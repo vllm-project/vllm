@@ -466,6 +466,128 @@ def _distributed_packed_a2a_worker(env: dict[str, str]) -> None:
         dist.destroy_process_group()
 
 
+def _distributed_direct_a2a_worker(env: dict[str, str]) -> None:
+    update_environment_variables(env)
+    local_rank = int(env["LOCAL_RANK"])
+    device = torch.device(f"cuda:{local_rank}")
+    torch.accelerator.set_device_index(local_rank)
+    dist.init_process_group(backend="nccl")
+    try:
+        from vllm.v1.attention.ops import dcp_direct_a2a
+        from vllm.v1.attention.ops.dcp_alltoall import _lse_weighted_combine
+
+        rank = dist.get_rank()
+        world_size = dist.get_world_size()
+        dtype = _dtype_from_name(env["TEST_DTYPE"])
+        is_lse_base_on_e = env["LSE_BASE_E"] == "1"
+        heads_per_rank, head_dim, max_num_tokens = 2, 32, 17
+        total_heads = world_size * heads_per_rank
+        active_ubatch = [0]
+        dcp_direct_a2a.dbo_current_ubatch_id = lambda: active_ubatch[0]
+        workspace = dcp_direct_a2a.DirectDCPA2AWorkspace(
+            dist.group.WORLD,
+            device,
+            max_num_tokens,
+            heads_per_rank,
+            head_dim,
+            dtype,
+            num_ubatches=2,
+        )
+
+        def check(num_tokens: int, iteration: int) -> None:
+            generator = torch.Generator(device=device)
+            generator.manual_seed(1234 + rank + iteration * world_size)
+            partial_output = torch.randn(
+                num_tokens,
+                total_heads,
+                head_dim,
+                device=device,
+                dtype=dtype,
+                generator=generator,
+            )
+            partial_lse = torch.randn(
+                num_tokens,
+                total_heads,
+                device=device,
+                dtype=torch.float32,
+                generator=generator,
+            )
+            active_ubatch[0] = iteration % 2
+            actual = workspace.lse_reduce(partial_output, partial_lse, is_lse_base_on_e)
+            torch.accelerator.synchronize()
+
+            gathered_output = [
+                torch.empty_like(partial_output) for _ in range(world_size)
+            ]
+            gathered_lse = [torch.empty_like(partial_lse) for _ in range(world_size)]
+            dist.all_gather(gathered_output, partial_output)
+            dist.all_gather(gathered_lse, partial_lse)
+            outputs = torch.stack(
+                [
+                    value[
+                        :,
+                        rank * heads_per_rank : (rank + 1) * heads_per_rank,
+                        :,
+                    ]
+                    for value in gathered_output
+                ]
+            ).float()
+            lses = torch.stack(
+                [
+                    value[:, rank * heads_per_rank : (rank + 1) * heads_per_rank]
+                    for value in gathered_lse
+                ]
+            )
+            expected = _lse_weighted_combine(
+                outputs, lses, is_lse_base_on_e=is_lse_base_on_e
+            )
+            _assert_packed_a2a_close(actual, expected, dtype)
+
+        for iteration, num_tokens in enumerate((1, 17, 5, 17)):
+            check(num_tokens, iteration)
+        generator = torch.Generator(device=device)
+        generator.manual_seed(4321 + rank)
+        partial_output = torch.randn(
+            5,
+            total_heads,
+            head_dim,
+            device=device,
+            dtype=dtype,
+            generator=generator,
+        )
+        partial_lse = torch.randn(
+            5,
+            total_heads,
+            device=device,
+            dtype=torch.float32,
+            generator=generator,
+        )
+        torch.accelerator.synchronize()
+        active_ubatch[0] = 1
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            actual = workspace.lse_reduce(partial_output, partial_lse, is_lse_base_on_e)
+        for _ in range(3):
+            graph.replay()
+        torch.accelerator.synchronize()
+
+        gathered_output = [torch.empty_like(partial_output) for _ in range(world_size)]
+        gathered_lse = [torch.empty_like(partial_lse) for _ in range(world_size)]
+        dist.all_gather(gathered_output, partial_output)
+        dist.all_gather(gathered_lse, partial_lse)
+        head_slice = slice(rank * heads_per_rank, (rank + 1) * heads_per_rank)
+        outputs = torch.stack(
+            [value[:, head_slice, :] for value in gathered_output]
+        ).float()
+        lses = torch.stack([value[:, head_slice] for value in gathered_lse])
+        expected = _lse_weighted_combine(
+            outputs, lses, is_lse_base_on_e=is_lse_base_on_e
+        )
+        _assert_packed_a2a_close(actual, expected, dtype)
+    finally:
+        dist.destroy_process_group()
+
+
 @pytest.mark.skipif(
     torch.accelerator.device_count() < 4, reason="Need at least 4 GPUs."
 )
@@ -494,6 +616,25 @@ def test_distributed_packed_a2a_with_workspace_matches_reference():
             "RETURN_LSE": "1",
             "LSE_BASE_E": "1",
             "USE_WORKSPACE": "1",
+        },
+    )
+
+
+@pytest.mark.skipif(
+    torch.accelerator.device_count() < 4, reason="Need at least 4 GPUs."
+)
+@pytest.mark.parametrize("world_size", [2, 4])
+@pytest.mark.parametrize("dtype_name", ["float16", "bfloat16"])
+@pytest.mark.parametrize("is_lse_base_on_e", [False, True])
+def test_distributed_direct_a2a_matches_reference(
+    world_size: int, dtype_name: str, is_lse_base_on_e: bool
+):
+    _distributed_run(
+        _distributed_direct_a2a_worker,
+        world_size=world_size,
+        extra_env={
+            "TEST_DTYPE": dtype_name,
+            "LSE_BASE_E": str(int(is_lse_base_on_e)),
         },
     )
 

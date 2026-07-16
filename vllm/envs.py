@@ -2005,6 +2005,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_USE_SIMPLE_KV_OFFLOAD": lambda: bool(
         int(os.getenv("VLLM_USE_SIMPLE_KV_OFFLOAD", "0"))
     ),
+    "VLLM_USE_DIRECT_DCP_A2A": lambda: bool(
+        int(os.getenv("VLLM_USE_DIRECT_DCP_A2A", "0"))
+    ),
     # Whether to enable dual cuda streams for LoRA computation
     # (used by both BaseLinearLayerWithLoRA and FusedMoEWithLoRA to
     # overlap the base layer compute with the LoRA fast path).

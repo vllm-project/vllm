@@ -276,6 +276,10 @@ from vllm.v1.attention.backends.utils import (
 )
 from vllm.v1.attention.ops.common import cp_lse_ag_out_ar, cp_lse_ag_out_rs
 from vllm.v1.attention.ops.dcp_alltoall import dcp_a2a_lse_reduce
+from vllm.v1.attention.ops.dcp_direct_a2a import (
+    DirectDCPA2AWorkspace,
+    get_direct_dcp_a2a_workspace,
+)
 from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
 from vllm.v1.attention.selector import get_attn_backend
 from vllm.v1.kv_cache_interface import (
@@ -547,6 +551,22 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             _vllm_config is not None
             and _vllm_config.parallel_config.decode_context_parallel_size > 1
             and _vllm_config.parallel_config.dcp_comm_backend == "a2a"
+        )
+        self.dcp_direct_a2a = (
+            envs.VLLM_USE_DIRECT_DCP_A2A
+            and self.dcp_a2a
+            and current_platform.is_cuda()
+            and dtype in (torch.float16, torch.bfloat16)
+        )
+        self.dcp_direct_a2a_workspace: DirectDCPA2AWorkspace | None = None
+        self.dcp_direct_a2a_num_ubatches = vllm_config.parallel_config.num_ubatches
+        self.dcp_direct_a2a_max_num_tokens = min(
+            vllm_config.scheduler_config.max_num_batched_tokens,
+            max(
+                vllm_config.scheduler_config.max_num_seqs
+                * (1 + vllm_config.num_speculative_tokens),
+                vllm_config.compilation_config.max_cudagraph_capture_size or 0,
+            ),
         )
 
         # Initialize q/k/v range constants.
@@ -893,7 +913,11 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             # correct dcp attn_out with lse.
             if self.impl.dcp_world_size > 1:
                 assert lse is not None
-                if self.dcp_a2a:
+                if self.dcp_direct_a2a_workspace is not None:
+                    attn_out = self.dcp_direct_a2a_workspace.lse_reduce(
+                        attn_out, lse, self.impl.lse_base_on_e
+                    )
+                elif self.dcp_a2a:
                     attn_out = dcp_a2a_lse_reduce(
                         attn_out,
                         lse,
@@ -985,6 +1009,18 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                     "DCP query replication is not implemented for the aiter "
                     "FP4/FP8 MLA BMM paths."
                 )
+
+        if self.dcp_direct_a2a:
+            self.dcp_direct_a2a_workspace = get_direct_dcp_a2a_workspace(
+                get_dcp_group().device_group,
+                kv_b_proj_weight.device,
+                self.dcp_direct_a2a_max_num_tokens,
+                self.num_heads,
+                self.kv_lora_rank,
+                act_dtype,
+                self.dcp_direct_a2a_num_ubatches,
+            )
+            logger.info_once("Using direct symmetric-memory DCP A2A for MLA.")
 
         assert kv_b_proj_weight.shape == (
             self.kv_lora_rank,
