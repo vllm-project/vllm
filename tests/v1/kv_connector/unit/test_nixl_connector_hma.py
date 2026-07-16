@@ -86,7 +86,9 @@ def test_logical_to_kernel_block_ids_with_hma():
 
     # Test conversion: FA + SW group
     logical_block_ids = [[0, 1, 2], [3, 4]]
-    kernel_block_ids = worker._logical_to_kernel_block_ids(logical_block_ids)
+    kernel_block_ids = worker._logical_to_kernel_block_ids(
+        logical_block_ids, worker._physical_blocks_per_logical_kv_block
+    )
 
     expected_kernel_block_ids = [[0, 1, 2, 3, 4, 5], [6, 7, 8, 9]]
     assert kernel_block_ids == expected_kernel_block_ids, (
@@ -179,7 +181,7 @@ def test_read_blocks_for_req_expands_remote_ids(
     """_read_blocks_for_req must expand remote logical block IDs to kernel
     block IDs when kernel block size != logical block size.
 
-    The hot path always calls _logical_to_remote_kernel_block_ids with
+    The hot path always calls _logical_to_kernel_block_ids with
     remote_info.remote_physical_blocks_per_logical (model-agnostic).
     """
     from unittest.mock import MagicMock
@@ -1140,7 +1142,7 @@ def test_derive_mamba_conv_split(
         ),
     ],
 )
-def test_logical_to_remote_kernel_block_ids(
+def test_logical_to_kernel_block_ids_with_remote_ratio(
     mamba_enabled,
     swa_enabled,
     local_physical_per_logical,
@@ -1148,7 +1150,7 @@ def test_logical_to_remote_kernel_block_ids(
     logical_block_ids,
     expected_kernel_block_ids,
 ):
-    """Verify _logical_to_remote_kernel_block_ids uses the remote
+    """Verify _logical_to_kernel_block_ids uses the remote
     physical_per_logical for FA expansion, not the local one.
 
     This was the root cause of silent accuracy corruption in Qwen3.5
@@ -1169,7 +1171,7 @@ def test_logical_to_remote_kernel_block_ids(
         swa_enabled=swa_enabled,
     )
 
-    result = worker._logical_to_remote_kernel_block_ids(
+    result = worker._logical_to_kernel_block_ids(
         logical_block_ids,
         remote_physical_per_logical,
     )
