@@ -455,7 +455,7 @@ class ModelOptFp8LinearMethod(LinearMethodBase):
 
     def __init__(self, quant_config: ModelOptFp8Config) -> None:
         self.quant_config = quant_config
-        self.out_dtype = torch.get_default_dtype()
+        self.out_dtype = get_current_vllm_config().model_config.dtype
         self.input_dtype = get_current_vllm_config().model_config.dtype
 
     def create_weights(
@@ -548,7 +548,7 @@ class ModelOptFp8PcPtLinearMethod(LinearMethodBase):
 
     def __init__(self, quant_config: ModelOptFp8Config) -> None:
         self.quant_config = quant_config
-        self.out_dtype = torch.get_default_dtype()
+        self.out_dtype = get_current_vllm_config().model_config.dtype
         self.input_dtype = get_current_vllm_config().model_config.dtype
 
     def create_weights(
@@ -645,7 +645,7 @@ class ModelOptFp8PbWoLinearMethod(LinearMethodBase):
             static=True, group_shape=GroupShape(block_n, block_k)
         )
 
-        self.out_dtype = torch.get_default_dtype()
+        self.out_dtype = get_current_vllm_config().model_config.dtype
         self.input_dtype = get_current_vllm_config().model_config.dtype
 
     def create_weights(
