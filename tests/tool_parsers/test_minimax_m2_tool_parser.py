@@ -9,6 +9,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionToolsParam,
     FunctionDefinition,
 )
+from vllm.parser.minimax_m2 import _minimax_m2_arg_converter
 from vllm.tool_parsers.minimax_m2_tool_parser import (
     MinimaxM2ToolParser,
 )
@@ -567,3 +568,55 @@ class TestNoneStringPreservation:
         assert len(tc) == 1
         parsed = json.loads(tc[0]["arguments"])
         assert parsed["value"] == "nil"
+
+
+# ---------------------------------------------------------------------------
+# Regression: parameter values must preserve surrounding whitespace
+# ---------------------------------------------------------------------------
+
+
+class TestParameterWhitespace:
+    """The value between ``>`` and ``</parameter>`` is argument data, so leading
+    and trailing whitespace must be preserved. Previously ``str.strip()`` deleted
+    it, silently corrupting any string argument whose value begins or ends with
+    whitespace (indented / newline-terminated code passed to an exact-match edit
+    tool). Same defect class as the qwen3 arg converter reported in #48753.
+    """
+
+    def test_converter_preserves_surrounding_whitespace(self):
+        out = _minimax_m2_arg_converter(
+            '<parameter name="msg"> hello world </parameter>', False
+        )
+        assert json.loads(out) == {"msg": " hello world "}
+
+    def test_converter_preserves_indentation_and_trailing_newline(self):
+        value = "    def foo():\n        return 1\n"
+        out = _minimax_m2_arg_converter(
+            f'<parameter name="content">{value}</parameter>', False
+        )
+        assert json.loads(out) == {"content": value}
+
+    def test_converter_partial_path_preserves_whitespace(self):
+        # Streaming tail (closing </parameter> not yet arrived) must not strip.
+        out = _minimax_m2_arg_converter('<parameter name="msg"> partial ', True)
+        assert json.loads(out) == {"msg": " partial "}
+
+    def test_converter_plain_value_unchanged(self):
+        # Common case without surrounding whitespace is unaffected.
+        out = _minimax_m2_arg_converter(
+            '<parameter name="city">Seattle</parameter>', False
+        )
+        assert json.loads(out) == {"city": "Seattle"}
+
+    def test_streaming_preserves_surrounding_whitespace(self, parser):
+        results = _feed(
+            parser,
+            [
+                '<minimax:tool_call><invoke name="echo">'
+                '<parameter name="msg"> hi </parameter>'
+                "</invoke></minimax:tool_call>",
+            ],
+        )
+        tc = _collect_tool_calls(results)
+        assert len(tc) == 1
+        assert json.loads(tc[0]["arguments"]) == {"msg": " hi "}
