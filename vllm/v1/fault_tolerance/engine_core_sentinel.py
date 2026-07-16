@@ -49,15 +49,27 @@ class EngineCoreSentinel:
         self._dp_reinit_epoch = 0
 
     def handle_command(self, client_idx: int, call_id: int, ft_args: dict):
-        """Dispatch an FT command by instruction name and enqueue result."""
+        """Dispatch an FT command by instruction name."""
         ft_request = FaultToleranceRequest(**ft_args)
-        try:
-            result = run_method(self, ft_request.instruction, (ft_request,), {})
-        except Exception as e:
-            logger.exception("[FT] Instruction '%s' failed", ft_request.instruction)
-            result = FaultToleranceResult(
-                request_id=ft_request.request_id, success=False, reason=str(e)
+        if self.status_type != EngineStatusType.UNHEALTHY:
+            reason = (
+                f"[FT] Rejecting {ft_request.instruction} on engine "
+                f"{self.engine_index}: status is {self.status_type.name}"
             )
+            logger.warning(reason)
+            result = FaultToleranceResult(
+                request_id=ft_request.request_id,
+                success=False,
+                reason=reason,
+            )
+        else:
+            try:
+                result = run_method(self, ft_request.instruction, (ft_request,), {})
+            except Exception as e:
+                logger.exception("[FT] Instruction '%s' failed", ft_request.instruction)
+                result = FaultToleranceResult(
+                    request_id=ft_request.request_id, success=False, reason=str(e)
+                )
 
         uo = UtilityOutput(call_id)
         uo.result = UtilityResult(msgspec.structs.asdict(result))
@@ -77,11 +89,19 @@ class EngineCoreSentinel:
         engine._send_abort_outputs(aborted)
         if engine.batch_queue is not None:
             engine.batch_queue.clear()
-
-        self.status_type = EngineStatusType.UNHEALTHY
+        if (
+            hasattr(engine.model_executor, "is_failed")
+            and engine.model_executor.is_failed
+        ):
+            self.status_type = EngineStatusType.DEAD
+        else:
+            self.status_type = EngineStatusType.UNHEALTHY
         self.fault_info = f"{type(exc).__name__}"
         logger.info(
-            "[FT] Engine %d status -> UNHEALTHY:", self.engine_index, exc_info=exc
+            "[FT] Engine %d status -> %s:",
+            self.engine_index,
+            self.status_type.name,
+            exc_info=exc,
         )
         self._push_status()
 

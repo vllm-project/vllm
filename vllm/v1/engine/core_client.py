@@ -1231,7 +1231,13 @@ class AsyncMPClient(MPClient):
         self, ft_request: FaultToleranceRequest
     ) -> FaultToleranceResult:
         res = await self.call_utility_async(FT_UTILITY_METHOD, ft_request)
-        return msgspec.convert(res, FaultToleranceResult)
+        result = msgspec.convert(res, FaultToleranceResult)
+        if not result.success:
+            status = self._engine_status.get(self.engine_ranks_managed[0])
+            if status is not None:
+                status["last_ft_request_id"] = result.request_id
+                status["ft_error"] = result.reason
+        return result
 
     async def get_status(self):
         return {
