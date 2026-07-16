@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 use std::collections::BTreeSet;
+use std::sync::Arc;
 
 pub(crate) mod logprobs;
 pub(crate) mod token_ids;
@@ -46,7 +47,7 @@ pub fn lower_text_request(
         // Align with Python's response path: decoded output state does not retain
         // `mm_features`; move them to the engine request to avoid cloning large
         // multimodal tensor payloads.
-        mm_features: request.mm_features.take(),
+        mm_features: request.mm_features.take().map(Arc::new),
         sampling_params: lower_sampling_params(
             request.sampling_params.clone(),
             sampling_hints,
@@ -609,7 +610,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(prepared.generate_request.mm_features, Some(features));
+        assert_eq!(prepared.generate_request.mm_features, Some(Arc::new(features)));
         assert_eq!(prepared.text_request.mm_features, None);
     }
 

@@ -527,11 +527,6 @@ fn collect_beam_search_chat_completion(
     let mut choices = Vec::with_capacity(beam_result.sequences.len());
     for (i, seq) in beam_result.sequences.iter().enumerate() {
         let generated_tokens = seq.tokens[beam_result.prompt_token_ids.len()..].to_vec();
-        let openai_finish_reason = seq
-            .finish_reason
-            .as_ref()
-            .map(|fr| chat_finish_reason_to_openai(fr, false).unwrap_or("error"))
-            .unwrap_or("length");
         let stop_reason = seq
             .stop_reason
             .map(|token_id| serde_json::Value::Number(serde_json::Number::from(token_id)));
@@ -551,14 +546,20 @@ fn collect_beam_search_chat_completion(
                 tool_call_parser,
                 reasoning_parser,
             )?;
-            let tool_calls = parsed_tool_calls;
             let reasoning = if include_reasoning {
                 parsed_reasoning
             } else {
                 None
             };
-            (parsed_content, reasoning, tool_calls)
+            (parsed_content, reasoning, parsed_tool_calls)
         };
+
+        let saw_tool_calls = !tool_calls.is_empty();
+        let openai_finish_reason = seq
+            .finish_reason
+            .as_ref()
+            .map(|fr| chat_finish_reason_to_openai(fr, saw_tool_calls).unwrap_or("error"))
+            .unwrap_or("length");
 
         let content = raw_content.map(|c| match &echo {
             Some(prefix) => format!("{prefix}{c}"),
