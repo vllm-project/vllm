@@ -230,8 +230,38 @@ class Gemma4Config(VerifyAndUpdateConfig):
         if len(set(head_dims.values())) <= 1:
             return
 
-        from vllm.v1.attention.backends.fa_utils import is_fa_version_supported
+        # NVFP4 KV cache on consumer Blackwell (CC 12.x): the FlashInfer
+        # FA2 asymmetric paged kernel handles head_dim_qk=512 /
+        # head_dim_vo=256 directly (the two-pass VO-split path), so route
+        # the heterogeneous-head Gemma 4 config to FLASHINFER instead of
+        # the TRITON_ATTN fallback below. Gated on VLLM_NVFP4_KV_VOSPLIT
+        # (default-on for nvfp4) and only when the user did not pin a
+        # backend. Returns before the FA4/Triton selection.
+        import vllm.envs as envs
+        from vllm.platforms import current_platform
         from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
+        cache_config = vllm_config.cache_config
+        if (
+            cache_config is not None
+            and cache_config.cache_dtype.startswith("nvfp4")
+            and envs.VLLM_NVFP4_KV_VOSPLIT
+            and vllm_config.attention_config.backend is None
+            and current_platform.is_device_capability_family(120)
+        ):
+            vllm_config.attention_config.backend = AttentionBackendEnum.FLASHINFER
+            logger.info(
+                "Gemma4 model has heterogeneous head dimensions %s with NVFP4 "
+                "KV cache on CC 12.x. Routing to FLASHINFER (FA2 VO-split "
+                "asymmetric head_dim_qk=%d/head_dim_vo=%d kernel) instead of "
+                "TRITON_ATTN.",
+                head_dims,
+                max(head_dims.values()),
+                min(head_dims.values()),
+            )
+            return
+
+        from vllm.v1.attention.backends.fa_utils import is_fa_version_supported
 
         max_head_dim = max(head_dims.values())
 
