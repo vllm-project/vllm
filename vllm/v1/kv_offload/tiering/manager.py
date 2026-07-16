@@ -348,11 +348,11 @@ class TieringOffloadingManager(OffloadingManager):
     def _accumulate_lookup_sync_delay(
         self, req_state: RequestState | None, start_time: float
     ) -> None:
-        """Accumulate secondary-tier lookup time until the scheduler step ends."""
+        """Accumulate secondary-tier lookup time until allocation or finish."""
         if req_state is not None:
             req_state.sync_lookup_delay += time.monotonic() - start_time
 
-    def _observe_lookup_sync_delay(self, req_state: RequestState) -> None:
+    def _maybe_observe_lookup_sync_delay(self, req_state: RequestState) -> None:
         delay = req_state.sync_lookup_delay
         if delay == 0:
             return
@@ -716,7 +716,7 @@ class TieringOffloadingManager(OffloadingManager):
             if tier is exclude_tier:
                 continue
             tier.on_request_finished(state.req_context)
-        self._observe_lookup_sync_delay(state)
+        self._maybe_observe_lookup_sync_delay(state)
         self._maybe_observe_lookup_async_delay(state)
         del self._req_state[req_id]
 
@@ -748,7 +748,7 @@ class TieringOffloadingManager(OffloadingManager):
             state = self._req_state.get(req_id)
             if state is None:
                 continue
-            self._observe_lookup_sync_delay(state)
+            self._maybe_observe_lookup_sync_delay(state)
             self._maybe_observe_lookup_async_delay(state)
 
     @override
@@ -804,7 +804,7 @@ class TieringOffloadingManager(OffloadingManager):
                 continue
             for tier in self.secondary_tiers:
                 tier.on_request_finished(state.req_context)
-            self._observe_lookup_sync_delay(state)
+            self._maybe_observe_lookup_sync_delay(state)
             self._maybe_observe_lookup_async_delay(state)
             finished_req_ids.append(req_id)
 
