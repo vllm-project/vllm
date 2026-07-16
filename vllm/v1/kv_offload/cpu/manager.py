@@ -52,7 +52,7 @@ class CPUOffloadingManager(OffloadingManager):
         store_threshold: int = 1,
         max_tracker_size: int = 64_000,
     ):
-        self.medium: str = MEDIUM_CPU
+        self.event_medium: str = MEDIUM_CPU
         self._num_blocks: int = num_blocks
         self._num_allocated_blocks: int = 0
         self._free_list: list[int] = []
@@ -219,7 +219,7 @@ class CPUOffloadingManager(OffloadingManager):
             self.events.append(
                 OffloadingEvent(
                     keys=to_evict,
-                    medium=self.medium,
+                    medium=self.event_medium,
                     removed=True,
                 )
             )
@@ -272,7 +272,7 @@ class CPUOffloadingManager(OffloadingManager):
             self.events.append(
                 OffloadingEvent(
                     keys=stored_keys,
-                    medium=self.medium,
+                    medium=self.event_medium,
                     removed=False,
                 )
             )
