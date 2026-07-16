@@ -1127,7 +1127,7 @@ def unified_mla_kv_cache_update(
             k_pe,
             layer_slot_mapping,
             attn_metadata.num_decode_tokens if attn_metadata is not None else None,
-            getattr(attn_layer, "use_pcp", False),
+            attn_layer.use_pcp,
         )
         attn_layer.impl.do_kv_cache_update(  # type: ignore[attr-defined]
             kv_c_normed,
