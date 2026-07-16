@@ -33,11 +33,13 @@ class PoolingCursor:
             num_scheduled_tokens_cpu=self.num_scheduled_tokens_cpu[indices],
             first_token_indices_cpu=(
                 self.first_token_indices_cpu[indices]
-                if self.first_token_indices_cpu is not None else None
+                if self.first_token_indices_cpu is not None
+                else None
             ),
             last_token_indices_cpu=(
                 self.last_token_indices_cpu[indices]
-                if self.last_token_indices_cpu is not None else None
+                if self.last_token_indices_cpu is not None
+                else None
             ),
         )
 

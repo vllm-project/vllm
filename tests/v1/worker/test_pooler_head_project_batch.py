@@ -43,8 +43,7 @@ def test_project_batch_sequential_projector_fp32_weights(input_dtype):
 
 @pytest.mark.parametrize("input_dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("wrap_sequential", [False, True])
-def test_project_batch_matches_forward_chunk_numerics(input_dtype,
-                                                      wrap_sequential):
+def test_project_batch_matches_forward_chunk_numerics(input_dtype, wrap_sequential):
     """project_batch must project at head_dtype exactly like forward_chunk
     (PR #40337 review, point 1): queries (chunk path) and documents (batch
     path) must use identical projection precision. Bit-exact — the batch

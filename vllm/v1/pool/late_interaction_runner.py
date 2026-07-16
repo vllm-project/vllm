@@ -231,9 +231,11 @@ class LateInteractionRunner:
                     logger.warning(
                         "flash-maxsim zero-copy scoring failed (%s); "
                         "falling back to the vanilla MaxSim path and "
-                        "disabling the kernel for this process.", exc)
+                        "disabling the kernel for this process.",
+                        exc,
+                    )
                     score_docs = [
-                        projected_batch[o:o + n]
+                        projected_batch[o : o + n]
                         for o, n in zip(score_doc_offsets, score_doc_lengths)
                     ]
                     score_values = compute_maxsim_score_batched(
