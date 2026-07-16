@@ -121,6 +121,7 @@ class KVCacheManager:
         max_in_flight_tokens: int | None = None,
         enable_caching: bool = True,
         use_eagle: bool = False,
+        num_reprefillable_tokens: int = 0,
         log_stats: bool = False,
         enable_kv_cache_events: bool = False,
         dcp_world_size: int = 1,
@@ -157,6 +158,7 @@ class KVCacheManager:
             scheduler_block_size=scheduler_block_size,
             hash_block_size=hash_block_size,
             metrics_collector=self.metrics_collector,
+            num_reprefillable_tokens=num_reprefillable_tokens,
         )
         self.num_kv_cache_groups = len(kv_cache_config.kv_cache_groups)
         self.block_pool = self.coordinator.block_pool

@@ -563,8 +563,7 @@ class SpeculativeConfig:
             hf_config.model_type = "inkling_mtp"
             hf_config.update(
                 {
-                    # Inkling currently exposes only the first checkpoint depth.
-                    "n_predict": 1,
+                    "n_predict": checkpoint_depths,
                     "num_nextn_predict_layers": checkpoint_depths,
                     "chain_hidden_post_norm": mtp_config.get(
                         "chain_hidden_post_norm", False
@@ -993,14 +992,6 @@ class SpeculativeConfig:
                         "`num_speculative_tokens` was not provided"
                     )
 
-                if (
-                    self.draft_model_config.hf_config.model_type == "inkling_mtp"
-                    and self.num_speculative_tokens != 1
-                ):
-                    raise ValueError(
-                        "Inkling MTP currently supports exactly one speculative token"
-                    )
-
                 if self.method == "dspark":
                     # DSpark is a semi-autoregressive *block* drafter. A
                     # speculative length smaller than the checkpoint's block
@@ -1344,6 +1335,14 @@ class SpeculativeConfig:
 
     def use_ngram_gpu(self) -> bool:
         return self.method == "ngram_gpu"
+
+    def use_multi_module_mtp(self) -> bool:
+        if self.method != "mtp" or self.draft_model_config is None:
+            return False
+        num_mtp_layers = getattr(
+            self.draft_model_config.hf_config, "num_nextn_predict_layers", 1
+        )
+        return min(num_mtp_layers, self.num_speculative_tokens) > 1
 
     def __repr__(self) -> str:
         method = self.method
