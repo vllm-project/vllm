@@ -167,12 +167,13 @@ CMAKE
 EOF
 
 # Clone custom triton_kernels for install later
-RUN mkdir -p /app/; \
+RUN mkdir -p /app/patched_triton_kernels; \
+    cd /app/patched_triton_kernels \
     git clone ${TRITON_KERNEL_REPO} \
     && cd triton \
     && git checkout ${TRITON_KERNEL_BRANCH} \
     && git submodule update --init --recursive
-ENV TRITON_KERNELS_SRC_DIR="/app/triton/python/triton_kernels/triton_kernels/"
+ENV TRITON_KERNELS_SRC_DIR="/app/patched_triton_kernels/triton/python/triton_kernels/triton_kernels/"
 
 
 # Setup sccache for HIP compilation via HIP_CLANG_PATH
