@@ -1441,6 +1441,10 @@ class VllmConfig:
         # (e.g., XPU may lower max_num_batched_tokens when MLA is enabled)
         self._set_compile_ranges()
 
+        # Validate the eager TP all-reduce split envelope after platform/default
+        # optimization updates but before splitting_ops are finalized.
+        self._validate_eager_tp_all_reduce()
+
         # Do this after all the updates to compilation_config.mode
         effective_dp_size = (
             self.parallel_config.data_parallel_size
@@ -2201,6 +2205,83 @@ class VllmConfig:
                 "Model Runner V2 does not yet support the thinking_token_budget "
                 "request parameter. Set VLLM_USE_V2_MODEL_RUNNER=0 if this is required."
             )
+
+    def _validate_eager_tp_all_reduce(self) -> None:
+        """Validate the supported envelope for the experimental eager in-place
+        TP all-reduce PIECEWISE split before splitting_ops are finalized.
+
+        Fails closed with a targeted error rather than silently normalizing an
+        incompatible configuration (e.g. into FULL cudagraphs).
+        """
+        comp = self.compilation_config
+        if not comp.enable_eager_tp_all_reduce:
+            return
+
+        from vllm.platforms import current_platform
+
+        def _require(condition: bool, reason: str) -> None:
+            if not condition:
+                raise ValueError(
+                    f"compilation_config.enable_eager_tp_all_reduce is set but "
+                    f"{reason}. This experimental feature requires an exact "
+                    f"configuration; disable it or fix the conflict. See "
+                    f"CompilationConfig.enable_eager_tp_all_reduce."
+                )
+
+        _require(current_platform.is_cuda(), "the platform is not NVIDIA CUDA")
+        _require(
+            self.parallel_config.tensor_parallel_size > 1,
+            "tensor_parallel_size must be greater than 1",
+        )
+        _require(
+            comp.mode == CompilationMode.VLLM_COMPILE,
+            "compilation mode must be VLLM_COMPILE",
+        )
+        _require(
+            comp.cudagraph_mode == CUDAGraphMode.PIECEWISE,
+            "cudagraph_mode must be exactly PIECEWISE (FULL and "
+            "FULL_AND_PIECEWISE can bypass the all-reduce split)",
+        )
+        _require(
+            comp.backend in ("", "inductor"),
+            'compilation backend must be the vLLM Inductor path ("" or "inductor")',
+        )
+        _require(
+            not comp.use_inductor_graph_partition,
+            "use_inductor_graph_partition must be False (the validated path "
+            "uses FX graph partitioning)",
+        )
+        _require(
+            not envs.VLLM_USE_BREAKABLE_CUDAGRAPH,
+            "VLLM_USE_BREAKABLE_CUDAGRAPH must be unset/false (this is not a "
+            "breakable-cudagraph path)",
+        )
+        _require(
+            not envs.VLLM_DISABLE_PYNCCL,
+            "VLLM_DISABLE_PYNCCL must be unset/false (the split executes "
+            "through PyNccl)",
+        )
+        _require(
+            not comp.pass_config.fuse_allreduce_rms,
+            "pass_config.fuse_allreduce_rms must be False",
+        )
+        _require(
+            not comp.pass_config.fuse_attn_quant,
+            "pass_config.fuse_attn_quant must be False",
+        )
+        _require(
+            not comp.pass_config.enable_sp,
+            "pass_config.enable_sp must be False",
+        )
+        _require(
+            not comp.pass_config.fuse_gemm_comms,
+            "pass_config.fuse_gemm_comms must be False",
+        )
+        _require(
+            comp.splitting_ops is None or len(comp.splitting_ops) > 0,
+            "splitting_ops must not be an explicitly empty list (piecewise "
+            "boundaries are required)",
+        )
 
     def validate_block_size(self) -> None:
         """Validate block_size against DCP and mamba constraints.
