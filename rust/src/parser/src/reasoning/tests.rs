@@ -255,3 +255,26 @@ fn olmo3_tolerates_old_and_new_formats() {
     assert_eq!(new.reasoning.as_deref(), Some("reason"));
     assert_eq!(new.content.as_deref(), Some("answer"));
 }
+
+#[test]
+fn olmo3_without_think_tokens_in_vocab_still_splits() {
+    let tokenizer = Arc::new(TestTokenizer::new()); // no <think>/</think> in vocab
+    let mut parser = Olmo3ReasoningParser::new(tokenizer);
+    let delta = parser.push("reason</think>answer").unwrap();
+    assert_eq!(delta.reasoning.as_deref(), Some("reason"));
+    assert_eq!(delta.content.as_deref(), Some("answer"));
+}
+
+#[test]
+fn olmo3_streams_leading_think_across_chunks() {
+    let mut parser = Olmo3ReasoningParser::new(Arc::new(fake_tokenizer()));
+    assert!(parser.push("<th").unwrap().is_empty());
+    assert_eq!(
+        parser.push("ink>reason").unwrap().reasoning.as_deref(),
+        Some("reason")
+    );
+    assert_eq!(
+        parser.push("</think>answer").unwrap().content.as_deref(),
+        Some("answer")
+    );
+}
