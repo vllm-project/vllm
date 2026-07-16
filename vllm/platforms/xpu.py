@@ -150,8 +150,18 @@ class XPUPlatform(Platform):
             return AttentionBackendEnum.TRITON_ATTN.get_path()
         elif attn_selector_config.use_mm_prefix:
             # Flash Attention on XPU has no FA4 kernel, so it cannot apply the
-            # multimodal prefix-LM bidirectional mask. Fall back to Triton
-            # Attention, which supports mm_prefix.
+            # multimodal prefix-LM bidirectional mask. Honor an explicit Flash
+            # Attention request (for text-only workloads); otherwise fall back
+            # to Triton Attention, which supports mm_prefix.
+            if selected_backend == AttentionBackendEnum.FLASH_ATTN:
+                logger.warning_once(
+                    "Using Flash Attention on XPU for a multimodal prefix-LM "
+                    "model because it was explicitly requested. The prefix-LM "
+                    "bidirectional mask cannot be applied, so image/video "
+                    "inputs will produce incorrect results; only use this for "
+                    "text-only workloads."
+                )
+                return AttentionBackendEnum.FLASH_ATTN.get_path()
             logger.warning_once(
                 "Flash Attention on XPU does not support multimodal prefix-LM "
                 "attention. Falling back to Triton Attention backend."
@@ -266,8 +276,6 @@ class XPUPlatform(Platform):
             compilation_config.compile_sizes = []
 
         attention_config = vllm_config.attention_config
-        if attention_config.backend is None:
-            attention_config.backend = AttentionBackendEnum.FLASH_ATTN
 
         # lazy import to avoid circular import
         from vllm.utils.torch_utils import supports_xpu_graph
