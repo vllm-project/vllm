@@ -1656,6 +1656,13 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         "tencent/Hy3-preview",
         speculative_model="tencent/Hy3-preview",
     ),
+    "InklingMTPModel": _HfExamplesInfo(
+        "thinkingmachines/Inkling-NVFP4",
+        speculative_model="thinkingmachines/Inkling-NVFP4",
+        tokenizer_mode="inkling",
+        trust_remote_code=True,
+        max_model_len=4096,
+    ),
     "LongCatFlashMTPModel": _HfExamplesInfo(
         "meituan-longcat/LongCat-Flash-Chat",
         trust_remote_code=True,
