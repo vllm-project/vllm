@@ -15,17 +15,44 @@
 # limitations under the License.
 """Inference-only EXAONE-4.5 model compatible with HuggingFace weights."""
 
+from __future__ import annotations
+
 from collections.abc import Callable, Iterable
 from functools import partial
+from typing import TYPE_CHECKING, Any, cast
 
 import einops
 import torch
 import torch.nn as nn
-from transformers.models.exaone4_5 import (
-    Exaone4_5_Config,
-    Exaone4_5_Processor,
-)
-from transformers.models.exaone4_5.configuration_exaone4_5 import Exaone4_5_VisionConfig
+
+if TYPE_CHECKING:
+    from transformers.models.exaone4_5 import (
+        Exaone4_5_Config,
+        Exaone4_5_Processor,
+    )
+    from transformers.models.exaone4_5.configuration_exaone4_5 import (
+        Exaone4_5_VisionConfig,
+    )
+else:
+    try:
+        from transformers.models.exaone4_5 import (
+            Exaone4_5_Config,
+            Exaone4_5_Processor,
+        )
+        from transformers.models.exaone4_5.configuration_exaone4_5 import (
+            Exaone4_5_VisionConfig,
+        )
+    except ModuleNotFoundError as exc:
+        missing_name = exc.name or ""
+        if missing_name != "transformers.models.exaone4_5" and not (
+            missing_name.startswith("transformers.models.exaone4_5.")
+        ):
+            raise
+        Exaone4_5_Config = None
+        Exaone4_5_Processor = None
+        _EXAONE4_5_IMPORT_ERROR = exc
+    else:
+        _EXAONE4_5_IMPORT_ERROR = None
 
 from vllm.compilation.decorators import (
     should_torch_compile_mm_encoder,
@@ -55,6 +82,16 @@ from .qwen2_vl import Qwen2VLMultiModalProcessor as Exaone4_5_MultiModalProcesso
 from .utils import AutoWeightsLoader, init_vllm_registered_model, maybe_prefix
 
 logger = init_logger(__name__)
+
+
+def _require_exaone4_5_transformers() -> tuple[type[Any], type[Any]]:
+    if Exaone4_5_Config is None or Exaone4_5_Processor is None:
+        raise ImportError(
+            "EXAONE-4.5 requires a Transformers version that provides "
+            "`transformers.models.exaone4_5`."
+        ) from _EXAONE4_5_IMPORT_ERROR
+
+    return cast(type[Any], Exaone4_5_Config), cast(type[Any], Exaone4_5_Processor)
 
 
 # === Vision Encoder === #
@@ -301,11 +338,13 @@ class EXAONE4_5_VisionTransformer(Qwen2_5_VisionTransformer):
 
 class Exaone4_5_ProcessingInfo(Qwen2VLProcessingInfo):
     def get_hf_config(self):
-        return self.ctx.get_hf_config(Exaone4_5_Config)
+        config_cls, _ = _require_exaone4_5_transformers()
+        return self.ctx.get_hf_config(config_cls)
 
     def get_hf_processor(self, **kwargs: object) -> Exaone4_5_Processor:
+        _, processor_cls = _require_exaone4_5_transformers()
         return self.ctx.get_hf_processor(
-            Exaone4_5_Processor,
+            processor_cls,
             use_fast=kwargs.pop("use_fast", True),
             **kwargs,
         )

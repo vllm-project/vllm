@@ -15,17 +15,41 @@ the language model, MTP integration, bidirectional attention helpers,
 embedding/forward path, and LoRA support are all inherited unchanged.
 """
 
+from __future__ import annotations
+
 import math
 from collections.abc import Iterable, Mapping
+from typing import TYPE_CHECKING, Any, cast
 
 import torch
 from torch import nn
-from transformers.models.gemma4_unified.configuration_gemma4_unified import (
-    Gemma4UnifiedConfig,
-)
-from transformers.models.gemma4_unified.processing_gemma4_unified import (
-    Gemma4UnifiedProcessor,
-)
+
+if TYPE_CHECKING:
+    from transformers.models.gemma4_unified.configuration_gemma4_unified import (
+        Gemma4UnifiedConfig,
+    )
+    from transformers.models.gemma4_unified.processing_gemma4_unified import (
+        Gemma4UnifiedProcessor,
+    )
+else:
+    try:
+        from transformers.models.gemma4_unified.configuration_gemma4_unified import (
+            Gemma4UnifiedConfig,
+        )
+        from transformers.models.gemma4_unified.processing_gemma4_unified import (
+            Gemma4UnifiedProcessor,
+        )
+    except ModuleNotFoundError as exc:
+        missing_name = exc.name or ""
+        if missing_name != "transformers.models.gemma4_unified" and not (
+            missing_name.startswith("transformers.models.gemma4_unified.")
+        ):
+            raise
+        Gemma4UnifiedConfig = None
+        Gemma4UnifiedProcessor = None
+        _GEMMA4_UNIFIED_IMPORT_ERROR = exc
+    else:
+        _GEMMA4_UNIFIED_IMPORT_ERROR = None
 
 from vllm.config import VllmConfig
 from vllm.config.multimodal import VideoDummyOptions
@@ -137,6 +161,19 @@ class Gemma4UnifiedVisionEmbedder(nn.Module):
 # ---------------------------------------------------------------------------
 
 
+def _require_gemma4_unified_transformers() -> tuple[type[Any], type[Any]]:
+    if Gemma4UnifiedConfig is None or Gemma4UnifiedProcessor is None:
+        raise ImportError(
+            "Gemma 4 Unified requires a Transformers version that provides "
+            "`transformers.models.gemma4_unified`."
+        ) from _GEMMA4_UNIFIED_IMPORT_ERROR
+
+    return (
+        cast(type[Any], Gemma4UnifiedConfig),
+        cast(type[Any], Gemma4UnifiedProcessor),
+    )
+
+
 class Gemma4UnifiedProcessingInfo(Gemma4ProcessingInfo):
     """ProcessingInfo for the Gemma4 Unified variant.
 
@@ -149,11 +186,13 @@ class Gemma4UnifiedProcessingInfo(Gemma4ProcessingInfo):
     """
 
     def get_hf_config(self):
-        return self.ctx.get_hf_config(Gemma4UnifiedConfig)
+        config_cls, _ = _require_gemma4_unified_transformers()
+        return self.ctx.get_hf_config(config_cls)
 
     def get_hf_processor(self, **kwargs: object) -> Gemma4UnifiedProcessor:
+        _, processor_cls = _require_gemma4_unified_transformers()
         return self.ctx.get_hf_processor(
-            Gemma4UnifiedProcessor,
+            processor_cls,
             **kwargs,
         )
 
