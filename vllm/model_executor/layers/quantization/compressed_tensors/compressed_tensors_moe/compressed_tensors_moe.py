@@ -96,7 +96,6 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
                     return rocm_moe_rdna.make_method(
                         weight_quant, input_quant, layer.moe_config
                     )
-
                 from vllm.platforms.rocm import on_gfx950
 
                 vllm_config = get_current_vllm_config()
@@ -119,6 +118,11 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
                     logger.info_once("Using CompressedTensorsW4A16FlydslMoEMethod")
                     return CompressedTensorsW4A16FlydslMoEMethod(
                         weight_quant, input_quant, layer.moe_config
+                    )
+                elif moe_backend == "emulation":
+                    logger.info_once(
+                        "Using CompressedTensorsWNA16MoEMethod "
+                        "(emulation backend requested)"
                     )
 
             from .compressed_tensors_moe_wna16 import (

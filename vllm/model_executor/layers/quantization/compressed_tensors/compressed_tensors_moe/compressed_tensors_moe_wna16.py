@@ -12,6 +12,7 @@ from compressed_tensors.quantization import (
 
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (
+    FusedMoEExpertsModular,
     RoutedExperts,
     SharedExperts,
 )
@@ -518,12 +519,18 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
             replace_parameter(layer, "w13_weight_zero_point", w13_qzeros)
             replace_parameter(layer, "w2_weight_zero_point", w2_qzeros)
 
-        # Marlin-specific parameters (not needed for Flashinfer/Triton)
+        # Marlin-specific parameters (not needed for Flashinfer)
         if self.is_marlin:
-            replace_parameter(layer, "w13_weight_g_idx", w13_g_idx_processed)
-            replace_parameter(layer, "w2_weight_g_idx", w2_g_idx_processed)
-            replace_parameter(layer, "w13_g_idx_sort_indices", w13_g_idx_sort_indices)
-            replace_parameter(layer, "w2_g_idx_sort_indices", w2_g_idx_sort_indices)
+            if w13_g_idx_processed is not None:
+                replace_parameter(layer, "w13_weight_g_idx", w13_g_idx_processed)
+            if w2_g_idx_processed is not None:
+                replace_parameter(layer, "w2_weight_g_idx", w2_g_idx_processed)
+            if w13_g_idx_sort_indices is not None:
+                replace_parameter(
+                    layer, "w13_g_idx_sort_indices", w13_g_idx_sort_indices
+                )
+            if w2_g_idx_sort_indices is not None:
+                replace_parameter(layer, "w2_g_idx_sort_indices", w2_g_idx_sort_indices)
 
             # Register input global scales if present
             if w13_input_global_scale is not None:
@@ -537,9 +544,15 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
                     torch.nn.Parameter(w2_input_global_scale, requires_grad=False),
                 )
 
-            layer.workspace = marlin_make_workspace_new(
-                layer.w13_weight_g_idx.device, 4
-            )
+            # Marlin workspace — only needed for Marlin-family backends, not emulation.
+            if (
+                self.experts_cls is not None
+                and issubclass(self.experts_cls, FusedMoEExpertsModular)
+                and self.wna16_backend != WNA16MoEBackend.EMULATION
+            ):
+                layer.workspace = marlin_make_workspace_new(
+                    layer.w13_weight_g_idx.device, 4
+                )
 
         # Alias packed weights to w13_weight/w2_weight for the modular kernel interface
         layer.w13_weight = layer.w13_weight_packed
@@ -557,6 +570,9 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
             num_bits=self.num_bits,
             w1_zp=getattr(layer, "w13_weight_zero_point", None),
             w2_zp=getattr(layer, "w2_weight_zero_point", None),
+            gemm1_clamp_limit=getattr(layer, "swiglu_limit", None),
+            gemm1_alpha=getattr(layer, "swiglu_alpha", None),
+            gemm1_beta=getattr(layer, "swiglu_beta", None),
         )
 
     def apply_monolithic(
