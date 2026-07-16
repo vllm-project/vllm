@@ -750,6 +750,42 @@ class TestChatCompletionStreamToV2:
         assert "error" in error_end["delta"]
 
     @pytest.mark.asyncio
+    async def test_error_message_end_is_sanitized(self):
+        # The client-visible ``error`` field on the terminal message-end
+        # must be routed through ``sanitize_message`` so tracebacks,
+        # host filesystem paths, and Python object memory addresses
+        # can't leak from a mid-stream exception into the SSE payload.
+        serving = _serving()
+
+        async def _raises_mid_stream() -> AsyncGenerator[str, None]:
+            yield _make_chunk(role="assistant")
+            raise RuntimeError(
+                "boom <Foo at 0x7fabc0deface> reading /Users/dev/vllm/x.py"
+            )
+
+        request = CohereChatV2Request(
+            model="m",
+            messages=[{"role": "user", "content": "hi"}],
+            stream=True,
+        )
+        frames = [
+            f
+            async for f in serving._chat_completion_stream_to_v2(
+                _raises_mid_stream(), request
+            )
+        ]
+        assert frames[-1] == _DONE_FRAME
+        error_end = _parse_event(frames[-2])
+        assert error_end["delta"]["finish_reason"] == "ERROR"
+        err_msg = error_end["delta"]["error"]
+        # Memory address stripped and path replaced with ``<path>``.
+        assert "0x7fabc0deface" not in err_msg
+        assert "/Users/dev/vllm/x.py" not in err_msg
+        assert "<path>" in err_msg
+        # The human-facing prefix should still survive sanitization.
+        assert "boom" in err_msg
+
+    @pytest.mark.asyncio
     async def test_citations_in_delta_emit_citation_events(self):
         serving = _serving()
         # Pass citation dicts the way the cohere2 reasoning parser does.

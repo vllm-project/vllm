@@ -80,6 +80,7 @@ from vllm.entrypoints.openai.engine.protocol import (
     StreamOptions,
 )
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
+from vllm.entrypoints.serve.utils.api_utils import sanitize_message
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.parser.abstract_parser import Parser
 
@@ -848,7 +849,7 @@ class CohereServingChatV2(OpenAIServingChat):
                         {
                             "type": "message-end",
                             "delta": {
-                                "error": str(exc),
+                                "error": sanitize_message(str(exc)),
                                 "finish_reason": "ERROR",
                             },
                         }
