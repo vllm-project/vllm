@@ -226,7 +226,7 @@ class FlashAttentionBackend(AttentionBackend):
                 has_sinks=has_sink,
             )
         ):
-            return "FP8 KV cache requires FlashAttention 3 or 4"
+            return "FP8 KV cache requires FA3 on SM90 or FA4 on SM100"
         if (
             use_mm_prefix
             and get_flash_attn_version(head_size=head_size, has_sinks=has_sink) != 4
