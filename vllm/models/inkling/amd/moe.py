@@ -292,9 +292,7 @@ class InklingSinkExperts(nn.Module):
     plain dense GEMMs with the fused sink epilogue between them.
     """
 
-    def __init__(
-        self, n_experts: int, d_model: int, d_mlp: int, *, prefix: str = ""
-    ) -> None:
+    def __init__(self, n_experts: int, d_model: int, d_mlp: int) -> None:
         super().__init__()
         self.n_experts = n_experts
         tp_size = get_tensor_model_parallel_world_size()
@@ -344,108 +342,6 @@ class InklingSinkExperts(nn.Module):
             raw, self._unit, gammas, self._unit, self.n_experts, x.dtype
         )
         return h @ self.w2_weight.T  # (T, D)
-
-
-class InklingSinkExpertsLinear(nn.Module):
-    """LoRA-capable variant of :class:`InklingSinkExperts`.
-
-    Same math (``sum_e gammas[:, e] * MLP_e(x)``, bf16, TP-partial output) but
-    expressed as two standard ``ParallelLinear`` layers instead of the fused
-    custom kernel, so vLLM's LoRA can wrap them:
-
-    * ``w13`` -- :class:`MergedColumnParallelLinear` whose two output shards are
-      the experts-stacked gate and up projections, concatenated ``[gate_all |
-      up_all]`` to match the adapter's ``[w1 | w3]`` (both expert-major, so
-      column ``c`` belongs to expert ``c // intermediate``).
-    * ``w2`` -- :class:`RowParallelLinear` with ``reduce_results=False`` so the
-      output stays a TP-partial sum, exactly like the routed MoE output.
-
-    Trade-off vs the fused kernel: the single batched GEMM and the fused
-    SwiGLU/gamma epilogue become separate ops (extra elementwise gamma mul).
-    Enables sink LoRA at some decode-time throughput cost.
-    """
-
-    def __init__(
-        self,
-        n_experts: int,
-        d_model: int,
-        d_mlp: int,
-        *,
-        prefix: str = "",
-    ) -> None:
-        super().__init__()
-        from vllm.model_executor.layers.linear import (
-            MergedColumnParallelLinear,
-            RowParallelLinear,
-        )
-
-        self.n_experts = n_experts
-        self.d_mlp = d_mlp  # per-expert intermediate
-        total = n_experts * d_mlp
-        # [gate_all(total) | up_all(total)]; column-parallel shards each half.
-        self.w13 = MergedColumnParallelLinear(
-            input_size=d_model,
-            output_sizes=[total, total],
-            bias=False,
-            prefix=f"{prefix}.w13",
-        )
-        # Down projection over the stacked intermediate; keep the output a
-        # TP-partial sum (the decoder layer reduces it itself).
-        self.w2 = RowParallelLinear(
-            input_size=total,
-            output_size=d_model,
-            bias=False,
-            reduce_results=False,
-            prefix=f"{prefix}.w2",
-        )
-        # Cache the per-partition intermediate now: once LoRA wraps `w2` in a
-        # RowParallelLinearWithLoRA, `input_size_per_partition` is no longer
-        # exposed on the (wrapper) attribute.
-        self._w2_input_pp = self.w2.input_size_per_partition
-        self._col_expert: torch.Tensor | None = None
-
-    def _gamma_expand(self, gammas: torch.Tensor) -> torch.Tensor:
-        """``[T, S]`` -> ``[T, local_intermediate]``: gamma per column by expert."""
-        if self._col_expert is None or self._col_expert.device != gammas.device:
-            local = self._w2_input_pp
-            start = get_tensor_model_parallel_rank() * local
-            cols = torch.arange(start, start + local, device=gammas.device)
-            self._col_expert = (cols // self.d_mlp).long()
-        return gammas[:, self._col_expert]
-
-    def load_weight(self, key: str, weight: torch.Tensor) -> list[str]:
-        """Load one checkpoint sink tensor (stacked over the S experts).
-
-        Mirrors :meth:`InklingSinkExperts.load_weight`'s signature/return so it
-        is a drop-in target for ``InklingMoE.load_expert_weight``. TP sharding
-        is delegated to each layer's ``weight_loader``.
-        """
-        if key == "w13_weight":
-            # weight: [S, 2F, d_model], gate/up interleaved along the row dim
-            # ([g0, u0, g1, u1, ...]); de-interleave into expert-major gate_all
-            # and up_all, then let the merged loader place each TP shard.
-            d_model = weight.shape[-1]
-            gate = weight[:, 0::2, :].reshape(-1, d_model).contiguous()
-            up = weight[:, 1::2, :].reshape(-1, d_model).contiguous()
-            self.w13.weight_loader(self.w13.weight, gate, 0)
-            self.w13.weight_loader(self.w13.weight, up, 1)
-            return ["w13.weight"]
-        # w2_weight: [S, d_model, F] -> [d_model, S*F] expert-major on the input.
-        w = weight.permute(1, 0, 2).reshape(weight.shape[1], -1).contiguous()
-        self.w2.weight_loader(self.w2.weight, w)
-        return ["w2.weight"]
-
-    def forward(self, x: torch.Tensor, gammas: torch.Tensor) -> torch.Tensor:
-        """``sum_e gammas[:, e] * MLP_e(x)`` (TP-partial along d_mlp)."""
-        # TODO:  optimize this path
-        gu, _ = self.w13(x)  # (T, 2 * local_intermediate)
-        gate, up = gu.chunk(2, dim=-1)
-        h = torch.nn.functional.silu(gate) * up
-        # gammas are fp32; keep the down-proj input in the weight dtype so the
-        # w2 GEMM doesn't hit a float/bf16 mismatch.
-        h = (h * self._gamma_expand(gammas)).to(x.dtype)
-        out, _ = self.w2(h)  # (T, d_model), TP-partial
-        return out
 
 
 class InklingMoE(nn.Module):
@@ -539,21 +435,10 @@ class InklingMoE(nn.Module):
             layer_id
         ), f"layer {layer_id}: NVFP4 shared experts are not supported"
 
-        # Pick the sink implementation from the current vLLM config (plan B:
-        # no plumbing through the decoder layer). With LoRA enabled the sinks
-        # must be ParallelLinear layers so vLLM can wrap them; otherwise keep
-        # the faster fused kernel.
-        lora_enabled = get_current_vllm_config().lora_config is not None
-
-        sink_experts_cls = (
-            InklingSinkExpertsLinear if lora_enabled else InklingSinkExperts
-        )
-
-        self.sink_experts = sink_experts_cls(
+        self.sink_experts = InklingSinkExperts(
             n_experts=n_shared,
             d_model=config.hidden_size,
             d_mlp=config.intermediate_size,
-            prefix=f"{prefix}.shared_experts",
         )
 
         # Sink chain overlaps the routed MoE call on the aux stream for

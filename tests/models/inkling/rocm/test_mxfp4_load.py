@@ -7,16 +7,7 @@ from types import SimpleNamespace
 import torch
 from torch import nn
 
-from vllm.models.inkling.amd.model import _is_peft_adapter_weight
 from vllm.models.inkling.amd.moe import InklingMoE
-
-
-def test_detects_converted_peft_adapter_weights():
-    assert _is_peft_adapter_weight("language_model.layers.0.attn.wq_du.lora_A.weight")
-    assert _is_peft_adapter_weight(
-        "language_model.layers.0.attn.wq_du.lora_B.weight_scale"
-    )
-    assert not _is_peft_adapter_weight("model.llm.layers.0.attn.wq_du.weight")
 
 
 def _fake_moe() -> tuple[InklingMoE, SimpleNamespace]:
@@ -34,7 +25,9 @@ def _fake_moe() -> tuple[InklingMoE, SimpleNamespace]:
         w2_weight_scale=nn.Parameter(torch.ones(4, 5, 3, dtype=torch.uint8), False),
     )
     moe.experts = SimpleNamespace(routed_experts=routed)
-    moe._local_expert_slots = lambda: dict(enumerate(range(4)))
+    moe._local_expert_slots = (  # type: ignore[method-assign]
+        lambda: dict(enumerate(range(4)))
+    )
     return moe, routed
 
 

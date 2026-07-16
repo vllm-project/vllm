@@ -23,7 +23,6 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.models.interfaces import (
     MultiModalEmbeddings,
-    SupportsLoRA,
     SupportsMultiModal,
     SupportsPP,
 )
@@ -336,7 +335,7 @@ class InklingModel(nn.Module):
         return self.norm(hidden_states)
 
 
-class _TmlForCausalLMBase(nn.Module, SupportsPP, SupportsLoRA):
+class _TmlForCausalLMBase(nn.Module, SupportsPP):
     """Shared text-backbone causal-LM scaffolding for both entry classes."""
 
     hf_to_vllm_mapper = WeightsMapper(
@@ -356,12 +355,6 @@ class _TmlForCausalLMBase(nn.Module, SupportsPP, SupportsLoRA):
             "model.llm.embed": "model.embed_tokens",
             "model.llm.norm": "model.norm",
             "model.llm.unembed": "lm_head",
-            # LoRA adapter keys use the `language_model.` backbone prefix;
-            # map them to the vLLM module paths so the adapter's tensors match
-            # the wrapped modules (otherwise the whole adapter is silently
-            # dropped — keys never match `model.*`).
-            "language_model.layers.": "model.layers.",
-            "language_model.lm_head.": "lm_head.",
         },
         orig_to_new_suffix={
             # NVFP4 scale
@@ -371,17 +364,10 @@ class _TmlForCausalLMBase(nn.Module, SupportsPP, SupportsLoRA):
             ".w2_weight.scale2": ".w2_weight_scale_2",
         },
     )
-    # The checkpoint's four attention projections are fused into `qkvr`
-    # (MergedColumnParallelLinear, 4 slices); the adapter keeps them split.
-    # `qkvr`: the 4 fused attention projections. `w13`: the sink experts'
-    # MergedColumnParallelLinear (gate|up), packed from the adapter's
-    # `shared_experts.w1` (gate) + `shared_experts.w3` (up).
+    # Quark uses this mapping when resolving quantization exclusions for the
+    # four checkpoint attention projections fused into qkvr.
     packed_modules_mapping = {
         "qkvr": ["wq_du", "wk_dv", "wv_dv", "wr_du"],
-        "w13": ["w1", "w3"],
-    }
-    embedding_modules = {
-        "lm_head": "output_embeddings",
     }
 
     def _build(
@@ -614,10 +600,6 @@ _MOE_EXPERT_WEIGHT_RE = re.compile(
 )
 
 
-def _is_peft_adapter_weight(name: str) -> bool:
-    return ".lora_A." in name or ".lora_B." in name
-
-
 def _load_inkling_weights(
     module: nn.Module,
     weights: Iterable[tuple[str, torch.Tensor]],
@@ -633,11 +615,10 @@ def _load_inkling_weights(
 
     def _iter_loadable_weights() -> Iterable[tuple[str, torch.Tensor]]:
         for name, weight in module.hf_to_vllm_mapper.apply(weights):
-            # The lightseek MXFP4 conversion bundles a quantized copy of a
-            # standalone PEFT adapter in the base safetensors index. Official
-            # Inkling checkpoints do not. These tensors are not base-model
-            # parameters and must not be interpreted as Linear submodules.
-            if _is_peft_adapter_weight(name):
+            # The converted checkpoint also carries auxiliary tensors under a
+            # separate language_model namespace. They are not base-model
+            # parameters and are intentionally ignored.
+            if name.startswith("language_model."):
                 continue
             shard_id = getattr(weight, "shard_id", None)
             # Replicate K/V conv-free GQA heads when tp_size > num_kv_heads.
