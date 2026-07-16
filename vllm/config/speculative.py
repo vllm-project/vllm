@@ -181,6 +181,17 @@ class SpeculativeConfig:
     inclusive batch-size range.
     """
 
+    adaptive_verification: bool = False
+    """Allow the speculator to distribute the batch-wide verification-token
+    budget unevenly among requests.
+
+    This currently requires ``method="dspark"`` and a
+    ``num_speculative_tokens_per_batch_size`` schedule. The configured
+    ``num_speculative_tokens`` is the per-request maximum. The model runner
+    uses the batch-size schedule as a cost model and redistributes its token
+    budget across request prefixes on device.
+    """
+
     # params generated in the post-init stage
     draft_model_config: SkipValidation[ModelConfig] = None  # type: ignore
     """The configuration of the draft model initialized internal."""
@@ -1222,6 +1233,18 @@ class SpeculativeConfig:
 
         if not self.use_heterogeneous_vocab:
             self.verify_equal_vocab_size_if_draft_model()
+
+        if self.adaptive_verification:
+            if self.method != "dspark":
+                raise ValueError(
+                    "adaptive_verification is currently supported only with "
+                    "method='dspark'."
+                )
+            if not self.num_speculative_tokens_per_batch_size:
+                raise ValueError(
+                    "adaptive_verification requires a non-empty "
+                    "num_speculative_tokens_per_batch_size schedule."
+                )
         return self
 
     def verify_equal_vocab_size_if_draft_model(self):
@@ -1286,7 +1309,10 @@ class SpeculativeConfig:
         return self.method == "dspark"
 
     def uses_dynamic_speculative_decoding(self) -> bool:
-        return self.num_speculative_tokens_per_batch_size is not None
+        return (
+            self.num_speculative_tokens_per_batch_size is not None
+            and not self.adaptive_verification
+        )
 
     def uses_draft_model(self) -> bool:
         return self.method == "draft_model"

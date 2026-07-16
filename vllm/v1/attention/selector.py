@@ -33,6 +33,7 @@ class AttentionSelectorConfig(NamedTuple):
     use_non_causal: bool = False
     use_batch_invariant: bool = False
     use_kv_connector: bool = False
+    requires_device_query_lengths: bool = False
 
     def __repr__(self):
         return (
@@ -49,7 +50,8 @@ class AttentionSelectorConfig(NamedTuple):
             f"has_sliding_window={self.has_sliding_window}, "
             f"use_non_causal={self.use_non_causal}, "
             f"use_batch_invariant={self.use_batch_invariant}, "
-            f"use_kv_connector={self.use_kv_connector})"
+            f"use_kv_connector={self.use_kv_connector}, "
+            f"requires_device_query_lengths={self.requires_device_query_lengths})"
         )
 
 
@@ -90,6 +92,15 @@ def get_attn_backend(
     use_kv_connector = (
         kv_transfer_config is not None and kv_transfer_config.is_kv_transfer_instance
     )
+    speculative_config = vllm_config.speculative_config
+    adaptive_verification = bool(
+        speculative_config is not None and speculative_config.adaptive_verification
+    )
+    if adaptive_verification:
+        from vllm.compilation.backends import model_tag
+
+        # Only the verifier requires device query lengths.
+        adaptive_verification = model_tag != "dspark_head"
 
     attn_selector_config = AttentionSelectorConfig(
         head_size=head_size,
@@ -106,6 +117,7 @@ def get_attn_backend(
         use_non_causal=vllm_config.attention_config.use_non_causal,
         use_batch_invariant=envs.VLLM_BATCH_INVARIANT,
         use_kv_connector=use_kv_connector,
+        requires_device_query_lengths=adaptive_verification,
     )
 
     return _cached_get_attn_backend(

@@ -282,6 +282,10 @@ class AttentionBackend(ABC):
         return True
 
     @classmethod
+    def supports_device_query_lengths(cls) -> bool:
+        return False
+
+    @classmethod
     def supports_attn_type(cls, attn_type: str) -> bool:
         """Check if backend supports a given attention type.
 
@@ -327,6 +331,7 @@ class AttentionBackend(ABC):
         use_non_causal: bool = False,
         use_batch_invariant: bool = False,
         use_kv_connector: bool = False,
+        requires_device_query_lengths: bool = False,
     ) -> list[str]:
         invalid_reasons = []
         if not cls.supports_head_size(head_size):
@@ -367,6 +372,8 @@ class AttentionBackend(ABC):
             invalid_reasons.append("batch invariance not supported")
         if use_kv_connector and not cls.supports_kv_connector():
             invalid_reasons.append("KV connector not supported")
+        if requires_device_query_lengths and not cls.supports_device_query_lengths():
+            invalid_reasons.append("device-side query lengths not supported")
         combination_reason = cls.supports_combination(
             head_size,
             dtype,

@@ -1,8 +1,39 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from unittest import TestCase
+from unittest.mock import Mock
 
-from vllm.v1.outputs import LogprobsLists
+import numpy as np
+import torch
+
+from vllm.v1.outputs import LogprobsLists, LogprobsTensors, ModelRunnerOutput
+from vllm.v1.worker.gpu.async_utils import AsyncOutput
+
+
+def test_async_output_groups_adaptive_logprobs_by_actual_draft_counts():
+    """Adaptive-verification logprobs must use device-selected, not planned, lengths."""
+    output = AsyncOutput.__new__(AsyncOutput)
+    output.copy_event = Mock()
+    output.sampled_token_ids = np.zeros((3, 4), dtype=np.int32)
+    output.num_sampled_tokens_np = np.ones(3, dtype=np.int32)
+    output.num_draft_tokens_np = np.array([3, 1, 2], dtype=np.int32)
+    output.num_nans = None
+    output.prompt_logprobs_dict = {}
+    output.model_runner_output = ModelRunnerOutput(
+        req_ids=["a", "b", "c"],
+        req_id_to_index={"a": 0, "b": 1, "c": 2},
+    )
+    output.logprobs_tensors = LogprobsTensors(
+        logprob_token_ids=torch.zeros((9, 1), dtype=torch.int32),
+        logprobs=torch.zeros((9, 1)),
+        selected_token_ranks=torch.zeros(9, dtype=torch.int32),
+        cu_num_generated_tokens=[0, 3, 6, 9],
+    )
+
+    result = output.get_output()
+
+    assert result.logprobs is not None
+    assert result.logprobs.cu_num_generated_tokens == [0, 4, 6, 9]
 
 
 class TestLogprobsLists(TestCase):

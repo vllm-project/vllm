@@ -1434,9 +1434,25 @@ def dspark_config():
             "attention_backend": "FLASH_ATTN",
             "draft_sample_method": "probabilistic",
         },
+        gpu_memory_utilization=0.8,
         max_model_len=4096,
         disable_log_stats=False,
     )
+
+
+@pytest.fixture
+def dspark_adaptive_config(dspark_config):
+    speculative_config = dspark_config["speculative_config"] | {
+        "num_speculative_tokens": 7,
+        "num_speculative_tokens_per_batch_size": [(1, 1024, 5)],
+        "adaptive_verification": True,
+    }
+    speculative_config.pop("attention_backend")
+    return dspark_config | {
+        "attention_backend": "FLASH_ATTN",
+        "speculative_config": speculative_config,
+        "max_num_seqs": 1024,
+    }
 
 
 @single_gpu_only
@@ -1471,8 +1487,43 @@ def test_dspark_correctness_and_acceptance_rate(dspark_config):
         f"gsm8k_accuracy={gsm8k_accuracy:.3f}"
     )
 
-    assert acceptance_rate >= 0.428 * 0.9
-    assert acceptance_len >= 3.994 * 0.9
+    assert acceptance_rate >= 0.428 * 0.95
+    assert acceptance_len >= 3.994 * 0.95
+    assert gsm8k_accuracy >= 0.801 * 0.9
+
+    del spec_llm
+    torch.accelerator.empty_cache()
+    cleanup_dist_env_and_memory()
+
+
+@single_gpu_only
+@large_gpu_mark(min_gb=24)
+def test_dspark_adaptive_correctness_and_acceptance_length(dspark_adaptive_config):
+    """Check adaptive verification quality with a larger draft window.
+    The drafter produces up to 7 candidates per request, while the target verifies an
+    average budget of 5 draft tokens per request.
+    """
+    spec_llm = LLM(**dspark_adaptive_config)
+
+    results = evaluate_gsm8k_offline(spec_llm, temperature=1.0)
+    gsm8k_accuracy = results["accuracy"]
+    metrics = spec_llm.get_metrics()
+    acceptance_len = compute_acceptance_len(metrics)
+
+    # Check the actual low-level stats to ensure we're not over- or under-allocating.
+    name2metric = {metric.name: metric for metric in metrics}
+    num_drafts = name2metric["vllm:spec_decode_num_drafts"].value
+    num_draft_tokens = name2metric["vllm:spec_decode_num_draft_tokens"].value
+
+    print(
+        f"Adaptive DSpark acceptance_len={acceptance_len:.2f}, "
+        f"gsm8k_accuracy={gsm8k_accuracy:.3f}"
+    )
+
+    assert num_drafts > 0
+    assert num_draft_tokens < num_drafts * 7
+    assert 0.99 * (num_drafts * 5) <= num_draft_tokens <= 1.01 * (num_drafts * 5)
+    assert acceptance_len >= 3.62 * 0.95  # Measured on non-adaptive K=5 baseline
     assert gsm8k_accuracy >= 0.801 * 0.9
 
     del spec_llm
