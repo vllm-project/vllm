@@ -568,13 +568,16 @@ class OpenAIServingChat(GenerateBaseServing):
                     if finish_reason_sent[i]:
                         continue
 
-                    if request.logprobs and request.top_logprobs is not None:
+                    if request.logprobs and (
+                        request.top_logprobs is not None or request.logprob_token_ids
+                    ):
                         assert output.logprobs is not None, "Did not output logprobs"
                         logprobs = self._create_chat_logprobs(
                             token_ids=output.token_ids,
                             top_logprobs=output.logprobs,
                             tokenizer=tokenizer,
                             num_output_top_logprobs=request.top_logprobs,
+                            logprob_token_ids=request.logprob_token_ids,
                             return_as_token_id=request.return_tokens_as_token_ids,
                         )
                     else:
@@ -862,12 +865,15 @@ class OpenAIServingChat(GenerateBaseServing):
             token_ids = output.token_ids
             out_logprobs = output.logprobs
 
-            if request.logprobs and request.top_logprobs is not None:
+            if request.logprobs and (
+                request.top_logprobs is not None or request.logprob_token_ids
+            ):
                 assert out_logprobs is not None, "Did not output logprobs"
                 logprobs = self._create_chat_logprobs(
                     token_ids=token_ids,
                     top_logprobs=out_logprobs,
                     num_output_top_logprobs=request.top_logprobs,
+                    logprob_token_ids=request.logprob_token_ids,
                     tokenizer=tokenizer,
                     return_as_token_id=request.return_tokens_as_token_ids,
                 )
@@ -1101,6 +1107,7 @@ class OpenAIServingChat(GenerateBaseServing):
         top_logprobs: int | None,
         tokenizer: TokenizerLike | None,
         should_return_as_token_id: bool,
+        return_all: bool = False,
     ) -> list[ChatCompletionLogProb]:
         return [
             ChatCompletionLogProb(
@@ -1116,7 +1123,9 @@ class OpenAIServingChat(GenerateBaseServing):
                 bytes=list(token.encode("utf-8", errors="replace")),
             )
             for i, p in enumerate(logprobs.items())
-            if (top_logprobs and i < top_logprobs or top_logprobs == -1)
+            if return_all
+            or top_logprobs == -1
+            or (top_logprobs is not None and i < top_logprobs)
         ]
 
     def _create_chat_logprobs(
@@ -1125,6 +1134,7 @@ class OpenAIServingChat(GenerateBaseServing):
         top_logprobs: GenericSequence[dict[int, Logprob] | None],
         tokenizer: TokenizerLike | None,
         num_output_top_logprobs: int | None = None,
+        logprob_token_ids: list[int] | None = None,
         return_as_token_id: bool | None = None,
     ) -> ChatCompletionLogProbs:
         """Create OpenAI-style logprobs."""
@@ -1177,6 +1187,7 @@ class OpenAIServingChat(GenerateBaseServing):
                             num_output_top_logprobs,
                             tokenizer,
                             should_return_as_token_id,
+                            return_all=bool(logprob_token_ids),
                         ),
                     )
                 )
