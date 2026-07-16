@@ -20,8 +20,10 @@ import torch
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
     OffloadingConnectorStats,
 )
-from vllm.v1.kv_offload.base import (
+from vllm.distributed.kv_transfer.kv_connector.v1.offloading.scheduler import (
     KV_LOAD_TIERS_KEY,
+)
+from vllm.v1.kv_offload.base import (
     LookupResult,
     Medium,
     OffloadingCounterMetadata,
