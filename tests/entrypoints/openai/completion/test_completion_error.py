@@ -11,19 +11,29 @@ from pydantic import ValidationError
 from vllm.config.multimodal import MultiModalConfig
 from vllm.entrypoints.openai.completion.protocol import CompletionRequest
 from vllm.entrypoints.openai.completion.serving import OpenAIServingCompletion
-from vllm.entrypoints.openai.engine.protocol import GenerationError
+from vllm.entrypoints.openai.engine.protocol import (
+    GenerationError,
+    RequestResponseMetadata,
+)
 from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
-from vllm.entrypoints.serve.render.serving import ServingRender
+from vllm.entrypoints.scale_out.render.serving import ServingRender
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.renderers.hf import HfRenderer
-from vllm.renderers.online_derenderer import OnlineDerenderer
 from vllm.renderers.online_renderer import OnlineRenderer
 from vllm.tokenizers.registry import cached_tokenizer_from_config
 from vllm.v1.engine.async_llm import AsyncLLM
+from vllm.v1.metrics.stats import RequestStateStats
 
 MODEL_NAME = "openai-community/gpt2"
 MODEL_NAME_SHORT = "gpt2"
+_PER_REQUEST_STATS = RequestStateStats(
+    queued_ts=1.0,
+    scheduled_ts=1.5,
+    first_token_ts=2.0,
+    last_token_ts=3.0,
+    num_generation_tokens=2,
+)
 BASE_MODEL_PATHS = [
     BaseModelPath(name=MODEL_NAME, model_path=MODEL_NAME),
     BaseModelPath(name=MODEL_NAME_SHORT, model_path=MODEL_NAME_SHORT),
@@ -94,11 +104,96 @@ def _build_serving_completion(engine: AsyncLLM) -> OpenAIServingCompletion:
     )
 
 
+def _build_minimal_metrics_serving_completion(
+    enable_per_request_metrics: bool,
+) -> OpenAIServingCompletion:
+    serving = OpenAIServingCompletion.__new__(OpenAIServingCompletion)
+    serving.enable_prompt_tokens_details = False
+    serving.system_fingerprint = None
+    serving.enable_per_request_metrics = enable_per_request_metrics
+    return serving
+
+
+def _make_metrics_request_output(
+    metrics: RequestStateStats | None = _PER_REQUEST_STATS,
+) -> RequestOutput:
+    return RequestOutput(
+        request_id="test-id",
+        prompt="Test prompt",
+        prompt_token_ids=[1, 2, 3],
+        prompt_logprobs=None,
+        outputs=[
+            CompletionOutput(
+                index=0,
+                text="Hello",
+                token_ids=[100, 101],
+                cumulative_logprob=None,
+                logprobs=None,
+                finish_reason="stop",
+            )
+        ],
+        finished=True,
+        metrics=metrics,
+    )
+
+
 def _build_renderer(model_config: MockModelConfig):
     return HfRenderer(
         MockVllmConfig(model_config, parallel_config=MockParallelConfig()),
         cached_tokenizer_from_config(model_config),
     )
+
+
+def test_completion_per_request_metrics_follow_server_flag():
+    request = CompletionRequest(model=MODEL_NAME, prompt="Test prompt", max_tokens=10)
+    request_output = _make_metrics_request_output()
+
+    disabled_serving = _build_minimal_metrics_serving_completion(
+        enable_per_request_metrics=False
+    )
+    disabled_response = disabled_serving.request_output_to_completion_response(
+        [request_output],
+        request,
+        "cmpl-test-id",
+        0,
+        MODEL_NAME,
+        None,
+        RequestResponseMetadata(request_id="cmpl-test-id"),
+    )
+    assert disabled_response.metrics is None
+
+    enabled_serving = _build_minimal_metrics_serving_completion(
+        enable_per_request_metrics=True
+    )
+    enabled_response = enabled_serving.request_output_to_completion_response(
+        [request_output],
+        request,
+        "cmpl-test-id",
+        0,
+        MODEL_NAME,
+        None,
+        RequestResponseMetadata(request_id="cmpl-test-id"),
+    )
+    assert enabled_response.metrics is not None
+    assert enabled_response.metrics.time_to_first_token_ms == pytest.approx(500.0)
+
+
+def test_completion_per_request_metrics_suppressed_for_multiple_prompts():
+    serving = _build_minimal_metrics_serving_completion(enable_per_request_metrics=True)
+    response = serving.request_output_to_completion_response(
+        [_make_metrics_request_output(), _make_metrics_request_output()],
+        CompletionRequest(
+            model=MODEL_NAME,
+            prompt=["Test prompt", "Another prompt"],
+            max_tokens=10,
+        ),
+        "cmpl-test-id",
+        0,
+        MODEL_NAME,
+        None,
+        RequestResponseMetadata(request_id="cmpl-test-id"),
+    )
+    assert response.metrics is None
 
 
 @pytest.mark.asyncio
@@ -191,15 +286,8 @@ def _build_serving_render(engine: AsyncLLM) -> ServingRender:
         chat_template=None,
         chat_template_content_format="auto",
     )
-    online_derenderer = OnlineDerenderer(
-        model_config=engine.model_config,
-        renderer=engine.renderer,
-        request_logger=None,
-        chat_template=None,
-        chat_template_content_format="auto",
-    )
 
-    serving_render = ServingRender(models, online_renderer, online_derenderer)
+    serving_render = ServingRender(models, online_renderer)
 
     async def _fake_preprocess_chat(*args, **kwargs):
         # return conversation, engine_inputs
@@ -386,3 +474,139 @@ def test_negative_prompt_token_ids_flat():
             prompt=[-1],
             max_tokens=10,
         )
+
+
+class TestCompletionPromptListLimit:
+    """Regression tests for CVE: unbounded prompt list fan-out."""
+
+    def test_scalar_prompt_allowed(self):
+        request = CompletionRequest(
+            model=MODEL_NAME,
+            prompt="hello",
+            max_tokens=1,
+        )
+        assert request.prompt == "hello"
+
+    def test_single_token_list_allowed(self):
+        request = CompletionRequest(
+            model=MODEL_NAME,
+            prompt=[1, 2, 3],
+            max_tokens=1,
+        )
+        assert request.prompt == [1, 2, 3]
+
+    def test_bounded_text_prompt_list_allowed(self, monkeypatch):
+        monkeypatch.setenv("VLLM_MAX_COMPLETION_PROMPTS", "10")
+        from vllm import envs
+
+        if hasattr(envs.__getattr__, "cache_clear"):
+            envs.__getattr__.cache_clear()
+
+        request = CompletionRequest(
+            model=MODEL_NAME,
+            prompt=["a", "b", "c"],
+            max_tokens=1,
+        )
+        assert request.prompt == ["a", "b", "c"]
+
+    def test_bounded_token_id_prompt_list_allowed(self, monkeypatch):
+        monkeypatch.setenv("VLLM_MAX_COMPLETION_PROMPTS", "10")
+        from vllm import envs
+
+        if hasattr(envs.__getattr__, "cache_clear"):
+            envs.__getattr__.cache_clear()
+
+        request = CompletionRequest(
+            model=MODEL_NAME,
+            prompt=[[1], [2], [3]],
+            max_tokens=1,
+        )
+        assert request.prompt == [[1], [2], [3]]
+
+    def test_oversized_text_prompt_list_rejected(self, monkeypatch):
+        monkeypatch.setenv("VLLM_MAX_COMPLETION_PROMPTS", "5")
+        from vllm import envs
+
+        if hasattr(envs.__getattr__, "cache_clear"):
+            envs.__getattr__.cache_clear()
+
+        with pytest.raises(
+            Exception, match="prompt list length 10 exceeds the maximum"
+        ):
+            CompletionRequest(
+                model=MODEL_NAME,
+                prompt=["x"] * 10,
+                max_tokens=1,
+            )
+
+    def test_oversized_token_id_prompt_list_rejected(self, monkeypatch):
+        monkeypatch.setenv("VLLM_MAX_COMPLETION_PROMPTS", "5")
+        from vllm import envs
+
+        if hasattr(envs.__getattr__, "cache_clear"):
+            envs.__getattr__.cache_clear()
+
+        with pytest.raises(
+            Exception, match="prompt list length 10 exceeds the maximum"
+        ):
+            CompletionRequest(
+                model=MODEL_NAME,
+                prompt=[[1]] * 10,
+                max_tokens=1,
+            )
+
+    def test_exact_limit_allowed(self, monkeypatch):
+        monkeypatch.setenv("VLLM_MAX_COMPLETION_PROMPTS", "5")
+        from vllm import envs
+
+        if hasattr(envs.__getattr__, "cache_clear"):
+            envs.__getattr__.cache_clear()
+
+        request = CompletionRequest(
+            model=MODEL_NAME,
+            prompt=["x"] * 5,
+            max_tokens=1,
+        )
+        assert len(request.prompt) == 5
+
+    def test_one_over_limit_rejected(self, monkeypatch):
+        monkeypatch.setenv("VLLM_MAX_COMPLETION_PROMPTS", "5")
+        from vllm import envs
+
+        if hasattr(envs.__getattr__, "cache_clear"):
+            envs.__getattr__.cache_clear()
+
+        with pytest.raises(Exception, match="prompt list length 6 exceeds the maximum"):
+            CompletionRequest(
+                model=MODEL_NAME,
+                prompt=["x"] * 6,
+                max_tokens=1,
+            )
+
+    def test_oversized_prompt_embeds_list_rejected(self, monkeypatch):
+        monkeypatch.setenv("VLLM_MAX_COMPLETION_PROMPTS", "5")
+        from vllm import envs
+
+        if hasattr(envs.__getattr__, "cache_clear"):
+            envs.__getattr__.cache_clear()
+
+        with pytest.raises(Exception, match="prompt_embeds list length 10 exceeds"):
+            CompletionRequest(
+                model=MODEL_NAME,
+                prompt_embeds=[b"\x00"] * 10,
+                max_tokens=1,
+            )
+
+    def test_bounded_prompt_embeds_list_allowed(self, monkeypatch):
+        monkeypatch.setenv("VLLM_MAX_COMPLETION_PROMPTS", "5")
+        from vllm import envs
+
+        if hasattr(envs.__getattr__, "cache_clear"):
+            envs.__getattr__.cache_clear()
+
+        request = CompletionRequest(
+            model=MODEL_NAME,
+            prompt_embeds=[b"\x00"] * 5,
+            max_tokens=1,
+        )
+        assert len(request.prompt_embeds) == 5
