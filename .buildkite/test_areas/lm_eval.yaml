@@ -74,6 +74,7 @@ steps:
   source_file_dependencies:
   - csrc/
   - vllm/model_executor/layers/quantization
+  autorun_on_main: true
   commands:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-small-tp.txt
 
