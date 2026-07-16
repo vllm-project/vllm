@@ -71,6 +71,7 @@ def test_session_id_precedence_and_fallback():
         ),
         ({"reclaim_batch_size": 0}, "reclaim_batch_size"),
         ({"residency_max_entries": 0}, "residency_max_entries"),
+        ({"max_sessions": 0}, "lifecycle_max_sessions"),
     ],
 )
 def test_lifecycle_config_validation(kwargs, match):
@@ -137,6 +138,59 @@ def test_session_heat_tracks_revisits_and_external_hits(monkeypatch):
     assert state.reuse_request_count == 1
     assert state.reuse_hit_blocks == 5
     assert state.last_reuse_at == 100.0
+
+
+def test_request_finalization_releases_fallback_session_metadata(monkeypatch):
+    _clock(monkeypatch)
+    lifecycle = SessionLifecycleManager(
+        LifecycleConfig(residency_tracking_enabled=True)
+    )
+    ctx = ReqContext(req_id="one-shot")
+    key = _key(6)
+
+    lifecycle.on_new_request(ctx)
+    lifecycle.record_request_keys(ctx, [key])
+    lifecycle.on_request_finished(ctx)
+    lifecycle.on_request_finalized(ctx)
+
+    assert lifecycle.snapshot()["sessions"] == 0
+    assert lifecycle._req_to_session == {}
+    assert lifecycle.residency.get_session_keys("one-shot") == set()
+
+
+def test_request_finalization_keeps_stable_session_but_not_request_ids(monkeypatch):
+    _clock(monkeypatch)
+    lifecycle = SessionLifecycleManager(LifecycleConfig())
+    ctx = ReqContext(req_id="r1", kv_transfer_params={"session_id": "s1"})
+
+    lifecycle.on_new_request(ctx, track_heat=True)
+    lifecycle.on_request_finished(ctx, track_heat=True)
+    lifecycle.on_request_finalized(ctx)
+
+    assert lifecycle.snapshot()["sessions"] == 1
+    assert lifecycle._req_to_session == {}
+    assert lifecycle._sessions["s1"].retained_req_ids == set()
+
+
+def test_idle_session_metadata_is_bounded(monkeypatch):
+    now = _clock(monkeypatch)
+    lifecycle = SessionLifecycleManager(LifecycleConfig(max_sessions=2))
+
+    for index in range(3):
+        ctx = ReqContext(
+            req_id=f"r{index}",
+            kv_transfer_params={"session_id": f"s{index}"},
+        )
+        lifecycle.on_new_request(ctx, track_heat=True)
+        lifecycle.on_request_finished(ctx, track_heat=True)
+        lifecycle.on_request_finalized(ctx)
+        now[0] += 1
+
+    result = lifecycle.prune_idle_sessions()
+
+    assert result.pruned_sessions == 1
+    assert lifecycle.snapshot()["sessions"] == 2
+    assert "s0" not in lifecycle._sessions
 
 
 def test_store_budget_selection_advances_only_selected_group_prefixes():

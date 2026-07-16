@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
 from collections import deque
 from dataclasses import dataclass
 from typing import Any
@@ -23,6 +24,8 @@ from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 
 logger = init_logger(__name__)
 
+_DEFAULT_LOAD_STAGING_BYTES = 64 * 1024 * 1024
+
 
 @dataclass
 class NPUTransfer:
@@ -36,7 +39,7 @@ class NPUTransfer:
     dma_src: torch.Tensor | None = None
     dma_dst: torch.Tensor | None = None
     dma_sizes: torch.Tensor | None = None
-    staging_slot: int | None = None
+    staging_buffer: torch.Tensor | None = None
 
 
 def _get_torch_npu() -> Any:
@@ -56,6 +59,42 @@ def _new_descriptor_buffers(
         torch.empty(num_copy_ops, dtype=torch.int64, pin_memory=PIN_MEMORY),
         torch.empty(num_copy_ops, dtype=torch.int64, pin_memory=PIN_MEMORY),
     )
+
+
+def _load_staging_limit_bytes() -> int:
+    value = os.getenv(
+        "VLLM_ASCEND_KV_LOAD_STAGING_BYTES",
+        str(_DEFAULT_LOAD_STAGING_BYTES),
+    )
+    try:
+        limit = int(value)
+    except ValueError as exc:
+        raise ValueError(
+            "VLLM_ASCEND_KV_LOAD_STAGING_BYTES must be an integer"
+        ) from exc
+    if limit <= 0:
+        raise ValueError("VLLM_ASCEND_KV_LOAD_STAGING_BYTES must be greater than zero")
+    return limit
+
+
+def _iter_transfer_chunks(sizes: Any, max_bytes: int) -> list[tuple[int, int]]:
+    """Split descriptors into contiguous chunks bounded by staging capacity."""
+    chunks: list[tuple[int, int]] = []
+    start = 0
+    while start < len(sizes):
+        end = start
+        chunk_bytes = 0
+        while end < len(sizes):
+            size = int(sizes[end])
+            if end > start and chunk_bytes + size > max_bytes:
+                break
+            chunk_bytes += size
+            end += 1
+            if chunk_bytes >= max_bytes:
+                break
+        chunks.append((start, end))
+        start = end
+    return chunks
 
 
 def _coalesce_host_pages(
@@ -139,10 +178,9 @@ class AscendSingleDirectionOffloadingHandler:
             tuple[torch.Tensor, torch.Tensor, torch.Tensor]
         ] = []
         self._stream = _get_torch_npu().Stream()
-        self._staging_npu: list[torch.Tensor] = []
-        self._staging_slot_events: list[Any | None] = []
-        self._next_staging_slot = 0
+        self._staging_npu: torch.Tensor | None = None
         self._staging_capacity_bytes = 0
+        self._max_staging_bytes = _load_staging_limit_bytes()
 
     def _new_event(self) -> Any:
         if self._event_pool:
@@ -153,31 +191,16 @@ class AscendSingleDirectionOffloadingHandler:
         if self.npu_to_cpu or num_bytes <= self._staging_capacity_bytes:
             return
 
-        for event in self._staging_slot_events:
-            if event is not None:
-                event.synchronize()
-
-        # Two buffers allow the next H2D transfer to use a different staging
-        # region while the previous one is being scattered on the NPU stream.
-        self._staging_npu = [
-            torch.empty(num_bytes, dtype=torch.uint8, device="npu")
-            for _ in range(2)
-        ]
-        self._staging_slot_events = [None, None]
-        self._next_staging_slot = 0
+        self._staging_npu = torch.empty(
+            num_bytes,
+            dtype=torch.uint8,
+            device="npu",
+        )
         self._staging_capacity_bytes = num_bytes
         logger.info(
-            "Allocated two %.2f MiB Ascend KV load staging buffers",
+            "Allocated a %.2f MiB Ascend KV load staging buffer",
             num_bytes / (1024 * 1024),
         )
-
-    def _acquire_staging_slot(self) -> int:
-        slot = self._next_staging_slot
-        self._next_staging_slot = (slot + 1) % len(self._staging_npu)
-        previous_event = self._staging_slot_events[slot]
-        if previous_event is not None:
-            previous_event.synchronize()
-        return slot
 
     def transfer_async(
         self, job_id: int, src_spec: LoadStoreSpec, dst_spec: LoadStoreSpec
@@ -273,7 +296,7 @@ class AscendSingleDirectionOffloadingHandler:
         npu = _get_torch_npu()
         start_event = self._new_event()
         end_event = self._new_event()
-        staging_slot: int | None = None
+        staging_buffer: torch.Tensor | None = None
         dma_src: torch.Tensor | None = None
         dma_dst: torch.Tensor | None = None
         dma_sizes: torch.Tensor | None = None
@@ -284,9 +307,14 @@ class AscendSingleDirectionOffloadingHandler:
             self._stream.wait_event(self._transfers[-1].end_event)
 
         if num_copy_ops and not self.npu_to_cpu:
-            self._ensure_staging_capacity(num_transfer_bytes)
-            staging_slot = self._acquire_staging_slot()
-            npu_staging = self._staging_npu[staging_slot]
+            max_page_bytes = int(all_sizes.max())
+            staging_bytes = min(
+                num_transfer_bytes,
+                max(self._max_staging_bytes, max_page_bytes),
+            )
+            self._ensure_staging_capacity(staging_bytes)
+            staging_buffer = self._staging_npu
+            assert staging_buffer is not None
 
             dma_src, dma_dst, dma_sizes = (
                 self._dma_buffer_pool.pop()
@@ -298,23 +326,6 @@ class AscendSingleDirectionOffloadingHandler:
             all_dma_src = dma_src.numpy()
             all_dma_dst = dma_dst.numpy()
             all_dma_sizes = dma_sizes.numpy()
-            num_dma_ops = _coalesce_host_pages(
-                all_src,
-                all_sizes,
-                npu_staging.data_ptr(),
-                all_dma_src,
-                all_dma_dst,
-                all_dma_sizes,
-            )
-
-            offsets = all_sizes.cumsum(dtype=all_sizes.dtype) - all_sizes
-            all_src[:] = npu_staging.data_ptr() + offsets
-            logger.debug(
-                "Ascend KV load job %d coalesced %d pages into %d H2D runs",
-                job_id,
-                num_copy_ops,
-                num_dma_ops,
-            )
 
         with npu.stream(self._stream):
             start_event.record(self._stream)
@@ -322,21 +333,55 @@ class AscendSingleDirectionOffloadingHandler:
                 if self.npu_to_cpu:
                     torch.ops._C_ascend.swap_blocks_batch(src, dst, sizes, 1)
                 else:
-                    assert staging_slot is not None
+                    assert staging_buffer is not None
                     assert dma_src is not None
                     assert dma_dst is not None
                     assert dma_sizes is not None
-                    torch.ops._C_ascend.swap_blocks_batch(
-                        dma_src[:num_dma_ops],
-                        dma_dst[:num_dma_ops],
-                        dma_sizes[:num_dma_ops],
-                        0,
-                    )
-                    torch.ops._C_ascend.swap_blocks_batch(src, dst, sizes, 2)
+                    dma_offset = 0
+                    for chunk_start, chunk_end in _iter_transfer_chunks(
+                        all_sizes,
+                        self._staging_capacity_bytes,
+                    ):
+                        chunk_src = all_src[chunk_start:chunk_end]
+                        chunk_sizes = all_sizes[chunk_start:chunk_end]
+                        chunk_dma_ops = _coalesce_host_pages(
+                            chunk_src,
+                            chunk_sizes,
+                            staging_buffer.data_ptr(),
+                            all_dma_src[dma_offset:],
+                            all_dma_dst[dma_offset:],
+                            all_dma_sizes[dma_offset:],
+                        )
+                        offsets = (
+                            chunk_sizes.cumsum(dtype=chunk_sizes.dtype) - chunk_sizes
+                        )
+                        chunk_src[:] = staging_buffer.data_ptr() + offsets
+                        dma_end = dma_offset + chunk_dma_ops
+                        torch.ops._C_ascend.swap_blocks_batch(
+                            dma_src[dma_offset:dma_end],
+                            dma_dst[dma_offset:dma_end],
+                            dma_sizes[dma_offset:dma_end],
+                            0,
+                        )
+                        torch.ops._C_ascend.swap_blocks_batch(
+                            src[chunk_start:chunk_end],
+                            dst[chunk_start:chunk_end],
+                            sizes[chunk_start:chunk_end],
+                            2,
+                        )
+                        dma_offset = dma_end
+                    num_dma_ops = dma_offset
             end_event.record(self._stream)
 
-        if staging_slot is not None:
-            self._staging_slot_events[staging_slot] = end_event
+        if num_copy_ops and not self.npu_to_cpu:
+            logger.debug(
+                "Ascend KV load job %d coalesced %d pages into %d H2D runs "
+                "using %.2f MiB staging chunks",
+                job_id,
+                num_copy_ops,
+                num_dma_ops,
+                self._staging_capacity_bytes / (1024 * 1024),
+            )
 
         self._transfers.append(
             NPUTransfer(
@@ -350,7 +395,7 @@ class AscendSingleDirectionOffloadingHandler:
                 dma_src=dma_src,
                 dma_dst=dma_dst,
                 dma_sizes=dma_sizes,
-                staging_slot=staging_slot,
+                staging_buffer=staging_buffer,
             )
         )
         return True
@@ -369,12 +414,6 @@ class AscendSingleDirectionOffloadingHandler:
                     ),
                 )
             )
-            if (
-                transfer.staging_slot is not None
-                and self._staging_slot_events[transfer.staging_slot]
-                is transfer.end_event
-            ):
-                self._staging_slot_events[transfer.staging_slot] = None
             self._event_pool.extend((transfer.end_event, transfer.start_event))
             self._buffer_pool.append(
                 (transfer.batch_src, transfer.batch_dst, transfer.batch_sizes)
@@ -400,8 +439,7 @@ class AscendSingleDirectionOffloadingHandler:
         self._event_pool.clear()
         self._buffer_pool.clear()
         self._dma_buffer_pool.clear()
-        self._staging_npu.clear()
-        self._staging_slot_events.clear()
+        self._staging_npu = None
         self.src_tensors.clear()
         self.dst_tensors.clear()
         if self._mmap_region is not None:

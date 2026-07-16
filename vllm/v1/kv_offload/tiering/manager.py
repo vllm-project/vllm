@@ -58,6 +58,7 @@ from vllm.v1.kv_offload.tiering.lifecycle import (
     LifecycleConfig,
     SessionLifecycleManager,
     get_session_id,
+    has_stable_session_id,
 )
 from vllm.v1.kv_offload.tiering.residency import TieringMetrics
 
@@ -410,7 +411,7 @@ class TieringOffloadingManager(OffloadingManager):
         if num_blocks <= 0:
             return True
 
-        if self._policy_config.secondary_pressure_aware:
+        if self._policy_config.secondary_pressure_aware and self.secondary_tiers:
             capacity = self.primary_tier.capacity_blocks
             resident = self.primary_tier.resident_blocks
             projected = resident + max(0, num_blocks)
@@ -464,19 +465,20 @@ class TieringOffloadingManager(OffloadingManager):
                 )
                 return 0
 
-            request_count, reuse_probability = self._lifecycle.get_session_heat(
-                req_context
-            )
-            if (
-                request_count < self._policy_config.min_session_requests_for_offload
-                or reuse_probability < self._policy_config.min_reuse_probability
-            ):
-                self._increase_counter(
-                    TieringMetrics.STORE_DECISIONS,
-                    requested_blocks,
-                    ("skip", "cold_session"),
+            if has_stable_session_id(req_context):
+                request_count, reuse_probability = self._lifecycle.get_session_heat(
+                    req_context
                 )
-                return 0
+                if (
+                    request_count < self._policy_config.min_session_requests_for_offload
+                    or reuse_probability < self._policy_config.min_reuse_probability
+                ):
+                    self._increase_counter(
+                        TieringMetrics.STORE_DECISIONS,
+                        requested_blocks,
+                        ("skip", "cold_session"),
+                    )
+                    return 0
 
         state = self._req_state.get(req_context.req_id)
         if state is None:
@@ -1081,7 +1083,7 @@ class TieringOffloadingManager(OffloadingManager):
         if success:
             state = self._req_state[req_context.req_id]
             cascade_tiers: Iterable[SecondaryTierManager]
-            if self._policy_config.secondary_pressure_aware:
+            if self._policy_config.secondary_pressure_aware and self.secondary_tiers:
                 cascade_tiers = state.request_level_tiers or ()
             else:
                 cascade_tiers = self.secondary_tiers
@@ -1149,6 +1151,7 @@ class TieringOffloadingManager(OffloadingManager):
 
         for tier in self.secondary_tiers:
             tier.on_request_finished(state.req_context)
+        self._lifecycle.on_request_finalized(state.req_context)
         del self._req_state[req_id]
 
     def _reclaim_primary_keys(
@@ -1351,6 +1354,17 @@ class TieringOffloadingManager(OffloadingManager):
                 len(expiration.unreferenced_keys),
             )
 
+        pruned_sessions = self._lifecycle.prune_idle_sessions()
+        if pruned_sessions.pruned_sessions:
+            self._increase_counter(
+                TieringMetrics.PRUNED_SESSIONS,
+                pruned_sessions.pruned_sessions,
+            )
+            logger.info(
+                "Pruned %d idle KV lifecycle session(s) to enforce the metadata limit",
+                pruned_sessions.pruned_sessions,
+            )
+
         self._maintain_primary_residency()
         if self._track_residency:
             pruned = self._lifecycle.residency.prune()
@@ -1435,6 +1449,7 @@ class TieringOffloadingManager(OffloadingManager):
                 continue
             for tier in self.secondary_tiers:
                 tier.on_request_finished(state.req_context)
+            self._lifecycle.on_request_finalized(state.req_context)
             finished_req_ids.append(req_id)
 
         self.primary_tier.reset_cache()

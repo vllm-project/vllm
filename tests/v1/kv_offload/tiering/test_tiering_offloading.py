@@ -206,9 +206,7 @@ def test_hbm_pressure_hysteresis_controls_device_store_decisions():
 
 def test_hbm_pressure_controls_device_cache_reclaim():
     manager = TieringOffloadingManager(
-        primary_tier=CPUPrimaryTierOffloadingManager(
-            num_blocks=5, mmap_region=None
-        ),
+        primary_tier=CPUPrimaryTierOffloadingManager(num_blocks=5, mmap_region=None),
         policy_config=TieringPolicyConfig(
             hbm_pressure_aware=True,
             hbm_high_watermark=0.8,
@@ -282,6 +280,58 @@ def test_reuse_aware_budget_limits_pressure_store_bursts():
     manager.update_device_pressure(0.9)
     assert manager.get_store_budget(second, 20, is_decode_phase=True) == 0
     manager.on_request_finished(second)
+    manager.shutdown()
+
+
+def test_pressure_store_does_not_require_session_id():
+    manager = TieringOffloadingManager(
+        primary_tier=CPUPrimaryTierOffloadingManager(
+            num_blocks=8, mmap_region=None, block_size_bytes=4096
+        ),
+        policy_config=TieringPolicyConfig(
+            hbm_pressure_aware=True,
+            hbm_high_watermark=0.8,
+            hbm_low_watermark=0.5,
+            min_session_requests_for_offload=2,
+            min_reuse_probability=0.5,
+            store_during_decode_only=False,
+        ),
+    )
+    ctx = ReqContext(req_id="ordinary-request")
+
+    manager.on_new_request(ctx)
+    manager.update_device_pressure(0.9)
+
+    assert manager.get_store_budget(ctx, 4, is_decode_phase=True) == 4
+    manager.on_request_finished(ctx)
+    manager.shutdown()
+
+
+def test_cpu_only_tiering_uses_primary_lru_above_cpu_watermark():
+    primary = CPUPrimaryTierOffloadingManager(
+        num_blocks=5, mmap_region=None, block_size_bytes=4096
+    )
+    manager = TieringOffloadingManager(
+        primary_tier=primary,
+        lifecycle_config=LifecycleConfig(
+            cpu_high_watermark=0.8,
+            cpu_low_watermark=0.5,
+        ),
+        policy_config=TieringPolicyConfig(
+            hbm_pressure_aware=True,
+            secondary_pressure_aware=True,
+        ),
+    )
+    ctx = ReqContext(req_id="cpu-only")
+    keys = to_keys(range(4))
+    prepared = primary.prepare_store(keys, ctx)
+    assert prepared is not None
+    primary.complete_store(prepared.keys_to_store, ctx)
+
+    manager.update_device_pressure(0.9)
+
+    assert manager.should_store(ctx, 2)
+    assert not manager._cpu_pressure_requested
     manager.shutdown()
 
 

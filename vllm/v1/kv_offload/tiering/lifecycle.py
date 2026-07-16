@@ -25,6 +25,7 @@ class LifecycleStatus(str, Enum):
 @dataclass(slots=True)
 class SessionKVState:
     session_id: str
+    has_stable_id: bool
     status: LifecycleStatus
     created_at: float
     last_access_at: float
@@ -52,6 +53,7 @@ class LifecycleConfig:
     cpu_low_watermark: float = 1.0
     reclaim_batch_size: int = 64
     residency_max_entries: int = 64_000
+    max_sessions: int = 4_096
     residency_tracking_enabled: bool = False
 
     def __post_init__(self) -> None:
@@ -71,6 +73,8 @@ class LifecycleConfig:
             raise ValueError("lifecycle_reclaim_batch_size must be greater than zero")
         if self.residency_max_entries <= 0:
             raise ValueError("residency_max_entries must be greater than zero")
+        if self.max_sessions <= 0:
+            raise ValueError("lifecycle_max_sessions must be greater than zero")
 
     @property
     def enabled(self) -> bool:
@@ -103,6 +107,7 @@ class LifecycleConfig:
             residency_max_entries=int(
                 extra_config.get("residency_max_entries", 64_000)
             ),
+            max_sessions=int(extra_config.get("lifecycle_max_sessions", 4_096)),
             residency_tracking_enabled=bool(
                 extra_config.get("residency_tracking_enabled", False)
             ),
@@ -112,6 +117,7 @@ class LifecycleConfig:
 @dataclass(slots=True)
 class ExpirationResult:
     expired_sessions: int = 0
+    pruned_sessions: int = 0
     unreferenced_keys: set[OffloadKey] = field(default_factory=set)
 
 
@@ -123,6 +129,15 @@ def get_session_id(req_context: ReqContext) -> str:
         if isinstance(value, str) and value:
             return value
     return req_context.req_id
+
+
+def has_stable_session_id(req_context: ReqContext) -> bool:
+    """Return whether the request carries a reusable conversation ID."""
+    params = req_context.kv_transfer_params or {}
+    return any(
+        isinstance(params.get(key), str) and bool(params[key])
+        for key in ("session_id", "conversation_id", "kv_session_id")
+    )
 
 
 class SessionLifecycleManager:
@@ -153,6 +168,7 @@ class SessionLifecycleManager:
         if state is None:
             state = SessionKVState(
                 session_id=session_id,
+                has_stable_id=has_stable_session_id(req_context),
                 status=LifecycleStatus.ACTIVE,
                 created_at=now,
                 last_access_at=now,
@@ -241,6 +257,21 @@ class SessionLifecycleManager:
             if self.enabled:
                 self.residency.on_session_idle(state.session_id)
 
+    def on_request_finalized(self, req_context: ReqContext) -> None:
+        """Release per-request metadata after all asynchronous stores finish."""
+        state = self._get_by_req(req_context)
+        self._req_to_session.pop(req_context.req_id, None)
+        if state is None:
+            return
+        state.retained_req_ids.discard(req_context.req_id)
+        if state.active_req_ids or state.retained_req_ids:
+            return
+        if state.has_stable_id:
+            return
+
+        self.residency.release_session(state.session_id)
+        self._delete_state(state)
+
     def expire_idle_sessions(
         self,
         *,
@@ -270,6 +301,31 @@ class SessionLifecycleManager:
             )
             self._delete_state(state)
             result.expired_sessions += 1
+        return result
+
+    def prune_idle_sessions(self) -> ExpirationResult:
+        """Bound retained Session metadata when TTL expiration is disabled."""
+        excess = len(self._sessions) - self.config.max_sessions
+        if excess <= 0:
+            return ExpirationResult()
+
+        candidates = sorted(
+            (
+                state
+                for state in self._sessions.values()
+                if state.is_idle
+                and not state.active_req_ids
+                and not state.retained_req_ids
+            ),
+            key=lambda state: state.last_access_at,
+        )
+        result = ExpirationResult()
+        for state in candidates[:excess]:
+            result.unreferenced_keys.update(
+                self.residency.release_session(state.session_id)
+            )
+            self._delete_state(state)
+            result.pruned_sessions += 1
         return result
 
     def get_idle_cpu_candidates(

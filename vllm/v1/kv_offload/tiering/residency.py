@@ -29,6 +29,7 @@ class TieringMetrics:
     MIGRATION_BYTES = "vllm:kv_tiering_migration_bytes"
     MIGRATION_LATENCY = "vllm:kv_tiering_migration_latency_seconds"
     EXPIRED_SESSIONS = "vllm:kv_tiering_expired_sessions"
+    PRUNED_SESSIONS = "vllm:kv_tiering_pruned_sessions"
     DELETED_BLOCKS = "vllm:kv_tiering_deleted_blocks"
     PRIMARY_RECLAIMED_BLOCKS = "vllm:kv_tiering_primary_reclaimed_blocks"
     PRUNED_TRACKING_ENTRIES = "vllm:kv_tiering_pruned_tracking_entries"
@@ -77,6 +78,11 @@ def build_tiering_metric_definitions() -> dict[str, OffloadingMetricMetadata]:
         ),
         TieringMetrics.EXPIRED_SESSIONS: OffloadingCounterMetadata(
             documentation="Number of idle KV lifecycle sessions that expired.",
+        ),
+        TieringMetrics.PRUNED_SESSIONS: OffloadingCounterMetadata(
+            documentation=(
+                "Number of oldest idle lifecycle sessions removed to bound metadata."
+            ),
         ),
         TieringMetrics.DELETED_BLOCKS: OffloadingCounterMetadata(
             documentation="Number of expired KV block copies deleted from a tier.",
