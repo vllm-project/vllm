@@ -8,9 +8,9 @@ use std::sync::{Arc, LazyLock};
 pub use vllm_parser::reasoning::{
     CohereCmdReasoningParser, DeepSeekR1ReasoningParser, DeepSeekV3ReasoningParser,
     DeepSeekV4ReasoningParser, Glm45ReasoningParser, KimiK2ReasoningParser, KimiReasoningParser,
-    MiniMaxM2ReasoningParser, MiniMaxM3ReasoningParser, NemotronV3ReasoningParser,
-    Qwen3ReasoningParser, ReasoningDelta, ReasoningError, ReasoningParser, SeedOssReasoningParser,
-    Step3ReasoningParser, Step3p5ReasoningParser,
+    MiniMaxM2ReasoningParser, MiniMaxM3ReasoningParser, MistralReasoningParser,
+    NemotronV3ReasoningParser, Qwen3ReasoningParser, ReasoningDelta, ReasoningError,
+    ReasoningParser, SeedOssReasoningParser, Step3ReasoningParser, Step3p5ReasoningParser,
 };
 use vllm_tokenizer::DynTokenizer;
 
@@ -28,6 +28,7 @@ pub mod names {
     pub const KIMI_K2: &str = "kimi_k2";
     pub const MINIMAX_M2: &str = "minimax_m2";
     pub const MINIMAX_M3: &str = "minimax_m3";
+    pub const MISTRAL: &str = "mistral";
     pub const NEMOTRON_V3: &str = "nemotron_v3";
     pub const QWEN3: &str = "qwen3";
     pub const SEED_OSS: &str = "seed_oss";
@@ -68,6 +69,7 @@ impl ReasoningParserFactory {
             .register_parser::<KimiK2ReasoningParser>(names::KIMI_K2)
             .register_parser::<MiniMaxM2ReasoningParser>(names::MINIMAX_M2)
             .register_parser::<MiniMaxM3ReasoningParser>(names::MINIMAX_M3)
+            .register_parser::<MistralReasoningParser>(names::MISTRAL)
             .register_parser::<NemotronV3ReasoningParser>(names::NEMOTRON_V3)
             .register_parser::<Qwen3ReasoningParser>(names::QWEN3)
             .register_parser::<SeedOssReasoningParser>(names::SEED_OSS)
@@ -88,6 +90,8 @@ impl ReasoningParserFactory {
             .register_pattern("glm-4.5", names::GLM45)
             .register_pattern("kimi-k2", names::KIMI_K2)
             .register_pattern("kimi", names::KIMI)
+            // Mistral `[THINK]` reasoning isn't auto-routed: needs explicit
+            // `--reasoning-parser mistral` (Magistral-Small-2506 emits `<think>`).
             // step3p5 patterns must precede `step3`: substring matching would
             // otherwise route step3p5 IDs to step3.
             .register_pattern("step-3p5", names::STEP3P5)

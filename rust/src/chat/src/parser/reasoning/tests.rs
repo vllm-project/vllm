@@ -16,6 +16,7 @@ fn factory_contains_and_lists_registered_parsers() {
     assert!(factory.contains(names::STEP3P5));
     assert!(factory.contains(names::MINIMAX_M3));
     assert!(factory.contains(names::GEMMA4));
+    assert!(factory.contains(names::MISTRAL));
     assert!(factory.list().contains(&names::QWEN3.to_string()));
     assert!(factory.list().contains(&names::DEEPSEEK_V4.to_string()));
     assert!(factory.list().contains(&names::SEED_OSS.to_string()));
@@ -82,6 +83,34 @@ fn factory_resolves_minimax_m3_before_generic_minimax() {
     assert_eq!(
         factory.resolve_name_for_model("mm-m3"),
         Some(names::MINIMAX_M3)
+    );
+}
+
+#[test]
+fn factory_does_not_auto_route_mistral_reasoning_models() {
+    let factory = ReasoningParserFactory::new();
+    // Mistral `[THINK]` parser is never auto-selected; needs explicit
+    // `--reasoning-parser mistral`. Magistral-Small-2506 even emits `<think>`.
+    assert_eq!(
+        factory.resolve_name_for_model("mistralai/Magistral-Small-2506"),
+        None
+    );
+    assert_eq!(
+        factory.resolve_name_for_model("mistralai/Magistral-Small-2509"),
+        None
+    );
+    // Plain Mistral / Mixtral / Ministral models are unaffected too.
+    assert_eq!(
+        factory.resolve_name_for_model("mistralai/Mistral-7B-Instruct-v0.3"),
+        None
+    );
+    assert_eq!(
+        factory.resolve_name_for_model("mistralai/Mixtral-8x7B-Instruct-v0.1"),
+        None
+    );
+    assert_eq!(
+        factory.resolve_name_for_model("mistralai/Ministral-3-8B-Reasoning-2512"),
+        None
     );
 }
 
