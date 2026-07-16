@@ -110,6 +110,14 @@ class HookManager:
                             )
                         )
                         self.handles.append(h)
+                        if hasattr(layer.self_attn, "rotary_emb"):
+                            h = layer.self_attn.rotary_emb.register_forward_hook(
+                                self._make_hook(
+                                    f"{layer_name}/self_attn/rotary_emb",
+                                    ["q_rotated", "k_rotated"],
+                                )
+                            )
+                            self.handles.append(h)
                     if hasattr(layer, "mlp"):
                         h = layer.mlp.register_forward_hook(
                             self._make_hook(f"{layer_name}/mlp", ["mlp_output"])
