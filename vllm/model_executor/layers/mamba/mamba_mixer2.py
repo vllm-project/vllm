@@ -505,7 +505,9 @@ class MambaMixer2(MambaBase, PluggableLayer):
             cache_config.use_replayssm if cache_config is not None else False
         )
         self.replayssm_buffer_len = (
-            cache_config.replayssm_buffer_len if cache_config is not None else 16
+            cache_config.replayssm_buffer_len
+            if cache_config is not None and cache_config.use_replayssm
+            else None
         )
         if self.use_replayssm and self.num_heads % self.tp_size != 0:
             raise ValueError(
@@ -1050,6 +1052,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
                 num_decode_tokens, -1, self.head_dim
             )
             if self.use_replayssm:
+                assert self.replayssm_buffer_len is not None
                 selective_state_update_replayssm_output_only(
                     ssm_state,
                     hidden_states_d,
@@ -1106,6 +1109,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
 
     def get_state_shape(self) -> tuple[tuple[int, ...], ...]:
         if self.use_replayssm:
+            assert self.replayssm_buffer_len is not None
             return MambaStateShapeCalculator.mamba2_replayssm_state_shape(
                 intermediate_size=self.intermediate_size,
                 tp_world_size=get_tensor_model_parallel_world_size(),
