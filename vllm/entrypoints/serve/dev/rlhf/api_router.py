@@ -91,6 +91,51 @@ async def resume_generation(raw_request: Request) -> JSONResponse:
         )
 
 
+@router.post("/abort_requests")
+async def abort_requests(raw_request: Request) -> JSONResponse:
+    """Abort in-flight requests without pausing the scheduler.
+
+    Empty/missing ``request_ids`` aborts all in-flight requests.
+    """
+
+    engine = engine_client(raw_request)
+
+    try:
+        body = await raw_request.json()
+    except json.JSONDecodeError as e:
+        raise HTTPException(status_code=400, detail="Invalid JSON format") from e  # noqa: B904
+
+    request_ids = body.get("request_ids")
+
+    try:
+        if request_ids:
+            # Body ids are external (user-supplied) request ids.
+            await engine.abort(request_ids)
+        else:
+            # The dev RL server runs AsyncLLM; abort everything it is tracking.
+            # request_states is keyed by internal ids; parent_requests holds
+            # parallel-sampling parents. Abort both as internal ids.
+            from vllm.v1.engine.async_llm import AsyncLLM
+
+            assert isinstance(engine, AsyncLLM)
+            op = engine.output_processor
+            request_ids = [
+                *op.request_states.keys(),
+                *op.parent_requests.keys(),
+            ]
+            await engine.abort(request_ids, internal=True)
+        return JSONResponse(
+            content={"status": "aborted", "aborted": len(request_ids)},
+            status_code=HTTPStatus.OK.value,
+        )
+    except Exception as err:  # pragma: no cover - defensive
+        logger.exception("Failed to abort requests")
+        return JSONResponse(
+            content={"error": f"Failed to abort requests: {err}"},
+            status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
+        )
+
+
 @router.get("/is_paused")
 async def is_paused(raw_request: Request) -> JSONResponse:
     """Return the current pause status."""
@@ -131,6 +176,12 @@ async def init_weight_transfer_engine(raw_request: Request):
 async def start_weight_update(raw_request: Request):
     await engine_client(raw_request).start_weight_update()
     return JSONResponse(content={"message": "Weight update started"})
+
+
+@router.post("/start_draft_weight_update")
+async def start_draft_weight_update(raw_request: Request):
+    await engine_client(raw_request).start_draft_weight_update()
+    return JSONResponse(content={"message": "Draft weight update started"})
 
 
 @router.post("/update_weights")
