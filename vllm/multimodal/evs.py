@@ -271,8 +271,11 @@ def recompute_mrope_positions(
             seem_mm_tokens_before_last_vision_start = torch.count_nonzero(
                 media_mask[:last_vision_start_token]
             )
+            # At a VISION_START | media boundary, no media token has been
+            # counted yet, but the cursor already belongs to that media.
             in_the_middle_of_media = (
                 seen_mm_tokens > seem_mm_tokens_before_last_vision_start
+                or (num_computed_tokens < N and media_mask[num_computed_tokens].item())
             )
             # For Qwen3 VL, we can be inside a media segment even before any
             # video tokens appear (timestamp tokens are text). If we've passed
