@@ -23,6 +23,7 @@ steps:
     - pytest -v -s -m 'not slow_test' v1/spec_decode
   mirror:
     amd:
+      dind: false
       device: mi300_1
       timeout_in_minutes: 75
       depends_on:
