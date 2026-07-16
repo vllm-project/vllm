@@ -968,6 +968,9 @@ class VllmRunner:
 
             wait_for_rocm_memory_to_settle(threshold_ratio=1.0 - gpu_memory_utilization)
 
+        if runner == "pooling":
+            kwargs["renderer_num_workers"] = kwargs.pop("renderer_num_workers", 4)
+
         with init_ctx:
             self.llm = LLM(
                 model=model_name,
