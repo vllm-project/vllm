@@ -317,11 +317,11 @@ roundtrip_tests! {
     deepseek_v32 => [tool_call_mix],
     glm45 => [reasoning_and_content, tool_call_mix],
     glm47 => [reasoning_and_content, tool_call_mix],
-    granite4 => [tool_call_only],
-    hermes4 => [tool_call_only],
-    seed_oss => [reasoning_and_content],
+    seed_oss => [reasoning_and_content, tool_call_mix],
     step3p5 => [reasoning_and_content],
     nemotron_v3 => [reasoning_and_content],
+    granite4 => [tool_call_only],
+    hermes4 => [tool_call_only],
     gemma4 => [tool_call_mix], // Gemma4 strips reasoning in history if there's no tool call
     kimi_k25 => [tool_call_mix], // Kimi K2.5 strips reasoning in history
     gpt_oss => [tool_call_mix], // Harmony strips reasoning in history if there's no tool call
