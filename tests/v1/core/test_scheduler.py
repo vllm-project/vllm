@@ -421,6 +421,26 @@ def _setup_remote_kv_resume(num_prompt_tokens: int, matched_tokens: int):
     return scheduler
 
 
+@pytest.mark.parametrize("kv_xfer_dir", ["finished_sending", "finished_recving"])
+def test_kv_xfer_finished_skips_untracked_request(kv_xfer_dir):
+    """Regression: a KV-transfer completion reported by the worker connector for
+    a request the scheduler no longer tracks (aborted mid-transfer, e.g. a client
+    disconnect, so its blocks were already freed in finish_requests()) must be
+    ignored, not trip the `assert req_id in self.requests` in
+    `_update_from_kv_xfer_finished`. That assert previously raised inside the
+    EngineCore busy loop and killed the whole engine (EngineDeadError)."""
+    scheduler = create_scheduler(
+        use_kv_connector=mock_kv(matched_tokens=0, is_async=True)
+    )
+    ghost_req_id = "aborted-req"
+    output = KVConnectorOutput(**{kv_xfer_dir: {ghost_req_id}})
+
+    # Must not raise. Pre-fix this raised AssertionError -> EngineDeadError.
+    scheduler._update_from_kv_xfer_finished(output)
+
+    assert ghost_req_id not in scheduler.requests
+
+
 def test_throttle_prefills_excludes_fully_transferred_remote_kv():
     """A remote-KV resume whose whole prompt was transferred (no local prefill
     left, e.g. the decode side of P/D disaggregation) must NOT be throttled by
