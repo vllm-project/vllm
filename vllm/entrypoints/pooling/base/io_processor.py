@@ -341,7 +341,7 @@ class PoolingIOProcessor:
 
     def _priority_to_seq(
         self,
-        priority: list[int] | None,
+        priority: Sequence[int] | None,
         num_requests: int,
     ) -> Sequence[int]:
         if priority is not None:

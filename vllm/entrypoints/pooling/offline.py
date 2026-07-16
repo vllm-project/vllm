@@ -27,6 +27,7 @@ from .scoring.typing import ScoreInput
 from .typing import (
     OfflineEncodeInputsContext,
     OfflineOutputsContext,
+    OfflinePluginInputsContext,
     OfflineScoringInputsContext,
     RequestFactory,
 )
@@ -101,7 +102,16 @@ class PoolingOfflineMixin(OfflineInferenceMixin):
         assert pooling_task is not None and pooling_task in self.pooling_io_processors
 
         io_processor = self.pooling_io_processors[pooling_task]
-        ctx = OfflineEncodeInputsContext(
+
+        inputs_context_cls: type(OfflinePluginInputsContext) | type(
+            OfflineEncodeInputsContext
+        )
+        if isinstance(prompts, dict) and "data" in prompts:
+            inputs_context_cls = OfflinePluginInputsContext
+        else:
+            inputs_context_cls = OfflineEncodeInputsContext
+
+        ctx = inputs_context_cls(
             pooling_task=pooling_task,
             prompts=prompts,
             tokenization_kwargs=tokenization_kwargs,
