@@ -109,13 +109,19 @@ def test_mp_client_uses_env_timeout(monkeypatch: pytest.MonkeyPatch):
     poll_timeouts: list[int] = []
 
     class ShadowSocket:
-        def poll(self, timeout: int) -> int:
-            # Capture the timeout value for each poll call
-            poll_timeouts.append(timeout)
-            return 1
-
         def recv_multipart(self):
             return (b"\x00\x00", b"")
+
+    shadow_socket = ShadowSocket()
+
+    class FakePoller:
+        def register(self, *_args, **_kwargs):
+            pass
+
+        def poll(self, timeout: int):
+            # Capture the timeout value for each poll call
+            poll_timeouts.append(timeout)
+            return [(shadow_socket, core_client_mod.zmq.POLLIN)]
 
     class DummySocket:
         def send_multipart(self, _msg, *, copy: bool = False, track: bool = False):
@@ -137,7 +143,8 @@ def test_mp_client_uses_env_timeout(monkeypatch: pytest.MonkeyPatch):
         def setsockopt(self, *_args, **_kwargs):
             pass
 
-    monkeypatch.setattr(core_client_mod.zmq.Socket, "shadow", lambda *_: ShadowSocket())
+    monkeypatch.setattr(core_client_mod.zmq.Socket, "shadow", lambda *_: shadow_socket)
+    monkeypatch.setattr(core_client_mod.zmq, "Poller", FakePoller)
     monkeypatch.setattr(
         core_client_mod, "make_zmq_socket", lambda *_, **__: DummySocket()
     )
@@ -170,6 +177,65 @@ def test_mp_client_uses_env_timeout(monkeypatch: pytest.MonkeyPatch):
         assert poll_timeouts == [timeout_value * 1000]
     finally:
         client.shutdown()
+
+
+def _make_ready_wait_client(core_client_mod, engine_manager=None):
+    """Build a bare MPClient with just the state _wait_for_engine_ready uses."""
+    client = object.__new__(core_client_mod.MPClient)
+    client.core_engines = [b"\x00\x00"]
+    client.resources = SimpleNamespace(engine_manager=engine_manager)
+    return client
+
+
+def test_ready_wait_timeout_reports_elapsed_and_jit_hint(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    core_client_mod = _reload_core_client_module()
+
+    class TimeoutPoller:
+        def register(self, *_args, **_kwargs):
+            pass
+
+        def poll(self, timeout: int):
+            return []
+
+    monkeypatch.setattr(core_client_mod.zmq, "Poller", TimeoutPoller)
+    client = _make_ready_wait_client(core_client_mod)
+
+    with pytest.raises(TimeoutError, match="VLLM_ENGINE_READY_TIMEOUT_S") as exc_info:
+        client._wait_for_engine_ready(SimpleNamespace())
+    # The message must name JIT compilation as a possible cause (#48031)
+    # and report the actual elapsed wait.
+    assert "JIT" in str(exc_info.value)
+    assert "after" in str(exc_info.value)
+
+
+def test_ready_wait_fails_fast_when_engine_proc_dies(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """An engine core proc dying during the ready wait must fail immediately
+    with the proc's name and exit code, not block until the ready timeout."""
+    core_client_mod = _reload_core_client_module()
+
+    dead_proc = SimpleNamespace(sentinel=42, name="EngineCore_DP0", exitcode=-9)
+    proc_manager = object.__new__(CoreEngineProcManager)
+    proc_manager.processes = [dead_proc]
+
+    class DeathPoller:
+        def register(self, *_args, **_kwargs):
+            pass
+
+        def poll(self, timeout: int):
+            # The proc sentinel (not the input socket) becomes ready.
+            return [(dead_proc.sentinel, core_client_mod.zmq.POLLIN)]
+
+    monkeypatch.setattr(core_client_mod.zmq, "Poller", DeathPoller)
+    client = _make_ready_wait_client(core_client_mod, engine_manager=proc_manager)
+
+    with pytest.raises(RuntimeError, match="exited before reporting ready") as exc_info:
+        client._wait_for_engine_ready(SimpleNamespace())
+    assert "EngineCore_DP0" in str(exc_info.value)
+    assert "-9" in str(exc_info.value)
 
 
 def _make_pooling_request(
