@@ -56,6 +56,11 @@ SP_MIN_PER_GPU_SIZE_MB: dict[int, float] = {
     95: 8,  # MI325X/MI355X (gfx950)
 }
 
+# ROCm device capabilities that support AITER-fused sequence parallelism
+# (MI3xx only: gfx942 -> 94, gfx950 -> 95). MI250 (gfx90a -> 90) is excluded so
+# it does not alias the CUDA H100 entry in the shared threshold dicts above.
+_ROCM_SP_SUPPORTED_CAPABILITIES = (94, 95)
+
 
 def get_sequence_parallelism_threshold(
     hidden_size: int,
@@ -106,12 +111,14 @@ def get_sequence_parallelism_threshold(
             return None
         device_capability = capability.to_int()
 
-        # Check if device has configured thresholds (gfx942/gfx950)
-        _hidden = SP_MIN_HIDDEN_SIZE.get(device_capability)
-        _gpu_mb = SP_MIN_PER_GPU_SIZE_MB.get(device_capability)
-        if _hidden is None or _gpu_mb is None:
+        # AITER-fused sequence parallelism is only supported on MI3xx
+        # (gfx942 -> 94, gfx950 -> 95). Gate explicitly so MI250 (gfx90a ->
+        # capability 90) is not enabled by aliasing the CUDA H100 entry, which
+        # also lives at capability 90 in the shared threshold dicts.
+        if device_capability not in _ROCM_SP_SUPPORTED_CAPABILITIES:
             return None
-        min_hidden_size, min_per_gpu_size_mb = _hidden, _gpu_mb
+        min_hidden_size = SP_MIN_HIDDEN_SIZE[device_capability]
+        min_per_gpu_size_mb = SP_MIN_PER_GPU_SIZE_MB[device_capability]
     else:
         return None
 
