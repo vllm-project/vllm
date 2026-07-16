@@ -1095,29 +1095,42 @@ def parse_flash_attn_features() -> dict[str, dict[str, Any]]:
             continue
 
         # Check flash_attn_supports_kv_cache_dtype for fp8 support per FA version.
-        # Looks for `fa_version == 3/4` or `get_flash_attn_version() == 3/4`.
+        # Accept both equality checks and membership checks such as `in (3, 4)`.
         if node.name == "flash_attn_supports_kv_cache_dtype":
             for n in ast.walk(node):
-                if (
+                if not (
                     isinstance(n, ast.Compare)
                     and len(n.ops) == 1
-                    and isinstance(n.ops[0], ast.Eq)
+                    and len(n.comparators) == 1
                 ):
-                    is_version_compare = (
-                        isinstance(n.left, ast.Name) and n.left.id == "fa_version"
-                    ) or (
-                        isinstance(n.left, ast.Call)
-                        and isinstance(n.left.func, ast.Name)
-                        and n.left.func.id == "get_flash_attn_version"
-                    )
-                    if is_version_compare and isinstance(
-                        n.comparators[0], ast.Constant
-                    ):
-                        val = n.comparators[0].value
-                        if val == 3:
-                            fa3_supports_fp8 = True
-                        elif val == 4:
-                            fa4_supports_fp8 = True
+                    continue
+                is_version_compare = (
+                    isinstance(n.left, ast.Name) and n.left.id == "fa_version"
+                ) or (
+                    isinstance(n.left, ast.Call)
+                    and isinstance(n.left.func, ast.Name)
+                    and n.left.func.id == "get_flash_attn_version"
+                )
+                if not is_version_compare:
+                    continue
+
+                versions: list[Any] = []
+                comparator = n.comparators[0]
+                if isinstance(n.ops[0], ast.Eq) and isinstance(
+                    comparator, ast.Constant
+                ):
+                    versions = [comparator.value]
+                elif isinstance(n.ops[0], ast.In) and isinstance(
+                    comparator, (ast.Tuple, ast.List, ast.Set)
+                ):
+                    versions = [
+                        elt.value
+                        for elt in comparator.elts
+                        if isinstance(elt, ast.Constant)
+                    ]
+
+                fa3_supports_fp8 |= 3 in versions
+                fa4_supports_fp8 |= 4 in versions
 
         # Check flash_attn_supports_sinks - looks for `fa_version == 3/4`
         # or `get_flash_attn_version() == 3/4` (also accepts `in (3, 4)`)
@@ -1288,10 +1301,12 @@ def _apply_fp8_support(kv_cache_dtypes: str, supports_fp8: bool) -> str:
     but actual support varies by FA version (e.g. FA2 has no fp8 support), so each
     variant's row is normalized to match its own capability.
     """
-    fp8_dtypes = ["fp8", "fp8_e4m3", "fp8_e5m2"]
-    base_dtypes = [d for d in kv_cache_dtypes.split(", ") if d not in fp8_dtypes]
+    fp8_dtypes = {"fp8", "fp8_e4m3", "fp8_e5m2"}
+    dtypes = kv_cache_dtypes.split(", ")
+    base_dtypes = [dtype for dtype in dtypes if dtype not in fp8_dtypes]
     if supports_fp8:
-        return ", ".join(base_dtypes + fp8_dtypes)
+        advertised_fp8_dtypes = [dtype for dtype in dtypes if dtype in fp8_dtypes]
+        return ", ".join(base_dtypes + advertised_fp8_dtypes)
     return ", ".join(base_dtypes)
 
 
