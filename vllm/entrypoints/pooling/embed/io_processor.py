@@ -28,11 +28,13 @@ from vllm.utils.mistral import is_mistral_tokenizer
 from ..base.io_processor import PoolingIOProcessor
 from ..scoring.io_processor import JinaRankingIOProcessorMixin
 from ..typing import (
+    ALLOfflineInputsContext,
     ChunkedEmbeddingMetadata,
-    OfflineInputsContext,
+    OfflineEncodeInputsContext,
     PoolingChatLikeRequest,
     PoolingCompletionLikeRequest,
     PoolingServeContext,
+    RequestFactory,
 )
 from .protocol import (
     CohereEmbedContent,
@@ -665,7 +667,10 @@ class JinaRankingTokenEmbedIOProcessor(
 
         ctx.engine_inputs = engine_inputs
 
-    def pre_process_offline(self, ctx: OfflineInputsContext) -> Sequence[EngineInput]:
+    def get_request_factory_offline(
+        self, ctx: ALLOfflineInputsContext
+    ) -> tuple[RequestFactory, int]:
+        assert isinstance(ctx, OfflineEncodeInputsContext)
         if not isinstance(ctx.prompts, Sequence) or len(ctx.prompts) < 2:
             raise ValueError("The JinaForRanking model requires at least 2 inputs.")
 
@@ -677,4 +682,4 @@ class JinaRankingTokenEmbedIOProcessor(
             query=text_prompts[-1], docs=text_prompts[:-1]
         )
 
-        return super().pre_process_offline(ctx)
+        return super().get_request_factory_offline(ctx)
