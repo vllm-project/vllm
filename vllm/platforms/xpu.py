@@ -93,6 +93,18 @@ def get_mem_info_wrapper(
 
     # Call the underlying C++ implementation
     free, total = torch.ops._C_cache_ops.getMemoryInfo(device)
+    if free == 0:
+        try:
+            torch_free, torch_total = torch.xpu.mem_get_info(device)
+        except RuntimeError:
+            pass
+        else:
+            if 0 < torch_free <= torch_total:
+                logger.warning_once(
+                    "The XPU kernel memory query returned no free memory; "
+                    "falling back to torch.xpu.mem_get_info()."
+                )
+                return torch_free, torch_total
 
     return free, total
 
