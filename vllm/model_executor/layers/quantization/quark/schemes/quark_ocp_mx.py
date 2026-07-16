@@ -144,8 +144,9 @@ if is_aiter_found_and_supported():
     )
 elif current_platform.is_rocm():
     logger.warning(
-        "AITER is not found or QuarkOCP_MX is not supported on the current "
-        "platform. QuarkOCP_MX quantization will not be available."
+        "AITER is not found or not supported on the current platform, "
+        "QuarkOCP_MX will fall back to emulation."
+        "Native MXFP4/MXFP6 acceleration will not be available."
     )
 
 
