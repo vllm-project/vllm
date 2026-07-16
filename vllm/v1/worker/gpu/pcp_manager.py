@@ -39,8 +39,8 @@ class PCPManager:
 
     The model runner keeps the global scheduled batch. This manager rewrites only
     the per-step InputBatch into rank-local DualChunkSwap rows and keeps the
-    global-batch view privately for to restore to the global batch shape for restoring
-    before sampling/postprocess.
+    global-batch view private to restore to the global batch shape before
+    sampling/postprocess.
     """
 
     def __init__(
