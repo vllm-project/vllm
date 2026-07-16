@@ -62,7 +62,6 @@ class _ExpandPageIndicesKernel:
 
 def _builder(
     *,
-    split_mtp_decode: bool,
     mtp_decode_qlen: int,
     has_full_cudagraphs: bool = False,
     kernel_block_size: int = 1,
@@ -79,7 +78,6 @@ def _builder(
                 has_full_cudagraphs=lambda: has_full_cudagraphs
             )
         ),
-        _split_mtp_decode=split_mtp_decode,
         _mtp_decode_qlen=mtp_decode_qlen,
         _uniform_padded_mtp_qo_len=(AiterMLAMetadataBuilder._uniform_padded_mtp_qo_len),
         _use_persistent_metadata=False,
@@ -113,14 +111,13 @@ def _config(*, method: str | None, num_speculative_tokens: int | None, tp_size: 
 
 @pytest.mark.parametrize("tp_size", [1, 2])
 @pytest.mark.parametrize(
-    ("num_speculative_tokens", "expected_query_len", "expected_split"),
+    ("num_speculative_tokens", "expected_query_len"),
     [
-        (3, 4, False),
-        (4, 5, True),
+        (3, 4),
     ],
 )
 def test_mtp_config_selects_uniform_decode_policy_without_gpu_allocation(
-    tp_size, num_speculative_tokens, expected_query_len, expected_split
+    tp_size, num_speculative_tokens, expected_query_len
 ):
     config = _config(
         method="deepseek_mtp",
@@ -128,9 +125,9 @@ def test_mtp_config_selects_uniform_decode_policy_without_gpu_allocation(
         tp_size=tp_size,
     )
 
+    # All qlen>1 verification batches use the same native uniform policy.
     assert AiterMLAMetadataBuilder._mtp_decode_query_len(config) == expected_query_len
     assert AiterMLAMetadataBuilder._allow_uniform_mtp_decode(config)
-    assert AiterMLAMetadataBuilder._split_uniform_mtp_decode(config) is expected_split
     assert (
         AiterMLAMetadataBuilder.get_cudagraph_support(config, None)
         == rocm_aiter_mla.AttentionCGSupport.UNIFORM_BATCH
@@ -142,7 +139,6 @@ def test_non_mtp_config_keeps_single_token_decode_policy():
 
     assert AiterMLAMetadataBuilder._mtp_decode_query_len(config) is None
     assert not AiterMLAMetadataBuilder._allow_uniform_mtp_decode(config)
-    assert not AiterMLAMetadataBuilder._split_uniform_mtp_decode(config)
     assert (
         AiterMLAMetadataBuilder.get_cudagraph_support(config, None)
         == rocm_aiter_mla.AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
@@ -243,7 +239,7 @@ def test_mtp_decode_qlen4_keeps_uniform_rows_with_metadata(monkeypatch):
     )
 
     metadata = AiterMLAMetadataBuilder._build_decode(
-        _builder(split_mtp_decode=False, mtp_decode_qlen=4),
+        _builder(mtp_decode_qlen=4),
         block_table_tensor=torch.arange(16, dtype=torch.int32).view(2, 8),
         seq_lens_device=torch.tensor([7, 5], dtype=torch.int32),
         max_seq_len=7,
@@ -294,7 +290,6 @@ def test_full_cudagraph_padded_uniform_mtp_synthesizes_decode_indptr(
     )
 
     builder = _builder(
-        split_mtp_decode=False,
         mtp_decode_qlen=mtp_qlen,
         has_full_cudagraphs=True,
         max_decode_rows=4,
@@ -362,7 +357,6 @@ def test_decode_expands_kernel_block_page_indices(monkeypatch):
 
     metadata = AiterMLAMetadataBuilder._build_decode(
         _builder(
-            split_mtp_decode=False,
             mtp_decode_qlen=1,
             kernel_block_size=kernel_block_size,
         ),
@@ -383,30 +377,3 @@ def test_decode_expands_kernel_block_page_indices(monkeypatch):
     )
     assert expand_kernel.grid == (seq_lens.numel(),)
     assert expand_kernel.kernel_block_size == kernel_block_size
-
-
-def test_mtp_decode_qlen5_splits_to_causal_single_token_rows(monkeypatch):
-    expand_mtp_kernel = _NoOpTritonKernel()
-    monkeypatch.setattr(
-        rocm_aiter_mla, "_expand_mtp_decode_page_indices_kernel", expand_mtp_kernel
-    )
-
-    metadata = AiterMLAMetadataBuilder._build_decode(
-        _builder(split_mtp_decode=True, mtp_decode_qlen=5),
-        block_table_tensor=torch.arange(16, dtype=torch.int32).view(2, 8),
-        seq_lens_device=torch.tensor([7, 5], dtype=torch.int32),
-        max_seq_len=7,
-        query_start_loc_cpu=torch.tensor([0, 5, 10], dtype=torch.int32),
-        query_start_loc_device=torch.tensor([0, 5, 10], dtype=torch.int32),
-        num_decode_tokens=10,
-        dcp_tot_seq_lens_device=None,
-    )
-
-    assert metadata.max_qo_len == 1
-    assert torch.equal(
-        metadata.seq_lens,
-        torch.tensor([3, 4, 5, 6, 7, 1, 2, 3, 4, 5], dtype=torch.int32),
-    )
-    assert torch.equal(metadata.qo_indptr, torch.arange(11, dtype=torch.int32))
-    assert not metadata.has_persistent_metadata
-    assert expand_mtp_kernel.grid == (10,)

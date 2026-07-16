@@ -133,7 +133,6 @@ class AiterMLAMetadata(MLACommonMetadata[AiterMLADecodeMetadata]):
 
 # Tile size used by the mla_prefill_ps_asm_fwd assembly kernel.
 _FP8_PREFILL_TILE_Q = 256
-_MAX_NATIVE_MTP_DECODE_QUERY_LEN = 4
 _DEFAULT_MLA_NUM_KV_SPLITS = 32
 
 
@@ -162,20 +161,10 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         return int(num_spec_tokens) + 1
 
     @classmethod
-    def _split_uniform_mtp_decode(cls, vllm_config: VllmConfig) -> bool:
-        mtp_query_len = cls._mtp_decode_query_len(vllm_config)
-        return (
-            mtp_query_len is not None
-            and mtp_query_len > 1
-            and mtp_query_len > _MAX_NATIVE_MTP_DECODE_QUERY_LEN
-        )
-
-    @classmethod
     def _allow_uniform_mtp_decode(cls, vllm_config: VllmConfig) -> bool:
-        # MTP (num_speculative_tokens>=1) always yields qlen>=2, so native
-        # dense AITER MLA consumes uniform MTP qlen>1 batches up to
-        # _MAX_NATIVE_MTP_DECODE_QUERY_LEN; larger qlen uses the split fallback,
-        # which still presents qlen=1 rows to AITER.
+        # MTP (num_speculative_tokens>=1) always yields qlen>=2. Native dense
+        # AITER MLA consumes those uniform qlen>1 verification batches directly
+        # when vLLM supplies causal persistent metadata, regardless of qlen.
         return cls._mtp_decode_query_len(vllm_config) is not None
 
     @staticmethod
@@ -237,7 +226,7 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
     ):
         if self._allow_uniform_mtp_decode(vllm_config):
             # Config-dependent upgrade: AITER MLA handles uniform MTP
-            # verification decode (qlen<=4) natively. The ClassVar is
+            # verification decode (qlen>1) natively. The ClassVar is
             # intentionally shadowed per-instance before super().__init__
             # consumes it to derive reorder_batch_threshold.
             self.query_len_support = QueryLenSupport.UNIFORM  # type: ignore[misc]
@@ -248,7 +237,6 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
 
         self.compilation_config = vllm_config.compilation_config
         self.decode_attn_out_dtype = vllm_config.model_config.dtype
-        self._split_mtp_decode = self._split_uniform_mtp_decode(vllm_config)
         self._mtp_decode_qlen = self._mtp_decode_query_len(vllm_config) or 1
 
         # Store the kernel block size from the spec. When kernel_block_size=1
@@ -262,11 +250,7 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         # kernel_block_size.
         max_num_pages_per_req = vllm_config.model_config.max_model_len
         max_num_reqs = vllm_config.scheduler_config.max_num_seqs
-        max_decode_rows = max_num_reqs
         max_num_pages = max_num_reqs * max_num_pages_per_req
-        if self._split_mtp_decode:
-            max_decode_rows *= self._mtp_decode_qlen
-            max_num_pages *= self._mtp_decode_qlen
 
         # Preparing persistent buffers
         # TODO: we can disambiguate between decode and mixed-prefill decode here
@@ -277,7 +261,7 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         # page_size=1 after .view(-1,1,1,H) flattening), so we create it
         # once and reuse slices in both eager and cudagraph modes.
         self.paged_kv_last_page_len = torch.ones(
-            max_decode_rows, dtype=torch.int32, device=device
+            max_num_reqs, dtype=torch.int32, device=device
         )
 
         # Persistent buffer for paged_kv_indices to avoid blocking boolean mask
@@ -310,10 +294,7 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         # wrong split/reduce metadata for the gfx950 fp8 nhead=32 fold path.
         self._mla_metadata_q_dtype = q_dtype
         self._mla_metadata_kv_dtype = kv_dtype
-        max_metadata_batch_size = (
-            max_decode_rows if self._split_mtp_decode else max_num_reqs
-        )
-        max_metadata_qo_len = 1 if self._split_mtp_decode else self._mtp_decode_qlen
+        max_metadata_qo_len = self._mtp_decode_qlen
         (
             (work_meta_data_size, work_meta_data_type),
             (work_indptr_size, work_indptr_type),
@@ -322,7 +303,7 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             (reduce_final_map_size, reduce_final_map_type),
             (reduce_partial_map_size, reduce_partial_map_type),
         ) = get_mla_metadata_info_v1(
-            max_metadata_batch_size,
+            max_num_reqs,
             max_metadata_qo_len,
             self._num_attention_heads,
             q_dtype,
@@ -366,11 +347,11 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
 
         if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
             self.paged_kv_indptr = torch.zeros(
-                max_decode_rows + 1, dtype=torch.int32, device=device
+                max_num_reqs + 1, dtype=torch.int32, device=device
             )
 
             self.qo_indptr = torch.zeros(
-                max_decode_rows + 1, dtype=torch.int32, device=device
+                max_num_reqs + 1, dtype=torch.int32, device=device
             )
 
     def _max_split_per_batch(self, batch_size: int) -> int:
@@ -587,49 +568,18 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             max_qo_len = padded_mtp_qo_len
         pad_uniform_mtp = padded_mtp_qo_len > 0
 
-        split_mtp_decode = self._split_mtp_decode and max_qo_len > 1
-        if split_mtp_decode:
+        seq_lens_for_kernel = seq_lens_device
+        num_kernel_reqs = num_reqs
+        if pad_uniform_mtp:
             qo_lens_device = (
                 query_start_loc_device[1 : num_reqs + 1]
                 - query_start_loc_device[:num_reqs]
             ).to(torch.int32)
-            seq_lens_device_i32 = seq_lens_device.to(torch.int32)
-            if pad_uniform_mtp:
-                padded_rows = qo_lens_device == 0
-                qo_lens_device = torch.where(
-                    padded_rows,
-                    qo_lens_device.new_full((), max_qo_len),
-                    qo_lens_device,
-                )
-                seq_lens_device_i32 = torch.where(
-                    padded_rows,
-                    seq_lens_device_i32.new_full((), max_qo_len),
-                    seq_lens_device_i32,
-                )
-            token_offsets = torch.arange(max_qo_len, dtype=torch.int32, device=device)
-            flat_seq_lens = seq_lens_device_i32.unsqueeze(1) - (
-                qo_lens_device.unsqueeze(1) - 1 - token_offsets.unsqueeze(0)
+            seq_lens_for_kernel = torch.where(
+                qo_lens_device > 0,
+                seq_lens_for_kernel,
+                seq_lens_for_kernel.new_full((), max_qo_len),
             )
-            valid_tokens = token_offsets.unsqueeze(0) < qo_lens_device.unsqueeze(1)
-            flat_seq_lens = torch.where(
-                valid_tokens, flat_seq_lens, flat_seq_lens.new_zeros(())
-            ).flatten()
-            flat_seq_lens = flat_seq_lens[:num_decode_tokens]
-            seq_lens_for_kernel = flat_seq_lens
-            num_kernel_reqs = num_decode_tokens
-        else:
-            seq_lens_for_kernel = seq_lens_device
-            num_kernel_reqs = num_reqs
-            if pad_uniform_mtp:
-                qo_lens_device = (
-                    query_start_loc_device[1 : num_reqs + 1]
-                    - query_start_loc_device[:num_reqs]
-                ).to(torch.int32)
-                seq_lens_for_kernel = torch.where(
-                    qo_lens_device > 0,
-                    seq_lens_for_kernel,
-                    seq_lens_for_kernel.new_full((), max_qo_len),
-                )
 
         # The aiter kernel always operates with page_size=1 (the wrapper
         # flattens kv_buffer). last_page_len is always 1.
@@ -646,37 +596,20 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
             self.paged_kv_indices.fill_(-1)
 
-        if split_mtp_decode:
-            # Present MTP qlen=2/4 as independent qlen=1 decode rows to AITER.
-            # Each row sees only the causal prefix up to that token, so token i
-            # never attends to later verification tokens in the same request.
-            _expand_mtp_decode_page_indices_kernel[(num_kernel_reqs,)](
-                self.paged_kv_indices,
-                block_table_tensor,
-                block_table_tensor.stride(0),
-                paged_kv_indptr,
-                seq_lens_device_i32,
-                qo_lens_device,
-                MAX_QO_LEN=max_qo_len,
-                KERNEL_BLOCK_SIZE=self.kernel_block_size,
-                BLOCK_SIZE=1024,
-            )
-            max_qo_len = 1
-        else:
-            # Expand block_table entries into per-token flat indices.
-            # When kernel_block_size=1, this degrades to a direct copy (identical
-            # to the original _copy_page_indices_kernel).
-            # When kernel_block_size=K>1, block_table entry b covering K tokens
-            # gets expanded to flat indices b*K, b*K+1, ..., b*K+(K-1).
-            _expand_page_indices_kernel[(num_reqs,)](
-                self.paged_kv_indices,
-                block_table_tensor,
-                block_table_tensor.stride(0),
-                paged_kv_indptr,
-                seq_lens_for_kernel,
-                KERNEL_BLOCK_SIZE=self.kernel_block_size,
-                BLOCK_SIZE=1024,
-            )
+        # Expand block_table entries into per-token flat indices.
+        # When kernel_block_size=1, this degrades to a direct copy (identical
+        # to the original _copy_page_indices_kernel).
+        # When kernel_block_size=K>1, block_table entry b covering K tokens
+        # gets expanded to flat indices b*K, b*K+1, ..., b*K+(K-1).
+        _expand_page_indices_kernel[(num_reqs,)](
+            self.paged_kv_indices,
+            block_table_tensor,
+            block_table_tensor.stride(0),
+            paged_kv_indptr,
+            seq_lens_for_kernel,
+            KERNEL_BLOCK_SIZE=self.kernel_block_size,
+            BLOCK_SIZE=1024,
+        )
         paged_kv_indices = self.paged_kv_indices
 
         if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
@@ -689,25 +622,16 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             # paged_kv_last_page_len already uses the pre-initialized buffer slice
             # (set above), so no copy needed - buffer is always 1s.
 
-            if split_mtp_decode:
+            if pad_uniform_mtp:
                 qo_indptr_src = torch.arange(
                     0,
-                    num_kernel_reqs + 1,
-                    step=1,
+                    (num_kernel_reqs + 1) * max_qo_len,
+                    step=max_qo_len,
                     dtype=torch.int32,
                     device=device,
                 )
             else:
-                if pad_uniform_mtp:
-                    qo_indptr_src = torch.arange(
-                        0,
-                        (num_kernel_reqs + 1) * max_qo_len,
-                        step=max_qo_len,
-                        dtype=torch.int32,
-                        device=device,
-                    )
-                else:
-                    qo_indptr_src = query_start_loc_device[: 1 + num_kernel_reqs]
+                qo_indptr_src = query_start_loc_device[: 1 + num_kernel_reqs]
             self.qo_indptr[: 1 + num_kernel_reqs].copy_(
                 qo_indptr_src, non_blocking=True
             )
@@ -738,11 +662,7 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         # For native MTP verification (qlen>1), pass persistent metadata so
         # AITER gets explicit causal boundaries for each request.
         has_persistent_metadata = False
-        use_persistent_metadata = (
-            max_qo_len > 1
-            and max_qo_len <= self._mtp_decode_qlen
-            and not split_mtp_decode
-        )
+        use_persistent_metadata = max_qo_len > 1 and max_qo_len <= self._mtp_decode_qlen
         if use_persistent_metadata:
             from aiter import get_mla_metadata_v1
 
@@ -854,48 +774,6 @@ def _expand_page_indices_kernel(
         block_ids = tl.load(row_ptr + block_idx, mask=mask)
 
         # Compute flat index in the flattened kv_buffer
-        flat_indices = block_ids * KERNEL_BLOCK_SIZE + offset_in_block
-
-        tl.store(
-            page_indices + start_idx + token_offsets,
-            flat_indices,
-            mask=mask,
-        )
-
-
-@triton.jit
-def _expand_mtp_decode_page_indices_kernel(
-    page_indices,
-    block_table,
-    block_table_stride,
-    cu_num_tokens,
-    seq_lens,
-    qo_lens,
-    MAX_QO_LEN: tl.constexpr,
-    KERNEL_BLOCK_SIZE: tl.constexpr,
-    BLOCK_SIZE: tl.constexpr,
-):
-    """Expand each MTP verification token as one qlen=1 decode row."""
-    flat_row = tl.program_id(0)
-    req_idx = flat_row // MAX_QO_LEN
-    token_idx = flat_row - req_idx * MAX_QO_LEN
-
-    qo_len = tl.load(qo_lens + req_idx)
-    seq_len_full = tl.load(seq_lens + req_idx)
-    seq_len = seq_len_full - (qo_len - 1 - token_idx)
-    seq_len = tl.where(token_idx < qo_len, seq_len, 0)
-
-    row_ptr = block_table + req_idx * block_table_stride
-    start_idx = tl.load(cu_num_tokens + flat_row)
-
-    offset = tl.arange(0, BLOCK_SIZE)
-    for i in tl.range(0, seq_len, BLOCK_SIZE):
-        token_offsets = i + offset
-        mask = token_offsets < seq_len
-
-        block_idx = token_offsets // KERNEL_BLOCK_SIZE
-        offset_in_block = token_offsets % KERNEL_BLOCK_SIZE
-        block_ids = tl.load(row_ptr + block_idx, mask=mask)
         flat_indices = block_ids * KERNEL_BLOCK_SIZE + offset_in_block
 
         tl.store(
