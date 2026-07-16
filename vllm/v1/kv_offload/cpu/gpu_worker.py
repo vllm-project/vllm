@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import functools
-import threading
 import time
 from collections import deque
 from dataclasses import dataclass
@@ -73,7 +72,7 @@ class Transfer:
 
 def compute_sub_block_ptrs(
     block_ids: np.ndarray,
-    block_size_factor: int,
+    blocks_per_chunk: int,
     output: np.ndarray,
     tensor: torch.Tensor,
     skip_count: int = 0,
@@ -81,44 +80,74 @@ def compute_sub_block_ptrs(
     """
     Compute byte pointers for sub-blocks of the given block IDs.
 
-    Each block in block_ids contains block_size_factor sub-blocks.
+    Each block in block_ids contains blocks_per_chunk sub-blocks.
     The pointer for sub-block j of block b is:
-        base_ptr + b * row_stride + j * sub_block_size
+        base_ptr + b * row_stride + j * block_page_size
 
-    where sub_block_size = tensor.shape[1] // block_size_factor (gpu page size).
+    where block_page_size = tensor.shape[1] // blocks_per_chunk (gpu page size).
 
-    This handles tensors where row_stride != block_size_factor * sub_block_size
+    This handles tensors where row_stride != blocks_per_chunk * block_page_size
     (e.g. non-contiguous CPU tensors).
 
     Args:
         block_ids: array of block IDs at the tensor's native granularity.
-        block_size_factor: number of sub-blocks per block.
+        blocks_per_chunk: number of sub-blocks per block.
         output: pre-allocated pointer array to write pointers into.
         tensor: the source or destination tensor.
         skip_count: sub-blocks to skip in the first block.
     """
-    assert skip_count < block_size_factor
+    assert skip_count < blocks_per_chunk
 
     num_sub_blocks = len(output)
     base_ptr = tensor.data_ptr()
     row_stride = tensor.stride(0)
 
-    if block_size_factor == 1:
+    if blocks_per_chunk == 1:
         # Fast path: 1:1 mapping, no sub-block expansion needed.
         output[:] = base_ptr + block_ids.astype(np.uint64)[:num_sub_blocks] * row_stride
         return
 
-    # Vectorized expansion for block_size_factor > 1.
-    assert tensor.shape[1] % block_size_factor == 0
-    sub_block_size = tensor.shape[1] // block_size_factor
-    sub_offsets = np.arange(block_size_factor, dtype=np.uint64) * sub_block_size
-    # (num_blocks, 1) + (1, block_size_factor) -> (num_blocks, block_size_factor)
+    # Vectorized expansion for blocks_per_chunk > 1.
+    assert tensor.shape[1] % blocks_per_chunk == 0
+    block_page_size = tensor.shape[1] // blocks_per_chunk
+    sub_offsets = np.arange(blocks_per_chunk, dtype=np.uint64) * block_page_size
+    # (num_blocks, 1) + (1, blocks_per_chunk) -> (num_blocks, blocks_per_chunk)
     all_ptrs = (
         base_ptr + block_ids.astype(np.uint64)[:, np.newaxis] * row_stride
     ) + sub_offsets[np.newaxis, :]
     # Flatten and apply skip_count / truncation
     flat = all_ptrs.ravel()
     output[:] = flat[skip_count : skip_count + num_sub_blocks]
+
+
+def pin_mmap_region(region: SharedOffloadRegion) -> None:
+    """Register the entire mmap as CUDA pinned memory via cudaHostRegister."""
+    if not current_platform.is_cuda_alike():
+        logger.info(
+            "Skipping mmap host registration on %s; cudaHostRegister is only "
+            "available on CUDA/ROCm.",
+            current_platform.device_name,
+        )
+        return
+
+    rank = region.rank
+
+    base_ptr = region._base.data_ptr()
+    result = torch.cuda.cudart().cudaHostRegister(base_ptr, region.total_size_bytes, 0)
+    if result.value != 0:
+        logger.warning(
+            "cudaHostRegister failed for rank=%d (code=%d) — "
+            "transfers will still work but may be slower (unpinned DMA)",
+            rank,
+            result,
+        )
+    else:
+        logger.debug(
+            "cudaHostRegister rank=%d %.2f GB",
+            rank,
+            region.total_size_bytes / 1e9,
+        )
+        region.is_pinned = True
 
 
 def _new_descriptor_buffers(
@@ -146,12 +175,10 @@ class SingleDirectionOffloadingHandler:
         self,
         gpu_tensors: list[torch.Tensor],
         cpu_tensors: list[torch.Tensor],
-        block_size_factor: int,
+        blocks_per_chunk: int,
         kv_cache_groups_data_refs: list[list[CanonicalKVCacheRef]],
         gpu_to_cpu: bool,
         mmap_region: SharedOffloadRegion | None = None,
-        pin_thread: threading.Thread | None = None,
-        manually_pinned_tensors: list[torch.Tensor] | None = None,
     ):
         """
         Initialize a SingleDirectionOffloadingHandler.
@@ -178,7 +205,7 @@ class SingleDirectionOffloadingHandler:
             assert cpu_tensor.device.type == "cpu"
             _, gpu_page_size = gpu_tensor.shape
             _, cpu_page_size = cpu_tensor.shape
-            assert cpu_page_size == gpu_page_size * block_size_factor
+            assert cpu_page_size == gpu_page_size * blocks_per_chunk
 
         self.src_tensors: list[torch.Tensor] = (
             gpu_tensors if gpu_to_cpu else cpu_tensors
@@ -193,14 +220,12 @@ class SingleDirectionOffloadingHandler:
         )
 
         # GPU blocks may be smaller
-        # cpu_page_size = gpu_page_size * block_size_factor.
-        self.src_block_size_factor = 1 if self.gpu_to_cpu else block_size_factor
-        self.dst_block_size_factor = block_size_factor if self.gpu_to_cpu else 1
+        # cpu_page_size = gpu_page_size * blocks_per_chunk.
+        self.src_blocks_per_chunk = 1 if self.gpu_to_cpu else blocks_per_chunk
+        self.dst_blocks_per_chunk = blocks_per_chunk if self.gpu_to_cpu else 1
 
         # mmap_region to clean up on shutdown (gpu_to_cpu handler owns it)
         self._mmap_region = mmap_region
-        self._pin_thread = pin_thread
-        self._manually_pinned_tensors = manually_pinned_tensors
         # job_id -> event
         self._transfer_events: dict[int, torch.Event] = {}
         # queue of transfers (job_id, stream, event)
@@ -288,20 +313,16 @@ class SingleDirectionOffloadingHandler:
             if group_size == 0:
                 continue
 
-            src_logical_blocks_to_skip = block_idx % self.src_block_size_factor
-            dst_logical_blocks_to_skip = block_idx % self.dst_block_size_factor
+            src_logical_blocks_to_skip = block_idx % self.src_blocks_per_chunk
+            dst_logical_blocks_to_skip = block_idx % self.dst_blocks_per_chunk
             src_logical_blocks_count = group_size + src_logical_blocks_to_skip
             dst_logical_blocks_count = group_size + dst_logical_blocks_to_skip
 
-            dst_blocks_count = cdiv(
-                dst_logical_blocks_count, self.dst_block_size_factor
-            )
+            dst_blocks_count = cdiv(dst_logical_blocks_count, self.dst_blocks_per_chunk)
             dst_end_offset = dst_offset + dst_blocks_count
             assert dst_end_offset <= num_dst_blocks
 
-            src_blocks_count = cdiv(
-                src_logical_blocks_count, self.src_block_size_factor
-            )
+            src_blocks_count = cdiv(src_logical_blocks_count, self.src_blocks_per_chunk)
             src_end_offset = src_offset + src_blocks_count
             assert src_end_offset <= num_src_blocks
 
@@ -314,14 +335,14 @@ class SingleDirectionOffloadingHandler:
 
                 compute_sub_block_ptrs(
                     group_src,
-                    self.src_block_size_factor,
+                    self.src_blocks_per_chunk,
                     all_src[op_idx:end_idx],
                     self.src_tensors[t_idx],
                     skip_count=src_logical_blocks_to_skip,
                 )
                 compute_sub_block_ptrs(
                     group_dst,
-                    self.dst_block_size_factor,
+                    self.dst_blocks_per_chunk,
                     all_dst[op_idx:end_idx],
                     self.dst_tensors[t_idx],
                     skip_count=dst_logical_blocks_to_skip,
@@ -433,23 +454,8 @@ class SingleDirectionOffloadingHandler:
         self._stream_pool.clear()
         self._event_pool.clear()
         self._buffer_pool.clear()
-
-        if self._pin_thread is not None:
-            self._pin_thread.join()
-            self._pin_thread = None
-
-        if self._manually_pinned_tensors is not None:
-            for tensor in self._manually_pinned_tensors:
-                result = torch.cuda.cudart().cudaHostUnregister(tensor.data_ptr())
-                if result.value != 0:
-                    logger.warning(
-                        "cudaHostUnregister failed for CPU tensor (code=%d)",
-                        result.value,
-                    )
-
         self.src_tensors.clear()
         self.dst_tensors.clear()
-
         if self._mmap_region is not None:
             self._mmap_region.cleanup()
             self._mmap_region = None
@@ -466,25 +472,23 @@ class CPUOffloadingWorker(OffloadingWorker):
     def __init__(
         self,
         kv_caches: CanonicalKVCaches,
-        block_size_factor: int,
+        blocks_per_chunk: int,
         num_cpu_blocks: int,
         mmap_region: SharedOffloadRegion | None = None,
     ):
         pin_memory = PIN_MEMORY
-        self.pin_thread: threading.Thread | None = None
-        self._manually_pinned_tensors: list[torch.Tensor] = []
-
         logger.info("Allocating %d CPU tensors...", len(kv_caches.tensors))
-        self._mmap_region = mmap_region
+        if mmap_region is not None and pin_memory:
+            pin_mmap_region(mmap_region)
 
         gpu_tensors: list[torch.Tensor] = []
-        self.cpu_tensors: list[torch.Tensor] = []
+        cpu_tensors: list[torch.Tensor] = []
         for kv_cache_tensor in kv_caches.tensors:
             gpu_page_size_bytes = kv_cache_tensor.page_size_bytes
             gpu_tensor = kv_cache_tensor.tensor.view(torch.int8).view(
                 (-1, gpu_page_size_bytes)
             )
-            cpu_page_size_bytes = gpu_page_size_bytes * block_size_factor
+            cpu_page_size_bytes = gpu_page_size_bytes * blocks_per_chunk
 
             if mmap_region is not None:
                 cpu_tensor = mmap_region.create_next_view(cpu_page_size_bytes)
@@ -494,13 +498,10 @@ class CPUOffloadingWorker(OffloadingWorker):
                     (num_cpu_blocks, cpu_page_size_bytes),
                     dtype=torch.int8,
                     device="cpu",
-                    # CUDA/ROCm memory is registered asynchronously below.
-                    # Pinning here would block worker initialization; other
-                    # hardware need PyTorch allocation-time pinning.
-                    pin_memory=PIN_MEMORY and not current_platform.is_cuda_alike(),
+                    pin_memory=pin_memory,
                 )
                 logger.debug(
-                    "torch.zeros tensor %d×%d (%.2f GB): %.3f s",
+                    "torch.zeros pinned tensor %d×%d (%.2f GB): %.3f s",
                     num_cpu_blocks,
                     cpu_page_size_bytes,
                     num_cpu_blocks * cpu_page_size_bytes / 1e9,
@@ -508,79 +509,23 @@ class CPUOffloadingWorker(OffloadingWorker):
                 )
 
             gpu_tensors.append(gpu_tensor)
-            self.cpu_tensors.append(cpu_tensor)
-
-        if pin_memory:
-            if not current_platform.is_cuda_alike():
-                logger.info(
-                    "Skipping host registration on %s; cudaHostRegister is only "
-                    "available on CUDA/ROCm.",
-                    current_platform.device_name,
-                )
-            else:
-                self.pin_thread = threading.Thread(
-                    target=self._pin_cpu_tensors,
-                    name="CPUTensorPinThread",
-                )
-                self.pin_thread.start()
-                logger.info("Starting to pin memory in background...")
+            cpu_tensors.append(cpu_tensor)
 
         self._store_handler = SingleDirectionOffloadingHandler(
             gpu_tensors=gpu_tensors,
-            cpu_tensors=self.cpu_tensors,
-            block_size_factor=block_size_factor,
+            cpu_tensors=cpu_tensors,
+            blocks_per_chunk=blocks_per_chunk,
             kv_cache_groups_data_refs=kv_caches.group_data_refs,
             gpu_to_cpu=True,
             mmap_region=mmap_region,
-            pin_thread=self.pin_thread,
-            manually_pinned_tensors=self._manually_pinned_tensors,
         )
 
         self._load_handler = SingleDirectionOffloadingHandler(
             gpu_tensors=gpu_tensors,
-            cpu_tensors=self.cpu_tensors,
-            block_size_factor=block_size_factor,
+            cpu_tensors=cpu_tensors,
+            blocks_per_chunk=blocks_per_chunk,
             kv_cache_groups_data_refs=kv_caches.group_data_refs,
             gpu_to_cpu=False,
-        )
-
-    def _pin_cpu_tensors(self) -> None:
-        """Register the CPU offload memory as CUDA pinned memory."""
-
-        t0 = time.monotonic()
-        tensors_to_pin = (
-            [self._mmap_region._base]
-            if self._mmap_region is not None
-            else self.cpu_tensors
-        )
-        num_pinned = 0
-        for tensor in tensors_to_pin:
-            total_size_bytes = tensor.numel() * tensor.element_size()
-            result = torch.cuda.cudart().cudaHostRegister(
-                tensor.data_ptr(), total_size_bytes, 0
-            )
-            if result.value != 0:
-                logger.warning(
-                    "cudaHostRegister failed for host tensor (code=%d) "
-                    "- transfers will still work but may be slower (unpinned DMA)",
-                    result.value,
-                )
-                continue
-            if self._mmap_region is not None:
-                self._mmap_region.is_pinned = True
-            else:
-                self._manually_pinned_tensors.append(tensor)
-            num_pinned += 1
-
-            logger.debug(
-                "cudaHostRegister pin %.2f GB",
-                total_size_bytes / 1e9,
-            )
-
-        logger.info(
-            "Completed CPU memory pinning: %d tensors pinned in %.3f s",
-            num_pinned,
-            time.monotonic() - t0,
         )
 
     def submit_store(

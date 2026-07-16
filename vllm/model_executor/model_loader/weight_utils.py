@@ -595,6 +595,14 @@ def filter_duplicate_safetensors_files(
     weight_files_in_index = set()
     for weight_name in weight_map:
         weight_files_in_index.add(os.path.join(hf_folder, weight_map[weight_name]))
+    # Check if files referenced in model.safetensors.index.json actually exist.
+    # Raise error if any file is missing.
+    hf_weights_files_set = set(hf_weights_files)
+    missing_files = weight_files_in_index - hf_weights_files_set
+    if missing_files:
+        raise FileNotFoundError(
+            f"Weight files referenced in index but missing: {missing_files}"
+        )
     # Filter out any fields that are not found in the index file.
     hf_weights_files = [f for f in hf_weights_files if f in weight_files_in_index]
     return hf_weights_files
@@ -686,10 +694,22 @@ def _get_checkpoints_size_bytes(files: list[str]) -> int:
 
 
 def _get_available_ram_bytes() -> int:
-    """Return the available RAM in bytes."""
+    """Return available RAM, honoring cgroup limits on ROCm."""
     import psutil
 
-    return psutil.virtual_memory().available
+    host_available = psutil.virtual_memory().available
+    if not current_platform.is_rocm():
+        return host_available
+
+    from vllm.utils.cpu_resource_utils import get_cgroup_memory_limit
+
+    cgroup_limit, cgroup_usage = get_cgroup_memory_limit()
+    if cgroup_limit is None:
+        return host_available
+    cgroup_available = (
+        cgroup_limit if cgroup_usage is None else max(0, cgroup_limit - cgroup_usage)
+    )
+    return min(host_available, cgroup_available)
 
 
 def _get_fs_type(files: list[str]) -> str:
