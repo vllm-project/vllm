@@ -37,6 +37,9 @@ elif current_platform.is_xpu():
 elif current_platform.is_rocm():
     # On ROCm we use AITER's Triton flash-attention; the upstream flash-attn
     # package is not installed/available. (Same source as aiter_triton_mla.py.)
+    # The FA4 compile-from-specs API is CUDA-only, so it is unavailable on ROCm
+    # regardless of whether AITER is present.
+    compile_flash_attn_varlen_func_from_specs = None  # type: ignore[assignment]
     try:
         from aiter.ops.triton.mha import (  # type: ignore[no-redef]
             flash_attn_varlen_func,
@@ -52,8 +55,6 @@ elif current_platform.is_rocm():
                 "(aiter.ops.triton.mha.flash_attn_varlen_func). "
                 "Please install aiter."
             )
-
-        compile_flash_attn_varlen_func_from_specs = None  # type: ignore[assignment]
 
     # ROCm doesn't use scheduler metadata (FA3 feature), provide stub
     def get_scheduler_metadata(*args: Any, **kwargs: Any) -> None:  # type: ignore[misc]
