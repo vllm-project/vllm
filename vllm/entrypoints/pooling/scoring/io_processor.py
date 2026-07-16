@@ -230,7 +230,7 @@ class BiEncoderIOProcessor(ScoringIOProcessor):
         assert isinstance(ctx, OfflineInputsScoringContext)
 
         max_tokens_per_query, max_tokens_per_doc = self._get_token_limits(
-            pooling_params=ctx.pooling_params
+            pooling_params=pooling_params
         )
 
         scoring_data = ctx.scoring_data

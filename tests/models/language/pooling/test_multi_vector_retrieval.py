@@ -3,6 +3,7 @@
 import pytest
 import torch
 from transformers import AutoModel
+
 from tests.models.utils import check_embeddings_close
 from vllm.config import PoolerConfig
 
@@ -18,15 +19,12 @@ def test_embed_models(hf_runner, vllm_runner, example_prompts, model: str, dtype
         model,
         runner="pooling",
         pooler_config=PoolerConfig(task="token_embed"),
-        max_model_len=None,dtype=dtype
+        max_model_len=None,
+        dtype=dtype,
     ) as vllm_model:
         vllm_outputs = vllm_model.token_embed(example_prompts)
 
-    with hf_runner(
-        model,
-        auto_cls=AutoModel,
-        dtype=dtype
-    ) as hf_model:
+    with hf_runner(model, auto_cls=AutoModel, dtype=dtype) as hf_model:
         tokenizer = hf_model.tokenizer
         hf_outputs = []
         for prompt in example_prompts:
