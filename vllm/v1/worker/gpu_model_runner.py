@@ -2441,7 +2441,14 @@ class GPUModelRunner(
             )
 
             extra_attn_metadata_args = {}
-            if use_spec_decode and isinstance(
+            # Under ReplaySSM-spec, draft-less steps must still reach the
+            # spec cursor machinery:
+            needs_mamba_spec_args = use_spec_decode or (
+                self.speculative_config is not None
+                and self.cache_config.use_replayssm_spec
+                and isinstance(builder, Mamba2AttentionMetadataBuilder)
+            )
+            if needs_mamba_spec_args and isinstance(
                 builder, (Mamba2AttentionMetadataBuilder, GDNAttentionMetadataBuilder)
             ):
                 assert ubid is None, "UBatching not supported with GDN yet"
