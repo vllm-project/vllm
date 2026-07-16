@@ -229,6 +229,33 @@ Unfortunately, some custom compile passes have to see the whole graph to be effe
 
 Long term, we've added the ability to partition the graph in Inductor instead of right after Dynamo. It can be enabled with `CompilationConfig.use_inductor_graph_partition=True` but is currently experimental and only available with `torch>=2.9`. This also increases compilation time as it has to compile the whole graph and cannot reuse piecewise compilation artifacts. Once vLLM supports 2.9, we plan to make this the default approach as it will also speed up piecewise cudagraph capture.
 
+### Experimental: eager in-place TP all-reduce split (`enable_eager_tp_all_reduce`)
+
+`CompilationConfig.enable_eager_tp_all_reduce` (default off) keeps compiled `PIECEWISE` CUDA graphs but splits the tensor-parallel all-reduce out of the graphs and runs it eagerly, in place, through PyNccl on vLLM's current model stream. This can stabilize cross-node TP over RDMA (e.g. two GB300 nodes connected only by ConnectX-8) for hybrid Mamba2 models under speculative decoding, where an in-graph collective can stall.
+
+Mechanically, it appends the mutation-only op `vllm::all_reduce_inplace_` (schema `Tensor(a!) tensor, str group_name -> ()`) to the piecewise `splitting_ops` boundaries and routes only the TP group's `all_reduce` to it; all other groups and feature-off behavior are unchanged.
+
+The option changes both the traced operator and the partition topology, so it is serialized to workers and included in the compile-cache key. It is validated against an exact envelope in `VllmConfig._validate_eager_tp_all_reduce` and fails closed (rather than normalizing to `FULL`) unless all hold:
+
+- NVIDIA CUDA platform and `tensor_parallel_size > 1`.
+- `mode=VLLM_COMPILE` and `cudagraph_mode=PIECEWISE` exactly (`FULL`/`FULL_AND_PIECEWISE` rejected).
+- Inductor backend (`""` or `"inductor"`) with `use_inductor_graph_partition=False` (FX partitioning).
+- `VLLM_USE_BREAKABLE_CUDAGRAPH` and `VLLM_DISABLE_PYNCCL` unset/false.
+- `pass_config.fuse_allreduce_rms`, `fuse_attn_quant`, `enable_sp`, and `fuse_gemm_comms` all disabled.
+- `splitting_ops` not set to an explicitly empty list.
+
+O2/O3 optimization defaults enable some of the above fusion passes, so they may require explicit overrides. Launch example (dotted and JSON forms both work):
+
+```bash
+vllm serve <model> --tensor-parallel-size 2 \
+  --compilation-config.mode 3 \
+  --compilation-config.cudagraph_mode PIECEWISE \
+  --compilation-config.enable_eager_tp_all_reduce true \
+  --compilation-config '{"pass_config": {"enable_sp": false, "fuse_gemm_comms": false, "fuse_allreduce_rms": false, "fuse_attn_quant": false}}'
+```
+
+This changes the TP all-reduce only, not every cross-node collective (for example an MTP `eh_proj` all-gather remains captured).
+
 ## About the Performance
 
 See the following links for examples:
