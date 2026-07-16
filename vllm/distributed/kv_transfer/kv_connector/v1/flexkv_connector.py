@@ -258,3 +258,11 @@ class FlexKVConnectorV1(KVConnectorBase_V1):
     def get_block_ids_with_load_errors(self) -> set[int]:
         """Get the block ids that have failed to load."""
         return self._flexkv_connector.get_block_ids_with_load_errors()
+
+    def reset_cache(self) -> bool | None:
+        """Reset FlexKV's internal cache (all tiers).
+
+        Returns:
+            True on success.
+        """
+        return self._flexkv_connector.reset_cache()

@@ -2585,6 +2585,12 @@ class Scheduler(SchedulerInterface):
             # persistent batch in the model runner.
             self.prev_step_scheduled_req_ids.clear()
 
+        # Reset the connector before the GPU kv pool, this frees the delayed-free blocks of connector in-flight transfers
+        # Reverse order leaves GPU kv blocks in use, making the GPU kv pool reset report False.
+        reset_connector_successful = True
+        if reset_connector:
+            reset_connector_successful = self.reset_connector_cache()
+
         reset_successful = self.kv_cache_manager.reset_prefix_cache()
         if reset_running_requests and not reset_successful:
             raise RuntimeError(
@@ -2594,10 +2600,7 @@ class Scheduler(SchedulerInterface):
                 "which is not supported yet."
             )
 
-        if reset_connector:
-            reset_successful = self.reset_connector_cache() and reset_successful
-
-        return reset_successful
+        return reset_successful and reset_connector_successful
 
     def reset_connector_cache(self) -> bool:
         if self.connector is None:
@@ -2614,6 +2617,16 @@ class Scheduler(SchedulerInterface):
 
         if self.connector.reset_cache() is False:
             return False
+
+        # Free in-flight KV cache transfer requests under delayed free.
+        # The connector reset already abandoned these in-flight transfers, so free the delayed-free GPU kv blocks. Otherwise the GPU kv pool reset will see them in use and fail.
+        in_flight_requests = [
+            req
+            for req_id, req in self.requests.items()
+            if req.is_finished()
+        ]
+        for request in in_flight_requests:
+            self._free_blocks(request)
 
         if self.log_stats:
             assert self.connector_prefix_cache_stats is not None
