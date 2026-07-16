@@ -2220,7 +2220,7 @@ checksum = "11d3d7f243d5c5a8b9bb5d6dd2b1602c0cb0b9db1621bafc7ed66e35ff9fe092"
 [[package]]
 name = "llm-multimodal"
 version = "1.7.1"
-source = "git+https://github.com/Inferact/llm-multimodal-internal.git?branch=tml-audio#5cf25a49162e5d06de202edf0af74573b804116c"
+source = "git+https://github.com/smg-project/llm-multimodal?rev=67e59ab79e0f7a77ad5767a0c05858acd92092d3#67e59ab79e0f7a77ad5767a0c05858acd92092d3"
 dependencies = [
  "anyhow",
  "base64 0.22.1",

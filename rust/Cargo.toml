@@ -53,8 +53,7 @@ hyper-util = { version = "0.1.20", features = [
 indexmap = "2.13.0"
 itertools = "0.14.0"
 libc = "0.2.177"
-# Branch source: tml-audio. Cargo.lock pins rev 5cf25a49162e5d06de202edf0af74573b804116c.
-llm-multimodal = { git = "https://github.com/Inferact/llm-multimodal-internal.git", branch = "tml-audio", default-features = false, features = ["native-tls"] }
+llm-multimodal = { git = "https://github.com/smg-project/llm-multimodal", rev = "67e59ab79e0f7a77ad5767a0c05858acd92092d3", default-features = false, features = ["native-tls"] }
 mimalloc = "0.1.52"
 minijinja = { version = "2.0", features = ["unstable_machinery", "json", "builtins", "loader", "loop_controls", "preserve_order"] }
 minijinja-contrib = { version = "2.0", features = ["pycompat"] }
