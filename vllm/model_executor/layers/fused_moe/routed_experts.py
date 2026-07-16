@@ -884,9 +884,7 @@ class RoutedExperts(PluggableLayer):
                 matched = True
                 weight_name = qual_name.replace(weight_name, param_name)
                 param_name = weight_name.removeprefix(f"{self.layer_name}.")
-                param = getattr(self, param_name, None)
-                if param is None:
-                    continue
+                param = getattr(self, param_name)
                 if is_fused:
                     # w1 and w3 share one fused tensor; use a local copy so the
                     # transpose below doesn't mutate loaded_weight across
