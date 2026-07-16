@@ -4,7 +4,7 @@ depends_on:
 steps:
 - label: Basic Models Tests (Initialization)
   key: basic-models-tests-initialization
-  timeout_in_minutes: 45
+  timeout_in_minutes: 25
   device: h200_18gb
   source_file_dependencies:
   - vllm/
@@ -17,7 +17,7 @@ steps:
 - label: Basic Models Tests (Extra Initialization) %N
   device: h200_35gb
   key: basic-models-tests-extra-initialization
-  timeout_in_minutes: 45
+  timeout_in_minutes: 100
   source_file_dependencies:
   - vllm/model_executor/models/
   - tests/models/test_initialization.py
@@ -27,12 +27,12 @@ steps:
     # subset of supported models (the complement of the small subset in the above
     # test.) Also run if model initialization test file is modified
     - pytest -v -s models/test_initialization.py -k 'not test_can_initialize_small_subset' --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
-  parallelism: 2
+  parallelism: 4
 
 - label: Basic Models Tests (Other)
   device: h200_35gb
   key: basic-models-tests-other
-  timeout_in_minutes: 45
+  timeout_in_minutes: 35
   source_file_dependencies:
   - vllm/
   - tests/models/test_terratorch.py
@@ -50,7 +50,7 @@ steps:
   key: basic-models-test-other-cpu
   depends_on:
   - image-build-cpu
-  timeout_in_minutes: 10
+  timeout_in_minutes: 20
   source_file_dependencies:
   - vllm/
   - tests/models/test_utils.py
