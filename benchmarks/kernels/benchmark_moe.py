@@ -6,6 +6,7 @@ import gc
 import json
 import os
 import time
+from collections.abc import Iterable
 from contextlib import nullcontext
 from datetime import datetime
 from itertools import product
@@ -748,6 +749,118 @@ def get_weight_block_size_safety(config, default_value=None):
     return default_value
 
 
+# Nested config locations to probe for MoE fields (after the root config).
+# "get_text_config" is a method; the others are attribute names.
+_CONFIG_VIEWS = (
+    "get_text_config",
+    "text_config",
+    "ffn_config",
+    "thinker_config",
+)
+
+# Logical MoE dims -> HF attribute aliases.
+_MOE_FIELDS = {
+    "num_experts": (
+        "num_experts",
+        "n_routed_experts",
+        "num_local_experts",
+        "moe_num_experts",
+    ),
+    "topk": (
+        "moe_topk",
+        "num_experts_per_tok",
+        "top_k_experts",
+        "moe_top_k",
+    ),
+    "intermediate_size": (
+        "moe_intermediate_size",
+        "intermediate_size",
+        "ffn_hidden_size",
+    ),
+    "hidden_size": ("hidden_size",),
+}
+
+
+def _first_moe_value(value: Any) -> Any:
+    """List-valued MoE fields (e.g. per-layer moe_topk) use the first entry."""
+    if isinstance(value, (list, tuple)):
+        if not value:
+            raise AttributeError("empty MoE list field")
+        return value[0]
+    return value
+
+
+def _get_moe_attrs(obj: Any) -> dict[str, Any]:
+    attrs: dict[str, Any] = {}
+    for key, aliases in _MOE_FIELDS.items():
+        present = [
+            (alias, value)
+            for alias in aliases
+            if (value := getattr(obj, alias, None)) is not None
+        ]
+        if not present:
+            continue
+        if len(present) > 1 and key in ("num_experts", "topk"):
+            detail = ", ".join(f"{alias}={value}" for alias, value in present)
+            print(
+                f"WARNING: ambiguous MoE field '{key}': "
+                f"multiple aliases set ({detail}), using the first one",
+                flush=True,
+            )
+        attrs[key] = present[0][1]
+    return attrs
+
+
+def _resolve_config_view(config: Any, name: str) -> Any | None:
+    attr = getattr(config, name, None)
+    if callable(attr):
+        try:
+            return attr()
+        except Exception:
+            return None
+    return attr
+
+
+def _iter_config_views(config: Any) -> Iterable[Any]:
+    yield config
+    seen: set[int] = set()
+    for view in _CONFIG_VIEWS:
+        view = _resolve_config_view(config, view)
+        if view is None:
+            continue
+        if id(view) in seen:
+            continue
+        seen.add(id(view))
+        yield view
+
+
+def extract_moe_shape_from_hf_config(config: Any) -> tuple[int, int, int, int]:
+    incomplete: list[str] = []
+    for view in _iter_config_views(config):
+        attrs = _get_moe_attrs(view)
+        if not attrs:
+            continue
+        if set(attrs) != set(_MOE_FIELDS):
+            missing = [k for k in _MOE_FIELDS if k not in attrs]
+            incomplete.append(
+                f"{type(view).__name__} missing {missing}: "
+                + ", ".join(f"{k}={attrs.get(k)}" for k in _MOE_FIELDS)
+            )
+            continue
+        return (
+            int(_first_moe_value(attrs["num_experts"])),
+            int(_first_moe_value(attrs["topk"])),
+            int(_first_moe_value(attrs["intermediate_size"])),
+            int(_first_moe_value(attrs["hidden_size"])),
+        )
+
+    if incomplete:
+        raise ValueError(
+            "incomplete MoE fields (no complete config view): " + "; ".join(incomplete)
+        )
+    raise AttributeError("HF config missing MoE shape fields")
+
+
 def get_model_params(config):
     architectures = getattr(config, "architectures", None) or [type(config).__name__]
     architecture = architectures[0]
@@ -816,13 +929,17 @@ def get_model_params(config):
         # recurse to get their parameters
         return get_model_params(config.get_text_config())
     else:
-        # Support for llama4
-        config = config.get_text_config()
-        # Default: Mixtral.
-        E = config.num_local_experts
-        topk = config.num_experts_per_tok
-        intermediate_size = config.intermediate_size
-        hidden_size = config.hidden_size
+        # Generic HF MoE schema: Mixtral / Llama4 / omni MoE configs / etc.
+        E, topk, intermediate_size, hidden_size = extract_moe_shape_from_hf_config(
+            config
+        )
+
+    print(
+        f"[benchmark_moe] arch={architecture} "
+        f"E={E} topk={topk} intermediate={intermediate_size} "
+        f"hidden={hidden_size}",
+        flush=True,
+    )
     return E, topk, intermediate_size, hidden_size
 
 
