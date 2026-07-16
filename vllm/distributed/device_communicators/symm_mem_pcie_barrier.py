@@ -57,6 +57,8 @@ Known constraints:
 
 import os
 import threading
+from collections.abc import Callable
+from typing import Any
 
 import torch
 from torch._C._distributed_c10d import _SymmetricMemory
@@ -80,7 +82,7 @@ _WORKSPACE_FLOOR = (
     int(os.getenv("VLLM_SYMM_MEM_WORKSPACE_FLOOR_MB", "256")) * 1024 * 1024
 )
 _workspace_graveyard: list = []
-_orig_get_workspace = None
+_orig_get_workspace: Callable[[str, int], torch.Tensor] | None = None
 
 _MAX_CHANNELS = 8
 _RING = 4
@@ -89,7 +91,7 @@ _lock = threading.Lock()
 _seq_state: dict[int, dict[int, int]] = {}
 _installed = False
 _orig_barrier = None
-_drv = None
+_drv: Any = None
 
 
 def _pcie_safe_barrier(self, channel: int = 0, timeout_ms: int = 0) -> None:
@@ -158,9 +160,11 @@ def _guarded_get_workspace(group_name, min_size):
             size,
             need,
         )
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
         _workspace_graveyard.append(tensor)
-    return _orig_get_workspace(group_name, need)
+    get_workspace = _orig_get_workspace
+    assert get_workspace is not None
+    return get_workspace(group_name, need)
 
 
 def _install_workspace_guard() -> None:
@@ -289,7 +293,7 @@ def _comm_stream_multi_all_gather_and_consume(
             offset_bytes += buf.numel() * buf.element_size()
         return bufs
 
-    shards = [[] for _ in range(group_size)]
+    shards: list[list[torch.Tensor]] = [[] for _ in range(group_size)]
     for x in ag_out:
         for i, y in enumerate(x.chunk(group_size)):
             shards[i].append(y)
