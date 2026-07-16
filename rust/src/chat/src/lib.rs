@@ -37,9 +37,6 @@ pub use parser::tool::{ToolParser, ToolParserError, ToolParserFactory};
 pub use parser::unified::UnifiedParserFactory;
 pub use parser::{ParserSelection, ToolStrictLevel, validate_parser_overrides};
 pub use reasoning::EffortValue;
-pub use vllm_parser::unified::{
-    CombinedParser, UnifiedParser, UnifiedParserEvent, UnifiedParserOutput,
-};
 pub use renderer::hf::ChatTemplateContentFormatOption;
 pub use renderer::{
     ChatRenderer, DeepSeekV4ChatRenderer, DeepSeekV32ChatRenderer, DeepSeekV41ChatRenderer,
@@ -53,6 +50,9 @@ pub use request::{
 pub use stream::{ChatEventStream, ChatEventStreamTrait, CollectedAssistantMessage};
 pub use vllm_engine_core_client::protocol::multimodal::MmFeatures;
 pub use vllm_llm::FinishReason;
+pub use vllm_parser::unified::{
+    CombinedParser, UnifiedParser, UnifiedParserEvent, UnifiedParserOutput,
+};
 pub use vllm_text::GenerationConfigMode;
 
 mod backend;

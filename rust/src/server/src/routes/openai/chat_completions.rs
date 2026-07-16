@@ -704,8 +704,8 @@ fn collect_beam_search_chat_completion(
         prompt_logprobs: None,
         prompt_token_ids: return_token_ids.then_some(beam_result.prompt_token_ids),
         prompt_text: None,
-        kv_transfer_params: None,
-        ec_transfer_params: None,
+        kv_transfer_params: beam_result.kv_transfer_params,
+        ec_transfer_params: beam_result.ec_transfer_params,
     })
 }
 
