@@ -147,6 +147,7 @@ LinearBackend = Literal[
     "flashinfer_cudnn",
     "flashinfer_b12x",
     "marlin",
+    "humming",
     "triton",
     "deep_gemm",
     "torch",
@@ -156,6 +157,8 @@ LinearBackend = Literal[
     "conch",
     "exllama",
     "emulation",
+    "xpu",
+    "xpu_woq",
 ]
 
 
@@ -174,6 +177,9 @@ class KernelConfig:
 
     enable_cutedsl_warmup: bool = True
     """If True, run CuTeDSL compile warmup during kernel warmup."""
+
+    enable_bf16x3_router_gemm: bool = False
+    """If True, use the experimental SM100 BF16x3 CuteDSL router GEMM."""
 
     moe_backend: MoEBackend = "auto"
     """Backend for MoE expert computation kernels. Available options:
@@ -217,7 +223,10 @@ class KernelConfig:
     - "fbgemm": Use FBGEMM kernels
     - "conch": Use Conch mixed-precision kernels
     - "exllama": Use Exllama mixed-precision kernels
-    - "emulation": Use slow dequant-to-BF16 emulation (for testing only)"""
+    - "emulation": Use slow dequant-to-BF16 emulation (for testing only)
+    - "xpu": Use XPU kernels
+    - "xpu_woq": Use XPU kernels for weight-only quantization (e.g. W8A16)
+    """
 
     @field_validator("moe_backend", mode="before")
     @classmethod
