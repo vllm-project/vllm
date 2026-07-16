@@ -312,7 +312,10 @@ def test_apply_prefix_caching_mamba_hybrid(
     worker.kv_cache_config = make_kv_cache_config(block_size=16, mamba_enabled=True)
 
     aligned_local, aligned_remote = worker._apply_prefix_caching(
-        local_block_ids, remote_block_ids, remote_physical_per_logical
+        local_block_ids,
+        remote_block_ids,
+        local_physical_per_logical,
+        remote_physical_per_logical,
     )
 
     assert aligned_local == expected_local, (
@@ -389,7 +392,10 @@ def test_apply_prefix_caching_ssm_prefix_cache_hit(
     worker.kv_cache_config = make_kv_cache_config(block_size=16, mamba_enabled=True)
 
     aligned_local, aligned_remote = worker._apply_prefix_caching(
-        local_block_ids, remote_block_ids, remote_physical_per_logical
+        local_block_ids,
+        remote_block_ids,
+        local_physical_per_logical,
+        remote_physical_per_logical,
     )
 
     assert aligned_local == expected_local, (
@@ -481,6 +487,7 @@ def test_mismatched_physical_per_logical_fails_with_prefix_caching(
     aligned_local, aligned_remote = worker._apply_prefix_caching(
         local_block_ids,
         remote_block_ids,
+        local_physical_per_logical,
         remote_physical_per_logical,
     )
 

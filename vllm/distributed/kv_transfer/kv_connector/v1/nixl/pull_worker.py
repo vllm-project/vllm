@@ -298,9 +298,11 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
             == len(local_block_ids)
             == len(self.kv_cache_config.kv_cache_groups)
         )
-        remote_physical_per_logical = remote_info.remote_physical_blocks_per_logical
         local_block_ids, remote_block_ids = self._apply_prefix_caching(
-            local_block_ids, remote_block_ids, remote_physical_per_logical
+            decode_block_ids=local_block_ids,
+            prefill_block_ids=remote_block_ids,
+            decode_physical_per_logical=self._physical_blocks_per_logical_kv_block,
+            prefill_physical_per_logical=remote_info.remote_physical_blocks_per_logical,
         )
 
         # NOTE (nicolo) With homogeneous TP, each TP worker loads KV from
