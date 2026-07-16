@@ -16,6 +16,7 @@ _LAZY_EXPORTS = {
     "silu_and_mul_triton": "silu_and_mul",
     "sink_silu_mul_epilogue": "silu_and_mul",
     "inkling_fa4_rel_attention": "fa4_rel_attention",
+    "inkling_rel_attention_split_kv_decode": "rel_attention_decode",
 }
 
 if TYPE_CHECKING:

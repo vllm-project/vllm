@@ -184,7 +184,7 @@ class InklingAttention(nn.Module, AttentionLayerBase):
                 window_size=self.window_size,
                 is_local=self.is_local,
                 max_kv_len=self._max_kv_len,
-                dtype=vllm_config.model_config.dtype,
+                dtype=cast(torch.dtype, vllm_config.model_config.dtype),
                 kv_dtype=self.kv_cache_torch_dtype,
                 block_size=vllm_config.cache_config.block_size,
                 max_num_reqs=vllm_config.scheduler_config.max_num_seqs,
@@ -277,7 +277,7 @@ class InklingAttention(nn.Module, AttentionLayerBase):
                 fa_md.slot_mapping,
                 off_k,
                 off_v,
-                self.conv_owner.block_size,
+                self.conv_owner.cache_block_size,
                 log_scaling if not self.is_local else None,
             )
             q = q.view(num_tokens, self.num_heads, self.head_dim)
@@ -307,7 +307,7 @@ class InklingAttention(nn.Module, AttentionLayerBase):
             max_query_len=max_seqlen_q,
             num_heads=self.num_heads,
             num_kv_heads=self.num_kv_heads,
-            max_kv_len=self._max_kv_len,
+            max_kv_len=md.max_seq_len,
         )
         inkling_fa4_rel_attention(
             q[:nt],
@@ -323,5 +323,6 @@ class InklingAttention(nn.Module, AttentionLayerBase):
             rel_extent=self.rel_extent,
             rel_logits=rel_logits[:nt],
             num_splits=num_splits,
+            max_kv_len=md.max_seq_len,
             out=output[:nt],
         )

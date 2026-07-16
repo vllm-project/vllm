@@ -17,7 +17,7 @@ is padded up to the uniform attention page by ``unify_kv_cache_spec_page_size``.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import ClassVar
+from typing import ClassVar, cast
 
 import torch
 from torch import nn
@@ -192,7 +192,7 @@ class InklingConvState(nn.Module, AttentionLayerBase):
             (2 * head_dim + hidden_per_head, hidden_per_head),  # _MLP
         )
         vllm_config = get_current_vllm_config()
-        self._dtype = vllm_config.model_config.dtype
+        self._dtype = cast(torch.dtype, vllm_config.model_config.dtype)
         assert self._dtype == torch.bfloat16, (
             f"sconv SWA cache supports bfloat16 only, got {self._dtype}"
         )
@@ -204,6 +204,13 @@ class InklingConvState(nn.Module, AttentionLayerBase):
         compilation_config.static_forward_context[prefix] = self
 
     def forward(self): ...
+
+    @property
+    def cache_block_size(self) -> int:
+        """Return the block size used by cache metadata and physical indexing."""
+        if self.kv_cache.numel() > 0:
+            return self.kv_cache.shape[2]
+        return self.block_size
 
     def get_attn_backend(self) -> type[AttentionBackend]:
         return InklingSconvBackend

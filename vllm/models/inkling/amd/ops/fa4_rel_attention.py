@@ -10,14 +10,55 @@ are processed together and KV pages are gathered through vLLM's block table.
 
 from __future__ import annotations
 
+import os
+from typing import cast
+
 import torch
 
+from vllm.models.inkling.amd.ops.rel_attention_decode import (
+    inkling_rel_attention_split_kv_decode,
+    use_split_kv_decode,
+)
+from vllm.platforms.rocm import on_gfx950
 from vllm.triton_utils import tl, triton
 
 
 def bucket_max_seqlen_q(max_seqlen_q: int) -> int:
     """Round the scheduling bound up to a power of two."""
     return 1 << max(0, max_seqlen_q - 1).bit_length()
+
+
+def use_gfx950_gluon_decode(
+    *, max_query_len: int, page_size: int, head_dim: int
+) -> bool:
+    """Use the vendored TokenSpeed CDNA4 decode kernel where it is supported."""
+    return (
+        os.getenv("INKLING_GFX950_GLUON", "1") == "1"
+        and on_gfx950()
+        and max_query_len == 1
+        and page_size in (64, 128, 256)
+        and head_dim in (64, 128)
+    )
+
+
+def use_gfx950_gluon_extend(
+    *,
+    max_query_len: int,
+    max_kv_len: int,
+    page_size: int,
+    head_dim: int,
+    window_left: int,
+) -> bool:
+    """Use Gluon only for the long full-attention extend regime it wins."""
+    return (
+        os.getenv("INKLING_GFX950_GLUON", "1") == "1"
+        and on_gfx950()
+        and max_query_len > 1
+        and max_kv_len >= 8192
+        and window_left < 0
+        and page_size in (64, 128, 256)
+        and head_dim in (64, 128)
+    )
 
 
 def inkling_fa4_num_splits(
@@ -62,8 +103,9 @@ def inkling_fa4_num_splits(
     {
         "BLOCK_D": lambda args: triton.next_power_of_2(args["head_dim"]),
         "BLOCK_H": lambda args: triton.next_power_of_2(args["gqa_group_size"]),
-        "BLOCK_QH": lambda args: args["BLOCK_Q"]
-        * triton.next_power_of_2(args["gqa_group_size"]),
+        "BLOCK_QH": lambda args: (
+            args["BLOCK_Q"] * triton.next_power_of_2(args["gqa_group_size"])
+        ),
     }
 )
 @triton.jit(do_not_specialize_on_alignment=["cache_seqlens", "cu_seqlens_q"])
@@ -254,6 +296,7 @@ def inkling_fa4_rel_attention(
     rel_extent: int,
     rel_logits: torch.Tensor,
     num_splits: int = 32,
+    max_kv_len: int | None = None,
     out: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Paged varlen attention with Inkling's relative score modification."""
@@ -275,6 +318,83 @@ def inkling_fa4_rel_attention(
         out = torch.empty_like(q)
     gqa_group_size = q.shape[1] // num_kv_heads
     batch = cu_seqlens_q.shape[0] - 1
+    if max_kv_len is None:
+        max_kv_len = key_cache.shape[0] * key_cache.shape[1]
+    if use_gfx950_gluon_decode(
+        max_query_len=max_seqlen_q,
+        page_size=key_cache.shape[1],
+        head_dim=q.shape[2],
+    ):
+        # Import only after the architecture guard. The implementation uses
+        # gfx950-only CDNA4 Gluon layouts and async-copy operations.
+        from vllm.models.inkling.amd.ops.gluon.rel_mha_decode_gfx950 import (
+            gluon_rel_mha_decode_gfx950,
+        )
+
+        return gluon_rel_mha_decode_gfx950(
+            q,
+            key_cache,
+            value_cache,
+            block_table,
+            cache_seqlens,
+            max_kv_len,
+            rel_logits,
+            cu_seqlens_q,
+            max_seqlen_q=max_seqlen_q,
+            window_left=window_size[0],
+            softmax_scale=softmax_scale,
+            out=out,
+        )
+    if use_gfx950_gluon_extend(
+        max_query_len=max_seqlen_q,
+        max_kv_len=max_kv_len,
+        page_size=key_cache.shape[1],
+        head_dim=q.shape[2],
+        window_left=window_size[0],
+    ):
+        from vllm.models.inkling.amd.ops.gluon.rel_mha_extend_gfx950 import (
+            gluon_rel_mha_extend_gfx950,
+        )
+
+        # The copied kernel retains TokenSpeed's cu_seqlens_kv parameter for
+        # API compatibility but does not consume it.
+        return cast(
+            torch.Tensor,
+            gluon_rel_mha_extend_gfx950(
+                q,
+                cu_seqlens_q,
+                cu_seqlens_q,
+                key_cache,
+                value_cache,
+                block_table,
+                cache_seqlens,
+                window_left=window_size[0],
+                max_seqlen_q=max_seqlen_q,
+                max_seqlen_k=max_kv_len,
+                rel_logits=rel_logits,
+                softmax_scale=softmax_scale,
+                out=out,
+            ),
+        )
+    if use_split_kv_decode(
+        max_query_len=max_seqlen_q,
+        max_kv_len=max_kv_len,
+        page_size=key_cache.shape[1],
+        window_left=window_size[0],
+    ):
+        return inkling_rel_attention_split_kv_decode(
+            q,
+            key_cache,
+            value_cache,
+            block_table=block_table,
+            cache_seqlens=cache_seqlens,
+            softmax_scale=softmax_scale,
+            window_left=window_size[0],
+            rel_extent=rel_extent,
+            rel_logits=rel_logits,
+            max_kv_len=max_kv_len,
+            out=out,
+        )
     block_q = 1 if max_seqlen_q == 1 else 4
     grid = (triton.cdiv(max_seqlen_q, block_q), num_kv_heads, batch)
     _inkling_rel_attention_kernel[grid](

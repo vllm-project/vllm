@@ -72,7 +72,12 @@ class InklingShortConv(nn.Module):
             return x
 
         off_s, ws = self.owner.stream_ranges[self.stream_idx]
-        block_size = self.owner.block_size
+        # The hybrid KV-cache planner can enlarge the logical conv block so
+        # that its physical page size matches the attention caches (for
+        # example, W=4 becomes 32 when --block-size=128). Metadata slot
+        # mappings are built with that enlarged size, so index the bound cache
+        # with its runtime token dimension rather than the kernel window size.
+        block_size = self.owner.cache_block_size
         x = x.contiguous()
         weight = self.weight.squeeze(1)  # (dim, W)
 
