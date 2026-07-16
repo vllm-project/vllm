@@ -351,6 +351,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 max_num_logits=self.max_num_reqs * self.decode_query_len,
                 vocab_size=self.vocab_size,
                 device=self.device,
+                mask_stride=self.decode_query_len,
             )
 
         if self.is_pooling_model and self.is_last_pp_rank:
@@ -452,7 +453,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             and self.speculative_config.use_confidence_based_verification
         ):
             self.adaptive_verification = make_adaptive_verification_manager(
-                self.speculative_config.dspark_enable_confidence_based_verification,
                 self.req_states,
                 self.input_buffers.query_start_loc,
                 self.model_state.num_new_sampled_tokens_per_step,

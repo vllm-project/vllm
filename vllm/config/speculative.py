@@ -74,7 +74,6 @@ SpeculativeMethod = Literal[
 ]
 RejectionSampleMethod = Literal["standard", "synthetic", "block"]
 DraftSampleMethod = Literal["greedy", "probabilistic"]
-ConfidenceBasedVerification = Literal["none", "off", "auto"]
 
 
 @config
@@ -231,15 +230,13 @@ class SpeculativeConfig:
     synthetic_acceptance_rates. Only valid when rejection_sample_method is 'synthetic'.
     Mutually exclusive with synthetic_acceptance_rates."""
 
-    dspark_enable_confidence_based_verification: ConfidenceBasedVerification = "auto"
-    """Confidence-based verification mode. ``"auto"`` enables compact
-    verification and ``"none"``/``"off"`` disable it."""
+    dspark_enable_confidence_based_verification: bool = True
+    """Whether to enable DSpark confidence-based verification."""
 
     @property
     def use_confidence_based_verification(self) -> bool:
         return (
-            self.method == "dspark"
-            and self.dspark_enable_confidence_based_verification not in ("none", "off")
+            self.method == "dspark" and self.dspark_enable_confidence_based_verification
         )
 
     @staticmethod

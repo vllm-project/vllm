@@ -399,15 +399,12 @@ class AdaptiveVerificationManager:
 
 
 def make_adaptive_verification_manager(
-    mode: str,
     req_states: "RequestState",
     query_start_loc: torch.Tensor,
     num_bonus_tokens: int,
 ) -> AdaptiveVerificationManager:
-    if mode == "auto":
-        return AdaptiveVerificationManager(
-            req_states,
-            query_start_loc,
-            num_bonus_tokens,
-        )
-    raise ValueError(f"Unknown confidence-based verification mode: {mode}")
+    return AdaptiveVerificationManager(
+        req_states,
+        query_start_loc,
+        num_bonus_tokens,
+    )
