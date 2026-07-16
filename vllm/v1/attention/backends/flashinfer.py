@@ -1055,7 +1055,8 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 has_trtllm_support = False
                 break
 
-        if has_trtllm_support:
+        # trtllm-gen only supports causal attention.
+        if has_trtllm_support and not vllm_config.attention_config.use_non_causal:
             return AttentionCGSupport.UNIFORM_BATCH
         else:
             return AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
