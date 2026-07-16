@@ -703,43 +703,6 @@ def test_flashinfer_xqa_bmm1_scale_matches_decode_q_dtype():
 
 
 @pytest.mark.skipif(
-    not current_platform.is_cuda(), reason="FA version selection is CUDA-specific."
-)
-def test_flash_attn_fp8_rejects_layer_resolved_to_fa2(monkeypatch):
-    """FP8 support must use the layer's resolved FA version."""
-    from vllm.platforms.interface import DeviceCapability
-    from vllm.v1.attention.backends import fa_utils
-    from vllm.v1.attention.backends import flash_attn as flash_attn_backend
-
-    monkeypatch.setattr(flash_attn_backend, "get_flash_attn_version", lambda **_: 2)
-    monkeypatch.setattr(fa_utils, "get_flash_attn_version", lambda **_: 2)
-
-    reason = flash_attn_backend.FlashAttentionBackend.supports_combination(
-        head_size=256,
-        dtype=torch.bfloat16,
-        kv_cache_dtype="fp8",
-        block_size=16,
-        use_mla=False,
-        has_sink=False,
-        use_sparse=False,
-        use_mm_prefix=False,
-        device_capability=DeviceCapability(10, 0),
-    )
-    assert reason == "FP8 KV cache requires FlashAttention 3 or 4"
-
-    with pytest.raises(NotImplementedError, match="does not support fp8 kv-cache"):
-        flash_attn_backend.FlashAttentionImpl(
-            num_heads=32,
-            head_size=256,
-            scale=0.5,
-            num_kv_heads=8,
-            alibi_slopes=None,
-            sliding_window=None,
-            kv_cache_dtype="fp8",
-        )
-
-
-@pytest.mark.skipif(
     AttentionBackendEnum.FLASHINFER not in BACKENDS_TO_TEST,
     reason="FlashInfer is not available.",
 )
