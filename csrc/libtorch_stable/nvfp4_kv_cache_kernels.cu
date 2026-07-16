@@ -218,9 +218,7 @@ void reshape_and_cache_nvfp4_dispatch(torch::stable::Tensor& key,
   // its 4-token V scale swizzle. Both consume the same per-page
   // [K_data | K_scale | V_data | V_scale] layout, so only the V-scale
   // swizzle is arch-conditional.
-  cudaDeviceProp dev_prop;
-  cudaGetDeviceProperties(&dev_prop, key.get_device_index());
-  const bool swizzle_v_sf = dev_prop.major < 12;
+  const bool swizzle_v_sf = get_device_prop()->major < 12;
 
   STD_TORCH_CHECK(!swizzle_v_sf || block_size % 4 == 0,
                   "block_size must be divisible by 4 for NVFP4 KV cache V "
