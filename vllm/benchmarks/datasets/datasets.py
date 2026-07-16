@@ -89,6 +89,14 @@ class SampleRequest:
     lora_request: LoRARequest | None = None
     request_id: str | None = None
     timestamp: float | None = None
+    # Pre-built chat messages. When set, the chat backend uses this list
+    # directly and skips constructing messages from `prompt` + multimodal
+    # content. Mutually exclusive with the `prompt`-based path.
+    chat_messages: list[dict[str, Any]] | None = None
+    # Per-request fields merged into the request body (e.g. tools,
+    # tool_choice, response_format). Shallow-merged with --extra-body at
+    # dispatch time; per-request keys win.
+    request_overrides: dict | None = None
 
 
 # -----------------------------------------------------------------------------

@@ -15,13 +15,8 @@ from vllm.lora.request import LoRARequest
 
 from ..utils import create_new_process_for_each_test
 
-# Model configuration
-WHISPER_MODEL = "openai/whisper-small"
-
 # Test prompts for Whisper transcription
 WHISPER_PROMPT = "<|startoftranscript|><|en|><|transcribe|><|notimestamps|>"
-
-# Note: whisper_lora_files fixture is defined in conftest.py
 
 
 @pytest.fixture(autouse=True)
@@ -30,10 +25,14 @@ def use_spawn_for_whisper(monkeypatch):
     monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
 
 
-def create_whisper_llm(enable_lora: bool = True, max_loras: int = 2):
+def create_whisper_llm(
+    model: str,
+    enable_lora: bool = True,
+    max_loras: int = 2,
+):
     """Create a Whisper LLM instance with optional LoRA support."""
     return vllm.LLM(
-        model=WHISPER_MODEL,
+        model=model,
         enable_lora=enable_lora,
         max_loras=max_loras if enable_lora else 1,
         max_lora_rank=64,
@@ -80,7 +79,7 @@ def run_whisper_inference(
 
 
 @create_new_process_for_each_test()
-def test_whisper_lora_inference(whisper_lora_files):
+def test_whisper_lora_inference(whisper_model_files, whisper_lora_files):
     """Test basic Whisper inference with a LoRA adapter.
 
     This test verifies that:
@@ -88,7 +87,7 @@ def test_whisper_lora_inference(whisper_lora_files):
     2. A LoRA adapter can be applied during inference
     3. The model produces valid transcription output
     """
-    llm = create_whisper_llm(enable_lora=True)
+    llm = create_whisper_llm(whisper_model_files, enable_lora=True)
 
     # Run inference with LoRA
     outputs = run_whisper_inference(llm, lora_path=whisper_lora_files, lora_id=1)
@@ -103,13 +102,13 @@ def test_whisper_lora_inference(whisper_lora_files):
 
 
 @create_new_process_for_each_test()
-def test_whisper_multi_lora(whisper_lora_files):
+def test_whisper_multi_lora(whisper_model_files, whisper_lora_files):
     """Test Whisper with multiple LoRA adapter IDs.
 
     This test verifies that the same LoRA adapter can be loaded with
     different IDs and produce consistent results.
     """
-    llm = create_whisper_llm(enable_lora=True, max_loras=4)
+    llm = create_whisper_llm(whisper_model_files, enable_lora=True, max_loras=4)
 
     # Test with different LoRA IDs using the same adapter
     outputs_lora1 = run_whisper_inference(llm, lora_path=whisper_lora_files, lora_id=1)

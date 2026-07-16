@@ -71,7 +71,7 @@ def is_transient_hf_error(exc: Exception) -> bool:
             return False
         status_code = _http_status_code(current)
         if status_code is not None:
-            return 500 <= status_code < 600
+            return status_code in (408, 429) or 500 <= status_code < 600
         if isinstance(current, HfHubHTTPError):
             return False
         module = type(current).__module__
@@ -86,7 +86,7 @@ def is_transient_hf_error(exc: Exception) -> bool:
 def retry_with_kwargs(
     func: Callable[..., _R],
     *,
-    retry_on_exception: Callable[[Exception], bool] | None = None,
+    retry_on_exception: Callable[[Exception], bool],
     **retry_kwargs: Any,
 ) -> Callable[..., _R]:
     """Retry a function once with extra keyword arguments after a selected failure."""
@@ -95,7 +95,7 @@ def retry_with_kwargs(
         try:
             return func(*args, **kwargs)
         except Exception as e:
-            if retry_on_exception is not None and not retry_on_exception(e):
+            if not retry_on_exception(e):
                 raise
             if all(
                 key in kwargs and kwargs[key] == value
@@ -142,7 +142,11 @@ def maybe_resolve_latest_hf_revision(
         if repo_type == "dataset":
             return hf_api().dataset_info(repo_id, token=token).sha
         return hf_api().model_info(repo_id, token=token).sha
+    except (RepositoryNotFoundError, RevisionNotFoundError):
+        raise
     except Exception as e:
+        if not is_transient_hf_error(e):
+            raise
         logger.warning(
             "Failed to resolve latest Hugging Face revision for %s; "
             "falling back to the default revision.",

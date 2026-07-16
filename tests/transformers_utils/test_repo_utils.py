@@ -172,7 +172,11 @@ def test_retry_with_kwargs_retries_with_kwargs():
             raise RuntimeError("transient failure")
         return kwargs["local_files_only"]
 
-    call_with_retry = retry_with_kwargs(flaky_call, local_files_only=True)
+    call_with_retry = retry_with_kwargs(
+        flaky_call,
+        retry_on_exception=lambda _: True,
+        local_files_only=True,
+    )
     assert call_with_retry(model="cached-model") is True
 
     assert calls == [
@@ -209,7 +213,11 @@ def test_retry_with_kwargs_retries_with_missing_none_kwarg():
             raise RuntimeError("transient failure")
         return kwargs["revision"]
 
-    call_with_retry = retry_with_kwargs(flaky_call, revision=None)
+    call_with_retry = retry_with_kwargs(
+        flaky_call,
+        retry_on_exception=lambda _: True,
+        revision=None,
+    )
     assert call_with_retry(model="cached-model") is None
 
     assert calls == [
@@ -231,11 +239,20 @@ def test_is_transient_hf_error_rejects_wrapped_hub_access_errors():
             assert not is_transient_hf_error(exc)
 
 
-def test_is_transient_hf_error_accepts_server_errors():
+@pytest.mark.parametrize("status_code", [408, 429, 500, 503])
+def test_is_transient_hf_error_accepts_retryable_statuses(status_code: int):
     response = requests.Response()
-    response.status_code = 503
+    response.status_code = status_code
 
     assert is_transient_hf_error(requests.HTTPError(response=response))
+
+
+@pytest.mark.parametrize("status_code", [400, 401, 403, 404])
+def test_is_transient_hf_error_rejects_non_retryable_statuses(status_code: int):
+    response = requests.Response()
+    response.status_code = status_code
+
+    assert not is_transient_hf_error(requests.HTTPError(response=response))
 
 
 def test_maybe_resolve_latest_hf_revision_preserves_explicit_revision(
@@ -294,3 +311,50 @@ def test_maybe_resolve_latest_hf_revision_can_force_dataset_lookup(
         )
         == "latest-dataset-sha"
     )
+
+
+def test_maybe_resolve_latest_hf_revision_propagates_access_errors(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    response = requests.Response()
+    response.status_code = 403
+
+    class FakeHfApi:
+        def model_info(self, repo_id, token=None):
+            raise RepositoryNotFoundError("private repo", response=response)
+
+    monkeypatch.setattr(
+        "vllm.transformers_utils.repo_utils.envs.VLLM_CI_ENSURE_LATEST_HF_REVISION",
+        True,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "vllm.transformers_utils.repo_utils.hf_api",
+        lambda: FakeHfApi(),
+    )
+
+    with pytest.raises(RepositoryNotFoundError):
+        maybe_resolve_latest_hf_revision("org/private-model", None)
+
+
+def test_maybe_resolve_latest_hf_revision_falls_back_on_transient_errors(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    response = requests.Response()
+    response.status_code = 503
+
+    class FakeHfApi:
+        def model_info(self, repo_id, token=None):
+            raise requests.HTTPError(response=response)
+
+    monkeypatch.setattr(
+        "vllm.transformers_utils.repo_utils.envs.VLLM_CI_ENSURE_LATEST_HF_REVISION",
+        True,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "vllm.transformers_utils.repo_utils.hf_api",
+        lambda: FakeHfApi(),
+    )
+
+    assert maybe_resolve_latest_hf_revision("org/model", None) is None

@@ -483,7 +483,6 @@ class ModelConfig:
         self.served_model_name = get_served_model_name(
             self.model, self.served_model_name
         )
-        user_revision = self.revision
         tokenizer_uses_model = self.tokenizer is None or self.tokenizer == self.model
         self.model = maybe_model_redirect(self.model)
         self.revision = maybe_resolve_latest_hf_revision(
@@ -496,7 +495,7 @@ class ModelConfig:
             self.tokenizer = self.model
         self.tokenizer = maybe_model_redirect(self.tokenizer)
         if self.tokenizer_revision is None:
-            if tokenizer_uses_model or user_revision is not None:
+            if tokenizer_uses_model:
                 self.tokenizer_revision = self.revision
             else:
                 self.tokenizer_revision = maybe_resolve_latest_hf_revision(
