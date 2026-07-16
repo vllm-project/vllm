@@ -109,7 +109,9 @@ def _make_bf16_monolithic_experts(
         block_shape=None,
     )
 
-    experts = TrtLlmBf16ExpertsMonolithic(moe_config=moe_config, quant_config=quant_config)
+    experts = TrtLlmBf16ExpertsMonolithic(
+        moe_config=moe_config, quant_config=quant_config
+    )
 
     gemm1 = (
         torch.randn(
