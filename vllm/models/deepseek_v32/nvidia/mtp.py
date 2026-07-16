@@ -96,11 +96,11 @@ class DeepseekV32MultiTokenPredictorLayer(nn.Module):
             hidden_states,
             residual,
             positions.shape[0],
+            is_sequence_parallel=self.mtp_block.use_sequence_parallel_moe,
         )
-        # mtp_block's MoE output is left un-reduced (skip_final_all_reduce); the
-        # main model fuses that all-reduce into the next norm, but here the
-        # recycle hidden is consumed directly, so reduce it now.
-        hidden_states = tensor_model_parallel_all_reduce(hidden_states)
+        if not self.mtp_block.use_sequence_parallel_moe:
+            # Without sequence parallelism, the MoE output is left un-reduced.
+            hidden_states = tensor_model_parallel_all_reduce(hidden_states)
         # Recycle the POST-final-norm hidden into the next draft step. The
         # residual-add is fused into the final RMSNorm so it is computed
         # exactly once, and the result is returned for both tuple positions:

@@ -151,6 +151,7 @@ fn resolve_multimodal_render_info(
     info.map(|info| MultimodalRenderInfo {
         image_token: info.placeholder_token(Modality::Image).map(str::to_string),
         video_token: info.placeholder_token(Modality::Video).map(str::to_string),
+        audio_token: info.placeholder_token(Modality::Audio).map(str::to_string),
     })
 }
 

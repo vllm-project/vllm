@@ -152,15 +152,24 @@ Object keys follow the same run-configuration digest scheme as the filesystem ti
 
 The P2P tier (`type: "p2p"`) shares completed KV blocks between vLLM instances over RDMA via NIXL. Each instance binds a control socket on `host:port` and exchanges blocks directly with peers — no shared filesystem required.
 
+PYTHONHASHSEED environment variable must be set to the same fixed value on all nodes.
+
 | Key | Required | Default | Notes |
 | --- | --- | --- | --- |
 | `type` | yes | — | Must be `p2p`. |
-| `host` | no | `0.0.0.0` | Address the control socket binds to. |
-| `port` | no | `7777` | Port for the control socket. Must be reachable from peers. |
+| `host` | no | `$VLLM_P2P_SIDE_CHANNEL_HOST` (`localhost`) | Address the control socket binds to, used verbatim as the identity peers dial back. When omitted, resolves from the env var below. The `localhost` default binds loopback only — for cross-host P2P you **must** set it to the node's routable IP (see below). |
+| `port` | no | `$VLLM_P2P_SIDE_CHANNEL_PORT` (`5710`) | Base port for the control socket. Must be reachable from peers. The bound port is `base + data_parallel_index` (one socket per DP replica). When omitted, the base resolves from the env var below. |
 | `backends` | no | `["UCX"]` | NIXL transport backends. See [NixlConnector Usage Guide](nixl_connector_usage.md#selecting-a-nixl-transport-backend-plugin) for available backends and selection guidance. |
 | `num_threads` | no | `4` | NIXL agent worker threads. Only used when `backends` is UCX-only; ignored when any non-UCX backend is requested. |
 
 The `backends` and `num_threads` options mirror the conditional logic used by [`NixlConnector`](nixl_connector_usage.md#selecting-a-nixl-transport-backend-plugin): when any non-UCX backend is configured, NIXL is initialised with `backends=...`; otherwise it falls back to a UCX-only agent with the configured `num_threads`. This lets the P2P tier use a different transport (e.g. `MOONCAKE`, `GDS_MT`, `LIBFABRIC`) than the main `NixlConnector` running in the same process.
+
+#### Environment Variables
+
+Rather than embedding `host`/`port` in each `secondary_tiers` entry, set them once at deploy time via environment variables (mirroring `VLLM_NIXL_SIDE_CHANNEL_HOST`/`VLLM_NIXL_SIDE_CHANNEL_PORT`). Explicit `host`/`port` config keys, when present, take precedence.
+
+- `VLLM_P2P_SIDE_CHANNEL_HOST` (default `localhost`): address the P2P control socket binds to. It is used **verbatim** as both the bind address and the identity peers dial back — there is no auto-detection (this mirrors `VLLM_NIXL_SIDE_CHANNEL_HOST`). The default binds the loopback interface only, so peers on another host cannot reach it. **For any cross-host P2P deployment you must set this explicitly to the node's routable IP** (e.g. the pod IP) before launching `vllm serve` — otherwise remote peers will fail to connect. The NIXL agent name is a separate per-process identifier, so peers sharing a `host:port` never collide.
+- `VLLM_P2P_SIDE_CHANNEL_PORT` (default `5710`): base port for the P2P control socket. The port actually bound is `VLLM_P2P_SIDE_CHANNEL_PORT + data_parallel_index` — one socket per DP replica, matching NIXL (for DP=1 the offset is 0). The peer's port is passed as `remote_port` in `kv_transfer_params`; the router/EPP that selects the DP rank (e.g. via the `X-data-parallel-rank` header) computes `remote_port = base + rank`. The DP-index offset separates replicas *within* one deployment; two co-located *deployments* (a prefiller and a decoder on the same host) still need distinct base ports (e.g. decoder base `5711`) to avoid a bind collision.
 
 ## Tuning Tips
 

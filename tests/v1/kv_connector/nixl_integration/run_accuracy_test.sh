@@ -140,12 +140,13 @@ run_tests_for_model() {
   # Start prefill instances
   for i in $(seq 0 $((NUM_PREFILL_INSTANCES-1))); do
     # Calculate GPU ID - we'll distribute across available GPUs
-    GPU_ID=$((i % $(get_num_gpus)))
-    NEXT_GPU=${GPU_ID}
+    GPU_START=$((i % $(get_num_gpus)))
+    GPU_ID=$GPU_START
+    NEXT_GPU=$GPU_START
     # Reserve TP*PP GPUs for the prefiller (TP shards across PP stages).
     PREFILLER_WORLD_SIZE=$((PREFILLER_TP_SIZE * PREFILLER_PP_SIZE))
     for (( j=1; j < PREFILLER_WORLD_SIZE; j++ )); do
-      NEXT_GPU=$(((GPU_ID + j) % $(get_num_gpus)))
+      NEXT_GPU=$(((GPU_START + j) % $(get_num_gpus)))
       GPU_ID="${GPU_ID},${NEXT_GPU}"
     done
 
@@ -195,10 +196,12 @@ run_tests_for_model() {
   # Start decode instances
   for i in $(seq 0 $((NUM_DECODE_INSTANCES-1))); do
     # Calculate GPU ID - we'll distribute across available GPUs, starting from after prefill GPUs
-    GPU_ID=$(((i + NEXT_GPU + 1) % $(get_num_gpus)))
+    DECODE_START=$(((i + NEXT_GPU + 1) % $(get_num_gpus)))
+    GPU_ID=$DECODE_START
+    NEXT_GPU=$DECODE_START
     # If DECODER_TP_SIZE is more than 1
     for (( j=1; j < DECODER_TP_SIZE; j++ )); do
-      NEXT_GPU=$(((GPU_ID + j) % $(get_num_gpus)))
+      NEXT_GPU=$(((DECODE_START + j) % $(get_num_gpus)))
       GPU_ID="${GPU_ID},${NEXT_GPU}"
     done
     # Calculate port number (base port + instance number)

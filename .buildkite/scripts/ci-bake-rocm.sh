@@ -285,7 +285,7 @@ get_content_arg_names() {
     fi | awk 'NF && !seen[$0]++'
 }
 
-compute_ci_base_content_hash() {
+compute_ci_base_content_hash_once() {
     local -a content_paths=()
     local -a content_args=()
     local dockerfile="${CI_BASE_DOCKERFILE:-}"
@@ -301,7 +301,8 @@ compute_ci_base_content_hash() {
         if [[ -n "${dockerfile}" ]]; then
             printf 'dockerfile:%s\n' "${dockerfile}"
             printf 'resolved-build-args:\n'
-            hash_dockerfile_arg_values "${dockerfile}" "${content_args[@]}"
+            hash_dockerfile_arg_values "${dockerfile}" "${content_args[@]}" \
+                || return 1
             if [[ -n "${stages}" ]]; then
                 printf 'dockerfile-stages:%s\n' "${stages}"
                 if [[ -f "${dockerfile}" ]]; then
@@ -312,6 +313,53 @@ compute_ci_base_content_hash() {
             fi
         fi
     } | sha256sum | cut -d' ' -f1
+}
+
+compute_ci_base_content_hash() {
+    local attempts="${CI_BASE_HASH_ATTEMPTS:-3}"
+    local delay_secs="${CI_BASE_HASH_RETRY_DELAY:-5}"
+    local attempt=0
+    local hash=""
+    local failed=0
+    local -a hashes=()
+
+    if [[ ! "${attempts}" =~ ^[1-9][0-9]*$ ]]; then
+        echo "Invalid CI_BASE_HASH_ATTEMPTS: ${attempts}" >&2
+        return 1
+    fi
+    if [[ ! "${delay_secs}" =~ ^[0-9]+$ ]]; then
+        echo "Invalid CI_BASE_HASH_RETRY_DELAY: ${delay_secs}" >&2
+        return 1
+    fi
+
+    for ((attempt = 1; attempt <= attempts; attempt++)); do
+        if ! hash=$(compute_ci_base_content_hash_once); then
+            echo "ci_base content hash calculation ${attempt}/${attempts} failed" >&2
+            failed=1
+        else
+            hashes+=("${hash}")
+            echo "ci_base content hash calculation ${attempt}/${attempts}: ${hash}" >&2
+        fi
+
+        if ((attempt < attempts)); then
+            sleep "${delay_secs}"
+        fi
+    done
+
+    if ((failed)) || ((${#hashes[@]} != attempts)); then
+        echo "Could not calculate a reliable ci_base content hash" >&2
+        return 1
+    fi
+
+    for hash in "${hashes[@]:1}"; do
+        if [[ "${hash}" != "${hashes[0]}" ]]; then
+            echo "ci_base content hash changed between calculations" >&2
+            printf '  observed: %s\n' "${hashes[@]}" >&2
+            return 1
+        fi
+    done
+
+    printf '%s\n' "${hashes[0]}"
 }
 
 extract_dockerfile_arg_default() {
@@ -366,7 +414,11 @@ hash_dockerfile_arg_values() {
         printf 'arg:%s=%s\n' "${arg_name}" "${arg_value:-<empty>}"
         if [[ "${arg_name}" == "BASE_IMAGE" && -n "${arg_value}" ]]; then
             digest=$(resolve_image_digest "${arg_value}")
-            printf 'arg:%s.digest=%s\n' "${arg_name}" "${digest:-unknown}"
+            if [[ -z "${digest}" ]]; then
+                echo "Failed to resolve digest for BASE_IMAGE=${arg_value}" >&2
+                return 1
+            fi
+            printf 'arg:%s.digest=%s\n' "${arg_name}" "${digest}"
         fi
     done
 }

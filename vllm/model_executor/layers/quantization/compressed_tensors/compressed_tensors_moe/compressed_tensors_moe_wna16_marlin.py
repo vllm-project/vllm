@@ -467,10 +467,16 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
 
         # Marlin-specific parameters (not needed for Flashinfer)
         if not is_flashinfer:
-            replace_parameter(layer, "w13_weight_g_idx", w13_g_idx_processed)
-            replace_parameter(layer, "w2_weight_g_idx", w2_g_idx_processed)
-            replace_parameter(layer, "w13_g_idx_sort_indices", w13_g_idx_sort_indices)
-            replace_parameter(layer, "w2_g_idx_sort_indices", w2_g_idx_sort_indices)
+            if w13_g_idx_processed is not None:
+                replace_parameter(layer, "w13_weight_g_idx", w13_g_idx_processed)
+            if w2_g_idx_processed is not None:
+                replace_parameter(layer, "w2_weight_g_idx", w2_g_idx_processed)
+            if w13_g_idx_sort_indices is not None:
+                replace_parameter(
+                    layer, "w13_g_idx_sort_indices", w13_g_idx_sort_indices
+                )
+            if w2_g_idx_sort_indices is not None:
+                replace_parameter(layer, "w2_g_idx_sort_indices", w2_g_idx_sort_indices)
 
             # Register input global scales if present
             if w13_input_global_scale is not None:
@@ -484,8 +490,11 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
                     torch.nn.Parameter(w2_input_global_scale, requires_grad=False),
                 )
 
-            if self.experts_cls is not None and issubclass(
-                self.experts_cls, FusedMoEExpertsModular
+            # Marlin workspace — only needed for Marlin-family backends, not emulation.
+            if (
+                self.experts_cls is not None
+                and issubclass(self.experts_cls, FusedMoEExpertsModular)
+                and self.wna16_backend != WNA16MoEBackend.EMULATION
             ):
                 layer.workspace = marlin_make_workspace_new(
                     layer.w13_weight_g_idx.device, 4
@@ -528,6 +537,9 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
             num_bits=self.num_bits,
             w1_zp=getattr(layer, "w13_weight_zero_point", None),
             w2_zp=getattr(layer, "w2_weight_zero_point", None),
+            gemm1_clamp_limit=getattr(layer, "swiglu_limit", None),
+            gemm1_alpha=getattr(layer, "swiglu_alpha", None),
+            gemm1_beta=getattr(layer, "swiglu_beta", None),
         )
 
     def apply_monolithic(

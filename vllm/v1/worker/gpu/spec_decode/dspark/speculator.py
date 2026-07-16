@@ -59,8 +59,6 @@ class DSparkSpeculator(DFlashSpeculator):
             self.max_num_tokens, draft_hidden, dtype=self.dtype, device=device
         )
 
-        self.dflash_causal = False
-
         self._step_cols = torch.arange(
             self.num_speculative_steps, dtype=torch.int32, device=device
         )
