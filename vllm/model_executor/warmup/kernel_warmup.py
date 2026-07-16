@@ -17,6 +17,9 @@ from vllm.model_executor.warmup.deep_gemm_warmup import deep_gemm_warmup
 from vllm.model_executor.warmup.deepseek_v4_mhc_warmup import (
     deepseek_v4_mhc_warmup,
 )
+from vllm.model_executor.warmup.eagle_spec_decode_warmup import (
+    eagle_eagle_kernel_warmup,
+)
 from vllm.model_executor.warmup.flashinfer_autotune_cache import (
     resolve_flashinfer_autotune_file,
     write_flashinfer_autotune_cache,
@@ -66,6 +69,26 @@ def kernel_warmup(worker: "Worker"):
             worker.vllm_config.compilation_config.cudagraph_capture_sizes or []
         ),
     )
+
+    # Eagle spec-decode Triton kernels.  Triton specializes on integer
+    # params that are 1, so we enumerate all combinations to pre-compile
+    # every cache entry.  No-op when Eagle is not configured.
+    spec_config = worker.vllm_config.speculative_config
+    num_spec_tokens = getattr(spec_config, "num_speculative_tokens", None)
+    drafter = getattr(worker.model_runner, "drafter", None)
+    eagle_block_size = getattr(drafter, "block_size", None)
+    if eagle_block_size is None or eagle_block_size <= 0:
+        eagle_block_size = worker.vllm_config.cache_config.block_size
+    try:
+        eagle_eagle_kernel_warmup(
+            device=getattr(worker.model_runner, "device", torch.device("cuda")),
+            num_speculative_tokens=num_spec_tokens,
+            vllm_config=worker.vllm_config,
+            block_size=eagle_block_size,
+            max_model_len=worker.vllm_config.model_config.max_model_len,
+        )
+    except Exception:
+        logger.warning("Skipping Eagle spec-decode warmup.", exc_info=True)
 
     # Run next so input-prep kernels JIT against pristine runner state.
     sparse_mla_triton_warmup_if_needed(worker)
