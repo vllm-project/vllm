@@ -6,7 +6,7 @@ Abstract interfaces and data types for the secondary tiering layer.
 
 from abc import ABC, abstractmethod
 from collections.abc import Collection, Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -36,6 +36,14 @@ class TieringOffloadingMetrics:
 
     LOOKUP_SYNC_DELAY = "vllm:kv_offload_tiering_lookup_sync_delay_seconds"
     LOOKUP_ASYNC_DELAY = "vllm:kv_offload_tiering_lookup_async_delay_seconds"
+    READ_BYTES = "vllm:kv_offload_tiering_read_bytes"
+    READ_TIME = "vllm:kv_offload_tiering_read_time"
+    WRITE_BYTES = "vllm:kv_offload_tiering_write_bytes"
+    WRITE_TIME = "vllm:kv_offload_tiering_write_time"
+    PROMOTION_JOB_FAILURES = "vllm:kv_offload_tiering_promotion_job_failures"
+    CASCADE_JOB_FAILURES = "vllm:kv_offload_tiering_cascade_job_failures"
+    BLOCK_QUERIES = "vllm:kv_offload_tiering_block_queries"
+    BLOCK_HITS = "vllm:kv_offload_tiering_block_hits"
 
 
 @dataclass
@@ -55,6 +63,8 @@ class JobResult:
 
     job_id: JobId
     success: bool
+    transfer_size: int | None = field(default=None, compare=False)
+    transfer_time: float | None = field(default=None, compare=False)
 
 
 class ParentManager(ABC):

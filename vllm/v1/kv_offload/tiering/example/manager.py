@@ -70,6 +70,8 @@ class ExampleSecondaryTierManager(SecondaryTierManager):
 
         # Completed jobs waiting to be retrieved by get_finished_jobs()
         self.completed_jobs: list[JobResult] = []
+        assert primary_kv_view.strides is not None
+        self._block_size = primary_kv_view.strides[0]
 
     @override
     def lookup(self, key: OffloadKey, req_context: ReqContext) -> LookupResult:
@@ -103,7 +105,14 @@ class ExampleSecondaryTierManager(SecondaryTierManager):
 
         for key in keys:
             self.blocks[key] = True
-        self.completed_jobs.append(JobResult(job_id=job_metadata.job_id, success=True))
+        self.completed_jobs.append(
+            JobResult(
+                job_id=job_metadata.job_id,
+                success=True,
+                transfer_size=len(keys) * self._block_size,
+                transfer_time=0.0,
+            )
+        )
 
     @override
     def submit_load(self, job_metadata: JobMetadata) -> None:
@@ -128,7 +137,14 @@ class ExampleSecondaryTierManager(SecondaryTierManager):
                 )
                 return
 
-        self.completed_jobs.append(JobResult(job_id=job_metadata.job_id, success=True))
+        self.completed_jobs.append(
+            JobResult(
+                job_id=job_metadata.job_id,
+                success=True,
+                transfer_size=len(keys) * self._block_size,
+                transfer_time=0.0,
+            )
+        )
 
     @override
     def get_finished_jobs(self) -> Iterable[JobResult]:

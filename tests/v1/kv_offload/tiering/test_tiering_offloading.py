@@ -95,18 +95,26 @@ class MetricsSecondaryTierManager(SecondaryTierManager):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.stats: OffloadingConnectorStats | None = None
+        self.lookup_result = LookupResult.MISS
+        self.finished_jobs: list[JobResult] = []
+        self.submitted_loads: list[JobMetadata] = []
+        self.submitted_stores: list[JobMetadata] = []
 
-    def lookup(self, key: OffloadKey, req_context: ReqContext) -> bool | None:
-        return False
+    def lookup(self, key: OffloadKey, req_context: ReqContext) -> LookupResult:
+        return self.lookup_result
 
     def submit_store(self, job_metadata: JobMetadata) -> None:
+        self.submitted_stores.append(job_metadata)
         return
 
     def submit_load(self, job_metadata: JobMetadata) -> None:
+        self.submitted_loads.append(job_metadata)
         return
 
     def get_finished_jobs(self) -> Iterable[JobResult]:
-        return ()
+        results = self.finished_jobs
+        self.finished_jobs = []
+        return results
 
     def drain_jobs(self) -> None:
         return
@@ -134,6 +142,10 @@ def test_tiering_spec_collects_secondary_metric_definitions(monkeypatch):
     metadata = metrics[MetricsSecondaryTierManager.MY_TIER_METRIC]
     assert metadata.documentation == "Number of bytes served by the test tier."
     assert metadata.labelnames == ("tier",)
+    assert metrics[TieringOffloadingMetrics.BLOCK_QUERIES].labelnames == ("tier",)
+    assert metrics[TieringOffloadingMetrics.PROMOTION_JOB_FAILURES].labelnames == (
+        "tier",
+    )
 
 
 def test_tiering_manager_aggregates_secondary_stats():
@@ -172,6 +184,116 @@ def test_tiering_manager_aggregates_secondary_stats():
     second_stats = manager.get_stats()
     assert second_stats is not None
     assert MetricsSecondaryTierManager.MY_TIER_METRIC not in second_stats.data["data"]
+
+
+def test_tiering_manager_records_secondary_lookup_metrics():
+    mock_region = _mock_mmap_region(5)
+    primary_tier = CPUPrimaryTierOffloadingManager(
+        num_blocks=5, mmap_region=mock_region
+    )
+    tier0 = MetricsSecondaryTierManager(
+        offloading_spec=_MOCK_OFFLOADING_SPEC,
+        primary_kv_view=mock_region.create_kv_memoryview(),
+        tier_type="fs",
+    )
+    tier1 = MetricsSecondaryTierManager(
+        offloading_spec=_MOCK_OFFLOADING_SPEC,
+        primary_kv_view=mock_region.create_kv_memoryview(),
+        tier_type="p2p",
+    )
+    tier1.lookup_result = LookupResult.HIT
+    manager = TieringOffloadingManager(
+        primary_tier=primary_tier,
+        secondary_tiers=[tier0, tier1],
+    )
+
+    assert manager.lookup(to_keys([1])[0], _CTX) is LookupResult.RETRY
+
+    stats = manager.get_stats()
+    assert stats is not None
+    values = stats.data["data"]
+    assert values[TieringOffloadingMetrics.BLOCK_QUERIES][("0:fs",)] == 1
+    assert values[TieringOffloadingMetrics.BLOCK_QUERIES][("1:p2p",)] == 1
+    assert values[TieringOffloadingMetrics.BLOCK_HITS][("1:p2p",)] == 1
+    assert ("0:fs",) not in values[TieringOffloadingMetrics.BLOCK_HITS]
+
+
+def test_tiering_manager_records_finished_job_metrics():
+    mock_region = _mock_mmap_region(5)
+    primary_tier = CPUPrimaryTierOffloadingManager(
+        num_blocks=5, mmap_region=mock_region
+    )
+    tier = MetricsSecondaryTierManager(
+        offloading_spec=_MOCK_OFFLOADING_SPEC,
+        primary_kv_view=mock_region.create_kv_memoryview(),
+        tier_type="fs",
+    )
+    manager = TieringOffloadingManager(
+        primary_tier=primary_tier,
+        secondary_tiers=[tier],
+    )
+    manager.on_new_request(_CTX)
+    cascade_key, promotion_key, failed_cascade_key, failed_promotion_key = to_keys(
+        range(4)
+    )
+
+    prepared = primary_tier.prepare_store([cascade_key, failed_cascade_key], _CTX)
+    assert prepared is not None
+    primary_tier.complete_store(prepared.keys_to_store, _CTX, success=True)
+    cascade_job = manager.create_store_job([cascade_key], _CTX)
+    failed_cascade_job = manager.create_store_job([failed_cascade_key], _CTX)
+
+    promotion_prepared = primary_tier.prepare_write([promotion_key], _CTX)
+    assert promotion_prepared is not None
+    promotion_job = JobMetadata(
+        job_id=manager._next_job_id(),
+        keys=[promotion_key],
+        block_ids=promotion_prepared.store_spec.block_ids,
+        is_promotion=True,
+        req_context=_CTX,
+    )
+    manager._transfer_jobs[promotion_job.job_id] = promotion_job
+
+    failed_promotion_prepared = primary_tier.prepare_write([failed_promotion_key], _CTX)
+    assert failed_promotion_prepared is not None
+    failed_promotion_job = JobMetadata(
+        job_id=manager._next_job_id(),
+        keys=[failed_promotion_key],
+        block_ids=failed_promotion_prepared.store_spec.block_ids,
+        is_promotion=True,
+        req_context=_CTX,
+    )
+    manager._transfer_jobs[failed_promotion_job.job_id] = failed_promotion_job
+
+    tier.finished_jobs = [
+        JobResult(
+            job_id=cascade_job.job_id,
+            success=True,
+            transfer_size=100,
+            transfer_time=0.5,
+        ),
+        JobResult(
+            job_id=promotion_job.job_id,
+            success=True,
+            transfer_size=80,
+            transfer_time=0.25,
+        ),
+        JobResult(job_id=failed_cascade_job.job_id, success=False),
+        JobResult(job_id=failed_promotion_job.job_id, success=False),
+    ]
+
+    manager._process_finished_jobs()
+
+    stats = manager.get_stats()
+    assert stats is not None
+    values = stats.data["data"]
+    label = ("0:fs",)
+    assert values[TieringOffloadingMetrics.WRITE_BYTES][label] == 100
+    assert values[TieringOffloadingMetrics.WRITE_TIME][label] == 0.5
+    assert values[TieringOffloadingMetrics.READ_BYTES][label] == 80
+    assert values[TieringOffloadingMetrics.READ_TIME][label] == 0.25
+    assert values[TieringOffloadingMetrics.CASCADE_JOB_FAILURES][label] == 1
+    assert values[TieringOffloadingMetrics.PROMOTION_JOB_FAILURES][label] == 1
 
 
 class TestExampleSecondaryTierManager:

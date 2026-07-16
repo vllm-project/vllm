@@ -210,6 +210,8 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         # kv_request_ids that hit a transport/session failure; On load lookup()
         # rejects them so the request falls back to local prefill.
         self._failed_req_ids: set[str] = set()
+        self._job_transfer_sizes: dict[int, int] = {}
+        self._job_submitted_at: dict[int, float] = {}
 
     # ------------------------------------------------------------------
     # SecondaryTierManager interface
@@ -319,6 +321,8 @@ class P2PSecondaryTierManager(SecondaryTierManager):
             self._finished_jobs.append(JobResult(job_id=job_id, success=False))
             return
 
+        self._track_job(job_id, len(block_ids))
+
         # Fast path: a session has already received FetchMsg for this id,
         # so we can route the batch straight into its ServerRole.
         session = self._kv_to_session.get(kv_request_id)
@@ -349,6 +353,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         job_id = job_metadata.job_id
         keys = list(job_metadata.keys)
         block_ids = job_metadata.block_ids
+        self._track_job(job_id, len(block_ids))
 
         prefill = _prefill_params(job_metadata.req_context.kv_transfer_params)
         logger.debug(
@@ -370,7 +375,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
                 self._local_id,
                 job_id,
             )
-            self._finished_jobs.append(JobResult(job_id=job_id, success=False))
+            self._finished_jobs.append(self._make_job_result(job_id, False))
             return
 
         kv_request_id = prefill["kv_request_id"]
@@ -383,7 +388,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
                 self._local_id,
                 job_id,
             )
-            self._finished_jobs.append(JobResult(job_id=job_id, success=True))
+            self._finished_jobs.append(self._make_job_result(job_id, True))
             return
 
         session = self._sessions.get(peer_id)
@@ -394,7 +399,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
                 job_id,
                 peer_id,
             )
-            self._finished_jobs.append(JobResult(job_id=job_id, success=False))
+            self._finished_jobs.append(self._make_job_result(job_id, False))
             self._failed_req_ids.add(kv_request_id)
             return
         logger.debug(
@@ -473,6 +478,22 @@ class P2PSecondaryTierManager(SecondaryTierManager):
             return f"{host}:{port}"
         return None
 
+    def _track_job(self, job_id: int, num_blocks: int) -> None:
+        self._job_transfer_sizes[job_id] = num_blocks * self._data.block_len
+        self._job_submitted_at[job_id] = time.monotonic()
+
+    def _make_job_result(self, job_id: int, success: bool) -> JobResult:
+        submitted_at = self._job_submitted_at.pop(job_id, None)
+        transfer_time = (
+            None if submitted_at is None else time.monotonic() - submitted_at
+        )
+        return JobResult(
+            job_id=job_id,
+            success=success,
+            transfer_size=self._job_transfer_sizes.pop(job_id, None),
+            transfer_time=transfer_time,
+        )
+
     def _get_or_create_session(self, peer_id: str) -> P2PSession:
         """Return the existing session for peer_id, or open one outbound.
 
@@ -548,10 +569,10 @@ class P2PSecondaryTierManager(SecondaryTierManager):
                 del self._kv_to_session[kid]
             failed_loads, failed_stores = session.close()
             for job_id, kv_request_id in failed_loads:
-                self._finished_jobs.append(JobResult(job_id=job_id, success=False))
+                self._finished_jobs.append(self._make_job_result(job_id, False))
                 self._failed_req_ids.add(kv_request_id)
             for job_id in failed_stores:
-                self._finished_jobs.append(JobResult(job_id=job_id, success=False))
+                self._finished_jobs.append(self._make_job_result(job_id, False))
             self._data.remove_remote_peer(pid)
             logger.warning("P2P %s: peer %s down", self._local_id, pid)
 
@@ -579,9 +600,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
             batches = self._unbound_stores.pop(kid)
             self._failed_req_ids.add(kid)
             for batch in batches:
-                self._finished_jobs.append(
-                    JobResult(job_id=batch.job_id, success=False)
-                )
+                self._finished_jobs.append(self._make_job_result(batch.job_id, False))
             logger.warning(
                 "P2P %s: unbound store kv_request_id=%s timed out after %.0fs "
                 "without a fetch — failing %d job(s)",
@@ -616,15 +635,11 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         for session in self._sessions.values():
             result = session.poll()
             for lr in result.loads:
-                self._finished_jobs.append(
-                    JobResult(job_id=lr.job_id, success=lr.success)
-                )
+                self._finished_jobs.append(self._make_job_result(lr.job_id, lr.success))
                 if not lr.success:
                     self._failed_req_ids.add(lr.kv_request_id)
             for sr in result.stores:
-                self._finished_jobs.append(
-                    JobResult(job_id=sr.job_id, success=sr.success)
-                )
+                self._finished_jobs.append(self._make_job_result(sr.job_id, sr.success))
             # Bind kv_request_id → session for any FetchMsg this tick and
             # replay any submit_store batches parked while no peer was
             # asking. ServerRole.on_fetch already recorded the demand
@@ -655,9 +670,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         # leak them; the manager is going away after this call.
         for batches in self._unbound_stores.values():
             for batch in batches:
-                self._finished_jobs.append(
-                    JobResult(job_id=batch.job_id, success=False)
-                )
+                self._finished_jobs.append(self._make_job_result(batch.job_id, False))
         self._unbound_stores.clear()
         self._control.close()
         self._data.close()

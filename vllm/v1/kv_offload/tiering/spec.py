@@ -39,6 +39,7 @@ from typing_extensions import override
 from vllm.logger import init_logger
 from vllm.v1.kv_offload.base import (
     CanonicalKVCaches,
+    OffloadingCounterMetadata,
     OffloadingHistogramMetadata,
     OffloadingManager,
     OffloadingMetricMetadata,
@@ -122,6 +123,46 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
                 ),
             )
         )
+        for metric_name, documentation in (
+            (
+                TieringOffloadingMetrics.READ_BYTES,
+                "Total bytes read from secondary tiers into the primary tier.",
+            ),
+            (
+                TieringOffloadingMetrics.READ_TIME,
+                "Total time spent reading from secondary tiers into the primary "
+                "tier, in seconds.",
+            ),
+            (
+                TieringOffloadingMetrics.WRITE_BYTES,
+                "Total bytes written from the primary tier to secondary tiers.",
+            ),
+            (
+                TieringOffloadingMetrics.WRITE_TIME,
+                "Total time spent writing from the primary tier to secondary "
+                "tiers, in seconds.",
+            ),
+            (
+                TieringOffloadingMetrics.PROMOTION_JOB_FAILURES,
+                "Number of failed secondary-tier promotion jobs.",
+            ),
+            (
+                TieringOffloadingMetrics.CASCADE_JOB_FAILURES,
+                "Number of failed secondary-tier cascade jobs.",
+            ),
+            (
+                TieringOffloadingMetrics.BLOCK_QUERIES,
+                "Number of block lookup queries sent to secondary tiers.",
+            ),
+            (
+                TieringOffloadingMetrics.BLOCK_HITS,
+                "Number of block lookup hits in secondary tiers.",
+            ),
+        ):
+            metrics[metric_name] = OffloadingCounterMetadata(
+                documentation=documentation,
+                labelnames=("tier",),
+            )
         secondary_tier_configs = extra_config.get("secondary_tiers", [])
         if not isinstance(secondary_tier_configs, list):
             raise ValueError("secondary_tiers must be a list of tier configurations")

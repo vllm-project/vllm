@@ -49,6 +49,7 @@ from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 from vllm.v1.kv_offload.tiering.base import (
     JobId,
     JobMetadata,
+    JobResult,
     ParentManager,
     SecondaryTierManager,
     TieringOffloadingMetrics,
@@ -217,7 +218,6 @@ class TieringOffloadingManager(OffloadingManager):
             tier: _SecondaryTierFacingParent(self, tier)
             for tier in self.secondary_tiers
         }
-
         # Buffers manager-level observations (e.g. lookup delay) between
         # get_stats() calls; merged in and reset each time get_stats() runs.
         self._stats = OffloadingConnectorStats()
@@ -227,6 +227,46 @@ class TieringOffloadingManager(OffloadingManager):
         job_id = self._job_id_counter
         self._job_id_counter += 1
         return job_id
+
+    @staticmethod
+    def _tier_label(tier_idx: int, tier: SecondaryTierManager) -> tuple[str]:
+        return (f"{tier_idx}:{tier.tier_type}",)
+
+    def _record_finished_job_stats(
+        self,
+        tier_idx: int,
+        tier: SecondaryTierManager,
+        job_metadata: JobMetadata,
+        completed_job: JobResult,
+    ) -> None:
+        labelvalues = self._tier_label(tier_idx, tier)
+        if not completed_job.success:
+            failure_metric = (
+                TieringOffloadingMetrics.PROMOTION_JOB_FAILURES
+                if job_metadata.is_promotion
+                else TieringOffloadingMetrics.CASCADE_JOB_FAILURES
+            )
+            self._stats.increase_counter(failure_metric, labelvalues=labelvalues)
+            return
+
+        bytes_metric = (
+            TieringOffloadingMetrics.READ_BYTES
+            if job_metadata.is_promotion
+            else TieringOffloadingMetrics.WRITE_BYTES
+        )
+        time_metric = (
+            TieringOffloadingMetrics.READ_TIME
+            if job_metadata.is_promotion
+            else TieringOffloadingMetrics.WRITE_TIME
+        )
+        if completed_job.transfer_size is not None:
+            self._stats.increase_counter(
+                bytes_metric, completed_job.transfer_size, labelvalues
+            )
+        if completed_job.transfer_time is not None:
+            self._stats.increase_counter(
+                time_metric, completed_job.transfer_time, labelvalues
+            )
 
     def _maybe_process_finished_jobs(self):
         """
@@ -260,6 +300,7 @@ class TieringOffloadingManager(OffloadingManager):
                     f"Finished job_id {job_id} from tier #{i}"
                     f" ({tier.tier_type}) not in _transfer_jobs"
                 )
+                self._record_finished_job_stats(i, tier, job_metadata, completed_job)
 
                 if job_metadata.is_promotion:
                     # secondary→primary transfer (promotion) completed.
@@ -321,11 +362,20 @@ class TieringOffloadingManager(OffloadingManager):
 
         lookup_start = time.monotonic()
         any_retry = False
-        for tier in self.secondary_tiers:
+        for i, tier in enumerate(self.secondary_tiers):
             if tier is exclude_tier:
                 continue
+            labelvalues = self._tier_label(i, tier)
+            self._stats.increase_counter(
+                TieringOffloadingMetrics.BLOCK_QUERIES,
+                labelvalues=labelvalues,
+            )
             result = tier.lookup(key, req_context)
             if result is LookupResult.HIT:
+                self._stats.increase_counter(
+                    TieringOffloadingMetrics.BLOCK_HITS,
+                    labelvalues=labelvalues,
+                )
                 promoted = self._initiate_promotion(tier, key, req_context)
                 self._accumulate_lookup_sync_delay(req_state, lookup_start)
                 if (
@@ -820,6 +870,13 @@ class TieringOffloadingManager(OffloadingManager):
 
         if stats is not None and stats.is_empty():
             stats = None
+
+        if not self._stats.is_empty():
+            if stats is None:
+                stats = self._stats
+            else:
+                stats.aggregate(self._stats)
+            self._stats = OffloadingConnectorStats()
 
         for tier in self.secondary_tiers:
             tier_stats = tier.get_stats()
