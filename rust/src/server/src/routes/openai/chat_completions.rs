@@ -496,6 +496,8 @@ fn resolve_optional_unified_parser(
 
 /// Parse decoded text through reasoning and tool parsers, returning extracted
 /// content, reasoning, and tool calls.
+type ParsedBeamChatOutput = (Option<String>, Option<String>, Vec<ToolCall>);
+
 fn parse_beam_chat_output(
     decoded_text: &str,
     model_id: &str,
@@ -503,7 +505,7 @@ fn parse_beam_chat_output(
     tokenizer: DynTokenizer,
     tool_call_parser: &ParserSelection,
     reasoning_parser: &ParserSelection,
-) -> Result<(Option<String>, Option<String>, Vec<ToolCall>), ApiError> {
+) -> Result<ParsedBeamChatOutput, ApiError> {
     let has_tools = !tools.is_empty() && !matches!(tool_call_parser, ParserSelection::None);
 
     let mut combined: Box<dyn UnifiedParser> = if tool_call_parser == reasoning_parser
@@ -623,11 +625,6 @@ fn collect_beam_search_chat_completion(
     let mut choices = Vec::with_capacity(beam_result.sequences.len());
     for (i, seq) in beam_result.sequences.iter().enumerate() {
         let generated_tokens = seq.tokens[beam_result.prompt_token_ids.len()..].to_vec();
-        let openai_finish_reason = seq
-            .finish_reason
-            .as_ref()
-            .map(|fr| chat_finish_reason_to_openai(fr, false).unwrap_or("error"))
-            .unwrap_or("length");
         let stop_reason = seq
             .stop_reason
             .map(|token_id| serde_json::Value::Number(serde_json::Number::from(token_id)));
@@ -654,6 +651,13 @@ fn collect_beam_search_chat_completion(
             };
             (parsed_content, reasoning, parsed_tool_calls)
         };
+
+        let saw_tool_calls = !tool_calls.is_empty();
+        let openai_finish_reason = seq
+            .finish_reason
+            .as_ref()
+            .map(|fr| chat_finish_reason_to_openai(fr, saw_tool_calls).unwrap_or("error"))
+            .unwrap_or("length");
 
         let content = raw_content.map(|c| match &echo {
             Some(prefix) => format!("{prefix}{c}"),

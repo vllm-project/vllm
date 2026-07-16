@@ -359,6 +359,7 @@ impl TextLlm {
             priority: request.priority,
             data_parallel_rank: request.data_parallel_rank,
             arrival_time: request.arrival_time,
+            mm_features: request.mm_features.take(),
         };
 
         run_beam_search(&self.llm, prompt_token_ids, params).await
