@@ -560,6 +560,10 @@ class ParallelLMHead(VocabParallelEmbedding):
         reuse itself as the head (e.g. compressed-tensors WNA16) instead of
         aliasing a plain ``weight`` it does not expose.
         """
+        # On a pipeline-parallel rank without the embedding, ``embed_tokens`` is
+        # a ``PPMissingLayer`` placeholder with no quant method; nothing to tie.
+        if not hasattr(embed_tokens, "quant_method"):
+            return embed_tokens
         return embed_tokens.quant_method.tie_weights(self, embed_tokens)
 
     def forward(self, input_):
