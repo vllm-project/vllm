@@ -58,14 +58,16 @@ __device__ __forceinline__ void clone_cp_async(void const* smem_addr,
                                                void const* global_ptr,
                                                bool cond) {
   static_assert(Bytes == 16 || Bytes == 8 || Bytes == 4);
-  int bytes = cond ? Bytes : 0;
+  if (!cond) {
+    return;
+  }
   unsigned int addr = __cvta_generic_to_shared(smem_addr);
   if constexpr (Bytes == 16) {
     asm volatile("cp.async.cg.shared.global [%0], [%1], %2, %3;" ::"r"(addr),
-                 "l"(global_ptr), "n"(Bytes), "r"(bytes));
+                 "l"(global_ptr), "n"(Bytes), "r"(Bytes));
   } else {
     asm volatile("cp.async.ca.shared.global [%0], [%1], %2, %3;" ::"r"(addr),
-                 "l"(global_ptr), "n"(Bytes), "r"(bytes));
+                 "l"(global_ptr), "n"(Bytes), "r"(Bytes));
   }
 }
 
@@ -124,8 +126,7 @@ __global__ void __launch_bounds__(CLONE_N, 2) wkv_fp16_v1_clone_kernel(
   }
 
   __shared__ __align__(128) half2 r[CLONE_N / 2], k[CLONE_N / 2],
-      w[CLONE_N / 2], a[CLONE_N / 2], bvec[CLONE_N / 2],
-      bvec_dummy[CLONE_N / 2];
+      w[CLONE_N / 2], a[CLONE_N / 2], bvec[CLONE_N / 2];
 #pragma unroll
   for (int tt = 0; tt < T; tt++) {
     int t = b * T * C + h * CLONE_N + tt * C;
@@ -135,8 +136,7 @@ __global__ void __launch_bounds__(CLONE_N, 2) wkv_fp16_v1_clone_kernel(
     clone_cp_commit();
     clone_cp_async<4>((half2*)(i < 32 ? r : k) + lane,
                       (half2*)((i < 32 ? r_ptr : k_ptr) + t) + lane, true);
-    clone_cp_async<4>((i < 32 ? bvec : bvec_dummy) + lane,
-                      (half2*)(b_ptr + t) + lane, i < 32);
+    clone_cp_async<4>(bvec + lane, (half2*)(b_ptr + t) + lane, i < 32);
     clone_cp_commit();
 
     half vv = v_ptr[t + i];
@@ -188,14 +188,16 @@ template <int Bytes>
 __device__ __forceinline__ void cp_async(void* smem, const void* global,
                                          bool pred) {
   static_assert(Bytes == 16 || Bytes == 8 || Bytes == 4);
-  int bytes = pred ? Bytes : 0;
+  if (!pred) {
+    return;
+  }
   unsigned addr = __cvta_generic_to_shared(smem);
   if constexpr (Bytes == 16) {
     asm volatile("cp.async.cg.shared.global [%0], [%1], %2, %3;" ::"r"(addr),
-                 "l"(global), "n"(Bytes), "r"(bytes));
+                 "l"(global), "n"(Bytes), "r"(Bytes));
   } else {
     asm volatile("cp.async.ca.shared.global [%0], [%1], %2, %3;" ::"r"(addr),
-                 "l"(global), "n"(Bytes), "r"(bytes));
+                 "l"(global), "n"(Bytes), "r"(Bytes));
   }
 }
 
@@ -214,8 +216,8 @@ __device__ __forceinline__ void cp_wait() {
 
 __device__ __forceinline__ void prefetch_token(
     int tid, int lane, int token, half2* r, half2* w, half2* k, half2* a,
-    half2* b, half2* b_dummy, const half* r_ptr, const half* w_ptr,
-    const half* k_ptr, const half* a_ptr, const half* b_ptr) {
+    half2* b, const half* r_ptr, const half* w_ptr, const half* k_ptr,
+    const half* a_ptr, const half* b_ptr) {
   cp_async<4>((tid < 32 ? w : a) + lane,
               (const half2*)(tid < 32 ? w_ptr + token : a_ptr + token) + lane,
               true);
@@ -223,8 +225,7 @@ __device__ __forceinline__ void prefetch_token(
   cp_async<4>((tid < 32 ? r : k) + lane,
               (const half2*)(tid < 32 ? r_ptr + token : k_ptr + token) + lane,
               true);
-  cp_async<4>((tid < 32 ? b : b_dummy) + lane,
-              (const half2*)(b_ptr + token) + lane, tid < 32);
+  cp_async<4>(b + lane, (const half2*)(b_ptr + token) + lane, tid < 32);
   cp_commit();
 }
 
@@ -268,7 +269,7 @@ __global__ __launch_bounds__(N, 2) void wkv_fp16_v1_exact_kernel(
   }
 
   __shared__ __align__(128) half2 r[HALF2_N], k[HALF2_N], w[HALF2_N],
-      a[HALF2_N], bvec[HALF2_N], bvec_dummy[HALF2_N];
+      a[HALF2_N], bvec[HALF2_N];
 #pragma unroll
   for (int tt = 0; tt < T; tt++) {
     int t = b_id * T * C + h * N + tt * C;
@@ -278,8 +279,7 @@ __global__ __launch_bounds__(N, 2) void wkv_fp16_v1_exact_kernel(
     cp_commit();
     cp_async<4>((half2*)(i < 32 ? r : k) + lane,
                 (half2*)((i < 32 ? r_ptr : k_ptr) + t) + lane, true);
-    cp_async<4>((i < 32 ? bvec : bvec_dummy) + lane,
-                (half2*)(b_ptr + t) + lane, i < 32);
+    cp_async<4>(bvec + lane, (half2*)(b_ptr + t) + lane, i < 32);
     cp_commit();
 
     half vv = v_ptr[t + i];
@@ -363,10 +363,10 @@ __global__ __launch_bounds__(N, 2) void wkv_fp16_seq_v2_kernel(
   }
 
   __shared__ __align__(128) half2 r[2][HALF2_N], w[2][HALF2_N], k[2][HALF2_N],
-      a[2][HALF2_N], bvec[2][HALF2_N], bvec_dummy[HALF2_N];
+      a[2][HALF2_N], bvec[2][HALF2_N];
   int token = (b_id * T) * C + h * N;
-  prefetch_token(i, lane, token, r[0], w[0], k[0], a[0], bvec[0], bvec_dummy,
-                 r_ptr, w_ptr, k_ptr, a_ptr, b_ptr);
+  prefetch_token(i, lane, token, r[0], w[0], k[0], a[0], bvec[0], r_ptr, w_ptr,
+                 k_ptr, a_ptr, b_ptr);
 
   for (int tt = 0; tt < T; ++tt) {
     const int cur = tt & 1;
@@ -388,8 +388,8 @@ __global__ __launch_bounds__(N, 2) void wkv_fp16_seq_v2_kernel(
     if (tt + 1 < T) {
       int next_token = token + C;
       prefetch_token(i, lane, next_token, r[cur ^ 1], w[cur ^ 1], k[cur ^ 1],
-                     a[cur ^ 1], bvec[cur ^ 1], bvec_dummy, r_ptr, w_ptr,
-                     k_ptr, a_ptr, b_ptr);
+                     a[cur ^ 1], bvec[cur ^ 1], r_ptr, w_ptr, k_ptr, a_ptr,
+                     b_ptr);
     }
 
     half vv = v_ptr[token + i];
@@ -463,12 +463,12 @@ __global__ __launch_bounds__(N, 2) void wkv_fp16_seq_v2_varlen_kernel(
   }
 
   __shared__ __align__(128) half2 r[2][HALF2_N], w[2][HALF2_N], k[2][HALF2_N],
-      a[2][HALF2_N], bvec[2][HALF2_N], bvec_dummy[HALF2_N];
+      a[2][HALF2_N], bvec[2][HALF2_N];
 
   const int my_t = query_start_loc[b_id + 1] - query_start_loc[b_id];
   int token = query_start_loc[b_id] * C + h * N;
-  prefetch_token(i, lane, token, r[0], w[0], k[0], a[0], bvec[0], bvec_dummy,
-                 r_ptr, w_ptr, k_ptr, a_ptr, b_ptr);
+  prefetch_token(i, lane, token, r[0], w[0], k[0], a[0], bvec[0], r_ptr, w_ptr,
+                 k_ptr, a_ptr, b_ptr);
 
   for (int tt = 0; tt < my_t; ++tt) {
     const int cur = tt & 1;
@@ -490,8 +490,8 @@ __global__ __launch_bounds__(N, 2) void wkv_fp16_seq_v2_varlen_kernel(
     if (tt + 1 < my_t) {
       int next_token = token + C;
       prefetch_token(i, lane, next_token, r[cur ^ 1], w[cur ^ 1], k[cur ^ 1],
-                     a[cur ^ 1], bvec[cur ^ 1], bvec_dummy, r_ptr, w_ptr,
-                     k_ptr, a_ptr, b_ptr);
+                     a[cur ^ 1], bvec[cur ^ 1], r_ptr, w_ptr, k_ptr, a_ptr,
+                     b_ptr);
     }
 
     half vv = v_ptr[token + i];
@@ -656,15 +656,14 @@ __global__ __launch_bounds__(N, 1) void wkv_fp16_one_cp_kernel(
   }
 
   __shared__ __align__(128) half2 r[HALF2_N], w[HALF2_N], k[HALF2_N],
-      a[HALF2_N], bvec[HALF2_N], bvec_dummy[HALF2_N];
+      a[HALF2_N], bvec[HALF2_N];
   const int token = b_id * C + h * N;
   cp_async<4>((half2*)(i < 32 ? w : a) + lane,
               (half2*)((i < 32 ? w_ptr : a_ptr) + token) + lane, true);
   cp_commit();
   cp_async<4>((half2*)(i < 32 ? r : k) + lane,
               (half2*)((i < 32 ? r_ptr : k_ptr) + token) + lane, true);
-  cp_async<4>((i < 32 ? bvec : bvec_dummy) + lane,
-              (half2*)(b_ptr + token) + lane, i < 32);
+  cp_async<4>(bvec + lane, (half2*)(b_ptr + token) + lane, i < 32);
   cp_commit();
 
   half vv = __ldg(v_ptr + token + i);
