@@ -1422,16 +1422,15 @@ class CompilationConfig:
                 "and make sure compilation mode is VLLM_COMPILE"
             )
 
-        # MRV1 adjusts cudagraph sizes to be a multiple of uniform_decode_query_len
-        # to avoid: https://github.com/vllm-project/vllm/issues/28207 and temp-fix:
-        # https://github.com/vllm-project/vllm/issues/28207#issuecomment-3504004536
-        # Will be removed in the near future when we have separate cudagraph capture
-        # sizes for decode and mixed prefill-decode.
-        # MRV2 handles cudagraph capture sizing in cudagraph_utils.py
-        # and doesn't need below: https://github.com/vllm-project/vllm/pull/45953
+        # Round cudagraph sizes to a multiple of uniform_decode_query_len so a
+        # uniform decode batch cannot dispatch to a "mixed" descriptor whose token
+        # count is not a multiple of the decode span, which corrupts per-request
+        # conv/attention state (https://github.com/vllm-project/vllm/issues/28207).
+        # Enabled for MRV2 as well: its cudagraph_utils.py sizing does not on its
+        # own keep uniform batches off mixed descriptors for multi-module MTP.
+        # Temporary until decode and mixed prefill-decode have separate sizes.
         if (
-            not use_v2_model_runner
-            and cudagraph_mode.decode_mode() == CUDAGraphMode.FULL
+            cudagraph_mode.decode_mode() == CUDAGraphMode.FULL
             and uniform_decode_query_len > 1
         ):
             self.adjust_cudagraph_sizes_for_spec_decode(

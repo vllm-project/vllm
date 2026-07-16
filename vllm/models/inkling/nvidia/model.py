@@ -227,6 +227,7 @@ class InklingDecoderLayer(nn.Module):
             # Caller folds mlp_output (pre-reduce, pre-sconv) into the next
             # fused sconv+add+rmsnorm.
             return hidden_states, (mlp_output, self.mlp_sconv)
+        # Standalone (MTP) tail: finish the sublayer without a norm.
         return _sconv_add_norm(
             mlp_output, hidden_states, self.mlp_sconv, None, positions
         )[1]
@@ -236,10 +237,12 @@ class InklingReplicatedEmbedding(nn.Module):
     """Full-vocab embedding table replicated on every TP rank.
 
     Trades the full table per rank (~2.3 GiB at V=201k / H=6144 bf16, vs a
-    1/tp shard) for no masked lookup or per-lookup TP all-reduce, and keeps the
-    full table on-rank for the fused gather+norm kernel. Bit-exact vs
-    vocab-parallel: the all-reduce there only ever summed one real row against
-    exact zeros. The LM head stays vocab-sharded.
+    1/tp shard) for no masked lookup and no per-lookup TP all-reduce — one
+    all-reduce per MTP draft step plus one per verify pass — and keeps the
+    full table on-rank for the fused gather+norm kernels (``embed_rmsnorm``,
+    ``embed_dual_rmsnorm_cat``). Bit-exact vs vocab-parallel: the all-reduce
+    there only ever summed one real row against exact zeros. The LM head
+    stays vocab-sharded.
     """
 
     def __init__(self, num_embeddings: int, embedding_dim: int) -> None:
@@ -611,7 +614,8 @@ class InklingForConditionalGeneration(_TmlForCausalLMBase, SupportsMultiModal):
     def get_language_model(self) -> nn.Module:
         # This class IS the causal LM (the towers are side branches), so the
         # language model is self — callers expect a module exposing ``.model``
-        # and ``.lm_head``.
+        # / ``.lm_head`` (e.g. the MTP/eagle loader shares embeddings via
+        # ``get_language_model().model.embed_tokens``).
         return self
 
 
@@ -672,8 +676,6 @@ def _load_inkling_weights(
 
             yield name, weight
 
-    # The release checkpoint also carries auxiliary prediction-head weights;
-    # they are not part of the causal LM served by this implementation.
     loader = AutoWeightsLoader(module, skip_prefixes=["model.mtp."])
     loaded |= loader.load_weights(_iter_loadable_weights())
 

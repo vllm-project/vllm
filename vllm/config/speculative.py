@@ -555,6 +555,8 @@ class SpeculativeConfig:
             )
 
         if hf_config.model_type in ("inkling_mm_model", "inkling_model"):
+            # MTP weights live on the text backbone. Promote text_config and
+            # expose the nested MTP fields on the flat draft config.
             mtp_config = getattr(hf_config, "mtp_config", None) or {}
             hf_config = getattr(hf_config, "text_config", hf_config)
             checkpoint_depths = mtp_config.get("num_nextn_predict_layers", 0)
@@ -563,12 +565,13 @@ class SpeculativeConfig:
             hf_config.model_type = "inkling_mtp"
             hf_config.update(
                 {
-                    # Inkling currently exposes only the first checkpoint depth.
-                    "n_predict": 1,
+                    "n_predict": checkpoint_depths,
                     "num_nextn_predict_layers": checkpoint_depths,
                     "chain_hidden_post_norm": mtp_config.get(
                         "chain_hidden_post_norm", False
                     ),
+                    # The MTP depth blocks carry their own sliding-window
+                    # pattern, which differs from the backbone's layer pattern.
                     "local_layer_ids": mtp_config.get("local_layer_ids", []),
                     "architectures": ["InklingMTPModel"],
                 }
@@ -974,14 +977,6 @@ class SpeculativeConfig:
                         "`num_speculative_tokens` was not provided"
                     )
 
-                if (
-                    self.draft_model_config.hf_config.model_type == "inkling_mtp"
-                    and self.num_speculative_tokens != 1
-                ):
-                    raise ValueError(
-                        "Inkling MTP currently supports exactly one speculative token"
-                    )
-
                 if self.method == "dspark":
                     # DSpark is a semi-autoregressive *block* drafter. A
                     # speculative length smaller than the checkpoint's block
@@ -1307,6 +1302,15 @@ class SpeculativeConfig:
         # target model hidden states"
         # TODO(ben): Refactor this so the naming is clearer
         return self.method in ("eagle", "eagle3", "mtp", "dflash", "dspark")
+
+    def num_speculative_prefill_steps(self) -> int:
+        if self.method == "mtp" and self.draft_model_config is not None:
+            n_predict = getattr(
+                self.draft_model_config.hf_config, "num_nextn_predict_layers", None
+            )
+            if n_predict:
+                return min(int(n_predict), self.num_speculative_tokens)
+        return 1
 
     def use_dflash(self) -> bool:
         return self.method == "dflash"
