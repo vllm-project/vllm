@@ -158,9 +158,8 @@ class Sampler:
         skip_top_k_top_p: bool = False,
         in_place: bool = False,
     ) -> torch.Tensor:
-        # The ops below all upcast to fp32 internally, so keep the caller's dtype.
-        # The copy only exists to leave the caller's logits intact for raw
-        # logprobs; skip it when they aren't needed.
+        # The ops below upcast to fp32 internally, so keep the caller's dtype. The
+        # copy is only needed to leave the caller's logits intact for raw logprobs.
         if not in_place:
             logits = logits.clone()
 
