@@ -5781,7 +5781,9 @@ def test_update_from_output_structured_output_mixed_path_parity():
     """Per-request structured output falls back to full path without drift."""
 
     def _mark_structured(requests: list[Request]) -> None:
-        requests[0].structured_output_request = Mock()
+        requests[0].structured_output_request = Mock(
+            reasoning_end_token_index=None
+        )
 
     _run_multi_step_parity(
         4,
