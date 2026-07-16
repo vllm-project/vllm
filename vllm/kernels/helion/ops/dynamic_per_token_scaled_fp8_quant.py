@@ -109,7 +109,18 @@ def baseline(
     scale: torch.Tensor,  # [num_tokens, 1]
     scale_ub: torch.Tensor | None = None,  # scalar tensor
 ) -> None:
-    torch.ops._C.dynamic_per_token_scaled_fp8_quant(result, input, scale, scale_ub)
+    fp8_min, fp8_max = get_fp8_min_max()
+    min_scaling_factor = 1.0 / (fp8_max * 512.0)
+
+    x = input.to(torch.float32)
+    s = torch.amax(torch.abs(x), dim=-1, keepdim=True)
+    if scale_ub is not None:
+        s = s.clamp(max=scale_ub)
+    s = (s * (1.0 / fp8_max)).clamp(min=min_scaling_factor)
+    y = (x / s).clamp(fp8_min, fp8_max)
+
+    scale.copy_(s)
+    result.copy_(y.to(result.dtype))
 
 
 # Overwrite autotune_baseline_atol and autotune_baseline_rtol
