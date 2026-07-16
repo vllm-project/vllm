@@ -75,7 +75,7 @@ class BaseMambaAttentionMetadata:
     batch_ptr: torch.Tensor | None = None
     token_chunk_offset_ptr: torch.Tensor | None = None
     # ReplaySSM standard decode: per-row ring cursor and flush flag, plus the
-    # per-step (decode_rows, ngroups, max_cache_len) fp32 scratch for the
+    # per-step (decode_rows, ngroups, replayssm_buffer_len) fp32 scratch for the
     # precomputed k^T q products. All None when use_replayssm is disabled.
     write_pos_d: torch.Tensor | None = None
     is_flush_d: torch.Tensor | None = None
@@ -104,8 +104,8 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         self.compilation_config = vllm_config.compilation_config
         self.num_spec_tokens: int = vllm_config.num_speculative_tokens
         self.use_spec_decode = self.num_spec_tokens > 0
-        self.use_cached_kernel = vllm_config.cache_config.use_replayssm
-        self.max_cache_len = vllm_config.cache_config.replayssm_buffer_len
+        self.use_replayssm = vllm_config.cache_config.use_replayssm
+        self.replayssm_buffer_len = vllm_config.cache_config.replayssm_buffer_len
 
         assert isinstance(kv_cache_spec, MambaSpec)
         scheduler_config = vllm_config.scheduler_config
@@ -166,7 +166,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
                 dtype=torch.int32,
                 device=device,
             )
-        if self.use_cached_kernel:
+        if self.use_replayssm:
             self.decode_write_pos_d: torch.Tensor = torch.empty(
                 (self.decode_cudagraph_max_bs,),
                 dtype=torch.int32,
@@ -177,8 +177,8 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
                 dtype=torch.int8,
                 device=device,
             )
-            # B_cache shape = (ngroups, max_cache_len, dstate); the page layout is
-            # (conv_state, ssm_state, x_cache, dt_cache, B_cache).
+            # B_cache shape = (ngroups, replayssm_buffer_len, dstate); the page
+            # layout is (conv_state, ssm_state, x_cache, dt_cache, B_cache).
             bc_ngroups = kv_cache_spec.shapes[4][0]
             bc_scratch_bs = max(
                 self.decode_cudagraph_max_bs, scheduler_config.max_num_seqs
@@ -187,7 +187,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
                 (
                     bc_scratch_bs,
                     bc_ngroups,
-                    self.max_cache_len,
+                    self.replayssm_buffer_len,
                 ),
                 dtype=torch.float32,
                 device=device,
@@ -558,7 +558,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
                     num_reqs - num_prefills : num_reqs
                 ]
 
-        if self.use_cached_kernel and num_decodes > 0:
+        if self.use_replayssm and num_decodes > 0:
             num_prompt_tokens_cpu = common_attn_metadata.num_prompt_tokens_cpu
             num_computed_tokens_cpu = common_attn_metadata._num_computed_tokens_cpu
             if num_prompt_tokens_cpu is None or num_computed_tokens_cpu is None:
@@ -587,9 +587,9 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
                 decode_steps_cpu,
                 torch.zeros_like(decode_steps_cpu),
             )
-            write_pos_cpu = torch.remainder(decode_steps_cpu, self.max_cache_len)
+            write_pos_cpu = torch.remainder(decode_steps_cpu, self.replayssm_buffer_len)
             is_flush_cpu = (
-                (write_pos_cpu == self.max_cache_len - 1) | leftover_prompt
+                (write_pos_cpu == self.replayssm_buffer_len - 1) | leftover_prompt
             ).to(torch.int8)
             write_pos_d = async_tensor_h2d(
                 write_pos_cpu.to(torch.int32).tolist(),
@@ -604,7 +604,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
 
         bc_pre_scratch = None
         if (
-            self.use_cached_kernel
+            self.use_replayssm
             and self.decode_bc_pre_scratch is not None
             and num_decodes > 0
         ):
@@ -720,7 +720,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
                     )
                     block_idx_last_scheduled_token_prev_step[metadata.num_decodes :] = 0
 
-            if self.use_cached_kernel:
+            if self.use_replayssm:
                 assert write_pos_d is not None
                 assert is_flush_d is not None
                 self.decode_write_pos_d[: metadata.num_decodes].copy_(
