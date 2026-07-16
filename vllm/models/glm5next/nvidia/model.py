@@ -219,7 +219,7 @@ class Glm5NextMoE(nn.Module):
             shared_experts=self.shared_experts,
             gate=self.gate,
             num_experts=config.n_routed_experts,
-            top_k=config.num_experts_per_tok,
+            top_k=config.num_experts_per_token,
             hidden_size=config.hidden_size,
             intermediate_size=config.moe_intermediate_size,
             renormalize=getattr(config, "norm_topk_prob", True),
@@ -915,8 +915,17 @@ class Glm5NextForConditionalGeneration(
             self.visual = Glm5NextVisionTransformer(
                 config.text_config,
                 config.vision_config,
-                norm_eps=getattr(config, "rms_norm_eps", 1e-5),
-                quant_config=quant_config,
+                # Read eps from the VISION sub-config, not the top-level
+                # `config.rms_norm_eps`: Glm5NextConfig.__getattribute__ mirrors
+                # the latter onto text_config (1e-5), silently ignoring the
+                # vision tower's own (1e-6) rms_norm_eps.
+                norm_eps=config.vision_config.rms_norm_eps,
+                # Vision tower ships BF16 weights in this fp8 checkpoint (no
+                # weight_scale_inv for visual.*), so it must NOT inherit the
+                # global fp8 quant_config -- doing so mis-quantizes the tower
+                # and yields NaN image features. Mirrors the MLA/KDA proj
+                # pattern (quant_config=None for BF16 submodules).
+                quant_config=None,
                 prefix=maybe_prefix(prefix, "visual"),
             )
 

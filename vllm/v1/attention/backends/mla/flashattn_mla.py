@@ -52,6 +52,15 @@ class FlashAttnMLABackend(MLACommonBackend):
     def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
         return [MultipleOf(16)]
 
+    @classmethod
+    def get_supported_head_sizes(cls) -> list[int]:
+        # FA-MLA places no head-size restriction: supports_combination only
+        # gates on device capability, and the qk_rope_head_dim=0 only_qv mode
+        # (headdim_v = kv_lora_rank, kHeadDimV>=256) covers non-DeepSeek widths
+        # such as 256. Returning [] here lets the metadata guard consult FA's
+        # own policy instead of MLACommonBackend's [320, 512, 576].
+        return []
+
     @staticmethod
     def get_kv_cache_stride_order(
         include_num_layers_dimension: bool = False,
@@ -112,7 +121,16 @@ class FlashAttnMLADecodeMetadata(MLACommonDecodeMetadata):
 
 @dataclass
 class FlashAttnMLAMetadata(MLACommonMetadata[FlashAttnMLADecodeMetadata]):
-    pass
+    def __post_init__(self):
+        # Consult FA-MLA's own head-size policy rather than the base
+        # MLACommonBackend [320, 512, 576] guard, which would wrongly reject
+        # non-DeepSeek MLA widths (e.g. head_dim 256 with qk_rope_head_dim=0).
+        if self.head_dim is not None and not FlashAttnMLABackend.supports_head_size(
+            self.head_dim
+        ):
+            raise ValueError(
+                f"Head dimension {self.head_dim} is not supported by FlashAttn-MLA."
+            )
 
 
 class FlashAttnMLAMetadataBuilder(MLACommonMetadataBuilder[FlashAttnMLAMetadata]):

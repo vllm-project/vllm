@@ -70,6 +70,19 @@ class Glm5NextTextConfig(PretrainedConfig):
         swiglu_limit: float | None = None,
         **kwargs,
     ):
+        # The checkpoint ships sglang/standard field names that differ from our
+        # __init__ params (num_experts_per_tok / hc_mult / hc_sinkhorn_iters).
+        # Use .get (not .pop) so BOTH names stay exposed at the checkpoint
+        # value: model.py reads the checkpoint name (num_experts_per_tok=8),
+        # while older code may read our param name. Without this, our default
+        # (num_experts_per_token=7) was used, routing 7 experts/token instead
+        # of the trained 8.
+        num_experts_per_token = kwargs.get("num_experts_per_tok", num_experts_per_token)
+        mhc_num_residual_streams = kwargs.get("hc_mult", mhc_num_residual_streams)
+        mhc_sinkhorn_iterations = kwargs.get(
+            "hc_sinkhorn_iters", mhc_sinkhorn_iterations
+        )
+
         self.model_type = model_type
         self.vocab_size = vocab_size
         self.hidden_size = hidden_size
@@ -230,7 +243,11 @@ class Glm5NextVisionConfig(PretrainedConfig):
         self.in_channels = in_channels
         self.initializer_range = initializer_range
         self.patch_size = patch_size
-        self.rms_norm_eps = rms_norm_eps
+        # The open GLM5-Next checkpoints ship vision_config.rms_norm_eps = 1e-5,
+        # but the vision tower was trained with 1e-6. Serving with 1e-5 drifts
+        # the RMSNorm and produces repetitive/degraded image descriptions, so
+        # force the trained value regardless of the checkpoint field.
+        self.rms_norm_eps = 1e-6
         self.spatial_merge_size = spatial_merge_size
         self.temporal_patch_size = temporal_patch_size
         self.attention_dropout = attention_dropout
