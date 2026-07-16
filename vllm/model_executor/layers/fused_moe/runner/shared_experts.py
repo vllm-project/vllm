@@ -91,6 +91,14 @@ class SharedExperts(torch.nn.Module):
             and parallel_config.all2all_backend != "allgather_reducescatter"
         ) or parallel_config.use_fi_nvl_two_sided_kernels
 
+    @property
+    def _should_enable_stream_overlap_heuristic(self) -> bool:
+        # On ROCm, empirically it's shown that only DPA deployments benefit from
+        # multi-stream shared experts
+        if not current_platform.is_rocm():
+            return True
+        return self._moe_config.moe_parallel_config.dp_size > 1
+
     def _determine_shared_experts_order(
         self,
         hidden_states: torch.Tensor,
@@ -106,6 +114,7 @@ class SharedExperts(torch.nn.Module):
             and self._stream is not None
             and hidden_states.shape[0]
             <= envs.VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD
+            and self._should_enable_stream_overlap_heuristic
         )
 
         if should_run_shared_in_aux_stream:
