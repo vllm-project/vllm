@@ -487,34 +487,18 @@ class Worker(WorkerBase):
         ) as profile_result:
             self.model_runner.profile_run()
 
-            stats = torch.accelerator.memory_stats(self.device)
-            profile_torch_peak = stats.get("allocated_bytes.all.peak", 0)
-            profile_torch_allocated = stats.get("allocated_bytes.all.current", 0)
-
-            # Profile CUDA graph memory if graphs will be captured.
-            # ROCm is included: #44825 moved the profiler to
-            # torch.accelerator.get_memory_info (reliable on ROCm, as used by
-            # the AMD-CI mem tests), and graph_pool_handle resolves to the same
-            # torch.cuda handle the live capture path already uses on ROCm.
-            # XPU stays excluded (see #39977).
-            cudagraph_memory_estimate = 0
-            if (
-                current_platform.is_cuda_alike()
-                and self.vllm_config.compilation_config.cudagraph_mode
-                != CUDAGraphMode.NONE
-            ):
-                cudagraph_memory_estimate = self.model_runner.profile_cudagraph_memory()
-
-        # Use the pre-cudagraph torch peak to avoid double-counting.
-        profile_result.torch_peak_increase = (
-            profile_torch_peak - profile_result.before_profile.torch_peak
-        )
-        # Only the transient headroom above the persistent level; using
-        # torch_peak_increase would double-count what total_consumed covers.
-        transient_peak_headroom = profile_torch_peak - profile_torch_allocated
-        profile_result.non_kv_cache_memory = (
-            profile_result.total_consumed + transient_peak_headroom
-        )
+        # Profile CUDA graph memory if graphs will be captured.
+        # ROCm is included: #44825 moved the profiler to
+        # torch.accelerator.get_memory_info (reliable on ROCm, as used by
+        # the AMD-CI mem tests), and graph_pool_handle resolves to the same
+        # torch.cuda handle the live capture path already uses on ROCm.
+        # XPU stays excluded (see #39977).
+        cudagraph_memory_estimate = 0
+        if (
+            current_platform.is_cuda_alike()
+            and self.vllm_config.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
+        ):
+            cudagraph_memory_estimate = self.model_runner.profile_cudagraph_memory()
 
         # Respect the opt-in flag as originally designed.
         cudagraph_memory_estimate_applied = (
@@ -525,7 +509,7 @@ class Worker(WorkerBase):
 
         self.total_consumed = profile_result.total_consumed
         self.peak_activation_memory = (
-            transient_peak_headroom + cudagraph_memory_estimate_applied
+            profile_result.transient_peak_headroom + cudagraph_memory_estimate_applied
         )
         self.cudagraph_memory_estimate = cudagraph_memory_estimate
 
