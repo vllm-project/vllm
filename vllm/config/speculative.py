@@ -10,6 +10,7 @@ from pydantic import Field, SkipValidation, field_validator, model_validator
 from typing_extensions import Self
 
 from vllm.config import LoadConfig
+from vllm.config.cache import CacheDType
 from vllm.config.kernel import MoEBackend
 from vllm.config.model import HfOverrides, ModelConfig
 from vllm.config.parallel import ParallelConfig
@@ -118,6 +119,9 @@ class SpeculativeConfig:
     """Attention backend to use for the draft model. When `None`, the backend is
     automatically selected. Useful when the drafter requires a different attention
     backend (e.g. DFlash needs a non-causal-capable backend like FLASH_ATTN)."""
+    kv_cache_dtype: CacheDType | None = None
+    """KV cache dtype for the draft model. When `None`, the draft inherits the
+    target model's `--kv-cache-dtype`."""
     max_model_len: int | None = Field(default=None, ge=1)
     """The maximum model length of the draft model. Used when testing the
     ability to skip speculation for some sequences."""
@@ -518,7 +522,7 @@ class SpeculativeConfig:
                     "architectures": ["Qwen3_5MoeMTP" if is_moe else "Qwen3_5MTP"],
                 }
             )
-        if hf_config.model_type == "longcat_flash":
+        if hf_config.model_type in ("longcat_flash", "longcat_flash_ngram"):
             hf_config.model_type = "longcat_flash_mtp"
             n_predict = getattr(hf_config, "num_nextn_predict_layers", 1)
             hf_config.update(
@@ -626,6 +630,18 @@ class SpeculativeConfig:
             SpeculativeConfig._apply_composed_hf_override, target_hf_overrides
         )
 
+    @staticmethod
+    def _is_custom_proposer_path(model: str | None) -> bool:
+        """True if ``model`` is a dotted import path (e.g. ``pkg.MyProposer``)."""
+        if model is None:
+            return False
+        if model.startswith(("http://", "https://", "file://")):
+            return False
+        if "/" in model:
+            return False
+        parts = model.split(".")
+        return len(parts) >= 2 and all(part.isidentifier() for part in parts)
+
     def __post_init__(self):
         # Note: "method" is a new parameter that helps to extend the
         # configuration of non-model-based proposers, and the "model" parameter
@@ -636,14 +652,9 @@ class SpeculativeConfig:
         # default.
 
         # infer method from user args
-        # Check if the model field contains a custom module path (e.g., 'pkg.Mod')
-        if (
-            self.model is not None
-            and "." in self.model
-            and not self.model.startswith(("http://", "https://", "file://"))
-            and "/" not in self.model  # not a HuggingFace repo (org/model)
+        if self.method is None and SpeculativeConfig._is_custom_proposer_path(
+            self.model
         ):
-            # Treat as a custom class path
             self.method = "custom_class"
         elif self.method is None:
             if self.model in ("ngram", "[ngram]"):
@@ -941,6 +952,31 @@ class SpeculativeConfig:
                         "A speculative model was provided, but "
                         "`num_speculative_tokens` was not provided"
                     )
+
+                if self.method == "dspark":
+                    # DSpark is a semi-autoregressive *block* drafter. A
+                    # speculative length smaller than the checkpoint's block
+                    # feeds the block / Markov-head machinery an unsupported
+                    # layout and yields incorrect (garbled) output rather than
+                    # merely lower acceptance. Require num_speculative_tokens to
+                    # be at least the block size (e.g. 5 or 7 for DeepSeek-V4).
+                    dspark_block_size = getattr(
+                        self.draft_model_config.hf_config,
+                        "dspark_block_size",
+                        None,
+                    )
+                    if (
+                        dspark_block_size is not None
+                        and self.num_speculative_tokens < dspark_block_size
+                    ):
+                        raise ValueError(
+                            "DSpark requires num_speculative_tokens >= "
+                            f"dspark_block_size ({dspark_block_size}); got "
+                            f"{self.num_speculative_tokens}. Smaller values "
+                            "produce incorrect output. Use "
+                            f"num_speculative_tokens={dspark_block_size} or "
+                            "larger (e.g. 7)."
+                        )
 
                 self.draft_tensor_parallel_size = (
                     SpeculativeConfig._verify_and_get_draft_tp(
