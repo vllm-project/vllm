@@ -9,9 +9,11 @@ import pybase64
 import torch
 from PIL import Image
 
+import vllm.envs as envs
 from vllm.utils.serial_utils import tensor2base64
+from vllm.utils.sparse_utils import check_sparse_tensor_invariants_threadsafe
 
-from ..image import convert_image_mode, rgba_to_rgb
+from ..image import convert_image_mode, normalize_image, rgba_to_rgb
 from .base import MediaIO, MediaWithBytes
 
 MAGIC_NUMPY_PREFIX = b"\x93NUMPY"  # https://numpy.org/devdocs/reference/generated/numpy.lib.format.html#format-version-1-0
@@ -65,11 +67,22 @@ class ImageMediaIO(MediaIO[Image.Image]):
         elif image.mode == "RGBA" and self.image_mode == "RGB":
             return rgba_to_rgb(image, self.rgba_background_color)
         else:
-            return convert_image_mode(image, self.image_mode)
+            return convert_image_mode(
+                image, self.image_mode, self.rgba_background_color
+            )
 
     def load_bytes(self, data: bytes) -> MediaWithBytes[Image.Image]:
         try:
             image = Image.open(BytesIO(data))
+            w, h = image.size
+            max_pixels = envs.VLLM_MAX_IMAGE_PIXELS
+            if max_pixels > 0 and w * h > max_pixels:
+                raise ValueError(
+                    f"Image dimensions {w}x{h} ({w * h} pixels) exceed "
+                    f"the maximum of {max_pixels} pixels. Set "
+                    f"VLLM_MAX_IMAGE_PIXELS to increase this limit."
+                )
+            image = normalize_image(image)
             image.load()
             image = self._convert_image_mode(image)
         except (OSError, Image.UnidentifiedImageError) as e:
@@ -111,9 +124,7 @@ class ImageEmbeddingMediaIO(MediaIO[torch.Tensor]):
 
     def _load_pickled_torch(self, data: bytes) -> torch.Tensor:
         buffer = BytesIO(data)
-        # Enable sparse tensor integrity checks to prevent out-of-bounds
-        # writes from maliciously crafted tensors
-        with torch.sparse.check_sparse_tensor_invariants():
+        with check_sparse_tensor_invariants_threadsafe():
             tensor = torch.load(buffer, weights_only=True)
             return tensor.to_dense()
 
@@ -134,7 +145,7 @@ class ImageEmbeddingMediaIO(MediaIO[torch.Tensor]):
         if filepath.suffix == ".npy":
             return torch.from_numpy(np.load(filepath))
 
-        with torch.sparse.check_sparse_tensor_invariants():
+        with check_sparse_tensor_invariants_threadsafe():
             tensor = torch.load(filepath, weights_only=True)
             return tensor.to_dense()
 

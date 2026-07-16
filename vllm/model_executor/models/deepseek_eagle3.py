@@ -20,10 +20,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
-from vllm.model_executor.model_loader.weight_utils import (
-    default_weight_loader,
-    maybe_remap_kv_scale_name,
-)
 from vllm.model_executor.models.deepseek_v2 import (
     DeepseekV2ForCausalLM,
     DeepseekV2MLAAttention,
@@ -31,8 +27,10 @@ from vllm.model_executor.models.deepseek_v2 import (
 )
 from vllm.multimodal.inputs import NestedTensors
 
+from .interfaces import LocalArgmaxMixin
 from .utils import (
     AutoWeightsLoader,
+    WeightsMapper,
     get_draft_quant_config,
     maybe_prefix,
     process_eagle_weight,
@@ -199,11 +197,18 @@ class DeepseekV2Eagle3Model(nn.Module):
             ]
         )
 
-        # fc layer for combining auxiliary hidden states (3x hidden size input)
-        if hasattr(self.config, "target_hidden_size"):
-            fc_input_size = self.config.target_hidden_size * 3
-        else:
-            fc_input_size = self.config.hidden_size * 3
+        # fc layer for combining auxiliary hidden states
+        num_aux_hidden_states = getattr(self.config, "num_aux_hidden_states", None)
+        if num_aux_hidden_states is None:
+            eagle_config = getattr(self.config, "eagle_config", None) or {}
+            layer_ids = eagle_config.get("eagle_aux_hidden_state_layer_ids")
+            num_aux_hidden_states = len(layer_ids) if layer_ids else 3
+        self.num_aux_hidden_states = num_aux_hidden_states
+
+        target_hidden_size = getattr(
+            self.config, "target_hidden_size", self.config.hidden_size
+        )
+        fc_input_size = target_hidden_size * num_aux_hidden_states
 
         self.fc = ReplicatedLinear(
             input_size=fc_input_size,
@@ -215,6 +220,18 @@ class DeepseekV2Eagle3Model(nn.Module):
             return_bias=False,
         )
 
+        use_fc_norm = getattr(self.config, "fc_norm", False)
+        if use_fc_norm:
+            self.fc_norm = nn.ModuleList(
+                [
+                    RMSNorm(target_hidden_size, eps=self.config.rms_norm_eps)
+                    for _ in range(self.num_aux_hidden_states)
+                ]
+            )
+        else:
+            self.fc_norm = None
+
+        self.norm_output = getattr(self.config, "norm_output", False)
         self.norm = RMSNorm(
             self.config.hidden_size,
             eps=self.config.rms_norm_eps,
@@ -242,63 +259,31 @@ class DeepseekV2Eagle3Model(nn.Module):
                 hidden_states=hidden_states,
                 residual=residual,
             )
+
         hidden_states, hidden_prenorm = self.norm(hidden_states, residual)
-        return hidden_states, hidden_prenorm
+
+        # norm_output variant uses the post-norm hidden states.
+        aux_output = hidden_states if self.norm_output else hidden_prenorm
+
+        return hidden_states, aux_output
+
+    # midlayer rename + gate_up / MLA fused_qkv_a merges
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_substr={"midlayer.": "layers.0."},
+        orig_to_new_stacked={
+            ".gate_proj": (".gate_up_proj", 0),
+            ".up_proj": (".gate_up_proj", 1),
+            ".q_a_proj": (".fused_qkv_a_proj", 0),
+            ".kv_a_proj_with_mqa": (".fused_qkv_a_proj", 1),
+        },
+    )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        stacked_params_mapping = [
-            # (param_name, shard_name, shard_id)
-            (".gate_up_proj", ".gate_proj", 0),
-            (".gate_up_proj", ".up_proj", 1),
-            (".fused_qkv_a_proj", ".q_a_proj", 0),
-            (".fused_qkv_a_proj", ".kv_a_proj_with_mqa", 1),
-        ]
-        params_dict = dict(self.named_parameters())
-        loaded_params: set[str] = set()
-
-        for name, loaded_weight in weights:
-            if "midlayer." in name:
-                name = name.replace("midlayer.", "layers.0.")
-
-            # Handle kv cache quantization scales
-            if self.quant_config is not None and (
-                scale_name := self.quant_config.get_cache_scale(name)
-            ):
-                param = params_dict[scale_name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                loaded_weight = (
-                    loaded_weight if loaded_weight.dim() == 0 else loaded_weight[0]
-                )
-                weight_loader(param, loaded_weight)
-                loaded_params.add(scale_name)
-                continue
-
-            # Remapping the name FP8 kv-scale
-            if "scale" in name:
-                name = maybe_remap_kv_scale_name(name, params_dict)
-                if name is None:
-                    continue
-
-            for param_name, weight_name, shard_id in stacked_params_mapping:
-                if weight_name not in name:
-                    continue
-                name = name.replace(weight_name, param_name)
-                param = params_dict[name]
-                weight_loader = param.weight_loader
-                weight_loader(param, loaded_weight, shard_id)
-                break
-            else:
-                if name not in params_dict:
-                    continue
-                param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                weight_loader(param, loaded_weight)
-            loaded_params.add(name)
-
-        return loaded_params
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
-class Eagle3DeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
+class Eagle3DeepseekV2ForCausalLM(LocalArgmaxMixin, DeepseekV2ForCausalLM):
     """Eagle3 speculative decoding model for DeepseekV2/V3."""
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -383,6 +368,12 @@ class Eagle3DeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
         # Combine multiple auxiliary hidden states returned by Eagle3
+        if self.model.fc_norm is not None:
+            chunks = hidden_states.chunk(self.model.num_aux_hidden_states, dim=-1)
+            hidden_states = torch.cat(
+                [norm(chunk) for norm, chunk in zip(self.model.fc_norm, chunks)],
+                dim=-1,
+            )
         return self.model.fc(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):

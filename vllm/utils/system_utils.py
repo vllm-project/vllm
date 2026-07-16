@@ -234,10 +234,15 @@ def _add_prefix(file: TextIO, worker_name: str, pid: int) -> None:
     file.write = write_with_prefix  # type: ignore[method-assign]
 
 
-def decorate_logs(process_name: str | None = None) -> None:
+def decorate_logs(
+    process_name: str | None = None, *, skip_if_decorated: bool = False
+) -> None:
     """Decorate stdout/stderr with process name and PID prefix."""
     # Respect VLLM_CONFIGURE_LOGGING environment variable
     if not envs.VLLM_CONFIGURE_LOGGING:
+        return
+
+    if skip_if_decorated and hasattr(sys.stdout, "_original_write"):
         return
 
     if process_name is None:
@@ -303,26 +308,26 @@ def set_ulimit(target_soft_limit: int = 65535):
 
 def find_loaded_library(lib_name: str) -> str | None:
     """
-    According to according to https://man7.org/linux/man-pages/man5/proc_pid_maps.5.html,
+    According to https://man7.org/linux/man-pages/man5/proc_pid_maps.5.html,
     the file `/proc/self/maps` contains the memory maps of the process, which includes the
     shared libraries loaded by the process. We can use this file to find the path of the
     loaded library.
     """  # noqa
-    found_line = None
+    # Match the mapped file's name, not the whole line: an unrelated library
+    # whose name merely contains lib_name (e.g. TileLang's libcudart_stub.so
+    # when looking for libcudart) or a directory component containing it must
+    # not win. Legitimate filenames are {lib_name}.so[.*] or a name-mangled
+    # {lib_name}-<hash>.so[.*], and /proc/self/maps is ordered by mapping
+    # address rather than load order, so a substring hit is a
+    # nondeterministic hijack.
     with open("/proc/self/maps") as f:
         for line in f:
-            if lib_name in line:
-                found_line = line
-                break
-    if found_line is None:
-        # the library is not loaded in the current process
-        return None
-    # if lib_name is libcudart, we need to match a line with:
-    # address /path/to/libcudart-hash.so.11.0
-    start = found_line.index("/")
-    path = found_line[start:].strip()
-    filename = path.split("/")[-1]
-    assert filename.rpartition(".so")[0].startswith(lib_name), (
-        f"Unexpected filename: {filename} for library {lib_name}"
-    )
-    return path
+            start = line.find("/")
+            if start == -1:
+                continue
+            path = line[start:].strip()
+            filename = path.rsplit("/", maxsplit=1)[-1]
+            if filename.startswith((f"{lib_name}.", f"{lib_name}-")):
+                return path
+    # the library is not loaded in the current process
+    return None

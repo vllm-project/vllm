@@ -80,7 +80,6 @@ def test_batched_deepgemm_vs_triton(
     mk_triton = FusedMoEKernel(
         prep_finalize,
         triton_experts,
-        inplace=False,
     )
 
     out_triton = mk_triton.apply(
@@ -105,7 +104,6 @@ def test_batched_deepgemm_vs_triton(
     mk_deepgemm = FusedMoEKernel(
         prep_finalize,
         deepgemm_experts,
-        inplace=False,
     )
 
     out_deepgemm = mk_deepgemm.apply(

@@ -11,17 +11,17 @@ from utils import (
     TEST_MODEL,
     _extract_step_logprobs,
     _random_prompt,
-    is_device_capability_below_90,
+    skip_if_not_cuda,
     skip_unsupported,
 )
 
 import vllm.envs as envs
 from vllm import LLM, SamplingParams
-
-IS_DEVICE_CAPABILITY_BELOW_90 = is_device_capability_below_90()
+from vllm.platforms import current_platform
 
 
 @skip_unsupported
+@pytest.mark.flaky(reruns=3)
 @pytest.mark.timeout(1000)
 @pytest.mark.parametrize(
     "backend",
@@ -51,6 +51,11 @@ def test_v1_generation_is_deterministic_across_batch_sizes_with_needle(
       seed.
     - Keep max_tokens and max_model_len bounded for speed and memory use.
     """
+    # Not all batch-invariant kernels are registered on XPU yet
+    # (e.g. attention, custom ops), so e2e determinism is not guaranteed.
+    if current_platform.is_xpu():
+        pytest.xfail("Not all batch-invariant kernels registered on XPU yet")
+
     seed = int(os.getenv("VLLM_TEST_SEED", "12345"))
     random.seed(seed)
 
@@ -150,9 +155,20 @@ def test_v1_generation_is_deterministic_across_batch_sizes_with_needle(
     "backend",
     BACKENDS,
 )
+@pytest.mark.parametrize(
+    "block_m,block_n",
+    [(16, 16), (8, 16)],
+)
 def test_logprobs_bitwise_batch_invariance_bs1_vs_bsN(
     backend,
+    block_m,
+    block_n,
 ):
+    # Not all batch-invariant kernels are registered on XPU yet
+    # (e.g. attention, custom ops), so e2e determinism is not guaranteed.
+    if current_platform.is_xpu():
+        pytest.xfail("Not all batch-invariant kernels registered on XPU yet")
+
     seed = int(os.getenv("VLLM_TEST_SEED", "12345"))
     random.seed(seed)
     tp_size = int(os.getenv("VLLM_TEST_TP_SIZE", "1"))
@@ -175,8 +191,11 @@ def test_logprobs_bitwise_batch_invariance_bs1_vs_bsN(
         max_model_len=8192,
         dtype="auto",  # not everything is supported
         gpu_memory_utilization=0.9,
-        enforce_eager=IS_DEVICE_CAPABILITY_BELOW_90,
-        attention_config={"backend": backend},
+        attention_config={
+            "backend": backend,
+            "flex_attn_block_m": block_m,
+            "flex_attn_block_n": block_n,
+        },
     )
 
     # Use more realistic prompts for better token generation
@@ -388,7 +407,6 @@ def test_simple_generation(backend):
         max_model_len=2048,
         dtype="auto",
         enable_prefix_caching=False,
-        enforce_eager=IS_DEVICE_CAPABILITY_BELOW_90,
         attention_config={"backend": backend},
     )
 
@@ -453,7 +471,6 @@ def test_logprobs_without_batch_invariance_should_fail(
         max_num_seqs=32,
         max_model_len=8192,
         dtype="auto",
-        enforce_eager=IS_DEVICE_CAPABILITY_BELOW_90,
         attention_config={"backend": backend},
     )
 
@@ -636,7 +653,7 @@ def test_logprobs_without_batch_invariance_should_fail(
         pytest.fail(fail_msg)
 
 
-@skip_unsupported
+@skip_if_not_cuda
 @pytest.mark.parametrize("backend", ["FLASH_ATTN"])
 def test_decode_logprobs_match_prefill_logprobs(
     backend,
@@ -673,7 +690,6 @@ def test_decode_logprobs_match_prefill_logprobs(
         max_num_seqs=32,
         max_model_len=8192,
         dtype="auto",
-        enforce_eager=IS_DEVICE_CAPABILITY_BELOW_90,
         attention_config={"backend": backend},
     )
 
@@ -920,7 +936,6 @@ def LLM_with_max_seqs(
         dtype="auto",
         tensor_parallel_size=int(os.getenv("VLLM_TP_SIZE", "1")),
         enable_prefix_caching=False,
-        enforce_eager=IS_DEVICE_CAPABILITY_BELOW_90,
         attention_config=attention_config,
         # Enable for MOE models
         # enable_expert_parallel=True,

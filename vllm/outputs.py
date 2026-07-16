@@ -104,6 +104,7 @@ class RequestOutput:
                                   None if decoder-only.
         num_cached_tokens: The number of tokens with prefix cache hit.
         kv_transfer_params: The params for remote K/V transfer.
+        ec_transfer_params: The params for remote encoder-cache transfer.
     """
 
     def __init__(
@@ -121,7 +122,7 @@ class RequestOutput:
         num_cached_tokens: int | None = None,
         *,
         kv_transfer_params: dict[str, Any] | None = None,
-        prompt_routed_experts: np.ndarray | None = None,
+        ec_transfer_params: dict[str, Any] | None = None,
         # Forward compatibility, code that uses args added in new release can
         # still run with older versions of vLLM without breaking.
         **kwargs: Any,
@@ -142,15 +143,14 @@ class RequestOutput:
         self.encoder_prompt_token_ids = encoder_prompt_token_ids
         self.num_cached_tokens = num_cached_tokens
         self.kv_transfer_params = kv_transfer_params
-        self.prompt_routed_experts = prompt_routed_experts
+        self.ec_transfer_params = ec_transfer_params
 
     def add(self, next_output: "RequestOutput", aggregate: bool) -> None:
         """Merge subsequent RequestOutput into this one"""
 
         self.finished |= next_output.finished
         self.kv_transfer_params = next_output.kv_transfer_params
-        if next_output.prompt_routed_experts is not None:
-            self.prompt_routed_experts = next_output.prompt_routed_experts
+        self.ec_transfer_params = next_output.ec_transfer_params
 
         for next_completion in next_output.outputs:
             for i, completion in enumerate(self.outputs):

@@ -114,6 +114,23 @@ except (ImportError, ModuleNotFoundError):
 logger = init_logger(__name__)
 
 
+def unpad_and_flat_audio_features(
+    input_audio_features: torch.Tensor,
+    audio_feature_lengths: torch.Tensor,
+) -> torch.Tensor:
+    """Unpad and flatten batched audio features."""
+    if len(audio_feature_lengths) != input_audio_features.size(0):
+        raise ValueError(
+            "Length of audio_feature_lengths must match "
+            "the batch size of input_audio_features."
+        )
+    unpadded_features = [
+        audio_feature[..., :length]
+        for audio_feature, length in zip(input_audio_features, audio_feature_lengths)
+    ]
+    return torch.cat(unpadded_features, dim=-1)
+
+
 def check_interleaved_audio_video(
     is_video: torch.Tensor,
     is_audio: torch.Tensor,
@@ -278,15 +295,15 @@ def create_qwen2_5_omni_thinker_field_factory(
             image_embeds=MultiModalFieldConfig.flat_from_sizes(
                 "image", image_embed_grid_sizes
             ),
-            image_grid_thw=MultiModalFieldConfig.batched("image"),
+            image_grid_thw=MultiModalFieldConfig.batched("image", keep_on_cpu=True),
             pixel_values_videos=MultiModalFieldConfig.flat_from_sizes(
                 "video", video_grid_sizes
             ),
             video_embeds=MultiModalFieldConfig.flat_from_sizes(
                 "video", video_embed_grid_sizes
             ),
-            video_grid_thw=MultiModalFieldConfig.batched("video"),
-            second_per_grid_ts=MultiModalFieldConfig.batched("video"),
+            video_grid_thw=MultiModalFieldConfig.batched("video", keep_on_cpu=True),
+            second_per_grid_ts=MultiModalFieldConfig.batched("video", keep_on_cpu=True),
             use_audio_in_video=MultiModalFieldConfig.shared("video", num_videos),
         )
 
@@ -886,6 +903,17 @@ class Qwen2_5OmniConditionalGenerationMixin:
         feature_attention_mask = kwargs.pop("feature_attention_mask", None)
         if input_audio_features is None:
             return None
+
+        # inputs features from rust frontend is batched and padded
+        # with shape [batch_size, n_mels, padded_seq_len], different
+        # from python's shape [n_mels, batch_size * seq_len]
+        if (
+            isinstance(input_audio_features, torch.Tensor)
+            and input_audio_features.dim() == 3
+        ):
+            input_audio_features = unpad_and_flat_audio_features(
+                input_audio_features, audio_feature_lengths
+            )
 
         return Qwen2_5OmniAudioFeatureInputs(
             type="audio_features",

@@ -16,6 +16,135 @@ from vllm.transformers_utils.config import try_get_safetensors_metadata
 from ..registry import _MULTIMODAL_EXAMPLE_MODELS, HF_EXAMPLE_MODELS
 
 
+def test_cosmos3_new_checkpoint_weights_mapper():
+    from vllm.model_executor.models.cosmos3 import Cosmos3ForConditionalGeneration
+
+    mapper = Cosmos3ForConditionalGeneration.hf_to_vllm_mapper
+
+    assert mapper.apply_list(
+        [
+            "layers.0.self_attn.to_q.weight",
+            "layers.0.self_attn.to_k.weight",
+            "layers.0.self_attn.to_v.weight",
+            "layers.0.self_attn.to_out.weight",
+            "layers.0.self_attn.norm_q.weight",
+            "layers.0.self_attn.norm_k.weight",
+            "embed_tokens.weight",
+            "norm.weight",
+            "lm_head.weight",
+            "blocks.0.attn.qkv.weight",
+        ]
+    ) == [
+        "language_model.model.layers.0.self_attn.q_proj.weight",
+        "language_model.model.layers.0.self_attn.k_proj.weight",
+        "language_model.model.layers.0.self_attn.v_proj.weight",
+        "language_model.model.layers.0.self_attn.o_proj.weight",
+        "language_model.model.layers.0.self_attn.q_norm.weight",
+        "language_model.model.layers.0.self_attn.k_norm.weight",
+        "language_model.model.embed_tokens.weight",
+        "language_model.model.norm.weight",
+        "language_model.lm_head.weight",
+        "visual.blocks.0.attn.qkv.weight",
+    ]
+
+    assert (
+        mapper.apply_list(
+            [
+                "layers.0.self_attn.add_q_proj.weight",
+                "layers.0.self_attn.add_k_proj.weight",
+                "layers.0.self_attn.add_v_proj.weight",
+                "layers.0.self_attn.to_add_out.weight",
+                "layers.0.self_attn.norm_added_q.weight",
+                "layers.0.self_attn.norm_added_k.weight",
+                "layers.0.self_attn.q_proj_moe_gen.weight",
+                "layers.0.mlp_moe_gen.gate_up_proj.weight",
+                "norm_moe_gen.weight",
+                "proj_in.weight",
+                "proj_out.weight",
+                "time_embedder.linear_1.weight",
+                "audio_proj_in.weight",
+                "audio_proj_out.weight",
+                "action_proj_in.weight",
+                "action_proj_out.weight",
+                "audio_modality_embed",
+                "action_modality_embed",
+            ]
+        )
+        == []
+    )
+
+
+def test_cosmos3_edge_checkpoint_weights_mapper():
+    from vllm.model_executor.models.cosmos3_edge import (
+        Cosmos3EdgeForConditionalGeneration,
+    )
+
+    mapper = Cosmos3EdgeForConditionalGeneration.hf_to_vllm_mapper
+
+    assert mapper.apply_list(
+        [
+            "embed_tokens.weight",
+            "norm.weight",
+            "layers.0.input_layernorm.weight",
+            "layers.0.self_attn.to_q.weight",
+            "layers.0.self_attn.to_k.weight",
+            "layers.0.self_attn.to_v.weight",
+            "layers.0.self_attn.to_out.weight",
+            "layers.0.post_attention_layernorm.weight",
+            "layers.0.mlp.up_proj.weight",
+            "layers.0.mlp.down_proj.weight",
+            "layers.27.input_layernorm.weight",
+            "layers.27.self_attn.to_q.weight",
+            "layers.27.post_attention_layernorm.weight",
+            "layers.27.mlp.down_proj.weight",
+            "model.visual.embeddings.patch_embedding.weight",
+            "model.visual.encoder.layers.0.self_attn.q_proj.weight",
+            "model.projector.linear_fc1.weight",
+            "lm_head.weight",
+        ]
+    ) == [
+        "language_model.model.embed_tokens.weight",
+        "language_model.model.norm_f.weight",
+        "language_model.model.layers.0.norm.weight",
+        "language_model.model.layers.0.mixer.qkv_proj.weight",
+        "language_model.model.layers.0.mixer.qkv_proj.weight",
+        "language_model.model.layers.0.mixer.qkv_proj.weight",
+        "language_model.model.layers.0.mixer.o_proj.weight",
+        "language_model.model.layers.1.norm.weight",
+        "language_model.model.layers.1.mixer.up_proj.weight",
+        "language_model.model.layers.1.mixer.down_proj.weight",
+        "language_model.model.layers.54.norm.weight",
+        "language_model.model.layers.54.mixer.qkv_proj.weight",
+        "language_model.model.layers.55.norm.weight",
+        "language_model.model.layers.55.mixer.down_proj.weight",
+        "visual.encoder.embeddings.patch_embedding.weight",
+        "visual.encoder.encoder.layers.0.self_attn.qkv_proj.weight",
+        "visual.projector.linear_fc1.weight",
+        "language_model.lm_head.weight",
+    ]
+
+    assert (
+        mapper.apply_list(
+            [
+                "layers.0.self_attn.add_q_proj.weight",
+                "layers.0.self_attn.add_k_proj.weight",
+                "layers.0.self_attn.add_v_proj.weight",
+                "layers.0.self_attn.to_add_out.weight",
+                "layers.0.self_attn.norm_added_q.weight",
+                "layers.0.self_attn.norm_added_k.weight",
+                "layers.0.self_attn.q_proj_moe_gen.weight",
+                "layers.0.mlp_moe_gen.up_proj.weight",
+                "norm_moe_gen.weight",
+                "proj_in.weight",
+                "proj_out.weight",
+                "audio_modality_embed",
+                "action_modality_embed",
+            ]
+        )
+        == []
+    )
+
+
 def create_repo_dummy_weights(repo: str) -> Iterable[tuple[str, torch.Tensor]]:
     """Create weights from safetensors checkpoint metadata"""
     metadata = try_get_safetensors_metadata(repo)
