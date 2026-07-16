@@ -77,6 +77,10 @@ def launch_lm_eval(eval_config, tp_size):
         if rocm_load_strategy is not None:
             model_args += f"safetensors_load_strategy={rocm_load_strategy},"
 
+    tokenizer_mode = eval_config.get("tokenizer_mode", None)
+    if tokenizer_mode is not None:
+        model_args += f"tokenizer_mode={tokenizer_mode},"
+
     env_vars = eval_config.get("env_vars", None)
     with scoped_env_vars(env_vars):
         results = lm_eval.simple_evaluate(
