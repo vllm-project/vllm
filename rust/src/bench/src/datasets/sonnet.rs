@@ -21,7 +21,7 @@ const BASE_PROMPT: &str = "Pick as many lines as you can from these poem lines:\
 /// Shakespeare's sonnets, public domain. Bundled so `--dataset-name sonnet` works
 /// out of the box without `--dataset-path`. Source:
 /// https://raw.githubusercontent.com/vllm-project/vllm/main/benchmarks/sonnet.txt
-const BUILTIN_SONNET: &str = include_str!("../../sonnet.txt");
+const BUILTIN_SONNET: &str = include_str!("sonnet.txt");
 
 /// Load the sonnet dataset and generate `num_requests` prompts targeting `input_len`
 /// total prompt tokens.
