@@ -8,7 +8,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Collection, Iterable, Sequence
 from dataclasses import dataclass, field
 from enum import Enum, auto
-from typing import TYPE_CHECKING, Any, NamedTuple, NewType, TypeVar
+from typing import TYPE_CHECKING, Any, ClassVar, NamedTuple, NewType, TypeVar
 
 import numpy as np
 import torch
@@ -48,10 +48,40 @@ def get_offload_group_idx(key: OffloadKey) -> int:
 _T = TypeVar("_T")
 
 
+class Medium(Enum):
+    """Storage medium of an offloading tier."""
+
+    CPU = "cpu"
+    STORAGE = "storage"
+
+
+KV_LOAD_TIERS_KEY = "kv_load_tiers"
+
+
+@dataclass(frozen=True)
+class TierFilter:
+    """Per-request filter controlling which tiers participate."""
+
+    matchers: tuple[dict[str, str], ...] = ()
+
+    ALL: ClassVar["TierFilter"]
+
+    def allows(self, medium: Medium) -> bool:
+        if self is TierFilter.ALL:
+            return True
+        return any(
+            "medium" not in m or m["medium"] == medium.value for m in self.matchers
+        )
+
+
+TierFilter.ALL = TierFilter(matchers=({},))
+
+
 @dataclass
 class ReqContext:
     req_id: str
     kv_transfer_params: dict[str, Any] | None = None
+    load_tier_filter: TierFilter = TierFilter.ALL
     # Per-request scratch space keyed by value type, so a tier can parse
     # kv_transfer_params once (in on_new_request) and read the result back
     # on later calls for the same request.

@@ -14,6 +14,7 @@ from vllm.logger import init_logger
 from vllm.v1.kv_offload.base import (
     Locality,
     LookupResult,
+    Medium,
     OffloadingEvent,
     OffloadKey,
     ReqContext,
@@ -99,6 +100,7 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
     """
 
     medium: ClassVar[str] = MEDIUM_OBJ
+    filter_medium: ClassVar[Medium | None] = Medium.STORAGE
 
     def __init__(
         self,
@@ -267,6 +269,10 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
         self._transfers[job_id] = TransferEntry(xfer_handle, files_desc, obj_handle)
 
     def lookup(self, key: OffloadKey, req_context: ReqContext) -> LookupResult:
+        if self.filter_medium is not None and not req_context.load_tier_filter.allows(
+            self.filter_medium
+        ):
+            return LookupResult.MISS
         result = self._lookup_manager.lookup(key, req_context)
         if result is None:
             return LookupResult.RETRY
