@@ -501,7 +501,7 @@ class PCPManager:
 
     def prepare_attn(
         self, input_batch: InputBatch
-    ) -> tuple[tuple[torch.Tensor, ...], torch.Tensor, torch.Tensor]:
+    ) -> tuple[tuple[torch.Tensor, ...], torch.Tensor]:
         assert self._block_tables is not None
         assert self._local_block_tables is not None
         assert self._local_block_table_ptrs is not None
@@ -512,7 +512,7 @@ class PCPManager:
             out_ptrs=self._local_block_table_ptrs,
         )
         slot_mappings = self.prepare_slot_mappings()
-        return block_tables, slot_mappings, slot_mappings
+        return block_tables, slot_mappings
 
     def prepare_slot_mappings(self) -> torch.Tensor:
         assert self._block_tables is not None
@@ -527,6 +527,11 @@ class PCPManager:
             out=self._global_batch_slot_mappings,
         )
         return self._convert_to_gathered_slot_mappings(global_batch_slot_mappings)
+
+    def get_dummy_slot_mappings(self, num_tokens: int) -> torch.Tensor:
+        assert self._gathered_kv_slot_mappings is not None
+        self._gathered_kv_slot_mappings.fill_(PAD_SLOT_ID)
+        return self._gathered_kv_slot_mappings[:, : num_tokens * self.pcp_world_size]
 
     def _convert_to_gathered_slot_mappings(
         self,
@@ -580,11 +585,22 @@ def maybe_partition_pcp_batch(
     return manager.partition_batch(input_batch)
 
 
+def maybe_get_pcp_dummy_slot_mappings(
+    manager: PCPManager | None,
+    block_tables: BlockTables,
+    num_tokens: int,
+) -> torch.Tensor:
+    if manager is None:
+        return block_tables.get_dummy_slot_mappings(num_tokens)
+    return manager.get_dummy_slot_mappings(num_tokens)
+
+
 def maybe_restore_pcp_for_sampling(
     manager: PCPManager | None,
-    hidden_states: torch.Tensor,
+    hidden_states: torch.Tensor | None,
     input_batch: InputBatch,
 ) -> tuple[torch.Tensor, InputBatch]:
+    assert hidden_states is not None
     if manager is None:
         return hidden_states, input_batch
     return manager.restore_for_sampling(hidden_states)
