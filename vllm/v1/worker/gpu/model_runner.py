@@ -1108,7 +1108,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             input_batch.query_start_loc,
             input_batch.positions,
             num_tokens_padded=input_batch.num_tokens_after_padding,
-            is_padding=input_batch.is_padding if envs.VLLM_MOE_SKIP_PADDING else None,
         )
         return block_tables, slot_mappings
 
