@@ -26,6 +26,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheSpecKind,
 )
 from vllm.v1.kv_offload.base import (
+    Locality,
     OffloadingEvent,
     OffloadingKVEventsConfig,
     OffloadKey,
@@ -105,7 +106,7 @@ def _record_chunks(
 
 def _stored_event(
     keys: list[OffloadKey],
-    locality: str | None = None,
+    locality: Locality | None = None,
     medium: str = _CPU_MEDIUM,
 ) -> OffloadingEvent:
     return OffloadingEvent(
@@ -118,7 +119,7 @@ def _stored_event(
 
 def _removed_event(
     keys: list[OffloadKey],
-    locality: str | None = None,
+    locality: Locality | None = None,
     medium: str = _CPU_MEDIUM,
 ) -> OffloadingEvent:
     return OffloadingEvent(
@@ -135,7 +136,9 @@ def test_take_events_forwards_locality_to_rich_store():
     key = _record_chunks(tracker, req, _group_config(), num_chunks=1)[0]
 
     events = list(
-        tracker.take_events([_stored_event([key], locality="LOCAL", medium=MEDIUM_FS)])
+        tracker.take_events(
+            [_stored_event([key], locality=Locality.LOCAL, medium=MEDIUM_FS)]
+        )
     )
 
     assert len(events) == 1
@@ -149,7 +152,9 @@ def test_take_events_forwards_locality_to_placeholder_store():
     key = _record_chunks(tracker, req, _group_config(), num_chunks=1)[0]
 
     events = list(
-        tracker.take_events([_stored_event([key], locality="REMOTE", medium=MEDIUM_FS)])
+        tracker.take_events(
+            [_stored_event([key], locality=Locality.REMOTE, medium=MEDIUM_FS)]
+        )
     )
 
     assert len(events) == 1
@@ -164,7 +169,9 @@ def test_take_events_forwards_locality_to_remove():
     key = _record_chunks(tracker, req, _group_config(), num_chunks=1)[0]
 
     events = list(
-        tracker.take_events([_removed_event([key], locality="LOCAL", medium=MEDIUM_FS)])
+        tracker.take_events(
+            [_removed_event([key], locality=Locality.LOCAL, medium=MEDIUM_FS)]
+        )
     )
 
     assert len(events) == 1

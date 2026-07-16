@@ -97,13 +97,31 @@ class PrepareStoreOutput:
     evicted_keys: list[OffloadKey]
 
 
+class Locality(Enum):
+    """Locality of a tier's storage relative to the publishing instance."""
+
+    LOCAL = "LOCAL"
+    REMOTE = "REMOTE"
+
+
+def parse_locality(value: str | None) -> Locality | None:
+    if value is None:
+        return None
+    try:
+        return Locality(value)
+    except ValueError:
+        raise ValueError(
+            f"locality must be 'LOCAL', 'REMOTE', or None, got {value!r}"
+        ) from None
+
+
 @dataclass
 class OffloadingEvent:
     keys: list[OffloadKey]
     medium: str
     # True if blocks are removed, False if stored
     removed: bool
-    locality: str | None = None
+    locality: Locality | None = None
 
 
 """

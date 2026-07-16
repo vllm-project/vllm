@@ -16,6 +16,7 @@ from vllm.v1.kv_offload.base import (
     OffloadingEvent,
     OffloadKey,
     ReqContext,
+    parse_locality,
 )
 from vllm.v1.kv_offload.file_mapper import FileMapper
 from vllm.v1.kv_offload.tiering.async_lookup import AsyncLookupManager
@@ -125,11 +126,7 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
                 to the publishing vLLM instance.
         """
         super().__init__(offloading_spec, primary_kv_view, tier_type)
-        if locality not in (None, "LOCAL", "REMOTE"):
-            raise ValueError(
-                f"locality must be 'LOCAL', 'REMOTE', or None, got {locality!r}"
-            )
-        self.locality = locality
+        self.locality = parse_locality(locality)
 
         self.events: list[OffloadingEvent] | None = None
         if enable_kv_events:

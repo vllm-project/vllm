@@ -19,6 +19,7 @@ import pytest
 import torch
 
 from vllm.v1.kv_offload.base import (
+    Locality,
     LookupResult,
     OffloadingKVEventsConfig,
     OffloadKey,
@@ -473,13 +474,16 @@ class TestObjTierKVEvents:
         assert events[0].keys == keys
         # Literal medium pins the wire contract, not just the constant choice.
         assert events[0].medium == "OBJ"
-        assert events[0].locality == "REMOTE"
+        assert events[0].locality is Locality.REMOTE
         assert not events[0].removed
         # take_events drains the buffer.
         assert list(self.tier.take_events()) == []
 
-    @pytest.mark.parametrize("locality", [None, "LOCAL"])
-    def test_store_event_uses_configured_locality(self, locality):
+    @pytest.mark.parametrize(
+        ("locality", "expected"),
+        [(None, None), ("LOCAL", Locality.LOCAL)],
+    )
+    def test_store_event_uses_configured_locality(self, locality, expected):
         locality_config = {} if locality is None else {"locality": locality}
         tier, _ = _make_tier(
             offloading_spec=_make_events_spec(enable_kv_cache_events=True),
@@ -492,7 +496,7 @@ class TestObjTierKVEvents:
 
             events = list(tier.take_events())
             assert len(events) == 1
-            assert events[0].locality == locality
+            assert events[0].locality is expected
         finally:
             tier.shutdown()
 

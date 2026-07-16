@@ -20,6 +20,7 @@ import torch
 
 from vllm.distributed.kv_events import MEDIUM_FS
 from vllm.v1.kv_offload.base import (
+    Locality,
     LookupResult,
     OffloadingEvent,
     OffloadingKVEventsConfig,
@@ -27,6 +28,7 @@ from vllm.v1.kv_offload.base import (
     ReqContext,
     ScheduleEndContext,
     make_offload_key,
+    parse_locality,
 )
 from vllm.v1.kv_offload.config import (
     OffloadingCacheConfig,
@@ -265,6 +267,27 @@ def test_invalid_locality_raises_at_construction(tmp_path):
         )
 
 
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("LOCAL", Locality.LOCAL),
+        ("REMOTE", Locality.REMOTE),
+        (None, None),
+    ],
+)
+def test_parse_locality(value, expected):
+    assert parse_locality(value) is expected
+
+
+def test_parse_locality_rejects_invalid_value():
+    with pytest.raises(ValueError) as exc_info:
+        parse_locality("local")
+
+    assert str(exc_info.value) == (
+        "locality must be 'LOCAL', 'REMOTE', or None, got 'local'"
+    )
+
+
 def test_failed_load_missing_file(fs_tier):
     """Test that loading a block whose file does not exist results in a failed job."""
     tier, _ = fs_tier
@@ -456,14 +479,17 @@ def test_successful_store_emits_stored_event(fs_tier_with_events):
     assert events[0].keys == keys
     # Literal medium pins the wire contract, not just the constant choice.
     assert events[0].medium == "FS"
-    assert events[0].locality == "LOCAL"
+    assert events[0].locality is Locality.LOCAL
     assert not events[0].removed
     # take_events drains the buffer.
     assert list(tier.take_events()) == []
 
 
-@pytest.mark.parametrize("locality", [None, "REMOTE"])
-def test_store_event_uses_configured_locality(tmp_path, locality):
+@pytest.mark.parametrize(
+    ("locality", "expected"),
+    [(None, None), ("REMOTE", Locality.REMOTE)],
+)
+def test_store_event_uses_configured_locality(tmp_path, locality, expected):
     tensor = _page_aligned_zero_tensor(4, _BLOCK_ELEMENTS)
     locality_config = {} if locality is None else {"locality": locality}
     tier = FileSystemTierManager(
@@ -480,7 +506,7 @@ def test_store_event_uses_configured_locality(tmp_path, locality):
 
         events = list(tier.take_events())
         assert len(events) == 1
-        assert events[0].locality == locality
+        assert events[0].locality is expected
     finally:
         tier.shutdown()
 
