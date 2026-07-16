@@ -424,6 +424,7 @@ def compile_flash_attn_varlen_func_from_specs(
     v_shape: tuple[int, ...],
     q_dtype: torch.dtype,
     v_stride: tuple[int, ...] | None = None,
+    k_stride: tuple[int, ...] | None = None,
     cu_seqlens_q_shape: tuple[int, ...] | None = None,
     cu_seqlens_k_shape: tuple[int, ...] | None = None,
     max_seqlen_q: int | None = None,
@@ -436,6 +437,12 @@ def compile_flash_attn_varlen_func_from_specs(
     return_softmax_lse=False,
     num_splits: int = 0,
     fa_version: int = DEFAULT_FA_VERSION,
+    seqused_k_shape: tuple[int, ...] | None = None,
+    page_table_shape: tuple[int, ...] | None = None,
+    q_descale: bool = False,
+    k_descale: bool = False,
+    v_descale: bool = False,
+    softcap: float | None = None,
 ) -> None:
     if fa_version != 4:
         raise ValueError(
@@ -465,15 +472,22 @@ def compile_flash_attn_varlen_func_from_specs(
         v_shape=v_shape,
         q_dtype=q_dtype,
         v_stride=v_stride,
+        k_stride=k_stride,
         cu_seqlens_q_shape=cu_seqlens_q_shape,
         cu_seqlens_k_shape=cu_seqlens_k_shape,
+        seqused_k_shape=seqused_k_shape,
+        page_table_shape=page_table_shape,
         max_seqlen_q=max_seqlen_q,
         max_seqlen_k=max_seqlen_k,
         softmax_scale=softmax_scale,
         causal=causal,
+        softcap=softcap,
         window_size=real_window_size,
         num_splits=num_splits,
         return_lse=return_softmax_lse,
+        q_descale=q_descale,
+        k_descale=k_descale,
+        v_descale=v_descale,
     )
 
 

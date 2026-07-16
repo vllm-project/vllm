@@ -10,6 +10,14 @@ import numpy as np
 import torch
 
 from vllm.model_executor.layers.attention import Attention
+from vllm.model_executor.warmup.cutedsl_warmup import (
+    CuTeDSLCompileUnit,
+    register_cutedsl_warmup_provider,
+)
+from vllm.model_executor.warmup.fa4_dense_config import (
+    FA4DenseCompileContext,
+    iter_fa4_dense_compile_units,
+)
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import (
     canonicalize_singleton_dim_strides,
@@ -47,6 +55,7 @@ from vllm.config import (
     get_layers_from_vllm_config,
 )
 from vllm.config.cache import CacheDType
+from vllm.config.compilation import CompilationMode
 from vllm.distributed.parallel_state import get_dcp_group
 from vllm.logger import init_logger
 from vllm.platforms.interface import DeviceCapability
@@ -378,6 +387,16 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
         self.max_num_splits = 0  # No upper bound on the number of splits.
         self.aot_schedule = get_flash_attn_version() == 3
 
+        self.vllm_flash_attn_version = get_flash_attn_version(head_size=self.headdim)
+        # Dense-FA4 warmup compiles kernels for contiguous query/paged-KV layouts
+        # produced by the vLLM-compile path. Under eager, tensors can be strided
+        # views, so restrict warmup to the compiled path and let eager JIT normally.
+        if (
+            self.vllm_flash_attn_version == 4
+            and self.compilation_config.mode == CompilationMode.VLLM_COMPILE
+        ):
+            register_cutedsl_warmup_provider(self)
+
         try:
             from vllm.distributed.parallel_state import get_dcp_group
 
@@ -443,6 +462,24 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
             self.persistent_rswa_window_tensor = torch.tensor(
                 [self.rswa_window], dtype=torch.int32, device=self.device
             )
+
+    def get_cutedsl_warmup_compile_units(self) -> tuple[CuTeDSLCompileUnit, ...]:
+        if self.vllm_flash_attn_version != 4:
+            return ()
+        dtype = self.model_config.dtype
+        if dtype not in (torch.bfloat16, torch.float16):
+            dtype = torch.bfloat16
+        ctx = FA4DenseCompileContext(
+            dtype=dtype,
+            num_qo_heads=self.num_heads_q,
+            num_kv_heads=self.num_heads_kv,
+            head_dim=self.headdim,
+            page_size=self.block_size,
+            max_blocks_per_seq=cdiv(self.model_config.max_model_len, self.block_size),
+            scale=self.headdim**-0.5,
+            fa_version=self.vllm_flash_attn_version,
+        )
+        return tuple(iter_fa4_dense_compile_units(ctx))
 
     def build(
         self,
