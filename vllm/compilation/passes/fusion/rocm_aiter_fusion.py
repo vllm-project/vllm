@@ -32,9 +32,11 @@ from ..vllm_inductor_pass import (
     fold_consecutive_reshapes,
 )
 from .matcher_utils import (
+    AITER_FUSED_RMS_GATED_FP8_GROUP_QUANT_HEAD_DIMS,
     MatcherQuantFP8,
     MatcherRMSNormGated,
     MatcherSiluAndMul,
+    RMSNORM_EPS_VALUES,
 )
 from .rms_quant_fusion import (
     FusedRMSQuantKey,
@@ -589,7 +591,7 @@ class RocmAiterRMSNormQuantFusionPass(VllmPatternMatcherPass):
         # additionally covers the rms_norm -> view -> 2x quant shape that
         # appears when the FP8 linear path inserts a 2D-flatten boilerplate
         # (DSv3.2 MLA indexer q_c norm).
-        for epsilon in [1e-5, 1e-6]:
+        for epsilon in RMSNORM_EPS_VALUES:
             # Fuse aiter rms_norm + 2x aiter group fp8 quant
             DoubleAiterRMSFp8GroupQuantPattern(
                 epsilon, FP8_DTYPE, GroupShape(1, 128)
@@ -639,7 +641,10 @@ class RocmAiterRMSNormQuantFusionPass(VllmPatternMatcherPass):
             # an aiter version that includes the GDN triton kernel renames.
             if gated_norm_shapes and rocm_aiter_ops.are_gdn_triton_kernels_available():
                 for num_heads, head_dim in gated_norm_shapes:
-                    if head_dim != 128:
+                    if (
+                        head_dim
+                        not in AITER_FUSED_RMS_GATED_FP8_GROUP_QUANT_HEAD_DIMS
+                    ):
                         continue
                     AiterRMSNormGatedFp8GroupQuantPattern(
                         epsilon,
@@ -706,7 +711,10 @@ class AiterSiluMulFp8GroupQuantPattern(VllmPatternReplacement):
         def _replacement(
             input: torch.Tensor,
         ) -> tuple[torch.Tensor, torch.Tensor]:
-            at = self.FUSED_SILU_MUL_QUANT_OP(x=input, group_size=128)
+            at = self.FUSED_SILU_MUL_QUANT_OP(
+                x=input,
+                group_size=128,
+            )
             return at[0], at[1]
 
         return _replacement
@@ -821,7 +829,7 @@ class RocmAiterTritonAddRMSNormPadFusionPass(VllmPatternMatcherPass):
         # gpt-oss has hidden size 2880
         # padded to a multiple of 128 on gfx942 and 256 on gfx950 respectively
         hidden_size = 2880
-        for epsilon in [1e-5, 1e-6]:
+        for epsilon in RMSNORM_EPS_VALUES:
             for x_pad_to_multiple in [128, 256]:
                 AddAiterRMSNormPadPattern(
                     epsilon, hidden_size, x_pad_to_multiple
@@ -1066,6 +1074,6 @@ class MLADualRMSNormFusionPass(VllmFusionPatternMatcherPass):
     def __init__(self, config: VllmConfig) -> None:
         super().__init__(config, "mla_dual_rms_norm_fusion_pass")
 
-        for epsilon in [1e-5, 1e-6]:
+        for epsilon in RMSNORM_EPS_VALUES:
             self.register(MLADualRMSNormPattern(epsilon))
             self.register(MLADualRMSPerTokenQuantPattern(epsilon))

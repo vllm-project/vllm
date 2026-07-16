@@ -29,6 +29,9 @@ from vllm.model_executor.layers.rotary_embedding.deepseek_scaling_rope import (
 )
 from vllm.platforms import current_platform
 
+RMSNORM_EPS_VALUES = (1e-5, 1e-6)
+AITER_FUSED_RMS_GATED_FP8_GROUP_QUANT_HEAD_DIMS = frozenset({128})
+
 ROTARY_OP = torch.ops._C.rotary_embedding.default
 FLASHINFER_ROTARY_OP = torch.ops.vllm.flashinfer_rotary_embedding.default
 
@@ -370,7 +373,10 @@ class MatcherQuantFP8(MatcherCustomOp):
                 scale=scale,
             )
         else:
-            return self.QUANT_OP(input, quant_key_group_shape.col)  # type: ignore[no-any-return]
+            return self.QUANT_OP(  # type: ignore[no-any-return]
+                input,
+                quant_key_group_shape.col,
+            )
 
     def forward_custom(
         self,
