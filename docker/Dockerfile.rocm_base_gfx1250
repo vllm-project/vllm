@@ -14,6 +14,8 @@ ARG AITER_BRANCH="main"
 ARG AITER_REPO="https://github.com/ROCm/aiter.git"
 ARG MORI_BRANCH="v1.1.0"
 ARG MORI_REPO="https://github.com/ROCm/mori.git"
+ARG TRITON_KERNEL_BRANCH="padroute"
+ARG TRITON_KERNEL_REP="https://github.com/jpvillam-amd/triton.git"
 
 # Sccache configuration (only used in release pipeline)
 ARG USE_SCCACHE
@@ -163,6 +165,15 @@ if(NOT TARGET numa::numa)
 endif()
 CMAKE
 EOF
+
+# Clone custom triton_kernels for install later
+RUN mkdir -p /app/; \
+    git clone ${TRITON_KERNEL_BRANCH} \
+    && cd triton \
+    && git checkout ${TRITON_KERNEL_BRANCH} \
+    && git submodule update --init --recursive
+ENV TRITON_KERNELS_SRC_DIR="/app/triton/python/triton_kernels/triton_kernels/"
+
 
 # Setup sccache for HIP compilation via HIP_CLANG_PATH
 # This creates wrapper scripts in a separate directory and points HIP to use them
