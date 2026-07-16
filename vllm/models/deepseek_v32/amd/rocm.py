@@ -2,216 +2,113 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import torch
-from transformers import DeepseekV2Config, DeepseekV3Config
 
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
-from vllm.config import VllmConfig
-from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.forward_context import get_forward_context
-from vllm.model_executor.layers.attention import MLAAttention
-from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.linear import (
-    ColumnParallelLinear,
-    RowParallelLinear,
-)
-from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sparse_attn_indexer import SparseAttnIndexer
-from vllm.model_executor.models.deepseek_v2 import (
-    DeepSeekV2FusedQkvAProjLinear,
-    yarn_get_mscale,
-)
-from vllm.model_executor.models.utils import extract_layer_index
-from vllm.models.deepseek_v32.common.attention import DeepseekV32Indexer
+from vllm.models.deepseek_v32.attention import DeepseekV32Attention
 from vllm.models.deepseek_v32.common.kernels import fused_norm_rope, fused_q
 from vllm.utils.torch_utils import is_quantized_kv_cache
 
 
-class DeepseekV32MLAAttention(MLAAttention):
-    # ROCm sparse MLA for DeepSeek V3.2 DSA.
+class DeepseekV32MLAAttention(DeepseekV32Attention):
+    require_fp8_kv_cache: bool = False
 
-    indexer: "DeepseekV32Indexer | None"
+    def __init__(self, vllm_config, config, prefix, topk_indices_buffer=None):
+        super().__init__(vllm_config, config, prefix, topk_indices_buffer)
 
-    def __init__(
-        self,
-        vllm_config: VllmConfig,
-        config: DeepseekV2Config | DeepseekV3Config,
-        prefix: str,
-        topk_indices_buffer: torch.Tensor | None = None,
-    ) -> None:
-        quant_config = vllm_config.quant_config
-        cache_config = vllm_config.cache_config
-
-        hidden_size = config.hidden_size
-        qk_nope_head_dim = config.qk_nope_head_dim
-        qk_rope_head_dim = config.qk_rope_head_dim
-        v_head_dim = config.v_head_dim
-        q_lora_rank = config.q_lora_rank
-        kv_lora_rank = config.kv_lora_rank
-        num_heads = config.num_attention_heads
-
-        tp_size = get_tensor_model_parallel_world_size()
-        assert num_heads % tp_size == 0
-        num_local_heads = num_heads // tp_size
-        qk_head_dim = qk_nope_head_dim + qk_rope_head_dim
-        scaling = qk_head_dim**-0.5
-        max_position_embeddings = getattr(config, "max_position_embeddings", 8192)
-
-        if config.rope_parameters["rope_type"] != "default":
-            config.rope_parameters["rope_type"] = (
-                "deepseek_yarn"
-                if config.rope_parameters.get("apply_yarn_scaling", True)
-                else "deepseek_llama_scaling"
-            )
-        if config.rope_parameters["rope_type"] == "deepseek_yarn":
-            mscale_all_dim = config.rope_parameters.get("mscale_all_dim", False)
-            scaling_factor = config.rope_parameters["factor"]
-            mscale = yarn_get_mscale(scaling_factor, float(mscale_all_dim))
-            scaling = scaling * mscale * mscale
-
-        layer_id = extract_layer_index(prefix)
-        index_topk_freq = getattr(config, "index_topk_freq", 1)
-        index_topk_pattern = getattr(config, "index_topk_pattern", None)
-        index_skip_topk_offset = getattr(config, "index_skip_topk_offset", 2)
-        if index_topk_pattern is None:
-            skip_topk = (
-                max(layer_id - index_skip_topk_offset + 1, 0) % index_topk_freq != 0
-            )
-        elif 0 <= layer_id < len(index_topk_pattern):
-            skip_topk = index_topk_pattern[layer_id] == "S"
-        else:
-            skip_topk = False
-        num_hidden_layers = getattr(config, "num_hidden_layers", None)
-        is_mtp_layer = num_hidden_layers is not None and layer_id >= num_hidden_layers
-
-        kv_b_proj = ColumnParallelLinear(
-            kv_lora_rank,
-            num_heads * (qk_nope_head_dim + v_head_dim),
-            bias=False,
-            quant_config=quant_config,
-            prefix=f"{prefix}.kv_b_proj",
-        )
-        indexer = None
-        if not skip_topk or is_mtp_layer:
-            indexer = DeepseekV32Indexer(
-                vllm_config,
-                config,
-                hidden_size,
-                q_lora_rank,
-                quant_config,
-                cache_config,
-                topk_indices_buffer,
-                prefix=f"{prefix}.indexer",
-            )
-
-        super().__init__(
-            num_heads=num_local_heads,
-            scale=scaling,
-            qk_nope_head_dim=qk_nope_head_dim,
-            qk_rope_head_dim=qk_rope_head_dim,
-            v_head_dim=v_head_dim,
-            q_lora_rank=q_lora_rank,
-            kv_lora_rank=kv_lora_rank,
-            kv_b_proj=kv_b_proj,
-            cache_config=cache_config,
-            quant_config=quant_config,
-            prefix=f"{prefix}.attn",
-            use_sparse=True,
-            indexer=indexer,
-            topk_indices_buffer=topk_indices_buffer,
-        )
-
-        self.num_local_heads = num_local_heads
-        self.qk_head_dim = qk_head_dim
-        self.indexer = indexer
-        self.topk_indices_buffer = topk_indices_buffer
-        self.skip_topk = False
-        # SparseAttnIndexer with skip_k_cache_insert=True: cache insertion is
-        # handled upstream in fused_norm_rope, so the indexer op must not
-        # re-insert. Constructed here so forward_hip() is used on ROCm instead
-        # of the raw sparse_attn_indexer function which has no ROCm path.
         self.indexer_op: SparseAttnIndexer | None = None
-        if indexer is not None:
+        if self.indexer is not None:
             self.indexer_op = SparseAttnIndexer(
-                indexer.k_cache,
-                indexer.quant_block_size,
-                indexer.scale_fmt,
-                indexer.topk_tokens,
-                indexer.head_dim,
-                indexer.max_model_len,
-                indexer.max_total_seq_len,
+                self.indexer.k_cache,
+                self.indexer.quant_block_size,
+                self.indexer.scale_fmt,
+                self.indexer.topk_tokens,
+                self.indexer.head_dim,
+                self.indexer.max_model_len,
+                self.indexer.max_total_seq_len,
                 topk_indices_buffer,
                 skip_k_cache_insert=True,
             )
-        # ROCm: accept bf16/fp16/fp8 KV caches; no hard assertion on fp8.
         self._fp8_kv = is_quantized_kv_cache(self.kv_cache_dtype)
         self._fp8_kv_needs_view = self._fp8_kv and self.kv_cache_dtype != "fp8_ds_mla"
-        self._index_rope_interleave = getattr(config, "indexer_rope_interleave", False)
 
-        self.fused_qkv_a_proj = DeepSeekV2FusedQkvAProjLinear(
-            hidden_size,
-            [q_lora_rank, kv_lora_rank + qk_rope_head_dim],
-            quant_config=quant_config,
-            prefix=f"{prefix}.fused_qkv_a_proj",
-        )
-        self.q_a_layernorm = RMSNorm(q_lora_rank, eps=config.rms_norm_eps)
-        self.q_b_proj = ColumnParallelLinear(
-            q_lora_rank,
-            num_heads * qk_head_dim,
-            bias=False,
-            quant_config=quant_config,
-            prefix=f"{prefix}.q_b_proj",
-        )
-        self.kv_a_layernorm = RMSNorm(kv_lora_rank, eps=config.rms_norm_eps)
-        self.o_proj = RowParallelLinear(
-            num_heads * v_head_dim,
-            hidden_size,
-            bias=False,
-            reduce_results=False,
-            quant_config=quant_config,
-            prefix=f"{prefix}.o_proj",
-        )
+    def _compute_ql_nope(self, q_c: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        q = self.q_b_proj(q_c)[0].view(-1, self.num_local_heads, self.qk_head_dim)
+        q_nope, q_pe = q.split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
+        q_nope = q_nope.transpose(0, 1)  # (N, tokens, P)
 
-        self.rotary_emb = get_rope(
-            qk_rope_head_dim,
-            max_position=max_position_embeddings,
-            rope_parameters=config.rope_parameters,
-            is_neox_style=False,
-        )
-        self.indexer_rope_emb = get_rope(
-            qk_rope_head_dim,
-            max_position=max_position_embeddings,
-            rope_parameters=config.rope_parameters,
-            is_neox_style=not getattr(config, "indexer_rope_interleave", False),
-        )
+        if self.is_aiter_triton_fp4_bmm_enabled:
+            from aiter.ops.triton.batched_gemm_a16wfp4 import batched_gemm_a16wfp4
 
-    def forward(  # type: ignore[override]
-        self,
-        positions: torch.Tensor,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor:
-        qkv_lora = self.fused_qkv_a_proj(hidden_states)[0]
-        q_c, kv_c, k_pe = qkv_lora.split(
-            [self.q_lora_rank, self.kv_lora_rank, self.qk_rope_head_dim], dim=-1
-        )
+            ql_nope = batched_gemm_a16wfp4(
+                q_nope, self.W_K, self.W_K_scale, transpose_bm=True, prequant=True
+            )
+        elif self.is_aiter_triton_fp8_bmm_enabled:
+            from vllm._aiter_ops import rocm_aiter_ops
 
-        if self.indexer is not None and not self.skip_topk:
-            kw = self.indexer.wk_weights_proj(hidden_states)[0]
-            index_k = kw[:, : self.indexer.head_dim]
-            index_weights = kw[:, self.indexer.head_dim :]
+            ql_nope = rocm_aiter_ops.triton_fp8_bmm(
+                q_nope, self.W_K, self.W_K_scale, group_size=128, transpose_bm=True
+            )
         else:
-            index_k = None
-            index_weights = None
+            ql_nope = torch.bmm(q_nope, self.W_UK_T).transpose(0, 1)
 
-        num_tokens = hidden_states.shape[0]
-        output = torch.empty(
-            (num_tokens, self.num_local_heads * self.v_head_dim),
-            dtype=hidden_states.dtype,
-            device=hidden_states.device,
-        )
-        self._fused_attention(
-            positions, q_c, kv_c, k_pe, index_k, index_weights, output
-        )
-        return self.o_proj(output)[0]
+        return ql_nope, q_pe
+
+    def _run_indexer(
+        self,
+        q_c: torch.Tensor,
+        index_q_fp8: torch.Tensor | None,
+        index_weights_out: torch.Tensor | None,
+    ) -> None:
+        """Run the ROCm sparse indexer (forward_hip) if this layer has an indexer."""
+        if self.indexer_op is not None:
+            self.indexer_op.forward_hip(q_c, index_q_fp8, None, index_weights_out)
+
+    def _build_q_for_attn(
+        self,
+        ql_nope: torch.Tensor,
+        mqa_q: torch.Tensor,
+        num_actual: int,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        if self._fp8_kv:
+            # fp8 KV: mqa_q is the full [ql_nope; q_pe] packed as fp8.
+            return mqa_q[:num_actual]
+
+        return (ql_nope[:num_actual], mqa_q[:num_actual])
+
+    def _compute_uv_out(
+        self,
+        attn_out: torch.Tensor,
+        output: torch.Tensor,
+        num_actual: int,
+    ) -> None:
+        x = attn_out.view(
+            num_actual, self.num_local_heads, self.kv_lora_rank
+        ).transpose(0, 1)  # (N, tokens, L)
+        out_view = output[:num_actual].view(
+            num_actual, self.num_local_heads, self.v_head_dim
+        )  # (tokens, N, V) — YQ for fp4/fp8 with transpose_bm=True
+
+        if self.is_aiter_triton_fp4_bmm_enabled:
+            from aiter.ops.triton.batched_gemm_a16wfp4 import batched_gemm_a16wfp4
+
+            batched_gemm_a16wfp4(
+                x, self.W_V, self.W_V_scale, out_view, transpose_bm=True, prequant=True
+            )
+        elif self.is_aiter_triton_fp8_bmm_enabled:
+            from vllm._aiter_ops import rocm_aiter_ops
+
+            rocm_aiter_ops.triton_fp8_bmm(
+                x,
+                self.W_V,
+                self.W_V_scale,
+                group_size=128,
+                transpose_bm=True,
+                YQ=out_view,
+            )
+        else:
+            torch.bmm(x, self.W_UV, out=out_view.transpose(0, 1))
 
     @eager_break_during_capture
     def _fused_attention(
@@ -290,26 +187,7 @@ class DeepseekV32MLAAttention(MLAAttention):
             index_rope_interleave=self._index_rope_interleave,
         )
 
-        q = self.q_b_proj(q_c)[0].view(-1, self.num_local_heads, self.qk_head_dim)
-        q_nope, q_pe = q.split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
-        q_nope = q_nope.transpose(0, 1)
-        # q_nope: (N, tokens, P); output must be (tokens, N, L)
-        # fp4/fp8 kernels with transpose_bm=True emit (B, N, L) directly;
-        # the bf16 bmm emits (N, tokens, L) and needs an explicit transpose.
-        if self.is_aiter_triton_fp4_bmm_enabled:
-            from aiter.ops.triton.batched_gemm_a16wfp4 import batched_gemm_a16wfp4
-
-            ql_nope = batched_gemm_a16wfp4(
-                q_nope, self.W_K, self.W_K_scale, transpose_bm=True, prequant=True
-            )
-        elif self.is_aiter_triton_fp8_bmm_enabled:
-            from vllm._aiter_ops import rocm_aiter_ops
-
-            ql_nope = rocm_aiter_ops.triton_fp8_bmm(
-                q_nope, self.W_K, self.W_K_scale, group_size=128, transpose_bm=True
-            )
-        else:
-            ql_nope = torch.bmm(q_nope, self.W_UK_T).transpose(0, 1)
+        ql_nope, q_pe = self._compute_ql_nope(q_c)
 
         if self.indexer is not None:
             index_q = self.indexer.wq_b(q_c)[0]
@@ -333,13 +211,7 @@ class DeepseekV32MLAAttention(MLAAttention):
             quantize_mqa=self._fp8_kv,
         )
 
-        if self.indexer_op is not None:
-            self.indexer_op.forward_hip(
-                q_c,
-                index_q_fp8,
-                None,
-                index_weights_out,
-            )
+        self._run_indexer(q_c, index_q_fp8, index_weights_out)
 
         if attn_metadata is None:
             output.zero_()
@@ -350,39 +222,9 @@ class DeepseekV32MLAAttention(MLAAttention):
         if self._fp8_kv_needs_view:
             kv_cache = kv_cache.view(torch.float8_e4m3fn)
 
-        # ROCm aiter sparse MLA backend: impl.forward_mqa handles both
-        # prefill and decode dispatch via MLASparseImpl.
-        # For bf16 KV cache, mqa_q is the RoPE'd q_pe only (quantize_mqa=False);
-        # pass (ql_nope, mqa_q) so forward_mqa's tuple path concatenates them.
-        # For fp8 KV cache, mqa_q is the full [ql_nope; q_pe] packed as fp8.
-        q_for_attn = (
-            mqa_q[:num_actual]
-            if self._fp8_kv
-            else (ql_nope[:num_actual], mqa_q[:num_actual])
-        )
+        q_for_attn = self._build_q_for_attn(ql_nope, mqa_q, num_actual)
         attn_out, _ = self.impl.forward_mqa(  # type: ignore[attr-defined]
             q_for_attn, kv_cache, attn_metadata, self
         )
-        # attn_out: (B, N, L) from forward_mqa
-        # x for bmm must be (N, B, L); out_view is (B, N, V) for fp8/fp4 YQ,
-        # transposed to (N, B, V) for the bf16 bmm.
-        x = attn_out.view(
-            num_actual, self.num_local_heads, self.kv_lora_rank
-        ).transpose(0, 1)
-        out_view = output[:num_actual].view(num_actual, self.num_local_heads, self.v_head_dim)
-        if self.is_aiter_triton_fp4_bmm_enabled:
-            from aiter.ops.triton.batched_gemm_a16wfp4 import batched_gemm_a16wfp4
 
-            # fp4: YQ shape (M, B, N) = (tokens, N_heads, v_head_dim) with transpose_bm=True
-            batched_gemm_a16wfp4(
-                x, self.W_V, self.W_V_scale, out_view, transpose_bm=True, prequant=True
-            )
-        elif self.is_aiter_triton_fp8_bmm_enabled:
-            from vllm._aiter_ops import rocm_aiter_ops
-
-            # fp8: YQ shape (M, B, N) = (tokens, N_heads, v_head_dim) with transpose_bm=True
-            rocm_aiter_ops.triton_fp8_bmm(
-                x, self.W_V, self.W_V_scale, group_size=128, transpose_bm=True, YQ=out_view
-            )
-        else:
-            torch.bmm(x, self.W_UV, out=out_view.transpose(0, 1))
+        self._compute_uv_out(attn_out, output, num_actual)

@@ -1,10 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""DeepSeek V3.2 causal LM for ROCm.
-
-instantiates DeepseekV32MLAAttention instead of DeepseekV32Attention.
-Weight loading, MoE routing, and pipeline-parallel logic are unchanged.
-"""
 
 import typing
 from collections.abc import Callable, Iterable
@@ -186,7 +181,7 @@ class DeepseekV32Model(torch.nn.Module):
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor | IntermediateTensors:
-        #raise "In amd dsv3.2 forward."
+        # raise "In amd dsv3.2 forward."
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
@@ -235,8 +230,6 @@ class DeepseekV32Model(torch.nn.Module):
             num_experts=self.config.n_routed_experts,
             num_redundant_experts=self.num_redundant_experts,
         )
-
-        #raise "In amd dsv3.2 forward."
 
         pp_missing_layer_names = get_pp_missing_layer_names(self)
         params_dict = dict(self.named_parameters())
@@ -318,12 +311,9 @@ class DeepseekV32Model(torch.nn.Module):
 
 
 class DeepseekV32ForCausalLM(DeepseekV2ForCausalLM):
-    """DSA causal LM for ROCm — DeepSeek V3.2 backbone with ROCm sparse MLA."""
- 
     model_cls = DeepseekV32Model
 
     def set_moe_parameters(self):
-        #print(f'*******************************************In AMD DPV3.2*******************************************')
         self.num_expert_groups = getattr(self.config, "n_group", 1)
         self.moe_layers = []
         self.moe_mlp_layers = []

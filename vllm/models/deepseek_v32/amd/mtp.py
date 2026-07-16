@@ -1,10 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Multi-Token Predictor for DeepSeek V3.2 on ROCm.
 
-  - ROCm aiter shared-expert fusion in load_weights
-  - DeepseekV32DecoderLayer for the decoder block inside the MTP layer
-"""
 
 import typing
 from collections.abc import Callable, Iterable
