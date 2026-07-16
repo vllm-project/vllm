@@ -4,7 +4,7 @@ import json
 import uuid
 from http import HTTPStatus
 
-from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 
 from vllm.engine.protocol import EngineClient
@@ -38,13 +38,13 @@ def _validate_payload(body: dict) -> tuple[str, dict]:
     "/fault_tolerance/apply",
     dependencies=[Depends(validate_json_request)],
     responses={
-        HTTPStatus.OK.value: {"model": dict},
+        HTTPStatus.ACCEPTED.value: {"model": dict},
         HTTPStatus.BAD_REQUEST.value: {"model": ErrorResponse},
-        HTTPStatus.REQUEST_TIMEOUT.value: {"model": ErrorResponse},
-        HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": ErrorResponse},
     },
 )
-async def process_fault_tolerance_instruction(raw_request: Request):
+async def process_fault_tolerance_instruction(
+    raw_request: Request, background_tasks: BackgroundTasks
+):
     try:
         body = await raw_request.json()
     except json.JSONDecodeError as e:
@@ -58,15 +58,36 @@ async def process_fault_tolerance_instruction(raw_request: Request):
     )
 
     client: EngineClient = raw_request.app.state.engine_client
-    try:
-        ft_result = await client.handle_fault(ft_request)
-    except Exception as e:
-        logger.error("Failed to handle fault: %s", e)
-        raise HTTPException(500, "Failed to handle fault.") from e
+    # Recovery runs cross-rank collective ops that only complete once every rank
+    # has been dispatched. Run it in the background and return immediately so the
+    # orchestrator can dispatch to all ranks without blocking; completion is
+    # observed by polling GET /fault_tolerance/status.
+    background_tasks.add_task(_run_fault_recovery, client, ft_request)
+    return JSONResponse(
+        status_code=HTTPStatus.ACCEPTED.value,
+        content={
+            "message": "Request accepted; poll /fault_tolerance/status for updates.",
+            "request_id": ft_request.request_id,
+        },
+        background=background_tasks,
+    )
 
-    if ft_result.success:
-        return JSONResponse({"message": "Instruction executed successfully."})
-    raise HTTPException(500, f"Instruction failed: {ft_result.reason}")
+
+async def _run_fault_recovery(
+    client: EngineClient, ft_request: FaultToleranceRequest
+) -> None:
+    """Drive recovery to completion after the 202 response is sent."""
+    try:
+        result = await client.handle_fault(ft_request)
+    except Exception:
+        logger.exception("[FT] Recovery dispatch failed.")
+        return
+    if not result.success:
+        logger.error(
+            "[FT] Recovery failed for request %s: %s",
+            ft_request.request_id,
+            result.reason,
+        )
 
 
 @router.get("/fault_tolerance/status")
