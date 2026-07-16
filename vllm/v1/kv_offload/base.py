@@ -8,7 +8,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Collection, Iterable, Sequence
 from dataclasses import dataclass
 from enum import Enum, auto
-from typing import TYPE_CHECKING, Any, NamedTuple, NewType
+from typing import TYPE_CHECKING, Any, ClassVar, NamedTuple, NewType
 
 import numpy as np
 import torch
@@ -45,10 +45,40 @@ def get_offload_group_idx(key: OffloadKey) -> int:
     return int.from_bytes(key[-4:], "big", signed=False)
 
 
+class Medium(Enum):
+    """Storage medium of an offloading tier."""
+
+    CPU = "cpu"
+    STORAGE = "storage"
+
+
+KV_LOAD_TIERS_KEY = "kv_load_tiers"
+
+
+@dataclass(frozen=True)
+class TierFilter:
+    """Per-request filter controlling which tiers participate."""
+
+    matchers: tuple[dict[str, str], ...] = ()
+
+    ALL: ClassVar["TierFilter"]
+
+    def allows(self, medium: Medium) -> bool:
+        if self is TierFilter.ALL:
+            return True
+        return any(
+            "medium" not in m or m["medium"] == medium.value for m in self.matchers
+        )
+
+
+TierFilter.ALL = TierFilter(matchers=({},))
+
+
 @dataclass
 class ReqContext:
     req_id: str
     kv_transfer_params: dict[str, Any] | None = None
+    load_tier_filter: TierFilter = TierFilter.ALL
 
 
 class LookupResult(Enum):

@@ -38,6 +38,7 @@ from vllm.v1.kv_cache_interface import (
     SlidingWindowSpec,
 )
 from vllm.v1.kv_offload.base import (
+    KV_LOAD_TIERS_KEY,
     GPULoadStoreSpec,
     LookupResult,
     OffloadingManager,
@@ -47,6 +48,7 @@ from vllm.v1.kv_offload.base import (
     ReqContext,
     RequestOffloadingContext,
     ScheduleEndContext,
+    TierFilter,
     make_offload_key,
 )
 from vllm.v1.outputs import KVConnectorOutput
@@ -375,9 +377,16 @@ class RequestOffloadState:
 
 
 def _create_req_context(req: Request) -> ReqContext:
+    params = req.kv_transfer_params
+    load_filter = TierFilter.ALL
+    if params:
+        raw = params.get(KV_LOAD_TIERS_KEY)
+        if raw is not None:
+            load_filter = TierFilter(matchers=tuple(raw))
     return ReqContext(
         req_id=req.request_id,
-        kv_transfer_params=req.kv_transfer_params,
+        kv_transfer_params=params,
+        load_tier_filter=load_filter,
     )
 
 
