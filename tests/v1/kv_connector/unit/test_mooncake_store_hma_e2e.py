@@ -97,14 +97,16 @@ def _build_worker_with_dict_store(vllm_config, kv_cache_config, store):
     with (
         patch.dict(sys.modules, {"mooncake.store": fake_mooncake_store}),
         patch.object(mooncake_store_worker, "MooncakeStoreConfig") as MCfg,
+        patch.object(mooncake_store_worker, "LookupKeyServer"),
     ):
-        sc = MCfg.load_from_env.return_value
+        sc = MCfg.load_from_config.return_value
         sc.metadata_server = ""
         sc.global_segment_size = 1 << 20
         sc.local_buffer_size = 1 << 20
         sc.protocol = "tcp"
         sc.device_name = ""
         sc.master_server_address = ""
+        sc.mode = "embedded"
         sc.enable_offload = False
         with (
             patch(
