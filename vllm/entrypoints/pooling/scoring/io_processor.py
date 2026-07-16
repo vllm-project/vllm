@@ -253,7 +253,7 @@ class BiEncoderIOProcessor(ScoringIOProcessor):
                 tokenization_kwargs=ctx.tokenization_kwargs,
                 pooling_params=ctx.pooling_params,
                 lora_request=ctx.lora_request,
-                priorities=None,
+                priorities=ctx.priorities,
             )
         )
 
@@ -875,7 +875,7 @@ class JinaRankingIOProcessor(LateInteractionIOProcessor, JinaRankingIOProcessorM
                 tokenization_kwargs=ctx.tokenization_kwargs,
                 pooling_params=ctx.pooling_params,
                 lora_request=ctx.lora_request,
-                priorities=None,
+                priorities=ctx.priorities,
             ),
         )
 
