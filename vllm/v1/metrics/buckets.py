@@ -7,6 +7,7 @@ boundaries from exactly one of the families defined here, so each default
 list has a single source of truth.
 """
 
+from collections.abc import Mapping
 from typing import Literal, get_args
 
 BucketFamilyKey = Literal[
@@ -192,22 +193,29 @@ def build_1_2_5_buckets(max_value: int) -> list[float]:
 def histogram_buckets(
     family: BucketFamilyKey,
     max_model_len: int | None = None,
+    overrides: Mapping[str, list[float]] | None = None,
 ) -> list[float]:
-    """Return the default bucket boundaries for a histogram family.
+    """Return the bucket boundaries for a histogram family.
 
     Args:
         family: Canonical bucket family key.
         max_model_len: Cap for the token-count series of the
             `request_tokens` family; required for that family and ignored
             otherwise.
+        overrides: Mapping from family key to replacement bucket bounds.
+            A present key replaces the family's defaults verbatim. Values
+            must already be validated; the single validation point is
+            `ObservabilityConfig.custom_histogram_buckets`.
 
     Returns:
         A fresh list of bucket upper bounds; callers may mutate it freely.
 
     Raises:
-        ValueError: If `family` is `request_tokens` and `max_model_len`
-            is None.
+        ValueError: If `family` is `request_tokens`, no override is given,
+            and `max_model_len` is None.
     """
+    if overrides is not None and (custom := overrides.get(family)) is not None:
+        return list(custom)
     if family == "request_tokens":
         if max_model_len is None:
             raise ValueError(
