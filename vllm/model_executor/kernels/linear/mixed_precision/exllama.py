@@ -16,7 +16,7 @@ from .MPLinearKernel import MPLinearKernel, MPLinearLayerConfig
 
 
 class ExllamaLinearKernel(MPLinearKernel):
-    SUPPORTED_QUANT_TYPES = [scalar_types.uint4b8, scalar_types.uint8b128]
+    SUPPORTED_QUANT_TYPES = [scalar_types.uint4, scalar_types.uint4b8, scalar_types.uint8b128]
     # In theory supports `scalar_types.uint2b2, scalar_types.uint3b4` too but
     # currently untested so not added to the list
 
@@ -110,7 +110,21 @@ class ExllamaLinearKernel(MPLinearKernel):
             setattr(
                 layer, self.w_zp_name, torch.nn.Parameter(zeros, requires_grad=False)
             )
-
+        else:
+            def transform_w_zp(x):
+                assert isinstance(x, BasevLLMParameter)
+                if c.weight_type.size_bits == 4:
+                    x.data = x.data - 0x11111111
+                elif c.weight_type.size_bits == 8:
+                    x.data = x.data - 0x01010101
+                else:
+                    raise NotImplementedError("Cannot fix GPTQ bug by simply substracting 1.")        
+                permute_param_layout_(x, input_dim=0, output_dim=1)
+                x.data = x.data.contiguous()
+                return x.to(dtype=torch.int32)
+            self._transform_param(layer, self.w_zp_name, transform_w_zp)
+            
+                
         if c.has_g_idx:
 
             def transform_w_g_idx(x):
@@ -121,6 +135,7 @@ class ExllamaLinearKernel(MPLinearKernel):
             self._transform_param(layer, self.w_gidx_name, transform_w_g_idx)  # type: ignore
         else:
             self.w_gidx_name = "g_idx"
+            device = getattr(layer, self.w_q_name).device
             empty_g_idx = torch.nn.Parameter(
                 torch.empty((0,), dtype=torch.int, device=device), requires_grad=False
             )
