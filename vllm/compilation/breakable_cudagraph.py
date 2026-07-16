@@ -33,6 +33,7 @@ from typing import Any, ClassVar, TypeVar
 import torch
 
 import vllm.envs as envs
+from vllm.compilation.breakable_cudagraph_debug import check_non_explicit_outputs
 from vllm.compilation.monitor import validate_cudagraph_capturing_enabled
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.distributed.device_communicators.pynccl_allocator import set_graph_pool_id
@@ -147,9 +148,11 @@ class BreakableCUDAGraphCapture:
     def is_active(cls) -> bool:
         return cls.current() is not None
 
-    def __init__(self, pool: Any | None = None) -> None:
+    def __init__(self, pool: Any | None = None, debug: bool = False) -> None:
         self.pool = pool
+        self.debug = debug
         self.segments: list[Callable[[], Any]] = []
+        self._non_explicit_output_errors: list[str] = []
         self._num_graphs: int = 0
         self._num_eager_breaks: int = 0
         self._current_graph: torch.cuda.CUDAGraph | None = None
@@ -169,6 +172,8 @@ class BreakableCUDAGraphCapture:
             self._end_segment()
         finally:
             BreakableCUDAGraphCapture._tls.active = None
+        if self._non_explicit_output_errors and exc_type is None:
+            raise RuntimeError("\n\n".join(self._non_explicit_output_errors))
 
     # --- segment management ----------------------------------------------
 
@@ -201,7 +206,12 @@ class BreakableCUDAGraphCapture:
         downstream dependencies via static output buffers.
         """
         self._end_segment()
-        result = fn()
+        if self.debug:
+            result, error_msg = check_non_explicit_outputs(fn, (), {})
+            if error_msg is not None:
+                self._non_explicit_output_errors.append(error_msg)
+        else:
+            result = fn()
         self.segments.append(fn)
         self._num_eager_breaks += 1
         self._begin_segment()
@@ -378,7 +388,9 @@ class BreakableCUDAGraphWrapper:
         # pre-capture prefetches are complete and don't leak into the graph.
         get_offloader().sync_prev_onload()
 
-        capture = BreakableCUDAGraphCapture(pool=self.graph_pool)
+        capture = BreakableCUDAGraphCapture(
+            pool=self.graph_pool, debug=envs.VLLM_BREAKABLE_CUDAGRAPH_DEBUG
+        )
         with capture:
             output = self.runnable(*args, **kwargs)
             # Join the offloader's copy stream while we still hold the last

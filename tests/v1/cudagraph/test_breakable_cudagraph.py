@@ -15,33 +15,6 @@ import torch
 os.environ["VLLM_USE_BREAKABLE_CUDAGRAPH"] = "1"
 
 
-@pytest.fixture(autouse=True)
-def _reset_breakable_tls():
-    """Defensively clear thread-local capture state between tests so a
-    failure in one test can't leak "nested capture" errors into the next."""
-    from vllm.compilation.breakable_cudagraph import BreakableCUDAGraphCapture
-
-    BreakableCUDAGraphCapture._tls.active = None
-    yield
-    BreakableCUDAGraphCapture._tls.active = None
-
-
-@pytest.fixture
-def cuda_capture_stream():
-    """A non-default CUDA stream suitable for cudagraph capture.
-
-    ``CUDAGraph.capture_begin`` refuses to capture from the default
-    stream, so all capture-using tests need to run under
-    ``torch.cuda.stream(...)`` for a separate stream.
-    """
-    if not torch.cuda.is_available():
-        pytest.skip("CUDA required")
-    stream = torch.cuda.Stream()
-    with torch.cuda.stream(stream):
-        yield stream
-    torch.cuda.current_stream().wait_stream(stream)
-
-
 # ---------------------------------------------------------------------------
 # eager_break_during_capture: outside capture
 # ---------------------------------------------------------------------------
