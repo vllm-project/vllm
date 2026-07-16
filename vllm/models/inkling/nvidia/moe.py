@@ -20,6 +20,7 @@ in :meth:`InklingMoE.load_expert_weight`.
 from __future__ import annotations
 
 import math
+import os
 from typing import TYPE_CHECKING
 
 import torch
@@ -36,6 +37,7 @@ from vllm.distributed import (
 )
 from vllm.model_executor.kernels.linear.cute_dsl import ll_bf16
 from vllm.model_executor.layers.fused_moe import FusedMoE
+from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, tldevice, triton
@@ -57,6 +59,9 @@ if TYPE_CHECKING:
 # ---------------------------------------------------------------------------
 
 _INKLING_LL_BF16_MAX_TOKENS = 64
+
+INKLING_FP8_SCALE_INTERLEAVED = os.environ.get(
+    "INKLING_FP8_SCALE_INTERLEAVED", "1") == "1"
 
 
 def _linear_with_fp32_out(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
@@ -350,6 +355,7 @@ class InklingMoE(nn.Module):
         layer_id: int,
         *,
         prefix: str = "",
+        quant_config: QuantizationConfig | None = None,
         nvfp4_config: InklingNvfp4Config | None = None,
     ) -> None:
         super().__init__()
@@ -371,7 +377,7 @@ class InklingMoE(nn.Module):
             use_gate_bias=config.use_gate_bias,
         )
 
-        moe_quant_config = None
+        moe_quant_config = quant_config
         if nvfp4_config is not None and nvfp4_config.experts_quantized(layer_id):
             from vllm.model_executor.layers.quantization.modelopt import (
                 ModelOptNvFp4Config,
@@ -522,7 +528,10 @@ class InklingMoE(nn.Module):
             input_scale.data.fill_(amax / (FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX))
             return [f"experts.routed_experts.{projection}_input_scale"]
 
-        param = getattr(experts, key)
+        param = getattr(experts, key, None)
+        if param is None:
+            raise ValueError(f"unhandled expert tensor {name!r} (key={key!r})")
+
         slots = self._local_expert_slots()
         gids = sorted(slots)
         lids = [slots[g] for g in gids]
@@ -533,7 +542,44 @@ class InklingMoE(nn.Module):
             # fused w13 param carries one slot per gate/up half.
             vals = weight[gids].float().to(param.device)
             param.data[lids] = vals[:, None] if param.data.ndim == 2 else vals
+
+        elif key == "w2_weight_scale":
+            if weight.shape[-1] == 1:
+                # Channelwise [E, H, 1]: per-output-channel over hidden, which is
+                # not TP-sharded for w2 — replicate whole per expert.
+                for gid, lid in slots.items():
+                    param.data[lid].copy_(weight[gid])
+            else:
+                # Block [E, H//bn, I//bk]: block-columns track w2's intermediate
+                # sharding — narrow exactly like w2_weight.
+                shard = param.shape[2]
+                for gid, lid in slots.items():
+                    param.data[lid].copy_(
+                        weight[gid].narrow(1, tp_rank * shard, shard))
+
+        elif key == "w13_weight_scale":
+            half = param.shape[1] // 2
+            for gid, lid in slots.items():
+                slab = weight[gid].narrow(0, tp_rank * 2 * half, 2 * half)
+                slab = slab.to(param.device)
+                if INKLING_FP8_SCALE_INTERLEAVED:
+                    # scale rows co-permuted with the interleaved weight
+                    param.data[lid, :half].copy_(slab[0::2])
+                    param.data[lid, half:].copy_(slab[1::2])
+                else:
+                    # scale rows stayed concatenated [gate; up]
+                    full = weight[gid]
+                    i_full = full.shape[0] // 2
+                    param.data[lid, :half].copy_(
+                        full[tp_rank * half:(tp_rank + 1) * half])
+                    param.data[lid, half:].copy_(
+                        full[i_full + tp_rank * half:
+                             i_full + (tp_rank + 1) * half])
+
         elif key.startswith("w13"):
+            assert param.dtype == weight.dtype or key != "w13_weight", (
+                f"{name}: dtype {weight.dtype} into {param.dtype} — quant/ignore "
+                "mismatch (check _remap_ct_ignore coverage for this layer)")
             # Checkpoint w13 rows are interleaved [g0, u0, g1, u1, ...]; the
             # fused param layout is [w1(gate); w3(up)]. The TP-local rows form
             # one contiguous slab of the interleaved tensor, so upload just
@@ -546,8 +592,9 @@ class InklingMoE(nn.Module):
                 slab = slab.to(param.device)
                 param.data[lid, :half].copy_(slab[0::2])
                 param.data[lid, half:].copy_(slab[1::2])
+
         else:
-            # w2: shard the packed intermediate (last) dim.
+            # w2_weight: shard the packed intermediate (last) dim.
             shard = param.shape[2]
             for gid, lid in slots.items():
                 param.data[lid].copy_(weight[gid].narrow(1, tp_rank * shard, shard))
@@ -575,4 +622,14 @@ class InklingMoE(nn.Module):
                 p = getattr(experts, pname, None)
                 if p is not None:
                     p.data[lid].zero_()
+
+        w13s = getattr(experts, "w13_weight_scale", None)
+        if w13s is not None and experts.w13_weight.dtype == torch.float8_e4m3fn:
+            sample_lid = next(iter(self._local_expert_slots().values()))
+            assert not torch.allclose(
+                w13s[sample_lid], torch.ones_like(w13s[0])
+            ), (
+                f"{self.experts.layer_name}: FP8 weight scales still at init "
+                "(never loaded)"
+            )
         return out
