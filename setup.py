@@ -445,6 +445,17 @@ class cmake_build_ext(build_ext):
                     dirs_exist_ok=True,
                 )
 
+            tml_fa4_build = os.path.join(
+                self.build_lib, "vllm", "third_party", "tml_fa4"
+            )
+            if os.path.exists(tml_fa4_build):
+                print(f"Copying {tml_fa4_build} to vllm/third_party/tml_fa4")
+                shutil.copytree(
+                    tml_fa4_build,
+                    "vllm/third_party/tml_fa4",
+                    dirs_exist_ok=True,
+                )
+
 
 class precompiled_build_ext(build_ext):
     """Disables extension building when using precompiled binaries."""
@@ -803,6 +814,7 @@ class precompiled_wheel_utils:
                 # DeepGEMM: extract all files (.py, .so, .cuh, .h, .hpp, etc.)
                 deep_gemm_regex = re.compile(r"vllm/third_party/deep_gemm/.*")
                 fmha_sm100_regex = re.compile(r"vllm/third_party/fmha_sm100/.*")
+                tml_fa4_regex = re.compile(r"vllm/third_party/tml_fa4/.*")
                 file_members = []
                 for member in wheel.filelist:
                     if member.filename in exact_members:
@@ -828,6 +840,7 @@ class precompiled_wheel_utils:
                         or triton_kernels_regex.match(member.filename)
                         or flashmla_regex.match(member.filename)
                         or deep_gemm_regex.match(member.filename)
+                        or tml_fa4_regex.match(member.filename)
                         or fmha_sm100_regex.match(member.filename)
                     ):
                         file_members.append(member)
@@ -1146,6 +1159,8 @@ if _is_cuda():
         ext_modules.append(CMakeExtension(name="vllm._qutlass_C", optional=True))
     # fmha_sm100 is a Python/CuTe-DSL package installed into vllm.third_party.
     ext_modules.append(CMakeExtension(name="vllm.fmha_sm100", optional=True))
+    # tml-fa4 is copied into an isolated vllm.third_party package.
+    ext_modules.append(CMakeExtension(name="vllm.tml_fa4", optional=True))
 
 if _is_cpu():
     import platform
