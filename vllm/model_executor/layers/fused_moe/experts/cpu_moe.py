@@ -12,7 +12,6 @@ from vllm._custom_ops import (
     fused_experts_cpu,
     fused_experts_cpu_local_skip,
 )
-from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
@@ -34,16 +33,6 @@ from vllm.platforms import current_platform
 # ===========================================================================
 # FP8 W8A16 MoE
 # ===========================================================================
-
-
-def _mask_padding_topk_ids(topk_ids: torch.Tensor) -> torch.Tensor:
-    if not is_forward_context_available():
-        return topk_ids
-    is_padding = get_forward_context().is_padding
-    if is_padding is None:
-        return topk_ids
-    n = topk_ids.shape[0]
-    return torch.where(is_padding[:n].unsqueeze(1), -1, topk_ids)
 
 
 def prepare_fp8_moe_layer_for_cpu(
@@ -180,10 +169,6 @@ class CPUExpertsFp8(mk.FusedMoEExpertsMonolithic):
             # selections entirely (instead of masking them to weight 0 and
             # still running their GEMMs), saving ~world_size x of expert
             # compute per rank.
-            # Only this local-skip path needs to mask padding rows: it drops
-            # rows by topk_ids == -1, and padding rows carry arbitrary router
-            # output that could otherwise route to a real local expert.
-            topk_ids = _mask_padding_topk_ids(topk_ids)
             return fused_experts_cpu_local_skip(
                 hidden_states,
                 w1,

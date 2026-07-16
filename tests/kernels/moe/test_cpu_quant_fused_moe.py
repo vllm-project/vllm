@@ -10,8 +10,6 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from vllm.config import VllmConfig
-from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
@@ -585,41 +583,6 @@ def test_w8a16_block_fp8_cpu_fused_moe_expert_parallel_apply(
     )
 
     torch.testing.assert_close(ref_out.bfloat16(), summed, atol=1e-2, rtol=1e-2)
-
-
-@pytest.mark.parametrize("seed", [0])
-def test_w8a16_block_fp8_cpu_ep_apply_masks_forward_padding(seed):
-    """apply() must zero padding rows even though topk_ids routes them to
-    real experts, since padding rows carry arbitrary router output."""
-    set_random_seed(seed)
-    M, N, K, E, topk, num_ranks = 8, 256, 512, 8, 2, 3
-    padded_rows = 2
-
-    a = torch.randn(M, K, dtype=torch.bfloat16) / math.sqrt(K)
-    w1, w2, w1_s, w2_s = _make_fp8_moe_weights(E, N, K, BLOCK_SIZE)
-
-    router_logits = torch.randn(M, E, dtype=torch.float32)
-    score = torch.softmax(router_logits, dim=-1)
-    topk_weight, topk_ids = torch.topk(score, topk)
-    topk_ids = topk_ids.to(torch.int32)
-    topk_ids[-padded_rows:] = -1
-
-    ref_out = ref_w8a16_block_fp8_moe(
-        a, w1, w2, w1_s, w2_s, topk_weight, topk_ids, BLOCK_SIZE
-    )
-
-    is_padding = torch.zeros(M, dtype=torch.bool)
-    is_padding[-padded_rows:] = True
-
-    with set_forward_context(None, VllmConfig(), is_padding=is_padding):
-        summed = _run_fp8_ep_apply_over_ranks(
-            a, w1, w2, w1_s, w2_s, router_logits, N, E, topk, num_ranks
-        )
-
-    torch.testing.assert_close(ref_out.bfloat16(), summed, atol=1e-2, rtol=1e-2)
-    torch.testing.assert_close(
-        summed[-padded_rows:], torch.zeros_like(summed[-padded_rows:])
-    )
 
 
 # ===========================================================================

@@ -247,25 +247,30 @@ def _ragged_dispatch_worker(
         router = _filled(local_rows, NUM_EXPERTS, float((rank + 1) * 10))
         weights = _filled(local_rows, TOPK, float((rank + 1) * 100))
         ids = torch.full((local_rows, TOPK), rank, dtype=torch.long)
+        extra = _filled(local_rows, 1, float((rank + 1) * 1000))
 
         expected_hidden = _concat_rank_values(sizes, HIDDEN_SIZE, 1.0)
         expected_router = _concat_rank_values(sizes, NUM_EXPERTS, 10.0)
         expected_weights = _concat_rank_values(sizes, TOPK, 100.0)
         expected_ids = _concat_rank_ids(sizes)
+        expected_extra = _concat_rank_values(sizes, 1, 1000.0)
 
         with _make_forward_context(rank, dp_size, local_rows, sizes):
             dp_metadata = get_forward_context().dp_metadata
             assert dp_metadata is not None
 
             with dp_metadata.sp_local_sizes(sequence_parallel_size=1):
-                gathered_hidden, gathered_router = (
+                gathered_hidden, gathered_router, gathered_extras = (
                     get_ep_group().dispatch_router_logits(
                         hidden.clone(),
                         router.clone(),
+                        extra_tensors=[extra.clone()],
                     )
                 )
                 torch.testing.assert_close(gathered_hidden, expected_hidden)
                 torch.testing.assert_close(gathered_router, expected_router)
+                assert len(gathered_extras) == 1
+                torch.testing.assert_close(gathered_extras[0], expected_extra)
 
                 gathered_hidden2, gathered_weights, gathered_ids = (
                     get_ep_group().dispatch(
@@ -289,59 +294,6 @@ def _ragged_dispatch_worker(
                     combined,
                     _expected_combined(rank, sizes, HIDDEN_SIZE),
                 )
-
-        dist.barrier()
-    except Exception as err:
-        _report_worker_failure(rank, err_q, err)
-
-
-def _ragged_dispatch_padding_worker(
-    rank,
-    world_size,
-    tp_size,
-    dp_size,
-    port,
-    dp_port,
-    sizes,
-    err_q,
-):
-    """VLLM_MOE_SKIP_PADDING gather propagation: an is_padding mask set in
-    this rank's forward context before dispatch_router_logits() must arrive,
-    gathered and thresholded, in forward_context.is_padding on every rank."""
-    try:
-        os.environ.setdefault("VLLM_DIST_IDENT", f"test_cpu_ep_comm_pad_{port}")
-        _init_tp_dp_environment(rank, tp_size, dp_size, port, dp_port)
-
-        from vllm.distributed.parallel_state import get_ep_group
-        from vllm.forward_context import get_forward_context
-
-        local_rows = sizes[rank]
-        hidden = _filled(local_rows, HIDDEN_SIZE, float(rank + 1))
-        router = _filled(local_rows, NUM_EXPERTS, float((rank + 1) * 10))
-        # Rank 0's row(s) are real; every other rank is all-padding (mirrors
-        # the conc=1 dummy-token pattern: only 1 of N DP ranks has a real
-        # token).
-        is_padding = torch.full((local_rows,), rank != 0, dtype=torch.bool)
-
-        with _make_forward_context(rank, dp_size, local_rows, sizes):
-            dp_metadata = get_forward_context().dp_metadata
-            assert dp_metadata is not None
-            get_forward_context().is_padding = is_padding
-
-            with dp_metadata.sp_local_sizes(sequence_parallel_size=1):
-                get_ep_group().dispatch_router_logits(
-                    hidden.clone(),
-                    router.clone(),
-                )
-
-            expected_mask = torch.cat(
-                [
-                    torch.full((size,), r != 0, dtype=torch.bool)
-                    for r, size in enumerate(sizes)
-                ]
-            )
-            gathered_mask = get_forward_context().is_padding
-            torch.testing.assert_close(gathered_mask, expected_mask)
 
         dist.barrier()
     except Exception as err:
@@ -388,11 +340,13 @@ def _sequence_parallel_worker(
         router = _filled(local_rows, NUM_EXPERTS, float((rank + 1) * 10))
         weights = _filled(local_rows, TOPK, float((rank + 1) * 100))
         ids = torch.full((local_rows, TOPK), rank, dtype=torch.long)
+        extra = _filled(local_rows, 1, float((rank + 1) * 1000))
 
         expected_hidden = _concat_rank_values(expected_local_sizes, HIDDEN_SIZE, 1.0)
         expected_router = _concat_rank_values(expected_local_sizes, NUM_EXPERTS, 10.0)
         expected_weights = _concat_rank_values(expected_local_sizes, TOPK, 100.0)
         expected_ids = _concat_rank_ids(expected_local_sizes)
+        expected_extra = _concat_rank_values(expected_local_sizes, 1, 1000.0)
 
         with _make_forward_context(
             dp_rank,
@@ -405,13 +359,18 @@ def _sequence_parallel_worker(
 
             with dp_metadata.sp_local_sizes(sequence_parallel_size=tp_size) as sizes:
                 assert sizes == expected_local_sizes
-                gathered_hidden, gathered_router = ep_group.dispatch_router_logits(
-                    hidden.clone(),
-                    router.clone(),
-                    is_sequence_parallel=True,
+                gathered_hidden, gathered_router, gathered_extras = (
+                    ep_group.dispatch_router_logits(
+                        hidden.clone(),
+                        router.clone(),
+                        is_sequence_parallel=True,
+                        extra_tensors=[extra.clone()],
+                    )
                 )
                 torch.testing.assert_close(gathered_hidden, expected_hidden)
                 torch.testing.assert_close(gathered_router, expected_router)
+                assert len(gathered_extras) == 1
+                torch.testing.assert_close(gathered_extras[0], expected_extra)
 
                 gathered_hidden2, gathered_weights, gathered_ids = ep_group.dispatch(
                     hidden.clone(),
@@ -453,7 +412,7 @@ def _run_compiled_fastpath(rank, sizes):
     combine_op = device_communicator._ep_combine_op
 
     def fastpath_step(hidden_states, router_logits):
-        gathered_hidden, _, _ = dispatch_op(hidden_states, router_logits)
+        gathered_hidden, _ = dispatch_op(hidden_states, router_logits)
         return combine_op(gathered_hidden) + hidden_states
 
     compiled = torch.compile(fastpath_step, fullgraph=True, backend="eager")
@@ -916,18 +875,6 @@ def test_cpu_ep_dispatch_combine_ragged(sizes):
 
 
 @pytest.mark.distributed
-@pytest.mark.parametrize("sizes", [[1, 2], [1, 0, 3]], ids=["dp2", "dp3-zero-rank"])
-def test_cpu_ep_dispatch_propagates_padding_mask(sizes):
-    _spawn_workers(
-        _ragged_dispatch_padding_worker,
-        world_size=len(sizes),
-        tp_size=1,
-        dp_size=len(sizes),
-        params=sizes,
-    )
-
-
-@pytest.mark.distributed
 def test_cpu_ep_sequence_parallel_uses_ep_group():
     _spawn_workers(
         _sequence_parallel_worker,
@@ -935,69 +882,6 @@ def test_cpu_ep_sequence_parallel_uses_ep_group():
         tp_size=2,
         dp_size=3,
         params=[3, 1, 5],
-    )
-
-
-def _non_sp_padding_reslice_worker(
-    rank,
-    world_size,
-    tp_size,
-    dp_size,
-    port,
-    dp_port,
-    dp_token_counts,
-    err_q,
-):
-    try:
-        os.environ.setdefault("VLLM_DIST_IDENT", f"test_cpu_ep_pad_reslice_{port}")
-        _init_tp_dp_environment(rank, tp_size, dp_size, port, dp_port)
-
-        from vllm.distributed.parallel_state import get_dp_group, get_ep_group
-        from vllm.forward_context import get_forward_context
-
-        dp_rank = rank // tp_size
-        local_rows = dp_token_counts[dp_rank]
-
-        is_padding = torch.zeros(local_rows, dtype=torch.bool)
-        if local_rows > 1:
-            is_padding[local_rows // 2 :] = True
-
-        hidden = _filled(local_rows, HIDDEN_SIZE, float(rank + 1))
-        router = _filled(local_rows, NUM_EXPERTS, float((rank + 1) * 10))
-
-        with _make_forward_context(dp_rank, dp_size, local_rows, dp_token_counts):
-            get_forward_context().is_padding = is_padding
-
-            get_ep_group().dispatch_router_logits(hidden.clone(), router.clone())
-
-            total_rows = sum(dp_token_counts)
-            expert_out = torch.arange(total_rows, dtype=torch.float32).unsqueeze(
-                1
-            ).expand(total_rows, HIDDEN_SIZE).contiguous() + float((dp_rank + 1) * 1000)
-            combined = get_ep_group().combine(expert_out)
-            torch.testing.assert_close(
-                combined,
-                _expected_combined(dp_rank, dp_token_counts, HIDDEN_SIZE),
-            )
-
-            assert get_dp_group().rank_in_group == dp_rank
-            torch.testing.assert_close(get_forward_context().is_padding, is_padding)
-
-        dist.barrier()
-    except Exception as err:
-        _report_worker_failure(rank, err_q, err)
-
-
-@pytest.mark.distributed
-def test_cpu_ep_combine_reslices_padding_mask_by_dp_group():
-    """TP=2, DP=3 (EP=6): combine()'s is_padding reslice must key off the DP
-    group, not the EP group, or unequal DP ranks read each other's mask."""
-    _spawn_workers(
-        _non_sp_padding_reslice_worker,
-        world_size=6,
-        tp_size=2,
-        dp_size=3,
-        params=[4, 8, 6],
     )
 
 

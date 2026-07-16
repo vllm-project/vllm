@@ -215,7 +215,12 @@ def _init_tp_dp_environment(rank, tp_size, dp_size, port, dp_port):
         ensure_model_parallel_initialized(tp_size, 1, backend="gloo")
 
 
-def _make_forward_context(dp_rank, dp_size, num_tokens_per_dp_rank):
+def _make_forward_context(
+    dp_rank,
+    dp_size,
+    num_tokens_per_dp_rank,
+    num_tokens_across_dp=None,
+):
     """Forward context with DP metadata for EP group dispatch."""
     from vllm.config.parallel import ParallelConfig
     from vllm.config.vllm import VllmConfig
@@ -235,7 +240,10 @@ def _make_forward_context(dp_rank, dp_size, num_tokens_per_dp_rank):
         vllm_config,
         num_tokens=num_tokens_per_dp_rank,
         num_tokens_across_dp=torch.tensor(
-            [num_tokens_per_dp_rank] * dp_size, dtype=torch.int
+            num_tokens_across_dp
+            if num_tokens_across_dp is not None
+            else [num_tokens_per_dp_rank] * dp_size,
+            dtype=torch.int,
         ),
     )
 
@@ -403,6 +411,261 @@ def _moe_ep_worker(rank, world_size, tp_size, dp_size, port, dp_port, params, er
         _report_worker_failure(rank, err_q, err)
 
 
+def _make_monolithic_ep_step(
+    backend,
+    packed_w1,
+    packed_w2,
+    w1_scale,
+    w2_scale,
+    expert_map,
+    topk,
+    total_sp_tokens,
+    local_sp_tokens,
+    num_real_tokens,
+):
+    from vllm.distributed.parallel_state import get_ep_group, get_tp_group
+    from vllm.model_executor.layers.fused_moe.cpu_fused_moe import select_experts
+
+    def step(hidden_states, router_logits):
+        hidden_states, router_logits = get_ep_group().dispatch_router_logits(
+            hidden_states,
+            router_logits,
+            is_sequence_parallel=True,
+        )
+        torch._check(hidden_states.shape[0] == total_sp_tokens)
+        topk_weights, topk_ids = select_experts(
+            hidden_states=hidden_states,
+            router_logits=router_logits,
+            use_grouped_topk=False,
+            top_k=topk,
+            renormalize=False,
+        )
+        expert_out = ops.fused_experts_cpu_local_skip(
+            hidden_states,
+            packed_w1,
+            packed_w2,
+            topk_weights,
+            topk_ids,
+            expert_map,
+            ops.CPUQuantMethod.FP8_W8A16,
+            w1_scale,
+            w2_scale,
+            None,
+            None,
+            BLOCK_SIZE,
+            None,
+            None,
+            None,
+            None,
+            True,
+        )
+        combined = get_ep_group().combine(
+            expert_out,
+            is_sequence_parallel=True,
+        )
+        torch._check(combined.shape[0] == local_sp_tokens)
+        return get_tp_group().all_gather(combined, dim=0)[:num_real_tokens]
+
+    if backend == "none":
+        return step
+    return torch.compile(step, fullgraph=True, backend=backend)
+
+
+def _run_all_experts_reference(
+    hidden_states,
+    router_logits,
+    packed_w1,
+    packed_w2,
+    w1_scale,
+    w2_scale,
+    topk,
+):
+    from vllm.model_executor.layers.fused_moe.cpu_fused_moe import select_experts
+
+    topk_weights, topk_ids = select_experts(
+        hidden_states=hidden_states,
+        router_logits=router_logits,
+        use_grouped_topk=False,
+        top_k=topk,
+        renormalize=False,
+    )
+    return ops.fused_experts_cpu(
+        hidden_states,
+        packed_w1,
+        packed_w2,
+        topk_weights,
+        topk_ids,
+        False,
+        ops.CPUQuantMethod.FP8_W8A16,
+        w1_scale,
+        w2_scale,
+        None,
+        None,
+        BLOCK_SIZE,
+        is_vnni=True,
+    )
+
+
+@torch._dynamo.config.patch(
+    capture_dynamic_output_shape_ops=True,
+    error_on_recompile=True,
+)
+def _run_monolithic_ep_step(
+    backend,
+    hidden_inputs,
+    router_inputs,
+    packed_w1,
+    packed_w2,
+    w1_scale,
+    w2_scale,
+    expert_map,
+    topk,
+    total_sp_tokens,
+    local_sp_tokens,
+    num_real_tokens,
+):
+    step = _make_monolithic_ep_step(
+        backend,
+        packed_w1,
+        packed_w2,
+        w1_scale,
+        w2_scale,
+        expert_map,
+        topk,
+        total_sp_tokens,
+        local_sp_tokens,
+        num_real_tokens,
+    )
+    return [
+        step(hidden_states, router_logits)
+        for hidden_states, router_logits in zip(hidden_inputs, router_inputs)
+    ]
+
+
+def _moe_ep_monolithic_compile_worker(
+    rank,
+    world_size,
+    tp_size,
+    dp_size,
+    port,
+    dp_port,
+    backend,
+    err_q,
+):
+    try:
+        os.environ.setdefault("VLLM_DIST_IDENT", f"test_cpu_moe_ep_compile_{port}")
+        _init_tp_dp_environment(rank, tp_size, dp_size, port, dp_port)
+        torch._dynamo.reset()
+
+        from vllm.model_executor.layers.fused_moe.expert_map_manager import (
+            determine_expert_map,
+        )
+
+        token_counts = [5, 4, 3]
+        hidden_size = 256
+        intermediate_size = 128
+        num_experts = 12
+        topk = 2
+        dp_rank = rank // tp_size
+        num_real_tokens = token_counts[dp_rank]
+        local_sp_tokens = math.ceil(num_real_tokens / tp_size)
+        total_sp_tokens = sum(
+            math.ceil(num_tokens / tp_size) * tp_size for num_tokens in token_counts
+        )
+
+        torch.manual_seed(0)
+        hidden_variants = [
+            torch.randn(
+                sum(token_counts),
+                hidden_size,
+                dtype=torch.bfloat16,
+            )
+            / math.sqrt(hidden_size)
+            for _ in range(2)
+        ]
+        router_variants = [
+            torch.randn(
+                sum(token_counts),
+                num_experts,
+                dtype=torch.bfloat16,
+            )
+            for _ in range(2)
+        ]
+        w1, w2, w1_s, w2_s = _make_fp8_moe_weights(
+            num_experts,
+            intermediate_size,
+            hidden_size,
+            BLOCK_SIZE,
+        )
+        packed_w1 = _prepack_experts(w1)
+        packed_w2 = _prepack_experts(w2)
+
+        start = sum(token_counts[:dp_rank])
+        end = start + num_real_tokens
+        hidden_dp = [hidden[start:end].clone() for hidden in hidden_variants]
+        router_dp = [router[start:end].clone() for router in router_variants]
+        references = [
+            _run_all_experts_reference(
+                hidden,
+                router,
+                packed_w1,
+                packed_w2,
+                w1_s,
+                w2_s,
+                topk,
+            )
+            for hidden, router in zip(hidden_dp, router_dp)
+        ]
+        hidden_local = [sequence_parallel_chunk(hidden) for hidden in hidden_dp]
+        router_local = [sequence_parallel_chunk(router) for router in router_dp]
+        assert all(tensor.shape[0] == local_sp_tokens for tensor in hidden_local)
+
+        local_num_experts, expert_map, _ = determine_expert_map(
+            ep_size=world_size,
+            ep_rank=rank,
+            global_num_experts=num_experts,
+        )
+        assert expert_map is not None
+        local_experts = _get_local_expert_slice(expert_map, local_num_experts)
+
+        with _make_forward_context(
+            dp_rank,
+            dp_size,
+            num_real_tokens,
+            token_counts,
+        ):
+            outputs = _run_monolithic_ep_step(
+                backend,
+                hidden_local,
+                router_local,
+                _prepack_experts(w1[local_experts].contiguous()),
+                _prepack_experts(w2[local_experts].contiguous()),
+                w1_s[local_experts].contiguous(),
+                w2_s[local_experts].contiguous(),
+                expert_map,
+                topk,
+                total_sp_tokens,
+                local_sp_tokens,
+                num_real_tokens,
+            )
+
+        for output, reference in zip(outputs, references):
+            assert output.shape[0] == token_counts[dp_rank]
+            torch.testing.assert_close(
+                output,
+                reference.bfloat16(),
+                atol=1e-2,
+                rtol=1e-2,
+            )
+
+        output_lengths = [None] * world_size
+        dist.all_gather_object(output_lengths, outputs[-1].shape[0])
+        assert output_lengths == [5, 5, 4, 4, 3, 3]
+        dist.barrier()
+    except Exception as err:
+        _report_worker_failure(rank, err_q, err)
+
+
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
@@ -436,3 +699,20 @@ def test_cpu_moe_ep_tp2_dp3(params):
 def test_cpu_moe_ep_tp2_dp3_sequence_parallel(params):
     """TP=2, DP=3: full EP-group AgRs plus TP all-gather restore."""
     _spawn_workers(_moe_ep_worker, world_size=6, tp_size=2, dp_size=3, params=params)
+
+
+@pytest.mark.distributed
+@pytest.mark.skipif(
+    os.environ.get("VLLM_CPU_EP_MONOLITHIC_COMPILE_TEST") != "1",
+    reason="six-rank CPU EP compile regression is opt-in",
+)
+@pytest.mark.parametrize("backend", ["none", "eager", "inductor"])
+def test_cpu_moe_ep_monolithic_compile_tp2_dp3(backend):
+    """Synthetic SP alignment rows are discarded after CPU EP combine."""
+    _spawn_workers(
+        _moe_ep_monolithic_compile_worker,
+        world_size=6,
+        tp_size=2,
+        dp_size=3,
+        params=backend,
+    )
