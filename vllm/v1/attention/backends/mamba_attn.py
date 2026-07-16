@@ -179,11 +179,6 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             )
             # B_cache shape = (ngroups, max_cache_len, dstate); the page layout is
             # (conv_state, ssm_state, x_cache, dt_cache, B_cache).
-            if len(kv_cache_spec.shapes) < 5:
-                raise ValueError(
-                    "--use-replayssm requires the 5-tensor Mamba2 page "
-                    "(conv, ssm, x_cache, dt_cache, B_cache)"
-                )
             bc_ngroups = kv_cache_spec.shapes[4][0]
             bc_scratch_bs = max(
                 self.decode_cudagraph_max_bs, scheduler_config.max_num_seqs

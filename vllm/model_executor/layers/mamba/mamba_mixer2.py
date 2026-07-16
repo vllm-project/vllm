@@ -719,10 +719,6 @@ class MambaMixer2(MambaBase, PluggableLayer):
             )
             ssm_state = self.kv_cache[1]
             if self.use_cache_kernel:
-                if len(self.kv_cache) != 5:
-                    raise ValueError(
-                        "Mamba2 cached decode kernel requires five Mamba state tensors"
-                    )
                 x_cache, dt_cache, B_cache = self.kv_cache[2:]
             else:
                 x_cache = dt_cache = B_cache = None
@@ -1055,31 +1051,6 @@ class MambaMixer2(MambaBase, PluggableLayer):
                 num_decode_tokens, -1, self.head_dim
             )
             if self.use_cache_kernel:
-                if is_mamba_cache_all:
-                    raise ValueError(
-                        "Mamba2 cached decode kernel requires mamba_cache_mode='none'"
-                    )
-                if num_accepted_tokens is not None or query_start_loc_d is not None:
-                    raise ValueError(
-                        "Mamba2 cached decode kernel does not support "
-                        "speculative or varlen decode"
-                    )
-                if attn_metadata.write_pos_d is None:
-                    raise ValueError(
-                        "Mamba2 cached decode metadata is missing write_pos_d"
-                    )
-                if attn_metadata.is_flush_d is None:
-                    raise ValueError(
-                        "Mamba2 cached decode metadata is missing is_flush_d"
-                    )
-                if attn_metadata.bc_pre_scratch is None:
-                    raise ValueError(
-                        "Mamba2 cached decode kernel requires "
-                        "bc_pre_scratch in attention metadata"
-                    )
-                assert x_cache is not None
-                assert dt_cache is not None
-                assert B_cache is not None
                 selective_state_update_replayssm_output_only(
                     ssm_state,
                     hidden_states_d,
