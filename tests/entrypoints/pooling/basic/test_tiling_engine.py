@@ -106,4 +106,4 @@ def test_tiling_engine_abort_on_exception(llm):
         request_ids = args[0]
         assert isinstance(request_ids, list)
         assert len(request_ids) > 0
-        assert kwargs.get("internal") is True
+        assert kwargs.get("internal") is False
