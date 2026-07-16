@@ -371,6 +371,7 @@ def _sequence_parallel_worker(
                 torch.testing.assert_close(gathered_router, expected_router)
                 assert len(gathered_extras) == 1
                 torch.testing.assert_close(gathered_extras[0], expected_extra)
+                assert dp_metadata.local_sizes is sizes
 
                 gathered_hidden2, gathered_weights, gathered_ids = ep_group.dispatch(
                     hidden.clone(),
@@ -381,6 +382,7 @@ def _sequence_parallel_worker(
                 torch.testing.assert_close(gathered_hidden2, expected_hidden)
                 torch.testing.assert_close(gathered_weights, expected_weights)
                 torch.testing.assert_close(gathered_ids, expected_ids)
+                assert dp_metadata.local_sizes is sizes
 
                 total_rows = sum(expected_local_sizes)
                 expert_out = torch.arange(total_rows, dtype=torch.float32).unsqueeze(
@@ -396,6 +398,9 @@ def _sequence_parallel_worker(
                     combined,
                     _expected_combined(rank, expected_local_sizes, HIDDEN_SIZE),
                 )
+                assert dp_metadata.local_sizes is sizes
+
+            assert dp_metadata.local_sizes is None
 
         dist.barrier()
     except Exception as err:

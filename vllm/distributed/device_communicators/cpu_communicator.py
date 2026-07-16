@@ -423,6 +423,8 @@ class CpuCommunicator(DeviceCommunicatorBase):
         def _with_sp_sizes(fn):
             dp_metadata = get_forward_context().dp_metadata
             assert dp_metadata is not None
+            if dp_metadata.local_sizes is not None:
+                return fn()
             dp_size = len(dp_metadata.num_tokens_across_dp_cpu)
             assert self.world_size % dp_size == 0
             sp_size = self.world_size // dp_size
