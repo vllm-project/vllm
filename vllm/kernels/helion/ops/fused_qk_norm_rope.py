@@ -281,23 +281,16 @@ def fused_qk_norm_rope(
     for tile_m, tile_gn, tile_n in hl.tile(
         [num_tokens, qk_heads, head_dim], block_size=[1, None, head_dim]
     ):
+        # Per-head RMS scale over the full head_dim.
         x_blk = qkv[tile_m, tile_gn, tile_n].to(dtype=torch.float32)
-
         rms = x_blk.pow(2).sum(dim=-1)
-        rms = torch.rsqrt(rms * (1.0 / head_dim) + eps)
+        rms = torch.rsqrt(rms * (1.0 / head_dim) + eps)[:, :, None]
 
         use_q_weight = (tile_gn.index < num_heads_q)[None, :, None]
-        w_blk = torch.where(
-            use_q_weight, q_weight[None, None, tile_n], k_weight[None, None, tile_n]
-        )
-
-        x_blk = (x_blk * rms[:, :, None]).to(qkv.dtype) * w_blk
-
-        qkv[tile_m, tile_gn, tile_n] = x_blk
 
         pos_id = position_ids[tile_m]
-        cos_blk = cos_sin_cache[pos_id, hl.arange(embed_dim)]
-        sin_blk = cos_sin_cache[pos_id, hl.arange(embed_dim) + embed_dim]
+        cos_blk = cos_sin_cache[pos_id, hl.arange(embed_dim)][:, None, :]
+        sin_blk = cos_sin_cache[pos_id, hl.arange(embed_dim) + embed_dim][:, None, :]
 
         if is_neox:
             x1_offset = hl.arange(embed_dim)
@@ -306,11 +299,50 @@ def fused_qk_norm_rope(
             x1_offset = hl.arange(embed_dim) * 2
             x2_offset = x1_offset + 1
 
-        x1_blk = qkv[tile_m, tile_gn, x1_offset]
-        x2_blk = qkv[tile_m, tile_gn, x2_offset]
+        # Read the rotary halves from the *original* qkv and apply RMSNorm inline,
+        # rather than storing the normalized head and reading it back. The former
+        # store/load used different-shaped index tensors (full head_dim vs. an
+        # embed_dim half), so an element written by one thread was read back by
+        # another thread with no barrier in between -- an in-place read-after-write
+        # data race that corrupted ~0.8% of outputs on B200 (num_warps=8). Reading
+        # the (yet-unwritten) original values sidesteps it entirely.
+        w1 = torch.where(
+            use_q_weight,
+            q_weight[None, None, x1_offset],
+            k_weight[None, None, x1_offset],
+        )
+        w2 = torch.where(
+            use_q_weight,
+            q_weight[None, None, x2_offset],
+            k_weight[None, None, x2_offset],
+        )
+        x1_blk = (qkv[tile_m, tile_gn, x1_offset].to(torch.float32) * rms).to(
+            qkv.dtype
+        ) * w1
+        x2_blk = (qkv[tile_m, tile_gn, x2_offset].to(torch.float32) * rms).to(
+            qkv.dtype
+        ) * w2
 
-        o1_blk = x1_blk * cos_blk[:, None, :] - x2_blk * sin_blk[:, None, :]
-        o2_blk = x2_blk * cos_blk[:, None, :] + x1_blk * sin_blk[:, None, :]
+        # RMSNorm covers the whole head; the non-rotary tail (untouched by RoPE)
+        # still needs its normalized value written. Read it from the original qkv
+        # before any store; its region is disjoint from the o1/o2 stores below.
+        if rotary_dim < head_dim:
+            tail_offset = hl.arange(rotary_dim, head_dim)
+            w_tail = torch.where(
+                use_q_weight,
+                q_weight[None, None, tail_offset],
+                k_weight[None, None, tail_offset],
+            )
+            tail_blk = (qkv[tile_m, tile_gn, tail_offset].to(torch.float32) * rms).to(
+                qkv.dtype
+            ) * w_tail
 
+        o1_blk = x1_blk * cos_blk - x2_blk * sin_blk
+        o2_blk = x2_blk * cos_blk + x1_blk * sin_blk
+
+        # Every read above precedes every store below (all reads see the original
+        # qkv), and the store regions are disjoint -- no read-after-write hazard.
         qkv[tile_m, tile_gn, x1_offset] = o1_blk
         qkv[tile_m, tile_gn, x2_offset] = o2_blk
+        if rotary_dim < head_dim:
+            qkv[tile_m, tile_gn, tail_offset] = tail_blk
