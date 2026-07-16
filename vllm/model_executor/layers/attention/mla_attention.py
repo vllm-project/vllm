@@ -281,6 +281,7 @@ from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheSpec,
     MLAAttentionSpec,
+    get_kv_quant_mode,
 )
 
 logger = init_logger(__name__)
@@ -396,6 +397,19 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             kv_cache_dtype = "auto"
             calculate_kv_scales = False
         self.quant_config = quant_config
+
+        if cache_config is not None and cache_config.kv_cache_dtype_skip_layers:
+            from vllm.model_executor.models.utils import extract_layer_index
+
+            layer_idx = extract_layer_index(prefix)
+            if str(layer_idx) in cache_config.kv_cache_dtype_skip_layers:
+                kv_cache_dtype = "auto"
+                calculate_kv_scales = False
+            logger.debug(
+                "Layer %s: kv_cache_dtype=%s",
+                prefix,
+                kv_cache_dtype,
+            )
 
         dtype = torch.get_default_dtype()
         if attn_backend is not None:
@@ -1063,7 +1077,8 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             num_kv_heads=1,
             head_size=self.head_size,
             dtype=kv_cache_dtype,
-            cache_dtype_str=vllm_config.cache_config.cache_dtype,
+            cache_dtype_str=self.kv_cache_dtype,
+            kv_quant_mode=get_kv_quant_mode(self.kv_cache_dtype),
         )
 
     def _v_up_proj(self, x: torch.Tensor, out: torch.Tensor):
