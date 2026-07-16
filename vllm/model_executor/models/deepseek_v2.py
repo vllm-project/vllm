@@ -848,11 +848,16 @@ def _try_load_fp8_indexer_wk(
     # We have both weight and scale: dequantize FP8 to BF16.
     weight_fp8, scale_inv = entry["weight"], entry["scale"]
     del buf[layer_prefix]
-    block_size = weight_fp8.shape[1] // scale_inv.shape[1]
+    if scale_inv.ndim == 1:
+        # Per-channel scale: one scale per row of [out, in]
+        group_shape = GroupShape(1, weight_fp8.shape[1])
+    else:
+        block_size = weight_fp8.shape[1] // scale_inv.shape[1]
+        group_shape = GroupShape(block_size, block_size)
     weight_bf16 = scaled_dequantize(
         weight_fp8,
         scale_inv,
-        group_shape=GroupShape(block_size, block_size),
+        group_shape=group_shape,
         out_dtype=torch.bfloat16,
     )
 

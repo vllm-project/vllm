@@ -30,6 +30,7 @@ from vllm.v1.attention.backend import (
 from vllm.v1.attention.backends.mla.rocm_aiter_mla import (
     AiterMLAHelper,
 )
+from vllm.v1.attention.backends.utils import split_decodes_and_prefills
 from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.v1.worker.workspace import current_workspace_manager
 
@@ -333,6 +334,14 @@ class ROCMAiterMLASparseMetadata(AttentionMetadata):
     block_size: int = 1
     topk_tokens: int = 2048
 
+    # Fields read by the shared MLA forward. This impl has no dense-MHA prefill
+    # path (supports_dense_mha_prefill=False), so it always runs the MQA path;
+    num_decodes: int = 0
+    num_prefills: int = 0
+    num_decode_tokens: int = 0
+    prefill_max_seq_len: int = 0
+    prefill: object = None
+
     # Persistent MLA metadata (only populated when persistent mode is enabled,
     # i.e. when the aiter sparse decode kernel supports work-stealing splits).
     work_meta_data: torch.Tensor | None = None
@@ -471,6 +480,10 @@ class ROCMAiterMLASparseMetadataBuilder(
         fast_build: bool = False,
     ) -> ROCMAiterMLASparseMetadata:
         num_tokens = common_attn_metadata.num_actual_tokens
+        (num_decodes, num_prefills, num_decode_tokens, _) = split_decodes_and_prefills(
+            common_attn_metadata,
+            decode_threshold=self.reorder_batch_threshold or 1,
+        )
         starts = np.asarray(common_attn_metadata.query_start_loc_cpu, dtype=np.int32)
         seg_lengths = np.diff(starts)
         req_id_per_token = np.repeat(
@@ -583,6 +596,9 @@ class ROCMAiterMLASparseMetadataBuilder(
             block_size=self.kv_cache_spec.block_size,
             attn_out_dtype=self.model_dtype,
             topk_tokens=self.topk_tokens,
+            num_decodes=num_decodes,
+            num_prefills=num_prefills,
+            num_decode_tokens=num_decode_tokens,
             qo_indptr=qo_indptr,
             paged_kv_last_page_len=paged_kv_last_page_len,
             paged_kv_indices=paged_kv_indices,
@@ -628,6 +644,7 @@ def reference_mla_sparse_prefill(
 
 class ROCMAiterMLASparseImpl(MLAAttentionImpl[ROCMAiterMLASparseMetadata]):
     is_sparse = True
+    supports_dense_mha_prefill = False
 
     def __init__(
         self,
