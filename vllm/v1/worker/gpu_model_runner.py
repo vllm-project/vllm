@@ -3432,9 +3432,11 @@ class GPUModelRunner(
             # Per-request slicing: AllPool extracts views of hidden_states
             pooled_data = pooler.pooling(hidden_states, pooling_metadata)  # type: ignore[operator]
             # Offsets from CPU-side scheduled-token metadata — no GPU sync.
-            if cursor.first_token_indices_cpu is not None:
-                firsts = cursor.first_token_indices_cpu.tolist()
-                lasts = cursor.last_token_indices_cpu.tolist()
+            fcpu = cursor.first_token_indices_cpu
+            lcpu = cursor.last_token_indices_cpu
+            if fcpu is not None and lcpu is not None:
+                firsts = fcpu.tolist()
+                lasts = lcpu.tolist()
             else:  # fallback: single sync (older cursor producers)
                 firsts = cursor.first_token_indices_gpu.tolist()
                 lasts = cursor.last_token_indices_gpu.tolist()
