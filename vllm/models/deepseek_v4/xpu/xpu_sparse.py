@@ -93,9 +93,6 @@ class DeepseekV4XPUAttention(DeepseekV4Attention):
             fused_inv_rope_fp8_quant,
         )
 
-        hidden_dim = o.shape[-1] * (self.n_local_heads // self.n_local_groups)
-        wo_a_raw_weight = cast(torch.Tensor, self.wo_a.weight)
-
         o_fp8, o_scale = fused_inv_rope_fp8_quant(
             o,
             positions,
@@ -107,14 +104,8 @@ class DeepseekV4XPUAttention(DeepseekV4Attention):
             tma_aligned_scales=False,
         )
 
-        # Weight is [N_total, K] where N_total = groups * o_lora_rank.
-        # Reshape to [groups, o_lora_rank, K] then transpose to [groups, K, N].
-        wo_a_weight = torch.reshape(
-            wo_a_raw_weight, (self.n_local_groups, self.o_lora_rank, hidden_dim)
-        ).transpose(1, 2)
-
-        # BMM scale is precomputed in process_weights_after_loading as
-        # [n_groups, K/bs, lora_rank/bs].
+        # Precomputed contiguous [G, K, N] weight and [G, K/bs, N/bs] scale.
+        wo_a_weight = self.wo_a.bmm_weight
         wo_a_scale = self.wo_a.bmm_scale
 
         # TODO: optimize fused_inv_rope_fp8_quant for xpu bmm to

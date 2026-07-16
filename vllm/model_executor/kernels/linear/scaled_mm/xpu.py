@@ -208,7 +208,7 @@ class XPUFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
         scale_t = scale.data.t().contiguous()
         replace_parameter(layer, scale_attr, scale_t)
 
-        # For BMM layers (e.g. wo_a), precompute 3D scale:
+        # For BMM layers (e.g. wo_a), precompute 3D scale and weight:
         # [K/bs, N/bs] -> [batch, K/bs, N_per_batch/bs]
         if getattr(layer, "is_bmm", False):
             batch = layer.bmm_batch_size
@@ -219,6 +219,14 @@ class XPUFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
                 .permute(1, 0, 2)
                 .contiguous()
             )
+            # Precompute contiguous [G, K, N] weight for fp8_bmm.
+            # Original weight is [N_total, K] where N_total = G * N_per_group.
+            w = layer.weight.data
+            N_total, K = w.shape
+            N_per_group = N_total // batch
+            layer.bmm_weight = (
+                w.reshape(batch, N_per_group, K).permute(0, 2, 1).contiguous()
+            )  # [G, K, N]
 
     def apply_block_scaled_mm(
         self,
