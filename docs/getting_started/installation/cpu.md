@@ -109,6 +109,8 @@ VLLM_USE_PRECOMPILED=1 VLLM_PRECOMPILED_WHEEL_VARIANT=cpu VLLM_TARGET_DEVICE=cpu
 
 ### Pre-built images
 
+--8<-- [start:pre-built-images]
+
 === "Intel/AMD x86"
 
     --8<-- "docs/getting_started/installation/cpu.x86.inc.md:pre-built-images"
@@ -124,6 +126,8 @@ VLLM_USE_PRECOMPILED=1 VLLM_PRECOMPILED_WHEEL_VARIANT=cpu VLLM_TARGET_DEVICE=cpu
 === "IBM Z (S390X)"
 
     --8<-- "docs/getting_started/installation/cpu.s390x.inc.md:pre-built-images"
+
+--8<-- [end:pre-built-images]
 
 ### Build image from source
 
