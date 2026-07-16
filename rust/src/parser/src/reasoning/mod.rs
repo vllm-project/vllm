@@ -44,6 +44,10 @@ pub type DeepSeekV3ReasoningParser = Qwen3ReasoningParser;
 pub type DeepSeekV4ReasoningParser = Qwen3ReasoningParser;
 /// GLM45 currently shares the standard `<think>...</think>` parser.
 pub type Glm45ReasoningParser = Qwen3ReasoningParser;
+/// HY3 currently shares the standard `<think>...</think>` parser.
+// TODO: Python's hy_v3 parser also honors a `token_suffix` tokenizer kwarg
+// (`<think{suffix}>`); suffixed checkpoints fail creation here with MissingToken.
+pub type HyV3ReasoningParser = Qwen3ReasoningParser;
 /// Kimi K2 currently shares the standard `<think>...</think>` parser.
 // TODO: kimi k2 may implicitly end reasoning by starting a tool call section
 // using <|tool_calls_section_begin|>, we should support that.
