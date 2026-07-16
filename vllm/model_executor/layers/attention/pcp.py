@@ -1,44 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import TYPE_CHECKING, Protocol, cast
-
 import torch
 
 from vllm.distributed.parallel_state import (
-    get_dcp_group,
     get_pcp_group,
     get_tp_group,
 )
-from vllm.v1.attention.ops.common import cp_lse_ag_out_ar
-from vllm.v1.attention.ops.dcp_alltoall import dcp_a2a_lse_reduce
-
-if TYPE_CHECKING:
-    from vllm.config import ParallelConfig
-
-
-class _DecodeMetadata(Protocol):
-    num_decode_tokens: int
-
-
-def get_dcp_tp_size(parallel_config: "ParallelConfig") -> int:
-    return max(
-        1,
-        parallel_config.decode_context_parallel_size
-        // parallel_config.prefill_context_parallel_size,
-    )
-
-
-def allgather_padded_token_tensors(
-    tensors: tuple[torch.Tensor, ...],
-) -> tuple[torch.Tensor, ...]:
-    pcp_group = get_pcp_group()
-    return tuple(
-        pcp_group.all_gather(
-            tensor if tensor.is_contiguous() else tensor.contiguous(),
-            dim=0,
-        )
-        for tensor in tensors
-    )
 
 
 def _gather_prefill_cache_inputs(
@@ -51,23 +18,24 @@ def _gather_prefill_cache_inputs(
     assert all(tensor.shape[0] == local_num_tokens for tensor in tensors)
     assert 0 <= num_decode_tokens <= local_num_tokens
 
-    pcp_size = get_pcp_group().world_size
-    expanded_num_tokens = pcp_size * local_num_tokens
-    rank_slot_mappings = slot_mapping[:expanded_num_tokens].view(
-        pcp_size, local_num_tokens
-    )
-    if num_decode_tokens == 0:
-        return allgather_padded_token_tensors(tensors), rank_slot_mappings.flatten()
     if num_decode_tokens == local_num_tokens:
-        return tensors, rank_slot_mappings[0, :num_decode_tokens]
+        return tensors, slot_mapping[:num_decode_tokens]
 
-    gathered_prefills = allgather_padded_token_tensors(
-        tuple(tensor[num_decode_tokens:] for tensor in tensors)
+    pcp_group = get_pcp_group()
+    gathered_prefills = tuple(
+        pcp_group.all_gather(tensor[num_decode_tokens:].contiguous(), dim=0)
+        for tensor in tensors
     )
+    pcp_size = pcp_group.world_size
+    gathered_slot_mapping = slot_mapping[: pcp_size * local_num_tokens]
+    if num_decode_tokens == 0:
+        return gathered_prefills, gathered_slot_mapping
+
     cache_inputs = tuple(
         torch.cat((tensor[:num_decode_tokens], gathered_prefill), dim=0)
         for tensor, gathered_prefill in zip(tensors, gathered_prefills)
     )
+    rank_slot_mappings = gathered_slot_mapping.view(pcp_size, local_num_tokens)
     cache_slot_mapping = torch.cat(
         (
             rank_slot_mappings[0, :num_decode_tokens],
@@ -78,13 +46,13 @@ def _gather_prefill_cache_inputs(
 
 
 def maybe_gather_mla_latent_cache_inputs(
-    attn_metadata: _DecodeMetadata | None,
     kv_c_normed: torch.Tensor,
     k_pe: torch.Tensor,
     slot_mapping: torch.Tensor | None,
+    num_decode_tokens: int | None,
     use_pcp: bool,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
-    if not use_pcp or attn_metadata is None:
+    if not use_pcp or num_decode_tokens is None:
         return kv_c_normed, k_pe, slot_mapping
     assert slot_mapping is not None
     num_tokens = kv_c_normed.shape[0]
@@ -92,7 +60,7 @@ def maybe_gather_mla_latent_cache_inputs(
     (cache_kv_c, cache_k_pe_flat), cache_slot_mapping = _gather_prefill_cache_inputs(
         (kv_c_normed, k_pe_flat),
         slot_mapping,
-        attn_metadata.num_decode_tokens,
+        num_decode_tokens,
     )
     cache_k_pe = cache_k_pe_flat.view(-1, *k_pe.shape[1:])
     return cache_kv_c, cache_k_pe, cache_slot_mapping
@@ -112,70 +80,13 @@ def maybe_gather_indexer_k(
     return cache_k, cache_slot_mapping
 
 
-def pcp_dcp_a2a_lse_reduce(
-    cp_attn_out: torch.Tensor,
-    cp_attn_lse: torch.Tensor,
-    return_lse: bool = False,
-    is_lse_base_on_e: bool = True,
-) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-    combined = dcp_a2a_lse_reduce(
-        cp_attn_out,
-        cp_attn_lse,
-        get_dcp_group(),
-        return_lse=return_lse,
-        is_lse_base_on_e=is_lse_base_on_e,
-    )
-    pcp_group = get_pcp_group()
-    if return_lse:
-        attn_out, attn_lse = cast(tuple[torch.Tensor, torch.Tensor], combined)
-        return (
-            pcp_group.all_gather(attn_out, dim=1),
-            pcp_group.all_gather(attn_lse, dim=1),
-        )
-    return pcp_group.all_gather(cast(torch.Tensor, combined), dim=1)
-
-
-def prepare_mla_decode_query(
-    q: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
-    use_pcp: bool,
-    dcp_tp_size: int,
-    fp8_attention: bool,
-) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-    if use_pcp:
-        if dcp_tp_size <= 1:
-            return q
-        if fp8_attention:
-            raise NotImplementedError("DCP does not support FP8 KV cache yet.")
-        comm_group = get_tp_group()
-    else:
-        comm_group = get_dcp_group()
-
-    if isinstance(q, tuple):
-        q = torch.cat(q, dim=-1)
-    return comm_group.all_gather(q, dim=1)
-
-
 def finalize_mla_pcp_decode(
     output: torch.Tensor,
-    lse: torch.Tensor,
-    dcp_tp_size: int,
-    use_dcp_a2a: bool,
     num_heads: int,
-    is_lse_base_on_e: bool,
 ) -> torch.Tensor:
-    if use_dcp_a2a:
-        return cast(
-            torch.Tensor,
-            pcp_dcp_a2a_lse_reduce(output, lse, is_lse_base_on_e=is_lse_base_on_e),
-        )
-
-    output = cp_lse_ag_out_ar(
-        output,
-        lse,
-        get_dcp_group(),
-        is_lse_base_on_e=is_lse_base_on_e,
-    )
-    if dcp_tp_size > 1:
+    if output.shape[1] < num_heads:
+        output = get_pcp_group().all_gather(output, dim=1)
+    elif output.shape[1] > num_heads:
         head_start = get_tp_group().rank_in_group * num_heads
         output = output[:, head_start : head_start + num_heads]
     return output

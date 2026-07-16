@@ -373,6 +373,9 @@ def sparse_attn_indexer(
     else:
         assert q_scale is None, "q_scale must be None when use_fp4_cache=False"
 
+    # During speculative decoding, k may be padded to the CUDA graph batch
+    # size while slot_mapping only covers actual tokens. Truncate k to avoid
+    # out-of-bounds reads in the kernel.
     # Keep PCP padding so every rank contributes the same all-gather shape.
     num_tokens = slot_mapping.shape[0]
     if use_pcp:

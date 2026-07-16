@@ -211,6 +211,7 @@ from vllm.config import (
 from vllm.config.cache import CacheDType
 from vllm.distributed.parallel_state import (
     get_dcp_group,
+    get_tp_group,
     is_global_first_rank,
 )
 from vllm.forward_context import ForwardContext, get_forward_context
@@ -227,9 +228,7 @@ from vllm.model_executor.layers.attention.kv_transfer_utils import (
 )
 from vllm.model_executor.layers.attention.pcp import (
     finalize_mla_pcp_decode,
-    get_dcp_tp_size,
     maybe_gather_mla_latent_cache_inputs,
-    prepare_mla_decode_query,
 )
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.linear import (
@@ -274,7 +273,7 @@ from vllm.v1.attention.backends.utils import (
     get_dcp_local_seq_lens,
     split_decodes_and_prefills,
 )
-from vllm.v1.attention.ops.common import cp_lse_ag_out_rs
+from vllm.v1.attention.ops.common import cp_lse_ag_out_ar, cp_lse_ag_out_rs
 from vllm.v1.attention.ops.dcp_alltoall import dcp_a2a_lse_reduce
 from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
 from vllm.v1.attention.selector import get_attn_backend
@@ -492,7 +491,6 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         vllm_config = get_current_vllm_config()
         parallel_config = vllm_config.parallel_config
         self.use_pcp = parallel_config.prefill_context_parallel_size > 1
-        self.dcp_tp_size = get_dcp_tp_size(parallel_config)
         compilation_config = vllm_config.compilation_config
         if prefix in compilation_config.static_forward_context:
             raise ValueError(f"Duplicate layer name: {prefix}")
@@ -608,10 +606,12 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             layer_slot_mapping = slot_mapping.get(self.layer_name)
             kv_for_cache, kpe_for_cache, layer_slot_mapping = (
                 maybe_gather_mla_latent_cache_inputs(
-                    attn_metadata,
                     kv_c_normed,
                     k_pe,
                     layer_slot_mapping,
+                    attn_metadata.num_decode_tokens
+                    if attn_metadata is not None
+                    else None,
                     self.use_pcp,
                 )
             )
@@ -841,12 +841,15 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             else:
                 mqa_q = (mqa_ql_nope, mqa_q_pe)
             if self.impl.dcp_world_size > 1:
-                mqa_q = prepare_mla_decode_query(
-                    mqa_q,
-                    self.use_pcp,
-                    self.dcp_tp_size,
-                    fp8_attention,
-                )
+                if self.use_pcp:
+                    if self.impl.dcp_world_size > self.impl.pcp_world_size:
+                        if isinstance(mqa_q, tuple):
+                            mqa_q = torch.cat(mqa_q, dim=-1)
+                        mqa_q = get_tp_group().all_gather(mqa_q, dim=1)
+                else:
+                    if isinstance(mqa_q, tuple):
+                        mqa_q = torch.cat(mqa_q, dim=-1)
+                    mqa_q = get_dcp_group().all_gather(mqa_q, dim=1)
 
             # call decode attn
             if not self.impl.is_sparse:
@@ -856,17 +859,15 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             # correct dcp attn_out with lse.
             if self.impl.dcp_world_size > 1:
                 assert lse is not None
-                if self.use_pcp:
-                    attn_out = finalize_mla_pcp_decode(
+                if self.dcp_a2a:
+                    attn_out = dcp_a2a_lse_reduce(
                         attn_out,
                         lse,
-                        self.dcp_tp_size,
-                        self.dcp_a2a,
-                        self.num_heads,
-                        self.impl.lse_base_on_e,
+                        get_dcp_group(),
+                        is_lse_base_on_e=self.impl.lse_base_on_e,
                     )
-                elif self.dcp_a2a:
-                    attn_out = dcp_a2a_lse_reduce(
+                elif self.use_pcp:
+                    attn_out = cp_lse_ag_out_ar(
                         attn_out,
                         lse,
                         get_dcp_group(),
@@ -879,6 +880,8 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                         get_dcp_group(),
                         is_lse_base_on_e=self.impl.lse_base_on_e,
                     )
+                if self.use_pcp:
+                    attn_out = finalize_mla_pcp_decode(attn_out, self.num_heads)
 
             # v_up projection
             self._v_up_proj(attn_out, out=mqa_output_slice)
@@ -1105,10 +1108,10 @@ def unified_mla_kv_cache_update(
     )
     if layer_slot_mapping is not None:
         kv_c_normed, k_pe, layer_slot_mapping = maybe_gather_mla_latent_cache_inputs(
-            attn_metadata,
             kv_c_normed,
             k_pe,
             layer_slot_mapping,
+            attn_metadata.num_decode_tokens if attn_metadata is not None else None,
             getattr(attn_layer, "use_pcp", False),
         )
         attn_layer.impl.do_kv_cache_update(  # type: ignore[attr-defined]

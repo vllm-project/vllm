@@ -68,11 +68,10 @@ class PCPManager:
         self._block_tables = block_tables
         self._hidden_restore_idx: torch.Tensor | None = None
         self._padded_gather_idx: torch.Tensor | None = None
-        self._expanded_is_padding: torch.Tensor | None = None
+        self._gathered_kv_write_mask: torch.Tensor | None = None
+        self._pad_slot_id = torch.tensor(PAD_SLOT_ID, dtype=torch.int64, device=device)
 
-        max_num_local_reqs = (
-            self._pad_num_reqs(2 * max_num_reqs) if max_num_reqs is not None else None
-        )
+        max_num_local_reqs = 2 * max_num_reqs if max_num_reqs is not None else None
         self._input_buffers = (
             InputBuffers(max_num_local_reqs, max_num_tokens, device)
             if max_num_local_reqs is not None and max_num_tokens is not None
@@ -159,14 +158,7 @@ class PCPManager:
                 "Set -cc.cudagraph_mode=NONE."
             )
         if vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs():
-            raise NotImplementedError("MRV2 PCP does not support full CUDA graphs yet.")
-
-    def _pad_num_reqs(self, num_reqs: int) -> int:
-        return (
-            (num_reqs + self.pcp_world_size - 1)
-            // self.pcp_world_size
-            * self.pcp_world_size
-        )
+            raise NotImplementedError("MRV2 PCP supports PIECEWISE CUDA graphs only.")
 
     def _get_rank_segments(
         self,
@@ -250,7 +242,7 @@ class PCPManager:
         padded_num_tokens = max(per_rank_num_tokens)
         num_expanded_tokens = padded_num_tokens * self.pcp_world_size
         padded_gather_idx = np.zeros(num_expanded_tokens, dtype=np.int64)
-        expanded_is_padding = np.ones(num_expanded_tokens, dtype=np.bool_)
+        gathered_kv_write_mask = np.zeros(num_expanded_tokens, dtype=np.bool_)
         for rank, segments in enumerate(segments_by_rank):
             expanded_rank_offset = rank * padded_num_tokens
             for segment in segments:
@@ -266,7 +258,7 @@ class PCPManager:
                 # Cache insertion pairs one slot entry with each rank's local decode.
                 if not bool(is_prefilling[segment.global_batch_req_idx]) and rank != 0:
                     continue
-                expanded_is_padding[padded_gathered_slice] = False
+                gathered_kv_write_mask[padded_gathered_slice] = True
                 hidden_restore_idx[segment.global_batch_slice] = np.arange(
                     padded_gathered_slice.start,
                     padded_gathered_slice.stop,
@@ -279,8 +271,8 @@ class PCPManager:
         self._padded_gather_idx = async_copy_to_gpu(
             padded_gather_idx, device=self.device
         )
-        self._expanded_is_padding = async_copy_to_gpu(
-            expanded_is_padding, device=self.device
+        self._gathered_kv_write_mask = async_copy_to_gpu(
+            gathered_kv_write_mask, device=self.device
         )
         return segments_by_rank, per_rank_num_tokens
 
@@ -291,10 +283,6 @@ class PCPManager:
         input_buffers = self._input_buffers
         if input_batch.num_draft_tokens > 0:
             raise NotImplementedError("MRV2 PCP does not support spec decode yet.")
-        if input_batch.num_reqs_after_padding != input_batch.num_reqs:
-            raise NotImplementedError(
-                "MRV2 PCP does not support request-padded CUDA graphs yet."
-            )
 
         global_batch = input_batch
         self._global_batch = global_batch
@@ -320,11 +308,10 @@ class PCPManager:
             ]
 
         num_local_reqs = len(local_segments)
-        num_local_reqs_padded = self._pad_num_reqs(num_local_reqs)
-        if num_local_reqs_padded > input_buffers.max_num_reqs:
+        if num_local_reqs > input_buffers.max_num_reqs:
             raise RuntimeError(
                 "PCP local request count exceeds the MRV2 input buffer size: "
-                f"{num_local_reqs_padded} > {input_buffers.max_num_reqs}."
+                f"{num_local_reqs} > {input_buffers.max_num_reqs}."
             )
 
         local_to_global_batch_req_idx_np = np.fromiter(
@@ -401,9 +388,7 @@ class PCPManager:
         np.cumsum(local_num_scheduled_tokens, out=local_query_start_loc_out)
         local_query_start_loc_np[num_local_reqs + 1 :] = num_local_tokens
         async_copy_to_gpu(local_query_start_loc_np, out=input_buffers.query_start_loc)
-        local_query_start_loc = input_buffers.query_start_loc[
-            : num_local_reqs_padded + 1
-        ]
+        local_query_start_loc = input_buffers.query_start_loc[: num_local_reqs + 1]
 
         local_to_global_req_idx = async_copy_to_gpu(
             local_to_global_req_idx_np, device=self.device
@@ -416,9 +401,9 @@ class PCPManager:
             local_query_start_loc,
             local_start_pos,
             input_buffers.positions,
-            input_buffers.seq_lens[:num_local_reqs_padded],
+            input_buffers.seq_lens[:num_local_reqs],
         )
-        seq_lens = input_buffers.seq_lens[:num_local_reqs_padded]
+        seq_lens = input_buffers.seq_lens[:num_local_reqs]
         is_padding = input_buffers.is_padding[:num_local_tokens_padded]
         is_padding[:num_local_tokens].fill_(False)
         is_padding[num_local_tokens:].fill_(True)
@@ -463,10 +448,8 @@ class PCPManager:
         local_is_prefilling_np = (
             local_num_computed_prefill_tokens_np < local_prefill_len_np
         )
-        seq_lens_cpu_upper_bound_np = np.zeros(num_local_reqs_padded, dtype=np.int32)
-        seq_lens_cpu_upper_bound_np[:num_local_reqs] = (
-            local_start_pos_np + local_num_scheduled_tokens
-        )
+        seq_lens_cpu_upper_bound_np = np.zeros(num_local_reqs, dtype=np.int32)
+        seq_lens_cpu_upper_bound_np[:] = local_start_pos_np + local_num_scheduled_tokens
 
         dcp_local_seq_lens = None
         if self.dcp_world_size > 1:
@@ -478,15 +461,13 @@ class PCPManager:
                 self.dcp_rank,
                 self.cp_interleave,
             )
-            dcp_local_seq_lens = input_buffers.dcp_local_seq_lens[
-                :num_local_reqs_padded
-            ]
+            dcp_local_seq_lens = input_buffers.dcp_local_seq_lens[:num_local_reqs]
 
         return replace(
             input_batch,
             req_ids=local_req_ids,
             num_reqs=num_local_reqs,
-            num_reqs_after_padding=num_local_reqs_padded,
+            num_reqs_after_padding=num_local_reqs,
             idx_mapping=local_to_global_req_idx,
             idx_mapping_np=local_to_global_req_idx_np,
             expanded_idx_mapping=local_to_global_req_idx,
@@ -499,7 +480,7 @@ class PCPManager:
             num_draft_tokens=0,
             num_draft_tokens_per_req=None,
             query_start_loc=local_query_start_loc,
-            query_start_loc_np=local_query_start_loc_np[: num_local_reqs_padded + 1],
+            query_start_loc_np=local_query_start_loc_np[: num_local_reqs + 1],
             seq_lens=seq_lens,
             seq_lens_cpu_upper_bound=torch.from_numpy(seq_lens_cpu_upper_bound_np),
             dcp_local_seq_lens=dcp_local_seq_lens,
@@ -552,7 +533,7 @@ class PCPManager:
         global_batch_slot_mappings: torch.Tensor,
     ) -> torch.Tensor:
         assert self._padded_gather_idx is not None
-        assert self._expanded_is_padding is not None
+        assert self._gathered_kv_write_mask is not None
         padded_gather_idx = self._padded_gather_idx
         num_expanded_tokens = padded_gather_idx.shape[0]
         if self._gathered_kv_slot_mappings is None:
@@ -568,8 +549,11 @@ class PCPManager:
             padded_gather_idx,
             out=gathered_kv_slot_mappings,
         )
-        gathered_kv_slot_mappings.masked_fill_(
-            self._expanded_is_padding.unsqueeze(0), PAD_SLOT_ID
+        torch.where(
+            self._gathered_kv_write_mask.unsqueeze(0),
+            gathered_kv_slot_mappings,
+            self._pad_slot_id,
+            out=gathered_kv_slot_mappings,
         )
         return gathered_kv_slot_mappings
 
