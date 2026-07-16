@@ -802,6 +802,22 @@ class SamplingParams(
         else:
             self.structured_outputs._backend = backend
 
+        if (
+            self.structured_outputs.disable_any_whitespace
+            != structured_outputs_config.disable_any_whitespace
+        ):
+            raise ValueError(
+                "Request-level `disable_any_whitespace` is not supported. "
+                f"The request set `disable_any_whitespace="
+                f"{self.structured_outputs.disable_any_whitespace}` but "
+                "the server was started with `--structured-outputs-config "
+                f'{{"disable_any_whitespace": '
+                f"{structured_outputs_config.disable_any_whitespace}}}"`. "
+                "Remove `disable_any_whitespace` from the request-level "
+                "`structured_outputs` and use the server-level "
+                "`--structured-outputs-config` instead."
+            )
+
         # Request content validation
         if (
             isinstance(self.structured_outputs.choice, list)
