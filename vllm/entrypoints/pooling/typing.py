@@ -129,9 +129,9 @@ class OfflineInputsScoringContext:
     scoring_data: ScoringData
     chat_template: str | None
 
-    pooling_params: PoolingParams
-    tokenization_kwargs: dict[str, Any]
-    lora_request: Sequence[LoRARequest | None]
+    pooling_params: PoolingParams | Sequence[PoolingParams] | None
+    tokenization_kwargs: dict[str, Any] | None = None
+    lora_request: Sequence[LoRARequest | None] | None = None
     priorities: Sequence[int] | None = None
 
 
