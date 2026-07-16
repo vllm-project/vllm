@@ -27,7 +27,7 @@ from ..typing import (
     ALLOfflineInputsContext,
     EncodeChatRenderParams,
     EncodeCMPLRenderParams,
-    OfflineInputsContext,
+    OfflineEncodeInputsContext,
     OfflineOutputsContext,
     PoolingChatLikeRequest,
     PoolingCompletionLikeRequest,
@@ -111,7 +111,7 @@ class PoolingIOProcessor:
     def get_request_factory_offline(
         self, ctx: ALLOfflineInputsContext
     ) -> tuple[RequestFactory, int]:
-        assert isinstance(ctx, OfflineInputsContext)
+        assert isinstance(ctx, OfflineEncodeInputsContext)
 
         prompts_seq = prompt_to_seq(ctx.prompts)
         num_requests = len(prompts_seq)

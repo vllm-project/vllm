@@ -115,6 +115,7 @@ class PoolingServeContext(Generic[PoolingRequestT]):
 
 @dataclass
 class OfflineInputsContext:
+    pooling_task: PoolingTask
     tokenization_kwargs: dict[str, Any] | None
     lora_request: Sequence[LoRARequest | None] | None
     priorities: Sequence[int] | None
@@ -122,7 +123,6 @@ class OfflineInputsContext:
 
 @dataclass
 class OfflineEncodeInputsContext(OfflineInputsContext):
-    pooling_task: PoolingTask
     prompts: PromptType | Sequence[PromptType]
     pooling_params: PoolingParams | Sequence[PoolingParams] | None
 
@@ -136,7 +136,6 @@ class OfflineScoringInputsContext(OfflineInputsContext):
 
 @dataclass
 class OfflinePluginInputsContext(OfflineInputsContext):
-    pooling_task: PoolingTask
     prompts: DataPrompt
     pooling_params: PoolingParams | Sequence[PoolingParams] | None
 

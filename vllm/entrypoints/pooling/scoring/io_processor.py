@@ -476,9 +476,7 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
     def get_request_factory_offline(
         self, ctx: ALLOfflineInputsContext
     ) -> tuple[RequestFactory, int]:
-        assert isinstance(
-            ctx,
-        )
+        assert isinstance(ctx, OfflineScoringInputsContext)
 
         data_1 = ctx.scoring_data.data_1
         data_2 = ctx.scoring_data.data_2
