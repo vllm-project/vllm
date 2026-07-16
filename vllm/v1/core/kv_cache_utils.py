@@ -1535,6 +1535,11 @@ def group_and_unify_kv_cache_specs(
     ):
         return None
 
+    # SlidingWindowMLASpec models with uniform page sizes don't need tuple packing.
+    page_sizes = {spec.page_size_bytes for spec in kv_cache_spec.values()}
+    if len(page_sizes) <= 1:
+        return None
+
     mla_specs: dict[str, KVCacheSpec] = {}
     grouped_swa_mla_specs: dict[tuple[int, int], dict[str, KVCacheSpec]] = defaultdict(
         dict
