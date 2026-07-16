@@ -28,10 +28,29 @@ class XPUMxFp8LinearKernel(Mxfp8LinearKernel):
         return True, None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        # Keep weight as [N, K] and scale as [N, K//32] (checkpoint layout).
-        # Transpose at runtime in apply_weights, matching block FP8 pattern.
+        # Transpose scale from checkpoint [N, K//32] to oneDNN [K//32, N]
+        # at load time (one-time cost, eliminates per-call .t().contiguous()).
         weight_scale = layer.weight_scale.view(torch.float8_e8m0fnu)
-        replace_parameter(layer, "weight_scale", weight_scale.data)
+        scale_t = weight_scale.data.t().contiguous()
+        replace_parameter(layer, "weight_scale", scale_t)
+
+        # For BMM layers (e.g. wo_a), precompute 3D scale and weight:
+        if getattr(layer, "is_bmm", False):
+            batch = layer.bmm_batch_size
+            k_blocks = scale_t.shape[0]  # K//32
+            n_per_batch_blocks = scale_t.shape[1] // batch
+            layer.bmm_scale = (
+                scale_t.reshape(k_blocks, batch, n_per_batch_blocks)
+                .permute(1, 0, 2)
+                .contiguous()
+            )  # [G, K//32, N_per_group]
+            # Precompute contiguous [G, K, N] weight for fp8_bmm.
+            w = layer.weight.data
+            N_total, K = w.shape
+            N_per_group = N_total // batch
+            layer.bmm_weight = (
+                w.reshape(batch, N_per_group, K).permute(0, 2, 1).contiguous()
+            )  # [G, K, N]
 
     def apply_weights(
         self,
@@ -42,12 +61,12 @@ class XPUMxFp8LinearKernel(Mxfp8LinearKernel):
         out_dtype = x.dtype
         x_fp8, x_scale = quant_mxfp8(x)
         # Weight is [N, K]. Use .t() to create a [K, N] view.
-        # Scale is [N, K//32]. Transpose to [K//32, N] for oneDNN.
+        # Scale is already [K//32, N] from process_weights_after_loading.
         return torch.ops._xpu_C.fp8_gemm(
             x_fp8,
             layer.weight.t(),
             out_dtype,
             x_scale,
-            layer.weight_scale.t().contiguous(),
+            layer.weight_scale,
             bias,
         )
