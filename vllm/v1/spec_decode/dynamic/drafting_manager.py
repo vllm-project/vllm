@@ -95,11 +95,11 @@ class DynamicSDDraftingManager(AdaptiveDraftingManager):
             scheduler_output, req_ids
         )
         num_reqs = len(req_ids)
-        draft_caps_gpu = self._copy_to_device(
-            draft_caps, self._draft_token_caps[:num_reqs]
+        draft_caps_gpu = async_copy_to_gpu(
+            draft_caps, out=self._draft_token_caps[:num_reqs]
         )
-        base_query_counts_gpu = self._copy_to_device(
-            base_query_counts, self._base_query_counts[:num_reqs]
+        base_query_counts_gpu = async_copy_to_gpu(
+            base_query_counts, out=self._base_query_counts[:num_reqs]
         )
         num_draft_tokens_per_req = self._speculator.allocate_draft_token_budget(
             idx_mapping,
@@ -169,13 +169,6 @@ class DynamicSDDraftingManager(AdaptiveDraftingManager):
             is_prefill[index] = self._is_prefill(req_id)
             draft_caps[index] = 0 if is_prefill[index] else len(token_ids)
         return draft_caps, base_query_counts, is_prefill
-
-    def _copy_to_device(
-        self, source: np.ndarray, destination: torch.Tensor
-    ) -> torch.Tensor:
-        if destination.device.type == "cpu":
-            return destination.copy_(torch.from_numpy(source))
-        return async_copy_to_gpu(source, out=destination)
 
     def _is_prefill(self, req_id: str) -> bool:
         req_index = self._req_states.req_id_to_index.get(req_id)

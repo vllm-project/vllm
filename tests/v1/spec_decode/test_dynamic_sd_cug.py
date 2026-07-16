@@ -18,8 +18,6 @@ from vllm.config import (
 from vllm.v1.spec_decode.dynamic.drafting_manager import DynamicSDDraftingManager
 from vllm.v1.worker.gpu import cudagraph_utils as gpu_cudagraph_utils
 
-pytestmark = pytest.mark.cpu_test
-
 
 @pytest.fixture(autouse=True)
 def _mock_cudagraph_runtime(monkeypatch):
@@ -31,32 +29,39 @@ def _mock_cudagraph_runtime(monkeypatch):
 
 
 def test_adaptive_drafting_manager_builds_worker_ordered_mixed_layout():
-    req_states = _make_req_states(["decode", "prefill"], {"prefill"})
+    device = torch.device("cuda")
+    req_states = SimpleNamespace(
+        req_id_to_index={"decode": 0, "prefill": 1},
+        num_computed_prefill_tokens=[1, 0],
+        prefill_len=SimpleNamespace(np=[1, 1]),
+    )
     speculator = MagicMock()
-    drafting_manager = _make_drafting_manager(
+    drafting_manager = DynamicSDDraftingManager(
         [(1, 2, 2), (3, 3, 1)],
         max_num_reqs=3,
         max_num_spec_tokens=4,
+        device=device,
         req_states=req_states,
         speculator=speculator,
     )
-    scheduler_output = _make_scheduler_output(
-        {"decode": 5, "prefill": 4},
-        {"decode": [1, 2, 3, 4]},
+    scheduler_output = SimpleNamespace(
+        num_scheduled_tokens={"decode": 5, "prefill": 4},
+        scheduled_spec_decode_tokens={"decode": [1, 2, 3, 4]},
+        total_num_scheduled_tokens=9,
     )
     num_tokens, draft_token_budget = drafting_manager.plan_batch(scheduler_output)
     assert (num_tokens, draft_token_budget) == (6, 1)
 
     speculator.allocate_draft_token_budget.return_value = torch.tensor(
-        [0, 1], dtype=torch.int32
+        [0, 1], dtype=torch.int32, device=device
     )
-    query_start_loc = torch.empty(4, dtype=torch.int32)
+    query_start_loc = torch.empty(4, dtype=torch.int32, device=device)
 
     num_draft_tokens, cu_num_logits, query_start_loc_np = (
         drafting_manager.prepare_verification_layout(
             scheduler_output,
             ["prefill", "decode"],
-            torch.tensor([1, 0], dtype=torch.int32),
+            torch.tensor([1, 0], dtype=torch.int32, device=device),
             draft_token_budget=draft_token_budget,
             query_start_loc=query_start_loc,
             num_reqs_padded=2,
@@ -71,43 +76,6 @@ def test_adaptive_drafting_manager_builds_worker_ordered_mixed_layout():
         0,
         4,
     ]
-
-
-def _make_scheduler_output(scheduled_tokens, draft_tokens):
-    return SimpleNamespace(
-        num_scheduled_tokens=scheduled_tokens,
-        scheduled_spec_decode_tokens=draft_tokens,
-        total_num_scheduled_tokens=sum(scheduled_tokens.values()),
-    )
-
-
-def _make_req_states(req_ids, prefill_req_ids=()):
-    req_ids = list(req_ids)
-    prefill_req_ids = set(prefill_req_ids)
-    return SimpleNamespace(
-        req_id_to_index={req_id: index for index, req_id in enumerate(req_ids)},
-        num_computed_prefill_tokens=[
-            0 if req_id in prefill_req_ids else 1 for req_id in req_ids
-        ],
-        prefill_len=SimpleNamespace(np=[1] * len(req_ids)),
-    )
-
-
-def _make_drafting_manager(
-    schedule,
-    max_num_reqs,
-    max_num_spec_tokens,
-    req_states,
-    speculator=None,
-):
-    return DynamicSDDraftingManager(
-        schedule,
-        max_num_reqs=max_num_reqs,
-        max_num_spec_tokens=max_num_spec_tokens,
-        device=torch.device("cpu"),
-        speculator=speculator if speculator is not None else MagicMock(),
-        req_states=req_states,
-    )
 
 
 def _create_vllm_config_for_dsd(
