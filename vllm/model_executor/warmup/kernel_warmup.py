@@ -50,27 +50,51 @@ def kernel_warmup(worker: "Worker"):
 
     # Pooling models do not use the generation slot-mapping path.
     if not worker.use_v2_model_runner and not worker.model_runner.is_pooling_model:
-        warm_v1_block_table_kernels(
-            getattr(worker.model_runner, "device", torch.device("cuda")),
-            worker.scheduler_config.max_num_batched_tokens,
-        )
-    qwen_triton_warmup(worker.model_runner, worker.vllm_config.model_config)
+        try:
+            warm_v1_block_table_kernels(
+                getattr(worker.model_runner, "device", torch.device("cuda")),
+                worker.scheduler_config.max_num_batched_tokens,
+            )
+        except Exception:
+            logger.warning("Skipping V1 block table warmup.", exc_info=True)
+
+    try:
+        qwen_triton_warmup(worker.model_runner, worker.vllm_config.model_config)
+    except Exception:
+        logger.warning("Skipping Qwen Triton warmup.", exc_info=True)
 
     # DSv4 mHC TileLang kernels (hc_pre/hc_post/hc_head_op) run every decoder
     # layer per token; warm them across token sizes first so the first real
     # request doesn't pay JIT cost. No-op for non-DSv4 models (gated inside).
-    deepseek_v4_mhc_warmup(
-        worker.get_model(),
-        max_tokens=worker.scheduler_config.max_num_batched_tokens,
-        cudagraph_capture_sizes=(
-            worker.vllm_config.compilation_config.cudagraph_capture_sizes or []
-        ),
-    )
+    try:
+        deepseek_v4_mhc_warmup(
+            worker.get_model(),
+            max_tokens=worker.scheduler_config.max_num_batched_tokens,
+            cudagraph_capture_sizes=(
+                worker.vllm_config.compilation_config.cudagraph_capture_sizes or []
+            ),
+        )
+    except Exception:
+        logger.warning("Skipping DSv4 mHC warmup.", exc_info=True)
 
     # Run next so input-prep kernels JIT against pristine runner state.
+    # ``sparse_mla_triton_warmup_if_needed`` has its own internal try/except.
     sparse_mla_triton_warmup_if_needed(worker)
-    flashinfer_sparse_mla_decode_autotune_warmup(worker)
-    deepseek_v4_sparse_mla_attention_warmup(worker)
+
+    try:
+        flashinfer_sparse_mla_decode_autotune_warmup(worker)
+    except Exception:
+        logger.warning(
+            "Skipping FlashInfer sparse MLA decode autotune warmup.",
+            exc_info=True,
+        )
+
+    try:
+        deepseek_v4_sparse_mla_attention_warmup(worker)
+    except Exception:
+        logger.warning(
+            "Skipping DeepSeek V4 sparse MLA attention warmup.", exc_info=True
+        )
 
     # Deep GEMM warmup
     do_deep_gemm_warmup = (
@@ -79,11 +103,17 @@ def kernel_warmup(worker: "Worker"):
         and envs.VLLM_DEEP_GEMM_WARMUP != "skip"
     )
     if do_deep_gemm_warmup:
-        model = worker.get_model()
-        max_tokens = worker.scheduler_config.max_num_batched_tokens
-        deep_gemm_warmup(model, max_tokens)
+        try:
+            model = worker.get_model()
+            max_tokens = worker.scheduler_config.max_num_batched_tokens
+            deep_gemm_warmup(model, max_tokens)
+        except Exception:
+            logger.warning("Skipping Deep GEMM warmup.", exc_info=True)
 
-    minimax_m3_msa_warmup(worker)
+    try:
+        minimax_m3_msa_warmup(worker)
+    except Exception:
+        logger.warning("Skipping MiniMax M3 MSA warmup.", exc_info=True)
 
     enable_flashinfer_autotune = (
         worker.vllm_config.kernel_config.enable_flashinfer_autotune
@@ -92,7 +122,10 @@ def kernel_warmup(worker: "Worker"):
     if enable_flashinfer_autotune is False:
         logger.info("Skipping FlashInfer autotune because it is disabled.")
     elif has_flashinfer() and current_platform.has_device_capability(90):
-        flashinfer_autotune(worker.model_runner)
+        try:
+            flashinfer_autotune(worker.model_runner)
+        except Exception:
+            logger.warning("Skipping FlashInfer autotune.", exc_info=True)
 
     # FlashInfer attention warmup
     # Only warmup if the model has FlashInfer attention groups
@@ -118,16 +151,22 @@ def kernel_warmup(worker: "Worker"):
         logger.info("Warming up FlashInfer attention.")
         # Warmup with mixed batch containing both prefill and decode tokens
         # This is to warm up both prefill and decode attention kernels
-        worker.model_runner._dummy_run(
-            num_tokens=16,
-            skip_eplb=True,
-            is_profile=True,
-            force_attention=True,
-            create_mixed_batch=True,
-        )
+        try:
+            worker.model_runner._dummy_run(
+                num_tokens=16,
+                skip_eplb=True,
+                is_profile=True,
+                force_attention=True,
+                create_mixed_batch=True,
+            )
+        except Exception:
+            logger.warning("Skipping FlashInfer attention warmup.", exc_info=True)
 
     if worker.vllm_config.kernel_config.enable_cutedsl_warmup:
-        cutedsl_warmup()
+        try:
+            cutedsl_warmup()
+        except Exception:
+            logger.warning("Skipping CuTeDSL warmup.", exc_info=True)
 
 
 def _flashinfer_autotune_skip_ops(runner: "GPUModelRunner") -> set[str] | None:
