@@ -172,15 +172,9 @@ class CohereServingChatV2(OpenAIServingChat):
     subclasses (see :mod:`vllm.entrypoints.cohere.cohere_chat_message`) so
     the OpenAI-shared :class:`ChatMessage` / :class:`DeltaMessage` keep
     their declared schemas unchanged. Non-streaming responses pick up
-    the subclass via the ``_chat_message_cls`` classvar; streaming
+    the subclass by overriding :meth:`_create_chat_message`; streaming
     deltas are emitted directly by the Cohere reasoning parser.
     """
-
-    # Route the base class's ``ChatMessage(...)`` construction sites
-    # through the citation-carrying subclass so ``_finalize_response_message``
-    # below can safely stash citations on ``message.citations`` without
-    # relying on ``extra="allow"`` attribute injection.
-    _chat_message_cls = CohereChatMessage
 
     def __init__(
         self,
@@ -667,6 +661,18 @@ class CohereServingChatV2(OpenAIServingChat):
             kv_transfer_params=response.kv_transfer_params,
         )
 
+    def _create_chat_message(self, *args: Any, **kwargs: Any) -> ChatMessage:
+        """Route response construction through the citation-carrying subclass.
+
+        Overrides :meth:`OpenAIServingChat._create_chat_message` so every
+        non-streaming construction site in the base full-generator
+        produces a :class:`CohereChatMessage`, letting
+        :meth:`_finalize_response_message` below safely stash citations
+        on ``message.citations`` without relying on ``extra="allow"``
+        attribute injection.
+        """
+        return CohereChatMessage(*args, **kwargs)
+
     def _finalize_response_message(
         self,
         message: ChatMessage,
@@ -683,14 +689,14 @@ class CohereServingChatV2(OpenAIServingChat):
         pick them up without the base :class:`OpenAIServingChat` having to
         know about citations.
         """
-        # ``_chat_message_cls`` above guarantees the concrete type at
+        # ``_create_chat_message`` above guarantees the concrete type at
         # runtime. ``cast`` narrows the declared ``ChatMessage`` for
         # mypy without adding a runtime check we don't need: even in the
-        # invariant-violated case (a subclass reset ``_chat_message_cls``
-        # back to plain ``ChatMessage``), ``OpenAIBaseModel``'s
-        # ``extra="allow"`` config lets the ``.citations`` write survive
-        # into ``model_dump`` via the extras bucket, so the wire is
-        # correct either way.
+        # invariant-violated case (a subclass reset the factory back to
+        # plain ``ChatMessage``), ``OpenAIBaseModel``'s ``extra="allow"``
+        # config lets the ``.citations`` write survive into
+        # ``model_dump`` via the extras bucket, so the wire is correct
+        # either way.
         message = cast(CohereChatMessage, message)
         citations = getattr(
             getattr(parser, "reasoning_parser", None),

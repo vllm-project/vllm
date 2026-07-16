@@ -81,8 +81,8 @@ class CohereChatMessage(ChatMessage):
     """:class:`ChatMessage` extension carrying grounding citations.
 
     Only instantiated by :class:`CohereServingChatV2` (and any other
-    :class:`OpenAIServingChat` subclass that opts in via the
-    ``_chat_message_cls`` hook). Regular OpenAI-compatible handlers keep
+    :class:`OpenAIServingChat` subclass that opts in by overriding
+    ``_create_chat_message``). Regular OpenAI-compatible handlers keep
     emitting plain :class:`ChatMessage` so their response schema is
     unchanged.
 

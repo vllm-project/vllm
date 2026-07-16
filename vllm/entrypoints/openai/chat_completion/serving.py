@@ -7,7 +7,7 @@ import time
 from collections.abc import AsyncGenerator, AsyncIterator
 from collections.abc import Sequence as GenericSequence
 from http import HTTPStatus
-from typing import Any, ClassVar, Final, cast
+from typing import Any, Final, cast
 
 import numpy as np
 import pybase64 as base64
@@ -104,13 +104,6 @@ def _make_prompt_tokens_details(
 
 
 class OpenAIServingChat(GenerateBaseServing):
-    # Subclasses can override this to swap in a specialized
-    # :class:`ChatMessage` subclass. The full-generator constructs messages
-    # via ``self._chat_message_cls(...)`` so replacing this classvar
-    # routes every non-streaming response through the subclass without
-    # duplicating the branchy construction logic.
-    _chat_message_cls: ClassVar[type[ChatMessage]] = ChatMessage
-
     def __init__(
         self,
         engine_client: EngineClient,
@@ -411,6 +404,18 @@ class OpenAIServingChat(GenerateBaseServing):
         if request.add_generation_prompt:
             return self.response_role
         return request.messages[-1]["role"]
+
+    def _create_chat_message(self, *args: Any, **kwargs: Any) -> ChatMessage:
+        """Construct the response :class:`ChatMessage` for the non-streaming path.
+
+        The full-generator calls this at every construction site so
+        subclasses can swap in a specialized :class:`ChatMessage`
+        subclass (e.g. :class:`CohereServingChatV2` returning
+        :class:`CohereChatMessage`) without duplicating the branchy
+        tool-choice / auto-tools logic that decides which fields are
+        populated. The default returns a plain :class:`ChatMessage`.
+        """
+        return ChatMessage(*args, **kwargs)
 
     def _finalize_response_message(
         self,
@@ -928,19 +933,19 @@ class OpenAIServingChat(GenerateBaseServing):
             )
             is_required_tool_choice = request.tool_choice == "required"
 
-            # All six construction sites route through ``self._chat_message_cls``
+            # All six construction sites route through ``self._create_chat_message``
             # so subclasses can swap in a specialized :class:`ChatMessage`
             # (e.g. the Cohere v2 handler's ``CohereChatMessage``) without
             # having to duplicate this branch logic.
             if (not self.enable_auto_tools or not tool_parser_cls) and (
                 not is_named_tool_choice and not is_required_tool_choice
             ):
-                message = self._chat_message_cls(
+                message = self._create_chat_message(
                     role=role, reasoning=reasoning, content=content
                 )
 
             elif is_named_tool_choice or is_required_tool_choice:
-                message = self._chat_message_cls(
+                message = self._create_chat_message(
                     role=role,
                     reasoning=reasoning,
                     content=content or "",
@@ -953,7 +958,7 @@ class OpenAIServingChat(GenerateBaseServing):
             # if the request doesn't use tool choice
             # OR specifies to not use a tool
             elif not request.tool_choice or request.tool_choice == "none":
-                message = self._chat_message_cls(
+                message = self._create_chat_message(
                     role=role, reasoning=reasoning, content=content
                 )
 
@@ -966,7 +971,7 @@ class OpenAIServingChat(GenerateBaseServing):
             ):
                 auto_tools_called = tool_calls is not None and len(tool_calls) > 0
                 if tool_calls:
-                    message = self._chat_message_cls(
+                    message = self._create_chat_message(
                         role=role,
                         reasoning=reasoning,
                         content=content,
@@ -977,7 +982,7 @@ class OpenAIServingChat(GenerateBaseServing):
                     )
 
                 else:
-                    message = self._chat_message_cls(
+                    message = self._create_chat_message(
                         role=role,
                         reasoning=reasoning,
                         content=content,
@@ -990,7 +995,7 @@ class OpenAIServingChat(GenerateBaseServing):
                     " if tools should be extracted. Returning a standard chat "
                     "completion."
                 )
-                message = self._chat_message_cls(
+                message = self._create_chat_message(
                     role=role, reasoning=reasoning, content=content
                 )
 
