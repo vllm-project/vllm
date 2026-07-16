@@ -70,10 +70,6 @@ void sm100_dsa_litetopk(const uint32_t seq_len, const uint32_t seq_len_kv,
                          int32_t* __restrict__ cand_idx,       // [seq_len, cand_cap]
                          int32_t* __restrict__ cand_cnt,       // [seq_len]
                          const uint32_t cand_cap,
-                         const uint32_t repair,             // certificate-repair pass
-                         const int32_t* __restrict__ th_safe,     // exact fallback gate
-                         const int32_t* __restrict__ seed_total,  // seeds emitted (<= th_safe)
-                         const int32_t* __restrict__ seed_pred,   // seeds under the predicted gate
                          const __grid_constant__ cute::TmaDescriptor tensor_map_q,
                          const __grid_constant__ cute::TmaDescriptor tensor_map_kv,
                          const __grid_constant__ cute::TmaDescriptor tensor_map_kv_scales,
@@ -89,48 +85,6 @@ void sm100_dsa_litetopk(const uint32_t seq_len, const uint32_t seq_len_kv,
     constexpr uint32_t kNumMathWarps = kNumMathThreads / 32;
 
     DG_STATIC_ASSERT(kNumSpecializedThreads == 128 and kNumMathThreads % 128 == 0, "Invalid threads");
-
-    if (repair) {
-        // Certificate-repair pass. A row is CERTIFIED exact iff at least
-        // topk genuine elements were counted STRICTLY below the predicted
-        // gate (scan emissions + predicted-qualifying seeds) and nothing
-        // overflowed the buffer: then the true top-k is fully inside the
-        // candidate set. CTAs whose rows all certify exit before touching
-        // any barrier or TMEM. Failed rows fall back to the exact subset
-        // bound (th_safe, provably >= the true k-th, and provably yielding
-        // cnt >= topk on the re-scan) with their counters rolled back to
-        // the seed base. Caller runs this pass with refresh OFF so the
-        // re-emitted counts cannot double-tighten anything.
-        bool all_ok = true;
-        #pragma unroll
-        for (uint32_t i = 0; i < BLOCK_Q; ++ i) {
-            const uint32_t r = blockIdx.x * BLOCK_Q + i;
-            if (r >= seq_len) continue;
-            const int c = cand_cnt[r];
-            const bool ok = (c - seed_total[r] + seed_pred[r] >= static_cast<int>(topk))
-                            && (c <= static_cast<int>(cand_cap));
-            all_ok &= ok;
-        }
-        if (all_ok) return;
-        if (threadIdx.x == 0) {
-            #pragma unroll
-            for (uint32_t i = 0; i < BLOCK_Q; ++ i) {
-                const uint32_t r = blockIdx.x * BLOCK_Q + i;
-                if (r >= seq_len) continue;
-                const int c = cand_cnt[r];
-                const bool ok = (c - seed_total[r] + seed_pred[r] >= static_cast<int>(topk))
-                                && (c <= static_cast<int>(cand_cap));
-                if (ok) {
-                    th_bucket[r] = -(1 << 30);   // certified: gate emits nothing
-                } else {
-                    th_bucket[r] = th_safe[r];
-                    cand_cnt[r] = seed_total[r];
-                }
-            }
-            __threadfence();
-        }
-        __syncthreads();
-    }
 
     if (warp_idx == kSpecWarpStart) {
         cute::prefetch_tma_descriptor(&tensor_map_q);

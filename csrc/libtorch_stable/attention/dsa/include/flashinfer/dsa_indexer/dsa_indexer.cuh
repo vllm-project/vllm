@@ -125,14 +125,8 @@ __global__ void seed_prep_kernel(
                            // when NB is scaled up with it): drifted scores
                            // land in real buckets instead of clamping to
                            // bucket 0 where refresh can never resolve them
-    const int K_safe,      // certificate mode when >0: publish th (kq=K) as
-                           // the PREDICTED gate, emit seeds up to the SAFE
-                           // bucket (cum >= K_safe), and count seeds that
-                           // qualify under the predicted bucket separately.
     float* __restrict__ origin, float* __restrict__ inv_delta,
     int32_t* __restrict__ th_bucket,
-    int32_t* __restrict__ th_safe_out,      // [rows] (cert mode only)
-    int32_t* __restrict__ seed_pred_cnt,    // [rows] (cert mode only)
     int32_t* __restrict__ bcount,
     float* __restrict__ cand_val, int32_t* __restrict__ cand_idx,
     int32_t* __restrict__ cand_cnt) {
@@ -235,50 +229,38 @@ __global__ void seed_prep_kernel(
         // Probe mode (emit_limit==0): scan-side refresh must start from zero
         // counts — write zeros here, saving the caller a separate memset.
         bcount[(size_t)row * NB + b] = (emit_limit == 0) ? 0 : s_hist[b];
-    __shared__ int s_th, s_th_safe;
+    __shared__ int s_th;
     if (tid == 0) {
         const int kk = K < head ? K : head;
-        const int kk_safe = K_safe < head ? K_safe : head;
-        int cum = 0, th = NB - 1, th2 = NB - 1;
-        bool got1 = false;
+        int cum = 0, th = NB - 1;
         for (int b = 0; b < NB; ++b) {
             cum += s_hist[b];
-            if (!got1 && cum >= kk) { th = b; got1 = true; if (K_safe <= 0) break; }
-            if (K_safe > 0 && cum >= kk_safe) { th2 = b; break; }
+            if (cum >= kk) { th = b; break; }
         }
         s_th = th;
-        s_th_safe = (K_safe > 0) ? th2 : th;
         th_bucket[row] = th;
-        if (K_safe > 0) th_safe_out[row] = th2;
         origin[row] = o;
         inv_delta[row] = inv;
     }
     __syncthreads();
-    const int th = s_th;
-    const int th_emit = s_th_safe;  // == th when certificate mode is off
+    const int th_emit = s_th;
 
     if (emit_limit == 0) {  // threshold-probe mode: no seeds wanted; skip the
-        if (tid == 0) {
+        if (tid == 0)
             cand_cnt[row] = 0;  // whole pass-3 read of the sample
-            if (K_safe > 0) seed_pred_cnt[row] = 0;
-        }
         return;
     }
 
     // pass 3: emit every position with bucket <= th (compact, unordered).
     // Warp-aggregated: one shared-counter atomic per warp per pass-group.
-    __shared__ int s_cnt, s_cnt_pred;
-    if (tid == 0) { s_cnt = 0; s_cnt_pred = 0; }
+    __shared__ int s_cnt;
+    if (tid == 0) s_cnt = 0;
     __syncthreads();
     float* vrow = cand_val + (size_t)row * cap;
     int32_t* irow = cand_idx + (size_t)row * cap;
     const auto emit_group = [&](const float s, const int j) {
         const int b_of = (isfinite(s) && j < emit_limit) ? bucket_of(s) : NB;
         const bool g = b_of <= th_emit;
-        if (K_safe > 0) {
-            const unsigned mp = __ballot_sync(0xffffffffu, b_of <= th);
-            if (lane == 0 && mp) atomicAdd(&s_cnt_pred, __popc(mp));
-        }
         const unsigned m = __ballot_sync(0xffffffffu, g);
         if (m != 0) {
             int base = 0;
@@ -313,11 +295,8 @@ __global__ void seed_prep_kernel(
         emit_group(s, j);
     }
     __syncthreads();
-    if (tid == 0) {
-        int c = s_cnt < cap ? s_cnt : cap;
-        cand_cnt[row] = c;
-        if (K_safe > 0) seed_pred_cnt[row] = s_cnt_pred;
-    }
+    if (tid == 0)
+        cand_cnt[row] = s_cnt < cap ? s_cnt : cap;
 }
 
 __device__ __forceinline__ uint32_t compact_enc_float(float v) {

@@ -65,9 +65,8 @@ void dsa_litetopk_seed_prep(const Tensor& slog, int64_t num_buckets, int64_t top
 
   seed_prep_kernel<<<Q, 1024, seed_smem, stream>>>(
       fptr(slog), static_cast<int>(slog.stride(0)), head, NB, K, cap, emit_lim, pst, hst,
-      static_cast<float>(headroom), /*K_safe=*/0, fptr(origin), fptr(inv_delta), iptr(th_bucket),
-      /*th_safe_out=*/nullptr, /*seed_pred_cnt=*/nullptr, iptr(bcount), fptr(cand_val),
-      iptr(cand_idx), iptr(cand_cnt));
+      static_cast<float>(headroom), fptr(origin), fptr(inv_delta), iptr(th_bucket),
+      iptr(bcount), fptr(cand_val), iptr(cand_idx), iptr(cand_cnt));
 }
 
 void dsa_litetopk_scan(const Tensor& q, const Tensor& kv, const Tensor& kv_scales,
@@ -127,7 +126,7 @@ void dsa_litetopk_scan(const Tensor& q, const Tensor& kv, const Tensor& kv_scale
       (uint32_t)num_kv_splits, (uint32_t)probe_group,
       probe_group > 0 ? (((1ULL << 42) + (uint64_t)probe_group - 1) / (uint64_t)probe_group) : 0ULL,
       (uint32_t)probe_add_max, fptr(cand_val), iptr(cand_idx), iptr(cand_cnt), (uint32_t)cand_cap,
-      /*repair=*/0u, nullptr, nullptr, nullptr, tm_q, tm_kv, tm_ks, tm_w);
+      tm_q, tm_kv, tm_ks, tm_w);
 
   if (external_refresh) {
     int block = 128;
