@@ -269,8 +269,12 @@ class KVCacheManager:
             num_new_computed_tokens + num_uncached if num_uncached else 0
         )
 
-        if self.log_stats:
+        # Record at most once per request: the scheduler re-runs this lookup on
+        # every waiting-loop visit while a KVConnector defers the request, but the
+        # prefix-cache query/hit stat must be counted once, not once per retry.
+        if self.log_stats and not request.prefix_cache_stats_recorded:
             assert self.prefix_cache_stats is not None
+            request.prefix_cache_stats_recorded = True
             self.prefix_cache_stats.record(
                 num_tokens=request.num_tokens,
                 num_hits=num_new_computed_tokens,

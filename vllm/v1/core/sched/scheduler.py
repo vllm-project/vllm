@@ -739,8 +739,12 @@ class Scheduler(SchedulerInterface):
                         # The per-group lookup does not detect an uncached shared
                         # prefix, so there is no junction to pin in this path.
                         request.shared_prefix_boundary = 0
-                        if self.kv_cache_manager.log_stats:
+                        if (
+                            self.kv_cache_manager.log_stats
+                            and not request.prefix_cache_stats_recorded
+                        ):
                             assert self.kv_cache_manager.prefix_cache_stats is not None
+                            request.prefix_cache_stats_recorded = True
                             self.kv_cache_manager.prefix_cache_stats.record(
                                 num_tokens=request.num_tokens,
                                 num_hits=num_new_local_computed_tokens,
