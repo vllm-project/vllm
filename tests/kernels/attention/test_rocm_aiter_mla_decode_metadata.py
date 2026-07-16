@@ -40,9 +40,10 @@ BATCH_SIZE = 128
 CONTEXT_LEN = 8192
 PAGE_SIZE = 1
 
-# Expected dtypes for this fold path: bf16 model dtype -> bf16 query; fp8
-# KV-cache -> fp8_e4m3 kv.
-EXPECTED_Q_DTYPE = torch.bfloat16
+# Expected dtypes for this fold path: fp8 KV-cache decode forwards an fp8 query
+# dtype to get_mla_metadata_v1 (see #47276, which fixes a memory access fault on
+# the gfx950 DPA+FP8 KV path); fp8 KV-cache -> fp8_e4m3 kv.
+EXPECTED_Q_DTYPE = torch.float8_e4m3fn
 EXPECTED_KV_DTYPE = torch.float8_e4m3fn
 
 # The split/reduce content tensors filled by get_mla_metadata_v1. work_meta_data
