@@ -57,12 +57,45 @@ class IncrementalDetokenizer:
             # No tokenizer => skipping detokenization.
             return IncrementalDetokenizer()
 
-        if USE_FAST_DETOKENIZER and isinstance(tokenizer, TokenizersBackend):
+        if (
+            USE_FAST_DETOKENIZER
+            and isinstance(tokenizer, TokenizersBackend)
+            and not _prompt_ends_mid_utf8(tokenizer, request)
+        ):
             # Fast tokenizer => use tokenizers library DecodeStream.
             return FastIncrementalDetokenizer(tokenizer, request)
 
         # Fall back to slow python-based incremental detokenization.
         return SlowIncrementalDetokenizer(tokenizer, request)
+
+
+def _prompt_ends_mid_utf8(
+    tokenizer: TokenizerLike, request: EngineCoreRequest
+) -> bool:
+    """Whether the prompt token ids decode to text ending in an incomplete
+    UTF-8 sequence (trailing U+FFFD).
+
+    ``DecodeStream(ids=...)`` cannot establish its text prefix from such a
+    prompt (the lazy prefill in tokenizers' ``step_decode_stream`` requires
+    the decoded prefix to not end with the replacement character), so the
+    entire prompt text would leak into the first streamed delta. Requests
+    like this are routed to ``SlowIncrementalDetokenizer``, whose offset
+    bookkeeping handles incomplete tails. This can happen with token-array
+    prompts whose final tokens hold part of a multi-byte character (e.g.
+    byte-fallback/byte-level BPE tokens for emoji or Thai combining marks).
+    """
+    prompt_ids = request.prompt_token_ids
+    if not prompt_ids:
+        return False
+    assert request.sampling_params is not None
+    # Only the trailing bytes matter: one UTF-8 character spans at most 4
+    # bytes and tokens hold at least one byte each, so an 8-token window is
+    # sufficient even with a few trailing special tokens being skipped.
+    tail = tokenizer.decode(
+        prompt_ids[-8:],
+        skip_special_tokens=request.sampling_params.skip_special_tokens,
+    )
+    return tail.endswith("�")
 
 
 class BaseIncrementalDetokenizer(IncrementalDetokenizer, ABC):
