@@ -118,13 +118,15 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
         else:
             self.sharded_to_full_mapping_gpu = None
 
-    def zero_lora_state(self) -> None:
-        super().zero_lora_state()
-        # sharded_to_full_mapping_gpu is not adapter state: it is a
-        # permanent index mapping used to reorder gathered logits when
-        # TP > 1, so it must never be zeroed. Its backing memory lives in
-        # the sleep-mode pool and is also discarded by level-2 sleep, so
-        # rebuild it in place from the CPU-side list.
+    def reset_sharded_to_full_mapping(self) -> None:
+        """Rebuild sharded_to_full_mapping_gpu from the CPU-side list.
+
+        Unlike the LoRA stacked tensors, this index mapping (used to
+        reorder gathered logits when TP > 1) is not rewritten by adapter
+        activation. Its backing memory lives in the sleep-mode pool, so
+        level-2 sleep leaves it undefined and it must be re-materialized
+        in place after reload_weights().
+        """
         mapping_gpu = getattr(self, "sharded_to_full_mapping_gpu", None)
         if mapping_gpu is not None:
             mapping_gpu.copy_(

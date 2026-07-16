@@ -74,35 +74,6 @@ class BaseLayerWithLoRA(nn.Module):
         loader = AutoWeightsLoader(self.base_layer)
         return loader.load_weights(weights)
 
-    # Plain tensor attributes (not nn.Parameters or registered buffers)
-    # holding per-slot adapter state. Subclasses whose state lives under
-    # other names override this.
-    lora_state_attrs: tuple[str, ...] = ("lora_a_stacked", "lora_b_stacked")
-
-    def zero_lora_state(self) -> None:
-        """Re-zero the LoRA stacked tensors after a weight reload.
-
-        The stacked tensors are plain attributes, not ``nn.Parameter`` or
-        registered buffers. After level-2 sleep the GPU memory backing
-        them is discarded and remapped with undefined contents, and
-        ``reload_weights()`` restores only parameters and buffers — so
-        they must be explicitly re-zeroed to avoid adding garbage to the
-        base-model output. Adapters active before sleep must be re-loaded
-        afterwards.
-        """
-        for name in self.lora_state_attrs:
-            val = getattr(self, name, None)
-            if isinstance(val, torch.Tensor):
-                tensors: Iterable[torch.Tensor] = (val,)
-            elif isinstance(val, (tuple, list)):
-                tensors = (v for v in val if isinstance(v, torch.Tensor))
-            else:
-                continue
-
-            for t in tensors:
-                if t.device.type != "meta":
-                    t.zero_()
-
     @overload
     def slice_lora_a(
         self, lora_a: list[torch.Tensor | None]
