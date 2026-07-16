@@ -188,19 +188,23 @@ class AttentionSpec(KVCacheSpec):
         return configured_cache_dtype
 
     @property
-    def page_size_bytes(self) -> int:
-        real_page_size = self.real_page_size_bytes
+    def unpadded_page_size_bytes(self) -> int:
+        unpadded = self.real_page_size_bytes
         # Per-token-head scales are stored in separate tensors managed
         # by the attention backend, but the memory is carved from the
         # raw KV cache allocation so it must be budgeted here.
         if self.kv_quant_mode.is_per_token_head:
-            real_page_size += (
+            unpadded += (
                 2 * self.block_size * self.num_kv_heads * get_dtype_size(torch.float32)
             )
+        return unpadded
+
+    @property
+    def page_size_bytes(self) -> int:
         if self.page_size_padded is not None:
-            assert self.page_size_padded >= real_page_size
+            assert self.page_size_padded >= self.unpadded_page_size_bytes
             return self.page_size_padded
-        return real_page_size
+        return self.unpadded_page_size_bytes
 
     @property
     def real_page_size_bytes(self) -> int:

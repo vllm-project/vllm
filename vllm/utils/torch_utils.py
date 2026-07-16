@@ -416,27 +416,73 @@ def nvfp4_kv_cache_full_dim(head_size: int) -> int:
     return head_size // 2 + head_size // 16
 
 
+def nvfp4_split_data_scale(
+    kv_side: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Split one side (K or V) of an NVFP4 KV cache into data and scale.
+
+    The input is a 4D uint8 tensor whose last dimension is
+    ``full_dim = data_dim + scale_dim``. The physical layout within each
+    side is ``[data | scale]``, both packed contiguously.
+
+    The caller is responsible for slicing K and V from the combined cache
+    first (e.g. ``kv_cache.split(num_kv_heads, dim=1)``).
+
+    Args:
+        kv_side: 4D uint8 tensor ``(B, H, N, full_dim)``.
+
+    Returns:
+        ``(data, scale)`` where *data* is uint8 and *scale* is
+        float8_e4m3fn, both views of the same storage.
+    """
+    num_pages = kv_side.shape[0]
+    dim_1, dim_2 = kv_side.shape[1], kv_side.shape[2]
+    full_dim = kv_side.shape[3]
+    data_dim = full_dim * 8 // 9
+    scale_dim = full_dim - data_dim
+
+    data_per_kv = dim_1 * dim_2 * data_dim
+    page_bytes = kv_side.stride(0)
+
+    # Scale the source strides to preserve the physical NHD/HND order.
+    s1 = kv_side.stride(1) * data_dim // full_dim
+    s2 = kv_side.stride(2) * data_dim // full_dim
+    data_shape = (num_pages, dim_1, dim_2, data_dim)
+    data_strides = (page_bytes, s1, s2, 1)
+
+    s1_s = kv_side.stride(1) * scale_dim // full_dim
+    s2_s = kv_side.stride(2) * scale_dim // full_dim
+    scale_shape = (num_pages, dim_1, dim_2, scale_dim)
+    scale_strides = (page_bytes, s1_s, s2_s, 1)
+
+    base = kv_side.storage_offset()
+    data = torch.as_strided(kv_side, data_shape, data_strides, storage_offset=base)
+    scale = torch.as_strided(
+        kv_side, scale_shape, scale_strides, storage_offset=base + data_per_kv
+    ).view(torch.float8_e4m3fn)
+
+    return data, scale
+
+
 def _nvfp4_split_data_scale(
     kv_side: torch.Tensor,
     head_size: int | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Split a single NVFP4 KV-side buffer into data and scale views.
+    """Split one side (K or V) of an NVFP4 KV cache into data and scale.
 
-    The input is a 4D tensor for one KV side (K or V) whose last
-    dimension is ``full_dim = data_dim + scale_dim``.  The physical
-    layout within each side is [data | scale], both packed contiguously.
+    The input is a 4D uint8 tensor whose last dimension is
+    ``full_dim = data_dim + scale_dim``.  The physical layout within each
+    side is ``[data | scale]``, both packed contiguously.
+
+    The caller is responsible for slicing K and V from the combined cache
+    first (e.g. ``kv_cache.split(num_kv_heads, dim=1)``).
 
     Args:
-        kv_side: 4D uint8 tensor with shape
-            ``(num_pages, dim_1, dim_2, full_dim)``.
-            May be in any permutation order (NHD or HND).
+        kv_side: 4D uint8 tensor ``(B, H, N, full_dim)``.
 
     Returns:
-        ``(data, scale)`` where
-        ``data`` is a uint8 view with shape
-        ``(num_pages, dim_1, dim_2, data_dim)``.
-        ``scale`` is a float8_e4m3fn view with shape
-        ``(num_pages, dim_1, dim_2, scale_dim)``.
+        ``(data, scale)`` where *data* is uint8 and *scale* is
+        float8_e4m3fn, both views of the same storage.
     """
     num_pages = kv_side.shape[0]
     dim_1, dim_2 = kv_side.shape[1], kv_side.shape[2]

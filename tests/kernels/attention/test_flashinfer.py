@@ -253,13 +253,13 @@ def test_flashinfer_nvfp4_mixed_head_shape_uses_packed_layout() -> None:
 
     assert shape == (
         3,
-        16,
         2,
+        16,
         nvfp4_kv_cache_full_dim(256) + nvfp4_kv_cache_full_dim(512),
     )
 
 
-def test_flashinfer_nvfp4_same_head_shape_keeps_stacked_layout() -> None:
+def test_flashinfer_nvfp4_same_head_shape_uses_separate_head_groups() -> None:
     from vllm.v1.attention.backends.flashinfer import FlashInferBackend
 
     shape = FlashInferBackend.get_kv_cache_shape(
@@ -271,18 +271,18 @@ def test_flashinfer_nvfp4_same_head_shape_keeps_stacked_layout() -> None:
         head_size_v=256,
     )
 
-    assert shape == (3, 2, 16, 2, nvfp4_kv_cache_full_dim(256))
+    assert shape == (3, 4, 16, nvfp4_kv_cache_full_dim(256))
 
 
 @pytest.mark.parametrize(
     ("cache_dtype", "head_size_v", "expected_shape"),
     [
-        pytest.param("auto", None, (1392, 2, 32, 4, 256), id="auto"),
-        pytest.param("fp8", None, (1392, 2, 32, 4, 256), id="fp8"),
+        pytest.param("auto", None, (1392, 4, 32, 512), id="auto"),
+        pytest.param("fp8", None, (1392, 4, 32, 512), id="fp8"),
         pytest.param(
             "nvfp4",
             256,
-            (1392, 2, 32, 4, nvfp4_kv_cache_full_dim(256)),
+            (1392, 8, 32, nvfp4_kv_cache_full_dim(256)),
             id="nvfp4-same-head",
         ),
         pytest.param(
@@ -290,8 +290,8 @@ def test_flashinfer_nvfp4_same_head_shape_keeps_stacked_layout() -> None:
             128,
             (
                 1392,
-                32,
                 4,
+                32,
                 nvfp4_kv_cache_full_dim(256) + nvfp4_kv_cache_full_dim(128),
             ),
             id="nvfp4-mixed-head",
@@ -337,21 +337,12 @@ def test_flashinfer_kv_cache_shape_matches_stride_order(
         cache_dtype_str=cache_dtype,
     )
 
-    mixed_nvfp4 = cache_dtype == "nvfp4" and head_size_v != 256
-    if mixed_nvfp4:
-        expected_stride_order = {
-            ("NHD", False): (0, 1, 2, 3),
-            ("HND", False): (0, 2, 1, 3),
-            ("NHD", True): (1, 0, 2, 3, 4),
-            ("HND", True): (1, 3, 0, 2, 4),
-        }[(cache_layout, include_num_layers_dimension)]
-    else:
-        expected_stride_order = {
-            ("NHD", False): (0, 1, 2, 3, 4),
-            ("HND", False): (0, 1, 3, 2, 4),
-            ("NHD", True): (1, 0, 2, 3, 4, 5),
-            ("HND", True): (1, 2, 4, 0, 3, 5),
-        }[(cache_layout, include_num_layers_dimension)]
+    expected_stride_order = {
+        ("NHD", False): (0, 2, 1, 3),
+        ("HND", False): (0, 1, 2, 3),
+        ("NHD", True): (1, 0, 3, 2, 4),
+        ("HND", True): (1, 2, 0, 3, 4),
+    }[(cache_layout, include_num_layers_dimension)]
 
     assert shape == expected_shape
     assert stride_order == expected_stride_order
@@ -359,7 +350,7 @@ def test_flashinfer_kv_cache_shape_matches_stride_order(
     assert sorted(stride_order) == list(range(len(shape)))
 
 
-def test_flashinfer_cascade_keeps_stacked_kv_cache() -> None:
+def test_flashinfer_cascade_passes_kv_tuple(monkeypatch) -> None:
     from vllm.v1.attention.backends import flashinfer as flashinfer_backend
 
     impl = flashinfer_backend.FlashInferImpl.__new__(flashinfer_backend.FlashInferImpl)
@@ -368,10 +359,15 @@ def test_flashinfer_cascade_keeps_stacked_kv_cache() -> None:
     impl.scale = 1.0
     impl.kv_cache_dtype = "auto"
     impl.is_kvcache_nvfp4 = False
+    impl.head_size = 8
+    impl.num_kv_heads = 1
+    monkeypatch.setattr(flashinfer_backend, "get_kv_cache_layout", lambda: "NHD")
 
-    seen_kv_caches: list[torch.Tensor] = []
+    seen_kv_caches: list[tuple[torch.Tensor, torch.Tensor]] = []
 
-    def run_cascade(query: torch.Tensor, paged_kv_cache: torch.Tensor) -> torch.Tensor:
+    def run_cascade(
+        query: torch.Tensor, paged_kv_cache: tuple[torch.Tensor, torch.Tensor]
+    ) -> torch.Tensor:
         seen_kv_caches.append(paged_kv_cache)
         return torch.zeros_like(query)
 
@@ -385,7 +381,7 @@ def test_flashinfer_cascade_keeps_stacked_kv_cache() -> None:
     query = torch.ones((2, 1, 8))
     key = torch.ones_like(query)
     value = torch.ones_like(query)
-    kv_cache = torch.empty((3, 2, 4, 1, 8))
+    kv_cache = torch.empty((3, 1, 4, 16))
     output = torch.ones_like(query)
 
     result = impl.forward(
@@ -399,8 +395,11 @@ def test_flashinfer_cascade_keeps_stacked_kv_cache() -> None:
     )
 
     assert len(seen_kv_caches) == 1
-    assert seen_kv_caches[0] is kv_cache
-    assert seen_kv_caches[0].ndim == 5
+    k_cache, v_cache = seen_kv_caches[0]
+    assert k_cache.shape == (3, 4, 1, 8)
+    assert v_cache.shape == (3, 4, 1, 8)
+    assert k_cache.untyped_storage().data_ptr() == kv_cache.untyped_storage().data_ptr()
+    assert v_cache.untyped_storage().data_ptr() == kv_cache.untyped_storage().data_ptr()
     assert torch.count_nonzero(result) == 0
 
 
@@ -1249,6 +1248,64 @@ def test_flashinfer_impl_gates_native_nvfp4_update_on_trtllm_availability(
         assert impl._nvfp4_slot_writer is fake_slot_writer
 
 
+def test_flashinfer_dcp_prefill_forwards_nvfp4_scales(monkeypatch) -> None:
+    from vllm.v1.attention.backends import flashinfer as flashinfer_backend
+
+    seen: dict[str, object] = {}
+
+    class FakeContext:
+        def run(self, *args, **kwargs):
+            seen["kv_cache"] = args[1]
+            seen["kv_cache_sf"] = kwargs["kv_cache_sf"]
+            return torch.zeros_like(args[0]), torch.zeros(args[0].shape[:2])
+
+    class FakeNewTokens:
+        def run(self, query, *args, **kwargs):
+            return torch.zeros_like(query), torch.zeros(query.shape[:2])
+
+    group = SimpleNamespace(all_gather=lambda tensor, dim: tensor)
+    monkeypatch.setattr(flashinfer_backend, "get_dcp_group", lambda: group)
+    monkeypatch.setattr(flashinfer_backend, "merge_attn_states", lambda *args: None)
+
+    wrapper = flashinfer_backend.BatchDCPPrefillWrapper.__new__(
+        flashinfer_backend.BatchDCPPrefillWrapper
+    )
+    wrapper._context = FakeContext()
+    wrapper._new_tokens = FakeNewTokens()
+    wrapper._dcp_combine = lambda output, lse, group, return_lse: (output, lse)
+
+    query = torch.empty((2, 1, 8))
+    kv_cache = (torch.empty(0), torch.empty(0))
+    kv_cache_sf = (torch.empty(0), torch.empty(0))
+    wrapper.run(
+        SimpleNamespace(_k_scale_float=1.0, _v_scale_float=1.0),
+        query,
+        kv_cache,
+        query,
+        query,
+        torch.empty_like(query),
+        kv_cache_sf=kv_cache_sf,
+    )
+
+    assert seen["kv_cache"] is kv_cache
+    assert seen["kv_cache_sf"] is kv_cache_sf
+
+
+def test_flashinfer_dcp_rejects_mixed_head_nvfp4() -> None:
+    from vllm.v1.attention.backends import flashinfer as flashinfer_backend
+
+    builder = flashinfer_backend.FlashInferMetadataBuilder.__new__(
+        flashinfer_backend.FlashInferMetadataBuilder
+    )
+    builder.use_dcp = True
+    builder.is_kvcache_nvfp4 = True
+    builder.head_dim = 64
+    builder.head_dim_v = 128
+
+    with pytest.raises(NotImplementedError, match="different K/V head dimensions"):
+        builder.build(0, SimpleNamespace())
+
+
 def test_flashinfer_impl_caches_nvfp4_kv_cache_views(monkeypatch) -> None:
     from vllm.v1.attention.backends import flashinfer as flashinfer_backend
 
@@ -1287,7 +1344,7 @@ def test_flashinfer_impl_caches_nvfp4_kv_cache_views(monkeypatch) -> None:
     )
 
     full_dim = nvfp4_kv_cache_full_dim(head_size) + nvfp4_kv_cache_full_dim(head_size_v)
-    kv_cache = torch.empty((2, 4, 3, full_dim), dtype=torch.uint8)
+    kv_cache = torch.empty((2, 1, 4, full_dim), dtype=torch.uint8)
 
     views = impl._get_nvfp4_kv_cache_views(kv_cache)
     cached_views = impl._get_nvfp4_kv_cache_views(kv_cache)
@@ -1296,12 +1353,68 @@ def test_flashinfer_impl_caches_nvfp4_kv_cache_views(monkeypatch) -> None:
     assert cached_views.kv_cache is views.kv_cache
     assert cached_views.data[0] is views.data[0]
     assert cached_views.block_scales[0] is views.block_scales[0]
+    assert views.data[0].shape == (2, 4, 1, head_size // 2)
+    assert views.data[1].shape == (2, 4, 1, head_size_v // 2)
 
     rebound_kv_cache = torch.empty_like(kv_cache)
     rebound_views = impl._get_nvfp4_kv_cache_views(rebound_kv_cache)
 
     assert rebound_views is not views
     assert rebound_views.data[0].data_ptr() == rebound_kv_cache.data_ptr()
+
+
+@pytest.mark.parametrize("cache_layout", ["NHD", "HND"])
+def test_flashinfer_impl_same_head_nvfp4_views_cover_compact_pages(
+    monkeypatch, cache_layout: str
+) -> None:
+    from vllm.v1.attention.backends import flashinfer as flashinfer_backend
+
+    monkeypatch.setattr(flashinfer_backend, "get_kv_cache_layout", lambda: cache_layout)
+
+    num_blocks = 2
+    num_kv_heads = 3
+    block_size = 16
+    head_size = 128
+    full_dim = nvfp4_kv_cache_full_dim(head_size)
+    logical_shape = (num_blocks, 2 * num_kv_heads, block_size, full_dim)
+    stride_order = (0, 2, 1, 3) if cache_layout == "NHD" else (0, 1, 2, 3)
+    physical_shape = tuple(logical_shape[i] for i in stride_order)
+    physical_cache = torch.empty(physical_shape, dtype=torch.uint8)
+    inverse_order = tuple(stride_order.index(i) for i in range(4))
+    kv_cache = physical_cache.permute(*inverse_order)
+
+    impl = flashinfer_backend.FlashInferImpl.__new__(flashinfer_backend.FlashInferImpl)
+    impl.head_size = head_size
+    impl.head_size_v = head_size
+    impl.num_kv_heads = num_kv_heads
+    impl.kv_cache_dtype = "nvfp4"
+    impl.use_native_nvfp4_kv_cache_update = False
+    impl._nvfp4_kv_cache_view_key = None
+    impl._nvfp4_kv_cache_views = None
+
+    views = impl._get_nvfp4_kv_cache_views(kv_cache)
+    cached_views = impl._get_nvfp4_kv_cache_views(kv_cache)
+
+    assert cached_views is views
+    if cache_layout == "NHD":
+        expected_prefix = (num_blocks, block_size, num_kv_heads)
+    else:
+        expected_prefix = (num_blocks, num_kv_heads, block_size)
+    assert views.data[0].shape == (*expected_prefix, head_size // 2)
+    assert views.data[1].shape == (*expected_prefix, head_size // 2)
+    assert views.block_scales[0].shape == (*expected_prefix, head_size // 16)
+    assert views.block_scales[1].shape == (*expected_prefix, head_size // 16)
+
+    offset_sets = [
+        _storage_offsets(views.data[0]),
+        _storage_offsets(views.block_scales[0]),
+        _storage_offsets(views.data[1]),
+        _storage_offsets(views.block_scales[1]),
+    ]
+    assert len(set().union(*offset_sets)) == sum(
+        len(offsets) for offsets in offset_sets
+    )
+    assert len(set().union(*offset_sets)) == physical_cache.numel()
 
 
 def test_flashinfer_impl_requires_nvfp4_slot_mapping_writer(monkeypatch) -> None:

@@ -64,8 +64,8 @@ class FakeFlashInferNvfp4MixedBackend:
         assert head_size_v == 64
         return (
             num_blocks,
-            block_size,
             num_kv_heads,
+            block_size,
             nvfp4_kv_cache_full_dim(head_size) + nvfp4_kv_cache_full_dim(head_size_v),
         )
 
@@ -80,7 +80,7 @@ class FakeFlashInferNvfp4MixedBackend:
         assert head_size == 32
         assert head_size_v == 64
         assert cache_dtype_str == "nvfp4"
-        return (0, 1, 2, 3)
+        return (0, 2, 1, 3)
 
 
 def test_reshape_padded_flash_attention_kv_cache_strides_by_page():
@@ -210,10 +210,11 @@ def test_reshape_flashinfer_nvfp4_mixed_kv_cache_passes_head_size_v():
 
     assert kv_cache.shape == (
         num_blocks,
-        16,
         1,
+        16,
         nvfp4_kv_cache_full_dim(32) + nvfp4_kv_cache_full_dim(64),
     )
+    assert kv_cache.permute(0, 2, 1, 3).is_contiguous()
 
 
 def test_turboquant_spec_preserves_configured_cache_dtype_for_shape():
@@ -244,7 +245,7 @@ def test_turboquant_spec_preserves_configured_cache_dtype_for_shape():
         kernel_block_size=tq_spec.block_size,
         cache_dtype="turboquant_4bit_nc",
     )
-    assert shape == (1, 16, 8, 134)
+    assert shape == (1, 8, 16, 134)
     assert stride_order == (0, 1, 2, 3)
 
 
