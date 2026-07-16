@@ -15,6 +15,7 @@ from vllm.model_executor.model_loader.ep_weight_filter import (
     should_skip_weight,
 )
 from vllm.model_executor.model_loader.weight_utils import (
+    multi_thread_safetensors_weights_iterator,
     safetensors_weights_iterator,
 )
 
@@ -359,3 +360,73 @@ class TestEpFilterOnSyntheticMoeWeights:
 
         for name, tensor in filtered.items():
             assert torch.equal(tensor, all_weights[name]), f"Tensor mismatch for {name}"
+
+
+class TestMultiThreadEpFilterOnSyntheticMoeWeights:
+    """The multithreaded safetensors iterator must honor ``local_expert_ids``
+    the same way the single-threaded one does. Regression for #48827, where
+    combining ``enable_multithread_load`` with EP weight filtering silently
+    loaded every expert on every rank."""
+
+    @pytest.fixture
+    def synthetic_moe_files(self, tmp_path):
+        """Two synthetic shards with experts split across files, so the
+        thread pool actually processes more than one file."""
+        from safetensors.torch import save_file
+
+        file0 = {
+            "model.embed_tokens.weight": torch.randn(50, 16),
+            "model.layers.0.self_attn.q_proj.weight": torch.randn(16, 16),
+        }
+        for expert_id in range(4):
+            file0[f"model.layers.0.mlp.experts.{expert_id}.gate_proj.weight"] = (
+                torch.randn(32, 16)
+            )
+        file1 = {}
+        for expert_id in range(4, 8):
+            file1[f"model.layers.0.mlp.experts.{expert_id}.gate_proj.weight"] = (
+                torch.randn(32, 16)
+            )
+
+        path0 = str(tmp_path / "model-00001-of-00002.safetensors")
+        path1 = str(tmp_path / "model-00002-of-00002.safetensors")
+        save_file(file0, path0)
+        save_file(file1, path1)
+        return [path0, path1], {**file0, **file1}
+
+    def test_no_filter_returns_all(self, synthetic_moe_files):
+        files, expected = synthetic_moe_files
+        loaded = dict(multi_thread_safetensors_weights_iterator(files, False))
+        assert set(loaded.keys()) == set(expected.keys())
+
+    def test_ep2_rank0_skips_remote_experts(self, synthetic_moe_files):
+        files, _ = synthetic_moe_files
+        # EP=2, rank=0 → experts 0-3 are local; 4-7 must be skipped.
+        local_ids = compute_local_expert_ids(8, ep_size=2, ep_rank=0)
+        loaded = dict(
+            multi_thread_safetensors_weights_iterator(
+                files, False, local_expert_ids=local_ids
+            )
+        )
+        loaded_expert_ids = {
+            parse_expert_id(n) for n in loaded if parse_expert_id(n) is not None
+        }
+        assert loaded_expert_ids == {0, 1, 2, 3}
+        # Dense weights are never filtered.
+        assert "model.embed_tokens.weight" in loaded
+        assert "model.layers.0.self_attn.q_proj.weight" in loaded
+
+    def test_matches_single_thread_iterator(self, synthetic_moe_files):
+        files, _ = synthetic_moe_files
+        local_ids = compute_local_expert_ids(8, ep_size=2, ep_rank=0)
+        single = dict(
+            safetensors_weights_iterator(files, False, local_expert_ids=local_ids)
+        )
+        multi = dict(
+            multi_thread_safetensors_weights_iterator(
+                files, False, local_expert_ids=local_ids
+            )
+        )
+        assert set(single.keys()) == set(multi.keys())
+        for name, tensor in multi.items():
+            assert torch.equal(tensor, single[name]), f"Tensor mismatch for {name}"
