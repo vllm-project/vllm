@@ -1169,7 +1169,12 @@ class NixlBaseConnectorWorker:
                         "All non-MLA kv cache tensors must have the same size"
                     )
 
-                if cache.shape[0] != num_blocks:
+                # When there's a mismatch between kbs<>bs, we rely on HMA to ensure
+                # caches are either [NB, PS] or [NB*r, PS/r] where r is bs/kbs.
+                if (
+                    self._physical_blocks_per_logical_kv_block == 1
+                    and cache.shape[0] != num_blocks
+                ):
                     raise AssertionError(
                         "All kv cache tensors must have the same number of "
                         f"blocks; layer={layer_name}, "
