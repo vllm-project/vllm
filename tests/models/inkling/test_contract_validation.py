@@ -8,6 +8,7 @@ from vllm.config.compilation import CompilationConfig, CUDAGraphMode
 from vllm.models.inkling.common.mm_preprocess import InklingMultiModalDataParser
 from vllm.models.inkling.configs import (
     InklingAudioConfig,
+    InklingModelConfig,
     InklingVisionConfig,
 )
 from vllm.models.inkling.nvidia.sconv_swa_attn import (
@@ -34,17 +35,21 @@ def test_inkling_raw_2d_audio_is_rejected_as_ambiguous():
         parser._parse_audio_data(np.zeros((2, 100), dtype=np.float32))
 
 
-def test_inkling_supports_full_decode_only_cudagraphs():
+def test_inkling_mtp_chain_norm_is_disabled_by_default():
+    assert InklingModelConfig().chain_hidden_post_norm is False
+
+
+def test_inkling_supports_piecewise_cudagraphs():
     support = InklingSconvMetadataBuilder.get_cudagraph_support
-    assert support(None, None) == AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
+    assert support(None, None) == AttentionCGSupport.UNIFORM_BATCH
 
     compilation_config = CompilationConfig(
-        cudagraph_mode=CUDAGraphMode.FULL,
+        cudagraph_mode=CUDAGraphMode.PIECEWISE,
         splitting_ops=[],
     )
     resolved_mode = compilation_config.resolve_cudagraph_mode_and_sizes(
-        AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE,
+        AttentionCGSupport.UNIFORM_BATCH,
         "InklingSconvBackend",
     )
 
-    assert resolved_mode == CUDAGraphMode.FULL_DECODE_ONLY
+    assert resolved_mode == CUDAGraphMode.PIECEWISE

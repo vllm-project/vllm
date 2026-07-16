@@ -123,6 +123,7 @@ class InklingDecoderLayer(nn.Module):
         quant_config: QuantizationConfig | None,
         prefix: str,
         nvfp4_config: InklingNvfp4Config | None = None,
+        force_dense_mlp: bool = False,
     ) -> None:
         super().__init__()
         # Per-layer owner of the conv state as a paged SWA cache. The 4 sconv
@@ -161,7 +162,7 @@ class InklingDecoderLayer(nn.Module):
             conv_owner=self.conv_state,
         )
         self.mlp_norm = InklingRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        if layer_id < config.dense_mlp_idx:
+        if force_dense_mlp or layer_id < config.dense_mlp_idx:
             self.mlp: nn.Module = InklingDenseMLP(
                 hidden_size=config.hidden_size,
                 intermediate_size=config.dense_intermediate_size,
@@ -199,9 +200,12 @@ class InklingDecoderLayer(nn.Module):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
         pending: tuple[torch.Tensor | None, InklingShortConv] | None = None,
+        defer_mlp_add: bool = False,
         attn_in: torch.Tensor | None = None,
         log_scaling: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, tuple[torch.Tensor | None, InklingShortConv]]:
+    ) -> (
+        torch.Tensor | tuple[torch.Tensor, tuple[torch.Tensor | None, InklingShortConv]]
+    ):
         # The previous sublayer's (pre-reduce, pre-sconv) delta is folded in
         # fused with its RS/sconv/AG and this layer's pre-attention rmsnorm.
         # A None delta means the partials sit in the NVLS symm buffer.
@@ -219,9 +223,13 @@ class InklingDecoderLayer(nn.Module):
             attn_output, hidden_states, self.attn_sconv, self.mlp_norm, positions
         )
         mlp_output = self.mlp(mlp_in)
-        # The caller folds mlp_output (pre-reduce, pre-sconv) into the next
-        # fused sconv+add+rmsnorm.
-        return hidden_states, (mlp_output, self.mlp_sconv)
+        if defer_mlp_add:
+            # Caller folds mlp_output (pre-reduce, pre-sconv) into the next
+            # fused sconv+add+rmsnorm.
+            return hidden_states, (mlp_output, self.mlp_sconv)
+        return _sconv_add_norm(
+            mlp_output, hidden_states, self.mlp_sconv, None, positions
+        )[1]
 
 
 class InklingReplicatedEmbedding(nn.Module):
@@ -330,6 +338,7 @@ class InklingModel(nn.Module):
                 positions,
                 hidden_states,
                 pending=pending,
+                defer_mlp_add=True,
                 attn_in=attn_in0,
                 log_scaling=log_scaling,
             )
