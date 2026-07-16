@@ -49,12 +49,6 @@ logger = init_logger(__name__)
 
 
 class DFlareQwen3Attention(DFlashQwen3Attention):
-    """Attention for DFlare speculative decoding.
-    - ``k_proj_target`` / ``v_proj_target``: used during
-      ``precompute_and_store_context_kv`` to project per-layer fused target
-      hidden states into the KV cache.
-    """
-
     def __init__(
         self,
         hidden_size: int,
@@ -102,8 +96,6 @@ class DFlareQwen3Attention(DFlashQwen3Attention):
 
 
 class DFlareQwen3DecoderLayer(nn.Module):
-    """Same as DFlashQwen3DecoderLayer but uses DFlareQwen3Attention."""
-
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -186,12 +178,7 @@ class DFlareQwen3Model(nn.Module):
     """DFlare draft model.
 
     Replaces DFlash's single ``fc`` (ReplicatedLinear) with per-layer
-    adaptive fusion:
-
-    - ``layer_fusion_weights``: [D, T] learnable matrix (softmax-normalised).
-    - ``hidden_norm``: RMSNorm applied to target hidden states before fusion.
-    - ``norm``: final output RMSNorm.
-
+    adaptive fusion.
     Context K/V are projected with ``k_proj_target`` / ``v_proj_target``
     (heterogeneous projections) instead of the shared ``k_proj`` / ``v_proj``.
     """
@@ -239,7 +226,6 @@ class DFlareQwen3Model(nn.Module):
             ]
         )
 
-        # Layer-wise adaptive fusion (replaces DFlash's self.fc)
         T = len(drafter_config.get("target_layer_ids", []))
         D = self.config.num_hidden_layers
         self.layer_fusion_weights = nn.Parameter(torch.zeros(D, T))
@@ -263,15 +249,6 @@ class DFlareQwen3Model(nn.Module):
         self,
         layers_attn: list[nn.Module],
     ) -> None:
-        """Build fused weight buffers for ``precompute_and_store_context_kv``.
-
-        Stacks ``k_proj_target`` / ``v_proj_target`` from all attention
-        layers.  Each layer's context input is different (per-layer fused
-        hidden state), so the forward uses ``bmm`` instead of DFlash's
-        single ``F.linear``.
-        """
-        self._hidden_norm_weight = self.hidden_norm.weight.data
-
         # Fused KV target weight: [D, 2*kv_size, H] → [D, H, 2*kv_size]
         kv_target = torch.stack([a.kv_target_proj.weight for a in layers_attn])
         self._kv_target = kv_target.transpose(1, 2).contiguous()
@@ -359,12 +336,6 @@ class DFlareQwen3Model(nn.Module):
         context_positions: torch.Tensor,
         context_slot_mapping: (torch.Tensor | list[torch.Tensor | None] | None) = None,
     ) -> None:
-        """Precompute K/V from per-layer fused context states.
-
-        Uses ``k_proj_target`` / ``v_proj_target`` (heterogeneous
-        projections).  Unlike DFlash, each draft layer receives its own
-        fused context signal.
-        """
         if not hasattr(self, "_num_attn_layers"):
             logger.warning_once(
                 "DFlare buffer initialization was skipped. If dummy weights "
@@ -378,7 +349,6 @@ class DFlareQwen3Model(nn.Module):
         hd = self._head_dim
         nkv = self._num_kv_heads
 
-        # context_states: [N, D, H] — permute to [D, N, H] for bmm
         ctx = context_states.permute(1, 0, 2)  # [D, N, H]
         N = ctx.shape[1]
 
@@ -386,7 +356,6 @@ class DFlareQwen3Model(nn.Module):
 
         all_k_normed = self._normalize_context_k(all_k)
 
-        # Fused RoPE: [D * N, kv]
         all_k_flat = all_k_normed.view(L * N, kv)
         positions_repeated = context_positions.repeat(L)
         cos_sin_cache = self._rope_cos_sin_cache
@@ -543,8 +512,8 @@ class DFlareQwen3ForCausalLM(DFlashQwen3ForCausalLM):
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
         T = len(self.dflare_config["target_layer_ids"])
-        h = hidden_states.view(-1, T, self.config.hidden_size)  # [N, T, H]
-        h_normed = self.model.hidden_norm(h)  # RMSNorm over hidden_size
+        h = hidden_states.view(-1, T, self.config.hidden_size)
+        h_normed = self.model.hidden_norm(h)
         fused = self.model.layer_fusion_weights @ h_normed
         return fused
 
