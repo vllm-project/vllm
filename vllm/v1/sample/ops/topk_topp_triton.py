@@ -91,18 +91,6 @@ def _update_min_larger_stats(data, above_mask, min_larger, num_min_larger, senti
 
 
 @triton.jit
-def _top_p_pivot_midpoint(max_range, min_range):
-    """Return a midpoint that converges uniformly across probability scales."""
-    return tl.sqrt(max_range * tl.maximum(min_range, 1e-30))
-
-
-@triton.jit
-def _top_p_search_converged(max_range, min_range):
-    """Require convergence in both absolute and relative probability space."""
-    return (max_range - min_range) < 1e-9 and max_range <= min_range * 1.0001
-
-
-@triton.jit
 def _topk_topp_kernel(
     LOGITS,
     LOGITS_STRIDE_0,
@@ -536,7 +524,9 @@ def _topk_topp_kernel(
                         # Fifth passes: Search for p_pivot
                         found_pivot = 0
                         while found_pivot == 0:
-                            p_pivot_0 = _top_p_pivot_midpoint(max_range, min_range)
+                            p_pivot_0 = tl.sqrt(
+                                max_range * tl.maximum(min_range, 1e-30)
+                            )
                             p_pivots_sum_0 = 0.0
                             min_larger_0 = 1.0
                             num_min_larger_0 = tl.zeros((), dtype=tl.uint32)
@@ -585,9 +575,9 @@ def _topk_topp_kernel(
 
                             num_iters += 1
                             if (
-                                _top_p_search_converged(max_range, min_range)
-                                or num_iters >= 18
-                            ):
+                                (max_range - min_range) < 1e-9
+                                and max_range <= min_range * 1.0001
+                            ) or num_iters >= 18:
                                 # Keep the pivot consistent with the
                                 # min-larger statistics computed above.
                                 p_pivot = p_pivot_0
@@ -710,7 +700,7 @@ def _topk_topp_kernel(
 
                     found_pivot = 0
                     while found_pivot == 0:
-                        p_pivot_0 = _top_p_pivot_midpoint(max_range, min_range)
+                        p_pivot_0 = tl.sqrt(max_range * tl.maximum(min_range, 1e-30))
                         p_pivots_sum_0 = 0.0
                         min_larger_0 = 1.0
                         num_min_larger_0 = tl.zeros((), dtype=tl.uint32)
@@ -758,9 +748,9 @@ def _topk_topp_kernel(
 
                         num_iters += 1
                         if (
-                            _top_p_search_converged(max_range, min_range)
-                            or num_iters >= 18
-                        ):
+                            (max_range - min_range) < 1e-9
+                            and max_range <= min_range * 1.0001
+                        ) or num_iters >= 18:
                             # Keep the pivot consistent with the min-larger
                             # statistics computed above.
                             p_pivot = p_pivot_0
@@ -783,7 +773,7 @@ def _topk_topp_kernel(
 
                     found_pivot = 0
                     while found_pivot == 0:
-                        p_pivot_0 = _top_p_pivot_midpoint(max_range, min_range)
+                        p_pivot_0 = tl.sqrt(max_range * tl.maximum(min_range, 1e-30))
                         p_pivots_sum_0 = 0.0
                         min_larger_0 = 1.0
                         num_min_larger_0 = tl.zeros((), dtype=tl.uint32)
@@ -829,9 +819,9 @@ def _topk_topp_kernel(
 
                         num_iters += 1
                         if (
-                            _top_p_search_converged(max_range, min_range)
-                            or num_iters >= 18
-                        ):
+                            (max_range - min_range) < 1e-9
+                            and max_range <= min_range * 1.0001
+                        ) or num_iters >= 18:
                             # Keep the pivot consistent with the min-larger
                             # statistics computed above.
                             p_pivot = p_pivot_0
