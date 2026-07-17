@@ -28,7 +28,7 @@ from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 from transformers import AutoModelForCausalLM
 
 from vllm import LLM, SamplingParams
-from vllm.config import IPCWeightTransferConfig
+from vllm.config import WeightTransferConfig
 from vllm.distributed.weight_transfer import (
     ModuleSource,
     RayVLLMWeightSyncClient,
@@ -70,8 +70,9 @@ class TrainModel:
         """Build the trainer-side IPC engine (no rendezvous needed for IPC)."""
         self.engine = WeightTransferTrainerFactory.trainer_init(
             backend="ipc",
-            config=IPCWeightTransferConfig(packed=False),
-            init_info=IPCTrainerInitInfo(rank=0),  # single-GPU trainer = sender
+            config=WeightTransferConfig(backend="ipc"),
+            # packed is a trainer-side wire param, propagated to the worker.
+            init_info=IPCTrainerInitInfo(rank=0, packed=False),  # rank 0 = sender
             client=RayVLLMWeightSyncClient(self.llm_handle),
             source=ModuleSource(self.train_model),
         )
@@ -103,7 +104,7 @@ llm = ray.remote(
     tensor_parallel_size=1,
     distributed_executor_backend="ray",
     gpu_memory_utilization=0.7,
-    weight_transfer_config=IPCWeightTransferConfig(packed=False),
+    weight_transfer_config=WeightTransferConfig(backend="ipc"),
     load_format="dummy",
 )
 

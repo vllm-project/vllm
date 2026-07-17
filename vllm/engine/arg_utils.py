@@ -42,7 +42,6 @@ from vllm.config import (
     DiffusionConfig,
     ECTransferConfig,
     EPLBConfig,
-    IPCWeightTransferConfig,
     KernelConfig,
     KVEventsConfig,
     KVTransferConfig,
@@ -139,14 +138,6 @@ logger = init_logger(__name__)
 T = TypeVar("T")
 TypeHint: TypeAlias = type[Any] | object
 TypeHintT: TypeAlias = type[T] | object
-
-# Backend-specific weight transfer config subclasses, keyed by `backend`, when a
-# user passes `weight_transfer_config` as a dict. Backends without extra wire
-# params (e.g. "nccl", "sparse_nccl") fall back to the base
-# `WeightTransferConfig`.
-_WEIGHT_TRANSFER_CONFIG_CLASSES: dict[str, type[WeightTransferConfig]] = {
-    "ipc": IPCWeightTransferConfig,
-}
 
 
 def parse_type(return_type: Callable[[str], T]) -> Callable[[str], T]:
@@ -760,21 +751,9 @@ class EngineArgs:
         if isinstance(self.eplb_config, dict):
             self.eplb_config = EPLBConfig(**self.eplb_config)
         if isinstance(self.weight_transfer_config, dict):
-            # Dispatch to the backend-specific config subclass so that
-            # backend wire params (packed, buffer sizes) are typed and shared
-            # by both the trainer and inference sides.
-            backend = self.weight_transfer_config.get("backend", "nccl")
-            cls = _WEIGHT_TRANSFER_CONFIG_CLASSES.get(backend, WeightTransferConfig)
-            self.weight_transfer_config = cls(**self.weight_transfer_config)
-        elif type(self.weight_transfer_config) is WeightTransferConfig:
-            # The `vllm serve` CLI deserializes `--weight-transfer-config` JSON
-            # straight into the base class, bypassing the dict dispatch above, so
-            # backend wire params (packed, buffer sizes) would be missing. Upgrade
-            # to the backend subclass, preserving any base fields provided.
-            wtc = self.weight_transfer_config
-            cls = _WEIGHT_TRANSFER_CONFIG_CLASSES.get(wtc.backend)
-            if cls is not None:
-                self.weight_transfer_config = cls(**vars(wtc))
+            self.weight_transfer_config = WeightTransferConfig(
+                **self.weight_transfer_config
+            )
         if isinstance(self.ir_op_priority, dict):
             self.ir_op_priority = IrOpPriorityConfig(**self.ir_op_priority)
 

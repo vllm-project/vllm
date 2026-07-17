@@ -16,10 +16,7 @@ import torch
 from torch.multiprocessing.reductions import reduce_tensor
 
 from vllm.config.parallel import ParallelConfig
-from vllm.config.weight_transfer import (
-    IPCWeightTransferConfig,
-    WeightTransferConfig,
-)
+from vllm.config.weight_transfer import WeightTransferConfig
 from vllm.distributed.weight_transfer import (
     HTTPVLLMWeightSyncClient,
     ModuleSource,
@@ -1079,7 +1076,7 @@ def inference_receive_ipc_tensor(
     device = _set_ray_assigned_device()
 
     from vllm.config.parallel import ParallelConfig
-    from vllm.config.weight_transfer import IPCWeightTransferConfig
+    from vllm.config.weight_transfer import WeightTransferConfig
     from vllm.distributed.weight_transfer.ipc_engine import (
         IPCWeightTransferEngine,
     )
@@ -1093,8 +1090,9 @@ def inference_receive_ipc_tensor(
             for name, tensor in weights:
                 self.received.append((name, tensor.clone()))
 
-    # Trainer sends unpacked IPC handles, so the worker reads packed=False.
-    config = IPCWeightTransferConfig(packed=False)
+    # Trainer sends unpacked IPC handles; the worker learns packed=False from
+    # the init handshake below (IPCWeightTransferInitInfo defaults to False).
+    config = WeightTransferConfig(backend="ipc")
     vllm_config = MagicMock()
     parallel_config = MagicMock(spec=ParallelConfig)
     parallel_config.rank = 0
@@ -1208,13 +1206,14 @@ def test_ipc_receive_weights_missing_gpu_uuid_raises():
     if torch.accelerator.device_count() < 1:
         pytest.skip("Need at least 1 GPU for this test")
 
-    config = IPCWeightTransferConfig(packed=False)
+    config = WeightTransferConfig(backend="ipc")
     engine = IPCWeightTransferEngine(
         config,
         create_mock_vllm_config(),
         torch.device("cuda:0"),
         MagicMock(spec=torch.nn.Module),
     )
+    # No init handshake here, so the engine keeps its default packed=False.
 
     dummy_tensor = torch.ones(10, 10, device="cuda:0")
     _, ipc_handle = reduce_tensor(dummy_tensor)
@@ -1429,13 +1428,14 @@ class TestTrainerEngineBase:
     reason="Need at least 1 GPU (CUDA IPC handles).",
 )
 def test_ipc_trainer_send_weights_drives_client_in_order():
-    """send_weights issues start -> update -> finish and ships per-round metadata,
-    with the packed wire param carried on the config rather than the update_info."""
+    """send_weights issues start -> update -> finish and ships per-round metadata;
+    the packed wire param rides the init info, not the per-round update_info."""
     client = RecordingClient()
     engine = IPCTrainerWeightTransferEngine(
-        IPCWeightTransferConfig(packed=False),
+        WeightTransferConfig(backend="ipc"),
         client=client,
         source=ModuleSource(_module_with(("w", torch.ones(4, device="cuda")))),
+        packed=False,
     )
 
     engine.send_weights()
@@ -1447,21 +1447,23 @@ def test_ipc_trainer_send_weights_drives_client_in_order():
     assert "packed" not in client.last_update_info
 
 
-def test_ipc_trainer_init_drives_client_init():
-    """trainer_init performs the (no-op for IPC) inference-side init handshake."""
+def test_ipc_trainer_init_ships_packed_to_worker():
+    """trainer_init drives the inference-side init handshake and propagates the
+    must-agree `packed` flag to the worker."""
     if torch.accelerator.device_count() < 1:
         pytest.skip("Need at least 1 GPU (CUDA IPC handles).")
 
     client = RecordingClient()
     engine = WeightTransferTrainerFactory.trainer_init(
         backend="ipc",
-        config=IPCWeightTransferConfig(packed=False),
-        init_info=IPCTrainerInitInfo(rank=0),
+        config=WeightTransferConfig(backend="ipc"),
+        init_info=IPCTrainerInitInfo(rank=0, packed=True),
         client=client,
         source=ModuleSource(_module_with(("w", torch.ones(4, device="cuda")))),
     )
 
     assert isinstance(engine, IPCTrainerWeightTransferEngine)
     assert engine.is_sender is True
+    assert engine.packed is True
     assert client.order == ["init"]
-    assert client.last_init_info == {}
+    assert client.last_init_info == {"packed": True}

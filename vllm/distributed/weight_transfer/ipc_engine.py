@@ -12,7 +12,7 @@ from torch.multiprocessing.reductions import rebuild_cuda_tensor, reduce_tensor
 from typing_extensions import Self
 
 from vllm import envs
-from vllm.config.weight_transfer import IPCWeightTransferConfig
+from vllm.config.weight_transfer import WeightTransferConfig
 from vllm.distributed.weight_transfer.base import (
     TrainerInitInfo,
     TrainerWeightTransferEngine,
@@ -26,6 +26,7 @@ from vllm.distributed.weight_transfer.base import (
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
 from vllm.distributed.weight_transfer.packed_tensor import (
+    DEFAULT_PACKED_BUFFER_SIZE_BYTES,
     packed_ipc_consumer,
     packed_ipc_producer,
 )
@@ -33,24 +34,37 @@ from vllm.distributed.weight_transfer.packed_tensor import (
 
 @dataclass
 class IPCWeightTransferInitInfo(WeightTransferInitInfo):
-    """Worker-side init info for IPC weight transfer. No rendezvous needed."""
+    """Worker-side init info for IPC weight transfer. No rendezvous needed.
 
-    pass
+    `packed` is a must-agree wire param: the trainer ships it here at the init
+    handshake so the worker decodes with the same setting the trainer encoded
+    with. The consumer rebuilds from the IPC handle + `tensor_sizes`, so it does
+    not need the buffer size (producer-only)."""
+
+    packed: bool = False
 
 
 @dataclass
 class IPCTrainerInitInfo(TrainerInitInfo):
     """Trainer-side init info for IPC weight transfer. No rendezvous needed;
     `rank` (from `TrainerInitInfo`) identifies this trainer process — rank 0
-    ships the merged IPC handles. All ranks still join the handle all-gather."""
+    ships the merged IPC handles. All ranks still join the handle all-gather.
+
+    `packed` / `packed_buffer_size_bytes` are the transfer's wire params. The
+    trainer propagates `packed` to the worker at `trainer_init` so the two sides
+    cannot disagree."""
+
+    packed: bool = False
+    packed_buffer_size_bytes: int = DEFAULT_PACKED_BUFFER_SIZE_BYTES
 
 
 @dataclass
 class IPCWeightTransferUpdateInfo(WeightTransferUpdateInfo):
     """Per-round update info for the IPC weight transfer backend.
 
-    Whether the transfer is packed lives on `IPCWeightTransferConfig`; this
-    carries only per-round metadata and the IPC handles.
+    Whether the transfer is packed is a must-agree wire param carried on the
+    init info (`IPCTrainerInitInfo` / `IPCWeightTransferInitInfo`), not here;
+    this carries only per-round metadata and the IPC handles.
     """
 
     names: list[str]
@@ -122,29 +136,28 @@ class IPCWeightTransferEngine(
     init_info_cls = IPCWeightTransferInitInfo
     update_info_cls = IPCWeightTransferUpdateInfo
 
-    # Narrow the base `config` type: the IPC engine reads the `packed` wire
-    # param that lives on the subclass.
-    config: IPCWeightTransferConfig
-
     def __init__(
         self,
-        config: IPCWeightTransferConfig,
+        config: WeightTransferConfig,
         vllm_config: "VllmConfig",
         device: torch.device,
         model: torch.nn.Module,
     ) -> None:
         super().__init__(config, vllm_config, device, model)
+        # Set from the trainer-supplied init info at the handshake; defaults are
+        # only for the (unreachable) receive-before-init case.
+        self.packed = False
 
     def init_transfer_engine(self, init_info: IPCWeightTransferInitInfo) -> None:
         """
-        Initialize the weight transfer mechanism.
-        This is called once at the beginning of training.
-        No initialization needed for IPC backend.
+        Initialize the weight transfer mechanism. No data-plane rendezvous is
+        needed for IPC; this just records the trainer-supplied wire params so the
+        worker decodes exactly as the trainer encoded.
 
         Args:
-            init_info: IPC initialization info (empty)
+            init_info: IPC initialization info (carries `packed`).
         """
-        pass
+        self.packed = init_info.packed
 
     def start_weight_update(self) -> None:
         """Initialize layerwise reloading for the incoming checkpoint weights."""
@@ -166,8 +179,9 @@ class IPCWeightTransferEngine(
         """
         Receive weights from the trainer via CUDA IPC handles and load them.
 
-        Whether the transfer is packed is read from `self.config` so it is
-        guaranteed to match the trainer's config.
+        Whether the transfer is packed is read from `self.packed`, set at the
+        init handshake from the trainer's init info, so it is guaranteed to
+        match how the trainer encoded.
 
         Args:
             update_info: IPC update info containing parameter names, dtypes, shapes,
@@ -181,7 +195,7 @@ class IPCWeightTransferEngine(
         # rebuilt on the device the model lives on.
         device_index = self.device.index
 
-        if self.config.packed:
+        if self.packed:
             if update_info.tensor_sizes is None:
                 raise ValueError("`tensor_sizes` is required when packed=True")
             assert isinstance(update_info.ipc_handles, dict)
@@ -240,7 +254,7 @@ class IPCWeightTransferEngine(
 
 
 class IPCTrainerWeightTransferEngine(
-    TrainerWeightTransferEngine[IPCWeightTransferConfig, IPCTrainerInitInfo]
+    TrainerWeightTransferEngine[WeightTransferConfig, IPCTrainerInitInfo]
 ):
     """Trainer-side CUDA IPC weight transfer engine.
 
@@ -250,39 +264,51 @@ class IPCTrainerWeightTransferEngine(
     the inference side. IPC transfer is straight-line (no concurrent broadcast
     like NCCL): `update_weights` *is* the transfer, and it rides the client, so
     it no-ops on non-senders.
+
+    `packed` / `packed_buffer_size_bytes` come from `IPCTrainerInitInfo`; the
+    sender propagates `packed` to the worker at `trainer_init`.
     """
 
     init_info_cls = IPCTrainerInitInfo
-    config_cls = IPCWeightTransferConfig
+    config_cls = WeightTransferConfig
 
     def __init__(
         self,
-        config: IPCWeightTransferConfig,
+        config: WeightTransferConfig,
         *,
         client: VLLMWeightSyncClient,
         source: WeightSource,
         is_sender: bool = True,
+        packed: bool = False,
+        packed_buffer_size_bytes: int = DEFAULT_PACKED_BUFFER_SIZE_BYTES,
     ) -> None:
         super().__init__(config, client=client, source=source, is_sender=is_sender)
+        self.packed = packed
+        self.packed_buffer_size_bytes = packed_buffer_size_bytes
         self.device_index = torch.accelerator.current_device_index()
         self.gpu_uuid = str(torch.cuda.get_device_properties(self.device_index).uuid)
 
     @classmethod
     def trainer_init(
         cls,
-        config: IPCWeightTransferConfig,
+        config: WeightTransferConfig,
         init_info: IPCTrainerInitInfo,
         *,
         client: VLLMWeightSyncClient,
         source: WeightSource,
     ) -> Self:
         engine = cls(
-            config, client=client, source=source, is_sender=init_info.is_sender
+            config,
+            client=client,
+            source=source,
+            is_sender=init_info.is_sender,
+            packed=init_info.packed,
+            packed_buffer_size_bytes=init_info.packed_buffer_size_bytes,
         )
-        # IPC needs no data-plane rendezvous; this just lets the worker construct
-        # its (empty) init info. Only the sender drives the inference side.
+        # IPC needs no data-plane rendezvous. The sender ships the must-agree
+        # `packed` flag so the worker decodes exactly as this trainer encodes.
         if engine.is_sender:
-            engine.client.init_weight_transfer_engine({})
+            engine.client.init_weight_transfer_engine({"packed": init_info.packed})
         return engine
 
     def send_weights(self) -> None:
@@ -297,7 +323,7 @@ class IPCTrainerWeightTransferEngine(
     # ---- data plane (runs on all ranks; only the sender ships) ----
 
     def _send(self, source: WeightSource) -> None:
-        if self.config.packed:
+        if self.packed:
             self._send_packed(source)
         else:
             self._send_unpacked(source)
@@ -388,7 +414,7 @@ class IPCTrainerWeightTransferEngine(
             iterator=iter(source),
             gpu_uuid=self.gpu_uuid,
             post_iter_func=lambda item: item[1],
-            buffer_size_bytes=self.config.packed_buffer_size_bytes,
+            buffer_size_bytes=self.packed_buffer_size_bytes,
         ):
             ipc_handle = self._all_gather_and_merge_handles([chunk.ipc_handle])[0]
             self._do_send(

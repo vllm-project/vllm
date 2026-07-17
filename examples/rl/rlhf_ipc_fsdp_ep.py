@@ -36,7 +36,7 @@ from torch.distributed.fsdp import fully_shard
 from transformers import AutoModelForCausalLM
 
 from vllm import LLM, SamplingParams
-from vllm.config import IPCWeightTransferConfig
+from vllm.config import WeightTransferConfig
 from vllm.distributed.weight_transfer import (
     ModuleSource,
     RayVLLMWeightSyncClient,
@@ -45,10 +45,12 @@ from vllm.distributed.weight_transfer import (
 from vllm.distributed.weight_transfer.ipc_engine import IPCTrainerInitInfo
 from vllm.utils.network_utils import get_ip, get_open_port
 
+# The inference side only needs the backend; the packed wire params are
+# trainer-side and get propagated to the workers at the init handshake.
+WEIGHT_TRANSFER_CONFIG = WeightTransferConfig(backend="ipc")
 # Packed IPC transfer with a 1 GB buffer (matches the per-chunk buffer size).
-WEIGHT_TRANSFER_CONFIG = IPCWeightTransferConfig(
-    packed=True, packed_buffer_size_bytes=1024 * 1024 * 1024
-)
+PACKED = True
+PACKED_BUFFER_SIZE_BYTES = 1024 * 1024 * 1024
 
 TRAIN_GPU_FRACTION = float(os.environ.get("RLHF_IPC_TRAIN_GPU_FRACTION", "0.42"))
 VLLM_GPU_FRACTION = float(os.environ.get("RLHF_IPC_VLLM_GPU_FRACTION", "0.42"))
@@ -142,7 +144,11 @@ class FSDPTrainWorker:
         self.engine = WeightTransferTrainerFactory.trainer_init(
             backend="ipc",
             config=WEIGHT_TRANSFER_CONFIG,
-            init_info=IPCTrainerInitInfo(rank=self.rank),  # FSDP rank; sender is 0
+            init_info=IPCTrainerInitInfo(
+                rank=self.rank,  # FSDP rank; sender is 0
+                packed=PACKED,
+                packed_buffer_size_bytes=PACKED_BUFFER_SIZE_BYTES,
+            ),
             client=RayVLLMWeightSyncClient(llm_handles),
             source=ModuleSource(self.model),
         )

@@ -10,13 +10,9 @@ from typing import Any
 import torch
 from torch.multiprocessing.reductions import reduce_tensor
 
-# Canonical home for these defaults is `vllm.config.weight_transfer` (they are
-# now config fields). Re-exported here so existing
-# `from ...packed_tensor import DEFAULT_PACKED_*` imports keep working.
-from vllm.config.weight_transfer import (  # noqa: F401
-    DEFAULT_PACKED_BUFFER_SIZE_BYTES,
-    DEFAULT_PACKED_NUM_BUFFERS,
-)
+# Default values for packed tensor transfer.
+DEFAULT_PACKED_BUFFER_SIZE_BYTES = 1024 * 1024 * 1024  # 1GB
+DEFAULT_PACKED_NUM_BUFFERS = 2
 
 
 def unpack_tensor(

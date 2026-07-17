@@ -46,7 +46,7 @@ import torch
 from openai import OpenAI
 from transformers import AutoModelForCausalLM
 
-from vllm.config import IPCWeightTransferConfig
+from vllm.config import WeightTransferConfig
 from vllm.distributed.weight_transfer import (
     HTTPVLLMWeightSyncClient,
     ModuleSource,
@@ -144,8 +144,8 @@ def main():
     # no-op rendezvous; the same client carries start/update/finish.
     engine = WeightTransferTrainerFactory.trainer_init(
         backend="ipc",
-        config=IPCWeightTransferConfig(packed=False),
-        init_info=IPCTrainerInitInfo(rank=0),  # single-GPU trainer = sender
+        config=WeightTransferConfig(backend="ipc"),
+        init_info=IPCTrainerInitInfo(rank=0, packed=False),  # rank 0 = sender
         client=HTTPVLLMWeightSyncClient(BASE_URL),
         source=ModuleSource(train_model),
     )
