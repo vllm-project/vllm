@@ -1344,10 +1344,7 @@ class SpeculativeConfig:
 
         assert self.draft_model_config is not None
         hf_config = self.draft_model_config.hf_config
-        sample_from_anchor = getattr(hf_config, "sample_from_anchor", None)
-        if sample_from_anchor is None:
-            sample_from_anchor = not getattr(hf_config, "dspark_bonus_anchor", False)
-        return num_query_tokens + int(not sample_from_anchor)
+        return num_query_tokens + int(getattr(hf_config, "dspark_bonus_anchor", False))
 
     def uses_dynamic_speculative_decoding(self) -> bool:
         return self.num_speculative_tokens_per_batch_size is not None
