@@ -288,6 +288,7 @@ def _setup_boundary_request(backend: str):
     structured_req.__dict__["structured_output_key"] = (
         StructuredOutputOptions.STRUCTURAL_TAG,
         "",
+        None,
     )
     manager.reasoner_cls = _MarkerReasoner
     structured_req.reasoner = _MarkerReasoner(marker)

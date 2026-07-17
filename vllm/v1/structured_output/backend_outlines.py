@@ -71,10 +71,18 @@ class OutlinesBackend(StructuredOutputBackend):
         return index
 
     def compile_grammar(
-        self, request_type: StructuredOutputOptions, grammar_spec: str
+        self,
+        request_type: StructuredOutputOptions,
+        grammar_spec: str,
+        whitespace_pattern: str | None = None,
     ) -> StructuredOutputGrammar:
         if request_type == StructuredOutputOptions.JSON:
-            regex = json_schema.build_regex_from_schema(grammar_spec)
+            if whitespace_pattern is not None:
+                regex = json_schema.build_regex_from_schema(
+                    grammar_spec, whitespace_pattern=whitespace_pattern
+                )
+            else:
+                regex = json_schema.build_regex_from_schema(grammar_spec)
         elif request_type == StructuredOutputOptions.REGEX:
             regex = grammar_spec
         elif request_type == StructuredOutputOptions.CHOICE:

@@ -407,14 +407,16 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
         Returns None for beams where the grammar has terminated.
         """
         vocab_size = self.model_config.get_vocab_size()
-        request_type, grammar_spec = structured_output_key
+        request_type, grammar_spec, whitespace_pattern = structured_output_key
         result: list[tuple[SamplingParams, list[int]] | None] = []
 
         for beam in beams:
             # Fresh grammar per beam, replaying generated tokens.
             # Backends don't support cloning grammar state, so
             # replay is needed to reconstruct the FSM position.
-            grammar = backend.compile_grammar(request_type, grammar_spec)
+            grammar = backend.compile_grammar(
+                request_type, grammar_spec, whitespace_pattern
+            )
             assert beam.orig_prompt["type"] != "enc_dec"
             prompt_len = len(beam.orig_prompt["prompt_token_ids"])
             generated_tokens = beam.tokens[prompt_len:]
