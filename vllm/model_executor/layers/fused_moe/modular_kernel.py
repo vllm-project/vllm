@@ -1016,6 +1016,14 @@ class FusedMoEExpertsMonolithic(FusedMoEExperts):
         capture_fn: Callable[[torch.Tensor], None] | None,
     ) -> None:
         self.routing_replay_capture_fn = capture_fn
+        if capture_fn is None:
+            self._routing_replay_buffer = None
+            return
+        self._routing_replay_buffer = torch.empty(
+            (self.moe_config.max_num_tokens, self.moe_config.experts_per_token),
+            dtype=torch.int16,
+            device=self.moe_config.device,
+        )
 
     def _maybe_make_routing_replay_buffer(
         self,
@@ -1024,15 +1032,14 @@ class FusedMoEExpertsMonolithic(FusedMoEExperts):
     ) -> torch.Tensor | None:
         if self.routing_replay_capture_fn is None:
             return None
-        topk = self.moe_config.experts_per_token
         buf = self._routing_replay_buffer
-        if buf is None or buf.shape[0] < num_tokens or buf.device != device:
-            buf = torch.empty(
-                (num_tokens, topk),
-                dtype=torch.int16,
-                device=device,
+        assert buf is not None
+        if buf.shape[0] < num_tokens or buf.device != device:
+            raise ValueError(
+                "Routing replay buffer was initialized for "
+                f"{buf.shape[0]} tokens on {buf.device}, but the kernel "
+                f"received {num_tokens} tokens on {device}."
             )
-            self._routing_replay_buffer = buf
         return buf
 
     def _maybe_dispatch_routing_replay(

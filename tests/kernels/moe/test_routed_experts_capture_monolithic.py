@@ -375,7 +375,8 @@ def test_trtllm_bf16_monolithic_capture_buffer_shape_and_dtype() -> None:
     buf = experts._maybe_make_routing_replay_buffer(num_tokens=11, device=device)
     assert buf is not None
     assert buf.dtype == torch.int16
-    assert buf.shape == (11, 4)
+    assert buf.shape[0] >= 11
+    assert buf.shape[1] == 4
     assert buf.device.type == "cuda"
 
 
