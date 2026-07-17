@@ -32,7 +32,6 @@ if not (_pkg / "_C.py").is_file():
 
 # Avoid DeepGEMM's clean-git assertion when vendoring a local dirty tree.
 env = os.environ.copy()
-env.setdefault("DG_USE_LOCAL_VERSION", "0")
 env.pop("DG_SKIP_CUDA_BUILD", None)
 
 print(f"[build_deepgemm_C] building in {src} with {sys.executable}", flush=True)
