@@ -7,7 +7,7 @@ use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
 use rand::{Rng, SeedableRng};
 
-use super::SampleRequest;
+use super::{SampleRequest, row_download_progress};
 use crate::cli::SpeedBenchConfig;
 use crate::error::{BenchError, Result};
 use crate::tokenizer::TokenizerKind;
@@ -35,11 +35,11 @@ pub fn download_speed_bench(config: SpeedBenchConfig) -> Result<String> {
     // Return cached file if it exists
     if cache_path.exists() {
         let path_str = cache_path.to_string_lossy().to_string();
-        println!("SPEED-Bench ({config_name}) cached: {path_str}");
+        tracing::info!(config = config_name, path = %path_str, "using cached SPEED-Bench dataset");
         return Ok(path_str);
     }
 
-    println!("Downloading SPEED-Bench ({config_name}) from HuggingFace datasets-server...");
+    tracing::info!(config = config_name, "downloading SPEED-Bench dataset");
 
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(120))
@@ -49,6 +49,7 @@ pub fn download_speed_bench(config: SpeedBenchConfig) -> Result<String> {
     let mut all_rows: Vec<serde_json::Value> = Vec::new();
     let mut offset = 0usize;
     let page_size = 100usize;
+    let progress = row_download_progress();
 
     loop {
         let url = format!(
@@ -116,15 +117,15 @@ pub fn download_speed_bench(config: SpeedBenchConfig) -> Result<String> {
         let fetched = rows.len();
         offset += fetched;
 
-        // Print progress
         let total = data["num_rows_total"].as_u64().unwrap_or(0);
-        eprint!("\r  Fetched {offset}/{total} rows...");
+        progress.set_length(total.max(offset as u64));
+        progress.set_position(offset as u64);
 
         if fetched < page_size {
             break;
         }
     }
-    eprintln!(); // newline after progress
+    progress.finish_and_clear();
 
     if all_rows.is_empty() {
         return Err(BenchError::Config(
@@ -137,9 +138,11 @@ pub fn download_speed_bench(config: SpeedBenchConfig) -> Result<String> {
     std::fs::write(&cache_path, &json_str)?;
 
     let path_str = cache_path.to_string_lossy().to_string();
-    println!(
-        "SPEED-Bench ({config_name}): {} rows saved to {path_str}",
-        all_rows.len()
+    tracing::info!(
+        config = config_name,
+        rows = all_rows.len(),
+        path = %path_str,
+        "saved SPEED-Bench dataset"
     );
     Ok(path_str)
 }
@@ -263,9 +266,11 @@ pub fn load_speed_bench_dataset(
     // Oversample if needed
     if samples.len() < num_requests {
         if no_oversample {
-            println!(
-                "Skipping oversampling. Total samples: {} (requested: {num_requests})",
-                samples.len()
+            tracing::info!(
+                dataset = "speed-bench",
+                samples = samples.len(),
+                requested = num_requests,
+                "skipping dataset oversampling"
             );
         } else if !samples.is_empty() {
             let original_len = samples.len();
@@ -275,9 +280,11 @@ pub fn load_speed_bench_dataset(
                 req.request_id = Some(format!("{request_id_prefix}{}", original_len + i));
                 samples.push(req);
             }
-            println!(
-                "Oversampled SPEED-Bench from {original_len} to {} total samples.",
-                samples.len()
+            tracing::info!(
+                dataset = "speed-bench",
+                original_samples = original_len,
+                samples = samples.len(),
+                "oversampled dataset"
             );
         }
     }
@@ -288,7 +295,6 @@ pub fn load_speed_bench_dataset(
         ));
     }
 
-    // Print category distribution
     let mut cat_counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
     for entry in &filtered[..filtered.len().min(samples.len())] {
         let cat = entry.get("category").and_then(|c| c.as_str()).unwrap_or("unknown");
@@ -297,7 +303,7 @@ pub fn load_speed_bench_dataset(
     let mut cats: Vec<_> = cat_counts.into_iter().collect();
     cats.sort_by_key(|b| std::cmp::Reverse(b.1));
     let cat_str: Vec<String> = cats.iter().map(|(k, v)| format!("{k}:{v}")).collect();
-    println!("SPEED-Bench categories: {}", cat_str.join(", "));
+    tracing::info!(categories = %cat_str.join(", "), "computed SPEED-Bench category distribution");
 
     Ok(samples)
 }

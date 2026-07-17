@@ -37,7 +37,12 @@ pub(crate) fn init_tracing() {
     let formatter = VllmEventFormatter::new();
 
     let _ = tracing_subscriber::registry()
-        .with(tracing_subscriber::fmt::layer().event_format(formatter).with_filter(filter))
+        .with(
+            tracing_subscriber::fmt::layer()
+                .event_format(formatter)
+                .with_writer(std::io::stderr)
+                .with_filter(filter),
+        )
         .try_init();
 }
 

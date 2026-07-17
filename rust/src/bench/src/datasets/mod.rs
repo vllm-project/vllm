@@ -14,6 +14,20 @@ pub mod speed_bench;
 
 use std::sync::Arc;
 
+use indicatif::{ProgressBar, ProgressStyle};
+
+pub(super) fn row_download_progress() -> ProgressBar {
+    let progress = ProgressBar::new(0);
+    progress.set_style(
+        ProgressStyle::with_template(
+            "{spinner:.green} Fetching rows [{bar:30.cyan/blue}] {pos}/{len}",
+        )
+        .unwrap()
+        .progress_chars("#>-"),
+    );
+    progress
+}
+
 /// Represents a single inference request for benchmarking.
 /// Matches Python's SampleRequest dataclass from datasets.py:71-82.
 ///
@@ -90,9 +104,10 @@ pub fn oversample_requests(
         return;
     }
     if no_oversample {
-        println!(
-            "Skipping oversampling. Total samples: {} (requested: {num_requests})",
-            requests.len()
+        tracing::info!(
+            samples = requests.len(),
+            requested = num_requests,
+            "skipping dataset oversampling"
         );
         return;
     }
@@ -103,9 +118,10 @@ pub fn oversample_requests(
         req.request_id = Some(format!("{request_id_prefix}{}", original_len + i));
         requests.push(req);
     }
-    println!(
-        "Oversampled requests from {original_len} to {} total samples.",
-        requests.len()
+    tracing::info!(
+        original_samples = original_len,
+        samples = requests.len(),
+        "oversampled dataset"
     );
 }
 
