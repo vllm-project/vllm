@@ -445,21 +445,13 @@ def test_pending_cpu_removal_consumes_hit_backfill_until_next_hit():
 
 
 @pytest.mark.parametrize("medium", [MEDIUM_FS, MEDIUM_OBJ])
-def test_secondary_events_do_not_mutate_cpu_metadata(medium: str):
+def test_secondary_stored_event_does_not_mutate_cpu_metadata(medium: str):
     tracker, _, _, key = _lookup_chunk()
     expected_metadata = dict(tracker._pending_event_metadata)
 
     stored = list(tracker.take_events([_stored_event([key], medium)]))
     assert stored[0].token_ids == [1, 2, 3, 4]
     assert tracker._pending_event_metadata == expected_metadata
-
-    removed = list(tracker.take_events([_removed_event([key], medium)]))
-    assert removed[0].block_hashes == [_wire_hash(_hash(0))]
-    assert tracker._pending_event_metadata == expected_metadata
-
-    cpu_removed = list(tracker.take_events([_removed_event([key])]))
-    assert cpu_removed[0].block_hashes == [_wire_hash(_hash(0))]
-    assert not tracker._pending_event_metadata
 
 
 def test_take_events_groups_removed_hashes_by_kv_group():

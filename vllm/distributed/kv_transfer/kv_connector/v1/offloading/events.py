@@ -19,12 +19,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, NamedTuple
 
-from vllm.distributed.kv_events import (
-    MEDIUM_CPU,
-    BlockRemoved,
-    BlockStored,
-    KVCacheEvent,
-)
+from vllm.distributed.kv_events import BlockRemoved, BlockStored, KVCacheEvent
 from vllm.logger import init_logger
 from vllm.v1.core.kv_cache_utils import BlockHash, maybe_convert_block_hash
 from vllm.v1.kv_cache_interface import (
@@ -290,10 +285,7 @@ class OffloadingEventsTracker:
         locality = event.locality.value if event.locality is not None else None
         by_group: dict[int, list] = {}
         for key in event.keys:
-            if event.medium == MEDIUM_CPU:
-                meta = self._pending_event_metadata.pop(key, None)
-            else:
-                meta = self._pending_event_metadata.get(key)
+            meta = self._pending_event_metadata.pop(key, None)
             if meta is not None:
                 group_idx = meta.group_idx
                 by_group.setdefault(group_idx, []).extend(
