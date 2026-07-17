@@ -256,7 +256,12 @@ class EngineCoreClient(ABC):
     async def reset_encoder_cache_async(self) -> None:
         raise NotImplementedError
 
-    async def sleep_async(self, level: int = 1, mode: PauseMode = "abort") -> None:
+    async def sleep_async(
+        self,
+        level: int = 1,
+        mode: PauseMode = "abort",
+        reset_connector: bool = True,
+    ) -> None:
         raise NotImplementedError
 
     async def wake_up_async(self, tags: list[str] | None = None) -> None:
@@ -1184,8 +1189,13 @@ class AsyncMPClient(MPClient):
     async def reset_encoder_cache_async(self) -> None:
         await self.call_utility_async("reset_encoder_cache")
 
-    async def sleep_async(self, level: int = 1, mode: PauseMode = "abort") -> None:
-        await self.call_utility_async("sleep", level, mode)
+    async def sleep_async(
+        self,
+        level: int = 1,
+        mode: PauseMode = "abort",
+        reset_connector: bool = True,
+    ) -> None:
+        await self.call_utility_async("sleep", level, mode, reset_connector)
 
     async def wake_up_async(self, tags: list[str] | None = None) -> None:
         await self.call_utility_async("wake_up", tags)

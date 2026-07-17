@@ -968,10 +968,15 @@ class AsyncLLM(EngineClient):
     async def reset_encoder_cache(self) -> None:
         await self.engine_core.reset_encoder_cache_async()
 
-    async def sleep(self, level: int = 1, mode: PauseMode = "abort") -> None:
+    async def sleep(
+        self,
+        level: int = 1,
+        mode: PauseMode = "abort",
+        reset_connector: bool = True,
+    ) -> None:
         if level >= 1:
             await self.renderer.clear_mm_cache_async()
-        await self.engine_core.sleep_async(level, mode)
+        await self.engine_core.sleep_async(level, mode, reset_connector)
 
         if self.logger_manager is not None:
             self.logger_manager.record_sleep_state(1, level)

@@ -840,7 +840,10 @@ class EngineCore:
         self.reset_encoder_cache()
 
     def pause_scheduler(
-        self, mode: PauseMode = "abort", clear_cache: bool = True
+        self,
+        mode: PauseMode = "abort",
+        clear_cache: bool = True,
+        reset_connector: bool = True,
     ) -> Future | None:
         """Pause generation; behavior depends on mode.
 
@@ -866,7 +869,7 @@ class EngineCore:
         pause_state = PauseState.PAUSED_ALL if mode == "keep" else PauseState.PAUSED_NEW
         self.scheduler.set_pause_state(pause_state)
         if clear_cache:
-            self._reset_caches()
+            self._reset_caches(reset_connector=reset_connector)
 
         return None
 
@@ -878,7 +881,12 @@ class EngineCore:
         """Return whether the scheduler is in any pause state."""
         return self.scheduler.pause_state != PauseState.UNPAUSED
 
-    def sleep(self, level: int = 1, mode: PauseMode = "abort") -> None | Future:
+    def sleep(
+        self,
+        level: int = 1,
+        mode: PauseMode = "abort",
+        reset_connector: bool = True,
+    ) -> None | Future:
         """Put the engine to sleep at the specified level.
 
         Args:
@@ -893,7 +901,11 @@ class EngineCore:
 
         # Pause scheduler before sleeping.
         clear_prefix_cache = level >= 1
-        pause_future = self.pause_scheduler(mode=mode, clear_cache=clear_prefix_cache)
+        pause_future = self.pause_scheduler(
+            mode=mode,
+            clear_cache=clear_prefix_cache,
+            reset_connector=reset_connector,
+        )
         if level < 1:
             return pause_future
 
@@ -1918,7 +1930,10 @@ class EngineCoreProc(EngineCore):
         self._send_error_outputs_to_client([request.request_id], request.client_index)
 
     def pause_scheduler(
-        self, mode: PauseMode = "abort", clear_cache: bool = True
+        self,
+        mode: PauseMode = "abort",
+        clear_cache: bool = True,
+        reset_connector: bool = True,
     ) -> Future | None:
         """Pause generation; behavior depends on mode.
 
@@ -1938,7 +1953,7 @@ class EngineCoreProc(EngineCore):
 
         def engine_idle_callback(engine: "EngineCoreProc", future: Future[Any]) -> None:
             if clear_cache:
-                engine._reset_caches()
+                engine._reset_caches(reset_connector=reset_connector)
             future.set_result(None)
 
         if mode == "abort":
@@ -1952,7 +1967,7 @@ class EngineCoreProc(EngineCore):
 
         if self._pause_complete():
             if clear_cache:
-                self._reset_caches()
+                self._reset_caches(reset_connector=reset_connector)
             return None
 
         future = Future[Any]()
