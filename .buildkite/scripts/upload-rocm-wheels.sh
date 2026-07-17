@@ -113,10 +113,13 @@ $PYTHON .buildkite/scripts/generate-nightly-index.py \
 echo "Uploading indices to $S3_COMMIT_PREFIX"
 aws s3 cp --recursive "$INDICES_OUTPUT_DIR/" "$S3_COMMIT_PREFIX"
 
-# Only scheduled nightly builds should update the moving nightly index.
-if [[ "${NIGHTLY:-0}" == "1" ]]; then
-    echo "Updating rocm/nightly/ index..."
+UPDATED_ROCM_NIGHTLY=0
+if [[ "${UPDATE_NIGHTLY_INDEX:-1}" == "1" && \
+      "$BUILDKITE_BRANCH" == "main" && \
+      "$BUILDKITE_PULL_REQUEST" == "false" ]]; then
+    echo "Uploading indices to overwrite rocm/nightly/"
     aws s3 cp --recursive "$INDICES_OUTPUT_DIR/" "s3://$BUCKET/rocm/nightly/"
+    UPDATED_ROCM_NIGHTLY=1
 fi
 
 # Extract version from vLLM wheel and update version-specific index
@@ -147,7 +150,7 @@ echo ""
 echo "Install command (by commit):"
 echo "  pip install vllm --extra-index-url https://${BUCKET}.s3.amazonaws.com/$ROCM_SUBPATH/"
 echo ""
-if [[ "${NIGHTLY:-0}" == "1" ]]; then
+if [[ "$UPDATED_ROCM_NIGHTLY" == "1" ]]; then
     echo "Install command (nightly):"
     echo "  pip install vllm --extra-index-url https://${BUCKET}.s3.amazonaws.com/rocm/nightly/"
 fi
