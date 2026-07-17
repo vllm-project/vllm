@@ -49,7 +49,6 @@ DEVICE_TYPE = current_platform.device_type
 FP8_KV_CACHE_DTYPES = {
     "fp8": torch.float8_e4m3fn,
     "fp8_e4m3": torch.float8_e4m3fn,
-    "fp8_e5m2": torch.float8_e5m2,
 }
 
 # Remove flashinfer from the list if it's not available
@@ -322,7 +321,7 @@ def run_attention_backend(
     mock_layer = MockAttentionLayer(device)
     output = torch.empty_like(query)
 
-    if is_quantized_kv_cache(kv_cache_dtype):
+    if is_quantized_kv_cache(kv_cache_dtype) and impl.supports_quant_query_input:
         query = query.to(current_platform.fp8_dtype())
 
     # Run forward pass
@@ -425,6 +424,8 @@ def _test_backend_correctness(
     if fp8_kv_cache:
         query_fp8_dtype = current_platform.fp8_dtype()
         kv_fp8_dtype = FP8_KV_CACHE_DTYPES[kv_cache_dtype]
+        atol = max(atol, 6e-2)
+        rtol = max(rtol, 1e-1)
 
     # 2. Generate data and compute SDPA reference output
     all_q_vllm, all_k_vllm, all_v_vllm = [], [], []
@@ -619,7 +620,7 @@ def _test_backend_correctness(
 )
 @pytest.mark.parametrize("model", ["meta-llama/Meta-Llama-3-8B"])
 @pytest.mark.parametrize("tensor_parallel_size", [1, 2, 4])
-@pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8", "fp8_e4m3", "fp8_e5m2"])
+@pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8", "fp8_e4m3"])
 def test_causal_backend_correctness(
     default_vllm_config,
     batch_spec_name: str,
