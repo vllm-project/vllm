@@ -102,7 +102,13 @@ def convert_to_w4a8_moe_kernel_format(
         convert_packed_uint4b8_to_signed_int4_inplace,
     )
 
-    quant_fp8 = QuantFP8(static=False, group_shape=GroupShape.PER_TOKEN)
+    # Cache QuantFP8 to avoid re-instantiation on weight reload.
+    # QuantFP8.__init__ calls CustomOp.dispatch_forward which requires
+    # get_current_vllm_config() — unavailable during the reload context.
+    if not hasattr(convert_to_w4a8_moe_kernel_format, "_quant_fp8"):
+        convert_to_w4a8_moe_kernel_format._quant_fp8 = QuantFP8(
+            static=False, group_shape=GroupShape.PER_TOKEN)
+    quant_fp8 = convert_to_w4a8_moe_kernel_format._quant_fp8
 
     convert_packed_uint4b8_to_signed_int4_inplace(w13_weight_packed)
     # Mirror the sync in CutlassW4A8LinearKernel; required for TP>1 correctness.
