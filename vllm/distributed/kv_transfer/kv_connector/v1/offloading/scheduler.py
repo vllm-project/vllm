@@ -1117,7 +1117,6 @@ class OffloadingConnectorScheduler:
                     if bid in self._current_batch_allocated_block_ids:
                         self._current_batch_jobs_to_flush.add(job_id)
 
-
         return store_jobs
 
     def build_connector_meta(
