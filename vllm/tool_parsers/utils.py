@@ -465,6 +465,11 @@ def get_parameter_value(val: ast.expr) -> Any:
         }
     elif isinstance(val, ast.List):
         return [get_parameter_value(v) for v in val.elts]
+    elif isinstance(val, ast.Tuple):
+        # JSON has no tuple type; a tuple argument (e.g. ``size=(800, 600)``)
+        # is treated as a list so it round-trips through ``json.dumps``.
+        # Without this the whole call is dropped.
+        return [get_parameter_value(v) for v in val.elts]
     elif isinstance(val, ast.Name) and val.id in _JSON_NAME_LITERALS:
         return _JSON_NAME_LITERALS[val.id]
     elif isinstance(val, ast.UnaryOp) and isinstance(val.op, (ast.USub, ast.UAdd)):

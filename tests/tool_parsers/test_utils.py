@@ -427,3 +427,21 @@ class TestHandleSingleToolNegativeNumbers:
         call = _first_call("[updateInventory(quantity_delta=-20)]")
         tool = handle_single_tool(call)
         assert json.loads(tool.function.arguments) == {"quantity_delta": -20}
+
+
+class TestGetParameterValueTuple:
+    # JSON has no tuple type, so a tuple argument is decoded as a list rather
+    # than dropping the whole call.
+    def test_tuple_becomes_list(self):
+        assert _value_of("(800, 600)") == [800, 600]
+
+    def test_nested_tuple(self):
+        assert _value_of("[(1, 2), (3, 4)]") == [[1, 2], [3, 4]]
+
+    def test_tuple_with_negative(self):
+        assert _value_of("(-74.0, 40.7)") == [-74.0, 40.7]
+
+    def test_tuple_end_to_end(self):
+        call = _first_call("[resize(size=(800, 600))]")
+        tool = handle_single_tool(call)
+        assert json.loads(tool.function.arguments) == {"size": [800, 600]}
