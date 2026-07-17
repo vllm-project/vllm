@@ -28,6 +28,7 @@ from vllm.model_executor.layers.quantization.quark.schemes import (
     QuarkNVFP4,
     QuarkOCP_MX,
     QuarkScheme,
+    QuarkW4A16Int4,
     QuarkW4A8_MXFP4_FP8,
     QuarkW8A8Fp8,
     QuarkW8A8Int8,
@@ -36,6 +37,7 @@ from vllm.model_executor.layers.quantization.quark.utils import (
     deep_compare,
     should_ignore_layer,
 )
+from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.models.utils import WeightsMapper
 from vllm.platforms import current_platform
 
@@ -49,7 +51,6 @@ logger = init_logger(__name__)
 # model_type values that use dynamic MXFP4 re-quantization for
 # OCP MX fp4 Quark checkpoints
 _DEEPSEEK_V3_FAMILY_MODEL_TYPES = frozenset({"deepseek_v3", "deepseek_v32"})
-
 
 class QuarkConfig(QuantizationConfig):
     def __init__(
@@ -71,6 +72,39 @@ class QuarkConfig(QuantizationConfig):
         # that come from shifting to mxfp4. It is left here in case
         # we want to re-enable it in the future.
         self.dynamic_mxfp4_quant = False
+
+    @staticmethod
+    def _is_packed_int4_export(config: dict[str, Any]) -> bool:
+        if config.get("quant_method", "").lower() != "quark":
+            return False
+        export_config = config.get("export", {})
+        if export_config.get("pack_method") not in ("order", "reorder"):
+            return False
+        weight_config = config.get("global_quant_config", {}).get("weight", {})
+        return weight_config.get("dtype") in ("int4", "uint4")
+
+    @staticmethod
+    def _dedupe_quark_excludes(exclude: list[str] | None) -> list[str] | None:
+        if not exclude:
+            return exclude
+
+        import fnmatch as _fnmatch
+        normalized: list[str] = []
+        seen: set[str] = set()
+
+        for module_name in exclude:
+            if not module_name or module_name in seen:
+                continue
+            seen.add(module_name)
+            # should_ignore_layer only supports exact match or re:-prefixed regex.
+            # Quark config uses fnmatch-style wildcards (* and ?). Convert them.
+            if not module_name.startswith("re:") and (
+                "*" in module_name or "?" in module_name
+            ):
+                module_name = "re:" + _fnmatch.translate(module_name)
+            normalized.append(module_name)
+
+        return normalized
 
     def maybe_update_config(
         self,
@@ -123,21 +157,30 @@ class QuarkConfig(QuantizationConfig):
             hf_to_vllm_mapper: maps from hf model structure (the assumed
                 structure of the qconfig) to vllm model structure
         """
+        def apply_string(value: str) -> str:
+            mapped_value = hf_to_vllm_mapper.apply_list([value])
+            return mapped_value[0] if mapped_value else value
+
+        def apply_value(value: Any) -> Any:
+            if isinstance(value, str):
+                return apply_string(value)
+            if isinstance(value, list):
+                return [apply_value(item) for item in value]
+            if isinstance(value, dict):
+                return {
+                    apply_string(key) if isinstance(key, str) else key: apply_value(item)
+                    for key, item in value.items()
+                }
+            return value
+
         quant_config_with_hf_to_vllm_mapper: dict[str, Any] = {}
 
         for k, v in self.quant_config.items():
-            if isinstance(v, list):
-                quant_config_with_hf_to_vllm_mapper[k] = hf_to_vllm_mapper.apply_list(v)
-            elif isinstance(v, dict):
-                quant_config_with_hf_to_vllm_mapper[k] = hf_to_vllm_mapper.apply_dict(v)
-            else:
-                if isinstance(v, str):
-                    mapped_v_list = hf_to_vllm_mapper.apply_list([v])
-                    if mapped_v_list:
-                        quant_config_with_hf_to_vllm_mapper[k] = mapped_v_list[0]
-                else:
-                    quant_config_with_hf_to_vllm_mapper[k] = v
+            quant_config_with_hf_to_vllm_mapper[k] = apply_value(v)
 
+        quant_config_with_hf_to_vllm_mapper["exclude"] = self._dedupe_quark_excludes(
+            quant_config_with_hf_to_vllm_mapper.get("exclude")
+        )
         self.quant_config = quant_config_with_hf_to_vllm_mapper
 
     def get_quant_method(
@@ -151,7 +194,7 @@ class QuarkConfig(QuantizationConfig):
             if (
                 "self_attn" not in prefix  # only quantize attention projections
                 or not getattr(self, "dynamic_mxfp4_quant", False)
-                or not isinstance(layer, LinearBase)  # Ignore other methods
+                or not isinstance(layer, (LinearBase, ParallelLMHead))
             ):
                 return UnquantizedLinearMethod()
 
@@ -162,7 +205,7 @@ class QuarkConfig(QuantizationConfig):
             )
             layer.scheme = scheme
             return QuarkLinearMethod(self)
-        if isinstance(layer, LinearBase):
+        if isinstance(layer, (LinearBase, ParallelLMHead)):
             scheme = self.get_scheme(layer=layer, layer_name=prefix)
             layer.scheme = scheme
             return QuarkLinearMethod(self)
@@ -372,6 +415,20 @@ class QuarkConfig(QuantizationConfig):
         # Both symmetric and asymmetric input quantization supported.
         # Only symmetric weight quantization supported.
         return is_int8_dtype and is_tensor and is_weight_symmetric and is_static
+
+    def _is_w4a16_int4(
+        self,
+        weight_quant: dict[str, Any] | None,
+        input_quant: dict[str, Any] | None,
+    ) -> bool:
+        if weight_quant is None or input_quant is not None:
+            return False
+
+        is_int4 = weight_quant.get("dtype") in ("int4", "uint4")
+        is_grouped = weight_quant.get("qscheme", "per_group") == "per_group"
+        is_static = not weight_quant.get("is_dynamic")
+        is_packed = self.pack_method in ("order", "reorder")
+        return is_int4 and is_grouped and is_static and is_packed
 
     def _is_w4a8_mxfp4_fp8(
         self,
@@ -640,6 +697,12 @@ class QuarkConfig(QuantizationConfig):
                 is_static_input_scheme=True,
                 input_symmetric=input_config.get("symmetric"),
             )
+        elif self._is_w4a16_int4(weight_config, input_config):
+            return QuarkW4A16Int4(
+                group_size=weight_config.get("group_size", 128),
+                pack_method=self.pack_method,
+                is_symmetric=weight_config.get("symmetric", True),
+            )
         elif self._is_w4a8_mxfp4_fp8(weight_config, input_config):
             is_w4a8_supported = self._check_scheme_supported(
                 QuarkW4A8_MXFP4_FP8.get_min_capability(), error=False
@@ -679,8 +742,19 @@ class QuarkConfig(QuantizationConfig):
 
         return scheme
 
-    @staticmethod
-    def get_cache_scale_mapper() -> "WeightsMapper":
+    def _get_int4_weight_mapper(self) -> "WeightsMapper":
+        if not self._is_packed_int4_export(self.quant_config):
+            return WeightsMapper()
+
+        suffix_map: dict[str, str | None] = {
+            ".qscales": ".weight_scale",
+            ".qqzeros": ".weight_zero_point",
+        }
+        return WeightsMapper(
+            orig_to_new_suffix=suffix_map,
+        )
+
+    def get_cache_scale_mapper(self) -> "WeightsMapper":
         """Map Quark KV-cache scale names to vLLM names."""
         orig_to_new_suffix = {
             ".k_proj.output_scale": ".attn.k_scale",
@@ -689,6 +763,8 @@ class QuarkConfig(QuantizationConfig):
             ".self_attn.prob_output_scale": ".self_attn.attn.prob_scale",
         }
         cache_scale_mapper = WeightsMapper(orig_to_new_suffix=orig_to_new_suffix)
+        if self._is_packed_int4_export(self.quant_config):
+            cache_scale_mapper |= self._get_int4_weight_mapper()
         return cache_scale_mapper | QuantizationConfig.get_cache_scale_mapper()
 
 

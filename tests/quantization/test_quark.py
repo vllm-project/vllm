@@ -18,16 +18,20 @@ import torch
 from packaging import version
 
 from vllm.model_executor.layers.quantization.quark.quark import (  # noqa: E501
+    QuarkConfig,
     QuarkLinearMethod,
     QuarkW8A8Fp8,
     QuarkW8A8Int8,
 )
 from vllm.model_executor.layers.quantization.quark.quark_moe import (  # noqa: E501
+    QuarkW4A16Int4MoEMethod,
     QuarkW8A8Int8MoEMethod,
 )
+from vllm.model_executor.layers.quantization.quark.schemes import QuarkW4A16Int4
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     is_layer_skipped,
 )
+from vllm.model_executor.models.utils import WeightsMapper
 from vllm.platforms import current_platform
 
 if current_platform.is_rocm():
@@ -533,3 +537,364 @@ def test_substr_match_on_fused_name():
         fused_mapping=FUSED_MAPPING,
         skip_with_substr=True,
     )
+
+
+_REVERSE_AWQ_PACK_ORDER = [0, 4, 1, 5, 2, 6, 3, 7]
+
+
+def _quark_int4_config(
+    *,
+    pack_method: str = "reorder",
+    symmetric: bool = True,
+    exclude: list[str] | None = None,
+) -> dict:
+    return {
+        "quant_method": "quark",
+        "export": {"pack_method": pack_method, "kv_cache_group": []},
+        "global_quant_config": {
+            "weight": {
+                "dtype": "int4",
+                "group_size": 128,
+                "symmetric": symmetric,
+            }
+        },
+        "exclude": exclude or [],
+    }
+
+
+def _sign_extend_int4_nibbles(t: torch.Tensor) -> torch.Tensor:
+    mask = (t & 0x8).bool()
+    t = t.clone()
+    t[mask] = t[mask] | 0xF0
+    return t
+
+
+def _dequantize_quark_signed_awq_torch(
+    qweight: torch.Tensor,
+    scales: torch.Tensor,
+    qzeros: torch.Tensor,
+    group_size: int,
+    *,
+    pack_reorder: bool = True,
+) -> torch.Tensor:
+    bits = 4
+    shifts = torch.arange(0, 32, bits, device=qweight.device)
+    iweights = ((qweight[:, :, None] >> shifts[None, None, :]) & 0xF).to(torch.int8)
+    iweights = iweights.view(qweight.shape[0], -1)
+    zeros = ((qzeros[:, :, None] >> shifts[None, None, :]) & 0xF).to(torch.int8)
+    zeros = zeros.view(qzeros.shape[0], -1)
+
+    if pack_reorder:
+        order = torch.tensor(_REVERSE_AWQ_PACK_ORDER, device=qweight.device)
+    else:
+        order = torch.arange(8, device=qweight.device)
+    iweights = iweights.view(qweight.shape[0], -1, 8)[:, :, order].reshape(
+        qweight.shape[0], -1
+    )
+    zeros = zeros.view(qzeros.shape[0], -1, 8)[:, :, order].reshape(
+        qzeros.shape[0], -1
+    )
+    iweights = _sign_extend_int4_nibbles(iweights & 0xF)
+    zeros = _sign_extend_int4_nibbles(zeros & 0xF)
+
+    scales = scales.repeat_interleave(group_size, dim=0)
+    zeros = zeros.repeat_interleave(group_size, dim=0)
+    return (iweights - zeros) * scales
+
+
+def _dequantize_awq_unsigned_torch(
+    qweight: torch.Tensor,
+    scales: torch.Tensor,
+    qzeros: torch.Tensor,
+    group_size: int,
+    *,
+    pack_reorder: bool = True,
+) -> torch.Tensor:
+    bits = 4
+    shifts = torch.arange(0, 32, bits, device=qweight.device)
+    iweights = ((qweight[:, :, None] >> shifts[None, None, :]) & 0xF).to(torch.int8)
+    iweights = iweights.view(qweight.shape[0], -1)
+    zeros = ((qzeros[:, :, None] >> shifts[None, None, :]) & 0xF).to(torch.int8)
+    zeros = zeros.view(qzeros.shape[0], -1)
+
+    if pack_reorder:
+        order = torch.tensor(_REVERSE_AWQ_PACK_ORDER, device=qweight.device)
+    else:
+        order = torch.arange(8, device=qweight.device)
+    iweights = iweights.view(qweight.shape[0], -1, 8)[:, :, order].reshape(
+        qweight.shape[0], -1
+    )
+    zeros = zeros.view(qzeros.shape[0], -1, 8)[:, :, order].reshape(
+        qzeros.shape[0], -1
+    )
+
+    scales = scales.repeat_interleave(group_size, dim=0)
+    zeros = zeros.repeat_interleave(group_size, dim=0)
+    return (iweights - zeros) * scales
+
+
+def _pack_int4_nibbles(nibbles: torch.Tensor, *, pack_reorder: bool) -> torch.Tensor:
+    pack_order = (
+        torch.tensor(_REVERSE_AWQ_PACK_ORDER, device=nibbles.device)
+        if pack_reorder
+        else torch.arange(8, device=nibbles.device)
+    )
+    shifts = pack_order * 4
+    return ((nibbles.to(torch.int64) & 0xF) << shifts).sum(dim=-1).to(torch.int32)
+
+
+class TestQuarkInt4Format:
+    """Tests for Quark INT4 export format compatibility."""
+
+    def test_quark_order_pack_method_uses_native_int4_scheme(self):
+        quant_config = QuarkConfig.from_config(_quark_int4_config(pack_method="order"))
+        scheme = quant_config._get_scheme_from_config(
+            quant_config.quant_config["global_quant_config"]
+        )
+
+        assert isinstance(scheme, QuarkW4A16Int4)
+        assert not scheme.pack_reorder
+
+    def test_quark_int4_scheme_supports_asymmetric_weights(self):
+        quant_config = QuarkConfig.from_config(_quark_int4_config(symmetric=False))
+        scheme = quant_config._get_scheme_from_config(
+            quant_config.quant_config["global_quant_config"]
+        )
+
+        assert isinstance(scheme, QuarkW4A16Int4)
+        assert not scheme.is_symmetric
+
+    def test_quark_int4_moe_uses_native_moe_method(self):
+        quant_config = QuarkConfig.from_config(_quark_int4_config())
+        moe_config = type("MoeConfig", (), {})()
+        moe_config.has_bias = False
+
+        method = QuarkW4A16Int4MoEMethod(
+            quant_config.quant_config["global_quant_config"]["weight"],
+            quant_config.pack_method,
+            moe_config,
+        )
+
+        assert method.group_size == 128
+        assert method.pack_reorder
+
+    def test_quark_excluded_lm_head_keeps_native_weight_name(self):
+        quant_config = QuarkConfig.from_config(_quark_int4_config(exclude=["lm_head"]))
+        mapper = quant_config.get_cache_scale_mapper()
+
+        output_names = {
+            name for name, _ in mapper.apply([("lm_head.weight", torch.zeros(1))])
+        }
+
+        assert "lm_head.weight" in output_names
+        assert "lm_head.qweight" not in output_names
+
+    def test_quark_linear_weights_keep_native_names(self):
+        quant_config = QuarkConfig.from_config(
+            _quark_int4_config(
+                exclude=["model.language_model.layers.0.mlp.gate.linear"]
+            )
+        )
+        mapper = quant_config.get_cache_scale_mapper()
+
+        output_names = {
+            name
+            for name, _ in mapper.apply(
+                [
+                    (
+                        "model.language_model.layers.0.mlp.gate.linear.weight",
+                        torch.zeros(1),
+                    ),
+                    (
+                        "model.language_model.layers.1.mlp.gate.linear.weight",
+                        torch.zeros(1),
+                    ),
+                    ("layers.0.mlp.gate.weight", torch.zeros(1)),
+                    ("layers.1.mlp.gate.weight", torch.zeros(1)),
+                ]
+            )
+        }
+
+        assert "model.language_model.layers.0.mlp.gate.linear.weight" in output_names
+        assert "model.language_model.layers.1.mlp.gate.linear.weight" in output_names
+        assert "layers.0.mlp.gate.weight" in output_names
+        assert "layers.1.mlp.gate.weight" in output_names
+
+    def test_quark_shared_expert_gate_keeps_quantized_tensors(self):
+        quant_config = QuarkConfig.from_config(_quark_int4_config())
+        mapper = quant_config.get_cache_scale_mapper()
+
+        output_names = {
+            name
+            for name, _ in mapper.apply(
+                [
+                    (
+                        "model.language_model.layers.0.mlp.shared_expert_gate.weight",
+                        torch.zeros(1),
+                    ),
+                    (
+                        "model.language_model.layers.0.mlp.shared_expert_gate"
+                        ".weight_scale",
+                        torch.zeros(1),
+                    ),
+                    (
+                        "model.language_model.layers.0.mlp.shared_expert_gate"
+                        ".weight_zero_point",
+                        torch.zeros(1),
+                    ),
+                ]
+            )
+        }
+
+        assert (
+            "model.language_model.layers.0.mlp.shared_expert_gate.weight"
+            in output_names
+        )
+        assert (
+            "model.language_model.layers.0.mlp.shared_expert_gate.weight_scale"
+            in output_names
+        )
+        assert (
+            "model.language_model.layers.0.mlp.shared_expert_gate.weight_zero_point"
+            in output_names
+        )
+
+    def test_quark_projection_weights_keep_native_names(self):
+        quant_config = QuarkConfig.from_config(
+            _quark_int4_config(exclude=["layers.0.mlp.shared_expert.down_proj"])
+        )
+        mapper = quant_config.get_cache_scale_mapper()
+
+        output_names = {
+            name
+            for name, _ in mapper.apply(
+                [
+                    (
+                        "layers.0.mlp.shared_expert.down_proj.weight",
+                        torch.zeros(1),
+                    ),
+                    (
+                        "layers.1.mlp.shared_expert.down_proj.weight",
+                        torch.zeros(1),
+                    ),
+                ]
+            )
+        }
+
+        assert "layers.0.mlp.shared_expert.down_proj.weight" in output_names
+        assert "layers.1.mlp.shared_expert.down_proj.weight" in output_names
+
+    def test_quark_mapper_adds_suffix_remappings(self):
+        quant_config = QuarkConfig.from_config(_quark_int4_config(symmetric=False))
+        mapper = quant_config.get_cache_scale_mapper()
+
+        assert ".qscales" in mapper.orig_to_new_suffix
+        assert mapper.orig_to_new_suffix[".qscales"] == ".weight_scale"
+        assert ".qqzeros" in mapper.orig_to_new_suffix
+        assert mapper.orig_to_new_suffix[".qqzeros"] == ".weight_zero_point"
+
+    def test_quark_apply_mapper_updates_layer_quant_config_keys(self):
+        quant_config = QuarkConfig.from_config(
+            {
+                **_quark_int4_config(),
+                "exclude": [
+                    "model.language_model.layers.0.mlp.gate.linear",
+                    "lm_head",
+                ],
+                "layer_quant_config": {
+                    "model.language_model.layers.0.mlp.gate.linear": {
+                        "weight": {"dtype": "float16"},
+                    },
+                },
+            }
+        )
+        quant_config.apply_vllm_mapper(
+            WeightsMapper(
+                orig_to_new_prefix={
+                    "lm_head": "language_model.lm_head",
+                    "model.language_model.": "language_model.model.",
+                },
+                orig_to_new_substr={".gate.linear": ".gate"},
+            )
+        )
+
+        layer_quant_config = quant_config.quant_config["layer_quant_config"]
+        assert "language_model.model.layers.0.mlp.gate" in layer_quant_config
+        assert "model.language_model.layers.0.mlp.gate.linear" not in layer_quant_config
+        assert quant_config.quant_config["exclude"] == [
+            "language_model.model.layers.0.mlp.gate",
+            "language_model.lm_head",
+        ]
+
+    def test_quark_config_does_not_expand_model_specific_excludes(self):
+        quant_config = QuarkConfig.from_config(
+            _quark_int4_config(
+                exclude=["model.language_model.layers.0.mlp.gate.linear"]
+            )
+        )
+
+        assert quant_config.quant_config["exclude"] == [
+            "model.language_model.layers.0.mlp.gate.linear"
+        ]
+
+    def test_quark_mapper_renames_tensor_names(self):
+        quant_config = QuarkConfig.from_config(_quark_int4_config(symmetric=False))
+        mapper = quant_config.get_cache_scale_mapper()
+
+        input_weights = [
+            ("model.layers.0.mlp.down_proj.weight", torch.zeros(1)),
+            ("model.layers.0.mlp.down_proj.qscales", torch.zeros(1)),
+            ("model.layers.0.mlp.down_proj.qqzeros", torch.zeros(1)),
+        ]
+        output_names = {name for name, _ in mapper.apply(input_weights)}
+
+        assert "model.layers.0.mlp.down_proj.weight" in output_names
+        assert "model.layers.0.mlp.down_proj.weight_scale" in output_names
+        assert "model.layers.0.mlp.down_proj.weight_zero_point" in output_names
+        assert "model.layers.0.mlp.down_proj.qscales" not in output_names
+        assert "model.layers.0.mlp.down_proj.qqzeros" not in output_names
+
+@pytest.mark.parametrize("symmetric", [False, True])
+@pytest.mark.parametrize("pack_method", ["order", "reorder"])
+def test_quark_int4_canonicalizes_pack_for_kernel_layout(pack_method, symmetric):
+    """Quark pack order is normalized to the layout expected by awq_* ops.
+
+    This reuses the existing AWQ dequant/gemm kernels for compute only; loading
+    still goes through the native Quark quantization path, not AutoAWQ.
+    """
+    pack_reorder = pack_method == "reorder"
+    group_size = 2
+    packed_values = torch.tensor(
+        [
+            [0, 1, 7, 8, 9, 15, 2, 14],
+            [15, 8, 0, 3, 12, 7, 1, 9],
+        ],
+        dtype=torch.int32,
+    )
+    packed_zeros = torch.zeros((1, 8), dtype=torch.int32)
+    qweight = _pack_int4_nibbles(packed_values, pack_reorder=pack_reorder).view(2, 1)
+    qzeros = _pack_int4_nibbles(packed_zeros, pack_reorder=pack_reorder).view(1, 1)
+    scales = torch.ones((1, 8), dtype=torch.float16)
+
+    dequantize = (
+        _dequantize_quark_signed_awq_torch
+        if symmetric
+        else _dequantize_awq_unsigned_torch
+    )
+    expected = dequantize(
+        qweight,
+        scales,
+        qzeros,
+        group_size,
+        pack_reorder=pack_reorder,
+    )
+    scheme = QuarkW4A16Int4(
+        group_size=group_size, pack_method=pack_method, is_symmetric=symmetric
+    )
+    canonical_weight = scheme._canonicalize_packed_weight(qweight)
+    canonical_zero = scheme._canonicalize_packed_weight(qzeros)
+    actual = _dequantize_awq_unsigned_torch(
+        canonical_weight, scales, canonical_zero, group_size
+    )
+
+    torch.testing.assert_close(actual, expected)

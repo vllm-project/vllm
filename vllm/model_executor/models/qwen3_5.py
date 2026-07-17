@@ -206,7 +206,11 @@ class Qwen3_5Model(Qwen3NextModel):
             ".in_proj_z": (".in_proj_qkvz", 3),
             ".in_proj_b": (".in_proj_ba", 0),
             ".in_proj_a": (".in_proj_ba", 1),
-        }
+        },
+        # Quark real_quantized exports may nest the MoE router under gate.linear.
+        orig_to_new_substr={
+            ".gate.linear": ".gate",
+        },
     )
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -357,9 +361,13 @@ class Qwen3_5ForCausalLMBase(
         return self.logits_processor(self.lm_head, hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        skip_prefixes = ["mtp."]
+        # When embeddings are tied, lm_head shares embed weights and is skipped.
+        if self.config.tie_word_embeddings:
+            skip_prefixes = ["lm_head.", *skip_prefixes]
         loader = AutoWeightsLoader(
             self,
-            skip_prefixes=["mtp."],
+            skip_prefixes=skip_prefixes,
         )
         return loader.load_weights(weights)
 
@@ -389,6 +397,14 @@ class Qwen3_5MoeForCausalLM(Qwen3_5ForCausalLMBase, QwenNextMixtureOfExperts):
 class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid):
     # Qwen3.5 does not support multimodal pruning (EVS).
     supports_multimodal_pruning = False
+
+    hf_to_vllm_mapper = Qwen3VLForConditionalGeneration.hf_to_vllm_mapper | (
+        WeightsMapper(
+            orig_to_new_prefix={"lm_head": "language_model.lm_head"},
+            # Quark real_quantized exports may nest the MoE router under gate.linear.
+            orig_to_new_substr={".gate.linear": ".gate"},
+        )
+    )
 
     packed_modules_mapping = Qwen3VLForConditionalGeneration.packed_modules_mapping | {
         "in_proj_qkvz": ["in_proj_qkv", "in_proj_z"],
@@ -503,11 +519,17 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid)
         return hidden_states
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        skip_prefixes = ["mtp."]
+        if self.language_model.config.tie_word_embeddings:
+            skip_prefixes = ["language_model.lm_head.", *skip_prefixes]
+        mapper = self.hf_to_vllm_mapper | WeightsMapper(
+            orig_to_new_prefix={"lm_head.": "language_model.lm_head."}
+        )
         loader = AutoWeightsLoader(
             self,
-            skip_prefixes=["mtp."],
+            skip_prefixes=skip_prefixes,
         )
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+        return loader.load_weights(weights, mapper=mapper)
 
     @classmethod
     def get_mamba_state_dtype_from_config(
