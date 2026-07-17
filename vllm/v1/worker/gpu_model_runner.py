@@ -3437,6 +3437,7 @@ class GPUModelRunner(
         )
 
         if raw_pooler_output is None or not any(finished_mask):
+            self._sync_device()
             model_runner_output.pooler_output = [None] * num_reqs
             return model_runner_output
 
