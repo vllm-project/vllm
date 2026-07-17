@@ -10,6 +10,7 @@ from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config.model import LogprobsMode
 from vllm.logger import init_logger
 from vllm.platforms import CpuArchEnum, current_platform
+from vllm.platforms.interface import DeviceCapability
 from vllm.triton_utils import HAS_TRITON
 
 if HAS_TRITON:
@@ -18,12 +19,46 @@ if HAS_TRITON:
 logger = init_logger(__name__)
 
 
+def _flashinfer_jit_unsupported_reason(capability: DeviceCapability) -> str | None:
+    """Return why FlashInfer JIT codegen cannot target the current GPU, or
+    None if it can.
+
+    FlashInfer swallows arch-detection errors when building its compilation
+    context (e.g. SM 12.x with a CUDA toolkit older than 12.9), leaving an
+    empty target-arch set that makes every JIT spec fail with a misleading
+    "requires sm75 or higher" error at first use — killing the engine during
+    startup profiling (https://github.com/vllm-project/vllm/issues/42393).
+    """
+    try:
+        from flashinfer.jit.core import check_cuda_arch
+    except ImportError:
+        return None
+    try:
+        check_cuda_arch()
+        return None
+    except RuntimeError as e:
+        reason = str(e)
+    try:
+        # Re-derive the real error that FlashInfer swallowed during arch
+        # detection, e.g. "SM 12.x requires CUDA >= 12.9".
+        from flashinfer.compilation_context import CompilationContext
+
+        CompilationContext._normalize_cuda_arch(capability.major, capability.minor)
+    except RuntimeError as e:
+        reason = str(e)
+    except Exception:
+        # FlashInfer internals changed; keep the original error message.
+        pass
+    return reason
+
+
 def flashinfer_sampler_supported() -> bool:
     """Decide whether FlashInfer's top-p/top-k sampler can be used.
 
     Returns False (with appropriate logging) when ``VLLM_USE_FLASHINFER_SAMPLER``
     is 0, when the platform isn't CUDA, when the GPU's compute capability is
-    unsupported. Raises ``RuntimeError`` if the user explicitly opted in
+    unsupported, or when FlashInfer cannot JIT-compile for the current
+    GPU/CUDA toolchain. Raises ``RuntimeError`` if the user explicitly opted in
     via the env var but FlashInfer is unavailable.
 
     Assumes flashinfer is installed, as guaranteed by ``requirements/cuda.txt``;
@@ -50,6 +85,8 @@ def flashinfer_sampler_supported() -> bool:
         unsupported_reason = (
             f"unsupported compute capability {capability.as_version_str()}"
         )
+    else:
+        unsupported_reason = _flashinfer_jit_unsupported_reason(capability)
 
     if unsupported_reason is None:
         logger.info_once("Using FlashInfer for top-p & top-k sampling.", scope="global")
