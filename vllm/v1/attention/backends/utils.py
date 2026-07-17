@@ -950,10 +950,8 @@ def mamba_get_block_table_tensor(
         assert isinstance(kv_cache_spec, MambaSpec)
         # NOTE: For 0-length requests in CUDA graph, use a start_index of 0
         # to handle the invalid block table.
-        start_indices = torch.clamp(
-            (seq_lens - 1) // kv_cache_spec.block_size,
-            min=0,
-        )
+        start_indices = (seq_lens - 1) // kv_cache_spec.block_size
+        start_indices.clamp_(min=0)
         # Use int32 for arithmetic to avoid dtype promotion overhead,
         # then convert to int64 for gather (which requires Long indices)
         offsets = torch.arange(
