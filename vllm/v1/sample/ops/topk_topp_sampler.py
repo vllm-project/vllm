@@ -360,6 +360,13 @@ def apply_top_k_top_p(
     return apply_top_k_top_p_pytorch(logits, k, p)
 
 
+# Size of the candidate window used to avoid a full-vocab sort in
+# apply_top_k_top_p_pytorch. Large enough to cover typical top_k values;
+# requests whose top_k exceeds it (or whose top_p nucleus spills past it)
+# fall back to the exact sort-based implementation.
+_TOPK_CANDIDATE_WINDOW = 1024
+
+
 def apply_top_k_top_p_pytorch(
     logits: torch.Tensor,
     k: torch.Tensor | None,
@@ -368,8 +375,10 @@ def apply_top_k_top_p_pytorch(
 ) -> torch.Tensor:
     """Apply top-k and top-p masks to the logits.
 
-    If a top-p is used, this function will sort the logits tensor,
-    which can be slow for large batches.
+    Resolves top-k/top-p from a top-N candidate window instead of sorting
+    the full vocab, falling back to the exact sort-based implementation for
+    the rare cases the window can't resolve exactly (ties at the window
+    boundary, or a top-p nucleus spilling past it).
 
     The logits tensor may be updated in-place.
     """
@@ -381,6 +390,55 @@ def apply_top_k_top_p_pytorch(
             # Avoid sorting vocab for top-k only case.
             return apply_top_k_only(logits, k)
 
+    V = logits.shape[1]
+    n = _TOPK_CANDIDATE_WINDOW
+    if k is not None:
+        n = max(n, int(k.max()))
+    n = min(n, V)
+
+    top_logits, _ = torch.topk(logits, n, dim=-1)
+
+    if k is not None:
+        k_idx = (k.long() - 1).clamp(min=0, max=n - 1).unsqueeze(1)
+        kth_val = top_logits.gather(1, k_idx)
+        if bool((top_logits[:, -1:] == kth_val).any()):
+            # A tied value sits at the window boundary: more ties may exist
+            # outside the window, invisible to us here.
+            return _apply_top_k_top_p_sort(logits, k, p)
+        top_logits = top_logits.masked_fill(top_logits < kth_val, -float("inf"))
+
+    if p is not None:
+        if bool((p >= 1.0).any()):
+            return _apply_top_k_top_p_sort(logits, k, p)
+
+        if k is not None:
+            probs = top_logits.softmax(dim=-1)
+        else:
+            lse = torch.logsumexp(logits, dim=-1, keepdim=True)
+            probs = torch.exp(top_logits - lse)
+        cumsum = probs.cumsum(dim=-1)
+
+        if k is None and bool((cumsum[:, -1] < p).any()):
+            return _apply_top_k_top_p_sort(logits, k, p)
+
+        keep = ((cumsum - probs) < p.unsqueeze(1)) & (top_logits > -float("inf"))
+        thresh = top_logits.masked_fill(~keep, float("inf")).min(
+            dim=-1, keepdim=True
+        ).values
+        return logits.masked_fill_(logits < thresh, -float("inf"))
+
+    thresh = top_logits.masked_fill(
+        top_logits == -float("inf"), float("inf")
+    ).min(dim=-1, keepdim=True).values
+    return logits.masked_fill_(logits < thresh, -float("inf"))
+
+
+def _apply_top_k_top_p_sort(
+    logits: torch.Tensor,
+    k: torch.Tensor | None,
+    p: torch.Tensor | None,
+) -> torch.Tensor:
+    """Exact top-k/top-p via full-vocab sort. Slow for large batches."""
     logits_sort, logits_idx = logits.sort(dim=-1, descending=False)
 
     if k is not None:
