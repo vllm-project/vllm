@@ -1017,6 +1017,33 @@ class FusedMoEExpertsMonolithic(FusedMoEExperts):
     ) -> None:
         self.routing_replay_capture_fn = capture_fn
 
+    def _maybe_make_routing_replay_buffer(
+        self,
+        num_tokens: int,
+        device: torch.device,
+    ) -> torch.Tensor | None:
+        if self.routing_replay_capture_fn is None:
+            return None
+        topk = self.moe_config.experts_per_token
+        buf = self._routing_replay_buffer
+        if buf is None or buf.shape[0] < num_tokens or buf.device != device:
+            buf = torch.empty(
+                (num_tokens, topk),
+                dtype=torch.int16,
+                device=device,
+            )
+            self._routing_replay_buffer = buf
+        return buf
+
+    def _maybe_dispatch_routing_replay(
+        self,
+        routing_replay_out: torch.Tensor | None,
+        num_tokens: int,
+    ) -> None:
+        if routing_replay_out is None or self.routing_replay_capture_fn is None:
+            return
+        self.routing_replay_capture_fn(routing_replay_out[:num_tokens])
+
     def apply(
         self,
         hidden_states: torch.Tensor,
