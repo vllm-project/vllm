@@ -1732,8 +1732,9 @@ class Gemma4ForConditionalGeneration(
         vision_cfg = self.vision_tower.config
         pool_ratio = getattr(vision_cfg, "pooling_kernel_size", 2) ** 2
 
-        # Distribute global token budget among batch slots
-        per_item_output = (token_budget + max_size - 1) // max_size
+        # The physical 3D slot size is strictly decoupled from the 1D
+        # global token_budget.
+        per_item_output = _SUPPORTED_SOFT_TOKENS[-1]
         # Satisfy k^2 * per_item_output = per_item_patches
         per_item_patches = per_item_output * pool_ratio
 
@@ -1812,23 +1813,12 @@ class Gemma4ForConditionalGeneration(
         per_item_out_tokens = [spec.output_tokens for spec in item_specs]
         total_tokens = sum(per_item_out_tokens)
 
-        min_budget, max_budget = self.get_encoder_cudagraph_budget_range(
-            self.vllm_config
-        )
-        budgets = []
-        b = min_budget
-        while b <= max_budget:
-            budgets.append(b)
-            b *= 2
-        if not budgets or budgets[-1] < max_budget:
-            budgets.append(max_budget)
-
-        token_budget = next((b for b in budgets if b >= total_tokens), budgets[-1])
         device = pixel_values.device
-        gather_indices = torch.zeros((token_budget,), dtype=torch.long, device=device)
+        per_item_output = _SUPPORTED_SOFT_TOKENS[-1]
 
-        max_size = max(max_batch_size, max_frames_per_batch)
-        per_item_output = (token_budget + max_size - 1) // max_size
+        # ONLY allocate an array of exact size `total_tokens`.
+        # DO NOT pad it. The upstream Graph Manager handles the padding securely.
+        gather_indices = torch.zeros((total_tokens,), dtype=torch.long, device=device)
 
         if modality == "image":
             dst_offset = 0
@@ -1901,9 +1891,9 @@ class Gemma4ForConditionalGeneration(
         )
         hidden_states = encoder_outputs.last_hidden_state
 
-        max_size = pixel_values.shape[0]
-        token_budget = gather_indices.shape[0]
-        per_item_output = (token_budget + max_size - 1) // max_size
+        # The physical 3D slot size is strictly decoupled from the 1D
+        # global token_budget.
+        per_item_output = _SUPPORTED_SOFT_TOKENS[-1]
 
         pooled_states, _ = vt.pooler(
             hidden_states=hidden_states,
@@ -1917,6 +1907,10 @@ class Gemma4ForConditionalGeneration(
 
         flat_pooled = pooled_states.reshape(-1, pooled_states.shape[-1])
         gathered_states = flat_pooled[gather_indices]
+
+        # Cast to the projection layer's dtype to resolve mixed-precision crash
+        target_dtype = self.embed_vision.embedding_projection.weight.dtype
+        gathered_states = gathered_states.to(target_dtype)
 
         flat_proj_embs = self.embed_vision(
             inputs_embeds=gathered_states.unsqueeze(0)
