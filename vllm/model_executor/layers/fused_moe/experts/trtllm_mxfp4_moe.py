@@ -187,10 +187,23 @@ class TrtLlmMxfp4ExpertsMonolithic(
             device=hidden_states.device,
         )
 
-        routing_replay_out = self._maybe_make_routing_replay_buffer(
-            num_tokens=hidden_states.shape[0],
-            device=hidden_states.device,
-        )
+        if self.routing_replay_capture_fn is not None:
+            num_tokens = hidden_states.shape[0]
+            replay_buffer = self._routing_replay_buffer
+            if (
+                replay_buffer is None
+                or replay_buffer.shape[0] < num_tokens
+                or replay_buffer.device != hidden_states.device
+            ):
+                replay_buffer = torch.empty(
+                    (num_tokens, self.moe_config.experts_per_token),
+                    dtype=torch.int16,
+                    device=hidden_states.device,
+                )
+                self._routing_replay_buffer = replay_buffer
+            routing_replay_out = replay_buffer
+        else:
+            routing_replay_out = None
         trtllm_fp4_block_scale_moe(
             routing_logits=router_logits.to(torch.bfloat16),
             routing_bias=None,
@@ -222,9 +235,9 @@ class TrtLlmMxfp4ExpertsMonolithic(
             output=output,
             routing_replay_out=routing_replay_out,
         )
-        self._maybe_dispatch_routing_replay(
-            routing_replay_out, num_tokens=hidden_states.shape[0]
-        )
+        if routing_replay_out is not None:
+            assert self.routing_replay_capture_fn is not None
+            self.routing_replay_capture_fn(routing_replay_out[: hidden_states.shape[0]])
         return output
 
 

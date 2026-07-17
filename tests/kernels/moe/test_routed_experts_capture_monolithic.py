@@ -315,27 +315,6 @@ def test_trtllm_bf16_monolithic_routing_replay_non_dsv3(
         )
 
 
-def test_trtllm_bf16_monolithic_capture_disabled_skips_buffer_alloc() -> None:
-    """With no callback installed the kernel should not see a
-    ``routing_replay_out`` tensor — verify the helper short-circuits."""
-    torch.manual_seed(0)
-    device = torch.device("cuda:0")
-    experts, _, _ = _make_bf16_monolithic_experts(
-        num_experts=_DSV3_NUM_EXPERTS,
-        top_k=2,
-        hidden_size=1024,
-        intermediate_size=1024,
-        routing_method=RoutingMethodType.DeepSeekV3,
-        device=device,
-    )
-    # No callback installed.
-    buf = experts._maybe_make_routing_replay_buffer(num_tokens=4, device=device)
-    assert buf is None
-
-    # Dispatch is also a no-op.
-    experts._maybe_dispatch_routing_replay(buf, num_tokens=4)
-
-
 def test_trtllm_bf16_monolithic_supports_capture_for_all_routing() -> None:
     """FlashInfer's ``routing_replay_out`` is supported by all routing
     methods, so ``supports_routing_replay_capture`` should be True
@@ -357,26 +336,6 @@ def test_trtllm_bf16_monolithic_supports_capture_for_all_routing() -> None:
         assert experts.supports_routing_replay_capture() is True, (
             f"{routing_method!r} should support routing replay capture"
         )
-
-
-def test_trtllm_bf16_monolithic_capture_buffer_shape_and_dtype() -> None:
-    """When capture is installed, the allocated buffer is int16 and shaped
-    ``(num_tokens, experts_per_token)``."""
-    device = torch.device("cuda:0")
-    experts, _, _ = _make_bf16_monolithic_experts(
-        num_experts=_DSV3_NUM_EXPERTS,
-        top_k=4,
-        hidden_size=1024,
-        intermediate_size=1024,
-        routing_method=RoutingMethodType.DeepSeekV3,
-        device=device,
-    )
-    experts.set_routing_replay_capture_fn(lambda r: None)
-    buf = experts._maybe_make_routing_replay_buffer(num_tokens=11, device=device)
-    assert buf is not None
-    assert buf.dtype == torch.int16
-    assert buf.shape == (11, 4)
-    assert buf.device.type == "cuda"
 
 
 def test_routed_experts_capturer_e2e_via_monolithic_experts() -> None:
