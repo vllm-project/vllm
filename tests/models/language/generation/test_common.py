@@ -143,6 +143,14 @@ def test_models(
         # in parts of the operators
         pytest.skip(f"Skipping '{model}' model test with AITER kernel.")
 
+    if (
+        model == "bigscience/bloom-560m"
+        and current_platform.is_device_capability_family(90)
+    ):
+        # Preserve the L4 test's V1 runner while FA2 + ALiBi is unsupported by
+        # the V2 runner on Hopper.
+        monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
+
     if model == "bigcode/starcoder2-3b":
         # Replace example.txt's Test1 (an NL prompt) with a code prompt:
         # starcoder2-3b is a code model, so NL prompts give near-uniform

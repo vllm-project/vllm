@@ -9,6 +9,7 @@ import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from tests.kernels.moe.utils import make_dummy_moe_config
+from tests.utils import large_gpu_mark
 from vllm import _custom_ops as ops
 from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.fused_moe import fused_experts, fused_topk
@@ -468,6 +469,7 @@ LARGE_MNK_FACTORS = [
 @pytest.mark.parametrize("per_act_token", [False])
 @pytest.mark.parametrize("per_out_channel", [True])
 @pytest.mark.parametrize("ep_size", [8])
+@large_gpu_mark(min_gb=80)
 @pytest.mark.skipif(
     (lambda x: x is None or not ops.cutlass_group_gemm_supported(x.to_int()))(
         current_platform.get_device_capability()

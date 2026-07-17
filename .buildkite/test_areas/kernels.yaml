@@ -78,7 +78,7 @@ steps:
   - tests/kernels/attention
   commands:
     - pytest -v -s kernels/attention --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
-  parallelism: 2
+  parallelism: 6
   mirror:
     amd:
       device: mi325_1
@@ -110,14 +110,14 @@ steps:
 - label: Kernels Quantization Test %N
   device: h200_35gb
   key: kernels-quantization-test
-  timeout_in_minutes: 60
+  timeout_in_minutes: 75
   source_file_dependencies:
   - csrc/quantization/
   - vllm/model_executor/layers/quantization
   - tests/kernels/quantization
   commands:
     - pytest -v -s kernels/quantization --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
-  parallelism: 2
+  parallelism: 12
   mirror:
     amd:
       device: mi325_1
@@ -136,7 +136,7 @@ steps:
 - label: Kernels MoE Test %N
   device: h200_35gb
   key: kernels-moe-test
-  timeout_in_minutes: 50
+  timeout_in_minutes: 70
   source_file_dependencies:
   - csrc/quantization/cutlass_w8a8/moe/
   - csrc/moe/
