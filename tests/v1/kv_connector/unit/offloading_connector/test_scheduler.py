@@ -14,6 +14,7 @@ from tests.v1.kv_connector.unit.utils import EOS_TOKEN_ID
 from vllm.distributed.kv_events import MEDIUM_CPU, BlockRemoved, BlockStored
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
     OffloadingConnectorMetadata,
+    OffloadingWorkerMetadata,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
     OffloadingConnectorStats,
@@ -40,6 +41,7 @@ from vllm.v1.kv_offload.base import (
     get_offload_block_hash,
     make_offload_key,
 )
+from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import RequestStatus
 
 
@@ -1503,6 +1505,51 @@ def test_complete_store_called_per_job(request_runner, async_scheduling: bool):
     # Finish: no store pending -> no further call.
     runner.run(decoded_tokens=[EOS_TOKEN_ID])
     assert runner.manager.complete_store.call_count == 0
+
+
+@pytest.mark.parametrize("async_scheduling", [True, False])
+def test_complete_store_waits_for_all_worker_acks(
+    request_runner, async_scheduling: bool
+):
+    tokens_per_block = 4
+    blocks_per_chunk = 3
+    tokens_per_chunk = tokens_per_block * blocks_per_chunk
+    runner = request_runner(
+        blocks_per_chunk=blocks_per_chunk,
+        block_size=tokens_per_block,
+        num_gpu_blocks=100,
+        async_scheduling=async_scheduling,
+        worker_count=3,
+    )
+    runner.new_request(token_ids=[0] * tokens_per_chunk)
+    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+        generate_store_output(keys)
+    )
+    runner.run(decoded_tokens=[0, 0], complete_transfers=False)
+    assert len(runner.connector_scheduler._jobs) == 1
+    job_id = next(iter(runner.connector_scheduler._jobs))
+    assert runner.connector_scheduler._jobs[job_id].pending_count == 3
+    runner.manager.complete_store.reset_mock()
+
+    runner.connector_scheduler.update_connector_output(
+        KVConnectorOutput(
+            kv_connector_worker_meta=OffloadingWorkerMetadata(
+                completed_jobs={job_id: 1}
+            )
+        )
+    )
+    assert runner.manager.complete_store.call_count == 0
+    assert runner.connector_scheduler._jobs[job_id].pending_count == 2
+
+    runner.connector_scheduler.update_connector_output(
+        KVConnectorOutput(
+            kv_connector_worker_meta=OffloadingWorkerMetadata(
+                completed_jobs={job_id: 2}
+            )
+        )
+    )
+    assert runner.manager.complete_store.call_count == 1
+    assert job_id not in runner.connector_scheduler._jobs
 
 
 @pytest.mark.parametrize("async_scheduling", [True, False])

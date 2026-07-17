@@ -1,8 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import contextlib
+import glob
+import json
 import mmap
 import os
 import time
+from typing import cast
 
 import torch
 
@@ -11,18 +15,120 @@ from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
 
+Metadata = dict[str, int | bool]
+_LAYOUT_METADATA_FIELDS = (
+    "num_blocks",
+    "row_stride",
+    "slot_bytes",
+    "replicated_layout",
+)
+_METADATA_TIMEOUT = 30.0
 
-def _wait_for_file_size(fd: int, expected_size: int, timeout: float = 30.0) -> None:
+
+def _stale_files_hint(mmap_path: str) -> str:
+    prefix = mmap_path[: -len(".mmap")] if mmap_path.endswith(".mmap") else mmap_path
+    return f"stale files from a previous run can be removed: rm {prefix}.*"
+
+
+def _unlink_path(path: str, description: str) -> None:
+    try:
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(path)
+            logger.info("Removed %s %s", description, path)
+    except Exception:
+        logger.warning("Failed to unlink %s %s", description, path, exc_info=True)
+
+
+def _cleanup_region_files(mmap_path: str, metadata_path: str) -> None:
+    _unlink_path(metadata_path, "metadata sidecar")
+    for tmp_path in glob.glob(f"{metadata_path}.*.tmp"):
+        _unlink_path(tmp_path, "metadata tmp")
+    _unlink_path(mmap_path, "mmap file")
+
+
+def _wait_for_file_size(
+    fd: int,
+    expected_size: int,
+    timeout: float = 30.0,
+    mmap_path: str | None = None,
+) -> None:
     """Spin-wait until the file reaches expected_size (creator truncated it)."""
     deadline = time.monotonic() + timeout
     while True:
         if os.fstat(fd).st_size >= expected_size:
             return
         if time.monotonic() > deadline:
+            path_text = f" for mmap {mmap_path}" if mmap_path else ""
+            hint = f"; {_stale_files_hint(mmap_path)}" if mmap_path else ""
             raise TimeoutError(
-                f"Timed out waiting for mmap file to reach {expected_size} bytes"
+                f"Timed out waiting for mmap file{path_text} to reach "
+                f"{expected_size} bytes{hint}"
             )
         time.sleep(0.005)
+
+
+def _wait_for_metadata(paths: tuple[str, str], deadline: float) -> Metadata:
+    """Spin-wait until the region metadata sidecar is visible."""
+    metadata_path, mmap_path = paths
+    while True:
+        try:
+            with open(metadata_path) as f:
+                return cast(Metadata, json.load(f))
+        except FileNotFoundError:
+            if time.monotonic() > deadline:
+                raise TimeoutError(
+                    f"Timed out waiting for mmap metadata {metadata_path} "
+                    f"for mmap {mmap_path}; {_stale_files_hint(mmap_path)}"
+                ) from None
+            time.sleep(0.005)
+        except json.JSONDecodeError as e:
+            if time.monotonic() > deadline:
+                raise ValueError(
+                    f"Invalid mmap metadata sidecar {metadata_path} for mmap "
+                    f"{mmap_path}: {e}; {_stale_files_hint(mmap_path)}"
+                ) from e
+            time.sleep(0.005)
+
+
+def _write_metadata(metadata_path: str, metadata: Metadata) -> None:
+    """Atomically write region metadata to a JSON sidecar."""
+    tmp_path = f"{metadata_path}.{os.getpid()}.tmp"
+    with open(tmp_path, "w") as f:
+        json.dump(metadata, f, sort_keys=True)
+        f.flush()
+        os.fsync(f.fileno())
+    os.rename(tmp_path, metadata_path)
+
+
+def _check_metadata(paths: tuple[str, str], fd: int, expected: Metadata) -> None:
+    """Validate region metadata written by the region creator."""
+    metadata_path, mmap_path = paths
+    deadline = time.monotonic() + _METADATA_TIMEOUT
+    mmap_inode = os.fstat(fd).st_ino
+    while True:
+        actual = _wait_for_metadata(paths, deadline)
+        sidecar_inode = actual.get("mmap_inode")
+        if sidecar_inode == mmap_inode:
+            break
+        if time.monotonic() > deadline:
+            raise TimeoutError(
+                f"Timed out waiting for mmap metadata {metadata_path} to match "
+                f"mmap {mmap_path} inode {mmap_inode}; "
+                f"sidecar mmap_inode={sidecar_inode!r}; "
+                f"{_stale_files_hint(mmap_path)}"
+            ) from None
+        time.sleep(0.005)
+
+    for field in _LAYOUT_METADATA_FIELDS:
+        expected_value = expected[field]
+        actual_value = actual.get(field)
+        if actual_value != expected_value:
+            raise ValueError(
+                "Shared offload region metadata mismatch for "
+                f"{field}: local={expected_value!r}, sidecar={actual_value!r} "
+                f"at {metadata_path} for mmap {mmap_path}; "
+                f"{_stale_files_hint(mmap_path)}"
+            )
 
 
 class SharedOffloadRegion:
@@ -45,6 +151,7 @@ class SharedOffloadRegion:
         rank: int | None,
         kv_bytes_per_block: int,
         cpu_page_size: int,
+        replicated_layout: bool = False,
     ) -> None:
         self.page_size = mmap.PAGESIZE
         assert kv_bytes_per_block % self.page_size == 0
@@ -52,8 +159,16 @@ class SharedOffloadRegion:
         self.num_blocks = num_blocks
         self._row_stride = kv_bytes_per_block
         self.total_size_bytes = self.num_blocks * self._row_stride
+        self._replicated_layout = replicated_layout
 
         self.mmap_path = f"/dev/shm/vllm_offload_{engine_id}.mmap"
+        self.metadata_path = f"/dev/shm/vllm_offload_{engine_id}.meta.json"
+        metadata: Metadata = {
+            "num_blocks": num_blocks,
+            "row_stride": kv_bytes_per_block,
+            "slot_bytes": cpu_page_size,
+            "replicated_layout": replicated_layout,
+        }
         self._creator = False  # set True only if this worker creates the file
         self.rank = rank
         if rank is not None:
@@ -66,7 +181,27 @@ class SharedOffloadRegion:
             self.fd: int | None = os.open(
                 self.mmap_path, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600
             )
-            os.ftruncate(self.fd, self.total_size_bytes)
+            if self._replicated_layout:
+                try:
+                    os.ftruncate(self.fd, self.total_size_bytes)
+                    creator_metadata = {
+                        **metadata,
+                        "mmap_inode": os.fstat(self.fd).st_ino,
+                    }
+                    _write_metadata(self.metadata_path, creator_metadata)
+                except Exception:
+                    if self.fd is not None:
+                        try:
+                            os.close(self.fd)
+                        except Exception:
+                            logger.warning(
+                                "Failed to close fd %s", self.fd, exc_info=True
+                            )
+                        self.fd = None
+                    _cleanup_region_files(self.mmap_path, self.metadata_path)
+                    raise
+            else:
+                os.ftruncate(self.fd, self.total_size_bytes)
             self._creator = True
             logger.info(
                 "Created mmap file %s (%.2f GB)",
@@ -75,7 +210,22 @@ class SharedOffloadRegion:
             )
         except FileExistsError:
             self.fd = os.open(self.mmap_path, os.O_RDWR)
-            _wait_for_file_size(self.fd, self.total_size_bytes)
+            if self._replicated_layout:
+                try:
+                    _check_metadata(
+                        (self.metadata_path, self.mmap_path), self.fd, metadata
+                    )
+                    _wait_for_file_size(
+                        self.fd,
+                        self.total_size_bytes,
+                        mmap_path=self.mmap_path,
+                    )
+                except Exception:
+                    os.close(self.fd)
+                    self.fd = None
+                    raise
+            else:
+                _wait_for_file_size(self.fd, self.total_size_bytes)
             logger.info("Opened existing mmap file %s", self.mmap_path)
 
         self.mmap_obj: mmap.mmap | None = mmap.mmap(
@@ -202,11 +352,14 @@ class SharedOffloadRegion:
                 logger.warning("Failed to close fd %s", self.fd, exc_info=True)
             self.fd = None
         if self._creator and getattr(self, "mmap_path", None):
-            try:
-                os.unlink(self.mmap_path)
-                logger.info("Removed mmap file %s", self.mmap_path)
-            except Exception:
-                logger.warning(
-                    "Failed to unlink path %s", self.mmap_path, exc_info=True
-                )
+            if self._replicated_layout:
+                _cleanup_region_files(self.mmap_path, self.metadata_path)
+            else:
+                try:
+                    os.unlink(self.mmap_path)
+                    logger.info("Removed mmap file %s", self.mmap_path)
+                except Exception:
+                    logger.warning(
+                        "Failed to unlink path %s", self.mmap_path, exc_info=True
+                    )
             self._creator = False

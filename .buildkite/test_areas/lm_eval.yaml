@@ -336,7 +336,7 @@ steps:
 
 - label: LM Eval KV-Offload (2xH100)
   key: kv-offload-medium
-  timeout_in_minutes: 30
+  timeout_in_minutes: 45
   device: h100
   num_devices: 2
   source_file_dependencies:
@@ -346,7 +346,7 @@ steps:
   - vllm/v1/simple_kv_offload/
   - tests/evals/gsm8k/test_gsm8k_offloading.py
   commands:
-  - pytest -s -v evals/gsm8k/test_gsm8k_offloading.py -k "qwen3.5-35b"
+  - pytest -s -v evals/gsm8k/test_gsm8k_offloading.py -k "qwen3.5-35b or deepseek-v2-lite"
 
 - label: LM Eval KV-Offload (4xH100)
   key: kv-offload-large

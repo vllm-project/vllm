@@ -3,6 +3,7 @@
 """Unit tests for SharedOffloadRegion."""
 
 import contextlib
+import json
 import mmap
 import os
 import threading
@@ -12,6 +13,7 @@ import uuid
 import pytest
 
 from vllm.utils.system_utils import get_mp_context
+from vllm.v1.kv_offload.cpu import shared_offload_region as shared_region_module
 from vllm.v1.kv_offload.cpu.shared_offload_region import (
     SharedOffloadRegion,
     _wait_for_file_size,
@@ -39,6 +41,7 @@ def _make_region(
     cpu_page_size: int = PAGE_SIZE,
     num_workers: int = 1,
     rank: int = 0,
+    replicated_layout: bool = False,
 ) -> SharedOffloadRegion:
     assert cpu_page_size % PAGE_SIZE == 0
     return SharedOffloadRegion(
@@ -47,6 +50,7 @@ def _make_region(
         rank=rank,
         kv_bytes_per_block=num_workers * cpu_page_size,
         cpu_page_size=cpu_page_size,
+        replicated_layout=replicated_layout,
     )
 
 
@@ -73,6 +77,7 @@ def _multi_region(
     num_workers: int,
     num_blocks: int = 4,
     cpu_page_size: int = PAGE_SIZE,
+    replicated_layout: bool = False,
 ):
     """Context manager: create one SharedOffloadRegion per rank, clean up on exit."""
     regions = [
@@ -82,6 +87,7 @@ def _multi_region(
             rank=rank,
             kv_bytes_per_block=num_workers * cpu_page_size,
             cpu_page_size=cpu_page_size,
+            replicated_layout=replicated_layout,
         )
         for rank in range(num_workers)
     ]
@@ -155,6 +161,35 @@ def _mp_race_construct_and_write(
         region.cleanup()
     except Exception as e:
         done_queue.put({"rank": rank, "error": repr(e)})
+
+
+def _mp_replicated_construct_and_read(
+    engine_id: str,
+    num_blocks: int,
+    cpu_page_size: int,
+    expected_value: int,
+    done_queue,
+) -> None:
+    try:
+        region = SharedOffloadRegion(
+            engine_id=engine_id,
+            num_blocks=num_blocks,
+            rank=0,
+            kv_bytes_per_block=cpu_page_size,
+            cpu_page_size=cpu_page_size,
+            replicated_layout=True,
+        )
+        t = region.create_next_view(cpu_page_size)
+        done_queue.put(
+            {
+                "error": None,
+                "matched": bool((t == expected_value).all().item()),
+            }
+        )
+        del t
+        region.cleanup()
+    except Exception as e:
+        done_queue.put({"error": repr(e), "matched": False})
 
 
 @pytest.fixture
@@ -374,6 +409,73 @@ def test_create_next_view_worker_isolation(iid):
         del raw, t0, t1  # release before finally triggers cleanup
 
 
+def test_replicated_layout_uses_single_slot(iid):
+    """Replicated workers all map slot 0 with a single-copy row stride."""
+    num_workers = 3
+    num_blocks = 4
+    regions = [
+        SharedOffloadRegion(
+            engine_id=iid,
+            num_blocks=num_blocks,
+            rank=0,
+            kv_bytes_per_block=PAGE_SIZE,
+            cpu_page_size=PAGE_SIZE,
+            replicated_layout=True,
+        )
+        for _ in range(num_workers)
+    ]
+    views = []
+    try:
+        for region in regions:
+            view = region.create_next_view(PAGE_SIZE)
+            views.append(view)
+            assert view.data_ptr() == region._base.data_ptr()
+            assert view.stride(0) == PAGE_SIZE
+        assert os.path.getsize(regions[0].mmap_path) == num_blocks * PAGE_SIZE
+    finally:
+        views.clear()
+        for region in regions:
+            region.cleanup()
+        _cleanup_file(regions[0].mmap_path)
+
+
+def test_replicated_layout_multiprocess_read_same_slot(iid):
+    """A logical rank 1 reader sees bytes written by rank 0 in slot 0."""
+    num_blocks = 3
+    fill_value = 33
+    ctx = get_mp_context()
+    done_queue = ctx.Queue()
+
+    region = SharedOffloadRegion(
+        engine_id=iid,
+        num_blocks=num_blocks,
+        rank=0,
+        kv_bytes_per_block=PAGE_SIZE,
+        cpu_page_size=PAGE_SIZE,
+        replicated_layout=True,
+    )
+    try:
+        t = region.create_next_view(PAGE_SIZE)
+        t[:, :] = fill_value
+
+        child = ctx.Process(
+            target=_mp_replicated_construct_and_read,
+            args=(iid, num_blocks, PAGE_SIZE, fill_value, done_queue),
+        )
+        child.start()
+
+        result = done_queue.get(timeout=30)
+        assert result["error"] is None, result["error"]
+        assert result["matched"]
+
+        child.join(timeout=10)
+        assert child.exitcode == 0
+        del t
+    finally:
+        region.cleanup()
+        _cleanup_file(region.mmap_path)
+
+
 # ---------------------------------------------------------------------------
 # Constructor — creator vs joiner semantics
 # ---------------------------------------------------------------------------
@@ -402,6 +504,213 @@ def test_file_has_correct_size(iid):
     """The mmap file size on disk must equal total_size_bytes."""
     with _region(iid, num_blocks=4) as r:
         assert os.path.getsize(r.mmap_path) == 4 * PAGE_SIZE
+
+
+def test_metadata_sidecar_consistent_region_passes(iid):
+    """Joiners accept sidecar metadata that matches their local layout."""
+    r0 = _make_region(iid, num_blocks=4, replicated_layout=True)
+    r1 = None
+    try:
+        r1 = _make_region(iid, num_blocks=4, replicated_layout=True)
+        assert os.path.exists(r0.metadata_path)
+        assert r1._creator is False
+    finally:
+        if r1 is not None:
+            r1.cleanup()
+        r0.cleanup()
+        _cleanup_file(r0.mmap_path)
+
+
+def test_metadata_sidecar_mismatch_raises(iid):
+    """Joiners fail loudly when their local layout differs from the creator."""
+    r0 = _make_region(iid, num_blocks=4, replicated_layout=True)
+    try:
+        with open(r0.metadata_path) as f:
+            metadata = json.load(f)
+        assert metadata["mmap_inode"] == os.fstat(r0.fd).st_ino
+
+        with pytest.raises(
+            ValueError,
+            match=r"num_blocks: local=5, sidecar=4",
+        ):
+            _make_region(iid, num_blocks=5, replicated_layout=True)
+    finally:
+        r0.cleanup()
+        _cleanup_file(r0.mmap_path)
+
+
+def test_metadata_sidecar_orphan_does_not_block_creator_joiner(iid, monkeypatch):
+    """A stale sidecar without its mmap file cannot poison a fresh region."""
+    metadata_path = f"/dev/shm/vllm_offload_{iid}.meta.json"
+    mmap_path = f"/dev/shm/vllm_offload_{iid}.mmap"
+    with open(metadata_path, "w") as f:
+        json.dump(
+            {
+                "num_blocks": 999,
+                "row_stride": 999 * PAGE_SIZE,
+                "slot_bytes": 999 * PAGE_SIZE,
+                "replicated_layout": False,
+            },
+            f,
+        )
+    assert not os.path.exists(mmap_path)
+
+    original_write_metadata = shared_region_module._write_metadata
+    creator_ready_to_publish = threading.Event()
+    publish_fresh_metadata = threading.Event()
+
+    def delayed_write_metadata(path, metadata):
+        creator_ready_to_publish.set()
+        assert publish_fresh_metadata.wait(timeout=5)
+        original_write_metadata(path, metadata)
+
+    monkeypatch.setattr(shared_region_module, "_write_metadata", delayed_write_metadata)
+
+    regions: list[SharedOffloadRegion] = []
+    errors: list[Exception] = []
+
+    def construct(rank: int) -> None:
+        try:
+            regions.append(
+                SharedOffloadRegion(
+                    engine_id=iid,
+                    num_blocks=4,
+                    rank=rank,
+                    kv_bytes_per_block=2 * PAGE_SIZE,
+                    cpu_page_size=PAGE_SIZE,
+                    replicated_layout=True,
+                )
+            )
+        except Exception as e:
+            errors.append(e)
+
+    creator = threading.Thread(target=construct, args=(0,))
+    joiner = threading.Thread(target=construct, args=(1,))
+    try:
+        creator.start()
+        assert creator_ready_to_publish.wait(timeout=5)
+        joiner.start()
+        time.sleep(0.05)
+        publish_fresh_metadata.set()
+
+        creator.join(timeout=5)
+        joiner.join(timeout=5)
+
+        assert not creator.is_alive()
+        assert not joiner.is_alive()
+        assert not errors
+        assert len(regions) == 2
+        assert {region.rank for region in regions} == {0, 1}
+    finally:
+        publish_fresh_metadata.set()
+        for region in regions:
+            region.cleanup()
+        _cleanup_file(metadata_path)
+        _cleanup_file(mmap_path)
+
+
+def test_orphan_mmap_without_metadata_times_out_with_hint(iid, monkeypatch):
+    """A replicated joiner reports how to remove an unpublished mmap."""
+    metadata_path = f"/dev/shm/vllm_offload_{iid}.meta.json"
+    mmap_path = f"/dev/shm/vllm_offload_{iid}.mmap"
+    fd = os.open(mmap_path, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600)
+    try:
+        os.ftruncate(fd, 4 * PAGE_SIZE)
+    finally:
+        os.close(fd)
+
+    monkeypatch.setattr(shared_region_module, "_METADATA_TIMEOUT", 0.2)
+    try:
+        with pytest.raises(TimeoutError) as exc_info:
+            _make_region(iid, replicated_layout=True)
+
+        message = str(exc_info.value)
+        assert metadata_path in message
+        assert "stale files from a previous run can be removed" in message
+        assert f"rm /dev/shm/vllm_offload_{iid}.*" in message
+    finally:
+        _cleanup_file(metadata_path)
+        _cleanup_file(mmap_path)
+
+
+def test_non_replicated_region_ignores_sidecar_and_writes_none(iid):
+    """Non-replicated regions neither consume nor own sidecar metadata."""
+    metadata_path = f"/dev/shm/vllm_offload_{iid}.meta.json"
+    mmap_path = f"/dev/shm/vllm_offload_{iid}.mmap"
+
+    initial = _make_region(iid)
+    try:
+        assert not os.path.exists(metadata_path)
+    finally:
+        initial.cleanup()
+
+    with open(metadata_path, "w") as f:
+        json.dump(
+            {
+                "num_blocks": 999,
+                "row_stride": 999 * PAGE_SIZE,
+                "slot_bytes": 999 * PAGE_SIZE,
+                "replicated_layout": True,
+                "mmap_inode": -1,
+            },
+            f,
+        )
+
+    creator = None
+    joiner = None
+    try:
+        creator = _make_region(iid)
+        joiner = _make_region(iid)
+        assert creator._creator is True
+        assert joiner._creator is False
+
+        joiner.cleanup()
+        joiner = None
+        creator.cleanup()
+        creator = None
+        assert os.path.exists(metadata_path)
+    finally:
+        if joiner is not None:
+            joiner.cleanup()
+        if creator is not None:
+            creator.cleanup()
+        _cleanup_file(metadata_path)
+        _cleanup_file(mmap_path)
+
+
+def test_creator_failure_rolls_back_mmap_metadata_and_tmp(iid, monkeypatch):
+    """A failed creator leaves no mmap/metadata residue for the next creator."""
+    metadata_path = f"/dev/shm/vllm_offload_{iid}.meta.json"
+    mmap_path = f"/dev/shm/vllm_offload_{iid}.mmap"
+    tmp_path = f"{metadata_path}.{os.getpid()}.tmp"
+    original_write_metadata = shared_region_module._write_metadata
+
+    def fail_write_metadata(path, metadata):
+        with open(tmp_path, "w") as f:
+            f.write("{}")
+        raise RuntimeError("metadata write failed")
+
+    monkeypatch.setattr(shared_region_module, "_write_metadata", fail_write_metadata)
+    with pytest.raises(RuntimeError, match="metadata write failed"):
+        _make_region(iid, replicated_layout=True)
+
+    try:
+        assert not os.path.exists(mmap_path)
+        assert not os.path.exists(metadata_path)
+        assert not os.path.exists(tmp_path)
+    finally:
+        for path in (mmap_path, metadata_path, tmp_path):
+            if os.path.exists(path):
+                os.unlink(path)
+
+    monkeypatch.setattr(
+        shared_region_module, "_write_metadata", original_write_metadata
+    )
+    r = _make_region(iid, replicated_layout=True)
+    try:
+        assert r._creator is True
+    finally:
+        r.cleanup()
 
 
 # ---------------------------------------------------------------------------

@@ -45,6 +45,10 @@ class OffloadingConnectorWorker:
         self.spec = spec
         self.kv_cache_config = kv_cache_config
         self.worker: OffloadingWorker | None = None
+        # Non-writers still ack: pending_count waits for world_size per job.
+        self._is_store_writer = (
+            not self.spec.replicated_layout or self.spec.config.parallel.rank == 0
+        )
 
         # job_id -> req_id for in-flight loads.
         self._load_jobs: dict[int, ReqId] = {}
@@ -317,6 +321,10 @@ class OffloadingConnectorWorker:
 
     def prepare_store_kv(self, metadata: OffloadingConnectorMetadata):
         for job_id, entry in metadata.store_jobs.items():
+            if not self._is_store_writer:
+                # Gate before queueing: no _unsubmitted_store_jobs entry.
+                self._connector_worker_meta.mark_completed(job_id)
+                continue
             # NOTE(orozery): defer the store to the beginning of the next
             # engine step, so that offloading starts AFTER transfers related
             # to token sampling, thereby avoiding delays to token generation.
