@@ -167,6 +167,62 @@ def test_fused_add_rms_norm_batch_invariant_residual_path(
 
 
 @skip_if_not_cuda
+@pytest.mark.parametrize("hidden_size", [2048, 4096])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_fused_add_rms_norm_invariant_across_block_size_boundary(
+    hidden_size: int,
+    dtype: torch.dtype,
+):
+    """Regression test for the num_tokens-dependent RMSNorm block size.
+
+    The CUDA launch picks ``max_block_size = (num_tokens < 256) ? 1024 : 256``,
+    which sets the per-row reduction width and therefore the float accumulation
+    order. Under ``VLLM_BATCH_INVARIANT=1`` (enabled here by the autouse
+    ``enable_batch_invariant_mode`` fixture in conftest.py) a row must normalize
+    identically no matter how many tokens share the launch, so the same rows fed
+    through a small launch (num_tokens < 256, block 1024) and a large launch
+    (num_tokens >= 256, block 256) must produce bitwise-identical output.
+
+    Existing coverage only used batch sizes < 256, so both launches took the same
+    block size and the divergence was never exercised. This test crosses the 256
+    boundary. It fails without pinning the block size under batch invariance and
+    passes with it.
+    """
+    import vllm._custom_ops as ops
+
+    device = torch.device(DEVICE_TYPE)
+    eps = 1e-6
+
+    torch.manual_seed(0)
+    n_large = 300  # >= 256 -> block 256
+    rows = torch.randn(n_large, hidden_size, dtype=dtype, device=device)
+    residual = torch.randn(n_large, hidden_size, dtype=dtype, device=device) * 0.1
+    weight = torch.randn(hidden_size, dtype=dtype, device=device)
+
+    # Large launch: all rows at once (num_tokens >= 256).
+    x_large = rows.clone()
+    res_large = residual.clone()
+    ops.fused_add_rms_norm(x_large, res_large, weight, eps)
+
+    # Small launches: same rows in chunks of 8 (num_tokens < 256 each).
+    x_small = torch.empty_like(rows)
+    for i in range(0, n_large, 8):
+        xi = rows[i : i + 8].clone()
+        ri = residual[i : i + 8].clone()
+        ops.fused_add_rms_norm(xi, ri, weight, eps)
+        x_small[i : i + 8] = xi
+
+    torch.testing.assert_close(
+        x_small,
+        x_large,
+        rtol=0.0,
+        atol=0.0,
+        msg="fused_add_rms_norm output must not depend on num_tokens "
+        "(block size) under VLLM_BATCH_INVARIANT=1",
+    )
+
+
+@skip_if_not_cuda
 @pytest.mark.parametrize("batch_size", [1, 16, 128])
 @pytest.mark.parametrize("seq_len", [1, 32, 512])
 @pytest.mark.parametrize("hidden_size", [2048, 4096])

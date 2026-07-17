@@ -249,7 +249,12 @@ void rms_norm(torch::stable::Tensor& out,    // [..., hidden_size]
   int64_t input_shape_d3 = (num_dims >= 4) ? input.size(-3) : 0;
 
   // For large num_tokens, use smaller blocks to increase SM concurrency.
-  const int max_block_size = (num_tokens < 256) ? 1024 : 256;
+  // Under batch invariance the block size must not depend on num_tokens, since
+  // it sets the per-row reduction width and thus the float accumulation order;
+  // pin it to the num_tokens < 256 value so a row normalizes identically
+  // regardless of how many tokens share the launch.
+  const int max_block_size =
+      vllm::vllm_is_batch_invariant() ? 1024 : ((num_tokens < 256) ? 1024 : 256);
   dim3 grid(num_tokens);
   const torch::stable::accelerator::DeviceGuard device_guard(
       input.get_device_index());
@@ -326,7 +331,12 @@ void fused_add_rms_norm(torch::stable::Tensor& input,     // [..., hidden_size]
      When num_tokens is large, a smaller block size allows
      for increased block occupancy on CUs and better latency
      hiding on global mem ops. */
-  const int max_block_size = (num_tokens < 256) ? 1024 : 256;
+  // Under batch invariance the block size must not depend on num_tokens, since
+  // it sets the per-row reduction width and thus the float accumulation order;
+  // pin it to the num_tokens < 256 value so a row normalizes identically
+  // regardless of how many tokens share the launch.
+  const int max_block_size =
+      vllm::vllm_is_batch_invariant() ? 1024 : ((num_tokens < 256) ? 1024 : 256);
   dim3 block(std::min(hidden_size, max_block_size));
   const torch::stable::accelerator::DeviceGuard device_guard(
       input.get_device_index());
