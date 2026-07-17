@@ -124,14 +124,6 @@ class XPUPlatform(Platform):
         attn_selector_config: "AttentionSelectorConfig",
         num_heads: int | None = None,
     ) -> str:
-        from vllm.v1.attention.backends.utils import set_kv_cache_layout
-
-        set_kv_cache_layout("NHD")
-        logger.info_once(
-            "Setting VLLM_KV_CACHE_LAYOUT to 'NHD' for XPU; "
-            "only NHD layout is supported by XPU attention kernels."
-        )
-
         # TurboQuant KV cache: route directly to TQ backend
         kv_cache_dtype = attn_selector_config.kv_cache_dtype
         if kv_cache_dtype is not None and kv_cache_dtype.startswith("turboquant_"):
