@@ -516,6 +516,9 @@ class TrtLlmNvFp4ExpertsMonolithic(
             num_tokens=hidden_states.shape[0],
             device=hidden_states.device,
         )
+        # Invoke kernel.
+        # NOTE: Activation padding and output
+        # truncation are handled by the MoE runner's
         result = flashinfer.fused_moe.trtllm_fp4_block_scale_moe(
             routing_logits=router_logits,
             routing_bias=e_score_correction_bias,
