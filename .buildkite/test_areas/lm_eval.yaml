@@ -86,12 +86,8 @@ steps:
   optional: true
   source_file_dependencies:
   - csrc/
-  - tests/evals/gsm8k/configs/GLM-5.2-NVFP4-TP4.yaml
-  - tests/evals/gsm8k/configs/GLM-5.2-NVFP4-TP4-EP.yaml
-  - tests/evals/gsm8k/configs/GLM-5.2-NVFP4-TP2-PCP2.yaml
   - tests/evals/gsm8k/configs/GLM-5.2-NVFP4-TP2-PCP2-EP.yaml
-  - tests/evals/gsm8k/configs/GLM-5.2-NVFP4-PCP4.yaml
-  - tests/evals/gsm8k/configs/GLM-5.2-NVFP4-PCP4-EP.yaml
+  - tests/evals/gsm8k/configs/GLM-5.2-NVFP4-TP1-PCP4-EP.yaml
   - tests/evals/gsm8k/configs/models-pcp.txt
   - vllm/model_executor/layers/quantization
   - vllm/config/parallel.py
