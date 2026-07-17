@@ -378,16 +378,22 @@ def _deep_ep_v2_moe_cudagraph(
     hidden_size = config.k
 
     # All ranks must use the same global weights before taking their EP slice.
-    w1_bf16 = torch.randn(
-        (config.num_experts, 2 * config.n, config.k),
-        device="cuda",
-        dtype=torch.bfloat16,
-    ) / 15
-    w2_bf16 = torch.randn(
-        (config.num_experts, config.k, config.n),
-        device="cuda",
-        dtype=torch.bfloat16,
-    ) / 15
+    w1_bf16 = (
+        torch.randn(
+            (config.num_experts, 2 * config.n, config.k),
+            device="cuda",
+            dtype=torch.bfloat16,
+        )
+        / 15
+    )
+    w2_bf16 = (
+        torch.randn(
+            (config.num_experts, config.k, config.n),
+            device="cuda",
+            dtype=torch.bfloat16,
+        )
+        / 15
+    )
     torch.distributed.broadcast(w1_bf16, src=0, group=pg)
     torch.distributed.broadcast(w2_bf16, src=0, group=pg)
 
