@@ -5,8 +5,8 @@
 Benchmark a registered Helion kernel against a baseline.
 
 For each input case produced by the kernel's registered input generator, this
-measures the latency of the Helion kernel and a chosen baseline, then reports
-the speedup.
+checks the Helion kernel's numerics once, measures its latency against a chosen
+baseline, then reports the speedup.
 
 Two baselines are supported (``--baseline``):
 
@@ -43,12 +43,17 @@ import statistics
 import sys
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
+from typing import Any
 
 import torch
+from torch.utils._pytree import tree_flatten
 
 from vllm.triton_utils import triton
 
 try:
+    from helion.autotuner.accuracy import assert_close as helion_assert_close
+    from helion.autotuner.accuracy import is_fp8_dtype
+
     from vllm.benchmarks.lib.utils import default_vllm_config
     from vllm.kernels.helion import get_kernel_by_name, get_registered_kernels
     from vllm.kernels.helion.ops import import_all_kernels
@@ -227,6 +232,68 @@ def _reduce(times: list[float], return_mode: str) -> float:
     return _REDUCERS[return_mode](times)
 
 
+def _assert_close(actual: object, expected: object, atol: float, rtol: float) -> None:
+    """Compare pytrees, allowing the one-ULP FP8 variance used by kernel tests."""
+    actual_flat, actual_spec = tree_flatten(actual)
+    expected_flat, expected_spec = tree_flatten(expected)
+    if actual_spec != expected_spec:
+        raise AssertionError(
+            f"Output structure mismatch: {actual_spec} != {expected_spec}"
+        )
+
+    for actual_leaf, expected_leaf in zip(actual_flat, expected_flat, strict=True):
+        is_fp8 = isinstance(actual_leaf, torch.Tensor) and is_fp8_dtype(
+            actual_leaf.dtype
+        )
+        helion_assert_close(
+            actual_leaf,
+            expected_leaf,
+            atol=1 if is_fp8 else atol,
+            rtol=0 if is_fp8 else rtol,
+        )
+
+
+def check_correctness(
+    kernel: Any,
+    baseline_fn: Callable,
+    inputs: tuple[Any, ...],
+    case: str,
+) -> None:
+    """Run one numerical comparison on copies separate from benchmark inputs."""
+    kernel_inputs = copy.deepcopy(inputs)
+    baseline_inputs = copy.deepcopy(inputs)
+
+    kernel_output = kernel(*kernel_inputs)
+    baseline_output = baseline_fn(*baseline_inputs)
+
+    settings = kernel.helion_settings
+    try:
+        custom_check = getattr(settings, "autotune_baseline_accuracy_check_fn", None)
+        if custom_check is not None:
+            custom_check(kernel_output, baseline_output)
+            custom_check(kernel_inputs, baseline_inputs)
+            return
+
+        configured_atol = getattr(settings, "autotune_baseline_atol", None)
+        configured_rtol = getattr(settings, "autotune_baseline_rtol", None)
+        atol = 1e-2 if configured_atol is None else configured_atol
+        rtol = 1e-2 if configured_rtol is None else configured_rtol
+        _assert_close(
+            kernel_output,
+            baseline_output,
+            atol=atol,
+            rtol=rtol,
+        )
+        _assert_close(
+            kernel_inputs,
+            baseline_inputs,
+            atol=atol,
+            rtol=rtol,
+        )
+    except AssertionError as e:
+        raise AssertionError(f"Numerics check failed for case {case}:\n{e}") from e
+
+
 def do_bench_cudagraph_l2_clear(
     fn: Callable, rep: int = 100, return_mode: str = "mean"
 ) -> float:
@@ -312,6 +379,9 @@ def benchmark(
 
     for key, inputs in inputs_dict.items():
         logger.info("Benchmarking case %s", key)
+
+        check_correctness(kernel, baseline_fn, inputs, str(key))
+        logger.info("Numerics check passed for case %s", key)
 
         # Kernels may mutate their inputs in place; give each side its own copy.
         kernel_inputs = copy.deepcopy(inputs)
