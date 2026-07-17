@@ -79,6 +79,7 @@ class QuarkW8A8Fp8(QuarkScheme):
             )
         self.out_dtype = torch.get_default_dtype()
         self.input_dtype = get_current_vllm_config().model_config.dtype
+        self.fp8_linear = None
 
     @classmethod
     def get_min_capability(cls) -> int:
@@ -86,6 +87,9 @@ class QuarkW8A8Fp8(QuarkScheme):
         return 89
 
     def process_weights_after_loading(self, layer) -> None:
+        if self.fp8_linear is None:
+            raise RuntimeError("FP8 linear kernel is not initialized")
+
         if self.is_per_block:
             if isinstance(self.fp8_linear, MarlinFP8ScaledMMLinearKernel):
                 self.fp8_linear.process_weights_after_loading(layer)
@@ -294,4 +298,6 @@ class QuarkW8A8Fp8(QuarkScheme):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        if self.fp8_linear is None:
+            raise RuntimeError("FP8 linear kernel is not initialized")
         return self.fp8_linear.apply_weights(layer, x, bias)
