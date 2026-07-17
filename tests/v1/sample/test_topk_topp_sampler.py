@@ -324,6 +324,33 @@ class TestTritonTopkTopp:
 
         self._compare_results(logits, k=None, p=p)
 
+    @pytest.mark.parametrize("vocab_size", [32000, 128256])
+    def test_topp_only_peaked_logits(self, vocab_size: int):
+        """Top-p pivot search must handle a wide probability dynamic range.
+
+        A few strongly boosted logits model the peaked distributions seen in
+        speculative decoding.  Linear probability-space bisection cannot
+        resolve the nucleus boundary within the kernel's 18-iteration cap.
+        """
+        batch_size = 8
+        logits = torch.randn(
+            batch_size, vocab_size, generator=self.generator, dtype=torch.float32
+        )
+        hot = torch.randint(
+            0,
+            vocab_size,
+            (batch_size, 8),
+            generator=self.generator,
+        )
+        boosts = torch.tensor(
+            [13.0, 8.0, 8.0, 8.0, 8.0, 8.0, 8.0, 8.0],
+            dtype=torch.float32,
+        ).expand_as(hot)
+        logits.scatter_add_(1, hot, boosts)
+        p = torch.full((batch_size,), 0.95, dtype=torch.float32)
+
+        self._compare_results(logits, k=None, p=p)
+
     @pytest.mark.parametrize("batch_size", [1, 8, 32, 128, 512, 1024])
     @pytest.mark.parametrize("vocab_size", [1024, 32000, 128256])
     def test_topk_and_topp(self, batch_size: int, vocab_size: int):
