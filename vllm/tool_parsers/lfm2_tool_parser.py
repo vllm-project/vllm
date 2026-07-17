@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import ast
+import json
 from collections.abc import Sequence
 
 import regex as re
@@ -27,6 +28,8 @@ from vllm.tool_parsers.utils import (
     escape_ctrl_chars_in_strings,
     handle_single_tool,
     make_valid_python,
+    rename_reserved_kwargs,
+    restore_reserved_kwarg_names,
 )
 
 logger = init_logger(__name__)
@@ -94,6 +97,15 @@ class Lfm2ToolParser(ToolParser):
     @current_tool_index.setter
     def current_tool_index(self, value: int) -> None:
         self.current_tool_id = value
+
+    @staticmethod
+    def _restore_reserved(tool_call):
+        """Restore parameter names renamed by ``rename_reserved_kwargs``."""
+        arguments = json.loads(tool_call.function.arguments)
+        restored = restore_reserved_kwarg_names(arguments)
+        if restored != arguments:
+            tool_call.function.arguments = json.dumps(restored, ensure_ascii=False)
+        return tool_call
 
     @staticmethod
     def _strip_echo(raw_after: str) -> str:
@@ -172,23 +184,36 @@ class Lfm2ToolParser(ToolParser):
             )
 
         try:
+            kw_renamed = False
             try:
                 module = ast.parse(tool_text)
             except SyntaxError:
                 # A raw newline/tab inside a string argument (e.g. a multi-line
                 # shell command) is invalid Python; escape control chars inside
                 # string literals and retry instead of dropping the call.
-                module = ast.parse(escape_ctrl_chars_in_strings(tool_text))
+                escaped = escape_ctrl_chars_in_strings(tool_text)
+                try:
+                    module = ast.parse(escaped)
+                except SyntaxError:
+                    # A parameter named after a Python keyword (`from=1`) is
+                    # also a SyntaxError; rename it, parse, restore below.
+                    renamed, kw_renamed = rename_reserved_kwargs(escaped)
+                    if not kw_renamed:
+                        raise
+                    module = ast.parse(renamed)
             parsed = getattr(module.body[0], "value", None)
             if isinstance(parsed, ast.List) and all(
                 isinstance(e, ast.Call) for e in parsed.elts
             ):
+                tool_calls = [
+                    handle_single_tool(e)  # type: ignore
+                    for e in parsed.elts
+                ]
+                if kw_renamed:
+                    tool_calls = [self._restore_reserved(tc) for tc in tool_calls]
                 return ExtractedToolCallInformation(
                     tools_called=True,
-                    tool_calls=[
-                        handle_single_tool(e)  # type: ignore
-                        for e in parsed.elts
-                    ],
+                    tool_calls=tool_calls,
                     content=content,
                 )
             else:
@@ -278,6 +303,14 @@ class Lfm2ToolParser(ToolParser):
             return DeltaMessage(content=combined) if combined else None
 
         try:
+            # A parameter named after a Python keyword (`from=1`) can never
+            # parse; rename complete `keyword=` tokens up front (a deterministic
+            # rewrite, so successive chunks stay consistent) and restore the
+            # original names after decoding.
+            renamed_tool_text, kw_renamed = rename_reserved_kwargs(tool_text)
+            if kw_renamed:
+                tool_text = renamed_tool_text
+
             valid_and_added_text = make_valid_python(tool_text)
             if valid_and_added_text is None:
                 return _content_only_or_none()
@@ -293,6 +326,8 @@ class Lfm2ToolParser(ToolParser):
                 handle_single_tool(e)  # type: ignore
                 for e in parsed.elts
             ]
+            if kw_renamed:
+                tool_calls = [self._restore_reserved(tc) for tc in tool_calls]
 
             tool_deltas = []
             for index, new_call in enumerate(tool_calls):

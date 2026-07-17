@@ -14,6 +14,8 @@ from vllm.tool_parsers.utils import (
     get_parameter_value,
     handle_single_tool,
     make_valid_python,
+    rename_reserved_kwargs,
+    restore_reserved_kwarg_names,
 )
 
 
@@ -445,3 +447,67 @@ class TestGetParameterValueTuple:
         call = _first_call("[resize(size=(800, 600))]")
         tool = handle_single_tool(call)
         assert json.loads(tool.function.arguments) == {"size": [800, 600]}
+
+
+class TestRenameReservedKwargs:
+    # A parameter named after a Python keyword (`from=1`) is a SyntaxError
+    # that no escape/retry can recover; rename_reserved_kwargs rewrites it to
+    # a parseable name and restore_reserved_kwarg_names is its exact inverse.
+    def test_reserved_kwarg_renamed(self):
+        text, changed = rename_reserved_kwargs("[memory_get(from=1)]")
+        assert changed
+        assert text == "[memory_get(from_pyreservedkw_=1)]"
+        assert ast.parse(text)
+
+    def test_round_trip_restores_original_name(self):
+        renamed, _ = rename_reserved_kwargs("[memory_get(path='M.md', from=1)]")
+        call = ast.parse(renamed).body[0].value.elts[0]
+        tool = handle_single_tool(call)
+        restored = restore_reserved_kwarg_names(json.loads(tool.function.arguments))
+        assert restored == {"path": "M.md", "from": 1}
+
+    def test_multiple_reserved_kwargs(self):
+        text, changed = rename_reserved_kwargs('[search(in="docs/", from=0)]')
+        assert changed
+        args = json.loads(
+            handle_single_tool(ast.parse(text).body[0].value.elts[0])
+            .function.arguments
+        )
+        assert restore_reserved_kwarg_names(args) == {"in": "docs/", "from": 0}
+
+    def test_keyword_inside_string_untouched(self):
+        text, changed = rename_reserved_kwargs('[f(cmd="import x from y")]')
+        assert not changed
+        assert text == '[f(cmd="import x from y")]'
+
+    def test_keyword_with_from_eq_inside_string_untouched(self):
+        text, changed = rename_reserved_kwargs('[f(cmd="SELECT from=1")]')
+        assert not changed
+
+    def test_keyword_value_untouched(self):
+        # `x=True` has a keyword as *value*, not parameter name.
+        text, changed = rename_reserved_kwargs("[f(x=True, y=None)]")
+        assert not changed
+
+    def test_double_equals_untouched(self):
+        text, changed = rename_reserved_kwargs('[f(expr="a", cond=1)]')
+        assert not changed
+        # `in ==` comparison-like text is not kwarg position anyway, but the
+        # `==` guard also protects string-free edge text.
+        text, changed = rename_reserved_kwargs("[f(x=1)]")
+        assert not changed
+
+    def test_non_keyword_names_untouched(self):
+        text, changed = rename_reserved_kwargs("[f(fromage=1, classic=2)]")
+        assert not changed
+
+    def test_spaces_around_equals(self):
+        text, changed = rename_reserved_kwargs("[f( from = 1 )]")
+        assert changed
+        assert ast.parse(text)
+
+    def test_restore_leaves_normal_names_alone(self):
+        assert restore_reserved_kwarg_names({"path": "x", "from": 1}) == {
+            "path": "x",
+            "from": 1,
+        }

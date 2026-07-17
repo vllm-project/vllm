@@ -3,6 +3,7 @@
 
 import ast
 import json
+import keyword as _python_keyword
 import math
 import warnings
 from dataclasses import dataclass
@@ -585,6 +586,93 @@ def escape_ctrl_chars_in_strings(text: str) -> str:
             out.append(char)
         index += 1
     return "".join(out)
+
+
+_RESERVED_KW_SUFFIX = "_pyreservedkw_"
+
+
+def rename_reserved_kwargs(text: str) -> tuple[str, bool]:
+    """Rename Python-keyword parameter names so pythonic tool text parses.
+
+    Tools legitimately name parameters ``from``, ``in``, ``class`` — but
+    ``memory_get(from=1)`` is a Python ``SyntaxError``, so the whole call
+    would be dropped. Rename ``from=`` to ``from_pyreservedkw_=`` (outside
+    string literals only, and only in keyword-argument position: preceded by
+    ``(`` or ``,`` and followed by a single ``=``), parse, then restore the
+    original name with :func:`restore_reserved_kwarg_names`.
+
+    Returns (rewritten_text, changed). Keyword *values* (``x=True``) and
+    keywords inside string arguments are never touched.
+    """
+    out: list[str] = []
+    quote: str | None = None
+    changed = False
+    last_sig = ""
+    index, length = 0, len(text)
+    while index < length:
+        char = text[index]
+        if quote is not None:
+            out.append(char)
+            if char == "\\" and index + 1 < length:
+                out.append(text[index + 1])
+                index += 2
+                continue
+            if char == quote:
+                quote = None
+            index += 1
+            continue
+        if char in {"'", '"'}:
+            quote = char
+            out.append(char)
+            last_sig = char
+            index += 1
+            continue
+        if char.isalpha() or char == "_":
+            end = index
+            while end < length and (text[end].isalnum() or text[end] == "_"):
+                end += 1
+            name = text[index:end]
+            look = end
+            while look < length and text[look] in " \t":
+                look += 1
+            if (
+                _python_keyword.iskeyword(name)
+                and look < length
+                and text[look] == "="
+                and (look + 1 >= length or text[look + 1] != "=")
+                and last_sig in {"(", ","}
+            ):
+                out.append(name + _RESERVED_KW_SUFFIX)
+                changed = True
+            else:
+                out.append(name)
+            last_sig = name[-1]
+            index = end
+            continue
+        out.append(char)
+        if not char.isspace():
+            last_sig = char
+        index += 1
+    return "".join(out), changed
+
+
+def restore_reserved_kwarg_names(arguments: dict) -> dict:
+    """Undo :func:`rename_reserved_kwargs` on a decoded arguments dict.
+
+    Only keys that carry the rename suffix *and* whose stem is a Python
+    keyword are restored, making this an exact inverse of the rename.
+    """
+    restored = {}
+    for key, value in arguments.items():
+        if (
+            isinstance(key, str)
+            and key.endswith(_RESERVED_KW_SUFFIX)
+            and _python_keyword.iskeyword(key[: -len(_RESERVED_KW_SUFFIX)])
+        ):
+            restored[key[: -len(_RESERVED_KW_SUFFIX)]] = value
+        else:
+            restored[key] = value
+    return restored
 
 
 def _is_escaped(text: str, index: int) -> bool:
