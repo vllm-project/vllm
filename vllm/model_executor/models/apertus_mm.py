@@ -410,25 +410,23 @@ class ApertusForConditionalGeneration(ApertusForCausalLM, SupportsMultiModal):
                     # Fallback to the HF configuration's _name_or_path
                     model_path = getattr(self.config, "_name_or_path", model_id)
 
-            # Strictly synchronize precision with the Backbone to prevent VRAM
-            # fragmentation
+            # Multimodal tokenizers use FP32 independently of the backbone.
             try:
                 sample_param = next(self.parameters())
                 target_device = sample_param.device
-                target_dtype = sample_param.dtype
             except StopIteration:
                 target_device = torch.device("cuda")
-                target_dtype = torch.bfloat16
+            tokenizer_dtype = torch.float32
 
             logger.info(
                 "[Apertus Worker] Loading Vision Tower natively on %s (%s)",
                 target_device,
-                target_dtype,
+                tokenizer_dtype,
             )
             self.vision_tower = self.image_tokenizer.load_vision_tokenizer(
                 model_path=model_path,
                 device=str(target_device),
-                dtype=target_dtype,
+                dtype=tokenizer_dtype,
                 vision_config=self.config.vision_config,
             )
 
@@ -439,6 +437,7 @@ class ApertusForConditionalGeneration(ApertusForCausalLM, SupportsMultiModal):
             self.audio_tower = self.audio_tokenizer.load_audio_tokenizer(
                 model_path=model_path,
                 device=str(target_device),
+                dtype=tokenizer_dtype,
                 audio_config=self.config.audio_config,
             )
 
@@ -468,7 +467,7 @@ class ApertusForConditionalGeneration(ApertusForCausalLM, SupportsMultiModal):
                 target_dtype = next(self.vision_tower.parameters()).dtype
             except StopIteration:
                 target_device = device
-                target_dtype = torch.bfloat16
+                target_dtype = torch.float32
 
             image_items = (
                 list(pixel_values.unbind(0))
@@ -503,7 +502,7 @@ class ApertusForConditionalGeneration(ApertusForCausalLM, SupportsMultiModal):
                 target_dtype = next(self.audio_tower.parameters()).dtype
             except StopIteration:
                 target_device = device
-                target_dtype = torch.bfloat16
+                target_dtype = torch.float32
 
             audio_items = (
                 list(audio_values.unbind(0))
