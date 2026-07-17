@@ -172,6 +172,13 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
         """
         Convert NVFP4 MoE weights into kernel format and setup the kernel.
         """
+        # On reload, weights are already in kernel format (renamed,
+        # shuffled) and the kernel exists.  Re-running would fail on the
+        # rename (w13_weight_packed already deleted) and corrupt the
+        # already-shuffled NvFp4 layout.
+        if self.moe_kernel is not None:
+            return
+
         # NOTE(rob): wN_weight_packed -> wN_weight is because ModularKernelMethod
         # requires this naming convention. However, the name change breaks
         # reloading because the state dict no longer matches disk. Once we

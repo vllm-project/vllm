@@ -147,6 +147,13 @@ class CompressedTensorsW4A4Mxfp4MoEMethod(CompressedTensorsMoEMethod):
             )
 
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:
+        # On reload, weights are already in kernel format (renamed,
+        # swizzled) and the kernel exists.  Re-running this method would
+        # fail on the rename (w13_weight_packed already deleted) and
+        # corrupt already-swizzled scales.
+        if self.moe_kernel is not None:
+            return
+
         layer.w13_weight = torch.nn.Parameter(
             layer.w13_weight_packed.data, requires_grad=False
         )
