@@ -283,9 +283,6 @@ def benchmark_swap_blocks(
 def print_results_table(block_sizes, results):
     """
     Print a Markdown formatted table of bandwidths (GB/s) for all directions and modes.
-
-    Columns: size, H2D-naive, H2D-batch, H2D-swap, H2D-triton,
-             D2H-naive, D2H-batch, D2H-swap, D2H-triton.
     """
     directions = ["H2D", "D2H"]
     modes = ["naive", "batch", "swap", "triton"]
@@ -315,12 +312,10 @@ def print_results_table(block_sizes, results):
 
 def plot_results(block_sizes, results, output_file=None):
     """
-    Create a log‑log bandwidth plot (GB/s vs block size in bytes).
-
-    Args:
-        block_sizes: List of block sizes (bytes).
-        results: Nested dict results[direction][mode] -> list of bandwidths.
-        output_file: If given, save the figure to this path.
+    Create a bandwidth plot (GB/s vs block size in bytes) with:
+      - X‑axis: logarithmic base‑2, tick labels in human‑readable format
+        (using format_size with 0 decimal places, e.g., '256B', '1K', '2M').
+      - Y‑axis: linear, starting from 0, with standard decimal formatting.
     """
     if not HAS_MATPLOTLIB:
         print("Skipping plot: matplotlib not available.")
@@ -331,26 +326,25 @@ def plot_results(block_sizes, results, output_file=None):
     colors = plt.rcParams["axes.prop_cycle"].by_key()["color"]
     line_styles = ["-", "--", "-.", ":"]
 
-    plt.figure(figsize=(12, 8))
+    fig, ax = plt.subplots(figsize=(12, 8))
 
+    # Plot each (direction, mode) combination
     for d_idx, direction in enumerate(directions):
         for m_idx, mode in enumerate(modes):
             bw_list = results.get(direction, {}).get(mode, [None] * len(block_sizes))
-            # Keep only valid (not None) data points
-            x = []
-            y = []
+            x_vals, y_vals = [], []
             for bs, bw in zip(block_sizes, bw_list):
                 if bw is not None:
-                    x.append(bs)
-                    y.append(bw / 1e9)  # GB/s
-            if not x:
+                    x_vals.append(bs)
+                    y_vals.append(bw / 1e9)  # Convert to GB/s
+            if not x_vals:
                 continue
             label = f"{direction}-{mode}"
             color = colors[(d_idx * len(modes) + m_idx) % len(colors)]
             style = line_styles[m_idx % len(line_styles)]
-            plt.plot(
-                x,
-                y,
+            ax.plot(
+                x_vals,
+                y_vals,
                 label=label,
                 color=color,
                 linestyle=style,
@@ -358,14 +352,26 @@ def plot_results(block_sizes, results, output_file=None):
                 markersize=4,
             )
 
-    plt.xscale("log", base=2)
-    plt.yscale("log")
-    plt.xlabel("Block Size (bytes)")
-    plt.ylabel("Bandwidth (GB/s)")
-    plt.title("Block Copy Bandwidth")
-    plt.grid(True, which="both", linestyle="--", linewidth=0.5)
-    plt.legend(bbox_to_anchor=(1.04, 1), loc="upper left")
-    plt.tight_layout()
+    # Configure X‑axis (log2)
+    ax.set_xscale("log", base=2)
+    ax.set_xticks(block_sizes)
+    # Generate labels
+    labels = [format_size(bs, decimal_places=0) for bs in block_sizes]
+    ax.set_xticklabels(labels, rotation=45, ha="right")
+    ax.set_xlabel("Block Size")
+
+    # Configure Y‑axis (linear)
+    ax.set_yscale("linear")
+    ax.set_ylim(bottom=0)
+    ax.yaxis.set_major_formatter(
+        plt.ScalarFormatter(useOffset=False, useMathText=False)
+    )
+    ax.set_ylabel("Bandwidth (GB/s)")
+
+    ax.set_title("Block Copy Bandwidth")
+    ax.grid(True, which="both", linestyle="--", linewidth=0.5)
+    ax.legend(bbox_to_anchor=(1.04, 1), loc="upper left")
+    fig.tight_layout()
 
     if output_file:
         plt.savefig(output_file, dpi=150, bbox_inches="tight")
