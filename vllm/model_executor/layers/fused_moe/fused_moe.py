@@ -841,6 +841,19 @@ def invoke_fused_moe_triton_kernel(
     BLOCK_SIZE_K = config.pop("BLOCK_SIZE_K")
     if block_shape is not None:
         BLOCK_SIZE_K = min(BLOCK_SIZE_K, min(block_shape[0], block_shape[1]))
+    if use_td and A.size(1) % BLOCK_SIZE_K != 0:
+        # TD gather/load feeding tl.dot with a non-block-aligned K
+        # miscompiles (~74% of output elements wrong) on real HW;
+        # this is a compiler-codegen issue, not a Python-maskable
+        # boundary gap. Fall back to the pointer-arith path.
+        logger.warning_once(
+            "Disabling VLLM_TRITON_USE_TD for this MoE launch: K=%d is not "
+            "a multiple of BLOCK_SIZE_K=%d, which triggers a known "
+            "Triton tensor-descriptor + tl.dot miscompilation.",
+            A.size(1),
+            BLOCK_SIZE_K,
+        )
+        use_td = False
     fused_moe_kernel[grid](
         A,
         B,
