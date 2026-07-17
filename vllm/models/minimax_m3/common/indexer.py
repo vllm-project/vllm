@@ -15,7 +15,7 @@ main attention.
 """
 
 from dataclasses import dataclass
-from typing import ClassVar
+from typing import ClassVar, Literal
 
 import torch
 from torch import nn
@@ -58,6 +58,18 @@ from vllm.v1.kv_cache_interface import (
 )
 
 logger = init_logger(__name__)
+
+TopKIndicesBufferLayout = Literal["head_major", "token_major"]
+
+
+def as_head_major_topk_indices(
+    buffer: torch.Tensor,
+    num_tokens: int,
+    layout: TopKIndicesBufferLayout,
+) -> torch.Tensor:
+    if layout == "token_major":
+        return buffer[:num_tokens].transpose(0, 1)
+    return buffer[:, :num_tokens]
 
 
 class MiniMaxM3IndexerBackend(AttentionBackend):
@@ -352,6 +364,7 @@ class MiniMaxM3IndexerImpl(nn.Module):
 
     # Set by each impl so the side cache reports the matching backend + builder.
     indexer_backend_cls: ClassVar[type[AttentionBackend]] = MiniMaxM3IndexerBackend
+    topk_indices_buffer_layout: ClassVar[TopKIndicesBufferLayout] = "head_major"
 
     def __init__(
         self,
@@ -420,10 +433,11 @@ class MiniMaxM3IndexerTritonImpl(MiniMaxM3IndexerImpl):
         )
         kv = self.index_cache.kv_cache
 
-        # Both sides write into the single shared persistent topk_indices_buffer
-        # (decode at [:, :nd], prefill at [:, nd:]) and return views into it; the
-        # kernels' out= writes out[:, :total_q]. None -> allocate fresh.
         buf = self.topk_indices_buffer
+        if buf is not None:
+            buf = as_head_major_topk_indices(
+                buf, num_tokens, self.topk_indices_buffer_layout
+            )
         decode_topk: torch.Tensor | None = None
         prefill_topk: torch.Tensor | None = None
         if index_md.num_decodes > 0:
@@ -575,6 +589,10 @@ class MiniMaxM3Indexer(nn.Module):
     @property
     def num_index_heads(self) -> int:
         return self.impl.num_index_heads
+
+    @property
+    def topk_indices_buffer_layout(self) -> TopKIndicesBufferLayout:
+        return self.impl.topk_indices_buffer_layout
 
     def forward(
         self,

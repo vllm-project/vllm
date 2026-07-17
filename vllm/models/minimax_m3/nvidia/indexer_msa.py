@@ -34,6 +34,7 @@ from vllm.models.minimax_m3.common.indexer import (
     MiniMaxM3IndexerImpl,
     MiniMaxM3IndexerMetadata,
     MiniMaxM3IndexerMetadataBuilder,
+    TopKIndicesBufferLayout,
 )
 from vllm.models.minimax_m3.common.ops.index_topk import (
     minimax_m3_index_decode_score,
@@ -260,6 +261,7 @@ class MiniMaxM3IndexerMSAImpl(MiniMaxM3IndexerImpl):
     """Decode: CuteDSL/Triton score. Prefill: fmha_sm100 OnlyScore + top-k."""
 
     indexer_backend_cls: ClassVar[type[AttentionBackend]] = MiniMaxM3IndexerMSABackend
+    topk_indices_buffer_layout: ClassVar[TopKIndicesBufferLayout] = "token_major"
 
     def forward(
         self,

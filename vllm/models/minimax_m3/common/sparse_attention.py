@@ -25,6 +25,7 @@ from vllm.config import VllmConfig
 from vllm.config.cache import CacheDType
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
+from vllm.models.minimax_m3.common.indexer import as_head_major_topk_indices
 from vllm.models.minimax_m3.common.ops.sparse_attn import SPARSE_BLOCK_SIZE
 from vllm.platforms import current_platform
 
@@ -359,8 +360,7 @@ class MiniMaxM3SparseImpl(AttentionImplBase[MiniMaxM3SparseMetadata]):
         """Attend the queries to the indexer-selected blocks. Per kernel.
 
         The indexer has already written the top-k block ids into
-        ``layer.topk_indices_buffer`` (decode at ``[:, :nd]``, prefill at
-        ``[:, nd:num_tokens]``); the attend reads them from there.
+        ``layer.topk_indices_buffer``; the attend reads them from there.
         """
         raise NotImplementedError
 
@@ -383,9 +383,10 @@ class MiniMaxM3SparseTritonImpl(MiniMaxM3SparseImpl):
 
         nd = main_md.num_decode_tokens
         num_tokens = main_md.num_actual_tokens
-        # Indexer top-k from the shared buffer: decode [:, :nd], prefill [:, nd:].
         topk = layer.topk_indices_buffer  # type: ignore[attr-defined]
         assert topk is not None
+        layout = layer.indexer.topk_indices_buffer_layout  # type: ignore[attr-defined]
+        topk = as_head_major_topk_indices(topk, num_tokens, layout)
         hd = self.head_size
         q = query[:num_tokens].view(-1, self.num_heads, hd)
         out = output[:num_tokens].view(-1, self.num_heads, hd)
