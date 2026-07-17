@@ -9,7 +9,6 @@ deepgemm kernel tests in .buildkite/test_areas/kernels.yaml.
 """
 
 import importlib.util
-import os
 import sys
 from pathlib import Path
 
@@ -17,8 +16,10 @@ from pathlib import Path
 def main() -> int:
     spec = importlib.util.find_spec("vllm.third_party.deep_gemm")
     if spec is None or spec.origin is None:
-        print("vllm.third_party.deep_gemm not importable; is vllm installed?",
-              file=sys.stderr)
+        print(
+            "vllm.third_party.deep_gemm not importable; is vllm installed?",
+            file=sys.stderr,
+        )
         return 1
     pkg_dir = Path(spec.origin).parent
 
