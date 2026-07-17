@@ -94,6 +94,12 @@ class GroupOffloadConfig(NamedTuple):
     # of these groups is volatile and lacks a stable hash, so it must
     # be excluded from store and load scheduling.
     is_eagle_group: bool = False
+    # Upper bound on the GPU blocks this group's pending (to-load) span can
+    # touch, used as a sanity check in update_state_after_alloc. None for
+    # full-attention groups (unbounded). For sliding-window groups this counts
+    # an unaligned window start (vLLM #48959); for Mamba it is the single-state
+    # footprint.
+    max_pending_gpu_blocks: int | None = None
 
 
 def get_sliding_window_size_in_chunks(
@@ -107,6 +113,41 @@ def get_sliding_window_size_in_chunks(
         # Mamba depends on a single state
         return 1
 
+    assert isinstance(kv_cache_spec, FullAttentionSpec)
+    return None
+
+
+def max_pending_gpu_blocks_for_group(
+    kv_cache_spec: KVCacheSpec,
+    tokens_per_block: int,
+    blocks_per_chunk: int,
+) -> int | None:
+    """Upper bound on the GPU blocks a group's pending (to-load) span can touch.
+
+    A sliding-window group's live span is ``sliding_window - 1`` tokens starting
+    at an arbitrary offset, so it can intersect
+    ``cdiv(sliding_window + tokens_per_block - 1, tokens_per_block)`` physical GPU
+    blocks -- one more than ``cdiv(sliding_window, tokens_per_block)`` whenever the
+    span is not GPU-block-aligned. Bounding instead by the chunk-rounded window
+    (``sliding_window_size_in_chunks * blocks_per_chunk``) drops that extra block
+    when the window is a chunk multiple, which fatally trips the
+    ``update_state_after_alloc`` sanity assertion (vLLM #48959).
+
+    Args:
+        kv_cache_spec: The group's KV cache spec.
+        tokens_per_block: GPU block size in tokens.
+        blocks_per_chunk: GPU blocks per offloaded chunk.
+
+    Returns:
+        The bound, or None for full-attention groups (no pending-span limit).
+    """
+    if isinstance(kv_cache_spec, SlidingWindowSpec):
+        return cdiv(
+            kv_cache_spec.sliding_window + tokens_per_block - 1, tokens_per_block
+        )
+    if isinstance(kv_cache_spec, MambaSpec):
+        # Mamba depends on a single state (one chunk's worth of GPU blocks).
+        return blocks_per_chunk
     assert isinstance(kv_cache_spec, FullAttentionSpec)
     return None
 
@@ -242,6 +283,11 @@ class SchedulerOffloadConfig(NamedTuple):
                         kv_cache_config.kv_cache_groups[idx]
                     ),
                     is_eagle_group=idx in eagle_groups,
+                    max_pending_gpu_blocks=max_pending_gpu_blocks_for_group(
+                        kv_cache_config.kv_cache_groups[idx].kv_cache_spec,
+                        tokens_per_block,
+                        spec.blocks_per_chunk,
+                    ),
                 )
                 for idx, tokens_per_block in enumerate(spec.tokens_per_block)
             ),
@@ -820,11 +866,9 @@ class OffloadingConnectorScheduler:
             )
             num_pending_gpu_blocks = num_gpu_blocks - num_locally_computed_gpu_blocks
 
-            if group_config.sliding_window_size_in_chunks is not None:
+            if group_config.max_pending_gpu_blocks is not None:
                 assert (
-                    num_pending_gpu_blocks
-                    <= group_config.sliding_window_size_in_chunks
-                    * self.config.blocks_per_chunk
+                    num_pending_gpu_blocks <= group_config.max_pending_gpu_blocks
                 )
 
             num_chunks = cdiv(num_cached_tokens, tokens_per_chunk)
