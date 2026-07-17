@@ -4,7 +4,6 @@ from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from typing import Any
 
-import numpy as np
 import torch
 import torch.nn as nn
 
@@ -123,7 +122,9 @@ class DraftModelSpeculator(BaseSpeculator):
             dtype=torch.int64,
             device=device,
         )
-        self.np_arange = np.arange(self.max_num_reqs + 1, dtype=np.int32)
+        self.arange = torch.arange(
+            self.max_num_reqs + 1, dtype=torch.int32, device="cpu"
+        )
 
         self.draft_logits: torch.Tensor | None = None
         if self.speculative_config.draft_sample_method == "probabilistic":
@@ -204,7 +205,7 @@ class DraftModelSpeculator(BaseSpeculator):
         self.target_input_buffers = target_input_buffers
         self.target_attn_groups = target_attn_groups
 
-    def _build_uniform_draft_attn_metadata(
+    def _build_draft_attn_metadata(
         self,
         num_reqs: int,
         num_reqs_padded: int,
@@ -212,30 +213,13 @@ class DraftModelSpeculator(BaseSpeculator):
         num_query_per_req: int = 1,
         causal: bool | Mapping[int, bool] = True,
     ) -> dict[str, Any] | None:
-        return self._build_draft_attn_metadata(
-            num_reqs,
-            num_reqs_padded,
-            num_tokens_padded,
-            self.np_arange[: num_reqs_padded + 1] * num_query_per_req,
-            causal=causal,
+        # Uniform query: query_start_loc[i] = min(i, num_reqs) * num_query_per_req.
+        # Clamp keeps the series non-decreasing past num_reqs, which some
+        # attention backends require.
+        query_start_loc_cpu = (
+            torch.clamp(self.arange[: num_reqs_padded + 1], max=num_reqs)
+            * num_query_per_req
         )
-
-    def _build_draft_attn_metadata(
-        self,
-        num_reqs: int,
-        num_reqs_padded: int,
-        num_tokens_padded: int,
-        query_start_loc_np: np.ndarray,
-        causal: bool | Mapping[int, bool] = True,
-    ) -> dict[str, Any]:
-        # Fresh tensor: no aliasing with the caller's array, sized to the padded
-        # request count, with the tail clamped to the last real cumulative value.
-        query_start_loc_cpu = torch.empty(num_reqs_padded + 1, dtype=torch.int32)
-        query_start_loc_cpu[: num_reqs + 1] = torch.from_numpy(
-            query_start_loc_np[: num_reqs + 1]
-        )
-        query_start_loc_cpu[num_reqs:] = query_start_loc_cpu[num_reqs]
-        max_query_len = int((query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]).max())
         block_tables = [
             x[:num_reqs_padded] for x in self.block_tables.input_block_tables
         ]
@@ -248,7 +232,7 @@ class DraftModelSpeculator(BaseSpeculator):
                 : num_reqs_padded + 1
             ],
             query_start_loc_cpu=query_start_loc_cpu,
-            max_query_len=max_query_len,
+            max_query_len=num_query_per_req,
             seq_lens=self.input_buffers.seq_lens[:num_reqs_padded],
             max_seq_len=self.draft_max_seq_len,
             block_tables=block_tables,
@@ -329,6 +313,7 @@ class DraftModelSpeculator(BaseSpeculator):
         self.temperature.copy_(temperature)
         self.seeds.copy_(seeds)
         self.idx_mapping[:num_reqs].copy_(idx_mapping)
-        # idx_mapping for CG padded requests points to -1, which is ignored
-        # during sampling to prevent writing stale values to draft logits.
-        self.idx_mapping[num_reqs:].fill_(-1)
+        if self.draft_logits is not None:
+            # idx_mapping for CG padded requests points to -1, which is ignored
+            # during sampling to prevent writing stale values to draft logits.
+            self.idx_mapping[num_reqs:].fill_(-1)

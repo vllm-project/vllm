@@ -86,7 +86,6 @@ class KVCacheCoordinator(ABC):
             for g in kv_cache_config.kv_cache_groups
         )
         self.scheduler_block_size = scheduler_block_size
-        self.num_spec_prefill_steps = 1
 
         self.block_pool = BlockPool(
             num_gpu_blocks=kv_cache_config.num_blocks,
@@ -282,14 +281,9 @@ class KVCacheCoordinator(ABC):
                 (including tokens that are already cached).
         """
         for manager in self.single_type_managers:
-            # Only cache tokens with finalized KV. The last num_spec_prefill_steps - 1
-            # tokens can be re-prefilled by speculative modules.
-            num_tokens_to_cache = max(
-                0, num_computed_tokens - (self.num_spec_prefill_steps - 1)
-            )
             manager.cache_blocks(
                 request,
-                num_tokens_to_cache,
+                num_computed_tokens,
                 retention_interval=self.retention_interval,
             )
 
@@ -667,20 +661,9 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
             # EAGLE groups match one block past each aligned boundary and drop
             # it, so make that lookahead block eligible to be cached.
             if manager.use_eagle and aligned_num_computed_tokens > 0:
-                # Only cache tokens with finalized KV. The last
-                # num_spec_prefill_steps - 1 tokens can be re-prefilled by
-                # speculative modules.
-                num_finalized_computed_tokens = max(
-                    0, num_computed_tokens - (self.num_spec_prefill_steps - 1)
-                )
-                aligned_num_finalized_computed_tokens = (
-                    num_finalized_computed_tokens
-                    // self.scheduler_block_size
-                    * self.scheduler_block_size
-                )
                 num_tokens_to_cache = min(
-                    num_finalized_computed_tokens,
-                    aligned_num_finalized_computed_tokens + manager.block_size,
+                    num_computed_tokens,
+                    aligned_num_computed_tokens + manager.block_size,
                 )
             # The manager already knows the fine hit granularity
             # (``scheduler_block_size``); retention is passed separately so it

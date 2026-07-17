@@ -249,13 +249,6 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-
-def _requires_static_attn_metadata(cudagraph_mode: CUDAGraphMode) -> bool:
-    return cudagraph_mode == CUDAGraphMode.FULL or (
-        cudagraph_mode == CUDAGraphMode.PIECEWISE and is_breakable_cudagraph_enabled()
-    )
-
-
 AttnMetadataDict: TypeAlias = dict[str, AttentionMetadata]
 # list when ubatching is enabled
 PerLayerAttnMetadata: TypeAlias = list[AttnMetadataDict] | AttnMetadataDict
@@ -4267,7 +4260,7 @@ class GPUModelRunner(
                 for id, spec in enumerate(self.kv_cache_config.kv_cache_groups)
                 if not isinstance(spec.kv_cache_spec, EncoderOnlyAttentionSpec)
             )
-            pad_attn = _requires_static_attn_metadata(cudagraph_mode)
+            pad_attn = cudagraph_mode == CUDAGraphMode.FULL
 
             if self.cache_config.mamba_cache_mode == "align":
                 # preprocess_mamba reads req_state.num_computed_tokens (CPU)
@@ -5948,13 +5941,9 @@ class GPUModelRunner(
         # protocol so that back-to-back dummy/real steps don't overwrite
         # pinned memory while a prior non_blocking H2D DMA is still reading.
         with self.synchronize_input_prep():
-            # Breakable PIECEWISE captures attention-dependent kernels around
-            # explicit eager breaks and therefore needs the same static,
-            # padded metadata as FULL graphs.
-            static_attn_metadata = _requires_static_attn_metadata(
-                cudagraph_runtime_mode
-            )
-            if force_attention or static_attn_metadata:
+            # If force_attention is True, we always capture attention.
+            # Otherwise, it only happens for cudagraph_runtime_mode=FULL.
+            if force_attention or cudagraph_runtime_mode == CUDAGraphMode.FULL:
                 if profile_seq_lens is not None:
                     seq_lens = profile_seq_lens  # type: ignore[assignment]
                 elif create_mixed_batch:
@@ -6006,7 +5995,7 @@ class GPUModelRunner(
                 # requests can corrupt Mamba state.
                 self.input_batch.block_table.commit_block_table(num_reqs_padded)
 
-                pad_attn = static_attn_metadata
+                pad_attn = cudagraph_runtime_mode == CUDAGraphMode.FULL
                 attn_metadata, _ = self._build_attention_metadata(
                     num_tokens=num_tokens_unpadded,
                     num_tokens_padded=num_tokens_padded if pad_attn else None,
@@ -6825,7 +6814,7 @@ class GPUModelRunner(
     ):
         if num_warmups is None:
             num_warmups = self.compilation_config.cudagraph_num_of_warmups
-        force_attention = _requires_static_attn_metadata(cudagraph_runtime_mode)
+        force_attention = cudagraph_runtime_mode == CUDAGraphMode.FULL
         for _ in range(num_warmups):
             self._dummy_run(
                 desc.num_tokens,
