@@ -58,6 +58,18 @@ void cutlass_scaled_mm(torch::stable::Tensor& out,
                        torch::stable::Tensor const& b_scales,
                        std::optional<torch::stable::Tensor> const& bias);
 
+void cutlass_scaled_mm_gemma4_gated(torch::stable::Tensor& out,
+                                    torch::stable::Tensor const& a,
+                                    torch::stable::Tensor const& b,
+                                    torch::stable::Tensor const& a_scales,
+                                    torch::stable::Tensor const& b_scales);
+
+void cutlass_scaled_mm_gemma4_gated_amax(
+    torch::stable::Tensor& out, torch::stable::Tensor& row_amax,
+    torch::stable::Tensor const& a, torch::stable::Tensor const& b,
+    torch::stable::Tensor const& a_scales,
+    torch::stable::Tensor const& b_scales);
+
 void cutlass_moe_mm(torch::stable::Tensor& out_tensors,
                     torch::stable::Tensor const& a_tensors,
                     torch::stable::Tensor const& b_tensors,
