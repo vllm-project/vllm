@@ -29,7 +29,7 @@ import torch.nn as nn
 
 import vllm.envs as envs
 from vllm.compilation.counter import compilation_counter
-from vllm.config import VllmConfig
+from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed.parallel_state import (
     get_dcp_group,
@@ -779,9 +779,125 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if self.pooling_runner is not None:
             self.pooling_runner.clear()
 
+    def _get_num_input_tokens(self, num_scheduled_tokens: int) -> int:
+        # SP is not supported yet.
+        return num_scheduled_tokens
+
+    def _init_minimal_kv_cache_for_profiling(self) -> None:
+        """Build a throwaway minimal KV cache so the cudagraph manager's capture
+        descriptors are populated, then the dry-capture in
+        :meth:`profile_cudagraph_memory` can run. Torn down by
+        :meth:`_cleanup_profiling_kv_cache` before the real ``initialize_kv_cache``.
+        """
+        from vllm.v1.core.kv_cache_utils import (
+            get_kv_cache_config_from_groups,
+            get_kv_cache_groups,
+        )
+
+        kv_cache_spec = self.get_kv_cache_spec()
+        kv_cache_groups = get_kv_cache_groups(self.vllm_config, kv_cache_spec)
+        # Smallest KV cache that still lets the largest capture graph run: the
+        # dry-capture reads/writes KV slots via the dummy block tables.
+        min_blocks = self.compilation_config.max_cudagraph_capture_size or 1
+        saved_override = self.cache_config.num_gpu_blocks_override
+        self.cache_config.num_gpu_blocks_override = min_blocks
+        minimal_config = get_kv_cache_config_from_groups(
+            self.vllm_config, kv_cache_groups, available_memory=0
+        )
+        self.cache_config.num_gpu_blocks_override = saved_override
+
+        self.initialize_kv_cache(minimal_config)
+        self.cache_config.num_gpu_blocks = minimal_config.num_blocks
+        logger.debug("Initialized minimal KV cache for CUDA graph profiling")
+
+    def _cleanup_profiling_kv_cache(self) -> None:
+        """Tear down the minimal KV cache / cudagraph manager created for
+        profiling so the real ``initialize_kv_cache`` starts from a clean state.
+        """
+        torch.accelerator.synchronize()
+        if hasattr(self, "kv_caches") and self.kv_caches:
+            for i in range(len(self.kv_caches)):
+                self.kv_caches[i] = None  # type: ignore[assignment]
+            self.kv_caches.clear()
+        if hasattr(self, "attn_groups") and self.attn_groups:
+            self.attn_groups.clear()
+        # Drop the profiling-only manager and block tables (real init recreates).
+        self.cudagraph_manager = None
+        self.block_tables = None  # type: ignore[assignment]
+        if hasattr(self, "kv_cache_config"):
+            delattr(self, "kv_cache_config")
+        self.cache_config.num_gpu_blocks = None
+
+        for layer in self.compilation_config.static_forward_context.values():
+            if hasattr(layer, "kv_cache"):
+                kv_cache = layer.kv_cache
+                layer.kv_cache = (
+                    torch.tensor([]) if isinstance(kv_cache, torch.Tensor) else []
+                )
+            if hasattr(layer, "impl"):
+                if hasattr(layer.impl, "_k_scale_cache"):
+                    layer.impl._k_scale_cache = None
+                if hasattr(layer.impl, "_v_scale_cache"):
+                    layer.impl._v_scale_cache = None
+
+        gc.collect()
+        torch.accelerator.empty_cache()
+        logger.debug("Cleaned up profiling KV cache and CUDA graphs")
+
+    @torch.inference_mode()
     def profile_cudagraph_memory(self) -> int:
-        # NOTE(woosuk): It is TBD whether we keep this API or not.
-        return 0
+        """Estimate CUDA graph capture memory so the KV-cache budget reserves
+        room for it. Without this the budget is oversized and capture OOMs at
+        high ``gpu_memory_utilization`` with large ``max_num_seqs``.
+
+        Builds a throwaway minimal KV cache to populate the cudagraph manager's
+        capture descriptors, dry-captures the 2 largest graphs per mode (in
+        ``CudaGraphManager.profile_memory``), and extrapolates. The target
+        model's estimate is included here; speculator (MTP) capture memory is a
+        follow-up.
+        """
+        with set_current_vllm_config(self.vllm_config):
+            self._init_minimal_kv_cache_for_profiling()
+
+        manager = self.cudagraph_manager
+        assert manager is not None
+        if not manager.needs_capture():
+            self._cleanup_profiling_kv_cache()
+            return 0
+
+        saved_num_cudagraph_captured = compilation_counter.num_cudagraph_captured
+        shared: dict[CUDAGraphMode, int] = {}
+        per_graph: dict[CUDAGraphMode, int] = {}
+        # NOTE: do not toggle set_cudagraph_capturing_enabled here. It defaults
+        # to True and MRv2's capture_model relies on that default (it never
+        # re-enables it); disabling it in this finally would break the real
+        # capture that runs next.
+        try:
+            estimates = manager.profile_memory(
+                self.model,
+                self.model_state,
+                self.input_buffers,
+                self.intermediate_tensors,
+                self.block_tables,
+                self.attn_groups,
+                self.kv_cache_config,
+                has_lora=self.lora_config is not None,
+                use_aux_hidden_state_outputs=self.use_aux_hidden_state_outputs,
+                lora_capture_hook=create_lora_capture_hook(self.lora_config, self),
+            )
+            for mode, (first, rest) in estimates.items():
+                shared[mode] = first
+                per_graph[mode] = rest
+        finally:
+            compilation_counter.num_cudagraph_captured = saved_num_cudagraph_captured
+            self._cleanup_profiling_kv_cache()
+
+        # FULL and PIECEWISE graphs share the global graph pool at runtime and
+        # are never replayed concurrently, so their shared pool overhead
+        # overlaps (take the max) while per-graph buffers add up (sum).
+        total = max(shared.values(), default=0) + sum(per_graph.values())
+        logger.info("Estimated CUDA graph memory: %.2f GiB total", total / (1 << 30))
+        return int(total)
 
     @torch.inference_mode()
     def capture_model(self) -> int:
