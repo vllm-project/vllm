@@ -1,5 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import functools
+from collections.abc import Callable
+
 import torch
 
 from vllm.config import SpeculativeConfig
@@ -18,6 +21,15 @@ from vllm.v1.worker.gpu.sample.states import NO_LOGPROBS
 from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import (
     rejection_sample,
 )
+
+
+@functools.cache
+def _get_flashinfer_top_p_renorm_probs() -> Callable[..., torch.Tensor] | None:
+    try:
+        from flashinfer.sampling import top_p_renorm_probs
+    except (ImportError, AttributeError):
+        return None
+    return top_p_renorm_probs
 
 
 @triton.jit
@@ -63,6 +75,9 @@ class RejectionSampler:
             )
         elif rejection_sample_method == "block":
             self.use_block_verification = True
+        self.flashinfer_top_p_renorm_probs = (
+            _get_flashinfer_top_p_renorm_probs() if sampler.use_flashinfer else None
+        )
 
     def _get_logprobs_tensors(
         self,
@@ -119,7 +134,49 @@ class RejectionSampler:
             pos,
             draft_sampled,
             input_batch.expanded_local_pos,
+            skip_top_k_top_p=True,
         )
+        top_k, top_p = self.sampler.sampling_states.get_top_k_top_p(
+            input_batch.expanded_idx_mapping,
+            input_batch.idx_mapping_np,
+        )
+        return_processed_outputs = (
+            self.sampler.logprobs_mode in ("processed_logprobs", "processed_logits")
+            and self.sampler.sampling_states.max_num_logprobs(
+                input_batch.idx_mapping_np
+            )
+            != NO_LOGPROBS
+        )
+        top_p_renorm_probs = self.flashinfer_top_p_renorm_probs
+        use_flashinfer_top_p = (
+            draft_logits is None
+            and not self.use_block_verification
+            and top_k is None
+            and top_p is not None
+            and top_p_renorm_probs is not None
+            and self.sampler.will_use_flashinfer(
+                top_k,
+                top_p,
+                input_batch.idx_mapping_np,
+                return_logprobs=return_processed_outputs,
+            )
+        )
+        target_probs = None
+        if use_flashinfer_top_p:
+            assert top_p_renorm_probs is not None
+            probs = processed_logits.softmax(dim=-1, dtype=torch.float32)
+            target_probs = top_p_renorm_probs(
+                probs,
+                top_p,
+                is_deterministic=True,
+            )
+            del probs
+        else:
+            processed_logits = self.sampler.sampling_states.apply_top_k_top_p(
+                processed_logits,
+                input_batch.expanded_idx_mapping,
+                input_batch.idx_mapping_np,
+            )
         sampled, num_sampled = rejection_sample(
             processed_logits,
             draft_logits,
@@ -135,6 +192,7 @@ class RejectionSampler:
             self.synthetic_conditional_rates,
             use_fp64=self.sampler.use_fp64_gumbel,
             use_block_verification=self.use_block_verification,
+            target_probs=target_probs,
         )
         logprobs_tensors = self._get_logprobs_tensors(
             input_batch,

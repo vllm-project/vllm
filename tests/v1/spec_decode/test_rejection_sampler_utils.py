@@ -179,6 +179,41 @@ def test_stochastic_rejection_sample(num_speculative_steps: int, temperature: fl
         )
 
 
+def test_target_probs_rejection_matches_logits_path():
+    """A precomputed target distribution must preserve rejection semantics."""
+    torch.manual_seed(42)
+    device = "cuda"
+    num_trials = 64
+    num_speculative_steps = 3
+    target_logits = torch.randn(VOCAB_SIZE, device=device, dtype=torch.float32)
+    draft_logits = torch.randn(VOCAB_SIZE, device=device, dtype=torch.float32)
+    inputs = _build_rejection_sample_inputs(
+        target_logits,
+        draft_logits,
+        num_speculative_steps,
+        temperature=1.0,
+        num_trials=num_trials,
+    )
+    inputs["draft_logits"] = None
+    target_probs = inputs["target_logits"].softmax(dim=-1, dtype=torch.float32)
+
+    expected = rejection_sample(
+        **inputs,
+        num_speculative_steps=num_speculative_steps,
+    )
+    actual = rejection_sample(
+        **inputs,
+        num_speculative_steps=num_speculative_steps,
+        target_probs=target_probs,
+    )
+
+    torch.testing.assert_close(actual[1], expected[1], rtol=0, atol=0)
+    valid = torch.arange(num_speculative_steps + 1, device=device).unsqueeze(
+        0
+    ) < expected[1].unsqueeze(1)
+    torch.testing.assert_close(actual[0][valid], expected[0][valid], rtol=0, atol=0)
+
+
 @pytest.mark.parametrize("num_speculative_steps", [1, 3])
 def test_greedy_rejection_sample(num_speculative_steps: int):
     """

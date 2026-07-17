@@ -228,17 +228,11 @@ class Sampler:
         top_k, top_p = self.sampling_states.get_top_k_top_p(
             expanded_idx_mapping, idx_mapping_np
         )
-        use_flashinfer = self.use_flashinfer and not (
-            # Don't use FI sampler if no requests use top_k/top_p, if there are
-            # any greedy requests or per-request seeds, or if post-processed
-            # logprobs need to be returned for any requests.
-            (top_k is None and top_p is None)
-            or (
-                return_logprobs
-                and self.logprobs_mode in ("processed_logprobs", "processed_logits")
-            )
-            or self.sampling_states.any_greedy(idx_mapping_np)
-            or self.sampling_states.any_explicit_seed(idx_mapping_np)
+        use_flashinfer = self.will_use_flashinfer(
+            top_k,
+            top_p,
+            idx_mapping_np,
+            return_logprobs=return_logprobs,
         )
 
         # Sample the next token.
@@ -256,3 +250,22 @@ class Sampler:
                 use_fp64=self.use_fp64_gumbel,
             )
         return sampled, processed_logits
+
+    def will_use_flashinfer(
+        self,
+        top_k: torch.Tensor | None,
+        top_p: torch.Tensor | None,
+        idx_mapping_np: np.ndarray,
+        return_logprobs: bool = False,
+    ) -> bool:
+        """Return whether this request batch will use FlashInfer sampling."""
+        return self.use_flashinfer and not (
+            (top_k is None and top_p is None)
+            or (
+                return_logprobs
+                and self.logprobs_mode in ("processed_logprobs", "processed_logits")
+            )
+            or self.sampling_states.any_greedy(idx_mapping_np)
+            or self.sampling_states.any_explicit_seed(idx_mapping_np)
+            or self.use_fp64_gumbel
+        )
