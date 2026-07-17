@@ -127,7 +127,7 @@ pub(super) fn prepare_completion_request(
             ignore_eos: request.ignore_eos,
             logit_bias: convert_logit_bias(request.logit_bias)?,
             allowed_token_ids: request.allowed_token_ids,
-            bad_words: None,
+            bad_words: request.bad_words,
             logprob_token_ids: None,
             structured_outputs,
             skip_reading_prefix_cache: None,
@@ -294,6 +294,7 @@ mod tests {
             "frequency_penalty": 0.2,
             "presence_penalty": 0.3,
             "repetition_penalty": 1.1,
+            "bad_words": ["hello"],
             "ignore_eos": true,
             "skip_special_tokens": false
         }))
@@ -328,6 +329,10 @@ mod tests {
         assert_eq!(
             prepared.text_request.sampling_params.repetition_penalty,
             Some(1.1)
+        );
+        assert_eq!(
+            prepared.text_request.sampling_params.bad_words,
+            Some(vec!["hello".to_string()])
         );
         assert!(prepared.text_request.sampling_params.ignore_eos);
         assert!(!prepared.text_request.decode_options.skip_special_tokens);
