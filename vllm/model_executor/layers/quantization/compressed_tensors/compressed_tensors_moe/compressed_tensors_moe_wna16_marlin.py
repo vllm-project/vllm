@@ -93,7 +93,6 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
                     else GroupShape(row=1, col=self.group_size)
                 ),
             )
-            self.quant_type = torch.uint8
 
         weight_key = QuantKey(self.quant_type, scale, symmetric=self.symmetric)
 
