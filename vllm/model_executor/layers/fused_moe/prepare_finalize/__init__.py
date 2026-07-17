@@ -9,6 +9,9 @@ from vllm.model_executor.layers.fused_moe.prepare_finalize.naive_dp_ep import (
     MoEPrepareAndFinalizeNaiveDPEPMonolithic,
     make_moe_prepare_and_finalize_naive_dp_ep,
 )
+from vllm.model_executor.layers.fused_moe.prepare_finalize.naive_low_latency import (
+    NaiveLowLatencyPrepareAndFinalize,
+)
 from vllm.model_executor.layers.fused_moe.prepare_finalize.no_dp_ep import (
     MoEPrepareAndFinalizeNoDPEPModular,
     MoEPrepareAndFinalizeNoDPEPMonolithic,
@@ -17,6 +20,7 @@ from vllm.model_executor.layers.fused_moe.prepare_finalize.no_dp_ep import (
 
 __all__ = [
     "BatchedPrepareAndFinalize",
+    "NaiveLowLatencyPrepareAndFinalize",
     "MoEPrepareAndFinalizeNaiveDPEPMonolithic",
     "MoEPrepareAndFinalizeNaiveDPEPModular",
     "make_moe_prepare_and_finalize_naive_dp_ep",
