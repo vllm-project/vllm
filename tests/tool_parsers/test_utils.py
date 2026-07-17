@@ -11,6 +11,8 @@ from vllm.tool_parsers.utils import (
     coerce_to_schema_type,
     escape_ctrl_chars_in_strings,
     extract_types_from_schema,
+    get_parameter_value,
+    handle_single_tool,
     make_valid_python,
 )
 
@@ -363,3 +365,65 @@ class TestEscapeCtrlCharsInStrings:
         escaped = escape_ctrl_chars_in_strings(f"f(cmd='{raw}')")
         call = ast.parse(escaped).body[0].value
         assert call.keywords[0].value.value == raw
+
+
+def _value_of(expr: str):
+    """Parse a single Python expression and run get_parameter_value on it."""
+    return get_parameter_value(ast.parse(expr, mode="eval").body)
+
+
+def _first_call(text: str) -> ast.Call:
+    """Parse ``[foo(...)]`` and return the single ast.Call node."""
+    return ast.parse(text).body[0].value.elts[0]
+
+
+class TestGetParameterValueNegativeNumbers:
+    # A negative number is parsed by Python as UnaryOp(USub, Constant(n)), not
+    # a plain Constant. Without explicit handling the entire tool call is
+    # dropped. Negative longitudes/deltas/offsets are extremely common tool
+    # arguments (e.g. every Western-hemisphere coordinate).
+    def test_negative_int(self):
+        assert _value_of("-1") == -1
+
+    def test_negative_float(self):
+        assert _value_of("-3.5") == -3.5
+
+    def test_explicit_positive_int(self):
+        assert _value_of("+7") == 7
+
+    def test_negative_longitude(self):
+        assert _value_of("-74.0046539") == -74.0046539
+
+    def test_negative_in_list(self):
+        assert _value_of("[-1, 2, -3]") == [-1, 2, -3]
+
+    def test_negative_in_dict(self):
+        assert _value_of('{"min": -5, "max": 5}') == {"min": -5, "max": 5}
+
+    def test_nested_negative(self):
+        assert _value_of('{"bbox": [-74.0, 40.7, -73.9]}') == {
+            "bbox": [-74.0, 40.7, -73.9]
+        }
+
+    def test_non_numeric_unary_still_raises(self):
+        # ``not x`` / ``~x`` are not literals and must still be rejected.
+        with pytest.raises(UnexpectedAstError):
+            _value_of("~5")
+        with pytest.raises(UnexpectedAstError):
+            _value_of("not True")
+
+
+class TestHandleSingleToolNegativeNumbers:
+    def test_negative_arg_end_to_end(self):
+        call = _first_call("[searchWeather(latitude=40.84, longitude=-74.0046539)]")
+        tool = handle_single_tool(call)
+        assert tool.function.name == "searchWeather"
+        assert json.loads(tool.function.arguments) == {
+            "latitude": 40.84,
+            "longitude": -74.0046539,
+        }
+
+    def test_negative_delta_end_to_end(self):
+        call = _first_call("[updateInventory(quantity_delta=-20)]")
+        tool = handle_single_tool(call)
+        assert json.loads(tool.function.arguments) == {"quantity_delta": -20}

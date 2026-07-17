@@ -467,6 +467,22 @@ def get_parameter_value(val: ast.expr) -> Any:
         return [get_parameter_value(v) for v in val.elts]
     elif isinstance(val, ast.Name) and val.id in _JSON_NAME_LITERALS:
         return _JSON_NAME_LITERALS[val.id]
+    elif isinstance(val, ast.UnaryOp) and isinstance(val.op, (ast.USub, ast.UAdd)):
+        # A negative (or explicitly positive) number is parsed by Python as a
+        # unary operation over a numeric constant, e.g. ``-1`` becomes
+        # ``UnaryOp(USub, Constant(1))`` rather than a plain ``Constant(-1)``.
+        # These are extremely common tool arguments (negative longitudes,
+        # offsets, deltas); without this branch the whole call is dropped.
+        # Restrict to numeric operands so ``not``/``~`` and other expressions
+        # still raise below.
+        operand = get_parameter_value(val.operand)
+        if isinstance(operand, (int, float)) and not isinstance(operand, bool):
+            return -operand if isinstance(val.op, ast.USub) else operand
+        logger.warning(
+            "Unsupported unary operand in tool call arguments: %s",
+            ast.dump(val),
+        )
+        raise UnexpectedAstError("Tool call arguments must be literals")
     else:
         logger.warning(
             "Unsupported AST node type in tool call arguments: %s",
