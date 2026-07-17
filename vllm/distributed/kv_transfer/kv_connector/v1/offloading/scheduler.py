@@ -1353,9 +1353,6 @@ class OffloadingConnectorScheduler:
 
         # Reset offloading manager cache
         self.manager.reset_cache()
-        if self._events_tracker.self_describing_enabled:
-            for _ in self.manager.take_events():
-                pass
 
         # Reset store progress so active requests re-offload from chunk 0.
         for status in self._req_status.values():
