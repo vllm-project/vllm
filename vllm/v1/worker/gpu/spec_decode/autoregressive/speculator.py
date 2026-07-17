@@ -377,8 +377,6 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
         skip_attn: bool,
         batch_desc: BatchExecutionDescriptor,
         num_tokens_across_dp: torch.Tensor | None,
-        # [num_reqs] target-side CPU upper bound on seq_lens; each draft step
-        # grows it by the number of tokens drafted so far.
         seq_lens_cpu_upper_bound: torch.Tensor,
     ) -> None:
         positions = self.input_buffers.positions[:num_reqs]

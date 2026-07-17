@@ -220,12 +220,6 @@ class DraftModelSpeculator(BaseSpeculator):
             x[:num_reqs_padded] for x in self.block_tables.input_block_tables
         ]
         slot_mappings = self.block_tables.slot_mappings[:, :num_tokens_padded]
-        # Per-request CPU upper bound on seq_lens for this draft step: the
-        # target's upper bound grown by the `step` already-drafted tokens,
-        # clamped to the model length. Padded slots are zeroed to match the
-        # main runner. This field is required by
-        # split_decodes_prefills_and_extends and several backends
-        # (MLA / indexer / flex-attention), so it must be set.
         draft_seq_lens_cpu_upper_bound = torch.zeros(
             num_reqs_padded, dtype=torch.int32, device="cpu"
         )
