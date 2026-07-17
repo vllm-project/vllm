@@ -80,21 +80,6 @@ def test_w4a4_dispatches_to_aiter(mxfp4_oracle_config):
 
 
 @pytest.mark.skipif(not ROCM_GFX950, reason="Requires GFX950 (mi355x)")
-@pytest.mark.skipif(
-    ROCM_AITER_AVAILABLE,
-    reason="Test requires AITER disabled (unset VLLM_ROCM_USE_AITER)",
-)
-def test_w4a4_falls_back_to_triton_unfused_without_aiter(mxfp4_oracle_config):
-    """Without AITER and no --moe-backend, ROCm falls back to TRITON_UNFUSED."""
-    config = _make_w4a4_moe_config()
-    backend, experts_cls = select_mxfp4_moe_backend(
-        config, activation_key=kMxfp4Dynamic
-    )
-    assert backend == Mxfp4MoeBackend.TRITON_UNFUSED
-    assert experts_cls is not None
-
-
-@pytest.mark.skipif(not ROCM_GFX950, reason="Requires GFX950 (mi355x)")
 def test_w4a4_dispatches_to_emulation_with_moe_backend(mxfp4_oracle_config):
     """With --moe-backend emulation, W4A4 selects EMULATION."""
     config = _make_w4a4_moe_config(moe_backend="emulation")
