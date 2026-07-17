@@ -550,7 +550,10 @@ class VllmConfig:
     def use_v2_model_runner(self) -> bool:
         use_v2_model_runner = envs.VLLM_USE_V2_MODEL_RUNNER
         if use_v2_model_runner is not None:
-            return use_v2_model_runner
+            return (
+                use_v2_model_runner
+                and not self._get_v2_model_runner_unsupported_features()
+            )
 
         # DSpark is implemented only by the V2 GPU model runner, and DeepSeek-V4
         # is not otherwise a default-V2 architecture, so force V2 for it. If V2

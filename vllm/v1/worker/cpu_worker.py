@@ -179,8 +179,10 @@ class CPUWorker(Worker):
             self.model_runner: CPUModelRunner = CPUModelRunnerV2(  # type: ignore
                 self.vllm_config, self.device
             )
+            logger.info("use CPU model runner V2.")
         else:
             self.model_runner = CPUModelRunner(self.vllm_config, torch.device("cpu"))
+            logger.info("use CPU model runner V1.")
 
     def sleep(self, level: int = 1) -> None:
         logger.warning("sleep mode is not supported on CPU, ignore it.")
