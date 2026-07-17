@@ -15,6 +15,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kFp8StaticTensorSym,
 )
+from vllm.platforms.rocm import on_gfx1250
 from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.backend import (
     AttentionLayer,
@@ -190,11 +191,36 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
         # RDNA3 has no low precision MMA, preserve query precision
         self.supports_quant_query_input = not on_gfx11()
 
+        # Layout flag: must mirror get_kv_cache_shape, which is attn_type
+        # agnostic because the allocation is shared across layers.
+        self._shuffle_kv_layout = (
+            rocm_aiter_ops.is_shuffle_kv_cache_enabled() and on_gfx1250()
+        )
+        # Kernel flag: the shuffled reader/writer is causal decoder only.
+        self._use_shuffle_kv = (
+            self._shuffle_kv_layout and self.attn_type != AttentionType.ENCODER_DECODER
+        )
+
     def _split_kv_cache(
         self, kv_cache: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        if self._shuffle_kv_layout:
+            # (2, B, N, H, hs) -> ((B, N, H, hs), (B, N, H, hs))
+            return kv_cache.unbind(0)
         # (B, H, N, 2*hs) -> ((B, N, H, hs), (B, N, H, hs))
         return kv_cache.transpose(1, 2).split(self.head_size, dim=-1)
+
+    def _shuffle_kv_views(
+        self, key_cache: torch.Tensor, value_cache: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        # No-copy reinterpret of standalone-contiguous K/V (num_blocks,
+        # block_size, num_kv_heads, head_size) as the 5D shuffle layout the
+        # gluon kernel reads (the shuffle WRITER laid bytes in this order).
+        nb, bs, nkv, hd = key_cache.shape
+        x = 16 // key_cache.element_size()
+        kc = key_cache.reshape(nb, nkv, hd // x, bs, x)
+        vc = value_cache.reshape(nb, nkv, bs // x, hd, x)
+        return kc, vc
 
     def forward(
         self,
@@ -270,6 +296,12 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
             key_cache = key_cache.view(self.fp8_dtype)
             value_cache = value_cache.view(self.fp8_dtype)
 
+        # The shuffle writer pre-divides K/V by k/v_scale before the
+        # (scale=1.0) store, so the stored fp8 matches what
+        # reshape_and_cache_flash writes and descaling is unchanged.
+        if self._use_shuffle_kv:
+            key_cache, value_cache = self._shuffle_kv_views(key_cache, value_cache)
+
         cu_seqlens_q = attn_metadata.query_start_loc
         seqused_k = attn_metadata.seq_lens
         max_seqlen_q = attn_metadata.max_query_len
@@ -297,6 +329,7 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
                 v_descale=layer._v_scale,
                 sinks=self.sinks,
                 output_scale=output_scale,
+                shuffled_kv_cache=self._use_shuffle_kv,
             )
         else:
             # The aiter kernel is causal-only. Non-causal cross-attention
@@ -345,6 +378,27 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
             return
         key_cache, value_cache = self._split_kv_cache(kv_cache)
 
+        if self._use_shuffle_kv:
+            from vllm.v1.attention.backends.rocm_aiter_fa import (
+                reshape_and_cache_shuffle_triton,
+            )
+
+            if is_quantized_kv_cache(self.kv_cache_dtype):
+                key_cache = key_cache.view(self.fp8_dtype)
+                value_cache = value_cache.view(self.fp8_dtype)
+            _dummy = torch.empty(1, dtype=torch.float32, device=key.device)
+            reshape_and_cache_shuffle_triton(
+                key,
+                value,
+                key_cache,
+                value_cache,
+                slot_mapping,
+                self.kv_cache_dtype,
+                _dummy,
+                _dummy,
+            )
+            return
+
         # Reshape the input keys and values and store them in the cache.
         ops.reshape_and_cache_flash(
             key,
@@ -381,6 +435,8 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
         kv_cache: torch.Tensor,
         layer_slot_mapping: torch.Tensor,
     ):
+        # _split_kv_cache picks the unbind dim per layout. The writer must
+        # match what forward() reads back, hence use_shuffle_layout below.
         key_cache, value_cache = self._split_kv_cache(kv_cache)
         rocm_aiter_ops.do_qk_norm_rope_kvcache_update(
             qkv=qkv,
@@ -401,7 +457,7 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
             k_scale=layer._k_scale_cpu,
             v_scale=layer._v_scale_cpu,
             kv_cache_dtype=self.kv_cache_dtype,
-            use_shuffle_layout=False,
+            use_shuffle_layout=self._use_shuffle_kv,
         )
 
     def do_qk_norm_mrope_kvcache_update(
@@ -462,12 +518,15 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
             # we use direct Q, K, V tensors without caching
             return
         key_cache, value_cache = self._split_kv_cache(kv_cache)
-        flash_layout = True
 
         is_fp8_kv_cache = is_quantized_kv_cache(self.kv_cache_dtype)
         if is_fp8_kv_cache:
             key_cache = key_cache.view(self.fp8_dtype)
             value_cache = value_cache.view(self.fp8_dtype)
+
+        if self._use_shuffle_kv:
+            key_cache, value_cache = self._shuffle_kv_views(key_cache, value_cache)
+        flash_layout = not self._use_shuffle_kv
 
         rocm_aiter_ops.triton_rope_and_cache(
             query,

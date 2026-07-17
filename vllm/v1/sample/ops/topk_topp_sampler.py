@@ -34,11 +34,34 @@ def register_top_k_top_p_warmups() -> None:
             _topp_split_mask.register_warmup()
 
 
-def _skip_aiter_sampler_on_gfx1250() -> bool:
-    # Lazy ROCm-only import; keeps arch detection out of import time on CUDA/CPU.
-    from vllm.platforms.rocm import on_gfx1250
+def _aiter_temp_gumbel_sample(
+    logits: torch.Tensor, generators: dict[int, torch.Generator]
+) -> torch.Tensor:
+    """Fused temperature Gumbel-max sampling via aiter.
 
-    return on_gfx1250()
+    Logits are already temperature-scaled by the parent Sampler, so temps=1.
+    Returns int64 token ids of shape (num_tokens,).
+    """
+    from aiter import mixed_sample_outer_exponential
+
+    n, vocab = logits.shape
+    out = torch.empty(n, dtype=torch.int32, device=logits.device)
+    if not generators:
+        # Common case: shared (1, vocab) exponential noise (cheap RNG).
+        exp = (
+            torch.empty((1, vocab), dtype=torch.float32, device=logits.device)
+            .exponential_()
+            .expand(n, vocab)
+        )
+    else:
+        exp = torch.empty((n, vocab), dtype=torch.float32, device=logits.device)
+        if len(generators) != n:
+            exp.exponential_()
+        for i, g in generators.items():
+            exp[i].exponential_(generator=g)
+    temps = torch.ones(n, dtype=torch.float32, device=logits.device)
+    mixed_sample_outer_exponential(out, logits, exp, temps, eps=1e-10)
+    return out.to(torch.int64)
 
 
 def _flashinfer_jit_unsupported_reason(capability: DeviceCapability) -> str | None:
@@ -246,8 +269,12 @@ class TopKTopPSampler(nn.Module):
         elif (
             logprobs_mode not in PROCESSED_LOGPROBS_MODES
             and rocm_aiter_ops.is_enabled()
-            and not _skip_aiter_sampler_on_gfx1250()  # TODO (JPVILLAM): Enable
         ):
+            # Lazy ROCm-only import; keeps arch detection out of import time
+            # on CUDA/CPU.
+            from vllm.platforms.rocm import on_gfx1250
+
+            self.on_gfx1250 = on_gfx1250()
             self.aiter_ops = None
             self._aiter_ops_import_failed = False
             logger.info_once(
@@ -376,6 +403,15 @@ class TopKTopPSampler(nn.Module):
         p: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """Optimized ROCm/aiter path (same structure as forward_cuda)."""
+        if self.on_gfx1250:
+            if (
+                k is None
+                and p is None
+                and not self.use_fp64_gumbel
+                and self.logprobs_mode not in PROCESSED_LOGPROBS_MODES
+            ):
+                return _aiter_temp_gumbel_sample(logits, generators), None
+            return self.forward_native(logits, generators, k, p)
         if (k is None and p is None) or generators:
             if generators:
                 logger.warning_once(

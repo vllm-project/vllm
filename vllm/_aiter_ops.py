@@ -3668,8 +3668,8 @@ class rocm_aiter_ops:
 
         Shared by the AITER FA and unified-attention impls. The caller splits
         kv_cache, since the unbind dim depends on the layout (e.g. the unified
-        encoder-decoder path is K/V-first), and passes use_shuffle_layout
-        (unified reads NHD and must pass False).
+        encoder-decoder path is K/V-first), and passes use_shuffle_layout to
+        match the layout its own read path expects.
         """
         if kv_cache_dtype.startswith("fp8"):
             key_cache = key_cache.view(current_platform.fp8_dtype())
