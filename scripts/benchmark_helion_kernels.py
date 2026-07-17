@@ -70,6 +70,7 @@ CUDA_BASELINE_OPS: dict[str, str] = {
     "dynamic_per_token_scaled_fp8_quant": "dynamic_per_token_scaled_fp8_quant",
     "fused_qk_norm_rope": "fused_qk_norm_rope",
     "per_token_group_fp8_quant": "per_token_group_fp8_quant",
+    "per_token_group_fp8_quant_packed": "per_token_group_fp8_quant_packed",
     "rms_norm_dynamic_per_token_quant": "rms_norm_dynamic_per_token_quant",
     "rms_norm_per_block_quant": "rms_norm_per_block_quant",
     "silu_and_mul_per_block_quant": "silu_and_mul_per_block_quant",
