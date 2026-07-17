@@ -106,6 +106,7 @@ class InputBatch:
         is_pooling_model: bool = False,
         cp_kv_cache_interleave_size: int = 1,
         reasoning_config: ReasoningConfig | None = None,
+        use_replayssm: bool = False,
     ):
         self.thinking_budget_state_holder = maybe_create_thinking_budget_state_holder(
             reasoning_config,
@@ -167,6 +168,17 @@ class InputBatch:
             pin_memory=PIN_MEMORY,
         )
         self.num_computed_tokens_cpu = self.num_computed_tokens_cpu_tensor.numpy()
+
+        # Mamba2 ReplaySSM decode ring origin (num_computed at each request's
+        # last full-state write); populated only when the feature is on.
+        self.use_replayssm = use_replayssm
+        self.replayssm_decode_base_cpu_tensor = torch.zeros(
+            (max_num_reqs,),
+            device="cpu",
+            dtype=torch.int32,
+            pin_memory=PIN_MEMORY,
+        )
+        self.replayssm_decode_base = self.replayssm_decode_base_cpu_tensor.numpy()
 
         # Block table.
         self.block_table = MultiGroupBlockTable(
@@ -374,6 +386,11 @@ class InputBatch:
         self.is_token_ids[req_index, start_idx:end_idx] = True
         # Number of tokens without spec decode tokens.
         self.num_tokens_no_spec[req_index] = request.num_tokens
+
+        if self.use_replayssm:
+            # Ring origin = full context at (re)admission (prompt + any resumed
+            # output), so a resumed request re-anchors past the prompt.
+            self.replayssm_decode_base[req_index] = request.num_tokens
 
         self.num_computed_tokens_cpu[req_index] = request.num_computed_tokens
         self.block_table.add_row(request.block_ids, req_index)
@@ -595,6 +612,11 @@ class InputBatch:
             self.num_prompt_tokens[i2],
             self.num_prompt_tokens[i1],
         )
+        if self.use_replayssm:
+            self.replayssm_decode_base[i1], self.replayssm_decode_base[i2] = (
+                self.replayssm_decode_base[i2],
+                self.replayssm_decode_base[i1],
+            )
         self.num_computed_tokens_cpu[i1], self.num_computed_tokens_cpu[i2] = (
             self.num_computed_tokens_cpu[i2],
             self.num_computed_tokens_cpu[i1],
@@ -752,6 +774,10 @@ class InputBatch:
                 last_req_index
             ]
             self.num_prompt_tokens[empty_index] = self.num_prompt_tokens[last_req_index]
+            if self.use_replayssm:
+                self.replayssm_decode_base[empty_index] = self.replayssm_decode_base[
+                    last_req_index
+                ]
             self.num_computed_tokens_cpu[empty_index] = self.num_computed_tokens_cpu[
                 last_req_index
             ]

@@ -559,16 +559,17 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
                 ]
 
         if self.use_replayssm and num_decodes > 0:
-            num_prompt_tokens_cpu = common_attn_metadata.num_prompt_tokens_cpu
+            decode_base_cpu = common_attn_metadata.replayssm_decode_base_cpu
             num_computed_tokens_cpu = common_attn_metadata._num_computed_tokens_cpu
-            if num_prompt_tokens_cpu is None or num_computed_tokens_cpu is None:
+            if decode_base_cpu is None or num_computed_tokens_cpu is None:
                 raise ValueError(
-                    "--use-replayssm requires CPU prompt and "
+                    "--use-replayssm requires CPU decode-base and "
                     "computed-token counts to derive decode write positions"
                 )
+            # write_pos counts decode steps since the ring's last full-state
+            # write (decode_base), so a resumed request re-anchors correctly.
             decode_steps_cpu = (
-                num_computed_tokens_cpu[:num_decodes]
-                - num_prompt_tokens_cpu[:num_decodes]
+                num_computed_tokens_cpu[:num_decodes] - decode_base_cpu[:num_decodes]
             )
             query_lens_cpu = (
                 common_attn_metadata.query_start_loc_cpu[1 : num_decodes + 1]
