@@ -265,7 +265,7 @@ def flashinfer_autotune(runner: "GPUModelRunner") -> None:
         is_profile=True,
     )
 
-    # Read the cached autotune results and broadcast them to all ranks.
+    # Read cached autotune results and broadcast to all ranks.
     cached_results: bytes | None = None
     if is_leader and cache_path.exists():
         with open(cache_path, "rb") as f:
@@ -276,8 +276,6 @@ def flashinfer_autotune(runner: "GPUModelRunner") -> None:
         world.barrier()
         tuner.load_configs(str(cache_path))
 
-    # A CPU process group averages per-tactic timings across ranks; None
-    # (single rank) is a no-op, keeping one code path for both cases.
     group = world.cpu_group if world.world_size > 1 else None
     set_autotune_process_group(group)
     try:
