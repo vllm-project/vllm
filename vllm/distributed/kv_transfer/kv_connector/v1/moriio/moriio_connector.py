@@ -1626,7 +1626,7 @@ class MoRIIOConnectorWorker:
 
             still_running = False
             for status in pending:
-                # Both terminal; a failed read is dropped in _pop_done_transfers.
+                # A failed read is dropped in _pop_done_transfers.
                 if status.Succeeded() or status.Failed():
                     continue
                 still_running = True
