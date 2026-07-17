@@ -939,7 +939,6 @@ class OffloadingConnectorScheduler:
             req = req_status.req
 
             if req.is_finished():
-                # Finished request: use final token count.
                 num_tokens_after_batch = req.num_tokens
             else:
                 num_scheduled_tokens = scheduler_output.num_scheduled_tokens[req_id]
@@ -1008,8 +1007,7 @@ class OffloadingConnectorScheduler:
                 self._connector_stats.increase_counter(
                     _ConnectorMetricName.ALLOCATION_FAILURE
                 )
-                logger.warning("Request %s: cannot store blocks", req_id)
-                # Don't advance_stored_idx: retry on next step
+                logger.warning("Request %s: cannot store chunks", req_id)
                 self._maybe_cleanup_finished_req(req_id, req_status)
                 continue
 
@@ -1073,9 +1071,7 @@ class OffloadingConnectorScheduler:
                 )
 
             src_spec = GPULoadStoreSpec(
-                src_block_ids,
-                group_sizes=group_sizes,
-                block_indices=block_indices,
+                src_block_ids, group_sizes=group_sizes, block_indices=block_indices
             )
             dst_spec = store_output.store_spec
 
