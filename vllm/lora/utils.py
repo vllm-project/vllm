@@ -369,7 +369,9 @@ def get_adapter_absolute_path(lora_path: str) -> str:
 
 
 def process_packed_modules_mapping(
-    model: nn.Module, force_2d_moe: bool = False
+    model: nn.Module,
+    force_2d_moe: bool = False,
+    enable_moe_shared_loras: bool = False,
 ) -> dict[str, list[str]]:
     if is_moe_model(model):
         # This method generates and returns a dictionary mapping packed module
@@ -382,7 +384,17 @@ def process_packed_modules_mapping(
         # the engine forces the universal 2D wrapper via
         # enable_mixed_moe_lora_format (so 3D models can also load 2D
         # adapters through FusedMoEWithLoRA).
-        if (not model.is_3d_moe_weight) or force_2d_moe:
+        if enable_moe_shared_loras:
+            # Shared MoE adapters store one pre-stacked tensor per
+            # expert-projection (experts.w1/w2/w3) rather than a per-expert
+            # tensor list, so the packed mapping references the three stack
+            # names directly (drives expected_lora_modules and the packing).
+            packed_modules_mapping["experts"] = [
+                "experts.w1",
+                "experts.w2",
+                "experts.w3",
+            ]
+        elif (not model.is_3d_moe_weight) or force_2d_moe:
             # Filter out malformed entries: non-gated MoE has empty
             # ckpt_up_proj_name which results in weight_name containing ".."
             # (e.g., "experts.0.." instead of "experts.0.layer_name.")
