@@ -1919,7 +1919,3 @@ class DeepseekV3ForCausalLM(DeepseekV2ForCausalLM):
 
 class GlmMoeDsaForCausalLM(DeepseekV2ForCausalLM):
     pass
-
-
-# Compatibility with
-# https://huggingface.co/deepseek-ai/DeepSeek-V3-Base/blob/main/configuration_deepseek.py
