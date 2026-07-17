@@ -618,8 +618,8 @@ def make_fp8_moe_quant_config(
         and block_shape is None
     ):
         assert a1_scale is not None and a2_scale is not None
-        g1_alphas = (w1_scale * a1_scale).squeeze()
-        g2_alphas = (w2_scale * a2_scale).squeeze()
+        g1_alphas = w1_scale * a1_scale
+        g2_alphas = w2_scale * a2_scale
         if layer is not None:
             layer.register_parameter(
                 "g1_alphas", torch.nn.Parameter(g1_alphas, requires_grad=False)
