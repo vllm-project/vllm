@@ -92,9 +92,7 @@ def test_true_w4a4_kernels_reject_explicit_non_mxfp4_activation(kernel_cls):
 
 
 @pytest.mark.parametrize("kernel_cls", _WEIGHT_ONLY_KERNELS)
-@pytest.mark.parametrize(
-    "activation_quant_key", [None, kMxfp4Dynamic, kMxfp4Static]
-)
+@pytest.mark.parametrize("activation_quant_key", [None, kMxfp4Dynamic, kMxfp4Static])
 def test_weight_only_kernels_accept_unquantized_or_mxfp4_activation(
     kernel_cls, activation_quant_key
 ):

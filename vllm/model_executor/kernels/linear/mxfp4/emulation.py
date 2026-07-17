@@ -25,6 +25,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kMxfp6E3M2Dynamic,
     kMxfp6E3M2Static,
 )
+from vllm.platforms import current_platform
 
 from .base import MxFp4LinearKernel, MxFp4LinearLayerConfig
 
@@ -66,6 +67,40 @@ class EmulationOcpMxLinearKernel(MxFp4LinearKernel):
 
     @classmethod
     def can_implement(cls, config: MxFp4LinearLayerConfig) -> tuple[bool, str | None]:
+        if (
+            current_platform.is_rocm()
+            and current_platform.supports_mx()
+            and config.weight_quant_key == kMxfp4Static
+            and config.activation_quant_key == kMxfp4Dynamic
+        ):
+            from vllm._aiter_ops import is_aiter_found_and_supported
+            from vllm.model_executor.kernels.linear import _get_linear_backend
+
+            linear_backend = _get_linear_backend()
+            if linear_backend == "auto":
+                if not is_aiter_found_and_supported():
+                    raise ValueError(
+                        "This platform supports native MXFP4 W4A4 "
+                        "computation via AITER, but AITER is not found or "
+                        "not supported. Please install AITER, or pass "
+                        "--linear-backend=emulation to force the (slow) "
+                        "emulation fallback."
+                    )
+                raise ValueError("Something went wrong, please open an issue.")
+
+        if config.weight_quant_key not in (
+            kMxfp4Static,
+            kMxfp6E2M3Static,
+            kMxfp6E3M2Static,
+        ):
+            return False, "only supports MXFP4 or MXFP6 weights"
+        if config.activation_quant_key not in (
+            kMxfp4Dynamic,
+            kMxfp6E3M2Dynamic,
+            kMxfp6E2M3Dynamic,
+        ):
+            return False, "only supports MXFP4 or MXFP6 activations"
+
         return True, None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
