@@ -40,7 +40,6 @@ def _config(
 
 
 class ToyKernel(VllmJitKernel["ToyKernel.CompileKey"]):
-
     @dataclass(frozen=True)
     class CompileKey:
         block_size: int
@@ -87,7 +86,6 @@ class ToyKernel(VllmJitKernel["ToyKernel.CompileKey"]):
 
 
 class RecordingToyKernel(ToyKernel):
-
     def __init__(self) -> None:
         self.compiled: list[ToyKernel.CompileKey] = []
         super().__init__()
@@ -110,11 +108,13 @@ def test_trace_dispatch_expands_ranges_dedupes_and_ignores_unused_inputs() -> No
 def test_compile_key_uses_defaults_locals_attributes_and_expressions() -> None:
     cfg = _config(bias=3, disabled=True, name="cfg", vectorized=True)
 
-    assert ToyKernel().compile_key({
-        "tokens": 4,
-        "cfg": cfg,
-        "lanes": 2,
-    }) == ToyKernel.CompileKey(
+    assert ToyKernel().compile_key(
+        {
+            "tokens": 4,
+            "cfg": cfg,
+            "lanes": 2,
+        }
+    ) == ToyKernel.CompileKey(
         block_size=4,
         work=11,
         vector_width=4,
@@ -174,9 +174,7 @@ def test_trace_dispatch_rejects_bad_positional_groups_and_duplicates() -> None:
 
 
 def test_helper_calls_support_keywords_and_reject_star_kwargs() -> None:
-
     class HelperKernel(VllmJitKernel["HelperKernel.CompileKey"]):
-
         @dataclass(frozen=True)
         class CompileKey:
             value: int
@@ -187,9 +185,7 @@ def test_helper_calls_support_keywords_and_reject_star_kwargs() -> None:
             tokens: int,
             block_size: int,
         ) -> CompileKey:
-            return self.CompileKey(
-                value=_round_up(tokens, multiple=block_size)
-            )
+            return self.CompileKey(value=_round_up(tokens, multiple=block_size))
 
         def get_warmup_keys(self) -> list[CompileKey]:
             return []
@@ -198,7 +194,6 @@ def test_helper_calls_support_keywords_and_reject_star_kwargs() -> None:
             pass
 
     class StarKwargsKernel(VllmJitKernel["StarKwargsKernel.CompileKey"]):
-
         @dataclass(frozen=True)
         class CompileKey:
             value: int
@@ -209,9 +204,7 @@ def test_helper_calls_support_keywords_and_reject_star_kwargs() -> None:
             tokens: int,
             block_size: int,
         ) -> CompileKey:
-            return self.CompileKey(
-                value=_round_up(tokens, **{"multiple": block_size})
-            )
+            return self.CompileKey(value=_round_up(tokens, **{"multiple": block_size}))
 
         def get_warmup_keys(self) -> list[CompileKey]:
             return []
@@ -219,18 +212,18 @@ def test_helper_calls_support_keywords_and_reject_star_kwargs() -> None:
         def compile(self, compile_key: CompileKey) -> None:
             pass
 
-    assert HelperKernel().compile_key({
-        "tokens": 5,
-        "block_size": 4,
-    }) == HelperKernel.CompileKey(value=8)
+    assert HelperKernel().compile_key(
+        {
+            "tokens": 5,
+            "block_size": 4,
+        }
+    ) == HelperKernel.CompileKey(value=8)
     with pytest.raises(ValueError, match=r"cannot use \*\*kwargs"):
         StarKwargsKernel().compile_key({"tokens": 5, "block_size": 4})
 
 
 def test_dispatch_body_must_be_local_assignments_then_compile_key_return() -> None:
-
     class BranchKernel(VllmJitKernel["BranchKernel.CompileKey"]):
-
         @dataclass(frozen=True)
         class CompileKey:
             value: int
@@ -247,7 +240,6 @@ def test_dispatch_body_must_be_local_assignments_then_compile_key_return() -> No
             pass
 
     class KwargsReturnKernel(VllmJitKernel["KwargsReturnKernel.CompileKey"]):
-
         @dataclass(frozen=True)
         class CompileKey:
             value: int
@@ -268,9 +260,7 @@ def test_dispatch_body_must_be_local_assignments_then_compile_key_return() -> No
 
 
 def test_dispatch_reports_unsupported_expression_with_context() -> None:
-
     class UnsupportedKernel(VllmJitKernel["UnsupportedKernel.CompileKey"]):
-
         @dataclass(frozen=True)
         class CompileKey:
             value: object
