@@ -95,7 +95,7 @@ class ExllamaLinearKernel(MPLinearKernel):
                 #  https://garden.danieldk.eu/GPTQ-Checkpoint-Format
                 zeros = torch.full(
                     (groups, out_features),
-                    c.weight_type.bias - 1,
+                    c.weight_type.bias,
                     dtype=torch.int32,
                     device=device,
                 )
@@ -112,16 +112,10 @@ class ExllamaLinearKernel(MPLinearKernel):
             )
         else:
             def transform_w_zp(x):
-                assert isinstance(x, BasevLLMParameter)
-                if c.weight_type.size_bits == 4:
-                    x.data = x.data - 0x11111111
-                elif c.weight_type.size_bits == 8:
-                    x.data = x.data - 0x01010101
-                else:
-                    raise NotImplementedError("Cannot fix GPTQ bug by simply substracting 1.")        
+                assert isinstance(x, BasevLLMParameter)      
                 permute_param_layout_(x, input_dim=0, output_dim=1)
                 x.data = x.data.contiguous()
-                return x.to(dtype=torch.int32)
+                return x
             self._transform_param(layer, self.w_zp_name, transform_w_zp)
             
                 
@@ -177,7 +171,7 @@ class ExllamaLinearKernel(MPLinearKernel):
         # gptq_gemm supports GPTQv2 format by passing use_v2_format=True.
         # However, the MPLinearLayerConfig doesn't contain format info.
         # So hardcode GPTQv1 format here, to keep its behavior unchanged.
-        use_v2_format = False
+        use_v2_format = True
 
         assert w_zp is not None, "Zero points are required by Exllama"
         assert w_g_idx is not None, "Group index is required by Exllama"
