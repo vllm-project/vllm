@@ -87,7 +87,7 @@ def _get_leading_space_marker(tokenizer: TokenizerLike) -> str | None:
         except Exception:
             pass
         else:
-            pre = config.get("pre_tokenizer", {})
+            pre = config.get("pre_tokenizer") or {}
             pre_type = pre.get("type")
             if pre_type == "Metaspace":
                 result = pre.get("replacement", "▁")
