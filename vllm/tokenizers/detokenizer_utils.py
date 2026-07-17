@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import json
-from functools import lru_cache
 
 from vllm.tokenizers import TokenizerLike
 
@@ -60,7 +59,9 @@ def _convert_tokens_to_string_with_added_encoders(
 INITIAL_INCREMENTAL_DETOKENIZATION_OFFSET = 5
 
 
-@lru_cache(maxsize=8)
+_space_marker_cache: dict[int, str | None] = {}
+
+
 def _get_leading_space_marker(tokenizer: TokenizerLike) -> str | None:
     """Read the space marker from the tokenizer's pre_tokenizer config.
 
@@ -72,22 +73,32 @@ def _get_leading_space_marker(tokenizer: TokenizerLike) -> str | None:
     Returns the marker character, or None if decode() is safe for single
     tokens.
     """
+    tid = id(tokenizer)
+    if tid in _space_marker_cache:
+        return _space_marker_cache[tid]
+
     backend = getattr(tokenizer, "backend_tokenizer", None)
     if backend is None:
-        return None
-    try:
-        config = json.loads(backend.to_str())
-    except Exception:
-        return None
-    pre = config.get("pre_tokenizer", {})
-    pre_type = pre.get("type")
-    if pre_type == "Metaspace":
-        return pre.get("replacement", "▁")
-    if pre_type == "Sequence":
-        for sub in pre.get("pretokenizers", []):
-            if sub.get("type") == "Metaspace":
-                return sub.get("replacement", "▁")
-    return None
+        result = None
+    else:
+        result = None
+        try:
+            config = json.loads(backend.to_str())
+        except Exception:
+            pass
+        else:
+            pre = config.get("pre_tokenizer", {})
+            pre_type = pre.get("type")
+            if pre_type == "Metaspace":
+                result = pre.get("replacement", "▁")
+            elif pre_type == "Sequence":
+                for sub in pre.get("pretokenizers", []):
+                    if sub.get("type") == "Metaspace":
+                        result = sub.get("replacement", "▁")
+                        break
+
+    _space_marker_cache[tid] = result
+    return result
 
 
 def _restore_leading_spaces(raw_token: str, token_str: str, marker: str) -> str:
