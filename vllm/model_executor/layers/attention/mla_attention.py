@@ -240,6 +240,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
     kNvfp4Dynamic,
 )
+from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer
 from vllm.utils.math_utils import cdiv, round_down
@@ -1017,9 +1018,9 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 )
         else:
             # Convert from (L, N, V) to (N, L, V)
-            self.W_UV = W_UV.transpose(0, 1)
+            replace_parameter(self, "W_UV", W_UV.transpose(0, 1), prefer_copy=True)
             # Convert from (L, N, P) to (N, P, L)
-            self.W_UK_T = W_UK.permute(1, 2, 0)
+            replace_parameter(self, "W_UK_T", W_UK.permute(1, 2, 0), prefer_copy=True)
 
         # If we should not load quant weights, we initialize the scales to 1.0
         # as the default value. See [Note: Register q/k/v/prob scales in state dict]
@@ -1052,6 +1053,8 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         self._q_scale_float = self._q_scale.item()
         self._k_scale_float = self._k_scale.item()
         self._v_scale_float = self._v_scale.item()
+        self._k_scale_cpu.fill_(self._k_scale_float)
+        self._v_scale_cpu.fill_(self._v_scale_float)
         self.calculate_kv_scales = False
 
     def get_attn_backend(self) -> type[AttentionBackend]:
@@ -1579,7 +1582,8 @@ def build_mla_chunked_context_metadata(
     chunk_ends = torch.min(
         context_lens_cpu.unsqueeze(0), chunk_starts + max_context_chunk
     )
-    chunk_seq_lens = (chunk_ends - chunk_starts).clamp(min=0)
+    chunk_seq_lens = chunk_ends - chunk_starts
+    chunk_seq_lens.clamp_(min=0)
 
     cu_seq_lens_cpu = torch.zeros(
         num_chunks, num_prefills + 1, dtype=torch.int32, pin_memory=True
@@ -1629,9 +1633,8 @@ def build_mla_chunked_context_metadata(
             padded_local_context_lens_cpu.unsqueeze(0),
             local_chunk_starts + padded_local_max_context_chunk,
         )
-        padded_local_chunk_seq_lens = (local_chunk_ends - local_chunk_starts).clamp(
-            min=0
-        )
+        padded_local_chunk_seq_lens = local_chunk_ends - local_chunk_starts
+        padded_local_chunk_seq_lens.clamp_(min=0)
 
         padded_local_cu_seq_lens_cpu = torch.zeros(
             num_chunks, num_prefills + 1, dtype=torch.int32, pin_memory=True
@@ -1830,6 +1833,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             self.determine_chunked_prefill_workspace_size(vllm_config)
         )
 
+        use_packed_fp8_cache = vllm_config.cache_config.cache_dtype == "fp8_ds_mla"
         if self.dcp_world_size > 1:
             # Note(hc): The local kvcache is incomplete when DCP is triggered,
             # an additional kvcache allgather across the DCP group is therefore
@@ -1842,7 +1846,9 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                     + self.chunked_prefill_workspace_size // self.dcp_world_size,
                     self.model_config.get_head_size(),
                 ),
-                dtype=self.model_config.dtype,
+                dtype=torch.bfloat16
+                if use_packed_fp8_cache
+                else self.model_config.dtype,
                 device=device,
             )
         else:
@@ -1851,7 +1857,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                     self.chunked_prefill_workspace_size,
                     self.model_config.get_head_size(),
                 ),
-                dtype=self.q_data_type,
+                dtype=torch.bfloat16 if use_packed_fp8_cache else self.q_data_type,
                 device=device,
             )
 
@@ -2196,7 +2202,16 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
 
         for i in range(iters):
             toks = prefill_metadata.chunked_context.seq_tot[i]
-            if not use_fp8_prefill:
+            if self.kv_cache_dtype == "fp8_ds_mla":
+                ops.cp_gather_and_upconvert_fp8_kv_cache(
+                    src_cache=kv_c_and_k_pe_cache,
+                    dst=workspace[:toks],
+                    block_table=prefill_metadata.block_table,
+                    workspace_starts=prefill_metadata.chunked_context.cu_seq_lens[i],
+                    batch_size=attn_metadata.num_prefills,
+                    seq_starts=prefill_metadata.chunked_context.starts[i],
+                )
+            elif not use_fp8_prefill:
                 ops.gather_and_maybe_dequant_cache(
                     src_cache=kv_c_and_k_pe_cache,
                     dst=workspace,
@@ -2311,9 +2326,16 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
             padded_local_cu_seq_lens = (
                 prefill_metadata.chunked_context.padded_local_cu_seq_lens[i]
             )
-            if is_quantized_kv_cache(self.kv_cache_dtype) and (
-                self.kv_cache_dtype != "fp8_ds_mla"
-            ):
+            if self.kv_cache_dtype == "fp8_ds_mla":
+                ops.cp_gather_and_upconvert_fp8_kv_cache(
+                    src_cache=kv_c_and_k_pe_cache,
+                    dst=workspace[:toks],
+                    block_table=prefill_metadata.block_table,
+                    workspace_starts=padded_local_cu_seq_lens,
+                    batch_size=attn_metadata.num_prefills,
+                    seq_starts=prefill_metadata.chunked_context.starts[i],
+                )
+            elif is_quantized_kv_cache(self.kv_cache_dtype):
                 assert k_scale is not None
                 ops.gather_and_maybe_dequant_cache(
                     src_cache=kv_c_and_k_pe_cache,

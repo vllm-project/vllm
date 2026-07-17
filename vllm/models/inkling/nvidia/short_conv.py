@@ -17,8 +17,8 @@ Per-forward metadata (``block_table`` / ``slot_mapping`` / ``seq_idx`` /
 the owner's prefix in the forward context; the absolute ``positions`` are
 threaded in from the model. The insert + conv run in a single ``fused_sconv``
 launch (same path for prefill / decode / mixed / spec). All inputs are
-fixed-address persistent buffers and the grid is fixed, so decode can replay
-under a full CUDA graph.
+fixed-address persistent buffers and the grid is fixed, so the conv replays
+correctly under eager, PIECEWISE, and FULL cudagraphs.
 """
 
 from __future__ import annotations
