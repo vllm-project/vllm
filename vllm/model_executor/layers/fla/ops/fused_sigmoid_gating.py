@@ -36,6 +36,7 @@ def fused_sigmoid_gating_delta_rule_update_kernel(
     ht,
     cu_seqlens,
     ssm_state_indices,
+    ssm_state_indices_output,
     num_accepted_tokens,
     scale,
     N: tl.int64,  # num of sequences
@@ -51,6 +52,7 @@ def fused_sigmoid_gating_delta_rule_update_kernel(
     stride_final_state_token: tl.constexpr,
     stride_indices_seq: tl.constexpr,
     stride_indices_tok: tl.constexpr,
+    stride_indices_output_seq: tl.constexpr,
     USE_INITIAL_STATE: tl.constexpr,  # whether to use initial state
     INPLACE_FINAL_STATE: tl.constexpr,  # whether to store final state inplace
     USE_QK_L2NORM_IN_KERNEL: tl.constexpr,
@@ -157,7 +159,7 @@ def fused_sigmoid_gating_delta_rule_update_kernel(
         if INPLACE_FINAL_STATE:
             # Load state index and check for invalid entries
             final_state_idx = tl.load(
-                ssm_state_indices + i_n * stride_indices_seq + i_t
+                ssm_state_indices_output + i_n * stride_indices_output_seq + i_t
             ).to(tl.int64)
             # Only store if state index is valid (not NULL_BLOCK_ID=0)
             if final_state_idx > 0:
@@ -193,6 +195,7 @@ def fused_sigmoid_gating_delta_rule_update(
     inplace_final_state: bool = True,
     cu_seqlens: torch.Tensor | None = None,
     ssm_state_indices: torch.Tensor | None = None,
+    ssm_state_indices_output: torch.Tensor | None = None,
     num_accepted_tokens: torch.Tensor | None = None,
     use_qk_l2norm_in_kernel: bool = False,
     is_kda: bool = False,
@@ -231,12 +234,33 @@ def fused_sigmoid_gating_delta_rule_update(
     stride_init_state_token = initial_state.stride(0)
     stride_final_state_token = final_state.stride(0)
 
+    # The kernel indexes both 2-D index tensors with an implicit token stride of
+    # 1 (`... + i_n * stride_seq + i_t`), so a non-contiguous last dim (e.g. a
+    # transposed/strided view) would silently read wrong offsets. Normalize to
+    # contiguous here — a no-op on the current (gather-produced, contiguous)
+    # all-mode spec path, a safety net otherwise.
+    if ssm_state_indices is not None and ssm_state_indices.stride(-1) != 1:
+        ssm_state_indices = ssm_state_indices.contiguous()
+    if (ssm_state_indices_output is not None
+            and ssm_state_indices_output.stride(-1) != 1):
+        ssm_state_indices_output = ssm_state_indices_output.contiguous()
+
     if ssm_state_indices is None:
         stride_indices_seq, stride_indices_tok = 1, 1
     elif ssm_state_indices.ndim == 1:
         stride_indices_seq, stride_indices_tok = ssm_state_indices.stride(0), 1
     else:
         stride_indices_seq, stride_indices_tok = ssm_state_indices.stride()
+
+    # all-mode dual-anchor: write the final state via a separate output index tensor
+    # while reading h0 via ssm_state_indices. Defaults to in-place (output == input).
+    if ssm_state_indices_output is None:
+        ssm_state_indices_output = ssm_state_indices
+    stride_indices_output_seq = (
+        ssm_state_indices_output.stride(0)
+        if ssm_state_indices_output is not None
+        else 1
+    )
 
     grid = (NK, NV, N * HV)
     fused_sigmoid_gating_delta_rule_update_kernel[grid](
@@ -254,6 +278,7 @@ def fused_sigmoid_gating_delta_rule_update(
         ht=final_state,
         cu_seqlens=cu_seqlens,
         ssm_state_indices=ssm_state_indices,
+        ssm_state_indices_output=ssm_state_indices_output,
         num_accepted_tokens=num_accepted_tokens,
         scale=scale,
         N=N,
@@ -269,6 +294,7 @@ def fused_sigmoid_gating_delta_rule_update(
         stride_final_state_token=stride_final_state_token,
         stride_indices_seq=stride_indices_seq,
         stride_indices_tok=stride_indices_tok,
+        stride_indices_output_seq=stride_indices_output_seq,
         INPLACE_FINAL_STATE=inplace_final_state,
         USE_QK_L2NORM_IN_KERNEL=use_qk_l2norm_in_kernel,
         IS_KDA=is_kda,
