@@ -1579,18 +1579,6 @@ class Scheduler(SchedulerInterface):
         )
         return GrammarOutput(structured_output_request_ids, bitmask)
 
-    def _take_prefill_stats(self, request: Request):
-        prefill_stats = request.prefill_stats
-        if prefill_stats is not None:
-            _, num_cached_tokens_after, _ = (
-                self.kv_cache_manager.coordinator.find_longest_cache_hit(
-                    request.block_hashes,
-                    request.num_prompt_tokens,
-                )
-            )
-            prefill_stats.finalize(num_cached_tokens_after)
-        return request.take_prefill_stats()
-
     def update_from_output(
         self,
         scheduler_output: SchedulerOutput,
@@ -1720,6 +1708,7 @@ class Scheduler(SchedulerInterface):
             pooler_output = pooler_outputs[req_index] if pooler_outputs else None
             kv_transfer_params = None
             ec_transfer_params = None
+            prefill_stats = None
             status_before_stop = request.status
             num_output_tokens_before = len(request._output_token_ids)
 
@@ -1799,6 +1788,16 @@ class Scheduler(SchedulerInterface):
                         # Normal decode / re-prefill: token(s) at the END.
                         routed_experts = routing_data[end - len(new_token_ids) : end]
 
+            should_emit_output = bool(
+                new_token_ids or pooler_output is not None or stopped
+            )
+            if should_emit_output:
+                prefill_stats = request.take_prefill_stats()
+                if prefill_stats is not None:
+                    prefill_stats.finalize(
+                        self.kv_cache_manager.estimate_cached_tokens(request)
+                    )
+
             finish_reason = None
             if stopped:
                 # Capture finish_reason BEFORE _handle_stopped_request, which may
@@ -1826,13 +1825,7 @@ class Scheduler(SchedulerInterface):
 
             # Get prompt logprobs for this request.
             prompt_logprobs_tensors = prompt_logprobs_dict.get(req_id)
-            if (
-                new_token_ids
-                or pooler_output is not None
-                or kv_transfer_params
-                or ec_transfer_params
-                or stopped
-            ):
+            if should_emit_output:
                 # Add EngineCoreOutput for this Request.
                 outputs[request.client_index].append(
                     EngineCoreOutput(
@@ -1844,7 +1837,7 @@ class Scheduler(SchedulerInterface):
                         pooling_output=pooler_output,
                         stop_reason=request.stop_reason,
                         events=request.take_events(),
-                        prefill_stats=self._take_prefill_stats(request),
+                        prefill_stats=prefill_stats,
                         kv_transfer_params=kv_transfer_params,
                         ec_transfer_params=ec_transfer_params,
                         trace_headers=request.trace_headers,
