@@ -4,7 +4,7 @@
 
 import torch
 
-from vllm.model_executor.layers.mamba.ops.mamba_ssm import softplus
+from vllm.model_executor.layers.mamba.ops.mamba_ssm import convert_rs_fp16x2, softplus
 from vllm.model_executor.layers.mamba.ops.replayssm_config import get_replayssm_config
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
@@ -132,6 +132,7 @@ def _replayssm_output_only_precompute_kernel(
 def _replayssm_output_only_kernel(
     # Pointers to matrices
     state_ptr,
+    rand_seed_ptr,
     x_ptr,
     dt_ptr,
     dt_bias_ptr,
@@ -209,6 +210,8 @@ def _replayssm_output_only_kernel(
     NF_NDS: tl.constexpr,
     FL_DSTATE_TILE: tl.constexpr,
     FL_NDS: tl.constexpr,
+    USE_RS_ROUNDING: tl.constexpr,
+    PHILOX_ROUNDS: tl.constexpr,
     # heuristic-computed
     BLOCK_SIZE_DSTATE: tl.constexpr,
     HAS_DT_BIAS: tl.constexpr,
@@ -422,7 +425,30 @@ def _replayssm_output_only_kernel(
             state_new = st_f.to(tl.float32) * total_decay_dot + delta_state.to(
                 tl.float32
             )
-            tl.store(state_ptrs, state_new.to(st_f.dtype), mask=state_mask)
+            if USE_RS_ROUNDING:
+                # Stochastic-round fp32->fp16 (Blackwell cvt.rs), mirroring the
+                # baseline. Only the flush step stores state, so this runs at 1/L
+                # the baseline's per-step rate. Absolute per-element offsets seed
+                # the RNG so each state element draws independently.
+                rand_seed = tl.load(rand_seed_ptr)
+                rand_offsets = (
+                    state_batch_idx * stride_state_batch
+                    + pid_h * stride_state_head
+                    + offs_m[:, None] * stride_state_dim
+                    + offs_n_f[None, :] * stride_state_dstate
+                )
+                if PHILOX_ROUNDS > 0:
+                    rand = tl.randint(rand_seed, rand_offsets, PHILOX_ROUNDS)
+                else:
+                    rand = tl.randint(rand_seed, rand_offsets)
+                tl.static_assert(
+                    state_ptrs.dtype.element_ty == tl.float16,
+                    "stochastic rounding requires an fp16 SSM state cache",
+                )
+                state_store = convert_rs_fp16x2(state_new, rand)
+            else:
+                state_store = state_new.to(st_f.dtype)
+            tl.store(state_ptrs, state_store, mask=state_mask)
             c_chunk_f = tl.load(
                 C_ptr + offs_n_f * stride_C_dstate, mask=nmask_f, other=0.0
             ).to(tl.float32)
@@ -466,6 +492,8 @@ def selective_state_update_replayssm_output_only(
     state_batch_indices: torch.Tensor | None = None,
     null_block_id: int = NULL_BLOCK_ID,
     out: torch.Tensor | None = None,
+    enable_stochastic_rounding: bool = False,
+    cache_philox_rounds: int = 0,
 ) -> torch.Tensor:
     """Cached-bc SSM update for vLLM's autoregressive Mamba2 decode path."""
     has_heads = state.dim() > 3
@@ -554,6 +582,11 @@ def selective_state_update_replayssm_output_only(
         if state_batch_indices is not None
         else (0, 0)
     )
+    rand_seed = (
+        torch.randint(0, 2**32, (1,), device=state.device)
+        if enable_stochastic_rounding
+        else None
+    )
 
     with torch.accelerator.device_index(x.device.index):
         # Both kernels always launch: the precompute kernel self-skips flush
@@ -592,6 +625,7 @@ def selective_state_update_replayssm_output_only(
         )
         _replayssm_output_only_kernel[grid](
             state,
+            rand_seed,
             x,
             dt,
             dt_bias,
@@ -664,6 +698,8 @@ def selective_state_update_replayssm_output_only(
             nf_nds,
             fl_dstate_tile,
             fl_nds,
+            enable_stochastic_rounding,
+            cache_philox_rounds,
             num_warps=num_warps,
             num_stages=num_stages,
         )

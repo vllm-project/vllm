@@ -2257,10 +2257,6 @@ class VllmConfig:
             raise ValueError("--use-replayssm does not support speculative decoding")
         if self.mamba_config.backend != MambaBackendEnum.TRITON:
             raise ValueError("--use-replayssm requires --mamba-backend triton")
-        if self.mamba_config.enable_stochastic_rounding:
-            raise ValueError(
-                "--use-replayssm does not support Mamba cache stochastic rounding"
-            )
         if (
             self.kv_transfer_config is not None
             and self.kv_transfer_config.is_kv_transfer_instance
