@@ -711,6 +711,9 @@ RUN echo "VLLM_BASE_IMAGE=${BASE_IMAGE}" >> ${COMMON_WORKDIR}/versions.txt \
     && echo "MORI_NIC_BACKEND=${NIC_BACKEND}" >> ${COMMON_WORKDIR}/versions.txt \
     && echo "AINIC_VERSION=${AINIC_VERSION}" >> ${COMMON_WORKDIR}/versions.txt
 
+# Download bench scripts for gfx1250
+RUN curl -k -O https://raw.githubusercontent.com/ROCm/vllm/refs/heads/gfx1250_bench/vllm_smoketest.sh
+
 
 ### Install triton from upstream for AITER Deps TODO: (JPVILLAM) If possible to get this on whls it would be better
 RUN pip3 uninstall -y triton && \
