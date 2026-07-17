@@ -69,7 +69,12 @@ class QuarkConfig(QuantizationConfig):
         self.quant_config = quant_config
         # Copy the class-level default (which a subclass may override, e.g. the
         # DeepSeek-V4 Quark config) so per-instance edits don't mutate the class.
-        self.packed_modules_mapping = dict(self.packed_modules_mapping)
+        # Read from the class rather than ``self`` because the base
+        # ``QuantizationConfig.__init__`` sets an empty instance-level
+        # ``packed_modules_mapping`` that would otherwise shadow the override.
+        self.packed_modules_mapping = dict(
+            getattr(type(self), "packed_modules_mapping", {})
+        )
         self.kv_cache_group = kv_cache_group
         self.kv_cache_config = kv_cache_config
         self.pack_method = pack_method
