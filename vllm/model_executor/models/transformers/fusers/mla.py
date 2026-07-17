@@ -230,6 +230,7 @@ class MLAFuser(BaseFuser):
                 quant_config=quant_config,
                 prefix=maybe_prefix(prefix, _FUSED_QKV_A_PROJ),
                 return_bias=True,
+                disable_tp=True,
             )
             q_lora_rank = q_a.out_features
             q_a_layernorm = module.get_submodule(self.q_a_layernorm_name)
