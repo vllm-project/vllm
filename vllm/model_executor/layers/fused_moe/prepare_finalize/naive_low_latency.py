@@ -113,12 +113,20 @@ class NaiveLowLatencyPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             send_eloc[r, :n] = flat_expert[idx] - r * e_local
             send_meta[r, :n] = idx
 
-        # Fixed-size all-to-all (desync-tolerant).
+        # Fixed-size all-to-all (desync-tolerant). Fuse the two small int
+        # metadata collectives (send_eloc + send_cnt) into a single
+        # [world, cap + 1] packet: column 0 carries the per-dest count, the
+        # rest carries the per-slot local expert ids. Two collectives instead
+        # of three, no extra host sync (all shapes are static).
+        send_meta_pkt = torch.empty((world, cap + 1), dtype=torch.int64, device=dev)
+        send_meta_pkt[:, 0] = send_cnt
+        send_meta_pkt[:, 1:] = send_eloc
         recv_x = comm.all_to_all_single(send_x.reshape(world, cap * h)).reshape(
             world, cap, h
         )
-        recv_eloc = comm.all_to_all_single(send_eloc)
-        recv_cnt = comm.all_to_all_single(send_cnt)
+        recv_meta_pkt = comm.all_to_all_single(send_meta_pkt)
+        recv_cnt = recv_meta_pkt[:, 0].contiguous()
+        recv_eloc = recv_meta_pkt[:, 1:]
 
         # Flatten valid received rows (first recv_cnt[s] slots per source).
         slot_ar = torch.arange(cap, device=dev)
