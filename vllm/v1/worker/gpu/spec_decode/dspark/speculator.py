@@ -47,8 +47,6 @@ class DSparkSpeculator(DFlashSpeculator):
         # Anchor-first: N query tokens per request (anchor + N-1 noise), not 1+N.
         self.num_query_per_req = self.num_speculative_steps
 
-        self.dflash_causal = False
-
         # The anchor query position is itself a prediction (see module docstring).
         self.sample_from_anchor = True
 

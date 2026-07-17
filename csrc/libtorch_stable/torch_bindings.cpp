@@ -466,7 +466,7 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "Tensor? slot_mapping, Tensor? index_slot_mapping, "
       "Tensor!? kv_cache, Tensor!? index_cache, "
       "int block_size, Tensor!? q_out, Tensor!? index_q_out, "
-      "str kv_cache_dtype) -> ()");
+      "str kv_cache_dtype, bool skip_index_branch=False) -> ()");
 
   // Apply repetition penalties to logits in-place.
   ops.def(
@@ -538,6 +538,9 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
 
   // Quick GELU implementation.
   ops.def("gelu_quick(Tensor! out, Tensor input) -> ()");
+
+  // relu(x)^2 activation from https://arxiv.org/abs/2109.08668v2
+  ops.def("relu_squared(Tensor! out, Tensor input) -> ()");
 
   // Compute int8 quantized tensor for given scaling factor.
   ops.def(
@@ -715,6 +718,7 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
   ops.impl("gelu_new", TORCH_BOX(&gelu_new));
   ops.impl("gelu_fast", TORCH_BOX(&gelu_fast));
   ops.impl("gelu_quick", TORCH_BOX(&gelu_quick));
+  ops.impl("relu_squared", TORCH_BOX(&relu_squared));
   ops.impl("silu_and_mul_with_clamp", TORCH_BOX(&silu_and_mul_clamp));
 
   // INT8 quantization kernels
@@ -843,8 +847,8 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C_cache_ops, ops) {
 
   ops.def(
       "cp_gather_and_upconvert_fp8_kv_cache(Tensor src_cache, Tensor! dst, "
-      "Tensor block_table, Tensor seq_lens, Tensor workspace_starts, int "
-      "batch_size) -> ()");
+      "Tensor block_table, Tensor workspace_starts, int batch_size, Tensor? "
+      "seq_starts) -> ()");
 
   ops.def(
       "indexer_k_quant_and_cache(Tensor k, Tensor! kv_cache, Tensor "

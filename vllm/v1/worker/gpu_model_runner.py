@@ -42,6 +42,7 @@ from vllm.distributed.eplb.eplb_state import EplbState
 from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group
 from vllm.distributed.kv_transfer.kv_connector.utils import copy_kv_blocks
 from vllm.distributed.parallel_state import (
+    GraphCaptureContext,
     get_dcp_group,
     get_pp_group,
     get_tp_group,
@@ -119,6 +120,7 @@ from vllm.utils.platform_utils import num_compute_units
 from vllm.utils.torch_utils import (
     PIN_MEMORY,
     async_tensor_h2d,
+    current_stream,
     get_dtype_size,
     is_quantized_kv_cache,
     kv_cache_dtype_str_to_dtype,
@@ -231,6 +233,7 @@ from .utils import (
     KVBlockZeroer,
     add_kv_sharing_layers_to_kv_cache_groups,
     bind_kv_cache,
+    copy_kv_cache_blocks_inplace,
     prepare_kernel_block_sizes,
     sanity_check_mm_encoder_outputs,
 )
@@ -1192,6 +1195,12 @@ class GPUModelRunner(
         # stale NaN/data from corrupting attention or SSM computation.
         if scheduler_output.new_block_ids_to_zero:
             self._zero_block_ids(scheduler_output.new_block_ids_to_zero)
+        if scheduler_output.kv_cache_block_copies:
+            copy_kv_cache_blocks_inplace(
+                self.kv_caches,
+                self.kv_cache_config.num_blocks,
+                scheduler_output.kv_cache_block_copies,
+            )
 
         # Free the cached encoder outputs.
         for mm_hash in scheduler_output.free_encoder_mm_hashes:
@@ -3279,6 +3288,17 @@ class GPUModelRunner(
             return self.model.unwrap()
         return self.model
 
+    def get_draft_model(self) -> nn.Module | None:
+        drafter = getattr(self, "drafter", None)
+        if drafter is None:
+            return None
+        model = getattr(drafter, "model", None)
+        if isinstance(
+            model, (CUDAGraphWrapper, UBatchWrapper, BreakableCUDAGraphWrapper)
+        ):
+            return cast(nn.Module, model.unwrap())
+        return cast(nn.Module | None, model)
+
     def get_supported_generation_tasks(self) -> list[GenerationTask]:
         model = self.get_model()
         supported_tasks = list[GenerationTask]()
@@ -3421,6 +3441,7 @@ class GPUModelRunner(
         )
 
         if raw_pooler_output is None or not any(finished_mask):
+            self._sync_device()
             model_runner_output.pooler_output = [None] * num_reqs
             return model_runner_output
 
@@ -6447,7 +6468,11 @@ class GPUModelRunner(
         kv_cache_spec = self.get_kv_cache_spec()
         KVCacheSpecRegistry.check_kv_cache_spec_registry(kv_cache_spec)
         kv_cache_groups = get_kv_cache_groups(self.vllm_config, kv_cache_spec)
-        min_blocks = self.compilation_config.max_cudagraph_capture_size or 1
+        # the minimum number of blocks required is 1 block *per sequence*
+        min_blocks = (
+            min(self.max_num_reqs, self.compilation_config.max_cudagraph_capture_size)
+            or 1
+        )
 
         # Temporarily change num_gpu_blocks_override to allocate a minimal KV cache
         saved_override = self.cache_config.num_gpu_blocks_override
@@ -6624,11 +6649,31 @@ class GPUModelRunner(
         per_graph_estimate = {}
         encoder_memory_estimate = 0
 
+        # On ROCm, capture these throwaway profiling graphs on vLLM's dedicated
+        # compute stream instead of the fresh side stream graph_capture()
+        # allocates by default. torch's allocator pools free blocks per stream,
+        # so a side-stream forward strands a persistent aiter scratch buffer in
+        # a separate pool, shifting the physical placement of the real KV cache
+        # allocated afterward and slowing bandwidth-bound decode ~20%. The
+        # graphs are discarded, so a side stream is unnecessary here.
+        # Use current_stream(), not torch.cuda.current_stream(): before vLLM
+        # initializes its dedicated stream, torch returns the per-thread default
+        # stream (cuda_stream=0), which cannot be used for cudagraph capture.
+        # cap_ctx=None keeps the side-stream path on CUDA.
+        cap_ctx = (
+            GraphCaptureContext(current_stream())
+            if current_platform.is_rocm()
+            else None
+        )
+
         # Cleanup-only guard: CUDA graph capture errors should still propagate
         # because encoder graph capture is opt-in.
         try:
             set_cudagraph_capturing_enabled(True)
-            with self._freeze_gc(), graph_capture(device=self.device):
+            with (
+                self._freeze_gc(),
+                graph_capture(device=self.device, graph_capture_context=cap_ctx),
+            ):
                 torch.accelerator.synchronize()
                 torch.accelerator.empty_cache()
 
@@ -7061,12 +7106,14 @@ class GPUModelRunner(
         if self.speculative_config and (
             self.speculative_config.use_eagle()
             or self.speculative_config.use_dspark()
+            or self.speculative_config.uses_draft_model()
             or self.speculative_config.uses_extract_hidden_states()
         ):
             assert isinstance(
                 self.drafter,
                 EagleProposer
                 | DFlashProposer
+                | DraftModelProposer
                 | ExtractHiddenStatesProposer
                 | Gemma4Proposer,
             )
@@ -7608,7 +7655,7 @@ class GPUModelRunner(
             BaseRouter,
         )
 
-        for module in self.compilation_config.static_forward_context.values():
+        for module in self.model.modules():
             if isinstance(module, MoERunner) and isinstance(module.router, BaseRouter):
                 layer_id = module.layer_id
 

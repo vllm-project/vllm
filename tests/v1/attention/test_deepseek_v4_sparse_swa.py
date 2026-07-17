@@ -11,7 +11,7 @@ from vllm.v1.attention.backends.mla.sparse_swa import (
 from vllm.v1.kv_cache_interface import MLAAttentionSpec
 
 
-def test_sparse_swa_reorder_threshold_matches_spec_decode_threshold():
+def test_sparse_swa_opts_out_of_reorder_batch_vote():
     vllm_config = create_vllm_config(
         block_size=256,
         hf_config_override={
@@ -39,4 +39,9 @@ def test_sparse_swa_reorder_threshold_matches_spec_decode_threshold():
     )
 
     assert builder.decode_threshold == 3
-    assert builder.reorder_batch_threshold == builder.decode_threshold
+    # sparse_swa deliberately opts OUT of the runner's reorder-batch vote
+    # (upstream #47327): the runner reduces thresholds with min_none_high, so
+    # publishing a real threshold here would drag flashmla_sparse's 128-1024
+    # dense-MHA routing threshold down for the whole model. indexer.py uses the
+    # same None opt-out. decode_threshold above stays the local spec value.
+    assert builder.reorder_batch_threshold is None

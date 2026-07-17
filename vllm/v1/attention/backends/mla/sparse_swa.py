@@ -299,8 +299,7 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
     - Chunked prefill (aligns with the indexer's chunking)
     """
 
-    # Base threshold: query_len <= 1 is decode
-    reorder_batch_threshold: int = 1
+    reorder_batch_threshold: int | None = None
     _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
 
     def __init__(self, *args, **kwargs):
@@ -311,19 +310,24 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
         self.compress_ratio = mla_spec.compress_ratio
         self.block_size = mla_spec.block_size
 
-        # Handle MTP: classify single-token queries plus speculative tokens as
-        # decodes, matching the runner-side batch reorder threshold.
+        # Handle MTP: adjust decode_threshold like the indexer does
         spec_config = self.vllm_config.speculative_config
         self.num_speculative_tokens = (
             spec_config.num_speculative_tokens if spec_config else 0
         )
-        # The spec-as-decode helper sets reorder_batch_threshold to
-        #   1 + (2 if parallel drafting else 1) * num_speculative_tokens,
-        # which MUST match the flashmla_sparse / indexer threshold so that all
-        # backends agree on the decode/prefill split.
-        self._init_reorder_batch_threshold(1, supports_spec_as_decode=True)
-        assert self.reorder_batch_threshold is not None
-        self.decode_threshold = self.reorder_batch_threshold
+        # Decode can have query_len up to
+        #   1 + (2 if parallel drafting else 1) * num_speculative_tokens.
+        # sparse_swa has no MQA-vs-dense-MHA routing, so multi-token queries take
+        # the prefill path and the decode/prefill split stays at that width.
+        # Like the indexer, sparse_swa opts out of the runner's shared
+        # reorder-threshold vote (which takes the min across builders) so that it
+        # cannot drag flashmla_sparse's much larger MHA-routing threshold down;
+        # its own split uses self.decode_threshold.
+        spec_mult = (
+            2 if (spec_config is not None and spec_config.parallel_drafting) else 1
+        )
+        self.decode_threshold = 1 + spec_mult * self.num_speculative_tokens
+        self.reorder_batch_threshold = None
 
         hf_config = self.vllm_config.model_config.hf_config
         assert hasattr(hf_config, "sliding_window")

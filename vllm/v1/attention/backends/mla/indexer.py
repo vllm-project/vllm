@@ -259,7 +259,9 @@ def get_max_prefill_buffer_size(vllm_config: VllmConfig):
 
 
 class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
-    reorder_batch_threshold: int = 1
+    # The indexer opts out of the shared reorder-threshold vote (see __init__),
+    # so this is None; its own split uses self.decode_threshold.
+    reorder_batch_threshold: int | None = None
 
     @classmethod
     def get_cudagraph_support(
@@ -306,7 +308,8 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         )
 
         next_n = self.num_speculative_tokens + 1
-        self.reorder_batch_threshold += self.num_speculative_tokens
+        self.decode_threshold = next_n
+        self.reorder_batch_threshold = None
         # NOTE: SM100 datacenter GPUs support any next_n natively via the
         # multi-atom paged MQA logits kernels (FP8 and FP4 indexer
         # caches). Outside the SM100 family the FP8
@@ -590,7 +593,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
             split_decodes_and_prefills(
                 common_attn_metadata,
-                decode_threshold=self.reorder_batch_threshold,
+                decode_threshold=self.decode_threshold,
                 require_uniform=not self.use_flattening,
                 treat_short_extends_as_decodes=not has_prefilling_rows,
             )

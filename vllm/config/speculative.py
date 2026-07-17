@@ -11,6 +11,7 @@ from typing_extensions import Self
 
 import vllm.envs as envs
 from vllm.config import LoadConfig
+from vllm.config.cache import CacheDType
 from vllm.config.kernel import MoEBackend
 from vllm.config.model import HfOverrides, ModelConfig
 from vllm.config.parallel import ParallelConfig
@@ -56,6 +57,7 @@ MTPModelTypes = Literal[
     "step3p5_mtp",
     "hy_v3_mtp",
     "gemma4_mtp",
+    "inkling_mtp",
 ]
 NgramGPUTypes = Literal["ngram_gpu"]
 DFlashModelTypes = Literal["dflash"]
@@ -125,6 +127,9 @@ class SpeculativeConfig:
     """Attention backend to use for the draft model. When `None`, the backend is
     automatically selected. Useful when the drafter requires a different attention
     backend (e.g. DFlash needs a non-causal-capable backend like FLASH_ATTN)."""
+    kv_cache_dtype: CacheDType | None = None
+    """KV cache dtype for the draft model. When `None`, the draft inherits the
+    target model's `--kv-cache-dtype`."""
     max_model_len: int | None = Field(default=None, ge=1)
     """The maximum model length of the draft model. Used when testing the
     ability to skip speculation for some sequences."""
@@ -602,6 +607,26 @@ class SpeculativeConfig:
                 {"n_predict": n_predict, "architectures": ["HYV3MTPModel"]}
             )
 
+        if hf_config.model_type in ("inkling_mm_model", "inkling_model"):
+            mtp_config = getattr(hf_config, "mtp_config", None) or {}
+            hf_config = getattr(hf_config, "text_config", hf_config)
+            checkpoint_depths = mtp_config.get("num_nextn_predict_layers", 0)
+            if checkpoint_depths < 1:
+                raise ValueError("The Inkling checkpoint does not contain MTP weights")
+            hf_config.model_type = "inkling_mtp"
+            hf_config.update(
+                {
+                    # Inkling currently exposes only the first checkpoint depth.
+                    "n_predict": 1,
+                    "num_nextn_predict_layers": checkpoint_depths,
+                    "chain_hidden_post_norm": mtp_config.get(
+                        "chain_hidden_post_norm", False
+                    ),
+                    "local_layer_ids": mtp_config.get("local_layer_ids", []),
+                    "architectures": ["InklingMTPModel"],
+                }
+            )
+
         if hf_config.model_type in ("gemma4_assistant", "gemma4_unified_assistant"):
             hf_config.model_type = "gemma4_mtp"
             text_config = getattr(hf_config, "text_config", hf_config)
@@ -679,6 +704,18 @@ class SpeculativeConfig:
             SpeculativeConfig._apply_composed_hf_override, target_hf_overrides
         )
 
+    @staticmethod
+    def _is_custom_proposer_path(model: str | None) -> bool:
+        """True if ``model`` is a dotted import path (e.g. ``pkg.MyProposer``)."""
+        if model is None:
+            return False
+        if model.startswith(("http://", "https://", "file://")):
+            return False
+        if "/" in model:
+            return False
+        parts = model.split(".")
+        return len(parts) >= 2 and all(part.isidentifier() for part in parts)
+
     def __post_init__(self):
         # Note: "method" is a new parameter that helps to extend the
         # configuration of non-model-based proposers, and the "model" parameter
@@ -689,14 +726,9 @@ class SpeculativeConfig:
         # default.
 
         # infer method from user args
-        # Check if the model field contains a custom module path (e.g., 'pkg.Mod')
-        if (
-            self.model is not None
-            and "." in self.model
-            and not self.model.startswith(("http://", "https://", "file://"))
-            and "/" not in self.model  # not a HuggingFace repo (org/model)
+        if self.method is None and SpeculativeConfig._is_custom_proposer_path(
+            self.model
         ):
-            # Treat as a custom class path
             self.method = "custom_class"
         elif self.method is None:
             if self.model in ("ngram", "[ngram]"):
@@ -903,6 +935,7 @@ class SpeculativeConfig:
                 elif (
                     "dspark" in self.draft_model_config.model.lower()
                     or "Qwen3DSparkModel" in self.draft_model_config.architectures
+                    or "Gemma4DSparkModel" in self.draft_model_config.architectures
                     or getattr(
                         self.draft_model_config.hf_config,
                         "dspark_block_size",
@@ -921,7 +954,7 @@ class SpeculativeConfig:
                     if (
                         self.num_speculative_tokens > 1
                         and self.draft_model_config.hf_config.model_type
-                        != "step3p5_mtp"
+                        not in ("step3p5_mtp", "inkling_mtp")
                     ):
                         logger.warning(
                             "Enabling num_speculative_tokens > 1 will run "
@@ -957,14 +990,17 @@ class SpeculativeConfig:
                         self.update_arch_()
 
                 if self.method == "dspark":
-                    self.parallel_drafting = True
                     if self.num_speculative_tokens is None:
                         self.num_speculative_tokens = getattr(
                             self.draft_model_config.hf_config,
                             "dspark_block_size",
                             None,
                         )
-                    if "Qwen3DSparkModel" not in self.draft_model_config.architectures:
+                    if (
+                        "Qwen3DSparkModel" not in self.draft_model_config.architectures
+                        and "Gemma4DSparkModel"
+                        not in self.draft_model_config.architectures
+                    ):
                         # DeepSeek-V4-Flash DSpark reuses the full DeepSeek-V4
                         # config and its weights ship in the target checkpoint.
                         self.draft_model_config.hf_config.model_type = "deepseek_v4"
@@ -972,7 +1008,22 @@ class SpeculativeConfig:
                             "DeepSeekV4DSparkModel"
                         ]
                         self.update_arch_()
-                elif self.method == "dflash":
+                    elif "Gemma4DSparkModel" in self.draft_model_config.architectures:
+                        # Normalize the self-contained Gemma4 draft's config keys
+                        # to the DSpark conventions.
+                        hf = self.draft_model_config.hf_config
+                        if (
+                            getattr(hf, "dspark_target_layer_ids", None) is None
+                            and getattr(hf, "target_layer_ids", None) is not None
+                        ):
+                            hf.dspark_target_layer_ids = hf.target_layer_ids
+                        if (
+                            getattr(hf, "n_predict", None) is None
+                            and getattr(hf, "block_size", None) is not None
+                        ):
+                            hf.n_predict = hf.block_size
+
+                if self.method in ("dflash", "dspark"):
                     self.parallel_drafting = True
 
                 if self.num_speculative_tokens is not None and hasattr(
@@ -1003,6 +1054,14 @@ class SpeculativeConfig:
                     raise ValueError(
                         "A speculative model was provided, but "
                         "`num_speculative_tokens` was not provided"
+                    )
+
+                if (
+                    self.draft_model_config.hf_config.model_type == "inkling_mtp"
+                    and self.num_speculative_tokens != 1
+                ):
+                    raise ValueError(
+                        "Inkling MTP currently supports exactly one speculative token"
                     )
 
                 if self.method == "dspark":

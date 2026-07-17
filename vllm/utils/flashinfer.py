@@ -478,11 +478,13 @@ def use_trtllm_attention(
     if force_use_trtllm is not None and not force_use_trtllm:
         return False
 
-    # Decode context parallel is not supported
+    # TRTLLM prefill attends only the DCP-local KV shard and has no
+    # cross-rank LSE combine, so it cannot be used with DCP; fall back to
+    # FlashInfer's DCP prefill path. TRTLLM decode under DCP is selected
+    # separately (all-gathered query heads + LSE combine in forward).
     if dcp_world_size > 1:
         logger.warning_once(
-            "Trtllm does not support returning LSE and as a result "
-            "does not support DCP, reverting to FlashInfer"
+            "TRTLLM prefill does not support DCP, reverting to FlashInfer"
         )
         return False
 
