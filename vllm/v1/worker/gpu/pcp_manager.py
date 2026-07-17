@@ -538,6 +538,7 @@ class PCPManager:
             logits_indices=logits_indices,
             cu_num_logits=cu_num_logits,
             cu_num_logits_np=cu_num_logits_np,
+            prompt_lens=None,
         )
 
     def prepare_attn(

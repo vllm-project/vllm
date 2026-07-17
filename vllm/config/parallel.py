@@ -479,6 +479,8 @@ class ParallelConfig:
                 )
             if not self.enable_expert_parallel:
                 raise ValueError("enable_expert_parallel must be True to use EPLB.")
+            # The EP group spans the TP x PCP x DP ranks. EPLB therefore needs
+            # TP, PCP, or DP > 1.
             if (
                 self.tensor_parallel_size
                 * self.prefill_context_parallel_size
