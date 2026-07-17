@@ -42,9 +42,10 @@ def _restore_full_token_layout_if_needed(
     hidden_states: torch.Tensor,
     residual: torch.Tensor,
     num_tokens: int,
+    is_sequence_parallel: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Restore full token rows for the MTP proposer after SP MoE layers."""
-    if hidden_states.shape[0] == num_tokens:
+    if not is_sequence_parallel and hidden_states.shape[0] == num_tokens:
         return hidden_states, residual
 
     combined_states = torch.cat([hidden_states, residual], dim=-1)
@@ -139,6 +140,7 @@ class DeepSeekMultiTokenPredictorLayer(nn.Module):
             hidden_states,
             residual,
             positions.shape[0],
+            is_sequence_parallel=self.mtp_block.use_sequence_parallel_moe,
         )
         hidden_states = residual + hidden_states  # pre-final-norm (logits hidden)
         # Recycle the post-final-norm hidden into the next draft step.
