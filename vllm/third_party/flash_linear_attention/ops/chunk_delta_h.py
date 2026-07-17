@@ -10,6 +10,7 @@
 
 import torch
 
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
 from .index import prepare_chunk_indices, prepare_chunk_offsets
@@ -19,6 +20,18 @@ from .utils import FLA_CHUNK_SIZE, use_cuda_graph
 NUM_WARPS = [2, 4, 8, 16]
 # Triton's AMD backend fails to lower this kernel with num_stages=4.
 _CHUNK_DELTA_H_NUM_STAGES = [2, 3] if torch.version.hip else [2, 3, 4]
+IS_CPU = current_platform.is_cpu()
+CPU_THREADS = [16, 32, 64, 96]
+
+if IS_CPU:
+    _chunk_delta_h_configs = [triton.Config({}, num_cpu_threads=t) for t in CPU_THREADS]
+else:
+    _chunk_delta_h_configs = [
+        triton.Config({"BV": BV}, num_warps=num_warps, num_stages=num_stages)
+        for num_warps in [2, 4]
+        for num_stages in _CHUNK_DELTA_H_NUM_STAGES
+        for BV in [32, 64]
+    ]
 
 
 @triton.heuristics(
@@ -29,15 +42,15 @@ _CHUNK_DELTA_H_NUM_STAGES = [2, 3] if torch.version.hip else [2, 3, 4]
         "STORE_FINAL_STATE": lambda args: args["ht"] is not None,
         "SAVE_NEW_VALUE": lambda args: args["v_new"] is not None,
         "IS_VARLEN": lambda args: args["cu_seqlens"] is not None,
+        **(
+            {"BV": lambda args: min(triton.next_power_of_2(args["V"]), 64)}
+            if IS_CPU
+            else {}
+        ),
     }
 )
 @triton.autotune(
-    configs=[
-        triton.Config({"BV": BV}, num_warps=num_warps, num_stages=num_stages)
-        for num_warps in [2, 4]
-        for num_stages in _CHUNK_DELTA_H_NUM_STAGES
-        for BV in [32, 64]
-    ],
+    configs=_chunk_delta_h_configs,
     key=["H", "K", "V", "BT"],
     use_cuda_graph=use_cuda_graph,
 )

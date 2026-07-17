@@ -12,6 +12,7 @@
 
 import torch
 
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
 from .index import prepare_chunk_indices
@@ -20,22 +21,37 @@ from .utils import FLA_CHUNK_SIZE, check_shared_mem, is_nvidia_hopper
 
 BKV_LIST = [64, 128] if check_shared_mem() else [32, 64]
 NUM_WARPS = [2, 4] if is_nvidia_hopper else [2, 4, 8]
+IS_CPU = current_platform.is_cpu()
+CPU_THREADS = [16, 32, 64, 96]
+
+if IS_CPU:
+    _chunk_o_configs = [triton.Config({}, num_cpu_threads=t) for t in CPU_THREADS]
+else:
+    _chunk_o_configs = [
+        triton.Config({"BK": BK, "BV": BV}, num_warps=num_warps, num_stages=num_stages)
+        for BK in BKV_LIST
+        for BV in BKV_LIST
+        for num_warps in NUM_WARPS
+        for num_stages in [2, 3, 4]
+    ]
 
 
 @triton.heuristics(
     {
         "USE_G": lambda args: args["g"] is not None,
         "IS_VARLEN": lambda args: args["cu_seqlens"] is not None,
+        **(
+            {
+                "BK": lambda args: min(triton.next_power_of_2(args["K"]), 64),
+                "BV": lambda args: min(triton.next_power_of_2(args["V"]), 64),
+            }
+            if IS_CPU
+            else {}
+        ),
     }
 )
 @triton.autotune(
-    configs=[
-        triton.Config({"BK": BK, "BV": BV}, num_warps=num_warps, num_stages=num_stages)
-        for BK in BKV_LIST
-        for BV in BKV_LIST
-        for num_warps in NUM_WARPS
-        for num_stages in [2, 3, 4]
-    ],
+    configs=_chunk_o_configs,
     key=["H", "K", "V", "BT"],
 )
 @triton.jit(do_not_specialize=["T"])

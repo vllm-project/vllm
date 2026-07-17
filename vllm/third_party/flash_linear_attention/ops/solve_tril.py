@@ -12,6 +12,7 @@ import os
 
 import torch
 
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
 from .index import prepare_chunk_indices
@@ -24,14 +25,33 @@ assert FLA_TRIL_PRECISION in ALLOWED_TRIL_PRECISIONS, (
     f"FLA_TRIL_PRECISION must be one of {ALLOWED_TRIL_PRECISIONS}, but got {FLA_TRIL_PRECISION}"
 )
 
+CPU_THREADS = [16, 32, 64, 96]
 
-@triton.heuristics({"IS_VARLEN": lambda args: args["cu_seqlens"] is not None})
-@triton.autotune(
-    configs=[
+if current_platform.is_cpu():
+    _solve_tril_configs = [triton.Config({}, num_cpu_threads=t) for t in CPU_THREADS]
+    _merge_32_configs = [triton.Config({}, num_cpu_threads=t) for t in CPU_THREADS]
+    _merge_64_configs = [triton.Config({}, num_cpu_threads=t) for t in CPU_THREADS]
+else:
+    _solve_tril_configs = [
         triton.Config({}, num_warps=num_warps, num_stages=num_stages)
         for num_warps in [1, 2, 4, 8]
         for num_stages in [2, 3, 4, 5]
-    ],
+    ]
+    _merge_32_configs = [
+        triton.Config({}, num_warps=num_warps, num_stages=num_stages)
+        for num_warps in [1, 2, 4, 8]
+        for num_stages in [2, 3, 4, 5]
+    ]
+    _merge_64_configs = [
+        triton.Config({}, num_warps=num_warps, num_stages=num_stages)
+        for num_warps in [2, 4, 8]
+        for num_stages in [2, 3, 4, 5]
+    ]
+
+
+@triton.heuristics({"IS_VARLEN": lambda args: args["cu_seqlens"] is not None})
+@triton.autotune(
+    configs=_solve_tril_configs,
     key=["BT"],
 )
 @triton.jit(do_not_specialize=["T"])
@@ -102,11 +122,7 @@ def solve_tril_16x16_kernel(
 
 @triton.heuristics({"IS_VARLEN": lambda args: args["cu_seqlens"] is not None})
 @triton.autotune(
-    configs=[
-        triton.Config({}, num_warps=num_warps, num_stages=num_stages)
-        for num_warps in [1, 2, 4, 8]
-        for num_stages in [2, 3, 4, 5]
-    ],
+    configs=_merge_32_configs,
     key=["H", "BT", "IS_VARLEN"],
 )
 @triton.jit(do_not_specialize=["T"])
@@ -227,11 +243,7 @@ def merge_16x16_to_32x32_inverse_kernel(
 
 @triton.heuristics({"IS_VARLEN": lambda args: args["cu_seqlens"] is not None})
 @triton.autotune(
-    configs=[
-        triton.Config({}, num_warps=num_warps, num_stages=num_stages)
-        for num_warps in [2, 4, 8]
-        for num_stages in [2, 3, 4, 5]
-    ],
+    configs=_merge_64_configs,
     key=["H", "BT", "IS_VARLEN"],
 )
 @triton.jit(do_not_specialize=["T"])
