@@ -33,10 +33,7 @@ steps:
     # Shard slow subset of standard language models tests. Only run when model
     # source is modified, or when specified test files are modified
     - pip freeze | grep -E 'torch'
-    # Keep V2 coverage for the models that support it on Hopper. Bloom uses
-    # FA2 + ALiBi, which currently needs the V1 runner on SM90.
-    - pytest -v -s models/language -m 'core_model and slow_test' -k 'not bloom-560m' --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
-    - VLLM_USE_V2_MODEL_RUNNER=0 pytest -v -s models/language -m 'core_model and slow_test' -k 'bloom-560m' --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
+    - pytest -v -s models/language -m 'core_model and slow_test' --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
   parallelism: 2
   mirror:
     amd:
@@ -55,10 +52,6 @@ steps:
       - tests/models/language/pooling/test_classification.py
       - vllm/_aiter_ops.py
       - vllm/platforms/rocm.py
-      commands:
-      - pip freeze | grep -E 'torch'
-      - pytest -v -s models/language -m 'core_model and slow_test' --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
-
 - label: Language Models Tests (Hybrid) %N
   device: h200_35gb
   key: language-models-tests-hybrid
