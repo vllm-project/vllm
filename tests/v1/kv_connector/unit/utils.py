@@ -388,18 +388,18 @@ class MockKVConnector(KVConnectorBase_V1):
             is_async=extra_config["is_async"],
             num_defers=extra_config.get("num_defers", 0),
         )
-        self._defers_left: dict[str, int] = {}
+        self._defers_left: defaultdict[str, int] = defaultdict(
+            lambda: self.config.num_defers
+        )
 
     def get_num_new_matched_tokens(
         self,
         request: Request,
         num_computed_tokens: int,
     ) -> tuple[int | None, bool]:
-        if self.config.num_defers:
-            left = self._defers_left.get(request.request_id, self.config.num_defers)
-            if left > 0:
-                self._defers_left[request.request_id] = left - 1
-                return (None, False)
+        if self._defers_left[request.request_id] > 0:
+            self._defers_left[request.request_id] -= 1
+            return (None, False)
         return (self.config.matched_tokens, self.config.is_async)
 
     def update_state_after_alloc(
