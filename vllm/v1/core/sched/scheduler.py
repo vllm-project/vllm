@@ -706,9 +706,11 @@ class Scheduler(SchedulerInterface):
                 num_external_computed_tokens = 0
                 load_kv_async = False
                 connector_prefix_cache_queries, connector_prefix_cache_hits = 0, 0
+                did_prefix_cache_lookup = False
 
                 # Get already-cached tokens.
                 if request.num_computed_tokens == 0:
+                    did_prefix_cache_lookup = True
                     # Get locally-cached tokens.
                     if (
                         self.connector is not None
@@ -739,9 +741,6 @@ class Scheduler(SchedulerInterface):
                         # The per-group lookup does not detect an uncached shared
                         # prefix, so there is no junction to pin in this path.
                         request.shared_prefix_boundary = 0
-                        self.kv_cache_manager.record_prefix_cache_query(
-                            request, num_new_local_computed_tokens
-                        )
                     else:
                         (
                             new_computed_blocks,
@@ -963,6 +962,17 @@ class Scheduler(SchedulerInterface):
                             num_hits=connector_prefix_cache_hits,
                             preempted=request.num_preemptions > 0,
                         )
+
+                # Record the GPU prefix-cache query once, at admission, mirroring
+                # the connector stat above. Deferral retries never reach here, and
+                # a preempted request re-enters the lookup and is recounted.
+                if self.kv_cache_manager.log_stats and did_prefix_cache_lookup:
+                    assert self.kv_cache_manager.prefix_cache_stats is not None
+                    self.kv_cache_manager.prefix_cache_stats.record(
+                        num_tokens=request.num_tokens,
+                        num_hits=num_new_local_computed_tokens,
+                        preempted=request.num_preemptions > 0,
+                    )
 
                 request = request_queue.pop_request()
                 if load_kv_async:
@@ -1215,8 +1225,6 @@ class Scheduler(SchedulerInterface):
         if request.spec_token_ids:
             request.spec_token_ids = []
         request.num_preemptions += 1
-        # Reset so the post-preemption recomputation is recorded.
-        request.prefix_cache_stats_recorded = False
         if self.log_stats:
             request.record_event(EngineCoreEventType.PREEMPTED, timestamp)
 

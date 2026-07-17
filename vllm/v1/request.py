@@ -194,9 +194,6 @@ class Request:
         # The number of times this request has been preempted by the scheduler.
         self.num_preemptions = 0
 
-        # Set once the prefix-cache query is recorded. Reset on preemption.
-        self.prefix_cache_stats_recorded = False
-
         self.prefill_stats: PrefillStats | None = PrefillStats()
 
         self.block_hashes: list[BlockHash] = []

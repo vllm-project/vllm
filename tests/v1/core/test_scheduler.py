@@ -1068,22 +1068,51 @@ def test_preempt_during_execution():
     assert requests[1].output_token_ids[0] == 42
 
 
-def test_preemption_reenables_prefix_cache_stat_recording():
-    """_preempt_request clears prefix_cache_stats_recorded so the prefix-cache
-    recomputation after preemption is counted again."""
+def test_prefix_cache_query_not_inflated_by_connector_defer():
+    """The GPU prefix-cache query is recorded at admission, so a request the
+    connector defers several times is counted once, not once per retry."""
+    num_defers = 3
+    scheduler = create_scheduler(
+        enable_prefix_caching=True,
+        use_kv_connector=mock_kv(
+            matched_tokens=0, is_async=False, num_defers=num_defers
+        ),
+    )
+    request = create_requests(num_requests=1, num_tokens=32, block_size=16)[0]
+    scheduler.add_request(request)
+
+    # Each deferred step re-runs the lookup but records nothing.
+    for _ in range(num_defers):
+        assert not scheduler.schedule().scheduled_new_reqs
+
+    output = scheduler.schedule()
+    assert any(r.req_id == request.request_id for r in output.scheduled_new_reqs)
+
+    stats = scheduler.kv_cache_manager.prefix_cache_stats
+    assert stats is not None
+    assert stats.requests == 1
+    assert stats.queries == request.num_tokens
+
+
+def test_preemption_re_records_prefix_cache_query():
+    """A preempted request re-enters the lookup on resume, so its recomputation
+    is counted again into the preempted stats."""
     scheduler = create_scheduler(enable_prefix_caching=True)
     request = create_requests(num_requests=1)[0]
     scheduler.add_request(request)
 
-    # First schedule records the prefix-cache query and sets the flag.
     scheduler.schedule()
-    assert request.status == RequestStatus.RUNNING
-    assert request.prefix_cache_stats_recorded
+    stats = scheduler.kv_cache_manager.prefix_cache_stats
+    assert stats is not None
+    assert (stats.requests, stats.preempted_requests) == (1, 0)
 
     scheduler.running.remove(request)
     scheduler._preempt_request(request, 0.0)
     assert request.status == RequestStatus.PREEMPTED
-    assert not request.prefix_cache_stats_recorded
+
+    scheduler.schedule()
+    assert request.status == RequestStatus.RUNNING
+    assert stats.preempted_requests == 1
 
 
 def test_scheduler_reset_prefix_cache():

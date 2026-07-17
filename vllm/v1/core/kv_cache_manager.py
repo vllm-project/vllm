@@ -204,19 +204,6 @@ class KVCacheManager:
         self.prefix_cache_stats = PrefixCacheStats()
         return stats
 
-    def record_prefix_cache_query(self, request: Request, num_hits: int) -> None:
-        # Record once per request. The lookup re-runs while a KVConnector defers
-        # the request, so the guard keeps deferral retries from double counting.
-        if not self.log_stats or request.prefix_cache_stats_recorded:
-            return
-        assert self.prefix_cache_stats is not None
-        request.prefix_cache_stats_recorded = True
-        self.prefix_cache_stats.record(
-            num_tokens=request.num_tokens,
-            num_hits=num_hits,
-            preempted=request.num_preemptions > 0,
-        )
-
     def get_computed_blocks(self, request: Request) -> tuple[KVCacheBlocks, int, int]:
         """Get the computed (cached) blocks for the request.
         Note that the computed blocks must be full.
@@ -281,8 +268,6 @@ class KVCacheManager:
         shared_prefix_boundary = (
             num_new_computed_tokens + num_uncached if num_uncached else 0
         )
-
-        self.record_prefix_cache_query(request, num_new_computed_tokens)
 
         blocks = self.create_kv_cache_blocks(computed_blocks)
         return blocks, num_new_computed_tokens, shared_prefix_boundary
