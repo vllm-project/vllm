@@ -36,17 +36,16 @@ from vllm.platforms import PlatformEnum
 
 pytestmark = pytest.mark.cpu_test
 
-# Kernels that quantize activations themselves (true W4A4): they only accept
-# no activation-format expectation, or an exact MXFP4-dynamic match.
+# Kernels that quantize activations themselves (true W4A4): they require an
+# explicit MXFP4-dynamic activation key.
 _TRUE_W4A4_KERNELS = [
     FlashInferMxFp4LinearKernel,
     XPUMxFp4LinearKernel,
     AiterMxfp4LinearKernel,
 ]
 
-# Weight-only (A16) kernels: they never quantize activations, so an
-# unquantized MXFP4-static activation key is tolerated (and ignored) in
-# addition to None/dynamic.
+# Weight-only (A16) kernels: they never quantize activations. They still accept
+# MXFP4 activation keys as an intentional compatibility fallback.
 _WEIGHT_ONLY_KERNELS = [MarlinMxFp4LinearKernel, HummingMxFp4LinearKernel]
 
 
@@ -68,15 +67,21 @@ def test_all_kernels_reject_non_mxfp4_weights(kernel_cls):
 
 
 @pytest.mark.parametrize("kernel_cls", _TRUE_W4A4_KERNELS)
-@pytest.mark.parametrize("activation_quant_key", [None, kMxfp4Dynamic])
-def test_true_w4a4_kernels_accept_native_or_unset_activation(
-    kernel_cls, activation_quant_key
-):
+def test_true_w4a4_kernels_accept_dynamic_mxfp4_activation(kernel_cls):
     config = MxFp4LinearLayerConfig(
-        weight_quant_key=kMxfp4Static, activation_quant_key=activation_quant_key
+        weight_quant_key=kMxfp4Static, activation_quant_key=kMxfp4Dynamic
     )
     can_implement, reason = kernel_cls.can_implement(config)
     assert can_implement, reason
+
+
+@pytest.mark.parametrize("kernel_cls", _TRUE_W4A4_KERNELS)
+def test_true_w4a4_kernels_reject_unset_activation(kernel_cls):
+    """None means weight-only/unquantized activations, not dynamic MXFP4."""
+    config = MxFp4LinearLayerConfig(weight_quant_key=kMxfp4Static)
+    can_implement, reason = kernel_cls.can_implement(config)
+    assert not can_implement
+    assert reason
 
 
 @pytest.mark.parametrize("kernel_cls", _TRUE_W4A4_KERNELS)

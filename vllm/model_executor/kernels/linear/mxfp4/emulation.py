@@ -95,11 +95,12 @@ class EmulationOcpMxLinearKernel(MxFp4LinearKernel):
         ):
             return False, "only supports MXFP4 or MXFP6 weights"
         if config.activation_quant_key not in (
+            None,
             kMxfp4Dynamic,
             kMxfp6E3M2Dynamic,
             kMxfp6E2M3Dynamic,
         ):
-            return False, "only supports MXFP4 or MXFP6 activations"
+            return False, "only supports MXFP4 or MXFP6 or unquantized activations"
 
         return True, None
 
