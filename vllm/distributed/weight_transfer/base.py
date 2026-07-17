@@ -5,7 +5,15 @@
 from abc import ABC, abstractmethod
 from collections.abc import Iterator
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Generic, Protocol, TypeVar, runtime_checkable
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    ClassVar,
+    Generic,
+    Protocol,
+    TypeVar,
+    runtime_checkable,
+)
 
 import torch
 from typing_extensions import Self
@@ -18,7 +26,7 @@ from vllm.config.weight_transfer import WeightTransferConfig
 
 TInitInfo = TypeVar("TInitInfo", bound="WeightTransferInitInfo")
 TUpdateInfo = TypeVar("TUpdateInfo", bound="WeightTransferUpdateInfo")
-TConfig = TypeVar("TConfig", bound="WeightTransferConfig")
+TTrainerInitInfo = TypeVar("TTrainerInitInfo", bound="TrainerInitInfo")
 
 # A trainer supplies its parameters as a `WeightSource` (defined below): a
 # re-iterable stream of materialized `(name, tensor)` pairs plus a `metadata()`
@@ -108,8 +116,12 @@ class WeightTransferInitInfo(ABC):  # noqa: B024
 
 
 @dataclass
-class TrainerInitInfo(WeightTransferInitInfo):
+class TrainerInitInfo:
     """Base trainer-side init info: which trainer rank drives the transfer.
+
+    Deliberately *not* a `WeightTransferInitInfo` (that base is for the worker
+    side, with its own dict-parse machinery). The trainer and worker init-info
+    hierarchies are parallel and never interchanged.
 
     `rank` is this trainer process's rank, provided **explicitly** by the
     caller — the engine does not read it from a global process group, which is
@@ -118,9 +130,25 @@ class TrainerInitInfo(WeightTransferInitInfo):
     while every rank still runs the trainer-side collectives. Backend subclasses
     add their own (positional) fields; `rank` is keyword-only so that ordering
     never conflicts.
+
+    Every concrete subclass sets a class-level `backend` string (the same key it
+    registers under in `WeightTransferTrainerFactory`). The factory reads it to
+    dispatch, so callers pass only the init info — never a separate `backend`
+    argument. It is a `ClassVar` (a fixed per-backend constant), so it is not an
+    ``__init__`` field.
     """
 
+    backend: ClassVar[str]
+
     rank: int = field(kw_only=True)
+
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        super().__init_subclass__(**kwargs)
+        if not getattr(cls, "backend", None):
+            raise TypeError(
+                f"{cls.__name__} must set a class-level `backend` string "
+                "(the WeightTransferTrainerFactory registry key)."
+            )
 
     @property
     def is_sender(self) -> bool:
@@ -373,7 +401,7 @@ class VLLMWeightSyncClient(Protocol):
     def finish_weight_update(self) -> None: ...
 
 
-class TrainerWeightTransferEngine(ABC, Generic[TConfig, TInitInfo]):
+class TrainerWeightTransferEngine(ABC, Generic[TTrainerInitInfo]):
     """Trainer-side weight transfer engine.
 
     Symmetric to `WeightTransferEngine` but lives in the training process.
@@ -381,6 +409,13 @@ class TrainerWeightTransferEngine(ABC, Generic[TConfig, TInitInfo]):
     backend-specific state (NCCL communicators, IPC device info, transfer
     plans) on `self`. The `WeightSource` is required at `trainer_init`,
     then replayed each round by the no-argument `send_weights()`.
+
+    Unlike the worker engine, the trainer side does not take a
+    `WeightTransferConfig`: the backend is selected from the init info's
+    `backend` `ClassVar` (so callers pass only the init info), and the static
+    wire params (packed, buffer sizes) ride the backend-specific
+    `TrainerInitInfo`, which the sender also propagates to the worker at the init
+    handshake.
 
     Multi-rank trainers: `trainer_init` and `send_weights` are
     called on *every* trainer rank. Rank 0 is the sender, resolved once at
@@ -392,22 +427,18 @@ class TrainerWeightTransferEngine(ABC, Generic[TConfig, TInitInfo]):
 
     Subclasses should define:
         init_info_cls: Type of backend-specific trainer init info
-        config_cls: Type of backend-specific config
     """
 
-    # Subclasses should override these class attributes
-    init_info_cls: type[TInitInfo]
-    config_cls: type[TConfig]
+    # Subclasses should override this class attribute
+    init_info_cls: type[TTrainerInitInfo]
 
     def __init__(
         self,
-        config: TConfig,
         *,
         client: "VLLMWeightSyncClient",
         source: "WeightSource",
         is_sender: bool = True,
     ) -> None:
-        self.config = config
         self.is_sender = is_sender
         # The real client is held on every rank; each engine only *calls* it when
         # `is_sender`, so non-sender ranks never touch the wire.
@@ -418,8 +449,7 @@ class TrainerWeightTransferEngine(ABC, Generic[TConfig, TInitInfo]):
     @abstractmethod
     def trainer_init(
         cls,
-        config: TConfig,
-        init_info: TInitInfo,
+        init_info: TTrainerInitInfo,
         *,
         client: "VLLMWeightSyncClient",
         source: "WeightSource",

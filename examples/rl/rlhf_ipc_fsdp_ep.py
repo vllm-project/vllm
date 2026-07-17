@@ -142,8 +142,6 @@ class FSDPTrainWorker:
         IPC handle all-gather during send_weights.
         """
         self.engine = WeightTransferTrainerFactory.trainer_init(
-            backend="ipc",
-            config=WEIGHT_TRANSFER_CONFIG,
             init_info=IPCTrainerInitInfo(
                 rank=self.rank,  # FSDP rank; sender is 0
                 packed=PACKED,

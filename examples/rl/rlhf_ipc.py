@@ -69,9 +69,6 @@ class TrainModel:
     def init_weight_transfer(self):
         """Build the trainer-side IPC engine (no rendezvous needed for IPC)."""
         self.engine = WeightTransferTrainerFactory.trainer_init(
-            backend="ipc",
-            config=WeightTransferConfig(backend="ipc"),
-            # packed is a trainer-side wire param, propagated to the worker.
             init_info=IPCTrainerInitInfo(rank=0, packed=False),  # rank 0 = sender
             client=RayVLLMWeightSyncClient(self.llm_handle),
             source=ModuleSource(self.train_model),

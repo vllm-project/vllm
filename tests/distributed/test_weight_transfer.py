@@ -27,6 +27,7 @@ from vllm.distributed.weight_transfer import (
     WeightTransferTrainerFactory,
 )
 from vllm.distributed.weight_transfer.base import (
+    TrainerInitInfo,
     WeightTransferInitRequest,
     WeightTransferUpdateRequest,
 )
@@ -1267,8 +1268,8 @@ class _DummyTrainerEngine(TrainerWeightTransferEngine):
     """Minimal concrete trainer engine to exercise base-class + factory."""
 
     @classmethod
-    def trainer_init(cls, config, init_info, *, client, source):
-        return cls(config, client=client, source=source)
+    def trainer_init(cls, init_info, *, client, source):
+        return cls(client=client, source=source)
 
     def send_weights(self):
         pass
@@ -1375,9 +1376,7 @@ class TestTrainerFactory:
         try:
             WeightTransferTrainerFactory.register_engine("dummy", _DummyTrainerEngine)
             engine = WeightTransferTrainerFactory.trainer_init(
-                "dummy",
-                WeightTransferConfig(backend="dummy"),
-                MagicMock(),
+                MagicMock(backend="dummy"),  # backend read from the init info
                 client=RecordingClient(),
                 source=ModuleSource(_module_with(("w", torch.zeros(2)))),
             )
@@ -1392,12 +1391,19 @@ class TestTrainerFactory:
     def test_unknown_backend_raises(self):
         with pytest.raises(ValueError, match="Invalid weight transfer backend"):
             WeightTransferTrainerFactory.trainer_init(
-                "nope",
-                WeightTransferConfig(backend="nope"),
-                MagicMock(),
+                MagicMock(backend="nope"),
                 client=RecordingClient(),
                 source=ModuleSource(_module_with(("w", torch.zeros(2)))),
             )
+
+    def test_ipc_init_info_declares_backend(self):
+        assert IPCTrainerInitInfo.backend == "ipc"
+
+    def test_trainer_init_info_subclass_must_set_backend(self):
+        with pytest.raises(TypeError, match="class-level `backend`"):
+
+            class _NoBackend(TrainerInitInfo):
+                pass
 
 
 class TestTrainerEngineBase:
@@ -1405,7 +1411,6 @@ class TestTrainerEngineBase:
 
     def test_source_stored_and_sender_by_default(self):
         engine = _DummyTrainerEngine(
-            WeightTransferConfig(backend="nccl"),
             client=RecordingClient(),
             source=ModuleSource(_module_with(("w", torch.zeros(2)))),
         )
@@ -1414,7 +1419,6 @@ class TestTrainerEngineBase:
 
     def test_shutdown_default_is_noop(self):
         engine = _DummyTrainerEngine(
-            WeightTransferConfig(backend="nccl"),
             client=RecordingClient(),
             source=ModuleSource(_module_with(("w", torch.zeros(2)))),
             is_sender=False,
@@ -1432,7 +1436,6 @@ def test_ipc_trainer_send_weights_drives_client_in_order():
     the packed wire param rides the init info, not the per-round update_info."""
     client = RecordingClient()
     engine = IPCTrainerWeightTransferEngine(
-        WeightTransferConfig(backend="ipc"),
         client=client,
         source=ModuleSource(_module_with(("w", torch.ones(4, device="cuda")))),
         packed=False,
@@ -1455,9 +1458,7 @@ def test_ipc_trainer_init_ships_packed_to_worker():
 
     client = RecordingClient()
     engine = WeightTransferTrainerFactory.trainer_init(
-        backend="ipc",
-        config=WeightTransferConfig(backend="ipc"),
-        init_info=IPCTrainerInitInfo(rank=0, packed=True),
+        init_info=IPCTrainerInitInfo(rank=0, packed=True),  # backend from init info
         client=client,
         source=ModuleSource(_module_with(("w", torch.ones(4, device="cuda")))),
     )

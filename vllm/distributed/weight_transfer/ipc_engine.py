@@ -4,7 +4,7 @@
 
 import pickle
 from dataclasses import asdict, dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 
 import pybase64 as base64
 import torch
@@ -52,8 +52,9 @@ class IPCTrainerInitInfo(TrainerInitInfo):
 
     `packed` / `packed_buffer_size_bytes` are the transfer's wire params. The
     trainer propagates `packed` to the worker at `trainer_init` so the two sides
-    cannot disagree."""
+    cannot disagree. `backend` is the factory dispatch key."""
 
+    backend: ClassVar[str] = "ipc"
     packed: bool = False
     packed_buffer_size_bytes: int = DEFAULT_PACKED_BUFFER_SIZE_BYTES
 
@@ -253,9 +254,7 @@ class IPCWeightTransferEngine(
         )
 
 
-class IPCTrainerWeightTransferEngine(
-    TrainerWeightTransferEngine[WeightTransferConfig, IPCTrainerInitInfo]
-):
+class IPCTrainerWeightTransferEngine(TrainerWeightTransferEngine[IPCTrainerInitInfo]):
     """Trainer-side CUDA IPC weight transfer engine.
 
     Called on every trainer rank. For multi-rank (e.g. FSDP) trainers all ranks
@@ -270,11 +269,9 @@ class IPCTrainerWeightTransferEngine(
     """
 
     init_info_cls = IPCTrainerInitInfo
-    config_cls = WeightTransferConfig
 
     def __init__(
         self,
-        config: WeightTransferConfig,
         *,
         client: VLLMWeightSyncClient,
         source: WeightSource,
@@ -282,7 +279,7 @@ class IPCTrainerWeightTransferEngine(
         packed: bool = False,
         packed_buffer_size_bytes: int = DEFAULT_PACKED_BUFFER_SIZE_BYTES,
     ) -> None:
-        super().__init__(config, client=client, source=source, is_sender=is_sender)
+        super().__init__(client=client, source=source, is_sender=is_sender)
         self.packed = packed
         self.packed_buffer_size_bytes = packed_buffer_size_bytes
         self.device_index = torch.accelerator.current_device_index()
@@ -291,14 +288,12 @@ class IPCTrainerWeightTransferEngine(
     @classmethod
     def trainer_init(
         cls,
-        config: WeightTransferConfig,
         init_info: IPCTrainerInitInfo,
         *,
         client: VLLMWeightSyncClient,
         source: WeightSource,
     ) -> Self:
         engine = cls(
-            config,
             client=client,
             source=source,
             is_sender=init_info.is_sender,
