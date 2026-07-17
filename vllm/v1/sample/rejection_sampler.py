@@ -3,7 +3,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+import functools
+from collections.abc import Callable, Sequence
 from dataclasses import replace
 from typing import TYPE_CHECKING
 
@@ -11,7 +12,9 @@ import torch
 import torch.nn as nn
 
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
+from vllm.utils.flashinfer import has_flashinfer
 from vllm.v1.outputs import LogprobsLists, LogprobsTensors, SamplerOutput
 from vllm.v1.sample.logits_processor.builtin import MinTokensLogitsProcessor
 from vllm.v1.sample.metadata import SamplingMetadata
@@ -32,6 +35,18 @@ GREEDY_TEMPERATURE: tl.constexpr = 0
 # Maximum number of speculative draft tokens allowed per request in a single
 # step. This value is chosen to be large enough to handle typical use cases.
 MAX_SPEC_LEN = 128
+
+
+@functools.cache
+def _get_flashinfer_top_p_renorm_probs() -> Callable[..., torch.Tensor] | None:
+    """Return FlashInfer AIR top-p renorm when it is usable on this host."""
+    if not current_platform.is_cuda() or not has_flashinfer():
+        return None
+    try:
+        from flashinfer.sampling import top_p_renorm_probs
+    except (ImportError, AttributeError):
+        return None
+    return top_p_renorm_probs
 
 
 class RejectionSampler(nn.Module):
@@ -166,11 +181,33 @@ class RejectionSampler(nn.Module):
         # [num_tokens, vocab_size]
         # NOTE(woosuk): `target_logits` can be updated in place inside the
         # `apply_sampling_constraints` function.
-        target_logits = apply_sampling_constraints(
-            target_logits,
-            metadata.cu_num_draft_tokens,
-            sampling_metadata,
+        target_probs = None
+        can_use_flashinfer_top_p = (
+            sampling_metadata.all_random
+            and sampling_metadata.top_p is not None
+            and sampling_metadata.top_k is None
+            and not self.is_processed_logprobs_mode
         )
+        flashinfer_top_p_renorm = (
+            _get_flashinfer_top_p_renorm_probs() if can_use_flashinfer_top_p else None
+        )
+        if flashinfer_top_p_renorm is not None:
+            # MTP rejection sampling consumes the complete target
+            # distribution.  AIR produces that distribution directly, so it
+            # avoids materializing masked logits and softmaxing them again in
+            # `rejection_sample`.
+            target_probs = apply_top_p_constraints_flashinfer(
+                target_logits,
+                metadata.cu_num_draft_tokens,
+                sampling_metadata,
+                flashinfer_top_p_renorm,
+            )
+        else:
+            target_logits = apply_sampling_constraints(
+                target_logits,
+                metadata.cu_num_draft_tokens,
+                sampling_metadata,
+            )
 
         output_token_ids = rejection_sample(
             metadata.draft_token_ids,
@@ -181,6 +218,7 @@ class RejectionSampler(nn.Module):
             target_logits,
             bonus_token_ids,
             sampling_metadata,
+            target_probs=target_probs,
             synthetic_mode=self.synthetic_mode,
             synthetic_conditional_rates=self.synthetic_conditional_rates,
             use_fp64_gumbel=self.use_fp64_gumbel,
@@ -408,6 +446,7 @@ def rejection_sample(
     # [batch_size, 1]
     bonus_token_ids: torch.Tensor,
     sampling_metadata: SamplingMetadata,
+    target_probs: torch.Tensor | None = None,
     synthetic_mode: bool = False,
     synthetic_conditional_rates: torch.Tensor | None = None,
     use_fp64_gumbel: bool = False,
@@ -425,6 +464,7 @@ def rejection_sample(
     assert draft_probs is None or draft_probs.is_contiguous()
     assert bonus_token_ids.is_contiguous()
     assert target_logits.shape == (num_tokens, vocab_size)
+    assert target_probs is None or target_probs.shape == target_logits.shape
 
     # Create output buffer.
     output_token_ids = torch.full(
@@ -470,8 +510,10 @@ def rejection_sample(
         if sampling_metadata.all_greedy:
             return output_token_ids
 
-    # Compute probability distribution from target logits.
-    target_probs = target_logits.softmax(dim=-1, dtype=torch.float32)
+    # Compute the target distribution unless the constraint path produced it
+    # directly (e.g. FlashInfer AIR top-p renormalization).
+    if target_probs is None:
+        target_probs = target_logits.softmax(dim=-1, dtype=torch.float32)
     assert target_probs.is_contiguous()
 
     # Sample recovered tokens for each position.
@@ -507,6 +549,39 @@ def rejection_sample(
         SYNTHETIC_MODE=synthetic_mode,
     )
     return output_token_ids
+
+
+def apply_top_p_constraints_flashinfer(
+    logits: torch.Tensor,
+    cu_num_draft_tokens: torch.Tensor,
+    sampling_metadata: SamplingMetadata,
+    top_p_renorm_probs: Callable[..., torch.Tensor],
+) -> torch.Tensor:
+    """Return temperature-scaled, top-p-renormalized target probabilities.
+
+    This helper is intentionally limited to the all-random, top-p-only path by
+    its caller.  Other sampling modes continue through
+    `apply_sampling_constraints`.
+    """
+    assert sampling_metadata.all_random
+    assert sampling_metadata.temperature is not None
+    assert sampling_metadata.top_p is not None
+    assert sampling_metadata.top_k is None
+
+    num_tokens = logits.shape[0]
+    temperature = expand_batch_to_tokens(
+        sampling_metadata.temperature,
+        cu_num_draft_tokens,
+        num_tokens,
+    )
+    logits.div_(temperature.unsqueeze(-1))
+    top_p = expand_batch_to_tokens(
+        sampling_metadata.top_p,
+        cu_num_draft_tokens,
+        num_tokens,
+    )
+    probs = logits.softmax(dim=-1, dtype=torch.float32)
+    return top_p_renorm_probs(probs, top_p, is_deterministic=True)
 
 
 def apply_sampling_constraints(

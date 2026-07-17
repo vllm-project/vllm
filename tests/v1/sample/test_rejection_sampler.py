@@ -11,9 +11,12 @@ from tests.v1.sample.utils import create_allowed_token_ids
 from vllm.platforms import current_platform
 from vllm.v1.sample.logits_processor import LogitsProcessors
 from vllm.v1.sample.metadata import SamplingMetadata
+from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p_pytorch
 from vllm.v1.sample.rejection_sampler import (
     PLACEHOLDER_TOKEN_ID,
     RejectionSampler,
+    apply_sampling_constraints,
+    apply_top_p_constraints_flashinfer,
     sample_recovered_tokens,
 )
 from vllm.v1.sample.sampler import Sampler, SamplerOutput
@@ -742,6 +745,41 @@ def test_top_p(rejection_sampler, top_p):
         unmasked_indices=top_p_indices,
         sampling_metadata=sampling_metadata,
     )
+
+
+def test_flashinfer_top_p_target_probs_match_vllm_constraints():
+    """The AIR fast path must preserve vLLM's MTP target distribution."""
+    vocab_size = 100
+    cu_num_draft_tokens = torch.tensor([2, 5, 6], device=DEVICE_TYPE, dtype=torch.int32)
+    logits = torch.randn((6, vocab_size), device=DEVICE_TYPE)
+    sampling_metadata = create_sampling_metadata(
+        all_greedy=False,
+        temperature=torch.tensor([0.5, 1.0, 2.0], device=DEVICE_TYPE),
+        top_p=torch.tensor([0.8, 0.9, 0.95], device=DEVICE_TYPE),
+    )
+
+    expected_logits = apply_sampling_constraints(
+        logits.clone(), cu_num_draft_tokens, sampling_metadata
+    )
+    expected_probs = expected_logits.softmax(dim=-1, dtype=torch.float32)
+
+    deterministic = None
+
+    def exact_top_p_renorm(probs, top_p, is_deterministic):
+        nonlocal deterministic
+        deterministic = is_deterministic
+        masked_logits = apply_top_k_top_p_pytorch(probs.log(), None, top_p)
+        return masked_logits.softmax(dim=-1, dtype=torch.float32)
+
+    target_probs = apply_top_p_constraints_flashinfer(
+        logits.clone(),
+        cu_num_draft_tokens,
+        sampling_metadata,
+        exact_top_p_renorm,
+    )
+
+    assert deterministic is True
+    torch.testing.assert_close(target_probs, expected_probs)
 
 
 ########################### Tests for Logit Processors ###################
