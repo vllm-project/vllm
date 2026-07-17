@@ -253,26 +253,33 @@ class TestAnnotateProfile:
 
         ctx_req = MagicMock(req_id="ctx1", num_computed_tokens=0)
         cached = CachedRequestData(
-            req_ids=["gen1"], resumed_req_ids=set(), new_token_ids=[],
-            all_token_ids={}, new_block_ids=[],
-            num_computed_tokens=[10], num_output_tokens=[1],
+            req_ids=["gen1"],
+            resumed_req_ids=set(),
+            new_token_ids=[],
+            all_token_ids={},
+            new_block_ids=[],
+            num_computed_tokens=[10],
+            num_output_tokens=[1],
         )
-        sched = MagicMock(scheduled_new_reqs=[ctx_req],
-                          scheduled_cached_reqs=cached,
-                          num_scheduled_tokens={"ctx1": 4, "gen1": 1})
+        sched = MagicMock(
+            scheduled_new_reqs=[ctx_req],
+            scheduled_cached_reqs=cached,
+            num_scheduled_tokens={"ctx1": 4, "gen1": 1},
+        )
 
         Worker.annotate_profile(worker, sched)
         return worker.profiler.annotate_context_manager.call_args[0][0]
 
     def test_simple_format_mixed(self):
         assert self._annotate(detailed=False) == (
-            "execute_context_1(4)_generation_1(1)")
+            "execute_context_1(4)_generation_1(1)"
+        )
 
     def test_detailed_format_mixed(self):
         # ctx1: sq=4, sk=4, sqsq=16, sqsk=16 | gen1: sq=1, sk=11, sqsq=1, sqsk=11 | bs=5
         assert self._annotate(detailed=True) == (
-            "execute_5_context_1(sq4sk4sqsq16sqsk16)"
-            "_generation_1(sq1sk11sqsq1sqsk11)")
+            "execute_5_context_1(sq4sk4sqsq16sqsk16)_generation_1(sq1sk11sqsq1sqsk11)"
+        )
 
 
 def test_profiler_entered_during_capture():
