@@ -228,3 +228,12 @@ WeightTransferEngineFactory.register_engine(
     "vllm.distributed.weight_transfer.sparse_nccl_engine",
     "SparseNCCLWeightTransferEngine",
 )
+
+
+# Trainer-side engines. Backends register here as they migrate to the stateful
+# trainer engine; NCCL / sparse NCCL keep their static trainer path until then.
+WeightTransferTrainerFactory.register_engine(
+    "ipc",
+    "vllm.distributed.weight_transfer.ipc_engine",
+    "IPCTrainerWeightTransferEngine",
+)
