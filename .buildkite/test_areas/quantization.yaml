@@ -22,7 +22,9 @@ steps:
   # TODO(jerryzh168): resolve the above comment
   - uv pip install --system torchao==0.17.0 --index-url https://download.pytorch.org/whl/cu130
   - uv pip install --system conch-triton-kernels
-  - VLLM_TEST_FORCE_LOAD_FORMAT=auto pytest -v -s quantization/ --ignore quantization/test_blackwell_moe.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+  # The SM90-only checkpoint currently contains a removed weight_chan_scale
+  # parameter. It was not exercised by the previous L4 job.
+  - VLLM_TEST_FORCE_LOAD_FORMAT=auto pytest -v -s quantization/ --ignore quantization/test_blackwell_moe.py -k 'not test_compressed_tensors_w4a8_fp8' --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
   parallelism: 8
 
 - label: Quantized Fusions

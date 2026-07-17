@@ -6,7 +6,6 @@ import torch
 from packaging.version import Version
 from transformers import __version__ as TRANSFORMERS_VERSION
 
-from vllm.envs import disable_envs_cache
 from vllm.platforms import current_platform
 
 from ....utils import large_gpu_mark
@@ -143,15 +142,6 @@ def test_models(
         # needed as all the models will be calling AITER kernels
         # in parts of the operators
         pytest.skip(f"Skipping '{model}' model test with AITER kernel.")
-
-    if (
-        model == "bigscience/bloom-560m"
-        and current_platform.is_device_capability_family(90)
-    ):
-        # Preserve the L4 test's V1 runner while FA2 + ALiBi is unsupported by
-        # the V2 runner on Hopper.
-        monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
-        disable_envs_cache()
 
     if model == "bigcode/starcoder2-3b":
         # Replace example.txt's Test1 (an NL prompt) with a code prompt:

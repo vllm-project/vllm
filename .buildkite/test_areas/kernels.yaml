@@ -107,16 +107,15 @@ steps:
     - pytest -v -s kernels/attention/test_triton_unified_attention_diffkv.py
 
 - label: Kernels Quantization Test %N
-  device: h200_35gb
   key: kernels-quantization-test
-  timeout_in_minutes: 75
+  timeout_in_minutes: 60
   source_file_dependencies:
   - csrc/quantization/
   - vllm/model_executor/layers/quantization
   - tests/kernels/quantization
   commands:
     - pytest -v -s kernels/quantization --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
-  parallelism: 12
+  parallelism: 2
   mirror:
     amd:
       device: mi325_1

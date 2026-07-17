@@ -33,7 +33,10 @@ steps:
     # Shard slow subset of standard language models tests. Only run when model
     # source is modified, or when specified test files are modified
     - pip freeze | grep -E 'torch'
-    - pytest -v -s models/language -m 'core_model and slow_test' --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
+    # Keep V2 coverage for the models that support it on Hopper. Bloom uses
+    # FA2 + ALiBi, which currently needs the V1 runner on SM90.
+    - pytest -v -s models/language -m 'core_model and slow_test' -k 'not bloom-560m' --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
+    - VLLM_USE_V2_MODEL_RUNNER=0 pytest -v -s models/language -m 'core_model and slow_test' -k 'bloom-560m' --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
   parallelism: 2
   mirror:
     amd:
@@ -52,6 +55,9 @@ steps:
       - tests/models/language/pooling/test_classification.py
       - vllm/_aiter_ops.py
       - vllm/platforms/rocm.py
+      commands:
+      - pip freeze | grep -E 'torch'
+      - pytest -v -s models/language -m 'core_model and slow_test' --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
 
 - label: Language Models Tests (Hybrid) %N
   device: h200_35gb
@@ -66,7 +72,10 @@ steps:
     - uv pip install --system --no-build-isolation 'git+https://github.com/state-spaces/mamba@v2.3.0'
     - uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.6.0'
     # Shard hybrid language model tests
-    - pytest -v -s models/language/generation -m hybrid_model --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
+    # Keep V2 coverage for the models that support it on Hopper. Granite's
+    # hybrid generation currently needs the V1 runner on SM90.
+    - pytest -v -s models/language/generation -m hybrid_model -k 'not granite-4.0-tiny-preview' --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
+    - VLLM_USE_V2_MODEL_RUNNER=0 pytest -v -s models/language/generation -m hybrid_model -k 'granite-4.0-tiny-preview' --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
   parallelism: 2
   mirror:
     amd:
