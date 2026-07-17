@@ -29,7 +29,17 @@
 #   TRANSFORMER_REPO_URL  仓库地址, 如 https://gitlab-cn-beijing.siflow.cn/pretrain/transformers.git
 #   TRANSFORMER_BRANCH    分支名, 如 feat_baseline
 #   TRANSFORMER_COMMIT    可选; 空则停在分支 HEAD (变量留空即可, 不要不建)
-#   GITLAB_TOKEN          带 read_repository 的 PAT/deploy token (Masked, 建议 Protected)
+#
+#   GITLAB_TOKEN          带 read_repository 的 PAT/deploy token (Masked, 建议 Protected);
+#                         base-image-build clone transformers、image-build clone lmcache 都要用
+#
+#   image-build (release/update) 需要 (从私有仓库 clone lmcache, 可编辑安装): Dockerfile 无默认值,
+#   未配置直接构建失败:
+#   LMCACHE_REPO_URL      仓库地址, 如 https://gitlab-cn-beijing.siflow.cn/inference/lmcache.git
+#   LMCACHE_BRANCH        分支名 (如 develop)
+#   LMCACHE_COMMIT        commit hash
+#     LMCACHE_BRANCH / LMCACHE_COMMIT 至少配一个, 都空报错;
+#     两个都配则校验 commit 必须在 branch 上, 通过后以 commit 为准
 #
 # Optional variables:
 #   FEISHU_WEBHOOK_URL  飞书机器人 webhook (未配置则跳过通知; 勿硬编码进仓库)
@@ -37,8 +47,6 @@
 #   BASE_IMAGE_TAG      日常构建基于的 base 镜像 tag (默认 base-latest)
 #   CUDA_ARCH_LIST      base 构建的目标 GPU 架构
 #   SOURCE_BRANCH       镜像 tag 中的分支段 (tag 流水线拿不到分支名, 默认 develop)
-#   LMCACHE_COMMIT      release (update) 镜像里 lmcache 要 checkout 的 commit;
-#                       留空则沿用 base 里的 develop HEAD (base 已可编辑安装该分支)
 
 stages:
   - lint
@@ -400,6 +408,9 @@ image-build:
         --dockerfile "${CI_PROJECT_DIR}/docker/Dockerfile.update" \
         --build-arg "BASE_IMAGE=${REGISTRY_HOST}/${REGISTRY_IMAGE}:${BASE_IMAGE_TAG}" \
         --build-arg "VLLM_BUILD_VERSION=${VLLM_BUILD_VERSION}" \
+        --build-arg "GITLAB_TOKEN=${GITLAB_TOKEN}" \
+        --build-arg "LMCACHE_REPO_URL=${LMCACHE_REPO_URL}" \
+        --build-arg "LMCACHE_BRANCH=${LMCACHE_BRANCH}" \
         --build-arg "LMCACHE_COMMIT=${LMCACHE_COMMIT}" \
         --destination "${REGISTRY_HOST}/${REGISTRY_IMAGE}:${IMAGE_TAG}" \
         --ignore-path=/workspace || KANIKO_EXIT=$?

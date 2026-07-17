@@ -27,21 +27,30 @@ RUN for f in /etc/apt/sources.list /etc/apt/sources.list.d/*.sources /etc/apt/so
       [ -f "$f" ] && sed -i 's|archive.ubuntu.com|mirrors.aliyun.com|g; s|security.ubuntu.com|mirrors.aliyun.com|g; s|deb.debian.org|mirrors.aliyun.com|g' "$f"; \
     done; true
 
-# 系统依赖: git/curl(构建), ccache(增量编译), libibverbs(RDMA),
+# 系统依赖: git/curl(构建), ccache(增量编译),
 # ffmpeg/libgl 等(多模态模型运行时),
-# xz-utils(解压 NVSHMEM 的 .tar.xz), libnuma-dev(DeepEP 编译依赖)
+# xz-utils(解压 NVSHMEM 的 .tar.xz), libnuma-dev(DeepEP 编译依赖),
+# RDMA/IB 环境 (DeepEP/NVSHMEM 跨机 all2all 运行时依赖):
+#   libibverbs-dev/ibverbs-providers/ibverbs-utils  verbs 库+驱动+诊断工具
+#   librdmacm-dev/rdmacm-utils                       RDMA 连接管理
+#   iproute2                                         rdma/ip 网络工具
 RUN apt-get update -y \
     && apt-get install -y --no-install-recommends \
         git \
         curl \
         ccache \
-        libibverbs-dev \
         ffmpeg \
         libsm6 \
         libxext6 \
         libgl1 \
         xz-utils \
         libnuma-dev \
+        libibverbs-dev \
+        ibverbs-providers \
+        ibverbs-utils \
+        librdmacm-dev \
+        rdmacm-utils \
+        iproute2 \
     && rm -rf /var/lib/apt/lists/*
 
 # 构建期断言: 基础镜像的 torch 必须和仓库 requirements 钉版一致,
@@ -121,7 +130,8 @@ RUN set -eu; \
     uv pip install --system --no-build-isolation --no-deps -e .
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 额外推理加速 / 调试组件: py-spy, instanttensor, DeepGEMM, DeepEP(+pplx), lmcache
+# 额外推理加速 / 调试组件: py-spy, instanttensor, DeepGEMM, DeepEP(+pplx)
+# (lmcache 迭代频繁, 放在 Dockerfile.update 层按需切 ref, 不占 base 重编译层)
 # 此时 WORKDIR 仍是 /vllm-workspace, vLLM 源码在 vllm/ (含 tools/ 脚本)
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -148,7 +158,9 @@ RUN VLLM_DOCKER_BUILD_CONTEXT=1 TORCH_CUDA_ARCH_LIST="${DEEP_KERNELS_CUDA_ARCH}"
 # 只删体积大的静态库和已装进 site-packages 的源码目录。
 ARG PPLX_COMMIT_HASH=12cecfd
 ARG DEEPEP_COMMIT_HASH=73b6ea4
-ARG NVSHMEM_VER=3.3.24
+# base 镜像 toolkit 是 CUDA 12.8; NVSHMEM 3.3.x 的 cuda12 预编译包是用 12.9 编的,
+# nvlink 会因 "newer than toolkit (129 vs 128)" 拒绝链接。3.2.5 用 <=12.8 编, 可用。
+ARG NVSHMEM_VER=3.2.5
 RUN UV_SYSTEM_PYTHON=1 TORCH_CUDA_ARCH_LIST="${DEEP_KERNELS_CUDA_ARCH}" \
     bash vllm/tools/ep_kernels/install_python_libraries.sh \
         --mode install \
@@ -162,26 +174,6 @@ RUN UV_SYSTEM_PYTHON=1 TORCH_CUDA_ARCH_LIST="${DEEP_KERNELS_CUDA_ARCH}" \
               /opt/ep_kernels_workspace/dist
 # DeepEP 运行时链接 NVSHMEM 共享库; cuda/nvidia 路径与官方 docker/Dockerfile 对齐
 ENV LD_LIBRARY_PATH=/opt/ep_kernels_workspace/nvshmem/lib:/usr/local/cuda/lib64:/usr/local/nvidia/lib64:$LD_LIBRARY_PATH
-
-# lmcache: 内部 gitlab develop 分支, 以可编辑形式安装 (源码留在 /vllm-workspace/lmcache)。
-# Dockerfile.update 里通过 CI/CD Variable LMCACHE_COMMIT 做 git fetch+checkout 增量更新。
-# 克隆 URL 内联 GITLAB_TOKEN (与 transformers 一致), 使 update 阶段的 git fetch
-# 无需再传 token 即可鉴权 (token 会留在 lmcache/.git/config, 与本仓库既有做法一致)。
-ARG LMCACHE_REPO_URL=https://gitlab-cn-beijing.siflow.cn/inference/lmcache.git
-ARG LMCACHE_BRANCH=develop
-ARG LMCACHE_COMMIT=
-RUN set -eu; \
-    if [ -n "$GITLAB_TOKEN" ]; then \
-        lm_clone_url="https://oauth2:${GITLAB_TOKEN}@${LMCACHE_REPO_URL#https://}"; \
-    else \
-        lm_clone_url="$LMCACHE_REPO_URL"; \
-    fi; \
-    git clone "$lm_clone_url" lmcache; \
-    unset lm_clone_url; \
-    cd lmcache; \
-    git checkout "$LMCACHE_BRANCH"; \
-    if [ -n "$LMCACHE_COMMIT" ]; then git checkout "$LMCACHE_COMMIT"; fi; \
-    uv pip install --system --no-build-isolation -e .
 
 WORKDIR /vllm-workspace/vllm
 ENTRYPOINT ["vllm", "serve"]
