@@ -208,7 +208,7 @@ class KVCacheManager:
         return self.enable_caching and not request.skip_reading_prefix_cache
 
     def record_prefix_cache_stats(self, request: Request, num_hits: int) -> None:
-        # No-op when no lookup ran, so a skipped request records no phantom miss.
+        # Don't count a request that skipped the cache lookup.
         if not self.log_stats or not self.prefix_cache_lookup_enabled(request):
             return
         assert self.prefix_cache_stats is not None

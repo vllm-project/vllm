@@ -363,7 +363,7 @@ class MockKVConfig:
     matched_tokens: int = 0
     is_async: bool = False
     # Defer each request this many times (return None) before matching.
-    num_defers: int = 0
+    num_defers_before_matching: int = 0
 
 
 class MockKVConnectorMetadata(KVConnectorMetadata):
@@ -386,10 +386,12 @@ class MockKVConnector(KVConnectorBase_V1):
         self.config = MockKVConfig(
             matched_tokens=extra_config["matched_tokens"],
             is_async=extra_config["is_async"],
-            num_defers=extra_config.get("num_defers", 0),
+            num_defers_before_matching=extra_config.get(
+                "num_defers_before_matching", 0
+            ),
         )
         self._defers_left: defaultdict[str, int] = defaultdict(
-            lambda: self.config.num_defers
+            lambda: self.config.num_defers_before_matching
         )
 
     def get_num_new_matched_tokens(

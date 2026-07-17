@@ -1071,18 +1071,20 @@ def test_preempt_during_execution():
 def test_prefix_cache_query_not_inflated_by_connector_defer():
     """The GPU prefix-cache query is recorded at admission, so a request the
     connector defers several times is counted once, not once per retry."""
-    num_defers = 3
+    num_defers_before_matching = 3
     scheduler = create_scheduler(
         enable_prefix_caching=True,
         use_kv_connector=mock_kv(
-            matched_tokens=0, is_async=False, num_defers=num_defers
+            matched_tokens=0,
+            is_async=False,
+            num_defers_before_matching=num_defers_before_matching,
         ),
     )
     request = create_requests(num_requests=1, num_tokens=32, block_size=16)[0]
     scheduler.add_request(request)
 
     # Each deferred step re-runs the lookup but records nothing.
-    for _ in range(num_defers):
+    for _ in range(num_defers_before_matching):
         assert not scheduler.schedule().scheduled_new_reqs
 
     output = scheduler.schedule()
