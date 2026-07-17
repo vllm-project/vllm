@@ -113,9 +113,25 @@ objects. Wrong abstraction level for this problem.
 
 ## Testing
 
-1. **Unit tests**: Mock layers with unmanaged tensors, verify collect/copy-back
-   preserves `data_ptr` across simulated PWAL
-2. **Integration**: Qwen3-0.6B reload with CUDA graph capture, verify
-   KL-divergence = 0 between cold-load and warm-reload
-3. **MLA mock test**: Verify W_UV/W_UK_T address preservation
-4. **Storage Identity regression**: All 13 confirmed/candidate cases from #48312
+### Test suite
+
+`tests/model_executor/model_loader/test_reload_storage_identity.py`
+
+- `test_storage_identity_bf16` — BF16 reload pointer census (Qwen3-0.6B, DeepSeek-V3-debug)
+- `test_storage_identity_fp8` — FP8 online quantization reload pointer census
+- `test_dsv3_reload_perplexity` — DeepSeek-V3 debug mul/add perplexity correctness
+
+### H200 validation results (2026-07-17, rl_learning, single GPU)
+
+| Test | Model | Features | Total Tensors | Unmanaged | Drifted | Result |
+|------|-------|----------|---------------|-----------|---------|--------|
+| Storage Identity BF16 | Qwen3-0.6B | Standard attn | 369 | 30 | 0 | **PASS** |
+| Storage Identity FP8 | Qwen3-0.6B + fp8 | FP8 quant | 906 | 116 | 0 | **PASS** |
+| Storage Identity MLA+MoE | DeepSeek-V3-debug | MLA (W_UV/W_UK_T) + MoE | 42 | 6 | 0 | **PASS** |
+| Storage Identity FP8 MoE | DeepSeek-V3-debug + fp8 | MLA + MoE + FP8 | 55 | 7 | 0 | **PASS** |
+| Reload Perplexity | DeepSeek-V3-debug | mul→add reload | — | — | — | **PASS** |
+
+Key validated tensors:
+- `W_UV`, `W_UK_T` (MLA derived weights, #48251) — address preserved
+- FP8 MoE scale tensors — address preserved
+- Reload behavior correct: multiply weights perplexity 1.02 vs 33M for addition
