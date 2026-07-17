@@ -164,14 +164,24 @@ def _entry_sys_path() -> list[str]:
     return list(_entry_state["sys_path"]) if _entry_state else list(sys.path)
 
 
+def _env_value_hash(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
 def environment_digest(env: dict[str, str]) -> str:
     stable = {name: value for name, value in env.items() if name not in ENV_ALLOWLIST}
     return sha256_json(stable)
 
 
 def environment_record(env: dict[str, str]) -> dict[str, Any]:
+    # Values are stored as hashes, never plaintext: the manifest must not
+    # persist secrets (HF_TOKEN, cloud credentials) at rest. The restore-time
+    # default-deny check only needs to detect that a value changed, which the
+    # per-variable hash preserves; the plaintext value is never re-applied
+    # (restore uses the live environment). import_affecting is a fixed set of
+    # non-secret import-behavior variables, kept readable for miss diagnostics.
     return {
-        "values": dict(sorted(env.items())),
+        "values": {name: _env_value_hash(value) for name, value in sorted(env.items())},
         "import_affecting": {
             name: env[name] for name in sorted(IMPORT_AFFECTING_ENV) if name in env
         },
@@ -183,8 +193,11 @@ def environment_record(env: dict[str, str]) -> dict[str, Any]:
 def environment_miss(
     recorded: dict[str, str], live: dict[str, str], allowlist: set[str] | frozenset[str]
 ) -> str | None:
+    # `recorded` holds per-variable value hashes (environment_record); hash the
+    # live value the same way before comparing so a changed variable is named.
     for name in sorted(set(recorded) | set(live)):
-        if recorded.get(name) != live.get(name) and name not in allowlist:
+        live_hash = _env_value_hash(live[name]) if name in live else None
+        if recorded.get(name) != live_hash and name not in allowlist:
             return f"env.{name}"
     return None
 
@@ -258,7 +271,8 @@ def read_ack_or_frame(channel: socket.socket) -> tuple[str, dict[str, Any] | Non
 def write_json_atomic(path: Path, value: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(path.name + ".tmp")
-    # 0600: manifests carry the recorded environment, credentials included
+    # 0600: manifests hold private snapshot metadata (fingerprint, hashed
+    # environment, fd identities) that should not be world-readable
     fd = os.open(str(temporary), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as handle:
         json.dump(value, handle, sort_keys=True, indent=2)
@@ -1168,7 +1182,7 @@ def _restore_argv(
     directory: Path,
     manifest: dict[str, Any],
     socket_fd: int,
-    stdio_fds: tuple[int, int, int],
+    stdio_fds: tuple[int, ...],
     run_dir: Path,
 ) -> list[str]:
     fd_identities = manifest["fd_identities"]
@@ -1366,8 +1380,8 @@ def _run_criu_restore(
         for fd in stdio_fds:
             with contextlib.suppress(OSError):
                 os.close(fd)
-        for signum, handler in old_handlers.items():
-            signal.signal(signum, handler)
+        for saved_signum, handler in old_handlers.items():
+            signal.signal(saved_signum, handler)
         shutil.rmtree(run_dir, ignore_errors=True)
 
 
