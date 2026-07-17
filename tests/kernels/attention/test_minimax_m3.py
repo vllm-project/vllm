@@ -1179,6 +1179,167 @@ def test_aiter_indexer_impl_matches_reference(
     assert torch.equal(sparse_ctx.cpu(), expected_ctx)
 
 
+def _run_indexer_impl_pair(
+    vllm_config, device, common, index_cache, index_q, impl_kwargs, specs
+):
+    """Construct, wire, and run indexer impls on the same metadata; each spec
+    is (impl_cls, builder_cls, prefix, topk_indices_buffer). Returns the impls
+    and their forward results, in spec order."""
+    from vllm.config import set_current_vllm_config
+    from vllm.forward_context import set_forward_context
+
+    kv_spec = MLAAttentionSpec(
+        block_size=BLOCK_SIZE,
+        num_kv_heads=1,
+        head_size=impl_kwargs["index_head_dim"],
+        dtype=DTYPE,
+    )
+    impls, builders = [], []
+    with set_current_vllm_config(vllm_config):
+        for impl_cls, builder_cls, prefix, _ in specs:
+            impl = impl_cls(prefix=prefix, **impl_kwargs)
+            impls.append(impl)
+            builders.append(
+                builder_cls(kv_spec, [impl.index_cache.prefix], vllm_config, device)
+            )
+    attn_metadata = {}
+    for impl, builder, (_, _, _, buf) in zip(impls, builders, specs):
+        impl.index_cache.kv_cache = index_cache
+        impl.topk_indices_buffer = buf
+        attn_metadata[impl.index_cache.prefix] = builder.build(0, common)
+    with set_forward_context(attn_metadata, vllm_config):
+        results = [impl(index_q) for impl in impls]
+    return impls, results
+
+
+def _has_flashinfer_msa_platform() -> bool:
+    from vllm.utils.flashinfer import has_flashinfer_msa
+
+    return current_platform.is_device_capability_family(120) and has_flashinfer_msa()
+
+
+# The SM120/SM121 FlashInfer indexer must match the Triton impl when driven
+# through the real metadata builders. The short decode request covers the -1
+# clamp; local_blocks=1 covers the local-window bias, with cache values
+# decreasing by block id so the window never wins on score alone.
+@pytest.mark.skipif(
+    not _has_flashinfer_msa_platform(),
+    reason="FlashInfer MSA indexer requires SM120/SM121 and flashinfer.msa_ops.",
+)
+@pytest.mark.parametrize("local_blocks", [0, 1])
+@pytest.mark.parametrize("index_dtype", [torch.bfloat16, torch.float8_e4m3fn])
+def test_flashinfer_indexer_impl_matches_triton(local_blocks, index_dtype, monkeypatch):
+    import vllm.models.minimax_m3.common.indexer as indexer_mod
+    from tests.v1.attention.utils import (
+        BatchSpec,
+        create_common_attn_metadata,
+        create_vllm_config,
+    )
+    from vllm.models.minimax_m3.common.indexer import (
+        MiniMaxM3IndexerTritonImpl,
+        MiniMaxM3IndexerTritonMetadataBuilder,
+    )
+    from vllm.models.minimax_m3.nvidia.indexer_flashinfer import (
+        MiniMaxM3IndexerFlashInferImpl,
+        MiniMaxM3IndexerFlashInferMetadataBuilder,
+    )
+
+    torch.manual_seed(0)
+    device = torch.device("cuda")
+    num_idx_heads, head_dim, topk = 4, HEAD_DIM, TOPK
+    # TP=1: avoid requiring an initialized distributed group in a unit test.
+    monkeypatch.setattr(indexer_mod, "get_tensor_model_parallel_world_size", lambda: 1)
+
+    vllm_config = create_vllm_config(
+        block_size=BLOCK_SIZE, max_model_len=8192, max_num_batched_tokens=8192
+    )
+    vllm_config.model_config.hf_config.sparse_attention_config = {
+        "sparse_num_index_heads": num_idx_heads,
+        "sparse_local_block": local_blocks,
+    }
+
+    # Decode-first mixed batch: one short and one long decode request, then
+    # two prefill requests whose prefixes exceed topk causal blocks.
+    batch = BatchSpec(seq_lens=[300, 2561, 2624, 2720], query_lens=[1, 1, 64, 96])
+    common = create_common_attn_metadata(
+        batch, BLOCK_SIZE, device, arange_block_indices=True
+    )
+    num_tokens = batch.compute_num_tokens()
+    # The production model runner always provides positions; the test helper
+    # does not.
+    common.positions = torch.cat(
+        [
+            torch.arange(s - q, s, dtype=torch.int64, device=device)
+            for s, q in zip(batch.seq_lens, batch.query_lens)
+        ]
+    )
+
+    # Distinct e4m3-exact per-block values, decreasing with the block id.
+    block_table = common.block_table_tensor
+    num_pages = int(block_table.max().item()) + 1
+    max_blocks = (max(batch.seq_lens) + BLOCK_SIZE - 1) // BLOCK_SIZE
+    assert max_blocks <= len(_E4M3_EXACT_VALUES)
+    index_cache = torch.zeros(
+        num_pages, BLOCK_SIZE, head_dim, device=device, dtype=index_dtype
+    )
+    for r, seq_len in enumerate(batch.seq_lens):
+        for b in range((seq_len + BLOCK_SIZE - 1) // BLOCK_SIZE):
+            index_cache[block_table[r, b]] = float(
+                _E4M3_EXACT_VALUES[max_blocks - 1 - b]
+            )
+    index_q = torch.ones(
+        num_tokens, num_idx_heads * head_dim, device=device, dtype=index_dtype
+    )
+
+    impl_kwargs = dict(
+        num_kv_heads=num_idx_heads,
+        scale=head_dim**-0.5,
+        topk_blocks=topk,
+        sparse_block_size=BLOCK_SIZE,
+        num_index_heads=num_idx_heads,
+        index_head_dim=head_dim,
+        init_blocks=0,
+        local_blocks=local_blocks,
+    )
+
+    (fi_impl, triton_impl), _ = _run_indexer_impl_pair(
+        vllm_config,
+        device,
+        common,
+        index_cache,
+        index_q,
+        impl_kwargs,
+        [
+            (
+                MiniMaxM3IndexerFlashInferImpl,
+                MiniMaxM3IndexerFlashInferMetadataBuilder,
+                "idx_fi",
+                torch.full(
+                    (num_tokens, num_idx_heads, topk),
+                    -2,
+                    dtype=torch.int32,
+                    device=device,
+                ),
+            ),
+            (
+                MiniMaxM3IndexerTritonImpl,
+                MiniMaxM3IndexerTritonMetadataBuilder,
+                "idx_triton",
+                torch.full(
+                    (num_tokens, num_idx_heads, topk),
+                    -2,
+                    dtype=torch.int32,
+                    device=device,
+                ),
+            ),
+        ],
+    )
+
+    _assert_topk_indices_equal_unordered(
+        fi_impl.topk_indices_buffer, triton_impl.topk_indices_buffer
+    )
+
+
 # NVFP4 index cache (SM100/SM103): MSA Q8KV4 decode on the packed pages, FP8
 # gather + Q8KV8 prefill. Both rank pages from e4m3_rn_satfinite(e2m1 * scale).
 _E2M1_VALUES = (0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0)
