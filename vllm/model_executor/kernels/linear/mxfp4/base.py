@@ -16,11 +16,11 @@ class MxFp4LinearLayerConfig:
     All MXFP4 layers share the same structure: packed uint8 weights (2 FP4 values per
     byte) and per-block weight scales (group size 32).
 
-    weight_quant_key: identifies the weight quantization format (e.g. OCP MXFP4,
-        MXFP6). Kernels compare this against the exact format(s) they implement.
-    activation_quant_key: identifies the activation quantization format, or None
-        when the caller has no explicit expectation (e.g. a weight-only a16
-        kernel may be selected, or a kernel may quantize activations itself).
+    Attributes:
+        weight_quant_key: Identifies the weight quantization format. This is
+            typically kMxfp4Static, but other OCP MX keys are accepted.
+        activation_quant_key: Identifies the activation quantization format,
+            or `None` when activations must not be quantized.
     """
 
     weight_quant_key: QuantKey

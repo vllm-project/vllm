@@ -18,7 +18,6 @@ from vllm.model_executor.layers.quantization.utils.mxfp6_utils import (
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
-    kFp8DynamicTensorSym,
     kMxfp4Dynamic,
     kMxfp4Static,
     kMxfp6E2M3Dynamic,
@@ -41,7 +40,6 @@ _ACTIVATION_QUANT_DEQUANT_FUNCS: dict[
     kMxfp4Dynamic: quant_dequant_mxfp4,
     kMxfp6E3M2Dynamic: partial(quant_dequant_mxfp6, quant_dtype="fp6_e3m2"),
     kMxfp6E2M3Dynamic: partial(quant_dequant_mxfp6, quant_dtype="fp6_e2m3"),
-    kFp8DynamicTensorSym: partial(quant_dequant_mxfp6, quant_dtype="fp8"),
 }
 
 

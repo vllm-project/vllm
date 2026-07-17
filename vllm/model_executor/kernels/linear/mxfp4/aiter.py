@@ -124,6 +124,11 @@ if is_aiter_found_and_supported():
 class AiterMxfp4LinearKernel(MxFp4LinearKernel):
     """AITER-based native MXFP4 GEMM kernel for ROCm."""
 
+    def __init__(self, config: MxFp4LinearLayerConfig) -> None:
+        super().__init__(config)
+        self.use_asm_gemm = rocm_aiter_ops.is_asm_fp4_gemm_dynamic_quant_enabled()
+        self.out_dtype = torch.get_default_dtype()
+
     @classmethod
     def is_supported(
         cls, compute_capability: int | None = None
@@ -143,8 +148,7 @@ class AiterMxfp4LinearKernel(MxFp4LinearKernel):
         return True, None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        use_asm_gemm = rocm_aiter_ops.is_asm_fp4_gemm_dynamic_quant_enabled()
-        if use_asm_gemm:
+        if self.use_asm_gemm:
             from aiter.ops.shuffle import shuffle_weight
 
             weight_scale = layer.weight_scale.data
@@ -169,13 +173,12 @@ class AiterMxfp4LinearKernel(MxFp4LinearKernel):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        use_asm_gemm = rocm_aiter_ops.is_asm_fp4_gemm_dynamic_quant_enabled()
         y = torch.ops.vllm.gemm_with_dynamic_quant(
             x,
             layer.weight,
             layer.weight_scale,
-            use_asm_gemm,
-            torch.get_default_dtype(),
+            self.use_asm_gemm,
+            self.out_dtype,
         )
         if bias is not None:
             y = y + bias

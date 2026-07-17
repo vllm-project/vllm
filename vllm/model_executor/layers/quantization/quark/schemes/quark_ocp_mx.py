@@ -14,7 +14,6 @@ from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import (
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
-    kFp8DynamicTensorSym,
     kMxfp4Dynamic,
     kMxfp4Static,
     kMxfp6E2M3Dynamic,
@@ -41,7 +40,6 @@ _WEIGHT_QUANT_KEY_MAP: dict[str, QuantKey] = {
 }
 
 _ACTIVATION_QUANT_KEY_MAP: dict[str, QuantKey] = {
-    "fp8": kFp8DynamicTensorSym,
     "mxfp4": kMxfp4Dynamic,
     "mxfp6_e3m2": kMxfp6E3M2Dynamic,
     "mxfp6_e2m3": kMxfp6E2M3Dynamic,
@@ -63,11 +61,14 @@ class QuarkOCP_MX(QuarkScheme):
         self.weight_dtype = weight_quant_spec["dtype"].replace("fp", "mxfp")
         self.input_dtype: str | None = None
         if input_quant_spec is not None:
-            input_quant = input_quant_spec["dtype"]
-            if input_quant == "fp8_e4m3":
-                self.input_dtype = "fp8"
-            else:
-                self.input_dtype = input_quant.replace("fp", "mxfp")
+            self.input_dtype = input_quant_spec["dtype"].replace("fp", "mxfp")
+
+        if self.input_dtype not in [None, *_ACTIVATION_QUANT_KEY_MAP]:
+            raise ValueError(
+                f"Unsupported input_dtype={self.input_dtype} for QuarkOCP_MX. "
+                f"Supported activation dtypes are {_ACTIVATION_QUANT_KEY_MAP.keys()}, "
+                "or None for weight-only quantization."
+            )
 
         self.weight_quant_key = _WEIGHT_QUANT_KEY_MAP[self.weight_dtype]
         self.activation_quant_key = (
