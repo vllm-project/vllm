@@ -9,11 +9,7 @@ import torch
 
 from vllm.config import ModelConfig
 from vllm.logger import init_logger
-from vllm.model_executor.layers.attention import (
-    Attention,
-    MLAAttention,
-    MMEncoderAttention,
-)
+from vllm.model_executor.layers.attention import POST_LOAD_ATTENTION_TYPES
 from vllm.model_executor.model_loader.load_session import (
     WeightLoadSession,
     _process_quant_method,
@@ -44,7 +40,6 @@ __all__ = [
     "record_metadata_for_reloading",
     "initialize_layerwise_reload",
     "finalize_layerwise_processing",
-    "finalize_layerwise_reload",
 ]
 
 
@@ -101,9 +96,6 @@ def finalize_layerwise_processing(
     if session is None:
         raise RuntimeError("initialize_layerwise_reload must be called first")
     session.finish(model_config)
-
-
-finalize_layerwise_reload = finalize_layerwise_processing
 
 
 @torch.no_grad()
@@ -222,7 +214,7 @@ def make_online_process_loader(layer: torch.nn.Module, param_name: str) -> Calla
         )
 
         # Do not online process attention layers, must wait until finalize
-        if isinstance(layer, (Attention, MLAAttention, MMEncoderAttention)):
+        if isinstance(layer, POST_LOAD_ATTENTION_TYPES):
             return ret
 
         # Log warnings allocating excessive buffers on device
@@ -279,7 +271,7 @@ def _finish_layerwise_loading(
             continue
 
         # Attention layers are processed after all other layers.
-        if isinstance(layer, (Attention, MLAAttention, MMEncoderAttention)):
+        if isinstance(layer, POST_LOAD_ATTENTION_TYPES):
             deferred_attn.append((layer, info))
             continue
 

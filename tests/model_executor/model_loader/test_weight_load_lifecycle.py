@@ -16,7 +16,6 @@ from vllm.model_executor.model_loader.load_session import (
 )
 from vllm.model_executor.model_loader.reload import (
     finalize_layerwise_processing,
-    finalize_layerwise_reload,
     initialize_layerwise_reload,
 )
 from vllm.model_executor.model_loader.reload.layerwise import (
@@ -71,14 +70,36 @@ def test_initial_load_finishes_quant_before_attention(monkeypatch):
         "process_attention",
         lambda module, _: calls.append(("attention", module)),
     )
+    monkeypatch.setattr(
+        "vllm.model_executor.model_loader.utils.POST_LOAD_ATTENTION_TYPES",
+        (nn.ReLU,),
+    )
     session.prepare()
     session.finish(Mock(dtype=torch.float32, quantization=None))
 
     modules = list(model.modules())
     assert calls == [
         *(("quant", module) for module in modules),
-        *(("attention", module) for module in modules),
+        ("attention", model[1]),
     ]
+
+
+def test_attention_processing_runs_once_without_type_discovery():
+    class PostLoadModule(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.calls = 0
+
+        def process_weights_after_loading(self, act_dtype):
+            self.calls += 1
+
+    module = PostLoadModule()
+    session = WeightLoadSession(nn.Module(), torch.device("cpu"))
+
+    session.process_attention(module, torch.float32)
+    session.process_attention(module, torch.float32)
+
+    assert module.calls == 1
 
 
 def test_dummy_online_quant_uses_load_session(monkeypatch):
@@ -122,11 +143,7 @@ def test_standalone_online_quant_does_not_require_session(monkeypatch):
     process_quant.assert_called_once_with(layer)
 
 
-@pytest.mark.parametrize(
-    "finalize",
-    [finalize_layerwise_processing, finalize_layerwise_reload],
-)
-def test_legacy_layerwise_api_preserves_storage(finalize):
+def test_legacy_layerwise_api_preserves_storage():
     model = nn.Linear(2, 2)
     original_weight = model.weight
     original_bias = model.bias
@@ -137,7 +154,7 @@ def test_legacy_layerwise_api_preserves_storage(finalize):
     initialize_layerwise_reload(model)
     model.weight.weight_loader(model.weight, loaded_weight)
     model.bias.weight_loader(model.bias, loaded_bias)
-    finalize(model, None)
+    finalize_layerwise_processing(model, None)
 
     assert model.weight is original_weight
     assert model.bias is original_bias

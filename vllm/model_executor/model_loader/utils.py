@@ -15,12 +15,15 @@ from typing_extensions import assert_never
 import vllm.envs as envs
 from vllm.config import ModelConfig, VllmConfig, set_current_vllm_config
 from vllm.logger import init_logger
+from vllm.model_executor.layers.attention import POST_LOAD_ATTENTION_TYPES
+from vllm.model_executor.layers.hpc import HpcModule
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
 )
 from vllm.model_executor.model_loader.load_session import WeightLoadSession
 from vllm.model_executor.model_loader.reload import (
     record_metadata_for_reloading,
+    set_torchao_reload_attrs,
 )
 from vllm.model_executor.models.interfaces import SupportsQuant
 from vllm.tracing import instrument
@@ -93,8 +96,32 @@ def initialize_model(
 def process_weights_after_loading(
     model: nn.Module, model_config: ModelConfig, target_device: torch.device
 ) -> None:
-    """Process initial-load weights while preserving the legacy hook."""
-    WeightLoadSession(model, target_device).process_all_modules(model_config)
+    """Process initial-load weights while preserving the legacy entry point."""
+    _process_modules_after_loading(
+        WeightLoadSession(model, target_device), model_config
+    )
+
+
+def _process_modules_after_loading(
+    session: WeightLoadSession, model_config: ModelConfig
+) -> None:
+    """Discover and process post-load modules in dependency order."""
+    model = session.model
+    for module in model.modules():
+        session.process_quant(module)
+    for module in model.modules():
+        if isinstance(module, POST_LOAD_ATTENTION_TYPES):
+            session.process_attention(module, model_config.dtype)
+    _process_hpc_modules_after_loading(model)
+
+    if model_config.quantization == "torchao":
+        set_torchao_reload_attrs(model, model_config)
+
+
+def _process_hpc_modules_after_loading(model: nn.Module) -> None:
+    for module in model.modules():
+        if isinstance(module, HpcModule):
+            module.process_weights_after_loading(model)
 
 
 @contextmanager

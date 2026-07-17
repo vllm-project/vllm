@@ -69,16 +69,24 @@ class WeightLoadSession:
             if self.initial_load_device is not None:
                 if model_config is None:
                     raise ValueError("model_config is required for initial loading")
-                self.process_all_modules(model_config)
+                from vllm.model_executor.model_loader.utils import (
+                    _process_modules_after_loading,
+                )
+
+                _process_modules_after_loading(self, model_config)
             else:
-                self._process_hpc()
+                from vllm.model_executor.model_loader.utils import (
+                    _process_hpc_modules_after_loading,
+                )
+
+                _process_hpc_modules_after_loading(model)
         except BaseException:
             self.abort()
             raise
         self._unbind()
 
     def abort(self) -> None:
-        """Discard layerwise loading state so a full update can be retried."""
+        """Restore temporary layerwise structure after a failed load."""
         model = self.model
         if get_active_weight_load_session(model) is not self:
             return
@@ -93,28 +101,6 @@ class WeightLoadSession:
         finally:
             self._unbind()
 
-    def process_all_modules(self, model_config: ModelConfig) -> None:
-        """Process initial-load weights in dependency order."""
-        for module in self.model.modules():
-            self.process_quant(module)
-        for module in self.model.modules():
-            self.process_attention(module, model_config.dtype)
-        self._process_hpc()
-
-        if model_config.quantization == "torchao":
-            from vllm.model_executor.model_loader.reload import (
-                set_torchao_reload_attrs,
-            )
-
-            set_torchao_reload_attrs(self.model, model_config)
-
-    def _process_hpc(self) -> None:
-        from vllm.model_executor.layers.hpc import HpcModule
-
-        for module in self.model.modules():
-            if isinstance(module, HpcModule):
-                module.process_weights_after_loading(self.model)
-
     def process_quant(self, module: nn.Module) -> None:
         if module in self._processed_quant:
             return
@@ -124,24 +110,16 @@ class WeightLoadSession:
     def process_attention(self, module: nn.Module, act_dtype: torch.dtype) -> None:
         if module in self._processed_attention:
             return
-
-        from vllm.model_executor.layers.attention import (
-            Attention,
-            MLAAttention,
-            MMEncoderAttention,
-        )
-
-        if not isinstance(module, (Attention, MLAAttention, MMEncoderAttention)):
-            return
+        process_weights = module.process_weights_after_loading  # type: ignore[attr-defined]
         if self.initial_load_device is None:
-            module.process_weights_after_loading(act_dtype)
+            process_weights(act_dtype)
         else:
             from vllm.model_executor.model_loader.utils import (
                 device_loading_context,
             )
 
             with device_loading_context(module, self.initial_load_device):
-                module.process_weights_after_loading(act_dtype)
+                process_weights(act_dtype)
         self._processed_attention.add(module)
 
     def _unbind(self) -> None:

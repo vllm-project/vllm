@@ -19,6 +19,8 @@ from vllm.model_executor.layers.attention.static_sink_attention import (
     StaticSinkAttention,
 )
 
+POST_LOAD_ATTENTION_TYPES = (Attention, MLAAttention, MMEncoderAttention)
+
 __all__ = [
     "Attention",
     "ChunkedLocalAttention",

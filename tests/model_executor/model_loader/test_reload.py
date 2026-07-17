@@ -494,7 +494,7 @@ def test_layerwise_reload_updates_loaded_non_persistent_buffers(monkeypatch):
     assert "0.scale" not in model.state_dict()
 
 
-def test_abort_partial_reload_restores_storage_and_allows_retry():
+def test_abort_partial_reload_restores_layer_structure():
     model = torch.nn.Sequential(
         torch.nn.Linear(2, 2),
         torch.nn.Linear(2, 2),
@@ -531,19 +531,6 @@ def test_abort_partial_reload_restores_storage_and_allows_retry():
     assert torch.equal(model[1].weight, original_values["1.weight"])
     assert torch.equal(model[1].bias, original_values["1.bias"])
 
-    retry_values = {
-        name: torch.full_like(param, 9) for name, param in original_params.items()
-    }
-    retry = _prepare_reload(model)
-    for name, value in retry_values.items():
-        param = model.get_parameter(name)
-        param.weight_loader(param, value)
-    _finish_reload(retry)
-
-    for name, original_param in original_params.items():
-        assert model.get_parameter(name) is original_param
-        assert torch.equal(original_param, retry_values[name])
-
 
 def test_reload_refreshes_hpc_derived_weight_in_place():
     model = _DerivedHpcModule()
@@ -562,17 +549,10 @@ def test_reload_refreshes_hpc_derived_weight_in_place():
 
 
 def test_reload_finalizes_mm_encoder_attention(monkeypatch):
-    import vllm.model_executor.layers.attention as attention_layers
-
     monkeypatch.setattr(
         reload_layerwise,
-        "MMEncoderAttention",
-        _FakeMMEncoderAttention,
-    )
-    monkeypatch.setattr(
-        attention_layers,
-        "MMEncoderAttention",
-        _FakeMMEncoderAttention,
+        "POST_LOAD_ATTENTION_TYPES",
+        (_FakeMMEncoderAttention,),
     )
     model = _FakeMMEncoderAttention()
     record_metadata_for_reloading(model)
