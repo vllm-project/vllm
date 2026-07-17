@@ -3,11 +3,13 @@
 
 from types import SimpleNamespace
 
+import pytest
 import torch
 
 from tests.v1.core.utils import create_requests
 from vllm.config import (
     CacheConfig,
+    DeviceConfig,
     ModelConfig,
     ParallelConfig,
     SchedulerConfig,
@@ -22,6 +24,8 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.structured_output import StructuredOutputManager
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
+
+pytestmark = pytest.mark.skip_global_cleanup
 
 # Matches defaults from tests/v1/spec_decode/test_eagle.py
 DFLASH_TARGET_DIR = "Qwen/Qwen3-8B"
@@ -48,8 +52,24 @@ def _dflash_speculative_config(num_speculative_tokens: int) -> SpeculativeConfig
     )
 
 
-def _create_dflash_scheduler(num_speculative_tokens: int) -> Scheduler:
+def _dspark_speculative_config(
+    num_speculative_tokens: int,
+    *,
+    sample_from_anchor: bool | None = None,
+) -> SpeculativeConfig:
     speculative_config = _dflash_speculative_config(num_speculative_tokens)
+    speculative_config.method = "dspark"
+    hf_config = speculative_config.draft_model_config.hf_config
+    if sample_from_anchor is None:
+        hf_config.dspark_bonus_anchor = True
+    else:
+        hf_config.sample_from_anchor = sample_from_anchor
+    return speculative_config
+
+
+def _create_parallel_drafter_scheduler(
+    speculative_config: SpeculativeConfig,
+) -> Scheduler:
     model_config = speculative_config.target_model_config
     scheduler_config = SchedulerConfig(
         max_num_seqs=16,
@@ -67,6 +87,7 @@ def _create_dflash_scheduler(num_speculative_tokens: int) -> Scheduler:
         scheduler_config=scheduler_config,
         model_config=model_config,
         cache_config=cache_config,
+        device_config=DeviceConfig(device="cpu"),
         parallel_config=ParallelConfig(),
         speculative_config=speculative_config,
     )
@@ -92,6 +113,12 @@ def _create_dflash_scheduler(num_speculative_tokens: int) -> Scheduler:
         block_size=BLOCK_SIZE,
         log_stats=True,
         structured_output_manager=StructuredOutputManager(vllm_config),
+    )
+
+
+def _create_dflash_scheduler(num_speculative_tokens: int) -> Scheduler:
+    return _create_parallel_drafter_scheduler(
+        _dflash_speculative_config(num_speculative_tokens)
     )
 
 
@@ -131,6 +158,45 @@ def test_dflash_first_prefill_query_window_fits_allocated_blocks():
     assert all(pos // BLOCK_SIZE < len(block_ids) for pos in query_positions)
 
 
+def test_bonus_anchor_dspark_reserves_full_query_window(monkeypatch):
+    monkeypatch.setattr("vllm.config.vllm.HAS_TRITON", True)
+    speculative_config = _dspark_speculative_config(NUM_SPECULATIVE_TOKENS)
+    scheduler = _create_parallel_drafter_scheduler(speculative_config)
+
+    assert scheduler.num_lookahead_tokens == NUM_SPECULATIVE_TOKENS + 1
+
+    num_tokens = BLOCK_SIZE - NUM_SPECULATIVE_TOKENS
+    (request,) = create_requests(
+        num_requests=1,
+        num_tokens=num_tokens,
+        block_size=BLOCK_SIZE,
+    )
+    scheduler.add_request(request)
+
+    output = scheduler.schedule()
+    block_ids = output.scheduled_new_reqs[0].block_ids[0]
+    query_positions = range(num_tokens, num_tokens + NUM_SPECULATIVE_TOKENS + 1)
+
+    assert len(block_ids) == 2
+    assert all(pos // BLOCK_SIZE < len(block_ids) for pos in query_positions)
+
+
+def test_dspark_query_width_follows_anchor_layout():
+    legacy_bonus_anchor = _dspark_speculative_config(NUM_SPECULATIVE_TOKENS)
+    configured_bonus_anchor = _dspark_speculative_config(
+        NUM_SPECULATIVE_TOKENS, sample_from_anchor=False
+    )
+    sample_from_anchor = _dspark_speculative_config(
+        NUM_SPECULATIVE_TOKENS, sample_from_anchor=True
+    )
+
+    assert legacy_bonus_anchor.num_drafter_query_tokens == NUM_SPECULATIVE_TOKENS + 1
+    assert (
+        configured_bonus_anchor.num_drafter_query_tokens == NUM_SPECULATIVE_TOKENS + 1
+    )
+    assert sample_from_anchor.num_drafter_query_tokens == NUM_SPECULATIVE_TOKENS
+
+
 def test_dflash_drafter_window_reserves_bonus_token():
     # DFlash's drafter window is num_spec + 1 (the extra slot is the bonus token),
     # so max_seq_len + num_spec + 1 must stay within the draft model's max len.
@@ -145,10 +211,22 @@ def test_dflash_drafter_window_reserves_bonus_token():
     assert not input_fits_in_drafter(dflash_runner, SimpleNamespace(max_seq_len=97))
     assert not input_fits_in_drafter(dflash_runner, None)  # no metadata
 
-    # Other drafters don't reserve the bonus token, so 97 fits (97 + 3 == 100).
-    plain_runner = SimpleNamespace(
-        num_spec_tokens=NUM_SPECULATIVE_TOKENS,
+    # Anchor-sampling DSpark has no separate bonus slot, so 97 still fits.
+    dspark_runner = SimpleNamespace(
         effective_drafter_max_model_len=100,
-        speculative_config=SimpleNamespace(use_dflash=lambda: False),
+        speculative_config=_dspark_speculative_config(
+            NUM_SPECULATIVE_TOKENS, sample_from_anchor=True
+        ),
     )
-    assert input_fits_in_drafter(plain_runner, SimpleNamespace(max_seq_len=97))
+    assert input_fits_in_drafter(dspark_runner, SimpleNamespace(max_seq_len=97))
+
+
+def test_bonus_anchor_dspark_drafter_window_reserves_bonus_token():
+    input_fits_in_drafter = GPUModelRunner._input_fits_in_drafter
+    dspark_runner = SimpleNamespace(
+        effective_drafter_max_model_len=100,
+        speculative_config=_dspark_speculative_config(NUM_SPECULATIVE_TOKENS),
+    )
+
+    assert input_fits_in_drafter(dspark_runner, SimpleNamespace(max_seq_len=96))
+    assert not input_fits_in_drafter(dspark_runner, SimpleNamespace(max_seq_len=97))
