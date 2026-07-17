@@ -62,6 +62,8 @@ class All2AllManagerBase:
                 in_the_same_node_as(tcp_store_group, source_rank=0)
             )
 
+        self.support_fault_tolerance = False
+
     def get_handle(self, kwargs):
         # get a handle for the all2all communication,
         # based on the kwargs.
@@ -100,6 +102,13 @@ class All2AllManagerBase:
         # Subclasses should either:
         # - implement handling for extra_tensors, or
         # - raise a clear error if extra_tensors is not supported.
+        raise NotImplementedError
+
+    def query_active_mask(self) -> torch.Tensor:
+        raise NotImplementedError
+
+    def query_fault(self) -> torch.Tensor:
+        """Returns has_fault scalar."""
         raise NotImplementedError
 
     def set_num_sms(self, num_sms: int):
@@ -166,10 +175,11 @@ class DeviceCommunicatorBase:
 
         config = get_current_vllm_config_or_none()
         if config is not None:
-            # as long as we use data parallel (coupled data parallel
-            # where all data parallel ranks execute forward together),
-            # we initialize the all2all manager used in expert parallel.
-            use_ep = config.parallel_config.data_parallel_size > 1
+            # initialize the all2all manager for DP or sequence-parallel EP.
+            use_ep = (
+                config.parallel_config.data_parallel_size > 1
+                or config.parallel_config.use_sequence_parallel_moe
+            )
             all2all_backend = config.parallel_config.all2all_backend
 
         self.is_ep_communicator = unique_name.split(":")[0] == "ep"

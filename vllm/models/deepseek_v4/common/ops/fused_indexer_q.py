@@ -3,6 +3,7 @@
 
 import torch
 
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.import_utils import has_cutedsl
 
@@ -88,6 +89,8 @@ def _fused_indexer_q_rope_quant_kernel(
     index_weights_head_scale,
     index_weights_out_ptr,
     index_weights_out_stride,
+    FP8_MAX: tl.constexpr = 448.0,
+    USE_FNUZ: tl.constexpr = False,
 ):
     # Layout matches the unfused reference (DeepseekV4ScalingRotaryEmbedding
     # + per_token_group_quant_fp8): GPT-J interleaved RoPE applied to the
@@ -128,26 +131,28 @@ def _fused_indexer_q_rope_quant_kernel(
         nope_offset = tl.arange(0, INDEX_Q_NOPE_DIM)
         x_nope = tl.load(base_ptr + nope_offset).to(tl.float32)
         amax = tl.maximum(amax, tl.max(tl.abs(x_nope)))
-    index_q_scale = tl.div_rn(tl.maximum(amax, 1e-4), 448.0)
+    index_q_scale = tl.div_rn(tl.maximum(amax, 1e-4), FP8_MAX)
     index_q_scale = tl.math.exp2(tl.math.ceil(tl.math.log2(index_q_scale)))
 
-    # Store quantized values to index_q_fp8
+    # Store quantized values to index_q_fp8. FNUZ (e4m3fnuz) on gfx942, OCP
+    # (e4m3fn) elsewhere -- matches the K cache.
+    fp8_dtype = tl.float8e4b8 if USE_FNUZ else tl.float8e4nv
     fp8_base_ptr = (
         index_q_fp8_ptr + tok_idx * index_q_fp8_stride0 + head_idx * index_q_fp8_stride1
     )
     if INDEX_Q_NOPE_DIM > 0:
         tl.store(
             fp8_base_ptr + nope_offset,
-            tl.div_rn(x_nope, index_q_scale).to(tl.float8e4nv),
+            tl.div_rn(x_nope, index_q_scale).to(fp8_dtype),
         )
     fp8_rot_base = fp8_base_ptr + INDEX_Q_NOPE_DIM
     tl.store(
         fp8_rot_base + half_offset * 2,
-        tl.div_rn(r_even, index_q_scale).to(tl.float8e4nv),
+        tl.div_rn(r_even, index_q_scale).to(fp8_dtype),
     )
     tl.store(
         fp8_rot_base + half_offset * 2 + 1,
-        tl.div_rn(r_odd, index_q_scale).to(tl.float8e4nv),
+        tl.div_rn(r_odd, index_q_scale).to(fp8_dtype),
     )
 
     # FP8 weight-fold contract:
@@ -299,8 +304,9 @@ def fused_indexer_q_rope_quant(
     Weight-fold semantics (important — the two paths differ):
 
     FP8 path (use_fp4=False, default):
-        q_fp8      : (T, H, HEAD_DIM) float8_e4m3fn, per-token-per-head
-                     scalar scale (NOT stored — folded into weights below)
+        q_fp8      : (T, H, HEAD_DIM) platform fp8 (e4m3fnuz on gfx942,
+                     e4m3fn elsewhere); per-token-per-head scalar scale
+                     (NOT stored — folded into weights below)
         weights_out = weights * q_scale * softmax_scale * head_scale
         Rationale: a single per-token q_scale is a scalar the downstream FP8
         logits kernel would otherwise multiply in. Folding it into `weights`
@@ -397,7 +403,10 @@ def fused_indexer_q_rope_quant(
             index_q_scale.view(torch.int32).squeeze(-1),
         ), index_weights_out
 
-    index_q_fp8 = torch.empty_like(index_q, dtype=torch.float8_e4m3fn)
+    fp8_dtype = current_platform.fp8_dtype()
+    use_fnuz = fp8_dtype == torch.float8_e4m3fnuz
+    fp8_max = 224.0 if use_fnuz else 448.0
+    index_q_fp8 = torch.empty_like(index_q, dtype=fp8_dtype)
     if has_cutedsl():
         # lazily import, otherwise some tests fail due to CUDA driver init failure.
         from vllm.models.deepseek_v4.nvidia.ops.fused_indexer_q_cutedsl import (
@@ -433,6 +442,8 @@ def fused_indexer_q_rope_quant(
             index_weights_head_scale,
             index_weights_out,
             index_weights_out.stride(0),
+            FP8_MAX=fp8_max,
+            USE_FNUZ=use_fnuz,
             num_warps=1,  # TODO: Tune this
         )
     return index_q_fp8, index_weights_out
