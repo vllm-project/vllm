@@ -12,7 +12,6 @@ import torch
 
 import vllm.envs as envs
 from vllm import _custom_ops as ops
-from vllm.kernels.helion import routing as helion_routing
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     get_fp8_min_max,
@@ -34,10 +33,24 @@ from vllm.utils.deep_gemm import (
     is_deep_gemm_e8m0_used,
     transform_sf_into_required_layout,
 )
+from vllm.utils.import_utils import has_helion
 from vllm.utils.platform_utils import get_device_name_as_file_name
 from vllm.utils.torch_utils import direct_register_custom_op
 
 logger = init_logger(__name__)
+
+
+@functools.cache
+def _get_helion_routing() -> Any | None:
+    if not has_helion():
+        logger.warning_once(
+            "VLLM_USE_HELION_KERNELS is set but Helion is not installed; "
+            "falling back to native kernels."
+        )
+        return None
+    from vllm.kernels.helion import routing
+
+    return routing
 
 
 def is_fp8(x: torch.dtype | torch.Tensor) -> bool:
@@ -636,19 +649,23 @@ def per_token_group_quant_fp8(
     if (
         current_platform.is_cuda_alike() or current_platform.is_xpu()
     ) and x.is_contiguous():
-        if helion_routing.try_launch_per_token_group_fp8_quant(
-            x,
-            x_q,
-            x_s,
-            group_size,
-            eps,
-            fp8_min,
-            fp8_max,
-            use_ue8m0,
-            column_major_scales,
-            tma_aligned_scales,
-        ):
-            return x_q, x_s
+        if envs.VLLM_USE_HELION_KERNELS:
+            helion_routing = _get_helion_routing()
+            if helion_routing is not None and (
+                helion_routing.try_launch_per_token_group_fp8_quant(
+                    x,
+                    x_q,
+                    x_s,
+                    group_size,
+                    eps,
+                    fp8_min,
+                    fp8_max,
+                    use_ue8m0,
+                    column_major_scales,
+                    tma_aligned_scales,
+                )
+            ):
+                return x_q, x_s
         torch.ops._C.per_token_group_fp8_quant(
             x,
             x_q,

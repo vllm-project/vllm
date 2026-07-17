@@ -9,7 +9,7 @@ import importlib
 import sys
 import types
 from collections.abc import Callable
-from typing import Any
+from typing import Any, cast
 
 import torch
 
@@ -228,10 +228,14 @@ class _RoutingModule(types.ModuleType):
             return
         if name == "_PTG_FAST_LAST":
             router.fast_last = value
-            _remember_last_alias(router.fast_recent, value)
+            _remember_last_alias(
+                router.fast_recent, cast("tuple[Any, ...] | None", value)
+            )
         elif name == "_PTG_CPP_LAST":
             router.cpp_last = value
-            _remember_last_alias(router.cpp_recent, value)
+            _remember_last_alias(
+                router.cpp_recent, cast("tuple[Any, ...] | None", value)
+            )
 
 
 sys.modules[__name__].__class__ = _RoutingModule
@@ -251,11 +255,7 @@ def try_launch_per_token_group_fp8_quant(
     dimensions: tuple[int, int] | None = None,
 ) -> bool:
     """Fast Helion route for vLLM's 2D per-token-group FP8 quant call site."""
-    if (
-        _PTG_ROUTER is None
-        or not use_helion_per_token_group_fp8_quant()
-        or not output_q.is_contiguous()
-    ):
+    if not use_helion_per_token_group_fp8_quant() or not output_q.is_contiguous():
         return False
 
     full_args = (
@@ -273,6 +273,13 @@ def try_launch_per_token_group_fp8_quant(
     dimensions = dimensions if dimensions is not None else _ptg_dimensions(input)
     if dimensions is None:
         return False
+
+    if _PTG_ROUTER is None:
+        kernel = _checked_eager_kernel(_PTG_OP_NAME)
+        if kernel is None:
+            return False
+        kernel(*full_args)
+        return True
 
     fast_key = _ptg_fast_cache_key(*full_args, dimensions=dimensions)
     if _PTG_ROUTER.try_recent_cpp(full_args):

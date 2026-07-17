@@ -278,7 +278,6 @@ def baseline(
     helion_settings=helion.Settings(
         autotune_baseline_fn=baseline,
         ignore_warnings=[helion.exc.ProcessGroupNameNotFound],
-        triton_do_not_specialize_nonunit_strides=True,
     ),
 )  # type: ignore[misc]
 def per_token_group_fp8_quant(
