@@ -20,6 +20,7 @@ from .meta import (
     materialize_layer,
     restore_layer_on_meta,
 )
+from .tensor_collector import collect_extra_tensors, copy_back_extra_tensors
 from .types import LayerReloadingInfo
 from .utils import (
     get_info_size,
@@ -111,6 +112,11 @@ def initialize_layerwise_reload(model: torch.nn.Module):
         info.kernel_tensors = get_layer_params_buffers(layer)
         # snapshot now: restore_layer_on_meta drops alias buffers from the live set
         info.kernel_non_persistent_buffers = set(layer._non_persistent_buffers_set)
+
+        # Snapshot unmanaged CUDA tensors (workspace, sort-indices,
+        # derived MLA weights, CUTLASS stride descriptors, …) so their
+        # device addresses can be preserved across reload.
+        info.extra_tensor_slots = collect_extra_tensors(layer)
 
         # Restore layer parameters/buffers onto meta device
         restore_layer_on_meta(layer, info)
@@ -306,6 +312,12 @@ def _finalize_attention_layer(
         _place_kernel_tensors(layer, info)
     layer.process_weights_after_loading(model_config.dtype)
 
+    # Attention PWAL creates derived tensors (W_UV, W_UK_T, W_K, W_V, …)
+    # with new device addresses.  Copy their values back into the old
+    # storage captured before reload so that CUDA-graph pointers stay valid.
+    if info.kernel_tensors is not None:
+        copy_back_extra_tensors(layer, info.extra_tensor_slots)
+
 
 def _reload_attention_scales(layer: torch.nn.Module, info: LayerReloadingInfo) -> None:
     """Load and process attention scale weights (k_scale, v_scale, etc.)
@@ -369,6 +381,7 @@ def _layerwise_process(layer: torch.nn.Module, info: LayerReloadingInfo):
     # this code is a no-op if not reloading (because kernel tensors is empty)
     if info.kernel_tensors is not None:
         _copy_and_restore_kernel_tensors(layer, info)
+        copy_back_extra_tensors(layer, info.extra_tensor_slots)
 
     info.reset()
     logger.debug("%s: Processed", layer.__class__.__name__)

@@ -33,6 +33,15 @@ class LayerReloadingInfo:
     # persistence survives `_non_persistent_buffers_set` being mutated during reload
     kernel_non_persistent_buffers: set[str] = field(default_factory=set)
 
+    # CUDA tensors reachable from the layer but NOT registered as parameters
+    # or buffers (e.g. workspace, sort-indices, derived MLA weights, CUTLASS
+    # stride descriptors).  Populated by `initialize_layerwise_reload` so that
+    # `copy_back_extra_tensors` can preserve their device addresses across
+    # reload, keeping captured CUDA-graph pointers valid.
+    # Each entry is (dotted_path, old_tensor).
+    extra_tensor_slots: list[tuple[str, torch.Tensor]] = field(
+        default_factory=list)
+
     def reset(self):
         self.__init__(  # type: ignore[misc]
             restore_metadata=self.restore_metadata, restore_device=self.restore_device
