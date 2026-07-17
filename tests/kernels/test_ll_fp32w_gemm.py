@@ -421,18 +421,24 @@ def test_gate_linear_uses_ll_fp32w_for_fp32_weight_fast_path(monkeypatch, x_dtyp
     assert calls[0][1] is gate.weight
 
 
-@pytest.mark.parametrize("M", range(1, 17))
-def test_gate_linear_uses_ll_fp32w_for_tuned_m3_with_cpp_available(
-    monkeypatch, M
+PREFERRED_FP32W_GATE_CASES = [
+    *((6144, 128, M) for M in range(1, 33)),
+    *((6144, 256, M) for M in (1, 8, 12, 14, 16, 20, 22, 25, 27, 32)),
+]
+
+
+@pytest.mark.parametrize(("input_size", "output_size", "M"), PREFERRED_FP32W_GATE_CASES)
+def test_gate_linear_uses_ll_fp32w_when_cpp_tier_disabled(
+    monkeypatch, input_size, output_size, M
 ):
     gate = _make_gate_linear_fp32w(
         monkeypatch,
         params_dtype=torch.float32,
-        input_size=6144,
-        output_size=128,
+        input_size=input_size,
+        output_size=output_size,
     )
-    assert gate.allow_fp32_router_gemm
-    x = torch.randn(M, 6144, dtype=torch.bfloat16, device="cuda")
+    gate.allow_fp32_router_gemm = False
+    x = torch.randn(M, input_size, dtype=torch.bfloat16, device="cuda")
     calls = []
 
     def fake_ll_fp32w_gemm(hidden_states, router_weight):
@@ -455,27 +461,28 @@ def test_gate_linear_uses_ll_fp32w_for_tuned_m3_with_cpp_available(
     assert torch.all(out == 2.0)
 
 
-def test_gate_linear_uses_cpp_fp32_router_for_m8_on_other_fp32_shape(
-    monkeypatch,
-):
+@pytest.mark.parametrize("M", [8, 16, 32])
+def test_gate_linear_uses_cpp_fp32_router_for_supported_cpp_shape(monkeypatch, M):
     gate = _make_gate_linear_fp32w(
         monkeypatch,
         params_dtype=torch.float32,
-        input_size=6144,
+        input_size=3072,
         output_size=256,
     )
     assert gate.allow_fp32_router_gemm
-    x = torch.randn(8, 6144, dtype=torch.bfloat16, device="cuda")
+    x = torch.randn(M, 3072, dtype=torch.bfloat16, device="cuda")
 
     def fail_ll_fp32w_gemm(hidden_states, router_weight):
-        raise AssertionError("ll_fp32w_gemm should only take tuned M3 M=8")
+        raise AssertionError(
+            "ll_fp32w_gemm should not bypass fp32_router_gemm_dispatch"
+        )
 
     monkeypatch.setattr(
         "vllm.model_executor.kernels.linear.cute_dsl.ll_fp32w.ll_fp32w_gemm",
         fail_ll_fp32w_gemm,
     )
     out, _ = gate(x)
-    assert out.shape == (8, 256)
+    assert out.shape == (M, 256)
     assert out.dtype == torch.float32
 
 
@@ -513,19 +520,19 @@ def test_gate_linear_non_fp32_out_dtype_disables_ll_fp32w(monkeypatch):
     assert not gate.allow_ll_fp32w_gemm
 
 
-def test_gate_linear_m_gt_16_skips_ll_fp32w(monkeypatch):
+def test_gate_linear_m_gt_32_skips_ll_fp32w(monkeypatch):
     gate = _make_gate_linear_fp32w(monkeypatch, params_dtype=torch.float32)
-    x = torch.randn(17, 2048, dtype=torch.bfloat16, device="cuda")
+    x = torch.randn(33, 2048, dtype=torch.bfloat16, device="cuda")
 
     def fail_ll_fp32w_gemm(hidden_states, router_weight):
-        raise AssertionError("ll_fp32w_gemm should not run for M > 16")
+        raise AssertionError("ll_fp32w_gemm should not run for M > 32")
 
     monkeypatch.setattr(
         "vllm.model_executor.kernels.linear.cute_dsl.ll_fp32w.ll_fp32w_gemm",
         fail_ll_fp32w_gemm,
     )
     out, _ = gate(x)
-    assert out.shape == (17, 64)
+    assert out.shape == (33, 64)
     assert out.dtype == torch.float32
 
 

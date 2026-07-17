@@ -12,8 +12,8 @@ from typing import Any
 import torch
 
 from ._ll_router_common import (
-    cute_context,
     current_cuda_stream,
+    cute_context,
     is_cutedsl_available,
     make_fake_gemm_tensors,
     use_pdl,
@@ -27,13 +27,40 @@ def is_available() -> bool:
     return is_cutedsl_available("ll_fp32w_gemm")
 
 
-_DEFAULT_DOTPROD_CONFIG = (192, 1)
-_TUNED_DOTPROD_CONFIGS: dict[tuple[int, int], dict[int, tuple[int, int]]] = {
-    # MiniMax-M3, measured on B300 with bf16 activations.
+_DEFAULT_DOTPROD_CONFIG = (192, 1, 1)
+_DEFAULT_DOTPROD_GROUPED_CONFIG = (192, 2, 1)
+
+
+def _default_dotprod_config(M: int, K: int, N: int) -> tuple[int, int, int]:
+    if N <= 128 and M >= 12 and M % 2 == 0:
+        return _DEFAULT_DOTPROD_GROUPED_CONFIG
+    return _DEFAULT_DOTPROD_CONFIG
+
+
+_TUNED_DOTPROD_CONFIGS: dict[tuple[int, int], dict[int, tuple[int, int, int]]] = {
+    # MiniMax-M3, aligned with fp32_router_gemm_dispatch B300 geometry.
     (6144, 128): {
-        **{M: (384, 2) for M in (4, 8)},
-        9: (384, 1),
-        **{M: (256, 1) for M in (14, 16)},
+        **{
+            M: (384, 1, 1)
+            for M in (
+                *range(1, 6),
+                *range(9, 14, 2),
+                17,
+                *range(23, 32, 2),
+            )
+        },
+        **{M: (256, 1, 1) for M in (7, 15, *range(19, 22, 2))},
+        **{M: (384, 2, 1) for M in range(6, 12, 2)},
+        **{M: (192, 2, 1) for M in (*range(12, 26, 2), 32)},
+        **{M: (128, 2, 1) for M in range(26, 32, 2)},
+    },
+    # GLM5.2, EPB reuses A across adjacent expert columns.
+    (6144, 256): {
+        **{M: (384, 1, 1) for M in range(1, 4)},
+        **{M: (128, 1, 1) for M in (*range(4, 7, 2), 11)},
+        **{M: (128, 1, 2) for M in range(5, 11, 2)},
+        **{M: (128, 2, 2) for M in range(8, 33, 2)},
+        **{M: (256, 1, 2) for M in range(13, 33, 2)},
     },
 }
 _SUPPORTED_ACTIVATION_DTYPES = (torch.bfloat16, torch.float16, torch.float32)
@@ -47,10 +74,13 @@ class LLFp32WGemm:
         bs: int
         a_dtype: torch.dtype
         token_groups: int = 1
+        epb: int = 1
 
     def __init__(self) -> None:
         # Dot-prod: keyed on static M/K/tile shape and activation dtype.
-        self._compiled_cache: dict[tuple[int, int, int, torch.dtype, int], Any] = {}
+        self._compiled_cache: dict[
+            tuple[int, int, int, torch.dtype, int, int], Any
+        ] = {}
 
     def dispatch(
         self,
@@ -60,8 +90,8 @@ class LLFp32WGemm:
         N: int,
         a_dtype: torch.dtype,
     ) -> CompileKey:
-        bs, token_groups = _TUNED_DOTPROD_CONFIGS.get((K, N), {}).get(
-            M, _DEFAULT_DOTPROD_CONFIG
+        bs, token_groups, epb = _TUNED_DOTPROD_CONFIGS.get((K, N), {}).get(
+            M, _default_dotprod_config(M, K, N)
         )
         return self.CompileKey(
             M=M,
@@ -69,6 +99,7 @@ class LLFp32WGemm:
             bs=bs,
             a_dtype=a_dtype,
             token_groups=token_groups,
+            epb=epb,
         )
 
     def get_warmup_keys(
@@ -123,6 +154,7 @@ class LLFp32WGemm:
             k=compile_key.K,
             bs=compile_key.bs,
             token_groups=compile_key.token_groups,
+            epb=compile_key.epb,
             use_pdl=use_pdl(),
         )
         compiled = cute.compile(
@@ -132,7 +164,7 @@ class LLFp32WGemm:
             output,
             1,  # runtime N placeholder for fake-tensor compile
             current_cuda_stream(),
-            options="--enable-tvm-ffi --ptxas-options -maxrregcount=64",
+            options="--enable-tvm-ffi",
         )
         cache_key = (
             compile_key.M,
@@ -140,20 +172,25 @@ class LLFp32WGemm:
             compile_key.bs,
             compile_key.a_dtype,
             compile_key.token_groups,
+            compile_key.epb,
         )
         self._compiled_cache[cache_key] = compiled
         logger.debug(
-            "Compiled ll_fp32w_dotprod: M=%d, K=%d, bs=%d, token_groups=%d, a_dtype=%s",
+            "Compiled ll_fp32w_dotprod: M=%d, K=%d, bs=%d, "
+            "token_groups=%d, epb=%d, a_dtype=%s",
             compile_key.M,
             compile_key.K,
             compile_key.bs,
             compile_key.token_groups,
+            compile_key.epb,
             compile_key.a_dtype,
         )
 
     def compile(self, compile_key: CompileKey) -> None:
         if compile_key.token_groups not in (1, 2):
             raise ValueError("ll_fp32w_gemm supports token_groups 1 or 2")
+        if compile_key.epb not in (1, 2):
+            raise ValueError("ll_fp32w_gemm supports epb 1 or 2")
         if compile_key.M % compile_key.token_groups != 0:
             raise ValueError("M must be divisible by token_groups")
         cache_key = (
@@ -162,6 +199,7 @@ class LLFp32WGemm:
             compile_key.bs,
             compile_key.a_dtype,
             compile_key.token_groups,
+            compile_key.epb,
         )
         if cache_key not in self._compiled_cache:
             self._compile_dotprod(compile_key)
@@ -212,6 +250,7 @@ class LLFp32WGemm:
             compile_key.bs,
             compile_key.a_dtype,
             compile_key.token_groups,
+            compile_key.epb,
         )
         if cache_key not in self._compiled_cache:
             self.compile(compile_key)
