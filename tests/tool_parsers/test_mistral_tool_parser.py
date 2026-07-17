@@ -144,6 +144,7 @@ def stream_delta_message_generator(
     mistral_tokenizer: TokenizerLike,
     model_output: str | None,
     tools: list[tuple[str, str]] | None,
+    chunk_size: int = 1,
 ) -> Generator[DeltaMessage, None, None]:
     if (
         isinstance(mistral_tokenizer, MistralTokenizer)
@@ -182,15 +183,13 @@ def stream_delta_message_generator(
     previous_tokens = None
     prefix_offset = 0
     read_offset = 0
+    pending_text = ""
+    pending_token_ids: list[int] = []
     for i, delta_token in enumerate(all_token_ids):
-        delta_token_ids = [delta_token]
-        previous_token_ids = all_token_ids[:i]
-        current_token_ids = all_token_ids[: i + 1]
-
         (new_tokens, delta_text, new_prefix_offset, new_read_offset) = (
             detokenize_incrementally(
                 tokenizer=mistral_tokenizer,
-                all_input_ids=current_token_ids,
+                all_input_ids=all_token_ids[: i + 1],
                 prev_tokens=previous_tokens,
                 prefix_offset=prefix_offset,
                 read_offset=read_offset,
@@ -198,27 +197,39 @@ def stream_delta_message_generator(
                 spaces_between_special_tokens=True,
             )
         )
+        previous_tokens = (
+            previous_tokens + new_tokens if previous_tokens else new_tokens
+        )
+        prefix_offset = new_prefix_offset
+        read_offset = new_read_offset
 
-        current_text = previous_text + delta_text
+        # Buffer tokens so each streamed delta can carry ``chunk_size`` tokens,
+        # reproducing the multi-token deltas produced by async scheduling /
+        # stream_interval > 1.
+        pending_text += delta_text
+        pending_token_ids.append(delta_token)
+        if len(pending_token_ids) < chunk_size and i != len(all_token_ids) - 1:
+            continue
+
+        previous_token_ids = all_token_ids[: i + 1 - len(pending_token_ids)]
+        current_token_ids = all_token_ids[: i + 1]
+        current_text = previous_text + pending_text
 
         delta_message = mistral_tool_parser.extract_tool_calls_streaming(
             previous_text,
             current_text,
-            delta_text,
+            pending_text,
             previous_token_ids,
             current_token_ids,
-            delta_token_ids,
+            pending_token_ids,
             request=_DUMMY_REQUEST,
         )
         if delta_message:
             yield delta_message
 
         previous_text = current_text
-        previous_tokens = (
-            previous_tokens + new_tokens if previous_tokens else new_tokens
-        )
-        prefix_offset = new_prefix_offset
-        read_offset = new_read_offset
+        pending_text = ""
+        pending_token_ids = []
 
 
 @pytest.mark.parametrize(
@@ -1572,3 +1583,39 @@ def test_grammar_from_tool_parser_set_by_adjust_request(
     request = _make_request()
     result = mistral_tool_parser.adjust_request(request)
     assert result._grammar_from_tool_parser is True
+
+
+@pytest.mark.parametrize("chunk_size", [2, 3, 4, 5])
+def test_streaming_pre_v11_parallel_calls_batched_deltas(
+    mistral_pre_v11_tool_parser, mistral_pre_v11_tokenizer, chunk_size
+):
+    """A batched delta spanning the boundary between two parallel calls must
+    keep them on distinct indices (the bug collapsed both onto index 0)."""
+    model_output = (
+        '[TOOL_CALLS] [{"name": "add", "arguments": {"a": 3.5, "b": 4}}, '
+        '{"name": "get_current_weather", "arguments": '
+        '{"city": "San Francisco", "state": "CA", "unit": "celsius"}}]'
+    )
+    names: list[str] = []
+    args: list[str] = []
+    idx = -1
+    for delta_message in stream_delta_message_generator(
+        mistral_pre_v11_tool_parser,
+        mistral_pre_v11_tokenizer,
+        model_output,
+        tools=None,
+        chunk_size=chunk_size,
+    ):
+        for tool_call in delta_message.tool_calls or []:
+            if tool_call.index != idx:
+                idx = tool_call.index
+                args.append("")
+            if tool_call.function and tool_call.function.name:
+                names.append(tool_call.function.name)
+            if tool_call.function and tool_call.function.arguments:
+                args[tool_call.index] += tool_call.function.arguments
+
+    assert names == ["add", "get_current_weather"]
+    assert len(args) == 2
+    # trailing args of the final call are flushed by the serving layer
+    assert json.loads(args[0]) == {"a": 3.5, "b": 4}

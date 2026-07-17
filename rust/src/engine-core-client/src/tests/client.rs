@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::convert::TryFrom;
 use std::io::Cursor;
@@ -226,6 +229,7 @@ fn request_output(
         stop_reason: None,
         events: None,
         kv_transfer_params: None,
+        ec_transfer_params: None,
         trace_headers: None,
         prefill_stats: None,
         routed_experts: None,
@@ -2462,6 +2466,7 @@ fn python_msgpack_fixtures_match_rust_encoding() {
             frequency_penalty: 0.0,
             presence_penalty: 0.0,
             repetition_penalty: 1.0,
+            repetition_detection: None,
             stop_token_ids: Vec::new(),
             eos_token_id: None,
             all_stop_token_ids: BTreeSet::new(),
@@ -2516,6 +2521,7 @@ fn python_msgpack_fixtures_match_rust_encoding() {
                         stop_reason: None,
                         events: None,
                         kv_transfer_params: None,
+                        ec_transfer_params: None,
                         trace_headers: None,
                         prefill_stats: None,
                         routed_experts: None,
