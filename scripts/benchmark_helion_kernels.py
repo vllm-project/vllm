@@ -313,6 +313,55 @@ def check_correctness(
         raise AssertionError(f"Numerics check failed for case {case}:\n{e}") from e
 
 
+@dataclass
+class CorrectnessResult:
+    """Outcome of the numerics check for a single shape case."""
+
+    case: str
+    passed: bool
+    error: str | None = None
+
+
+def check_kernel_correctness(
+    kernel: Any,
+    baseline_fn: Callable,
+    inputs_dict: dict[Any, tuple[Any, ...]] | None = None,
+) -> list[CorrectnessResult]:
+    """Run the per-shape numerics check for a kernel, continuing past failures.
+
+    Runs the same comparison as ``check_correctness`` for every shape case
+    produced by the kernel's input generator, but records the outcome per case
+    instead of raising on the first mismatch. This lets callers (e.g. a CI gate)
+    report every failing shape in one pass rather than aborting early.
+
+    Args:
+        kernel: The Helion kernel wrapper to check.
+        baseline_fn: Reference callable sharing the kernel's argument interface.
+        inputs_dict: Optional mapping of case key to input tuple. Defaults to
+            ``kernel.get_inputs()``.
+
+    Returns:
+        One ``CorrectnessResult`` per shape case, in iteration order. A case that
+        raises (compile/run error or numerics mismatch) is marked
+        ``passed=False`` with the exception text in ``error``; iteration
+        continues regardless.
+    """
+    if inputs_dict is None:
+        inputs_dict = kernel.get_inputs()
+
+    results: list[CorrectnessResult] = []
+    for key, inputs in inputs_dict.items():
+        case = str(key)
+        try:
+            check_correctness(kernel, baseline_fn, inputs, case)
+        except Exception as e:  # noqa: BLE001 - any failure is recorded, not fatal
+            results.append(CorrectnessResult(case=case, passed=False, error=str(e)))
+        else:
+            results.append(CorrectnessResult(case=case, passed=True))
+        cleanup_gpu_resources()
+    return results
+
+
 def do_bench_cudagraph_l2_clear(
     fn: Callable, rep: int = 100, return_mode: str = "mean"
 ) -> float:
@@ -387,7 +436,6 @@ def benchmark(
     repeat: int,
     cudagraph: bool,
     return_mode: str,
-    numerics_only: bool = False,
 ) -> list[Row]:
     kernel = get_kernel_by_name(kernel_name)
     # do_bench already flushes L2 per call; do_bench_cudagraph does not, so use
@@ -398,14 +446,10 @@ def benchmark(
     rows: list[Row] = []
 
     for key, inputs in inputs_dict.items():
-        logger.info("%s case %s", "Checking" if numerics_only else "Benchmarking", key)
+        logger.info("Benchmarking case %s", key)
 
         check_correctness(kernel, baseline_fn, inputs, str(key))
         logger.info("Numerics check passed for case %s", key)
-
-        if numerics_only:
-            cleanup_gpu_resources()
-            continue
 
         # Kernels may mutate their inputs in place; give each side its own copy.
         kernel_inputs = copy.deepcopy(inputs)
@@ -527,18 +571,32 @@ def main() -> None:
         else:
             baseline_fn = make_autotune_baseline(args.kernel)
 
+        if args.numerics_only:
+            results = check_kernel_correctness(wrapper, baseline_fn)
+            for r in results:
+                if r.passed:
+                    logger.info("Numerics check passed for case %s", r.case)
+                else:
+                    logger.error("Numerics check FAILED for case %s: %s", r.case, r.error)
+            failed = [r for r in results if not r.passed]
+            if failed:
+                logger.error(
+                    "%d/%d case(s) failed numerics for '%s'",
+                    len(failed),
+                    len(results),
+                    args.kernel,
+                )
+                sys.exit(1)
+            logger.info("Numerics check passed for all cases of '%s'", args.kernel)
+            return
+
         rows = benchmark(
             args.kernel,
             baseline_fn,
             args.repeat,
             args.cudagraph,
             args.return_mode,
-            args.numerics_only,
         )
-
-    if args.numerics_only:
-        logger.info("Numerics check passed for all cases of '%s'", args.kernel)
-        return
 
     print_table(rows)
 
