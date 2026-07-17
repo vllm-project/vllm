@@ -153,9 +153,9 @@ def test_fused_topk_softplus_sqrt_hash(
     # experts.
     hash_indices_table = torch.stack(
         [torch.randperm(num_experts)[:topk] for _ in range(vocab_size)]
-    ).to(device="cuda", dtype=torch.int32)
+    ).to(device="cuda", dtype=torch.long)
     input_ids = torch.randint(
-        0, vocab_size, (num_tokens,), dtype=torch.int32, device="cuda"
+        0, vocab_size, (num_tokens,), dtype=torch.long, device="cuda"
     )
 
     topk_weights_ref, topk_ids_ref = _torch_topk_softplus_sqrt(

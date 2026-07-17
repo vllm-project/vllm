@@ -1539,7 +1539,11 @@ def scaled_fp4_quant(
     Args:
         input: The input tensor to be quantized to FP4
         input_global_scale: A scalar scaling factor for the entire tensor.
-        use_8x4_sf_layout: Whether to use the 8x4 or 128x4 layout for the scaling
+        is_sf_swizzled_layout: Whether to store the scaling factors in the
+            swizzled layout (default `True`).
+        backend: Quantization kernel backend to dispatch to. For `"trtllm"`
+            backends the 8x4 scale-factor layout is selected for small
+            batches (m <= 32) instead of the 128x4 layout.
         padded_n: Optional padded K dimension. When provided, the quantized
             output and scale tensors are allocated for ``padded_n``
 
@@ -2134,8 +2138,13 @@ def wvSplitKQ(
 
 
 # moe
-def moe_sum(input: torch.Tensor, output: torch.Tensor):
-    torch.ops._moe_C.moe_sum(input, output)
+def moe_sum(
+    input: torch.Tensor,
+    output: torch.Tensor,
+    topk_ids: torch.Tensor | None = None,
+    expert_map: torch.Tensor | None = None,
+):
+    torch.ops._moe_C.moe_sum(input, output, topk_ids, expert_map)
 
 
 def moe_align_block_size(
@@ -2750,9 +2759,9 @@ def cp_gather_and_upconvert_fp8_kv_cache(
     src_cache: torch.Tensor,
     dst: torch.Tensor,
     block_table: torch.Tensor,
-    seq_lens: torch.Tensor,
     workspace_starts: torch.Tensor,
     batch_size: int,
+    seq_starts: torch.Tensor | None = None,
 ) -> None:
     """Gather and upconvert FP8 KV cache to BF16 workspace.
 
@@ -2760,12 +2769,12 @@ def cp_gather_and_upconvert_fp8_kv_cache(
         src_cache: FP8 KV cache [num_blocks, block_size, 656]
         dst: BF16 output workspace [total_tokens, 576]
         block_table: Block indices [num_reqs, max_blocks]
-        seq_lens: Sequence lengths [num_reqs]
         workspace_starts: Workspace start offsets [num_reqs]
         batch_size: Number of requests
+        seq_starts: Optional source sequence offsets [num_reqs]
     """
     torch.ops._C_cache_ops.cp_gather_and_upconvert_fp8_kv_cache(
-        src_cache, dst, block_table, seq_lens, workspace_starts, batch_size
+        src_cache, dst, block_table, workspace_starts, batch_size, seq_starts
     )
 
 

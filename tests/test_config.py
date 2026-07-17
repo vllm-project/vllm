@@ -213,6 +213,26 @@ def test_resolve_cudagraph_mode_adjusts_spec_decode_sizes_only_for_v1(
         ),
         (
             SimpleNamespace(
+                model="thinkingmachines/Inkling",
+                architectures=["InklingForCausalLM"],
+                runner_type="generate",
+                is_moe=True,
+                is_quantized=False,
+            ),
+            True,
+        ),
+        (
+            SimpleNamespace(
+                model="thinkingmachines/Inkling",
+                architectures=["InklingForConditionalGeneration"],
+                runner_type="generate",
+                is_moe=True,
+                is_quantized=False,
+            ),
+            True,
+        ),
+        (
+            SimpleNamespace(
                 model="mistralai/Mixtral-8x7B-Instruct-v0.1",
                 architectures=["MixtralForCausalLM"],
                 runner_type="generate",
