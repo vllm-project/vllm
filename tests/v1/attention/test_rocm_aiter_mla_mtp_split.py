@@ -92,7 +92,6 @@ def _builder(
         _mla_metadata_q_dtype=torch.bfloat16,
         _mla_metadata_kv_dtype=torch.bfloat16,
         decode_attn_out_dtype=torch.bfloat16,
-        _max_split_per_batch=lambda num_reqs: 32,
     )
 
 
