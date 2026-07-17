@@ -17,6 +17,7 @@ steps:
     amd:
       dind: false
       device: mi300_1
+      timeout_in_minutes: 32
       depends_on:
       - image-build-amd
 
@@ -34,9 +35,9 @@ steps:
   - pytest -v -s entrypoints/llm/offline_mode # Needs to avoid interference with other tests
   mirror:
     amd:
-      device: mi325_1
-      # TODO(akaratza): Test after Torch >= 2.12 bump
-      soft_fail: true
+      dind: false
+      device: mi300_1
+      timeout_in_minutes: 55
       depends_on:
       - image-build-amd
 
@@ -56,7 +57,9 @@ steps:
   - pytest -v -s entrypoints/scale_out
   mirror:
     amd:
-      device: mi325_1
+      dind: false
+      device: mi300_1
+      timeout_in_minutes: 65
       depends_on:
       - image-build-amd
 
@@ -73,7 +76,8 @@ steps:
   - pytest -v -s entrypoints/openai --ignore=entrypoints/openai/completion --ignore=entrypoints/openai/chat_completion --ignore=entrypoints/openai/responses --ignore=entrypoints/openai/correctness
   mirror:
     amd:
-      device: mi325_1
+      dind: false
+      device: mi300_1
       timeout_in_minutes: 65
       depends_on:
       - image-build-amd
@@ -92,8 +96,9 @@ steps:
   - pytest -v -s entrypoints/openai/completion --ignore=entrypoints/openai/completion/test_tensorizer_entrypoint.py
   mirror:
     amd:
-      device: mi325_1
-      timeout_in_minutes: 80
+      dind: false
+      device: mi300_1
+      timeout_in_minutes: 66
       depends_on:
       - image-build-amd
 
@@ -114,8 +119,9 @@ steps:
   - pytest -v -s entrypoints/anthropic
   mirror:
     amd:
-      device: mi325_1
-      timeout_in_minutes: 65
+      dind: false
+      device: mi300_1
+      timeout_in_minutes: 64
       depends_on:
       - image-build-amd
 
@@ -132,6 +138,7 @@ steps:
     amd:
       dind: false
       device: mi300_1
+      timeout_in_minutes: 47
       depends_on:
       - image-build-amd
 
@@ -162,6 +169,7 @@ steps:
     amd:
       dind: false
       device: mi300_1
+      timeout_in_minutes: 55
       depends_on:
       - image-build-amd
 
@@ -188,6 +196,7 @@ steps:
   mirror:
     amd:
       device: mi325_1
+      timeout_in_minutes: 29
       depends_on:
       - image-build-amd
       source_file_dependencies:

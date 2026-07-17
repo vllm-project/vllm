@@ -52,7 +52,7 @@ steps:
   mirror:
     amd:
       device: mi250_2
-      timeout_in_minutes: 50
+      timeout_in_minutes: 49
       depends_on:
       - image-build-amd
       source_file_dependencies:

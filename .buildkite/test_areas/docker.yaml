@@ -18,7 +18,7 @@ steps:
     amd:
       device: mi250_1
       no_gpu: true
-      timeout_in_minutes: 180
+      timeout_in_minutes: 35
       depends_on:
       - image-build-amd
       source_file_dependencies:

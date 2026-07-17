@@ -85,7 +85,7 @@ steps:
     amd:
       dind: false
       device: mi300_2
-      timeout_in_minutes: 180
+      timeout_in_minutes: 43
       depends_on:
       - image-build-amd
       source_file_dependencies:
@@ -138,3 +138,18 @@ steps:
   - pytest -v -s v1/spec_decode/test_rejection_sampler_utils.py
   - pytest -v -s v1/spec_decode/test_synthetic_rejection_sampler_utils.py
   - pytest -v -s v1/e2e/spec_decode/test_spec_decode.py -k "eagle or mtp"
+  mirror:
+    amd:
+      dind: false
+      device: mi300_1
+      timeout_in_minutes: 73
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - vllm/platforms/rocm.py
+      - vllm/v1/worker/gpu/
+      - vllm/v1/worker/gpu_worker.py
+      - tests/v1/spec_decode/test_max_len.py
+      - tests/v1/spec_decode/test_rejection_sampler_utils.py
+      - tests/v1/spec_decode/test_synthetic_rejection_sampler_utils.py
+      - tests/v1/e2e/spec_decode/test_spec_decode.py

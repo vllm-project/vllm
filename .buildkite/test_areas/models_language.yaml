@@ -17,6 +17,7 @@ steps:
     amd:
       dind: false
       device: mi300_1
+      timeout_in_minutes: 44
       depends_on:
       - image-build-amd
 
@@ -38,6 +39,7 @@ steps:
     amd:
       dind: false
       device: mi300_1
+      timeout_in_minutes: 40
       depends_on:
       - image-build-amd
       source_file_dependencies:
@@ -69,7 +71,7 @@ steps:
   mirror:
     amd:
       device: mi325_1
-      timeout_in_minutes: 70
+      timeout_in_minutes: 56
       depends_on:
       - image-build-amd
       commands:
@@ -95,6 +97,7 @@ steps:
     amd:
       dind: false
       device: mi300_1
+      timeout_in_minutes: 69
       depends_on:
       - image-build-amd
       commands:
@@ -116,6 +119,7 @@ steps:
     amd:
       dind: false
       device: mi300_1
+      timeout_in_minutes: 64
       depends_on:
       - image-build-amd
       source_file_dependencies:
@@ -150,8 +154,9 @@ steps:
     - pytest -v -s models/language/pooling -m 'not core_model'
   mirror:
     amd:
-      device: mi325_1
-      timeout_in_minutes: 120
+      dind: false
+      device: mi300_1
+      timeout_in_minutes: 95
       depends_on:
       - image-build-amd
 
@@ -169,6 +174,6 @@ steps:
     amd:
       dind: false
       device: mi300_1
-      timeout_in_minutes: 100
+      timeout_in_minutes: 58
       depends_on:
       - image-build-amd
