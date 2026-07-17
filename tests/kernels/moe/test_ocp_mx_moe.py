@@ -1,29 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import importlib.metadata
 import types
 from dataclasses import dataclass
-from importlib.util import find_spec
 
 import pytest
 import torch
-from packaging import version
 
 from tests.kernels.moe.utils import check_accuracy
 from vllm._aiter_ops import is_aiter_found, rocm_aiter_ops
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer
-
-# MXFP4 via quark requires amd-quark >= 0.12 on torch >= 2.11.
-# Earlier torch releases work with older quark versions. See
-# https://github.com/amd/Quark/issues/34
-# TODO: Remove once amd-quark>=0.12.0
-QUARK_MXFP4_TORCH_COMPATIBLE = find_spec("quark") is not None and (
-    version.parse(importlib.metadata.version("amd-quark")) >= version.parse("0.12.0")
-    if version.parse(torch.__version__.split("+")[0]) >= version.parse("2.11")
-    else True
-)
 
 TRTLLM_GEN_MXFP4_AVAILABLE = (
     current_platform.is_cuda() and current_platform.is_device_capability_family(100)
@@ -96,8 +83,8 @@ def enable_pickle(monkeypatch):
     ],
 )
 @pytest.mark.skipif(
-    not QUARK_MXFP4_TORCH_COMPATIBLE,
-    reason="MXFP4 via quark requires amd-quark >= 0.12 on torch >= 2.11.",
+    not ROCM_AVAILABLE,
+    reason="This test is only enabled on platforms that support amd-quark",
 )
 def test_mxfp4_loading_and_execution_moe(vllm_runner, model_case: ModelCase):
     if torch.accelerator.device_count() < model_case.tp:
