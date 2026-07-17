@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import inspect
 import os
 import sys
 from contextlib import contextmanager
@@ -19,11 +20,15 @@ def _reset_monitor():
     jit_monitor._mode = "warn"
     jit_monitor._verbose = False
     jit_monitor._cutedsl_hook_installed = False
+    jit_monitor._tilelang_hook_installed = False
+    jit_monitor._tilelang_jitimpl_compile_depth = 0
     yield
     jit_monitor._active = False
     jit_monitor._mode = "warn"
     jit_monitor._verbose = False
     jit_monitor._cutedsl_hook_installed = False
+    jit_monitor._tilelang_hook_installed = False
+    jit_monitor._tilelang_jitimpl_compile_depth = 0
 
 
 # ------------------------------------------------------------------
@@ -55,6 +60,45 @@ def _fake_cute_compile(*args, **kwargs):
     return "compiled"
 
 
+def _fake_tilelang_import_modules():
+    """Fake Python's TileLang modules touched by ``jit_monitor.activate``."""
+
+    class FakeJITKernel:
+        def __init__(self, *args, **kwargs):
+            pass
+
+    class FakeJITImpl:
+        def __init__(self, func, signature):
+            self.func = func
+            self.signature = signature
+            self.mode = "lazy"
+            self._kernel_cache = {}
+
+        def __call__(self, *args, **kwargs):
+            key, _ = self.func.parse_args(*args, **kwargs)
+            kernel = self._kernel_cache.get(key)
+            if kernel is None:
+                kernel = "compiled"
+                self._kernel_cache[key] = kernel
+            return kernel
+
+    fake_kernel = cast(Any, ModuleType("tilelang.jit.kernel"))
+    fake_kernel.JITKernel = FakeJITKernel
+
+    fake_jit = cast(Any, ModuleType("tilelang.jit"))
+    fake_jit.JITImpl = FakeJITImpl
+    fake_jit.kernel = fake_kernel
+
+    fake_tilelang = cast(Any, ModuleType("tilelang"))
+    fake_tilelang.jit = fake_jit
+
+    return {
+        "tilelang": fake_tilelang,
+        "tilelang.jit": fake_jit,
+        "tilelang.jit.kernel": fake_kernel,
+    }
+
+
 @contextmanager
 def _patch_jit_modules(fake_knobs, *, cute_compile=_fake_cute_compile):
     """Patch the Triton and CuTeDSL imports touched by ``jit_monitor.activate``."""
@@ -66,6 +110,7 @@ def _patch_jit_modules(fake_knobs, *, cute_compile=_fake_cute_compile):
             {
                 "triton": fake_triton,
                 **_fake_cute_import_modules(cute_compile),
+                **_fake_tilelang_import_modules(),
             },
         ),
         mock.patch.object(jit_monitor, "HAS_TRITON", True),
@@ -274,6 +319,136 @@ class TestCuTeDSLHook:
             jit_monitor.activate(mode="error")
             with pytest.raises(RuntimeError, match="CuTeDSL JIT compilation"):
                 cute.compile(lambda: None, "arg", option=True)
+
+    def test_subscripted_compile_is_monitored(self):
+        """``cute.compile[options](...)`` (flashinfer >= 0.6.14) must work."""
+
+        class FakeCompileCallable:
+            def __getitem__(self, options):
+                return self
+
+            def __call__(self, *args, **kwargs):
+                return "compiled"
+
+        with _patch_jit_modules(_make_fake_knobs(), cute_compile=FakeCompileCallable()):
+            import cutlass.cute as cute
+
+            jit_monitor.activate()
+            with mock.patch.object(jit_monitor.logger, "warning_once") as warning_once:
+                result = cute.compile[("opt_level", 3)](lambda: None, "arg")
+
+        assert result == "compiled"
+        warning_once.assert_called_once()
+
+
+class TestTileLangHook:
+    def test_jit_kernel_logs_warning(self):
+        with _patch_jit_modules(_make_fake_knobs()):
+            from tilelang.jit.kernel import JITKernel
+
+            func = SimpleNamespace(attrs={"global_symbol": "tl_kernel"})
+            jit_monitor.activate()
+            with mock.patch.object(jit_monitor.logger, "warning_once") as warning_once:
+                JITKernel(func=func, out_idx=None, execution_backend="tvm_ffi")
+
+        warning_once.assert_called_once()
+        msg = warning_once.call_args[0][0] % warning_once.call_args[0][1:]
+        assert "TileLang JIT compilation during inference" in msg
+        assert "tl_kernel" in msg
+
+    def test_jit_impl_logs_warning(self):
+        with _patch_jit_modules(_make_fake_knobs()):
+            from tilelang.jit import JITImpl
+
+            def tilelang_fn(
+                gemm_out_mul,
+                hidden_size: int,
+                n_splits: int = 1,
+                hc_mult: int = 4,
+            ):
+                return None
+
+            class FakeFunc:
+                orig_func = tilelang_fn
+
+                def parse_args(self, *args, **kwargs):
+                    return (
+                        (
+                            "tilelang_key",
+                            kwargs["hidden_size"],
+                            kwargs.get("n_splits", 1),
+                        ),
+                        {},
+                    )
+
+                def set_mode(self, mode):
+                    self.mode = mode
+
+            tensor = SimpleNamespace(
+                shape=(2, 16, 24),
+                dtype="float32",
+                device="cuda:0",
+            )
+            impl = JITImpl(FakeFunc(), inspect.signature(tilelang_fn))
+
+            jit_monitor.activate()
+            with (
+                mock.patch.object(jit_monitor.logger, "warning_once") as warning_once,
+                mock.patch.object(jit_monitor.logger, "warning") as warning,
+            ):
+                impl(tensor, hidden_size=7168, n_splits=2)
+
+        warning_once.assert_called_once()
+        warning.assert_not_called()
+        msg = warning_once.call_args[0][0] % warning_once.call_args[0][1:]
+        assert "TileLang JIT compilation during inference" in msg
+        assert "tilelang_fn" in msg
+
+    def test_jit_impl_does_not_log_on_cache_hit(self):
+        with _patch_jit_modules(_make_fake_knobs()):
+            from tilelang.jit import JITImpl
+
+            def tilelang_fn(gemm_out_mul, n_splits: int = 1):
+                return None
+
+            class FakeFunc:
+                orig_func = tilelang_fn
+
+                def parse_args(self, *args, **kwargs):
+                    return (("tilelang_key", kwargs.get("n_splits", 1)), {})
+
+                def set_mode(self, mode):
+                    self.mode = mode
+
+            tensor = SimpleNamespace(shape=(2, 16, 24), dtype="float32")
+            impl = JITImpl(FakeFunc(), inspect.signature(tilelang_fn))
+
+            jit_monitor.activate()
+            with mock.patch.object(jit_monitor.logger, "warning_once") as warning_once:
+                impl(tensor, n_splits=2)
+                impl(tensor, n_splits=2)
+
+        warning_once.assert_called_once()
+
+    def test_from_database_does_not_log(self):
+        with _patch_jit_modules(_make_fake_knobs()):
+            from tilelang.jit.kernel import JITKernel
+
+            func = SimpleNamespace(attrs={"global_symbol": "cached_tl_kernel"})
+            jit_monitor.activate()
+            with mock.patch.object(jit_monitor.logger, "warning_once") as warning_once:
+                JITKernel(func=func, from_database=True)
+
+        warning_once.assert_not_called()
+
+    def test_error_mode_raises(self):
+        with _patch_jit_modules(_make_fake_knobs()):
+            from tilelang.jit.kernel import JITKernel
+
+            func = SimpleNamespace(attrs={"global_symbol": "error_tl_kernel"})
+            jit_monitor.activate(mode="error")
+            with pytest.raises(RuntimeError, match="TileLang JIT compilation"):
+                JITKernel(func=func)
 
 
 # ------------------------------------------------------------------
