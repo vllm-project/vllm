@@ -91,7 +91,8 @@ class DeepseekV32MultiTokenPredictorLayer(nn.Module):
             positions=positions, hidden_states=hidden_states, residual=None
         )
         hidden_states = tensor_model_parallel_all_reduce(hidden_states)
-        return residual + hidden_states
+        hidden_states = residual + hidden_states
+        return hidden_states, self.shared_head(hidden_states)
 
 
 class DeepseekV32MultiTokenPredictor(nn.Module):
