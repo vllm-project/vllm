@@ -349,7 +349,7 @@ class BloomForCausalLM(nn.Module, SupportsPP, SupportsQuant):
             )
 
         self.logits_processor = LogitsProcessor(config.vocab_size)
-        self.make_empty_intermediate_tensors = (
+        self.make_empty_intermediate_tensors = (  # type: ignore[method-assign]
             self.transformer.make_empty_intermediate_tensors
         )
 

@@ -186,7 +186,7 @@ class BailingMLP(nn.Module):
         intermediate_size: int,
         config: PretrainedConfig,
         quant_config: QuantizationConfig | None = None,
-        reduce_results: bool | None = True,
+        reduce_results: bool = True,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -283,7 +283,7 @@ class BailingMoE(nn.Module):
             else:
                 intermediate_size = config.moe_intermediate_size
             intermediate_size *= config.num_shared_experts
-            self.shared_experts = BailingMLP(
+            self.shared_experts: BailingMLP | None = BailingMLP(
                 intermediate_size=intermediate_size,
                 config=config,
                 quant_config=quant_config,
@@ -516,7 +516,7 @@ class BailingMoeModel(nn.Module):
                 break
             else:
                 for mapping in expert_params_mapping:
-                    param_name, weight_name, expert_id, shard_id = mapping
+                    param_name, weight_name, expert_id, expert_shard_id = mapping
                     if weight_name not in name:
                         continue
                     name = name.replace(weight_name, param_name)
@@ -531,7 +531,7 @@ class BailingMoeModel(nn.Module):
                         param,
                         loaded_weight,
                         name,
-                        shard_id=shard_id,
+                        shard_id=expert_shard_id,
                         expert_id=expert_id,
                     )
                     break
@@ -596,7 +596,7 @@ class BailingMoeForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
         else:
             self.lm_head = PPMissingLayer()
 
-        self.make_empty_intermediate_tensors = (
+        self.make_empty_intermediate_tensors = (  # type: ignore[method-assign]
             self.model.make_empty_intermediate_tensors
         )
 

@@ -460,7 +460,7 @@ class Blip2DummyInputsBuilder(BaseDummyInputsBuilder[Blip2ProcessingInfo]):
                 width=max_image_size,
                 height=max_image_size,
                 num_images=num_images,
-                overrides=image_overrides,
+                overrides=image_overrides,  # type: ignore[arg-type]
             )
         }
 
@@ -523,7 +523,7 @@ class Blip2MultiModalProcessor(BaseMultiModalProcessor[Blip2ProcessingInfo]):
     info=Blip2ProcessingInfo,
     dummy_inputs=Blip2DummyInputsBuilder,
 )
-class Blip2ForConditionalGeneration(
+class Blip2ForConditionalGeneration(  # type: ignore[misc]
     nn.Module, SupportsLoRA, SupportsMultiModal, SupportsPP, SupportsQuant
 ):
     @classmethod
@@ -576,7 +576,7 @@ class Blip2ForConditionalGeneration(
                 prefix=maybe_prefix(prefix, "language_model"),
             )
 
-        self.make_empty_intermediate_tensors = (
+        self.make_empty_intermediate_tensors = (  # type: ignore[method-assign]
             self.language_model.make_empty_intermediate_tensors
         )
 
@@ -623,7 +623,7 @@ class Blip2ForConditionalGeneration(
         if image_input["type"] == "image_embeds":
             return image_input["data"]
 
-        image_features = self._process_image_pixels(image_input)
+        image_features = self._process_image_pixels(image_input)  # type: ignore[arg-type]
 
         query_tokens = self.query_tokens.expand(image_features.shape[0], -1, -1)
         query_output = self.qformer(

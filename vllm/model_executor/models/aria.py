@@ -79,7 +79,9 @@ class AriaImagePixelInputs(TensorSchema):
     ]
 
 
-class AriaVisionTransformer(Idefics3VisionTransformer, SupportsQuant):
+class AriaVisionTransformer(  # type: ignore[misc]
+    Idefics3VisionTransformer, SupportsQuant
+):
     packed_modules_mapping = {"qkv_proj": ["q_proj", "k_proj", "v_proj"]}
 
     def __init__(
@@ -218,7 +220,7 @@ class AriaProjector(nn.Module):
 
 
 class AriaRoutedExperts(RoutedExperts):
-    def weight_loader(
+    def weight_loader(  # type: ignore[override]
         self, param: nn.Parameter, loaded_weight: torch.Tensor, shard_id: str
     ) -> None:
         # Override the weight_loader to handle the expert weights in the Aria
@@ -326,7 +328,7 @@ class AriaTextDecoderLayer(LlamaDecoderLayer):
         )
 
 
-class AriaTextModel(LlamaModel, SupportsQuant):
+class AriaTextModel(LlamaModel, SupportsQuant):  # type: ignore[misc]
     """
     Custom LlamaModel for the AriaMoE model which modifies the standard
     LlamaModel by replacing the `LlamaDecoderLayer` with `MoEDecoderLayer`.
@@ -386,9 +388,10 @@ class AriaTextModel(LlamaModel, SupportsQuant):
                 if name.endswith(".bias") and name not in params_dict:
                     continue
                 # Remapping the name of FP8 kv-scale.
-                name = maybe_remap_kv_scale_name(name, params_dict)
-                if name is None:
+                remapped_name = maybe_remap_kv_scale_name(name, params_dict)
+                if remapped_name is None:
                     continue
+                name = remapped_name
 
                 if is_pp_missing_parameter(name, self):
                     continue
@@ -445,7 +448,7 @@ class AriaDummyInputsBuilder(BaseDummyInputsBuilder[AriaProcessingInfo]):
                 width=max_image_size,
                 height=max_image_size,
                 num_images=num_images,
-                overrides=image_overrides,
+                overrides=image_overrides,  # type: ignore[arg-type]
             )
         }
 

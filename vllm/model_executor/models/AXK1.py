@@ -109,8 +109,12 @@ class AXK1MoE(nn.Module):
         self.ep_group = get_ep_group().device_group
         self.ep_rank = get_ep_group().rank_in_group
         self.ep_size = self.ep_group.size()
+        assert config.n_routed_experts is not None
+        assert config.num_experts_per_tok is not None
+        assert config.scoring_func is not None
+        assert config.hidden_act is not None
         self.n_routed_experts: int = config.n_routed_experts
-        self.n_shared_experts: int = config.n_shared_experts
+        self.n_shared_experts: int | None = config.n_shared_experts
 
         self.is_sequence_parallel = parallel_config.use_sequence_parallel_moe
 
@@ -244,7 +248,7 @@ class AXK1Attention(nn.Module):
         qk_nope_head_dim: int,
         qk_rope_head_dim: int,
         v_head_dim: int,
-        q_lora_rank: int,
+        q_lora_rank: int | None,
         kv_lora_rank: int,
         max_position_embeddings: int = 8192,
         cache_config: CacheConfig | None = None,
@@ -281,7 +285,7 @@ class AXK1Attention(nn.Module):
             )
             self.q_a_layernorm = RMSNorm(self.q_lora_rank, eps=config.rms_norm_eps)
             self.q_b_proj = ColumnParallelLinear(
-                q_lora_rank,
+                self.q_lora_rank,
                 self.num_heads * self.qk_head_dim,
                 bias=False,
                 quant_config=quant_config,
@@ -319,6 +323,7 @@ class AXK1Attention(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.o_proj",
         )
+        assert config.rope_parameters is not None
         if config.rope_parameters["rope_type"] != "default":
             config.rope_parameters["rope_type"] = (
                 "deepseek_yarn"
@@ -491,6 +496,7 @@ class AXK1MLAAttention(nn.Module):
             prefix=f"{prefix}.o_proj",
         )
 
+        assert config.rope_parameters is not None
         if config.rope_parameters["rope_type"] != "default":
             config.rope_parameters["rope_type"] = (
                 "deepseek_yarn"
@@ -572,6 +578,13 @@ class AXK1DecoderLayer(nn.Module):
         parallel_config = vllm_config.parallel_config
         self.config = config
 
+        assert config.max_position_embeddings is not None
+        assert config.hidden_act is not None
+        assert config.routed_scaling_factor is not None
+        assert config.qk_nope_head_dim is not None
+        assert config.qk_rope_head_dim is not None
+        assert config.v_head_dim is not None
+        assert config.kv_lora_rank is not None
         self.hidden_size = config.hidden_size
         max_position_embeddings = config.max_position_embeddings
         # DecoderLayers are created with `make_layers` which passes the prefix
@@ -587,6 +600,7 @@ class AXK1DecoderLayer(nn.Module):
         use_mha = all(dim == 0 for dim in (qk_nope_head_dim, qk_rope_head_dim))
         self.use_mha = use_mha
 
+        attn_cls: type[nn.Module]
         if use_mha:
             attn_cls = DeepseekAttention
         elif model_config.use_mla:
@@ -634,6 +648,7 @@ class AXK1DecoderLayer(nn.Module):
         self.routed_scaling_factor = config.routed_scaling_factor
 
     def _is_layer_sparse(self) -> bool:
+        assert self.config.moe_layer_freq is not None
         return (
             self.config.n_routed_experts is not None
             and self.layer_idx >= self.config.first_k_dense_replace
@@ -788,7 +803,7 @@ class AXK1Model(nn.Module):
         rocm_aiter_moe_shared_expert_enabled = (
             rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
         )
-        stacked_params_mapping = [
+        stacked_params_mapping: list[tuple[str, str, int | str]] = [
             # (param_name, shard_name, shard_id)
             ("gate_up_proj", "gate_proj", 0),
             ("gate_up_proj", "up_proj", 1),
@@ -809,6 +824,7 @@ class AXK1Model(nn.Module):
 
         # Params for weights, fp8 weight scales, fp8 activation scales
         # (param_name, weight_name, expert_id, shard_id)
+        assert self.config.n_routed_experts is not None
         expert_params_mapping = fused_moe_make_expert_params_mapping(
             self,
             ckpt_gate_proj_name="gate_proj",
@@ -816,7 +832,7 @@ class AXK1Model(nn.Module):
             ckpt_up_proj_name="up_proj",
             num_experts=self.config.n_routed_experts
             + (
-                self.config.n_shared_experts
+                (self.config.n_shared_experts or 0)
                 if rocm_aiter_moe_shared_expert_enabled
                 else 0
             ),
@@ -925,7 +941,7 @@ class AXK1Model(nn.Module):
                     # param and delegate to its expert-aware weight_loader
                     # with expert_id.
                     for mapping in expert_params_mapping:
-                        param_name, weight_name, expert_id, shard_id = mapping
+                        param_name, weight_name, expert_id, expert_shard_id = mapping
                         if weight_name not in chunk_name:
                             continue
 
@@ -951,7 +967,7 @@ class AXK1Model(nn.Module):
                             param,
                             weight_to_load,
                             name_mapped,
-                            shard_id=shard_id,
+                            shard_id=expert_shard_id,
                             expert_id=expert_id,
                             return_success=True,
                         )
@@ -973,9 +989,10 @@ class AXK1Model(nn.Module):
                             continue
 
                         # Remapping the name of FP8 kv-scale.
-                        name = maybe_remap_kv_scale_name(name, params_dict)
-                        if name is None:
+                        remapped_name = maybe_remap_kv_scale_name(name, params_dict)
+                        if remapped_name is None:
                             continue
+                        name = remapped_name
 
                         if is_pp_missing_parameter(name, self):
                             continue
@@ -1013,7 +1030,7 @@ class AXK1MixtureOfExperts(MixtureOfExperts):
             self.num_physical_experts = example_moe.n_physical_experts
             self.num_local_physical_experts = example_moe.n_local_physical_experts
             self.num_routed_experts = example_moe.n_routed_experts
-            self.num_shared_experts = example_moe.n_shared_experts
+            self.num_shared_experts = example_moe.n_shared_experts or 0
             self.num_redundant_experts = example_moe.n_redundant_experts
 
     def update_physical_experts_metadata(
@@ -1078,7 +1095,7 @@ class AXK1ForCausalLM(
         else:
             self.lm_head = PPMissingLayer()
         self.logits_processor = LogitsProcessor(config.vocab_size)
-        self.make_empty_intermediate_tensors = (
+        self.make_empty_intermediate_tensors = (  # type: ignore[method-assign]
             self.model.make_empty_intermediate_tensors
         )
         # Set MoE hyperparameters
@@ -1131,6 +1148,7 @@ class AXK1ForCausalLM(
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         # Params for weights, fp8 weight scales, fp8 activation scales
         # (param_name, weight_name, expert_id, shard_id)
+        assert self.config.n_routed_experts is not None
         return fused_moe_make_expert_params_mapping(
             self,
             ckpt_gate_proj_name="gate_proj",

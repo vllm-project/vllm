@@ -326,7 +326,7 @@ class ArceeForCausalLM(
             # Placeholder for lm_head on non-last ranks
             self.lm_head = PPMissingLayer()
 
-        self.make_empty_intermediate_tensors = (
+        self.make_empty_intermediate_tensors = (  # type: ignore[method-assign]
             self.model.make_empty_intermediate_tensors
         )
 

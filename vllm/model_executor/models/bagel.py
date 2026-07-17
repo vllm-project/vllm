@@ -264,7 +264,7 @@ class BagelDummyInputsBuilder(BaseDummyInputsBuilder[BagelProcessingInfo]):
                 width=image_size,
                 height=image_size,
                 num_images=num_images,
-                overrides=image_overrides,
+                overrides=image_overrides,  # type: ignore[arg-type]
             ),
         }
 
@@ -430,7 +430,7 @@ class BagelForConditionalGeneration(
             self.connector = StageMissingLayer("image_tower")
             self.vit_pos_embed = StageMissingLayer("image_tower")
 
-        self.make_empty_intermediate_tensors = (
+        self.make_empty_intermediate_tensors = (  # type: ignore[method-assign]
             self.language_model.make_empty_intermediate_tensors
         )
 

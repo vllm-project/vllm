@@ -103,7 +103,7 @@ class BeeDummyInputsBuilder(LlavaDummyInputsBuilder[BeeProcessingInfo]):
                 width=target_width,
                 height=target_height,
                 num_images=num_images,
-                overrides=image_overrides,
+                overrides=image_overrides,  # type: ignore[arg-type]
             ),
         }
 
@@ -133,7 +133,7 @@ class BeeMultiModalProjector(nn.Module):
         return hidden_states
 
 
-@MULTIMODAL_REGISTRY.register_processor(
+@MULTIMODAL_REGISTRY.register_processor(  # type: ignore[misc]
     LlavaNextMultiModalProcessor,
     info=BeeProcessingInfo,
     dummy_inputs=BeeDummyInputsBuilder,

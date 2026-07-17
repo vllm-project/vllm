@@ -232,7 +232,7 @@ class AfmoeAttention(nn.Module):
 
         # Only create rotary embeddings for local attention
         if self.is_local_attention:
-            self.rotary_emb = get_rope(
+            self.rotary_emb: nn.Module | None = get_rope(
                 self.head_dim,
                 max_position=max_position_embeddings,
                 rope_parameters=config.rope_parameters,
@@ -409,8 +409,10 @@ class AfmoeModel(nn.Module, EagleModelMixin):
         else:
             self.norm = PPMissingLayer()
 
-        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
-            ["hidden_states", "residual"], config.hidden_size
+        self.make_empty_intermediate_tensors = (  # type: ignore[method-assign]
+            make_empty_intermediate_tensors_factory(
+                ["hidden_states", "residual"], config.hidden_size
+            )
         )
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
@@ -525,7 +527,7 @@ class AfmoeForCausalLM(
         else:
             self.lm_head = PPMissingLayer()
         self.logits_processor = LogitsProcessor(config.vocab_size)
-        self.make_empty_intermediate_tensors = (
+        self.make_empty_intermediate_tensors = (  # type: ignore[method-assign]
             self.model.make_empty_intermediate_tensors
         )
         # Set MoE hyperparameters
@@ -576,7 +578,7 @@ class AfmoeForCausalLM(
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)
 
-    def forward(
+    def forward(  # type: ignore[override]
         self,
         input_ids: torch.Tensor | None,
         positions: torch.Tensor,

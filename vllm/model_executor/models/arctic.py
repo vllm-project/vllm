@@ -501,7 +501,7 @@ class ArcticModel(nn.Module):
                 weight_loader(param, loaded_weight, shard_id)
                 break
             else:
-                for param_name, weight_name, shard_id in mlp_params_mapping:
+                for param_name, weight_name, mlp_shard_id in mlp_params_mapping:
                     if weight_name not in name:
                         continue
                     name = name.replace(weight_name, param_name)
@@ -509,10 +509,10 @@ class ArcticModel(nn.Module):
                         continue
                     param = params_dict[name]
                     weight_loader = param.weight_loader
-                    weight_loader(param, loaded_weight, shard_id)
+                    weight_loader(param, loaded_weight, mlp_shard_id)
                     break
                 else:
-                    for param_name, weight_name, shard_id in expert_params_mapping:
+                    for param_name, weight_name, expert_id in expert_params_mapping:
                         if weight_name not in name:
                             continue
                         name = name.replace(weight_name, param_name)
@@ -521,7 +521,7 @@ class ArcticModel(nn.Module):
                         param = params_dict[name]
                         weight_loader = param.weight_loader
                         weight_loader(
-                            param, loaded_weight, weight_name, expert_id=shard_id
+                            param, loaded_weight, weight_name, expert_id=expert_id
                         )
                         break
                     else:
@@ -562,7 +562,7 @@ class ArcticForCausalLM(nn.Module, SupportsPP, SupportsQuant):
         self.num_experts_per_tok = config.num_experts_per_tok
 
         self.logits_processor = LogitsProcessor(config.vocab_size)
-        self.make_empty_intermediate_tensors = (
+        self.make_empty_intermediate_tensors = (  # type: ignore[method-assign]
             self.model.make_empty_intermediate_tensors
         )
 
