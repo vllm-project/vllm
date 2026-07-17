@@ -3,6 +3,7 @@
 """Unit tests for the `vllm launch` CLI subcommand."""
 
 import argparse
+import sys
 from unittest.mock import patch
 
 import pytest
@@ -12,6 +13,8 @@ from vllm.entrypoints.cli.launch import (
     RenderSubcommand,
     cmd_init,
 )
+from vllm.entrypoints.cli.snapshot import SnapshotSubcommand
+from vllm.entrypoints.snapshot import maybe_restore_serve
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 
@@ -109,3 +112,63 @@ def test_launch_registered_in_main():
     assert hasattr(launch_module, "cmd_init")
     subcmds = launch_module.cmd_init()
     assert any(s.name == "launch" for s in subcmds)
+
+
+# -- `vllm snapshot` subcommand (folded here per the no-new-test-file rule; this
+#    file now also covers the snapshot CLI surface) --
+
+
+@pytest.fixture
+def snapshot_parser():
+    parser = FlexibleArgumentParser(description="test")
+    subparsers = parser.add_subparsers(required=False, dest="subparser")
+    SnapshotSubcommand().subparser_init(subparsers)
+    return parser
+
+
+def test_snapshot_registered_in_main():
+    import vllm.entrypoints.cli.snapshot as snapshot_module
+
+    assert hasattr(snapshot_module, "cmd_init")
+    subcmds = snapshot_module.cmd_init()
+    assert any(s.name == "snapshot" for s in subcmds)
+
+
+def test_parse_snapshot_create_flags(snapshot_parser):
+    args = snapshot_parser.parse_args(["snapshot", "create", "--dry-run", "--force"])
+    assert args.dry_run is True
+    assert args.force is True
+
+
+def test_restore_hook_noop_when_disabled(monkeypatch, caplog):
+    monkeypatch.delenv("VLLM_SNAPSHOT", raising=False)
+    with caplog.at_level("INFO", logger="vllm.entrypoints.snapshot"):
+        assert maybe_restore_serve() is None
+    assert not any(
+        "snapshot restore" in record.getMessage() for record in caplog.records
+    )
+
+
+def test_restore_hook_cold_fallback_logs_miss(monkeypatch, caplog, tmp_path):
+    # Enabled + `serve` + no matching snapshot: the hook must fall back to a cold
+    # start (return None) and log exactly one miss line. Platform is pinned so
+    # the linux-only gate runs off-linux too, and the lookup key is stubbed so
+    # the test stays on the no-snapshot path even in editable or RECORD-less
+    # environments where key computation itself would refuse.
+    import vllm.entrypoints.snapshot as snapshot_module
+
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(sys, "argv", ["vllm", "serve", "some-model"])
+    monkeypatch.setenv("VLLM_SNAPSHOT", "1")
+    monkeypatch.delenv("VLLM_SNAPSHOT_RESTORED", raising=False)
+    monkeypatch.setenv("VLLM_SNAPSHOT_ROOT", str(tmp_path))
+    monkeypatch.setattr(snapshot_module, "lookup_key", lambda env: {"stub": 1})
+    with caplog.at_level("INFO", logger="vllm.entrypoints.snapshot"):
+        assert maybe_restore_serve() is None
+    misses = [
+        record
+        for record in caplog.records
+        if "snapshot restore miss" in record.getMessage()
+    ]
+    assert len(misses) == 1
+    assert "no snapshot" in misses[0].getMessage()

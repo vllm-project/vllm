@@ -9,18 +9,24 @@ import importlib.metadata
 import sys
 from importlib.util import find_spec
 
+from vllm.entrypoints.snapshot import maybe_restore_serve
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
 
 def main():
+    # Must run before the eager subcommand imports below: they pull the serve
+    # graph (torch + v1 engine), which is exactly the bill a restore replaces.
+    maybe_restore_serve()
+
     import vllm.entrypoints.cli.benchmark.main
     import vllm.entrypoints.cli.collect_env
     import vllm.entrypoints.cli.launch
     import vllm.entrypoints.cli.openai
     import vllm.entrypoints.cli.run_batch
     import vllm.entrypoints.cli.serve
+    import vllm.entrypoints.cli.snapshot
     from vllm.entrypoints.serve.utils.api_utils import (
         VLLM_SUBCMD_PARSER_EPILOG,
         cli_env_setup,
@@ -34,6 +40,7 @@ def main():
         vllm.entrypoints.cli.benchmark.main,
         vllm.entrypoints.cli.collect_env,
         vllm.entrypoints.cli.run_batch,
+        vllm.entrypoints.cli.snapshot,
     ]
 
     cli_env_setup()

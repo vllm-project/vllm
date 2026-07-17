@@ -32,6 +32,9 @@ if TYPE_CHECKING:
     S3_ENDPOINT_URL: str | None = None
     VLLM_MODEL_REDIRECT_PATH: str | None = None
     VLLM_CACHE_ROOT: str = os.path.expanduser("~/.cache/vllm")
+    VLLM_SNAPSHOT: bool = False
+    VLLM_SNAPSHOT_ROOT: str = os.path.join(VLLM_CACHE_ROOT, "snapshots")
+    VLLM_SNAPSHOT_RESTORED: bool = False
     VLLM_CONFIG_ROOT: str = os.path.expanduser("~/.config/vllm")
     VLLM_USAGE_STATS_SERVER: str = "https://stats.vllm.ai"
     VLLM_NO_USAGE_STATS: bool = False
@@ -679,6 +682,28 @@ environment_variables: dict[str, Callable[[], Any]] = {
             "VLLM_CACHE_ROOT",
             os.path.join(get_default_cache_root(), "vllm"),
         )
+    ),
+    # Opt-in native CRIU imports snapshot for `vllm serve`
+    # (see vllm/entrypoints/snapshot.py). Off by default; when set, `vllm serve`
+    # restores a matching snapshot instead of paying the import bill, and any
+    # miss falls back to a normal cold start.
+    "VLLM_SNAPSHOT": lambda: bool(int(os.getenv("VLLM_SNAPSHOT", "0"))),
+    # Snapshot storage root; defaults under VLLM_CACHE_ROOT.
+    "VLLM_SNAPSHOT_ROOT": lambda: os.path.expanduser(
+        os.getenv("VLLM_SNAPSHOT_ROOT")
+        or os.path.join(
+            os.getenv(
+                "VLLM_CACHE_ROOT",
+                os.path.join(get_default_cache_root(), "vllm"),
+            ),
+            "snapshots",
+        )
+    ),
+    # Internal marker set inside a restored process so the restore hook does not
+    # recurse. Registered so it does not trip the unknown-env-var check; not a
+    # user knob.
+    "VLLM_SNAPSHOT_RESTORED": lambda: bool(
+        int(os.getenv("VLLM_SNAPSHOT_RESTORED", "0"))
     ),
     # used in distributed environment to determine the ip address
     # of the current node, when the node has multiple network interfaces.
@@ -2112,6 +2137,12 @@ def compile_factors() -> dict[str, object]:
         "VLLM_CACHE_ROOT",
         # Runtime memory-plan persistence; does not affect compiled graphs.
         "VLLM_ENABLE_STARTUP_PLAN",
+        # Imports-snapshot startup path; compiled graphs are identical whether
+        # imports came from a restore or a cold start, and the root is a
+        # location, not a graph input.
+        "VLLM_SNAPSHOT",
+        "VLLM_SNAPSHOT_ROOT",
+        "VLLM_SNAPSHOT_RESTORED",
         "LD_LIBRARY_PATH",
         "VLLM_SERVER_DEV_MODE",
         "VLLM_DP_MASTER_IP",
