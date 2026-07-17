@@ -175,11 +175,15 @@ class SpeculativeConfig:
     """The parallel configuration for the target model."""
 
     # dynamic speculative decoding control
-    num_speculative_tokens_per_batch_size: list[tuple[int, int, int]] | None = None
-    """Batch-size schedule used to dynamically choose speculative-token count.
-
-    Each entry is ``(range_start, range_end, num_speculative_tokens)`` with an
-    inclusive batch-size range.
+    num_speculative_tokens_per_batch_size: (
+        list[tuple[int, int, int]]
+        | list[tuple[int, int, int, int, int]]
+        | None
+    ) = None
+    """Schedule used to dynamically choose speculative-token count. Entries are
+    ``(bs_lo, bs_hi, K)`` for context-independent schedules or
+    ``(bs_lo, bs_hi, ctx_lo, ctx_hi, K)`` for schedules forming a rectangular
+    ``(batch_size x context)`` grid. Forms cannot be mixed in one schedule.
     """
 
     # params generated in the post-init stage

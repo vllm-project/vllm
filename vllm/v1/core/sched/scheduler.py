@@ -59,7 +59,10 @@ from vllm.v1.metrics.perf import ModelMetrics, PerfStats
 from vllm.v1.metrics.stats import PrefixCacheStats, SchedulerStats
 from vllm.v1.outputs import DraftTokenIds, KVConnectorOutput, ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus, StreamingUpdate
-from vllm.v1.spec_decode.dynamic.utils import build_dynamic_sd_schedule_lookup
+from vllm.v1.spec_decode.dynamic.utils import (
+    DynamicSDLookup,
+    build_dynamic_sd_schedule_lookup,
+)
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
 from vllm.v1.structured_output import StructuredOutputManager
 from vllm.v1.utils import record_function_or_nullcontext
@@ -234,7 +237,7 @@ class Scheduler(SchedulerInterface):
         self.use_eagle = False
         self.num_spec_tokens = vllm_config.num_speculative_tokens
         self.num_lookahead_tokens = 0
-        self.dynamic_sd_lookup: list[int] | None = None
+        self.dynamic_sd_lookup: DynamicSDLookup | None = None
         if speculative_config is not None:
             if speculative_config.num_speculative_tokens_per_batch_size:
                 self.dynamic_sd_lookup = build_dynamic_sd_schedule_lookup(
@@ -1132,9 +1135,15 @@ class Scheduler(SchedulerInterface):
         # Dynamic speculative decoding: compute optimal K
         num_spec_tokens_to_schedule = self.num_spec_tokens
         if self.dynamic_sd_lookup is not None and len(num_scheduled_tokens) > 0:
-            num_spec_tokens_to_schedule = self.dynamic_sd_lookup[
+            ctx_values = sorted(
+                self.requests[req_id].num_computed_tokens
+                for req_id in num_scheduled_tokens
+            )
+            p50_ctx = ctx_values[len(ctx_values) // 2]
+            ctx_bucket = self.dynamic_sd_lookup.bucket_of(p50_ctx)
+            num_spec_tokens_to_schedule = self.dynamic_sd_lookup.dense[
                 len(num_scheduled_tokens)
-            ]
+            ][ctx_bucket]
 
         scheduled_encoder_input_stats = None
         if (
