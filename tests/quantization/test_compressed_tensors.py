@@ -48,6 +48,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.platforms import current_platform
+from vllm.scalar_type import scalar_types
 from vllm.v1.attention.backends.fa_utils import get_flash_attn_version
 
 # AITER only supports per-channel-per-channel INT8 gemm
@@ -1086,6 +1087,22 @@ def test_humming_linear_kernel_uses_wna16_bitwidth(monkeypatch, num_bits):
         "group_size": 128,
     }
     assert captured["input_quant_config"] is None
+
+
+def test_quant_key_str_supports_scalar_type_dtypes():
+    quant_key = QuantKey(
+        dtype=scalar_types.uint2b2,
+        scale=ScaleDesc(
+            dtype=torch.float16,
+            static=True,
+            group_shape=GroupShape(row=1, col=128),
+        ),
+        symmetric=True,
+    )
+
+    assert str(quant_key) == (
+        "QuantKey(uint2b2,scale(f16,static,GroupShape(row=1, col=128)),symmetric)"
+    )
 
 
 @pytest.mark.skipif(

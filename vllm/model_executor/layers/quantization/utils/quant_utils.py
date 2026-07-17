@@ -24,6 +24,12 @@ INT4_DTYPE = scalar_types.uint4b8
 INT8_DTYPE = scalar_types.uint8b128
 
 
+def _dtype_abbr(dtype: torch.dtype | ScalarType) -> str:
+    if isinstance(dtype, ScalarType):
+        return str(dtype)
+    return fx.graph.dtype_abbrs[dtype]
+
+
 def get_fp8_min_max() -> tuple[float, float]:
     """Get the min and max values for FP8 quantization."""
     # Using the default value (240.0) from pytorch will cause accuracy
@@ -91,7 +97,7 @@ class ScaleDesc:
         }
         group_shape = d.get(self.group_shape, str(self.group_shape))
         return (
-            f"{fx.graph.dtype_abbrs[self.dtype]},"
+            f"{_dtype_abbr(self.dtype)},"
             f"{'static' if self.static else 'dynamic'},{group_shape}"
         )
 
@@ -114,7 +120,7 @@ class QuantKey:
     def __str__(self):
         scale2_str = f"scale2({self.scale2})," if self.scale2 else ""
         return (
-            f"QuantKey({fx.graph.dtype_abbrs[self.dtype]},"
+            f"QuantKey({_dtype_abbr(self.dtype)},"
             f"scale({self.scale}),{scale2_str}"
             f"{'a' if not self.symmetric else ''}symmetric)"
         )
