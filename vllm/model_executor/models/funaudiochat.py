@@ -142,9 +142,8 @@ class FunAudioChatAudioAttention(nn.Module):
                 self.qkv_proj.bias.zero_()
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        return AutoWeightsLoader(self).load_weights(
-            weights, mapper=self.hf_to_vllm_mapper
-        )
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     def forward(
         self,

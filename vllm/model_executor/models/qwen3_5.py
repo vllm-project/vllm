@@ -273,9 +273,8 @@ class Qwen3_5Model(Qwen3NextModel):
             n_shared_experts=1,
             ckpt_prefix="mlp.shared_expert",
         )
-        return AutoWeightsLoader(self).load_weights(
-            weights, mapper=self.hf_to_vllm_mapper
-        )
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
 class Qwen3_5ForCausalLMBase(

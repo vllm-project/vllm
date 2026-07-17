@@ -487,21 +487,14 @@ class Glm4MoeModel(nn.Module):
         hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states
 
-    def _preprocess(
-        self, weights: Iterable[tuple[str, torch.Tensor]]
-    ) -> Iterable[tuple[str, torch.Tensor]]:
-        # Drop MTP/spec layers (loaded by the MTP head, not the base model),
-        # then route AITER fused-shared-experts into the extra expert slots.
-        return maybe_fuse_shared_experts(
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        weights = maybe_fuse_shared_experts(
             skip_spec_layers(weights, self.config),
             n_routed_experts=self.config.n_routed_experts,
             n_shared_experts=self.config.n_shared_experts or 1,
         )
-
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        return AutoWeightsLoader(self).load_weights(
-            self._preprocess(weights), mapper=self.hf_to_vllm_mapper
-        )
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
 class Glm4MixtureOfExperts(MixtureOfExperts):

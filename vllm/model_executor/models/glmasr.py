@@ -509,10 +509,9 @@ class GlmAsrEncoder(nn.Module):
         return _GlmAsrEncoderOutput(last_hidden_state=hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        return AutoWeightsLoader(self).load_weights(
-            _create_fake_bias_for_k_proj(weights, ".k_proj.weight"),
-            mapper=self.hf_to_vllm_mapper,
-        )
+        weights = _create_fake_bias_for_k_proj(weights, ".k_proj.weight")
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
 class GlmAsrFeatureInputs(TensorSchema):
