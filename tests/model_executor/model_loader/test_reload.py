@@ -319,6 +319,26 @@ def test_marlin_prepare_layer_preserves_workspace_address(monkeypatch, variant):
     assert torch.all(layer.workspace == 0)
 
 
+def test_marlin_make_workspace_new_rejects_incompatible_existing(monkeypatch):
+    """An incompatible existing workspace means the address captured by CUDA
+    graphs is already unusable; allocating a replacement would hide that."""
+    from vllm.model_executor.layers.quantization.utils import marlin_utils
+
+    monkeypatch.setattr(marlin_utils, "num_compute_units", lambda _: 4)
+    device = torch.device("cpu")
+
+    workspace = marlin_utils.marlin_make_workspace_new(device)
+    reused = marlin_utils.marlin_make_workspace_new(device, existing=workspace)
+    assert reused is workspace
+
+    with pytest.raises(ValueError, match="incompatible"):
+        marlin_utils.marlin_make_workspace_new(device, 4, existing=workspace)
+    with pytest.raises(ValueError, match="incompatible"):
+        marlin_utils.marlin_make_workspace_new(
+            device, existing=workspace.to(torch.int64)
+        )
+
+
 def test_model_cleanup(dist_init, default_vllm_config):
     layer = QKVParallelLinear(2, 3, 4)
     assert layer.weight.weight_loader.__self__ is layer

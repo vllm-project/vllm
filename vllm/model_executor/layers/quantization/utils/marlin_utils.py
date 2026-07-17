@@ -405,9 +405,21 @@ def marlin_make_workspace_new(
     # size. The num of threadblocks is sms_count * max_blocks_per_sm.
     sms = num_compute_units(device.index)
     size = sms * max_blocks_per_sm
-    # On weight reload, reuse compatible storage so the workspace address
+    # On weight reload, reuse the existing storage so the workspace address
     # captured by CUDA graphs stays valid.
-    if existing is not None and existing.device == device and existing.numel() == size:
+    if existing is not None:
+        if (
+            existing.device != device
+            or existing.dtype != torch.int
+            or existing.numel() != size
+        ):
+            raise ValueError(
+                f"Existing Marlin workspace is incompatible "
+                f"(device={existing.device}, dtype={existing.dtype}, "
+                f"numel={existing.numel()}; expected device={device}, "
+                f"dtype={torch.int}, numel={size}). Reload must reuse the "
+                f"workspace storage captured by CUDA graphs."
+            )
         return existing.zero_()
     return torch.zeros(size, dtype=torch.int, device=device, requires_grad=False)
 
