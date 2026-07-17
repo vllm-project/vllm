@@ -420,7 +420,7 @@ class ReqMeta:
     remote_handshake_port: int
     remote_notify_port: int
     remote_engine_id: str
-    tp_size: int
+    remote_tp_size: int
     remote_dp_size: int
 
 
@@ -473,7 +473,7 @@ class MoRIIOConnectorMetadata(KVConnectorMetadata):
             remote_port=int(remote_handshake_port),
             remote_handshake_port=int(remote_handshake_port),
             remote_notify_port=int(remote_notify_port),
-            tp_size=kv_transfer_params.get("tp_size", 1),
+            remote_tp_size=kv_transfer_params.get("remote_tp_size", 1),
             remote_dp_size=kv_transfer_params.get("remote_dp_size", 1),
         )
         if write_mode:
