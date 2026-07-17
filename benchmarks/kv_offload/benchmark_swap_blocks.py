@@ -144,8 +144,8 @@ def benchmark_swap_blocks(
     bandwidths = []
 
     # Create CUDA events once for timing (reused across runs)
-    start_event = torch.cuda.Event(enable_timing=True)
-    end_event = torch.cuda.Event(enable_timing=True)
+    start_event = torch.Event(enable_timing=True)
+    end_event = torch.Event(enable_timing=True)
 
     with torch.inference_mode():
         for block_size in block_sizes:
@@ -201,7 +201,7 @@ def benchmark_swap_blocks(
                     _dst_addrs=dst_addrs,
                     _sizes=sizes,
                 ):
-                    with torch.cuda.stream(torch.cuda.Stream()):
+                    with torch.Stream():
                         ops.swap_blocks_batch(_src_addrs, _dst_addrs, _sizes)
 
                 run_copy = run_batch
@@ -262,13 +262,13 @@ def benchmark_swap_blocks(
             # Warmup:
             for _ in range(warmup_iters):
                 run_copy(1)
-            torch.cuda.synchronize()
+            torch.accelerator.synchronize()
 
             # Timed run:
             start_event.record()
             run_copy(n_iters)
             end_event.record()
-            torch.cuda.synchronize()
+            torch.accelerator.synchronize()
             elapsed_ms = start_event.elapsed_time(end_event)
             elapsed_s = elapsed_ms / 1000.0
 
