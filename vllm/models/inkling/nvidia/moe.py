@@ -348,6 +348,71 @@ class InklingSinkExperts(nn.Module):
         return h @ self.w2_weight.T  # (T, D)
 
 
+class InklingSinkExpertsLinear(nn.Module):
+    """LoRA-capable implementation of the Inkling sink experts."""
+
+    def __init__(
+        self,
+        n_experts: int,
+        d_model: int,
+        d_mlp: int,
+        *,
+        prefix: str = "",
+    ) -> None:
+        super().__init__()
+        from vllm.model_executor.layers.linear import (
+            MergedColumnParallelLinear,
+            RowParallelLinear,
+        )
+
+        self.n_experts = n_experts
+        self.d_mlp = d_mlp
+        total = n_experts * d_mlp
+        self.w13 = MergedColumnParallelLinear(
+            input_size=d_model,
+            output_sizes=[total, total],
+            bias=False,
+            prefix=f"{prefix}.w13",
+        )
+        self.w2 = RowParallelLinear(
+            input_size=total,
+            output_size=d_model,
+            bias=False,
+            reduce_results=False,
+            prefix=f"{prefix}.w2",
+        )
+        self._w2_input_pp = self.w2.input_size_per_partition
+        self._col_expert: torch.Tensor | None = None
+
+    def _gamma_expand(self, gammas: torch.Tensor) -> torch.Tensor:
+        if self._col_expert is None or self._col_expert.device != gammas.device:
+            local = self._w2_input_pp
+            start = get_tensor_model_parallel_rank() * local
+            cols = torch.arange(start, start + local, device=gammas.device)
+            self._col_expert = (cols // self.d_mlp).long()
+        return gammas[:, self._col_expert]
+
+    def load_weight(self, key: str, weight: torch.Tensor) -> list[str]:
+        if key == "w13_weight":
+            d_model = weight.shape[-1]
+            gate = weight[:, 0::2, :].reshape(-1, d_model).contiguous()
+            up = weight[:, 1::2, :].reshape(-1, d_model).contiguous()
+            self.w13.weight_loader(self.w13.weight, gate, 0)
+            self.w13.weight_loader(self.w13.weight, up, 1)
+            return ["w13.weight"]
+        w = weight.permute(1, 0, 2).reshape(weight.shape[1], -1).contiguous()
+        self.w2.weight_loader(self.w2.weight, w)
+        return ["w2.weight"]
+
+    def forward(self, x: torch.Tensor, gammas: torch.Tensor) -> torch.Tensor:
+        gate_up, _ = self.w13(x)
+        gate, up = gate_up.chunk(2, dim=-1)
+        hidden_states = torch.nn.functional.silu(gate) * up
+        hidden_states = (hidden_states * self._gamma_expand(gammas)).to(x.dtype)
+        output, _ = self.w2(hidden_states)
+        return output
+
+
 class InklingMoE(nn.Module):
     def __init__(
         self,
@@ -423,7 +488,12 @@ class InklingMoE(nn.Module):
             layer_id
         ), f"layer {layer_id}: NVFP4 shared experts are not supported"
 
-        self.sink_experts = InklingSinkExperts(
+        sink_experts_cls = (
+            InklingSinkExpertsLinear
+            if get_current_vllm_config().lora_config is not None
+            else InklingSinkExperts
+        )
+        self.sink_experts = sink_experts_cls(
             n_experts=n_shared,
             d_model=config.hidden_size,
             d_mlp=config.intermediate_size,
