@@ -3089,6 +3089,11 @@ class GPUModelRunner(
         encoder_outputs: list[torch.Tensor] = []
         # HiPrune: pruned soft-token indices per encoded item (aligned
         # with encoder_outputs / mm_hashes); None for unpruned items.
+        # NOTE: `model` may be a CUDAGraphWrapper whose __getattr__ only
+        # forwards reads; writing through it would create a shadowing
+        # attribute on the wrapper. Always use the unwrapped model for
+        # the HiPrune attribute handoff.
+        raw_model = self.get_model()
         pruned_indices_per_item: list[list[int] | None] = []
         # Track the current index in mm_kwargs/mm_lora_refs to map groups to request IDs
         current_item_idx = 0
@@ -3100,8 +3105,8 @@ class GPUModelRunner(
             # HiPrune: clear stale per-item indices so paths that bypass
             # embed_multimodal (e.g. cudagraph replay) cannot leak the
             # previous call's indices into this group.
-            if hasattr(model, "hiprune_pruned_indices_per_item"):
-                model.hiprune_pruned_indices_per_item = []
+            if hasattr(raw_model, "hiprune_pruned_indices_per_item"):
+                raw_model.hiprune_pruned_indices_per_item = []
 
             # EVS and dynamic res video related change.
             # (ekhvedchenia): Temporary hack to limit peak memory usage when
@@ -3177,7 +3182,7 @@ class GPUModelRunner(
             # its most recent embed_multimodal call. The length guard
             # skips paths that bypassed embed_multimodal (cudagraph
             # replay) where the attribute would be stale.
-            item_pruned = getattr(model, "hiprune_pruned_indices_per_item", None)
+            item_pruned = getattr(raw_model, "hiprune_pruned_indices_per_item", None)
             if item_pruned is not None and len(item_pruned) == num_items:
                 pruned_indices_per_item.extend(item_pruned)
             else:
