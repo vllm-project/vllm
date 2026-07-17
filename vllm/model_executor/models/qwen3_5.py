@@ -265,14 +265,15 @@ class Qwen3_5Model(Qwen3NextModel):
         # FSE must match construction (Qwen3NextSparseMoeBlock): reroute the
         # shared expert into the extra fused slot only when AITER FSE is both
         # requested and compatible with the quant spec.
-        weights = maybe_fuse_shared_experts(
-            weights,
-            enabled=rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
-            and _is_shared_expert_fse_compatible(self.quant_config),
-            n_routed_experts=self.config.num_experts,
-            n_shared_experts=1,
-            ckpt_prefix="mlp.shared_expert",
-        )
+        if "moe" in self.config.model_type:
+            weights = maybe_fuse_shared_experts(
+                weights,
+                enabled=rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
+                and _is_shared_expert_fse_compatible(self.quant_config),
+                n_routed_experts=self.config.num_experts,
+                n_shared_experts=1,
+                ckpt_prefix="mlp.shared_expert",
+            )
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
