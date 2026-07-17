@@ -153,14 +153,8 @@ class DSparkSpeculator(DFlashSpeculator):
         # costs speculation acceptance heavily on repetition-rich outputs
         # (e.g. TTS speech tokens). Set via set_penalties_state().
         self._penalties_state = None
-        self._sampling_states = None
-        self._topk_arange: torch.Tensor | None = None
 
-    # Static cap for the draft-side top-k/top-p mirror: requests with
-    # top_k > _TOPK_CAP (or disabled, stored as vocab_size) skip truncation.
-    _TOPK_CAP = 64
-
-    def set_penalties_state(self, penalties_state, sampling_states=None) -> None:
+    def set_penalties_state(self, penalties_state) -> None:
         import os
 
         if self.draft_logits is None:
@@ -168,14 +162,6 @@ class DSparkSpeculator(DFlashSpeculator):
             return
         if os.environ.get("VLLM_DRAFT_REP_PENALTY", "0") == "1":
             self._penalties_state = penalties_state
-        if (
-            sampling_states is not None
-            and os.environ.get("VLLM_DRAFT_TOPK_TOPP", "0") == "1"
-        ):
-            self._sampling_states = sampling_states
-            self._topk_arange = torch.arange(
-                self._TOPK_CAP, dtype=torch.int64, device=self.device
-            )
 
     def load_draft_model(
         self,
@@ -219,23 +205,13 @@ class DSparkSpeculator(DFlashSpeculator):
         # read via the precomputed persistent index (fixed buffer for capture).
         prev = self.input_buffers.input_ids[self._anchor_idx[:num_reqs]]
 
-        # PATCH (local): per-request state for the draft-side sampling-param
-        # mirrors (repetition penalty via _draft_penalties_kernel; top-k/top-p
-        # truncation). rows/k/p/temp are block-constant; the kernel adds the
-        # in-block draft tokens t_0..t_{i-1} per step from self.draft_tokens.
+        # PATCH (local): per-request state for the draft-side repetition
+        # penalty (_draft_penalties_kernel). pen_rows is block-constant; the
+        # kernel adds the in-block draft tokens t_0..t_{i-1} per step from
+        # self.draft_tokens.
         pen_rows = None
         if self._penalties_state is not None and self.draft_logits is not None:
             pen_rows = idx_map[:, 0].contiguous()
-        tk_state = None
-        if self._sampling_states is not None and self.draft_logits is not None:
-            rows = idx_map[:, 0].to(torch.long)
-            k_req = self._sampling_states.top_k.gpu[rows]
-            p_req = self._sampling_states.top_p.gpu[rows].to(torch.float32)
-            temp = self.temperature[rows].to(torch.float32).clamp_min(1e-5)
-            k_enabled = (k_req <= self._TOPK_CAP).unsqueeze(1)
-            k_eff = k_req.clamp(min=1, max=self._TOPK_CAP).to(torch.long)
-            within_k = self._topk_arange.unsqueeze(0) < k_eff.unsqueeze(1)
-            tk_state = (k_eff, k_enabled, within_k, p_req, temp)
 
         for i in range(n_spec):
             # Sequential stage: Markov bias from the previously sampled token.
@@ -246,9 +222,9 @@ class DSparkSpeculator(DFlashSpeculator):
                 # PATCH (local): mirror the target's repetition-penalty logit
                 # transform on the draft logits (fused triton kernel, mutates
                 # logits_i in place; per-row early exit when rep == 1.0).
-                # Runs BEFORE the d2t scatter so the kernel (and the top-k/p
-                # mirror below) only touch draft-vocab-sized rows; target-vocab
-                # penalty statistics are gathered via the d2t index.
+                # Runs BEFORE the d2t scatter so the kernel only touches
+                # draft-vocab-sized rows; target-vocab penalty statistics are
+                # gathered via the d2t index.
                 if pen_rows is not None:
                     ps = self._penalties_state
                     logits_i = logits_i.contiguous()
@@ -274,38 +250,6 @@ class DSparkSpeculator(DFlashSpeculator):
                         vocab,
                         BLOCK_SIZE=blk,
                         HAS_D2T=self._d2t_scatter_index is not None,
-                    )
-                # PATCH (local): mirror the target's top-k/top-p truncation so
-                # the draft never proposes tokens the target has zeroed out.
-                # Order matches the target sampler: penalties -> temperature
-                # -> top-k/top-p (top-p is computed on temperature-scaled
-                # logits within the top-k set). Also pre-scatter: the d2t
-                # scatter is value-preserving into a -inf background, so
-                # top-k/thresholds computed on the draft vocab are identical.
-                if tk_state is not None:
-                    k_eff, k_enabled, within_k, p_req, temp = tk_state
-                    vals = torch.topk(
-                        logits_i.float(), self._TOPK_CAP, dim=-1
-                    ).values
-                    kth = vals.gather(1, (k_eff - 1).unsqueeze(1))
-                    scaled = torch.where(
-                        within_k,
-                        vals / temp.unsqueeze(1),
-                        torch.full((), float("-inf"), device=vals.device),
-                    )
-                    probs = torch.softmax(scaled, dim=-1)
-                    keep = (probs.cumsum(-1) - probs) < p_req.unsqueeze(1)
-                    last = (keep.sum(-1).clamp(min=1) - 1).unsqueeze(1)
-                    thresh = torch.maximum(kth, vals.gather(1, last))
-                    thresh = torch.where(
-                        k_enabled,
-                        thresh,
-                        torch.full((), float("-inf"), device=vals.device),
-                    )
-                    logits_i = torch.where(
-                        logits_i >= thresh,
-                        logits_i,
-                        torch.full((), float("-inf"), device=vals.device),
                     )
                 # Probabilistic: sample in target vocab (a reduced draft vocab is
                 # scattered into its target columns; full vocab is already there).
