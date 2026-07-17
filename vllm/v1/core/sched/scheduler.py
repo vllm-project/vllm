@@ -2677,6 +2677,7 @@ class Scheduler(SchedulerInterface):
         marked_invalid_block_ids: set[int] = set()
         for request in requests:
             is_affected = False
+            marked_invalid_block = False
             req_id = request.request_id
             req_block_ids_by_group = self.kv_cache_manager.get_block_ids(req_id)
             # We iterate only over blocks that may contain externally computed
@@ -2687,7 +2688,7 @@ class Scheduler(SchedulerInterface):
             )
 
             for g_idx, req_block_ids in enumerate(req_block_ids_by_group):
-                marked_invalid_block = False
+                group_marked_invalid_block = False
                 group_block_size = self.kv_cache_config.kv_cache_groups[g_idx].kv_cache_spec.block_size
                 req_num_computed_blocks = (
                                                   req_num_computed_tokens + group_block_size - 1
@@ -2710,11 +2711,12 @@ class Scheduler(SchedulerInterface):
 
                     marked_invalid_block_ids.add(block_id)
 
-                    if marked_invalid_block:
+                    if group_marked_invalid_block:
                         # This group has already marked an invalid block for
                         # recomputation and updated its num_computed_tokens.
                         continue
 
+                    group_marked_invalid_block = True
                     marked_invalid_block = True
                     failed_token_pos = idx * group_block_size
                     rewind_num_computed_tokens = min(rewind_num_computed_tokens, failed_token_pos)
