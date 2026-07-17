@@ -937,6 +937,18 @@ def init_nvfp4_linear_kernel(use_a16: bool = False) -> NvFp4LinearKernel:
     platform = current_platform._enum
     possible = list(_POSSIBLE_NVFP4_KERNELS.get(platform, []))
 
+    # The CUTLASS-based NVFP4 kernels produce incorrect output on SM 12x
+    # (https://github.com/vllm-project/vllm/issues/48898), and FlashInfer's
+    # JIT can fail to target consumer 12x CUDA toolchains at engine startup.
+    # Prefer Marlin there; both kernels remain available via an explicit
+    # --linear-backend opt-in.
+    if linear_backend == "auto" and current_platform.is_device_capability_family(120):
+        possible = [
+            k
+            for k in possible
+            if k not in (FlashInferCutlassNvFp4LinearKernel, CutlassNvFp4LinearKernel)
+        ]
+
     # Apply --linear-backend filtering when set.
     if linear_backend != "auto":
         filtered = _filter_kernels_by_backend(linear_backend, possible)
