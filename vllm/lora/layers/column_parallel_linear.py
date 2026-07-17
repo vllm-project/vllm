@@ -35,14 +35,9 @@ def _mcp_apply(x, bias, layer: "ColumnParallelLinearWithLoRA"):
 
     output = layer._get_quant_method().apply(layer.base_layer, x, bias)
 
-    # NOTE: No layer-level skip here. This fully-sharded (S-LoRA) path runs
-    # collectives (all_gather below, and add_shrink's all_reduce) whose
-    # participation must be identical across TP ranks. _num_adapters_with_
-    # active_slices is computed from each rank's local weight shard, so it can
-    # differ across ranks (an adapter whose non-zero rows land entirely in one
-    # rank's shard). Skipping on it would desync the collectives and hang the
-    # TP group. Zero-weight skipping on this path is handled by the kernel-level
-    # slice_active_mask, which launches symmetrically on every rank.
+    # No layer-level skip on this fully-sharded path: the active-slice counter
+    # is per-rank, so skipping on it would desync the collectives below and
+    # hang the TP group.
 
     x = x.view(-1, x.shape[-1])
     output, out_orig_shape = output.view(-1, output.shape[-1]), output.shape
@@ -63,19 +58,15 @@ def _mcp_apply(x, bias, layer: "ColumnParallelLinearWithLoRA"):
     )
     buffers.zero_()
 
-    # NOTE: this fully-sharded path must not use any per-rank skip (Python
-    # layer-level or CPU-tensor wrapper-level): the active-slice state is
-    # computed from each rank's local weight shard and can differ across TP
-    # ranks, so a per-rank skip would make one rank shrink while another does
-    # not — feeding inconsistent data into the all_gather below. Only the
-    # kernel-level slice_active_mask is safe here (symmetric launch on every
-    # rank, per-CTA device-tensor skip).
+    # Fully-sharded: never pass slice_active_mask (to shrink or expand). It is
+    # built from local A/B shards, so it differs across TP ranks; the all_gather
+    # couples them, and masking on one rank drops contributions others need.
     shrunk_buffers: torch.Tensor | None = layer.punica_wrapper.add_shrink(
         buffers,
         x,
         layer.lora_a_stacked,
         1.0,
-        slice_active_mask=layer._kernel_slice_mask,
+        slice_active_mask=None,
     )
 
     if not current_platform.can_update_inplace():
@@ -90,7 +81,7 @@ def _mcp_apply(x, bias, layer: "ColumnParallelLinearWithLoRA"):
         layer.output_slices,
         offset_start=0,
         add_input=True,
-        slice_active_mask=layer._kernel_slice_mask,
+        slice_active_mask=None,
     )
 
     if not current_platform.can_update_inplace():

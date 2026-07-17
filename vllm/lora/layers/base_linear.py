@@ -7,6 +7,7 @@ from transformers import PretrainedConfig
 
 from vllm import envs
 from vllm.config import get_current_vllm_config
+from vllm.config.compilation import CUDAGraphMode
 from vllm.config.lora import LoRAConfig
 from vllm.distributed.utils import divide
 from vllm.forward_context import (
@@ -79,9 +80,23 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
         self.tp_rank = self.base_layer.tp_rank
         self.device = _get_lora_device(self.base_layer)
         self._init_lora_stream_context()
+        # The layer-level early-return is disabled under CUDA graphs; see
+        # _apply_lora_to_output.
+        self._cudagraph_enabled = self._compute_cudagraph_enabled()
         self.output_slices: tuple[int, ...]
         self.output_size: int
         self.n_slices: int
+
+    def _compute_cudagraph_enabled(self) -> bool:
+        try:
+            vllm_config = get_current_vllm_config()
+        except Exception:
+            return False
+        compilation_config = vllm_config.compilation_config
+        cudagraph_mode = compilation_config.cudagraph_mode
+        if cudagraph_mode is None:
+            return False
+        return cudagraph_mode.max_cudagraph_mode() != CUDAGraphMode.NONE
 
     def _init_lora_stream_context(self) -> None:
         if not self._enable_aux_cuda_stream:
@@ -159,15 +174,10 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
             device=self.device,
         )
         self._num_adapters_with_active_slices = 0
-        # Whether passing slice_active_mask to the kernels can ever skip work.
-        # Only true when some loaded adapter has a partial slice pattern
-        # (>=1 active AND >=1 inactive slice) — the sole case where a per-CTA
-        # mask read skips a CTA. Recomputed on every load/reset. When false
-        # (dense adapters, or n_slices==1 layers), we pass None so the kernels
-        # avoid the per-invocation mask overhead.
-        # Resolved mask handed to the kernels: the mask tensor when a partial
-        # slice pattern makes a per-CTA skip possible, else None (recomputed at
-        # load time, so the hot path is a plain attribute read, not a branch).
+        # Mask passed to the kernels: the tensor only when some adapter has a
+        # partial slice pattern (a per-CTA skip is then possible), else None to
+        # skip the mask overhead. Recomputed on load/reset by
+        # _recompute_mask_can_skip so the hot path is a plain attribute read.
         self._kernel_slice_mask: torch.Tensor | None = None
 
     def _recompute_mask_can_skip(self) -> None:
@@ -250,11 +260,14 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
     def _apply_lora_to_output(
         self, x: torch.Tensor, output: torch.Tensor
     ) -> torch.Tensor:
-        # Layer-level skip: if no loaded adapter has active slices on this
-        # layer, skip the entire LoRA path. Only in eager mode — with CUDA
-        # graphs the kernel-level slice_active_mask handles skipping.
+        # Skip the LoRA path when no adapter has active slices, but only in
+        # eager. Under CUDA graphs / compile the skip must be identical across
+        # warmup, capture and replay (warmup uses zero-weight dummies), so we
+        # always run the kernels and let the per-CTA slice_active_mask skip
+        # zero-weight work on device.
         if (
             self._num_adapters_with_active_slices == 0
+            and not self._cudagraph_enabled
             and not torch.compiler.is_compiling()
         ):
             return output

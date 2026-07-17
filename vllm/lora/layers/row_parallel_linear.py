@@ -118,13 +118,8 @@ class RowParallelLinearWithShardedLoRA(RowParallelLinearWithLoRA):
     def apply(self, x: torch.Tensor, bias: torch.Tensor | None = None) -> torch.Tensor:
         output = self._get_quant_method().apply(self.base_layer, x, bias)
 
-        # NOTE: No layer-level skip here. This fully-sharded (S-LoRA) path runs
-        # an all_reduce below whose participation must be identical across TP
-        # ranks. _num_adapters_with_active_slices is computed from each rank's
-        # local weight shard, so it can differ across ranks and skipping on it
-        # would desync the collective and hang the TP group. Zero-weight
-        # skipping here is handled by the kernel-level slice_active_mask, which
-        # launches symmetrically on every rank.
+        # No layer-level skip on this fully-sharded path: the active-slice
+        # counter is per-rank, so skipping would desync the all_reduce below.
 
         x = x.view(-1, x.shape[-1])
         output, out_orig_shape = output.view(-1, output.shape[-1]), output.shape
@@ -134,15 +129,15 @@ class RowParallelLinearWithShardedLoRA(RowParallelLinearWithLoRA):
             device=x.device,
         )
 
-        # NOTE: no per-rank skip here — active-slice state is per-rank and
-        # would diverge ranks before the all_reduce below. Only the kernel-
-        # level slice_active_mask is safe (symmetric launch on every rank).
+        # Also never pass slice_active_mask: it differs across TP ranks (built
+        # from local A/B shards) and the all_reduce couples them, so masking on
+        # one rank drops contributions others need.
         shrunk_buffer: torch.Tensor | None = self.punica_wrapper.add_shrink(
             buffer,
             x,
             self.lora_a_stacked,
             1.0,
-            slice_active_mask=self._kernel_slice_mask,
+            slice_active_mask=None,
         )
         if not current_platform.can_update_inplace():
             buffer = shrunk_buffer
@@ -156,6 +151,7 @@ class RowParallelLinearWithShardedLoRA(RowParallelLinearWithLoRA):
         # the output is not the same as a normal row_parallel, it should be
         # reduced before being used
         # NOTE offset are based on the rank.
+        # expand also runs unmasked (same reason as shrink above).
         shard_size = self.lora_b_stacked[0].shape[2]
         offset_start = self.tp_rank * shard_size
         lora_output: torch.Tensor | None = self.punica_wrapper.add_expand(
@@ -165,7 +161,7 @@ class RowParallelLinearWithShardedLoRA(RowParallelLinearWithLoRA):
             self.output_slices,
             offset_start=offset_start,
             add_input=True,
-            slice_active_mask=self._kernel_slice_mask,
+            slice_active_mask=None,
         )
 
         if not current_platform.can_update_inplace():
