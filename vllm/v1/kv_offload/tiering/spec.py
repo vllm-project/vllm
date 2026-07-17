@@ -39,6 +39,7 @@ from typing_extensions import override
 from vllm.logger import init_logger
 from vllm.v1.kv_offload.base import (
     CanonicalKVCaches,
+    OffloadingHistogramMetadata,
     OffloadingManager,
     OffloadingMetricMetadata,
 )
@@ -46,6 +47,7 @@ from vllm.v1.kv_offload.config import OffloadingConfig
 from vllm.v1.kv_offload.cpu.gpu_worker import CPUOffloadingWorker
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 from vllm.v1.kv_offload.cpu.spec import CPUOffloadingSpec
+from vllm.v1.kv_offload.tiering.base import TieringOffloadingMetrics
 from vllm.v1.kv_offload.tiering.factory import SecondaryTierFactory
 from vllm.v1.kv_offload.tiering.manager import (
     CPUPrimaryTierOffloadingManager,
@@ -76,6 +78,50 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
         cls, extra_config: dict[str, Any]
     ) -> dict[str, OffloadingMetricMetadata]:
         metrics = super().build_metric_definitions(extra_config)
+        metrics[TieringOffloadingMetrics.LOOKUP_SYNC_DELAY] = (
+            OffloadingHistogramMetadata(
+                documentation=(
+                    "Histogram of total blocking time spent querying secondary "
+                    "tiers for a request, accumulated from first lookup until "
+                    "the request is allocated or finishes, in seconds."
+                ),
+                buckets=(
+                    0.00001,
+                    0.00005,
+                    0.0001,
+                    0.0005,
+                    0.001,
+                    0.005,
+                    0.01,
+                    0.05,
+                    0.1,
+                    0.5,
+                    1,
+                ),
+            )
+        )
+        metrics[TieringOffloadingMetrics.LOOKUP_ASYNC_DELAY] = (
+            OffloadingHistogramMetadata(
+                documentation=(
+                    "Histogram of wall-clock time from a request's first deferred "
+                    "secondary-tier lookup until the request is allocated or "
+                    "finishes, in seconds."
+                ),
+                buckets=(
+                    0.0001,
+                    0.0005,
+                    0.001,
+                    0.005,
+                    0.01,
+                    0.05,
+                    0.1,
+                    0.5,
+                    1,
+                    5,
+                    10,
+                ),
+            )
+        )
         secondary_tier_configs = extra_config.get("secondary_tiers", [])
         if not isinstance(secondary_tier_configs, list):
             raise ValueError("secondary_tiers must be a list of tier configurations")

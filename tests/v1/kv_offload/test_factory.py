@@ -612,3 +612,40 @@ def test_build_metric_definitions_returns_counter_at_threshold():
         config.kv_transfer_config.kv_connector_extra_config
     )
     assert CPUOffloadingMetrics.STORES_SKIPPED in metrics
+
+
+def test_offloading_spec_accepts_blocks_per_chunk_for_heterogeneous_groups():
+    config = _make_layout_vllm_config(
+        cpu_bytes_to_use=65536,
+        extra_config={"blocks_per_chunk": 2},
+    )
+
+    spec = _create_spec(config, _make_hybrid_kv_cache_config())
+
+    assert spec.tokens_per_block == (12, 16)
+    assert spec.blocks_per_chunk == 2
+
+
+def test_block_size_and_blocks_per_chunk_are_mutually_exclusive():
+    config = _make_layout_vllm_config(
+        cpu_bytes_to_use=65536,
+        extra_config={
+            "block_size": 64,
+            "blocks_per_chunk": 2,
+        },
+    )
+
+    with pytest.raises(ValueError, match="Specify only one"):
+        _create_spec(config, _make_kv_cache_config())
+
+
+def test_blocks_per_chunk_must_be_positive():
+    config = _make_layout_vllm_config(
+        cpu_bytes_to_use=65536,
+        extra_config={
+            "blocks_per_chunk": 0,
+        },
+    )
+
+    with pytest.raises(ValueError, match="greater than 0"):
+        _create_spec(config, _make_kv_cache_config())

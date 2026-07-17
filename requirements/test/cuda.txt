@@ -43,7 +43,7 @@ anyio==4.14.1
     #   sse-starlette
     #   starlette
     #   watchfiles
-apache-tvm-ffi==0.1.9
+apache-tvm-ffi==0.1.10
     # via
     #   -c requirements/cuda.txt
     #   xgrammar
