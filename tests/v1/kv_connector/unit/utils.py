@@ -362,7 +362,6 @@ class TestExampleConnector(ExampleConnector):
 class MockKVConfig:
     matched_tokens: int = 0
     is_async: bool = False
-    # Defer each request this many times (return None) before matching.
     num_defers_before_matching: int = 0
 
 
