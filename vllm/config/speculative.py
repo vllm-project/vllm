@@ -283,6 +283,16 @@ class SpeculativeConfig:
     during rejection sampling. This comes at the cost of additional GPU memory
     usage."""
 
+    draft_apply_repetition_penalty: bool = False
+    """Mirror the target's repetition penalty on the draft logits before draft
+    sampling. With draft_sample_method='probabilistic', the rejection test
+    compares the draft distribution p against a target q that has the
+    repetition penalty applied; without the mirror, every context-repeated
+    token has q suppressed but p not, which costs acceptance on
+    repetition-rich outputs (e.g. TTS speech tokens). Only used by drafters
+    that support it (currently DSpark) and only with probabilistic draft
+    sampling. Frequency/presence penalties are not mirrored."""
+
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,
@@ -1182,6 +1192,17 @@ class SpeculativeConfig:
                 "use_heterogeneous_vocab currently only supports greedy draft "
                 "sampling. Set draft_sample_method='greedy' (the default) or "
                 "omit it."
+            )
+
+        if (
+            self.draft_apply_repetition_penalty
+            and self.draft_sample_method != "probabilistic"
+        ):
+            raise ValueError(
+                "draft_apply_repetition_penalty requires "
+                "draft_sample_method='probabilistic' (greedy rejection "
+                "verifies by exact argmax match, where the penalty mirror "
+                "does not apply)."
             )
 
         if not self.use_heterogeneous_vocab:

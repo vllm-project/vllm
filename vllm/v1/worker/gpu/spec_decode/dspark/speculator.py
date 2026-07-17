@@ -145,22 +145,22 @@ class DSparkSpeculator(DFlashSpeculator):
         self._d2t_scatter_index: torch.Tensor | None = None
         self._draft_scatter_buf: torch.Tensor | None = None
 
-        # PATCH (local): draft-side repetition penalty. When enabled (env
-        # VLLM_DRAFT_REP_PENALTY=1 + probabilistic drafting), the drafter
-        # mirrors the target's repetition-penalty logit transform so the
-        # rejection test compares aligned p/q distributions. Without this,
-        # every context-repeated token has q suppressed but p not, which
-        # costs speculation acceptance heavily on repetition-rich outputs
-        # (e.g. TTS speech tokens). Set via set_penalties_state().
+        # Draft-side repetition penalty (speculative_config.
+        # draft_apply_repetition_penalty): the drafter mirrors the target's
+        # repetition-penalty logit transform so the rejection test compares
+        # aligned p/q distributions. Without this, every context-repeated
+        # token has q suppressed but p not, which costs speculation
+        # acceptance heavily on repetition-rich outputs (e.g. TTS speech
+        # tokens). Set via set_penalties_state().
         self._penalties_state = None
 
     def set_penalties_state(self, penalties_state) -> None:
-        import os
-
         if self.draft_logits is None:
-            # Greedy drafting: rejection uses exact match, p/q alignment moot.
+            # Greedy drafting: rejection uses exact match, p/q alignment moot
+            # (draft_apply_repetition_penalty + greedy is rejected at
+            # config time).
             return
-        if os.environ.get("VLLM_DRAFT_REP_PENALTY", "0") == "1":
+        if self.speculative_config.draft_apply_repetition_penalty:
             self._penalties_state = penalties_state
 
     def load_draft_model(
@@ -205,7 +205,7 @@ class DSparkSpeculator(DFlashSpeculator):
         # read via the precomputed persistent index (fixed buffer for capture).
         prev = self.input_buffers.input_ids[self._anchor_idx[:num_reqs]]
 
-        # PATCH (local): per-request state for the draft-side repetition
+        # Per-request state for the draft-side repetition
         # penalty (_draft_penalties_kernel). pen_rows is block-constant; the
         # kernel adds the in-block draft tokens t_0..t_{i-1} per step from
         # self.draft_tokens.
@@ -219,7 +219,7 @@ class DSparkSpeculator(DFlashSpeculator):
             bias = self.model.markov_bias(markov_embed)
             logits_i = base_logits[:, i] + bias
             if self.draft_logits is not None:
-                # PATCH (local): mirror the target's repetition-penalty logit
+                # Mirror the target's repetition-penalty logit
                 # transform on the draft logits (fused triton kernel, mutates
                 # logits_i in place; per-row early exit when rep == 1.0).
                 # Runs BEFORE the d2t scatter so the kernel only touches

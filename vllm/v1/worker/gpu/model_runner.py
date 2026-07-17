@@ -349,7 +349,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             )
             # Let drafters mirror the target's repetition penalty so
             # probabilistic rejection sampling compares aligned p/q
-            # distributions (opt-in via VLLM_DRAFT_REP_PENALTY=1).
+            # distributions (opt-in via speculative_config.
+            # draft_apply_repetition_penalty).
             if self.speculator is not None and hasattr(
                 self.speculator, "set_penalties_state"
             ):
