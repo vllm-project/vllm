@@ -25,6 +25,7 @@ INT8_DTYPE = scalar_types.uint8b128
 
 
 def _dtype_abbr(dtype: torch.dtype | ScalarType) -> str:
+    """Return a stable short name for torch and ScalarType dtypes."""
     if isinstance(dtype, ScalarType):
         return str(dtype)
     return fx.graph.dtype_abbrs[dtype]
