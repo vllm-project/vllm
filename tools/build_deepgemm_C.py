@@ -47,9 +47,7 @@ shutil.copy2(shim, out / shim.name)
 
 so_files = sorted(_pkg.glob("_C_extension*.so"))
 if not so_files:
-    sys.exit(
-        f"DeepGEMM build did not produce deep_gemm/_C_extension*.so under {src}"
-    )
+    sys.exit(f"DeepGEMM build did not produce deep_gemm/_C_extension*.so under {src}")
 for so in so_files:
     shutil.copy2(so, out / so.name)
     print(f"[build_deepgemm_C] installed {so.name} -> {out}", flush=True)
