@@ -2,8 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """The lifecycle shared by initial weight loading and checkpoint reloads."""
 
-from weakref import WeakSet, ref
-
 import torch
 from torch import nn
 
@@ -22,21 +20,14 @@ class WeightLoadSession:
         model: nn.Module,
         initial_load_device: torch.device | None = None,
     ) -> None:
-        self._model_ref = ref(model)
+        self.model = model
         self.initial_load_device = initial_load_device
-        self._processed_quant: WeakSet[nn.Module] = WeakSet()
-        self._processed_attention: WeakSet[nn.Module] = WeakSet()
+        self._processed_quant: set[nn.Module] = set()
+        self._processed_attention: set[nn.Module] = set()
         self._uses_layerwise_loading = initial_load_device is None or any(
             getattr(getattr(module, "quant_method", None), "uses_meta_device", False)
             for module in model.modules()
         )
-
-    @property
-    def model(self) -> nn.Module:
-        model = self._model_ref()
-        if model is None:
-            raise RuntimeError("weight load model no longer exists")
-        return model
 
     def prepare(self) -> None:
         model = self.model
@@ -62,10 +53,7 @@ class WeightLoadSession:
             self.abort()
             raise
 
-    def finish(
-        self,
-        model_config: ModelConfig | None,
-    ) -> None:
+    def finish(self, model_config: ModelConfig | None) -> None:
         model = self.model
         if get_active_weight_load_session(model) is not self:
             raise RuntimeError("weight load session was not prepared")
@@ -81,27 +69,18 @@ class WeightLoadSession:
             if self.initial_load_device is not None:
                 if model_config is None:
                     raise ValueError("model_config is required for initial loading")
-                from vllm.model_executor.model_loader.utils import (
-                    process_weights_after_loading,
-                )
-
-                process_weights_after_loading(
-                    model,
-                    model_config,
-                    self.initial_load_device,
-                )
+                self.process_all_modules(model_config)
             else:
-                self._process_hpc_modules()
+                self._process_hpc()
         except BaseException:
             self.abort()
             raise
-        else:
-            self._unbind()
+        self._unbind()
 
     def abort(self) -> None:
         """Discard layerwise loading state so a full update can be retried."""
-        model = self._model_ref()
-        if model is None or get_active_weight_load_session(model) is not self:
+        model = self.model
+        if get_active_weight_load_session(model) is not self:
             return
 
         try:
@@ -114,13 +93,13 @@ class WeightLoadSession:
         finally:
             self._unbind()
 
-    def process_weights_after_loading(self, model_config: ModelConfig) -> None:
+    def process_all_modules(self, model_config: ModelConfig) -> None:
         """Process initial-load weights in dependency order."""
         for module in self.model.modules():
             self.process_quant(module)
         for module in self.model.modules():
             self.process_attention(module, model_config.dtype)
-        self._process_hpc_modules()
+        self._process_hpc()
 
         if model_config.quantization == "torchao":
             from vllm.model_executor.model_loader.reload import (
@@ -129,7 +108,7 @@ class WeightLoadSession:
 
             set_torchao_reload_attrs(self.model, model_config)
 
-    def _process_hpc_modules(self) -> None:
+    def _process_hpc(self) -> None:
         from vllm.model_executor.layers.hpc import HpcModule
 
         for module in self.model.modules():
@@ -166,11 +145,8 @@ class WeightLoadSession:
         self._processed_attention.add(module)
 
     def _unbind(self) -> None:
-        model = self._model_ref()
-        if model is None:
-            return
-        if get_active_weight_load_session(model) is self:
-            delattr(model, "_vllm_weight_load_session")
+        if get_active_weight_load_session(self.model) is self:
+            delattr(self.model, "_vllm_weight_load_session")
 
 
 def get_active_weight_load_session(model: nn.Module) -> WeightLoadSession | None:

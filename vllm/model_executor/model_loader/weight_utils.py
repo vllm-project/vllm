@@ -1328,7 +1328,7 @@ def initialize_single_dummy_weight(
     seed: int = 1234,
 ) -> None:
     if param.device.type == "meta":
-        return  # deferred to the load session commit (e.g. online quant)
+        return  # deferred to finalize_layerwise_processing (e.g. online quant)
 
     if not torch.is_floating_point(param):
         if current_platform.is_rocm():

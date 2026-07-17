@@ -40,11 +40,11 @@ from .utils import (
 logger = init_logger(__name__)
 
 __all__ = [
+    "get_layerwise_info",
+    "record_metadata_for_reloading",
+    "initialize_layerwise_reload",
     "finalize_layerwise_processing",
     "finalize_layerwise_reload",
-    "get_layerwise_info",
-    "initialize_layerwise_reload",
-    "record_metadata_for_reloading",
 ]
 
 
@@ -103,10 +103,7 @@ def finalize_layerwise_processing(
     session.finish(model_config)
 
 
-def finalize_layerwise_reload(
-    model: torch.nn.Module, model_config: ModelConfig | None
-) -> None:
-    finalize_layerwise_processing(model, model_config)
+finalize_layerwise_reload = finalize_layerwise_processing
 
 
 @torch.no_grad()
@@ -131,8 +128,6 @@ def _prepare_layerwise_loading(model: torch.nn.Module):
 
     for layer in model.modules():
         info = get_layerwise_info(layer)
-        if info.load_session is None:
-            raise RuntimeError("layerwise reload requires a WeightLoadSession")
 
         # Skip if the layer has already been initialized
         if info.can_load():
@@ -153,7 +148,7 @@ def _prepare_layerwise_loading(model: torch.nn.Module):
 def initialize_online_processing(layer: torch.nn.Module):
     """
     Wrap a layer's weight loaders with online processing loaders.
-    Called by either a reload session or an online quantization scheme,
+    Called by either `initialize_layerwise_reload` or an online quantization scheme,
     prevents double wrapping in the case of online quantization + reloading
 
     Args:
@@ -317,9 +312,6 @@ def _finish_layerwise_loading(
         _finalize_attention_layer(layer, info, session, act_dtype)
         info.reset()
 
-    for layer in model.modules():
-        get_layerwise_info(layer).load_session = None
-
     LOADING_LAYERS.clear()
 
 
@@ -359,7 +351,6 @@ def _abort_layerwise_loading(model: torch.nn.Module) -> None:
                 if hasattr(tensor, "weight_loader"):
                     tensor.weight_loader = _get_original_loader(tensor)
         info.reset()
-        info.load_session = None
 
     LOADING_LAYERS.clear()
 

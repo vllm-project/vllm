@@ -1,10 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import gc
 from contextlib import contextmanager
 from unittest.mock import Mock
-from weakref import ref
 
 import pytest
 import torch
@@ -161,22 +159,6 @@ def test_legacy_post_load_hook_still_works_standalone():
     model.quant_method.process_weights_after_loading.assert_called_once_with(model)
 
 
-def test_initial_load_uses_patchable_post_load_hook(monkeypatch):
-    model = nn.Module()
-    session = WeightLoadSession(model, torch.device("cpu"))
-    session.prepare()
-    calls = []
-    monkeypatch.setattr(
-        "vllm.model_executor.model_loader.utils.process_weights_after_loading",
-        lambda *args: calls.append(args),
-    )
-    model_config = Mock(dtype=torch.float32, quantization=None)
-
-    session.finish(model_config)
-
-    assert calls == [(model, model_config, torch.device("cpu"))]
-
-
 def test_initial_quant_processing_uses_device_context(monkeypatch):
     model = nn.Module()
     model.quant_method = Mock(spec=QuantizeMethodBase)
@@ -212,9 +194,8 @@ def test_initial_quant_processing_uses_device_context(monkeypatch):
     model.quant_method.process_weights_after_loading.assert_called_once_with(model)
 
 
-def test_prepare_failure_does_not_retain_model(monkeypatch):
+def test_prepare_failure_unbinds_session(monkeypatch):
     model = nn.Linear(1, 1)
-    model_ref = ref(model)
 
     def fail_prepare(*_):
         raise RuntimeError("boom")
@@ -224,14 +205,7 @@ def test_prepare_failure_does_not_retain_model(monkeypatch):
         fail_prepare,
     )
     session = WeightLoadSession(model)
-    session_ref = ref(session)
 
     with pytest.raises(RuntimeError, match="boom"):
         session.prepare()
     assert get_active_weight_load_session(model) is None
-
-    del session
-    del model
-    gc.collect()
-    assert session_ref() is None
-    assert model_ref() is None

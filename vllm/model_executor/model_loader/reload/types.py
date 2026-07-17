@@ -40,11 +40,9 @@ class LayerReloadingInfo:
     load_session: "WeightLoadSession | None" = field(default=None, repr=False)
 
     def reset(self):
-        load_session = self.load_session
         self.__init__(  # type: ignore[misc]
             restore_metadata=self.restore_metadata,
             restore_device=self.restore_device,
-            load_session=load_session,
         )
 
     def can_load(self) -> bool:

@@ -10,9 +10,7 @@ from vllm.config import ModelConfig, VllmConfig
 from vllm.config.load import LoadConfig
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader.load_session import WeightLoadSession
-from vllm.model_executor.model_loader.utils import (
-    initialize_model,
-)
+from vllm.model_executor.model_loader.utils import initialize_model
 from vllm.platforms import current_platform
 from vllm.tracing import instrument
 from vllm.utils.mem_utils import format_gib
