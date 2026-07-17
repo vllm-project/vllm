@@ -67,9 +67,9 @@ class QuarkConfig(QuantizationConfig):
         if kv_cache_group is None:
             kv_cache_group = []
         self.quant_config = quant_config
-        self.packed_modules_mapping = dict(
-            getattr(type(self), "packed_modules_mapping", {})
-        )
+        # Copy the class-level default (which a subclass may override, e.g. the
+        # DeepSeek-V4 Quark config) so per-instance edits don't mutate the class.
+        self.packed_modules_mapping = dict(self.packed_modules_mapping)
         self.kv_cache_group = kv_cache_group
         self.kv_cache_config = kv_cache_config
         self.pack_method = pack_method

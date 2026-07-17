@@ -237,12 +237,10 @@ class QuarkW8A8Fp8PerBlock(QuarkScheme):
         return QuarkW8A8Fp8.get_min_capability()
 
     def process_weights_after_loading(self, layer) -> None:
-        if isinstance(self.fp8_linear, MarlinFP8ScaledMMLinearKernel):
-            self.fp8_linear.process_weights_after_loading(layer)
-            return
         # Non-Marlin per-block FP8 kernels use dynamic 128-group activation
         # scaling, so there is no checkpoint-provided static input scale.
-        layer.input_scale = None
+        if not isinstance(self.fp8_linear, MarlinFP8ScaledMMLinearKernel):
+            layer.input_scale = None
         self.fp8_linear.process_weights_after_loading(layer)
 
     def create_weights(
