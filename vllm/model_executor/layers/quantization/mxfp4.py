@@ -15,7 +15,7 @@ from vllm.model_executor.layers.fused_moe import (
 )
 from vllm.model_executor.layers.fused_moe import modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
-    TRITON_BACKENDS,
+    PREPROCESSED_WEIGHT_BACKENDS,
     Mxfp4MoeBackend,
     convert_gpt_oss_weight_to_mxfp4_moe_kernel_format,
     convert_weight_to_mxfp4_moe_kernel_format,
@@ -341,9 +341,9 @@ class GptOssMxfp4MoEMethod(FusedMoEMethodBase):
             )
         )
 
-        # For TRITON backends, weights are wrapped tensors from triton_kernels
-        # that don't support .detach(). Manually assign parameters.
-        if self.mxfp4_backend not in TRITON_BACKENDS:
+        # Some backends return preprocessed weight wrappers and scale metadata
+        # instead of Parameters that can be installed with replace_parameter().
+        if self.mxfp4_backend not in PREPROCESSED_WEIGHT_BACKENDS:
             replace_parameter(layer, "w13_weight", w13)
             replace_parameter(layer, "w2_weight", w2)
             replace_parameter(layer, "w13_weight_scale", w13_scale)
@@ -393,12 +393,16 @@ class GptOssMxfp4MoEMethod(FusedMoEMethodBase):
     def get_fused_moe_quant_config(
         self, layer: RoutedExperts
     ) -> FusedMoEQuantConfig | None:
-        w1_bias = getattr(layer, "w13_bias", None)
-        w2_bias = getattr(layer, "w2_bias", None)
+        if self.mxfp4_backend == Mxfp4MoeBackend.TOKENSPEED:
+            w1_bias = layer.w13_weight_bias
+            w2_bias = layer.w2_weight_bias
+        else:
+            w1_bias = getattr(layer, "w13_bias", None)
+            w2_bias = getattr(layer, "w2_bias", None)
 
-        if self.mxfp4_backend in TRITON_BACKENDS:
-            # TRITON backends free w13/w2_weight_scale after swizzling; the
-            # swizzled scales live inside the precision configs instead.
+        if self.mxfp4_backend in PREPROCESSED_WEIGHT_BACKENDS:
+            # Preprocessed backends store kernel-ready scale metadata on the
+            # method instead of the original layer weight-scale Parameters.
             assert self.w13_precision_config is not None
             assert self.w2_precision_config is not None
             w1_scale = self.w13_precision_config
@@ -688,9 +692,9 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             )
         )
 
-        # For TRITON backends, weights are wrapped tensors from triton_kernels
-        # that don't support .detach(). Manually assign parameters.
-        if self.mxfp4_backend not in TRITON_BACKENDS:
+        # Some backends return preprocessed weight wrappers and scale metadata
+        # instead of Parameters that can be installed with replace_parameter().
+        if self.mxfp4_backend not in PREPROCESSED_WEIGHT_BACKENDS:
             replace_parameter(layer, "w13_weight", w13)
             replace_parameter(layer, "w2_weight", w2)
             replace_parameter(layer, "w13_weight_scale", w13_scale)
@@ -745,9 +749,9 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         w2_bias = getattr(layer, "w2_bias", None)
         swiglu_limit = getattr(layer, "swiglu_limit", None)
 
-        if self.mxfp4_backend in TRITON_BACKENDS:
-            # TRITON backends free w13/w2_weight_scale after swizzling; the
-            # swizzled scales live inside the precision configs instead.
+        if self.mxfp4_backend in PREPROCESSED_WEIGHT_BACKENDS:
+            # Preprocessed backends store kernel-ready scale metadata on the
+            # method instead of the original layer weight-scale Parameters.
             assert self.w13_precision_config is not None
             assert self.w2_precision_config is not None
             w1_scale = self.w13_precision_config
