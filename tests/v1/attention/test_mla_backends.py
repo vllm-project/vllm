@@ -42,7 +42,10 @@ from vllm.v1.attention.backends.mla.prefill import (
 )
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.attention.ops.flashmla import is_flashmla_dense_supported
-from vllm.v1.kv_cache_interface import MLAAttentionSpec
+from vllm.v1.kv_cache_interface import (
+    KVQuantMode,
+    MLAAttentionSpec,
+)
 
 BACKENDS_TO_TEST = [
     AttentionBackendEnum.CUTLASS_MLA,
@@ -54,6 +57,31 @@ BACKENDS_TO_TEST = [
 ]
 
 DEVICE_TYPE = current_platform.device_type
+
+
+@pytest.mark.parametrize(
+    ("cache_dtype", "expected_quant_mode"),
+    [
+        ("auto", KVQuantMode.NONE),
+        ("fp8_ds_mla", KVQuantMode.FP8_PER_TENSOR),
+    ],
+)
+def test_mla_kv_cache_spec_uses_layer_cache_dtype(
+    cache_dtype: str, expected_quant_mode: KVQuantMode
+):
+    layer = SimpleNamespace(kv_cache_dtype=cache_dtype, head_size=576)
+    vllm_config = SimpleNamespace(
+        cache_config=SimpleNamespace(block_size=64), model_config=None
+    )
+
+    spec = MLAAttention.get_kv_cache_spec(layer, vllm_config)
+
+    assert isinstance(spec, MLAAttentionSpec)
+    assert spec.cache_dtype_str == cache_dtype
+    assert spec.kv_quant_mode == expected_quant_mode
+    if cache_dtype == "fp8_ds_mla":
+        assert spec.page_size_bytes == 64 * 656
+
 
 # Remove sm100 backends from the list if not using sm100
 if not torch.cuda.is_available() or torch.cuda.get_device_properties(0).major < 10:
