@@ -12,7 +12,6 @@ from typing_extensions import Self
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
-    from vllm.model_executor.model_loader.post_load import WeightLoadSession
 
 from vllm.config.parallel import ParallelConfig
 from vllm.config.weight_transfer import WeightTransferConfig
@@ -200,7 +199,6 @@ class WeightTransferEngine(ABC, Generic[TInitInfo, TUpdateInfo]):
         self.model = model
         self._default_model_config = self.model_config
         self._default_model = model
-        self._weight_load_session: WeightLoadSession | None = None
 
     def set_weight_update_target(
         self,
@@ -267,21 +265,39 @@ class WeightTransferEngine(ABC, Generic[TInitInfo, TUpdateInfo]):
         """
         raise NotImplementedError
 
+    @abstractmethod
     def start_weight_update(self) -> None:
-        """Start the common checkpoint-format reload lifecycle."""
-        from vllm.model_executor.model_loader.post_load import WeightLoadSession
+        """Prepare the engine for a new weight update."""
+        raise NotImplementedError
 
-        if self._weight_load_session is not None:
-            raise RuntimeError("a weight update session is already active")
-        self._weight_load_session = WeightLoadSession(self.model, self.model_config)
-        self._weight_load_session.prepare()
-
+    @abstractmethod
     def finish_weight_update(self) -> None:
-        """Commit the common checkpoint-format reload lifecycle."""
-        if self._weight_load_session is None:
+        """Finalize the current weight update."""
+        raise NotImplementedError
+
+    def _start_checkpoint_weight_update(self) -> None:
+        from vllm.model_executor.model_loader.load_session import WeightLoadSession
+
+        WeightLoadSession(self.model).prepare()
+
+    def _finish_checkpoint_weight_update(self) -> None:
+        from vllm.model_executor.model_loader.load_session import (
+            get_active_weight_load_session,
+        )
+
+        session = get_active_weight_load_session(self.model)
+        if session is None:
             raise RuntimeError("start_weight_update must be called before finish")
-        self._weight_load_session.finish()
-        self._weight_load_session = None
+        session.finish(self.model_config)
+
+    def _abort_checkpoint_weight_update(self) -> None:
+        from vllm.model_executor.model_loader.load_session import (
+            get_active_weight_load_session,
+        )
+
+        session = get_active_weight_load_session(self.model)
+        if session is not None:
+            session.abort()
 
     def update_weights(self, update_info: dict[str, Any]) -> None:
         """
@@ -290,11 +306,15 @@ class WeightTransferEngine(ABC, Generic[TInitInfo, TUpdateInfo]):
         Args:
             update_info: Dictionary containing backend-specific update info
         """
-        typed_update_info = self.parse_update_info(update_info)
-        self.receive_weights(typed_update_info)
-        # NCCL broadcast / IPC paths may be asynchronous. Synchronize here so the
-        # next step uses the new weights.
-        torch.accelerator.synchronize()
+        try:
+            typed_update_info = self.parse_update_info(update_info)
+            self.receive_weights(typed_update_info)
+            # NCCL broadcast / IPC paths may be asynchronous. Synchronize here so the
+            # next step uses the new weights.
+            torch.accelerator.synchronize()
+        except BaseException:
+            self._abort_checkpoint_weight_update()
+            raise
 
     @abstractmethod
     def receive_weights(self, update_info: TUpdateInfo) -> None:

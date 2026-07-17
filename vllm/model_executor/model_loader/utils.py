@@ -18,6 +18,10 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
 )
+from vllm.model_executor.model_loader.load_session import (
+    WeightLoadSession,
+    get_active_weight_load_session,
+)
 from vllm.model_executor.model_loader.reload import (
     record_metadata_for_reloading,
 )
@@ -87,6 +91,16 @@ def initialize_model(
         record_metadata_for_reloading(model)
 
     return model
+
+
+def process_weights_after_loading(
+    model: nn.Module, model_config: ModelConfig, target_device: torch.device
+) -> None:
+    """Process initial-load weights while preserving the legacy hook."""
+    session = get_active_weight_load_session(model)
+    if session is None:
+        session = WeightLoadSession(model, initial_load_device=target_device)
+    session.process_weights_after_loading(model_config)
 
 
 @contextmanager

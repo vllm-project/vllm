@@ -184,6 +184,12 @@ class IPCWeightTransferEngine(
         """
         pass
 
+    def start_weight_update(self) -> None:
+        self._start_checkpoint_weight_update()
+
+    def finish_weight_update(self) -> None:
+        self._finish_checkpoint_weight_update()
+
     def receive_weights(self, update_info: IPCWeightTransferUpdateInfo) -> None:
         """
         Receive weights from the trainer via CUDA IPC handles and load them.

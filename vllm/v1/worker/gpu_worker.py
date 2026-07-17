@@ -1372,9 +1372,11 @@ class Worker(WorkerBase):
                 "finish_weight_update called without a matching start_weight_update."
             )
 
-        self.weight_transfer_engine.finish_weight_update()
-        self.weight_transfer_engine.reset_weight_update_target()
-        self._weight_update_active = False
+        try:
+            self.weight_transfer_engine.finish_weight_update()
+        finally:
+            self._weight_update_active = False
+            self.weight_transfer_engine.reset_weight_update_target()
 
     def shutdown(self) -> None:
         gc.unfreeze()

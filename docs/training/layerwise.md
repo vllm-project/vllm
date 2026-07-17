@@ -101,16 +101,18 @@ llm.collective_rpc("reload_weights", kwargs={"weights_iterator": weights_iterato
 
 ### Low Level `layerwise` API
 
-[layerwise.py](../../vllm/model_executor/model_loader/reload/layerwise.py) Implements the following functions to execute its lifecycle:
+The model loader internally owns this lifecycle through one weight-load session. The documented functions below remain available for custom reload integrations.
+
+[layerwise.py](../../vllm/model_executor/model_loader/reload/layerwise.py) implements the following operations:
 
 | Function | Purpose | Quantized Reload | Online Quantization |
 | - | - | - | - |
 | `record_metadata_for_reloading` | Record tensor metadata so that layers can be restored on the meta device | Called by `BaseModelLoader` | Called by `BaseModelLoader` |
-| `restore_layer_on_meta` | Restore layer to model format at start of reload | Called by `initialize_layerwise_reload` | Not called. Online quantized weights already start on meta device via `...OnlineLinearMethod.create_weights` |
-| `initialize_online_processing` | Wrap weight loaders with the `online_process_loader` wrapper, which buffers weights until all layer weights have been loaded | Called by `initialize_layerwise_reload` | Called by `...OnlineLinearMethod.create_weights` |
+| `restore_layer_on_meta` | Restore layer to model format at start of reload | Called while the reload session is prepared | Not called. Online quantized weights already start on meta device via `...OnlineLinearMethod.create_weights` |
+| `initialize_online_processing` | Wrap weight loaders with the `online_process_loader` wrapper, which buffers weights until all layer weights have been loaded | Called while the reload session is prepared | Called by `...OnlineLinearMethod.create_weights` |
 | `_layerwise_process` | Process layer once all weights are loaded | Called by `online_process_loader` during loading | Called by `online_process_loader` during loading |
 | `_copy_and_restore_kernel_tensors` | Copy processed weights into original tensor locations to affect compiled cuda graphs, etc. | Called by `_layerwise_process` after `process_weights_after_loading` | Not called. There is no compiled cuda graph yet |
-| `finalize_layerwise_processing` | Catch any layers which did not load all weights (for example attention weights or weights with padding) | Called by `BaseModelLoader` | Called by `BaseModelLoader` |
+| `finalize_layerwise_processing` | Catch any layers which did not load all weights (for example attention weights or weights with padding) | Called by the reload session | Called by the initial-load session |
 
 You can plug into this lifecycle directly by calling the `initialize_layerwise_reload`, loading weights, then calling `finalize_layerwise_processing`:
 

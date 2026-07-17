@@ -28,6 +28,8 @@ The base class provides two methods:
 2. `update_weights(update_info_dict)`:  Thin wrapper for `receive_weights`: parses
 the dict into user-specified data type, calls `receive_weights`, and synchronizes the device. Subclasses implement `receive_weights`.
 
+If a checkpoint-format update fails, vLLM discards the temporary loading state but does not copy the old checkpoint back over layers that were already updated. Before inference resumes, start a new update and resend the complete checkpoint from its first weight. Errors that invalidate the accelerator context require restarting the worker.
+
 ### Request Classes
 
 The API-level request classes provide backend-agnostic serialization using plain dictionaries. The engine's `parse_init_info` and `parse_update_info` methods convert these dictionaries into typed dataclasses.
@@ -106,14 +108,14 @@ class MyWeightTransferEngine(WeightTransferEngine[MyInitInfo, MyUpdateInfo]):
         ...
 
     def start_weight_update(self) -> None:
-        # Checkpoint-format engines: run initialize_layerwise_reload(self.model).
+        # Checkpoint-format engines use the shared protected helper.
         # In-place engines: no-op
-        ...
+        self._start_checkpoint_weight_update()
 
     def finish_weight_update(self) -> None:
-        # Checkpoint-format engines: run finalize_layerwise_reload(...).
+        # Checkpoint-format engines use the shared protected helper.
         # In-place engines: no-op
-        ...
+        self._finish_checkpoint_weight_update()
 
     def receive_weights(self, update_info: MyUpdateInfo) -> None:
         weights = []

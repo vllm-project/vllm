@@ -9,7 +9,7 @@ import vllm.envs as envs
 from vllm.config import ModelConfig, VllmConfig
 from vllm.config.load import LoadConfig
 from vllm.logger import init_logger
-from vllm.model_executor.model_loader.post_load import WeightLoadSession
+from vllm.model_executor.model_loader.load_session import WeightLoadSession
 from vllm.model_executor.model_loader.utils import (
     initialize_model,
 )
@@ -61,25 +61,25 @@ class BaseModelLoader(ABC):
 
             load_session = WeightLoadSession(
                 model,
-                model_config,
-                target_device=target_device,
+                initial_load_device=target_device,
             )
             load_session.prepare()
-            logger.debug("Loading weights on %s ...", load_device)
-            self.load_weights(model, model_config)
+            try:
+                logger.debug("Loading weights on %s ...", load_device)
+                self.load_weights(model, model_config)
 
-            # Log peak GPU memory after loading weights. This is needed
-            # to have test coverage on peak memory for online quantization.
-            if current_platform.is_cuda_alike() or current_platform.is_xpu():
-                peak_memory = torch.accelerator.max_memory_allocated()
-                logger.debug_once(
-                    "Peak GPU memory after loading weights: %s GiB",
-                    format_gib(peak_memory),
-                )
-
-            # Process weights into kernel format. Note that when using online
-            # quantization, weights are (typically) quantized as they are loaded.
-            load_session.finish()
+                # Log peak GPU memory after loading weights. This is needed
+                # to have test coverage on peak memory for online quantization.
+                if current_platform.is_cuda_alike() or current_platform.is_xpu():
+                    peak_memory = torch.accelerator.max_memory_allocated()
+                    logger.debug_once(
+                        "Peak GPU memory after loading weights: %s GiB",
+                        format_gib(peak_memory),
+                    )
+            except BaseException:
+                load_session.abort()
+                raise
+            load_session.finish(model_config)
 
         return model.eval()
 

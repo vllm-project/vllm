@@ -134,6 +134,12 @@ class NCCLWeightTransferEngine(
             init_info, self.parallel_config
         )
 
+    def start_weight_update(self) -> None:
+        self._start_checkpoint_weight_update()
+
+    def finish_weight_update(self) -> None:
+        self._finish_checkpoint_weight_update()
+
     def receive_weights(self, update_info: NCCLWeightTransferUpdateInfo) -> None:
         """
         Receive weights from trainer via NCCL broadcast.

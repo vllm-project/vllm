@@ -7,9 +7,18 @@ from weakref import WeakKeyDictionary, WeakSet
 
 import torch
 
+from vllm.config import ModelConfig
 from vllm.logger import init_logger
-from vllm.model_executor.layers.attention import Attention, MLAAttention
-from vllm.model_executor.model_loader.post_load import WeightLoadSession
+from vllm.model_executor.layers.attention import (
+    Attention,
+    MLAAttention,
+    MMEncoderAttention,
+)
+from vllm.model_executor.model_loader.load_session import (
+    WeightLoadSession,
+    _process_quant_method,
+    get_active_weight_load_session,
+)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 
 from .meta import (
@@ -31,7 +40,10 @@ from .utils import (
 logger = init_logger(__name__)
 
 __all__ = [
+    "finalize_layerwise_processing",
+    "finalize_layerwise_reload",
     "get_layerwise_info",
+    "initialize_layerwise_reload",
     "record_metadata_for_reloading",
 ]
 
@@ -74,6 +86,27 @@ def record_metadata_for_reloading(model: torch.nn.Module):
         info = get_layerwise_info(layer)
         info.restore_metadata = capture_layer_to_meta(layer)
         info.restore_device = torch.get_default_device()
+
+
+def initialize_layerwise_reload(model: torch.nn.Module) -> None:
+    """Prepare the documented low-level layerwise reload lifecycle."""
+    WeightLoadSession(model).prepare()
+
+
+def finalize_layerwise_processing(
+    model: torch.nn.Module, model_config: ModelConfig | None
+) -> None:
+    """Finish the documented low-level layerwise reload lifecycle."""
+    session = get_active_weight_load_session(model)
+    if session is None:
+        raise RuntimeError("initialize_layerwise_reload must be called first")
+    session.finish(model_config)
+
+
+def finalize_layerwise_reload(
+    model: torch.nn.Module, model_config: ModelConfig | None
+) -> None:
+    finalize_layerwise_processing(model, model_config)
 
 
 @torch.no_grad()
@@ -194,7 +227,7 @@ def make_online_process_loader(layer: torch.nn.Module, param_name: str) -> Calla
         )
 
         # Do not online process attention layers, must wait until finalize
-        if isinstance(layer, (Attention, MLAAttention)):
+        if isinstance(layer, (Attention, MLAAttention, MMEncoderAttention)):
             return ret
 
         # Log warnings allocating excessive buffers on device
@@ -226,6 +259,7 @@ def make_online_process_loader(layer: torch.nn.Module, param_name: str) -> Calla
 def _finish_layerwise_loading(
     model: torch.nn.Module,
     session: WeightLoadSession,
+    act_dtype: torch.dtype | None,
 ):
     """
     Apply processing to any layers which were not layerwise processed during loading.
@@ -249,8 +283,8 @@ def _finish_layerwise_loading(
             info.reset()
             continue
 
-        # Attention/MLA layers are processed after all other layers
-        if isinstance(layer, (Attention, MLAAttention)):
+        # Attention layers are processed after all other layers.
+        if isinstance(layer, (Attention, MLAAttention, MMEncoderAttention)):
             deferred_attn.append((layer, info))
             continue
 
@@ -280,7 +314,7 @@ def _finish_layerwise_loading(
 
     # Process attention layers after all other layers are done
     for layer, info in deferred_attn:
-        _finalize_attention_layer(layer, info, session)
+        _finalize_attention_layer(layer, info, session, act_dtype)
         info.reset()
 
     for layer in model.modules():
@@ -290,8 +324,13 @@ def _finish_layerwise_loading(
 
 
 def _finalize_attention_layer(
-    layer: torch.nn.Module, info: LayerReloadingInfo, session: WeightLoadSession
+    layer: torch.nn.Module,
+    info: LayerReloadingInfo,
+    session: WeightLoadSession,
+    act_dtype: torch.dtype | None,
 ) -> None:
+    if act_dtype is None:
+        raise ValueError("model_config is required to process attention layers")
     if info.load_numel > 0 and info.kernel_tensors is not None:
         # Reload with new scale weights from checkpoint
         _place_kernel_tensors(layer, info)
@@ -303,7 +342,26 @@ def _finalize_attention_layer(
         )
     else:
         _place_kernel_tensors(layer, info)
-    session.process_attention(layer)
+    session.process_attention(layer, act_dtype)
+
+
+def _abort_layerwise_loading(model: torch.nn.Module) -> None:
+    """Restore layer structure after an interrupted layerwise load."""
+    if hasattr(model, "_original_do_torchao_reload"):
+        model._do_torchao_reload = model._original_do_torchao_reload
+
+    for layer in model.modules():
+        info = get_layerwise_info(layer)
+        if info.kernel_tensors is not None:
+            _place_kernel_tensors(layer, info)
+        else:
+            for tensor in get_layer_tensors(layer).values():
+                if hasattr(tensor, "weight_loader"):
+                    tensor.weight_loader = _get_original_loader(tensor)
+        info.reset()
+        info.load_session = None
+
+    LOADING_LAYERS.clear()
 
 
 def _reload_attention_scales(
@@ -366,8 +424,9 @@ def _layerwise_process(layer: torch.nn.Module, info: LayerReloadingInfo):
     # Process weights (quantization, repacking, etc.)
     session = info.load_session
     if session is None:
-        raise RuntimeError("layerwise processing has no weight load session")
-    session.process_quant(layer)
+        _process_quant_method(layer)
+    else:
+        session.process_quant(layer)
 
     # Copy processed values into original tensor storage (preserves cudagraph refs)
     # this code is a no-op if not reloading (because kernel tensors is empty)

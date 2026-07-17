@@ -5,6 +5,7 @@ import torch.nn as nn
 from vllm.config import ModelConfig
 from vllm.config.load import LoadConfig
 from vllm.model_executor.model_loader.base_loader import BaseModelLoader
+from vllm.model_executor.model_loader.load_session import _process_quant_method
 from vllm.model_executor.model_loader.reload.layerwise import (
     _get_original_loader,
     get_layerwise_info,
@@ -57,7 +58,8 @@ class DummyModelLoader(BaseModelLoader):
             param.weight_loader = _get_original_loader(param)
 
         if info.load_session is None:
-            raise RuntimeError("dummy layer processing has no weight load session")
-        info.load_session.process_quant(layer)
+            _process_quant_method(layer)
+        else:
+            info.load_session.process_quant(layer)
 
         info.reset()

@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 import torch
 
 if TYPE_CHECKING:
-    from vllm.model_executor.model_loader.post_load import WeightLoadSession
+    from vllm.model_executor.model_loader.load_session import WeightLoadSession
 
 __all__ = ["LayerTensors", "LayerReloadingInfo"]
 
@@ -37,7 +37,7 @@ class LayerReloadingInfo:
     # persistence survives `_non_persistent_buffers_set` being mutated during reload
     kernel_non_persistent_buffers: set[str] = field(default_factory=set)
 
-    load_session: "WeightLoadSession | None" = None
+    load_session: "WeightLoadSession | None" = field(default=None, repr=False)
 
     def reset(self):
         load_session = self.load_session

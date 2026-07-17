@@ -9,10 +9,16 @@ import pytest
 import torch
 from torch.nn.parameter import UninitializedParameter
 
+import vllm.model_executor.model_loader.reload.layerwise as reload_layerwise
 import vllm.model_executor.model_loader.reload.meta as reload_meta
+from vllm.model_executor.layers.hpc import HpcModule
 from vllm.model_executor.layers.linear import QKVParallelLinear
-from vllm.model_executor.model_loader.post_load import WeightLoadSession
+from vllm.model_executor.model_loader.load_session import (
+    WeightLoadSession,
+    get_active_weight_load_session,
+)
 from vllm.model_executor.model_loader.reload.layerwise import (
+    get_layerwise_info,
     record_metadata_for_reloading,
 )
 from vllm.model_executor.model_loader.reload.meta import (
@@ -33,9 +39,13 @@ from vllm.platforms import current_platform
 
 
 def _prepare_reload(model: torch.nn.Module) -> WeightLoadSession:
-    session = WeightLoadSession(model, Mock())
+    session = WeightLoadSession(model)
     session.prepare()
     return session
+
+
+def _finish_reload(session: WeightLoadSession) -> None:
+    session.finish(Mock(dtype=torch.float32, quantization=None))
 
 
 def _fp8_reload_unsupported() -> bool:
@@ -103,6 +113,26 @@ class _NonPersistentBufferLayer(torch.nn.Module):
         super().__init__()
         self.weight = torch.nn.Parameter(torch.ones(2, 2))
         self.register_buffer("scale", torch.tensor(0.25), persistent=False)
+
+
+class _DerivedHpcModule(HpcModule):
+    def __init__(self):
+        super().__init__()
+        self.source = torch.nn.Parameter(torch.ones(2))
+        self.derived = torch.nn.Parameter(torch.zeros(2))
+
+    def process_weights_after_loading(self, model):
+        self.derived.data.copy_(self.source.float() * 2)
+
+
+class _FakeMMEncoderAttention(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.weight = torch.nn.Parameter(torch.ones(1))
+        self.processed_dtypes = []
+
+    def process_weights_after_loading(self, act_dtype):
+        self.processed_dtypes.append(act_dtype)
 
 
 def test_move_metatensors():
@@ -277,7 +307,7 @@ def test_layerwise_reload_composed_loader_does_not_drop_params(monkeypatch):
     for name in ("A", "dt_bias", "D"):
         param = params[name]
         param.weight_loader(param, loaded[name])
-    load_session.finish()
+    _finish_reload(load_session)
 
     assert torch.equal(layer.A, -torch.exp(loaded["A"]))
     assert torch.equal(layer.dt_bias, loaded["dt_bias"])
@@ -308,7 +338,7 @@ def test_layerwise_reload_skips_non_persistent_parameter_alias_buffers(monkeypat
     record_metadata_for_reloading(model)
     load_session = _prepare_reload(model)
     layer.weight.weight_loader(layer.weight, loaded_weight)
-    load_session.finish()
+    _finish_reload(load_session)
 
     assert torch.equal(layer.weight, loaded_weight)
     assert layer.weight_view.untyped_storage().data_ptr() == (
@@ -352,7 +382,7 @@ def test_layerwise_reload_skips_child_parameter_alias_buffers(monkeypatch):
     load_session = _prepare_reload(model)
     layer.conv1d.weight.weight_loader(layer.conv1d.weight, loaded_conv)
     layer.scale.weight_loader(layer.scale, loaded_scale)
-    load_session.finish()
+    _finish_reload(load_session)
 
     assert torch.equal(layer.conv1d.weight, loaded_conv)
     assert torch.equal(layer.conv_weights, loaded_conv.view(-1))
@@ -387,7 +417,7 @@ def test_layerwise_reload_restores_alias_buffer_on_zero_size_layer(monkeypatch):
     record_metadata_for_reloading(model)
     load_session = _prepare_reload(model)
     layer.conv1d.weight.weight_loader(layer.conv1d.weight, loaded_conv)
-    load_session.finish()
+    _finish_reload(load_session)
 
     assert torch.equal(layer.conv_weights, loaded_conv.view(-1))
     assert layer.conv_weights.untyped_storage().data_ptr() == (
@@ -422,7 +452,7 @@ def test_layerwise_reload_preserves_unloaded_non_persistent_buffers(monkeypatch)
     record_metadata_for_reloading(model)
     load_session = _prepare_reload(model)
     layer.weight.weight_loader(layer.weight, loaded_weight)
-    load_session.finish()
+    _finish_reload(load_session)
 
     assert torch.equal(layer.weight, loaded_weight)
     assert torch.equal(layer.scale, original_scale)
@@ -456,12 +486,101 @@ def test_layerwise_reload_updates_loaded_non_persistent_buffers(monkeypatch):
     load_session = _prepare_reload(model)
     layer.weight.weight_loader(layer.weight, loaded_weight)
     layer.scale.weight_loader(layer.scale, loaded_scale)
-    load_session.finish()
+    _finish_reload(load_session)
 
     assert torch.equal(layer.weight, loaded_weight)
     assert torch.equal(layer.scale, loaded_scale)
     assert "scale" in layer._non_persistent_buffers_set
     assert "0.scale" not in model.state_dict()
+
+
+def test_abort_partial_reload_restores_storage_and_allows_retry():
+    model = torch.nn.Sequential(
+        torch.nn.Linear(2, 2),
+        torch.nn.Linear(2, 2),
+    )
+    original_params = dict(model.named_parameters())
+    original_values = {
+        name: param.detach().clone() for name, param in original_params.items()
+    }
+    first_values = {
+        "0.weight": torch.full_like(model[0].weight, 1),
+        "0.bias": torch.full_like(model[0].bias, 2),
+        "1.weight": torch.full_like(model[1].weight, 3),
+        "1.bias": torch.full_like(model[1].bias, 4),
+    }
+    record_metadata_for_reloading(model)
+
+    session = _prepare_reload(model)
+    for name in ("0.weight", "0.bias", "1.weight"):
+        param = model.get_parameter(name)
+        param.weight_loader(param, first_values[name])
+    session.abort()
+
+    assert get_active_weight_load_session(model) is None
+    for name, original_param in original_params.items():
+        assert model.get_parameter(name) is original_param
+        assert not original_param.is_meta
+    for module in model.modules():
+        info = get_layerwise_info(module)
+        assert info.loaded_weights == []
+        assert info.kernel_tensors is None
+        assert info.load_session is None
+    assert torch.equal(model[0].weight, first_values["0.weight"])
+    assert torch.equal(model[0].bias, first_values["0.bias"])
+    assert torch.equal(model[1].weight, original_values["1.weight"])
+    assert torch.equal(model[1].bias, original_values["1.bias"])
+
+    retry_values = {
+        name: torch.full_like(param, 9) for name, param in original_params.items()
+    }
+    retry = _prepare_reload(model)
+    for name, value in retry_values.items():
+        param = model.get_parameter(name)
+        param.weight_loader(param, value)
+    _finish_reload(retry)
+
+    for name, original_param in original_params.items():
+        assert model.get_parameter(name) is original_param
+        assert torch.equal(original_param, retry_values[name])
+
+
+def test_reload_refreshes_hpc_derived_weight_in_place():
+    model = _DerivedHpcModule()
+    derived = model.derived
+    derived_ptr = derived.data_ptr()
+    loaded_source = torch.full_like(model.source, 7)
+    record_metadata_for_reloading(model)
+
+    session = _prepare_reload(model)
+    model.source.weight_loader(model.source, loaded_source)
+    _finish_reload(session)
+
+    assert model.derived is derived
+    assert model.derived.data_ptr() == derived_ptr
+    assert torch.equal(model.derived, loaded_source * 2)
+
+
+def test_reload_finalizes_mm_encoder_attention(monkeypatch):
+    import vllm.model_executor.layers.attention as attention_layers
+
+    monkeypatch.setattr(
+        reload_layerwise,
+        "MMEncoderAttention",
+        _FakeMMEncoderAttention,
+    )
+    monkeypatch.setattr(
+        attention_layers,
+        "MMEncoderAttention",
+        _FakeMMEncoderAttention,
+    )
+    model = _FakeMMEncoderAttention()
+    record_metadata_for_reloading(model)
+
+    session = _prepare_reload(model)
+    _finish_reload(session)
+
+    assert model.processed_dtypes == [torch.float32]
 
 
 @pytest.mark.parametrize(

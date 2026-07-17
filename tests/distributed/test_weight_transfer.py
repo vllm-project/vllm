@@ -45,6 +45,10 @@ from vllm.distributed.weight_transfer.sparse_nccl_engine import (
     SparseNCCLWeightTransferUpdateInfo,
     SparseWeightPatch,
 )
+from vllm.model_executor.model_loader.load_session import (
+    get_active_weight_load_session,
+)
+from vllm.model_executor.model_loader.reload import record_metadata_for_reloading
 from vllm.platforms import current_platform
 from vllm.utils.network_utils import get_open_port
 
@@ -101,6 +105,35 @@ def create_mock_vllm_config(
     vllm_config.parallel_config = create_mock_parallel_config(rank, world_size, dp_rank)
     vllm_config.model_config = MagicMock()
     return vllm_config
+
+
+def test_checkpoint_update_aborts_on_receive_failure_and_can_retry(monkeypatch):
+    model = torch.nn.Linear(1, 1)
+    record_metadata_for_reloading(model)
+    vllm_config = create_mock_vllm_config()
+    vllm_config.model_config.dtype = torch.float32
+    vllm_config.model_config.quantization = None
+    engine = NCCLWeightTransferEngine(
+        WeightTransferConfig(backend="nccl"),
+        vllm_config,
+        torch.device("cuda"),
+        model,
+    )
+    monkeypatch.setattr(engine, "parse_update_info", lambda _: MagicMock())
+    monkeypatch.setattr(
+        engine,
+        "receive_weights",
+        MagicMock(side_effect=ValueError("boom")),
+    )
+
+    engine.start_weight_update()
+    with pytest.raises(ValueError, match="boom"):
+        engine.update_weights({})
+    assert get_active_weight_load_session(model) is None
+
+    engine.start_weight_update()
+    assert get_active_weight_load_session(model) is not None
+    engine._abort_checkpoint_weight_update()
 
 
 # --- Unit Tests: NCCLWeightTransferUpdateInfo Validation ---
