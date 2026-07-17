@@ -3,7 +3,7 @@
 import time
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
-from itertools import islice
+from itertools import chain, islice
 from typing import Any, NamedTuple
 
 from vllm.config import VllmConfig
@@ -443,6 +443,17 @@ class OffloadingConnectorScheduler:
             pending.remove(job_id)
             if not pending:
                 del self._block_id_to_pending_jobs[bid]
+
+    def _calc_num_offloadable_tokens(
+        self, req_status: RequestOffloadState, num_computed_tokens: int
+    ) -> int:
+        num = min(num_computed_tokens, req_status.req.num_tokens)
+        max_offload_tokens = req_status.max_offload_tokens
+        if max_offload_tokens is not None:
+            num = min(num, max_offload_tokens)
+        if self.config.offload_prompt_only:
+            num = min(num, req_status.req.num_prompt_tokens)
+        return num
 
     def _maximal_prefix_lookup(
         self, keys: Iterable[OffloadKey], req_context: ReqContext
@@ -911,28 +922,25 @@ class OffloadingConnectorScheduler:
     ) -> dict[int, TransferJob]:
         blocks_per_chunk = self.config.blocks_per_chunk
         store_jobs: dict[int, TransferJob] = {}
-        for req_id in scheduler_output.num_scheduled_tokens:
+        for req_id in chain(
+            scheduler_output.num_scheduled_tokens,
+            scheduler_output.finished_req_ids or (),
+        ):
             req_status = self._req_status.get(req_id)
             if req_status is None:
                 continue
             req = req_status.req
 
-            num_scheduled_tokens = scheduler_output.num_scheduled_tokens[req_id]
-            num_tokens_after_batch = req.num_computed_tokens + num_scheduled_tokens
-            # with async scheduling, some tokens may be missing
-            num_offloadable_tokens = min(num_tokens_after_batch, req.num_tokens)
-            max_offload_tokens = req_status.max_offload_tokens
-            if max_offload_tokens is not None:
-                num_offloadable_tokens = min(num_offloadable_tokens, max_offload_tokens)
+            if req.is_finished():
+                # Finished request: use final token count.
+                num_tokens_after_batch = req.num_tokens
+            else:
+                num_scheduled_tokens = scheduler_output.num_scheduled_tokens[req_id]
+                num_tokens_after_batch = req.num_computed_tokens + num_scheduled_tokens
 
-            # Skip decode-phase chunks: clamp to the prompt length so only
-            # prefill chunks become eligible for store. next_stored_chunk_idx
-            # never advances past this boundary, so decode chunks are never
-            # queued in this or any later step.
-            if self.config.offload_prompt_only:
-                num_offloadable_tokens = min(
-                    num_offloadable_tokens, req.num_prompt_tokens
-                )
+            num_offloadable_tokens = self._calc_num_offloadable_tokens(
+                req_status, num_tokens_after_batch
+            )
 
             # Filter out chunks skipped due to sliding window attention / SSM
             # or unreachable by the load path's alignment constraints.
@@ -981,117 +989,132 @@ class OffloadingConnectorScheduler:
                             continue
                     new_offload_keys.append(offload_key)
 
-            if not new_offload_keys:
-                req_status.advance_stored_idx(num_offloadable_tokens)
-                continue
-
-            store_output = self.manager.prepare_store(
-                new_offload_keys, req_status.req_context
-            )
-            if store_output is None:
-                self._connector_stats.increase_counter(
-                    _ConnectorMetricName.ALLOCATION_FAILURE
+            should_advance = True
+            if new_offload_keys:
+                store_output = self.manager.prepare_store(
+                    new_offload_keys, req_status.req_context
                 )
-                logger.warning("Request %s: cannot store chunks", req_id)
-                continue
+                if store_output is None:
+                    self._connector_stats.increase_counter(
+                        _ConnectorMetricName.ALLOCATION_FAILURE
+                    )
+                    logger.warning("Request %s: cannot store blocks", req_id)
+                    # Don't advance_stored_idx: retry on next step
+                    should_advance = False
+                elif store_output.keys_to_store:
+                    self._touch(req_status)
 
-            if not store_output.keys_to_store:
-                req_status.advance_stored_idx(num_offloadable_tokens)
-                continue
+                    keys_to_store = set(store_output.keys_to_store)
 
-            self._touch(req_status)
+                    group_sizes: list[int] = []
+                    block_indices: list[int] = []
+                    src_block_ids: list[int] = []
+                    sliding_window_block_ids: list[int] = []
+                    non_sliding_window_block_ids: list[int] = []
+                    for group_config, group_state in zip(
+                        self.config.kv_group_configs, req_status.group_states
+                    ):
+                        is_sliding_window = (
+                            group_config.sliding_window_size_in_chunks is not None
+                        )
+                        num_chunks = req_status.storable_chunks(
+                            group_config, num_offloadable_tokens
+                        )
+                        start_chunk_idx = group_state.next_stored_chunk_idx
+                        block_ids = group_state.block_ids
+                        num_group_blocks = 0
+                        start_gpu_block_idx: int | None = None
+                        for idx, offload_key in enumerate(
+                            group_state.offload_keys[start_chunk_idx:num_chunks]
+                        ):
+                            if offload_key not in keys_to_store:
+                                continue
 
-            keys_to_store = set(store_output.keys_to_store)
+                            chunk_idx = start_chunk_idx + idx
 
-            group_sizes: list[int] = []
-            block_indices: list[int] = []
-            src_block_ids: list[int] = []
-            sliding_window_block_ids: list[int] = []
-            non_sliding_window_block_ids: list[int] = []
-            for group_config, group_state in zip(
-                self.config.kv_group_configs, req_status.group_states
-            ):
-                is_sliding_window = (
-                    group_config.sliding_window_size_in_chunks is not None
-                )
-                num_chunks = req_status.storable_chunks(
-                    group_config, num_offloadable_tokens
-                )
-                start_chunk_idx = group_state.next_stored_chunk_idx
-                block_ids = group_state.block_ids
-                num_group_blocks = 0
-                start_gpu_block_idx: int | None = None
-                for idx, offload_key in enumerate(
-                    group_state.offload_keys[start_chunk_idx:num_chunks]
-                ):
-                    if offload_key not in keys_to_store:
-                        continue
+                            self._events_tracker.record_store(
+                                req, group_config, chunk_idx, offload_key
+                            )
 
-                    chunk_idx = start_chunk_idx + idx
+                            gpu_block_idx = chunk_idx * blocks_per_chunk
+                            for i in range(blocks_per_chunk):
+                                block_id = block_ids[gpu_block_idx + i]
+                                if block_id == 0:
+                                    continue
+                                if start_gpu_block_idx is None:
+                                    start_gpu_block_idx = gpu_block_idx + i
+                                src_block_ids.append(block_id)
+                                num_group_blocks += 1
+                                if is_sliding_window:
+                                    sliding_window_block_ids.append(block_id)
+                                else:
+                                    non_sliding_window_block_ids.append(block_id)
 
-                    self._events_tracker.record_store(
-                        req, group_config, chunk_idx, offload_key
+                        group_sizes.append(num_group_blocks)
+                        block_indices.append(start_gpu_block_idx or 0)
+                        group_state.next_stored_chunk_idx = max(
+                            group_state.next_stored_chunk_idx, num_chunks
+                        )
+
+                    src_spec = GPULoadStoreSpec(
+                        src_block_ids,
+                        group_sizes=group_sizes,
+                        block_indices=block_indices,
+                    )
+                    dst_spec = store_output.store_spec
+
+                    job_id = self._generate_job_id()
+                    # a store can only be issued when no load is pending.
+                    if req_status.transfer_jobs:
+                        any_jid = next(iter(req_status.transfer_jobs))
+                        assert self._jobs[any_jid].is_store
+                    req_status.transfer_jobs.add(job_id)
+
+                    # Watch sliding window blocks as they may get evicted
+                    # before the request finishes
+                    for bid in sliding_window_block_ids or ():
+                        self._block_id_to_pending_jobs.setdefault(bid, set()).add(
+                            job_id
+                        )
+
+                    # the non-sliding window blocks will be watched only
+                    # when the request finishes
+                    self._jobs[job_id] = TransferJobStatus(
+                        req_id=req_id,
+                        pending_count=self.config.num_workers,
+                        keys=set(keys_to_store),
+                        is_store=True,
+                        non_sliding_window_block_ids=non_sliding_window_block_ids,
+                        sliding_window_block_ids=sliding_window_block_ids or None,
                     )
 
-                    gpu_block_idx = chunk_idx * blocks_per_chunk
-                    for i in range(blocks_per_chunk):
-                        block_id = block_ids[gpu_block_idx + i]
-                        if block_id == 0:
-                            continue
-                        if start_gpu_block_idx is None:
-                            start_gpu_block_idx = gpu_block_idx + i
-                        src_block_ids.append(block_id)
-                        num_group_blocks += 1
-                        if is_sliding_window:
-                            sliding_window_block_ids.append(block_id)
-                        else:
-                            non_sliding_window_block_ids.append(block_id)
+                    store_jobs[job_id] = TransferJob(
+                        req_id=req_id, src_spec=src_spec, dst_spec=dst_spec
+                    )
 
-                group_sizes.append(num_group_blocks)
-                block_indices.append(start_gpu_block_idx or 0)
-                group_state.next_stored_chunk_idx = max(
-                    group_state.next_stored_chunk_idx, num_chunks
-                )
+                    logger.debug(
+                        "Request %s offloading %s chunks upto %d tokens (job %d)",
+                        req_id,
+                        len(keys_to_store),
+                        num_offloadable_tokens,
+                        job_id,
+                    )
 
-            src_spec = GPULoadStoreSpec(
-                src_block_ids, group_sizes=group_sizes, block_indices=block_indices
-            )
-            dst_spec = store_output.store_spec
+                    if req.is_finished():
+                        # Register non-sliding-window blocks for flush detection.
+                        for bid in non_sliding_window_block_ids:
+                            self._block_id_to_pending_jobs.setdefault(bid, set()).add(
+                                job_id
+                            )
+                            if bid in self._current_batch_allocated_block_ids:
+                                self._current_batch_jobs_to_flush.add(job_id)
 
-            job_id = self._generate_job_id()
-            # a store can only be issued when no load is pending.
-            if req_status.transfer_jobs:
-                any_jid = next(iter(req_status.transfer_jobs))
-                assert self._jobs[any_jid].is_store
-            req_status.transfer_jobs.add(job_id)
+            if should_advance:
+                req_status.advance_stored_idx(num_offloadable_tokens)
 
-            # Watch sliding window blocks as they may get evicted
-            # before the request finishes
-            for bid in sliding_window_block_ids or ():
-                self._block_id_to_pending_jobs.setdefault(bid, set()).add(job_id)
-
-            # the non-sliding window blocks will be watched only
-            # when the request finishes
-            self._jobs[job_id] = TransferJobStatus(
-                req_id=req_id,
-                pending_count=self.config.num_workers,
-                keys=set(keys_to_store),
-                is_store=True,
-                non_sliding_window_block_ids=non_sliding_window_block_ids,
-                sliding_window_block_ids=sliding_window_block_ids or None,
-            )
-
-            store_jobs[job_id] = TransferJob(
-                req_id=req_id, src_spec=src_spec, dst_spec=dst_spec
-            )
-
-            logger.debug(
-                "Request %s offloading %s chunks upto %d tokens (job %d)",
-                req_id,
-                len(keys_to_store),
-                num_offloadable_tokens,
-                job_id,
-            )
+            # Unified cleanup
+            if req_status.req.is_finished() and not req_status.transfer_jobs:
+                del self._req_status[req_id]
 
         return store_jobs
 
@@ -1255,8 +1278,6 @@ class OffloadingConnectorScheduler:
             Optional KVTransferParams to be included in the request outputs
             returned by the engine.
         """
-        # TODO(orozery): possibly kickoff offload for last block
-        # which may have been deferred due to async scheduling
         req_status = self._req_status.get(request.request_id)
 
         if req_status is None:
@@ -1269,20 +1290,20 @@ class OffloadingConnectorScheduler:
 
         self.manager.on_request_finished(req_status.req_context)
         self._maybe_observe_lookup_async_delay(req_status)
-        if not req_status.transfer_jobs:
-            # No in-flight jobs: no later complete_store()/complete_load() calls
-            # need this request's state.
-            del self._req_status[request.request_id]
-            return False, None
 
-        # In-flight jobs remain after the request stopped. Their completion may
-        # still call manager.complete_store()/complete_load(), so keep req_status.
-        # Pending stores outlive the request's block ownership; register them so
-        # future reuse of those blocks triggers a flush.
+        # Update offload keys with final block hash so _build_store_jobs can
+        # create store jobs for the last block(s) on the next schedule step.
+        req_status.update_offload_keys()
+
+        # Keep req_status alive: _build_store_jobs will process finished_req_ids
+        # on the next step and handle cleanup after creating store jobs.
+        # Register non_sliding_window_block_ids so future block reuse triggers
+        # a flush via _block_id_to_pending_jobs.
         for job_id in req_status.transfer_jobs:
             job_status = self._jobs[job_id]
             for bid in job_status.non_sliding_window_block_ids or ():
                 self._block_id_to_pending_jobs.setdefault(bid, set()).add(job_id)
+
         return False, None
 
     def take_events(self) -> Iterable[KVCacheEvent]:
