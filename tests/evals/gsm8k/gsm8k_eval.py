@@ -291,28 +291,36 @@ def evaluate_gsm8k_offline(
     max_tokens: int = 256,
     temperature: float = 0.0,
     gen_prefix: str = "",
+    use_chat_completions: bool = False,
 ) -> dict[str, float | int]:
     """Evaluate GSM8K accuracy using an offline vllm.LLM object.
 
     Same prompts and scoring as evaluate_gsm8k(), but runs generation
     directly via llm.generate() instead of calling a server over HTTP.
+
+    When ``use_chat_completions=True``, prompts go through the chat template via
+    ``llm.chat()`` instead of raw completion (for instruction-tuned models).
     """
     from vllm import SamplingParams
 
     prompts, labels = _build_gsm8k_prompts(num_questions, num_shots, gen_prefix)
-
     sampling_params = SamplingParams(
         temperature=temperature,
         max_tokens=max_tokens,
         stop=["Question", "Assistant:", "<|separator|>"],
     )
-
+    mode = "chat" if use_chat_completions else "completion"
     print(
-        f"Running offline GSM8K evaluation: {len(prompts)} questions, {num_shots}-shot"
+        f"Running offline GSM8K evaluation: {len(prompts)} questions, "
+        f"{num_shots}-shot, {mode}"
     )
 
     tic = time.perf_counter()
-    outputs = llm.generate(prompts, sampling_params)
+    if use_chat_completions:
+        conversations = [[{"role": "user", "content": p}] for p in prompts]
+        outputs = llm.chat(conversations, sampling_params)
+    else:
+        outputs = llm.generate(prompts, sampling_params)
     latency = time.perf_counter() - tic
 
     states = [o.outputs[0].text for o in outputs]
