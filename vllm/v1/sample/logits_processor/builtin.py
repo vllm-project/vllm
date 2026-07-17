@@ -22,11 +22,15 @@ T = TypeVar("T")
 
 class PLessLogitsProcessor(LogitsProcessor):
     def __init__(
-        self, vllm_config: VllmConfig, device: torch.device, is_pin_memory: bool
+        self, vllm_config: "VllmConfig", device: torch.device, is_pin_memory: bool
     ):
-        self.vllm_config = vllm_config
-        self.device = device
-        self.is_pin_memory = is_pin_memory
+        max_num_reqs = vllm_config.scheduler_config.max_num_seqs
+        self.p_less_count: int = 0
+
+        self.p_less_cpu_tensor = torch.zeros(
+            (max_num_reqs,), dtype=torch.bool, device="cpu", pin_memory=is_pin_memory
+        )
+        self.p_less_cpu = self.p_less_cpu_tensor.numpy()
 
     def is_argmax_invariant(self) -> bool:
         """
@@ -35,17 +39,48 @@ class PLessLogitsProcessor(LogitsProcessor):
         return True
 
     def update_state(self, batch_update: BatchUpdate | None):
-        """
-        p-less is parameter-free; the logits processor is state-free.
-        """
         if not batch_update:
             return
-        return
+
+        # Process added requests.
+        for index, params, _, __ in batch_update.added:
+            p_less = params.p_less
+            p_less_before = self.p_less_cpu[index]
+            if p_less_before != p_less:
+                self.p_less_cpu[index] = p_less
+                if p_less and not p_less_before:
+                    self.p_less_count += 1
+                elif not p_less and p_less_before:
+                    self.p_less_count -= 1
+
+        if self.p_less_count:
+            # Process removed requests.
+            if batch_update.removed:
+                for index in batch_update.removed:
+                    if self.p_less_cpu[index]:
+                        self.p_less_cpu[index] = False
+                        self.p_less_count -= 1
+
+            # Process moved requests, unidirectional (a->b) and swap (a<->b).
+            for a_index, b_index, direction in batch_update.moved:
+                p_less_a, p_less_b = self.p_less_cpu[a_index], self.p_less_cpu[b_index]
+                if p_less_a != p_less_b:
+                    self.p_less_cpu[b_index] = p_less_a
+                    if direction == MoveDirectionality.SWAP:
+                        self.p_less_cpu[a_index] = p_less_b
+                if direction == MoveDirectionality.UNIDIRECTIONAL:
+                    if p_less_a:
+                        self.p_less_cpu[a_index] = False
+                    if p_less_b:
+                        self.p_less_count -= 1
 
     def apply(self, logits: torch.Tensor) -> torch.Tensor:
         """
         Modify the logits based on the p-less method.
         """
+        if not self.p_less_count:
+            return logits
+
         # Convert logits to probabilities
         probabilities = logits.softmax(dim=-1)
         # Calculate threshold probabilities for the batch for filtering out invalid
