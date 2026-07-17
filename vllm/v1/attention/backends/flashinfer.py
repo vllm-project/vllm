@@ -82,6 +82,7 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.utils import CpuGpuBuffer
 
 FLASHINFER_WORKSPACE_BUFFER_SIZE_BATCH_INVARIANT = 2048 * 1024 * 1024
+FLASHINFER_PREFILL_WORKSPACE_BYTES_PER_ELEM = 16
 
 FP8_DTYPE = current_platform.fp8_dtype()
 FP4_DTYPE = torch.uint8
@@ -648,6 +649,9 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             self.disable_split_kv = False
 
         self.compilation_config = vllm_config.compilation_config
+        self.max_num_batched_tokens = (
+            vllm_config.scheduler_config.max_num_batched_tokens
+        )
         max_num_pages_per_req = cdiv(
             self.model_config.max_model_len, self.kv_cache_spec.block_size
         )
@@ -752,12 +756,32 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             if can_use_xqa_or_trtllm_gen_decode
             else None
         )
+        if (
+            self.use_dcp
+            and self.flashinfer_trtllm_api_decode_kernel == FlashInferDecodeKernel.XQA
+        ):
+            logger.warning_once(
+                "FlashInfer XQA decode does not support returning LSE and "
+                "therefore does not support DCP, reverting to native FlashInfer "
+                "decode."
+            )
+            self.use_trtllm_decode_attention = False
+            self.flashinfer_trtllm_api_decode_kernel = None
         supports_spec_as_decode = (
             self.flashinfer_trtllm_api_decode_kernel
             == FlashInferDecodeKernel.TRTLLM_GEN
         )
         self._init_reorder_batch_threshold(
-            1, supports_spec_as_decode=supports_spec_as_decode
+            1,
+            supports_spec_as_decode=supports_spec_as_decode,
+            # trtllm-gen decode receives no cp_rank/global-seq-len information,
+            # so its end-aligned causal mask is wrong for q_len > 1 over the
+            # DCP-interleaved local KV shard (spec token i misses up to
+            # (dcp_world_size - 1) * (q_len - 1 - i) KV entries, including its
+            # own). Keep the threshold at 1 under DCP so spec queries take the
+            # DCP-aware prefill path, until the kernel is CP-aware (compare
+            # flash_attn_varlen_func's cp_world_size/cp_rank/cp_tot_seqused_k).
+            supports_dcp_with_varlen=False,
         )
 
         self._cascade_wrapper = None  # Wrapper for cascade attention
@@ -903,7 +927,8 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 has_trtllm_support = False
                 break
 
-        if has_trtllm_support:
+        # trtllm-gen only supports causal attention.
+        if has_trtllm_support and not vllm_config.attention_config.use_non_causal:
             return AttentionCGSupport.UNIFORM_BATCH
         else:
             return AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
@@ -913,6 +938,21 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             buffer_size = envs.VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE
             if envs.VLLM_BATCH_INVARIANT:
                 buffer_size = FLASHINFER_WORKSPACE_BUFFER_SIZE_BATCH_INVARIANT
+            else:
+                # FlashInfer prefill temp buffers (batch_prefill_tmp_v, ...)
+                # scale with the prefill chunk and query-head footprint, NOT
+                # context length. The fixed ~394 MiB default is too small for
+                # wide-head models at the default 8192-token chunk on some
+                # archs (e.g. sm_120), where FlashInfer hard-errors instead of
+                # growing. Size to the batch's head footprint; never shrink
+                # below the configured default.
+                est = (
+                    self.max_num_batched_tokens
+                    * self.num_qo_heads
+                    * self.head_dim
+                    * FLASHINFER_PREFILL_WORKSPACE_BYTES_PER_ELEM
+                )
+                buffer_size = max(buffer_size, est)
             self._workspace_buffer = torch.zeros(
                 buffer_size, dtype=torch.uint8, device=self.device
             )
@@ -1127,9 +1167,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             has_sinks=self.has_sinks,
             has_spec=uses_spec_reorder,
         )
-        decode_with_flashinfer_trtllm_api = (
-            causal and self.use_trtllm_decode_attention and self.dcp_world_size <= 1
-        )
+        decode_with_flashinfer_trtllm_api = causal and self.use_trtllm_decode_attention
 
         if not causal and self.use_dcp:
             raise NotImplementedError(
@@ -1230,7 +1268,13 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         # Compute paged_kv_indices if necessary
         # paged_kv_indices is only needed for FlashInfer native paths;
         # XQA/trtllm-gen paths use block_tables directly on GPU.
-        needs_paged_kv_indices = use_cascade or not all_uses_trtllm
+        needs_native_paged_prefill = num_prefills > 0 and not prefill_use_trtllm
+        needs_native_paged_decode = (
+            num_decodes > 0 and not decode_with_flashinfer_trtllm_api
+        )
+        needs_paged_kv_indices = (
+            use_cascade or needs_native_paged_prefill or needs_native_paged_decode
+        )
         if needs_paged_kv_indices:
             assert num_blocks_np is not None
             assert seq_lens_np is not None
@@ -1306,6 +1350,9 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             assert qo_indptr_prefill_cpu.shape[0] == num_prefills + 1
 
             if prefill_use_trtllm:
+                # TRTLLM prefill has no cross-rank combine for DCP-sharded KV;
+                # use_trtllm_attention never selects it when DCP is enabled.
+                assert not self.use_dcp
                 # Create GPU versions
                 qo_indptr_prefill_gpu = (
                     qo_indptr[prefill_start:] - qo_indptr[prefill_start]
@@ -1332,7 +1379,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 max_q_len_prefill = int(query_lens_prefill_cpu.max().item())
                 attn_metadata.prefill = TRTLLMPrefill(
                     block_tables=block_table_tensor[prefill_start:],
-                    seq_lens=seq_lens[prefill_start:],
+                    seq_lens=prefill_seq_lens,
                     cum_seq_lens_q=qo_indptr_prefill_gpu,
                     cum_seq_lens_kv=paged_kv_indptr_prefill_gpu,
                     max_q_len=max_q_len_prefill,
@@ -1409,10 +1456,16 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                     f"Got {num_decode_tokens=} and {num_decodes=}."
                 )
                 assert self.flashinfer_trtllm_api_decode_kernel is not None
+                seq_lens_decode = seq_lens[:num_decodes]
+                if self.use_dcp:
+                    assert common_attn_metadata.dcp_local_seq_lens is not None
+                    seq_lens_decode = common_attn_metadata.dcp_local_seq_lens[
+                        :num_decodes
+                    ]
                 attn_metadata.decode = FlashInferTrtllmAPIDecode(
                     kernel=self.flashinfer_trtllm_api_decode_kernel,
                     block_tables=block_table_tensor[:num_decodes],
-                    seq_lens=seq_lens[:num_decodes],
+                    seq_lens=seq_lens_decode,
                     max_seq_len=max_seq_len,
                 )
             else:
@@ -1520,6 +1573,8 @@ class FlashInferImpl(AttentionImpl):
             )
 
         self.sinks: torch.Tensor | None = None
+        # Keep the source so RL weight updates can refresh the runtime tensor.
+        self._sinks_source = sinks
         if sinks is not None:
             if sinks.shape[0] != num_heads:
                 raise ValueError(
@@ -1580,8 +1635,15 @@ class FlashInferImpl(AttentionImpl):
 
     # FlashInfer requires attention sinks to be float32
     def process_weights_after_loading(self, act_dtype: torch.dtype):
-        if self.sinks is not None and self.sinks.dtype != torch.float32:
-            self.sinks = self.sinks.to(torch.float32)
+        source_sinks = self._sinks_source
+        if source_sinks is None:
+            return
+        if source_sinks.dtype == torch.float32:
+            self.sinks = source_sinks
+        elif self.sinks is None or self.sinks.dtype != torch.float32:
+            self.sinks = source_sinks.to(torch.float32)
+        else:
+            self.sinks.copy_(source_sinks)
 
     def get_xqa_bmm1_scale(self, layer: torch.nn.Module, q_data_type: torch.dtype):
         bmm1_scale = self.scale
@@ -2086,6 +2148,18 @@ class FlashInferImpl(AttentionImpl):
                     f"contiguous, got strides {kv_strides}"
                 )
 
+                if use_dcp:
+                    assert decode_with_trtllm_gen
+                    if output.dtype == FP4_DTYPE:
+                        raise NotImplementedError(
+                            "DCP decode with FlashInfer trtllm-gen does not support "
+                            "FP4 attention output yet."
+                        )
+                    decode_query = get_dcp_group().all_gather(
+                        decode_query.contiguous(), dim=-2
+                    )
+                    decode_query = canonicalize_singleton_dim_strides(decode_query)
+
                 if output.dtype == FP4_DTYPE:
                     assert self.o_sf_scale is not None
                     out = FP4Tensor(
@@ -2124,6 +2198,19 @@ class FlashInferImpl(AttentionImpl):
                     else self.bmm1_scale
                 )
 
+                lse = None
+                if use_dcp:
+                    out = torch.empty(
+                        decode_query.shape,
+                        dtype=output.dtype,
+                        device=decode_query.device,
+                    )
+                    lse = torch.empty(
+                        (decode_query.size(0), decode_query.size(1)),
+                        dtype=torch.float32,
+                        device=decode_query.device,
+                    )
+
                 trtllm_batch_decode_with_kv_cache(
                     query=decode_query,
                     kv_cache=(
@@ -2145,9 +2232,19 @@ class FlashInferImpl(AttentionImpl):
                     kv_cache_sf=(
                         nvfp4_kv_block_scales if self.is_kvcache_nvfp4 else None
                     ),
+                    lse=lse,
+                    return_lse=self.need_to_return_lse_for_decode,
                 )
 
-                if needs_fp8_out:
+                if use_dcp:
+                    assert isinstance(out, torch.Tensor)
+                    assert lse is not None
+                    output[:num_decode_tokens] = self.dcp_combine(
+                        out,
+                        lse,
+                        get_dcp_group(),
+                    )
+                elif needs_fp8_out:
                     output[:num_decode_tokens].copy_(out.to(output.dtype))
         return output_padded
 
