@@ -175,14 +175,6 @@ class DFlareQwen3DecoderLayer(nn.Module):
 
 @support_torch_compile
 class DFlareQwen3Model(nn.Module):
-    """DFlare draft model.
-
-    Replaces DFlash's single ``fc`` (ReplicatedLinear) with per-layer
-    adaptive fusion.
-    Context K/V are projected with ``k_proj_target`` / ``v_proj_target``
-    (heterogeneous projections) instead of the shared ``k_proj`` / ``v_proj``.
-    """
-
     def __init__(
         self,
         *,
@@ -464,10 +456,6 @@ class DFlareQwen3Model(nn.Module):
 
 class DFlareQwen3ForCausalLM(DFlashQwen3ForCausalLM):
     """DFlare draft model for Qwen3 architecture.
-
-    Inherits most of the DFlash infrastructure (LM head, logits processor,
-    draft/target vocab mapping, mask embedding, weight loading patterns).
-
     Overrides:
     - ``combine_hidden_states``: per-layer adaptive fusion instead of single fc.
     - ``load_weights``: handles the extra ``k_proj_target`` / ``v_proj_target``
@@ -513,9 +501,8 @@ class DFlareQwen3ForCausalLM(DFlashQwen3ForCausalLM):
     ) -> torch.Tensor:
         T = len(self.dflare_config["target_layer_ids"])
         h = hidden_states.view(-1, T, self.config.hidden_size)
-        h_normed = self.model.hidden_norm(h)
-        fused = self.model.layer_fusion_weights @ h_normed
-        return fused
+        fused = self.model.layer_fusion_weights @ h
+        return self.model.hidden_norm(fused)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         model_weights = {}
