@@ -63,12 +63,7 @@ def aiter_triton_kernel_w4a8_moe_forward(
         gating_output, topk, sm_first=not renormalize
     )
 
-    # gfx1250: aiter's in-kernel gather is numerically broken (validated on the
-    # FFM sim: do_gather=True -> maxrel ~2.4), so gather rows into expert-sorted
-    # order in torch and pass gather_indx=None. Per aiter's moe_gemm_torch,
-    # sorted row i reads source token gather_idx[i] // n_expts_act, so this
-    # reproduces the in-kernel gather exactly (manual gather -> maxrel ~5e-3).
-    # gfx950 keeps the (working) in-kernel gather.
+    # gfx1250: aiter's in-kernel gather is numerically broken
     if on_gfx1250():
         gather_src = gather_idx.to(torch.long) // topk
         hidden_states = hidden_states[gather_src]
@@ -153,12 +148,6 @@ def triton_kernel_fused_mxfp4_w4a8_experts(
         hidden_states, quant_config.w1_precision.flex_ctx.lhs_data.scale
     )
 
-    # gfx1250 stores the MXFP4 weight scale unswizzled (StridedLayout, see
-    # mxfp4_utils._swizzle_mxfp4) because the gfx1250 moe_gemm_a8w4 reads a
-    # CDNA4-swizzled scale as garbage (validated on the FFM sim: CDNA4_SCALE ->
-    # maxrel ~7e4, plain/None -> ~6e-3); pass swizzle_mx_scale=None there.
-    # gfx950 uses the CDNA4 swizzle layout.
-
     intermediate_cache1 = moe_gemm_a8w4(
         hidden_states,
         w1.storage.data,
@@ -228,11 +217,6 @@ class AiterW4A8ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
 
     @staticmethod
     def _supports_current_device() -> bool:
-        # Requires AITER and a supported AMD arch. gfx950 (CDNA4) uses the
-        # in-kernel gather + CDNA4 scale swizzle; gfx1250 routes through the
-        # same moe_gemm_a8w4 kernel with a manual gather and unswizzled scales
-        # (see aiter_triton_kernel_w4a8_moe_forward / the swizzle handling in
-        # triton_kernel_fused_mxfp4_w4a8_experts).
         if not rocm_aiter_ops.is_enabled():
             return False
         from vllm.platforms.rocm import on_gfx950, on_gfx1250
@@ -391,7 +375,7 @@ def _aiter_w4a16_silu_via_a8w4(
     if unpadded_N_w1 is not None:
         raw_gate_up = raw_gate_up[:, :unpadded_N_w1]
 
-    interm_fp8, a2_scale = fused_clamp_act_mul(
+    interim_fp8, a2_scale = fused_clamp_act_mul(
         raw_gate_up,
         swiglu_limit=swiglu_limit,
         activation="silu",
@@ -401,7 +385,7 @@ def _aiter_w4a16_silu_via_a8w4(
     )
 
     out = moe_gemm_a8w4(
-        interm_fp8,
+        interim_fp8,
         w2_data,
         a2_scale,
         w2_wscale,
@@ -447,9 +431,8 @@ def aiter_triton_kernel_w4a16_moe_forward(
         from aiter.ops.triton.moe.moe_op_gemm_a16w4 import moe_gemm_a16w4
         from aiter.ops.triton.moe.moe_routing import routing as _routing_mod
     except ImportError:
-        from aiter.ops.triton.moe_routing import routing as _routing_mod
-
         from aiter.ops.triton.moe.moe_op_gemm_a16w4 import moe_gemm_a16w4
+        from aiter.ops.triton.moe_routing import routing as _routing_mod
 
     if on_gfx1250():
         _routing_mod.is_tdm_avail = lambda: False
@@ -491,9 +474,7 @@ def aiter_triton_kernel_w4a16_moe_forward(
     gammas = routing_data.gate_scal if routing_data else None
 
     swiglu_alpha = (
-        quant_config.gemm1_alpha
-        if quant_config.gemm1_alpha is not None
-        else 1.0
+        quant_config.gemm1_alpha if quant_config.gemm1_alpha is not None else 1.0
     )
     swiglu_limit = (
         quant_config.gemm1_clamp_limit
@@ -566,7 +547,6 @@ def aiter_triton_kernel_w4a16_moe_forward(
 
 
 class AiterW4A16ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
-
     def __init__(
         self,
         moe_config: FusedMoEConfig,
