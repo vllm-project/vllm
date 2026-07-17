@@ -62,7 +62,7 @@ class InklingModelConfig(PretrainedConfig):
         final_logit_softcapping: float | None = None,
         tie_word_embeddings: bool = False,
         num_nextn_predict_layers: int = 0,
-        chain_hidden_post_norm: bool = True,
+        chain_hidden_post_norm: bool = False,
         **kwargs: Any,
     ) -> None:
         if head_dim is None:

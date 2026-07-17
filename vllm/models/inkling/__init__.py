@@ -20,6 +20,7 @@ if TYPE_CHECKING:
 __all__ = [
     "InklingForConditionalGeneration",
     "InklingForCausalLM",
+    "InklingMTP",
 ]
 if current_platform.is_rocm():
     __all__.append("InklingMTP")
