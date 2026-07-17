@@ -141,6 +141,29 @@ def creation_env(env: dict[str, str] | None = None) -> dict[str, str]:
     return dict(sorted(values.items()))
 
 
+# Import-time code mutates process state in place (cv2's loader shim appends
+# to LD_LIBRARY_PATH, torch and vllm.env_override set cache and worker vars,
+# sys.path can grow). `snapshot create` dispatches AFTER the CLI's eager
+# imports while the restore hook runs BEFORE them, so both sides must key the
+# state as it was at CLI entry or they key different worlds and every restore
+# misses. maybe_restore_serve() captures this on every CLI start.
+_entry_state: dict[str, Any] = {}
+
+
+def _capture_entry_state() -> None:
+    if not _entry_state:
+        _entry_state["env"] = canonical_env()
+        _entry_state["sys_path"] = list(sys.path)
+
+
+def _entry_env() -> dict[str, str]:
+    return dict(_entry_state["env"]) if _entry_state else canonical_env()
+
+
+def _entry_sys_path() -> list[str]:
+    return list(_entry_state["sys_path"]) if _entry_state else list(sys.path)
+
+
 def environment_digest(env: dict[str, str]) -> str:
     stable = {name: value for name, value in env.items() if name not in ENV_ALLOWLIST}
     return sha256_json(stable)
@@ -339,7 +362,7 @@ def lookup_key(env: dict[str, str]) -> dict[str, Any]:
             "prefix": sys.prefix,
             "executable": sys.executable,
             "build": list(platform.python_build()),
-            "sys_path_digest": sha256_json(list(sys.path)),
+            "sys_path_digest": sha256_json(_entry_sys_path()),
         },
         "env_digest": environment_digest(env),
         "dists_digest": _distributions_digest(),
@@ -976,7 +999,7 @@ def _print_dry_run(key: str, directory: Path) -> None:
 def _run_create(
     key: str, directory: Path, create_env: dict[str, Any], key_obj: dict[str, Any]
 ) -> None:
-    write_json_atomic(directory / "work" / "sys_path.json", list(sys.path))
+    write_json_atomic(directory / "work" / "sys_path.json", _entry_sys_path())
     subject, peer = socket.socketpair()
     process: subprocess.Popen[bytes] | None = None
     try:
@@ -984,7 +1007,7 @@ def _run_create(
         subject.close()
         subject = None  # type: ignore[assignment]
         state = _wait_for_ready(process, directory / "work" / "ready.json")
-        if state.get("sys_path") != list(sys.path):
+        if state.get("sys_path") != _entry_sys_path():
             raise RuntimeError("helper sys.path diverged from the keyed sys.path")
         dump_argv = _dump_argv(
             directory, process.pid, _payload_socket_ino(state["fd_identities"])
@@ -1047,7 +1070,7 @@ def _log_tail(path: Path, lines: int = 30) -> str | None:
 
 def create_snapshot(force: bool = False, dry_run: bool = False) -> None:
     require_dump_host()
-    create_env = creation_env()
+    create_env = creation_env(_entry_env())
     key_obj = lookup_key(create_env)  # raises SnapshotKeyError on editable/RECORD-less
     key = key_from(key_obj)
     root = _snapshot_root()
@@ -1333,7 +1356,7 @@ def _run_criu_restore(
 
 
 def _restore_serve() -> None:
-    live_env = canonical_env()
+    live_env = _entry_env()
     key_obj = lookup_key(live_env)  # raises SnapshotKeyError -> miss
     key = key_from(key_obj)
     root = _snapshot_root()
@@ -1364,12 +1387,14 @@ def maybe_restore_serve() -> None:
         enabled = bool(int(os.getenv("VLLM_SNAPSHOT", "0")))
     except ValueError:
         enabled = False
-    if not enabled:
-        return
+    command = sys.argv[1] if len(sys.argv) > 1 else ""
+    if not (command == "snapshot" or (enabled and command == "serve")):
+        return  # gate closed: no work at all on any other path
+    _capture_entry_state()  # before the eager imports mutate env/sys.path
+    if command == "snapshot":
+        return  # capture only; create keys off it
     if os.environ.get("VLLM_SNAPSHOT_RESTORED"):
         return  # already inside a restored process; no recursive restore
-    if len(sys.argv) <= 1 or sys.argv[1] != "serve":
-        return
     if sys.platform != "linux":
         return
     try:
