@@ -3413,6 +3413,11 @@ class GPUModelRunner(
             device=hidden_states.device,
             query_start_loc_gpu=self.query_start_loc.gpu[: num_reqs + 1],
         )
+        # A chunked (partial) prefill under torch.compile can leave the
+        # pooled hidden states reading a reused/aliased buffer whose write
+        # has not completed; synchronize so pooling observes final values.
+        if pooling_metadata.get_pooling_cursor().is_partial_prefill():
+            torch.cuda.current_stream().synchronize()
 
         model = cast(VllmModelForPooling, self.model)
         raw_pooler_output: PoolerOutput = model.pooler(
