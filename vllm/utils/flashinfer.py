@@ -233,6 +233,44 @@ def has_flashinfer_sparse_mla_sm120() -> bool:
 
 
 @functools.cache
+def has_flashinfer_msa() -> bool:
+    """Return ``True`` if FlashInfer MiniMax Sparse Attention (MSA) ops for
+    SM120/SM121 (Consumer Blackwell) are available."""
+    if not has_flashinfer():
+        return False
+    try:
+        from flashinfer.msa_ops import (
+            msa_proxy_score,
+            msa_sparse_attention,
+            msa_sparse_decode_attention,
+            msa_topk_select,
+        )
+    except ImportError:
+        return False
+    return all(
+        callable(fn)
+        for fn in (
+            msa_proxy_score,
+            msa_topk_select,
+            msa_sparse_attention,
+            msa_sparse_decode_attention,
+        )
+    )
+
+
+@functools.cache
+def has_flashinfer_msa_packed_kv() -> bool:
+    """Return ``True`` if the FlashInfer MSA attention kernels accept K/V
+    views split from vLLM's packed-content KV cache, advertised by the
+    ``SUPPORTS_PACKED_KV`` flag on ``flashinfer.msa_ops``."""
+    if not has_flashinfer_msa():
+        return False
+    import flashinfer.msa_ops as msa_ops
+
+    return bool(getattr(msa_ops, "SUPPORTS_PACKED_KV", False))
+
+
+@functools.cache
 def has_flashinfer_cutedsl() -> bool:
     """Return ``True`` if FlashInfer cutedsl module is available."""
     return (
