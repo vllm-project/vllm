@@ -130,19 +130,26 @@ def inkling_fa4_rel_attention(
     cute_window = (None, None) if window_size == (-1, -1) else window_size
 
     rel_logits = rel_logits.contiguous()
+    flash_attn_impl: Callable[..., Any]
     if _use_sheared_bias():
-        from vllm.third_party.tml_fa4 import flash_attn_varlen_func
+        from vllm.third_party.tml_fa4 import (
+            flash_attn_varlen_func as tml_flash_attn_varlen_func,
+        )
 
+        flash_attn_impl = tml_flash_attn_varlen_func
         bias_kwargs: dict[str, Any] = {"rel_bias": rel_logits}
     else:
-        from vllm.vllm_flash_attn.cute import flash_attn_varlen_func
+        from vllm.vllm_flash_attn.cute import (
+            flash_attn_varlen_func as cute_flash_attn_varlen_func,
+        )
 
+        flash_attn_impl = cute_flash_attn_varlen_func
         bias_kwargs = {
             "score_mod": _get_score_mod(rel_extent),
             "aux_tensors": [rel_logits],
         }
 
-    ret = flash_attn_varlen_func(
+    ret = flash_attn_impl(
         q=q,
         k=key_cache,
         v=value_cache,
@@ -161,3 +168,179 @@ def inkling_fa4_rel_attention(
     if isinstance(ret, tuple):
         return ret[0]
     return ret
+
+
+def inkling_torch_rel_attention(
+    q: torch.Tensor,
+    key_cache: torch.Tensor,
+    value_cache: torch.Tensor,
+    *,
+    block_table: torch.Tensor,
+    cache_seqlens: torch.Tensor,
+    cu_seqlens_q: torch.Tensor,
+    max_seqlen_q: int,
+    softmax_scale: float,
+    causal: bool,
+    window_size: tuple[int, int],
+    rel_extent: int,
+    rel_logits: torch.Tensor,
+    num_splits: int = 32,
+    out: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Correctness-first paged relative attention for ROCm.
+
+    This mirrors :func:`inkling_fa4_rel_attention` using bounded-size PyTorch
+    score tensors. It intentionally synchronizes the small varlen metadata to
+    the host and is not intended as a performance path.
+    """
+    del max_seqlen_q, num_splits
+    if not causal:
+        raise NotImplementedError("Inkling PyTorch attention requires causal=True")
+    if window_size == (-1, -1):
+        window_left = None
+    elif window_size[0] >= 0 and window_size[1] == 0:
+        window_left = window_size[0]
+    else:
+        raise NotImplementedError(
+            f"Unsupported Inkling PyTorch attention window: {window_size}"
+        )
+
+    if q.ndim != 3 or key_cache.ndim != 4 or value_cache.ndim != 4:
+        raise ValueError("Expected q to be 3D and paged K/V caches to be 4D")
+    if key_cache.shape != value_cache.shape:
+        raise ValueError("Inkling key and value cache shapes must match")
+    if key_cache.shape[-1] != q.shape[-1]:
+        raise ValueError("Inkling query and KV head dimensions must match")
+    if rel_logits.shape[:2] != q.shape[:2] or rel_logits.shape[2] < rel_extent:
+        raise ValueError("Inkling relative logits have an incompatible shape")
+
+    num_heads = q.shape[1]
+    num_kv_heads = key_cache.shape[2]
+    if num_heads % num_kv_heads != 0:
+        raise ValueError("Inkling query heads must be divisible by KV heads")
+    num_kv_groups = num_heads // num_kv_heads
+    block_size = key_cache.shape[1]
+
+    query_starts = cu_seqlens_q.detach().to("cpu").tolist()
+    kv_lens = cache_seqlens.detach().to("cpu").tolist()
+    if len(query_starts) != len(kv_lens) + 1:
+        raise ValueError("Inkling varlen query and KV metadata do not match")
+    if query_starts[-1] > q.shape[0]:
+        raise ValueError("Inkling query metadata exceeds the query tensor")
+
+    result = torch.empty_like(q) if out is None else out
+    if result.shape != q.shape:
+        raise ValueError("Inkling attention output must have the query shape")
+
+    # Keep each fp32 score tensor at or below roughly 64 MiB.
+    max_score_elements = 16 * 1024 * 1024
+    for seq_idx, kv_len in enumerate(kv_lens):
+        query_start = query_starts[seq_idx]
+        query_end = query_starts[seq_idx + 1]
+        query_len = query_end - query_start
+        if query_len == 0:
+            continue
+        if kv_len < query_len or kv_len <= 0:
+            raise ValueError("Inkling KV length must cover every query token")
+
+        if window_left is None:
+            query_chunk_size = max(
+                1, min(query_len, max_score_elements // (num_heads * kv_len))
+            )
+        else:
+            max_keys_per_query = min(kv_len, window_left + 1)
+            query_chunk_size = max(
+                1,
+                min(
+                    query_len,
+                    max_score_elements // (num_heads * max_keys_per_query),
+                ),
+            )
+            while (
+                num_heads
+                * query_chunk_size
+                * min(kv_len, window_left + query_chunk_size)
+                > max_score_elements
+            ):
+                query_chunk_size = max(1, query_chunk_size // 2)
+
+        for chunk_start in range(0, query_len, query_chunk_size):
+            chunk_end = min(query_len, chunk_start + query_chunk_size)
+            absolute_query_start = kv_len - query_len + chunk_start
+            absolute_query_end = kv_len - query_len + chunk_end
+            key_start = (
+                0 if window_left is None else max(0, absolute_query_start - window_left)
+            )
+            key_end = absolute_query_end
+
+            first_block = key_start // block_size
+            last_block = (key_end + block_size - 1) // block_size
+            physical_blocks = block_table[seq_idx, first_block:last_block].to(
+                dtype=torch.long
+            )
+            if physical_blocks.numel() == 0 or bool((physical_blocks < 0).any()):
+                raise ValueError("Inkling block table is missing required KV pages")
+            page_offset = key_start - first_block * block_size
+            num_keys = key_end - key_start
+
+            key = key_cache.index_select(0, physical_blocks).reshape(
+                -1, num_kv_heads, q.shape[-1]
+            )[page_offset : page_offset + num_keys]
+            value = value_cache.index_select(0, physical_blocks).reshape(
+                -1, num_kv_heads, q.shape[-1]
+            )[page_offset : page_offset + num_keys]
+
+            query = q[query_start + chunk_start : query_start + chunk_end].float()
+            query = query.view(
+                chunk_end - chunk_start,
+                num_kv_heads,
+                num_kv_groups,
+                q.shape[-1],
+            )
+            scores = torch.einsum("qhgd,khd->hgqk", query, key.float())
+            scores = scores.reshape(num_heads, chunk_end - chunk_start, num_keys)
+            scores.mul_(softmax_scale)
+
+            query_positions = torch.arange(
+                absolute_query_start,
+                absolute_query_end,
+                device=q.device,
+            ).view(-1, 1)
+            key_positions = torch.arange(key_start, key_end, device=q.device).view(
+                1, -1
+            )
+            distance = query_positions - key_positions
+            relative_index = distance.clamp(0, rel_extent - 1)
+            relative = rel_logits[
+                query_start + chunk_start : query_start + chunk_end
+            ].float()
+            bias = relative.permute(1, 0, 2).gather(
+                2,
+                relative_index.unsqueeze(0).expand(num_heads, -1, -1),
+            )
+            bias.masked_fill_(
+                ((distance < 0) | (distance >= rel_extent)).unsqueeze(0),
+                0.0,
+            )
+            scores.add_(bias)
+
+            mask = distance < 0
+            if window_left is not None:
+                mask = mask | (distance > window_left)
+            scores.masked_fill_(mask.unsqueeze(0), float("-inf"))
+
+            probabilities = torch.softmax(scores, dim=-1)
+            probabilities = probabilities.view(
+                num_kv_heads,
+                num_kv_groups,
+                chunk_end - chunk_start,
+                num_keys,
+            )
+            attention = torch.einsum(
+                "hgqk,khd->qhgd", probabilities, value.float()
+            ).reshape(chunk_end - chunk_start, num_heads, q.shape[-1])
+            result[query_start + chunk_start : query_start + chunk_end].copy_(
+                attention.to(q.dtype)
+            )
+
+    return result
