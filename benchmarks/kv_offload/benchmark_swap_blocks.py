@@ -7,13 +7,13 @@ vLLM KV Cache Offload Benchmark — Block Copy Performance
 This script benchmarks the throughput (bandwidth) of copying fixed-size blocks
 between CPU (host) and GPU (device) memory under different transfer strategies:
 
-  - naive     : Single element‑wise copy via PyTorch tensor indexing.
+  - naive     : Single element-wise copy via PyTorch tensor indexing.
   - batch     : vLLM `swap_blocks_batch`.
   - swap      : vLLM `swap_blocks`.
   - triton    : Custom Triton kernel.
 
 For each strategy, a range of block sizes (from 2**min_block_exp to 2**max_block_exp
-bytes) is tested, and the achieved bandwidth (GB/s) is reported.
+bytes) is tested, and the achieved bandwidth (GiB/s) is reported.
 After all measurements, a results table is printed and a bandwidth plot is generated.
 """
 
@@ -85,7 +85,7 @@ def format_size(
     """Format a byte count as a human-readable string."""
     if num_bytes == 0:
         return f"0 {target_unit or 'B'}"
-    units = ["B", "KB", "MB", "GB"]
+    units = ["B", "KiB", "MiB", "GiB"] if use_binary else ["B", "KB", "MB", "GB"]
     base = 1024 if use_binary else 1000
     if target_unit is not None:
         target_exp = units.index(target_unit)
@@ -100,9 +100,11 @@ def format_size(
 
 
 def format_bandwidth(bytes_per_sec: float, decimal_places: int = 4) -> str:
-    """Format bandwidth in GB/s."""
+    """Format bandwidth in GiB/s."""
     return (
-        format_size(int(bytes_per_sec), decimal_places=decimal_places, target_unit="GB")
+        format_size(
+            int(bytes_per_sec), decimal_places=decimal_places, target_unit="GiB"
+        )
         + "/s"
     )
 
@@ -152,7 +154,7 @@ def benchmark_swap_blocks(
             device_view = device.view(-1, block_size)
             num_blocks = host_view.size(0)
 
-            # Pre‑generate random (src_idx, dst_idx) pairs
+            # Pre-generate random (src_idx, dst_idx) pairs
             tasks = [
                 (random.randint(0, num_blocks - 1), random.randint(0, num_blocks - 1))
                 for _ in range(n_iters)
@@ -282,40 +284,40 @@ def benchmark_swap_blocks(
 
 def print_results_table(block_sizes, results):
     """
-    Print a Markdown formatted table of bandwidths (GB/s) for all directions and modes.
+    Print a Markdown formatted table of bandwidths (GiB/s) for all directions and modes.
     """
     directions = ["H2D", "D2H"]
     modes = ["naive", "batch", "swap", "triton"]
 
     # Build header
-    header = ["size"] + [f"{d}-{m}" for d in directions for m in modes]
+    header = ["Block Size"] + [f"{d}-{m}" for d in directions for m in modes]
 
     # Print Markdown table header
-    print("\n### Bandwidth Results (GB/s)")
+    print("\n### Bandwidth Results (GiB/s)")
     print("| " + " | ".join(header) + " |")
     # Separator row
     print("|" + "|".join([" --- " for _ in header]) + "|")
 
     for i, bs in enumerate(block_sizes):
-        row = [format_size(bs)]
+        row = [format_size(bs, decimal_places=0)]
         for d in directions:
             for m in modes:
                 bw = results.get(d, {}).get(m, [None] * len(block_sizes))[i]
                 if bw is None:
                     row.append("N/A")
                 else:
-                    # Convert bytes/s to GB/s
-                    gb_s = bw / 1e9
-                    row.append(f"{gb_s:.4f}")
+                    # Convert bytes/s to GiB/s
+                    gib_s = bw / (1024**3)
+                    row.append(f"{gib_s:.4f}")
         print("| " + " | ".join(row) + " |")
 
 
 def plot_results(block_sizes, results, output_file=None):
     """
-    Create a bandwidth plot (GB/s vs block size in bytes) with:
-      - X‑axis: logarithmic base‑2, tick labels in human‑readable format
-        (using format_size with 0 decimal places, e.g., '256B', '1K', '2M').
-      - Y‑axis: linear, starting from 0, with standard decimal formatting.
+    Create a bandwidth plot (GiB/s vs block size in bytes) with:
+      - X-axis: logarithmic base-2, tick labels in human-readable format
+        (using format_size with 0 decimal places, e.g., '256B', '1KiB', '2MiB').
+      - Y-axis: linear, starting from 0, with standard decimal formatting.
     """
     if not HAS_MATPLOTLIB:
         print("Skipping plot: matplotlib not available.")
@@ -336,7 +338,7 @@ def plot_results(block_sizes, results, output_file=None):
             for bs, bw in zip(block_sizes, bw_list):
                 if bw is not None:
                     x_vals.append(bs)
-                    y_vals.append(bw / 1e9)  # Convert to GB/s
+                    y_vals.append(bw / (1024**3))  # Convert to GiB/s
             if not x_vals:
                 continue
             label = f"{direction}-{mode}"
@@ -352,7 +354,7 @@ def plot_results(block_sizes, results, output_file=None):
                 markersize=4,
             )
 
-    # Configure X‑axis (log2)
+    # Configure X-axis (log2)
     ax.set_xscale("log", base=2)
     ax.set_xticks(block_sizes)
     # Generate labels
@@ -360,15 +362,15 @@ def plot_results(block_sizes, results, output_file=None):
     ax.set_xticklabels(labels, rotation=45, ha="right")
     ax.set_xlabel("Block Size")
 
-    # Configure Y‑axis (linear)
+    # Configure Y-axis (linear)
     ax.set_yscale("linear")
     ax.set_ylim(bottom=0)
     ax.yaxis.set_major_formatter(
         plt.ScalarFormatter(useOffset=False, useMathText=False)
     )
-    ax.set_ylabel("Bandwidth (GB/s)")
+    ax.set_ylabel("Bandwidth (GiB/s)")
 
-    ax.set_title("Block Copy Bandwidth")
+    ax.set_title("Block Copy Bandwidth (GiB/s)")
     ax.grid(True, which="both", linestyle="--", linewidth=0.5)
     ax.legend(bbox_to_anchor=(1.04, 1), loc="upper left")
     fig.tight_layout()
