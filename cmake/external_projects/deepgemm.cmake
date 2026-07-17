@@ -30,7 +30,7 @@ else()
   # Keep in sync with tools/install_deepgemm.sh
   set(_DEEPGEMM_UPSTREAM_REPO "https://github.com/cleonard530/DeepGEMM.git")
   # TORCH_LIBRARY migration (migrate_pybind_to_torch_library); see cleonard530/DeepGEMM#2
-  set(_DEEPGEMM_UPSTREAM_TAG "5b266fb39a1c147793dea19d53d21bf8e8e3a256")
+  set(_DEEPGEMM_UPSTREAM_TAG "441c417c6cf7184593421273b7e6d79a0999a8f3")
 
   set(_deepgemm_fc_root "${FETCHCONTENT_BASE_DIR}")
   if(NOT _deepgemm_fc_root)
