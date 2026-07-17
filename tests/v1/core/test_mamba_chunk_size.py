@@ -48,3 +48,27 @@ def test_gdn_marker_with_explicit_chunk_keeps_explicit():
     """NEW: an explicit chunk field wins over the GDN marker."""
     assert ModelConfig.get_mamba_chunk_size(
         _cfg(linear_conv_kernel_dim=4, chunk_size=256)) == 256
+
+
+# ------------- post-resolution all-mode block-size validation -------------
+
+
+def test_all_mode_block_validation_passes_chunk_multiples():
+    """REGRESSION-shape: auto-resolved all-mode blocks (chunk multiples by
+    construction) pass — e.g. 576/1152 (GDN, chunk 64) and 2048 (Mamba1)."""
+    from vllm.platforms.interface import validate_all_mode_mamba_block_size
+
+    validate_all_mode_mamba_block_size(576, 64)
+    validate_all_mode_mamba_block_size(1152, 64)
+    validate_all_mode_mamba_block_size(2048, 2048)
+
+
+def test_all_mode_block_validation_rejects_non_multiple():
+    """NEW: a user-forced block that is not a kernel-chunk multiple fails fast
+    (e.g. 560 with chunk 64 -> off-boundary checkpoints would poison APC)."""
+    import pytest
+
+    from vllm.platforms.interface import validate_all_mode_mamba_block_size
+
+    with pytest.raises(ValueError, match="multiple of the kernel chunk"):
+        validate_all_mode_mamba_block_size(560, 64)

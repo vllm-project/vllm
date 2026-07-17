@@ -64,6 +64,37 @@ def in_wsl() -> bool:
     return "microsoft" in " ".join(platform.uname()).lower()
 
 
+def validate_all_mode_mamba_block_size(
+    mamba_block_size: int, kernel_chunk_size: int
+) -> None:
+    """Fail fast when an all-mode mamba block size is not kernel-chunk aligned.
+
+    mamba_cache_mode="all" caches one SSM checkpoint per mamba block, mapped to
+    kernel chunk boundaries. The mapping is only lossless when each block
+    boundary lands on a chunk boundary; otherwise per-block checkpoints would
+    be written at within-block offsets and poison the content-hash-addressed
+    prefix cache. Auto-resolved block sizes satisfy this by construction (the
+    resolution builds a chunk multiple); only a user-specified
+    --mamba-block-size that is not a chunk multiple can violate it.
+
+    Called post-resolution (from ``_align_hybrid_block_size``) rather than at
+    layer init: model load runs before block-size resolution, so a layer-init
+    check would see the pre-resolution block_size placeholder.
+
+    Raises:
+        ValueError: if ``mamba_block_size`` is not a multiple of
+            ``kernel_chunk_size``.
+    """
+    if mamba_block_size % kernel_chunk_size != 0:
+        raise ValueError(
+            "mamba_cache_mode='all' (prefix caching) requires the resolved "
+            f"mamba_block_size ({mamba_block_size}) to be a multiple of the "
+            f"kernel chunk size ({kernel_chunk_size}). Remove or correct the "
+            "user-specified --mamba-block-size, or disable prefix caching / "
+            "all-mode."
+        )
+
+
 class PlatformEnum(enum.Enum):
     """Enumeration of supported hardware platforms."""
 
@@ -892,6 +923,12 @@ class Platform:
             chunk_size = lcm(base_chunk_size, kernel_block_alignment_size)
             attn_block_size = chunk_size * cdiv(attn_tokens_per_mamba_state, chunk_size)
             cache_config.mamba_block_size = attn_block_size
+            # A user-specified --mamba-block-size replaces base_chunk_size
+            # wholesale above; reject it post-resolution if the resulting
+            # block is not aligned to the model's real kernel chunk.
+            validate_all_mode_mamba_block_size(
+                attn_block_size, model_config.get_mamba_chunk_size()
+            )
         else:
             # Without prefix caching, use minimum block size that satisfies
             # both backend alignment and mamba page size compatibility
