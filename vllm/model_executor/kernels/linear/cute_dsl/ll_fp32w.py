@@ -4,118 +4,231 @@
 from __future__ import annotations
 
 import logging
+import math
+from collections.abc import Iterable
+from dataclasses import dataclass
+from typing import Any
 
 import torch
 
+from ._ll_router_common import (
+    cute_context,
+    current_cuda_stream,
+    is_cutedsl_available,
+    make_fake_gemm_tensors,
+    use_pdl,
+    validate_common_gemm_inputs,
+)
+
 logger = logging.getLogger(__name__)
 
-_cutedsl_available: bool | None = None
 
-
-# Called once per process.
 def is_available() -> bool:
-    global _cutedsl_available
-    if _cutedsl_available is not None:
-        return _cutedsl_available
-    try:
-        import cutlass  # noqa: F401
-        import cutlass.cute  # noqa: F401
-
-        _cutedsl_available = True
-    except ImportError:
-        _cutedsl_available = False
-        logger.info("cuteDSL (CUTLASS Python) not available, ll_fp32w_gemm disabled")
-    return _cutedsl_available
-
-# Cache: (M, K, a_dtype) -> compiled callable
-_compiled_cache: dict[tuple, object] = {}
-
-# lazy import helper - deferred until first actual kernel call.
-_cute_ctx = None
+    return is_cutedsl_available("ll_fp32w_gemm")
 
 
-def _cute():
-    global _cute_ctx
-    if _cute_ctx is not None:
-        return _cute_ctx
-    import cutlass.cute as cute
-    from cuda.bindings.driver import CUstream
-    from cutlass.cute.runtime import from_dlpack
-    from torch.cuda import current_stream
+_DEFAULT_DOTPROD_CONFIG = (192, 1)
+_TUNED_DOTPROD_CONFIGS: dict[tuple[int, int], dict[int, tuple[int, int]]] = {
+    # MiniMax-M3, measured on B300 with bf16 activations.
+    (6144, 128): {
+        **{M: (384, 2) for M in (4, 8)},
+        9: (384, 1),
+        **{M: (256, 1) for M in (14, 16)},
+    },
+}
+_SUPPORTED_ACTIVATION_DTYPES = (torch.bfloat16, torch.float16, torch.float32)
 
-    _cute_ctx = (cute, from_dlpack, CUstream, current_stream)
-    return _cute_ctx
 
+class LLFp32WGemm:
+    @dataclass(frozen=True, slots=True)
+    class CompileKey:
+        M: int
+        K: int
+        bs: int
+        a_dtype: torch.dtype
+        token_groups: int = 1
 
-def _stream():
-    _, _, CUstream, current_stream = _cute()
-    return CUstream(current_stream().cuda_stream)
+    def __init__(self) -> None:
+        # Dot-prod: keyed on static M/K/tile shape and activation dtype.
+        self._compiled_cache: dict[tuple[int, int, int, torch.dtype, int], Any] = {}
 
-# Takes flattened 1D tensors. The dot-product kernel uses raw pointer
-# arithmetic, not cute's tiled layout system.
-def _get_compiled_dotprod(M: int, K: int, N: int, a_flat, b_flat, c_flat, a_dtype):
-    cute, from_dlpack, CUstream, current_stream = _cute()
+    def dispatch(
+        self,
+        *,
+        M: int,
+        K: int,
+        N: int,
+        a_dtype: torch.dtype,
+    ) -> CompileKey:
+        bs, token_groups = _TUNED_DOTPROD_CONFIGS.get((K, N), {}).get(
+            M, _DEFAULT_DOTPROD_CONFIG
+        )
+        return self.CompileKey(
+            M=M,
+            K=K,
+            bs=bs,
+            a_dtype=a_dtype,
+            token_groups=token_groups,
+        )
 
-    # N is not in the key.
-    # the kernel handles any N at runtime (one CTA per expert, grid size = N).
-    bs = 128 if (K % 2048 != 0 and K % 1024 == 0) else 256
-    # M-bucket tuning: BS=256 for small M (better latency hiding),
-    # BS=128 for large M (clean K iterations for K=3072)
-    bs = 256 if M <= 4 else 128
-    key = (M, K, a_dtype)
-    if key in _compiled_cache:
-        return _compiled_cache[key]
+    def get_warmup_keys(
+        self,
+        *,
+        shapes: Iterable[tuple[int, int]],
+        m_values: Iterable[int],
+        a_dtypes: Iterable[torch.dtype] = (torch.bfloat16,),
+    ) -> list[CompileKey]:
+        return list(
+            dict.fromkeys(
+                self.dispatch(M=M, K=K, N=N, a_dtype=a_dtype)
+                for K, N in shapes
+                for M in m_values
+                for a_dtype in a_dtypes
+            )
+        )
 
-    # cache check before any expensive work.
-    from ._ll_fp32w_dotprod import make_host_fp32w
-
-    # Use BS=128 when K doesn't divide by VPT(8)*256=2048 but does by VPT(8)*128=1024
-    host_fn = make_host_fp32w(K, bs=bs) # creates a new kernel closure with K baked
-    # into all loop bounds as Constexpr
-
-    a_c = from_dlpack(
-        a_flat, assumed_align=32, enable_tvm_ffi=True
-    ).mark_layout_dynamic()
-    b_c = from_dlpack(
-        b_flat, assumed_align=32, enable_tvm_ffi=True
-    ).mark_layout_dynamic()
-    c_c = from_dlpack(
-        c_flat, assumed_align=32, enable_tvm_ffi=True
-    ).mark_layout_dynamic()
-
-    stream = _stream()
-
-    compiled = cute.compile(
-        host_fn,
-        a_c,
-        b_c,
-        c_c,
+    @staticmethod
+    def _fake_gemm_tensors(
+        *,
         M,
         K,
         N,
-        stream,
-        options="--enable-tvm-ffi --ptxas-options -maxrregcount=64",
-    )
-    _compiled_cache[key] = compiled
-    logger.debug("Compiled ll_fp32w_dotprod: M=%d, K=%d", M, K)
-    return compiled
+        a_dtype: torch.dtype,
+        divisibility: int,
+    ):
+        return make_fake_gemm_tensors(
+            M=M,
+            K=K,
+            N=N,
+            a_dtype=a_dtype,
+            b_dtype=torch.float32,
+            divisibility=divisibility,
+        )
+
+    def _compile_dotprod(self, compile_key: CompileKey) -> None:
+        cute, _ = cute_context()
+        from ._ll_fp32w_dotprod import LLFp32WDotprod
+
+        N = cute.sym_int()
+        stride_divisibility = math.gcd(8, compile_key.K)
+        hidden_states, router_weight, output = self._fake_gemm_tensors(
+            M=compile_key.M,
+            K=compile_key.K,
+            N=N,
+            a_dtype=compile_key.a_dtype,
+            divisibility=stride_divisibility,
+        )
+        gemm = LLFp32WDotprod(
+            m=compile_key.M,
+            k=compile_key.K,
+            bs=compile_key.bs,
+            token_groups=compile_key.token_groups,
+            use_pdl=use_pdl(),
+        )
+        compiled = cute.compile(
+            gemm,
+            hidden_states,
+            router_weight,
+            output,
+            1,  # runtime N placeholder for fake-tensor compile
+            current_cuda_stream(),
+            options="--enable-tvm-ffi --ptxas-options -maxrregcount=64",
+        )
+        cache_key = (
+            compile_key.M,
+            compile_key.K,
+            compile_key.bs,
+            compile_key.a_dtype,
+            compile_key.token_groups,
+        )
+        self._compiled_cache[cache_key] = compiled
+        logger.debug(
+            "Compiled ll_fp32w_dotprod: M=%d, K=%d, bs=%d, token_groups=%d, a_dtype=%s",
+            compile_key.M,
+            compile_key.K,
+            compile_key.bs,
+            compile_key.token_groups,
+            compile_key.a_dtype,
+        )
+
+    def compile(self, compile_key: CompileKey) -> None:
+        if compile_key.token_groups not in (1, 2):
+            raise ValueError("ll_fp32w_gemm supports token_groups 1 or 2")
+        if compile_key.M % compile_key.token_groups != 0:
+            raise ValueError("M must be divisible by token_groups")
+        cache_key = (
+            compile_key.M,
+            compile_key.K,
+            compile_key.bs,
+            compile_key.a_dtype,
+            compile_key.token_groups,
+        )
+        if cache_key not in self._compiled_cache:
+            self._compile_dotprod(compile_key)
+
+    def warmup(
+        self,
+        *,
+        shapes: Iterable[tuple[int, int]],
+        m_values: Iterable[int],
+        a_dtypes: Iterable[torch.dtype] = (torch.bfloat16,),
+    ) -> None:
+        for compile_key in self.get_warmup_keys(
+            shapes=shapes, m_values=m_values, a_dtypes=a_dtypes
+        ):
+            self.compile(compile_key)
+
+    @staticmethod
+    def _validate_inputs(
+        hidden_states: torch.Tensor,
+        router_weight: torch.Tensor,
+        output_dtype: torch.dtype,
+    ) -> None:
+        if hidden_states.dtype not in _SUPPORTED_ACTIVATION_DTYPES:
+            raise ValueError("hidden_states must have dtype bf16, fp16, or fp32")
+        if router_weight.dtype != torch.float32:
+            raise ValueError("router_weight must have dtype=float32")
+        validate_common_gemm_inputs(
+            hidden_states,
+            router_weight,
+            output_dtype,
+            op_name="ll_fp32w_gemm",
+        )
+
+    def __call__(
+        self,
+        hidden_states: torch.Tensor,  # [M, K] bf16/fp16/fp32
+        router_weight: torch.Tensor,  # [N, K] fp32
+        output_dtype: torch.dtype = torch.float32,
+    ) -> torch.Tensor:  # [M, N] fp32
+        self._validate_inputs(hidden_states, router_weight, output_dtype)
+
+        M, K = hidden_states.shape
+        N = router_weight.shape[0]
+        compile_key = self.dispatch(M=M, K=K, N=N, a_dtype=hidden_states.dtype)
+        cache_key = (
+            compile_key.M,
+            compile_key.K,
+            compile_key.bs,
+            compile_key.a_dtype,
+            compile_key.token_groups,
+        )
+        if cache_key not in self._compiled_cache:
+            self.compile(compile_key)
+        kernel = self._compiled_cache[cache_key]
+
+        stream = current_cuda_stream()
+        output = torch.empty(M, N, dtype=output_dtype, device=hidden_states.device)
+        kernel(hidden_states, router_weight, output, N, stream)
+        return output
+
+
+ll_fp32w_gemm_kernel = LLFp32WGemm()
 
 
 def ll_fp32w_gemm(
-    hidden_states: torch.Tensor,  # [M, K] bf16/fp16/fp32
-    router_weight: torch.Tensor,  # [N, K] fp32
+    hidden_states: torch.Tensor,
+    router_weight: torch.Tensor,
     output_dtype: torch.dtype = torch.float32,
-) -> torch.Tensor:                # [M, N] fp32
-    M, K = hidden_states.shape
-    N = router_weight.shape[0]
-    stream = _stream()
-    output = torch.empty(M, N, dtype=output_dtype, device=hidden_states.device)
-
-    a_flat = hidden_states.reshape(-1)
-    b_flat = router_weight.reshape(-1)
-    c_flat = output.reshape(-1)
-
-    compiled = _get_compiled_dotprod(M, K, N, a_flat, b_flat, c_flat, hidden_states.dtype)
-    compiled(a_flat, b_flat, c_flat, N, stream)
-
-    return output
+) -> torch.Tensor:
+    return ll_fp32w_gemm_kernel(hidden_states, router_weight, output_dtype)

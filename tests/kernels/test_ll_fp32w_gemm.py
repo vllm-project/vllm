@@ -6,9 +6,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-pytestmark = pytest.mark.skipif(
-    not torch.cuda.is_available(), reason="CUDA required"
-)
+pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 
 
 @pytest.fixture(autouse=True, scope="module")
@@ -18,6 +16,7 @@ def _require_sm90_and_cutedsl():
     from vllm.model_executor.kernels.linear.cute_dsl.ll_fp32w import (
         is_available,
     )
+
     if not is_available():
         pytest.skip("cuteDSL (CUTLASS Python) not installed")
 
@@ -38,11 +37,12 @@ def _assert_close(out, ref, *, min_cos_sim=0.99, context=""):
     )
 
 
-def _gemm(a, b):
+def _gemm(a, b, output_dtype=torch.float32):
     from vllm.model_executor.kernels.linear.cute_dsl.ll_fp32w import (
         ll_fp32w_gemm,
     )
-    return ll_fp32w_gemm(a, b)
+
+    return ll_fp32w_gemm(a, b, output_dtype)
 
 
 SHAPES = [
@@ -226,8 +226,9 @@ def test_bf16_vs_fp32_activations():
     out_bf16 = _gemm(a_bf16, b)
     a_fp32 = a_bf16.float()
     out_fp32 = _gemm(a_fp32, b)
-    _assert_close(out_bf16, out_fp32, min_cos_sim=0.999,
-                  context="bf16_vs_fp32_activations")
+    _assert_close(
+        out_bf16, out_fp32, min_cos_sim=0.999, context="bf16_vs_fp32_activations"
+    )
 
 
 # =================================================================
@@ -235,7 +236,9 @@ def test_bf16_vs_fp32_activations():
 # =================================================================
 
 
-@pytest.mark.parametrize("M,K,N", [(4, 3072, 256), (16, 5120, 128)], ids=["MiniMax", "DeepSeek"])
+@pytest.mark.parametrize(
+    "M,K,N", [(4, 3072, 256), (16, 5120, 128)], ids=["MiniMax", "DeepSeek"]
+)
 def test_cudagraph(M, K, N):
     torch.manual_seed(42)
     a = torch.randn(M, K, dtype=torch.bfloat16, device="cuda")
@@ -266,8 +269,9 @@ def test_cudagraph_20x_replay():
         torch.cuda.synchronize()
         results.append(out.clone())
     for i in range(1, len(results)):
-        torch.testing.assert_close(results[0], results[i], atol=0, rtol=0,
-                                   msg=f"Replay {i} differs")
+        torch.testing.assert_close(
+            results[0], results[i], atol=0, rtol=0, msg=f"Replay {i} differs"
+        )
 
 
 def test_cudagraph_input_update():
@@ -307,8 +311,222 @@ def test_invalid_device_cpu():
 def test_invalid_1d_input():
     a = torch.randn(4096, dtype=torch.bfloat16, device="cuda")
     b = torch.randn(64, 4096, dtype=torch.float32, device="cuda")
-    with pytest.raises((RuntimeError, ValueError, IndexError)):
+    with pytest.raises(ValueError):
         _gemm(a, b)
+
+
+def test_invalid_activation_dtype():
+    a = torch.ones(4, 4096, dtype=torch.int32, device="cuda")
+    b = torch.randn(64, 4096, dtype=torch.float32, device="cuda")
+    with pytest.raises(ValueError):
+        _gemm(a, b)
+
+
+def test_invalid_output_dtype():
+    a = torch.randn(4, 4096, dtype=torch.bfloat16, device="cuda")
+    b = torch.randn(64, 4096, dtype=torch.float32, device="cuda")
+    with pytest.raises(ValueError):
+        _gemm(a, b, torch.bfloat16)
+
+
+def test_invalid_k_mismatch():
+    a = torch.randn(4, 4096, dtype=torch.bfloat16, device="cuda")
+    b = torch.randn(64, 2048, dtype=torch.float32, device="cuda")
+    with pytest.raises(ValueError):
+        _gemm(a, b)
+
+
+def test_invalid_non_contiguous():
+    base = torch.randn(4, 8192, dtype=torch.bfloat16, device="cuda")
+    a = base[:, ::2]
+    b = torch.randn(64, 4096, dtype=torch.float32, device="cuda")
+    with pytest.raises(ValueError):
+        _gemm(a, b)
+
+
+# =================================================================
+# GateLinear dispatch integration
+# =================================================================
+
+
+def _make_gate_linear_fp32w(
+    monkeypatch,
+    *,
+    params_dtype,
+    out_dtype=torch.float32,
+    input_size=2048,
+    output_size=64,
+):
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.linear.get_tensor_model_parallel_rank",
+        lambda: 0,
+    )
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.linear.get_tensor_model_parallel_world_size",
+        lambda: 1,
+    )
+    monkeypatch.setattr(
+        "vllm.model_executor.parameter.get_tensor_model_parallel_rank",
+        lambda: 0,
+    )
+    monkeypatch.setattr(
+        "vllm.model_executor.parameter.get_tensor_model_parallel_world_size",
+        lambda: 1,
+    )
+    monkeypatch.setattr(
+        "vllm.model_executor.kernels.linear.cute_dsl.ll_bf16.is_available",
+        lambda: False,
+    )
+    monkeypatch.setattr(
+        "vllm.model_executor.kernels.linear.cute_dsl.ll_fp32w.is_available",
+        lambda: True,
+    )
+
+    from vllm.model_executor.layers.fused_moe.router.gate_linear import GateLinear
+
+    return GateLinear(
+        input_size=input_size,
+        output_size=output_size,
+        bias=False,
+        out_dtype=out_dtype,
+        params_dtype=params_dtype,
+    ).cuda()
+
+
+@pytest.mark.parametrize("x_dtype", [torch.bfloat16, torch.float16, torch.float32])
+def test_gate_linear_uses_ll_fp32w_for_fp32_weight_fast_path(monkeypatch, x_dtype):
+    gate = _make_gate_linear_fp32w(monkeypatch, params_dtype=torch.float32)
+    x = torch.randn(4, 2048, dtype=x_dtype, device="cuda")
+    calls = []
+
+    def fake_ll_fp32w_gemm(hidden_states, router_weight):
+        calls.append((hidden_states, router_weight))
+        return torch.full(
+            (hidden_states.shape[0], router_weight.shape[0]),
+            1.0,
+            dtype=torch.float32,
+            device=hidden_states.device,
+        )
+
+    monkeypatch.setattr(
+        "vllm.model_executor.kernels.linear.cute_dsl.ll_fp32w.ll_fp32w_gemm",
+        fake_ll_fp32w_gemm,
+    )
+    out, bias = gate(x)
+    assert bias is None
+    assert out.shape == (4, 64)
+    assert out.dtype == torch.float32
+    assert len(calls) == 1
+    assert calls[0][0] is x
+    assert calls[0][1] is gate.weight
+
+
+@pytest.mark.parametrize("M", range(1, 17))
+def test_gate_linear_uses_ll_fp32w_for_tuned_m3_with_cpp_available(
+    monkeypatch, M
+):
+    gate = _make_gate_linear_fp32w(
+        monkeypatch,
+        params_dtype=torch.float32,
+        input_size=6144,
+        output_size=128,
+    )
+    assert gate.allow_fp32_router_gemm
+    x = torch.randn(M, 6144, dtype=torch.bfloat16, device="cuda")
+    calls = []
+
+    def fake_ll_fp32w_gemm(hidden_states, router_weight):
+        calls.append((hidden_states, router_weight))
+        return torch.full(
+            (hidden_states.shape[0], router_weight.shape[0]),
+            2.0,
+            dtype=torch.float32,
+            device=hidden_states.device,
+        )
+
+    monkeypatch.setattr(
+        "vllm.model_executor.kernels.linear.cute_dsl.ll_fp32w.ll_fp32w_gemm",
+        fake_ll_fp32w_gemm,
+    )
+    out, _ = gate(x)
+    assert len(calls) == 1
+    assert calls[0][0] is x
+    assert calls[0][1] is gate.weight
+    assert torch.all(out == 2.0)
+
+
+def test_gate_linear_uses_cpp_fp32_router_for_m8_on_other_fp32_shape(
+    monkeypatch,
+):
+    gate = _make_gate_linear_fp32w(
+        monkeypatch,
+        params_dtype=torch.float32,
+        input_size=6144,
+        output_size=256,
+    )
+    assert gate.allow_fp32_router_gemm
+    x = torch.randn(8, 6144, dtype=torch.bfloat16, device="cuda")
+
+    def fail_ll_fp32w_gemm(hidden_states, router_weight):
+        raise AssertionError("ll_fp32w_gemm should only take tuned M3 M=8")
+
+    monkeypatch.setattr(
+        "vllm.model_executor.kernels.linear.cute_dsl.ll_fp32w.ll_fp32w_gemm",
+        fail_ll_fp32w_gemm,
+    )
+    out, _ = gate(x)
+    assert out.shape == (8, 256)
+    assert out.dtype == torch.float32
+
+
+def test_gate_linear_bf16_weight_skips_ll_fp32w(monkeypatch):
+    gate = _make_gate_linear_fp32w(monkeypatch, params_dtype=torch.bfloat16)
+    assert not gate.allow_ll_fp32w_gemm
+    x = torch.randn(4, 2048, dtype=torch.bfloat16, device="cuda")
+
+    def fail_ll_fp32w_gemm(hidden_states, router_weight):
+        raise AssertionError("ll_fp32w_gemm should not run for bf16 weights")
+
+    monkeypatch.setattr(
+        "vllm.model_executor.kernels.linear.cute_dsl.ll_fp32w.ll_fp32w_gemm",
+        fail_ll_fp32w_gemm,
+    )
+    out, _ = gate(x)
+    assert out.shape == (4, 64)
+    assert out.dtype == torch.float32
+
+
+def test_gate_linear_set_out_dtype_enables_ll_fp32w(monkeypatch):
+    gate = _make_gate_linear_fp32w(
+        monkeypatch, params_dtype=torch.float32, out_dtype=None
+    )
+    assert not gate.allow_ll_fp32w_gemm
+    gate.set_out_dtype(torch.float32)
+    assert gate.allow_ll_fp32w_gemm
+
+
+def test_gate_linear_non_fp32_out_dtype_disables_ll_fp32w(monkeypatch):
+    gate = _make_gate_linear_fp32w(
+        monkeypatch, params_dtype=torch.float32, out_dtype=None
+    )
+    gate.set_out_dtype(torch.bfloat16)
+    assert not gate.allow_ll_fp32w_gemm
+
+
+def test_gate_linear_m_gt_16_skips_ll_fp32w(monkeypatch):
+    gate = _make_gate_linear_fp32w(monkeypatch, params_dtype=torch.float32)
+    x = torch.randn(17, 2048, dtype=torch.bfloat16, device="cuda")
+
+    def fail_ll_fp32w_gemm(hidden_states, router_weight):
+        raise AssertionError("ll_fp32w_gemm should not run for M > 16")
+
+    monkeypatch.setattr(
+        "vllm.model_executor.kernels.linear.cute_dsl.ll_fp32w.ll_fp32w_gemm",
+        fail_ll_fp32w_gemm,
+    )
+    out, _ = gate(x)
+    assert out.shape == (17, 64)
+    assert out.dtype == torch.float32
 
 
 if __name__ == "__main__":

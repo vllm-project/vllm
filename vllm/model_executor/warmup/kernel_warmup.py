@@ -50,6 +50,8 @@ _LL_BF16_WARMUP_MODEL_SHAPES: tuple[tuple[int, int], ...] = (
 )
 _LL_BF16_WARMUP_M_RANGE = range(1, 17)
 
+_LL_FP32W_WARMUP_M_RANGE = range(1, 17)
+
 
 def _warmup_ll_bf16_router_gemm() -> None:
     from vllm.model_executor.kernels.linear.cute_dsl.ll_bf16 import (
@@ -66,6 +68,60 @@ def _warmup_ll_bf16_router_gemm() -> None:
     ll_bf16_gemm_kernel.warmup(
         shapes=_LL_BF16_WARMUP_MODEL_SHAPES,
         m_values=_LL_BF16_WARMUP_M_RANGE,
+    )
+
+
+def _ll_fp32w_router_shapes_from_model(
+    model: torch.nn.Module,
+) -> tuple[tuple[int, int], ...]:
+    from vllm.model_executor.layers.fused_moe.router.gate_linear import GateLinear
+
+    shapes: set[tuple[int, int]] = set()
+    for module in model.modules():
+        if not isinstance(module, GateLinear):
+            continue
+        weight = getattr(module, "weight", None)
+        if not isinstance(weight, torch.Tensor):
+            continue
+        if weight.dim() != 2 or weight.dtype != torch.float32:
+            continue
+        if getattr(module, "out_dtype", None) != torch.float32:
+            continue
+        n, k = weight.shape
+        shapes.add((int(k), int(n)))
+    return tuple(sorted(shapes))
+
+
+def _warmup_ll_fp32w_router_gemm(
+    model: torch.nn.Module,
+    activation_dtype: torch.dtype,
+) -> None:
+    from vllm.model_executor.kernels.linear.cute_dsl.ll_fp32w import (
+        is_available as is_ll_fp32w_gemm_available,
+    )
+    from vllm.model_executor.kernels.linear.cute_dsl.ll_fp32w import (
+        ll_fp32w_gemm_kernel,
+    )
+
+    if not is_ll_fp32w_gemm_available():
+        return
+
+    shapes = _ll_fp32w_router_shapes_from_model(model)
+    if not shapes:
+        logger.info(
+            "Skipping ll_fp32w router GEMM warmup: no fp32 GateLinear shapes found."
+        )
+        return
+
+    logger.info(
+        "Warming up ll_fp32w router GEMM kernels for shapes: %s, a_dtype: %s.",
+        shapes,
+        activation_dtype,
+    )
+    ll_fp32w_gemm_kernel.warmup(
+        shapes=shapes,
+        m_values=_LL_FP32W_WARMUP_M_RANGE,
+        a_dtypes=(activation_dtype,),
     )
 
 
@@ -122,6 +178,9 @@ def kernel_warmup(worker: "Worker"):
 
     if current_platform.has_device_capability(90):
         _warmup_ll_bf16_router_gemm()
+        _warmup_ll_fp32w_router_gemm(
+            worker.get_model(), worker.vllm_config.model_config.dtype
+        )
 
     # FlashInfer attention warmup
     # Only warmup if the model has FlashInfer attention groups

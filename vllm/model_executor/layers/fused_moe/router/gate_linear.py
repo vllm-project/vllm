@@ -19,9 +19,9 @@ class GateLinear(ReplicatedLinear):
     """MoE gate linear layer with multi-tier GEMM dispatch:
 
     1a. cuteDSL ll_bf16_gemm (SM90+, M<=16, bf16 in, fp32 out,
-       K divisible by 8)
-    1b. cuteDSL ll_fp32w_gemm (SM90+, M<=16, bf16/fp32 in, fp32 out, 
-       K divisible by 8)
+       any shape w/ K divisible by 8)
+    1b. cuteDSL ll_fp32w_gemm (SM90+, M<=16, bf16/fp32 in, fp32 out,
+       any shape)
     2. DSV3 specialized kernel (SM90+, M<=16, H=7168 E=256/384, H=6144 E=256)
     3. fp32 specialized kernel  (SM90+, bf16/fp32 in, fp32 out, M<=32,
        (H, E) in {(3072, 256), (6144, 128), (6144, 256)})
@@ -123,19 +123,29 @@ class GateLinear(ReplicatedLinear):
             and self.out_dtype == torch.float32
         )
 
-        # cuteDSL ll_bf16_gemm eligibility. Any dims supported, but SM90+ required bc:
+        # cuteDSL ll_bf16_gemm/ll_fp32w_gemm eligibility. Any dims supported, but 
+        # SM90+ required because:
         # 1. PDL support. Both dot-product and split-K kernels.
         # 2. Thread Block Clusters. Split-K kernel for cross-CTA reduction.
         self.allow_ll_bf16_gemm = False
+        self.allow_ll_fp32w_gemm = False
         if can_use_specialized_kernels:
             from vllm.model_executor.kernels.linear.cute_dsl.ll_bf16 import (
-                is_available,
+                is_available as is_ll_bf16_gemm_available,
+            )
+            from vllm.model_executor.kernels.linear.cute_dsl.ll_fp32w import (
+                is_available as is_ll_fp32w_gemm_available,
             )
 
             self.allow_ll_bf16_gemm = (
-                self.weight.dtype == torch.bfloat16
+                is_ll_bf16_gemm_available()
+                and self.weight.dtype == torch.bfloat16
                 and self.out_dtype == torch.float32
-                and is_available()
+            )
+            self.allow_ll_fp32w_gemm = (
+                is_ll_fp32w_gemm_available()
+                and self.weight.dtype == torch.float32
+                and self.out_dtype == torch.float32
             )
 
     def set_out_dtype(self, out_dtype: torch.dtype) -> None:
@@ -158,25 +168,46 @@ class GateLinear(ReplicatedLinear):
         # out_dtype may start as None -> recompute eligibility here
         if self.allow_specialized_router_gemm:
             from vllm.model_executor.kernels.linear.cute_dsl.ll_bf16 import (
-                is_available,
+                is_available as is_ll_bf16_gemm_available,
+            )
+            from vllm.model_executor.kernels.linear.cute_dsl.ll_fp32w import (
+                is_available as is_ll_fp32w_gemm_available,
             )
 
             self.allow_ll_bf16_gemm = (
-                self.weight.dtype == torch.bfloat16
+                is_ll_bf16_gemm_available()
+                and self.weight.dtype == torch.bfloat16
                 and out_dtype == torch.float32
-                and is_available()
+            )
+            self.allow_ll_fp32w_gemm = (
+                is_ll_fp32w_gemm_available()
+                and self.weight.dtype == torch.float32
+                and out_dtype == torch.float32
             )
 
     def forward(
         self, x: torch.Tensor
     ) -> torch.Tensor | tuple[torch.Tensor, Parameter | None]:
-        # Tier 1: cuteDSL ll_bf16_gemm (SM90+, any dims)
+        # Tier 1a: cuteDSL ll_bf16_gemm (SM90+, bf16 in, fp32 out, any dims w/ K divisible by 8)
         if self.allow_ll_bf16_gemm and x.shape[0] <= 16 and x.dtype == torch.bfloat16:
             from vllm.model_executor.kernels.linear.cute_dsl.ll_bf16 import (
                 ll_bf16_gemm,
             )
 
             output = ll_bf16_gemm(x, self.weight)
+            return output, None
+
+        # Tier 1b: cuteDSL ll_fp32w_gemm (SM90+, bf16/fp32 in, fp32 out)
+        if (
+            self.allow_ll_fp32w_gemm
+            and x.shape[0] <= 16
+            and x.dtype in (torch.bfloat16, torch.float16, torch.float32)
+        ):
+            from vllm.model_executor.kernels.linear.cute_dsl.ll_fp32w import (
+                ll_fp32w_gemm,
+            )
+
+            output = ll_fp32w_gemm(x, self.weight)
             return output, None
 
         # Tier 2: DSV3 specialized kernel (fallback for when cuteDSL unavailable)
