@@ -1000,16 +1000,12 @@ class QKVParallelLinear(ColumnParallelLinear):
             self.num_kv_heads = divide(self.total_num_kv_heads, tp_size)
             self.num_kv_head_replicas = 1
         input_size = self.hidden_size
-        output_size = (
-            self.num_heads * self.head_size
-            + self.num_kv_heads * self.head_size
-            + self.num_kv_heads * self.v_head_size
-        ) * tp_size
         self.output_sizes = [
             self.num_heads * self.head_size * tp_size,  # q_proj
             self.num_kv_heads * self.head_size * tp_size,  # k_proj
             self.num_kv_heads * self.v_head_size * tp_size,  # v_proj
         ]
+        output_size = sum(self.output_sizes)
 
         super().__init__(
             input_size=input_size,

@@ -16,7 +16,10 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
 )
-from vllm.model_executor.layers.fused_moe.utils import trtllm_moe_pack_topk_ids_weights
+from vllm.model_executor.layers.fused_moe.utils import (
+    fi_moe_largest_bucket,
+    trtllm_moe_pack_topk_ids_weights,
+)
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     activation_to_flashinfer_int,
 )
@@ -30,6 +33,10 @@ from vllm.utils.flashinfer import has_flashinfer_trtllm_fused_moe
 
 logger = init_logger(__name__)
 
+# Base scale for per-token NVFP4 activation quant; the kernel folds the
+# per-token global scale (from the activation amax) on top of it.
+_PER_TOKEN_BASE_GLOBAL_SCALE = 1.0 / (448.0 * 6.0)
+
 
 class TrtLlmNvFp4ExpertsBase:
     """
@@ -40,9 +47,13 @@ class TrtLlmNvFp4ExpertsBase:
         self,
         moe_config: FusedMoEConfig,
         quant_config: FusedMoEQuantConfig,
+        per_token_activation: bool = False,
     ):
         self.moe_config = moe_config
         self.quant_config = quant_config
+        # Quantize the input here (deferred from prepare) to capture a per-token
+        # global scale, instead of a static one.
+        self.per_token_activation = per_token_activation
 
         self.routing_method_type = self.moe_config.routing_method
         self.topk = moe_config.experts_per_token
@@ -208,6 +219,27 @@ class TrtLlmNvFp4ExpertsBase:
     def activation_format() -> mk.FusedMoEActivationFormat:
         return mk.FusedMoEActivationFormat.Standard
 
+    @property
+    def expects_unquantized_inputs(self) -> bool:
+        return self.per_token_activation
+
+    def _quantize_per_token_input(
+        self, hidden_states: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """NVFP4-quantize activations with a per-token global scale.
+
+        Returns ``(packed_fp4, block_scale, per_token_scale)``.
+        """
+        from flashinfer import SfLayout, nvfp4_quantize
+
+        hs_fp4, hs_block_scale, per_token_scale = nvfp4_quantize(
+            hidden_states,
+            _PER_TOKEN_BASE_GLOBAL_SCALE,
+            sfLayout=SfLayout.layout_linear,
+            per_token_activation=True,
+        )
+        return hs_fp4, hs_block_scale, per_token_scale
+
     def _get_chunk_size(self) -> int:
         MAX_GRID_Y = 65535
         MAX_TILE_TOKENS_DIM = 128
@@ -252,6 +284,15 @@ class TrtLlmNvFp4ExpertsModular(TrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsModula
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         activation: MoEActivation,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
+        if self.per_token_activation:
+            # Deferred input quant leaves K unpacked here, breaking the
+            # workspace assumptions below. Per-token NVFP4 is only supported on
+            # the monolithic (non-EP) path for now.
+            raise NotImplementedError(
+                "NVFP4 per-token activation is only supported on the monolithic "
+                "(non-EP) FlashInfer TRTLLM MoE path."
+            )
+
         # The workspaces for this implementation are managed by flashinfer.
         workspace1 = (0,)
         workspace2 = (0,)
@@ -283,6 +324,15 @@ class TrtLlmNvFp4ExpertsModular(TrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsModula
         assert self.quant_config.w1_scale is not None
         assert self.quant_config.w2_scale is not None
 
+        # Per-token: input is unquantized, quantize it here. Otherwise it was
+        # already quantized in prepare() with the static global scale.
+        if self.per_token_activation:
+            hidden_states, block_scale, per_token_scale = (
+                self._quantize_per_token_input(hidden_states)
+            )
+        else:
+            block_scale, per_token_scale = a1q_scale, None
+
         # Pack topk ids and weights into format expected by the kernel.
         packed_tensor = trtllm_moe_pack_topk_ids_weights(topk_ids, topk_weights)
         output1_scale_gate_scalar = self.quant_config.g1_alphas
@@ -292,7 +342,7 @@ class TrtLlmNvFp4ExpertsModular(TrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsModula
             topk_ids=packed_tensor,
             routing_bias=None,
             hidden_states=hidden_states,
-            hidden_states_scale=a1q_scale.view(torch.float8_e4m3fn).reshape(
+            hidden_states_scale=block_scale.view(torch.float8_e4m3fn).reshape(
                 *hidden_states.shape[:-1], -1
             ),
             gemm1_weights=w1,
@@ -318,7 +368,11 @@ class TrtLlmNvFp4ExpertsModular(TrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsModula
             routing_method_type=1,  # not used
             do_finalize=True,
             activation_type=activation_to_flashinfer_int(activation),
+            per_token_scale=per_token_scale,
             output=output,
+            tune_max_num_tokens=min(
+                fi_moe_largest_bucket(self.moe_config), self._get_chunk_size()
+            ),
         )
 
     def apply(
@@ -340,7 +394,8 @@ class TrtLlmNvFp4ExpertsModular(TrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsModula
         apply_router_weight_on_input: bool,
     ):
         assert self._supports_activation(activation)
-        assert a1q_scale is not None
+        # Per-token defers input quant to _invoke_kernel, so a1q_scale is None.
+        assert a1q_scale is not None or self.per_token_activation
 
         M = hidden_states.shape[0]
         chunk_size = self._get_chunk_size()
@@ -369,7 +424,7 @@ class TrtLlmNvFp4ExpertsModular(TrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsModula
                     topk_ids[start:end],
                     activation,
                     global_num_experts,
-                    a1q_scale[start:end],
+                    None if a1q_scale is None else a1q_scale[start:end],
                 )
 
 
@@ -433,7 +488,7 @@ class TrtLlmNvFp4ExpertsMonolithic(
         import flashinfer
 
         assert self._supports_activation(activation)
-        assert a1q_scale is not None
+        assert a1q_scale is not None or self.per_token_activation
         assert self.quant_config.w1_scale is not None
         assert self.quant_config.w2_scale is not None
         assert (
@@ -444,6 +499,14 @@ class TrtLlmNvFp4ExpertsMonolithic(
             and self.routing_method_type != RoutingMethodType.Llama4
         )
 
+        # Per-token: input is unquantized, quantize it here (see modular apply).
+        if self.per_token_activation:
+            hidden_states, block_scale, per_token_scale = (
+                self._quantize_per_token_input(hidden_states)
+            )
+        else:
+            block_scale, per_token_scale = a1q_scale, None
+
         output1_scale_gate_scalar = self.quant_config.g1_alphas
 
         # Invoke kernel.
@@ -453,7 +516,7 @@ class TrtLlmNvFp4ExpertsMonolithic(
             routing_logits=router_logits,
             routing_bias=e_score_correction_bias,
             hidden_states=hidden_states,
-            hidden_states_scale=a1q_scale.view(torch.float8_e4m3fn).reshape(
+            hidden_states_scale=block_scale.view(torch.float8_e4m3fn).reshape(
                 *hidden_states.shape[:-1], -1
             ),
             gemm1_weights=w1,
@@ -479,4 +542,6 @@ class TrtLlmNvFp4ExpertsMonolithic(
             routing_method_type=self.routing_method_type,
             do_finalize=True,
             activation_type=activation_to_flashinfer_int(activation),
+            per_token_scale=per_token_scale,
+            tune_max_num_tokens=fi_moe_largest_bucket(self.moe_config),
         )[0]

@@ -43,6 +43,7 @@ def vllm_topk_sigmoid(
     gating_output: torch.Tensor,
     renormalize: bool = False,
     e_score_correction_bias: torch.Tensor | None = None,
+    routed_scaling_factor: float = 1.0,
 ) -> tuple[torch.Tensor, ...]:
     ops.topk_sigmoid(
         topk_weights,
@@ -51,6 +52,7 @@ def vllm_topk_sigmoid(
         gating_output,
         renormalize,
         e_score_correction_bias,
+        routed_scaling_factor,
     )
 
     return topk_weights, topk_indices
@@ -168,13 +170,12 @@ def fused_topk_bias(
     hash_indices_table: torch.Tensor | None = None,
     routed_scaling_factor: float = 1.0,
 ):
-    # The topk kernel dispatches dtype based on topk_ids (set by
-    # indices_type) and assumes input_tokens/hash_indices_table match.
-    if indices_type is not None:
-        if input_tokens is not None and input_tokens.dtype != indices_type:
-            input_tokens = input_tokens.to(dtype=indices_type)
-        if hash_indices_table is not None and hash_indices_table.dtype != indices_type:
-            hash_indices_table = hash_indices_table.to(dtype=indices_type)
+    if (
+        input_tokens is not None
+        and hash_indices_table is not None
+        and input_tokens.dtype != hash_indices_table.dtype
+    ):
+        input_tokens = input_tokens.to(dtype=hash_indices_table.dtype)
 
     if not rocm_aiter_ops.is_fused_moe_enabled():
         assert hidden_states.size(0) == gating_output.size(0), (
@@ -216,9 +217,8 @@ def fused_topk_bias(
                 gating_output,
                 renormalize,
                 e_score_correction_bias,
+                routed_scaling_factor,
             )
-            if routed_scaling_factor != 1.0:
-                topk_weights *= routed_scaling_factor
             return topk_weights, topk_ids
         elif scoring_func == "sqrtsoftplus":
             return vllm_topk_softplus_sqrt(
@@ -303,6 +303,7 @@ def fused_topk_bias(
         scores_for_choice = scores.view(-1, n_routed_experts)
     # For batch invariance, use sorted=True to ensure deterministic expert selection
     if hash_indices_table is not None:
+        assert input_tokens is not None
         topk_indices = hash_indices_table[input_tokens]
     else:
         use_sorted = envs.VLLM_BATCH_INVARIANT
