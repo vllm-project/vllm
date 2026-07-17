@@ -157,6 +157,76 @@ class ColumnParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
         output_bias = self.base_layer.bias if self.base_layer.skip_bias_add else None
         return output, output_bias
 
+    def apply_mla_kv_b_lora_q(
+        self,
+        q_nope: torch.Tensor,
+        output: torch.Tensor,
+        v_head_dim: int,
+    ) -> None:
+        from vllm.lora.ops.triton_ops.mla_kv_b_lora import (
+            apply_mla_kv_b_lora_native,
+            mla_kv_b_lora_q,
+        )
+
+        metadata = getattr(self.punica_wrapper, "token_mapping_meta", None)
+        if metadata is None:
+            apply_mla_kv_b_lora_native(
+                q_nope,
+                self.lora_a_stacked[0],
+                self.lora_b_stacked[0],
+                output,
+                self.punica_wrapper.token_lora_indices,
+                q_nope.shape[-1],
+                query_side=True,
+            )
+            return
+
+        num_tokens = self.punica_wrapper.token_lora_indices.shape[0]
+        mla_kv_b_lora_q(
+            q_nope,
+            self.lora_a_stacked[0],
+            self.lora_b_stacked[0],
+            output,
+            *metadata.meta_args(num_tokens, self.lora_config.specialize_active_lora),
+            q_nope.shape[-1],
+            v_head_dim,
+        )
+
+    def apply_mla_kv_b_lora_v(
+        self,
+        latent_output: torch.Tensor,
+        output: torch.Tensor,
+        qk_nope_head_dim: int,
+    ) -> None:
+        from vllm.lora.ops.triton_ops.mla_kv_b_lora import (
+            apply_mla_kv_b_lora_native,
+            mla_kv_b_lora_v,
+        )
+
+        metadata = getattr(self.punica_wrapper, "token_mapping_meta", None)
+        if metadata is None:
+            apply_mla_kv_b_lora_native(
+                latent_output,
+                self.lora_a_stacked[0],
+                self.lora_b_stacked[0],
+                output,
+                self.punica_wrapper.token_lora_indices,
+                qk_nope_head_dim,
+                query_side=False,
+            )
+            return
+
+        num_tokens = self.punica_wrapper.token_lora_indices.shape[0]
+        mla_kv_b_lora_v(
+            latent_output,
+            self.lora_a_stacked[0],
+            self.lora_b_stacked[0],
+            output,
+            *metadata.meta_args(num_tokens, self.lora_config.specialize_active_lora),
+            qk_nope_head_dim,
+            output.shape[-1],
+        )
+
     @classmethod
     @_not_fully_sharded_can_replace
     def can_replace_layer(

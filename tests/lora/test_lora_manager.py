@@ -12,6 +12,7 @@ from vllm.config import ModelConfig, VllmConfig
 from vllm.config.lora import LoRAConfig
 from vllm.lora.layers import (
     ColumnParallelLinearWithLoRA,
+    ColumnParallelLinearWithShardedLoRA,
     MergedColumnParallelLinearWithLoRA,
     ReplicatedLinearWithLoRA,
     RowParallelLinearWithLoRA,
@@ -28,6 +29,7 @@ from vllm.lora.peft_helper import PEFTHelper
 from vllm.lora.request import LoRARequest
 from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager, WorkerLoRAManager
 from vllm.model_executor.layers.fused_moe import GateLinear
+from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.platforms import current_platform
 
 from .utils import create_peft_lora
@@ -133,6 +135,39 @@ def test_replace_submodules(default_vllm_config, dist_init, dummy_model):
     )
     assert isinstance(model.get_submodule("dense2"), RowParallelLinearWithLoRA)
     assert isinstance(model.get_submodule("layer1.dense2"), RowParallelLinearWithLoRA)
+
+
+def test_mla_kv_b_proj_keeps_replicated_lora_a(
+    default_vllm_config, dist_init, dummy_model
+):
+    model = dummy_model
+    model.add_module("kv_b_proj", ColumnParallelLinear(16, 32))
+    manager = LoRAModelManager(
+        model,
+        1,
+        1,
+        1,
+        LoRAConfig(
+            max_lora_rank=8,
+            max_cpu_loras=1,
+            max_loras=1,
+            lora_dtype=DEFAULT_DTYPE,
+            fully_sharded_loras=True,
+            target_modules=["dense1", "kv_b_proj"],
+        ),
+        torch.device(DEVICES[0]),
+        default_vllm_config,
+    )
+
+    assert isinstance(
+        manager.model.get_submodule("dense1"), ColumnParallelLinearWithShardedLoRA
+    )
+    kv_b_proj = manager.model.get_submodule("kv_b_proj")
+    assert isinstance(kv_b_proj, ColumnParallelLinearWithLoRA)
+    assert not isinstance(
+        kv_b_proj,
+        ColumnParallelLinearWithShardedLoRA,
+    )
 
 
 def test_wrap_replicated_linear_subclasses(default_vllm_config, dist_init, dummy_model):

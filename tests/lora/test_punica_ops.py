@@ -636,3 +636,136 @@ def test_add_lora_fused_moe_early_exit(device):
     assert torch.equal(y, y_snapshot), (
         "add_lora_fused_moe modified output tensor despite no_lora_flag_cpu=True"
     )
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="MLA LoRA kernels require CUDA"
+)
+@pytest.mark.parametrize("dtype", DTYPES)
+def test_mla_kv_b_lora_correction(dtype):
+    device = DEVICES[0]
+    torch.set_default_device(device)
+    torch.accelerator.set_device_index(device)
+    set_random_seed(0)
+
+    num_tokens = 19
+    num_mqa_tokens = 11
+    num_heads = 3
+    qk_nope_head_dim = 8
+    v_head_dim = 8
+    kv_lora_rank = 16
+    lora_rank = 8
+    num_loras = 2
+    full_head_dim = qk_nope_head_dim + v_head_dim
+
+    token_mapping = torch.tensor(
+        [0, 1, -1, 0, 1, 1, -1, 0, 0, 1, -1, 1, 1, 0, -1, 0, 1, 0, -1],
+        dtype=torch.int32,
+        device=device,
+    )
+    metadata = LoRAKernelMeta.make(num_loras, num_tokens, device)
+    metadata.prepare_tensors(token_mapping)
+    metadata_args = metadata.meta_args(num_tokens, specialize_active_lora=False)
+
+    lora_a = torch.randn(
+        num_loras,
+        1,
+        lora_rank,
+        kv_lora_rank,
+        dtype=dtype,
+        device=device,
+    )
+    lora_b = torch.randn(
+        num_loras,
+        1,
+        num_heads * full_head_dim,
+        lora_rank,
+        dtype=dtype,
+        device=device,
+    )
+    q_nope = torch.randn(
+        num_mqa_tokens,
+        num_heads,
+        qk_nope_head_dim,
+        dtype=dtype,
+        device=device,
+    )
+    latent_output = torch.randn(
+        num_mqa_tokens,
+        num_heads,
+        kv_lora_rank,
+        dtype=dtype,
+        device=device,
+    )
+    q_output = torch.randn_like(latent_output)
+    v_output = torch.randn(
+        num_mqa_tokens,
+        num_heads,
+        v_head_dim,
+        dtype=dtype,
+        device=device,
+    )
+    expected_q = q_output.clone()
+    expected_v = v_output.clone()
+
+    b_by_head = lora_b[:, 0].view(num_loras, num_heads, full_head_dim, lora_rank)
+    for token_idx in range(num_mqa_tokens):
+        lora_id = token_mapping[token_idx].item()
+        if lora_id == -1:
+            continue
+        a = lora_a[lora_id, 0]
+        b_k = b_by_head[lora_id, :, :qk_nope_head_dim]
+        b_v = b_by_head[lora_id, :, qk_nope_head_dim:]
+        expected_q[token_idx] += torch.einsum(
+            "hp,hpr,rl->hl", q_nope[token_idx], b_k, a
+        )
+        expected_v[token_idx] += torch.einsum(
+            "hl,rl,hvr->hv", latent_output[token_idx], a, b_v
+        )
+
+    triton_ops.mla_kv_b_lora_q(
+        q_nope,
+        lora_a,
+        lora_b,
+        q_output,
+        *metadata_args,
+        qk_nope_head_dim,
+        v_head_dim,
+    )
+    triton_ops.mla_kv_b_lora_v(
+        latent_output,
+        lora_a,
+        lora_b,
+        v_output,
+        *metadata_args,
+        qk_nope_head_dim,
+        v_head_dim,
+    )
+
+    torch.testing.assert_close(q_output, expected_q, rtol=3e-2, atol=3e-2)
+    torch.testing.assert_close(v_output, expected_v, rtol=3e-2, atol=3e-2)
+
+    metadata.prepare_tensors(torch.full_like(token_mapping, -1))
+    metadata_args = metadata.meta_args(num_tokens, specialize_active_lora=False)
+    q_snapshot = q_output.clone()
+    v_snapshot = v_output.clone()
+    triton_ops.mla_kv_b_lora_q(
+        q_nope,
+        lora_a,
+        lora_b,
+        q_output,
+        *metadata_args,
+        qk_nope_head_dim,
+        v_head_dim,
+    )
+    triton_ops.mla_kv_b_lora_v(
+        latent_output,
+        lora_a,
+        lora_b,
+        v_output,
+        *metadata_args,
+        qk_nope_head_dim,
+        v_head_dim,
+    )
+    torch.testing.assert_close(q_output, q_snapshot)
+    torch.testing.assert_close(v_output, v_snapshot)

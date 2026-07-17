@@ -778,7 +778,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             )
 
             # Convert from (B, N, P) to (N, B, P)
-            mqa_q_nope = mqa_q_nope.transpose(0, 1)
+            mqa_q_nope_t = mqa_q_nope.transpose(0, 1)
 
             if self.q_pad_num_heads is not None:
                 B, N, L = mqa_q_pe.shape
@@ -791,7 +791,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 from aiter.ops.triton.batched_gemm_a16wfp4 import batched_gemm_a16wfp4
 
                 mqa_ql_nope = batched_gemm_a16wfp4(
-                    mqa_q_nope,
+                    mqa_q_nope_t,
                     self.W_K,
                     self.W_K_scale,
                     transpose_bm=True,
@@ -801,7 +801,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             elif self.is_aiter_triton_fp8_bmm_enabled:
                 # Multiply+Transpose (N, B, P)x(N, P, L)->(N, B, L)->(B, N, L)
                 mqa_ql_nope = rocm_aiter_ops.triton_fp8_bmm(
-                    mqa_q_nope,
+                    mqa_q_nope_t,
                     self.W_K,
                     self.W_K_scale,
                     group_size=128,
@@ -809,7 +809,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 )
             else:
                 # Pads the head_dim if necessary (for the underlying kernel)
-                N, B, P = mqa_q_nope.shape
+                N, B, P = mqa_q_nope_t.shape
                 _, _, L = self.W_UK_T.shape
 
                 if self.q_pad_num_heads is not None:
@@ -819,10 +819,14 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                     mqa_ql_nope = mqa_q_nope.new_empty((N, B, L))
 
                 # Multiply (N, B, P) x (N, P, L) -> (N, B, L)
-                torch.bmm(mqa_q_nope, self.W_UK_T, out=mqa_ql_nope)
+                torch.bmm(mqa_q_nope_t, self.W_UK_T, out=mqa_ql_nope)
 
                 # Convert from (N, B, L) to (B, N, L)
                 mqa_ql_nope = mqa_ql_nope.transpose(0, 1)
+
+            apply_q_lora = getattr(self.kv_b_proj, "apply_mla_kv_b_lora_q", None)
+            if apply_q_lora is not None:
+                apply_q_lora(mqa_q_nope, mqa_ql_nope, self.v_head_dim)
 
             if fp8_attention and self.impl.supports_quant_query_input:
                 assert mqa_ql_nope.shape[0] == mqa_q_pe.shape[0]
@@ -1047,7 +1051,8 @@ class MLAAttention(nn.Module, AttentionLayerBase):
 
     def _v_up_proj(self, x: torch.Tensor, out: torch.Tensor):
         # Convert from (B, N, L) to (N, B, L)
-        x = x.view(-1, self.num_heads, self.kv_lora_rank).transpose(0, 1)
+        latent_output = x.view(-1, self.num_heads, self.kv_lora_rank)
+        x = latent_output.transpose(0, 1)
         out = out.view(-1, self.num_heads, self.v_head_dim)
         if self.is_aiter_triton_fp4_bmm_enabled:
             out = rocm_aiter_ops.batched_gemm_a16wfp4(
@@ -1068,6 +1073,10 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         else:
             # Multiply + Transpose (N, B, L) x (N, L, V)->(N, B, V)->(B, N, V)
             torch.bmm(x, self.W_UV, out=out.transpose(0, 1))
+
+        apply_v_lora = getattr(self.kv_b_proj, "apply_mla_kv_b_lora_v", None)
+        if apply_v_lora is not None:
+            apply_v_lora(latent_output, out, self.qk_nope_head_dim)
 
 
 def unified_mla_kv_cache_update(
