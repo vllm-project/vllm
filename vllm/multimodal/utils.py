@@ -346,3 +346,41 @@ def fetch_video(
         allowed_local_media_path="/",
     )
     return media_connector.fetch_video(video_url)
+
+
+def set_mm_embedding_modality(embed: "torch.Tensor", modality: str) -> "torch.Tensor":
+    """Attach modality metadata to a gathered multimodal embedding tensor.
+
+    Used by interleaved Omni merge paths that need to group embeddings by
+    modality without threading a parallel modalities list through
+    ``embed_input_ids``.
+    """
+    embed.modality = modality  # type: ignore[attr-defined]
+    return embed
+
+
+def copy_mm_embedding_modality(
+    src: "torch.Tensor", dst: "torch.Tensor"
+) -> "torch.Tensor":
+    """Copy ``modality`` from ``src`` onto ``dst`` if present."""
+    modality = getattr(src, "modality", None)
+    if modality is not None:
+        dst.modality = modality  # type: ignore[attr-defined]
+    return dst
+
+
+def get_mm_embedding_modalities(
+    multimodal_embeddings: Sequence["torch.Tensor"],
+) -> list[str]:
+    """Collect per-embedding modalities previously set on the tensors."""
+    modalities: list[str] = []
+    for i, emb in enumerate(multimodal_embeddings):
+        modality = getattr(emb, "modality", None)
+        if modality is None:
+            raise ValueError(
+                f"Missing modality on multimodal embedding at index {i}. "
+                "Encoder gather must set embed.modality before interleaved "
+                "audio-in-video merge."
+            )
+        modalities.append(modality)
+    return modalities
