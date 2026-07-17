@@ -4483,12 +4483,9 @@ class GPUModelRunner(
         if common_attn_metadata is None:
             return False
         assert self.speculative_config is not None
-        # DFlash queries one extra token (the bonus token) beyond num_spec_tokens
-        num_drafter_query_tokens = self.num_spec_tokens + (
-            1 if self.speculative_config.use_dflash() else 0
-        )
         return (
-            common_attn_metadata.max_seq_len + num_drafter_query_tokens
+            common_attn_metadata.max_seq_len
+            + self.speculative_config.num_drafter_query_tokens
             <= self.effective_drafter_max_model_len
         )
 
