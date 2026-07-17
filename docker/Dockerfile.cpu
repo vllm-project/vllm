@@ -74,7 +74,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --upgrade pip && \
     if [ "${PYTORCH_NIGHTLY}" = "1" ]; then \
         echo "Installing torch nightly (CPU)..." \
-        && uv pip install torch torchaudio torchvision --pre \
+        && uv pip install torch torchaudio torchvision torchcodec --pre \
             --index-url ${PYTORCH_CPU_INDEX_BASE_URL}/nightly/cpu \
         && python3 use_existing_torch.py --prefix \
         && uv pip install -r requirements/cpu.txt \
