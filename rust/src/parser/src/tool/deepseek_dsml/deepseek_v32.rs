@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use super::{DeepSeekDsmlToolParser, DsmlTokens};
 use crate::tool::{Result, StructuralTagModel, Tool, ToolParser, ToolParserOutput};
 

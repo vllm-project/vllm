@@ -1,34 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import importlib.metadata
-from importlib.util import find_spec
 
 import pytest
-import torch
-from packaging import version
 
 import vllm
 from vllm.lora.request import LoRARequest
 from vllm.platforms import current_platform
 
 from ..utils import multi_gpu_test
-
-# Require amd-quark >= 0.12 on torch >= 2.11.
-# Earlier torch releases work with older quark versions. See
-# https://github.com/amd/Quark/issues/34
-# TODO: Remove once amd-quark>=0.12.0
-QUARK_TORCH_COMPATIBLE = find_spec("quark") is not None and (
-    version.parse(importlib.metadata.version("amd-quark")) >= version.parse("0.12.0")
-    if version.parse(torch.__version__.split("+")[0]) >= version.parse("2.11")
-    else True
-)
-
-if current_platform.is_rocm() and not QUARK_TORCH_COMPATIBLE:
-    pytest.skip(
-        "This test requires amd-quark >= 0.12 on torch >= 2.11.",
-        allow_module_level=True,
-    )
 
 MODEL_PATH = "openai/gpt-oss-20b"
 
@@ -62,6 +42,14 @@ EXPECTED_LORA_OUTPUT = [
 ]
 
 
+def reformat(text: str) -> str:
+    # Remove all spaces immediately before or after comma
+    text = ",".join(map(str.strip, text.split(",")))
+    # Remove duplicated blank spaces
+    text = " ".join(map(str.strip, text.split()))
+    return text
+
+
 def generate_and_test(llm: vllm.LLM, lora_path: str, lora_id: int) -> None:
     prompts = [
         PROMPT_TEMPLATE.format(
@@ -88,11 +76,18 @@ def generate_and_test(llm: vllm.LLM, lora_path: str, lora_id: int) -> None:
         generated_texts.append(generated_text)
         print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
     for i in range(len(EXPECTED_LORA_OUTPUT)):
-        assert generated_texts[i].startswith(EXPECTED_LORA_OUTPUT[i])
+        # The generated text may have different numbers of blank space,
+        # so reformat to compare.
+        compactGeneratedStr = reformat(generated_texts[i])
+        compactExpectedStr = reformat(EXPECTED_LORA_OUTPUT[i])
+        if not generated_texts[i].startswith(
+            EXPECTED_LORA_OUTPUT[i]
+        ) and not compactGeneratedStr.startswith(compactExpectedStr):
+            raise AssertionError(
+                f"Generated: {generated_texts[i]}, Expected: {EXPECTED_LORA_OUTPUT[i]}"
+            )
 
 
-# TODO: make the Mxfp4MoeBackend.TRITON spawn-safe.
-# For now just use TRITON_UNFUSED kernel
 @pytest.mark.parametrize(
     "mxfp4_use_marlin",
     [

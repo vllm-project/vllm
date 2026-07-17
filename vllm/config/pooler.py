@@ -16,6 +16,12 @@ SEQ_POOLING_TYPES: tuple[SequencePoolingType, ...] = get_args(SequencePoolingTyp
 TokenPoolingType = Literal["ALL", "STEP"]
 TOK_POOLING_TYPES: tuple[TokenPoolingType, ...] = get_args(TokenPoolingType)
 
+POOLER_CONFIG_LOG_FIELDS = (
+    "seq_pooling_type",
+    "tok_pooling_type",
+    "use_activation",
+)
+
 
 @config
 class PoolerConfig:
