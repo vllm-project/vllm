@@ -3,7 +3,7 @@
 
 setuptools==77.0.3 # this version can reuse CMake build dir
 
-numba == 0.65.0; platform_machine != "s390x" # Required for N-gram speculative decoding
+numba == 0.66.0; platform_machine != "s390x" # Required for N-gram speculative decoding
 
 # Dependencies for CPUs
 torch==2.11.0+cpu; platform_machine == "x86_64" or platform_machine == "s390x" or platform_machine == "aarch64"
@@ -16,7 +16,7 @@ torchaudio; platform_machine != "s390x" and platform_machine != "riscv64"
 torchvision; platform_machine != "s390x"  and platform_machine != "riscv64"
 
 # required for the torchcodec video decoding backend
-torchcodec >= 0.14; platform_machine != "s390x" and platform_machine != "riscv64" and platform_machine != "ppc64le"
+torchcodec >= 0.15.0; platform_machine != "s390x" and platform_machine != "riscv64" and platform_machine != "ppc64le"
 
 # Intel Extension for PyTorch, only for x86_64 CPUs
 intel-openmp==2024.2.1; platform_machine == "x86_64"
