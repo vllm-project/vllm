@@ -366,6 +366,24 @@ class CuMemAllocator:
             if expandable_was_enabled:
                 torch.cuda.memory._set_allocator_settings("expandable_segments:True")
 
+    @contextmanager
+    def reuse_memory_pool(self, tag: str) -> Iterator[None]:
+        """
+        Re-enter an existing memory pool so that new allocations
+        use the same pool and are tagged accordingly.
+        """
+        if tag not in self.allocator_and_pools:
+            raise ValueError(f"Memory pool for tag '{tag}' does not exist.")
+
+        mem_pool, _ = self.allocator_and_pools[tag]
+        old_tag = self.current_tag
+        self.current_tag = tag
+        try:
+            with torch.cuda.memory.use_mem_pool(mem_pool):
+                yield
+        finally:
+            self.current_tag = old_tag
+
     def get_current_usage(self) -> int:
         """
         Get the total number of bytes allocated in the memory pool.
