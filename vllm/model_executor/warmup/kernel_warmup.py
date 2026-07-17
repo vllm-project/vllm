@@ -12,6 +12,7 @@ import torch
 
 import vllm.envs as envs
 from vllm.logger import init_logger
+from vllm.model_executor.warmup.cutedsl_warmup import cutedsl_warmup
 from vllm.model_executor.warmup.deep_gemm_warmup import deep_gemm_warmup
 from vllm.model_executor.warmup.deepseek_v4_mhc_warmup import (
     deepseek_v4_mhc_warmup,
@@ -155,6 +156,12 @@ def kernel_warmup(worker: "Worker"):
             force_attention=True,
             create_mixed_batch=True,
         )
+
+    if worker.vllm_config.kernel_config.enable_cutedsl_warmup:
+        # TODO(roberto): Remove after registered CuTeDSL warmups are migrated
+        # to the shared JIT warmup infrastructure.
+        # https://github.com/vllm-project/vllm/pull/47451
+        cutedsl_warmup()
 
     if worker.vllm_config.kernel_config.enable_jit_warmup:
         fa4_cutedsl_warmup(worker)
