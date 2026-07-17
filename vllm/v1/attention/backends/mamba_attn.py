@@ -166,6 +166,8 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
                 dtype=torch.int32,
                 device=device,
             )
+        # ReplaySSM standard-decode CUDA-graph buffers: per-row ring cursor,
+        # flush flag, and the k^T q precompute scratch.
         if self.use_replayssm:
             self.decode_write_pos_d: torch.Tensor = torch.empty(
                 (self.decode_cudagraph_max_bs,),

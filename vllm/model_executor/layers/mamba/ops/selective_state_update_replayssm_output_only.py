@@ -556,6 +556,9 @@ def selective_state_update_replayssm_output_only(
     )
 
     with torch.accelerator.device_index(x.device.index):
+        # Both kernels always launch: the precompute kernel self-skips flush
+        # rows per row (the branch can't be hoisted out under CUDA graphs), so
+        # it is a no-op when every row is flushing.
         _replayssm_output_only_precompute_kernel[(batch, ngroups)](
             B,
             C,
