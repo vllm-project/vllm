@@ -118,3 +118,18 @@ pub fn split_by_chars(text: &str, chunk_chars: usize) -> Vec<&str> {
 
     chunks
 }
+
+/// Extract `(function name, semantically-parsed arguments)` for each coalesced
+/// tool call. Lets a native parser be compared against its Dynamo counterpart
+/// without depending on argument-string formatting (raw vs re-serialized JSON).
+pub fn semantic_calls(output: ToolParserOutput) -> Vec<(Option<String>, serde_json::Value)> {
+    output
+        .coalesce()
+        .calls()
+        .into_iter()
+        .map(|call| {
+            let args = serde_json::from_str(&call.arguments).unwrap_or(serde_json::Value::Null);
+            (call.name.clone(), args)
+        })
+        .collect()
+}

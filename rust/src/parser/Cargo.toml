@@ -8,6 +8,8 @@ license.workspace = true
 test-util = []
 
 [dependencies]
+anyhow.workspace = true
+dynamo-parsers-v2.workspace = true
 easy-ext.workspace = true
 serde.workspace = true
 serde_json.workspace = true

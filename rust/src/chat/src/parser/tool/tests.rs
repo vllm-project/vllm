@@ -34,6 +34,13 @@ impl ToolParser for FakeToolParser {
     }
 }
 
+fn parse_complete(parser: &mut dyn ToolParser, text: &str) -> Result<ToolParserOutput> {
+    let mut output = ToolParserOutput::default();
+    parser.parse_into(text, &mut output)?;
+    output.append(parser.finish()?);
+    Ok(output.coalesce())
+}
+
 #[test]
 fn default_factory_starts_empty() {
     let factory = ToolParserFactory::default();
@@ -220,4 +227,105 @@ fn factory_new_registers_phi4_mini_json_by_name() {
 
     assert!(factory.contains(names::PHI4_MINI_JSON));
     factory.create(names::PHI4_MINI_JSON, &[]).unwrap();
+}
+
+#[test]
+fn factory_uses_native_deepseek_v4_by_default() {
+    let factory = ToolParserFactory::new_with_options(false);
+    let mut parser = factory.create(names::DEEPSEEK_V4, &[]).unwrap();
+
+    let error = parse_complete(&mut *parser, DEEPSEEK_V4_MISSING_OUTER_CLOSE).unwrap_err();
+
+    assert!(error.to_string().contains("incomplete DeepSeek DSML tool call"));
+}
+
+#[test]
+fn factory_uses_dynamo_deepseek_v4_when_enabled() {
+    let factory = ToolParserFactory::new_with_options(true);
+    let mut parser = factory.create(names::DEEPSEEK_V4, &[]).unwrap();
+
+    let result = parse_complete(&mut *parser, DEEPSEEK_V4_MISSING_OUTER_CLOSE).unwrap();
+
+    assert_eq!(result.normal_text(), "");
+    assert_eq!(result.calls().len(), 1);
+    assert_eq!(result.calls()[0].name.as_deref(), Some("get_datetime"));
+    assert_eq!(
+        result.calls()[0].arguments,
+        r#"{"timezone":"Asia/Shanghai"}"#
+    );
+}
+
+const DEEPSEEK_V4_MISSING_OUTER_CLOSE: &str = "<｜DSML｜tool_calls>\n\
+<｜DSML｜invoke name=\"get_datetime\">\n\
+<｜DSML｜parameter name=\"timezone\" string=\"true\">Asia/Shanghai</｜DSML｜parameter>\n\
+</｜DSML｜invoke>";
+
+#[test]
+fn factory_uses_native_qwen3_coder_by_default() {
+    let factory = ToolParserFactory::new_with_options(false);
+    let mut parser = factory.create(names::QWEN3_CODER, &qwen3_coder_weather_tools()).unwrap();
+
+    let result = parse_complete(&mut *parser, QWEN3_CODER_BARE_FUNCTION).unwrap();
+
+    // Native Qwen3-Coder requires the <tool_call> wrapper; a bare <function=...>
+    // back-off form is not recovered, so no tool call is emitted.
+    assert!(result.calls().is_empty());
+}
+
+#[test]
+fn factory_uses_dynamo_qwen3_coder_when_enabled() {
+    let factory = ToolParserFactory::new_with_options(true);
+    let mut parser = factory.create(names::QWEN3_CODER, &qwen3_coder_weather_tools()).unwrap();
+
+    let result = parse_complete(&mut *parser, QWEN3_CODER_BARE_FUNCTION).unwrap();
+
+    // Dynamo recovers the bare <function=...> back-off form as a tool call.
+    assert_eq!(result.normal_text(), "");
+    assert_eq!(result.calls().len(), 1);
+    assert_eq!(result.calls()[0].name.as_deref(), Some("get_weather"));
+    assert_eq!(result.calls()[0].arguments, r#"{"location":"NYC"}"#);
+}
+
+fn qwen3_coder_weather_tools() -> Vec<ChatTool> {
+    vec![ChatTool {
+        name: "get_weather".to_string(),
+        description: None,
+        parameters: serde_json::json!({
+            "type": "object",
+            "properties": { "location": { "type": "string" } }
+        }),
+        strict: None,
+    }]
+}
+
+const QWEN3_CODER_BARE_FUNCTION: &str =
+    "<function=get_weather> <parameter=location>NYC</parameter> </function>";
+
+#[test]
+fn factory_routes_all_dynamo_families_when_enabled() {
+    // Every family the Dynamo v2 crate implements must construct through the
+    // Dynamo adapter when the experimental env is on.
+    let factory = ToolParserFactory::new_with_options(true);
+    for name in [
+        names::DEEPSEEK_V4,
+        names::QWEN3_CODER,
+        names::GLM47,
+        names::KIMI_K2,
+        names::MINIMAX_M2,
+        names::MINIMAX_M3,
+        names::GEMMA4,
+    ] {
+        assert!(
+            factory.create(name, &[]).is_ok(),
+            "dynamo parser for {name} should construct when enabled"
+        );
+    }
+}
+
+#[test]
+fn factory_gemma4_is_dummy_until_dynamo_enabled() {
+    // Native gemma4 is a unified-only dummy that errors on direct tool-parser
+    // creation; enabling Dynamo overrides it with a real parser.
+    assert!(ToolParserFactory::new_with_options(false).create(names::GEMMA4, &[]).is_err());
+    assert!(ToolParserFactory::new_with_options(true).create(names::GEMMA4, &[]).is_ok());
 }
