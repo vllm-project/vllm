@@ -128,7 +128,6 @@ if TYPE_CHECKING:
     VLLM_MXFP8_EMULATION_DEQUANT_AT_LOAD: bool = True
     VLLM_ROCM_USE_AITER: bool = False
     VLLM_ROCM_USE_AITER_CUSTOM_AR: bool = True
-    VLLM_ROCM_USE_AITER_PAGED_ATTN: bool = False
     VLLM_ROCM_USE_AITER_LINEAR: bool = True
     VLLM_ROCM_USE_AITER_LINEAR_HIPBMM: bool = False
     VLLM_ROCM_USE_AITER_MOE: bool = True
@@ -183,8 +182,6 @@ if TYPE_CHECKING:
     VLLM_HUMMING_MOE_GEMM_TYPE: Literal["indexed", "grouped", "auto"] | None = None
     VLLM_DEEPEPLL_NVFP4_DISPATCH: bool = False
     VLLM_V1_USE_OUTLINES_CACHE: bool = False
-    VLLM_TPU_BUCKET_PADDING_GAP: int = 0
-    VLLM_TPU_MOST_MODEL_LEN: int | None = None
     VLLM_TPU_USING_PATHWAYS: bool = False
     VLLM_USE_DEEP_GEMM: bool = True
     VLLM_MOE_USE_DEEP_GEMM: bool = True
@@ -1195,11 +1192,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ROCM_USE_AITER_CUSTOM_AR": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_CUSTOM_AR", "True").lower() in ("true", "1")
     ),
-    # Whether to use aiter paged attention.
-    # By default is disabled.
-    "VLLM_ROCM_USE_AITER_PAGED_ATTN": lambda: (
-        os.getenv("VLLM_ROCM_USE_AITER_PAGED_ATTN", "False").lower() in ("true", "1")
-    ),
     # use aiter linear op if aiter ops are enabled
     # The following list of related ops
     # - scaled_mm (per-tensor / rowwise)
@@ -1433,8 +1425,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_RAY_EXTRA_ENV_VARS_TO_COPY": lambda: os.getenv(
         "VLLM_RAY_EXTRA_ENV_VARS_TO_COPY", ""
     ),
-    # Whether to use S3 path for model loading in CI via RunAI Streamer
-    "VLLM_CI_USE_S3": lambda: os.environ.get("VLLM_CI_USE_S3", "0") == "1",
     # Resolve floating Hugging Face model/dataset revisions to immutable commits.
     "VLLM_CI_ENSURE_LATEST_HF_REVISION": lambda: (
         os.environ.get("VLLM_CI_ENSURE_LATEST_HF_REVISION", "0") == "1"
@@ -1486,16 +1476,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # an environment with potentially malicious users.
     "VLLM_V1_USE_OUTLINES_CACHE": lambda: (
         os.environ.get("VLLM_V1_USE_OUTLINES_CACHE", "0") == "1"
-    ),
-    # Gap between padding buckets for the forward pass. So we have
-    # 8, we will run forward pass with [16, 24, 32, ...].
-    "VLLM_TPU_BUCKET_PADDING_GAP": lambda: (
-        int(os.environ["VLLM_TPU_BUCKET_PADDING_GAP"])
-        if "VLLM_TPU_BUCKET_PADDING_GAP" in os.environ
-        else 0
-    ),
-    "VLLM_TPU_MOST_MODEL_LEN": lambda: maybe_convert_int(
-        os.environ.get("VLLM_TPU_MOST_MODEL_LEN", None)
     ),
     # Whether using Pathways
     "VLLM_TPU_USING_PATHWAYS": lambda: bool(
@@ -1671,15 +1651,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # This is used to prevent the kernel from running out of memory.
     "VLLM_MAX_TOKENS_PER_EXPERT_FP4_MOE": lambda: int(
         os.getenv("VLLM_MAX_TOKENS_PER_EXPERT_FP4_MOE", "163840")
-    ),
-    # Specifies the thresholds of the communicated tensor sizes under which
-    # vllm should use flashinfer fused allreduce. The variable should be a
-    # JSON with the following format:
-    #     { <world size>: <max size in mb> }
-    # Unspecified world sizes will fall back to
-    #     { 2: 64, 4: 1, <everything else>: 0.5 }
-    "VLLM_FLASHINFER_ALLREDUCE_FUSION_THRESHOLDS_MB": lambda: json.loads(
-        os.getenv("VLLM_FLASHINFER_ALLREDUCE_FUSION_THRESHOLDS_MB", "{}")
     ),
     # MoE routing strategy selector.
     # See `RoutingSimulator.get_available_strategies()` # for available
@@ -2152,7 +2123,6 @@ def compile_factors() -> dict[str, object]:
         "VLLM_DP_MASTER_PORT",
         "VLLM_NIXL_SIDE_CHANNEL_HOST",
         "VLLM_RANDOMIZE_DP_DUMMY_INPUTS",
-        "VLLM_CI_USE_S3",
         "VLLM_CI_ENSURE_LATEST_HF_REVISION",
         "VLLM_MODEL_REDIRECT_PATH",
         "VLLM_HOST_IP",
