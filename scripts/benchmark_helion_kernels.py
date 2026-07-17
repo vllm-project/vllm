@@ -60,13 +60,32 @@ try:
 
     from vllm.benchmarks.lib.utils import default_vllm_config
     from vllm.kernels.helion import get_kernel_by_name, get_registered_kernels
-    from vllm.kernels.helion.ops import import_all_kernels
     from vllm.logger import init_logger
     from vllm.utils.import_utils import has_helion
 except ImportError as e:
     print(f"Error importing vLLM: {e}")
     print("Please ensure vLLM is installed and in your Python path")
     sys.exit(1)
+
+
+def import_all_kernels() -> None:
+    """Trigger Helion op registration, tolerating cross-version name drift.
+
+    Current vLLM registers every Helion kernel as a side effect of importing
+    ``vllm.kernels.helion.ops``; some builds instead expose an explicit importer
+    whose name has drifted (``import_all_kernels`` / ``import_all_ops``). Call
+    whichever exists; if none does, importing the module already registered
+    them.
+    """
+    try:
+        import vllm.kernels.helion.ops as ops
+    except ImportError:
+        return
+    for fn_name in ("import_all_kernels", "import_all_ops"):
+        fn = getattr(ops, fn_name, None)
+        if callable(fn):
+            fn()
+            return
 
 logger = init_logger("vllm.scripts.benchmark_helion_kernels")
 
