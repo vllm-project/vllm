@@ -6,7 +6,9 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from vllm.lora.utils import get_supported_lora_modules
 from vllm.models.inkling.nvidia import moe
+from vllm.models.inkling.nvidia.model import _TmlForCausalLMBase
 from vllm.platforms import current_platform
 
 
@@ -60,6 +62,29 @@ def test_gate_uses_ll_bf16_gemm_through_token_limit(
         assert calls[0][1] is gate.weight
     assert logits.shape == (num_tokens, 8)
     assert logits.dtype == torch.float32
+
+
+def test_gate_is_not_a_lora_target() -> None:
+    model = torch.nn.Module()
+    model.gate = moe.InklingGate(
+        d_model=4,
+        n_routed_experts=5,
+        n_shared_experts=2,
+        experts_per_token=2,
+        route_scale=1.0,
+    )
+
+    assert "gate" not in get_supported_lora_modules(model)
+
+
+def test_custom_embedding_is_not_a_lora_target() -> None:
+    model = torch.nn.Module()
+    model.embedding_modules = _TmlForCausalLMBase.embedding_modules
+
+    supported = get_supported_lora_modules(model)
+
+    assert "embed_tokens" not in supported
+    assert "lm_head" in supported
 
 
 @pytest.mark.parametrize(("projection", "amax"), [("w13", 4.375), ("w2", 2960.0)])

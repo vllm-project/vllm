@@ -280,7 +280,21 @@ class OffloadingConnectorWorker:
 
     def handle_preemptions(self, kv_connector_metadata: OffloadingConnectorMetadata):
         assert self.worker is not None
+
+        # Pop jobs_to_flush from store_jobs into _unsubmitted_store_jobs
+        # so the existing submission loop below submits them before wait().
+        if kv_connector_metadata.jobs_to_flush:
+            for job_id in kv_connector_metadata.jobs_to_flush:
+                entry = kv_connector_metadata.store_jobs.pop(job_id, None)
+                if entry is not None:
+                    assert isinstance(entry.src_spec, GPULoadStoreSpec)
+                    self._unsubmitted_store_jobs.append(
+                        (job_id, entry.src_spec, entry.dst_spec)
+                    )
+
+        # Submit deferred stores from previous step (and jobs_to_flush above).
         for job_id, src_spec, dst_spec in self._unsubmitted_store_jobs:
+            assert isinstance(src_spec, GPULoadStoreSpec)
             success = self.worker.submit_store(job_id, src_spec, dst_spec)
             assert success
         self._unsubmitted_store_jobs.clear()
