@@ -28,7 +28,6 @@ from vllm.v1.kv_offload.base import (
     ReqContext,
     ScheduleEndContext,
     make_offload_key,
-    parse_locality,
 )
 from vllm.v1.kv_offload.config import (
     OffloadingCacheConfig,
@@ -259,7 +258,7 @@ def test_invalid_path_raises_at_construction():
 def test_invalid_locality_raises_at_construction(tmp_path, locality):
     tensor = _page_aligned_zero_tensor(4, _BLOCK_ELEMENTS)
 
-    with pytest.raises(ValueError, match="locality"):
+    with pytest.raises(ValueError, match="Locality"):
         FileSystemTierManager(
             offloading_spec=_MOCK_OFFLOADING_SPEC,
             primary_kv_view=memoryview(tensor.numpy()),
@@ -267,27 +266,6 @@ def test_invalid_locality_raises_at_construction(tmp_path, locality):
             root_dir=str(tmp_path),
             locality=locality,
         )
-
-
-@pytest.mark.parametrize(
-    ("value", "expected"),
-    [
-        ("LOCAL", Locality.LOCAL),
-        ("REMOTE", Locality.REMOTE),
-        (None, None),
-    ],
-)
-def test_parse_locality(value, expected):
-    assert parse_locality(value) is expected
-
-
-def test_parse_locality_rejects_invalid_value():
-    with pytest.raises(ValueError) as exc_info:
-        parse_locality("local")
-
-    assert str(exc_info.value) == (
-        "locality must be 'LOCAL', 'REMOTE', or None, got 'local'"
-    )
 
 
 def test_factory_forwards_locality_to_fs_tier(tmp_path):

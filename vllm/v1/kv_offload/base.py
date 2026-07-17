@@ -104,17 +104,6 @@ class Locality(Enum):
     REMOTE = "REMOTE"
 
 
-def parse_locality(value: str | None) -> Locality | None:
-    if value is None:
-        return None
-    try:
-        return Locality(value)
-    except ValueError:
-        raise ValueError(
-            f"locality must be 'LOCAL', 'REMOTE', or None, got {value!r}"
-        ) from None
-
-
 @dataclass
 class OffloadingEvent:
     keys: list[OffloadKey]

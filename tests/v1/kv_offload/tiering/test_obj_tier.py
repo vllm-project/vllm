@@ -269,7 +269,7 @@ def lookup_and_wait(
 
 @pytest.mark.parametrize("locality", ["local", ""])
 def test_invalid_locality_raises_at_construction(locality):
-    with pytest.raises(ValueError, match="locality"):
+    with pytest.raises(ValueError, match="Locality"):
         _make_tier(locality=locality)
 
 

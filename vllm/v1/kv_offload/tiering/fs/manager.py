@@ -33,11 +33,11 @@ from typing_extensions import override
 from vllm.distributed.kv_events import MEDIUM_FS
 from vllm.logger import init_logger
 from vllm.v1.kv_offload.base import (
+    Locality,
     LookupResult,
     OffloadingEvent,
     OffloadKey,
     ReqContext,
-    parse_locality,
 )
 from vllm.v1.kv_offload.file_mapper import FileMapper
 from vllm.v1.kv_offload.tiering.async_lookup import AsyncLookupManager
@@ -129,7 +129,7 @@ class FileSystemTierManager(SecondaryTierManager):
                 to the publishing vLLM instance.
         """
         super().__init__(offloading_spec, primary_kv_view, tier_type)
-        self.locality = parse_locality(locality)
+        self.locality = Locality(locality) if locality is not None else None
 
         self.events: list[OffloadingEvent] | None = None
         if enable_kv_events:
