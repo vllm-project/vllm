@@ -964,6 +964,7 @@ class CompilationConfig:
             # TODO(zhuhaoran): support rope native forward match and remove this.
             # Linked issue: https://github.com/vllm-project/vllm/issues/28042
             self.custom_ops.append("+rotary_embedding")
+
         if (
             self.pass_config.fuse_rope_kvcache
             and "+rotary_embedding" not in self.custom_ops
@@ -981,6 +982,12 @@ class CompilationConfig:
                     "fuse_qk_norm_rope_kvcache (requires "
                     "unified_kv_cache_update in compiled graph)."
                 )
+
+        if (
+            self.pass_config.fuse_qk_norm_rope_kvcache
+            and "+rotary_embedding" not in self.custom_ops
+        ):
+            self.custom_ops.append("+rotary_embedding")
 
         if (
             is_torch_equal_or_newer("2.9.0.dev")
@@ -1164,6 +1171,16 @@ class CompilationConfig:
                             "to enable RoPE+KV cache fusion."
                         )
                         self.pass_config.fuse_rope_kvcache = False
+                    if self.pass_config.fuse_qk_norm_rope_kvcache:
+                        logger.warning_once(
+                            "fuse_qk_norm_rope_kvcache is enabled, but "
+                            "splitting_ops is None and Inductor graph partition "
+                            "is not enabled. Disabling fuse_qk_norm_rope_kvcache. "
+                            "Please either set splitting_ops to an empty list [] "
+                            "or set use_inductor_graph_partition to True "
+                            "to enable QK-Norm+RoPE+KV cache fusion."
+                        )
+                        self.pass_config.fuse_qk_norm_rope_kvcache = False
                     self.splitting_ops.append("vllm::unified_kv_cache_update")
                     self.splitting_ops.append("vllm::unified_mla_kv_cache_update")
 

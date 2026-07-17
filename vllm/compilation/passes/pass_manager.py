@@ -172,14 +172,11 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
                 if rocm_aiter_ops.is_enabled():
                     self.passes += [RocmAiterSiluMulFp8GroupQuantFusionPass(config)]
 
-            if self.pass_config.fuse_act_padding and rocm_aiter_ops.is_enabled():
-                self.passes += [RocmAiterTritonAddRMSNormPadFusionPass(config)]
-
             if self.pass_config.fuse_qk_norm_rope_kvcache:
                 self.passes += [SplitCoalescingPass(config)]
                 self.passes += [ScatterSplitReplacementPass(config)]
                 self.passes += [QkNormRopeKvCacheFusionPass(config)]
-                
+
             if (
                 self.pass_config.fuse_mla_dual_rms_norm
                 and rocm_aiter_ops.is_enabled()

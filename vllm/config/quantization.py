@@ -18,6 +18,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kInt8StaticChannelSym,
     kMxfp4Dynamic,
     kMxfp8Dynamic,
+    kNvfp4Static,
 )
 
 # User-facing names addressable from quantization_config.
@@ -133,6 +134,11 @@ _ONLINE_SHORTHANDS: dict[str, QuantizationConfigArgs] = {
     # INT8 weight-only on MoE; linear stays unquantized (no `linear` field).
     "int8_per_channel_weight_only": QuantizationConfigArgs(
         moe=QuantSpec(weight=kInt8StaticChannelSym),
+    ),
+    # Online NVFP4 on MoE with per-token dynamic activation scales (Blackwell +
+    # FlashInfer TRTLLM only); linear stays unquantized (no `linear` field).
+    "nvfp4_per_token": QuantizationConfigArgs(
+        moe=QuantSpec(weight=kNvfp4Static),
     ),
 }
 

@@ -757,7 +757,9 @@ class AttentionMetadataBuilder(ABC, Generic[M]):
 class AttentionLayer(Protocol):
     _q_scale: torch.Tensor
     _k_scale: torch.Tensor
+    _k_scale_cpu: torch.Tensor
     _v_scale: torch.Tensor
+    _v_scale_cpu: torch.Tensor
     _q_scale_float: float
     _k_scale_float: float
     _v_scale_float: float
@@ -930,12 +932,6 @@ class AttentionImpl(AttentionImplBase[T], Generic[T]):
         with the RoPE ops and the KV cache update for implementations that support it.
         """
         return False
-
-    def set_fused_kv_cache_layout(self):
-        """Called by the fusion pass after confirming this layer will use
-        the fused kernel. Backends that need to adjust their KV cache read
-        path (e.g. permute strides) should override this."""
-        pass
 
     def fused_rope_kvcache_supported(self):
         """
