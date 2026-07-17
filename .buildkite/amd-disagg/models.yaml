@@ -68,7 +68,7 @@ models:
       VLLM_ROCM_USE_AITER: "1"
       VLLM_ROCM_USE_AITER_MOE: "1"
       VLLM_ROCM_USE_AITER_RMSNORM: "1"
-    base_flags: "--trust-remote-code"
+    base_flags: "--trust-remote-code --attention-backend TRITON_ATTN --block-size 128"
     prefill:
       tp: "--gpu-memory-utilization 0.85"
     decode:

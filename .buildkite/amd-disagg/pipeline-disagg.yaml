@@ -84,6 +84,7 @@ steps:
   commands:
   - IMAGE=vllm/vllm-openai-rocm:v0.23.0 MODEL_NAME=Kimi-K2.5-MXFP4 NODES=2 GPUS_PER_NODE=8 WIDE_EP_MODE=0 MORIIO_READ_MODE=0 RUN_AFTER_HEALTH=accuracy ROUTER_TYPE=proxy WAIT=1 SLURM_TIME_LIMIT=08:30:00 bash .buildkite/amd-disagg/run-slurm-disagg-test.sh
 
+
 - label: "Kimi-K2.5-MXFP4-PD-2P2D-TP8-MoRIIO-vllm-router"
   agents:
     queue: amd_mi250_8
@@ -125,6 +126,13 @@ steps:
   timeout_in_minutes: 480
   commands:
   - IMAGE=vllm/vllm-openai-rocm:v0.23.0 MODEL_NAME=Kimi-K2.6-MXFP4 xP=2 yD=2 NODES=4 GPUS_PER_NODE=8 WIDE_EP_MODE=0 MORIIO_READ_MODE=0 RUN_AFTER_HEALTH=accuracy ROUTER_TYPE=proxy WAIT=1 SLURM_TIME_LIMIT=08:30:00 bash .buildkite/amd-disagg/run-slurm-disagg-test.sh
+
+- label: "MiniMax-M3-MXFP8-PD-1P1D-TP8-MoRIIO-proxy"
+  agents:
+    queue: amd_mi250_8
+  timeout_in_minutes: 480
+  commands:
+  - IMAGE=vllm/vllm-openai-rocm:v0.23.0 MODEL_NAME=MiniMax-M3-MXFP8 NODES=2 GPUS_PER_NODE=8 WIDE_EP_MODE=0 MORIIO_READ_MODE=0 RUN_AFTER_HEALTH=accuracy ROUTER_TYPE=proxy WAIT=1 SLURM_TIME_LIMIT=08:30:00 bash .buildkite/amd-disagg/run-slurm-disagg-test.sh
 
 # - label: "ROCm Disagg P/D 1P1D EP8/DP8 WideEP (MoRIIO + toy proxy) — SLURM"
 #   agents:
