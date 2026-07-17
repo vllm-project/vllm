@@ -137,7 +137,116 @@ def test_dense_norm_rope(num_tokens, num_heads, num_kv_heads):
     torch.testing.assert_close(v_out, v_in, rtol=0, atol=0)
 
 
-# ── Test 2: sparse mode (full: index branch + cache inserts) ─────────────────
+# ── Test 2: dense mode with fused KV insert (no index branch) ────────────────
+
+
+@pytest.mark.parametrize("num_tokens", [1, 7, 64, 513])
+@pytest.mark.parametrize("block_size", [16, 64])
+@pytest.mark.parametrize("cache_layout", ["HND", "NHD"])
+def test_dense_kv_insert(num_tokens, block_size, cache_layout):
+    """Dense rows ([q|k|v], no index tail) with kv_cache: k/v must land in the
+    paged cache like the generic Attention's separate reshape_and_cache would
+    write them, honoring both NHD and HND physical layouts via strides, and
+    padded tokens (slot -1) must be skipped."""
+    torch.manual_seed(2)
+    device, dtype, eps = "cuda", torch.bfloat16, 1e-6
+    base, max_pos = 5_000_000.0, 4096
+    num_heads, num_kv_heads = 16, 4
+
+    q_w = torch.randn(HEAD_DIM, dtype=dtype, device=device) * 0.1
+    k_w = torch.randn(HEAD_DIM, dtype=dtype, device=device) * 0.1
+    cos_sin = make_cos_sin_cache(max_pos, ROTARY_DIM, base, dtype, device)
+    positions = torch.randint(
+        0, max_pos, (num_tokens,), dtype=torch.int64, device=device
+    )
+
+    qsz, kvsz = num_heads * HEAD_DIM, num_kv_heads * HEAD_DIM
+    qkv = torch.randn(num_tokens, qsz + 2 * kvsz, dtype=dtype, device=device)
+    qkv_orig = qkv.clone()
+
+    num_blocks = (num_tokens + block_size - 1) // block_size + 1
+    if cache_layout == "HND":
+        kv_cache = torch.zeros(
+            num_blocks,
+            num_kv_heads,
+            block_size,
+            2 * HEAD_DIM,
+            dtype=dtype,
+            device=device,
+        )
+    else:
+        # Logical [nb, nkv, bs, 2*hd] view over NHD physical storage.
+        kv_cache = torch.zeros(
+            num_blocks,
+            block_size,
+            num_kv_heads,
+            2 * HEAD_DIM,
+            dtype=dtype,
+            device=device,
+        ).permute(0, 2, 1, 3)
+    slot_mapping = torch.randperm(
+        num_blocks * block_size, dtype=torch.int64, device=device
+    )[:num_tokens]
+    if num_tokens > 1:
+        slot_mapping[-1] = -1  # cudagraph-padded / unscheduled token
+
+    ops.fused_minimax_m3_qknorm_rope_kv_insert(
+        qkv,
+        q_w,
+        k_w,
+        cos_sin,
+        positions,
+        num_heads,
+        num_kv_heads,
+        ROTARY_DIM,
+        eps,
+        slot_mapping=slot_mapping,
+        kv_cache=kv_cache,
+        block_size=block_size,
+        kv_cache_dtype="auto",
+    )
+
+    q_out, k_out, v_out = qkv.split([qsz, kvsz, kvsz], dim=-1)
+    q_in, k_in, v_in = qkv_orig.split([qsz, kvsz, kvsz], dim=-1)
+    q_ref = norm_rope_ref(
+        q_in.view(num_tokens, num_heads, HEAD_DIM), q_w, positions, cos_sin, eps
+    ).view(num_tokens, qsz)
+    k_ref = norm_rope_ref(
+        k_in.view(num_tokens, num_kv_heads, HEAD_DIM),
+        k_w,
+        positions,
+        cos_sin,
+        eps,
+    ).view(num_tokens, kvsz)
+    torch.testing.assert_close(q_out, q_ref, rtol=1e-2, atol=1e-2)
+    torch.testing.assert_close(k_out, k_ref, rtol=1e-2, atol=1e-2)
+    torch.testing.assert_close(v_out, v_in, rtol=0, atol=0)
+
+    # Cache K is the same fp32->bf16 store as the in-place k_out (bit-exact);
+    # V is copied raw.
+    k_out_h = k_out.view(num_tokens, num_kv_heads, HEAD_DIM)
+    v_ref_h = v_in.view(num_tokens, num_kv_heads, HEAD_DIM)
+    written = torch.zeros(num_blocks * block_size, dtype=torch.bool)
+    for t in range(num_tokens):
+        s = slot_mapping[t].item()
+        if s < 0:
+            continue
+        written[s] = True
+        b, pos = s // block_size, s % block_size
+        torch.testing.assert_close(
+            kv_cache[b, :, pos, :HEAD_DIM], k_out_h[t], rtol=0, atol=0
+        )
+        torch.testing.assert_close(
+            kv_cache[b, :, pos, HEAD_DIM:], v_ref_h[t], rtol=0, atol=0
+        )
+    # Slots not in the mapping (including the padded token's) stay zero.
+    untouched = kv_cache.transpose(1, 2).reshape(num_blocks * block_size, -1)[
+        ~written.to(device)
+    ]
+    assert (untouched == 0).all()
+
+
+# ── Test 3: sparse mode (full: index branch + cache inserts) ─────────────────
 
 
 @pytest.mark.parametrize("num_tokens", [1, 7, 64, 513])

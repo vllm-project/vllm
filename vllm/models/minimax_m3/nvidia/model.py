@@ -358,6 +358,14 @@ class MiniMaxM3Attention(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.attn",
         )
+        # Fuse the KV insert into the qknorm+rope kernel when the backend runs
+        # the KV update as a separate step this layer can take over. All such
+        # backends keep the paged cache in the [nb, nkv, bs, 2*hd] layout the
+        # kernel writes; its host checks fail loudly otherwise.
+        self.fuse_kv_insert = (
+            not self.attn.attn_backend.forward_includes_kv_cache_update
+        )
+        self.attn.skip_kv_cache_update_by_layer = self.fuse_kv_insert
 
     def forward(
         self,
@@ -366,19 +374,41 @@ class MiniMaxM3Attention(nn.Module):
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         # Fused per-head Gemma QK-norm + partial NeoX RoPE on q/k, in place.
-
-        ops.fused_minimax_m3_qknorm_rope_kv_insert(
-            qkv,
-            self.q_norm.weight,
-            self.k_norm.weight,
-            self.rotary_emb.cos_sin_cache,
-            positions,
-            self.num_heads,
-            self.num_kv_heads,
-            self.rotary_emb.rotary_dim,
-            self.q_norm.variance_epsilon,
-            kv_cache_dtype="auto",
-        )
+        slot_mapping = None
+        if self.fuse_kv_insert:
+            fwd_slot_mapping = get_forward_context().slot_mapping
+            if isinstance(fwd_slot_mapping, dict):
+                slot_mapping = fwd_slot_mapping.get(self.attn.layer_name)
+        if slot_mapping is not None:
+            kv_cache = self.attn.kv_cache
+            ops.fused_minimax_m3_qknorm_rope_kv_insert(
+                qkv,
+                self.q_norm.weight,
+                self.k_norm.weight,
+                self.rotary_emb.cos_sin_cache,
+                positions,
+                self.num_heads,
+                self.num_kv_heads,
+                self.rotary_emb.rotary_dim,
+                self.q_norm.variance_epsilon,
+                slot_mapping=slot_mapping,
+                kv_cache=kv_cache,
+                block_size=kv_cache.size(2),
+                kv_cache_dtype="auto",
+            )
+        else:
+            ops.fused_minimax_m3_qknorm_rope_kv_insert(
+                qkv,
+                self.q_norm.weight,
+                self.k_norm.weight,
+                self.rotary_emb.cos_sin_cache,
+                positions,
+                self.num_heads,
+                self.num_kv_heads,
+                self.rotary_emb.rotary_dim,
+                self.q_norm.variance_epsilon,
+                kv_cache_dtype="auto",
+            )
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         attn_output = self.attn(q, k, v)
         output, _ = self.o_proj(attn_output)
