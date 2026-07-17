@@ -97,6 +97,12 @@ def _top_p_pivot_midpoint(max_range, min_range):
 
 
 @triton.jit
+def _top_p_search_converged(max_range, min_range):
+    """Require convergence in both absolute and relative probability space."""
+    return (max_range - min_range) < 1e-9 and max_range <= min_range * 1.0001
+
+
+@triton.jit
 def _topk_topp_kernel(
     LOGITS,
     LOGITS_STRIDE_0,
@@ -578,7 +584,10 @@ def _topk_topp_kernel(
                                 max_range = p_pivot_0
 
                             num_iters += 1
-                            if max_range <= min_range * 1.0001 or num_iters >= 18:
+                            if (
+                                _top_p_search_converged(max_range, min_range)
+                                or num_iters >= 18
+                            ):
                                 # Keep the pivot consistent with the
                                 # min-larger statistics computed above.
                                 p_pivot = p_pivot_0
@@ -748,7 +757,10 @@ def _topk_topp_kernel(
                             max_range = p_pivot_0
 
                         num_iters += 1
-                        if max_range <= min_range * 1.0001 or num_iters >= 18:
+                        if (
+                            _top_p_search_converged(max_range, min_range)
+                            or num_iters >= 18
+                        ):
                             # Keep the pivot consistent with the min-larger
                             # statistics computed above.
                             p_pivot = p_pivot_0
@@ -816,7 +828,10 @@ def _topk_topp_kernel(
                             max_range = p_pivot_0
 
                         num_iters += 1
-                        if max_range <= min_range * 1.0001 or num_iters >= 18:
+                        if (
+                            _top_p_search_converged(max_range, min_range)
+                            or num_iters >= 18
+                        ):
                             # Keep the pivot consistent with the min-larger
                             # statistics computed above.
                             p_pivot = p_pivot_0
