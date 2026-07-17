@@ -20,6 +20,7 @@ import torch
 
 from vllm.distributed.kv_events import MEDIUM_FS
 from vllm.v1.kv_offload.base import (
+    Locality,
     LookupResult,
     OffloadingEvent,
     OffloadingKVEventsConfig,
@@ -35,6 +36,7 @@ from vllm.v1.kv_offload.config import (
     OffloadingParallelConfig,
 )
 from vllm.v1.kv_offload.tiering.base import JobMetadata
+from vllm.v1.kv_offload.tiering.factory import SecondaryTierFactory
 from vllm.v1.kv_offload.tiering.fs.manager import (
     FileSystemTierManager,
 )
@@ -186,6 +188,7 @@ def fs_tier_with_events(tmp_path):
         n_read_threads=4,
         n_write_threads=4,
         enable_kv_events=True,
+        locality="LOCAL",
     )
     yield tier
     tier.shutdown()
@@ -249,6 +252,40 @@ def test_invalid_path_raises_at_construction():
             tier_type="fs",
             root_dir="/dev/null/invalid_path",
         )
+
+
+@pytest.mark.parametrize("locality", ["local", ""])
+def test_invalid_locality_raises_at_construction(tmp_path, locality):
+    tensor = _page_aligned_zero_tensor(4, _BLOCK_ELEMENTS)
+
+    with pytest.raises(ValueError, match="Locality"):
+        FileSystemTierManager(
+            offloading_spec=_MOCK_OFFLOADING_SPEC,
+            primary_kv_view=memoryview(tensor.numpy()),
+            tier_type="fs",
+            root_dir=str(tmp_path),
+            locality=locality,
+        )
+
+
+def test_factory_forwards_locality_to_fs_tier(tmp_path):
+    tensor = _page_aligned_zero_tensor(4, _BLOCK_ELEMENTS)
+    tier = SecondaryTierFactory.create_secondary_tier(
+        {
+            "type": "fs",
+            "root_dir": str(tmp_path),
+            "n_read_threads": 1,
+            "n_write_threads": 1,
+            "locality": "LOCAL",
+        },
+        memoryview(tensor.numpy()),
+        _MOCK_OFFLOADING_SPEC,
+    )
+    try:
+        assert isinstance(tier, FileSystemTierManager)
+        assert tier.locality is Locality.LOCAL
+    finally:
+        tier.shutdown()
 
 
 def test_failed_load_missing_file(fs_tier):
@@ -442,9 +479,36 @@ def test_successful_store_emits_stored_event(fs_tier_with_events):
     assert events[0].keys == keys
     # Literal medium pins the wire contract, not just the constant choice.
     assert events[0].medium == "FS"
+    assert events[0].locality is Locality.LOCAL
     assert not events[0].removed
     # take_events drains the buffer.
     assert list(tier.take_events()) == []
+
+
+@pytest.mark.parametrize(
+    ("locality", "expected"),
+    [(None, None), ("REMOTE", Locality.REMOTE)],
+)
+def test_store_event_uses_configured_locality(tmp_path, locality, expected):
+    tensor = _page_aligned_zero_tensor(4, _BLOCK_ELEMENTS)
+    locality_config = {} if locality is None else {"locality": locality}
+    tier = FileSystemTierManager(
+        offloading_spec=_make_offloading_spec(enable_kv_cache_events=True),
+        primary_kv_view=memoryview(tensor.numpy()),
+        tier_type="fs",
+        root_dir=str(tmp_path),
+        enable_kv_events=True,
+        **locality_config,
+    )
+    try:
+        tier.submit_store(make_job(1, [key(1)], [0]))
+        assert all(r.success for r in drain(tier))
+
+        events = list(tier.take_events())
+        assert len(events) == 1
+        assert events[0].locality is expected
+    finally:
+        tier.shutdown()
 
 
 def test_load_job_emits_no_event(fs_tier_with_events):
