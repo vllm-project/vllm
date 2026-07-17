@@ -33,7 +33,7 @@ torchaudio==2.11.0
 torchvision==0.26.0
 transformers_stream_generator # required for qwen-vl test
 matplotlib # required for qwen-vl test
-mistral_common[image,audio] >= 1.11.5 # required for voxtral test
+mistral_common[image,audio] >= 1.11.6 # required for voxtral test
 num2words # required for smolvlm test
 open_clip_torch==2.32.0 # Required for nemotron_vl test, Nemotron Parse in test_common.py
 datamodel_code_generator # required for minicpm3 test
