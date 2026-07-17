@@ -710,7 +710,11 @@ class Scheduler(SchedulerInterface):
 
                 # Get already-cached tokens.
                 if request.num_computed_tokens == 0:
-                    did_prefix_cache_lookup = True
+                    # Only record a real lookup, matching get_computed_blocks.
+                    did_prefix_cache_lookup = (
+                        self.kv_cache_manager.enable_caching
+                        and not request.skip_reading_prefix_cache
+                    )
                     # Get locally-cached tokens.
                     if (
                         self.connector is not None
