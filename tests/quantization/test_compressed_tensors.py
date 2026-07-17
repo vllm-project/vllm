@@ -7,6 +7,7 @@ Run `pytest tests/quantization/test_compressed_tensors.py`.
 
 from contextlib import contextmanager
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import Mock
 
 import pytest
@@ -1044,7 +1045,7 @@ def test_humming_linear_kernel_uses_wna16_bitwidth(monkeypatch, num_bits):
     )
     from vllm.model_executor.layers.quantization.utils import humming_utils
 
-    captured = {}
+    captured: dict[str, Any] = {}
 
     monkeypatch.setattr(
         humming_utils,
