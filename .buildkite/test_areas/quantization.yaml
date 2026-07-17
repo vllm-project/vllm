@@ -3,6 +3,7 @@ depends_on:
   - image-build
 steps:
 - label: Quantization
+  device: h200_35gb
   key: quantization
   timeout_in_minutes: 60
   source_file_dependencies:
@@ -22,6 +23,7 @@ steps:
   - VLLM_TEST_FORCE_LOAD_FORMAT=auto pytest -v -s quantization/ --ignore quantization/test_blackwell_moe.py
 
 - label: Quantized Fusions
+  device: h200_35gb
   key: quantized-fusions
   timeout_in_minutes: 20
   source_file_dependencies:
@@ -52,6 +54,7 @@ steps:
     - pytest -s -v tests/quantization/test_blackwell_moe.py
 
 - label: Quantized Models Test
+  device: h200_35gb
   key: quantized-models-test
   timeout_in_minutes: 50
   source_file_dependencies:

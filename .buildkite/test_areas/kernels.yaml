@@ -15,6 +15,7 @@ steps:
     - pytest -v -s tests/kernels/ir
 
 - label: Kernels Core Operation Test
+  device: h200_35gb
   key: kernels-core-operation-test
   timeout_in_minutes: 120
   source_file_dependencies:
@@ -65,6 +66,7 @@ steps:
     - pytest -v -s kernels/test_fused_deepseek_v4_*.py
 
 - label: Kernels Attention Test %N
+  device: h200_35gb
   key: kernels-attention-test
   timeout_in_minutes: 65
   source_file_dependencies:
@@ -106,6 +108,7 @@ steps:
     - pytest -v -s kernels/attention/test_triton_unified_attention_diffkv.py
 
 - label: Kernels Quantization Test %N
+  device: h200_35gb
   key: kernels-quantization-test
   timeout_in_minutes: 60
   source_file_dependencies:
@@ -131,6 +134,7 @@ steps:
       - image-build-amd
 
 - label: Kernels MoE Test %N
+  device: h200_35gb
   key: kernels-moe-test
   timeout_in_minutes: 50
   source_file_dependencies:
@@ -163,6 +167,7 @@ steps:
       - image-build-amd
 
 - label: Kernels Mamba Test
+  device: h200_35gb
   key: kernels-mamba-test
   timeout_in_minutes: 40
   source_file_dependencies:
