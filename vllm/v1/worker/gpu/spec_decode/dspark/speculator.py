@@ -51,6 +51,7 @@ def _draft_penalties_kernel(
     output_bin_counts_stride,
     d2t_index_ptr,  # [vocab_size] draft column -> target id (HAS_D2T only)
     vocab_size,  # row width of logits (draft vocab when HAS_D2T)
+    max_num_reqs,  # bound for req-state indices (padded rows may hold junk)
     BLOCK_SIZE: tl.constexpr,
     HAS_D2T: tl.constexpr,
 ):
@@ -67,6 +68,10 @@ def _draft_penalties_kernel(
     """
     req_idx = tl.program_id(0).to(tl.int64)
     state_idx = tl.load(rows_ptr + req_idx).to(tl.int64)
+    # CUDA-graph replays run with a padded request count; padded rows can
+    # carry junk state indices. Clamp so their (ignored) rows never gather
+    # out of bounds.
+    state_idx = tl.minimum(tl.maximum(state_idx, 0), max_num_reqs - 1)
     rep = tl.load(repetition_penalty_ptr + state_idx)
     if rep == 1.0:
         return
@@ -248,6 +253,7 @@ class DSparkSpeculator(DFlashSpeculator):
                         if self._d2t_scatter_index is not None
                         else self.draft_tokens,
                         vocab,
+                        self.max_num_reqs,
                         BLOCK_SIZE=blk,
                         HAS_D2T=self._d2t_scatter_index is not None,
                     )
