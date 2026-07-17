@@ -43,6 +43,7 @@ def vllm_topk_sigmoid(
     gating_output: torch.Tensor,
     renormalize: bool = False,
     e_score_correction_bias: torch.Tensor | None = None,
+    routed_scaling_factor: float = 1.0,
 ) -> tuple[torch.Tensor, ...]:
     ops.topk_sigmoid(
         topk_weights,
@@ -51,6 +52,7 @@ def vllm_topk_sigmoid(
         gating_output,
         renormalize,
         e_score_correction_bias,
+        routed_scaling_factor,
     )
 
     return topk_weights, topk_indices
@@ -168,13 +170,12 @@ def fused_topk_bias(
     hash_indices_table: torch.Tensor | None = None,
     routed_scaling_factor: float = 1.0,
 ):
-    # The topk kernel dispatches dtype based on topk_ids (set by
-    # indices_type) and assumes input_tokens/hash_indices_table match.
-    if indices_type is not None:
-        if input_tokens is not None and input_tokens.dtype != indices_type:
-            input_tokens = input_tokens.to(dtype=indices_type)
-        if hash_indices_table is not None and hash_indices_table.dtype != indices_type:
-            hash_indices_table = hash_indices_table.to(dtype=indices_type)
+    if (
+        input_tokens is not None
+        and hash_indices_table is not None
+        and input_tokens.dtype != hash_indices_table.dtype
+    ):
+        input_tokens = input_tokens.to(dtype=hash_indices_table.dtype)
 
     if not rocm_aiter_ops.is_fused_moe_enabled():
         assert hidden_states.size(0) == gating_output.size(0), (
@@ -216,9 +217,8 @@ def fused_topk_bias(
                 gating_output,
                 renormalize,
                 e_score_correction_bias,
+                routed_scaling_factor,
             )
-            if routed_scaling_factor != 1.0:
-                topk_weights *= routed_scaling_factor
             return topk_weights, topk_ids
         elif scoring_func == "sqrtsoftplus":
             return vllm_topk_softplus_sqrt(
@@ -303,6 +303,7 @@ def fused_topk_bias(
         scores_for_choice = scores.view(-1, n_routed_experts)
     # For batch invariance, use sorted=True to ensure deterministic expert selection
     if hash_indices_table is not None:
+        assert input_tokens is not None
         topk_indices = hash_indices_table[input_tokens]
     else:
         use_sorted = envs.VLLM_BATCH_INVARIANT
@@ -334,6 +335,8 @@ class FusedTopKBiasRouter(BaseRouter):
         *,
         scoring_func: str = "sigmoid",
         hash_indices_table: torch.Tensor | None = None,
+        num_fused_shared_experts: int = 0,
+        shared_expert_weight: float = 1.0,
     ):
         super().__init__(
             top_k=top_k,
@@ -346,6 +349,11 @@ class FusedTopKBiasRouter(BaseRouter):
         self.routed_scaling_factor = routed_scaling_factor
         self.scoring_func = scoring_func
         self._hash_indices_table = hash_indices_table
+        # Fused shared experts: append constant slots (ids immediately after
+        # the routed experts, [global, global+n)) routed to by every token at
+        # ``shared_expert_weight``, AFTER the routed top-k is renormalized.
+        self.num_fused_shared_experts = num_fused_shared_experts
+        self.shared_expert_weight = shared_expert_weight
 
     @property
     def routing_method_type(self) -> RoutingMethodType:
@@ -381,5 +389,24 @@ class FusedTopKBiasRouter(BaseRouter):
             hash_indices_table=self._hash_indices_table,
             routed_scaling_factor=self.routed_scaling_factor,
         )
+
+        if self.num_fused_shared_experts > 0:
+            m = topk_ids.shape[0]
+            n = self.num_fused_shared_experts
+            # global_num_experts counts only the routed experts; the fused
+            # shared experts occupy the slots immediately after them, i.e. ids
+            # [global_num_experts, global_num_experts + n).
+            base = self.global_num_experts
+            shared_ids = torch.arange(
+                base, base + n, dtype=topk_ids.dtype, device=topk_ids.device
+            ).expand(m, n)
+            shared_w = torch.full(
+                (m, n),
+                self.shared_expert_weight,
+                dtype=topk_weights.dtype,
+                device=topk_weights.device,
+            )
+            topk_ids = torch.cat([topk_ids, shared_ids], dim=-1)
+            topk_weights = torch.cat([topk_weights, shared_w], dim=-1)
 
         return topk_weights, topk_ids
