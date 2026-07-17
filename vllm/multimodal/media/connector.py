@@ -308,8 +308,8 @@ class MediaConnector:
             msg = f"Invalid data URL {url[:32]!r}: missing ',' separator."
             raise ValueError(msg)
 
-        media_type, _, encoding = data_spec.rpartition(";")
-        if encoding.strip().lower() != "base64":
+        media_type, sep, encoding = data_spec.rpartition(";")
+        if not sep or encoding.strip().lower() != "base64":
             msg = "Only base64 data URLs are supported for now."
             raise NotImplementedError(msg)
 

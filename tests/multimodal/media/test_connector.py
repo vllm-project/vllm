@@ -251,6 +251,10 @@ def test_fetch_image_data_url_malformed():
     with pytest.raises(NotImplementedError, match="base64"):
         connector.fetch_image("data:text/plain,hello")
 
+    # ";base64" requires the ";"; here "base64" is a (bogus) media type.
+    with pytest.raises(NotImplementedError, match="base64"):
+        connector.fetch_image("data:base64,aGVsbG8=")
+
 
 @pytest.mark.asyncio
 async def test_fetch_image_error_conversion():
