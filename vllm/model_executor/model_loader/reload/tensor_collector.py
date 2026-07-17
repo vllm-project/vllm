@@ -89,31 +89,91 @@ def collect_extra_tensors(
     return results
 
 
-def resolve_path(root: Any, path: str) -> torch.Tensor | None:
-    """Navigate *root* along the dot-separated *path* and return the tensor
-    found there, or ``None`` if the path is broken."""
+def _parse_segments(path: str) -> list[tuple[str, str | int | None]]:
+    """Split a recorded path into (action, key) segments.
+
+    Handles mixed dot-access and bracket-access paths produced by ``_walk``:
+      ``"quant_method.cache['scale']"``  →  [("attr","quant_method"),
+                                              ("attr","cache"),
+                                              ("item","scale")]
+      ``"fn.args[0]"``                   →  [("attr","fn"), ("attr","args"),
+                                              ("index",0)]
+      ``"fn.__closure__[2]"``            →  [("attr","fn"),
+                                              ("attr","__closure__"),
+                                              ("index",2)]
+    """
+    import re
+    segs: list[tuple[str, str | int | None]] = []
+    for tok in re.split(r"(?<!\[)\.", path):  # split on dots not inside []
+        # tok might be  "args[0]"  or  "cache['scale']"  or plain "name"
+        m = re.match(r"^([^\[]+)\[(.+)\]$", tok)
+        if m:
+            segs.append(("attr", m.group(1)))
+            inner = m.group(2)
+            # Detect int index vs string key (strip quotes)
+            stripped = inner.strip("'\"")
+            if inner.isdigit():
+                segs.append(("index", int(inner)))
+            elif inner != stripped:
+                segs.append(("item", stripped))
+            else:
+                segs.append(("item", inner))
+        else:
+            segs.append(("attr", tok))
+    return segs
+
+
+def _navigate(root: Any, segments: list[tuple[str, str | int | None]],
+              ) -> Any | None:
+    """Walk *root* along parsed segments, returning the final object."""
     cur = root
-    for seg in path.split("."):
-        cur = getattr(cur, seg, None)
-        if cur is None:
+    for action, key in segments:
+        try:
+            if action == "attr":
+                cur = getattr(cur, key)
+            elif action == "index":
+                cur = cur[key]
+            elif action == "item":
+                cur = cur[key]
+            else:
+                return None
+        except (AttributeError, TypeError, IndexError, KeyError):
             return None
-    return cur if isinstance(cur, torch.Tensor) else None
+    return cur
+
+
+def _set_final(root: Any,
+               segments: list[tuple[str, str | int | None]],
+               value: torch.Tensor) -> bool:
+    """Navigate to the parent and set the final segment to *value*."""
+    parent = _navigate(root, segments[:-1]) if len(segments) > 1 else root
+    if parent is None:
+        return False
+    action, key = segments[-1]
+    try:
+        if action == "attr":
+            setattr(parent, key, value)
+        elif action in ("index", "item"):
+            parent[key] = value
+        else:
+            return False
+        return True
+    except (AttributeError, TypeError, IndexError, KeyError):
+        return False
+
+
+def resolve_path(root: Any, path: str) -> torch.Tensor | None:
+    """Navigate *root* along *path* and return the tensor found there,
+    or ``None`` if the path is broken.  Supports both dot-access and
+    bracket-access segments (dicts, lists, closures, partials)."""
+    result = _navigate(root, _parse_segments(path))
+    return result if isinstance(result, torch.Tensor) else None
 
 
 def set_by_path(root: Any, path: str, value: torch.Tensor) -> bool:
-    """Set the attribute at the end of *path* to *value*.
-    Returns ``True`` on success."""
-    parts = path.split(".")
-    cur = root
-    for seg in parts[:-1]:
-        cur = getattr(cur, seg, None)
-        if cur is None:
-            return False
-    try:
-        setattr(cur, parts[-1], value)
-        return True
-    except (AttributeError, TypeError):
-        return False
+    """Set the value at the end of *path*.
+    Returns ``True`` on success.  Supports bracket-access segments."""
+    return _set_final(root, _parse_segments(path), value)
 
 
 def copy_back_extra_tensors(
@@ -138,7 +198,9 @@ def copy_back_extra_tensors(
         new_tensor = resolve_path(layer, path)
 
         if not isinstance(new_tensor, torch.Tensor):
-            logger.debug("extra-tensor path gone after reload: %s", path)
+            logger.warning(
+                "extra-tensor path unresolvable after reload: %s "
+                "(tensor was recorded but cannot be restored)", path)
             n_skipped += 1
             continue
 
@@ -166,11 +228,17 @@ def copy_back_extra_tensors(
             n_copied += 1
 
         # Point the attribute back at the old tensor (every alias path).
-        set_by_path(layer, path, old_tensor)
+        if not set_by_path(layer, path, old_tensor):
+            logger.warning(
+                "extra-tensor set_by_path failed for: %s "
+                "(value was copied but attribute not restored)", path)
 
     if n_copied or n_skipped:
-        logger.info(
-            "%s: extra-tensor copy-back: %d copied, %d skipped",
+        logger.warning(
+            "%s: repaired %d unmanaged tensor(s) during reload "
+            "(%d skipped). These tensors are not registered as "
+            "parameters or buffers and should be migrated to the "
+            "tensor registry (#48478).",
             layer.__class__.__name__, n_copied, n_skipped,
         )
 
