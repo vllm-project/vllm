@@ -325,6 +325,23 @@ class TestMakeValidPythonStringLiterals:
         call = module.body[0].value.elts[0]
         assert call.keywords[0].value.value == "line1\nline2"
 
+    def test_value_ending_in_backslash_recovers(self):
+        # A string value ending in a literal backslash: the closing quote follows
+        # an escaped backslash (an *even* run), so it closes the string. Checking
+        # only the single preceding char misread it as an escaped quote, left the
+        # string open, and make_valid_python returned None — dropping calls whose
+        # last argument ends in a backslash (common in regex like r'\b').
+        text = "[write(path='x', content='pattern \\\\')]"
+        assert make_valid_python(text) == (text, "")
+
+    def test_escaped_quote_odd_backslashes_stays_open(self):
+        # An escaped quote (an *odd* backslash run) must NOT close the string;
+        # only the final unescaped quote does. Value round-trips to it's fine.
+        text = "[say(msg='it\\'s fine')]"
+        assert make_valid_python(text) == (text, "")
+        module = ast.parse(text)
+        assert module.body[0].value.elts[0].keywords[0].value.value == "it's fine"
+
 
 class TestEscapeCtrlCharsInStrings:
     def test_newline_inside_string_escaped(self):

@@ -566,6 +566,23 @@ def escape_ctrl_chars_in_strings(text: str) -> str:
     return "".join(out)
 
 
+def _is_escaped(text: str, index: int) -> bool:
+    """Whether the character at ``index`` is backslash-escaped.
+
+    A character is escaped iff it is preceded by an *odd* number of consecutive
+    backslashes. Checking only the single preceding character is wrong for even
+    runs: in ``'ab\\'`` the closing quote follows an escaped backslash (``\\\\``)
+    and is therefore NOT escaped — it closes the string. Common in regex/code
+    arguments such as ``r'\\\\b'``.
+    """
+    backslashes = 0
+    j = index - 1
+    while j >= 0 and text[j] == "\\":
+        backslashes += 1
+        j -= 1
+    return backslashes % 2 == 1
+
+
 def make_valid_python(text: str) -> tuple[str, str] | None:
     """Attempt to close all open brackets/quotes to make partial Python valid.
 
@@ -588,9 +605,7 @@ def make_valid_python(text: str) -> tuple[str, str] | None:
         # in a string argument (e.g. `cmd='grep -F "]"'`) corrupts the bracket
         # stack and the whole tool call is rejected as mismatched.
         if bracket_stack and bracket_stack[-1] in {"'", '"'}:
-            if char == bracket_stack[-1] and not (
-                index > 0 and text[index - 1] == "\\"
-            ):
+            if char == bracket_stack[-1] and not _is_escaped(text, index):
                 bracket_stack.pop()
             continue
         if char in {"[", "(", "{"}:
