@@ -2002,7 +2002,12 @@ def test_prefix_cache_stats_disabled():
 
 
 def test_maybe_evict_cached_block():
-    pool = BlockPool(num_gpu_blocks=4, enable_caching=True, hash_block_size=16)
+    pool = BlockPool(
+        num_gpu_blocks=4,
+        enable_caching=True,
+        hash_block_size=16,
+        enable_kv_cache_events=True,
+    )
     block_hash0 = make_block_hash_with_group_id(BlockHash(b"10"), 1000)
     block_hash1 = make_block_hash_with_group_id(BlockHash(b"20"), 2000)
     block_hash2 = make_block_hash_with_group_id(BlockHash(b"30"), 3000)
@@ -2047,6 +2052,35 @@ def test_maybe_evict_cached_block():
     # Evict block3
     pool._maybe_evict_cached_block(block3)
     assert pool.cached_block_hash_to_block._cache == {}
+
+    events = pool.take_events()
+    removed_events = [event for event in events if isinstance(event, BlockRemoved)]
+    assert len(removed_events) == len(events) == 4
+    assert [
+        (event.block_hashes, event.group_idx, event.remaining_copy_counts)
+        for event in removed_events
+    ] == [
+        (
+            [kv_cache_utils.maybe_convert_block_hash(get_block_hash(block_hash1))],
+            2000,
+            [0],
+        ),
+        (
+            [kv_cache_utils.maybe_convert_block_hash(get_block_hash(block_hash0))],
+            1000,
+            [1],
+        ),
+        (
+            [kv_cache_utils.maybe_convert_block_hash(get_block_hash(block_hash2))],
+            3000,
+            [0],
+        ),
+        (
+            [kv_cache_utils.maybe_convert_block_hash(get_block_hash(block_hash0))],
+            1000,
+            [0],
+        ),
+    ]
 
 
 @pytest.mark.parametrize("blocks_to_cache", [2, 3, 10])
@@ -3534,6 +3568,26 @@ def test_block_lookup_cache_multi_blocks_per_key():
     assert cache.pop(key1, 11) is block11
     assert cache.get_one_block(key1) is None
     assert cache.pop(key1, 12) is None
+
+
+def test_block_lookup_cache_pop_with_remaining_count():
+    cache = BlockHashToBlockMap()
+    key = BlockHashWithGroupId(b"hash")
+    blocks = [KVCacheBlock(block_id) for block_id in range(3)]
+    for block in blocks:
+        cache.insert(key, block)
+
+    assert cache.pop_with_remaining_count(key, 100) == (None, 3)
+    assert cache.pop_with_remaining_count(key, 0) == (blocks[0], 2)
+    assert cache.pop_with_remaining_count(key, 1) == (blocks[1], 1)
+    assert cache.pop_with_remaining_count(key, 2) == (blocks[2], 0)
+    assert cache.pop_with_remaining_count(key, 2) == (None, 0)
+
+    single_key = BlockHashWithGroupId(b"single-hash")
+    single_block = KVCacheBlock(3)
+    cache.insert(single_key, single_block)
+    assert cache.pop_with_remaining_count(single_key, 100) == (None, 1)
+    assert cache.pop_with_remaining_count(single_key, 3) == (single_block, 0)
 
 
 def test_can_fit_full_sequence_swa_cap_admits_long_prompt():

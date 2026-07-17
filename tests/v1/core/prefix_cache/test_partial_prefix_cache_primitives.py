@@ -167,6 +167,7 @@ def test_cache_partial_block_kv_cache_events():
     assert isinstance(removed_event, BlockRemoved)
     assert removed_event.block_hashes == stored_event.block_hashes
     assert removed_event.group_idx == kv_cache_group_id
+    assert removed_event.remaining_copy_counts == [0]
 
 
 def test_partial_block_replacement_emits_remove_then_store_events():
@@ -219,6 +220,7 @@ def test_partial_block_replacement_emits_remove_then_store_events():
         kv_cache_utils.maybe_convert_block_hash(partial_hash_8)
     ]
     assert removed_event.group_idx == kv_cache_group_id
+    assert removed_event.remaining_copy_counts == [0]
     assert isinstance(stored_event, BlockStored)
     assert stored_event.block_hashes == [
         kv_cache_utils.maybe_convert_block_hash(partial_hash_10)
@@ -370,6 +372,42 @@ def test_cache_partial_block_duplicate_checks_all_blocks_for_hash():
     )
     assert duplicate_entry_hash == second_entry_hash
     assert pool.cached_block_hashes_by_block == {}
+
+
+def test_partial_block_removal_reports_remaining_copy_counts():
+    hash_block_size = 2
+    block_size = 4
+    kv_cache_group_id = 0
+    req = make_request("0", [0, 0], hash_block_size, sha256)
+    pool = BlockPool(
+        num_gpu_blocks=3,
+        enable_caching=True,
+        hash_block_size=hash_block_size,
+        enable_kv_cache_events=True,
+    )
+    blocks = pool.get_new_blocks(2)
+    for block in blocks:
+        pool.cache_partial_block(
+            request=req,
+            block=block,
+            num_tokens=hash_block_size,
+            kv_cache_group_id=kv_cache_group_id,
+            block_size=block_size,
+        )
+
+    pool.take_events()
+    pool.free_blocks(blocks)
+    expected_hash = kv_cache_utils.maybe_convert_block_hash(req.block_hashes[0])
+
+    for remaining_copy_count in (1, 0):
+        pool.get_new_blocks(1)
+        events = pool.take_events()
+        assert len(events) == 1
+        event = events[0]
+        assert isinstance(event, BlockRemoved)
+        assert event.block_hashes == [expected_hash]
+        assert event.group_idx == kv_cache_group_id
+        assert event.remaining_copy_counts == [remaining_copy_count]
 
 
 def test_reset_prefix_cache_clears_partial_entry_metadata():
