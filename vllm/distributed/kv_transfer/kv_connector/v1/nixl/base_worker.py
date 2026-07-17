@@ -1938,29 +1938,8 @@ class NixlBaseConnectorWorker:
         indices = torch.tensor(block_ids, device=self.device_type, dtype=torch.long)
 
         for _, cache_or_caches in self.device_kv_caches.items():
-            num_blocks, kv_heads, block_size, kv_head_size = cache_or_caches.shape
-            if kv_head_size % 2 != 0:
-                raise ValueError(
-                    f"Expected fused KV head size to be even, got {kv_head_size}"
-                )
-            head_size = kv_head_size // 2
-            cpu_kv_cache = cache_or_caches.view(
-                num_blocks, kv_heads, block_size * 2, head_size
-            )
-            # Source blocks are fused as [..., 2*D] with per-token [K|V].
-            # Split source on the last dim to avoid K/V interleaving.
-            blocks_to_update = cache_or_caches.index_select(0, indices)
-            key = blocks_to_update[..., :head_size]
-            value = blocks_to_update[..., head_size:]
-
-            # Destination CPU_ATTN cache view follows backend canonical layout.
-            key_cache, value_cache = cpu_kv_cache.chunk(2, dim=2)
             current_platform.pack_kv_cache(
-                key=key,
-                value=value,
-                key_cache=key_cache,
-                value_cache=value_cache,
-                block_ids=block_ids,
+                kv_cache=cache_or_caches,
                 indices=indices,
             )
 
