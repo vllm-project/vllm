@@ -14,8 +14,23 @@ from vllm.entrypoints.chat_utils import (
 from vllm.entrypoints.openai.engine.protocol import OpenAIBaseModel
 from vllm.exceptions import VLLMValidationError
 from vllm.renderers import ChatParams, TokenizeParams, merge_kwargs
+from vllm.tasks import REMOVED_POOLING_TASK_MESSAGES
 from vllm.utils import random_uuid
 from vllm.utils.serial_utils import EmbedDType, EncodingFormat, Endianness
+
+
+def reject_removed_pooling_parameters(data):
+    if not isinstance(data, dict):
+        return data
+    if "normalize" in data:
+        raise VLLMValidationError(
+            "Parameter `normalize` was removed; use `use_activation` instead.",
+            parameter="normalize",
+        )
+    task = data.get("task")
+    if isinstance(task, str) and (message := REMOVED_POOLING_TASK_MESSAGES.get(task)):
+        raise VLLMValidationError(message, parameter="task")
+    return data
 
 
 class PoolingBasicRequestMixin(OpenAIBaseModel):

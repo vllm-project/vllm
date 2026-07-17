@@ -15,6 +15,13 @@ PoolingTask = Literal[
 ]
 POOLING_TASKS: tuple[PoolingTask, ...] = get_args(PoolingTask)
 
+REMOVED_POOLING_TASK_MESSAGES = {
+    "score": "`score` task was removed; use `classify` instead.",
+    "encode": (
+        "`encode` task was removed; use `token_embed` or `token_classify` instead."
+    ),
+}
+
 ScoreType = Literal["bi-encoder", "cross-encoder", "late-interaction"]
 SCORE_TYPE_MAP: dict[PoolingTask, ScoreType] = {
     "embed": "bi-encoder",
