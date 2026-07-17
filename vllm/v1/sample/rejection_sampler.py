@@ -20,7 +20,7 @@ from vllm.v1.sample.logits_processor.builtin import MinTokensLogitsProcessor
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.ops.bad_words import apply_bad_words_with_drafts
 from vllm.v1.sample.ops.penalties import apply_all_penalties
-from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p
+from vllm.v1.sample.ops.topk_topp_sampler import TopKTopPSampler, apply_top_k_top_p
 from vllm.v1.sample.sampler import Sampler
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.spec_decode.utils import unconditional_to_conditional_rates
@@ -182,11 +182,18 @@ class RejectionSampler(nn.Module):
         # NOTE(woosuk): `target_logits` can be updated in place inside the
         # `apply_sampling_constraints` function.
         target_probs = None
+        topk_topp_sampler = getattr(self.sampler, "topk_topp_sampler", None)
         can_use_flashinfer_top_p = (
             sampling_metadata.all_random
             and sampling_metadata.top_p is not None
             and sampling_metadata.top_k is None
             and not self.is_processed_logprobs_mode
+            and isinstance(topk_topp_sampler, TopKTopPSampler)
+            and topk_topp_sampler.will_use_flashinfer(
+                sampling_metadata.generators,
+                sampling_metadata.top_k,
+                sampling_metadata.top_p,
+            )
         )
         flashinfer_top_p_renorm = (
             _get_flashinfer_top_p_renorm_probs() if can_use_flashinfer_top_p else None
