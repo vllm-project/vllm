@@ -7,7 +7,7 @@ import torch
 
 from tests.v1.kv_connector.unit.utils import create_vllm_config
 from vllm.config import KVEventsConfig, KVTransferConfig
-from vllm.distributed.kv_events import MEDIUM_CPU, BlockRemoved, BlockStored
+from vllm.distributed.kv_events import MEDIUM_CPU, MEDIUM_FS, BlockRemoved, BlockStored
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.config import (
     build_offloading_config,
 )
@@ -26,6 +26,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheSpecKind,
 )
 from vllm.v1.kv_offload.base import (
+    Locality,
     OffloadingEvent,
     OffloadingKVEventsConfig,
     OffloadKey,
@@ -103,12 +104,81 @@ def _record_chunks(
     return keys
 
 
-def _stored_event(keys: list[OffloadKey]) -> OffloadingEvent:
-    return OffloadingEvent(keys=keys, medium=_CPU_MEDIUM, removed=False)
+def _stored_event(
+    keys: list[OffloadKey],
+    locality: Locality | None = None,
+    medium: str = _CPU_MEDIUM,
+) -> OffloadingEvent:
+    return OffloadingEvent(
+        keys=keys,
+        medium=medium,
+        removed=False,
+        locality=locality,
+    )
 
 
-def _removed_event(keys: list[OffloadKey]) -> OffloadingEvent:
-    return OffloadingEvent(keys=keys, medium=_CPU_MEDIUM, removed=True)
+def _removed_event(
+    keys: list[OffloadKey],
+    locality: Locality | None = None,
+    medium: str = _CPU_MEDIUM,
+) -> OffloadingEvent:
+    return OffloadingEvent(
+        keys=keys,
+        medium=medium,
+        removed=True,
+        locality=locality,
+    )
+
+
+def test_take_events_forwards_locality_to_rich_store():
+    tracker = _tracker()
+    req = _request(block_hashes=[_hash(0)], token_count=4)
+    key = _record_chunks(tracker, req, _group_config(), num_chunks=1)[0]
+
+    events = list(
+        tracker.take_events(
+            [_stored_event([key], locality=Locality.LOCAL, medium=MEDIUM_FS)]
+        )
+    )
+
+    assert len(events) == 1
+    assert isinstance(events[0], BlockStored)
+    assert events[0].token_ids == [1, 2, 3, 4]
+    assert events[0].block_size == 4
+    assert events[0].locality == "LOCAL"
+
+
+def test_take_events_forwards_locality_to_placeholder_store():
+    tracker = _tracker(self_describing_kv_events=False)
+    req = _request(block_hashes=[_hash(0)], token_count=4)
+    key = _record_chunks(tracker, req, _group_config(), num_chunks=1)[0]
+
+    events = list(
+        tracker.take_events(
+            [_stored_event([key], locality=Locality.REMOTE, medium=MEDIUM_FS)]
+        )
+    )
+
+    assert len(events) == 1
+    assert isinstance(events[0], BlockStored)
+    assert events[0].block_size == 0
+    assert events[0].locality == "REMOTE"
+
+
+def test_take_events_forwards_locality_to_remove():
+    tracker = _tracker()
+    req = _request(block_hashes=[_hash(0)], token_count=4)
+    key = _record_chunks(tracker, req, _group_config(), num_chunks=1)[0]
+
+    events = list(
+        tracker.take_events(
+            [_removed_event([key], locality=Locality.LOCAL, medium=MEDIUM_FS)]
+        )
+    )
+
+    assert len(events) == 1
+    assert isinstance(events[0], BlockRemoved)
+    assert events[0].locality == "LOCAL"
 
 
 def test_take_events_publishes_routable_block_stored():

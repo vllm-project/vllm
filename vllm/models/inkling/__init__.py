@@ -7,14 +7,20 @@ if TYPE_CHECKING:
         InklingForCausalLM,
         InklingForConditionalGeneration,
     )
+    from .nvidia.mtp import InklingMTP
 
 __all__ = [
     "InklingForConditionalGeneration",
     "InklingForCausalLM",
+    "InklingMTP",
 ]
 
 
 def __getattr__(name: str):
+    if name == "InklingMTP":
+        from .nvidia import mtp
+
+        return mtp.InklingMTP
     if name in __all__:
         from .nvidia import model
 
