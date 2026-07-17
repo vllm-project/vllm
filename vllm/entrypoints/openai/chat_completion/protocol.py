@@ -523,8 +523,8 @@ class ChatCompletionRequest(OpenAIBaseModel):
                 msg["tool_calls"] = list(tool_calls)
         return self
 
-    _grammar_from_tool_parser: bool = PrivateAttr(default=False)
-    """CAUTION: Should only be set by ``ToolParser.adjust_request``."""
+    _grammar_from_parser: bool = PrivateAttr(default=False)
+    """CAUTION: Should only be set by the parser-engine adapter's adjust_request."""
 
     def build_chat_params(
         self,

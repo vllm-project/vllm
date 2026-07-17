@@ -8,7 +8,7 @@ import llguidance
 import pytest
 from mistral_common.exceptions import InvalidMessageStructureException
 from mistral_common.guidance.grammar_factory import GrammarFactory
-from mistral_common.tokens.tokenizers.base import SpecialTokenPolicy
+from mistral_common.tokens.tokenizers.base import SpecialTokenPolicy, SpecialTokens
 
 from vllm.tokenizers.mistral import (
     MistralTokenizer,
@@ -1247,7 +1247,7 @@ class TestMistralTokenizer:
 
         expected_strings = (
             '[{"type": "function", "function": {"name": "get_weather", "description": "Gets the current weather in a city.", "parameters": {"type": "object", "properties": {"city": {"type": "string", "description": "The city name"}}, "required": ["city"]}}}] I am an AI\n\nHello world ![TOOL_CALLS][{"name": "get_weather", "arguments": {"city": "Paris"}, "id": "123456789"}] {"content": {"temperature": 20, "unit": "celsius"}, "call_id": "123456789"}',  # noqa: E501
-            'I am an AI[{"type": "function", "function": {"name": "get_weather", "description": "Gets the current weather in a city.", "parameters": {"type": "object", "properties": {"city": {"type": "string", "description": "The city name"}}, "required": ["city"]}}}]Hello world ![TOOL_CALLS]get_weather{"city": "Paris"}{"temperature": 20, "unit": "celsius"}',  # noqa: E501
+            'I am an AI[{"type": "function", "function": {"name": "get_weather", "description": "Gets the current weather in a city.", "parameters": {"type": "object", "properties": {"city": {"type": "string", "description": "The city name"}}, "required": ["city"]}}}]Hello world ![TOOL_CALLS]get_weather[ARGS]{"city": "Paris"}{"temperature": 20, "unit": "celsius"}',  # noqa: E501
         )
 
         assert (
@@ -1498,6 +1498,7 @@ class TestMistralTokenizer:
                         "get",
                         "_",
                         "weather",
+                        "[ARGS]",
                         '{"',
                         "city",
                         '":',
@@ -2234,3 +2235,14 @@ class TestMistralTokenizer:
         decoded = mistral_tokenizer.tokenizer.decode(output, SpecialTokenPolicy.KEEP)
 
         assert "[THINK]2+2 equals 4[/THINK]" in decoded
+
+
+def test_convert_ids_to_tokens_pre_args_tekken():
+    """convert_ids_to_tokens does not raise on pre-[ARGS] Tekken tokenizers."""
+    tokenizer = MistralTokenizer.from_pretrained("mistralai/Ministral-8B-Instruct-2410")
+    assert tokenizer.is_tekken
+    assert not tokenizer.tokenizer.is_special(SpecialTokens.args)
+
+    ids = tokenizer.encode("Hello world !", add_special_tokens=False)
+    tokens = tokenizer.convert_ids_to_tokens(ids, skip_special_tokens=True)
+    assert len(tokens) > 0

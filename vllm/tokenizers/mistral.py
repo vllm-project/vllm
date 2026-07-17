@@ -475,6 +475,7 @@ class MistralTokenizer(TokenizerLike):
     def convert_tokens_to_string(self, tokens: list[str]) -> str:
         to_decode_special_tokens = {
             SpecialTokens.tool_calls,
+            SpecialTokens.args,
             SpecialTokens.begin_think,
             SpecialTokens.end_think,
         }
@@ -531,6 +532,12 @@ class MistralTokenizer(TokenizerLike):
         non_skip_special_tokens_ids = {
             self.tokenizer.get_special_token(SpecialTokens.tool_calls),
         }
+        # [ARGS] only exists in v11+ tool-call tokenizers; older tokenizers
+        # raise (Tekken) or return unk (SPM) for it.
+        if self.tokenizer.is_special(SpecialTokens.args):
+            non_skip_special_tokens_ids.add(
+                self.tokenizer.get_special_token(SpecialTokens.args)
+            )
         if isinstance(self.instruct, InstructTokenizerV13):
             if self.instruct.BEGIN_THINK:
                 non_skip_special_tokens_ids.add(self.instruct.BEGIN_THINK)

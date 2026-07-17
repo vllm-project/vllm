@@ -65,7 +65,6 @@ from vllm.renderers.online_renderer import OnlineRenderer
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.tokenizers import TokenizerLike
 from vllm.utils.collection_utils import as_list
-from vllm.utils.mistral import is_mistral_tool_parser
 
 logger = init_logger(__name__)
 
@@ -157,15 +156,6 @@ class OpenAIServingChat(GenerateBaseServing):
             model_name=self.model_config.model,
             is_harmony=self.model_config.hf_config.model_type == "gpt_oss",
         )
-        if (
-            self.parser_cls is not None
-            and is_mistral_tool_parser(self.parser_cls.tool_parser_cls)
-            and self.parser_cls.reasoning_parser_cls is not None
-        ):
-            from vllm.tool_parsers.mistral_tool_parser import MistralToolParser
-
-            MistralToolParser.model_can_reason = True
-
         self.exclude_tools_when_tool_choice_none = exclude_tools_when_tool_choice_none
 
         self.enable_prompt_tokens_details = enable_prompt_tokens_details
@@ -350,7 +340,7 @@ class OpenAIServingChat(GenerateBaseServing):
             else:
                 if not request.include_reasoning:
                     reasoning_ended = True
-                elif request._grammar_from_tool_parser:
+                elif request._grammar_from_parser:
                     # The Mistral grammar already includes an optional
                     # `think?` rule that handles both reasoning and
                     # non-reasoning outputs.

@@ -32,7 +32,9 @@ def server(request, server_config: ServerConfig):
     model = server_config["model"]
     args_for_model = server_config["arguments"]
     with RemoteOpenAIServer(
-        model, ARGS + args_for_model, max_wait_seconds=480
+        model,
+        ARGS + args_for_model,
+        max_wait_seconds=server_config.get("startup_timeout", 480),
     ) as server:
         yield server
 

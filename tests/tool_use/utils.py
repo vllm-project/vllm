@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from copy import deepcopy
-from typing import Any
+from typing import Any, Literal
 
 from openai.types.chat import ChatCompletionMessageParam, ChatCompletionToolParam
 from typing_extensions import TypedDict
@@ -13,14 +13,20 @@ from tests.utils import VLLM_PATH
 class ServerConfig(TypedDict, total=False):
     model: str
     arguments: list[str]
-    system_prompt: str | None
+    system_prompt: str | list[dict[str, Any]] | None
     supports_parallel: bool | None
     supports_rocm: bool | None
     extended: bool | None  # tests do not run in CI automatically
+    reasoning_mode: Literal["none", "intrinsic", "effort"]
+    supports_grammar: bool
+    # Seconds to wait for the server to start; large models (e.g. 119B fp8 on
+    # TP=2) need longer to load and quantize weights than the default.
+    startup_timeout: int
 
 
 def patch_system_prompt(
-    messages: list[dict[str, Any]], system_prompt: str
+    messages: list[dict[str, Any]],
+    system_prompt: str | list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     new_messages = deepcopy(messages)
     if new_messages[0]["role"] == "system":
