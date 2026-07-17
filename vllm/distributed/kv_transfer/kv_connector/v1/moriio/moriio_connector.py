@@ -16,7 +16,7 @@ import numpy as np
 import torch
 import zmq
 
-from vllm.config import VllmConfig
+from vllm.config import KVTransferConfig, VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
     KVConnectorMetadata,
@@ -189,13 +189,9 @@ def resolve_moriio_transfer_ack(
 class MoRIIOConnector(KVConnectorBase_V1):
     @classmethod
     def requires_piecewise_for_cudagraph(cls, extra_config: dict[str, Any]) -> bool:
-        # MoRIIO READ mode does asynchronous per-layer RDMA reads and blocks in
-        # wait_for_layer_load() between layers. That Python barrier cannot be
-        # captured in a FULL CUDA graph -- it would be skipped during replay, so
-        # attention runs before the remote KV lands (high-concurrency "salad").
-        # Require PIECEWISE so Python executes between graph pieces and the
-        # barrier actually fires.
-        return True
+        # READ needs PIECEWISE for its per-layer barrier; WRITE is unchanged.
+        kv_transfer_config = KVTransferConfig(kv_connector_extra_config=extra_config)
+        return get_moriio_mode(kv_transfer_config) == MoRIIOMode.READ
 
     def __init__(
         self,
@@ -1005,9 +1001,7 @@ class MoRIIOConnectorWorker:
         # Map of engine_id -> num_blocks. All ranks in the same deployment will
         # have the same number of blocks.
         self.dst_num_blocks: dict[EngineId, int] = {}
-        # In progress READ transfers, keyed per-layer (req_id -> {layer_name:
-        # status}) so wait_for_layer_load() can block on exactly the layer whose
-        # attention is about to run; a flat list cannot tell which layer landed.
+        # In-progress READ transfers: req_id -> {layer_name: status}.
         self._recving_transfers: defaultdict[ReqId, dict] = defaultdict(dict)
         # Values are (remote_host, remote_notify_port, transfer_id).
         self._recving_transfers_callback_addr: dict[ReqId, tuple[str, str, str]] = {}
@@ -1614,21 +1608,7 @@ class MoRIIOConnectorWorker:
         return done_sending, done_recving
 
     def wait_for_layer_load(self, layer_name: str) -> None:
-        """Block until every in-flight READ of ``layer_name`` has landed.
-
-        MoRIIO READ posts all of a request's per-layer RDMA reads up front in
-        start_load_kv; they complete asynchronously (a CQ-poll thread flips each
-        status to Succeeded). The attention kernel for ``layer_name`` runs
-        immediately after this returns, so without this barrier attention reads
-        KV that has not arrived yet -> garbage output that scales with
-        concurrency. Only the READ-mode consumer waits; the producer and WRITE
-        mode return immediately.
-
-        A failed read is treated as terminal here and cleaned up non-fatally by
-        _pop_done_transfers (notify prefill + drop). The deadline logs and
-        proceeds rather than raising, so a stuck transfer cannot take down the
-        worker.
-        """
+        """Block until all in-flight READs of this layer have landed."""
         if self.is_producer or self.mode != MoRIIOMode.READ:
             return
 
@@ -1646,8 +1626,7 @@ class MoRIIOConnectorWorker:
 
             still_running = False
             for status in pending:
-                # Succeeded and Failed are both terminal for the barrier; a
-                # Failed read is notified + dropped in _pop_done_transfers.
+                # A failed read is dropped in _pop_done_transfers.
                 if status.Succeeded() or status.Failed():
                     continue
                 still_running = True
@@ -1657,9 +1636,8 @@ class MoRIIOConnectorWorker:
 
             if time.monotonic() > deadline:
                 logger.warning(
-                    "MoRIIO READ barrier timed out for layer %s after "
-                    "transfer_timeout; proceeding (get_finished notifies "
-                    "prefill and drops unfinished requests).",
+                    "MoRIIO READ barrier timed out for layer %s; proceeding "
+                    "(request dropped via get_finished).",
                     layer_name,
                 )
                 return
