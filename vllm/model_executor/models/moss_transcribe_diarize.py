@@ -14,6 +14,7 @@ import math
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Annotated, Any, Literal, TypeAlias
 
+import regex as re
 import torch
 from torch import nn
 from transformers import BatchFeature
@@ -78,6 +79,11 @@ DEFAULT_MOSS_TRANSCRIBE_DIARIZE_PROMPT = (
     "（[S01]、[S02]、[S03]…）开头，正文为对应的语音内容，"
     "并在段末标注结束时间戳，以清晰标明该段语音范围。"
 )
+
+_MOSS_DIARIZED_HEADER_RE = re.compile(
+    r"\[(?P<start>[0-9.]{1,32})\]\s*\[(?P<speaker>S[0-9]{1,15})\]"
+)
+_MOSS_DIARIZED_END_RE = re.compile(r"\[(?P<end>[0-9.]{1,32})\]\s*\Z")
 
 
 class MossTranscribeDiarizeAudioInputs(TensorSchema):
@@ -639,134 +645,41 @@ class MossTranscribeDiarizeForConditionalGeneration(
     @classmethod
     def parse_diarized_transcript(cls, text: str) -> list[DiarizedTranscriptionSegment]:
         """Parse MOSS's canonical ``[start][Sxx]text[end]`` transcript."""
-        seek_start, read_start, expect_speaker = range(3)
-        read_speaker, read_text, read_end, after_end = range(3, 7)
+        headers: list[tuple[re.Match[str], float, str]] = []
+        for match in _MOSS_DIARIZED_HEADER_RE.finditer(text):
+            start = parse_diarized_timestamp(match["start"])
+            speaker = parse_diarized_speaker(match["speaker"])
+            if start is not None and speaker is not None:
+                headers.append((match, start, speaker))
+
+        if not headers:
+            return []
+
         segments: list[DiarizedTranscriptionSegment] = []
-        state = seek_start
-        token: list[str] = []
-        segment_text: list[str] = []
-        pending_whitespace: list[str] = []
-        start: float | None = None
-        end: float | None = None
-        speaker: str | None = None
-        end_marker = ""
+        for index, (header, start, speaker) in enumerate(headers):
+            next_header_start = (
+                headers[index + 1][0].start() if index + 1 < len(headers) else len(text)
+            )
+            body = text[header.end() : next_header_start]
+            end_match = _MOSS_DIARIZED_END_RE.search(body)
+            if end_match is None:
+                return []
 
-        def reset() -> None:
-            nonlocal state, start, end, speaker, end_marker
-            state = seek_start
-            token.clear()
-            segment_text.clear()
-            pending_whitespace.clear()
-            start = None
-            end = None
-            speaker = None
-            end_marker = ""
+            end = parse_diarized_timestamp(end_match["end"])
+            if end is None or end < start:
+                return []
 
-        def emit_segment() -> None:
-            if start is not None and end is not None and speaker is not None:
-                parsed_text = "".join(segment_text).strip()
-                if parsed_text:
-                    segments.append(
-                        DiarizedTranscriptionSegment(
-                            start=start,
-                            end=end,
-                            speaker=speaker,
-                            text=parsed_text,
-                        )
+            segment_text = body[: end_match.start()].strip()
+            if segment_text:
+                segments.append(
+                    DiarizedTranscriptionSegment(
+                        start=start,
+                        end=end,
+                        speaker=speaker,
+                        text=segment_text,
                     )
-            reset()
+                )
 
-        for char in text:
-            if state == seek_start:
-                if char == "[":
-                    token.clear()
-                    state = read_start
-            elif state == read_start:
-                if char == "]":
-                    start = parse_diarized_timestamp("".join(token))
-                    token.clear()
-                    if start is None:
-                        reset()
-                    else:
-                        state = expect_speaker
-                elif "0" <= char <= "9" or char == ".":
-                    token.append(char)
-                    if len(token) > 32:
-                        reset()
-                else:
-                    reset()
-                    if char == "[":
-                        state = read_start
-            elif state == expect_speaker:
-                if char == "[":
-                    token.clear()
-                    state = read_speaker
-                elif not char.isspace():
-                    reset()
-            elif state == read_speaker:
-                if char == "]":
-                    speaker = parse_diarized_speaker("".join(token))
-                    token.clear()
-                    if speaker is None:
-                        reset()
-                    else:
-                        segment_text.clear()
-                        state = read_text
-                elif char == "S" or "0" <= char <= "9":
-                    token.append(char)
-                    if len(token) > 16:
-                        reset()
-                else:
-                    reset()
-                    if char == "[":
-                        state = read_start
-            elif state == read_text:
-                if char == "[":
-                    token.clear()
-                    state = read_end
-                else:
-                    segment_text.append(char)
-            elif state == read_end:
-                if char == "]":
-                    parsed_end = parse_diarized_timestamp("".join(token))
-                    if (
-                        parsed_end is not None
-                        and start is not None
-                        and parsed_end >= start
-                    ):
-                        end = parsed_end
-                        end_marker = "".join(token)
-                        pending_whitespace.clear()
-                        state = after_end
-                    else:
-                        segment_text.extend(("[", *token, "]"))
-                        state = read_text
-                    token.clear()
-                elif "0" <= char <= "9" or char == ".":
-                    token.append(char)
-                    if len(token) > 32:
-                        segment_text.append("[")
-                        segment_text.extend(token)
-                        token.clear()
-                        state = read_text
-                else:
-                    segment_text.extend(("[", *token, char))
-                    token.clear()
-                    state = read_text
-            elif char == "[":
-                emit_segment()
-                state = read_start
-            elif char.isspace():
-                pending_whitespace.append(char)
-            else:
-                segment_text.extend(("[", end_marker, "]", *pending_whitespace, char))
-                pending_whitespace.clear()
-                end = None
-                end_marker = ""
-                state = read_text
-
-        if state == after_end:
-            emit_segment()
         return segments
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
