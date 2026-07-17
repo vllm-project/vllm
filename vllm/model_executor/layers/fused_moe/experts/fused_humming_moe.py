@@ -37,9 +37,9 @@ from vllm.model_executor.layers.fused_moe.utils import (
     swiglu_limit_func,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    GroupShape,
     INT4_DTYPE,
     INT8_DTYPE,
+    GroupShape,
     QuantKey,
     kFp8Dynamic128Sym,
     kFp8DynamicTokenSym,

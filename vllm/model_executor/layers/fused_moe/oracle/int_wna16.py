@@ -1035,8 +1035,7 @@ def _humming_wna16_weight_schema(
         }
     if isinstance(quant_config, QuantizationArgs):
         quant_type = getattr(quant_config.type, "value", quant_config.type)
-        quant_strategy = getattr(quant_config.strategy, "value",
-                                 quant_config.strategy)
+        quant_strategy = getattr(quant_config.strategy, "value", quant_config.strategy)
         return {
             "quant_method": "compressed-tensors",
             "format": "pack-quantized",
