@@ -1233,11 +1233,11 @@ def _send_signal(pid: int, signum: int) -> None:
             os.close(pidfd)
 
 
-def _read_status_frame(sock: socket.socket) -> int:
+def _read_status_frame(sock: socket.socket, timeout: float | None = 2.0) -> int:
     # Post-commit EOF with no well-formed frame = abnormal termination (fatal
     # signal / native crash / OOM), fixed exit 254; criu's rc is never consulted.
     try:
-        sock.settimeout(2.0)
+        sock.settimeout(timeout)
         code = read_frame(sock).get("exit_code")
         if isinstance(code, int):
             return code
@@ -1317,8 +1317,15 @@ def _run_criu_restore(
 
         for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
             signal.signal(signum, _forward)
-        process.wait()
-        raise SystemExit(_read_status_frame(parent_sock))
+        # Exit when the SERVER exits: the status frame (or its EOF) arrives at
+        # restored-root death. criu stays behind as the tree's subreaper, so
+        # any straggler is in ITS subtree; sweep from the criu child (the walk
+        # includes criu itself), then a short reap. The wrapper's stop latency
+        # is the server's, never criu's daemon draining.
+        status = _read_status_frame(parent_sock, timeout=None)
+        kill_restored_group(process.pid, deadline_s=5.0)
+        _wait_bounded(process)
+        raise SystemExit(status)
     except BaseException as error:
         if not committed:
             pid = restored_pid
