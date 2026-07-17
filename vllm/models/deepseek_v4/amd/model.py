@@ -806,6 +806,10 @@ class DeepseekV4ForCausalLM(nn.Module, SupportsPP, SupportsEagle3):
     # Default mapper assumes the original FP4-expert checkpoint layout.
     # Overridden per-instance in __init__ when expert_dtype != "fp4".
     hf_to_vllm_mapper = _make_deepseek_v4_weights_mapper("fp4")
+    packed_modules_mapping = {
+        "gate_up_proj": ["w1", "w3"],
+        "fused_wqa_wkv": ["wq_a", "wkv"],
+    }
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()

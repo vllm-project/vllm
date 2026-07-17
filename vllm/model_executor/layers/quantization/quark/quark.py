@@ -33,6 +33,7 @@ from vllm.model_executor.layers.quantization.quark.schemes import (
     QuarkScheme,
     QuarkW4A8_MXFP4_FP8,
     QuarkW8A8Fp8,
+    QuarkW8A8Fp8PerBlock,
     QuarkW8A8Int8,
 )
 from vllm.model_executor.layers.quantization.quark.utils import (
@@ -69,8 +70,6 @@ class QuarkConfig(QuantizationConfig):
         self.packed_modules_mapping = dict(
             getattr(type(self), "packed_modules_mapping", {})
         )
-        self.packed_modules_mapping.setdefault("gate_up_proj", ["w1", "w3"])
-        self.packed_modules_mapping.setdefault("fused_wqa_wkv", ["wq_a", "wkv"])
         self.kv_cache_group = kv_cache_group
         self.kv_cache_config = kv_cache_config
         self.pack_method = pack_method
@@ -346,9 +345,10 @@ class QuarkConfig(QuantizationConfig):
             "per_tensor",
             "per_channel",
         ]
+        block_size = list(weight_quant.get("block_size") or [])
         is_per_block_weight = (
             weight_quant.get("qscheme") == "per_block"
-            and list(weight_quant.get("block_size") or []) == [128, 128]
+            and block_size == [128, 128]
             and weight_quant.get("symmetric") is True
         )
 
@@ -360,7 +360,7 @@ class QuarkConfig(QuantizationConfig):
                 return False
             return (
                 input_quant.get("qscheme") == "per_group"
-                and input_quant.get("group_size") == 128
+                and input_quant.get("group_size") == block_size[1]
                 and input_quant.get("symmetric") is True
             )
 
@@ -663,6 +663,8 @@ class QuarkConfig(QuantizationConfig):
                 QuarkW8A8Fp8.get_min_capability(), error=False
             )
             if is_fp8_w8a8_supported:
+                if weight_config.get("qscheme") == "per_block":
+                    return QuarkW8A8Fp8PerBlock(weight_config, input_config)
                 return QuarkW8A8Fp8(weight_config, input_config)
         elif self._is_static_tensor_w8a8(weight_config, input_config):
             weight_qscheme = cast(str, weight_config.get("qscheme"))

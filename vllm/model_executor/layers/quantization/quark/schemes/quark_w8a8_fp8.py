@@ -39,7 +39,7 @@ from vllm.model_executor.parameter import (
 )
 from vllm.platforms import current_platform
 
-__all__ = ["QuarkW8A8Fp8"]
+__all__ = ["QuarkW8A8Fp8", "QuarkW8A8Fp8PerBlock"]
 
 logger = init_logger(__name__)
 
@@ -55,40 +55,28 @@ class QuarkW8A8Fp8(QuarkScheme):
             self.is_static_input_scheme = not cast(bool, input_config.get("is_dynamic"))
             self.input_qscheme = cast(str, input_config.get("qscheme"))
 
-        self.is_per_block = self.weight_qscheme == "per_block"
-        self.weight_config = weight_config
-        block_size = weight_config.get("block_size")
-        if self.is_per_block:
-            if not block_size:
-                raise ValueError(
-                    "Quark W8A8 FP8 per-block weight quantization requires "
-                    "`block_size` in the weight quantization config."
-                )
-            self.weight_block_size = list(block_size)
-        else:
-            self.weight_block_size = list(block_size or [128, 128])
+        if self.weight_qscheme == "per_block":
+            raise ValueError(
+                "Quark W8A8 FP8 per-block weight quantization should use "
+                "QuarkW8A8Fp8PerBlock."
+            )
         per_token_activation = (
             not self.is_static_input_scheme and self.input_qscheme == "per_channel"
         )
         per_channel_weight = self.weight_qscheme == "per_channel"
 
-        if self.is_per_block:
-            self.activation_quant_key = kFp8Dynamic128Sym
-            self.weight_quant_key = kFp8Static128BlockSym
-        else:
-            self.activation_quant_key = (
-                kFp8DynamicTokenSym if per_token_activation else kFp8StaticTensorSym
-            )
-            # A per-output-channel weight scale is one fp32 value per weight row
-            # (length N). Tag it as ``GroupShape.PER_CHANNEL`` to match the
-            # canonical compressed-tensors CHANNEL strategy, so kernel selection
-            # (e.g. AITER's pre-shuffled FP8 GEMM) treats it uniformly.
-            self.weight_quant_key = (
-                kFp8StaticChannelSym if per_channel_weight else kFp8StaticTensorSym
-            )
+        self.activation_quant_key = (
+            kFp8DynamicTokenSym if per_token_activation else kFp8StaticTensorSym
+        )
+        # A per-output-channel weight scale is one fp32 value per weight row
+        # (length N). Tag it as ``GroupShape.PER_CHANNEL`` to match the
+        # canonical compressed-tensors CHANNEL strategy, so kernel selection
+        # (e.g. AITER's pre-shuffled FP8 GEMM) treats it uniformly.
+        self.weight_quant_key = (
+            kFp8StaticChannelSym if per_channel_weight else kFp8StaticTensorSym
+        )
         self.out_dtype = torch.get_default_dtype()
         self.input_dtype = get_current_vllm_config().model_config.dtype
-        self.fp8_linear = None
 
     @classmethod
     def get_min_capability(cls) -> int:
@@ -96,20 +84,6 @@ class QuarkW8A8Fp8(QuarkScheme):
         return 89
 
     def process_weights_after_loading(self, layer) -> None:
-        if self.fp8_linear is None:
-            raise RuntimeError("FP8 linear kernel is not initialized")
-
-        if self.is_per_block:
-            if isinstance(self.fp8_linear, MarlinFP8ScaledMMLinearKernel):
-                self.fp8_linear.process_weights_after_loading(layer)
-                return
-            # Non-Marlin per-block FP8 kernels use dynamic 128-group
-            # activation scaling, so there is no checkpoint-provided static
-            # input scale to pass through.
-            layer.input_scale = None
-            self.fp8_linear.process_weights_after_loading(layer)
-            return
-
         # If per tensor, when we have a fused module (e.g. QKV) with per
         # tensor scales (thus N scales being passed to the kernel),
         # requantize so we can always run per tensor
@@ -175,17 +149,6 @@ class QuarkW8A8Fp8(QuarkScheme):
         weight_loader: Callable,
         **kwargs,
     ):
-        if self.is_per_block:
-            self._create_per_block_weights(
-                layer=layer,
-                output_partition_sizes=output_partition_sizes,
-                input_size_per_partition=input_size_per_partition,
-                params_dtype=params_dtype,
-                weight_loader=weight_loader,
-                **kwargs,
-            )
-            return
-
         output_size_per_partition = sum(output_partition_sizes)
         layer.logical_widths = output_partition_sizes
 
@@ -240,7 +203,49 @@ class QuarkW8A8Fp8(QuarkScheme):
             module_name=self.__class__.__name__,
         )
 
-    def _create_per_block_weights(
+    def apply_weights(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        bias: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        return self.fp8_linear.apply_weights(layer, x, bias)
+
+
+class QuarkW8A8Fp8PerBlock(QuarkScheme):
+    def __init__(
+        self, weight_config: dict[str, Any], input_config: dict[str, Any] | None
+    ):
+        self.weight_qscheme = cast(str, weight_config.get("qscheme"))
+        if self.weight_qscheme != "per_block":
+            raise ValueError("QuarkW8A8Fp8PerBlock requires per-block weights.")
+        block_size = weight_config.get("block_size")
+        if not block_size:
+            raise ValueError(
+                "Quark W8A8 FP8 per-block weight quantization requires "
+                "`block_size` in the weight quantization config."
+            )
+        self.weight_config = weight_config
+        self.weight_block_size = list(block_size)
+        self.activation_quant_key = kFp8Dynamic128Sym
+        self.weight_quant_key = kFp8Static128BlockSym
+        self.out_dtype = torch.get_default_dtype()
+        self.input_dtype = get_current_vllm_config().model_config.dtype
+
+    @classmethod
+    def get_min_capability(cls) -> int:
+        return QuarkW8A8Fp8.get_min_capability()
+
+    def process_weights_after_loading(self, layer) -> None:
+        if isinstance(self.fp8_linear, MarlinFP8ScaledMMLinearKernel):
+            self.fp8_linear.process_weights_after_loading(layer)
+            return
+        # Non-Marlin per-block FP8 kernels use dynamic 128-group activation
+        # scaling, so there is no checkpoint-provided static input scale.
+        layer.input_scale = None
+        self.fp8_linear.process_weights_after_loading(layer)
+
+    def create_weights(
         self,
         layer: torch.nn.Module,
         output_partition_sizes: list[int],
@@ -300,7 +305,7 @@ class QuarkW8A8Fp8(QuarkScheme):
             module_name=self.__class__.__name__,
         )
         logger.info_once(
-            "Selected %s for QuarkW8A8Fp8 per-block",
+            "Selected %s for QuarkW8A8Fp8PerBlock",
             type(self.fp8_linear).__name__,
         )
 
@@ -310,6 +315,4 @@ class QuarkW8A8Fp8(QuarkScheme):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        if self.fp8_linear is None:
-            raise RuntimeError("FP8 linear kernel is not initialized")
         return self.fp8_linear.apply_weights(layer, x, bias)
