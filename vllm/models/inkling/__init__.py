@@ -16,14 +16,13 @@ if TYPE_CHECKING:
             InklingForCausalLM,
             InklingForConditionalGeneration,
         )
+        from .nvidia.mtp import InklingMTP as InklingMTP
 
 __all__ = [
     "InklingForConditionalGeneration",
     "InklingForCausalLM",
     "InklingMTP",
 ]
-if current_platform.is_rocm():
-    __all__.append("InklingMTP")
 
 
 def __getattr__(name: str):
@@ -33,9 +32,9 @@ def __getattr__(name: str):
 
             return amd_mtp.InklingMTP
 
-        raise AttributeError(
-            f"module {__name__!r} has no NVIDIA implementation of {name!r}"
-        )
+        from .nvidia import mtp as nvidia_mtp
+
+        return nvidia_mtp.InklingMTP
 
     if name in __all__:
         if current_platform.is_rocm():

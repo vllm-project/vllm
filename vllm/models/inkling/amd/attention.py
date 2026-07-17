@@ -184,7 +184,7 @@ class InklingAttention(nn.Module, AttentionLayerBase):
                 window_size=self.window_size,
                 is_local=self.is_local,
                 max_kv_len=self._max_kv_len,
-                dtype=cast(torch.dtype, vllm_config.model_config.dtype),
+                dtype=vllm_config.model_config.dtype,
                 kv_dtype=self.kv_cache_torch_dtype,
                 block_size=vllm_config.cache_config.block_size,
                 max_num_reqs=vllm_config.scheduler_config.max_num_seqs,
