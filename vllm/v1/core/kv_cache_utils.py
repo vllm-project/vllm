@@ -1463,10 +1463,9 @@ def unify_hybrid_kv_cache_specs(kv_cache_spec: dict[str, KVCacheSpec]):
     )
 
     uniform_block_size: int | None = None
-    if has_swa_mla:
-        # For DeepseekV4, block sizes can be different for different KV cache groups.
-        # E.g., Full MLA: 256; SWA MLA: 64; C4 partial states: 4, C128 states: 8.
-        assert has_full_attention
+    if has_full_attention and (has_swa_mla or has_sliding_window):
+        # For DeepseekV4, block sizes can be different for different KV cache
+        # groups (e.g. Full MLA: 256; SWA MLA: 64; C4: 4, C128: 8).
         any_full_spec = next(
             iter(
                 spec
@@ -1478,11 +1477,14 @@ def unify_hybrid_kv_cache_specs(kv_cache_spec: dict[str, KVCacheSpec]):
 
     if has_full_attention and (has_sliding_window or has_chunked_local_attention):
         for layer_name, spec in kv_cache_spec.items():
+            block_size = (
+                uniform_block_size
+                if uniform_block_size is not None
+                else spec.block_size
+            )
             if isinstance(spec, SlidingWindowMLASpec):
                 kv_cache_spec[layer_name] = MLAAttentionSpec(
-                    block_size=uniform_block_size
-                    if uniform_block_size is not None
-                    else spec.block_size,
+                    block_size=block_size,
                     num_kv_heads=spec.num_kv_heads,
                     head_size=spec.head_size,
                     dtype=spec.dtype,
@@ -1494,7 +1496,7 @@ def unify_hybrid_kv_cache_specs(kv_cache_spec: dict[str, KVCacheSpec]):
                 )
             elif isinstance(spec, SlidingWindowSpec):
                 kv_cache_spec[layer_name] = FullAttentionSpec(
-                    block_size=spec.block_size,
+                    block_size=block_size,
                     num_kv_heads=spec.num_kv_heads,
                     head_size=spec.head_size,
                     head_size_v=spec.head_size_v,
@@ -1505,7 +1507,7 @@ def unify_hybrid_kv_cache_specs(kv_cache_spec: dict[str, KVCacheSpec]):
                 )
             elif isinstance(spec, ChunkedLocalAttentionSpec):
                 kv_cache_spec[layer_name] = FullAttentionSpec(
-                    block_size=spec.block_size,
+                    block_size=block_size,
                     num_kv_heads=spec.num_kv_heads,
                     head_size=spec.head_size,
                     dtype=spec.dtype,
