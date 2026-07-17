@@ -535,7 +535,7 @@ def descendant_identities(root_pid: int) -> dict[int, tuple[int, int]]:
     return identities
 
 
-def _leakers(root_pid: int, targets: dict[int, tuple[int, int]]) -> list[int]:
+def _leakers(pgids: set[int], targets: dict[int, tuple[int, int]]) -> list[int]:
     table = process_table()
     leaked: list[int] = []
     for pid, (starttime, _pgid) in targets.items():
@@ -543,7 +543,7 @@ def _leakers(root_pid: int, targets: dict[int, tuple[int, int]]) -> list[int]:
         if row is not None and row[2] == starttime and row[3] != "Z":
             leaked.append(pid)
     for pid, (_ppid, pgid, _starttime, state) in table.items():
-        if pgid == root_pid and state != "Z" and pid not in leaked:
+        if pgid in pgids and state != "Z" and pid not in leaked:
             leaked.append(pid)
     return leaked
 
@@ -562,9 +562,20 @@ def pgid_empty(pgid: int) -> bool:
     raise RuntimeError(f"pgrep -g {pgid} failed rc={result.returncode}")
 
 
-def kill_restored_group(pid: int, deadline_s: float = REAP_DEADLINE) -> list[int]:
-    targets = descendant_identities(pid)
-    pgids = {pid} | {pgid for _, pgid in targets.values()}
+def kill_restored_group(*roots: int, deadline_s: float = REAP_DEADLINE) -> list[int]:
+    """SIGKILL every restored process reachable from any of `roots`.
+
+    A process reparents when its parent dies but keeps its process group, so
+    passing the restored SESSION leader (setsid at create, so pgid == pid)
+    reaps the whole workload including orphans reparented to init that a
+    subtree walk from a different root would miss (e.g. multiprocessing's
+    resource_tracker after the server root is killed).
+    """
+    live_roots = [root for root in roots if root]
+    targets: dict[int, tuple[int, int]] = {}
+    for root in live_roots:
+        targets.update(descendant_identities(root))
+    pgids = set(live_roots) | {pgid for _, pgid in targets.values()}
     pgids.discard(os.getpgrp())  # never SIGKILL the wrapper's own group
     for pgid in pgids:
         with contextlib.suppress(ProcessLookupError, OSError):
@@ -574,17 +585,17 @@ def kill_restored_group(pid: int, deadline_s: float = REAP_DEADLINE) -> list[int
             os.kill(target_pid, signal.SIGKILL)
     deadline = time.monotonic() + deadline_s
     while time.monotonic() < deadline:
-        leaked = _leakers(pid, targets)
-        # settle needs BOTH no live leakers AND the group drained: zombies are
-        # not re-killable and not leaks, but the group is not settled until
-        # their reaper collects them.
-        if not leaked and pgid_empty(pid):
+        leaked = _leakers(pgids, targets)
+        # settle needs BOTH no live leakers AND every swept group drained:
+        # zombies are not re-killable and not leaks, but a group is not
+        # settled until their reaper collects them.
+        if not leaked and all(pgid_empty(pgid) for pgid in pgids):
             break
         for target_pid in leaked:
             with contextlib.suppress(ProcessLookupError, OSError):
                 os.kill(target_pid, signal.SIGKILL)
         time.sleep(0.05)
-    residual = _leakers(pid, targets)
+    residual = _leakers(pgids, targets)
     if residual:
         logger.warning("snapshot reap left processes behind: %s", residual)
     return residual
@@ -1299,7 +1310,7 @@ def _run_criu_restore(
         kind, response = read_ack_or_frame(parent_sock)
         if kind != "ack":
             reason = str((response or {}).get("miss", "protocol"))
-            kill_restored_group(restored_pid)
+            kill_restored_group(restored_pid, process.pid)
             _wait_bounded(process)
             logger.info("snapshot restore miss (%s)", reason)
             return
@@ -1317,13 +1328,13 @@ def _run_criu_restore(
 
         for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
             signal.signal(signum, _forward)
-        # Exit when the SERVER exits: the status frame (or its EOF) arrives at
-        # restored-root death. criu stays behind as the tree's subreaper, so
-        # any straggler is in ITS subtree; sweep from the criu child (the walk
-        # includes criu itself), then a short reap. The wrapper's stop latency
-        # is the server's, never criu's daemon draining.
+        # Exit when the SERVER exits, not when criu drains: the status frame
+        # (or its EOF) arrives at restored-root death. Then sweep the restored
+        # session (orphans keep its pgid) AND criu's subtree (anything
+        # reparented to criu as subreaper), and bounded-reap criu itself. The
+        # wrapper's stop latency is the server's, never criu's daemon draining.
         status = _read_status_frame(parent_sock, timeout=None)
-        kill_restored_group(process.pid, deadline_s=5.0)
+        kill_restored_group(restored_pid, process.pid, deadline_s=5.0)
         _wait_bounded(process)
         raise SystemExit(status)
     except BaseException as error:
@@ -1331,12 +1342,10 @@ def _run_criu_restore(
             pid = restored_pid
             if pid is None:
                 pid = _read_pidfile(run_dir / "pid")
-            if pid is not None:
-                kill_restored_group(pid)
-            elif process is not None:
-                # criu died or never wrote the pidfile: reap whatever part of
-                # the restored tree it materialized, not just criu itself
-                kill_restored_group(process.pid)
+            # reap the restored session (if we know its pid) and criu's
+            # subtree; either may be absent this early, kill_restored_group
+            # skips falsy roots
+            kill_restored_group(pid or 0, process.pid if process else 0)
             if process is not None:
                 _wait_bounded(process)
             if isinstance(error, _RestoreInterrupted):
