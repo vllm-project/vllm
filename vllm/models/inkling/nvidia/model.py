@@ -179,6 +179,7 @@ class InklingDecoderLayer(nn.Module):
                 config,
                 layer_id,
                 prefix=f"{prefix}.mlp",
+                quant_config=quant_config,
                 nvfp4_config=nvfp4_config,
             )
 
@@ -400,6 +401,17 @@ class _TmlForCausalLMBase(nn.Module, SupportsPP, SupportsLoRA):
         "lm_head": "output_embeddings",
     }
 
+    @staticmethod
+    def _remap_ct_ignore(entry: str) -> str:
+        """apply_vllm_mapper skips `re:` entries, so rewrite HF-name regexes
+        to vLLM naming ourselves."""
+        if not entry.startswith("re:"):
+            return entry
+        pattern = entry[3:].replace(r"model\.llm\.layers", r"model\.layers")
+        if pattern == r".*gate.*":
+            pattern = r".*\.gate$"
+        return "re:" + pattern
+
     def _build(
         self,
         vllm_config: VllmConfig,
@@ -407,6 +419,10 @@ class _TmlForCausalLMBase(nn.Module, SupportsPP, SupportsLoRA):
         prefix: str,
     ) -> None:
         quant_config = vllm_config.quant_config
+        if quant_config is not None and quant_config.get_name() == "compressed-tensors":
+            quant_config.ignore = [
+                self._remap_ct_ignore(entry) for entry in quant_config.ignore
+            ]
         self.config = text_config
         # NVFP4 experts are detected directly from the checkpoint quant config;
         # only the MoE experts are quantized (attention/dense MLP stay bf16).
