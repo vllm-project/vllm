@@ -33,6 +33,10 @@ Usage:
     # Disable CUDA graph capture and save results
     python scripts/benchmark_helion_kernels.py --kernel per_token_group_fp8_quant \\
         --no-cudagraph --output results.json
+
+    # Only verify numerics, skipping the timing runs
+    python scripts/benchmark_helion_kernels.py --kernel per_token_group_fp8_quant \\
+        --numerics-only
 """
 
 import argparse
@@ -383,6 +387,7 @@ def benchmark(
     repeat: int,
     cudagraph: bool,
     return_mode: str,
+    numerics_only: bool = False,
 ) -> list[Row]:
     kernel = get_kernel_by_name(kernel_name)
     # do_bench already flushes L2 per call; do_bench_cudagraph does not, so use
@@ -393,10 +398,14 @@ def benchmark(
     rows: list[Row] = []
 
     for key, inputs in inputs_dict.items():
-        logger.info("Benchmarking case %s", key)
+        logger.info("%s case %s", "Checking" if numerics_only else "Benchmarking", key)
 
         check_correctness(kernel, baseline_fn, inputs, str(key))
         logger.info("Numerics check passed for case %s", key)
+
+        if numerics_only:
+            cleanup_gpu_resources()
+            continue
 
         # Kernels may mutate their inputs in place; give each side its own copy.
         kernel_inputs = copy.deepcopy(inputs)
@@ -475,6 +484,11 @@ def main() -> None:
         type=str,
         help="Path to save benchmark results as JSON (default: log only)",
     )
+    parser.add_argument(
+        "--numerics-only",
+        action="store_true",
+        help="Only run the per-case numerics check; skip timing and reporting",
+    )
 
     args = parser.parse_args()
 
@@ -519,7 +533,12 @@ def main() -> None:
             args.repeat,
             args.cudagraph,
             args.return_mode,
+            args.numerics_only,
         )
+
+    if args.numerics_only:
+        logger.info("Numerics check passed for all cases of '%s'", args.kernel)
+        return
 
     print_table(rows)
 
