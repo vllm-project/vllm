@@ -18,6 +18,8 @@ steps:
       TERM: "xterm-256color"
     retry:
       automatic:
+        - exit_status: 1  # Transient Docker/BuildKit failure
+          limit: 1
         - exit_status: -1  # Agent was lost
           limit: 1
         - exit_status: -10  # Agent was lost
@@ -46,6 +48,8 @@ steps:
       VLLM_BRANCH: "$BUILDKITE_COMMIT"
     retry:
       automatic:
+        - exit_status: 1  # Transient Docker/BuildKit failure
+          limit: 1
         - exit_status: -1  # Agent was lost
           limit: 1
         - exit_status: -10  # Agent was lost
@@ -72,6 +76,8 @@ steps:
       VLLM_BRANCH: "$BUILDKITE_COMMIT"
     retry:
       automatic:
+        - exit_status: 1  # Transient Docker/BuildKit failure
+          limit: 1
         - exit_status: -1  # Agent was lost
           limit: 1
         - exit_status: -10  # Agent was lost
