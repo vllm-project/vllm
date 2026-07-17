@@ -130,29 +130,39 @@ def test_weight_only_kernels_reject_non_mxfp4_activation(kernel_cls):
 )
 def test_emulation_kernel_accepts_any_config(weight_quant_key, activation_quant_key):
     """EmulationOcpMxLinearKernel is the universal fallback: it must accept
-    every weight/activation format combination."""
+    every supported weight/activation format combination when explicitly
+    selected."""
     config = MxFp4LinearLayerConfig(
         weight_quant_key=weight_quant_key, activation_quant_key=activation_quant_key
     )
-    can_implement, reason = EmulationOcpMxLinearKernel.can_implement(config)
+    with patch(
+        "vllm.model_executor.kernels.linear._get_linear_backend",
+        return_value="emulation",
+    ):
+        can_implement, reason = EmulationOcpMxLinearKernel.can_implement(config)
     assert can_implement, reason
 
 
 def test_emulation_kernel_derives_dequant_funcs_from_config():
     """dequant_func/quant_dequant_func must be derived purely from the
     config's weight/activation QuantKeys, not set externally."""
-    weight_only_config = MxFp4LinearLayerConfig(weight_quant_key=kMxfp4Static)
-    kernel = EmulationOcpMxLinearKernel(weight_only_config)
-    assert kernel.dequant_func is dequant_mxfp4
-    x = torch.randn(4)
-    assert torch.equal(kernel.quant_dequant_func(x), x)  # identity for weight-only
+    with patch(
+        "vllm.model_executor.kernels.linear._get_linear_backend",
+        return_value="emulation",
+    ):
+        weight_only_config = MxFp4LinearLayerConfig(weight_quant_key=kMxfp4Static)
+        kernel = EmulationOcpMxLinearKernel(weight_only_config)
+        assert kernel.dequant_func is dequant_mxfp4
+        x = torch.randn(4)
+        # identity for weight-only
+        assert torch.equal(kernel.quant_dequant_func(x), x)
 
-    w4a4_config = MxFp4LinearLayerConfig(
-        weight_quant_key=kMxfp4Static, activation_quant_key=kMxfp4Dynamic
-    )
-    kernel = EmulationOcpMxLinearKernel(w4a4_config)
-    assert kernel.dequant_func is dequant_mxfp4
-    assert kernel.quant_dequant_func is quant_dequant_mxfp4
+        w4a4_config = MxFp4LinearLayerConfig(
+            weight_quant_key=kMxfp4Static, activation_quant_key=kMxfp4Dynamic
+        )
+        kernel = EmulationOcpMxLinearKernel(w4a4_config)
+        assert kernel.dequant_func is dequant_mxfp4
+        assert kernel.quant_dequant_func is quant_dequant_mxfp4
 
 
 def test_aiter_kernel_is_supported_requires_native_mx_support():
