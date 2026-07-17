@@ -126,6 +126,21 @@ def print_table(rows: list[Row]) -> None:
         print(fmt(row))
 
 
+def log_versions() -> None:
+    """Log torch/helion/triton versions at the head of the output."""
+    from importlib.metadata import PackageNotFoundError, version
+
+    def pkg_version(name: str) -> str:
+        try:
+            return version(name)
+        except PackageNotFoundError:
+            return "not installed"
+
+    logger.info("torch: %s", torch.__version__)
+    logger.info("helion: %s", pkg_version("helion"))
+    logger.info("triton: %s", getattr(triton, "__version__", pkg_version("triton")))
+
+
 def list_kernels() -> None:
     kernels = get_registered_kernels()
 
@@ -462,6 +477,8 @@ def main() -> None:
     )
 
     args = parser.parse_args()
+
+    log_versions()
 
     import_all_kernels()
 

@@ -9,7 +9,9 @@ from vllm.utils.import_utils import has_helion
 if not has_helion():
     pytest.skip("Helion is not installed", allow_module_level=True)
 
-from scripts.benchmark_helion_kernels import check_correctness
+from scripts import benchmark_helion_kernels
+
+check_correctness = benchmark_helion_kernels.check_correctness
 
 
 class _FakeKernel:
@@ -69,3 +71,20 @@ def test_check_correctness_reports_return_value_mismatch():
 
     with pytest.raises(AssertionError, match="Numerics check failed for case bad"):
         check_correctness(kernel, baseline, inputs, "bad")
+
+
+def test_log_versions(monkeypatch):
+    messages = []
+
+    def record(message: str, *args):
+        messages.append(message % args)
+
+    monkeypatch.setattr(benchmark_helion_kernels.logger, "info", record)
+
+    benchmark_helion_kernels.log_versions()
+
+    assert [message.split(":", 1)[0] for message in messages] == [
+        "torch",
+        "helion",
+        "triton",
+    ]
