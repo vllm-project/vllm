@@ -199,8 +199,8 @@ def test_hc_prenorm_gemm_tilelang(num_tokens, hidden_size):
 )
 @pytest.mark.parametrize(
     "n_splits",
-    [1, 16],
-    ids=["split1-rank-adapter", "split16-partials"],
+    [1, 4, 16],
+    ids=["split1-rank-adapter", "split4-partials", "split16-partials"],
 )
 @pytest.mark.parametrize("k", [5120, 7168, 7680, 16384, 28672])
 @pytest.mark.parametrize("num_tokens", [13, 137])

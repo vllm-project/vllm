@@ -11,7 +11,7 @@ import cutlass.utils.blackwell_helpers as sm100_utils
 import cutlass.utils.mixed_input_helpers as mixed_input_utils
 import torch
 from cuda.bindings import driver as cuda
-from cutlass.cute.nvgpu import cpasync, tcgen05
+from cutlass.cute.nvgpu import cpasync, tcgen05, warp
 from cutlass.cute.runtime import make_fake_compact_tensor, make_fake_stream
 from cutlass.pipeline import pipeline_init_arrive, pipeline_init_wait
 
@@ -146,8 +146,6 @@ class HCPrenormGemm:
             tmem_holding_buf: cutlass.Int32
             a_full: cute.struct.MemRange[cutlass.Int64, self.num_load_stages]
             a_empty: cute.struct.MemRange[cutlass.Int64, self.num_load_stages]
-            b_full: cute.struct.MemRange[cutlass.Int64, self.num_load_stages]
-            b_empty: cute.struct.MemRange[cutlass.Int64, self.num_load_stages]
             transform_full: cute.struct.MemRange[
                 cutlass.Int64, self.num_transform_stages
             ]
@@ -207,6 +205,7 @@ class HCPrenormGemm:
             block=(256, 1, 1),
             min_blocks_per_mp=1,
             stream=stream,
+            use_pdl=True,
         )
 
     @cute.kernel
@@ -258,23 +257,13 @@ class HCPrenormGemm:
 
         thread = pipeline.CooperativeGroup(pipeline.Agent.Thread)
         transform_tidx = tidx % 128
-        a_pipeline = pipeline.PipelineTmaAsync.create(
+
+        ab_pipeline = pipeline.PipelineTmaUmma.create(
             barrier_storage=storage.a_full.data_ptr(),
             num_stages=num_load_stages,
             producer_group=thread,
-            consumer_group=pipeline.CooperativeGroup(pipeline.Agent.Thread, 4),
-            tx_count=mma_tiler[0] * mma_tiler[2] * 2,
-            cta_layout_vmnk=cluster_layout_vmnk,
-            tidx=transform_tidx,
-            mcast_mode_mn=(1, 0),
-            defer_sync=True,
-        )
-        b_pipeline = pipeline.PipelineTmaUmma.create(
-            barrier_storage=storage.b_full.data_ptr(),
-            num_stages=num_load_stages,
-            producer_group=thread,
             consumer_group=thread,
-            tx_count=mma_tiler[1] * mma_tiler[2] * 4,
+            tx_count=mma_tiler[0] * mma_tiler[2] * 2 + mma_tiler[1] * mma_tiler[2] * 4,
             cta_layout_vmnk=cluster_layout_vmnk,
             mcast_mode_mn=(0, 1),
             defer_sync=True,
@@ -324,9 +313,6 @@ class HCPrenormGemm:
         a_consumer = pipeline.make_pipeline_state(
             pipeline.PipelineUserType.Consumer, num_load_stages
         )
-        b_producer = pipeline.make_pipeline_state(
-            pipeline.PipelineUserType.Producer, num_load_stages
-        )
         b_consumer = pipeline.make_pipeline_state(
             pipeline.PipelineUserType.Consumer, num_load_stages
         )
@@ -356,29 +342,28 @@ class HCPrenormGemm:
         transformed_a = pool.allocate_tensor(a_tmem_layout, cutlass.TFloat32)
         tmem.relinquish_alloc_permit()
 
+        cute.arch.griddepcontrol_wait()
+
         # TMA load warp
         if warp_idx == 0:
-            for tile in cutlass.range(0, tile_count, 1, unroll=1):
-                a_pipeline.producer_acquire(a_producer)
-                b_pipeline.producer_acquire(b_producer)
+            for tile in cutlass.range(0, tile_count, 1, unroll=2):
+                ab_pipeline.producer_acquire(a_producer)
+                ab_bar = ab_pipeline.producer_get_barrier(a_producer)
                 cute.copy(
                     tma_atom_a,
                     tAgA[(None, tile_begin + tile)],
                     tAsA[(None, a_producer.index)],
-                    tma_bar_ptr=a_pipeline.producer_get_barrier(a_producer),
+                    tma_bar_ptr=ab_bar,
                 )
                 cute.copy(
                     tma_atom_b,
                     tBgB[(None, tile_begin + tile)],
-                    tBsB[(None, b_producer.index)],
-                    tma_bar_ptr=b_pipeline.producer_get_barrier(b_producer),
+                    tBsB[(None, a_producer.index)],
+                    tma_bar_ptr=ab_bar,
                 )
-                a_pipeline.producer_commit(a_producer)
-                b_pipeline.producer_commit(b_producer)
+                ab_pipeline.producer_commit(a_producer)
                 a_producer.advance()
-                b_producer.advance()
-            a_pipeline.producer_tail(a_producer)
-            b_pipeline.producer_tail(b_producer)
+            ab_pipeline.producer_tail(a_producer)
 
         # A transform and row-sum warp group
         if warp_idx >= 4:
@@ -416,17 +401,25 @@ class HCPrenormGemm:
             tArA_store = cute.flat_divide(tArA_transform, transform_tiler)
             tArA_store = cute.group_modes(tArA_store, 1, cute.rank(tArA_store))
 
+            ldsm_atom = cute.make_copy_atom(
+                warp.LdMatrix8x8x16bOp(transpose=False, num_matrices=2),
+                cutlass.BFloat16,
+            )
+            tiled_ldsm = cute.make_tiled_copy_S(ldsm_atom, dst_copy)
+            thr_ldsm = tiled_ldsm.get_slice(transform_tidx)
+            tAsA_ldsm = thr_ldsm.partition_S(sA)
+
             sums = cute.make_rmem_tensor((2, 2), cutlass.Float32)
             sums.fill(0.0)
-            transform_barrier = pipeline.NamedBarrier(3, 128)
-            for _ in cutlass.range(0, tile_count, 1, unroll=1):
-                a_pipeline.consumer_wait(a_consumer)
+            for _ in cutlass.range(0, tile_count, 1, unroll=2):
+                ab_pipeline.consumer_wait(a_consumer)
                 transform_pipeline.producer_acquire(transform_producer)
-                tAsA_stage = tAsA_input[(None, None, None, None, a_consumer.index)]
-                tAsA_stage = cute.flat_divide(tAsA_stage, transform_tiler)
-                tAsA_stage = cute.group_modes(tAsA_stage, 1, cute.rank(tAsA_stage))
+                cute.copy(
+                    tiled_ldsm,
+                    tAsA_ldsm[(None, None, None, None, a_consumer.index)],
+                    tArA,
+                )
                 for i in cutlass.range_constexpr(cute.size(tArA_load, mode=[1])):
-                    cute.autovec_copy(tAsA_stage[(None, i)], tArA_load[(None, i)])
                     x = tArA_load[(None, i)].load().to(cutlass.Float32)
                     u = i % 2
                     sums[u, 0], sums[u, 1] = cute.arch.fma_packed_f32x2(
@@ -441,11 +434,9 @@ class HCPrenormGemm:
                     tAsA_transform[(None, None, None, None, transform_producer.index)],
                     dst_copy,
                 )
-                transform_barrier.arrive_and_wait()
                 cute.arch.fence_view_async_tmem_store()
-                a_pipeline.consumer_release(a_consumer)
-                a_consumer.advance()
                 transform_pipeline.producer_commit(transform_producer)
+                a_consumer.advance()
                 transform_producer.advance()
 
             transform_pipeline.producer_tail(transform_producer)
@@ -473,9 +464,8 @@ class HCPrenormGemm:
             accumulator = accumulators[(None, None, None, acc_producer.index)]
             acc_pipeline.producer_acquire(acc_producer)
             tiled_mma.set(tcgen05.Field.ACCUMULATE, False)
-            for _ in cutlass.range(0, tile_count, 1, unroll=1):
+            for _ in cutlass.range(0, tile_count, 1, unroll=2):
                 transform_pipeline.consumer_wait(transform_consumer)
-                b_pipeline.consumer_wait(b_consumer)
                 for k_block in cutlass.range_constexpr(
                     cute.size(transformed_a, mode=[2])
                 ):
@@ -488,7 +478,7 @@ class HCPrenormGemm:
                     )
                     tiled_mma.set(tcgen05.Field.ACCUMULATE, True)
                 transform_pipeline.consumer_release(transform_consumer)
-                b_pipeline.consumer_release(b_consumer)
+                ab_pipeline.consumer_release(b_consumer)
                 transform_consumer.advance()
                 b_consumer.advance()
             acc_pipeline.producer_commit(acc_producer)
@@ -633,7 +623,7 @@ def can_use_hc_prenorm_gemm(a, b, num_splits):
         and b.shape[0] == 24
         and a.shape[1] == b.shape[1]
         and a.shape[1] in (5120, 7168, 7680, 16384, 28672)
-        and num_splits in (1, 16)
+        and num_splits in (1, 2, 4, 8, 16)
     )
 
 
