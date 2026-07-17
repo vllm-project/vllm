@@ -75,6 +75,17 @@ def collect_extra_tensors(
             continue
         _walk(attr_name, val, managed_storages, visited, results, 0)
 
+    if results:
+        logger.info(
+            "%s: found %d unmanaged CUDA tensor(s) to preserve:",
+            layer.__class__.__name__, len(results),
+        )
+        for path, t in results:
+            logger.info(
+                "  %s  shape=%s dtype=%s ptr=%s",
+                path, list(t.shape), t.dtype, hex(t.data_ptr()),
+            )
+
     return results
 
 
@@ -158,7 +169,7 @@ def copy_back_extra_tensors(
         set_by_path(layer, path, old_tensor)
 
     if n_copied or n_skipped:
-        logger.debug(
+        logger.info(
             "%s: extra-tensor copy-back: %d copied, %d skipped",
             layer.__class__.__name__, n_copied, n_skipped,
         )
