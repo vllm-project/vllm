@@ -10,6 +10,7 @@ from tests.models.registry import HF_EXAMPLE_MODELS
 from tests.utils import multi_gpu_test
 from vllm import LLM
 from vllm.engine.arg_utils import EngineArgs
+from vllm.envs import disable_envs_cache
 from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingParams
 from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
@@ -99,6 +100,7 @@ def test_models(
         # Preserve the L4 test's V1 runner until Granite hybrid generation
         # matches the reference model with the V2 runner on Hopper.
         monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
+        disable_envs_cache()
 
     with hf_runner(model) as hf_model:
         hf_outputs = hf_model.generate_greedy_logprobs_limit(

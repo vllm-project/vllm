@@ -66,7 +66,6 @@ steps:
     - pytest -v -s kernels/test_fused_deepseek_v4_*.py
 
 - label: Kernels Attention Test %N
-  device: h200_35gb
   key: kernels-attention-test
   timeout_in_minutes: 65
   source_file_dependencies:
@@ -78,7 +77,7 @@ steps:
   - tests/kernels/attention
   commands:
     - pytest -v -s kernels/attention --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
-  parallelism: 6
+  parallelism: 2
   mirror:
     amd:
       device: mi325_1

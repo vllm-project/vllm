@@ -6,6 +6,8 @@ steps:
   device: h200_35gb
   key: quantization
   timeout_in_minutes: 75
+  env:
+    VLLM_USE_V2_MODEL_RUNNER: "0"
   source_file_dependencies:
   - csrc/
   - vllm/model_executor/layers/quantization
@@ -58,6 +60,8 @@ steps:
   device: h200_35gb
   key: quantized-models-test
   timeout_in_minutes: 65
+  env:
+    VLLM_USE_V2_MODEL_RUNNER: "0"
   source_file_dependencies:
   - vllm/model_executor/layers/quantization
   - tests/models/quantization
