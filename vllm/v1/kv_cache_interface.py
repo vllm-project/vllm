@@ -981,37 +981,22 @@ class KVCacheConfig:
         return any(isinstance(g.kv_cache_spec, MambaSpec) for g in self.kv_cache_groups)
 
     @property
-    def has_block_dropping_layers(self) -> bool:
-        """Any group uses an attention type that frees KV blocks mid-request
-        (sliding-window or chunked-local)."""
-        return any(
-            isinstance(g.kv_cache_spec, (SlidingWindowSpec, ChunkedLocalAttentionSpec))
-            for g in self.kv_cache_groups
-        )
-
-    @property
-    def has_quantized_kv_cache(self) -> bool:
-        """Any group stores its KV cache in a quantized dtype (FP8/NVFP4)."""
-        return any(
-            isinstance(g.kv_cache_spec, AttentionSpec)
-            and g.kv_cache_spec.kv_quant_mode != KVQuantMode.NONE
-            for g in self.kv_cache_groups
-        )
+    def has_mixed_precision_kv_cache(self) -> bool:
+        """Whether attention groups store their KV cache at more than one precision."""
+        kv_cache_precisions = {
+            (group.kv_cache_spec.dtype, group.kv_cache_spec.kv_quant_mode)
+            for group in self.kv_cache_groups
+            if isinstance(group.kv_cache_spec, AttentionSpec)
+        }
+        return len(kv_cache_precisions) > 1
 
     @property
     def needs_kv_cache_zeroing(self) -> bool:
         """Whether newly allocated KV cache blocks must be zeroed before use.
 
-        Required in two cases:
-        - Mamba layers, whose state is read before being fully written.
-        - Hybrid configs mixing a block-dropping attention type with a quantized
-          KV cache. Groups share the same tensors, so a page freed mid-request by
-          a block-dropping group can be reallocated and read before every slot is
-          written this step (partial-block tail, alignment padding). Stale
-          quantized bytes decode to NaN/Inf and poison attention; zeroing makes
-          such slots read as 0. Uniform/unquantized configs are unaffected.
+        Required for Mamba layers, whose state is read before it is fully written
+        (#35219), and for mixed-precision caches, where a block reused across
+        groups can be reinterpreted under a different precision and decode stale
+        bytes to NaN/Inf. Uniform-precision caches skip zeroing.
         """
-        needs_quantized_reuse_zeroing = (
-            self.has_block_dropping_layers and self.has_quantized_kv_cache
-        )
-        return self.has_mamba_layers or needs_quantized_reuse_zeroing
+        return self.has_mamba_layers or self.has_mixed_precision_kv_cache
