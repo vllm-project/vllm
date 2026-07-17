@@ -82,8 +82,13 @@ fn shutdown_signal() -> CancellationToken {
 }
 
 fn main() -> Result<()> {
-    logging::init_tracing();
     let cli = Cli::parse();
+
+    let process_label = match &cli.command {
+        Command::Bench(_) => "Bench",
+        Command::Frontend(_) | Command::Serve(_) => "RustFrontend",
+    };
+    logging::init_tracing(process_label);
 
     let mut runtime = tokio::runtime::Builder::new_multi_thread();
     runtime.enable_all();
