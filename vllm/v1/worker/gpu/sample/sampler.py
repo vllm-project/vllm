@@ -163,7 +163,7 @@ class Sampler:
         # The ops below upcast to fp32 internally, so the input dtype is kept and
         # mutated in place. Only raw_logprobs reads the unmodified logits
         # afterward, so copy just for that case.
-        if self.logprobs_mode == "raw_logprobs" and self.returns_logprobs(
+        if self.logprobs_mode.startswith("raw_") and self.returns_logprobs(
             idx_mapping_np
         ):
             logits = logits.clone()
