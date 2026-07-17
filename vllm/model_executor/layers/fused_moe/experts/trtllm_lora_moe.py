@@ -292,7 +292,10 @@ class _TrtLlmLoRAExpertsBase(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
         gemm1_lora_delta = None
         w13_meta = (None, None, None, None)
 
-        gemm1_lora_delta = torch.empty(
+        # zeros (not empty): under EP the punica expand kernel only writes
+        # slots whose expert is local to this rank; non-local (token, top_k)
+        # slots must stay 0 so they contribute no bias when fed to flashinfer.
+        gemm1_lora_delta = torch.zeros(
             num_tokens,
             top_k,
             2 * intermediate_size,
@@ -364,7 +367,7 @@ class _TrtLlmLoRAExpertsBase(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
             token_lora_mapping,
         ) = w13_meta
 
-        w2_delta = torch.empty(
+        w2_delta = torch.zeros(
             num_tokens,
             top_k,
             K,
