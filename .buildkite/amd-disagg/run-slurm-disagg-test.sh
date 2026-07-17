@@ -32,14 +32,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 JOB_SCRIPT="${JOB_SCRIPT:-${SCRIPT_DIR}/run_xPyD_disagg.slurm}"
 
 # ---- knobs (override from the Buildkite step env) --------------------------
-# Defaults tuned for the Spur AMD MI350X cluster: pinned v0.23.0 image (avoids
-# :nightly build skew), /data NFS mount, and the Spur default partition (leave
-# PARTITION empty so we don't pass --partition, which Spur rejects). Everything
-# stays env-overridable for CI / other clusters.
+# Defaults tuned for the Spur AMD MI350X cluster
 IMAGE="${IMAGE:-vllm/vllm-openai-rocm:v0.23.0}"
 NODES="${NODES:-2}"
 GPUS_PER_NODE="${GPUS_PER_NODE:-8}"
-PARTITION="${SLURM_PARTITION:-}"               # empty -> Spur default partition
+PARTITION="${SLURM_PARTITION:-}"
 TIME_LIMIT="${SLURM_TIME_LIMIT:-01:30:00}"
 WIDE_EP_MODE="${WIDE_EP_MODE:-0}"              # 0 -> 1P1D TP8 (default); 1 -> wide-EP
 xP="${xP:-1}"
@@ -51,14 +48,9 @@ LOG_ROOT="${LOG_ROOT:-${SHARED_MOUNT}/${USER:-$(whoami)}/disagg_logs}"
 DRY_RUN="${DRY_RUN:-0}"
 MORIIO_READ_MODE="${MORIIO_READ_MODE:-0}"
 
-# Spur has no working srun/squeue/sacct in the login shell (they hang), so we do
-# NOT block on them by default (WAIT=0); just submit and return. Set WAIT=1 to
-# opt into the classic CI poll-until-done behavior (timeout-guarded so it
-# degrades gracefully if the scheduler tools are unavailable).
-# NB: --output/--error are NOT set here on purpose -- see the submit block below.
 WAIT="${WAIT:-0}"
 
-# Front door: vllm-router (external container, default) | toy (in-container proxy).
+# ROUTER Type - defaults to vllm-router
 ROUTER_TYPE="${ROUTER_TYPE:-vllm-router}"
 ROUTER_PORT="${ROUTER_PORT:-30000}"
 VLLM_ROUTER_IMAGE="${VLLM_ROUTER_IMAGE:-vllm/vllm-router:nightly}"
@@ -67,18 +59,7 @@ VLLM_ROUTER_IMAGE="${VLLM_ROUTER_IMAGE:-vllm/vllm-router:nightly}"
 
 mkdir -p "${LOG_ROOT}"
 
-# IMPORTANT (Spur): passing sbatch CLI resource flags (--nodes/--gres/--time/
-# --output/... ) makes the job PENDING forever even though Spur accepts them and
-# prints a job id. The proven-working invocation on this cluster passes NO CLI
-# resource flags and relies entirely on the #SBATCH directives baked into
-# run_xPyD_disagg.slurm (nodes/gres/time/chdir + /tmp output/error, all
-# Spur-correct) plus env inherited from THIS shell. So we:
-#   * EXPORT the knobs (Spur forwards the shell env to the job; there is no
-#     --export flag), and
-#   * submit the job script bare, parsing the id from "Submitted batch job N".
-#
-# DISAGG_SCRIPTS_DIR is bind-mounted on compute nodes. The Buildkite checkout
-# lives on the login node only — stage scripts onto shared NFS before sbatch.
+# Spur - sbatch scheduler.
 DISAGG_SCRIPTS_STAGE="${DISAGG_SCRIPTS_STAGE:-/data/scratch/buildkite-agent}"
 STAGED_DIR="${DISAGG_SCRIPTS_STAGE}/${BUILDKITE_COMMIT:-local}"
 mkdir -p "${STAGED_DIR}"
@@ -89,17 +70,11 @@ echo "[slurm-submit] staged scripts for compute nodes: ${DISAGG_SCRIPTS_DIR}" >&
 export IMAGE MODEL_NAME WIDE_EP_MODE xP yD GPUS_PER_NODE RUN_AFTER_HEALTH HEALTH_TIMEOUT_S
 export SHARED_MOUNT LOG_ROOT DRY_RUN MORIIO_READ_MODE
 export ROUTER_TYPE ROUTER_PORT VLLM_ROUTER_IMAGE
-# Model selection is optional: forward MODEL_NAME/MODEL_DIR only when the caller
-# set them, so cluster.sh's per-cluster default (DeepSeek-V3 under /data/models2)
-# still applies when unset. Spur forwards only *exported* env to the job, so a
-# bare `MODEL_NAME=... bash run-...sh` prefix is lost unless we re-export it here.
+
+# Model selection.
 [[ -n "${MODEL_NAME:-}" ]] && export MODEL_NAME
 [[ -n "${MODEL_DIR:-}" ]] && export MODEL_DIR
 
-# Non-default resource requests can't ride CLI flags (they wedge Spur), so we
-# patch the relevant #SBATCH directive(s) on a throwaway /tmp copy of the job
-# script instead. Node count is the common one (EP wants 4). PARTITION has no
-# Spur equivalent and is ignored.
 [[ -n "${PARTITION}" ]] && echo "[slurm-submit] NOTE: PARTITION='${PARTITION}' ignored (Spur sbatch has no --partition)" >&2
 
 SUBMIT_SCRIPT="${JOB_SCRIPT}"
@@ -111,8 +86,6 @@ if [[ -n "${NODES}" && -n "${FILE_NODES}" && "${NODES}" != "${FILE_NODES}" ]]; t
 fi
 
 # Job name comes from the script's #SBATCH --job-name (SLURM sets SLURM_JOB_NAME
-# from it), which is what the in-job `exec > $LOG_ROOT/${SLURM_JOB_NAME}-...`
-# redirect uses -- so parse it here to compute the right NFS log path.
 JOB_NAME="$(grep -oE '^#SBATCH[[:space:]]+--job-name=[^[:space:]]+' "${JOB_SCRIPT}" | sed -E 's/.*--job-name=//' | head -n1)"
 JOB_NAME="${JOB_NAME:-vllm-disagg-pd}"
 
@@ -137,9 +110,6 @@ echo "[slurm-submit] job log:  ${LOG_FILE}"
 echo "[slurm-submit] role logs: ${LOG_DIR}/"
 
 # --- Spur-safe by default: fire-and-forget --------------------------------------
-# squeue/sacct/srun hang in the Spur login shell, so we do NOT poll unless the
-# caller opts in with WAIT=1 (classic CI behavior). In fire-and-forget mode we
-# exit 0 on a successful submit; check the job log for the PASS/FAIL gate verdict.
 if [[ "${WAIT}" != "1" ]]; then
     echo "[slurm-submit] submitted (WAIT=0, not polling). Track with:" >&2
     echo "  tail -f ${LOG_FILE}" >&2
@@ -147,48 +117,150 @@ if [[ "${WAIT}" != "1" ]]; then
     exit 0
 fi
 
-# --- WAIT=1: poll NFS job log for PASS/FAIL (Spur-safe) -----------------------
-# squeue/sacct are unreliable on Spur login nodes (empty/hang). Do not treat an
-# empty squeue as "job finished" while the log has no gate verdict yet.
-echo "[slurm-submit] WAIT=1: polling ${LOG_FILE} for gate (timeout ${TIME_LIMIT})" >&2
+# --- WAIT=1: phase-aware poll of the NFS job log (scontrol-based) -------------
+# Detection is phased so failures surface fast instead of waiting out the full
+# walltime:
+#   1) submitted -> running : scontrol catches infra/scheduler failures
+#                             (NODE_FAIL/BOOT_FAIL/CANCELLED/TIMEOUT/...) within
+#                             one poll, or a stuck-PENDING/never-started job.
+#   2) running   -> healthy : advance once every endpoint reports healthy (+ the
+#                             vllm-router, when used); fail on bring-up errors or
+#                             the health budget.
+#   3) healthy   -> verdict : PASS/FAIL from the accuracy gate, capped.
+# scontrol is the scheduler authority on this cluster
+echo "[slurm-submit] WAIT=1: phase-aware poll of ${LOG_FILE} (timeout ${TIME_LIMIT})" >&2
+
 _h=0 _m=0 _s=0
 IFS=: read -r _h _m _s <<< "${TIME_LIMIT}"
 WAIT_DEADLINE=$(( $(date +%s) + 10#${_h}*3600 + 10#${_m}*60 + 10#${_s:-0} ))
 unset -v _h _m _s
 
+# Per-phase budgets (all overridable from the Buildkite step env).
+POLL_INTERVAL="${POLL_INTERVAL:-20}"
+SUBMIT_GRACE_S="${SUBMIT_GRACE_S:-900}"                        # reach RUNNING within 15m
+PENDING_MAX_S="${PENDING_MAX_S:-3600}"                          # tolerate 60m queued
+HEALTH_PHASE_TIMEOUT_S="${HEALTH_PHASE_TIMEOUT_S:-$(( HEALTH_TIMEOUT_S + 900 ))}"
+WORKLOAD_TIMEOUT_S="${WORKLOAD_TIMEOUT_S:-3600}"               # accuracy/bench cap
+
+SENTINEL="${LOG_DIR}/.disagg_done"
+
+# scontrol field extractor (authoritative here; timeout-guarded so a momentary
+# scheduler stall can't wedge the poll). Returns the value or "".
+job_field() {  # $1=jobid  $2=field  ->  value | ""
+    timeout 15 scontrol show job "$1" 2>/dev/null \
+        | grep -oE "$2=[^ ]+" | head -n1 | cut -d= -f2- || true
+}
+have() { grep -aqE "$1" "${LOG_FILE}" 2>/dev/null; }
+
 STATE=""
 RC=1
+REASON=""
+PHASE="submitted"
+T_PHASE=$(date +%s)
+
 while [[ $(date +%s) -lt ${WAIT_DEADLINE} ]]; do
-    if grep -aqE '(PASS|FAIL): ' "${LOG_FILE}" 2>/dev/null; then
-        if grep -aqE 'FAIL: ' "${LOG_FILE}" 2>/dev/null; then
-            STATE="FAILED"
-            RC=1
-        else
-            STATE="COMPLETED"
-            RC=0
-        fi
-        break
+    NOW=$(date +%s)
+
+    # (1) Ultimate authority: terminal sentinel (holds rank-0 rc), then the
+    #     explicit accuracy gate line. Honored regardless of phase.
+    if [[ -f "${SENTINEL}" ]]; then
+        RC="$(tr -dc '0-9' < "${SENTINEL}" 2>/dev/null || true)"; RC="${RC:-1}"
+        if [[ "${RC}" == "0" ]]; then STATE="COMPLETED"; else STATE="FAILED"; fi
+        REASON="sentinel"; break
     fi
-    _sq=$(timeout 15 squeue -j "${JOB_ID}" -h -o "%T" 2>/dev/null || true)
-    case "${_sq}" in
-        FAILED|CANCELLED|TIMEOUT|NODE_FAIL)
-            STATE="${_sq}"
-            RC=1
-            break
+    if have '(PASS|FAIL): '; then
+        if have 'FAIL: '; then STATE="FAILED"; RC=1; else STATE="COMPLETED"; RC=0; fi
+        REASON="gate"; break
+    fi
+
+    # (2) Scheduler state via scontrol: drives phase transitions and catches
+    #     infra/scheduler failures fast.
+    ST="$(job_field "${JOB_ID}" JobState)"
+    case "${ST}" in
+        RUNNING|COMPLETING)
+            if [[ "${PHASE}" == "submitted" ]]; then PHASE="bringup"; T_PHASE="${NOW}"; fi
+            ;;
+        NODE_FAIL|BOOT_FAIL|CANCELLED|TIMEOUT|OUT_OF_MEMORY|DEADLINE|PREEMPTED)
+            STATE="infra-${ST}"; RC=1
+            REASON="scontrol Reason=$(job_field "${JOB_ID}" Reason)"; break
+            ;;
+        FAILED)
+            # Ambiguous (infra crash vs a legit accuracy exit=1). A gate/sentinel
+            # line would have won above, so classify by the phase we reached.
+            case "${PHASE}" in
+                submitted) STATE="infra-FAILED" ;;
+                bringup)   STATE="server-failed" ;;
+                *)         STATE="workload-failed" ;;
+            esac
+            RC=1; REASON="scontrol JobState=FAILED phase=${PHASE}"; break
+            ;;
+        COMPLETED)
+            STATE="COMPLETED"; RC=0; REASON="scontrol COMPLETED"; break
+            ;;
+        PENDING|CONFIGURING|RESV_DEL_HOLD|REQUEUED)
+            if (( NOW - T_PHASE > PENDING_MAX_S )); then
+                STATE="infra-stuck-${ST}"; RC=1; REASON="queued > ${PENDING_MAX_S}s"; break
+            fi
+            ;;
+        "")
+            # scontrol lost the job (purged past MinJobAge) with no log verdict:
+            # rely on the terminal markers above + the per-phase deadlines below.
+            :
             ;;
     esac
-    unset -v _sq
-    sleep 30
+
+    # (3) Log-driven phase progress + per-phase deadlines. Fast-fails hangs where
+    #     the job is still RUNNING (so scontrol won't help) but bring-up/workload
+    #     is stuck.
+    case "${PHASE}" in
+        submitted)
+            # Job body appearing in the log is a second "it started" signal for
+            # when scontrol is briefly empty.
+            if have 'Selected node IPs|health-gate:|\[disagg-pd\]'; then
+                PHASE="bringup"; T_PHASE="${NOW}"
+            elif [[ -z "${ST}" ]] && (( NOW - T_PHASE > SUBMIT_GRACE_S )); then
+                # scontrol can't confirm the job exists (empty state) AND no log
+                # output within the grace window -> treat as a lost/failed launch.
+                # NB: a genuinely-queued job reports PENDING via scontrol above and
+                # is governed by PENDING_MAX_S (default 1h), not this grace window.
+                STATE="infra-nostart"; RC=1; REASON="no scheduler state or log within ${SUBMIT_GRACE_S}s"; break
+            fi
+            ;;
+        bringup)
+            if have 'FAIL:|TIMEOUT waiting for|exited while waiting|Traceback \(most recent'; then
+                STATE="server-failed"; RC=1; REASON="bring-up failure in log"; break
+            fi
+            NEED="$(grep -aoE 'waiting on [0-9]+' "${LOG_FILE}" 2>/dev/null | grep -oE '[0-9]+' | tail -n1 || true)"
+            GOT="$(grep -acE '\] healthy: ' "${LOG_FILE}" 2>/dev/null || true)"; GOT="${GOT:-0}"
+            ROUTER_OK=1
+            if [[ "${ROUTER_TYPE}" == "vllm-router" ]]; then
+                if ! have 'vllm-router healthy on'; then ROUTER_OK=0; fi
+            fi
+            if [[ -n "${NEED}" ]] && (( GOT >= NEED )) && (( ROUTER_OK == 1 )); then
+                PHASE="workload"; T_PHASE="${NOW}"
+            elif (( NOW - T_PHASE > HEALTH_PHASE_TIMEOUT_S )); then
+                STATE="bringup-timeout"; RC=1; REASON="no healthy within ${HEALTH_PHASE_TIMEOUT_S}s"; break
+            fi
+            ;;
+        workload)
+            # PASS/FAIL handled at the top; only enforce the cap here.
+            if (( NOW - T_PHASE > WORKLOAD_TIMEOUT_S )); then
+                STATE="workload-timeout"; RC=1; REASON="no verdict within ${WORKLOAD_TIMEOUT_S}s"; break
+            fi
+            ;;
+    esac
+
+    sleep "${POLL_INTERVAL}"
 done
 
 if [[ -z "${STATE}" ]]; then
-    echo "[slurm-submit] WARN: no gate verdict before ${TIME_LIMIT}; failing" >&2
-    RC=1
+    echo "[slurm-submit] WARN: no verdict before ${TIME_LIMIT}; failing" >&2
+    STATE="deadline"; RC=1; REASON="poll deadline"
 fi
 
 # Surface the accuracy gate verdict (if any) from the job log — to stderr.
 GATE_LINE=$(grep -aE '(PASS|FAIL): ' "${LOG_FILE}" 2>/dev/null | tail -n1 || true)
 [[ -n "${GATE_LINE}" ]] && echo "[slurm-submit] gate: ${GATE_LINE}" >&2
 
-echo "[slurm-submit] job ${JOB_ID} finished: state=${STATE:-unknown} exit=${RC}" >&2
+echo "[slurm-submit] job ${JOB_ID} finished: state=${STATE:-unknown} phase=${PHASE} exit=${RC} reason=${REASON:-}" >&2
 exit "${RC}"

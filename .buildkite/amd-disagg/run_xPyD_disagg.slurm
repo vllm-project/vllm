@@ -384,11 +384,11 @@ fi
 if command -v srun >/dev/null 2>&1; then
     srun --nodelist="$SELECTED_NODELIST_STR" \
          --nodes="$NUM_NODES" --ntasks="$NUM_NODES" --ntasks-per-node=1 \
-      bash -c 'docker rm -f "$DOCKER_CONT_NAME" 2>/dev/null || true
-               [ "$ROUTER_TYPE" = "vllm-router" ] && docker rm -f "$ROUTER_CONT_NAME" 2>/dev/null || true' || true
+      bash -c 'docker stop "$DOCKER_CONT_NAME" 2>/dev/null || true; docker rm "$DOCKER_CONT_NAME" 2>/dev/null || true
+               [ "$ROUTER_TYPE" = "vllm-router" ] && { docker stop "$ROUTER_CONT_NAME" 2>/dev/null || true; docker rm "$ROUTER_CONT_NAME" 2>/dev/null || true; }' || true
 else
-    docker rm -f "$DOCKER_CONT_NAME" 2>/dev/null || true
-    [ "$ROUTER_TYPE" = "vllm-router" ] && docker rm -f "$ROUTER_CONT_NAME" 2>/dev/null || true
+    docker stop "$DOCKER_CONT_NAME" 2>/dev/null || true; docker rm "$DOCKER_CONT_NAME" 2>/dev/null || true
+    [ "$ROUTER_TYPE" = "vllm-router" ] && { docker stop "$ROUTER_CONT_NAME" 2>/dev/null || true; docker rm "$ROUTER_CONT_NAME" 2>/dev/null || true; }
 fi
 
 echo "[disagg-pd] launch finished rc=${RC}; logs in ${LOG_PATH}"

@@ -471,7 +471,7 @@ orchestrate_master() {
             log "waiting for vllm-router on :${ROUTER_PORT} (up to 300s)"
             until /usr/bin/curl -sf "http://127.0.0.1:${ROUTER_PORT}/health" >/dev/null 2>&1; do
                 if (( $(date +%s) >= router_deadline )); then
-                    log "TIMEOUT waiting for vllm-router on :${ROUTER_PORT}"
+                    log "FAIL: vllm-router not ready on :${ROUTER_PORT} after 300s (bring-up)"
                     rc=1
                     break
                 fi
@@ -486,6 +486,7 @@ orchestrate_master() {
             set -e
         fi
     else
+        log "FAIL: health-gate did not pass — server bring-up failed"
         rc=1
     fi
     echo "${rc}" > "${sentinel}" 2>/dev/null || true
@@ -602,6 +603,9 @@ run_node() {
     local rc=0
     if (( NODE_RANK == 0 )); then
         orchestrate_master "${sentinel}" || rc=$?
+        # Canonical, human-readable end-of-run verdict for the login-node poller
+        # and CI logs (the .disagg_done sentinel remains the machine authority).
+        log "VERDICT: $( (( rc == 0 )) && echo PASS || echo FAIL) rc=${rc}"
     else
         watch_until_done "${sentinel}" || rc=$?
     fi
