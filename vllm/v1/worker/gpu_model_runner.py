@@ -7628,20 +7628,17 @@ class GPUModelRunner(
             moe_kernel = getattr(quant_method, "moe_kernel", None)
             impl = getattr(moe_kernel, "impl", None)
             fused_experts = getattr(impl, "fused_experts", None)
-            if isinstance(fused_experts, FusedMoEExpertsMonolithic) or (
-                quant_method.is_monolithic
-            ):
-                if (
+            if quant_method.is_monolithic:
+                if not (
                     isinstance(fused_experts, FusedMoEExpertsMonolithic)
                     and fused_experts.supports_routing_replay_capture()
                 ):
-                    fused_experts.set_routing_replay_capture_fn(_capture_fn)
-                else:
                     raise ValueError(
                         "--enable-return-routed-experts is not supported with "
                         f"monolithic MoE kernel {type(fused_experts).__name__}; "
                         "routed expert IDs would be silently all-zero."
                     )
+                fused_experts.set_capture_fn(_capture_fn)
             elif isinstance(module.router, BaseRouter):
                 module.router.set_capture_fn(_capture_fn)
 

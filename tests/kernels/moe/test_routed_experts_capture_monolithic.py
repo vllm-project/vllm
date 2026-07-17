@@ -4,7 +4,7 @@
 
 These tests exercise the wiring that lets ``RoutedExpertsCapturer`` see the
 expert IDs picked by FlashInfer's fused router-and-experts kernels (the
-"monolithic" path). When ``set_routing_replay_capture_fn`` is installed on
+"monolithic" path). When ``set_capture_fn`` is installed on
 a ``FusedMoEExpertsMonolithic`` subclass that supports it, the kernel call
 should:
 
@@ -213,7 +213,7 @@ def test_trtllm_bf16_monolithic_routing_replay_records_valid_experts(
         captured.append(replay_out.clone())
 
     assert experts.supports_routing_replay_capture()
-    experts.set_routing_replay_capture_fn(capture_fn)
+    experts.set_capture_fn(capture_fn)
 
     hidden_states = (
         torch.randn(num_tokens, hidden_size, device=device, dtype=torch.bfloat16) * 0.1
@@ -283,7 +283,7 @@ def test_trtllm_bf16_monolithic_routing_replay_non_dsv3(
     )
 
     captured: list[torch.Tensor] = []
-    experts.set_routing_replay_capture_fn(lambda r: captured.append(r.clone()))
+    experts.set_capture_fn(lambda r: captured.append(r.clone()))
 
     hidden_states = (
         torch.randn(num_tokens, hidden_size, device=device, dtype=torch.bfloat16) * 0.1
@@ -371,7 +371,7 @@ def test_trtllm_bf16_monolithic_capture_buffer_shape_and_dtype() -> None:
         routing_method=RoutingMethodType.DeepSeekV3,
         device=device,
     )
-    experts.set_routing_replay_capture_fn(lambda r: None)
+    experts.set_capture_fn(lambda r: None)
     buf = experts._maybe_make_routing_replay_buffer(num_tokens=11, device=device)
     assert buf is not None
     assert buf.dtype == torch.int16
@@ -426,7 +426,7 @@ def test_routed_experts_capturer_e2e_via_monolithic_experts() -> None:
     def capture_fn(replay_out: torch.Tensor) -> None:
         capturer.capture(layer_id, replay_out)
 
-    experts.set_routing_replay_capture_fn(capture_fn)
+    experts.set_capture_fn(capture_fn)
 
     hidden_states = (
         torch.randn(num_tokens, hidden_size, device=device, dtype=torch.bfloat16) * 0.1
@@ -616,7 +616,7 @@ def test_trtllm_fp8_block_scale_monolithic_routing_replay_records_valid_experts(
     assert experts.supports_routing_replay_capture()
 
     captured: list[torch.Tensor] = []
-    experts.set_routing_replay_capture_fn(lambda r: captured.append(r.clone()))
+    experts.set_capture_fn(lambda r: captured.append(r.clone()))
 
     # Per-token / per-block hidden scales (ones is fine for the routing
     # path; the GEMM output isn't being asserted on).
@@ -837,7 +837,7 @@ def test_trtllm_nvfp4_monolithic_routing_replay_records_valid_experts(
 
     assert experts.supports_routing_replay_capture()
     captured: list[torch.Tensor] = []
-    experts.set_routing_replay_capture_fn(lambda r: captured.append(r.clone()))
+    experts.set_capture_fn(lambda r: captured.append(r.clone()))
 
     hidden_states = (
         torch.randn(num_tokens, hidden_size, device=device, dtype=torch.bfloat16) * 0.1

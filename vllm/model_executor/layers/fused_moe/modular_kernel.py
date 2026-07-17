@@ -1011,7 +1011,7 @@ class FusedMoEExpertsMonolithic(FusedMoEExperts):
         """
         return False
 
-    def set_routing_replay_capture_fn(
+    def set_capture_fn(
         self,
         capture_fn: Callable[[torch.Tensor], None] | None,
     ) -> None:
