@@ -101,9 +101,7 @@ def validate_common_gemm_inputs(
     if hidden_states.dim() != 2 or router_weight.dim() != 2:
         raise ValueError("hidden_states and router_weight must be 2D tensors")
     if hidden_states.device.type != "cuda" or router_weight.device.type != "cuda":
-        raise ValueError(
-            "hidden_states and router_weight must have device_type=cuda"
-        )
+        raise ValueError("hidden_states and router_weight must have device_type=cuda")
     if hidden_states.device != router_weight.device:
         raise ValueError(
             "hidden_states and router_weight must be on the same CUDA device"

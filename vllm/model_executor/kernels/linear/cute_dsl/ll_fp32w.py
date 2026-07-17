@@ -38,7 +38,6 @@ def _default_dotprod_config(M: int, K: int, N: int) -> tuple[int, int, int]:
 
 
 _TUNED_DOTPROD_CONFIGS: dict[tuple[int, int], dict[int, tuple[int, int, int]]] = {
-    # MiniMax-M3, aligned with fp32_router_gemm_dispatch B300 geometry.
     (6144, 128): {
         **{
             M: (384, 1, 1)
@@ -54,7 +53,6 @@ _TUNED_DOTPROD_CONFIGS: dict[tuple[int, int], dict[int, tuple[int, int, int]]] =
         **{M: (192, 2, 1) for M in (*range(12, 26, 2), 32)},
         **{M: (128, 2, 1) for M in range(26, 32, 2)},
     },
-    # GLM5.2, EPB reuses A across adjacent expert columns.
     (6144, 256): {
         **{M: (384, 1, 1) for M in range(1, 4)},
         **{M: (128, 1, 1) for M in (*range(4, 7, 2), 11)},

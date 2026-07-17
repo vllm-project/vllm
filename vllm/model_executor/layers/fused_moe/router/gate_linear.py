@@ -19,7 +19,7 @@ class GateLinear(ReplicatedLinear):
     """MoE gate linear layer with multi-tier GEMM dispatch:
 
     1. cuteDSL ll_bf16_gemm (SM90+, M<=16, bf16 in, fp32 out,
-       any shape w/ K divisible by 8)    
+       any shape w/ K divisible by 8)
     2. DSV3 specialized kernel (SM90+, M<=16, H=7168 E=256/384, H=6144 E=256)
     3. fp32 specialized kernel  (SM90+, bf16/fp32 in, fp32 out, M<=32,
        (H, E) in {(3072, 256), (6144, 128), (6144, 256)})
@@ -124,7 +124,7 @@ class GateLinear(ReplicatedLinear):
             and self.out_dtype == torch.float32
         )
 
-        # cuteDSL ll_bf16_gemm/ll_fp32w_gemm eligibility. Any dims supported, but 
+        # cuteDSL ll_bf16_gemm/ll_fp32w_gemm eligibility. Any dims supported, but
         # SM90+ required because:
         # 1. PDL support. Both dot-product and split-K kernels.
         # 2. Thread Block Clusters. Split-K kernel for cross-CTA reduction.
@@ -189,7 +189,8 @@ class GateLinear(ReplicatedLinear):
     def forward(
         self, x: torch.Tensor
     ) -> torch.Tensor | tuple[torch.Tensor, Parameter | None]:
-        # Tier 1: cuteDSL ll_bf16_gemm (SM90+, bf16 in, fp32 out, any dims w/ K divisible by 8)
+        # Tier 1: cuteDSL ll_bf16_gemm (SM90+, bf16 in, fp32 out,
+        # any dims w/ K divisible by 8)
         if self.allow_ll_bf16_gemm and x.shape[0] <= 16 and x.dtype == torch.bfloat16:
             from vllm.model_executor.kernels.linear.cute_dsl.ll_bf16 import (
                 ll_bf16_gemm,

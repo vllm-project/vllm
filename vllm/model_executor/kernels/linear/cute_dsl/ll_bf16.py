@@ -12,8 +12,8 @@ from typing import Any, Literal
 import torch
 
 from ._ll_router_common import (
-    cute_context,
     current_cuda_stream,
+    cute_context,
     is_cutedsl_available,
     make_fake_gemm_tensors,
     use_pdl,
