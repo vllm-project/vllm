@@ -1541,7 +1541,6 @@ class rocm_aiter_ops:
     # Check if the env variable is set
     _AITER_ENABLED = envs.VLLM_ROCM_USE_AITER
     _CUSTOM_ALL_REDUCE_ENABLED = envs.VLLM_ROCM_USE_AITER_CUSTOM_AR
-    _CUSTOM_AG_RS_ENABLED = envs.VLLM_ROCM_USE_AITER_AG_RS
     _LINEAR_ENABLED = envs.VLLM_ROCM_USE_AITER_LINEAR
     _FMOE_ENABLED = envs.VLLM_ROCM_USE_AITER_MOE
     _MLA_ENABLED = envs.VLLM_ROCM_USE_AITER_MLA
@@ -1574,7 +1573,6 @@ class rocm_aiter_ops:
         """
         cls._AITER_ENABLED = envs.VLLM_ROCM_USE_AITER
         cls._CUSTOM_ALL_REDUCE_ENABLED = envs.VLLM_ROCM_USE_AITER_CUSTOM_AR
-        cls._CUSTOM_AG_RS_ENABLED = envs.VLLM_ROCM_USE_AITER_AG_RS
         cls._LINEAR_ENABLED = envs.VLLM_ROCM_USE_AITER_LINEAR
         cls._FMOE_ENABLED = envs.VLLM_ROCM_USE_AITER_MOE
         cls._MLA_ENABLED = envs.VLLM_ROCM_USE_AITER_MLA
@@ -1742,7 +1740,7 @@ class rocm_aiter_ops:
     @classmethod
     @if_aiter_supported
     def is_custom_ag_rs_enabled(cls) -> bool:
-        return cls._AITER_ENABLED and cls._CUSTOM_AG_RS_ENABLED
+        return cls._AITER_ENABLED and cls._CUSTOM_ALL_REDUCE_ENABLED
 
     @classmethod
     @if_aiter_supported

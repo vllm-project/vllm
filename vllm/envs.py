@@ -127,7 +127,6 @@ if TYPE_CHECKING:
     VLLM_MXFP8_EMULATION_DEQUANT_AT_LOAD: bool = True
     VLLM_ROCM_USE_AITER: bool = False
     VLLM_ROCM_USE_AITER_CUSTOM_AR: bool = True
-    VLLM_ROCM_USE_AITER_AG_RS: bool = True
     VLLM_ROCM_USE_AITER_LINEAR: bool = True
     VLLM_ROCM_USE_AITER_LINEAR_HIPBMM: bool = False
     VLLM_ROCM_USE_AITER_MOE: bool = True
@@ -1188,13 +1187,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
         os.getenv("VLLM_ROCM_USE_AITER", "False").lower() in ("true", "1")
     ),
     # Use AITER's CustomAllreduce as the custom-allreduce backend inside vLLM's
-    # CudaCommunicator on ROCm.
+    # CudaCommunicator on ROCm. Also enables AITER AG/RS for DP communication.
     "VLLM_ROCM_USE_AITER_CUSTOM_AR": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_CUSTOM_AR", "True").lower() in ("true", "1")
-    ),
-    # Use AITER's custom all-gather / reduce-scatter kernels on the DP group.
-    "VLLM_ROCM_USE_AITER_AG_RS": lambda: (
-        os.getenv("VLLM_ROCM_USE_AITER_AG_RS", "True").lower() in ("true", "1")
     ),
     # use aiter linear op if aiter ops are enabled
     # The following list of related ops
