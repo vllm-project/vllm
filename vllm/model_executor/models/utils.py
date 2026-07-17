@@ -963,3 +963,25 @@ def scatter_output_slices(
         sliced = output[offset : offset + n_tok]
         dest[idx] = sliced.clone() if clone else sliced
         offset += n_tok
+
+
+def parse_diarized_timestamp(marker: str) -> float | None:
+    if (
+        not marker
+        or not marker.isascii()
+        or marker.count(".") > 1
+        or not marker.replace(".", "").isdigit()
+    ):
+        return None
+    return float(marker)
+
+
+def parse_diarized_speaker(speaker: str) -> str | None:
+    if (
+        len(speaker) < 2
+        or speaker[0] != "S"
+        or not speaker[1:].isascii()
+        or not speaker[1:].isdigit()
+    ):
+        return None
+    return speaker

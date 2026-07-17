@@ -36,6 +36,8 @@ from vllm.model_executor.models.utils import (
     _merge_multimodal_embeddings,
     init_vllm_registered_model,
     maybe_prefix,
+    parse_diarized_speaker,
+    parse_diarized_timestamp,
 )
 from vllm.model_executor.models.whisper import (
     WhisperEncoder,
@@ -76,28 +78,6 @@ DEFAULT_MOSS_TRANSCRIBE_DIARIZE_PROMPT = (
     "（[S01]、[S02]、[S03]…）开头，正文为对应的语音内容，"
     "并在段末标注结束时间戳，以清晰标明该段语音范围。"
 )
-
-
-def _parse_timestamp(marker: str) -> float | None:
-    if (
-        not marker
-        or not marker.isascii()
-        or marker.count(".") > 1
-        or not marker.replace(".", "").isdigit()
-    ):
-        return None
-    return float(marker)
-
-
-def _parse_speaker(speaker: str) -> str | None:
-    if (
-        len(speaker) < 2
-        or speaker[0] != "S"
-        or not speaker[1:].isascii()
-        or not speaker[1:].isdigit()
-    ):
-        return None
-    return speaker
 
 
 class MossTranscribeDiarizeAudioInputs(TensorSchema):
@@ -703,7 +683,7 @@ class MossTranscribeDiarizeForConditionalGeneration(
                     state = read_start
             elif state == read_start:
                 if char == "]":
-                    start = _parse_timestamp("".join(token))
+                    start = parse_diarized_timestamp("".join(token))
                     token.clear()
                     if start is None:
                         reset()
@@ -725,7 +705,7 @@ class MossTranscribeDiarizeForConditionalGeneration(
                     reset()
             elif state == read_speaker:
                 if char == "]":
-                    speaker = _parse_speaker("".join(token))
+                    speaker = parse_diarized_speaker("".join(token))
                     token.clear()
                     if speaker is None:
                         reset()
@@ -748,7 +728,7 @@ class MossTranscribeDiarizeForConditionalGeneration(
                     segment_text.append(char)
             elif state == read_end:
                 if char == "]":
-                    parsed_end = _parse_timestamp("".join(token))
+                    parsed_end = parse_diarized_timestamp("".join(token))
                     if (
                         parsed_end is not None
                         and start is not None
