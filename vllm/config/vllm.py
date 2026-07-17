@@ -2220,6 +2220,13 @@ class VllmConfig:
             # Will be added by https://github.com/vllm-project/vllm/pull/38390
             unsupported.append("EC transfer")
 
+        if (
+            model_config is not None
+            and model_config.runner_type is not None
+            and model_config.runner_type == "pooling"
+        ):
+            unsupported.append("Pooling model")
+
         return unsupported
 
     def _validate_v2_model_runner(self) -> None:
