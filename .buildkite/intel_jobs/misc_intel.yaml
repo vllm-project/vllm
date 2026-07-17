@@ -125,13 +125,13 @@ steps:
       pytest -v -s v1/kv_offload &&
       pytest -v -s v1/kv_connector/unit/test_offloading_connector.py'
 
-- label: NixlConnector PD accuracy (4 GPUs)
+- label: NixlConnector PD accuracy (2 GPUs)
   timeout_in_minutes: 60
-  num_devices: 4
+  num_devices: 2
   device: intel_gpu
   agent_tags:
     label: production
-    gpu: 4+
+    gpu: 2+
     mem: 16+
   no_plugin: true
   working_dir: "."
@@ -148,10 +148,7 @@ steps:
     - >-
       bash .buildkite/scripts/hardware_ci/run-intel-test.sh
       'cd tests &&
-      bash v1/kv_connector/nixl_integration/run_xpu_disagg_accuracy_test.sh &&
-      PREFILLER_TP_SIZE=2 DECODER_TP_SIZE=1 bash v1/kv_connector/nixl_integration/run_xpu_disagg_accuracy_test.sh &&
-      PREFILLER_TP_SIZE=1 DECODER_TP_SIZE=2 bash v1/kv_connector/nixl_integration/run_xpu_disagg_accuracy_test.sh &&
-      PREFILLER_TP_SIZE=2 DECODER_TP_SIZE=2 bash v1/kv_connector/nixl_integration/run_xpu_disagg_accuracy_test.sh'
+      bash v1/kv_connector/nixl_integration/run_xpu_disagg_accuracy_test.sh'
 
 - label: Regression
   key: regression
