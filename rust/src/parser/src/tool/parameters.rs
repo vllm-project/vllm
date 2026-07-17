@@ -291,9 +291,12 @@ fn convert_with_optional_schema(param_type: Option<&JsonParamType>, input: &Para
     // literal text "null" for a string field means the string, not a missing
     // value. This covers a bare `string` type and any union containing one,
     // mirroring Python's precedence where a `string` member resolves "null" to
-    // the string before the null fallback is reached.
+    // the string before the null fallback is reached. The match is exact, like
+    // Python's case-sensitive `json.loads` fallback; other casings ("NULL",
+    // "Null") coerce to null only when the schema declares a `null` type, whose
+    // branch is case-insensitive like Python's declared-null check.
     if let ParamInput::Text(value) = input
-        && value.eq_ignore_ascii_case("null")
+        && value == "null"
         && !param_type.is_some_and(admits_string)
     {
         return Value::Null;
@@ -862,6 +865,29 @@ mod tests {
         // Non-string and schema-less params are unchanged: "null" -> null.
         assert_eq!(params.convert("count", text("null")), json!(null));
         assert_eq!(params.convert("anything", text("null")), json!(null));
+    }
+
+    #[test]
+    fn literal_null_casing_matches_python() {
+        // Python is case-insensitive only when the schema declares a `null`
+        // type (`value.lower() == "null"`); its final fallback is a
+        // case-sensitive `json.loads`. So for a type admitting neither
+        // `string` nor `null`, only the exact text "null" coerces to JSON
+        // null. Values copied from live Python `coerce_to_schema_type`:
+        //   ("NULL", ["integer"]) -> "NULL", ("null", ["integer"]) -> None,
+        //   ("NULL", ["integer","null"]) -> None.
+        let params = ToolSchema::from_schema(&json!({
+            "type": "object",
+            "properties": {
+                "count": { "type": "integer" },
+                "nullable_count": { "type": ["integer", "null"] }
+            }
+        }));
+
+        assert_eq!(params.convert("count", text("null")), json!(null));
+        assert_eq!(params.convert("count", text("NULL")), json!("NULL"));
+        assert_eq!(params.convert("count", text("Null")), json!("Null"));
+        assert_eq!(params.convert("nullable_count", text("NULL")), json!(null));
     }
 
     #[test]
