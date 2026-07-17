@@ -476,16 +476,14 @@ class OffloadingConnectorScheduler:
         defer_lookup = False
         for local_idx, key in enumerate(keys):
             result = self.manager.lookup(key, req_context)
-            if result is not LookupResult.MISS:
-                self._events_tracker.record_speculative(
-                    req,
-                    group_config,
-                    start_chunk_idx + local_idx,
-                    key,
-                    result,
-                )
             match result:
                 case LookupResult.HIT:
+                    self._events_tracker.record_lookup(
+                        req,
+                        group_config,
+                        start_chunk_idx + local_idx,
+                        key,
+                    )
                     hit_count += 1
                 case LookupResult.HIT_PENDING:
                     defer_lookup = True
@@ -1298,7 +1296,6 @@ class OffloadingConnectorScheduler:
             returned by the engine.
         """
         req_status = self._req_status.get(request.request_id)
-        self._events_tracker.on_request_finished(request.request_id)
 
         if req_status is None:
             # Untracked request (offloading never started): no in-flight jobs,
