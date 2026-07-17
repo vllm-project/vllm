@@ -39,6 +39,7 @@ class ReplaySSMBuildCase:
     buffer_len: int
     expected_write_pos: list[int]
     expected_is_flush: list[int]
+    mamba_cache_mode: str = "none"
 
 
 REPLAYSSM_BUILD_CASES = {
@@ -120,6 +121,83 @@ REPLAYSSM_BUILD_CASES = {
         expected_write_pos=[0],
         expected_is_flush=[1],
     ),
+    # Align mode (block_size 16). Past the first boundary the ring re-anchors at
+    # the block start: num_computed 117 -> block_start 112, write_pos 5 (vs 1 in
+    # none mode).
+    "align_reanchor_past_boundary": ReplaySSMBuildCase(
+        seq_lens=[118],
+        query_lens=[1],
+        is_prefilling=[False],
+        num_prompt_tokens=[100],
+        decode_base=[100],
+        buffer_len=16,
+        expected_write_pos=[5],
+        expected_is_flush=[0],
+        mamba_cache_mode="align",
+    ),
+    # First-block boundary (num_computed+1 == 112) forces a flush even though
+    # write_pos (11) != buffer_len - 1.
+    "align_first_block_boundary_flush": ReplaySSMBuildCase(
+        seq_lens=[112],
+        query_lens=[1],
+        is_prefilling=[False],
+        num_prompt_tokens=[100],
+        decode_base=[100],
+        buffer_len=16,
+        expected_write_pos=[11],
+        expected_is_flush=[1],
+        mamba_cache_mode="align",
+    ),
+    # First step of a new block re-anchors write_pos to 0.
+    "align_new_block_start_zero": ReplaySSMBuildCase(
+        seq_lens=[113],
+        query_lens=[1],
+        is_prefilling=[False],
+        num_prompt_tokens=[100],
+        decode_base=[100],
+        buffer_len=16,
+        expected_write_pos=[0],
+        expected_is_flush=[0],
+        mamba_cache_mode="align",
+    ),
+    # block_size % buffer_len == 0: a later boundary lands on write_pos ==
+    # buffer_len - 1, so the boundary flush coincides with the natural flush.
+    "align_boundary_coincides_natural_flush": ReplaySSMBuildCase(
+        seq_lens=[128],
+        query_lens=[1],
+        is_prefilling=[False],
+        num_prompt_tokens=[100],
+        decode_base=[100],
+        buffer_len=16,
+        expected_write_pos=[15],
+        expected_is_flush=[1],
+        mamba_cache_mode="align",
+    ),
+    # block_size % buffer_len != 0 (buffer_len 6): the boundary step still flushes
+    # although write_pos (3) != buffer_len - 1.
+    "align_unaligned_buffer_forces_flush": ReplaySSMBuildCase(
+        seq_lens=[128],
+        query_lens=[1],
+        is_prefilling=[False],
+        num_prompt_tokens=[100],
+        decode_base=[100],
+        buffer_len=6,
+        expected_write_pos=[3],
+        expected_is_flush=[1],
+        mamba_cache_mode="align",
+    ),
+    # Per-row independence in align mode: partial-block / new-block / boundary.
+    "align_mixed_rows": ReplaySSMBuildCase(
+        seq_lens=[105, 113, 112],
+        query_lens=[1, 1, 1],
+        is_prefilling=[False, False, False],
+        num_prompt_tokens=[100, 100, 100],
+        decode_base=[100, 100, 100],
+        buffer_len=16,
+        expected_write_pos=[4, 0, 11],
+        expected_is_flush=[0, 0, 1],
+        mamba_cache_mode="align",
+    ),
 }
 
 
@@ -138,7 +216,9 @@ def _make_mamba_spec(buffer_len: int) -> MambaSpec:
     )
 
 
-def _create_replayssm_builder(buffer_len: int) -> MockMambaBuilder:
+def _create_replayssm_builder(
+    buffer_len: int, mamba_cache_mode: str = "none"
+) -> MockMambaBuilder:
     vllm_config = create_vllm_config(
         model_name="Qwen/Qwen3.5-0.8B", block_size=BLOCK_SIZE
     )
@@ -146,7 +226,7 @@ def _create_replayssm_builder(buffer_len: int) -> MockMambaBuilder:
     # (it requires a Triton backend) on the mock model.
     vllm_config.cache_config.use_replayssm = True
     vllm_config.cache_config.replayssm_buffer_len = buffer_len
-    vllm_config.cache_config.mamba_cache_mode = "none"
+    vllm_config.cache_config.mamba_cache_mode = mamba_cache_mode
     return MockMambaBuilder(
         _make_mamba_spec(buffer_len), ["layer0"], vllm_config, DEVICE
     )
@@ -166,7 +246,7 @@ def _build(builder: MockMambaBuilder, case: ReplaySSMBuildCase):
     "case", REPLAYSSM_BUILD_CASES.values(), ids=REPLAYSSM_BUILD_CASES.keys()
 )
 def test_replayssm_write_pos(case: ReplaySSMBuildCase):
-    builder = _create_replayssm_builder(case.buffer_len)
+    builder = _create_replayssm_builder(case.buffer_len, case.mamba_cache_mode)
     meta = _build(builder, case)
 
     assert meta.write_pos_d is not None

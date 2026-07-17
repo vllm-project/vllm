@@ -2248,8 +2248,11 @@ class VllmConfig:
     def validate_mamba_cached_kernel(self) -> "VllmConfig":
         if not self.cache_config.use_replayssm:
             return self
-        if self.cache_config.mamba_cache_mode != "none":
-            raise ValueError("--use-replayssm requires --mamba-cache-mode none")
+        if self.cache_config.mamba_cache_mode == "all":
+            raise ValueError(
+                "--use-replayssm supports prefix caching only in align mode; "
+                "pass --mamba-cache-mode align"
+            )
         if self.num_speculative_tokens > 0:
             raise ValueError("--use-replayssm does not support speculative decoding")
         if self.mamba_config.backend != MambaBackendEnum.TRITON:

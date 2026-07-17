@@ -56,3 +56,63 @@ def test_replayssm_decode_matches_baseline_tp2(vllm_runner, model_name):
     # Tensor-parallel correctness: ReplaySSM's caches and checkpoint state are
     # sharded per rank, so TP2 decode must still match the baseline at TP2.
     _check_replayssm_parity(vllm_runner, model_name, tensor_parallel_size=2)
+
+
+# Shared prefix long enough to span several mamba blocks; the exact repeat
+# guarantees a full-prefix cache hit.
+_PC_PREFIX = (
+    "In a detailed survey of state space models, the authors compared many "
+    "architectures across a wide range of long-context language tasks and "
+    "measured their throughput, memory use, and accuracy in careful detail. "
+)
+PREFIX_CACHING_PROMPTS = [
+    _PC_PREFIX + "The most important conclusion was that",
+    _PC_PREFIX + "Surprisingly, the experiments showed that",
+    _PC_PREFIX + "The most important conclusion was that",
+]
+
+
+def _check_replayssm_prefix_caching_parity(
+    vllm_runner, model_name, *, tensor_parallel_size=1
+):
+    # align mode + prefix caching: ReplaySSM must materialize the exact SSM state
+    # at each mamba block boundary (via the boundary flush) so cached prefixes
+    # match the always-materialized baseline. Only ReplaySSM varies.
+    common = dict(
+        max_model_len=1024,
+        trust_remote_code=True,
+        enable_prefix_caching=True,
+        enable_chunked_prefill=True,
+        mamba_cache_mode="align",
+        tensor_parallel_size=tensor_parallel_size,
+    )
+    with vllm_runner(model_name, **common) as llm:
+        baseline = llm.generate_greedy_logprobs(
+            PREFIX_CACHING_PROMPTS, max_tokens=32, num_logprobs=5
+        )
+    with vllm_runner(
+        model_name, use_replayssm=True, replayssm_buffer_len=16, **common
+    ) as llm:
+        replay = llm.generate_greedy_logprobs(
+            PREFIX_CACHING_PROMPTS, max_tokens=32, num_logprobs=5
+        )
+
+    check_logprobs_close(
+        outputs_0_lst=baseline,
+        outputs_1_lst=replay,
+        name_0="baseline_align_pc",
+        name_1="replayssm_align_pc",
+    )
+
+
+@pytest.mark.parametrize("model_name", MODELS)
+def test_replayssm_prefix_caching_matches_baseline(vllm_runner, model_name):
+    _check_replayssm_prefix_caching_parity(vllm_runner, model_name)
+
+
+@multi_gpu_test(num_gpus=2)
+@pytest.mark.parametrize("model_name", [MAMBA2_MODEL])
+def test_replayssm_prefix_caching_matches_baseline_tp2(vllm_runner, model_name):
+    _check_replayssm_prefix_caching_parity(
+        vllm_runner, model_name, tensor_parallel_size=2
+    )

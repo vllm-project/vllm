@@ -566,11 +566,23 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
                     "--use-replayssm requires CPU decode-base and "
                     "computed-token counts to derive decode write positions"
                 )
+            num_computed_d = num_computed_tokens_cpu[:num_decodes]
+            decode_base_d = decode_base_cpu[:num_decodes]
+            align_mode = self.vllm_config.cache_config.mamba_cache_mode == "align"
+            block_size = self.kv_cache_spec.block_size
+            if align_mode:
+                # After a boundary the align copy leaves an exact checkpoint at
+                # the block start and the new block's ring restarts empty, so
+                # re-anchor there; max() keeps the prompt-end anchor for the
+                # first (partial) block.
+                effective_base = torch.maximum(
+                    decode_base_d, (num_computed_d // block_size) * block_size
+                )
+            else:
+                effective_base = decode_base_d
             # write_pos counts decode steps since the ring's last full-state
-            # write (decode_base), so a resumed request re-anchors correctly.
-            decode_steps_cpu = (
-                num_computed_tokens_cpu[:num_decodes] - decode_base_cpu[:num_decodes]
-            )
+            # write (the anchor), so a resumed request re-anchors correctly.
+            decode_steps_cpu = num_computed_d - effective_base
             query_lens_cpu = (
                 common_attn_metadata.query_start_loc_cpu[1 : num_decodes + 1]
                 - common_attn_metadata.query_start_loc_cpu[:num_decodes]
@@ -590,8 +602,16 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             )
             write_pos_cpu = torch.remainder(decode_steps_cpu, self.replayssm_buffer_len)
             is_flush_cpu = (
-                (write_pos_cpu == self.replayssm_buffer_len - 1) | leftover_prompt
-            ).to(torch.int8)
+                write_pos_cpu == self.replayssm_buffer_len - 1
+            ) | leftover_prompt
+            if align_mode:
+                # Force a flush on the step completing a mamba block so the exact
+                # boundary state is materialized for prefix caching.
+                is_flush_cpu = is_flush_cpu | (
+                    valid_decode_rows
+                    & ((num_computed_d + query_lens_cpu) % block_size == 0)
+                )
+            is_flush_cpu = is_flush_cpu.to(torch.int8)
             write_pos_d = async_tensor_h2d(
                 write_pos_cpu.to(torch.int32).tolist(),
                 dtype=torch.int32,
