@@ -35,6 +35,7 @@ ROOT_DIR = Path(__file__).parent
 logger = logging.getLogger(__name__)
 
 PRECOMPILED_RUST_FRONTEND_PATH = ROOT_DIR / "vllm" / "vllm-rs"
+PRECOMPILED_RUST_FRONTEND_MEMBER_REGEX = re.compile(r"^[^/]+\.data/scripts/vllm-rs$")
 # setuptools-rust installs PyO3 artifacts as `<module>.<ext-suffix>`, where the
 # suffix ends with `.so` on Linux and macOS alike (e.g. `_rust_foo.abi3.so`).
 PRECOMPILED_RUST_EXTENSION_MEMBER_REGEX = re.compile(r"vllm/_rust_[^/]*\.so$")
@@ -483,8 +484,12 @@ class precompiled_build_rust(build_rust):
             )
 
         if not missing:
+            install_scripts = self.get_finalized_command("install_scripts")
+            destination = Path(install_scripts.build_dir) / "vllm-rs"
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(PRECOMPILED_RUST_FRONTEND_PATH, destination)
             logger.info(
-                "Skipping local Rust build: using precompiled %s and %s",
+                "Installed precompiled Rust artifacts from %s and %s",
                 PRECOMPILED_RUST_FRONTEND_PATH,
                 get_precompiled_rust_extension_paths(),
             )
@@ -793,9 +798,6 @@ class precompiled_wheel_utils:
                             "vllm/_rocm_C.abi3.so",
                         }
                     )
-                if extract_rust_frontend:
-                    exact_members.add("vllm/vllm-rs")
-
                 flash_attn_regex = re.compile(
                     r"vllm/vllm_flash_attn/(?:[^/.][^/]*/)*(?!\.)[^/]*\.py"
                 )
@@ -817,6 +819,14 @@ class precompiled_wheel_utils:
                 tml_fa4_regex = re.compile(r"vllm/third_party/tml_fa4/.*")
                 file_members = []
                 for member in wheel.filelist:
+                    if (
+                        extract_rust_frontend
+                        and PRECOMPILED_RUST_FRONTEND_MEMBER_REGEX.match(
+                            member.filename
+                        )
+                    ):
+                        file_members.append(member)
+                        continue
                     if member.filename in exact_members:
                         file_members.append(member)
                         continue
@@ -847,16 +857,26 @@ class precompiled_wheel_utils:
 
                 for file in file_members:
                     print(f"[extract] {file.filename}")
-                    target_path = os.path.join(".", file.filename)
-                    os.makedirs(os.path.dirname(target_path), exist_ok=True)
+                    is_rust_frontend = bool(
+                        PRECOMPILED_RUST_FRONTEND_MEMBER_REGEX.match(file.filename)
+                    )
+                    target_path = (
+                        PRECOMPILED_RUST_FRONTEND_PATH
+                        if is_rust_frontend
+                        else Path(file.filename)
+                    )
+                    target_path.parent.mkdir(parents=True, exist_ok=True)
                     with (
                         wheel.open(file.filename) as src,
-                        open(target_path, "wb") as dst,
+                        target_path.open("wb") as dst,
                     ):
                         shutil.copyfileobj(src, dst)
                     mode = file.external_attr >> 16
                     if mode:
-                        os.chmod(target_path, mode)
+                        target_path.chmod(mode)
+
+                    if is_rust_frontend:
+                        continue
 
                     pkg = os.path.dirname(file.filename).replace("/", ".")
                     package_data_patch.setdefault(pkg, []).append(
@@ -1225,10 +1245,6 @@ if USE_PRECOMPILED_RUST_FRONTEND:
     for pkg, files in patch.items():
         package_data.setdefault(pkg, []).extend(files)
 
-# If the rust frontend binary is already present in the source tree (e.g.,
-# pre-built in a separate Docker build stage), ship it as-is.
-if PRECOMPILED_RUST_FRONTEND_PATH.exists():
-    add_vllm_package_data("vllm-rs")
 for rust_extension_path in get_precompiled_rust_extension_paths():
     add_vllm_package_data(rust_extension_path.name)
 
@@ -1250,8 +1266,8 @@ if (
 ):
     cmdclass["build_rust"] = precompiled_build_rust
 
-# Rust artifacts, built via setuptools-rust and installed into the package
-# directory alongside the Python modules.
+# Rust artifacts built via setuptools-rust. RustBin installs vllm-rs into the
+# environment scripts directory; PyO3 extensions remain in the vllm package.
 rust_extensions = rust_build.rust_extensions(
     optional=not should_require_rust_frontend()
 )

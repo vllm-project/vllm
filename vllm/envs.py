@@ -5,7 +5,9 @@ import functools
 import json
 import logging
 import os
+import shutil
 import sys
+import sysconfig
 import tempfile
 import uuid
 from collections.abc import Callable
@@ -567,14 +569,23 @@ def _resolve_rust_frontend_path() -> str | None:
         return None
 
     if raw.lower() in ("auto", "1", "true"):
-        pkg_dir = os.path.dirname(os.path.abspath(__file__))
-        candidate = os.path.join(pkg_dir, "vllm-rs")
+        candidate = os.path.join(sysconfig.get_path("scripts"), "vllm-rs")
         if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+
+        package_dir = os.path.dirname(os.path.abspath(__file__))
+        candidate = os.path.join(package_dir, "vllm-rs")
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+
+        candidate = shutil.which("vllm-rs")
+        if candidate is not None:
             return candidate
 
         raise FileNotFoundError(
             "VLLM_RUST_FRONTEND_PATH=auto but the vllm-rs binary was "
-            f"not found at {candidate}. "
+            "not found in the Python scripts directory, package directory, "
+            "or PATH. "
             "Build with setuptools-rust or set the path explicitly."
         )
     return raw

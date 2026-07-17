@@ -9,7 +9,7 @@ docker run --rm --network=none --entrypoint /bin/bash "${image_ref}" -ec '
   if [ ! -d /vllm-workspace ]; then echo Missing directory: /vllm-workspace >&2; exit 1; fi
   if [ ! -d /vllm-workspace/tests ]; then echo Missing directory: /vllm-workspace/tests >&2; exit 1; fi
   if [ ! -d /vllm-workspace/src/vllm ]; then echo Missing directory: /vllm-workspace/src/vllm >&2; exit 1; fi
-  if [ ! -x /vllm-workspace/src/vllm/vllm-rs ]; then echo Missing executable: /vllm-workspace/src/vllm/vllm-rs >&2; exit 1; fi
+  if ! command -v vllm-rs >/dev/null 2>&1; then echo Missing executable: vllm-rs >&2; exit 1; fi
 
   command -v python3
   command -v uv

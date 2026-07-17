@@ -10,19 +10,19 @@ import sys
 from pathlib import Path
 
 from setuptools import setup
-from setuptools_rust import Binding, RustExtension
+from setuptools_rust import Binding, RustBin, RustExtension
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
+RUST_STAGING_DIR = ROOT_DIR / "vllm"
 
 
 def rust_extensions(*, optional: bool = False) -> list[RustExtension]:
     return [
-        RustExtension(
-            target="vllm.vllm-rs",
+        RustBin(
+            target="vllm-rs",
             path="rust/src/cmd/Cargo.toml",
             args=["--bin", "vllm-rs"],
             features=["native-tls-vendored"],
-            binding=Binding.Exec,
             optional=optional,
         ),
         RustExtension(
@@ -51,11 +51,12 @@ def rust_py_extension_module_names() -> list[str]:
 
 def build_binary(build_rust_args: list[str]) -> None:
     os.chdir(ROOT_DIR)
-    (ROOT_DIR / "vllm").mkdir(exist_ok=True)
+    RUST_STAGING_DIR.mkdir(exist_ok=True)
     setup(
         name="vllm-rust-frontend-build",
         packages=[],
         rust_extensions=rust_extensions(optional=False),
+        options={"install_scripts": {"build_dir": str(RUST_STAGING_DIR)}},
         script_args=["build_rust", "--quiet", "--inplace", *build_rust_args],
     )
 

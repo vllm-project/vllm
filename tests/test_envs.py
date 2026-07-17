@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -143,6 +144,59 @@ def test_precompiled_install_flags_are_orthogonal() -> None:
     ):
         assert environment_variables["VLLM_USE_PRECOMPILED"]() is True
         assert environment_variables["VLLM_USE_PRECOMPILED_RUST"]() is True
+
+
+def test_resolve_rust_frontend_path_from_scripts_dir(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    binary = tmp_path / "vllm-rs"
+    binary.write_text("")
+    binary.chmod(0o755)
+    monkeypatch.setenv("VLLM_USE_RUST_FRONTEND", "1")
+    monkeypatch.setenv("VLLM_RUST_FRONTEND_PATH", "auto")
+    monkeypatch.setattr(envs.sysconfig, "get_path", lambda _: str(tmp_path))
+    monkeypatch.setattr(envs.shutil, "which", lambda _: None)
+
+    assert envs._resolve_rust_frontend_path() == str(binary)
+
+
+def test_resolve_rust_frontend_path_from_path(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    binary = tmp_path / "vllm-rs"
+    monkeypatch.setenv("VLLM_USE_RUST_FRONTEND", "1")
+    monkeypatch.setenv("VLLM_RUST_FRONTEND_PATH", "auto")
+    monkeypatch.setattr(envs, "__file__", str(tmp_path / "vllm" / "envs.py"))
+    monkeypatch.setattr(envs.sysconfig, "get_path", lambda _: str(tmp_path / "bin"))
+    monkeypatch.setattr(envs.shutil, "which", lambda _: str(binary))
+
+    assert envs._resolve_rust_frontend_path() == str(binary)
+
+
+def test_resolve_rust_frontend_path_from_package_staging(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    package_dir = tmp_path / "vllm"
+    package_dir.mkdir()
+    binary = package_dir / "vllm-rs"
+    binary.write_text("")
+    binary.chmod(0o755)
+    monkeypatch.setenv("VLLM_USE_RUST_FRONTEND", "1")
+    monkeypatch.setenv("VLLM_RUST_FRONTEND_PATH", "auto")
+    monkeypatch.setattr(envs, "__file__", str(package_dir / "envs.py"))
+    monkeypatch.setattr(envs.sysconfig, "get_path", lambda _: str(tmp_path / "bin"))
+    monkeypatch.setattr(envs.shutil, "which", lambda _: None)
+
+    assert envs._resolve_rust_frontend_path() == str(binary)
+
+
+def test_resolve_rust_frontend_path_explicit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("VLLM_USE_RUST_FRONTEND", "1")
+    monkeypatch.setenv("VLLM_RUST_FRONTEND_PATH", "/tmp/vllm-rs")
+
+    assert envs._resolve_rust_frontend_path() == "/tmp/vllm-rs"
 
 
 class TestEnvWithChoices:

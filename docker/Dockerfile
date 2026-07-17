@@ -533,8 +533,8 @@ WORKDIR /workspace
 COPY --from=csrc-build /workspace/dist /precompiled-wheels
 COPY . .
 
-# Drop the pre-built Rust artifacts into the source tree. setup.py detects
-# them and ships them as-is, skipping the local Rust build.
+# Drop the pre-built Rust artifacts into the source tree. setup.py installs
+# the binary as RustBin and ships the PyO3 extensions as package modules.
 COPY --from=rust-build /workspace/vllm/vllm-rs vllm/vllm-rs
 COPY --from=rust-build /workspace/vllm/_rust_*.so vllm/
 

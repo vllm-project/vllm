@@ -1,5 +1,5 @@
 #!/bin/bash
-# Build vLLM Rust artifacts and install them into the vllm package.
+# Build vLLM Rust artifacts into the vllm staging directory.
 # Usage: ./build_rust.sh [--debug]
 #
 # By default builds in release mode. Pass --debug for faster compile times
