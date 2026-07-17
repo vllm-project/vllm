@@ -9,6 +9,7 @@ from typing import Any
 import torch
 
 from vllm.platforms import current_platform
+from vllm.triton_utils import tl, triton
 
 
 def bucket_max_seqlen_q(max_seqlen_q: int) -> int:
@@ -168,6 +169,233 @@ def inkling_fa4_rel_attention(
     if isinstance(ret, tuple):
         return ret[0]
     return ret
+
+
+@triton.jit
+def _inkling_decode_rel_attention_kernel(
+    q_ptr,
+    key_cache_ptr,
+    value_cache_ptr,
+    block_table_ptr,
+    cache_seqlens_ptr,
+    cu_seqlens_q_ptr,
+    rel_logits_ptr,
+    out_ptr,
+    softmax_scale,
+    stride_q_token: tl.int64,
+    stride_q_head: tl.int64,
+    stride_q_dim: tl.int64,
+    stride_k_block: tl.int64,
+    stride_k_token: tl.int64,
+    stride_k_head: tl.int64,
+    stride_k_dim: tl.int64,
+    stride_v_block: tl.int64,
+    stride_v_token: tl.int64,
+    stride_v_head: tl.int64,
+    stride_v_dim: tl.int64,
+    stride_block_table_seq: tl.int64,
+    stride_rel_token: tl.int64,
+    stride_rel_head: tl.int64,
+    stride_rel_distance: tl.int64,
+    stride_out_token: tl.int64,
+    stride_out_head: tl.int64,
+    stride_out_dim: tl.int64,
+    NUM_HEADS: tl.constexpr,
+    NUM_KV_HEADS: tl.constexpr,
+    HEAD_DIM: tl.constexpr,
+    BLOCK_D: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    PAGE_SIZE: tl.constexpr,
+    REL_EXTENT: tl.constexpr,
+    WINDOW_LEFT: tl.constexpr,
+):
+    seq_idx = tl.program_id(0)
+    head_idx = tl.program_id(1)
+
+    query_idx = tl.load(cu_seqlens_q_ptr + seq_idx)
+    query_end = tl.load(cu_seqlens_q_ptr + seq_idx + 1)
+    if query_idx == query_end:
+        return
+
+    kv_len = tl.load(cache_seqlens_ptr + seq_idx)
+    if kv_len <= 0:
+        return
+
+    kv_group_size: tl.constexpr = NUM_HEADS // NUM_KV_HEADS
+    kv_head_idx = head_idx // kv_group_size
+    offs_d = tl.arange(0, BLOCK_D)
+    dim_mask = offs_d < HEAD_DIM
+    q_offsets = (
+        query_idx * stride_q_token + head_idx * stride_q_head + offs_d * stride_q_dim
+    )
+    q = tl.load(q_ptr + q_offsets, mask=dim_mask, other=0.0)
+
+    key_start = 0
+    if WINDOW_LEFT >= 0:
+        key_start = tl.maximum(0, kv_len - WINDOW_LEFT - 1)
+
+    running_max = -float("inf")
+    running_sum = 0.0
+    acc = tl.zeros((BLOCK_D,), dtype=tl.float32)
+
+    for tile_start in range(key_start, kv_len, BLOCK_N):
+        key_idx = tile_start + tl.arange(0, BLOCK_N)
+        key_mask = key_idx < kv_len
+        physical_block = tl.load(
+            block_table_ptr + seq_idx * stride_block_table_seq + key_idx // PAGE_SIZE,
+            mask=key_mask,
+            other=0,
+            cache_modifier=".ca",
+        ).to(tl.int64)
+        page_offset = key_idx % PAGE_SIZE
+
+        key_offsets = (
+            physical_block[:, None] * stride_k_block
+            + page_offset[:, None] * stride_k_token
+            + kv_head_idx * stride_k_head
+            + offs_d[None, :] * stride_k_dim
+        )
+        key = tl.load(
+            key_cache_ptr + key_offsets,
+            mask=key_mask[:, None] & dim_mask[None, :],
+            other=0.0,
+            cache_modifier=".cg",
+        )
+        scores = tl.sum(q[None, :] * key, axis=1) * softmax_scale
+
+        distance = kv_len - 1 - key_idx
+        rel_mask = key_mask & (distance < REL_EXTENT)
+        rel_offsets = (
+            query_idx * stride_rel_token
+            + head_idx * stride_rel_head
+            + distance * stride_rel_distance
+        )
+        relative_bias = tl.load(
+            rel_logits_ptr + rel_offsets,
+            mask=rel_mask,
+            other=0.0,
+            cache_modifier=".ca",
+        )
+        scores += relative_bias
+        scores = tl.where(key_mask, scores, -float("inf"))
+
+        value_offsets = (
+            physical_block[:, None] * stride_v_block
+            + page_offset[:, None] * stride_v_token
+            + kv_head_idx * stride_v_head
+            + offs_d[None, :] * stride_v_dim
+        )
+        value = tl.load(
+            value_cache_ptr + value_offsets,
+            mask=key_mask[:, None] & dim_mask[None, :],
+            other=0.0,
+            cache_modifier=".cg",
+        )
+
+        tile_max = tl.maximum(tl.max(scores, axis=0), running_max)
+        old_scale = tl.exp(running_max - tile_max)
+        probabilities = tl.exp(scores - tile_max)
+        acc = acc * old_scale + tl.sum(probabilities[:, None] * value, axis=0)
+        running_sum = running_sum * old_scale + tl.sum(probabilities, axis=0)
+        running_max = tile_max
+
+    output_offsets = (
+        query_idx * stride_out_token
+        + head_idx * stride_out_head
+        + offs_d * stride_out_dim
+    )
+    tl.store(out_ptr + output_offsets, acc / running_sum, mask=dim_mask)
+
+
+def inkling_triton_decode_rel_attention(
+    q: torch.Tensor,
+    key_cache: torch.Tensor,
+    value_cache: torch.Tensor,
+    *,
+    block_table: torch.Tensor,
+    cache_seqlens: torch.Tensor,
+    cu_seqlens_q: torch.Tensor,
+    max_seqlen_q: int,
+    softmax_scale: float,
+    causal: bool,
+    window_size: tuple[int, int],
+    rel_extent: int,
+    rel_logits: torch.Tensor,
+    num_splits: int = 32,
+    out: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Fused paged relative attention for a single-token decode step."""
+    del num_splits
+    if max_seqlen_q != 1:
+        raise ValueError("Inkling Triton decode attention requires max_seqlen_q=1")
+    if not causal:
+        raise NotImplementedError(
+            "Inkling Triton decode attention requires causal=True"
+        )
+    if window_size == (-1, -1):
+        window_left = -1
+    elif window_size[0] >= 0 and window_size[1] == 0:
+        window_left = window_size[0]
+    else:
+        raise NotImplementedError(
+            f"Unsupported Inkling Triton attention window: {window_size}"
+        )
+
+    if q.ndim != 3 or key_cache.ndim != 4 or value_cache.ndim != 4:
+        raise ValueError("Expected q to be 3D and paged K/V caches to be 4D")
+    if key_cache.shape != value_cache.shape:
+        raise ValueError("Inkling key and value cache shapes must match")
+    if key_cache.shape[-1] != q.shape[-1]:
+        raise ValueError("Inkling query and KV head dimensions must match")
+    if rel_logits.shape[:2] != q.shape[:2] or rel_logits.shape[2] < rel_extent:
+        raise ValueError("Inkling relative logits have an incompatible shape")
+    if cu_seqlens_q.shape[0] != cache_seqlens.shape[0] + 1:
+        raise ValueError("Inkling varlen query and KV metadata do not match")
+
+    num_heads = q.shape[1]
+    num_kv_heads = key_cache.shape[2]
+    if num_heads % num_kv_heads != 0:
+        raise ValueError("Inkling query heads must be divisible by KV heads")
+
+    result = torch.empty_like(q) if out is None else out
+    if result.shape != q.shape:
+        raise ValueError("Inkling attention output must have the query shape")
+    if q.shape[0] == 0:
+        return result
+
+    head_dim = q.shape[2]
+    block_d = triton.next_power_of_2(head_dim)
+    kv_group_size = num_heads // num_kv_heads
+    num_warps = 1 if kv_group_size > 1 else 4
+    grid = (cache_seqlens.shape[0], num_heads)
+    _inkling_decode_rel_attention_kernel[grid](
+        q,
+        key_cache,
+        value_cache,
+        block_table,
+        cache_seqlens,
+        cu_seqlens_q,
+        rel_logits,
+        result,
+        softmax_scale,
+        *q.stride(),
+        *key_cache.stride(),
+        *value_cache.stride(),
+        block_table.stride(0),
+        *rel_logits.stride(),
+        *result.stride(),
+        NUM_HEADS=num_heads,
+        NUM_KV_HEADS=num_kv_heads,
+        HEAD_DIM=head_dim,
+        BLOCK_D=block_d,
+        BLOCK_N=8,
+        PAGE_SIZE=key_cache.shape[1],
+        REL_EXTENT=rel_extent,
+        WINDOW_LEFT=window_left,
+        num_warps=num_warps,
+        num_stages=2,
+    )
+    return result
 
 
 def inkling_torch_rel_attention(

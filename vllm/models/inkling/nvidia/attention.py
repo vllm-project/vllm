@@ -40,6 +40,7 @@ from .ops.fa4_rel_attention import (
     inkling_fa4_num_splits,
     inkling_fa4_rel_attention,
     inkling_torch_rel_attention,
+    inkling_triton_decode_rel_attention,
 )
 from .ops.fa4_warmup import InklingFA4WarmupConfig, register_fa4_warmup
 from .ops.qkvr_prep import fused_qkvr_prep
@@ -318,7 +319,12 @@ class InklingAttention(nn.Module, AttentionLayerBase):
         nt = md.num_actual_tokens
         key_cache, value_cache = self._split_kv_cache()
         if self._use_torch_rel_attention:
-            inkling_torch_rel_attention(
+            attention_fn = (
+                inkling_triton_decode_rel_attention
+                if md.max_query_len == 1
+                else inkling_torch_rel_attention
+            )
+            attention_fn(
                 q[:nt],
                 key_cache,
                 value_cache,
