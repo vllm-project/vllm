@@ -87,25 +87,6 @@ class SymmMemCommunicator:
             self.max_size = SYMM_MEM_ALL_REDUCE_MAX_SIZES[self.device_capability][
                 self.world_size
             ]
-        from vllm.distributed.parallel_state import in_the_same_node_as
-
-        if not all(in_the_same_node_as(self.group, source_rank=0)):
-            # Cross-node group (multi-node NVLink): the default CUDA backend
-            # exchanges CUDA IPC handles, which are same-node only. Select
-            # the NVSHMEM backend before the process's first symm-mem
-            # allocation so rendezvous maps fabric-reachable peer VAs.
-            try:
-                torch_symm_mem.set_backend("NVSHMEM")
-                logger.info_once(
-                    "SymmMemCommunicator: multi-node group, using the "
-                    "NVSHMEM symmetric-memory backend"
-                )
-            except RuntimeError as e:
-                logger.warning_once(
-                    "SymmMemCommunicator: could not select the NVSHMEM "
-                    "backend for a multi-node group: %s",
-                    str(e),
-                )
         try:
             self.buffer = torch_symm_mem.empty(
                 self.max_size // self.dtype.itemsize,

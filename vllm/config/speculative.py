@@ -1327,15 +1327,6 @@ class SpeculativeConfig:
         # TODO(ben): Refactor this so the naming is clearer
         return self.method in ("eagle", "eagle3", "mtp", "dflash", "dspark")
 
-    def num_speculative_prefill_steps(self) -> int:
-        if self.method == "mtp" and self.draft_model_config is not None:
-            n_predict = getattr(
-                self.draft_model_config.hf_config, "num_nextn_predict_layers", None
-            )
-            if n_predict:
-                return min(int(n_predict), self.num_speculative_tokens)
-        return 1
-
     def use_dflash(self) -> bool:
         return self.method == "dflash"
 
