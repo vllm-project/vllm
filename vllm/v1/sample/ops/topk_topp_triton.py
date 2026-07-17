@@ -91,6 +91,12 @@ def _update_min_larger_stats(data, above_mask, min_larger, num_min_larger, senti
 
 
 @triton.jit
+def _top_p_pivot_midpoint(max_range, min_range):
+    """Return a midpoint that converges uniformly across probability scales."""
+    return tl.sqrt(max_range * tl.maximum(min_range, 1e-30))
+
+
+@triton.jit
 def _topk_topp_kernel(
     LOGITS,
     LOGITS_STRIDE_0,
@@ -524,7 +530,7 @@ def _topk_topp_kernel(
                         # Fifth passes: Search for p_pivot
                         found_pivot = 0
                         while found_pivot == 0:
-                            p_pivot_0 = (max_range - min_range) * 0.5 + min_range
+                            p_pivot_0 = _top_p_pivot_midpoint(max_range, min_range)
                             p_pivots_sum_0 = 0.0
                             min_larger_0 = 1.0
                             num_min_larger_0 = tl.zeros((), dtype=tl.uint32)
@@ -572,8 +578,10 @@ def _topk_topp_kernel(
                                 max_range = p_pivot_0
 
                             num_iters += 1
-                            if (max_range - min_range) < 1e-9 or num_iters >= 18:
-                                p_pivot = (max_range + min_range) / 2.0
+                            if max_range <= min_range * 1.0001 or num_iters >= 18:
+                                # Keep the pivot consistent with the
+                                # min-larger statistics computed above.
+                                p_pivot = p_pivot_0
                                 min_larger_prob = min_larger_0
                                 num_min_larger = num_min_larger_0
                                 p_pivots_sum = p_pivots_sum_0
@@ -693,15 +701,7 @@ def _topk_topp_kernel(
 
                     found_pivot = 0
                     while found_pivot == 0:
-                        # Search in log-probability space.  An arithmetic
-                        # midpoint needs more than the fixed 18 iterations
-                        # below when a peaked row has max_probability close
-                        # to one but the nucleus boundary is several orders
-                        # of magnitude smaller.  The geometric midpoint
-                        # retains the same iteration cap while making the
-                        # convergence depend on the probability ratio rather
-                        # than its absolute range.
-                        p_pivot_0 = tl.sqrt(max_range * tl.maximum(min_range, 1e-30))
+                        p_pivot_0 = _top_p_pivot_midpoint(max_range, min_range)
                         p_pivots_sum_0 = 0.0
                         min_larger_0 = 1.0
                         num_min_larger_0 = tl.zeros((), dtype=tl.uint32)
@@ -748,8 +748,10 @@ def _topk_topp_kernel(
                             max_range = p_pivot_0
 
                         num_iters += 1
-                        if (max_range - min_range) < 1e-9 or num_iters >= 18:
-                            p_pivot = tl.sqrt(max_range * tl.maximum(min_range, 1e-30))
+                        if max_range <= min_range * 1.0001 or num_iters >= 18:
+                            # Keep the pivot consistent with the min-larger
+                            # statistics computed above.
+                            p_pivot = p_pivot_0
                             min_larger_prob = min_larger_0
                             num_min_larger = num_min_larger_0
                             p_pivots_sum = p_pivots_sum_0
@@ -769,9 +771,7 @@ def _topk_topp_kernel(
 
                     found_pivot = 0
                     while found_pivot == 0:
-                        # See the outlier-buffer branch above.  Use the same
-                        # log-space search when scanning the full vocabulary.
-                        p_pivot_0 = tl.sqrt(max_range * tl.maximum(min_range, 1e-30))
+                        p_pivot_0 = _top_p_pivot_midpoint(max_range, min_range)
                         p_pivots_sum_0 = 0.0
                         min_larger_0 = 1.0
                         num_min_larger_0 = tl.zeros((), dtype=tl.uint32)
@@ -816,8 +816,10 @@ def _topk_topp_kernel(
                             max_range = p_pivot_0
 
                         num_iters += 1
-                        if (max_range - min_range) < 1e-9 or num_iters >= 18:
-                            p_pivot = tl.sqrt(max_range * tl.maximum(min_range, 1e-30))
+                        if max_range <= min_range * 1.0001 or num_iters >= 18:
+                            # Keep the pivot consistent with the min-larger
+                            # statistics computed above.
+                            p_pivot = p_pivot_0
                             min_larger_prob = min_larger_0
                             num_min_larger = num_min_larger_0
                             p_pivots_sum = p_pivots_sum_0

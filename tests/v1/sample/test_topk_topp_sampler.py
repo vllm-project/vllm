@@ -351,6 +351,58 @@ class TestTritonTopkTopp:
 
         self._compare_results(logits, k=None, p=p)
 
+    def test_topk_topp_peaked_logits(self):
+        """Test fused top-k + top-p with a wide probability dynamic range."""
+        batch_size, vocab_size = 8, 128256
+        logits = torch.randn(
+            batch_size, vocab_size, generator=self.generator, dtype=torch.float32
+        )
+        hot = torch.randint(
+            0,
+            vocab_size,
+            (batch_size, 8),
+            generator=self.generator,
+        )
+        boosts = torch.tensor(
+            [13.0, 8.0, 8.0, 8.0, 8.0, 8.0, 8.0, 8.0],
+            dtype=torch.float32,
+        ).expand_as(hot)
+        logits.scatter_add_(1, hot, boosts)
+        k = torch.full((batch_size,), 32000, dtype=torch.int32)
+        p = torch.full((batch_size,), 0.95, dtype=torch.float32)
+
+        self._compare_results(logits, k=k, p=p)
+
+    @pytest.mark.parametrize("k_value", [None, 32000])
+    def test_topp_extreme_probability_range(self, k_value: int | None):
+        """Test nucleus boundaries near 1e-9 in probability space.
+
+        Thousands of tail tokens can have nearly identical, tiny
+        probabilities in this case, so probability-mass error is a more
+        meaningful measure than the exact number of retained tokens.
+        """
+        batch_size, vocab_size = 8, 128256
+        logits = torch.randn(
+            batch_size, vocab_size, generator=self.generator, dtype=torch.float32
+        )
+        logits[:, 0] = 20.0
+        k = (
+            None
+            if k_value is None
+            else torch.full((batch_size,), k_value, dtype=torch.int32)
+        )
+        p = torch.full((batch_size,), 0.9999, dtype=torch.float32)
+
+        from vllm.v1.sample.ops.topk_topp_triton import apply_top_k_top_p_triton
+
+        reference = apply_top_k_top_p_pytorch(logits.clone(), k, p)
+        result = apply_top_k_top_p_triton(logits.clone(), k, p)
+        total_variation = 0.5 * (
+            reference.softmax(dim=-1) - result.softmax(dim=-1)
+        ).abs().sum(dim=-1)
+
+        assert total_variation.max().item() < 1e-4
+
     @pytest.mark.parametrize("batch_size", [1, 8, 32, 128, 512, 1024])
     @pytest.mark.parametrize("vocab_size", [1024, 32000, 128256])
     def test_topk_and_topp(self, batch_size: int, vocab_size: int):
