@@ -1161,9 +1161,14 @@ class AsyncMPClient(MPClient):
             await self._send_input(EngineCoreRequestType.ABORT, request_ids)
 
     async def pause_scheduler_async(
-        self, mode: PauseMode = "abort", clear_cache: bool = True
+        self,
+        mode: PauseMode = "abort",
+        clear_cache: bool = True,
+        offload_aborted_kv: bool | None = None,
     ) -> None:
-        await self.call_utility_async("pause_scheduler", mode, clear_cache)
+        await self.call_utility_async(
+            "pause_scheduler", mode, clear_cache, offload_aborted_kv
+        )
 
     async def resume_scheduler_async(self) -> None:
         await self.call_utility_async("resume_scheduler")

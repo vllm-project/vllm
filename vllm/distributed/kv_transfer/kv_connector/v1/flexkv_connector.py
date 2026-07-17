@@ -259,6 +259,9 @@ class FlexKVConnectorV1(KVConnectorBase_V1):
         """Get the block ids that have failed to load."""
         return self._flexkv_connector.get_block_ids_with_load_errors()
 
+    def supports_abort_kv_offload(self) -> bool:
+        return True
+
     def reset_cache(self) -> bool | None:
         """Reset FlexKV's internal cache (all tiers).
 

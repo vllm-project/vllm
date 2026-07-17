@@ -32,6 +32,7 @@ async def pause_generation(
     mode: Annotated[PauseMode, Query()] = "abort",
     wait_for_inflight_requests: bool = Query(False),
     clear_cache: Annotated[bool, Query()] = True,
+    offload_aborted_kv: Annotated[bool | None, Query()] = None,
 ) -> JSONResponse:
     """Pause generation requests to allow weight updates.
 
@@ -52,6 +53,7 @@ async def pause_generation(
             mode=mode,
             clear_cache=clear_cache,
             wait_for_inflight_requests=wait_for_inflight_requests,
+            offload_aborted_kv=offload_aborted_kv,
         )
         return JSONResponse(
             content={"status": "paused"},

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import dataclasses
+import os
 from concurrent.futures import Future
 from unittest.mock import Mock
 
@@ -51,6 +52,8 @@ from vllm.v1.structured_output import StructuredOutputGrammar, StructuredOutputM
 from .utils import EOS_TOKEN_ID, create_requests, create_scheduler, mock_kv
 
 pytestmark = pytest.mark.cpu_test
+
+ABORT_OFFLOAD_TEST_MODEL = os.getenv("VLLM_TEST_MODEL", "facebook/opt-125m")
 
 
 def test_make_scheduled_encoder_input_stats_output_embeddings():
@@ -132,6 +135,20 @@ def test_finish_request():
         scheduler.finish_requests(request.request_id, RequestStatus.FINISHED_ABORTED)
         assert request.request_id not in scheduler.requests
         assert len(scheduler.waiting) == 9 - i
+
+
+def test_finish_aborted_request_sets_offload_directive_before_cleanup():
+    scheduler = create_scheduler(model=ABORT_OFFLOAD_TEST_MODEL)
+    request = create_requests(num_requests=1)[0]
+    scheduler.add_request(request)
+
+    scheduler.finish_requests(
+        request.request_id,
+        RequestStatus.FINISHED_ABORTED,
+        offload_aborted_kv=True,
+    )
+
+    assert request.offload_kv_on_finish is True
 
 
 def test_get_num_unfinished_requests():

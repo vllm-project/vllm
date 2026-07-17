@@ -99,6 +99,27 @@ logger = init_logger(__name__)
 
 HANDSHAKE_TIMEOUT_MINS = 5
 
+
+def _resolve_abort_kv_offload(
+    scheduler: SchedulerInterface, requested: bool | None
+) -> bool:
+    if requested is not None:
+        return requested
+
+    env_value = os.getenv("VLLM_ABORT_KV_OFFLOAD")
+    if env_value is not None:
+        normalized = env_value.strip().lower()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off"}:
+            return False
+        raise ValueError(
+            "VLLM_ABORT_KV_OFFLOAD must be a boolean value, "
+            f"got {env_value!r}"
+        )
+
+    return scheduler.supports_abort_kv_offload()
+
 _R = TypeVar("_R")  # Return type for collective_rpc
 
 
@@ -843,6 +864,7 @@ class EngineCore:
         self,
         mode: PauseMode = "abort",
         clear_cache: bool = True,
+        offload_aborted_kv: bool | None = None,
         reset_connector: bool = True,
     ) -> Future | None:
         """Pause generation; behavior depends on mode.
@@ -864,7 +886,13 @@ class EngineCore:
             raise ValueError("'wait' mode can't be used in inproc-engine mode")
 
         if mode == "abort":
-            self.scheduler.finish_requests(None, RequestStatus.FINISHED_ABORTED)
+            self.scheduler.finish_requests(
+                None,
+                RequestStatus.FINISHED_ABORTED,
+                offload_aborted_kv=_resolve_abort_kv_offload(
+                    self.scheduler, offload_aborted_kv
+                ),
+            )
 
         pause_state = PauseState.PAUSED_ALL if mode == "keep" else PauseState.PAUSED_NEW
         self.scheduler.set_pause_state(pause_state)
@@ -1933,6 +1961,7 @@ class EngineCoreProc(EngineCore):
         self,
         mode: PauseMode = "abort",
         clear_cache: bool = True,
+        offload_aborted_kv: bool | None = None,
         reset_connector: bool = True,
     ) -> Future | None:
         """Pause generation; behavior depends on mode.
@@ -1958,7 +1987,11 @@ class EngineCoreProc(EngineCore):
 
         if mode == "abort":
             aborted_reqs = self.scheduler.finish_requests(
-                None, RequestStatus.FINISHED_ABORTED
+                None,
+                RequestStatus.FINISHED_ABORTED,
+                offload_aborted_kv=_resolve_abort_kv_offload(
+                    self.scheduler, offload_aborted_kv
+                ),
             )
             self._send_abort_outputs(aborted_reqs)
 

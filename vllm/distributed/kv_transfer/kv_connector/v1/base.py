@@ -582,6 +582,13 @@ class KVConnectorBase_V1(ABC):
         # scheduler alive (e.g. extend has_unfinished_requests).
         return False
 
+    def supports_abort_kv_offload(self) -> bool:
+        """Return whether this connector can save KV for aborted requests.
+
+        vLLM owns the offload policy; connectors only advertise capability.
+        """
+        return False
+
     @classmethod
     def get_required_kvcache_layout(cls, vllm_config: "VllmConfig") -> str | None:
         """

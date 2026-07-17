@@ -793,6 +793,7 @@ class AsyncLLM(EngineClient):
         mode: PauseMode = "abort",
         wait_for_inflight_requests: bool | None = None,
         clear_cache: bool = True,
+        offload_aborted_kv: bool | None = None,
     ) -> None:
         """
         Pause generation to allow model weight updates.
@@ -811,6 +812,8 @@ class AsyncLLM(EngineClient):
             wait_for_inflight_requests: DEPRECATED: use mode argument.
             clear_cache: Whether to clear KV cache and prefix cache after
                 draining. Set to ``False`` to preserve cache for faster resume.
+            offload_aborted_kv: Whether a capable KV connector should save KV
+                for requests aborted by this pause. ``None`` uses vLLM policy.
         """
         if wait_for_inflight_requests:
             warnings.warn(
@@ -823,7 +826,11 @@ class AsyncLLM(EngineClient):
             mode = "wait"
         if clear_cache:
             await self.renderer.clear_mm_cache_async()
-        await self.engine_core.pause_scheduler_async(mode=mode, clear_cache=clear_cache)
+        await self.engine_core.pause_scheduler_async(
+            mode=mode,
+            clear_cache=clear_cache,
+            offload_aborted_kv=offload_aborted_kv,
+        )
         # Small sleep to help ensure that final outputs from any in-flight requests are
         # returned prior to this method returning. These outputs come out of the engine
         # prior to the wait-for-idle completion event, but involve additional async

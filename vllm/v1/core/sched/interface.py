@@ -146,6 +146,7 @@ class SchedulerInterface(ABC):
         self,
         request_ids: str | Iterable[str] | None,
         finished_status: "RequestStatus",
+        offload_aborted_kv: bool = False,
     ) -> "list[Request]":
         """Finish the requests in the scheduler's internal queue. If the request
         is not in the queue, this method will do nothing for that request.
@@ -158,6 +159,8 @@ class SchedulerInterface(ABC):
         Args:
             request_ids: A single or a list of request IDs, or None to finish all.
             finished_status: The finished status of the given requests.
+            offload_aborted_kv: Mark aborted requests for connector offload
+                before releasing their local KV blocks.
 
         Returns:
             List of requests that were aborted. Will not include any that were
@@ -194,6 +197,10 @@ class SchedulerInterface(ABC):
         """Returns True if there are unfinished requests, or finished requests
         not yet returned in SchedulerOutputs."""
         return self.has_unfinished_requests() or self.has_finished_requests()
+
+    def supports_abort_kv_offload(self) -> bool:
+        """Return whether the configured KV connector supports abort offload."""
+        return False
 
     @property
     @abstractmethod
