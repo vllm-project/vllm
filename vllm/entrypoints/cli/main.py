@@ -6,15 +6,36 @@ Note that all future modules must be lazily loaded within main
 to avoid certain eager import breakage."""
 
 import importlib.metadata
+import os
 import sys
 from importlib.util import find_spec
+from pathlib import Path
 
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
+_RUST_CLI_PATH = Path(__file__).resolve().parents[2] / "vllm-rs"
+
+
+def _maybe_exec_rust_bench() -> None:
+    if "--omni" in sys.argv or sys.argv[1:3] != ["bench", "serve"]:
+        return
+
+    if not _RUST_CLI_PATH.is_file():
+        logger.warning(
+            "Rust benchmark binary not found at %s; falling back to Python.",
+            _RUST_CLI_PATH,
+        )
+        return
+
+    rust_cli = str(_RUST_CLI_PATH)
+    logger.info("Delegating `vllm bench serve` to Rust binary at %s.", rust_cli)
+    os.execv(rust_cli, [rust_cli, "bench", "serve", *sys.argv[3:]])
 
 
 def main():
+    _maybe_exec_rust_bench()
+
     import vllm.entrypoints.cli.benchmark.main
     import vllm.entrypoints.cli.collect_env
     import vllm.entrypoints.cli.launch

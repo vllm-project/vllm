@@ -5560,6 +5560,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+ "vllm-bench",
  "vllm-chat",
  "vllm-engine-core-client",
  "vllm-managed-engine",
