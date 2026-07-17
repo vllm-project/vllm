@@ -271,7 +271,21 @@ def finalize_layerwise_processing(model: torch.nn.Module, model_config: ModelCon
             # when nothing is loadable (load_numel_total == 0), so parameter-alias
             # buffers on such layers are restored rather than left deleted.
             if info.load_numel_total > 0:  # type: ignore[operator]
-                logger.warning("%s: Failed to load weights", layer.__class__.__name__)
+                # Only warn if the layer has actual parameters (not just
+                # non-persistent buffers like cos_sin_cache in RotaryEmbedding).
+                has_params = any(
+                    p is not None for p in layer._parameters.values()
+                )
+                if has_params:
+                    logger.warning(
+                        "%s: Failed to load weights",
+                        layer.__class__.__name__,
+                    )
+                else:
+                    logger.debug(
+                        "%s: No checkpoint weights (non-persistent buffers only)",
+                        layer.__class__.__name__,
+                    )
             _place_kernel_tensors(layer, info)
 
         # Process non-attention layers which did not load all elements. This can happen
