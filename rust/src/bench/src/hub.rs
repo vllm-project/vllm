@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 //! Sync facade over the async `hf_hub` API.
 //!
 //! The workspace bans rustls (`rust/deny.toml`), but hf-hub's sync `ureq`
