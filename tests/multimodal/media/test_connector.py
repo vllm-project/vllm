@@ -226,6 +226,33 @@ async def test_fetch_image_local_files_with_space_in_name(image_url: str):
 
 
 @pytest.mark.asyncio
+async def test_fetch_image_data_url_with_params():
+    """RFC 2397 allows parameters between the mediatype and the base64
+    marker; they must not be rejected or leak into the media type."""
+    connector = MediaConnector()
+
+    image = Image.new("RGB", (4, 4), color=(255, 0, 0))
+    with NamedTemporaryFile(suffix=".png") as f:
+        image.save(f.name)
+        base64_image = base64.b64encode(f.read()).decode("utf-8")
+
+    data_url = f"data:image/png;charset=utf-8;base64,{base64_image}"
+    image_sync = connector.fetch_image(data_url)
+    image_async = await connector.fetch_image_async(data_url)
+    assert _image_equals(image_sync, image_async)
+
+
+def test_fetch_image_data_url_malformed():
+    connector = MediaConnector()
+
+    with pytest.raises(ValueError, match="missing ','"):
+        connector.fetch_image("data:image/png;base64")
+
+    with pytest.raises(NotImplementedError, match="base64"):
+        connector.fetch_image("data:text/plain,hello")
+
+
+@pytest.mark.asyncio
 async def test_fetch_image_error_conversion():
     connector = MediaConnector()
     broken_img = "data:image/png;base64,aGVsbG9fdmxsbV9jb21tdW5pdHkK"
