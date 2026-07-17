@@ -95,6 +95,19 @@ class CompletionRequest(OpenAIBaseModel):
     )
     allowed_token_ids: list[int] | None = None
     prompt_logprobs: int | None = None
+    logprob_token_ids: list[int] | None = Field(
+        default=None,
+        description=(
+            "Specific vocab token IDs to return logprobs for at each generated "
+            "position, in addition to the sampled token. More efficient than "
+            "requesting the full vocab when only a small fixed label set is "
+            "needed (e.g. multilabel "
+            "scoring where each label corresponds to a known vocab id). When "
+            "set, this explicit token selection takes precedence over the "
+            "natural top-k selected by `logprobs`. Requires `logprobs` to be "
+            "set."
+        ),
+    )
     bad_words: list[str] = Field(default_factory=list)
     # --8<-- [end:completion-sampling-params]
 
@@ -196,10 +209,10 @@ class CompletionRequest(OpenAIBaseModel):
         ),
     )
 
-    vllm_xargs: dict[str, str | int | float] | None = Field(
+    vllm_xargs: dict[str, str | int | float | list[str | int | float]] | None = Field(
         default=None,
         description=(
-            "Additional request parameters with string or "
+            "Additional request parameters with (list of) string or "
             "numeric values, used by custom extensions."
         ),
     )
@@ -368,11 +381,12 @@ class CompletionRequest(OpenAIBaseModel):
             seed=self.seed,
             stop=self.stop,
             stop_token_ids=stop_token_ids,
-            logprobs=self.logprobs,
+            logprobs=None if self.logprob_token_ids else self.logprobs,
             ignore_eos=self.ignore_eos,
             max_tokens=max_tokens if not echo_without_generation else 1,
             min_tokens=self.min_tokens,
             prompt_logprobs=prompt_logprobs,
+            logprob_token_ids=self.logprob_token_ids or None,
             skip_special_tokens=self.skip_special_tokens,
             spaces_between_special_tokens=self.spaces_between_special_tokens,
             include_stop_str_in_output=self.include_stop_str_in_output,
@@ -459,6 +473,29 @@ class CompletionRequest(OpenAIBaseModel):
     @model_validator(mode="before")
     @classmethod
     def check_logprobs(cls, data):
+        if data.get("logprob_token_ids") and data.get("use_beam_search"):
+            raise VLLMValidationError(
+                "`logprob_token_ids` is not supported with beam search.",
+                parameter="logprob_token_ids",
+            )
+
+        if (
+            data.get("logprob_token_ids")
+            and data.get("echo")
+            and data.get("max_tokens") == 0
+        ):
+            raise VLLMValidationError(
+                "`logprob_token_ids` is not supported when `echo=True` and "
+                "`max_tokens=0` because no output tokens are generated.",
+                parameter="logprob_token_ids",
+            )
+
+        if data.get("logprob_token_ids") and data.get("logprobs") is None:
+            raise VLLMValidationError(
+                "when using `logprob_token_ids`, `logprobs` must be set.",
+                parameter="logprob_token_ids",
+            )
+
         if (prompt_logprobs := data.get("prompt_logprobs")) is not None:
             if data.get("stream") and (prompt_logprobs > 0 or prompt_logprobs == -1):
                 raise VLLMValidationError(
