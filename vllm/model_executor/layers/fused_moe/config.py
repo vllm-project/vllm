@@ -1081,7 +1081,11 @@ class FusedMoEParallelConfig:
 
     @property
     def use_batched_activation_format(self):
-        return self.use_deepep_ll_kernels or self.use_nixl_ep_kernels
+        return (
+            self.use_deepep_ll_kernels
+            or self.use_nixl_ep_kernels
+            or self.use_naive_ll_kernels
+        )
 
     @property
     def needs_round_robin_routing_tables(self):
@@ -1093,6 +1097,10 @@ class FusedMoEParallelConfig:
             self.use_all2all_kernels
             and self.all2all_backend == "allgather_reducescatter"
         )
+
+    @property
+    def use_naive_ll_kernels(self):
+        return self.use_all2all_kernels and self.all2all_backend == "naive_low_latency"
 
     @property
     def use_mori_kernels(self):
@@ -1438,6 +1446,10 @@ class FusedMoEConfig:
     @property
     def use_ag_rs_all2all_kernels(self):
         return self.moe_parallel_config.use_ag_rs_all2all_kernels
+
+    @property
+    def use_naive_ll_kernels(self):
+        return self.moe_parallel_config.use_naive_ll_kernels
 
     @property
     def use_nixl_ep_kernels(self):
