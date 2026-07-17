@@ -74,6 +74,12 @@ from vllm.model_executor.kernels.linear.mxfp4 import (
     MxFp4LinearKernel,
     MxFp4LinearLayerConfig,
 )
+from vllm.model_executor.kernels.linear.mxfp4.aiter import (
+    AiterMxfp4LinearKernel,
+)
+from vllm.model_executor.kernels.linear.mxfp4.emulation import (
+    EmulationOcpMxLinearKernel,
+)
 from vllm.model_executor.kernels.linear.mxfp4.flashinfer import (
     FlashInferMxFp4LinearKernel,
 )
@@ -274,6 +280,7 @@ _LINEAR_BACKEND_KERNEL_MAP: dict[str, set[type]] = {
         AiterFp8BlockScaledMMKernel,
         AiterPerTokenFp8ScaledMMLinearKernel,
         AiterPreshuffledPerTokenFp8ScaledMMLinearKernel,
+        AiterMxfp4LinearKernel,
     },
     "machete": {
         MacheteLinearKernel,
@@ -290,6 +297,7 @@ _LINEAR_BACKEND_KERNEL_MAP: dict[str, set[type]] = {
     "emulation": {
         EmulationMxfp8LinearKernel,
         EmulationNvFp4LinearKernel,
+        EmulationOcpMxLinearKernel,
     },
     "xpu": {
         XPUW8A8FP8LinearKernel,
@@ -468,6 +476,11 @@ _POSSIBLE_MXFP4_KERNELS: dict[PlatformEnum, list[type[MxFp4LinearKernel]]] = {
         FlashInferMxFp4LinearKernel,
         MarlinMxFp4LinearKernel,
         HummingMxFp4LinearKernel,
+        EmulationOcpMxLinearKernel,
+    ],
+    PlatformEnum.ROCM: [
+        AiterMxfp4LinearKernel,
+        EmulationOcpMxLinearKernel,
     ],
     PlatformEnum.XPU: [
         XPUMxFp4LinearKernel,
@@ -805,9 +818,17 @@ def init_mxfp8_linear_kernel() -> Mxfp8LinearKernel:
     )
 
 
-def init_mxfp4_linear_kernel() -> MxFp4LinearKernel:
+def init_mxfp4_linear_kernel(
+    weight_quant_key: QuantKey,
+    activation_quant_key: QuantKey | None = None,
+) -> MxFp4LinearKernel:
     """Select and instantiate the best MXFP4 linear kernel for the
     current platform."""
+    config = MxFp4LinearLayerConfig(
+        weight_quant_key=weight_quant_key,
+        activation_quant_key=activation_quant_key,
+    )
+
     linear_backend = _get_linear_backend()
 
     platform = current_platform._enum
@@ -836,8 +857,13 @@ def init_mxfp4_linear_kernel() -> MxFp4LinearKernel:
             failure_reasons.append(f"{kernel_cls.__name__}: {reason}")
             continue
 
+        can_implement, reason = kernel_cls.can_implement(config)
+        if not can_implement:
+            failure_reasons.append(f"{kernel_cls.__name__}: {reason}")
+            continue
+
         logger.info_once("Using %s for MXFP4 GEMM", kernel_cls.__name__)
-        return kernel_cls(MxFp4LinearLayerConfig())
+        return kernel_cls(config)
 
     raise ValueError(
         "Failed to find a kernel that can implement the "
@@ -1079,6 +1105,8 @@ __all__ = [
     "init_mxfp4_linear_kernel",
     "MxFp4LinearKernel",
     "MxFp4LinearLayerConfig",
+    "AiterMxfp4LinearKernel",
+    "EmulationOcpMxLinearKernel",
     "FlashInferMxFp4LinearKernel",
     "MarlinMxFp4LinearKernel",
     "FlashInferCutedslMxfp8LinearKernel",

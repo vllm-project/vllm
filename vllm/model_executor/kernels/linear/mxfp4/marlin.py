@@ -3,10 +3,16 @@
 
 import torch
 
+from vllm.model_executor.layers.quantization.utils.quant_utils import kMxfp4Static
+
 from .base import MxFp4LinearKernel, MxFp4LinearLayerConfig
 
 
 class MarlinMxFp4LinearKernel(MxFp4LinearKernel):
+    """Weight-only (A16) MXFP4 GEMM via Marlin. Does not quantize activations,
+    so it can only be selected when the caller has no explicit activation
+    quantization expectation."""
+
     @classmethod
     def is_supported(
         cls, compute_capability: int | None = None
@@ -20,7 +26,11 @@ class MarlinMxFp4LinearKernel(MxFp4LinearKernel):
         return False, "Marlin FP4 not available"
 
     @classmethod
-    def can_implement(cls, c: MxFp4LinearLayerConfig) -> tuple[bool, str | None]:
+    def can_implement(cls, config: MxFp4LinearLayerConfig) -> tuple[bool, str | None]:
+        if config.weight_quant_key != kMxfp4Static:
+            return False, "only supports MXFP4 weights"
+        if config.activation_quant_key is not None:
+            return False, "weight-only kernel, cannot quantize activations"
         return True, None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:

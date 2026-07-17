@@ -6,6 +6,8 @@ from dataclasses import dataclass
 
 import torch
 
+from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
+
 
 @dataclass
 class MxFp4LinearLayerConfig:
@@ -13,9 +15,16 @@ class MxFp4LinearLayerConfig:
 
     All MXFP4 layers share the same structure: packed uint8 weights (2 FP4 values per
     byte) and per-block weight scales (group size 32).
+
+    weight_quant_key: identifies the weight quantization format (e.g. OCP MXFP4,
+        MXFP6). Kernels compare this against the exact format(s) they implement.
+    activation_quant_key: identifies the activation quantization format, or None
+        when the caller has no explicit expectation (e.g. a weight-only a16
+        kernel may be selected, or a kernel may quantize activations itself).
     """
 
-    pass
+    weight_quant_key: QuantKey
+    activation_quant_key: QuantKey | None = None
 
 
 class MxFp4LinearKernel(ABC):

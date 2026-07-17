@@ -7,13 +7,16 @@ from vllm.model_executor.layers.quantization.utils.humming_utils import (
     convert_linear_layer_to_humming_standard,
     prepare_humming_layer,
 )
+from vllm.model_executor.layers.quantization.utils.quant_utils import kMxfp4Static
 from vllm.platforms import current_platform
 
 from .base import MxFp4LinearKernel, MxFp4LinearLayerConfig
 
 
 class HummingMxFp4LinearKernel(MxFp4LinearKernel):
-    """Humming GEMM Kernel for MXFP4."""
+    """Weight-only (A16) MXFP4 GEMM via Humming. Does not quantize
+    activations, so it can only be selected when the caller has no explicit
+    activation quantization expectation."""
 
     @classmethod
     def is_supported(
@@ -28,7 +31,11 @@ class HummingMxFp4LinearKernel(MxFp4LinearKernel):
         return True, None
 
     @classmethod
-    def can_implement(cls, c: MxFp4LinearLayerConfig) -> tuple[bool, str | None]:
+    def can_implement(cls, config: MxFp4LinearLayerConfig) -> tuple[bool, str | None]:
+        if config.weight_quant_key != kMxfp4Static:
+            return False, "only supports MXFP4 weights"
+        if config.activation_quant_key is not None:
+            return False, "weight-only kernel, cannot quantize activations"
         return True, None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
