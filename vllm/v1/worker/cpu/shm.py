@@ -24,12 +24,17 @@ def fake_pin_memory(self: torch.Tensor, *args: Any, **kwargs: Any) -> torch.Tens
 class _EventPlaceholder:
     def __init__(self, *args, **kwargs) -> None:
         self.record = noop
+        self.wait = noop
         self.synchronize = noop
 
 
 class _StreamPlaceholder:
     def __init__(self, *args, **kwargs) -> None:
         self.wait_stream = noop
+        self.wait_event = noop
+        self.record_event = noop
+        self.synchronize = noop
+        self.query = lambda: True
         self.device = torch.device("cpu")
 
     def __enter__(self, *args, **kwargs):
@@ -55,6 +60,7 @@ torch.cuda.current_stream = lambda *args, **kwargs: _StreamPlaceholder()
 torch.accelerator.synchronize = noop
 torch.accelerator.empty_cache = noop
 torch.Tensor.pin_memory = fake_pin_memory
+torch.Tensor.record_stream = noop
 torch.accelerator.get_memory_info = get_memory_info
 
 # Patch vLLM torch utils
