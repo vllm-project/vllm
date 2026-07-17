@@ -9,9 +9,12 @@ expert_mask) and skipped (native fallback) when the device/package is missing.
 """
 
 import dataclasses
+import sys
+import types
 from unittest.mock import patch
 
 import pytest
+import torch
 
 from vllm.platforms import current_platform
 
@@ -133,3 +136,75 @@ def test_explicit_moe_backend_aiter():
         pytest.raises(ValueError, match="flydsl package"),
     ):
         _select_kernel_cls(Fp8MoeBackend.AITER_MXFP8, _config(1))
+
+
+@pytest.mark.parametrize("output_kind", ["owning", "view", "noncontiguous"])
+def test_aiter_mxfp8_rebinds_output_only_when_safe(monkeypatch, output_kind):
+    """Owning outputs adopt AITER storage; views retain their storage."""
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    def _enum_value(value):
+        return types.SimpleNamespace(value=value)
+
+    fake_aiter = types.ModuleType("aiter")
+    fake_aiter.__dict__["ActivationType"] = types.SimpleNamespace(Swiglu=_enum_value(1))
+    fake_aiter.__dict__["QuantType"] = types.SimpleNamespace(per_1x32=_enum_value(2))
+    fake_aiter_ops = types.ModuleType("aiter.ops")
+    fake_flydsl = types.ModuleType("aiter.ops.flydsl")
+    fake_moe_common = types.ModuleType("aiter.ops.flydsl.moe_common")
+    fake_moe_common.__dict__["GateMode"] = types.SimpleNamespace(
+        INTERLEAVE=_enum_value("interleave")
+    )
+    monkeypatch.setitem(sys.modules, "aiter", fake_aiter)
+    monkeypatch.setitem(sys.modules, "aiter.ops", fake_aiter_ops)
+    monkeypatch.setitem(sys.modules, "aiter.ops.flydsl", fake_flydsl)
+    monkeypatch.setitem(sys.modules, "aiter.ops.flydsl.moe_common", fake_moe_common)
+
+    experts = object.__new__(AiterMxfp8Experts)
+    experts.moe_config = types.SimpleNamespace(rocm_aiter_fmoe_enabled=False)
+    experts.quant_config = types.SimpleNamespace(gemm1_clamp_limit=None)
+    experts.w1_scale_val = None
+    experts.w2_scale_val = None
+
+    result = torch.randn(4, 16, dtype=torch.bfloat16)
+    if output_kind == "owning":
+        output = torch.empty_like(result)
+    elif output_kind == "view":
+        output = torch.empty(8, 16, dtype=result.dtype)[:4]
+    else:
+        output = torch.empty(4, 32, dtype=result.dtype)[:, ::2]
+    original_output_ptr = output.data_ptr()
+    original_output_stride = output.stride()
+
+    def _fake_fused_moe(*args, **kwargs):
+        assert kwargs["output_dtype"] == output.dtype
+        return result
+
+    monkeypatch.setattr(rocm_aiter_ops, "fused_moe", _fake_fused_moe)
+
+    experts.apply(
+        output=output,
+        hidden_states=torch.empty_like(result),
+        w1=torch.empty(1),
+        w2=torch.empty(1),
+        topk_weights=torch.ones(4, 2),
+        topk_ids=torch.zeros(4, 2, dtype=torch.int32),
+        activation=None,
+        global_num_experts=1,
+        expert_map=None,
+        a1q_scale=None,
+        a2_scale=None,
+        workspace13=torch.empty(0),
+        workspace2=torch.empty(0),
+        expert_tokens_meta=None,
+        apply_router_weight_on_input=False,
+    )
+
+    if output_kind == "owning":
+        assert output.data_ptr() == result.data_ptr()
+        assert output.data_ptr() != original_output_ptr
+    else:
+        assert output.data_ptr() == original_output_ptr
+        assert output.data_ptr() != result.data_ptr()
+        assert output.stride() == original_output_stride
+    assert torch.equal(output, result)
