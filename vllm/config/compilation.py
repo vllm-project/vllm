@@ -160,9 +160,6 @@ class PassConfig:
     eliminate_noops: bool = Field(default=True)
     """Eliminate no-op ops."""
 
-    enable_qk_norm_rope_fusion: bool = False
-    """Enable fused Q/K RMSNorm + RoPE pass."""
-
     rope_kvcache_fusion_max_token_num: int = 256
     """The threshold for ROCm AITER RoPE+KVCache fusion e.g. for small batch decode.
     Larger batch sizes e.g. during prefill will use the unfused kernels.
