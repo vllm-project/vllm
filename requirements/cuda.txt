@@ -26,7 +26,8 @@ fastsafetensors >= 0.3.2
 
 # QuACK and Cutlass DSL for FA4 (cute-DSL implementation)
 nvidia-cutlass-dsl[cu13]==4.6.0
-quack-kernels>=0.4.0  # Required for tml-fa4
+# 0.4.1 floor: required for tml-fa4, and <=0.4.0 import cutlass.base_dsl.Arch, removed in cutlass-dsl 4.5+ (https://github.com/vllm-project/vllm/issues/47570)
+quack-kernels>=0.4.1
 
 # Tokenspeed_MLA for faster mla with spec decode
 tokenspeed-mla==0.1.8; platform_system == "Linux"
