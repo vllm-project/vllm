@@ -7624,8 +7624,7 @@ class GPUModelRunner(
             def _capture_fn(topk_ids, _layer_id=layer_id, _capturer=capturer):
                 _capturer.capture(_layer_id, topk_ids)
 
-            quant_method = getattr(module, "_quant_method", None)
-            assert quant_method is not None
+            quant_method = module._quant_method
             moe_kernel = getattr(quant_method, "moe_kernel", None)
             impl = getattr(moe_kernel, "impl", None)
             fused_experts = getattr(impl, "fused_experts", None)
