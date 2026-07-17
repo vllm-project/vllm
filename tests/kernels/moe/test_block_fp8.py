@@ -206,12 +206,11 @@ def test_w8a8_block_fp8_fused_moe(
 
     # 0.039 only needed for M >= 8192
     tol = 0.035 if M < 8192 else 0.039
-    # fp8 block-quant accumulation error grows with the reduction dim K; large-K
-    # MoE shapes (e.g. K=7168) exceed the base tolerance on gfx950. The error is
-    # bounded fp8 noise (worst observed abs diff ~0.0776, only a couple elements
-    # out of tens of millions across M/topk), so widen the tolerance for these
-    # shapes rather than treating it as a correctness failure.
-    if K >= 4096:
+    # ROCm/gfx950: fp8 block-quant accumulation error grows with K and N, so the
+    # large-K/large-N shapes slightly exceed the base tolerance. The error is
+    # broadly distributed but hard-capped (no element exceeds 0.08), so widen the
+    # absolute tolerance for these shapes on ROCm only.
+    if current_platform.is_rocm() and K >= 4096 and N >= 1024:
         tol = max(tol, 0.08)
     torch.testing.assert_close(out, ref_out, atol=tol, rtol=tol)
     torch.testing.assert_close(m_out, ref_out, atol=tol, rtol=tol)
