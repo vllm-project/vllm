@@ -12,6 +12,7 @@ from typing_extensions import Self
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
+    from vllm.model_executor.model_loader.post_load import WeightLoadSession
 
 from vllm.config.parallel import ParallelConfig
 from vllm.config.weight_transfer import WeightTransferConfig
@@ -199,6 +200,7 @@ class WeightTransferEngine(ABC, Generic[TInitInfo, TUpdateInfo]):
         self.model = model
         self._default_model_config = self.model_config
         self._default_model = model
+        self._weight_load_session: WeightLoadSession | None = None
 
     def set_weight_update_target(
         self,
@@ -265,26 +267,21 @@ class WeightTransferEngine(ABC, Generic[TInitInfo, TUpdateInfo]):
         """
         raise NotImplementedError
 
-    @abstractmethod
     def start_weight_update(self) -> None:
-        """
-        Prepare the engine for a new weight update.
+        """Start the common checkpoint-format reload lifecycle."""
+        from vllm.model_executor.model_loader.post_load import WeightLoadSession
 
-        Engines that receive weights in checkpoint format initialize layerwise reloading
-        here, else this is typically a no-op.
-        See: https://docs.vllm.ai/en/latest/training/layerwise/ for more details.
-        """
-        raise NotImplementedError
+        if self._weight_load_session is not None:
+            raise RuntimeError("a weight update session is already active")
+        self._weight_load_session = WeightLoadSession(self.model, self.model_config)
+        self._weight_load_session.prepare()
 
-    @abstractmethod
     def finish_weight_update(self) -> None:
-        """
-        Finalize the current weight update.
-
-        Checkpoint-format engines finalize layerwise reloading here; engines
-        that apply weights in place leave this as a no-op.
-        """
-        raise NotImplementedError
+        """Commit the common checkpoint-format reload lifecycle."""
+        if self._weight_load_session is None:
+            raise RuntimeError("start_weight_update must be called before finish")
+        self._weight_load_session.finish()
+        self._weight_load_session = None
 
     def update_weights(self, update_info: dict[str, Any]) -> None:
         """

@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import gc
 import inspect
+from unittest.mock import Mock
 from weakref import WeakKeyDictionary, ref
 
 import pytest
@@ -10,9 +11,8 @@ from torch.nn.parameter import UninitializedParameter
 
 import vllm.model_executor.model_loader.reload.meta as reload_meta
 from vllm.model_executor.layers.linear import QKVParallelLinear
+from vllm.model_executor.model_loader.post_load import WeightLoadSession
 from vllm.model_executor.model_loader.reload.layerwise import (
-    finalize_layerwise_reload,
-    initialize_layerwise_reload,
     record_metadata_for_reloading,
 )
 from vllm.model_executor.model_loader.reload.meta import (
@@ -30,6 +30,12 @@ from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
 )
 from vllm.platforms import current_platform
+
+
+def _prepare_reload(model: torch.nn.Module) -> WeightLoadSession:
+    session = WeightLoadSession(model, Mock())
+    session.prepare()
+    return session
 
 
 def _fp8_reload_unsupported() -> bool:
@@ -264,14 +270,14 @@ def test_layerwise_reload_composed_loader_does_not_drop_params(monkeypatch):
     }
 
     record_metadata_for_reloading(model)
-    initialize_layerwise_reload(model)
+    load_session = _prepare_reload(model)
     # Mimic real load_weights: resolve params once, then load in checkpoint
     # order with D last (the param that was dropped).
     params = dict(layer.named_parameters())
     for name in ("A", "dt_bias", "D"):
         param = params[name]
         param.weight_loader(param, loaded[name])
-    finalize_layerwise_reload(model, model_config=None)
+    load_session.finish()
 
     assert torch.equal(layer.A, -torch.exp(loaded["A"]))
     assert torch.equal(layer.dt_bias, loaded["dt_bias"])
@@ -300,9 +306,9 @@ def test_layerwise_reload_skips_non_persistent_parameter_alias_buffers(monkeypat
     )
 
     record_metadata_for_reloading(model)
-    initialize_layerwise_reload(model)
+    load_session = _prepare_reload(model)
     layer.weight.weight_loader(layer.weight, loaded_weight)
-    finalize_layerwise_reload(model, model_config=None)
+    load_session.finish()
 
     assert torch.equal(layer.weight, loaded_weight)
     assert layer.weight_view.untyped_storage().data_ptr() == (
@@ -343,10 +349,10 @@ def test_layerwise_reload_skips_child_parameter_alias_buffers(monkeypatch):
     )
 
     record_metadata_for_reloading(model)
-    initialize_layerwise_reload(model)
+    load_session = _prepare_reload(model)
     layer.conv1d.weight.weight_loader(layer.conv1d.weight, loaded_conv)
     layer.scale.weight_loader(layer.scale, loaded_scale)
-    finalize_layerwise_reload(model, model_config=None)
+    load_session.finish()
 
     assert torch.equal(layer.conv1d.weight, loaded_conv)
     assert torch.equal(layer.conv_weights, loaded_conv.view(-1))
@@ -379,9 +385,9 @@ def test_layerwise_reload_restores_alias_buffer_on_zero_size_layer(monkeypatch):
     )
 
     record_metadata_for_reloading(model)
-    initialize_layerwise_reload(model)
+    load_session = _prepare_reload(model)
     layer.conv1d.weight.weight_loader(layer.conv1d.weight, loaded_conv)
-    finalize_layerwise_reload(model, model_config=None)
+    load_session.finish()
 
     assert torch.equal(layer.conv_weights, loaded_conv.view(-1))
     assert layer.conv_weights.untyped_storage().data_ptr() == (
@@ -414,9 +420,9 @@ def test_layerwise_reload_preserves_unloaded_non_persistent_buffers(monkeypatch)
     )
 
     record_metadata_for_reloading(model)
-    initialize_layerwise_reload(model)
+    load_session = _prepare_reload(model)
     layer.weight.weight_loader(layer.weight, loaded_weight)
-    finalize_layerwise_reload(model, model_config=None)
+    load_session.finish()
 
     assert torch.equal(layer.weight, loaded_weight)
     assert torch.equal(layer.scale, original_scale)
@@ -447,10 +453,10 @@ def test_layerwise_reload_updates_loaded_non_persistent_buffers(monkeypatch):
     )
 
     record_metadata_for_reloading(model)
-    initialize_layerwise_reload(model)
+    load_session = _prepare_reload(model)
     layer.weight.weight_loader(layer.weight, loaded_weight)
     layer.scale.weight_loader(layer.scale, loaded_scale)
-    finalize_layerwise_reload(model, model_config=None)
+    load_session.finish()
 
     assert torch.equal(layer.weight, loaded_weight)
     assert torch.equal(layer.scale, loaded_scale)

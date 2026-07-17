@@ -9,10 +9,9 @@ import vllm.envs as envs
 from vllm.config import ModelConfig, VllmConfig
 from vllm.config.load import LoadConfig
 from vllm.logger import init_logger
-from vllm.model_executor.model_loader.reload import finalize_layerwise_processing
+from vllm.model_executor.model_loader.post_load import WeightLoadSession
 from vllm.model_executor.model_loader.utils import (
     initialize_model,
-    process_weights_after_loading,
 )
 from vllm.platforms import current_platform
 from vllm.tracing import instrument
@@ -60,6 +59,12 @@ class BaseModelLoader(ABC):
 
             log_model_inspection(model)
 
+            load_session = WeightLoadSession(
+                model,
+                model_config,
+                target_device=target_device,
+            )
+            load_session.prepare()
             logger.debug("Loading weights on %s ...", load_device)
             self.load_weights(model, model_config)
 
@@ -74,10 +79,7 @@ class BaseModelLoader(ABC):
 
             # Process weights into kernel format. Note that when using online
             # quantization, weights are (typically) quantized as they are loaded.
-            if _has_online_quant(model):
-                finalize_layerwise_processing(model, model_config)
-
-            process_weights_after_loading(model, model_config, target_device)
+            load_session.finish()
 
         return model.eval()
 
@@ -90,12 +92,3 @@ def log_model_inspection(model: nn.Module) -> None:
     from vllm.model_inspection import format_model_inspection
 
     logger.info("vLLM model structure:\n%s", format_model_inspection(model))
-
-
-def _has_online_quant(model: nn.Module):
-    for module in model.modules():
-        quant_method = getattr(module, "quant_method", None)
-        if getattr(quant_method, "uses_meta_device", False):
-            return True
-
-    return False

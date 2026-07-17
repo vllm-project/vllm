@@ -9,11 +9,7 @@ from typing import TYPE_CHECKING
 import torch
 
 from vllm.config import ModelConfig
-
-from .layerwise import (
-    finalize_layerwise_reload,
-    initialize_layerwise_reload,
-)
+from vllm.model_executor.model_loader.post_load import WeightLoadSession
 
 if TYPE_CHECKING:
     from vllm.model_executor.models.utils import AutoWeightsLoader
@@ -49,9 +45,10 @@ def support_quantized_model_reload_from_hp_weights(original_load_weights: Functi
         if not getattr(model, "_do_torchao_reload", False):
             return original_load_weights(self, weights, *args, **kwargs)
 
-        initialize_layerwise_reload(model)
+        load_session = WeightLoadSession(model, model._model_config)
+        load_session.prepare()
         loaded_weights = original_load_weights(self, weights, *args, **kwargs)
-        finalize_layerwise_reload(model, model._model_config)
+        load_session.finish()
 
         return loaded_weights
 

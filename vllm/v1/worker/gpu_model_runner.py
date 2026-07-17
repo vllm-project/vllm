@@ -70,10 +70,7 @@ from vllm.model_executor.layers.rotary_embedding import (
     XDRotaryEmbedding,
 )
 from vllm.model_executor.model_loader import get_model_loader
-from vllm.model_executor.model_loader.reload import (
-    finalize_layerwise_reload,
-    initialize_layerwise_reload,
-)
+from vllm.model_executor.model_loader.post_load import WeightLoadSession
 from vllm.model_executor.models.interfaces import (
     MixtureOfExperts,
     MultiModalEmbeddings,
@@ -5525,9 +5522,10 @@ class GPUModelRunner(
         logger.info_once("Reloading weights inplace...")
         if is_checkpoint_format:
             # load weights from checkpoint/ original model format
-            initialize_layerwise_reload(model)
+            load_session = WeightLoadSession(model, self.model_config)
+            load_session.prepare()
             loaded_weights = model.load_weights(weights_iterator)
-            finalize_layerwise_reload(model, self.model_config)
+            load_session.finish()
 
         else:
             # load weights from kernel format
