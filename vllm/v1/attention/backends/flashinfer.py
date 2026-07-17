@@ -1573,6 +1573,7 @@ class FlashInferImpl(AttentionImpl):
             )
 
         self.sinks: torch.Tensor | None = None
+        # Keep the source so RL weight updates can refresh the runtime tensor.
         self._sinks_source = sinks
         if sinks is not None:
             if sinks.shape[0] != num_heads:
