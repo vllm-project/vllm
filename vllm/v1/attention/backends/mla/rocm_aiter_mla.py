@@ -133,7 +133,6 @@ class AiterMLAMetadata(MLACommonMetadata[AiterMLADecodeMetadata]):
 
 # Tile size used by the mla_prefill_ps_asm_fwd assembly kernel.
 _FP8_PREFILL_TILE_Q = 256
-_DEFAULT_MLA_NUM_KV_SPLITS = 32
 
 
 class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
@@ -353,19 +352,6 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             self.qo_indptr = torch.zeros(
                 max_num_reqs + 1, dtype=torch.int32, device=device
             )
-
-    def _max_split_per_batch(self, batch_size: int) -> int:
-        if self._num_attention_heads < 128 or batch_size <= 0:
-            return -1
-        device_properties = torch.cuda.get_device_properties(self.device)
-        cu_num = device_properties.multi_processor_count
-        return max(
-            1,
-            min(
-                (cu_num + batch_size - 1) // batch_size,
-                _DEFAULT_MLA_NUM_KV_SPLITS,
-            ),
-        )
 
     def _init_fp8_prefill_ps_buffers(
         self,
@@ -687,7 +673,6 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
                 max_seqlen_qo=max_qo_len,
                 uni_seqlen_qo=uni_qo_len,
                 fast_mode=True,
-                max_split_per_batch=self._max_split_per_batch(num_kernel_reqs),
                 dtype_q=self._mla_metadata_q_dtype,
                 dtype_kv=self._mla_metadata_kv_dtype,
             )
