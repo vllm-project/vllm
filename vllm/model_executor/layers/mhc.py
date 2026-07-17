@@ -25,8 +25,17 @@ def _has_tilelang_mhc() -> bool:
     return False
 
 
+def _has_aiter_mhc() -> bool:
+    if is_aiter_found_and_supported():
+        from vllm.platforms.rocm import on_rdna4
+
+        # AITER MHC kernel not supported on gfx120x
+        return not on_rdna4()
+    return False
+
+
 HAS_TILELANG_MHC = _has_tilelang_mhc()
-HAS_AITER_MHC = is_aiter_found_and_supported()
+HAS_AITER_MHC = _has_aiter_mhc()
 
 
 # --8<-- [start:mhc_pre]
