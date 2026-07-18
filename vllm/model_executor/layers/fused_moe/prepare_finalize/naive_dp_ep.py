@@ -10,6 +10,10 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceDelegate,
 )
 from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
+from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
+    MXFP8_BLOCK_SIZE,
+    swizzle_mxfp8_scale,
+)
 from vllm.utils.flashinfer import nvfp4_block_scale_interleave
 
 
@@ -64,6 +68,17 @@ def _unwrap_scale_and_prepare_for_moe(
         if a1q_scale.element_size() == 1:
             a1q_scale = a1q_scale.view(torch.uint8)
         a1q_scale = nvfp4_block_scale_interleave(a1q_scale)
+    elif quant_config.quant_dtype == "mxfp8" and quant_config.is_scale_swizzled:
+        # The mxfp8 scales were quantized row-major ([M, K//32]) so they could
+        # be dispatched alongside the hidden states; kernels that expect the
+        # F8_128x4 swizzled layout (e.g. FlashInfer CUTLASS) need them
+        # interleaved after the a2a, same as the nvfp4 branch above.
+        assert a1q_scale is not None and a1q_scale.ndim == 2
+        a1q_scale = swizzle_mxfp8_scale(
+            a1q_scale,
+            M=a1q_scale.shape[0],
+            K=a1q_scale.shape[1] * MXFP8_BLOCK_SIZE,
+        )
 
     return a1q_scale
 
