@@ -65,6 +65,12 @@ def _create_workspace(
             comm_backend=comm_backend,
             group=group,
         )
+        if backend == "mnnvl" and not getattr(workspace, "mc_ptr", 0):
+            workspace.destroy()
+            logger.warning_once(
+                "FlashInfer MNNVL multicast is unavailable on the current topology."
+            )
+            return None
     except Exception as e:
         if "multicast" in str(e).lower():
             logger.warning_once(
