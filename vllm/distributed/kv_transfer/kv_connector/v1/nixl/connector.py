@@ -160,6 +160,14 @@ class NixlBaseConnector(KVConnectorBase_V1, SupportsHMA):
     # Scheduler Side Methods
     ############################################################
 
+    @property
+    def is_disagg_prefill_transfer(self) -> bool:
+        # NIXL is purely a prefill/decode KV-transfer connector: every token it
+        # reports via get_num_new_matched_tokens is pulled/pushed from another
+        # engine for this request, never a reusable prefix-cache hit, so it is
+        # excluded from cached_tokens in the API response (see #43370).
+        return True
+
     def get_num_new_matched_tokens(
         self, request: "Request", num_computed_tokens: int
     ) -> tuple[int | None, bool]:
