@@ -7,6 +7,7 @@ import pytest
 import torch
 
 from vllm.lora.utils import get_supported_lora_modules
+from vllm.model_executor.layers.quantization.modelopt import ModelOptNvFp4Config
 from vllm.models.inkling.nvidia import moe
 from vllm.models.inkling.nvidia.model import _TmlForCausalLMBase
 from vllm.platforms import current_platform
@@ -85,6 +86,30 @@ def test_custom_embedding_is_not_a_lora_target() -> None:
 
     assert "embed_tokens" not in supported
     assert "lm_head" in supported
+
+
+def test_inkling_mapper_maps_modelopt_exclusions() -> None:
+    quant_config = ModelOptNvFp4Config.from_config(
+        {
+            "quantization": {
+                "quant_algo": "NVFP4",
+                "group_size": 16,
+                "kv_cache_quant_algo": None,
+                "exclude_modules": [
+                    "model.llm.layers.2.mlp.experts",
+                    "model.llm.layers.2.mlp.shared_experts",
+                ],
+            }
+        }
+    )
+
+    quant_config.apply_vllm_mapper(
+        _TmlForCausalLMBase.hf_to_vllm_mapper.get_unstacked_mapper()
+    )
+
+    assert quant_config.is_layer_excluded("model.layers.2.mlp.experts")
+    assert quant_config.is_layer_excluded("model.layers.2.mlp.shared_experts")
+    assert not quant_config.is_layer_excluded("model.layers.3.mlp.experts")
 
 
 @pytest.mark.parametrize(("projection", "amax"), [("w13", 4.375), ("w2", 2960.0)])
