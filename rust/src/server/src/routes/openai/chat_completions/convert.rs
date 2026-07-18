@@ -42,6 +42,8 @@ pub(super) struct ResponseOptions {
     pub include_continuous_usage: bool,
     /// Whether the caller requested output logprobs on chat choices.
     pub requested_logprobs: bool,
+    /// Number of top logprobs to include for each output token.
+    pub output_top_logprobs: i32,
     /// Whether the caller requested top-level prompt logprobs.
     pub include_prompt_logprobs: bool,
     /// Whether to include reasoning content in OpenAI responses.
@@ -172,6 +174,7 @@ pub(super) fn prepare_chat_request(
             include_usage,
             include_continuous_usage,
             requested_logprobs,
+            output_top_logprobs: top_logprobs,
             include_prompt_logprobs,
             include_reasoning,
             echo,
