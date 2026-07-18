@@ -8,6 +8,17 @@
 #include "vec.h"
 #include "vec_pack.h"
 
+at::Tensor causal_conv1d_update_cpu(
+    const at::Tensor& x,
+    const at::Tensor& conv_states,
+    const at::Tensor& weight,
+    const std::optional<at::Tensor>& bias,
+    bool silu_activation,
+    const std::optional<at::Tensor>& cache_seqlens,
+    const std::optional<at::Tensor>& conv_state_indices,
+    int64_t pad_slot_id,
+    bool is_vnni);
+
 namespace {
 // For this cpu kernel, we have some innovations aside from the existing gpu kernels:
 // 1) Use less parallel loops, i.e. 4 including l2_norm.
@@ -1656,6 +1667,127 @@ at::Tensor fused_sigmoid_gating_delta_rule_update_cpu(
             softplus_threshold);
       });
   return core_attn_out;
+}
+
+void fused_gdn_decode_cpu(
+    const at::Tensor& mixed_qkv,
+    at::Tensor& conv_states,
+    const at::Tensor& packed_conv_weight,
+    const std::optional<at::Tensor>& bias,
+    bool silu_activation,
+    const at::Tensor& A_log,
+    const at::Tensor& dt_bias,
+    const at::Tensor& a,
+    const at::Tensor& b,
+    at::Tensor& ssm_state,
+    const at::Tensor& state_indices,
+    int64_t num_tokens,
+    at::Tensor& output) {
+  CHECK_DIM(2, mixed_qkv);
+  CHECK_CONTIGUOUS(mixed_qkv);
+  CHECK_CONTIGUOUS(packed_conv_weight);
+  CHECK_DIM(2, a);
+  CHECK_DIM(2, b);
+  CHECK_DIM(4, ssm_state);
+  CHECK_DIM(1, state_indices);
+  CHECK_DIM(3, output);
+  CHECK_CONTIGUOUS(a);
+  CHECK_CONTIGUOUS(b);
+  CHECK_CONTIGUOUS(state_indices);
+  CHECK_CONTIGUOUS(output);
+  TORCH_CHECK(mixed_qkv.scalar_type() == at::kBFloat16,
+              "fused_gdn_decode_cpu supports only BF16");
+  TORCH_CHECK(num_tokens > 0 && num_tokens <= mixed_qkv.size(0),
+              "invalid num_tokens: ", num_tokens);
+
+  int64_t packed_dim = mixed_qkv.size(1);
+  int64_t v_num_heads = A_log.size(0);
+  int64_t head_dim = ssm_state.size(2);
+  int64_t v_head_dim = ssm_state.size(3);
+  int64_t v_dim = v_num_heads * v_head_dim;
+  int64_t qk_dim = packed_dim - v_dim;
+  TORCH_CHECK(qk_dim > 0 && qk_dim % 2 == 0,
+              "invalid packed QKV dimension: ", packed_dim);
+  int64_t q_dim = qk_dim / 2;
+  TORCH_CHECK(q_dim % head_dim == 0,
+              "query dimension must be divisible by head_dim");
+  int64_t num_heads = q_dim / head_dim;
+
+  CHECK_EQ(packed_conv_weight.size(0), packed_dim);
+  CHECK_EQ(packed_conv_weight.size(1), 4);
+  CHECK_EQ(a.size(1), v_num_heads);
+  CHECK_EQ(b.size(1), v_num_heads);
+  CHECK(a.size(0) >= num_tokens);
+  CHECK(b.size(0) >= num_tokens);
+  CHECK_INPUT_SHAPE_DTYPE<true>(dt_bias, {v_num_heads}, mixed_qkv.scalar_type());
+  CHECK_INPUT_SHAPE_DTYPE<true>(state_indices, {num_tokens}, at::kInt);
+  CHECK_INPUT_SHAPE_DTYPE<true>(
+      ssm_state,
+      {ssm_state.size(0), v_num_heads, head_dim, v_head_dim},
+      at::kFloat);
+  CHECK_EQ(v_num_heads % num_heads, 0);
+  TORCH_CHECK(A_log.sizes() == at::IntArrayRef({v_num_heads}));
+  TORCH_CHECK(output.size(0) >= num_tokens);
+  CHECK_EQ(output.size(1), v_num_heads);
+  CHECK_EQ(output.size(2), v_head_dim);
+  CHECK_EQ(output.scalar_type(), mixed_qkv.scalar_type());
+
+  at::Tensor conv_input = mixed_qkv.narrow(0, 0, num_tokens);
+  at::Tensor conv_out = causal_conv1d_update_cpu(
+      conv_input,
+      conv_states,
+      packed_conv_weight,
+      bias,
+      silu_activation,
+      std::nullopt,
+      state_indices,
+      -1,
+      true);
+
+  at::Tensor qk_scale_buf = at::empty({2, num_tokens, num_heads}, at::kFloat);
+
+  int64_t state_slot_stride = ssm_state.stride(0);
+  CPU_DISPATCH_REDUCED_FLOATING_TYPES_EXT(
+      mixed_qkv.scalar_type(),
+      A_log.scalar_type(),
+      "fused_gdn_decode_cpu",
+      [&] {
+        const scalar_t* packed = conv_out.data_ptr<scalar_t>();
+        const scalar_t* query = packed;
+        const scalar_t* key = packed + q_dim;
+        const scalar_t* value = packed + 2 * q_dim;
+
+        fused_sigmoid_gating_delta_rule_update_kernel_impl<scalar_t, param_t>(
+            query,
+            key,
+            value,
+            A_log.data_ptr<param_t>(),
+            a.data_ptr<scalar_t>(),
+            dt_bias.data_ptr<scalar_t>(),
+            b.data_ptr<scalar_t>(),
+            state_indices.data_ptr<int32_t>(),
+            ssm_state.data_ptr<float>(),
+            output.data_ptr<scalar_t>(),
+            qk_scale_buf.data_ptr<float>(),
+            1,
+            num_tokens,
+            num_heads,
+            head_dim,
+            v_num_heads,
+            v_head_dim,
+            packed_dim,
+            packed_dim * num_tokens,
+            head_dim,
+            packed_dim,
+            packed_dim * num_tokens,
+            head_dim,
+            packed_dim,
+            packed_dim * num_tokens,
+            v_head_dim,
+            state_slot_stride,
+            true,
+            20.0);
+      });
 }
 
 // Speculative-decode update (multi-token, multi-slot rollback).

@@ -2,12 +2,17 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import functools
+from types import SimpleNamespace
 
 import pytest
 import torch
 import torch.nn.functional as F
 
 import vllm._custom_ops as ops
+from vllm.model_executor.layers.mamba.ops.cpu.gdn_attention import (
+    _can_use_fused_gdn_decode,
+    _split_packed_qkv,
+)
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
 
@@ -513,6 +518,207 @@ def test_causal_conv1d_fwd_cpu_two_call_split(total_tokens: int, split: int) -> 
     out_split = torch.cat([out1, out2], dim=1)
 
     torch.testing.assert_close(out_split, out_full, atol=1e-2, rtol=1e-2)
+
+
+@torch.inference_mode()
+def test_split_packed_qkv_preserves_strided_rows() -> None:
+    num_tokens = 4
+    num_qk_heads = 8
+    num_v_heads = 16
+    head_dim = 128
+    q_dim = num_qk_heads * head_dim
+    v_dim = num_v_heads * head_dim
+    packed_dim = 2 * q_dim + v_dim
+    storage = torch.randn(num_tokens, packed_dim + 17, dtype=torch.bfloat16)
+    packed = storage[:, :packed_dim]
+    layer = SimpleNamespace(
+        key_dim=q_dim * 2,
+        value_dim=v_dim * 2,
+        tp_size=2,
+        head_k_dim=head_dim,
+        head_v_dim=head_dim,
+    )
+
+    query, key, value = _split_packed_qkv(layer, packed)
+    q_ref, k_ref, v_ref = packed.split([q_dim, q_dim, v_dim], dim=-1)
+
+    assert packed.stride(0) == packed_dim + 17
+    assert query.stride(-1) == key.stride(-1) == value.stride(-1) == 1
+    torch.testing.assert_close(
+        query, q_ref.contiguous().view(1, num_tokens, num_qk_heads, head_dim)
+    )
+    torch.testing.assert_close(
+        key, k_ref.contiguous().view(1, num_tokens, num_qk_heads, head_dim)
+    )
+    torch.testing.assert_close(
+        value, v_ref.contiguous().view(1, num_tokens, num_v_heads, head_dim)
+    )
+
+
+@pytest.mark.skipif(
+    not torch.cpu._is_amx_tile_supported(),
+    reason="fused_gdn_decode_cpu requires AMX/AVX512",
+)
+@pytest.mark.parametrize("num_tokens", [1, 4, 8])
+@torch.inference_mode()
+def test_fused_gdn_decode_cpu_matches_existing_pipeline(num_tokens: int) -> None:
+    num_qk_heads = 8
+    num_v_heads = 16
+    head_dim = 128
+    q_dim = num_qk_heads * head_dim
+    v_dim = num_v_heads * head_dim
+    conv_dim = 2 * q_dim + v_dim
+    num_slots = 2 * num_tokens + 3
+    state_indices = torch.arange(1, 2 * num_tokens + 1, 2, dtype=torch.int32)
+    mixed_qkv = torch.randn(num_tokens, conv_dim, dtype=torch.bfloat16)
+    weight = torch.randn(conv_dim, CONV_KERNEL, dtype=torch.bfloat16)
+    packed_weight = ops.causal_conv1d_weight_pack(weight)
+    bias = torch.randn(conv_dim, dtype=torch.bfloat16)
+    a = torch.randn(num_tokens, num_v_heads, dtype=torch.bfloat16)
+    b = torch.randn_like(a)
+    A_log = torch.randn(num_v_heads, dtype=torch.float32)
+    dt_bias = torch.randn(num_v_heads, dtype=torch.bfloat16)
+
+    conv_state = torch.randn(num_slots, CONV_KERNEL - 1, conv_dim, dtype=torch.bfloat16)
+    conv_state_ref = conv_state.clone().transpose(1, 2)
+    conv_state_out = conv_state.clone().transpose(1, 2)
+    ssm_state = torch.randn(
+        num_slots, num_v_heads, head_dim, head_dim, dtype=torch.float32
+    )
+    ssm_state_ref = ssm_state.clone()
+    ssm_state_out = ssm_state.clone()
+
+    conv_out_ref = ops.causal_conv1d_update_cpu(
+        mixed_qkv,
+        conv_state_ref,
+        packed_weight,
+        bias,
+        True,
+        state_indices,
+        True,
+    )
+    layer = SimpleNamespace(
+        key_dim=q_dim * 2,
+        value_dim=v_dim * 2,
+        tp_size=2,
+        head_k_dim=head_dim,
+        head_v_dim=head_dim,
+    )
+    query, key, value = _split_packed_qkv(layer, conv_out_ref)
+    attn_out_ref = ops.fused_sigmoid_gating_delta_rule_update_cpu(
+        A_log,
+        dt_bias,
+        query,
+        key,
+        value,
+        a,
+        b,
+        ssm_state_ref,
+        state_indices,
+        torch.arange(num_tokens + 1, dtype=torch.int32),
+        True,
+    )
+    output_ref = torch.zeros(
+        num_tokens + 2, num_v_heads, head_dim, dtype=torch.bfloat16
+    )
+    output_ref[:num_tokens] = attn_out_ref.squeeze(1)
+
+    output = torch.zeros_like(output_ref)
+    ops.fused_gdn_decode_cpu(
+        mixed_qkv,
+        conv_state_out,
+        packed_weight,
+        bias,
+        True,
+        A_log,
+        dt_bias,
+        a,
+        b,
+        ssm_state_out,
+        state_indices,
+        num_tokens,
+        output,
+    )
+
+    torch.testing.assert_close(output[:num_tokens], output_ref[:num_tokens])
+    torch.testing.assert_close(
+        output[num_tokens:], torch.zeros_like(output[num_tokens:])
+    )
+    torch.testing.assert_close(conv_state_out, conv_state_ref)
+    torch.testing.assert_close(ssm_state_out, ssm_state_ref, atol=0, rtol=0)
+
+
+@pytest.mark.skipif(
+    not torch.cpu._is_amx_tile_supported(),
+    reason="causal_conv1d_update_cpu requires AMX/AVX512",
+)
+@torch.inference_mode()
+def test_causal_conv1d_update_cpu_coalesces_selected_state_update() -> None:
+    from vllm.model_executor.layers.mamba.ops.cpu.causal_conv1d import (
+        causal_conv1d_update_torch,
+    )
+
+    batch_size = 4
+    num_slots = 11
+    state_indices = torch.tensor([1, 4, 7, 9], dtype=torch.int32)
+    x, weight, bias = _conv_inputs(batch_size)
+    packed_weight = ops.causal_conv1d_weight_pack(weight)
+    initial_state = torch.randn(
+        num_slots, CONV_KERNEL - 1, CONV_DIM, dtype=torch.bfloat16
+    )
+    native_state = initial_state.clone().transpose(1, 2)
+    ref_state = initial_state.clone().transpose(1, 2)
+
+    native_out = ops.causal_conv1d_update_cpu(
+        x,
+        native_state,
+        packed_weight,
+        bias,
+        True,
+        state_indices,
+        True,
+    )
+    selected_ref_state = ref_state[state_indices].contiguous()
+    ref_out = causal_conv1d_update_torch(
+        x=x.unsqueeze(-1),
+        conv_state=selected_ref_state,
+        weight=weight,
+        bias=bias,
+        activation="silu",
+    ).squeeze(-1)
+    ref_state[state_indices] = selected_ref_state
+
+    torch.testing.assert_close(native_out, ref_out, atol=1e-2, rtol=1e-2)
+    torch.testing.assert_close(native_state, ref_state)
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {},
+        {"num_prefills": 1},
+        {"speculative": True},
+        {"is_amx": False},
+        {"is_dim_first": True},
+        {"dtype": torch.float32},
+        {"width": 3},
+        {"num_decode_tokens": 3},
+    ],
+)
+def test_fused_gdn_decode_dispatch(overrides: dict) -> None:
+    inputs = {
+        "dtype": torch.bfloat16,
+        "is_amx": True,
+        "is_dim_first": False,
+        "width": 4,
+        "num_decodes": 4,
+        "num_decode_tokens": 4,
+        "num_prefills": 0,
+        "speculative": False,
+    }
+    inputs.update(overrides)
+    expected = not overrides
+    assert _can_use_fused_gdn_decode(**inputs) is expected
 
 
 @torch.inference_mode()

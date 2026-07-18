@@ -23,6 +23,41 @@ from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 _CPU_GDN_ATTENTION_OPS_REGISTERED = False
 
 
+def _split_packed_qkv(layer, mixed_qkv: torch.Tensor):
+    num_tokens = mixed_qkv.size(0)
+    q_dim = layer.key_dim // layer.tp_size
+    v_dim = layer.value_dim // layer.tp_size
+    query, key, value = mixed_qkv.split([q_dim, q_dim, v_dim], dim=-1)
+    return (
+        query.view(1, num_tokens, -1, layer.head_k_dim),
+        key.view(1, num_tokens, -1, layer.head_k_dim),
+        value.view(1, num_tokens, -1, layer.head_v_dim),
+    )
+
+
+def _can_use_fused_gdn_decode(
+    *,
+    dtype: torch.dtype,
+    is_amx: bool,
+    is_dim_first: bool,
+    width: int,
+    num_decodes: int,
+    num_decode_tokens: int,
+    num_prefills: int,
+    speculative: bool,
+) -> bool:
+    return (
+        dtype == torch.bfloat16
+        and is_amx
+        and not is_dim_first
+        and width == 4
+        and num_decodes > 0
+        and num_decode_tokens == num_decodes
+        and num_prefills == 0
+        and not speculative
+    )
+
+
 def cpu_gdn_attention_core(
     mixed_qkv: torch.Tensor,
     b: torch.Tensor,
@@ -128,6 +163,34 @@ def _cpu_gdn_attention_nonspec(
     num_prefills = attn_metadata_i.num_prefills
     num_prefill_tokens = attn_metadata_i.num_prefill_tokens
 
+    if _can_use_fused_gdn_decode(
+        dtype=mixed_qkv.dtype,
+        is_amx=is_amx,
+        is_dim_first=is_conv_state_dim_first(),
+        width=layer.conv1d.weight.size(-1),
+        num_decodes=num_decodes,
+        num_decode_tokens=num_decode_tokens,
+        num_prefills=num_prefills,
+        speculative=False,
+    ):
+        decode_state_indices = state_indices_tensor[:num_decodes]
+        ops.fused_gdn_decode_cpu(
+            mixed_qkv=mixed_qkv,
+            conv_states=conv_state,
+            packed_conv_weight=layer.conv1d.weight,
+            bias=layer.conv1d.bias,
+            silu_activation=layer.activation == "silu",
+            A_log=layer.A_log,
+            dt_bias=layer.dt_bias,
+            a=a,
+            b=b,
+            ssm_state=ssm_state,
+            state_indices=decode_state_indices,
+            num_tokens=num_decode_tokens,
+            output=core_attn_out,
+        )
+        return
+
     # all decode requests (batched)
     if num_decodes > 0:
         decode_mixed_qkv = mixed_qkv[:num_decode_tokens]
@@ -156,7 +219,7 @@ def _cpu_gdn_attention_nonspec(
             ).squeeze(-1)
             conv_state[decode_state_indices] = decode_conv_state
 
-        query, key, value = layer.rearrange_mixed_qkv(decode_mixed_qkv)
+        query, key, value = _split_packed_qkv(layer, decode_mixed_qkv)
 
         attn_out = ops.fused_sigmoid_gating_delta_rule_update_cpu(
             A_log=layer.A_log,
@@ -432,10 +495,10 @@ def _spec_forward(
     # Single fused kernel call: it runs the recurrence over each sequence's
     # draft tokens internally, resumes from slot ``num_accepted-1`` and stores
     # the state after token ``t`` into slot ``t`` (rollback for the next step).
-    query, key, value = layer.rearrange_mixed_qkv(conv_out)
-    query = query.squeeze(0).contiguous()
-    key = key.squeeze(0).contiguous()
-    value = value.squeeze(0).contiguous()
+    query, key, value = _split_packed_qkv(layer, conv_out)
+    query = query.squeeze(0)
+    key = key.squeeze(0)
+    value = value.squeeze(0)
     spec_idx = spec_state_indices[:num_spec_decodes].to(torch.int32).contiguous()
     num_acc = num_accepted[:num_spec_decodes].to(torch.int32).contiguous()
     cu = spec_qsl[: num_spec_decodes + 1].to(torch.int32).contiguous()
@@ -507,12 +570,7 @@ def _spec_aware_nonspec(
         ).squeeze(-1)
         conv_buf[decode_state_indices, :, : width - 1] = decode_conv_state
 
-        query, key, value = layer.rearrange_mixed_qkv(decode_mixed_qkv)
-        # rearrange_mixed_qkv can return views whose last dim is not
-        # contiguous; the fused CPU kernel requires a contiguous last dim.
-        query = query.contiguous()
-        key = key.contiguous()
-        value = value.contiguous()
+        query, key, value = _split_packed_qkv(layer, decode_mixed_qkv)
         attn_out = ops.fused_sigmoid_gating_delta_rule_update_cpu(
             A_log=layer.A_log,
             dt_bias=layer.dt_bias,

@@ -429,25 +429,23 @@ void causal_conv1d_update_kernel_impl(
             TORCH_CHECK(false, "Unexpected block size, ", width, " x ", nb_size);
         }
 
+        scalar_t* state =
+            conv_states + conv_state_index * conv_state_slot_stride + nb_start;
+        for (int64_t w = 1; w < width - 1; ++w) {
+          std::memcpy(
+              state + (w - 1) * dim,
+              state + w * dim,
+              nb_size * sizeof(scalar_t));
+        }
+        std::memcpy(
+            state + (width - 2) * dim,
+            input + bs * dim + nb_start,
+            nb_size * sizeof(scalar_t));
+
         // move to the next index
         data_index_step(bs, batch, nb, NB);
       }
     });
-  });
-
-#define CONV_STATE_INDEXR(w) conv_states + conv_state_index*conv_state_slot_stride + (w) * dim
-
-  // update conv_states
-  at::parallel_for(0, batch, 0, [&](int64_t begin, int64_t end) {
-    for (int64_t bs = begin; bs < end; ++bs) {
-      // update old states, range [1, width - 1)
-      int32_t conv_state_index = has_conv_indices ? conv_indices[bs] : bs;
-      for (int64_t w = 1; w < width - 1; ++w) {
-        std::memcpy(CONV_STATE_INDEXR(w - 1), CONV_STATE_INDEXR(w), dim * sizeof(scalar_t));
-      }
-      // copy new states
-      std::memcpy(CONV_STATE_INDEXR(width - 2), input + bs * dim, dim * sizeof(scalar_t));
-    }
   });
 }
 
