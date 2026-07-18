@@ -10,6 +10,7 @@ from torch import nn
 
 from vllm.config import VllmConfig
 from vllm.config.lora import LoRAConfig
+from vllm.config.utils import replace as replace_config
 from vllm.logger import init_logger
 from vllm.lora.layers import (
     BaseLayerWithLoRA,
@@ -454,13 +455,23 @@ class LoRAModelManager:
                 # LoRA weights of w1 and w3 have already been fused on disk.
 
                 packed_moduled_lst = ["w13"] if self._is_3d_moe_model else ["w1", "w3"]
+            module_lora_config = self.lora_config
+            if self.lora_config.fully_sharded_loras and module_name.endswith(
+                "kv_b_proj"
+            ):
+                # MLA decode applies this adapter after the base K/V weights
+                # have been absorbed. Keep A replicated so the routed
+                # correction is local on every tensor-parallel rank.
+                module_lora_config = replace_config(
+                    self.lora_config, fully_sharded_loras=False
+                )
             new_module = replace_submodule(
                 self.model,
                 module_name,
                 from_layer(
                     module,
                     self.lora_slots,
-                    self.lora_config,
+                    module_lora_config,
                     packed_moduled_lst,
                     self.model.config,
                 ),

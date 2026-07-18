@@ -636,3 +636,140 @@ def test_add_lora_fused_moe_early_exit(device):
     assert torch.equal(y, y_snapshot), (
         "add_lora_fused_moe modified output tensor despite no_lora_flag_cpu=True"
     )
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="MLA LoRA kernels require CUDA"
+)
+@pytest.mark.parametrize("dtype", DTYPES)
+def test_mla_kv_b_lora_uses_explicit_token_mapping(dtype):
+    device = f"{DEVICE_TYPE}:0"
+    set_random_seed(0)
+    num_tokens = 7
+    num_heads = 3
+    kv_lora_rank = 16
+    qk_nope_head_dim = 8
+    v_head_dim = 8
+    lora_rank = 4
+    num_loras = 2
+    full_head_dim = qk_nope_head_dim + v_head_dim
+    mapping = torch.tensor([1, -1, 0, 1, 0, -1, 1], device=device)
+    no_lora_flag_cpu = torch.tensor([False], dtype=torch.bool, device="cpu")
+
+    lora_a = torch.randn(
+        num_loras, 1, lora_rank, kv_lora_rank, dtype=dtype, device=device
+    )
+    lora_b = torch.randn(
+        num_loras,
+        1,
+        num_heads * full_head_dim,
+        lora_rank,
+        dtype=dtype,
+        device=device,
+    )
+    b_by_head = lora_b[:, 0].view(num_loras, num_heads, full_head_dim, lora_rank)
+
+    x = torch.randn(num_tokens, kv_lora_rank, dtype=dtype, device=device)
+    linear_output = torch.randn(
+        num_tokens, num_heads * full_head_dim, dtype=dtype, device=device
+    )
+    expected_linear = linear_output.clone()
+    q_nope = torch.randn(
+        num_tokens,
+        num_heads,
+        qk_nope_head_dim,
+        dtype=dtype,
+        device=device,
+    )
+    q_output = torch.randn(
+        num_tokens, num_heads, kv_lora_rank, dtype=dtype, device=device
+    )
+    expected_q = q_output.clone()
+    latent_output = torch.randn_like(q_output)
+    v_output = torch.randn(
+        num_tokens, num_heads, v_head_dim, dtype=dtype, device=device
+    )
+    expected_v = v_output.clone()
+
+    for token_idx, lora_id in enumerate(mapping.tolist()):
+        if lora_id == -1:
+            continue
+        a = lora_a[lora_id, 0]
+        b = lora_b[lora_id, 0]
+        expected_linear[token_idx] = (
+            expected_linear[token_idx].float()
+            + x[token_idx].float() @ a.float().T @ b.float().T
+        ).to(dtype)
+        expected_q[token_idx] = (
+            expected_q[token_idx].float()
+            + torch.einsum(
+                "hp,hpr,rl->hl",
+                q_nope[token_idx].float(),
+                b_by_head[lora_id, :, :qk_nope_head_dim].float(),
+                a.float(),
+            )
+        ).to(dtype)
+        expected_v[token_idx] = (
+            expected_v[token_idx].float()
+            + torch.einsum(
+                "hl,rl,hvr->hv",
+                latent_output[token_idx].float(),
+                a.float(),
+                b_by_head[lora_id, :, qk_nope_head_dim:].float(),
+            )
+        ).to(dtype)
+
+    triton_ops.mla_kv_b_lora_linear(
+        x, lora_a, lora_b, linear_output, mapping, no_lora_flag_cpu
+    )
+    triton_ops.mla_kv_b_lora_q(
+        q_nope,
+        lora_a,
+        lora_b,
+        q_output,
+        mapping,
+        no_lora_flag_cpu,
+        v_head_dim,
+    )
+    triton_ops.mla_kv_b_lora_v(
+        latent_output,
+        lora_a,
+        lora_b,
+        v_output,
+        mapping,
+        no_lora_flag_cpu,
+        qk_nope_head_dim,
+    )
+
+    torch.testing.assert_close(linear_output, expected_linear, rtol=3e-2, atol=3e-2)
+    torch.testing.assert_close(q_output, expected_q, rtol=3e-2, atol=3e-2)
+    torch.testing.assert_close(v_output, expected_v, rtol=3e-2, atol=3e-2)
+
+    no_lora_flag_cpu.fill_(True)
+    linear_snapshot = linear_output.clone()
+    q_snapshot = q_output.clone()
+    v_snapshot = v_output.clone()
+    triton_ops.mla_kv_b_lora_linear(
+        x, lora_a, lora_b, linear_output, mapping, no_lora_flag_cpu
+    )
+    triton_ops.mla_kv_b_lora_q(
+        q_nope,
+        lora_a,
+        lora_b,
+        q_output,
+        mapping,
+        no_lora_flag_cpu,
+        v_head_dim,
+    )
+    triton_ops.mla_kv_b_lora_v(
+        latent_output,
+        lora_a,
+        lora_b,
+        v_output,
+        mapping,
+        no_lora_flag_cpu,
+        qk_nope_head_dim,
+    )
+    torch.testing.assert_close(linear_output, linear_snapshot)
+    torch.testing.assert_close(q_output, q_snapshot)
+    torch.testing.assert_close(v_output, v_snapshot)
