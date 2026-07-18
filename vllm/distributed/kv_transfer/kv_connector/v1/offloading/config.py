@@ -76,7 +76,17 @@ def build_offloading_config(
     elif tokens_per_chunk is not None:
         tokens_per_chunk_int = int(tokens_per_chunk)
 
-        unique_tokens_per_block = {group.tokens_per_block for group in groups}
+        reference_groups = (
+            tuple(
+                group
+                for group, kv_cache_group in zip(
+                    groups, kv_cache_config.kv_cache_groups, strict=True
+                )
+                if not kv_cache_group.is_eagle_group
+            )
+            or groups
+        )
+        unique_tokens_per_block = {group.tokens_per_block for group in reference_groups}
 
         assert len(unique_tokens_per_block) == 1, (
             "If 'block_size' is specified in kv_connector_extra_config, "

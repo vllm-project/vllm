@@ -425,6 +425,70 @@ def _full_attention_spec(block_size: int = 16) -> FullAttentionSpec:
     )
 
 
+@pytest.mark.parametrize(
+    ("target_block_size", "eagle_block_size", "connector_block_size"),
+    [
+        (256, 64, 256),
+        (16, 8, 32),
+    ],
+)
+def test_block_size_ignores_eagle_group_block_size(
+    target_block_size: int,
+    eagle_block_size: int,
+    connector_block_size: int,
+):
+    config = _make_layout_vllm_config(extra_config={"block_size": connector_block_size})
+    kv_cache_config = KVCacheConfig(
+        num_blocks=0,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(["target_layer"], _full_attention_spec(target_block_size)),
+            KVCacheGroupSpec(
+                ["eagle_layer"],
+                _full_attention_spec(eagle_block_size),
+                is_eagle_group=True,
+            ),
+        ],
+    )
+
+    offloading_config = build_offloading_config(config, kv_cache_config)
+
+    assert tuple(group.layer_names for group in offloading_config.groups) == (
+        ("target_layer",),
+        ("eagle_layer",),
+    )
+    assert tuple(group.tokens_per_block for group in offloading_config.groups) == (
+        target_block_size,
+        eagle_block_size,
+    )
+    assert (
+        offloading_config.cache.blocks_per_chunk
+        == connector_block_size // target_block_size
+    )
+
+
+def test_block_size_still_rejects_heterogeneous_non_eagle_groups():
+    config = _make_layout_vllm_config(extra_config={"block_size": 32})
+    kv_cache_config = KVCacheConfig(
+        num_blocks=0,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(["target_layer_0"], _full_attention_spec(16)),
+            KVCacheGroupSpec(["target_layer_1"], _full_attention_spec(8)),
+            KVCacheGroupSpec(
+                ["eagle_layer"],
+                _full_attention_spec(4),
+                is_eagle_group=True,
+            ),
+        ],
+    )
+
+    with pytest.raises(
+        AssertionError, match="all groups must have the same block size"
+    ):
+        build_offloading_config(config, kv_cache_config)
+
+
 def _parallelism_agnostic(kv_cache_groups: list[KVCacheGroupSpec]) -> bool:
     config = _make_layout_vllm_config()
     kv_cache_config = KVCacheConfig(
