@@ -97,12 +97,20 @@ class PrepareStoreOutput:
     evicted_keys: list[OffloadKey]
 
 
+class Locality(Enum):
+    """Locality of a tier's storage relative to the publishing instance."""
+
+    LOCAL = "LOCAL"
+    REMOTE = "REMOTE"
+
+
 @dataclass
 class OffloadingEvent:
     keys: list[OffloadKey]
     medium: str
     # True if blocks are removed, False if stored
     removed: bool
+    locality: Locality | None = None
 
 
 """
