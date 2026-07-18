@@ -258,6 +258,10 @@ class AsyncLLM(EngineClient):
 
     def shutdown(self, timeout: float | None = None) -> None:
         """Shutdown, cleaning up the background proc and IPC."""
+        # Set before teardown, so it's visible in time.
+        shutdown_initiated = getattr(self, "_shutdown_initiated", None)
+        if shutdown_initiated is not None:
+            shutdown_initiated[0] = True
         shutdown_prometheus()
 
         if renderer := getattr(self, "renderer", None):
@@ -653,6 +657,13 @@ class AsyncLLM(EngineClient):
         renderer = self.renderer
         chunk_size = envs.VLLM_V1_OUTPUT_PROC_CHUNK_SIZE
 
+        # Track whether shutdown() has been called intentionally
+        # to distinguish between real engine crash
+        # from the EngineDeadError poison pill
+        # Use a mutable list to avoid circular reference
+        shutdown_initiated = [False]
+        self._shutdown_initiated = shutdown_initiated
+
         async def output_handler():
             try:
                 while True:
@@ -700,6 +711,14 @@ class AsyncLLM(EngineClient):
                             iteration_stats=iteration_stats,
                             mm_cache_stats=renderer.stat_mm_cache(),
                         )
+            except EngineDeadError as e:
+                # only log loudly if shutdown wasn't requested
+                if shutdown_initiated[0]:
+                    logger.debug("output_handler exiting: engine client shut down")
+                    return
+                logger.exception("AsyncLLM output_handler failed.")
+                output_processor.propagate_error(e)
+
             except Exception as e:
                 logger.exception("AsyncLLM output_handler failed.")
                 output_processor.propagate_error(e)
