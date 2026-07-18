@@ -53,6 +53,13 @@ def is_breakable_cudagraph_enabled() -> bool:
     return bool(envs.VLLM_USE_BREAKABLE_CUDAGRAPH)
 
 
+# Set True (once, at wrapper init) when the engine runs speculative decoding.
+# The DeepSeek-V4 sparse-MLA decode is per-token and not FULL-cudagraph-safe for
+# spec-decode batches; when this is set we eager-break the DSv4 attention out of
+# the FULL graph (see eager_break_during_capture).
+_BREAK_DSV4_ATTN_UNDER_FULL_FOR_SPEC = False
+
+
 F = TypeVar("F", bound=Callable[..., Any])
 
 
@@ -99,7 +106,16 @@ def eager_break_during_capture(fn: F) -> F:
             return fn(*args, **kwargs)
         if is_forward_context_available():
             mode = get_forward_context().cudagraph_runtime_mode
-            if mode == CUDAGraphMode.FULL:
+            # Under spec-decode, the per-token DeepSeek-V4 sparse-MLA decode
+            # cross-contaminates requests when captured into a FULL monolithic
+            # cudagraph (token_to_req_indices -> per-request block_table/topk
+            # gather). Eager-break the DSv4 attention (the nested indexer then
+            # runs eagerly too) for the q=1 draft and the q>1 verify forwards;
+            # keep FULL capture for non-spec decode and every non-DSv4 op.
+            if mode == CUDAGraphMode.FULL and not (
+                _BREAK_DSV4_ATTN_UNDER_FULL_FOR_SPEC
+                and "deepseek_v4.attention" in (getattr(fn, "__module__", "") or "")
+            ):
                 return fn(*args, **kwargs)
 
         # Weak-ref args: strong refs in the replay lambda pin cudagraph-pool
@@ -278,6 +294,10 @@ class BreakableCUDAGraphWrapper:
         # BatchDescriptor which already encodes batch shape / uniformity.
         self.runnable = runnable
         self.vllm_config = vllm_config
+        _sc = getattr(vllm_config, "speculative_config", None)
+        if _sc is not None and (getattr(_sc, "num_speculative_tokens", 0) or 0) > 0:
+            global _BREAK_DSV4_ATTN_UNDER_FULL_FOR_SPEC
+            _BREAK_DSV4_ATTN_UNDER_FULL_FOR_SPEC = True
         self.compilation_config = vllm_config.compilation_config
         self.graph_pool = current_platform.get_global_graph_pool()
         self.is_debugging_mode = envs.VLLM_LOGGING_LEVEL == "DEBUG"

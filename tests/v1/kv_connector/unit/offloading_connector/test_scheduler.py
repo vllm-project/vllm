@@ -18,7 +18,10 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.scheduler import (
     OffloadingConnectorScheduler,
     RequestOffloadState,
+    is_store_reachable_swa_chunk,
+    max_pending_gpu_blocks_for_group,
 )
+from vllm.utils.math_utils import cdiv
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheGroupSpec,
@@ -121,6 +124,55 @@ def test_scheduler_reports_lookup_sync_delay(request_runner):
     reduced = _reduce_kv_connector_stats(runner)
     assert reduced[f"{_ConnectorMetricName.LOOKUP_SYNC_DELAY}_count"] == 1
     assert reduced[f"{_ConnectorMetricName.LOOKUP_SYNC_DELAY}_sum"] > 0
+
+
+@pytest.mark.parametrize(
+    (
+        "absolute_chunk_index",
+        "storable_chunk_count",
+        "alignment_chunk_count",
+        "sliding_window_chunks",
+        "is_eagle_group",
+        "expected",
+    ),
+    [
+        # Full 64-chunk segment: ordinary SWA keeps 62-63; EAGLE also keeps 61.
+        (61, 64, 64, 2, False, False),
+        (62, 64, 64, 2, False, True),
+        (60, 64, 64, 2, True, False),
+        (61, 64, 64, 2, True, True),
+        # Partial 48-of-64 segment: the reachable tail ends at chunk 47.
+        (45, 48, 64, 2, False, False),
+        (46, 48, 64, 2, False, True),
+        (44, 48, 64, 2, True, False),
+        (45, 48, 64, 2, True, True),
+        # A later partial segment uses its own actual end (chunks 64-79).
+        (76, 80, 64, 3, False, False),
+        (77, 80, 64, 3, False, True),
+        # No alignment means no store-pruning optimization.
+        (0, 1, None, None, False, True),
+        # A tail at least as large as the segment keeps every chunk.
+        (0, 2, 64, 2, False, True),
+    ],
+)
+def test_is_store_reachable_swa_chunk(
+    absolute_chunk_index: int,
+    storable_chunk_count: int,
+    alignment_chunk_count: int | None,
+    sliding_window_chunks: int | None,
+    is_eagle_group: bool,
+    expected: bool,
+):
+    assert (
+        is_store_reachable_swa_chunk(
+            absolute_chunk_index,
+            storable_chunk_count,
+            alignment_chunk_count,
+            sliding_window_chunks,
+            is_eagle_group,
+        )
+        is expected
+    )
 
 
 def test_scheduler_reports_lookup_async_delay_on_resolve(request_runner):
@@ -2804,3 +2856,66 @@ def test_request_finished_mixed_full_attn_and_sliding_window(
     # Verify fence is empty after full lifecycle (cleanup happened).
     assert runner.connector_scheduler._block_id_to_pending_jobs == {}
     assert len(runner.connector_scheduler._jobs) == 0
+
+
+def _cold_swa_pending_gpu_blocks(
+    num_cached_tokens: int, sliding_window: int, tokens_per_block: int
+) -> int:
+    """Pending GPU blocks a cold SWA external load presents to the bound check.
+
+    Mirrors update_state_after_alloc: num_gpu_blocks minus the null-placeholder
+    prefix, which single_type_kv_cache_manager floors to whole GPU blocks
+    (never to chunks), leaving the window start GPU-block-unaligned.
+    """
+    num_gpu_blocks = cdiv(num_cached_tokens, tokens_per_block)
+    num_skipped_blocks = max(0, num_cached_tokens - sliding_window + 1) // (
+        tokens_per_block
+    )
+    return num_gpu_blocks - num_skipped_blocks
+
+
+def test_max_pending_gpu_blocks_for_group_swa_unaligned():
+    """SWA bound must count the unaligned +1 GPU block (vLLM #48959).
+
+    The old bound sliding_window_size_in_chunks * blocks_per_chunk equals
+    cdiv(sliding_window, tokens_per_block) when the window is a chunk multiple,
+    so a valid unaligned span that intersects one extra physical GPU block
+    fatally trips the update_state_after_alloc assertion.
+    """
+    # DeepSeek-V4 production geometry from the crash report: 4096-token window,
+    # 32-token GPU blocks, 256-token chunks (blocks_per_chunk=8).
+    sliding_window, tokens_per_block, blocks_per_chunk = 4096, 32, 8
+    spec = SlidingWindowSpec(
+        block_size=tokens_per_block,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float32,
+        sliding_window=sliding_window,
+    )
+    bound = max_pending_gpu_blocks_for_group(spec, tokens_per_block, blocks_per_chunk)
+
+    # Old (wrong) bound was cdiv(4096, 256) * 8 = 128; the correct bound is 129.
+    old_bound = cdiv(sliding_window, tokens_per_block * blocks_per_chunk)
+    old_bound *= blocks_per_chunk
+    assert old_bound == 128
+    assert bound == 129
+
+    # The Queen crash value must now pass, and the bound must hold for every
+    # token count (the true max pending equals the bound, never exceeds it).
+    assert _cold_swa_pending_gpu_blocks(98012, sliding_window, tokens_per_block) == 129
+    max_pending = max(
+        _cold_swa_pending_gpu_blocks(n, sliding_window, tokens_per_block)
+        for n in range(sliding_window, sliding_window + 20000)
+    )
+    assert max_pending == bound
+
+
+def test_max_pending_gpu_blocks_for_group_full_attention_unbounded():
+    """Full-attention groups carry no pending-span bound (None)."""
+    spec = FullAttentionSpec(
+        block_size=32,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float32,
+    )
+    assert max_pending_gpu_blocks_for_group(spec, 32, 8) is None

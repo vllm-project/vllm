@@ -94,6 +94,12 @@ class GroupOffloadConfig(NamedTuple):
     # of these groups is volatile and lacks a stable hash, so it must
     # be excluded from store and load scheduling.
     is_eagle_group: bool = False
+    # Upper bound on the GPU blocks this group's pending (to-load) span can
+    # touch, used as a sanity check in update_state_after_alloc. None for
+    # full-attention groups (unbounded). For sliding-window groups this counts
+    # an unaligned window start (vLLM #48959); for Mamba it is the single-state
+    # footprint.
+    max_pending_gpu_blocks: int | None = None
 
 
 def get_sliding_window_size_in_chunks(
@@ -109,6 +115,61 @@ def get_sliding_window_size_in_chunks(
 
     assert isinstance(kv_cache_spec, FullAttentionSpec)
     return None
+
+
+def max_pending_gpu_blocks_for_group(
+    kv_cache_spec: KVCacheSpec,
+    tokens_per_block: int,
+    blocks_per_chunk: int,
+) -> int | None:
+    """Upper bound on the GPU blocks a group's pending (to-load) span can touch.
+
+    A sliding-window group's live span is ``sliding_window - 1`` tokens starting
+    at an arbitrary offset, so it can intersect
+    ``cdiv(sliding_window + tokens_per_block - 1, tokens_per_block)`` physical GPU
+    blocks -- one more than ``cdiv(sliding_window, tokens_per_block)`` whenever the
+    span is not GPU-block-aligned. Bounding instead by the chunk-rounded window
+    (``sliding_window_size_in_chunks * blocks_per_chunk``) drops that extra block
+    when the window is a chunk multiple, which fatally trips the
+    ``update_state_after_alloc`` sanity assertion (vLLM #48959).
+
+    Args:
+        kv_cache_spec: The group's KV cache spec.
+        tokens_per_block: GPU block size in tokens.
+        blocks_per_chunk: GPU blocks per offloaded chunk.
+
+    Returns:
+        The bound, or None for full-attention groups (no pending-span limit).
+    """
+    if isinstance(kv_cache_spec, SlidingWindowSpec):
+        return cdiv(
+            kv_cache_spec.sliding_window + tokens_per_block - 1, tokens_per_block
+        )
+    if isinstance(kv_cache_spec, MambaSpec):
+        # Mamba depends on a single state (one chunk's worth of GPU blocks).
+        return blocks_per_chunk
+    assert isinstance(kv_cache_spec, FullAttentionSpec)
+    return None
+
+
+def is_store_reachable_swa_chunk(
+    absolute_chunk_index: int,
+    storable_chunk_count: int,
+    alignment_chunk_count: int | None,
+    sliding_window_chunks: int | None,
+    is_eagle_group: bool,
+) -> bool:
+    """Return whether an SWA chunk can participate in an external-cache hit."""
+    if alignment_chunk_count is None:
+        return True
+    assert sliding_window_chunks is not None
+    position_in_segment = absolute_chunk_index % alignment_chunk_count
+    segment_start = absolute_chunk_index - position_in_segment
+    actual_segment_length = min(
+        alignment_chunk_count, storable_chunk_count - segment_start
+    )
+    reachable_tail = sliding_window_chunks + int(is_eagle_group)
+    return position_in_segment >= actual_segment_length - reachable_tail
 
 
 def resolve_mamba_align_size(
@@ -222,6 +283,11 @@ class SchedulerOffloadConfig(NamedTuple):
                         kv_cache_config.kv_cache_groups[idx]
                     ),
                     is_eagle_group=idx in eagle_groups,
+                    max_pending_gpu_blocks=max_pending_gpu_blocks_for_group(
+                        kv_cache_config.kv_cache_groups[idx].kv_cache_spec,
+                        tokens_per_block,
+                        spec.blocks_per_chunk,
+                    ),
                 )
                 for idx, tokens_per_block in enumerate(spec.tokens_per_block)
             ),
@@ -818,11 +884,9 @@ class OffloadingConnectorScheduler:
             )
             num_pending_gpu_blocks = num_gpu_blocks - num_locally_computed_gpu_blocks
 
-            if group_config.sliding_window_size_in_chunks is not None:
+            if group_config.max_pending_gpu_blocks is not None:
                 assert (
-                    num_pending_gpu_blocks
-                    <= group_config.sliding_window_size_in_chunks
-                    * self.config.blocks_per_chunk
+                    num_pending_gpu_blocks <= group_config.max_pending_gpu_blocks
                 )
 
             num_chunks = cdiv(num_cached_tokens, tokens_per_chunk)
@@ -974,9 +1038,6 @@ class OffloadingConnectorScheduler:
                 ]
                 assert len(offload_keys) == len(offload_block_ids)
 
-                alignment_chunk_count = group_config.alignment_chunk_count
-                tail = group_config.sliding_window_size_in_chunks
-
                 for key_idx, (offload_key, block_id) in enumerate(
                     zip(offload_keys, offload_block_ids)
                 ):
@@ -984,15 +1045,18 @@ class OffloadingConnectorScheduler:
                         continue
                     # Skip SWA chunks that can never serve a load hit:
                     # within each full-attention alignment segment, only the
-                    # trailing `tail` chunks are reachable by
-                    # _sliding_window_lookup. For DeepSeek V4 with 100K
-                    # tokens this reduces SWA stores by ~78%.
-                    if alignment_chunk_count is not None:
-                        assert tail is not None
-                        abs_chunk_idx = start_chunk_idx + key_idx
-                        pos_in_segment = abs_chunk_idx % alignment_chunk_count
-                        if pos_in_segment < alignment_chunk_count - tail:
-                            continue
+                    # trailing chunks queried by _sliding_window_lookup are
+                    # reachable. EAGLE/MTP requires one additional chunk that
+                    # lookup later drops as its volatile draft tail.
+                    abs_chunk_idx = start_chunk_idx + key_idx
+                    if not is_store_reachable_swa_chunk(
+                        abs_chunk_idx,
+                        num_chunks,
+                        group_config.alignment_chunk_count,
+                        group_config.sliding_window_size_in_chunks,
+                        group_config.is_eagle_group,
+                    ):
+                        continue
                     new_offload_keys.append(offload_key)
 
             if not new_offload_keys:

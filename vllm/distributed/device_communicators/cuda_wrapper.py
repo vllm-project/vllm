@@ -15,7 +15,6 @@ import torch  # noqa
 import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.utils.system_utils import find_loaded_library
 
 logger = init_logger(__name__)
 
@@ -102,32 +101,94 @@ class CudaRTLibrary:
     #  to the corresponding dictionary
     path_to_dict_mapping: dict[str, dict[str, Any]] = {}
 
+    @classmethod
+    def _runtime_lib_name(cls) -> str:
+        return "libamdhip64" if current_platform.is_rocm() else "libcudart"
+
+    @classmethod
+    def _symbol_name(cls, func: Function) -> str:
+        if current_platform.is_rocm():
+            return cls.cuda_to_hip_mapping[func.name]
+        return func.name
+
+    @classmethod
+    def _loaded_library_paths(cls, lib_name: str) -> list[str]:
+        paths: list[str] = []
+        try:
+            with open("/proc/self/maps") as maps:
+                for line in maps:
+                    if lib_name not in line or "/" not in line:
+                        continue
+                    path = line[line.index("/") :].strip()
+                    filename = path.rsplit("/", 1)[-1]
+                    if not filename.rpartition(".so")[0].startswith(lib_name):
+                        continue
+                    if path not in paths:
+                        paths.append(path)
+        except OSError:
+            return paths
+        return paths
+
+    @classmethod
+    def _load_library(cls, so_file: str) -> Any:
+        if so_file not in cls.path_to_library_cache:
+            cls.path_to_library_cache[so_file] = ctypes.CDLL(so_file)
+        return cls.path_to_library_cache[so_file]
+
+    @classmethod
+    def _missing_exported_functions(cls, lib: Any) -> list[str]:
+        missing: list[str] = []
+        for func in cls.exported_functions:
+            symbol = cls._symbol_name(func)
+            try:
+                getattr(lib, symbol)
+            except AttributeError:
+                missing.append(symbol)
+        return missing
+
+    @classmethod
+    def _select_runtime_library(cls) -> str:
+        lib_name = cls._runtime_lib_name()
+        candidates = cls._loaded_library_paths(lib_name)
+        if envs.VLLM_CUDART_SO_PATH and envs.VLLM_CUDART_SO_PATH not in candidates:
+            candidates.append(envs.VLLM_CUDART_SO_PATH)
+
+        rejected: list[str] = []
+        for so_file in candidates:
+            try:
+                lib = cls._load_library(so_file)
+            except OSError as e:
+                rejected.append(f"{so_file} ({e})")
+                continue
+            missing = cls._missing_exported_functions(lib)
+            if missing:
+                rejected.append(f"{so_file} (missing {', '.join(missing)})")
+                continue
+            return so_file
+
+        message = (
+            f"{lib_name} with the required runtime symbols is not loaded in "
+            "the current process; try setting VLLM_CUDART_SO_PATH."
+        )
+        if rejected:
+            message += " Rejected candidates: " + "; ".join(rejected)
+        raise RuntimeError(message)
+
     def __init__(self, so_file: str | None = None):
         if so_file is None:
-            so_file = (
-                find_loaded_library(
-                    "libamdhip64" if current_platform.is_rocm() else "libcudart"
-                )
-                or envs.VLLM_CUDART_SO_PATH  # fallback to env var
-            )
-            assert so_file is not None, (
-                "libcudart is not loaded in the current process, "
-                "try setting VLLM_CUDART_SO_PATH"
-            )
-        if so_file not in CudaRTLibrary.path_to_library_cache:
-            lib = ctypes.CDLL(so_file)
-            CudaRTLibrary.path_to_library_cache[so_file] = lib
-        self.lib = CudaRTLibrary.path_to_library_cache[so_file]
+            so_file = self._select_runtime_library()
+        self.lib = self._load_library(so_file)
 
         if so_file not in CudaRTLibrary.path_to_dict_mapping:
+            missing = self._missing_exported_functions(self.lib)
+            if missing:
+                raise RuntimeError(
+                    f"{so_file} is missing required runtime symbols: "
+                    f"{', '.join(missing)}"
+                )
             _funcs = {}
             for func in CudaRTLibrary.exported_functions:
-                f = getattr(
-                    self.lib,
-                    CudaRTLibrary.cuda_to_hip_mapping[func.name]
-                    if current_platform.is_rocm()
-                    else func.name,
-                )
+                f = getattr(self.lib, self._symbol_name(func))
                 f.restype = func.restype
                 f.argtypes = func.argtypes
                 _funcs[func.name] = f

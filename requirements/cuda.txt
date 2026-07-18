@@ -11,6 +11,9 @@ torchvision==0.26.0 # Required for phi3v processor. See https://github.com/pytor
 torchcodec >= 0.14
 PyNvVideoCodec==2.0.4
 # FlashInfer should be updated together with the Dockerfile
+# NOTE (SM12x): 0.6.14 is load-bearing for DeepSeek-V4 on SM120 — 0.6.13 LACKS
+# the sparse-MLA kernel (flashinfer.mla._sparse_mla_sm120). Upstream now pins
+# 0.6.14 itself (#47669), so our fork override is retired; do NOT downgrade.
 # flashinfer-cubin is not on PyPI since 0.6.14; setup.py excludes it from
 # install_requires so the published wheel does not carry an unresolvable pin
 --extra-index-url https://flashinfer.ai/whl/
@@ -26,7 +29,12 @@ fastsafetensors >= 0.3.2
 
 # QuACK and Cutlass DSL for FA4 (cute-DSL implementation)
 nvidia-cutlass-dsl[cu13]==4.6.0
-quack-kernels>=0.4.0  # Required for tml-fa4
+# quack < 0.6.0 annotates with `cute.core.ThrMma`, which nvidia-cutlass-dsl
+# 4.6.0 moved out of `cute.core` (it is `cute.ThrMma` / `cute.atom.ThrMma` now),
+# so quack fails to import at all. The old >=0.4.0 floor was satisfied by an
+# already-installed 0.5.x, which then never got upgraded alongside the 4.6.0
+# bump -> AttributeError at engine start. Keep the floor in step with the DSL.
+quack-kernels>=0.6.0  # Required for tml-fa4; <0.6 breaks on cutlass-dsl 4.6.0
 
 # Tokenspeed_MLA for faster mla with spec decode
 tokenspeed-mla==0.1.8; platform_system == "Linux"

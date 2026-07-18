@@ -110,7 +110,26 @@ class ServingRender(BaseServing):
             self.override_max_tokens,
             truncate_prompt_tokens=request.truncate_prompt_tokens,
         )
-        params = request.to_sampling_params(max_tokens, self.default_sampling_params)
+        # DeepSeek-V4 API semantics: translate the request-level ``thinking``
+        # knob into chat-template kwargs so the sampling params reflect the same
+        # effective thinking state the prompt is rendered with (see the matching
+        # apply_chat_template_kwargs() call in OnlineRenderer.render_chat).
+        renderer = self.online_renderer
+        chat_template_kwargs = request.apply_chat_template_kwargs(
+            request.build_chat_params(
+                renderer.chat_template,
+                renderer.chat_template_content_format,
+            )
+            .with_defaults(renderer.default_chat_template_kwargs)
+            .chat_template_kwargs,
+            model_config=self.model_config,
+        )
+        params = request.to_sampling_params(
+            max_tokens,
+            self.default_sampling_params,
+            chat_template_kwargs=chat_template_kwargs,
+            model_config=self.model_config,
+        )
 
         assistant_tokens_mask: list[int] | None = engine_input.get(  # type: ignore[assignment]
             "assistant_tokens_mask"

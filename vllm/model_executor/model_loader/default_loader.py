@@ -4,7 +4,7 @@ import dataclasses
 import glob
 import os
 import time
-from collections.abc import Generator, Iterable
+from collections.abc import Callable, Generator, Iterable
 from typing import cast
 
 import torch
@@ -242,7 +242,9 @@ class DefaultModelLoader(BaseModelLoader):
         return hf_folder, hf_weights_files, use_safetensors
 
     def _get_weights_iterator(
-        self, source: "Source"
+        self,
+        source: "Source",
+        weight_name_filter: Callable[[str], bool] | None = None,
     ) -> Generator[tuple[str, torch.Tensor], None, None]:
         """Get an iterator for the model weights based on the load format."""
         extra_config = self.load_config.model_loader_extra_config
@@ -268,6 +270,8 @@ class DefaultModelLoader(BaseModelLoader):
                 weights_iterator = fastsafetensors_weights_iterator(
                     hf_weights_files,
                     self.load_config.use_tqdm_on_load,
+                    local_expert_ids=self.local_expert_ids,
+                    weight_name_filter=weight_name_filter,
                 )
             elif self.load_config.load_format == "instanttensor":
                 weights_iterator = instanttensor_weights_iterator(
@@ -289,6 +293,7 @@ class DefaultModelLoader(BaseModelLoader):
                         self.load_config.use_tqdm_on_load,
                         self.load_config.safetensors_load_strategy,
                         local_expert_ids=self.local_expert_ids,
+                        weight_name_filter=weight_name_filter,
                         safetensors_prefetch_num_threads=(
                             self.load_config.safetensors_prefetch_num_threads
                         ),
@@ -323,6 +328,9 @@ class DefaultModelLoader(BaseModelLoader):
         model_config: ModelConfig,
         model: nn.Module,
     ) -> Generator[tuple[str, torch.Tensor], None, None]:
+        weight_name_filter = getattr(model, "skip_weight_name_before_load", None)
+        if not callable(weight_name_filter):
+            weight_name_filter = None
         primary_weights = DefaultModelLoader.Source(
             model_config.model,
             model_config.revision,
@@ -330,14 +338,14 @@ class DefaultModelLoader(BaseModelLoader):
             fall_back_to_pt=getattr(model, "fall_back_to_pt_during_load", True),
             allow_patterns_overrides=getattr(model, "allow_patterns_overrides", None),
         )
-        yield from self._get_weights_iterator(primary_weights)
+        yield from self._get_weights_iterator(primary_weights, weight_name_filter)
 
         secondary_weights = cast(
             Iterable[DefaultModelLoader.Source],
             getattr(model, "secondary_weights", ()),
         )
         for source in secondary_weights:
-            yield from self._get_weights_iterator(source)
+            yield from self._get_weights_iterator(source, weight_name_filter)
 
     def download_model(self, model_config: ModelConfig) -> None:
         self._prepare_weights(

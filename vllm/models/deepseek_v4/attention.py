@@ -61,6 +61,7 @@ from vllm.v1.kv_cache_interface import (
     MLAAttentionSpec,
     get_kv_quant_mode,
 )
+from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 
 logger = init_logger(__name__)
 
@@ -98,6 +99,25 @@ def _resolve_dsv4_kv_cache_dtype(
     return kv_cache_dtype, torch.bfloat16
 
 
+def resolve_layer_compress_ratio(config, layer_id: int) -> tuple[int, bool]:
+    """Resolve (operational_compress_ratio, use_unscaled_rope) for a layer.
+
+    NOTE(zyongye) Compress ratio can't be 0; historically every layer_id >=
+    num_hidden_layers (the MTP draft layer) was mapped to 1 because "MTP layer
+    is not included in the compress ratio list". Some checkpoints DO include
+    their MTP draft layer in compress_ratios, with an entry of 0 meaning
+    uncompressed KV and plain (unscaled) rope. The operational ratio stays
+    clamped to >= 1 (KV-cache specs treat 1 as "no compression" and divide by
+    it); a raw 0 only selects unscaled rope for that layer.
+    """
+    if layer_id < config.num_hidden_layers:
+        return max(1, config.compress_ratios[layer_id]), False
+    if layer_id < len(config.compress_ratios):
+        raw_compress_ratio = config.compress_ratios[layer_id]
+        return max(1, raw_compress_ratio), raw_compress_ratio == 0
+    return 1, False
+
+
 class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
     """DeepseekV4 MLA attention layer.
 
@@ -121,6 +141,9 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
     # workspace allocated in _forward_prefill and is also read by the dummy-run
     # path to pre-reserve that workspace.
     PREFILL_CHUNK_SIZE: ClassVar[int] = 4
+    _q_padded_scratch_by_key: ClassVar[
+        dict[tuple[str, int, int, torch.dtype, int, int], torch.Tensor]
+    ] = {}
 
     @classmethod
     @abstractmethod
@@ -181,13 +204,9 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         self.n_groups = config.o_groups
         self.n_local_groups = self.n_groups // tp_size
         self.window_size = config.sliding_window
-        # NOTE(zyongye) Compress ratio can't be 0
-        # we do this for because MTP layer is not included
-        # in the compress ratio list
-        if layer_id < config.num_hidden_layers:
-            self.compress_ratio = max(1, config.compress_ratios[layer_id])
-        else:
-            self.compress_ratio = 1
+        self.compress_ratio, use_unscaled_rope = resolve_layer_compress_ratio(
+            config, layer_id
+        )
         self.eps = config.rms_norm_eps
         self.scale = self.head_dim**-0.5
 
@@ -245,6 +264,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             rope_head_dim=self.rope_head_dim,
             max_position_embeddings=config.max_position_embeddings,
             compress_ratio=self.compress_ratio,
+            use_unscaled_rope=use_unscaled_rope,
         )
         self.indexer_rotary_emb = self.rotary_emb
         self.topk_indices_buffer = topk_indices_buffer
@@ -284,6 +304,10 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             vllm_config.scheduler_config.max_num_batched_tokens
         )
         self.max_model_len = vllm_config.model_config.max_model_len
+        self._q_padded_scratch_num_ubatches = (
+            2 if vllm_config.parallel_config.enable_dbo else 1
+        )
+        self._q_padded_scratch_dtype = vllm_config.model_config.dtype
 
         # Resolve the kv-cache dtype from this backend's block format. The same
         # resolution drives the SWA cache tensor dtype below.
@@ -319,6 +343,78 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
                 rotate=True,
                 prefix=f"{prefix}.compressor",
                 k_cache_prefix=self.prefix,
+            )
+
+    @staticmethod
+    def _q_padded_scratch_device_index(device: torch.device) -> int:
+        if device.index is not None:
+            return int(device.index)
+        if device.type == "cuda":
+            return int(torch.cuda.current_device())
+        return -1
+
+    @classmethod
+    def _reserve_q_padded_scratch_buffer(
+        cls,
+        num_tokens: int,
+        padded_heads: int,
+        head_dim: int,
+        dtype: torch.dtype,
+        device: torch.device,
+        ubatch_id: int,
+    ) -> torch.Tensor:
+        key = (
+            device.type,
+            cls._q_padded_scratch_device_index(device),
+            ubatch_id,
+            dtype,
+            padded_heads,
+            head_dim,
+        )
+        scratch = cls._q_padded_scratch_by_key.get(key)
+        if scratch is not None and scratch.shape[0] >= num_tokens:
+            return scratch
+
+        old_scratch = cls._q_padded_scratch_by_key.pop(key, None)
+        if old_scratch is not None:
+            del old_scratch
+            torch.accelerator.empty_cache()
+
+        scratch = torch.empty(
+            (num_tokens, padded_heads, head_dim),
+            dtype=dtype,
+            device=device,
+        )
+        cls._q_padded_scratch_by_key[key] = scratch
+        return scratch
+
+    def _get_q_padded_scratch(self, q: torch.Tensor) -> torch.Tensor:
+        num_tokens = q.shape[0]
+        reserved_tokens = max(num_tokens, int(self.max_num_batched_tokens))
+        scratch = self._reserve_q_padded_scratch_buffer(
+            reserved_tokens,
+            int(self.padded_heads),
+            int(self.head_dim),
+            q.dtype,
+            q.device,
+            dbo_current_ubatch_id(),
+        )
+        return scratch[:num_tokens]
+
+    def reserve_profile_scratch(self) -> None:
+        if self.kv_cache_torch_dtype != torch.uint8:
+            return
+        device = self.q_norm.weight.device
+        if device.type not in ("cuda", "xpu"):
+            return
+        for ubatch_id in range(self._q_padded_scratch_num_ubatches):
+            self._reserve_q_padded_scratch_buffer(
+                max(1, int(self.max_num_batched_tokens)),
+                int(self.padded_heads),
+                int(self.head_dim),
+                self._q_padded_scratch_dtype,
+                device,
+                ubatch_id,
             )
 
     def forward(
@@ -522,6 +618,8 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         if not isinstance(attn_metadata, dict):
             # Profile run: kernel doesn't fire; produce a padded tensor so
             # downstream FlashMLA gets the right shape.
+            if self.kv_cache_torch_dtype == torch.uint8:
+                return self._get_q_padded_scratch(q)
             if self.n_local_heads < self.padded_heads:
                 return F.pad(
                     q,
@@ -547,21 +645,22 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         if cache_dtype == torch.uint8:
             # fp8_ds_mla UE8M0 paged path. Horizontally fused:
             #   Q side:  per-head RMSNorm (no weight) + GPT-J RoPE, zero-filling
-            #            the padding head slots; the kernel allocates and returns
-            #            the padded q tensor.
+            #            the padding head slots into a reusable q buffer.
             #   KV side: GPT-J RoPE + UE8M0 FP8 quant + paged cache insert.
             swa_kv_cache_2d = swa_kv_cache.view(swa_kv_cache.shape[0], -1)
-            return torch.ops._C.fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert(
+            q_out = self._get_q_padded_scratch(q)
+            torch.ops._C.fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert(
                 q,
                 kv,
+                q_out,
                 swa_kv_cache_2d,
                 swa_metadata.slot_mapping,
                 positions,
                 cos_sin_cache,
-                self.padded_heads,
                 self.eps,
                 swa_metadata.block_size,
             )
+            return q_out
 
         # Plain-row path: the [num_blocks, block_size, 512] cache stores the KV
         # row in its element dtype (no Q padding). bf16 rewrites q in place;

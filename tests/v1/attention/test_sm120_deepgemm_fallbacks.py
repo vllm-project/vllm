@@ -1,0 +1,396 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+import pytest
+import torch
+
+import vllm.utils.deep_gemm as deep_gemm_utils
+from vllm.model_executor.layers.sparse_attn_indexer import (
+    _decode_logits_width,
+    _decode_topk_logits_width,
+    _sparse_indexer_requires_deep_gemm,
+)
+from vllm.models.deepseek_v4.nvidia.ops import (
+    sm12x_deep_gemm_fallbacks,
+    sm12x_mqa,
+)
+from vllm.platforms import current_platform
+from vllm.utils.math_utils import cdiv
+
+
+def _make_indexer_kv_cache(
+    kv_fp8: torch.Tensor,
+    kv_scale: torch.Tensor,
+) -> torch.Tensor:
+    num_blocks, block_size, num_kv_heads, head_dim = kv_fp8.shape
+    assert num_kv_heads == 1
+    fused_kv = torch.empty(
+        num_blocks,
+        block_size,
+        1,
+        head_dim + torch.float32.itemsize,
+        device=kv_fp8.device,
+        dtype=torch.uint8,
+    )
+    block_stride = fused_kv.stride(0)
+    kv_values = torch.as_strided(
+        fused_kv,
+        size=kv_fp8.shape,
+        stride=(block_stride, head_dim, head_dim, 1),
+    )
+    kv_scales = torch.as_strided(
+        fused_kv,
+        size=(num_blocks, block_size, 1, torch.float32.itemsize),
+        stride=(block_stride, torch.float32.itemsize, torch.float32.itemsize, 1),
+        storage_offset=block_size * head_dim,
+    )
+    kv_values.copy_(kv_fp8.view(torch.uint8))
+    kv_scales.copy_(kv_scale.contiguous().view(torch.uint8))
+    return fused_kv
+
+
+def _reference_paged_mqa_logits(
+    q_fp8: torch.Tensor,
+    kv_fp8: torch.Tensor,
+    kv_scale: torch.Tensor,
+    weights: torch.Tensor,
+    context_lens: torch.Tensor,
+    block_tables: torch.Tensor,
+    max_model_len: int,
+) -> torch.Tensor:
+    batch_size, next_n, _, _ = q_fp8.shape
+    _, block_size, _, _ = kv_fp8.shape
+    logits = torch.full(
+        (batch_size * next_n, max_model_len),
+        float("-inf"),
+        device=q_fp8.device,
+        dtype=torch.float32,
+    )
+    q = q_fp8.float()
+    kv = kv_fp8.float() * kv_scale.float()
+    for batch_idx in range(batch_size):
+        for next_idx in range(next_n):
+            row = batch_idx * next_n + next_idx
+            context_len = min(
+                int(context_lens[batch_idx, next_idx].item()),
+                max_model_len,
+            )
+            for token_idx in range(context_len):
+                block_idx = block_tables[batch_idx, token_idx // block_size]
+                block_offset = token_idx % block_size
+                k = kv[block_idx, block_offset, 0]
+                scores = (q[batch_idx, next_idx] * k).sum(dim=-1).relu()
+                logits[row, token_idx] = (scores * weights[row]).sum()
+    return logits
+
+
+def _assert_topk_indices_match_values(
+    logits: torch.Tensor,
+    actual: torch.Tensor,
+    topk_tokens: int,
+) -> None:
+    for row_idx in range(logits.shape[0]):
+        valid_count = int(torch.isfinite(logits[row_idx]).sum().item())
+        row_topk = min(topk_tokens, valid_count)
+        expected = torch.topk(logits[row_idx], row_topk, dim=0).indices.to(torch.int32)
+        actual_row = actual[row_idx, :row_topk]
+        assert torch.all(actual_row >= 0)
+        assert torch.all(torch.isfinite(logits[row_idx, actual_row.long()]))
+        actual_values = torch.sort(logits[row_idx, actual_row.long()]).values
+        expected_values = torch.sort(logits[row_idx, expected.long()]).values
+        torch.testing.assert_close(
+            actual_values,
+            expected_values,
+            rtol=0,
+            atol=0,
+        )
+        if row_topk < topk_tokens:
+            torch.testing.assert_close(
+                actual[row_idx, row_topk:],
+                torch.full_like(actual[row_idx, row_topk:], -1),
+                rtol=0,
+                atol=0,
+            )
+
+
+def test_decode_logits_width_uses_active_context_bound():
+    assert _decode_logits_width(262144, 1024) == 1024
+    assert _decode_logits_width(4096, 8192) == 4096
+    assert _decode_logits_width(4096, 0) == 4096
+    assert _decode_logits_width(0, 1024) == 0
+
+
+def test_decode_topk_logits_width_keeps_topk_kernel_width():
+    assert _decode_topk_logits_width(262144, 1024, 512) == 1024
+    assert _decode_topk_logits_width(262144, 128, 512) == 512
+    assert _decode_topk_logits_width(300, 128, 512) == 300
+    assert _decode_topk_logits_width(0, 128, 512) == 0
+
+
+def test_sparse_indexer_requires_deep_gemm_for_sm120_fp4_cache(monkeypatch):
+    monkeypatch.setattr(
+        current_platform,
+        "is_cuda",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        current_platform,
+        "is_device_capability_family",
+        lambda family: family == 120,
+    )
+
+    assert not _sparse_indexer_requires_deep_gemm(use_fp4_cache=False)
+    assert _sparse_indexer_requires_deep_gemm(use_fp4_cache=True)
+
+
+def test_sparse_indexer_requires_deep_gemm_for_other_cuda_arches(monkeypatch):
+    monkeypatch.setattr(
+        current_platform,
+        "is_cuda",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        current_platform,
+        "is_device_capability_family",
+        lambda family: False,
+    )
+
+    assert _sparse_indexer_requires_deep_gemm(use_fp4_cache=False)
+
+
+def test_sm120_direct_mqa_logits_block_m_prefers_short_prefill_tile():
+    assert sm12x_mqa._fp8_mqa_logits_block_m(1024, 1024) == 16
+    assert sm12x_mqa._fp8_mqa_logits_block_m(4096, 4096) == 16
+    assert sm12x_mqa._fp8_mqa_logits_block_m(16384, 16384) == 16
+    assert sm12x_mqa._fp8_mqa_logits_block_m(65536, 65536) == 64
+
+
+def test_tf32_hc_prenorm_gemm_does_not_specialize_prefill_token_count():
+    kernel = sm12x_mqa._tf32_hc_prenorm_gemm_kernel
+    constexpr_names = {kernel.arg_names[index] for index in kernel.constexprs}
+
+    assert "M" not in constexpr_names
+
+
+@pytest.mark.skipif(
+    not current_platform.is_device_capability_family(120), reason="SM120 only"
+)
+def test_sm120_mqa_direct_topk_uses_triton_logits_when_logits_fit(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    torch.manual_seed(11)
+    num_q, num_heads, head_dim = 8, 4, 64
+    seq_len_kv, topk_tokens = 17, 5
+    monkeypatch.setattr(
+        sm12x_deep_gemm_fallbacks,
+        "_SM120_MQA_TRITON_TOPK_MAX_LOGITS_BYTES",
+        num_q * seq_len_kv * torch.float32.itemsize,
+    )
+
+    q = torch.randn(num_q, num_heads, head_dim, device="cuda", dtype=torch.bfloat16)
+    q_fp8 = q.to(torch.float8_e4m3fn).contiguous()
+    kv = torch.randn(seq_len_kv, head_dim, device="cuda", dtype=torch.bfloat16)
+    kv_scale = kv.abs().float().amax(dim=-1).clamp(1e-4) / 448.0
+    kv_fp8 = (kv * kv_scale.reciprocal()[:, None]).to(torch.float8_e4m3fn)
+    weights = torch.randn(num_q, num_heads, device="cuda", dtype=torch.float32)
+    cu_seqlen_ks = torch.arange(num_q, device="cuda", dtype=torch.int32) % 3
+    cu_seqlen_ke = torch.full((num_q,), seq_len_kv, device="cuda", dtype=torch.int32)
+    out = torch.empty(num_q, topk_tokens, device="cuda", dtype=torch.int32)
+
+    original_triton = sm12x_mqa.fp8_mqa_logits_triton
+    calls = 0
+
+    def wrapped_triton(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original_triton(*args, **kwargs)
+
+    monkeypatch.setattr(sm12x_mqa, "fp8_mqa_logits_triton", wrapped_triton)
+    original_topk_op = sm12x_deep_gemm_fallbacks._top_k_per_row_prefill_op()
+    if original_topk_op is None:
+        pytest.skip("top_k_per_row_prefill op is unavailable")
+    topk_calls = 0
+
+    def wrapped_topk_op(*args, **kwargs):
+        nonlocal topk_calls
+        topk_calls += 1
+        return original_topk_op(*args, **kwargs)
+
+    monkeypatch.setattr(
+        sm12x_deep_gemm_fallbacks,
+        "_top_k_per_row_prefill_op",
+        lambda: wrapped_topk_op,
+    )
+
+    assert deep_gemm_utils.fp8_fp4_mqa_topk_indices(
+        (q_fp8, None),
+        (kv_fp8, kv_scale),
+        weights,
+        cu_seqlen_ks,
+        cu_seqlen_ke,
+        out,
+    )
+    assert calls == 1
+    assert topk_calls == 1
+
+    reference_logits = sm12x_deep_gemm_fallbacks._fp8_mqa_logits_torch(
+        (q_fp8, None),
+        (kv_fp8, kv_scale),
+        weights,
+        cu_seqlen_ks,
+        cu_seqlen_ke,
+        clean_logits=True,
+    )
+    _assert_topk_indices_match_values(reference_logits, out, topk_tokens)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_device_capability_family(120), reason="SM120 only"
+)
+def test_sm120_mqa_direct_topk_uses_triton_chunks_when_logits_do_not_fit(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    torch.manual_seed(13)
+    num_q, num_heads, head_dim = 9, 4, 64
+    seq_len_kv, topk_tokens = 23, 6
+    logits_bytes = num_q * seq_len_kv * torch.float32.itemsize
+    monkeypatch.setattr(
+        sm12x_deep_gemm_fallbacks,
+        "_SM120_MQA_TRITON_TOPK_MAX_LOGITS_BYTES",
+        logits_bytes - 1,
+    )
+    monkeypatch.setattr(
+        sm12x_deep_gemm_fallbacks,
+        "_SM120_MQA_TRITON_CHUNKED_TOPK_CHUNK_SIZE",
+        7,
+    )
+
+    q = torch.randn(num_q, num_heads, head_dim, device="cuda", dtype=torch.bfloat16)
+    q_fp8 = q.to(torch.float8_e4m3fn).contiguous()
+    kv = torch.randn(seq_len_kv, head_dim, device="cuda", dtype=torch.bfloat16)
+    kv_scale = kv.abs().float().amax(dim=-1).clamp(1e-4) / 448.0
+    kv_fp8 = (kv * kv_scale.reciprocal()[:, None]).to(torch.float8_e4m3fn)
+    weights = torch.randn(num_q, num_heads, device="cuda", dtype=torch.float32)
+    cu_seqlen_ks = torch.arange(num_q, device="cuda", dtype=torch.int32) % 4
+    cu_seqlen_ke = torch.full((num_q,), seq_len_kv, device="cuda", dtype=torch.int32)
+    out = torch.empty(num_q, topk_tokens, device="cuda", dtype=torch.int32)
+
+    original_triton = sm12x_mqa.fp8_mqa_logits_triton
+    calls = 0
+
+    def wrapped_triton(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original_triton(*args, **kwargs)
+
+    monkeypatch.setattr(sm12x_mqa, "fp8_mqa_logits_triton", wrapped_triton)
+
+    assert deep_gemm_utils.fp8_fp4_mqa_topk_indices(
+        (q_fp8, None),
+        (kv_fp8, kv_scale),
+        weights,
+        cu_seqlen_ks,
+        cu_seqlen_ke,
+        out,
+    )
+    assert calls == cdiv(seq_len_kv, 7)
+
+    reference_logits = sm12x_deep_gemm_fallbacks._fp8_mqa_logits_torch(
+        (q_fp8, None),
+        (kv_fp8, kv_scale),
+        weights,
+        cu_seqlen_ks,
+        cu_seqlen_ke,
+        clean_logits=True,
+    )
+    _assert_topk_indices_match_values(reference_logits, out, topk_tokens)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_device_capability_family(120), reason="SM120 only"
+)
+def test_sm120_paged_mqa_direct_topk_matches_truncated_decode_width(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    torch.manual_seed(7)
+    batch_size, next_n, num_heads, head_dim = 2, 2, 8, 32
+    block_size, max_model_len, num_blocks = 4, 64, 16
+    active_max_len = 13
+    topk_tokens = 6
+    monkeypatch.setattr(deep_gemm_utils, "_lazy_init", lambda: None)
+    monkeypatch.setattr(
+        sm12x_deep_gemm_fallbacks,
+        "_SM120_PAGED_MQA_TOPK_CHUNK_SIZE",
+        7,
+    )
+
+    q = torch.randn(
+        batch_size,
+        next_n,
+        num_heads,
+        head_dim,
+        device="cuda",
+        dtype=torch.bfloat16,
+    )
+    q_fp8 = q.to(torch.float8_e4m3fn).contiguous()
+    kv = torch.randn(
+        num_blocks, block_size, 1, head_dim, device="cuda", dtype=torch.bfloat16
+    )
+    kv_scale = kv.abs().float().amax(dim=-1, keepdim=True).clamp(1e-4) / 448.0
+    kv_fp8 = (kv * kv_scale.reciprocal()).to(torch.float8_e4m3fn)
+    fused_kv = _make_indexer_kv_cache(kv_fp8, kv_scale)
+
+    weights = torch.randn(
+        batch_size * next_n, num_heads, device="cuda", dtype=torch.float32
+    )
+    context_lens = torch.tensor(
+        [[7, active_max_len], [9, 12]], device="cuda", dtype=torch.int32
+    )
+    block_tables = (
+        torch.arange(
+            batch_size * cdiv(max_model_len, block_size),
+            device="cuda",
+            dtype=torch.int32,
+        ).reshape(batch_size, -1)
+        % num_blocks
+    )
+
+    full_width_topk = torch.empty(
+        batch_size * next_n, topk_tokens, device="cuda", dtype=torch.int32
+    )
+    truncated_width_topk = torch.empty_like(full_width_topk)
+
+    assert deep_gemm_utils.fp8_fp4_paged_mqa_topk_indices(
+        (q_fp8, None),
+        fused_kv,
+        weights,
+        context_lens,
+        block_tables,
+        max_model_len,
+        full_width_topk,
+    )
+    assert deep_gemm_utils.fp8_fp4_paged_mqa_topk_indices(
+        (q_fp8, None),
+        fused_kv,
+        weights,
+        context_lens,
+        block_tables,
+        active_max_len,
+        truncated_width_topk,
+    )
+
+    reference_logits = _reference_paged_mqa_logits(
+        q_fp8,
+        kv_fp8,
+        kv_scale,
+        weights,
+        context_lens,
+        block_tables,
+        active_max_len,
+    )
+    expected_topk = torch.topk(reference_logits, topk_tokens, dim=1).indices.to(
+        torch.int32
+    )
+
+    torch.testing.assert_close(truncated_width_topk, full_width_topk, rtol=0, atol=0)
+    torch.testing.assert_close(truncated_width_topk, expected_topk, rtol=0, atol=0)

@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import itertools
 from abc import ABC, abstractmethod
-from collections import defaultdict
+from collections import defaultdict, deque
 from collections.abc import Sequence
 from typing import ClassVar
 
@@ -52,6 +52,8 @@ class SingleTypeKVCacheManager(ABC):
         pcp_world_size: int = 1,
         needs_kv_cache_zeroing: bool = False,
         max_admission_blocks_per_request: int | None = None,
+        max_model_len: int | None = None,
+        max_num_seqs: int | None = None,
     ) -> None:
         """
         Initializes the SingleTypeKVCacheManager.
@@ -81,6 +83,9 @@ class SingleTypeKVCacheManager(ABC):
         self.block_pool = block_pool
         self.enable_caching = enable_caching
         self._max_admission_blocks_per_request = max_admission_blocks_per_request
+        self.max_model_len = max_model_len
+        self.max_num_seqs = max_num_seqs
+        self.cache_alignment_tokens = self.block_size
         # Record newly allocated block ids only when worker-side zeroing will
         # consume them and this manager holds a spec type that gets zeroed.
         self._record_new_block_ids = needs_kv_cache_zeroing and type(kv_cache_spec) in (
@@ -104,6 +109,8 @@ class SingleTypeKVCacheManager(ABC):
 
         self.kv_cache_group_id = kv_cache_group_id
         self._null_block = block_pool.null_block
+        self._protected_prompt_block_ids: set[int] = set()
+        self._protected_prompt_block_queue: deque[int] = deque()
 
         # Whether this group's prefix-cache hits drop the EAGLE/MTP lookahead
         # block. Only consulted by managers whose hit logic is sparse within an
@@ -370,6 +377,79 @@ class SingleTypeKVCacheManager(ABC):
         self.new_block_ids = []
         return ids
 
+    def _max_protected_prompt_blocks(self) -> int | None:
+        if self.max_model_len is None:
+            return None
+        return 2 * cdiv(max(1, self.max_model_len), self.block_size)
+
+    def _protect_prompt_blocks(self, blocks: Sequence[KVCacheBlock]) -> None:
+        if not self.enable_caching:
+            return
+
+        protected: list[KVCacheBlock] = []
+        for block in blocks:
+            if (
+                block.is_null
+                or block.block_hash is None
+                or block.block_id in self._protected_prompt_block_ids
+            ):
+                continue
+            protected.append(block)
+            self._protected_prompt_block_ids.add(block.block_id)
+            self._protected_prompt_block_queue.append(block.block_id)
+
+        if not protected:
+            return
+
+        # Keep an extra reference for prompt blocks that must survive after
+        # their request releases its normal runtime reference. Later request
+        # reuse increments/decrements the runtime reference as usual.
+        self.block_pool.touch(protected)
+        self._trim_protected_prompt_blocks()
+
+    def _trim_protected_prompt_blocks(self) -> None:
+        max_blocks = self._max_protected_prompt_blocks()
+        if max_blocks is None:
+            return
+
+        while len(self._protected_prompt_block_ids) > max_blocks:
+            if not self._release_one_protected_prompt_block():
+                return
+
+    def _release_one_protected_prompt_block(
+        self, block_ids_to_skip: set[int] | None = None
+    ) -> bool:
+        attempts = len(self._protected_prompt_block_queue)
+        while attempts:
+            block_id = self._protected_prompt_block_queue.popleft()
+            attempts -= 1
+            if block_id not in self._protected_prompt_block_ids:
+                continue
+            if block_ids_to_skip is not None and block_id in block_ids_to_skip:
+                self._protected_prompt_block_queue.append(block_id)
+                continue
+
+            self._protected_prompt_block_ids.remove(block_id)
+            block = self.block_pool.blocks[block_id]
+            if block.ref_cnt > 0:
+                self.block_pool.free_blocks([block])
+            return True
+        return False
+
+    def release_protected_prompt_blocks(
+        self,
+        target_free_blocks: int | None = None,
+        block_ids_to_skip: set[int] | None = None,
+    ) -> None:
+        while self._protected_prompt_block_ids:
+            if (
+                target_free_blocks is not None
+                and self.block_pool.get_num_free_blocks() >= target_free_blocks
+            ):
+                return
+            if not self._release_one_protected_prompt_block(block_ids_to_skip):
+                return
+
     def take_pending_cow_copies(
         self,
     ) -> list[tuple[KVCacheBlock, KVCacheBlock]]:
@@ -404,6 +484,7 @@ class SingleTypeKVCacheManager(ABC):
         self,
         request: Request,
         num_tokens: int,
+        alignment_tokens: int | None = None,
         retention_interval: int | None = None,
     ) -> None:
         """
@@ -413,6 +494,8 @@ class SingleTypeKVCacheManager(ABC):
             request: The request.
             num_tokens: The total number of tokens that need to be cached
                 (including tokens that are already cached).
+            alignment_tokens: The prefix-cache hit alignment in tokens.
+                ``None`` uses this manager's scheduler block size.
             retention_interval: Sparse local-checkpoint granularity. ``None``
                 keeps dense checkpointing; ``0`` keeps only the latest replay
                 boundary; a positive multiple of ``scheduler_block_size`` keeps
@@ -424,6 +507,9 @@ class SingleTypeKVCacheManager(ABC):
         if num_cached_blocks >= num_full_blocks:
             return
 
+        if alignment_tokens is None:
+            alignment_tokens = self.scheduler_block_size
+
         # Token boundaries whose reachable tail must be retained under sparse
         # retention: the replay boundary (``num_prompt - 1``, capped by
         # ``get_computed_blocks``) and any detected shared-prefix junction.
@@ -434,7 +520,7 @@ class SingleTypeKVCacheManager(ABC):
         block_mask = self.reachable_block_mask(
             start_block=num_cached_blocks,
             end_block=num_full_blocks,
-            alignment_tokens=self.scheduler_block_size,
+            alignment_tokens=alignment_tokens,
             kv_cache_spec=self.kv_cache_spec,
             use_eagle=self.use_eagle,
             retention_interval=retention_interval,
@@ -754,9 +840,15 @@ class FullAttentionManager(SingleTypeKVCacheManager):
         self,
         request: Request,
         num_tokens: int,
+        alignment_tokens: int | None = None,
         retention_interval: int | None = None,
     ) -> None:
-        super().cache_blocks(request, num_tokens, retention_interval=retention_interval)
+        super().cache_blocks(
+            request,
+            num_tokens,
+            alignment_tokens=alignment_tokens,
+            retention_interval=retention_interval,
+        )
         hash_block_size = self.block_pool.hash_block_size
         if self.block_size == hash_block_size:
             return
@@ -797,6 +889,92 @@ class FullAttentionManager(SingleTypeKVCacheManager):
         num_common_blocks = 0
         for block in blocks:
             if block.ref_cnt == len(self.req_to_blocks):
+                num_common_blocks += 1
+            else:
+                break
+        return num_common_blocks
+
+
+class MLAAttentionManager(FullAttentionManager):
+    """KV cache manager for compressed / fp8 MLA cache layouts.
+
+    Used by any MLA spec whose hit semantics need prompt-block
+    protection across decode and unrelated cache churn. ``_should_
+    protect_prompt_blocks`` enumerates the triggering conditions.
+    """
+
+    def _should_protect_prompt_blocks(self) -> bool:
+        # Three independent triggers:
+        # 1. ``model_version == "deepseek_v4"``: DSv4 explicitly opts in.
+        # 2. ``cache_dtype_str == "fp8_ds_mla"``: fp8 DeepSeek-style
+        #    MLA cache; protection is needed for the same hybrid-align
+        #    reuse pattern.
+        # 3. ``compress_ratio > 1``: any compressed MLA cache (today
+        #    only DSv4 sets ``compress_ratio > 1``; V3.2 keeps it at 1).
+        return (
+            getattr(self.kv_cache_spec, "model_version", None) == "deepseek_v4"
+            or getattr(self.kv_cache_spec, "cache_dtype_str", None) == "fp8_ds_mla"
+            or getattr(self.kv_cache_spec, "compress_ratio", 1) > 1
+        )
+
+    def _max_protected_prompt_blocks(self) -> int | None:
+        if self.max_num_seqs is None:
+            return super()._max_protected_prompt_blocks()
+        if self.max_model_len is None:
+            return None
+
+        prompt_blocks = cdiv(max(1, self.max_model_len), self.block_size)
+        target_reqs = max(2, self.max_num_seqs)
+        target_blocks = target_reqs * prompt_blocks
+
+        # Keep one max-length request worth of blocks available for new work
+        # before the generic allocation path has to release protected prompts.
+        pool_blocks = max(0, self.block_pool.num_gpu_blocks - 1)
+        if pool_blocks <= prompt_blocks:
+            return pool_blocks
+        return min(target_blocks, pool_blocks - prompt_blocks)
+
+    def cache_blocks(
+        self,
+        request: Request,
+        num_tokens: int,
+        alignment_tokens: int | None = None,
+        retention_interval: int | None = None,
+    ) -> None:
+        super().cache_blocks(
+            request,
+            num_tokens,
+            alignment_tokens=alignment_tokens,
+            retention_interval=retention_interval,
+        )
+        if not self._should_protect_prompt_blocks() or request.num_prompt_tokens <= 1:
+            return
+
+        max_cache_hit_length = request.num_prompt_tokens - 1
+        aligned_cache_hit_length = (
+            max_cache_hit_length
+            // self.cache_alignment_tokens
+            * self.cache_alignment_tokens
+        )
+        if aligned_cache_hit_length <= 0 or num_tokens < aligned_cache_hit_length:
+            return
+        num_hit_blocks = aligned_cache_hit_length // self.block_size
+        if num_hit_blocks == 0:
+            return
+
+        self._protect_prompt_blocks(
+            self.req_to_blocks[request.request_id][:num_hit_blocks]
+        )
+
+    def get_num_common_prefix_blocks(self, running_request_id: str) -> int:
+        blocks = self.req_to_blocks[running_request_id]
+        num_common_blocks = 0
+        expected_ref_cnt = len(self.req_to_blocks)
+        for block in blocks:
+            ref_cnt = block.ref_cnt
+            if block.block_id in self._protected_prompt_block_ids:
+                ref_cnt -= 1
+            if ref_cnt == expected_ref_cnt:
                 num_common_blocks += 1
             else:
                 break
@@ -1064,6 +1242,58 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         window in the future.
         """
         return 0
+
+
+class SlidingWindowMLAManager(SlidingWindowManager):
+    """KV cache manager for DeepSeek V4's sliding-window MLA cache.
+
+    During decode, the live sliding window can move past the prompt boundary.
+    The blocks around the hybrid-aligned prompt boundary are still the suffix
+    needed for a future prefix-cache hit of the same prompt.
+    """
+
+    def cache_blocks(
+        self,
+        request: Request,
+        num_tokens: int,
+        alignment_tokens: int | None = None,
+        retention_interval: int | None = None,
+    ) -> None:
+        super().cache_blocks(
+            request,
+            num_tokens,
+            alignment_tokens=alignment_tokens,
+            retention_interval=retention_interval,
+        )
+        if not self.enable_caching or request.num_prompt_tokens <= 1:
+            return
+
+        max_cache_hit_length = request.num_prompt_tokens - 1
+        aligned_cache_hit_length = (
+            max_cache_hit_length
+            // self.cache_alignment_tokens
+            * self.cache_alignment_tokens
+        )
+        if aligned_cache_hit_length <= 0 or num_tokens < aligned_cache_hit_length:
+            return
+
+        aligned_num_hit_blocks = aligned_cache_hit_length // self.block_size
+        last_full_prompt_block = max_cache_hit_length // self.block_size
+        # Must match find_longest_cache_hit's contiguous-block requirement,
+        # including the eagle +1 (the last matched block is dropped under
+        # eagle/MTP); under-protecting by one block lets it evict and zeroes the
+        # entire SWA hit at the hybrid-coordinator boundary. Reported by
+        # @calper-ql.
+        contiguous_blocks = self._contiguous_blocks_for_hit(
+            self.sliding_window, self.block_size, self.use_eagle
+        )
+        first_protected_block = max(0, aligned_num_hit_blocks - contiguous_blocks)
+        last_protected_block = max(aligned_num_hit_blocks, last_full_prompt_block)
+        blocks = self.req_to_blocks[request.request_id]
+        protected_blocks = blocks[
+            first_protected_block : min(last_protected_block, len(blocks))
+        ]
+        self._protect_prompt_blocks(protected_blocks)
 
 
 class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
@@ -1621,10 +1851,16 @@ class MambaManager(SingleTypeKVCacheManager):
         self,
         request: Request,
         num_tokens: int,
+        alignment_tokens: int | None = None,
         retention_interval: int | None = None,
     ) -> None:
         num_cached_blocks_before = self.num_cached_block.get(request.request_id, 0)
-        super().cache_blocks(request, num_tokens, retention_interval=retention_interval)
+        super().cache_blocks(
+            request,
+            num_tokens,
+            alignment_tokens=alignment_tokens,
+            retention_interval=retention_interval,
+        )
         num_cached_blocks_after = self.num_cached_block.get(request.request_id, 0)
         if self.mamba_cache_mode == "align":
             partial_hash = self._cache_partial_tail_block(request, num_tokens)
@@ -1711,6 +1947,7 @@ class CrossAttentionManager(SingleTypeKVCacheManager):
         self,
         request: Request,
         num_tokens: int,
+        alignment_tokens: int | None = None,
         retention_interval: int | None = None,
     ) -> None:
         # We do not cache blocks for cross-attention to be shared between
@@ -1757,6 +1994,8 @@ class SinkFullAttentionManager(FullAttentionManager):
         scheduler_block_size: int,
         dcp_world_size: int = 1,
         pcp_world_size: int = 1,
+        max_model_len: int | None = None,
+        max_num_seqs: int | None = None,
     ):
         super().__init__(
             kv_cache_spec=kv_cache_spec,
@@ -1766,6 +2005,8 @@ class SinkFullAttentionManager(FullAttentionManager):
             scheduler_block_size=scheduler_block_size,
             dcp_world_size=dcp_world_size,
             pcp_world_size=pcp_world_size,
+            max_model_len=max_model_len,
+            max_num_seqs=max_num_seqs,
         )
         sink_len = kv_cache_spec.sink_len
         assert sink_len is not None and sink_len > 0 and sink_len % self.block_size == 0
@@ -1777,6 +2018,7 @@ def get_manager_for_kv_cache_spec(
     kv_cache_spec: KVCacheSpec,
     max_in_flight_tokens: int,
     max_model_len: int,
+    max_num_seqs: int | None = None,
     **kwargs,
 ) -> SingleTypeKVCacheManager:
     """
@@ -1798,6 +2040,8 @@ def get_manager_for_kv_cache_spec(
     assert manager_class is not None, (
         f"No manager registered for KVCacheSpec {type(kv_cache_spec)}"
     )
+    kwargs["max_model_len"] = max_model_len
+    kwargs["max_num_seqs"] = max_num_seqs
     # SlidingWindow / ChunkedLocalAttention managers recycle blocks;
     # the runtime admission cap must match the recycling-aware bound the
     # startup pool sizer uses (single source of truth: the spec method).
@@ -1833,7 +2077,7 @@ def register_all_kvcache_specs(vllm_config):
     )
     KVCacheSpecRegistry.register(
         SlidingWindowMLASpec,
-        SlidingWindowManager,
+        SlidingWindowMLAManager,
         uniform_type_base_spec=SlidingWindowMLASpec,
     )
 
@@ -1858,7 +2102,7 @@ def register_all_kvcache_specs(vllm_config):
         uniform_type_base_spec=FullAttentionSpec,
     )
     KVCacheSpecRegistry.register(
-        MLAAttentionSpec, FullAttentionManager, uniform_type_base_spec=FullAttentionSpec
+        MLAAttentionSpec, MLAAttentionManager, uniform_type_base_spec=FullAttentionSpec
     )
     KVCacheSpecRegistry.register(
         RSWASpec, RSWAManager, uniform_type_base_spec=FullAttentionSpec
