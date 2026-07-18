@@ -611,19 +611,21 @@ class DCPGroupColumnParallelLinear(ColumnParallelLinear):
     """Column-parallel linear whose weight is sharded across DCP groups.
 
     With Decode Context Parallelism (DCP) the KV cache is sharded across a DCP
-    group, so MLA decode must attend the group's full head set. This layer shards
-    its output across DCP *groups* (effective tp size ``tp_size //
-    dcp_world_size``) rather than across every rank, so each rank in a group
-    holds the whole group's heads.
+    group, so MLA decode must attend the group's full head set. When MLA query
+    replication (``VLLM_DCP_Q_REPLICATE``) is ON this layer shards its output
+    across DCP *groups* (effective tp size ``tp_size // dcp_world_size``) rather
+    than across every rank, so each rank in a group holds the whole group's heads
+    and :meth:`forward_replicated` can produce the group's queries directly,
+    letting decode skip the query all-gather.
 
     :meth:`forward` returns only this rank's tp shard, exactly matching
     :class:`ColumnParallelLinear`, making this a drop-in replacement.
-    :meth:`forward_replicated` returns the group's full head set, which lets MLA
-    query replication (qrep) skip the decode query all-gather.
 
-    It is an ordinary column-parallel layer with coarser shard coordinates, so
-    standard (and quantized) weight loading applies unchanged. At
-    ``dcp_world_size == 1`` the group size is 1 and both forwards coincide.
+    When qrep is OFF (or ``dcp_world_size == 1``) the group size is 1: the layer
+    is a plain :class:`ColumnParallelLinear` (per-rank shard, standard/quantized
+    gemm, no dequantized local weight), and DCP decode uses its pre-existing
+    baseline query all-gather. Group sharding — and the dequantized-weight path
+    for quantized layers — is thus paid ONLY when qrep is explicitly enabled.
     """
 
     def __init__(self, *args, **kwargs):
@@ -632,11 +634,11 @@ class DCPGroupColumnParallelLinear(ColumnParallelLinear):
         )
         rank = get_tensor_model_parallel_rank()
         world_size = get_tensor_model_parallel_world_size()
-        self.group_size = max(dcp_world_size, 1)
+        self.qrep_active = (
+            bool(envs.VLLM_DCP_Q_REPLICATE) and max(dcp_world_size, 1) > 1
+        )
+        self.group_size = max(dcp_world_size, 1) if self.qrep_active else 1
         self.rank_in_group = rank % self.group_size
-        # qrep only decides whether callers use forward_replicated(); the weight
-        # is sharded per DCP group either way.
-        self.qrep_active = bool(envs.VLLM_DCP_Q_REPLICATE) and self.group_size > 1
         super().__init__(
             *args,
             **kwargs,
