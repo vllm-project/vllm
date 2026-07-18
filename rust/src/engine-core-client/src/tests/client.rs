@@ -234,6 +234,7 @@ fn request_output(
         prefill_stats: None,
         routed_experts: None,
         num_nans_in_logits: 0,
+        weight_version: None,
     }
 }
 
@@ -2526,6 +2527,7 @@ fn python_msgpack_fixtures_match_rust_encoding() {
                         prefill_stats: None,
                         routed_experts: None,
                         num_nans_in_logits: 0,
+                        weight_version: Some(3),
                     },
                 ],
                 scheduler_stats: None,

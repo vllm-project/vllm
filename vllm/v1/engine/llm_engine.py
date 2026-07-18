@@ -425,6 +425,10 @@ class LLMEngine:
     ) -> list[_R]:
         return self.engine_core.collective_rpc(method, timeout, args, kwargs)
 
+    def get_weight_version(self) -> int:
+        """Return the latest committed target-policy weight generation."""
+        return self.engine_core.get_weight_version()
+
     def apply_model(self, func: Callable[[nn.Module], _R]) -> list[_R]:
         return self.collective_rpc("apply_model", args=(func,))
 

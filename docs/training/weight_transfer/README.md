@@ -54,6 +54,7 @@ When running vLLM as an HTTP server, the following endpoints are available for w
 | `/start_weight_update` | POST | Start a weight update |
 | `/update_weights` | POST | Transfer a batch of weights with backend-specific metadata |
 | `/finish_weight_update` | POST | Finish the weight update and run post-processing |
+| `/weight_info` | GET | Get the latest committed weight version |
 | `/pause` | POST | Pause generation before weight sync to handle inflight requests |
 | `/resume` | POST | Resume generation after weight sync |
 | `/get_world_size` | GET | Get the number of inference workers (useful for NCCL world size calculation) |

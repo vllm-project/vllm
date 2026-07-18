@@ -889,6 +889,10 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
         """Finish the current weight update."""
         self.llm_engine.collective_rpc("finish_weight_update")
 
+    def get_weight_version(self) -> int:
+        """Return the latest committed target-policy weight generation."""
+        return self.llm_engine.get_weight_version()
+
     def __repr__(self) -> str:
         """Return a transformers-style hierarchical view of the model."""
         # Cache the result to avoid repeated collective_rpc calls

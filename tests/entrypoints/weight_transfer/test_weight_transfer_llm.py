@@ -259,6 +259,8 @@ def test_full_weight_transfer_flow():
             weight_transfer_config=WeightTransferConfig(backend="nccl"),
         )
 
+        assert llm.get_weight_version() == 0
+
         # Step 1: Initialize weight transfer engine
         llm.init_weight_transfer_engine(
             WeightTransferInitRequest(init_info={"test_param": "flow_test"})
@@ -278,8 +280,12 @@ def test_full_weight_transfer_flow():
             )
         )
 
+        assert llm.get_weight_version() == 0
+
         # Step 4: Finish weight update
         llm.finish_weight_update()
+
+        assert llm.get_weight_version() == 1
 
         # Verify the full flow completed
         def check_flow(self):

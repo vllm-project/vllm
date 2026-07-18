@@ -97,6 +97,9 @@ class Request:
         self.status = RequestStatus.WAITING
         self.events: list[EngineCoreEvent] = []
         self.stop_reason: int | str | None = None
+        # Target-policy weight generation bound when this request is admitted
+        # to the scheduler. EngineCore sets this before Scheduler.add_request.
+        self.weight_version: int | None = None
 
         # P/D: Connector-specific KV transfer parameters.
         self.kv_transfer_params: dict[str, Any] | None = None

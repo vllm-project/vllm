@@ -112,6 +112,9 @@ pub struct EngineCoreOutput {
     /// Number of NaNs seen in logits. Values above zero indicate corruption.
     #[serde(default)]
     pub num_nans_in_logits: u32,
+    /// Target-policy weight generation bound when the request was admitted.
+    #[serde(default)]
+    pub weight_version: Option<u64>,
 }
 
 impl EngineCoreOutput {
@@ -384,6 +387,7 @@ mod tests {
                 prefill_stats: None,
                 routed_experts: None,
                 num_nans_in_logits: 0,
+                weight_version: None,
             }],
             finished_requests: Some(BTreeSet::from(["req-1".to_string()])),
             ..Default::default()
@@ -437,6 +441,7 @@ mod tests {
                             prefill_stats: None,
                             routed_experts: None,
                             num_nans_in_logits: 0,
+                            weight_version: None,
                         },
                     ],
                     scheduler_stats: None,
