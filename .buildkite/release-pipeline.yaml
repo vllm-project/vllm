@@ -817,7 +817,7 @@ steps:
             # buildkite-agent artifact download "artifacts/rocm-vllm-wheel/*.whl" .
 
             # # Run upload script
-            # bash .buildkite/scripts/upload-rocm-wheels.sh
+            bash .buildkite/scripts/upload-rocm-wheels.sh
         env:
           DOCKER_BUILDKIT: "1"
           S3_BUCKET: "vllm-wheels-dev"
