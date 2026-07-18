@@ -255,7 +255,7 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             kv_dtype = {
                 torch.float16: dtypes.fp16,
                 torch.bfloat16: dtypes.bf16,
-            }.get(kv_cache_spec.dtype, kv_cache_spec.dtype)
+            }[kv_cache_spec.dtype]
         # MLAAttention quantizes decode Q to FP8 before calling this backend
         # whenever the KV cache is FP8 and supports_quant_query_input is true.
         q_dtype = (
