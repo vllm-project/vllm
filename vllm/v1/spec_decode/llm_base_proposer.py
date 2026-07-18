@@ -1487,7 +1487,7 @@ class SpecDecodeBaseProposer:
                 ):
                     target_dim = target_embed_tokens.weight.shape[-1]
                     draft_dim = draft_embed.weight.shape[-1]
-                    if target_dim != draft_dim:
+                    if target_dim != draft_dim and self.method != "mtp":
                         share_embeddings = False
                         logger.info(
                             "Target embedding dim (%d) differs from draft "
