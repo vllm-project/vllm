@@ -310,8 +310,15 @@ def test_shutdown_discards_pending_tasks(fs_tier):
     assert all(not t.is_alive() for t in tier._pool._threads)
 
 
-def test_store_load_data_integrity(fs_tier):
+@pytest.mark.parametrize("use_c_ext", [True, False])
+def test_store_load_data_integrity(fs_tier, monkeypatch, use_c_ext):
     """Data written by store must be exactly recovered by load."""
+    import vllm.v1.kv_offload.tiering.fs.io as io_mod
+
+    if use_c_ext and not io_mod._HAS_FSIO_C:
+        pytest.skip("fs_io_C extension not built")
+    monkeypatch.setattr(io_mod, "_HAS_FSIO_C", use_c_ext)
+
     tier, tensor = fs_tier
     # Populate tensor with random data
     tensor[:] = _page_aligned_rand_tensor(4, _BLOCK_ELEMENTS)
@@ -425,6 +432,33 @@ def test_batch_lookup_dispatch(fs_tier, monkeypatch, use_c_ext):
     assert results == [LookupResult.HIT, LookupResult.MISS]
 
 
+@pytest.mark.parametrize("batch_size", [0, 1, 2, 5])
+@pytest.mark.parametrize("use_c_ext", [True, False])
+def test_store_then_load_batch_sizes(fs_tier, monkeypatch, use_c_ext, batch_size):
+    """batch_store_block/batch_load_block must handle batches of any size,
+    including the empty batch, correctly."""
+    import vllm.v1.kv_offload.tiering.fs.io as io_mod
+
+    if use_c_ext and not io_mod._HAS_FSIO_C:
+        pytest.skip("fs_io_C extension not built")
+    monkeypatch.setattr(io_mod, "_HAS_FSIO_C", use_c_ext)
+
+    tier, _ = fs_tier
+    keys = [key(i) for i in range(batch_size)]
+    block_ids = list(range(batch_size))
+
+    tier.submit_store(make_job(1, keys, block_ids))
+    store_results = drain(tier)
+    assert len(store_results) == 1
+    assert store_results[0].success
+    assert all(os.path.exists(tier.file_mapper.get_file_name(k)) for k in keys)
+
+    tier.submit_load(make_job(2, keys, block_ids, is_promotion=True))
+    load_results = drain(tier)
+    assert len(load_results) == 1
+    assert load_results[0].success
+
+
 # ---------------------------------------------------------------------------
 # KV events
 # ---------------------------------------------------------------------------
@@ -471,14 +505,14 @@ def test_mixed_job_results_emit_event_only_for_successful_job(
 
     tier = fs_tier_with_events
     failing_path = tier.file_mapper.get_file_name(key(1))
-    original_store_block = mgr_mod.store_block
+    original_batch_store_block = mgr_mod.batch_store_block
 
-    def flaky_store_block(dest_path, *args, **kwargs):
-        if dest_path == failing_path:
+    def flaky_batch_store_block(paths, *args, **kwargs):
+        if failing_path in paths:
             raise OSError("injected store failure")
-        return original_store_block(dest_path, *args, **kwargs)
+        return original_batch_store_block(paths, *args, **kwargs)
 
-    monkeypatch.setattr(mgr_mod, "store_block", flaky_store_block)
+    monkeypatch.setattr(mgr_mod, "batch_store_block", flaky_batch_store_block)
 
     tier.submit_store(make_job(1, [key(1)], [0]))
     tier.submit_store(make_job(2, [key(2)], [1]))
@@ -499,14 +533,14 @@ def test_partially_failed_store_emits_no_event(fs_tier_with_events, monkeypatch)
 
     tier = fs_tier_with_events
     failing_path = tier.file_mapper.get_file_name(key(2))
-    original_store_block = mgr_mod.store_block
+    original_batch_store_block = mgr_mod.batch_store_block
 
-    def flaky_store_block(dest_path, *args, **kwargs):
-        if dest_path == failing_path:
+    def flaky_batch_store_block(paths, *args, **kwargs):
+        if failing_path in paths:
             raise OSError("injected store failure")
-        return original_store_block(dest_path, *args, **kwargs)
+        return original_batch_store_block(paths, *args, **kwargs)
 
-    monkeypatch.setattr(mgr_mod, "store_block", flaky_store_block)
+    monkeypatch.setattr(mgr_mod, "batch_store_block", flaky_batch_store_block)
 
     tier.submit_store(make_job(1, [key(1), key(2)], [0, 1]))
     results = drain(tier)
