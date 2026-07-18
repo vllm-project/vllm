@@ -21,7 +21,6 @@
 """PyTorch Falcon model."""
 
 import math
-from collections.abc import Iterable
 from itertools import islice
 from typing import TypeAlias
 
@@ -52,14 +51,11 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.falcon import RWConfig
 
 from .interfaces import SupportsPP
 from .utils import (
-    AutoWeightsLoader,
-    is_pp_missing_parameter,
     make_empty_intermediate_tensors_factory,
     make_layers,
     maybe_prefix,
@@ -138,6 +134,7 @@ class FalconAttention(nn.Module):
             skip_bias_add=True,
             quant_config=quant_config,
             prefix=f"{prefix}.query_key_value",
+            fused_qkv_interleaved=True,
         )
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
@@ -421,61 +418,6 @@ class FalconModel(nn.Module):
         hidden_states = self.ln_f(hidden_states)
         return hidden_states
 
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        total_num_heads = self.config.num_attention_heads
-        if self.config.new_decoder_architecture:
-            total_num_kv_heads = self.config.num_kv_heads
-        elif self.config.multi_query:
-            total_num_kv_heads = 1
-        else:
-            total_num_kv_heads = total_num_heads
-        num_query_heads_per_kv_head = total_num_heads // total_num_kv_heads
-        params_dict = dict(self.named_parameters(remove_duplicate=False))
-        loaded_params: set[str] = set()
-        for name, loaded_weight in weights:
-            # Skip loading extra bias for GPTQ models.
-            if name.endswith(".bias") and name not in params_dict:
-                continue
-            if is_pp_missing_parameter(name, self):
-                continue
-            param = params_dict[name]
-            if "query_key_value" in name:
-                output_dim = getattr(param, "output_dim", None)
-                loaded_weight_shape = loaded_weight.shape
-                if output_dim is not None:
-                    loaded_weight = loaded_weight.view(
-                        loaded_weight_shape[:output_dim]
-                        + (total_num_kv_heads, num_query_heads_per_kv_head + 2, -1)
-                        + loaded_weight_shape[output_dim + 1 :]
-                    )
-                    wq = loaded_weight.narrow(
-                        output_dim + 1, 0, num_query_heads_per_kv_head
-                    ).reshape(
-                        *loaded_weight_shape[:output_dim],
-                        -1,
-                        *loaded_weight_shape[output_dim + 1 :],
-                    )
-                    wk = loaded_weight.narrow(
-                        output_dim + 1, num_query_heads_per_kv_head, 1
-                    ).reshape(
-                        *loaded_weight_shape[:output_dim],
-                        -1,
-                        *loaded_weight_shape[output_dim + 1 :],
-                    )
-                    wv = loaded_weight.narrow(
-                        output_dim + 1, num_query_heads_per_kv_head + 1, 1
-                    ).reshape(
-                        *loaded_weight_shape[:output_dim],
-                        -1,
-                        *loaded_weight_shape[output_dim + 1 :],
-                    )
-                    loaded_weight = torch.cat([wq, wk, wv], dim=output_dim)
-
-            weight_loader = getattr(param, "weight_loader", default_weight_loader)
-            weight_loader(param, loaded_weight)
-            loaded_params.add(name)
-        return loaded_params
-
 
 class FalconForCausalLM(nn.Module, SupportsPP):
     packed_modules_mapping = {
@@ -534,10 +476,3 @@ class FalconForCausalLM(nn.Module, SupportsPP):
     ) -> torch.Tensor | None:
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
-
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(
-            self,
-            skip_prefixes=(["lm_head."] if self.config.tie_word_embeddings else None),
-        )
-        return loader.load_weights(weights)
