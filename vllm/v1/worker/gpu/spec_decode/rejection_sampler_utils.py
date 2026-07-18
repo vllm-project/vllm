@@ -1107,6 +1107,7 @@ def rejection_sample(
     target_probs: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     if target_probs is not None:
+        assert target_probs.dtype == torch.float32
         assert target_probs.is_contiguous()
         assert target_probs.shape == target_logits.shape
         assert draft_logits is None

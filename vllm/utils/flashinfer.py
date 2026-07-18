@@ -87,6 +87,15 @@ def _get_submodule(module_name: str) -> Any | None:
         return None
 
 
+@functools.cache
+def get_flashinfer_top_p_renorm_probs() -> Callable[..., torch.Tensor] | None:
+    """Return FlashInfer's top-p renormalization op when available."""
+    if not has_flashinfer():
+        return None
+    mod = _get_submodule("flashinfer.sampling")
+    return getattr(mod, "top_p_renorm_probs", None) if mod else None
+
+
 # General lazy import wrapper
 def _lazy_import_wrapper(
     module_name: str, attr_name: str, fallback_fn: Callable[..., Any] = _missing
@@ -1023,6 +1032,7 @@ def is_flashinfer_cudnn_fp8_prefill_attn_supported() -> bool:
 
 __all__ = [
     "has_flashinfer",
+    "get_flashinfer_top_p_renorm_probs",
     "flashinfer_trtllm_fp8_block_scale_moe",
     "flashinfer_cutlass_fused_moe",
     "flashinfer_cutedsl_grouped_gemm_nt_masked",

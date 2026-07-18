@@ -2,10 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import math
+from unittest.mock import Mock
 
 import pytest
 import torch
 
+from vllm.v1.worker.gpu.sample.sampler import Sampler
 from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import (
     rejection_sample,
 )
@@ -212,6 +214,21 @@ def test_target_probs_rejection_matches_logits_path():
         0
     ) < expected[1].unsqueeze(1)
     torch.testing.assert_close(actual[0][valid], expected[0][valid], rtol=0, atol=0)
+
+
+def test_flashinfer_gate_rejects_processed_outputs():
+    sampler = Sampler.__new__(Sampler)
+    sampler.use_flashinfer = True
+    sampler.use_fp64_gumbel = False
+    sampler.sampling_states = Mock()
+    sampler.sampling_states.any_greedy.return_value = False
+    sampler.sampling_states.any_explicit_seed.return_value = False
+
+    for mode in ("processed_logprobs", "processed_logits"):
+        sampler.logprobs_mode = mode
+        assert not sampler.will_use_flashinfer(
+            None, torch.tensor([0.9]), None, return_logprobs=True
+        )
 
 
 @pytest.mark.parametrize("num_speculative_steps", [1, 3])

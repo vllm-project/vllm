@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import functools
 from collections.abc import Callable, Sequence
 from dataclasses import replace
 from typing import TYPE_CHECKING
@@ -12,9 +11,8 @@ import torch
 import torch.nn as nn
 
 from vllm.logger import init_logger
-from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
-from vllm.utils.flashinfer import has_flashinfer
+from vllm.utils.flashinfer import get_flashinfer_top_p_renorm_probs
 from vllm.v1.outputs import LogprobsLists, LogprobsTensors, SamplerOutput
 from vllm.v1.sample.logits_processor.builtin import MinTokensLogitsProcessor
 from vllm.v1.sample.metadata import SamplingMetadata
@@ -35,18 +33,6 @@ GREEDY_TEMPERATURE: tl.constexpr = 0
 # Maximum number of speculative draft tokens allowed per request in a single
 # step. This value is chosen to be large enough to handle typical use cases.
 MAX_SPEC_LEN = 128
-
-
-@functools.cache
-def _get_flashinfer_top_p_renorm_probs() -> Callable[..., torch.Tensor] | None:
-    """Return FlashInfer AIR top-p renorm when it is usable on this host."""
-    if not current_platform.is_cuda() or not has_flashinfer():
-        return None
-    try:
-        from flashinfer.sampling import top_p_renorm_probs
-    except (ImportError, AttributeError):
-        return None
-    return top_p_renorm_probs
 
 
 class RejectionSampler(nn.Module):
@@ -196,7 +182,7 @@ class RejectionSampler(nn.Module):
             )
         )
         flashinfer_top_p_renorm = (
-            _get_flashinfer_top_p_renorm_probs() if can_use_flashinfer_top_p else None
+            get_flashinfer_top_p_renorm_probs() if can_use_flashinfer_top_p else None
         )
         if flashinfer_top_p_renorm is not None:
             # MTP rejection sampling consumes the complete target
@@ -521,6 +507,7 @@ def rejection_sample(
     # directly (e.g. FlashInfer AIR top-p renormalization).
     if target_probs is None:
         target_probs = target_logits.softmax(dim=-1, dtype=torch.float32)
+    assert target_probs.dtype == torch.float32
     assert target_probs.is_contiguous()
 
     # Sample recovered tokens for each position.
