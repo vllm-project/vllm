@@ -225,7 +225,11 @@ def _layer_mapping(
 
     if isinstance(spec, MLAAttentionSpec):
         # TP-replicated latent; CP shards its tokens; first DCP group writes
-        if spec.compress_ratio != 1 or page % bs:
+        if (
+            spec.compress_ratio != 1
+            or page % bs
+            or spec.kv_quant_mode.is_per_token_head
+        ):
             return None
         row = page // bs
         runs = _chunk_runs([(0, 0, row, row)], bs, ctx)
@@ -330,7 +334,7 @@ def _verify_mappings(layer_name: str, per_rank: list[CanonicalPageMapping]) -> N
 
 def _unpadded_page_size(spec: KVCacheSpec) -> int | None:
     if isinstance(spec, AttentionSpec):
-        return spec.real_page_size_bytes
+        return spec.unpadded_page_size_bytes
     if isinstance(spec, MambaSpec):
         return replace(spec, page_size_padded=None).page_size_bytes
     return None

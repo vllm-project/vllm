@@ -13,6 +13,7 @@ steps:
   - pytest -v -s benchmarks/
   mirror:
     amd:
+      dind: false
       device: mi300_1
       depends_on:
       - image-build-amd
