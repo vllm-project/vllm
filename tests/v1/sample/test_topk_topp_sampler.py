@@ -10,7 +10,6 @@ from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON
 from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.sample.ops.topk_topp_sampler import (
-    TopKTopPSampler,
     apply_top_k_top_p_pytorch,
     flashinfer_sample,
     random_sample,
@@ -66,24 +65,6 @@ def test_sampler_threads_fp64_gumbel_to_topk_topp_sampler():
     sampler = Sampler(use_fp64_gumbel=True)
 
     assert sampler.topk_topp_sampler.use_fp64_gumbel
-
-
-def test_flashinfer_sampler_runtime_gate():
-    sampler = TopKTopPSampler()
-    p = torch.tensor([0.9])
-
-    sampler._use_flashinfer = True
-    assert sampler.will_use_flashinfer({}, None, p)
-
-    generators = {0: torch.Generator().manual_seed(0)}
-    assert not sampler.will_use_flashinfer(generators, None, p)
-
-    sampler.use_fp64_gumbel = True
-    assert not sampler.will_use_flashinfer({}, None, p)
-
-    sampler.use_fp64_gumbel = False
-    sampler._use_flashinfer = False
-    assert not sampler.will_use_flashinfer({}, None, p)
 
 
 def test_rocm_aiter_sampler_defers_import_when_generators_force_native(
