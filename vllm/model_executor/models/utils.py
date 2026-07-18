@@ -221,6 +221,11 @@ class AutoWeightsLoader:
             and "lm_head." not in self.skip_prefixes
         ):
             self.skip_prefixes = [*self.skip_prefixes, "lm_head."]
+        # If the module has a `mtp_start_layer_idx` attribute,
+        # it is an MTP head and should only load spec layers.
+        self.loads_spec_layers_only = any(
+            hasattr(m, "mtp_start_layer_idx") for m in module.modules()
+        )
 
     def _groupby_prefix(
         self,
@@ -395,6 +400,22 @@ class AutoWeightsLoader:
                     logger.debug("Ignoring missing %s", prefix)
 
                     continue
+
+                # Skip spec layers on base models and skip base layers on spec models.
+                config = getattr(self.module, "config", None)
+                if config is not None:
+                    is_spec_layer = (
+                        get_spec_layer_idx_from_weight_name(config, prefix + ".")
+                        is not None
+                    )
+                    if is_spec_layer != self.loads_spec_layers_only:
+                        logger.debug(
+                            "Skipping %s model layer %s",
+                            "base" if self.loads_spec_layers_only else "speculative",
+                            prefix,
+                        )
+
+                        continue
 
                 named_parameters = module.named_parameters(recurse=True)
                 desc_param_keys = {
