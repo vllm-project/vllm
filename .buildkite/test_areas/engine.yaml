@@ -173,6 +173,7 @@ steps:
   source_file_dependencies:
     - vllm/v1/core/
     - vllm/v1/worker/gpu_model_runner.py
+    - vllm/v1/engine/llm_engine.py
     - tests/v1/e2e/test_hybrid_mamba_prefix_cache_correctness.py
   commands:
     - pytest -v -s -rA v1/e2e/test_hybrid_mamba_prefix_cache_correctness.py

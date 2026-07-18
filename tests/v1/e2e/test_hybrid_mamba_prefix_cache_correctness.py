@@ -465,14 +465,23 @@ def test_cold_concurrent_prefill_mamba_prefix_cache(
         # cache was silently disabled and the test would pass vacuously.
         liveness_hits = None
         probe_hits = None
-        if 3 * block_size + 512 <= kwargs["max_model_len"]:
-            probe_text, _, _, _ = _build_needle_manual(
-                tokenizer, target_tokens=3 * block_size + 128
+        if 3 * block_size + 512 > kwargs["max_model_len"]:
+            # The anti-vacuity gate MUST run: if the >=3-block probe cannot
+            # fit, a clean cold-race result would be vacuous (a
+            # silently-disabled cache is indistinguishable from a cured one).
+            # Hard-fail rather than silently skip.
+            raise GeometryUnsupported(
+                GEOMETRY_UNSUPPORTED + f"cache-liveness probe "
+                f"({3 * block_size + 512} tokens) exceeds "
+                f"max_model_len={kwargs['max_model_len']}"
             )
-            probe_sampling = SamplingParams(temperature=0.0, max_tokens=8)
-            llm.generate([probe_text + _needle_question(0)], probe_sampling)
-            probe_hits = _counter(llm, "vllm:prefix_cache_hits")
-            llm.generate([probe_text + _needle_question(1)], probe_sampling)
+        probe_text, _, _, _ = _build_needle_manual(
+            tokenizer, target_tokens=3 * block_size + 128
+        )
+        probe_sampling = SamplingParams(temperature=0.0, max_tokens=8)
+        llm.generate([probe_text + _needle_question(0)], probe_sampling)
+        probe_hits = _counter(llm, "vllm:prefix_cache_hits")
+        llm.generate([probe_text + _needle_question(1)], probe_sampling)
         # The trigger waves' short stop-bounded decodes may legitimately
         # draft zero tokens on some models; a short unconstrained decode
         # proves the MTP speculator is live in this engine configuration.
