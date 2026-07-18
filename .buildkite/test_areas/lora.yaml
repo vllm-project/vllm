@@ -50,7 +50,7 @@ steps:
   mirror:
     amd:
       dind: false
-      device: mi300_1
+      device: mi300_4
       working_dir: "/vllm-workspace/tests"
       timeout_in_minutes: 52
       source_file_dependencies:

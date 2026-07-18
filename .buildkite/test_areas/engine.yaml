@@ -163,7 +163,7 @@ steps:
   mirror:
     amd:
       dind: false
-      device: mi300_2
+      device: mi300_4
       timeout_in_minutes: 32
       depends_on:
       - image-build-amd
