@@ -288,6 +288,15 @@ def test_splitting_ops_dynamic():
     # is unchanged.
     assert config.compilation_config.cudagraph_mode == CUDAGraphMode.PIECEWISE
 
+    compilation_config = CompilationConfig(
+        mode=CompilationMode.VLLM_COMPILE,
+        pass_config=PassConfig(),
+    )
+    compilation_config.pass_config.fuse_rope_kvcache_cat_mla = True
+    compilation_config.set_splitting_ops_for_v1(all2all_backend="naive")
+    assert "vllm::unified_kv_cache_update" in compilation_config.splitting_ops
+    assert "vllm::unified_mla_kv_cache_update" not in compilation_config.splitting_ops
+
 
 def test_moe_splitting_ops_deepep_ht_inductor_partition():
     # Inductor partition case: user-provided splitting_ops should be
