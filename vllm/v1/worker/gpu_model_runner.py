@@ -7138,6 +7138,7 @@ class GPUModelRunner(
                 self.drafter,
                 EagleProposer
                 | DFlashProposer
+                | DraftModelProposer
                 | ExtractHiddenStatesProposer
                 | Gemma4Proposer,
             )
