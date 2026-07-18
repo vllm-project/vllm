@@ -3,37 +3,25 @@
 Single-node 8×B300 (sm_100/103), pure tensor parallel, NVFP4 weights, fp8 KV cache,
 MTP=5 speculative decode, model runner v2.
 
-Validated on branch `glm5.2-LL` @ `8d407aee1` (vllm `0.1.dev422+g8d407aee1`).
+Validated on `glm5.2-LL` @ `8d407aee1`.
 
 ## Versions
 
 | Component | Version |
 |---|---|
-| vLLM | `0.1.dev422+g8d407aee1` (branch `glm5.2-LL`) |
+| vLLM | `glm5.2-LL` @ `8d407aee1` |
 | flashinfer-python | `0.6.15` |
 | Model | `nvidia/GLM-5.2-NVFP4` (`modelopt_fp4`) |
 
 ## Build (once)
 
 ```bash
-# in the vllm source tree, branch glm5.2-LL, with the venv activated
-# flashinfer 0.6.15 (its cubin package only ships <=0.6.13, so remove it and let
-# 0.6.15 JIT/fetch its own kernels at runtime)
 pip install 'flashinfer-python==0.6.15'
-rm -rf "$(python -c 'import site;print(site.getsitepackages()[0])')"/flashinfer_cubin*
-# the flashinfer upgrade displaces the NCCL pin — restore it
-pip install --no-deps 'nvidia-nccl-cu13==2.30.7'
-# build tools
-pip install cmake setuptools_rust setuptools_scm
 
-# rebuild extensions in place (no dep churn; scope to Blackwell; Rust frontend skipped)
-CUDA_HOME=/usr/local/cuda-13.0 \
-TORCH_CUDA_ARCH_LIST="10.0 10.3" MAX_JOBS=96 \
+CUDA_HOME=/usr/local/cuda-13.0 TORCH_CUDA_ARCH_LIST="10.0 10.3" MAX_JOBS=96 \
 VLLM_USE_PRECOMPILED=0 VLLM_USE_PRECOMPILED_RUST=0 \
 pip install -e . --no-deps --no-build-isolation
 ```
-
-flashinfer JIT needs `nvcc`/`ninja` on `PATH` and `CUDA_HOME` set.
 
 ## Server
 
