@@ -391,7 +391,7 @@ inflect==7.5.0
     # via datamodel-code-generator
 iniconfig==2.3.0
     # via pytest
-instanttensor==0.1.6
+instanttensor==0.1.9
     # via -r requirements/test/rocm.in
 interegular==0.3.3
     # via lm-format-enforcer
