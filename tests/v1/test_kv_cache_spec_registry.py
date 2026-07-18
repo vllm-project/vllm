@@ -184,6 +184,36 @@ class TestKVCacheSpecRegistry:
                 is spec_uniform_base_map[spec_cls]
             )
 
+    def test_knorm_is_not_registered_with_prefix_caching(self):
+        _REGISTRY_KVCACHESPEC_LIST.clear()
+        config = make_vllm_config()
+        config.cache_config.enable_prefix_caching = True
+
+        register_all_kvcache_specs(config)
+
+        spec = make_spec(FullAttentionSpec)
+        assert KVCacheSpecRegistry.get_manager_class(spec) is FullAttentionManager
+
+    def test_knorm_is_not_registered_without_runtime_config(self):
+        _REGISTRY_KVCACHESPEC_LIST.clear()
+
+        register_all_kvcache_specs(None)
+
+        spec = make_spec(FullAttentionSpec)
+        assert KVCacheSpecRegistry.get_manager_class(spec) is FullAttentionManager
+
+    def test_knorm_is_registered_without_prefix_caching(self):
+        from vllm.knorm.manager import KnormFullAttentionManager
+
+        _REGISTRY_KVCACHESPEC_LIST.clear()
+        config = make_vllm_config()
+        config.cache_config.enable_prefix_caching = False
+
+        register_all_kvcache_specs(config)
+
+        spec = make_spec(FullAttentionSpec)
+        assert KVCacheSpecRegistry.get_manager_class(spec) is KnormFullAttentionManager
+
     @pytest.mark.parametrize("spec_cls", list(spec_manager_map))
     def test_custom_spec_register(self, spec_cls):
         """A decorated custom spec resolves to the declared manager."""
