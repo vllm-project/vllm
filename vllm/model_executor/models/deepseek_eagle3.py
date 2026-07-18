@@ -275,10 +275,6 @@ class DeepseekV2Eagle3Model(nn.Module):
         },
     )
 
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
-
 
 class Eagle3DeepseekV2ForCausalLM(LocalArgmaxMixin, DeepseekV2ForCausalLM):
     """Eagle3 speculative decoding model for DeepseekV2/V3."""

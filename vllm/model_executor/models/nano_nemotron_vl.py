@@ -91,7 +91,7 @@ from vllm.transformers_utils.processors.nano_nemotron_vl import (
 )
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
-from .utils import _merge_multimodal_embeddings
+from .utils import _merge_multimodal_embeddings, autoload_weights
 
 logger = init_logger(__name__)
 
@@ -1553,7 +1553,7 @@ class NemotronH_Nano_VL_V2(
         # Fully drain the generator so every mm tensor is buffered, even if
         # the LLM loader stops iterating early.
         llm_weights_iter = llm_weights_gen()
-        self.language_model.load_weights(llm_weights_iter)
+        autoload_weights(self.language_model, llm_weights_iter)
         for _ in llm_weights_iter:
             pass
 
@@ -1563,9 +1563,9 @@ class NemotronH_Nano_VL_V2(
                 param = adapter_dict[trimmed_name]
                 with torch.no_grad():
                     default_weight_loader(param, w)
-            self.vision_model.load_weights(vision_weights)
+            autoload_weights(self.vision_model, vision_weights)
             if self.sound_encoder is not None and len(sound_weights) > 0:
-                self.sound_encoder.load_weights(sound_weights)
+                autoload_weights(self.sound_encoder, sound_weights)
 
     def get_vit_model_from_radio_config(self, hf_config):
         hf_config_vision = hf_config.vision_config

@@ -3,7 +3,6 @@
 
 # Adapted from https://huggingface.co/mosaicml/mpt-7b/tree/main
 import math
-from collections.abc import Iterable
 from itertools import islice
 
 import torch
@@ -31,7 +30,6 @@ from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsPP
 from .utils import (
-    AutoWeightsLoader,
     make_empty_intermediate_tensors_factory,
     make_layers,
     maybe_prefix,
@@ -312,7 +310,3 @@ class MPTForCausalLM(nn.Module, SupportsPP):
     ) -> torch.Tensor | None:
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
-
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights)

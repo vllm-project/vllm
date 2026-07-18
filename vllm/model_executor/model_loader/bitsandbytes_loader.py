@@ -336,9 +336,8 @@ class BitsAndBytesModelLoader(BaseModelLoader):
 
         global_tp_size = get_tensor_model_parallel_world_size()
         global_tp_rank = get_tensor_model_parallel_rank()
-        check_match = (
-            lambda weight_name, module_name: weight_name.removesuffix(".weight")
-            == module_name
+        check_match = lambda weight_name, module_name: (
+            weight_name.removesuffix(".weight") == module_name
         )
         for (
             org_weight_name,
@@ -807,8 +806,10 @@ class BitsAndBytesModelLoader(BaseModelLoader):
             model_config.model,
             model_config.revision,
         )
+        from vllm.model_executor.models.utils import autoload_weights
+
         weights_to_load = {name for name, _ in model.named_parameters()}
-        loaded_weights = model.load_weights(qweight_iterator)
+        loaded_weights = autoload_weights(model, qweight_iterator)
         # Some models may have weights loading tracker unimplemented.
         if loaded_weights is not None:
             weights_not_loaded = weights_to_load - loaded_weights

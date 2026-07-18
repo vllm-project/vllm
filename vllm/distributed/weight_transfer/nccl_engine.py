@@ -27,6 +27,7 @@ from vllm.distributed.weight_transfer.packed_tensor import (
     DEFAULT_PACKED_NUM_BUFFERS,
     packed_nccl_broadcast_consumer,
 )
+from vllm.model_executor.models.utils import autoload_weights
 
 # Re-exported for backward compatibility; canonical home is nccl_common.
 __all__ = [
@@ -177,11 +178,14 @@ class NCCLWeightTransferEngine(
                     dtype = getattr(torch, dtype_name)
                     yield (name, (shape, dtype))
 
+            def load_weights(w: list[tuple[str, torch.Tensor]]) -> None:
+                autoload_weights(self.model, w)
+
             packed_nccl_broadcast_consumer(
                 iterator=state_dict_info_iterator(),
                 group=self.model_update_group,
                 src=0,
-                post_unpack_func=self.model.load_weights,
+                post_unpack_func=load_weights,
                 buffer_size_bytes=update_info.packed_buffer_size_bytes,
                 num_buffers=update_info.packed_num_buffers,
                 device=self.device,
@@ -196,7 +200,7 @@ class NCCLWeightTransferEngine(
                 self.model_update_group.broadcast(
                     weight, src=0, stream=torch.cuda.current_stream()
                 )
-                self.model.load_weights([(name, weight)])
+                autoload_weights(self.model, [(name, weight)])
                 del weight
 
     def shutdown(self) -> None:

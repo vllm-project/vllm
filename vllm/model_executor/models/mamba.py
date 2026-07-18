@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """PyTorch MAMBA model."""
 
-from collections.abc import Iterable
 from itertools import islice
 
 import torch
@@ -35,7 +34,6 @@ from vllm.model_executor.models.interfaces import (
 from vllm.sequence import IntermediateTensors
 
 from .utils import (
-    AutoWeightsLoader,
     WeightsMapper,
     make_empty_intermediate_tensors_factory,
     make_layers,
@@ -259,7 +257,3 @@ class MambaForCausalLM(
     def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
-
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)

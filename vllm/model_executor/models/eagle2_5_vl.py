@@ -3,7 +3,6 @@
 # Adapted from NVIDIA Eagle2.5-VL model
 # https://huggingface.co/nvidia/Eagle2.5-8B
 
-from collections.abc import Iterable
 from typing import Annotated, Literal, TypeAlias
 
 import torch
@@ -33,7 +32,7 @@ from .internvl import (
     BaseInternVLMultiModalProcessor,
     BaseInternVLProcessingInfo,
 )
-from .utils import AutoWeightsLoader, init_vllm_registered_model, maybe_prefix
+from .utils import init_vllm_registered_model, maybe_prefix
 
 
 class Eagle2_5_VLImagePixelInputs(TensorSchema):
@@ -401,11 +400,6 @@ class Eagle2_5_VLForConditionalGeneration(
     ) -> torch.Tensor | None:
         """Compute logits from hidden states."""
         return self.language_model.compute_logits(hidden_states)
-
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        """Load model weights."""
-        loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights)
 
     def get_mm_mapping(self) -> MultiModelKeys:
         """Get the module prefix mapping for multimodal models."""

@@ -5526,7 +5526,9 @@ class GPUModelRunner(
         if is_checkpoint_format:
             # load weights from checkpoint/ original model format
             initialize_layerwise_reload(model)
-            loaded_weights = model.load_weights(weights_iterator)
+            from vllm.model_executor.models.utils import autoload_weights
+
+            loaded_weights = autoload_weights(model, weights_iterator)
             finalize_layerwise_reload(model, self.model_config)
 
         else:

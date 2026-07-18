@@ -55,7 +55,6 @@ from vllm.v1.attention.backend import AttentionMetadata
 
 from .interfaces import HasInnerState, IsHybrid, SupportsPP
 from .utils import (
-    AutoWeightsLoader,
     PPMissingLayer,
     is_pp_missing_parameter,
     make_layers,
@@ -812,10 +811,6 @@ class BailingMoeV25ForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsPP):
     @classmethod
     def get_mamba_state_copy_func(cls) -> tuple:
         return MambaStateCopyFuncCalculator.linear_attention_state_copy_func()
-
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights)
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         return self.model.get_expert_mapping()

@@ -108,10 +108,6 @@ class KimiAudioWhisperEncoder(WhisperEncoder):
             init_in_fp32=init_in_fp32,
         )
 
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
-
 
 # -----------------------------------------------------------------------------
 # Processing Info, Dummy Inputs, and MultiModal Processor

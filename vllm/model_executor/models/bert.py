@@ -43,7 +43,7 @@ from vllm.v1.pool.metadata import PoolingMetadata
 
 from .interfaces import SupportsCrossEncoding, SupportsQuant
 from .interfaces_base import attn_type, default_pooling_type
-from .utils import AutoWeightsLoader, WeightsMapper, maybe_prefix
+from .utils import AutoWeightsLoader, WeightsMapper, autoload_weights, maybe_prefix
 
 
 class BertEmbedding(nn.Module):
@@ -437,10 +437,6 @@ class BertPoolingModel(BertModel):
 
         self.pooler = BertPooler(vllm_config.model_config)
 
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
-
 
 @default_pooling_type(seq_pooling_type="CLS")
 class BertEmbeddingModel(nn.Module, SupportsQuant):
@@ -737,7 +733,7 @@ class BertSpladeSparseEmbeddingModel(BertEmbeddingModel):
                 model_side.append((name, w))
 
         loaded: set[str] = set()
-        loaded_model = self.model.load_weights(model_side)
+        loaded_model = autoload_weights(self.model, model_side)
         loaded.update({"model." + n for n in loaded_model})
 
         if mlm_side:

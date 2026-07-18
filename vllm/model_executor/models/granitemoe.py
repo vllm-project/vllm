@@ -64,7 +64,7 @@ from vllm.model_executor.models.utils import sequence_parallel_chunk
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsLoRA, SupportsPP
-from .utils import AutoWeightsLoader, is_pp_missing_parameter, make_layers, maybe_prefix
+from .utils import is_pp_missing_parameter, make_layers, maybe_prefix
 
 
 class GraniteMoeMoE(nn.Module):
@@ -541,10 +541,3 @@ class GraniteMoeForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                 ),
             }
         )
-
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(
-            self,
-            skip_prefixes=(["lm_head."] if self.config.tie_word_embeddings else None),
-        )
-        return loader.load_weights(weights)

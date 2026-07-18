@@ -3,7 +3,7 @@
 # copied from : https://github.com/huggingface/transformers
 import ast
 from collections import defaultdict
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from functools import partial
 from itertools import accumulate
 from typing import Annotated, Literal
@@ -40,7 +40,6 @@ from .clip import CLIPVisionModel
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
 from .siglip import SiglipVisionModel
 from .utils import (
-    AutoWeightsLoader,
     flatten_bn,
     init_vllm_registered_model,
     maybe_prefix,
@@ -927,13 +926,6 @@ class HCXVisionForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         hidden_states: torch.Tensor,
     ) -> torch.Tensor | None:
         return self.language_model.compute_logits(hidden_states)
-
-    def load_weights(
-        self,
-        weights: Iterable[tuple[str, torch.Tensor]],
-    ) -> set[str]:
-        loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights)
 
     def _init_possible_resolutions(
         self,

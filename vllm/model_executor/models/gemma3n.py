@@ -1050,10 +1050,6 @@ class Gemma3nTextModel(nn.Module, SupportsQuant):
         hidden_states = self.altup_unembed(hidden_states)
         return self.norm(hidden_states)
 
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
-
 
 class Gemma3nForCausalLM(nn.Module):
     packed_modules_mapping = {

@@ -537,10 +537,6 @@ class Qwen3OmniMoeAudioEncoder(nn.Module):
             lengths = (lengths - 1) // 2 + 1
         return lengths
 
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
-
 
 class Qwen3_VisionPatchEmbed(nn.Module):
     def __init__(
@@ -1030,10 +1026,6 @@ class Qwen3Omni_VisionTransformer(nn.Module):
             )  # [seq_len, hidden_size * (1 + depth_of_deepstack)]
 
         return hidden_states
-
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
 @support_torch_compile(

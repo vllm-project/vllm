@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """PyTorch Ovis model."""
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Mapping
 from functools import partial
 from typing import Annotated, Literal
 
@@ -18,7 +18,6 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.models.ovis import VisualEmbedding
 from vllm.model_executor.models.siglip2navit import Siglip2NavitModel
 from vllm.model_executor.models.utils import (
-    AutoWeightsLoader,
     flatten_bn,
     init_vllm_registered_model,
     maybe_prefix,
@@ -646,7 +645,3 @@ class Ovis2_5(nn.Module, SupportsMultiModal, SupportsPP):
         hidden_states: torch.Tensor,
     ) -> torch.Tensor | None:
         return self.llm.compute_logits(hidden_states)
-
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights)

@@ -141,10 +141,6 @@ class FunAudioChatAudioAttention(nn.Module):
                 # shard starts as zeros, while allowing q/v shards to load.
                 self.qkv_proj.bias.zero_()
 
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
-
     def forward(
         self,
         hidden_states: torch.Tensor,

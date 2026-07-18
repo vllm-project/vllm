@@ -9,7 +9,7 @@ LoRA support: use --enable-lora --default-mm-loras for LM-only LoRA adapters.
 """
 
 import math
-from collections.abc import Iterable, Mapping
+from collections.abc import Mapping
 from fractions import Fraction
 from itertools import islice
 
@@ -48,7 +48,6 @@ from vllm.model_executor.models.llava_next import (
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.models.siglip import SiglipVisionModel
 from vllm.model_executor.models.utils import (
-    AutoWeightsLoader,
     PPMissingLayer,
     WeightsMapper,
     maybe_prefix,
@@ -925,7 +924,3 @@ class Granite4VisionForConditionalGeneration(
         # GraniteForCausalLM.compute_logits uses
         # LogitsProcessor(scale=1/logits_scaling)
         return self.language_model.compute_logits(hidden_states)
-
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)

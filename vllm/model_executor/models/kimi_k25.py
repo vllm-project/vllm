@@ -6,7 +6,7 @@ Kimi-K2.5 Model Implementation for vLLM.
 Kimi-K2.5 extends Kimi-K2 with vision support.
 """
 
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Annotated, Any, Literal
 
@@ -63,7 +63,6 @@ from vllm.utils.import_utils import is_numba_available
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .utils import (
-    AutoWeightsLoader,
     WeightsMapper,
     init_vllm_registered_model,
     maybe_prefix,
@@ -469,7 +468,3 @@ class KimiK25ForConditionalGeneration(
 
     def get_eagle3_aux_hidden_state_layers(self) -> tuple[int, ...]:
         return self.language_model.get_eagle3_aux_hidden_state_layers()
-
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
-        loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)

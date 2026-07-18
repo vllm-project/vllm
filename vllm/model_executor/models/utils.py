@@ -213,6 +213,14 @@ class AutoWeightsLoader:
         self.ignore_unexpected_suffixes = ignore_unexpected_suffixes or []
         # update default skip_substrs
         self.skip_substrs += self.ROTARY_EMBEDS_UNUSED_WEIGHTS
+        # If the module has a `tie_word_embeddings` attribute, skip the lm_head weights.
+        config = getattr(module, "config", None)
+        if (
+            config is not None
+            and getattr(config, "tie_word_embeddings", False)
+            and "lm_head." not in self.skip_prefixes
+        ):
+            self.skip_prefixes = [*self.skip_prefixes, "lm_head."]
 
     def _groupby_prefix(
         self,
@@ -338,6 +346,12 @@ class AutoWeightsLoader:
                         lambda x: self._get_qualname(base_prefix, x),
                         loaded_params,
                     )
+
+        # If the module has a `hf_to_vllm_mapper` attribute, apply it to the weights.
+        if not callable(getattr(module, "load_weights", None)):
+            module_mapper = getattr(module, "hf_to_vllm_mapper", None)
+            if module_mapper is not None:
+                weights = module_mapper.apply(weights)
 
         child_modules = dict(module.named_children())
         child_params = dict(module.named_parameters(recurse=False))
@@ -533,6 +547,22 @@ def skip_spec_layers(
         for name, w in weights
         if get_spec_layer_idx_from_weight_name(config, name) is None
     )
+
+
+def autoload_weights(
+    model: nn.Module, weights: Iterable[tuple[str, torch.Tensor]]
+) -> set[str]:
+    """Load `weights` into `model` via its `load_weights`, or AutoWeightsLoader.
+
+    Models whose loading is fully handled by `AutoWeightsLoader` (mapper as a
+    class attribute, tied lm_head auto-skipped) need not define a trivial
+    `load_weights`. This is the single entry point every caller should use so
+    such models load correctly whether or not the method exists.
+    """
+    model_load_weights = getattr(model, "load_weights", None)
+    if callable(model_load_weights):
+        return model_load_weights(weights)
+    return AutoWeightsLoader(model).load_weights(weights)
 
 
 def init_vllm_registered_model(

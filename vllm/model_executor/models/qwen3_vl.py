@@ -840,10 +840,6 @@ class Qwen3_VisionTransformer(nn.Module):
         )  # [seq_len, hidden_size * (1 + depth_of_deepstack)]
         return hidden_states
 
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
-
 
 class Qwen3VLProcessingInfo(Qwen2VLProcessingInfo):
     def get_hf_config(self):

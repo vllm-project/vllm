@@ -135,6 +135,9 @@ class RunaiModelStreamerLoader(BaseModelLoader):
         model_weights = model_config.model
         if model_weights_override := model_config.model_weights:
             model_weights = model_weights_override
-        model.load_weights(
-            self._get_weights_iterator(model_weights, model_config.revision)
+        from vllm.model_executor.models.utils import autoload_weights
+
+        autoload_weights(
+            model,
+            self._get_weights_iterator(model_weights, model_config.revision),
         )

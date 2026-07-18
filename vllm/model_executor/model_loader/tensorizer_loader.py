@@ -83,7 +83,9 @@ class TensorizerLoader(BaseModelLoader):
             with torch.device(device_config.device):
                 model = initialize_model(vllm_config=vllm_config, prefix=prefix)
 
-            model.load_weights(self._get_weights_iterator())
+            from vllm.model_executor.models.utils import autoload_weights
+
+            autoload_weights(model, self._get_weights_iterator())
         return model.eval()
 
     def download_model(self, model_config: ModelConfig) -> None:
@@ -110,7 +112,9 @@ class TensorizerLoader(BaseModelLoader):
             tensorizer_config = self._patch_tensorizer_config(model_config)
             deserialize_tensorizer_model(model, tensorizer_config)
         else:
-            model.load_weights(self._get_weights_iterator())
+            from vllm.model_executor.models.utils import autoload_weights
+
+            autoload_weights(model, self._get_weights_iterator())
 
     def load_model(
         self, vllm_config: VllmConfig, model_config: ModelConfig, prefix: str = ""

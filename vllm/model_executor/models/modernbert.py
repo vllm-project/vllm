@@ -29,7 +29,7 @@ from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsCrossEncoding
 from .interfaces_base import attn_type, default_pooling_type
-from .utils import AutoWeightsLoader, WeightsMapper, maybe_prefix
+from .utils import AutoWeightsLoader, WeightsMapper, autoload_weights, maybe_prefix
 
 
 class ModernBertEmbeddings(nn.Module):
@@ -383,7 +383,7 @@ class ModernBertForSequenceClassification(nn.Module, SupportsCrossEncoding):
                 else:
                     self_weights.append((name, weight))
 
-        self.model.load_weights(weight_filter())
+        autoload_weights(self.model, weight_filter())
 
         params_dict = dict(self.named_parameters())
 

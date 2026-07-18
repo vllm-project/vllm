@@ -64,7 +64,7 @@ from vllm.transformers_utils.processors.voxtral import (
 from vllm.utils.collection_utils import is_list_of
 
 from .interfaces import SupportsLoRA, SupportsMultiModal, SupportsTranscription
-from .utils import init_vllm_registered_model, maybe_prefix
+from .utils import autoload_weights, init_vllm_registered_model, maybe_prefix
 
 logger = init_logger(__name__)
 
@@ -556,7 +556,7 @@ class VoxtralForConditionalGeneration(
                 else:
                     yield (name, w)
 
-        for name in self.language_model.load_weights(llm_weights_generator()):
+        for name in autoload_weights(self.language_model, llm_weights_generator()):
             loaded_weights.add(f"language_model.{name}")
 
         # potentially manually add position embeddings

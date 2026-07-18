@@ -77,7 +77,6 @@ from vllm.transformers_utils.configs.AXK1 import AXK1Config
 
 from .interfaces import MixtureOfExperts, SupportsEagle, SupportsLoRA, SupportsPP
 from .utils import (
-    AutoWeightsLoader,
     PPMissingLayer,
     get_spec_layer_idx_from_weight_name,
     is_pp_missing_parameter,
@@ -1140,7 +1139,3 @@ class AXK1ForCausalLM(
             num_experts=self.config.n_routed_experts,
             num_redundant_experts=0,
         )
-
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights)

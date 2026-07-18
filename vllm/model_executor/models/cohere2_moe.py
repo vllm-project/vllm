@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections.abc import Iterable
 from itertools import islice
 
 import torch
@@ -37,7 +36,6 @@ from vllm.sequence import IntermediateTensors
 from .commandr import LayerNorm
 from .interfaces import SupportsPP, SupportsQuant
 from .utils import (
-    AutoWeightsLoader,
     WeightsMapper,
     extract_layer_index,
     make_empty_intermediate_tensors_factory,
@@ -526,7 +524,3 @@ class Cohere2MoeForCausalLM(nn.Module, SupportsPP, SupportsQuant):
         hidden_states: torch.Tensor,
     ) -> torch.Tensor | None:
         return self.logits_processor(self.model.embed_tokens, hidden_states)
-
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self, skip_prefixes=["lm_head."])
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)

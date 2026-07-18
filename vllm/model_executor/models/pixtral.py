@@ -36,7 +36,7 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.models.utils import WeightsMapper
+from vllm.model_executor.models.utils import WeightsMapper, autoload_weights
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargsItems
 from vllm.multimodal.inputs import (
     MultiModalFieldConfig,
@@ -573,7 +573,7 @@ class PixtralForConditionalGeneration(
                     name = name.removeprefix("language_model.")
                     yield (name, w)
 
-        self.language_model.load_weights(llm_weights_generator())
+        autoload_weights(self.language_model, llm_weights_generator())
 
     def get_mm_mapping(self) -> MultiModelKeys:
         return MultiModelKeys.from_string_field(
