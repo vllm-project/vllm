@@ -96,6 +96,7 @@ class EngineCoreOutput(
     prefill_stats: object | None = None
     routed_experts: object | None = None
     num_nans_in_logits: int = 0
+    weight_version: int | None = None
 
 
 class EngineCoreOutputs(
@@ -194,6 +195,7 @@ outputs = EngineCoreOutputs(
             request_id="req-1",
             new_token_ids=[7, 8],
             finish_reason=FinishReason.LENGTH,
+            weight_version=3,
         )
     ],
     finished_requests={"req-1"},

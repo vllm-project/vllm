@@ -121,6 +121,12 @@ class EngineCore:
 
         self.log_stats = log_stats
 
+        # Monotonically increasing generation of the target policy weights.
+        # Requests are bound to a generation when they enter the scheduler
+        # queue (admission time).
+        self._weight_version = 0
+        self._weight_update_is_draft: bool | None = None
+
         # Setup Model.
         self.model_executor = executor_class(vllm_config)
         self._pooler_config_logged = False
@@ -468,6 +474,8 @@ class EngineCore:
                 "Disabling ECTransfer for this request."
             )
 
+        # Bind the version at scheduler admission, before enqueueing.
+        request.weight_version = self._weight_version
         self.scheduler.add_request(request)
         if request.abort_immediately:
             # Immediately abort so the connector's request_finished hook runs
@@ -949,7 +957,22 @@ class EngineCore:
         args: tuple = (),
         kwargs: dict[str, Any] | None = None,
     ) -> list[_R]:
-        return self.model_executor.collective_rpc(method, timeout, args, kwargs)
+        result = self.model_executor.collective_rpc(method, timeout, args, kwargs)
+        # Target and draft updates share finish_weight_update.
+        if method == "start_weight_update":
+            self._weight_update_is_draft = False
+        elif method == "start_draft_weight_update":
+            self._weight_update_is_draft = True
+        elif method == "finish_weight_update":
+            # Only a successfully finished target update advances the version.
+            if self._weight_update_is_draft is False:
+                self._weight_version += 1
+            self._weight_update_is_draft = None
+        return result
+
+    def get_weight_version(self) -> int:
+        """Return the latest committed target-policy weight generation."""
+        return self._weight_version
 
     def preprocess_add_request(self, request: EngineCoreRequest) -> tuple[Request, int]:
         """Preprocess the request.

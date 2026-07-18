@@ -1846,6 +1846,7 @@ class Scheduler(SchedulerInterface):
                         trace_headers=request.trace_headers,
                         routed_experts=routed_experts,
                         num_nans_in_logits=request.num_nans_in_logits,
+                        weight_version=request.weight_version,
                     )
                 )
             else:
@@ -1870,6 +1871,7 @@ class Scheduler(SchedulerInterface):
                         finish_reason=request.get_finished_reason(),
                         events=request.take_events(),
                         trace_headers=request.trace_headers,
+                        weight_version=request.weight_version,
                     )
                 )
 

@@ -65,6 +65,7 @@ For further details on Weight Transfer, please refer to [this page](../training/
 - `LLM.start_weight_update` - Starts a new weight update cycle.
 - `LLM.update_weights` - Updates the model weights.
 - `LLM.finish_weight_update` - Finishes the current weight update cycle.
+- `LLM.get_weight_version` - Returns the latest committed weight version.
 
 ## Additional APIs
 
