@@ -8,7 +8,7 @@ from pydantic_core import ArgsKwargs
 
 from vllm.config.utils import config
 from vllm.logger import init_logger
-from vllm.tasks import REMOVED_POOLING_TASK_MESSAGES, PoolingTask
+from vllm.tasks import PoolingTask, check_removed_pooling_task
 from vllm.utils.hashing import safe_hash
 
 logger = init_logger(__name__)
@@ -125,11 +125,7 @@ class PoolerConfig:
             raise ValueError(
                 "Parameter `normalize` was removed; use `use_activation` instead."
             )
-        task = values.get("task")
-        if isinstance(task, str) and (
-            message := REMOVED_POOLING_TASK_MESSAGES.get(task)
-        ):
-            raise ValueError(message)
+        check_removed_pooling_task(values.get("task"))
         return data
 
     def __post_init__(self) -> None:

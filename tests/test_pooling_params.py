@@ -12,6 +12,7 @@ from vllm.config import ModelConfig, PoolerConfig
 from vllm.entrypoints.pooling.classify.protocol import ClassificationRequest
 from vllm.entrypoints.pooling.embed.protocol import EmbeddingRequest
 from vllm.entrypoints.pooling.pooling.protocol import PoolingRequest
+from vllm.exceptions import VLLMValidationError
 
 EMBEDDING_MODELS = [
     EmbedModelInfo("intfloat/multilingual-e5-small", is_matryoshka=False),
@@ -60,7 +61,7 @@ def test_removed_pooling_parameters(parameter: str, value: Any, message: str):
     assert len(exc_info.value.errors()) == 1
 
     if parameter == "task":
-        with pytest.raises(ValueError, match=message):
+        with pytest.raises(VLLMValidationError, match=message):
             PoolingParams(task=value)
 
 

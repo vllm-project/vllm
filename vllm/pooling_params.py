@@ -9,7 +9,7 @@ import msgspec
 from vllm.config import ModelConfig, PoolerConfig
 from vllm.logger import init_logger
 from vllm.sampling_params import RequestOutputKind
-from vllm.tasks import REMOVED_POOLING_TASK_MESSAGES, PoolingTask
+from vllm.tasks import PoolingTask, check_removed_pooling_task
 
 logger = init_logger(__name__)
 
@@ -229,10 +229,7 @@ class PoolingParams(
         )
 
     def __post_init__(self) -> None:
-        if isinstance(self.task, str) and (
-            message := REMOVED_POOLING_TASK_MESSAGES.get(self.task)
-        ):
-            raise ValueError(message)
+        check_removed_pooling_task(self.task)
         if self.output_kind != RequestOutputKind.FINAL_ONLY:
             raise ValueError(
                 "For pooling output_kind has to be FINAL_ONLY, "
