@@ -477,6 +477,61 @@ class TestTieringOffloadingManager:
         assert reduced[f"{TieringOffloadingMetrics.LOOKUP_SYNC_DELAY}_count"] == 1
         assert reduced[f"{TieringOffloadingMetrics.LOOKUP_ASYNC_DELAY}_count"] == 1
 
+    def test_finalize_deferred_until_pending_promotion_flushed(self, manager_setup):
+        """A request that finishes with a promotion still queued must not have
+        on_request_finished() forwarded to a secondary tier before the deferred
+        submit_load() is flushed.
+
+        Regression: _maybe_finalize_request() gated only on pending_primary_stores,
+        so it forwarded on_request_finished() (and dropped _req_state) while a
+        promotion queued during lookup() this step was still unflushed. The later
+        _flush_pending_promotions() then called submit_load() for the finished
+        request, violating the SecondaryTierManager.on_request_finished contract
+        ("all per-request calls have already been issued, and none will follow").
+        """
+        # Record the order of submit_load vs on_request_finished per request.
+        events: list[tuple[str, str]] = []
+        real_submit_load = self.secondary_tier1.submit_load
+        real_on_finished = self.secondary_tier1.on_request_finished
+
+        def spy_submit_load(job_metadata):
+            events.append(("submit_load", job_metadata.req_context.req_id))
+            return real_submit_load(job_metadata)
+
+        def spy_on_finished(req_context):
+            events.append(("on_request_finished", req_context.req_id))
+            return real_on_finished(req_context)
+
+        self.secondary_tier1.submit_load = spy_submit_load
+        self.secondary_tier1.on_request_finished = spy_on_finished
+
+        self._start_request()
+        block = to_keys(range(1))[0]
+        self.secondary_tier1.blocks[block] = True
+
+        # Lookup finds the block in the secondary tier and queues a promotion.
+        assert self.manager.lookup(block, _CTX) is LookupResult.RETRY
+
+        # The request finishes this same step, before the promotion is flushed.
+        self.manager.on_request_finished(_CTX)
+        # Finalization must be deferred: the tier is not told finished yet.
+        assert ("on_request_finished", _CTX.req_id) not in events
+        assert _CTX.req_id in self.manager._req_state
+
+        # End of step flushes the promotion, then completes finalization.
+        self._simulate_on_schedule_end()
+
+        # The tier was eventually told the request finished, and no submit_load
+        # was issued after that point.
+        assert ("on_request_finished", _CTX.req_id) in events
+        finish_idx = events.index(("on_request_finished", _CTX.req_id))
+        later_loads = [
+            e for e in events[finish_idx + 1 :] if e == ("submit_load", _CTX.req_id)
+        ]
+        assert not later_loads, (
+            f"submit_load issued after on_request_finished: {events}"
+        )
+
     def test_partial_lookup(self, manager_setup):
         """Test lookup with partial hits."""
         blocks = to_keys(range(5))

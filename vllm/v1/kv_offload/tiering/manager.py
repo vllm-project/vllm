@@ -695,6 +695,13 @@ class TieringOffloadingManager(OffloadingManager):
         state.is_finished = True
         self._maybe_finalize_request(req_context.req_id, exclude_tier)
 
+    def _has_pending_promotions(self, req_id: str) -> bool:
+        """Whether a not-yet-flushed promotion is queued for this request."""
+        return any(
+            req_id in pending_by_ctx
+            for pending_by_ctx in self._pending_load_submissions.values()
+        )
+
     def _maybe_finalize_request(
         self,
         req_id: str,
@@ -710,6 +717,15 @@ class TieringOffloadingManager(OffloadingManager):
         if not state.is_finished:
             return
         if state.pending_primary_stores != 0:
+            return
+        # A promotion queued during lookup() this step is not submitted
+        # until _flush_pending_promotions() runs in on_schedule_end().
+        # Forwarding on_request_finished() to the tiers now would let that
+        # later submit_load() violate the SecondaryTierManager
+        # on_request_finished contract (no per-request calls may follow).
+        # Defer finalization until the promotion has been flushed; the
+        # re-check in on_schedule_end() completes it once flushed.
+        if self._has_pending_promotions(req_id):
             return
 
         for tier in self.secondary_tiers:
@@ -741,6 +757,10 @@ class TieringOffloadingManager(OffloadingManager):
         self._processed_jobs_this_step = False
 
         self._flush_pending_promotions()
+        # Promotions are now flushed (submitted as in-flight jobs); complete
+        # any finalization that was deferred waiting on a pending promotion.
+        for req_id in [rid for rid, st in self._req_state.items() if st.is_finished]:
+            self._maybe_finalize_request(req_id)
         for tier in self.secondary_tiers:
             tier.on_schedule_end(context)
 
