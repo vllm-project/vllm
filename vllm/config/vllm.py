@@ -2202,13 +2202,6 @@ class VllmConfig:
         if model_config is not None and model_config.enable_prompt_embeds:
             unsupported.append("prompt embeds")
 
-        if (
-            model_config is not None
-            and model_config.runner_type == "generate"
-            and model_config.logprobs_mode in ("raw_logits", "processed_logits")
-        ):
-            unsupported.append(f"logprobs mode '{model_config.logprobs_mode}'")
-
         if self.cache_config.kv_sharing_fast_prefill:
             # Will be added by https://github.com/vllm-project/vllm/pull/35045
             unsupported.append("KV sharing fast prefill")

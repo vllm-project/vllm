@@ -3,7 +3,7 @@
 import time
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
-from itertools import islice
+from itertools import chain, islice
 from typing import Any, NamedTuple
 
 from vllm.config import VllmConfig
@@ -443,6 +443,24 @@ class OffloadingConnectorScheduler:
             pending.remove(job_id)
             if not pending:
                 del self._block_id_to_pending_jobs[bid]
+
+    def _calc_num_offloadable_tokens(
+        self, req_status: RequestOffloadState, num_computed_tokens: int
+    ) -> int:
+        num = min(num_computed_tokens, req_status.req.num_tokens)
+        max_offload_tokens = req_status.max_offload_tokens
+        if max_offload_tokens is not None:
+            num = min(num, max_offload_tokens)
+        if self.config.offload_prompt_only:
+            num = min(num, req_status.req.num_prompt_tokens)
+        return num
+
+    def _maybe_cleanup_finished_req(
+        self, req_id: str, req_status: RequestOffloadState
+    ) -> None:
+        """Clean up req_status if finished and no in-flight jobs."""
+        if req_status.req.is_finished() and not req_status.transfer_jobs:
+            del self._req_status[req_id]
 
     def _maximal_prefix_lookup(
         self, keys: Iterable[OffloadKey], req_context: ReqContext
@@ -911,28 +929,24 @@ class OffloadingConnectorScheduler:
     ) -> dict[int, TransferJob]:
         blocks_per_chunk = self.config.blocks_per_chunk
         store_jobs: dict[int, TransferJob] = {}
-        for req_id in scheduler_output.num_scheduled_tokens:
+        for req_id in chain(
+            scheduler_output.num_scheduled_tokens,
+            scheduler_output.finished_req_ids or (),
+        ):
             req_status = self._req_status.get(req_id)
             if req_status is None:
                 continue
             req = req_status.req
 
-            num_scheduled_tokens = scheduler_output.num_scheduled_tokens[req_id]
-            num_tokens_after_batch = req.num_computed_tokens + num_scheduled_tokens
-            # with async scheduling, some tokens may be missing
-            num_offloadable_tokens = min(num_tokens_after_batch, req.num_tokens)
-            max_offload_tokens = req_status.max_offload_tokens
-            if max_offload_tokens is not None:
-                num_offloadable_tokens = min(num_offloadable_tokens, max_offload_tokens)
+            if req.is_finished():
+                num_tokens_after_batch = req.num_tokens
+            else:
+                num_scheduled_tokens = scheduler_output.num_scheduled_tokens[req_id]
+                num_tokens_after_batch = req.num_computed_tokens + num_scheduled_tokens
 
-            # Skip decode-phase chunks: clamp to the prompt length so only
-            # prefill chunks become eligible for store. next_stored_chunk_idx
-            # never advances past this boundary, so decode chunks are never
-            # queued in this or any later step.
-            if self.config.offload_prompt_only:
-                num_offloadable_tokens = min(
-                    num_offloadable_tokens, req.num_prompt_tokens
-                )
+            num_offloadable_tokens = self._calc_num_offloadable_tokens(
+                req_status, num_tokens_after_batch
+            )
 
             # Filter out chunks skipped due to sliding window attention / SSM
             # or unreachable by the load path's alignment constraints.
@@ -983,6 +997,7 @@ class OffloadingConnectorScheduler:
 
             if not new_offload_keys:
                 req_status.advance_stored_idx(num_offloadable_tokens)
+                self._maybe_cleanup_finished_req(req_id, req_status)
                 continue
 
             store_output = self.manager.prepare_store(
@@ -993,10 +1008,12 @@ class OffloadingConnectorScheduler:
                     _ConnectorMetricName.ALLOCATION_FAILURE
                 )
                 logger.warning("Request %s: cannot store chunks", req_id)
+                self._maybe_cleanup_finished_req(req_id, req_status)
                 continue
 
             if not store_output.keys_to_store:
                 req_status.advance_stored_idx(num_offloadable_tokens)
+                self._maybe_cleanup_finished_req(req_id, req_status)
                 continue
 
             self._touch(req_status)
@@ -1092,6 +1109,13 @@ class OffloadingConnectorScheduler:
                 num_offloadable_tokens,
                 job_id,
             )
+
+            if req.is_finished():
+                # Register non-sliding-window blocks for flush detection.
+                for bid in non_sliding_window_block_ids:
+                    self._block_id_to_pending_jobs.setdefault(bid, set()).add(job_id)
+                    if bid in self._current_batch_allocated_block_ids:
+                        self._current_batch_jobs_to_flush.add(job_id)
 
         return store_jobs
 
@@ -1255,8 +1279,6 @@ class OffloadingConnectorScheduler:
             Optional KVTransferParams to be included in the request outputs
             returned by the engine.
         """
-        # TODO(orozery): possibly kickoff offload for last block
-        # which may have been deferred due to async scheduling
         req_status = self._req_status.get(request.request_id)
 
         if req_status is None:
@@ -1269,20 +1291,20 @@ class OffloadingConnectorScheduler:
 
         self.manager.on_request_finished(req_status.req_context)
         self._maybe_observe_lookup_async_delay(req_status)
-        if not req_status.transfer_jobs:
-            # No in-flight jobs: no later complete_store()/complete_load() calls
-            # need this request's state.
-            del self._req_status[request.request_id]
-            return False, None
 
-        # In-flight jobs remain after the request stopped. Their completion may
-        # still call manager.complete_store()/complete_load(), so keep req_status.
-        # Pending stores outlive the request's block ownership; register them so
-        # future reuse of those blocks triggers a flush.
+        # Update offload keys with final block hash so _build_store_jobs can
+        # create store jobs for the last block(s) on the next schedule step.
+        req_status.update_offload_keys()
+
+        # Keep req_status alive: _build_store_jobs will process finished_req_ids
+        # on the next step and handle cleanup after creating store jobs.
+        # Register non_sliding_window_block_ids so future block reuse triggers
+        # a flush via _block_id_to_pending_jobs.
         for job_id in req_status.transfer_jobs:
             job_status = self._jobs[job_id]
             for bid in job_status.non_sliding_window_block_ids or ():
                 self._block_id_to_pending_jobs.setdefault(bid, set()).add(job_id)
+
         return False, None
 
     def take_events(self) -> Iterable[KVCacheEvent]:
