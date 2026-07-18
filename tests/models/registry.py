@@ -409,6 +409,9 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "MiniCPM3ForCausalLM": _HfExamplesInfo(
         "openbmb/MiniCPM3-4B", trust_remote_code=True
     ),
+    "MiniCPMSALAForCausalLM": _HfExamplesInfo(
+        "openbmb/MiniCPM-SALA", trust_remote_code=True
+    ),
     "MiniCPM4ForCausalLM": _HfExamplesInfo(
         "openbmb/MiniCPM4.1-8B",
         min_transformers_version="4.56",
