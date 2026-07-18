@@ -463,6 +463,7 @@ def test_system_message_warns_on_video(video_content):
     assert "video_url" in call_args
 
 
+@pytest.mark.skip_global_cleanup
 def test_json_schema_response_format_missing_schema():
     """When response_format type is 'json_schema' but the json_schema field
     is not provided, request construction should raise a validation error
@@ -514,4 +515,48 @@ def test_structured_outputs_structural_tag_invalid(structural_tag):
             model=MODEL_NAME,
             messages=[{"role": "user", "content": "hello"}],
             structured_outputs={"structural_tag": structural_tag},
+        )
+
+
+@pytest.mark.parametrize(
+    "response_format",
+    [
+        {"type": "text"},
+        {"type": "json_object"},
+        {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "answer",
+                "schema": {"type": "object"},
+            },
+        },
+    ],
+)
+@pytest.mark.skip_global_cleanup
+def test_valid_response_format_is_accepted(response_format):
+    request = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": "hello"}],
+        response_format=response_format,
+    )
+
+    assert request.response_format is not None
+
+
+@pytest.mark.parametrize(
+    ("response_format", "match"),
+    [
+        ("json", "response_format.*object.*type"),
+        ({}, "response_format.*type"),
+        ({"type": "xml"}, "response_format.type.*one of"),
+        ({"type": "json_schema", "json_schema": "schema"}, "json_schema.*object"),
+    ],
+)
+@pytest.mark.skip_global_cleanup
+def test_invalid_response_format_is_rejected(response_format, match):
+    with pytest.raises(Exception, match=match):
+        ChatCompletionRequest(
+            model=MODEL_NAME,
+            messages=[{"role": "user", "content": "hello"}],
+            response_format=response_format,
         )
