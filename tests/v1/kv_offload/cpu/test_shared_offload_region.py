@@ -532,8 +532,15 @@ def test_metadata_sidecar_mismatch_raises(iid):
         with pytest.raises(
             ValueError,
             match=r"num_blocks: local=5, sidecar=4",
-        ):
+        ) as exc_info:
             _make_region(iid, num_blocks=5, replicated_layout=True)
+
+        message = str(exc_info.value)
+        assert r0.mmap_path in message
+        assert r0.metadata_path in message
+        assert "remove only the exact stale files" in message
+        assert "rm " not in message
+        assert "*" not in message
     finally:
         r0.cleanup()
         _cleanup_file(r0.mmap_path)
@@ -626,8 +633,11 @@ def test_orphan_mmap_without_metadata_times_out_with_hint(iid, monkeypatch):
 
         message = str(exc_info.value)
         assert metadata_path in message
-        assert "stale files from a previous run can be removed" in message
-        assert f"rm /dev/shm/vllm_offload_{iid}.*" in message
+        assert mmap_path in message
+        assert "no other vLLM instance on this host is using either path" in message
+        assert "remove only the exact stale files" in message
+        assert "rm " not in message
+        assert "*" not in message
     finally:
         _cleanup_file(metadata_path)
         _cleanup_file(mmap_path)
@@ -711,6 +721,60 @@ def test_creator_failure_rolls_back_mmap_metadata_and_tmp(iid, monkeypatch):
         assert r._creator is True
     finally:
         r.cleanup()
+
+
+def test_creator_file_exists_error_is_not_treated_as_joiner(iid, monkeypatch):
+    """Only failure of the exclusive mmap open selects the joiner path."""
+    metadata_path = f"/dev/shm/vllm_offload_{iid}.meta.json"
+    mmap_path = f"/dev/shm/vllm_offload_{iid}.mmap"
+
+    def fail_write_metadata(path, metadata):
+        raise FileExistsError("metadata write collision")
+
+    monkeypatch.setattr(shared_region_module, "_write_metadata", fail_write_metadata)
+    try:
+        with pytest.raises(FileExistsError, match="metadata write collision"):
+            _make_region(iid, replicated_layout=True)
+
+        assert not os.path.exists(mmap_path)
+        assert not os.path.exists(metadata_path)
+    finally:
+        _cleanup_file(metadata_path)
+        _cleanup_file(mmap_path)
+
+
+def test_non_replicated_ftruncate_failure_rolls_back_only_mmap(iid, monkeypatch):
+    """A failed non-replicated creator rolls back only its mmap resources."""
+    mmap_path = f"/dev/shm/vllm_offload_{iid}.mmap"
+    metadata_path = f"/dev/shm/vllm_offload_{iid}.meta.json"
+    closed_fds = []
+    original_close = shared_region_module.os.close
+
+    with open(metadata_path, "w") as f:
+        f.write("sentinel")
+
+    def fail_ftruncate(fd, size):
+        raise RuntimeError("ftruncate failed")
+
+    def record_close(fd):
+        closed_fds.append(fd)
+        original_close(fd)
+
+    monkeypatch.setattr(shared_region_module.os, "ftruncate", fail_ftruncate)
+    monkeypatch.setattr(shared_region_module.os, "close", record_close)
+    try:
+        with pytest.raises(RuntimeError, match="ftruncate failed"):
+            _make_region(iid)
+
+        assert len(closed_fds) == 1
+        with pytest.raises(OSError):
+            os.fstat(closed_fds[0])
+        assert not os.path.exists(mmap_path)
+        with open(metadata_path) as f:
+            assert f.read() == "sentinel"
+    finally:
+        _cleanup_file(metadata_path)
+        _cleanup_file(mmap_path)
 
 
 # ---------------------------------------------------------------------------

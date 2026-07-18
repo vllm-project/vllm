@@ -25,9 +25,12 @@ _LAYOUT_METADATA_FIELDS = (
 _METADATA_TIMEOUT = 30.0
 
 
-def _stale_files_hint(mmap_path: str) -> str:
-    prefix = mmap_path[: -len(".mmap")] if mmap_path.endswith(".mmap") else mmap_path
-    return f"stale files from a previous run can be removed: rm {prefix}.*"
+def _stale_files_hint(mmap_path: str, metadata_path: str) -> str:
+    return (
+        "if no other vLLM instance on this host is using either path, "
+        f"remove only the exact stale files {mmap_path} and {metadata_path}, "
+        "then restart"
+    )
 
 
 def _unlink_path(path: str, description: str) -> None:
@@ -51,6 +54,7 @@ def _wait_for_file_size(
     expected_size: int,
     timeout: float = 30.0,
     mmap_path: str | None = None,
+    metadata_path: str | None = None,
 ) -> None:
     """Spin-wait until the file reaches expected_size (creator truncated it)."""
     deadline = time.monotonic() + timeout
@@ -59,7 +63,11 @@ def _wait_for_file_size(
             return
         if time.monotonic() > deadline:
             path_text = f" for mmap {mmap_path}" if mmap_path else ""
-            hint = f"; {_stale_files_hint(mmap_path)}" if mmap_path else ""
+            hint = (
+                f"; {_stale_files_hint(mmap_path, metadata_path)}"
+                if mmap_path and metadata_path
+                else ""
+            )
             raise TimeoutError(
                 f"Timed out waiting for mmap file{path_text} to reach "
                 f"{expected_size} bytes{hint}"
@@ -78,14 +86,16 @@ def _wait_for_metadata(paths: tuple[str, str], deadline: float) -> Metadata:
             if time.monotonic() > deadline:
                 raise TimeoutError(
                     f"Timed out waiting for mmap metadata {metadata_path} "
-                    f"for mmap {mmap_path}; {_stale_files_hint(mmap_path)}"
+                    f"for mmap {mmap_path}; "
+                    f"{_stale_files_hint(mmap_path, metadata_path)}"
                 ) from None
             time.sleep(0.005)
         except json.JSONDecodeError as e:
             if time.monotonic() > deadline:
                 raise ValueError(
                     f"Invalid mmap metadata sidecar {metadata_path} for mmap "
-                    f"{mmap_path}: {e}; {_stale_files_hint(mmap_path)}"
+                    f"{mmap_path}: {e}; "
+                    f"{_stale_files_hint(mmap_path, metadata_path)}"
                 ) from e
             time.sleep(0.005)
 
@@ -115,7 +125,7 @@ def _check_metadata(paths: tuple[str, str], fd: int, expected: Metadata) -> None
                 f"Timed out waiting for mmap metadata {metadata_path} to match "
                 f"mmap {mmap_path} inode {mmap_inode}; "
                 f"sidecar mmap_inode={sidecar_inode!r}; "
-                f"{_stale_files_hint(mmap_path)}"
+                f"{_stale_files_hint(mmap_path, metadata_path)}"
             ) from None
         time.sleep(0.005)
 
@@ -127,7 +137,7 @@ def _check_metadata(paths: tuple[str, str], fd: int, expected: Metadata) -> None
                 "Shared offload region metadata mismatch for "
                 f"{field}: local={expected_value!r}, sidecar={actual_value!r} "
                 f"at {metadata_path} for mmap {mmap_path}; "
-                f"{_stale_files_hint(mmap_path)}"
+                f"{_stale_files_hint(mmap_path, metadata_path)}"
             )
 
 
@@ -177,36 +187,9 @@ class SharedOffloadRegion:
             # exclusive upper bound for this worker's area within each row
             self._worker_area_end = (rank + 1) * cpu_page_size
         try:
-            # Exclusive create — only one worker succeeds
+            # Exclusive create — only one worker succeeds.
             self.fd: int | None = os.open(
                 self.mmap_path, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600
-            )
-            if self._replicated_layout:
-                try:
-                    os.ftruncate(self.fd, self.total_size_bytes)
-                    creator_metadata = {
-                        **metadata,
-                        "mmap_inode": os.fstat(self.fd).st_ino,
-                    }
-                    _write_metadata(self.metadata_path, creator_metadata)
-                except Exception:
-                    if self.fd is not None:
-                        try:
-                            os.close(self.fd)
-                        except Exception:
-                            logger.warning(
-                                "Failed to close fd %s", self.fd, exc_info=True
-                            )
-                        self.fd = None
-                    _cleanup_region_files(self.mmap_path, self.metadata_path)
-                    raise
-            else:
-                os.ftruncate(self.fd, self.total_size_bytes)
-            self._creator = True
-            logger.info(
-                "Created mmap file %s (%.2f GB)",
-                self.mmap_path,
-                self.total_size_bytes / 1e9,
             )
         except FileExistsError:
             self.fd = os.open(self.mmap_path, os.O_RDWR)
@@ -219,6 +202,7 @@ class SharedOffloadRegion:
                         self.fd,
                         self.total_size_bytes,
                         mmap_path=self.mmap_path,
+                        metadata_path=self.metadata_path,
                     )
                 except Exception:
                     os.close(self.fd)
@@ -227,6 +211,33 @@ class SharedOffloadRegion:
             else:
                 _wait_for_file_size(self.fd, self.total_size_bytes)
             logger.info("Opened existing mmap file %s", self.mmap_path)
+        else:
+            try:
+                os.ftruncate(self.fd, self.total_size_bytes)
+                if self._replicated_layout:
+                    creator_metadata = {
+                        **metadata,
+                        "mmap_inode": os.fstat(self.fd).st_ino,
+                    }
+                    _write_metadata(self.metadata_path, creator_metadata)
+            except Exception:
+                if self.fd is not None:
+                    try:
+                        os.close(self.fd)
+                    except Exception:
+                        logger.warning("Failed to close fd %s", self.fd, exc_info=True)
+                    self.fd = None
+                if self._replicated_layout:
+                    _cleanup_region_files(self.mmap_path, self.metadata_path)
+                else:
+                    _unlink_path(self.mmap_path, "mmap file")
+                raise
+            self._creator = True
+            logger.info(
+                "Created mmap file %s (%.2f GB)",
+                self.mmap_path,
+                self.total_size_bytes / 1e9,
+            )
 
         self.mmap_obj: mmap.mmap | None = mmap.mmap(
             self.fd,
