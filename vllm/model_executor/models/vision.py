@@ -149,7 +149,7 @@ def is_vit_use_data_parallel(num_heads: int | None = None) -> bool:
         if num_heads is not None
         else None
     )
-    if not can_split:
+    if num_heads is not None and not can_split:
         logger.warning_once(
             "The number of vision attention heads is not divisible by "
             "the tensor parallel size. Falling back to data parallelism "
