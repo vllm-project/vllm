@@ -22,6 +22,7 @@ from vllm import LLM, SamplingParams
 from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.platforms import current_platform
 from vllm.utils.network_utils import get_open_port
+from ..utils import multi_gpu_test
 
 pytestmark = pytest.mark.skipif(
     not current_platform.is_rocm(),
@@ -829,10 +830,7 @@ def test_quick_allreduce_two_gpu_correctness(quant_level):
     )
 
 
-@pytest.mark.skipif(
-    current_platform.device_count() < CUDAGRAPH_WORLD_SIZE,
-    reason="requires 4 ROCm GPUs",
-)
+@multi_gpu_test(num_gpus=CUDAGRAPH_WORLD_SIZE)
 def test_quick_allreduce_cudagraph_replay():
     # Regression test for the stale flag_color bug: a quick-reduce captured in a
     # CUDA graph must return correct results on every replay, not the data from
