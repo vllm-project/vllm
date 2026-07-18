@@ -4,6 +4,7 @@
 import functools
 import gc
 import itertools
+import os
 import threading
 import time
 from collections import defaultdict
@@ -164,6 +165,7 @@ from vllm.v1.kv_cache_interface import (
     KVQuantMode,
     MambaSpec,
     SlidingWindowSpec,
+    TQFullAttentionSpec,
     UniformTypeKVCacheSpecs,
     get_kv_cache_spec_kind,
 )
@@ -248,6 +250,119 @@ if TYPE_CHECKING:
     from vllm.v1.worker.encoder_cudagraph import EncoderCudaGraphManager
 
 logger = init_logger(__name__)
+
+# ---------------------------------------------------------------------------
+# GLM52 Deliverable 4: pre-step TP fingerprint prevention guard.
+#
+# Each TP rank fingerprints its per-step execution decisions (cudagraph
+# dispatch mode + BatchDescriptor, token counts, draft-token total, request
+# count) and all ranks agree them over the TP cpu_group (gloo) BEFORE any
+# model forward. The per-rank cudagraph graph dispatch is the proven
+# divergence trigger (vllm#46097); if all ranks agree their plans before
+# launching, the divergent step never executes.
+#
+# Modes via env GLM52_FINGERPRINT_MODE:
+#   off     (default) guard fully inert -- no group access, no exchange.
+#   observe exchange + compare + log GLM52_FINGERPRINT MISMATCH; NEVER
+#           alters execution (D2/D3 still catch any wedge that forms).
+#   enforce on mismatch, force THIS step to run eager (cudagraph_mode ->
+#           NONE, same recovery the calculate_kv_scales path uses), which
+#           removes the per-rank graph dispatch from the step.
+#
+# This layer PREVENTS; it never aborts. No ncclCommAbort here (proven
+# unreliable on sm_121) -- if a peer dies mid-exchange we block until the
+# gloo timeout and D2's stuck-RPC watchdog os._exit()s us long before.
+# D1 (external RAS watchdog), D2 (worker abort watchdog) and D3
+# (consensus guard side-thread) remain armed beneath this layer.
+# ---------------------------------------------------------------------------
+_GLM52_FP_MODE = os.environ.get("GLM52_FINGERPRINT_MODE", "off").strip().lower()
+if _GLM52_FP_MODE not in ("off", "observe", "enforce"):
+    _GLM52_FP_MODE = "off"
+
+# ---------------------------------------------------------------------------
+# GLM52 D5 Task 4: TP drafter-gate consensus (mechanism #1 fix).
+#
+# The drafter gate (input_fits_in_drafter in sample_tokens) is a rank-local
+# decision with a DP-only dummy_run guard; a TP run-vs-skip split shifts the
+# NCCL op schedule by 3 all-reduces per MTP pass on the running ranks
+# (incident A: per-rank deltas all multiples of 3, freeze counts ≡ 2 mod 3
+# = the intra-pass MoE final all-reduce). This guard exchanges every rank's
+# intended pass count over the TP gloo cpu_group IN-STEP, pre-launch --
+# before any drafter collective is issued -- and in enforce mode all ranks
+# adopt one consensus decision, so the mismatched collective never launches.
+#
+# Consensus rule: MAX of the proposed counts. A fit-skip rank can always
+# run -- the drafter clamps positions >= max_model_len and pads their slots
+# (spec_decode/utils compute_new_slot_mapping, PADDING_SLOT_ID), and the
+# extra passes only produce draft tokens that verification rejects.
+# Carve-outs where MAX is NOT executable by every rank, forcing all-skip
+# (always executable: it is the stock zero-drafts path):
+#   - a rank has no spec-decode attn metadata (cannot build a real pass);
+#   - ranks disagree on num_spec_tokens_to_schedule itself (a forced run
+#     would launch shape-mismatched collectives).
+#
+# Modes via env GLM52_DRAFTER_GATE:
+#   off     (default) fully inert.
+#   observe exchange + log GLM52_GATE DIVERGENCE; never alters execution.
+#   enforce on divergence, ALL ranks adopt the consensus decision.
+#
+# Alignment rule (same as the D4 fingerprint): exactly one gate exchange
+# per engine iteration on every rank -- the zero-token execute_model path
+# sends a dummy. Gloo ops on the shared cpu_group are issued in the same
+# order on every rank (FP exchange first, gate second). If a peer never
+# arrives we block in gloo; D2's stuck-RPC watchdog (180 s) is the floor.
+# ---------------------------------------------------------------------------
+_GLM52_GATE_MODE = os.environ.get("GLM52_DRAFTER_GATE", "off").strip().lower()
+if _GLM52_GATE_MODE not in ("off", "observe", "enforce"):
+    _GLM52_GATE_MODE = "off"
+
+
+def _glm52_ras_dump_once(reason, rank):
+    """Evidence-before-exit (D5 Task 1): log every rank's per-communicator
+    launched-op counts from the local NCCL RAS agent (one query sees all ranks
+    via RAS's out-of-band network). Called on fingerprint MISMATCH, capped by
+    the caller; bounded and fail-safe -- never blocks or raises into the step."""
+    import json as _json
+    import socket as _socket
+    try:
+        with _socket.create_connection(("127.0.0.1", 28028), timeout=1.5) as s:
+            s.sendall(b"set format json\nverbose status\n")
+            s.settimeout(0.5)
+            buf = b""
+            deadline = time.monotonic() + 2.5
+            while time.monotonic() < deadline:
+                try:
+                    chunk = s.recv(65536)
+                except _socket.timeout:
+                    chunk = b""
+                if chunk:
+                    buf += chunk
+                txt = buf.decode(errors="replace")
+                i = txt.find("{")
+                if i != -1 and txt.count("{") == txt.count("}") \
+                        and txt.rstrip().endswith("}"):
+                    break
+                if not chunk:
+                    break
+        txt = buf.decode(errors="replace")
+        status = _json.loads(txt[txt.find("{"):])
+        comms = [{
+            "hash": c.get("hash", "?"),
+            "size": c.get("size", -1),
+            "missing": c.get("missing_ranks_count", 0),
+            "ranks": [
+                {"rank": r.get("rank", -1),
+                 "counts": r.get("collective_counts", {}),
+                 "total": sum(r.get("collective_counts", {}).values())}
+                for r in sorted(c.get("ranks", []),
+                                key=lambda x: x.get("rank", -1))
+            ],
+        } for c in status.get("communicators", [])]
+        logger.error("GLM52_RAS_DUMP rank=%d trigger=%r %s", rank, reason,
+                     _json.dumps({"communicators": comms}, sort_keys=True))
+    except Exception as e:
+        logger.error("GLM52_RAS_DUMP rank=%d trigger=%r FAILED: %s",
+                     rank, reason, e)
 
 AttnMetadataDict: TypeAlias = dict[str, AttentionMetadata]
 # list when ubatching is enabled
@@ -4107,6 +4222,202 @@ class GPUModelRunner(
         num_reqs = self.input_batch.num_reqs
         return bool(self.discard_request_mask.np[:num_reqs].all())
 
+    # ------------------------------------------------------------------
+    # GLM52 D4: pre-step fingerprint prevention guard (see module header).
+    # ------------------------------------------------------------------
+    _glm52_fp: dict | None = None  # lazy-armed per-instance state
+    # D5 Task 4 instrument: this rank's drafter gate decision from the LAST
+    # step -- (input_fits_in_drafter, drafter_ran, attn_metadata_was_none).
+    # Exchanged in the NEXT step's pre-launch fingerprint: the gate is
+    # per-rank with no TP consensus (the dummy_run guard at the gate is
+    # DP-only), and a run-vs-skip disagreement shifts the pynccl schedule
+    # by exactly one 3-AllReduce MTP pass -- the prime Type-A candidate.
+    _glm52_drafter_last = (-1, -1, -1)  # class default; list on instances
+
+    def _glm52_fp_lazy_init(self) -> dict | None:
+        """One-time arm of the fingerprint guard on first exchange.
+
+        Returns the state dict, or None when the guard cannot run (TP world
+        of 1, no cpu_group, or a prior failure disarmed it).
+        """
+        st = self._glm52_fp
+        if st is not None:
+            return None if st.get("dead") else st
+        try:
+            tp = get_tp_group()
+            cpu_group = tp.cpu_group
+            world = tp.world_size
+            if cpu_group is None or world <= 1:
+                raise RuntimeError(f"no usable TP cpu_group (world={world})")
+            st = {
+                "dead": False,
+                "group": cpu_group,
+                "rank": tp.rank_in_group,
+                "world": world,
+                "step": 0,
+                "mismatches": 0,
+                "enforced": 0,
+            }
+            self._glm52_fp = st
+            logger.info(
+                "GLM52_FINGERPRINT ARMED rank=%d world=%d mode=%s "
+                "(pre-step decision exchange over TP gloo cpu_group)",
+                st["rank"], world, _GLM52_FP_MODE,
+            )
+            return st
+        except Exception:
+            self._glm52_fp = {"dead": True}
+            logger.exception(
+                "GLM52_FINGERPRINT DISARMED: init failed; guard inert "
+                "(D1/D2/D3 layers unaffected)"
+            )
+            return None
+
+    def _glm52_fp_check(self, fingerprint: tuple) -> bool:
+        """Exchange `fingerprint` across TP ranks; True if ranks disagree.
+
+        Blocking CPU-side gloo all_gather on the main thread (~sub-ms on
+        this LAN). Every execute_model() call must perform EXACTLY one
+        exchange so the collectives stay aligned across ranks -- the
+        zero-token early-return path exchanges a dummy fingerprint for
+        this reason. If a peer dies we block until the gloo timeout; D2's
+        stuck-RPC watchdog (180 s) os._exit()s us first by design.
+        """
+        st = self._glm52_fp_lazy_init()
+        if st is None:
+            return False
+        try:
+            gathered: list = [None] * st["world"]
+            torch.distributed.all_gather_object(
+                gathered, fingerprint, group=st["group"]
+            )
+        except Exception:
+            st["dead"] = True
+            logger.exception(
+                "GLM52_FINGERPRINT DISARMED rank=%d step=%d: exchange "
+                "failed; guard inert from here (peers may block until the "
+                "gloo timeout; D2 stuck-RPC watchdog is the floor)",
+                st["rank"], st["step"],
+            )
+            return False
+        st["step"] += 1
+        mismatch = any(fp != gathered[0] for fp in gathered)
+        if mismatch:
+            st["mismatches"] += 1
+            logger.error(
+                "GLM52_FINGERPRINT MISMATCH rank=%d step=%d n=%d mode=%s "
+                "fingerprints=%s",
+                st["rank"], st["step"], st["mismatches"], _GLM52_FP_MODE,
+                {i: fp for i, fp in enumerate(gathered)},
+            )
+            if st["mismatches"] <= 3:
+                # Evidence-before-exit (D5 Task 1): pair the decision-layer
+                # mismatch with the collective-layer per-rank RAS op counts
+                # while every rank is still alive and pre-launch. Bounded
+                # (~3 s), first 3 mismatches only -- this is the one moment
+                # the whole investigation exists to capture.
+                _glm52_ras_dump_once(
+                    f"fingerprint mismatch step={st['step']}", st["rank"])
+        elif st["step"] % 5000 == 0:
+            logger.info(
+                "GLM52_FINGERPRINT OK rank=%d steps=%d mismatches=%d "
+                "enforced=%d",
+                st["rank"], st["step"], st["mismatches"], st["enforced"],
+            )
+        return mismatch
+
+    # D5 Task 4 fix: TP drafter-gate consensus state (see module header).
+    _glm52_gate_st: dict | None = None
+
+    def _glm52_gate_consensus(self, payload: tuple) -> bool | None:
+        """Exchange drafter-gate intent across TP ranks; return consensus.
+
+        `payload` is ("dummy",) from the zero-token execute_model path,
+        else (proposed_pass_count, sched_spec_tokens, fits, md_none).
+        Returns None when all ranks agree, when the divergence is not
+        fixable here (mixed dummy/real: a rank had a zero-token step, the
+        split is upstream of the drafter), or in observe mode -- callers
+        then keep their local decision. In enforce mode, on a real
+        divergence, returns True (all run) / False (all skip); the value
+        is identical on every rank because it is computed from the same
+        gathered data.
+
+        Runs pre-launch: at call time the disagreement is still host-side
+        intent, no drafter collective has been issued, so adopting the
+        consensus prevents the mismatched collective entirely (RFC #48720
+        section 4: prevention is pre-launch only; post-launch is recovery
+        only).
+        """
+        st = self._glm52_fp_lazy_init()  # same TP cpu_group substrate as D4
+        if st is None:
+            return None
+        gst = self._glm52_gate_st
+        if gst is None:
+            gst = self._glm52_gate_st = {"step": 0, "div": 0, "forced": 0}
+            logger.info(
+                "GLM52_GATE ARMED rank=%d world=%d mode=%s "
+                "(in-step drafter-gate consensus over TP gloo cpu_group)",
+                st["rank"], st["world"], _GLM52_GATE_MODE,
+            )
+        try:
+            gathered: list = [None] * st["world"]
+            torch.distributed.all_gather_object(
+                gathered, payload, group=st["group"]
+            )
+        except Exception:
+            # Disarm BOTH exchanges: they share the gloo group, and a
+            # half-completed collective leaves the group's op stream
+            # misaligned across ranks -- continuing would cross-pair FP
+            # and gate exchanges.
+            st["dead"] = True
+            logger.exception(
+                "GLM52_GATE DISARMED rank=%d step=%d: exchange failed; "
+                "gate AND fingerprint inert from here (shared cpu_group; "
+                "D1/D2/D3 layers unaffected)",
+                st["rank"], gst["step"],
+            )
+            return None
+        gst["step"] += 1
+        if all(p == gathered[0] for p in gathered):
+            if gst["step"] % 5000 == 0:
+                logger.info(
+                    "GLM52_GATE OK rank=%d steps=%d div=%d forced=%d",
+                    st["rank"], gst["step"], gst["div"], gst["forced"],
+                )
+            return None
+        gst["div"] += 1
+        logger.error(
+            "GLM52_GATE DIVERGENCE rank=%d step=%d n=%d mode=%s payloads=%s",
+            st["rank"], gst["step"], gst["div"], _GLM52_GATE_MODE,
+            {i: p for i, p in enumerate(gathered)},
+        )
+        if gst["div"] <= 3:
+            # Pair the decision-layer divergence with the collective-layer
+            # RAS op counts while every rank is alive and pre-launch.
+            _glm52_ras_dump_once(
+                f"drafter-gate divergence step={gst['step']}", st["rank"])
+        real = [
+            p for p in gathered
+            if isinstance(p, tuple) and len(p) == 4
+        ]
+        if len(real) != len(gathered):
+            return None  # mixed dummy/real: upstream split, not fixable here
+        if any(p[3] for p in real):
+            consensus = False  # a rank cannot build a real pass: all skip
+        elif len({p[1] for p in real}) > 1:
+            consensus = False  # sched-count split: forced run = shape mismatch
+        else:
+            consensus = max(p[0] for p in real) > 0  # MAX: {0, N} -> run
+        if _GLM52_GATE_MODE != "enforce":
+            return None
+        gst["forced"] += 1
+        logger.error(
+            "GLM52_GATE FORCED rank=%d step=%d consensus=%s local=%s",
+            st["rank"], gst["step"],
+            "run" if consensus else "skip", payload,
+        )
+        return consensus
+
     @torch.inference_mode()
     def execute_model(
         self,
@@ -4161,6 +4472,25 @@ class GPUModelRunner(
                     return make_empty_encoder_model_runner_output(scheduler_output)
 
             if not num_scheduled_tokens:
+                # D4: zero-token step. Exchange a dummy fingerprint so every
+                # execute_model() call performs exactly one exchange and the
+                # gloo collectives stay aligned across ranks. A rank seeing
+                # "dummy" while others see a real fingerprint IS a divergence
+                # and logs as MISMATCH.
+                if _GLM52_FP_MODE != "off":
+                    self._glm52_fp_check(
+                        ("dummy", "none", 0, 0, 0, True,
+                         int(self.input_batch.num_reqs))
+                        + tuple(self._glm52_drafter_last)
+                    )
+                if (
+                    _GLM52_GATE_MODE != "off"
+                    and self.speculative_config is not None
+                ):
+                    # Zero-token step: no sample_tokens() spec branch runs,
+                    # so send the gate dummy here to keep gate exchanges
+                    # 1:1 with peers (same rule as the FP dummy above).
+                    self._glm52_gate_consensus(("dummy",))
                 if (
                     self.parallel_config.distributed_executor_backend
                     == "external_launcher"
@@ -4235,6 +4565,40 @@ class GPUModelRunner(
             num_reqs_padded = (
                 batch_desc.num_reqs if batch_desc.num_reqs is not None else num_reqs
             )
+
+            # D4: all execution decisions for this step are now made -- agree
+            # them across TP ranks BEFORE any kernel launches (module header).
+            if _GLM52_FP_MODE != "off":
+                _glm52_fp_draft_total = (
+                    int(sum(spec_decode_metadata.num_draft_tokens))
+                    if spec_decode_metadata is not None
+                    else 0
+                )
+                _glm52_fp_mismatch = self._glm52_fp_check((
+                    str(cudagraph_mode),   # per-rank dispatch decision (#46097)
+                    str(batch_desc),       # the dispatch key itself
+                    int(num_tokens_unpadded),
+                    int(num_tokens_padded),
+                    _glm52_fp_draft_total,  # post local MTP skip decisions
+                    False,                  # is_dummy_step
+                    int(num_reqs),          # post-abort-processing count
+                ) + tuple(self._glm52_drafter_last))  # last step's drafter gate
+                if _glm52_fp_mismatch and _GLM52_FP_MODE == "enforce":
+                    # Symmetric on all ranks (everyone saw the same gathered
+                    # fingerprints), so every rank forces eager together and
+                    # the divergent per-rank graph dispatch never executes.
+                    # Same recovery the calculate_kv_scales path uses below;
+                    # pad_attn and the attention metadata are computed after
+                    # this point, so the whole step is a consistent eager step.
+                    self._glm52_fp["enforced"] += 1
+                    logger.error(
+                        "GLM52_FINGERPRINT ENFORCE rank=%d: forcing eager "
+                        "(cudagraph_mode %s -> NONE) for this step (n=%d)",
+                        self._glm52_fp["rank"], cudagraph_mode,
+                        self._glm52_fp["enforced"],
+                    )
+                    cudagraph_mode = CUDAGraphMode.NONE
+
             ubatch_slices, ubatch_slices_padded = maybe_create_ubatch_slices(
                 should_ubatch,
                 num_scheduled_tokens_np,
@@ -4553,6 +4917,8 @@ class GPUModelRunner(
         self.input_batch.prev_sampled_token_ids = None
 
         def propose_draft_token_ids(sampled_token_ids):
+            if isinstance(self._glm52_drafter_last, list):
+                self._glm52_drafter_last[1] = 1  # D5 T4: drafter ran
             assert spec_decode_common_attn_metadata is not None
             with record_function_or_nullcontext("gpu_model_runner: draft"):
                 self._draft_token_ids = self.propose_draft_token_ids(
@@ -4575,6 +4941,45 @@ class GPUModelRunner(
             input_fits_in_drafter = self._input_fits_in_drafter(
                 spec_decode_common_attn_metadata
             )
+            # D5 Task 4: record the gate decision; compared across TP ranks
+            # in the NEXT step's fingerprint exchange. drafter_ran flips to
+            # 1 inside propose_draft_token_ids.
+            self._glm52_drafter_last = [
+                int(input_fits_in_drafter),
+                0,
+                int(spec_decode_common_attn_metadata is None),
+            ]
+            if not input_fits_in_drafter:
+                _c = getattr(self, "_glm52_drafter_skips", 0) + 1
+                self._glm52_drafter_skips = _c
+                if _c <= 20 or _c % 1000 == 0:
+                    logger.warning(
+                        "GLM52_DRAFTER skip n=%d: input_fits_in_drafter="
+                        "False (attn_metadata_none=%s) -- un-guarded TP "
+                        "branch", _c,
+                        spec_decode_common_attn_metadata is None,
+                    )
+            # D5 Task 4 fix: TP consensus on the gate decision, in-step,
+            # BEFORE any drafter collective is issued (see module header).
+            # The override below is seen by every later use of
+            # input_fits_in_drafter in this call (run/skip branch, the
+            # zero-drafts block, and draft_after_bookkeeping).
+            if _GLM52_GATE_MODE != "off":
+                _g_sched = int(scheduler_output.num_spec_tokens_to_schedule)
+                _g_consensus = self._glm52_gate_consensus((
+                    _g_sched if input_fits_in_drafter else 0,
+                    _g_sched,
+                    int(input_fits_in_drafter),
+                    int(spec_decode_common_attn_metadata is None),
+                ))
+                if _g_consensus is not None:
+                    input_fits_in_drafter = _g_consensus
+                    # Record the ADOPTED decision in the D4 instrument:
+                    # no divergence reaches the device, so the next-step
+                    # fingerprint should agree (the local intent is in the
+                    # GLM52_GATE DIVERGENCE line).
+                    if isinstance(self._glm52_drafter_last, list):
+                        self._glm52_drafter_last[0] = int(_g_consensus)
             # Whether the drafter runs a GPU model forward (and thus carries
             # TP/EP/DP collectives), independent of padded-batch timing.
             drafter_runs_model_forward = (
@@ -6431,6 +6836,25 @@ class GPUModelRunner(
                 output = self._dummy_sampler_run(last_hidden_states)
         else:
             output = None
+        # Warm compute_logits' vocab-parallel all-gather at the spec-decode row
+        # count (max_num_reqs*(1+num_spec_tokens)), larger than the 1-row-per-
+        # request warmup above. On ROCm/RCCL the larger message connects extra
+        # channels lazily on first use, so if that first use is a live decode
+        # step the connect fails ("no transport for peer on channel N"). Running
+        # it here forces the connect during init.
+        if (
+            self.num_spec_tokens > 0
+            and get_pp_group().is_last_rank
+            and not self.is_pooling_model
+        ):
+            spec_logit_rows = min(
+                self.max_num_reqs * (1 + self.num_spec_tokens),
+                self.max_num_tokens,
+            )
+            if spec_logit_rows > last_hidden_states.shape[0]:
+                self.model.compute_logits(
+                    last_hidden_states[:1].expand(spec_logit_rows, -1).contiguous()
+                )
         self._sync_device()
         del hidden_states, output
         self.encoder_cache.clear()
@@ -7349,6 +7773,7 @@ class GPUModelRunner(
                     layer_cache_dtype_str = (
                         "auto"
                         if kv_cache_spec.kv_quant_mode == KVQuantMode.NONE
+                        and not isinstance(kv_cache_spec, TQFullAttentionSpec)
                         else getattr(
                             kv_cache_spec,
                             "cache_dtype_str",
