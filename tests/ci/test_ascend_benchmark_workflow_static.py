@@ -458,6 +458,10 @@ def test_target_checkout_uses_resilient_git_http_retry_settings():
 
 def test_ascend_torch_stack_is_installed_before_preinstall_preflight():
     text = workflow_text()
+    ensure_script = (
+        Path(__file__).resolve().parents[2]
+        / ".github/workflows/scripts/ensure_ascend_torch_stack.sh"
+    ).read_text(encoding="utf-8")
 
     install_step = text.index("      - name: Install Ascend torch stack for preflight")
     preinstall_preflight_step = text.index(
@@ -465,8 +469,14 @@ def test_ascend_torch_stack_is_installed_before_preinstall_preflight():
     )
 
     assert install_step < preinstall_preflight_step
-    assert '"torch==2.9.0" "torch-npu==2.9.0"' in text
-    assert "import torch, torch_npu" in text
+    assert "bash .github/workflows/scripts/ensure_ascend_torch_stack.sh" in text
+    assert 'ASCEND_TORCH_VERSION="${ASCEND_TORCH_VERSION:-2.10.0}"' in ensure_script
+    assert (
+        'ASCEND_TORCH_NPU_VERSION="${ASCEND_TORCH_NPU_VERSION:-2.10.0}"'
+        in ensure_script
+    )
+    assert "import torch" in ensure_script
+    assert "import torch_npu" in ensure_script
 
 
 def test_l2_targeted_scenario_registry_is_covered_by_parser_tests():
