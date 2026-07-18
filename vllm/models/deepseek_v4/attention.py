@@ -61,6 +61,7 @@ from vllm.v1.kv_cache_interface import (
     MLAAttentionSpec,
     get_kv_quant_mode,
 )
+from vllm.v1.worker.cp_utils import ContextParallelLayout
 
 logger = init_logger(__name__)
 
@@ -284,6 +285,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             vllm_config.scheduler_config.max_num_batched_tokens
         )
         self.max_model_len = vllm_config.model_config.max_model_len
+        self.cp_layout = ContextParallelLayout.from_config(vllm_config)
 
         # Resolve the kv-cache dtype from this backend's block format. The same
         # resolution drives the SWA cache tensor dtype below.
@@ -621,6 +623,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             alignment=576 if uses_fp8_ds_mla_layout else 512,
             model_version="deepseek_v4",
             kv_quant_mode=get_kv_quant_mode(self.kv_cache_dtype),
+            supports_context_parallel=uses_fp8_ds_mla_layout,
         )
 
 
@@ -657,6 +660,9 @@ class DeepseekV4IndexerCache(torch.nn.Module, AttentionLayerBase):
             compress_ratio=self.compress_ratio,
             # 576B for FlashMLA packing; 512B for FlashInfer sparse (#44577).
             alignment=576 if uses_fp8_ds_mla_layout else 512,
+            supports_context_parallel=(
+                self.compress_ratio > 1 and uses_fp8_ds_mla_layout
+            ),
         )
 
     def forward(self): ...
