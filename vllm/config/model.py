@@ -3,7 +3,7 @@
 
 import warnings
 from collections.abc import Callable
-from dataclasses import InitVar, field
+from dataclasses import InitVar, field, replace
 from functools import cached_property
 from typing import TYPE_CHECKING, Any, Literal, cast, get_args
 
@@ -751,6 +751,8 @@ class ModelConfig:
                     "disable the cache with --mm-processor-cache-gb 0."
                 )
 
+            self._apply_mm_prefix_lm_limits()
+
         if self.disable_sliding_window:
             # Set after get_and_verify_max_len to ensure that max_model_len
             # can be correctly capped to sliding window size
@@ -762,6 +764,40 @@ class ModelConfig:
         self._verify_quantization()
         self._verify_cuda_graph()
         self._verify_bnb_config()
+
+    def _apply_mm_prefix_lm_limits(self) -> None:
+        """Disable multimodal prefix attention for text-only serving."""
+        arch = self.model_arch_config
+        if not arch.is_mm_prefix_lm:
+            return
+
+        mm_config = self.get_multimodal_config()
+        if mm_config is None:
+            return
+
+        if mm_config.language_model_only:
+            reason = "--language-model-only is set"
+        else:
+            from vllm.multimodal import MULTIMODAL_REGISTRY
+
+            info = MULTIMODAL_REGISTRY.get_processing_info(self)
+            vision_modalities = {"image", "video"} & info.supported_mm_limits.keys()
+            if not vision_modalities or any(
+                info.allowed_mm_limits[modality] > 0
+                for modality in vision_modalities
+            ):
+                return
+            reason = (
+                "all supported vision modalities are limited to zero via "
+                "--limit-mm-per-prompt"
+            )
+
+        self.model_arch_config = replace(arch, is_mm_prefix_lm=False)
+        logger.info_once(
+            "Disabled mm_prefix attention mode because %s. Attention backends without "
+            "mm_prefix support may now be selected.",
+            reason,
+        )
 
     def get_model_arch_config(
         self,

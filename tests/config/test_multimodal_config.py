@@ -1,9 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
+
 import pytest
 
 from vllm.config.model import ModelConfig
+from vllm.config.model_arch import ModelArchitectureConfig
 from vllm.config.multimodal import MultiModalConfig
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
@@ -59,3 +63,83 @@ def test_mm_encoder_attn_dtype_hash_updates(tmp_path):
     ).compute_hash()
     assert base_hash != fp8_hash
     assert fp8_hash != fp8_static_hash
+
+
+def _make_mm_prefix_model_config(
+    *,
+    language_model_only: bool = False,
+    is_mm_prefix_lm: bool = True,
+) -> ModelConfig:
+    model_config = MagicMock(spec=ModelConfig)
+    model_config.model_arch_config = ModelArchitectureConfig(
+        architectures=["PrefixLMForConditionalGeneration"],
+        model_type="prefix_lm",
+        text_model_type=None,
+        hidden_size=1,
+        total_num_hidden_layers=1,
+        total_num_attention_heads=1,
+        head_size=1,
+        vocab_size=1,
+        total_num_kv_heads=1,
+        num_experts=0,
+        quantization_config=None,
+        is_deepseek_mla=False,
+        is_mm_prefix_lm=is_mm_prefix_lm,
+        rswa_window=None,
+        derived_max_model_len_and_key=(8192.0, "max_position_embeddings"),
+    )
+    model_config.get_multimodal_config.return_value = MultiModalConfig(
+        language_model_only=language_model_only
+    )
+    return model_config
+
+
+@pytest.mark.parametrize(
+    ("supported_limits", "allowed_limits", "expected"),
+    [
+        ({"image": None, "video": None}, {"image": 1, "video": 1}, True),
+        ({"image": None, "video": None}, {"image": 0, "video": 0}, False),
+        ({"image": None}, {"image": 0}, False),
+        (
+            {"image": None, "video": None, "audio": None},
+            {"image": 0, "video": 1, "audio": 1},
+            True,
+        ),
+        ({"audio": None}, {"audio": 0}, True),
+    ],
+)
+def test_mm_prefix_lm_respects_vision_limits(
+    supported_limits: dict[str, int | None],
+    allowed_limits: dict[str, int],
+    expected: bool,
+):
+    model_config = _make_mm_prefix_model_config()
+    info = SimpleNamespace(
+        supported_mm_limits=supported_limits,
+        allowed_mm_limits=allowed_limits,
+    )
+
+    with patch(
+        "vllm.multimodal.MULTIMODAL_REGISTRY.get_processing_info",
+        return_value=info,
+    ):
+        ModelConfig._apply_mm_prefix_lm_limits(model_config)
+
+    assert model_config.model_arch_config.is_mm_prefix_lm is expected
+
+
+def test_language_model_only_disables_mm_prefix_lm():
+    model_config = _make_mm_prefix_model_config(language_model_only=True)
+
+    ModelConfig._apply_mm_prefix_lm_limits(model_config)
+
+    assert not model_config.model_arch_config.is_mm_prefix_lm
+
+
+def test_mm_prefix_limits_noop_for_causal_model():
+    model_config = _make_mm_prefix_model_config(is_mm_prefix_lm=False)
+    original_arch = model_config.model_arch_config
+
+    ModelConfig._apply_mm_prefix_lm_limits(model_config)
+
+    assert model_config.model_arch_config is original_arch
