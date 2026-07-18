@@ -23,7 +23,6 @@ from vllm.model_executor.model_loader.reload.layerwise import (
     record_metadata_for_reloading,
 )
 from vllm.model_executor.model_loader.reload.types import LayerReloadingInfo
-from vllm.model_executor.model_loader.utils import process_weights_after_loading
 
 
 def test_reload_session_wraps_weight_loading(monkeypatch):
@@ -160,20 +159,6 @@ def test_legacy_layerwise_api_preserves_storage():
     assert model.bias is original_bias
     assert torch.equal(model.weight, loaded_weight)
     assert torch.equal(model.bias, loaded_bias)
-
-
-def test_legacy_post_load_hook_still_works_standalone():
-    model = nn.Module()
-    model.quant_method = Mock(spec=QuantizeMethodBase)
-    model.quant_method.uses_meta_device = False
-
-    process_weights_after_loading(
-        model,
-        Mock(dtype=torch.float32, quantization=None),
-        torch.device("cpu"),
-    )
-
-    model.quant_method.process_weights_after_loading.assert_called_once_with(model)
 
 
 def test_initial_quant_processing_uses_device_context(monkeypatch):

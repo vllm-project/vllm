@@ -93,15 +93,6 @@ def initialize_model(
     return model
 
 
-def process_weights_after_loading(
-    model: nn.Module, model_config: ModelConfig, target_device: torch.device
-) -> None:
-    """Process initial-load weights while preserving the legacy entry point."""
-    _process_modules_after_loading(
-        WeightLoadSession(model, target_device), model_config
-    )
-
-
 def _process_modules_after_loading(
     session: WeightLoadSession, model_config: ModelConfig
 ) -> None:
