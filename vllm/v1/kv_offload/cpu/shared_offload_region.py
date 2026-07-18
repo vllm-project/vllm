@@ -115,6 +115,7 @@ class SharedOffloadRegion:
 
         self._base = torch.frombuffer(memoryview(self.mmap_obj), dtype=torch.int8)
         self._views: list[torch.Tensor] = []
+        self._shared_offset = 0
         self.is_pinned: bool = False
 
     def create_next_view(self, tensor_page_size: int) -> torch.Tensor:
@@ -155,6 +156,24 @@ class SharedOffloadRegion:
         self._worker_offset = new_offset
         self._views.append(worker_layer_view)
         return worker_layer_view
+
+    def create_next_shared_view(self, area_size: int) -> torch.Tensor:
+        """Allocate a strided int8 view over an area shared by all workers for
+        one canonical tensor (canonical layout). Areas are carved from the
+        start of each block row; workers write disjoint bytes within them as
+        described by their mappings. Must be called once per canonical tensor,
+        instead of create_next_view."""
+        new_offset = self._shared_offset + area_size
+        assert new_offset <= self._row_stride
+        view = torch.as_strided(
+            self._base,
+            size=(self.num_blocks, area_size),
+            stride=(self._row_stride, 1),
+            storage_offset=self._shared_offset,
+        )
+        self._shared_offset = new_offset
+        self._views.append(view)
+        return view
 
     def create_kv_memoryview(self) -> memoryview:
         """Return a zero-copy memoryview over the entire KV buffer.

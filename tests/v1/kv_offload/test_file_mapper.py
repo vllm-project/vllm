@@ -39,6 +39,7 @@ _MOCK_OFFLOADING_SPEC = MagicMock(spec=OffloadingSpec)
 _MOCK_OFFLOADING_SPEC.vllm_config = _MOCK_VLLM_CONFIG
 _MOCK_OFFLOADING_SPEC.kv_cache_config = _MOCK_KV_CACHE_CONFIG
 _MOCK_OFFLOADING_SPEC.block_size_factor = 1
+_MOCK_OFFLOADING_SPEC.extra_config = {}
 
 
 # ---------------------------------------------------------------------------
@@ -66,13 +67,26 @@ def make_mapper_from_offloading_spec(**kwargs) -> FileMapper:
     mock_vllm_config.parallel_config.rank = kwargs.get("rank", 0)
     mock_vllm_config.use_v2_model_runner = kwargs.get("use_v2_model_runner", False)
 
+    kv_cache_groups = kwargs.get("kv_cache_groups", [])
+    total_kv_heads = kwargs.get("total_kv_heads")
+    if total_kv_heads is None:
+        # Default to genuinely head-sharded groups
+        heads = (
+            getattr(kv_cache_groups[0].kv_cache_spec, "num_kv_heads", 0)
+            if kv_cache_groups
+            else 0
+        )
+        total_kv_heads = heads * kwargs.get("tp_size", 1)
+    mock_vllm_config.model_config.get_total_num_kv_heads.return_value = total_kv_heads
+
     mock_kv_cache_config = MagicMock()
-    mock_kv_cache_config.kv_cache_groups = kwargs.get("kv_cache_groups", [])
+    mock_kv_cache_config.kv_cache_groups = kv_cache_groups
 
     mock_offloading_spec = MagicMock(spec=OffloadingSpec)
     mock_offloading_spec.vllm_config = mock_vllm_config
     mock_offloading_spec.kv_cache_config = mock_kv_cache_config
     mock_offloading_spec.block_size_factor = kwargs.get("block_size_factor", 1)
+    mock_offloading_spec.extra_config = kwargs.get("extra_config", {})
 
     return FileMapper.from_offloading_spec(
         root_dir=kwargs.get("root_dir", "/tmp/cache"),
@@ -224,3 +238,49 @@ def test_parallel_agnostic_disabled_on_v2_model_runner():
     )
     assert fm.fields["tp_size"] == 2
     assert fm.rank == 1
+
+
+def test_parallel_agnostic_disabled_under_cp():
+    # CP token-shards pages per rank, so collapsing rank out of the
+    # namespace would merge different token shards into one file path.
+    fm = make_mapper_from_offloading_spec(
+        tp_size=2,
+        rank=1,
+        dcp_size=2,
+        kv_cache_groups=[_full_attention_group()],
+        parallel_agnostic=True,
+    )
+    assert fm.fields["tp_size"] == 2
+    assert fm.rank == 1
+
+
+def test_parallel_agnostic_disabled_for_replicated_heads():
+    # GQA with tp > total KV heads replicates heads across ranks, so pages
+    # are not head-sharded and must keep per-rank namespacing.
+    fm = make_mapper_from_offloading_spec(
+        tp_size=2,
+        rank=1,
+        kv_cache_groups=[_full_attention_group()],
+        total_kv_heads=4,  # == per-rank heads: replicated, not sharded
+        parallel_agnostic=True,
+    )
+    assert fm.fields["tp_size"] == 2
+    assert fm.rank == 1
+
+
+def test_canonical_layout_changes_storage_namespace():
+    # Canonical bytes are not interchangeable with the legacy layout, so the
+    # schema id must fork the storage namespace.
+    from vllm.v1.attention.backends.utils import set_kv_cache_layout
+
+    set_kv_cache_layout("NHD")
+    try:
+        legacy = make_mapper_from_offloading_spec()
+        canonical = make_mapper_from_offloading_spec(
+            extra_config={"canonical_layout": True}
+        )
+    finally:
+        set_kv_cache_layout(None)
+    assert "canonical_schema" not in legacy.fields
+    assert canonical.fields["canonical_schema"] == "v1-nhd"
+    assert legacy.base_path != canonical.base_path

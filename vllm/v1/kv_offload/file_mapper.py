@@ -11,6 +11,7 @@ from vllm.v1.kv_offload.base import (
     get_offload_block_hash,
     get_offload_group_idx,
 )
+from vllm.v1.kv_offload.sharding import canonical_schema_id
 
 _BASE_PATH_HASH_LEN = 12
 _CONFIG_FILENAME = "config.json"
@@ -36,6 +37,7 @@ class FileMapper:
         kv_cache_groups: list[dict] | None = None,
         inference_engine: str = "vllm",
         parallel_agnostic: bool = False,
+        canonical_schema: str | None = None,
     ):
         """
         Initialize the file mapper. Each worker constructs its own, but
@@ -59,6 +61,11 @@ class FileMapper:
             "kv_cache_groups": kv_cache_groups or [],
             "inference_engine": inference_engine,
         }
+        # The canonical byte format is not interchangeable with the legacy
+        # layout (or with other canonical schema versions/families), so its
+        # identity participates in the storage namespace.
+        if canonical_schema is not None:
+            self.fields["canonical_schema"] = canonical_schema
         self.base_path: str = self._compute_base_path(root_dir, self.fields)
 
     @classmethod
@@ -82,10 +89,10 @@ class FileMapper:
             }
             for group in kv_cache_config.kv_cache_groups
         ]
-        # Only a single full-attention group is parallelism-invariant. MLA is
-        # excluded: its latent KV is replicated per rank, never head-sharded.
-        # The V2 model runner is excluded: its KV layout is not known to be
-        # parallelism-invariant.
+        # Invariant only for a single full-attention group with genuinely
+        # head-sharded, unpacked pages: MLA (replicated latent), replicated
+        # GQA heads, per-token-head scales, CP token sharding, and the V2
+        # runner are all excluded.
         groups = kv_cache_config.kv_cache_groups
         spec = groups[0].kv_cache_spec if len(groups) == 1 else None
         parallel_agnostic = (
@@ -93,6 +100,16 @@ class FileMapper:
             and not vllm_config.use_v2_model_runner
             and isinstance(spec, FullAttentionSpec)
             and not isinstance(spec, MLAAttentionSpec)
+            and spec.num_kv_heads * parallel_config.tensor_parallel_size
+            == vllm_config.model_config.get_total_num_kv_heads()
+            and not spec.kv_quant_mode.is_per_token_head
+            and parallel_config.decode_context_parallel_size == 1
+            and parallel_config.prefill_context_parallel_size == 1
+        )
+        canonical_schema = (
+            canonical_schema_id()
+            if offloading_spec.extra_config.get("canonical_layout", False)
+            else None
         )
         return cls(
             root_dir=root_dir,
@@ -107,6 +124,7 @@ class FileMapper:
             dtype=dtype,
             kv_cache_groups=kv_cache_groups,
             parallel_agnostic=parallel_agnostic,
+            canonical_schema=canonical_schema,
         )
 
     def get_file_name(self, key: OffloadKey) -> str:
