@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from types import SimpleNamespace
+
 import pytest
 import torch
 
@@ -143,6 +145,56 @@ def test_deepseek_v4_prefill_chunk_planning_expands_for_short_sequences():
 
     # the adaptive plan keeps all 5 in one chunk
     assert chunk_plan == [(0, 5, 36, 103)]
+
+
+@pytest.mark.skip_global_cleanup
+def test_flashinfer_sparse_prefill_skips_cudagraph_padding_chunks(monkeypatch):
+    from vllm.models.deepseek_v4.nvidia import flashinfer_sparse as flashinfer_mod
+    from vllm.v1.attention.backends.mla.sparse_swa import DeepseekSparseSWAMetadata
+
+    calls = []
+
+    def fake_sparse_mla(**kwargs):
+        calls.append(kwargs["query"].shape[0])
+
+    monkeypatch.setattr(
+        flashinfer_mod,
+        "flashinfer_trtllm_batch_decode_sparse_mla_dsv4",
+        fake_sparse_mla,
+    )
+
+    attn = SimpleNamespace(
+        compress_ratio=1,
+        PREFILL_CHUNK_SIZE=4,
+        scale=1.0,
+        attn_sink=None,
+        _prepare_query=lambda query, output: query,
+        _as_sparse_cache=lambda cache: cache,
+        _get_workspace=lambda device: torch.empty(0),
+    )
+    swa_metadata = DeepseekSparseSWAMetadata(
+        block_table=torch.empty(0, dtype=torch.int32),
+        slot_mapping=torch.empty(0, dtype=torch.int64),
+        block_size=64,
+        query_start_loc_cpu=torch.tensor([0, 1, 1, 1, 1, 1]),
+        prefill_swa_indices=torch.zeros((2, 1, 128), dtype=torch.int32),
+        prefill_swa_lens=torch.ones(2, dtype=torch.int32),
+        num_prefills=5,
+        num_prefill_tokens=2,
+    )
+    query = torch.zeros((2, 16, 512), dtype=torch.bfloat16)
+
+    flashinfer_mod.DeepseekV4FlashInferSM120Attention._forward_prefill(
+        attn,
+        q=query,
+        compressed_k_cache=None,
+        swa_k_cache=torch.empty((1, 64, 584), dtype=torch.uint8),
+        output=torch.empty_like(query),
+        attn_metadata=None,
+        swa_metadata=swa_metadata,
+    )
+
+    assert calls == [1]
 
 
 def test_flashinfer_sparse_indices_cache(monkeypatch):
