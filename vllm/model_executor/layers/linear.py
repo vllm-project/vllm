@@ -973,6 +973,9 @@ class QKVParallelLinear(ColumnParallelLinear):
                         (e.g. model.layers.0.qkv_proj)
         return_bias: If true, return bias together with outputs in forward pass.
         disable_tp: If true, weights matrix won't be sharded through tp rank.
+        v_head_size: size of each attention value head.
+            If None, assume v_head_size = head_size.
+        fused_qkv_interleaved: If true, QKV weights are fused and interleaved on disk.
     """
 
     def __init__(
@@ -990,10 +993,12 @@ class QKVParallelLinear(ColumnParallelLinear):
         return_bias: bool = True,
         disable_tp: bool = False,
         v_head_size: int | None = None,
+        fused_qkv_interleaved: bool = False,
     ):
         self.hidden_size = hidden_size
         self.head_size = head_size
         self.v_head_size = v_head_size if v_head_size is not None else head_size
+        self.fused_qkv_interleaved = fused_qkv_interleaved
         self.total_num_heads = total_num_heads
         if total_num_kv_heads is None:
             total_num_kv_heads = total_num_heads
@@ -1054,6 +1059,27 @@ class QKVParallelLinear(ColumnParallelLinear):
         }
         return shard_size_mapping.get(loaded_shard_id)
 
+    def _deinterleave_fused_qkv(self, loaded_weight: torch.Tensor) -> torch.Tensor:
+        """De-interleave a per-KV-group fused qkv weight/bias to [Q|K|V].
+
+        The on-disk layout groups each KV head's query heads, key and value
+        together: ``[q_0..q_{g-1}, k, v]`` repeated per KV head, where
+        ``g = total_num_heads // total_num_kv_heads``. This reorders it to the
+        block-contiguous ``[Q_all | K_all | V_all]`` that the fused split below
+        expects. Operates on the output dim (0); trailing dims (hidden, or none
+        for a bias) are preserved. Assumes a uniform head size across q/k/v.
+        """
+        heads = self.total_num_heads
+        kv_heads = self.total_num_kv_heads
+        hs = self.head_size
+        groups = heads // kv_heads
+        rest = loaded_weight.shape[1:]
+        x = loaded_weight.reshape(kv_heads, groups + 2, hs, *rest)
+        q = x[:, :groups].reshape(heads * hs, *rest)
+        k = x[:, groups : groups + 1].reshape(kv_heads * hs, *rest)
+        v = x[:, groups + 1 : groups + 2].reshape(kv_heads * hs, *rest)
+        return torch.cat((q, k, v), dim=0)
+
     def _load_fused_module_from_checkpoint(
         self, param: BasevLLMParameter, loaded_weight: torch.Tensor
     ):
@@ -1066,6 +1092,8 @@ class QKVParallelLinear(ColumnParallelLinear):
         An example of a model with these fused layers:
         https://huggingface.co/microsoft/Phi-3-mini-4k-instruct
         """
+        if self.fused_qkv_interleaved:
+            loaded_weight = self._deinterleave_fused_qkv(loaded_weight)
         shard_offsets = [
             # (shard_id, shard_offset, shard_size)
             ("q", 0, self.total_num_heads * self.head_size),
@@ -1173,6 +1201,8 @@ class QKVParallelLinear(ColumnParallelLinear):
                 assert param_data.shape == loaded_weight.shape
                 param_data.copy_(loaded_weight)
                 return
+            if self.fused_qkv_interleaved:
+                loaded_weight = self._deinterleave_fused_qkv(loaded_weight)
             shard_offsets = [
                 # (shard_id, shard_offset, shard_size)
                 ("q", 0, self.total_num_heads * self.head_size),
