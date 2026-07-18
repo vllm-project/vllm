@@ -633,7 +633,7 @@ def rename_reserved_kwargs(text: str) -> tuple[str, bool]:
                 end += 1
             name = text[index:end]
             look = end
-            while look < length and text[look] in " \t":
+            while look < length and text[look].isspace():
                 look += 1
             if (
                 _python_keyword.iskeyword(name)
