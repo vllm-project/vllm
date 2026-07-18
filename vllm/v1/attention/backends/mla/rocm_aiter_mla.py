@@ -263,8 +263,8 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         )
         # Persist for get_mla_metadata_v1 (decode build): omitting these causes
         # wrong split/reduce metadata for the gfx950 fp8 nhead=32 fold path.
-        self._mla_metadata_q_dtype = q_dtype
-        self._mla_metadata_kv_dtype = kv_dtype
+        self._mla_q_dtype = q_dtype
+        self._mla_kv_dtype = kv_dtype
         max_metadata_qo_len = self._mtp_decode_qlen
         (
             (work_meta_data_size, work_meta_data_type),
@@ -645,8 +645,8 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
                 max_seqlen_qo=max_qo_len,
                 uni_seqlen_qo=uni_qo_len,
                 fast_mode=True,
-                dtype_q=self._mla_metadata_q_dtype,
-                dtype_kv=self._mla_metadata_kv_dtype,
+                dtype_q=self._mla_q_dtype,
+                dtype_kv=self._mla_kv_dtype,
             )
             has_persistent_metadata = True
 
