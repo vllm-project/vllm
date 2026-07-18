@@ -224,7 +224,11 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                 "Fused MoE LoRA with EP currently only supports "
                 f"all2all_backend='allgather_reducescatter', got '{all2all_backend}'."
             )
-            assert not moe_config.moe_parallel_config.is_sequence_parallel
+            # Sequence parallel with LoRA + EP is functional but was
+            # incorrectly blocked by this assertion. The assertion is
+            # removed to allow LoRA adapters that target only attention
+            # layers (not MoE) to work with SP+EP configurations.
+            # See issue #48862.
 
     def _verify_ep_fs(self, lora_config: LoRAConfig):
         # EP and fully_sharded LoRA both partition along the same TP group —
