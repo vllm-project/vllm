@@ -177,6 +177,14 @@ class Worker(WorkerBase):
                     buffer.data.copy_(saved_buffers[name].data)
         self._sleep_saved_buffers = {}
 
+    def get_request_rng_offset(self, request_id: str) -> int | None:
+        """Return the seeded sampler position at an engine-step boundary."""
+        index = self.model_runner.input_batch.req_id_to_index.get(request_id)
+        if index is None:
+            return None
+        generator = self.model_runner.input_batch.generators.get(index)
+        return None if generator is None else generator.get_offset()
+
     def sleep(self, level: int = 1) -> None:
         from vllm.device_allocator.cumem import CuMemAllocator
 

@@ -44,6 +44,56 @@ def engine_client(request: Request) -> EngineClient:
 
 
 router = APIRouter()
+_migration_prepare_lock = asyncio.Lock()
+
+
+@router.post("/migrate")
+async def migrate_request(raw_request: Request):
+    """Control a running-request checkpoint used by an external router."""
+    try:
+        body = await raw_request.json()
+        action = body["action"]
+        request_id = body["request_id"]
+    except (json.JSONDecodeError, KeyError, TypeError) as e:
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST.value,
+            detail=f"Invalid migration request: {e}",
+        ) from e
+
+    client = engine_client(raw_request)
+    core = getattr(client, "engine_core", None)
+    if core is None:
+        raise HTTPException(
+            status_code=HTTPStatus.SERVICE_UNAVAILABLE.value,
+            detail="Migration requires the V1 EngineCore client",
+        )
+    try:
+        external_id = (
+            request_id if request_id.startswith("cmpl-") else f"cmpl-{request_id}-0"
+        )
+        external_map = getattr(
+            getattr(client, "output_processor", None), "external_req_ids", {}
+        )
+        internal_ids = list(external_map.get(external_id, ()))
+        if len(internal_ids) > 1:
+            raise ValueError("migration requires one internal request")
+        engine_request_id = internal_ids[0] if internal_ids else request_id
+        args = (action, engine_request_id, body.get("transfer_id"))
+        if action == "prepare":
+            async with _migration_prepare_lock:
+                try:
+                    await core.call_utility_async("pause_scheduler", "keep", False)
+                    result = await core.call_utility_async("migrate_request", *args)
+                finally:
+                    await core.call_utility_async("resume_scheduler")
+        else:
+            result = await core.call_utility_async("migrate_request", *args)
+    except Exception as e:
+        raise HTTPException(
+            status_code=HTTPStatus.CONFLICT.value,
+            detail=str(e),
+        ) from e
+    return JSONResponse(content=result)
 
 
 @router.post(

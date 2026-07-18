@@ -74,6 +74,8 @@ class MooncakeXferMetadata(
     remote_port: int
     remote_tp_size: int
     remote_tp_rank: int
+    remote_pp_size: int
+    remote_pp_rank: int
     req_blocks: dict[ReqId, tuple[TransferId, list[int]]]
     kv_caches_base_addr: list[int]
 
@@ -492,12 +494,9 @@ class MooncakeConnectorWorker:
         dp_rank = parallel_config.data_parallel_index
         dp_local_rank = parallel_config.data_parallel_rank_local
         self.dp_rank = dp_local_rank if parallel_config.local_engines_only else dp_rank
-        pp_size = vllm_config.parallel_config.pipeline_parallel_size
-        if pp_size > 1:
-            raise ValueError(
-                "Mooncake Transfer Engine does not support pipeline parallelism yet."
-            )
-        self.pp_rank = get_pp_group().rank_in_group
+        pp_group = get_pp_group()
+        self.pp_rank = pp_group.rank_in_group
+        self.pp_size = pp_group.world_size
 
         self.kv_caches_base_addr: list[int] = []
         self.device_kv_caches: dict[str, torch.Tensor] = {}
@@ -683,17 +682,37 @@ class MooncakeConnectorWorker:
     async def send_kv_to_decode(
         self, identity: bytes, sock: zmq.asyncio.Socket, meta: MooncakeXferMetadata
     ):
-        pending_reqs: dict[ReqId, SendBlockMeta] = {}
-        remote_tp_ranks = self.kv_topo.get_target_remote_ranks(meta.remote_tp_size)
-        if self.tp_rank not in remote_tp_ranks:
-            # This D worker does not pair with the P worker.
-            msg = f"This P tp_rank {self.tp_rank} not in remote D target ranks {remote_tp_ranks}"  # noqa: E501
+        async def reject(msg: str):
             logger.error(msg)
             response = MooncakeXferResponse(
-                status=MooncakeXferResponseStatus.ERROR,
-                err_msg=msg,
+                status=MooncakeXferResponseStatus.ERROR, err_msg=msg
             )
             await sock.send_multipart((identity, self._encoder.encode(response)))
+
+        if meta.remote_pp_size != self.pp_size or meta.remote_pp_rank != self.pp_rank:
+            msg = (
+                "Mooncake requires matching pipeline topology and stages: "
+                f"local PP={self.pp_size}, rank={self.pp_rank}; "
+                f"remote PP={meta.remote_pp_size}, rank={meta.remote_pp_rank}"
+            )
+            await reject(msg)
+            return
+        pending_reqs: dict[ReqId, SendBlockMeta] = {}
+        if meta.remote_tp_size != self.tp_size:
+            msg = (
+                "Mooncake request migration requires matching tensor parallel "
+                f"topology: local TP={self.tp_size}, remote TP={meta.remote_tp_size}"
+            )
+            await reject(msg)
+            return
+        remote_tp_ranks = self.kv_topo.get_target_remote_ranks(meta.remote_tp_size)
+        if meta.remote_tp_rank not in remote_tp_ranks:
+            # This D worker does not pair with the P worker.
+            msg = (
+                f"P tp_rank {self.tp_rank} is not paired with remote D tp_rank "
+                f"{meta.remote_tp_rank}; expected one of {remote_tp_ranks}"
+            )
+            await reject(msg)
             return
         for d_req_id, (transfer_id, _) in meta.req_blocks.items():
             if transfer_id not in self.reqs_need_send:
@@ -1047,6 +1066,8 @@ class MooncakeConnectorWorker:
             remote_port=self.rpc_port,
             remote_tp_size=self.tp_size,
             remote_tp_rank=self.tp_rank,
+            remote_pp_size=self.pp_size,
+            remote_pp_rank=self.pp_rank,
             req_blocks={
                 req_id: (pull_meta.transfer_id, pull_meta.local_block_ids)
                 for req_id, pull_meta in pull_metas.items()
@@ -1151,6 +1172,12 @@ class MooncakeConnectorWorker:
         remote_tp_ranks = self.kv_topo.get_target_remote_ranks_from_engine_id(
             remote_engine_id
         )
+        remote_tp_size = self._tp_size[remote_engine_id]
+        if remote_tp_size != self.tp_size:
+            raise ValueError(
+                "Mooncake request migration requires matching tensor parallel "
+                f"topology: local TP={self.tp_size}, remote TP={remote_tp_size}"
+            )
         count = len(remote_tp_ranks)
         if count != 1:
             logger.error("Mooncake: Heterogeneous TP is not supported yet.")
@@ -1160,7 +1187,13 @@ class MooncakeConnectorWorker:
         for pull_meta in pull_metas.values():
             pull_meta.pull_tasks_count = count
         for remote_tp_rank in remote_tp_ranks:
-            worker_addr = self._remote_agents[remote_engine_id][remote_tp_rank][0]
+            pp_workers = self._remote_agents[remote_engine_id][remote_tp_rank]
+            if set(pp_workers) != set(range(self.pp_size)):
+                raise ValueError(
+                    "Mooncake requires matching pipeline parallel topology: "
+                    f"local PP={self.pp_size}, remote stages={sorted(pp_workers)}"
+                )
+            worker_addr = pp_workers[self.pp_rank]
             asyncio.create_task(
                 self.receive_kv_from_single_worker(worker_addr, pull_metas)
             )

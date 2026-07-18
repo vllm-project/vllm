@@ -24,6 +24,7 @@ from vllm.logger import init_logger
 from vllm.logging_utils.dump_input import dump_engine_exception
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.sampling_params import SamplingType
 from vllm.tasks import POOLING_TASKS, SupportedTask
 from vllm.tracing import instrument, maybe_init_worker_tracer
 from vllm.transformers_utils.config import maybe_register_config_serialize_by_value
@@ -147,6 +148,7 @@ class EngineCore:
             block_size=scheduler_block_size,
         )
         self.use_spec_decode = vllm_config.speculative_config is not None
+        self._request_migrations: dict[str, tuple[int, dict[str, Any] | None]] = {}
         if self.scheduler.connector is not None:  # type: ignore
             self.model_executor.init_kv_output_aggregator(self.scheduler.connector)  # type: ignore
 
@@ -728,6 +730,100 @@ class EngineCore:
         kwargs: dict[str, Any] | None = None,
     ) -> list[_R]:
         return self.model_executor.collective_rpc(method, timeout, args, kwargs)
+
+    def migrate_request(
+        self, action: str, request_id: str, transfer_id: str | None = None
+    ) -> dict[str, Any]:
+        """Checkpoint a decode request so Mooncake can move its KV blocks."""
+        request = self.scheduler.requests.get(request_id)  # type: ignore[attr-defined]
+        if action == "commit":
+            self._request_migrations.pop(request_id, None)
+            return {"request_id": request_id, "state": "committed"}
+        if action == "abort":
+            saved = self._request_migrations.pop(request_id, None)
+            if request is not None and saved is not None and not request.is_finished():
+                request.max_tokens, request.kv_transfer_params = saved
+                return {"request_id": request_id, "state": "resumed"}
+            return {"request_id": request_id, "state": "checkpointed"}
+        if action != "prepare" or not transfer_id:
+            raise ValueError("action must be prepare, commit, or abort")
+        if self.use_spec_decode:
+            raise ValueError("speculative decoding migration is not supported")
+        if request is None or request.status != RequestStatus.RUNNING:
+            raise ValueError(f"request {request_id} is not running")
+        if request.num_output_placeholders:
+            raise ValueError("request has pending async outputs")
+        if request.num_computed_tokens + 1 != request.num_tokens:
+            raise ValueError("request is not at a decode boundary")
+        if request_id in self._request_migrations:
+            raise ValueError(f"request {request_id} is already migrating")
+        if request.num_output_tokens + 1 >= request.max_tokens:
+            raise ValueError("request is too close to its output limit")
+
+        sampling = request.sampling_params
+        if sampling is None or sampling.n != 1:
+            raise ValueError("migration requires a single completion")
+        if sampling.sampling_type == SamplingType.RANDOM:
+            raise ValueError("sampling migration requires an explicit seed")
+        config = self.vllm_config.kv_transfer_config
+        if config is None or config.kv_connector != "MooncakeConnector":
+            raise ValueError("migration requires MooncakeConnector")
+        if config.kv_role not in ("kv_producer", "kv_both"):
+            raise ValueError("source instance must be a KV producer")
+
+        offsets: list[int | None] = self.collective_rpc(
+            "get_request_rng_offset", args=(request_id,)
+        )
+        generator_offsets = {int(x) for x in offsets if x is not None}
+        if len(generator_offsets) > 1:
+            raise ValueError("worker RNG offsets disagree")
+        generator_offset = next(iter(generator_offsets), None)
+        if (
+            sampling.sampling_type == SamplingType.RANDOM_SEED
+            and generator_offset is None
+        ):
+            raise ValueError("request RNG state is unavailable")
+
+        self._request_migrations[request_id] = (
+            request.max_tokens,
+            request.kv_transfer_params,
+        )
+        try:
+            request.kv_transfer_params = {
+                "do_remote_decode": True,
+                "do_remote_prefill": False,
+                "transfer_id": transfer_id,
+            }
+            connector = getattr(self.scheduler, "connector", None)
+            kv_cache_manager = getattr(self.scheduler, "kv_cache_manager", None)
+            if connector is None or kv_cache_manager is None:
+                raise ValueError("scheduler does not support request KV migration")
+            blocks = kv_cache_manager.get_blocks(request_id)
+            connector.update_state_after_alloc(request, blocks, 0)
+        except Exception:
+            request.max_tokens, request.kv_transfer_params = (
+                self._request_migrations.pop(request_id)
+            )
+            raise
+        # The next sampled token closes the source stream at a decode boundary.
+        # The router discards and deterministically re-samples that token.
+        request.max_tokens = request.num_output_tokens + 1
+        return {
+            "request_id": request_id,
+            "state": "checkpointing",
+            "transfer_id": transfer_id,
+            "engine_id": config.engine_id,
+            "bootstrap_port": int(os.getenv("VLLM_MOONCAKE_BOOTSTRAP_PORT", "8998")),
+            "generator_offset": generator_offset,
+            "num_output_tokens": request.num_output_tokens,
+            "num_computed_tokens": request.num_computed_tokens,
+            "tensor_parallel_size": (
+                self.vllm_config.parallel_config.tensor_parallel_size
+            ),
+            "pipeline_parallel_size": (
+                self.vllm_config.parallel_config.pipeline_parallel_size
+            ),
+        }
 
     def preprocess_add_request(self, request: EngineCoreRequest) -> tuple[Request, int]:
         """Preprocess the request.

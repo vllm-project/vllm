@@ -1059,6 +1059,9 @@ class GPUModelRunner(
             ):
                 generator = torch.Generator(device=self.device)
                 generator.manual_seed(sampling_params.seed)
+                extra_args = sampling_params.extra_args or {}
+                if (offset := extra_args.get("generator_offset")) is not None:
+                    generator.set_offset(int(offset))
             else:
                 generator = None
 
