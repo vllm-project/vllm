@@ -16,7 +16,7 @@ from vllm.model_executor.layers.attention.mla_attention import (
 from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
 from vllm.utils.platform_utils import num_compute_units
-from vllm.utils.torch_utils import is_quantized_kv_cache, np_to_pinned_tensor
+from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -36,6 +36,10 @@ from vllm.v1.attention.backends.utils import (
     split_decodes_and_prefills,
     split_prefill_chunks,
 )
+# --- SM12x: activate portable Triton sparse-MLA before the native ops are
+# copied into this module's namespace (must precede the import below). ---
+from vllm.v1.attention.backends.mla import patch_flashmla_ops as _sm12x_pfo  # noqa: E402
+_sm12x_pfo.apply()
 from vllm.v1.attention.ops.flashmla import (
     FlashMLASchedMeta,
     flash_mla_sparse_fwd,
@@ -127,7 +131,7 @@ class FlashMLASparseBackend(AttentionBackend):
 
     @classmethod
     def supports_compute_capability(cls, capability: DeviceCapability) -> bool:
-        return capability.major in [9, 10]
+        return capability.major in [9, 10, 12]
 
     @staticmethod
     def get_kv_cache_shape(
@@ -137,7 +141,7 @@ class FlashMLASparseBackend(AttentionBackend):
         head_size: int,
         cache_dtype_str: str = "auto",
     ) -> tuple[int, ...]:
-        if cache_dtype_str == "fp8_ds_mla":
+        if head_size == 576:  # fp8_ds_mla V3.2: 576 latent + 80 meta = 656
             # V3.2 main MLA: 656-byte custom storage format. See module docstring.
             return (num_blocks, block_size, 656)
         else:
@@ -503,7 +507,7 @@ class FlashMLASparseMetadataBuilder(AttentionMetadataBuilder[FlashMLASparseMetad
         # Zero-fill for cudagraphs
         self.req_id_per_token_buffer.fill_(0)
         self.req_id_per_token_buffer[: req_id_per_token.shape[0]].copy_(
-            np_to_pinned_tensor(req_id_per_token), non_blocking=True
+            torch.from_numpy(req_id_per_token), non_blocking=True
         )
         req_id_per_token = self.req_id_per_token_buffer[:num_tokens]
 
@@ -540,8 +544,28 @@ class FlashMLASparseMetadataBuilder(AttentionMetadataBuilder[FlashMLASparseMetad
 class FlashMLASparseImpl(SparseMLAAttentionImpl[FlashMLASparseMetadata]):
     @staticmethod
     def _compute_fp8_decode_padded_heads(num_heads: int) -> int:
-        # FP8 decode kernel only supports h_q = 64 or 128
-        # Compute padded head count for decode
+        # Raw FlashMLA fp8 decode kernel supports h_q = 64 or 128 only, but the
+        # b12x / Triton sm12x sparse-MLA path used on GB10 (sm_121) accepts
+        # %16 alignment (b12x_sparse_helpers falls to mg_n_hg=1 when %32 != 0).
+        # At high TP the per-rank head count is small (GLM-5.2: 64 heads ->
+        # 16/rank @ TP=4), so padding 16 -> 64 wasted 75% of the fp8 attention
+        # compute; padding to 16 (i.e. not at all at TP=4) eliminates it.
+        #
+        # GB10 4-node TP=4 bench (GLM-5.2 QuantTrio, in-ckpt MTP k=4, cudagraph
+        # FULL, kv fp8_ds_mla, llama-benchy) prefill tok/s, 64-pad -> 32 -> 16:
+        #   depth 0    498 -> 666 -> 722
+        #   depth 8k   509 -> 671 -> 736
+        #   depth 32k  461 -> 592 -> 626
+        # Decode is unchanged between 32 and 16 once normalized for spec-decode
+        # acceptance variance; output coherence verified at both. Credit:
+        # back199640 (GB10 user forum) for the original 64->32 fix; the 32->16
+        # step exploits the helper's mg_n_hg=1 path.
+        # WARNING: below 32 heads the raw-FlashMLA fallback (h_q 64/128) is no
+        # longer reachable -- b12x must be installed for the fp8 decode path.
+        if num_heads <= 16:
+            return 16
+        if num_heads <= 32:
+            return 32
         return 64 if num_heads <= 64 else 128
 
     def __init__(
@@ -800,17 +824,39 @@ class FlashMLASparseImpl(SparseMLAAttentionImpl[FlashMLASparseMetadata]):
             q_padded[:, :, :actual_num_heads, :] = q
             q = q_padded
 
-        out, lse = flash_mla_with_kvcache(
-            q=q,
-            k_cache=kv_c_and_k_pe_cache.view(torch.uint8).unsqueeze(-2),
-            block_table=kernel_metadata.dummy_block_table,
-            head_dim_v=512,
-            cache_seqlens=kernel_metadata.cache_lens,
-            tile_scheduler_metadata=kernel_metadata.scheduler_metadata,
-            is_fp8_kvcache=True,
-            indices=topk_indices,
-            softmax_scale=self.softmax_scale,
-        )
+        kv_cache_uint8 = kv_c_and_k_pe_cache.view(torch.uint8)
+        b12x_result = None
+        try:
+            from vllm.v1.attention.ops.deepseek_v4_ops.b12x_sparse_helpers import (
+                b12x_glm_mla_attention,
+            )
+
+            b12x_result = b12x_glm_mla_attention(
+                q=q,
+                kv_cache=kv_cache_uint8,
+                topk_indices=topk_indices,
+                softmax_scale=self.softmax_scale,
+            )
+        except Exception as exc:
+            logger.warning_once(
+                "B12x GLM sparse MLA failed; falling back to SM12x path: %r",
+                exc,
+            )
+
+        if b12x_result is None:
+            out, lse = flash_mla_with_kvcache(
+                q=q,
+                k_cache=kv_cache_uint8.unsqueeze(-2),
+                block_table=kernel_metadata.dummy_block_table,
+                head_dim_v=512,
+                cache_seqlens=kernel_metadata.cache_lens,
+                tile_scheduler_metadata=kernel_metadata.scheduler_metadata,
+                is_fp8_kvcache=True,
+                indices=topk_indices,
+                softmax_scale=self.softmax_scale,
+            )
+        else:
+            out, lse = b12x_result
 
         # Slice output back to actual head count if we padded
         if actual_num_heads < padded_num_heads:
