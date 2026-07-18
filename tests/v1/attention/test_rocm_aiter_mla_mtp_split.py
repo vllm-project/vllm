@@ -89,8 +89,8 @@ def _builder(
         _mla_reduce_indptr=torch.empty(1, dtype=torch.int32),
         _mla_reduce_final_map=torch.empty(1, dtype=torch.int32),
         _mla_reduce_partial_map=torch.empty(1, dtype=torch.int32),
-        _mla_metadata_q_dtype=torch.bfloat16,
-        _mla_metadata_kv_dtype=torch.bfloat16,
+        _mla_q_dtype=torch.bfloat16,
+        _mla_kv_dtype=torch.bfloat16,
         decode_attn_out_dtype=torch.bfloat16,
     )
 
@@ -186,8 +186,8 @@ def test_mtp_builder_init_sizes_native_fp8_metadata(monkeypatch):
             "fast_mode": True,
         }
     ]
-    assert builder._mla_metadata_q_dtype == dtypes.fp8
-    assert builder._mla_metadata_kv_dtype == dtypes.fp8
+    assert builder._mla_q_dtype == dtypes.fp8
+    assert builder._mla_kv_dtype == dtypes.fp8
 
 
 def test_mtp_decode_qlen4_keeps_uniform_rows_with_metadata(monkeypatch):
