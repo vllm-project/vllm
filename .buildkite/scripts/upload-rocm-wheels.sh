@@ -28,6 +28,7 @@ echo "S3 Bucket: $BUCKET"
 echo "S3 Path: $ROCM_SUBPATH"
 echo "Commit: $BUILDKITE_COMMIT"
 echo "Branch: $BUILDKITE_BRANCH"
+echo "Nightly: $NIGHTLY"
 echo "========================================"
 
 # ======== Part 0: Setup Python and helpers ========
