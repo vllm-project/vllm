@@ -66,6 +66,15 @@ class OCP_MXQuantizationEmulationTritonExperts(TritonExperts):
         self.quant_config._w1.scale = None
         self.quant_config._w2.scale = None
 
+        # Activations are fake-QDQ'd to bf16 in `apply` (via moe_kernel_quantize_input),
+        # so the underlying bf16 TritonExperts must see no activation scale. For a_fp8
+        # schemes `_a1.scale` holds a static fp8 scale; left set, TritonExperts.apply
+        # falls back to it (`a1q_scale or self.a1_scale`) and the bf16 kernel trips
+        # `assert A_scale is None`. a_mxfp4 schemes have no static scale, so this is a
+        # no-op there.
+        self.quant_config._a1.scale = None
+        self.quant_config._a2.scale = None
+
         self.quantization_emulation = True
 
         if self.ocp_mx_scheme in {
