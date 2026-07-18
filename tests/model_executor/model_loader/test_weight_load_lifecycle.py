@@ -58,7 +58,7 @@ def test_quant_processing_runs_once_per_load():
     module.quant_method.process_weights_after_loading.assert_called_once_with(module)
 
 
-def test_initial_load_finishes_quant_before_attention(monkeypatch):
+def test_initial_load_processes_quant_before_finalizing_attention_runtime(monkeypatch):
     model = nn.Sequential(nn.Linear(1, 1), nn.ReLU())
     session = WeightLoadSession(model, torch.device("cpu"))
     calls = []
@@ -67,8 +67,8 @@ def test_initial_load_finishes_quant_before_attention(monkeypatch):
     )
     monkeypatch.setattr(
         session,
-        "process_attention",
-        lambda module, _: calls.append(("attention", module)),
+        "finalize_attention_runtime",
+        lambda module, _: calls.append(("attention_runtime", module)),
     )
     monkeypatch.setattr(
         "vllm.model_executor.model_loader.utils.POST_LOAD_ATTENTION_TYPES",
@@ -80,11 +80,11 @@ def test_initial_load_finishes_quant_before_attention(monkeypatch):
     modules = list(model.modules())
     assert calls == [
         *(("quant", module) for module in modules),
-        ("attention", model[1]),
+        ("attention_runtime", model[1]),
     ]
 
 
-def test_attention_processing_runs_once_without_type_discovery():
+def test_attention_runtime_finalization_runs_once_without_type_discovery():
     class PostLoadModule(nn.Module):
         def __init__(self):
             super().__init__()
@@ -96,8 +96,8 @@ def test_attention_processing_runs_once_without_type_discovery():
     module = PostLoadModule()
     session = WeightLoadSession(nn.Module(), torch.device("cpu"))
 
-    session.process_attention(module, torch.float32)
-    session.process_attention(module, torch.float32)
+    session.finalize_attention_runtime(module, torch.float32)
+    session.finalize_attention_runtime(module, torch.float32)
 
     assert module.calls == 1
 

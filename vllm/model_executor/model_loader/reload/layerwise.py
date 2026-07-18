@@ -326,7 +326,7 @@ def _finalize_attention_layer(
         )
     else:
         _place_kernel_tensors(layer, info)
-    session.process_attention(layer, act_dtype)
+    session.finalize_attention_runtime(layer, act_dtype)
 
 
 def _abort_layerwise_loading(model: torch.nn.Module) -> None:

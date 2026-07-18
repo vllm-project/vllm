@@ -23,7 +23,7 @@ class WeightLoadSession:
         self.model = model
         self.initial_load_device = initial_load_device
         self._processed_quant: set[nn.Module] = set()
-        self._processed_attention: set[nn.Module] = set()
+        self._finalized_attention_runtime: set[nn.Module] = set()
         self._uses_layerwise_loading = initial_load_device is None or any(
             getattr(getattr(module, "quant_method", None), "uses_meta_device", False)
             for module in model.modules()
@@ -107,8 +107,10 @@ class WeightLoadSession:
         if _process_quant_method(module, self.initial_load_device):
             self._processed_quant.add(module)
 
-    def process_attention(self, module: nn.Module, act_dtype: torch.dtype) -> None:
-        if module in self._processed_attention:
+    def finalize_attention_runtime(
+        self, module: nn.Module, act_dtype: torch.dtype
+    ) -> None:
+        if module in self._finalized_attention_runtime:
             return
         process_weights = module.process_weights_after_loading  # type: ignore[attr-defined]
         if self.initial_load_device is None:
@@ -120,7 +122,7 @@ class WeightLoadSession:
 
             with device_loading_context(module, self.initial_load_device):
                 process_weights(act_dtype)
-        self._processed_attention.add(module)
+        self._finalized_attention_runtime.add(module)
 
     def _unbind(self) -> None:
         if get_active_weight_load_session(self.model) is self:

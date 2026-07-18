@@ -111,7 +111,7 @@ def _process_modules_after_loading(
         session.process_quant(module)
     for module in model.modules():
         if isinstance(module, POST_LOAD_ATTENTION_TYPES):
-            session.process_attention(module, model_config.dtype)
+            session.finalize_attention_runtime(module, model_config.dtype)
     _process_hpc_modules_after_loading(model)
 
     if model_config.quantization == "torchao":
