@@ -909,7 +909,7 @@ def w8a8_triton_block_scaled_mm(
         Bs: The per-block quantization scale for `B`.
         block_size: The block size for per-block quantization. It should
         be 2-dim, e.g., [128, 128].
-        output_dytpe: The dtype of the returned tensor.
+        output_dtype: The dtype of the returned tensor.
     Returns:
         torch.Tensor: The result of matmul.
     """

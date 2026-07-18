@@ -341,7 +341,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     self.speculative_config,
                     self.device,
                 )
-            self.prompt_logprobs_worker = PromptLogprobsWorker(self.max_num_reqs)
+            self.prompt_logprobs_worker = PromptLogprobsWorker(
+                self.max_num_reqs,
+                logprobs_mode=self.model_config.logprobs_mode,
+            )
             self.structured_outputs_worker = StructuredOutputsWorker(
                 max_num_logits=self.max_num_reqs * self.decode_query_len,
                 vocab_size=self.vocab_size,
@@ -472,9 +475,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             decode_query_len=self.decode_query_len,
             lora_capture_cases=self.lora_capture_cases,
         )
-        if self.speculator is not None:
-            self.speculator.init_cudagraph_manager(cudagraph_mode)
-
         check_attention_cp_compatibility(self.vllm_config)
         if isinstance(self.speculator, DraftModelSpeculator):
             # HACK(woosuk)
@@ -485,6 +485,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.input_buffers,
                 self.attn_groups,
             )
+        if self.speculator is not None:
+            # After set_attn, so the speculator can size its cudagraph mode
+            # to its own attention support.
+            self.speculator.init_cudagraph_manager(cudagraph_mode)
 
         self.kv_caches: list[torch.Tensor] = []
         kv_caches_dict = init_kv_cache(
