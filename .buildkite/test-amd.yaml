@@ -1922,10 +1922,10 @@ steps:
 
 - label: Multi-Modal Processor (CPU) %N # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
   dind: false
-  agent_pool: mi300_1
-  parallelism: 4
+  agent_pool: mi250_1
+  parallelism: 6
   optional: true
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
@@ -2540,9 +2540,9 @@ steps:
 
 - label: V1 others (CPU) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
   dind: false
-  agent_pool: mi300_1
+  agent_pool: mi250_1
   optional: true
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
