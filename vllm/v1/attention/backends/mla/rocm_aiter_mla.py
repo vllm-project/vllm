@@ -139,9 +139,6 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
     # TODO(luka, lucas): audit this as part of:
     #  https://github.com/vllm-project/vllm/issues/22945
     _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
-    # UNIFORM covers both cases: MTP verification presents uniform qlen>1 decode
-    # batches (consumed natively once vLLM supplies causal persistent metadata),
-    # and without MTP the decode qlen is always 1, a trivially uniform batch.
     query_len_support: ClassVar[QueryLenSupport] = QueryLenSupport.UNIFORM
 
     @staticmethod
