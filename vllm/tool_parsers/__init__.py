@@ -70,6 +70,10 @@ _TOOL_PARSERS_TO_REGISTER = {
         "iquest_coder_tool_parser",
         "IquestCoderToolParser",
     ),
+    "iquest_coder_v2": (
+        "iquest_coder_v2_tool_parser",
+        "IquestCoderV2ToolParser",
+    ),
     "jamba": (
         "jamba_tool_parser",
         "JambaToolParser",

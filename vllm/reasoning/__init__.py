@@ -56,6 +56,10 @@ _REASONING_PARSERS_TO_REGISTER = {
         "iquest_reasoning_parser",
         "IquestReasoningParser",
     ),
+    "iquest_coder_v2": (
+        "iquest_coder_v2_reasoning_parser",
+        "IquestCoderV2ReasoningParser",
+    ),
     "kimi_k2": (
         "deepseek_v3_reasoning_parser",
         "DeepSeekV3ReasoningWithThinkingParser",
