@@ -41,7 +41,23 @@ def _ensure_dirs(path: str) -> None:
     os.makedirs(os.path.dirname(path), exist_ok=True)
 
 
-def store_block(
+def _validate_offsets(view: memoryview, offsets: list[int], block_size: int) -> None:
+    """Raise if any block would read/write past the bounds of `view`.
+
+    Without this, an out-of-range offset silently clips to a shorter (or
+    empty) slice instead of failing, since memoryview slicing follows
+    Python's slice-clamping semantics rather than raising.
+    """
+    total_len = len(view.cast("B"))
+    for offset in offsets:
+        if offset < 0 or offset + block_size > total_len:
+            raise ValueError(
+                f"block offset {offset} (block_size {block_size}) is out of "
+                f"bounds for a buffer of size {total_len}"
+            )
+
+
+def _store_block(
     dest_path: str,
     buffer: memoryview,
     offset: int,
@@ -89,7 +105,7 @@ def store_block(
         raise
 
 
-def load_block(
+def _load_block(
     source_path: str,
     view: memoryview,
     offset: int,
@@ -134,6 +150,8 @@ def batch_store_block(
     Each block buffer[offsets[i] : offsets[i]+block_size] is written atomically
     to dest_paths[i] via a temp-file rename.  Raises on first error.
     """
+    _validate_offsets(view, offsets, block_size)
+
     if _HAS_FSIO_C:
         view_B = view.cast("B")
         view_slices = [view_B[x : x + block_size] for x in offsets]
@@ -141,7 +159,7 @@ def batch_store_block(
         return batch_store_block_C(tmp_paths, paths, view_slices)
 
     for path, offset in zip(paths, offsets):
-        store_block(path, view, offset, block_size)
+        _store_block(path, view, offset, block_size)
 
 
 def batch_load_block(
@@ -156,10 +174,12 @@ def batch_load_block(
     Block i is read from source_paths[i] into view[offsets[i] : offsets[i]+block_size].
     Raises on first error and removes the offending file.
     """
+    _validate_offsets(view, offsets, block_size)
+
     if _HAS_FSIO_C:
         view_B = view.cast("B")
         view_slices = [view_B[x : x + block_size] for x in offsets]
         return batch_load_block_C(paths, view_slices)
 
     for path, offset in zip(paths, offsets):
-        load_block(path, view, offset, block_size)
+        _load_block(path, view, offset, block_size)
