@@ -440,7 +440,10 @@ def test_derive_mixed_model_with_dcp():
     assert mappings["attn"].store_runs
     # Uncertifiable layers degrade to rank-private, never disappear
     assert not mappings["quant"].parallel_invariant
-    assert mappings["quant"].canonical_page_size_bytes == 4 * 512
+    assert (
+        mappings["quant"].canonical_page_size_bytes
+        == 4 * quant_spec.unpadded_page_size_bytes
+    )
 
 
 def test_derive_refuses_foreign_worker_groups():
