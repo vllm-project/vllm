@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Per-phase cold-start OTEL span consumer for vllm bench startup."""
 
+import json
 import logging
 import threading
 import time
@@ -33,6 +34,7 @@ try:
         ExportTraceServiceResponse,
     )
     from opentelemetry.proto.collector.trace.v1.trace_service_pb2_grpc import (
+        TraceServiceServicer,
         add_TraceServiceServicer_to_server,
     )
     _OTEL_PROTO_AVAILABLE = True
@@ -40,7 +42,11 @@ except ImportError:
     _OTEL_PROTO_AVAILABLE = False
 
 
-class InMemorySpanSink:
+# Inherit TraceServiceServicer (when available) to mirror the proven
+# tests/tracing/conftest.py::FakeTraceService gRPC pattern the plan named;
+# fall back to ``object`` so the class still imports when opentelemetry is
+# absent (the sink then refuses to start in __init__ with a clear error).
+class InMemorySpanSink(TraceServiceServicer if _OTEL_PROTO_AVAILABLE else object):
     def __init__(self, address: str = "localhost:0"):
         if not _OTEL_PROTO_AVAILABLE:
             raise RuntimeError(
@@ -143,3 +149,64 @@ def build_phase_report(spans, *, wall_clock_startup_s=None) -> dict[str, Any]:
         "total_phase_time_s": sum(s.duration_s for s in spans),
         "wall_clock_startup_s": wall_clock_startup_s,
     }
+
+
+def format_phase_report(report) -> str:
+    """Format a per-phase report as an aligned stdout table (seconds to 3 dp).
+
+    The row format matches the historical inlined ``print(...)`` so existing
+    output is byte-identical when callers switch to this function.
+    """
+    lines: list[str] = []
+    for p in report["phases"]:
+        status = "MISSING" if p.get("missing") else "ok"
+        lines.append(f"{p['name']:<22} {p['duration_s']:>14.3f} {status:>10}")
+    return "\n".join(lines)
+
+
+def compare_to_baseline(
+    report, baseline_path, *, rel_threshold: float = 0.10,
+    abs_threshold_s: float = 0.5,
+) -> dict[str, Any]:
+    """Compare a per-phase report against a baseline JSON file.
+
+    A phase regresses when ``delta > max(abs_threshold_s,
+    baseline_duration_s * rel_threshold)`` (default: +10% relative or +0.5 s
+    absolute, whichever is greater). A missing baseline file or a
+    ``phase_list_version`` mismatch logs a warning and returns a skipped
+    result with ``regressed=False`` (never raises) so a missing optional
+    file cannot hard-fail the benchmark.
+    """
+    try:
+        with open(baseline_path) as f:
+            baseline = json.load(f)
+    except FileNotFoundError:
+        logger.warning("phase baseline not found at %s; comparison skipped",
+                       baseline_path)
+        return {"regressed": False, "phases": [], "skipped": "baseline_missing"}
+    if baseline.get("phase_list_version") != PHASE_LIST_VERSION:
+        logger.warning(
+            "baseline phase_list_version=%r != current=%d; comparison skipped",
+            baseline.get("phase_list_version"), PHASE_LIST_VERSION)
+        return {"regressed": False, "phases": [], "skipped": "version_mismatch"}
+    base_by_name = {p["name"]: p for p in baseline.get("phases", [])}
+    deltas: list[dict[str, Any]] = []
+    regressed = False
+    for p in report["phases"]:
+        # A missing phase (span never arrived) carries no real measurement;
+        # skip it rather than reporting a meaningless "improvement" delta.
+        if p.get("missing"):
+            continue
+        b = base_by_name.get(p["name"])
+        if b is None:
+            continue
+        delta = p["duration_s"] - b["duration_s"]
+        threshold = max(abs_threshold_s, b["duration_s"] * rel_threshold)
+        is_reg = delta > threshold
+        regressed |= is_reg
+        deltas.append({
+            "name": p["name"], "delta_s": delta,
+            "baseline_s": b["duration_s"], "current_s": p["duration_s"],
+            "regressed": is_reg,
+        })
+    return {"regressed": regressed, "phases": deltas, "skipped": None}
