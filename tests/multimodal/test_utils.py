@@ -10,7 +10,11 @@ from vllm.multimodal.inputs import (
     MultiModalSharedField,
     PlaceholderRange,
 )
-from vllm.multimodal.utils import argsort_mm_positions, group_and_batch_mm_items
+from vllm.multimodal.utils import (
+    argsort_mm_positions,
+    encode_image_url,
+    group_and_batch_mm_items,
+)
 
 
 @pytest.mark.parametrize(
@@ -197,6 +201,18 @@ def test_group_and_batch_mm_items_split_by_fieldset():
 
     res = group_and_batch_mm_items([item1, item2, item3, item4, item5])
     assert [num_items for num_items, _ in res] == [2, 1, 1, 1]
+
+
+def test_encode_image_url_uncommon_format_has_valid_mimetype():
+    """A format missing from mimetypes.types_map must still produce a
+    well-formed type/subtype media type, not a bare 'image'."""
+    from PIL import Image
+
+    # ".tga" is not registered in mimetypes.types_map, so it exercises the
+    # fallback path; Pillow can still encode it.
+    url = encode_image_url(Image.new("RGB", (2, 2)), format="TGA")
+    mimetype = url.removeprefix("data:").split(";", 1)[0]
+    assert mimetype == "image/tga"
 
 
 def test_group_and_batch_mm_items_split_by_shared_data():
