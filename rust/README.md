@@ -15,6 +15,7 @@ The component is organized as a Cargo workspace with several crates, layered bot
 │  vllm-cmd / vllm-rs             │  CLI entrypoint:
 │                                 │  Python vLLM frontend subprocess
 │                                 │  Rust managed-engine serve mode
+│                                 │  Engine-free render mode
 ├─────────────────────────────────┤
 │  vllm-server                    │  OpenAI-compatible HTTP API (axum)
 ├─────────────────────────────────┤
@@ -74,9 +75,60 @@ To build the `vllm-rs` in isolation:
 ./build_rust.sh
 ```
 
+### Engine-free renderer
+
+`vllm-rs render` serves text-only request preprocessing without starting or
+connecting to a Python inference engine:
+
+```bash
+cargo run --manifest-path rust/Cargo.toml -p vllm-cmd --release -- \
+  render Qwen/Qwen2.5-0.5B-Instruct --max-model-len 32768
+```
+
+It exposes `/v1/chat/completions/render` and `/v1/completions/render`. Only
+tokenizer and model configuration files are loaded; model weights, PyTorch,
+and vLLM kernels are not required.
+
+The render endpoints currently serialize the internal
+`vllm_llm::GenerateRequest` produced by the normal Rust lowering path. This is
+not yet the Python scale-out `GenerateRequest` wire format, and the Rust
+`/inference/v1/generate` endpoint does not consume it directly.
+
+The render and inference paths use the same `vllm-chat` and `vllm-text`
+request-preparation logic; render mode stops before engine submission.
+
+```bash
+curl http://127.0.0.1:8000/v1/chat/completions/render \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "Qwen/Qwen2.5-0.5B-Instruct",
+    "messages": [{"role": "user", "content": "Hello"}],
+    "max_completion_tokens": 16
+  }'
+```
+
+Build the minimal container from the repository root:
+
+```bash
+docker build -f docker/Dockerfile.render-rust -t vllm-render-rust .
+docker run --rm -p 8000:8000 vllm-render-rust \
+  Qwen/Qwen2.5-0.5B-Instruct --max-model-len 32768
+```
+
+For an offline container, mount an existing Hugging Face cache and set
+`HF_HUB_OFFLINE=1`:
+
+```bash
+docker run --rm -p 8000:8000 \
+  -e HF_HUB_OFFLINE=1 \
+  -v /path/to/huggingface:/tmp/huggingface:ro \
+  vllm-render-rust Qwen/Qwen2.5-0.5B-Instruct --max-model-len 32768
+```
+
 ### Example Request
 
-After either startup path, you can use any OpenAI-compatible client:
+After either full-frontend startup path, you can use any OpenAI-compatible
+client against the inference endpoints:
 
 ```bash
 curl http://127.0.0.1:8000/v1/chat/completions \

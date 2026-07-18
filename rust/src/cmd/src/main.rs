@@ -203,5 +203,8 @@ async fn async_main(cli: Cli) -> Result<()> {
                 )),
             }
         }
+        Command::Render(args) => {
+            vllm_server::serve_render(args.into_config(), shutdown_signal()).await
+        }
     }
 }

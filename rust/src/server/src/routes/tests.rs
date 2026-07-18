@@ -23,8 +23,8 @@ use serial_test::serial;
 use tower::{Service as _, ServiceExt as _};
 use vllm_chat::{
     ChatBackend, ChatContent, ChatContentPart, ChatLlm, ChatMessage, ChatRenderer, ChatRequest,
-    ChatTextBackend, DefaultChatOutputProcessor, DynChatOutputProcessor, DynChatRenderer,
-    NewChatOutputProcessorOptions,
+    ChatRequestProcessor, ChatTextBackend, DefaultChatOutputProcessor, DynChatOutputProcessor,
+    DynChatRenderer, NewChatOutputProcessorOptions,
 };
 use vllm_engine_core_client::mock_engine::default_ready_response;
 use vllm_engine_core_client::protocol::decode_value;
@@ -46,13 +46,17 @@ use vllm_engine_core_client::{
 use vllm_llm::Llm;
 use vllm_metrics::METRICS;
 use vllm_text::tokenizer::DynTokenizer;
-use vllm_text::{Prompt, TextBackend};
+use vllm_text::{Prompt, TextBackend, TextRequestProcessor};
 use vllm_tokenizer::test_utils::TestTokenizer;
 use zeromq::prelude::{SocketRecv, SocketSend};
 use zeromq::{DealerSocket, PushSocket, ZmqMessage};
 
-use super::{build_router, build_router_with_dev_mode, build_router_with_dev_mode_and_lora};
+use super::{
+    build_router, build_router_with_dev_mode, build_router_with_dev_mode_and_lora,
+    render::build_router as build_render_router,
+};
 use crate::config::{ApiServerOptions, CorsConfig};
+use crate::render::RenderState;
 use crate::state::AppState;
 
 fn request_output(
@@ -661,6 +665,16 @@ async fn test_app() -> axum::Router {
     test_app_with_dev_mode(false).await
 }
 
+fn test_render_app() -> axum::Router {
+    let backend = Arc::new(FakeChatBackend::new());
+    build_render_router(Arc::new(RenderState {
+        model: "backend-model".to_string(),
+        served_model_names: vec!["render-model".to_string()],
+        text: TextRequestProcessor::new(backend.clone(), 128),
+        chat: ChatRequestProcessor::render_only(backend),
+    }))
+}
+
 async fn test_app_with_dev_mode(dev_mode_enabled: bool) -> axum::Router {
     let (chat, _engine_task) = test_models_with_engine_outputs_and_backend(
         b"engine-openai",
@@ -675,6 +689,69 @@ async fn test_app_with_dev_mode(dev_mode_enabled: bool) -> axum::Router {
         )),
         dev_mode_enabled,
     )
+}
+
+#[tokio::test]
+async fn render_chat_returns_generate_request_with_header_request_id() {
+    let mut app = test_render_app();
+    let response = app
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions/render")
+                .header("content-type", "application/json")
+                .header("X-Request-Id", "header-req")
+                .body(Body::from(
+                    json!({
+                        "request_id": "body-req",
+                        "model": "render-model",
+                        "messages": [{"role": "user", "content": "hello"}],
+                        "max_completion_tokens": 8
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
+
+    assert_eq!(json["request_id"], "chatcmpl-header-req");
+    assert!(!json["prompt_token_ids"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn render_completion_returns_generate_request_with_body_request_id() {
+    let mut app = test_render_app();
+    let response = app
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/completions/render")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "request_id": "body-req",
+                        "model": "render-model",
+                        "prompt": "hello",
+                        "max_tokens": 8
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
+
+    assert_eq!(json[0]["request_id"], "cmpl-body-req");
+    assert!(!json[0]["prompt_token_ids"].as_array().unwrap().is_empty());
 }
 
 /// Build a dev-mode router backed by a mock engine using a custom ready

@@ -1,0 +1,32 @@
+# syntax=docker/dockerfile:1
+
+FROM rust:1.95-bookworm AS builder
+
+WORKDIR /workspace
+ENV OPENSSL_STATIC=1 \
+    PCRE2_SYS_STATIC=1
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        libprotobuf-dev \
+        protobuf-compiler \
+    && rm -rf /var/lib/apt/lists/*
+COPY rust rust
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    --mount=type=cache,target=/workspace/rust/target \
+    cargo build \
+        --manifest-path rust/Cargo.toml \
+        --release \
+        --locked \
+        -p vllm-cmd \
+        --features native-tls-vendored \
+    && cp rust/target/release/vllm-rs /workspace/vllm-rs \
+    && strip /workspace/vllm-rs
+
+FROM gcr.io/distroless/cc-debian12:nonroot
+
+ENV HF_HOME=/tmp/huggingface
+COPY --from=builder /workspace/vllm-rs /usr/local/bin/vllm-rs
+
+EXPOSE 8000
+ENTRYPOINT ["/usr/local/bin/vllm-rs", "render"]

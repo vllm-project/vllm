@@ -3,9 +3,61 @@
 
 use expect_test::expect;
 use vllm_engine_core_client::TransportMode;
-use vllm_server::{Config, HttpListenerMode, ParserSelection, RendererSelection};
+use vllm_server::{
+    ChatTemplateContentFormatOption, Config, HttpListenerMode, ParserSelection, RendererSelection,
+};
 
 use super::{BenchCommand, Cli, Command};
+
+#[test]
+fn render_args_map_to_engine_free_server_config() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "render",
+        "backend-model",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "8100",
+        "--served-model-name",
+        "public-model",
+        "--tokenizer-mode",
+        "hf",
+        "--chat-template",
+        "{{ messages }}",
+        "--default-chat-template-kwargs",
+        r#"{"enable_thinking":false}"#,
+        "--chat-template-content-format",
+        "string",
+        "--max-model-len",
+        "4096",
+        "--max-logprobs",
+        "8",
+    ])
+    .unwrap();
+
+    let Command::Render(args) = cli.command else {
+        panic!("expected render args");
+    };
+    let config = args.into_config();
+
+    assert_eq!(config.model, "backend-model");
+    assert_eq!(config.host, "127.0.0.1");
+    assert_eq!(config.port, 8100);
+    assert_eq!(config.served_model_name, ["public-model"]);
+    assert_eq!(config.renderer, RendererSelection::Hf);
+    assert_eq!(config.chat_template.as_deref(), Some("{{ messages }}"));
+    assert_eq!(
+        config.default_chat_template_kwargs,
+        [("enable_thinking".to_string(), false.into())].into()
+    );
+    assert_eq!(
+        config.chat_template_content_format,
+        ChatTemplateContentFormatOption::String
+    );
+    assert_eq!(config.max_model_len, 4096);
+    assert_eq!(config.max_logprobs, Some(8));
+}
 
 #[test]
 fn bench_serve_args_parse_without_managed_engine_repartition() {
