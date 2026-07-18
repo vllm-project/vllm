@@ -124,7 +124,7 @@ def test_use_audio_in_video_without_audio_track(model_id: str) -> None:
     """
     ctx = build_model_context(
         model_id,
-        limit_mm_per_prompt={"audio": 0, "image": 0, "video": 1},
+        limit_mm_per_prompt={"audio": 1, "image": 0, "video": 1},
     )
     processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config, cache=None)
     video_token_id = processor.info.get_hf_config().video_token_id
@@ -132,7 +132,11 @@ def test_use_audio_in_video_without_audio_track(model_id: str) -> None:
     rng = np.random.RandomState(0)
     video = random_video(rng, min_frames=8, max_frames=9, min_wh=64, max_wh=65)
 
-    # No "audio" key at all: this is the "video has no audio track" case.
+    # No "audio" key at all in this request's data: this is the "video has
+    # no audio track" case. (The audio limit above is 1, not 0, so that
+    # `mm_counts["audio"]` is still declared for this request; a 0 limit
+    # would make vLLM omit the "audio" key from `mm_counts` entirely, which
+    # trips an unrelated assertion in `_apply_hf_processor_mm_only`.)
     mm_data = {"video": [video]}
 
     with pytest.raises(ValueError, match="doesn't have audio track"):

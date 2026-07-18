@@ -1224,7 +1224,10 @@ class Qwen3OmniMoeThinkerMultiModalProcessor(
             tok_kwargs = dict(tok_kwargs)
             mm_kwargs["audio_kwargs"] = dict(mm_kwargs.get("audio_kwargs") or {})
             mm_kwargs["text_kwargs"] = dict(mm_kwargs.get("text_kwargs") or {})
-        elif mm_kwargs.get("use_audio_in_video"):
+        elif mm_kwargs.get("use_audio_in_video") and mm_data.get("videos"):
+            # mm_data can be empty on a multimodal-processor-cache hit, where
+            # there's nothing to (re-)process this call and the real result
+            # comes from the cache — not a genuine "no audio" case.
             raise ValueError(
                 "Video doesn't have audio track with `audio_in_video=True`"
             )
