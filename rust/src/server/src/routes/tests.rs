@@ -2380,6 +2380,14 @@ async fn non_stream_chat_includes_logprobs_and_prompt_logprobs() {
         json["choices"][0]["logprobs"]["content"][1]["token"],
         json!("i")
     );
+    assert_eq!(
+        json["choices"][0]["logprobs"]["content"][0]["top_logprobs"],
+        json!([])
+    );
+    assert_eq!(
+        json["choices"][0]["logprobs"]["content"][1]["top_logprobs"],
+        json!([])
+    );
     assert_eq!(json["prompt_logprobs"][0], serde_json::Value::Null);
     assert!(json["prompt_logprobs"][1].is_object());
 }
