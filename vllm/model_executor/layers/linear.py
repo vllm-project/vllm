@@ -260,7 +260,7 @@ class LinearBase(PluggableLayer):
         # Keep input parameters
         self.input_size = input_size
         self.output_size = output_size
-        self.has_bias = bool(bias)
+        self.has_bias = bias
         self.skip_bias_add = skip_bias_add
         if params_dtype is None:
             params_dtype = torch.get_default_dtype()
