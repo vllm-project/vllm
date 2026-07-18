@@ -69,7 +69,9 @@ def _minimax_m2_arg_converter(raw_args: str, partial: bool) -> str:
         ).strip()
         if not name:
             continue
-        params[name] = match.group("value").strip()
+        # Keep the value verbatim (like the glm47 converter): it is inline
+        # between `>` and `</parameter>`, so surrounding whitespace is data.
+        params[name] = match.group("value")
 
     if partial:
         remaining = _PARAM_RE.sub("", raw_args)
@@ -82,7 +84,8 @@ def _minimax_m2_arg_converter(raw_args: str, partial: bool) -> str:
                 or ""
             ).strip()
             if name:
-                params[name] = match.group("value").strip()
+                # Verbatim, same as the complete-match loop above.
+                params[name] = match.group("value")
 
     return json.dumps(params, ensure_ascii=False)
 
