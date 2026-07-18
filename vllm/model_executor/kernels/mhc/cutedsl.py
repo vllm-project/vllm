@@ -623,7 +623,7 @@ def can_use_hc_prenorm_gemm(a, b, num_splits):
         and b.shape[0] == 24
         and a.shape[1] == b.shape[1]
         and a.shape[1] in (5120, 7168, 7680, 16384, 28672)
-        and num_splits in (1, 2, 4, 8, 16)
+        and 0 < num_splits <= a.shape[1] // (64 * 4)
     )
 
 

@@ -42,11 +42,8 @@ def _select_hc_prenorm_gemm_backend(
     fn: torch.Tensor,
     preferred_n_splits: int,
 ) -> tuple[bool, bool, int]:
-    # Largest power-of-two split <= preferred, capped at 16 to keep the number
-    # of JIT-compiled kernel variants bounded.
-    cutedsl_n_splits = min(16, 1 << (preferred_n_splits.bit_length() - 1))
-    if _can_use_cutedsl_hc_prenorm_gemm(x, fn, cutedsl_n_splits):
-        return True, False, cutedsl_n_splits
+    if _can_use_cutedsl_hc_prenorm_gemm(x, fn, preferred_n_splits):
+        return True, False, preferred_n_splits
 
     from vllm.utils.deep_gemm import is_deep_gemm_supported
 
