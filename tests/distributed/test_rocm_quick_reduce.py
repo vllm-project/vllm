@@ -22,6 +22,7 @@ from vllm import LLM, SamplingParams
 from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.platforms import current_platform
 from vllm.utils.network_utils import get_open_port
+
 from ..utils import multi_gpu_test
 
 pytestmark = pytest.mark.skipif(
