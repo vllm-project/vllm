@@ -716,10 +716,9 @@ def test_multi_turn_decode_written_mamba_prefix_cache(
     # never engaged APC+MTP fails as an engagement problem instead of
     # reaching a corruption check it had no standing to make. The gate
     # uses the cumulative counters (see above); the wave-2 hit ratio is
-    # printed rather than asserted (0.431-0.477 across the fixed-tree
-    # calibration runs: 0.46 Nemotron-Super TP4 and 0.43 Qwen TP1 on this
-    # tree, 0.477 under the single-lane cures — not calibrated as stable
-    # across hardware).
+    # printed rather than asserted (~0.43-0.48 across calibration runs:
+    # 0.477 Nemotron-Super TP4 and ~0.43 Qwen TP1 on GB200 — not calibrated
+    # as stable across hardware).
     _assert_cache_and_spec_engaged(
         hits, queries, drafts, "multi-turn", require_hits=True
     )
