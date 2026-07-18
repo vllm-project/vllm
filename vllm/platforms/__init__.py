@@ -98,8 +98,41 @@ def cuda_platform_plugin() -> str | None:
                 "/sys/class/tegra-firmware"
             )
 
+        def cuda_driver_api_usable() -> bool:
+            # NVML can be absent or non-functional while the CUDA driver API
+            # works, e.g. WSL2 setups whose driver exposes working libcuda
+            # stubs but whose NVML cannot communicate with the driver. Probe
+            # the driver API in a subprocess so CUDA is never initialized in
+            # this process before workers may fork.
+            import subprocess
+            import sys
+
+            probe = (
+                "import ctypes, sys; "
+                "lib = ctypes.CDLL('libcuda.so.1'); "
+                "count = ctypes.c_int(0); "
+                "sys.exit(0 if lib.cuInit(0) == 0 "
+                "and lib.cuDeviceGetCount(ctypes.byref(count)) == 0 "
+                "and count.value > 0 else 1)"
+            )
+            try:
+                result = subprocess.run(
+                    [sys.executable, "-c", probe],
+                    capture_output=True,
+                    timeout=60,
+                )
+            except (OSError, subprocess.SubprocessError):
+                return False
+            return result.returncode == 0
+
         if cuda_is_jetson():
             logger.debug("Confirmed CUDA platform is available on Jetson.")
+            is_cuda = True
+        elif not vllm_version_matches_substr("cpu") and cuda_driver_api_usable():
+            logger.debug(
+                "Confirmed CUDA platform is available via the CUDA driver "
+                "API; NVML is not functional in this environment."
+            )
             is_cuda = True
         else:
             logger.debug("CUDA platform is not available because: %s", str(e))
