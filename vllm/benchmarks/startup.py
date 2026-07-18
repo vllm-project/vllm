@@ -13,6 +13,7 @@ import json
 import multiprocessing
 import os
 import shutil
+import sys
 import tempfile
 import time
 from contextlib import contextmanager
@@ -29,6 +30,8 @@ from vllm.benchmarks.startup_spans import (
     InMemorySpanSink,
     build_phase_report,
     collect_startup_spans,
+    compare_to_baseline,
+    format_phase_report,
 )
 from vllm.engine.arg_utils import EngineArgs
 from vllm.utils.argparse_utils import FlexibleArgumentParser
@@ -231,6 +234,18 @@ def add_cli_args(parser: FlexibleArgumentParser):
         help="Capture OTEL startup spans and report per-phase cold-start "
         "timings. Requires opentelemetry.",
     )
+    parser.add_argument(
+        "--phase-baseline",
+        type=str,
+        default=None,
+        help="Path to a baseline per-phase JSON (as written by --output-json) "
+        "to compare against (regression gate). Only applies with "
+        "--per-phase. Exits non-zero when a phase regresses beyond "
+        "the threshold (default: 0.5 seconds absolute or 10 percent "
+        "relative, whichever is greater). A missing file or a "
+        "phase_list_version mismatch logs a warning and skips the "
+        "comparison (never hard-fails the bench).",
+    )
 
     parser = EngineArgs.add_cli_args(parser)
     return parser
@@ -331,6 +346,7 @@ def main(args: argparse.Namespace):
     print("=" * 60)
 
     per_phase_payload: dict[str, Any] = {}
+    baseline_regressed = False
     if per_phase_enabled:
         print("-" * 60)
         print("PER-PHASE COLD-START REPORT")
@@ -340,11 +356,25 @@ def main(args: argparse.Namespace):
                 continue
             rpt = iters[-1]["per_phase"]
             print(f"\n{label} startup (last iteration):")
-            for p in rpt["phases"]:
-                status = "MISSING" if p.get("missing") else "ok"
-                print(f"{p['name']:<22} {p['duration_s']:>14.3f} {status:>10}")
+            print(format_phase_report(rpt))
             per_phase_payload[label.lower()] = rpt
+            if args.phase_baseline is not None:
+                cmp = compare_to_baseline(rpt, args.phase_baseline)
+                per_phase_payload[label.lower()]["baseline"] = cmp
+                if cmp.get("regressed"):
+                    baseline_regressed = True
+                    for d in cmp["phases"]:
+                        if d["regressed"]:
+                            print(f"  REGRESSION  {d['name']:<22} "
+                                  f"{d['baseline_s']:.3f}s -> "
+                                  f"{d['current_s']:.3f}s "
+                                  f"(delta {d['delta_s']:+.3f}s)")
         print("-" * 60)
+        if args.phase_baseline is not None:
+            status = ("REGRESSION DETECTED" if baseline_regressed
+                      else "no regression")
+            print(f"Baseline comparison ({args.phase_baseline}): {status}")
+            print("-" * 60)
 
     # Output JSON results if specified
     if args.output_json:
@@ -359,3 +389,11 @@ def main(args: argparse.Namespace):
 
     if sink is not None:
         sink.stop()
+
+    # Regression gate (criterion #6): non-zero exit only when a phase
+    # regressed beyond the baseline threshold. A missing baseline file or
+    # a phase_list_version mismatch is a warning, not a failure (see
+    # compare_to_baseline).
+    if baseline_regressed:
+        print("\nBaseline regression detected; exiting with non-zero status.\n")
+        sys.exit(1)
