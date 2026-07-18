@@ -132,9 +132,8 @@ steps:
       - image-build-amd
 
 - label: Kernels MoE Test %N
-  device: h200_35gb
   key: kernels-moe-test
-  timeout_in_minutes: 70
+  timeout_in_minutes: 50
   source_file_dependencies:
   - csrc/quantization/cutlass_w8a8/moe/
   - csrc/moe/
@@ -144,7 +143,8 @@ steps:
   - vllm/envs.py
   - vllm/config
   commands:
-    - pytest -v -s kernels/moe --ignore=kernels/moe/test_block_fp8.py --ignore=kernels/moe/test_cutlass_moe.py --ignore=kernels/moe/test_modular_kernel_combinations.py --ignore=kernels/moe/test_modular_oai_triton_moe.py --ignore=kernels/moe/test_ocp_mx_moe.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+    - pytest -v -s kernels/moe --ignore=kernels/moe/test_modular_oai_triton_moe.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+    - pytest -v -s kernels/moe/test_modular_oai_triton_moe.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
   parallelism: 5
   mirror:
     amd:
@@ -162,24 +162,6 @@ steps:
       - vllm/platforms/rocm.py
       depends_on:
       - image-build-amd
-
-# These files contain L4-covered cases that use allocator NVML paths unsupported
-# by MIG, retain allocations on a MIG slice, or have SM90 FP8 numerical mismatches.
-- label: Kernels MoE Test (L4 Compatibility) %N
-  key: kernels-moe-test-l4-compatibility
-  timeout_in_minutes: 50
-  source_file_dependencies:
-  - csrc/quantization/cutlass_w8a8/moe/
-  - csrc/moe/
-  - tests/kernels/moe
-  - vllm/model_executor/layers/fused_moe/
-  - vllm/distributed/device_communicators/
-  - vllm/envs.py
-  - vllm/config
-  commands:
-    - pytest -v -s kernels/moe/test_block_fp8.py kernels/moe/test_cutlass_moe.py kernels/moe/test_modular_kernel_combinations.py kernels/moe/test_ocp_mx_moe.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
-    - pytest -v -s kernels/moe/test_modular_oai_triton_moe.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
-  parallelism: 2
 
 - label: Kernels Mamba Test
   device: h200_35gb
