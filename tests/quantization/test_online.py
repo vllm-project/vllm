@@ -18,6 +18,8 @@ from vllm.model_executor.layers.quantization.online.fp8 import (
 )
 from vllm.model_executor.layers.quantization.online.nvfp4 import (
     Nvfp4OnlineMoEMethod,
+    Nvfp4W4A4OnlineLinearMethod,
+    Nvfp4W4A16OnlineLinearMethod,
 )
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer_trtllm_fused_moe
@@ -179,6 +181,107 @@ def test_online_nvfp4_per_token_moe(vllm_runner, monkeypatch) -> None:
         llm.apply_model(check_model)
         outputs = llm.generate_greedy(["Hello my name is"], max_tokens=4)
         print(outputs[0][1])
+
+
+@pytest.mark.skipif(
+    not (current_platform.is_cuda() and current_platform.has_device_capability(75)),
+    reason="Online NVFP4 W4A16 needs the FP4 Marlin kernel (CUDA SM>=75).",
+)
+def test_online_nvfp4_w4a16_linear(vllm_runner, monkeypatch) -> None:
+    """Online NVFP4 W4A16 quantizes dense linear layers to FP4 at load time.
+
+    Weight-only path: activations stay bf16/fp16 and Marlin dequantizes on the
+    fly, so this runs on any SM>=75 GPU (not just Blackwell).
+    """
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+
+    with vllm_runner(
+        "ibm-granite/granite-3.0-1b-a400m-base",
+        quantization="nvfp4",
+        enforce_eager=True,
+    ) as llm:
+
+        def check_model(model):
+            o_proj = model.model.layers[0].self_attn.o_proj
+            assert isinstance(o_proj.quant_method, Nvfp4W4A16OnlineLinearMethod)
+            # Weights are packed FP4 (two values per uint8 byte).
+            assert o_proj.weight.dtype == torch.uint8
+            assert hasattr(o_proj, "weight_global_scale")
+            # MoE stays unquantized under the linear-only "nvfp4" shorthand.
+            moe = model.model.layers[0].block_sparse_moe.experts
+            if moe is not None:
+                assert not isinstance(moe._quant_method, Nvfp4OnlineMoEMethod)
+
+        llm.apply_model(check_model)
+        outputs = llm.generate_greedy(["Hello my name is"], max_tokens=4)
+        print(outputs[0][1])
+
+
+def _nvfp4_w4a4_supported() -> bool:
+    if not current_platform.is_cuda():
+        return False
+    try:
+        from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
+            cutlass_fp4_supported,
+        )
+    except Exception:
+        return False
+    return cutlass_fp4_supported()
+
+
+@pytest.mark.skipif(
+    not _nvfp4_w4a4_supported(),
+    reason="Online NVFP4 W4A4 needs a native FP4 W4A4 GEMM kernel (Blackwell).",
+)
+def test_online_nvfp4_w4a4_cudagraph_dynamic_scale() -> None:
+    """W4A4's dynamic activation scale must replay against the live input.
+
+    The old ``.data.copy_`` refresh captured the warmup activation's scale once
+    and replayed it stale under CUDA graphs, yielding garbage. The explicit
+    dataflow fix computes the scale as fresh graph-visible ops threaded into the
+    kernel, so a captured graph replayed on a materially different input must
+    match eager on that same input (a stale scale would not).
+    """
+    torch.manual_seed(0)
+    device = torch.device("cuda")
+    out_features, in_features = 256, 512
+
+    layer = torch.nn.Module()
+    layer.output_size_per_partition = out_features
+    layer.input_size_per_partition = in_features
+    layer.params_dtype = torch.bfloat16
+    weight = torch.randn(out_features, in_features, device=device, dtype=torch.bfloat16)
+    layer.weight = torch.nn.Parameter(weight, requires_grad=False)
+
+    method = Nvfp4W4A4OnlineLinearMethod()
+    method.process_weights_after_loading(layer)
+
+    # Two inputs with materially different amax -> different dynamic scale.
+    x_small = torch.randn(8, in_features, device=device, dtype=torch.bfloat16) * 0.1
+    x_large = torch.randn(8, in_features, device=device, dtype=torch.bfloat16) * 8.0
+
+    eager_small = method.apply(layer, x_small).clone()
+    eager_large = method.apply(layer, x_large).clone()
+    # Distinct scales must produce meaningfully distinct outputs.
+    assert not torch.allclose(eager_small, eager_large, atol=1e-2)
+
+    # Capture a graph on x_small, then replay on x_large's data.
+    static_in = x_small.clone()
+    method.apply(layer, static_in)  # warmup
+    torch.accelerator.synchronize()
+
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        static_out = method.apply(layer, static_in)
+
+    static_in.copy_(x_large)
+    graph.replay()
+    torch.accelerator.synchronize()
+
+    # If the scale replayed stale (bug), the graph output would match the
+    # captured x_small scale instead of x_large's eager result.
+    assert torch.allclose(static_out, eager_large, atol=5e-2, rtol=5e-2)
+    assert not torch.allclose(static_out, eager_small, atol=1e-2)
 
 
 @pytest.mark.skipif(

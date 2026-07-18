@@ -71,6 +71,16 @@ class NvFp4LinearKernel(ABC):
         layer: torch.nn.Module,
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
+        *,
+        input_global_scale_inv: torch.Tensor | None = None,
+        alpha: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """Run the quantized GEMM."""
+        """Run the quantized GEMM.
+
+        ``input_global_scale_inv`` and ``alpha`` optionally override the
+        persistent ``layer.input_global_scale_inv`` / ``layer.alpha``
+        parameters. Online W4A4 passes freshly computed per-forward tensors
+        (graph-visible dynamic activation scale); calibrated/pre-quantized
+        callers leave them ``None`` to use the layer's static values.
+        """
         raise NotImplementedError

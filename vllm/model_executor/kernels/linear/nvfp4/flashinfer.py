@@ -61,14 +61,23 @@ class FlashInferCuteDslNvFp4LinearKernel(NvFp4LinearKernel):
         layer: torch.nn.Module,
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
+        *,
+        input_global_scale_inv: torch.Tensor | None = None,
+        alpha: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        input_global_scale_inv = (
+            layer.input_global_scale_inv
+            if input_global_scale_inv is None
+            else input_global_scale_inv
+        )
+        alpha = layer.alpha if alpha is None else alpha
         output_size = layer.output_size_per_partition
         output_dtype = x.dtype
         output_shape = [*x.shape[:-1], output_size]
 
         x_fp4, x_blockscale = scaled_fp4_quant(
             x,
-            layer.input_global_scale_inv,
+            input_global_scale_inv,
             is_sf_swizzled_layout=True,
             backend="flashinfer-cutedsl",
         )
@@ -82,7 +91,7 @@ class FlashInferCuteDslNvFp4LinearKernel(NvFp4LinearKernel):
             layer.weight,
             x_blockscale,
             layer.weight_scale,
-            layer.alpha,
+            alpha,
             output_dtype,
             backend="cute-dsl",
         )
@@ -137,7 +146,16 @@ class FlashInferCutlassNvFp4LinearKernel(NvFp4LinearKernel):
         layer: torch.nn.Module,
         x: torch.Tensor | QuantizedActivation,
         bias: torch.Tensor | None = None,
+        *,
+        input_global_scale_inv: torch.Tensor | None = None,
+        alpha: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        input_global_scale_inv = (
+            layer.input_global_scale_inv
+            if input_global_scale_inv is None
+            else input_global_scale_inv
+        )
+        alpha = layer.alpha if alpha is None else alpha
         output_size = layer.output_size_per_partition
         weights_padding_bytes = getattr(layer, "weights_padding_cols", 0)
 
@@ -153,7 +171,7 @@ class FlashInferCutlassNvFp4LinearKernel(NvFp4LinearKernel):
             output_shape = [*x.shape[:-1], output_size]
             x_fp4, x_blockscale = scaled_fp4_quant(
                 x,
-                layer.input_global_scale_inv,
+                input_global_scale_inv,
                 is_sf_swizzled_layout=True,
                 backend="flashinfer-cutlass",
                 padded_n=x.shape[-1] + weights_padding_bytes * 2,
@@ -164,7 +182,7 @@ class FlashInferCutlassNvFp4LinearKernel(NvFp4LinearKernel):
             layer.weight,
             x_blockscale,
             layer.weight_scale,
-            layer.alpha,
+            alpha,
             output_dtype,
             backend="cutlass",
         )
@@ -214,14 +232,23 @@ class FlashInferTrtllmNvFp4LinearKernel(NvFp4LinearKernel):
         layer: torch.nn.Module,
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
+        *,
+        input_global_scale_inv: torch.Tensor | None = None,
+        alpha: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        input_global_scale_inv = (
+            layer.input_global_scale_inv
+            if input_global_scale_inv is None
+            else input_global_scale_inv
+        )
+        alpha = layer.alpha if alpha is None else alpha
         output_size = layer.output_size_per_partition
         output_dtype = x.dtype
         output_shape = [*x.shape[:-1], output_size]
 
         x_fp4, x_blockscale = scaled_fp4_quant(
             x,
-            layer.input_global_scale_inv,
+            input_global_scale_inv,
             is_sf_swizzled_layout=True,
             backend="flashinfer-trtllm",
         )
@@ -231,7 +258,7 @@ class FlashInferTrtllmNvFp4LinearKernel(NvFp4LinearKernel):
             layer.weight,
             x_blockscale,
             layer.weight_scale,
-            layer.alpha,
+            alpha,
             output_dtype,
             backend="trtllm",
         )
@@ -274,7 +301,16 @@ class FlashInferCudnnNvFp4LinearKernel(NvFp4LinearKernel):
         layer: torch.nn.Module,
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
+        *,
+        input_global_scale_inv: torch.Tensor | None = None,
+        alpha: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        input_global_scale_inv = (
+            layer.input_global_scale_inv
+            if input_global_scale_inv is None
+            else input_global_scale_inv
+        )
+        alpha = layer.alpha if alpha is None else alpha
         output_size = layer.output_size_per_partition
         output_dtype = x.dtype
         output_shape = [*x.shape[:-1], output_size]
@@ -282,7 +318,7 @@ class FlashInferCudnnNvFp4LinearKernel(NvFp4LinearKernel):
 
         x_fp4, x_blockscale = scaled_fp4_quant(
             x,
-            layer.input_global_scale_inv,
+            input_global_scale_inv,
             is_sf_swizzled_layout=True,
             backend="flashinfer-cudnn",
             padded_n=x.shape[-1] + weights_padding_bytes * 2,
@@ -293,7 +329,7 @@ class FlashInferCudnnNvFp4LinearKernel(NvFp4LinearKernel):
             layer.weight,
             x_blockscale,
             layer.weight_scale,
-            layer.alpha,
+            alpha,
             output_dtype,
             backend="cudnn",
         )
@@ -339,14 +375,23 @@ class FlashInferB12xNvFp4LinearKernel(NvFp4LinearKernel):
         layer: torch.nn.Module,
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
+        *,
+        input_global_scale_inv: torch.Tensor | None = None,
+        alpha: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        input_global_scale_inv = (
+            layer.input_global_scale_inv
+            if input_global_scale_inv is None
+            else input_global_scale_inv
+        )
+        alpha = layer.alpha if alpha is None else alpha
         output_size = layer.output_size_per_partition
         output_dtype = x.dtype
         output_shape = [*x.shape[:-1], output_size]
 
         x_fp4, x_blockscale = scaled_fp4_quant(
             x,
-            layer.input_global_scale_inv,
+            input_global_scale_inv,
             is_sf_swizzled_layout=True,
             backend="b12x",
         )
@@ -360,7 +405,7 @@ class FlashInferB12xNvFp4LinearKernel(NvFp4LinearKernel):
             layer.weight,
             x_blockscale,
             layer.weight_scale,
-            layer.alpha,
+            alpha,
             output_dtype,
             backend="b12x",
         )
