@@ -128,7 +128,6 @@ EXCLUDE = [
     r"vllm/model_executor/models/[vV]",
     r"vllm/model_executor/models/[wW]",
     r"vllm/model_executor/models/[zZ]",
-    "vllm/model_executor/layers/fla/ops",
 ]
 
 
