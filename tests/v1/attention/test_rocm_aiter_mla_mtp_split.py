@@ -115,7 +115,7 @@ def _config(*, method: str | None, num_speculative_tokens: int | None, tp_size: 
         (3, 4),
     ],
 )
-def test_mtp_config_selects_uniform_decode_policy_without_gpu_allocation(
+def test_mtp_config_reports_verification_query_len(
     tp_size, num_speculative_tokens, expected_query_len
 ):
     config = _config(
@@ -124,23 +124,25 @@ def test_mtp_config_selects_uniform_decode_policy_without_gpu_allocation(
         tp_size=tp_size,
     )
 
-    # All qlen>1 verification batches use the same native uniform policy.
     assert AiterMLAMetadataBuilder._mtp_decode_query_len(config) == expected_query_len
-    assert AiterMLAMetadataBuilder._allow_uniform_mtp_decode(config)
-    assert (
-        AiterMLAMetadataBuilder.get_cudagraph_support(config, None)
-        == rocm_aiter_mla.AttentionCGSupport.UNIFORM_BATCH
-    )
 
 
-def test_non_mtp_config_keeps_single_token_decode_policy():
+def test_non_mtp_config_reports_no_verification_query_len():
     config = _config(method=None, num_speculative_tokens=None, tp_size=1)
 
     assert AiterMLAMetadataBuilder._mtp_decode_query_len(config) is None
-    assert not AiterMLAMetadataBuilder._allow_uniform_mtp_decode(config)
+
+
+def test_backend_declares_uniform_batch_support():
+    # UNIFORM/UNIFORM_BATCH is unconditional: MTP yields uniform qlen>1 and
+    # non-MTP yields qlen==1, both uniform batches.
     assert (
-        AiterMLAMetadataBuilder.get_cudagraph_support(config, None)
-        == rocm_aiter_mla.AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
+        AiterMLAMetadataBuilder.query_len_support
+        == rocm_aiter_mla.QueryLenSupport.UNIFORM
+    )
+    assert (
+        AiterMLAMetadataBuilder._cudagraph_support
+        == rocm_aiter_mla.AttentionCGSupport.UNIFORM_BATCH
     )
 
 

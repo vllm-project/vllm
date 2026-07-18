@@ -138,13 +138,11 @@ _FP8_PREFILL_TILE_Q = 256
 class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
     # TODO(luka, lucas): audit this as part of:
     #  https://github.com/vllm-project/vllm/issues/22945
-    _cudagraph_support: ClassVar[AttentionCGSupport] = (
-        AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
-    )
-    # MTP verification presents uniform qlen>1 decode batches. AITER's dense
-    # MLA decode path supports those batches when vLLM supplies causal
-    # persistent metadata, so keep the native row layout by default.
-    query_len_support: ClassVar[QueryLenSupport] = QueryLenSupport.SINGLE_ONLY
+    _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
+    # UNIFORM covers both cases: MTP verification presents uniform qlen>1 decode
+    # batches (consumed natively once vLLM supplies causal persistent metadata),
+    # and without MTP the decode qlen is always 1, a trivially uniform batch.
+    query_len_support: ClassVar[QueryLenSupport] = QueryLenSupport.UNIFORM
 
     @classmethod
     def _mtp_decode_query_len(cls, vllm_config: VllmConfig) -> int | None:
@@ -158,13 +156,6 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             return None
 
         return int(num_spec_tokens) + 1
-
-    @classmethod
-    def _allow_uniform_mtp_decode(cls, vllm_config: VllmConfig) -> bool:
-        # MTP (num_speculative_tokens>=1) always yields qlen>=2. Native dense
-        # AITER MLA consumes those uniform qlen>1 verification batches directly
-        # when vLLM supplies causal persistent metadata, regardless of qlen.
-        return cls._mtp_decode_query_len(vllm_config) is not None
 
     @staticmethod
     def _uniform_padded_mtp_qo_len(
@@ -206,16 +197,6 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
 
         return uniform_qo_len
 
-    @classmethod
-    def get_cudagraph_support(
-        cls,
-        vllm_config: VllmConfig,
-        kv_cache_spec: AttentionSpec,
-    ) -> AttentionCGSupport:
-        if cls._allow_uniform_mtp_decode(vllm_config):
-            return AttentionCGSupport.UNIFORM_BATCH
-        return super().get_cudagraph_support(vllm_config, kv_cache_spec)
-
     def __init__(
         self,
         kv_cache_spec: AttentionSpec,
@@ -223,13 +204,6 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         vllm_config: VllmConfig,
         device: torch.device,
     ):
-        if self._allow_uniform_mtp_decode(vllm_config):
-            # Config-dependent upgrade: AITER MLA handles uniform MTP
-            # verification decode (qlen>1) natively. The ClassVar is
-            # intentionally shadowed per-instance before super().__init__
-            # consumes it to derive reorder_batch_threshold.
-            self.query_len_support = QueryLenSupport.UNIFORM  # type: ignore[misc]
-
         super().__init__(
             kv_cache_spec, layer_names, vllm_config, device, AiterMLAMetadata
         )
