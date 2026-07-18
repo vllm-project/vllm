@@ -592,6 +592,7 @@ steps:
 
   - group: "Build ROCm Wheel / Image "
     key: "build-rocm-wheel-image"
+    depends_on: ~
     steps:
       # ROCm Job 1: Build ROCm Base Wheels (with S3 caching)
       - label: ":rocm: Build ROCm Base Image & Wheels"
