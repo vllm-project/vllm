@@ -405,15 +405,37 @@ class CanonicalKVCacheTensor:
 
 
 @dataclass(frozen=True)
-class KVHeadRegion:
-    """One region of this worker's page as a run of equally-sized fragments,
-    each holding num_kv_heads heads (the unit of one copy op). Describes this
-    worker's physical page only — in-process use, never serialized."""
+class MappedRun:
+    """A strided byte correspondence between this worker's physical page and
+    a canonical page: for i in range(num_fragments), fragment i spans
+    [local_offset + i * local_stride, +fragment_size) in the worker's page and
+    [canonical_offset + i * canonical_stride, +fragment_size) canonically."""
 
-    offset: int
+    local_offset: int
+    canonical_offset: int
     fragment_size: int
     num_fragments: int
-    num_kv_heads: int
+    local_stride: int
+    canonical_stride: int
+
+
+@dataclass(frozen=True)
+class CanonicalPageMapping:
+    """How this worker's page maps into a canonical (parallelism-free) page.
+    In-process only, never serialized. store_runs may be empty when another
+    worker contributes the same bytes; load_runs cover the full local page.
+    """
+
+    # Size of the canonical page in bytes
+    canonical_page_size_bytes: int
+    # Size of this worker's (un-padded) page in bytes
+    local_page_size_bytes: int
+    # Bytes this worker contributes when writing a canonical page
+    store_runs: tuple[MappedRun, ...]
+    # Bytes this worker reads back from a canonical page
+    load_runs: tuple[MappedRun, ...]
+    # Canonical bytes identical under any parallel config with this block span
+    parallel_invariant: bool
 
 
 @dataclass
@@ -427,11 +449,8 @@ class CanonicalKVCacheRef:
     tensor_idx: int
     # The un-padded page size per block in bytes
     page_size_bytes: int
-    # Per-head source decomposition of the page; None = no head slicing
-    head_regions: tuple[KVHeadRegion, ...] | None = None
-    # When head_regions is None: True = page is identical on every TP rank
-    # (MLA latent), False = rank-specific shards (Mamba states, packed)
-    replicated: bool = False
+    # How this worker's page maps into a canonical page; None = uncertified
+    mapping: CanonicalPageMapping | None = None
 
 
 @dataclass
