@@ -1354,7 +1354,7 @@ class LlavaOnevision2ProcessingInfo(BaseProcessingInfo):
             preprocessed = ImageSize(width=rw, height=rh)
         else:
             preprocessed = ImageSize(width=image_width, height=image_height)
-        padded_frames = num_frames + num_frames % temporal_patch_size
+        padded_frames = num_frames + (-num_frames % temporal_patch_size)
         grid_t = max(padded_frames // temporal_patch_size, 1)
         grid_h = preprocessed.height // patch_size
         grid_w = preprocessed.width // patch_size
