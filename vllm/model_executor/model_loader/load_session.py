@@ -6,10 +6,13 @@ import torch
 from torch import nn
 
 from vllm.config import ModelConfig
+from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizeMethodBase,
 )
 from vllm.utils.mem_utils import release_device_memory_under_pressure
+
+logger = init_logger(__name__)
 
 
 class WeightLoadSession:
@@ -98,6 +101,8 @@ class WeightLoadSession:
                 )
 
                 _abort_layerwise_loading(model)
+        except BaseException:
+            logger.exception("Failed to clean up an aborted weight load")
         finally:
             self._unbind()
 

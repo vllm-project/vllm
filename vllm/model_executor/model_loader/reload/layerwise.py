@@ -98,6 +98,13 @@ def finalize_layerwise_processing(
     session.finish(model_config)
 
 
+def finalize_layerwise_reload(
+    model: torch.nn.Module, model_config: ModelConfig | None
+) -> None:
+    """Compatibility alias for ``finalize_layerwise_processing``."""
+    finalize_layerwise_processing(model, model_config)
+
+
 @torch.no_grad()
 def _prepare_layerwise_loading(model: torch.nn.Module):
     """

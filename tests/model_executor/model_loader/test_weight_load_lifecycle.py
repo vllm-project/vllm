@@ -16,11 +16,15 @@ from vllm.model_executor.model_loader.load_session import (
 )
 from vllm.model_executor.model_loader.reload import (
     finalize_layerwise_processing,
+    finalize_layerwise_reload,
     initialize_layerwise_reload,
 )
 from vllm.model_executor.model_loader.reload.layerwise import (
     _layerwise_process,
     record_metadata_for_reloading,
+)
+from vllm.model_executor.model_loader.reload.torchao_decorator import (
+    support_quantized_model_reload_from_hp_weights,
 )
 from vllm.model_executor.model_loader.reload.types import LayerReloadingInfo
 
@@ -161,6 +165,21 @@ def test_legacy_layerwise_api_preserves_storage():
     assert torch.equal(model.bias, loaded_bias)
 
 
+def test_finalize_layerwise_reload_remains_a_compatibility_alias(monkeypatch):
+    finish = Mock()
+    monkeypatch.setattr(
+        "vllm.model_executor.model_loader.reload.layerwise."
+        "finalize_layerwise_processing",
+        finish,
+    )
+    model = nn.Module()
+    model_config = Mock()
+
+    finalize_layerwise_reload(model, model_config)
+
+    finish.assert_called_once_with(model, model_config)
+
+
 def test_initial_quant_processing_uses_device_context(monkeypatch):
     model = nn.Module()
     model.quant_method = Mock(spec=QuantizeMethodBase)
@@ -210,4 +229,43 @@ def test_prepare_failure_unbinds_session(monkeypatch):
 
     with pytest.raises(RuntimeError, match="boom"):
         session.prepare()
+    assert get_active_weight_load_session(model) is None
+
+
+def test_abort_cleanup_failure_does_not_mask_load_failure(monkeypatch):
+    model = nn.Linear(1, 1)
+    record_metadata_for_reloading(model)
+    session = WeightLoadSession(model)
+    session.prepare()
+    monkeypatch.setattr(
+        "vllm.model_executor.model_loader.reload.layerwise._finish_layerwise_loading",
+        Mock(side_effect=ValueError("load failed")),
+    )
+    monkeypatch.setattr(
+        "vllm.model_executor.model_loader.reload.layerwise._abort_layerwise_loading",
+        Mock(side_effect=RuntimeError("cleanup failed")),
+    )
+
+    with pytest.raises(ValueError, match="load failed"):
+        session.finish(None)
+
+    assert get_active_weight_load_session(model) is None
+
+
+def test_torchao_reload_failure_clears_session():
+    model = nn.Linear(1, 1)
+    record_metadata_for_reloading(model)
+    model._do_torchao_reload = True
+
+    class Loader:
+        def __init__(self):
+            self.module = model
+
+        @support_quantized_model_reload_from_hp_weights
+        def load_weights(self, _weights):
+            raise ValueError("load failed")
+
+    with pytest.raises(ValueError, match="load failed"):
+        Loader().load_weights([])
+
     assert get_active_weight_load_session(model) is None
