@@ -95,44 +95,6 @@ def _builder(
     )
 
 
-def _config(*, method: str | None, num_speculative_tokens: int | None, tp_size: int):
-    speculative_config = None
-    if method is not None:
-        speculative_config = SimpleNamespace(
-            method=method,
-            num_speculative_tokens=num_speculative_tokens,
-        )
-    return SimpleNamespace(
-        speculative_config=speculative_config,
-        parallel_config=SimpleNamespace(tensor_parallel_size=tp_size),
-    )
-
-
-@pytest.mark.parametrize("tp_size", [1, 2])
-@pytest.mark.parametrize(
-    ("num_speculative_tokens", "expected_query_len"),
-    [
-        (3, 4),
-    ],
-)
-def test_mtp_config_reports_verification_query_len(
-    tp_size, num_speculative_tokens, expected_query_len
-):
-    config = _config(
-        method="deepseek_mtp",
-        num_speculative_tokens=num_speculative_tokens,
-        tp_size=tp_size,
-    )
-
-    assert AiterMLAMetadataBuilder._mtp_decode_query_len(config) == expected_query_len
-
-
-def test_non_mtp_config_reports_no_verification_query_len():
-    config = _config(method=None, num_speculative_tokens=None, tp_size=1)
-
-    assert AiterMLAMetadataBuilder._mtp_decode_query_len(config) is None
-
-
 def test_backend_declares_uniform_batch_support():
     # UNIFORM/UNIFORM_BATCH is unconditional: MTP yields uniform qlen>1 and
     # non-MTP yields qlen==1, both uniform batches.

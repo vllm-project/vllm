@@ -144,19 +144,6 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
     # and without MTP the decode qlen is always 1, a trivially uniform batch.
     query_len_support: ClassVar[QueryLenSupport] = QueryLenSupport.UNIFORM
 
-    @classmethod
-    def _mtp_decode_query_len(cls, vllm_config: VllmConfig) -> int | None:
-        speculative_config = vllm_config.speculative_config
-        if speculative_config is None:
-            return None
-
-        num_spec_tokens = speculative_config.num_speculative_tokens
-        method = speculative_config.method
-        if method not in ("mtp", "deepseek_mtp") or num_spec_tokens is None:
-            return None
-
-        return int(num_spec_tokens) + 1
-
     @staticmethod
     def _uniform_padded_mtp_qo_len(
         qo_len: torch.Tensor,
@@ -210,7 +197,18 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
 
         self.compilation_config = vllm_config.compilation_config
         self.decode_attn_out_dtype = vllm_config.model_config.dtype
-        self._mtp_decode_qlen = self._mtp_decode_query_len(vllm_config) or 1
+
+        # MTP/deepseek_mtp verification runs decode with qlen = num_spec + 1;
+        # any other config (including no spec) stays at single-token decode.
+        speculative_config = vllm_config.speculative_config
+        if (
+            speculative_config is not None
+            and speculative_config.method in ("mtp", "deepseek_mtp")
+            and speculative_config.num_speculative_tokens is not None
+        ):
+            self._mtp_decode_qlen = int(speculative_config.num_speculative_tokens) + 1
+        else:
+            self._mtp_decode_qlen = 1
 
         # Store the kernel block size from the spec. When kernel_block_size=1
         # (no spec-dec), behavior is identical to the original. When > 1
