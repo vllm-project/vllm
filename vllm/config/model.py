@@ -783,8 +783,7 @@ class ModelConfig:
             info = MULTIMODAL_REGISTRY.get_processing_info(self)
             vision_modalities = {"image", "video"} & info.supported_mm_limits.keys()
             if not vision_modalities or any(
-                info.allowed_mm_limits[modality] > 0
-                for modality in vision_modalities
+                info.allowed_mm_limits[modality] > 0 for modality in vision_modalities
             ):
                 return
             reason = (
