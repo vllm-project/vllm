@@ -41,6 +41,7 @@ steps:
   _raw_old_commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+  # lora/test_chatglm3_tp.py::test_chatglm3_lora_tp4 skipped due to OOM on 4x Intel GPU and will hang
   - pytest -v -s -x lora/test_chatglm3_tp.py
   - pytest -v -s -x lora/test_llama_tp.py
   - pytest -v -s -x lora/test_qwen3_with_multi_loras.py
@@ -57,7 +58,7 @@ steps:
     'export VLLM_WORKER_MULTIPROC_METHOD=spawn || true &&
     export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True || true &&
     cd tests &&
-    pytest -v -s -x lora/test_chatglm3_tp.py || true &&
+    pytest -v -s -x lora/test_chatglm3_tp.py --deselect="lora/test_chatglm3_tp.py::test_chatglm3_lora_tp4" || true &&
     pytest -v -s -x lora/test_llama_tp.py || true &&
     pytest -v -s -x lora/test_qwen3_with_multi_loras.py || true &&
     pytest -v -s -x lora/test_olmoe_tp.py || true &&

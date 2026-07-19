@@ -16,6 +16,7 @@ steps:
     gpu: 1+
   _raw_old_commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  # v1/spec_decode/test_max_len.py::test_eagle_max_len[FLASH_ATTN-10] skipped due to OOM on Intel GPU and will hang
   - pytest -v -s -m 'not slow_test' v1/spec_decode
   source_file_dependencies:
   - vllm/config/
@@ -33,7 +34,7 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'export VLLM_WORKER_MULTIPROC_METHOD=spawn || true &&
     cd tests &&
-    pytest -v -s -m not slow_test v1/spec_decode || true'
+    pytest -v -s -m not slow_test v1/spec_decode --deselect="v1/spec_decode/test_max_len.py::test_eagle_max_len[FLASH_ATTN-10]"|| true'
 - label: V1 Sample + Logits
   timeout_in_minutes: 45
   device: intel_gpu
@@ -130,6 +131,7 @@ steps:
   - tests/v1/worker
   - tests/v1/kv_connector/unit
   - tests/v1/ec_connector/unit
+  # v1/metrics/test_ray_metrics.py is skipped due to Ray dependency issues on Intel GPU
   - tests/v1/metrics
   - tests/entrypoints/openai/correctness/test_lmeval.py
   commands:
@@ -145,7 +147,7 @@ steps:
     pytest -v -s v1/worker || true &&
     pytest -v -s -m not cpu_test v1/kv_connector/unit || true &&
     pytest -v -s -m not cpu_test v1/ec_connector/unit || true &&
-    pytest -v -s -m not cpu_test v1/metrics || true &&
+    pytest -v -s -m not cpu_test v1/metrics --ignore="v1/metrics/test_ray_metrics.py" || true &&
     pip install -U git+https://github.com/vllm-project/lm-evaluation-harness.git@streaming-api || true &&
     pytest -v -s entrypoints/openai/correctness/test_lmeval.py::test_lm_eval_accuracy_v1_engine || true'
 - label: Extract Hidden States Integration
