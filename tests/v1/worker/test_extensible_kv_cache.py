@@ -652,3 +652,33 @@ def test_v2_narrow_kv_caches_to_num_blocks() -> None:
         assert torch.all(full[1, committed - 1] == 2)
     finally:
         buffers.free()
+
+
+def test_v2_extensible_defragment_on_commit() -> None:
+    """commit(defragment=True) re-maps each segment prefix as ONE physical
+    chunk (required for KV-transfer registration), discarding prior data."""
+    spec = _full_attention_spec()
+    kv_cache_config, attn_groups = _attention_config(spec, _SplitKVBackend)
+    kv_caches, buffers = _v2_allocate(kv_cache_config, attn_groups, [BLOCK_SIZE])
+    try:
+        kv_cache = kv_caches["layer.0"]
+        # Staged commits spanning multiple VMM granules -> multiple physical
+        # chunks per segment.
+        buffers.commit(8)
+        buffers.commit(NUM_BLOCKS // 2)
+        kv_cache[0, 0].fill_(1)
+        torch.cuda.synchronize()
+        [(buffer, _)] = buffers.buffers
+        assert len(buffer._buffer._handles) > 2
+
+        buffers.commit(NUM_BLOCKS, defragment=True)
+        # One chunk per segment; data discarded (zeroed); views still work.
+        assert len(buffer._buffer._handles) == 2
+        assert buffers.num_blocks_committed == NUM_BLOCKS
+        torch.cuda.synchronize()
+        assert torch.count_nonzero(kv_cache) == 0
+        kv_cache[1, NUM_BLOCKS - 1].fill_(3)
+        torch.cuda.synchronize()
+        assert torch.all(kv_cache[1, NUM_BLOCKS - 1] == 3)
+    finally:
+        buffers.free()
