@@ -14,7 +14,7 @@ protobuf >= 5.29.6, !=6.30.*, !=6.31.*, !=6.32.*, !=6.33.0.*, !=6.33.1.*, !=6.33
 fastapi[standard] >= 0.133.0, < 0.137.0 # First version supporting Starlette 1.0; < 0.137.0 avoids route-tree change that breaks model-hosting-container-standards handler overrides.
 starlette >= 1.0.1 # CVE-2026-48710: Host header injection in < 1.0.1
 aiohttp >= 3.13.3
-openai >= 2.0.0  # For Responses API with reasoning content
+openai >= 2.25.0  # For Responses API with namespace tools
 pydantic >= 2.12.0
 prometheus_client >= 0.18.0
 pillow  # Required for image processing
