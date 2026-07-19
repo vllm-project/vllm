@@ -47,6 +47,9 @@ from ..transcription.protocol import (
     TranscriptionResponseVerbose,
     TranscriptionSegment,
     TranscriptionStreamResponse,
+    TranscriptionTextDeltaEvent,
+    TranscriptionTextDoneEvent,
+    TranscriptionUsageTokens,
 )
 from ..translation.protocol import (
     TranslationResponse,
@@ -679,13 +682,18 @@ class SpeechToTextBaseServing(GenerateBaseServing):
         | type[TranslationStreamResponse],
         separator: str,
     ) -> AsyncGenerator[str, None]:
-        created_time = int(time.time())
-        model_name = request.model
+        is_transcription = self.task_type == "transcribe"
+        if not is_transcription:
+            created_time = int(time.time())
+            model_name = request.model
 
         completion_tokens = 0
         num_prompt_tokens = 0
+        transcript_text_parts: list[str] | None = [] if is_transcription else None
 
-        include_usage = self.enable_force_include_usage or request.stream_include_usage
+        include_usage = not is_transcription and (
+            self.enable_force_include_usage or request.stream_include_usage
+        )
         include_continuous_usage = (
             request.stream_continuous_usage_stats
             if include_usage and request.stream_continuous_usage_stats
@@ -730,42 +738,61 @@ class SpeechToTextBaseServing(GenerateBaseServing):
                         completion_tokens += len(output.token_ids)
                         continue
 
-                    delta_message = DeltaMessage(content=output_text)
                     completion_tokens += len(output.token_ids)
 
-                    if output.finish_reason is None:
-                        # Still generating, send delta update.
-                        choice_data = response_stream_choice_class(delta=delta_message)
+                    if is_transcription:
+                        if output_text:
+                            assert transcript_text_parts is not None
+                            transcript_text_parts.append(output_text)
+                            delta_event = TranscriptionTextDeltaEvent(delta=output_text)
+                            yield f"data: {delta_event.model_dump_json()}\n\n"
                     else:
-                        # Model is finished generating.
-                        choice_data = response_stream_choice_class(
-                            delta=delta_message,
-                            finish_reason=output.finish_reason,
-                            stop_reason=output.stop_reason,
+                        delta_message = DeltaMessage(content=output_text)
+                        if output.finish_reason is None:
+                            # Still generating, send delta update.
+                            choice_data = response_stream_choice_class(
+                                delta=delta_message
+                            )
+                        else:
+                            # Model is finished generating.
+                            choice_data = response_stream_choice_class(
+                                delta=delta_message,
+                                finish_reason=output.finish_reason,
+                                stop_reason=output.stop_reason,
+                            )
+
+                        chunk = stream_response_class(
+                            id=request_id,
+                            object=chunk_object_type,
+                            created=created_time,
+                            choices=[choice_data],
+                            model=model_name,
                         )
 
-                    chunk = stream_response_class(
-                        id=request_id,
-                        object=chunk_object_type,
-                        created=created_time,
-                        choices=[choice_data],
-                        model=model_name,
-                    )
+                        # handle usage stats if requested & if continuous
+                        if include_continuous_usage:
+                            chunk.usage = UsageInfo(
+                                prompt_tokens=num_prompt_tokens,
+                                completion_tokens=completion_tokens,
+                                total_tokens=num_prompt_tokens + completion_tokens,
+                            )
 
-                    # handle usage stats if requested & if continuous
-                    if include_continuous_usage:
-                        chunk.usage = UsageInfo(
-                            prompt_tokens=num_prompt_tokens,
-                            completion_tokens=completion_tokens,
-                            total_tokens=num_prompt_tokens + completion_tokens,
-                        )
+                        data = chunk.model_dump_json(exclude_unset=True)
+                        yield f"data: {data}\n\n"
 
-                    data = chunk.model_dump_json(exclude_unset=True)
-                    yield f"data: {data}\n\n"
-
-            # Once the final token is handled, if stream_options.include_usage
-            # is sent, send the usage.
-            if include_usage:
+            if is_transcription:
+                assert transcript_text_parts is not None
+                done_event = TranscriptionTextDoneEvent(
+                    text="".join(transcript_text_parts),
+                    usage=TranscriptionUsageTokens(
+                        input_tokens=num_prompt_tokens,
+                        output_tokens=completion_tokens,
+                        total_tokens=num_prompt_tokens + completion_tokens,
+                    ),
+                )
+                yield f"data: {done_event.model_dump_json()}\n\n"
+            elif include_usage:
+                # Once the final token is handled, send requested usage.
                 final_usage = UsageInfo(
                     prompt_tokens=num_prompt_tokens,
                     completion_tokens=completion_tokens,
