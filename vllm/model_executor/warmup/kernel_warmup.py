@@ -97,8 +97,16 @@ def kernel_warmup(worker: "Worker"):
     )
 
     # Run next so input-prep kernels JIT against pristine runner state.
-    flashinfer_sparse_mla_decode_autotune_warmup(worker)
-    deepseek_v4_sparse_mla_attention_warmup(worker)
+    enable_flashinfer_autotune = (
+        worker.vllm_config.kernel_config.enable_flashinfer_autotune
+    )
+    flashinfer_skip_ops = (
+        _flashinfer_autotune_skip_ops(worker.model_runner)
+        if enable_flashinfer_autotune is True
+        else None
+    )
+    flashinfer_sparse_mla_decode_autotune_warmup(worker, flashinfer_skip_ops)
+    deepseek_v4_sparse_mla_attention_warmup(worker, flashinfer_skip_ops)
 
     # Deep GEMM warmup
     do_deep_gemm_warmup = (
@@ -113,9 +121,6 @@ def kernel_warmup(worker: "Worker"):
 
     minimax_m3_msa_warmup(worker)
 
-    enable_flashinfer_autotune = (
-        worker.vllm_config.kernel_config.enable_flashinfer_autotune
-    )
     # FlashInfer autotune for Hopper (SM 9.0) and Blackwell (SM 10.0) GPUs
     if enable_flashinfer_autotune is False:
         logger.info("Skipping FlashInfer autotune because it is disabled.")
