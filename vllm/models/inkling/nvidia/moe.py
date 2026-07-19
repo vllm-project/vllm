@@ -43,20 +43,19 @@ from vllm.utils.multi_stream_utils import maybe_execute_in_parallel
 from vllm.utils.torch_utils import aux_stream
 
 from ..configs import InklingModelConfig
-from ..nvfp4 import FLOAT4_E2M1_MAX, FLOAT8_E4M3_MAX
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.fused_moe.routed_experts import (
         RoutedExperts,
     )
-
-    from ..nvfp4 import InklingNvfp4Config
+    from vllm.model_executor.layers.quantization import QuantizationConfig
 
 # ---------------------------------------------------------------------------
 # Gate / expert selection
 # ---------------------------------------------------------------------------
 
 _INKLING_LL_BF16_MAX_TOKENS = 64
+_NVFP4_INPUT_SCALE_DENOMINATOR = torch.finfo(torch.float8_e4m3fn).max * 6.0
 
 
 def _linear_with_fp32_out(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
@@ -343,14 +342,78 @@ class InklingSinkExperts(nn.Module):
         return h @ self.w2_weight.T  # (T, D)
 
 
+class InklingSinkExpertsLinear(nn.Module):
+    """LoRA-capable implementation of the Inkling sink experts."""
+
+    def __init__(
+        self,
+        n_experts: int,
+        d_model: int,
+        d_mlp: int,
+        *,
+        prefix: str = "",
+    ) -> None:
+        super().__init__()
+        from vllm.model_executor.layers.linear import (
+            MergedColumnParallelLinear,
+            RowParallelLinear,
+        )
+
+        self.n_experts = n_experts
+        self.d_mlp = d_mlp
+        total = n_experts * d_mlp
+        self.w13 = MergedColumnParallelLinear(
+            input_size=d_model,
+            output_sizes=[total, total],
+            bias=False,
+            prefix=f"{prefix}.w13",
+        )
+        self.w2 = RowParallelLinear(
+            input_size=total,
+            output_size=d_model,
+            bias=False,
+            reduce_results=False,
+            prefix=f"{prefix}.w2",
+        )
+        self._w2_input_pp = self.w2.input_size_per_partition
+        self._col_expert: torch.Tensor | None = None
+
+    def _gamma_expand(self, gammas: torch.Tensor) -> torch.Tensor:
+        if self._col_expert is None or self._col_expert.device != gammas.device:
+            local = self._w2_input_pp
+            start = get_tensor_model_parallel_rank() * local
+            cols = torch.arange(start, start + local, device=gammas.device)
+            self._col_expert = (cols // self.d_mlp).long()
+        return gammas[:, self._col_expert]
+
+    def load_weight(self, key: str, weight: torch.Tensor) -> list[str]:
+        if key == "w13_weight":
+            d_model = weight.shape[-1]
+            gate = weight[:, 0::2, :].reshape(-1, d_model).contiguous()
+            up = weight[:, 1::2, :].reshape(-1, d_model).contiguous()
+            self.w13.weight_loader(self.w13.weight, gate, 0)
+            self.w13.weight_loader(self.w13.weight, up, 1)
+            return ["w13.weight"]
+        w = weight.permute(1, 0, 2).reshape(weight.shape[1], -1).contiguous()
+        self.w2.weight_loader(self.w2.weight, w)
+        return ["w2.weight"]
+
+    def forward(self, x: torch.Tensor, gammas: torch.Tensor) -> torch.Tensor:
+        gate_up, _ = self.w13(x)
+        gate, up = gate_up.chunk(2, dim=-1)
+        hidden_states = torch.nn.functional.silu(gate) * up
+        hidden_states = (hidden_states * self._gamma_expand(gammas)).to(x.dtype)
+        output, _ = self.w2(hidden_states)
+        return output
+
+
 class InklingMoE(nn.Module):
     def __init__(
         self,
         config: InklingModelConfig,
-        layer_id: int,
         *,
         prefix: str = "",
-        nvfp4_config: InklingNvfp4Config | None = None,
+        quant_config: QuantizationConfig | None = None,
     ) -> None:
         super().__init__()
         # Overfit to the served checkpoint: sigmoid gate renormalized after
@@ -371,22 +434,6 @@ class InklingMoE(nn.Module):
             use_gate_bias=config.use_gate_bias,
         )
 
-        moe_quant_config = None
-        if nvfp4_config is not None and nvfp4_config.experts_quantized(layer_id):
-            from vllm.model_executor.layers.quantization.modelopt import (
-                ModelOptNvFp4Config,
-            )
-
-            # The Inkling checkpoint is ModelOpt NVFP4; exclusion is decided per
-            # layer right here, so no exclude list is needed.
-            moe_quant_config = ModelOptNvFp4Config(
-                quant_method="NVFP4",
-                is_checkpoint_nvfp4_serialized=True,
-                kv_cache_quant_algo=None,
-                exclude_modules=[],
-                group_size=nvfp4_config.group_size,
-            )
-
         # TRTLLM MoE kernels assume equal, contiguous per-rank expert slabs
         # (local_expert_offset = ep_rank * local_num_experts), so pad the
         # expert count to a multiple of the EP size. A no-op for the usual
@@ -399,7 +446,7 @@ class InklingMoE(nn.Module):
             hidden_size=config.hidden_size,
             intermediate_size=config.intermediate_size,
             renormalize=False,
-            quant_config=moe_quant_config,
+            quant_config=quant_config,
             prefix=f"{prefix}.experts",
             custom_routing_function=self._select_routed,
             router_logits_dtype=torch.float32,
@@ -411,13 +458,13 @@ class InklingMoE(nn.Module):
         self.experts.moe_config.skip_final_all_reduce = True
 
         self._routed_sel: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None
-        # The sinks are always bf16; fail loudly on a checkpoint that
-        # quantizes them instead of silently misloading.
-        assert nvfp4_config is None or not nvfp4_config.shared_experts_quantized(
-            layer_id
-        ), f"layer {layer_id}: NVFP4 shared experts are not supported"
 
-        self.sink_experts = InklingSinkExperts(
+        sink_experts_cls = (
+            InklingSinkExpertsLinear
+            if get_current_vllm_config().lora_config is not None
+            else InklingSinkExperts
+        )
+        self.sink_experts = sink_experts_cls(
             n_experts=n_shared,
             d_model=config.hidden_size,
             d_mlp=config.intermediate_size,
@@ -519,7 +566,7 @@ class InklingMoE(nn.Module):
                 f"bad {projection} input_amax: {amax}"
             )
             input_scale = getattr(experts, f"{projection}_input_scale")
-            input_scale.data.fill_(amax / (FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX))
+            input_scale.data.fill_(amax / _NVFP4_INPUT_SCALE_DENOMINATOR)
             return [f"experts.routed_experts.{projection}_input_scale"]
 
         param = getattr(experts, key)
