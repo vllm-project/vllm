@@ -91,7 +91,7 @@ class ScaleDesc:
         }
         group_shape = d.get(self.group_shape, str(self.group_shape))
         return (
-            f"{fx.graph.dtype_abbrs[self.dtype]},"
+            f"{fx.graph.dtype_abbrs.get(self.dtype, str(self.dtype))},"
             f"{'static' if self.static else 'dynamic'},{group_shape}"
         )
 
@@ -114,7 +114,7 @@ class QuantKey:
     def __str__(self):
         scale2_str = f"scale2({self.scale2})," if self.scale2 else ""
         return (
-            f"QuantKey({fx.graph.dtype_abbrs[self.dtype]},"
+            f"QuantKey({fx.graph.dtype_abbrs.get(self.dtype, str(self.dtype))},"
             f"scale({self.scale}),{scale2_str}"
             f"{'a' if not self.symmetric else ''}symmetric)"
         )

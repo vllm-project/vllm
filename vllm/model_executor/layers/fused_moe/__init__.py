@@ -111,7 +111,7 @@ if HAS_TRITON:
     )
     from vllm.model_executor.layers.fused_moe.experts.triton_moe import (
         TritonExperts,
-        TritonWNA16Experts,
+        TritonWNA16OTFExperts,
     )
     from vllm.model_executor.layers.fused_moe.experts.xpu_moe import (
         XPUExperts,
@@ -139,7 +139,7 @@ if HAS_TRITON:
         "CutlassBatchedExpertsFp8",
         "CutlassExpertsW4A8Fp8",
         "TritonExperts",
-        "TritonWNA16Experts",
+        "TritonWNA16OTFExperts",
         "BatchedTritonExperts",
         "DeepGemmExperts",
         "BatchedDeepGemmExperts",

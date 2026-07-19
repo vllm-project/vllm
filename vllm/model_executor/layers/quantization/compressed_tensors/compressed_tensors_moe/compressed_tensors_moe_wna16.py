@@ -240,11 +240,11 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
             from vllm.triton_utils import HAS_TRITON
 
             if HAS_TRITON:
-                from vllm.model_executor.layers.fused_moe import TritonWNA16Experts
+                from vllm.model_executor.layers.fused_moe import TritonWNA16OTFExperts
 
                 layer.w13_weight = layer.w13_weight_packed
                 layer.w2_weight = layer.w2_weight_packed
-                return TritonWNA16Experts(
+                return TritonWNA16OTFExperts(
                     moe_config=self.moe, quant_config=self.moe_quant_config
                 )
             else:
