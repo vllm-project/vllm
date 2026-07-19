@@ -328,7 +328,7 @@ def _allocate_extensible_kv_cache(
     attn_groups: Sequence[AttentionGroup],
     kernel_block_sizes: list[int],
     cache_dtype: str,
-    rdma_capable: bool = False,
+    shareable: bool = False,
 ) -> tuple[dict[str, torch.Tensor], ExtensibleKVCacheBuffers]:
     """Reserve virtual address space for the full KV cache capacity but commit
     only one block per buffer. The returned raw tensors view the full capacity;
@@ -363,7 +363,7 @@ def _allocate_extensible_kv_cache(
                     max_num_bytes=kv_cache_tensor.size,
                     device=device,
                     num_segments=1,
-                    rdma_capable=rdma_capable,
+                    shareable=shareable,
                 )
                 buffers.append((packed_buffer, bytes_per_block))
                 packed_view = packed_buffer.full_view()
@@ -384,7 +384,7 @@ def _allocate_extensible_kv_cache(
                 max_num_bytes=kv_cache_tensor.size,
                 device=device,
                 num_segments=num_segments,
-                rdma_capable=rdma_capable,
+                shareable=shareable,
             )
             buffers.append((buffer, bytes_per_block // num_segments))
             tensor = buffer.full_view()
@@ -739,8 +739,9 @@ def init_kv_cache(
             flattened_attn_groups,
             kernel_block_sizes,
             cache_dtype,
-            # KV connectors may register the cache for GPU-direct RDMA.
-            rdma_capable=vllm_config.kv_transfer_config is not None,
+            # KV connectors export this memory for cross-process access
+            # (CUDA IPC intra-node, GPU-direct RDMA across nodes).
+            shareable=vllm_config.kv_transfer_config is not None,
         )
     else:
         kv_cache_raw_tensors = _allocate_kv_cache(
