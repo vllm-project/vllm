@@ -277,6 +277,15 @@ class Executor(ABC):
         """Shutdown the executor."""
         self.collective_rpc("shutdown")
 
+    def shutdown_for_process_exit(self) -> None:
+        """Shutdown the executor when its hosting process will exit.
+
+        Executors whose workers run in another process keep the normal
+        shutdown behavior. Executors with an in-process worker may override
+        this to avoid cleanup work that only matters if Python stays alive.
+        """
+        self.shutdown()
+
     def init_kv_output_aggregator(self, connector: "KVConnectorBase") -> None:
         """Init KVOutputAggregator"""
         self.kv_output_aggregator = KVOutputAggregator.from_connector(
