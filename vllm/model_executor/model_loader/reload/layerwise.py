@@ -206,12 +206,13 @@ def _bind_runtime_weight_reload_mapping(
 ) -> bool:
     restore_params, restore_buffers = info.restore_metadata
     runtime_params, runtime_buffers = runtime_tensors
-    is_identity = mapping.keys() == runtime_params.keys() and all(
-        mapping[name] is runtime_params[name] for name in mapping
+    reloadable_runtime_params, _ = get_reloadable_layer_tensors(layer)
+    is_identity = mapping.keys() == reloadable_runtime_params.keys() and all(
+        mapping[name] is reloadable_runtime_params[name] for name in mapping
     )
 
     if is_identity:
-        if not _matching_tensor_layouts(restore_params, runtime_params):
+        if not _matching_tensor_layouts(restore_params, reloadable_runtime_params):
             return False
     else:
         if restore_buffers:

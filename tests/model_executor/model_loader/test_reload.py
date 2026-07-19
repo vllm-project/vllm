@@ -269,6 +269,8 @@ def test_direct_weight_reload_restores_parameter_loading_metadata():
     layer = _DirectReloadLayer(supported=True)
     layer.weight = _DirectReloadParameter(layer.weight.data)
     layer.weight.weight_loader = _merged_weight_loader
+    # Runtime-only tensors must not make an otherwise direct mapping non-identity.
+    layer.e_score_correction_bias = torch.nn.Parameter(torch.ones(1))
     model = torch.nn.Sequential(layer)
     loaded_weight = torch.full_like(layer.weight, 7.0)
 
