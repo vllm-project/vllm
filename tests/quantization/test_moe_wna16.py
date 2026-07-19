@@ -87,14 +87,24 @@ def test_compressed_tensors_wna16_binds_checkpoint_views_to_runtime_storage():
         "w2_weight_shape": torch.nn.Parameter(torch.empty((2, 2)), requires_grad=False),
     }
     runtime_ptrs = {name: param.data_ptr() for name, param in runtime_params.items()}
+    checkpoint_ptrs = {
+        name: param.data_ptr() for name, param in layer.named_parameters()
+    }
     method = object.__new__(CompressedTensorsWNA16MoEMethod)
 
-    assert method.bind_runtime_weight_reload(layer, runtime_params)
-    assert layer.w13_weight_packed.shape == (2, 6, 4)
-    assert layer.w2_weight_packed.shape == (2, 8, 3)
-    assert layer.w13_weight_scale.shape == (2, 6, 5)
-    assert layer.w2_weight_scale.shape == (2, 8, 3)
-    assert not layer.w13_weight_packed.is_transposed
-    assert not layer.w13_weight_scale.is_transposed
-    bound_ptrs = {name: param.data_ptr() for name, param in layer.named_parameters()}
+    checkpoint_params = dict(layer.named_parameters())
+    mapping = method.get_runtime_weight_reload_mapping(
+        layer, checkpoint_params, runtime_params
+    )
+    assert mapping is not None
+    assert {
+        name: param.data_ptr() for name, param in layer.named_parameters()
+    } == checkpoint_ptrs
+    assert mapping["w13_weight_packed"].shape == (2, 6, 4)
+    assert mapping["w2_weight_packed"].shape == (2, 8, 3)
+    assert mapping["w13_weight_scale"].shape == (2, 6, 5)
+    assert mapping["w2_weight_scale"].shape == (2, 8, 3)
+    assert not mapping["w13_weight_packed"].is_transposed
+    assert not mapping["w13_weight_scale"].is_transposed
+    bound_ptrs = {name: param.data_ptr() for name, param in mapping.items()}
     assert bound_ptrs == runtime_ptrs

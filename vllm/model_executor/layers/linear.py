@@ -3,7 +3,7 @@
 
 import itertools
 from abc import abstractmethod
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from typing import Any
 
 import torch
@@ -217,8 +217,13 @@ class UnquantizedLinearMethod(LinearMethodBase):
 
             dispatch_cpu_unquantized_gemm(layer, remove_weight=True)
 
-    def supports_direct_weight_reload(self, layer: torch.nn.Module) -> bool:
-        return not current_platform.is_cpu()
+    def get_runtime_weight_reload_mapping(
+        self,
+        layer: torch.nn.Module,
+        checkpoint_params: Mapping[str, Parameter],
+        runtime_params: Mapping[str, Parameter],
+    ) -> Mapping[str, Parameter] | None:
+        return runtime_params if not current_platform.is_cpu() else None
 
     def apply(
         self,

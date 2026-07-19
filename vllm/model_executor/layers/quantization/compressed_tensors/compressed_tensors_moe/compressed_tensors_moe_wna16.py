@@ -213,28 +213,29 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
             layer.w2_weight_scale.transpose(1, 2).contiguous(), requires_grad=False
         )
 
-    def bind_runtime_weight_reload(
+    def get_runtime_weight_reload_mapping(
         self,
         layer: torch.nn.Module,
+        checkpoint_params: Mapping[str, torch.nn.Parameter],
         runtime_params: Mapping[str, torch.nn.Parameter],
-    ) -> bool:
+    ) -> Mapping[str, torch.nn.Parameter] | None:
         packed_weights = {"w13_weight_packed", "w2_weight_packed"}
         transposed_scales = {"w13_weight_scale", "w2_weight_scale"}
         bound_params = {}
 
-        for name, checkpoint_param in layer._parameters.items():
-            if checkpoint_param is None or name not in runtime_params:
-                return False
+        if checkpoint_params.keys() - runtime_params.keys():
+            return None
 
+        for name, checkpoint_param in checkpoint_params.items():
             runtime_data = runtime_params[name].data
             if name in packed_weights:
                 if checkpoint_param.ndim != 3 or runtime_data.dtype != torch.uint8:
-                    return False
+                    return None
                 reload_data = runtime_data.view(torch.int32)
                 expected_shape = checkpoint_param.transpose(1, 2).shape
             elif name in transposed_scales:
                 if checkpoint_param.ndim != 3:
-                    return False
+                    return None
                 reload_data = runtime_data
                 expected_shape = checkpoint_param.transpose(1, 2).shape
             else:
@@ -245,18 +246,19 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
                 reload_data.shape != expected_shape
                 or reload_data.dtype != checkpoint_param.dtype
             ):
-                return False
+                return None
             bound_params[name] = (checkpoint_param, reload_data)
 
+        mapping = {}
         for name, (checkpoint_param, reload_data) in bound_params.items():
             bound_param = torch.nn.Parameter(reload_data, requires_grad=False)
             bound_param.__class__ = checkpoint_param.__class__
             bound_param.__dict__ = checkpoint_param.__dict__.copy()
             if name in packed_weights or name in transposed_scales:
                 bound_param.is_transposed = False
-            setattr(layer, name, bound_param)
+            mapping[name] = bound_param
 
-        return True
+        return mapping
 
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module

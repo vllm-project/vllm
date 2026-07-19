@@ -6,13 +6,16 @@ from weakref import WeakKeyDictionary, ref
 
 import pytest
 import torch
-from torch.nn.parameter import UninitializedParameter
+from torch.nn.parameter import UninitializedBuffer, UninitializedParameter
 
 import vllm.model_executor.model_loader.reload.meta as reload_meta
 from vllm.model_executor.layers.linear import QKVParallelLinear
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
 from vllm.model_executor.model_loader.reload.layerwise import (
+    _DEFERRED_ATTENTION_TYPES,
+    _matching_tensor_layouts,
     finalize_layerwise_reload,
+    get_layerwise_info,
     initialize_layerwise_reload,
     record_metadata_for_reloading,
 )
@@ -24,7 +27,11 @@ from vllm.model_executor.model_loader.reload.meta import (
     restore_layer_on_meta,
     to_meta_tensor,
 )
-from vllm.model_executor.model_loader.reload.types import LayerReloadingInfo
+from vllm.model_executor.model_loader.reload.types import (
+    LayerReloadingInfo,
+    LayerReloadMode,
+    TensorReloadSignature,
+)
 from vllm.model_executor.model_loader.reload.utils import get_layer_tensors
 from vllm.model_executor.model_loader.weight_utils import (
     composed_weight_loader,
@@ -114,8 +121,10 @@ class _DirectReloadMethod(QuantizeMethodBase):
     def process_weights_after_loading(self, layer):
         self.process_calls += 1
 
-    def supports_direct_weight_reload(self, layer):
-        return self.supported
+    def get_runtime_weight_reload_mapping(
+        self, layer, checkpoint_params, runtime_params
+    ):
+        return runtime_params if self.supported else None
 
 
 class _DirectReloadLayer(torch.nn.Module):
@@ -139,25 +148,40 @@ class _RuntimeViewReloadMethod(_DirectReloadMethod):
     def __init__(self):
         super().__init__(supported=False)
 
-    def bind_runtime_weight_reload(self, layer, runtime_params):
-        checkpoint_param = layer.weight
+    def get_runtime_weight_reload_mapping(
+        self, layer, checkpoint_params, runtime_params
+    ):
+        checkpoint_param = checkpoint_params["weight"]
         bound_param = torch.nn.Parameter(runtime_params["weight"].t())
         bound_param.__class__ = checkpoint_param.__class__
         bound_param.__dict__ = checkpoint_param.__dict__.copy()
-        layer.weight = bound_param
-        return True
+        return {"weight": bound_param}
 
     def process_weights_after_loading(self, layer):
         self.process_calls += 1
         layer.weight = torch.nn.Parameter(layer.weight.t().contiguous())
 
 
+class _DetachedRuntimeViewReloadMethod(_RuntimeViewReloadMethod):
+    def get_runtime_weight_reload_mapping(
+        self, layer, checkpoint_params, runtime_params
+    ):
+        checkpoint_param = checkpoint_params["weight"]
+        bound_param = torch.nn.Parameter(runtime_params["weight"].t().clone())
+        bound_param.__class__ = checkpoint_param.__class__
+        bound_param.__dict__ = checkpoint_param.__dict__.copy()
+        return {"weight": bound_param}
+
+
 class _RuntimeViewReloadLayer(torch.nn.Module):
-    def __init__(self):
+    def __init__(self, quant_method=None):
         super().__init__()
         self.weight = torch.nn.Parameter(torch.arange(6.0).reshape(2, 3))
-        self.weight.weight_loader = default_weight_loader
-        self.quant_method = _RuntimeViewReloadMethod()
+        self.weight.weight_loader = self._weight_loader
+        self.quant_method = quant_method or _RuntimeViewReloadMethod()
+
+    def _weight_loader(self, param, loaded_weight):
+        param.data.copy_(loaded_weight)
 
 
 def test_move_metatensors():
@@ -208,6 +232,9 @@ def test_direct_weight_reload_preserves_runtime_storage(supported):
     record_metadata_for_reloading(model)
     initialize_layerwise_reload(model)
 
+    expected_mode = LayerReloadMode.DIRECT if supported else LayerReloadMode.LAYERWISE
+    assert get_layerwise_info(layer).reload_plan.mode is expected_mode
+
     if supported:
         assert not layer.weight.is_meta
     else:
@@ -231,6 +258,29 @@ def test_direct_weight_reload_requires_matching_layout():
     initialize_layerwise_reload(model)
 
     assert layer.weight.is_meta
+
+
+def test_direct_weight_reload_requires_matching_tensor_sets():
+    weight = torch.empty(2, 3)
+    extra = torch.empty(1)
+
+    assert not _matching_tensor_layouts(
+        {"weight": weight}, {"weight": weight, "extra": extra}
+    )
+
+
+def test_deferred_attention_types_are_complete():
+    from vllm.model_executor.layers.attention import (
+        Attention,
+        MLAAttention,
+        MMEncoderAttention,
+    )
+
+    assert (
+        Attention,
+        MLAAttention,
+        MMEncoderAttention,
+    ) == _DEFERRED_ATTENTION_TYPES
 
 
 def test_direct_weight_reload_restores_parameter_loading_metadata():
@@ -264,12 +314,71 @@ def test_runtime_view_reload_uses_existing_kernel_storage():
     initialize_layerwise_reload(model)
 
     assert not layer.weight.is_meta
+    assert get_layerwise_info(layer).reload_plan.mode is LayerReloadMode.RUNTIME_VIEW
     layer.weight.weight_loader(layer.weight, loaded_weight)
     finalize_layerwise_reload(model, model_config=None)
 
     assert torch.equal(layer.weight, loaded_weight.t())
     assert layer.weight.data_ptr() == original_data_ptr
     assert layer.quant_method.process_calls == 1
+
+
+def test_runtime_view_reload_rejects_detached_mapping_atomically():
+    layer = _RuntimeViewReloadLayer(_DetachedRuntimeViewReloadMethod())
+    model = torch.nn.Sequential(layer)
+
+    record_metadata_for_reloading(model)
+    layer.quant_method.process_weights_after_loading(layer)
+    initialize_layerwise_reload(model)
+
+    assert layer.weight.is_meta
+    assert get_layerwise_info(layer).reload_plan.mode is LayerReloadMode.LAYERWISE
+
+
+def test_runtime_view_reload_reuses_validated_plan():
+    layer = _RuntimeViewReloadLayer()
+    model = torch.nn.Sequential(layer)
+    loaded_weight = torch.full_like(layer.weight, 7.0)
+
+    record_metadata_for_reloading(model)
+    layer.quant_method.process_weights_after_loading(layer)
+    original_data_ptr = layer.weight.data_ptr()
+
+    for _ in range(2):
+        initialize_layerwise_reload(model)
+        assert get_layerwise_info(layer).reload_plan.mode is (
+            LayerReloadMode.RUNTIME_VIEW
+        )
+        layer.weight.weight_loader(layer.weight, loaded_weight)
+        finalize_layerwise_reload(model, model_config=None)
+        assert layer.weight.data_ptr() == original_data_ptr
+
+
+def test_direct_weight_reload_detects_runtime_storage_replacement():
+    layer = _DirectReloadLayer(supported=True)
+    model = torch.nn.Sequential(layer)
+
+    record_metadata_for_reloading(model)
+    initialize_layerwise_reload(model)
+    layer.weight = torch.nn.Parameter(layer.weight.detach().clone())
+
+    with pytest.raises(RuntimeError, match="changed runtime tensor storage"):
+        finalize_layerwise_reload(model, model_config=None)
+
+
+def test_cached_direct_plan_rechecks_quant_method_support():
+    layer = _DirectReloadLayer(supported=True)
+    model = torch.nn.Sequential(layer)
+
+    record_metadata_for_reloading(model)
+    initialize_layerwise_reload(model)
+    finalize_layerwise_reload(model, model_config=None)
+    assert get_layerwise_info(layer).reload_plan.mode is LayerReloadMode.DIRECT
+
+    layer.quant_method = _DirectReloadMethod(supported=False)
+    initialize_layerwise_reload(model)
+
+    assert get_layerwise_info(layer).reload_plan.mode is LayerReloadMode.LAYERWISE
 
 
 def test_materialize_layer_preserves_non_meta_tensors():
@@ -453,6 +562,12 @@ def test_capture_layer_to_meta_skips_uninitialized_parameter_storage_ptrs():
     _, buffers = capture_layer_to_meta(layer)
 
     assert "weight_view" not in buffers
+
+
+def test_lazy_tensors_fail_closed_without_reading_storage():
+    for tensor in (UninitializedParameter(), UninitializedBuffer()):
+        assert not _matching_tensor_layouts({"weight": tensor}, {"weight": tensor})
+        assert TensorReloadSignature.from_tensor(tensor).storage_ptr is None
 
 
 def test_layerwise_reload_skips_child_parameter_alias_buffers(monkeypatch):

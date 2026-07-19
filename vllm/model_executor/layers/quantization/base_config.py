@@ -72,17 +72,19 @@ class QuantizeMethodBase(ABC):
         """
         return
 
-    def supports_direct_weight_reload(self, layer: nn.Module) -> bool:
-        """Whether checkpoint weights can reload into runtime tensors directly."""
-        return False
-
-    def bind_runtime_weight_reload(
+    def get_runtime_weight_reload_mapping(
         self,
         layer: nn.Module,
+        checkpoint_params: Mapping[str, nn.Parameter],
         runtime_params: Mapping[str, nn.Parameter],
-    ) -> bool:
-        """Bind checkpoint-layout parameters to existing runtime storage."""
-        return False
+    ) -> Mapping[str, nn.Parameter] | None:
+        """Return loader-facing parameters backed by runtime storage.
+
+        Implementations must not mutate ``layer`` and must return every checkpoint
+        parameter as a view over its complete runtime storage, or return ``None``.
+        The reload framework validates the whole mapping before committing it.
+        """
+        return None
 
 
 def method_has_implemented_embedding(method_class: type[QuantizeMethodBase]) -> bool:

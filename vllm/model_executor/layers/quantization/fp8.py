@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
 import torch
@@ -446,12 +447,18 @@ class Fp8LinearMethod(LinearMethodBase):
 
         self.fp8_linear.process_weights_after_loading(layer)
 
-    def supports_direct_weight_reload(self, layer: torch.nn.Module) -> bool:
-        return (
+    def get_runtime_weight_reload_mapping(
+        self,
+        layer: torch.nn.Module,
+        checkpoint_params: Mapping[str, torch.nn.Parameter],
+        runtime_params: Mapping[str, torch.nn.Parameter],
+    ) -> Mapping[str, torch.nn.Parameter] | None:
+        supported = (
             self.block_quant
             and isinstance(self.fp8_linear, CutlassFp8BlockScaledMMKernel)
             and not current_platform.is_fp8_fnuz()
         )
+        return runtime_params if supported else None
 
     def apply(
         self,
@@ -772,12 +779,18 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             layer, w13, w2, w13_scale, w2_scale, w13_input_scale, w2_input_scale
         )
 
-    def supports_direct_weight_reload(self, layer: torch.nn.Module) -> bool:
-        return (
+    def get_runtime_weight_reload_mapping(
+        self,
+        layer: torch.nn.Module,
+        checkpoint_params: Mapping[str, torch.nn.Parameter],
+        runtime_params: Mapping[str, torch.nn.Parameter],
+    ) -> Mapping[str, torch.nn.Parameter] | None:
+        supported = (
             self.block_quant
             and self.fp8_backend in (Fp8MoeBackend.TRITON, Fp8MoeBackend.BATCHED_TRITON)
             and not current_platform.is_fp8_fnuz()
         )
+        return runtime_params if supported else None
 
     def maybe_make_prepare_finalize(
         self,
