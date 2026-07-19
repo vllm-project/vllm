@@ -584,3 +584,35 @@ def test_v2_extensible_packed_layout() -> None:
         assert torch.count_nonzero(cache0[1 : NUM_BLOCKS - 1]) == 0
     finally:
         buffers.free()
+
+
+def test_v2_extensible_release_and_recommit() -> None:
+    """Sleep/wake cycle: release_physical discards data but keeps VA and
+    views valid; recommit restores the committed size with zeroed pages."""
+    spec = _full_attention_spec()
+    kv_cache_config, attn_groups = _attention_config(spec, _SplitKVBackend)
+    kv_caches, buffers = _v2_allocate(kv_cache_config, attn_groups, [BLOCK_SIZE])
+    try:
+        kv_cache = kv_caches["layer.0"]
+        base_ptr = buffers.buffers[0][0].base_ptr
+        buffers.commit(NUM_BLOCKS)
+        kv_cache.fill_(7)
+        torch.cuda.synchronize()
+        assert buffers.physical_bytes > 0
+
+        buffers.release_physical()
+        assert buffers.physical_bytes == 0
+        assert buffers.num_blocks_committed == 0
+
+        buffers.recommit()
+        assert buffers.num_blocks_committed == NUM_BLOCKS
+        assert buffers.buffers[0][0].base_ptr == base_ptr
+        torch.cuda.synchronize()
+        # Data was discarded; fresh pages are zeroed and writable through
+        # the original views.
+        assert torch.count_nonzero(kv_cache) == 0
+        kv_cache[1, NUM_BLOCKS - 1].fill_(9)
+        torch.cuda.synchronize()
+        assert torch.all(kv_cache[1, NUM_BLOCKS - 1] == 9)
+    finally:
+        buffers.free()

@@ -207,6 +207,14 @@ class Worker(WorkerBase):
 
         self._get_sleep_mode_backend().suspend(level)
 
+        # The extensible KV cache lives outside the torch/CuMem allocators;
+        # discard its physical memory directly (VA and views stay valid).
+        extensible_kv_buffers = getattr(
+            self.model_runner, "extensible_kv_buffers", None
+        )
+        if extensible_kv_buffers is not None:
+            extensible_kv_buffers.release_physical()
+
         torch.accelerator.synchronize()
         deadline = time.monotonic() + (5.0 if current_platform.is_rocm() else 0)
         while True:
@@ -244,6 +252,11 @@ class Worker(WorkerBase):
             self._sleep_rebuild_draft_metadata_buffers = False
 
         if tags is None or "kv_cache" in tags:
+            extensible_kv_buffers = getattr(
+                self.model_runner, "extensible_kv_buffers", None
+            )
+            if extensible_kv_buffers is not None:
+                extensible_kv_buffers.recommit()
             self.model_runner.post_kv_cache_wake_up()
 
     def _maybe_get_memory_pool_context(self, tag: str) -> AbstractContextManager:

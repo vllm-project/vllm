@@ -302,11 +302,6 @@ class EngineCore:
                     "KV connectors: connectors register KV cache memory "
                     "before the full physical size is committed."
                 )
-            if vllm_config.model_config.enable_sleep_mode:
-                raise ValueError(
-                    "enable_extensible_kv_cache=True is not supported with "
-                    "sleep mode: the KV cache bypasses the CuMem allocator."
-                )
             # The workers' drivers must support virtual memory management
             # (e.g. WSL2 and non-GPU platforms do not); fall back gracefully.
             reasons = self.collective_rpc("extensible_kv_cache_unsupported_reason")

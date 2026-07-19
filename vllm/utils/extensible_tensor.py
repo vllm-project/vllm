@@ -96,10 +96,12 @@ class _VirtualBuffer:
 
         self._handles.append((handle, offset, size))
 
-    def free(self) -> None:
-        if self._freed:
-            return
-        self._freed = True
+    def release_physical(self) -> None:
+        """Unmap and release all physical memory, keeping the VA reservation.
+
+        The base pointer (and any tensor views over it) stays valid but
+        unbacked; `ensure_committed_range` maps fresh physical pages again.
+        """
         driver = self._driver
         driver.ensure_context(self.device_index)
         if self._handles:
@@ -107,10 +109,16 @@ class _VirtualBuffer:
         for handle, offset, size in self._handles:
             driver.unmap(self.base_ptr + offset, size)
             driver.release(handle)
-        if self.base_ptr:
-            driver.free_reserved(self.base_ptr, self.reserved_size)
         self._handles = []
         self._mapped_granules = set()
+
+    def free(self) -> None:
+        if self._freed:
+            return
+        self._freed = True
+        self.release_physical()
+        if self.base_ptr:
+            self._driver.free_reserved(self.base_ptr, self.reserved_size)
         self.base_ptr = 0
 
     def __del__(self) -> None:
@@ -333,6 +341,15 @@ class ExtensibleTensor:
         """Physically mapped bytes (committed size rounded up to granules)."""
         return self._buffer.committed_bytes
 
+    def release_physical(self) -> None:
+        """Release all physical memory while keeping the VA reservation.
+
+        Existing tensor views stay pointer-valid but must not be accessed
+        until the buffer is committed again; the data is discarded.
+        """
+        self._buffer.release_physical()
+        self._bytes_per_segment = 0
+
     @property
     def base_ptr(self) -> int:
         return self._buffer.base_ptr
@@ -364,6 +381,7 @@ class ExtensibleKVCacheBuffers:
         self.buffers = buffers
         self.num_blocks_capacity = num_blocks_capacity
         self.num_blocks_committed = 0
+        self._num_blocks_to_recommit = 0
 
     def commit(self, num_blocks: int) -> None:
         if num_blocks <= self.num_blocks_committed:
@@ -379,6 +397,17 @@ class ExtensibleKVCacheBuffers:
     @property
     def physical_bytes(self) -> int:
         return sum(buffer.physical_bytes for buffer, _ in self.buffers)
+
+    def release_physical(self) -> None:
+        """Discard all physical memory (sleep), keeping VA and views valid."""
+        self._num_blocks_to_recommit = self.num_blocks_committed
+        for buffer, _ in self.buffers:
+            buffer.release_physical()
+        self.num_blocks_committed = 0
+
+    def recommit(self) -> None:
+        """Re-commit the pre-release block count with freshly zeroed pages."""
+        self.commit(self._num_blocks_to_recommit)
 
     def free(self) -> None:
         for buffer, _ in self.buffers:
