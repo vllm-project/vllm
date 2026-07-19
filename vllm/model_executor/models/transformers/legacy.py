@@ -31,25 +31,25 @@ class LegacyMixin:
         super().__init__(vllm_config=vllm_config, prefix=prefix)
 
         # Skip unsupported/unwanted output embeddings layers
-        self.skip_prefixes.extend(
-            [
-                "model.lm_head.",
-                "model.predictions.",
-                "model.qa_outputs.",
-                "model.embeddings_project.",
-                "model.discriminator_predictions.",
-            ]
+        self.hf_to_vllm_mapper.orig_to_new_prefix.update(
+            {
+                "model.lm_head.": None,
+                "model.predictions.": None,
+                "model.qa_outputs.": None,
+                "model.embeddings_project.": None,
+                "model.discriminator_predictions.": None,
+            }
         )
 
         # Some encoder models have the position_ids buffer in the checkpoint.
         # vLLM will always pass position_ids as an argument, so we skip loading
         # the buffer if it exists
-        self.skip_substrs.append("position_ids")
+        self.hf_to_vllm_mapper.orig_to_new_substr["position_ids"] = None
 
         # Some encoder models have the bias of the final classifier layer
         # in the checkpoint. vLLM does not use this bias, so we skip loading
         # it if it exists
-        self.skip_substrs.append("score.bias")
+        self.hf_to_vllm_mapper.orig_to_new_substr["score.bias"] = None
 
         # roberta-like models an extra padding in positions.
         # FIXME(Isotr0py): This is quite hacky for roberta edge case,
