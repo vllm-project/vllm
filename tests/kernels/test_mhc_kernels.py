@@ -268,6 +268,23 @@ def test_can_use_hc_prenorm_gemm_cutedsl_split_bounds():
     assert _select_hc_prenorm_gemm_backend(x, fn, 49) == (True, False, 49)
 
 
+@requires_cutedsl_mhc
+def test_warmup_hc_prenorm_gemm_cutedsl(monkeypatch):
+    from vllm.model_executor.kernels.mhc import cutedsl, tilelang_kernels
+
+    compile_calls = []
+    monkeypatch.setattr(cutedsl, "_compile", lambda k, n: compile_calls.append((k, n)))
+    monkeypatch.setattr(
+        tilelang_kernels,
+        "compute_num_split",
+        lambda _block_k, _k, grid: 2 if grid < 3 else 1,
+    )
+
+    cutedsl.warmup_hc_prenorm_gemm(16384, 192)
+
+    assert compile_calls == [(16384, 2), (16384, 1)]
+
+
 @pytest.mark.skipif(
     not HAS_TILELANG_MHC,
     reason="TileLang MHC support required",

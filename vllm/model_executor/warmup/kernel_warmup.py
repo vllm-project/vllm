@@ -72,6 +72,29 @@ def _warmup_ll_bf16_router_gemm() -> None:
     )
 
 
+def _warmup_hc_prenorm_gemm(worker: "Worker") -> None:
+    from vllm.utils.import_utils import has_cutedsl
+
+    if not current_platform.is_device_capability(100) or not has_cutedsl():
+        return
+
+    config = getattr(worker.get_model(), "config", None)
+    if (
+        config is None
+        or getattr(config, "model_type", None) != "deepseek_v4"
+        or getattr(config, "hc_mult", None) != 4
+    ):
+        return
+
+    from vllm.model_executor.kernels.mhc.cutedsl import warmup_hc_prenorm_gemm
+
+    logger.info("Warming up CuTeDSL mHC prenorm GEMM kernels.")
+    warmup_hc_prenorm_gemm(
+        config.hc_mult * config.hidden_size,
+        worker.scheduler_config.max_num_batched_tokens,
+    )
+
+
 def kernel_warmup(worker: "Worker"):
     from vllm.model_executor.warmup.minimax_m3_msa_warmup import (
         minimax_m3_msa_warmup,
@@ -124,6 +147,7 @@ def kernel_warmup(worker: "Worker"):
 
     if current_platform.has_device_capability(90):
         _warmup_ll_bf16_router_gemm()
+    _warmup_hc_prenorm_gemm(worker)
 
     # FlashInfer attention warmup
     # Only warmup if the model has FlashInfer attention groups

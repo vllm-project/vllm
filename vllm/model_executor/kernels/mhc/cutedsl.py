@@ -616,6 +616,16 @@ def _compile(k, num_splits):
     )
 
 
+def warmup_hc_prenorm_gemm(k: int, max_num_batched_tokens: int) -> None:
+    from vllm.model_executor.kernels.mhc.tilelang_kernels import compute_num_split
+    from vllm.utils.math_utils import cdiv
+
+    grid_sizes = range(1, cdiv(max_num_batched_tokens, 64) + 1)
+    num_splits = dict.fromkeys(compute_num_split(64, k, grid) for grid in grid_sizes)
+    for num_split in num_splits:
+        _compile(k, num_split)
+
+
 def can_use_hc_prenorm_gemm(a, b, num_splits):
     return (
         a.ndim == 2
