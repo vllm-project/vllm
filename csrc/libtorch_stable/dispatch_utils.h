@@ -52,41 +52,44 @@
       TYPE, NAME,                                                         \
       VLLM_STABLE_DISPATCH_CASE_INTEGRAL_AND_UNSIGNED_TYPES(__VA_ARGS__))
 
-// FP8 type dispatch - ROCm uses FNUZ format, CUDA uses OCP format
+// FP8 type dispatch - ROCm uses FNUZ format, CUDA uses OCP format.
+// - ...FP8_TYPES binds 'fp8_t' for a nested fp8-only dispatch.
+// - ...FLOATING_AND_FP8_TYPES binds 'scalar_t' for kernels that may receive fp8
+//   input.
 #ifdef USE_ROCM
   #define VLLM_STABLE_DISPATCH_CASE_FP8_TYPES(...)                 \
     VLLM_STABLE_DISPATCH_FP8_CASE(                                 \
         torch::headeronly::ScalarType::Float8_e4m3fn, __VA_ARGS__) \
     VLLM_STABLE_DISPATCH_FP8_CASE(                                 \
         torch::headeronly::ScalarType::Float8_e4m3fnuz, __VA_ARGS__)
+
+  #define VLLM_STABLE_DISPATCH_CASE_FLOATING_AND_FP8_TYPES(...)       \
+    VLLM_STABLE_DISPATCH_CASE_FLOATING_TYPES(__VA_ARGS__)             \
+    THO_DISPATCH_CASE(torch::headeronly::ScalarType::Float8_e4m3fn,   \
+                      __VA_ARGS__)                                    \
+    THO_DISPATCH_CASE(torch::headeronly::ScalarType::Float8_e4m3fnuz, \
+                      __VA_ARGS__)
 #else
   #define VLLM_STABLE_DISPATCH_CASE_FP8_TYPES(...) \
     VLLM_STABLE_DISPATCH_FP8_CASE(                 \
         torch::headeronly::ScalarType::Float8_e4m3fn, __VA_ARGS__)
+
+  #define VLLM_STABLE_DISPATCH_CASE_FLOATING_AND_FP8_TYPES(...) \
+    VLLM_STABLE_DISPATCH_CASE_FLOATING_TYPES(__VA_ARGS__)       \
+    THO_DISPATCH_CASE(torch::headeronly::ScalarType::Float8_e4m3fn, __VA_ARGS__)
 #endif
-
-// Dispatch for floating types including FP8 input.
-// Used when the input tensor may already be quantized to FP8 (e.g., transformers
-// backend with FP8 MoE models where weights are already Float8_e4m3fn).
-// Uses 'scalar_t' as the type alias for all dispatched types so kernel code
-// that references 'scalar_t' works for both floating and FP8 types.
-#define VLLM_STABLE_DISPATCH_FP8_CASE_SCALAR_T(enum_type, ...) \
-  THO_PRIVATE_CASE_TYPE_USING_HINT(enum_type, scalar_t, __VA_ARGS__)
-
-#define VLLM_STABLE_DISPATCH_CASE_FLOATING_AND_FP8_SCALAR_T(...) \
-  VLLM_STABLE_DISPATCH_CASE_FLOATING_TYPES(__VA_ARGS__) \
-  VLLM_STABLE_DISPATCH_FP8_CASE_SCALAR_T(                 \
-      torch::headeronly::ScalarType::Float8_e4m3fn, __VA_ARGS__)
-
-#define VLLM_STABLE_DISPATCH_FLOATING_AND_FP8_TYPES(TYPE, NAME, ...) \
-  THO_DISPATCH_SWITCH(TYPE, NAME,                                    \
-                      VLLM_STABLE_DISPATCH_CASE_FLOATING_AND_FP8_SCALAR_T(__VA_ARGS__))
 
 // When using this dispatch macro, the type is 'fp8_t' not 'scalar_t'.
 // See VLLM_STABLE_DISPATCH_FP8_CASE above.
 #define VLLM_STABLE_DISPATCH_FP8_TYPES(TYPE, NAME, ...) \
   THO_DISPATCH_SWITCH(TYPE, NAME,                       \
                       VLLM_STABLE_DISPATCH_CASE_FP8_TYPES(__VA_ARGS__))
+
+// When using this dispatch macro, the type is 'scalar_t' not 'fp8_t'.
+#define VLLM_STABLE_DISPATCH_FLOATING_AND_FP8_TYPES(TYPE, NAME, ...) \
+  THO_DISPATCH_SWITCH(                                               \
+      TYPE, NAME,                                                    \
+      VLLM_STABLE_DISPATCH_CASE_FLOATING_AND_FP8_TYPES(__VA_ARGS__))
 
 // Half types dispatch (Half + BFloat16)
 #define VLLM_STABLE_DISPATCH_CASE_HALF_TYPES(...)                     \
