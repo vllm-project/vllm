@@ -98,9 +98,6 @@ class NodePrefixCacheState:
             },
         )
 
-    def apply_singleNode(self, snapshot: PrefixCacheSnapshot) -> None:
-        self.apply_snapshot(snapshot)
-
     def apply_events(self, events: Iterable[KVCacheEvent]) -> None:
         """Apply prefix-cache deltas emitted by a vLLM node."""
         for event in events:
@@ -132,15 +129,17 @@ class NodePrefixCacheState:
         if max_length <= 0:
             return 0
 
+        group_block_sizes = self.group_block_sizes or {
+            group_id: self.hash_block_size for group_id in self.group_hashes
+        }
         group_hits = [
             self._longest_group_match(
                 block_hashes=block_hashes,
-                hashes=hashes,
-                block_size=self.group_block_sizes.get(gid, self.hash_block_size),
+                hashes=self.group_hashes.get(group_id, set()),
+                block_size=block_size,
                 max_cache_hit_length=max_length,
             )
-            for gid, hashes in self.group_hashes.items()
-            if hashes
+            for group_id, block_size in group_block_sizes.items()
         ]
         return min(group_hits, default=0)
 
@@ -162,21 +161,15 @@ class NodePrefixCacheState:
 
         matched_blocks = 0
         for block_idx in range(max_blocks):
-            cache_key = self._cache_key_for_group_block(block_hashes, block_idx, scale)
+            # Request block hashes form a prefix chain. The final hash-block
+            # boundary inside this group block already fingerprints the full
+            # prefix covered by the group block.
+            hash_idx = (block_idx + 1) * scale - 1
+            cache_key = maybe_convert_block_hash(block_hashes[hash_idx])
             if cache_key not in hashes:
                 break
             matched_blocks += 1
         return matched_blocks * block_size
-
-    def _cache_key_for_group_block(
-        self, block_hashes: Sequence[BlockHash], block_idx: int, scale: int
-    ) -> PrefixBlockHash:
-        if scale == 1:
-            return maybe_convert_block_hash(block_hashes[block_idx])
-
-        start = block_idx * scale
-        end = start + scale
-        return maybe_convert_block_hash(BlockHash(b"".join(block_hashes[start:end])))
 
 
 class GlobalPrefixScheduler:

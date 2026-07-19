@@ -1,6 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import asyncio
+from types import SimpleNamespace
+
+import pytest
+
 from vllm.config.kv_events import KVEventsConfig
 from vllm.distributed.kv_events import (
     AllBlocksCleared,
@@ -16,6 +21,10 @@ from vllm.distributed.prefix_scheduler import (
     GlobalPrefixScheduler,
     NodePrefixCacheState,
     PrefixCacheSnapshot,
+)
+from vllm.entrypoints.openai.prefix_routing import (
+    PrefixRoutingProxy,
+    _parse_prefix_routing_config,
 )
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
@@ -164,12 +173,22 @@ def test_node_prefix_cache_state_matches_larger_group_block_size():
         node_id="node-a",
         hash_block_size=16,
         group_block_sizes={0: 32},
-        group_hashes={
-            0: {_external_hash(BlockHash(block_hashes[0] + block_hashes[1]))}
-        },
+        group_hashes={0: {_external_hash(block_hashes[1])}},
     )
 
     assert state.longest_prefix_match(block_hashes, prompt_num_tokens=80) == 32
+
+
+def test_node_prefix_cache_state_requires_a_hit_in_every_cache_group():
+    block_hashes = [_hash(1), _hash(2)]
+    state = NodePrefixCacheState(
+        node_id="node-a",
+        hash_block_size=16,
+        group_block_sizes={0: 16, 1: 16},
+        group_hashes={0: {_external_hash(block_hashes[0])}},
+    )
+
+    assert state.longest_prefix_match(block_hashes, prompt_num_tokens=32) == 0
 
 
 def test_prefix_cache_upload_is_independent_from_event_publisher():
@@ -187,3 +206,80 @@ def test_prefix_cache_upload_is_independent_from_event_publisher():
         assert isinstance(uploader, HttpPrefixCacheEventUploader)
     finally:
         uploader.shutdown()
+
+
+def test_prefix_routing_renders_completion_engine_inputs():
+    class Renderer:
+        async def render_completion(self, request):
+            return [
+                {"prompt_token_ids": [1, 2], "cache_salt": "salt"},
+                {"prompt_token_ids": [3]},
+            ]
+
+    proxy = object.__new__(PrefixRoutingProxy)
+    proxy.app_state = SimpleNamespace(online_renderer=Renderer())
+
+    rendered = asyncio.run(
+        proxy._render_request(
+            "/v1/completions",
+            {"model": "test-model", "prompt": ["first", "second"]},
+        )
+    )
+
+    assert rendered == [([1, 2], "salt"), ([3], None)]
+
+
+def test_prefix_routing_renders_chat_engine_inputs():
+    class Renderer:
+        async def render_chat(self, request):
+            return [], [{"prompt_token_ids": [4, 5], "cache_salt": "chat-salt"}]
+
+    proxy = object.__new__(PrefixRoutingProxy)
+    proxy.app_state = SimpleNamespace(online_renderer=Renderer())
+
+    rendered = asyncio.run(
+        proxy._render_request(
+            "/v1/chat/completions",
+            {
+                "model": "test-model",
+                "messages": [{"role": "user", "content": "hello"}],
+            },
+        )
+    )
+
+    assert rendered == [([4, 5], "chat-salt")]
+
+
+@pytest.mark.parametrize(
+    "config, error",
+    [
+        (
+            {
+                "nodes": [
+                    {"id": "node-a", "url": "local"},
+                    {"id": "node-a", "url": "local"},
+                ]
+            },
+            "duplicate prefix routing node id",
+        ),
+        (
+            {"nodes": [{"id": "node-a", "url": "ftp://node-a"}]},
+            r"requires an HTTP\(S\) URL",
+        ),
+        (
+            {"nodes": [{"id": "node-a", "url": "local"}], "hash_block_size": 0},
+            "hash_block_size must be a positive integer",
+        ),
+        (
+            {"nodes": [{"id": "node-a", "url": "local"}], "request_timeout": 0},
+            "request_timeout must be positive",
+        ),
+    ],
+)
+def test_prefix_routing_config_rejects_invalid_values(config, error):
+    vllm_config = SimpleNamespace(
+        cache_config=SimpleNamespace(hash_block_size=16, block_size=16)
+    )
+
+    with pytest.raises(ValueError, match=error):
+        _parse_prefix_routing_config(config, vllm_config)

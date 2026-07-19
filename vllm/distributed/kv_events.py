@@ -321,7 +321,6 @@ class HttpPrefixCacheEventUploader(EventPublisher):
             events.data_parallel_rank = self._data_parallel_rank
         try:
             self._event_queue.put_nowait(events)
-            # 这里设计直接丢弃，并不好
         except queue.Full:
             logger.warning(
                 "Dropping prefix-cache event batch because the HTTP upload "

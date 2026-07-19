@@ -156,19 +156,26 @@ class PrefixRoutingProxy:
     async def _render_request(
         self, path: str, payload: Mapping[str, Any]
     ) -> list[tuple[list[int], str | None]]:
-        render = self.app_state.openai_serving_render
+        renderer = self.app_state.online_renderer
         if path == "/v1/completions":
             completion_request = CompletionRequest.model_validate(payload)
-            result = await render.render_completion_request(completion_request)
+            result = await renderer.render_completion(completion_request)
             if isinstance(result, ErrorResponse):
                 return []
-            return [(req.token_ids, req.cache_salt) for req in result]
+            return [
+                (list(engine_input["prompt_token_ids"]), engine_input.get("cache_salt"))
+                for engine_input in result
+            ]
         if path == "/v1/chat/completions":
             chat_request = ChatCompletionRequest.model_validate(payload)
-            result = await render.render_chat_request(chat_request)
+            result = await renderer.render_chat(chat_request)
             if isinstance(result, ErrorResponse):
                 return []
-            return [(result.token_ids, result.cache_salt)]
+            _, engine_inputs = result
+            return [
+                (list(engine_input["prompt_token_ids"]), engine_input.get("cache_salt"))
+                for engine_input in engine_inputs
+            ]
         return []
 
     def _make_block_hashes(
@@ -300,17 +307,58 @@ def _parse_prefix_routing_config(
         raise ValueError("prefix routing config 'nodes' must be a list")
 
     nodes: list[PrefixRoutingNode] = []
+    node_ids: set[str] = set()
     for node in raw_nodes:
         if not isinstance(node, Mapping):
             raise ValueError("prefix routing node config must be a JSON object")
+        node_id = node.get("id")
+        if not isinstance(node_id, str) or not node_id.strip():
+            raise ValueError("prefix routing node 'id' must be a non-empty string")
+        if node_id in node_ids:
+            raise ValueError(f"duplicate prefix routing node id: {node_id!r}")
+        node_ids.add(node_id)
+
         node_url = node.get("url")
+        local = bool(node.get("local", node_url == "local"))
+        if local:
+            if node_url not in (None, "local"):
+                raise ValueError(
+                    f"local prefix routing node {node_id!r} cannot have a remote URL"
+                )
+            node_url = None
+        elif not isinstance(node_url, str) or not node_url.startswith(
+            ("http://", "https://")
+        ):
+            raise ValueError(
+                f"remote prefix routing node {node_id!r} requires an HTTP(S) URL"
+            )
+
+        event_endpoint = node.get("event_endpoint")
+        if event_endpoint is not None and (
+            not isinstance(event_endpoint, str) or not event_endpoint
+        ):
+            raise ValueError(
+                f"prefix routing node {node_id!r} event_endpoint must be a string"
+            )
+
+        data_parallel_rank = node.get("data_parallel_rank")
+        if data_parallel_rank is not None and (
+            not isinstance(data_parallel_rank, int)
+            or isinstance(data_parallel_rank, bool)
+            or data_parallel_rank < 0
+        ):
+            raise ValueError(
+                f"prefix routing node {node_id!r} data_parallel_rank "
+                "must be a non-negative integer"
+            )
+
         nodes.append(
             PrefixRoutingNode(
-                node_id=str(node["id"]),
-                url=None if node_url == "local" else node_url,
-                event_endpoint=node.get("event_endpoint"),
-                data_parallel_rank=node.get("data_parallel_rank"),
-                local=bool(node.get("local", node_url == "local")),
+                node_id=node_id,
+                url=node_url,
+                event_endpoint=event_endpoint,
+                data_parallel_rank=data_parallel_rank,
+                local=local,
             )
         )
     if not nodes:
@@ -320,12 +368,26 @@ def _parse_prefix_routing_config(
     hash_block_size = raw_config.get("hash_block_size")
     if hash_block_size is None:
         hash_block_size = cache_config.hash_block_size or cache_config.block_size
+    if (
+        not isinstance(hash_block_size, int)
+        or isinstance(hash_block_size, bool)
+        or hash_block_size <= 0
+    ):
+        raise ValueError("prefix routing hash_block_size must be a positive integer")
+
+    request_timeout = raw_config.get("request_timeout", 6 * 60 * 60)
+    if (
+        not isinstance(request_timeout, int | float)
+        or isinstance(request_timeout, bool)
+        or request_timeout <= 0
+    ):
+        raise ValueError("prefix routing request_timeout must be positive")
 
     return PrefixRoutingConfig(
         nodes=nodes,
-        hash_block_size=int(hash_block_size),
+        hash_block_size=hash_block_size,
         event_topic=str(raw_config.get("event_topic", "")),
-        request_timeout=float(raw_config.get("request_timeout", 6 * 60 * 60)),
+        request_timeout=float(request_timeout),
     )
 
 
