@@ -70,13 +70,44 @@ vllm serve <model> \
 | `cpu_bytes_to_use` | yes | — | both | Total bytes of host memory reserved for the CPU tier across all workers (not per-worker). |
 | `block_size` | no | GPU block size | both | Offloaded block size in tokens; must be a multiple of the GPU block size. Mutually exclusive with `blocks_per_chunk`. |
 | `blocks_per_chunk` | no | `1` | both | Offloaded chunk size in GPU blocks; must be > 0. Alternative to `block_size` for models whose KV cache groups have different block sizes. |
-| `eviction_policy` | no | `lru` | both | Primary tier policy: `lru` or `arc`. |
+| `eviction_policy` | no | `lru` | both | Primary tier policy: built-in `lru`/`arc`, or a custom `CachePolicy` name (see [Custom Eviction Policies](#custom-eviction-policies)). |
+| `cache_policy_module_path` | no | — | both | Python import path for a custom `CachePolicy` not in the built-in registry. Required only when `eviction_policy` is not built-in and wasn't pre-registered via `CachePolicyFactory` (advanced). |
 | `store_threshold` | no | `0` | single-tier | Min lookups before a block is offloaded. Values ≥ 2 are rejected by `TieringOffloadingSpec`. |
 | `max_tracker_size` | no | `64000` | single-tier | Max entries in the lookup tracker. |
 | `secondary_tiers` | no | `[]` | multi-tier | List of secondary tier configs (see below). |
 | `offload_prompt_only` | no | `true` | both | If `true`, only prompt (prefill) blocks are offloaded; decode blocks are skipped. |
 | `self_describing_kv_events` | no | `false` | both | Opt-in. When `true` *and* KV cache events are enabled (`--kv-events-config` with `enable_kv_cache_events`), the connector emits self-describing block-granular `BlockStored`/`BlockRemoved` payloads (constituent block hashes, whole-chunk `token_ids`, per-block `block_size`, parent hash, LoRA + group/cache-spec metadata) instead of the placeholder fallback, so external KV-event consumers can index offloaded blocks. Inert unless events are enabled. With `TieringOffloadingSpec`, a CPU promotion is self-describing when a local request observes its primary-tier `HIT` before event translation; otherwise its stored event may retain the placeholder, while a later `HIT` can backfill metadata for removal. Pending-removal/re-promotion races and externally initiated promotions may also produce placeholders, and consumers must ignore removals for unknown hashes. Full-attention groups only; sliding-window/SSM groups keep the placeholder fallback. In chunk mode (`block_size` > GPU block size, or `blocks_per_chunk` > 1), overlapping chunks re-announce shared per-block hashes, so consumers must reference-count (deduplicate) repeated store/remove announcements. |
 | `spec_module_path` | no | — | both | Python import path for a custom `OffloadingSpec` not in the built-in registry. Required only when `spec_name` is not built-in (advanced). |
+
+## Custom Eviction Policies
+
+`eviction_policy` resolves through `CachePolicyFactory` (`vllm/v1/kv_offload/cpu/policies/factory.py`), which pre-registers the built-in `lru` and `arc` policies.
+
+### Out-of-tree (recommended)
+
+Implement `CachePolicy` (`vllm/v1/kv_offload/cpu/policies/base.py`) in your own package — no vLLM fork or patch required — and point `kv_connector_extra_config` at it directly:
+
+```json
+{
+  "cpu_bytes_to_use": 10737418240,
+  "eviction_policy": "MyCachePolicy",
+  "cache_policy_module_path": "my_package.my_module"
+}
+```
+
+`eviction_policy` is checked against the built-in registry first; if it isn't a registered name, vLLM imports `cache_policy_module_path` and looks up `eviction_policy` as a class name in that module — the same fallback `spec_module_path` provides for a custom `OffloadingSpec`. No import or registration call needs to run before the server starts.
+
+### Registering a friendly short name (in-process only)
+
+If you control the process that constructs the vLLM engine (e.g. an embedding application), you can register a short name once at startup instead of repeating the module path in every config:
+
+```python
+from vllm.v1.kv_offload.cpu.policies.factory import CachePolicyFactory
+
+CachePolicyFactory.register_cache_policy("my_policy", "my_package.my_module", "MyCachePolicy")
+```
+
+Then set `"eviction_policy": "my_policy"` in `kv_connector_extra_config`, the same as `"lru"`/`"arc"`. This only takes effect within the process that ran the `register_cache_policy` call — it does not help when the server is launched as a separate process (e.g. via the `vllm serve` CLI), where the out-of-tree `cache_policy_module_path` config above is the only option.
 
 ## Secondary Tiers
 

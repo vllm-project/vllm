@@ -111,6 +111,9 @@ class CPUOffloadingSpec(OffloadingSpec):
         self._worker: CPUOffloadingWorker | None = None
 
         self.eviction_policy: str = self.extra_config.get("eviction_policy", "lru")
+        self.cache_policy_module_path: str | None = self.extra_config.get(
+            "cache_policy_module_path"
+        )
 
     @override
     def get_manager(self) -> OffloadingManager:
@@ -125,7 +128,8 @@ class CPUOffloadingSpec(OffloadingSpec):
 
             self._manager = CPUOffloadingManager(
                 num_blocks=self.num_blocks,
-                cache_policy=self.eviction_policy,  # type: ignore[arg-type]
+                cache_policy=self.eviction_policy,
+                cache_policy_module_path=self.cache_policy_module_path,
                 enable_events=self.kv_events_config.enable_kv_cache_events,
                 store_threshold=store_threshold,
                 max_tracker_size=max_tracker_size,
