@@ -30,9 +30,6 @@ from .meta import (
 from .sanitize import restore_layer_refs
 from .types import (
     LayerReloadingInfo,
-    LayerReloadMode,
-    LayerReloadPlan,
-    TensorReloadSignature,
 )
 from .utils import (
     get_info_size,
@@ -115,8 +112,7 @@ def initialize_layerwise_reload(model: torch.nn.Module):
     model._original_do_torchao_reload = getattr(model, "_do_torchao_reload", False)
     model._do_torchao_reload = False
 
-    direct_layers = 0
-    runtime_view_layers = 0
+    mapped_layers = 0
     layerwise_layers = 0
     for layer in model.modules():
         info = get_layerwise_info(layer)
@@ -126,46 +122,12 @@ def initialize_layerwise_reload(model: torch.nn.Module):
             continue
 
         runtime_tensors = get_layer_params_buffers(layer)
-        plan = info.reload_plan
-        if plan is not None and not _matches_runtime_plan(plan, runtime_tensors):
-            info.reload_plan = plan = None
-
-        if plan is not None and plan.mode is LayerReloadMode.DIRECT:
-            mapping = _get_runtime_weight_reload_mapping(layer, info)
-            if mapping is not None and _is_direct_reload_mapping(layer, info, mapping):
-                _restore_loading_metadata(layer, info)
-                direct_layers += 1
-                continue
-            info.reload_plan = plan = None
-
-        if plan is not None and plan.mode is LayerReloadMode.RUNTIME_VIEW:
-            if _bind_runtime_weight_reload_mapping(layer, info, runtime_tensors):
-                runtime_view_layers += 1
-                continue
-            info.reload_plan = plan = None
-
-        if plan is None:
-            mapping = _get_runtime_weight_reload_mapping(layer, info)
-            if mapping is not None and _is_direct_reload_mapping(layer, info, mapping):
-                info.reload_plan = _make_reload_plan(
-                    LayerReloadMode.DIRECT, runtime_tensors
-                )
-                _restore_loading_metadata(layer, info)
-                direct_layers += 1
-                continue
-
-            if mapping is not None and _bind_runtime_weight_reload_mapping(
-                layer, info, runtime_tensors, mapping
-            ):
-                info.reload_plan = _make_reload_plan(
-                    LayerReloadMode.RUNTIME_VIEW, runtime_tensors
-                )
-                runtime_view_layers += 1
-                continue
-
-            info.reload_plan = _make_reload_plan(
-                LayerReloadMode.LAYERWISE, runtime_tensors
-            )
+        mapping = _get_runtime_weight_reload_mapping(layer, info)
+        if mapping is not None and _bind_runtime_weight_reload_mapping(
+            layer, info, runtime_tensors, mapping
+        ):
+            mapped_layers += 1
+            continue
 
         # Save current tensors for later copying
         info.kernel_tensors = get_layer_params_buffers(layer)
@@ -180,10 +142,8 @@ def initialize_layerwise_reload(model: torch.nn.Module):
         layerwise_layers += 1
 
     logger.info_once(
-        "Weight reload uses %d direct layers, %d runtime-view layers, "
-        "and %d layerwise layers",
-        direct_layers,
-        runtime_view_layers,
+        "Weight reload uses %d mapped layers and %d layerwise layers",
+        mapped_layers,
         layerwise_layers,
     )
 
@@ -218,17 +178,6 @@ def _get_runtime_weight_reload_mapping(
     if mapping is None or mapping.keys() != restore_params.keys():
         return None
     return dict(mapping)
-
-
-def _is_direct_reload_mapping(
-    layer: torch.nn.Module,
-    info: LayerReloadingInfo,
-    mapping: dict[str, torch.nn.Parameter],
-) -> bool:
-    restore_params, _ = info.restore_metadata
-    return _is_identity_reload_mapping(layer, mapping) and (
-        _matching_tensor_layouts(restore_params, get_reloadable_layer_tensors(layer)[0])
-    )
 
 
 def _is_identity_reload_mapping(
@@ -267,29 +216,53 @@ def _bind_runtime_weight_reload_mapping(
 ) -> bool:
     if mapping is None:
         mapping = _get_runtime_weight_reload_mapping(layer, info)
-    if mapping is None or _is_identity_reload_mapping(layer, mapping):
+    if mapping is None:
         return False
 
     restore_params, restore_buffers = info.restore_metadata
-    runtime_params, _ = runtime_tensors
-    if restore_buffers:
-        return False
+    runtime_params, runtime_buffers = runtime_tensors
+    is_identity = _is_identity_reload_mapping(layer, mapping)
 
-    for name, checkpoint_param in restore_params.items():
-        mapped_param = mapping[name]
-        runtime_param = runtime_params.get(name)
-        if (
-            runtime_param is None
-            or mapped_param.__class__ is not checkpoint_param.__class__
-            or not _covers_same_storage(mapped_param, runtime_param)
-        ):
+    if is_identity:
+        if not _matching_tensor_layouts(restore_params, runtime_params):
+            return False
+    else:
+        if restore_buffers:
             return False
 
+        for name, checkpoint_param in restore_params.items():
+            mapped_param = mapping[name]
+            runtime_param = runtime_params.get(name)
+            if (
+                runtime_param is None
+                or mapped_param.__class__ is not checkpoint_param.__class__
+                or not _covers_same_storage(mapped_param, runtime_param)
+            ):
+                return False
+
     info.kernel_tensors = runtime_tensors
-    for name, mapped_param in mapping.items():
-        setattr(layer, name, mapped_param)
+    info.kernel_non_persistent_buffers = set(layer._non_persistent_buffers_set)
+    if is_identity:
+        _restore_loading_metadata(layer, info)
+    else:
+        for name, mapped_param in mapping.items():
+            setattr(layer, name, mapped_param)
     info.runtime_bound = True
     return True
+
+
+def _validate_runtime_binding(layer: torch.nn.Module, info: LayerReloadingInfo) -> None:
+    assert info.kernel_tensors is not None
+    runtime_params, runtime_buffers = info.kernel_tensors
+    for name, runtime_tensor in {**runtime_params, **runtime_buffers}.items():
+        bound_tensor = getattr(layer, name, None)
+        if bound_tensor is None or not _covers_same_storage(
+            bound_tensor, runtime_tensor
+        ):
+            raise RuntimeError(
+                f"{layer.__class__.__name__} changed runtime tensor storage "
+                "during weight reload"
+            )
 
 
 def _covers_same_storage(view: torch.Tensor, runtime_tensor: torch.Tensor) -> bool:
@@ -331,45 +304,6 @@ def _matching_tensor_layouts(
         ):
             return False
     return True
-
-
-def _make_reload_plan(
-    mode: LayerReloadMode,
-    runtime_tensors: tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]],
-) -> LayerReloadPlan:
-    params, buffers = runtime_tensors
-    return LayerReloadPlan(
-        mode=mode,
-        runtime_signatures=(
-            {
-                name: TensorReloadSignature.from_tensor(tensor)
-                for name, tensor in params.items()
-            },
-            {
-                name: TensorReloadSignature.from_tensor(tensor)
-                for name, tensor in buffers.items()
-            },
-        ),
-    )
-
-
-def _matches_runtime_plan(
-    plan: LayerReloadPlan,
-    runtime_tensors: tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]],
-) -> bool:
-    current = _make_reload_plan(plan.mode, runtime_tensors)
-    return plan.runtime_signatures == current.runtime_signatures
-
-
-def _verify_reload_plan(layer: torch.nn.Module, info: LayerReloadingInfo) -> None:
-    plan = info.reload_plan
-    if plan is None:
-        return
-    if not _matches_runtime_plan(plan, get_layer_params_buffers(layer)):
-        raise RuntimeError(
-            f"{layer.__class__.__name__} changed runtime tensor storage or "
-            "layout during weight reload"
-        )
 
 
 def initialize_online_processing(layer: torch.nn.Module):
@@ -499,12 +433,11 @@ def finalize_layerwise_processing(model: torch.nn.Module, model_config: ModelCon
     for layer in model.modules():
         info = get_layerwise_info(layer)
         if info.runtime_bound:
+            _validate_runtime_binding(layer, info)
             _place_kernel_tensors(layer, info)
-            _verify_reload_plan(layer, info)
             info.reset()
             continue
         if not info.can_load():
-            _verify_reload_plan(layer, info)
             info.reset()
             continue
 
@@ -535,13 +468,11 @@ def finalize_layerwise_processing(model: torch.nn.Module, model_config: ModelCon
             logger.debug("%s: Delayed processing", layer.__class__.__name__)
             _layerwise_process(layer, info)
 
-        _verify_reload_plan(layer, info)
         info.reset()
 
     # Process attention layers after all other layers are done
     for layer, info in deferred_attn:
         _finalize_attention_layer(layer, info, model_config)
-        _verify_reload_plan(layer, info)
         info.reset()
 
     LOADING_LAYERS.clear()
