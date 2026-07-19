@@ -405,7 +405,18 @@ class ExtensibleKVCacheBuffers:
         self.num_blocks_committed = 0
         self._num_blocks_to_recommit = 0
 
-    def commit(self, num_blocks: int) -> None:
+    def commit(self, num_blocks: int, defragment: bool = False) -> None:
+        """Grow the committed prefix of every buffer to `num_blocks` blocks.
+
+        With `defragment=True`, all previously committed physical chunks are
+        released first so each segment's prefix is re-mapped as one physical
+        allocation. Existing contents are DISCARDED, so this is only valid
+        before real KV data exists (e.g. right after warmup). It is required
+        before KV-transfer registration: UCX cannot transfer memory regions
+        that span multiple VMM allocation handles.
+        """
+        if defragment and self.num_blocks_committed > 0:
+            self.release_physical()
         if num_blocks <= self.num_blocks_committed:
             return
         for buffer, bytes_per_block_per_segment in self.buffers:

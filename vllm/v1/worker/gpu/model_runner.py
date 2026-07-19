@@ -552,7 +552,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 min(num_blocks, self.extensible_kv_buffers.num_blocks_capacity)
             )
 
-    def extend_kv_cache(self, num_blocks: int) -> None:
+    def extend_kv_cache(self, num_blocks: int, defragment: bool = False) -> None:
         """Commit physical pages so the KV cache holds `num_blocks` blocks.
 
         Grows the KV cache after warmup and CUDA graph capture, once the
@@ -560,11 +560,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         already view the full reserved capacity and each block stays at a
         fixed offset within its layout segment, so captured graphs stay valid
         as more pages are mapped under the stable base pointer. Newly
-        committed blocks are zeroed.
+        committed blocks are zeroed. `defragment` discards the warmup-time
+        commits so each segment is backed by a single physical allocation
+        (required before KV-transfer registration).
         """
         if self.extensible_kv_buffers is None:
             raise RuntimeError("extend_kv_cache requires an extensible KV cache.")
-        self.extensible_kv_buffers.commit(num_blocks)
+        self.extensible_kv_buffers.commit(num_blocks, defragment=defragment)
         self.kv_cache_config.num_blocks = num_blocks
         logger.info("Extended KV cache to %d blocks.", num_blocks)
 

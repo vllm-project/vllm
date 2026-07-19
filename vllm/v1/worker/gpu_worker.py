@@ -779,7 +779,11 @@ class Worker(WorkerBase):
         """Commit the final KV cache size after warmup (extensible flow)."""
         num_blocks = kv_cache_config.num_blocks
         self.cache_config.num_gpu_blocks = num_blocks
-        self.model_runner.extend_kv_cache(num_blocks)
+        # Defragment when a connector will register the memory: UCX cannot
+        # transfer regions spanning multiple VMM allocation handles.
+        self.model_runner.extend_kv_cache(
+            num_blocks, defragment=self._deferred_kv_transfer_init
+        )
         if self._deferred_kv_transfer_init:
             # The final size is committed; now the connector may register the
             # (physically backed) KV cache memory.

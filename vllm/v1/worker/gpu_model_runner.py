@@ -7596,7 +7596,7 @@ class GPUModelRunner(
                     stride=(hidden_size, 2 * hidden_size, *kv_cache.stride()[2:]),
                 )
 
-    def extend_kv_cache(self, num_blocks: int) -> None:
+    def extend_kv_cache(self, num_blocks: int, defragment: bool = False) -> None:
         """Commit physical pages so the KV cache holds `num_blocks` blocks.
 
         Grows the KV cache after CUDA graph capture, once the available memory
@@ -7607,7 +7607,7 @@ class GPUModelRunner(
         """
         if getattr(self, "extensible_kv_buffers", None) is None:
             raise RuntimeError("extend_kv_cache requires an extensible KV cache.")
-        self.extensible_kv_buffers.commit(num_blocks)
+        self.extensible_kv_buffers.commit(num_blocks, defragment=defragment)
         logger.info("Extended KV cache to %d blocks.", num_blocks)
 
     @property
