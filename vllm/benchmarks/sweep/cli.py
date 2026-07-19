@@ -15,6 +15,8 @@ from .serve_workload import SweepServeWorkloadArgs
 from .serve_workload import main as serve_workload_main
 from .startup import SweepStartupArgs
 from .startup import main as startup_main
+from .tune_speculative_k import SweepTuneSpeculativeKArgs
+from .tune_speculative_k import main as tune_speculative_k_main
 
 SUBCOMMANDS = (
     (SweepServeArgs, serve_main),
@@ -22,6 +24,7 @@ SUBCOMMANDS = (
     (SweepStartupArgs, startup_main),
     (SweepPlotArgs, plot_main),
     (SweepPlotParetoArgs, plot_pareto_main),
+    (SweepTuneSpeculativeKArgs, tune_speculative_k_main),
 )
 
 

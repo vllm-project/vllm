@@ -237,6 +237,39 @@ vllm bench sweep plot $EXPERIMENT_DIR \
 !!! tip
     You can use `--dry-run` to preview the figures to be plotted.
 
+### Speculative K schedule
+
+`vllm bench sweep tune_speculative_k` analyzes repeated `sweep serve` results
+whose server configurations force different speculative-token counts. It
+selects K from a conservative estimate of the configured objective at each
+`max_concurrency` anchor and writes a `num_speculative_tokens_per_batch_size`
+schedule. Output TPS is maximized by default:
+
+```bash
+vllm bench sweep tune_speculative_k results/spec-k \
+  --max-batch-size 64
+```
+
+To minimize TPOT instead, add
+`--objective-var mean_tpot_ms --objective-direction minimize`. To optimize an
+SLO-aware serving metric, run `vllm bench serve` with `--goodput` and maximize
+`request_goodput`. The default K source is
+`speculative_config.num_speculative_tokens_per_batch_size`; each benchmark
+server should retain the same global `num_speculative_tokens` and use a fixed
+one-range schedule for the candidate being measured. The default selection
+penalizes noisy measurements, treats candidates within 1% as tied, and prefers
+the smaller K. Candidate K values are selected independently because optimal K
+can be non-monotonic for some architectures.
+It fails when an anchor is missing candidates or when `--max-batch-size` was not
+measured, rather than extrapolating a K into an untested load range. Standard
+serving records are also rejected when they report failed requests or fewer
+completed requests than requested.
+`max_concurrency` is a load ceiling, so use saturated, fixed-length workloads
+where it closely tracks the scheduled request batch size. The tuner optimizes
+one scalar metric at a time; encode latency SLOs in `request_goodput` or filter
+ineligible candidate results before tuning.
+See [Dynamic Speculative Decoding](../features/speculative_decoding/dynamic_speculative_decoding.md#offline-k-schedule-tuning) for a complete sweep setup.
+
 ### Pareto chart
 
 `vllm bench sweep plot_pareto` helps pick configurations that balance per-user and per-GPU throughput.
