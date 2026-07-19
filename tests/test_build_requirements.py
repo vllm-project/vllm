@@ -3,34 +3,45 @@
 
 from pathlib import Path
 
-from packaging.markers import default_environment
 from packaging.requirements import Requirement
 
+ROOT = Path(__file__).resolve().parents[1]
 
-def _torch_build_requirement(machine: str) -> Requirement:
-    pyproject = Path(__file__).resolve().parents[1] / "pyproject.toml"
+
+def _requirements_file(path: Path) -> set[str]:
+    return {
+        str(Requirement(line))
+        for raw_line in path.read_text().splitlines()
+        if (line := raw_line.strip()) and not line.startswith("#")
+    }
+
+
+def _pep517_build_requirements() -> set[str]:
     try:
         import tomllib
     except ModuleNotFoundError:
         import tomli as tomllib
 
-    requirements = tomllib.loads(pyproject.read_text())["build-system"]["requires"]
-    environment = default_environment() | {"platform_machine": machine}
-    matches = [
+    pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text())
+    return {str(Requirement(item)) for item in pyproject["build-system"]["requires"]}
+
+
+def test_empty_build_tools_mirror_pep517_without_torch():
+    pep517_without_torch = {
         requirement
-        for item in requirements
-        if (requirement := Requirement(item)).name == "torch"
-        and requirement.marker is not None
-        and requirement.marker.evaluate(environment)
-    ]
+        for requirement in _pep517_build_requirements()
+        if Requirement(requirement).name != "torch"
+    }
+    empty_build_tools = _requirements_file(ROOT / "requirements/build/empty.txt")
 
-    assert len(matches) == 1
-    return matches[0]
+    assert empty_build_tools == pep517_without_torch
 
 
-def test_aarch64_build_torch_matches_runtime_pin():
-    assert str(_torch_build_requirement("aarch64").specifier) == "==2.10.0"
+def test_pep517_torch_requirement_remains_platform_agnostic():
+    torch_requirements = {
+        requirement
+        for requirement in _pep517_build_requirements()
+        if Requirement(requirement).name == "torch"
+    }
 
-
-def test_other_platforms_keep_upstream_build_torch():
-    assert str(_torch_build_requirement("x86_64").specifier) == "==2.11.0"
+    assert torch_requirements == {"torch==2.11.0"}
