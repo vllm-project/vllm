@@ -616,6 +616,10 @@ class InputBatch:
             [i2, i1], :max_active_token_count
         ]
 
+        self.logits_processing_needs_token_ids[[i1, i2]] = (
+            self.logits_processing_needs_token_ids[[i2, i1]]
+        )
+
         # Swap prompt embeddings if they exist
         embeds_i1 = self.req_prompt_embeds.get(i1)
         embeds_i2 = self.req_prompt_embeds.get(i2)
@@ -746,6 +750,9 @@ class InputBatch:
             self.is_token_ids[empty_index, :num_tokens] = self.is_token_ids[
                 last_req_index, :num_tokens
             ]
+            self.logits_processing_needs_token_ids[empty_index] = (
+                self.logits_processing_needs_token_ids[last_req_index]
+            )
             if last_req_index in self.req_prompt_embeds:
                 self.req_prompt_embeds[empty_index] = self.req_prompt_embeds.pop(
                     last_req_index
