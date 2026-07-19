@@ -123,6 +123,7 @@ steps:
   _raw_old_commands:
   - set -x
   - export VLLM_USE_V2_MODEL_RUNNER=1
+  # v1/spec_decode/test_max_len.py::test_eagle_max_len[FLASH_ATTN-10] skipped due to OOM on Intel GPU and will hang
   - pytest -v -s v1/spec_decode/test_max_len.py -k "eagle or mtp"
   - pytest -v -s v1/spec_decode/test_rejection_sampler_utils.py
   - pytest -v -s v1/spec_decode/test_synthetic_rejection_sampler_utils.py
@@ -138,7 +139,7 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'export VLLM_USE_V2_MODEL_RUNNER=1 || true &&
     cd tests &&
-    pytest -v -s v1/spec_decode/test_max_len.py -k eagle or mtp || true &&
+    pytest -v -s v1/spec_decode/test_max_len.py -k eagle or mtp --deselect="v1/spec_decode/test_max_len.py::test_eagle_max_len[FLASH_ATTN-10]" || true &&
     pytest -v -s v1/spec_decode/test_rejection_sampler_utils.py || true &&
     pytest -v -s v1/spec_decode/test_synthetic_rejection_sampler_utils.py || true &&
     pytest -v -s v1/e2e/spec_decode/test_spec_decode.py -k eagle or mtp || true'
