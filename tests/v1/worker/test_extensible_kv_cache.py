@@ -527,3 +527,60 @@ def test_v2_extensible_hybrid_attention_mamba() -> None:
             assert torch.count_nonzero(state_tensor[1 : NUM_BLOCKS - 1]) == 0
     finally:
         buffers.free()
+
+
+def test_v2_extensible_packed_layout() -> None:
+    """A packed (block_stride) layout uses one shared block-major buffer;
+    per-layer pages within a block stay isolated across commits."""
+    spec = _full_attention_spec()
+    page_bytes = spec.page_size_bytes
+    block_stride = 2 * page_bytes  # two layers packed per block
+    layer_names = ["packed.0", "packed.1"]
+    kv_cache_config = KVCacheConfig(
+        num_blocks=NUM_BLOCKS,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=NUM_BLOCKS * block_stride,
+                shared_by=[name],
+                offset=i * page_bytes,
+                block_stride=block_stride,
+            )
+            for i, name in enumerate(layer_names)
+        ],
+        kv_cache_groups=[KVCacheGroupSpec(layer_names=layer_names, kv_cache_spec=spec)],
+    )
+    attn_groups = [
+        [
+            AttentionGroup(
+                backend=_BlockMajorBackend,
+                layer_names=layer_names,
+                kv_cache_spec=spec,
+                kv_cache_group_id=0,
+            )
+        ]
+    ]
+    kv_caches, buffers = _v2_allocate(kv_cache_config, attn_groups, [BLOCK_SIZE])
+    try:
+        assert len(buffers.buffers) == 1
+        [(buffer, bytes_per_block)] = buffers.buffers
+        assert buffer.num_segments == 1
+        assert bytes_per_block == block_stride
+
+        cache0, cache1 = kv_caches["packed.0"], kv_caches["packed.1"]
+        assert cache0.shape == (NUM_BLOCKS, 2, BLOCK_SIZE, 8, 128)
+
+        cache0[0].fill_(1)
+        cache1[0].fill_(2)
+        torch.cuda.synchronize()
+        buffers.commit(NUM_BLOCKS)
+        cache0[NUM_BLOCKS - 1].fill_(3)
+        torch.cuda.synchronize()
+        assert torch.all(cache0[0] == 1)
+        assert torch.all(cache1[0] == 2)
+        assert torch.all(cache0[NUM_BLOCKS - 1] == 3)
+        # The other layer's page of the same block is untouched, and all
+        # middle blocks were zeroed on commit.
+        assert torch.count_nonzero(cache1[1:]) == 0
+        assert torch.count_nonzero(cache0[1 : NUM_BLOCKS - 1]) == 0
+    finally:
+        buffers.free()

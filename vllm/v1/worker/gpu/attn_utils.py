@@ -283,11 +283,6 @@ def _allocate_extensible_kv_cache(
         raise ValueError(
             "enable_extensible_kv_cache=True requires at least one KV block."
         )
-    if any(t.block_stride > 0 for t in kv_cache_config.kv_cache_tensors):
-        raise ValueError(
-            "enable_extensible_kv_cache=True is not supported with packed "
-            "KV cache tensor layouts."
-        )
 
     num_segments_by_layer = _kv_cache_num_segments_by_layer(
         attn_groups,
@@ -297,27 +292,44 @@ def _allocate_extensible_kv_cache(
     )
     kv_cache_raw_tensors: dict[str, torch.Tensor] = {}
     buffers: list[tuple[ExtensibleTensor, int]] = []
+    packed_view: torch.Tensor | None = None
     for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
         bytes_per_block = kv_cache_tensor.size // num_blocks
         assert bytes_per_block * num_blocks == kv_cache_tensor.size
-        segment_counts = {
-            num_segments_by_layer[layer_name]
-            for layer_name in kv_cache_tensor.shared_by
-            if layer_name in num_segments_by_layer
-        }
-        assert len(segment_counts) <= 1, (
-            "Layers sharing one KV cache tensor disagree on the buffer "
-            f"segmentation ({segment_counts}): {kv_cache_tensor.shared_by}"
-        )
-        num_segments = segment_counts.pop() if segment_counts else 1
-        assert bytes_per_block % num_segments == 0
-        buffer = ExtensibleTensor(
-            max_num_bytes=kv_cache_tensor.size,
-            device=device,
-            num_segments=num_segments,
-        )
-        buffers.append((buffer, bytes_per_block // num_segments))
-        tensor = buffer.full_view()
+        if kv_cache_tensor.block_stride > 0:
+            # Packed layout: one backing shared by all layers, with block b
+            # occupying the b-th `block_stride`-byte row (holding every
+            # layer's page). The backing is block-major by construction, so
+            # one shared single-segment buffer commits a prefix of blocks.
+            assert bytes_per_block % kv_cache_tensor.block_stride == 0
+            if packed_view is None:
+                packed_buffer = ExtensibleTensor(
+                    max_num_bytes=kv_cache_tensor.size,
+                    device=device,
+                    num_segments=1,
+                )
+                buffers.append((packed_buffer, bytes_per_block))
+                packed_view = packed_buffer.full_view()
+            tensor = packed_view
+        else:
+            segment_counts = {
+                num_segments_by_layer[layer_name]
+                for layer_name in kv_cache_tensor.shared_by
+                if layer_name in num_segments_by_layer
+            }
+            assert len(segment_counts) <= 1, (
+                "Layers sharing one KV cache tensor disagree on the buffer "
+                f"segmentation ({segment_counts}): {kv_cache_tensor.shared_by}"
+            )
+            num_segments = segment_counts.pop() if segment_counts else 1
+            assert bytes_per_block % num_segments == 0
+            buffer = ExtensibleTensor(
+                max_num_bytes=kv_cache_tensor.size,
+                device=device,
+                num_segments=num_segments,
+            )
+            buffers.append((buffer, bytes_per_block // num_segments))
+            tensor = buffer.full_view()
         for layer_name in kv_cache_tensor.shared_by:
             kv_cache_raw_tensors[layer_name] = tensor
 
