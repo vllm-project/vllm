@@ -8,6 +8,7 @@ import os
 import signal
 import time
 import uuid
+from collections import Counter
 from concurrent.futures import Future
 from dataclasses import dataclass
 from threading import Thread
@@ -27,7 +28,11 @@ from vllm.platforms import current_platform
 from vllm.pooling_params import LateInteractionParams, PoolingParams
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.torch_utils import set_default_torch_num_threads
-from vllm.v1.engine import EngineCoreReadyResponse, EngineCoreRequest
+from vllm.v1.engine import (
+    EngineCoreOutputs,
+    EngineCoreReadyResponse,
+    EngineCoreRequest,
+)
 from vllm.v1.engine.core import EngineCore
 from vllm.v1.engine.core_client import (
     AsyncMPClient,
@@ -198,13 +203,19 @@ def _make_pooling_request(
     )
 
 
-def test_dplb_late_interaction_sticky_routing():
+def _make_dplb_client(num_engines: int = 3, client_count: int = 1) -> DPLBAsyncMPClient:
     client = object.__new__(DPLBAsyncMPClient)
-    client.client_count = 1
+    client.client_count = client_count
     client.reqs_in_flight = {}
-    client.core_engines = [b"\x00\x00", b"\x01\x00", b"\x02\x00"]
-    client.lb_engines = [[0, 0], [0, 0], [0, 0]]
+    client.engine_inflight = Counter()
+    client.core_engines = [bytes([i, 0]) for i in range(num_engines)]
+    client.lb_engines = [[0, 0, 0.0] for _ in range(num_engines)]
     client.eng_start_index = 0
+    return client
+
+
+def test_dplb_late_interaction_sticky_routing():
+    client = _make_dplb_client()
 
     query_key = "rerank-abc-query-0"
     query_request = _make_pooling_request(
@@ -223,18 +234,78 @@ def test_dplb_late_interaction_sticky_routing():
 
 
 def test_dplb_non_late_interaction_still_uses_lb():
-    client = object.__new__(DPLBAsyncMPClient)
-    client.client_count = 1
-    client.reqs_in_flight = {}
-    client.core_engines = [b"\x00\x00", b"\x01\x00", b"\x02\x00"]
-    client.lb_engines = [[2, 1], [0, 0], [1, 0]]
-    client.eng_start_index = 0
+    client = _make_dplb_client()
+    client.lb_engines = [[2, 1, 0.0], [0, 0, 0.0], [1, 0, 0.0]]
 
     request = make_request(SamplingParams(max_tokens=1))
     chosen_engine = client.get_core_engine_for_request(request)
 
     assert chosen_engine == client.core_engines[1]
     assert client.lb_engines[1][0] == 1
+
+
+def test_dplb_burst_round_robins_despite_snapshot_rebinds():
+    """A stats snapshot rebind wipes the optimistic lb_engines increments;
+    the exact in-flight floor must keep a burst spreading round-robin."""
+    client = _make_dplb_client(num_engines=4)
+
+    for _ in range(4):
+        client.get_core_engine_for_request(make_request(SamplingParams(max_tokens=1)))
+    # Coordinator snapshot arrives, not yet reflecting the 4 routed requests.
+    client.lb_engines = [[0, 0, 0.0] for _ in range(4)]
+    for _ in range(4):
+        client.get_core_engine_for_request(make_request(SamplingParams(max_tokens=1)))
+
+    assert sorted(client.engine_inflight.values()) == [2, 2, 2, 2]
+
+
+def test_dplb_snapshot_backpressure_overrides_inflight():
+    """An engine reported heavily loaded by the coordinator is avoided even
+    when this client has routed nothing to it."""
+    client = _make_dplb_client(num_engines=2)
+    client.lb_engines = [[5, 10, 0.0], [0, 0, 0.0]]
+
+    chosen = client.get_core_engine_for_request(
+        make_request(SamplingParams(max_tokens=1))
+    )
+
+    assert chosen == client.core_engines[1]
+
+
+def test_dplb_kv_pressure_amplifies_waiting_penalty():
+    """A waiting queue on a KV-bound engine (slow drain) is penalized, while
+    the same queue with low KV usage is not (e.g. transient burst)."""
+    client = _make_dplb_client(num_engines=2)
+    # Engine 0 has a smaller total but is KV-bound with a queue.
+    client.lb_engines = [[5, 10, 1.0], [0, 20, 0.2]]
+
+    chosen = client.get_core_engine_for_request(
+        make_request(SamplingParams(max_tokens=1))
+    )
+    assert chosen == client.core_engines[1]
+
+    # Same counts without KV pressure: the smaller total wins.
+    client = _make_dplb_client(num_engines=2)
+    client.lb_engines = [[5, 10, 0.2], [0, 20, 0.2]]
+
+    chosen = client.get_core_engine_for_request(
+        make_request(SamplingParams(max_tokens=1))
+    )
+    assert chosen == client.core_engines[0]
+
+
+def test_dplb_finished_requests_release_inflight():
+    client = _make_dplb_client(num_engines=2)
+
+    req = make_request(SamplingParams(max_tokens=1))
+    engine = client.get_core_engine_for_request(req)
+    assert client.engine_inflight[engine] == 1
+
+    outputs = EngineCoreOutputs(finished_requests={req.request_id})
+    asyncio.run(DPLBAsyncMPClient.process_engine_outputs(client, outputs))
+
+    assert client.engine_inflight[engine] == 0
+    assert req.request_id not in client.reqs_in_flight
 
 
 def test_apply_ready_response_syncs_block_size():

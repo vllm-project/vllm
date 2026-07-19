@@ -2108,6 +2108,10 @@ class Scheduler(SchedulerInterface):
         """Returns (num_running_reqs, num_waiting_reqs)."""
         return len(self.running), len(self.waiting) + len(self.skipped_waiting)
 
+    def get_kv_cache_usage(self) -> float:
+        """Returns the fraction of the KV cache currently in use (0.0-1.0)."""
+        return self.kv_cache_manager.usage
+
     def add_request(self, request: Request) -> None:
         existing = self.requests.get(request.request_id)
         if existing is not None:
