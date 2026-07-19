@@ -768,6 +768,118 @@ def test_pyav_backend_returns_target_frames_not_keyframes():
         )
 
 
+# ============================================================================
+# TorchCodec Backend Tests
+# ============================================================================
+
+
+def test_torchcodec_backend_loads_frames(
+    dummy_video_path, monkeypatch: pytest.MonkeyPatch
+):
+    """Test that the torchcodec codec backend can load frames."""
+    pytest.importorskip("torchcodec")
+    with monkeypatch.context() as m:
+        m.setenv("VLLM_VIDEO_LOADER_BACKEND", "opencv")
+
+        with open(dummy_video_path, "rb") as f:
+            video_data = f.read()
+
+        loader = VIDEO_LOADER_REGISTRY.load("opencv")
+        frames, metadata = loader.load_bytes(
+            video_data, num_frames=8, backend="torchcodec"
+        )
+
+        assert frames.ndim == 4
+        assert frames.shape[3] == 3  # RGB
+        assert frames.shape[0] == 8
+        assert frames.shape[0] == len(metadata["frames_indices"])
+        assert metadata["video_backend"] == "torchcodec"
+        assert "total_num_frames" in metadata
+        assert "fps" in metadata
+        assert "duration" in metadata
+
+
+def test_torchcodec_dynamic_backend_loads_frames(
+    dummy_video_path, monkeypatch: pytest.MonkeyPatch
+):
+    """Test that the torchcodec codec with dynamic sampling can load frames."""
+    pytest.importorskip("torchcodec")
+    with monkeypatch.context() as m:
+        m.setenv("VLLM_VIDEO_LOADER_BACKEND", "opencv_dynamic")
+
+        with open(dummy_video_path, "rb") as f:
+            video_data = f.read()
+
+        loader = VIDEO_LOADER_REGISTRY.load("opencv_dynamic")
+        frames, metadata = loader.load_bytes(
+            video_data, fps=2, max_duration=10, backend="torchcodec"
+        )
+
+        assert frames.ndim == 4
+        assert frames.shape[3] == 3  # RGB
+        assert frames.shape[0] > 0
+        assert frames.shape[0] == len(metadata["frames_indices"])
+        assert metadata["video_backend"] == "torchcodec_dynamic"
+
+
+def test_torchcodec_backend_rejects_frame_recovery(dummy_video_path):
+    """frame_recovery is OpenCV-only; torchcodec must reject it."""
+    pytest.importorskip("torchcodec")
+    with open(dummy_video_path, "rb") as f:
+        video_data = f.read()
+
+    loader = VIDEO_LOADER_REGISTRY.load("opencv")
+    with pytest.raises(AssertionError):
+        loader.load_bytes(
+            video_data, num_frames=8, backend="torchcodec", frame_recovery=True
+        )
+
+
+def test_torchcodec_backend_returns_target_frames_not_keyframes():
+    """Regression test: torchcodec must return the requested frames, not the
+    GOP keyframe they seek back to.
+
+    Mirrors ``test_pyav_backend_returns_target_frames_not_keyframes``: a long
+    GOP (single keyframe at frame 0) with a per-frame green-channel marker.
+    With ``seek_mode="exact"`` torchcodec resolves each index to the exact
+    frame, so the returned markers must be distinct, ordered, and match the
+    requested indices.
+    """
+    pytest.importorskip("torchcodec")
+    num_frames = 50
+    num_sampled = 4
+    height, width = 64, 64
+
+    video_bytes = create_long_gop_video(
+        num_frames=num_frames, width=width, height=height
+    )
+
+    loader = VIDEO_LOADER_REGISTRY.load("opencv")
+    frames, metadata = loader.load_bytes(
+        video_bytes, num_frames=num_sampled, backend="torchcodec"
+    )
+    assert frames.shape == (num_sampled, height, width, 3)
+
+    requested = list(metadata["frames_indices"])
+    assert len(requested) == num_sampled
+
+    actual = [int(f[height // 2, width // 2, 1]) for f in frames]
+
+    assert len(set(actual)) == num_sampled, (
+        f"torchcodec returned only {len(set(actual))} distinct frames for "
+        f"{num_sampled} requested indices: markers={actual}, "
+        f"requested={requested}. Keyframe-snap regression."
+    )
+
+    assert actual == sorted(actual), f"Returned frames out of order: markers={actual}"
+
+    for marker, want_idx in zip(actual, requested):
+        assert abs(marker - want_idx) <= 10, (
+            f"Frame mismatch: requested index {want_idx}, "
+            f"got marker {marker} (tolerance ±10)"
+        )
+
+
 @pytest.mark.parametrize(
     "loader_key, kwargs, expected_num_frames",
     [
@@ -854,6 +966,42 @@ def test_pyav_backend_returns_target_frames_not_keyframes():
             120,
             id="glm46v-pyav-60s",
         ),
+        # uniform sampling + torchcodec codec (same frame counts as opencv)
+        pytest.param(
+            "opencv",
+            {"num_frames": 32, "backend": "torchcodec"},
+            32,
+            id="torchcodec-num_frames",
+        ),
+        pytest.param(
+            "opencv", {"fps": 2, "backend": "torchcodec"}, 120, id="torchcodec-fps"
+        ),
+        pytest.param(
+            "opencv",
+            {"num_frames": 500, "fps": 2, "backend": "torchcodec"},
+            120,
+            id="torchcodec-num_frames_wins_fps",
+        ),
+        # dynamic sampling + torchcodec codec
+        pytest.param(
+            "opencv_dynamic",
+            {"fps": 1, "max_duration": 60, "backend": "torchcodec"},
+            60,
+            id="torchcodec_dynamic-within_max_duration",
+        ),
+        pytest.param(
+            "opencv_dynamic",
+            {"fps": 2, "max_duration": 30, "backend": "torchcodec"},
+            60,
+            id="torchcodec_dynamic-exceeds_max_duration",
+        ),
+        # glm46v dynamic FPS + torchcodec codec
+        pytest.param(
+            "glm46v",
+            {"backend": "torchcodec"},
+            120,
+            id="glm46v-torchcodec-60s",
+        ),
     ],
 )
 def test_video_loader_frames_sampling(
@@ -864,6 +1012,8 @@ def test_video_loader_frames_sampling(
     expected_num_frames: int,
 ):
     """Test video loader frames sampling functionality."""
+    if kwargs.get("backend") == "torchcodec":
+        pytest.importorskip("torchcodec")
     monkeypatch.setenv("VLLM_VIDEO_LOADER_BACKEND", loader_key)
     loader = VIDEO_LOADER_REGISTRY.load(loader_key)
 
