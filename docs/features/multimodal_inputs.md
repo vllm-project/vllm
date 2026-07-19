@@ -885,7 +885,9 @@ Works with common video formats like MP4 when using OpenCV backends.
 
 The `pynvvideocodec` backend uses NVIDIA NVDEC to decode the sampled video
 frames on the GPU before copying them into host memory for multimodal
-preprocessing.
+preprocessing. For workloads with large videos and relatively light inference,
+such as video tagging, this can alleviate bottlenecks in CPU-based video
+decoders.
 
 !!! warning
     [CUDA Multi-Process Service (MPS)](https://docs.nvidia.com/deploy/mps/quick-start.html)
