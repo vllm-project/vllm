@@ -29,12 +29,12 @@ class _VirtualBuffer:
     """
 
     def __init__(
-        self, max_bytes: int, device_index: int, rdma_capable: bool = False
+        self, max_bytes: int, device_index: int, shareable: bool = False
     ) -> None:
         self._driver = get_vmm_driver()
         self._driver.ensure_context(device_index)
         self.device_index = device_index
-        self._rdma_capable = rdma_capable
+        self._shareable = shareable
 
         self.granularity: int = self._driver.granularity(device_index)
         self.reserved_size: int = _round_up(max(max_bytes, 1), self.granularity)
@@ -90,17 +90,17 @@ class _VirtualBuffer:
         """Create one physical chunk of `size` bytes and map it at `offset`."""
         driver = self._driver
         driver.ensure_context(self.device_index)
-        if self._rdma_capable:
+        if self._shareable:
             try:
-                handle = driver.create(size, self.device_index, rdma_capable=True)
+                handle = driver.create(size, self.device_index, shareable=True)
             except RuntimeError as e:
                 logger.warning_once(
-                    "Failed to allocate GPU-direct-RDMA-capable memory (%s); "
-                    "falling back to standard allocation. KV transfers may "
-                    "not be able to use GPU-direct RDMA.",
+                    "Failed to allocate shareable (IPC/RDMA-capable) memory "
+                    "(%s); falling back to standard allocation. KV transfers "
+                    "from this memory may fail.",
                     e,
                 )
-                self._rdma_capable = False
+                self._shareable = False
                 handle = driver.create(size, self.device_index)
         else:
             handle = driver.create(size, self.device_index)
@@ -235,7 +235,7 @@ class ExtensibleTensor:
         max_num_bytes: int,
         device: torch.device | str | int | None = None,
         num_segments: int = 1,
-        rdma_capable: bool = False,
+        shareable: bool = False,
     ) -> None:
         if max_num_bytes < 0:
             raise ValueError("max_num_bytes must be non-negative.")
@@ -262,7 +262,7 @@ class ExtensibleTensor:
         self._num_segments: int = num_segments
         self._segment_capacity_bytes: int = max_num_bytes // num_segments
         self._buffer: _VirtualBuffer = _VirtualBuffer(
-            max_num_bytes, self._device_index, rdma_capable=rdma_capable
+            max_num_bytes, self._device_index, shareable=shareable
         )
         self._bytes_per_segment: int = 0
 

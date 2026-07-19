@@ -24,6 +24,7 @@ _MEM_LOCATION_TYPE_DEVICE = 1
 _MEM_ALLOC_GRANULARITY_MINIMUM = 0
 _MEM_ACCESS_FLAGS_PROT_READWRITE = 3
 _MEM_ALLOCATION_COMP_NONE = 0
+_MEM_HANDLE_TYPE_POSIX_FD = 1
 
 DevicePtr = ctypes.c_ulonglong
 MemHandle = ctypes.c_ulonglong
@@ -158,14 +159,19 @@ class VmmDriver:
         raise RuntimeError(f"GPU driver error {result}: {self.error_string(result)}")
 
     def _make_alloc_prop(
-        self, device_index: int, rdma_capable: bool = False
+        self, device_index: int, shareable: bool = False
     ) -> _MemAllocationProp:
         prop = _MemAllocationProp()
         prop.type = _MEM_ALLOCATION_TYPE_PINNED
         prop.location.type = _MEM_LOCATION_TYPE_DEVICE
         prop.location.id = device_index
         prop.allocFlags.compressionType = _MEM_ALLOCATION_COMP_NONE
-        prop.allocFlags.gpuDirectRDMACapable = 1 if rdma_capable else 0
+        if shareable:
+            # KV transfer engines access this memory from other processes:
+            # intra-node CUDA IPC needs an exportable (POSIX FD) handle type,
+            # and NIC RDMA needs the GPU-direct-RDMA-capable flag.
+            prop.requestedHandleTypes = _MEM_HANDLE_TYPE_POSIX_FD
+            prop.allocFlags.gpuDirectRDMACapable = 1
         return prop
 
     def granularity(self, device_index: int) -> int:
@@ -189,9 +195,9 @@ class VmmDriver:
     def free_reserved(self, ptr: int, size: int) -> None:
         self._check(self._fns["address_free"](ptr, size))
 
-    def create(self, size: int, device_index: int, rdma_capable: bool = False) -> int:
+    def create(self, size: int, device_index: int, shareable: bool = False) -> int:
         """Create a physical memory handle of `size` bytes."""
-        prop = self._make_alloc_prop(device_index, rdma_capable)
+        prop = self._make_alloc_prop(device_index, shareable)
         handle = MemHandle()
         self._check(
             self._fns["create"](ctypes.byref(handle), size, ctypes.byref(prop), 0)
