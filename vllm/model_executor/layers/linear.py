@@ -223,7 +223,7 @@ class UnquantizedLinearMethod(LinearMethodBase):
         checkpoint_params: Mapping[str, Parameter],
         runtime_params: Mapping[str, Parameter],
     ) -> Mapping[str, Parameter] | None:
-        return runtime_params if not current_platform.is_cpu() else None
+        return runtime_params
 
     def apply(
         self,

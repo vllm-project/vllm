@@ -2,14 +2,19 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import gc
 import inspect
+from types import SimpleNamespace
 from weakref import WeakKeyDictionary, ref
 
 import pytest
 import torch
 from torch.nn.parameter import UninitializedBuffer, UninitializedParameter
 
+import vllm.model_executor.model_loader.reload.layerwise as reload_layerwise
 import vllm.model_executor.model_loader.reload.meta as reload_meta
-from vllm.model_executor.layers.linear import QKVParallelLinear
+from vllm.model_executor.layers.linear import (
+    QKVParallelLinear,
+    UnquantizedLinearMethod,
+)
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
 from vllm.model_executor.model_loader.reload.layerwise import (
     _matching_tensor_layouts,
@@ -179,6 +184,17 @@ class _RuntimeViewReloadLayer(torch.nn.Module):
         param.data.copy_(loaded_weight)
 
 
+class _PostLoadAttention(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.weight = torch.nn.Parameter(torch.arange(6.0).reshape(2, 3))
+        self.weight.weight_loader = default_weight_loader
+        self.processed_dtype = None
+
+    def process_weights_after_loading(self, dtype):
+        self.processed_dtype = dtype
+
+
 def test_move_metatensors():
     tensor = torch.empty((1, 2, 3))
     meta_tensor = to_meta_tensor(tensor)
@@ -252,6 +268,42 @@ def test_direct_weight_reload_requires_matching_layout():
     initialize_layerwise_reload(model)
 
     assert layer.weight.is_meta
+
+
+@pytest.mark.parametrize("runtime_shape", [(2, 3), (0,)])
+def test_unquantized_linear_reload_uses_layout_validation(runtime_shape):
+    layer = _DirectReloadLayer(supported=True)
+    layer.quant_method = UnquantizedLinearMethod()
+    model = torch.nn.Sequential(layer)
+
+    record_metadata_for_reloading(model)
+    layer.weight = torch.nn.Parameter(torch.empty(runtime_shape))
+    layer.weight.weight_loader = default_weight_loader
+    initialize_layerwise_reload(model)
+
+    matching_layout = runtime_shape == (2, 3)
+    assert layer.weight.is_meta is not matching_layout
+    assert get_layerwise_info(layer).runtime_bound is matching_layout
+
+
+def test_direct_attention_runs_deferred_post_load(monkeypatch):
+    monkeypatch.setattr(
+        reload_layerwise, "_POST_LOAD_ATTENTION_TYPES", (_PostLoadAttention,)
+    )
+    layer = _PostLoadAttention()
+    model = torch.nn.Sequential(layer)
+    loaded_weight = torch.full_like(layer.weight, 7.0)
+
+    record_metadata_for_reloading(model)
+    initialize_layerwise_reload(model)
+
+    assert get_layerwise_info(layer).runtime_bound
+    assert layer.processed_dtype is None
+    layer.weight.weight_loader(layer.weight, loaded_weight)
+    finalize_layerwise_reload(model, model_config=SimpleNamespace(dtype=torch.float16))
+
+    assert torch.equal(layer.weight, loaded_weight)
+    assert layer.processed_dtype is torch.float16
 
 
 def test_direct_weight_reload_requires_matching_tensor_sets():

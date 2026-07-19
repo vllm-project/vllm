@@ -41,7 +41,7 @@ from .utils import (
 
 logger = init_logger(__name__)
 
-_DEFERRED_ATTENTION_TYPES = (Attention, MLAAttention, MMEncoderAttention)
+_POST_LOAD_ATTENTION_TYPES = (Attention, MLAAttention, MMEncoderAttention)
 
 __all__ = [
     "get_layerwise_info",
@@ -152,9 +152,6 @@ def _get_runtime_weight_reload_mapping(
     layer: torch.nn.Module,
     info: LayerReloadingInfo,
 ) -> dict[str, torch.nn.Parameter] | None:
-    if isinstance(layer, _DEFERRED_ATTENTION_TYPES):
-        return None
-
     restore_params, restore_buffers = info.restore_metadata
     runtime_params, runtime_buffers = get_reloadable_layer_tensors(layer)
     if not _matching_tensor_layouts(restore_buffers, runtime_buffers):
@@ -371,7 +368,7 @@ def make_online_process_loader(layer: torch.nn.Module, param_name: str) -> Calla
         )
 
         # Do not online process attention layers, must wait until finalize
-        if isinstance(layer, _DEFERRED_ATTENTION_TYPES):
+        if isinstance(layer, _POST_LOAD_ATTENTION_TYPES):
             return ret
 
         # Log warnings allocating excessive buffers on device
@@ -420,6 +417,11 @@ def finalize_layerwise_processing(model: torch.nn.Module, model_config: ModelCon
 
     for layer in model.modules():
         info = get_layerwise_info(layer)
+        if isinstance(layer, _POST_LOAD_ATTENTION_TYPES) and (
+            info.runtime_bound or info.can_load()
+        ):
+            deferred_attn.append((layer, info))
+            continue
         if info.runtime_bound:
             _validate_runtime_binding(layer, info)
             _place_kernel_tensors(layer, info)
@@ -427,11 +429,6 @@ def finalize_layerwise_processing(model: torch.nn.Module, model_config: ModelCon
             continue
         if not info.can_load():
             info.reset()
-            continue
-
-        # Attention/MLA layers are processed after all other layers
-        if isinstance(layer, _DEFERRED_ATTENTION_TYPES):
-            deferred_attn.append((layer, info))
             continue
 
         # No weights were loaded
@@ -473,7 +470,10 @@ def finalize_layerwise_reload(*args, **kwargs):
 def _finalize_attention_layer(
     layer: torch.nn.Module, info: LayerReloadingInfo, model_config: ModelConfig
 ) -> None:
-    if info.load_numel > 0 and info.kernel_tensors is not None:
+    if info.runtime_bound:
+        _validate_runtime_binding(layer, info)
+        _place_kernel_tensors(layer, info)
+    elif info.load_numel > 0 and info.kernel_tensors is not None:
         # Reload with new scale weights from checkpoint
         _place_kernel_tensors(layer, info)
         _reload_attention_scales(layer, info)
