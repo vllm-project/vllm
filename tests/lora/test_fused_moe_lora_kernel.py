@@ -142,6 +142,7 @@ def use_fused_moe_lora_kernel(
     fully_sharded=False,
     offset=0,
     add_inputs=True,
+    adapter_enabled=None,
 ):
     max_num_tokens_padded = topk_ids.numel() + num_experts * (block_size - 1)
     max_num_tokens_padded = round_up(max_num_tokens_padded, block_size)
@@ -154,7 +155,8 @@ def use_fused_moe_lora_kernel(
     )
     expert_ids = torch.empty((max_loras * max_num_m_blocks,), dtype=torch.int32)
     num_tokens_post_padded = torch.empty((max_loras,), dtype=torch.int32)
-    adapter_enabled = torch.ones(max_loras + 1, dtype=torch.int32)
+    if adapter_enabled is None:
+        adapter_enabled = torch.ones(max_loras + 1, dtype=torch.int32)
 
     # call kernel
     ops.moe_lora_align_block_size(
@@ -1240,3 +1242,118 @@ def test_fused_moe_lora_kernel_rejects_bad_block_size_m(device):
             adapter_enabled,
             block_size,
         )
+
+
+# -- non-LoRA request neutrality (regression for gh #49063) -----------------
+# On a fused-MoE-LoRA model, requests that carry no adapter must be numerically
+# unaffected by LoRA being enabled: the kernel skips any token whose adapter is
+# disabled (`adapter_enabled[lora_id] == 0`) or absent (`lora_id < 0`) and must
+# contribute exactly zero for it. gh #49063 reported the opposite -- enabling
+# LoRA perturbed the greedy output of non-adapter requests into a repetition
+# loop. This checks the property directly at the kernel level: disabled-adapter
+# tokens get a zero delta while enabled-adapter tokens still match the
+# reference, so the test also fails if the guard is made a no-op.
+
+
+@pytest.mark.parametrize("num_tokens", [100])
+@pytest.mark.parametrize("top_k_num", [6])
+@pytest.mark.parametrize("num_experts", [64])
+@pytest.mark.parametrize("max_loras", [4])
+@pytest.mark.parametrize("N", [1408])
+@pytest.mark.parametrize("K", [2048])
+@pytest.mark.parametrize("max_lora_rank", [16, 64])
+@pytest.mark.parametrize("block_size", [16])
+@pytest.mark.parametrize("num_slices", [1, 2])
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("seed", SEED)
+def test_fused_moe_lora_kernel_disabled_adapter_is_neutral(
+    num_tokens,
+    top_k_num,
+    num_experts,
+    max_loras,
+    N,
+    K,
+    max_lora_rank,
+    block_size,
+    num_slices,
+    dtype,
+    device,
+    seed,
+):
+    torch.set_default_device(device)
+    set_random_seed(seed)
+    num_sequences = 10
+    topk_ids, topk_weights, token_lora_mapping, lora_ids = sample_data(
+        num_tokens, num_sequences, max_loras, num_experts, top_k_num
+    )
+
+    lora_a_stacked = [
+        torch.rand((max_loras, num_experts, max_lora_rank, K), dtype=dtype)
+        for _ in range(num_slices)
+    ]
+    lora_b_stacked = [
+        torch.rand(
+            (max_loras, num_experts, N // num_slices, max_lora_rank), dtype=dtype
+        )
+        for _ in range(num_slices)
+    ]
+    hidden_states = torch.rand((num_tokens, K), dtype=dtype)
+
+    # Disable half of the adapters; a token is "no-adapter" iff its mapped
+    # adapter is disabled. Require both groups to be non-empty so the test
+    # exercises the skip branch and the active branch in the same launch.
+    present = torch.unique(token_lora_mapping).tolist()
+    assert len(present) >= 2, "seed did not produce >=2 distinct adapters"
+    disabled = set(present[::2])
+    adapter_enabled = torch.ones(max_loras + 1, dtype=torch.int32)
+    for lid in disabled:
+        adapter_enabled[lid] = 0
+    disabled_token = torch.tensor(
+        [int(x) in disabled for x in token_lora_mapping.tolist()], device=device
+    )
+    assert bool(disabled_token.any()) and not bool(disabled_token.all())
+
+    # add_inputs=False so `output` holds only the LoRA delta.
+    output = torch.zeros((num_tokens, top_k_num, N), dtype=dtype)
+    use_fused_moe_lora_kernel(
+        topk_ids,
+        topk_weights,
+        token_lora_mapping,
+        max_lora_rank,
+        top_k_num,
+        lora_ids,
+        lora_a_stacked,
+        lora_b_stacked,
+        hidden_states,
+        output,
+        max_loras,
+        num_experts,
+        block_size,
+        add_inputs=False,
+        adapter_enabled=adapter_enabled,
+    )
+
+    # Disabled-adapter tokens must get exactly zero contribution.
+    disabled_rows = output[disabled_token]
+    assert torch.count_nonzero(disabled_rows) == 0, (
+        "disabled-adapter (non-LoRA) tokens received a non-zero LoRA delta; "
+        "enabling LoRA is not neutral for non-adapter requests (gh #49063)"
+    )
+
+    # Enabled-adapter tokens must still match the pytorch reference, proving the
+    # kernel did real work and the test is not trivially satisfied by all-zeros.
+    output_ref = use_torch(
+        hidden_states,
+        token_lora_mapping,
+        topk_ids,
+        lora_a_stacked,
+        lora_b_stacked,
+        top_k_num,
+        num_slices,
+    )
+    enabled_token = ~disabled_token
+    torch.testing.assert_close(
+        output[enabled_token], output_ref[enabled_token], atol=1e-2, rtol=1e-2
+    )
+    assert torch.count_nonzero(output[enabled_token]) > 0
