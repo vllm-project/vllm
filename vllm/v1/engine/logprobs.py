@@ -83,25 +83,32 @@ class LogprobsProcessor:
 
         token_ids_lst, logprobs_lst, ranks_lst, _ = logprobs_lists
 
-        for rank, logprobs, token_ids in zip(ranks_lst, logprobs_lst, token_ids_lst):
+        num_available_logprobs = logprobs_lst.shape[1]
+        num_output_logprobs = (
+            num_available_logprobs if self.num_logprobs == -1 else self.num_logprobs + 1
+        )
+        token_ids_list = token_ids_lst[:, :num_output_logprobs].tolist()
+        logprobs_list = logprobs_lst[:, :num_output_logprobs].tolist()
+        ranks_list = ranks_lst.tolist()
+
+        for rank, logprobs, token_ids in zip(ranks_list, logprobs_list, token_ids_list):
             # Detokenize (non-incrementally).
             decoded_tokens: list[str] | Iterable[None]
             if self.tokenizer is None:
                 decoded_tokens = NONES
             else:
-                token_ids_for_decode = token_ids.tolist()
                 decoded_tokens_list = convert_ids_list_to_tokens(
-                    self.tokenizer, token_ids_for_decode
+                    self.tokenizer, token_ids
                 )
                 context_token_ids = self._get_sampled_context_ids(self.logprobs)
                 decoded_tokens = self._verify_tokens(
                     decoded_tokens_list=decoded_tokens_list,
-                    tokens=token_ids_for_decode,
+                    tokens=token_ids,
                     context_token_ids=context_token_ids,
                 )
 
             # Sampler puts the sampled logprob in first.
-            sampled_token_logprob = float(logprobs[0])
+            sampled_token_logprob = logprobs[0]
             self.cumulative_logprob += sampled_token_logprob
 
             # Update with the Logprob container for this pos.
@@ -110,7 +117,7 @@ class LogprobsProcessor:
                 token_ids,
                 logprobs,
                 decoded_tokens,
-                int(rank),
+                rank,
                 self.num_logprobs,
             )
 
@@ -132,32 +139,47 @@ class LogprobsProcessor:
 
         token_ids, logprobs, ranks, _ = prompt_logprobs_tensors
 
-        # Recover shapes.
-        num_prompt_tokens = logprobs.shape[0]
+        # Recover shapes and discard columns padded for other requests before
+        # converting the arrays to Python objects.
+        num_prompt_tokens, num_available_logprobs = logprobs.shape
+        num_output_logprobs = (
+            num_available_logprobs
+            if self.num_prompt_logprobs == -1
+            else self.num_prompt_logprobs + 1
+        )
+        token_ids_list = token_ids[:, :num_output_logprobs].tolist()
+        prompt_logprobs = logprobs[:, :num_output_logprobs].tolist()
+        prompt_token_ranks = ranks.tolist()
+
+        # Detokenize non-incrementally. Reuse the Python token IDs instead of
+        # materializing the same NumPy array a second time.
+        all_decoded_tokens: list[str] | None = (
+            None
+            if self.tokenizer is None
+            else convert_ids_list_to_tokens(
+                self.tokenizer,
+                list(itertools.chain.from_iterable(token_ids_list)),
+            )
+        )
 
         # Make Logprob for each position.
         for pos in range(num_prompt_tokens):
-            token_ids_for_pos = token_ids[pos]
+            token_ids_for_pos = token_ids_list[pos]
 
             decoded_tokens_for_pos: list[str] | Iterable[None]
-            if self.tokenizer is None:
+            if all_decoded_tokens is None:
                 decoded_tokens_for_pos = NONES
             else:
-                token_ids_for_decode = (
-                    token_ids_for_pos.tolist()
-                    if hasattr(token_ids_for_pos, "tolist")
-                    else list(token_ids_for_pos)
-                )
-                decoded_tokens_list = convert_ids_list_to_tokens(
-                    self.tokenizer, token_ids_for_decode
-                )
+                offset = pos * num_output_logprobs
+                offset_end = offset + num_output_logprobs
+                decoded_tokens_list = all_decoded_tokens[offset:offset_end]
                 # Context: preceding prompt tokens accumulated in
                 # self.prompt_logprobs from previous loop iterations.
                 context_token_ids = self._get_sampled_context_ids(self.prompt_logprobs)
                 # Apply UTF-8 correction within this position's token boundaries
                 decoded_tokens_for_pos = self._verify_tokens(
                     decoded_tokens_list=decoded_tokens_list,
-                    tokens=token_ids_for_decode,
+                    tokens=token_ids_for_pos,
                     context_token_ids=context_token_ids,
                 )
 
@@ -165,9 +187,9 @@ class LogprobsProcessor:
             append_logprobs_for_next_position(
                 self.prompt_logprobs,
                 token_ids_for_pos,
-                logprobs[pos],
+                prompt_logprobs[pos],
                 decoded_tokens_for_pos,
-                int(ranks[pos]),
+                prompt_token_ranks[pos],
                 self.num_prompt_logprobs,
             )
 
