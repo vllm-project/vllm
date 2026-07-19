@@ -183,6 +183,11 @@ class FlashInferTrtllmNvFp4LinearKernel(NvFp4LinearKernel):
     def is_supported(
         cls, compute_capability: int | None = None
     ) -> tuple[bool, str | None]:
+        if not current_platform.is_device_capability_family(100):
+            # FlashInfer rejects the trtllm backend on other architectures at
+            # dispatch time (BackendSupportedError), e.g. on SM120, so
+            # advertising support would guarantee a runtime crash.
+            return False, "FlashInfer TRTLLM NVFP4 GEMM requires sm_10x"
         if has_flashinfer():
             return True, None
         return False, "FlashInfer required"
