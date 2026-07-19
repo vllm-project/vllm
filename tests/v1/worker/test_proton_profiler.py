@@ -368,6 +368,20 @@ def test_proton_is_not_initialized_when_cuda_graphs_are_disabled():
         pass
 
 
+def test_proton_is_not_initialized_when_v2_runner_has_no_graphs_to_capture():
+    worker = MagicMock()
+    worker.use_v2_model_runner = True
+    worker.vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.FULL
+    worker.profiler_config.profiler = "proton"
+    worker.model_runner.cudagraph_manager.needs_capture.return_value = False
+
+    context = Worker._get_proton_capture_context(worker)
+
+    worker._get_or_create_profiler.assert_not_called()
+    with context:
+        pass
+
+
 def test_xpu_worker_rejects_proton():
     config = SimpleNamespace(
         profiler_config=SimpleNamespace(profiler="proton"),

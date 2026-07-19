@@ -933,6 +933,12 @@ class Worker(WorkerBase):
         ):
             return nullcontext()
 
+        if self.use_v2_model_runner:
+            cudagraph_manager = getattr(self.model_runner, "cudagraph_manager", None)
+            assert cudagraph_manager is not None
+            if not cudagraph_manager.needs_capture():
+                return nullcontext()
+
         self._get_or_create_profiler()
         assert isinstance(self.profiler, ProtonProfilerWrapper)
         return self.profiler.capture_cuda_graphs()
