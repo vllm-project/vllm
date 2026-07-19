@@ -273,8 +273,18 @@ class InklingMTP(nn.Module):
         mup = self.config.logits_mup_width_multiplier
         if not mup:
             return self.logits_processor(self.lm_head, hidden_states)
-        assert self.logits_processor.soft_cap is None
-        assert self.logits_processor.scale == 1.0
+        lp = self.logits_processor
+        assert lp.soft_cap is None
+        assert lp.scale == 1.0
+        # Honor a non-model head dtype (fp32 lm_head for RL training-inference
+        # consistency) the same way the target's InklingLogitsProcessor does:
+        # the fused-alpha addmm fast path would emit bf16 and drop the
+        # promotion, so the draft's logits must not diverge from the target's.
+        if lp.head_dtype is not None and lp.head_dtype != hidden_states.dtype:
+            logits = lp._get_logits(hidden_states, self.lm_head, None)
+            if logits is not None:
+                logits = logits * (1.0 / mup)
+            return logits
         w = self.lm_head.weight
         if self._logits_zero is None:
             self._logits_zero = w.new_zeros(1)
@@ -285,9 +295,9 @@ class InklingMTP(nn.Module):
             beta=0.0,
             alpha=1.0 / mup,
         )
-        logits = self.logits_processor._gather_logits(logits)
+        logits = lp._gather_logits(logits)
         if logits is not None:
-            logits = logits[..., : self.logits_processor.org_vocab_size]
+            logits = logits[..., : lp.org_vocab_size]
         return logits
 
     def get_top_tokens(self, hidden_states: torch.Tensor) -> torch.Tensor:

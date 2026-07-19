@@ -107,12 +107,23 @@ class InklingLogitsProcessor(LogitsProcessor):
         mup = self.logits_mup_width_multiplier
         if not mup:
             return super().forward(lm_head, hidden_states, embedding_bias)
+        assert self.soft_cap is None
+        assert self.scale == 1.0
+        # A non-model head dtype (e.g. `--hf-overrides '{"head_dtype":
+        # "float32"}'` for RL training-inference consistency) must be honored.
+        # The fused-alpha ``addmm`` fast path below emits logits in
+        # ``hidden_states``' dtype and would silently drop the promotion, so
+        # route through the dtype-aware head projection and fold in the muP
+        # divisor as an elementwise multiply in that dtype instead.
+        if self.head_dtype is not None and self.head_dtype != hidden_states.dtype:
+            logits = self._get_logits(hidden_states, lm_head, embedding_bias)
+            if logits is not None:
+                logits = logits * (1.0 / mup)
+            return logits
         # Fold the muP width divisor into the lm_head GEMM alpha (fp32 epilogue):
         # no separate elementwise kernel, no bf16 rounding of scaled logits, and
         # no weight mutation. Overfit to the served checkpoint: bf16 lm_head, no
         # soft cap, unit logits scale.
-        assert self.soft_cap is None
-        assert self.scale == 1.0
         w = lm_head.weight
         if self._logits_zero is None:
             self._logits_zero = w.new_zeros(1)
