@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
+import time
+import urllib.error
 from types import SimpleNamespace
 
 import msgspec
@@ -210,6 +212,104 @@ def test_prefix_cache_upload_is_independent_from_event_publisher():
         assert isinstance(publisher, NullEventPublisher)
         assert isinstance(uploader, HttpPrefixCacheEventUploader)
         assert uploader._headers["Authorization"] == "Bearer shared-secret"
+    finally:
+        uploader.shutdown()
+
+
+def _stored_event(block_hash, *, group_idx=0):
+    return BlockStored(
+        block_hashes=[_external_hash(block_hash)],
+        parent_block_hash=None,
+        token_ids=[],
+        block_size=16,
+        lora_id=None,
+        medium="GPU",
+        lora_name=None,
+        group_idx=group_idx,
+    )
+
+
+def test_prefix_cache_upload_queue_overflow_reconciles_latest_state():
+    uploader = HttpPrefixCacheEventUploader(
+        data_parallel_rank=0,
+        endpoint="http://127.0.0.1:9/prefix_routing",
+        max_queue_size=1,
+        token="shared-secret",
+        _start_thread=False,
+    )
+    first_hash = _hash(1)
+    second_hash = _hash(2)
+
+    uploader.publish(KVEventBatch(ts=1.0, events=[_stored_event(first_hash)]))
+    uploader.publish(KVEventBatch(ts=2.0, events=[_stored_event(second_hash)]))
+
+    assert uploader._needs_snapshot.is_set()
+    uploader._discard_queued_batches()
+    snapshot, _ = uploader._build_snapshot_batch()
+    state = NodePrefixCacheState(node_id="node-a", hash_block_size=16)
+    state.apply_events(snapshot.events)
+    # Reapplying a reconciliation snapshot is idempotent.
+    state.apply_events(snapshot.events)
+    # A later reconciliation also repairs an out-of-order stale delta.
+    state.apply_events(
+        [
+            BlockRemoved(
+                block_hashes=[_external_hash(first_hash)],
+                medium="GPU",
+                group_idx=0,
+            )
+        ]
+    )
+    state.apply_events(snapshot.events)
+    assert state.group_hashes[0] == {
+        _external_hash(first_hash),
+        _external_hash(second_hash),
+    }
+    uploader.shutdown()
+
+
+def test_prefix_cache_upload_recovers_after_disconnect(monkeypatch):
+    attempts = []
+
+    class Response:
+        status = 204
+        headers = {}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return None
+
+    def urlopen(request, timeout):
+        attempts.append((request.data, timeout))
+        if len(attempts) == 1:
+            raise urllib.error.URLError("disconnected")
+        return Response()
+
+    monkeypatch.setattr("urllib.request.urlopen", urlopen)
+    uploader = HttpPrefixCacheEventUploader(
+        data_parallel_rank=0,
+        endpoint="http://127.0.0.1:9/prefix_routing",
+        token="shared-secret",
+        initial_snapshot=PrefixCacheSnapshot(
+            node_id="node-a",
+            hash_block_size=16,
+            group_block_sizes={0: 16},
+            group_hashes={0: {_external_hash(_hash(1))}},
+        ),
+        retry_interval=0.001,
+        max_retry_interval=0.002,
+    )
+    deadline = time.monotonic() + 2
+    while uploader._needs_snapshot.is_set() and time.monotonic() < deadline:
+        time.sleep(0.005)
+
+    try:
+        assert len(attempts) >= 2
+        assert not uploader._needs_snapshot.is_set()
+        recovered = msgspec.msgpack.decode(attempts[-1][0], type=KVEventBatch)
+        assert isinstance(recovered.events[0], AllBlocksCleared)
     finally:
         uploader.shutdown()
 

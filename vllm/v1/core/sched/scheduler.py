@@ -161,10 +161,6 @@ class Scheduler(SchedulerInterface):
             self.kv_events_config,
             self.parallel_config.data_parallel_index,
         )
-        self.prefix_cache_event_uploader = PrefixCacheEventUploaderFactory.create(
-            self.kv_events_config,
-            self.parallel_config.data_parallel_index,
-        )
         self.ec_connector = None
         if self.vllm_config.ec_transfer_config is not None:
             self.ec_connector = ECConnectorFactory.create_connector(
@@ -279,6 +275,20 @@ class Scheduler(SchedulerInterface):
             hash_block_size=hash_block_size,
             metrics_collector=self.kv_metrics_collector,
             watermark=self.scheduler_config.watermark,
+        )
+        prefix_cache_snapshot = (
+            self.kv_cache_manager.get_prefix_cache_snapshot(
+                node_id="",
+                data_parallel_rank=self.parallel_config.data_parallel_index,
+            )
+            if self.kv_events_config is not None
+            and self.kv_events_config.prefix_cache_upload_endpoint is not None
+            else None
+        )
+        self.prefix_cache_event_uploader = PrefixCacheEventUploaderFactory.create(
+            self.kv_events_config,
+            self.parallel_config.data_parallel_index,
+            initial_snapshot=prefix_cache_snapshot,
         )
         # Bind GPU block pool to the KV connector. This must happen after
         # kv_cache_manager is constructed so block_pool is available.

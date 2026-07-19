@@ -279,7 +279,7 @@ class NullEventPublisher(EventPublisher):
 
 
 class HttpPrefixCacheEventUploader(EventPublisher):
-    """Best-effort HTTP uploader for prefix-cache routing metadata.
+    """Non-blocking HTTP uploader with snapshot-based reconciliation.
 
     This is intentionally not registered as a normal KV event publisher. It is
     a side channel used by prefix-aware routing so that enabling it does not
@@ -295,6 +295,10 @@ class HttpPrefixCacheEventUploader(EventPublisher):
         max_queue_size: int = 100_000,
         request_timeout: float = 5.0,
         token: str | None = None,
+        initial_snapshot: Any | None = None,
+        retry_interval: float = 0.1,
+        max_retry_interval: float = 5.0,
+        _start_thread: bool = True,
         **_: Any,
     ) -> None:
         super().__init__(data_parallel_rank)
@@ -310,26 +314,100 @@ class HttpPrefixCacheEventUploader(EventPublisher):
             self._headers["Authorization"] = f"Bearer {token}"
         self._event_queue = Queue[EventBatch | None](maxsize=max_queue_size)
         self._pack = msgspec.msgpack.Encoder()
+        self._retry_interval = retry_interval
+        self._max_retry_interval = max_retry_interval
+        self._state_lock = threading.Lock()
+        self._group_block_sizes: dict[int, int] = {}
+        self._group_hashes: dict[int, set[ExternalBlockHash]] = {}
+        self._needs_snapshot = threading.Event()
+        self._reconcile_generation = 0
+        if initial_snapshot is not None:
+            self._group_block_sizes = dict(initial_snapshot.group_block_sizes)
+            self._group_hashes = {
+                group_id: set(hashes)
+                for group_id, hashes in initial_snapshot.group_hashes.items()
+            }
+            self._mark_snapshot_needed()
         self._running = True
         self._thread = threading.Thread(
             target=self._publisher_thread,
             daemon=True,
             name="prefix-cache-http-uploader",
         )
-        self._thread.start()
+        if _start_thread:
+            self._thread.start()
 
     def publish(self, events: EventBatch) -> None:
         if not self._running:
             return
         if events.data_parallel_rank is None:
             events.data_parallel_rank = self._data_parallel_rank
+        self._apply_to_mirror(events.events)
         try:
             self._event_queue.put_nowait(events)
         except queue.Full:
+            self._mark_snapshot_needed()
             logger.warning(
-                "Dropping prefix-cache event batch because the HTTP upload "
-                "queue is full"
+                "Prefix-cache upload queue is full; scheduling reconciliation"
             )
+
+    def _apply_to_mirror(self, events: list[Any]) -> None:
+        with self._state_lock:
+            for event in events:
+                if isinstance(event, BlockStored):
+                    group_idx = 0 if event.group_idx is None else event.group_idx
+                    self._group_block_sizes[group_idx] = event.block_size
+                    self._group_hashes.setdefault(group_idx, set()).update(
+                        event.block_hashes
+                    )
+                elif isinstance(event, BlockRemoved):
+                    group_idx = 0 if event.group_idx is None else event.group_idx
+                    self._group_hashes.setdefault(group_idx, set()).difference_update(
+                        event.block_hashes
+                    )
+                elif isinstance(event, AllBlocksCleared):
+                    self._group_hashes.clear()
+
+    def _mark_snapshot_needed(self) -> None:
+        with self._state_lock:
+            self._reconcile_generation += 1
+            self._needs_snapshot.set()
+
+    def _build_snapshot_batch(self) -> tuple[KVEventBatch, int]:
+        with self._state_lock:
+            generation = self._reconcile_generation
+            events: list[KVCacheEvent] = [AllBlocksCleared()]
+            for group_idx, block_size in self._group_block_sizes.items():
+                events.append(
+                    BlockStored(
+                        block_hashes=list(self._group_hashes.get(group_idx, set())),
+                        parent_block_hash=None,
+                        token_ids=[],
+                        block_size=block_size,
+                        lora_id=None,
+                        medium=None,
+                        lora_name=None,
+                        group_idx=group_idx,
+                    )
+                )
+        return (
+            KVEventBatch(
+                ts=time.time(),
+                events=events,
+                data_parallel_rank=self._data_parallel_rank,
+            ),
+            generation,
+        )
+
+    def _discard_queued_batches(self) -> None:
+        while True:
+            try:
+                queued = self._event_queue.get_nowait()
+            except queue.Empty:
+                return
+            self._event_queue.task_done()
+            if queued is None:
+                return
 
     def shutdown(self) -> None:
         self._running = False
@@ -346,16 +424,24 @@ class HttpPrefixCacheEventUploader(EventPublisher):
             self._thread.join(timeout=self.SHUTDOWN_TIMEOUT)
 
     def _publisher_thread(self) -> None:
+        retry_delay = self._retry_interval
         while self._running or self._event_queue.qsize() > 0:
+            is_snapshot = self._needs_snapshot.is_set()
+            generation = None
+            event: EventBatch | None
+            if is_snapshot:
+                self._discard_queued_batches()
+                event, generation = self._build_snapshot_batch()
+            else:
+                try:
+                    event = self._event_queue.get(timeout=0.1)
+                    if event is None:
+                        self._event_queue.task_done()
+                        break
+                except queue.Empty:
+                    continue
             try:
-                event = self._event_queue.get(timeout=0.1)
-                if event is None:
-                    self._event_queue.task_done()
-                    break
-            except queue.Empty:
-                continue
-
-            try:
+                assert event is not None
                 payload = self._pack.encode(event)
                 request = urllib.request.Request(
                     self._endpoint,
@@ -367,18 +453,31 @@ class HttpPrefixCacheEventUploader(EventPublisher):
                     request, timeout=self._request_timeout
                 ) as response:
                     if response.status >= 300:
-                        logger.warning(
-                            "HTTP prefix-cache upload returned status %s",
+                        raise urllib.error.HTTPError(
+                            self._endpoint,
                             response.status,
+                            "prefix-cache upload rejected",
+                            response.headers,
+                            None,
                         )
+                retry_delay = self._retry_interval
+                if is_snapshot:
+                    with self._state_lock:
+                        if generation == self._reconcile_generation:
+                            self._needs_snapshot.clear()
             except urllib.error.URLError as exc:
                 logger.warning("HTTP prefix-cache upload failed: %s", exc)
-                time.sleep(0.1)
+                self._mark_snapshot_needed()
+                time.sleep(retry_delay)
+                retry_delay = min(retry_delay * 2, self._max_retry_interval)
             except Exception as exc:
                 logger.exception("Unexpected HTTP prefix-cache upload error: %s", exc)
-                time.sleep(0.1)
+                self._mark_snapshot_needed()
+                time.sleep(retry_delay)
+                retry_delay = min(retry_delay * 2, self._max_retry_interval)
             finally:
-                self._event_queue.task_done()
+                if not is_snapshot:
+                    self._event_queue.task_done()
 
 
 class ZmqEventPublisher(EventPublisher):
@@ -622,7 +721,9 @@ class EventPublisherFactory:
 
     @classmethod
     def create(
-        cls, config: KVEventsConfig | None, data_parallel_rank: int = 0
+        cls,
+        config: KVEventsConfig | None,
+        data_parallel_rank: int = 0,
     ) -> EventPublisher:
         """Create publisher from a config mapping."""
         if (
@@ -650,7 +751,10 @@ class EventPublisherFactory:
 class PrefixCacheEventUploaderFactory:
     @classmethod
     def create(
-        cls, config: KVEventsConfig | None, data_parallel_rank: int = 0
+        cls,
+        config: KVEventsConfig | None,
+        data_parallel_rank: int = 0,
+        initial_snapshot: Any | None = None,
     ) -> EventPublisher:
         """Create the independent prefix-cache event upload side channel."""
         if config is None or config.prefix_cache_upload_endpoint is None:
@@ -662,4 +766,5 @@ class PrefixCacheEventUploaderFactory:
             max_queue_size=config.prefix_cache_upload_max_queue_size,
             request_timeout=config.prefix_cache_upload_timeout,
             token=config.prefix_cache_upload_token,
+            initial_snapshot=initial_snapshot,
         )
