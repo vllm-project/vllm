@@ -178,12 +178,15 @@ class CacheConfig:
     (when not-None) ignores gpu_memory_utilization"""
 
     enable_extensible_kv_cache: bool = False
-    """Use CUDA virtual memory to reserve the KV cache address range before
-    CUDA graph capture and commit the final size after capture.
+    """Use driver virtual memory to reserve the KV cache address range up
+    front, run warmup and CUDA graph capture with only a small block prefix
+    physically committed, and commit the final size afterwards.
 
-    This makes automatic KV sizing account for the actual CUDA graph pool.
-    Supported for all V1 CUDA attention backends (block-major and K/V-split
-    KV cache layouts) and for Mamba / linear-attention models.
+    This makes automatic KV sizing account for the memory that warmup and
+    CUDA graph capture actually consume (including worst-case activation
+    working sets, e.g. with speculative decoding), and avoids warmup-time
+    OOMs. Requires driver VMM support (CUDA or ROCm; falls back to standard
+    allocation with a warning where unavailable, e.g. WSL2).
     """
 
     kv_offloading_size: float | None = None

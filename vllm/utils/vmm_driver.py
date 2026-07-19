@@ -3,7 +3,7 @@
 """ctypes bindings for GPU virtual-memory-management (VMM) driver APIs.
 
 Exposes a uniform driver interface over the CUDA driver's ``cuMem*`` entry
-points (and, structurally, HIP's mirrored ``hipMem*`` entry points) used by
+points and HIP's mirrored ``hipMem*`` entry points, used by
 :class:`vllm.utils.extensible_tensor.ExtensibleTensor`: reserve a virtual
 address range, create physical memory handles, map/unmap them into the
 reservation, and set access permissions.
@@ -264,12 +264,60 @@ class CudaVmmDriver(VmmDriver):
         self._check(self._lib.cuCtxSetCurrent(pctx))
 
 
+class HipVmmDriver(VmmDriver):
+    """HIP mirrors the CUDA driver's VMM API (``hipMem*``) with identical
+    call signatures, struct layouts, and constants; PyTorch's
+    expandable-segments allocator uses the same entry points on ROCm.
+    """
+
+    dlpack_device_type = 10  # kDLROCM
+    _lib_candidates = (
+        "libamdhip64.so",
+        "libamdhip64.so.7",
+        "libamdhip64.so.6",
+        "libamdhip64.so.5",
+    )
+    _lib_search_name = "libamdhip64"
+    _symbols = {
+        "get_granularity": "hipMemGetAllocationGranularity",
+        "address_reserve": "hipMemAddressReserve",
+        "create": "hipMemCreate",
+        "map": "hipMemMap",
+        "set_access": "hipMemSetAccess",
+        "unmap": "hipMemUnmap",
+        "release": "hipMemRelease",
+        "address_free": "hipMemAddressFree",
+    }
+
+    def __init__(self) -> None:
+        super().__init__()
+        lib = self._lib
+        lib.hipGetErrorString.argtypes = [ctypes.c_int]
+        lib.hipGetErrorString.restype = ctypes.c_char_p
+        lib.hipGetDevice.argtypes = [ctypes.POINTER(ctypes.c_int)]
+        lib.hipGetDevice.restype = ctypes.c_int
+        lib.hipSetDevice.argtypes = [ctypes.c_int]
+        lib.hipSetDevice.restype = ctypes.c_int
+
+    def error_string(self, code: int) -> str:
+        msg = self._lib.hipGetErrorString(code)
+        return msg.decode() if msg else "unknown error"
+
+    def ensure_context(self, device_index: int) -> None:
+        # The HIP runtime manages contexts implicitly; just make sure the
+        # buffer's device is current on this thread.
+        device = ctypes.c_int()
+        self._check(self._lib.hipGetDevice(ctypes.byref(device)))
+        if device.value != device_index:
+            self._check(self._lib.hipSetDevice(device_index))
+
+
 @cache
 def get_vmm_driver() -> VmmDriver:
     import torch
 
     if torch.version.hip is not None:
-        raise RuntimeError("VMM-backed tensors are not yet supported on ROCm.")
+        return HipVmmDriver()
     return CudaVmmDriver()
 
 
