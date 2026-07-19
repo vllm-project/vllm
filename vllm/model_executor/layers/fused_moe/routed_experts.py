@@ -1038,6 +1038,9 @@ class RoutedExperts(PluggableLayer):
                 gate_up = "gate_up_proj"
             elif ckpt_gate_proj_name == "w1" and ckpt_up_proj_name == "w3":
                 gate_up = "w13"
+            elif ckpt_up_proj_name == "":
+                # Non-gated MoE (Nemotron H): no up_proj, skip fused mapping silently
+                pass
             else:
                 logger.warning(
                     "Unexpected gate/up projection names: %s, %s. "
