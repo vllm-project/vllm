@@ -117,9 +117,7 @@ class NcclEPBatchedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
 
         if q_dtype == "nvfp4":
             q_dtype = None
-            logger.debug_once(
-                "Using NCCL EP bfloat16 dispatch for NVFP4 MoE."
-            )
+            logger.debug_once("Using NCCL EP bfloat16 dispatch for NVFP4 MoE.")
 
         x = x.view((-1, hidden_dim))
         x, x_scales = moe_kernel_quantize_input(
@@ -153,8 +151,7 @@ class NcclEPBatchedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
     ) -> tuple[Callable, mk.ReceiverType]:
         if defer_input_quant:
             raise NotImplementedError(
-                f"{self.__class__.__name__} does not support "
-                "defer_input_quant=True."
+                f"{self.__class__.__name__} does not support defer_input_quant=True."
             )
 
         a2a_idx = dbo_current_ubatch_id()
@@ -231,9 +228,7 @@ class NcclEPBatchedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         a1_dtype: torch.dtype,
         quant_config: FusedMoEQuantConfig,
     ) -> mk.PrepareResultType:
-        expert_x, expert_x_scale = self._do_quant(
-            expert_x, a1_dtype, quant_config
-        )
+        expert_x, expert_x_scale = self._do_quant(expert_x, a1_dtype, quant_config)
 
         expert_tokens_meta = mk.ExpertTokensMetadata(
             expert_num_tokens=expert_num_tokens,

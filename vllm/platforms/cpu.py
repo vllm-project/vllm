@@ -93,11 +93,6 @@ class CpuPlatform(Platform):
         return meminfo.total_memory
 
     @classmethod
-    def mem_get_info(cls) -> tuple[int, int]:
-        meminfo = get_memory_node_info()
-        return meminfo.available_memory, meminfo.total_memory
-
-    @classmethod
     def set_device(cls, device: torch.device) -> None:
         """
         Set the device for the current platform.
@@ -129,6 +124,14 @@ class CpuPlatform(Platform):
                 "CPU backend prefers block_size is multiples of 32, "
                 "otherwise the performance is not optimized."
             )
+
+        # AMX GDN requires float32 state
+        if (
+            torch.cpu._is_amx_tile_supported()
+            and cache_config.mamba_ssm_cache_dtype != "float32"
+        ):
+            cache_config.mamba_ssm_cache_dtype = "float32"
+            logger.warning("Reset SSM cache type to float32 for AMX mamba attention.")
 
         # Lagecy setting
         env_key = "VLLM_CPU_KVCACHE_SPACE"
@@ -198,6 +201,18 @@ class CpuPlatform(Platform):
             and "-gelu" not in compilation_config.custom_ops
         ):
             compilation_config.custom_ops.append("+gelu")
+        if (
+            cls.get_cpu_architecture() == CpuArchEnum.ARM
+            and "+gelu_tanh" not in compilation_config.custom_ops
+            and "-gelu_tanh" not in compilation_config.custom_ops
+        ):
+            compilation_config.custom_ops.append("+gelu_tanh")
+        if (
+            cls.get_cpu_architecture() == CpuArchEnum.ARM
+            and "+gelu_and_mul" not in compilation_config.custom_ops
+            and "-gelu_and_mul" not in compilation_config.custom_ops
+        ):
+            compilation_config.custom_ops.append("+gelu_and_mul")
 
         vllm_config.profiler_config.torch_profiler_dump_cuda_time_total = False
 
@@ -232,7 +247,12 @@ class CpuPlatform(Platform):
         if (
             platform.system() == "Linux"
             and cpu_architecture
-            in (CpuArchEnum.ARM, CpuArchEnum.POWERPC, CpuArchEnum.X86)
+            in (
+                CpuArchEnum.ARM,
+                CpuArchEnum.POWERPC,
+                CpuArchEnum.X86,
+                CpuArchEnum.S390X,
+            )
             and not (
                 "libomp" in ld_preload_str
                 or "libgomp" in ld_preload_str

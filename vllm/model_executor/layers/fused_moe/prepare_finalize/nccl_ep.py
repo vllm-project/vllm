@@ -181,11 +181,7 @@ class NcclEPStandardPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             recv_topk_idx = recv_topk_idx + self.rank_expert_offset
             invalid = recv_topk_idx < 0
             if invalid.any():
-                fill_val = (
-                    num_experts - 1
-                    if self.rank_expert_offset == 0
-                    else 0
-                )
+                fill_val = num_experts - 1 if self.rank_expert_offset == 0 else 0
                 recv_topk_idx = torch.where(invalid, fill_val, recv_topk_idx)
 
         # Build per-expert token counts from topk_idx
@@ -194,16 +190,16 @@ class NcclEPStandardPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             local_ids = recv_topk_idx[:, 0] - self.rank_expert_offset
             num_local = self.num_experts // self.num_dispatchers_
             for e in range(num_local):
-                expert_num_tokens_list.append(
-                    int((local_ids == e).sum().item())
-                )
+                expert_num_tokens_list.append(int((local_ids == e).sum().item()))
         expert_tokens_meta = mk.ExpertTokensMetadata.make_from_list(
             expert_num_tokens_list, device=expert_x.device
         )
 
-        if (not quant_config.is_block_quantized
-                and not defer_input_quant
-                and expert_x.numel() != 0):
+        if (
+            not quant_config.is_block_quantized
+            and not defer_input_quant
+            and expert_x.numel() != 0
+        ):
             expert_x, expert_x_scale = moe_kernel_quantize_input(
                 expert_x,
                 a1_scale,
@@ -325,8 +321,7 @@ class NcclEPStandardPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         dbo_yield_and_switch_from_compute_to_comm()
 
         assert fused_expert_output.dtype == torch.bfloat16, (
-            f"NCCL EP combine requires bfloat16, "
-            f"got {fused_expert_output.dtype}"
+            f"NCCL EP combine requires bfloat16, got {fused_expert_output.dtype}"
         )
 
         combined_output = torch.empty_like(output)

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use thiserror::Error;
 use thiserror_ext::Macro;
 
@@ -10,4 +13,8 @@ pub type Result<T> = std::result::Result<T, ToolParserError>;
 pub enum ToolParserError {
     #[error("tool parser parsing failed: {message}")]
     ParsingFailed { message: String },
+    #[error(
+        "`{name}` only provides a unified parser; the same reasoning parser and tool parser should be specified together"
+    )]
+    DummyUnifiedParser { name: String },
 }

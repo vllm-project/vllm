@@ -237,7 +237,11 @@ class ModernBertEncoderLayer(nn.Module):
 @default_pooling_type(seq_pooling_type="CLS")
 class ModernBertModel(nn.Module):
     hf_to_vllm_mapper = WeightsMapper(
-        orig_to_new_prefix={"layers.": "encoder_layer.layers."}
+        orig_to_new_prefix={
+            "model.layers.": "encoder_layer.layers.",
+            "layers.": "encoder_layer.layers.",
+            "model.": "",
+        }
     )
 
     def __init__(
@@ -265,6 +269,8 @@ class ModernBertModel(nn.Module):
         loaded_params: set[str] = set()
         for name, loaded_weight in weights:
             if name.endswith(".bias") and name not in params_dict:
+                continue
+            if name not in params_dict:
                 continue
             param = params_dict[name]
             weight_loader = getattr(param, "weight_loader", default_weight_loader)

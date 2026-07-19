@@ -1,28 +1,28 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 //! Streaming tool parsers for chat completions.
 
 #[macro_use]
 pub(crate) mod error;
 mod deepseek_dsml;
 pub(crate) mod deepseek_json;
-mod gemma4;
 mod glm_xml;
 mod hy_v3;
-mod json;
+pub(crate) mod json;
 mod kimi_k2;
 mod minimax_m2;
 mod minimax_m3;
 mod parameters;
 mod qwen_coder;
+mod seed_oss;
 #[cfg(any(test, feature = "test-util"))]
 pub mod test_utils;
-pub(crate) mod utils;
-
 use std::collections::{BTreeMap, btree_map};
 
 pub use deepseek_dsml::{DeepSeekV4ToolParser, DeepSeekV32ToolParser};
 pub use deepseek_json::{DeepSeekV3ToolParser, DeepSeekV31ToolParser};
 pub use error::{Result, ToolParserError};
-pub use gemma4::Gemma4ToolParser;
 pub use glm_xml::{Glm45MoeToolParser, Glm47MoeToolParser};
 pub use hy_v3::HyV3ToolParser;
 pub use json::{
@@ -33,9 +33,12 @@ pub use kimi_k2::KimiK2ToolParser;
 pub use minimax_m2::MinimaxM2ToolParser;
 pub use minimax_m3::MinimaxM3ToolParser;
 pub use qwen_coder::Qwen3CoderToolParser;
+pub use seed_oss::SeedOssToolParser;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 pub use xgrammar_structural_tag::Model as StructuralTagModel;
+
+use crate::utils;
 
 /// One function-style tool made available to the model.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
