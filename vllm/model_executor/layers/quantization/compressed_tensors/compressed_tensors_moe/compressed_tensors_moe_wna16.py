@@ -221,7 +221,7 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
     ) -> Mapping[str, torch.nn.Parameter] | None:
         packed_weights = {"w13_weight_packed", "w2_weight_packed"}
         transposed_scales = {"w13_weight_scale", "w2_weight_scale"}
-        bound_params = {}
+        mapping = {}
 
         if checkpoint_params.keys() - runtime_params.keys():
             return None
@@ -247,10 +247,6 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
                 or reload_data.dtype != checkpoint_param.dtype
             ):
                 return None
-            bound_params[name] = (checkpoint_param, reload_data)
-
-        mapping = {}
-        for name, (checkpoint_param, reload_data) in bound_params.items():
             bound_param = torch.nn.Parameter(reload_data, requires_grad=False)
             bound_param.__class__ = checkpoint_param.__class__
             bound_param.__dict__ = checkpoint_param.__dict__.copy()

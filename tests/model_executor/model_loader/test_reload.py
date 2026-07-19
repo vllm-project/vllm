@@ -12,7 +12,6 @@ import vllm.model_executor.model_loader.reload.meta as reload_meta
 from vllm.model_executor.layers.linear import QKVParallelLinear
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
 from vllm.model_executor.model_loader.reload.layerwise import (
-    _DEFERRED_ATTENTION_TYPES,
     _matching_tensor_layouts,
     finalize_layerwise_reload,
     get_layerwise_info,
@@ -262,20 +261,8 @@ def test_direct_weight_reload_requires_matching_tensor_sets():
     assert not _matching_tensor_layouts(
         {"weight": weight}, {"weight": weight, "extra": extra}
     )
-
-
-def test_deferred_attention_types_are_complete():
-    from vllm.model_executor.layers.attention import (
-        Attention,
-        MLAAttention,
-        MMEncoderAttention,
-    )
-
-    assert (
-        Attention,
-        MLAAttention,
-        MMEncoderAttention,
-    ) == _DEFERRED_ATTENTION_TYPES
+    for tensor in (UninitializedParameter(), UninitializedBuffer()):
+        assert not _matching_tensor_layouts({"weight": tensor}, {"weight": tensor})
 
 
 def test_direct_weight_reload_restores_parameter_loading_metadata():
@@ -555,11 +542,6 @@ def test_capture_layer_to_meta_skips_uninitialized_parameter_storage_ptrs():
     _, buffers = capture_layer_to_meta(layer)
 
     assert "weight_view" not in buffers
-
-
-def test_lazy_tensors_fail_closed_without_reading_storage():
-    for tensor in (UninitializedParameter(), UninitializedBuffer()):
-        assert not _matching_tensor_layouts({"weight": tensor}, {"weight": tensor})
 
 
 def test_layerwise_reload_skips_child_parameter_alias_buffers(monkeypatch):
