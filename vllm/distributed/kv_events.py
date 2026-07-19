@@ -294,6 +294,7 @@ class HttpPrefixCacheEventUploader(EventPublisher):
         endpoint: str,
         max_queue_size: int = 100_000,
         request_timeout: float = 5.0,
+        token: str | None = None,
         **_: Any,
     ) -> None:
         super().__init__(data_parallel_rank)
@@ -304,6 +305,9 @@ class HttpPrefixCacheEventUploader(EventPublisher):
             )
         self._endpoint = endpoint
         self._request_timeout = request_timeout
+        self._headers = {"Content-Type": "application/msgpack"}
+        if token is not None:
+            self._headers["Authorization"] = f"Bearer {token}"
         self._event_queue = Queue[EventBatch | None](maxsize=max_queue_size)
         self._pack = msgspec.msgpack.Encoder()
         self._running = True
@@ -357,7 +361,7 @@ class HttpPrefixCacheEventUploader(EventPublisher):
                     self._endpoint,
                     data=payload,
                     method="POST",
-                    headers={"Content-Type": "application/msgpack"},
+                    headers=self._headers,
                 )
                 with urllib.request.urlopen(
                     request, timeout=self._request_timeout
@@ -635,6 +639,7 @@ class EventPublisherFactory:
         config_dict.pop("prefix_cache_upload_endpoint")
         config_dict.pop("prefix_cache_upload_max_queue_size")
         config_dict.pop("prefix_cache_upload_timeout")
+        config_dict.pop("prefix_cache_upload_token")
         try:
             constructor = cls._registry[kind]
         except KeyError as exc:
@@ -656,4 +661,5 @@ class PrefixCacheEventUploaderFactory:
             endpoint=config.prefix_cache_upload_endpoint,
             max_queue_size=config.prefix_cache_upload_max_queue_size,
             request_timeout=config.prefix_cache_upload_timeout,
+            token=config.prefix_cache_upload_token,
         )

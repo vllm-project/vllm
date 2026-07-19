@@ -3,8 +3,10 @@
 """OpenAI API prefix-routing proxy integration."""
 
 import asyncio
+import hashlib
 import json
 import os
+import secrets
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
@@ -53,6 +55,24 @@ async def ingest_prefix_routing_kv_events(
     proxy = getattr(raw_request.app.state, "prefix_routing_proxy", None)
     if proxy is None:
         raise HTTPException(status_code=503, detail="Prefix routing is not enabled")
+
+    expected_token = proxy.config.event_ingest_token
+    if expected_token is None:
+        raise HTTPException(
+            status_code=503, detail="Prefix routing HTTP event ingestion is disabled"
+        )
+    authorization = raw_request.headers.get("authorization", "")
+    scheme, _, token = authorization.partition(" ")
+    token_matches = scheme.lower() == "bearer" and secrets.compare_digest(
+        hashlib.sha256(token.encode("utf-8")).digest(),
+        hashlib.sha256(expected_token.encode("utf-8")).digest(),
+    )
+    if not token_matches:
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid prefix routing event credential",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
     if node_id not in proxy.nodes:
         raise HTTPException(status_code=404, detail=f"Unknown prefix node {node_id!r}")
 
@@ -85,6 +105,7 @@ class PrefixRoutingConfig:
     hash_block_size: int
     event_topic: str = ""
     request_timeout: float = 6 * 60 * 60
+    event_ingest_token: str | None = None
 
 
 class PrefixRoutingProxy:
@@ -383,11 +404,20 @@ def _parse_prefix_routing_config(
     ):
         raise ValueError("prefix routing request_timeout must be positive")
 
+    event_ingest_token = raw_config.get("event_ingest_token")
+    if event_ingest_token is not None and (
+        not isinstance(event_ingest_token, str) or not event_ingest_token
+    ):
+        raise ValueError(
+            "prefix routing event_ingest_token must be a non-empty string"
+        )
+
     return PrefixRoutingConfig(
         nodes=nodes,
         hash_block_size=hash_block_size,
         event_topic=str(raw_config.get("event_topic", "")),
         request_timeout=float(request_timeout),
+        event_ingest_token=event_ingest_token,
     )
 
 

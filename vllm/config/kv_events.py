@@ -62,6 +62,17 @@ class KVEventsConfig:
     prefix_cache_upload_timeout: float = 5.0
     """HTTP request timeout in seconds for prefix-cache upload."""
 
+    prefix_cache_upload_token: str | None = None
+    """Bearer token used to authenticate prefix-cache HTTP uploads."""
+
     def __post_init__(self):
         if self.publisher is None:
             self.publisher = "zmq" if self.enable_kv_cache_events else "null"
+        if self.prefix_cache_upload_endpoint is not None and not (
+            isinstance(self.prefix_cache_upload_token, str)
+            and self.prefix_cache_upload_token
+        ):
+            raise ValueError(
+                "prefix_cache_upload_token must be a non-empty string when "
+                "prefix_cache_upload_endpoint is configured"
+            )

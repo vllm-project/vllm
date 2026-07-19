@@ -4,7 +4,9 @@
 import asyncio
 from types import SimpleNamespace
 
+import msgspec
 import pytest
+from fastapi import HTTPException
 
 from vllm.config.kv_events import KVEventsConfig
 from vllm.distributed.kv_events import (
@@ -23,8 +25,10 @@ from vllm.distributed.prefix_scheduler import (
     PrefixCacheSnapshot,
 )
 from vllm.entrypoints.openai.prefix_routing import (
+    PrefixRoutingConfig,
     PrefixRoutingProxy,
     _parse_prefix_routing_config,
+    ingest_prefix_routing_kv_events,
 )
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
@@ -196,6 +200,7 @@ def test_prefix_cache_upload_is_independent_from_event_publisher():
         enable_kv_cache_events=False,
         publisher="null",
         prefix_cache_upload_endpoint="http://127.0.0.1:9/prefix_routing",
+        prefix_cache_upload_token="shared-secret",
     )
 
     publisher = EventPublisherFactory.create(config)
@@ -204,8 +209,74 @@ def test_prefix_cache_upload_is_independent_from_event_publisher():
     try:
         assert isinstance(publisher, NullEventPublisher)
         assert isinstance(uploader, HttpPrefixCacheEventUploader)
+        assert uploader._headers["Authorization"] == "Bearer shared-secret"
     finally:
         uploader.shutdown()
+
+
+def _event_ingest_request(token: str | None, configured_token: str | None):
+    class Scheduler:
+        batch = None
+
+        def apply_event_batch(self, node_id, batch):
+            self.batch = (node_id, batch)
+
+    class Request:
+        headers = {} if token is None else {"authorization": f"Bearer {token}"}
+
+        def __init__(self):
+            self.scheduler = Scheduler()
+            proxy = SimpleNamespace(
+                config=PrefixRoutingConfig(
+                    nodes=[],
+                    hash_block_size=16,
+                    event_ingest_token=configured_token,
+                ),
+                nodes={"node-a": object()},
+                scheduler=self.scheduler,
+            )
+            self.app = SimpleNamespace(
+                state=SimpleNamespace(prefix_routing_proxy=proxy)
+            )
+
+        async def body(self):
+            return msgspec.msgpack.encode(
+                KVEventBatch(ts=1.0, data_parallel_rank=0, events=[])
+            )
+
+    return Request()
+
+
+def test_prefix_routing_http_event_ingest_is_disabled_without_token():
+    request = _event_ingest_request(token=None, configured_token=None)
+
+    with pytest.raises(HTTPException, match="ingestion is disabled") as exc_info:
+        asyncio.run(ingest_prefix_routing_kv_events("node-a", request))
+
+    assert exc_info.value.status_code == 503
+
+
+@pytest.mark.parametrize("token", [None, "wrong-secret"])
+def test_prefix_routing_http_event_ingest_rejects_invalid_token(token):
+    request = _event_ingest_request(token=token, configured_token="shared-secret")
+
+    with pytest.raises(HTTPException, match="Invalid.*credential") as exc_info:
+        asyncio.run(ingest_prefix_routing_kv_events("node-a", request))
+
+    assert exc_info.value.status_code == 401
+    assert exc_info.value.headers == {"WWW-Authenticate": "Bearer"}
+
+
+def test_prefix_routing_http_event_ingest_accepts_shared_token():
+    request = _event_ingest_request(
+        token="shared-secret", configured_token="shared-secret"
+    )
+
+    response = asyncio.run(ingest_prefix_routing_kv_events("node-a", request))
+
+    assert response.status_code == 204
+    assert request.scheduler.batch is not None
+    assert request.scheduler.batch[0] == "node-a"
 
 
 def test_prefix_routing_renders_completion_engine_inputs():
