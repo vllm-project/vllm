@@ -754,6 +754,11 @@ class Worker(WorkerBase):
         self.cache_config.num_gpu_blocks = num_blocks
         self.model_runner.extend_kv_cache(num_blocks)
 
+    def extensible_kv_cache_unsupported_reason(self) -> str | None:
+        from vllm.utils.vmm_driver import vmm_unavailable_reason
+
+        return vmm_unavailable_reason()
+
     @instrument(span_name="Warmup (GPU)")
     def compile_or_warm_up_model(self) -> CompilationTimes:
         warmup_sizes: list[int] = []

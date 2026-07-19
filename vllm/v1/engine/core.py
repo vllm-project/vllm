@@ -296,18 +296,6 @@ class EngineCore:
             has_kv_cache and vllm_config.cache_config.enable_extensible_kv_cache
         )
         if use_extensible_kv_cache:
-            from vllm.platforms import current_platform
-
-            if vllm_config.cache_config.kv_cache_memory_bytes is not None:
-                raise ValueError(
-                    "enable_extensible_kv_cache=True is not supported with "
-                    "kv_cache_memory_bytes. The extensible path requires "
-                    "automatic KV cache sizing."
-                )
-            if not current_platform.is_cuda():
-                raise ValueError(
-                    "enable_extensible_kv_cache=True is only supported on CUDA."
-                )
             if vllm_config.kv_transfer_config is not None:
                 raise ValueError(
                     "enable_extensible_kv_cache=True is not supported with "
@@ -319,6 +307,16 @@ class EngineCore:
                     "enable_extensible_kv_cache=True is not supported with "
                     "sleep mode: the KV cache bypasses the CuMem allocator."
                 )
+            # The workers' drivers must support virtual memory management
+            # (e.g. WSL2 and non-GPU platforms do not); fall back gracefully.
+            reasons = self.collective_rpc("extensible_kv_cache_unsupported_reason")
+            if reason := next((r for r in reasons if r), None):
+                logger.warning(
+                    "Disabling extensible KV cache; falling back to standard "
+                    "KV cache allocation: %s",
+                    reason,
+                )
+                use_extensible_kv_cache = False
 
         # Track max_model_len before KV cache config to detect auto-fit changes
         # made by get_kv_cache_configs().
@@ -341,35 +339,41 @@ class EngineCore:
             extensible=use_extensible_kv_cache,
         )
         if use_extensible_kv_cache:
-            if len(compilation_times) != len(available_gpu_memory):
-                raise RuntimeError(
-                    "Expected one CompilationTimes result per worker when "
-                    "initializing extensible KV cache, but got "
-                    f"{len(compilation_times)} results for "
-                    f"{len(available_gpu_memory)} workers."
+            if vllm_config.cache_config.kv_cache_memory_bytes is None:
+                # Automatic sizing: re-derive the KV cache size from the
+                # memory actually consumed by warmup and CUDA graph capture.
+                # With an explicit kv_cache_memory_bytes, the requested size
+                # is committed as-is (the extensible path still defers the
+                # commit until after warmup).
+                if len(compilation_times) != len(available_gpu_memory):
+                    raise RuntimeError(
+                        "Expected one CompilationTimes result per worker when "
+                        "initializing extensible KV cache, but got "
+                        f"{len(compilation_times)} results for "
+                        f"{len(available_gpu_memory)} workers."
+                    )
+                final_available_gpu_memory = [
+                    max(
+                        available_memory
+                        - times.warmup_memory
+                        - _WARMUP_MEMORY_BUFFER_BYTES,
+                        0,
+                    )
+                    for available_memory, times in zip(
+                        available_gpu_memory, compilation_times, strict=True
+                    )
+                ]
+                max_model_len_before = vllm_config.model_config.max_model_len
+                kv_cache_configs = get_kv_cache_configs(
+                    vllm_config,
+                    kv_cache_specs,
+                    final_available_gpu_memory,
                 )
-            final_available_gpu_memory = [
-                max(
-                    available_memory
-                    - times.warmup_memory
-                    - _WARMUP_MEMORY_BUFFER_BYTES,
-                    0,
+                scheduler_kv_cache_config = self._apply_kv_cache_config(
+                    vllm_config,
+                    kv_cache_configs,
+                    max_model_len_before,
                 )
-                for available_memory, times in zip(
-                    available_gpu_memory, compilation_times, strict=True
-                )
-            ]
-            max_model_len_before = vllm_config.model_config.max_model_len
-            kv_cache_configs = get_kv_cache_configs(
-                vllm_config,
-                kv_cache_specs,
-                final_available_gpu_memory,
-            )
-            scheduler_kv_cache_config = self._apply_kv_cache_config(
-                vllm_config,
-                kv_cache_configs,
-                max_model_len_before,
-            )
             self.model_executor.extend_kv_cache(scheduler_kv_cache_config.num_blocks)
 
         elapsed = time.time() - start
