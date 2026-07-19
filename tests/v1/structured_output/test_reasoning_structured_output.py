@@ -251,8 +251,7 @@ class TestReasoningStructuredOutput:
         reasoner = MockReasoner(tokenizer=Mock())
         # Detection mirrors the real Qwen3 parser: end token in the delta.
         reasoner.is_reasoning_end_streaming = Mock(
-            side_effect=lambda input_ids, delta_ids: end_token_id
-            in list(delta_ids)
+            side_effect=lambda input_ids, delta_ids: end_token_id in list(delta_ids)
         )
         structured_req.reasoner = reasoner
 
@@ -261,9 +260,13 @@ class TestReasoningStructuredOutput:
         # The placeholder math would yield delta=[271] and miss </think>.
         # Passing new_token_ids must override that.
         new_token_ids = [9, 198, end_token_id, 271]
-        mock_request_with_structured_output.all_token_ids = (
-            [1, 2, 3, 4, 5] + new_token_ids
-        )
+        mock_request_with_structured_output.all_token_ids = [
+            1,
+            2,
+            3,
+            4,
+            5,
+        ] + new_token_ids
         mock_request_with_structured_output.num_computed_tokens = 9
         mock_request_with_structured_output.num_output_placeholders = 1
 
@@ -333,9 +336,7 @@ class TestReasoningStructuredOutput:
         structured_req.reasoner = MarkerReasoner()
 
         new_token_ids = [9, 198, marker, 271, 5005]
-        mock_request_with_structured_output.all_token_ids = (
-            [1, 2, 3] + new_token_ids
-        )
+        mock_request_with_structured_output.all_token_ids = [1, 2, 3] + new_token_ids
 
         result = manager_with_reasoner.should_advance(
             mock_request_with_structured_output,

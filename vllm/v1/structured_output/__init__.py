@@ -405,9 +405,7 @@ class StructuredOutputManager:
             start = len(all_token_ids) - len(new_token_ids)
             delta_ids: Iterable[int] = new_token_ids
         else:
-            delta_from = (
-                request.num_computed_tokens - request.num_output_placeholders
-            )
+            delta_from = request.num_computed_tokens - request.num_output_placeholders
             start = (
                 delta_from
                 if delta_from >= 0
@@ -418,9 +416,7 @@ class StructuredOutputManager:
             structured_req.reasoning_ended = True
 
             # Record the boundary so the scheduler can exclude reasoning tokens.
-            end_index = self._find_reasoning_end_index(
-                reasoner, all_token_ids, start
-            )
+            end_index = self._find_reasoning_end_index(reasoner, all_token_ids, start)
 
             structured_req.reasoning_end_token_index = end_index
             return True
