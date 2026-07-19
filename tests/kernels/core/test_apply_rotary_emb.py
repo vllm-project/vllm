@@ -11,7 +11,9 @@ ApplyRotaryEmb methods based on the calling context:
 3. RotaryEmbedding.forward_hip() -> ApplyRotaryEmb.forward() (auto-dispatch)
 """
 
+import sys
 from dataclasses import dataclass
+from types import ModuleType
 
 import pytest
 import torch
@@ -22,9 +24,45 @@ from vllm.config import (
     get_cached_compilation_config,
     set_current_vllm_config,
 )
+from vllm.model_executor.layers.rotary_embedding.common import ApplyRotaryEmb
 from vllm.platforms import current_platform
 
 CUDA_DEVICES = ["cuda:0"]
+
+
+def test_cuda_fp32_compute_preserves_input_storage(
+    default_vllm_config,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Keep Q/K in their original storage dtype for the CUDA kernel."""
+    captured: dict[str, torch.Tensor] = {}
+
+    def apply_rotary_emb(
+        x: torch.Tensor,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+        interleaved: bool,
+    ) -> torch.Tensor:
+        captured.update(x=x, cos=cos, sin=sin)
+        return torch.empty_like(x)
+
+    rotary_module = ModuleType("vllm.vllm_flash_attn.layers.rotary")
+    rotary_module.__dict__["apply_rotary_emb"] = apply_rotary_emb
+    monkeypatch.setitem(sys.modules, rotary_module.__name__, rotary_module)
+
+    x = torch.randn(2, 8, 3, 80, dtype=torch.bfloat16)
+    cos = torch.randn(8, 39, dtype=torch.float32)
+    sin = torch.randn(8, 39, dtype=torch.float32)
+    op = ApplyRotaryEmb(enforce_enable=True, enable_fp32_compute=True)
+
+    output = op.forward_cuda(x, cos, sin)
+
+    assert captured["x"].dtype == x.dtype
+    assert captured["x"].data_ptr() == x.data_ptr()
+    assert captured["cos"].dtype == torch.float32
+    assert captured["sin"].dtype == torch.float32
+    assert output.shape == x.shape
+    assert output.dtype == x.dtype
 
 
 @dataclass
