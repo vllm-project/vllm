@@ -940,12 +940,10 @@ class Worker(WorkerBase):
                 return nullcontext()
         else:
             capture_descs = self.model_runner.cudagraph_dispatcher.get_capture_descs()
-            encoder_capture_enabled = (
-                self.vllm_config.compilation_config.cudagraph_mm_encoder
-                and self.model_runner.supports_mm_inputs
-            )
-            if not capture_descs and not encoder_capture_enabled:
-                return nullcontext()
+            if not capture_descs:
+                self.model_runner._maybe_init_encoder_cudagraph_manager()
+                if self.model_runner.encoder_cudagraph_manager is None:
+                    return nullcontext()
 
         self._get_or_create_profiler()
         assert isinstance(self.profiler, ProtonProfilerWrapper)

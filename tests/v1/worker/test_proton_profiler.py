@@ -419,12 +419,13 @@ def test_proton_is_not_initialized_when_v1_runner_has_no_graphs_to_capture():
     worker = MagicMock()
     worker.use_v2_model_runner = False
     worker.vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.FULL
-    worker.vllm_config.compilation_config.cudagraph_mm_encoder = False
     worker.profiler_config.profiler = "proton"
     worker.model_runner.cudagraph_dispatcher.get_capture_descs.return_value = []
+    worker.model_runner.encoder_cudagraph_manager = None
 
     context = Worker._get_proton_capture_context(worker)
 
+    worker.model_runner._maybe_init_encoder_cudagraph_manager.assert_called_once()
     worker._get_or_create_profiler.assert_not_called()
     with context:
         pass
