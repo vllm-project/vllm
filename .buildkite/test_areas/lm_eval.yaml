@@ -5,7 +5,7 @@ steps:
 - label: LM Eval Small Models
   device: h200_35gb
   key: lm-eval-small-models
-  timeout_in_minutes: 75
+  timeout_in_minutes: 45
   source_file_dependencies:
   - csrc/
   - vllm/model_executor/layers/quantization
@@ -56,7 +56,7 @@ steps:
 
 - label: LM Eval Small Models (1xB200)
   key: lm-eval-small-models-1xb200
-  timeout_in_minutes: 120
+  timeout_in_minutes: 50
   device: b200-k8s
   optional: true
   source_file_dependencies:
@@ -78,9 +78,31 @@ steps:
   commands:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-small-tp.txt
 
+- label: LM Eval PCP (4xB200)
+  key: lm-eval-pcp-4xb200
+  timeout_in_minutes: 360
+  device: b200-k8s
+  num_devices: 4
+  optional: true
+  source_file_dependencies:
+  - csrc/
+  - tests/evals/gsm8k/configs/GLM-5.2-NVFP4-TP2-PCP2-EP.yaml
+  - tests/evals/gsm8k/configs/GLM-5.2-NVFP4-TP1-PCP4-EP.yaml
+  - tests/evals/gsm8k/configs/models-pcp.txt
+  - vllm/model_executor/layers/quantization
+  - vllm/config/parallel.py
+  - vllm/distributed/parallel_state.py
+  - vllm/model_executor/layers/attention/mla_attention.py
+  - vllm/model_executor/layers/attention/pcp.py
+  - vllm/v1/worker/gpu/model_runner.py
+  - vllm/v1/worker/gpu/pcp_manager.py
+  autorun_on_main: true
+  commands:
+  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-pcp.txt
+
 - label: LM Eval Large Models EP (2xB200)
   key: lm-eval-large-models-ep-2xb200
-  timeout_in_minutes: 120
+  timeout_in_minutes: 60
   device: b200-k8s
   optional: true
   num_devices: 2
@@ -92,7 +114,7 @@ steps:
 
 - label: LM Eval Qwen3.5 Models (2xB200)
   key: lm-eval-qwen3-5-models-2xb200
-  timeout_in_minutes: 120
+  timeout_in_minutes: 45
   device: b200-k8s
   optional: true
   num_devices: 2
@@ -103,13 +125,13 @@ steps:
   - vllm/transformers_utils/configs/qwen3_5_moe.py
   - vllm/model_executor/models/qwen3_next.py
   - vllm/model_executor/models/qwen3_next_mtp.py
-  - vllm/model_executor/layers/fla/ops/
+  - vllm/third_party/flash_linear_attention/ops/
   commands:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-qwen35-blackwell.txt
 
 - label: LM Eval Large Models (8xH200)
   key: lm-eval-large-models-8xh200
-  timeout_in_minutes: 60
+  timeout_in_minutes: 50
   device: h200
   optional: true
   num_devices: 8
@@ -117,8 +139,9 @@ steps:
     - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-h200.txt
   mirror:
     amd:
+      dind: false
       device: mi300_8
-      timeout_in_minutes: 180
+      timeout_in_minutes: 60
       depends_on:
       - image-build-amd
       commands:
@@ -152,7 +175,7 @@ steps:
 
 - label: LM Eval Humming f16 (A100 - TEMPORARY)
   key: lm-eval-humming-f16-a100
-  timeout_in_minutes: 120
+  timeout_in_minutes: 75
   device: a100
   optional: true
   num_devices: 1
@@ -167,7 +190,7 @@ steps:
 
 - label: LM Eval Humming Act int8 (A100 - TEMPORARY)
   key: lm-eval-humming-act-a100
-  timeout_in_minutes: 120
+  timeout_in_minutes: 45
   device: a100
   optional: true
   num_devices: 1
@@ -182,7 +205,7 @@ steps:
 
 - label: LM Eval Humming f16 (H100 - TEMPORARY)
   key: lm-eval-humming-f16-h100
-  timeout_in_minutes: 120
+  timeout_in_minutes: 70
   device: h100
   optional: true
   num_devices: 1
@@ -197,7 +220,7 @@ steps:
 
 - label: LM Eval Humming Act fp8/int8 (H100 - TEMPORARY)
   key: lm-eval-humming-act-h100
-  timeout_in_minutes: 120
+  timeout_in_minutes: 70
   device: h100
   optional: true
   num_devices: 1
@@ -213,7 +236,7 @@ steps:
 
 - label: LM Eval Humming f16 (B200 - TEMPORARY)
   key: lm-eval-humming-f16-b200
-  timeout_in_minutes: 120
+  timeout_in_minutes: 50
   device: b200-k8s
   optional: true
   num_devices: 1
@@ -228,7 +251,7 @@ steps:
 
 - label: LM Eval Humming Act fp8/int8 (B200 - TEMPORARY)
   key: lm-eval-humming-act-b200
-  timeout_in_minutes: 120
+  timeout_in_minutes: 50
   device: b200-k8s
   optional: true
   num_devices: 1
@@ -244,7 +267,7 @@ steps:
 
 - label: LM Eval TurboQuant KV Cache
   key: lm-eval-turboquant-kv-cache
-  timeout_in_minutes: 75
+  timeout_in_minutes: 55
   device: h200_18gb
   source_file_dependencies:
   - vllm/model_executor/layers/quantization/turboquant/
@@ -256,7 +279,7 @@ steps:
 
 - label: GPQA Eval (GPT-OSS) (2xH100)
   key: gpqa-eval-gpt-oss-2xh100
-  timeout_in_minutes: 120
+  timeout_in_minutes: 35
   device: h100
   optional: true
   num_devices: 2
@@ -270,7 +293,7 @@ steps:
 
 - label: GPQA Eval (GPT-OSS) (2xB200)
   key: gpqa-eval-gpt-oss-2xb200
-  timeout_in_minutes: 120
+  timeout_in_minutes: 30
   device: b200-k8s
   optional: true
   num_devices: 2
@@ -284,7 +307,7 @@ steps:
 
 - label: GPQA Eval (GPT-OSS) (DGX Spark)
   key: gpqa-eval-gpt-oss-spark
-  timeout_in_minutes: 120
+  timeout_in_minutes: 35
   device: dgx-spark
   optional: true
   num_devices: 1
@@ -298,9 +321,50 @@ steps:
     - uv pip install --system 'gpt-oss[eval]==0.0.5'
     - pytest -s -v evals/gpt_oss/test_gpqa_correctness.py --config-list-file=configs/models-spark.txt
 
+- label: LM Eval KV-Offload (1xH200)
+  key: kv-offload-small
+  timeout_in_minutes: 30
+  device: h200_35gb
+  source_file_dependencies:
+  - vllm/distributed/kv_transfer/kv_connector/v1/offloading/
+  - vllm/distributed/kv_transfer/kv_connector/v1/simple_cpu_offload_connector.py
+  - vllm/v1/kv_offload/
+  - vllm/v1/simple_kv_offload/
+  - tests/evals/gsm8k/test_gsm8k_offloading.py
+  commands:
+  - pytest -s -v evals/gsm8k/test_gsm8k_offloading.py -k "nemotron-h-8b or gemma-4-e4b-it"
+
+- label: LM Eval KV-Offload (2xH100)
+  key: kv-offload-medium
+  timeout_in_minutes: 30
+  device: h100
+  num_devices: 2
+  source_file_dependencies:
+  - vllm/distributed/kv_transfer/kv_connector/v1/offloading/
+  - vllm/distributed/kv_transfer/kv_connector/v1/simple_cpu_offload_connector.py
+  - vllm/v1/kv_offload/
+  - vllm/v1/simple_kv_offload/
+  - tests/evals/gsm8k/test_gsm8k_offloading.py
+  commands:
+  - pytest -s -v evals/gsm8k/test_gsm8k_offloading.py -k "qwen3.5-35b"
+
+- label: LM Eval KV-Offload (4xH100)
+  key: kv-offload-large
+  timeout_in_minutes: 40
+  device: h100
+  num_devices: 4
+  source_file_dependencies:
+  - vllm/distributed/kv_transfer/kv_connector/v1/offloading/
+  - vllm/distributed/kv_transfer/kv_connector/v1/simple_cpu_offload_connector.py
+  - vllm/v1/kv_offload/
+  - vllm/v1/simple_kv_offload/
+  - tests/evals/gsm8k/test_gsm8k_offloading.py
+  commands:
+  - pytest -s -v evals/gsm8k/test_gsm8k_offloading.py -k "deepseek-v4-flash"
+
 - label: MRCR Eval Small Models
   device: h200_35gb
-  timeout_in_minutes: 30
+  timeout_in_minutes: 25
   source_file_dependencies:
   - tests/evals/mrcr/
   commands:

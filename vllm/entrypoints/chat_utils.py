@@ -3,6 +3,7 @@
 
 import asyncio
 import json
+import types
 from abc import ABC, abstractmethod
 from collections import Counter, defaultdict
 from collections.abc import Awaitable, Callable, Iterable
@@ -10,7 +11,19 @@ from dataclasses import dataclass
 from functools import cached_property, lru_cache, partial
 from itertools import accumulate
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Final, Generic, Literal, TypeAlias, TypeVar, cast
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Final,
+    Generic,
+    Literal,
+    TypeAlias,
+    TypeVar,
+    Union,
+    cast,
+    get_args,
+    get_origin,
+)
 
 from openai.types.chat import (
     ChatCompletionAssistantMessageParam,
@@ -821,10 +834,19 @@ class AsyncMultiModalItemTracker(BaseMultiModalItemTracker[_AsyncMultiModalItem]
         if not self._items_by_modality:
             return None, None
 
-        resolved_items_by_modality = {
-            modality: await asyncio.gather(*(item() for item in items))
-            for modality, items in self._items_by_modality.items()
-        }
+        resolved_items_by_modality: dict[str, list[Any]] = {}
+        for modality, items in self._items_by_modality.items():
+            results = await asyncio.gather(
+                *(item() for item in items), return_exceptions=True
+            )
+            for result in results:
+                if isinstance(result, BaseException):
+                    # Gathering with return_exceptions=True lets every task in
+                    # this modality finish (or itself fail) before we raise,
+                    # instead of abandoning still-in-flight fetches (real
+                    # network/thread-pool work) the moment the first one fails.
+                    raise result
+            resolved_items_by_modality[modality] = results
 
         mm_processor = (
             self.mm_processor if self._model_config.is_multimodal_model else None
@@ -1451,6 +1473,25 @@ MM_PARSER_MAP: dict[
 }
 
 
+def _collect_known_content_part_fields() -> frozenset[str]:
+    fields: set[str] = set()
+    stack: list[Any] = [ChatCompletionContentPartParam]
+    while stack:
+        node = stack.pop()
+        if get_origin(node) in (Union, types.UnionType):
+            stack.extend(get_args(node))
+        elif hasattr(node, "__required_keys__"):
+            fields |= node.__required_keys__ | node.__optional_keys__
+    return frozenset(fields)
+
+
+_KNOWN_CONTENT_PART_FIELDS = _collect_known_content_part_fields()
+
+
+def _collect_extra_fields(part: dict[str, Any]) -> dict[str, Any]:
+    return {k: v for k, v in part.items() if k not in _KNOWN_CONTENT_PART_FIELDS}
+
+
 def _parse_chat_message_content_mm_part(
     part: ChatCompletionContentPartParam,
 ) -> tuple[str, _ContentPart]:
@@ -1660,7 +1701,9 @@ def _parse_chat_message_content_part(
         str_content = cast(str, content)
         _reject_reserved_placeholder_in_text(str_content, mm_parser.model_config)
         if wrap_dicts:
-            return {"type": "text", "text": str_content}
+            result: dict[str, Any] = {"type": "text", "text": str_content}
+            result.update(_collect_extra_fields(cast(dict[str, Any], part)))
+            return result
         else:
             return str_content
 
@@ -1725,7 +1768,9 @@ def _parse_chat_message_content_part(
             # emit the single sentinel token as text so the template renders
             # it inline. The renderer later expands it to N tokens post-tokenize.
             return {"type": "text", "text": PROMPT_EMBEDS_PLACEHOLDER_TOKEN}
-        return {"type": modality}
+        result = {"type": modality}
+        result.update(_collect_extra_fields(cast(dict[str, Any], part)))
+        return result
     if modality == "prompt_embeds":
         # Emit the renderer token inline regardless of `interleave_strings`,
         # prompt_embeds are spliced at the token offset so position matters.

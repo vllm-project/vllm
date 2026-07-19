@@ -32,7 +32,11 @@ from vllm.entrypoints.speech_to_text.transcription.protocol import Transcription
 from vllm.entrypoints.speech_to_text.transcription.serving import (
     OpenAIServingTranscription,
 )
-from vllm.model_executor.models.interfaces import SupportsTranscription
+from vllm.model_executor.models.interfaces import (
+    StreamingTranscriptionPostProcessor,
+    SupportsTranscription,
+)
+from vllm.model_executor.models.qwen3_asr import Qwen3ASRForConditionalGeneration
 from vllm.outputs import CompletionOutput, RequestOutput
 
 # --- Unit: helper + protocol -------------------------------------------------
@@ -56,6 +60,63 @@ def test_default_no_space_languages_includes_zh_and_ja():
 def test_asr_inter_chunk_separator_matches_protocol(language, expected_sep):
     sep = asr_inter_chunk_separator(language, SupportsTranscription.no_space_languages)
     assert sep == expected_sep
+
+
+def test_qwen3_asr_stream_processor_passes_plain_text_without_prefix():
+    post_processor = (
+        Qwen3ASRForConditionalGeneration.get_streaming_post_processor_cls()()
+    )
+
+    assert post_processor.process_delta("Hello", False) == "Hello"
+    assert post_processor.process_delta(" world", True) == " world"
+
+
+def test_qwen3_asr_stream_processor_buffers_prefix_with_leading_space():
+    post_processor = (
+        Qwen3ASRForConditionalGeneration.get_streaming_post_processor_cls()()
+    )
+
+    assert post_processor.process_delta(" language Eng", False) == ""
+    assert post_processor.process_delta("lish<asr", False) == ""
+    assert post_processor.process_delta("_text>Hello", True) == "Hello"
+
+
+def test_qwen3_asr_stream_processor_keeps_independent_state():
+    processor_cls = Qwen3ASRForConditionalGeneration.get_streaming_post_processor_cls()
+    first_processor = processor_cls()
+    second_processor = processor_cls()
+
+    assert first_processor.process_delta(" language Eng", False) == ""
+    assert second_processor.process_delta("plain text", True) == "plain text"
+    assert first_processor.process_delta("lish<asr_text>Hello", True) == "Hello"
+
+
+def test_qwen3_asr_stream_processor_emits_finished_incomplete_prefix():
+    post_processor = (
+        Qwen3ASRForConditionalGeneration.get_streaming_post_processor_cls()()
+    )
+
+    assert (
+        post_processor.process_delta(" language English", True) == " language English"
+    )
+
+
+def test_qwen3_asr_stream_processor_stops_buffering_long_plain_prefix():
+    post_processor = (
+        Qwen3ASRForConditionalGeneration.get_streaming_post_processor_cls()()
+    )
+    text = " language " + ("x" * 50)
+
+    assert post_processor.process_delta(text, False) == text
+
+
+def test_qwen3_asr_stream_processor_stops_buffering_prefix_with_newline():
+    post_processor = (
+        Qwen3ASRForConditionalGeneration.get_streaming_post_processor_cls()()
+    )
+    text = " language English\nhello"
+
+    assert post_processor.process_delta(text, False) == text
 
 
 def test_joined_chunks_english_has_space_between():
@@ -90,8 +151,14 @@ class _StubTranscriptionModel:
     def post_process_output(cls, text: str) -> str:
         return text
 
+    @classmethod
+    def get_streaming_post_processor_cls(
+        cls,
+    ) -> type[StreamingTranscriptionPostProcessor]:
+        return StreamingTranscriptionPostProcessor
 
-def _request_output(text: str) -> RequestOutput:
+
+def _request_output(text: str, finish_reason: str | None = "stop") -> RequestOutput:
     return RequestOutput(
         request_id="rid",
         prompt=None,
@@ -104,7 +171,7 @@ def _request_output(text: str) -> RequestOutput:
                 token_ids=(1, 2, 3),
                 cumulative_logprob=None,
                 logprobs=None,
-                finish_reason="stop",
+                finish_reason=finish_reason,
             )
         ],
         finished=True,
@@ -141,6 +208,9 @@ async def test_transcription_stream_generator_english_inserts_space_between_chun
     serving = OpenAIServingTranscription.__new__(OpenAIServingTranscription)
     serving.enable_force_include_usage = False
     serving.model_cls = _StubTranscriptionModel
+    serving.streaming_post_processor_cls = (
+        _StubTranscriptionModel.get_streaming_post_processor_cls()
+    )
     serving.task_type = "transcribe"
     request = SimpleNamespace(
         model="stub-model",
@@ -178,6 +248,9 @@ async def test_transcription_stream_generator_chinese_no_space_between_chunks():
     serving = OpenAIServingTranscription.__new__(OpenAIServingTranscription)
     serving.enable_force_include_usage = False
     serving.model_cls = _StubTranscriptionModel
+    serving.streaming_post_processor_cls = (
+        _StubTranscriptionModel.get_streaming_post_processor_cls()
+    )
     serving.task_type = "transcribe"
     request = SimpleNamespace(
         model="stub-model",
@@ -201,6 +274,48 @@ async def test_transcription_stream_generator_chinese_no_space_between_chunks():
         out_lines.append(line)
     combined = "".join(_sse_delta_contents("".join(out_lines)))
     assert combined == "你好世界"
+
+
+@pytest.mark.asyncio
+async def test_transcription_stream_generator_strips_qwen3_asr_prefix_per_chunk():
+    async def gen_hello() -> AsyncGenerator[RequestOutput, None]:
+        yield _request_output("language Eng", finish_reason=None)
+        yield _request_output("lish<asr", finish_reason=None)
+        yield _request_output("_text>Hello", finish_reason=None)
+        yield _request_output("")
+
+    async def gen_world() -> AsyncGenerator[RequestOutput, None]:
+        yield _request_output(" language Eng", finish_reason=None)
+        yield _request_output("lish<asr_text>world")
+
+    serving = OpenAIServingTranscription.__new__(OpenAIServingTranscription)
+    serving.enable_force_include_usage = False
+    serving.model_cls = Qwen3ASRForConditionalGeneration
+    serving.streaming_post_processor_cls = (
+        Qwen3ASRForConditionalGeneration.get_streaming_post_processor_cls()
+    )
+    serving.task_type = "transcribe"
+    request = SimpleNamespace(
+        model="stub-qwen3-asr",
+        stream_include_usage=False,
+        stream_continuous_usage_stats=False,
+    )
+
+    out_lines: list[str] = []
+    agen = OpenAIServingTranscription.transcription_stream_generator(
+        serving,
+        request=request,
+        result_generator=[gen_hello(), gen_world()],
+        request_id="test-qwen3-asr",
+        request_metadata=RequestResponseMetadata(request_id="test-qwen3-asr"),
+        audio_duration_s=1.0,
+        separator=" ",
+    )
+    async for line in agen:
+        out_lines.append(line)
+
+    combined = "".join(_sse_delta_contents("".join(out_lines)))
+    assert combined == "Hello world"
 
 
 @pytest.mark.asyncio

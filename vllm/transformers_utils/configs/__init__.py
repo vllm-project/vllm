@@ -28,6 +28,10 @@ _CLASS_TO_MODULE: dict[str, str] = {
     "OpsColQwen3Config": "vllm.transformers_utils.configs.colqwen3",
     "Qwen3VLNemotronEmbedConfig": "vllm.transformers_utils.configs.colqwen3",
     "Cosmos3Config": "vllm.transformers_utils.configs.cosmos3",
+    "Cosmos3EdgeConfig": "vllm.transformers_utils.configs.cosmos3_edge",
+    "Cosmos3EdgeProjectorConfig": "vllm.transformers_utils.configs.cosmos3_edge",
+    "Cosmos3EdgeTextConfig": "vllm.transformers_utils.configs.cosmos3_edge",
+    "Cosmos3EdgeVisionConfig": "vllm.transformers_utils.configs.cosmos3_edge",
     "DiffusionGemmaConfig": "vllm.transformers_utils.configs.diffusion_gemma",
     "DiffusionGemmaTextConfig": "vllm.transformers_utils.configs.diffusion_gemma",
     "DeepseekVLV2Config": "vllm.transformers_utils.configs.deepseek_vl2",
@@ -62,6 +66,9 @@ _CLASS_TO_MODULE: dict[str, str] = {
     "Moondream3Config": "vllm.transformers_utils.configs.moondream3",
     "Moondream3TextConfig": "vllm.transformers_utils.configs.moondream3",
     "Moondream3VisionConfig": "vllm.transformers_utils.configs.moondream3",
+    "MossTranscribeDiarizeConfig": (
+        "vllm.transformers_utils.configs.moss_transcribe_diarize"
+    ),
     "MoonViTConfig": "vllm.transformers_utils.configs.moonvit",
     "KimiLinearConfig": "vllm.transformers_utils.configs.kimi_linear",
     "KimiVLConfig": "vllm.transformers_utils.configs.kimi_vl",
@@ -88,6 +95,10 @@ _CLASS_TO_MODULE: dict[str, str] = {
     "Qwen3_5TextConfig": "vllm.transformers_utils.configs.qwen3_5",
     "Qwen3_5MoeConfig": "vllm.transformers_utils.configs.qwen3_5_moe",
     "Qwen3_5MoeTextConfig": "vllm.transformers_utils.configs.qwen3_5_moe",
+    "InklingModelConfig": "vllm.models.inkling.configs",
+    "InklingAudioConfig": "vllm.models.inkling.configs",
+    "InklingVisionConfig": "vllm.models.inkling.configs",
+    "InklingMMConfig": "vllm.models.inkling.configs",
     # Special case: DeepseekV3Config is from HuggingFace Transformers
     "DeepseekV3Config": "transformers",
 }
@@ -106,6 +117,10 @@ __all__ = [
     "OpsColQwen3Config",
     "Qwen3VLNemotronEmbedConfig",
     "Cosmos3Config",
+    "Cosmos3EdgeConfig",
+    "Cosmos3EdgeProjectorConfig",
+    "Cosmos3EdgeTextConfig",
+    "Cosmos3EdgeVisionConfig",
     "DiffusionGemmaConfig",
     "DiffusionGemmaTextConfig",
     "DeepseekVLV2Config",
@@ -138,6 +153,7 @@ __all__ = [
     "Moondream3Config",
     "Moondream3TextConfig",
     "Moondream3VisionConfig",
+    "MossTranscribeDiarizeConfig",
     "MoonViTConfig",
     "KimiLinearConfig",
     "KimiVLConfig",
@@ -164,6 +180,10 @@ __all__ = [
     "Qwen3_5TextConfig",
     "Qwen3_5MoeConfig",
     "Qwen3_5MoeTextConfig",
+    "InklingModelConfig",
+    "InklingAudioConfig",
+    "InklingVisionConfig",
+    "InklingMMConfig",
 ]
 
 
