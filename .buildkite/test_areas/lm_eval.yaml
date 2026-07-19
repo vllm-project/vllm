@@ -78,6 +78,28 @@ steps:
   commands:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-small-tp.txt
 
+- label: LM Eval PCP (4xB200)
+  key: lm-eval-pcp-4xb200
+  timeout_in_minutes: 360
+  device: b200-k8s
+  num_devices: 4
+  optional: true
+  source_file_dependencies:
+  - csrc/
+  - tests/evals/gsm8k/configs/GLM-5.2-NVFP4-TP2-PCP2-EP.yaml
+  - tests/evals/gsm8k/configs/GLM-5.2-NVFP4-TP1-PCP4-EP.yaml
+  - tests/evals/gsm8k/configs/models-pcp.txt
+  - vllm/model_executor/layers/quantization
+  - vllm/config/parallel.py
+  - vllm/distributed/parallel_state.py
+  - vllm/model_executor/layers/attention/mla_attention.py
+  - vllm/model_executor/layers/attention/pcp.py
+  - vllm/v1/worker/gpu/model_runner.py
+  - vllm/v1/worker/gpu/pcp_manager.py
+  autorun_on_main: true
+  commands:
+  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-pcp.txt
+
 - label: LM Eval Large Models EP (2xB200)
   key: lm-eval-large-models-ep-2xb200
   timeout_in_minutes: 60
