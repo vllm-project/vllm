@@ -340,11 +340,13 @@ class Scheduler(SchedulerInterface):
 
     def _validate_routed_experts_offload(
         self, kv_cache_config: KVCacheConfig
-    ) -> tuple[int, int]:
+    ) -> tuple[int | None, int]:
         """Validate the KV connector for offloaded routed experts.
 
         The CPU OffloadingConnector stores/loads routing rows on the
-        scheduler side, following the KV blocks' offload transfer jobs.
+        scheduler side, following the KV blocks' offload transfer jobs. NIXL
+        P/D keeps routing local to each engine; the deployment router must
+        splice the prefill and decode routing rows.
 
         Returns:
             The number of offload blocks and the block-size factor.
@@ -356,6 +358,19 @@ class Scheduler(SchedulerInterface):
             OffloadingConnector,
         )
         from vllm.v1.kv_offload.cpu.spec import CPUOffloadingSpec
+
+        kv_transfer_config = self.vllm_config.kv_transfer_config
+        assert kv_transfer_config is not None
+        if kv_transfer_config.kv_connector in (
+            "NixlConnector",
+            "NixlPullConnector",
+            "NixlPushConnector",
+        ):
+            logger.warning(
+                "Routed-experts capture with NIXL P/D requires the router "
+                "to merge prefill routing rows with decode routing rows."
+            )
+            return None, 1
 
         if not isinstance(self.connector, OffloadingConnector):
             raise ValueError(
@@ -383,6 +398,15 @@ class Scheduler(SchedulerInterface):
             connector_scheduler.spec.num_blocks,
             connector_scheduler.config.block_size_factor,
         )
+
+    def _apply_routed_experts_offload_transfers(
+        self, metadata: KVConnectorMetadata | None
+    ) -> None:
+        manager = self.routed_experts_manager
+        if manager.routed_experts_by_offload_block is None:
+            return
+        assert metadata is not None
+        manager.apply_offload_transfers(metadata)
 
     def _mamba_block_aligned_split(
         self,
@@ -1572,7 +1596,7 @@ class Scheduler(SchedulerInterface):
                 offset += num_scheduled_tokens[request_id]
 
         if self.enable_return_routed_experts and self.connector is not None:
-            self.routed_experts_manager.apply_offload_transfers(
+            self._apply_routed_experts_offload_transfers(
                 scheduler_output.kv_connector_metadata
             )
 

@@ -281,3 +281,29 @@ def test_routed_experts_capturer_dp_unexpected_batch_raises():
     ):
         capturer.capture(layer_id=0, topk_ids=topk_ids)
     assert capturer.device_buffer[0, 0, 0].item() == -1
+
+
+def test_scheduler_accepts_nixl_without_routing_offload_buffer():
+    from vllm.v1.core.sched.scheduler import Scheduler
+
+    scheduler = Scheduler.__new__(Scheduler)
+    scheduler.vllm_config = SimpleNamespace(
+        kv_transfer_config=SimpleNamespace(kv_connector="NixlConnector")
+    )
+    scheduler.connector = Mock()
+
+    assert scheduler._validate_routed_experts_offload(Mock()) == (None, 1)
+
+
+def test_scheduler_skips_offload_transfers_without_offload_buffer():
+    from vllm.v1.core.sched.scheduler import Scheduler
+
+    scheduler = Scheduler.__new__(Scheduler)
+    scheduler.routed_experts_manager = SimpleNamespace(
+        routed_experts_by_offload_block=None,
+        apply_offload_transfers=Mock(),
+    )
+
+    scheduler._apply_routed_experts_offload_transfers(Mock())
+
+    scheduler.routed_experts_manager.apply_offload_transfers.assert_not_called()
