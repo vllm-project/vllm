@@ -32,8 +32,6 @@ logger = init_logger(__name__)
 
 
 class BlockHashToBlockMap:
-    """映射表"""
-
     """
     Cache of blocks that are used for prefix caching. It caches blocks
     from hash directly to a block or multiple blocks
@@ -142,17 +140,11 @@ class BlockHashToBlockMap:
     def __iter__(self) -> Iterator[BlockHashWithGroupId]:
         return iter(self._cache)
 
-    def keys(self) -> list[BlockHashWithGroupId]:
-        """Return all cached block hash keys."""
-        return list(self._cache.keys())
-
     def _unexpected_blocks_type(self, blocks: Any) -> None:
         raise AssertionError(f"Invalid KV cache block type {type(blocks)}")
 
 
 class BlockPool:
-    """管理池"""
-
     """BlockPool that manages KVCacheBlocks.
     It provides methods to allocate, free and cache the kv cache blocks. The
     free_block_queue stores the free blocks in eviction order to enable
@@ -193,7 +185,6 @@ class BlockPool:
         self.free_block_queue = FreeKVCacheBlockQueue(self.blocks)
 
         # Cache for block lookup
-        # cached_block_hash_to_blocks就是一个映射表
         self.cached_block_hash_to_block: BlockHashToBlockMap = BlockHashToBlockMap()
         self.cached_block_hashes_by_block: dict[int, set[BlockHashWithGroupId]] = {}
 
@@ -652,7 +643,7 @@ class BlockPool:
         if prepend:
             self.free_block_queue.prependleft_n(blocks_without_hash + blocks_with_hash)
         else:
-            # Blocks without hash always get evicted first - prepend them last to the tail
+            # Blocks without a hash are evicted first, so prepend them last.
             self.free_block_queue.prepend_n(blocks_without_hash)
             self.free_block_queue.append_n(blocks_with_hash)
 

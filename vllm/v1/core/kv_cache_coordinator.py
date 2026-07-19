@@ -5,7 +5,7 @@ from collections.abc import Sequence
 from typing import NamedTuple
 
 from vllm import envs
-from vllm.distributed.prefix_scheduler import PrefixCacheSingleNode
+from vllm.distributed.prefix_scheduler import PrefixCacheSnapshot
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import (
@@ -364,12 +364,11 @@ class KVCacheCoordinator(ABC):
             for manager in self.single_type_managers
         )
 
-    # 从局部vllm节点获取信息提供给全局
     def get_prefix_cache_local(
         self, node_id: str, data_parallel_rank: int | None = None
-    ) -> PrefixCacheSingleNode:
+    ) -> PrefixCacheSnapshot:
         """Export the node-local prefix-cache state for global routing."""
-        return PrefixCacheSingleNode(
+        return PrefixCacheSnapshot(
             node_id=node_id,
             data_parallel_rank=data_parallel_rank,
             hash_block_size=self.block_pool.hash_block_size,

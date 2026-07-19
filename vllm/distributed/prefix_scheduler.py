@@ -53,10 +53,6 @@ class PrefixCacheSnapshot:
     data_parallel_rank: int | None = None
 
 
-# Backward-compatible alias for earlier local code that used this name.
-PrefixCacheSingleNode = PrefixCacheSnapshot
-
-
 @dataclass
 class NodePrefixCacheState:
     """Prefix-cache index for one vLLM node."""
@@ -84,10 +80,6 @@ class NodePrefixCacheState:
                 },
             ),
         )
-
-    @classmethod
-    def from_singleNode(cls, snapshot: PrefixCacheSnapshot) -> "NodePrefixCacheState":
-        return cls.from_snapshot(snapshot)
 
     def apply_snapshot(self, snapshot: PrefixCacheSnapshot) -> None:
         if snapshot.node_id != self.node_id:
@@ -217,9 +209,6 @@ class GlobalPrefixScheduler:
             self._nodes[snapshot.node_id] = NodePrefixCacheState.from_snapshot(snapshot)
         else:
             state.apply_snapshot(snapshot)
-
-    def update_singleNode(self, snapshot: PrefixCacheSnapshot) -> None:
-        self.update_snapshot(snapshot)
 
     def apply_events(self, node_id: str, events: Iterable[KVCacheEvent]) -> None:
         self._nodes[node_id].apply_events(events)

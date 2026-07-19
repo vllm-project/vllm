@@ -370,12 +370,12 @@ async def _forward_request(
     if scope.get("query_string"):
         url += "?" + scope["query_string"].decode("latin-1")
 
-    headers = {
-        key.decode("latin-1"): value.decode("latin-1")
+    headers = [
+        (key.decode("latin-1"), value.decode("latin-1"))
         for key, value in scope["headers"]
         if key.lower() not in (b"host", b"content-length")
-    }
-    headers[PREFIX_ROUTING_BYPASS_HEADER] = PREFIX_ROUTING_BYPASS_VALUE
+    ]
+    headers.append((PREFIX_ROUTING_BYPASS_HEADER, PREFIX_ROUTING_BYPASS_VALUE))
 
     timeout = aiohttp.ClientTimeout(total=request_timeout)
     try:
@@ -391,7 +391,8 @@ async def _forward_request(
             response_headers = [
                 (key.encode("latin-1"), value.encode("latin-1"))
                 for key, value in response.headers.items()
-                if key.lower() not in ("transfer-encoding", "content-encoding")
+                if key.lower()
+                not in ("transfer-encoding", "content-encoding", "content-length")
             ]
             await send(
                 {
