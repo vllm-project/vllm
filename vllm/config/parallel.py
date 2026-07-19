@@ -52,6 +52,7 @@ All2AllBackend = Literal[
     "flashinfer_nvlink_two_sided",
     "flashinfer_nvlink_one_sided",
 ]
+NcclEPActivationFormat = Literal["standard", "batched"]
 
 
 @config
@@ -194,6 +195,13 @@ class ParallelConfig:
     - "nixl_ep": Use nixl-ep kernels
     - "flashinfer_nvlink_two_sided": Use flashinfer two-sided kernels for mnnvl
     - "flashinfer_nvlink_one_sided": Use flashinfer high-throughput a2a kernels"""
+
+    nccl_ep_activation_format: NcclEPActivationFormat = "standard"
+    """Activation format used by the NCCL EP backend.
+
+    - "standard": Use the standard contiguous expert format
+    - "batched": Use the batched experts format
+    """
 
     max_parallel_loading_workers: int | None = Field(default=None, ge=1)
     """Maximum number of parallel loading workers when loading model
