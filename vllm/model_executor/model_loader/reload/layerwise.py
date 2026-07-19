@@ -180,16 +180,6 @@ def _get_runtime_weight_reload_mapping(
     return dict(mapping)
 
 
-def _is_identity_reload_mapping(
-    layer: torch.nn.Module,
-    mapping: dict[str, torch.nn.Parameter],
-) -> bool:
-    runtime_params, _ = get_reloadable_layer_tensors(layer)
-    return mapping.keys() == runtime_params.keys() and all(
-        mapping[name] is runtime_params[name] for name in mapping
-    )
-
-
 def _restore_loading_metadata(layer: torch.nn.Module, info: LayerReloadingInfo) -> None:
     restore_params, restore_buffers = info.restore_metadata
     runtime_params, runtime_buffers = get_layer_params_buffers(layer)
@@ -212,16 +202,13 @@ def _bind_runtime_weight_reload_mapping(
     layer: torch.nn.Module,
     info: LayerReloadingInfo,
     runtime_tensors: tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]],
-    mapping: dict[str, torch.nn.Parameter] | None = None,
+    mapping: dict[str, torch.nn.Parameter],
 ) -> bool:
-    if mapping is None:
-        mapping = _get_runtime_weight_reload_mapping(layer, info)
-    if mapping is None:
-        return False
-
     restore_params, restore_buffers = info.restore_metadata
     runtime_params, runtime_buffers = runtime_tensors
-    is_identity = _is_identity_reload_mapping(layer, mapping)
+    is_identity = mapping.keys() == runtime_params.keys() and all(
+        mapping[name] is runtime_params[name] for name in mapping
+    )
 
     if is_identity:
         if not _matching_tensor_layouts(restore_params, runtime_params):
