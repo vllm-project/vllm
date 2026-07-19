@@ -101,33 +101,17 @@ RUN cd vllm && \
     uv pip install --system -r requirements/build.txt && \
     uv pip install --system --no-build-isolation -e . -v
 
-# 内部 pretrain/transformers 分支 (编辑模式安装, 源码留在 /vllm-workspace/transformers).
-# 四个值都从 CI/CD Variables 通过 --build-arg 注入 (见 .gitlab-ci.yml base-image-build),
-# 不在 Dockerfile 里硬编码:
-#   TRANSFORMER_REPO_URL  仓库地址 (公开信息, 但为集中管理也走 CI 变量)
-#   TRANSFORMER_BRANCH    分支名
-#   TRANSFORMER_COMMIT    可选; 空则停在分支 HEAD
-#   GITLAB_TOKEN          带 read_repository 权限的 PAT (在 GitLab 里设 Masked + Protected)
-ARG TRANSFORMER_REPO_URL=
-ARG TRANSFORMER_BRANCH=
-ARG TRANSFORMER_COMMIT=
-ARG GITLAB_TOKEN=
+# 让 pip show/pip list 与 vllm.__version__ 直接显示构建来源, 而非 setuptools_scm 的
+# 0.0.0.dev0+... 格式。base 阶段写入 "base(<commit>)"; release 阶段(update) 会在其后
+# 追加 "-release(<commit>)"。只用 commit 不带分支: tag 流水线拿不到可靠分支名, 分支段
+# 反而会误导。直接改写已安装 dist-info 的 METADATA 与 vllm/_version.py, 不触发重编译。
+# 值由 .gitlab-ci.yml 经 --build-arg 注入 (base(${SHORT_SHA}))。
+ARG VLLM_VERSION_STAMP=
+RUN if [ -n "${VLLM_VERSION_STAMP}" ]; then python vllm/docker/stamp_vllm_version.py "${VLLM_VERSION_STAMP}"; \
+    else echo "VLLM_VERSION_STAMP 未设置, 保持 setuptools_scm 生成的版本"; fi
 
-# 引入 --no-deps 确保绝不触碰 vLLM 已对齐的底层依赖环境
-RUN set -eu; \
-    : "${TRANSFORMER_REPO_URL:?TRANSFORMER_REPO_URL is required (set in GitLab CI/CD Variables)}"; \
-    : "${TRANSFORMER_BRANCH:?TRANSFORMER_BRANCH is required (set in GitLab CI/CD Variables)}"; \
-    if [ -n "$GITLAB_TOKEN" ]; then \
-        tf_clone_url="https://oauth2:${GITLAB_TOKEN}@${TRANSFORMER_REPO_URL#https://}"; \
-    else \
-        tf_clone_url="$TRANSFORMER_REPO_URL"; \
-    fi; \
-    git clone "$tf_clone_url" transformers; \
-    unset tf_clone_url GITLAB_TOKEN; \
-    cd transformers; \
-    git checkout "$TRANSFORMER_BRANCH"; \
-    if [ -n "$TRANSFORMER_COMMIT" ]; then git checkout "$TRANSFORMER_COMMIT"; fi; \
-    uv pip install --system --no-build-isolation --no-deps -e .
+# 注: 内部 pretrain/transformers 已挪到 Dockerfile.update (与 lmcache 同层, 便于按需
+# 更新分支/commit 而不必重建 base)。base 内不再 clone 任何私有仓库, 故不需要 GITLAB_TOKEN。
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 额外推理加速 / 调试组件: py-spy, instanttensor, DeepGEMM, DeepEP(+pplx)
@@ -136,8 +120,8 @@ RUN set -eu; \
 # ─────────────────────────────────────────────────────────────────────────────
 
 # py-spy: 采样式 profiler, 线上抓 Python 调用栈排查卡顿/死锁
-# instanttensor: pip 直接安装
-RUN uv pip install --system --no-cache-dir py-spy instanttensor
+# instanttensor: pip 直接安装, 钉版 0.1.8
+RUN uv pip install --system --no-cache-dir py-spy instanttensor==0.1.8
 
 # deep* kernel 仅支持 Hopper/Blackwell, 编译 arch 覆盖为 9.0a/10.0a
 # (与官方 docker/Dockerfile 一致; base 默认的 "8.9 ..." 含 Ada, DeepEP 不支持)

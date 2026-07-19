@@ -41,14 +41,47 @@ WORKDIR /vllm-workspace/vllm
 # 编译产物完好保留
 COPY . .
 
+# 在 base 已有的 "base(<commit>)" 后追加 "-release(<commit>)", 最终版本形如
+#   base(5af21d57c)-release(149758942)
+# --append: 读当前已安装版本再拼接; base 不重装 vllm, 这里直接改写 dist-info 与
+# vllm/_version.py (不重编译)。值由 .gitlab-ci.yml 注入 (-release(${SHORT_SHA}))。
+ARG VLLM_VERSION_STAMP=
+RUN if [ -n "${VLLM_VERSION_STAMP}" ]; then python docker/stamp_vllm_version.py "${VLLM_VERSION_STAMP}" --append; \
+    else echo "VLLM_VERSION_STAMP 未设置, 保持 base 里的版本"; fi
+
+# 内部私有仓库克隆用的 token; transformers 与 lmcache 共用 (装完各自 scrub 掉 remote)
+ARG GITLAB_TOKEN=
+
+# 内部 pretrain/transformers 分支 (可编辑 --no-deps 安装, 源码在 /vllm-workspace/transformers)。
+# 与 lmcache 一样放在 update 层: 内部分支迭代频繁, 每次发版更新, 不必重建 base。
+# REPO_URL/BRANCH 必填 (无默认值, 空则报错); COMMIT 可选 (空则停在分支 HEAD)。
+# --no-deps 确保绝不触碰 vLLM 已对齐的底层依赖环境。
+ARG TRANSFORMER_REPO_URL
+ARG TRANSFORMER_BRANCH
+ARG TRANSFORMER_COMMIT=
+RUN set -e; \
+    : "${TRANSFORMER_REPO_URL:?TRANSFORMER_REPO_URL is required (set in GitLab CI/CD Variables)}"; \
+    : "${TRANSFORMER_BRANCH:?TRANSFORMER_BRANCH is required (set in GitLab CI/CD Variables)}"; \
+    if [ -n "${GITLAB_TOKEN:-}" ]; then \
+        tf_clone_url="https://oauth2:${GITLAB_TOKEN}@${TRANSFORMER_REPO_URL#https://}"; \
+    else \
+        tf_clone_url="$TRANSFORMER_REPO_URL"; \
+    fi; \
+    git clone "$tf_clone_url" /vllm-workspace/transformers; \
+    unset tf_clone_url; \
+    cd /vllm-workspace/transformers; \
+    git checkout "$TRANSFORMER_BRANCH"; \
+    if [ -n "${TRANSFORMER_COMMIT:-}" ]; then git checkout "$TRANSFORMER_COMMIT"; fi; \
+    git remote set-url origin "$TRANSFORMER_REPO_URL"; \
+    uv pip install --system --no-build-isolation --no-deps -e .
+
 # lmcache: 从内部 gitlab 仓库以可编辑形式安装 (源码在 /vllm-workspace/lmcache)。
 # 放在 update 层: lmcache 迭代频繁, 每次发版按需切 ref, 不必重建 base。
-# 仓库地址/分支/commit/token 全部由 CI/CD Variables 经 --build-arg 注入, 不设默认值:
+# 仓库地址/分支/commit 全部由 CI/CD Variables 经 --build-arg 注入, 不设默认值:
 #   LMCACHE_REPO_URL              必填, 留空报错
 #   LMCACHE_BRANCH/LMCACHE_COMMIT 至少配一个, 都空报错
 #   两个都配: 校验 commit 必须在 branch 上, 通过后以 commit 为准 (打印提示)
 # 装完把 token 从 git remote 抹掉, 不把凭据留在镜像的 .git/config 里。
-ARG GITLAB_TOKEN=
 ARG LMCACHE_REPO_URL
 ARG LMCACHE_BRANCH
 ARG LMCACHE_COMMIT

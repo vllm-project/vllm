@@ -25,17 +25,15 @@
 #   (凭据未配置时构建类 job 自动跳过; 若变量勾了 Protected, 需同时把
 #    unittest-*/base-*/release-* 加入 Protected tags, 否则 tag 流水线拿不到)
 #
-#   仅 base-image-build 需要 (内部 pretrain/transformers 从私有仓库 clone):
-#   TRANSFORMER_REPO_URL  仓库地址, 如 https://gitlab-cn-beijing.siflow.cn/pretrain/transformers.git
-#   TRANSFORMER_BRANCH    分支名, 如 feat_baseline
-#   TRANSFORMER_COMMIT    可选; 空则停在分支 HEAD (变量留空即可, 不要不建)
-#
-#   GITLAB_TOKEN          带 read_repository 的 PAT/deploy token (Masked, 建议 Protected);
-#                         base-image-build clone transformers、image-build clone lmcache 都要用
-#
-#   image-build (release/update) 需要 (从私有仓库 clone lmcache, 可编辑安装): Dockerfile 无默认值,
+#   image-build (release/update) 需要 (从私有仓库 clone transformers + lmcache, 可编辑安装):
+#   base-image-build 不再需要以下变量 (base 内不 clone 任何私有仓库)。Dockerfile 无默认值,
 #   未配置直接构建失败:
-#   LMCACHE_REPO_URL      仓库地址, 如 https://gitlab-cn-beijing.siflow.cn/inference/lmcache.git
+#   GITLAB_TOKEN          带 read_repository 的 PAT/deploy token (Masked, 建议 Protected);
+#                         image-build clone transformers 和 lmcache 都要用
+#   TRANSFORMER_REPO_URL  仓库地址, 如 https://gitlab-cn-beijing.siflow.cn/pretrain/transformers.git (必填)
+#   TRANSFORMER_BRANCH    分支名, 如 feat_baseline (必填)
+#   TRANSFORMER_COMMIT    可选; 空则停在分支 HEAD
+#   LMCACHE_REPO_URL      仓库地址, 如 https://gitlab-cn-beijing.siflow.cn/inference/lmcache.git (必填)
 #   LMCACHE_BRANCH        分支名 (如 develop)
 #   LMCACHE_COMMIT        commit hash
 #     LMCACHE_BRANCH / LMCACHE_COMMIT 至少配一个, 都空报错;
@@ -46,17 +44,28 @@
 #   BUILD_BASE_IMAGE    base 镜像构建的起点镜像 (需自带 torch+CUDA+nvcc)
 #   BASE_IMAGE_TAG      日常构建基于的 base 镜像 tag (默认 base-latest)
 #   CUDA_ARCH_LIST      base 构建的目标 GPU 架构
-#   SOURCE_BRANCH       镜像 tag 中的分支段 (tag 流水线拿不到分支名, 默认 develop)
+#   BUILD_IMAGE         手动触发镜像构建 (不打 tag): GitLab Build -> Pipelines -> Run pipeline,
+#                       选目标分支, 设 BUILD_IMAGE=base|release|unittest, 对应构建 job 会用该
+#                       分支代码构建 (设了它时 lint/unit-test 跳过)
 
 stages:
   - lint
   - unittest
   - build
 
+# 所有 job 默认可被新流水线抢占取消: 配合项目设置 "Auto-cancel redundant pipelines"
+# (Settings -> CI/CD -> General pipelines), rebase / 连续推送时旧的冗余流水线会自动取消,
+# 不再并行堆积。耗时的镜像构建 job 各自 override 成 interruptible: false, 避免手动/tag
+# 构建被一次无关推送误取消。
+default:
+  interruptible: true
+
 # 避免 push + MR 触发重复流水线: 有开着的 MR 时只跑 MR 流水线
 workflow:
   rules:
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    # 手动 Run pipeline (source=web) 始终放行, 即使该分支正开着 MR
+    - if: $CI_PIPELINE_SOURCE == "web"
     - if: $CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS
       when: never
     - if: $CI_COMMIT_BRANCH
@@ -68,9 +77,9 @@ variables:
   #   REGISTRY_HOST  = registry-cn-beijing.siflow.cn (末尾不带 /)
   #   REGISTRY_IMAGE = skyinfer/vllm (命名空间/镜像名, 不带 tag)
   # 三类镜像共用该仓库, 用 tag 前缀区分 (末尾 dev<流水线编号> 区分同日多次构建):
-  #   base-<分支>-<sha9>-<日期>-dev<IID>      完整编译的 base 镜像
-  #   release-<分支>-<sha9>-<日期>-dev<IID>   发版镜像
-  #   unittest-<分支>-<sha9>-<日期>-dev<IID>  单测依赖镜像
+  #   base-<sha9>-<日期>-dev<IID>      完整编译的 base 镜像
+  #   release-<sha9>-<日期>-dev<IID>   发版镜像
+  #   unittest-<sha9>-<日期>-dev<IID>  单测依赖镜像
   # 滑动 tag: base-latest / unittest-latest (release 不推滑动 tag, 每次用具体 tag)
   TEST_DEPS_IMAGE: ${REGISTRY_HOST}/${REGISTRY_IMAGE}:unittest-latest
   BASE_IMAGE_TAG: base-latest
@@ -83,9 +92,6 @@ variables:
   NVCC_THREADS: "8"
   # 目标 GPU 架构: 8.9=Ada, 9.0=Hopper, 10.0/12.0=Blackwell
   CUDA_ARCH_LIST: "8.9 9.0 10.0 12.0"
-  # tag 流水线里拿不到分支名(CI_COMMIT_BRANCH 为空), 镜像 tag 中的分支段用
-  # 此变量代替; 从非 develop 分支打 tag 时, 触发流水线时覆盖它
-  SOURCE_BRANCH: develop
   # CPU 可跑的单元测试子集 (iquest parser + 轻量顶层测试)
   # TODO: tests/reasoning/test_iquest_reasoning_parser.py tests/tool_parsers/test_iquest_coder_tool_parser.py
   UNIT_TEST_PATHS: >-
@@ -93,8 +99,10 @@ variables:
   # 国内访问 HuggingFace 的镜像 (parser 测试需要下载 Qwen tokenizer)
   HF_ENDPOINT: https://hf-mirror.com
 
-# 镜像 tag 规则: <类型>-<分支>-<commit前9位>-<日期>-dev<流水线编号>,
-#   如 base-develop-5da4717f4-20260706-dev45
+# 镜像 tag 规则: <类型>-<commit前9位>-<日期>-dev<流水线编号>,
+#   如 base-5da4717f4-20260706-dev45
+# 不带分支段: tag 流水线拿不到可靠分支名(CI_COMMIT_BRANCH 为空), 分支段会误导;
+# commit 号本身已唯一定位代码。
 # 类型由各 job 的 IMAGE_TYPE 变量给出; 日期取流水线创建时间,
 # 保证同一条流水线各 job 算出的 tag 一致。
 # dev<CI_PIPELINE_IID> 后缀: 项目级递增的流水线编号, 让同一天、同一 commit
@@ -102,9 +110,8 @@ variables:
 .export-image-tag: &export-image-tag
   - export SHORT_SHA=$(echo $CI_COMMIT_SHA | cut -c1-9)
   - export BUILD_DATE=$(echo $CI_PIPELINE_CREATED_AT | cut -c1-10 | tr -d '-')
-  - export REF_NAME=${CI_COMMIT_BRANCH:-${SOURCE_BRANCH}}
   - export BUILD_SUFFIX=dev${CI_PIPELINE_IID}
-  - export IMAGE_TAG=${IMAGE_TYPE:-release}-${REF_NAME}-${SHORT_SHA}-${BUILD_DATE}-${BUILD_SUFFIX}
+  - export IMAGE_TAG=${IMAGE_TYPE:-release}-${SHORT_SHA}-${BUILD_DATE}-${BUILD_SUFFIX}
   - echo "IMAGE_TAG = ${IMAGE_TAG}"
   - echo "REGISTRY_USER = ${REGISTRY_USER}"
   - echo "REGISTRY_PASSWORD = ${REGISTRY_PASSWORD}"
@@ -226,6 +233,9 @@ lint:
   timeout: 1h
   # 只在 push/MR 上跑; tag 事件不跑 (tag 只用于触发镜像构建)
   rules:
+    # 手动触发镜像构建 (BUILD_IMAGE 已设) 时不跑 lint/unit-test, 只出镜像
+    - if: $BUILD_IMAGE
+      when: never
     - if: $CI_COMMIT_TAG
       when: never
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
@@ -279,6 +289,9 @@ unit-test:
   timeout: 1h
   # 只在 push/MR 上跑; tag 事件不跑
   rules:
+    # 手动触发镜像构建 (BUILD_IMAGE 已设) 时不跑 lint/unit-test, 只出镜像
+    - if: $BUILD_IMAGE
+      when: never
     - if: $CI_COMMIT_TAG
       when: never
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
@@ -297,6 +310,7 @@ unit-test:
 # kaniko 完整编译 CUDA kernel, 数小时。csrc/CMake/torch 等变化时必须重建
 base-image-build:
   stage: build
+  interruptible: false   # 完整编译数小时, 不因新推送被自动取消
   extends: .feishu-notify
   tags:
     - iquest-inference-runner
@@ -321,10 +335,7 @@ base-image-build:
         --build-arg "nvcc_threads=${NVCC_THREADS}" \
         --build-arg "torch_cuda_arch_list=${CUDA_ARCH_LIST}" \
         --build-arg "VLLM_BUILD_VERSION=0.0.0.dev0+${SHORT_SHA}" \
-        --build-arg "TRANSFORMER_REPO_URL=${TRANSFORMER_REPO_URL}" \
-        --build-arg "TRANSFORMER_BRANCH=${TRANSFORMER_BRANCH}" \
-        --build-arg "TRANSFORMER_COMMIT=${TRANSFORMER_COMMIT}" \
-        --build-arg "GITLAB_TOKEN=${GITLAB_TOKEN}" \
+        --build-arg "VLLM_VERSION_STAMP=base(${SHORT_SHA})" \
         --destination "${REGISTRY_HOST}/${REGISTRY_IMAGE}:${IMAGE_TAG}" \
         --destination "${REGISTRY_HOST}/${REGISTRY_IMAGE}:base-latest" \
         --ignore-path=/workspace || KANIKO_EXIT=$?
@@ -338,12 +349,15 @@ base-image-build:
     - if: '$REGISTRY_USER == null || $REGISTRY_PASSWORD == null'
       when: never
     - if: $CI_COMMIT_TAG =~ /^base/
+    # 手动触发 (不打 tag): Run pipeline 时选目标分支并设 BUILD_IMAGE=base, 用该分支代码构建
+    - if: $BUILD_IMAGE == "base"
 
 # ─── unittest 依赖镜像 (低频, unittest* tag) ─────────────────────────────────
 # 重建单测依赖镜像 (unit-test job 的运行环境, 预装全部测试依赖)。
 # 仅 requirements/*.txt 变化时需要: 打 unittest* tag 触发
 unittest-image-build:
   stage: build
+  interruptible: false   # 重建单测依赖镜像较慢, 不因新推送被自动取消
   extends: .feishu-notify
   tags:
     - iquest-inference-runner
@@ -374,12 +388,15 @@ unittest-image-build:
     - if: '$REGISTRY_USER == null || $REGISTRY_PASSWORD == null'
       when: never
     - if: $CI_COMMIT_TAG =~ /^unittest/
+    # 手动触发: Run pipeline 时设 BUILD_IMAGE=unittest
+    - if: $BUILD_IMAGE == "unittest"
 
 # ─── image build (日常, 快速, release* tag) ──────────────────────────────────
 # kaniko 基于 base 镜像重新打包 Python 代码 (复用已编译 kernel), 分钟级,
 # 直接推 :release-<分支>-<sha>-<日期> tag; 无镜像内测试和发布晋升
 image-build:
   stage: build
+  interruptible: false   # 打包镜像不因新推送被自动取消
   extends: .feishu-notify
   tags:
     - iquest-inference-runner
@@ -408,7 +425,11 @@ image-build:
         --dockerfile "${CI_PROJECT_DIR}/docker/Dockerfile.update" \
         --build-arg "BASE_IMAGE=${REGISTRY_HOST}/${REGISTRY_IMAGE}:${BASE_IMAGE_TAG}" \
         --build-arg "VLLM_BUILD_VERSION=${VLLM_BUILD_VERSION}" \
+        --build-arg "VLLM_VERSION_STAMP=-release(${SHORT_SHA})" \
         --build-arg "GITLAB_TOKEN=${GITLAB_TOKEN}" \
+        --build-arg "TRANSFORMER_REPO_URL=${TRANSFORMER_REPO_URL}" \
+        --build-arg "TRANSFORMER_BRANCH=${TRANSFORMER_BRANCH}" \
+        --build-arg "TRANSFORMER_COMMIT=${TRANSFORMER_COMMIT}" \
         --build-arg "LMCACHE_REPO_URL=${LMCACHE_REPO_URL}" \
         --build-arg "LMCACHE_BRANCH=${LMCACHE_BRANCH}" \
         --build-arg "LMCACHE_COMMIT=${LMCACHE_COMMIT}" \
@@ -420,3 +441,5 @@ image-build:
     - if: '$REGISTRY_USER == null || $REGISTRY_PASSWORD == null'
       when: never
     - if: $CI_COMMIT_TAG =~ /^release/
+    # 手动触发: Run pipeline 时选目标分支并设 BUILD_IMAGE=release, 用该分支代码构建
+    - if: $BUILD_IMAGE == "release"
