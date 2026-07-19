@@ -62,10 +62,7 @@ from .interfaces import (
     SupportsMultiModal,
     SupportsPP,
 )
-from .utils import (
-    init_vllm_registered_model,
-    maybe_prefix,
-)
+from .utils import init_vllm_registered_model, maybe_prefix
 
 
 class AudioFlamingo3FeatureInputs(TensorSchema):
