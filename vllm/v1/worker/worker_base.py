@@ -103,7 +103,7 @@ class WorkerBase:
         """Get specifications for KV cache implementation."""
         raise NotImplementedError
 
-    def extend_kv_cache(self, num_blocks: int) -> None:
+    def extend_kv_cache(self, kv_cache_config: Any) -> None:
         raise RuntimeError(
             f"{self.__class__.__name__} does not support extensible KV cache."
         )
@@ -345,6 +345,12 @@ class WorkerWrapperBase:
                 )
             else:
                 self.worker.initialize_from_config(kv_cache_config)  # type: ignore
+
+    def extend_kv_cache(self, kv_cache_configs: list[Any]) -> None:
+        kv_cache_config = kv_cache_configs[self.global_rank]
+        assert self.vllm_config is not None
+        with set_current_vllm_config(self.vllm_config):
+            self.worker.extend_kv_cache(kv_cache_config)  # type: ignore
 
     def init_device(self):
         assert self.vllm_config is not None

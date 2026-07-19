@@ -616,3 +616,39 @@ def test_v2_extensible_release_and_recommit() -> None:
         assert torch.all(kv_cache[1, NUM_BLOCKS - 1] == 9)
     finally:
         buffers.free()
+
+
+def test_v2_narrow_kv_caches_to_num_blocks() -> None:
+    """Connector-registration views are trimmed to the committed block count
+    along each layout's block dim, keeping base pointers and strides (so the
+    K and V segment prefixes are addressed exactly)."""
+    from vllm.v1.worker.gpu.attn_utils import narrow_kv_caches_to_num_blocks
+
+    spec = _full_attention_spec()
+    kv_cache_config, attn_groups = _attention_config(spec, _SplitKVBackend)
+    kv_caches, buffers = _v2_allocate(kv_cache_config, attn_groups, [BLOCK_SIZE])
+    try:
+        committed = 16
+        buffers.commit(committed)
+        narrowed = narrow_kv_caches_to_num_blocks(
+            kv_caches,
+            [g for groups in attn_groups for g in groups],
+            [BLOCK_SIZE],
+            "auto",
+            committed,
+        )
+        full = kv_caches["layer.0"]
+        trimmed = narrowed["layer.0"]
+        assert trimmed.shape == (2, committed, BLOCK_SIZE, 8, 128)
+        assert trimmed.stride() == full.stride()
+        # K prefix starts at the buffer base; V prefix at the segment offset.
+        assert trimmed[0].data_ptr() == full[0].data_ptr()
+        assert trimmed[1].data_ptr() == full[1].data_ptr()
+        # The narrowed views cover only committed memory.
+        trimmed[0, committed - 1].fill_(1)
+        trimmed[1, committed - 1].fill_(2)
+        torch.cuda.synchronize()
+        assert torch.all(full[0, committed - 1] == 1)
+        assert torch.all(full[1, committed - 1] == 2)
+    finally:
+        buffers.free()
