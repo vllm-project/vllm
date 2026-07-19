@@ -108,6 +108,10 @@ class WorkerBase:
             f"{self.__class__.__name__} does not support extensible KV cache."
         )
 
+    def extensible_kv_cache_unsupported_reason(self) -> str | None:
+        """Return why this worker cannot use the extensible KV cache, or None."""
+        return f"not supported by {self.__class__.__name__}"
+
     def compile_or_warm_up_model(self) -> CompilationTimes:
         """Prepare model for execution through compilation/warmup.
 
