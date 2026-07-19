@@ -735,12 +735,9 @@ class Worker(WorkerBase):
         ensure_kv_transfer_initialized(self.vllm_config, kv_cache_config)
 
         with self._maybe_get_memory_pool_context(tag="kv_cache"):
-            if extensible:
-                # Only the V1 GPU model runner implements the extensible flow;
-                # keep the default call signature untouched otherwise.
-                self.model_runner.initialize_kv_cache(kv_cache_config, extensible=True)
-            else:
-                self.model_runner.initialize_kv_cache(kv_cache_config)
+            self.model_runner.initialize_kv_cache(
+                kv_cache_config, extensible=extensible
+            )
 
         if self.model_config.enable_return_routed_experts:
             self.model_runner.init_routed_experts_capturer()
@@ -898,6 +895,31 @@ class Worker(WorkerBase):
             else:
                 self.model_runner._dummy_sampler_run(hidden_states=last_hidden_states)
 
+        warmup_memory_bytes = cuda_graph_memory_bytes
+        if self.cache_config.enable_extensible_kv_cache and hasattr(
+            self, "available_kv_cache_memory_bytes"
+        ):
+            # With the extensible KV cache, only a small prefix of the KV cache
+            # is committed so far, so the current memory usage reflects
+            # everything else at its post-warmup state: weights, CUDA graphs,
+            # NCCL buffers, and the allocator segments retained from the
+            # worst-case warmup batches (which can far exceed the profiled
+            # activation peak, e.g. with speculative decoding). Report the
+            # measured excess over the profiling estimate so the final KV cache
+            # size is computed from actual usage.
+            torch.accelerator.synchronize()
+            free_memory, _ = torch.accelerator.get_memory_info()
+            non_kv_used_memory = (
+                self.init_snapshot.free_memory
+                - free_memory
+                - self.model_runner.kv_cache_committed_bytes
+            )
+            post_warmup_available = int(self.requested_memory) - non_kv_used_memory
+            warmup_memory_bytes = max(
+                cuda_graph_memory_bytes,
+                int(self.available_kv_cache_memory_bytes) - post_warmup_available,
+            )
+
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
         set_random_seed(self.model_config.seed)
@@ -933,7 +955,7 @@ class Worker(WorkerBase):
         return CompilationTimes(
             language_model=self.compilation_config.compilation_time,
             encoder=self.compilation_config.encoder_compilation_time,
-            cuda_graph=cuda_graph_memory_bytes,
+            warmup_memory=warmup_memory_bytes,
         )
 
     def reset_mm_cache(self) -> None:

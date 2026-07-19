@@ -408,7 +408,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def get_kv_cache_spec(self):
         return get_kv_cache_spec(self.vllm_config)
 
-    def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
+    def initialize_kv_cache(
+        self, kv_cache_config: KVCacheConfig, extensible: bool = False
+    ) -> None:
+        if getattr(self, "extensible_kv_buffers", None) is not None:
+            self.extensible_kv_buffers.free()
+        self.extensible_kv_buffers = None
         kv_cache_config = deepcopy(kv_cache_config)
         self.kv_cache_config = kv_cache_config
 
@@ -501,7 +506,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.speculator.init_cudagraph_manager(cudagraph_mode)
 
         self.kv_caches: list[torch.Tensor] = []
-        kv_caches_dict = init_kv_cache(
+        kv_caches_dict, self.extensible_kv_buffers = init_kv_cache(
             self.kv_caches,
             self.compilation_config.static_forward_context,
             self.kv_cache_config,
@@ -510,8 +515,41 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.cache_config.cache_dtype,
             self.kernel_block_sizes,
             self.vllm_config,
+            extensible=extensible,
         )
         self.kv_connector = get_kv_connector(self.vllm_config, kv_caches_dict)
+
+    def ensure_kv_cache_blocks(self, num_blocks: int) -> None:
+        """Commit at least `num_blocks` KV blocks when the extensible KV cache
+        is in use (no-op otherwise). Warmup paths call this before executing
+        batches that write to a prefix of real block IDs.
+        """
+        if self.extensible_kv_buffers is not None:
+            self.extensible_kv_buffers.commit(
+                min(num_blocks, self.extensible_kv_buffers.num_blocks_capacity)
+            )
+
+    def extend_kv_cache(self, num_blocks: int) -> None:
+        """Commit physical pages so the KV cache holds `num_blocks` blocks.
+
+        Grows the KV cache after warmup and CUDA graph capture, once the
+        actual available memory is known. No re-view is needed: the layers
+        already view the full reserved capacity and each block stays at a
+        fixed offset within its layout segment, so captured graphs stay valid
+        as more pages are mapped under the stable base pointer. Newly
+        committed blocks are zeroed.
+        """
+        if self.extensible_kv_buffers is None:
+            raise RuntimeError("extend_kv_cache requires an extensible KV cache.")
+        self.extensible_kv_buffers.commit(num_blocks)
+        self.kv_cache_config.num_blocks = num_blocks
+        logger.info("Extended KV cache to %d blocks.", num_blocks)
+
+    @property
+    def kv_cache_committed_bytes(self) -> int:
+        """Physically committed KV cache bytes (0 without extensible KV)."""
+        buffers = getattr(self, "extensible_kv_buffers", None)
+        return buffers.physical_bytes if buffers is not None else 0
 
     def _init_kv_zero_meta(self) -> None:
         """Build KV-block zeroing metadata; invoked from gpu_worker."""
@@ -1596,6 +1634,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.attn_groups.clear()
         if hasattr(self, "kv_cache_config"):
             del self.kv_cache_config
+        if getattr(self, "extensible_kv_buffers", None) is not None:
+            self.extensible_kv_buffers.free()
+            self.extensible_kv_buffers = None
         free_before_shutdown(self.vllm_config)
         if hasattr(self, "model_state"):
             del self.model_state

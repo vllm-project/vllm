@@ -7624,6 +7624,15 @@ class GPUModelRunner(
         self._extensible_kv_cache_committed_blocks = num_blocks
         logger.info("Extended KV cache to %d blocks.", num_blocks)
 
+    @property
+    def kv_cache_committed_bytes(self) -> int:
+        """Physically committed KV cache bytes (0 without extensible KV)."""
+        if not getattr(self, "_extensible_kv_cache_enabled", False):
+            return 0
+        return sum(
+            buffer.physical_bytes for buffer, _ in self._extensible_kv_cache_buffers
+        )
+
     def initialize_kv_cache_tensors(
         self,
         kv_cache_config: KVCacheConfig,

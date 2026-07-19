@@ -73,6 +73,10 @@ def run_mixed_prefill_decode_warmup(
         )
         return False
 
+    # With the extensible KV cache, only a prefix of the blocks is physically
+    # committed so far; commit the prefix this warmup writes to.
+    model_runner.ensure_kv_cache_blocks(1 + required_blocks)
+
     next_block_id = 1
 
     def _alloc_blocks(num_blocks: int) -> list[int]:
@@ -220,6 +224,10 @@ def warmup_kernels(
         # Reserve block 0 (null block) and ensure we have enough blocks.
         max(1, (model_runner.kv_cache_config.num_blocks - 1) // max_blocks_per_req),
     )
+
+    # With the extensible KV cache, only a prefix of the blocks is physically
+    # committed so far; commit the prefix this warmup writes to.
+    model_runner.ensure_kv_cache_blocks(1 + num_reqs * max_blocks_per_req)
 
     req_ids = [f"_warmup_{i}_" for i in range(num_reqs)]
 

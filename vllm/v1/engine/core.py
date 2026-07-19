@@ -91,7 +91,7 @@ logger = init_logger(__name__)
 
 
 HANDSHAKE_TIMEOUT_MINS = 5
-_CUDAGRAPH_MEMORY_BUFFER_BYTES = 150 * (1 << 20)
+_WARMUP_MEMORY_BUFFER_BYTES = 150 * (1 << 20)
 
 _R = TypeVar("_R")  # Return type for collective_rpc
 
@@ -308,6 +308,17 @@ class EngineCore:
                 raise ValueError(
                     "enable_extensible_kv_cache=True is only supported on CUDA."
                 )
+            if vllm_config.kv_transfer_config is not None:
+                raise ValueError(
+                    "enable_extensible_kv_cache=True is not supported with "
+                    "KV connectors: connectors register KV cache memory "
+                    "before the full physical size is committed."
+                )
+            if vllm_config.model_config.enable_sleep_mode:
+                raise ValueError(
+                    "enable_extensible_kv_cache=True is not supported with "
+                    "sleep mode: the KV cache bypasses the CuMem allocator."
+                )
 
         # Track max_model_len before KV cache config to detect auto-fit changes
         # made by get_kv_cache_configs().
@@ -322,8 +333,9 @@ class EngineCore:
         )
 
         # Initialize KV cache and warm up execution. With extensible KV cache,
-        # this reserves the upper-bound address range, commits one block, and
-        # captures CUDA graphs before committing the post-capture KV size.
+        # this reserves the upper-bound address range, commits only the block
+        # prefix warmup needs, and runs warmup / CUDA graph capture before the
+        # post-warmup KV size is committed.
         compilation_times = self.model_executor.initialize_from_config(
             kv_cache_configs,
             extensible=use_extensible_kv_cache,
@@ -339,8 +351,8 @@ class EngineCore:
             final_available_gpu_memory = [
                 max(
                     available_memory
-                    - times.cuda_graph
-                    - _CUDAGRAPH_MEMORY_BUFFER_BYTES,
+                    - times.warmup_memory
+                    - _WARMUP_MEMORY_BUFFER_BYTES,
                     0,
                 )
                 for available_memory, times in zip(

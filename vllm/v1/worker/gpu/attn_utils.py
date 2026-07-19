@@ -16,6 +16,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.multimodal.inputs import MultiModalFeatureSpec
+from vllm.utils.extensible_tensor import ExtensibleTensor
 from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.attention.backend import (
     AttentionCGSupport,
@@ -187,6 +188,15 @@ def _allocate_kv_cache(
         for layer_name in kv_cache_tensor.shared_by:
             kv_cache_raw_tensors[layer_name] = tensor
 
+    _check_layer_coverage(kv_cache_config, kv_cache_raw_tensors, shared_layers)
+    return kv_cache_raw_tensors
+
+
+def _check_layer_coverage(
+    kv_cache_config: KVCacheConfig,
+    kv_cache_raw_tensors: dict[str, torch.Tensor],
+    shared_layers: dict[str, str],
+) -> None:
     layer_names = set()
     for group in kv_cache_config.kv_cache_groups:
         for layer_name in group.layer_names:
@@ -194,7 +204,167 @@ def _allocate_kv_cache(
     assert layer_names == (kv_cache_raw_tensors.keys() | shared_layers.keys()), (
         "Some layers are not correctly initialized"
     )
-    return kv_cache_raw_tensors
+
+
+class ExtensibleKVCacheBuffers:
+    """Grow-only physical backing for the KV cache: one CUDA virtual-memory
+    buffer per KV cache tensor, committed as a per-segment prefix of blocks.
+
+    `commit` maps (and zeroes) physical pages for additional blocks while
+    keeping every buffer's base pointer, existing data, and the logical views
+    built over the full reserved capacity stable.
+    """
+
+    def __init__(
+        self,
+        buffers: list[tuple[ExtensibleTensor, int]],
+        num_blocks_capacity: int,
+    ) -> None:
+        self._buffers = buffers
+        self.num_blocks_capacity = num_blocks_capacity
+        self.num_blocks_committed = 0
+
+    def commit(self, num_blocks: int) -> None:
+        if num_blocks <= self.num_blocks_committed:
+            return
+        for buffer, bytes_per_block_per_segment in self._buffers:
+            # Zero only the freshly committed blocks; existing ones are left
+            # intact.
+            buffer.resize_per_segment_(
+                num_blocks * bytes_per_block_per_segment, zero_new=True
+            )
+        self.num_blocks_committed = num_blocks
+
+    @property
+    def physical_bytes(self) -> int:
+        return sum(buffer.physical_bytes for buffer, _ in self._buffers)
+
+    def free(self) -> None:
+        for buffer, _ in self._buffers:
+            buffer.free()
+        self._buffers = []
+        self.num_blocks_committed = 0
+
+
+def _kv_cache_num_segments_by_layer(
+    attn_groups: Sequence[AttentionGroup],
+    kernel_block_sizes: list[int],
+    cache_dtype: str,
+    has_mamba: bool,
+) -> dict[str, int]:
+    """Number of equal contiguous segments of each layer's KV cache buffer
+    under its physical layout -- the product of the physical dims preceding
+    the block dim. Within each segment, block `b` occupies bytes
+    `[b * S, (b + 1) * S)` where `S = bytes_per_block / num_segments`, so the
+    extensible KV cache can commit a per-segment prefix of blocks.
+    """
+    num_segments_by_layer: dict[str, int] = {}
+    for group in attn_groups:
+        if group.kv_cache_group_id >= len(kernel_block_sizes):
+            continue
+        kv_cache_spec = group.kv_cache_spec
+        if isinstance(kv_cache_spec, AttentionSpec) and not has_mamba:
+            if kv_cache_spec.storage_block_size != kv_cache_spec.block_size:
+                kernel_block_size = kv_cache_spec.storage_block_size
+            else:
+                kernel_block_size = kernel_block_sizes[group.kv_cache_group_id]
+            # Mirror the per-layer dtype selection of _reshape_kv_cache.
+            layer_cache_dtype = (
+                "auto"
+                if kv_cache_spec.kv_quant_mode == KVQuantMode.NONE
+                and not isinstance(kv_cache_spec, TQFullAttentionSpec)
+                else cache_dtype
+            )
+            block_dim = group.backend.get_kv_cache_block_dim(
+                kernel_block_size,
+                kv_cache_spec.num_kv_heads,
+                kv_cache_spec.head_size,
+                cache_dtype_str=layer_cache_dtype,
+            )
+            kv_cache_shape = group.backend.get_kv_cache_shape(
+                1,
+                kernel_block_size,
+                kv_cache_spec.num_kv_heads,
+                kv_cache_spec.head_size,
+                cache_dtype_str=layer_cache_dtype,
+            )
+            try:
+                stride_order = group.backend.get_kv_cache_stride_order()
+            except (AttributeError, NotImplementedError):
+                stride_order = tuple(range(len(kv_cache_shape)))
+            num_segments = prod(
+                kv_cache_shape[dim]
+                for dim in stride_order[: stride_order.index(block_dim)]
+            )
+        else:
+            # Mamba states are packed per block (block-major), and
+            # `_update_hybrid_attention_layout` re-strides attention caches of
+            # hybrid models to a block-major interleaved layout.
+            num_segments = 1
+        for layer_name in group.layer_names:
+            num_segments_by_layer[layer_name] = num_segments
+    return num_segments_by_layer
+
+
+def _allocate_extensible_kv_cache(
+    kv_cache_config: KVCacheConfig,
+    shared_layers: dict[str, str],
+    device: torch.device,
+    attn_groups: Sequence[AttentionGroup],
+    kernel_block_sizes: list[int],
+    cache_dtype: str,
+) -> tuple[dict[str, torch.Tensor], ExtensibleKVCacheBuffers]:
+    """Reserve virtual address space for the full KV cache capacity but commit
+    only one block per buffer. The returned raw tensors view the full capacity;
+    `ExtensibleKVCacheBuffers.commit` maps physical pages for more blocks.
+    """
+    num_blocks = kv_cache_config.num_blocks
+    if num_blocks <= 0:
+        raise ValueError(
+            "enable_extensible_kv_cache=True requires at least one KV block."
+        )
+    if any(t.block_stride > 0 for t in kv_cache_config.kv_cache_tensors):
+        raise ValueError(
+            "enable_extensible_kv_cache=True is not supported with packed "
+            "KV cache tensor layouts."
+        )
+
+    num_segments_by_layer = _kv_cache_num_segments_by_layer(
+        attn_groups,
+        kernel_block_sizes,
+        cache_dtype,
+        kv_cache_config.has_mamba_layers,
+    )
+    kv_cache_raw_tensors: dict[str, torch.Tensor] = {}
+    buffers: list[tuple[ExtensibleTensor, int]] = []
+    for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
+        bytes_per_block = kv_cache_tensor.size // num_blocks
+        assert bytes_per_block * num_blocks == kv_cache_tensor.size
+        segment_counts = {
+            num_segments_by_layer[layer_name]
+            for layer_name in kv_cache_tensor.shared_by
+            if layer_name in num_segments_by_layer
+        }
+        assert len(segment_counts) <= 1, (
+            "Layers sharing one KV cache tensor disagree on the buffer "
+            f"segmentation ({segment_counts}): {kv_cache_tensor.shared_by}"
+        )
+        num_segments = segment_counts.pop() if segment_counts else 1
+        assert bytes_per_block % num_segments == 0
+        buffer = ExtensibleTensor(
+            max_num_bytes=kv_cache_tensor.size,
+            device=device,
+            num_segments=num_segments,
+        )
+        buffers.append((buffer, bytes_per_block // num_segments))
+        tensor = buffer.full_view()
+        for layer_name in kv_cache_tensor.shared_by:
+            kv_cache_raw_tensors[layer_name] = tensor
+
+    _check_layer_coverage(kv_cache_config, kv_cache_raw_tensors, shared_layers)
+    extensible_buffers = ExtensibleKVCacheBuffers(buffers, num_blocks)
+    extensible_buffers.commit(1)
+    return kv_cache_raw_tensors, extensible_buffers
 
 
 def _reshape_attention_kv_cache(
@@ -526,12 +696,24 @@ def init_kv_cache(
     cache_dtype: str,
     kernel_block_sizes: list[int],
     vllm_config: VllmConfig,
-) -> dict[str, Any]:
+    extensible: bool = False,
+) -> tuple[dict[str, Any], ExtensibleKVCacheBuffers | None]:
     shared_kv_cache_layers = get_shared_kv_cache_layers(vllm_config)
-    kv_cache_raw_tensors = _allocate_kv_cache(
-        kv_cache_config, shared_kv_cache_layers, device
-    )
     flattened_attn_groups = list(group for groups in attn_groups for group in groups)
+    extensible_buffers = None
+    if extensible:
+        kv_cache_raw_tensors, extensible_buffers = _allocate_extensible_kv_cache(
+            kv_cache_config,
+            shared_kv_cache_layers,
+            device,
+            flattened_attn_groups,
+            kernel_block_sizes,
+            cache_dtype,
+        )
+    else:
+        kv_cache_raw_tensors = _allocate_kv_cache(
+            kv_cache_config, shared_kv_cache_layers, device
+        )
     kv_caches = _reshape_kv_cache(
         attn_groups=flattened_attn_groups,
         kv_cache_raw_tensors=kv_cache_raw_tensors,
@@ -549,7 +731,7 @@ def init_kv_cache(
         else 1
     )
     bind_kv_cache(kv_caches, forward_context, runner_kv_caches, num_attn_module)
-    return kv_caches
+    return kv_caches, extensible_buffers
 
 
 def build_slot_mappings_by_layer(

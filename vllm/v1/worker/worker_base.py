@@ -34,7 +34,10 @@ _R = TypeVar("_R")
 class CompilationTimes(NamedTuple):
     language_model: float
     encoder: float
-    cuda_graph: int = 0
+    # GPU memory (bytes) consumed by warmup and CUDA graph capture beyond the
+    # profiled baseline; used by the extensible KV cache flow to compute the
+    # final KV cache size from actual usage.
+    warmup_memory: int = 0
 
 
 class WorkerBase:
@@ -109,7 +112,7 @@ class WorkerBase:
         """Prepare model for execution through compilation/warmup.
 
         Returns:
-            Compilation times in seconds and CUDA graph memory in bytes.
+            Compilation times in seconds and warmup memory in bytes.
         """
         raise NotImplementedError
 

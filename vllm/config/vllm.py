@@ -2207,9 +2207,6 @@ class VllmConfig:
             # Will be added by https://github.com/vllm-project/vllm/pull/35045
             unsupported.append("KV sharing fast prefill")
 
-        if self.cache_config.enable_extensible_kv_cache:
-            unsupported.append("extensible KV cache")
-
         if self.ec_transfer_config is not None:
             # Will be added by https://github.com/vllm-project/vllm/pull/38390
             unsupported.append("EC transfer")

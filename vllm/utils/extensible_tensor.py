@@ -508,6 +508,11 @@ class ExtensibleTensor:
         return self._buffer.reserved_size
 
     @property
+    def physical_bytes(self) -> int:
+        """Physically mapped bytes (committed size rounded up to granules)."""
+        return self._buffer.committed_bytes
+
+    @property
     def base_ptr(self) -> int:
         return self._buffer.base_ptr
 

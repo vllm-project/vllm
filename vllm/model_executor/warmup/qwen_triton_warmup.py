@@ -174,6 +174,12 @@ def _warm_zero_kv_blocks_with_runner_zeroer(runner: object) -> bool:
     if not callable(zero_block_ids):
         return False
 
+    # With the extensible KV cache (V2), only a prefix of the blocks is
+    # physically committed; make sure the blocks zeroed below are backed.
+    ensure_kv_cache_blocks = getattr(runner, "ensure_kv_cache_blocks", None)
+    if callable(ensure_kv_cache_blocks):
+        ensure_kv_cache_blocks(max(_ZERO_KV_N_BLOCKS))
+
     for n_blocks in _ZERO_KV_N_BLOCKS:
         zero_block_ids(list(range(n_blocks)))
     return True
