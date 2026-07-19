@@ -3,6 +3,7 @@ depends_on:
   - image-build
 steps:
 - label: Entrypoints Unit Tests
+  device: h200_35gb
   key: entrypoints-unit-tests
   timeout_in_minutes: 25
   working_dir: "/vllm-workspace/tests"
@@ -15,6 +16,7 @@ steps:
   - pytest -v -s entrypoints/weight_transfer
 
 - label: Entrypoints Integration (LLM)
+  device: h200_35gb
   key: entrypoints-integration-llm
   timeout_in_minutes: 60
   working_dir: "/vllm-workspace/tests"
@@ -114,6 +116,7 @@ steps:
       - image-build-amd
 
 - label: Entrypoints Integration (Responses API)
+  device: h200_35gb
   key: entrypoints-integration-responses-api
   timeout_in_minutes: 50
   working_dir: "/vllm-workspace/tests"
