@@ -2,25 +2,107 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Unified software fp8e4m3 <-> {fp16, bf16} conversion for pre-SM89 Triton.
 
-Single merged entry points dispatching on dtype at Triton compile time. The
-encode REQUIRES an fp16/bf16 input -- asserted, never silently cast -- so the
-encoder always matches the data and a wider accumulator (e.g. an fp32 scaled
-tile) can never slip through unnoticed; the caller hands in the activation
-representation. fp16 serves SM75 (no bf16 hardware type); bf16 serves SM80-88;
-SM89+ uses the native cvt and skips this path. Encode is round-to-nearest-even
-(bit-exact vs torch.float8_e4m3fn); decode is exact (prmt byte-LUT). The PTX
-literals live in fp8e4nv_fp16.py / fp8e4nv_bf16.py.
+The public Triton helpers dispatch on dtype at compile time. Conversion code
+lives in an always-inline CUDA C++ helper linked from portable SM75 LLVM
+bitcode. Scalar encode adapters preserve Triton's partial pack-4 lowering;
+decode maps complete packs directly.
 """
 
+from pathlib import Path
+
 from vllm.triton_utils import tl, triton
-from vllm.v1.attention.ops.fp8e4nv_bf16 import (
-    _BF16_TO_FP8E4M3_RNE_ASM,
-    _FP8E4M3_TO_BF16_ASM,
-)
-from vllm.v1.attention.ops.fp8e4nv_fp16 import (
-    _FP8E4M3_TO_FP16_ASM,
-    _FP16_TO_FP8E4M3_RNE_ASM,
-)
+
+_HELPER_PATH = Path(__file__).with_name("fp8e4nv_helper_sm75.bc")
+_HELPER_PATH_STR = str(_HELPER_PATH)
+FP8E4NV_EXTERN_LIBS = {"fp8e4nv": _HELPER_PATH_STR}
+
+
+@tl.core.extern
+def _fp16x1_to_fp8e4m3(arg0, _semantic=None):
+    u8 = tl.core.dtype("uint8")
+    u16 = tl.core.dtype("uint16")
+    return tl.core.extern_elementwise(
+        "fp8e4nv",
+        _HELPER_PATH_STR,
+        [arg0],
+        {(u16,): ("fp16x1_to_fp8e4m3", u8)},
+        is_pure=True,
+        _semantic=_semantic,
+    )
+
+
+@tl.core.extern
+def _bf16x1_to_fp8e4m3(arg0, _semantic=None):
+    u8 = tl.core.dtype("uint8")
+    u16 = tl.core.dtype("uint16")
+    return tl.core.extern_elementwise(
+        "fp8e4nv",
+        _HELPER_PATH_STR,
+        [arg0],
+        {(u16,): ("bf16x1_to_fp8e4m3", u8)},
+        is_pure=True,
+        _semantic=_semantic,
+    )
+
+
+@tl.core.extern
+def _fp8e4m3x4_to_fp16x4(arg0, _semantic=None):
+    u32 = tl.core.dtype("uint32")
+    u64 = tl.core.dtype("uint64")
+    return tl.core.extern_elementwise(
+        "fp8e4nv",
+        _HELPER_PATH_STR,
+        [arg0],
+        {(u32,): ("fp8e4m3x4_to_fp16x4", u64)},
+        is_pure=True,
+        _semantic=_semantic,
+    )
+
+
+@tl.core.extern
+def _fp8e4m3x4_to_bf16x4(arg0, _semantic=None):
+    u32 = tl.core.dtype("uint32")
+    u64 = tl.core.dtype("uint64")
+    return tl.core.extern_elementwise(
+        "fp8e4nv",
+        _HELPER_PATH_STR,
+        [arg0],
+        {(u32,): ("fp8e4m3x4_to_bf16x4", u64)},
+        is_pure=True,
+        _semantic=_semantic,
+    )
+
+
+@triton.jit
+def _pack_fp8x4(x0, x1, x2, x3):
+    return (
+        x0.to(tl.uint32)
+        | (x1.to(tl.uint32) << 8)
+        | (x2.to(tl.uint32) << 16)
+        | (x3.to(tl.uint32) << 24)
+    )
+
+
+@triton.jit
+def _decode_fp16_pack4(x0, x1, x2, x3):
+    decoded = _fp8e4m3x4_to_fp16x4(_pack_fp8x4(x0, x1, x2, x3))
+    return (
+        (decoded & 0xFFFF).to(tl.uint16).to(tl.float16, bitcast=True),
+        ((decoded >> 16) & 0xFFFF).to(tl.uint16).to(tl.float16, bitcast=True),
+        ((decoded >> 32) & 0xFFFF).to(tl.uint16).to(tl.float16, bitcast=True),
+        (decoded >> 48).to(tl.uint16).to(tl.float16, bitcast=True),
+    )
+
+
+@triton.jit
+def _decode_bf16_pack4(x0, x1, x2, x3):
+    decoded = _fp8e4m3x4_to_bf16x4(_pack_fp8x4(x0, x1, x2, x3))
+    return (
+        (decoded & 0xFFFF).to(tl.uint16).to(tl.bfloat16, bitcast=True),
+        ((decoded >> 16) & 0xFFFF).to(tl.uint16).to(tl.bfloat16, bitcast=True),
+        ((decoded >> 32) & 0xFFFF).to(tl.uint16).to(tl.bfloat16, bitcast=True),
+        (decoded >> 48).to(tl.uint16).to(tl.bfloat16, bitcast=True),
+    )
 
 
 @triton.jit
@@ -34,48 +116,19 @@ def convert_to_fp8e4m3(x):
         (x.dtype == tl.float16) or (x.dtype == tl.bfloat16),
         "convert_to_fp8e4m3 expects fp16 or bf16 input",
     )
+    bits = x.to(tl.uint16, bitcast=True)
     if x.dtype == tl.float16:
-        return tl.inline_asm_elementwise(
-            _FP16_TO_FP8E4M3_RNE_ASM,
-            "=r,r,r",
-            [x],
-            dtype=tl.uint8,
-            is_pure=True,
-            pack=4,
-        )
-    else:
-        return tl.inline_asm_elementwise(
-            _BF16_TO_FP8E4M3_RNE_ASM,
-            "=r,r,r",
-            [x],
-            dtype=tl.uint8,
-            is_pure=True,
-            pack=4,
-        )
+        return _fp16x1_to_fp8e4m3(bits)
+    return _bf16x1_to_fp8e4m3(bits)
 
 
 @triton.jit
 def convert_from_fp8e4m3(x, dtype: tl.constexpr):
-    """Decode 4 packed uint8 fp8e4m3 bytes -> dtype (tl.float16 or tl.bfloat16)."""
+    """Decode packed uint8 fp8e4m3 bytes to fp16 or bf16.
+
+    The input layout must assign a multiple of four elements to each thread.
+    """
     if dtype == tl.float16:
-        return tl.inline_asm_elementwise(
-            _FP8E4M3_TO_FP16_ASM,
-            "=r,=r,r",
-            [x],
-            dtype=tl.float16,
-            is_pure=True,
-            pack=4,
-        )
+        return tl.map_elementwise(_decode_fp16_pack4, x, pack=4)[0]
     else:
-        # Explicit else is required: the two branches return different dtypes
-        # (fp16 vs bf16), and Triton type-checks a bare trailing return even when
-        # an earlier branch already returned -- rejecting it as "inconsistent
-        # return types". Mutually-exclusive if/else gives one type per specialization.
-        return tl.inline_asm_elementwise(
-            _FP8E4M3_TO_BF16_ASM,
-            "=r,=r,r",
-            [x],
-            dtype=tl.bfloat16,
-            is_pure=True,
-            pack=4,
-        )
+        return tl.map_elementwise(_decode_bf16_pack4, x, pack=4)[0]

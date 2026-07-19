@@ -1182,6 +1182,7 @@ if _build_custom_ops():
 package_data = {
     "vllm": [
         "py.typed",
+        "v1/attention/ops/fp8e4nv_helper_sm75.bc",
         "libs/*.so*",
         "model_executor/layers/fused_moe/configs/*.json",
         "model_executor/layers/quantization/utils/configs/*.json",

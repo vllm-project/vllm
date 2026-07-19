@@ -10,7 +10,10 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import is_quantized_kv_cache
-from vllm.v1.attention.ops.fp8e4nv import convert_to_fp8e4m3
+from vllm.v1.attention.ops.fp8e4nv import (
+    FP8E4NV_EXTERN_LIBS,
+    convert_to_fp8e4m3,
+)
 from vllm.v1.kv_cache_interface import KVQuantMode
 
 
@@ -467,6 +470,7 @@ def triton_reshape_and_cache_flash(
         slot_mapping.shape[0],
         triton.cdiv(n, meta["TILE_SIZE"]),
     )
+    launch_kwargs = {"extern_libs": FP8E4NV_EXTERN_LIBS} if fp8_software_conv else {}
 
     reshape_and_cache_kernel_flash[grid](
         key_ptr=key,
@@ -495,6 +499,7 @@ def triton_reshape_and_cache_flash(
         TILE_SIZE=TILE_SIZE,
         num_warps=num_warps,
         num_stages=num_stages,
+        **launch_kwargs,
     )
 
 

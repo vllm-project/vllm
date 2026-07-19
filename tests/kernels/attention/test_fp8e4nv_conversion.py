@@ -23,7 +23,11 @@ import torch
 
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
-from vllm.v1.attention.ops.fp8e4nv import convert_from_fp8e4m3, convert_to_fp8e4m3
+from vllm.v1.attention.ops.fp8e4nv import (
+    FP8E4NV_EXTERN_LIBS,
+    convert_from_fp8e4m3,
+    convert_to_fp8e4m3,
+)
 
 if not current_platform.is_cuda():
     pytest.skip("fp8e4nv software conversions require CUDA", allow_module_level=True)
@@ -59,7 +63,13 @@ def _run_decode(x_u8: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
     out = torch.empty(x_u8.numel(), dtype=dtype, device="cuda")
     n = x_u8.numel()
     _decode_kernel[(triton.cdiv(n, 256),)](
-        x_u8, out, n, IS_FP16=(dtype == torch.float16), BLOCK=256
+        x_u8,
+        out,
+        n,
+        IS_FP16=(dtype == torch.float16),
+        BLOCK=256,
+        num_warps=2,
+        extern_libs=FP8E4NV_EXTERN_LIBS,
     )
     return out
 
@@ -67,7 +77,9 @@ def _run_decode(x_u8: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
 def _run_encode(x: torch.Tensor) -> torch.Tensor:
     out = torch.empty(x.numel(), dtype=torch.uint8, device="cuda")
     n = x.numel()
-    _encode_kernel[(triton.cdiv(n, 256),)](x, out, n, BLOCK=256)
+    _encode_kernel[(triton.cdiv(n, 256),)](
+        x, out, n, BLOCK=256, extern_libs=FP8E4NV_EXTERN_LIBS
+    )
     return out
 
 
