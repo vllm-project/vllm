@@ -13,11 +13,11 @@ from vllm.distributed import get_dcp_group, get_pcp_group
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
+from vllm.model_executor.layers.attention.pcp import maybe_gather_indexer_k
 from vllm.model_executor.layers.dsa_litetopk import (
     dsa_litetopk_available,
     dsa_litetopk_indexer,
 )
-from vllm.model_executor.layers.attention.pcp import maybe_gather_indexer_k
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     get_fp8_min_max,
 )
