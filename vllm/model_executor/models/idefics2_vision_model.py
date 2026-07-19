@@ -357,7 +357,8 @@ class Idefics2VisionTransformer(nn.Module):
             ".q_proj": (".qkv_proj", "q"),
             ".k_proj": (".qkv_proj", "k"),
             ".v_proj": (".qkv_proj", "v"),
-        }
+        },
+        orig_to_new_prefix={"head.": None},
     )
 
     def __init__(
@@ -461,12 +462,6 @@ class Idefics2VisionTransformer(nn.Module):
         return last_hidden_state
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        # head is a pooling header absent from this model.
-        skip_prefixes = ["head."]
-        if not self.require_post_norm:
-            skip_prefixes.append("post_layernorm.")
-        loader = AutoWeightsLoader(self, skip_prefixes=skip_prefixes)
-
         layer_count = len(self.encoder.layers)
 
         def _filter(ws: Iterable[tuple[str, torch.Tensor]]):
@@ -479,4 +474,8 @@ class Idefics2VisionTransformer(nn.Module):
                     continue
                 yield name, w
 
-        return loader.load_weights(_filter(weights), mapper=self.hf_to_vllm_mapper)
+        mapper = self.hf_to_vllm_mapper
+        if not self.require_post_norm:
+            mapper |= WeightsMapper(orig_to_new_prefix={"post_layernorm.": None})
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(_filter(weights), mapper=mapper)

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import math
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from typing import Annotated, cast
 
 import torch
@@ -52,12 +52,7 @@ from .interfaces import (
     _require_is_multimodal,
 )
 from .qwen2 import Qwen2ForCausalLM
-from .utils import (
-    AutoWeightsLoader,
-    WeightsMapper,
-    _merge_multimodal_embeddings,
-    maybe_prefix,
-)
+from .utils import WeightsMapper, _merge_multimodal_embeddings, maybe_prefix
 
 logger = init_logger(__name__)
 
@@ -332,7 +327,8 @@ class FireRedASR2ForConditionalGeneration(
             "net.0": "pre_layer_norm",
             "net.1": "linear_expand",
             "net.4": "linear_project",
-        }
+        },
+        orig_to_new_prefix={"model.encoder.audio_encoder.positional_encoding.pe": None},
     )
 
     supports_transcription_only = True
@@ -475,10 +471,3 @@ class FireRedASR2ForConditionalGeneration(
     def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
         logits = self.logits_processor(self.model.decoder.lm_head, hidden_states)
         return logits
-
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(
-            self, skip_prefixes=["model.encoder.audio_encoder.positional_encoding.pe"]
-        )
-
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)

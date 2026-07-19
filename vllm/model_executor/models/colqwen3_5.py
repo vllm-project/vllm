@@ -237,11 +237,11 @@ class ColQwen3_5Model(
             else:
                 model_weights.append((name, weight))
 
-        loader = AutoWeightsLoader(
-            self,
-            skip_prefixes=["mtp."],
+        drop = WeightsMapper(orig_to_new_prefix={"mtp.": None})
+        loader = AutoWeightsLoader(self)
+        loaded = loader.load_weights(
+            model_weights, mapper=self.hf_to_vllm_mapper | drop
         )
-        loaded = loader.load_weights(model_weights, mapper=self.hf_to_vllm_mapper)
 
         for name, weight in proj_weights:
             param_name = name.split(".")[-1]

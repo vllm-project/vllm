@@ -32,6 +32,7 @@ logger = logging.getLogger(__name__)
 
 class JinaForRanking(nn.Module, SupportsLateInteraction):
     is_pooling_model = True
+    hf_to_vllm_mapper = WeightsMapper(orig_to_new_prefix={"lm_head.": None})
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -75,10 +76,6 @@ class JinaForRanking(nn.Module, SupportsLateInteraction):
             input_ids, positions, intermediate_tensors, inputs_embeds
         )
         return hidden_states
-
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self, skip_prefixes=(["lm_head."]))
-        return loader.load_weights(weights)
 
 
 class JinaForRankingPool(StepPool):

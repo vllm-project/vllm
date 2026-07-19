@@ -20,9 +20,9 @@
 """Inference-only BLOOM model compatible with HuggingFace weights."""
 
 import math
-from collections.abc import Iterable
 from itertools import islice
 
+import regex as re
 import torch
 from torch import nn
 from transformers import BloomConfig
@@ -51,7 +51,7 @@ from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsPP, SupportsQuant
 from .utils import (
-    AutoWeightsLoader,
+    WeightsMapper,
     make_empty_intermediate_tensors_factory,
     make_layers,
     maybe_prefix,
@@ -298,6 +298,11 @@ class BloomModel(nn.Module):
 
 
 class BloomForCausalLM(nn.Module, SupportsPP, SupportsQuant):
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_regex={re.compile(r"^(?!transformer\.)"): "transformer."},
+        orig_to_new_prefix={"lm_head.weight": None},
+    )
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
@@ -342,17 +347,3 @@ class BloomForCausalLM(nn.Module, SupportsPP, SupportsQuant):
     ) -> torch.Tensor | None:
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
-
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self, skip_prefixes=["lm_head.weight"])
-        weights = _add_transformer_prefix(weights)
-        return loader.load_weights(weights)
-
-
-def _add_transformer_prefix(
-    weights: Iterable[tuple[str, torch.Tensor]],
-) -> Iterable[tuple[str, torch.Tensor]]:
-    for name, tensor in weights:
-        if not name.startswith("transformer."):
-            name = "transformer." + name
-        yield name, tensor

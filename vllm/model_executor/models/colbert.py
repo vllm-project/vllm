@@ -362,10 +362,10 @@ class ColBERTJinaRobertaModel(ColBERTMixin, nn.Module):
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         other_weights, colbert_loaded = self._load_colbert_weights(weights)
 
-        mapper = WeightsMapper(orig_to_new_prefix={"roberta.": "model."})
-
-        # Skip HF pooler weights (model.pooler.*) as they not used in ColBERT
-        loader = AutoWeightsLoader(self, skip_prefixes=["model.pooler."])
+        mapper = WeightsMapper(
+            orig_to_new_prefix={"roberta.": "model.", "model.pooler.": None}
+        )
+        loader = AutoWeightsLoader(self)
 
         loaded = loader.load_weights(other_weights, mapper=mapper)
         return loaded | colbert_loaded

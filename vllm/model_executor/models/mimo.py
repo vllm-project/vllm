@@ -26,7 +26,6 @@
 # limitations under the License.
 """Inference-only MiMo model compatible with HuggingFace weights."""
 
-from collections.abc import Iterable
 from itertools import islice
 
 import torch
@@ -41,7 +40,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.models.qwen2 import Qwen2ForCausalLM, Qwen2Model
 from vllm.sequence import IntermediateTensors
 
-from .utils import AutoWeightsLoader, PPMissingLayer, maybe_prefix
+from .utils import PPMissingLayer, WeightsMapper, maybe_prefix
 
 logger = init_logger(__name__)
 
@@ -87,6 +86,8 @@ class MiMoModel(Qwen2Model):
 
 
 class MiMoForCausalLM(Qwen2ForCausalLM, nn.Module):
+    hf_to_vllm_mapper = WeightsMapper(orig_to_new_prefix={"model.mtp_layers.": None})
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         nn.Module.__init__(self)
         config = vllm_config.model_config.hf_config
@@ -118,13 +119,6 @@ class MiMoForCausalLM(Qwen2ForCausalLM, nn.Module):
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors
         )
-
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        skip_prefixes = ["lm_head."] if self.config.tie_word_embeddings else []
-        # MTP layers are loaded by the draft model, not the main model.
-        skip_prefixes.append("model.mtp_layers.")
-        loader = AutoWeightsLoader(self, skip_prefixes=skip_prefixes)
-        return loader.load_weights(weights)
 
     def compute_logits(
         self,

@@ -324,11 +324,6 @@ class BlipVisionModel(nn.Module, SupportsQuant):
         return self.post_layernorm(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        skip_prefixes: list[str] = []
-        if self.post_layernorm is None:
-            skip_prefixes.append("post_layernorm.")
-        loader = AutoWeightsLoader(self, skip_prefixes=skip_prefixes)
-
         # omit layers when num_hidden_layers_override is set
         def _filter(ws):
             for name, weight in ws:
@@ -338,4 +333,8 @@ class BlipVisionModel(nn.Module, SupportsQuant):
                     continue
                 yield name, weight
 
-        return loader.load_weights(_filter(weights), mapper=self.hf_to_vllm_mapper)
+        mapper = self.hf_to_vllm_mapper
+        if self.post_layernorm is None:
+            mapper |= WeightsMapper(orig_to_new_prefix={"post_layernorm.": None})
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(_filter(weights), mapper=mapper)

@@ -3,6 +3,7 @@
 
 from collections.abc import Iterable, Set
 
+import regex as re
 import torch
 from torch import nn
 from transformers import BertConfig
@@ -449,6 +450,11 @@ class BertEmbeddingModel(nn.Module, SupportsQuant):
 
     is_pooling_model = True
 
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_regex={re.compile(r"^(?!model\.)"): "model."},
+        orig_to_new_prefix={"lm_head.": None},
+    )
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
 
@@ -476,16 +482,6 @@ class BertEmbeddingModel(nn.Module, SupportsQuant):
             inputs_embeds=inputs_embeds,
             intermediate_tensors=intermediate_tensors,
         )
-
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
-        weights_list = list(weights)
-
-        has_model_prefix = any(name.startswith("model.") for name, _ in weights_list)
-        if not has_model_prefix:
-            mapper = WeightsMapper(orig_to_new_prefix={"": "model."})
-
-        loader = AutoWeightsLoader(self, skip_prefixes=["lm_head."])
-        return loader.load_weights(weights_list, mapper=mapper)
 
     def _build_model(self, vllm_config: VllmConfig, prefix: str = "") -> BertModel:
         return BertModel(
