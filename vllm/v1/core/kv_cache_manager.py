@@ -657,6 +657,35 @@ class KVCacheManager:
             clipped_block_ids.append(ids[:num_valid_blocks])
         return tuple(clipped_block_ids)
 
+    def estimate_cached_tokens(self, request: Request) -> int:
+        """Estimate the number of tokens cached by the request."""
+        cached_tokens: int | None = None
+        for group, blocks in zip(
+            self.kv_cache_config.kv_cache_groups,
+            self.get_blocks(request.request_id).blocks,
+        ):
+            if isinstance(
+                group.kv_cache_spec,
+                (CrossAttentionSpec, EncoderOnlyAttentionSpec),
+            ):
+                # Cross-attention and encoder-only groups are not prefix cached.
+                continue
+
+            group_cached_tokens = 0
+            for block in blocks:
+                group_cached_tokens = max(
+                    group_cached_tokens,
+                    block.block_hash_num_tokens or 0,
+                )
+
+            cached_tokens = (
+                group_cached_tokens
+                if cached_tokens is None
+                else min(cached_tokens, group_cached_tokens)
+            )
+
+        return cached_tokens or 0
+
     def cache_blocks(self, request: Request, num_computed_tokens: int) -> None:
         """Cache the blocks for the request, if enabled.
 

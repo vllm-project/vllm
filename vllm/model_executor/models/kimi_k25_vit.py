@@ -357,7 +357,7 @@ class MoonViTEncoderLayer(nn.Module):
         attn_bias: bool = False,
     ):
         super().__init__()
-        self.use_data_parallel = is_vit_use_data_parallel()
+        self.use_data_parallel = is_vit_use_data_parallel(num_heads)
 
         self.num_heads = num_heads
         self.hidden_dim = hidden_dim

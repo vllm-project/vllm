@@ -508,6 +508,23 @@ class Qwen2_5OmniThinkerMultiModalProcessor(
                 **mm_kwargs,
             )
 
+        merged = self.info.ctx.get_merged_mm_kwargs(mm_kwargs)
+        if mm_data.get("videos") and (
+            merged.keys() & {"size", "min_pixels", "max_pixels"}
+        ):
+            mm_kwargs = dict(mm_kwargs)
+            video_size = dict(self.info.get_hf_processor().video_processor.size)
+            size_override = merged.get("size")
+            if size_override is not None:
+                video_size = video_size | size_override
+            min_pixels = merged.get("min_pixels")
+            if min_pixels is not None:
+                video_size["shortest_edge"] = min_pixels
+            max_pixels = merged.get("max_pixels")
+            if max_pixels is not None:
+                video_size["longest_edge"] = max_pixels
+            mm_kwargs["size"] = video_size
+
         hf_inputs = super()._call_hf_processor(
             prompt=prompt,
             mm_data=mm_data,
