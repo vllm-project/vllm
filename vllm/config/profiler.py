@@ -18,6 +18,7 @@ ProtonBackend = Literal["cupti", "rocprofiler"]
 ProtonContext = Literal["shadow", "python"]
 ProtonData = Literal["tree", "trace"]
 ProtonHook = Literal["triton"]
+ProtonOutputFormat = Literal["hatchet", "hatchet_msgpack", "chrome_trace"]
 
 
 def _is_uri_path(path: str) -> bool:
@@ -70,6 +71,10 @@ class ProfilerConfig:
 
     proton_hook: ProtonHook | None = None
     """Optional Proton hook. Use ``triton`` to add Triton launch metadata."""
+
+    proton_output_format: ProtonOutputFormat | None = None
+    """Optional format passed to Proton when finalizing a profile. ``None``
+    uses the default format for ``proton_data``."""
 
     torch_profiler_with_stack: bool = True
     """If `True`, enables stack tracing in the torch profiler. Enabled by default
@@ -199,6 +204,21 @@ class ProfilerConfig:
             self.proton_profiler_dir = os.path.abspath(
                 os.path.expanduser(proton_profiler_dir)
             )
+
+        if self.profiler == "proton" and self.delay_iterations > 0:
+            raise ValueError(
+                "delay_iterations is not supported by the Proton profiler "
+                "because start errors must be returned by /start_profile"
+            )
+
+        output_format = self.proton_output_format
+        if output_format == "chrome_trace" and self.proton_data != "trace":
+            raise ValueError("chrome_trace output requires proton_data='trace'")
+        if (
+            output_format in ("hatchet", "hatchet_msgpack")
+            and self.proton_data != "tree"
+        ):
+            raise ValueError(f"{output_format} output requires proton_data='tree'")
 
         if self.capture_torch_profiler and self.profiler != "torch":
             raise ValueError(

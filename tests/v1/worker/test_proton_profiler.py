@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, Mock, patch
 
 import pytest
+import torch
 from pydantic import ValidationError
 
 from vllm.config import CUDAGraphMode, ProfilerConfig
@@ -27,14 +28,23 @@ def make_proton(
     )
 
 
-def make_wrapper(tmp_path, proton=None, **config_overrides):
+def make_wrapper(tmp_path, proton=None, triton_version="3.6.0", **config_overrides):
     proton = proton or make_proton()
     config = ProfilerConfig(
         profiler="proton",
         proton_profiler_dir=str(tmp_path),
         **config_overrides,
     )
-    with patch("vllm.profiler.wrapper.importlib.import_module", return_value=proton):
+
+    def import_module(name):
+        if name == "triton.profiler":
+            return proton
+        assert name == "triton"
+        return SimpleNamespace(__version__=triton_version)
+
+    with patch(
+        "vllm.profiler.wrapper.importlib.import_module", side_effect=import_module
+    ):
         wrapper = ProtonProfilerWrapper(config, worker_name="rank_3")
     return wrapper, proton
 
@@ -63,6 +73,7 @@ class TestProtonConfig:
             ("proton_backend", "invalid"),
             ("proton_backend", "instrumentation"),
             ("proton_hook", "invalid"),
+            ("proton_output_format", "invalid"),
         ],
     )
     def test_rejects_invalid_typed_options(self, field, value, tmp_path):
@@ -82,12 +93,41 @@ class TestProtonConfig:
             proton_backend="rocprofiler",
             proton_mode="pcsampling",
             proton_hook="triton",
+            proton_output_format="chrome_trace",
         )
         assert config.proton_context == "python"
         assert config.proton_data == "trace"
         assert config.proton_backend == "rocprofiler"
         assert config.proton_mode == "pcsampling"
         assert config.proton_hook == "triton"
+        assert config.proton_output_format == "chrome_trace"
+
+    @pytest.mark.parametrize(
+        ("data", "output_format"),
+        [
+            ("tree", "chrome_trace"),
+            ("trace", "hatchet"),
+            ("trace", "hatchet_msgpack"),
+        ],
+    )
+    def test_rejects_incompatible_data_and_output_format(
+        self, tmp_path, data, output_format
+    ):
+        with pytest.raises(ValueError, match="output requires proton_data"):
+            ProfilerConfig(
+                profiler="proton",
+                proton_profiler_dir=str(tmp_path),
+                proton_data=data,
+                proton_output_format=output_format,
+            )
+
+    def test_rejects_delayed_start(self, tmp_path):
+        with pytest.raises(ValueError, match="delay_iterations is not supported"):
+            ProfilerConfig(
+                profiler="proton",
+                proton_profiler_dir=str(tmp_path),
+                delay_iterations=1,
+            )
 
 
 class TestProtonProfilerWrapper:
@@ -134,6 +174,37 @@ class TestProtonProfilerWrapper:
         assert proton.finalize.call_count == 2
         proton.finalize.assert_any_call(session=7)
         proton.finalize.assert_any_call(session=8)
+
+    def test_passes_explicit_output_format_to_finalize(self, tmp_path):
+        wrapper, proton = make_wrapper(
+            tmp_path,
+            proton_data="trace",
+            proton_output_format="chrome_trace",
+        )
+
+        wrapper.start()
+        wrapper.stop()
+
+        proton.finalize.assert_called_once_with(session=7, output_format="chrome_trace")
+
+    @pytest.mark.parametrize(
+        ("option", "value", "feature"),
+        [
+            ("proton_output_format", "hatchet_msgpack", "hatchet_msgpack"),
+            ("proton_mode", "periodic_flushing", "periodic flushing"),
+            ("proton_backend", "rocprofiler", "rocprofiler backend"),
+        ],
+    )
+    def test_newer_features_require_triton_3_8(self, tmp_path, option, value, feature):
+        with pytest.raises(RuntimeError, match=feature):
+            make_wrapper(tmp_path, **{option: value})
+
+    def test_rejects_output_format_when_finalize_lacks_capability(self, tmp_path):
+        proton = make_proton()
+        proton.finalize = lambda session=None: None
+
+        with pytest.raises(RuntimeError, match="does not support selecting"):
+            make_wrapper(tmp_path, proton, proton_output_format="hatchet")
 
     def test_duplicate_start_does_not_rename_active_profile(self, tmp_path):
         wrapper, proton = make_wrapper(tmp_path)
@@ -207,10 +278,62 @@ class TestProtonProfilerWrapper:
     def test_disabled_proton_session_is_reported_as_start_failure(self, tmp_path):
         wrapper, _ = make_wrapper(tmp_path, make_proton(session_id=None))
 
-        wrapper.start()
+        with pytest.raises(RuntimeError, match="did not create"):
+            wrapper.start()
 
         assert wrapper._running is False
+        assert wrapper._active is False
         assert wrapper._session_id is None
+
+    def test_start_error_propagates_and_resets_state(self, tmp_path):
+        proton = make_proton()
+        proton.start.side_effect = RuntimeError("CUPTI unavailable")
+        wrapper, _ = make_wrapper(tmp_path, proton)
+
+        with pytest.raises(RuntimeError, match="CUPTI unavailable"):
+            wrapper.start()
+
+        assert wrapper._active is False
+        assert wrapper._running is False
+
+    def test_finalize_error_propagates_and_resets_state(self, tmp_path):
+        proton = make_proton()
+        proton.finalize.side_effect = RuntimeError("write failed")
+        wrapper, _ = make_wrapper(tmp_path, proton)
+        wrapper.start()
+
+        with pytest.raises(RuntimeError, match="write failed"):
+            wrapper.stop()
+
+        assert wrapper._active is False
+        assert wrapper._running is False
+        assert wrapper._session_id is None
+
+    def test_finalize_runs_when_deactivate_fails(self, tmp_path):
+        proton = make_proton()
+        proton.deactivate.side_effect = RuntimeError("deactivate failed")
+        wrapper, _ = make_wrapper(tmp_path, proton)
+        wrapper.start()
+
+        with pytest.raises(RuntimeError, match="deactivate failed"):
+            wrapper.stop()
+
+        proton.finalize.assert_called_once_with(session=7)
+        assert wrapper._running is False
+        assert wrapper._session_id is None
+
+    def test_rejects_amd_visibility_environment(self, tmp_path):
+        wrapper, proton = make_wrapper(tmp_path)
+
+        with (
+            patch.object(torch.version, "hip", "6.0"),
+            patch.dict(os.environ, {"HIP_VISIBLE_DEVICES": "0"}, clear=True),
+            pytest.raises(RuntimeError, match="ROCR_VISIBLE_DEVICES"),
+        ):
+            wrapper.start()
+
+        proton.start.assert_not_called()
+        assert wrapper._active is False
 
     def test_missing_proton_has_actionable_error(self, tmp_path):
         config = ProfilerConfig(profiler="proton", proton_profiler_dir=str(tmp_path))

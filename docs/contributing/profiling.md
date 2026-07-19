@@ -98,6 +98,7 @@ vllm serve meta-llama/Llama-3.1-8B-Instruct \
     --profiler-config '{
         "profiler": "proton",
         "proton_profiler_dir": "./proton_profile",
+        "proton_output_format": "hatchet",
         "proton_hook": "triton"
     }'
 ```
@@ -134,11 +135,24 @@ The Proton-specific options are:
 - `proton_backend`: `cupti`, `rocprofiler`, or automatic
 - `proton_mode`: an optional backend mode string
 - `proton_hook`: `triton` to record Triton launch metadata, or unset
+- `proton_output_format`: `hatchet`, `hatchet_msgpack`, `chrome_trace`, or unset
+
+`hatchet` and `hatchet_msgpack` require `proton_data: "tree"`, while
+`chrome_trace` requires `proton_data: "trace"`. Proton does not support
+`delay_iterations`; starting the session synchronously ensures initialization
+errors are returned by `/start_profile`.
 
 Automatic backend selection is recommended. `cupti` is for NVIDIA GPUs and
 `rocprofiler` requires a ROCm installation. vLLM does not expose Proton's
 experimental instrumentation backend because current upstream Triton builds
 can produce profiles without timing metrics.
+
+Triton 3.6 supports explicit `hatchet` and `chrome_trace` output. The
+`hatchet_msgpack` format, `periodic_flushing` mode, and `rocprofiler` backend
+require Triton 3.8 or newer; vLLM rejects these options with the detected
+version before starting a session. On AMD, Proton requires
+`ROCR_VISIBLE_DEVICES`; `HIP_VISIBLE_DEVICES` and `CUDA_VISIBLE_DEVICES` must be
+unset.
 
 Each model execution scope also records the context/generation request and
 token counts as numeric Proton metrics. This keeps the existing readable scope

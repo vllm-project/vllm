@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import importlib
+import inspect
 import os
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterator
@@ -9,6 +10,7 @@ from contextlib import contextmanager, nullcontext, suppress
 from typing import Literal
 
 import torch
+from packaging.version import InvalidVersion, Version
 from typing_extensions import override
 
 from vllm.config import ProfilerConfig
@@ -17,8 +19,12 @@ from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
+_TRITON_ADVANCED_PROTON_VERSION = Version("3.8.0")
+
 
 class WorkerProfiler(ABC):
+    _propagate_errors = False
+
     def __init__(self, profiler_config: ProfilerConfig) -> None:
         self._delay_iters = profiler_config.delay_iterations
         if self._delay_iters > 0:
@@ -65,6 +71,8 @@ class WorkerProfiler(ABC):
             self._running = True  # Only mark as running if start succeeds
         except Exception as e:
             logger.warning("Failed to start profiler: %s", e)
+            if self._propagate_errors:
+                raise
 
     def _call_stop(self) -> None:
         """Call _stop with error handling but no safeguards."""
@@ -73,7 +81,10 @@ class WorkerProfiler(ABC):
             logger.info_once("Profiler stopped successfully.")
         except Exception as e:
             logger.warning("Failed to stop profiler: %s", e)
-        self._running = False  # Always mark as not running, assume stop worked
+            if self._propagate_errors:
+                raise
+        finally:
+            self._running = False
 
     def start(self) -> None:
         """Attempt to start the profiler, accounting for delayed starts."""
@@ -85,7 +96,11 @@ class WorkerProfiler(ABC):
             return
         self._active = True
         if self._delay_iters == 0:
-            self._call_start()
+            try:
+                self._call_start()
+            except Exception:
+                self._active = False
+                raise
 
     def step(self) -> None:
         """Update the profiler state at each worker step,
@@ -101,7 +116,11 @@ class WorkerProfiler(ABC):
             and self._active_iteration_count == self._delay_iters
         ):
             logger.info_once("Starting profiler after delay...")
-            self._call_start()
+            try:
+                self._call_start()
+            except Exception:
+                self._active = False
+                raise
 
         # Call profiler step for schedule-based profiling
         # Only count iterations where data is actually recorded (not warmup)
@@ -325,6 +344,8 @@ class ProtonProfilerWrapper(WorkerProfiler):
     can identify graph replays without retaining model-startup activity.
     """
 
+    _propagate_errors = True
+
     def __init__(
         self,
         profiler_config: ProfilerConfig,
@@ -334,6 +355,7 @@ class ProtonProfilerWrapper(WorkerProfiler):
 
         try:
             self._proton = importlib.import_module("triton.profiler")
+            triton = importlib.import_module("triton")
         except ImportError as exc:
             raise RuntimeError(
                 "The Proton profiler requires a Triton installation with "
@@ -347,6 +369,13 @@ class ProtonProfilerWrapper(WorkerProfiler):
         self._backend = profiler_config.proton_backend
         self._mode = profiler_config.proton_mode
         self._hook = profiler_config.proton_hook
+        self._output_format = profiler_config.proton_output_format
+        self._triton_version_string = getattr(triton, "__version__", "unknown")
+        try:
+            self._triton_version = Version(self._triton_version_string)
+        except InvalidVersion:
+            self._triton_version = None
+        self._validate_capabilities()
         self._session_id: int | None = None
         self._run_id = 0
         self._capture_session_id: int | None = None
@@ -360,7 +389,54 @@ class ProtonProfilerWrapper(WorkerProfiler):
             self._output_dir,
         )
 
+    def _require_triton_3_8(self, feature: str) -> None:
+        if (
+            self._triton_version is None
+            or self._triton_version < _TRITON_ADVANCED_PROTON_VERSION
+        ):
+            raise RuntimeError(
+                f"Proton {feature} requires Triton >= "
+                f"{_TRITON_ADVANCED_PROTON_VERSION}; found "
+                f"{self._triton_version_string}."
+            )
+
+    def _validate_capabilities(self) -> None:
+        if self._output_format is not None:
+            parameters = inspect.signature(self._proton.finalize).parameters
+            supports_output_format = "output_format" in parameters or any(
+                parameter.kind == inspect.Parameter.VAR_KEYWORD
+                for parameter in parameters.values()
+            )
+            if not supports_output_format:
+                raise RuntimeError(
+                    "The installed Triton Proton does not support selecting "
+                    "an output format during finalize."
+                )
+
+        if self._output_format == "hatchet_msgpack":
+            self._require_triton_3_8("hatchet_msgpack output")
+        if self._mode and self._mode.split(":", 1)[0] == "periodic_flushing":
+            self._require_triton_3_8("periodic flushing")
+        if self._backend == "rocprofiler":
+            self._require_triton_3_8("rocprofiler backend")
+
+    @staticmethod
+    def _validate_amd_environment() -> None:
+        if torch.version.hip is None:
+            return
+        conflicting = [
+            name
+            for name in ("HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES")
+            if name in os.environ
+        ]
+        if conflicting:
+            raise RuntimeError(
+                "Proton on AMD requires ROCR_VISIBLE_DEVICES; unset "
+                f"{', '.join(conflicting)} before profiling."
+            )
+
     def _create_session(self, output_path: str, *, capture: bool = False) -> int:
+        self._validate_amd_environment()
         os.makedirs(self._output_dir, exist_ok=True)
         session_id = self._proton.start(
             name=output_path,
@@ -417,9 +493,19 @@ class ProtonProfilerWrapper(WorkerProfiler):
     @override
     def _stop(self) -> None:
         assert self._session_id is not None
-        self._proton.deactivate(session=self._session_id)
-        self._proton.finalize(session=self._session_id)
-        self._session_id = None
+        session_id = self._session_id
+        try:
+            self._proton.deactivate(session=session_id)
+        finally:
+            try:
+                if self._output_format is None:
+                    self._proton.finalize(session=session_id)
+                else:
+                    self._proton.finalize(
+                        session=session_id, output_format=self._output_format
+                    )
+            finally:
+                self._session_id = None
 
     @override
     def shutdown(self) -> None:
