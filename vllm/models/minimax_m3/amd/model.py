@@ -70,7 +70,6 @@ from vllm.model_executor.models.interfaces import (
     SupportsPP,
 )
 from vllm.model_executor.models.utils import (
-    AutoWeightsLoader,
     PPMissingLayer,
     WeightsMapper,
     init_vllm_registered_model,
@@ -1327,10 +1326,6 @@ class MiniMaxM3SparseForCausalLM(nn.Module, SupportsPP, SupportsEagle3):
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         return self.model.get_expert_mapping()
 
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights)
-
 
 # TODO(refactor): this VL wrapper is platform-agnostic and byte-identical to the
 # NVIDIA copy — it only orchestrates the shared vision tower + the per-platform
@@ -1533,7 +1528,3 @@ class MiniMaxM3SparseForConditionalGeneration(
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         return self.language_model.get_expert_mapping()
-
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
