@@ -304,12 +304,22 @@ class IquestMoeAttention(nn.Module):
             if real_sliding_window:
                 rope_parameters["rope_theta"] = config.swa_rope_theta
 
-        self.rotary_emb = get_rope(
-            self.head_dim,
-            max_position=max_position_embeddings,
-            rope_parameters=rope_parameters,
-            is_neox_style=True,
+        # NOTE(yxing): check no_rope_layers. Now the full attention use no_rope
+        # and sliding window use rope
+        no_rope_layers = getattr(config, "no_rope_layers", [])
+        current_layer_no_rope = layer_idx in no_rope_layers
+
+        self.rotary_emb = (
+            get_rope(
+                self.head_dim,
+                max_position=max_position_embeddings,
+                rope_parameters=rope_parameters,
+                is_neox_style=True,
+            )
+            if not current_layer_no_rope
+            else None
         )
+
         # NOTE(yxing): check shared kv cache
         self.shared_kv_num_layers = config.shared_kv_num_layers
         kv_sharing_target_layer_name = None
@@ -408,6 +418,7 @@ class IquestMoeAttention(nn.Module):
         q = q_by_head.view(q.shape)
 
         if self.cross_kv_cache:
+            # TODO(yxing): adapt no-rope for cross kvcache
             q, _ = self.rotary_emb(positions, q, None)
             attn_output = self.attn(q, None, None)
         else:
@@ -416,7 +427,10 @@ class IquestMoeAttention(nn.Module):
             )
             k_by_head = self.k_norm(k_by_head)
             k = k_by_head.view(k.shape)
-            q, k = self.rotary_emb(positions, q, k)
+
+            # NOTE(yxing): check rotary_embed whether exists or not
+            if self.rotary_emb:
+                q, k = self.rotary_emb(positions, q, k)
             attn_output = self.attn(q, k, v)
         output, _ = self.o_proj(attn_output)
         return output
