@@ -991,7 +991,7 @@ mod tests {
     fn lower_sampling_params_rejects_out_of_vocab_allowed_token_ids() {
         let error = lower_sampling_params_with_limits(
             SamplingParams {
-                allowed_token_ids: Some(vec![1999, 2000]),
+                allowed_token_ids: Some(vec![999, 1000]),
                 ..Default::default()
             },
             sample_sampling_limits(),
@@ -1003,8 +1003,8 @@ mod tests {
             Error::TokenIds(TokenIdsError::OutOfVocab {
                 parameter: "allowed_token_ids",
                 token_ids,
-                vocab_size: 2000,
-            }) if token_ids == vec![2000]
+                vocab_size: 1000,
+            }) if token_ids == vec![1000]
         ));
     }
 

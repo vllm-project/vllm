@@ -184,9 +184,13 @@ def _bias_kernel(
         allowed_token_ids = tl.load(
             allowed_token_ids_ptr + req_state_idx * allowed_token_ids_stride + block,
             mask=mask,
+            other=0,
         )
+        id_mask = mask & (allowed_token_ids >= 0) & (allowed_token_ids < vocab_size)
         logits = tl.load(
-            logits_ptr + token_idx * logits_stride + allowed_token_ids, mask=mask
+            logits_ptr + token_idx * logits_stride + allowed_token_ids,
+            mask=id_mask,
+            other=-float("inf"),
         )
 
         tl.debug_barrier()  # save must read original logits before the -inf overwrite
@@ -206,7 +210,7 @@ def _bias_kernel(
         tl.store(
             logits_ptr + token_idx * logits_stride + allowed_token_ids,
             logits,
-            mask=mask,
+            mask=id_mask,
         )
 
     # Logit bias.
