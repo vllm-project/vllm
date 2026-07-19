@@ -87,6 +87,8 @@ if TYPE_CHECKING:
     VLLM_MAIN_CUDA_VERSION: str = "13.0"
     VLLM_FLOAT32_MATMUL_PRECISION: Literal["highest", "high", "medium"] = "highest"
     VLLM_BATCH_INVARIANT: bool = False
+    VLLM_TRITON_USE_TD: bool | None = None
+    # Deprecated alias of VLLM_TRITON_USE_TD (removed in v0.25).
     VLLM_TRITON_ATTN_USE_TD: bool | None = None
     VLLM_GPU_SYNC_CHECK: Literal["warn", "error"] | None = None
     MAX_JOBS: str | None = None
@@ -95,12 +97,17 @@ if TYPE_CHECKING:
     VLLM_USE_PRECOMPILED_RUST: bool = False
     VLLM_SKIP_PRECOMPILED_VERSION_SUFFIX: bool = False
     VLLM_DOCKER_BUILD_CONTEXT: bool = False
+    VLLM_BUILD_COMMIT: str = "unknown"
+    VLLM_BUILD_PIPELINE: str = "local"
+    VLLM_BUILD_URL: str = ""
+    VLLM_IMAGE_TAG: str = ""
     VLLM_KEEP_ALIVE_ON_ENGINE_DEATH: bool = False
     CMAKE_BUILD_TYPE: Literal["Debug", "Release", "RelWithDebInfo"] | None = None
     VERBOSE: bool = False
     VLLM_ALLOW_LONG_MAX_MODEL_LEN: bool = False
     VLLM_HTTP_TIMEOUT_KEEP_ALIVE: int = 5  # seconds
     VLLM_MAX_N_SEQUENCES: int = 16384
+    VLLM_MAX_COMPLETION_PROMPTS: int = 1024
     VLLM_PLUGINS: list[str] | None = None
     VLLM_LORA_RESOLVER_CACHE_DIR: str | None = None
     VLLM_LORA_RESOLVER_HF_REPO_LIST: str | None = None
@@ -120,7 +127,6 @@ if TYPE_CHECKING:
     VLLM_MXFP8_EMULATION_DEQUANT_AT_LOAD: bool = True
     VLLM_ROCM_USE_AITER: bool = False
     VLLM_ROCM_USE_AITER_CUSTOM_AR: bool = True
-    VLLM_ROCM_USE_AITER_PAGED_ATTN: bool = False
     VLLM_ROCM_USE_AITER_LINEAR: bool = True
     VLLM_ROCM_USE_AITER_LINEAR_HIPBMM: bool = False
     VLLM_ROCM_USE_AITER_MOE: bool = True
@@ -175,8 +181,6 @@ if TYPE_CHECKING:
     VLLM_HUMMING_MOE_GEMM_TYPE: Literal["indexed", "grouped", "auto"] | None = None
     VLLM_DEEPEPLL_NVFP4_DISPATCH: bool = False
     VLLM_V1_USE_OUTLINES_CACHE: bool = False
-    VLLM_TPU_BUCKET_PADDING_GAP: int = 0
-    VLLM_TPU_MOST_MODEL_LEN: int | None = None
     VLLM_TPU_USING_PATHWAYS: bool = False
     VLLM_USE_DEEP_GEMM: bool = True
     VLLM_MOE_USE_DEEP_GEMM: bool = True
@@ -192,6 +196,7 @@ if TYPE_CHECKING:
     VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER: bool = True
     VLLM_USE_FLASHINFER_MOE_INT4: bool = False
     VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR: str | None = None
+    VLLM_FLASHINFER_AUTOTUNE_SKIP_OPS: list[str] | None = None
     VLLM_FLASHINFER_ALLREDUCE_BACKEND: Literal["auto", "trtllm", "mnnvl"] = "auto"
     VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE: int = 394 * 1024 * 1024
     VLLM_XGRAMMAR_CACHE_MB: int = 0
@@ -201,6 +206,10 @@ if TYPE_CHECKING:
     VLLM_DISABLE_REQUEST_ID_RANDOMIZATION: bool = False
     VLLM_NIXL_SIDE_CHANNEL_HOST: str = "localhost"
     VLLM_NIXL_SIDE_CHANNEL_PORT: int = 5600
+    VLLM_P2P_SIDE_CHANNEL_HOST: str = "localhost"
+    VLLM_P2P_SIDE_CHANNEL_PORT: int = 5710
+    VLLM_EC_SIDE_CHANNEL_HOST: str = "localhost"
+    VLLM_EC_SIDE_CHANNEL_PORT: int = 5601
     VLLM_MOONCAKE_BOOTSTRAP_PORT: int = 8998
     VLLM_MOONCAKE_STORE_TIER_LOG: bool = False
     VLLM_MOONCAKE_LOAD_RECV_THREADS: int = 1
@@ -233,6 +242,7 @@ if TYPE_CHECKING:
     VLLM_ALLREDUCE_USE_SYMM_MEM: bool = True
     VLLM_ALLREDUCE_USE_FLASHINFER: bool = False
     VLLM_TUNED_CONFIG_FOLDER: str | None = None
+    VLLM_ENABLE_STARTUP_PLAN: bool = False
     VLLM_GPT_OSS_SYSTEM_TOOL_MCP_LABELS: set[str] = set()
     VLLM_USE_EXPERIMENTAL_PARSER_CONTEXT: bool = False
     VLLM_GPT_OSS_HARMONY_SYSTEM_INSTRUCTIONS: bool = False
@@ -524,6 +534,19 @@ def get_env_or_set_default(
 logger = logging.getLogger(__name__)
 
 
+def _deprecated_triton_attn_use_td() -> None:
+    """Warn that VLLM_TRITON_ATTN_USE_TD was renamed to VLLM_TRITON_USE_TD.
+
+    The old name is ignored; VLLM_TRITON_USE_TD is the supported variable.
+    """
+    if "VLLM_TRITON_ATTN_USE_TD" in os.environ:
+        logger.warning(
+            "VLLM_TRITON_ATTN_USE_TD is deprecated and will be removed in "
+            "v0.25. Use VLLM_TRITON_USE_TD instead."
+        )
+    return None
+
+
 def _resolve_rust_frontend_path() -> str | None:
     """Resolve the Rust frontend binary path.
 
@@ -579,13 +602,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_BATCH_INVARIANT": lambda: bool(int(os.getenv("VLLM_BATCH_INVARIANT", "0"))),
     # Use tensor descriptors for Q/K/V loads and output stores in the
     # Triton unified-attention kernel.  Enables HW 2D block reads on
-    # Intel Xe2/Xe3; the non-TD branch is dead-code-eliminated at Triton
+    # Intel XPU; the non-TD branch is dead-code-eliminated at Triton
     # compile time so other platforms see no overhead.  Tri-state override:
     # unset (default) lets the `triton_attn` backend auto-select per
     # platform (currently auto-enabled on XPU only); ``1`` forces TD on;
     # ``0`` forces TD off.  Useful for A/B benchmarking the TD path.
-    "VLLM_TRITON_ATTN_USE_TD": lambda: {"1": True, "0": False}.get(
-        os.getenv("VLLM_TRITON_ATTN_USE_TD", "").strip()
+    "VLLM_TRITON_USE_TD": lambda: {"1": True, "0": False}.get(
+        os.getenv("VLLM_TRITON_USE_TD", "").strip()
     ),
     # If set, enable PyTorch's GPU<->CPU synchronization debug mode around
     # the worker's `execute_model` and `sample_tokens` calls. Valid values
@@ -594,6 +617,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_GPU_SYNC_CHECK": env_with_choices(
         "VLLM_GPU_SYNC_CHECK", None, ["warn", "error"]
     ),
+    # Deprecated: renamed to VLLM_TRITON_USE_TD.  Kept registered so it does
+    # not trip the unknown-env-var check; warns on use and is otherwise
+    # ignored.
+    "VLLM_TRITON_ATTN_USE_TD": lambda: _deprecated_triton_attn_use_td(),
     # Maximum number of compilation jobs to run in parallel.
     # By default this is the number of CPUs
     "MAX_JOBS": lambda: os.getenv("MAX_JOBS", None),
@@ -619,6 +646,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_DOCKER_BUILD_CONTEXT": lambda: (
         os.environ.get("VLLM_DOCKER_BUILD_CONTEXT", "").strip().lower() in ("1", "true")
     ),
+    # Build provenance metadata embedded in official vllm-openai images.
+    # Set via Docker ENV at image build time; informational only.
+    "VLLM_BUILD_COMMIT": lambda: os.environ.get("VLLM_BUILD_COMMIT", "unknown"),
+    "VLLM_BUILD_PIPELINE": lambda: os.environ.get("VLLM_BUILD_PIPELINE", "local"),
+    "VLLM_BUILD_URL": lambda: os.environ.get("VLLM_BUILD_URL", ""),
+    "VLLM_IMAGE_TAG": lambda: os.environ.get("VLLM_IMAGE_TAG", ""),
     # CMake build type
     # If not set, defaults to "Debug" or "RelWithDebInfo"
     # Available options: "Debug", "Release", "RelWithDebInfo"
@@ -1058,6 +1091,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_MAX_N_SEQUENCES": lambda: int(
         os.environ.get("VLLM_MAX_N_SEQUENCES", "16384")
     ),
+    # Maximum number of prompts allowed in a single /v1/completions request
+    # when the prompt field is a list. Prevents unbounded fan-out of engine
+    # requests from a single API call. Default: 1024.
+    "VLLM_MAX_COMPLETION_PROMPTS": lambda: int(
+        os.environ.get("VLLM_MAX_COMPLETION_PROMPTS", "1024")
+    ),
     # a list of plugin names to load, separated by commas.
     # if this is not set, it means all plugins will be loaded
     # if this is set to an empty string, no plugins will be loaded
@@ -1151,11 +1190,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # CudaCommunicator on ROCm.
     "VLLM_ROCM_USE_AITER_CUSTOM_AR": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_CUSTOM_AR", "True").lower() in ("true", "1")
-    ),
-    # Whether to use aiter paged attention.
-    # By default is disabled.
-    "VLLM_ROCM_USE_AITER_PAGED_ATTN": lambda: (
-        os.getenv("VLLM_ROCM_USE_AITER_PAGED_ATTN", "False").lower() in ("true", "1")
     ),
     # use aiter linear op if aiter ops are enabled
     # The following list of related ops
@@ -1390,8 +1424,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_RAY_EXTRA_ENV_VARS_TO_COPY": lambda: os.getenv(
         "VLLM_RAY_EXTRA_ENV_VARS_TO_COPY", ""
     ),
-    # Whether to use S3 path for model loading in CI via RunAI Streamer
-    "VLLM_CI_USE_S3": lambda: os.environ.get("VLLM_CI_USE_S3", "0") == "1",
     # Use model_redirect to redirect the model name to a local folder.
     # `model_redirect` can be a json file mapping the model between
     # repo_id and local folder:
@@ -1439,16 +1471,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # an environment with potentially malicious users.
     "VLLM_V1_USE_OUTLINES_CACHE": lambda: (
         os.environ.get("VLLM_V1_USE_OUTLINES_CACHE", "0") == "1"
-    ),
-    # Gap between padding buckets for the forward pass. So we have
-    # 8, we will run forward pass with [16, 24, 32, ...].
-    "VLLM_TPU_BUCKET_PADDING_GAP": lambda: (
-        int(os.environ["VLLM_TPU_BUCKET_PADDING_GAP"])
-        if "VLLM_TPU_BUCKET_PADDING_GAP" in os.environ
-        else 0
-    ),
-    "VLLM_TPU_MOST_MODEL_LEN": lambda: maybe_convert_int(
-        os.environ.get("VLLM_TPU_MOST_MODEL_LEN", None)
     ),
     # Whether using Pathways
     "VLLM_TPU_USING_PATHWAYS": lambda: bool(
@@ -1546,6 +1568,26 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_NIXL_SIDE_CHANNEL_PORT": lambda: int(
         os.getenv("VLLM_NIXL_SIDE_CHANNEL_PORT", "5600")
     ),
+    # Address the P2P KV-offload control socket binds to. Defaults to
+    # ``localhost`` (loopback only); must be set to the node IP for
+    # cross-host P2P so remote peers can reach the socket.
+    "VLLM_P2P_SIDE_CHANNEL_HOST": lambda: os.getenv(
+        "VLLM_P2P_SIDE_CHANNEL_HOST", "localhost"
+    ),
+    # Port the P2P KV-offload control socket binds to.
+    "VLLM_P2P_SIDE_CHANNEL_PORT": lambda: int(
+        os.getenv("VLLM_P2P_SIDE_CHANNEL_PORT", "5710")
+    ),
+    # IP address used for the EC connector's ZMQ side channel
+    # (producer ROUTER bind, consumer DEALER dial).
+    "VLLM_EC_SIDE_CHANNEL_HOST": lambda: os.getenv(
+        "VLLM_EC_SIDE_CHANNEL_HOST", "localhost"
+    ),
+    # Port for the EC connector's ZMQ side channel; advertised to peers
+    # via `ec_transfer_params.peer_port` on the producer's response.
+    "VLLM_EC_SIDE_CHANNEL_PORT": lambda: int(
+        os.getenv("VLLM_EC_SIDE_CHANNEL_PORT", "5601")
+    ),
     # Port used for Mooncake handshake between remote agents.
     "VLLM_MOONCAKE_BOOTSTRAP_PORT": lambda: int(
         os.getenv("VLLM_MOONCAKE_BOOTSTRAP_PORT", "8998")
@@ -1576,6 +1618,18 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR": lambda: os.getenv(
         "VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR", None
     ),
+    # Comma-separated FlashInfer op names to exclude from autotuning, using
+    # the heuristic fallback tactic instead. Unset: skip "fp4_gemm" when the
+    # CuTe-DSL NVFP4 linear kernel is selected. Empty: skip nothing.
+    "VLLM_FLASHINFER_AUTOTUNE_SKIP_OPS": lambda: (
+        None
+        if "VLLM_FLASHINFER_AUTOTUNE_SKIP_OPS" not in os.environ
+        else [
+            v.strip()
+            for v in os.environ["VLLM_FLASHINFER_AUTOTUNE_SKIP_OPS"].split(",")
+            if v.strip()
+        ]
+    ),
     # Flashinfer fused allreduce backend.
     "VLLM_FLASHINFER_ALLREDUCE_BACKEND": env_with_choices(
         "VLLM_FLASHINFER_ALLREDUCE_BACKEND",
@@ -1592,15 +1646,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # This is used to prevent the kernel from running out of memory.
     "VLLM_MAX_TOKENS_PER_EXPERT_FP4_MOE": lambda: int(
         os.getenv("VLLM_MAX_TOKENS_PER_EXPERT_FP4_MOE", "163840")
-    ),
-    # Specifies the thresholds of the communicated tensor sizes under which
-    # vllm should use flashinfer fused allreduce. The variable should be a
-    # JSON with the following format:
-    #     { <world size>: <max size in mb> }
-    # Unspecified world sizes will fall back to
-    #     { 2: 64, 4: 1, <everything else>: 0.5 }
-    "VLLM_FLASHINFER_ALLREDUCE_FUSION_THRESHOLDS_MB": lambda: json.loads(
-        os.getenv("VLLM_FLASHINFER_ALLREDUCE_FUSION_THRESHOLDS_MB", "{}")
     ),
     # MoE routing strategy selector.
     # See `RoutingSimulator.get_available_strategies()` # for available
@@ -1721,6 +1766,16 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Each component first checks this folder, then the configs shipped with
     # vLLM (if any). If no JSON matches, it uses a hard-coded heuristic.
     "VLLM_TUNED_CONFIG_FOLDER": lambda: os.getenv("VLLM_TUNED_CONFIG_FOLDER", None),
+    # Opt-in persistence of the startup plan. When enabled, each worker
+    # saves the memory-profiling result (the suggested --kv-cache-memory value
+    # and the free-memory baseline) under VLLM_CACHE_ROOT/startup_plan/,
+    # keyed by a hardware+config fingerprint, and later boots auto-apply it
+    # -- skipping memory profiling -- when the fingerprint matches and
+    # current free memory >= the recorded baseline.
+    # See vllm/v1/worker/startup_plan.py.
+    "VLLM_ENABLE_STARTUP_PLAN": lambda: bool(
+        int(os.getenv("VLLM_ENABLE_STARTUP_PLAN", "0"))
+    ),
     # Valid values are container,code_interpreter,web_search_preview
     # ex VLLM_GPT_OSS_SYSTEM_TOOL_MCP_LABELS=container,code_interpreter
     # If the server_label of your mcp tool is not in this list it will
@@ -2055,13 +2110,14 @@ def compile_factors() -> dict[str, object]:
         "VLLM_DEBUG_DUMP_PATH",
         "VLLM_PORT",
         "VLLM_CACHE_ROOT",
+        # Runtime memory-plan persistence; does not affect compiled graphs.
+        "VLLM_ENABLE_STARTUP_PLAN",
         "LD_LIBRARY_PATH",
         "VLLM_SERVER_DEV_MODE",
         "VLLM_DP_MASTER_IP",
         "VLLM_DP_MASTER_PORT",
         "VLLM_NIXL_SIDE_CHANNEL_HOST",
         "VLLM_RANDOMIZE_DP_DUMMY_INPUTS",
-        "VLLM_CI_USE_S3",
         "VLLM_MODEL_REDIRECT_PATH",
         "VLLM_HOST_IP",
         "VLLM_FORCE_AOT_LOAD",
@@ -2080,6 +2136,7 @@ def compile_factors() -> dict[str, object]:
         "VLLM_DEBUG_LOG_API_SERVER_RESPONSE",
         "VLLM_TUNED_CONFIG_FOLDER",
         "VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR",
+        "VLLM_FLASHINFER_AUTOTUNE_SKIP_OPS",
         "VLLM_ENGINE_ITERATION_TIMEOUT_S",
         "VLLM_HTTP_TIMEOUT_KEEP_ALIVE",
         "VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS",
