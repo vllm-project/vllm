@@ -14,7 +14,7 @@ from vllm.utils.hashing import safe_hash
 logger = init_logger(__name__)
 
 ProfilerKind = Literal["torch", "cuda", "proton"]
-ProtonBackend = Literal["cupti", "roctracer"]
+ProtonBackend = Literal["cupti", "rocprofiler"]
 ProtonContext = Literal["shadow", "python"]
 ProtonData = Literal["tree", "trace"]
 ProtonHook = Literal["triton"]
@@ -66,8 +66,7 @@ class ProfilerConfig:
     """Proton GPU backend. ``None`` lets Proton select the platform backend."""
 
     proton_mode: str | None = None
-    """Optional backend-specific Proton mode string, such as
-    ``periodic_flushing:format=hatchet``."""
+    """Optional backend-specific Proton mode string, such as ``pcsampling``."""
 
     proton_hook: ProtonHook | None = None
     """Optional Proton hook. Use ``triton`` to add Triton launch metadata."""

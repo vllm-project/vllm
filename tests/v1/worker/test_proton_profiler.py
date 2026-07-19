@@ -4,13 +4,15 @@
 import os
 from contextlib import nullcontext
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 import pytest
 from pydantic import ValidationError
 
-from vllm.config import ProfilerConfig
+from vllm.config import CUDAGraphMode, ProfilerConfig
 from vllm.profiler.wrapper import ProtonProfilerWrapper
+from vllm.v1.worker.gpu_worker import Worker
+from vllm.v1.worker.xpu_worker import XPUWorker
 
 
 def make_proton(
@@ -77,13 +79,13 @@ class TestProtonConfig:
             proton_profiler_dir=str(tmp_path),
             proton_context="python",
             proton_data="trace",
-            proton_backend="cupti",
+            proton_backend="rocprofiler",
             proton_mode="pcsampling",
             proton_hook="triton",
         )
         assert config.proton_context == "python"
         assert config.proton_data == "trace"
-        assert config.proton_backend == "cupti"
+        assert config.proton_backend == "rocprofiler"
         assert config.proton_mode == "pcsampling"
         assert config.proton_hook == "triton"
 
@@ -102,7 +104,7 @@ class TestProtonProfilerWrapper:
         wrapper.start()
 
         proton.start.assert_called_once_with(
-            name=os.path.join(tmp_path, "proton_rank_3"),
+            name=os.path.join(tmp_path, "proton_rank_3_run0"),
             context="python",
             data="trace",
             backend="cupti",
@@ -111,20 +113,22 @@ class TestProtonProfilerWrapper:
         )
         assert tmp_path.is_dir()
 
-    def test_finalizes_each_profile_and_uses_next_prefix(self, tmp_path):
+    def test_finalizes_each_profile_with_unique_output_names(self, tmp_path):
         proton = make_proton()
         proton.start.side_effect = [7, 8]
         wrapper, proton = make_wrapper(tmp_path, proton)
 
         wrapper.start()
         wrapper.stop()
-        wrapper.set_worker_name("request_rank_3")
         wrapper.start()
         wrapper.stop()
 
         assert proton.start.call_count == 2
+        assert proton.start.call_args_list[0].kwargs["name"] == os.path.join(
+            tmp_path, "proton_rank_3_run0"
+        )
         assert proton.start.call_args_list[1].kwargs["name"] == os.path.join(
-            tmp_path, "proton_request_rank_3"
+            tmp_path, "proton_rank_3_run1"
         )
         assert proton.deactivate.call_count == 2
         assert proton.finalize.call_count == 2
@@ -141,7 +145,7 @@ class TestProtonProfilerWrapper:
 
         proton.start.assert_called_once()
         assert proton.start.call_args.kwargs["name"] == os.path.join(
-            tmp_path, "proton_rank_3"
+            tmp_path, "proton_rank_3_run0"
         )
 
     def test_cuda_graph_capture_prepares_dormant_session(self, tmp_path):
@@ -165,7 +169,7 @@ class TestProtonProfilerWrapper:
         wrapper, proton = make_wrapper(tmp_path, proton_mode="pcsampling")
 
         with (
-            pytest.raises(ValueError, match="enable eager execution"),
+            pytest.raises(ValueError, match="disable CUDA graphs"),
             wrapper.capture_cuda_graphs(),
         ):
             pass
@@ -227,3 +231,30 @@ class TestProtonProfilerWrapper:
 
         proton.scope.assert_called_once_with("decode", metrics=metrics)
         assert context is not None
+
+
+def test_proton_is_not_initialized_when_cuda_graphs_are_disabled():
+    worker = MagicMock()
+    worker.vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+    worker.profiler_config.profiler = "proton"
+
+    context = Worker._get_proton_capture_context(worker)
+
+    worker._get_or_create_profiler.assert_not_called()
+    with context:
+        pass
+
+
+def test_xpu_worker_rejects_proton():
+    config = SimpleNamespace(
+        profiler_config=SimpleNamespace(profiler="proton"),
+    )
+
+    def initialize_worker(worker, *_args, **_kwargs):
+        worker.profiler_config = config.profiler_config
+
+    with (
+        patch.object(Worker, "__init__", autospec=True, side_effect=initialize_worker),
+        pytest.raises(ValueError, match="not supported by XPU workers"),
+    ):
+        XPUWorker(config, 0, 0, "tcp://localhost:1")

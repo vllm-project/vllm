@@ -43,6 +43,11 @@ class WorkerProfiler(ABC):
         self._profiling_for_iters = 0
         self._running = False
 
+    @property
+    def is_running(self) -> bool:
+        """Whether the underlying profiler is currently collecting data."""
+        return self._running
+
     @abstractmethod
     def _start(self) -> None:
         """Start the profiler."""
@@ -343,6 +348,7 @@ class ProtonProfilerWrapper(WorkerProfiler):
         self._mode = profiler_config.proton_mode
         self._hook = profiler_config.proton_hook
         self._session_id: int | None = None
+        self._run_id = 0
         self._capture_session_id: int | None = None
         self._capture_output_path = os.path.join(
             self._output_dir,
@@ -384,7 +390,7 @@ class ProtonProfilerWrapper(WorkerProfiler):
         if self._mode and self._mode.split(":", 1)[0] == "pcsampling":
             raise ValueError(
                 "Proton PC sampling is incompatible with CUDA graph capture; "
-                "enable eager execution."
+                "enable eager execution or disable CUDA graphs."
             )
         if self._running:
             yield
@@ -404,7 +410,9 @@ class ProtonProfilerWrapper(WorkerProfiler):
 
     @override
     def _start(self) -> None:
-        self._session_id = self._create_session(self._output_path)
+        output_path = f"{self._output_path}_run{self._run_id}"
+        self._session_id = self._create_session(output_path)
+        self._run_id += 1
 
     @override
     def _stop(self) -> None:

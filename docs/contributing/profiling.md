@@ -105,9 +105,10 @@ vllm serve meta-llama/Llama-3.1-8B-Instruct \
 Then use `/start_profile` and `/stop_profile` as shown above, or pass
 `--profile` to a vLLM benchmark. Each worker uses a topology- and
 rank-qualified output name, such as
-`proton_dp0_pp0_tp0_dcp0_ep0_rank0.hatchet`, so distributed workers do not
-overwrite one another. A `profile_prefix` is included when supplied. Each
-profile is finalized by `/stop_profile` and is ready to inspect immediately.
+`proton_dp0_pp0_tp0_dcp0_ep0_rank0_run0.hatchet`, so distributed workers and
+repeated profiling runs do not overwrite one another. A `profile_prefix` is
+included when supplied. Each profile is finalized by `/stop_profile` and is
+ready to inspect immediately.
 
 Backend-specific modes can be selected with `proton_mode`:
 
@@ -123,18 +124,19 @@ vllm serve meta-llama/Llama-3.1-8B-Instruct \
 ```
 
 PC sampling synchronizes the CUDA context and is therefore incompatible with
-CUDA graph capture. Use `--enforce-eager` when selecting a `pcsampling` mode.
+CUDA graph capture. Use `--enforce-eager` or disable CUDA graphs in the
+compilation config when selecting a `pcsampling` mode.
 
 The Proton-specific options are:
 
 - `proton_context`: `shadow` (default) or `python`
 - `proton_data`: `tree` (default) or `trace`
-- `proton_backend`: `cupti`, `roctracer`, or automatic
+- `proton_backend`: `cupti`, `rocprofiler`, or automatic
 - `proton_mode`: an optional backend mode string
 - `proton_hook`: `triton` to record Triton launch metadata, or unset
 
 Automatic backend selection is recommended. `cupti` is for NVIDIA GPUs and
-`roctracer` requires a ROCm installation. vLLM does not expose Proton's
+`rocprofiler` requires a ROCm installation. vLLM does not expose Proton's
 experimental instrumentation backend because current upstream Triton builds
 can produce profiles without timing metrics.
 
@@ -147,7 +149,7 @@ Inspect tree profiles with:
 
 ```bash
 proton-viewer -m time/ns \
-    proton_profile/proton_dp0_pp0_tp0_dcp0_ep0_rank0.hatchet
+    proton_profile/proton_dp0_pp0_tp0_dcp0_ep0_rank0_run0.hatchet
 ```
 
 Chrome traces (`proton_data: "trace"`) can be opened in

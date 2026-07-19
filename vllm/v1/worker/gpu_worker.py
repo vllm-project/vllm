@@ -785,13 +785,7 @@ class Worker(WorkerBase):
 
         cuda_graph_memory_bytes = 0
         if not self.model_config.enforce_eager:
-            capture_context: AbstractContextManager[None] = nullcontext()
-            if self.profiler_config.profiler == "proton":
-                self._get_or_create_profiler()
-                assert isinstance(self.profiler, ProtonProfilerWrapper)
-                capture_context = self.profiler.capture_cuda_graphs()
-
-            with capture_context:
+            with self._get_proton_capture_context():
                 cuda_graph_memory_bytes = self.model_runner.capture_model()
 
         # Compare actual vs estimated CUDA graph memory (if we did profiling)
@@ -931,6 +925,18 @@ class Worker(WorkerBase):
             encoder=self.compilation_config.encoder_compilation_time,
         )
 
+    def _get_proton_capture_context(self) -> AbstractContextManager[None]:
+        """Prepare Proton only when CUDA graphs will actually be captured."""
+        if (
+            self.profiler_config.profiler != "proton"
+            or self.vllm_config.compilation_config.cudagraph_mode == CUDAGraphMode.NONE
+        ):
+            return nullcontext()
+
+        self._get_or_create_profiler()
+        assert isinstance(self.profiler, ProtonProfilerWrapper)
+        return self.profiler.capture_cuda_graphs()
+
     def reset_mm_cache(self) -> None:
         self.model_runner.reset_mm_cache()
 
@@ -983,6 +989,8 @@ class Worker(WorkerBase):
             return nullcontext()
 
         self.profiler.step()
+        if not self.profiler.is_running:
+            return nullcontext()
 
         iteration_details = compute_iteration_details(scheduler_output)
 
