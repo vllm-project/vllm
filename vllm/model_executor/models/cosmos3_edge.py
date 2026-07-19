@@ -47,14 +47,8 @@ from .qwen3_vl import (
     Qwen3VLMultiModalProcessor,
     Qwen3VLProcessingInfo,
 )
-from .utils import (
-    WeightsMapper,
-    maybe_prefix,
-)
-from .vision import (
-    is_vit_use_data_parallel,
-    run_dp_sharded_mrope_vision_model,
-)
+from .utils import WeightsMapper, maybe_prefix
+from .vision import is_vit_use_data_parallel, run_dp_sharded_mrope_vision_model
 
 
 class Cosmos3EdgeVisionEncoder(Siglip2VisionTransformer):
