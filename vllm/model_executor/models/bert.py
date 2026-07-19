@@ -792,11 +792,6 @@ class BertForSequenceClassification(nn.Module, SupportsCrossEncoding, SupportsQu
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.bert.embed_input_ids(input_ids)
 
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
-        loader = AutoWeightsLoader(self)
-        loaded_params = loader.load_weights(weights)
-        return loaded_params
-
     def forward(
         self,
         input_ids: torch.Tensor | None,
@@ -844,11 +839,6 @@ class BertForTokenClassification(nn.Module):
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.bert.embed_input_ids(input_ids)
-
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
-        loader = AutoWeightsLoader(self)
-        loaded_params = loader.load_weights(weights)
-        return loaded_params
 
     def forward(
         self,

@@ -41,12 +41,7 @@ from .interfaces import (
     SupportsPP,
 )
 from .interfaces_base import VllmModelForPooling
-from .utils import (
-    AutoWeightsLoader,
-    WeightsMapper,
-    init_vllm_registered_model,
-    maybe_prefix,
-)
+from .utils import WeightsMapper, init_vllm_registered_model, maybe_prefix
 
 
 class NemotronVLProcessingInfo(BaseInternVLProcessingInfo):
@@ -526,11 +521,6 @@ class LlamaNemotronVLForEmbedding(LlamaNemotronVLChatModel, VllmModelForPooling)
     def _call_vision_model(self, pixel_values: torch.Tensor) -> torch.Tensor:
         """Override to handle SigLIP interface."""
         return self.vision_model(pixel_values)
-
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        """Override to use different weight mapping for SigLIP."""
-        loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
 class LlamaNemotronVLForSequenceClassification(

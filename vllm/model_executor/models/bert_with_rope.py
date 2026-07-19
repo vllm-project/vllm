@@ -31,11 +31,7 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.models.utils import (
-    AutoWeightsLoader,
-    WeightsMapper,
-    maybe_prefix,
-)
+from vllm.model_executor.models.utils import WeightsMapper, maybe_prefix
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
@@ -705,11 +701,6 @@ class GteNewForSequenceClassification(nn.Module, SupportsCrossEncoding):
             pooling=self.new.pooler,
             classifier=self.classifier,
         )
-
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
-        loader = AutoWeightsLoader(self)
-        loaded_params = loader.load_weights(weights)
-        return loaded_params
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.new.embed_input_ids(input_ids)

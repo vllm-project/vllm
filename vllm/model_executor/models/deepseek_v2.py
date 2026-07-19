@@ -85,7 +85,6 @@ from vllm.model_executor.model_loader.weight_utils import (
     maybe_remap_kv_scale_name,
 )
 from vllm.model_executor.models.utils import (
-    AutoWeightsLoader,
     extract_layer_index,
     sequence_parallel_chunk,
 )
@@ -1903,10 +1902,6 @@ class DeepseekV2ForCausalLM(
             num_experts=self.config.n_routed_experts,
             num_redundant_experts=0,
         )
-
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights)
 
 
 class DeepseekForCausalLM(DeepseekV2ForCausalLM):

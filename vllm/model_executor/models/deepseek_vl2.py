@@ -5,7 +5,7 @@
 """Inference-only Deepseek-VL2 model compatible with HuggingFace weights."""
 
 import math
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from typing import Annotated, Literal, TypeAlias
 
 import torch
@@ -52,12 +52,7 @@ from vllm.utils.tensor_schema import TensorSchema, TensorShape
 from vllm.utils.torch_utils import set_default_torch_dtype
 
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
-from .utils import (
-    AutoWeightsLoader,
-    WeightsMapper,
-    init_vllm_registered_model,
-    maybe_prefix,
-)
+from .utils import WeightsMapper, init_vllm_registered_model, maybe_prefix
 
 # The image token id may be various
 _IMAGE_TOKEN = "<image>"
@@ -619,8 +614,3 @@ class DeepseekVLV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         hidden_states: torch.Tensor,
     ) -> torch.Tensor | None:
         return self.language_model.compute_logits(hidden_states)
-
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self)
-        autoloaded_weights = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
-        return autoloaded_weights
