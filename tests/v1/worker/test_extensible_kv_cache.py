@@ -139,8 +139,9 @@ def _attention_config(spec: FullAttentionSpec, backend) -> tuple[KVCacheConfig, 
 
 
 def _free_buffers(runner: GPUModelRunner) -> None:
-    for buffer, _ in getattr(runner, "_extensible_kv_cache_buffers", []):
-        buffer.free()
+    buffers = getattr(runner, "extensible_kv_buffers", None)
+    if buffers is not None:
+        buffers.free()
 
 
 def test_kv_cache_num_segments_by_layer() -> None:
@@ -170,7 +171,7 @@ def test_extensible_split_layout_grows_both_halves() -> None:
         kv_caches = runner._reshape_kv_cache_tensors(raw_tensors, [BLOCK_SIZE])
         kv_cache = kv_caches["layer.0"]
         assert kv_cache.shape == (2, NUM_BLOCKS, BLOCK_SIZE, 8, 128)
-        [(buffer, bytes_per_block_per_segment)] = runner._extensible_kv_cache_buffers
+        [(buffer, bytes_per_block_per_segment)] = runner.extensible_kv_buffers.buffers
         assert buffer.num_segments == 2
         assert bytes_per_block_per_segment == spec.page_size_bytes // 2
 
@@ -206,7 +207,7 @@ def test_extensible_block_major_layout() -> None:
         kv_caches = runner._reshape_kv_cache_tensors(raw_tensors, [BLOCK_SIZE])
         kv_cache = kv_caches["layer.0"]
         assert kv_cache.shape == (NUM_BLOCKS, 2, BLOCK_SIZE, 8, 128)
-        [(buffer, bytes_per_block_per_segment)] = runner._extensible_kv_cache_buffers
+        [(buffer, bytes_per_block_per_segment)] = runner.extensible_kv_buffers.buffers
         assert buffer.num_segments == 1
         assert bytes_per_block_per_segment == spec.page_size_bytes
 
@@ -268,8 +269,8 @@ def test_extensible_mamba_grows_per_layer() -> None:
         )
         kv_caches = runner._reshape_kv_cache_tensors(raw_tensors, [BLOCK_SIZE])
         assert set(kv_caches) == set(layer_names)
-        assert len(runner._extensible_kv_cache_buffers) == len(layer_names)
-        for buffer, bytes_per_block_per_segment in runner._extensible_kv_cache_buffers:
+        assert len(runner.extensible_kv_buffers.buffers) == len(layer_names)
+        for buffer, bytes_per_block_per_segment in runner.extensible_kv_buffers.buffers:
             assert buffer.num_segments == 1
             assert bytes_per_block_per_segment == spec.page_size_bytes
 

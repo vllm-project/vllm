@@ -523,3 +523,44 @@ class ExtensibleTensor:
     def free(self) -> None:
         self._buffer.free()
         self._bytes_per_segment = 0
+
+
+class ExtensibleKVCacheBuffers:
+    """Grow-only physical backing for the KV cache: one CUDA virtual-memory
+    buffer per KV cache tensor, committed as a per-segment prefix of blocks.
+
+    `commit` maps (and zeroes) physical pages for additional blocks while
+    keeping every buffer's base pointer, existing data, and the logical views
+    built over the full reserved capacity stable.
+    """
+
+    def __init__(
+        self,
+        buffers: list[tuple[ExtensibleTensor, int]],
+        num_blocks_capacity: int,
+    ) -> None:
+        # Each entry is (buffer, bytes_per_block_per_segment).
+        self.buffers = buffers
+        self.num_blocks_capacity = num_blocks_capacity
+        self.num_blocks_committed = 0
+
+    def commit(self, num_blocks: int) -> None:
+        if num_blocks <= self.num_blocks_committed:
+            return
+        for buffer, bytes_per_block_per_segment in self.buffers:
+            # Zero only the freshly committed blocks; existing ones are left
+            # intact.
+            buffer.resize_per_segment_(
+                num_blocks * bytes_per_block_per_segment, zero_new=True
+            )
+        self.num_blocks_committed = num_blocks
+
+    @property
+    def physical_bytes(self) -> int:
+        return sum(buffer.physical_bytes for buffer, _ in self.buffers)
+
+    def free(self) -> None:
+        for buffer, _ in self.buffers:
+            buffer.free()
+        self.buffers = []
+        self.num_blocks_committed = 0
