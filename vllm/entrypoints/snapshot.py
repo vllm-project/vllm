@@ -69,6 +69,30 @@ UNION_IMPORTS = (
 CONTROL_ENV = frozenset(
     {"VLLM_SNAPSHOT", "VLLM_SNAPSHOT_ROOT", "VLLM_SNAPSHOT_RESTORED"}
 )
+# Explicit credential names only, NO suffix/pattern matching: policy vars
+# like HF_HUB_DISABLE_IMPLICIT_TOKEN end in _TOKEN but are import-affecting
+# (huggingface_hub freezes the value at import), so a pattern would silently
+# bake and mask the wrong auth policy. Credentials are never read at import
+# time; keeping them out of the dumped heap beats keying on them.
+# Invariant: secret-named vars never reach the dumped helper, never key the
+# snapshot, and never gate the compare; the restored process still inherits
+# the operator's live values via the payload env.
+SECRET_ENV = frozenset(
+    {
+        "HF_TOKEN",
+        "HUGGING_FACE_HUB_TOKEN",
+        "HF_API_KEY",
+        "AWS_SECRET_ACCESS_KEY",
+        "AWS_SESSION_TOKEN",
+        "OPENAI_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "AZURE_API_KEY",
+        "GITHUB_TOKEN",
+        "WANDB_API_KEY",
+        "VLLM_API_KEY",
+        "MODELSCOPE_API_TOKEN",
+    }
+)
 # Pins the helper is created under: default env leaves an OMP pool per nproc and
 # device fds; these reach 0 device fds with one residual libcuda driver thread.
 CREATION_PINS = {
@@ -138,6 +162,8 @@ def creation_env(env: dict[str, str] | None = None) -> dict[str, str]:
     # baked at helper start and cannot be refreshed post-restore. The paired
     # restore-side guard in _restore_serve refuses when the var is set.
     values.pop("PYTHONHASHSEED", None)
+    for name in SECRET_ENV:
+        values.pop(name, None)
     values.update(CREATION_PINS)
     return dict(sorted(values.items()))
 
@@ -170,7 +196,11 @@ def _env_value_hash(value: str) -> str:
 
 
 def environment_digest(env: dict[str, str]) -> str:
-    stable = {name: value for name, value in env.items() if name not in ENV_ALLOWLIST}
+    stable = {
+        name: value
+        for name, value in env.items()
+        if name not in ENV_ALLOWLIST and name not in SECRET_ENV
+    }
     return sha256_json(stable)
 
 
@@ -197,6 +227,8 @@ def environment_miss(
     # `recorded` holds per-variable value hashes (environment_record); hash the
     # live value the same way before comparing so a changed variable is named.
     for name in sorted(set(recorded) | set(live)):
+        if name in SECRET_ENV:
+            continue
         live_hash = _env_value_hash(live[name]) if name in live else None
         if recorded.get(name) != live_hash and name not in allowlist:
             return f"env.{name}"
@@ -1047,7 +1079,9 @@ def _run_create(
         dump_argv = _dump_argv(
             directory, process.pid, _payload_socket_ino(state["fd_identities"])
         )
-        result = subprocess.run(dump_argv, check=False)
+        # umask applies to the criu child only: image files land 0600 (criu
+        # creates them 0644 & ~umask); defense-in-depth inside the 0700 dir
+        result = subprocess.run(dump_argv, check=False, umask=0o077)
         if result.returncode != 0:
             raise RuntimeError(f"criu dump failed (status {result.returncode})")
         try:

@@ -14,7 +14,12 @@ from vllm.entrypoints.cli.launch import (
     cmd_init,
 )
 from vllm.entrypoints.cli.snapshot import SnapshotSubcommand
-from vllm.entrypoints.snapshot import maybe_restore_serve
+from vllm.entrypoints.snapshot import (
+    creation_env,
+    environment_miss,
+    environment_record,
+    maybe_restore_serve,
+)
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 
@@ -197,6 +202,35 @@ def test_restore_hook_refuses_pythonhashseed(monkeypatch, caplog):
     ]
     assert len(misses) == 1
     assert "PYTHONHASHSEED" in misses[0].getMessage()
+
+
+def test_creation_env_drops_secrets_keeps_policy_vars():
+    # Credentials never reach the dumped helper; policy vars that merely end
+    # in _TOKEN (import-affecting) stay in the keyed env.
+    env = {
+        "HF_TOKEN": "hf_secret",
+        "HF_HUB_DISABLE_IMPLICIT_TOKEN": "1",
+        "PATH": "/usr/bin",
+    }
+    values = creation_env(env)
+    assert "HF_TOKEN" not in values
+    assert values["HF_HUB_DISABLE_IMPLICIT_TOKEN"] == "1"
+
+
+def test_environment_miss_ignores_secrets_not_policy_vars():
+    # A live secret absent from the create-side record must not cold-fallback
+    # the restore; a policy-var difference must still be named.
+    recorded = environment_record({"PATH": "/usr/bin"})["values"]
+    live_with_secret = {"PATH": "/usr/bin", "HF_TOKEN": "hf_live"}
+    assert environment_miss(recorded, live_with_secret, frozenset()) is None
+    live_with_policy = {
+        "PATH": "/usr/bin",
+        "HF_HUB_DISABLE_IMPLICIT_TOKEN": "1",
+    }
+    assert (
+        environment_miss(recorded, live_with_policy, frozenset())
+        == "env.HF_HUB_DISABLE_IMPLICIT_TOKEN"
+    )
 
 
 def test_pgid_empty_reads_the_process_table(monkeypatch):
