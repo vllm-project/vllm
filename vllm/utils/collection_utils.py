@@ -122,13 +122,15 @@ def full_groupby(values: Iterable[_V], *, key: Callable[[_V], _K]):
 
 def swap_dict_values(obj: dict[_K, _V], key1: _K, key2: _K) -> None:
     """Swap values between two keys."""
-    v1 = obj.get(key1)
-    v2 = obj.get(key2)
-    if v1 is not None:
+    has1 = key1 in obj
+    has2 = key2 in obj
+    v1 = obj[key1] if has1 else None
+    v2 = obj[key2] if has2 else None
+    if has1:
         obj[key2] = v1
     else:
         obj.pop(key2, None)
-    if v2 is not None:
+    if has2:
         obj[key1] = v2
     else:
         obj.pop(key1, None)
