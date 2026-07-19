@@ -28,7 +28,12 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 )
 
 from .qwen3_dflash import DFlashQwen3ForCausalLM, DFlashQwen3Model
-from .utils import AutoWeightsLoader, maybe_prefix, process_eagle_weight
+from .utils import (
+    AutoWeightsLoader,
+    WeightsMapper,
+    maybe_prefix,
+    process_eagle_weight,
+)
 
 logger = init_logger(__name__)
 
@@ -173,13 +178,14 @@ class Qwen3DSparkForCausalLM(DFlashQwen3ForCausalLM):
         # confidence_head is not wired into inference yet; skip its weights.
         # embed_tokens / lm_head are optional; when omitted they are shared from
         # the target by load_dspark_model, so skip the unloaded params here.
-        skip_substrs = ["mask_embedding", "confidence_head"]
+        orig_to_new_substr = {"mask_embedding": None, "confidence_head": None}
         if not includes_embed_tokens:
-            skip_substrs.append("embed_tokens")
+            orig_to_new_substr["embed_tokens"] = None
         if not includes_lm_head:
-            skip_substrs.append("lm_head")
+            orig_to_new_substr["lm_head"] = None
         if not includes_draft_id_mapping:
-            skip_substrs.append("draft_id_to_target_id")
-        loader = AutoWeightsLoader(self, skip_substrs=skip_substrs)
-        loader.load_weights(model_weights.items())
+            orig_to_new_substr["draft_id_to_target_id"] = None
+        drop = WeightsMapper(orig_to_new_substr=orig_to_new_substr)
+        loader = AutoWeightsLoader(self)
+        loader.load_weights(model_weights.items(), mapper=drop)
         self.model._build_fused_kv_buffers()

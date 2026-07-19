@@ -4,6 +4,7 @@
 import itertools
 from collections.abc import Iterable
 
+import regex as re
 import torch
 from torch import nn
 from transformers import RobertaConfig
@@ -117,6 +118,10 @@ class RobertaClassificationHead(nn.Module):
 class RobertaEmbeddingModel(BertEmbeddingModel):
     """A model that uses Roberta to provide embedding functionalities."""
 
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_regex={re.compile(r"^(?!model\.)(?:roberta\.)?"): "model."},
+    )
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
         self.padding_idx: int = vllm_config.model_config.hf_config.pad_token_id
@@ -144,23 +149,6 @@ class RobertaEmbeddingModel(BertEmbeddingModel):
             return BertModel(**kwargs, embedding_class=RobertaEmbedding)
         else:
             return JinaRobertaModel(**kwargs)
-
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
-        weights_list = list(weights)
-        has_roberta_prefix = any(
-            name.startswith("roberta.") for name, _ in weights_list
-        )
-        if has_roberta_prefix:
-            # For models with the `roberta.` prefix e.g.
-            # `FacebookAI/roberta-base`
-            mapper = WeightsMapper(orig_to_new_prefix={"roberta.": "model."})
-        else:
-            # For models without the `roberta.` prefix e.g.
-            # `sentence-transformers/stsb-roberta-base-v2`
-            mapper = WeightsMapper(orig_to_new_prefix={"": "model."})
-
-        loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights_list, mapper=mapper)
 
 
 def filter_secondary_weights(

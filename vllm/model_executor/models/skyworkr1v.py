@@ -38,7 +38,12 @@ from .internvl import (
     BaseInternVLMultiModalProcessor,
     BaseInternVLProcessingInfo,
 )
-from .utils import AutoWeightsLoader, init_vllm_registered_model, maybe_prefix
+from .utils import (
+    AutoWeightsLoader,
+    WeightsMapper,
+    init_vllm_registered_model,
+    maybe_prefix,
+)
 
 
 class SkyworkR1VImagePixelInputs(TensorSchema):
@@ -411,19 +416,21 @@ class SkyworkR1VChatModel(nn.Module, SupportsMultiModal, SupportsPP):
         return self.language_model.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        skip_prefixes = [
-            "action_embed",
-            "temporal_embed",
-            "track_embed",
-            "track_embed_decoder",
-            "box_token",
-            "cg_criterion",
-            "cg_model",
-            "loc_encoder",
-            "loc_decoder",
-            "sam",
-            "temporal_token",
-            "track_token",
-        ]
-        loader = AutoWeightsLoader(self, skip_prefixes=skip_prefixes)
-        return loader.load_weights(weights)
+        loader = AutoWeightsLoader(self)
+        drop = WeightsMapper(
+            orig_to_new_prefix={
+                "action_embed": None,
+                "temporal_embed": None,
+                "track_embed": None,
+                "track_embed_decoder": None,
+                "box_token": None,
+                "cg_criterion": None,
+                "cg_model": None,
+                "loc_encoder": None,
+                "loc_decoder": None,
+                "sam": None,
+                "temporal_token": None,
+                "track_token": None,
+            }
+        )
+        return loader.load_weights(weights, mapper=drop)

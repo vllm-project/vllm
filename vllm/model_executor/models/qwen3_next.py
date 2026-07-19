@@ -785,6 +785,7 @@ class Qwen3NextForCausalLM(
         "in_proj_qkvz": ["in_proj_qkvz"],
         "in_proj_ba": ["in_proj_ba"],
     }
+    hf_to_vllm_mapper = WeightsMapper(orig_to_new_prefix={"mtp.": None})
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         config = vllm_config.model_config.hf_text_config
@@ -879,7 +880,3 @@ class Qwen3NextForCausalLM(
         hidden_states: torch.Tensor,
     ) -> torch.Tensor | None:
         return self.logits_processor(self.lm_head, hidden_states)
-
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self, skip_prefixes=["mtp."])
-        return loader.load_weights(weights)

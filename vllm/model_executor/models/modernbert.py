@@ -29,7 +29,7 @@ from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsCrossEncoding
 from .interfaces_base import attn_type, default_pooling_type
-from .utils import AutoWeightsLoader, WeightsMapper, autoload_weights, maybe_prefix
+from .utils import WeightsMapper, autoload_weights, maybe_prefix
 
 
 class ModernBertEmbeddings(nn.Module):
@@ -433,6 +433,7 @@ class ModernBertPredictionHead(nn.Module):
 @default_pooling_type(tok_pooling_type="ALL")
 class ModernBertForTokenClassification(nn.Module):
     is_pooling_model = True
+    hf_to_vllm_mapper = WeightsMapper(orig_to_new_prefix={"drop": None})
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -454,11 +455,6 @@ class ModernBertForTokenClassification(nn.Module):
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)
-
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
-        loader = AutoWeightsLoader(self, skip_prefixes=["drop"])
-        loaded_params = loader.load_weights(weights)
-        return loaded_params
 
     def forward(
         self,

@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import math
 from abc import abstractmethod
-from collections.abc import Iterable, Iterator, Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from functools import partial
 from typing import Annotated, Any, Literal, TypeAlias, TypeVar
 
@@ -69,7 +69,6 @@ from .interfaces import (
 )
 from .siglip import SiglipMLP
 from .utils import (
-    AutoWeightsLoader,
     WeightsMapper,
     init_vllm_registered_model,
     maybe_prefix,
@@ -714,11 +713,12 @@ class KeyeSiglipVisionModel(nn.Module):
     main_input_name = "pixel_values"
 
     hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_prefix={"vision_model.head.": None},
         orig_to_new_stacked={
             ".q_proj": (".qkv_proj", "q"),
             ".k_proj": (".qkv_proj", "k"),
             ".v_proj": (".qkv_proj", "v"),
-        }
+        },
     )
 
     def __init__(
@@ -777,10 +777,6 @@ class KeyeSiglipVisionModel(nn.Module):
             use_rope=use_rope,
             window_size=window_size,
         )
-
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self, skip_prefixes=["vision_model.head."])
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
 class Projector(nn.Module):

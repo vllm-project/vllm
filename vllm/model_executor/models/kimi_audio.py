@@ -571,18 +571,19 @@ class KimiAudioForConditionalGeneration(
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         """Load weights, skipping MIMO layers (TTS-only) for ASR."""
         # Filter out MIMO/TTS weights since we only do ASR (speech-to-text)
-        skipped_patterns = [
-            # Audio tower
-            "model.",
-            # MIMO/TTS
-            "mimo_layers.",
-            "mimo_output.",
-            "mimo_norm.",
-        ]
-
         # Load main model weights (LLM + projector) with mapper
-        loader = AutoWeightsLoader(self, skip_prefixes=skipped_patterns)
-        loaded = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+        drop = WeightsMapper(
+            orig_to_new_prefix={
+                # Audio tower
+                "model.": None,
+                # MIMO/TTS
+                "mimo_layers.": None,
+                "mimo_output.": None,
+                "mimo_norm.": None,
+            }
+        )
+        loader = AutoWeightsLoader(self)
+        loaded = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper | drop)
         return loaded
 
     @classmethod

@@ -1466,8 +1466,10 @@ class DeepseekV4ForCausalLM(
         return getattr(self.model, "_mtp_hidden_buffer", None)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self, skip_substrs=["mtp."])
-        loaded_params = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+        drop = WeightsMapper(orig_to_new_substr={"mtp.": None})
+        mapper = self.hf_to_vllm_mapper | drop
+        loader = AutoWeightsLoader(self)
+        loaded_params = loader.load_weights(weights, mapper=mapper)
         self.model.finalize_mega_moe_weights()
         self.model.finalize_mhc_broadcast_weights()
         return loaded_params

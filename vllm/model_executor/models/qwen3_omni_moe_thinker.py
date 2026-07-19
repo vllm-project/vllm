@@ -22,7 +22,7 @@
 # limitations under the License.
 """Inference-only Qwen3-Omni-Moe model (thinker part)."""
 
-from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from functools import partial
 from typing import Any, cast
 
@@ -100,12 +100,7 @@ from .qwen2_5_vl import (
     Qwen2_5_VLProcessingInfo,
 )
 from .qwen3_moe import Qwen3MoeForCausalLM, Qwen3MoeModel
-from .utils import (
-    AutoWeightsLoader,
-    WeightsMapper,
-    _merge_multimodal_embeddings,
-    maybe_prefix,
-)
+from .utils import WeightsMapper, _merge_multimodal_embeddings, maybe_prefix
 from .vision import get_vit_attn_backend
 
 logger = init_logger(__name__)
@@ -1602,6 +1597,8 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
 ):
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
+            "talker.": None,
+            "code2wav.": None,
             "thinker.lm_head.": "language_model.lm_head.",
             "thinker.model.": "language_model.model.",
             "thinker.": "",
@@ -1960,15 +1957,6 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
         hidden_states: torch.Tensor,
     ) -> torch.Tensor | None:
         return self.language_model.compute_logits(hidden_states)
-
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(
-            self,
-            skip_prefixes=["talker.", "code2wav."],
-        )
-        loaded_weights = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
-
-        return loaded_weights
 
     def _compute_audio_token_count(self, audio_feature_length: int) -> int:
         """Compute audio tokens from feature length using Qwen3-Omni formula."""
