@@ -57,10 +57,10 @@ variables:
   # CI/CD Variables 提供 (Settings -> CI/CD -> Variables):
   #   REGISTRY_HOST  = registry-cn-beijing.siflow.cn (末尾不带 /)
   #   REGISTRY_IMAGE = skyinfer/vllm (命名空间/镜像名, 不带 tag)
-  # 三类镜像共用该仓库, 用 tag 前缀区分:
-  #   base-<分支>-<sha9>-<日期>      完整编译的 base 镜像
-  #   release-<分支>-<sha9>-<日期>   发版镜像
-  #   unittest-<分支>-<sha9>-<日期>  单测依赖镜像
+  # 三类镜像共用该仓库, 用 tag 前缀区分 (末尾 dev<流水线编号> 区分同日多次构建):
+  #   base-<分支>-<sha9>-<日期>-dev<IID>      完整编译的 base 镜像
+  #   release-<分支>-<sha9>-<日期>-dev<IID>   发版镜像
+  #   unittest-<分支>-<sha9>-<日期>-dev<IID>  单测依赖镜像
   # 滑动 tag: base-latest / unittest-latest (release 不推滑动 tag, 每次用具体 tag)
   TEST_DEPS_IMAGE: ${REGISTRY_HOST}/${REGISTRY_IMAGE}:unittest-latest
   BASE_IMAGE_TAG: base-latest
@@ -83,14 +83,18 @@ variables:
   # 国内访问 HuggingFace 的镜像 (parser 测试需要下载 Qwen tokenizer)
   HF_ENDPOINT: https://hf-mirror.com
 
-# 镜像 tag 规则: <类型>-<分支>-<commit前9位>-<日期>, 如 base-develop-5da4717f4-20260706
+# 镜像 tag 规则: <类型>-<分支>-<commit前9位>-<日期>-dev<流水线编号>,
+#   如 base-develop-5da4717f4-20260706-dev45
 # 类型由各 job 的 IMAGE_TYPE 变量给出; 日期取流水线创建时间,
-# 保证同一条流水线各 job 算出的 tag 一致
+# 保证同一条流水线各 job 算出的 tag 一致。
+# dev<CI_PIPELINE_IID> 后缀: 项目级递增的流水线编号, 让同一天、同一 commit
+# 的多次构建产生不同 tag, 不再互相覆盖; 也方便按编号排序看同日多次构建。
 .export-image-tag: &export-image-tag
   - export SHORT_SHA=$(echo $CI_COMMIT_SHA | cut -c1-9)
   - export BUILD_DATE=$(echo $CI_PIPELINE_CREATED_AT | cut -c1-10 | tr -d '-')
   - export REF_NAME=${CI_COMMIT_BRANCH:-${SOURCE_BRANCH}}
-  - export IMAGE_TAG=${IMAGE_TYPE:-release}-${REF_NAME}-${SHORT_SHA}-${BUILD_DATE}
+  - export BUILD_SUFFIX=dev${CI_PIPELINE_IID}
+  - export IMAGE_TAG=${IMAGE_TYPE:-release}-${REF_NAME}-${SHORT_SHA}-${BUILD_DATE}-${BUILD_SUFFIX}
   - echo "IMAGE_TAG = ${IMAGE_TAG}"
   - echo "REGISTRY_USER = ${REGISTRY_USER}"
   - echo "REGISTRY_PASSWORD = ${REGISTRY_PASSWORD}"
