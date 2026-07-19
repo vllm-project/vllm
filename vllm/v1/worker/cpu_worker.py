@@ -55,9 +55,22 @@ class CPUWorker(Worker):
                 allowed_memory_nodes,
             )
 
-        torch.ops._C.init_cpu_memory_env([cpu_core.numa_node])
+        # On s390x, numa_node may be a synthetic book ID that doesn't
+        # correspond to a real memory node. Fall back to first visible node.
+        if cpu_core.numa_node in allowed_memory_nodes:
+            memory_node = cpu_core.numa_node
+        else:
+            logger.warning(
+                "CPU group key %s is not a valid memory node. "
+                "Falling back to memory node %s.",
+                cpu_core.numa_node,
+                allowed_memory_nodes[0],
+            )
+            memory_node = allowed_memory_nodes[0]
 
-        memory_status = get_memory_node_info(cpu_core.numa_node)
+        torch.ops._C.init_cpu_memory_env([memory_node])
+
+        memory_status = get_memory_node_info(memory_node)
         memory_fraction = vllm_config.cache_config.gpu_memory_utilization
         self.requested_cpu_memory = math.ceil(
             memory_status.total_memory * memory_fraction

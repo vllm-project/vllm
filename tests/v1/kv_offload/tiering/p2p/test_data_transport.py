@@ -47,7 +47,7 @@ class TestDataTransportBase:
     def test_config_fingerprint_deterministic(self):
         """Same config fields → same fingerprint."""
         view = self._make_view()
-        fields = {"model": "llama", "dtype": "float16", "block_size_factor": 1}
+        fields = {"model": "llama", "dtype": "float16", "blocks_per_chunk": 1}
         with patch("vllm.v1.kv_offload.tiering.p2p.data.nixl._NixlAgent", None):
             t1 = NixlTransport("test:1", view, config_fields=fields)
             t2 = NixlTransport("test:2", view, config_fields=fields)
@@ -182,6 +182,35 @@ class TestNixlTransportWithMockedAgent:
         result = transport.poll()
         assert result.done == ()
         assert result.failed == ()
+
+    def test_poll_peer_id_scopes_to_peer(self):
+        """poll(peer_id) drains only that peer's transfers.
+
+        Regression: the transport is shared across peer sessions (e.g. a
+        single prefiller serving a DP>1 decoder). An unscoped poll by one
+        session used to consume and discard sibling sessions' completions,
+        starving them until timeout. poll(peer_id) must leave other peers'
+        transfers inflight.
+        """
+        transport = self._make_transport()
+        transport.add_remote_peer("peer:1", b"meta", 0x1000, 8, 1024)
+        transport.add_remote_peer("peer:2", b"meta", 0x2000, 8, 1024)
+
+        tid1 = transport.write_blocks("peer:1", [0], [1])
+        tid2 = transport.write_blocks("peer:2", [2], [3])
+        transport._agent.check_xfer_state.return_value = "DONE"
+
+        # Polling peer:1 must not consume peer:2's completed transfer.
+        result = transport.poll(peer_id="peer:1")
+        assert tid1 in result.done
+        assert tid2 not in result.done
+        assert tid1 not in transport._inflight
+        assert tid2 in transport._inflight
+
+        # peer:2 sees its own completion when it polls.
+        result2 = transport.poll(peer_id="peer:2")
+        assert tid2 in result2.done
+        assert tid2 not in transport._inflight
 
     def test_cancel_removes_inflight(self):
         """cancel removes transfers and releases handles."""

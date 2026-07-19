@@ -31,10 +31,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
-from vllm.model_executor.model_loader.weight_utils import (
-    default_weight_loader,
-    maybe_remap_kv_scale_name,
-)
 from vllm.multimodal.inputs import NestedTensors
 from vllm.transformers_utils.config import set_default_rope_theta
 from vllm.transformers_utils.repo_utils import get_hf_file_bytes
@@ -44,12 +40,33 @@ from .qwen2 import Qwen2MLP as Qwen3MLP
 from .qwen3 import Qwen3ForCausalLM
 from .utils import (
     AutoWeightsLoader,
+    WeightsMapper,
     get_draft_quant_config,
     maybe_prefix,
     process_eagle_weight,
 )
 
 logger = init_logger(__name__)
+
+
+_SLIDING_ATTENTION = "sliding_attention"
+
+
+def _dflash_layer_causal(config: Qwen3Config, layer_idx: int) -> bool:
+    """``dflash_config.causal`` overrides all layers; else only SWA layers causal."""
+    override = (getattr(config, "dflash_config", None) or {}).get("causal")
+    if override is not None:
+        return override
+    layer_types = getattr(config, "layer_types", None)
+    return bool(layer_types) and layer_types[layer_idx] == _SLIDING_ATTENTION
+
+
+def dflash_has_any_non_causal(config: Qwen3Config) -> bool:
+    """Whether the draft needs a non-causal-capable backend, resolved from config
+    (config mirror of the model's ``get_draft_attn_causal``, usable pre-build)."""
+    return not all(
+        _dflash_layer_causal(config, i) for i in range(config.num_hidden_layers)
+    )
 
 
 def _resolve_layer_attention(
@@ -79,33 +96,27 @@ def _resolve_layer_attention(
     dflash_config = getattr(config, "dflash_config", None) or {}
     layer_types = getattr(config, "layer_types", None)
     use_swa = dflash_config.get("use_swa", False)
-    config_causal = dflash_config.get("causal", None)
 
-    SLIDING_ATTENTION = "sliding_attention"
     any_sliding = False
     if layer_types is not None:
-        num_sliding = sum(lt == SLIDING_ATTENTION for lt in layer_types)
+        num_sliding = sum(lt == _SLIDING_ATTENTION for lt in layer_types)
         any_sliding = num_sliding > 0
-        all_sliding = num_sliding == len(layer_types)
-        if any_sliding and not all_sliding:
-            # Mixed sliding/full attention needs per-layer causal metadata and
-            # multiple KV-cache groups, which DFlash does not yet support.
+        # Mixed sliding/full attention needs multiple KV groups (V2 runner only).
+        if (
+            0 < num_sliding < len(layer_types)
+            and not get_current_vllm_config().use_v2_model_runner
+        ):
             raise NotImplementedError(
-                "DFlash does not yet support mixed sliding/full attention via "
-                "layer_types; see "
-                "https://github.com/vllm-project/vllm/issues/40898."
+                "DFlash drafters with mixed sliding/full attention require "
+                "the V2 model runner; relaunch with "
+                "VLLM_USE_V2_MODEL_RUNNER=1."
             )
 
-    default_causal = False
+    # ``use_swa`` forces SWA on every layer, even an all-full ``layer_types``.
     if layer_types is None or (use_swa and not any_sliding):
-        # An absent ``layer_types`` (or the all-"full_attention" one that may
-        # be synthesized when the checkpoint omits it) must not override
-        # ``dflash_config.use_swa``, which forces SWA on every layer.
         is_sliding = use_swa
     else:
-        is_sliding = layer_types[layer_idx] == SLIDING_ATTENTION
-        # Full-attention layers default non-causal; SWA layers default causal.
-        default_causal = is_sliding
+        is_sliding = layer_types[layer_idx] == _SLIDING_ATTENTION
 
     sliding_window = None
     if is_sliding:
@@ -118,8 +129,7 @@ def _resolve_layer_attention(
                 "dflash_config.swa_window_size or the top-level sliding_window."
             )
 
-    causal = config_causal if config_causal is not None else default_causal
-    return sliding_window, causal
+    return sliding_window, _dflash_layer_causal(config, layer_idx)
 
 
 class DFlashQwen3Attention(nn.Module):
@@ -207,8 +217,7 @@ class DFlashQwen3Attention(nn.Module):
             attn_type=attn_type,
             sinks=self.attention_sink_bias,
         )
-        # NOTE: `causal` is currently unused here, but will be needed in the future
-        # to support models with different causality per-layer.
+        self.causal = causal
         self.q_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
         self.k_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
 
@@ -321,6 +330,17 @@ class DFlashQwen3DecoderLayer(nn.Module):
 
 @support_torch_compile
 class DFlashQwen3Model(nn.Module):
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_substr={"midlayer.": "layers.0."},
+        orig_to_new_stacked={
+            ".q_proj": (".qkv_proj", "q"),
+            ".k_proj": (".qkv_proj", "k"),
+            ".v_proj": (".qkv_proj", "v"),
+            ".gate_proj": (".gate_up_proj", 0),
+            ".up_proj": (".gate_up_proj", 1),
+        },
+    )
+
     def __init__(
         self,
         *,
@@ -612,51 +632,26 @@ class DFlashQwen3Model(nn.Module):
         hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states
 
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        stacked_params_mapping = [
-            (".qkv_proj", ".q_proj", "q"),
-            (".qkv_proj", ".k_proj", "k"),
-            (".qkv_proj", ".v_proj", "v"),
-            (".gate_up_proj", ".gate_proj", 0),
-            (".gate_up_proj", ".up_proj", 1),
-        ]
-        params_dict = dict(self.named_parameters())
-        loaded_params: set[str] = set()
-        tp_rank = get_tensor_model_parallel_rank()
+    def _preprocess(
+        self, weights: Iterable[tuple[str, torch.Tensor]]
+    ) -> Iterable[tuple[str, torch.Tensor]]:
         tp_size = get_tensor_model_parallel_world_size()
+        tp_rank = get_tensor_model_parallel_rank()
         for name, loaded_weight in weights:
-            if "midlayer." in name:
-                name = name.replace("midlayer.", "layers.0.")
-            if "scale" in name:
-                name = maybe_remap_kv_scale_name(name, params_dict)
-                if name is None:
-                    continue
             if "attention_sink_bias" in name:
-                if name not in params_dict:
-                    continue
                 # Sink bias is per-head; shard it across TP ranks like the
                 # attention heads themselves.
-                param = params_dict[name]
                 heads_per_rank = loaded_weight.shape[0] // tp_size
-                head_start = tp_rank * heads_per_rank
-                narrow_weight = loaded_weight.narrow(0, head_start, heads_per_rank)
-                param.data.copy_(narrow_weight)
-                loaded_params.add(name)
-                continue
-            for param_name, weight_name, shard_id in stacked_params_mapping:
-                if weight_name not in name:
-                    continue
-                name = name.replace(weight_name, param_name)
-                param = params_dict[name]
-                weight_loader = param.weight_loader
-                weight_loader(param, loaded_weight, shard_id)
-                break
-            else:
-                param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                weight_loader(param, loaded_weight)
-            loaded_params.add(name)
-        return loaded_params
+                loaded_weight = loaded_weight.narrow(
+                    0, tp_rank * heads_per_rank, heads_per_rank
+                )
+            yield name, loaded_weight
+
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(
+            self._preprocess(weights), mapper=self.hf_to_vllm_mapper
+        )
 
 
 class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
@@ -709,6 +704,14 @@ class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
     ) -> torch.Tensor:
         return self.model(input_ids, positions, inputs_embeds)
 
+    def get_draft_kv_cache_layer_names(self) -> list[str]:
+        return [layer.self_attn.attn.layer_name for layer in self.model.layers]
+
+    def get_draft_attn_causal(self) -> list[bool]:
+        """Per-layer attention causality, aligned with
+        get_draft_kv_cache_layer_names."""
+        return [layer.self_attn.causal for layer in self.model.layers]
+
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
@@ -746,6 +749,14 @@ class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
         needs_squeeze = hidden_states.dim() == 1
         if needs_squeeze:
             hidden_states = hidden_states.unsqueeze(0)
+        expected = self.model.fc.input_size
+        if hidden_states.shape[-1] != expected:
+            raise ValueError(
+                f"DFlash drafter expects {expected} concatenated aux hidden "
+                f"features but received {hidden_states.shape[-1]}. This usually "
+                "means the draft model's target_layer_ids reference layers that "
+                "do not exist in the target model (incompatible draft/target pair)."
+            )
         result = self.model.fc(hidden_states)
         if needs_squeeze:
             result = result.squeeze(0)
