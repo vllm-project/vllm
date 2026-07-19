@@ -45,3 +45,14 @@ def test_swap_dict_values(obj, key1, key2):
         assert obj[key1] == original_obj[key2]
     else:
         assert key1 not in obj
+@pytest.mark.parametrize(
+    ("obj", "key1", "key2", "expected"),
+    [
+        ({"a": None, "b": "Y"}, "a", "b", {"a": "Y", "b": None}),
+        ({"a": "X", "b": None}, "a", "b", {"a": None, "b": "X"}),
+        ({"a": None, "b": None}, "a", "b", {"a": None, "b": None}),
+    ],
+)
+def test_swap_dict_values_preserves_none(obj, key1, key2, expected):
+    swap_dict_values(obj, key1, key2)
+    assert obj == expected
