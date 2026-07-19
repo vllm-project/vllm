@@ -280,3 +280,52 @@ def test_extra_args_preserves_custom_objects_and_shared_containers():
     params = SamplingParams(extra_args=extra_args)
     assert params.extra_args["first"][0] is custom
     assert params.extra_args["first"] is params.extra_args["second"]
+
+
+class TestAllowedTokenIdsVocabValidation:
+    """Regression tests for GHSA-wr27-mx79-rg6c: allowed_token_ids must be
+    validated against model output vocab size, not tokenizer length."""
+
+    def test_accept_last_valid_id(self):
+        config = MockModelConfig()
+        vocab_size = config.get_vocab_size()
+        params = SamplingParams(allowed_token_ids=[vocab_size - 1])
+        params.verify(config, None, None, None)
+
+    def test_reject_id_equal_to_vocab_size(self):
+        config = MockModelConfig()
+        vocab_size = config.get_vocab_size()
+        params = SamplingParams(allowed_token_ids=[vocab_size])
+        with pytest.raises(VLLMValidationError, match="out-of-vocab"):
+            params.verify(config, None, None, None)
+
+    def test_reject_id_exceeding_vocab_size(self):
+        config = MockModelConfig()
+        vocab_size = config.get_vocab_size()
+        params = SamplingParams(allowed_token_ids=[vocab_size + 100])
+        with pytest.raises(VLLMValidationError, match="out-of-vocab"):
+            params.verify(config, None, None, None)
+
+    def test_reject_negative_id(self):
+        config = MockModelConfig()
+        params = SamplingParams(allowed_token_ids=[-1])
+        with pytest.raises(VLLMValidationError, match="out-of-vocab"):
+            params.verify(config, None, None, None)
+
+    def test_reject_mixed_valid_and_invalid(self):
+        config = MockModelConfig()
+        vocab_size = config.get_vocab_size()
+        params = SamplingParams(allowed_token_ids=[0, vocab_size])
+        with pytest.raises(VLLMValidationError, match="out-of-vocab"):
+            params.verify(config, None, None, None)
+
+    def test_reject_empty_list(self):
+        config = MockModelConfig()
+        params = SamplingParams(allowed_token_ids=[])
+        with pytest.raises(VLLMValidationError, match="empty"):
+            params.verify(config, None, None, None)
+
+    def test_accept_valid_ids(self):
+        config = MockModelConfig()
+        params = SamplingParams(allowed_token_ids=[0, 1, 512, 1023])
+        params.verify(config, None, None, None)
