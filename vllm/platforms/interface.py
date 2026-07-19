@@ -64,32 +64,6 @@ def in_wsl() -> bool:
     return "microsoft" in " ".join(platform.uname()).lower()
 
 
-def _indexer_aligned_block_size(
-    attn_block_size: int, index_kpool: int, mamba_page_size: int
-) -> int:
-    """Round a hybrid model's attention block size up to one the kpool
-    sparse indexer supports.
-
-    The indexer storage block (``block_size / index_kpool``) must be one of
-    DeepGEMM paged-MQA's supported sizes {32, 64}, i.e. ``block_size`` in
-    {512, 1024} for ``index_kpool=16`` (e.g. GLM-5-Next). Fails closed when
-    even the largest valid block cannot cover the mamba state page (larger
-    storage blocks are unverified).
-    """
-    valid_block_sizes = [index_kpool * 32, index_kpool * 64]
-    for candidate in valid_block_sizes:
-        if candidate >= attn_block_size:
-            return candidate
-    raise ValueError(
-        f"The mamba state page ({mamba_page_size} bytes) needs an attention "
-        f"block of {attn_block_size} tokens to fit inside the attention "
-        f"page, but the kpool sparse indexer only supports block sizes "
-        f"{valid_block_sizes} (storage block 32 or 64). Increase tensor "
-        f"parallelism to shard the mamba state or use a wider KV cache "
-        f"dtype to grow the attention page."
-    )
-
-
 class PlatformEnum(enum.Enum):
     """Enumeration of supported hardware platforms."""
 
@@ -934,9 +908,14 @@ class Platform:
             )
             index_kpool = getattr(model_config.hf_text_config, "index_kpool", None)
             if index_kpool and index_kpool > 1:
-                attn_block_size = _indexer_aligned_block_size(
-                    attn_block_size, index_kpool, mamba_page_size
-                )
+                from vllm.utils.deep_gemm import PAGED_MQA_PAGE_SIZES
+
+                # kpool sparse indexer: the storage block (block_size /
+                # index_kpool) is virtually split into paged-MQA pool pages,
+                # so block_size must be a multiple of index_kpool times the
+                # smallest supported page (512 for GLM-5-Next).
+                pool_align = index_kpool * min(PAGED_MQA_PAGE_SIZES)
+                attn_block_size = pool_align * cdiv(attn_block_size, pool_align)
 
         if cache_config.block_size < attn_block_size:
             cache_config.block_size = attn_block_size

@@ -239,6 +239,7 @@ from .utils import (
     KVBlockZeroer,
     add_kv_sharing_layers_to_kv_cache_groups,
     bind_kv_cache,
+    compressed_kernel_block_size,
     copy_kv_cache_blocks_inplace,
     prepare_kernel_block_sizes,
     sanity_check_mm_encoder_outputs,
@@ -7381,18 +7382,16 @@ class GPUModelRunner(
                     num_blocks = raw_tensor.numel() // kv_cache_spec.page_size_bytes
                 if isinstance(kv_cache_spec, AttentionSpec):
                     has_attn = True
-                    # For MLA with compression (storage_block_size !=
-                    # block_size, e.g. the indexer kpool / DeepseekV4), the
-                    # cache is addressed at `storage_block_size` granularity:
-                    # the metadata builder emits slot_mapping that is a linear
-                    # index into a (num_blocks, storage_block_size, head_size)
-                    # buffer. Such caches must NOT be virtually split into
-                    # kernel blocks, since splitting would both inflate the
-                    # block count beyond the allocated buffer and desync the
-                    # layout from the slot_mapping.
+                    # Compressed MLA (storage_block_size != block_size, e.g.
+                    # the indexer kpool / DeepseekV4) is never split into
+                    # attention kernel blocks; it is split into its own pool
+                    # pages when the storage block exceeds one (see
+                    # compressed_kernel_block_size).
                     if kv_cache_spec.storage_block_size != kv_cache_spec.block_size:
-                        kernel_num_blocks = num_blocks
-                        shape_block_size = kv_cache_spec.storage_block_size
+                        shape_block_size = compressed_kernel_block_size(kv_cache_spec)
+                        kernel_num_blocks = num_blocks * (
+                            kv_cache_spec.storage_block_size // shape_block_size
+                        )
                     else:
                         num_blocks_per_kv_block = (
                             kv_cache_spec.block_size // kernel_block_size

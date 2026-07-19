@@ -2477,24 +2477,6 @@ def test_get_kv_cache_config_mamba_hybrid_sharing_no_indexer():
     )
 
 
-def test_indexer_aligned_block_size():
-    """Hybrid models with a kpool indexer must pick the attention block from
-    the indexer-valid sizes (storage block 32/64 -> block 512/1024 at
-    index_kpool=16), rounding the mamba-driven requirement up, and fail
-    closed when even the largest valid block cannot cover the mamba page."""
-    from vllm.platforms.interface import _indexer_aligned_block_size
-
-    # GLM-5-Next fp8 (656 B/token MLA page), per-TP mamba-driven block sizes
-    # as computed by _align_hybrid_block_size (64-token kernel alignment):
-    # TP4 needs 320 -> 512 (the floor), TP2 needs 576 -> 1024.
-    assert _indexer_aligned_block_size(320, 16, 175_360) == 512
-    assert _indexer_aligned_block_size(576, 16, 350_720) == 1024
-    assert _indexer_aligned_block_size(1024, 16, 350_720) == 1024
-    # TP1 needs 1088: storage block 128 is unverified -> fail closed.
-    with pytest.raises(ValueError, match="tensor parallelism"):
-        _indexer_aligned_block_size(1088, 16, 701_440)
-
-
 def test_get_kv_cache_capacity_after_scheduler_unwrap():
     """max_concurrency must survive the scheduler-config unwrap.
 

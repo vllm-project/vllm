@@ -71,12 +71,14 @@ class Glm5NextIndexerCache(DeepseekV32IndexerCache):
     The indexer shares one block with the co-located MLA (a single
     ``MLAAttentionSpec`` / block_table), so ``block_size`` is the model-wide
     ``cache_config.block_size``. DeepGEMM's paged-MQA kernel
-    (``csrc/apis/attention.hpp``) requires ``block_kv`` — which equals
-    ``storage_block_size`` here — to be exactly 32 or 64. With
-    ``index_kpool = 16`` that means ``--block-size 1024`` (sm90) or ``512``
-    (sm100). A smaller block (e.g. the default 64) silently collapses
-    ``storage_block_size`` (64 // 16 = 4) and only fails later at the opaque
-    C++ assert; ``get_kv_cache_spec`` guards this up front instead.
+    (``csrc/apis/attention.hpp``) requires ``block_kv`` to be exactly 32 or
+    64, so the storage block is virtually split into pool pages of the
+    largest such size that tiles it (``storage_kernel_block_size``); this
+    needs ``block_size`` to be a multiple of ``index_kpool * 32`` (512 for
+    ``index_kpool = 16``). A smaller block (e.g. the default 64) silently
+    collapses ``storage_block_size`` (64 // 16 = 4) and only fails later at
+    the opaque C++ assert; ``get_kv_cache_spec`` guards this up front
+    instead.
     """
 
     def __init__(
@@ -104,23 +106,18 @@ class Glm5NextIndexerCache(DeepseekV32IndexerCache):
         assert isinstance(spec, MLAAttentionSpec)
         spec = replace(spec, compress_ratio=self._index_kpool)
 
-        # storage_block_size (= block_size // index_kpool) is forwarded to
-        # DeepGEMM paged-MQA as block_kv, which must be 32 or 64. Since the
-        # indexer shares the MLA block (one block_table), block_size comes from
-        # cache_config.block_size and must be sized so the division lands on
-        # 32/64 -- i.e. --block-size = index_kpool * 64 (sm90) / * 32 (sm100).
+        # DeepGEMM paged-MQA takes block_kv in {32, 64}; the storage block
+        # (= block_size // index_kpool) is virtually split into pool pages of
+        # the largest such size that tiles it, so it must be a multiple of 32.
         storage_block_size = spec.block_size // self._index_kpool
-        assert spec.block_size % self._index_kpool == 0 and storage_block_size in (
-            32,
-            64,
+        assert (
+            spec.block_size % self._index_kpool == 0 and storage_block_size % 32 == 0
         ), (
-            "Glm5NextIndexerCache: kpool indexer requires cache block_size to be "
-            f"a multiple of index_kpool ({self._index_kpool}) and yield "
-            "storage_block_size (block_size // index_kpool) of 32 or 64 for "
-            f"DeepGEMM paged-MQA, got block_size={spec.block_size} -> "
-            f"storage_block_size={storage_block_size}. Set --block-size "
-            f"{self._index_kpool * 64} on sm90 (Hopper) or "
-            f"{self._index_kpool * 32} on sm100 (Blackwell)."
+            "Glm5NextIndexerCache: kpool indexer requires cache block_size to "
+            f"be a multiple of index_kpool * 32 ({self._index_kpool * 32}) so "
+            "that DeepGEMM paged-MQA pool pages (32 or 64 entries) tile the "
+            f"storage block, got block_size={spec.block_size} -> "
+            f"storage_block_size={storage_block_size}."
         )
         return spec
 

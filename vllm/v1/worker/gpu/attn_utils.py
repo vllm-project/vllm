@@ -34,6 +34,7 @@ from vllm.v1.worker.utils import (
     AttentionGroup,
     add_kv_sharing_layers_to_kv_cache_groups,
     bind_kv_cache,
+    compressed_kernel_block_size,
     prepare_kernel_block_sizes,
 )
 
@@ -287,10 +288,15 @@ def _reshape_kv_cache(
             continue
 
         kv_cache_spec = group.kv_cache_spec
-        if kv_cache_spec.storage_block_size != kv_cache_spec.block_size:
-            # use storage_block_size as the kernel block size for groups
-            # that apply a compression on block size (eg. DeepSeek V4).
-            kernel_block_size = kv_cache_spec.storage_block_size
+        if (
+            isinstance(kv_cache_spec, AttentionSpec)
+            and kv_cache_spec.storage_block_size != kv_cache_spec.block_size
+        ):
+            # use the compressed cache's own kernel page for groups that
+            # apply a compression on block size (eg. DeepSeek V4, GLM-5
+            # kpool): the storage block, or the pool page it is virtually
+            # split into when it exceeds the kernel's 64-entry maximum.
+            kernel_block_size = compressed_kernel_block_size(kv_cache_spec)
         else:
             kernel_block_size = kernel_block_sizes[group.kv_cache_group_id]
 

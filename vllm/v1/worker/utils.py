@@ -17,6 +17,7 @@ from vllm.model_executor.models.interfaces import MultiModalEmbeddings
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
+from vllm.utils.deep_gemm import PAGED_MQA_PAGE_SIZES
 from vllm.utils.math_utils import largest_power_of_2_divisor
 from vllm.utils.mem_utils import MemorySnapshot, format_gib
 from vllm.utils.torch_utils import async_tensor_h2d
@@ -51,6 +52,22 @@ def raise_if_nan_logits(num_nans_in_logits: Mapping[str, int]) -> None:
         if num_nans > 0
     }
     raise RuntimeError(f"NaNs detected in logits: {corrupted_requests}")
+
+
+def compressed_kernel_block_size(spec: AttentionSpec) -> int:
+    """Kernel page of a compressed cache (storage_block_size != block_size),
+    in storage entries.
+
+    Storage blocks up to DeepGEMM paged-MQA's largest supported page are
+    used natively (DeepseekV4, GLM-5 kpool at block 512/1024); larger ones
+    (GLM-5 kpool at larger blocks) are virtually split into the largest
+    supported page that tiles them.
+    """
+    storage = spec.storage_block_size
+    max_page, min_page = max(PAGED_MQA_PAGE_SIZES), min(PAGED_MQA_PAGE_SIZES)
+    if storage <= max_page:
+        return storage
+    return max_page if storage % max_page == 0 else min_page
 
 
 @triton.jit(do_not_specialize=["n_blocks"])
@@ -292,23 +309,31 @@ class AttentionGroup:
         kernel_block_size: int | None = None,
         num_metadata_builders: int = 1,
     ):
-        # Compressed MLA (e.g. the kpool indexer) is addressed at
-        # ``storage_block_size`` granularity and is not virtually split into
-        # kernel blocks. Rescaling its ``block_size`` down to
-        # ``kernel_block_size`` would shrink ``storage_block_size``
-        # (= block_size // compress_ratio) and desync the metadata builder from
-        # the cache layout (e.g. kpool: 1024 -> 64 makes storage 64 -> 4). Skip
-        # the rescale for such specs.
-        is_compressed_mla = (
+        # Compressed MLA (e.g. the kpool indexer) is addressed at pool-page
+        # granularity, not attention kernel blocks. Rescaling its
+        # ``block_size`` down to ``kernel_block_size`` would shrink
+        # ``storage_block_size`` (= block_size // compress_ratio) and desync
+        # the metadata builder from the cache layout (e.g. kpool: 1024 -> 64
+        # makes storage 64 -> 4). Rescale to the pool page instead, so the
+        # builder's block-table translation, slot mapping and paged-MQA
+        # metadata all land on it (a no-op when the storage block is itself
+        # a pool page, e.g. GLM-5 kpool at block 512/1024 and DeepseekV4).
+        if kernel_block_size is None:
+            kv_cache_spec_builder = self.kv_cache_spec
+        elif (
             isinstance(self.kv_cache_spec, AttentionSpec)
             and self.kv_cache_spec.storage_block_size != self.kv_cache_spec.block_size
-        )
-        if kernel_block_size is not None and not is_compressed_mla:
+        ):
+            compress_ratio = self.kv_cache_spec.block_size // (
+                self.kv_cache_spec.storage_block_size
+            )
+            kv_cache_spec_builder = self.kv_cache_spec.copy_with_new_block_size(
+                compressed_kernel_block_size(self.kv_cache_spec) * compress_ratio
+            )
+        else:
             kv_cache_spec_builder = self.kv_cache_spec.copy_with_new_block_size(
                 kernel_block_size
             )
-        else:
-            kv_cache_spec_builder = self.kv_cache_spec
         builder_cls = self.backend.get_builder_cls()
         builder_kwargs = {}
         if builder_cls.requires_block_table_width:
