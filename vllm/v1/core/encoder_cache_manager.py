@@ -5,6 +5,8 @@ from collections import OrderedDict
 from collections.abc import Mapping
 from typing import TYPE_CHECKING
 
+import torch
+
 from vllm.logger import init_logger
 from vllm.v1.request import Request
 
@@ -77,6 +79,17 @@ class EncoderCacheManager:
         # mm_hash of mm_data => num_encoder_embeds of the mm_data
         self.freeable: OrderedDict[str, int] = OrderedDict()
         self.freed: list[str] = []
+
+    @staticmethod
+    def make_profiling_reservation(
+        cache_size: int,
+        embed_size: int,
+        dtype: torch.dtype,
+        device: torch.device | str,
+    ) -> torch.Tensor | None:
+        if cache_size <= 0:
+            return None
+        return torch.empty((cache_size, embed_size), dtype=dtype, device=device)
 
     def reset(self) -> None:
         """Reset the encoder cache to its initial state.
