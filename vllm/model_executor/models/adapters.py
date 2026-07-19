@@ -219,7 +219,8 @@ def _create_pooling_model_cls(orig_cls: _T) -> _T:
 
             def default_load_weights(weights):
                 loader = AutoWeightsLoader(self)
-                return loader.load_weights(weights)
+                mapper = getattr(self, "hf_to_vllm_mapper", None)
+                return loader.load_weights(weights, mapper=mapper)
 
             load_weights = getattr(super(), "load_weights", default_load_weights)
             return load_weights(mapped_weights)
