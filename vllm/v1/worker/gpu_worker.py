@@ -975,19 +975,104 @@ class Worker(WorkerBase):
 
         iteration_details = compute_iteration_details(scheduler_output)
 
-        annotation = "".join(
-            [
-                "execute_context_",
-                str(iteration_details.num_ctx_requests),
-                "(",
-                str(iteration_details.num_ctx_tokens),
-                ")_generation_",
-                str(iteration_details.num_generation_requests),
-                "(",
-                str(iteration_details.num_generation_tokens),
-                ")",
-            ]
-        )
+        if self.vllm_config.profiler_config.detailed_trace_annotation:
+            # Compute roofline-model metrics per request, split by phase
+            # (context vs generation). These help estimate compute and
+            # memory intensity from the trace.
+            #
+            # Per-request quantities:
+            #   query_len = number of scheduled (new) tokens for this request
+            #   seq_len   = total sequence length (computed + scheduled tokens)
+            #
+            # Aggregated across requests in each phase
+            # (ctx_=context, gen_=generation):
+            #   seq_len_sum = sum of seq_len   (total KV length)
+            #   qq_compute  = sum of query_len*query_len
+            #                 (proxy for QK^T compute cost)
+            #   qk_compute  = sum of query_len*seq_len
+            #                 (proxy for QK^T compute cost for decode and
+            #                  chunked prefill)
+            #   total_scheduled_tokens = scheduled tokens across all requests
+            ctx_seq_len_sum = 0
+            ctx_qq_compute = 0
+            ctx_qk_compute = 0
+            gen_seq_len_sum = 0
+            gen_qq_compute = 0
+            gen_qk_compute = 0
+            total_scheduled_tokens = 0
+
+            # Build a map of req_id -> num_computed_tokens for all requests
+            new_req_ids = {
+                new_req.req_id for new_req in scheduler_output.scheduled_new_reqs
+            }
+            num_computed_tokens_ids = {
+                new_req.req_id: new_req.num_computed_tokens
+                for new_req in scheduler_output.scheduled_new_reqs
+            }
+            for req_id, num_computed_tokens in zip(
+                scheduler_output.scheduled_cached_reqs.req_ids,
+                scheduler_output.scheduled_cached_reqs.num_computed_tokens,
+            ):
+                num_computed_tokens_ids[req_id] = num_computed_tokens
+
+            # Accumulate per-phase metrics
+            for req_id, num_tokens in scheduler_output.num_scheduled_tokens.items():
+                query_len = num_tokens
+                total_scheduled_tokens += query_len
+                seq_len = num_computed_tokens_ids.get(req_id, 0) + query_len
+                if (
+                    scheduler_output.scheduled_cached_reqs.is_context_phase(req_id)
+                    or req_id in new_req_ids
+                ):
+                    ctx_seq_len_sum += seq_len
+                    ctx_qq_compute += query_len * query_len
+                    ctx_qk_compute += query_len * seq_len
+                else:
+                    gen_seq_len_sum += seq_len
+                    gen_qq_compute += query_len * query_len
+                    gen_qk_compute += query_len * seq_len
+            annotation = "".join(
+                [
+                    "execute_",
+                    str(total_scheduled_tokens),
+                    "_context_",
+                    str(iteration_details.num_ctx_requests),
+                    "(sq",
+                    str(iteration_details.num_ctx_tokens),
+                    "sk",
+                    str(ctx_seq_len_sum),
+                    "sqsq",
+                    str(ctx_qq_compute),
+                    "sqsk",
+                    str(ctx_qk_compute),
+                    ")_generation_",
+                    str(iteration_details.num_generation_requests),
+                    "(sq",
+                    str(iteration_details.num_generation_tokens),
+                    "sk",
+                    str(gen_seq_len_sum),
+                    "sqsq",
+                    str(gen_qq_compute),
+                    "sqsk",
+                    str(gen_qk_compute),
+                    ")",
+                ]
+            )
+        else:
+            annotation = "".join(
+                [
+                    "execute_context_",
+                    str(iteration_details.num_ctx_requests),
+                    "(",
+                    str(iteration_details.num_ctx_tokens),
+                    ")",
+                    "_generation_",
+                    str(iteration_details.num_generation_requests),
+                    "(",
+                    str(iteration_details.num_generation_tokens),
+                    ")",
+                ]
+            )
         return self.profiler.annotate_context_manager(annotation)
 
     @torch.inference_mode()
