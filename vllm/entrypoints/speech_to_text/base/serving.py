@@ -659,7 +659,7 @@ class SpeechToTextBaseServing(GenerateBaseServing):
                             ),
                             segments=[
                                 {
-                                    "id": f"segment_{index}",
+                                    "id": f"seg_{index}",
                                     "start": segment.start,
                                     "end": segment.end,
                                     "text": segment.text,
