@@ -15,7 +15,10 @@ import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
-from vllm.v1.attention.ops.fp8e4nv import convert_from_fp8e4m3
+from vllm.v1.attention.ops.fp8e4nv import (
+    FP8E4NV_EXTERN_LIBS,
+    convert_from_fp8e4m3,
+)
 from vllm.v1.attention.ops.triton_attention_helpers import (
     apply_alibi_to_score,
     apply_softcap,
@@ -53,11 +56,12 @@ def _cast_kv_tile(
     """
     if KV_QUANT_MODE == 1:
         if FP8_SOFTWARE_CONV:
-            # Software-decode the fp8 bytes to the activation dtype and apply the
-            # per-tensor scale in that dtype (no fp32).
-            return convert_from_fp8e4m3(data, Q.dtype) * tl.load(tensor_scale).to(
-                Q.dtype
-            )
+            # Match the native path's fp32 scale multiplication before the final
+            # cast to the activation dtype.
+            return (
+                convert_from_fp8e4m3(data, Q.dtype).to(tl.float32)
+                * tl.load(tensor_scale)
+            ).to(Q.dtype)
         if Q.dtype.is_fp8():
             return data.to(Q.dtype)
         return (data.to(tl.float32) * tl.load(tensor_scale)).to(Q.dtype)
@@ -1094,11 +1098,13 @@ def unified_attention(
         grid = (total_num_q_blocks, num_kv_heads, num_par_softmax_segments)
         tile_size = TILE_SIZE_DECODE
 
-    launch_kwargs: dict[str, int] = {}
+    launch_kwargs: dict[str, Any] = {}
     if launch_num_warps is not None:
         launch_kwargs["num_warps"] = launch_num_warps
     if launch_num_stages is not None:
         launch_kwargs["num_stages"] = launch_num_stages
+    if fp8_software_conv:
+        launch_kwargs["extern_libs"] = FP8E4NV_EXTERN_LIBS
 
     kernel_unified_attention[grid](
         output_ptr=out,
