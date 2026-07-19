@@ -19,7 +19,6 @@
 # limitations under the License.
 """Inference-only GPT-NeoX model compatible with HuggingFace weights."""
 
-from collections.abc import Iterable
 from itertools import islice
 
 import torch
@@ -47,7 +46,7 @@ from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsPP
 from .utils import (
-    AutoWeightsLoader,
+    WeightsMapper,
     make_empty_intermediate_tensors_factory,
     make_layers,
     maybe_prefix,
@@ -197,6 +196,10 @@ class GPTNeoXLayer(nn.Module):
 
 @support_torch_compile
 class GPTNeoXModel(nn.Module):
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_substr={"attention.bias": None, "attention.masked_bias": None}
+    )
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
 
@@ -247,11 +250,6 @@ class GPTNeoXModel(nn.Module):
             return IntermediateTensors({"hidden_states": hidden_states})
         hidden_states = self.final_layer_norm(hidden_states)
         return hidden_states
-
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        skip_substrs = ["attention.bias", "attention.masked_bias"]
-        loader = AutoWeightsLoader(self, skip_substrs=skip_substrs)
-        return loader.load_weights(weights)
 
 
 class GPTNeoXForCausalLM(nn.Module, SupportsPP):

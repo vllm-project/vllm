@@ -22,7 +22,7 @@
 # limitations under the License.
 """Inference-only Qwen3-ASR model."""
 
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 import regex as re
@@ -56,7 +56,6 @@ from vllm.model_executor.models.qwen3_omni_moe_thinker import (
     Qwen3OmniMoeThinkerMultiModalProcessor,
 )
 from vllm.model_executor.models.utils import (
-    AutoWeightsLoader,
     WeightsMapper,
     _merge_multimodal_embeddings,
     maybe_prefix,
@@ -89,9 +88,7 @@ from vllm.transformers_utils.configs.qwen3_asr import (
     Qwen3ASRThinkerConfig,
 )
 from vllm.transformers_utils.processor import cached_processor_from_config
-from vllm.transformers_utils.processors.qwen3_asr import (
-    Qwen3ASRProcessor,
-)
+from vllm.transformers_utils.processors.qwen3_asr import Qwen3ASRProcessor
 
 logger = init_logger(__name__)
 _ASR_TEXT_TAG = "<asr_text>"
@@ -363,6 +360,8 @@ class Qwen3ASRForConditionalGeneration(
 
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
+            "talker.": None,
+            "code2wav.": None,
             "thinker.lm_head.": "language_model.lm_head.",
             "thinker.model.": "language_model.model.",
             "thinker.": "",
@@ -536,15 +535,6 @@ class Qwen3ASRForConditionalGeneration(
         hidden_states: torch.Tensor,
     ) -> torch.Tensor | None:
         return self.language_model.compute_logits(hidden_states)
-
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(
-            self,
-            skip_prefixes=["talker.", "code2wav."],
-        )
-        loaded_weights = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
-
-        return loaded_weights
 
     def get_mrope_input_positions(
         self,

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import math
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from functools import partial
 from typing import Any
 
@@ -67,7 +67,7 @@ from .qwen2_5_vl import (
     Qwen2_5_VLVideoPixelInputs,
 )
 from .qwen2_vl import _create_qwen2vl_field_factory
-from .utils import AutoWeightsLoader, IntermediateTensors, WeightsMapper, maybe_prefix
+from .utils import IntermediateTensors, WeightsMapper, maybe_prefix
 
 
 class MiMoVisionMLP(Qwen2_5_VisionMLP):
@@ -1156,6 +1156,7 @@ class MiMoV2OmniForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsQ
     # To ensure correct weight loading and mapping.
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
+            "audio_tokenizer.": None,
             # audio encoder
             "speech_embeddings.": "audio_encoder.speech_embeddings.",
             # mapping for new names in checkpoint saved after transformers v4.52
@@ -1461,10 +1462,3 @@ class MiMoV2OmniForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsQ
         hidden_states: torch.Tensor,
     ) -> torch.Tensor | None:
         return self.language_model.compute_logits(hidden_states)
-
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        audio_loaded: set[str] = set()
-
-        loader = AutoWeightsLoader(self, skip_prefixes=["audio_tokenizer."])
-        auto_loaded = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
-        return audio_loaded | auto_loaded

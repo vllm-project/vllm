@@ -225,13 +225,11 @@ class AIMv2Model(torch.nn.Module):
         return x
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(
-            self,
-            # post_trunk_norm is optional (absent for clip-skip backbones).
-            skip_prefixes=(
-                ["trunk.post_trunk_norm."]
-                if self.trunk.post_trunk_norm is None
-                else None
-            ),
+        # post_trunk_norm is optional (absent for clip-skip backbones).
+        drop = WeightsMapper(
+            orig_to_new_prefix={"trunk.post_trunk_norm.": None}
+            if self.trunk.post_trunk_norm is None
+            else {}
         )
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper | drop)

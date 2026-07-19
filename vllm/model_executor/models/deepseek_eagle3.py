@@ -393,12 +393,9 @@ class Eagle3DeepseekV2ForCausalLM(LocalArgmaxMixin, DeepseekV2ForCausalLM):
         if not includes_embed_tokens:
             skip_substrs.append("embed_tokens")
 
-        loader = AutoWeightsLoader(
-            self,
-            skip_prefixes=None,
-            skip_substrs=skip_substrs,
-        )
-        loader.load_weights(model_weights.items())
+        drop = WeightsMapper(orig_to_new_substr=dict.fromkeys(skip_substrs, None))
+        loader = AutoWeightsLoader(self)
+        loader.load_weights(model_weights.items(), mapper=drop)
 
 
 # Aliases for compatibility

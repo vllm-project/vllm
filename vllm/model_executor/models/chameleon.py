@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from functools import cached_property
 from itertools import islice
 from typing import Annotated, Any, Literal
@@ -63,7 +63,6 @@ from .interfaces import (
     SupportsQuant,
 )
 from .utils import (
-    AutoWeightsLoader,
     WeightsMapper,
     make_empty_intermediate_tensors_factory,
     make_layers,
@@ -1029,8 +1028,3 @@ class ChameleonForConditionalGeneration(
             logits[:, image_tokens] = torch.finfo(logits.dtype).min
 
         return logits
-
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        skip_prefixes = ["lm_head."] if self.config.tie_word_embeddings else None
-        loader = AutoWeightsLoader(self, skip_prefixes=skip_prefixes)
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)

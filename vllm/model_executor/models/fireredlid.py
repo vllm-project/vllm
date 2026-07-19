@@ -15,7 +15,7 @@ This implementation follows the Whisper-style encoder-decoder pattern:
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from typing import Annotated, Literal
 
 import numpy as np
@@ -59,11 +59,7 @@ from .interfaces import (
     SupportsMultiModal,
     SupportsTranscription,
 )
-from .utils import (
-    AutoWeightsLoader,
-    WeightsMapper,
-    maybe_prefix,
-)
+from .utils import WeightsMapper, maybe_prefix
 from .whisper_utils import ISO639_1_SUPPORTED_LANGS
 
 logger = init_logger(__name__)
@@ -589,7 +585,15 @@ class FireRedLIDForConditionalGeneration(
             "net.0": "pre_layer_norm",
             "net.1": "linear_expand",
             "net.4": "linear_project",
-        }
+        },
+        orig_to_new_prefix={
+            # Position encoding buffers are rebuilt at init
+            "model.encoder.positional_encoding.pe": None,
+            "model.decoder.positional_encoding.pe": None,
+            # Tied output projection (shared with embedding)
+            "model.decoder.tgt_word_prj.weight": None,
+            "proj_out.": None,
+        },
     )
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -776,17 +780,3 @@ class FireRedLIDForConditionalGeneration(
     def post_process_output(cls, text: str) -> str:
         # Strip any leading/trailing whitespace from the raw LID output.
         return text.strip()
-
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(
-            self,
-            skip_prefixes=[
-                # Position encoding buffers are rebuilt at init
-                "model.encoder.positional_encoding.pe",
-                "model.decoder.positional_encoding.pe",
-                # Tied output projection (shared with embedding)
-                "model.decoder.tgt_word_prj.weight",
-                "proj_out.",
-            ],
-        )
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)

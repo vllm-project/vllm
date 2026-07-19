@@ -34,6 +34,23 @@ from .utils import AutoWeightsLoader, WeightsMapper
 
 
 class Fairseq2LlamaForCausalLM(LlamaForCausalLM):
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_prefix={
+            "decoder_frontend.embed.": "model.embed_tokens.",
+            "decoder.": "model.",
+            "final_proj.": "lm_head.",
+        },
+        orig_to_new_substr={
+            ".self_attn_layer_norm.": ".input_layernorm.",
+            ".ffn_layer_norm.": ".post_attention_layernorm.",
+            ".self_attn.output_proj.": ".self_attn.o_proj.",
+            ".ffn.gate_proj.": ".mlp.gate_proj.",
+            ".ffn.inner_proj.": ".mlp.up_proj.",
+            ".ffn.output_proj.": ".mlp.down_proj.",
+            ".layer_norm.": ".norm.",
+        },
+    )
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
         self.tp_rank = get_tensor_model_parallel_rank()
@@ -53,31 +70,9 @@ class Fairseq2LlamaForCausalLM(LlamaForCausalLM):
         weights_wrapped = dict(weights)
         weights = weights_wrapped[weights_wrapped["model_key"]].items()  # type: ignore
 
-        # remap keys
-        fs2_to_vllm_mapper = WeightsMapper(
-            orig_to_new_prefix={
-                "decoder_frontend.embed.": "model.embed_tokens.",
-                "decoder.": "model.",
-                "final_proj.": "lm_head.",
-            },
-            orig_to_new_substr={
-                ".self_attn_layer_norm.": ".input_layernorm.",
-                ".ffn_layer_norm.": ".post_attention_layernorm.",
-                ".self_attn.output_proj.": ".self_attn.o_proj.",
-                ".ffn.gate_proj.": ".mlp.gate_proj.",
-                ".ffn.inner_proj.": ".mlp.up_proj.",
-                ".ffn.output_proj.": ".mlp.down_proj.",
-                ".layer_norm.": ".norm.",
-            },
-        )
-        weights = fs2_to_vllm_mapper.apply(weights)
-
         params = dict(self.named_parameters())
 
-        loader = AutoWeightsLoader(
-            self,
-            skip_prefixes=(["lm_head."] if self.config.tie_word_embeddings else None),
-        )
+        loader = AutoWeightsLoader(self)
         return loader.load_weights(
             self.reshape_fairseq2_weights(name, loaded_weight, params)
             for name, loaded_weight in weights

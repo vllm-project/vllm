@@ -370,6 +370,7 @@ class BertModel(nn.Module, SupportsQuant):
     packed_modules_mapping = {"qkv_proj": ["query", "key", "value"]}
 
     hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_prefix={"pooler.": None},
         # Original google-bert checkpoints use the legacy `gamma`/`beta`
         # LayerNorm names; rename to vLLM's `weight`/`bias`.
         orig_to_new_substr={
@@ -413,10 +414,6 @@ class BertModel(nn.Module, SupportsQuant):
         )
 
         return self.encoder(hidden_states)
-
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self, skip_prefixes=["pooler."])
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
 class BertPoolingModel(BertModel):
