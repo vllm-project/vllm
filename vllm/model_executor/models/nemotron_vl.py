@@ -41,7 +41,12 @@ from .interfaces import (
     SupportsPP,
 )
 from .interfaces_base import VllmModelForPooling
-from .utils import WeightsMapper, init_vllm_registered_model, maybe_prefix
+from .utils import (
+    AutoWeightsLoader,
+    WeightsMapper,
+    init_vllm_registered_model,
+    maybe_prefix,
+)
 
 
 class NemotronVLProcessingInfo(BaseInternVLProcessingInfo):
@@ -556,7 +561,8 @@ class LlamaNemotronVLForSequenceClassification(
         self.pooler = DispatchPooler.for_seq_cls(pooler_config, classifier=self.score)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loaded_weights = super().load_weights(weights)
+        loader = AutoWeightsLoader(self)
+        loaded_weights = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
         # reranker checkpoint omits the inner LM seq-cls head
         # (`language_model.score.*`). It is unused by this outer model, but
