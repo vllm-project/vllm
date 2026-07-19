@@ -130,6 +130,32 @@ class TestNonStreaming:
         assert result.content is not None
         assert "Let me check" in result.content
 
+    def test_missing_func_start_orphan_invoke(self, mock_tokenizer, mock_request):
+        """Orphan invoke without the <｜DSML｜function_calls> wrapper is
+        still parsed as a tool call (see gh-48931)."""
+        text = _invoke("get_weather", _param("city", "true", "SF")) + DSML_FUNC_END
+        parser = DeepSeekV32Parser(mock_tokenizer)
+        result = parser.extract_tool_calls(text, mock_request)
+        assert result.tools_called
+        assert len(result.tool_calls) == 1
+        assert result.tool_calls[0].function.name == "get_weather"
+        args = json.loads(result.tool_calls[0].function.arguments)
+        assert args == {"city": "SF"}
+        assert result.content is None
+
+    def test_foreign_tool_calls_wrapper_rejected(self, mock_tokenizer, mock_request):
+        """An invoke inside the V4-style tool_calls wrapper stays plain
+        content: the orphan fallback must not fire inside a foreign
+        wrapper."""
+        text = _func_calls(
+            _invoke("get_weather", _param("city", "true", "SF")),
+        ).replace("function_calls", "tool_calls")
+        parser = DeepSeekV32Parser(mock_tokenizer)
+        result = parser.extract_tool_calls(text, mock_request)
+        assert not result.tools_called
+        assert result.tool_calls == []
+        assert result.content == text
+
     def test_non_string_params_json_parsed(self, mock_tokenizer, mock_request):
         text = _func_calls(
             _invoke(
@@ -253,6 +279,17 @@ class TestStreaming:
         assert json.loads(final_args) == {"location": "NYC"}
         assert '"arguments"' not in streamed_args
         assert final_args.startswith(streamed_args)
+
+    def test_missing_func_start_orphan_invoke(self, mock_tokenizer, mock_request):
+        """Orphan invoke without the <｜DSML｜function_calls> wrapper is
+        still parsed as a tool call (see gh-48931)."""
+        text = _invoke("get_weather", _param("city", "true", "SF")) + DSML_FUNC_END
+        parser = DeepSeekV32Parser(mock_tokenizer)
+        results = simulate_tool_streaming(parser, mock_request, list(text))
+        assert collect_function_name(results) == "get_weather"
+        args = json.loads(collect_tool_arguments(results))
+        assert args == {"city": "SF"}
+        assert "DSML" not in collect_content(results)
 
     def test_missing_invoke_end(self, mock_tokenizer, mock_request):
         text = (
