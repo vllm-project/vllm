@@ -289,7 +289,7 @@ class TranslationSegment(OpenAIBaseModel):
 
 
 class TranslationResponseVerbose(OpenAIBaseModel):
-    duration: str
+    duration: float
     """The duration of the input audio."""
 
     language: str

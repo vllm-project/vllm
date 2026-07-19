@@ -634,7 +634,7 @@ class SpeechToTextBaseServing(GenerateBaseServing):
                         TranscriptionResponseVerbose(
                             text=text,
                             language=request.language,
-                            duration=str(duration_s),
+                            duration=duration_s,
                             segments=total_segments,
                         ),
                     )
@@ -648,7 +648,7 @@ class SpeechToTextBaseServing(GenerateBaseServing):
                         TranslationResponseVerbose(
                             text=text,
                             language=request.language,
-                            duration=str(duration_s),
+                            duration=duration_s,
                             segments=total_segments,
                         ),
                     )
