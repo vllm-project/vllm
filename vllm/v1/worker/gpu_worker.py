@@ -175,6 +175,10 @@ class Worker(WorkerBase):
         # pending non-blocking PP send work from the previous iteration
         self._pp_send_work: list[Handle] = []
 
+        # Set by initialize_from_config when the extensible KV cache defers
+        # KV transfer init until the final cache size is committed.
+        self._deferred_kv_transfer_init = False
+
         # Resolved lazily on first sleep/wake; persists worker-process state.
         self._sleep_mode_backend: SleepModeBackend | None = None
 
@@ -745,7 +749,15 @@ class Worker(WorkerBase):
         # NOTE(Kuntai): This need to be done before `initialize_kv_cache`,
         # because `initialize_kv_cache` will inject kv cache groups not
         # related to kv cache connector (e.g. kv cache sharing layers).
-        ensure_kv_transfer_initialized(self.vllm_config, kv_cache_config)
+        # With the extensible KV cache, connectors must not register the KV
+        # cache memory before its final size is committed, so KV transfer
+        # init is deferred to `extend_kv_cache` (which receives the final,
+        # pristine kv_cache_config).
+        self._deferred_kv_transfer_init = (
+            extensible and self.vllm_config.kv_transfer_config is not None
+        )
+        if not self._deferred_kv_transfer_init:
+            ensure_kv_transfer_initialized(self.vllm_config, kv_cache_config)
 
         with self._maybe_get_memory_pool_context(tag="kv_cache"):
             self.model_runner.initialize_kv_cache(
@@ -763,9 +775,16 @@ class Worker(WorkerBase):
         ):
             self.model_runner._init_kv_zero_meta()
 
-    def extend_kv_cache(self, num_blocks: int) -> None:
+    def extend_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
+        """Commit the final KV cache size after warmup (extensible flow)."""
+        num_blocks = kv_cache_config.num_blocks
         self.cache_config.num_gpu_blocks = num_blocks
         self.model_runner.extend_kv_cache(num_blocks)
+        if self._deferred_kv_transfer_init:
+            # The final size is committed; now the connector may register the
+            # (physically backed) KV cache memory.
+            ensure_kv_transfer_initialized(self.vllm_config, kv_cache_config)
+            self.model_runner.init_deferred_kv_connector()
 
     def extensible_kv_cache_unsupported_reason(self) -> str | None:
         from vllm.utils.vmm_driver import vmm_unavailable_reason

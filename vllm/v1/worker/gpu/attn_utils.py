@@ -266,6 +266,61 @@ def _kv_cache_num_segments_by_layer(
     return num_segments_by_layer
 
 
+def narrow_kv_caches_to_num_blocks(
+    kv_caches: dict[str, Any],
+    attn_groups: Sequence[AttentionGroup],
+    kernel_block_sizes: list[int],
+    cache_dtype: str,
+    num_blocks: int,
+) -> dict[str, Any]:
+    """Return views of the KV caches narrowed to the first `num_blocks` blocks.
+
+    With the extensible KV cache, the layer views span the full reserved
+    capacity while only a block prefix is physically committed. KV connectors
+    must only see (and register) backed memory, so hand them views whose block
+    dimension is trimmed to the committed count. Since committed blocks form a
+    prefix of each layout segment, a narrow along the block dim covers exactly
+    the committed bytes of every segment.
+    """
+    narrowed: dict[str, Any] = dict(kv_caches)
+    for group in attn_groups:
+        if group.kv_cache_group_id >= len(kernel_block_sizes):
+            continue
+        kv_cache_spec = group.kv_cache_spec
+        for layer_name in group.layer_names:
+            kv_cache = kv_caches.get(layer_name)
+            if kv_cache is None:
+                continue
+            if isinstance(kv_cache_spec, AttentionSpec):
+                if kv_cache_spec.storage_block_size != kv_cache_spec.block_size:
+                    kernel_block_size = kv_cache_spec.storage_block_size
+                else:
+                    kernel_block_size = kernel_block_sizes[group.kv_cache_group_id]
+                num_blocks_per_kv_block = (
+                    kv_cache_spec.storage_block_size // kernel_block_size
+                )
+                layer_cache_dtype = (
+                    "auto"
+                    if kv_cache_spec.kv_quant_mode == KVQuantMode.NONE
+                    and not isinstance(kv_cache_spec, TQFullAttentionSpec)
+                    else cache_dtype
+                )
+                block_dim = group.backend.get_kv_cache_block_dim(
+                    kernel_block_size,
+                    kv_cache_spec.num_kv_heads,
+                    kv_cache_spec.head_size,
+                    cache_dtype_str=layer_cache_dtype,
+                )
+                narrowed[layer_name] = kv_cache.narrow(
+                    block_dim, 0, num_blocks * num_blocks_per_kv_block
+                )
+            elif isinstance(kv_cache_spec, MambaSpec):
+                narrowed[layer_name] = [
+                    state.narrow(0, 0, num_blocks) for state in kv_cache
+                ]
+    return narrowed
+
+
 def _allocate_extensible_kv_cache(
     kv_cache_config: KVCacheConfig,
     shared_layers: dict[str, str],
@@ -273,6 +328,7 @@ def _allocate_extensible_kv_cache(
     attn_groups: Sequence[AttentionGroup],
     kernel_block_sizes: list[int],
     cache_dtype: str,
+    rdma_capable: bool = False,
 ) -> tuple[dict[str, torch.Tensor], ExtensibleKVCacheBuffers]:
     """Reserve virtual address space for the full KV cache capacity but commit
     only one block per buffer. The returned raw tensors view the full capacity;
@@ -307,6 +363,7 @@ def _allocate_extensible_kv_cache(
                     max_num_bytes=kv_cache_tensor.size,
                     device=device,
                     num_segments=1,
+                    rdma_capable=rdma_capable,
                 )
                 buffers.append((packed_buffer, bytes_per_block))
                 packed_view = packed_buffer.full_view()
@@ -327,6 +384,7 @@ def _allocate_extensible_kv_cache(
                 max_num_bytes=kv_cache_tensor.size,
                 device=device,
                 num_segments=num_segments,
+                rdma_capable=rdma_capable,
             )
             buffers.append((buffer, bytes_per_block // num_segments))
             tensor = buffer.full_view()
@@ -681,6 +739,8 @@ def init_kv_cache(
             flattened_attn_groups,
             kernel_block_sizes,
             cache_dtype,
+            # KV connectors may register the cache for GPU-direct RDMA.
+            rdma_capable=vllm_config.kv_transfer_config is not None,
         )
     else:
         kv_cache_raw_tensors = _allocate_kv_cache(

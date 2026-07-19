@@ -9,7 +9,10 @@ from contextlib import suppress
 
 import torch
 
+from vllm.logger import init_logger
 from vllm.utils.vmm_driver import get_vmm_driver
+
+logger = init_logger(__name__)
 
 
 def _round_up(value: int, multiple: int) -> int:
@@ -25,10 +28,13 @@ class _VirtualBuffer:
     freely.
     """
 
-    def __init__(self, max_bytes: int, device_index: int) -> None:
+    def __init__(
+        self, max_bytes: int, device_index: int, rdma_capable: bool = False
+    ) -> None:
         self._driver = get_vmm_driver()
         self._driver.ensure_context(device_index)
         self.device_index = device_index
+        self._rdma_capable = rdma_capable
 
         self.granularity: int = self._driver.granularity(device_index)
         self.reserved_size: int = _round_up(max(max_bytes, 1), self.granularity)
@@ -84,7 +90,20 @@ class _VirtualBuffer:
         """Create one physical chunk of `size` bytes and map it at `offset`."""
         driver = self._driver
         driver.ensure_context(self.device_index)
-        handle = driver.create(size, self.device_index)
+        if self._rdma_capable:
+            try:
+                handle = driver.create(size, self.device_index, rdma_capable=True)
+            except RuntimeError as e:
+                logger.warning_once(
+                    "Failed to allocate GPU-direct-RDMA-capable memory (%s); "
+                    "falling back to standard allocation. KV transfers may "
+                    "not be able to use GPU-direct RDMA.",
+                    e,
+                )
+                self._rdma_capable = False
+                handle = driver.create(size, self.device_index)
+        else:
+            handle = driver.create(size, self.device_index)
 
         addr = self.base_ptr + offset
         try:
@@ -216,6 +235,7 @@ class ExtensibleTensor:
         max_num_bytes: int,
         device: torch.device | str | int | None = None,
         num_segments: int = 1,
+        rdma_capable: bool = False,
     ) -> None:
         if max_num_bytes < 0:
             raise ValueError("max_num_bytes must be non-negative.")
@@ -241,7 +261,9 @@ class ExtensibleTensor:
         self._max_num_bytes: int = max_num_bytes
         self._num_segments: int = num_segments
         self._segment_capacity_bytes: int = max_num_bytes // num_segments
-        self._buffer: _VirtualBuffer = _VirtualBuffer(max_num_bytes, self._device_index)
+        self._buffer: _VirtualBuffer = _VirtualBuffer(
+            max_num_bytes, self._device_index, rdma_capable=rdma_capable
+        )
         self._bytes_per_segment: int = 0
 
     @property

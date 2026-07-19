@@ -158,8 +158,9 @@ class Executor(ABC):
     def get_kv_cache_specs(self) -> list[dict[str, KVCacheSpec]]:
         return self.collective_rpc("get_kv_cache_spec")
 
-    def extend_kv_cache(self, num_blocks: int) -> None:
-        self.collective_rpc("extend_kv_cache", args=(num_blocks,))
+    def extend_kv_cache(self, kv_cache_configs: list[KVCacheConfig]) -> None:
+        """Commit the final KV cache size on all workers (extensible flow)."""
+        self.collective_rpc("extend_kv_cache", args=(kv_cache_configs,))
 
     @overload
     def collective_rpc(

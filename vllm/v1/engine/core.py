@@ -296,11 +296,14 @@ class EngineCore:
             has_kv_cache and vllm_config.cache_config.enable_extensible_kv_cache
         )
         if use_extensible_kv_cache:
-            if vllm_config.kv_transfer_config is not None:
+            if (
+                vllm_config.kv_transfer_config is not None
+                and not vllm_config.use_v2_model_runner
+            ):
                 raise ValueError(
-                    "enable_extensible_kv_cache=True is not supported with "
-                    "KV connectors: connectors register KV cache memory "
-                    "before the full physical size is committed."
+                    "enable_extensible_kv_cache=True with KV connectors "
+                    "requires the V2 model runner (which defers connector "
+                    "registration until the final KV cache size is committed)."
                 )
             # The workers' drivers must support virtual memory management
             # (e.g. WSL2 and non-GPU platforms do not); fall back gracefully.
@@ -369,7 +372,7 @@ class EngineCore:
                     kv_cache_configs,
                     max_model_len_before,
                 )
-            self.model_executor.extend_kv_cache(scheduler_kv_cache_config.num_blocks)
+            self.model_executor.extend_kv_cache(kv_cache_configs)
 
         elapsed = time.time() - start
         compile_time = vllm_config.compilation_config.compilation_time

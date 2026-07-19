@@ -59,6 +59,7 @@ from vllm.v1.worker.gpu.attn_utils import (
     get_kv_cache_spec,
     init_attn_backend,
     init_kv_cache,
+    narrow_kv_caches_to_num_blocks,
 )
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.buffer_utils import (
@@ -517,7 +518,29 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.vllm_config,
             extensible=extensible,
         )
+        self._kv_caches_dict = kv_caches_dict
+        # With the extensible flow, KV transfer init is deferred until the
+        # final KV cache size is committed, so this yields a no-op connector
+        # that init_deferred_kv_connector later replaces.
         self.kv_connector = get_kv_connector(self.vllm_config, kv_caches_dict)
+
+    def init_deferred_kv_connector(self) -> None:
+        """Create and register the KV connector after `extend_kv_cache`.
+
+        With the extensible KV cache, connectors must not register the cache
+        before its final size is physically committed. Registration views are
+        narrowed to the committed block count so connectors only see (and
+        register with e.g. RDMA) backed memory.
+        """
+        assert self.extensible_kv_buffers is not None
+        kv_caches = narrow_kv_caches_to_num_blocks(
+            self._kv_caches_dict,
+            [g for groups in self.attn_groups for g in groups],
+            self.kernel_block_sizes,
+            self.cache_config.cache_dtype,
+            self.kv_cache_config.num_blocks,
+        )
+        self.kv_connector = get_kv_connector(self.vllm_config, kv_caches)
 
     def ensure_kv_cache_blocks(self, num_blocks: int) -> None:
         """Commit at least `num_blocks` KV blocks when the extensible KV cache
