@@ -15,6 +15,7 @@ import torch
 
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.forward_context import get_forward_context, set_forward_context
+from vllm.model_executor.layers.fused_moe.fused_moe import zero_experts_compute_triton
 from vllm.model_executor.layers.fused_moe.layer import FusedMoE
 from vllm.model_executor.layers.fused_moe.router.zero_expert_router import (
     ZeroExpertRouter,
@@ -27,8 +28,6 @@ def zero_expert_moe(dist_init, default_vllm_config):
     """Create a FusedMoE layer with zero experts."""
     num_experts = 4
     top_k = 2
-    # hidden_size must be >= 256 for the zero expert identity kernel to
-    # produce output (its BLOCK_SIZE=256 causes grid=0 when hidden_dim<256).
     hidden_size = 256
     intermediate_size = 512
     zero_expert_num = 1
@@ -62,6 +61,63 @@ def zero_expert_moe(dist_init, default_vllm_config):
         layer._quant_method.process_weights_after_loading(layer.routed_experts)
 
         yield layer, vllm_config
+
+
+def _zero_expert_identity_reference(
+    expert_indices: torch.Tensor,
+    expert_scales: torch.Tensor,
+    num_experts: int,
+    hidden_states: torch.Tensor,
+) -> torch.Tensor:
+    """Plain-PyTorch ground truth for the identity zero-expert output:
+    output[t] = hidden_states[t] * sum_k(scales[t, k] where index[t, k] >= num_experts).
+    """
+    zero_scales = expert_scales.clone()
+    zero_scales[expert_indices < num_experts] = 0.0
+    scale_sum = zero_scales.sum(dim=-1, keepdim=True)
+    return (hidden_states.float() * scale_sum).to(hidden_states.dtype)
+
+
+@pytest.mark.parametrize("num_tokens", [1, 7, 128])
+# Includes dims that are NOT multiples of the kernel's BLOCK_SIZE (256) and one
+# below it: the old floor-division grid (hidden_dim // BLOCK_SIZE) dropped the
+# tail block (and produced grid=0, i.e. all-zeros, for hidden_dim < 256). The
+# ceil-div grid must now write every element for these shapes.
+@pytest.mark.parametrize("hidden_dim", [200, 257, 300, 768, 1000, 4096, 7168])
+@pytest.mark.parametrize("top_k", [2, 8])
+def test_zero_expert_identity_kernel_covers_all_dims(num_tokens, hidden_dim, top_k):
+    """zero_experts_compute_triton must match the PyTorch reference for arbitrary
+    hidden dims, including non-multiples of BLOCK_SIZE and dims below it."""
+    torch.manual_seed(0)
+    num_experts = 8
+    total_experts = num_experts + 2  # indices >= num_experts are zero experts
+
+    hidden_states = torch.randn(
+        num_tokens, hidden_dim, dtype=torch.float16, device="cuda"
+    )
+    expert_indices = torch.randint(
+        0, total_experts, (num_tokens, top_k), dtype=torch.int64, device="cuda"
+    )
+    expert_scales = torch.rand(
+        num_tokens, top_k, dtype=torch.float32, device="cuda"
+    )
+
+    expected = _zero_expert_identity_reference(
+        expert_indices, expert_scales, num_experts, hidden_states
+    )
+
+    # zero_experts_compute_triton mutates its index/scale args in place; pass clones.
+    out = zero_experts_compute_triton(
+        expert_indices.clone(),
+        expert_scales.clone(),
+        num_experts,
+        "identity",
+        hidden_states,
+    )
+
+    assert out.shape == hidden_states.shape
+    assert not torch.isnan(out).any(), "kernel produced NaNs"
+    torch.testing.assert_close(out, expected, atol=1e-3, rtol=1e-3)
 
 
 @pytest.mark.parametrize("num_tokens", [1, 32])
