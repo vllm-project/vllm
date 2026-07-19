@@ -157,10 +157,12 @@ def test_restore_hook_cold_fallback_logs_miss(monkeypatch, caplog, tmp_path):
     # environments where key computation itself would refuse.
     import vllm.entrypoints.snapshot as snapshot_module
 
+    monkeypatch.setattr(snapshot_module, "_entry_state", {})
     monkeypatch.setattr(sys, "platform", "linux")
     monkeypatch.setattr(sys, "argv", ["vllm", "serve", "some-model"])
     monkeypatch.setenv("VLLM_SNAPSHOT", "1")
     monkeypatch.delenv("VLLM_SNAPSHOT_RESTORED", raising=False)
+    monkeypatch.delenv("PYTHONHASHSEED", raising=False)
     monkeypatch.setenv("VLLM_SNAPSHOT_ROOT", str(tmp_path))
     monkeypatch.setattr(snapshot_module, "lookup_key", lambda env: {"stub": 1})
     with caplog.at_level("INFO", logger="vllm.entrypoints.snapshot"):
@@ -172,3 +174,37 @@ def test_restore_hook_cold_fallback_logs_miss(monkeypatch, caplog, tmp_path):
     ]
     assert len(misses) == 1
     assert "no snapshot" in misses[0].getMessage()
+
+
+def test_restore_hook_refuses_pythonhashseed(monkeypatch, caplog):
+    # A restored interpreter keeps its create-time hash seed, so a requested
+    # PYTHONHASHSEED can never be honored: the hook must miss explicitly,
+    # before any key lookup.
+    import vllm.entrypoints.snapshot as snapshot_module
+
+    monkeypatch.setattr(snapshot_module, "_entry_state", {})
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(sys, "argv", ["vllm", "serve", "some-model"])
+    monkeypatch.setenv("VLLM_SNAPSHOT", "1")
+    monkeypatch.delenv("VLLM_SNAPSHOT_RESTORED", raising=False)
+    monkeypatch.setenv("PYTHONHASHSEED", "0")
+    with caplog.at_level("INFO", logger="vllm.entrypoints.snapshot"):
+        assert maybe_restore_serve() is None
+    misses = [
+        record
+        for record in caplog.records
+        if "snapshot restore miss" in record.getMessage()
+    ]
+    assert len(misses) == 1
+    assert "PYTHONHASHSEED" in misses[0].getMessage()
+
+
+def test_pgid_empty_reads_the_process_table(monkeypatch):
+    # Emptiness comes from /proc, not pgrep (absent on slim images); a zombie
+    # still occupies its group until reaped.
+    import vllm.entrypoints.snapshot as snapshot_module
+
+    table = {10: (1, 42, 100, "Z")}
+    monkeypatch.setattr(snapshot_module, "process_table", lambda: table)
+    assert snapshot_module.pgid_empty(42) is False
+    assert snapshot_module.pgid_empty(43) is True

@@ -135,7 +135,8 @@ def canonical_env(env: dict[str, str] | None = None) -> dict[str, str]:
 def creation_env(env: dict[str, str] | None = None) -> dict[str, str]:
     values = canonical_env(env)
     # Create runs with PYTHONHASHSEED unset: the interpreter's hash secret is
-    # baked at helper start and cannot be refreshed post-restore.
+    # baked at helper start and cannot be refreshed post-restore. The paired
+    # restore-side guard in _restore_serve refuses when the var is set.
     values.pop("PYTHONHASHSEED", None)
     values.update(CREATION_PINS)
     return dict(sorted(values.items()))
@@ -563,17 +564,10 @@ def _leakers(pgids: set[int], targets: dict[int, tuple[int, int]]) -> list[int]:
 
 
 def pgid_empty(pgid: int) -> bool:
-    result = subprocess.run(
-        ["pgrep", "-g", str(pgid), "."],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode == 0:
-        return not result.stdout.strip()
-    if result.returncode == 1:
-        return True
-    raise RuntimeError(f"pgrep -g {pgid} failed rc={result.returncode}")
+    # /proc-based on purpose: no pgrep dependency (absent on slim images) and
+    # no exception path a post-commit reap could trip over. Zombies still
+    # occupy the group until their reaper collects them.
+    return all(row[1] != pgid for row in process_table().values())
 
 
 def kill_restored_group(*roots: int, deadline_s: float = REAP_DEADLINE) -> list[int]:
@@ -663,7 +657,7 @@ def _acquire_lock(root: Path, key: str) -> _KeyLock:
     # --force rmtree cannot invalidate what a restorer is reading.
     import fcntl
 
-    root.mkdir(parents=True, exist_ok=True)
+    root.mkdir(mode=0o700, parents=True, exist_ok=True)
     handle = (root / f"{key}.lock").open("w")
     fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
     return _KeyLock(handle)
@@ -804,6 +798,13 @@ def _post_restore_refresh() -> None:
         current_process().authkey = os.urandom(32)
     with contextlib.suppress(Exception):
         uuid._node = None  # type: ignore[attr-defined]
+    with contextlib.suppress(Exception):
+        # ssl rides in via the openai entrypoint imports, so OpenSSL's DRBG
+        # holds dump-time state; reseed so restores of one image do not share
+        # PRNG state
+        import ssl
+
+        ssl.RAND_add(os.urandom(32), 32.0)
 
 
 def _dispatch_serve() -> int:
@@ -827,6 +828,10 @@ def _helper_resume(payload: dict[str, Any], manifest_path: Path) -> int:
     os.environ.clear()
     os.environ.update(live)
     os.environ["VLLM_SNAPSHOT_RESTORED"] = "1"
+    control = payload.get("control_env") or {}
+    for name in ("VLLM_SNAPSHOT", "VLLM_SNAPSHOT_ROOT"):
+        if name in control:
+            os.environ[name] = str(control[name])
     cwd = payload.get("cwd")
     if isinstance(cwd, str):
         try:
@@ -919,11 +924,16 @@ def _prepare_directory(directory: Path, force: bool) -> None:
         if (directory / "MANIFEST.json").exists() and not force:
             raise RuntimeError(f"snapshot already exists, pass --force: {directory}")
         shutil.rmtree(directory)
-    (directory / "work").mkdir(parents=True)
-    (directory / "imgs").mkdir()
-    (directory / "dump.log").touch()
-    # 0700/0600: the criu images and logs hold full process memory, the
-    # recorded environment included
+    # 0700/0600 from creation (umask; chmod kept as belt-and-braces): the criu
+    # images and logs hold full process memory, the recorded environment
+    # included
+    old_umask = os.umask(0o077)
+    try:
+        (directory / "work").mkdir(parents=True)
+        (directory / "imgs").mkdir()
+        (directory / "dump.log").touch()
+    finally:
+        os.umask(old_umask)
     for entry in (directory, directory / "work", directory / "imgs"):
         os.chmod(entry, 0o700)
     os.chmod(directory / "dump.log", 0o600)
@@ -1317,7 +1327,19 @@ def _run_criu_restore(
         parent_sock.settimeout(ACK_TIMEOUT)
         write_frame(
             parent_sock,
-            {"argv": list(sys.argv), "env": live_env, "cwd": os.getcwd()},
+            {
+                "argv": list(sys.argv),
+                "env": live_env,
+                "cwd": os.getcwd(),
+                # live_env is CONTROL_ENV-stripped by construction; carry the
+                # operator's values separately so the restored server's
+                # environ matches what a cold start would keep
+                "control_env": {
+                    name: os.environ[name]
+                    for name in ("VLLM_SNAPSHOT", "VLLM_SNAPSHOT_ROOT")
+                    if name in os.environ
+                },
+            },
         )
         restored_pid = _wait_pidfile(process, run_dir / "pid", PIDFILE_TIMEOUT)
         os.kill(restored_pid, signal.SIGUSR2)
@@ -1348,8 +1370,14 @@ def _run_criu_restore(
         # reparented to criu as subreaper), and bounded-reap criu itself. The
         # wrapper's stop latency is the server's, never criu's daemon draining.
         status = _read_status_frame(parent_sock, timeout=None)
-        kill_restored_group(restored_pid, process.pid, deadline_s=5.0)
-        _wait_bounded(process)
+        try:
+            kill_restored_group(restored_pid, process.pid, deadline_s=5.0)
+            _wait_bounded(process)
+        except Exception:
+            # a post-commit reap failure must never cancel the real exit
+            # status: propagating from here reads as a miss upstream and
+            # cold-starts a second server
+            logger.warning("snapshot post-exit reap failed", exc_info=True)
         raise SystemExit(status)
     except BaseException as error:
         if not committed:
@@ -1387,6 +1415,15 @@ def _run_criu_restore(
 
 def _restore_serve() -> None:
     live_env = _entry_env()
+    if "PYTHONHASHSEED" in live_env:
+        # create bakes a random interpreter hash seed (creation_env pops the
+        # var), so restore can never honor a requested seed; refuse explicitly
+        # instead of surfacing as an accidental env-digest mismatch
+        logger.info(
+            "snapshot restore miss (PYTHONHASHSEED is set; a restored "
+            "interpreter cannot honor it)"
+        )
+        return
     key_obj = lookup_key(live_env)  # raises SnapshotKeyError -> miss
     key = key_from(key_obj)
     root = _snapshot_root()
