@@ -78,6 +78,38 @@ def _zero_expert_identity_reference(
     return (hidden_states.float() * scale_sum).to(hidden_states.dtype)
 
 
+def _make_zero_expert_routing(num_tokens, top_k, num_experts, num_zero_experts):
+    """Build deterministic routing that exercises the identity kernel on purpose.
+
+    Row ``r`` is assigned ``1 + (r % top_k)`` zero-expert slots (indices
+    ``>= num_experts``), so across the matrix rows have exactly one and several
+    zero experts. When ``num_tokens > 1`` the last row is given *no* zero expert
+    (all-normal), so the "sum of zero-expert scales is 0 -> output row is all
+    zeros" path is covered too. Every other row has at least one zero-expert slot
+    with a strictly positive scale, so a dropped tail block (which would leave 0
+    there) is always distinguishable from the reference -- including the
+    ``num_tokens=1`` case, which random routing could otherwise leave with no
+    zero expert at all.
+
+    Returns int64 ``expert_indices`` and positive fp32 ``expert_scales``, both on
+    CUDA, shaped ``[num_tokens, top_k]``.
+    """
+    indices = torch.empty(num_tokens, top_k, dtype=torch.int64)
+    for r in range(num_tokens):
+        n_zero = 0 if (num_tokens > 1 and r == num_tokens - 1) else 1 + (r % top_k)
+        for k in range(top_k):
+            if k < n_zero:
+                # Cycle through the distinct zero-expert ids.
+                indices[r, k] = num_experts + (k % num_zero_experts)
+            else:
+                indices[r, k] = k % num_experts  # a normal expert
+    # Strictly positive, varied scales (0.1 .. 0.7) so the written value is
+    # non-zero wherever a zero expert is routed.
+    flat = torch.arange(num_tokens * top_k, dtype=torch.float32)
+    scales = ((flat % 7) + 1).reshape(num_tokens, top_k) * 0.1
+    return indices.cuda(), scales.cuda()
+
+
 @pytest.mark.parametrize("num_tokens", [1, 7, 128])
 # Includes dims that are NOT multiples of the kernel's BLOCK_SIZE (256) and one
 # below it: the old floor-division grid (hidden_dim // BLOCK_SIZE) dropped the
@@ -90,16 +122,13 @@ def test_zero_expert_identity_kernel_covers_all_dims(num_tokens, hidden_dim, top
     hidden dims, including non-multiples of BLOCK_SIZE and dims below it."""
     torch.manual_seed(0)
     num_experts = 8
-    total_experts = num_experts + 2  # indices >= num_experts are zero experts
+    num_zero_experts = 2  # indices >= num_experts are zero experts
 
     hidden_states = torch.randn(
         num_tokens, hidden_dim, dtype=torch.float16, device="cuda"
     )
-    expert_indices = torch.randint(
-        0, total_experts, (num_tokens, top_k), dtype=torch.int64, device="cuda"
-    )
-    expert_scales = torch.rand(
-        num_tokens, top_k, dtype=torch.float32, device="cuda"
+    expert_indices, expert_scales = _make_zero_expert_routing(
+        num_tokens, top_k, num_experts, num_zero_experts
     )
 
     expected = _zero_expert_identity_reference(
