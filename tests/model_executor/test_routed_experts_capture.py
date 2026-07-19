@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import types
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, call, patch
 
 import pytest
 import torch
@@ -307,3 +307,197 @@ def test_scheduler_skips_offload_transfers_without_offload_buffer():
     scheduler._apply_routed_experts_offload_transfers(Mock())
 
     scheduler.routed_experts_manager.apply_offload_transfers.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "kv_transfer_config",
+    [
+        pytest.param(
+            {
+                "kv_connector": "NixlConnector",
+                "kv_role": "kv_both",
+            },
+            id="direct_nixl",
+        ),
+        pytest.param(
+            {
+                "kv_connector": "OffloadingConnector",
+                "kv_role": "kv_both",
+                "kv_connector_extra_config": {
+                    "cpu_bytes_to_use": 1 << 30,
+                },
+            },
+            id="direct_cpu_offload",
+        ),
+        pytest.param(
+            {
+                "kv_connector": "MultiConnector",
+                "kv_role": "kv_both",
+                "kv_connector_extra_config": {
+                    "connectors": [
+                        {
+                            "kv_connector": "NixlConnector",
+                            "kv_role": "kv_both",
+                        },
+                        {
+                            "kv_connector": "OffloadingConnector",
+                            "kv_role": "kv_both",
+                            "kv_connector_extra_config": {
+                                "cpu_bytes_to_use": 1 << 30,
+                            },
+                        },
+                    ]
+                },
+            },
+            id="nixl_and_cpu_offload",
+        ),
+    ],
+)
+def test_vllm_config_accepts_supported_routed_experts_connectors(
+    kv_transfer_config,
+):
+    from vllm.config import KVTransferConfig, VllmConfig
+
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(enable_return_routed_experts=True),
+        kv_transfer_config=KVTransferConfig(**kv_transfer_config),
+    )
+
+    VllmConfig._verify_return_routed_experts_kv_compatibility(config)
+
+
+def test_vllm_config_rejects_tiered_offload_for_routed_experts():
+    from vllm.config import KVTransferConfig, VllmConfig
+
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(enable_return_routed_experts=True),
+        kv_transfer_config=KVTransferConfig(
+            kv_connector="MultiConnector",
+            kv_role="kv_both",
+            kv_connector_extra_config={
+                "connectors": [
+                    {
+                        "kv_connector": "NixlConnector",
+                        "kv_role": "kv_both",
+                    },
+                    {
+                        "kv_connector": "OffloadingConnector",
+                        "kv_role": "kv_both",
+                        "kv_connector_extra_config": {
+                            "cpu_bytes_to_use": 1 << 30,
+                            "spec_name": "TieringOffloadingSpec",
+                        },
+                    },
+                ]
+            },
+        ),
+    )
+
+    with pytest.raises(ValueError, match="exactly one of each"):
+        VllmConfig._verify_return_routed_experts_kv_compatibility(config)
+
+
+def _cpu_offloading_connector(*, num_blocks: int, block_size_factor: int):
+    from vllm.distributed.kv_transfer.kv_connector.v1.offloading_connector import (
+        OffloadingConnector,
+    )
+    from vllm.v1.kv_offload.cpu.spec import CPUOffloadingSpec
+
+    spec = CPUOffloadingSpec.__new__(CPUOffloadingSpec)
+    spec.num_blocks = num_blocks
+    connector = OffloadingConnector.__new__(OffloadingConnector)
+    connector.connector_scheduler = SimpleNamespace(
+        spec=spec,
+        config=SimpleNamespace(block_size_factor=block_size_factor),
+    )
+    return connector
+
+
+def test_scheduler_accepts_nixl_cpu_offload_multi_connector():
+    from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import (
+        MultiConnector,
+    )
+    from vllm.v1.core.sched.scheduler import Scheduler
+
+    cpu_offload = _cpu_offloading_connector(num_blocks=19, block_size_factor=2)
+    multi_connector = MultiConnector.__new__(MultiConnector)
+    multi_connector._connectors = [Mock(), cpu_offload]
+
+    scheduler = Scheduler.__new__(Scheduler)
+    scheduler.vllm_config = SimpleNamespace(
+        kv_transfer_config=SimpleNamespace(kv_connector="MultiConnector")
+    )
+    scheduler.connector = multi_connector
+    scheduler._routed_experts_offload_connector_index = None
+
+    with patch(
+        "vllm.v1.core.sched.scheduler.require_full_attn_group_id"
+    ) as require_full_attn_group_id:
+        assert scheduler._validate_routed_experts_offload(Mock()) == (19, 2)
+
+    require_full_attn_group_id.assert_called_once()
+    assert scheduler._routed_experts_offload_connector_index == 1
+
+
+def test_scheduler_extracts_offload_metadata_from_multi_connector():
+    from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import (
+        MultiKVConnectorMetadata,
+    )
+    from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
+        OffloadingConnectorMetadata,
+    )
+    from vllm.v1.core.sched.scheduler import Scheduler
+
+    offload_metadata = OffloadingConnectorMetadata(load_jobs={}, store_jobs={})
+    multi_metadata = MultiKVConnectorMetadata(metadata=(Mock(), offload_metadata))
+    scheduler = Scheduler.__new__(Scheduler)
+    scheduler._routed_experts_offload_connector_index = 1
+    scheduler.routed_experts_manager = SimpleNamespace(
+        routed_experts_by_offload_block=object(),
+        apply_offload_transfers=Mock(),
+    )
+
+    scheduler._apply_routed_experts_offload_transfers(multi_metadata)
+
+    scheduler.routed_experts_manager.apply_offload_transfers.assert_called_once_with(
+        offload_metadata
+    )
+
+
+def test_routed_experts_offload_uses_transfer_spec_tuple():
+    from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
+        OffloadingConnectorMetadata,
+        TransferJob,
+    )
+    from vllm.model_executor.layers.fused_moe.routed_experts_capture import (
+        RoutedExpertsManager,
+    )
+
+    manager = RoutedExpertsManager.__new__(RoutedExpertsManager)
+    empty_block_map = SimpleNamespace(gpu_block_ids=[])
+    manager._compute_full_attn_block_map = Mock(return_value=empty_block_map)
+    manager.load_from_offload_blocks = Mock()
+    manager.store_to_offload_blocks = Mock()
+    metadata = OffloadingConnectorMetadata(
+        load_jobs={
+            1: TransferJob(
+                req_id="load",
+                transfer_spec=("cpu-load-source", "gpu-load-destination"),
+            )
+        },
+        store_jobs={
+            2: TransferJob(
+                req_id="store",
+                transfer_spec=("gpu-store-source", "cpu-store-destination"),
+            )
+        },
+    )
+
+    manager.apply_offload_transfers(metadata)
+
+    assert manager._compute_full_attn_block_map.call_args_list == [
+        call("gpu-load-destination", "cpu-load-source"),
+        call("gpu-store-source", "cpu-store-destination"),
+    ]
+    manager.load_from_offload_blocks.assert_not_called()
+    manager.store_to_offload_blocks.assert_not_called()

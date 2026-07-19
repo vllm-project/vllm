@@ -295,7 +295,7 @@ class RoutedExpertsManager:
         # dropped so concatenate() never sees a zero-length job.
         load_block_maps: list[FullAttnBlockMap] = []
         for job in metadata.load_jobs.values():
-            source_spec, destination_spec = job.src_spec, job.dst_spec
+            source_spec, destination_spec = job.transfer_spec
             block_map = self._compute_full_attn_block_map(destination_spec, source_spec)
             if len(block_map.gpu_block_ids):
                 load_block_maps.append(block_map)
@@ -303,7 +303,7 @@ class RoutedExpertsManager:
             self.load_from_offload_blocks(FullAttnBlockMap.concatenate(load_block_maps))
         store_block_maps: list[FullAttnBlockMap] = []
         for job in metadata.store_jobs.values():
-            source_spec, destination_spec = job.src_spec, job.dst_spec
+            source_spec, destination_spec = job.transfer_spec
             block_map = self._compute_full_attn_block_map(source_spec, destination_spec)
             if len(block_map.gpu_block_ids):
                 store_block_maps.append(block_map)

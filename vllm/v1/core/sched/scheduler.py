@@ -317,6 +317,7 @@ class Scheduler(SchedulerInterface):
 
             num_offload_blocks = None
             block_size_factor = 1
+            self._routed_experts_offload_connector_index: int | None = None
             if self.connector is not None:
                 num_offload_blocks, block_size_factor = (
                     self._validate_routed_experts_offload(kv_cache_config)
@@ -354,6 +355,9 @@ class Scheduler(SchedulerInterface):
         Raises:
             ValueError: On any unsupported connector / spec combination.
         """
+        from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import (
+            MultiConnector,
+        )
         from vllm.distributed.kv_transfer.kv_connector.v1.offloading_connector import (  # noqa: E501
             OffloadingConnector,
         )
@@ -372,12 +376,30 @@ class Scheduler(SchedulerInterface):
             )
             return None, 1
 
-        if not isinstance(self.connector, OffloadingConnector):
+        offloading_connector = self.connector
+        if isinstance(self.connector, MultiConnector):
+            offloading_children = [
+                (index, connector)
+                for index, connector in enumerate(self.connector._connectors)
+                if isinstance(connector, OffloadingConnector)
+            ]
+            if len(offloading_children) != 1:
+                raise ValueError(
+                    "--enable-return-routed-experts requires exactly one CPU "
+                    "OffloadingConnector child in a MultiConnector; got "
+                    f"{len(offloading_children)}"
+                )
+            (
+                self._routed_experts_offload_connector_index,
+                offloading_connector,
+            ) = offloading_children[0]
+
+        if not isinstance(offloading_connector, OffloadingConnector):
             raise ValueError(
                 "--enable-return-routed-experts only supports the CPU "
                 f"OffloadingConnector; got {type(self.connector).__name__}"
             )
-        connector_scheduler = self.connector.connector_scheduler
+        connector_scheduler = offloading_connector.connector_scheduler
         assert connector_scheduler is not None, (
             "OffloadingConnector must provide a connector scheduler"
         )
@@ -406,6 +428,34 @@ class Scheduler(SchedulerInterface):
         if manager.routed_experts_by_offload_block is None:
             return
         assert metadata is not None
+        connector_index = self._routed_experts_offload_connector_index
+        if connector_index is not None:
+            from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import (
+                MultiKVConnectorMetadata,
+            )
+
+            if not isinstance(metadata, MultiKVConnectorMetadata):
+                raise TypeError(
+                    "expected MultiKVConnectorMetadata for routed-experts "
+                    f"offload, got {type(metadata).__name__}"
+                )
+            try:
+                metadata = metadata.metadata[connector_index]
+            except IndexError as exc:
+                raise RuntimeError(
+                    "routed-experts offload connector index is missing from "
+                    "MultiConnector metadata"
+                ) from exc
+
+        from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
+            OffloadingConnectorMetadata,
+        )
+
+        if not isinstance(metadata, OffloadingConnectorMetadata):
+            raise TypeError(
+                "expected OffloadingConnectorMetadata for routed-experts "
+                f"offload, got {type(metadata).__name__}"
+            )
         manager.apply_offload_transfers(metadata)
 
     def _mamba_block_aligned_split(

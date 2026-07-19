@@ -817,21 +817,69 @@ class VllmConfig:
         kv_transfer_config = self.kv_transfer_config
         if kv_transfer_config is None or not kv_transfer_config.is_kv_transfer_instance:
             return
-        offloading_spec_name = kv_transfer_config.kv_connector_extra_config.get(
-            "spec_name", "CPUOffloadingSpec"
-        )
-        uses_supported_cpu_offload = (
-            kv_transfer_config.kv_connector == "OffloadingConnector"
-            and kv_transfer_config.kv_role == "kv_both"
-            and offloading_spec_name == "CPUOffloadingSpec"
-        )
-        if not uses_supported_cpu_offload:
-            raise ValueError(
-                "--enable-return-routed-experts only supports the CPU KV "
-                "offload connector (OffloadingConnector + CPUOffloadingSpec) "
-                "with kv_role=kv_both; PD disaggregation and other KV "
-                "connectors are not supported."
+        nixl_connector_names = {
+            "NixlConnector",
+            "NixlPullConnector",
+            "NixlPushConnector",
+        }
+
+        def is_cpu_offloading_connector(connector_config: dict[str, Any]) -> bool:
+            extra_config = connector_config.get("kv_connector_extra_config", {})
+            return (
+                connector_config.get("kv_connector") == "OffloadingConnector"
+                and connector_config.get("kv_role") == "kv_both"
+                and extra_config.get("spec_name", "CPUOffloadingSpec")
+                == "CPUOffloadingSpec"
             )
+
+        if kv_transfer_config.kv_connector in nixl_connector_names:
+            logger.warning(
+                "Routed-experts capture with NIXL P/D requires the router/proxy "
+                "to merge the prefill routing rows with the decode routing rows."
+            )
+            return
+
+        direct_connector_config = {
+            "kv_connector": kv_transfer_config.kv_connector,
+            "kv_role": kv_transfer_config.kv_role,
+            "kv_connector_extra_config": (kv_transfer_config.kv_connector_extra_config),
+        }
+        if is_cpu_offloading_connector(direct_connector_config):
+            return
+
+        if kv_transfer_config.kv_connector == "MultiConnector":
+            connector_configs = kv_transfer_config.kv_connector_extra_config.get(
+                "connectors", []
+            )
+            nixl_connectors = [
+                connector_config
+                for connector_config in connector_configs
+                if connector_config.get("kv_connector") in nixl_connector_names
+            ]
+            cpu_offloading_connectors = [
+                connector_config
+                for connector_config in connector_configs
+                if is_cpu_offloading_connector(connector_config)
+            ]
+            if (
+                len(connector_configs) == 2
+                and len(nixl_connectors) == 1
+                and len(cpu_offloading_connectors) == 1
+            ):
+                logger.warning(
+                    "Routed-experts capture with NIXL P/D requires the "
+                    "router/proxy to merge the prefill routing rows with the "
+                    "decode routing rows. CPU-offloaded routing rows will be "
+                    "stored and restored with the OffloadingConnector child."
+                )
+                return
+
+        raise ValueError(
+            "--enable-return-routed-experts supports direct NIXL P/D, the CPU "
+            "KV offload connector (OffloadingConnector + CPUOffloadingSpec) "
+            "with kv_role=kv_both, or a MultiConnector containing exactly one "
+            "of each; other KV connector configurations are not supported."
+        )
 
     def _verify_kv_transfer_compat(self) -> None:
         """Reject configurations that silently corrupt KV transfers."""
@@ -1207,15 +1255,12 @@ class VllmConfig:
                     "corrupt the LRU state."
                 )
             if self.speculative_config is not None:
-                raise ValueError(
-                    "HiSparse does not support speculative decoding."
-                )
+                raise ValueError("HiSparse does not support speculative decoding.")
             if self.model_config is not None and not hasattr(
                 self.model_config.hf_config, "index_topk"
             ):
                 raise ValueError(
-                    "HiSparse is only supported for DSA models with "
-                    "index_topk."
+                    "HiSparse is only supported for DSA models with index_topk."
                 )
             if self.kv_transfer_config is not None and (
                 self.kv_transfer_config.kv_connector
