@@ -190,8 +190,8 @@ def test_arbitrary_N_splitk(N):
 
 @pytest.mark.parametrize(
     "N,K",
-    [(256, 7168), (256, 14400), (8, 4096), (384, 7168)],
-    ids=["DSV3", "DSV4-Flash", "Mixtral", "DSV4-Pro"],
+    [(256, 7168), (256, 14400), (8, 4096), (384, 7168), (264, 6144)],
+    ids=["DSV3", "DSV4-Flash", "Mixtral", "DSV4-Pro", "Inkling"],
 )
 def test_single_token(N, K):
     torch.manual_seed(42)
@@ -200,6 +200,15 @@ def test_single_token(N, K):
     out = _gemm(a, b)
     assert out.shape == (1, N)
     _assert_close(out, _ref(a, b), context=f"M=1 {N}x{K}")
+
+
+def test_inkling_max_tokens():
+    torch.manual_seed(42)
+    a = torch.randn(64, 6144, dtype=torch.bfloat16, device="cuda")
+    b = torch.randn(264, 6144, dtype=torch.bfloat16, device="cuda")
+    out = _gemm(a, b)
+    assert out.shape == (64, 264)
+    _assert_close(out, _ref(a, b), context="Inkling M=64")
 
 
 # =================================================================
