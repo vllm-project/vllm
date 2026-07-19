@@ -6,6 +6,7 @@ import os
 from collections.abc import Callable
 from concurrent.futures import Future
 from typing import Any
+from unittest.mock import MagicMock, call
 
 import pytest
 
@@ -15,7 +16,7 @@ from vllm.sampling_params import SamplingParams
 from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.engine.llm_engine import LLMEngine
 from vllm.v1.executor import multiproc_executor as multiproc_executor_module
-from vllm.v1.executor.abstract import Executor
+from vllm.v1.executor.abstract import Executor, _run_profile
 from vllm.v1.executor.multiproc_executor import MultiprocExecutor
 from vllm.v1.executor.uniproc_executor import (
     ExecutorWithExternalLauncher,
@@ -42,6 +43,32 @@ def test_supports_async_scheduling_executor_with_external_launcher():
 
 def test_supports_async_scheduling_multiproc_executor():
     assert MultiprocExecutor.supports_async_scheduling() is True
+
+
+def test_profile_rolls_back_successful_workers_after_start_failure():
+    executor = MagicMock()
+    executor.collective_rpc.side_effect = [
+        [None, "rank 1: RuntimeError: start failed"],
+        [None, None],
+    ]
+
+    with pytest.raises(RuntimeError, match="rank 1.*start failed"):
+        Executor.profile(executor, is_start=True, profile_prefix="request")
+
+    assert executor.collective_rpc.call_args_list == [
+        call(_run_profile, args=(True, "request")),
+        call(_run_profile, args=(False, None)),
+    ]
+
+
+def test_profile_reports_stop_failure_without_rollback():
+    executor = MagicMock()
+    executor.collective_rpc.return_value = ["rank 0: RuntimeError: write failed"]
+
+    with pytest.raises(RuntimeError, match="rank 0.*write failed"):
+        Executor.profile(executor, is_start=False)
+
+    executor.collective_rpc.assert_called_once_with(_run_profile, args=(False, None))
 
 
 class _FakeClock:

@@ -12,6 +12,7 @@ from pydantic import ValidationError
 
 from vllm.config import CUDAGraphMode, ProfilerConfig
 from vllm.profiler.wrapper import ProtonProfilerWrapper
+from vllm.v1.worker.cpu_worker import CPUWorker
 from vllm.v1.worker.gpu_worker import Worker
 from vllm.v1.worker.xpu_worker import XPUWorker
 
@@ -275,6 +276,24 @@ class TestProtonProfilerWrapper:
         assert wrapper._capture_session_id is None
         assert wrapper._running is False
 
+    def test_shutdown_contains_proton_errors_and_finishes_cleanup(self, tmp_path):
+        proton = make_proton()
+        proton.start.side_effect = [7, 8]
+        wrapper, proton = make_wrapper(tmp_path, proton)
+        with wrapper.capture_cuda_graphs():
+            pass
+        wrapper.start()
+        proton.deactivate.side_effect = RuntimeError("deactivate failed")
+        proton.finalize.side_effect = RuntimeError("finalize failed")
+
+        wrapper.shutdown()
+
+        proton.finalize.assert_any_call(session=8)
+        proton.finalize.assert_any_call(session=7)
+        assert wrapper._session_id is None
+        assert wrapper._capture_session_id is None
+        assert wrapper._running is False
+
     def test_disabled_proton_session_is_reported_as_start_failure(self, tmp_path):
         wrapper, _ = make_wrapper(tmp_path, make_proton(session_id=None))
 
@@ -335,6 +354,20 @@ class TestProtonProfilerWrapper:
         proton.start.assert_not_called()
         assert wrapper._active is False
 
+    @pytest.mark.parametrize("environment", [{}, {"ROCR_VISIBLE_DEVICES": ""}])
+    def test_requires_nonempty_rocr_visible_devices(self, tmp_path, environment):
+        wrapper, proton = make_wrapper(tmp_path)
+
+        with (
+            patch.object(torch.version, "hip", "6.0"),
+            patch.dict(os.environ, environment, clear=True),
+            pytest.raises(RuntimeError, match="non-empty ROCR_VISIBLE_DEVICES"),
+        ):
+            wrapper.start()
+
+        proton.start.assert_not_called()
+        assert wrapper._active is False
+
     def test_missing_proton_has_actionable_error(self, tmp_path):
         config = ProfilerConfig(profiler="proton", proton_profiler_dir=str(tmp_path))
         with (
@@ -380,6 +413,30 @@ def test_proton_is_not_initialized_when_v2_runner_has_no_graphs_to_capture():
     worker._get_or_create_profiler.assert_not_called()
     with context:
         pass
+
+
+def test_proton_is_not_initialized_when_v1_runner_has_no_graphs_to_capture():
+    worker = MagicMock()
+    worker.use_v2_model_runner = False
+    worker.vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.FULL
+    worker.vllm_config.compilation_config.cudagraph_mm_encoder = False
+    worker.profiler_config.profiler = "proton"
+    worker.model_runner.cudagraph_dispatcher.get_capture_descs.return_value = []
+
+    context = Worker._get_proton_capture_context(worker)
+
+    worker._get_or_create_profiler.assert_not_called()
+    with context:
+        pass
+
+
+def test_cpu_worker_rejects_proton():
+    config = SimpleNamespace(
+        profiler_config=SimpleNamespace(profiler="proton"),
+    )
+
+    with pytest.raises(ValueError, match="not supported by CPU workers"):
+        CPUWorker(config, 0, 0, "tcp://localhost:1")
 
 
 def test_xpu_worker_rejects_proton():

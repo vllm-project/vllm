@@ -424,6 +424,7 @@ class ProtonProfilerWrapper(WorkerProfiler):
     def _validate_amd_environment() -> None:
         if torch.version.hip is None:
             return
+        rocr_visible_devices = os.environ.get("ROCR_VISIBLE_DEVICES")
         conflicting = [
             name
             for name in ("HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES")
@@ -433,6 +434,10 @@ class ProtonProfilerWrapper(WorkerProfiler):
             raise RuntimeError(
                 "Proton on AMD requires ROCR_VISIBLE_DEVICES; unset "
                 f"{', '.join(conflicting)} before profiling."
+            )
+        if not rocr_visible_devices:
+            raise RuntimeError(
+                "Proton on AMD requires a non-empty ROCR_VISIBLE_DEVICES value."
             )
 
     def _create_session(self, output_path: str, *, capture: bool = False) -> int:
@@ -510,12 +515,23 @@ class ProtonProfilerWrapper(WorkerProfiler):
     @override
     def shutdown(self) -> None:
         if self._running:
-            self.stop()
+            try:
+                self.stop()
+            except Exception:
+                logger.exception("Failed to stop Proton during worker shutdown.")
         if self._capture_session_id is not None:
-            self._proton.finalize(session=self._capture_session_id)
+            capture_session_id = self._capture_session_id
             self._capture_session_id = None
-            with suppress(FileNotFoundError):
-                os.remove(f"{self._capture_output_path}.hatchet")
+            try:
+                self._proton.finalize(session=capture_session_id)
+            except Exception:
+                logger.exception(
+                    "Failed to finalize Proton CUDA graph capture during "
+                    "worker shutdown."
+                )
+            finally:
+                with suppress(FileNotFoundError):
+                    os.remove(f"{self._capture_output_path}.hatchet")
 
     @override
     def annotate_context_manager(

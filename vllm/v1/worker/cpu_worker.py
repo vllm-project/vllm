@@ -39,6 +39,9 @@ class CPUWorker(Worker):
         distributed_init_method: str,
         is_driver_worker: bool = False,
     ):
+        if vllm_config.profiler_config.profiler == "proton":
+            raise ValueError("The Proton profiler is not supported by CPU workers.")
+
         # TODO: use numactl for process setup
         # TODO: optimize for `interleaved` policy
         # Bind memory node
