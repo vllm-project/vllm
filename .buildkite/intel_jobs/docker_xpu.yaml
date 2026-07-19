@@ -1,6 +1,6 @@
 group: Docker XPU
 depends_on:
-- image-build-cpu
+  - image-build-xpu
 steps:
 - label: Docker Build Metadata
   timeout_in_minutes: 20
