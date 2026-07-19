@@ -24,6 +24,11 @@ from vllm.v1.kv_cache_interface import (
     KVCacheTensor,
     MambaSpec,
 )
+from vllm.v1.worker.gpu.attn_utils import (
+    _allocate_extensible_kv_cache,
+    _kv_cache_num_segments_by_layer,
+    _reshape_kv_cache,
+)
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 from vllm.v1.worker.utils import AttentionGroup
 
@@ -367,3 +372,157 @@ def test_extensible_hybrid_attention_mamba() -> None:
             assert torch.count_nonzero(state_tensor[1 : NUM_BLOCKS - 1]) == 0
     finally:
         _free_buffers(runner)
+
+
+# ---------------------------------------------------------------------------
+# V2 model runner (vllm.v1.worker.gpu) extensible allocation
+# ---------------------------------------------------------------------------
+
+
+def _v2_allocate(kv_cache_config, attn_groups, kernel_block_sizes):
+    flat_groups = [g for groups in attn_groups for g in groups]
+    raw_tensors, buffers = _allocate_extensible_kv_cache(
+        kv_cache_config,
+        {},
+        torch.device("cuda:0"),
+        flat_groups,
+        kernel_block_sizes,
+        "auto",
+    )
+    kv_caches = _reshape_kv_cache(
+        attn_groups=flat_groups,
+        kv_cache_raw_tensors=raw_tensors,
+        cache_dtype="auto",
+        kernel_block_sizes=kernel_block_sizes,
+        shared_kv_cache_layers={},
+        kv_cache_config=kv_cache_config,
+    )
+    return kv_caches, buffers
+
+
+def test_v2_num_segments_by_layer() -> None:
+    """V2 segment counts follow the layer's physical layout, and hybrid
+    models force block-major (one segment)."""
+    spec = _full_attention_spec()
+    for backend, expected in (
+        (_SplitKVBackend, 2),
+        (_BlockMajorBackend, 1),
+        (_StrideOrderBackend, 1),
+    ):
+        _, attn_groups = _attention_config(spec, backend)
+        flat_groups = [g for groups in attn_groups for g in groups]
+        assert _kv_cache_num_segments_by_layer(
+            flat_groups, [BLOCK_SIZE], "auto", has_mamba=False
+        ) == {"layer.0": expected}
+        assert _kv_cache_num_segments_by_layer(
+            flat_groups, [BLOCK_SIZE], "auto", has_mamba=True
+        ) == {"layer.0": 1}
+
+
+def test_v2_extensible_split_layout_grows_incrementally() -> None:
+    """A K/V-split layer grows both halves in lockstep through the staged
+    commits the V2 flow performs (init -> warmup prefix -> final size)."""
+    spec = _full_attention_spec()
+    kv_cache_config, attn_groups = _attention_config(spec, _SplitKVBackend)
+    kv_caches, buffers = _v2_allocate(kv_cache_config, attn_groups, [BLOCK_SIZE])
+    try:
+        kv_cache = kv_caches["layer.0"]
+        assert kv_cache.shape == (2, NUM_BLOCKS, BLOCK_SIZE, 8, 128)
+        assert buffers.num_blocks_committed == 1
+
+        kv_cache[0, 0].fill_(1)  # K, block 0
+        kv_cache[1, 0].fill_(2)  # V, block 0
+        torch.cuda.synchronize()
+
+        # Warmup-style prefix commit, then the final post-warmup commit.
+        buffers.commit(8)
+        kv_cache[0, 7].fill_(3)
+        torch.cuda.synchronize()
+        buffers.commit(NUM_BLOCKS)
+        # Shrink requests are ignored.
+        buffers.commit(1)
+        assert buffers.num_blocks_committed == NUM_BLOCKS
+
+        kv_cache[1, NUM_BLOCKS - 1].fill_(4)
+        torch.cuda.synchronize()
+        assert torch.all(kv_cache[0, 0] == 1)
+        assert torch.all(kv_cache[1, 0] == 2)
+        assert torch.all(kv_cache[0, 7] == 3)
+        assert torch.all(kv_cache[1, NUM_BLOCKS - 1] == 4)
+        assert torch.count_nonzero(kv_cache[:, 1:7]) == 0
+        assert torch.count_nonzero(kv_cache[:, 8 : NUM_BLOCKS - 1]) == 0
+        assert buffers.physical_bytes >= NUM_BLOCKS * spec.page_size_bytes
+    finally:
+        buffers.free()
+
+
+def test_v2_extensible_hybrid_attention_mamba() -> None:
+    """V2 hybrid models re-stride attention to block-major; both the
+    attention and Mamba buffers grow as single-segment prefixes."""
+    attn_spec = _full_attention_spec()
+    mamba_spec = _mamba_spec()
+    kv_cache_config = KVCacheConfig(
+        num_blocks=NUM_BLOCKS,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=NUM_BLOCKS * attn_spec.page_size_bytes, shared_by=["attn.0"]
+            ),
+            KVCacheTensor(
+                size=NUM_BLOCKS * mamba_spec.page_size_bytes, shared_by=["mamba.0"]
+            ),
+        ],
+        kv_cache_groups=[
+            KVCacheGroupSpec(layer_names=["attn.0"], kv_cache_spec=attn_spec),
+            KVCacheGroupSpec(layer_names=["mamba.0"], kv_cache_spec=mamba_spec),
+        ],
+    )
+    attn_groups = [
+        [
+            AttentionGroup(
+                backend=_SplitKVBackend,
+                layer_names=["attn.0"],
+                kv_cache_spec=attn_spec,
+                kv_cache_group_id=0,
+            )
+        ],
+        [
+            AttentionGroup(
+                backend=_BlockMajorBackend,
+                layer_names=["mamba.0"],
+                kv_cache_spec=mamba_spec,
+                kv_cache_group_id=1,
+            )
+        ],
+    ]
+    kv_caches, buffers = _v2_allocate(
+        kv_cache_config, attn_groups, [BLOCK_SIZE, BLOCK_SIZE]
+    )
+    try:
+        attn_cache = kv_caches["attn.0"]
+        # Re-strided to interleave K/V per block: block b spans one page.
+        hidden_size = attn_cache.shape[2:].numel()
+        assert attn_cache.stride()[:2] == (hidden_size, 2 * hidden_size)
+
+        attn_cache[0, 0].fill_(1)
+        attn_cache[1, 0].fill_(2)
+        for state_tensor in kv_caches["mamba.0"]:
+            state_tensor[0].fill_(3)
+        torch.cuda.synchronize()
+
+        buffers.commit(NUM_BLOCKS)
+        attn_cache[0, NUM_BLOCKS - 1].fill_(4)
+        attn_cache[1, NUM_BLOCKS - 1].fill_(5)
+        for state_tensor in kv_caches["mamba.0"]:
+            state_tensor[NUM_BLOCKS - 1].fill_(6)
+        torch.cuda.synchronize()
+        assert torch.all(attn_cache[0, 0] == 1)
+        assert torch.all(attn_cache[1, 0] == 2)
+        assert torch.all(attn_cache[0, NUM_BLOCKS - 1] == 4)
+        assert torch.all(attn_cache[1, NUM_BLOCKS - 1] == 5)
+        assert torch.count_nonzero(attn_cache[:, 1 : NUM_BLOCKS - 1]) == 0
+        for state_tensor in kv_caches["mamba.0"]:
+            assert torch.all(state_tensor[0] == 3)
+            assert torch.all(state_tensor[NUM_BLOCKS - 1] == 6)
+            assert torch.count_nonzero(state_tensor[1 : NUM_BLOCKS - 1]) == 0
+    finally:
+        buffers.free()
