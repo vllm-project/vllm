@@ -119,7 +119,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.tasks import GenerationTask, PoolingTask, SupportedTask
 from vllm.tracing import instrument
 from vllm.utils import length_from_prompt_token_ids_or_embeds
-from vllm.utils.extensible_tensor import ExtensibleTensor
+from vllm.utils.extensible_tensor import ExtensibleKVCacheBuffers, ExtensibleTensor
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
 from vllm.utils.nvtx_pytorch_hooks import PytHooks
@@ -6525,11 +6525,9 @@ class GPUModelRunner(
             self.attn_groups.clear()
         if hasattr(self, "kv_cache_config"):
             delattr(self, "kv_cache_config")
-        if hasattr(self, "_extensible_kv_cache_buffers"):
-            for buffer, _ in self._extensible_kv_cache_buffers:
-                buffer.free()
-            self._extensible_kv_cache_buffers = []
-            self._extensible_kv_cache_enabled = False
+        if getattr(self, "extensible_kv_buffers", None) is not None:
+            self.extensible_kv_buffers.free()
+            self.extensible_kv_buffers = None
         self.cache_config.num_gpu_blocks = None
 
         for layer in self.compilation_config.static_forward_context.values():
@@ -7285,9 +7283,7 @@ class GPUModelRunner(
             # prefix per layout segment (e.g. the K and V halves of a
             # K/V-split layout) -- see `ExtensibleTensor`.
             num_segments_by_layer = self._kv_cache_num_segments_by_layer()
-            self._extensible_kv_cache_buffers: list[tuple[ExtensibleTensor, int]] = []
-            self._extensible_kv_cache_committed_blocks = 1
-            self._extensible_kv_cache_enabled = True
+            buffers: list[tuple[ExtensibleTensor, int]] = []
             for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
                 bytes_per_block = kv_cache_tensor.size // kv_cache_config.num_blocks
                 assert bytes_per_block * kv_cache_config.num_blocks == (
@@ -7304,25 +7300,25 @@ class GPUModelRunner(
                 )
                 num_segments = segment_counts.pop()
                 assert bytes_per_block % num_segments == 0
-                bytes_per_block_per_segment = bytes_per_block // num_segments
                 buffer = ExtensibleTensor(
                     max_num_bytes=kv_cache_tensor.size,
                     device=self.device,
                     num_segments=num_segments,
                 )
-                self._extensible_kv_cache_buffers.append(
-                    (buffer, bytes_per_block_per_segment)
-                )
-                buffer.resize_per_segment_(bytes_per_block_per_segment, zero_new=True)
+                buffers.append((buffer, bytes_per_block // num_segments))
                 tensor = buffer.full_view()
                 for layer_name in kv_cache_tensor.shared_by:
                     kv_cache_raw_tensors[layer_name] = tensor
 
+            self.extensible_kv_buffers = ExtensibleKVCacheBuffers(
+                buffers, kv_cache_config.num_blocks
+            )
+            self.extensible_kv_buffers.commit(1)
             return self._check_kv_cache_raw_tensors(
                 kv_cache_config, kv_cache_raw_tensors
             )
 
-        self._extensible_kv_cache_enabled = False
+        self.extensible_kv_buffers = None
         packed_backing: torch.Tensor | None = None
         for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
             if kv_cache_tensor.block_stride > 0:
@@ -7609,29 +7605,16 @@ class GPUModelRunner(
         segment, so captured graphs stay valid as more pages are mapped under
         the stable base pointer. Newly committed blocks are zeroed.
         """
-        if not getattr(self, "_extensible_kv_cache_enabled", False):
+        if getattr(self, "extensible_kv_buffers", None) is None:
             raise RuntimeError("extend_kv_cache requires an extensible KV cache.")
-        if num_blocks <= self._extensible_kv_cache_committed_blocks:
-            return
-
-        for buffer, bytes_per_block_per_segment in self._extensible_kv_cache_buffers:
-            # Zero only the freshly committed blocks; existing ones are left
-            # intact.
-            buffer.resize_per_segment_(
-                num_blocks * bytes_per_block_per_segment, zero_new=True
-            )
-
-        self._extensible_kv_cache_committed_blocks = num_blocks
+        self.extensible_kv_buffers.commit(num_blocks)
         logger.info("Extended KV cache to %d blocks.", num_blocks)
 
     @property
     def kv_cache_committed_bytes(self) -> int:
         """Physically committed KV cache bytes (0 without extensible KV)."""
-        if not getattr(self, "_extensible_kv_cache_enabled", False):
-            return 0
-        return sum(
-            buffer.physical_bytes for buffer, _ in self._extensible_kv_cache_buffers
-        )
+        buffers = getattr(self, "extensible_kv_buffers", None)
+        return buffers.physical_bytes if buffers is not None else 0
 
     def initialize_kv_cache_tensors(
         self,

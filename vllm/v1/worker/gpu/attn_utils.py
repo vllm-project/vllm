@@ -16,7 +16,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.multimodal.inputs import MultiModalFeatureSpec
-from vllm.utils.extensible_tensor import ExtensibleTensor
+from vllm.utils.extensible_tensor import ExtensibleKVCacheBuffers, ExtensibleTensor
 from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.attention.backend import (
     AttentionCGSupport,
@@ -204,46 +204,6 @@ def _check_layer_coverage(
     assert layer_names == (kv_cache_raw_tensors.keys() | shared_layers.keys()), (
         "Some layers are not correctly initialized"
     )
-
-
-class ExtensibleKVCacheBuffers:
-    """Grow-only physical backing for the KV cache: one CUDA virtual-memory
-    buffer per KV cache tensor, committed as a per-segment prefix of blocks.
-
-    `commit` maps (and zeroes) physical pages for additional blocks while
-    keeping every buffer's base pointer, existing data, and the logical views
-    built over the full reserved capacity stable.
-    """
-
-    def __init__(
-        self,
-        buffers: list[tuple[ExtensibleTensor, int]],
-        num_blocks_capacity: int,
-    ) -> None:
-        self._buffers = buffers
-        self.num_blocks_capacity = num_blocks_capacity
-        self.num_blocks_committed = 0
-
-    def commit(self, num_blocks: int) -> None:
-        if num_blocks <= self.num_blocks_committed:
-            return
-        for buffer, bytes_per_block_per_segment in self._buffers:
-            # Zero only the freshly committed blocks; existing ones are left
-            # intact.
-            buffer.resize_per_segment_(
-                num_blocks * bytes_per_block_per_segment, zero_new=True
-            )
-        self.num_blocks_committed = num_blocks
-
-    @property
-    def physical_bytes(self) -> int:
-        return sum(buffer.physical_bytes for buffer, _ in self._buffers)
-
-    def free(self) -> None:
-        for buffer, _ in self._buffers:
-            buffer.free()
-        self._buffers = []
-        self.num_blocks_committed = 0
 
 
 def _kv_cache_num_segments_by_layer(
