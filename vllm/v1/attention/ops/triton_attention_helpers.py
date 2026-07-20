@@ -141,6 +141,7 @@ def init_softmax_M(
 @triton.jit
 def compute_tile_loop_bounds(
     context_len,
+    seq_idx,
     seq_len,
     cur_batch_query_len,
     q_block_local_idx,
@@ -157,6 +158,8 @@ def compute_tile_loop_bounds(
     USE_PER_SEQ_CAUSAL: tl.constexpr = False,
     CHUNK_LOOKBACK: tl.constexpr = -1,
     CHUNK_SIZE: tl.constexpr = -1,
+    USE_DIFFUSION_RECT_SWA: tl.constexpr = False,
+    diffusion_rect_swa_ptr=None,
 ):
     """Compute the tile-loop bounds ``(loop_lo, loop_hi)`` and the
     derived ``max_seq_prefix_len`` used for per-tile masking.
@@ -212,6 +215,9 @@ def compute_tile_loop_bounds(
         # The union of allowed key positions for this Q-block is:
         # [context_len + qpos_lo - SLIDING_WINDOW + 1, context_len + qpos_hi]
         q_abs = context_len + qpos_lo
+        use_rect_swa = False
+        if USE_DIFFUSION_RECT_SWA:
+            use_rect_swa = tl.load(diffusion_rect_swa_ptr + seq_idx)
         if CHUNK_LOOKBACK > -1:
             first_allowed_key = ((q_abs // CHUNK_SIZE) - CHUNK_LOOKBACK) * CHUNK_SIZE
         else:
@@ -224,6 +230,11 @@ def compute_tile_loop_bounds(
             )
         else:
             last_allowed_key = context_len + qpos_hi
+        if USE_DIFFUSION_RECT_SWA:
+            first_allowed_key = tl.where(
+                use_rect_swa, context_len - SLIDING_WINDOW, first_allowed_key
+            )
+            last_allowed_key = tl.where(use_rect_swa, seq_len - 1, last_allowed_key)
         # Convert to tile indices and clamp
         tile_start = tl.maximum(0, first_allowed_key // TILE_SIZE)
         tile_end = tl.minimum((last_allowed_key // TILE_SIZE) + 1, num_tiles)
@@ -287,6 +298,9 @@ def compute_kv_seq_mask(
     CHUNK_LOOKBACK: tl.constexpr = -1,
     CHUNK_SIZE: tl.constexpr = -1,
     MM_PREFIX_CLAMP_SW: tl.constexpr = False,
+    USE_DIFFUSION_RECT_SWA: tl.constexpr = False,
+    diffusion_rect_swa_ptr=None,
+    context_len=None,
 ):
     """Build the KV mask for one tile.
 
@@ -335,6 +349,12 @@ def compute_kv_seq_mask(
             seq_mask = seq_mask & sw_left & sw_right
         else:
             seq_mask = seq_mask & sw_left
+        if USE_DIFFUSION_RECT_SWA:
+            use_rect_swa = tl.load(diffusion_rect_swa_ptr + seq_idx)
+            rect_mask = (seq_offset[None, :] >= context_len - SLIDING_WINDOW) & (
+                seq_offset[None, :] < seq_len
+            )
+            seq_mask = tl.where(use_rect_swa, rect_mask, seq_mask)
 
     if USE_R_SWA:
         prefix_len = tl.load(rswa_prefix_lens_ptr + seq_idx)

@@ -439,6 +439,10 @@ class CommonAttentionMetadata:
 
     causal: bool | torch.Tensor = True
 
+    diffusion_rect_swa: torch.Tensor | None = None
+    """(batch_size,) bool tensor selecting a fixed sliding-window prefix
+    plus the complete bidirectional diffusion canvas."""
+
     # Needed by FastPrefillAttentionBuilder
     logits_indices_padded: torch.Tensor | None = None
     num_logits_indices: int | None = None

@@ -473,6 +473,7 @@ def _attn_packed(
 
     loop_lo, loop_hi, max_seq_prefix_len = compute_tile_loop_bounds(
         context_len,
+        seq_idx,
         seq_len,
         cur_batch_query_len,
         q_block_local_idx,
