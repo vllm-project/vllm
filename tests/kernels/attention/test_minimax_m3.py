@@ -1055,6 +1055,124 @@ def test_prefill_sparse_attention_correctness(
     assert error.max().item() < 1.7e-2
 
 
+def _has_flashinfer_msa_packed_kv_platform() -> bool:
+    if not _has_flashinfer_msa_platform():
+        return False
+    from vllm.utils.flashinfer import has_flashinfer_msa_packed_kv
+
+    return has_flashinfer_msa_packed_kv()
+
+
+# FlashInfer attend vs the Triton kernels' reference, at the impl's call shape.
+@pytest.mark.skipif(
+    not _has_flashinfer_msa_packed_kv_platform(),
+    reason="FlashInfer MSA attend requires SM120/SM121 and packed-KV support.",
+)
+@pytest.mark.parametrize("kv_layout", ["NHD", "HND"], indirect=True)
+@pytest.mark.parametrize(
+    ("q_lens", "kv_lens"),
+    [
+        ((129, 257), (129, 257)),
+        ((65, 129, 257), (129, 257, 385)),
+        ((1, 1, 1), (129, 257, 385)),  # decode path
+    ],
+)
+def test_flashinfer_sparse_attention_matches_reference(
+    kv_layout: str,
+    q_lens: tuple[int, ...],
+    kv_lens: tuple[int, ...],
+):
+    from flashinfer.msa_ops import (
+        msa_sparse_attention,
+        msa_sparse_decode_attention,
+    )
+
+    assert all(kv_len >= q_len for q_len, kv_len in zip(q_lens, kv_lens))
+    is_decode = all(q_len == 1 for q_len in q_lens)
+
+    batch = len(q_lens)
+    pages_per_req = [(kv_len + BLOCK_SIZE - 1) // BLOCK_SIZE for kv_len in kv_lens]
+    max_blocks = max(pages_per_req)
+    num_pages = sum(pages_per_req)
+    physical_pages = torch.randperm(num_pages, device="cuda", dtype=torch.int32)
+    block_table = torch.zeros(batch, max_blocks, device="cuda", dtype=torch.int32)
+    base_page = 0
+    for req_id, num_req_pages in enumerate(pages_per_req):
+        block_table[req_id, :num_req_pages] = physical_pages[
+            base_page : base_page + num_req_pages
+        ]
+        base_page += num_req_pages
+
+    q_lens_t = torch.tensor(q_lens, device="cuda", dtype=torch.int32)
+    seq_lens = torch.tensor(kv_lens, device="cuda", dtype=torch.int32)
+    prefix_lens = seq_lens - q_lens_t
+    cu_seqlens = torch.zeros(batch + 1, device="cuda", dtype=torch.int32)
+    cu_seqlens[1:] = q_lens_t.cumsum(0)
+    total_q = sum(q_lens)
+
+    q = torch.randn(total_q, NUM_Q_HEADS, HEAD_DIM, device="cuda", dtype=DTYPE)
+    kv_cache = _allocate_main_kv_via_contract(num_pages)
+    k_cache, v_cache = kv_cache.split(HEAD_DIM, dim=-1)
+
+    topk_shape = (NUM_KV_HEADS, total_q, TOPK)
+    topk_idx = torch.full(topk_shape, -1, device="cuda", dtype=torch.int32)
+    q_start = 0
+    for q_len, prefix_len in zip(q_lens_t.tolist(), prefix_lens.tolist()):
+        for local_q in range(q_len):
+            current_block = (prefix_len + local_q) // BLOCK_SIZE
+            older_blocks = torch.randperm(
+                current_block, device="cuda", dtype=torch.int32
+            )
+            selected = torch.cat(
+                [
+                    torch.tensor([current_block], device="cuda", dtype=torch.int32),
+                    older_blocks[: TOPK - 1],
+                ]
+            )
+            topk_idx[:, q_start + local_q, : selected.numel()] = selected
+        q_start += q_len
+
+    if is_decode:
+        actual = msa_sparse_decode_attention(
+            q,
+            k_cache,
+            v_cache,
+            topk_idx,
+            page_table=block_table,
+            seqused_k=seq_lens,
+            seqlen_q=1,
+            causal=True,
+            softmax_scale=SM_SCALE,
+        )
+    else:
+        actual = msa_sparse_attention(
+            q,
+            k_cache,
+            v_cache,
+            topk_idx,
+            cu_seqlens,
+            causal=True,
+            softmax_scale=SM_SCALE,
+            page_table=block_table,
+            seqused_k=seq_lens,
+        )
+
+    expected = _reference_sparse_attn(
+        q,
+        kv_cache,
+        topk_idx,
+        block_table,
+        q_lens_t,
+        seq_lens,
+        prefix_lens,
+    )
+    torch.accelerator.synchronize()
+
+    error = (actual.float() - expected.float()).abs()
+    assert error.mean().item() < 2.5e-4
+    assert error.max().item() < 1.7e-2
+
+
 def test_main_backend_layout_contract():
     """The main sparse backend exposes the logical-NHD shape and the
     flash_attn-style stride order for each layout."""
