@@ -123,7 +123,10 @@ def make_compact_manager(
     return CPUOffloadingManager(
         num_blocks=num_blocks,
         cache_policy=cache_policy,
-        compact_group_slice_configs=group_slice_configs,
+        compact_group_payload_map={
+            cfg.group_idx: cfg.compact_real_bytes_per_rank
+            for cfg in group_slice_configs
+        },
         blocks_per_chunk=blocks_per_chunk,
         compact_cpu_budget_bytes=cpu_budget,
         compact_page_size=page_size,
@@ -146,7 +149,7 @@ def test_compact_partial_args_raises() -> None:
     with pytest.raises(ValueError, match="all four compact args"):
         CPUOffloadingManager(
             num_blocks=4,
-            compact_group_slice_configs=_single_group_cfg(),
+            compact_group_payload_map={0: 80},
             blocks_per_chunk=1,
             # missing compact_cpu_budget_bytes, compact_page_size
         )
@@ -158,7 +161,7 @@ def test_compact_supported_policy_accepted() -> None:
         mgr = CPUOffloadingManager(
             num_blocks=4,
             cache_policy=policy,
-            compact_group_slice_configs=_single_group_cfg(),
+            compact_group_payload_map={0: 80},
             blocks_per_chunk=1,
             compact_cpu_budget_bytes=1024,
             compact_page_size=256,
@@ -187,38 +190,16 @@ def test_compact_negative_payload_raises() -> None:
         make_compact_manager(cpu_budget=1024, page_size=256, group_slice_configs=cfg)
 
 
-def test_compact_duplicate_group_idx_raises() -> None:
-    """Duplicate group index must raise."""
-    cfg = (
-        CompactGroupSliceConfig(
-            group_idx=0,
-            slices=(
-                CompactSliceConfig(
-                    offset_bytes=0,
-                    real_bytes_per_gpu_block=80,
-                    padded_bytes_per_gpu_block=80,
-                    layer_name="k",
-                ),
-            ),
-            compact_real_bytes_per_rank=80,
-            compact_padded_bytes_per_rank=80,
-        ),
-        CompactGroupSliceConfig(
-            group_idx=0,  # duplicate
-            slices=(
-                CompactSliceConfig(
-                    offset_bytes=0,
-                    real_bytes_per_gpu_block=80,
-                    padded_bytes_per_gpu_block=80,
-                    layer_name="v",
-                ),
-            ),
-            compact_real_bytes_per_rank=80,
-            compact_padded_bytes_per_rank=80,
-        ),
-    )
-    with pytest.raises(ValueError, match="duplicate"):
-        make_compact_manager(cpu_budget=1024, page_size=256, group_slice_configs=cfg)
+def test_compact_non_contiguous_group_idx_raises() -> None:
+    """Aggregate payload map must use contiguous group indices from zero."""
+    with pytest.raises(ValueError, match="contiguous"):
+        CPUOffloadingManager(
+            num_blocks=4,
+            compact_group_payload_map={1: 80},
+            blocks_per_chunk=1,
+            compact_cpu_budget_bytes=1024,
+            compact_page_size=256,
+        )
 
 
 # ---------------------------------------------------------------------------

@@ -23,6 +23,10 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
     UniformTypeKVCacheSpecs,
 )
+from vllm.v1.kv_offload.config import (
+    CompactGroupSliceConfig,
+    CompactSliceConfig,
+)
 
 # Re-export KVCacheConfig so that cpu.compact_accounting and other callers
 # can import it through the neutral module without a separate import edge.
@@ -31,6 +35,7 @@ __all__ = [
     "CompactTransportSignature",
     "KVCacheConfig",
     "build_compact_group_charges",
+    "build_compact_slice_accounting",
 ]
 
 
@@ -109,10 +114,18 @@ def build_compact_group_charges(
     charges: list[CompactGroupCharge] = []
     for group_idx, group in enumerate(kv_cache_config.kv_cache_groups):
         inner_specs = _layer_specs(group.kv_cache_spec)
-        real_bytes = sum(
-            _real_page_size_bytes(inner_specs.get(layer_name, group.kv_cache_spec))
-            for layer_name in group.layer_names
-        )
+        real_bytes = 0
+        for layer_name in group.layer_names:
+            if inner_specs:
+                spec = inner_specs.get(layer_name)
+                if spec is None:
+                    raise ValueError(
+                        f"KV group {group_idx} layer {layer_name!r} not found "
+                        f"in UniformTypeKVCacheSpecs"
+                    )
+            else:
+                spec = group.kv_cache_spec
+            real_bytes += _real_page_size_bytes(spec)
         payload_per_rank = real_bytes * block_size_factor
         if payload_per_rank <= 0:
             raise ValueError(f"KV group {group_idx} has non-positive compact payload")
@@ -127,3 +140,83 @@ def build_compact_group_charges(
     if not charges:
         raise ValueError("compact accounting requires at least one KV group")
     return tuple(charges)
+
+
+def build_compact_slice_accounting(
+    kv_cache_config: KVCacheConfig,
+    *,
+    world_size: int,
+) -> tuple[CompactGroupSliceConfig, ...]:
+    """Build worker-local packed slice geometry through canonical accounting.
+
+    This runs only on rich per-worker configs, before the scheduler collapses
+    ``UniformTypeKVCacheSpecs`` to representative specs. Aggregate group
+    charges remain a separate scheduler-safe transport contract.
+    """
+    if kv_cache_config.compact_aggregate_signature is None:
+        raise ValueError("compact aggregate signature is required")
+    if not kv_cache_config.kv_cache_tensors or not any(
+        tensor.block_stride for tensor in kv_cache_config.kv_cache_tensors
+    ):
+        raise ValueError("compact slice accounting requires packed tensor metadata")
+    if any(
+        not isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs)
+        for group in kv_cache_config.kv_cache_groups
+    ):
+        raise ValueError(
+            "compact slice accounting requires rich UniformTypeKVCacheSpecs"
+        )
+
+    # Lazy import preserves the neutral import boundary while reusing the one
+    # canonical physical accounting implementation.
+    from vllm.v1.kv_offload.cpu.compact_accounting import (
+        build_compact_layout_accounting,
+    )
+
+    accounting = build_compact_layout_accounting(
+        kv_cache_config,
+        world_size=world_size,
+        block_size_factor=1,
+        cpu_budget_bytes=1,
+    )
+    group_slices = tuple(
+        CompactGroupSliceConfig(
+            group_idx=group.group_idx,
+            slices=tuple(
+                CompactSliceConfig(
+                    offset_bytes=slice_.offset_bytes,
+                    real_bytes_per_gpu_block=slice_.real_bytes_per_gpu_block,
+                    padded_bytes_per_gpu_block=slice_.padded_bytes_per_gpu_block,
+                    layer_name=slice_.layer_name,
+                )
+                for slice_ in group.slices
+            ),
+            compact_real_bytes_per_rank=group.compact_real_bytes_per_rank,
+            compact_padded_bytes_per_rank=group.compact_padded_bytes_per_rank,
+        )
+        for group in accounting.groups
+    )
+
+    signature = kv_cache_config.compact_aggregate_signature
+    assert signature is not None
+    if len(group_slices) != len(signature):
+        raise ValueError(
+            f"compact slice group count {len(group_slices)} does not match "
+            f"aggregate signature count {len(signature)}"
+        )
+    for group_slice, charge in zip(group_slices, signature):
+        if group_slice.group_idx != charge.group_idx:
+            raise ValueError(
+                f"compact slice group {group_slice.group_idx} does not match "
+                f"aggregate signature group {charge.group_idx}"
+            )
+        if (
+            group_slice.compact_real_bytes_per_rank
+            != charge.compact_bytes_per_native_block_per_worker
+        ):
+            raise ValueError(
+                f"Group {group_slice.group_idx} slice accounting "
+                f"{group_slice.compact_real_bytes_per_rank} != transported charge "
+                f"{charge.compact_bytes_per_native_block_per_worker}"
+            )
+    return group_slices

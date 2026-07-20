@@ -38,6 +38,7 @@ from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 from vllm.v1.kv_offload.compact_geometry import (
     CompactTransportSignature,
     build_compact_group_charges,
+    build_compact_slice_accounting,
 )
 from vllm.v1.request import Request
 from vllm.v1.utils import tensor_data
@@ -1810,6 +1811,10 @@ def generate_scheduler_kv_cache_config(
     # All workers have the same kv_cache_config except layer names, so use
     # an arbitrary one to initialize the scheduler.
     cfg = copy.deepcopy(kv_cache_configs[0])
+    # Physical packed slice geometry belongs only to worker configs. The
+    # scheduler consumes aggregate compact charges and must never reconstruct
+    # physical slices after representative-spec collapse.
+    cfg.compact_slice_accounting = None
     for group in cfg.kv_cache_groups:
         if isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs):
             # All layers in the UniformTypeKVCacheSpecs have the same type,
@@ -2201,12 +2206,21 @@ def get_kv_cache_configs(
             )
         )
 
-    # Stamp the compact aggregate signature on every worker's config.
+    # Stamp scheduler-safe aggregate charges and worker-local physical slice
+    # geometry on every rich worker config before scheduler projection.
     if compact_aggregate_signature is not None:
         for kv_cache_config in kv_cache_configs:
             kv_cache_config.compact_aggregate_signature = compact_aggregate_signature
+            if any(tensor.block_stride for tensor in kv_cache_config.kv_cache_tensors):
+                kv_cache_config.compact_slice_accounting = (
+                    build_compact_slice_accounting(
+                        kv_cache_config,
+                        world_size=world_size,
+                    )
+                )
 
-        # Verify all workers received the same signature.
+        # Verify all workers received the same aggregate signature. Physical
+        # slices remain worker-local because future PP support may differ by rank.
         if len(kv_cache_configs) > 1:
             for idx in range(1, len(kv_cache_configs)):
                 assert (

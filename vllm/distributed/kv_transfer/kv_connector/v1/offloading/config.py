@@ -7,8 +7,6 @@ from typing import TYPE_CHECKING
 from vllm.v1.core.kv_cache_utils import resolve_kv_cache_block_sizes
 from vllm.v1.kv_cache_interface import FullAttentionSpec, MLAAttentionSpec
 from vllm.v1.kv_offload.config import (
-    CompactGroupSliceConfig,
-    CompactSliceConfig,
     OffloadingCacheConfig,
     OffloadingConfig,
     OffloadingGroupConfig,
@@ -24,81 +22,6 @@ if TYPE_CHECKING:
 def is_kv_cache_tensor_packed(kv_cache_tensor: "KVCacheTensor") -> bool:
     """Return whether a KV cache tensor uses a packed block stride."""
     return bool(kv_cache_tensor.block_stride)
-
-
-def _build_compact_slice_accounting(
-    kv_cache_config: "KVCacheConfig",
-    vllm_config: "VllmConfig",
-) -> tuple[CompactGroupSliceConfig, ...] | None:
-    """Derive per-slice accounting from packed tensor metadata.
-
-    Returns None when the config lacks packed tensor metadata or the
-    compact layout is not enabled.  Requires the compact aggregate signature
-    (from the scheduler-side pre-projection global groups) plus packed tensor
-    metadata (from the post-projection worker config); when both are present
-    the slice accounting is derived regardless of whether
-    ``build_offloading_config`` is called on the scheduler or worker side.
-    """
-    signature = kv_cache_config.compact_aggregate_signature
-    if signature is None:
-        return None
-
-    # Need packed tensor metadata for full slice accounting.
-    if not kv_cache_config.kv_cache_tensors or not any(
-        t.block_stride for t in kv_cache_config.kv_cache_tensors
-    ):
-        return None
-
-    # Lazy import to keep cpu module out of the pure config path.
-    # build_compact_layout_accounting requires packed tensors.
-    from vllm.v1.kv_offload.cpu.compact_accounting import (
-        build_compact_layout_accounting,
-    )
-
-    world_size = vllm_config.parallel_config.world_size
-    # Use a sentinel cpu_budget_bytes — GroupCompactAccounting derives its
-    # slice fields from packed tensor geometry, not the CPU budget.
-    cpu_budget_bytes = 1
-    accounting = build_compact_layout_accounting(
-        kv_cache_config,
-        world_size=world_size,
-        block_size_factor=1,
-        cpu_budget_bytes=cpu_budget_bytes,
-    )
-
-    group_slices: list[CompactGroupSliceConfig] = []
-    for group in accounting.groups:
-        slices = tuple(
-            CompactSliceConfig(
-                offset_bytes=s.offset_bytes,
-                real_bytes_per_gpu_block=s.real_bytes_per_gpu_block,
-                padded_bytes_per_gpu_block=s.padded_bytes_per_gpu_block,
-                layer_name=s.layer_name,
-            )
-            for s in group.slices
-        )
-        group_slices.append(
-            CompactGroupSliceConfig(
-                group_idx=group.group_idx,
-                slices=slices,
-                compact_real_bytes_per_rank=group.compact_real_bytes_per_rank,
-                compact_padded_bytes_per_rank=group.compact_padded_bytes_per_rank,
-            )
-        )
-
-    # Validate aggregate slice accounting equals transported group charges.
-    for gs in group_slices:
-        charge = signature[gs.group_idx]
-        assert (
-            gs.compact_real_bytes_per_rank
-            == charge.compact_bytes_per_native_block_per_worker
-        ), (
-            f"Group {gs.group_idx} slice accounting "
-            f"{gs.compact_real_bytes_per_rank} != transported charge "
-            f"{charge.compact_bytes_per_native_block_per_worker}"
-        )
-
-    return tuple(group_slices)
 
 
 def build_offloading_config(
@@ -220,14 +143,10 @@ def build_offloading_config(
         and not isinstance(single_group, MLAAttentionSpec)
     )
 
-    # Derive compact slice accounting from the transported signature and
-    # packed tensor metadata when both are available.  build_offloading_config
-    # runs on both the scheduler (pre-projection, global groups) and worker
-    # (post-projection) side; when the scheduler-side config has packed
-    # tensor metadata the slice accounting is derived there too.
-    compact_slice_accounting = _build_compact_slice_accounting(
-        kv_cache_config, vllm_config
-    )
+    # Physical compact slices are stamped only on rich worker KV configs before
+    # scheduler projection. The collapsed scheduler config carries only the
+    # aggregate signature above.
+    compact_slice_accounting = kv_cache_config.compact_slice_accounting
 
     kv_events_config = vllm_config.kv_events_config
     return OffloadingConfig(

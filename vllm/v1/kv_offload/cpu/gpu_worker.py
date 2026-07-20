@@ -23,6 +23,12 @@ from vllm.v1.kv_offload.base import (
     OffloadingWorker,
     TransferResult,
 )
+from vllm.v1.kv_offload.config import CompactGroupSliceConfig
+from vllm.v1.kv_offload.cpu.common import CompactCPULoadStoreSpec
+from vllm.v1.kv_offload.cpu.compact_transfer import (
+    CompactTransferPlan,
+    plan_compact_transfer,
+)
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 from vllm.v1.kv_offload.cpu.swap_blocks_triton import (
     THRESHOLD_BYTES,
@@ -163,6 +169,56 @@ def _new_descriptor_buffers(
     )
 
 
+def _fill_compact_descriptor_buffers(
+    gpu_to_cpu: bool,
+    plan: CompactTransferPlan,
+    batch_src: torch.Tensor,
+    batch_dst: torch.Tensor,
+    batch_sizes: torch.Tensor,
+    num_copy_ops: int,
+) -> None:
+    """Fill PyTorch descriptor buffers from a compact transfer plan.
+
+    Pure NumPy helper (no CUDA) that swaps GPU/CPU pointer roles for
+    store vs. load.  ``batch_src``, ``batch_dst``, ``batch_sizes`` are
+    pre-allocated pinned PyTorch int64/uint64 tensors; only the first
+    ``num_copy_ops`` entries are filled.
+
+    Extracted from ``_transfer_compact`` so that bounded tests can capture
+    exact descriptors without CUDA, CUPTI, stream synchronization, or real
+    GPU/CPU tensor allocations.
+    """
+    _fill_compact_descriptor_buffers_numpy(
+        gpu_to_cpu=gpu_to_cpu,
+        plan=plan,
+        src_arr=batch_src.numpy()[:num_copy_ops],
+        dst_arr=batch_dst.numpy()[:num_copy_ops],
+        sizes_arr=batch_sizes.numpy()[:num_copy_ops],
+    )
+
+
+def _fill_compact_descriptor_buffers_numpy(
+    gpu_to_cpu: bool,
+    plan: CompactTransferPlan,
+    src_arr: np.ndarray,
+    dst_arr: np.ndarray,
+    sizes_arr: np.ndarray,
+) -> None:
+    """Fill numpy descriptor arrays from a compact transfer plan.
+
+    Pure NumPy (no torch, no CUDA) -- usable in bounded tests that prove
+    exact descriptor construction without importing the full vllm module
+    chain.
+    """
+    if gpu_to_cpu:
+        src_arr[:] = np.asarray(plan.gpu_ptrs)
+        dst_arr[:] = np.asarray(plan.cpu_ptrs)
+    else:
+        src_arr[:] = np.asarray(plan.cpu_ptrs)
+        dst_arr[:] = np.asarray(plan.gpu_ptrs)
+    sizes_arr[:] = np.asarray(plan.sizes)
+
+
 class SingleDirectionOffloadingHandler:
     """
     Handles transfers for a single direction, either CPU->GPU or GPU->CPU.
@@ -179,6 +235,8 @@ class SingleDirectionOffloadingHandler:
         kv_cache_groups_data_refs: list[list[CanonicalKVCacheRef]],
         gpu_to_cpu: bool,
         mmap_region: SharedOffloadRegion | None = None,
+        compact_region: torch.Tensor | None = None,
+        compact_group_slice_configs: tuple[CompactGroupSliceConfig, ...] | None = None,
     ):
         """
         Initialize a SingleDirectionOffloadingHandler.
@@ -189,11 +247,25 @@ class SingleDirectionOffloadingHandler:
             cpu_tensors: list of CPU KV cache tensors.
                 Each of shape (num_cpu_blocks, cpu_page_size_bytes) with dtype int8.
                 Order should match gpu_tensors.
+            blocks_per_chunk: number of GPU blocks per CPU block.
             kv_cache_groups_data_refs: list of CanonicalKVCacheRef per group.
             gpu_to_cpu: if True, transfer from GPU to CPU; otherwise CPU to GPU.
+            compact_region: contiguous pinned CPU region for compact layout.
+            compact_group_slice_configs: slice accounting for compact transfer
+                planning, matching the transported compact_slice_accounting.
         """
-        assert len(gpu_tensors) == len(cpu_tensors)
-        assert len(gpu_tensors) > 0
+        compact_mode = compact_region is not None
+        if compact_mode != (compact_group_slice_configs is not None):
+            raise ValueError(
+                "compact_region and compact_group_slice_configs "
+                "must be provided together"
+            )
+        if compact_mode and mmap_region is not None:
+            raise ValueError("compact CPU layout does not support mmap storage")
+        if not compact_mode and len(gpu_tensors) != len(cpu_tensors):
+            raise ValueError("legacy GPU and CPU tensor counts must match")
+        if not gpu_tensors:
+            raise ValueError("at least one GPU tensor is required")
 
         # assert input tensors are as expected
         for gpu_tensor, cpu_tensor in zip(gpu_tensors, cpu_tensors):
@@ -215,6 +287,8 @@ class SingleDirectionOffloadingHandler:
         )
         self.gpu_to_cpu: bool = gpu_to_cpu
         self.kv_cache_groups_data_refs = kv_cache_groups_data_refs
+        self._compact_region = compact_region
+        self._compact_group_slice_configs = compact_group_slice_configs
         self._swap_blocks_batch = _select_swap_blocks_fn(
             kv_cache_groups_data_refs, gpu_to_cpu
         )
@@ -237,9 +311,150 @@ class SingleDirectionOffloadingHandler:
         # list of pinned descriptor buffer sets available for re-use
         self._buffer_pool: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = []
 
+    def _submit_descriptors(
+        self,
+        *,
+        job_id: int,
+        batch_src: torch.Tensor,
+        batch_dst: torch.Tensor,
+        batch_sizes: torch.Tensor,
+        num_copy_ops: int,
+        num_transfer_bytes: int,
+    ) -> bool:
+        """Submit descriptors through the one canonical async lifecycle path.
+
+        Extracted for reuse by both the legacy block-id path and the compact
+        packed-slice path so that stream/wait/event plumbing stays in one place.
+        """
+        src = batch_src[:num_copy_ops]
+        dst = batch_dst[:num_copy_ops]
+        sizes = batch_sizes[:num_copy_ops]
+        stream = (
+            self._stream_pool.pop() if self._stream_pool else current_platform.Stream()
+        )
+        start_event = (
+            self._event_pool.pop()
+            if self._event_pool
+            else torch.Event(enable_timing=True)
+        )
+        end_event = (
+            self._event_pool.pop()
+            if self._event_pool
+            else torch.Event(enable_timing=True)
+        )
+
+        if self.gpu_to_cpu:
+            stream.wait_stream(current_platform.current_stream())
+        if self._transfers:
+            stream.wait_event(self._transfers[-1].end_event)
+        is_src_access_order_any = not self.gpu_to_cpu
+        with current_platform.stream(stream):
+            start_event.record(stream)
+            if num_copy_ops > 0:
+                self._swap_blocks_batch(
+                    src,
+                    dst,
+                    sizes,
+                    is_src_access_order_any=is_src_access_order_any,
+                )
+            end_event.record(stream)
+
+        self._transfer_events[job_id] = end_event
+        self._transfers.append(
+            Transfer(
+                job_id=job_id,
+                stream=stream,
+                start_event=start_event,
+                end_event=end_event,
+                num_bytes=num_transfer_bytes,
+                batch_src=batch_src,
+                batch_dst=batch_dst,
+                batch_sizes=batch_sizes,
+            )
+        )
+        return True
+
+    def _transfer_compact(
+        self,
+        job_id: int,
+        cpu_spec: CompactCPULoadStoreSpec,
+        gpu_spec: GPULoadStoreSpec,
+    ) -> bool:
+        """Transfer compact packed-slice data through plan_compact_transfer.
+
+        Uses the direction-neutral planner from commit 3: for store (GPU->CPU)
+        the GPU block IDs are src and compact addresses are dst; for load
+        (CPU->GPU) the roles are reversed.
+        """
+        region = self._compact_region
+        slice_configs = self._compact_group_slice_configs
+        assert region is not None
+        assert slice_configs is not None
+
+        # Select the one canonical packed GPU tensor and derive row geometry.
+        gpu_tensor = self.src_tensors[0] if self.gpu_to_cpu else self.dst_tensors[0]
+        gpu_base_ptr = gpu_tensor.data_ptr()
+        gpu_row_stride = gpu_tensor.stride(0)
+        cpu_base_ptr = region.data_ptr()
+        cpu_region_size = region.numel() * region.element_size()
+
+        plan = plan_compact_transfer(
+            gpu_base_ptr=gpu_base_ptr,
+            gpu_row_stride=gpu_row_stride,
+            cpu_base_ptr=cpu_base_ptr,
+            cpu_region_size=cpu_region_size,
+            gpu_block_ids=gpu_spec.block_ids,
+            group_sizes=gpu_spec.group_sizes,
+            block_indices=gpu_spec.block_indices,
+            compact_addresses=cpu_spec.compact_addresses,
+            group_slice_configs=slice_configs,
+            block_size_factor=(
+                self.dst_blocks_per_chunk
+                if self.gpu_to_cpu
+                else self.src_blocks_per_chunk
+            ),
+        )
+
+        num_copy_ops = len(plan.sizes)
+        batch_src, batch_dst, batch_sizes = (
+            self._buffer_pool.pop()
+            if self._buffer_pool
+            else _new_descriptor_buffers(num_copy_ops)
+        )
+        if batch_src.numel() < num_copy_ops:
+            batch_src, batch_dst, batch_sizes = _new_descriptor_buffers(num_copy_ops)
+
+        # Fill descriptor buffers using the extracted pure helper.
+        _fill_compact_descriptor_buffers(
+            gpu_to_cpu=self.gpu_to_cpu,
+            plan=plan,
+            batch_src=batch_src,
+            batch_dst=batch_dst,
+            batch_sizes=batch_sizes,
+            num_copy_ops=num_copy_ops,
+        )
+
+        return self._submit_descriptors(
+            job_id=job_id,
+            batch_src=batch_src,
+            batch_dst=batch_dst,
+            batch_sizes=batch_sizes,
+            num_copy_ops=num_copy_ops,
+            num_transfer_bytes=plan.num_bytes,
+        )
+
     def transfer_async(
         self, job_id: int, src_spec: LoadStoreSpec, dst_spec: LoadStoreSpec
     ) -> bool:
+        # Compact path: detect CompactCPULoadStoreSpec on the CPU side.
+        if self.gpu_to_cpu and isinstance(dst_spec, CompactCPULoadStoreSpec):
+            assert isinstance(src_spec, GPULoadStoreSpec)
+            return self._transfer_compact(job_id, dst_spec, src_spec)
+        if not self.gpu_to_cpu and isinstance(src_spec, CompactCPULoadStoreSpec):
+            assert isinstance(dst_spec, GPULoadStoreSpec)
+            return self._transfer_compact(job_id, src_spec, dst_spec)
+
+        # Legacy block-id path.
         assert isinstance(src_spec, BlockIDsLoadStoreSpec)
         assert isinstance(dst_spec, BlockIDsLoadStoreSpec)
 
@@ -359,62 +574,14 @@ class SingleDirectionOffloadingHandler:
         assert dst_offset == num_dst_blocks
         assert op_idx == num_copy_ops
 
-        stream = (
-            self._stream_pool.pop() if self._stream_pool else current_platform.Stream()
+        return self._submit_descriptors(
+            job_id=job_id,
+            batch_src=batch_src,
+            batch_dst=batch_dst,
+            batch_sizes=batch_sizes,
+            num_copy_ops=num_copy_ops,
+            num_transfer_bytes=num_transfer_bytes,
         )
-        start_event = (
-            self._event_pool.pop()
-            if self._event_pool
-            else torch.Event(enable_timing=True)
-        )
-        end_event = (
-            self._event_pool.pop()
-            if self._event_pool
-            else torch.Event(enable_timing=True)
-        )
-
-        if self.gpu_to_cpu:
-            # wait for model computation to finish before offloading
-            stream.wait_stream(current_platform.current_stream())
-        if self._transfers:
-            last_transfer: Transfer = self._transfers[-1]
-            last_event = last_transfer.end_event
-            # assure job will start only after the previous one completes
-            stream.wait_event(last_event)
-        # CPU->GPU reads from host pinned memory, which is never written
-        # by a concurrent GPU stream, so CU_MEMCPY_SRC_ACCESS_ORDER_ANY is
-        # safe and lets the driver pipeline source reads. GPU->CPU reads
-        # from the live GPU KV cache, which the compute stream keeps
-        # writing; we must keep STREAM ordering so source reads are gated
-        # by the transfer stream's wait_stream(compute) barrier.
-        is_src_access_order_any = not self.gpu_to_cpu
-        with current_platform.stream(stream):
-            start_event.record(stream)
-            if num_copy_ops > 0:
-                self._swap_blocks_batch(
-                    src,
-                    dst,
-                    sizes,
-                    is_src_access_order_any=is_src_access_order_any,
-                )
-            end_event.record(stream)
-
-        self._transfer_events[job_id] = end_event
-        self._transfers.append(
-            Transfer(
-                job_id=job_id,
-                stream=stream,
-                start_event=start_event,
-                end_event=end_event,
-                num_bytes=num_transfer_bytes,
-                batch_src=batch_src,
-                batch_dst=batch_dst,
-                batch_sizes=batch_sizes,
-            )
-        )
-
-        # success
-        return True
 
     def get_finished(self) -> list[TransferResult]:
         results: list[TransferResult] = []
@@ -456,6 +623,8 @@ class SingleDirectionOffloadingHandler:
         self._buffer_pool.clear()
         self.src_tensors.clear()
         self.dst_tensors.clear()
+        self._compact_region = None
+        self._compact_group_slice_configs = None
         if self._mmap_region is not None:
             self._mmap_region.cleanup()
             self._mmap_region = None
@@ -467,6 +636,11 @@ class CPUOffloadingWorker(OffloadingWorker):
     Composes two SingleDirectionOffloadingHandler instances (one for each
     direction) and exposes them through the explicit submit_store /
     submit_load API.
+
+    When *compact_slice_accounting* is provided, the worker allocates a
+    single contiguous pinned CPU region instead of per-tensor block rows.
+    Both handlers share the same compact region and slice configs for
+    packed-slice transfer planning.
     """
 
     def __init__(
@@ -475,11 +649,32 @@ class CPUOffloadingWorker(OffloadingWorker):
         blocks_per_chunk: int,
         num_cpu_blocks: int,
         mmap_region: SharedOffloadRegion | None = None,
+        compact_slice_accounting: tuple[CompactGroupSliceConfig, ...] | None = None,
+        compact_cpu_budget_bytes_per_rank: int | None = None,
     ):
         pin_memory = PIN_MEMORY
+        compact_mode = compact_slice_accounting is not None
+        if compact_mode != (compact_cpu_budget_bytes_per_rank is not None):
+            raise ValueError(
+                "compact slice accounting and per-rank budget must be provided together"
+            )
+        if compact_mode and mmap_region is not None:
+            raise ValueError("compact CPU layout does not support mmap storage")
         logger.info("Allocating %d CPU tensors...", len(kv_caches.tensors))
         if mmap_region is not None and pin_memory:
             pin_mmap_region(mmap_region)
+
+        compact_region: torch.Tensor | None = None
+        if compact_mode:
+            assert compact_cpu_budget_bytes_per_rank is not None
+            if compact_cpu_budget_bytes_per_rank <= 0:
+                raise ValueError("compact per-rank CPU budget must be positive")
+            compact_region = torch.empty(
+                compact_cpu_budget_bytes_per_rank,
+                dtype=torch.uint8,
+                device="cpu",
+                pin_memory=pin_memory,
+            )
 
         gpu_tensors: list[torch.Tensor] = []
         cpu_tensors: list[torch.Tensor] = []
@@ -490,6 +685,11 @@ class CPUOffloadingWorker(OffloadingWorker):
             )
             cpu_page_size_bytes = gpu_page_size_bytes * blocks_per_chunk
 
+            if compact_mode:
+                # Compact mode uses one contiguous CPU region shared by both
+                # handlers. The gpu_tensor is still needed for row geometry.
+                gpu_tensors.append(gpu_tensor)
+                continue
             if mmap_region is not None:
                 cpu_tensor = mmap_region.create_next_view(cpu_page_size_bytes)
             else:
@@ -518,6 +718,8 @@ class CPUOffloadingWorker(OffloadingWorker):
             kv_cache_groups_data_refs=kv_caches.group_data_refs,
             gpu_to_cpu=True,
             mmap_region=mmap_region,
+            compact_region=compact_region,
+            compact_group_slice_configs=compact_slice_accounting,
         )
 
         self._load_handler = SingleDirectionOffloadingHandler(
@@ -526,6 +728,8 @@ class CPUOffloadingWorker(OffloadingWorker):
             blocks_per_chunk=blocks_per_chunk,
             kv_cache_groups_data_refs=kv_caches.group_data_refs,
             gpu_to_cpu=False,
+            compact_region=compact_region,
+            compact_group_slice_configs=compact_slice_accounting,
         )
 
     def submit_store(

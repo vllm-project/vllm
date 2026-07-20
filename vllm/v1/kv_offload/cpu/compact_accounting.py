@@ -191,7 +191,15 @@ def build_compact_layout_accounting(
                     "multiple times in layer_names"
                 )
             seen_layers.add(layer_name)
-            layer_spec = inner_specs.get(layer_name, group.kv_cache_spec)
+            if inner_specs:
+                layer_spec = inner_specs.get(layer_name)
+                if layer_spec is None:
+                    raise ValueError(
+                        f"KV group {group_idx} layer {layer_name!r} not found "
+                        f"in UniformTypeKVCacheSpecs"
+                    )
+            else:
+                layer_spec = group.kv_cache_spec
             layer_real_bytes = _real_page_size_bytes(layer_spec)
             if layer_real_bytes > slot.padded_bytes_per_gpu_block:
                 raise ValueError(

@@ -20,7 +20,6 @@ from vllm.v1.kv_offload.base import (
     ReqContext,
     RequestOffloadingContext,
 )
-from vllm.v1.kv_offload.config import CompactGroupSliceConfig
 from vllm.v1.kv_offload.cpu.common import (
     CompactCPUAddress,
     CompactCPUAddressSpan,
@@ -46,29 +45,6 @@ _COMPACT_SUPPORTED_POLICIES = frozenset({"lru", "arc"})
 
 
 # ---------------------------------------------------------------------------
-# Per-group logical payload charge for compact layout
-# ---------------------------------------------------------------------------
-
-
-def _build_group_payload_bytes(
-    group_slice_configs: tuple[CompactGroupSliceConfig, ...],
-    blocks_per_chunk: int,
-) -> dict[int, int]:
-    """Map group index to logical compact payload bytes per chunk."""
-    lookup: dict[int, int] = {}
-    for cfg in group_slice_configs:
-        payload = cfg.compact_real_bytes_per_rank * blocks_per_chunk
-        if payload <= 0:
-            raise ValueError(
-                f"compact group {cfg.group_idx} has non-positive payload {payload}"
-            )
-        if cfg.group_idx in lookup:
-            raise ValueError(f"duplicate compact group index {cfg.group_idx}")
-        lookup[cfg.group_idx] = payload
-    return lookup
-
-
-# ---------------------------------------------------------------------------
 # CPUOffloadingManager
 # ---------------------------------------------------------------------------
 
@@ -82,7 +58,7 @@ class CPUOffloadingManager(OffloadingManager):
     Policy-specific block organization and eviction decisions are delegated
     to the CachePolicy implementation.
 
-    When *compact layout* is enabled (all of *compact_group_slice_configs*,
+    When *compact layout* is enabled (all of *compact_group_payload_map*,
     *blocks_per_chunk*, *compact_cpu_budget_bytes*, and *compact_page_size*
     are provided), the manager uses a global :class:`FixedPageAllocator` for
     all groups so that byte offsets share a single coordinate space.
@@ -100,7 +76,7 @@ class CPUOffloadingManager(OffloadingManager):
         store_threshold: int = 1,
         max_tracker_size: int = 64_000,
         # Compact layout arguments (optional -- all four must be set together)
-        compact_group_slice_configs: tuple[CompactGroupSliceConfig, ...] | None = None,
+        compact_group_payload_map: dict[int, int] | None = None,
         blocks_per_chunk: int | None = None,
         compact_cpu_budget_bytes: int | None = None,
         compact_page_size: int | None = None,
@@ -134,7 +110,7 @@ class CPUOffloadingManager(OffloadingManager):
 
         # ---- Compact layout setup ----
         compact_args = [
-            compact_group_slice_configs,
+            compact_group_payload_map,
             blocks_per_chunk,
             compact_cpu_budget_bytes,
             compact_page_size,
@@ -143,11 +119,11 @@ class CPUOffloadingManager(OffloadingManager):
         if not compact_enabled and any(arg is not None for arg in compact_args):
             raise ValueError(
                 "compact layout requires all four compact args to be non-None: "
-                "compact_group_slice_configs, blocks_per_chunk, "
+                "compact_group_payload_map, blocks_per_chunk, "
                 "compact_cpu_budget_bytes, compact_page_size"
             )
         if compact_enabled:
-            assert compact_group_slice_configs is not None
+            assert compact_group_payload_map is not None
             assert blocks_per_chunk is not None
             assert compact_cpu_budget_bytes is not None
             assert compact_page_size is not None
@@ -159,21 +135,31 @@ class CPUOffloadingManager(OffloadingManager):
                 )
 
             self._compact_enabled = True
-            self._compact_group_slice_configs = compact_group_slice_configs
             self._blocks_per_chunk = blocks_per_chunk
+            expected_group_ids = list(range(len(compact_group_payload_map)))
+            if sorted(compact_group_payload_map) != expected_group_ids:
+                raise ValueError(
+                    "compact group indices must be contiguous from zero: "
+                    f"expected {expected_group_ids}, "
+                    f"got {sorted(compact_group_payload_map)}"
+                )
             self._compact_allocator: FixedPageAllocator = FixedPageAllocator(
                 compact_cpu_budget_bytes,
                 compact_page_size,
             )
-            self._group_payload_bytes: dict[int, int] = _build_group_payload_bytes(
-                compact_group_slice_configs, blocks_per_chunk
-            )
+            self._group_payload_bytes = {}
+            for group_idx, payload_per_block in compact_group_payload_map.items():
+                payload = payload_per_block * blocks_per_chunk
+                if payload <= 0:
+                    raise ValueError(
+                        f"compact group {group_idx} has non-positive payload {payload}"
+                    )
+                self._group_payload_bytes[group_idx] = payload
             # Per-key tracking for compact layout
             self._compact_pending: dict[OffloadKey, PageAllocation] = {}
             self._compact_allocations: dict[OffloadKey, PageAllocation] = {}
         else:
             self._compact_enabled = False
-            self._compact_group_slice_configs = None
             self._blocks_per_chunk = None
             self._compact_allocator = None
             self._group_payload_bytes = {}
@@ -440,7 +426,6 @@ class CPUOffloadingManager(OffloadingManager):
 
         allocator = self._compact_allocator
         assert allocator is not None
-        assert self._compact_group_slice_configs is not None
         assert self._blocks_per_chunk is not None
 
         # --- Compute pages required for this batch, per key ---

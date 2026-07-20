@@ -22,6 +22,7 @@ from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.v1.kv_offload.compact_geometry import CompactTransportSignature
+    from vllm.v1.kv_offload.config import CompactGroupSliceConfig
 
 logger = init_logger(__name__)
 
@@ -974,6 +975,11 @@ class KVCacheConfig:
     # projection when enable_compact_layout is true.  None for legacy configs.
     # Tuple order matches kv_cache_groups order.
     compact_aggregate_signature: tuple[CompactTransportSignature, ...] | None = None
+
+    # Worker-local physical packed slice geometry. Populated on rich worker
+    # configs before scheduler projection and explicitly cleared from the
+    # collapsed scheduler copy. None for legacy and scheduler configs.
+    compact_slice_accounting: tuple[CompactGroupSliceConfig, ...] | None = None
 
     @property
     def has_mamba_layers(self) -> bool:

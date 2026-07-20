@@ -62,10 +62,14 @@ def _single_slice_cfg(
     group_idx: int = 0,
     real_bytes: int = 80,
     padded: int = 100,
-    block_size_factor: int = 1,
     layer_name: str = "k",
 ) -> tuple[CompactGroupSliceConfig, ...]:
-    """One group with one packed slice."""
+    """One group with one packed slice.
+
+    ``compact_real_bytes_per_rank`` is UNSCALED (per-native-GPU-block).
+    Callers must multiply by ``block_size_factor`` when constructing
+    ``CompactCPUAddress.logical_length``.
+    """
     return (
         CompactGroupSliceConfig(
             group_idx=group_idx,
@@ -77,8 +81,8 @@ def _single_slice_cfg(
                     layer_name=layer_name,
                 ),
             ),
-            compact_real_bytes_per_rank=real_bytes * block_size_factor,
-            compact_padded_bytes_per_rank=padded * block_size_factor,
+            compact_real_bytes_per_rank=real_bytes,
+            compact_padded_bytes_per_rank=padded,
         ),
     )
 
@@ -89,9 +93,11 @@ def _two_slice_cfg(
     real_v: int = 40,
     padded_k: int = 100,
     padded_v: int = 60,
-    block_size_factor: int = 1,
 ) -> tuple[CompactGroupSliceConfig, ...]:
-    """One group with two packed slices (k and v)."""
+    """One group with two packed slices (k and v).
+
+    ``compact_real_bytes_per_rank`` is UNSCALED (per-native-GPU-block).
+    """
     k = CompactSliceConfig(
         offset_bytes=0,
         real_bytes_per_gpu_block=real_k,
@@ -110,8 +116,8 @@ def _two_slice_cfg(
         CompactGroupSliceConfig(
             group_idx=group_idx,
             slices=(k, v),
-            compact_real_bytes_per_rank=total_real * block_size_factor,
-            compact_padded_bytes_per_rank=total_padded * block_size_factor,
+            compact_real_bytes_per_rank=total_real,
+            compact_padded_bytes_per_rank=total_padded,
         ),
     )
 
@@ -224,7 +230,7 @@ def test_nonzero_block_index_selects_sub_block() -> None:
         compact_addresses=[
             _addr(0, 160, 160, 0),
         ],
-        group_slice_configs=_single_slice_cfg(real_bytes=80, block_size_factor=2),
+        group_slice_configs=_single_slice_cfg(real_bytes=80),
         block_size_factor=2,
     )
     assert plan.num_descriptors == 1
@@ -254,7 +260,7 @@ def test_blocks_per_chunk_two() -> None:
         compact_addresses=[
             _addr(0, 160, 160, 0),
         ],
-        group_slice_configs=_single_slice_cfg(real_bytes=80, block_size_factor=2),
+        group_slice_configs=_single_slice_cfg(real_bytes=80),
         block_size_factor=2,
     )
     assert plan.num_descriptors == 2
@@ -376,7 +382,7 @@ def test_two_slices_with_block_size_factor_two() -> None:
         compact_addresses=[
             _addr(0, 240, 240, 0),  # 2 * (80 + 40) = 240
         ],
-        group_slice_configs=_two_slice_cfg(block_size_factor=2),
+        group_slice_configs=_two_slice_cfg(),
         block_size_factor=2,
     )
     assert plan.num_descriptors == 4  # 2 blocks * 2 slices
@@ -463,7 +469,7 @@ def test_insufficient_address_size_fails() -> None:
             compact_addresses=[
                 _addr(0, 80, 80, 0),
             ],
-            group_slice_configs=_single_slice_cfg(real_bytes=80, block_size_factor=2),
+            group_slice_configs=_single_slice_cfg(real_bytes=80),
             block_size_factor=2,
         )
 
@@ -856,7 +862,7 @@ def test_sum_group_sizes_mismatch_fails() -> None:
                 _addr(0, 160, 160, 0),
                 _addr(200, 160, 160, 0),
             ],
-            group_slice_configs=_single_slice_cfg(real_bytes=80, block_size_factor=2),
+            group_slice_configs=_single_slice_cfg(real_bytes=80),
             block_size_factor=2,
         )
 
@@ -948,4 +954,102 @@ def test_slice_charge_mismatch_fails() -> None:
                 ),
             ),
             block_size_factor=1,
+        )
+
+
+def test_address_logical_length_mismatch_fails() -> None:
+    """Address logical_length not matching slice_base must raise.
+
+    ``CompactCPUAddress.logical_length`` must equal
+    ``compact_real_bytes_per_rank * block_size_factor``.  This test
+    provides an address whose logical_length is too small for the slice
+    geometry, which should fail the per-address invariant check.
+    """
+    # real_bytes=80, block_size_factor=2 -> slice_base = 160
+    # But address.logical_length = 80 < 160
+    with pytest.raises(
+        ValueError,
+        match="compact address is smaller than its static slice layout",
+    ):
+        plan_compact_transfer(
+            gpu_base_ptr=0x1000,
+            gpu_row_stride=160,
+            cpu_base_ptr=0xA000,
+            cpu_region_size=1024,
+            gpu_block_ids=np.array([0, 1], dtype=np.int64),
+            group_sizes=[2],
+            block_indices=[0],
+            compact_addresses=[
+                _addr(0, 80, 80, 0),  # should be 160 for block_size_factor=2
+            ],
+            group_slice_configs=_single_slice_cfg(real_bytes=80),
+            block_size_factor=2,
+        )
+
+
+def test_address_logical_length_not_equal_slice_base() -> None:
+    """Address logical_length not equal to slice_base (but >= required payload)
+    must raise the exact-equality check.
+
+    The early invariant check (``logical_length < required_payload``) passes,
+    but the per-address exact-equality check at the end of the group loop
+    fires because ``logical_length != slice_base``.
+    """
+    # real_bytes=80, block_size_factor=2 -> slice_base = 160
+    # address.logical_length = 200 >= 160 (passes early check)
+    # But 200 != 160 (fails exact-equality check)
+    with pytest.raises(ValueError, match="does not match"):
+        plan_compact_transfer(
+            gpu_base_ptr=0x1000,
+            gpu_row_stride=160,
+            cpu_base_ptr=0xA000,
+            cpu_region_size=1024,
+            gpu_block_ids=np.array([0, 1], dtype=np.int64),
+            group_sizes=[2],
+            block_indices=[0],
+            compact_addresses=[
+                _addr(0, 200, 200, 0),  # >= 160 but != 160
+            ],
+            group_slice_configs=_single_slice_cfg(real_bytes=80),
+            block_size_factor=2,
+        )
+
+
+def test_address_scaling_mismatch_fails() -> None:
+    """Aggregate charge check: slice_base must equal
+    compact_real_bytes_per_rank * block_size_factor.
+
+    Provide a group config whose compact_real_bytes_per_rank is wrong
+    (should be 80 but instead 40), so the aggregate check fires.
+    """
+    # real_bytes=80, block_size_factor=2 -> slice_base = 160
+    # compact_real_bytes_per_rank=40 * 2 = 80 != 160
+    with pytest.raises(ValueError, match="does not match"):
+        plan_compact_transfer(
+            gpu_base_ptr=0x1000,
+            gpu_row_stride=160,
+            cpu_base_ptr=0xA000,
+            cpu_region_size=1024,
+            gpu_block_ids=np.array([0, 1], dtype=np.int64),
+            group_sizes=[2],
+            block_indices=[0],
+            compact_addresses=[
+                _addr(0, 160, 160, 0),
+            ],
+            group_slice_configs=(
+                CompactGroupSliceConfig(
+                    group_idx=0,
+                    slices=(
+                        CompactSliceConfig(
+                            offset_bytes=0,
+                            real_bytes_per_gpu_block=80,
+                            padded_bytes_per_gpu_block=100,
+                            layer_name="k",
+                        ),
+                    ),
+                    compact_real_bytes_per_rank=40,  # wrong: should be 80
+                    compact_padded_bytes_per_rank=60,
+                ),
+            ),
+            block_size_factor=2,
         )

@@ -219,9 +219,16 @@ def plan_compact_transfer(
                     )
             slice_base += block_size_factor * real_bytes
 
-        if slice_base != group_slice_cfg.compact_real_bytes_per_rank:
+        # Verify that the computed slice geometry matches the transported
+        # group payload charge.  compact_real_bytes_per_rank is UNSCALED
+        # (per-native-GPU-block), so multiply by block_size_factor to obtain
+        # the per-address payload that the accumulated slice_base represents.
+        expected = group_slice_cfg.compact_real_bytes_per_rank * block_size_factor
+        if slice_base != expected:
             raise ValueError(
-                "compact slice layout does not match the group payload charge"
+                "compact slice layout does not match the group payload charge: "
+                f"computed {slice_base}, "
+                f"expected {expected}"
             )
         for address in group_addresses:
             if address.logical_length != slice_base:

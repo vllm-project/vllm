@@ -23,7 +23,10 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.config import (
     build_offloading_config,
 )
 from vllm.platforms import current_platform
-from vllm.v1.core.kv_cache_utils import get_kv_cache_configs
+from vllm.v1.core.kv_cache_utils import (
+    generate_scheduler_kv_cache_config,
+    get_kv_cache_configs,
+)
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
@@ -32,10 +35,14 @@ from vllm.v1.kv_cache_interface import (
     KVCacheTensor,
     UniformTypeKVCacheSpecs,
 )
-from vllm.v1.kv_offload.compact_geometry import CompactTransportSignature
+from vllm.v1.kv_offload.compact_geometry import (
+    CompactTransportSignature,
+    build_compact_slice_accounting,
+)
 from vllm.v1.kv_offload.cpu.compact_accounting import (
     CompactGroupCharge,
     build_compact_group_charges,
+    build_compact_layout_accounting,
 )
 
 # ---------------------------------------------------------------------------
@@ -315,6 +322,15 @@ def test_get_kv_cache_configs_stamps_signature() -> None:
     for cfg in configs:
         assert cfg.compact_aggregate_signature is not None
         assert len(cfg.compact_aggregate_signature) == 1  # merged into one group
+        # This synthetic fixture is unpacked, so no worker physical slices exist.
+        assert cfg.compact_slice_accounting is None
+
+    scheduler_cfg = generate_scheduler_kv_cache_config(configs)
+    assert (
+        scheduler_cfg.compact_aggregate_signature
+        == configs[0].compact_aggregate_signature
+    )
+    assert scheduler_cfg.compact_slice_accounting is None
 
 
 def test_pp_greater_than_one_fails_loud() -> None:
@@ -346,13 +362,16 @@ def test_pp_greater_than_one_fails_loud() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_worker_derives_slice_accounting() -> None:
-    """Worker-side build_offloading_config derives compact_slice_accounting."""
+def test_worker_consumes_stamped_slice_accounting() -> None:
+    """Worker normalized config consumes pre-stamped physical slice geometry."""
     kv_config = _packed_kv_cache_config()
     signature = _to_signature(
         build_compact_group_charges(kv_config, world_size=1, block_size_factor=1)
     )
     kv_config.compact_aggregate_signature = signature
+    kv_config.compact_slice_accounting = build_compact_slice_accounting(
+        kv_config, world_size=1
+    )
 
     vllm_config = _make_vllm_config(enable_compact=True)
     off_config = build_offloading_config(vllm_config, kv_config)
@@ -382,6 +401,9 @@ def test_worker_slice_accounting_aggregate_matches_charge() -> None:
     charges = build_compact_group_charges(kv_config, world_size=1, block_size_factor=1)
     signature = _to_signature(charges)
     kv_config.compact_aggregate_signature = signature
+    kv_config.compact_slice_accounting = build_compact_slice_accounting(
+        kv_config, world_size=1
+    )
 
     vllm_config = _make_vllm_config(enable_compact=True)
     off_config = build_offloading_config(vllm_config, kv_config)
@@ -648,9 +670,8 @@ def test_mismatched_slice_accounting_vs_charge_asserts() -> None:
     )
     kv_config.compact_aggregate_signature = _to_signature(tuple(wrong_charges))
 
-    vllm_config = _make_vllm_config(enable_compact=True)
-    with pytest.raises(AssertionError, match="slice accounting"):
-        build_offloading_config(vllm_config, kv_config)
+    with pytest.raises(ValueError, match="slice accounting"):
+        build_compact_slice_accounting(kv_config, world_size=1)
 
 
 # ---------------------------------------------------------------------------
@@ -675,3 +696,233 @@ def test_signature_has_only_neutral_fields() -> None:
     assert fields == {"group_idx", "compact_bytes_per_native_block_per_worker"}, (
         f"CompactTransportSignature has unexpected fields: {fields}"
     )
+
+
+# ---------------------------------------------------------------------------
+# 8. Scheduler-collapsed config: no physical slice accounting
+# ---------------------------------------------------------------------------
+
+
+def test_scheduler_collapsed_returns_no_slice_accounting() -> None:
+    """Scheduler-collapsed (non-UniformTypeKVCacheSpecs) config returns
+    compact_slice_accounting=None while aggregate charges remain available.
+
+    Simulates generate_scheduler_kv_cache_config by replacing each group's
+    UniformTypeKVCacheSpecs with a single representative spec, preserving
+    layer_names and packed tensors.
+    """
+    kv_config = _packed_kv_cache_config()
+    signature = _to_signature(
+        build_compact_group_charges(kv_config, world_size=1, block_size_factor=1)
+    )
+
+    kv_config.compact_aggregate_signature = signature
+    kv_config.compact_slice_accounting = build_compact_slice_accounting(
+        kv_config, world_size=1
+    )
+    collapsed = generate_scheduler_kv_cache_config([kv_config])
+
+    # Worker-rich config consumes the stamped physical slice accounting.
+    vllm_config = _make_vllm_config(enable_compact=True)
+    off_config_rich = build_offloading_config(vllm_config, kv_config)
+    assert off_config_rich.compact_slice_accounting is not None
+
+    # Scheduler-collapsed config -> slice accounting None, no error.
+    off_config_collapsed = build_offloading_config(vllm_config, collapsed)
+    assert off_config_collapsed.compact_slice_accounting is None
+
+    # Aggregate charges still flow through OffloadingGroupConfig.
+    assert (
+        off_config_collapsed.groups[0].compact_bytes_per_native_block_per_worker == 120
+    )
+    assert (
+        off_config_collapsed.groups[1].compact_bytes_per_native_block_per_worker == 80
+    )
+
+
+def test_scheduler_collapsed_mixed_geometry_no_slice() -> None:
+    """Scheduler-collapsed config with mixed 8640/1728 geometry returns no
+    physical slice accounting and does not throw."""
+    # Simulate DeepSeek V4 mixed geometry: C4 (indexer) ~8448 real bytes
+    # and C128 (attention) ~1728 real bytes sharing a packed slot.
+    c4_spec = FullAttentionSpec(
+        block_size=64,
+        num_kv_heads=1,
+        head_size=528,
+        dtype=torch.uint8,
+    )  # real = 2 * 64 * 1 * 528 * 1 = 67584 -- too large
+    # Use realistic scaled values for test:
+    # C4 indexer:  2 * 64 * 1 * 66  * 1 = 8448
+    # C128 attn:   2 * 64 * 1 * 13.5 -> use 14*1 = 1792 (approx 1728)
+    # Round to match paddle: C4 real=8448, C128 real=1728
+    c4_spec = FullAttentionSpec(
+        block_size=64,
+        num_kv_heads=1,
+        head_size=66,
+        dtype=torch.uint8,
+    )
+    c128_spec = FullAttentionSpec(
+        block_size=64,
+        num_kv_heads=1,
+        head_size=14,
+        dtype=torch.uint8,
+    )
+    # real_page_size_bytes: 2 * 64 * 1 * 66 * 1 = 8448
+    # real_page_size_bytes: 2 * 64 * 1 * 14 * 1 = 1792
+    # Packed slot must accommodate the larger: padded >= 8448
+    slot_padded = max(c4_spec.real_page_size_bytes, c128_spec.real_page_size_bytes)
+    slot_padded_rounded = ((slot_padded + 255) // 256) * 256  # round up to 256
+
+    kv_config = KVCacheConfig(
+        num_blocks=4,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=4 * slot_padded_rounded,
+                shared_by=["c4", "c128"],
+                offset=0,
+                block_stride=slot_padded_rounded,
+            ),
+        ],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                layer_names=["c4", "c128"],
+                kv_cache_spec=UniformTypeKVCacheSpecs(
+                    block_size=64,
+                    kv_cache_specs={"c4": c4_spec, "c128": c128_spec},
+                ),
+            ),
+        ],
+    )
+
+    signature = _to_signature(
+        build_compact_group_charges(kv_config, world_size=1, block_size_factor=1)
+    )
+
+    # Worker-rich: stamp and consume slice accounting.
+    vllm_config = _make_vllm_config(enable_compact=True)
+    kv_config.compact_aggregate_signature = signature
+    kv_config.compact_slice_accounting = build_compact_slice_accounting(
+        kv_config, world_size=1
+    )
+    off_config = build_offloading_config(vllm_config, kv_config)
+    assert off_config.compact_slice_accounting is not None
+    assert len(off_config.compact_slice_accounting) == 1
+    gs = off_config.compact_slice_accounting[0]
+    assert gs.group_idx == 0
+    assert len(gs.slices) == 2
+    assert gs.slices[0].layer_name == "c4"
+    assert gs.slices[0].real_bytes_per_gpu_block == 8448
+    assert gs.slices[1].layer_name == "c128"
+    assert gs.slices[1].real_bytes_per_gpu_block == 1792
+
+    # Scheduler projection clears worker-only physical slices while preserving
+    # the aggregate charge.
+    collapsed = generate_scheduler_kv_cache_config([kv_config])
+    off_config_collapsed = build_offloading_config(vllm_config, collapsed)
+    assert off_config_collapsed.compact_slice_accounting is None
+    # Aggregate charge still flows.
+    assert (
+        off_config_collapsed.groups[0].compact_bytes_per_native_block_per_worker
+        == 8448 + 1792
+    )
+
+
+def test_missing_keyed_membership_fails_loud_in_group_charges() -> None:
+    """build_compact_group_charges raises ValueError when a UniformType map
+    lacks a requested layer key."""
+    a0 = FullAttentionSpec(
+        block_size=4,
+        num_kv_heads=1,
+        head_size=10,
+        dtype=torch.uint8,
+    )
+    # a1 intentionally not added to kv_cache_specs
+    config = KVCacheConfig(
+        num_blocks=4,
+        kv_cache_tensors=[
+            KVCacheTensor(size=4 * 160, shared_by=["a0"], offset=0, block_stride=160),
+        ],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                layer_names=["a0", "a1"],
+                kv_cache_spec=UniformTypeKVCacheSpecs(
+                    block_size=4,
+                    kv_cache_specs={
+                        "a0": a0,  # a1 is missing!
+                    },
+                ),
+            ),
+        ],
+    )
+    with pytest.raises(ValueError, match="layer.*a1"):
+        build_compact_group_charges(config, world_size=1, block_size_factor=1)
+
+
+def test_missing_keyed_membership_fails_loud_in_layout_accounting() -> None:
+    """build_compact_layout_accounting raises ValueError when a UniformType map
+    lacks a requested layer key."""
+    a0 = FullAttentionSpec(
+        block_size=4,
+        num_kv_heads=1,
+        head_size=10,
+        dtype=torch.uint8,
+    )
+    # a1 spec intentionally omitted from kv_cache_specs
+    config = KVCacheConfig(
+        num_blocks=4,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=4 * 160, shared_by=["a0", "a1"], offset=0, block_stride=160
+            ),
+        ],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                layer_names=["a0", "a1"],
+                kv_cache_spec=UniformTypeKVCacheSpecs(
+                    block_size=4,
+                    kv_cache_specs={
+                        "a0": a0,  # a1 is missing!
+                    },
+                ),
+            ),
+        ],
+    )
+    with pytest.raises(ValueError, match="layer.*a1"):
+        build_compact_layout_accounting(
+            config, world_size=1, block_size_factor=1, cpu_budget_bytes=10_000
+        )
+
+
+def test_misaligned_layer_key_raises_in_group_charges() -> None:
+    """build_compact_group_charges raises ValueError when a layer key exists
+    in the UniformType map but the layer name in layer_names has a different
+    key that is missing."""
+    a0 = FullAttentionSpec(
+        block_size=4,
+        num_kv_heads=1,
+        head_size=10,
+        dtype=torch.uint8,
+    )
+    a1 = FullAttentionSpec(
+        block_size=4,
+        num_kv_heads=1,
+        head_size=5,
+        dtype=torch.uint8,
+    )
+    config = KVCacheConfig(
+        num_blocks=4,
+        kv_cache_tensors=[
+            KVCacheTensor(size=4 * 160, shared_by=["a0"], offset=0, block_stride=160),
+        ],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                layer_names=["a0", "missing_layer"],
+                kv_cache_spec=UniformTypeKVCacheSpecs(
+                    block_size=4,
+                    kv_cache_specs={"a0": a0, "a1": a1},
+                ),
+            ),
+        ],
+    )
+    with pytest.raises(ValueError, match="layer.*missing_layer"):
+        build_compact_group_charges(config, world_size=1, block_size_factor=1)
