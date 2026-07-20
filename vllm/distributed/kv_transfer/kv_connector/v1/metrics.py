@@ -51,6 +51,23 @@ class KVConnectorStats:
 
 
 class KVConnectorLogging:
+    """
+    Pipeline for collecting and logging KV transfer telemetry.
+
+    Logging flow:
+
+        observe() -> aggregate() -> reduce() -> log()
+
+    observe() receives transfer statistics that have already been aggregated
+    across all distributed workers (e.g., TP ranks) by the connector.
+    aggregate() accumulates observations received during the current logging
+    interval before reduce() computes summary metrics over the merged
+    observations. log() then formats and emits the resulting metrics.
+
+    The reported averages, percentiles, and throughput are computed from the
+    combined observations across all TP ranks rather than for any individual
+    rank.
+    """
     def __init__(self, kv_transfer_config: KVTransferConfig | None):
         # Instantiate the connector's stats class.
         if kv_transfer_config and kv_transfer_config.kv_connector:

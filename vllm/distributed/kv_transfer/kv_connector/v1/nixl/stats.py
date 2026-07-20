@@ -23,7 +23,31 @@ if TYPE_CHECKING:
 
 @dataclass
 class NixlKVConnectorStats(KVConnectorStats):
-    """Container for transfer performance metrics"""
+    """
+    Collects and aggregates NIXL KV transfer telemetry across all TP ranks.
+
+    Aggregation workflow:
+    1. Each TP rank independently records individual transfer observations via record_transfer()
+    2. aggregate() concatenates all observation lists from every TP rank using list.extend()
+    3. reduce() computes averages, P90 percentiles and throughput over the merged cross-rank dataset
+
+    Metric semantics after aggregation across all ranks:
+    - Num successful transfers: Total completed transfers summed across all TP ranks, not per-rank count
+    - Avg / P90 xfer time (ms): Mean and P90 transfer latency across all individual
+      rank-level transfers.
+    - Avg / P90 post time (ms): Time spent submitting the transfer request to the RDMA backend before
+      asynchronous data transfer begins.
+    - Avg MB per transfer: Average data size of every single rank-level transfer, not total bytes of one global KV cache shift
+    - Throughput (MB/s): Total MB across all ranks divided by the total transfer
+      time across all ranks. This represents average per-rank throughput, not
+      aggregate system throughput.
+    - Avg number of descriptors: Average descriptor count across all individual
+      rank transfer events
+
+    These semantics are particularly important when interpreting metrics from
+    TP > 1 deployments, where a single logical KV transfer may generate
+    multiple per-rank transfer observations.
+    """
 
     def __post_init__(self):
         if not self.data:
@@ -84,6 +108,12 @@ class NixlKVConnectorStats(KVConnectorStats):
         return self
 
     def reduce(self) -> dict[str, int | float]:
+        # All stats are calculated on observations merged from every TP rank.
+        # Derived values (averages, P90, throughput) are computed over the
+        # combined cross-rank data pool.
+        # Throughput metric is per-rank throughput, not total system aggregate.
+        # Raw data is stored in seconds and bytes; reduce() converts to
+        # milliseconds and MB for display.
         # Compute compact representative stats suitable for CLI logging
         if self.num_successful_transfers == 0:
             # CLI logging only reports successful transfers stats. If all requests in
