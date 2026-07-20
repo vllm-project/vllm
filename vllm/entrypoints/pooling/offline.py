@@ -399,6 +399,9 @@ class PoolingOfflineMixin(OfflineInferenceMixin):
         num_requests: int,
         use_tqdm: bool | Callable[..., tqdm] = True,
     ):
+        if num_requests == 0:
+            raise ValueError("You must pass at least one prompt")
+
         # Keeping max_num_seqs * 2 requests in the core can already saturate the core.
         # Therefore, keep most requests waiting outside the core.
         max_requests_in_core = (

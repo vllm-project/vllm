@@ -29,5 +29,10 @@ async def create_classify(
     handler = classify(raw_request)
     if handler is None:
         raise NotImplementedError("The model does not support Classification API")
+    try:
+        return await handler(request, raw_request)
+    except:
+        import traceback
 
-    return await handler(request, raw_request)
+        traceback.print_exc()
+        raise
