@@ -83,7 +83,7 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.utils import CpuGpuBuffer
 
 if TYPE_CHECKING:
-    # flashinfer>=0.6.13 only; imported lazily at runtime (see
+    # flashinfer>=0.6.15 only; imported lazily at runtime (see
     # _get_cutedsl_decode_wrapper).
     from flashinfer.cute_dsl.attention import BatchDecodePagedCuteDSLWrapper
 

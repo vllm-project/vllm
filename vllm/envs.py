@@ -1530,7 +1530,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
         int(os.getenv("VLLM_USE_FLASHINFER_MOE_INT4", "0"))
     ),
     # Route non-causal DFlash decode through the FlashInfer CuteDSL paged
-    # decode kernel (SM100, flashinfer>=0.6.13) instead of the prefill
+    # decode kernel (SM100, flashinfer>=0.6.15) instead of the prefill
     # wrapper. Falls back automatically when unavailable.
     "VLLM_FLASHINFER_CUTEDSL_DECODE": lambda: bool(
         int(os.getenv("VLLM_FLASHINFER_CUTEDSL_DECODE", "0"))
