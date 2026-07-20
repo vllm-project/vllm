@@ -41,7 +41,7 @@ else:
 from .reference_mxfp4 import dq_mxfp4_torch, qdq_mxfp4_torch
 
 # Minimum amd-quark version for MXFP4/OCP_MX tests (single source of truth).
-QUARK_MXFP4_MIN_VERSION = "0.8.99"
+QUARK_MXFP4_MIN_VERSION = "0.12"
 
 QUARK_MXFP4_AVAILABLE = find_spec("quark") is not None and version.parse(
     importlib.metadata.version("amd-quark")
@@ -220,10 +220,6 @@ class AccuracyTestConfig:
         }
         if model_max_len is not None:
             model_args["max_model_len"] = model_max_len
-
-        # Emulation backend on MI300, MI250 is opt-in following https://github.com/vllm-project/vllm/pull/45896
-        if not on_gfx950():
-            model_args["moe_backend"] = "emulation"
 
         return model_args
 

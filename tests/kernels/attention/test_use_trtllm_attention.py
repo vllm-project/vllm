@@ -79,11 +79,26 @@ def test_supports_sm100_with_artifactory(_art, _cap):
 
 @patch("vllm.envs.VLLM_BATCH_INVARIANT", False)
 @patch(
+    "vllm.utils.flashinfer.current_platform.is_device_capability", return_value=False
+)
+@patch(
     "vllm.utils.flashinfer.current_platform.is_device_capability_family",
     return_value=False,
 )
-def test_supports_non_sm100_platform(_cap):
+def test_supports_unsupported_platform(_family, _cap):
     assert supports_trtllm_attention() is False
+
+
+@patch("vllm.envs.VLLM_BATCH_INVARIANT", False)
+@patch("vllm.utils.flashinfer.current_platform.is_device_capability", return_value=True)
+@patch(
+    "vllm.utils.flashinfer.current_platform.is_device_capability_family",
+    return_value=False,
+)
+@patch("vllm.utils.flashinfer.has_nvidia_artifactory", return_value=True)
+def test_supports_sm90_decode_only(_art, _family, _cap):
+    assert supports_trtllm_attention(is_prefill=False) is True
+    assert supports_trtllm_attention(is_prefill=True) is False
 
 
 @patch("vllm.envs.VLLM_BATCH_INVARIANT", False)
@@ -137,6 +152,17 @@ def test_use_force_off(_mock):
 @patch("vllm.utils.flashinfer.supports_trtllm_attention", return_value=True)
 def test_use_dcp_fallback(_mock):
     assert _call(dcp_world_size=2) is False
+
+
+@patch("vllm.utils.flashinfer.supports_trtllm_attention", return_value=True)
+def test_use_dcp_fallback_prefill(_mock):
+    # TRTLLM prefill has no cross-rank LSE combine for DCP-sharded KV.
+    assert _call(dcp_world_size=2, is_prefill=True) is False
+
+
+@patch("vllm.utils.flashinfer.supports_trtllm_attention", return_value=True)
+def test_use_dcp_fallback_prefill_force_on_still_false(_mock):
+    assert _call(dcp_world_size=2, is_prefill=True, force_use_trtllm=True) is False
 
 
 @patch("vllm.utils.flashinfer.supports_trtllm_attention", return_value=False)

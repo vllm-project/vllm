@@ -1,8 +1,10 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use axum::Json;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use thiserror_ext::AsReport as _;
-use thiserror_ext::{Construct, Macro};
+use thiserror_ext::{AsReport as _, Construct, Macro};
 
 use crate::routes::openai::utils::types::{ErrorDetail, ErrorResponse};
 

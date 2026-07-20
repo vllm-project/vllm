@@ -156,6 +156,11 @@ def kernel_paged_attention_2d(
         # Supports non-contiguous mapping
         # from logical blocks to physical blocks
         abs_token_idx = start_n + offs_n
+        # Slots >= seq_len are unwritten KV cache and may hold NaN/garbage
+        # (e.g. the tail of the last partial block). They are score-masked
+        # below, but 0 * NaN = NaN would still poison the output, so exclude
+        # them from the K/V loads too.
+        kv_load_mask = abs_token_idx < seq_len
         l_block_idx = abs_token_idx // PHYSICAL_BLOCK_SIZE
         # Vectorized loading of physical block IDs
         p_block_idx = tl.load(block_tables_ptr + block_table_offset + l_block_idx)
@@ -181,7 +186,7 @@ def kernel_paged_attention_2d(
         # K : (HEAD_SIZE, BLOCK_SIZE)
         K_load = tl.load(
             key_cache_ptr + k_offset,
-            mask=dim_mask[:, None],
+            mask=dim_mask[:, None] & kv_load_mask[None, :],
             other=0.0,
             eviction_policy="evict_last",
         )
@@ -194,7 +199,7 @@ def kernel_paged_attention_2d(
         # V : (BLOCK_SIZE, HEAD_SIZE)
         V_load = tl.load(
             value_cache_ptr + v_offset,
-            mask=dim_mask[None, :],
+            mask=dim_mask[None, :] & kv_load_mask[:, None],
             other=0.0,
             eviction_policy="evict_last",
         )
