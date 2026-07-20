@@ -1,10 +1,32 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from cutlass import BFloat16, Float32, Int64, Uint32, cute
+import torch
+from cutlass import (
+    BFloat16,
+    Float8E4M3FN,
+    Float16,
+    Float32,
+    Int32,
+    Int64,
+    Uint32,
+    cute,
+)
 from cutlass._mlir import ir
 from cutlass._mlir.dialects import llvm, vector
 from cutlass.cute.nvgpu import cpasync
 from cutlass.cutlass_dsl import T, dsl_user_op
+
+_TORCH_TO_CUTE_DTYPE = {
+    torch.bfloat16: BFloat16,
+    torch.float8_e4m3fn: Float8E4M3FN,
+}
+
+_CUTE_TO_PTX_DTYPE = {
+    BFloat16: "bf16",
+    Float16: "f16",
+    Float8E4M3FN: "e4m3",
+    Float32: "f32",
+}
 
 # https://github.com/NVIDIA/cutlass/blob/v4.3.2/include/cute/arch/copy_sm90_desc.hpp#L193-L197
 EVICT_NORMAL = Int64(0x1000000000000000)
@@ -63,22 +85,35 @@ def fence_before_tma_store(*, loc=None, ip=None):
 
 
 @dsl_user_op
-def mma_bf16(
-    a: cute.TensorSSA, b: cute.TensorSSA, c: cute.TensorSSA, *, loc=None, ip=None
-):
-    if a.element_type == BFloat16:
-        a = cute.recast_tensor(a, Uint32)
-    if b.element_type == BFloat16:
-        b = cute.recast_tensor(b, Uint32)
+def mma_sync(a, b, c: cute.Tensor, *, loc=None, ip=None):
+    a_ty = _CUTE_TO_PTX_DTYPE[a.element_type]
+    b_ty = _CUTE_TO_PTX_DTYPE[b.element_type]
+    c_ty = _CUTE_TO_PTX_DTYPE[c.element_type]
+    mlir_ty = c.element_type.mlir_type
+    K = 256 // a.element_type.width  # 32B
 
-    mlir_ty = Float32.mlir_type
+    # Recast expects tensor-backed fragments; materialize SSA fragments here so
+    # callsites can pass converted FP8 fragments directly.
+    if isinstance(a, cute.TensorSSA):
+        a_ = cute.make_rmem_tensor_like(a)
+        a_.store(a, loc=loc, ip=ip)
+        a = a_
+    if isinstance(b, cute.TensorSSA):
+        b_ = cute.make_rmem_tensor_like(b)
+        b_.store(b, loc=loc, ip=ip)
+        b = b_
+
+    a = cute.recast_tensor(a, Int32, loc=loc, ip=ip)
+    b = cute.recast_tensor(b, Int32, loc=loc, ip=ip)
     out = llvm.inline_asm(
         llvm.StructType.get_literal([mlir_ty] * 4),
         [a[i].ir_value(loc=loc, ip=ip) for i in range(4)]
         + [b[i].ir_value(loc=loc, ip=ip) for i in range(2)]
         + [c[i].ir_value(loc=loc, ip=ip) for i in range(4)],
-        "mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 "
-        "{$0, $1, $2, $3}, {$4, $5, $6, $7}, {$8, $9}, "
+        f"mma.sync.aligned.m16n8k{K}.row.col.{c_ty}.{a_ty}.{b_ty}.{c_ty} "
+        "{$0, $1, $2, $3}, "
+        "{$4, $5, $6, $7}, "
+        "{$8, $9}, "
         "{$10, $11, $12, $13};",
         "=f,=f,=f,=f,r,r,r,r,r,r,f,f,f,f",
         has_side_effects=False,
@@ -92,7 +127,7 @@ def mma_bf16(
         loc=loc,
         ip=ip,
     )
-    return cute.TensorSSA(vec, 4, Float32)
+    return cute.TensorSSA(vec, 4, c.element_type)
 
 
 def _bf16x2_unary(asm: str, a: Uint32, *, loc=None, ip=None) -> Uint32:

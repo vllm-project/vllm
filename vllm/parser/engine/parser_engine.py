@@ -110,6 +110,8 @@ class ParserEngine(Parser):
 
         self._has_reasoning = (
             "THINK_END" in parser_engine_config.token_id_terminals
+            or "THINK_START" in parser_engine_config.terminals
+            or "THINK_END" in parser_engine_config.terminals
             or parser_engine_config.initial_state == ParserState.REASONING
         )
         self._reasoning_ended: bool = not self._has_reasoning
