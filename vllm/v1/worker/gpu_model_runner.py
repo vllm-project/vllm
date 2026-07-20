@@ -7691,25 +7691,23 @@ class GPUModelRunner(
             def _capture_fn(topk_ids, _layer_id=layer_id, _capturer=capturer):
                 _capturer.capture(_layer_id, topk_ids)
 
-            quant_method = getattr(module, "_quant_method", None)
+            quant_method = module._quant_method
             moe_kernel = getattr(quant_method, "moe_kernel", None)
             impl = getattr(moe_kernel, "impl", None)
             fused_experts = getattr(impl, "fused_experts", None)
-            if (
-                isinstance(fused_experts, FusedMoEExpertsMonolithic)
-                and fused_experts.supports_routing_replay_capture()
-            ):
-                fused_experts.set_routing_replay_capture_fn(_capture_fn)
+            if quant_method.is_monolithic:
+                if not (
+                    isinstance(fused_experts, FusedMoEExpertsMonolithic)
+                    and fused_experts.supports_routing_replay_capture()
+                ):
+                    raise ValueError(
+                        "--enable-return-routed-experts is not supported with "
+                        f"monolithic MoE kernel {type(fused_experts).__name__}; "
+                        "routed expert IDs would be silently all-zero."
+                    )
+                fused_experts.set_capture_fn(_capture_fn)
             elif isinstance(module.router, BaseRouter):
                 module.router.set_capture_fn(_capture_fn)
-            else:
-                logger.warning(
-                    "MoE layer %d: cannot bind routed-experts capture "
-                    "(no routing replay support and router is not "
-                    "BaseRouter). Expert IDs for this layer will be "
-                    "zero.",
-                    layer_id,
-                )
 
     def may_add_encoder_only_layers_to_kv_cache_config(self) -> None:
         """
