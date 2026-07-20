@@ -95,6 +95,102 @@ if TYPE_CHECKING:
     from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
 
+@contextmanager
+def _pool_routing_suspended(device_index: int, mem_pool):
+    """Temporarily stop routing this thread's allocations to ``mem_pool``.
+
+    Pool routing registers in the caching allocator's ``captures_underway``
+    machinery, and while any entry is present the allocator refuses to release
+    cached blocks device-wide — ``empty_cache`` is silently a no-op. Suspending
+    (end WITHOUT ``_cuda_releasePool``) empties ``captures_underway`` so a real
+    ``empty_cache`` can hand freed memory back to the driver, then resumes the
+    SAME pool. (Creating a second ``MemPool`` for a tag instead is unsound: the
+    orphaned pool's destructor fires mid-load and trips the
+    ``captures_underway.empty()`` internal assert.)
+    """
+    from torch.cuda.memory import (
+        _cuda_beginAllocateCurrentThreadToPool,
+        _cuda_endAllocateToPool,
+    )
+
+    _cuda_endAllocateToPool(device_index, mem_pool.id)
+    try:
+        yield
+    finally:
+        _cuda_beginAllocateCurrentThreadToPool(device_index, mem_pool.id)
+
+
+def _rehome_model_into_mem_pool(model: nn.Module, allocator) -> int:
+    """Copy every CUDA parameter/buffer storage into the CuMem weights MemPool.
+
+    Called AFTER the model was loaded and converted entirely with the default
+    caching allocator. Sleep mode can only offload/discard pool-owned memory,
+    so the finished weights must be re-homed into the pool. Works inside ONE
+    ``use_memory_pool`` context; every ~1 GiB it suspends pool routing and
+    calls ``empty_cache`` so the just-freed originals return to the driver —
+    on small-VRAM cards the pool's growth must be fed by exactly that memory.
+    Storage-granular copying preserves tensors that share a storage (tied
+    weights) and bounds double-residency to one chunk. Returns bytes moved.
+    """
+    # Collect re-home targets first (owner, name, tensor, is_param); slots are
+    # nulled as they are processed — the list must not keep originals alive, or
+    # the between-chunk empty_cache would have nothing to release.
+    targets: list[tuple[nn.Module, str, torch.Tensor, bool] | None] = []
+    for mod in model.modules():
+        for name, p in mod._parameters.items():
+            if p is not None and p.data.is_cuda:
+                targets.append((mod, name, p.data, True))
+        for name, b in mod._buffers.items():
+            if b is not None and b.is_cuda:
+                targets.append((mod, name, b, False))
+
+    moved_bytes = 0
+    chunk_bytes = 0
+    chunk_limit = 1 << 30  # purge freed originals every ~1 GiB moved
+    # old storage base ptr -> pool-resident replacement storage
+    replacements: dict[int, torch.UntypedStorage] = {}
+
+    def pool_storage_for(t: torch.Tensor) -> torch.UntypedStorage:
+        nonlocal moved_bytes, chunk_bytes
+        src = t.untyped_storage()
+        base = src.data_ptr()
+        if base in replacements:
+            return replacements[base]
+        buf = torch.empty(src.nbytes(), dtype=torch.uint8, device=t.device)
+        dst = buf.untyped_storage()
+        dst.copy_(src)
+        replacements[base] = dst
+        moved_bytes += src.nbytes()
+        chunk_bytes += src.nbytes()
+        return dst
+
+    def rehomed(t: torch.Tensor) -> torch.Tensor:
+        new_t = torch.empty([0], dtype=t.dtype, device=t.device)
+        new_t.set_(pool_storage_for(t), t.storage_offset(), t.size(), t.stride())
+        return new_t
+
+    device_index = torch.cuda.current_device()
+    with allocator.use_memory_pool(tag="weights"):
+        mem_pool = allocator.allocator_and_pools["weights"][0]
+        for i in range(len(targets)):
+            if chunk_bytes >= chunk_limit:
+                # Hand the freed originals back to the driver so the next
+                # chunk's pool growth has physical memory to map.
+                with _pool_routing_suspended(device_index, mem_pool):
+                    torch.cuda.empty_cache()
+                chunk_bytes = 0
+            mod, name, t, is_param = targets[i]  # type: ignore[misc]
+            if is_param:
+                mod._parameters[name].data = rehomed(t)
+            else:
+                mod._buffers[name] = rehomed(t)
+            targets[i] = None  # drop the last reference to the original
+            del mod, name, t
+    # Final purge of whatever the last chunk freed (pool context closed now).
+    torch.cuda.empty_cache()
+    return moved_bytes
+
+
 class AsyncIntermediateTensors(IntermediateTensors):
     """IntermediateTensors with lazy comm synchronization"""
 
@@ -422,13 +518,43 @@ class Worker(WorkerBase):
     # FIXME(youkaichao & ywang96): Use TorchDispatchMode instead of memory pool
     # to hijack tensor allocation.
     def load_model(self, *, load_dummy_weights: bool = False) -> None:
-        with (
-            self._maybe_get_memory_pool_context(tag="weights"),
-            set_current_vllm_config(self.vllm_config),
-            # 20 MiB is the minimum PyTorch allows for max_split_size_mb.
-            self._scoped_allocator_max_split(max_split_size_mb=20),
-        ):
-            self.model_runner.load_model(load_dummy_weights=load_dummy_weights)
+        pool_ctx = self._maybe_get_memory_pool_context(tag="weights")
+        if isinstance(pool_ctx, nullcontext):
+            with (
+                pool_ctx,
+                set_current_vllm_config(self.vllm_config),
+                # 20 MiB is the minimum PyTorch allows for max_split_size_mb.
+                self._scoped_allocator_max_split(max_split_size_mb=20),
+            ):
+                self.model_runner.load_model(load_dummy_weights=load_dummy_weights)
+        else:
+            # Sleep mode (CuMem): loading and converting weights INSIDE a live
+            # MemPool strands every freed buffer — a live pool can neither
+            # release emptied segments nor reuse them for differently-sized
+            # requests (pytorch/pytorch#159674) — so quantized checkpoints
+            # whose post-load conversion replaces each weight with a slightly
+            # larger one (e.g. modelopt NVFP4 MoE padding) leak the entire
+            # original copy per layer and OOM 16 GiB cards (#48680).
+            # Instead: run the whole load + conversion with the default
+            # caching allocator (identical to the non-sleep path, where freed
+            # memory is reusable and returned to the driver), then RE-HOME the
+            # finished weights into the pool, one storage at a time, so sleep
+            # can still offload/discard them. Peak overhead over the non-sleep
+            # path is a single chunk's double-residency.
+            with set_current_vllm_config(self.vllm_config):
+                self.model_runner.load_model(load_dummy_weights=load_dummy_weights)
+            # Return the conversion churn (cached-free segments) to the driver
+            # BEFORE the pool starts growing — the pool's cuMem mappings must
+            # be fed by exactly this memory on small cards.
+            torch.cuda.empty_cache()
+            moved_bytes = _rehome_model_into_mem_pool(
+                self.model_runner.get_model(), get_mem_allocator_instance()
+            )
+            logger.info(
+                "Sleep mode: re-homed %.2f GiB of weights into the CuMem pool "
+                "after out-of-pool loading",
+                moved_bytes / (1024**3),
+            )
 
         if self.vllm_config.weight_transfer_config is not None:
             self.weight_transfer_engine = WeightTransferEngineFactory.create_engine(
