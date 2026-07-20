@@ -34,7 +34,7 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'export VLLM_WORKER_MULTIPROC_METHOD=spawn || true &&
     cd tests &&
-    pytest -v -s -m not slow_test v1/spec_decode --deselect="v1/spec_decode/test_max_len.py::test_eagle_max_len[FLASH_ATTN-10]"|| true'
+    pytest -v -s -m not slow_test v1/spec_decode --deselect="tests/v1/spec_decode/test_max_len.py::test_eagle_max_len[FLASH_ATTN-10]"|| true'
 - label: V1 Sample + Logits
   timeout_in_minutes: 45
   device: intel_gpu
