@@ -41,8 +41,9 @@ PUSH_REG_NOTIF_PREFIX = b"PUSH_REG:"
 #   4: Add KV block lease renewal through heartbeats
 #   5: Add remote_blocks_expiry_time to kv_transfer_params + handshake
 #      clock-sync timestamp
+#   6: Validate EAGLE/MTP speculative configuration compatibility
 #
-NIXL_CONNECTOR_VERSION: int = 5
+NIXL_CONNECTOR_VERSION: int = 6
 
 
 @dataclass
@@ -78,6 +79,36 @@ class NixlHandshakePayload(KVConnectorHandshakeMetadata):
     agent_metadata_bytes: bytes  # NixlAgentMetadata encoded
 
 
+def _get_speculative_compatibility_factors(
+    vllm_config: VllmConfig,
+) -> dict[str, Any] | None:
+    """Return NIXL compatibility factors for hidden-state-based speculators."""
+    speculative_config = vllm_config.speculative_config
+    if speculative_config is None or not speculative_config.use_eagle():
+        return None
+
+    draft_model_config = speculative_config.draft_model_config
+    assert draft_model_config is not None
+    auxiliary_layer_ids = getattr(
+        draft_model_config.hf_config,
+        "eagle_aux_hidden_state_layer_ids",
+        None,
+    )
+
+    return {
+        "method": speculative_config.method,
+        "model": draft_model_config.model,
+        "revision": draft_model_config.revision,
+        "code_revision": draft_model_config.code_revision,
+        "parallel_drafting": speculative_config.parallel_drafting,
+        "kv_cache_dtype": str(speculative_config.kv_cache_dtype),
+        "attention_backend": str(speculative_config.attention_backend),
+        "auxiliary_layer_ids": (
+            tuple(auxiliary_layer_ids) if auxiliary_layer_ids is not None else None
+        ),
+    }
+
+
 def compute_nixl_compatibility_hash(
     vllm_config: VllmConfig, attn_backend_name: str, cross_layers_blocks: bool
 ) -> str:
@@ -92,6 +123,7 @@ def compute_nixl_compatibility_hash(
     - Model architecture (name, dtype, KV heads, layers)
     - KV cache format (dtype, sliding window)
     - Attention backend
+    - EAGLE/MTP configuration that affects transferred state
 
     Note: Factors like tensor_parallel_size, block_size, and kv_cache_layout
     are validated at runtime in _validate_remote_agent_handshake and are not
@@ -125,6 +157,7 @@ def compute_nixl_compatibility_hash(
         "cache_dtype": str(cache_config.cache_dtype),
         "cross_layers_blocks": cross_layers_blocks,
         "is_hma_enabled": is_hma_enabled,
+        "speculative_config": _get_speculative_compatibility_factors(vllm_config),
     }
 
     compat_hash = hash_factors(factors)
