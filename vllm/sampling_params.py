@@ -383,6 +383,7 @@ class SamplingParams(
         extra_args: dict[str, Any] | None = None,
         skip_clone: bool = False,
         repetition_detection: RepetitionDetectionParams | None = None,
+        logprob_token_ids: list[int] | None = None,
     ) -> "SamplingParams":
         if logit_bias is not None:
             # Fast path uses a dict comprehension; on failure we iterate once
@@ -433,6 +434,7 @@ class SamplingParams(
             min_tokens=min_tokens,
             logprobs=logprobs,
             prompt_logprobs=prompt_logprobs,
+            logprob_token_ids=logprob_token_ids,
             detokenize=detokenize,
             skip_special_tokens=skip_special_tokens,
             spaces_between_special_tokens=spaces_between_special_tokens,
@@ -745,6 +747,7 @@ class SamplingParams(
         self._validate_logits_processors(model_config)
         self._validate_allowed_token_ids(tokenizer)
         self._validate_spec_decode(speculative_config)
+        self._validate_diffusion(model_config)
         self._validate_structured_outputs(
             model_config, structured_outputs_config, tokenizer
         )
@@ -876,6 +879,28 @@ class SamplingParams(
             raise ValueError(
                 "The min_p and logit_bias sampling parameters "
                 "are not yet supported with speculative decoding."
+            )
+
+    def _validate_diffusion(self, model_config: ModelConfig) -> None:
+        if not model_config.is_diffusion:
+            return
+
+        # Diffusion models denoise a whole canvas per step with a fixed
+        # temperature schedule, so per-request sampling parameters are not
+        # supported. Penalties are ignored by the sampler with a warning.
+        if (
+            self.temperature != 1.0
+            or self.min_p > _SAMPLING_EPS
+            or self.seed is not None
+            or self.min_tokens > 0
+            or self.logit_bias
+            or self.bad_words
+            or self.allowed_token_ids
+        ):
+            raise ValueError(
+                "The temperature, min_p, seed, min_tokens, logit_bias, "
+                "bad_words, and allowed_token_ids sampling parameters "
+                "are not yet supported with diffusion models."
             )
 
     def _validate_structured_outputs(

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from abc import ABC, abstractmethod
+from collections.abc import Mapping
 from typing import Any
 
 import torch
@@ -17,13 +18,10 @@ from vllm.v1.worker.gpu.attn_utils import (
     init_attn_backend,
 )
 from vllm.v1.worker.gpu.block_table import BlockTables
-from vllm.v1.worker.gpu.cudagraph_utils import (
-    AttentionStatePair,
-    BatchExecutionDescriptor,
-)
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
+from vllm.v1.worker.utils import AttentionGroup
 
 logger = init_logger(__name__)
 
@@ -34,10 +32,7 @@ class BaseSpeculator(ABC):
         pass
 
     @abstractmethod
-    def capture(
-        self,
-        attn_states: dict[BatchExecutionDescriptor, AttentionStatePair],
-    ) -> None:
+    def capture(self) -> None:
         pass
 
     @abstractmethod
@@ -180,21 +175,35 @@ class DraftModelSpeculator(BaseSpeculator):
                 num_unpadded_tokens,
             )
 
+    @property
+    def attn_vllm_config(self) -> VllmConfig:
+        """Config for the draft's attention metadata builders. Overridden by
+        speculators whose attention mode differs from the target's."""
+        return self.vllm_config
+
     def set_attn(
         self,
         model_state: ModelState,
         kv_cache_config: KVCacheConfig,
         block_tables: BlockTables,
+        target_input_buffers: InputBuffers,
+        target_attn_groups: list[list[AttentionGroup]],
     ) -> None:
         self.model_state = model_state
         self.kv_cache_config = kv_cache_config
-        self.attn_groups, _, _ = init_attn_backend(
+        self.attn_groups, self.attn_cg_support, _ = init_attn_backend(
             kv_cache_config,
-            self.vllm_config,
+            self.attn_vllm_config,
             self.device,
             active_layer_names=self.draft_attn_layer_names,
         )
         self.block_tables = block_tables
+        # The target model runner's buffers and attention groups. Draft
+        # prefill reuses the target model's attention metadata, so its
+        # cudagraph capture must build dummy metadata through the same
+        # builders and buffers.
+        self.target_input_buffers = target_input_buffers
+        self.target_attn_groups = target_attn_groups
 
     def _build_draft_attn_metadata(
         self,
@@ -202,7 +211,7 @@ class DraftModelSpeculator(BaseSpeculator):
         num_reqs_padded: int,
         num_tokens_padded: int,
         num_query_per_req: int = 1,
-        causal: bool = True,
+        causal: bool | Mapping[int, bool] = True,
     ) -> dict[str, Any] | None:
         # Uniform query: query_start_loc[i] = min(i, num_reqs) * num_query_per_req.
         # Clamp keeps the series non-decreasing past num_reqs, which some
