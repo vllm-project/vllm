@@ -23,7 +23,7 @@ use crate::error::{Error, Result, bail_multimodal, multimodal};
 ///
 /// Video-capable vLLM models read `pixel_values_videos` alongside
 /// `video_grid_thw`, mirroring the HF processor output naming.
-const VIDEO_PRIMARY_KEY: &str = "pixel_values_videos";
+pub(super) const VIDEO_PRIMARY_KEY: &str = "pixel_values_videos";
 
 impl MultimodalModelInfo {
     /// Preprocess fetched video clips one at a time and build per-item
@@ -47,8 +47,7 @@ impl MultimodalModelInfo {
         for (clip, uuid) in izip!(&clips, uuids) {
             let preprocessed = self.preprocess_video_clip(support, Arc::clone(clip)).await?;
             let mut clip_replacements =
-                self.spec
-                    .prompt_replacements_for(&self.context, &preprocessed, Modality::Video)?;
+                support.spec.prompt_replacements_for(&self.context, &preprocessed)?;
             if clip_replacements.len() != 1 {
                 bail_multimodal!(
                     "expected exactly one prompt replacement per video clip, got {}",
@@ -56,7 +55,8 @@ impl MultimodalModelInfo {
                 );
             }
             replacements.push(clip_replacements.pop().unwrap());
-            items.push(self.build_video_item(
+            items.push(build_video_item(
+                support,
                 preprocessed,
                 clip.hash.clone(),
                 uuid,
@@ -107,30 +107,36 @@ impl MultimodalModelInfo {
         .await
         .map_err(|error| multimodal!("video preprocessing task failed: {error}"))?
     }
+}
 
-    /// Convert one preprocessed video clip into engine kwargs.
-    ///
-    /// The clip is a batch of one, so no per-item slicing is required: the
-    /// primary tensor ships as a full-range flat field (the engine re-batches
-    /// flat fields by concatenating along the declared dim, matching vLLM's
-    /// `flat_from_sizes` treatment of video patches), and batched metadata
-    /// tensors drop their singleton batch axis.
-    fn build_video_item(
-        &self,
-        preprocessed: PreprocessedEncoderInputs,
-        hash: String,
-        uuid: Option<String>,
-        model_dtype: ModelDtype,
-    ) -> Result<PreparedItem> {
-        let tensors = tensor::collect_tensors(preprocessed, VIDEO_PRIMARY_KEY, model_dtype)?;
+/// Convert one preprocessed video clip into engine kwargs.
+///
+/// The clip is a batch of one, so no per-item slicing is required: the
+/// primary tensor ships as a full-range flat field (the engine re-batches
+/// flat fields by concatenating along the declared dim, matching vLLM's
+/// `flat_from_sizes` treatment of video patches), and batched metadata
+/// tensors drop their singleton batch axis.
+fn build_video_item(
+    support: &ModalitySupport,
+    preprocessed: PreprocessedEncoderInputs,
+    hash: String,
+    uuid: Option<String>,
+    model_dtype: ModelDtype,
+) -> Result<PreparedItem> {
+    let tensors = tensor::collect_tensors(preprocessed, support.spec.primary_key(), model_dtype)?;
 
-        let mut data = MmKwargsItem::new();
-        for (key, tensor) in tensors {
-            let keep_on_cpu = self.spec.keep_on_cpu_keys.contains(&key);
-            let (value, field) = if key == VIDEO_PRIMARY_KEY {
+    let mut data = MmKwargsItem::new();
+    for (key, tensor) in tensors {
+        let keep_on_cpu = support.spec.keep_on_cpu_keys.contains(&key);
+        let (value, field) = match support.spec.field_layout_for(&key) {
+            Some(FieldLayout::Batched) => (
+                tensor.batched_value_at(0)?,
+                MmField::Batched(MmBatchedField { keep_on_cpu }),
+            ),
+            Some(FieldLayout::Flat { .. }) => {
                 let len = tensor
                     .first_dim()
-                    .ok_or_else(|| multimodal!("video encoder input `{key}` is not a tensor"))?;
+                    .ok_or_else(|| multimodal!("flat video input `{key}` is not a tensor"))?;
                 (
                     tensor,
                     MmField::Flat(MmFlatField {
@@ -143,35 +149,26 @@ impl MultimodalModelInfo {
                         keep_on_cpu,
                     }),
                 )
-            } else if matches!(
-                self.spec.field_layouts.get(&key),
-                Some(FieldLayout::Batched)
-            ) {
-                (
-                    tensor.batched_value_at(0)?,
-                    MmField::Batched(MmBatchedField { keep_on_cpu }),
-                )
-            } else {
-                (
-                    tensor,
-                    MmField::Shared(MmSharedField {
-                        batch_size: 1,
-                        keep_on_cpu,
-                    }),
-                )
-            };
+            }
+            None => (
+                tensor,
+                MmField::Shared(MmSharedField {
+                    batch_size: 1,
+                    keep_on_cpu,
+                }),
+            ),
+        };
 
-            data.insert(
-                key,
-                MmFieldElem {
-                    data: Some(value.try_into()?),
-                    field,
-                },
-            );
-        }
-
-        Ok(PreparedItem { data, hash, uuid })
+        data.insert(
+            key,
+            MmFieldElem {
+                data: Some(value.try_into()?),
+                field,
+            },
+        );
     }
+
+    Ok(PreparedItem { data, hash, uuid })
 }
 
 #[cfg(test)]
@@ -287,14 +284,14 @@ mod tests {
             ]),
         };
 
-        let item = info
-            .build_video_item(
-                preprocessed,
-                "<hash>".to_string(),
-                None,
-                ModelDtype::Float32,
-            )
-            .unwrap();
+        let item = build_video_item(
+            info.video.as_ref().unwrap(),
+            preprocessed,
+            "<hash>".to_string(),
+            None,
+            ModelDtype::Float32,
+        )
+        .unwrap();
 
         let primary = &item.data[VIDEO_PRIMARY_KEY];
         assert!(matches!(

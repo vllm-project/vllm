@@ -114,6 +114,7 @@ steps:
     - pytest -v -s v1/e2e/spec_decode/test_spec_decode.py -k "tensor_parallelism"
   mirror:
     amd:
+      dind: false
       device: mi300_2
       depends_on:
       - image-build-amd
