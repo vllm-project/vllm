@@ -508,11 +508,11 @@ class MoRIIOConnectorScheduler:
             "req_id": req_id,
             "transfer_id": transfer_id,
             "block_notify_list": block_notify_list or [],
-            # GLOBAL decode dp rank: the producer derives the per-pod local
-            # notify offset (% dp_local), the owning pod index (// dp_local),
-            # and the write-target session from it. Sending the local rank
-            # made child-pod consumers look like master rank 0 and hang in
-            # WAITING_FOR_REMOTE_KVS. Single-pod is unaffected (local==global).
+            # GLOBAL decode dp rank: producer derives the per-pod notify offset
+            # (% dp_local), owning pod index (// dp_local), and write-target
+            # from it. Sending the LOCAL rank made child-pod consumers look
+            # like master rank 0 and hang in WAITING_FOR_REMOTE_KVS. Single-pod:
+            # local == global.
             "decode_rank": self._global_dp_rank,
             "type": "remote_blocks",
         }
@@ -528,11 +528,10 @@ class MoRIIOConnectorScheduler:
             )
             self.paths[path] = sock
 
-        # Align with the upstream READ-mode release (see _pop_done_transfers):
-        # advertise the consumer (decode) TP size so the prefill side counts
-        # the right number of ACKs via get_moriio_expected_ack_count(). For the
-        # homogeneous-TP configs we run (1P1D/2P2D, TP=1) this resolves to 1
-        # ACK exactly as before; it only matters under heterogeneous-TP fan-in.
+        # Advertise the consumer (decode) TP size so prefill counts the right
+        # number of ACKs (get_moriio_expected_ack_count; see the upstream
+        # READ-mode release in _pop_done_transfers). Resolves to 1 for our
+        # homogeneous TP=1 configs; only matters under heterogeneous-TP fan-in.
         self.paths[path].send(
             msgpack.dumps(
                 {
@@ -615,12 +614,10 @@ class MoRIIOConnectorScheduler:
         params = request.kv_transfer_params
         if not params:
             return
-        # LLM-D sidecar compat: the routing-sidecar (--kv-connector=nixlv2)
-        # emits NIXL-shaped kv_transfer_params that do not include MoRI-IO's
-        # transfer_id. Synthesize one deterministically from request_id so the
-        # producer and consumer (both downstream of the same sidecar fan-out)
-        # observe the same transfer_id without requiring a wire-protocol
-        # change in the sidecar.
+        # LLM-D sidecar compat: the nixlv2 routing sidecar emits NIXL-shaped
+        # kv_transfer_params without MoRI-IO's transfer_id. Synthesize one
+        # deterministically from request_id so producer and consumer agree
+        # without a sidecar wire-protocol change.
         transfer_id = params.get("transfer_id") or f"sidecar-{request.request_id}"
         params.setdefault("transfer_id", transfer_id)
         request_id = request.request_id
@@ -688,13 +685,11 @@ class MoRIIOConnectorScheduler:
                 except (TypeError, ValueError):
                     _dp_local = 0
 
-                # Rank routing is ROUTER-AUTHORITATIVE. We honor the prefill DP
-                # rank the router pinned (remote_dp_rank, matched to the
-                # X-data-parallel-rank dispatch pin). The connector deliberately
-                # does NOT self-derive a rank: an independent hash here could
-                # disagree with the router's dispatch pin and send the notify to
-                # a rank that never served the request. If the router failed to
-                # pin a rank in a multi-rank deployment, warn instead of guessing.
+                # Rank routing is ROUTER-AUTHORITATIVE: honor the router-pinned
+                # remote_dp_rank (matched to the X-data-parallel-rank dispatch
+                # pin). Self-deriving a rank could disagree and notify a rank
+                # that never served the request. If unpinned in a multi-rank
+                # deployment, warn instead of guessing.
                 if (
                     _dp_size > 1
                     and "remote_dp_rank" not in request.kv_transfer_params

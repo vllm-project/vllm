@@ -1935,27 +1935,15 @@ class DPEngineCoreProc(EngineCoreProc):
             return
         if request_wave > self.current_wave:
             self.current_wave = request_wave
-        # Wake the DP group whenever the engines are idle and the scheduler is
-        # unpaused -- INCLUDING the very first request of the current wave
-        # (request_wave == current_wave). This must NOT be gated on
-        # ``request_wave != self.current_wave``: both default to 0, so the
-        # first cold request would hit ``0 != 0 == False``, no ``start_wave``
-        # would be broadcast, and the rank that received it would block forever
-        # on the EP all2all while the other ranks -- seeing
-        # ``engines_running=False`` and no local work -- skip
-        # ``execute_dummy_batch`` and never join the collective.
-        #
-        # The DP coordinator's own front-end ``FIRST_REQ`` wake is NOT
-        # sufficient on its own here: it was already present in the tree when
-        # the DP=8/16 EP DeepSeek-V3 cold-start hang reproduced 100%
-        # deterministically, so the engine re-broadcasts as well. Platform-
-        # agnostic and applies to every LB mode:
-        #   * internal / hybrid LB -- belt-and-suspenders over the coordinator
-        #     wake (empirically required for ROCm DP+EP disagg cold start).
-        #   * external LB -- the router addresses engines directly, so the
-        #     coordinator is not in the per-request path at all and this is the
-        #     only wake for the current wave's first request.
-        # Re-broadcasting is harmless in steady state (engines already running).
+        # Wake the DP group whenever engines are idle and the scheduler is
+        # unpaused, INCLUDING the wave's first request (request_wave ==
+        # current_wave). Gating on ``request_wave != current_wave`` deadlocks
+        # cold start: both default to 0, so no start_wave is broadcast and the
+        # receiving rank blocks forever on the EP all2all while peers skip
+        # execute_dummy_batch. The coordinator's FIRST_REQ wake proved
+        # insufficient for ROCm DP+EP disagg cold start, so re-broadcast here
+        # for every LB mode (external LB has no coordinator in the per-request
+        # path). Re-broadcasting is harmless in steady state.
         if (
             not self.engines_running
             and self.scheduler.pause_state == PauseState.UNPAUSED

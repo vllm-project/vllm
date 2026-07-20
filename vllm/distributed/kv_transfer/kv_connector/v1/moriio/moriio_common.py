@@ -280,17 +280,12 @@ class MoRIIOConfig:
         kv_transfer_config = vllm_config.kv_transfer_config
         extra_config = kv_transfer_config.kv_connector_extra_config
         tp_rank = get_tensor_model_parallel_rank()
-        # For per-node port allocation we want the local dp_rank within the
-        # node, not the global one. data_parallel_rank is global, so fold it
-        # back to [0, dp_size_local).
-        #
-        # data_parallel_size_local == 0 is a documented sentinel meaning DP
-        # was specified externally (external launcher / external LB), in which
-        # case the local per-node size is unknown here. Fall back to the global
-        # data_parallel_size, which restores the pre-multi-pod single-world port
-        # math. data_parallel_size is Field(ge=1), so this is always >= 1 and
-        # can never divide by zero (do NOT use assert -- it is stripped under
-        # `python -O` and would crash valid external-DP deployments anyway).
+        # Fold the global data_parallel_rank back to [0, dp_size_local) for
+        # per-node port allocation. data_parallel_size_local == 0 is the
+        # documented external-DP sentinel (local size unknown here); fall back
+        # to the global data_parallel_size (Field(ge=1), so never zero-divides).
+        # Do NOT assert -- it is stripped under `python -O` and would crash
+        # valid external-DP deployments.
         pc = vllm_config.parallel_config
         dp_size_local = pc.data_parallel_size_local or pc.data_parallel_size
         dp_rank = pc.data_parallel_rank % dp_size_local
