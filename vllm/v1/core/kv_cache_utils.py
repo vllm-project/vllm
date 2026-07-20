@@ -35,6 +35,10 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
+from vllm.v1.kv_offload.compact_geometry import (
+    CompactTransportSignature,
+    build_compact_group_charges,
+)
 from vllm.v1.request import Request
 from vllm.v1.utils import tensor_data
 
@@ -2090,6 +2094,54 @@ def get_kv_cache_configs(
     # After this call, merged_kv_cache_specs may be modified in-place.
     global_kv_cache_groups = get_kv_cache_groups(vllm_config, merged_kv_cache_specs)
 
+    # Compute compact aggregate signature from global (pre-projection) groups
+    # when compact layout is enabled.  Every worker receives the same signature
+    # regardless of PP sharding so that compact transfer planning can
+    # reconstruct the full row geometry from any worker.
+    kv_transfer_config = vllm_config.kv_transfer_config
+    extra_config = (
+        kv_transfer_config.kv_connector_extra_config
+        if kv_transfer_config is not None
+        else {}
+    )
+    enable_compact = (
+        str(extra_config.get("enable_compact_layout", "False")).lower() == "true"
+    )
+    compact_aggregate_signature = None
+    if enable_compact:
+        # Compact geometry transport is validated only for pipeline_parallel=1.
+        # PP slice accounting is local to each worker, while the global
+        # pre-projection signature is shared across all ranks.  Fail loud
+        # until the transport handles PP correctly.
+        pp_size = vllm_config.parallel_config.pipeline_parallel_size
+        if pp_size != 1:
+            raise ValueError(
+                f"enable_compact_layout requires pipeline_parallel_size=1, "
+                f"got {pp_size}"
+            )
+
+        world_size = vllm_config.parallel_config.world_size
+        # block_size_factor is 1 for the transported signature (per-block
+        # charge).  The CPU backend applies its own factor during allocator
+        # setup.
+        compact_aggregate_signature = build_compact_group_charges(
+            KVCacheConfig(
+                num_blocks=0,
+                kv_cache_tensors=[],
+                kv_cache_groups=global_kv_cache_groups,
+            ),
+            world_size=world_size,
+            block_size_factor=1,
+        )
+        # Convert to transport-neutral signature (strip rich charge fields).
+        compact_aggregate_signature = tuple(
+            CompactTransportSignature(
+                group_idx=cg.group_idx,
+                compact_bytes_per_native_block_per_worker=cg.compact_real_bytes_per_rank,
+            )
+            for cg in compact_aggregate_signature
+        )
+
     # If original_max_model_len was -1, automatically
     # determine the maximum model length that fits in available GPU memory.
     # We use per-worker projected groups to account for PP sharding.
@@ -2148,6 +2200,22 @@ def get_kv_cache_configs(
                 vllm_config, projected_groups, available_memory_one_worker
             )
         )
+
+    # Stamp the compact aggregate signature on every worker's config.
+    if compact_aggregate_signature is not None:
+        for kv_cache_config in kv_cache_configs:
+            kv_cache_config.compact_aggregate_signature = compact_aggregate_signature
+
+        # Verify all workers received the same signature.
+        if len(kv_cache_configs) > 1:
+            for idx in range(1, len(kv_cache_configs)):
+                assert (
+                    kv_cache_configs[idx].compact_aggregate_signature
+                    == kv_cache_configs[0].compact_aggregate_signature
+                ), (
+                    f"Worker {idx} compact aggregate signature does not agree "
+                    f"with worker 0"
+                )
 
     # Change the num_blocks of each rank to the smallest among all ranks.
     # We also need to shrink the tensor size proportionally to avoid

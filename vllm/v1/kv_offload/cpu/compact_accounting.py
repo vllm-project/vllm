@@ -10,15 +10,27 @@ without changing allocation or transfer behavior.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from math import prod
 
-from vllm.v1.kv_cache_interface import (
-    AttentionSpec,
+# Re-export neutral compact geometry symbols so existing callers (tests,
+# kv_cache_interface, kv_cache_utils) continue to find them at the
+# cpu.compact_accounting import path.
+from vllm.v1.kv_offload.compact_geometry import (
+    CompactGroupCharge,
     KVCacheConfig,
-    KVCacheSpec,
-    MambaSpec,
-    UniformTypeKVCacheSpecs,
+    _layer_specs,
+    _real_page_size_bytes,
+    build_compact_group_charges,
 )
+
+__all__ = [
+    "CompactGroupCharge",
+    "CompactLayoutAccounting",
+    "GroupCompactAccounting",
+    "GroupCompactSlice",
+    "PackedSlotAccounting",
+    "build_compact_group_charges",
+    "build_compact_layout_accounting",
+]
 
 
 @dataclass(frozen=True)
@@ -95,37 +107,6 @@ class CompactLayoutAccounting:
     groups: tuple[GroupCompactAccounting, ...]
 
 
-@dataclass(frozen=True)
-class CompactGroupCharge:
-    """Scheduler-safe compact payload charge derived from canonical specs."""
-
-    group_idx: int
-    native_block_tokens: int
-    compact_real_bytes_per_rank: int
-    compact_real_bytes_server: int
-
-
-def _layer_specs(spec: KVCacheSpec) -> dict[str, KVCacheSpec]:
-    if isinstance(spec, UniformTypeKVCacheSpecs):
-        return spec.kv_cache_specs
-    return {}
-
-
-def _real_page_size_bytes(spec: KVCacheSpec) -> int:
-    if isinstance(spec, AttentionSpec):
-        return spec.real_page_size_bytes
-    if isinstance(spec, MambaSpec):
-        # Mamba exposes padding through page_size_bytes; reconstruct the real
-        # state payload by removing that optional page-level padding.
-        if spec.page_size_padded is None:
-            return spec.page_size_bytes
-        return sum(
-            prod(shape) * dtype.itemsize
-            for shape, dtype in zip(spec.shapes, spec.dtypes)
-        )
-    return spec.page_size_bytes
-
-
 def _packed_slots(
     kv_cache_config: KVCacheConfig,
 ) -> tuple[int, tuple[PackedSlotAccounting, ...]]:
@@ -162,41 +143,6 @@ def _packed_slots(
     if sum(slot.padded_bytes_per_gpu_block for slot in slots) != stride:
         raise ValueError("packed slots do not cover the packed row")
     return stride, tuple(slots)
-
-
-def build_compact_group_charges(
-    kv_cache_config: KVCacheConfig,
-    *,
-    world_size: int,
-    block_size_factor: int,
-) -> tuple[CompactGroupCharge, ...]:
-    """Derive group payload charges without worker physical packed tensors."""
-    if world_size <= 0:
-        raise ValueError("world_size must be positive")
-    if block_size_factor <= 0:
-        raise ValueError("block_size_factor must be positive")
-
-    charges: list[CompactGroupCharge] = []
-    for group_idx, group in enumerate(kv_cache_config.kv_cache_groups):
-        inner_specs = _layer_specs(group.kv_cache_spec)
-        real_bytes = sum(
-            _real_page_size_bytes(inner_specs.get(layer_name, group.kv_cache_spec))
-            for layer_name in group.layer_names
-        )
-        payload_per_rank = real_bytes * block_size_factor
-        if payload_per_rank <= 0:
-            raise ValueError(f"KV group {group_idx} has non-positive compact payload")
-        charges.append(
-            CompactGroupCharge(
-                group_idx=group_idx,
-                native_block_tokens=group.kv_cache_spec.block_size,
-                compact_real_bytes_per_rank=payload_per_rank,
-                compact_real_bytes_server=payload_per_rank * world_size,
-            )
-        )
-    if not charges:
-        raise ValueError("compact accounting requires at least one KV group")
-    return tuple(charges)
 
 
 def build_compact_layout_accounting(
