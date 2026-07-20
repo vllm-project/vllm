@@ -116,7 +116,8 @@ def generate_execution_code_with_name(
             names = sorted(del_after[i])
             lines.append(f"    del {', '.join(names)}")
 
-    assert len(param_names) > 0
+    # param_names may be empty: splitting ops whose args are all constants
+    # (e.g. vllm::side_stream_begin) produce submodules with no placeholders.
     params = ", ".join(param_names)
     kw_params = ", *, __vllm_submods__" if with_submod else ""
     header = f"\ndef {fn_name}({params}{kw_params}):"

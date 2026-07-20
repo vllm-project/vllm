@@ -201,6 +201,7 @@ import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
+from vllm.compilation.side_stream import wait_side_stream
 from vllm.config import (
     CacheConfig,
     ModelConfig,
@@ -546,7 +547,6 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             and _vllm_config.parallel_config.decode_context_parallel_size > 1
             and _vllm_config.parallel_config.dcp_comm_backend == "a2a"
         )
-
         # Initialize q/k/v range constants.
         self.q_range = torch.tensor(envs.Q_SCALE_CONSTANT, dtype=torch.float32)
         self.k_range = torch.tensor(envs.K_SCALE_CONSTANT, dtype=torch.float32)
@@ -591,6 +591,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         kv_c_normed: torch.Tensor,
         k_pe: torch.Tensor,
         output_shape: torch.Size | None = None,
+        indexer_dummy_dep: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if self.calculate_kv_scales:
             torch.ops.vllm.maybe_calc_kv_scales(
@@ -646,6 +647,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 self_kv_cache,
                 attn_metadata,
                 output=output,
+                indexer_dummy_dep=indexer_dummy_dep,
             )
             return output
         else:
@@ -665,6 +667,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 output,
                 encoded,
                 kv_cache_dummy_dep=kv_cache_dummy_dep,
+                indexer_dummy_dep=indexer_dummy_dep,
             )
             return output
 
@@ -682,6 +685,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         quant_scale_ue8m0: bool | None = None,
         quant_col_major: bool | None = None,
         quant_tma_aligned: bool | None = None,
+        indexer_dummy_dep: torch.Tensor | None = None,
     ) -> torch.Tensor:
         assert output is not None, "Output tensor must be provided."
 
@@ -869,7 +873,14 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             # call decode attn
             if not self.impl.is_sparse:
                 assert attn_metadata.decode is not None
-            attn_out, lse = self.impl.forward_mqa(mqa_q, kv_cache, attn_metadata, self)  # type: ignore[attr-defined]
+            if indexer_dummy_dep is not None:
+                wait_side_stream()
+            attn_out, lse = self.impl.forward_mqa(  # type: ignore[attr-defined]
+                mqa_q,
+                kv_cache,
+                attn_metadata,
+                self,
+            )
 
             # correct dcp attn_out with lse.
             if self.impl.dcp_world_size > 1:
@@ -1176,6 +1187,7 @@ def unified_mla_attention_with_output(
     quant_scale_ue8m0: bool | None = None,
     quant_col_major: bool | None = None,
     quant_tma_aligned: bool | None = None,
+    indexer_dummy_dep: torch.Tensor | None = None,
 ) -> None:
     # kv_cache_dummy_dep is not used but accepting it creates a data dependency
     # that ensures torch.compile preserves ordering between KV cache update and
@@ -1196,6 +1208,7 @@ def unified_mla_attention_with_output(
         quant_scale_ue8m0=quant_scale_ue8m0,
         quant_col_major=quant_col_major,
         quant_tma_aligned=quant_tma_aligned,
+        indexer_dummy_dep=indexer_dummy_dep,
     )
 
 
@@ -1212,7 +1225,9 @@ def unified_mla_attention_with_output_fake(
     quant_scale_ue8m0: bool | None = None,
     quant_col_major: bool | None = None,
     quant_tma_aligned: bool | None = None,
+    indexer_dummy_dep: torch.Tensor | None = None,
 ) -> None:
+    del indexer_dummy_dep
     return
 
 

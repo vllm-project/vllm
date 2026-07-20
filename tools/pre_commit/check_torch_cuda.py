@@ -19,6 +19,9 @@ _TORCH_CUDA_PATTERNS = [
 ALLOWED_FILES = {
     "vllm/platforms/",
     "vllm/device_allocator/",
+    # Patches torch internals; the flagged torch.cuda call is inside a
+    # generated-code string for inductor, not a vLLM API call.
+    "vllm/env_override.py",
     "vllm/distributed/weight_transfer/ipc_engine.py",
     "tests/distributed/test_packed_tensor.py",
 }

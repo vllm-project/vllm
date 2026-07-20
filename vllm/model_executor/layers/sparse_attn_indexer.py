@@ -135,14 +135,9 @@ def _fused_indexer_q_rope_quant_kernel(
     q_fp8,
     q_fp8_s0,
     q_fp8_s1,
-    weights,
-    weights_s0,
-    weights_s1,
-    weights_out,
-    weights_out_s0,
-    weights_out_s1,
-    softmax_scale,
-    head_scale,
+    q_scale_out,
+    q_scale_out_s0,
+    q_scale_out_s1,
     fp8_min: tl.constexpr,
     fp8_max: tl.constexpr,
     is_neox: tl.constexpr,
@@ -200,30 +195,25 @@ def _fused_indexer_q_rope_quant_kernel(
         tl.clamp(q_nope / q_scale, fp8_min, fp8_max).to(q_fp8.dtype.element_ty),
     )
 
-    weight = tl.load(weights + token * weights_s0 + head * weights_s1).to(tl.float32)
-    tl.store(
-        weights_out + token * weights_out_s0 + head * weights_out_s1,
-        weight * q_scale * softmax_scale * head_scale,
-    )
+    tl.store(q_scale_out + token * q_scale_out_s0 + head * q_scale_out_s1, q_scale)
 
 
 def fused_indexer_q_rope_quant(
     positions: torch.Tensor,
     q: torch.Tensor,
     cos_sin_cache: torch.Tensor,
-    weights: torch.Tensor,
-    softmax_scale: float,
-    head_scale: float,
     is_neox: bool,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    """Fused rope + per-head fp8 quant for the indexer q; returns the raw
+    per-head q scale so callers fold it into the indexer weights, letting
+    this kernel issue before the wk/weights GEMM."""
     assert current_platform.is_cuda()
     assert q.dtype == torch.bfloat16
     assert q.shape[-1] == 128
     assert cos_sin_cache.shape[-1] == 64
-    assert weights.shape == q.shape[:2]
 
     q_fp8 = torch.empty_like(q, dtype=current_platform.fp8_dtype())
-    weights_out = torch.empty_like(weights, dtype=torch.float32)
+    q_scale = torch.empty(q.shape[:2], device=q.device, dtype=torch.float32)
     fp8_min, fp8_max = get_fp8_min_max()
     _fused_indexer_q_rope_quant_kernel[(q.shape[0], q.shape[1])](
         positions,
@@ -235,20 +225,15 @@ def fused_indexer_q_rope_quant(
         q_fp8,
         q_fp8.stride(0),
         q_fp8.stride(1),
-        weights,
-        weights.stride(0),
-        weights.stride(1),
-        weights_out,
-        weights_out.stride(0),
-        weights_out.stride(1),
-        softmax_scale,
-        head_scale,
+        q_scale,
+        q_scale.stride(0),
+        q_scale.stride(1),
         fp8_min=fp8_min,
         fp8_max=fp8_max,
         is_neox=is_neox,
         num_warps=1,
     )
-    return q_fp8, weights_out
+    return q_fp8, q_scale
 
 
 def _gather_workspace_shapes(
@@ -367,7 +352,7 @@ def sparse_attn_indexer(
     num_decode_tokens = attn_metadata_narrowed.num_decode_tokens
 
     # q_scale is required iff the FP4 cache path is enabled; the FP8 path
-    # folds the Q scale into `weights` inside fused_indexer_q_rope_quant.
+    # folds the Q scale into `weights` before calling this op.
     if use_fp4_cache:
         assert q_scale is not None, "use_fp4_cache=True requires q_scale"
     else:

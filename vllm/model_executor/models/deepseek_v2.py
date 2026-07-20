@@ -35,6 +35,7 @@ from transformers import DeepseekV2Config, DeepseekV3Config
 import vllm._custom_ops as ops
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.decorators import support_torch_compile
+from vllm.compilation.side_stream import side_stream
 from vllm.config import CacheConfig, ParallelConfig, VllmConfig, get_current_vllm_config
 from vllm.distributed import (
     get_ep_group,
@@ -714,6 +715,10 @@ class Indexer(nn.Module):
         )
 
         self.is_inplace_rope = is_inplace_rope
+        # Run the indexer on a high-priority side stream so it overlaps the
+        # main stream's path to attention. Applies to all CUDA sparse-MLA
+        # decode, not just DCP.
+        self.use_indexer_side_stream = current_platform.is_cuda()
         self.n_head_scale = self.n_head**-0.5
         self.use_fused_indexer_q = (
             current_platform.is_cuda()
@@ -723,9 +728,13 @@ class Indexer(nn.Module):
             and self.scale_fmt is not None
         )
 
-    def forward(
-        self, hidden_states: torch.Tensor, qr: torch.Tensor, positions, rotary_emb
-    ) -> torch.Tensor:
+    def _prepare_indexer_inputs(
+        self,
+        hidden_states: torch.Tensor,
+        qr: torch.Tensor,
+        positions,
+        rotary_emb,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         q, _ = self.wq_b(qr)
         q = q.view(-1, self.n_head, self.head_dim)
 
@@ -747,6 +756,15 @@ class Indexer(nn.Module):
                 positions, q[..., : self.rope_dim], k[..., : self.rope_dim].unsqueeze(1)
             )
         elif self.use_fused_indexer_q and q.dtype == torch.bfloat16:
+            # q rope+quant first so it is not serialized behind the wk GEMM;
+            # the q scale is folded into the weights afterwards
+            q_fp8, q_scale = fused_indexer_q_rope_quant(
+                positions,
+                q,
+                rotary_emb.cos_sin_cache,
+                rotary_emb.is_neox_style,
+            )
+
             # fused wk + weights_proj: one GEMM, then split
             kw, _ = self.wk_weights_proj(hidden_states)
             k = kw[:, : self.head_dim]
@@ -757,16 +775,6 @@ class Indexer(nn.Module):
                 k, [self.rope_dim, self.head_dim - self.rope_dim], dim=-1
             )
 
-            q_fp8, weights = fused_indexer_q_rope_quant(
-                positions,
-                q,
-                rotary_emb.cos_sin_cache,
-                weights,
-                self.softmax_scale,
-                self.n_head_scale,
-                rotary_emb.is_neox_style,
-            )
-
             # rotate only the MQA K
             k_pe = k_pe.unsqueeze(1)
             q_dummy = torch.empty_like(k_pe)
@@ -774,7 +782,9 @@ class Indexer(nn.Module):
             k_pe = k_pe.reshape(-1, self.rope_dim)
             k = torch.cat([k_pe, k_nope], dim=-1)
 
-            return self.indexer_op(hidden_states, q_fp8, k, weights)
+            weights = weights * q_scale * self.softmax_scale * self.n_head_scale
+
+            return q_fp8, k, weights
         else:
             q_pe, q_nope = torch.split(
                 q, [self.rope_dim, self.head_dim - self.rope_dim], dim=-1
@@ -814,6 +824,21 @@ class Indexer(nn.Module):
 
         weights = weights * q_scale * self.softmax_scale * self.n_head_scale
 
+        return q_fp8, k, weights
+
+    def forward(
+        self, hidden_states: torch.Tensor, qr: torch.Tensor, positions, rotary_emb
+    ) -> torch.Tensor:
+        if self.use_indexer_side_stream:
+            with side_stream(hidden_states.device):
+                q_fp8, k, weights = self._prepare_indexer_inputs(
+                    hidden_states, qr, positions, rotary_emb
+                )
+                topk_indices = self.indexer_op(hidden_states, q_fp8, k, weights)
+            return topk_indices
+        q_fp8, k, weights = self._prepare_indexer_inputs(
+            hidden_states, qr, positions, rotary_emb
+        )
         return self.indexer_op(hidden_states, q_fp8, k, weights)
 
 
