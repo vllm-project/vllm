@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import math
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from typing import Annotated, Any, Literal, TypeAlias
 
 import numpy as np
@@ -52,7 +52,7 @@ from vllm.utils.tensor_schema import TensorSchema, TensorShape
 from .idefics2_vision_model import Idefics2VisionTransformer
 from .interfaces import MultiModalEmbeddings, SupportsLoRA, SupportsMultiModal
 from .phi4mm_audio import AudioEmbedding
-from .utils import WeightsMapper, maybe_prefix
+from .utils import AutoWeightsLoader, WeightsMapper, maybe_prefix
 
 # <|endoftext10|> (see vocab.json in hf model)
 _IMAGE_PLACEHOLDER_TOKEN_ID = 200010
@@ -1027,10 +1027,7 @@ class Phi4MMForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
     }
 
     hf_to_vllm_mapper = WeightsMapper(
-        orig_to_new_substr={
-            "base_layer.": "",
-            "lora": None,
-        },
+        orig_to_new_substr={"base_layer.": ""},
         orig_to_new_prefix={
             "model.embed_tokens_extend.audio_embed.audio_projection.vision.": "embed_tokens_extend.audio_projection_for_vision.",  # noqa: E501
             "model.embed_tokens_extend.audio_embed.audio_projection.speech.": "embed_tokens_extend.audio_projection.",  # noqa: E501
@@ -1270,6 +1267,15 @@ class Phi4MMForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
     ) -> torch.Tensor | None:
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
+
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> None:
+        # Drop the frozen base-model LoRA weights at load time only.
+        # This must not live in `hf_to_vllm_mapper`: the LoRA loader
+        # also consults that mapper to translate adapter weight names.
+        loader = AutoWeightsLoader(self)
+        drop = WeightsMapper(orig_to_new_substr={"lora": None})
+        mapper = self.hf_to_vllm_mapper | drop
+        return loader.load_weights(weights, mapper=mapper)
 
     def get_mm_mapping(self) -> MultiModelKeys:
         """
