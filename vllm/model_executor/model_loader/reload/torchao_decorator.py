@@ -49,6 +49,8 @@ def support_quantized_model_reload_from_hp_weights(original_load_weights: Functi
         if not getattr(model, "_do_torchao_reload", False):
             return original_load_weights(self, weights, *args, **kwargs)
 
+        # No graph scope: torchao reload runs during initial model setup,
+        # before CUDA graph capture.
         initialize_layerwise_reload(model)
         loaded_weights = original_load_weights(self, weights, *args, **kwargs)
         finalize_layerwise_reload(model, model._model_config)
