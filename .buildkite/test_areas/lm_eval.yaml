@@ -202,6 +202,7 @@ steps:
   - vllm/model_executor/kernels/linear/
   commands:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/humming/config-act-int8.txt
+  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/humming/config-act-int8-a100-only.txt
 
 - label: LM Eval Humming f16 (H100 - TEMPORARY)
   key: lm-eval-humming-f16-h100
