@@ -19,6 +19,7 @@ import torch
 
 from vllm import _custom_ops as ops
 from vllm.models.deepseek_v4.common.ops import (
+    compute_global_topk_indices_and_lens,
     dequantize_and_gather_k_cache,
     quantize_and_insert_k_cache,
 )
@@ -30,6 +31,23 @@ from vllm.models.deepseek_v4.common.ops.fused_compress_quant_cache import (
 from vllm.platforms import current_platform
 
 from .test_fused_indexer_q_rope_quant import quantize_to_mxfp4
+
+
+def test_compute_global_topk_reuses_output_buffers():
+    device = "cuda"
+    topk_indices = torch.tensor(
+        [[0, 3, -1], [1, 2, -1]], dtype=torch.int32, device=device
+    )
+    token_to_req = torch.tensor([0, 1], dtype=torch.int32, device=device)
+    block_table = torch.tensor([[5, 7], [11, 13]], dtype=torch.int32, device=device)
+    is_valid = torch.tensor([True, False], device=device)
+    args = (topk_indices, token_to_req, block_table, 2, is_valid)
+    expected = compute_global_topk_indices_and_lens(*args)
+    outputs = tuple(torch.empty_like(tensor) for tensor in expected)
+    actual = compute_global_topk_indices_and_lens(*args, output_buffers=outputs)
+    for result, output, reference in zip(actual, outputs, expected):
+        assert result.data_ptr() == output.data_ptr()
+        torch.testing.assert_close(result, reference)
 
 
 def _ue8m0_reference(x: torch.Tensor, block_size: int, fp8_max: float):

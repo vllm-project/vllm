@@ -295,6 +295,7 @@ def fused_indexer_q_rope_quant(
     index_weights_softmax_scale: float,
     index_weights_head_scale: float,
     use_fp4: bool = False,
+    output_buffers: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
 ) -> tuple[
     torch.Tensor | tuple[torch.Tensor, torch.Tensor],
     torch.Tensor,
@@ -332,7 +333,12 @@ def fused_indexer_q_rope_quant(
     num_index_q_heads = index_q.shape[1]
     index_q_head_dim = index_q.shape[2]
 
-    index_weights_out = torch.empty_like(index_weights, dtype=torch.float32)
+    if output_buffers is None:
+        index_weights_out = torch.empty_like(index_weights, dtype=torch.float32)
+    else:
+        assert use_fp4
+        index_q_packed, index_q_scale, index_weights_out = output_buffers
+        assert index_weights_out.shape == index_weights.shape
 
     if use_fp4:
         assert index_q_head_dim % MXFP4_BLOCK_SIZE == 0, (
@@ -340,16 +346,21 @@ def fused_indexer_q_rope_quant(
             f"size {MXFP4_BLOCK_SIZE}"
         )
         num_scale_blocks = index_q_head_dim // MXFP4_BLOCK_SIZE
-        index_q_packed = torch.empty(
-            (num_tokens, num_index_q_heads, index_q_head_dim // 2),
-            dtype=torch.uint8,
-            device=index_q.device,
-        )
-        index_q_scale = torch.empty(
-            (num_tokens, num_index_q_heads, num_scale_blocks),
-            dtype=torch.uint8,
-            device=index_q.device,
-        )
+        packed_shape = (num_tokens, num_index_q_heads, index_q_head_dim // 2)
+        scale_shape = (num_tokens, num_index_q_heads, num_scale_blocks)
+        if output_buffers is None:
+            index_q_packed = torch.empty(
+                packed_shape,
+                dtype=torch.uint8,
+                device=index_q.device,
+            )
+            index_q_scale = torch.empty(
+                scale_shape,
+                dtype=torch.uint8,
+                device=index_q.device,
+            )
+        assert index_q_packed.shape == packed_shape
+        assert index_q_scale.shape == scale_shape
         if has_cutedsl():
             # lazily import, otherwise some tests fail due to CUDA driver init failure.
             from vllm.models.deepseek_v4.nvidia.ops.fused_indexer_q_cutedsl import (

@@ -748,6 +748,9 @@ class DeepseekV4FlashInferSM120Attention(DeepseekV4Attention):
                         attn_metadata.block_table[:num_decodes],
                         block_size,
                         is_valid,
+                        output_buffers=self._global_topk_output_buffers(
+                            self.topk_indices_buffer[:num_decode_tokens]
+                        ),
                     )
                 )
                 extra_sparse_indices = global_indices.view(num_decode_tokens, 1, -1)
@@ -837,6 +840,7 @@ class DeepseekV4FlashInferSM120Attention(DeepseekV4Attention):
                     attn_metadata.block_table,
                     block_size,
                     swa_metadata.is_valid_token[prefill_token_slice],
+                    output_buffers=self._global_topk_output_buffers(local_topk_indices),
                 )
             )
 

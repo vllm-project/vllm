@@ -429,6 +429,7 @@ def compute_global_topk_indices_and_lens(
     block_table: torch.Tensor,
     block_size: int,
     is_valid_token: torch.Tensor,
+    output_buffers: tuple[torch.Tensor, torch.Tensor] | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Map local topk indices to global KV cache slots and count valid entries.
 
@@ -438,8 +439,15 @@ def compute_global_topk_indices_and_lens(
     3. Masking padding tokens to length 0
     """
     num_tokens = topk_indices.shape[0]
-    global_topk_indices = torch.empty_like(topk_indices)
-    topk_lens = torch.empty(num_tokens, dtype=torch.int32, device=topk_indices.device)
+    if output_buffers is None:
+        global_topk_indices = torch.empty_like(topk_indices)
+        topk_lens = torch.empty(
+            num_tokens, dtype=torch.int32, device=topk_indices.device
+        )
+    else:
+        global_topk_indices, topk_lens = output_buffers
+        assert global_topk_indices.shape == topk_indices.shape
+        assert topk_lens.shape == (num_tokens,)
     _compute_global_topk_indices_and_lens_kernel[(num_tokens,)](
         global_topk_indices,
         global_topk_indices.stride(0),
