@@ -282,6 +282,13 @@ class AttentionBackend(ABC):
         return True
 
     @classmethod
+    def supports_pcp(cls) -> bool:
+        try:
+            return cls.get_impl_cls().supports_pcp
+        except NotImplementedError:
+            return False
+
+    @classmethod
     def supports_attn_type(cls, attn_type: str) -> bool:
         """Check if backend supports a given attention type.
 
@@ -327,6 +334,7 @@ class AttentionBackend(ABC):
         use_non_causal: bool = False,
         use_batch_invariant: bool = False,
         use_kv_connector: bool = False,
+        use_pcp: bool = False,
     ) -> list[str]:
         invalid_reasons = []
         if not cls.supports_head_size(head_size):
@@ -367,6 +375,8 @@ class AttentionBackend(ABC):
             invalid_reasons.append("batch invariance not supported")
         if use_kv_connector and not cls.supports_kv_connector():
             invalid_reasons.append("KV connector not supported")
+        if use_pcp and not cls.supports_pcp():
+            invalid_reasons.append("PCP not supported")
         combination_reason = cls.supports_combination(
             head_size,
             dtype,
@@ -858,8 +868,8 @@ class AttentionImplBase(ABC, Generic[T]):
         except AssertionError:
             self.pcp_world_size = 1
             self.pcp_rank = 0
-        self.total_cp_world_size = self.pcp_world_size * self.dcp_world_size
-        self.total_cp_rank = self.pcp_rank * self.dcp_world_size + self.dcp_rank
+        self.total_cp_world_size = self.dcp_world_size
+        self.total_cp_rank = self.dcp_rank
 
         self.need_to_return_lse_for_decode = (
             self.dcp_world_size > 1 and self.can_return_lse_for_decode
@@ -986,6 +996,8 @@ class AttentionImpl(AttentionImplBase[T], Generic[T]):
 
 class MLAAttentionImpl(AttentionImplBase[T], Generic[T]):
     """MLA attention implementation with forward_mqa and forward_mha methods."""
+
+    supports_pcp: bool = True
 
     @abstractmethod
     def __init__(
