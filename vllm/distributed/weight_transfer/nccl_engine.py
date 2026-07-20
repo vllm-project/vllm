@@ -139,15 +139,28 @@ class NCCLWeightTransferEngine(
         from vllm.model_executor.model_loader.reload import (
             initialize_layerwise_reload,
         )
+        from vllm.model_executor.model_loader.weight_load_transaction import (
+            abort_weight_load_transaction,
+            start_weight_load_transaction,
+        )
 
-        initialize_layerwise_reload(self.model)
+        start_weight_load_transaction(self.model)
+        try:
+            initialize_layerwise_reload(self.model)
+        except BaseException:
+            abort_weight_load_transaction(self.model)
+            raise
 
     def finish_weight_update(self) -> None:
         """Finalize layerwise reloading after all weights have been received."""
         from vllm.model_executor.model_loader.reload import (
             finalize_layerwise_reload,
         )
+        from vllm.model_executor.model_loader.weight_load_transaction import (
+            finish_weight_load_transaction,
+        )
 
+        finish_weight_load_transaction(self.model)
         finalize_layerwise_reload(self.model, self.model_config)
 
     def receive_weights(self, update_info: NCCLWeightTransferUpdateInfo) -> None:

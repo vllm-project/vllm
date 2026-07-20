@@ -25,11 +25,56 @@ from vllm.model_executor.model_loader.reload.meta import (
 )
 from vllm.model_executor.model_loader.reload.types import LayerReloadingInfo
 from vllm.model_executor.model_loader.reload.utils import get_layer_tensors
+from vllm.model_executor.model_loader.weight_load_transaction import (
+    complete_weight_load,
+    finish_weight_load_transaction,
+    get_weight_load_transaction,
+    start_weight_load_transaction,
+)
 from vllm.model_executor.model_loader.weight_utils import (
     composed_weight_loader,
     default_weight_loader,
 )
 from vllm.platforms import current_platform
+
+
+def test_weight_load_completion_runs_immediately_without_transaction():
+    model = torch.nn.Module()
+    completed = []
+
+    complete_weight_load(model, {"layer.0.weight"}, completed.append)
+
+    assert completed == [{"layer.0.weight"}]
+
+
+def test_weight_load_transaction_aggregates_chunks_until_finish():
+    model = torch.nn.Module()
+    completed = []
+    start_weight_load_transaction(model)
+
+    complete_weight_load(model, {"layer.0.weight"}, completed.append)
+    complete_weight_load(model, {"layer.1.weight"}, completed.append)
+
+    assert completed == []
+    finish_weight_load_transaction(model)
+    assert completed == [{"layer.0.weight", "layer.1.weight"}]
+    assert get_weight_load_transaction(model) is None
+
+
+def test_weight_load_transaction_reports_aggregate_missing_items_at_finish():
+    model = torch.nn.Module()
+    start_weight_load_transaction(model)
+
+    def require_all(loaded_items):
+        missing = {"layer.0.weight", "layer.1.weight"} - loaded_items
+        if missing:
+            raise ValueError(f"missing weights: {sorted(missing)}")
+
+    complete_weight_load(model, {"layer.0.weight"}, require_all)
+
+    with pytest.raises(ValueError, match="layer.1.weight"):
+        finish_weight_load_transaction(model)
+    assert get_weight_load_transaction(model) is None
 
 
 def _fp8_reload_unsupported() -> bool:

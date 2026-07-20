@@ -19,6 +19,9 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
+from vllm.model_executor.model_loader.weight_load_transaction import (
+    complete_weight_load,
+)
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
     maybe_remap_kv_scale_name,
@@ -302,11 +305,12 @@ class MiniMaxM3MTP(nn.Module):
             if mtp_layer is not None:
                 loaded_mtp_layers.add(mtp_layer)
 
-        # Validate that weights were loaded for each MTP layer.
-        for layer_idx in range(self.model.num_mtp_layers):
-            if layer_idx not in loaded_mtp_layers:
-                raise ValueError(
-                    f"Failed to load MTP layer {layer_idx} weights from checkpoint."
-                )
+        def complete(loaded_layers: set[int]) -> None:
+            for layer_idx in range(self.model.num_mtp_layers):
+                if layer_idx not in loaded_layers:
+                    raise ValueError(
+                        f"Failed to load MTP layer {layer_idx} weights from checkpoint."
+                    )
 
+        complete_weight_load(self, loaded_mtp_layers, complete)
         return loaded_params

@@ -25,6 +25,9 @@ from vllm.config import VllmConfig
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
+from vllm.model_executor.model_loader.weight_load_transaction import (
+    complete_weight_load,
+)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.utils import maybe_prefix
 from vllm.sequence import IntermediateTensors
@@ -391,16 +394,20 @@ def _load_inkling_mtp_weights(
             loaded_weight = _load(name, weight)
         if not loaded_weight:
             raise ValueError(f"Unexpected Inkling MTP weight: {original_name}")
-    required = {
-        name
-        for name in params
-        if name.startswith("model.layers.") or name.startswith("model.chain_norm.")
-    }
-    if missing := sorted(required - loaded):
-        raise ValueError(
-            "Inkling MTP checkpoint is missing required parameters: "
-            + ", ".join(missing)
-        )
+
+    def complete(loaded_weights: set[str]) -> None:
+        required = {
+            name
+            for name in params
+            if name.startswith("model.layers.") or name.startswith("model.chain_norm.")
+        }
+        if missing := sorted(required - loaded_weights):
+            raise ValueError(
+                "Inkling MTP checkpoint is missing required parameters: "
+                + ", ".join(missing)
+            )
+
+    complete_weight_load(module, loaded, complete)
     return loaded
 
 
