@@ -1613,9 +1613,9 @@ class TestBindHostPortDefaults:
             or SimpleNamespace(),
         )
         spec = SimpleNamespace(
-            block_size_factor=1,
-            vllm_config=SimpleNamespace(
-                parallel_config=SimpleNamespace(data_parallel_index=dp_index)
+            blocks_per_chunk=1,
+            config=SimpleNamespace(
+                parallel=SimpleNamespace(data_parallel_index=dp_index)
             ),
         )
         mgr = P2PSecondaryTierManager(spec, memoryview(b""), **kwargs)
