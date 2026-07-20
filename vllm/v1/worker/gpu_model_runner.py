@@ -93,6 +93,7 @@ from vllm.model_executor.models.interfaces_base import (
     is_pooling_model,
     is_text_generation_model,
 )
+from vllm.model_executor.models.utils import autoload_weights
 from vllm.model_executor.offloader import (
     create_offloader,
     get_offloader,
@@ -5526,8 +5527,6 @@ class GPUModelRunner(
         if is_checkpoint_format:
             # load weights from checkpoint/ original model format
             initialize_layerwise_reload(model)
-            from vllm.model_executor.models.utils import autoload_weights
-
             loaded_weights = autoload_weights(model, weights_iterator)
             finalize_layerwise_reload(model, self.model_config)
 

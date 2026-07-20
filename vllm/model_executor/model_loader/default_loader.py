@@ -34,6 +34,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     pt_weights_iterator,
     safetensors_weights_iterator,
 )
+from vllm.model_executor.models.utils import autoload_weights
 from vllm.tracing import instrument
 from vllm.transformers_utils.repo_utils import list_filtered_repo_files
 
@@ -424,11 +425,8 @@ class DefaultModelLoader(BaseModelLoader):
 
         self._init_ep_weight_filter(model_config)
 
-        from vllm.model_executor.models.utils import autoload_weights
-
-        loaded_weights = autoload_weights(
-            model, self.get_all_weights(model_config, model)
-        )
+        weights = self.get_all_weights(model_config, model)
+        loaded_weights = autoload_weights(model, weights)
 
         self.counter_after_loading_weights = time.perf_counter()
         logger.info_once(

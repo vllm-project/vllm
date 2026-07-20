@@ -15,6 +15,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     download_weights_from_hf,
     runai_safetensors_weights_iterator,
 )
+from vllm.model_executor.models.utils import autoload_weights
 from vllm.transformers_utils.runai_utils import is_runai_obj_uri, list_safetensors
 
 
@@ -135,9 +136,5 @@ class RunaiModelStreamerLoader(BaseModelLoader):
         model_weights = model_config.model
         if model_weights_override := model_config.model_weights:
             model_weights = model_weights_override
-        from vllm.model_executor.models.utils import autoload_weights
-
-        autoload_weights(
-            model,
-            self._get_weights_iterator(model_weights, model_config.revision),
-        )
+        weights = self._get_weights_iterator(model_weights, model_config.revision)
+        autoload_weights(model, weights)
