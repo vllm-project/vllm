@@ -66,6 +66,36 @@ def maybe_gather_mla_latent_cache_inputs(
     return cache_kv_c, cache_k_pe, cache_slot_mapping
 
 
+def maybe_gather_kv_cache_inputs(
+    key: torch.Tensor,
+    value: torch.Tensor,
+    slot_mapping: torch.Tensor | None,
+    num_decode_tokens: int | None,
+    use_pcp: bool,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
+    """GQA/MHA PCP KV-cache gather.
+
+    All-gather the prefill portion of K/V across PCP ranks so every rank can
+    write the full prefill KV to its (replicated, ``dcp=1``) cache, while
+    keeping decode writes local. Returns contiguous K, V and the gathered
+    cache slot mapping ready for ``reshape_and_cache_flash``. No-op when PCP
+    is off.
+
+    Gathering K and V separately (rather than ``cat``-then-``split``) keeps
+    each output contiguous, so the cache kernel's ``head stride == head_size``
+    assumption holds.
+    """
+    if not use_pcp or num_decode_tokens is None:
+        return key, value, slot_mapping
+    assert slot_mapping is not None
+    (cache_key, cache_value), cache_slot_mapping = _gather_prefill_cache_inputs(
+        (key, value),
+        slot_mapping,
+        num_decode_tokens,
+    )
+    return cache_key, cache_value, cache_slot_mapping
+
+
 def maybe_gather_indexer_k(
     k: torch.Tensor,
     slot_mapping: torch.Tensor,

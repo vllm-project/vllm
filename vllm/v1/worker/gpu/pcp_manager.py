@@ -132,8 +132,10 @@ class PCPManager:
         if pcp_size <= 1:
             return
 
-        if not model_config.use_mla:
-            raise NotImplementedError("MRV2 PCP currently supports MLA models only.")
+        # Non-MLA (GQA/MHA) models are supported on the FlashAttention backend,
+        # which opts in via AttentionImplBase.supports_pcp. MLA uses its own
+        # latent-attention PCP path. Per-backend capability is still enforced by
+        # check_attention_cp_compatibility in vllm/v1/worker/cp_utils.py.
         if parallel_config.pipeline_parallel_size > 1:
             raise NotImplementedError("MRV2 PCP does not support PP yet.")
         if model_config.is_encoder_decoder:
