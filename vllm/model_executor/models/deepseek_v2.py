@@ -1020,6 +1020,7 @@ class DeepseekV2MLAAttention(nn.Module):
         qrep_enabled = (
             envs.VLLM_DCP_Q_REPLICATE
             and vllm_config.parallel_config.decode_context_parallel_size > 1
+            and vllm_config.parallel_config.prefill_context_parallel_size <= 1
         )
         q_proj_cls = (
             DCPGroupColumnParallelLinear if qrep_enabled else ColumnParallelLinear
