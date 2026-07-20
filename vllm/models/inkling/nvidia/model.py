@@ -47,7 +47,6 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.sequence import IntermediateTensors
 
 from ..configs import InklingMMConfig, InklingModelConfig
-from ..nvfp4 import InklingNvfp4Config
 from .attention import InklingAttention, compute_log_scaling_tau
 from .layernorm import InklingRMSNorm
 from .logits_processor import InklingLogitsProcessor
@@ -123,7 +122,6 @@ class InklingDecoderLayer(nn.Module):
         is_local: bool,
         quant_config: QuantizationConfig | None,
         prefix: str,
-        nvfp4_config: InklingNvfp4Config | None = None,
         force_dense_mlp: bool = False,
     ) -> None:
         super().__init__()
@@ -172,14 +170,10 @@ class InklingDecoderLayer(nn.Module):
                 prefix=f"{prefix}.mlp",
             )
         else:
-            # InklingMoE decides per layer (from the checkpoint exclude list)
-            # whether the routed experts are NVFP4 or bf16; the shared sink
-            # experts are always bf16.
             self.mlp = InklingMoE(
                 config,
-                layer_id,
                 prefix=f"{prefix}.mlp",
-                nvfp4_config=nvfp4_config,
+                quant_config=quant_config,
             )
 
         # Short convolution on the attention-output and MLP-output residual
@@ -261,7 +255,6 @@ class InklingModel(nn.Module):
         config: InklingModelConfig,
         quant_config: QuantizationConfig | None,
         prefix: str,
-        nvfp4_config: InklingNvfp4Config | None = None,
     ) -> None:
         super().__init__()
         self.config = config
@@ -278,7 +271,7 @@ class InklingModel(nn.Module):
         def get_layer(prefix: str) -> InklingDecoderLayer:
             idx = _layer_id(prefix + ".") or int(prefix.split(".")[-1])
             return InklingDecoderLayer(
-                config, idx, idx in local_ids, quant_config, prefix, nvfp4_config
+                config, idx, idx in local_ids, quant_config, prefix
             )
 
         self.start_layer, self.end_layer, self.layers = make_layers(
@@ -408,11 +401,6 @@ class _TmlForCausalLMBase(nn.Module, SupportsPP, SupportsLoRA):
     ) -> None:
         quant_config = vllm_config.quant_config
         self.config = text_config
-        # NVFP4 experts are detected directly from the checkpoint quant config;
-        # only the MoE experts are quantized (attention/dense MLP stay bf16).
-        self.nvfp4_config = InklingNvfp4Config.from_hf_config(
-            vllm_config.model_config.hf_config
-        )
         # Read by the MRV2 runner to publish per-request short-conv metadata.
         # Short convolution is intrinsic to Inkling, so this is always set.
         self.uses_sconv = True
@@ -420,7 +408,6 @@ class _TmlForCausalLMBase(nn.Module, SupportsPP, SupportsLoRA):
             config=text_config,
             quant_config=quant_config,
             prefix=maybe_prefix(prefix, "model"),
-            nvfp4_config=self.nvfp4_config,
         )
         initialize_lamport_rs_conv(
             text_config.hidden_size,
