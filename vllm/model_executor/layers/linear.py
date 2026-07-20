@@ -55,13 +55,10 @@ WEIGHT_LOADER_V2_SUPPORTED = [
     "AutoGPTQLinearMethod",
     "Fp8LinearMethod",
     "FBGEMMFp8LinearMethod",
-    "ModelOptFp8LinearMethod",
-    "ModelOptFp8PcPtLinearMethod",
-    "ModelOptFp8PbWoLinearMethod",
     "QuarkLinearMethod",
-    "ModelOptNvFp4LinearMethod",
-    "ModelOptNvFp4W4A16LinearMethod",
     "HummingLinearMethod",
+    # ModelOptLinearMethod self-registers via
+    # register_weight_loader_v2_supported_method (see modelopt.py).
 ]
 
 
