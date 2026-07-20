@@ -5,6 +5,7 @@ from abc import ABC, abstractmethod
 from collections import defaultdict
 from collections.abc import Sequence
 
+from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_utils import (
@@ -28,6 +29,8 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 from vllm.v1.request import Request
+
+logger = init_logger(__name__)
 
 
 class SingleTypeKVCacheManager(ABC):
@@ -1505,12 +1508,31 @@ def get_manager_for_kv_cache_spec(
 def register_all_kvcache_specs(vllm_config):
     """Built-in spec registration"""
     full_attention_manager = FullAttentionManager
-    try:
-        from vllm.knorm.manager import KnormFullAttentionManager
+    prefix_caching_enabled = (
+        vllm_config is not None
+        and vllm_config.cache_config is not None
+        and vllm_config.cache_config.enable_prefix_caching
+    )
+    knorm_compatible = (
+        vllm_config is not None
+        and vllm_config.cache_config is not None
+        and not vllm_config.cache_config.enable_prefix_caching
+    )
+    if knorm_compatible:
+        try:
+            from vllm.knorm.manager import KnormFullAttentionManager
 
-        full_attention_manager = KnormFullAttentionManager
-    except ImportError:
-        pass  # knorm module not installed - use default FullAttentionManager
+            full_attention_manager = KnormFullAttentionManager
+        except ImportError:
+            pass  # knorm module not installed - use default FullAttentionManager
+    elif prefix_caching_enabled:
+        from vllm import envs
+
+        if envs.VLLM_KNORM_ENABLED:
+            logger.warning_once(
+                "Knorm KV compression is disabled because prefix caching is enabled. "
+                "Set --no-enable-prefix-caching to use Knorm."
+            )
 
     KVCacheSpecRegistry.register(
         FullAttentionSpec,
@@ -1550,7 +1572,9 @@ def register_all_kvcache_specs(vllm_config):
         uniform_type_base_spec=FullAttentionSpec,
     )
     KVCacheSpecRegistry.register(
-        MLAAttentionSpec, full_attention_manager, uniform_type_base_spec=FullAttentionSpec
+        MLAAttentionSpec,
+        full_attention_manager,
+        uniform_type_base_spec=FullAttentionSpec,
     )
     KVCacheSpecRegistry.register(
         RSWASpec, RSWAManager, uniform_type_base_spec=FullAttentionSpec
