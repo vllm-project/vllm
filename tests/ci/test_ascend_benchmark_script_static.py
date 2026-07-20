@@ -78,7 +78,7 @@ def test_same_spec_runner_resolves_spec_from_shared_registry():
     assert '--repo-root "$VLLM_HUST_BENCHMARK_REPO"' in same_spec_block
 
 
-def test_e2e_inference_scripts_retry_http_requests_and_print_server_log():
+def test_e2e_inference_scripts_use_python_http_probe_with_server_log():
     for script_name in (
         "run_e2e_serve_smoke.sh",
         "run_e2e_inference_regression.sh",
@@ -86,9 +86,9 @@ def test_e2e_inference_scripts_retry_http_requests_and_print_server_log():
         text = script_text(script_name)
 
         assert "print_server_log_tail() {" in text
-        assert "http_request() {" in text
-        assert "http_request_with_server_log() {" in text
-        assert "urllib.request.ProxyHandler({})" in text
+        assert "http_with_server_log() {" in text
+        assert "e2e_http_request.py" in text
+        assert '"$PYTHON_BIN" "$HTTP_REQUEST_SCRIPT"' in text
         assert "E2E_HTTP_REQUEST_ATTEMPTS" in text
         assert "E2E_HTTP_REQUEST_TIMEOUT_SECONDS" in text
         assert "else\n      rc=$?\n    fi" in text
@@ -96,6 +96,6 @@ def test_e2e_inference_scripts_retry_http_requests_and_print_server_log():
         assert "curl -fsS" not in text
         assert "vLLM models endpoint readiness confirmation" in text
         assert (
-            "http_request_with_server_log"
+            "http_with_server_log"
             in text[text.index("completion_response=$(mktemp)") :]
         )
