@@ -61,45 +61,48 @@ _SHUTDOWN_DRAIN_TIMEOUT_S = 3.0
 _DRAIN_SLEEP_S = 0.001
 
 
-def _prefill_params(kv_params: dict | None) -> dict | None:
-    """Return the ``prefill`` sub-dict, or None if absent.
+def _remote_prefiller_params(kv_params: dict | None) -> dict | None:
+    """Return the ``remote_prefiller`` sub-dict, or None if absent.
 
-    Set on decoder requests; carries kv_request_id, remote_host, remote_port.
+    Set on decoder requests to name the remote prefiller they pull from;
+    carries kv_request_id, remote_host, remote_port.
     """
     if not kv_params:
         return None
-    return kv_params.get("prefill")
+    return kv_params.get("remote_prefiller")
 
 
-def _decode_params(kv_params: dict | None) -> dict | None:
-    """Return the ``decode`` sub-dict, or None if absent.
+def _remote_decoder_params(kv_params: dict | None) -> dict | None:
+    """Return the ``remote_decoder`` sub-dict, or None if absent.
 
-    Set on prefiller requests; carries kv_request_id.
+    Set on prefiller requests to name the remote decoder they serve;
+    carries kv_request_id.
     """
     if not kv_params:
         return None
-    return kv_params.get("decode")
+    return kv_params.get("remote_decoder")
 
 
-def _p2p_params(kv_params: dict | None) -> dict | None:
-    """Return the ``p2p`` sub-dict, or None if absent.
+def _remote_kv_peer_params(kv_params: dict | None) -> dict | None:
+    """Return the ``remote_kv_peer`` sub-dict, or None if absent.
 
-    Set on symmetric-P2P consumer requests; carries kv_request_id,
-    remote_host, remote_port.
+    Set on symmetric-P2P consumer requests to name the remote peer they
+    pull from; carries kv_request_id, remote_host, remote_port.
     """
     if not kv_params:
         return None
-    return kv_params.get("p2p")
+    return kv_params.get("remote_kv_peer")
 
 
 def _consumer_params(kv_params: dict | None) -> dict | None:
     """Return the consumer sub-dict for either PD or symmetric-P2P.
 
-    Decoder (PD) requests carry ``prefill``; symmetric-P2P consumers
-    carry ``p2p``. Both have the same shape (kv_request_id, remote_host,
-    remote_port) so callers can use whichever is set.
+    Decoder (PD) requests carry ``remote_prefiller``; symmetric-P2P
+    consumers carry ``remote_kv_peer``. Both have the same shape
+    (kv_request_id, remote_host, remote_port) so callers can use
+    whichever is set.
     """
-    return _prefill_params(kv_params) or _p2p_params(kv_params)
+    return _remote_prefiller_params(kv_params) or _remote_kv_peer_params(kv_params)
 
 
 @dataclass
@@ -191,7 +194,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
             raise ValueError(
                 "PYTHONHASHSEED must be set for P2P KV offload so that block "
                 "hashes match across instances. Set it to a fixed value (e.g. "
-                "PYTHONHASHSEED=0) on every prefiller and decoder."
+                "PYTHONHASHSEED=0) on every P2P peer."
             )
         self._hash_seed = hash_seed
         if host is None:
@@ -273,13 +276,13 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         if kv_request_id in self._failed_req_ids:
             return LookupResult.MISS
 
-        # Symmetric-P2P consumer (``p2p`` sub-dict): probe the peer
-        # asynchronously. First call registers the (kv_request_id,
+        # Symmetric-P2P consumer (``remote_kv_peer`` sub-dict): probe the
+        # peer asynchronously. First call registers the (kv_request_id,
         # block_hash) entry and returns RETRY; flush_pending_lookups()
         # in on_schedule_end batches the LookupMsg; a later step's
         # lookup() returns HIT/MISS once LookupRespMsg has arrived.
-        # PD path (``prefill`` sub-dict only) keeps the eager HIT today.
-        if _p2p_params(req_context.kv_transfer_params):
+        # PD path (``remote_prefiller`` sub-dict only) keeps the eager HIT.
+        if _remote_kv_peer_params(req_context.kv_transfer_params):
             peer_id = self._remote_id_from_params(consumer)
             session = self._sessions.get(peer_id) if peer_id else None
             if session is None:
@@ -299,8 +302,9 @@ class P2PSecondaryTierManager(SecondaryTierManager):
     def on_new_request(self, req_context: ReqContext) -> RequestOffloadingContext:
         """Open the outbound session toward the producer if needed.
 
-        On the consumer side (``prefill`` for PD or ``p2p`` for symmetric
-        P2P), open a session toward the producer at remote_host:remote_port
+        On the consumer side (``remote_prefiller`` for PD or
+        ``remote_kv_peer`` for symmetric P2P), open a session toward the
+        producer at remote_host:remote_port
         so submit_load can issue FetchMsg as soon as it fires. On the
         prefiller side, sessions are created when the consumer's inbound
         connection arrives in _accept_new_peers — submit_store no longer
@@ -317,11 +321,12 @@ class P2PSecondaryTierManager(SecondaryTierManager):
     def on_request_finished(self, req_context: ReqContext) -> None:
         """Cancels pending loads and prunes session-scoped state.
 
-        Consumer side (``prefill`` for PD or ``p2p`` for symmetric-P2P):
-        looks up the session by peer_id because the producer's address
-        is what addresses the client-role load to cancel; also drops any
-        pending symmetric-P2P lookup state via ``session.finish_request``.
-        Prefiller side (``decode`` set): looks up via kv_request_id
+        Consumer side (``remote_prefiller`` for PD or ``remote_kv_peer``
+        for symmetric-P2P): looks up the session by peer_id because the
+        producer's address is what addresses the client-role load to
+        cancel; also drops any pending symmetric-P2P lookup state via
+        ``session.finish_request``.
+        Prefiller side (``remote_decoder`` set): looks up via kv_request_id
         because peer_id is no longer carried on store-time
         kv_transfer_params; if a session has bound the id, finish it. If
         no session has bound the id yet, this is a no-op: parked batches
@@ -332,8 +337,8 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         if not kv_params:
             return
         consumer = _consumer_params(kv_params)
-        decode = _decode_params(kv_params)
-        kv_request_id = (consumer or decode or {}).get("kv_request_id")
+        producer = _remote_decoder_params(kv_params)
+        kv_request_id = (consumer or producer or {}).get("kv_request_id")
         if not kv_request_id:
             return
         self._failed_req_ids.discard(kv_request_id)
@@ -361,23 +366,24 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         assert len(keys) == len(block_ids)
 
         kv_params = job_metadata.req_context.kv_transfer_params
-        decode = _decode_params(kv_params)
+        producer = _remote_decoder_params(kv_params)
         logger.debug(
-            "P2P %s: submit_store ENTRY job_id=%d blocks=%d decode=%s kv_request_id=%s",
+            "P2P %s: submit_store ENTRY job_id=%d blocks=%d "
+            "remote_decoder=%s kv_request_id=%s",
             self._local_id,
             job_id,
             len(block_ids),
-            decode is not None,
-            (decode or {}).get("kv_request_id"),
+            producer is not None,
+            (producer or {}).get("kv_request_id"),
         )
-        # Absent ``decode`` block => not a remote-decode request: succeed
-        # locally without parking. An empty/malformed dict is still a
-        # remote-decode signal and must fail the missing-id check below.
-        if decode is None:
+        # Absent ``remote_decoder`` block => not a remote-decode request:
+        # succeed locally without parking. An empty/malformed dict is still
+        # a remote-decode signal and must fail the missing-id check below.
+        if producer is None:
             self._finished_jobs.append(JobResult(job_id=job_id, success=True))
             return
 
-        kv_request_id = decode.get("kv_request_id")
+        kv_request_id = producer.get("kv_request_id")
         if not kv_request_id:
             logger.warning(
                 "P2P %s: submit_store missing kv_request_id",
@@ -555,7 +561,8 @@ class P2PSecondaryTierManager(SecondaryTierManager):
 
     @staticmethod
     def _remote_id_from_params(role_params: dict) -> str | None:
-        """Build peer_id from a role-scoped sub-dict (``prefill``/``p2p``)."""
+        """Build peer_id from a role-scoped sub-dict
+        (``remote_prefiller``/``remote_kv_peer``)."""
         host = role_params.get("remote_host")
         port = role_params.get("remote_port")
         if host and port:
@@ -565,8 +572,8 @@ class P2PSecondaryTierManager(SecondaryTierManager):
     def _get_or_create_session(self, peer_id: str) -> P2PSession:
         """Return the existing session for peer_id, or open one outbound.
 
-        Consumer-side helper for on_new_request: when ``prefill`` (PD)
-        or ``p2p`` (symmetric P2P) is set, the consumer must reach the
+        Consumer-side helper for on_new_request: when ``remote_prefiller``
+        (PD) or ``remote_kv_peer`` (symmetric P2P) is set, the consumer must reach the
         producer at peer_id. If we already have a session toward that
         peer (from a prior load or a peer-initiated inbound), reuse it;
         otherwise open an outbound ControlConnection and build a

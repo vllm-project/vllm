@@ -34,15 +34,15 @@ from vllm.v1.kv_offload.tiering.p2p.session import (
 # ---------------------------------------------------------------------------
 
 
-def _prefill_kv_params(
+def _remote_prefiller_kv_params(
     remote_host: str = "10.0.0.1",
     remote_port: int = 8000,
     kv_request_id: str = "req-1",
 ) -> dict:
-    """Decoder-side kv_transfer_params: ``prefill`` sub-dict carries
+    """Decoder-side kv_transfer_params: ``remote_prefiller`` sub-dict carries
     kv_request_id + remote_host + remote_port."""
     return {
-        "prefill": {
+        "remote_prefiller": {
             "kv_request_id": kv_request_id,
             "remote_host": remote_host,
             "remote_port": remote_port,
@@ -50,15 +50,15 @@ def _prefill_kv_params(
     }
 
 
-def _p2p_kv_params(
+def _remote_kv_peer_kv_params(
     remote_host: str = "10.0.0.1",
     remote_port: int = 8000,
     kv_request_id: str = "req-1",
 ) -> dict:
-    """Symmetric-P2P consumer kv_transfer_params: ``p2p`` sub-dict has
-    the same shape as ``prefill`` (kv_request_id + remote_host + port)."""
+    """Symmetric-P2P consumer kv_transfer_params: ``remote_kv_peer`` sub-dict has
+    the same shape as ``remote_prefiller`` (kv_request_id + remote_host + port)."""
     return {
-        "p2p": {
+        "remote_kv_peer": {
             "kv_request_id": kv_request_id,
             "remote_host": remote_host,
             "remote_port": remote_port,
@@ -66,10 +66,10 @@ def _p2p_kv_params(
     }
 
 
-def _decode_kv_params(kv_request_id: str = "req-1") -> dict:
-    """Prefiller-side kv_transfer_params: ``decode`` sub-dict carries
+def _remote_decoder_kv_params(kv_request_id: str = "req-1") -> dict:
+    """Prefiller-side kv_transfer_params: ``remote_decoder`` sub-dict carries
     kv_request_id only."""
-    return {"decode": {"kv_request_id": kv_request_id}}
+    return {"remote_decoder": {"kv_request_id": kv_request_id}}
 
 
 def _req_context(kv_params: dict | None = None) -> ReqContext:
@@ -191,32 +191,32 @@ class TestLookup:
 
     def test_lookup_returns_miss_without_required_fields(self):
         mgr = _make_manager()
-        ctx = _req_context(kv_params={"prefill": {"remote_host": "x"}})
+        ctx = _req_context(kv_params={"remote_prefiller": {"remote_host": "x"}})
         assert mgr.lookup(b"key", ctx) is LookupResult.MISS
 
     def test_lookup_returns_hit_for_valid_request(self):
         mgr = _make_manager()
-        ctx = _req_context(kv_params=_prefill_kv_params())
+        ctx = _req_context(kv_params=_remote_prefiller_kv_params())
         assert mgr.lookup(b"key", ctx) is LookupResult.HIT
 
     def test_lookup_returns_miss_for_failed_request(self):
         mgr = _make_manager()
         mgr._failed_req_ids.add("req-1")
-        ctx = _req_context(kv_params=_prefill_kv_params(kv_request_id="req-1"))
+        ctx = _req_context(kv_params=_remote_prefiller_kv_params(kv_request_id="req-1"))
         assert mgr.lookup(b"key", ctx) is LookupResult.MISS
 
     def test_lookup_returns_hit_for_different_request_id(self):
         mgr = _make_manager()
         mgr._failed_req_ids.add("req-1")
-        ctx = _req_context(kv_params=_prefill_kv_params(kv_request_id="req-2"))
+        ctx = _req_context(kv_params=_remote_prefiller_kv_params(kv_request_id="req-2"))
         assert mgr.lookup(b"key", ctx) is LookupResult.HIT
 
     def test_lookup_returns_miss_without_prefill_key(self):
-        """No ``prefill`` sub-dict means the request was not routed for
+        """No ``remote_prefiller`` sub-dict means the request was not routed for
         remote prefill — local prefill should run instead, so lookup()
-        returns MISS even when a stale ``decode`` block is present."""
+        returns MISS even when a stale ``remote_decoder`` block is present."""
         mgr = _make_manager()
-        ctx = _req_context(kv_params=_decode_kv_params())
+        ctx = _req_context(kv_params=_remote_decoder_kv_params())
         assert mgr.lookup(b"key", ctx) is LookupResult.MISS
 
 
@@ -297,16 +297,16 @@ class TestServeExternalRequests:
 
 class TestSubmitStore:
     def test_no_decode_succeeds_immediately(self):
-        """Without a ``decode`` block, job succeeds immediately."""
+        """Without a ``remote_decoder`` block, job succeeds immediately."""
         mgr = _make_manager()
         job = _job_metadata(job_id=1, kv_params={})
         mgr.submit_store(job)
         assert mgr._finished_jobs == [JobResult(job_id=1, success=True)]
 
     def test_missing_kv_request_id_fails(self):
-        """Missing kv_request_id inside ``decode`` fails the job."""
+        """Missing kv_request_id inside ``remote_decoder`` fails the job."""
         mgr = _make_manager()
-        params: dict = {"decode": {}}
+        params: dict = {"remote_decoder": {}}
         job = _job_metadata(job_id=1, kv_params=params)
         mgr.submit_store(job)
         assert mgr._finished_jobs == [JobResult(job_id=1, success=False)]
@@ -320,7 +320,7 @@ class TestSubmitStore:
             job_id=1,
             keys=[b"k1", b"k2"],
             block_ids=[3, 4],
-            kv_params=_decode_kv_params(kv_request_id="req-1"),
+            kv_params=_remote_decoder_kv_params(kv_request_id="req-1"),
         )
         mgr.submit_store(job)
 
@@ -351,7 +351,7 @@ class TestSubmitStore:
             job_id=7,
             keys=[b"k1", b"k2"],
             block_ids=[3, 4],
-            kv_params=_decode_kv_params(kv_request_id="req-1"),
+            kv_params=_remote_decoder_kv_params(kv_request_id="req-1"),
         )
         mgr.submit_store(job)
 
@@ -364,9 +364,9 @@ class TestSubmitStore:
     def test_extra_top_level_keys_are_ignored(self):
         """Producer-side kv_transfer_params should not pre-create a
         session even when a stale caller still passes a top-level
-        ``remote_host``/``remote_port`` next to ``decode``."""
+        ``remote_host``/``remote_port`` next to ``remote_decoder``."""
         mgr = _make_manager()
-        params = _decode_kv_params()
+        params = _remote_decoder_kv_params()
         params["remote_host"] = "stale"
         params["remote_port"] = 12345
         job = _job_metadata(job_id=1, kv_params=params)
@@ -393,7 +393,7 @@ class TestSubmitLoad:
         """Empty key list succeeds immediately."""
         mgr = _make_manager()
         job = _job_metadata(
-            job_id=1, keys=[], block_ids=[], kv_params=_prefill_kv_params()
+            job_id=1, keys=[], block_ids=[], kv_params=_remote_prefiller_kv_params()
         )
         mgr.submit_load(job)
         assert mgr._finished_jobs == [JobResult(job_id=1, success=True)]
@@ -401,7 +401,7 @@ class TestSubmitLoad:
     def test_no_session_fails(self):
         """No session for peer fails and marks request failed."""
         mgr = _make_manager()
-        job = _job_metadata(job_id=1, kv_params=_prefill_kv_params())
+        job = _job_metadata(job_id=1, kv_params=_remote_prefiller_kv_params())
         mgr.submit_load(job)
         assert mgr._finished_jobs == [JobResult(job_id=1, success=False)]
         assert "req-1" in mgr._failed_req_ids
@@ -417,7 +417,7 @@ class TestSubmitLoad:
             job_id=42,
             keys=[b"k1", b"k2"],
             block_ids=[5, 6],
-            kv_params=_prefill_kv_params(kv_request_id="req-42"),
+            kv_params=_remote_prefiller_kv_params(kv_request_id="req-42"),
         )
         mgr.submit_load(job)
 
@@ -453,7 +453,7 @@ class TestOnRequestFinished:
 
     def test_prunes_failed_req_ids(self):
         mgr = self._make_with_failed()
-        ctx = _req_context(kv_params=_prefill_kv_params(kv_request_id="req-1"))
+        ctx = _req_context(kv_params=_remote_prefiller_kv_params(kv_request_id="req-1"))
         mgr.on_request_finished(ctx)
         assert "req-1" not in mgr._failed_req_ids
 
@@ -470,26 +470,26 @@ class TestOnRequestFinished:
         assert "req-1" in mgr._failed_req_ids
 
     def test_decoder_side_calls_session_finish_request(self):
-        """Decoder-side finish (``prefill`` set) still routes via peer_id
+        """Decoder-side finish (``remote_prefiller`` set) still routes via peer_id
         because the consumer addresses the producer it loaded from. The
         session's finish_request cancels the client-role load."""
         mgr = _make_manager()
         peer_id = "10.0.0.1:8000"
         session = _FakeSession(peer_id=peer_id)
         mgr._sessions[peer_id] = session
-        ctx = _req_context(kv_params=_prefill_kv_params(kv_request_id="req-1"))
+        ctx = _req_context(kv_params=_remote_prefiller_kv_params(kv_request_id="req-1"))
         mgr.on_request_finished(ctx)
         assert session.finishes == ["req-1"]
 
     def test_p2p_consumer_side_calls_session_finish_request(self):
-        """Symmetric-P2P consumer finish (``p2p`` set) routes via peer_id
+        """Symmetric-P2P consumer finish (``remote_kv_peer`` set) routes via peer_id
         so the session drops any pending lookups (cancel_lookups) and
         cancels any inbound load."""
         mgr = _make_manager()
         peer_id = "10.0.0.1:8000"
         session = _FakeSession(peer_id=peer_id)
         mgr._sessions[peer_id] = session
-        ctx = _req_context(kv_params=_p2p_kv_params(kv_request_id="req-1"))
+        ctx = _req_context(kv_params=_remote_kv_peer_kv_params(kv_request_id="req-1"))
         mgr.on_request_finished(ctx)
         assert session.finishes == ["req-1"]
 
@@ -499,7 +499,7 @@ class TestOnRequestFinished:
         mgr = _make_manager()
         bound = _FakeSession(peer_id="some-peer:1", connected=True)
         mgr._kv_to_session["req-1"] = bound  # type: ignore[assignment]
-        ctx = _req_context(kv_params=_decode_kv_params(kv_request_id="req-1"))
+        ctx = _req_context(kv_params=_remote_decoder_kv_params(kv_request_id="req-1"))
         mgr.on_request_finished(ctx)
         assert bound.finishes == ["req-1"]
         assert "req-1" not in mgr._kv_to_session
@@ -517,7 +517,7 @@ class TestOnRequestFinished:
             _UnboundStoreBatch(job_id=10, keys=[b"k"], block_ids=[0]),
             _UnboundStoreBatch(job_id=11, keys=[b"k2"], block_ids=[1]),
         ]
-        ctx = _req_context(kv_params=_decode_kv_params(kv_request_id="req-1"))
+        ctx = _req_context(kv_params=_remote_decoder_kv_params(kv_request_id="req-1"))
         mgr.on_request_finished(ctx)
         assert "req-1" in mgr._unbound_stores
         assert [b.job_id for b in mgr._unbound_stores["req-1"]] == [10, 11]
@@ -730,7 +730,7 @@ class TestGetFinished:
         submitted_at stamp so the unbound-store sweep can age it out."""
         mgr = _make_manager()
         job = _job_metadata(
-            job_id=1, kv_params=_decode_kv_params(kv_request_id="req-1")
+            job_id=1, kv_params=_remote_decoder_kv_params(kv_request_id="req-1")
         )
         before = time.monotonic()
         mgr.submit_store(job)
@@ -1074,21 +1074,21 @@ class TestBidirectionalManager:
         b_loads_kv = "req-BtoA-load"  # B loads, A serves
 
         a_decoder_params = {
-            "prefill": {
+            "remote_prefiller": {
                 "kv_request_id": a_loads_kv,
                 "remote_host": "B",
                 "remote_port": 2,
             },
         }
         b_decoder_params = {
-            "prefill": {
+            "remote_prefiller": {
                 "kv_request_id": b_loads_kv,
                 "remote_host": "A",
                 "remote_port": 1,
             },
         }
-        a_prefiller_params = {"decode": {"kv_request_id": b_loads_kv}}
-        b_prefiller_params = {"decode": {"kv_request_id": a_loads_kv}}
+        a_prefiller_params = {"remote_decoder": {"kv_request_id": b_loads_kv}}
+        b_prefiller_params = {"remote_decoder": {"kv_request_id": a_loads_kv}}
 
         # 1. Both sides open client-role sessions toward the peer.
         mgr_a.on_new_request(_req_context(a_decoder_params))
@@ -1502,13 +1502,13 @@ class TestConnectionDeathMidTransfer:
         mgr_a, mgr_b = _build_paired_managers()
 
         a_decoder_params = {
-            "prefill": {
+            "remote_prefiller": {
                 "kv_request_id": "req-load",
                 "remote_host": "B",
                 "remote_port": 2,
             },
         }
-        a_prefiller_params = {"decode": {"kv_request_id": "req-store"}}
+        a_prefiller_params = {"remote_decoder": {"kv_request_id": "req-store"}}
 
         # Open the outbound session A->B and submit one load + one store.
         mgr_a.on_new_request(_req_context(a_decoder_params))
