@@ -205,6 +205,7 @@ class KVCacheManager:
         return stats
 
     def prefix_cache_lookup_enabled(self, request: Request) -> bool:
+        """Whether a local prefix cache lookup may be run for this request."""
         return self.enable_caching and not request.skip_reading_prefix_cache
 
     def record_prefix_cache_stats(self, request: Request, num_hits: int) -> None:
