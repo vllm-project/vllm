@@ -14,6 +14,7 @@ import pytest
 import torch
 
 from vllm.model_executor.layers.fused_moe import RoutedExperts
+from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import Mxfp4MoeBackend
 from vllm.model_executor.layers.linear import LinearBase, UnquantizedLinearMethod
 from vllm.model_executor.layers.quantization.auto_gptq import AutoGPTQConfig
 from vllm.model_executor.layers.quantization.inc import INCConfig
@@ -589,6 +590,7 @@ def test_inc_mxfp4_moe_method_registers_weights_and_builds_kernel(
     captured = {}
     expected_quant_config = object()
     expected_kernel = object()
+    expected_experts_cls = object()
 
     monkeypatch.setattr(
         "vllm.model_executor.layers.quantization.inc.schemes.inc_mxfp4_moe."
@@ -596,6 +598,11 @@ def test_inc_mxfp4_moe_method_registers_weights_and_builds_kernel(
         lambda: False,
     )
     monkeypatch.setattr(current_platform, "is_xpu", lambda: True)
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.quantization.inc.schemes.inc_mxfp4_moe."
+        "select_mxfp4_moe_backend",
+        lambda moe: (Mxfp4MoeBackend.XPU, expected_experts_cls),
+    )
     monkeypatch.setattr(
         "vllm.model_executor.layers.quantization.inc.schemes.inc_mxfp4_moe."
         "make_mxfp4_moe_quant_config",
@@ -610,7 +617,6 @@ def test_inc_mxfp4_moe_method_registers_weights_and_builds_kernel(
 
     from vllm.model_executor.layers.quantization.inc.schemes.inc_mxfp4_moe import (
         INCMxfp4MoEMethod,
-        XPUExpertsMxFp4,
     )
 
     method = INCMxfp4MoEMethod(moe=cast(Any, "moe-config"))
@@ -625,7 +631,7 @@ def test_inc_mxfp4_moe_method_registers_weights_and_builds_kernel(
         params_dtype=torch.bfloat16,
     )
 
-    assert method.experts_cls is XPUExpertsMxFp4
+    assert method.experts_cls is expected_experts_cls
     assert layer.w13_weight_packed.shape == (2, 64, 32)
     assert layer.w2_weight_packed.shape == (2, 64, 16)
     assert layer.w13_weight_scale.shape == (2, 64, 2)
@@ -643,7 +649,7 @@ def test_inc_mxfp4_moe_method_registers_weights_and_builds_kernel(
     assert captured["quant_config_kwargs"]["w2_scale"] is layer.w2_weight_scale
     assert captured["kernel_kwargs"]["moe_quant_config"] is expected_quant_config
     assert captured["kernel_kwargs"]["moe_config"] == "moe-config"
-    assert captured["kernel_kwargs"]["experts_cls"] is XPUExpertsMxFp4
+    assert captured["kernel_kwargs"]["experts_cls"] is expected_experts_cls
     assert captured["kernel_kwargs"]["routing_tables"] == "routing-tables"
     assert method.moe_kernel is expected_kernel
 
