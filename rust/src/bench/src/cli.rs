@@ -75,7 +75,7 @@ pub enum DatasetName {
     ShareGpt,
     #[value(name = "sonnet")]
     Sonnet,
-    #[value(name = "speed-bench")]
+    #[value(name = "speed-bench", alias = "speed_bench")]
     SpeedBench,
     #[value(name = "hf")]
     Hf,
