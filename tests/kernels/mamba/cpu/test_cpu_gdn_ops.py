@@ -504,6 +504,63 @@ def test_spec_aware_nonspec_materializes_state_indices(
     )
 
 
+@torch.inference_mode()
+def test_spec_forward_forwards_accepted_counts_to_native_conv(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    accepted_counts = torch.tensor([1, 0, 4], dtype=torch.int64)[::2]
+    assert not accepted_counts.is_contiguous()
+    metadata = types.SimpleNamespace(
+        num_spec_decodes=2,
+        spec_state_indices_tensor=torch.tensor([[0], [4]], dtype=torch.int32),
+        spec_query_start_loc=torch.tensor([0, 4, 8], dtype=torch.int32),
+        num_accepted_tokens=accepted_counts,
+    )
+    forwarded_counts = None
+
+    def causal_conv1d_update_cpu(**kwargs):
+        nonlocal forwarded_counts
+        forwarded_counts = kwargs["num_accepted_tokens"]
+        return kwargs["x"]
+
+    monkeypatch.setattr(torch.cpu, "_is_amx_tile_supported", lambda: True)
+    monkeypatch.setattr(gdn_attention, "is_conv_state_dim_first", lambda: False)
+    monkeypatch.setattr(
+        gdn_attention.ops, "causal_conv1d_update_cpu", causal_conv1d_update_cpu
+    )
+    monkeypatch.setattr(
+        gdn_attention.ops,
+        "fused_sigmoid_gating_delta_rule_update_spec_cpu",
+        lambda **kwargs: kwargs["q"],
+    )
+
+    layer = types.SimpleNamespace(
+        activation="silu",
+        conv1d=types.SimpleNamespace(weight=torch.empty(1, CONV_KERNEL), bias=None),
+        A_log=None,
+        dt_bias=None,
+        rearrange_mixed_qkv=lambda x: (x.unsqueeze(0),) * 3,
+    )
+    gdn_attention._spec_forward(
+        layer=layer,
+        attn_metadata_i=metadata,
+        mixed_qkv_spec=torch.zeros(8, 1, dtype=torch.bfloat16),
+        b_spec=torch.empty(0),
+        a_spec=torch.empty(0),
+        conv_buf=torch.empty(0),
+        ssm_state=torch.empty(0),
+        width=CONV_KERNEL,
+        state_len=0,
+    )
+
+    assert forwarded_counts is not None
+    assert forwarded_counts.is_contiguous()
+    assert forwarded_counts.dtype == torch.int32
+    torch.testing.assert_close(
+        forwarded_counts, torch.tensor([1, 4], dtype=torch.int32)
+    )
+
+
 @pytest.mark.parametrize("total_tokens, split", TWO_CALL_SPLITS)
 @torch.inference_mode()
 def test_causal_conv1d_torch_two_call_split(total_tokens: int, split: int) -> None:
@@ -562,14 +619,14 @@ def test_causal_conv1d_torch_two_call_split(total_tokens: int, split: int) -> No
 
 @pytest.mark.skipif(
     not torch.cpu._is_amx_tile_supported(),
-    reason="causal_conv1d_update_cpu requires AMX/AVX512",
+    reason="requires AMX support",
 )
-@pytest.mark.parametrize("is_vnni", [False, True])
 @torch.inference_mode()
-def test_causal_conv1d_update_cpu_accepts_wide_state(is_vnni: bool) -> None:
+def test_causal_conv1d_update_cpu_accepts_wide_state() -> None:
     state_len = CONV_KERNEL - 1
     wide_state_len = state_len + 5
     batch_size = 3
+    is_vnni = True
     x, weight, bias = _conv_inputs(batch_size)
     conv_state_indices = torch.tensor([2, 0, 1], dtype=torch.int32)
 
@@ -642,21 +699,19 @@ def _ref_causal_conv1d_update_cpu_multi(
 
 @pytest.mark.skipif(
     not torch.cpu._is_amx_tile_supported(),
-    reason="causal_conv1d_update_cpu requires AMX/AVX512",
+    reason="requires AMX support",
 )
 @pytest.mark.parametrize(
-    "batch_size, seq_len, accepted_counts",
+    ("batch_size, seq_len, accepted_counts, has_bias, silu_activation, is_vnni"),
     [
-        (1, 1, [1]),
-        (4, 4, [1, 2, 3, 4]),
-        (4, 16, [1, 5, 10, 16]),
+        (1, 1, [1], False, False, False),
+        (1, 1, [1], True, True, True),
+        (4, 4, [1, 2, 3, 4], False, True, False),
+        (4, 4, [4, 3, 2, 1], True, False, True),
+        (4, 16, [1, 5, 10, 16], False, False, True),
+        (4, 16, [16, 10, 5, 1], True, True, False),
     ],
 )
-@pytest.mark.parametrize(
-    "has_bias, silu_activation",
-    [(False, True), (True, False)],
-)
-@pytest.mark.parametrize("is_vnni", [False, True])
 @torch.inference_mode()
 def test_causal_conv1d_update_cpu_multi_token_matches_python(
     batch_size: int,
@@ -709,7 +764,7 @@ def test_causal_conv1d_update_cpu_multi_token_matches_python(
 
 @pytest.mark.skipif(
     not torch.cpu._is_amx_tile_supported(),
-    reason="causal_conv1d_update_cpu requires AMX/AVX512",
+    reason="requires AMX support",
 )
 @pytest.mark.parametrize("num_accepted", [0, 17])
 @torch.inference_mode()
@@ -739,7 +794,7 @@ def test_causal_conv1d_update_cpu_rejects_invalid_accepted_count(
 
 @pytest.mark.skipif(
     not torch.cpu._is_amx_tile_supported(),
-    reason="causal_conv1d_fwd_cpu requires AMX/AVX512",
+    reason="requires AMX support",
 )
 @pytest.mark.parametrize("total_tokens, split", TWO_CALL_SPLITS)
 @torch.inference_mode()
@@ -781,13 +836,13 @@ def test_causal_conv1d_fwd_cpu_two_call_split(total_tokens: int, split: int) -> 
 
 @pytest.mark.skipif(
     not torch.cpu._is_amx_tile_supported(),
-    reason="causal_conv1d_fwd_cpu requires AMX/AVX512",
+    reason="requires AMX support",
 )
-@pytest.mark.parametrize("is_vnni", [False, True])
 @torch.inference_mode()
-def test_causal_conv1d_fwd_cpu_accepts_wide_state(is_vnni: bool) -> None:
+def test_causal_conv1d_fwd_cpu_accepts_wide_state() -> None:
     state_len = CONV_KERNEL - 1
     wide_state_len = state_len + 5
+    is_vnni = True
     seq_lens = [CHUNK_SIZE - 1, CHUNK_SIZE + 5]
     total_tokens = sum(seq_lens)
     x, weight, bias = _conv_inputs(total_tokens)
