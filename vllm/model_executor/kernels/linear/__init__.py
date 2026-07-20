@@ -478,10 +478,8 @@ _POSSIBLE_NVFP4_KERNELS: dict[PlatformEnum, list[type[NvFp4LinearKernel]]] = {
     PlatformEnum.CUDA: [
         FlashInferCuteDslNvFp4LinearKernel,
         FlashInferCutlassNvFp4LinearKernel,
-        # Listed after the CUTLASS kernel so auto-selection prefers CUTLASS:
-        # the b12x GEMM needs FlashInfer autotuning (opt-in) to outperform
-        # it; heuristic fallback tactics are slower at prefill shapes.
-        # Select explicitly with --linear-backend flashinfer_b12x.
+        # After CUTLASS for auto-selection; explicit --linear-backend
+        # flashinfer_b12x force-enables the autotuning it needs to win.
         FlashInferB12xNvFp4LinearKernel,
         CutlassNvFp4LinearKernel,
         MarlinNvFp4LinearKernel,
