@@ -14,6 +14,9 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceDelegate,
 )
 from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
+from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+    per_token_group_quant_fp8,
+)
 from vllm.v1.worker.ubatching import (
     dbo_current_ubatch_id,
     dbo_enabled,
@@ -197,6 +200,16 @@ class NcclEPStandardPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         expert_x = recv_x
         expert_x_scale = recv_x_scale
 
+        # NCCL EP HT dispatch transports one FP8 scale per token. DeepGEMM's
+        # block-FP8 interface expects one activation scale per 128-wide block,
+        # so repeat the transport scale across the hidden-dimension blocks.
+        if expert_x_scale is not None and quant_config.is_block_quantized:
+            assert quant_config.block_shape is not None
+            block_size = quant_config.block_shape[1]
+            num_scale_groups = (expert_x.shape[1] + block_size - 1) // block_size
+            assert expert_x_scale.shape == (expert_x.shape[0], 1)
+            expert_x_scale = expert_x_scale.expand(-1, num_scale_groups).contiguous()
+
         if recv_topk_idx is not None:
             recv_topk_idx = recv_topk_idx + self.rank_expert_offset
             invalid = recv_topk_idx < 0
@@ -262,16 +275,17 @@ class NcclEPStandardPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             and quant_config.is_block_quantized
             and not defer_input_quant
         ):
-            a1q, a1q_scale = moe_kernel_quantize_input(
+            # NCCL EP HT dispatch accepts FP8 payloads with one float scale per
+            # token. Quantize the entire hidden row as one group for transport;
+            # _receiver expands the scale to DeepGEMM's block-FP8 layout.
+            a1q, a1q_scale = per_token_group_quant_fp8(
                 a1,
-                quant_config.a1_scale,
-                quant_dtype=quant_config.quant_dtype,
-                per_act_token_quant=quant_config.per_act_token_quant,
-                block_shape=quant_config.block_shape,
+                group_size=a1.shape[-1],
+                dtype=torch.float8_e4m3fn,
             )
             assert a1q.dtype == torch.float8_e4m3fn
-            assert a1q_scale is not None
             a1q_scale = a1q_scale.view(a1q.shape[0], -1)
+            assert a1q_scale.shape == (a1q.shape[0], 1)
             a1_post_scale = None
         else:
             a1q = a1

@@ -118,14 +118,18 @@ def test_standard_passes_quantized_tokens_and_scales_to_dispatch(
         return lambda: None
 
     monkeypatch.setattr(prepare_finalize, "_do_dispatch", fake_dispatch)
-    monkeypatch.setattr(
-        nccl_ep_module,
-        "moe_kernel_quantize_input",
-        lambda *args, **kwargs: (quantized, scales),
-    )
+    quantize_args = {}
 
+    def fake_quantize(x, group_size, **kwargs):
+        quantize_args["x"] = x
+        quantize_args["group_size"] = group_size
+        return quantized, scales
+
+    monkeypatch.setattr(nccl_ep_module, "per_token_group_quant_fp8", fake_quantize)
+
+    a1 = torch.empty((4, 128), dtype=torch.bfloat16)
     prepare_finalize.prepare_async(
-        a1=torch.empty((4, 128), dtype=torch.bfloat16),
+        a1=a1,
         topk_weights=torch.empty((4, 2), dtype=torch.float32),
         topk_ids=torch.zeros((4, 2), dtype=torch.int64),
         num_experts=4,
@@ -137,6 +141,7 @@ def test_standard_passes_quantized_tokens_and_scales_to_dispatch(
     assert dispatched["tokens"] is quantized
     assert dispatched["token_scales"].data_ptr() == scales.data_ptr()
     assert dispatched["token_scales"].shape == (4, 1)
+    assert quantize_args == {"x": a1, "group_size": 128}
 
 
 def test_standard_dispatch_carries_fp8_scales_end_to_end(
@@ -181,3 +186,26 @@ def test_standard_dispatch_carries_fp8_scales_end_to_end(
     receiver()
     assert received["scales"] is not None
     assert received["scales"].shape == (8, 1)
+
+
+def test_standard_expands_transport_scales_for_block_quantization(nccl_ep_module):
+    prepare_finalize = _standard_prepare_finalize(nccl_ep_module)
+    recv_x = torch.empty((8, 6144), dtype=torch.float8_e4m3fn)
+    transport_scales = torch.ones((8, 1), dtype=torch.float32)
+    recv_topk_idx = torch.full((8, 2), -1, dtype=torch.int64)
+
+    _, expert_scales, _, _, _ = prepare_finalize._receiver(
+        recv_x=recv_x,
+        recv_x_scale=transport_scales,
+        recv_topk_idx=recv_topk_idx,
+        recv_topk_weights=torch.empty((8, 2), dtype=torch.float32),
+        num_experts=4,
+        a1_scale=None,
+        quant_config=_block_quant_config(),
+        defer_input_quant=False,
+    )
+
+    assert expert_scales is not None
+    assert expert_scales.shape == (8, 48)
+    assert expert_scales.is_contiguous()
+    torch.testing.assert_close(expert_scales[:, :1], transport_scales)
