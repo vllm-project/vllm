@@ -76,7 +76,9 @@ def test_gdn_chunk_cutedsl_correctness(num_seqs: int, state_dtype: torch.dtype):
     )
     # Match upstream FLA GatedDeltaNet synthetic initialization:
     # https://github.com/fla-org/flash-linear-attention/blob/main/fla/layers/gated_deltanet.py
-    A = torch.empty(num_v_heads, device="cuda", dtype=torch.float32).uniform_(0, 16)
+    A = torch.empty(num_v_heads, device="cuda", dtype=torch.float32).uniform_(
+        0, 16, generator=rng
+    )
     A_log = torch.log(A)
     dt = torch.exp(
         torch.rand(num_v_heads, device="cuda", dtype=torch.float32, generator=rng)
