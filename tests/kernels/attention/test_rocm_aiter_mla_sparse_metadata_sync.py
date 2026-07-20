@@ -58,7 +58,7 @@ def _make_builder():
         max_num_batched_tokens + 1, dtype=torch.int32, device="cpu"
     )
     builder._num_attention_heads = 16
-    builder._num_compute_units = 8
+    builder._num_compute_units = current_platform.num_compute_units()
     builder._mla_work_meta_data = torch.empty(1, dtype=torch.int32, device="cpu")
     builder._mla_work_indptr = torch.empty(1, dtype=torch.int32, device="cpu")
     builder._mla_work_info_set = torch.empty(1, dtype=torch.int32, device="cpu")
