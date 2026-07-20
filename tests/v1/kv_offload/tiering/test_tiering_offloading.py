@@ -250,9 +250,9 @@ class TestTieringOffloadingManager:
             self.manager.on_new_request(req_context)
 
     def test_take_events_aggregates_tier_owned_events(self, manager_setup):
-        primary_event = OffloadingEvent(to_keys([1]), "CPU", removed=False)
-        secondary_event1 = OffloadingEvent(to_keys([2]), "tier-1", removed=False)
-        secondary_event2 = OffloadingEvent(to_keys([3]), "tier-2", removed=True)
+        primary_event = OffloadingEvent(to_keys([1]), Medium.CPU, removed=False)
+        secondary_event1 = OffloadingEvent(to_keys([2]), Medium.FS, removed=False)
+        secondary_event2 = OffloadingEvent(to_keys([3]), Medium.OBJ, removed=True)
 
         self.primary_tier.take_events = MagicMock(return_value=[primary_event])
         self.secondary_tier1.take_events = MagicMock(return_value=[secondary_event1])
@@ -988,11 +988,11 @@ class TestTieringOffloadingManager:
         self.manager.complete_store(blocks[:1], _CTX, success=True)
         self.secondary_tier1.blocks[blocks[1]] = True
 
-        # Filter allows only STORAGE; secondaries have medium=CPU
+        # Filter allows only FS; secondaries have medium=CPU
         ctx = ReqContext(
             req_id="r1",
-            kv_transfer_params={KV_LOAD_TIERS_KEY: [{"medium": Medium.STORAGE.value}]},
-            load_tier_filter=TierFilter(matchers=({"medium": Medium.STORAGE.value},)),
+            kv_transfer_params={KV_LOAD_TIERS_KEY: [{"medium": Medium.FS.value}]},
+            load_tier_filter=TierFilter(matchers=({"medium": Medium.FS.value},)),
         )
         assert self.manager.lookup(blocks[0], ctx) is LookupResult.HIT
         assert self.manager.lookup(blocks[1], ctx) is LookupResult.MISS

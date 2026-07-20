@@ -110,7 +110,7 @@ class SecondaryTierManager(ABC):
     async jobs; get_finished_jobs() polls for completion.
     """
 
-    filter_medium: ClassVar[Medium | None] = None
+    medium: ClassVar[Medium | None] = None
 
     def __init__(
         self,

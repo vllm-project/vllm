@@ -30,7 +30,6 @@ except ImportError:
 
 from typing_extensions import override
 
-from vllm.distributed.kv_events import MEDIUM_FS
 from vllm.logger import init_logger
 from vllm.v1.kv_offload.base import (
     Locality,
@@ -101,8 +100,7 @@ class FileSystemTierManager(SecondaryTierManager):
         content.
     """
 
-    medium: ClassVar[str] = MEDIUM_FS
-    filter_medium: ClassVar[Medium | None] = Medium.STORAGE
+    medium: ClassVar[Medium] = Medium.FS
 
     def __init__(
         self,
@@ -184,8 +182,8 @@ class FileSystemTierManager(SecondaryTierManager):
 
     @override
     def lookup(self, key: OffloadKey, req_context: ReqContext) -> LookupResult:
-        if self.filter_medium is not None and not req_context.load_tier_filter.allows(
-            self.filter_medium
+        if self.medium is not None and not req_context.load_tier_filter.allows(
+            self.medium
         ):
             return LookupResult.MISS
         result = self._lookup_manager.lookup(key, req_context)

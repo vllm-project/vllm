@@ -43,7 +43,7 @@ class ExampleSecondaryTierManager(SecondaryTierManager):
     - Completes transfers immediately (synchronous)
     """
 
-    filter_medium: ClassVar[Medium | None] = Medium.CPU
+    medium: ClassVar[Medium] = Medium.CPU
 
     def __init__(
         self,
@@ -86,8 +86,8 @@ class ExampleSecondaryTierManager(SecondaryTierManager):
         Returns:
             HIT if the block is present, MISS if not found.
         """
-        if self.filter_medium is not None and not req_context.load_tier_filter.allows(
-            self.filter_medium
+        if self.medium is not None and not req_context.load_tier_filter.allows(
+            self.medium
         ):
             return LookupResult.MISS
         return LookupResult.HIT if key in self.blocks else LookupResult.MISS

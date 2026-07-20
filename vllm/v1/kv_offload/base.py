@@ -48,8 +48,9 @@ def get_offload_group_idx(key: OffloadKey) -> int:
 class Medium(Enum):
     """Storage medium of an offloading tier."""
 
-    CPU = "cpu"
-    STORAGE = "storage"
+    CPU = "CPU"
+    FS = "FS"
+    OBJ = "OBJ"
 
 
 @dataclass(frozen=True)
@@ -134,7 +135,7 @@ class Locality(Enum):
 @dataclass
 class OffloadingEvent:
     keys: list[OffloadKey]
-    medium: str
+    medium: Medium
     # True if blocks are removed, False if stored
     removed: bool
     locality: Locality | None = None
