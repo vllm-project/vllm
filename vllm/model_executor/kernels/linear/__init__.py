@@ -774,9 +774,7 @@ def choose_mp_linear_kernel(
     platform_kernels = _POSSIBLE_KERNELS.get(current_platform._enum, [])
 
     # Apply --linear-backend filtering when set.
-    platform_kernels = _resolve_backend_kernels(
-        platform_kernels, "mixed-precision"
-    )
+    platform_kernels = _resolve_backend_kernels(platform_kernels, "mixed-precision")
 
     failure_reasons = []
     for kernel in platform_kernels:
@@ -856,8 +854,6 @@ def init_mxfp4_linear_kernel(
     config = MxFp4LinearLayerConfig(
         activation_quant_key=activation_quant_key,
     )
-
-    linear_backend = _get_linear_backend()
 
     platform = current_platform._enum
     possible = list(_POSSIBLE_MXFP4_KERNELS.get(platform, []))
