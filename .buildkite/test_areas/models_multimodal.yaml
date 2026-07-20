@@ -20,7 +20,7 @@ steps:
 
 - label: "Multi-Modal Models (Standard) 2: qwen3 + gemma"
   key: multi-modal-models-standard-2-qwen3-gemma
-  timeout_in_minutes: 45
+  timeout_in_minutes: 50
   device: h200_18gb
   source_file_dependencies:
   - vllm/
@@ -38,7 +38,7 @@ steps:
 - label: "Multi-Modal Models (Standard) 3: llava + qwen2_vl"
   device: h200_35gb
   key: multi-modal-models-standard-3-llava-qwen2-vl
-  timeout_in_minutes: 45
+  timeout_in_minutes: 40
   source_file_dependencies:
   - vllm/
   - tests/models/multimodal
@@ -54,7 +54,7 @@ steps:
 - label: "Multi-Modal Models (Standard) 4: other + whisper"
   device: h200_35gb
   key: multi-modal-models-standard-4-other-whisper
-  timeout_in_minutes: 45
+  timeout_in_minutes: 50
   source_file_dependencies:
   - vllm/
   - tests/models/multimodal
@@ -69,22 +69,23 @@ steps:
       depends_on:
       - image-build-amd
 
-- label: Multi-Modal Processor (CPU)
+- label: Multi-Modal Processor (CPU) %N
   key: multi-modal-processor-cpu
   depends_on:
   - image-build-cpu
-  timeout_in_minutes: 60
+  timeout_in_minutes: 125
   source_file_dependencies:
   - vllm/
   - tests/models/multimodal
   - tests/models/registry.py
   device: cpu-medium
   commands:
-    - pytest -v -s models/multimodal/processing --ignore models/multimodal/processing/test_tensor_schema.py
+    - pytest -v -s models/multimodal/processing --ignore models/multimodal/processing/test_tensor_schema.py --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
+  parallelism: 4
 
 - label: Multi-Modal Processor # 44min
   key: multi-modal-processor
-  timeout_in_minutes: 60
+  timeout_in_minutes: 65
   device: h200_18gb
   source_file_dependencies:
   - vllm/
@@ -96,7 +97,7 @@ steps:
 - label: Multi-Modal Accuracy Eval (Small Models) # 50min
   device: h200_35gb
   key: multi-modal-accuracy-eval-small-models
-  timeout_in_minutes: 70
+  timeout_in_minutes: 30
   working_dir: "/vllm-workspace/.buildkite/lm-eval-harness"
   source_file_dependencies:
   - vllm/multimodal/
@@ -106,6 +107,7 @@ steps:
   - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-mm-small.txt --tp-size=1
   mirror:
     amd:
+      dind: false
       device: mi300_1
       depends_on:
       - image-build-amd
@@ -117,6 +119,7 @@ steps:
       - vllm/model_executor/model_loader/
 
 - label: Multi-Modal Models (Extended Generation 1)
+  device: h200_35gb
   key: multi-modal-models-extended-generation-1
   optional: true
   source_file_dependencies:
@@ -164,7 +167,7 @@ steps:
   mirror:
     amd:
       device: mi325_1
-      timeout_in_minutes: 60
+      timeout_in_minutes: 75
       depends_on:
       - image-build-amd
       source_file_dependencies:

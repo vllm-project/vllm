@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from enum import Enum
+
 import numpy as np
 import torch
 
@@ -10,9 +12,13 @@ from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.utils import CpuGpuBuffer
-from vllm.v1.worker.cp_utils import get_total_cp_world_size
 
 logger = init_logger(__name__)
+
+
+class SlotMappingMode(Enum):
+    TOKEN_TO_KV_SLOT = "token_to_kv_slot"
+    NONE = "none"
 
 
 class BlockTable:
@@ -26,6 +32,7 @@ class BlockTable:
         device: torch.device,
         kernel_block_size: int,
         cp_kv_cache_interleave_size: int,
+        slot_mapping_mode: SlotMappingMode = SlotMappingMode.TOKEN_TO_KV_SLOT,
     ):
         """
         Args:
@@ -38,11 +45,15 @@ class BlockTable:
             kernel_block_size: The block_size of underlying attention kernel.
                 Will be the same as `block_size` if `block_size` is supported
                 by the attention kernel.
+            slot_mapping_mode: How this cache group maps scheduled tokens to
+                cache slots. Mamba-like state caches do not use token slot
+                mappings and should use SlotMappingMode.NONE.
         """
         self.max_num_reqs = max_num_reqs
         self.max_num_batched_tokens = max_num_batched_tokens
         self.pin_memory = pin_memory
         self.device = device
+        self.kv_cache_block_size = block_size
 
         if kernel_block_size == block_size:
             # Standard case: allocation and computation use same block size
@@ -98,6 +109,7 @@ class BlockTable:
             self.dcp_world_size = 1
             self.dcp_rank = 0
         self.cp_kv_cache_interleave_size = cp_kv_cache_interleave_size
+        self.slot_mapping_mode = slot_mapping_mode
 
     def append_row(
         self,
@@ -145,8 +157,12 @@ class BlockTable:
         positions: torch.Tensor,
     ) -> None:
         num_tokens = positions.shape[0]
-        total_cp_world_size = self.pcp_world_size * self.dcp_world_size
-        total_cp_rank = self.pcp_rank * self.dcp_world_size + self.dcp_rank
+        if self.slot_mapping_mode == SlotMappingMode.NONE:
+            # Mamba/GDN groups consume the block table as recurrent state
+            # indices and do not use per-token slot mappings.
+            return
+        assert self.slot_mapping_mode == SlotMappingMode.TOKEN_TO_KV_SLOT
+
         _compute_slot_mapping_kernel[(num_reqs + 1,)](
             num_tokens,
             self.max_num_batched_tokens,
@@ -156,8 +172,10 @@ class BlockTable:
             self.block_table.gpu.stride(0),
             self.block_size,
             self.slot_mapping.gpu,
-            TOTAL_CP_WORLD_SIZE=total_cp_world_size,
-            TOTAL_CP_RANK=total_cp_rank,
+            KV_CACHE_BLOCK_SIZE=self.kv_cache_block_size,
+            BLOCKS_PER_KV_BLOCK=self.blocks_per_kv_block,
+            TOTAL_CP_WORLD_SIZE=self.dcp_world_size,
+            TOTAL_CP_RANK=self.dcp_rank,
             CP_KV_CACHE_INTERLEAVE_SIZE=self.cp_kv_cache_interleave_size,
             PAD_ID=PAD_SLOT_ID,
             BLOCK_SIZE=1024,
@@ -226,30 +244,27 @@ class MultiGroupBlockTable:
     def __init__(
         self,
         max_num_reqs: int,
-        max_model_len: int,
         max_num_batched_tokens: int,
         pin_memory: bool,
         device: torch.device,
         block_sizes: list[int],
         kernel_block_sizes: list[int],
-        max_num_blocks: list[int] | None = None,
+        max_num_blocks: list[int],
         cp_kv_cache_interleave_size: int = 1,
+        slot_mapping_modes: list[SlotMappingMode] | None = None,
     ) -> None:
         if len(kernel_block_sizes) != len(block_sizes):
             raise ValueError(
                 f"kernel_block_sizes length ({len(kernel_block_sizes)}) "
                 f"must match block_sizes length ({len(block_sizes)})"
             )
-        if max_num_blocks is None:
-            # Note(hc): each dcp rank only store
-            # (max_model_len//dcp_world_size) tokens in kvcache,
-            # so the block_size which used for calc max_num_blocks_per_req
-            # must be multiplied by dcp_world_size.
-            total_cp_world_size = get_total_cp_world_size()
-            max_num_blocks = [
-                cdiv(max_model_len, block_size * total_cp_world_size)
-                for block_size in block_sizes
-            ]
+        if slot_mapping_modes is None:
+            slot_mapping_modes = [SlotMappingMode.TOKEN_TO_KV_SLOT] * len(block_sizes)
+        if len(slot_mapping_modes) != len(block_sizes):
+            raise ValueError(
+                f"slot_mapping_modes length ({len(slot_mapping_modes)}) "
+                f"must match block_sizes length ({len(block_sizes)})"
+            )
 
         if len(max_num_blocks) != len(block_sizes):
             raise ValueError(
@@ -274,9 +289,15 @@ class MultiGroupBlockTable:
                 device,
                 kernel_block_size,
                 cp_kv_cache_interleave_size,
+                slot_mapping_mode=slot_mapping_mode,
             )
-            for block_size, kernel_block_size, max_num_blocks_per_req in zip(
-                block_sizes, kernel_block_sizes, max_num_blocks
+            for (
+                block_size,
+                kernel_block_size,
+                max_num_blocks_per_req,
+                slot_mapping_mode,
+            ) in zip(
+                block_sizes, kernel_block_sizes, max_num_blocks, slot_mapping_modes
             )
         ]
 
@@ -332,6 +353,8 @@ def _compute_slot_mapping_kernel(
     block_table_stride,  # max_num_blocks_per_req
     block_size,
     slot_mapping_ptr,  # [max_num_tokens], int64
+    KV_CACHE_BLOCK_SIZE: tl.constexpr,
+    BLOCKS_PER_KV_BLOCK: tl.constexpr,
     TOTAL_CP_WORLD_SIZE: tl.constexpr,
     TOTAL_CP_RANK: tl.constexpr,
     CP_KV_CACHE_INTERLEAVE_SIZE: tl.constexpr,
@@ -354,18 +377,14 @@ def _compute_slot_mapping_kernel(
     start_idx = tl.load(query_start_loc_ptr + req_idx).to(tl.int64)
     end_idx = tl.load(query_start_loc_ptr + req_idx + 1).to(tl.int64)
 
-    virtual_block_size = block_size * TOTAL_CP_WORLD_SIZE
+    virtual_block_size = KV_CACHE_BLOCK_SIZE * TOTAL_CP_WORLD_SIZE
     row_offset = req_idx * block_table_stride
     for i in range(start_idx, end_idx, BLOCK_SIZE):
         offsets = i + tl.arange(0, BLOCK_SIZE)
         mask = offsets < end_idx
         pos = tl.load(positions_ptr + offsets, mask=mask, other=0)
-        block_indices = pos // virtual_block_size
-        block_numbers = tl.load(block_table_ptr + row_offset + block_indices).to(
-            tl.int64
-        )
-
-        virtual_block_offsets = pos - block_indices * virtual_block_size
+        virtual_block_indices = pos // virtual_block_size
+        virtual_block_offsets = pos - virtual_block_indices * virtual_block_size
         is_local = (
             virtual_block_offsets // CP_KV_CACHE_INTERLEAVE_SIZE
         ) % TOTAL_CP_WORLD_SIZE == TOTAL_CP_RANK
@@ -375,6 +394,16 @@ def _compute_slot_mapping_kernel(
             virtual_block_offsets % CP_KV_CACHE_INTERLEAVE_SIZE
         )
 
-        slot_ids = block_numbers * block_size + local_block_offsets
+        block_indices = (
+            virtual_block_indices * BLOCKS_PER_KV_BLOCK
+            + local_block_offsets // block_size
+        )
+        block_numbers = tl.load(
+            block_table_ptr + row_offset + block_indices,
+            mask=mask & is_local,
+            other=0,
+        ).to(tl.int64)
+        slot_offsets = local_block_offsets % block_size
+        slot_ids = block_numbers * block_size + slot_offsets
         slot_ids = tl.where(is_local, slot_ids, PAD_ID)
         tl.store(slot_mapping_ptr + offsets, slot_ids, mask=mask)
