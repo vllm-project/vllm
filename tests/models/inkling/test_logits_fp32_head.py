@@ -12,6 +12,7 @@ logits drive the rejection-sampling acceptance distribution.
 
 import types
 
+import pytest
 import torch
 
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -101,3 +102,22 @@ def test_mtp_draft_compute_logits_default_head_stays_bf16(default_vllm_config):
     logits = mtp.compute_logits(hidden)
 
     assert logits.dtype == torch.bfloat16
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="fp32 fold is CUDA-only")
+def test_target_fp32_fold_matches_unfused_projection(default_vllm_config):
+    # On CUDA the fp32 head folds muP into ``addmm(out_dtype=fp32)``; it must be
+    # bit-for-bit identical to the dtype-aware projection + elementwise multiply.
+    lp = InklingLogitsProcessor(VOCAB, logits_mup_width_multiplier=MUP)
+    lp.head_dtype = torch.float32
+    lp._gather_logits = lambda logits: logits
+
+    hidden, weight = _inputs()
+    hidden, weight = hidden.cuda(), weight.cuda()
+    head = _FakeLmHead(weight)
+
+    folded = lp(head, hidden)
+    unfused = lp._get_logits(hidden, head, None) * (1.0 / MUP)
+
+    assert folded.dtype == torch.float32
+    torch.testing.assert_close(folded, unfused, atol=0.0, rtol=0.0)
