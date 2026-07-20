@@ -682,6 +682,39 @@ class TestLookupFlow:
         assert len(fresh) == 1
         assert fresh[0][LookupMsg.BLOCK_HASHES] == [b"hA"]
 
+    def test_flush_uses_work_list_not_full_scan(self):
+        """flush drains a work-list rather than scanning every live request.
+
+        A request with no newly-registered hashes is not revisited: after a
+        flush the work-list is empty, an idle re-flush sends nothing, and a
+        subsequent register re-arms exactly the one affected id — even while
+        an unrelated request stays live in ``_requests``.
+        """
+        session, conn, _ = _make_session()
+        _activate(session, conn)
+        client = session._client
+
+        # Two requests register hashes; both are queued for flush.
+        session.register_lookup("req-A", b"hA")
+        session.register_lookup("req-B", b"hB")
+        assert client._flush_pending == {"req-A", "req-B"}
+
+        # Flush drains the work-list even though both requests stay live.
+        session.flush_pending_lookups()
+        assert client._flush_pending == set()
+        assert set(client._requests) == {"req-A", "req-B"}
+
+        # An idle re-flush visits nothing and sends no LookupMsg.
+        sent_before = len(conn._sent)
+        session.flush_pending_lookups()
+        assert [
+            m for m in conn._sent[sent_before:] if m[TYPE_KEY] == LookupMsg.TYPE
+        ] == []
+
+        # A new register re-arms only that id.
+        session.register_lookup("req-A", b"hA2")
+        assert client._flush_pending == {"req-A"}
+
     def test_separate_lookup_msg_per_kv_request_id(self):
         """Hashes for different kv_request_ids flush as separate LookupMsgs."""
         session, conn, _ = _make_session()

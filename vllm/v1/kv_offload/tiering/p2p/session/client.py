@@ -104,6 +104,12 @@ class ClientRole:
         # lazily by request_blocks / register_lookup and dropped by
         # _maybe_gc once every field is idle.
         self._requests: dict[str, _ClientRequestState] = {}
+        # kv_request_ids with unsent lookup hashes for the next flush to
+        # visit — the work-list that keeps flush_pending_lookups from
+        # scanning every request each scheduler step. Mirrors the server's
+        # _serve_pending. Populated by register_lookup, drained by
+        # flush_pending_lookups, and discarded on cancel_lookups/close.
+        self._flush_pending: set[str] = set()
         self._completed_loads: list[LoadResult] = []
 
     # ------------------------------------------------------------------
@@ -282,6 +288,7 @@ class ClientRole:
             return st.probes[block_hash]
         st.probes[block_hash] = None
         st.unsent.append(block_hash)
+        self._flush_pending.add(kv_request_id)
         logger.debug(
             "P2P LOOKUP client %s: REGISTER kv_request_id=%s hash=%s (unsent=%d)",
             self._peer_id,
@@ -306,9 +313,14 @@ class ClientRole:
         (see request_blocks / cancel_lookups). Send-gating is handled by
         the injected ``_send`` callback (queues until ConnectAckMsg if
         needed).
+
+        Only requests that registered new hashes since the last flush are
+        visited — the ``_flush_pending`` work-list avoids scanning every
+        live request each scheduler step.
         """
-        for req_id, st in self._requests.items():
-            if not st.unsent:
+        for req_id in self._flush_pending:
+            st = self._requests.get(req_id)
+            if st is None or not st.unsent:
                 continue
             # Record that the peer now holds lookup state for this id so
             # cancel_lookups knows a terminal empty FetchMsg may be owed;
@@ -328,6 +340,7 @@ class ClientRole:
                 }
             )
             st.unsent = []
+        self._flush_pending.clear()
 
     def on_lookup_resp(
         self,
@@ -391,6 +404,7 @@ class ClientRole:
         st.probes.clear()
         st.unsent.clear()
         st.has_pending_responses = False
+        self._flush_pending.discard(kv_request_id)
         self._maybe_gc(kv_request_id)
 
     def collect_results(self) -> list[LoadResult]:
@@ -468,5 +482,6 @@ class ClientRole:
             if any(hit is None for hit in st.probes.values())
         ]
         self._requests.clear()
+        self._flush_pending.clear()
         self._completed_loads.clear()
         return failed, failed_probes
