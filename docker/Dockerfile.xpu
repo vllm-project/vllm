@@ -141,7 +141,7 @@ CMD ["/bin/bash"]
 
 ######################### UCX + NIXL BUILD STAGE #########################
 # Build UCX and NIXL in a dedicated stage so compiler/autotools layers are
-# never included in the final runtime image (mirrors ROCm's build_nixl stage).
+# never included in the final runtime image (mirrors ROCm's build_rixl stage).
 FROM vllm-base AS ucx-nixl-build
 
 ARG UCX_VERSION=v1.21.0-rc2
