@@ -280,15 +280,20 @@ class MoRIIOConfig:
         kv_transfer_config = vllm_config.kv_transfer_config
         extra_config = kv_transfer_config.kv_connector_extra_config
         tp_rank = get_tensor_model_parallel_rank()
-        # For per-node port allocation we want the local dp_rank within
-        # the node, not the global one. data_parallel_rank is global, so
-        # fold it back to [0, data_parallel_size_local).
-        dp_size = vllm_config.parallel_config.data_parallel_size_local
-        assert dp_size and dp_size > 0, (
-            "data_parallel_size_local must be a positive integer for MoRIIO "
-            f"port allocation, got {dp_size!r}"
-        )
-        dp_rank = vllm_config.parallel_config.data_parallel_rank % dp_size
+        # For per-node port allocation we want the local dp_rank within the
+        # node, not the global one. data_parallel_rank is global, so fold it
+        # back to [0, dp_size_local).
+        #
+        # data_parallel_size_local == 0 is a documented sentinel meaning DP
+        # was specified externally (external launcher / external LB), in which
+        # case the local per-node size is unknown here. Fall back to the global
+        # data_parallel_size, which restores the pre-multi-pod single-world port
+        # math. data_parallel_size is Field(ge=1), so this is always >= 1 and
+        # can never divide by zero (do NOT use assert -- it is stripped under
+        # `python -O` and would crash valid external-DP deployments anyway).
+        pc = vllm_config.parallel_config
+        dp_size_local = pc.data_parallel_size_local or pc.data_parallel_size
+        dp_rank = pc.data_parallel_rank % dp_size_local
         base_notify_port = int(extra_config["notify_port"])
         tp_size = get_tensor_model_parallel_world_size()
         port_offset = get_port_offset(dp_rank, tp_rank)
@@ -319,7 +324,10 @@ class MoRIIOConfig:
             notify_port=base_notify_port + port_offset,
             tp_rank=tp_rank,
             dp_rank=dp_rank,
-            dp_size=dp_size,
+            # Advertise the GLOBAL DP world size to the routing proxy so it can
+            # address every rank across pods; dp_size_local above is only for
+            # per-pod port folding, not for routing.
+            dp_size=pc.data_parallel_size,
             tp_size=tp_size,
             read_mode=get_moriio_mode(kv_transfer_config) == MoRIIOMode.READ,
             qp_per_transfer=int(extra_config.get("qp_per_transfer", 1)),
@@ -463,6 +471,38 @@ class MoRIIOConnectorMetadata(KVConnectorMetadata):
         kv_transfer_params: dict[str, Any],
         write_mode=False,
     ):
+        """Ingest a peer's ``kv_transfer_params`` into a typed ``ReqMeta``.
+
+        This is the single place peer info enters the connector. The
+        ``kv_transfer_params`` contract (as produced by the llm-d sidecar /
+        vLLM router, or echoed by the prefill leg's ``request_finished``):
+
+        Required (always):
+          * ``transfer_id``        -- stable id shared by both legs.
+          * ``remote_engine_id``   -- peer engine id for the handshake table.
+          * ``remote_block_ids``   -- peer block ids (may be [] in WRITE mode,
+                                      where decode allocates its own blocks).
+
+        Peer address -- ONE of the following two must resolve:
+          * embedded in ``request_id`` (vLLM-router PD id form), OR
+          * explicit ``remote_host`` + ``remote_handshake_port`` +
+            ``remote_notify_port`` (llm-d sidecar / returnable path).
+          If neither resolves we raise -- there is no safe default host/port.
+
+        Optional (defaulted):
+          * ``tp_size``              (default 1) -- peer TP size.
+          * ``remote_dp_size``       (default 1) -- peer GLOBAL DP size.
+          * ``remote_dp_size_local`` (default = ``remote_dp_size``) -- per-pod
+                                      DP size for Wide-EP multi-pod port/host
+                                      folding; 0/absent means single-pod.
+          * ``remote_hosts``         (default [remote_host]) -- per-pod IP list
+                                      indexed by ``pod_idx = rank // dp_local``.
+
+        Routing keys consumed elsewhere (NOT here): ``remote_dp_rank`` /
+        ``remote_dp_rank_override`` gate the decode->prefill notify target in
+        MoRIIOConnectorScheduler; they are router-authoritative and never
+        self-derived (see that class's request routing contract).
+        """
         transfer_id = kv_transfer_params["transfer_id"]
 
         # Try request_id embedded address first, fallback to explicit params.
