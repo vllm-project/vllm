@@ -196,11 +196,11 @@ class FileSystemTierManager(SecondaryTierManager):
     def submit_store(self, job_metadata: JobMetadata) -> None:
         if self.events is not None:
             self._store_job_keys[job_metadata.job_id] = list(job_metadata.keys)
-            self._pool.enqueue_store(
-                job_metadata.job_id,
-                len(job_metadata.keys),
-                self._tasks_from_jobmetadata(job_metadata),
-            )
+        self._pool.enqueue_store(
+            job_metadata.job_id,
+            len(job_metadata.keys),
+            self._tasks_from_jobmetadata(job_metadata),
+        )
 
     @override
     def submit_load(self, job_metadata: JobMetadata) -> None:

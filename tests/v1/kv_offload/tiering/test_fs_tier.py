@@ -172,6 +172,7 @@ def fs_tier(tmp_path):
         root_dir=str(tmp_path),
         n_read_threads=4,
         n_write_threads=4,
+        rw_batch_size=1,
     )
     yield tier, tensor
     tier.shutdown()

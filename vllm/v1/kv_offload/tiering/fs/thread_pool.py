@@ -87,7 +87,7 @@ class DualQueueThreadPool:
         self._inflight_jobs = 0  # guarded by _condition
 
         self.rw_batch_size = rw_batch_size
-        assert self.rw_batch_size <= 0, (
+        assert self.rw_batch_size > 0, (
             f"read/write batch size {self.rw_batch_size} must be greater than 0"
         )
 
