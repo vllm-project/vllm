@@ -409,37 +409,6 @@ def _rocm_aiter_fused_topk_fake(
 
 # Cache whether aiter supports FP8 MLA parameters
 _AITER_MLA_SUPPORTS_FP8: bool | None = None
-_AITER_HAS_FUSED_QK_RMSNORM: bool | None = None
-
-
-def check_aiter_fused_qk_rmsnorm() -> bool:
-    """Check if aiter provides fused_qk_rmsnorm.
-
-    Supports both the new private name ``_fused_qk_rmsnorm``
-    (AITER >= PR #2958) and the old public name ``fused_qk_rmsnorm``
-    (AITER >= PR #2442).
-
-    TODO(rbrugaro-amd): remove the legacy fused_qk_rmsnorm path once
-    AITER stabilizes the API (https://github.com/ROCm/aiter/issues/3207).
-    """
-    global _AITER_HAS_FUSED_QK_RMSNORM
-    if _AITER_HAS_FUSED_QK_RMSNORM is None:
-        try:
-            from aiter.ops.fused_qk_norm_rope_cache_quant import (  # noqa: F401
-                _fused_qk_rmsnorm,
-            )
-
-            _AITER_HAS_FUSED_QK_RMSNORM = True
-        except (ImportError, ModuleNotFoundError, AttributeError):
-            try:
-                from aiter.ops.fused_qk_norm_rope_cache_quant import (  # noqa: F401
-                    fused_qk_rmsnorm,
-                )
-
-                _AITER_HAS_FUSED_QK_RMSNORM = True
-            except (ImportError, ModuleNotFoundError, AttributeError):
-                _AITER_HAS_FUSED_QK_RMSNORM = False
-    return _AITER_HAS_FUSED_QK_RMSNORM
 
 
 def _check_aiter_mla_fp8_support() -> bool:
