@@ -88,6 +88,21 @@ def test_custom_op():
         _ = CompilationConfig(custom_ops=["quant_fp8"])
 
 
+@pytest.mark.parametrize(
+    ("custom_ops", "match"),
+    [
+        (["all", "none"], "can contain only one base mode"),
+        (
+            ["none", "+rms_norm", "-rms_norm"],
+            "cannot both enable and disable.*rms_norm",
+        ),
+    ],
+)
+def test_reject_contradictory_custom_ops(custom_ops, match):
+    with pytest.raises(ValueError, match=match):
+        CompilationConfig(custom_ops=custom_ops)
+
+
 # forked needed to workaround https://github.com/vllm-project/vllm/issues/21073
 @pytest.mark.forked
 # NB: We don't test VLLM_DISABLE_COMPILE_CACHE=0 because that depends

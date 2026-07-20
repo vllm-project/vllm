@@ -905,9 +905,20 @@ class CompilationConfig:
         return handler(value)
 
     def __post_init__(self) -> None:
-        count_none = self.custom_ops.count("none")
-        count_all = self.custom_ops.count("all")
-        assert count_none + count_all <= 1, "Can only specify 'none' or 'all'"
+        base_modes = [op for op in self.custom_ops if op in {"all", "none"}]
+        if len(base_modes) > 1:
+            raise ValueError(
+                "custom_ops can contain only one base mode: 'all' or 'none'"
+            )
+
+        enabled_ops = {op[1:] for op in self.custom_ops if op.startswith("+")}
+        disabled_ops = {op[1:] for op in self.custom_ops if op.startswith("-")}
+        conflicting_ops = sorted(enabled_ops & disabled_ops)
+        if conflicting_ops:
+            raise ValueError(
+                "custom_ops cannot both enable and disable the same operation(s): "
+                f"{', '.join(conflicting_ops)}. Remove either the '+' or '-' directive"
+            )
 
         # TODO(zou3519/luka): There are 2 issues with auto-functionalization V2:
         # 1. A bug in PyTorch, fixed in 2.7:
