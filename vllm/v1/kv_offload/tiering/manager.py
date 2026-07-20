@@ -324,6 +324,10 @@ class TieringOffloadingManager(OffloadingManager):
         for tier in self.secondary_tiers:
             if tier is exclude_tier:
                 continue
+            if tier.medium is not None and not req_context.load_tier_filter.allows(
+                tier.medium
+            ):
+                continue
             result = tier.lookup(key, req_context)
             if result is LookupResult.HIT:
                 promoted = self._initiate_promotion(tier, key, req_context)
