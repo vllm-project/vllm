@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import fnmatch
+import re
 from typing import TYPE_CHECKING, Any, cast
 
 import torch
@@ -74,6 +75,38 @@ class QuarkConfig(QuantizationConfig):
         # that come from shifting to mxfp4. It is left here in case
         # we want to re-enable it in the future.
         self.dynamic_mxfp4_quant = False
+        # Layer indices of the MTP / nextn speculative-decoding draft blocks.
+        # Some fp4/mxfp4 checkpoints (e.g. amd/GLM-5.1-NVFP4) keep these draft
+        # MoE layers unquantized (bf16) but omit the corresponding `exclude`
+        # entries, which makes vLLM allocate quantized experts and crash while
+        # loading the bf16 weights. Tracking the indices lets us treat those
+        # FusedMoE modules as unquantized without editing the checkpoint.
+        self.mtp_layer_indices: set[int] = set()
+
+    def _record_mtp_layer_indices(self, hf_config: PretrainedConfig | None) -> None:
+        if hf_config is None:
+            return
+        num_hidden_layers = getattr(hf_config, "num_hidden_layers", None)
+        num_nextn = getattr(hf_config, "num_nextn_predict_layers", 0) or 0
+        if num_hidden_layers is None or num_nextn <= 0:
+            return
+        self.mtp_layer_indices = set(
+            range(num_hidden_layers, num_hidden_layers + num_nextn)
+        )
+
+    def _is_unquantized_mtp_layer(self, prefix: str) -> bool:
+        """Whether ``prefix`` addresses a module inside an MTP draft layer.
+
+        These draft layers are stored unquantized in the checkpoint even
+        though the config's global quant scheme is fp4, so their weights
+        must fall back to the unquantized methods.
+        """
+        if not self.mtp_layer_indices:
+            return False
+        match = re.search(r"\.layers\.(\d+)\.", prefix)
+        if match is None:
+            return False
+        return int(match.group(1)) in self.mtp_layer_indices
 
     def maybe_update_config(
         self,
@@ -85,6 +118,8 @@ class QuarkConfig(QuantizationConfig):
 
         if hf_config is None:
             return
+
+        self._record_mtp_layer_indices(hf_config)
 
         if (
             getattr(hf_config, "model_type", None)
@@ -146,6 +181,19 @@ class QuarkConfig(QuantizationConfig):
     def get_quant_method(
         self, layer: torch.nn.Module, prefix: str
     ) -> "QuantizeMethodBase | None":
+        # MTP / nextn speculative-decoding draft blocks are shipped fully
+        # unquantized (bf16) in some fp4 checkpoints (e.g. amd/GLM-5.1-NVFP4)
+        # even though the config's global scheme is fp4 and no matching
+        # `exclude` entries are provided. Force their MoE experts and linear
+        # projections to the unquantized methods so vLLM does not allocate fp4
+        # tensors and crash while loading the bf16 weights. Attention modules
+        # still go through the normal path (kv-cache quant is independent).
+        if self._is_unquantized_mtp_layer(prefix):
+            if isinstance(layer, RoutedExperts):
+                return UnquantizedFusedMoEMethod(layer.moe_config)
+            if isinstance(layer, LinearBase):
+                return UnquantizedLinearMethod()
+
         # Check if the layer is skipped for quantization.
         exclude_layers = cast(list[str], self.quant_config.get("exclude"))
         if should_ignore_layer(
