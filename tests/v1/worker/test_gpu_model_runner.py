@@ -831,7 +831,7 @@ def test_update_config(model_runner):
     model_runner.update_config({"load_config": {"load_format": "dummy"}})
     assert model_runner.load_config.load_format == "dummy"
     # Raise error on non-existing config
-    with pytest.raises(AssertionError):
+    with pytest.raises(ValueError, match="do_not_exist_config"):
         model_runner.update_config({"do_not_exist_config": "dummy"})
 
 
