@@ -36,13 +36,12 @@ def build_offloading_config(
     engine_id = kv_transfer_config.engine_id
 
     parallel_config = vllm_config.parallel_config
-    context_parallel_factor = (
-        parallel_config.decode_context_parallel_size
-        * parallel_config.prefill_context_parallel_size
-    )
     groups = tuple(
         OffloadingGroupConfig(
-            tokens_per_block=(group.kv_cache_spec.block_size * context_parallel_factor),
+            tokens_per_block=(
+                group.kv_cache_spec.block_size
+                * parallel_config.decode_context_parallel_size
+            ),
             layer_names=tuple(group.layer_names),
         )
         for group in kv_cache_config.kv_cache_groups
@@ -58,15 +57,32 @@ def build_offloading_config(
         )
 
     blocks_per_chunk = 1
+    blocks_per_chunk_config = extra_config.get("blocks_per_chunk")
     tokens_per_chunk = extra_config.get("block_size")
-    if tokens_per_chunk is not None:
+
+    if blocks_per_chunk_config is not None and tokens_per_chunk is not None:
+        raise ValueError(
+            "Specify only one of 'block_size' or 'blocks_per_chunk' "
+            "in kv_connector_extra_config."
+        )
+
+    if blocks_per_chunk_config is not None:
+        blocks_per_chunk = int(blocks_per_chunk_config)
+
+        if blocks_per_chunk <= 0:
+            raise ValueError("'blocks_per_chunk' must be greater than 0.")
+
+    elif tokens_per_chunk is not None:
         tokens_per_chunk_int = int(tokens_per_chunk)
+
         unique_tokens_per_block = {group.tokens_per_block for group in groups}
+
         assert len(unique_tokens_per_block) == 1, (
             "If 'block_size' is specified in kv_connector_extra_config, "
             "there must be at least one KV cache group, "
             "and all groups must have the same block size."
         )
+
         tokens_per_block = unique_tokens_per_block.pop()
         assert tokens_per_chunk_int % tokens_per_block == 0
         blocks_per_chunk = tokens_per_chunk_int // tokens_per_block
