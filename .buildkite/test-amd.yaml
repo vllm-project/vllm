@@ -117,7 +117,7 @@ steps:
 
 - label: PyTorch Fullgraph Smoke Test # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -127,7 +127,7 @@ steps:
 
 - label: Pipeline + Context Parallelism (4 GPUs) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_4
   num_gpus: 4
   working_dir: "/vllm-workspace/tests"
@@ -139,7 +139,7 @@ steps:
 
 - label: Kernels Helion Test # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -148,7 +148,7 @@ steps:
 
 - label: Kernels Mamba Test # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -158,7 +158,7 @@ steps:
 
 - label: Basic Models Test (Other CPU) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   no_gpu: true
   working_dir: "/vllm-workspace/tests"
@@ -169,7 +169,7 @@ steps:
 
 - label: Language Models Test (MTEB) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -177,7 +177,7 @@ steps:
 
 - label: Language Models Test (PPL) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -187,7 +187,7 @@ steps:
 
 - label: Batch Invariance (H100-MI325) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -198,7 +198,7 @@ steps:
 
 - label: Cudagraph # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -207,7 +207,7 @@ steps:
 
 - label: e2e Core (1 GPU) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -217,7 +217,7 @@ steps:
 
 - label: Async Engine, Inputs, Utils, Worker, Config (CPU) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   no_gpu: true
   working_dir: "/vllm-workspace/tests"
@@ -241,7 +241,7 @@ steps:
 
 - label: Rust Frontend Cargo Style + Clippy # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   no_gpu: true
   working_dir: "/vllm-workspace"
@@ -250,7 +250,7 @@ steps:
 
 - label: Rust Frontend Cargo Tests # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   no_gpu: true
   working_dir: "/vllm-workspace"
@@ -261,7 +261,7 @@ steps:
 
 - label: Docker Build Metadata (ROCm) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   no_gpu: true
   working_dir: "/vllm-workspace/tests"
@@ -278,7 +278,7 @@ steps:
 
 - label: Basic Correctness # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   fast_check: true
   working_dir: "/vllm-workspace/tests"
@@ -290,7 +290,7 @@ steps:
 
 - label: Distributed Model Tests (2 GPUs) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_2
   num_gpus: 2
   working_dir: "/vllm-workspace/tests"
@@ -307,7 +307,7 @@ steps:
 
 - label: Benchmarks CLI Test # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -317,7 +317,7 @@ steps:
 
 - label: PyTorch Compilation Unit Tests # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -325,7 +325,7 @@ steps:
 
 - label: Fusion E2E Config Sweep (H100-MI325) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   num_gpus: 1
   working_dir: "/vllm-workspace/"
@@ -335,7 +335,7 @@ steps:
 
 - label: Fusion E2E Quick (H100-MI325) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   num_gpus: 1
   working_dir: "/vllm-workspace/"
@@ -348,7 +348,7 @@ steps:
 
 - label: PyTorch Compilation Passes Unit Tests # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -356,7 +356,7 @@ steps:
 
 - label: PyTorch Fullgraph # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -364,7 +364,7 @@ steps:
 
 - label: Pytorch Nightly Dependency Override Check # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   soft_fail: true
   working_dir: "/vllm-workspace/tests"
@@ -373,7 +373,7 @@ steps:
 
 - label: Distributed Compile Unit Tests (2xH100-2xMI325) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_2
   num_gpus: 2
   working_dir: "/vllm-workspace/"
@@ -386,7 +386,7 @@ steps:
 
 - label: Platform Tests # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -397,7 +397,7 @@ steps:
 
 - label: Async Engine, Inputs, Utils, Worker # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -409,7 +409,7 @@ steps:
 
 - label: Distributed Comm Ops # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_2
   num_gpus: 2
   working_dir: "/vllm-workspace/tests"
@@ -421,7 +421,7 @@ steps:
 
 - label: EPLB Algorithm # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -430,7 +430,7 @@ steps:
 
 - label: EPLB Execution # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_4
   num_gpus: 4
   working_dir: "/vllm-workspace/tests"
@@ -440,7 +440,7 @@ steps:
 
 - label: Distributed Tests (2xH100-2xMI325) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_2
   num_gpus: 2
   working_dir: "/vllm-workspace/"
@@ -455,7 +455,7 @@ steps:
 
 - label: Distributed Tests (4xA100-4xMI325) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_4
   num_gpus: 4
   working_dir: "/vllm-workspace/tests"
@@ -467,7 +467,7 @@ steps:
 
 - label: Distributed Torchrun + Examples (4 GPUs) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_4
   num_gpus: 4
   working_dir: "/vllm-workspace/tests"
@@ -485,7 +485,7 @@ steps:
 
 - label: Elastic EP Scaling Test # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_4
   num_gpus: 4
   working_dir: "/vllm-workspace/tests"
@@ -494,7 +494,7 @@ steps:
 
 - label: RayExecutorV2 (4 GPUs) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_4
   num_gpus: 4
   working_dir: "/vllm-workspace/tests"
@@ -507,7 +507,7 @@ steps:
 
 - label: Distributed Tests (8xH100-8xMI325) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_8
   num_gpus: 8
   working_dir: "/vllm-workspace/tests"
@@ -518,7 +518,7 @@ steps:
 
 - label: Entrypoints Unit Tests # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   fast_check: true
   working_dir: "/vllm-workspace/tests"
@@ -528,7 +528,7 @@ steps:
 
 - label: Entrypoints Integration (LLM) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   fast_check: true
   working_dir: "/vllm-workspace/tests"
@@ -540,7 +540,7 @@ steps:
 
 - label: Entrypoints Integration (API Server) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   fast_check: true
   working_dir: "/vllm-workspace/tests"
@@ -552,7 +552,7 @@ steps:
 
 - label: Entrypoints Integration (API Server OpenAI - Part 1) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   fast_check: true
   working_dir: "/vllm-workspace/tests"
@@ -562,7 +562,7 @@ steps:
 
 - label: Entrypoints Integration (API Server OpenAI - Part 2) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   fast_check: true
   working_dir: "/vllm-workspace/tests"
@@ -573,7 +573,7 @@ steps:
 
 - label: Entrypoints Integration (API Server Generate) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   fast_check: true
   working_dir: "/vllm-workspace/tests"
@@ -586,7 +586,7 @@ steps:
 
 - label: Entrypoints Integration (Responses API) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   fast_check: true
   working_dir: "/vllm-workspace/tests"
@@ -596,7 +596,7 @@ steps:
 
 - label: Entrypoints Integration (Speech to Text) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   fast_check: true
   working_dir: "/vllm-workspace/tests"
@@ -606,7 +606,7 @@ steps:
 
 - label: Entrypoints Integration (Multimodal)
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   fast_check: true
   working_dir: "/vllm-workspace/tests"
@@ -616,7 +616,7 @@ steps:
 
 - label: Entrypoints Integration (Pooling) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   fast_check: true
   working_dir: "/vllm-workspace/tests"
@@ -626,7 +626,7 @@ steps:
 
 - label: OpenAI API correctness # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -637,7 +637,7 @@ steps:
 
 - label: DeepSeek V2-Lite Prefetch Offload Accuracy (H100-MI325) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   num_gpus: 1
   working_dir: "/vllm-workspace"
@@ -646,7 +646,7 @@ steps:
 
 - label: LM Eval Small Models # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -654,7 +654,7 @@ steps:
 
 - label: MRCR Eval Small Models # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -662,7 +662,7 @@ steps:
 
 - label: LM Eval Small Models (MI325) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/.buildkite/lm-eval-harness"
   commands:
@@ -670,7 +670,7 @@ steps:
 
 - label: Multi-Modal Accuracy Eval (Small Models) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/.buildkite/lm-eval-harness"
   commands:
@@ -678,7 +678,7 @@ steps:
 
 - label: GPQA Eval (GPT-OSS) (2xH100-2xMI325) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_2
   num_gpus: 2
   working_dir: "/vllm-workspace/tests"
@@ -688,7 +688,7 @@ steps:
 
 - label: LM Eval Small Models (2xB200-2xMI325) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_2
   num_gpus: 2
   working_dir: "/vllm-workspace/tests"
@@ -697,7 +697,7 @@ steps:
 
 - label: DeepSeek V2-Lite Sync EPLB Accuracy (4xH100-4xMI325) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_4
   num_gpus: 4
   working_dir: "/vllm-workspace"
@@ -706,7 +706,7 @@ steps:
 
 - label: LM Eval Large Models (4xA100-4xMI325) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_4
   num_gpus: 4
   working_dir: "/vllm-workspace/.buildkite/lm-eval-harness"
@@ -716,7 +716,7 @@ steps:
 
 - label: Qwen3-30B-A3B-FP8-block Sync EPLB Accuracy (4xH100-4xMI325) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_4
   num_gpus: 4
   working_dir: "/vllm-workspace"
@@ -725,7 +725,7 @@ steps:
 
 - label: Qwen3-30B-A3B-FP8 DP4 Async EPLB Accuracy (4xH100-4xMI325) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_4
   num_gpus: 4
   working_dir: "/vllm-workspace"
@@ -734,7 +734,7 @@ steps:
 
 - label: Qwen3-Next-80B-A3B-Instruct MTP Async EPLB Accuracy # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_4
   num_gpus: 4
   working_dir: "/vllm-workspace"
@@ -743,7 +743,7 @@ steps:
 
 - label: LM Eval Large Models (8xH200-8xMI325) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_8
   num_gpus: 8
   working_dir: "/vllm-workspace/tests"
@@ -753,7 +753,7 @@ steps:
 
 - label: ROCm LM Eval Large Models (8 GPUs) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_8
   num_gpus: 8
   working_dir: "/vllm-workspace/.buildkite/lm-eval-harness"
@@ -765,7 +765,7 @@ steps:
 
 - label: Examples # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/examples"
   commands:
@@ -795,7 +795,7 @@ steps:
 
 - label: vLLM IR Tests # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/"
   commands:
@@ -804,7 +804,7 @@ steps:
 
 - label: Kernels Attention Test %N # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   parallelism: 2
   working_dir: "/vllm-workspace/tests"
@@ -813,7 +813,7 @@ steps:
 
 - label: Kernels Core Operation Test # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -821,7 +821,7 @@ steps:
 
 - label: Kernels KDA Test # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -829,7 +829,7 @@ steps:
 
 - label: Kernels MoE Test %N # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   parallelism: 5
   working_dir: "/vllm-workspace/tests"
@@ -839,7 +839,7 @@ steps:
 
 - label: Kernels Quantization Test %N # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   parallelism: 2
   working_dir: "/vllm-workspace/tests"
@@ -848,7 +848,7 @@ steps:
 
 - label: Kernels FP8 MoE Test (2xH100-2xMI325) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_2
   num_gpus: 2
   working_dir: "/vllm-workspace/tests"
@@ -859,7 +859,7 @@ steps:
 
 - label: LoRA %N # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   parallelism: 4
   working_dir: "/vllm-workspace/tests"
@@ -868,7 +868,7 @@ steps:
 
 - label: LoRA TP (Distributed) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_4
   num_gpus: 4
   working_dir: "/vllm-workspace/tests"
@@ -884,7 +884,7 @@ steps:
 
 - label: Model Executor # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -897,7 +897,7 @@ steps:
 
 - label: Model Runner V2 Core Tests # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -911,7 +911,7 @@ steps:
 
 - label: Model Runner V2 Examples # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/examples"
   commands:
@@ -933,7 +933,7 @@ steps:
 
 - label: Model Runner V2 Distributed (2 GPUs) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_2
   num_gpus: 2
   working_dir: "/vllm-workspace/tests"
@@ -946,7 +946,7 @@ steps:
 
 - label: Model Runner V2 Pipeline Parallelism (4 GPUs) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_4
   num_gpus: 4
   working_dir: "/vllm-workspace/tests"
@@ -958,7 +958,7 @@ steps:
 
 - label: Model Runner V2 Spec Decode # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -973,7 +973,7 @@ steps:
 
 - label: Basic Models Tests (Extra Initialization) %N # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   parallelism: 6
   working_dir: "/vllm-workspace/tests"
@@ -982,7 +982,7 @@ steps:
 
 - label: Basic Models Tests (Initialization) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -990,7 +990,7 @@ steps:
 
 - label: Basic Models Tests (Other) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -1000,7 +1000,7 @@ steps:
 
 - label: Language Models Test (Extended Pooling)  # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -1008,7 +1008,7 @@ steps:
 
 - label: Language Models Tests (Standard) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -1017,7 +1017,7 @@ steps:
 
 - label: Language Models Tests (Extra Standard) %N # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   parallelism: 2
   working_dir: "/vllm-workspace/tests"
@@ -1029,7 +1029,7 @@ steps:
 
 - label: Multi-Modal Models (Extended Generation 1) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -1038,7 +1038,7 @@ steps:
 
 - label: Multi-Modal Models (Extended Generation 2) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -1047,7 +1047,7 @@ steps:
 
 - label: Multi-Modal Models (Extended Generation 3) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -1055,7 +1055,7 @@ steps:
 
 - label: "Multi-Modal Models (Standard) 1: qwen2" # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -1064,7 +1064,7 @@ steps:
 
 - label: "Multi-Modal Models (Standard) 3: llava + qwen2_vl" # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -1073,7 +1073,7 @@ steps:
 
 - label: "Multi-Modal Models (Standard) 4: other + whisper" # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -1083,7 +1083,7 @@ steps:
 
 - label: Multi-Modal Processor # 1h 42m
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -1091,7 +1091,7 @@ steps:
 
 - label: Multi-Modal Processor (CPU) %N # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   parallelism: 4
   working_dir: "/vllm-workspace/tests"
@@ -1102,7 +1102,7 @@ steps:
 
 - label: Quantized Models Test # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -1112,7 +1112,7 @@ steps:
 
 - label: Transformers Nightly Models (Shardable) %N # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   parallelism: 4
   working_dir: "/vllm-workspace/"
@@ -1123,7 +1123,7 @@ steps:
 
 - label: Transformers Nightly Models (Single) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/"
   commands:
@@ -1138,7 +1138,7 @@ steps:
 
 - label: Plugin Tests (2 GPUs) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_2
   num_gpus: 2
   working_dir: "/vllm-workspace/tests"
@@ -1184,7 +1184,7 @@ steps:
 
 - label: GGUF Plugin # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   soft_fail: true
   working_dir: "/vllm-workspace/tests"
@@ -1196,7 +1196,7 @@ steps:
 
 - label: Rust Frontend OpenAI Coverage # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -1212,7 +1212,7 @@ steps:
 
 - label: Rust Frontend Serve Admin Coverage # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -1226,7 +1226,7 @@ steps:
 
 - label: Rust Frontend Core Correctness # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -1236,7 +1236,7 @@ steps:
 
 - label: Rust Frontend Tool Use # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -1246,7 +1246,7 @@ steps:
 
 - label: Rust Frontend Distributed # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_4
   num_gpus: 4
   working_dir: "/vllm-workspace/tests"
@@ -1261,7 +1261,7 @@ steps:
 
 - label: Quantization # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -1281,7 +1281,7 @@ steps:
 
 - label: ROCm AITER Ops Test # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -1291,7 +1291,7 @@ steps:
 
 - label: Samplers Test # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -1301,7 +1301,7 @@ steps:
 
 - label: Regression # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -1312,7 +1312,7 @@ steps:
 
 - label: Ray Dependency Compatibility Check # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/"
   commands:
@@ -1322,7 +1322,7 @@ steps:
 
 - label: Acceptance Length Test (Large Models) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -1331,7 +1331,7 @@ steps:
 
 - label: e2e Scheduling (1 GPU) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -1339,7 +1339,7 @@ steps:
 
 - label: Engine (1 GPU) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -1348,7 +1348,7 @@ steps:
 
 - label: Spec Decode Draft Model # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -1356,7 +1356,7 @@ steps:
 
 - label: Spec Decode Eagle # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -1364,7 +1364,7 @@ steps:
 
 - label: Spec Decode Ngram + Suffix # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -1372,7 +1372,7 @@ steps:
 
 - label: Spec Decode Speculators + MTP # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -1380,7 +1380,7 @@ steps:
 
 - label: Speculators Correctness # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -1389,7 +1389,7 @@ steps:
 
 - label: V1 Spec Decode # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -1397,7 +1397,7 @@ steps:
 
 - label: Extract Hidden States Integration # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_2
   num_gpus: 2
   working_dir: "/vllm-workspace/tests"
@@ -1407,7 +1407,7 @@ steps:
 
 - label: V1 attention (H100-MI325) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -1415,7 +1415,7 @@ steps:
 
 - label: V1 Core + KV + Metrics # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -1432,7 +1432,7 @@ steps:
 
 - label: V1 others (CPU) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -1444,7 +1444,7 @@ steps:
 
 - label: V1 Sample + Logits # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -1456,7 +1456,7 @@ steps:
 
 - label: Distributed DP Tests (2 GPUs) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_2
   num_gpus: 2
   working_dir: "/vllm-workspace/tests"
@@ -1469,7 +1469,7 @@ steps:
 
 - label: Metrics, Tracing (2 GPUs) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_2
   num_gpus: 2
   working_dir: "/vllm-workspace/tests"
@@ -1483,7 +1483,7 @@ steps:
 
 - label: V1 e2e (2 GPUs) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_2
   num_gpus: 2
   working_dir: "/vllm-workspace/tests"
@@ -1492,7 +1492,7 @@ steps:
 
 - label: NixlConnector PD + Spec Decode acceptance (2 GPUs) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_2
   num_gpus: 2
   working_dir: "/vllm-workspace/tests"
@@ -1502,7 +1502,7 @@ steps:
 
 - label: CrossLayer KV layout Distributed NixlConnector PD accuracy tests (4 GPUs) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_4
   num_gpus: 4
   working_dir: "/vllm-workspace/tests"
@@ -1512,7 +1512,7 @@ steps:
 
 - label: Distributed DP Tests (4 GPUs) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_4
   num_gpus: 4
   working_dir: "/vllm-workspace/tests"
@@ -1528,7 +1528,7 @@ steps:
 
 - label: Distributed NixlConnector PD accuracy (4 GPUs)  # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_4
   num_gpus: 4
   working_dir: "/vllm-workspace/tests"
@@ -1538,7 +1538,7 @@ steps:
 
 - label: DP EP Distributed NixlConnector PD accuracy tests (4 GPUs) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_4
   num_gpus: 4
   working_dir: "/vllm-workspace/tests"
@@ -1548,7 +1548,7 @@ steps:
 
 - label: Hybrid SSM NixlConnector PD accuracy tests (4 GPUs) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_4
   num_gpus: 4
   working_dir: "/vllm-workspace/tests"
@@ -1558,7 +1558,7 @@ steps:
 
 - label: Hybrid SSM NixlConnector PD prefix cache test (2 GPUs) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_2
   num_gpus: 2
   working_dir: "/vllm-workspace/tests"
@@ -1568,7 +1568,7 @@ steps:
 
 - label: MultiConnector (Nixl+Offloading) PD accuracy (2 GPUs) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_2
   num_gpus: 2
   working_dir: "/vllm-workspace/tests"
@@ -1578,7 +1578,7 @@ steps:
 
 - label: MultiConnector (Nixl+Offloading) PD edge cases (2 GPUs) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_2
   num_gpus: 2
   working_dir: "/vllm-workspace/tests"
@@ -1588,7 +1588,7 @@ steps:
 
 - label: V1 e2e (4 GPUs) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_4
   num_gpus: 4
   working_dir: "/vllm-workspace/tests"
@@ -1597,7 +1597,7 @@ steps:
 
 - label: V1 e2e (4xH100-4xMI325) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_4
   num_gpus: 4
   commands:
@@ -1607,7 +1607,7 @@ steps:
 
 - label: Weight Loading Multiple GPU # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_2
   num_gpus: 2
   working_dir: "/vllm-workspace/tests"
@@ -1616,7 +1616,7 @@ steps:
 
 - label: Weight Loading Multiple GPU - Large Models # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_2
   num_gpus: 2
   working_dir: "/vllm-workspace/tests"
@@ -1633,7 +1633,7 @@ steps:
 
 - label: Distributed Compile + RPC Tests (2 GPUs) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_2
   num_gpus: 2
   working_dir: "/vllm-workspace/tests"
@@ -1646,7 +1646,7 @@ steps:
 
 - label: Distributed Torchrun + Shutdown Tests (2 GPUs) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_2
   num_gpus: 2
   working_dir: "/vllm-workspace/tests"
@@ -1658,7 +1658,7 @@ steps:
 
 - label: Distributed Compile + Comm (4 GPUs) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_4
   num_gpus: 4
   working_dir: "/vllm-workspace/tests"
@@ -1673,7 +1673,7 @@ steps:
 
 - label: Engine # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -1683,7 +1683,7 @@ steps:
 
 - label: LM Eval Large Models (4xH100-4xMI325) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_4
   num_gpus: 4
   working_dir: "/vllm-workspace/.buildkite/lm-eval-harness"
@@ -1695,7 +1695,7 @@ steps:
 
 - label: Language Models Test (Extended Generation) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -1705,7 +1705,7 @@ steps:
 
 - label: Language Models Tests (Hybrid) %N # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   parallelism: 2
   working_dir: "/vllm-workspace/tests"
@@ -1718,7 +1718,7 @@ steps:
 
 - label: Multi-Modal Models (Extended Pooling) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -1726,7 +1726,7 @@ steps:
 
 - label: "Multi-Modal Models (Standard) 2: qwen3 + gemma" # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -1737,7 +1737,7 @@ steps:
 
 - label: Python-only Installation # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -1760,7 +1760,7 @@ steps:
 
 - label: COPY A PyTorch Fullgraph Smoke Test # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -1770,7 +1770,7 @@ steps:
 
 - label: COPY A Pipeline + Context Parallelism (4 GPUs) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_4
   num_gpus: 4
   working_dir: "/vllm-workspace/tests"
@@ -1782,7 +1782,7 @@ steps:
 
 - label: COPY A Kernels Helion Test # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -1791,7 +1791,7 @@ steps:
 
 - label: COPY A Kernels Mamba Test # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -1801,7 +1801,7 @@ steps:
 
 - label: COPY A Basic Models Test (Other CPU) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   no_gpu: true
   working_dir: "/vllm-workspace/tests"
@@ -1812,7 +1812,7 @@ steps:
 
 - label: COPY A Language Models Test (MTEB) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -1820,7 +1820,7 @@ steps:
 
 - label: COPY A Language Models Test (PPL) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -1830,7 +1830,7 @@ steps:
 
 - label: COPY A Batch Invariance (H100-MI325) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -1841,7 +1841,7 @@ steps:
 
 - label: COPY A Cudagraph # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -1850,7 +1850,7 @@ steps:
 
 - label: COPY A e2e Core (1 GPU) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -1860,7 +1860,7 @@ steps:
 
 - label: COPY A Async Engine, Inputs, Utils, Worker, Config (CPU) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   no_gpu: true
   working_dir: "/vllm-workspace/tests"
@@ -1884,7 +1884,7 @@ steps:
 
 - label: COPY A Rust Frontend Cargo Style + Clippy # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   no_gpu: true
   working_dir: "/vllm-workspace"
@@ -1893,7 +1893,7 @@ steps:
 
 - label: COPY A Rust Frontend Cargo Tests # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   no_gpu: true
   working_dir: "/vllm-workspace"
@@ -1904,7 +1904,7 @@ steps:
 
 - label: COPY A Docker Build Metadata (ROCm) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   no_gpu: true
   working_dir: "/vllm-workspace/tests"
@@ -1921,7 +1921,7 @@ steps:
 
 - label: COPY A Basic Correctness # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   fast_check: true
   working_dir: "/vllm-workspace/tests"
@@ -1933,7 +1933,7 @@ steps:
 
 - label: COPY A Distributed Model Tests (2 GPUs) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_2
   num_gpus: 2
   working_dir: "/vllm-workspace/tests"
@@ -1950,7 +1950,7 @@ steps:
 
 - label: COPY A Benchmarks CLI Test # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -1960,7 +1960,7 @@ steps:
 
 - label: COPY A PyTorch Compilation Unit Tests # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -1968,7 +1968,7 @@ steps:
 
 - label: COPY A Fusion E2E Config Sweep (H100-MI325) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   num_gpus: 1
   working_dir: "/vllm-workspace/"
@@ -1978,7 +1978,7 @@ steps:
 
 - label: COPY A Fusion E2E Quick (H100-MI325) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   num_gpus: 1
   working_dir: "/vllm-workspace/"
@@ -1991,7 +1991,7 @@ steps:
 
 - label: COPY A PyTorch Compilation Passes Unit Tests # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -1999,7 +1999,7 @@ steps:
 
 - label: COPY A PyTorch Fullgraph # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -2007,7 +2007,7 @@ steps:
 
 - label: COPY A Pytorch Nightly Dependency Override Check # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   soft_fail: true
   working_dir: "/vllm-workspace/tests"
@@ -2016,7 +2016,7 @@ steps:
 
 - label: COPY A Distributed Compile Unit Tests (2xH100-2xMI325) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_2
   num_gpus: 2
   working_dir: "/vllm-workspace/"
@@ -2029,7 +2029,7 @@ steps:
 
 - label: COPY A Platform Tests # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -2040,7 +2040,7 @@ steps:
 
 - label: COPY A Async Engine, Inputs, Utils, Worker # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -2052,7 +2052,7 @@ steps:
 
 - label: COPY A Distributed Comm Ops # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_2
   num_gpus: 2
   working_dir: "/vllm-workspace/tests"
@@ -2064,7 +2064,7 @@ steps:
 
 - label: COPY A EPLB Algorithm # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -2073,7 +2073,7 @@ steps:
 
 - label: COPY A EPLB Execution # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_4
   num_gpus: 4
   working_dir: "/vllm-workspace/tests"
@@ -2083,7 +2083,7 @@ steps:
 
 - label: COPY A Distributed Tests (2xH100-2xMI325) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_2
   num_gpus: 2
   working_dir: "/vllm-workspace/"
@@ -2098,7 +2098,7 @@ steps:
 
 - label: COPY A Distributed Tests (4xA100-4xMI325) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_4
   num_gpus: 4
   working_dir: "/vllm-workspace/tests"
@@ -2110,7 +2110,7 @@ steps:
 
 - label: COPY A Distributed Torchrun + Examples (4 GPUs) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_4
   num_gpus: 4
   working_dir: "/vllm-workspace/tests"
@@ -2128,7 +2128,7 @@ steps:
 
 - label: COPY A Elastic EP Scaling Test # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_4
   num_gpus: 4
   working_dir: "/vllm-workspace/tests"
@@ -2137,7 +2137,7 @@ steps:
 
 - label: COPY A RayExecutorV2 (4 GPUs) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_4
   num_gpus: 4
   working_dir: "/vllm-workspace/tests"
@@ -2150,7 +2150,7 @@ steps:
 
 - label: COPY A Distributed Tests (8xH100-8xMI325) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_8
   num_gpus: 8
   working_dir: "/vllm-workspace/tests"
@@ -2161,7 +2161,7 @@ steps:
 
 - label: COPY A Entrypoints Unit Tests # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   fast_check: true
   working_dir: "/vllm-workspace/tests"
@@ -2171,7 +2171,7 @@ steps:
 
 - label: COPY A Entrypoints Integration (LLM) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   fast_check: true
   working_dir: "/vllm-workspace/tests"
@@ -2183,7 +2183,7 @@ steps:
 
 - label: COPY A Entrypoints Integration (API Server) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   fast_check: true
   working_dir: "/vllm-workspace/tests"
@@ -2195,7 +2195,7 @@ steps:
 
 - label: COPY A Entrypoints Integration (API Server OpenAI - Part 1) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   fast_check: true
   working_dir: "/vllm-workspace/tests"
@@ -2205,7 +2205,7 @@ steps:
 
 - label: COPY A Entrypoints Integration (API Server OpenAI - Part 2) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   fast_check: true
   working_dir: "/vllm-workspace/tests"
@@ -2216,7 +2216,7 @@ steps:
 
 - label: COPY A Entrypoints Integration (API Server Generate) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   fast_check: true
   working_dir: "/vllm-workspace/tests"
@@ -2229,7 +2229,7 @@ steps:
 
 - label: COPY A Entrypoints Integration (Responses API) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   fast_check: true
   working_dir: "/vllm-workspace/tests"
@@ -2239,7 +2239,7 @@ steps:
 
 - label: COPY A Entrypoints Integration (Speech to Text) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   fast_check: true
   working_dir: "/vllm-workspace/tests"
@@ -2249,7 +2249,7 @@ steps:
 
 - label: COPY A Entrypoints Integration (Multimodal)
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   fast_check: true
   working_dir: "/vllm-workspace/tests"
@@ -2259,7 +2259,7 @@ steps:
 
 - label: COPY A Entrypoints Integration (Pooling) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   fast_check: true
   working_dir: "/vllm-workspace/tests"
@@ -2269,7 +2269,7 @@ steps:
 
 - label: COPY A OpenAI API correctness # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -2280,7 +2280,7 @@ steps:
 
 - label: COPY A DeepSeek V2-Lite Prefetch Offload Accuracy (H100-MI325) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   num_gpus: 1
   working_dir: "/vllm-workspace"
@@ -2289,7 +2289,7 @@ steps:
 
 - label: COPY A LM Eval Small Models # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -2297,7 +2297,7 @@ steps:
 
 - label: COPY A MRCR Eval Small Models # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -2305,7 +2305,7 @@ steps:
 
 - label: COPY A LM Eval Small Models (MI325) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/.buildkite/lm-eval-harness"
   commands:
@@ -2313,7 +2313,7 @@ steps:
 
 - label: COPY A Multi-Modal Accuracy Eval (Small Models) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/.buildkite/lm-eval-harness"
   commands:
@@ -2321,7 +2321,7 @@ steps:
 
 - label: COPY A GPQA Eval (GPT-OSS) (2xH100-2xMI325) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_2
   num_gpus: 2
   working_dir: "/vllm-workspace/tests"
@@ -2331,7 +2331,7 @@ steps:
 
 - label: COPY A LM Eval Small Models (2xB200-2xMI325) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_2
   num_gpus: 2
   working_dir: "/vllm-workspace/tests"
@@ -2340,7 +2340,7 @@ steps:
 
 - label: COPY A DeepSeek V2-Lite Sync EPLB Accuracy (4xH100-4xMI325) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_4
   num_gpus: 4
   working_dir: "/vllm-workspace"
@@ -2349,7 +2349,7 @@ steps:
 
 - label: COPY A LM Eval Large Models (4xA100-4xMI325) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_4
   num_gpus: 4
   working_dir: "/vllm-workspace/.buildkite/lm-eval-harness"
@@ -2359,7 +2359,7 @@ steps:
 
 - label: COPY A Qwen3-30B-A3B-FP8-block Sync EPLB Accuracy (4xH100-4xMI325) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_4
   num_gpus: 4
   working_dir: "/vllm-workspace"
@@ -2368,7 +2368,7 @@ steps:
 
 - label: COPY A Qwen3-30B-A3B-FP8 DP4 Async EPLB Accuracy (4xH100-4xMI325) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_4
   num_gpus: 4
   working_dir: "/vllm-workspace"
@@ -2377,7 +2377,7 @@ steps:
 
 - label: COPY A Qwen3-Next-80B-A3B-Instruct MTP Async EPLB Accuracy # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_4
   num_gpus: 4
   working_dir: "/vllm-workspace"
@@ -2386,7 +2386,7 @@ steps:
 
 - label: COPY A LM Eval Large Models (8xH200-8xMI325) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_8
   num_gpus: 8
   working_dir: "/vllm-workspace/tests"
@@ -2396,7 +2396,7 @@ steps:
 
 - label: COPY A ROCm LM Eval Large Models (8 GPUs) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_8
   num_gpus: 8
   working_dir: "/vllm-workspace/.buildkite/lm-eval-harness"
@@ -2408,7 +2408,7 @@ steps:
 
 - label: COPY A Examples # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/examples"
   commands:
@@ -2438,7 +2438,7 @@ steps:
 
 - label: COPY A vLLM IR Tests # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/"
   commands:
@@ -2447,7 +2447,7 @@ steps:
 
 - label: COPY A Kernels Attention Test %N # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   parallelism: 2
   working_dir: "/vllm-workspace/tests"
@@ -2456,7 +2456,7 @@ steps:
 
 - label: COPY A Kernels Core Operation Test # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -2464,7 +2464,7 @@ steps:
 
 - label: COPY A Kernels KDA Test # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -2472,7 +2472,7 @@ steps:
 
 - label: COPY A Kernels MoE Test %N # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   parallelism: 5
   working_dir: "/vllm-workspace/tests"
@@ -2482,7 +2482,7 @@ steps:
 
 - label: COPY A Kernels Quantization Test %N # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   parallelism: 2
   working_dir: "/vllm-workspace/tests"
@@ -2491,7 +2491,7 @@ steps:
 
 - label: COPY A Kernels FP8 MoE Test (2xH100-2xMI325) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_2
   num_gpus: 2
   working_dir: "/vllm-workspace/tests"
@@ -2502,7 +2502,7 @@ steps:
 
 - label: COPY A LoRA %N # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   parallelism: 4
   working_dir: "/vllm-workspace/tests"
@@ -2511,7 +2511,7 @@ steps:
 
 - label: COPY A LoRA TP (Distributed) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_4
   num_gpus: 4
   working_dir: "/vllm-workspace/tests"
@@ -2527,7 +2527,7 @@ steps:
 
 - label: COPY A Model Executor # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -2540,7 +2540,7 @@ steps:
 
 - label: COPY A Model Runner V2 Core Tests # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -2554,7 +2554,7 @@ steps:
 
 - label: COPY A Model Runner V2 Examples # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/examples"
   commands:
@@ -2576,7 +2576,7 @@ steps:
 
 - label: COPY A Model Runner V2 Distributed (2 GPUs) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_2
   num_gpus: 2
   working_dir: "/vllm-workspace/tests"
@@ -2589,7 +2589,7 @@ steps:
 
 - label: COPY A Model Runner V2 Pipeline Parallelism (4 GPUs) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_4
   num_gpus: 4
   working_dir: "/vllm-workspace/tests"
@@ -2601,7 +2601,7 @@ steps:
 
 - label: COPY A Model Runner V2 Spec Decode # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -2616,7 +2616,7 @@ steps:
 
 - label: COPY A Basic Models Tests (Extra Initialization) %N # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   parallelism: 6
   working_dir: "/vllm-workspace/tests"
@@ -2625,7 +2625,7 @@ steps:
 
 - label: COPY A Basic Models Tests (Initialization) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -2633,7 +2633,7 @@ steps:
 
 - label: COPY A Basic Models Tests (Other) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -2643,7 +2643,7 @@ steps:
 
 - label: COPY A Language Models Test (Extended Pooling)  # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -2651,7 +2651,7 @@ steps:
 
 - label: COPY A Language Models Tests (Standard) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -2660,7 +2660,7 @@ steps:
 
 - label: COPY A Language Models Tests (Extra Standard) %N # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   parallelism: 2
   working_dir: "/vllm-workspace/tests"
@@ -2672,7 +2672,7 @@ steps:
 
 - label: COPY A Multi-Modal Models (Extended Generation 1) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -2681,7 +2681,7 @@ steps:
 
 - label: COPY A Multi-Modal Models (Extended Generation 2) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -2690,7 +2690,7 @@ steps:
 
 - label: COPY A Multi-Modal Models (Extended Generation 3) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -2698,7 +2698,7 @@ steps:
 
 - label: "COPY A Multi-Modal Models (Standard) 1: qwen2" # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -2707,7 +2707,7 @@ steps:
 
 - label: "COPY A Multi-Modal Models (Standard) 3: llava + qwen2_vl" # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -2716,7 +2716,7 @@ steps:
 
 - label: "COPY A Multi-Modal Models (Standard) 4: other + whisper" # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -2726,7 +2726,7 @@ steps:
 
 - label: COPY A Multi-Modal Processor # 1h 42m
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -2734,7 +2734,7 @@ steps:
 
 - label: COPY A Multi-Modal Processor (CPU) %N # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   parallelism: 4
   working_dir: "/vllm-workspace/tests"
@@ -2745,7 +2745,7 @@ steps:
 
 - label: COPY A Quantized Models Test # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -2755,7 +2755,7 @@ steps:
 
 - label: COPY A Transformers Nightly Models (Shardable) %N # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   parallelism: 4
   working_dir: "/vllm-workspace/"
@@ -2766,7 +2766,7 @@ steps:
 
 - label: COPY A Transformers Nightly Models (Single) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/"
   commands:
@@ -2781,7 +2781,7 @@ steps:
 
 - label: COPY A Plugin Tests (2 GPUs) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_2
   num_gpus: 2
   working_dir: "/vllm-workspace/tests"
@@ -2827,7 +2827,7 @@ steps:
 
 - label: COPY A GGUF Plugin # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   soft_fail: true
   working_dir: "/vllm-workspace/tests"
@@ -2839,7 +2839,7 @@ steps:
 
 - label: COPY A Rust Frontend OpenAI Coverage # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -2855,7 +2855,7 @@ steps:
 
 - label: COPY A Rust Frontend Serve Admin Coverage # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -2869,7 +2869,7 @@ steps:
 
 - label: COPY A Rust Frontend Core Correctness # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -2879,7 +2879,7 @@ steps:
 
 - label: COPY A Rust Frontend Tool Use # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -2889,7 +2889,7 @@ steps:
 
 - label: COPY A Rust Frontend Distributed # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_4
   num_gpus: 4
   working_dir: "/vllm-workspace/tests"
@@ -2904,7 +2904,7 @@ steps:
 
 - label: COPY A Quantization # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -2924,7 +2924,7 @@ steps:
 
 - label: COPY A ROCm AITER Ops Test # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -2934,7 +2934,7 @@ steps:
 
 - label: COPY A Samplers Test # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -2944,7 +2944,7 @@ steps:
 
 - label: COPY A Regression # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -2955,7 +2955,7 @@ steps:
 
 - label: COPY A Ray Dependency Compatibility Check # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/"
   commands:
@@ -2965,7 +2965,7 @@ steps:
 
 - label: COPY A Acceptance Length Test (Large Models) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -2974,7 +2974,7 @@ steps:
 
 - label: COPY A e2e Scheduling (1 GPU) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -2982,7 +2982,7 @@ steps:
 
 - label: COPY A Engine (1 GPU) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -2991,7 +2991,7 @@ steps:
 
 - label: COPY A Spec Decode Draft Model # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -2999,7 +2999,7 @@ steps:
 
 - label: COPY A Spec Decode Eagle # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -3007,7 +3007,7 @@ steps:
 
 - label: COPY A Spec Decode Ngram + Suffix # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -3015,7 +3015,7 @@ steps:
 
 - label: COPY A Spec Decode Speculators + MTP # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -3023,7 +3023,7 @@ steps:
 
 - label: COPY A Speculators Correctness # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -3032,7 +3032,7 @@ steps:
 
 - label: COPY A V1 Spec Decode # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -3040,7 +3040,7 @@ steps:
 
 - label: COPY A Extract Hidden States Integration # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_2
   num_gpus: 2
   working_dir: "/vllm-workspace/tests"
@@ -3050,7 +3050,7 @@ steps:
 
 - label: COPY A V1 attention (H100-MI325) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -3058,7 +3058,7 @@ steps:
 
 - label: COPY A V1 Core + KV + Metrics # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -3075,7 +3075,7 @@ steps:
 
 - label: COPY A V1 others (CPU) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -3087,7 +3087,7 @@ steps:
 
 - label: COPY A V1 Sample + Logits # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -3099,7 +3099,7 @@ steps:
 
 - label: COPY A Distributed DP Tests (2 GPUs) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_2
   num_gpus: 2
   working_dir: "/vllm-workspace/tests"
@@ -3112,7 +3112,7 @@ steps:
 
 - label: COPY A Metrics, Tracing (2 GPUs) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_2
   num_gpus: 2
   working_dir: "/vllm-workspace/tests"
@@ -3126,7 +3126,7 @@ steps:
 
 - label: COPY A V1 e2e (2 GPUs) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_2
   num_gpus: 2
   working_dir: "/vllm-workspace/tests"
@@ -3135,7 +3135,7 @@ steps:
 
 - label: COPY A NixlConnector PD + Spec Decode acceptance (2 GPUs) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_2
   num_gpus: 2
   working_dir: "/vllm-workspace/tests"
@@ -3145,7 +3145,7 @@ steps:
 
 - label: COPY A CrossLayer KV layout Distributed NixlConnector PD accuracy tests (4 GPUs) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_4
   num_gpus: 4
   working_dir: "/vllm-workspace/tests"
@@ -3155,7 +3155,7 @@ steps:
 
 - label: COPY A Distributed DP Tests (4 GPUs) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_4
   num_gpus: 4
   working_dir: "/vllm-workspace/tests"
@@ -3171,7 +3171,7 @@ steps:
 
 - label: COPY A Distributed NixlConnector PD accuracy (4 GPUs)  # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_4
   num_gpus: 4
   working_dir: "/vllm-workspace/tests"
@@ -3181,7 +3181,7 @@ steps:
 
 - label: COPY A DP EP Distributed NixlConnector PD accuracy tests (4 GPUs) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_4
   num_gpus: 4
   working_dir: "/vllm-workspace/tests"
@@ -3191,7 +3191,7 @@ steps:
 
 - label: COPY A Hybrid SSM NixlConnector PD accuracy tests (4 GPUs) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_4
   num_gpus: 4
   working_dir: "/vllm-workspace/tests"
@@ -3201,7 +3201,7 @@ steps:
 
 - label: COPY A Hybrid SSM NixlConnector PD prefix cache test (2 GPUs) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_2
   num_gpus: 2
   working_dir: "/vllm-workspace/tests"
@@ -3211,7 +3211,7 @@ steps:
 
 - label: COPY A MultiConnector (Nixl+Offloading) PD accuracy (2 GPUs) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_2
   num_gpus: 2
   working_dir: "/vllm-workspace/tests"
@@ -3221,7 +3221,7 @@ steps:
 
 - label: COPY A MultiConnector (Nixl+Offloading) PD edge cases (2 GPUs) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_2
   num_gpus: 2
   working_dir: "/vllm-workspace/tests"
@@ -3231,7 +3231,7 @@ steps:
 
 - label: COPY A V1 e2e (4 GPUs) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_4
   num_gpus: 4
   working_dir: "/vllm-workspace/tests"
@@ -3240,7 +3240,7 @@ steps:
 
 - label: COPY A V1 e2e (4xH100-4xMI325) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_4
   num_gpus: 4
   commands:
@@ -3250,7 +3250,7 @@ steps:
 
 - label: COPY A Weight Loading Multiple GPU # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_2
   num_gpus: 2
   working_dir: "/vllm-workspace/tests"
@@ -3259,7 +3259,7 @@ steps:
 
 - label: COPY A Weight Loading Multiple GPU - Large Models # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_2
   num_gpus: 2
   working_dir: "/vllm-workspace/tests"
@@ -3276,7 +3276,7 @@ steps:
 
 - label: COPY A Distributed Compile + RPC Tests (2 GPUs) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_2
   num_gpus: 2
   working_dir: "/vllm-workspace/tests"
@@ -3289,7 +3289,7 @@ steps:
 
 - label: COPY A Distributed Torchrun + Shutdown Tests (2 GPUs) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_2
   num_gpus: 2
   working_dir: "/vllm-workspace/tests"
@@ -3301,7 +3301,7 @@ steps:
 
 - label: COPY A Distributed Compile + Comm (4 GPUs) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_4
   num_gpus: 4
   working_dir: "/vllm-workspace/tests"
@@ -3316,7 +3316,7 @@ steps:
 
 - label: COPY A Engine # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -3326,7 +3326,7 @@ steps:
 
 - label: COPY A LM Eval Large Models (4xH100-4xMI325) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_4
   num_gpus: 4
   working_dir: "/vllm-workspace/.buildkite/lm-eval-harness"
@@ -3338,7 +3338,7 @@ steps:
 
 - label: COPY A Language Models Test (Extended Generation) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -3348,7 +3348,7 @@ steps:
 
 - label: COPY A Language Models Tests (Hybrid) %N # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   parallelism: 2
   working_dir: "/vllm-workspace/tests"
@@ -3361,7 +3361,7 @@ steps:
 
 - label: COPY A Multi-Modal Models (Extended Pooling) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -3369,7 +3369,7 @@ steps:
 
 - label: "COPY A Multi-Modal Models (Standard) 2: qwen3 + gemma" # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -3380,7 +3380,7 @@ steps:
 
 - label: COPY A Python-only Installation # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -3403,7 +3403,7 @@ steps:
 
 - label: COPY B PyTorch Fullgraph Smoke Test # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -3413,7 +3413,7 @@ steps:
 
 - label: COPY B Pipeline + Context Parallelism (4 GPUs) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_4
   num_gpus: 4
   working_dir: "/vllm-workspace/tests"
@@ -3425,7 +3425,7 @@ steps:
 
 - label: COPY B Kernels Helion Test # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -3434,7 +3434,7 @@ steps:
 
 - label: COPY B Kernels Mamba Test # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -3444,7 +3444,7 @@ steps:
 
 - label: COPY B Language Models Test (MTEB) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -3452,7 +3452,7 @@ steps:
 
 - label: COPY B Language Models Test (PPL) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -3462,7 +3462,7 @@ steps:
 
 - label: COPY B Batch Invariance (H100-MI325) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -3473,7 +3473,7 @@ steps:
 
 - label: COPY B Cudagraph # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -3482,7 +3482,7 @@ steps:
 
 - label: COPY B e2e Core (1 GPU) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -3492,7 +3492,7 @@ steps:
 
 - label: COPY B Docker Build Metadata (ROCm) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   no_gpu: true
   working_dir: "/vllm-workspace/tests"
@@ -3509,7 +3509,7 @@ steps:
 
 - label: COPY B Basic Correctness # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   fast_check: true
   working_dir: "/vllm-workspace/tests"
@@ -3521,7 +3521,7 @@ steps:
 
 - label: COPY B Distributed Model Tests (2 GPUs) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_2
   num_gpus: 2
   working_dir: "/vllm-workspace/tests"
@@ -3538,7 +3538,7 @@ steps:
 
 - label: COPY B Benchmarks CLI Test # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -3548,7 +3548,7 @@ steps:
 
 - label: COPY B PyTorch Compilation Unit Tests # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -3556,7 +3556,7 @@ steps:
 
 - label: COPY B Fusion E2E Config Sweep (H100-MI325) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   num_gpus: 1
   working_dir: "/vllm-workspace/"
@@ -3566,7 +3566,7 @@ steps:
 
 - label: COPY B Fusion E2E Quick (H100-MI325) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   num_gpus: 1
   working_dir: "/vllm-workspace/"
@@ -3579,7 +3579,7 @@ steps:
 
 - label: COPY B PyTorch Compilation Passes Unit Tests # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -3587,7 +3587,7 @@ steps:
 
 - label: COPY B PyTorch Fullgraph # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -3595,7 +3595,7 @@ steps:
 
 - label: COPY B Pytorch Nightly Dependency Override Check # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   soft_fail: true
   working_dir: "/vllm-workspace/tests"
@@ -3604,7 +3604,7 @@ steps:
 
 - label: COPY B Distributed Compile Unit Tests (2xH100-2xMI325) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_2
   num_gpus: 2
   working_dir: "/vllm-workspace/"
@@ -3617,7 +3617,7 @@ steps:
 
 - label: COPY B Platform Tests # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -3628,7 +3628,7 @@ steps:
 
 - label: COPY B Async Engine, Inputs, Utils, Worker # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -3640,7 +3640,7 @@ steps:
 
 - label: COPY B Distributed Comm Ops # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_2
   num_gpus: 2
   working_dir: "/vllm-workspace/tests"
@@ -3652,7 +3652,7 @@ steps:
 
 - label: COPY B EPLB Algorithm # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -3661,7 +3661,7 @@ steps:
 
 - label: COPY B EPLB Execution # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_4
   num_gpus: 4
   working_dir: "/vllm-workspace/tests"
@@ -3671,7 +3671,7 @@ steps:
 
 - label: COPY B Distributed Tests (2xH100-2xMI325) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_2
   num_gpus: 2
   working_dir: "/vllm-workspace/"
@@ -3686,7 +3686,7 @@ steps:
 
 - label: COPY B Distributed Tests (4xA100-4xMI325) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_4
   num_gpus: 4
   working_dir: "/vllm-workspace/tests"
@@ -3698,7 +3698,7 @@ steps:
 
 - label: COPY B Distributed Torchrun + Examples (4 GPUs) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_4
   num_gpus: 4
   working_dir: "/vllm-workspace/tests"
@@ -3716,7 +3716,7 @@ steps:
 
 - label: COPY B Elastic EP Scaling Test # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_4
   num_gpus: 4
   working_dir: "/vllm-workspace/tests"
@@ -3725,7 +3725,7 @@ steps:
 
 - label: COPY B RayExecutorV2 (4 GPUs) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_4
   num_gpus: 4
   working_dir: "/vllm-workspace/tests"
@@ -3738,7 +3738,7 @@ steps:
 
 - label: COPY B Distributed Tests (8xH100-8xMI325) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_8
   num_gpus: 8
   working_dir: "/vllm-workspace/tests"
@@ -3749,7 +3749,7 @@ steps:
 
 - label: COPY B Entrypoints Unit Tests # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   fast_check: true
   working_dir: "/vllm-workspace/tests"
@@ -3759,7 +3759,7 @@ steps:
 
 - label: COPY B Entrypoints Integration (LLM) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   fast_check: true
   working_dir: "/vllm-workspace/tests"
@@ -3771,7 +3771,7 @@ steps:
 
 - label: COPY B Entrypoints Integration (API Server) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   fast_check: true
   working_dir: "/vllm-workspace/tests"
@@ -3783,7 +3783,7 @@ steps:
 
 - label: COPY B Entrypoints Integration (API Server OpenAI - Part 1) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   fast_check: true
   working_dir: "/vllm-workspace/tests"
@@ -3793,7 +3793,7 @@ steps:
 
 - label: COPY B Entrypoints Integration (API Server OpenAI - Part 2) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   fast_check: true
   working_dir: "/vllm-workspace/tests"
@@ -3804,7 +3804,7 @@ steps:
 
 - label: COPY B Entrypoints Integration (API Server Generate) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   fast_check: true
   working_dir: "/vllm-workspace/tests"
@@ -3817,7 +3817,7 @@ steps:
 
 - label: COPY B Entrypoints Integration (Responses API) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   fast_check: true
   working_dir: "/vllm-workspace/tests"
@@ -3827,7 +3827,7 @@ steps:
 
 - label: COPY B Entrypoints Integration (Speech to Text) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   fast_check: true
   working_dir: "/vllm-workspace/tests"
@@ -3837,7 +3837,7 @@ steps:
 
 - label: COPY B Entrypoints Integration (Multimodal)
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   fast_check: true
   working_dir: "/vllm-workspace/tests"
@@ -3847,7 +3847,7 @@ steps:
 
 - label: COPY B Entrypoints Integration (Pooling) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   fast_check: true
   working_dir: "/vllm-workspace/tests"
@@ -3857,7 +3857,7 @@ steps:
 
 - label: COPY B OpenAI API correctness # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -3868,7 +3868,7 @@ steps:
 
 - label: COPY B DeepSeek V2-Lite Prefetch Offload Accuracy (H100-MI325) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   num_gpus: 1
   working_dir: "/vllm-workspace"
@@ -3877,7 +3877,7 @@ steps:
 
 - label: COPY B LM Eval Small Models # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -3885,7 +3885,7 @@ steps:
 
 - label: COPY B MRCR Eval Small Models # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -3893,7 +3893,7 @@ steps:
 
 - label: COPY B LM Eval Small Models (MI325) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/.buildkite/lm-eval-harness"
   commands:
@@ -3901,7 +3901,7 @@ steps:
 
 - label: COPY B Multi-Modal Accuracy Eval (Small Models) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/.buildkite/lm-eval-harness"
   commands:
@@ -3909,7 +3909,7 @@ steps:
 
 - label: COPY B GPQA Eval (GPT-OSS) (2xH100-2xMI325) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_2
   num_gpus: 2
   working_dir: "/vllm-workspace/tests"
@@ -3919,7 +3919,7 @@ steps:
 
 - label: COPY B LM Eval Small Models (2xB200-2xMI325) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_2
   num_gpus: 2
   working_dir: "/vllm-workspace/tests"
@@ -3928,7 +3928,7 @@ steps:
 
 - label: COPY B DeepSeek V2-Lite Sync EPLB Accuracy (4xH100-4xMI325) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_4
   num_gpus: 4
   working_dir: "/vllm-workspace"
@@ -3937,7 +3937,7 @@ steps:
 
 - label: COPY B LM Eval Large Models (4xA100-4xMI325) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_4
   num_gpus: 4
   working_dir: "/vllm-workspace/.buildkite/lm-eval-harness"
@@ -3947,7 +3947,7 @@ steps:
 
 - label: COPY B Qwen3-30B-A3B-FP8-block Sync EPLB Accuracy (4xH100-4xMI325) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_4
   num_gpus: 4
   working_dir: "/vllm-workspace"
@@ -3956,7 +3956,7 @@ steps:
 
 - label: COPY B Qwen3-30B-A3B-FP8 DP4 Async EPLB Accuracy (4xH100-4xMI325) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_4
   num_gpus: 4
   working_dir: "/vllm-workspace"
@@ -3965,7 +3965,7 @@ steps:
 
 - label: COPY B Qwen3-Next-80B-A3B-Instruct MTP Async EPLB Accuracy # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_4
   num_gpus: 4
   working_dir: "/vllm-workspace"
@@ -3974,7 +3974,7 @@ steps:
 
 - label: COPY B LM Eval Large Models (8xH200-8xMI325) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_8
   num_gpus: 8
   working_dir: "/vllm-workspace/tests"
@@ -3984,7 +3984,7 @@ steps:
 
 - label: COPY B ROCm LM Eval Large Models (8 GPUs) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_8
   num_gpus: 8
   working_dir: "/vllm-workspace/.buildkite/lm-eval-harness"
@@ -3996,7 +3996,7 @@ steps:
 
 - label: COPY B Examples # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/examples"
   commands:
@@ -4026,7 +4026,7 @@ steps:
 
 - label: COPY B vLLM IR Tests # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/"
   commands:
@@ -4035,7 +4035,7 @@ steps:
 
 - label: COPY B Kernels Attention Test %N # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   parallelism: 2
   working_dir: "/vllm-workspace/tests"
@@ -4044,7 +4044,7 @@ steps:
 
 - label: COPY B Kernels Core Operation Test # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -4052,7 +4052,7 @@ steps:
 
 - label: COPY B Kernels KDA Test # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -4060,7 +4060,7 @@ steps:
 
 - label: COPY B Kernels MoE Test %N # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   parallelism: 5
   working_dir: "/vllm-workspace/tests"
@@ -4070,7 +4070,7 @@ steps:
 
 - label: COPY B Kernels Quantization Test %N # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   parallelism: 2
   working_dir: "/vllm-workspace/tests"
@@ -4079,7 +4079,7 @@ steps:
 
 - label: COPY B Kernels FP8 MoE Test (2xH100-2xMI325) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_2
   num_gpus: 2
   working_dir: "/vllm-workspace/tests"
@@ -4090,7 +4090,7 @@ steps:
 
 - label: COPY B LoRA %N # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   parallelism: 4
   working_dir: "/vllm-workspace/tests"
@@ -4099,7 +4099,7 @@ steps:
 
 - label: COPY B LoRA TP (Distributed) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_4
   num_gpus: 4
   working_dir: "/vllm-workspace/tests"
@@ -4115,7 +4115,7 @@ steps:
 
 - label: COPY B Model Executor # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -4128,7 +4128,7 @@ steps:
 
 - label: COPY B Model Runner V2 Core Tests # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -4142,7 +4142,7 @@ steps:
 
 - label: COPY B Model Runner V2 Examples # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/examples"
   commands:
@@ -4164,7 +4164,7 @@ steps:
 
 - label: COPY B Model Runner V2 Distributed (2 GPUs) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_2
   num_gpus: 2
   working_dir: "/vllm-workspace/tests"
@@ -4177,7 +4177,7 @@ steps:
 
 - label: COPY B Model Runner V2 Pipeline Parallelism (4 GPUs) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_4
   num_gpus: 4
   working_dir: "/vllm-workspace/tests"
@@ -4189,7 +4189,7 @@ steps:
 
 - label: COPY B Model Runner V2 Spec Decode # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -4204,7 +4204,7 @@ steps:
 
 - label: COPY B Basic Models Tests (Extra Initialization) %N # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   parallelism: 6
   working_dir: "/vllm-workspace/tests"
@@ -4213,7 +4213,7 @@ steps:
 
 - label: COPY B Basic Models Tests (Initialization) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -4221,7 +4221,7 @@ steps:
 
 - label: COPY B Basic Models Tests (Other) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -4231,7 +4231,7 @@ steps:
 
 - label: COPY B Language Models Test (Extended Pooling)  # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -4239,7 +4239,7 @@ steps:
 
 - label: COPY B Language Models Tests (Standard) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -4248,7 +4248,7 @@ steps:
 
 - label: COPY B Language Models Tests (Extra Standard) %N # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   parallelism: 2
   working_dir: "/vllm-workspace/tests"
@@ -4260,7 +4260,7 @@ steps:
 
 - label: COPY B Multi-Modal Models (Extended Generation 1) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -4269,7 +4269,7 @@ steps:
 
 - label: COPY B Multi-Modal Models (Extended Generation 2) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -4278,7 +4278,7 @@ steps:
 
 - label: COPY B Multi-Modal Models (Extended Generation 3) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -4286,7 +4286,7 @@ steps:
 
 - label: "COPY B Multi-Modal Models (Standard) 1: qwen2" # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -4295,7 +4295,7 @@ steps:
 
 - label: "COPY B Multi-Modal Models (Standard) 3: llava + qwen2_vl" # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -4304,7 +4304,7 @@ steps:
 
 - label: "COPY B Multi-Modal Models (Standard) 4: other + whisper" # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -4314,7 +4314,7 @@ steps:
 
 - label: COPY B Multi-Modal Processor # 1h 42m
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -4322,7 +4322,7 @@ steps:
 
 - label: COPY B Multi-Modal Processor (CPU) %N # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   parallelism: 4
   working_dir: "/vllm-workspace/tests"
@@ -4333,7 +4333,7 @@ steps:
 
 - label: COPY B Quantized Models Test # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -4343,7 +4343,7 @@ steps:
 
 - label: COPY B Transformers Nightly Models (Shardable) %N # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   parallelism: 4
   working_dir: "/vllm-workspace/"
@@ -4354,7 +4354,7 @@ steps:
 
 - label: COPY B Transformers Nightly Models (Single) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/"
   commands:
@@ -4369,7 +4369,7 @@ steps:
 
 - label: COPY B Plugin Tests (2 GPUs) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_2
   num_gpus: 2
   working_dir: "/vllm-workspace/tests"
@@ -4415,7 +4415,7 @@ steps:
 
 - label: COPY B GGUF Plugin # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   soft_fail: true
   working_dir: "/vllm-workspace/tests"
@@ -4427,7 +4427,7 @@ steps:
 
 - label: COPY B Rust Frontend OpenAI Coverage # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -4443,7 +4443,7 @@ steps:
 
 - label: COPY B Rust Frontend Serve Admin Coverage # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -4457,7 +4457,7 @@ steps:
 
 - label: COPY B Rust Frontend Core Correctness # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -4467,7 +4467,7 @@ steps:
 
 - label: COPY B Rust Frontend Tool Use # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -4477,7 +4477,7 @@ steps:
 
 - label: COPY B Rust Frontend Distributed # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_4
   num_gpus: 4
   working_dir: "/vllm-workspace/tests"
@@ -4492,7 +4492,7 @@ steps:
 
 - label: COPY B Quantization # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -4512,7 +4512,7 @@ steps:
 
 - label: COPY B ROCm AITER Ops Test # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -4522,7 +4522,7 @@ steps:
 
 - label: COPY B Samplers Test # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -4532,7 +4532,7 @@ steps:
 
 - label: COPY B Regression # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -4543,7 +4543,7 @@ steps:
 
 - label: COPY B Ray Dependency Compatibility Check # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/"
   commands:
@@ -4553,7 +4553,7 @@ steps:
 
 - label: COPY B Acceptance Length Test (Large Models) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -4562,7 +4562,7 @@ steps:
 
 - label: COPY B e2e Scheduling (1 GPU) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -4570,7 +4570,7 @@ steps:
 
 - label: COPY B Engine (1 GPU) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -4579,7 +4579,7 @@ steps:
 
 - label: COPY B Spec Decode Draft Model # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -4587,7 +4587,7 @@ steps:
 
 - label: COPY B Spec Decode Eagle # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -4595,7 +4595,7 @@ steps:
 
 - label: COPY B Spec Decode Ngram + Suffix # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -4603,7 +4603,7 @@ steps:
 
 - label: COPY B Spec Decode Speculators + MTP # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -4611,7 +4611,7 @@ steps:
 
 - label: COPY B Speculators Correctness # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -4620,7 +4620,7 @@ steps:
 
 - label: COPY B V1 Spec Decode # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -4628,7 +4628,7 @@ steps:
 
 - label: COPY B Extract Hidden States Integration # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_2
   num_gpus: 2
   working_dir: "/vllm-workspace/tests"
@@ -4638,7 +4638,7 @@ steps:
 
 - label: COPY B V1 attention (H100-MI325) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -4646,7 +4646,7 @@ steps:
 
 - label: COPY B V1 Core + KV + Metrics # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -4663,7 +4663,7 @@ steps:
 
 - label: COPY B V1 others (CPU) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -4675,7 +4675,7 @@ steps:
 
 - label: COPY B V1 Sample + Logits # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -4687,7 +4687,7 @@ steps:
 
 - label: COPY B Distributed DP Tests (2 GPUs) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_2
   num_gpus: 2
   working_dir: "/vllm-workspace/tests"
@@ -4700,7 +4700,7 @@ steps:
 
 - label: COPY B Metrics, Tracing (2 GPUs) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_2
   num_gpus: 2
   working_dir: "/vllm-workspace/tests"
@@ -4714,7 +4714,7 @@ steps:
 
 - label: COPY B V1 e2e (2 GPUs) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_2
   num_gpus: 2
   working_dir: "/vllm-workspace/tests"
@@ -4723,7 +4723,7 @@ steps:
 
 - label: COPY B NixlConnector PD + Spec Decode acceptance (2 GPUs) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_2
   num_gpus: 2
   working_dir: "/vllm-workspace/tests"
@@ -4733,7 +4733,7 @@ steps:
 
 - label: COPY B CrossLayer KV layout Distributed NixlConnector PD accuracy tests (4 GPUs) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_4
   num_gpus: 4
   working_dir: "/vllm-workspace/tests"
@@ -4743,7 +4743,7 @@ steps:
 
 - label: COPY B Distributed DP Tests (4 GPUs) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_4
   num_gpus: 4
   working_dir: "/vllm-workspace/tests"
@@ -4759,7 +4759,7 @@ steps:
 
 - label: COPY B Distributed NixlConnector PD accuracy (4 GPUs)  # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_4
   num_gpus: 4
   working_dir: "/vllm-workspace/tests"
@@ -4769,7 +4769,7 @@ steps:
 
 - label: COPY B DP EP Distributed NixlConnector PD accuracy tests (4 GPUs) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_4
   num_gpus: 4
   working_dir: "/vllm-workspace/tests"
@@ -4779,7 +4779,7 @@ steps:
 
 - label: COPY B Hybrid SSM NixlConnector PD accuracy tests (4 GPUs) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_4
   num_gpus: 4
   working_dir: "/vllm-workspace/tests"
@@ -4789,7 +4789,7 @@ steps:
 
 - label: COPY B Hybrid SSM NixlConnector PD prefix cache test (2 GPUs) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_2
   num_gpus: 2
   working_dir: "/vllm-workspace/tests"
@@ -4799,7 +4799,7 @@ steps:
 
 - label: COPY B MultiConnector (Nixl+Offloading) PD accuracy (2 GPUs) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_2
   num_gpus: 2
   working_dir: "/vllm-workspace/tests"
@@ -4809,7 +4809,7 @@ steps:
 
 - label: COPY B MultiConnector (Nixl+Offloading) PD edge cases (2 GPUs) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_2
   num_gpus: 2
   working_dir: "/vllm-workspace/tests"
@@ -4819,7 +4819,7 @@ steps:
 
 - label: COPY B V1 e2e (4 GPUs) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_4
   num_gpus: 4
   working_dir: "/vllm-workspace/tests"
@@ -4828,7 +4828,7 @@ steps:
 
 - label: COPY B V1 e2e (4xH100-4xMI325) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_4
   num_gpus: 4
   commands:
@@ -4838,7 +4838,7 @@ steps:
 
 - label: COPY B Weight Loading Multiple GPU # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_2
   num_gpus: 2
   working_dir: "/vllm-workspace/tests"
@@ -4847,7 +4847,7 @@ steps:
 
 - label: COPY B Weight Loading Multiple GPU - Large Models # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_2
   num_gpus: 2
   working_dir: "/vllm-workspace/tests"
@@ -4864,7 +4864,7 @@ steps:
 
 - label: COPY B Distributed Compile + RPC Tests (2 GPUs) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_2
   num_gpus: 2
   working_dir: "/vllm-workspace/tests"
@@ -4877,7 +4877,7 @@ steps:
 
 - label: COPY B Distributed Torchrun + Shutdown Tests (2 GPUs) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_2
   num_gpus: 2
   working_dir: "/vllm-workspace/tests"
@@ -4889,7 +4889,7 @@ steps:
 
 - label: COPY B Distributed Compile + Comm (4 GPUs) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_4
   num_gpus: 4
   working_dir: "/vllm-workspace/tests"
@@ -4904,7 +4904,7 @@ steps:
 
 - label: COPY B Engine # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -4914,7 +4914,7 @@ steps:
 
 - label: COPY B LM Eval Large Models (4xH100-4xMI325) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_4
   num_gpus: 4
   working_dir: "/vllm-workspace/.buildkite/lm-eval-harness"
@@ -4926,7 +4926,7 @@ steps:
 
 - label: COPY B Language Models Test (Extended Generation) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -4936,7 +4936,7 @@ steps:
 
 - label: COPY B Language Models Tests (Hybrid) %N # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   parallelism: 2
   working_dir: "/vllm-workspace/tests"
@@ -4949,7 +4949,7 @@ steps:
 
 - label: COPY B Multi-Modal Models (Extended Pooling) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -4957,7 +4957,7 @@ steps:
 
 - label: "COPY B Multi-Modal Models (Standard) 2: qwen3 + gemma" # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -4968,7 +4968,7 @@ steps:
 
 - label: COPY B Python-only Installation # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
+  mirror_hardwares: [amdexperimental, amdproduction, amdshadow]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   commands:
