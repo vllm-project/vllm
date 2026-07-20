@@ -69,7 +69,7 @@ This guide will help you quickly get started with vLLM to perform:
 
     vLLM supports Intel GPUs through the XPU backend. Pre-built XPU wheels will be available soon.
 
-    Official Docker images for Intel GPUs is added to the vLLM release starting from v0.26.0. Nightly Docker image is also available as [vllm/vllm-openai-xpu:nightly](https://hub.docker.com/r/vllm/vllm-openai-xpu/tags).
+    Official Docker images for Intel GPUs are added to the vLLM release starting from v0.26.0. Nightly Docker image is also available as [vllm/vllm-openai-xpu:nightly](https://hub.docker.com/r/vllm/vllm-openai-xpu/tags).
 
     !!! tip
         For more detailed instructions, including building from source and Docker image setup, please refer to the [GPU installation guide](installation/gpu.md) and select the "Intel XPU" tab.
