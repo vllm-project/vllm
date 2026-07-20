@@ -1698,33 +1698,50 @@ def disable_deepgemm_ue8m0(monkeypatch):
         is_deep_gemm_e8m0_used.cache_clear()
 
 
+def _should_clean_gpu_memory_between_tests() -> bool:
+    setting = os.getenv("VLLM_TEST_CLEAN_GPU_MEMORY")
+    if setting == "1":
+        return True
+    if setting == "0":
+        return False
+    # ROCm reclaims VRAM lazily; default to waiting between tests on ROCm CI.
+    return current_platform.is_rocm()
+
+
 @pytest.fixture(autouse=True)
 def clean_gpu_memory_between_tests():
-    if os.getenv("VLLM_TEST_CLEAN_GPU_MEMORY", "0") != "1":
+    if not _should_clean_gpu_memory_between_tests():
         yield
         return
 
-    # Wait for GPU memory to be cleared before starting the test
     import gc
 
-    from tests.utils import wait_for_gpu_memory_to_clear
+    from tests.utils import wait_for_gpu_memory_to_clear, wait_for_rocm_memory_to_settle
 
     num_gpus = torch.accelerator.device_count()
-    if num_gpus > 0:
+
+    def _wait_for_settled_gpu_memory() -> None:
+        if num_gpus <= 0:
+            return
         try:
-            wait_for_gpu_memory_to_clear(
-                devices=list(range(num_gpus)),
-                threshold_ratio=0.1,
-            )
+            if current_platform.is_rocm():
+                wait_for_rocm_memory_to_settle()
+            else:
+                wait_for_gpu_memory_to_clear(
+                    devices=list(range(num_gpus)),
+                    threshold_ratio=0.1,
+                )
         except ValueError as e:
             logger.info("Failed to clean GPU memory: %s", e)
 
+    _wait_for_settled_gpu_memory()
+
     yield
 
-    # Clean up GPU memory after the test
     if torch.cuda.is_available():
         torch.accelerator.empty_cache()
         gc.collect()
+    _wait_for_settled_gpu_memory()
 
 
 @pytest.fixture
