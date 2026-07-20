@@ -349,7 +349,7 @@ impl BenchConfig {
         let tokenizer_id = if args.skip_tokenizer_init {
             None
         } else {
-            Some(args.tokenizer.clone().or_else(|| args.model.clone()).unwrap_or_default())
+            args.tokenizer.clone().or_else(|| args.model.clone())
         };
 
         // Resolve input/output lengths
@@ -1078,6 +1078,14 @@ mod tests {
         let config = BenchConfig::from_args(&args).unwrap();
 
         assert_eq!(config.max_model_len, Some(4096));
+    }
+
+    #[test]
+    fn test_tokenizer_id_deferred_when_model_is_unspecified() {
+        let args = parse_args(["vllm-bench"]);
+        let config = BenchConfig::from_args(&args).unwrap();
+
+        assert_eq!(config.tokenizer_id, None);
     }
 
     #[test]
