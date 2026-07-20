@@ -10,7 +10,9 @@ steps:
   - vllm/engine/arg_utils.py
   - vllm/config/model.py
   - vllm/model_executor
+  - vllm/model_executor/warmup
   - tests/model_executor
+  - tests/model_executor/test_jit_warmup.py
   - tests/entrypoints/openai/completion/test_tensorizer_entrypoint.py
   commands:
     - apt-get update && apt-get install -y curl libsodium23
@@ -34,7 +36,9 @@ steps:
       - vllm/engine/arg_utils.py
       - vllm/config/model.py
       - vllm/model_executor
+      - vllm/model_executor/warmup
       - tests/model_executor
+      - tests/model_executor/test_jit_warmup.py
       - tests/entrypoints/openai/completion/test_tensorizer_entrypoint.py
       - vllm/_aiter_ops.py
       - vllm/platforms/rocm.py

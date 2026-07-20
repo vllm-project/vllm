@@ -111,6 +111,26 @@ def get_sliding_window_size_in_chunks(
     return None
 
 
+def is_store_reachable_swa_chunk(
+    absolute_chunk_index: int,
+    storable_chunk_count: int,
+    alignment_chunk_count: int | None,
+    sliding_window_chunks: int | None,
+    is_eagle_group: bool,
+) -> bool:
+    """Return whether an SWA chunk can participate in an external-cache hit."""
+    if alignment_chunk_count is None:
+        return True
+    assert sliding_window_chunks is not None
+    position_in_segment = absolute_chunk_index % alignment_chunk_count
+    segment_start = absolute_chunk_index - position_in_segment
+    actual_segment_length = min(
+        alignment_chunk_count, storable_chunk_count - segment_start
+    )
+    reachable_tail = sliding_window_chunks + int(is_eagle_group)
+    return position_in_segment >= actual_segment_length - reachable_tail
+
+
 def resolve_mamba_align_size(
     spec: "OffloadingSpec", kv_cache_config: KVCacheConfig
 ) -> int | None:
@@ -990,9 +1010,6 @@ class OffloadingConnectorScheduler:
                 ]
                 assert len(offload_keys) == len(offload_block_ids)
 
-                alignment_chunk_count = group_config.alignment_chunk_count
-                tail = group_config.sliding_window_size_in_chunks
-
                 for key_idx, (offload_key, block_id) in enumerate(
                     zip(offload_keys, offload_block_ids)
                 ):
@@ -1000,15 +1017,18 @@ class OffloadingConnectorScheduler:
                         continue
                     # Skip SWA chunks that can never serve a load hit:
                     # within each full-attention alignment segment, only the
-                    # trailing `tail` chunks are reachable by
-                    # _sliding_window_lookup. For DeepSeek V4 with 100K
-                    # tokens this reduces SWA stores by ~78%.
-                    if alignment_chunk_count is not None:
-                        assert tail is not None
-                        abs_chunk_idx = start_chunk_idx + key_idx
-                        pos_in_segment = abs_chunk_idx % alignment_chunk_count
-                        if pos_in_segment < alignment_chunk_count - tail:
-                            continue
+                    # trailing chunks queried by _sliding_window_lookup are
+                    # reachable. EAGLE/MTP requires one additional chunk that
+                    # lookup later drops as its volatile draft tail.
+                    abs_chunk_idx = start_chunk_idx + key_idx
+                    if not is_store_reachable_swa_chunk(
+                        abs_chunk_idx,
+                        num_chunks,
+                        group_config.alignment_chunk_count,
+                        group_config.sliding_window_size_in_chunks,
+                        group_config.is_eagle_group,
+                    ):
+                        continue
                     new_offload_keys.append(offload_key)
 
             if not new_offload_keys:
