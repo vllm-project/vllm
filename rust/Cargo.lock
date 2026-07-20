@@ -6321,9 +6321,9 @@ checksum = "9edde0db4769d2dc68579893f2306b26c6ecfbe0ef499b013d731b7b9247e0b9"
 
 [[package]]
 name = "xgrammar-structural-tag"
-version = "0.1.0+xgrammar.0.2.2.4d145cc"
+version = "0.2.0+xgrammar.0.2.4.dd729e7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2436dea2393d55a3b188588aa300c5a8afe8f45a77da52c611fb4498a6c876e6"
+checksum = "d4d24c842efc3c24e9756aa426d530cbdac0980e49af223cb384e276e981ca0a"
 dependencies = [
  "auto_impl",
  "serde",
