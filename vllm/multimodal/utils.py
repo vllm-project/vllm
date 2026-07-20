@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import bisect
 import mimetypes
 from collections import defaultdict
 from collections.abc import Generator, Sequence
@@ -18,6 +19,7 @@ from vllm.utils.import_utils import LazyLoader
 from .hasher import MultiModalHasher
 from .inputs import (
     BatchedTensorInputs,
+    MultiModalFeatureSpec,
     MultiModalFieldElem,
     MultiModalKwargsItem,
     MultiModalSharedField,
@@ -56,13 +58,14 @@ def encode_audio_url(
 def encode_image_base64(
     image: Image.Image,
     *,
-    image_mode: str = "RGB",
+    image_mode: str | None = "RGB",
     format: str = "PNG",
 ) -> str:
     """
     Encode a pillow image to base64 format.
 
     By default, the image is converted into RGB format before being encoded.
+    Pass `image_mode=None` to keep the original image mode.
     """
     image_io = ImageMediaIO(image_mode=image_mode)
     return image_io.encode_base64(image, image_format=format)
@@ -71,13 +74,14 @@ def encode_image_base64(
 def encode_image_url(
     image: Image.Image,
     *,
-    image_mode: str = "RGB",
+    image_mode: str | None = "RGB",
     format: str = "PNG",
 ) -> str:
     """
     Encode a pillow image as a data URL.
 
     By default, the image is converted into RGB format before being encoded.
+    Pass `image_mode=None` to keep the original image mode.
     """
     image_b64 = encode_image_base64(image, image_mode=image_mode, format=format)
     mimetype = mimetypes.types_map.get("." + format.lower(), "image")
@@ -107,6 +111,29 @@ def encode_video_url(
         mimetype = mimetypes.types_map.get("." + format.lower(), "video")
 
     return f"data:{mimetype};base64,{video_b64}"
+
+
+def get_mm_features_in_window(
+    mm_features: list[MultiModalFeatureSpec],
+    start: int,
+    end: int,
+) -> tuple[int, int]:
+    """Return (lo, hi) indices for features overlapping [start, end).
+
+    Assumes mm_features are sorted by offset and non-overlapping, so
+    offset + length is also sorted.
+    """
+    lo = bisect.bisect_left(
+        mm_features,
+        start + 1,
+        key=lambda f: f.mm_position.offset + f.mm_position.length,
+    )
+    hi = bisect.bisect_left(
+        mm_features,
+        end,
+        key=lambda f: f.mm_position.offset,
+    )
+    return lo, hi
 
 
 def argsort_mm_positions(
@@ -321,3 +348,41 @@ def fetch_video(
         allowed_local_media_path="/",
     )
     return media_connector.fetch_video(video_url)
+
+
+def set_mm_embedding_modality(embed: "torch.Tensor", modality: str) -> "torch.Tensor":
+    """Attach modality metadata to a gathered multimodal embedding tensor.
+
+    Used by interleaved Omni merge paths that need to group embeddings by
+    modality without threading a parallel modalities list through
+    ``embed_input_ids``.
+    """
+    embed.modality = modality  # type: ignore[attr-defined]
+    return embed
+
+
+def copy_mm_embedding_modality(
+    src: "torch.Tensor", dst: "torch.Tensor"
+) -> "torch.Tensor":
+    """Copy ``modality`` from ``src`` onto ``dst`` if present."""
+    modality = getattr(src, "modality", None)
+    if modality is not None:
+        dst.modality = modality  # type: ignore[attr-defined]
+    return dst
+
+
+def get_mm_embedding_modalities(
+    multimodal_embeddings: Sequence["torch.Tensor"],
+) -> list[str]:
+    """Collect per-embedding modalities previously set on the tensors."""
+    modalities: list[str] = []
+    for i, emb in enumerate(multimodal_embeddings):
+        modality = getattr(emb, "modality", None)
+        if modality is None:
+            raise ValueError(
+                f"Missing modality on multimodal embedding at index {i}. "
+                "Encoder gather must set embed.modality before interleaved "
+                "audio-in-video merge."
+            )
+        modalities.append(modality)
+    return modalities

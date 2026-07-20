@@ -2,8 +2,7 @@
 
 !!! note
     We currently support pooling models primarily for convenience. This is not guaranteed to provide any performance
-improvements over using Hugging Face Transformers or Sentence Transformers directly.
-
+    improvements over using Hugging Face Transformers or Sentence Transformers directly.
     We plan to optimize pooling models in vLLM. Please comment on <https://github.com/vllm-project/vllm/issues/21796> if you have any suggestions!
 
 ## What are pooling models?
@@ -33,6 +32,12 @@ from large language models, allowing them to benefit from the continuous improve
 similarity enables them to reuse much of vLLM’s infrastructure. If compatible, we would be happy to help them leverage
 the latest features of vLLM as well.
 
+### Cheat Sheet
+
+As illustrated in the figure below, we have summarized the relationships among the key elements of pooling models as a takeaway.
+
+![Cheat Sheet](../../assets/models/pooling_models/cheat_sheet.svg)
+
 ### Sequence-wise Task and Token-wise Task
 
 The key distinction between sequence-wise task and token-wise task lies in their output granularity: sequence-wise task
@@ -57,9 +62,11 @@ please refer to [IO Processor Plugins](../../design/io_processor_plugins.md).
 
 !!! note
     Within classification tasks, there is a specialized subcategory: Cross-encoder (aka reranker) models. These models
-are a subset of classification models that accept two prompts as input and output num_labels equal to 1.
+    are a subset of classification models that accept two prompts as input and output num_labels equal to 1.
 
 ### Pooling Types
+
+![Pooling Types](../../assets/models/pooling_models/pooling_types.svg)
 
 | Pooling Tasks  | Granularity   | Description                                                                                                                                                                                       |
 |----------------|---------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
@@ -70,6 +77,8 @@ are a subset of classification models that accept two prompts as input and outpu
 | `STEP` pooling | Token-wise    | Filters and outputs the last_hidden_states corresponding to the token IDs returned by returned_token_ids.                                                                                         |
 
 ### Score Types
+
+![Score Types](../../assets/models/pooling_models/score_types.svg)
 
 The scoring models is designed to compute similarity scores between two input prompts. It supports three model types
 (aka `score_type`): `cross-encoder`, `late-interaction`, and `bi-encoder`.
@@ -133,7 +142,7 @@ enabling the corresponding APIs.
 
 The [classify][vllm.LLM.classify] method outputs a probability vector for each prompt.
 It is primarily designed for [classification models](classify.md).
-For more information about `LLM.embed`, see [this page](classify.md#offline-inference).
+For more information about `LLM.classify`, see [this page](classify.md#offline-inference).
 
 ### `LLM.embed`
 
@@ -170,12 +179,12 @@ Our online Server provides endpoints that correspond to the offline APIs:
 
 - Corresponding to `LLM.embed`:
     - [Cohere Embed API](embed.md#cohere-embed-api) (`/v2/embed`)
-    - [Openai-compatible Embeddings API](embed.md#openai-compatible-embeddings-api) (`/v1/embeddings`)
+    - [OpenAI-compatible Embeddings API](embed.md#openai-compatible-embeddings-api) (`/v1/embeddings`)
 - Corresponding to `LLM.classify`:
     - [Classification API](classify.md#online-serving)(`/classify`)
 - Corresponding to `LLM.score`:
-    - [Score API](scoring.md#score-api)(`/score`)
-    - [Rerank API](scoring.md#rerank-api) (`/rerank`, `/v1/rerank`, `/v2/rerank`)
+    - [Score API](scoring.md#score-api) (`/score`, `/v1/score`)
+    - [Cohere Rerank API](scoring.md#rerank-api) (`/rerank`, `/v1/rerank`, `/v2/rerank`)
 - Pooling API (`/pooling`) is similar to `LLM.encode`, being applicable to all types of pooling models.
 
 The following introduces the Pooling API. For other APIs, please refer to the link above.
@@ -270,11 +279,66 @@ the pooler assigned to each task has the following attributes by default:
 | `embed`    | `LAST`       | ✅︎            | ❌      |
 | `classify` | `LAST`       | ❌            | ✅︎      |
 
-When loading [Sentence Transformers](https://huggingface.co/sentence-transformers) models,
-its Sentence Transformers configuration file (`modules.json`) takes priority over the model's defaults.
+#### Resolution precedence
 
-You can further customize this via the `--pooler-config` option,
-which takes priority over both the model's and Sentence Transformers' defaults.
+The pooling method and `use_activation` are resolved per field. An explicitly
+set field in `--pooler-config` takes precedence over Sentence Transformers
+metadata, which in turn takes precedence over the model architecture or task
+default. Fields left unset continue through the chain independently.
+
+The current `PoolerConfig` has no `normalize` or `activation` field.
+`use_activation` controls whether the task's constructed normalization or
+classification activation is applied.
+
+| Field | Source precedence | How to override |
+| ----- | ----------------- | --------------- |
+| Pooling method (`pooling_type`) | `--pooler-config` > boolean `pooling_mode_*` fields in the Pooling module referenced by Sentence Transformers `modules.json` > architecture default (`LAST` for sequence pooling and `ALL` for token pooling unless the architecture overrides it) | Set `{"pooling_type": "CLS"}`, or set `seq_pooling_type` / `tok_pooling_type` explicitly. |
+| Embedding normalization (`use_activation`) | `--pooler-config` > Sentence Transformers modules (`true` when a Normalize module is present, otherwise `false`) > pooling-task default (`true`) when no Sentence Transformers Pooling module is found | Set `{"use_activation": false}` to return unnormalized embeddings. |
+| Classification activation function | Hugging Face `problem_type` > Sentence Transformers activation metadata > sigmoid or softmax selected from the label count | The function cannot be selected through `--pooler-config`; set `{"use_activation": false}` to return logits instead. |
+
+Sentence Transformers configurations using the newer compact `pooling_mode`
+string are not currently parsed; see [issue #45995](https://github.com/vllm-project/vllm/issues/45995).
+
+For converted models and predefined models using the standard DispatchPooler
+adapters, `embed` and `token_embed` construct an L2-normalization head, while
+`classify` and `token_classify` construct the selected classification activation.
+In both cases, `use_activation` controls whether that head is applied. Models with
+custom poolers can implement different behavior.
+
+To inspect the resolved fields without loading model weights:
+
+```python
+from vllm.config import ModelConfig, PoolerConfig
+from vllm.model_executor.layers.pooler.activations import get_act_fn
+
+
+def inspect(requested: PoolerConfig) -> None:
+    model_config = ModelConfig(
+        "intfloat/e5-small",
+        runner="pooling",
+        pooler_config=requested,
+    )
+    resolved = model_config.pooler_config
+    assert resolved is not None
+    print(
+        {
+            "seq_pooling_type": resolved.seq_pooling_type,
+            "tok_pooling_type": resolved.tok_pooling_type,
+            "use_activation": resolved.use_activation,
+            "sequence_classification_activation": type(
+                get_act_fn(model_config.hf_config)
+            ).__name__,
+        }
+    )
+
+
+inspect(PoolerConfig())
+inspect(PoolerConfig(pooling_type="CLS", use_activation=False))
+```
+
+For `intfloat/e5-small`, the first result contains `MEAN`, `ALL`, and `True`.
+The second contains `CLS`, `ALL`, and `False`. Both report the classification
+activation that the standard sequence-classification adapter would construct.
 
 ## Removed Features
 
@@ -292,7 +356,7 @@ Pooling models now support token-wise task.
 
 ### Score task
 
-`score` task have has been removed in v0.21, use `classify` instead. Only when a classification model outputs num_labels
+`score` task has been removed in v0.21, use `classify` instead. Only when a classification model outputs num_labels
 equal to 1 can it be used as a scoring model and have its scoring API enabled.
 
 ### Pooling multitask support

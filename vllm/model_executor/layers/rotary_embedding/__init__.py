@@ -211,10 +211,14 @@ def get_rope(
             )
         elif "factor" in rope_parameters:
             scaling_factor = rope_parameters["factor"]
+            max_trained_positions = rope_parameters.get(
+                "max_trained_positions", max_position
+            )
             rotary_emb = DynamicNTKScalingRotaryEmbedding(
                 head_size,
                 rotary_dim,
                 max_position,
+                max_trained_positions,
                 base,
                 is_neox_style,
                 scaling_factor,

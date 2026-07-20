@@ -16,7 +16,11 @@ from vllm.model_executor.layers.quantization.online.fp8 import (
     Fp8PerTensorOnlineLinearMethod,
     Fp8PerTensorOnlineMoEMethod,
 )
+from vllm.model_executor.layers.quantization.online.nvfp4 import (
+    Nvfp4OnlineMoEMethod,
+)
 from vllm.platforms import current_platform
+from vllm.utils.flashinfer import has_flashinfer_trtllm_fused_moe
 
 
 @pytest.mark.skipif(
@@ -40,13 +44,12 @@ from vllm.platforms import current_platform
             Fp8PerBlockOnlineLinearMethod,
             Fp8PerBlockOnlineMoEMethod,
         ),
-        # quantization='online with linear_scheme_override and
-        # moe_scheme_override
+        # quantization='online' with per-layer-kind overrides
         (
             "online",
             {
-                "linear_scheme_override": "fp8_per_block",
-                "moe_scheme_override": "fp8_per_tensor",
+                "linear": "fp8_per_block",
+                "moe": "fp8_per_tensor",
             },
             Fp8PerBlockOnlineLinearMethod,
             Fp8PerTensorOnlineMoEMethod,
@@ -116,7 +119,7 @@ def test_online_quantization(
             # because of how we craft the test case inputs
             assert isinstance(o_proj.quant_method, expected_linear_cls)
             if moe is not None:
-                assert isinstance(moe.quant_method, expected_moe_cls)
+                assert isinstance(moe._quant_method, expected_moe_cls)
 
             if current_platform.is_cuda():
                 assert o_proj.weight.dtype == torch.float8_e4m3fn
@@ -142,6 +145,38 @@ def test_online_quantization(
 
         llm.apply_model(check_model)
 
+        outputs = llm.generate_greedy(["Hello my name is"], max_tokens=4)
+        print(outputs[0][1])
+
+
+@pytest.mark.skipif(
+    not (
+        current_platform.is_cuda()
+        and current_platform.is_device_capability_family(100)
+        and has_flashinfer_trtllm_fused_moe()
+    ),
+    reason="nvfp4_per_token needs a Blackwell (SM100) GPU + FlashInfer TRTLLM MoE.",
+)
+def test_online_nvfp4_per_token_moe(vllm_runner, monkeypatch) -> None:
+    """Online NVFP4 quantizes the MoE and leaves dense layers unquantized."""
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+
+    with vllm_runner(
+        "ibm-granite/granite-3.0-1b-a400m-base",
+        quantization="nvfp4_per_token",
+        enforce_eager=True,
+    ) as llm:
+
+        def check_model(model):
+            layer = model.model.layers[0]
+            assert isinstance(
+                layer.block_sparse_moe.experts._quant_method, Nvfp4OnlineMoEMethod
+            )
+            assert isinstance(
+                layer.self_attn.o_proj.quant_method, UnquantizedLinearMethod
+            )
+
+        llm.apply_model(check_model)
         outputs = llm.generate_greedy(["Hello my name is"], max_tokens=4)
         print(outputs[0][1])
 
