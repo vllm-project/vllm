@@ -93,7 +93,6 @@ QWEN3_AUTOROUND_MODELS = [
 MODEL_RUNNER_KWARGS = {
     "INCModel/Qwen3-1.7B-AutoRound-MXFP4-W4A4": {"enforce_eager": True},
     "INCModel/Qwen3-30B-A3B-AutoRound-MXFP4-W4A4": {"enforce_eager": True},
-MODEL_RUNNER_KWARGS = {
     "Intel/Qwen3-8B-w2g64-for-ut": {
         "block_size": 64,
         "gpu_memory_utilization": 0.8,
