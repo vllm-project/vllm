@@ -110,6 +110,12 @@ class ClientRole:
         # _serve_pending. Populated by register_lookup, drained by
         # flush_pending_lookups, and discarded on cancel_lookups/close.
         self._flush_pending: set[str] = set()
+        # kv_request_ids with a fetch in flight (``st.load is not None``) —
+        # the work-list collect_results walks for timeouts, and the
+        # has_active_loads predicate, instead of scanning every request.
+        # Kept in exact sync with ``st.load``: armed in request_blocks,
+        # discarded wherever load is cleared, and cleared on close.
+        self._active_loads: set[str] = set()
         self._completed_loads: list[LoadResult] = []
 
     # ------------------------------------------------------------------
@@ -141,7 +147,7 @@ class ClientRole:
     @property
     def has_active_loads(self) -> bool:
         """True if any kv_request_id has a fetch in flight."""
-        return any(st.load is not None for st in self._requests.values())
+        return bool(self._active_loads)
 
     # ------------------------------------------------------------------
     # Public API
@@ -170,6 +176,7 @@ class ClientRole:
             job_id=job_id,
             submitted_at=time.monotonic(),
         )
+        self._active_loads.add(kv_request_id)
         st.fetch_sent = True
         self._send(
             {
@@ -201,6 +208,7 @@ class ClientRole:
                 }
             )
         st.load = None
+        self._active_loads.discard(kv_request_id)
         self._maybe_gc(kv_request_id)
 
     def on_transfer_done(self, kv_request_id: str, success: bool) -> None:
@@ -215,6 +223,7 @@ class ClientRole:
                 )
             )
             st.load = None
+            self._active_loads.discard(kv_request_id)
             self._maybe_gc(kv_request_id)
         else:
             # No matching in-flight load: either a duplicate
@@ -249,6 +258,7 @@ class ClientRole:
                 )
             )
             st.load = None
+            self._active_loads.discard(kv_request_id)
             self._maybe_gc(kv_request_id)
         else:
             # See on_transfer_done: same ambiguity (duplicate ack
@@ -419,8 +429,9 @@ class ClientRole:
         """
         now = time.monotonic()
         to_remove: list[str] = []
-        for req_id, st in self._requests.items():
-            load = st.load
+        for req_id in self._active_loads:
+            st = self._requests.get(req_id)
+            load = st.load if st is not None else None
             if load is None:
                 continue
             if load.aborted_at is None:
@@ -454,6 +465,7 @@ class ClientRole:
                     )
         for req_id in to_remove:
             self._requests[req_id].load = None
+            self._active_loads.discard(req_id)
             self._maybe_gc(req_id)
 
         results = self._completed_loads
@@ -483,5 +495,6 @@ class ClientRole:
         ]
         self._requests.clear()
         self._flush_pending.clear()
+        self._active_loads.clear()
         self._completed_loads.clear()
         return failed, failed_probes

@@ -513,6 +513,39 @@ class TestClientFlows:
         assert abort[TYPE_KEY] == AbortFetchMsg.TYPE
         assert abort[AbortFetchMsg.KV_REQUEST_ID] == "req-1"
 
+    def test_active_loads_work_list_tracks_in_flight(self):
+        """collect_results / has_active_loads use the _active_loads work-list,
+        armed when a fetch is issued and discarded exactly when its load
+        clears — a probe-only request never enters it, and completion empties
+        it while the entry may briefly linger for GC."""
+        session, conn, _ = _make_session()
+        _activate(session, conn)
+        client = session._client
+
+        # A probe-only request has no in-flight load: not in _active_loads.
+        session.register_lookup("req-probe", b"hp")
+        assert client._active_loads == set()
+        assert client.has_active_loads is False
+
+        # Issuing a fetch arms the work-list.
+        session.request_blocks(
+            job_id=1, kv_request_id="req-1", keys=[b"k"], block_ids=[0]
+        )
+        assert client._active_loads == {"req-1"}
+        assert client.has_active_loads is True
+
+        # Completion clears the load and discards it from the work-list.
+        conn.enqueue(
+            {
+                TYPE_KEY: TransferDoneMsg.TYPE,
+                TransferDoneMsg.KV_REQUEST_ID: "req-1",
+                TransferDoneMsg.SUCCESS: True,
+            }
+        )
+        session.poll()
+        assert client._active_loads == set()
+        assert client.has_active_loads is False
+
     def test_load_timeout_sends_abort(self):
         session, conn, _ = _make_session()
         _activate(session, conn)
