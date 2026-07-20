@@ -417,7 +417,35 @@ print_server_log_tail() {
   fi
 }
 
-curl_with_server_log() {
+http_request() {
+  local method=$1
+  local url=$2
+  local payload=${3:-}
+
+  "$PYTHON_BIN" - "$method" "$url" "$payload" <<'PY'
+import os
+import sys
+import urllib.error
+import urllib.request
+
+method, url, payload = sys.argv[1:4]
+data = payload.encode("utf-8") if payload else None
+request = urllib.request.Request(url, data=data, method=method)
+if data is not None:
+    request.add_header("Content-Type", "application/json")
+
+opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+timeout = float(os.environ.get("E2E_HTTP_REQUEST_TIMEOUT_SECONDS", "10"))
+try:
+    with opener.open(request, timeout=timeout) as response:
+        sys.stdout.buffer.write(response.read())
+except (OSError, urllib.error.URLError) as exc:
+    print(f"HTTP request failed: {exc}", file=sys.stderr)
+    raise SystemExit(1) from None
+PY
+}
+
+http_request_with_server_log() {
   local description=$1
   shift
   local max_attempts=${E2E_HTTP_REQUEST_ATTEMPTS:-5}
@@ -426,20 +454,20 @@ curl_with_server_log() {
   local rc=0
 
   while [[ "$attempt" -le "$max_attempts" ]]; do
-    if curl -fsS "$@"; then
+    if http_request "$@"; then
       return 0
     else
       rc=$?
     fi
 
     if [[ -n "$server_pid" ]] && ! kill -0 "$server_pid" 2>/dev/null; then
-      echo "$description failed because the vLLM server exited (curl exit $rc)" >&2
+      echo "$description failed because the vLLM server exited (HTTP client exit $rc)" >&2
       print_server_log_tail
       return "$rc"
     fi
 
     if [[ "$attempt" -eq "$max_attempts" ]]; then
-      echo "$description failed after ${max_attempts} attempts (curl exit $rc)" >&2
+      echo "$description failed after ${max_attempts} attempts (HTTP client exit $rc)" >&2
       print_server_log_tail
       return "$rc"
     fi
@@ -501,7 +529,7 @@ fi
 start_server
 
 for attempt in $(seq 1 120); do
-  if curl -fsS "http://$HOST:$PORT/v1/models" >/dev/null; then
+  if http_request GET "http://$HOST:$PORT/v1/models" >/dev/null 2>&1; then
     break
   fi
 
@@ -520,15 +548,14 @@ for attempt in $(seq 1 120); do
   sleep 2
 done
 
-curl_with_server_log \
+http_request_with_server_log \
   "vLLM models endpoint readiness confirmation" \
-  "http://$HOST:$PORT/v1/models" >/dev/null
+  GET "http://$HOST:$PORT/v1/models" >/dev/null
 
 completion_response=$(mktemp)
-curl_with_server_log "vLLM completions request" \
-  "http://$HOST:$PORT/v1/completions" \
-  -H "Content-Type: application/json" \
-  -d "{\"model\": \"$MODEL_NAME\", \"prompt\": \"$PROMPT\", \"max_tokens\": $MAX_TOKENS, \"temperature\": 0}" \
+http_request_with_server_log "vLLM completions request" \
+  POST "http://$HOST:$PORT/v1/completions" \
+  "{\"model\": \"$MODEL_NAME\", \"prompt\": \"$PROMPT\", \"max_tokens\": $MAX_TOKENS, \"temperature\": 0}" \
   > "$completion_response"
 
 "$PYTHON_BIN" - "$completion_response" "$MODEL_NAME" <<'PY'
