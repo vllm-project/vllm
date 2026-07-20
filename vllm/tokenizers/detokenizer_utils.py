@@ -59,8 +59,8 @@ def _convert_tokens_to_string_with_added_encoders(
 INITIAL_INCREMENTAL_DETOKENIZATION_OFFSET = 5
 
 
-_MARKER_ATTR = "_vllm_leading_space_marker"
-_UNSET = "__unset__"
+_CACHED_MARKER_KEY = "_vllm_space_marker_cache"
+_NOT_COMPUTED = "__not_computed__"
 
 
 def _get_leading_space_marker(tokenizer: TokenizerLike) -> str | None:
@@ -74,8 +74,8 @@ def _get_leading_space_marker(tokenizer: TokenizerLike) -> str | None:
     Returns the marker character, or None if decode() is safe for single
     tokens.
     """
-    cached = getattr(tokenizer, _MARKER_ATTR, _UNSET)
-    if cached is not _UNSET:
+    cached = getattr(tokenizer, _CACHED_MARKER_KEY, _NOT_COMPUTED)
+    if cached is not _NOT_COMPUTED:
         return cached  # type: ignore[return-value]
 
     backend = getattr(tokenizer, "backend_tokenizer", None)
@@ -98,7 +98,7 @@ def _get_leading_space_marker(tokenizer: TokenizerLike) -> str | None:
                         result = sub.get("replacement", "▁")
                         break
 
-    setattr(tokenizer, _MARKER_ATTR, result)
+    setattr(tokenizer, _CACHED_MARKER_KEY, result)
     return result
 
 
