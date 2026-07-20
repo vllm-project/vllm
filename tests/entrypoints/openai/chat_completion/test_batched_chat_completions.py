@@ -187,3 +187,37 @@ async def test_batched_chat_completions_return_tokens_as_token_ids(
     content = data["choices"][0]["logprobs"]["content"]
     assert content
     assert all(entry["token"].startswith("token_id:") for entry in content)
+
+
+@pytest.mark.asyncio
+async def test_batched_chat_completions_logprob_token_ids(
+    server: RemoteOpenAIServer,
+) -> None:
+    conversations = [[{"role": "user", "content": "Hello"}]]
+
+    async with httpx.AsyncClient() as http_client:
+        response = await http_client.post(
+            f"{server.url_for('v1/chat/completions/batch')}",
+            json={
+                "model": MODEL_NAME,
+                "messages": conversations,
+                "max_tokens": 1,
+                "temperature": 0,
+                "logprobs": True,
+                "top_logprobs": 5,
+                "logprob_token_ids": [100, 1000, 5000],
+                "return_tokens_as_token_ids": True,
+            },
+            timeout=60,
+        )
+
+    assert response.status_code == 200, response.text
+    content = response.json()["choices"][0]["logprobs"]["content"]
+    assert content
+    sampled_token = content[0]["token"]
+    assert {entry["token"] for entry in content[0]["top_logprobs"]} == {
+        "token_id:100",
+        "token_id:1000",
+        "token_id:5000",
+        sampled_token,
+    }

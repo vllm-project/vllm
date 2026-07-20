@@ -3,7 +3,6 @@
 
 # Adapted from
 # https://github.com/lm-sys/FastChat/blob/168ccc29d3f7edc50823016105c024fe2282732a/fastchat/protocol/openai_api_protocol.py
-import json
 import time
 from typing import Annotated, Any, ClassVar, Literal
 
@@ -14,7 +13,6 @@ from openai.types.chat.chat_completion_message import Annotation as OpenAIAnnota
 from pydantic import Field, PrivateAttr, model_serializer, model_validator
 
 from vllm.config import ModelConfig
-from vllm.config.utils import replace
 from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
     ChatTemplateContentFormatOption,
@@ -24,13 +22,12 @@ from vllm.entrypoints.openai.engine.protocol import (
     DeltaMessage,
     FunctionCall,
     FunctionDefinition,
-    LegacyStructuralTagResponseFormat,
     OpenAIBaseModel,
     PerRequestTimingMetrics,
     StreamOptions,
-    StructuralTagResponseFormat,
     ToolCall,
     UsageInfo,
+    structured_outputs_from_response_format,
     validate_structural_tag_response_format,
     validate_structured_outputs_structural_tag,
 )
@@ -133,6 +130,9 @@ class ChatCompletionResponse(OpenAIBaseModel):
     prompt_text: str | None = None
     kv_transfer_params: dict[str, Any] | None = Field(
         default=None, description="KVTransfer parameters."
+    )
+    ec_transfer_params: dict[str, Any] | None = Field(
+        default=None, description="ECTransfer parameters."
     )
     metrics: PerRequestTimingMetrics | None = None
 
@@ -267,6 +267,18 @@ class ChatCompletionRequest(OpenAIBaseModel):
         ),
     )
     prompt_logprobs: int | None = None
+    logprob_token_ids: list[int] | None = Field(
+        default=None,
+        description=(
+            "Specific vocab token IDs to return logprobs for at each generated "
+            "position, in addition to the sampled token. More efficient than "
+            "`top_logprobs=-1` when only a small fixed label set is needed "
+            "(e.g. multilabel scoring "
+            "where each label corresponds to a known vocab id). When set, "
+            "this explicit token selection takes precedence over the natural "
+            "top-k selected by `top_logprobs`. Requires `logprobs=True`."
+        ),
+    )
     allowed_token_ids: list[int] | None = None
     bad_words: list[str] = Field(default_factory=list)
     # --8<-- [end:chat-completion-sampling-params]
@@ -439,6 +451,13 @@ class ChatCompletionRequest(OpenAIBaseModel):
         description="KVTransfer parameters used for disaggregated serving.",
     )
 
+    ec_transfer_params: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "ECTransfer parameters used for encoder-cache disaggregated serving."
+        ),
+    )
+
     vllm_xargs: dict[str, str | int | float | list[str | int | float]] | None = Field(
         default=None,
         description=(
@@ -585,6 +604,13 @@ class ChatCompletionRequest(OpenAIBaseModel):
             include_stop_str_in_output=self.include_stop_str_in_output,
         )
 
+    def extract_structured_outputs(self) -> StructuredOutputsParams | None:
+        """Normalize request constraints into ``StructuredOutputsParams``."""
+        return structured_outputs_from_response_format(
+            self.structured_outputs,
+            self.response_format,
+        )
+
     def to_sampling_params(
         self,
         max_tokens: int,
@@ -629,42 +655,13 @@ class ChatCompletionRequest(OpenAIBaseModel):
         if prompt_logprobs is None and self.echo:
             prompt_logprobs = self.top_logprobs
 
-        response_format = self.response_format
-        if response_format is not None:
-            structured_outputs_kwargs = dict[str, Any]()
-
-            # Set structured output params for response format
-            if response_format.type == "json_object":
-                structured_outputs_kwargs["json_object"] = True
-            elif response_format.type == "json_schema":
-                json_schema = response_format.json_schema
-                assert json_schema is not None
-                structured_outputs_kwargs["json"] = json_schema.json_schema
-            elif response_format.type == "structural_tag":
-                structural_tag = response_format
-                assert structural_tag is not None and isinstance(
-                    structural_tag,
-                    (
-                        LegacyStructuralTagResponseFormat,
-                        StructuralTagResponseFormat,
-                    ),
-                )
-                s_tag_obj = structural_tag.model_dump(by_alias=True)
-                structured_outputs_kwargs["structural_tag"] = json.dumps(s_tag_obj)
-
-            # If structured outputs wasn't already enabled,
-            # we must enable it for these features to work
-            if len(structured_outputs_kwargs) > 0:
-                self.structured_outputs = (
-                    StructuredOutputsParams(**structured_outputs_kwargs)
-                    if self.structured_outputs is None
-                    else replace(self.structured_outputs, **structured_outputs_kwargs)
-                )
-
         extra_args: dict[str, Any] = self.vllm_xargs if self.vllm_xargs else {}
         if self.kv_transfer_params:
             # Pass in kv_transfer_params via extra_args
             extra_args["kv_transfer_params"] = self.kv_transfer_params
+        if self.ec_transfer_params:
+            # Pass in ec_transfer_params via extra_args
+            extra_args["ec_transfer_params"] = self.ec_transfer_params
         return SamplingParams.from_optional(
             n=self.n,
             presence_penalty=self.presence_penalty,
@@ -677,8 +674,13 @@ class ChatCompletionRequest(OpenAIBaseModel):
             seed=self.seed,
             stop=self.stop,
             stop_token_ids=stop_token_ids,
-            logprobs=self.top_logprobs if self.logprobs else None,
+            logprobs=(
+                self.top_logprobs
+                if self.logprobs and not self.logprob_token_ids
+                else None
+            ),
             prompt_logprobs=prompt_logprobs,
+            logprob_token_ids=self.logprob_token_ids or None,
             ignore_eos=self.ignore_eos,
             max_tokens=max_tokens,
             min_tokens=self.min_tokens,
@@ -688,7 +690,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
             output_kind=RequestOutputKind.DELTA
             if self.stream
             else RequestOutputKind.FINAL_ONLY,
-            structured_outputs=self.structured_outputs,
+            structured_outputs=self.extract_structured_outputs(),
             logit_bias=self.logit_bias,
             bad_words=self.bad_words,
             thinking_token_budget=self.thinking_token_budget,
@@ -743,6 +745,18 @@ class ChatCompletionRequest(OpenAIBaseModel):
     @model_validator(mode="before")
     @classmethod
     def check_logprobs(cls, data):
+        if data.get("logprob_token_ids") and data.get("use_beam_search"):
+            raise VLLMValidationError(
+                "`logprob_token_ids` is not supported with beam search.",
+                parameter="logprob_token_ids",
+            )
+
+        if data.get("logprob_token_ids") and not data.get("logprobs"):
+            raise VLLMValidationError(
+                "when using `logprob_token_ids`, `logprobs` must be set to true.",
+                parameter="logprob_token_ids",
+            )
+
         if (prompt_logprobs := data.get("prompt_logprobs")) is not None:
             if data.get("stream") and (prompt_logprobs > 0 or prompt_logprobs == -1):
                 raise VLLMValidationError(
@@ -996,6 +1010,14 @@ class BatchChatCompletionRequest(OpenAIBaseModel):
     logit_bias: dict[str, float] | None = None
     logprobs: bool | None = False
     top_logprobs: int | None = 0
+    logprob_token_ids: list[int] | None = Field(
+        default=None,
+        description=(
+            "Specific vocab token IDs to return logprobs for at each generated "
+            "position, in addition to the sampled token. Requires "
+            "`logprobs=True`."
+        ),
+    )
     max_tokens: int | None = None
     max_completion_tokens: int | None = None
     n: int | None = 1
@@ -1044,6 +1066,10 @@ class BatchChatCompletionRequest(OpenAIBaseModel):
             raise ValueError(
                 "Batch chat completions do not support beam search. "
                 "Please set `use_beam_search` to False."
+            )
+        if data.get("logprob_token_ids") and not data.get("logprobs"):
+            raise ValueError(
+                "when using `logprob_token_ids`, `logprobs` must be set to true."
             )
         response_format = data.get("response_format")
         rf_type = (

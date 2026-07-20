@@ -26,6 +26,7 @@ from vllm.model_executor.models.qwen3_5 import (
 )
 from vllm.model_executor.models.qwen3_next import (
     QwenNextMixtureOfExperts,
+    _all_gather_hidden_and_residual,
     _is_shared_expert_fse_compatible,
 )
 from vllm.sequence import IntermediateTensors
@@ -40,9 +41,9 @@ from .interfaces import (
 from .utils import (
     AutoWeightsLoader,
     PPMissingLayer,
-    WeightsMapper,
     _merge_multimodal_embeddings,
     make_empty_intermediate_tensors_factory,
+    maybe_fuse_shared_experts,
     maybe_prefix,
 )
 
@@ -150,7 +151,8 @@ class Qwen3_5MultiTokenPredictor(nn.Module):
             residual = intermediate_tensors["residual"]
 
         current_step_idx = spec_step_idx % self.num_mtp_layers
-        hidden_states, residual = self.layers[current_step_idx](
+        mtp_layer = self.layers[current_step_idx]
+        hidden_states, residual = mtp_layer(
             positions=positions,
             hidden_states=hidden_states,
             residual=residual,
@@ -161,21 +163,29 @@ class Qwen3_5MultiTokenPredictor(nn.Module):
                 {"hidden_states": hidden_states, "residual": residual}
             )
 
+        if mtp_layer.use_attn_reduce_scatter_for_moe:
+            hidden_states, residual = _all_gather_hidden_and_residual(
+                hidden_states,
+                residual,
+                positions.shape[-1],
+                self.config.hidden_size,
+            )
         hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        mapper = self.hf_to_vllm_mapper
-        is_fse = rocm_aiter_ops.is_fusion_moe_shared_experts_enabled() and (
-            _is_shared_expert_fse_compatible(get_current_vllm_config().quant_config)
+        weights = maybe_fuse_shared_experts(
+            weights,
+            enabled=rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
+            and _is_shared_expert_fse_compatible(
+                get_current_vllm_config().quant_config
+            ),
+            n_routed_experts=getattr(self.config, "num_experts", 0),
+            n_shared_experts=1,
+            ckpt_prefix="mlp.shared_expert",
         )
-        if is_fse:
-            num_routed = getattr(self.config, "num_experts", 0)
-            mapper = mapper | WeightsMapper(
-                orig_to_new_substr={"mlp.shared_expert.": f"mlp.experts.{num_routed}."}
-            )
         loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights, mapper=mapper)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
 @support_torch_compile(
