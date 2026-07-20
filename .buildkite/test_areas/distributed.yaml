@@ -39,6 +39,7 @@ steps:
   - DP_SIZE=2 pytest -v -s entrypoints/openai/test_multi_api_servers.py
   mirror:
     amd:
+      dind: false
       device: mi300_2
       depends_on:
       - image-build-amd

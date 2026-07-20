@@ -6,8 +6,16 @@ import torch
 
 import vllm.envs as envs
 from vllm.config import VllmConfig
-from vllm.distributed import get_dcp_group
+from vllm.distributed import get_dcp_group, get_pcp_group
 from vllm.logger import init_logger
+from vllm.model_executor.warmup.jit_warmup import (
+    VllmJitKernel,
+    WarmupIntRange,
+)
+from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    TritonPointerInputVariant,
+    TritonWarmupTensor,
+)
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.deep_gemm import (
@@ -29,7 +37,7 @@ from vllm.v1.attention.backends.utils import (
     split_decodes_and_prefills,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec, MLAAttentionSpec
-from vllm.v1.worker.cp_utils import get_total_cp_world_size
+from vllm.v1.worker.cp_utils import get_kv_cache_shard_count
 
 logger = init_logger(__name__)
 
@@ -109,7 +117,7 @@ def split_indexer_prefill_chunks(
             end += 1
 
         req_slice = slice(start + request_offset, end + request_offset)
-        max_q = max(1, max_logits_elems // chunk_n) if chunk_n > 0 else chunk_m
+        max_q = max(1, max_logits_elems // chunk_n) if chunk_n > 0 else max(1, chunk_m)
         for q_off in range(0, chunk_m, max_q):
             sub_m = min(max_q, chunk_m - q_off)
             chunks.append((req_slice, slice(q_off, q_off + sub_m)))
@@ -118,6 +126,10 @@ def split_indexer_prefill_chunks(
 
 
 class DeepseekV32IndexerBackend(AttentionBackend):
+    @classmethod
+    def supports_pcp(cls) -> bool:
+        return True
+
     @staticmethod
     def get_name() -> str:
         return "DEEPSEEK_V32_INDEXER"
@@ -186,6 +198,211 @@ class DeepseekV32IndexerPrefillChunkMetadata:
     max_local_total_seq_lens: int = 0
 
 
+_BUILD_PREFILL_CHUNK_METADATA_INPUT_VARIANTS = (
+    TritonPointerInputVariant.from_alignment(uncompressed_seq_lens=True),
+    TritonPointerInputVariant.from_alignment(uncompressed_seq_lens=False),
+)
+
+
+class BuildPrefillChunkMetadataKernel(
+    VllmJitKernel["BuildPrefillChunkMetadataKernel.CompileKey"]
+):
+    BLOCK_SIZE = 1024
+
+    @dataclass(frozen=True)
+    class CompileKey:
+        query_slice_start: int
+        query_slice_stop: int
+        DCP_RANK: int
+        DCP_WORLD: int
+        DCP_INTERLEAVE: int
+        BLOCK_SIZE: int
+        COMPRESS_RATIO: int
+        input_variant: TritonPointerInputVariant
+
+    @staticmethod
+    @triton.jit
+    def kernel(
+        # Inputs
+        query_start_loc_ptr,
+        uncompressed_seq_lens_ptr,
+        cu_compressed_seq_lens_ptr,
+        # Row-start base for cu_seq_len_ks/ke: local cumulative lens under DCP,
+        # aliases cu_compressed_seq_lens_ptr otherwise.
+        row_start_cu_compressed_seq_lens_ptr,
+        # Outputs
+        token_to_seq_ptr,
+        cu_compressed_seq_len_ks_ptr,
+        cu_compressed_seq_len_ke_ptr,
+        query_slice_start,
+        query_slice_stop,
+        DCP_RANK,
+        DCP_WORLD,
+        DCP_INTERLEAVE,
+        BLOCK_SIZE: tl.constexpr,
+        COMPRESS_RATIO: tl.constexpr,
+    ):
+        batch_idx = tl.program_id(0)
+
+        query_start = tl.load(query_start_loc_ptr + batch_idx)
+        query_end = tl.load(query_start_loc_ptr + batch_idx + 1)
+        query_len = query_end - query_start
+
+        seq_start = tl.load(cu_compressed_seq_lens_ptr + batch_idx)
+        seq_end = tl.load(cu_compressed_seq_lens_ptr + batch_idx + 1)
+        compressed_seq_len = seq_end - seq_start
+
+        # Row start for the (possibly localized) cu_seq_len_ks/ke. Equals seq_start
+        # when DCP is disabled (the pointer aliases cu_compressed_seq_lens_ptr).
+        row_start = tl.load(row_start_cu_compressed_seq_lens_ptr + batch_idx)
+
+        uncompressed_seq_len = tl.load(uncompressed_seq_lens_ptr + batch_idx)
+        start_pos = uncompressed_seq_len - query_len
+
+        for i in range(0, query_len, BLOCK_SIZE):
+            offset = i + tl.arange(0, BLOCK_SIZE)
+            abs_pos = query_start + offset
+            mask = (
+                (offset < query_len)
+                & (abs_pos >= query_slice_start)
+                & (abs_pos < query_slice_stop)
+            )
+            out_pos = abs_pos - query_slice_start
+
+            # cu_seq_len_ks: row start in the gathered K buffer.
+            tl.store(cu_compressed_seq_len_ks_ptr + out_pos, row_start, mask=mask)
+
+            # cu_seq_len_ke: row start + per-token context length. Under DCP the
+            # global per-token length is sharded across ranks.
+            global_ctx = start_pos + 1 + offset
+            len_per_token = global_ctx // COMPRESS_RATIO
+            if DCP_WORLD > 1:
+                # Per-rank local context length under interleave-aware DCP, matching
+                # get_dcp_local_seq_lens. K == 1 reduces to (len + world-1-rank)//world.
+                base = (len_per_token // DCP_INTERLEAVE // DCP_WORLD) * DCP_INTERLEAVE
+                remainder = len_per_token - base * DCP_WORLD
+                remainder = tl.minimum(
+                    tl.maximum(remainder - DCP_RANK * DCP_INTERLEAVE, 0), DCP_INTERLEAVE
+                )
+                len_per_token = base + remainder
+            tl.store(
+                cu_compressed_seq_len_ke_ptr + out_pos,
+                row_start + len_per_token,
+                mask=mask,
+            )
+
+        # Compute token_to_seq
+        for i in range(0, compressed_seq_len, BLOCK_SIZE):
+            offset = i + tl.arange(0, BLOCK_SIZE)
+            mask = offset < compressed_seq_len
+            tl.store(token_to_seq_ptr + seq_start + offset, batch_idx, mask=mask)
+
+    def dispatch(  # type: ignore[override]
+        self,
+        *,
+        query_slice_start: int,
+        query_slice_stop: int,
+        DCP_RANK: int,
+        DCP_WORLD: int,
+        DCP_INTERLEAVE: int,
+        BLOCK_SIZE: int,
+        COMPRESS_RATIO: int,
+        input_variant: TritonPointerInputVariant,
+    ) -> CompileKey:
+        return self.CompileKey(
+            query_slice_start=query_slice_start,
+            query_slice_stop=query_slice_stop,
+            DCP_RANK=DCP_RANK,
+            DCP_WORLD=DCP_WORLD,
+            DCP_INTERLEAVE=DCP_INTERLEAVE,
+            BLOCK_SIZE=BLOCK_SIZE,
+            COMPRESS_RATIO=COMPRESS_RATIO,
+            input_variant=input_variant,
+        )
+
+    def get_warmup_keys(self, vllm_config: VllmConfig) -> list[CompileKey]:
+        max_tokens = max(1, min(vllm_config.scheduler_config.max_num_batched_tokens, 8))
+        hf_config = vllm_config.model_config.hf_config
+        parallel_config = vllm_config.parallel_config
+        dcp_world = parallel_config.decode_context_parallel_size
+        dcp_interleave = parallel_config.cp_kv_cache_interleave_size
+        dcp_rank = get_dcp_group().rank_in_group if dcp_world > 1 else 0
+        compress_ratios = tuple(
+            int(ratio)
+            for ratio in (getattr(hf_config, "compress_ratios", None) or (1,))
+        )
+        return self._trace_dispatch(self.dispatch)(
+            query_slice_start=WarmupIntRange(0, 2),
+            query_slice_stop=(1, 2 * max_tokens - 1, 2 * max_tokens),
+            DCP_RANK=dcp_rank,
+            DCP_WORLD=dcp_world,
+            DCP_INTERLEAVE=dcp_interleave,
+            BLOCK_SIZE=self.BLOCK_SIZE,
+            COMPRESS_RATIO=list(compress_ratios),
+            input_variant=_BUILD_PREFILL_CHUNK_METADATA_INPUT_VARIANTS,
+        )
+
+    def compile(self, compile_key: CompileKey) -> None:
+        warmup = getattr(self.kernel, "warmup", None)
+        assert warmup is not None
+        int32_ptr = TritonWarmupTensor(torch.int32)
+        warmup(
+            int32_ptr,
+            compile_key.input_variant.pointer("uncompressed_seq_lens", torch.int32),
+            int32_ptr,
+            int32_ptr,
+            int32_ptr,
+            int32_ptr,
+            int32_ptr,
+            compile_key.query_slice_start,
+            compile_key.query_slice_stop,
+            compile_key.DCP_RANK,
+            compile_key.DCP_WORLD,
+            compile_key.DCP_INTERLEAVE,
+            BLOCK_SIZE=compile_key.BLOCK_SIZE,
+            COMPRESS_RATIO=compile_key.COMPRESS_RATIO,
+            grid=(1,),
+        )
+
+    def __call__(
+        self,
+        query_start_loc: torch.Tensor,
+        uncompressed_seq_lens: torch.Tensor,
+        cu_compressed_seq_lens: torch.Tensor,
+        row_start_cu_compressed_seq_lens: torch.Tensor,
+        token_to_seq: torch.Tensor,
+        cu_compressed_seq_len_ks: torch.Tensor,
+        cu_compressed_seq_len_ke: torch.Tensor,
+        query_slice_start: int,
+        query_slice_stop: int,
+        DCP_RANK: int,
+        DCP_WORLD: int,
+        DCP_INTERLEAVE: int,
+        *,
+        num_reqs: int,
+        COMPRESS_RATIO: int,
+    ) -> None:
+        self.kernel[(num_reqs,)](
+            query_start_loc,
+            uncompressed_seq_lens,
+            cu_compressed_seq_lens,
+            row_start_cu_compressed_seq_lens,
+            token_to_seq,
+            cu_compressed_seq_len_ks,
+            cu_compressed_seq_len_ke,
+            query_slice_start,
+            query_slice_stop,
+            DCP_RANK,
+            DCP_WORLD,
+            DCP_INTERLEAVE,
+            BLOCK_SIZE=self.BLOCK_SIZE,
+            COMPRESS_RATIO=COMPRESS_RATIO,
+        )
+
+
+_BUILD_PREFILL_CHUNK_METADATA_KERNEL = BuildPrefillChunkMetadataKernel()
+
+
 @dataclass
 class DeepseekV32IndexerPrefillMetadata:
     chunks: list[DeepseekV32IndexerPrefillChunkMetadata]
@@ -238,7 +455,9 @@ def get_max_prefill_buffer_size(vllm_config: VllmConfig):
 
 
 class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
-    reorder_batch_threshold: int = 1
+    # The indexer opts out of the shared reorder-threshold vote (see __init__),
+    # so this is None; its own split uses self.decode_threshold.
+    reorder_batch_threshold: int | None = None
 
     @classmethod
     def get_cudagraph_support(
@@ -254,6 +473,8 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         parallel_config = self.vllm_config.parallel_config
         self.dcp_world_size = parallel_config.decode_context_parallel_size
         self.dcp_rank = get_dcp_group().rank_in_group if self.dcp_world_size > 1 else 0
+        self.pcp_world_size = parallel_config.prefill_context_parallel_size
+        self.use_pcp = self.pcp_world_size > 1
         self.cp_kv_cache_interleave_size = parallel_config.cp_kv_cache_interleave_size
         # The DCP sparse-indexer code is parameterized by interleave size, but
         # interleave > 1 is not yet validated end-to-end (gsm8k parity fails),
@@ -285,7 +506,8 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         )
 
         next_n = self.num_speculative_tokens + 1
-        self.reorder_batch_threshold += self.num_speculative_tokens
+        self.decode_threshold = next_n
+        self.reorder_batch_threshold = None
         # NOTE: SM100 datacenter GPUs support any next_n natively via the
         # multi-atom paged MQA logits kernels (FP8 and FP4 indexer
         # caches). Outside the SM100 family the FP8
@@ -339,7 +561,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         # _expanded_block_table resizes on first use if needed.
         max_num_blocks_per_req = cdiv(
             self.vllm_config.model_config.max_model_len,
-            self.kv_cache_spec.block_size * get_total_cp_world_size(),
+            self.kv_cache_spec.block_size * get_kv_cache_shard_count(),
         )
         self.expanded_block_table_buffer = torch.zeros(
             (
@@ -593,8 +815,9 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
             split_decodes_and_prefills(
                 common_attn_metadata,
-                decode_threshold=self.reorder_batch_threshold,
+                decode_threshold=self.decode_threshold,
                 require_uniform=not self.use_flattening,
+                treat_short_extends_as_decodes=not self.use_pcp,
             )
         )
 
@@ -604,6 +827,9 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         compressed_slot_mapping = slot_mapping
         compressed_seq_lens = seq_lens
         if self.compress_ratio > 1:
+            padded_num_tokens = num_tokens
+            if self.pcp_world_size > 1:
+                padded_num_tokens = slot_mapping.shape[0] // self.pcp_world_size
             compressed_slot_mapping = get_compressed_slot_mapping(
                 num_tokens,
                 query_start_loc,
@@ -613,6 +839,11 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 self.compress_ratio,
                 out=self.compressed_slot_mapping_buffer,
             )
+            if self.pcp_world_size > 1:
+                compressed_slot_mapping = get_pcp_group().all_gather(
+                    self.compressed_slot_mapping_buffer[:padded_num_tokens],
+                    dim=0,
+                )
             compressed_seq_lens = seq_lens // self.compress_ratio
 
         prefill_metadata = None
@@ -851,7 +1082,7 @@ def build_prefill_chunk_metadata(
 
     # Under DCP the kernel writes this rank's local row bounds into
     # cu_seq_len_ks/ke; otherwise local_cu_seq_lens aliases cu_seq_lens.
-    _build_prefill_chunk_metadata_kernel[(num_reqs,)](
+    _BUILD_PREFILL_CHUNK_METADATA_KERNEL(
         query_start_loc,
         uncompressed_seq_lens[start_idx:end_idx],
         cu_seq_lens,
@@ -864,7 +1095,7 @@ def build_prefill_chunk_metadata(
         dcp_rank,
         dcp_world_size,
         cp_kv_cache_interleave_size,
-        BLOCK_SIZE=1024,
+        num_reqs=num_reqs,
         COMPRESS_RATIO=compress_ratio,
     )
 
@@ -891,80 +1122,3 @@ def build_prefill_chunk_metadata(
         local_total_seq_lens=local_total_seq_lens,
         max_local_total_seq_lens=max_local_total_seq_lens,
     )
-
-
-@triton.jit
-def _build_prefill_chunk_metadata_kernel(
-    # Inputs
-    query_start_loc_ptr,
-    uncompressed_seq_lens_ptr,
-    cu_compressed_seq_lens_ptr,
-    # Row-start base for cu_seq_len_ks/ke: local cumulative lens under DCP,
-    # aliases cu_compressed_seq_lens_ptr otherwise.
-    row_start_cu_compressed_seq_lens_ptr,
-    # Outputs
-    token_to_seq_ptr,
-    cu_compressed_seq_len_ks_ptr,
-    cu_compressed_seq_len_ke_ptr,
-    query_slice_start,
-    query_slice_stop,
-    DCP_RANK,
-    DCP_WORLD,
-    DCP_INTERLEAVE,
-    BLOCK_SIZE: tl.constexpr,
-    COMPRESS_RATIO: tl.constexpr,
-):
-    batch_idx = tl.program_id(0)
-
-    query_start = tl.load(query_start_loc_ptr + batch_idx)
-    query_end = tl.load(query_start_loc_ptr + batch_idx + 1)
-    query_len = query_end - query_start
-
-    seq_start = tl.load(cu_compressed_seq_lens_ptr + batch_idx)
-    seq_end = tl.load(cu_compressed_seq_lens_ptr + batch_idx + 1)
-    compressed_seq_len = seq_end - seq_start
-
-    # Row start for the (possibly localized) cu_seq_len_ks/ke. Equals seq_start
-    # when DCP is disabled (the pointer aliases cu_compressed_seq_lens_ptr).
-    row_start = tl.load(row_start_cu_compressed_seq_lens_ptr + batch_idx)
-
-    uncompressed_seq_len = tl.load(uncompressed_seq_lens_ptr + batch_idx)
-    start_pos = uncompressed_seq_len - query_len
-
-    for i in range(0, query_len, BLOCK_SIZE):
-        offset = i + tl.arange(0, BLOCK_SIZE)
-        abs_pos = query_start + offset
-        mask = (
-            (offset < query_len)
-            & (abs_pos >= query_slice_start)
-            & (abs_pos < query_slice_stop)
-        )
-        out_pos = abs_pos - query_slice_start
-
-        # cu_seq_len_ks: row start in the gathered K buffer.
-        tl.store(cu_compressed_seq_len_ks_ptr + out_pos, row_start, mask=mask)
-
-        # cu_seq_len_ke: row start + per-token context length. Under DCP the
-        # global per-token length is sharded across ranks.
-        global_ctx = start_pos + 1 + offset
-        len_per_token = global_ctx // COMPRESS_RATIO
-        if DCP_WORLD > 1:
-            # Per-rank local context length under interleave-aware DCP, matching
-            # get_dcp_local_seq_lens. K == 1 reduces to (len + world-1-rank)//world.
-            base = (len_per_token // DCP_INTERLEAVE // DCP_WORLD) * DCP_INTERLEAVE
-            remainder = len_per_token - base * DCP_WORLD
-            remainder = tl.minimum(
-                tl.maximum(remainder - DCP_RANK * DCP_INTERLEAVE, 0), DCP_INTERLEAVE
-            )
-            len_per_token = base + remainder
-        tl.store(
-            cu_compressed_seq_len_ke_ptr + out_pos,
-            row_start + len_per_token,
-            mask=mask,
-        )
-
-    # Compute token_to_seq
-    for i in range(0, compressed_seq_len, BLOCK_SIZE):
-        offset = i + tl.arange(0, BLOCK_SIZE)
-        mask = offset < compressed_seq_len
-        tl.store(token_to_seq_ptr + seq_start + offset, batch_idx, mask=mask)
