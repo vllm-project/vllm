@@ -176,7 +176,8 @@ class GlobalPrefixScheduler:
     """In-memory longest-prefix-first router for vLLM nodes."""
 
     def __init__(self) -> None:
-        self._nodes: dict[str, NodePrefixCacheState] = {}
+        self._nodes: dict[tuple[str, int | None], NodePrefixCacheState] = {}
+        self._node_defaults: dict[str, tuple[int, int | None, dict[int, int]]] = {}
         self._tie_breaker = count()
 
     def register_node(
@@ -187,33 +188,89 @@ class GlobalPrefixScheduler:
         data_parallel_rank: int | None = None,
         group_block_sizes: Mapping[int, int] | None = None,
     ) -> NodePrefixCacheState:
+        group_block_sizes = dict(group_block_sizes or {})
         state = NodePrefixCacheState(
             node_id=node_id,
             hash_block_size=hash_block_size,
             data_parallel_rank=data_parallel_rank,
-            group_block_sizes=dict(group_block_sizes or {}),
+            group_block_sizes=group_block_sizes,
         )
-        self._nodes[node_id] = state
+        self._node_defaults[node_id] = (
+            hash_block_size,
+            data_parallel_rank,
+            group_block_sizes,
+        )
+        self._nodes[node_id, data_parallel_rank] = state
         return state
 
     def update_snapshot(self, snapshot: PrefixCacheSnapshot) -> None:
-        state = self._nodes.get(snapshot.node_id)
+        self._node_defaults.setdefault(
+            snapshot.node_id,
+            (
+                snapshot.hash_block_size,
+                None,
+                dict(snapshot.group_block_sizes),
+            ),
+        )
+        key = (snapshot.node_id, snapshot.data_parallel_rank)
+        state = self._nodes.get(key)
         if state is None:
-            self._nodes[snapshot.node_id] = NodePrefixCacheState.from_snapshot(snapshot)
+            self._discard_unranked_placeholder(snapshot.node_id)
+            self._nodes[key] = NodePrefixCacheState.from_snapshot(snapshot)
         else:
             state.apply_snapshot(snapshot)
 
-    def apply_events(self, node_id: str, events: Iterable[KVCacheEvent]) -> None:
-        self._nodes[node_id].apply_events(events)
+    def apply_events(
+        self,
+        node_id: str,
+        events: Iterable[KVCacheEvent],
+        data_parallel_rank: int | None = None,
+    ) -> None:
+        self._state_for_events(node_id, data_parallel_rank).apply_events(events)
 
     def apply_event_batch(self, node_id: str, batch: KVEventBatch) -> None:
-        state = self._nodes[node_id]
-        if batch.data_parallel_rank is not None:
-            state.data_parallel_rank = batch.data_parallel_rank
-        state.apply_events(batch.events)
+        self.apply_events(node_id, batch.events, batch.data_parallel_rank)
 
     def remove_node(self, node_id: str) -> None:
-        self._nodes.pop(node_id, None)
+        self._node_defaults.pop(node_id, None)
+        for key in [key for key in self._nodes if key[0] == node_id]:
+            del self._nodes[key]
+
+    def _state_for_events(
+        self, node_id: str, data_parallel_rank: int | None
+    ) -> NodePrefixCacheState:
+        try:
+            hash_block_size, configured_rank, group_block_sizes = self._node_defaults[
+                node_id
+            ]
+        except KeyError as exc:
+            raise KeyError(f"unknown prefix routing node {node_id!r}") from exc
+
+        if data_parallel_rank is None:
+            data_parallel_rank = configured_rank
+        elif configured_rank is not None and data_parallel_rank != configured_rank:
+            raise ValueError(
+                f"node {node_id!r} is configured for data-parallel rank "
+                f"{configured_rank}, but reported rank {data_parallel_rank}"
+            )
+
+        key = (node_id, data_parallel_rank)
+        state = self._nodes.get(key)
+        if state is None:
+            self._discard_unranked_placeholder(node_id)
+            state = NodePrefixCacheState(
+                node_id=node_id,
+                hash_block_size=hash_block_size,
+                data_parallel_rank=data_parallel_rank,
+                group_block_sizes=dict(group_block_sizes),
+            )
+            self._nodes[key] = state
+        return state
+
+    def _discard_unranked_placeholder(self, node_id: str) -> None:
+        placeholder = self._nodes.get((node_id, None))
+        if placeholder is not None and not placeholder.group_hashes:
+            del self._nodes[node_id, None]
 
     def choose_node(
         self,
@@ -229,7 +286,11 @@ class GlobalPrefixScheduler:
         """
         node_ids = list(candidate_node_ids) if candidate_node_ids is not None else None
         states = (
-            [self._nodes[node_id] for node_id in node_ids if node_id in self._nodes]
+            [
+                state
+                for (node_id, _), state in self._nodes.items()
+                if node_id in node_ids
+            ]
             if node_ids is not None
             else list(self._nodes.values())
         )

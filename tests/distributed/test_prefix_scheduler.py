@@ -6,6 +6,7 @@ import time
 import urllib.error
 from types import SimpleNamespace
 
+import aiohttp
 import msgspec
 import pytest
 from fastapi import HTTPException
@@ -28,7 +29,10 @@ from vllm.distributed.prefix_scheduler import (
 )
 from vllm.entrypoints.openai.prefix_routing import (
     PrefixRoutingConfig,
+    PrefixRoutingMiddleware,
+    PrefixRoutingNode,
     PrefixRoutingProxy,
+    _forward_request,
     _parse_prefix_routing_config,
     ingest_prefix_routing_kv_events,
 )
@@ -37,6 +41,8 @@ from vllm.v1.core.kv_cache_utils import (
     ExternalBlockHash,
     maybe_convert_block_hash,
 )
+
+pytestmark = pytest.mark.skip_global_cleanup
 
 
 def _hash(value: int) -> BlockHash:
@@ -171,6 +177,40 @@ def test_global_prefix_scheduler_applies_event_batch_rank():
     assert decision is not None
     assert decision.data_parallel_rank == 3
     assert decision.matched_tokens == 16
+
+
+def test_global_prefix_scheduler_isolates_data_parallel_rank_state():
+    scheduler = GlobalPrefixScheduler()
+    rank_zero_hash = _hash(1)
+    rank_one_hash = _hash(2)
+    scheduler.register_node("node-a", hash_block_size=16)
+
+    scheduler.apply_event_batch(
+        "node-a",
+        KVEventBatch(
+            ts=1.0,
+            data_parallel_rank=0,
+            events=[_stored_event(rank_zero_hash)],
+        ),
+    )
+    scheduler.apply_event_batch(
+        "node-a",
+        KVEventBatch(
+            ts=2.0,
+            data_parallel_rank=1,
+            events=[_stored_event(rank_one_hash)],
+        ),
+    )
+
+    rank_zero = scheduler.choose_node([rank_zero_hash], prompt_num_tokens=32)
+    rank_one = scheduler.choose_node([rank_one_hash], prompt_num_tokens=32)
+
+    assert rank_zero is not None
+    assert rank_zero.data_parallel_rank == 0
+    assert rank_zero.matched_tokens == 16
+    assert rank_one is not None
+    assert rank_one.data_parallel_rank == 1
+    assert rank_one.matched_tokens == 16
 
 
 def test_node_prefix_cache_state_matches_larger_group_block_size():
@@ -419,6 +459,155 @@ def test_prefix_routing_renders_chat_engine_inputs():
     )
 
     assert rendered == [([4, 5], "chat-salt")]
+
+
+def test_prefix_routing_falls_back_locally_when_upstream_cannot_start(
+    monkeypatch,
+):
+    request_body = b'{"model":"test-model","prompt":"hello"}'
+    local_calls = []
+    sent = []
+
+    class FailedRequest:
+        async def __aenter__(self):
+            raise aiohttp.ClientConnectionError("unreachable")
+
+        async def __aexit__(self, *args):
+            return None
+
+    class ClientSession:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        def request(self, **kwargs):
+            return FailedRequest()
+
+    class Proxy:
+        config = SimpleNamespace(request_timeout=1.0)
+        nodes = {
+            "node-a": PrefixRoutingNode(node_id="node-a", url="http://node-a:8000")
+        }
+
+        async def choose_node_for_request(self, path, payload):
+            return SimpleNamespace(
+                node_id="node-a", matched_tokens=16, data_parallel_rank=2
+            )
+
+    async def app(scope, receive, send):
+        local_calls.append((scope, await receive()))
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"local"})
+
+    scope = {
+        "type": "http",
+        "method": "POST",
+        "scheme": "http",
+        "path": "/v1/completions",
+        "root_path": "",
+        "query_string": b"",
+        "headers": [(b"host", b"router")],
+        "server": ("router", 8000),
+        "app": SimpleNamespace(state=SimpleNamespace(prefix_routing_proxy=Proxy())),
+    }
+    received = False
+
+    async def receive():
+        nonlocal received
+        assert not received
+        received = True
+        return {"type": "http.request", "body": request_body}
+
+    async def send(message):
+        sent.append(message)
+
+    monkeypatch.setattr(
+        "vllm.entrypoints.openai.prefix_routing.aiohttp.ClientSession",
+        lambda **kwargs: ClientSession(),
+    )
+
+    asyncio.run(PrefixRoutingMiddleware(app)(scope, receive, send))
+
+    assert len(local_calls) == 1
+    routed_scope, replayed = local_calls[0]
+    assert all(
+        key.lower() != b"x-data-parallel-rank" for key, _ in routed_scope["headers"]
+    )
+    assert replayed["body"] == request_body
+    assert [message["type"] for message in sent] == [
+        "http.response.start",
+        "http.response.body",
+    ]
+    assert sent[0]["status"] == 200
+
+
+def test_prefix_routing_stream_failure_does_not_restart_response(monkeypatch):
+    sent = []
+    request_headers = []
+
+    class Content:
+        async def iter_chunked(self, size):
+            yield b"partial"
+            raise aiohttp.ClientPayloadError("stream interrupted")
+
+    class Response:
+        status = 200
+        headers = {"content-type": "text/event-stream"}
+        content = Content()
+
+    class RequestContext:
+        async def __aenter__(self):
+            return Response()
+
+        async def __aexit__(self, *args):
+            return None
+
+    class ClientSession:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        def request(self, **kwargs):
+            request_headers.extend(kwargs["headers"])
+            return RequestContext()
+
+    async def send(message):
+        sent.append(message)
+
+    monkeypatch.setattr(
+        "vllm.entrypoints.openai.prefix_routing.aiohttp.ClientSession",
+        lambda **kwargs: ClientSession(),
+    )
+    scope = {
+        "method": "POST",
+        "path": "/v1/completions",
+        "query_string": b"",
+        "headers": [],
+    }
+    node = PrefixRoutingNode(node_id="node-a", url="http://node-a:8000")
+
+    with pytest.raises(aiohttp.ClientPayloadError, match="stream interrupted"):
+        asyncio.run(
+            _forward_request(
+                scope,
+                b"{}",
+                send,
+                node,
+                request_timeout=1.0,
+                data_parallel_rank=3,
+            )
+        )
+
+    assert ("x-data-parallel-rank", "3") in request_headers
+    assert [message["type"] for message in sent] == [
+        "http.response.start",
+        "http.response.body",
+    ]
+    assert sum(message["type"] == "http.response.start" for message in sent) == 1
 
 
 @pytest.mark.parametrize(

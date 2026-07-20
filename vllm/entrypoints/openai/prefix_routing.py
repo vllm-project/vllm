@@ -290,10 +290,32 @@ class PrefixRoutingMiddleware:
 
         node = proxy.nodes.get(decision.node_id)
         if node is None or node.local or node.url is None:
-            await self.app(scope, _replay_body(body), send)
+            await self.app(
+                _with_data_parallel_rank(scope, decision.data_parallel_rank),
+                _replay_body(body),
+                send,
+            )
             return
 
-        await _forward_request(scope, body, send, node, proxy.config.request_timeout)
+        forwarded = await _forward_request(
+            scope,
+            body,
+            send,
+            node,
+            proxy.config.request_timeout,
+            decision.data_parallel_rank,
+        )
+        if not forwarded:
+            logger.warning(
+                "Prefix routing upstream %s failed before responding; "
+                "falling back to local handling",
+                node.node_id,
+            )
+            await self.app(
+                scope,
+                _replay_body(body),
+                send,
+            )
 
 
 async def init_prefix_routing(app_state: Any, args: Any) -> None:
@@ -408,9 +430,7 @@ def _parse_prefix_routing_config(
     if event_ingest_token is not None and (
         not isinstance(event_ingest_token, str) or not event_ingest_token
     ):
-        raise ValueError(
-            "prefix routing event_ingest_token must be a non-empty string"
-        )
+        raise ValueError("prefix routing event_ingest_token must be a non-empty string")
 
     return PrefixRoutingConfig(
         nodes=nodes,
@@ -450,13 +470,26 @@ def _replay_body(body: bytes) -> Receive:
     return receive
 
 
+def _with_data_parallel_rank(scope: Scope, rank: int | None) -> Scope:
+    if rank is None:
+        return scope
+    routed_scope = dict(scope)
+    routed_scope["headers"] = [
+        (key, value)
+        for key, value in scope["headers"]
+        if key.lower() != b"x-data-parallel-rank"
+    ] + [(b"x-data-parallel-rank", str(rank).encode("ascii"))]
+    return routed_scope
+
+
 async def _forward_request(
     scope: Scope,
     body: bytes,
     send: Send,
     node: PrefixRoutingNode,
     request_timeout: float,
-) -> None:
+    data_parallel_rank: int | None = None,
+) -> bool:
     assert node.url is not None
     url = f"{node.url.rstrip('/')}{scope['path']}"
     if scope.get("query_string"):
@@ -468,8 +501,16 @@ async def _forward_request(
         if key.lower() not in (b"host", b"content-length")
     ]
     headers.append((PREFIX_ROUTING_BYPASS_HEADER, PREFIX_ROUTING_BYPASS_VALUE))
+    if data_parallel_rank is not None:
+        headers = [
+            (key, value)
+            for key, value in headers
+            if key.lower() != "x-data-parallel-rank"
+        ]
+        headers.append(("x-data-parallel-rank", str(data_parallel_rank)))
 
     timeout = aiohttp.ClientTimeout(total=request_timeout)
+    response_started = False
     try:
         async with (
             aiohttp.ClientSession(timeout=timeout) as session,
@@ -493,6 +534,7 @@ async def _forward_request(
                     "headers": response_headers,
                 }
             )
+            response_started = True
             async for chunk in response.content.iter_chunked(1024):
                 await send(
                     {
@@ -502,18 +544,8 @@ async def _forward_request(
                     }
                 )
             await send({"type": "http.response.body", "body": b""})
-    except aiohttp.ClientError as exc:
-        body = json.dumps({"error": f"Prefix routing upstream failed: {exc}"}).encode(
-            "utf-8"
-        )
-        await send(
-            {
-                "type": "http.response.start",
-                "status": 502,
-                "headers": [
-                    (b"content-type", b"application/json"),
-                    (b"content-length", str(len(body)).encode("ascii")),
-                ],
-            }
-        )
-        await send({"type": "http.response.body", "body": body})
+            return True
+    except (aiohttp.ClientError, TimeoutError):
+        if response_started:
+            raise
+        return False
