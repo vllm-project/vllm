@@ -1591,7 +1591,7 @@ class MoRIIOConnectorWorker:
         if fut is None:
             host = meta.remote_host
             port = int(meta.remote_handshake_port)
-            remote_tp_size = int(meta.remote_tp_size)
+            tp_size = int(meta.tp_size)
             remote_dp_size = int(meta.remote_dp_size)
             # Wide-EP multi-pod: remote DP ranks span pods at different IPs
             # (ranks per pod = dp_local), so resolve the host per cur_dp_rank

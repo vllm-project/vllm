@@ -450,7 +450,7 @@ class ReqMeta:
     remote_handshake_port: int
     remote_notify_port: int
     remote_engine_id: str
-    remote_tp_size: int
+    tp_size: int
     remote_dp_size: int
     # Prefill DP rank that owns this request's KV (forwarded by the proxy). The
     # read must target this rank's memory registration; the default 0 preserves
