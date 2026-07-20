@@ -120,6 +120,7 @@ class RobertaEmbeddingModel(BertEmbeddingModel):
 
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_regex={re.compile(r"^(?!model\.)(?:roberta\.)?"): "model."},
+        orig_to_new_prefix={"model.lm_head.": None},
     )
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):

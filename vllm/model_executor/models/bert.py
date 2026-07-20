@@ -452,7 +452,7 @@ class BertEmbeddingModel(nn.Module, SupportsQuant):
 
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_regex={re.compile(r"^(?!model\.)"): "model."},
-        orig_to_new_prefix={"lm_head.": None},
+        orig_to_new_prefix={"model.lm_head.": None},
     )
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
