@@ -31,7 +31,7 @@ from vllm.model_executor.layers.linear import (
     RowParallelLinear,
 )
 from vllm.model_executor.model_loader.base_loader import BaseModelLoader
-from vllm.model_executor.model_loader.utils import ParamMapping
+from vllm.model_executor.model_loader.utils import ParamMapping, autoload_weights
 from vllm.model_executor.model_loader.weight_utils import (
     download_safetensors_index_file_from_hf,
     download_weights_from_hf,
@@ -41,7 +41,6 @@ from vllm.model_executor.model_loader.weight_utils import (
     safetensors_weights_iterator,
 )
 from vllm.model_executor.models import is_pooling_model
-from vllm.model_executor.models.utils import autoload_weights
 from vllm.model_executor.utils import (
     get_moe_expert_mapping,
     get_packed_modules_mapping,

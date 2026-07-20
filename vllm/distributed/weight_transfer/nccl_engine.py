@@ -27,7 +27,7 @@ from vllm.distributed.weight_transfer.packed_tensor import (
     DEFAULT_PACKED_NUM_BUFFERS,
     packed_nccl_broadcast_consumer,
 )
-from vllm.model_executor.models.utils import autoload_weights
+from vllm.model_executor.model_loader.utils import autoload_weights
 
 # Re-exported for backward compatibility; canonical home is nccl_common.
 __all__ = [

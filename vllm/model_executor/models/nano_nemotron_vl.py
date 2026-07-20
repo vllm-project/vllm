@@ -24,6 +24,7 @@ from vllm.inputs import MultiModalDataDict, MultiModalInput
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import ReLUSquaredActivation
 from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.model_executor.model_loader.utils import autoload_weights
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.interfaces import (
     HasInnerState,
@@ -91,7 +92,7 @@ from vllm.transformers_utils.processors.nano_nemotron_vl import (
 )
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
-from .utils import _merge_multimodal_embeddings, autoload_weights
+from .utils import _merge_multimodal_embeddings
 
 logger = init_logger(__name__)
 

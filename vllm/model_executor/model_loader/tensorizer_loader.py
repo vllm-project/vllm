@@ -20,10 +20,10 @@ from vllm.model_executor.model_loader.tensorizer import (
     tensorizer_weights_iterator,
 )
 from vllm.model_executor.model_loader.utils import (
+    autoload_weights,
     get_model_architecture,
     initialize_model,
 )
-from vllm.model_executor.models.utils import autoload_weights
 from vllm.utils.torch_utils import set_default_torch_dtype
 
 logger = init_logger(__name__)

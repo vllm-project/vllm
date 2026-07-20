@@ -20,7 +20,7 @@ from vllm.distributed.weight_transfer.base import (
     WeightTransferInitInfo,
     WeightTransferUpdateInfo,
 )
-from vllm.model_executor.models.utils import autoload_weights
+from vllm.model_executor.model_loader.utils import autoload_weights
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig

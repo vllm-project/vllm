@@ -10,12 +10,12 @@ from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
 from vllm.config import ModelConfig
 from vllm.config.load import LoadConfig
 from vllm.model_executor.model_loader.base_loader import BaseModelLoader
+from vllm.model_executor.model_loader.utils import autoload_weights
 from vllm.model_executor.model_loader.weight_utils import (
     download_safetensors_index_file_from_hf,
     download_weights_from_hf,
     runai_safetensors_weights_iterator,
 )
-from vllm.model_executor.models.utils import autoload_weights
 from vllm.transformers_utils.runai_utils import is_runai_obj_uri, list_safetensors
 
 

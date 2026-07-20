@@ -24,12 +24,13 @@ from vllm.model_executor.layers.pooler.seqwise import (
 from vllm.model_executor.layers.pooler.tokwise import pooler_for_token_classify
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
+from vllm.model_executor.model_loader.utils import autoload_weights
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsCrossEncoding
 from .interfaces_base import attn_type, default_pooling_type
-from .utils import WeightsMapper, autoload_weights, maybe_prefix
+from .utils import WeightsMapper, maybe_prefix
 
 
 class ModernBertEmbeddings(nn.Module):

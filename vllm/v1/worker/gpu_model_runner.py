@@ -74,6 +74,7 @@ from vllm.model_executor.model_loader.reload import (
     finalize_layerwise_reload,
     initialize_layerwise_reload,
 )
+from vllm.model_executor.model_loader.utils import autoload_weights
 from vllm.model_executor.models.interfaces import (
     MixtureOfExperts,
     MultiModalEmbeddings,
@@ -93,7 +94,6 @@ from vllm.model_executor.models.interfaces_base import (
     is_pooling_model,
     is_text_generation_model,
 )
-from vllm.model_executor.models.utils import autoload_weights
 from vllm.model_executor.offloader import (
     create_offloader,
     get_offloader,

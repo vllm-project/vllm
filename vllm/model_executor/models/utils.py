@@ -535,22 +535,6 @@ def skip_spec_layers(
     )
 
 
-def autoload_weights(
-    model: nn.Module, weights: Iterable[tuple[str, torch.Tensor]]
-) -> set[str]:
-    """Load `weights` into `model` via its `load_weights`, or AutoWeightsLoader.
-
-    Models whose loading is fully handled by `AutoWeightsLoader` (mapper as a
-    class attribute, tied lm_head auto-skipped) need not define a trivial
-    `load_weights`. This is the single entry point every caller should use so
-    such models load correctly whether or not the method exists.
-    """
-    model_load_weights = getattr(model, "load_weights", None)
-    if callable(model_load_weights):
-        return model_load_weights(weights)
-    return AutoWeightsLoader(model).load_weights(weights)
-
-
 def init_vllm_registered_model(
     vllm_config: VllmConfig,
     *,
