@@ -18,10 +18,10 @@ import numpy as np
 import pytest
 import torch
 
-from vllm.distributed.kv_events import MEDIUM_FS
 from vllm.v1.kv_offload.base import (
     Locality,
     LookupResult,
+    Medium,
     OffloadingEvent,
     OffloadingKVEventsConfig,
     OffloadKey,
@@ -648,7 +648,7 @@ def test_cascade_store_emits_fs_event_through_tiering_manager(tmp_path):
             events.extend(manager.take_events())
             time.sleep(0.01)
 
-        fs_events = [e for e in events if e.medium == MEDIUM_FS]
+        fs_events = [e for e in events if e.medium == Medium.FS]
         assert len(fs_events) == 1
         assert set(fs_events[0].keys) == set(keys)
         assert not fs_events[0].removed
