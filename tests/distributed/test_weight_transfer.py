@@ -39,6 +39,8 @@ from vllm.distributed.weight_transfer.ipc_engine import (
     IPCWeightTransferUpdateInfo,
 )
 from vllm.distributed.weight_transfer.nccl_engine import (
+    NCCLTrainerInitInfo,
+    NCCLTrainerWeightTransferEngine,
     NCCLWeightTransferEngine,
     NCCLWeightTransferInitInfo,
     NCCLWeightTransferUpdateInfo,
@@ -1366,9 +1368,10 @@ class TestModuleSource:
 class TestTrainerFactory:
     """WeightTransferTrainerFactory registry mechanics."""
 
-    def test_registry_has_ipc(self):
-        # IPC is the first backend migrated to the trainer engine; NCCL /
-        # sparse NCCL register in later PRs.
+    def test_registry_has_nccl_and_ipc(self):
+        # Sparse NCCL keeps its static trainer path and registers when it
+        # migrates to the trainer engine.
+        assert "nccl" in WeightTransferTrainerFactory._registry
         assert "ipc" in WeightTransferTrainerFactory._registry
 
     def test_register_and_dispatch(self):
@@ -1398,6 +1401,9 @@ class TestTrainerFactory:
 
     def test_ipc_init_info_declares_backend(self):
         assert IPCTrainerInitInfo.backend == "ipc"
+
+    def test_nccl_init_info_declares_backend(self):
+        assert NCCLTrainerInitInfo.backend == "nccl"
 
     def test_trainer_init_info_subclass_must_set_backend(self):
         with pytest.raises(TypeError, match="class-level `backend`"):
@@ -1468,3 +1474,88 @@ def test_ipc_trainer_init_ships_packed_to_worker():
     assert engine.packed is True
     assert client.order == ["init"]
     assert client.last_init_info == {"packed": True}
+
+
+def test_nccl_trainer_init_ships_worker_init_info(monkeypatch):
+    """The sender's trainer_init drives the inference-side init handshake with
+    the worker-shaped init info (rank_offset=1) while opening its own endpoint,
+    and reads the wire params off the trainer init info."""
+    import vllm.distributed.weight_transfer.nccl_engine as nccl_engine_mod
+
+    # Bypass the real NCCL rendezvous.
+    monkeypatch.setattr(nccl_engine_mod, "trainer_init", lambda info: MagicMock())
+
+    client = RecordingClient()
+    engine = WeightTransferTrainerFactory.trainer_init(
+        init_info=NCCLTrainerInitInfo(
+            master_address="127.0.0.1",
+            master_port=29500,
+            world_size=3,
+            rank=0,
+            packed=True,
+        ),
+        client=client,
+        source=ModuleSource(_module_with(("w", torch.zeros(4)))),
+    )
+
+    assert isinstance(engine, NCCLTrainerWeightTransferEngine)
+    assert engine.is_sender is True
+    assert engine.packed is True
+    assert client.order == ["init"]
+    assert client.last_init_info == {
+        "master_address": "127.0.0.1",
+        "master_port": 29500,
+        "rank_offset": 1,
+        "world_size": 3,
+    }
+
+
+def test_nccl_trainer_init_non_sender_skips_rendezvous_and_client():
+    """Non-sender trainer ranks build an engine without opening an endpoint or
+    touching the client; they only join the collectives in send_weights."""
+    client = RecordingClient()
+    engine = WeightTransferTrainerFactory.trainer_init(
+        init_info=NCCLTrainerInitInfo(
+            master_address="127.0.0.1",
+            master_port=29500,
+            world_size=3,
+            rank=1,
+        ),
+        client=client,
+        source=ModuleSource(_module_with(("w", torch.zeros(4)))),
+    )
+
+    assert engine.is_sender is False
+    assert engine.model_update_group is None
+    assert client.order == []
+
+    # send_weights on a non-sender only iterates the source (packed mode needs
+    # no CUDA stream on non-senders), never the client.
+    engine.send_weights()
+    assert client.order == []
+
+
+@pytest.mark.skipif(
+    torch.accelerator.device_count() < 1,
+    reason="Need at least 1 GPU (NCCL broadcast / CUDA stream).",
+)
+def test_nccl_trainer_send_weights_drives_client_in_order():
+    """send_weights issues start -> update -> finish, ships the per-round
+    metadata, and stamps the engine's wire params onto the payload (the worker
+    reads them there while the legacy static trainer path exists)."""
+    client = RecordingClient()
+    engine = NCCLTrainerWeightTransferEngine(
+        client=client,
+        source=ModuleSource(_module_with(("w", torch.zeros(4, device="cuda")))),
+        packed=False,
+    )
+    # Bypass the real NCCL rendezvous; broadcast is a no-op.
+    engine.model_update_group = MagicMock()
+
+    engine.send_weights()
+
+    assert client.order == ["start", "update", "finish"]
+    assert client.last_update_info is not None
+    assert client.last_update_info["names"] == ["w"]
+    assert client.last_update_info["shapes"] == [[4]]
+    assert client.last_update_info["packed"] is False
