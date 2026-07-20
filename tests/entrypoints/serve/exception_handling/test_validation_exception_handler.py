@@ -151,3 +151,38 @@ class TestValidationErrorDoesNotLeakServerPaths:
 
         assert "missing" in message
         assert "Field required" in message
+
+
+class TestValidationErrorResponseIsBounded:
+    """A malformed request must not amplify into a huge response body.
+
+    Regression for #49239: a single request could fail validation thousands
+    of times, and each error echoed the full offending `input`, producing a
+    >100MB 400 body from a few-KB request.
+    """
+
+    @pytest.mark.asyncio
+    async def test_input_not_echoed_and_error_count_capped(self):
+        big = "x" * 2000
+        errors = [
+            {
+                "type": "string_type",
+                "loc": ("body", "input", i, "content"),
+                "msg": "Input should be a valid string",
+                "input": big,
+            }
+            for i in range(12000)
+        ]
+        exc = RequestValidationError(errors)
+
+        response = await validation_exception_handler(_fake_request(), exc)
+        body = json.loads(response.body)
+        message = body["error"]["message"]
+
+        # The offending input is never echoed, and only a bounded number of
+        # errors are rendered -> body stays tiny even for 12k errors.
+        assert big not in message
+        assert len(response.body) < 50_000
+        # The true error count is still reported, with a truncation notice.
+        assert "12000 validation errors" in message
+        assert "more" in message
