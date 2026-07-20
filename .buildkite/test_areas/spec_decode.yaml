@@ -174,7 +174,7 @@ steps:
 - label: Spec Decode DeepSeek MTP Parallel Load (B200)
   key: spec-decode-deepseek-mtp-parallel-load-b200
   timeout_in_minutes: 30
-  device: b200
+  device: b200-k8s
   optional: true
   num_devices: 2
   source_file_dependencies:
