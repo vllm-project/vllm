@@ -286,7 +286,8 @@ def test_gpu_model_runner_v2_skips_unsupported_monolithic_capture(monkeypatch):
     )
     RoutedExpertsCaptureHelper().bind(runner, types.SimpleNamespace())
     assert not hasattr(
-        runner.compilation_config.static_forward_context["dummy"].quant_method
-        .moe_kernel.fused_experts,
+        runner.compilation_config.static_forward_context[
+            "dummy"
+        ].quant_method.moe_kernel.fused_experts,
         "capture_fn",
     )
