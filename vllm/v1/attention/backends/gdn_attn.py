@@ -224,7 +224,33 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         )
 
         spec_sequence_masks_cpu: torch.Tensor | None = None
-        if (
+        if self.use_cache_spec_kernel and num_accepted_tokens is not None:
+            # ReplaySSM spec: every post-prefill row must run through the spec
+            # kernel (a draft-less row is a T=1 window). The baseline decode /
+            # prefill paths read the checkpoint page, which lags the committed
+            # ring history, so routing any decode row there corrupts the state.
+            # num_decode_draft_tokens_cpu cannot drive this mask: it is stale
+            # on draft-less steps and -1 for decode rows whose drafts were
+            # dropped.
+            is_prefilling_cpu = m.is_prefilling
+            assert is_prefilling_cpu is not None
+            query_lens_cpu_all = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
+            spec_sequence_masks_cpu = (
+                ~is_prefilling_cpu[: query_lens_cpu_all.shape[0]]
+            ) & (query_lens_cpu_all > 0)
+            num_spec_decodes = int(spec_sequence_masks_cpu.sum().item())
+            if num_spec_decodes == 0:
+                spec_sequence_masks = None
+                spec_sequence_masks_cpu = None
+            else:
+                assert (
+                    int(query_lens_cpu_all[spec_sequence_masks_cpu].max().item())
+                    <= self.num_spec + 1
+                ), "ReplaySSM-spec decode row wider than the spec window"
+                spec_sequence_masks = async_tensor_h2d(
+                    spec_sequence_masks_cpu, device=query_start_loc.device
+                )
+        elif (
             not self.use_spec_decode
             or num_decode_draft_tokens_cpu is None
             or num_decode_draft_tokens_cpu[num_decode_draft_tokens_cpu >= 0]
@@ -508,6 +534,8 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
 
             assert spec_state_indices_tensor is not None
             assert num_accepted_tokens is not None
+            # non-None whenever num_spec_decodes > 0 (set together above)
+            assert spec_sequence_masks_cpu is not None
             if self.spec_write_pos is None:
                 n_blocks = self.vllm_config.cache_config.num_gpu_blocks
                 assert n_blocks is not None and n_blocks > 0, (
