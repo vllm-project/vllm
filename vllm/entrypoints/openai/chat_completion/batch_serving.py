@@ -181,7 +181,7 @@ class OpenAIServingChatBatch(OpenAIServingChat):
                     sub_request_id,
                     lora_request=lora_request,
                     trace_headers=trace_headers,
-                    priority=request.priority if hasattr(request, "priority") else 0,
+                    priority=request.priority,
                     data_parallel_rank=data_parallel_rank,
                     reasoning_ended=None,
                 )
@@ -251,14 +251,17 @@ class OpenAIServingChatBatch(OpenAIServingChat):
             for output in final_res.outputs:
                 self._raise_if_error(output.finish_reason, request_id)
 
-                if request.logprobs and request.top_logprobs is not None:
+                if request.logprobs and (
+                    request.top_logprobs is not None or request.logprob_token_ids
+                ):
                     assert output.logprobs is not None, "Did not output logprobs"
                     logprobs = self._create_chat_logprobs(
                         token_ids=output.token_ids,
                         top_logprobs=output.logprobs,
                         num_output_top_logprobs=request.top_logprobs,
+                        logprob_token_ids=request.logprob_token_ids,
                         tokenizer=tokenizer,
-                        return_as_token_id=request.return_token_ids,
+                        return_as_token_id=request.return_tokens_as_token_ids,
                     )
                 else:
                     logprobs = None
@@ -267,6 +270,7 @@ class OpenAIServingChatBatch(OpenAIServingChat):
                     reasoning, content, _ = parser.parse(
                         output.text,
                         request=request,  # type: ignore[arg-type]
+                        model_output_token_ids=output.token_ids,
                     )
                     if not request.include_reasoning:
                         reasoning = None

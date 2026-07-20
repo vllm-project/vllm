@@ -15,7 +15,7 @@ from aiter.ops.flydsl.kernels.moe_gemm_2stage import (
 )
 
 from vllm.logger import init_logger
-from vllm.platforms import current_platform
+from vllm.utils.platform_utils import get_device_name_as_file_name
 from vllm.utils.torch_utils import direct_register_custom_op
 
 logger = init_logger(__name__)
@@ -106,7 +106,7 @@ def build_routing_buffers(
 
 @functools.lru_cache
 def try_get_optimal_config(num_experts, inter_dim):
-    device_name = current_platform.get_device_name().replace(" ", "_")
+    device_name = get_device_name_as_file_name()
     json_file_name = (
         f"E={num_experts},N={inter_dim},device_name={device_name},"
         "dtype=int4_w4a16,backend=flydsl.json"

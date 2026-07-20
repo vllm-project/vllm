@@ -83,8 +83,7 @@ class SimpleCPUOffloadScheduler:
             and vllm_config.kv_events_config.enable_kv_cache_events
         )
         dcp_world_size = vllm_config.parallel_config.decode_context_parallel_size
-        pcp_world_size = vllm_config.parallel_config.prefill_context_parallel_size
-        self.cp_world_size = dcp_world_size * pcp_world_size
+        self.cp_world_size = dcp_world_size
         self.block_size = scheduler_block_size
         self.hash_block_size = hash_block_size
         assert self.block_size % self.hash_block_size == 0
@@ -103,9 +102,12 @@ class SimpleCPUOffloadScheduler:
         assert 0 <= self.fa_gidx < len(self.cpu_kv_cache_config.kv_cache_groups)
         # FA group's own block_size; divides scheduler_block_size (the LCM)
         # but is NOT assumed to equal it.
-        self.fa_block_size: int = self.cpu_kv_cache_config.kv_cache_groups[
-            self.fa_gidx
-        ].kv_cache_spec.block_size
+        self.fa_block_size: int = (
+            self.cpu_kv_cache_config.kv_cache_groups[
+                self.fa_gidx
+            ].kv_cache_spec.block_size
+            * self.cp_world_size
+        )
         assert self.block_size % self.fa_block_size == 0
 
         logger.info(
@@ -115,23 +117,21 @@ class SimpleCPUOffloadScheduler:
             "lazy" if lazy_offload else "eager",
         )
 
-        # TODO (yifan): maybe need to enable kv_cache_events and metrics_collector here.
+        spec_config = vllm_config.speculative_config
+        use_eagle = spec_config is not None and spec_config.use_eagle()
         self.cpu_coordinator: KVCacheCoordinator = get_kv_cache_coordinator(
             kv_cache_config=self.cpu_kv_cache_config,
             max_model_len=vllm_config.model_config.max_model_len,
-            max_num_batched_tokens=(
-                vllm_config.scheduler_config.max_num_batched_tokens
-            ),
-            use_eagle=False,
+            max_in_flight_tokens=vllm_config.max_in_flight_tokens,
+            use_eagle=use_eagle,
             enable_caching=True,
             enable_kv_cache_events=self.enable_kv_cache_events,
             dcp_world_size=dcp_world_size,
-            pcp_world_size=pcp_world_size,
+            pcp_world_size=1,
             scheduler_block_size=self.block_size,
             hash_block_size=self.hash_block_size,
         )
         self.cpu_block_pool: BlockPool = self.cpu_coordinator.block_pool
-
         # GPU block pool reference - bound after scheduler builds kv_cache_manager
         self._gpu_block_pool: BlockPool | None = None
 
@@ -261,7 +261,7 @@ class SimpleCPUOffloadScheduler:
         max_hit_len = request.num_tokens - 1 - num_computed_tokens
         if max_hit_len <= 0:
             return 0, False
-        cpu_hit_blocks, hit_length = self.cpu_coordinator.find_longest_cache_hit(
+        cpu_hit_blocks, hit_length, _ = self.cpu_coordinator.find_longest_cache_hit(
             remaining_hashes, max_hit_len
         )
 
@@ -348,7 +348,9 @@ class SimpleCPUOffloadScheduler:
         # the rest will be released along with the temp pin below.
         cpu_hit_blocks: list[list[KVCacheBlock]] = []
         for g in range(num_groups):
-            g_block_size = kv_cache_groups[g].kv_cache_spec.block_size
+            g_block_size = (
+                kv_cache_groups[g].kv_cache_spec.block_size * self.cp_world_size
+            )
             assert num_external_tokens % g_block_size == 0, (
                 f"num_external_tokens={num_external_tokens} not aligned to "
                 f"group {g} block_size={g_block_size}"
@@ -484,24 +486,14 @@ class SimpleCPUOffloadScheduler:
         if self._cursor is not None and self._cursor.ref_cnt > 0:
             self._cursor = None
 
-        # Determine start node.
-        if self._cursor is None:
-            node = free_queue.fake_free_list_head.next_free_block
-        else:
-            node = self._cursor.next_free_block
-
-        tail = free_queue.fake_free_list_tail
         gpu_ids: list[int] = []
         block_hashes: list[bytes] = []
-        covered = 0
         last_visited = self._cursor
 
-        while (
-            node is not None
-            and node is not tail
-            and covered < self._target_free
-            and len(gpu_ids) < num_cpu_free
-        ):
+        for covered, node in enumerate(free_queue.iter_blocks_after(self._cursor)):
+            if covered >= self._target_free or len(gpu_ids) >= num_cpu_free:
+                break
+
             last_visited = node
             bhash = node.block_hash
 
@@ -512,9 +504,6 @@ class SimpleCPUOffloadScheduler:
             ):
                 gpu_ids.append(node.block_id)
                 block_hashes.append(bhash)
-
-            covered += 1
-            node = node.next_free_block
 
         self._cursor = last_visited
 
@@ -599,7 +588,9 @@ class SimpleCPUOffloadScheduler:
                 already_stored_g = state.num_stored_blocks[g]
                 group_gpu_ids = block_ids_by_group[g]
 
-                g_block_size = kv_cache_groups[g].kv_cache_spec.block_size
+                g_block_size = (
+                    kv_cache_groups[g].kv_cache_spec.block_size * self.cp_world_size
+                )
                 ready_blocks_g = aligned_tokens // g_block_size
                 scannable = group_gpu_ids[already_stored_g:ready_blocks_g]
 
