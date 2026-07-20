@@ -1209,7 +1209,13 @@ def _get_kv_cache_groups_uniform_page_size(
 
     # Separate speculator layers into their own group before the heuristic
     # below runs, so drafter layers don't get scattered across groups.
-    speculator_group_layers: list[str] = []
+    # Separate speculator (drafter) layers into their own dedicated group(s),
+    # one per KV cache spec type. A hybrid draft model (e.g. LFM2.5: short_conv +
+    # attention) has multiple spec types among its layers; they must NOT be merged
+    # into a single group (a KV cache group must be spec-uniform), so we keep one
+    # dedicated group per spec type. A non-hybrid (EAGLE-style) drafter simply
+    # yields a single group.
+    speculator_groups_by_spec: dict[KVCacheSpec, list[str]] = {}
     if speculator_layers:
         for spec in list(same_type_layers.keys()):
             layers = same_type_layers[spec]
@@ -1220,11 +1226,12 @@ def _get_kv_cache_groups_uniform_page_size(
                     same_type_layers[spec] = non_spec
                 else:
                     del same_type_layers[spec]
-                speculator_group_layers.extend(spec_in_group)
-        if speculator_group_layers:
+                speculator_groups_by_spec[spec] = spec_in_group
+        if speculator_groups_by_spec:
             logger.info(
-                "Separated %d speculator layers into dedicated KV cache group",
-                len(speculator_group_layers),
+                "Separated %d speculator layers into %d dedicated KV cache group(s)",
+                sum(len(v) for v in speculator_groups_by_spec.values()),
+                len(speculator_groups_by_spec),
             )
 
     # Split each group into smaller groups, to make the number of layers in each
@@ -1274,9 +1281,9 @@ def _get_kv_cache_groups_uniform_page_size(
         # instead of layers[i * group_size: (i + 1) * group_size]
         for i in range(num_groups):
             grouped_layers.append(layers[i::num_groups])
-    # Prepend speculator layers as their own dedicated group
-    if speculator_group_layers:
-        grouped_layers.insert(0, speculator_group_layers)
+    # Prepend speculator layers as their own dedicated group(s), one per spec type
+    for spec_layers in speculator_groups_by_spec.values():
+        grouped_layers.insert(0, spec_layers)
 
     return create_kv_cache_group_specs(kv_cache_spec, grouped_layers)
 
@@ -1772,6 +1779,13 @@ def _identify_speculator_layers(
 
     speculator_layers: set[str] = set()
     for name in all_layer_names:
+        # Classical separate draft model: layers are loaded with prefix
+        # "draft_model" (see spec_decode/draft_model.py). Their local layer
+        # indices do NOT exceed the target's layer count, so the index
+        # heuristic below misses them; detect them by prefix instead.
+        if "draft_model" in name:
+            speculator_layers.add(name)
+            continue
         try:
             layer_idx = extract_layer_index(name)
             if layer_idx >= target_num_layers:
