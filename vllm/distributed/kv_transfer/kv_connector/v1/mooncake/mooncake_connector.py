@@ -39,6 +39,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.stats import (
     MooncakeKVConnectorStats,
 )
 from vllm.distributed.parallel_state import (
+    get_pcp_group,
     get_pp_group,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
@@ -477,6 +478,26 @@ class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
 
         assert vllm_config.kv_transfer_config is not None
         assert vllm_config.kv_transfer_config.engine_id is not None
+        parallel_config = vllm_config.parallel_config
+        kv_role = vllm_config.kv_transfer_config.kv_role
+        if (
+            kv_role in ("kv_consumer", "kv_both")
+            and parallel_config.prefill_context_parallel_size > 1
+        ):
+            raise NotImplementedError(
+                "Mooncake MRV2 PCP currently supports producer-only PCP. "
+                "Consumers and kv_both require prefill_context_parallel_size=1."
+            )
+        if (
+            kv_role == "kv_producer"
+            and parallel_config.prefill_context_parallel_size > 1
+            and parallel_config.decode_context_parallel_size > 1
+        ):
+            raise NotImplementedError(
+                "Mooncake MRV2 PCP producers currently require "
+                "decode_context_parallel_size=1. PCP with DCP-sharded KV "
+                "requires DCP-aware worker discovery."
+            )
         self.engine_id: EngineId = vllm_config.kv_transfer_config.engine_id
 
         if role == KVConnectorRole.SCHEDULER:
@@ -553,6 +574,15 @@ class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
     ) -> tuple[bool, dict[str, Any] | None]:
         assert self.connector_scheduler is not None
         return self.connector_scheduler.request_finished(request, block_ids)
+
+    def get_finished_count(self) -> int | None:
+        if self._kv_transfer_config.kv_role != "kv_producer":
+            return None
+
+        parallel_config = self._vllm_config.parallel_config
+        return (
+            parallel_config.world_size // parallel_config.prefill_context_parallel_size
+        )
 
     ############################################################
     # Worker Side Methods
@@ -967,6 +997,8 @@ class MooncakeConnectorWorker:
         self.dp_rank = dp_local_rank if parallel_config.local_engines_only else dp_rank
         self.pp_size = vllm_config.parallel_config.pipeline_parallel_size
         self.pp_rank = get_pp_group().rank_in_group
+        self.pcp_size = vllm_config.parallel_config.prefill_context_parallel_size
+        self.pcp_rank = get_pcp_group().rank_in_group
 
         self.kv_caches_base_addr: list[int] = []
         self.device_kv_caches: dict[str, torch.Tensor] = {}
@@ -998,7 +1030,13 @@ class MooncakeConnectorWorker:
             # Start bootstrap server on global rank 0.
             if should_launch_bootstrap_server(vllm_config):
                 _, port = get_mooncake_bootstrap_addr(vllm_config)
-                self.bootstrap_server = MooncakeBootstrapServer("0.0.0.0", port)
+                self.bootstrap_server = MooncakeBootstrapServer(
+                    "0.0.0.0",
+                    port,
+                    expected_tp_size=self.tp_size,
+                    expected_pp_size=self.pp_size,
+                    wait_for_complete_topology=self.pcp_size > 1,
+                )
                 self.bootstrap_server.start()
 
         if not self.is_kv_producer:
@@ -1100,6 +1138,9 @@ class MooncakeConnectorWorker:
             self._mooncake_receiver_t.join()
 
     async def register_worker_with_bootstrap(self):
+        if self.pcp_rank != 0:
+            return
+
         host, port = get_mooncake_bootstrap_addr(self.vllm_config)
         url = make_zmq_path("http", host, port) + "/register"
         worker_addr = make_zmq_path("tcp", self.hostname, self.side_channel_port)
@@ -1906,9 +1947,24 @@ class MooncakeConnectorWorker:
         url = remote_bootstrap_addr + "/query"
         try:
             async with httpx.AsyncClient() as client:
-                response = await client.get(url)
-                response.raise_for_status()
-                data: dict = response.json()
+
+                async def query_topology() -> dict:
+                    while True:
+                        response = await client.get(url)
+                        if response.status_code != 503:
+                            response.raise_for_status()
+                            break
+                        logger.debug(
+                            "Prefiller topology at %s is not ready; retrying.",
+                            remote_bootstrap_addr,
+                        )
+                        await asyncio.sleep(1)
+                    return response.json()
+
+                data = await asyncio.wait_for(
+                    query_topology(),
+                    timeout=envs.VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT,
+                )
                 for _, dp_entry in data.items():
                     remote_engine_id = dp_entry["engine_id"]
                     self._remote_agents[remote_engine_id] = {
@@ -1925,10 +1981,10 @@ class MooncakeConnectorWorker:
                 remote_bootstrap_addr,
                 e,
             )
-
-        # Always notify others regardless of connection success or failure.
-        self._pending_bootstrap_queries[remote_bootstrap_addr].set()
-        del self._pending_bootstrap_queries[remote_bootstrap_addr]
+        finally:
+            # Always notify waiters, including when this task is cancelled.
+            self._pending_bootstrap_queries[remote_bootstrap_addr].set()
+            del self._pending_bootstrap_queries[remote_bootstrap_addr]
 
     def receive_kv(
         self,
@@ -1998,6 +2054,9 @@ class MooncakeConnectorWorker:
                 self.receive_kv(remote_engine_id, pull_metas)
 
     async def record_send_reqs(self, metadata: MooncakeConnectorMetadata):
+        if self.pcp_rank != 0:
+            return
+
         for p_req_id, (transfer_id, block_ids) in metadata.reqs_to_send.items():
             if block_ids:
                 # Already gone through request_finished()
@@ -2143,10 +2202,12 @@ def _async_loop(loop: asyncio.AbstractEventLoop):
 
 def should_launch_bootstrap_server(vllm_config: VllmConfig) -> bool:
     assert (parallel_config := vllm_config.parallel_config)
-    # Only the TP=0, PP=0 worker of the designated engine should launch it.
+    # Only the TP=0, PP=0, PCP=0 worker of the designated engine should launch it.
     if get_tensor_model_parallel_rank() != 0:
         return False
     if get_pp_group().rank_in_group != 0:
+        return False
+    if get_pcp_group().rank_in_group != 0:
         return False
 
     # In hybrid or external LB mode,

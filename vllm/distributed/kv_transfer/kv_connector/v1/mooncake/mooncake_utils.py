@@ -47,8 +47,21 @@ class MooncakeBootstrapServer:
     Prefiller workers register their connection info (IP, port, ranks) here.
     """
 
-    def __init__(self, host: str, port: int):
+    def __init__(
+        self,
+        host: str,
+        port: int,
+        expected_tp_size: int = 1,
+        expected_pp_size: int = 1,
+        wait_for_complete_topology: bool = False,
+    ):
+        if expected_tp_size < 1 or expected_pp_size < 1:
+            raise ValueError("Expected TP and PP sizes must be positive.")
+
         self.workers: dict[int, EngineEntry] = {}
+        self.expected_tp_size = expected_tp_size
+        self.expected_pp_size = expected_pp_size
+        self.wait_for_complete_topology = wait_for_complete_topology
 
         self.host = host
         self.port = port
@@ -89,6 +102,22 @@ class MooncakeBootstrapServer:
 
     async def register_worker(self, payload: RegisterWorkerPayload):
         """Handles registration of a prefiller worker."""
+        if payload.tp_rank < 0 or payload.tp_rank >= self.expected_tp_size:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"TP rank {payload.tp_rank} must be less than TP size "
+                    f"{self.expected_tp_size}."
+                ),
+            )
+        if payload.pp_rank < 0 or payload.pp_rank >= self.expected_pp_size:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"PP rank {payload.pp_rank} must be less than PP size "
+                    f"{self.expected_pp_size}."
+                ),
+            )
         if payload.dp_rank not in self.workers:
             self.workers[payload.dp_rank] = EngineEntry(
                 engine_id=payload.engine_id,
@@ -133,4 +162,24 @@ class MooncakeBootstrapServer:
         return {"status": "ok"}
 
     async def query(self) -> dict[int, EngineEntry]:
+        if self.wait_for_complete_topology and not self._is_topology_complete():
+            raise HTTPException(
+                status_code=503,
+                detail="Mooncake prefiller worker topology is not ready.",
+            )
         return self.workers
+
+    def _is_topology_complete(self) -> bool:
+        if not self.workers:
+            return False
+
+        expected_tp_ranks = set(range(self.expected_tp_size))
+        expected_pp_ranks = set(range(self.expected_pp_size))
+        return all(
+            set(entry.worker_addr) == expected_tp_ranks
+            and all(
+                set(tp_entry) == expected_pp_ranks
+                for tp_entry in entry.worker_addr.values()
+            )
+            for entry in self.workers.values()
+        )
