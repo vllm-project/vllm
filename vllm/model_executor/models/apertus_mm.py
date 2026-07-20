@@ -424,8 +424,8 @@ class ApertusForConditionalGeneration(ApertusForCausalLM, SupportsMultiModal):
                 target_device = sample_param.device
             except StopIteration:
                 target_device = torch.device("cuda")
+            
             tokenizer_dtype = torch.float32
-
             logger.info(
                 "[Apertus Worker] Loading Vision Tower natively on %s (%s)",
                 target_device,
@@ -495,51 +495,58 @@ class ApertusForConditionalGeneration(ApertusForCausalLM, SupportsMultiModal):
 
         return valid_codes.to(torch.long) + self.audio_token_offset
 
-    def _parse_mm_modality_and_encoder(
+    def _process_modality_input(
         self,
-        **kwargs: object,
-    ) -> tuple[
-        torch.Tensor | list[torch.Tensor],
-        Callable[[torch.Tensor], torch.Tensor],
-    ] | None:
-        pixel_values = kwargs.get("pixel_values")
-        audio_values = kwargs.get("audio_values")
-
-        # vLLM batches each encoder call by modality. Both fields cannot be set.
-        if pixel_values is not None:
-            if self.vision_tower is None:
-                return None
-            return pixel_values, self._encode_image_to_llm_ids
-        if audio_values is not None:
-            if self.audio_tower is None:
-                return None
-            return audio_values, self._encode_audio_to_llm_ids
-
-        return None
-
-    def embed_multimodal(
-        self,
-        **kwargs: object,
-    ) -> MultiModalEmbeddings:
-        """Encode one modality batch into language embeddings."""
-        selected_encoder = self._parse_mm_modality_and_encoder(**kwargs)
-        if selected_encoder is None:
-            return []
-        values, encode_to_llm_ids = selected_encoder
-
-        try:
-            device = next(self.parameters()).device
-        except StopIteration:
-            device = torch.device("cuda")
-
+        values: torch.Tensor | list[torch.Tensor],
+        encode_fn: Callable[[torch.Tensor], torch.Tensor],
+        device: torch.device,
+    ) -> list[torch.Tensor]:
+        """Encodes inputs for a single modality and retrieves their embeddings."""
         items = list(values.unbind(0)) if isinstance(values, torch.Tensor) else values
+        if not items:
+            return []
 
-        ids_per_item = [encode_to_llm_ids(item) for item in items]
+        ids_per_item = [encode_fn(item) for item in items]
         lengths = [ids.shape[0] for ids in ids_per_item]
 
         all_ids = torch.cat(ids_per_item).to(device)
         all_embeds = super().embed_input_ids(all_ids)
         return list(all_embeds.split(lengths))
+
+    def embed_multimodal(
+        self,
+        **kwargs: object,
+    ) -> MultiModalEmbeddings:
+        """Encode all modality batches into language embeddings."""
+        try:
+            device = next(self.parameters()).device
+        except StopIteration:
+            device = torch.device("cuda")
+
+        multimodal_embeddings: list[torch.Tensor] = []
+
+        # Iterate over keys of kwargs to preserve modality order
+        for input_key in kwargs:
+            if input_key == "pixel_values":
+                pixel_values = kwargs[input_key]
+                if pixel_values is not None and self.vision_tower is not None:
+                    image_embeds = self._process_modality_input(
+                        pixel_values,  # type: ignore
+                        self._encode_image_to_llm_ids,
+                        device,
+                    )
+                    multimodal_embeddings.extend(image_embeds)
+            elif input_key == "audio_values":
+                audio_values = kwargs[input_key]
+                if audio_values is not None and self.audio_tower is not None:
+                    audio_embeds = self._process_modality_input(
+                        audio_values,  # type: ignore
+                        self._encode_audio_to_llm_ids,
+                        device,
+                    )
+                    multimodal_embeddings.extend(audio_embeds)
+
+        return multimodal_embeddings
 
     def embed_input_ids(
         self,

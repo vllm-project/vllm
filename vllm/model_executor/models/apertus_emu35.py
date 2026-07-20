@@ -5,6 +5,7 @@
 # Licensed under the Apache License, Version 2.0 (the "License").
 
 import os.path as osp
+from typing import Any
 
 import numpy as np
 import torch
@@ -273,26 +274,19 @@ class Encoder(nn.Module):
 
 
 class IndexPropagationQuantize(nn.Module):
+
     def __init__(
         self,
-        n_e,
-        e_dim,
-        beta=0.25,
-        use_entropy_loss=False,
-        remap=None,
-        unknown_index="random",
-        cosine_similarity=False,
-        entropy_temperature=0.01,
-        sample_minimization_weight=1.0,
-        batch_maximization_weight=1.0,
-        l2_normalize=False,
+        n_e: int,
+        e_dim: int,
+        remap: str | None = None,
+        unknown_index: str | int = "random",
+        l2_normalize: bool = False,
     ):
         super().__init__()
 
         self.n_e = n_e
         self.e_dim = e_dim
-        self.use_entropy_loss = use_entropy_loss
-        self.beta = beta
 
         self.embedding = nn.Embedding(self.n_e, self.e_dim)
         self.remap = remap
@@ -306,21 +300,9 @@ class IndexPropagationQuantize(nn.Module):
         else:
             self.re_embed = n_e
 
-        self.cosine_similarity = cosine_similarity
-        self.entropy_temperature = entropy_temperature
-        self.sample_minimization_weight = sample_minimization_weight
-        self.batch_maximization_weight = batch_maximization_weight
-
         self.l2_normalize = l2_normalize
-        if self.l2_normalize:
-            self.init_embedding()
 
-    def init_embedding(self):
-        embedding = torch.randn(self.n_e, self.e_dim)
-        embedding = embedding / embedding.norm(dim=-1, keepdim=True).clamp(min=1e-8)
-        self.embedding.weight.data = embedding
-
-    def remap_to_used(self, inds):
+    def remap_to_used(self, inds: torch.Tensor) -> torch.Tensor:
         ishape = inds.shape
         assert len(ishape) > 1
         inds = inds.reshape(ishape[0], -1)
@@ -336,7 +318,7 @@ class IndexPropagationQuantize(nn.Module):
             new[unknown] = self.unknown_index
         return new.reshape(ishape)
 
-    def unmap_to_all(self, inds):
+    def unmap_to_all(self, inds: torch.Tensor) -> torch.Tensor:
         ishape = inds.shape
         assert len(ishape) > 1
         inds = inds.reshape(ishape[0], -1)
@@ -346,7 +328,10 @@ class IndexPropagationQuantize(nn.Module):
         back = torch.gather(used[None, :][inds.shape[0] * [0], :], 1, inds)
         return back.reshape(ishape)
 
-    def forward(self, z, temp=None, return_logits=False):
+    def forward(
+        self,
+        z: torch.Tensor,
+    ) -> tuple[torch.Tensor, float, tuple[None, None, torch.Tensor]]:
         # z: [b, d, h, w]
         # embed.weight: [n, d]
         if self.l2_normalize:
@@ -361,20 +346,13 @@ class IndexPropagationQuantize(nn.Module):
             full_zeros = torch.zeros_like(logits)
             logits = logits[:, self.used, ...]
 
-        soft_one_hot = F.softmax(logits, dim=1)
-        if self.remap is not None:
-            # go back to all entries but unused set to zero
-            full_zeros[:, self.used, ...] = soft_one_hot
-            soft_one_hot = full_zeros
-
         dim = 1
-        ind = soft_one_hot.max(dim, keepdim=True)[1]
+        ind = logits.argmax(dim=dim, keepdim=True)
         hard_one_hot = torch.zeros_like(
             logits,
             memory_format=torch.legacy_contiguous_format,
         ).scatter_(dim, ind, 1.0)
 
-        diff = 0.0
         z_q = einsum("b n h w, n d -> b d h w", hard_one_hot, embedding)
 
         ind = torch.flatten(ind)
@@ -383,11 +361,16 @@ class IndexPropagationQuantize(nn.Module):
             ind = self.remap_to_used(ind)
             ind = ind.reshape(-1, 1)
 
-        return z_q, diff, (None, None, ind)
+        return z_q, 0.0, (None, None, ind)
 
-    def get_codebook_entry(self, indices, shape=None):
+    def get_codebook_entry(
+        self,
+        indices: torch.Tensor,
+        shape: tuple[int, int, int, int] | None = None,
+    ) -> torch.Tensor:
         # shape specifying (batch, height, width, channel)
         if self.remap is not None:
+            assert shape is not None
             indices = indices.reshape(shape[0], -1)  # add batch axis
             indices = self.unmap_to_all(indices)
             indices = indices.reshape(-1)  # flatten again
@@ -404,32 +387,23 @@ class IndexPropagationQuantize(nn.Module):
 
 
 class IBQ(nn.Module):
+
     def __init__(
         self,
-        ddconfig: dict,
+        ddconfig: dict[str, Any],
         n_embed: int,
         embed_dim: int,
-        beta: float = 0.25,
-        use_entropy_loss: bool = False,
-        cosine_similarity: bool = False,
-        entropy_temperature: float = 0.01,
-        sample_minimization_weight: float = 1.0,
-        batch_maximization_weight: float = 1.0,
-        **kwargs,
+        l2_normalize: bool = False,
+        **kwargs: Any,
     ):
         super().__init__()
 
         self.encoder = Encoder(**ddconfig)
 
         self.quantize = IndexPropagationQuantize(
-            n_embed,
-            embed_dim,
-            beta,
-            use_entropy_loss,
-            cosine_similarity=cosine_similarity,
-            entropy_temperature=entropy_temperature,
-            sample_minimization_weight=sample_minimization_weight,
-            batch_maximization_weight=batch_maximization_weight,
+            n_e=n_embed,
+            e_dim=embed_dim,
+            l2_normalize=l2_normalize,
         )
 
         self.quant_conv = nn.Conv2d(ddconfig["z_channels"], embed_dim, 1)
@@ -437,7 +411,7 @@ class IBQ(nn.Module):
     def encode(
         self,
         x: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor | tuple, tuple]:
+    ) -> tuple[torch.Tensor, float, tuple[None, None, torch.Tensor]]:
         h = self.encoder(x)
         h = self.quant_conv(h)
         quant, emb_loss, info = self.quantize(h)
@@ -478,18 +452,7 @@ def build_vision_tokenizer(
         "ddconfig": ddconfig,
         "n_embed": vision_config.get("codebook_size", 131072),
         "embed_dim": vision_config.get("embed_dim", 256),
-        "beta": vision_config.get("beta", 0.25),
-        "use_entropy_loss": vision_config.get("use_entropy_loss", False),
-        "cosine_similarity": vision_config.get("cosine_similarity", False),
-        "entropy_temperature": vision_config.get("entropy_temperature", 0.01),
-        "sample_minimization_weight": vision_config.get(
-            "sample_minimization_weight",
-            1.0,
-        ),
-        "batch_maximization_weight": vision_config.get(
-            "batch_maximization_weight",
-            1.0,
-        ),
+        "l2_normalize": vision_config.get("l2_normalize", False),
     }
 
     tokenizer = IBQ(**cfg)

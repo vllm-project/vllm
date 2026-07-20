@@ -68,6 +68,7 @@ DEFAULT_CONFIG = {
         },
     },
 }
+DEFAULT_FILE_NAME = "wavtokenizer_large_unify_600_24k.safetensors"
 
 
 class SLSTM(nn.Module):
@@ -403,35 +404,19 @@ class SEANetEncoder(nn.Module):
 
 
 class EuclideanCodebook(nn.Module):
+
     def __init__(
         self,
         dim: int,
         codebook_size: int,
-        kmeans_init: bool = False,
-        kmeans_iters: int = 10,
-        decay: float = 0.99,
-        epsilon: float = 1e-5,
-        threshold_ema_dead_code: int = 2,
+        **kwargs: tp.Any,
     ):
         super().__init__()
-        self.decay = decay
-        if kmeans_init:
-            embed = torch.zeros(codebook_size, dim)
-        else:
-            embed = torch.empty(codebook_size, dim)
-            nn.init.kaiming_uniform_(embed)
         self.codebook_size = codebook_size
-        self.kmeans_iters = kmeans_iters
-        self.epsilon = epsilon
-        self.threshold_ema_dead_code = threshold_ema_dead_code
 
-        self.register_buffer("inited", torch.Tensor([not kmeans_init]))
-        self.register_buffer("cluster_size", torch.zeros(codebook_size))
+        embed = torch.empty(codebook_size, dim)
+        nn.init.kaiming_uniform_(embed)
         self.register_buffer("embed", embed)
-        self.register_buffer("embed_avg", embed.clone())
-
-    def init_embed_(self, data: torch.Tensor) -> None:
-        return
 
     def preprocess(self, x: torch.Tensor) -> torch.Tensor:
         return rearrange(x, "... d -> (...) d")
@@ -459,7 +444,6 @@ class EuclideanCodebook(nn.Module):
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         shape = x.shape
         x = self.preprocess(x)
-        self.init_embed_(x)
         embed_ind = self.quantize(x)
         embed_ind = self.postprocess_emb(embed_ind, shape)
         quantize = self.dequantize(embed_ind)
@@ -467,17 +451,13 @@ class EuclideanCodebook(nn.Module):
 
 
 class VectorQuantization(nn.Module):
+
     def __init__(
         self,
         dim: int,
         codebook_size: int,
         codebook_dim: int | None = None,
-        decay: float = 0.99,
-        epsilon: float = 1e-5,
-        kmeans_init: bool = True,
-        kmeans_iters: int = 50,
-        threshold_ema_dead_code: int = 2,
-        commitment_weight: float = 1.0,
+        **kwargs: tp.Any,
     ):
         super().__init__()
         _codebook_dim = codebook_dim if codebook_dim is not None else dim
@@ -488,16 +468,9 @@ class VectorQuantization(nn.Module):
         self.project_out = (
             nn.Linear(_codebook_dim, dim) if requires_projection else nn.Identity()
         )
-        self.epsilon = epsilon
-        self.commitment_weight = commitment_weight
         self._codebook = EuclideanCodebook(
             dim=_codebook_dim,
             codebook_size=codebook_size,
-            kmeans_init=kmeans_init,
-            kmeans_iters=kmeans_iters,
-            decay=decay,
-            epsilon=epsilon,
-            threshold_ema_dead_code=threshold_ema_dead_code,
         )
         self.codebook_size = codebook_size
 
@@ -508,18 +481,17 @@ class VectorQuantization(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        device = x.device
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         x = rearrange(x, "b d n -> b n d")
         x = self.project_in(x)
         quantize, embed_ind = self._codebook(x)
-        loss = torch.tensor([0.0], device=device)
         quantize = self.project_out(quantize)
         quantize = rearrange(quantize, "b n d -> b d n")
-        return quantize, embed_ind, loss
+        return quantize, embed_ind
 
 
 class LanguageVectorQuantization(nn.Module):
+
     def __init__(self, *, num_quantizers: int, **kwargs: tp.Any):
         super().__init__()
         self.layers = nn.ModuleList(
@@ -530,19 +502,15 @@ class LanguageVectorQuantization(nn.Module):
         self,
         x: torch.Tensor,
         n_q: int | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, float]:
         quantized_out = 0.0
-        residual = x
-        all_losses = []
-        all_indices = []
         n_q = n_q or len(self.layers)
+        all_indices = []
         for layer in self.layers[:n_q]:
-            quantized_out, indices, loss = layer(residual)
+            quantized_out, indices = layer(x)
             all_indices.append(indices)
-            all_losses.append(loss)
-        out_losses = torch.stack(all_losses)
         out_indices = torch.stack(all_indices)
-        return quantized_out, out_indices, out_losses
+        return quantized_out, out_indices, 0.0
 
 
 @dataclass
@@ -550,38 +518,28 @@ class QuantizedResult:
     quantized: torch.Tensor
     codes: torch.Tensor
     bandwidth: torch.Tensor
-    penalty: torch.Tensor | None = None
+    penalty: float | None = None
     metrics: dict = field(default_factory=dict)
 
 
 class ResidualVectorQuantizer(nn.Module):
+
     def __init__(
         self,
         dimension: int = 256,
         n_q: int = 8,
         bins: int = 1024,
-        decay: float = 0.99,
-        kmeans_init: bool = True,
-        kmeans_iters: int = 50,
-        threshold_ema_dead_code: int = 2,
+        **kwargs: tp.Any,
     ):
         super().__init__()
         self.n_q = n_q
         self.dimension = dimension
         self.bins = bins
-        self.decay = decay
-        self.kmeans_init = kmeans_init
-        self.kmeans_iters = kmeans_iters
-        self.threshold_ema_dead_code = threshold_ema_dead_code
 
         self.vq = LanguageVectorQuantization(
             dim=self.dimension,
             codebook_size=self.bins,
             num_quantizers=self.n_q,
-            decay=self.decay,
-            kmeans_init=self.kmeans_init,
-            kmeans_iters=self.kmeans_iters,
-            threshold_ema_dead_code=self.threshold_ema_dead_code,
         )
 
     def infer(
@@ -594,7 +552,7 @@ class ResidualVectorQuantizer(nn.Module):
         n_q = 1
         quantized, codes, commit_loss = self.vq(x, n_q=n_q)
         bw = torch.tensor(n_q * bw_per_q).to(x)
-        return QuantizedResult(quantized, codes, bw, penalty=torch.mean(commit_loss))
+        return QuantizedResult(quantized, codes, bw, penalty=commit_loss)
 
     def get_bandwidth_per_quantizer(self, frame_rate: int) -> float:
         return math.log2(self.bins) * frame_rate
@@ -803,10 +761,7 @@ class WavTokenizer40(WavTokenizerBase):
 
         # Check for safetensors or ckpt file
         safetensors_path = os.path.join(
-            self.checkpoint, "wavtokenizer_large_unify_600_24k.safetensors"
-        )
-        ckpt_path = os.path.join(
-            self.checkpoint, "wavtokenizer_large_unify_600_24k.ckpt"
+            self.checkpoint, DEFAULT_FILE_NAME
         )
 
         # Initialize self.model using config
@@ -818,21 +773,13 @@ class WavTokenizer40(WavTokenizerBase):
         self.model = OriginalWavTokenizer(feature_extractor=feature_extractor)
 
         # Load weights
-        if os.path.exists(safetensors_path):
-            state_dict_raw = load_file(safetensors_path, device="cpu")
-        elif os.path.exists(ckpt_path):
-            raw_state = torch.load(ckpt_path, map_location="cpu", weights_only=True)
-            if isinstance(raw_state, dict) and "state_dict" in raw_state:
-                state_dict_raw = raw_state["state_dict"]
-            else:
-                state_dict_raw = raw_state
-        else:
+        if not os.path.exists(safetensors_path):
             raise FileNotFoundError(
                 f"WavTokenizer checkpoint not found under {self.checkpoint}. "
-                f"Expected either 'wavtokenizer_large_unify_600_24k.safetensors' or "
-                f"'wavtokenizer_large_unify_600_24k.ckpt'.",
+                f"Expected either '{DEFAULT_FILE_NAME}'",
             )
 
+        state_dict_raw = load_file(safetensors_path, device="cpu")
         state_dict = {}
         for k, v in state_dict_raw.items():
             if k.startswith("feature_extractor.") and not k.startswith(
