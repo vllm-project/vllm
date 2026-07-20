@@ -25,7 +25,6 @@ from vllm.utils.import_utils import has_deep_gemm
 from vllm.utils.math_utils import cdiv
 
 _DEEPGEMM_BLACKWELL_EXCLUDED_MODEL_TYPES: set[str] = {
-    "glm_moe_dsa",
     "qwen3_5_text",
     "qwen3_5_moe_text",
 }
