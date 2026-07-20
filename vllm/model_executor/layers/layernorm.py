@@ -102,9 +102,12 @@ class RMSNorm(CustomOp):
             assert self.variance_size_override is None, (
                 "Batch invariance is not supported for variance_size_override"
             )
+            pass_weight = (
+                self.pass_weight_add if residual is not None else self.pass_weight
+            )
             return rms_norm_batch_invariant(
                 x,
-                self.weight.data,
+                self.weight.data if pass_weight else None,
                 self.variance_epsilon,
                 residual=residual,
             )
@@ -283,7 +286,9 @@ class RMSNormGated(CustomOp):
     def forward_cuda(
         self, x: torch.Tensor, z: torch.Tensor | None = None
     ) -> torch.Tensor:
-        from vllm.model_executor.layers.fla.ops.layernorm_guard import rmsnorm_fn
+        from vllm.third_party.flash_linear_attention.ops.layernorm_guard import (
+            rmsnorm_fn,
+        )
 
         return rmsnorm_fn(
             x,

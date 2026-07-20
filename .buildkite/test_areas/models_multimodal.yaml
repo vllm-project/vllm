@@ -119,6 +119,7 @@ steps:
       - vllm/model_executor/model_loader/
 
 - label: Multi-Modal Models (Extended Generation 1)
+  device: h200_35gb
   key: multi-modal-models-extended-generation-1
   optional: true
   source_file_dependencies:
