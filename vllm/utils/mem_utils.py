@@ -134,14 +134,16 @@ class MemorySnapshot:
     def measure(self) -> None:
         device = self.device_
 
-        # we measure the torch peak memory usage via allocated_bytes,
+        # Obtain torch stats object, from which we will need to measure the allocated
+        # currently and at peak during profiling
+        stats = torch.accelerator.memory_stats(device)
+
+        # We measure the torch peak memory usage via allocated_bytes,
         # rather than `torch.accelerator.memory_reserved()` .
         # After `torch.accelerator.reset_peak_memory_stats()`,
         # `torch.accelerator.memory_reserved()` will keep growing, and only shrink
         # when we call `torch.accelerator.empty_cache()` or OOM happens.
-        self.torch_peak = torch.accelerator.memory_stats(device).get(
-            "allocated_bytes.all.peak", 0
-        )
+        self.torch_peak = stats.get("allocated_bytes.all.peak", 0)
 
         self.free_memory, self.total_memory = torch.accelerator.get_memory_info(device)
         if current_platform.is_integrated_gpu(device.index):
@@ -155,10 +157,14 @@ class MemorySnapshot:
 
         self.cuda_memory = self.total_memory - self.free_memory
 
-        # torch.accelerator.memory_reserved() is how many bytes
+        # `torch.accelerator.memory_reserved()` is how many bytes
         # PyTorch gets from cuda (by calling cudaMalloc, etc.)
-        # this is used to measure the non-torch memory usage
-        self.torch_memory = torch.accelerator.memory_reserved(device)
+        # this was previously used to measure the non-torch memory usage
+        # Prior to implementation of sleep mode this may have been a good estimate
+        # of torch memory used, but with the implementation of sleep mode and
+        # custom allocators, this is no longer reliable. Torch memory is better
+        # estimated from `allocated_bytes.all.current` in torch stats.
+        self.torch_memory = stats.get("allocated_bytes.all.current", 0)
 
         self.non_torch_memory = self.cuda_memory - self.torch_memory
         self.timestamp = time.time()
