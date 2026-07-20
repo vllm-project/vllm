@@ -154,10 +154,6 @@ async fn recv_engine_message(dealer: &mut DealerSocket) -> Vec<bytes::Bytes> {
     dealer.recv().await.expect("recv engine message").into_vec()
 }
 
-fn test_llm(client: EngineCoreClient) -> Llm {
-    Llm::new(client).with_request_id_randomization(false)
-}
-
 #[derive(Clone, Debug)]
 struct FakeTextBackend;
 
@@ -245,7 +241,7 @@ async fn setup_grpc_service(
     let engine_health = client.subscribe_health();
 
     let chat = ChatLlm::from_shared_backend(
-        test_llm(client),
+        Llm::new(client),
         Arc::new(FakeTextBackend) as Arc<dyn ChatTextBackend>,
     );
     let state = Arc::new(AppState::new(vec!["test-model".to_string()], chat));
@@ -1086,7 +1082,7 @@ async fn grpc_without_keepalive_keeps_unresponsive_connection_open() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
-async fn control_abort_ends_active_generation() {
+async fn control_abort_resolves_external_id_and_empty_is_noop() {
     let (generate_service, control_service, engine_health, engine_task) =
         setup_grpc_service(b"engine-grpc-abort-active", vec![(vec![b'h' as u32], None)]).await;
     let (channel, server_task) = start_grpc_test_server(
@@ -1114,6 +1110,32 @@ async fn control_abort_ends_active_generation() {
         .await
         .expect("start generation")
         .into_inner();
+
+    loop {
+        let response = tokio::time::timeout(Duration::from_secs(2), stream.message())
+            .await
+            .expect("timed out waiting for active generation output")
+            .expect("read active generation output")
+            .expect("generation ended before producing output");
+        if let Some(output) = response.outputs {
+            assert!(
+                output.finish_info.is_none(),
+                "generation finished before abort behavior was exercised"
+            );
+            break;
+        }
+    }
+
+    control_client
+        .abort(pb::AbortRequest::default())
+        .await
+        .expect("empty abort should be a no-op");
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), stream.message())
+            .await
+            .is_err(),
+        "empty abort unexpectedly ended the active generation"
+    );
 
     control_client
         .abort(pb::AbortRequest {

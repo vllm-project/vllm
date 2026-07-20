@@ -63,9 +63,13 @@ impl pb::control_server::Control for ControlServiceImpl {
         &self,
         request: Request<pb::AbortRequest>,
     ) -> Result<Response<pb::AbortResponse>, Status> {
+        let request_ids = request.into_inner().request_ids;
+        if request_ids.is_empty() {
+            return Ok(Response::new(pb::AbortResponse {}));
+        }
         self.state
-            .engine_core_client()
-            .abort(&request.into_inner().request_ids)
+            .chat
+            .abort(&request_ids)
             .await
             .map_err(|error| Status::internal(error.to_report_string()))?;
         Ok(Response::new(pb::AbortResponse {}))
