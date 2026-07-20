@@ -215,9 +215,7 @@ def test_gpu_model_runner_v2_binds_supported_monolithic_capture(monkeypatch):
             self.layer_id = 17
             self.router = None
             self.quant_method = types.SimpleNamespace(
-                moe_kernel=types.SimpleNamespace(
-                    fused_experts=DummyMonolithicExperts()
-                )
+                moe_kernel=types.SimpleNamespace(fused_experts=DummyMonolithicExperts())
             )
 
     class DummyCapturer:
@@ -268,9 +266,7 @@ def test_gpu_model_runner_v2_skips_unsupported_monolithic_capture(monkeypatch):
         layer_id = 19
         router = None
         quant_method = types.SimpleNamespace(
-            moe_kernel=types.SimpleNamespace(
-                fused_experts=DummyMonolithicExperts()
-            )
+            moe_kernel=types.SimpleNamespace(fused_experts=DummyMonolithicExperts())
         )
 
     import vllm.model_executor.layers.fused_moe.layer as fused_moe_layer
@@ -290,7 +286,7 @@ def test_gpu_model_runner_v2_skips_unsupported_monolithic_capture(monkeypatch):
     )
     RoutedExpertsCaptureHelper().bind(runner, types.SimpleNamespace())
     assert not hasattr(
-        runner.compilation_config.static_forward_context["dummy"]
-        .quant_method.moe_kernel.fused_experts,
+        runner.compilation_config.static_forward_context["dummy"].quant_method
+        .moe_kernel.fused_experts,
         "capture_fn",
     )

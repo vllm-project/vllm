@@ -87,8 +87,13 @@ class RoutedExpertsCaptureHelper:
             supports_capture = getattr(
                 fused_experts, "supports_routing_replay_capture", None
             )
-            if supports_capture is not None and supports_capture():
-                fused_experts.set_routing_replay_capture_fn(_capture_fn)
+            set_capture = getattr(
+                fused_experts, "set_routing_replay_capture_fn", None
+            )
+            if supports_capture is not None and supports_capture() and callable(
+                set_capture
+            ):
+                set_capture(_capture_fn)
 
     def before_execute(self) -> None:
         if not self._initialized:
