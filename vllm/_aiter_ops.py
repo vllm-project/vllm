@@ -1236,43 +1236,17 @@ def _fused_mla_dual_rms_norm_impl(
     x1_epsilon: float,
     x2_epsilon: float,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    try:
-        import aiter.ops.fused_qk_norm_rope_cache_quant as aiter_ops
-    except (ImportError, ModuleNotFoundError, AttributeError) as exc:
-        raise ImportError(
-            "fused_qk_rmsnorm requires AITer >= PR #2442. "
-            "Please upgrade aiter or disable the "
-            "fuse_mla_dual_rms_norm pass."
-        ) from exc
+    from aiter.ops.fused_qk_norm_rope_cache_quant import _fused_qk_rmsnorm
 
-    if hasattr(aiter_ops, "_fused_qk_rmsnorm"):
-        return aiter_ops._fused_qk_rmsnorm(
-            q_out=None,
-            q=x1,
-            q_weight=x1_weight,
-            q_eps=x1_epsilon,
-            k_out=None,
-            k=x2,
-            k_weight=x2_weight,
-            k_eps=x2_epsilon,
-        )
-
-    # TODO(rbrugaro-amd): remove the legacy fused_qk_rmsnorm path once
-    # AITER stabilizes the API (https://github.com/ROCm/aiter/issues/3207).
-    if hasattr(aiter_ops, "fused_qk_rmsnorm"):
-        return aiter_ops.fused_qk_rmsnorm(
-            q=x1,
-            q_weight=x1_weight,
-            q_eps=x1_epsilon,
-            k=x2,
-            k_weight=x2_weight,
-            k_eps=x2_epsilon,
-        )
-
-    raise ImportError(
-        "fused_qk_rmsnorm requires AITer >= PR #2442. "
-        "Please upgrade aiter or disable the "
-        "fuse_mla_dual_rms_norm pass."
+    return _fused_qk_rmsnorm(
+        q_out=None,
+        q=x1,
+        q_weight=x1_weight,
+        q_eps=x1_epsilon,
+        k_out=None,
+        k=x2,
+        k_weight=x2_weight,
+        k_eps=x2_epsilon,
     )
 
 
