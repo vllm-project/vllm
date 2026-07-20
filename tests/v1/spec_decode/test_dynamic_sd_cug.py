@@ -15,6 +15,7 @@ from vllm.config import (
     SchedulerConfig,
     VllmConfig,
 )
+from vllm.forward_context import BatchDescriptor
 from vllm.v1.worker.gpu import cudagraph_utils as gpu_cudagraph_utils
 
 pytestmark = pytest.mark.cpu_test
@@ -194,6 +195,82 @@ def test_dynamic_sd_non_uniform_batch_falls_back_to_piecewise(monkeypatch):
     assert desc.num_reqs is None
     assert desc.num_tokens == 3
     assert desc.num_active_loras == 0
+
+
+@pytest.mark.parametrize(
+    ("cudagraph_mode", "decode_mode"),
+    [
+        (CUDAGraphMode.PIECEWISE, CUDAGraphMode.PIECEWISE),
+        (CUDAGraphMode.FULL_AND_PIECEWISE, CUDAGraphMode.FULL),
+    ],
+)
+@pytest.mark.skip_global_cleanup
+def test_cudagraph_dispatch_preserves_attention_backend_role(
+    monkeypatch, cudagraph_mode, decode_mode
+):
+    monkeypatch.setattr(
+        gpu_cudagraph_utils,
+        "get_pp_group",
+        lambda: SimpleNamespace(is_first_rank=True, is_last_rank=True),
+    )
+    monkeypatch.setattr(
+        gpu_cudagraph_utils.current_platform, "get_global_graph_pool", lambda: None
+    )
+    vllm_config = _create_vllm_config_for_dsd(
+        max_num_seqs=2,
+        max_spec_tokens=1,
+        cudagraph_mode=cudagraph_mode.name,
+        use_dynamic_sd=False,
+    )
+    manager = gpu_cudagraph_utils.CudaGraphManager(
+        vllm_config=vllm_config,
+        device=torch.device("cpu"),
+        cudagraph_mode=cudagraph_mode,
+        decode_query_len=2,
+        capture_prefill_backend=True,
+    )
+    manager._graphs_captured = True
+
+    decode_desc = manager.dispatch(
+        num_reqs=1,
+        num_tokens=2,
+        uniform_token_count=2,
+        num_active_loras=0,
+    )
+    prefill_desc = manager.dispatch(
+        num_reqs=1,
+        num_tokens=2,
+        uniform_token_count=2,
+        num_active_loras=0,
+        use_prefill_backend=True,
+    )
+
+    assert decode_desc.cg_mode == decode_mode
+    assert not decode_desc.use_prefill_backend
+    assert prefill_desc.cg_mode == CUDAGraphMode.PIECEWISE
+    assert prefill_desc.use_prefill_backend
+    assert decode_desc != prefill_desc
+
+    if decode_mode == CUDAGraphMode.FULL:
+        synced_decode_desc = manager.dispatch(
+            num_reqs=1,
+            num_tokens=2,
+            uniform_token_count=2,
+            num_active_loras=0,
+            max_cudagraph_mode=CUDAGraphMode.PIECEWISE,
+        )
+        assert synced_decode_desc.cg_mode == CUDAGraphMode.PIECEWISE
+        assert not synced_decode_desc.use_prefill_backend
+
+    piecewise_roles = {
+        desc.use_prefill_backend
+        for desc in manager._capture_descs[CUDAGraphMode.PIECEWISE]
+        if desc.num_tokens == 2
+    }
+    assert piecewise_roles == {False, True}
+    assert BatchDescriptor(num_tokens=2) != BatchDescriptor(
+        num_tokens=2, use_prefill_backend=True
+    )
 
 
 def test_basic_sd_does_not_capture_shorter_full_decode_shapes(monkeypatch):

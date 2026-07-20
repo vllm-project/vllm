@@ -498,6 +498,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             cudagraph_mode,
             decode_query_len=self.decode_query_len,
             lora_capture_cases=self.lora_capture_cases,
+            capture_prefill_backend=self.has_prefill_attn_backend,
         )
         check_attention_cp_compatibility(self.vllm_config)
         if isinstance(self.speculator, DraftModelSpeculator):
@@ -1203,9 +1204,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 < self.req_states.prefill_len.np[req_idx]
                 for req_idx in req_indices
             )
-        if use_prefill_backend:
-            uniform_tok_count = None
-
         num_active_loras = 0
         if self.lora_config:
             req_ids = list(scheduler_output.num_scheduled_tokens.keys())
@@ -1229,6 +1227,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.dp_rank,
             need_eager=is_profile or skip_compiled,
             num_active_loras=num_active_loras,
+            use_prefill_backend=use_prefill_backend,
         )
 
         if batch_desc.num_tokens == 0:
@@ -1239,6 +1238,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         assert not (use_prefill_backend and batch_desc.cg_mode == CUDAGraphMode.FULL), (
             "Prefill attention backend cannot run in a full CUDA graph"
         )
+        assert batch_desc.use_prefill_backend == use_prefill_backend
 
         if not dummy_run:
             # Common case.
@@ -1370,6 +1370,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 num_tokens=input_batch.num_tokens_after_padding,
                 has_lora=self.lora_config is not None,
                 num_active_loras=batch_desc.num_active_loras,
+                use_prefill_backend=batch_desc.use_prefill_backend,
             )
 
             with set_forward_context(
@@ -1382,7 +1383,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 slot_mapping=slot_mappings_by_layer,
                 skip_compiled=skip_compiled,
                 is_padding=input_batch.is_padding,
-                use_prefill_backend=use_prefill_backend,
+                use_prefill_backend=batch_desc.use_prefill_backend,
             ):
                 self.kv_connector.pre_forward(scheduler_output)
                 if batch_desc.cg_mode == CUDAGraphMode.PIECEWISE:

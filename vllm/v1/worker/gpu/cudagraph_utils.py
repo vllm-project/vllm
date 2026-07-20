@@ -54,6 +54,7 @@ class BatchExecutionDescriptor:
     num_reqs: int | None  # None means no request padding is needed (PIECEWISE graphs)
     uniform_token_count: int | None = None
     num_active_loras: int = 0
+    use_prefill_backend: bool = False
 
 
 class CreateForwardFn(Protocol):
@@ -112,6 +113,7 @@ class CudaGraphManager:
         cudagraph_mode: CUDAGraphMode,
         decode_query_len: int,
         lora_capture_cases: list[int] | None = None,
+        capture_prefill_backend: bool = False,
     ):
         self.vllm_config = vllm_config
         self.device = device
@@ -120,6 +122,7 @@ class CudaGraphManager:
         assert self.compilation_config is not None
         self.cudagraph_mode = cudagraph_mode
         self.decode_query_len = decode_query_len
+        self.capture_prefill_backend = capture_prefill_backend
 
         self.dp_size = vllm_config.parallel_config.data_parallel_size
         self.tp_size = vllm_config.parallel_config.tensor_parallel_size
@@ -135,7 +138,9 @@ class CudaGraphManager:
 
         self._graphs_captured = False
 
-        self._candidates: dict[tuple[int, int], list[BatchExecutionDescriptor]] = {}
+        self._candidates: dict[
+            tuple[int, int, bool], list[BatchExecutionDescriptor]
+        ] = {}
         self._capture_descs: dict[CUDAGraphMode, list[BatchExecutionDescriptor]] = {}
 
         # Breakable CUDA graph (PW CUDA graph without torch.compile)
@@ -186,9 +191,9 @@ class CudaGraphManager:
         separate_decode_routine = self.cudagraph_mode.separate_routine()
         max_cg_capture_size = self.compilation_config.max_cudagraph_capture_size
 
-        descs_by_token_lora: dict[tuple[int, int], list[BatchExecutionDescriptor]] = (
-            defaultdict(list)
-        )
+        descs_by_token_lora_role: dict[
+            tuple[int, int, bool], list[BatchExecutionDescriptor]
+        ] = defaultdict(list)
         descs_by_mode: defaultdict[CUDAGraphMode, list[BatchExecutionDescriptor]] = (
             defaultdict(list)
         )
@@ -247,8 +252,8 @@ class CudaGraphManager:
                     # avoid duplicate graphs
                     if desc not in descs_by_mode[decode_mode]:
                         descs_by_mode[decode_mode].append(desc)
-                        descs_by_token_lora[
-                            (rounded_num_tokens, num_active_loras)
+                        descs_by_token_lora_role[
+                            (rounded_num_tokens, num_active_loras, False)
                         ].append(desc)
 
             if mixed_mode:
@@ -260,28 +265,43 @@ class CudaGraphManager:
                     mixed_mode == CUDAGraphMode.PIECEWISE and self.use_breakable_cg
                 ):
                     num_reqs = min(num_tokens, self.max_num_reqs)
-                desc = BatchExecutionDescriptor(
-                    cg_mode=mixed_mode,
-                    num_tokens=num_tokens,
-                    num_reqs=num_reqs,
-                    num_active_loras=num_active_loras,
-                )
-                descs_by_mode[mixed_mode].append(desc)
-                descs_by_token_lora[(num_tokens, num_active_loras)].append(desc)
+                backend_roles = [False]
+                if (
+                    self.capture_prefill_backend
+                    and mixed_mode == CUDAGraphMode.PIECEWISE
+                ):
+                    backend_roles.append(True)
+                for use_prefill_backend in backend_roles:
+                    desc = BatchExecutionDescriptor(
+                        cg_mode=mixed_mode,
+                        num_tokens=num_tokens,
+                        num_reqs=num_reqs,
+                        num_active_loras=num_active_loras,
+                        use_prefill_backend=use_prefill_backend,
+                    )
+                    descs_by_mode[mixed_mode].append(desc)
+                    descs_by_token_lora_role[
+                        (num_tokens, num_active_loras, use_prefill_backend)
+                    ].append(desc)
 
-        if not descs_by_token_lora:
+        if not descs_by_token_lora_role:
             return
 
-        all_token_counts = sorted({k[0] for k in descs_by_token_lora})
+        all_token_counts = sorted({k[0] for k in descs_by_token_lora_role})
         current_range_start = 0
         for token_cg_size in all_token_counts:
             for i in range(current_range_start, token_cg_size + 1):
                 for num_active_loras in self.lora_capture_cases:
-                    staging_key = (token_cg_size, num_active_loras)
-                    if staging_key in descs_by_token_lora:
-                        self._candidates[(i, num_active_loras)] = descs_by_token_lora[
-                            staging_key
-                        ]
+                    for use_prefill_backend in (False, True):
+                        staging_key = (
+                            token_cg_size,
+                            num_active_loras,
+                            use_prefill_backend,
+                        )
+                        if staging_key in descs_by_token_lora_role:
+                            self._candidates[
+                                (i, num_active_loras, use_prefill_backend)
+                            ] = descs_by_token_lora_role[staging_key]
             current_range_start = token_cg_size + 1
 
         for mode, descs in descs_by_mode.items():
@@ -363,13 +383,24 @@ class CudaGraphManager:
         num_tokens: int,
         uniform_token_count: int | None,
         num_active_loras: int,
+        use_prefill_backend: bool = False,
+        max_cudagraph_mode: CUDAGraphMode | None = None,
     ) -> BatchExecutionDescriptor:
         """Find matching cudagraph descriptor from priority-ordered candidates."""
 
+        assert max_cudagraph_mode is None or max_cudagraph_mode.is_valid_runtime_mode()
         effective_loras = self._resolve_effective_loras(num_active_loras)
-        key = (num_tokens, effective_loras)
+        key = (num_tokens, effective_loras, use_prefill_backend)
         if self._graphs_captured and num_tokens > 0 and key in self._candidates:
             for desc in self._candidates[key]:
+                if max_cudagraph_mode is not None and (
+                    max_cudagraph_mode == CUDAGraphMode.NONE
+                    or (
+                        desc.cg_mode == CUDAGraphMode.FULL
+                        and max_cudagraph_mode == CUDAGraphMode.PIECEWISE
+                    )
+                ):
+                    continue
                 if _is_compatible(
                     desc,
                     num_reqs,
@@ -383,6 +414,7 @@ class CudaGraphManager:
             num_tokens=num_tokens,
             num_reqs=num_reqs,
             num_active_loras=effective_loras,
+            use_prefill_backend=use_prefill_backend,
         )
 
     def run_fullgraph(self, desc: BatchExecutionDescriptor):
@@ -424,6 +456,7 @@ class ModelCudaGraphManager(CudaGraphManager):
         cudagraph_mode: CUDAGraphMode,
         decode_query_len: int,
         lora_capture_cases: list[int] | None = None,
+        capture_prefill_backend: bool = False,
     ):
         super().__init__(
             vllm_config,
@@ -431,6 +464,7 @@ class ModelCudaGraphManager(CudaGraphManager):
             cudagraph_mode,
             decode_query_len,
             lora_capture_cases=lora_capture_cases,
+            capture_prefill_backend=capture_prefill_backend,
         )
         self.hidden_states: torch.Tensor | None = None
         self.aux_hidden_states: list[torch.Tensor] = []
@@ -497,7 +531,7 @@ class ModelCudaGraphManager(CudaGraphManager):
                     desc.cg_mode == CUDAGraphMode.PIECEWISE
                     and not self.use_breakable_cg
                 ),
-                use_prefill_backend=desc.cg_mode == CUDAGraphMode.PIECEWISE,
+                use_prefill_backend=desc.use_prefill_backend,
             )
 
             # Capture with dummy rows marked as padding.
@@ -511,6 +545,7 @@ class ModelCudaGraphManager(CudaGraphManager):
                         num_tokens=num_tokens,
                         has_lora=has_lora,
                         num_active_loras=desc.num_active_loras,
+                        use_prefill_backend=desc.use_prefill_backend,
                     )
                 with set_forward_context(
                     attn_metadata,
@@ -521,7 +556,7 @@ class ModelCudaGraphManager(CudaGraphManager):
                     slot_mapping=slot_mappings,
                     batch_descriptor=batch_descriptor,
                     is_padding=input_buffers.is_padding[:num_tokens],
-                    use_prefill_backend=desc.cg_mode == CUDAGraphMode.PIECEWISE,
+                    use_prefill_backend=desc.use_prefill_backend,
                 ):
                     if cg_mode == CUDAGraphMode.PIECEWISE:
                         # PIECEWISE graph (compiled PW or breakable, chosen inside

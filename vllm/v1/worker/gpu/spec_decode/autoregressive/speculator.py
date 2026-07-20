@@ -59,12 +59,18 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
         return True
 
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
+        has_prefill_attn_backend = any(
+            group.prefill_backend is not None
+            for groups in self.target_attn_groups
+            for group in groups
+        )
         # Initialize cudagraph manager for draft prefill (draft position 0).
         self.prefill_cudagraph_manager = SpeculatorCudaGraphManager(
             self.vllm_config,
             self.device,
             cudagraph_mode,
             self.num_speculative_steps + 1,
+            capture_prefill_backend=has_prefill_attn_backend,
         )
 
         # PIECEWISE cudagraphs are not supported for draft decodes.
@@ -206,8 +212,6 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             input_batch.num_tokens,
             max_query_len,
         )
-        if use_prefill_backend:
-            uniform_token_count = None
         prefill_batch_desc, num_tokens_across_dp = dispatch_cg_and_sync_dp(
             self.prefill_cudagraph_manager,
             num_reqs,
@@ -216,6 +220,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             dp_size=self.dp_size,
             dp_rank=self.dp_rank,
             need_eager=is_profile,
+            use_prefill_backend=use_prefill_backend,
         )
 
         self._prepare_eplb_forward(input_batch.num_tokens)
@@ -236,7 +241,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
                 num_tokens_across_dp=num_tokens_across_dp,
                 cudagraph_runtime_mode=prefill_batch_desc.cg_mode,
                 mm_inputs=mm_inputs,
-                use_prefill_backend=use_prefill_backend,
+                use_prefill_backend=prefill_batch_desc.use_prefill_backend,
             )
 
         if self.num_speculative_steps == 1:
@@ -287,7 +292,10 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
         use_prefill_backend: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        batch_descriptor = BatchDescriptor(num_tokens=num_tokens)
+        batch_descriptor = BatchDescriptor(
+            num_tokens=num_tokens,
+            use_prefill_backend=use_prefill_backend,
+        )
         with set_forward_context(
             attn_metadata,
             self.vllm_config,
@@ -346,10 +354,8 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
         num_tokens_across_dp: torch.Tensor | None,
         cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
-        use_prefill_backend: bool | None = None,
+        use_prefill_backend: bool = False,
     ) -> None:
-        if use_prefill_backend is None:
-            use_prefill_backend = cudagraph_runtime_mode == CUDAGraphMode.PIECEWISE
         last_token_indices = self.last_token_indices[:num_reqs]
         positions = self.input_buffers.positions[last_token_indices]
         idx_mapping = self.idx_mapping[:num_reqs]
@@ -437,6 +443,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
         slot_mappings: dict[str, torch.Tensor] | None,
         num_tokens_across_dp: torch.Tensor | None,
         cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
+        use_prefill_backend: bool = False,
     ) -> None:
         self._prepare_eplb_forward(num_reqs)
 
@@ -449,6 +456,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             slot_mappings,
             num_tokens_across_dp,
             cudagraph_runtime_mode,
+            use_prefill_backend=use_prefill_backend,
         )
         last_hidden_states = last_hidden_states[:num_reqs]
 

@@ -56,6 +56,8 @@ class BatchDescriptor:
     (like fused_moe_lora) whose grid size depends on num_active_loras
     to be properly captured.
     """
+    use_prefill_backend: bool = False
+    """Whether the graph uses the optional prefill attention backend."""
 
 
 def _compute_sp_num_tokens(
