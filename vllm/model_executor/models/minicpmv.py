@@ -74,6 +74,8 @@ from vllm.multimodal.processing import BaseDummyInputsBuilder
 from vllm.multimodal.processing.processor import (
     BaseMultiModalProcessor,
     BaseProcessingInfo,
+    PromptIndexTargets,
+    PromptInsertion,
     PromptReplacement,
     PromptUpdate,
     PromptUpdateDetails,
@@ -546,7 +548,7 @@ class MiniCPMVProcessingInfo(BaseProcessingInfo):
 
     def get_hf_processor(self, **kwargs: object):
         hf_processor = self.ctx.get_hf_processor(**kwargs)
-
+        """
         from vllm.transformers_utils.processors.minicpmv import MiniCPMVProcessor
 
         vendored_processor = MiniCPMVProcessor(
@@ -555,6 +557,7 @@ class MiniCPMVProcessingInfo(BaseProcessingInfo):
             version=self.get_model_version(),
         )
         hf_processor = vendored_processor
+        """
 
         # NumPy arrays are considered as Iterable but not Sequence in
         # https://github.com/huggingface/transformers/blob/main/src/transformers/image_transforms.py#L428
@@ -715,7 +718,16 @@ class MiniCPMVDummyInputsBuilder(BaseDummyInputsBuilder[_I]):
         image_prompt_texts = self.info.image_pattern * num_images
         video_prompt_texts = self.info.video_pattern * num_videos
 
-        return image_prompt_texts + video_prompt_texts
+        prompt_text = image_prompt_texts + video_prompt_texts
+
+        # MiniCPM-V 4.x uses a user-prefix insertion fallback when the legacy
+        # placeholder text is tokenized differently inside chat templates.
+        # Keep dummy startup prompts aligned with the real online prompt shape
+        # so encoder-budget initialization exercises the same path.
+        if self.info.get_model_version() in {(4, 0), (4, 5), (4, 6)}:
+            return f"<|im_start|>user\n{prompt_text}<|im_end|>\n<|im_start|>assistant\n"
+
+        return prompt_text
 
     def get_dummy_mm_data(
         self,
@@ -958,12 +970,46 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
             "video": get_video_replacement,
         }
 
-        return [
+        prompt_updates: list[PromptUpdate] = [
             PromptReplacement(
-                modality=modality, target=pattern, replacement=get_replacement[modality]
+                modality=modality,
+                target=pattern,
+                replacement=get_replacement[modality],
             )
             for modality, pattern in placeholders
         ]
+
+        # MiniCPM-V 4.x legacy placeholders can be tokenized differently when
+        # encoded standalone versus inside chat templates, so token-mode
+        # replacement may miss them. Add a V-series-only insertion fallback at
+        # the stable user prefix instead of changing the generic processor.
+        if self.info.get_model_version() in {(4, 0), (4, 5), (4, 6)}:
+            user_prefix_ids = tokenizer.encode(
+                "<|im_start|>user",
+                add_special_tokens=False,
+            )
+            fallback_prefixes = [PromptIndexTargets.prefix(user_prefix_ids)]
+
+            if tokenizer.bos_token_id is not None:
+                fallback_prefixes.append(
+                    PromptIndexTargets.prefix(
+                        [tokenizer.bos_token_id, *user_prefix_ids]
+                    )
+                )
+
+            prompt_updates.extend(
+                [
+                    PromptInsertion(
+                        modality=modality,
+                        target=target,
+                        insertion=get_replacement[modality],
+                    )
+                    for target in fallback_prefixes
+                    for modality in ("image", "video")
+                ]
+            )
+
+        return prompt_updates
 
     def _recompute_cached_prompt_update(
         self,
