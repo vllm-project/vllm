@@ -45,7 +45,7 @@ if current_platform.is_cuda():
         # Falcon-H1: parallel hybrid (every layer has both attention and SSM).
         # The mamba and attention groups end up with different GPU block sizes
         # after page-size unification, so we leave cpu_block_size=None
-        # (block_size_factor stays 1).
+        # (blocks_per_chunk stays 1).
         ("tiiuae/Falcon-H1-0.5B-Instruct", None, None, True),
     ]
 
