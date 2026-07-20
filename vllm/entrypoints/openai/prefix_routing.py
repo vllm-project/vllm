@@ -295,7 +295,7 @@ class PrefixRoutingMiddleware:
             return
 
         if _has_authenticated_bypass(headers, proxy.config.routing_token):
-            await self.app(scope, receive, send)
+            await self.app(_without_bypass_header(scope), receive, send)
             return
 
         scope = _without_external_routing_headers(scope)
@@ -575,6 +575,16 @@ def _without_external_routing_headers(scope: Scope) -> Scope:
     return routed_scope
 
 
+def _without_bypass_header(scope: Scope) -> Scope:
+    routed_scope = dict(scope)
+    routed_scope["headers"] = [
+        (key, value)
+        for key, value in scope["headers"]
+        if key.lower() != PREFIX_ROUTING_BYPASS_HEADER.encode()
+    ]
+    return routed_scope
+
+
 def _has_authenticated_bypass(headers: Headers, expected_token: str | None) -> bool:
     if expected_token is None:
         return False
@@ -622,6 +632,7 @@ async def _forward_request(
             url=url,
             data=body,
             headers=headers,
+            allow_redirects=False,
         ) as response:
             response_headers = [
                 (key.encode("latin-1"), value.encode("latin-1"))

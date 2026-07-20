@@ -608,6 +608,7 @@ def test_prefix_routing_stream_failure_does_not_restart_response():
 
     class ClientSession:
         def request(self, **kwargs):
+            assert kwargs["allow_redirects"] is False
             request_headers.extend(kwargs["headers"])
             return RequestContext()
 
@@ -747,7 +748,11 @@ def test_prefix_routing_accepts_authenticated_internal_bypass():
 
     asyncio.run(PrefixRoutingMiddleware(app)(scope, receive, send))
 
-    assert app_scopes == [scope]
+    assert len(app_scopes) == 1
+    assert (b"x-data-parallel-rank", b"4") in app_scopes[0]["headers"]
+    assert all(
+        key.lower() != b"x-vllm-prefix-routing" for key, _ in app_scopes[0]["headers"]
+    )
 
 
 def test_prefix_routing_rejects_oversized_request_body():
