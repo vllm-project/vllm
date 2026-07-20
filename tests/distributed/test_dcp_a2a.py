@@ -545,34 +545,42 @@ def _distributed_direct_a2a_worker(env: dict[str, str]) -> None:
             num_ubatches=2,
         )
 
-        def check(num_tokens: int, iteration: int) -> None:
+        def check(num_tokens: int, iteration: int, padded: bool) -> None:
             generator = torch.Generator(device=device)
             generator.manual_seed(1234 + rank + iteration * world_size)
-            partial_output = torch.randn(
+            storage_heads = 128 if padded else total_heads
+            partial_output_storage = torch.randn(
                 num_tokens,
-                total_heads,
+                storage_heads,
                 head_dim,
                 device=device,
                 dtype=dtype,
                 generator=generator,
             )
-            partial_lse = torch.randn(
+            partial_lse_storage = torch.randn(
                 num_tokens,
-                total_heads,
+                storage_heads,
                 device=device,
                 dtype=torch.float32,
                 generator=generator,
             )
+            partial_output = partial_output_storage[:, :total_heads, :]
+            partial_lse = partial_lse_storage[:, :total_heads]
+            if padded:
+                assert not partial_output.is_contiguous()
+                assert not partial_lse.is_contiguous()
             active_ubatch[0] = iteration % 2
             actual = workspace.lse_reduce(partial_output, partial_lse, is_lse_base_on_e)
             torch.accelerator.synchronize()
 
+            reference_output = partial_output.contiguous()
+            reference_lse = partial_lse.contiguous()
             gathered_output = [
-                torch.empty_like(partial_output) for _ in range(world_size)
+                torch.empty_like(reference_output) for _ in range(world_size)
             ]
-            gathered_lse = [torch.empty_like(partial_lse) for _ in range(world_size)]
-            dist.all_gather(gathered_output, partial_output)
-            dist.all_gather(gathered_lse, partial_lse)
+            gathered_lse = [torch.empty_like(reference_lse) for _ in range(world_size)]
+            dist.all_gather(gathered_output, reference_output)
+            dist.all_gather(gathered_lse, reference_lse)
             outputs = torch.stack(
                 [
                     value[
@@ -594,25 +602,30 @@ def _distributed_direct_a2a_worker(env: dict[str, str]) -> None:
             )
             _assert_packed_a2a_close(actual, expected, dtype)
 
-        for iteration, num_tokens in enumerate((1, 17, 5, 17)):
-            check(num_tokens, iteration)
+        cases = ((1, False), (17, False), (5, True), (17, True))
+        for iteration, (num_tokens, padded) in enumerate(cases):
+            check(num_tokens, iteration, padded)
         generator = torch.Generator(device=device)
         generator.manual_seed(4321 + rank)
-        partial_output = torch.randn(
+        partial_output_storage = torch.randn(
             5,
-            total_heads,
+            128,
             head_dim,
             device=device,
             dtype=dtype,
             generator=generator,
         )
-        partial_lse = torch.randn(
+        partial_lse_storage = torch.randn(
             5,
-            total_heads,
+            128,
             device=device,
             dtype=torch.float32,
             generator=generator,
         )
+        partial_output = partial_output_storage[:, :total_heads, :]
+        partial_lse = partial_lse_storage[:, :total_heads]
+        assert not partial_output.is_contiguous()
+        assert not partial_lse.is_contiguous()
         torch.accelerator.synchronize()
         active_ubatch[0] = 1
         graph = torch.cuda.CUDAGraph()
@@ -622,10 +635,14 @@ def _distributed_direct_a2a_worker(env: dict[str, str]) -> None:
             graph.replay()
         torch.accelerator.synchronize()
 
-        gathered_output = [torch.empty_like(partial_output) for _ in range(world_size)]
-        gathered_lse = [torch.empty_like(partial_lse) for _ in range(world_size)]
-        dist.all_gather(gathered_output, partial_output)
-        dist.all_gather(gathered_lse, partial_lse)
+        reference_output = partial_output.contiguous()
+        reference_lse = partial_lse.contiguous()
+        gathered_output = [
+            torch.empty_like(reference_output) for _ in range(world_size)
+        ]
+        gathered_lse = [torch.empty_like(reference_lse) for _ in range(world_size)]
+        dist.all_gather(gathered_output, reference_output)
+        dist.all_gather(gathered_lse, reference_lse)
         head_slice = slice(rank * heads_per_rank, (rank + 1) * heads_per_rank)
         outputs = torch.stack(
             [value[:, head_slice, :] for value in gathered_output]

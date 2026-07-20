@@ -74,24 +74,23 @@ __global__ void dispatch_output_lse_kernel(
     const int64_t* peer_output_ptrs, const int64_t* peer_lse_ptrs,
     const int64_t* epoch_ptr, int64_t world_size, int64_t rank,
     int64_t num_tokens, int64_t max_num_tokens, int64_t heads_per_rank,
-    int64_t head_dim) {
+    int64_t head_dim, int64_t output_token_stride, int64_t lse_token_stride) {
   int64_t item = static_cast<int64_t>(blockIdx.x);
   int64_t destination_rank = item / num_tokens;
   int64_t token_idx = item - destination_rank * num_tokens;
-  int64_t total_heads = world_size * heads_per_rank;
 
   uint32_t epoch = static_cast<uint32_t>(epoch_ptr[0]);
   int64_t parity = static_cast<int64_t>(epoch & 1u);
   int64_t destination_item =
       ((parity * world_size + rank) * max_num_tokens + token_idx) *
       heads_per_rank;
-  int64_t source_item =
-      token_idx * total_heads + destination_rank * heads_per_rank;
+  int64_t source_head = destination_rank * heads_per_rank;
 
   uint4* peer_output = reinterpret_cast<uint4*>(
       static_cast<uintptr_t>(peer_output_ptrs[destination_rank]));
   int64_t vectors_per_item = heads_per_rank * head_dim / 8;
-  int64_t source_vector = source_item * head_dim / 8;
+  int64_t source_vector =
+      (token_idx * output_token_stride + source_head * head_dim) / 8;
   int64_t destination_vector = destination_item * head_dim / 8;
   for (int64_t vector_idx = threadIdx.x; vector_idx < vectors_per_item;
        vector_idx += blockDim.x) {
@@ -101,9 +100,10 @@ __global__ void dispatch_output_lse_kernel(
 
   float* peer_lse = reinterpret_cast<float*>(
       static_cast<uintptr_t>(peer_lse_ptrs[destination_rank]));
+  int64_t source_lse = token_idx * lse_token_stride + source_head;
   for (int64_t head_idx = threadIdx.x; head_idx < heads_per_rank;
        head_idx += blockDim.x) {
-    peer_lse[destination_item + head_idx] = partial_lse[source_item + head_idx];
+    peer_lse[destination_item + head_idx] = partial_lse[source_lse + head_idx];
   }
 }
 
@@ -230,8 +230,6 @@ void direct_dcp_a2a_lse_reduce(const torch::stable::Tensor& partial_output,
                                int64_t max_num_tokens, bool is_lse_base_on_e) {
   STD_TORCH_CHECK(partial_output.is_cuda() && partial_lse.is_cuda(),
                   "partial output and LSE must be CUDA tensors");
-  STD_TORCH_CHECK(partial_output.is_contiguous() && partial_lse.is_contiguous(),
-                  "partial output and LSE must be contiguous");
   auto output_dtype = partial_output.scalar_type();
   STD_TORCH_CHECK(output_dtype == torch::headeronly::ScalarType::Half ||
                       output_dtype == torch::headeronly::ScalarType::BFloat16,
@@ -247,6 +245,15 @@ void direct_dcp_a2a_lse_reduce(const torch::stable::Tensor& partial_output,
   int64_t num_tokens = partial_output.size(0);
   int64_t total_heads = partial_output.size(1);
   int64_t head_dim = partial_output.size(2);
+  int64_t output_token_stride = partial_output.stride(0);
+  int64_t lse_token_stride = partial_lse.stride(0);
+  STD_TORCH_CHECK(
+      partial_output.stride(2) == 1 && partial_output.stride(1) == head_dim &&
+          output_token_stride >= total_heads * head_dim &&
+          output_token_stride % 8 == 0,
+      "partial output must have packed heads and an aligned token stride");
+  STD_TORCH_CHECK(partial_lse.stride(1) == 1 && lse_token_stride >= total_heads,
+                  "partial LSE must have packed heads");
   STD_TORCH_CHECK(num_tokens > 0 && num_tokens <= max_num_tokens,
                   "token count exceeds symmetric buffer capacity");
   STD_TORCH_CHECK(total_heads % world_size == 0,
@@ -291,7 +298,8 @@ void direct_dcp_a2a_lse_reduce(const torch::stable::Tensor& partial_output,
       partial_lse.const_data_ptr<float>(),
       peer_output_ptrs.const_data_ptr<int64_t>(),
       peer_lse_ptrs.const_data_ptr<int64_t>(), epoch.const_data_ptr<int64_t>(),
-      world_size, rank, num_tokens, max_num_tokens, heads_per_rank, head_dim);
+      world_size, rank, num_tokens, max_num_tokens, heads_per_rank, head_dim,
+      output_token_stride, lse_token_stride);
   check_launch();
   int64_t signal_items = world_size;
   int64_t signal_blocks =
