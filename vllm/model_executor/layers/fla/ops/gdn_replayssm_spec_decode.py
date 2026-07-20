@@ -583,9 +583,15 @@ def gdn_replayssm_spec_decode(
     if dot_precision_flush is None:
         dot_precision_flush = dot_precision
     vb, vw, vnk, vns = get_replayssm_config(
-        "gdn_spec_verify", max_spec_len=max_spec_len
+        "gdn_spec_verify",
+        max_spec_len=max_spec_len,
+        head_k_dim=checkpoint_state.shape[-1],
     )
-    fb, fw, fnk, fns = get_replayssm_config("gdn_spec_flush", max_spec_len=max_spec_len)
+    fb, fw, fnk, fns = get_replayssm_config(
+        "gdn_spec_flush",
+        max_spec_len=max_spec_len,
+        head_k_dim=checkpoint_state.shape[-1],
+    )
 
     if launch_mode in ("both", "verify"):
         _launch_gdn_spec(

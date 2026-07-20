@@ -70,9 +70,41 @@ def _mamba2_output_only(dstate, L, is_blackwell):
     return 16, 1, _dstate_tile(dstate, 64), _dstate_tile(dstate, 128), 2
 
 
-def _gdn_spec(max_spec_len, is_blackwell):
-    # (block_v, num_warps, nk, num_stages); verify and flush share a config.
+# (block_v, num_warps, nk, num_stages); verify and flush are tuned
+# independently per spec window on Blackwell. Non-Blackwell and untuned T
+# fall back to the shared default.
+_GDN_SPEC_VERIFY_BLACKWELL = {
+    2: (128, 2, 4, 3),
+    4: (128, 2, 4, 3),
+    6: (128, 2, 8, 4),
+    8: (128, 2, 8, 4),
+}
+_GDN_SPEC_FLUSH_BLACKWELL = {
+    2: (64, 1, 8, 4),
+    4: (64, 1, 8, 4),
+    6: (64, 1, 8, 2),
+    8: (64, 1, 8, 2),
+}
+
+
+def _gdn_spec_default(max_spec_len):
     return 64, 1, (4 if max_spec_len >= 6 else 2), 2
+
+
+def _gdn_spec_verify(max_spec_len, head_k_dim, is_blackwell):
+    if is_blackwell and head_k_dim == 128:
+        return _GDN_SPEC_VERIFY_BLACKWELL.get(
+            max_spec_len, _gdn_spec_default(max_spec_len)
+        )
+    return _gdn_spec_default(max_spec_len)
+
+
+def _gdn_spec_flush(max_spec_len, head_k_dim, is_blackwell):
+    if is_blackwell and head_k_dim == 128:
+        return _GDN_SPEC_FLUSH_BLACKWELL.get(
+            max_spec_len, _gdn_spec_default(max_spec_len)
+        )
+    return _gdn_spec_default(max_spec_len)
 
 
 def _l_bucket(cache_len: int) -> int:
@@ -122,6 +154,8 @@ def get_replayssm_config(kernel: str, **shape) -> tuple:
         return _STATE_AND_OUTPUT_BY_L[_l_bucket(shape.get("L", 16))]
     if kernel == "gdn_decode":
         return _gdn_decode(shape.get("L", 16), bw)
-    if kernel in ("gdn_spec_verify", "gdn_spec_flush"):
-        return _gdn_spec(shape["max_spec_len"], bw)
+    if kernel == "gdn_spec_verify":
+        return _gdn_spec_verify(shape["max_spec_len"], shape["head_k_dim"], bw)
+    if kernel == "gdn_spec_flush":
+        return _gdn_spec_flush(shape["max_spec_len"], shape["head_k_dim"], bw)
     raise ValueError(f"unknown ReplaySSM kernel config key: {kernel}")
