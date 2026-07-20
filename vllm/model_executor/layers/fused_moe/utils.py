@@ -324,7 +324,7 @@ def moe_kernel_quantize_input(
     elif quant_dtype == "mxfp8":
         # TODO: `quant_dtype == "mxfp8"` is ambiguous,
         # should be fp8_e4m3. OCP MX also defines `fp8_e5m2`.
-        if not current_platform.is_xpu() and not quantization_emulation:
+        if not current_platform.is_xpu() and quantization_emulation:
             raise NotImplementedError(
                 "moe_kernel_quantize_input does not support quant_dtype='mxfp8' MOE "
                 "quantization emulation. Please open an issue."
