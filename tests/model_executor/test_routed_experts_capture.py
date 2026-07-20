@@ -198,3 +198,60 @@ def test_gpu_model_runner_v2_binds_router_capture(monkeypatch):
     layer_id, topk_ids = capturer.calls[0]
     assert layer_id == 13
     assert torch.equal(topk_ids, torch.tensor([[7, 8]]))
+
+
+def test_gpu_model_runner_v2_binds_supported_monolithic_capture(monkeypatch):
+    from vllm.v1.worker.gpu.routed_experts_utils import RoutedExpertsCaptureHelper
+
+    class DummyMonolithicExperts:
+        def supports_routing_replay_capture(self):
+            return True
+
+        def set_routing_replay_capture_fn(self, capture_fn):
+            self.capture_fn = capture_fn
+
+    class DummyFusedMoE:
+        def __init__(self):
+            self.layer_id = 17
+            self.router = None
+            self.quant_method = types.SimpleNamespace(
+                moe_kernel=types.SimpleNamespace(
+                    fused_experts=DummyMonolithicExperts()
+                )
+            )
+
+    class DummyCapturer:
+        def __init__(self):
+            self.calls = []
+
+        def capture(self, layer_id, topk_ids):
+            self.calls.append((layer_id, topk_ids))
+
+    dummy_module = DummyFusedMoE()
+    import vllm.model_executor.layers.fused_moe.layer as fused_moe_layer
+    import vllm.model_executor.layers.fused_moe.modular_kernel as modular_kernel
+
+    monkeypatch.setattr(fused_moe_layer, "FusedMoE", DummyFusedMoE)
+    monkeypatch.setattr(
+        modular_kernel,
+        "FusedMoEExpertsMonolithic",
+        DummyMonolithicExperts,
+    )
+
+    dummy_self = types.SimpleNamespace(
+        compilation_config=types.SimpleNamespace(
+            static_forward_context={"dummy": dummy_module}
+        )
+    )
+    capturer = DummyCapturer()
+    RoutedExpertsCaptureHelper().bind(dummy_self, capturer)
+
+    dummy_module.quant_method.moe_kernel.fused_experts.capture_fn(
+        torch.tensor([[12, 13]])
+    )
+    assert dummy_module.quant_method.moe_kernel.fused_experts.capture_fn is not None
+    assert dummy_module.quant_method.moe_kernel.fused_experts.capture_fn
+    assert len(capturer.calls) == 1
+    layer_id, topk_ids = capturer.calls[0]
+    assert layer_id == 17
+    assert torch.equal(topk_ids, torch.tensor([[12, 13]]))
