@@ -366,15 +366,16 @@ class BailingMoeV25MTPModel(nn.Module):
             if load_param(name, loaded_weight):
                 loaded_mtp_layers.add(spec_layer)
 
-        for layer_idx in range(
-            self.model.mtp_start_layer_idx,
-            self.model.mtp_start_layer_idx + self.model.num_mtp_layers,
-        ):
-            if layer_idx not in loaded_mtp_layers:
-                raise ValueError(
-                    f"Bailing MTP speculative decoding layer {layer_idx} "
-                    "weights are missing from checkpoint. Use a checkpoint "
-                    "that includes MTP layer weights, or disable speculative "
-                    "decoding."
-                )
+        if not getattr(self, "_vllm_skip_mtp_completeness_check", False):
+            for layer_idx in range(
+                self.model.mtp_start_layer_idx,
+                self.model.mtp_start_layer_idx + self.model.num_mtp_layers,
+            ):
+                if layer_idx not in loaded_mtp_layers:
+                    raise ValueError(
+                        f"Bailing MTP speculative decoding layer {layer_idx} "
+                        "weights are missing from checkpoint. Use a checkpoint "
+                        "that includes MTP layer weights, or disable speculative "
+                        "decoding."
+                    )
         return loaded_params

@@ -302,11 +302,12 @@ class MiniMaxM3MTP(nn.Module):
             if mtp_layer is not None:
                 loaded_mtp_layers.add(mtp_layer)
 
-        # Validate that weights were loaded for each MTP layer.
-        for layer_idx in range(self.model.num_mtp_layers):
-            if layer_idx not in loaded_mtp_layers:
-                raise ValueError(
-                    f"Failed to load MTP layer {layer_idx} weights from checkpoint."
-                )
+        if not getattr(self, "_vllm_skip_mtp_completeness_check", False):
+            # Validate that weights were loaded for each MTP layer.
+            for layer_idx in range(self.model.num_mtp_layers):
+                if layer_idx not in loaded_mtp_layers:
+                    raise ValueError(
+                        f"Failed to load MTP layer {layer_idx} weights from checkpoint."
+                    )
 
         return loaded_params

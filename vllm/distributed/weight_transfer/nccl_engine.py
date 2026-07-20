@@ -136,19 +136,33 @@ class NCCLWeightTransferEngine(
 
     def start_weight_update(self) -> None:
         """Initialize layerwise reloading for the incoming checkpoint weights."""
+        from vllm.distributed.weight_transfer.base import (
+            set_mtp_completeness_check,
+        )
         from vllm.model_executor.model_loader.reload import (
             initialize_layerwise_reload,
         )
 
-        initialize_layerwise_reload(self.model)
+        set_mtp_completeness_check(self.model, True)
+        try:
+            initialize_layerwise_reload(self.model)
+        except BaseException:
+            set_mtp_completeness_check(self.model, False)
+            raise
 
     def finish_weight_update(self) -> None:
         """Finalize layerwise reloading after all weights have been received."""
+        from vllm.distributed.weight_transfer.base import (
+            set_mtp_completeness_check,
+        )
         from vllm.model_executor.model_loader.reload import (
             finalize_layerwise_reload,
         )
 
-        finalize_layerwise_reload(self.model, self.model_config)
+        try:
+            finalize_layerwise_reload(self.model, self.model_config)
+        finally:
+            set_mtp_completeness_check(self.model, False)
 
     def receive_weights(self, update_info: NCCLWeightTransferUpdateInfo) -> None:
         """

@@ -391,16 +391,17 @@ def _load_inkling_mtp_weights(
             loaded_weight = _load(name, weight)
         if not loaded_weight:
             raise ValueError(f"Unexpected Inkling MTP weight: {original_name}")
-    required = {
-        name
-        for name in params
-        if name.startswith("model.layers.") or name.startswith("model.chain_norm.")
-    }
-    if missing := sorted(required - loaded):
-        raise ValueError(
-            "Inkling MTP checkpoint is missing required parameters: "
-            + ", ".join(missing)
-        )
+    if not getattr(module, "_vllm_skip_mtp_completeness_check", False):
+        required = {
+            name
+            for name in params
+            if name.startswith("model.layers.") or name.startswith("model.chain_norm.")
+        }
+        if missing := sorted(required - loaded):
+            raise ValueError(
+                "Inkling MTP checkpoint is missing required parameters: "
+                + ", ".join(missing)
+            )
     return loaded
 
 

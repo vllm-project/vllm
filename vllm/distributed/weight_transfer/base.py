@@ -37,6 +37,15 @@ def materialize_full_tensor(tensor: torch.Tensor) -> torch.Tensor:
     return full_tensor() if callable(full_tensor) else tensor
 
 
+def set_mtp_completeness_check(model: torch.nn.Module, skip: bool) -> None:
+    """Temporarily skip MTP completeness checks during bucketed updates."""
+    for module in model.modules():
+        if skip:
+            module._vllm_skip_mtp_completeness_check = True
+        else:
+            module.__dict__.pop("_vllm_skip_mtp_completeness_check", None)
+
+
 @dataclass(frozen=True)
 class ParamMeta:
     """Name / wire dtype / full (HF) shape for one output parameter."""
@@ -293,11 +302,15 @@ class WeightTransferEngine(ABC, Generic[TInitInfo, TUpdateInfo]):
         Args:
             update_info: Dictionary containing backend-specific update info
         """
-        typed_update_info = self.parse_update_info(update_info)
-        self.receive_weights(typed_update_info)
-        # NCCL broadcast / IPC paths may be asynchronous. Synchronize here so the
-        # next step uses the new weights.
-        torch.accelerator.synchronize()
+        try:
+            typed_update_info = self.parse_update_info(update_info)
+            self.receive_weights(typed_update_info)
+            # NCCL broadcast / IPC paths may be asynchronous. Synchronize here so the
+            # next step uses the new weights.
+            torch.accelerator.synchronize()
+        except BaseException:
+            set_mtp_completeness_check(self.model, False)
+            raise
 
     @abstractmethod
     def receive_weights(self, update_info: TUpdateInfo) -> None:
