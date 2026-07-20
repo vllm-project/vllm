@@ -21,6 +21,7 @@ steps:
       - image-build-amd
 
 - label: Language Models Tests (Extra Standard) %N
+  device: h200_35gb
   key: language-models-tests-extra-standard
   timeout_in_minutes: 40
   source_file_dependencies:
@@ -51,8 +52,8 @@ steps:
       - tests/models/language/pooling/test_classification.py
       - vllm/_aiter_ops.py
       - vllm/platforms/rocm.py
-
 - label: Language Models Tests (Hybrid) %N
+  device: h200_35gb
   key: language-models-tests-hybrid
   timeout_in_minutes: 65
   source_file_dependencies:
@@ -63,8 +64,8 @@ steps:
     # Note: also needed to run plamo2 model in vLLM
     - uv pip install --system --no-build-isolation 'git+https://github.com/state-spaces/mamba@v2.3.0'
     - uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.6.0'
-    # Shard hybrid language model tests
-    - pytest -v -s models/language/generation -m hybrid_model --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
+    # Shard the hybrid language model tests that are numerically stable on Hopper.
+    - pytest -v -s models/language/generation -m hybrid_model -k 'not granite-4.0-tiny-preview' --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
   parallelism: 2
   mirror:
     amd:
@@ -76,6 +77,20 @@ steps:
       - uv pip install --system --no-build-isolation 'git+https://github.com/AndreasKaratzas/mamba@fix-rocm-7.0-warp-size-constexpr'
       - uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.6.0'
       - pytest -v -s models/language/generation -m hybrid_model --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
+
+# Granite 4 hybrid generation is sensitive to hardware-specific Triton SSD
+# autotuning (https://github.com/vllm-project/vllm/issues/25194). Keep this one
+# correctness test on L4 until its H200 output matches the Transformers reference.
+- label: Language Models Tests (Granite L4 Compatibility)
+  key: language-models-tests-granite-l4-compatibility
+  timeout_in_minutes: 65
+  source_file_dependencies:
+  - vllm/
+  - tests/models/language/generation
+  commands:
+    - uv pip install --system --no-build-isolation 'git+https://github.com/state-spaces/mamba@v2.3.0'
+    - uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.6.0'
+    - pytest -v -s models/language/generation -m hybrid_model -k 'granite-4.0-tiny-preview'
 
 - label: Language Models Test (Extended Generation) # 80min
   device: h200_35gb
