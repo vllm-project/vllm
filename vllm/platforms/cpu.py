@@ -156,7 +156,7 @@ class CpuPlatform(Platform):
         if parallel_config.worker_cls == "auto":
             if cache_config.simulate_forward:
                 parallel_config.worker_cls = (
-                    "vllm.v1.worker.simulated_cpu_worker.SimulatedCPUWorker"
+                    "vllm.v1.worker.simulated.worker.SimulatedCPUWorker"
                 )
             else:
                 parallel_config.worker_cls = "vllm.v1.worker.cpu_worker.CPUWorker"

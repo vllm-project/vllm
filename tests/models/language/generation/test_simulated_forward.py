@@ -7,9 +7,13 @@ from tests.conftest import VllmRunner
 from tests.models.registry import HF_EXAMPLE_MODELS
 from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingParams
+from vllm.triton_utils import HAS_TRITON
 from vllm.v1.metrics.reader import Counter
 
-pytestmark = pytest.mark.cpu_model
+pytestmark = [
+    pytest.mark.cpu_model,
+    pytest.mark.skipif(not HAS_TRITON, reason="Simulated forward requires Triton."),
+]
 
 SIMULATED_FORWARD_MODELS = [
     pytest.param("Qwen/Qwen3-235B-A22B", 1, id="qwen3-235b-a22b"),
@@ -64,10 +68,11 @@ def test_simulate_forward_model_matrix(
 
     # No max_tokens/ignore_eos: generation must emit the caller-provided
     # tokens and then terminate via EOS instead of padding to max_model_len.
+    simulated_output_token_ids = [501, 502]
     sampling_params = SamplingParams(
         temperature=0.0,
         detokenize=False,
-        extra_args={"simulated_output_token_ids": [501, 502]},
+        extra_args={"simulated_output_token_ids": simulated_output_token_ids},
     )
 
     with vllm_runner(
@@ -83,6 +88,7 @@ def test_simulate_forward_model_matrix(
             sampling_params=sampling_params,
         )
         assert outputs[0][0][0][-3:] == [501, 502, eos_token_id]
+        assert simulated_output_token_ids == [501, 502]
 
         group_count = _get_kv_cache_group_count(vllm_model)
         if group_count is not None:
@@ -128,8 +134,15 @@ def test_simulate_forward_prefix_cache_hybrid_retention_zero(
         assert outputs[0][0][0][-2:] == [501, 502]
         hits_after_first = _get_counter_value(vllm_model, "vllm:prefix_cache_hits")
 
-        outputs = vllm_model.generate([prompt], sampling_params=sampling_params)
-        assert outputs[0][0][0][-2:] == [501, 502]
+        second_sampling_params = SamplingParams(
+            temperature=0.0,
+            max_tokens=2,
+            ignore_eos=True,
+            detokenize=False,
+            extra_args={"simulated_output_token_ids": [503, 504]},
+        )
+        outputs = vllm_model.generate([prompt], sampling_params=second_sampling_params)
+        assert outputs[0][0][0][-2:] == [503, 504]
         hits_after_second = _get_counter_value(vllm_model, "vllm:prefix_cache_hits")
 
         assert hits_after_second > hits_after_first

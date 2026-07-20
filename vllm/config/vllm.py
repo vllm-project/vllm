@@ -2229,7 +2229,7 @@ class VllmConfig:
 
     def _validate_v2_model_runner(self) -> None:
         """Check for features not yet supported by the V2 model runner."""
-        if not HAS_TRITON and not self.cache_config.simulate_forward:
+        if not HAS_TRITON:
             raise ValueError("Model Runner V2 requires Triton.")
 
         unsupported = self._get_v2_model_runner_unsupported_features()

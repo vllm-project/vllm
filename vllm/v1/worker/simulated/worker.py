@@ -13,7 +13,7 @@ from vllm.platforms import current_platform
 from vllm.utils.mem_utils import format_gib, get_cpu_memory
 from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.worker.gpu_worker import Worker, init_worker_distributed_environment
-from vllm.v1.worker.simulated_cpu_model_runner import SimulatedCPUModelRunner
+from vllm.v1.worker.simulated.model_runner import SimulatedCPUModelRunner
 from vllm.v1.worker.worker_base import CompilationTimes
 
 logger = init_logger(__name__)
