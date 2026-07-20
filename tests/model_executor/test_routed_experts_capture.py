@@ -2,43 +2,66 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import types
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, call, patch
 
 import pytest
 import torch
 
 from vllm.distributed.eplb.eplb_state import EplbLayerState
 from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
-from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
+from vllm.model_executor.layers.fused_moe.routed_experts_capture import (
     RoutedExpertsCapturer,
+    RoutedExpertsTensors,
+    RoutedExpertsWriteTask,
 )
 from vllm.model_executor.layers.fused_moe.router.base_router import BaseRouter
 
 pytestmark = pytest.mark.cpu_test
 
-_REC_MODULE = "vllm.model_executor.layers.fused_moe.routed_experts_capturer"
+_CAPTURER_MODULE = (
+    "vllm.model_executor.layers.fused_moe.routed_experts_capture.capturer"
+)
+
+
+def test_routed_experts_write_task_publishes_copied_tensors():
+    routing_data = torch.tensor([[[1, 2]], [[3, 4]]], dtype=torch.int32)
+    slot_mapping = torch.tensor([5, 9], dtype=torch.int64)
+    writer = Mock()
+    output = SimpleNamespace(routed_experts_slots=None)
+    write_task = RoutedExpertsWriteTask(
+        routed_experts_tensors=RoutedExpertsTensors(routing_data, slot_mapping),
+        writer=writer,
+    )
+
+    write_task.start_copy()
+    write_task.finalize(output)
+
+    stored_routing, stored_slots = writer.store_batch.call_args.args
+    assert stored_routing.tolist() == routing_data.tolist()
+    assert stored_slots.tolist() == slot_mapping.tolist()
+    assert output.routed_experts_slots.tolist() == slot_mapping.tolist()
 
 
 def _capturer_with_buffer(
     *,
     max_tokens: int = 8,
     num_layers: int = 4,
-    num_experts_per_tok: int = 2,
+    moe_top_k: int = 2,
     dp_rank: int = 0,
     tp_size: int = 1,
 ) -> RoutedExpertsCapturer:
     # Bypass __init__ so the test can use a CPU buffer and skip the
     # VllmConfig dependency. The CUDA device-tensor allocation in the
     # real constructor is not what we are exercising here.
-    c = RoutedExpertsCapturer.__new__(RoutedExpertsCapturer)
-    c.dp_rank = dp_rank
-    c.tp_size = tp_size
-    c.device_buffer = torch.full(
-        (max_tokens, num_layers, num_experts_per_tok),
+    capturer = RoutedExpertsCapturer.__new__(RoutedExpertsCapturer)
+    capturer.dp_rank = dp_rank
+    capturer.tp_size = tp_size
+    capturer.device_buffer = torch.full(
+        (max_tokens, num_layers, moe_top_k),
         -1,
         dtype=torch.int32,
     )
-    return c
+    return capturer
 
 
 class DummyRouter(BaseRouter):
@@ -70,8 +93,8 @@ def test_base_router_capture_pre_eplb_mapping():
     router = _make_router()
     captured = []
 
-    def capture_fn(ids):
-        captured.append(ids.clone())
+    def capture_fn(expert_ids: torch.Tensor) -> None:
+        captured.append(expert_ids.clone())
 
     router.set_capture_fn(capture_fn)
     topk_weights, topk_ids = router.select_experts(
@@ -95,8 +118,8 @@ def test_base_router_capture_with_eplb_enabled():
 
     captured = []
 
-    def capture_fn(ids):
-        captured.append(ids.clone())
+    def capture_fn(expert_ids: torch.Tensor) -> None:
+        captured.append(expert_ids.clone())
 
     router.set_capture_fn(capture_fn)
     _, topk_ids = router.select_experts(
@@ -112,7 +135,7 @@ def test_base_router_capture_with_eplb_enabled():
 
 
 def test_gpu_model_runner_binds_router_capture(monkeypatch):
-    from vllm.v1.worker import gpu_model_runner as gmr
+    from vllm.v1.worker import gpu_model_runner
 
     class _DummyRouter:
         _routing_replay_out: torch.Tensor | None = None
@@ -143,7 +166,7 @@ def test_gpu_model_runner_binds_router_capture(monkeypatch):
     )
 
     capturer = DummyCapturer()
-    gmr.GPUModelRunner._bind_routed_experts_capturer(dummy_self, capturer)
+    gpu_model_runner.GPUModelRunner._bind_routed_experts_capturer(dummy_self, capturer)
 
     assert dummy_module.router.capture_fn is not None
     dummy_module.router.capture_fn(torch.tensor([[5, 6]]))
@@ -155,7 +178,7 @@ def test_gpu_model_runner_binds_router_capture(monkeypatch):
 
 
 def test_gpu_model_runner_binding_stage(monkeypatch):
-    from vllm.v1.worker import gpu_model_runner as gmr
+    from vllm.v1.worker import gpu_model_runner
 
     class DummyFusedMoE:
         def __init__(self):
@@ -181,13 +204,11 @@ def test_gpu_model_runner_binding_stage(monkeypatch):
         )
     )
 
-    # Before binding, no capture hook.
     assert dummy_module.router.capture_fn is None
 
     capturer = DummyCapturer()
-    gmr.GPUModelRunner._bind_routed_experts_capturer(dummy_self, capturer)
+    gpu_model_runner.GPUModelRunner._bind_routed_experts_capturer(dummy_self, capturer)
 
-    # After binding, hook should exist and be callable.
     assert callable(dummy_module.router.capture_fn)
     dummy_module.router.capture_fn(torch.tensor([[9, 10]]))
     assert len(capturer.calls) == 1
@@ -196,56 +217,287 @@ def test_gpu_model_runner_binding_stage(monkeypatch):
 def test_routed_experts_capturer_single_dp_no_metadata():
     """dp_metadata is None: capture writes the full topk_ids rows."""
     capturer = _capturer_with_buffer(dp_rank=0)
-    topk = torch.tensor([[1, 2], [3, 4], [5, 6]], dtype=torch.int32)
-    ctx = SimpleNamespace(dp_metadata=None)
-    with patch(f"{_REC_MODULE}.get_forward_context", return_value=ctx):
-        capturer.capture(layer_id=0, topk_ids=topk)
-    assert torch.equal(capturer.device_buffer[:3, 0, :], topk)
+    topk_ids = torch.tensor([[1, 2], [3, 4], [5, 6]], dtype=torch.int32)
+    forward_context = SimpleNamespace(dp_metadata=None)
+    with patch(
+        f"{_CAPTURER_MODULE}.get_forward_context",
+        return_value=forward_context,
+    ):
+        capturer.capture(layer_id=0, topk_ids=topk_ids)
+    assert torch.equal(capturer.device_buffer[:3, 0, :], topk_ids)
     assert capturer.device_buffer[3, 0, 0].item() == -1
 
 
 def test_routed_experts_capturer_dp_naive_concatenated_all_ranks():
-    """n == sum(num_tokens_dp): slice this rank's segment from concatenated topk."""
+    """Slice this rank's rows from routing concatenated across DP ranks."""
     capturer = _capturer_with_buffer(dp_rank=1)
     num_tokens_dp = torch.tensor([2, 3], dtype=torch.int32)
-    ctx = SimpleNamespace(
+    forward_context = SimpleNamespace(
         dp_metadata=SimpleNamespace(num_tokens_across_dp_cpu=num_tokens_dp)
     )
     # Concatenated order: rank0 rows then rank1 rows.
-    topk = torch.tensor(
+    topk_ids = torch.tensor(
         [[0, 1], [2, 3], [10, 11], [12, 13], [14, 15]], dtype=torch.int32
     )
-    with patch(f"{_REC_MODULE}.get_forward_context", return_value=ctx):
-        capturer.capture(layer_id=0, topk_ids=topk)
-    want = topk[2:5]
-    assert torch.equal(capturer.device_buffer[:3, 0, :], want)
+    with patch(
+        f"{_CAPTURER_MODULE}.get_forward_context",
+        return_value=forward_context,
+    ):
+        capturer.capture(layer_id=0, topk_ids=topk_ids)
+    expected = topk_ids[2:5]
+    assert torch.equal(capturer.device_buffer[:3, 0, :], expected)
 
 
 def test_routed_experts_capturer_dp_modular_local_tokens():
-    """n == token_num_per_dp: topk is already local to this DP rank."""
+    """Capture routing that is already local to this DP rank."""
     capturer = _capturer_with_buffer(dp_rank=1)
     num_tokens_dp = torch.tensor([2, 3], dtype=torch.int32)
-    ctx = SimpleNamespace(
+    forward_context = SimpleNamespace(
         dp_metadata=SimpleNamespace(num_tokens_across_dp_cpu=num_tokens_dp)
     )
-    topk = torch.tensor([[10, 11], [12, 13], [14, 15]], dtype=torch.int32)
-    with patch(f"{_REC_MODULE}.get_forward_context", return_value=ctx):
-        capturer.capture(layer_id=0, topk_ids=topk)
-    assert torch.equal(capturer.device_buffer[:3, 0, :], topk)
+    topk_ids = torch.tensor([[10, 11], [12, 13], [14, 15]], dtype=torch.int32)
+    with patch(
+        f"{_CAPTURER_MODULE}.get_forward_context",
+        return_value=forward_context,
+    ):
+        capturer.capture(layer_id=0, topk_ids=topk_ids)
+    assert torch.equal(capturer.device_buffer[:3, 0, :], topk_ids)
 
 
 def test_routed_experts_capturer_dp_unexpected_batch_raises():
     """Mismatch between topk batch dim and DP layout: fail fast."""
     capturer = _capturer_with_buffer(dp_rank=0)
     num_tokens_dp = torch.tensor([2, 3], dtype=torch.int32)
-    ctx = SimpleNamespace(
+    forward_context = SimpleNamespace(
         dp_metadata=SimpleNamespace(num_tokens_across_dp_cpu=num_tokens_dp)
     )
-    # total=5, local=2: n=1 matches neither naive (5) nor modular (2).
-    topk = torch.tensor([[1, 2]], dtype=torch.int32)
+    topk_ids = torch.tensor([[1, 2]], dtype=torch.int32)
     with (
-        patch(f"{_REC_MODULE}.get_forward_context", return_value=ctx),
+        patch(
+            f"{_CAPTURER_MODULE}.get_forward_context",
+            return_value=forward_context,
+        ),
         pytest.raises(AssertionError, match="unexpected topk_ids batch dim"),
     ):
-        capturer.capture(layer_id=0, topk_ids=topk)
+        capturer.capture(layer_id=0, topk_ids=topk_ids)
     assert capturer.device_buffer[0, 0, 0].item() == -1
+
+
+def test_scheduler_accepts_nixl_without_routing_offload_buffer():
+    from vllm.v1.core.sched.scheduler import Scheduler
+
+    scheduler = Scheduler.__new__(Scheduler)
+    scheduler.vllm_config = SimpleNamespace(
+        kv_transfer_config=SimpleNamespace(kv_connector="NixlConnector")
+    )
+    scheduler.connector = Mock()
+
+    assert scheduler._validate_routed_experts_offload(Mock()) == (None, 1)
+
+
+def test_scheduler_skips_offload_transfers_without_offload_buffer():
+    from vllm.v1.core.sched.scheduler import Scheduler
+
+    scheduler = Scheduler.__new__(Scheduler)
+    scheduler.routed_experts_manager = SimpleNamespace(
+        routed_experts_by_offload_block=None,
+        apply_offload_transfers=Mock(),
+    )
+
+    scheduler._apply_routed_experts_offload_transfers(Mock())
+
+    scheduler.routed_experts_manager.apply_offload_transfers.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "kv_transfer_config",
+    [
+        pytest.param(
+            {
+                "kv_connector": "NixlConnector",
+                "kv_role": "kv_both",
+            },
+            id="direct_nixl",
+        ),
+        pytest.param(
+            {
+                "kv_connector": "OffloadingConnector",
+                "kv_role": "kv_both",
+                "kv_connector_extra_config": {
+                    "cpu_bytes_to_use": 1 << 30,
+                },
+            },
+            id="direct_cpu_offload",
+        ),
+        pytest.param(
+            {
+                "kv_connector": "MultiConnector",
+                "kv_role": "kv_both",
+                "kv_connector_extra_config": {
+                    "connectors": [
+                        {
+                            "kv_connector": "NixlConnector",
+                            "kv_role": "kv_both",
+                        },
+                        {
+                            "kv_connector": "OffloadingConnector",
+                            "kv_role": "kv_both",
+                            "kv_connector_extra_config": {
+                                "cpu_bytes_to_use": 1 << 30,
+                            },
+                        },
+                    ]
+                },
+            },
+            id="nixl_and_cpu_offload",
+        ),
+    ],
+)
+def test_vllm_config_accepts_supported_routed_experts_connectors(
+    kv_transfer_config,
+):
+    from vllm.config import KVTransferConfig, VllmConfig
+
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(enable_return_routed_experts=True),
+        kv_transfer_config=KVTransferConfig(**kv_transfer_config),
+    )
+
+    VllmConfig._verify_return_routed_experts_kv_compatibility(config)
+
+
+def test_vllm_config_rejects_tiered_offload_for_routed_experts():
+    from vllm.config import KVTransferConfig, VllmConfig
+
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(enable_return_routed_experts=True),
+        kv_transfer_config=KVTransferConfig(
+            kv_connector="MultiConnector",
+            kv_role="kv_both",
+            kv_connector_extra_config={
+                "connectors": [
+                    {
+                        "kv_connector": "NixlConnector",
+                        "kv_role": "kv_both",
+                    },
+                    {
+                        "kv_connector": "OffloadingConnector",
+                        "kv_role": "kv_both",
+                        "kv_connector_extra_config": {
+                            "cpu_bytes_to_use": 1 << 30,
+                            "spec_name": "TieringOffloadingSpec",
+                        },
+                    },
+                ]
+            },
+        ),
+    )
+
+    with pytest.raises(ValueError, match="exactly one of each"):
+        VllmConfig._verify_return_routed_experts_kv_compatibility(config)
+
+
+def _cpu_offloading_connector(*, num_blocks: int, block_size_factor: int):
+    from vllm.distributed.kv_transfer.kv_connector.v1.offloading_connector import (
+        OffloadingConnector,
+    )
+    from vllm.v1.kv_offload.cpu.spec import CPUOffloadingSpec
+
+    spec = CPUOffloadingSpec.__new__(CPUOffloadingSpec)
+    spec.num_blocks = num_blocks
+    connector = OffloadingConnector.__new__(OffloadingConnector)
+    connector.connector_scheduler = SimpleNamespace(
+        spec=spec,
+        config=SimpleNamespace(block_size_factor=block_size_factor),
+    )
+    return connector
+
+
+def test_scheduler_accepts_nixl_cpu_offload_multi_connector():
+    from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import (
+        MultiConnector,
+    )
+    from vllm.v1.core.sched.scheduler import Scheduler
+
+    cpu_offload = _cpu_offloading_connector(num_blocks=19, block_size_factor=2)
+    multi_connector = MultiConnector.__new__(MultiConnector)
+    multi_connector._connectors = [Mock(), cpu_offload]
+
+    scheduler = Scheduler.__new__(Scheduler)
+    scheduler.vllm_config = SimpleNamespace(
+        kv_transfer_config=SimpleNamespace(kv_connector="MultiConnector")
+    )
+    scheduler.connector = multi_connector
+    scheduler._routed_experts_offload_connector_index = None
+
+    with patch(
+        "vllm.v1.core.sched.scheduler.require_full_attn_group_id"
+    ) as require_full_attn_group_id:
+        assert scheduler._validate_routed_experts_offload(Mock()) == (19, 2)
+
+    require_full_attn_group_id.assert_called_once()
+    assert scheduler._routed_experts_offload_connector_index == 1
+
+
+def test_scheduler_extracts_offload_metadata_from_multi_connector():
+    from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import (
+        MultiKVConnectorMetadata,
+    )
+    from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
+        OffloadingConnectorMetadata,
+    )
+    from vllm.v1.core.sched.scheduler import Scheduler
+
+    offload_metadata = OffloadingConnectorMetadata(load_jobs={}, store_jobs={})
+    multi_metadata = MultiKVConnectorMetadata(metadata=(Mock(), offload_metadata))
+    scheduler = Scheduler.__new__(Scheduler)
+    scheduler._routed_experts_offload_connector_index = 1
+    scheduler.routed_experts_manager = SimpleNamespace(
+        routed_experts_by_offload_block=object(),
+        apply_offload_transfers=Mock(),
+    )
+
+    scheduler._apply_routed_experts_offload_transfers(multi_metadata)
+
+    scheduler.routed_experts_manager.apply_offload_transfers.assert_called_once_with(
+        offload_metadata
+    )
+
+
+def test_routed_experts_offload_uses_transfer_spec_tuple():
+    from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
+        OffloadingConnectorMetadata,
+        TransferJob,
+    )
+    from vllm.model_executor.layers.fused_moe.routed_experts_capture import (
+        RoutedExpertsManager,
+    )
+
+    manager = RoutedExpertsManager.__new__(RoutedExpertsManager)
+    empty_block_map = SimpleNamespace(gpu_block_ids=[])
+    manager._compute_full_attn_block_map = Mock(return_value=empty_block_map)
+    manager.load_from_offload_blocks = Mock()
+    manager.store_to_offload_blocks = Mock()
+    metadata = OffloadingConnectorMetadata(
+        load_jobs={
+            1: TransferJob(
+                req_id="load",
+                transfer_spec=("cpu-load-source", "gpu-load-destination"),
+            )
+        },
+        store_jobs={
+            2: TransferJob(
+                req_id="store",
+                transfer_spec=("gpu-store-source", "cpu-store-destination"),
+            )
+        },
+    )
+
+    manager.apply_offload_transfers(metadata)
+
+    assert manager._compute_full_attn_block_map.call_args_list == [
+        call("gpu-load-destination", "cpu-load-source"),
+        call("gpu-store-source", "cpu-store-destination"),
+    ]
+    manager.load_from_offload_blocks.assert_not_called()
+    manager.store_to_offload_blocks.assert_not_called()

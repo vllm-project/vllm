@@ -321,6 +321,9 @@ class OffloadingConnectorScheduler:
         self,
         spec: OffloadingSpec,
     ):
+        # Kept for capability checks by the core scheduler
+        # (e.g. routed-experts offload buffer sizing).
+        self.spec = spec
         self.config = SchedulerOffloadConfig.from_spec(spec)
         self.manager: OffloadingManager = spec.get_manager()
         self._connector_stats: OffloadingConnectorStats | None = None

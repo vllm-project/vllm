@@ -808,6 +808,79 @@ class VllmConfig:
         # This is the same for all backends
         self.kv_transfer_config.kv_role = "kv_both"
 
+    def _verify_return_routed_experts_kv_compatibility(self) -> None:
+        """Reject unsupported KV transfer connectors for routed-experts returns."""
+        if self.model_config is None or not (
+            self.model_config.enable_return_routed_experts
+        ):
+            return
+        kv_transfer_config = self.kv_transfer_config
+        if kv_transfer_config is None or not kv_transfer_config.is_kv_transfer_instance:
+            return
+        nixl_connector_names = {
+            "NixlConnector",
+            "NixlPullConnector",
+            "NixlPushConnector",
+        }
+
+        def is_cpu_offloading_connector(connector_config: dict[str, Any]) -> bool:
+            extra_config = connector_config.get("kv_connector_extra_config", {})
+            return (
+                connector_config.get("kv_connector") == "OffloadingConnector"
+                and connector_config.get("kv_role") == "kv_both"
+                and extra_config.get("spec_name", "CPUOffloadingSpec")
+                == "CPUOffloadingSpec"
+            )
+
+        if kv_transfer_config.kv_connector in nixl_connector_names:
+            logger.warning(
+                "Routed-experts capture with NIXL P/D requires the router/proxy "
+                "to merge the prefill routing rows with the decode routing rows."
+            )
+            return
+
+        direct_connector_config = {
+            "kv_connector": kv_transfer_config.kv_connector,
+            "kv_role": kv_transfer_config.kv_role,
+            "kv_connector_extra_config": (kv_transfer_config.kv_connector_extra_config),
+        }
+        if is_cpu_offloading_connector(direct_connector_config):
+            return
+
+        if kv_transfer_config.kv_connector == "MultiConnector":
+            connector_configs = kv_transfer_config.kv_connector_extra_config.get(
+                "connectors", []
+            )
+            nixl_connectors = [
+                connector_config
+                for connector_config in connector_configs
+                if connector_config.get("kv_connector") in nixl_connector_names
+            ]
+            cpu_offloading_connectors = [
+                connector_config
+                for connector_config in connector_configs
+                if is_cpu_offloading_connector(connector_config)
+            ]
+            if (
+                len(connector_configs) == 2
+                and len(nixl_connectors) == 1
+                and len(cpu_offloading_connectors) == 1
+            ):
+                logger.warning(
+                    "Routed-experts capture with NIXL P/D requires the "
+                    "router/proxy to merge the prefill routing rows with the "
+                    "decode routing rows. CPU-offloaded routing rows will be "
+                    "stored and restored with the OffloadingConnector child."
+                )
+                return
+
+        raise ValueError(
+            "--enable-return-routed-experts supports direct NIXL P/D, the CPU "
+            "KV offload connector (OffloadingConnector + CPUOffloadingSpec) "
+            "with kv_role=kv_both, or a MultiConnector containing exactly one "
+            "of each; other KV connector configurations are not supported."
+        )
+
     def _verify_kv_transfer_compat(self) -> None:
         """Reject configurations that silently corrupt KV transfers."""
         if (
@@ -871,26 +944,12 @@ class VllmConfig:
         if (
             self.model_config is not None
             and self.model_config.enable_return_routed_experts
+            and self.parallel_config.pipeline_parallel_size > 1
         ):
-            if self.parallel_config.pipeline_parallel_size > 1:
-                raise ValueError(
-                    "--enable-return-routed-experts is incompatible with "
-                    "pipeline parallelism (PP > 1)."
-                )
-
-            # Incompatible with any KV connector — covers both PD disaggregation
-            # (kv_producer/kv_consumer: routing captured on P can't reach D) and
-            # single-instance KV offload/sharing (kv_both: slot_mapping semantics
-            # change when KV blocks live outside local GPU memory, breaking the
-            # slot-indexed routed_experts buffer).
-            if (
-                self.kv_transfer_config is not None
-                and self.kv_transfer_config.is_kv_transfer_instance
-            ):
-                raise ValueError(
-                    "--enable-return-routed-experts is incompatible with KV "
-                    "connectors (PD disaggregation, KV cache offload)."
-                )
+            raise ValueError(
+                "--enable-return-routed-experts is incompatible with "
+                "pipeline parallelism (PP > 1)."
+            )
 
         if self.lora_config is not None:
             self.lora_config.verify_with_model_config(self.model_config)
@@ -1168,6 +1227,69 @@ class VllmConfig:
             )
 
         self._maybe_override_dynamic_sd_cudagraph_mode()
+
+        if (
+            self.attention_config is not None
+            and self.attention_config.hisparse_config is not None
+        ):
+            # PD-decode instances (KV arrives via a consumer connector) are
+            # the intended fast path. Local prefill also works — rows are
+            # written to the host pool and prefill attention stages the
+            # context host->GPU — but it is slower than a normal GPU prefill,
+            # so warn when the deployment will prefill routinely.
+            if (
+                self.kv_transfer_config is None
+                or not self.kv_transfer_config.is_kv_consumer
+            ):
+                logger.warning(
+                    "HiSparse host-resident KV is enabled without a "
+                    "kv_consumer connector (unified / non-PD instance). "
+                    "Every prefill gathers KV from host memory, which is "
+                    "slower than a normal GPU prefill; PD decode-only "
+                    "instances avoid this cost."
+                )
+            if self.parallel_config.use_ubatching:
+                raise ValueError(
+                    "HiSparse does not support DBO/ubatching: micro-batches "
+                    "would index the same hot-buffer rows concurrently and "
+                    "corrupt the LRU state."
+                )
+            if self.speculative_config is not None:
+                raise ValueError("HiSparse does not support speculative decoding.")
+            if self.model_config is not None and not hasattr(
+                self.model_config.hf_config, "index_topk"
+            ):
+                raise ValueError(
+                    "HiSparse is only supported for DSA models with index_topk."
+                )
+            if self.kv_transfer_config is not None and (
+                self.kv_transfer_config.kv_connector
+                not in (
+                    None,
+                    "NixlConnector",
+                    "MooncakeStoreConnector",
+                    "MultiConnector",
+                )
+            ):
+                logger.warning(
+                    "HiSparse host-resident KV is configured with connector "
+                    "%s. NixlConnector (direct-to-host RDMA) and "
+                    "MooncakeStoreConnector (shared-store offload) are the "
+                    "validated paths; other connectors are treated as "
+                    "debug/fallback paths.",
+                    self.kv_transfer_config.kv_connector,
+                )
+
+            from vllm.v1.attention.backends.mla.hisparse import (
+                _has_hisparse_ops,
+            )
+
+            if not _has_hisparse_ops():
+                raise RuntimeError(
+                    "HiSparse requires the compiled CUDA ops "
+                    "(_C_cache_ops.hisparse_*), which are missing from this "
+                    "build. Rebuild vLLM from source with CUDA."
+                )
 
         if (
             self.compilation_config.cudagraph_mode.requires_piecewise_compilation()
@@ -1458,6 +1580,8 @@ class VllmConfig:
         # Resolve kv_offloading-derived connector name into kv_transfer_config
         # before the HMA check below, which inspects the connector class.
         self._post_init_kv_transfer_config()
+
+        self._verify_return_routed_experts_kv_compatibility()
 
         # Hybrid KV cache manager (HMA) runtime rules:
         # - Explicit enable (--no-disable-kv-cache-manager): error if runtime
