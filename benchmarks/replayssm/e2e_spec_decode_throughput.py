@@ -114,8 +114,16 @@ def run_worker(args):
         # Avoid the FlashInfer GDN-prefill cutlass-DSL JIT stall on Blackwell
         # (same default as the decode benchmark).
         additional_config={"gdn_prefill_backend": "triton"},
+        # Ladder of spec_window multiples: covers the baseline spec path's
+        # <= max_concurrency sub-batches when bs > cap, and fixes the
+        # bs=1,T=6 "cudagraph size must be a multiple of T" abort.
         compilation_config={
-            "max_cudagraph_capture_size": max(8, args.batch_size * spec_window)
+            "cudagraph_capture_sizes": sorted({
+                min(r, args.batch_size) * spec_window
+                for r in (1, 2, 4, 8, 16, 24, 32, 48, 64, 96, 128,
+                          192, 256, 384, 512)
+            }),
+            "max_cudagraph_capture_size": args.batch_size * spec_window,
         },
     )
     if args.disable_flashinfer_autotune:
