@@ -67,6 +67,8 @@ def test_models(
 
     if kv_cache_dtype == "fp8_e5m2" and current_platform.is_rocm():
         pytest.skip(f"{kv_cache_dtype} is currently not supported on ROCm/HIP.")
+    if kv_cache_dtype == "fp8_e5m2" and current_platform.is_cuda():
+        pytest.skip(f"{kv_cache_dtype} is not supported by FLASH_ATTN on CUDA.")
 
     if not (
         current_platform.is_xpu()
