@@ -208,33 +208,19 @@ class IPCWeightTransferEngine(
 
     def start_weight_update(self) -> None:
         """Initialize layerwise reloading for the incoming checkpoint weights."""
-        from vllm.distributed.weight_transfer.base import (
-            set_mtp_completeness_check,
-        )
         from vllm.model_executor.model_loader.reload import (
             initialize_layerwise_reload,
         )
 
-        set_mtp_completeness_check(self.model, True)
-        try:
-            initialize_layerwise_reload(self.model)
-        except BaseException:
-            set_mtp_completeness_check(self.model, False)
-            raise
+        initialize_layerwise_reload(self.model)
 
     def finish_weight_update(self) -> None:
         """Finalize layerwise reloading after all weights have been received."""
-        from vllm.distributed.weight_transfer.base import (
-            set_mtp_completeness_check,
-        )
         from vllm.model_executor.model_loader.reload import (
             finalize_layerwise_reload,
         )
 
-        try:
-            finalize_layerwise_reload(self.model, self.model_config)
-        finally:
-            set_mtp_completeness_check(self.model, False)
+        finalize_layerwise_reload(self.model, self.model_config)
 
     def receive_weights(self, update_info: IPCWeightTransferUpdateInfo) -> None:
         """
@@ -288,7 +274,12 @@ class IPCWeightTransferEngine(
                 weight = rebuild_cuda_tensor(*list_args)
                 weights.append((name, weight))
 
-        self.model.load_weights(weights)
+        from vllm.model_executor.model_loader.mtp_validation import (
+            disable_mtp_completeness_check,
+        )
+
+        with disable_mtp_completeness_check():
+            self.model.load_weights(weights)
 
     def shutdown(self) -> None:
         pass

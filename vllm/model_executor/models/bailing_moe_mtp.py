@@ -20,6 +20,9 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
+from vllm.model_executor.model_loader.mtp_validation import (
+    is_mtp_completeness_check_enabled,
+)
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
     maybe_remap_kv_scale_name,
@@ -370,8 +373,9 @@ class BailingMoeV25MTPModel(nn.Module):
             self.model.mtp_start_layer_idx,
             self.model.mtp_start_layer_idx + self.model.num_mtp_layers,
         ):
-            if layer_idx not in loaded_mtp_layers and not getattr(
-                self, "_vllm_skip_mtp_completeness_check", False
+            if (
+                layer_idx not in loaded_mtp_layers
+                and is_mtp_completeness_check_enabled()
             ):
                 raise ValueError(
                     f"Bailing MTP speculative decoding layer {layer_idx} "

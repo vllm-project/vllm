@@ -242,35 +242,6 @@ class TestNCCLEngineParsing:
         assert update_info.dtype_names == ["float32", "bfloat16"]
         assert update_info.shapes == [[100, 100], [50]]
 
-    def test_checkpoint_update_scopes_mtp_completeness_flag(self, monkeypatch):
-        model = torch.nn.Sequential(torch.nn.Linear(2, 2))
-        engine = NCCLWeightTransferEngine(
-            WeightTransferConfig(backend="nccl"),
-            create_mock_vllm_config(),
-            torch.device("cpu"),
-            model,
-        )
-        monkeypatch.setattr(
-            "vllm.model_executor.model_loader.reload.initialize_layerwise_reload",
-            lambda *_: None,
-        )
-        monkeypatch.setattr(
-            "vllm.model_executor.model_loader.reload.finalize_layerwise_reload",
-            lambda *_: None,
-        )
-
-        engine.start_weight_update()
-        assert all(
-            getattr(module, "_vllm_skip_mtp_completeness_check", False)
-            for module in model.modules()
-        )
-
-        engine.finish_weight_update()
-        assert all(
-            not hasattr(module, "_vllm_skip_mtp_completeness_check")
-            for module in model.modules()
-        )
-
 
 # --- Unit Tests: Engine Registry ---
 
