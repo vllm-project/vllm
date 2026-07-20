@@ -86,10 +86,6 @@ class ExampleSecondaryTierManager(SecondaryTierManager):
         Returns:
             HIT if the block is present, MISS if not found.
         """
-        if self.medium is not None and not req_context.load_tier_filter.allows(
-            self.medium
-        ):
-            return LookupResult.MISS
         return LookupResult.HIT if key in self.blocks else LookupResult.MISS
 
     @override
