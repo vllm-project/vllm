@@ -41,6 +41,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     safetensors_weights_iterator,
 )
 from vllm.model_executor.models import is_pooling_model
+from vllm.model_executor.models.utils import autoload_weights
 from vllm.model_executor.utils import (
     get_moe_expert_mapping,
     get_packed_modules_mapping,
@@ -523,12 +524,6 @@ class BitsAndBytesModelLoader(BaseModelLoader):
         """
         Verify that the model is compatible with BitsAndBytes quantization.
         """
-        if not hasattr(model, "load_weights"):
-            raise AttributeError(
-                "The required method 'load_weights' is not defined in class"
-                f" {type(model).__name__}."
-            )
-
         if not hasattr(model, "packed_modules_mapping"):
             raise AttributeError(
                 f"Model {type(model).__name__} does not support BitsAndBytes "
@@ -806,8 +801,6 @@ class BitsAndBytesModelLoader(BaseModelLoader):
             model_config.model,
             model_config.revision,
         )
-        from vllm.model_executor.models.utils import autoload_weights
-
         weights_to_load = {name for name, _ in model.named_parameters()}
         loaded_weights = autoload_weights(model, qweight_iterator)
         # Some models may have weights loading tracker unimplemented.
