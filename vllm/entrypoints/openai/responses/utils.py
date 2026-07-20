@@ -24,6 +24,10 @@ from vllm import envs
 from vllm.entrypoints.constants import MCP_PREFIX
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionMessageParam
 from vllm.entrypoints.openai.responses.protocol import ResponseInputOutputItem
+from vllm.tool_parsers.utils import (
+    flat_namespace_tool_name,
+    iter_response_function_tool_dicts,
+)
 
 
 def should_continue_final_message(
@@ -116,6 +120,15 @@ def construct_input_messages(
     return messages
 
 
+def _tool_call_wire_name(item: ResponseFunctionToolCall) -> str:
+    """The tool name to put on the wire for a (possibly namespaced) function
+    call replayed as input: flattened `namespace__name` when a namespace is
+    set, otherwise the bare name."""
+    if item.namespace:
+        return flat_namespace_tool_name(item.namespace, item.name)
+    return item.name
+
+
 def _maybe_combine_reasoning_and_tool_call(
     item: ResponseInputOutputItem, messages: list[ChatCompletionMessageParam]
 ) -> ChatCompletionMessageParam | None:
@@ -141,7 +154,7 @@ def _maybe_combine_reasoning_and_tool_call(
         ChatCompletionMessageToolCallParam(
             id=item.call_id,
             function=FunctionCallTool(
-                name=item.name,
+                name=_tool_call_wire_name(item),
                 arguments=item.arguments,
             ),
             type="function",
@@ -180,7 +193,7 @@ def _construct_single_message_from_response_item(
                 ChatCompletionMessageToolCallParam(
                     id=item.call_id,
                     function=FunctionCallTool(
-                        name=item.name,
+                        name=_tool_call_wire_name(item),
                         arguments=item.arguments,
                     ),
                     type="function",
@@ -256,8 +269,10 @@ def construct_tool_dicts(
     if tools is None or (tool_choice == "none"):
         tool_dicts = None
     else:
+        # Flatten namespace tools into `namespace__name` function tools so the
+        # engine (which only understands flat function tools) sees them.
         tool_dicts = [
-            convert_tool_responses_to_completions_format(tool.model_dump())
-            for tool in tools
+            convert_tool_responses_to_completions_format(tool)
+            for tool in iter_response_function_tool_dicts(tools)
         ]
     return tool_dicts

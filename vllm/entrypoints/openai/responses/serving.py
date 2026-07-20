@@ -114,6 +114,10 @@ from vllm.outputs import CompletionOutput
 from vllm.parser import ParserManager
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.tokenizers import TokenizerLike
+from vllm.tool_parsers.utils import (
+    build_responses_tool_call_name_map,
+    resolve_responses_tool_call_name,
+)
 from vllm.utils import random_uuid
 
 logger = init_logger(__name__)
@@ -1351,7 +1355,11 @@ class OpenAIServingResponses(OpenAIServing):
         tool_state = StreamingState()
         tool_call_active = False
         tool_fn_name: str | None = None
+        tool_fn_namespace: str | None = None
         tool_args_accum = ""
+        # Map flattened `namespace__name` back to (name, namespace) so streamed
+        # function_call events reflect the original namespace tool.
+        tool_call_name_map = build_responses_tool_call_name_map(request.tools)
         text_item_open = False
         tool_text_accum = ""
         # Buffer for residual content before a text item is opened. We only
@@ -1535,21 +1543,36 @@ class OpenAIServingResponses(OpenAIServing):
                             if tool_call_active:
                                 # Finish the previous tool call before the next.
                                 for ev in emit_function_call_done_events(
-                                    tool_fn_name or "", tool_args_accum, tool_state
+                                    tool_fn_name or "",
+                                    tool_args_accum,
+                                    tool_state,
+                                    namespace=tool_fn_namespace,
                                 ):
                                     yield _increment_sequence_number_and_return(ev)
                                 tool_state.reset_for_new_item()
                             tool_call_active = True
-                            tool_fn_name = fn.name
+                            # The model emits the flattened `namespace__name`;
+                            # split it back so events carry the original name.
+                            resolved = resolve_responses_tool_call_name(
+                                fn.name, tool_call_name_map=tool_call_name_map
+                            )
+                            tool_fn_name = resolved.name
+                            tool_fn_namespace = resolved.namespace
                             tool_args_accum = fn.arguments or ""
                             for ev in emit_function_call_delta_events(
-                                fn.arguments or "", fn.name, tool_state
+                                fn.arguments or "",
+                                resolved.name,
+                                tool_state,
+                                namespace=resolved.namespace,
                             ):
                                 yield _increment_sequence_number_and_return(ev)
                         elif fn.arguments:
                             tool_args_accum += fn.arguments
                             for ev in emit_function_call_delta_events(
-                                fn.arguments, tool_fn_name or "", tool_state
+                                fn.arguments,
+                                tool_fn_name or "",
+                                tool_state,
+                                namespace=tool_fn_namespace,
                             ):
                                 yield _increment_sequence_number_and_return(ev)
                     previous_delta_messages.append(delta_message)
@@ -1726,7 +1749,10 @@ class OpenAIServingResponses(OpenAIServing):
         if tool_content_handoff_done:
             if tool_call_active:
                 for ev in emit_function_call_done_events(
-                    tool_fn_name or "", tool_args_accum, tool_state
+                    tool_fn_name or "",
+                    tool_args_accum,
+                    tool_state,
+                    namespace=tool_fn_namespace,
                 ):
                     yield _increment_sequence_number_and_return(ev)
             elif text_item_open:

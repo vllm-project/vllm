@@ -24,6 +24,10 @@ from vllm.outputs import CompletionOutput
 from vllm.reasoning.abs_reasoning_parsers import ReasoningParser
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers.abstract_tool_parser import ToolParser
+from vllm.tool_parsers.utils import (
+    build_responses_tool_call_name_map,
+    resolve_responses_tool_call_name,
+)
 from vllm.utils import random_uuid
 
 logger = logging.getLogger(__name__)
@@ -86,6 +90,12 @@ class ResponsesParser:
                 request=self.request,  # type: ignore
             )
             if tool_call_info is not None and tool_call_info.tools_called:
+                # The model emits the flattened `namespace__name`; split it back
+                # into (name, namespace) so the response reflects the original
+                # namespace tool.
+                tool_call_name_map = build_responses_tool_call_name_map(
+                    self.request.tools
+                )
                 # extract_tool_calls() returns a list of tool calls.
                 function_calls.extend(
                     ResponseFunctionToolCall(
@@ -93,10 +103,20 @@ class ResponsesParser:
                         call_id=f"call_{random_uuid()}",
                         type="function_call",
                         status="completed",
-                        name=tool_call.function.name,
+                        name=resolved.name,
+                        namespace=resolved.namespace,
                         arguments=tool_call.function.arguments,
                     )
-                    for tool_call in tool_call_info.tool_calls
+                    for tool_call, resolved in (
+                        (
+                            tc,
+                            resolve_responses_tool_call_name(
+                                tc.function.name,
+                                tool_call_name_map=tool_call_name_map,
+                            ),
+                        )
+                        for tc in tool_call_info.tool_calls
+                    )
                 )
                 content = tool_call_info.content
                 if content and content.strip() == "":

@@ -2,12 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import json
+from dataclasses import dataclass
 from json import JSONDecodeError, JSONDecoder
 from typing import Any
 
 import partial_json_parser
 from openai.types.responses import (
     FunctionTool,
+    NamespaceTool,
     ToolChoiceFunction,
 )
 from openai.types.responses.tool import Tool
@@ -17,6 +19,103 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionNamedToolChoiceParam,
     ChatCompletionToolsParam,
 )
+
+# Responses API "namespace" tools (e.g. an agent tool bundle) group several
+# function tools under one namespace. The engine only understands flat function
+# tools, so we flatten a NamespaceTool into `namespace__toolname` function tools
+# on the way in, and reconstruct the (name, namespace) split on the way out.
+_NAMESPACE_TOOL_SEPARATOR = "__"
+
+
+@dataclass(frozen=True)
+class ResponsesToolCallName:
+    """A tool call name split into its bare name and optional namespace."""
+
+    name: str
+    namespace: str | None = None
+
+
+def flat_namespace_tool_name(namespace: str, name: str) -> str:
+    return f"{namespace}{_NAMESPACE_TOOL_SEPARATOR}{name}"
+
+
+def iter_response_function_tool_info(
+    tool: Tool,
+) -> list[tuple[str, dict[str, Any] | None]]:
+    """Yield (flat_name, parameters) for a Responses tool, expanding namespace
+    tools into their child function tools."""
+    if isinstance(tool, FunctionTool):
+        return [(tool.name, tool.parameters)]
+    if not isinstance(tool, NamespaceTool):
+        return []
+
+    namespace = tool.name
+    return [
+        (
+            flat_namespace_tool_name(namespace, namespaced_tool.name),
+            namespaced_tool.parameters,
+        )
+        for namespaced_tool in tool.tools
+        if namespaced_tool.type == "function"
+    ]
+
+
+def iter_response_function_tool_dicts(
+    tools: list[Tool],
+) -> list[dict[str, Any]]:
+    """Flatten Responses tools into a list of function-tool dicts, expanding
+    namespace tools so each child carries its flattened `namespace__name`."""
+    function_tools: list[dict[str, Any]] = []
+    for tool in tools:
+        if isinstance(tool, NamespaceTool):
+            namespace = tool.name
+            for namespaced_tool in tool.tools:
+                if namespaced_tool.type != "function":
+                    continue
+                tool_dict = namespaced_tool.model_dump()
+                tool_dict["name"] = flat_namespace_tool_name(
+                    namespace, namespaced_tool.name
+                )
+                function_tools.append(tool_dict)
+        else:
+            function_tools.append(tool.model_dump())
+    return function_tools
+
+
+def build_responses_tool_call_name_map(
+    tools: list[Tool] | None,
+) -> dict[str, ResponsesToolCallName]:
+    """Map each flattened `namespace__name` back to its (name, namespace)."""
+    if not tools:
+        return {}
+
+    name_map: dict[str, ResponsesToolCallName] = {}
+    for tool in tools:
+        if not isinstance(tool, NamespaceTool):
+            continue
+        namespace = tool.name
+        for namespaced_tool in tool.tools:
+            if namespaced_tool.type != "function":
+                continue
+            flat_name = flat_namespace_tool_name(namespace, namespaced_tool.name)
+            name_map[flat_name] = ResponsesToolCallName(
+                name=namespaced_tool.name,
+                namespace=namespace,
+            )
+    return name_map
+
+
+def resolve_responses_tool_call_name(
+    name: str,
+    tools: list[Tool] | None = None,
+    tool_call_name_map: dict[str, ResponsesToolCallName] | None = None,
+) -> ResponsesToolCallName:
+    """Resolve a (possibly flattened) tool call name to its (name, namespace).
+    Non-namespaced names pass through unchanged."""
+    name_map = tool_call_name_map
+    if name_map is None:
+        name_map = build_responses_tool_call_name_map(tools)
+    return name_map.get(name, ResponsesToolCallName(name=name))
 
 
 def find_common_prefix(s1: str, s2: str) -> str:
@@ -145,8 +244,9 @@ def _extract_tool_info(
         raise TypeError(f"Unsupported tool type: {type(tool)}")
 
 
-def _get_tool_schema_from_tool(tool: Tool | ChatCompletionToolsParam) -> dict:
-    name, params = _extract_tool_info(tool)
+def _get_tool_schema_from_name_and_params(
+    name: str, params: dict[str, Any] | None
+) -> dict:
     params = params if params else {"type": "object", "properties": {}}
     return {
         "properties": {
@@ -155,6 +255,11 @@ def _get_tool_schema_from_tool(tool: Tool | ChatCompletionToolsParam) -> dict:
         },
         "required": ["name", "parameters"],
     }
+
+
+def _get_tool_schema_from_tool(tool: Tool | ChatCompletionToolsParam) -> dict:
+    name, params = _extract_tool_info(tool)
+    return _get_tool_schema_from_name_and_params(name, params)
 
 
 def _get_tool_schema_defs(
@@ -179,15 +284,29 @@ def _get_tool_schema_defs(
 def _get_json_schema_from_tools(
     tools: list[Tool | ChatCompletionToolsParam],
 ) -> dict:
+    # Expand namespace tools into their flattened function schemas; other
+    # (function / chat) tools use the existing per-tool schema. `fn_tools` is
+    # the subset whose $defs we still collect below.
+    fn_tool_schemas: list[dict[str, Any]] = []
+    fn_tools: list[Tool | ChatCompletionToolsParam] = []
+    for tool in tools:
+        if isinstance(tool, NamespaceTool):
+            fn_tool_schemas.extend(
+                _get_tool_schema_from_name_and_params(name, params)
+                for name, params in iter_response_function_tool_info(tool)
+            )
+        else:
+            fn_tool_schemas.append(_get_tool_schema_from_tool(tool))
+            fn_tools.append(tool)
     json_schema = {
         "type": "array",
         "minItems": 1,
         "items": {
             "type": "object",
-            "anyOf": [_get_tool_schema_from_tool(tool) for tool in tools],
+            "anyOf": fn_tool_schemas,
         },
     }
-    json_schema_defs = _get_tool_schema_defs(tools)
+    json_schema_defs = _get_tool_schema_defs(fn_tools)
     if json_schema_defs:
         json_schema["$defs"] = json_schema_defs
     return json_schema
@@ -205,10 +324,21 @@ def get_json_schema_from_tools(
         tool_choice, ToolChoiceFunction
     ):
         tool_name = tool_choice.name
-        tool_map = {tool.name: tool for tool in tools if isinstance(tool, FunctionTool)}
-        if tool_name not in tool_map:
+        # Expand function + namespace tools; accept both the flattened
+        # `namespace__child` name and the bare child name.
+        responses_tool_map: dict[str, dict[str, Any] | None] = {}
+        for tool in tools:
+            if not isinstance(tool, (FunctionTool, NamespaceTool)):
+                continue
+            for name, params in iter_response_function_tool_info(tool):
+                responses_tool_map[name] = params
+                if _NAMESPACE_TOOL_SEPARATOR in name:
+                    responses_tool_map.setdefault(
+                        name.rsplit(_NAMESPACE_TOOL_SEPARATOR, 1)[1], params
+                    )
+        if tool_name not in responses_tool_map:
             raise ValueError(f"Tool '{tool_name}' has not been passed in `tools`.")
-        return tool_map[tool_name].parameters
+        return responses_tool_map[tool_name]
     # tool_choice: Forced Function (ChatCompletion)
     if (not isinstance(tool_choice, str)) and isinstance(
         tool_choice, ChatCompletionNamedToolChoiceParam

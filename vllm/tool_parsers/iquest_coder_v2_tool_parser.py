@@ -18,6 +18,7 @@ from vllm.entrypoints.openai.engine.protocol import (
 )
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers.abstract_tool_parser import ToolParser
+from vllm.tool_parsers.utils import iter_response_function_tool_info
 
 
 class IquestCoderV2ToolParser(ToolParser):
@@ -68,16 +69,45 @@ class IquestCoderV2ToolParser(ToolParser):
             return raw_value
 
     @staticmethod
+    def _tool_name_and_params(
+        tool: Any,
+    ) -> tuple[str | None, dict[str, Any] | None]:
+        """Return (name, parameters) for a tool regardless of its shape.
+
+        Handles the Responses API ``FunctionTool`` (``.name`` / ``.parameters``
+        directly) and the Chat Completions ``ChatCompletionToolsParam``
+        (nested under ``.function``). Returns ``(None, None)`` for shapes that
+        are not plain function tools (e.g. namespace tools are expanded by the
+        caller).
+        """
+        function = getattr(tool, "function", None)
+        if function is not None:
+            return getattr(function, "name", None), getattr(
+                function, "parameters", None
+            )
+        # Responses API FunctionTool: name/parameters live on the tool itself.
+        return getattr(tool, "name", None), getattr(tool, "parameters", None)
+
+    @classmethod
     def _parameter_is_string(
+        cls,
         request: ChatCompletionRequest,
         tool_name: str,
         parameter_name: str,
     ) -> bool:
+        # Expand namespace tools (Responses API) into flattened function tools
+        # so their children are matched against the flattened tool_name.
+        candidates: list[tuple[str | None, dict[str, Any] | None]] = []
         for tool in request.tools or []:
-            function = tool.function
-            if function.name != tool_name or not function.parameters:
+            if getattr(tool, "type", None) == "namespace":
+                candidates.extend(iter_response_function_tool_info(tool))
+            else:
+                candidates.append(cls._tool_name_and_params(tool))
+
+        for name, parameters in candidates:
+            if name != tool_name or not parameters:
                 continue
-            properties = function.parameters.get("properties", {})
+            properties = parameters.get("properties", {})
             parameter = properties.get(parameter_name, {})
             return parameter.get("type") == "string"
         return False

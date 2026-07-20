@@ -2,8 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import json
+from types import SimpleNamespace
 
 import pytest
+from openai.types.responses import FunctionTool, NamespaceTool
 from transformers import AutoTokenizer
 
 from vllm.entrypoints.openai.chat_completion.protocol import (
@@ -309,3 +311,109 @@ def test_streaming_parallel_tool_calls_indices(iquest_v2_tool_parser, sample_too
             tool_indices.append(tc.index)
 
     assert tool_indices == [0, 1]
+
+
+# _parameter_is_string across tool shapes.
+#
+# The parser is invoked from both the Chat Completions path (tools are
+# ChatCompletionToolsParam, params nested under `.function`) and the Responses
+# API path (tools are FunctionTool / NamespaceTool with `.name`/`.parameters`
+# on the tool itself). Directly reading `tool.function` used to crash on the
+# Responses shapes with AttributeError; these lock in support for all three.
+def _weather_properties():
+    return {
+        "city": {"type": "string"},
+        "days": {"type": "integer"},
+    }
+
+
+def test_parameter_is_string_responses_function_tool():
+    """Responses API FunctionTool has name/parameters directly (no `.function`)."""
+    ft = FunctionTool(
+        type="function",
+        name="get_current_weather",
+        description="w",
+        strict=False,
+        parameters={"type": "object", "properties": _weather_properties()},
+    )
+    request = SimpleNamespace(tools=[ft], tool_choice="auto")
+
+    assert IquestCoderV2ToolParser._parameter_is_string(
+        request, "get_current_weather", "city"
+    )
+    assert not IquestCoderV2ToolParser._parameter_is_string(
+        request, "get_current_weather", "days"
+    )
+
+
+def test_parameter_is_string_chat_completion_tool():
+    """Chat Completions tool nests name/parameters under `.function`."""
+    tool = ChatCompletionToolsParam(
+        type="function",
+        function={
+            "name": "get_current_weather",
+            "parameters": {"type": "object", "properties": _weather_properties()},
+        },
+    )
+    request = SimpleNamespace(tools=[tool], tool_choice="auto")
+
+    assert IquestCoderV2ToolParser._parameter_is_string(
+        request, "get_current_weather", "city"
+    )
+    assert not IquestCoderV2ToolParser._parameter_is_string(
+        request, "get_current_weather", "days"
+    )
+
+
+def test_parameter_is_string_namespace_tool():
+    """Namespace tool children match against the flattened `namespace__name`."""
+    ns = NamespaceTool(
+        type="namespace",
+        name="multi_agent_v1",
+        description="agents",
+        tools=[
+            {
+                "type": "function",
+                "name": "spawn_agent",
+                "description": "spawn",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "message": {"type": "string"},
+                        "count": {"type": "integer"},
+                    },
+                },
+            }
+        ],
+    )
+    request = SimpleNamespace(tools=[ns], tool_choice="auto")
+
+    assert IquestCoderV2ToolParser._parameter_is_string(
+        request, "multi_agent_v1__spawn_agent", "message"
+    )
+    assert not IquestCoderV2ToolParser._parameter_is_string(
+        request, "multi_agent_v1__spawn_agent", "count"
+    )
+
+
+def test_parameter_is_string_unknown_tool_or_param():
+    ft = FunctionTool(
+        type="function",
+        name="get_current_weather",
+        description="w",
+        strict=False,
+        parameters={"type": "object", "properties": _weather_properties()},
+    )
+    request = SimpleNamespace(tools=[ft], tool_choice="auto")
+
+    assert not IquestCoderV2ToolParser._parameter_is_string(
+        request, "unknown_tool", "city"
+    )
+    assert not IquestCoderV2ToolParser._parameter_is_string(
+        request, "get_current_weather", "unknown_param"
+    )
+
+
+def test_parameter_is_string_no_tools():
+    request = SimpleNamespace(tools=None, tool_choice="auto")
+    assert not IquestCoderV2ToolParser._parameter_is_string(request, "x", "y")

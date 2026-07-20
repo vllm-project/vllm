@@ -232,6 +232,7 @@ def emit_function_call_delta_events(
     delta: str,
     function_name: str,
     state: StreamingState,
+    namespace: str | None = None,
 ) -> list[StreamingResponsesResponse]:
     """Emit events for function call argument deltas."""
     events: list[StreamingResponsesResponse] = []
@@ -241,6 +242,7 @@ def emit_function_call_delta_events(
         state.current_call_id = f"call_{random_uuid()}"
         tool_call_item = ResponseFunctionToolCall(
             name=function_name,
+            namespace=namespace,
             type="function_call",
             id=state.current_item_id,
             call_id=state.current_call_id,
@@ -464,6 +466,7 @@ def emit_function_call_done_events(
     function_name: str,
     arguments: str,
     state: StreamingState,
+    namespace: str | None = None,
 ) -> list[StreamingResponsesResponse]:
     """Emit events when a function call completes."""
     events: list[StreamingResponsesResponse] = []
@@ -481,6 +484,7 @@ def emit_function_call_done_events(
         type="function_call",
         arguments=arguments,
         name=function_name,
+        namespace=namespace,
         item_id=state.current_item_id,
         output_index=state.current_output_index,
         sequence_number=-1,
