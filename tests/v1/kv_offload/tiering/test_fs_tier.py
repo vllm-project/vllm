@@ -38,7 +38,7 @@ from vllm.v1.kv_offload.tiering.base import JobMetadata
 from vllm.v1.kv_offload.tiering.fs.manager import (
     FileSystemTierManager,
 )
-from vllm.v1.kv_offload.tiering.fs.thread_pool import DualQueueThreadPool
+from vllm.v1.kv_offload.tiering.fs.thread_pool import DualQueueThreadPool, Task
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -354,11 +354,22 @@ def test_store_load_data_integrity(fs_tier, monkeypatch, use_c_ext, batch_size):
         )
 
 
-def test_wait_idle_blocks_until_tasks_complete():
+def test_wait_idle_blocks_until_tasks_complete(monkeypatch):
     """wait_idle must not return while a task is still in flight."""
-    pool = DualQueueThreadPool(n_read_threads=1, n_write_threads=1)
+    import vllm.v1.kv_offload.tiering.fs.thread_pool as thread_pool_mod
+
     gate = threading.Event()
-    pool.enqueue_store(job_id=1, n_tasks=1, tasks=[lambda: gate.wait(timeout=5.0)])
+
+    def blocking_batch_store_block(*args, **kwargs):
+        gate.wait(timeout=5.0)
+
+    monkeypatch.setattr(
+        thread_pool_mod, "batch_store_block", blocking_batch_store_block
+    )
+
+    pool = DualQueueThreadPool(n_read_threads=1, n_write_threads=1, rw_batch_size=1)
+    task = Task(path="unused", view=memoryview(bytearray(1)), offset=0, block_size=1)
+    pool.enqueue_store(job_id=1, n_tasks=1, tasks=[task])
 
     waiter = threading.Thread(target=pool.wait_idle)
     waiter.start()
@@ -503,18 +514,18 @@ def test_mixed_job_results_emit_event_only_for_successful_job(
 ):
     """With a failed and a successful store job in flight, exactly one event
     is emitted and its keys belong to the successful job."""
-    import vllm.v1.kv_offload.tiering.fs.manager as mgr_mod
+    import vllm.v1.kv_offload.tiering.fs.thread_pool as thread_pool_mod
 
     tier = fs_tier_with_events
     failing_path = tier.file_mapper.get_file_name(key(1))
-    original_batch_store_block = mgr_mod.batch_store_block
+    original_batch_store_block = thread_pool_mod.batch_store_block
 
     def flaky_batch_store_block(paths, *args, **kwargs):
         if failing_path in paths:
             raise OSError("injected store failure")
         return original_batch_store_block(paths, *args, **kwargs)
 
-    monkeypatch.setattr(mgr_mod, "batch_store_block", flaky_batch_store_block)
+    monkeypatch.setattr(thread_pool_mod, "batch_store_block", flaky_batch_store_block)
 
     tier.submit_store(make_job(1, [key(1)], [0]))
     tier.submit_store(make_job(2, [key(2)], [1]))
@@ -531,18 +542,18 @@ def test_mixed_job_results_emit_event_only_for_successful_job(
 
 def test_partially_failed_store_emits_no_event(fs_tier_with_events, monkeypatch):
     """A store job with any failed block emits no event for the whole job."""
-    import vllm.v1.kv_offload.tiering.fs.manager as mgr_mod
+    import vllm.v1.kv_offload.tiering.fs.thread_pool as thread_pool_mod
 
     tier = fs_tier_with_events
     failing_path = tier.file_mapper.get_file_name(key(2))
-    original_batch_store_block = mgr_mod.batch_store_block
+    original_batch_store_block = thread_pool_mod.batch_store_block
 
     def flaky_batch_store_block(paths, *args, **kwargs):
         if failing_path in paths:
             raise OSError("injected store failure")
         return original_batch_store_block(paths, *args, **kwargs)
 
-    monkeypatch.setattr(mgr_mod, "batch_store_block", flaky_batch_store_block)
+    monkeypatch.setattr(thread_pool_mod, "batch_store_block", flaky_batch_store_block)
 
     tier.submit_store(make_job(1, [key(1), key(2)], [0, 1]))
     results = drain(tier)
