@@ -293,19 +293,11 @@ class WeightTransferEngine(ABC, Generic[TInitInfo, TUpdateInfo]):
         Args:
             update_info: Dictionary containing backend-specific update info
         """
-        try:
-            typed_update_info = self.parse_update_info(update_info)
-            self.receive_weights(typed_update_info)
-            # NCCL broadcast / IPC paths may be asynchronous. Synchronize here so the
-            # next step uses the new weights.
-            torch.accelerator.synchronize()
-        except BaseException:
-            from vllm.model_executor.model_loader.weight_load_transaction import (
-                abort_weight_load_transaction,
-            )
-
-            abort_weight_load_transaction(self.model)
-            raise
+        typed_update_info = self.parse_update_info(update_info)
+        self.receive_weights(typed_update_info)
+        # NCCL broadcast / IPC paths may be asynchronous. Synchronize here so the
+        # next step uses the new weights.
+        torch.accelerator.synchronize()
 
     @abstractmethod
     def receive_weights(self, update_info: TUpdateInfo) -> None:

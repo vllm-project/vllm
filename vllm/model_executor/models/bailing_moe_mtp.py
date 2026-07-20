@@ -20,9 +20,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
-from vllm.model_executor.model_loader.weight_load_transaction import (
-    complete_weight_load,
-)
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
     maybe_remap_kv_scale_name,
@@ -369,18 +366,15 @@ class BailingMoeV25MTPModel(nn.Module):
             if load_param(name, loaded_weight):
                 loaded_mtp_layers.add(spec_layer)
 
-        def complete(loaded_layers: set[int]) -> None:
-            for layer_idx in range(
-                self.model.mtp_start_layer_idx,
-                self.model.mtp_start_layer_idx + self.model.num_mtp_layers,
-            ):
-                if layer_idx not in loaded_layers:
-                    raise ValueError(
-                        f"Bailing MTP speculative decoding layer {layer_idx} "
-                        "weights are missing from checkpoint. Use a checkpoint "
-                        "that includes MTP layer weights, or disable speculative "
-                        "decoding."
-                    )
-
-        complete_weight_load(self, loaded_mtp_layers, complete)
+        for layer_idx in range(
+            self.model.mtp_start_layer_idx,
+            self.model.mtp_start_layer_idx + self.model.num_mtp_layers,
+        ):
+            if layer_idx not in loaded_mtp_layers:
+                raise ValueError(
+                    f"Bailing MTP speculative decoding layer {layer_idx} "
+                    "weights are missing from checkpoint. Use a checkpoint "
+                    "that includes MTP layer weights, or disable speculative "
+                    "decoding."
+                )
         return loaded_params

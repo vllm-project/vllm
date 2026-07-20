@@ -37,9 +37,6 @@ from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
-from vllm.model_executor.model_loader.weight_load_transaction import (
-    complete_weight_load,
-)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.deepseek_mtp import SharedHead
 from vllm.model_executor.models.deepseek_v2 import get_spec_layer_idx_from_weight_name
@@ -461,30 +458,25 @@ class DeepSeekV4MTP(nn.Module):
                     loaded_params.add(name)
                     continue
 
-        def complete(loaded_weights: set[str]) -> None:
-            loaded_layers: set[int] = set()
-            for param_name in loaded_weights:
-                spec_layer = get_spec_layer_idx_from_weight_name(
-                    self.config, param_name
+        loaded_layers: set[int] = set()
+        for param_name in loaded_params:
+            spec_layer = get_spec_layer_idx_from_weight_name(self.config, param_name)
+            if spec_layer is not None:
+                loaded_layers.add(spec_layer)
+        for layer_idx in range(
+            self.model.mtp_start_layer_idx,
+            self.model.mtp_start_layer_idx + self.model.num_mtp_layers,
+        ):
+            if layer_idx not in loaded_layers:
+                raise ValueError(
+                    f"MTP speculative decoding layer {layer_idx} weights "
+                    f"missing from checkpoint. The checkpoint may have "
+                    f"been quantized without including the MTP layers. "
+                    f"Use a checkpoint that includes MTP layer weights, "
+                    f"or disable speculative decoding."
                 )
-                if spec_layer is not None:
-                    loaded_layers.add(spec_layer)
-            for layer_idx in range(
-                self.model.mtp_start_layer_idx,
-                self.model.mtp_start_layer_idx + self.model.num_mtp_layers,
-            ):
-                if layer_idx not in loaded_layers:
-                    raise ValueError(
-                        f"MTP speculative decoding layer {layer_idx} weights "
-                        f"missing from checkpoint. The checkpoint may have "
-                        f"been quantized without including the MTP layers. "
-                        f"Use a checkpoint that includes MTP layer weights, "
-                        f"or disable speculative decoding."
-                    )
-            self.finalize_mega_moe_weights()
-            logger.info_once("MTP draft model loaded: %d params", len(loaded_weights))
-
-        complete_weight_load(self, loaded_params, complete)
+        self.finalize_mega_moe_weights()
+        logger.info_once("MTP draft model loaded: %d params", len(loaded_params))
         return loaded_params
 
     def finalize_mega_moe_weights(self) -> None:

@@ -45,9 +45,6 @@ from vllm.distributed.weight_transfer.sparse_nccl_engine import (
     SparseNCCLWeightTransferUpdateInfo,
     SparseWeightPatch,
 )
-from vllm.model_executor.model_loader.weight_load_transaction import (
-    complete_weight_load,
-)
 from vllm.platforms import current_platform
 from vllm.utils.network_utils import get_open_port
 
@@ -244,33 +241,6 @@ class TestNCCLEngineParsing:
         assert update_info.names == ["w1", "w2"]
         assert update_info.dtype_names == ["float32", "bfloat16"]
         assert update_info.shapes == [[100, 100], [50]]
-
-    def test_checkpoint_update_completes_after_all_chunks(self, monkeypatch):
-        model = torch.nn.Module()
-        completed = []
-        engine = NCCLWeightTransferEngine(
-            WeightTransferConfig(backend="nccl"),
-            create_mock_vllm_config(),
-            torch.device("cpu"),
-            model,
-        )
-        monkeypatch.setattr(
-            "vllm.model_executor.model_loader.reload.initialize_layerwise_reload",
-            lambda *_: None,
-        )
-        monkeypatch.setattr(
-            "vllm.model_executor.model_loader.reload.finalize_layerwise_reload",
-            lambda *_: None,
-        )
-
-        engine.start_weight_update()
-        complete_weight_load(model, {"layer.0.weight"}, completed.append)
-        complete_weight_load(model, {"layer.1.weight"}, completed.append)
-        assert completed == []
-
-        engine.finish_weight_update()
-
-        assert completed == [{"layer.0.weight", "layer.1.weight"}]
 
 
 # --- Unit Tests: Engine Registry ---

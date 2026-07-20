@@ -15,9 +15,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
-from vllm.model_executor.model_loader.weight_load_transaction import (
-    complete_weight_load,
-)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.sequence import IntermediateTensors
 
@@ -275,29 +272,25 @@ class Step3p5MTP(nn.Module):
                     )
                     weight_loader(param, loaded_weight)
             loaded_params.add(name)
-
-        def complete(loaded_weights: set[str]) -> None:
-            params_need_to_load = set(params_dict.keys())
-            # Some KV cache scales are optional: checkpoints may omit them and vLLM
-            # will fall back to default scales during initialization.
-            optional_params = {
-                name
-                for name, param in params_dict.items()
-                if name.endswith((".k_scale", ".v_scale", ".q_scale", ".prob_scale"))
-                and getattr(param, "numel", lambda: 0)() == 1
-                and getattr(param, "requires_grad", False) is False
-            }
-            params_need_to_load -= optional_params
-            if params_need_to_load != loaded_weights:
-                missing_params = list(params_need_to_load - loaded_weights)
-                param_name_example = missing_params[0]
-                raise RuntimeError(
-                    "Some parameters like "
-                    f"{param_name_example} are not in the checkpoint and will "
-                    "falsely use random initialization"
-                )
-
-        complete_weight_load(self, loaded_params, complete)
+        params_need_to_load = set(params_dict.keys())
+        # Some KV cache scales are optional: checkpoints may omit them and vLLM
+        # will fall back to default scales during initialization.
+        optional_params = {
+            name
+            for name, param in params_dict.items()
+            if name.endswith((".k_scale", ".v_scale", ".q_scale", ".prob_scale"))
+            and getattr(param, "numel", lambda: 0)() == 1
+            and getattr(param, "requires_grad", False) is False
+        }
+        params_need_to_load -= optional_params
+        if params_need_to_load != loaded_params:
+            missing_params = list(params_need_to_load - loaded_params)
+            param_name_example = missing_params[0]
+            raise RuntimeError(
+                "Some parameters like "
+                f"{param_name_example} are not in the checkpoint and will falsely "
+                "use random initialization"
+            )
         return loaded_params
 
     def _rewrite_spec_layer_name(self, spec_layer: int, name: str) -> str:
