@@ -9,6 +9,7 @@ from openai.types.responses.response_function_tool_call_output_item import (
     ResponseFunctionToolCallOutputItem,
 )
 from openai.types.responses.response_output_message import ResponseOutputMessage
+from openai.types.responses.response_output_refusal import ResponseOutputRefusal
 from openai.types.responses.response_output_text import ResponseOutputText
 from openai.types.responses.response_reasoning_item import (
     Content,
@@ -921,3 +922,37 @@ class TestConstructInputMessagesInstructionsLeak:
         assert len(msgs) == 2
         assert msgs[0] == {"role": "system", "content": "be helpful"}
         assert msgs[1] == {"role": "user", "content": "hello"}
+
+
+class TestOutputMessageContent:
+    """An assistant ResponseOutputMessage may carry empty content or a refusal
+    block (which has no ``text``); reconstructing the input must not crash."""
+
+    def test_empty_content_yields_empty_string(self):
+        item = ResponseOutputMessage(
+            id="msg_empty",
+            content=[],
+            role="assistant",
+            status="completed",
+            type="message",
+        )
+        message = _single_chat_message(item)
+        assert message["role"] == "assistant"
+        assert message["content"] == ""
+
+    def test_refusal_content_uses_refusal_text(self):
+        item = ResponseOutputMessage(
+            id="msg_refusal",
+            content=[
+                ResponseOutputRefusal(
+                    refusal="I can't help with that.",
+                    type="refusal",
+                )
+            ],
+            role="assistant",
+            status="completed",
+            type="message",
+        )
+        message = _single_chat_message(item)
+        assert message["role"] == "assistant"
+        assert message["content"] == "I can't help with that."
