@@ -40,8 +40,11 @@ impl HubRepo {
                 .build()
                 .map_err(|e| format!("Failed to build download runtime: {e}"))?;
             rt.block_on(async move {
-                let api = hf_hub::api::tokio::Api::new()
-                    .map_err(|e| format!("Failed to init HF API: {e}"))?;
+                let mut builder = hf_hub::api::tokio::ApiBuilder::from_env();
+                if let Ok(token) = std::env::var("HF_TOKEN") {
+                    builder = builder.with_token(Some(token));
+                }
+                let api = builder.build().map_err(|e| format!("Failed to init HF API: {e}"))?;
                 api.repo(repo).get(&filename).await.map_err(|e| format!("{e}"))
             })
         })

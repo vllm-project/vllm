@@ -442,7 +442,8 @@ class Worker(WorkerBase):
         self.model_runner.update_config(overrides)
 
     def reload_weights(self, *args, **kwargs) -> None:
-        self.model_runner.reload_weights(*args, **kwargs)
+        with set_current_vllm_config(self.vllm_config):
+            self.model_runner.reload_weights(*args, **kwargs)
 
     @torch.inference_mode()
     def determine_available_memory(self) -> int:
@@ -1301,14 +1302,16 @@ class Worker(WorkerBase):
         the configured weight transfer engine. The worker only tracks that a
         session is active.
         """
-        self._start_weight_update()
+        with set_current_vllm_config(self.vllm_config):
+            self._start_weight_update()
 
     def start_draft_weight_update(self) -> None:
         """
         Like start_weight_update, but retargets the engine at the speculative
         draft model for this session.
         """
-        self._start_weight_update(is_draft=True)
+        with set_current_vllm_config(self.vllm_config):
+            self._start_weight_update(is_draft=True)
 
     def _start_weight_update(self, is_draft: bool = False) -> None:
         self._check_weight_transfer_engine()
@@ -1355,12 +1358,13 @@ class Worker(WorkerBase):
                 "start_weight_update must be called before update_weights."
             )
 
-        try:
-            self.weight_transfer_engine.update_weights(update_info)
-        except BaseException:
-            self._weight_update_active = False
-            self.weight_transfer_engine.reset_weight_update_target()
-            raise
+        with set_current_vllm_config(self.vllm_config):
+            try:
+                self.weight_transfer_engine.update_weights(update_info)
+            except BaseException:
+                self._weight_update_active = False
+                self.weight_transfer_engine.reset_weight_update_target()
+                raise
 
     def finish_weight_update(self) -> None:
         """Finish the current weight update session."""
@@ -1373,7 +1377,8 @@ class Worker(WorkerBase):
             )
 
         try:
-            self.weight_transfer_engine.finish_weight_update()
+            with set_current_vllm_config(self.vllm_config):
+                self.weight_transfer_engine.finish_weight_update()
         finally:
             self._weight_update_active = False
             self.weight_transfer_engine.reset_weight_update_target()

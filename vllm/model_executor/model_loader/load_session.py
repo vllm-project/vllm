@@ -110,6 +110,10 @@ class WeightLoadSession:
         if module in self._processed_quant:
             return
         if _process_quant_method(module, self.initial_load_device):
+            # Quantization may replace Parameters, so reconcile their TP state
+            # before a subsequent reload or RL weight refit.
+            if hasattr(module, "update_param_tp_status"):
+                module.update_param_tp_status()
             self._processed_quant.add(module)
 
     def finalize_attention_runtime(
