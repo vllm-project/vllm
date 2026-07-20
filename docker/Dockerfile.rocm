@@ -340,13 +340,9 @@ COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/rust-toolchain.toml /rust-toolchai
 COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/vllm/v1 /vllm_v1
 
 # NIXL/UCX build stages
-# Keep the build_rixl stage and RIXL_* build arguments as compatibility aliases
-# for the existing ROCm CI cache targets.
-FROM base AS build_rixl
-ARG RIXL_BRANCH="231d56753047c989062a5cb2ac703a1ad761c7d2"
-ARG RIXL_REPO="https://github.com/ai-dynamo/nixl.git"
-ARG NIXL_BRANCH=${RIXL_BRANCH}
-ARG NIXL_REPO=${RIXL_REPO}
+FROM base AS build_nixl
+ARG NIXL_BRANCH="231d56753047c989062a5cb2ac703a1ad761c7d2"
+ARG NIXL_REPO="https://github.com/ai-dynamo/nixl.git"
 ARG UCX_BRANCH="96e58a16039f6d7d213bc967b8069238742c5194"
 ARG UCX_REPO="https://github.com/openucx/ucx.git"
 ENV ROCM_PATH=/opt/rocm
@@ -680,7 +676,7 @@ RUN if [ "${DEEPEP_NIC}" = "cx7" ] || [ "${DEEPEP_NIC}" = "io" ]; then \
 fi
 
 # Install NIXL + DeepEP wheels.
-RUN --mount=type=bind,from=build_rixl,src=/app/install,target=/nixl_install \
+RUN --mount=type=bind,from=build_nixl,src=/app/install,target=/nixl_install \
     --mount=type=bind,from=build_deepep,src=/app/deep_install,target=/deep_install \
     uv pip install --system /nixl_install/*.whl /deep_install/*.whl
 
@@ -817,7 +813,7 @@ RUN --mount=type=bind,from=export_vllm,src=/,target=/install \
     && uv pip install --system *.whl
 
 # Install NIXL ROCm wheel
-RUN --mount=type=bind,from=build_rixl,src=/app/install,target=/nixl_install \
+RUN --mount=type=bind,from=build_nixl,src=/app/install,target=/nixl_install \
     uv pip install --system /nixl_install/*.whl
 
 ARG COMMON_WORKDIR

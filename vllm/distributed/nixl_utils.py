@@ -16,14 +16,12 @@ NixlWrapper: Any
 nixl_agent_config: Any
 nixlXferTelemetry: Any
 
-_ROCM_NIXL_PACKAGES = ("nixl_rocm", "rixl")
-
 
 def _maybe_set_ucx_rcache_limit() -> None:
     if "UCX_RCACHE_MAX_UNRELEASED" in os.environ:
         return
 
-    if "nixl" in sys.modules or any(pkg in sys.modules for pkg in _ROCM_NIXL_PACKAGES):
+    if "nixl" in sys.modules or "nixl_rocm" in sys.modules:
         logger.warning_once(
             "NIXL was already imported, we can't reset "
             "UCX_RCACHE_MAX_UNRELEASED. "
@@ -39,15 +37,7 @@ def _maybe_set_ucx_rcache_limit() -> None:
 
 
 def _get_nixl_package_name() -> str:
-    if not current_platform.is_rocm():
-        return "nixl"
-
-    import importlib.util
-
-    for pkg in _ROCM_NIXL_PACKAGES:
-        if pkg in sys.modules or importlib.util.find_spec(pkg) is not None:
-            return pkg
-    return _ROCM_NIXL_PACKAGES[0]
+    return "nixl_rocm" if current_platform.is_rocm() else "nixl"
 
 
 def _get_nixl_module_name(name: str) -> str:
