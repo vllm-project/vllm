@@ -707,6 +707,33 @@ def test_flashinfer_xqa_bmm1_scale_matches_decode_q_dtype():
     AttentionBackendEnum.FLASHINFER not in BACKENDS_TO_TEST,
     reason="FlashInfer is not available.",
 )
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
+def test_flashinfer_attention_sinks_refreshed_after_reload(dtype):
+    from vllm.v1.attention.backends import flashinfer as flashinfer_backend
+
+    source_sinks = torch.tensor([1.0, 2.0], dtype=dtype)
+    impl = object.__new__(flashinfer_backend.FlashInferImpl)
+    impl._sinks_source = source_sinks
+    impl.sinks = source_sinks
+
+    impl.process_weights_after_loading(dtype)
+
+    assert impl.sinks is not None
+    sinks_ptr = impl.sinks.data_ptr()
+    assert impl.sinks.dtype == torch.float32
+    torch.testing.assert_close(impl.sinks, source_sinks.float())
+
+    source_sinks.copy_(torch.tensor([3.0, 4.0], dtype=dtype))
+    impl.process_weights_after_loading(dtype)
+
+    assert impl.sinks.data_ptr() == sinks_ptr
+    torch.testing.assert_close(impl.sinks, source_sinks.float())
+
+
+@pytest.mark.skipif(
+    AttentionBackendEnum.FLASHINFER not in BACKENDS_TO_TEST,
+    reason="FlashInfer is not available.",
+)
 def test_flashinfer_sm90_xqa_decode_correctness(default_vllm_config):
     """FlashInfer should route Hopper decode through XQA and match SDPA."""
     if not current_platform.is_cuda() or not current_platform.is_device_capability(90):

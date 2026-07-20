@@ -268,6 +268,105 @@ def embed_rmsnorm(
     return out
 
 
+@triton.jit
+def _embed_dual_rmsnorm_cat_kernel(
+    hidden_ptr,  # [T, N]
+    emb_ptr,  # [T, N] embeddings, or the [V, N] embedding table when GATHER
+    ids_ptr,  # [T] token ids (GATHER only)
+    w_hidden_ptr,  # [N]
+    w_pre_ptr,  # [N] chained pre-norm on the embed side (HAS_PRE_NORM only)
+    w_embed_ptr,  # [N]
+    out_ptr,  # [T, 2N]: [rmsnorm(hidden) | rmsnorm(rmsnorm?(emb))]
+    eps,
+    hidden_stride_0,
+    emb_stride_0,
+    n_cols,
+    block_size_n: tl.constexpr,
+    GATHER: tl.constexpr,
+    HAS_PRE_NORM: tl.constexpr,
+):
+    pid_m = tl.program_id(0).to(tl.int64)
+    which = tl.program_id(1)  # 0 -> hidden into cols [0, N); 1 -> emb into [N, 2N)
+    offs_n = tl.arange(0, block_size_n)
+    mask_n = offs_n < n_cols
+    if which == 0:
+        x = tl.load(
+            hidden_ptr + pid_m * hidden_stride_0 + offs_n, mask=mask_n, other=0.0
+        ).to(tl.float32)
+        w = tl.load(w_hidden_ptr + offs_n, mask=mask_n, other=0.0).to(tl.float32)
+    else:
+        row = tl.load(ids_ptr + pid_m).to(tl.int64) if GATHER else pid_m
+        x = tl.load(emb_ptr + row * emb_stride_0 + offs_n, mask=mask_n, other=0.0).to(
+            tl.float32
+        )
+        if HAS_PRE_NORM:
+            w_pre = tl.load(w_pre_ptr + offs_n, mask=mask_n, other=0.0).to(tl.float32)
+            rstd = tl.math.rsqrt(tl.sum(x * x, axis=0) / n_cols + eps)
+            # Round-trip through the output dtype so the chained norm is
+            # bit-exact vs the unfused pair (which stores bf16 in between).
+            x = (x * rstd * w_pre).to(out_ptr.dtype.element_ty).to(tl.float32)
+        w = tl.load(w_embed_ptr + offs_n, mask=mask_n, other=0.0).to(tl.float32)
+    rstd = tl.math.rsqrt(tl.sum(x * x, axis=0) / n_cols + eps)
+    tl.store(
+        out_ptr + pid_m * (2 * n_cols) + which * n_cols + offs_n,
+        (x * rstd * w).to(out_ptr.dtype.element_ty),
+        mask=mask_n,
+    )
+
+
+def embed_dual_rmsnorm_cat(
+    hidden: torch.Tensor,
+    hidden_weight: torch.Tensor,
+    embed_weight: torch.Tensor,
+    eps: float,
+    *,
+    embeds: torch.Tensor | None = None,
+    input_ids: torch.Tensor | None = None,
+    embed_table: torch.Tensor | None = None,
+    pre_norm_weight: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """The MTP depth-layer input in one launch:
+    ``cat([rmsnorm(hidden, w_h), rmsnorm(pre?(emb), w_e)], -1)``.
+
+    The embed side is either a fused row gather ``embed_table[input_ids]``
+    (draft decode steps) or precomputed ``embeds`` ([T, N], the target-merged
+    multimodal embeddings at draft prefill); ``pre_norm_weight`` chains the
+    backbone embed_norm in front of the depth embed_norm (bit-exact vs the
+    unfused sequence). The concat copies collapse into direct writes."""
+    T, n = hidden.shape
+    if embeds is not None:
+        assert embeds.shape == hidden.shape
+        src, ids, src_stride = embeds, embeds, embeds.stride(0)
+        gather = False
+    else:
+        assert input_ids is not None and embed_table is not None
+        assert input_ids.shape == (T,) and embed_table.shape[1] == n
+        src, ids, src_stride = embed_table, input_ids, embed_table.stride(0)
+        gather = True
+    out = torch.empty((T, 2 * n), dtype=hidden.dtype, device=hidden.device)
+    if T == 0:
+        return out
+    block_size_n = triton.next_power_of_2(n)
+    _embed_dual_rmsnorm_cat_kernel[(T, 2)](
+        hidden,
+        src,
+        ids,
+        hidden_weight,
+        pre_norm_weight if pre_norm_weight is not None else embed_weight,
+        embed_weight,
+        out,
+        eps,
+        hidden.stride(0),
+        src_stride,
+        n,
+        block_size_n,
+        GATHER=gather,
+        HAS_PRE_NORM=pre_norm_weight is not None,
+        num_warps=_get_num_warps_from_block_size(block_size_n),
+    )
+    return out
+
+
 def rmsnorm(x: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.Tensor:
     assert x.ndim == 2, f"{x.shape=}"
     assert weight.ndim == 1, f"{weight.shape=}"

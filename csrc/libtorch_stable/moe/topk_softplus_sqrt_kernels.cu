@@ -71,6 +71,73 @@ __device__ __forceinline__ float toFloat(T value) {
   }
 }
 
+#ifndef USE_ROCM
+// Adapted from:
+// https://github.com/sgl-project/sglang/blob/main/python/sglang/jit_kernel/csrc/deepseek_v4/hash_topk.cuh
+template <typename OutIndType, typename HashIndType>
+__launch_bounds__(128) __global__
+    void dsv4HashTopkSoftplusSqrt(const float* input, float* output,
+                                  OutIndType* indices, int num_rows,
+                                  int num_experts, float routed_scaling_factor,
+                                  const HashIndType* input_ids,
+                                  const HashIndType* tid2eid) {
+  const int warp = (blockIdx.x * blockDim.x + threadIdx.x) / 32;
+  const int lane = threadIdx.x % 32;
+  if (warp >= num_rows) return;
+  const int64_t token_id = load_index_as_int64(input_ids, warp);
+
+  #if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
+  cudaGridDependencySynchronize();
+  #endif
+  int expert = 0;
+  float weight = 0.f;
+  if (lane < 6) {
+    // only load and calculate for 6 experts
+    expert = static_cast<int>(tid2eid[token_id * 6 + lane]);
+    const float x = input[warp * num_experts + expert];
+    weight = sqrtf(fmaxf(x, 0.f) + __logf(1.f + __expf(-fabsf(x))));
+  }
+  float weight_sum = weight;
+  #pragma unroll
+  for (int mask = 16; mask > 0; mask >>= 1) {
+    // sum in warp
+    weight_sum += VLLM_SHFL_XOR_SYNC(weight_sum, mask);
+  }
+
+  #if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
+  cudaTriggerProgrammaticLaunchCompletion();
+  #endif
+  if (lane < 6) {
+    const int offset = warp * 6 + lane;
+    output[offset] =
+        weight * routed_scaling_factor / (weight_sum > 0.f ? weight_sum : 1.f);
+    indices[offset] = static_cast<OutIndType>(expert);
+  }
+}
+
+template <typename OutIndType, typename HashIndType>
+void launchDsv4HashTopk(const float* input, float* output, OutIndType* indices,
+                        int num_rows, int num_experts,
+                        double routed_scaling_factor,
+                        const HashIndType* input_ids,
+                        const HashIndType* tid2eid, cudaStream_t stream) {
+  if (num_rows == 0) return;
+  auto* kernel = &dsv4HashTopkSoftplusSqrt<OutIndType, HashIndType>;
+  cudaLaunchConfig_t config = {};
+  config.gridDim = (num_rows + 3) / 4;
+  config.blockDim = 128;
+  config.stream = stream;
+  cudaLaunchAttribute attr;
+  attr.id = cudaLaunchAttributeProgrammaticStreamSerialization;
+  attr.val.programmaticStreamSerializationAllowed = 1;
+  config.attrs = &attr;
+  config.numAttrs = 1;
+  const float scale = static_cast<float>(routed_scaling_factor);
+  cudaLaunchKernelEx(&config, kernel, input, output, indices, num_rows,
+                     num_experts, scale, input_ids, tid2eid);
+}
+#endif
+
 // ====================== TopK softplus_sqrt things
 // ===============================
 
@@ -556,6 +623,17 @@ void topkGatingSoftplusSqrtKernelLauncher(
     const float* correction_bias, const bool use_hash,
     const HashIndType* input_ids, const HashIndType* tid2eid,
     cudaStream_t stream) {
+#ifndef USE_ROCM
+  if constexpr (std::is_same_v<InputType, float>) {
+    if (use_hash && topk == 6 && renormalize &&
+        (num_experts == 256 || num_experts == 384)) {
+      launchDsv4HashTopk<IndType, HashIndType>(
+          gating_output, topk_weights, topk_indices, num_tokens, num_experts,
+          routed_scaling_factor, input_ids, tid2eid, stream);
+      return;
+    }
+  }
+#endif
   static constexpr int WARPS_PER_TB = 4;
   static constexpr int BYTES_PER_LDG_POWER_OF_2 = 16;
   // for bfloat16 dtype, we need 4 bytes loading to make sure num_experts
