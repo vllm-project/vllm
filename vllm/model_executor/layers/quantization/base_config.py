@@ -3,6 +3,7 @@
 
 import inspect
 from abc import ABC, abstractmethod
+from collections.abc import Callable, Iterable
 from typing import TYPE_CHECKING, Any
 
 import regex as re
@@ -240,6 +241,17 @@ class QuantizationConfig(ABC):
         # TODO (@kylesayrs): add implementations for all subclasses
         pass
 
+    def apply_checkpoint_shard_aliases(  # noqa: B027
+        self, aliases: dict[str, list[str]]
+    ):
+        """Extend ignore/target storage so entries naming a checkpoint shard
+        also cover its runtime clones.
+
+        Called before `apply_vllm_mapper`; aliases are in HF checkpoint name
+        space. Subclasses override to touch their own storage.
+        """
+        pass
+
     def maybe_update_config(  # noqa: B027
         self,
         model_name: str,
@@ -274,3 +286,25 @@ class QuantizationConfig(ABC):
             True if this config uses MXFP4 quantization, False otherwise
         """
         return False
+
+
+def extend_with_shard_aliases(
+    storage: list[str],
+    aliases: dict[str, list[str]],
+    matcher: Callable[[str, Iterable[str]], bool],
+) -> None:
+    """Append alias clones to `storage` for every alias src it already matches.
+
+    Shared by QuantizationConfig subclasses whose ignore lists differ only in
+    backing location. `matcher(src, storage)` returns True iff `storage` has an
+    entry equal to or regex-matching `src`.
+    """
+    additions: list[str] = []
+    for src, dsts in aliases.items():
+        if not matcher(src, storage):
+            continue
+        for dst in dsts:
+            if dst not in storage and dst not in additions:
+                additions.append(dst)
+    if additions:
+        storage.extend(additions)

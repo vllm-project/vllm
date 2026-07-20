@@ -40,7 +40,10 @@ from vllm.inputs import MultiModalDataDict
 from vllm.logger import init_logger
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import ReplicatedLinear
-from vllm.model_executor.models.gemma4 import Gemma4ForCausalLM
+from vllm.model_executor.models.gemma4 import (
+    Gemma4CheckpointAliasesMixin,
+    Gemma4ForCausalLM,
+)
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.models.transformers.utils import recursive_replace_linear
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -72,7 +75,6 @@ from .interfaces import (
     SupportsLoRA,
     SupportsMultiModal,
     SupportsPP,
-    SupportsQuant,
 )
 from .utils import (
     AutoWeightsLoader,
@@ -973,7 +975,7 @@ class Gemma4MultimodalEmbedder(nn.Module):
 class Gemma4ForConditionalGeneration(
     nn.Module,
     SupportsMultiModal,
-    SupportsQuant,
+    Gemma4CheckpointAliasesMixin,
     SupportsPP,
     SupportsLoRA,
     SupportsEagle3,
