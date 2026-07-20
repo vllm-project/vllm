@@ -133,6 +133,9 @@ class DualQueueThreadPool:
         tasks: Iterable[Task],
     ) -> None:
         """Batch `tasks` and append (fn, state, batch_size) entries to `queue`."""
+        if n_tasks == 0:
+            self._finished_q.append((job_id, True))
+            return
         state = JobState(job_id, n_tasks)
         n_batches = 0
         with self._condition:
