@@ -18,6 +18,8 @@ steps:
   - tests/kernels/quantization/test_cpu_fp8_scaled_mm.py
   - tests/kernels/mamba/cpu/test_cpu_gdn_ops.py
   - tests/kernels/mamba/test_cpu_short_conv.py
+  - tests/kernels/mamba/test_causal_conv1d.py
+  - tests/kernels/mamba/test_mamba_ssm.py
   commands:
     - |
       bash .buildkite/scripts/hardware_ci/run-cpu-test.sh 30m "
@@ -28,7 +30,9 @@ steps:
       pytest -x -v -s tests/kernels/test_onednn.py
       pytest -x -v -s tests/kernels/test_awq_int4_to_int8.py
       pytest -x -v -s tests/kernels/quantization/test_cpu_fp8_scaled_mm.py
-      pytest -x -v -s tests/kernels/mamba/cpu/test_cpu_gdn_ops.py"
+      pytest -x -v -s tests/kernels/mamba/cpu/test_cpu_gdn_ops.py
+      pytest -x -v -s tests/kernels/mamba/test_causal_conv1d.py
+      pytest -x -v -s tests/kernels/mamba/test_mamba_ssm.py"
 
 # Note: SDE can't be downloaded from CI host because of AWS WAF
 # - label: CPU-Compatibility Tests
