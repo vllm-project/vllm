@@ -116,8 +116,9 @@ steps:
       - image-build-amd
 
 - label: PyTorch Fullgraph Smoke Test
+  device: h200_35gb
   key: pytorch-fullgraph-smoke-test
-  timeout_in_minutes: 60
+  timeout_in_minutes: 90
   source_file_dependencies:
   - vllm/__init__.py
   - vllm/_aiter_ops.py
@@ -149,7 +150,42 @@ steps:
   # as it is a heavy test that is covered in other steps.
   # Use `find` to launch multiple instances of pytest so that
   # they do not suffer from https://github.com/vllm-project/vllm/issues/28965
-  - "find compile/fullgraph/ -name 'test_*.py' -not -name 'test_full_graph.py' -print0 | xargs -0 -n1 -I{} pytest -s -v '{}'"
+  - "find compile/fullgraph/ -name 'test_*.py' -not -name 'test_full_cudagraph.py' -not -name 'test_full_graph.py' -print0 | xargs -0 -n1 -I{} pytest -s -v '{}'"
+
+# Hopper-only DeepSeek-V2-Lite cases in this file require two 29.3-GiB model
+# instances and cannot fit a 35GB MIG slice. L4 retains the original coverage:
+# those SM90 cases skip while the architecture-compatible cases still run.
+- label: PyTorch Fullgraph CUDAGraph (L4 Compatibility)
+  key: pytorch-fullgraph-cudagraph-l4-compatibility
+  timeout_in_minutes: 60
+  source_file_dependencies:
+  - vllm/__init__.py
+  - vllm/_aiter_ops.py
+  - vllm/_custom_ops.py
+  - vllm/compilation/
+  - vllm/config/
+  - vllm/distributed/
+  - vllm/engine/
+  - vllm/env_override.py
+  - vllm/envs.py
+  - vllm/forward_context.py
+  - vllm/inputs/
+  - vllm/ir/
+  - vllm/kernels/
+  - vllm/logger.py
+  - vllm/model_executor/
+  - vllm/multimodal/
+  - vllm/platforms/
+  - vllm/plugins/
+  - vllm/sampling_params.py
+  - vllm/sequence.py
+  - vllm/transformers_utils/
+  - vllm/triton_utils/
+  - vllm/utils/
+  - vllm/v1/
+  - tests/compile
+  commands:
+  - pytest -s -v compile/fullgraph/test_full_cudagraph.py
 
 - label: PyTorch Fullgraph
   key: pytorch-fullgraph

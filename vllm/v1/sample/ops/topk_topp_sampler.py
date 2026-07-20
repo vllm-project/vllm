@@ -392,8 +392,9 @@ def apply_top_k_top_p_pytorch(
         logits_sort.masked_fill_(top_k_mask, -float("inf"))
 
     if p is not None:
-        # Apply top-p.
-        probs_sort = logits_sort.softmax(dim=-1)
+        # Apply top-p. The cumsum below runs over the whole vocab, so accumulating
+        # in a low-precision dtype makes the nucleus undershoot p.
+        probs_sort = logits_sort.softmax(dim=-1, dtype=torch.float32)
         probs_sum = torch.cumsum(probs_sort, dim=-1, out=probs_sort)
         top_p_mask = probs_sum <= 1 - p.unsqueeze(dim=1)
         # at least one
@@ -500,9 +501,10 @@ def flashinfer_sample(
             probs, k, deterministic=True
         )
     else:
-        # Both top-k and top-p.
+        # Both top-k and top-p. FlashInfer requires contiguous fp32 logits; the
+        # branches above get that from softmax().
         next_token_ids = flashinfer.sampling.top_k_top_p_sampling_from_logits(
-            logits, k, p, deterministic=True
+            logits.float().contiguous(), k, p, deterministic=True
         )
 
     return next_token_ids.view(-1)

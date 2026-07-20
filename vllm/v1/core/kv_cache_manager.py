@@ -657,6 +657,35 @@ class KVCacheManager:
             clipped_block_ids.append(ids[:num_valid_blocks])
         return tuple(clipped_block_ids)
 
+    def estimate_cached_tokens(self, request: Request) -> int:
+        """Estimate the number of tokens cached by the request."""
+        cached_tokens: int | None = None
+        for group, blocks in zip(
+            self.kv_cache_config.kv_cache_groups,
+            self.get_blocks(request.request_id).blocks,
+        ):
+            if isinstance(
+                group.kv_cache_spec,
+                (CrossAttentionSpec, EncoderOnlyAttentionSpec),
+            ):
+                # Cross-attention and encoder-only groups are not prefix cached.
+                continue
+
+            group_cached_tokens = 0
+            for block in blocks:
+                group_cached_tokens = max(
+                    group_cached_tokens,
+                    block.block_hash_num_tokens or 0,
+                )
+
+            cached_tokens = (
+                group_cached_tokens
+                if cached_tokens is None
+                else min(cached_tokens, group_cached_tokens)
+            )
+
+        return cached_tokens or 0
+
     def cache_blocks(self, request: Request, num_computed_tokens: int) -> None:
         """Cache the blocks for the request, if enabled.
 
@@ -680,6 +709,34 @@ class KVCacheManager:
         for mgr in self.coordinator.single_type_managers:
             ids.extend(mgr.take_new_block_ids())
         return ids
+
+    def get_zeroing_block_ids_in_range(
+        self, request_id: str, start_token: int, end_token: int
+    ) -> list[int]:
+        """The request's block ids covering [start_token, end_token), from
+        the groups whose new blocks are zeroed by the worker."""
+        ids: list[int] = []
+        for mgr in self.coordinator.single_type_managers:
+            if mgr.records_new_block_ids:
+                start_idx = start_token // mgr.block_size
+                end_idx = cdiv(end_token, mgr.block_size)
+                blocks = mgr.req_to_blocks[request_id]
+                ids.extend(blk.block_id for blk in blocks[start_idx:end_idx])
+        return ids
+
+    def record_blocks_for_zeroing(self, request_id: str, start_token: int) -> None:
+        """Re-record the request's blocks from start_token onwards for
+        zeroing, e.g. blocks a failed async KV load left unwritten.
+
+        start_token must be block-aligned: zeroing a partially-valid block
+        would wipe its valid prefix.
+        """
+        for mgr in self.coordinator.single_type_managers:
+            if mgr.records_new_block_ids:
+                assert start_token % mgr.block_size == 0
+                start_idx = start_token // mgr.block_size
+                blocks = mgr.req_to_blocks[request_id]
+                mgr.new_block_ids.extend(blk.block_id for blk in blocks[start_idx:])
 
     def take_kv_cache_block_copies(
         self,

@@ -111,6 +111,13 @@ def process_weights_after_loading(
             # parameters onto device for processing and back off after.
             with device_loading_context(module, target_device):
                 quant_method.process_weights_after_loading(module)
+            # process_weights_after_loading may swap in freshly-created
+            # Parameters (e.g. FP8 requantization), which are stamped with the
+            # global rank in BasevLLMParameter.__init__. Re-reconcile their TP
+            # state to the layer so a later weight reload / RL weight-refit
+            # narrows replicated (disable_tp) weights at the correct offset.
+            if hasattr(module, "update_param_tp_status"):
+                module.update_param_tp_status()
             # Repacking transients above can leave large amounts of memory in
             # the caching allocator, which starves the OS on UMA devices.
             release_device_memory_under_pressure(target_device)

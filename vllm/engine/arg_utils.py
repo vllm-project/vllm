@@ -602,6 +602,7 @@ class EngineArgs:
     enable_tower_connector_lora: bool = LoRAConfig.enable_tower_connector_lora
     specialize_active_lora: bool = LoRAConfig.specialize_active_lora
     enable_mixed_moe_lora_format: bool = LoRAConfig.enable_mixed_moe_lora_format
+    enable_moe_shared_loras: bool = LoRAConfig.enable_moe_shared_loras
 
     ray_workers_use_nsight: bool = ParallelConfig.ray_workers_use_nsight
     num_gpu_blocks_override: int | None = CacheConfig.num_gpu_blocks_override
@@ -665,6 +666,7 @@ class EngineArgs:
     enable_flashinfer_autotune: bool = get_field(
         KernelConfig, "enable_flashinfer_autotune"
     )
+    enable_bf16x3_router_gemm: bool | None = None
     worker_cls: str = ParallelConfig.worker_cls
     worker_extension_cls: str = ParallelConfig.worker_extension_cls
 
@@ -1350,6 +1352,10 @@ class EngineArgs:
             "--enable-mixed-moe-lora-format",
             **lora_kwargs["enable_mixed_moe_lora_format"],
         )
+        lora_group.add_argument(
+            "--enable-moe-shared-loras",
+            **lora_kwargs["enable_moe_shared_loras"],
+        )
 
         # Observability arguments
         observability_kwargs = get_kwargs(ObservabilityConfig)
@@ -1507,6 +1513,10 @@ class EngineArgs:
         kernel_group.add_argument(
             "--enable-flashinfer-autotune",
             **kernel_kwargs["enable_flashinfer_autotune"],
+        )
+        kernel_group.add_argument(
+            "--enable-bf16x3-router-gemm",
+            **kernel_kwargs["enable_bf16x3_router_gemm"],
         )
         moe_backend_kwargs = kernel_kwargs["moe_backend"]
         moe_backend_kwargs["type"] = lambda s: s.lower().replace("-", "_")
@@ -2208,6 +2218,7 @@ class EngineArgs:
                 enable_tower_connector_lora=self.enable_tower_connector_lora,
                 specialize_active_lora=self.specialize_active_lora,
                 enable_mixed_moe_lora_format=self.enable_mixed_moe_lora_format,
+                enable_moe_shared_loras=self.enable_moe_shared_loras,
                 max_cpu_loras=self.max_cpu_loras
                 if self.max_cpu_loras and self.max_cpu_loras > 0
                 else None,
@@ -2286,6 +2297,8 @@ class EngineArgs:
                     "are mutually exclusive"
                 )
             kernel_config.enable_flashinfer_autotune = self.enable_flashinfer_autotune
+        if self.enable_bf16x3_router_gemm is not None:
+            kernel_config.enable_bf16x3_router_gemm = self.enable_bf16x3_router_gemm
         if self.moe_backend != "auto":
             kernel_config.moe_backend = self.moe_backend
         if self.linear_backend != "auto":

@@ -2104,7 +2104,7 @@ def _rocm_sparse_attn_decode_ragged_triton(
     comb_dim = nope_head_dim + rope_head_dim
     is_fnuz = current_platform.is_fp8_fnuz()
 
-    if not _ON_GFX950:  # Fallback path for un-tuned architectures.
+    if not (_ON_GFX942 or _ON_GFX950):  # Fallback path for un-tuned architectures.
         block_k = 16 if head_dim >= 256 else 32
         _sparse_attn_decode_ragged_kernel[(num_queries, heads_blocks)](
             q,
@@ -2205,7 +2205,7 @@ def _rocm_sparse_attn_decode_ragged_triton(
         num_warps=4,
     )
 
-    _sparse_attn_decode_reduce_kernel[(num_queries, heads_blocks)](
+    _sparse_attn_decode_reduce_kernel[(num_queries, num_heads)](
         part_m,
         part_l,
         part_acc,
@@ -2221,7 +2221,7 @@ def _rocm_sparse_attn_decode_ragged_triton(
         num_heads,
         HAS_ATTN_SINK=has_attn_sink,
         COMB_DIM=comb_dim,
-        BLOCK_H=block_h,
+        BLOCK_H=1,
         NUM_SPLITS=num_splits,
         SPLITS_PAD=triton.next_power_of_2(num_splits),
         num_warps=4,

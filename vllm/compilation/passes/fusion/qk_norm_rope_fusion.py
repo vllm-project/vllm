@@ -25,6 +25,11 @@ logger = init_logger(__name__)
 
 FUSED_QK_ROPE_OP = torch.ops._C.fused_qk_norm_rope.default
 
+# Head dimensions supported by csrc/fused_qknorm_rope_kernel.cu's
+# launchFusedQKNormRope and launchFusedQKNormRopeNTokenHeads dispatchers.
+# Keep in sync with the switch statements in that file.
+SUPPORTED_FUSED_QK_NORM_ROPE_HEAD_DIMS: tuple[int, ...] = (64, 128, 256)
+
 P = ParamSpec("P")
 
 
@@ -190,7 +195,12 @@ class QkNormRopePattern:
 
 
 class QKNormRoPEFusionPass(VllmPatternMatcherPass):
-    """Fuse Q/K RMSNorm + RoPE into fused_qk_norm_rope when the custom op exists."""
+    """Fuse Q/K RMSNorm + RoPE into fused_qk_norm_rope when the custom op exists.
+
+    Registers patterns for both standard vLLM ops and ROCm AITER ops
+    (when AITER is enabled), so the fusion fires regardless of which
+    RMSNorm/RoPE implementation the graph uses.
+    """
 
     @enable_fake_mode
     def __init__(self, config: VllmConfig) -> None:
@@ -215,6 +225,17 @@ class QKNormRoPEFusionPass(VllmPatternMatcherPass):
                 "QK Norm+RoPE fusion enabled, but no Attention layers were discovered."
             )
             return
+
+        for layer in attn_layers.values():
+            if layer.head_size not in SUPPORTED_FUSED_QK_NORM_ROPE_HEAD_DIMS:
+                logger.warning_once(
+                    "QK Norm+RoPE fusion not enabled: layer head_size=%d is not "
+                    "supported by fused_qk_norm_rope kernel (supported: %s). "
+                    "Falling back to unfused QK norm + RoPE path.",
+                    layer.head_size,
+                    SUPPORTED_FUSED_QK_NORM_ROPE_HEAD_DIMS,
+                )
+                return
 
         self._attention_geometries = tuple(
             sorted(

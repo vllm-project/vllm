@@ -31,24 +31,24 @@ use super::utils::{
 };
 use super::{Result, ToolCallDelta, ToolParserOutput};
 
-type JsonToolInput<'i> = Partial<&'i str>;
+pub(crate) type JsonToolInput<'i> = Partial<&'i str>;
 
 #[derive(Debug, Clone, Copy)]
-struct JsonToolCallConfig {
-    parser_name: &'static str,
-    start_marker: &'static str,
-    end_marker: &'static str,
-    marker_whitespace: JsonToolCallWhitespace,
-    delimiter: Option<&'static str>,
-    name_key: &'static str,
+pub(crate) struct JsonToolCallConfig {
+    pub parser_name: &'static str,
+    pub start_marker: &'static str,
+    pub end_marker: &'static str,
+    pub marker_whitespace: JsonToolCallWhitespace,
+    pub delimiter: Option<&'static str>,
+    pub name_key: &'static str,
     /// Candidate JSON keys naming the arguments payload, tried in order.
     /// Most parsers use a single key like `["arguments"]`, but some accept
     /// multiple (e.g. InternLM2 accepts `parameters` or `arguments`).
-    arguments_key: &'static [&'static str],
+    pub arguments_key: &'static [&'static str],
 }
 
 #[derive(Debug, Clone, Copy)]
-enum JsonToolCallWhitespace {
+pub(crate) enum JsonToolCallWhitespace {
     Optional,
     Exact(&'static str),
 }
@@ -61,7 +61,7 @@ enum JsonToolCallMode {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum JsonToolCallEvent {
+pub(crate) enum JsonToolCallEvent {
     Text { len: usize },
     ToolCallStart,
     ToolCallHeader { function_name: String },
@@ -220,7 +220,7 @@ fn tool_call_start_event(
 
 /// Parse a marker-wrapped JSON tool-call header before the raw arguments
 /// payload.
-fn tool_call_header_event(
+pub(crate) fn tool_call_header_event(
     input: &mut JsonToolInput<'_>,
     config: JsonToolCallConfig,
 ) -> ModalResult<JsonToolCallEvent> {

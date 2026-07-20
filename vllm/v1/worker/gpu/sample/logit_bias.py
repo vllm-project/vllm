@@ -218,7 +218,9 @@ def _bias_kernel(
             mask=mask,
         )
         bias = tl.load(bias_ptr + req_state_idx * bias_stride + block, mask=mask)
-        logits = tl.load(logits_ptr + token_idx * logits_stride + token_ids, mask=mask)
+        logits = tl.load(
+            logits_ptr + token_idx * logits_stride + token_ids, mask=mask
+        ).to(tl.float32)
         logits += bias
         tl.store(logits_ptr + token_idx * logits_stride + token_ids, logits, mask=mask)
 

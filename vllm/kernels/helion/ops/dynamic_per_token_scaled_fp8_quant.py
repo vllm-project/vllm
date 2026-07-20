@@ -41,7 +41,13 @@ def generate_inputs() -> dict[CaseKey, tuple[Any, ...]]:
         input = torch.randn(num_tokens, hidden_size, device="cuda", dtype=in_dtype)
         result = torch.empty(input.shape, device=input.device, dtype=out_dtype)
         scale = torch.empty((num_tokens, 1), device=input.device, dtype=scale_dtype)
-        scale_ub = torch.mean(input).to(scale_dtype)
+        # scale_ub clamps the per-token amax of |input|. Use a non-degenerate
+        # upper bound (midway between the mean and max of |input|) so clamping is
+        # partially active and the baseline comparison is meaningful.
+        # torch.mean(input) ~= 0 for the zero-mean input would collapse every
+        # scale to the floor and saturate the output.
+        input_abs = input.to(torch.float32).abs()
+        scale_ub = (0.5 * (input_abs.mean() + input_abs.amax())).to(scale_dtype)
 
         config_key = CaseKey({"hidden_size": hidden_size, "num_tokens": num_tokens})
         inputs[config_key] = (result, input, scale, scale_ub)

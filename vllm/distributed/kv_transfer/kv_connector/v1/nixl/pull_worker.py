@@ -48,7 +48,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         """
         for req_id, meta in metadata.reqs_to_recv.items():
             meta.local_physical_block_ids = self._logical_to_kernel_block_ids(
-                meta.local_block_ids
+                meta.local_block_ids, self._physical_blocks_per_logical_kv_block
             )
             assert meta.remote is not None
             # Remote block IDs are kept logical here; expanded in
@@ -134,7 +134,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         remote_info = self.transfer_topo.get_engine_info(engine_id)
         tp_ratio = self.transfer_topo.tp_ratio(remote_info.remote_tp_size)
 
-        meta.remote.block_ids = self._logical_to_remote_kernel_block_ids(
+        meta.remote.block_ids = self._logical_to_kernel_block_ids(
             meta.remote.block_ids,
             remote_info.remote_physical_blocks_per_logical,
         )

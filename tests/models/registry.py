@@ -330,6 +330,12 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         "naver-hyperclovax/HyperCLOVAX-SEED-Think-14B",
         min_transformers_version="5.9.0",
     ),
+    "InklingForCausalLM": _HfExamplesInfo(
+        "thinkingmachines/Inkling-NVFP4",
+        tokenizer_mode="inkling",
+        trust_remote_code=True,
+        max_model_len=4096,
+    ),
     "InternLM2ForCausalLM": _HfExamplesInfo(
         "internlm/internlm2-chat-7b", trust_remote_code=True
     ),
@@ -956,6 +962,12 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         "HuggingFaceM4/Idefics3-8B-Llama3",
         extras={"tiny": "HuggingFaceTB/SmolVLM-256M-Instruct"},
     ),
+    "InklingForConditionalGeneration": _HfExamplesInfo(
+        "thinkingmachines/Inkling-NVFP4",
+        tokenizer_mode="inkling",
+        trust_remote_code=True,
+        max_model_len=4096,
+    ),
     "IsaacForConditionalGeneration": _HfExamplesInfo(
         "PerceptronAI/Isaac-0.1",
         trust_remote_code=True,
@@ -1465,6 +1477,12 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         is_available_online=False,
         use_original_num_layers=True,  # DSpark backbone requires all layers
     ),
+    "Gemma4DSparkModel": _HfExamplesInfo(
+        "google/gemma-4-12B-it",
+        speculative_model="deepseek-ai/dspark_gemma4_12b_block7",
+        is_available_online=False,
+        use_original_num_layers=True,
+    ),
     # [Eagle]
     "EagleCohereForCausalLM": _HfExamplesInfo(
         "/host/engines/cohere-moe",
@@ -1643,6 +1661,13 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
     "HYV3MTPModel": _HfExamplesInfo(
         "tencent/Hy3-preview",
         speculative_model="tencent/Hy3-preview",
+    ),
+    "InklingMTPModel": _HfExamplesInfo(
+        "thinkingmachines/Inkling-NVFP4",
+        speculative_model="thinkingmachines/Inkling-NVFP4",
+        tokenizer_mode="inkling",
+        trust_remote_code=True,
+        max_model_len=4096,
     ),
     "LongCatFlashMTPModel": _HfExamplesInfo(
         "meituan-longcat/LongCat-Flash-Chat",
