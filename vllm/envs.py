@@ -359,6 +359,18 @@ def use_mega_aot_artifact():
     return os.environ.get("VLLM_USE_MEGA_AOT_ARTIFACT", default_value) == "1"
 
 
+def _default_aiter_rmsnorm() -> bool:
+    # AITER RMSNorm kernel not supported on gfx120x (RDNA4); default it to off
+    # Still overridable via VLLM_ROCM_USE_AITER_RMSNORM.
+    from vllm.platforms import current_platform
+
+    if not current_platform.is_rocm():
+        return True
+    from vllm.platforms.rocm import on_rdna4
+
+    return not on_rdna4()
+
+
 def env_with_choices(
     env_name: str,
     default: str | None,
@@ -1223,15 +1235,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ROCM_USE_AITER_RMSNORM": lambda: (
         os.environ["VLLM_ROCM_USE_AITER_RMSNORM"].lower() in ("true", "1")
         if "VLLM_ROCM_USE_AITER_RMSNORM" in os.environ
-        else (
-            not __import__(
-                "vllm.platforms.rocm", fromlist=["on_rdna4"]
-            ).on_rdna4()
-            if __import__(
-                "vllm.platforms", fromlist=["current_platform"]
-            ).current_platform.is_rocm()
-            else True
-        )
+        else _default_aiter_rmsnorm()
     ),
     # Whether to use aiter mla ops.
     # By default is enabled.
