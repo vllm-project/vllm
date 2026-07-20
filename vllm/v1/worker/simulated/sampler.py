@@ -10,6 +10,8 @@ from vllm.v1.worker.gpu.states import RequestState
 
 
 class SimulatedSampler:
+    """Returns caller-provided token IDs without computing logits."""
+
     def __init__(self, req_states: RequestState) -> None:
         self.req_states = req_states
         self.output_token_ids: dict[int, tuple[int, ...]] = {}
