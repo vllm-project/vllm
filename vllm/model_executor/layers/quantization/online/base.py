@@ -88,6 +88,7 @@ class OnlineQuantizationConfig(QuantizationConfig):
             )
         self.args = args
         self.ignored_layers: list[str] = args.ignore
+        self.use_deep_gemm: bool | None = None
 
     @classmethod
     def get_name(cls) -> QuantizationMethods:

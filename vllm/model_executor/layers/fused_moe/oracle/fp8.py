@@ -7,6 +7,7 @@ import torch
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import envs
 from vllm._aiter_ops import rocm_aiter_ops
+from vllm.config import get_current_vllm_config
 from vllm.config.kernel import MoEBackend
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.all2all_utils import (
@@ -34,6 +35,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8Static128BlockSym,
 )
 from vllm.platforms import current_platform
+from vllm.utils.deep_gemm import should_auto_disable_deep_gemm
 
 logger = init_logger(__name__)
 
@@ -239,6 +241,36 @@ def map_fp8_backend(runner_backend: MoEBackend) -> Fp8MoeBackend:
     )
 
 
+def _remove_deep_gemm_backends(
+    available_backends: list[Fp8MoeBackend],
+) -> None:
+    for backend in (Fp8MoeBackend.DEEPGEMM, Fp8MoeBackend.BATCHED_DEEPGEMM):
+        if backend in available_backends:
+            available_backends.remove(backend)
+
+
+def _remove_deep_gemm_if_auto_disabled(
+    available_backends: list[Fp8MoeBackend],
+) -> bool:
+    """Honor the model-level DeepGEMM safety decision for FP8 MoE."""
+    vllm_config = get_current_vllm_config()
+    quant_config = vllm_config.quant_config
+    auto_disabled = getattr(quant_config, "use_deep_gemm", None) is False
+
+    if not auto_disabled:
+        model_config = vllm_config.model_config
+        model_type = (
+            getattr(model_config.hf_text_config, "model_type", None)
+            if model_config is not None
+            else None
+        )
+        auto_disabled = should_auto_disable_deep_gemm(model_type)
+
+    if auto_disabled:
+        _remove_deep_gemm_backends(available_backends)
+    return auto_disabled
+
+
 def select_fp8_moe_backend(
     config: FusedMoEConfig,
     weight_key: QuantKey | None,
@@ -326,11 +358,16 @@ def select_fp8_moe_backend(
             requested_backend, config, weight_key, activation_key, activation_format
         )
 
+    deep_gemm_auto_disabled = _remove_deep_gemm_if_auto_disabled(AVAILABLE_BACKENDS)
+
     # Handle explicit DeepGEMM FP8 configuration.
     if envs.is_set("VLLM_USE_DEEP_GEMM") or envs.is_set("VLLM_MOE_USE_DEEP_GEMM"):
-        if not envs.VLLM_USE_DEEP_GEMM or not envs.VLLM_MOE_USE_DEEP_GEMM:
-            AVAILABLE_BACKENDS.remove(Fp8MoeBackend.DEEPGEMM)
-            AVAILABLE_BACKENDS.remove(Fp8MoeBackend.BATCHED_DEEPGEMM)
+        if (
+            deep_gemm_auto_disabled
+            or not envs.VLLM_USE_DEEP_GEMM
+            or not envs.VLLM_MOE_USE_DEEP_GEMM
+        ):
+            _remove_deep_gemm_backends(AVAILABLE_BACKENDS)
         else:
             backend = (
                 Fp8MoeBackend.DEEPGEMM
