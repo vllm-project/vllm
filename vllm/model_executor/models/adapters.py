@@ -25,7 +25,7 @@ if TYPE_CHECKING:
     from vllm.config import ModelConfig, VllmConfig
     from vllm.model_executor.layers.pooler import Pooler
 
-_T = TypeVar("_T", bound=type[nn.Module])
+_T = TypeVar("_T", bound=nn.Module)
 
 logger = init_logger(__name__)
 
@@ -126,7 +126,7 @@ def _get_pooling_model_name(orig_model_name: str, pooling_suffix: str) -> str:
     return model_name + pooling_suffix
 
 
-def _create_pooling_model_cls(orig_cls: _T) -> _T:
+def _create_pooling_model_cls(orig_cls: type[_T]) -> type[_T]:
     # Lazy import
     from vllm.model_executor.layers.logits_processor import LogitsProcessor
     from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
@@ -157,9 +157,10 @@ def _create_pooling_model_cls(orig_cls: _T) -> _T:
 
             # If the model already defines a pooler instance, don't overwrite it
             pooler = getattr(self, "pooler", None)
-            if not pooler and supports_multimodal(self):
+            multimodal_model: object = self
+            if not pooler and supports_multimodal(multimodal_model):
                 # Try to get the pooler from the LM backbone
-                language_model = self.get_language_model()  # type: ignore[call-arg]
+                language_model = multimodal_model.get_language_model()
                 if hasattr(language_model, "pooler"):
                     pooler = language_model.pooler
 
@@ -175,7 +176,9 @@ def _create_pooling_model_cls(orig_cls: _T) -> _T:
         ) -> "Pooler":
             raise NotImplementedError
 
-        def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
+        def _load_pooling_model_weights(
+            self, weights: Iterable[tuple[str, torch.Tensor]]
+        ):
             params_dict = dict(self.named_parameters())
 
             # We support loading from both `*ForCausalLM` and `*Model`
@@ -226,10 +229,13 @@ def _create_pooling_model_cls(orig_cls: _T) -> _T:
             load_weights = getattr(super(), "load_weights", default_load_weights)
             return load_weights(mapped_weights)
 
-    return ModelForPooling  # type: ignore
+        def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
+            return self._load_pooling_model_weights(weights)
+
+    return ModelForPooling
 
 
-def as_embedding_model(cls: _T) -> _T:
+def as_embedding_model(cls: type[_T]) -> type[_T]:
     """
     Subclass an existing vLLM model to support embeddings.
 
@@ -260,10 +266,10 @@ def as_embedding_model(cls: _T) -> _T:
 
     ModelForEmbedding.__name__ = _get_pooling_model_name(cls.__name__, "ForEmbedding")
 
-    return ModelForEmbedding  # type: ignore
+    return ModelForEmbedding
 
 
-def as_seq_cls_model(cls: _T) -> _T:
+def as_seq_cls_model(cls: type[_T]) -> type[_T]:
     """
     Subclass an existing vLLM model to support classify and score tasks.
 
@@ -369,7 +375,7 @@ def as_seq_cls_model(cls: _T) -> _T:
         cls.__name__, "ForSequenceClassification"
     )
 
-    return ModelForSequenceClassification  # type: ignore
+    return ModelForSequenceClassification
 
 
 class SequenceClassificationConfig(VerifyAndUpdateConfig):
@@ -403,14 +409,15 @@ class SequenceClassificationConfig(VerifyAndUpdateConfig):
         text_config.use_sep_token = use_sep_token
 
 
-def _get_language_model_for_seq_cls(model) -> nn.Module:
+def _get_language_model_for_seq_cls(model: nn.Module) -> nn.Module:
     """
     Get the language model component for sequence classification conversion.
     For VLMs, returns the inner language model. For standard LLMs, returns model itself.
     """
-    if supports_multimodal(model):
+    multimodal_model: object = model
+    if supports_multimodal(multimodal_model):
         try:
-            lm = model.get_language_model()  # type: ignore[call-arg]
+            lm = multimodal_model.get_language_model()
             if lm is not model:
                 return lm
         except Exception:
@@ -512,14 +519,7 @@ def load_weights_using_from_2_way_softmax(
         language_model.lm_head = language_model.lm_head.tie_weights(embed_tokens)
 
     with _disable_seq_cls_loading_on_inner_model(language_model, is_vlm):
-        # ModelForPooling is dynamically defined inside the _create_pooling_model_cls
-        # function, so we need use this hacky method to obtain it.
-        pooling_model_cls = next(
-            x for x in type(model).__mro__ if x.__name__ == "ModelForPooling"
-        )
-        loaded_weights = pooling_model_cls.load_weights(  # type: ignore[attr-defined]
-            model, weights
-        )
+        loaded_weights = model._load_pooling_model_weights(weights)
 
     from vllm.tokenizers import get_tokenizer
 
@@ -587,13 +587,8 @@ def load_weights_no_post_processing(model, weights: Iterable[tuple[str, torch.Te
         language_model.lm_head = language_model.lm_head.tie_weights(embed_tokens)
 
     with _disable_seq_cls_loading_on_inner_model(language_model, is_vlm):
-        pooling_model_cls = next(
-            x for x in type(model).__mro__ if x.__name__ == "ModelForPooling"
-        )
-        # Skip ModelForSequenceClassification in MRO to avoid infinite recursion
-        loaded_weights = pooling_model_cls.load_weights(  # type: ignore[attr-defined]
-            model, weights
-        )
+        # Bypass ModelForSequenceClassification to avoid infinite recursion
+        loaded_weights = model._load_pooling_model_weights(weights)
 
     from vllm.tokenizers import get_tokenizer
 

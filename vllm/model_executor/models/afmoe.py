@@ -47,7 +47,6 @@ from vllm.model_executor.models.utils import (
     PPMissingLayer,
     WeightsMapper,
     extract_layer_index,
-    make_empty_intermediate_tensors_factory,
     make_layers,
     maybe_prefix,
 )
@@ -409,12 +408,6 @@ class AfmoeModel(nn.Module, EagleModelMixin):
         else:
             self.norm = PPMissingLayer()
 
-        self.make_empty_intermediate_tensors = (  # type: ignore[method-assign]
-            make_empty_intermediate_tensors_factory(
-                ["hidden_states", "residual"], config.hidden_size
-            )
-        )
-
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
 
@@ -527,7 +520,7 @@ class AfmoeForCausalLM(
         else:
             self.lm_head = PPMissingLayer()
         self.logits_processor = LogitsProcessor(config.vocab_size)
-        self.make_empty_intermediate_tensors = (  # type: ignore[method-assign]
+        self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors
         )
         # Set MoE hyperparameters
@@ -578,7 +571,7 @@ class AfmoeForCausalLM(
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)
 
-    def forward(  # type: ignore[override]
+    def forward(
         self,
         input_ids: torch.Tensor | None,
         positions: torch.Tensor,

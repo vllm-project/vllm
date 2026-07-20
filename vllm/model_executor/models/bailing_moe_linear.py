@@ -790,7 +790,7 @@ class BailingMoeV25ForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsPP):
         )
 
     @classmethod
-    def get_mamba_state_shape_from_config(  # type: ignore[override]
+    def get_mamba_state_shape_from_config(
         cls,
         vllm_config: VllmConfig,
     ) -> tuple[tuple[int, ...], ...]:

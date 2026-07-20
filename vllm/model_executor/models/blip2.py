@@ -14,7 +14,7 @@ from transformers import (
 )
 
 from vllm.config import CacheConfig, VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.config.multimodal import BaseDummyOptions, ImageDummyOptions
 from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -454,13 +454,14 @@ class Blip2DummyInputsBuilder(BaseDummyInputsBuilder[Blip2ProcessingInfo]):
         num_images = mm_counts.get("image", 0)
 
         image_overrides = mm_options.get("image")
+        assert image_overrides is None or isinstance(image_overrides, ImageDummyOptions)
 
         return {
             "image": self._get_dummy_images(
                 width=max_image_size,
                 height=max_image_size,
                 num_images=num_images,
-                overrides=image_overrides,  # type: ignore[arg-type]
+                overrides=image_overrides,
             )
         }
 
@@ -523,7 +524,7 @@ class Blip2MultiModalProcessor(BaseMultiModalProcessor[Blip2ProcessingInfo]):
     info=Blip2ProcessingInfo,
     dummy_inputs=Blip2DummyInputsBuilder,
 )
-class Blip2ForConditionalGeneration(  # type: ignore[misc]
+class Blip2ForConditionalGeneration(
     nn.Module, SupportsLoRA, SupportsMultiModal, SupportsPP, SupportsQuant
 ):
     @classmethod
@@ -576,7 +577,7 @@ class Blip2ForConditionalGeneration(  # type: ignore[misc]
                 prefix=maybe_prefix(prefix, "language_model"),
             )
 
-        self.make_empty_intermediate_tensors = (  # type: ignore[method-assign]
+        self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors
         )
 
@@ -620,10 +621,10 @@ class Blip2ForConditionalGeneration(  # type: ignore[misc]
         return self._image_pixels_to_features(self.vision_model, pixel_values)
 
     def _process_image_input(self, image_input: Blip2ImageInputs) -> torch.Tensor:
-        if image_input["type"] == "image_embeds":
-            return image_input["data"]
+        if image_input.type == "image_embeds":
+            return image_input.data
 
-        image_features = self._process_image_pixels(image_input)  # type: ignore[arg-type]
+        image_features = self._process_image_pixels(image_input)
 
         query_tokens = self.query_tokens.expand(image_features.shape[0], -1, -1)
         query_output = self.qformer(

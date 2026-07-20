@@ -17,7 +17,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence, Sized
 from typing import Annotated, Any, Literal, TypeAlias
 
 import torch
@@ -30,7 +30,7 @@ from transformers.models.audioflamingo3 import (
 from transformers.models.qwen2_audio import Qwen2AudioEncoder
 
 from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.config.multimodal import AudioDummyOptions, BaseDummyOptions
 from vllm.inputs import ModalityData, MultiModalDataDict
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.models.module_mapping import MultiModelKeys
@@ -226,12 +226,13 @@ class AudioFlamingo3DummyInputsBuilder(
         audio_len = int(hf_processor.max_audio_len * sampling_rate)
         num_audios = mm_counts.get("audio", 0)
         audio_overrides = mm_options.get("audio")
+        assert audio_overrides is None or isinstance(audio_overrides, AudioDummyOptions)
 
         return {
             "audio": self._get_dummy_audios(
                 length=audio_len,
                 num_audios=num_audios,
-                overrides=audio_overrides,  # type: ignore[arg-type]
+                overrides=audio_overrides,
             )
         }
 
@@ -412,7 +413,8 @@ class AudioFlamingo3MultiModalProcessor(
         chunk_counts = []
         for audio in audio_list:
             # audio is numpy array or list
-            n_samples = len(audio)  # type: ignore[arg-type]
+            assert isinstance(audio, Sized)
+            n_samples = len(audio)
 
             n_win = max(1, (n_samples + window_size - 1) // window_size)
             if n_win > max_windows:
@@ -524,7 +526,7 @@ class AudioFlamingo3ForConditionalGeneration(
                 architectures=["Qwen2ForCausalLM"],
             )
 
-        self.make_empty_intermediate_tensors = (  # type: ignore[method-assign]
+        self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors
         )
 
@@ -557,17 +559,15 @@ class AudioFlamingo3ForConditionalGeneration(
     def _process_audio_input(
         self, audio_input: AudioFlamingo3Inputs
     ) -> torch.Tensor | tuple[torch.Tensor, ...]:
-        if audio_input["type"] == "audio_embeds":
-            audio_embeds = audio_input["audio_embeds"]
+        if audio_input.type == "audio_embeds":
+            audio_embeds = audio_input.audio_embeds
             return tuple(audio_embeds)
 
         (
             input_features,
             feature_attention_mask,
             chunk_counts,
-        ) = self._normalize_audio_feature_inputs(
-            audio_input  # type: ignore[arg-type]
-        )
+        ) = self._normalize_audio_feature_inputs(audio_input)
         audio_hidden_states = self._encode_audio_features(
             input_features,
             feature_attention_mask,

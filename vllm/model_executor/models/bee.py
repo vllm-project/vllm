@@ -8,7 +8,7 @@ import torch.nn as nn
 from transformers.activations import GELUActivation
 
 from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.config.multimodal import BaseDummyOptions, ImageDummyOptions
 from vllm.inputs import MultiModalDataDict
 from vllm.multimodal import MULTIMODAL_REGISTRY
 
@@ -97,13 +97,14 @@ class BeeDummyInputsBuilder(LlavaDummyInputsBuilder[BeeProcessingInfo]):
         target_width, target_height = self.info.get_image_size_with_most_features()
 
         image_overrides = mm_options.get("image")
+        assert image_overrides is None or isinstance(image_overrides, ImageDummyOptions)
 
         return {
             "image": self._get_dummy_images(
                 width=target_width,
                 height=target_height,
                 num_images=num_images,
-                overrides=image_overrides,  # type: ignore[arg-type]
+                overrides=image_overrides,
             ),
         }
 
@@ -133,7 +134,7 @@ class BeeMultiModalProjector(nn.Module):
         return hidden_states
 
 
-@MULTIMODAL_REGISTRY.register_processor(  # type: ignore[misc]
+@MULTIMODAL_REGISTRY.register_processor(
     LlavaNextMultiModalProcessor,
     info=BeeProcessingInfo,
     dummy_inputs=BeeDummyInputsBuilder,

@@ -14,7 +14,7 @@ import torch
 import torch.nn as nn
 
 from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.config.multimodal import BaseDummyOptions, ImageDummyOptions
 from vllm.inputs import MultiModalDataDict
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import get_act_fn
@@ -258,13 +258,14 @@ class BagelDummyInputsBuilder(BaseDummyInputsBuilder[BagelProcessingInfo]):
         # Use the configured image size
         image_size = vit_config.image_size
         image_overrides = mm_options.get("image")
+        assert image_overrides is None or isinstance(image_overrides, ImageDummyOptions)
 
         return {
             "image": self._get_dummy_images(
                 width=image_size,
                 height=image_size,
                 num_images=num_images,
-                overrides=image_overrides,  # type: ignore[arg-type]
+                overrides=image_overrides,
             ),
         }
 
@@ -430,7 +431,7 @@ class BagelForConditionalGeneration(
             self.connector = StageMissingLayer("image_tower")
             self.vit_pos_embed = StageMissingLayer("image_tower")
 
-        self.make_empty_intermediate_tensors = (  # type: ignore[method-assign]
+        self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors
         )
 

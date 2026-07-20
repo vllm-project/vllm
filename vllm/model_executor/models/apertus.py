@@ -454,7 +454,7 @@ class ApertusForCausalLM(
         else:
             self.lm_head = PPMissingLayer()
 
-        self.make_empty_intermediate_tensors = (  # type: ignore[method-assign]
+        self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors
         )
 
