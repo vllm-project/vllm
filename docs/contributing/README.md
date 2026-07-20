@@ -43,6 +43,20 @@ If you are only developing vLLM's Python code, install vLLM using:
 VLLM_USE_PRECOMPILED=1 uv pip install -e .
 ```
 
+!!! note "Non-CUDA platforms (macOS, CPU backend)"
+    `VLLM_USE_PRECOMPILED=1` pulls a pre-built CUDA wheel and only works on
+    Linux with a CUDA-enabled PyTorch. On macOS (Apple Silicon) or when
+    developing for the CPU backend, follow the
+    [CPU build-from-source instructions](../getting_started/installation/cpu.md)
+    instead. On macOS the short path is:
+
+    ```bash
+    uv pip install -r requirements/cpu.txt
+    uv pip install -e .
+    ```
+
+    `VLLM_TARGET_DEVICE=cpu` is set automatically on macOS.
+
 To rebuild only the Rust frontend binary:
 
 ```bash
