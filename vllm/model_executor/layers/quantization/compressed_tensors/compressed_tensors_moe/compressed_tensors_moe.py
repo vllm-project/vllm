@@ -102,6 +102,7 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
                 and weight_quant.actorder
                 in (ActivationOrdering.GROUP, ActivationOrdering.DYNAMIC)
             )
+            # Prefer to use the MarlinMoE kernel when it is supported.
             use_marlin = (
                 moe_backend in ("auto", "marlin")
                 and check_moe_marlin_supports_layer(
