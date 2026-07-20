@@ -87,6 +87,7 @@ def import_all_kernels() -> None:
             fn()
             return
 
+
 logger = init_logger("vllm.scripts.benchmark_helion_kernels")
 
 
@@ -596,7 +597,9 @@ def main() -> None:
                 if r.passed:
                     logger.info("Numerics check passed for case %s", r.case)
                 else:
-                    logger.error("Numerics check FAILED for case %s: %s", r.case, r.error)
+                    logger.error(
+                        "Numerics check FAILED for case %s: %s", r.case, r.error
+                    )
             failed = [r for r in results if not r.passed]
             if failed:
                 logger.error(
