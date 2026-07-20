@@ -555,8 +555,23 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             dtype=torch.int32,
             device=self.device,
         )
+        max_num_blocks_per_req = cdiv(
+            self.vllm_config.model_config.max_model_len,
+            self.kv_cache_spec.block_size * get_kv_cache_shard_count(),
+        )
+        # When the co-located MLA is virtually split (compress_ratio > 1, e.g.
+        # GLM5-Next kpool), the shared block_table passed to
+        # _prepare_decode_tensors is in kernel/storage-block units: each
+        # block_size page spans compress_ratio sub-pages, so the raw MLA-width
+        # table is compress_ratio x wider. The expand kernels in
+        # _prepare_decode_tensors copy these raw rows (see the translate step in
+        # build()), so the buffer must hold the full raw width or it writes OOB.
+        max_num_blocks_per_req *= getattr(self.kv_cache_spec, "compress_ratio", 1)
+        # main passes block_table_width; take the max so the buffer is never
+        # narrower than the compress-ratio-expanded raw table.
+        expanded_block_table_width = max(block_table_width, max_num_blocks_per_req)
         self.expanded_block_table_buffer = torch.zeros(
-            (scheduler_config.max_num_batched_tokens, block_table_width),
+            (scheduler_config.max_num_batched_tokens, expanded_block_table_width),
             dtype=torch.int32,
             device=self.device,
         )
