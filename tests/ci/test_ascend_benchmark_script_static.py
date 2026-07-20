@@ -86,13 +86,16 @@ def test_e2e_inference_scripts_retry_http_requests_and_print_server_log():
         text = script_text(script_name)
 
         assert "print_server_log_tail() {" in text
-        assert "curl_with_server_log() {" in text
+        assert "http_request() {" in text
+        assert "http_request_with_server_log() {" in text
+        assert "urllib.request.ProxyHandler({})" in text
         assert "E2E_HTTP_REQUEST_ATTEMPTS" in text
+        assert "E2E_HTTP_REQUEST_TIMEOUT_SECONDS" in text
         assert "else\n      rc=$?\n    fi" in text
         assert "failed after ${max_attempts} attempts" in text
-        assert 'done\n\ncurl -fsS "http://$HOST:$PORT/v1/models" >/dev/null' not in text
+        assert "curl -fsS" not in text
         assert "vLLM models endpoint readiness confirmation" in text
         assert (
-            "curl_with_server_log"
+            "http_request_with_server_log"
             in text[text.index("completion_response=$(mktemp)") :]
         )
