@@ -611,21 +611,13 @@ class DCPGroupColumnParallelLinear(ColumnParallelLinear):
     """Column-parallel linear whose weight is sharded across DCP groups.
 
     With Decode Context Parallelism (DCP) the KV cache is sharded across a DCP
-    group, so MLA decode must attend the group's full head set. When MLA query
-    replication (``VLLM_DCP_Q_REPLICATE``) is ON this layer shards its output
-    across DCP *groups* (effective tp size ``tp_size // dcp_world_size``) rather
-    than across every rank, so each rank in a group holds the whole group's heads
-    and :meth:`forward_replicated` can produce the group's queries directly,
-    letting decode skip the query all-gather.
+    group, so MLA decode must attend the group's full head set. This layer shards
+    its output across DCP *groups* (effective tp size ``tp_size //
+    dcp_world_size``) rather than across every rank, so each rank in a group
+    holds the whole group's heads, letting decode skip the query all-gather.
 
-    :meth:`forward` returns only this rank's tp shard, exactly matching
-    :class:`ColumnParallelLinear`, making this a drop-in replacement.
-
-    When qrep is OFF (or ``dcp_world_size == 1``) the group size is 1: the layer
-    is a plain :class:`ColumnParallelLinear` (per-rank shard, standard/quantized
-    gemm, no dequantized local weight), and DCP decode uses its pre-existing
-    baseline query all-gather. Group sharding — and the dequantized-weight path
-    for quantized layers — is thus paid ONLY when qrep is explicitly enabled.
+    :meth:`forward` returns the group's full head set. :meth:`_local_view`
+    extracts this rank's TP shard for prefill.
     """
 
     def __init__(self, *args, **kwargs):
@@ -634,10 +626,8 @@ class DCPGroupColumnParallelLinear(ColumnParallelLinear):
         )
         rank = get_tensor_model_parallel_rank()
         world_size = get_tensor_model_parallel_world_size()
-        self.qrep_active = (
-            bool(envs.VLLM_DCP_Q_REPLICATE) and max(dcp_world_size, 1) > 1
-        )
-        self.group_size = max(dcp_world_size, 1) if self.qrep_active else 1
+        self.group_size = max(dcp_world_size, 1)
+        self.qrep_active = self.group_size > 1
         self.rank_in_group = rank % self.group_size
         super().__init__(
             *args,
@@ -645,36 +635,6 @@ class DCPGroupColumnParallelLinear(ColumnParallelLinear):
             tp_rank=rank // self.group_size,
             tp_size=world_size // self.group_size,
         )
-
-        # This rank's own tp shard of the group's output.
-        local_size = self.output_size_per_partition // self.group_size
-        start = self.rank_in_group * local_size
-        self._local_shard = slice(start, start + local_size)
-        self._is_unquantized = isinstance(self.quant_method, UnquantizedLinearMethod)
-        if self.group_size > 1 and not self._is_unquantized:
-            # Quantized weights are repacked/swizzled by the quant method, so the
-            # group weight cannot be row-sliced at runtime. build_local_weight()
-            # derives a dequantized local weight once, after loading.
-            self.register_buffer("_local_weight", None, persistent=False)
-
-    def build_local_weight(self, act_dtype: torch.dtype) -> None:
-        """Derive the dequantized local weight :meth:`forward` uses.
-
-        Only needed for quantized layers (unquantized row-slices ``weight``).
-        Must run after weight loading; MLAAttention.process_weights_after_loading
-        drives this for the MLA projections.
-        """
-        if self.group_size == 1 or self._is_unquantized:
-            return
-
-        from vllm.model_executor.layers.quantization.utils.quant_utils import (
-            get_and_maybe_dequant_weights,
-        )
-
-        # [out, in] dequantized group weight; clone this rank's rows so the
-        # (group_size x larger) dequantized group weight can be freed.
-        weight = get_and_maybe_dequant_weights(self, out_dtype=act_dtype)
-        self._local_weight = weight[self._local_shard].clone()
 
     def _local_view(self, out: torch.Tensor) -> torch.Tensor:
         """Slice this rank's tp head shard from a group-heads output.
@@ -686,33 +646,6 @@ class DCPGroupColumnParallelLinear(ColumnParallelLinear):
         n = out.shape[-2] // self.group_size
         start = self.rank_in_group * n
         return out[..., start : start + n, :].contiguous()
-
-    def forward_replicated(self, input_):
-        """Project to the DCP group's full head set (replicated within a group)."""
-        return super().forward(input_)
-
-    def forward(self, input_):
-        """Project to this rank's own tp shard, as ColumnParallelLinear would."""
-        if self.group_size == 1:
-            return super().forward(input_)
-
-        weight = (
-            self.weight[self._local_shard]
-            if self._is_unquantized
-            else self._local_weight
-        )
-        assert weight is not None, (
-            "build_local_weight() must run before forward() on a quantized "
-            f"{type(self).__name__} ({self.prefix})"
-        )
-        bias = self.bias[self._local_shard] if self.bias is not None else None
-        output = torch.nn.functional.linear(
-            input_, weight, None if self.skip_bias_add else bias
-        )
-
-        if not self.return_bias:
-            return output
-        return output, (bias if self.skip_bias_add else None)
 
 
 class MergedColumnParallelLinear(ColumnParallelLinear):

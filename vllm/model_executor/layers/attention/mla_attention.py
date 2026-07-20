@@ -361,7 +361,6 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         kv_lora_rank: int,
         kv_b_proj: ColumnParallelLinear,
         dcp_q_replicate: bool = False,
-        q_proj: torch.nn.Module | None = None,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
@@ -381,19 +380,10 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         self.kv_lora_rank = kv_lora_rank
         self.kv_b_proj = kv_b_proj
         self.dcp_q_replicate = dcp_q_replicate
-        # Held so their dequantized local weights can be built post-load.
-        self.q_proj = q_proj
         self.W_UK_T_dcp_qrep: torch.Tensor | None = None
         self.head_size = kv_lora_rank + qk_rope_head_dim
         self.layer_name = prefix
         self.indexer = indexer
-        # kv_b_proj's weight is sharded per DCP group, so it holds the group's
-        # heads; this rank's own heads start at dcp_qrep_local_head_offset.
-        self.kv_b_proj_num_heads = self.num_heads * getattr(kv_b_proj, "group_size", 1)
-        self.dcp_qrep_local_head_offset = (
-            getattr(kv_b_proj, "rank_in_group", 0) * self.num_heads
-        )
-
         self.num_kv_heads = 1
         self.qk_head_dim = self.qk_nope_head_dim + self.qk_rope_head_dim
 
@@ -900,13 +890,6 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         return output_padded
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):
-        # Runs after every quant method has repacked its weights, so DCP-group
-        # sharded projections can now derive their dequantized local weights.
-        for proj in (self.q_proj, self.kv_b_proj):
-            build_local_weight = getattr(proj, "build_local_weight", None)
-            if build_local_weight is not None:
-                build_local_weight(act_dtype)
-
         # we currently do not have quantized bmm's which are needed for
         # `W_UV` and `W_UK_T`, we just store fp16/bf16 copies and perform
         # the bmm's in 16-bit, the extra memory overhead of this is fairly low
@@ -931,34 +914,19 @@ class MLAAttention(nn.Module, AttentionLayerBase):
 
         assert kv_b_proj_weight.shape == (
             self.kv_lora_rank,
-            self.kv_b_proj_num_heads * (self.qk_nope_head_dim + self.v_head_dim),
+            self.num_heads * (self.qk_nope_head_dim + self.v_head_dim),
         ), (
             f"{kv_b_proj_weight.shape=}, "
             f"{self.kv_lora_rank=}, "
-            f"{self.kv_b_proj_num_heads=}, "
+            f"{self.num_heads=}, "
             f"{self.qk_nope_head_dim=}, "
             f"{self.v_head_dim=}"
         )
         kv_b_proj_weight = kv_b_proj_weight.view(
             self.kv_lora_rank,
-            self.kv_b_proj_num_heads,
+            self.num_heads,
             self.qk_nope_head_dim + self.v_head_dim,
         )
-
-        W_UK_dcp_qrep = None
-        if self.kv_b_proj_num_heads != self.num_heads:
-            # kv_b_proj holds the DCP group's heads: keep the group W_UK for the
-            # qrep decode BMM, and slice this rank's heads for everything else.
-            if self.dcp_q_replicate:
-                W_UK_dcp_qrep, _ = kv_b_proj_weight.split(
-                    [self.qk_nope_head_dim, self.v_head_dim], dim=-1
-                )
-            kv_b_proj_weight = kv_b_proj_weight[
-                :,
-                self.dcp_qrep_local_head_offset : self.dcp_qrep_local_head_offset
-                + self.num_heads,
-                :,
-            ]
 
         W_UK, W_UV = kv_b_proj_weight.split(
             [self.qk_nope_head_dim, self.v_head_dim], dim=-1
@@ -1024,8 +992,10 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             self.W_UV = W_UV.transpose(0, 1)
             # Convert from (L, N, P) to (N, P, L)
             self.W_UK_T = W_UK.permute(1, 2, 0)
-            if W_UK_dcp_qrep is not None:
-                self.W_UK_T_dcp_qrep = W_UK_dcp_qrep.permute(1, 2, 0)
+            if self.dcp_q_replicate:
+                self.W_UK_T_dcp_qrep = get_dcp_group().all_gather(
+                    self.W_UK_T.contiguous(), dim=0
+                )
 
         # If we should not load quant weights, we initialize the scales to 1.0
         # as the default value. See [Note: Register q/k/v/prob scales in state dict]

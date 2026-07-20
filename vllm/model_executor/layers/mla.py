@@ -115,7 +115,6 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
             prefix=f"{prefix}.attn",
             kv_b_proj=self.kv_b_proj,
             dcp_q_replicate=self.dcp_q_replicate,
-            q_proj=q_proj_layer,
             use_sparse=self.is_sparse,
             indexer=self.indexer,
             topk_indices_buffer=mla_modules.topk_indices_buffer,
@@ -167,14 +166,10 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
         # Add head dim of 1 to k_pe
         k_pe = k_pe.unsqueeze(1)
 
-        # Under qrep, project the DCP group's full head set so decode can skip
-        # the query all-gather; prefill slices this rank's heads back out.
+        q = q_proj_layer(q_proj_input)[0]
         heads = self.num_heads
         if self.dcp_q_replicate:
-            q = q_proj_layer.forward_replicated(q_proj_input)[0]
             heads *= q_proj_layer.group_size
-        else:
-            q = q_proj_layer(q_proj_input)[0]
         q = q.view(-1, heads, self.qk_head_dim)
 
         if self.rotary_emb is not None:
