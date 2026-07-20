@@ -1512,3 +1512,49 @@ def test_rocm_mxfp4_moe_oracle(
 
     # Check accuracy using per-backend thresholds
     check_accuracy(ref, out, atol=0.1, rtol=config["rtol"], percent=config["percent"])
+
+
+# -----------------------------------------------------------------------------
+# MXFP4 emulation size-rounding tests
+# -----------------------------------------------------------------------------
+# Emulation needs each per-partition dim rounded up to OCP_MX_BLOCK_SIZE (32);
+# a non-block-aligned shard (e.g. GPT-OSS 2880 // 4 = 720) otherwise truncates
+# the scale buffer and fails weight loading.
+# NOTE: gated to ROCm since it is the emulation backend's current target;
+# remove this skip if the backend is enabled on non-ROCm platforms.
+@pytest.mark.skipif(not ROCM_AVAILABLE, reason="emulation backend targets ROCm")
+@pytest.mark.parametrize(
+    "hidden_size,intermediate_size,expected_hidden,expected_intermediate",
+    [
+        (2880, 720, 2880, 736),  # GPT-OSS TP=4 shard: 720 -> round_up(720, 32)
+        (2880, 360, 2880, 384),  # GPT-OSS TP=8 shard: 360 -> 384
+        (2880, 2880, 2880, 2880),  # already block-aligned: unchanged
+        (90, 90, 96, 96),  # both dims unaligned
+    ],
+)
+def test_mxfp4_emulation_rounds_up_to_block_size(
+    hidden_size: int,
+    intermediate_size: int,
+    expected_hidden: int,
+    expected_intermediate: int,
+):
+    """Emulation must block-align per-partition dims to OCP_MX_BLOCK_SIZE."""
+    from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
+        Mxfp4MoeBackend,
+        mxfp4_round_up_hidden_size_and_intermediate_size,
+    )
+    from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import (
+        OCP_MX_BLOCK_SIZE,
+    )
+
+    rounded_hidden, rounded_intermediate = (
+        mxfp4_round_up_hidden_size_and_intermediate_size(
+            Mxfp4MoeBackend.EMULATION, hidden_size, intermediate_size
+        )
+    )
+
+    assert rounded_hidden == expected_hidden
+    assert rounded_intermediate == expected_intermediate
+    # The block-scale buffer (dim // OCP_MX_BLOCK_SIZE) must not floor-truncate.
+    assert rounded_hidden % OCP_MX_BLOCK_SIZE == 0
+    assert rounded_intermediate % OCP_MX_BLOCK_SIZE == 0
