@@ -22,7 +22,6 @@ from vllm.models.deepseek_v4.sparse_mla import (
     DeepseekV4FlashMLABackend,
     DeepseekV4FlashMLAMetadata,
 )
-from vllm.models.deepseek_v4.xpu.ops import xpu_fp8_bmm
 from vllm.models.deepseek_v4.xpu.xpu_sparse_decode_fp8 import (
     xpu_sparse_decode_fp8,
 )
@@ -111,7 +110,7 @@ class DeepseekV4XPUAttention(DeepseekV4Attention):
 
         # TODO: optimize fused_inv_rope_fp8_quant for xpu bmm to
         # eliminate o_scale transpose + contiguous
-        z = xpu_fp8_bmm(
+        z = torch.ops.vllm.xpu_fp8_bmm(
             o_fp8.transpose(0, 1),
             wo_a_weight,
             torch.bfloat16,
