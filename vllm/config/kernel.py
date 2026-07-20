@@ -159,6 +159,7 @@ LinearBackend = Literal[
     "emulation",
     "xpu",
     "xpu_woq",
+    "helion",
 ]
 
 
