@@ -36,6 +36,7 @@ from vllm.v1.metrics.stats import (
     LoRARequestStates,
     RequestStateStats,
     SchedulerStats,
+    interval,
 )
 
 # shared empty CPU tensor used as a placeholder pooling output
@@ -742,10 +743,10 @@ class OutputProcessor:
 
         # Calculate timing metrics
         e2e_time = iteration_stats.iteration_timestamp - metrics.arrival_time
-        queued_time = metrics.scheduled_ts - metrics.queued_ts
-        prefill_time = metrics.first_token_ts - metrics.scheduled_ts
-        decode_time = metrics.last_token_ts - metrics.first_token_ts
-        inference_time = metrics.last_token_ts - metrics.scheduled_ts
+        queued_time = interval(metrics.queued_ts, metrics.scheduled_ts)
+        prefill_time = interval(metrics.scheduled_ts, metrics.first_token_ts)
+        decode_time = interval(metrics.first_token_ts, metrics.last_token_ts)
+        inference_time = interval(metrics.scheduled_ts, metrics.last_token_ts)
 
         # Build attributes dict
         attributes: dict[str, Any] = {
