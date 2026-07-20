@@ -122,8 +122,6 @@ class EngineCore:
         self.log_stats = log_stats
 
         # Monotonically increasing generation of the target policy weights.
-        # Requests are bound to a generation when they enter the scheduler
-        # queue (admission time).
         self._weight_version = 0
         self._weight_update_is_draft: bool | None = None
 
@@ -474,8 +472,6 @@ class EngineCore:
                 "Disabling ECTransfer for this request."
             )
 
-        # Bind the version at scheduler admission, before enqueueing.
-        request.weight_version = self._weight_version
         self.scheduler.add_request(request)
         if request.abort_immediately:
             # Immediately abort so the connector's request_finished hook runs

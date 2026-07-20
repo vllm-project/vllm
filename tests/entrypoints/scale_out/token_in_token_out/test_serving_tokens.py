@@ -113,7 +113,6 @@ async def test_generate_endpoint(client):
     resp.raise_for_status()
     data = resp.json()
     assert "choices" in data
-    assert data["weight_version"] == 0
 
 
 @pytest.mark.asyncio
@@ -180,7 +179,6 @@ async def test_generate_stream(client):
     # Every chunk has choices with token_ids
     all_token_ids = []
     for chunk in chunks:
-        assert chunk["weight_version"] == 0
         assert "choices" in chunk
         assert len(chunk["choices"]) == 1
         choice = chunk["choices"][0]

@@ -44,8 +44,6 @@ pub struct CollectedGenerateOutput {
     /// Connector-specific encoder cache transfer parameters for disaggregated
     /// serving.
     pub ec_transfer_params: Option<serde_json::Value>,
-    /// Target-policy weight generation bound when the request was admitted.
-    pub weight_version: Option<u64>,
 }
 
 /// Prompt-scoped metadata emitted only once on the first [`GenerateOutput`] for
@@ -157,8 +155,6 @@ pub struct GenerateOutput {
     /// Connector-specific encoder cache transfer parameters for disaggregated
     /// serving.
     pub ec_transfer_params: Option<serde_json::Value>,
-    /// Target-policy weight generation bound when the request was admitted.
-    pub weight_version: Option<u64>,
 }
 
 impl GenerateOutput {
@@ -206,7 +202,6 @@ impl GenerateOutput {
             cached_token_count: 0,
             kv_transfer_params: None,
             ec_transfer_params: None,
-            weight_version: None,
         }
     }
 }
@@ -296,7 +291,6 @@ impl Stream for GenerateOutputStream {
             cached_token_count,
             kv_transfer_params: raw.kv_transfer_params,
             ec_transfer_params: raw.ec_transfer_params,
-            weight_version: raw.weight_version,
         };
 
         Poll::Ready(Some(Ok(output)))
@@ -357,9 +351,6 @@ impl<T: Stream<Item = Result<GenerateOutput>> + Send> T {
                 }
 
                 if let Some(existing) = collected.as_mut() {
-                    if existing.weight_version.is_none() {
-                        existing.weight_version = output.weight_version;
-                    }
                     existing.token_ids.extend(output.token_ids);
                     if let Some(step_logprobs) = output.logprobs {
                         if let Some(collected_logprobs) = existing.logprobs.as_mut() {
@@ -383,7 +374,6 @@ impl<T: Stream<Item = Result<GenerateOutput>> + Send> T {
                         },
                         kv_transfer_params: None,
                         ec_transfer_params: None,
-                        weight_version: output.weight_version,
                     });
                 }
 

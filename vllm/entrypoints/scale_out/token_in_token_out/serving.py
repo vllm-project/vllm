@@ -251,13 +251,10 @@ class ServingTokens(GenerateBaseServing):
     ) -> ErrorResponse | GenerateResponse:
         created_time = int(time.time())
         final_res: RequestOutput | None = None
-        weight_version: int | None = None
         sampling_params: SamplingParams = request.sampling_params
 
         try:
             async for res in result_generator:
-                if res.weight_version is not None:
-                    weight_version = res.weight_version
                 final_res = res
         except asyncio.CancelledError:
             return self.create_error_response("Client disconnected")
@@ -334,7 +331,6 @@ class ServingTokens(GenerateBaseServing):
             prompt_logprobs=clamp_prompt_logprobs(final_res.prompt_logprobs),
             kv_transfer_params=final_res.kv_transfer_params,
             ec_transfer_params=final_res.ec_transfer_params,
-            weight_version=weight_version,
         )
 
         # Log complete response if output logging is enabled
@@ -370,7 +366,6 @@ class ServingTokens(GenerateBaseServing):
         num_generated_tokens: list[int] = []
         first_iteration = True
         num_cached_tokens = None
-        weight_version: int | None = None
         sampling_params: SamplingParams = request.sampling_params
 
         include_usage, include_continuous_usage = should_include_usage(
@@ -379,8 +374,6 @@ class ServingTokens(GenerateBaseServing):
 
         try:
             async for res in result_generator:
-                if res.weight_version is not None:
-                    weight_version = res.weight_version
                 if first_iteration:
                     if res.prompt_token_ids is not None:
                         num_prompt_tokens = len(res.prompt_token_ids)
@@ -422,7 +415,6 @@ class ServingTokens(GenerateBaseServing):
 
                     chunk = GenerateStreamResponse(
                         request_id=request_id,
-                        weight_version=weight_version,
                         choices=[
                             GenerateResponseStreamChoice(
                                 index=i,
@@ -459,7 +451,6 @@ class ServingTokens(GenerateBaseServing):
                     request_id=request_id,
                     choices=[],
                     usage=final_usage_info,
-                    weight_version=weight_version,
                 )
                 yield f"data: {final_chunk.model_dump_json(exclude_none=True)}\n\n"
 

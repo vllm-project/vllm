@@ -130,14 +130,10 @@ async fn generate_chunk_stream(
     pin_mut!(stream);
     let mut prompt_tokens = None;
     let mut usage = TokenUsage::default();
-    let mut weight_version = None;
 
     while let Some(next) = stream.next().await {
         match next {
             Ok(output) => {
-                if output.weight_version.is_some() {
-                    weight_version = output.weight_version;
-                }
                 if prompt_tokens.is_none() {
                     prompt_tokens =
                         output.prompt_info.as_ref().map(|info| info.prompt_token_ids.len());
@@ -190,7 +186,6 @@ async fn generate_chunk_stream(
                     }],
                     usage: include_continuous_usage
                         .then(|| Usage::from_token_usage(usage, enable_prompt_tokens_details)),
-                    weight_version,
                 })
                 .await;
             }
@@ -209,7 +204,6 @@ async fn generate_chunk_stream(
             request_id,
             choices: Vec::new(),
             usage: Some(Usage::from_token_usage(usage, enable_prompt_tokens_details)),
-            weight_version,
         })
         .await;
     }
@@ -274,7 +268,6 @@ fn collect_generate(
             token_ids: collected.token_ids,
         }],
         prompt_logprobs,
-        weight_version: collected.weight_version,
         kv_transfer_params: collected.kv_transfer_params,
         ec_transfer_params: collected.ec_transfer_params,
     })
@@ -416,7 +409,6 @@ mod tests {
                 cached_token_count: 0,
                 kv_transfer_params: None,
                 ec_transfer_params: None,
-                weight_version: None,
             }),
             Ok(GenerateOutput {
                 request_id: String::new(),
@@ -430,7 +422,6 @@ mod tests {
                 cached_token_count: 2,
                 kv_transfer_params: None,
                 ec_transfer_params: None,
-                weight_version: None,
             }),
         ]);
 
