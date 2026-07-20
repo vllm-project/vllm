@@ -4,6 +4,7 @@
 from argparse import ArgumentError
 
 import pytest
+from pydantic import ValidationError
 
 from vllm.config import VllmConfig
 from vllm.engine.arg_utils import EngineArgs
@@ -128,3 +129,24 @@ def test_mm_prefix_lm_raises_batched_tokens_floor():
         vllm_config = engine_args.create_engine_config(UsageContext.OPENAI_API_SERVER)
 
     assert vllm_config.scheduler_config.max_num_batched_tokens >= 2496
+
+
+def test_prefix_cache_hit_rate_window_from_cli():
+    """CLI flag --prefix-cache-hit-rate-window propagates to ObservabilityConfig."""
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+
+    # Default value is 1000 (backward compatible)
+    args = parser.parse_args([])
+    vllm_config = EngineArgs.from_cli_args(args=args).create_engine_config()
+    assert vllm_config.observability_config.prefix_cache_hit_rate_window == 1000
+
+    # Custom value propagates correctly end-to-end
+    args = parser.parse_args(["--prefix-cache-hit-rate-window", "500"])
+    vllm_config = EngineArgs.from_cli_args(args=args).create_engine_config()
+    assert vllm_config.observability_config.prefix_cache_hit_rate_window == 500
+
+    # Invalid value (zero) is rejected by Pydantic Field(gt=0)
+    parser.exit_on_error = False
+    with pytest.raises(ValidationError):
+        args = parser.parse_args(["--prefix-cache-hit-rate-window", "0"])
+        EngineArgs.from_cli_args(args=args).create_engine_config()
