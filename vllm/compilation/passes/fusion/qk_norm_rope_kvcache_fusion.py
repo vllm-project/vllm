@@ -464,6 +464,7 @@ class QkNormRopeKvCacheFusionPass(VllmPatternMatcherPass):
                     layer.head_size,
                 )
                 continue
+            layer.impl.set_interleaved_v_cache()
             for epsilon in [1e-5, 1e-6]:
                 for neox in [True, False]:
                     for quant_q in [False, True]:
@@ -473,6 +474,25 @@ class QkNormRopeKvCacheFusionPass(VllmPatternMatcherPass):
                             is_neox=neox,
                             quant_query=quant_q,
                         ).register(self.patterns)
+
+        # Backends that set _use_interleaved_v_cache (ROCM_ATTN) write the
+        # interleaved V layout only on the fused path; an unfused compile range
+        # would write the standard layout the decode kernel can't read. Raise the
+        # max-token bound to the scheduler's max batch so every range is fused.
+        max_batched = config.scheduler_config.max_num_batched_tokens
+        needs_full_coverage = any(
+            getattr(layer.impl, "_use_interleaved_v_cache", False)
+            for _, layer in attn_layers.items()
+            if layer.impl.fused_qk_norm_rope_kvcache_supported()
+        )
+        if needs_full_coverage and self.max_token_num < max_batched:
+            logger.info(
+                "Raising rope_kvcache_fusion_max_token_num from %d to %d "
+                "for interleaved V-cache coverage.",
+                self.max_token_num,
+                max_batched,
+            )
+            self.max_token_num = max_batched
 
         self.dump_patterns(config, self.patterns)
 
