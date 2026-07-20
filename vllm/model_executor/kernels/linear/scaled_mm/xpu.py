@@ -224,8 +224,8 @@ class XPUFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
             w = layer.weight.data
             N_total, K = w.shape
             N_per_group = N_total // batch
-            layer.bmm_weight = (
-                w.reshape(batch, N_per_group, K).permute(0, 2, 1)
+            layer.bmm_weight = w.reshape(batch, N_per_group, K).permute(
+                0, 2, 1
             )  # [G, K, N]
 
     def apply_block_scaled_mm(
