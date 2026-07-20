@@ -120,6 +120,7 @@ tokio-stream = "0.1"
 tokio-util = { version = "0.7.18", features = ["rt"] }
 tonic = "0.14.5"
 tonic-build = "0.14.5"
+tonic-health = "0.14.5"
 tonic-prost = "0.14.5"
 tonic-prost-build = "0.14.5"
 tool-parser = "1.2.0"

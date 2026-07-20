@@ -36,9 +36,12 @@ use hyper_util::rt::{TokioIo, TokioTimer};
 use hyper_util::server::graceful::GracefulShutdown;
 use hyper_util::service::TowerToHyperService;
 use tokio::net::TcpListener;
+use tokio::sync::watch;
 use tokio::time::{Instant, sleep_until};
 use tokio_util::sync::CancellationToken;
 use tonic::transport::Server as TonicServer;
+use tonic_health::ServingStatus;
+use tonic_health::server::{HealthReporter, health_reporter};
 use tower::ServiceExt as _;
 use tracing::{info, trace, warn};
 use vllm_chat::{ChatLlm, LoadModelBackendsOptions, load_model_backends};
@@ -58,6 +61,36 @@ const GRPC_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(7200);
 /// How long the server waits for a keepalive PING reply before dropping the gRPC
 /// connection. 20s matches the gRPC-core default.
 const GRPC_KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(20);
+
+async fn wait_until_engine_unhealthy(mut engine_health: watch::Receiver<bool>) {
+    loop {
+        if !*engine_health.borrow_and_update() {
+            return;
+        }
+        if engine_health.changed().await.is_err() {
+            return;
+        }
+    }
+}
+
+async fn monitor_grpc_health(
+    health_reporter: HealthReporter,
+    engine_health: watch::Receiver<bool>,
+    shutdown: CancellationToken,
+) {
+    tokio::select! {
+        _ = wait_until_engine_unhealthy(engine_health) => {}
+        _ = shutdown.cancelled() => {}
+    }
+
+    health_reporter
+        .set_not_serving::<grpc::GenerateServer<grpc::GenerateServiceImpl>>()
+        .await;
+    health_reporter
+        .set_not_serving::<grpc::ControlServer<grpc::ControlServiceImpl>>()
+        .await;
+    health_reporter.set_service_status("", ServingStatus::NotServing).await;
+}
 
 /// Resolve the public model names accepted by the frontend.
 fn effective_served_model_names(model: &str, served_model_name: &[String]) -> Vec<String> {
@@ -203,14 +236,26 @@ where
             .map(tls::build_grpc_server_config)
             .transpose()
             .context("invalid gRPC TLS configuration")?;
-        let svc = grpc::GenerateServer::new(grpc::GenerateServiceImpl::new(state.clone()));
+        let (health_reporter, health_service) = health_reporter();
+        let engine_health = state.engine_core_client().subscribe_health();
+        health_reporter
+            .set_serving::<grpc::GenerateServer<grpc::GenerateServiceImpl>>()
+            .await;
+        health_reporter
+            .set_serving::<grpc::ControlServer<grpc::ControlServiceImpl>>()
+            .await;
+        let generate_service =
+            grpc::GenerateServer::new(grpc::GenerateServiceImpl::new(state.clone()));
+        let control_service = grpc::ControlServer::new(grpc::ControlServiceImpl::new());
         let svc = TonicServer::builder()
             .http2_keepalive_interval(Some(GRPC_KEEPALIVE_INTERVAL))
             .http2_keepalive_timeout(Some(GRPC_KEEPALIVE_TIMEOUT))
             .layer(middleware::request_runtime_layer(state.clone()))
-            .add_service(svc);
+            .add_service(health_service)
+            .add_service(generate_service)
+            .add_service(control_service);
         info!(%addr, tls = grpc_tls.is_some(), "starting gRPC server");
-        Some((grpc_listener, svc, grpc_tls))
+        Some((grpc_listener, svc, grpc_tls, health_reporter, engine_health))
     } else {
         None
     };
@@ -229,6 +274,14 @@ where
     let server_shutdown = shutdown.child_token();
     let force_shutdown = CancellationToken::new();
     let shutdown_deadline = Arc::new(OnceLock::new());
+
+    let (grpc_server_setup, grpc_health_setup) = match grpc_setup {
+        Some((listener, service, tls, reporter, engine_health)) => (
+            Some((listener, service, tls)),
+            Some((reporter, engine_health)),
+        ),
+        None => (None, None),
+    };
 
     // Spawn a task to trigger `force_shutdown` after shutdown deadline elapses.
     tokio::spawn({
@@ -294,7 +347,7 @@ where
         let server_shutdown = server_shutdown.clone();
         let force_shutdown = force_shutdown.clone();
         async move {
-            let Some((grpc_listener, svc, grpc_tls)) = grpc_setup else {
+            let Some((grpc_listener, svc, grpc_tls)) = grpc_server_setup else {
                 // No gRPC configured: just wait for shutdown so we do not race the
                 // join! by resolving early and tripping the cancellation token.
                 shutdown.cancelled().await;
@@ -321,7 +374,17 @@ where
         }
     };
 
-    let (http_res, grpc_res) = tokio::join!(http_fut, grpc_fut);
+    let grpc_health_fut = {
+        let shutdown = server_shutdown.child_token();
+        async move {
+            let Some((health_reporter, engine_health)) = grpc_health_setup else {
+                return;
+            };
+            monitor_grpc_health(health_reporter, engine_health, shutdown).await;
+        }
+    };
+
+    let (http_res, grpc_res, ()) = tokio::join!(http_fut, grpc_fut, grpc_health_fut);
     http_res.and(grpc_res)?;
 
     let shutdown_deadline = shutdown_deadline

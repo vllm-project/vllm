@@ -16,6 +16,10 @@ use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::TcpStream;
 use tokio_openssl::SslStream;
 use tonic::transport::{Channel, Endpoint, Server as TonicServer, Uri};
+use tonic_health::pb::HealthCheckRequest;
+use tonic_health::pb::health_check_response::ServingStatus as HealthServingStatus;
+use tonic_health::pb::health_client::HealthClient;
+use tonic_health::server::health_reporter;
 use tower::service_fn;
 use vllm_chat::{
     ChatBackend, ChatLlm, ChatRenderer, ChatRequest, ChatTextBackend, DefaultChatOutputProcessor,
@@ -26,7 +30,9 @@ use vllm_engine_core_client::protocol::output::{
 };
 use vllm_engine_core_client::protocol::request::EngineCoreRequest;
 use vllm_engine_core_client::test_utils::{IpcNamespace, spawn_mock_engine_task};
-use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig, EngineId};
+use vllm_engine_core_client::{
+    ENGINE_CORE_DEAD_SENTINEL, EngineCoreClient, EngineCoreClientConfig, EngineId,
+};
 use vllm_llm::Llm;
 use vllm_text::tokenizer::DynTokenizer;
 use vllm_text::{Prompt, TextBackend};
@@ -34,8 +40,9 @@ use vllm_tokenizer::test_utils::TestTokenizer;
 use zeromq::prelude::{SocketRecv, SocketSend};
 use zeromq::{DealerSocket, PushSocket, ZmqMessage};
 
+use super::pb::control_client::ControlClient;
 use super::pb::generate_client::GenerateClient;
-use super::{GenerateServer, GenerateServiceImpl, pb};
+use super::{ControlServer, ControlServiceImpl, GenerateServer, GenerateServiceImpl, pb};
 use crate::listener::{Listener, MaybeTlsListener};
 use crate::state::AppState;
 use crate::tls;
@@ -200,7 +207,37 @@ impl ChatRenderer for FakeTextBackend {
 async fn setup_grpc_service(
     engine_id: impl Into<EngineId>,
     output_specs: Vec<(Vec<u32>, Option<EngineCoreFinishReason>)>,
-) -> (GenerateServer<GenerateServiceImpl>, MockEngineTask) {
+) -> (
+    GenerateServer<GenerateServiceImpl>,
+    tokio::sync::watch::Receiver<bool>,
+    MockEngineTask,
+) {
+    setup_grpc_service_with_engine(engine_id, move |dealer, push| {
+        boxed_test_future(async move {
+            let add = recv_engine_message(dealer).await;
+            let request: EngineCoreRequest =
+                rmp_serde::from_slice(&add[1]).expect("decode request");
+            send_outputs(
+                push,
+                engine_outputs_for_request(&request.request_id, output_specs),
+            )
+            .await;
+        })
+    })
+    .await
+}
+
+async fn setup_grpc_service_with_engine<F>(
+    engine_id: impl Into<EngineId>,
+    run: F,
+) -> (
+    GenerateServer<GenerateServiceImpl>,
+    tokio::sync::watch::Receiver<bool>,
+    MockEngineTask,
+)
+where
+    F: for<'a> FnOnce(&'a mut DealerSocket, &'a mut PushSocket) -> TestFuture<'a> + Send + 'static,
+{
     let ipc = IpcNamespace::new().expect("create ipc namespace");
     let handshake_address = ipc.handshake_endpoint();
     let engine_id = engine_id.into();
@@ -208,18 +245,7 @@ async fn setup_grpc_service(
     let engine_task = MockEngineTask::new(spawn_mock_engine_task(
         handshake_address.clone(),
         engine_id.clone(),
-        move |dealer, push| {
-            boxed_test_future(async move {
-                let add = recv_engine_message(dealer).await;
-                let request: EngineCoreRequest =
-                    rmp_serde::from_slice(&add[1]).expect("decode request");
-                send_outputs(
-                    push,
-                    engine_outputs_for_request(&request.request_id, output_specs),
-                )
-                .await;
-            })
-        },
+        run,
     ));
 
     let client = EngineCoreClient::connect(
@@ -232,6 +258,7 @@ async fn setup_grpc_service(
     )
     .await
     .expect("connect client");
+    let engine_health = client.subscribe_health();
 
     let chat = ChatLlm::from_shared_backend(
         test_llm(client),
@@ -240,6 +267,7 @@ async fn setup_grpc_service(
     let state = Arc::new(AppState::new(vec!["test-model".to_string()], chat));
     (
         GenerateServer::new(GenerateServiceImpl::new(state)),
+        engine_health,
         engine_task,
     )
 }
@@ -251,28 +279,66 @@ async fn grpc_test_server(
     output_specs: Vec<(Vec<u32>, Option<EngineCoreFinishReason>)>,
 ) -> (
     GenerateClient<tonic::transport::Channel>,
+    ControlClient<tonic::transport::Channel>,
+    HealthClient<tonic::transport::Channel>,
     tokio::task::JoinHandle<()>,
     MockEngineTask,
 ) {
-    let (svc, engine_task) = setup_grpc_service(engine_id, output_specs).await;
+    let (svc, engine_health, engine_task) = setup_grpc_service(engine_id, output_specs).await;
+    start_grpc_test_server(svc, engine_health, engine_task).await
+}
+
+async fn start_grpc_test_server(
+    generate_service: GenerateServer<GenerateServiceImpl>,
+    engine_health: tokio::sync::watch::Receiver<bool>,
+    engine_task: MockEngineTask,
+) -> (
+    GenerateClient<tonic::transport::Channel>,
+    ControlClient<tonic::transport::Channel>,
+    HealthClient<tonic::transport::Channel>,
+    tokio::task::JoinHandle<()>,
+    MockEngineTask,
+) {
+    let control_service = ControlServer::new(ControlServiceImpl::new());
+    let (health_reporter, health_service) = health_reporter();
+    health_reporter.set_serving::<GenerateServer<GenerateServiceImpl>>().await;
+    health_reporter.set_serving::<ControlServer<ControlServiceImpl>>().await;
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind grpc listener");
     let addr = listener.local_addr().expect("local addr");
 
     let server_task = tokio::spawn(async move {
         let incoming = MaybeTlsListener::plain(Listener::Tcp(listener));
-        TonicServer::builder()
-            .add_service(svc)
-            .serve_with_incoming(incoming)
-            .await
-            .expect("grpc server");
+        let server = TonicServer::builder()
+            .add_service(health_service)
+            .add_service(generate_service)
+            .add_service(control_service)
+            .serve_with_incoming(incoming);
+        let health_monitor = crate::monitor_grpc_health(
+            health_reporter,
+            engine_health,
+            tokio_util::sync::CancellationToken::new(),
+        );
+        let (server_result, ()) = tokio::join!(server, health_monitor);
+        server_result.expect("grpc server");
     });
 
-    let grpc_client = GenerateClient::connect(format!("http://{addr}"))
+    let channel = Endpoint::from_shared(format!("http://{addr}"))
+        .expect("grpc endpoint")
+        .connect()
         .await
-        .expect("connect grpc client");
+        .expect("connect grpc channel");
+    let grpc_client = GenerateClient::new(channel.clone());
+    let control_client = ControlClient::new(channel.clone());
+    let health_client = HealthClient::new(channel);
 
-    (grpc_client, server_task, engine_task)
+    (
+        grpc_client,
+        control_client,
+        health_client,
+        server_task,
+        engine_task,
+    )
 }
 
 /// Spin up a TLS gRPC server (server cert from `certs`, `cert_reqs` mTLS mode).
@@ -283,7 +349,7 @@ async fn grpc_tls_test_server(
     certs: &TestCerts,
     cert_reqs: i32,
 ) -> (String, tokio::task::JoinHandle<()>, MockEngineTask) {
-    let (svc, engine_task) = setup_grpc_service(engine_id, output_specs).await;
+    let (svc, _engine_health, engine_task) = setup_grpc_service(engine_id, output_specs).await;
     let context = tls::build_grpc_server_config(&server_tls(certs, cert_reqs))
         .expect("build grpc tls config");
 
@@ -373,7 +439,8 @@ async fn grpc_server_with_keepalive(
     engine_id: impl Into<EngineId>,
     keepalive: Option<Duration>,
 ) -> (String, tokio::task::JoinHandle<()>, MockEngineTask) {
-    let (svc, engine_task) = setup_grpc_service(engine_id, default_stream_output_specs()).await;
+    let (svc, _engine_health, engine_task) =
+        setup_grpc_service(engine_id, default_stream_output_specs()).await;
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind grpc listener");
     let addr = listener.local_addr().expect("local addr").to_string();
@@ -434,7 +501,7 @@ async fn h2_unresponsive_peer_closed_within(addr: &str, wait: Duration) -> bool 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn unary_generate_returns_collected_text() {
-    let (mut client, server_task, engine_task) =
+    let (mut client, _control_client, _health_client, server_task, engine_task) =
         grpc_test_server(b"engine-grpc-unary", default_stream_output_specs()).await;
 
     let response = client
@@ -477,7 +544,7 @@ async fn unary_generate_returns_collected_text() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn unary_generate_with_token_ids_prompt() {
-    let (mut client, server_task, engine_task) =
+    let (mut client, _control_client, _health_client, server_task, engine_task) =
         grpc_test_server(b"engine-grpc-token-ids", default_stream_output_specs()).await;
 
     let response = client
@@ -511,7 +578,7 @@ async fn unary_generate_with_token_ids_prompt() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn unary_generate_returns_token_ids_when_requested() {
-    let (mut client, server_task, engine_task) =
+    let (mut client, _control_client, _health_client, server_task, engine_task) =
         grpc_test_server(b"engine-grpc-tok-resp", default_stream_output_specs()).await;
 
     let response = client
@@ -551,7 +618,7 @@ async fn unary_generate_returns_token_ids_when_requested() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn unary_generate_missing_prompt_returns_invalid_argument() {
-    let (mut client, server_task, _engine_task) =
+    let (mut client, _control_client, _health_client, server_task, _engine_task) =
         grpc_test_server(b"engine-grpc-no-prompt", default_stream_output_specs()).await;
 
     let status = client
@@ -573,7 +640,7 @@ async fn unary_generate_missing_prompt_returns_invalid_argument() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn unary_generate_min_tokens_above_max_tokens_returns_invalid_argument() {
-    let (mut client, server_task, _engine_task) =
+    let (mut client, _control_client, _health_client, server_task, _engine_task) =
         grpc_test_server(b"engine-grpc-min-above-max", default_stream_output_specs()).await;
 
     let status = client
@@ -601,7 +668,7 @@ async fn unary_generate_min_tokens_above_max_tokens_returns_invalid_argument() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn streaming_generate_yields_incremental_responses() {
-    let (mut client, server_task, engine_task) =
+    let (mut client, _control_client, _health_client, server_task, engine_task) =
         grpc_test_server(b"engine-grpc-stream", default_stream_output_specs()).await;
 
     let stream = client
@@ -665,11 +732,12 @@ async fn streaming_generate_yields_incremental_responses() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn streaming_generate_missing_prompt_returns_invalid_argument() {
-    let (mut client, server_task, _engine_task) = grpc_test_server(
-        b"engine-grpc-stream-no-prompt",
-        default_stream_output_specs(),
-    )
-    .await;
+    let (mut client, _control_client, _health_client, server_task, _engine_task) =
+        grpc_test_server(
+            b"engine-grpc-stream-no-prompt",
+            default_stream_output_specs(),
+        )
+        .await;
 
     let status = client
         .generate_stream(pb::GenerateRequest {
@@ -689,11 +757,12 @@ async fn streaming_generate_missing_prompt_returns_invalid_argument() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn streaming_generate_min_tokens_above_max_tokens_returns_invalid_argument() {
-    let (mut client, server_task, _engine_task) = grpc_test_server(
-        b"engine-grpc-stream-min-above-max",
-        default_stream_output_specs(),
-    )
-    .await;
+    let (mut client, _control_client, _health_client, server_task, _engine_task) =
+        grpc_test_server(
+            b"engine-grpc-stream-min-above-max",
+            default_stream_output_specs(),
+        )
+        .await;
 
     let status = client
         .generate_stream(pb::GenerateRequest {
@@ -720,7 +789,7 @@ async fn streaming_generate_min_tokens_above_max_tokens_returns_invalid_argument
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn unary_generate_with_sampling_params() {
-    let (mut client, server_task, engine_task) =
+    let (mut client, _control_client, _health_client, server_task, engine_task) =
         grpc_test_server(b"engine-grpc-sampling", default_stream_output_specs()).await;
 
     let response = client
@@ -756,7 +825,7 @@ async fn unary_generate_with_sampling_params() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn unary_generate_rejects_wrong_model() {
-    let (mut client, server_task, _engine_task) =
+    let (mut client, _control_client, _health_client, server_task, _engine_task) =
         grpc_test_server(b"engine-grpc-wrong-model", default_stream_output_specs()).await;
 
     let status = client
@@ -782,11 +851,12 @@ async fn unary_generate_rejects_wrong_model() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn streaming_generate_rejects_wrong_model() {
-    let (mut client, server_task, _engine_task) = grpc_test_server(
-        b"engine-grpc-stream-wrong-model",
-        default_stream_output_specs(),
-    )
-    .await;
+    let (mut client, _control_client, _health_client, server_task, _engine_task) =
+        grpc_test_server(
+            b"engine-grpc-stream-wrong-model",
+            default_stream_output_specs(),
+        )
+        .await;
 
     let status = client
         .generate_stream(pb::GenerateRequest {
@@ -811,7 +881,7 @@ async fn streaming_generate_rejects_wrong_model() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn unary_generate_accepts_empty_model() {
-    let (mut client, server_task, engine_task) =
+    let (mut client, _control_client, _health_client, server_task, engine_task) =
         grpc_test_server(b"engine-grpc-empty-model", default_stream_output_specs()).await;
 
     // Empty `model` (proto3 default) is treated as "unset" and should be accepted.
@@ -840,7 +910,7 @@ async fn unary_generate_accepts_empty_model() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn unary_generate_output_text_defaults_to_true() {
-    let (mut client, server_task, engine_task) =
+    let (mut client, _control_client, _health_client, server_task, engine_task) =
         grpc_test_server(b"engine-grpc-default-text", default_stream_output_specs()).await;
 
     // No response options at all — output_text should default to true.
@@ -1034,4 +1104,115 @@ async fn grpc_without_keepalive_keeps_unresponsive_connection_open() {
     );
 
     server_task.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn canonical_health_and_unimplemented_extensions_share_listener() {
+    let (_generate_client, mut client, mut health_client, server_task, _engine_task) =
+        grpc_test_server(b"engine-grpc-stubs", default_stream_output_specs()).await;
+
+    for service in ["vllm.Generate", "vllm.Control", ""] {
+        let health = health_client
+            .check(HealthCheckRequest {
+                service: service.to_string(),
+            })
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(health.status, HealthServingStatus::Serving as i32);
+    }
+
+    assert_eq!(
+        client.get_server_info(pb::GetServerInfoRequest {}).await.unwrap_err().code(),
+        tonic::Code::Unimplemented
+    );
+    assert_eq!(
+        client.get_model_info(pb::GetModelInfoRequest {}).await.unwrap_err().code(),
+        tonic::Code::Unimplemented
+    );
+    assert_eq!(
+        client.abort(pb::AbortRequest::default()).await.unwrap_err().code(),
+        tonic::Code::Unimplemented
+    );
+    assert_eq!(
+        client.drain(pb::DrainRequest {}).await.unwrap_err().code(),
+        tonic::Code::Unimplemented
+    );
+    assert_eq!(
+        client.load_lora(pb::LoadLoraRequest::default()).await.unwrap_err().code(),
+        tonic::Code::Unimplemented
+    );
+    assert_eq!(
+        client.unload_lora(pb::UnloadLoraRequest::default()).await.unwrap_err().code(),
+        tonic::Code::Unimplemented
+    );
+    assert_eq!(
+        client.list_loras(pb::ListLorasRequest {}).await.unwrap_err().code(),
+        tonic::Code::Unimplemented
+    );
+    assert_eq!(
+        client
+            .get_kv_event_sources(pb::GetKvEventSourcesRequest {})
+            .await
+            .unwrap_err()
+            .code(),
+        tonic::Code::Unimplemented
+    );
+
+    server_task.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn grpc_health_transitions_to_not_serving_when_engine_fails() {
+    let (fail_tx, fail_rx) = tokio::sync::oneshot::channel();
+    let (generate_service, engine_health, engine_task) =
+        setup_grpc_service_with_engine(b"engine-grpc-health-failure", move |_dealer, push| {
+            boxed_test_future(async move {
+                fail_rx.await.expect("trigger engine failure");
+                push.send(ZmqMessage::from(ENGINE_CORE_DEAD_SENTINEL.to_vec()))
+                    .await
+                    .expect("send engine-dead sentinel");
+            })
+        })
+        .await;
+    let (_generate_client, _control_client, mut health_client, server_task, engine_task) =
+        start_grpc_test_server(generate_service, engine_health, engine_task).await;
+
+    let mut health_streams = Vec::new();
+    for service in ["vllm.Generate", "vllm.Control", ""] {
+        let mut stream = health_client
+            .watch(HealthCheckRequest {
+                service: service.to_string(),
+            })
+            .await
+            .expect("start health watch")
+            .into_inner();
+        let initial = stream
+            .message()
+            .await
+            .expect("read initial health")
+            .expect("initial health response");
+        assert_eq!(initial.status, HealthServingStatus::Serving as i32);
+        health_streams.push((service, stream));
+    }
+
+    fail_tx.send(()).expect("trigger engine failure");
+
+    for (service, mut stream) in health_streams {
+        let update = tokio::time::timeout(Duration::from_secs(2), stream.message())
+            .await
+            .expect("health update timeout")
+            .expect("read health update")
+            .expect("health update response");
+        assert_eq!(
+            update.status,
+            HealthServingStatus::NotServing as i32,
+            "unexpected health status for {service}"
+        );
+    }
+
+    server_task.abort();
+    engine_task.await.expect("mock engine task");
 }

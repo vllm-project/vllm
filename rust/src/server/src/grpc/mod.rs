@@ -24,6 +24,7 @@ pub mod pb {
     tonic::include_proto!("vllm");
 }
 
+pub use pb::control_server::ControlServer;
 pub use pb::generate_server::GenerateServer;
 
 #[cfg(test)]
@@ -37,6 +38,16 @@ pub struct GenerateServiceImpl {
 impl GenerateServiceImpl {
     pub fn new(state: Arc<AppState>) -> Self {
         Self { state }
+    }
+}
+
+/// Unimplemented control-plane service registered on the existing gRPC listener.
+#[derive(Default)]
+pub struct ControlServiceImpl;
+
+impl ControlServiceImpl {
+    pub fn new() -> Self {
+        Self
     }
 }
 
@@ -154,6 +165,65 @@ impl pb::generate_server::Generate for GenerateServiceImpl {
 
         let response_stream = ReceiverStream::new(rx);
         Ok(Response::new(Box::pin(response_stream)))
+    }
+}
+
+#[tonic::async_trait]
+impl pb::control_server::Control for ControlServiceImpl {
+    async fn get_server_info(
+        &self,
+        _request: Request<pb::GetServerInfoRequest>,
+    ) -> Result<Response<pb::ServerInfo>, Status> {
+        Err(Status::unimplemented("GetServerInfo"))
+    }
+
+    async fn get_model_info(
+        &self,
+        _request: Request<pb::GetModelInfoRequest>,
+    ) -> Result<Response<pb::ModelInfo>, Status> {
+        Err(Status::unimplemented("GetModelInfo"))
+    }
+
+    async fn abort(
+        &self,
+        _request: Request<pb::AbortRequest>,
+    ) -> Result<Response<pb::AbortResponse>, Status> {
+        Err(Status::unimplemented("Abort"))
+    }
+
+    async fn drain(
+        &self,
+        _request: Request<pb::DrainRequest>,
+    ) -> Result<Response<pb::DrainResponse>, Status> {
+        Err(Status::unimplemented("Drain"))
+    }
+
+    async fn load_lora(
+        &self,
+        _request: Request<pb::LoadLoraRequest>,
+    ) -> Result<Response<pb::LoadLoraResponse>, Status> {
+        Err(Status::unimplemented("LoadLora"))
+    }
+
+    async fn unload_lora(
+        &self,
+        _request: Request<pb::UnloadLoraRequest>,
+    ) -> Result<Response<pb::UnloadLoraResponse>, Status> {
+        Err(Status::unimplemented("UnloadLora"))
+    }
+
+    async fn list_loras(
+        &self,
+        _request: Request<pb::ListLorasRequest>,
+    ) -> Result<Response<pb::ListLorasResponse>, Status> {
+        Err(Status::unimplemented("ListLoras"))
+    }
+
+    async fn get_kv_event_sources(
+        &self,
+        _request: Request<pb::GetKvEventSourcesRequest>,
+    ) -> Result<Response<pb::GetKvEventSourcesResponse>, Status> {
+        Err(Status::unimplemented("GetKvEventSources"))
     }
 }
 
