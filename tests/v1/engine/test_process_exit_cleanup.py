@@ -334,6 +334,9 @@ def test_v1_model_runner_shutdown_forwards_gc_lifecycle(monkeypatch, collect_gc:
     monkeypatch.setattr(
         model_runner_v1_module.current_platform, "is_rocm", lambda: False
     )
+    monkeypatch.setattr(
+        model_runner_v1_module.current_platform, "is_xpu", lambda: False
+    )
     runner, layer = _v1_model_runner()
 
     runner.shutdown(collect_gc=collect_gc)
@@ -386,7 +389,9 @@ def test_distributed_cleanup_gc_lifecycle(monkeypatch, collect_gc: bool):
     mock_platform.is_cpu.return_value = False
     monkeypatch.setattr(platforms, "current_platform", mock_platform)
     monkeypatch.setattr(parallel_state.torch.accelerator, "empty_cache", empty_cache)
-    monkeypatch.setattr(parallel_state.torch._C, "_host_emptyCache", host_empty_cache)
+    monkeypatch.setattr(
+        parallel_state.torch._C, "_host_emptyCache", host_empty_cache, raising=False
+    )
 
     parallel_state.cleanup_dist_env_and_memory(collect_gc=collect_gc)
 
