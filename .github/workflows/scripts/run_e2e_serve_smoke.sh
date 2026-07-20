@@ -12,6 +12,8 @@ PROMPT=${PROMPT:-The capital of France is}
 SERVER_LOG=${SERVER_LOG:-/tmp/vllm-e2e-smoke.log}
 RUNTIME_READY_LOG=${RUNTIME_READY_LOG:-/tmp/vllm-e2e-smoke-runtime-ready.log}
 PYTHON_BIN=${PYTHON_BIN:-python}
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+HTTP_REQUEST_SCRIPT=${E2E_HTTP_REQUEST_SCRIPT:-$SCRIPT_DIR/e2e_http_request.py}
 VLLM_ASCEND_HUST_REPO=${VLLM_ASCEND_HUST_REPO:-${GITHUB_WORKSPACE:-$PWD}/vllm-ascend-hust}
 SUDO_AUTH_EXIT_CODE=${SUDO_AUTH_EXIT_CODE:-76}
 ASCEND_E2E_USE_SUDO=${ASCEND_E2E_USE_SUDO:-0}
@@ -19,7 +21,7 @@ DEFAULT_SYSTEM_ASCEND_ROOT_HELPER=${DEFAULT_SYSTEM_ASCEND_ROOT_HELPER:-/usr/loca
 REPO_ASCEND_ROOT_HELPER=${REPO_ASCEND_ROOT_HELPER:-$VLLM_ASCEND_HUST_REPO/.github/workflows/scripts/run_ascend_benchmark_root_helper.sh}
 REPO_ASCEND_ROOT_HELPER_INSTALL_SCRIPT=${REPO_ASCEND_ROOT_HELPER_INSTALL_SCRIPT:-$VLLM_ASCEND_HUST_REPO/scripts/install_ascend_benchmark_root_helper.sh}
 if [[ -n "${ASCEND_E2E_ROOT_HELPER:-}" ]]; then
-  ASCEND_E2E_ROOT_HELPER=${ASCEND_E2E_ROOT_HELPER}
+  : # Keep the explicitly configured helper.
 elif [[ -x "$DEFAULT_SYSTEM_ASCEND_ROOT_HELPER" ]]; then
   ASCEND_E2E_ROOT_HELPER=$DEFAULT_SYSTEM_ASCEND_ROOT_HELPER
 else
@@ -115,7 +117,7 @@ export_sudo_preserved_env_vars() {
 
   for var_name in "${SUDO_PRESERVE_ENV_VARS[@]}"; do
     if [[ -n "${!var_name+x}" ]]; then
-      export "$var_name"
+      export "${var_name?}"
     fi
   done
 }
@@ -417,29 +419,30 @@ print_server_log_tail() {
   fi
 }
 
-curl_with_server_log() {
+http_with_server_log() {
   local description=$1
   shift
   local max_attempts=${E2E_HTTP_REQUEST_ATTEMPTS:-5}
   local delay_seconds=${E2E_HTTP_REQUEST_DELAY_SECONDS:-2}
+  local timeout_seconds=${E2E_HTTP_REQUEST_TIMEOUT_SECONDS:-30}
   local attempt=1
   local rc=0
 
   while [[ "$attempt" -le "$max_attempts" ]]; do
-    if curl -fsS "$@"; then
+    if "$PYTHON_BIN" "$HTTP_REQUEST_SCRIPT" --timeout "$timeout_seconds" "$@"; then
       return 0
     else
       rc=$?
     fi
 
     if [[ -n "$server_pid" ]] && ! kill -0 "$server_pid" 2>/dev/null; then
-      echo "$description failed because the vLLM server exited (curl exit $rc)" >&2
+      echo "$description failed because the vLLM server exited (HTTP probe exit $rc)" >&2
       print_server_log_tail
       return "$rc"
     fi
 
     if [[ "$attempt" -eq "$max_attempts" ]]; then
-      echo "$description failed after ${max_attempts} attempts (curl exit $rc)" >&2
+      echo "$description failed after ${max_attempts} attempts (HTTP probe exit $rc)" >&2
       print_server_log_tail
       return "$rc"
     fi
@@ -501,7 +504,9 @@ fi
 start_server
 
 for attempt in $(seq 1 120); do
-  if curl -fsS "http://$HOST:$PORT/v1/models" >/dev/null; then
+  if "$PYTHON_BIN" "$HTTP_REQUEST_SCRIPT" \
+    --timeout "${E2E_HTTP_REQUEST_TIMEOUT_SECONDS:-30}" \
+    "http://$HOST:$PORT/v1/models" >/dev/null 2>&1; then
     break
   fi
 
@@ -520,15 +525,16 @@ for attempt in $(seq 1 120); do
   sleep 2
 done
 
-curl_with_server_log \
+http_with_server_log \
   "vLLM models endpoint readiness confirmation" \
   "http://$HOST:$PORT/v1/models" >/dev/null
 
 completion_response=$(mktemp)
-curl_with_server_log "vLLM completions request" \
+http_with_server_log "vLLM completions request" \
+  --method POST \
+  --header "Content-Type: application/json" \
+  --data "{\"model\": \"$MODEL_NAME\", \"prompt\": \"$PROMPT\", \"max_tokens\": $MAX_TOKENS, \"temperature\": 0}" \
   "http://$HOST:$PORT/v1/completions" \
-  -H "Content-Type: application/json" \
-  -d "{\"model\": \"$MODEL_NAME\", \"prompt\": \"$PROMPT\", \"max_tokens\": $MAX_TOKENS, \"temperature\": 0}" \
   > "$completion_response"
 
 "$PYTHON_BIN" - "$completion_response" "$MODEL_NAME" <<'PY'
