@@ -18,7 +18,7 @@ coordinator's ``_dispatch_message`` can reuse its existing
 from __future__ import annotations
 
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, NamedTuple
 
@@ -441,6 +441,45 @@ class ServerRole:
                 parent.on_request_finished(ctx)
             self._finished_lookup_ctxs = []
 
+    def _poll_lookup_hashes(
+        self,
+        lookup: _LookupBlocks,
+        hashes: Iterable[OffloadKey],
+        parent: ParentManager,
+    ) -> list[OffloadKey]:
+        """Poll ``hashes`` against the tiering manager and pin any HITs.
+
+        For each hash not already definitively resolved, query
+        ``parent.lookup`` and record the outcome on ``lookup``: HIT / MISS
+        land in ``resolved`` and clear ``pending``; HIT_PENDING / RETRY park
+        in ``pending`` for a later serve. Newly-HIT hashes are pinned in one
+        batch via :meth:`_pin_and_register_hits` and also returned (for
+        caller logging).
+
+        Shared by the first-sighting pass (:meth:`_process_inbound_lookup`)
+        and the re-poll pass (:meth:`_resolve_pending_lookups`); callers pass
+        a de-duplicated ``hashes`` collection.
+        """
+        new_hits: list[OffloadKey] = []
+        for h in hashes:
+            if h in lookup.resolved:
+                continue
+            result = parent.lookup(h, lookup.ctx)
+            if result is LookupResult.HIT:
+                new_hits.append(h)
+                lookup.resolved[h] = True
+                lookup.pending.discard(h)
+            elif result is LookupResult.MISS:
+                lookup.resolved[h] = False
+                lookup.pending.discard(h)
+            else:
+                lookup.pending.add(h)
+        if new_hits:
+            self._pin_and_register_hits(
+                lookup.kv_request_id, new_hits, lookup.ctx, parent
+            )
+        return new_hits
+
     def _process_inbound_lookup(
         self,
         kv_request_id: str,
@@ -479,22 +518,11 @@ class ServerRole:
         # hash has settled.
         parent.on_new_request(ctx)
 
-        hit_hashes: list[OffloadKey] = []
-        for h in lookup.hashes:
-            if h in lookup.resolved or h in lookup.pending:
-                # Duplicate hash within the LookupMsg — its state has
-                # already been established on the first sighting.
-                continue
-            result = parent.lookup(h, ctx)
-            if result is LookupResult.HIT:
-                hit_hashes.append(h)
-                lookup.resolved[h] = True
-            elif result is LookupResult.MISS:
-                lookup.resolved[h] = False
-            else:
-                # HIT_PENDING / RETRY — defer until the next serve gives
-                # the underlying primary write or promotion time to settle.
-                lookup.pending.add(h)
+        # dict.fromkeys de-duplicates hashes within the LookupMsg while
+        # preserving wire order — each unique hash is polled once.
+        hit_hashes = self._poll_lookup_hashes(
+            lookup, dict.fromkeys(lookup.hashes), parent
+        )
 
         logger.debug(
             "P2P LOOKUP server %s: RESOLVED kv_request_id=%s hits=%d misses=%d "
@@ -505,9 +533,6 @@ class ServerRole:
             sum(1 for v in lookup.resolved.values() if not v),
             len(lookup.pending),
         )
-
-        if hit_hashes:
-            self._pin_and_register_hits(kv_request_id, hit_hashes, ctx, parent)
 
         if lookup.pending:
             self._state(kv_request_id).lookups[lookup_id] = lookup
@@ -559,28 +584,12 @@ class ServerRole:
         now = time.monotonic()
         finished_lookups: list[int] = []
         for lookup_id, lookup in st.lookups.items():
-            new_hits: list[OffloadKey] = []
-            for h in list(lookup.pending):
-                result = parent.lookup(h, lookup.ctx)
-                if result is LookupResult.HIT:
-                    new_hits.append(h)
-                    lookup.resolved[h] = True
-                    lookup.pending.discard(h)
-                elif result is LookupResult.MISS:
-                    lookup.resolved[h] = False
-                    lookup.pending.discard(h)
-                # else still HIT_PENDING / RETRY: leave for next serve,
-                # unless the deadline forces MISS below.
+            self._poll_lookup_hashes(lookup, list(lookup.pending), parent)
 
             if lookup.pending and now >= lookup.deadline:
                 for h in lookup.pending:
                     lookup.resolved[h] = False
                 lookup.pending.clear()
-
-            if new_hits:
-                self._pin_and_register_hits(
-                    lookup.kv_request_id, new_hits, lookup.ctx, parent
-                )
 
             if not lookup.pending:
                 finished_lookups.append(lookup_id)
