@@ -48,7 +48,9 @@ def _compute_num_kv_splits(max_seq_len: int, sm_count: int) -> int:
 
 
 class TritonMLAMetadataBuilder(MLACommonMetadataBuilder[MLACommonMetadata]):
-    _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
+    _cudagraph_support: ClassVar[AttentionCGSupport] = (
+        AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
+    )
 
     def __init__(self, kv_cache_spec, layer_names, vllm_config, device):
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
@@ -177,6 +179,32 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
                 "are not implemented for "
                 "TritonMLAImpl"
             )
+
+        if current_platform.is_cuda():
+            cap = current_platform.get_device_capability()
+            cap_str = cap.as_version_str() if cap is not None else "unknown"
+            dev = current_platform.get_device_name()
+            if self.kv_cache_dtype.startswith("fp8") and not (
+                current_platform.has_device_capability(89)
+            ):
+                suggested = (
+                    "float16" if (cap is None or cap.to_int() < 80) else "bfloat16"
+                )
+                raise ValueError(
+                    f"FP8 KV cache is not supported by the Triton MLA backend "
+                    f"on {dev} (compute capability {cap_str}); native FP8 "
+                    f"(fp8e4nv) requires SM89+. Re-run with "
+                    f"--kv-cache-dtype {suggested}."
+                )
+            if self.kv_cache_dtype == "bfloat16" and not (
+                current_platform.has_device_capability(80)
+            ):
+                raise ValueError(
+                    f"bfloat16 KV cache is not supported by the Triton MLA "
+                    f"backend on {dev} (compute capability {cap_str}); "
+                    f"bfloat16 requires SM80+. Re-run with "
+                    f"--kv-cache-dtype float16."
+                )
 
         # For FP8 KV cache, we dequantize to BF16 on load inside the
         # Triton kernel. Tell the common layer not to quantize queries

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import itertools
 from collections.abc import Iterable
-from typing import Any
+from typing import Any, NamedTuple
 
 from vllm.distributed.nixl_utils import NixlWrapper as _NixlAgent
 from vllm.distributed.nixl_utils import nixl_agent_config as _NixlAgentConfig
@@ -27,6 +27,17 @@ logger = init_logger(__name__)
 _EMPTY_POLL_RESULT: PollResult = PollResult(done=(), failed=())
 
 
+class _Inflight(NamedTuple):
+    """A submitted-but-not-yet-drained transfer.
+
+    ``peer_id`` lets poll() scope to a single owning session, since the
+    transport is shared across all peer sessions of the engine.
+    """
+
+    peer_id: str
+    handle: object
+
+
 class NixlTransport(DataTransport):
     """Manages a NIXL agent, memory registration, and block transfers.
 
@@ -37,14 +48,14 @@ class NixlTransport(DataTransport):
 
     def __init__(
         self,
-        local_id: str,
+        agent_name: str,
         view: memoryview,
         config_fields: dict | None = None,
         backends: list[str] | None = None,
         num_threads: int = 4,
     ) -> None:
         super().__init__(view, config_fields=config_fields)
-        self._local_id = local_id
+        self._agent_name = agent_name
         self._backends = list(backends) if backends else ["UCX"]
         self._num_threads = num_threads
         self._agent: Any = None
@@ -52,7 +63,8 @@ class NixlTransport(DataTransport):
         self._local_dlist: Any = None
         self._remote_dlists: dict[str, object] = {}
         self._peer_nixl_names: dict[str, str] = {}
-        self._inflight: dict[int, object] = {}  # transfer_id → handle
+        # transfer_id → _Inflight(peer_id, handle).
+        self._inflight: dict[int, _Inflight] = {}
         self._next_id = itertools.count()
 
         self._init(view)
@@ -70,7 +82,7 @@ class NixlTransport(DataTransport):
             cfg = _NixlAgentConfig(backends=self._backends, capture_telemetry=True)
             logger.info(
                 "NixlTransport %s: NIXL backends=%s",
-                self._local_id,
+                self._agent_name,
                 self._backends,
             )
         else:
@@ -79,10 +91,10 @@ class NixlTransport(DataTransport):
             )
             logger.info(
                 "NixlTransport %s: NIXL backends=[UCX] num_threads=%d",
-                self._local_id,
+                self._agent_name,
                 self._num_threads,
             )
-        self._agent = _NixlAgent(self._local_id, cfg)
+        self._agent = _NixlAgent(self._agent_name, cfg)
 
         total_size = self._num_blocks * self._block_len
         reg_descs = [(self._base_addr, total_size, 0, "")]
@@ -95,7 +107,7 @@ class NixlTransport(DataTransport):
         xfer_dlist = self._agent.get_xfer_descs(block_tuples, mem_type="DRAM")
         self._local_dlist = self._agent.prep_xfer_dlist("NIXL_INIT_AGENT", xfer_dlist)
         logger.info(
-            "NixlTransport %s: registered %d blocks", self._local_id, self._num_blocks
+            "NixlTransport %s: registered %d blocks", self._agent_name, self._num_blocks
         )
 
     def get_agent_metadata(self) -> bytes:
@@ -152,14 +164,14 @@ class NixlTransport(DataTransport):
             logger.warning(
                 "NixlTransport %s: write_blocks NO REMOTE DLIST for peer=%s "
                 "(known peers=%s)",
-                self._local_id,
+                self._agent_name,
                 peer_id,
                 list(self._remote_dlists.keys()),
             )
             return None
         logger.debug(
             "NixlTransport %s: write_blocks NIXL.transfer peer=%s blocks=%d",
-            self._local_id,
+            self._agent_name,
             peer_id,
             len(local_idxs),
         )
@@ -172,11 +184,16 @@ class NixlTransport(DataTransport):
         )
         self._agent.transfer(handle)
         transfer_id = next(self._next_id)
-        self._inflight[transfer_id] = handle
+        self._inflight[transfer_id] = _Inflight(peer_id, handle)
         return transfer_id
 
-    def poll(self) -> PollResult:
-        """Poll all inflight transfers.
+    def poll(self, peer_id: str | None = None) -> PollResult:
+        """Poll inflight transfers.
+
+        When *peer_id* is given, only transfers submitted for that peer_id are
+        checked and drained — the transport is shared across peer sessions, so
+        an unscoped poll by one session would consume and discard siblings'
+        completions. *peer_id* None polls every peer (shutdown drain only).
 
         Returns PollResult(done=..., failed=...) with transfer IDs.
         Completed handles are released automatically.
@@ -187,13 +204,15 @@ class NixlTransport(DataTransport):
         done_ids: list[int] | None = None
         failed_ids: list[int] | None = None
 
-        for transfer_id, handle in self._inflight.items():
+        for transfer_id, entry in self._inflight.items():
+            if peer_id is not None and entry.peer_id != peer_id:
+                continue
             try:
-                state = self._agent.check_xfer_state(handle)
+                state = self._agent.check_xfer_state(entry.handle)
             except Exception as exc:
                 logger.warning(
                     "NixlTransport %s: check_xfer_state failed for transfer_id=%d: %s",
-                    self._local_id,
+                    self._agent_name,
                     transfer_id,
                     exc,
                 )
@@ -212,9 +231,9 @@ class NixlTransport(DataTransport):
 
         handles_to_release = []
         for tid in done_ids or ():
-            handles_to_release.append(self._inflight.pop(tid))
+            handles_to_release.append(self._inflight.pop(tid).handle)
         for tid in failed_ids or ():
-            handles_to_release.append(self._inflight.pop(tid))
+            handles_to_release.append(self._inflight.pop(tid).handle)
         self._release_handles(handles_to_release)
 
         return PollResult(
@@ -236,22 +255,24 @@ class NixlTransport(DataTransport):
         """
         if mode == "immediate":
             handles = [
-                self._inflight.pop(tid) for tid in transfer_ids if tid in self._inflight
+                self._inflight.pop(tid).handle
+                for tid in transfer_ids
+                if tid in self._inflight
             ]
             self._release_handles(handles)
             return []
 
         still_inflight: list[int] = []
         for tid in transfer_ids:
-            handle = self._inflight.get(tid)
-            if handle is None:
+            entry = self._inflight.get(tid)
+            if entry is None:
                 continue
             try:
-                self._agent.release_xfer_handle(handle)
+                self._agent.release_xfer_handle(entry.handle)
             except Exception as exc:
                 logger.debug(
                     "NixlTransport %s: cancel pending for transfer_id=%d: %s",
-                    self._local_id,
+                    self._agent_name,
                     tid,
                     exc,
                 )
@@ -267,7 +288,7 @@ class NixlTransport(DataTransport):
     def close(self) -> None:
         if self._agent is None:
             return
-        self._release_handles(list(self._inflight.values()))
+        self._release_handles([entry.handle for entry in self._inflight.values()])
         self._inflight.clear()
         for peer_id in list(self._remote_dlists):
             self.remove_remote_peer(peer_id)
@@ -292,6 +313,6 @@ class NixlTransport(DataTransport):
             except Exception as exc:
                 logger.warning(
                     "NixlTransport %s: release_xfer_handle failed: %s",
-                    self._local_id,
+                    self._agent_name,
                     exc,
                 )
