@@ -85,6 +85,32 @@ def fp8x4_to_bf16x4(x: Uint32, *, loc=None, ip=None) -> cute.TensorSSA:
 
 
 @dsl_user_op
+def fp8x4_to_fp16x4(x: Uint32, *, loc=None, ip=None) -> cute.TensorSSA:
+    out = llvm.inline_asm(
+        llvm.StructType.get_literal([T.i32()] * 2),
+        [x.ir_value(loc=loc, ip=ip)],
+        "{\n\t"
+        ".reg .b16 lo, hi;\n\t"
+        "mov.b32 {lo, hi}, $2;\n\t"
+        "cvt.rn.f16x2.e4m3x2 $0, lo;\n\t"
+        "cvt.rn.f16x2.e4m3x2 $1, hi;\n\t"
+        "}\n",
+        "=r,=r,r",
+        has_side_effects=False,
+        is_align_stack=False,
+        loc=loc,
+        ip=ip,
+    )
+    vec = vector.from_elements(
+        ir.VectorType.get([2], T.i32(), loc=loc),
+        [llvm.extractvalue(T.i32(), out, [i], loc=loc, ip=ip) for i in range(2)],
+        loc=loc,
+        ip=ip,
+    )
+    return cute.TensorSSA(vec, 2, Uint32)
+
+
+@dsl_user_op
 def fp32x4_to_fp8x4(
     a0: Float32,
     a1: Float32,
