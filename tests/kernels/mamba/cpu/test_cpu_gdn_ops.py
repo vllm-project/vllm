@@ -419,8 +419,10 @@ def _conv_inputs(total_tokens: int):
     return x, weight, bias
 
 
-def _sd_conv_states(num_slots: int, state_len: int) -> torch.Tensor:
-    storage = torch.zeros(num_slots, state_len, CONV_DIM, dtype=torch.bfloat16)
+def _sd_conv_states(
+    num_slots: int, state_len: int, dim: int = CONV_DIM
+) -> torch.Tensor:
+    storage = torch.zeros(num_slots, state_len, dim, dtype=torch.bfloat16)
     return storage.transpose(1, 2)
 
 
@@ -446,32 +448,60 @@ def test_spec_aware_nonspec_materializes_state_indices(
         has_initial_state=torch.tensor([False, False]),
     )
 
+    recorded_indices = None
+
     def causal_conv1d_fwd_cpu(**kwargs):
-        assert kwargs["cache_indices"].is_contiguous()
-        raise RuntimeError("stop after conv")
+        nonlocal recorded_indices
+        recorded_indices = kwargs["cache_indices"]
+        return kwargs["x"]
+
+    def fused_gdn_gating_cpu(**kwargs):
+        return kwargs["a"], kwargs["b"]
+
+    def chunk_gated_delta_rule_cpu(**kwargs):
+        out = torch.zeros(1, 4, 1, 1)
+        return out, kwargs["initial_state"]
 
     monkeypatch.setattr(torch.cpu, "_is_amx_tile_supported", lambda: True)
     monkeypatch.setattr(gdn_attention, "is_conv_state_dim_first", lambda: False)
     monkeypatch.setattr(
         gdn_attention.ops, "causal_conv1d_fwd_cpu", causal_conv1d_fwd_cpu
     )
+    monkeypatch.setattr(gdn_attention.ops, "fused_gdn_gating_cpu", fused_gdn_gating_cpu)
+    monkeypatch.setattr(
+        gdn_attention.ops,
+        "chunk_gated_delta_rule_cpu",
+        chunk_gated_delta_rule_cpu,
+    )
 
     layer = types.SimpleNamespace(
         activation="silu",
         conv1d=types.SimpleNamespace(weight=torch.empty(0), bias=None),
+        A_log=torch.empty(0),
+        dt_bias=torch.empty(0),
+        rearrange_mixed_qkv=lambda x: (
+            x[:, :1].view(1, 4, 1, 1),
+            x[:, :1].view(1, 4, 1, 1),
+            x[:, :1].view(1, 4, 1, 1),
+        ),
     )
-    with pytest.raises(RuntimeError, match="stop after conv"):
-        gdn_attention._spec_aware_nonspec(
-            layer=layer,
-            attn_metadata_i=metadata,
-            mixed_qkv=torch.zeros(4, 4),
-            b=torch.zeros(4, 1),
-            a=torch.zeros(4, 1),
-            core_attn_out=torch.zeros(4, 1, 1),
-            conv_buf=torch.zeros(8, 1, 6),
-            ssm_state=torch.zeros(8, 1, 1, 1),
-            width=4,
-        )
+    gdn_attention._spec_aware_nonspec(
+        layer=layer,
+        attn_metadata_i=metadata,
+        mixed_qkv=torch.zeros(4, 4),
+        b=torch.zeros(4, 1),
+        a=torch.zeros(4, 1),
+        core_attn_out=torch.zeros(4, 1, 1),
+        conv_buf=torch.zeros(8, 1, 6),
+        ssm_state=torch.zeros(8, 1, 1, 1),
+        width=4,
+    )
+
+    assert recorded_indices is not None
+    assert recorded_indices.is_contiguous()
+    torch.testing.assert_close(
+        recorded_indices, torch.tensor([0, 4], dtype=torch.int32)
+    )
 
 
 @pytest.mark.parametrize("total_tokens, split", TWO_CALL_SPLITS)
@@ -583,9 +613,10 @@ def _ref_causal_conv1d_update_cpu_multi(
     x: torch.Tensor,
     conv_states: torch.Tensor,
     weight: torch.Tensor,
-    bias: torch.Tensor,
+    bias: torch.Tensor | None,
+    silu_activation: bool,
     conv_state_indices: torch.Tensor,
-    history_offsets: torch.Tensor,
+    num_accepted_tokens: torch.Tensor,
 ) -> torch.Tensor:
     batch_size, seq_len, dim = x.shape
     state_len = conv_states.size(2)
@@ -594,13 +625,15 @@ def _ref_causal_conv1d_update_cpu_multi(
 
     for i in range(batch_size):
         slot = int(conv_state_indices[i].item())
-        offset = int(history_offsets[i].item())
+        offset = int(num_accepted_tokens[i].item()) - 1
         state = conv_states[slot]
         x_seq = x[i].transpose(0, 1).to(state.dtype)
         prior = state[:, offset : offset + CONV_KERNEL - 1]
         conv_in = torch.cat([prior, x_seq], dim=-1).unsqueeze(0)
         out = F.conv1d(conv_in, conv_weight, bias, groups=dim)[0]
-        conv_out[i] = F.silu(out).transpose(0, 1).to(conv_out.dtype)
+        if silu_activation:
+            out = F.silu(out)
+        conv_out[i] = out.transpose(0, 1).to(conv_out.dtype)
         keep = state[:, offset + 1 : offset + 1 + (state_len - seq_len)]
         state.copy_(torch.cat([keep, x_seq], dim=-1))
 
@@ -611,22 +644,39 @@ def _ref_causal_conv1d_update_cpu_multi(
     not torch.cpu._is_amx_tile_supported(),
     reason="causal_conv1d_update_cpu requires AMX/AVX512",
 )
-@pytest.mark.parametrize("batch_size", [1, 4])
-@pytest.mark.parametrize("seq_len", [1, 2, 4])
+@pytest.mark.parametrize(
+    "batch_size, seq_len, accepted_counts",
+    [
+        (1, 1, [1]),
+        (4, 4, [1, 2, 3, 4]),
+        (4, 16, [1, 5, 10, 16]),
+    ],
+)
+@pytest.mark.parametrize(
+    "has_bias, silu_activation",
+    [(False, True), (True, False)],
+)
 @pytest.mark.parametrize("is_vnni", [False, True])
 @torch.inference_mode()
 def test_causal_conv1d_update_cpu_multi_token_matches_python(
     batch_size: int,
     seq_len: int,
+    accepted_counts: list[int],
+    has_bias: bool,
+    silu_activation: bool,
     is_vnni: bool,
 ) -> None:
-    state_len = CONV_KERNEL - 1 + 3
-    x, weight, bias = _conv_inputs(batch_size * seq_len)
-    x = x.view(batch_size, seq_len, CONV_DIM).contiguous()
+    dim = 96
+    state_len = seq_len + 2
+    x = tensor_cache(batch_size * seq_len * dim, torch.bfloat16).view(
+        batch_size, seq_len, dim
+    )
+    weight = tensor_cache(dim * CONV_KERNEL, torch.bfloat16).view(dim, CONV_KERNEL)
+    bias = tensor_cache(dim, torch.bfloat16) if has_bias else None
     conv_state_indices = torch.arange(batch_size - 1, -1, -1, dtype=torch.int32)
-    history_offsets = torch.arange(batch_size, dtype=torch.int32) % seq_len
+    num_accepted_tokens = torch.tensor(accepted_counts, dtype=torch.int32)
 
-    conv_states_ref = _sd_conv_states(batch_size, state_len)
+    conv_states_ref = _sd_conv_states(batch_size, state_len, dim)
     conv_states_ref.copy_(
         tensor_cache(conv_states_ref.numel(), torch.bfloat16).view_as(conv_states_ref)
     )
@@ -638,22 +688,53 @@ def test_causal_conv1d_update_cpu_multi_token_matches_python(
         conv_states=conv_states,
         weight=conv_weight,
         bias=bias,
-        silu_activation=True,
+        silu_activation=silu_activation,
         conv_state_indices=conv_state_indices,
         is_vnni=is_vnni,
-        cache_seqlens=history_offsets,
+        num_accepted_tokens=num_accepted_tokens,
     )
     ref_out = _ref_causal_conv1d_update_cpu_multi(
         x=x,
         conv_states=conv_states_ref,
         weight=weight,
         bias=bias,
+        silu_activation=silu_activation,
         conv_state_indices=conv_state_indices,
-        history_offsets=history_offsets,
+        num_accepted_tokens=num_accepted_tokens,
     )
 
     torch.testing.assert_close(out, ref_out, atol=1e-2, rtol=1e-2)
     torch.testing.assert_close(conv_states, conv_states_ref, atol=0, rtol=0)
+
+
+@pytest.mark.skipif(
+    not torch.cpu._is_amx_tile_supported(),
+    reason="causal_conv1d_update_cpu requires AMX/AVX512",
+)
+@pytest.mark.parametrize("num_accepted", [0, 17])
+@torch.inference_mode()
+def test_causal_conv1d_update_cpu_rejects_invalid_accepted_count(
+    num_accepted: int,
+) -> None:
+    batch_size = 1
+    seq_len = 16
+    dim = 96
+    state_len = seq_len + 2
+    x = torch.zeros(batch_size, seq_len, dim, dtype=torch.bfloat16)
+    weight = torch.zeros(dim, CONV_KERNEL, dtype=torch.bfloat16)
+    conv_states = _sd_conv_states(batch_size, state_len, dim)
+
+    with pytest.raises(RuntimeError, match="num_accepted_tokens must be in.*seqlen"):
+        ops.causal_conv1d_update_cpu(
+            x=x,
+            conv_states=conv_states,
+            weight=weight,
+            bias=None,
+            silu_activation=True,
+            conv_state_indices=torch.tensor([0], dtype=torch.int32),
+            is_vnni=False,
+            num_accepted_tokens=torch.tensor([num_accepted], dtype=torch.int32),
+        )
 
 
 @pytest.mark.skipif(

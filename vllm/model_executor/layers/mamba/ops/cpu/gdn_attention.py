@@ -419,7 +419,6 @@ def _spec_forward(
     silu = layer.activation == "silu"
 
     col0 = spec_state_indices[:, 0].to("cpu", torch.int64)
-    history_offsets_cpu = torch.clamp(num_acc_cpu - 1, min=0)
 
     can_use_native_conv = (
         torch.cpu._is_amx_tile_supported()
@@ -439,7 +438,7 @@ def _spec_forward(
             silu_activation=silu,
             conv_state_indices=col0[:num_spec_decodes].to(torch.int32).contiguous(),
             is_vnni=True,
-            cache_seqlens=history_offsets_cpu[:num_spec_decodes]
+            num_accepted_tokens=num_acc_cpu[:num_spec_decodes]
             .to(torch.int32)
             .contiguous(),
         ).reshape_as(mixed_qkv_spec)
@@ -451,7 +450,7 @@ def _spec_forward(
                 continue
             start = int(seq_starts[i].item())
             slot0 = int(col0[i].item())
-            offset = int(history_offsets_cpu[i].item())
+            offset = int(num_acc_cpu[i].item()) - 1
             B = conv_buf[slot0]  # (dim, state_len)
             x_seq = mixed_qkv_spec[start : start + q_i].transpose(0, 1).to(B.dtype)
             prior = B[:, offset : offset + (width - 1)]

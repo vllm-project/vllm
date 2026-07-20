@@ -3473,7 +3473,7 @@ def causal_conv1d_update_cpu(
     silu_activation: bool,
     conv_state_indices: torch.Tensor | None,
     is_vnni: bool,
-    cache_seqlens: torch.Tensor | None = None,
+    num_accepted_tokens: torch.Tensor | None = None,
 ) -> torch.Tensor:
     return torch.ops._C.causal_conv1d_update_cpu(
         x,
@@ -3481,7 +3481,7 @@ def causal_conv1d_update_cpu(
         weight,
         bias,
         silu_activation,
-        cache_seqlens,
+        num_accepted_tokens,
         conv_state_indices,
         -1,
         is_vnni,
