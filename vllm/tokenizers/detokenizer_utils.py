@@ -60,7 +60,7 @@ INITIAL_INCREMENTAL_DETOKENIZATION_OFFSET = 5
 
 
 _CACHED_MARKER_KEY = "_vllm_space_marker_cache"
-_NOT_COMPUTED = "__not_computed__"
+_NOT_CACHED = "__not_computed__"
 
 
 def _get_leading_space_marker(tokenizer: TokenizerLike) -> str | None:
@@ -74,8 +74,8 @@ def _get_leading_space_marker(tokenizer: TokenizerLike) -> str | None:
     Returns the marker character, or None if decode() is safe for single
     tokens.
     """
-    cached = getattr(tokenizer, _CACHED_MARKER_KEY, _NOT_COMPUTED)
-    if cached is not _NOT_COMPUTED:
+    cached = getattr(tokenizer, _CACHED_MARKER_KEY, _NOT_CACHED)
+    if cached is not _NOT_CACHED:
         return cached  # type: ignore[return-value]
 
     backend = getattr(tokenizer, "backend_tokenizer", None)
