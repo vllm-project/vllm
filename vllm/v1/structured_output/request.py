@@ -22,6 +22,8 @@ if TYPE_CHECKING:
 class StructuredOutputRequest:
     params: StructuredOutputsParams
     _grammar: Future[StructuredOutputGrammar] | StructuredOutputGrammar | None = None
+    # Set when async grammar compilation fails; cleared when grammar is reset.
+    grammar_error: BaseException | None = None
     reasoning_ended: bool | None = None
     # Absolute index into the request's all_token_ids of the last reasoning
     # token (the reasoning-end marker). Tokens at or before this index are
@@ -53,9 +55,13 @@ class StructuredOutputRequest:
             try:
                 # We will check whether the future is ready within 100 us
                 self._grammar = self._grammar.result(timeout=0.0001)
+                self.grammar_error = None
                 self.status = RequestStatus.WAITING
             except TimeoutError:
                 return False
+            except Exception as exc:
+                self._grammar = None
+                self.grammar_error = exc
         return True
 
     @property
@@ -74,6 +80,7 @@ class StructuredOutputRequest:
         self, grammar: StructuredOutputGrammar | Future[StructuredOutputGrammar]
     ) -> None:
         self._grammar = grammar
+        self.grammar_error = None
 
     @functools.cached_property
     def structured_output_key(self) -> StructuredOutputKey:
