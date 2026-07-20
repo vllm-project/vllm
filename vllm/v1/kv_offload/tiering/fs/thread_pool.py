@@ -11,7 +11,7 @@ Thread pool:
 import functools
 import threading
 from collections import deque
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 
 from vllm.logger import init_logger
@@ -124,6 +124,24 @@ class DualQueueThreadPool:
         if batch:
             yield batch
 
+    def _enqueue(
+        self,
+        queue: deque,
+        make_fn: Callable[[list[Task]], Callable[[], None]],
+        job_id: JobId,
+        n_tasks: int,
+        tasks: Iterable[Task],
+    ) -> None:
+        """Batch `tasks` and append (fn, state, batch_size) entries to `queue`."""
+        state = JobState(job_id, n_tasks)
+        n_batches = 0
+        with self._condition:
+            self._inflight_jobs += 1
+            for batch in self._batch_tasks(tasks):
+                queue.append((make_fn(batch), state, len(batch)))
+                n_batches += 1
+            self._condition.notify(n_batches)
+
     def enqueue_load(
         self,
         job_id: JobId,
@@ -131,21 +149,17 @@ class DualQueueThreadPool:
         tasks: Iterable[Task],
     ) -> None:
         """Enqueue load tasks for a job (high-priority for load-priority threads)."""
-        state = JobState(job_id, n_tasks)
-        n_batches = 0
-        with self._condition:
-            self._inflight_jobs += 1
-            for batch in self._batch_tasks(tasks):
-                fn = functools.partial(
-                    batch_load_block,
-                    paths=[t.path for t in batch],
-                    view=batch[0].view,
-                    offsets=[t.offset for t in batch],
-                    block_size=batch[0].block_size,
-                )
-                self._load_q.append((fn, state, len(batch)))
-                n_batches += 1
-            self._condition.notify(n_batches)
+
+        def make_fn(batch: list[Task]) -> Callable[[], None]:
+            return functools.partial(
+                batch_load_block,
+                paths=[t.path for t in batch],
+                view=batch[0].view,
+                offsets=[t.offset for t in batch],
+                block_size=batch[0].block_size,
+            )
+
+        self._enqueue(self._load_q, make_fn, job_id, n_tasks, tasks)
 
     def enqueue_store(
         self,
@@ -154,21 +168,17 @@ class DualQueueThreadPool:
         tasks: Iterable[Task],
     ) -> None:
         """Enqueue store tasks for a job (high-priority for store-priority threads)."""
-        state = JobState(job_id, n_tasks)
-        n_batches = 0
-        with self._condition:
-            self._inflight_jobs += 1
-            for batch in self._batch_tasks(tasks):
-                fn = functools.partial(
-                    batch_store_block,
-                    paths=[t.path for t in batch],
-                    view=batch[0].view,
-                    offsets=[t.offset for t in batch],
-                    block_size=batch[0].block_size,
-                )
-                self._store_q.append((fn, state, len(batch)))
-                n_batches += 1
-            self._condition.notify(n_batches)
+
+        def make_fn(batch: list[Task]) -> Callable[[], None]:
+            return functools.partial(
+                batch_store_block,
+                paths=[t.path for t in batch],
+                view=batch[0].view,
+                offsets=[t.offset for t in batch],
+                block_size=batch[0].block_size,
+            )
+
+        self._enqueue(self._store_q, make_fn, job_id, n_tasks, tasks)
 
     def get_finished(self) -> list[tuple[JobId, bool]]:
         # No lock needed: deque is thread-safe for concurrent append/popleft,
@@ -218,14 +228,14 @@ class DualQueueThreadPool:
                 )
             try:
                 fn()
-                job_finished, success = state.task_done(True, batch_size)
+                job_finished, success = state.task_done(batch_size, True)
             except Exception as exc:
                 logger.error(
                     "Job %s block I/O failed: %s",
                     state.job_id,
                     exc,
                 )
-                job_finished, success = state.task_done(False, batch_size)
+                job_finished, success = state.task_done(batch_size, False)
 
             if job_finished:
                 with self._condition:
