@@ -223,6 +223,148 @@ def test_fused_add_rms_norm_invariant_across_block_size_boundary(
 
 
 @skip_if_not_cuda
+@pytest.mark.parametrize("hidden_size", [4096, 8192])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("add_residual", [False, True])
+def test_static_fp8_quant_invariant_across_block_size_boundary(
+    hidden_size: int,
+    dtype: torch.dtype,
+    add_residual: bool,
+):
+    """Regression test for the num_tokens-dependent block size in the fused
+    RMSNorm + static-fp8-quant kernels.
+
+    ``rms_norm_static_fp8_quant`` and ``fused_add_rms_norm_static_fp8_quant``
+    (``csrc/libtorch_stable/layernorm_quant_kernels.cu``) pick the same
+    ``max_block_size = (num_tokens < 256) ? 1024 : 256`` heuristic as plain
+    RMSNorm, so the fp32 reduction width — and thus the float accumulation
+    order feeding the fp8 quantization — depends on how many tokens share the
+    launch. Under ``VLLM_BATCH_INVARIANT=1`` (enabled by the autouse fixture in
+    conftest.py) the same rows must produce bitwise-identical fp8 output whether
+    launched in small chunks (block 1024) or one launch that crosses the 256
+    boundary (block 256).
+
+    These fused kernels are the RMSNorm implementation reached under batch
+    invariance for fp8-quantized models on the default compiled path, where the
+    ``RMSNormQuantFusionPass`` rewrites norm + quant into them. It fails without
+    pinning the block size and passes with it.
+    """
+    import vllm._custom_ops as ops  # noqa: F401
+
+    device = torch.device(DEVICE_TYPE)
+    fp8_dtype = current_platform.fp8_dtype()
+    eps = 1e-6
+
+    torch.manual_seed(0)
+    n_large = 300  # >= 256 -> block 256
+    scale = 1.0 / (2 * hidden_size)
+    rows = torch.randn(n_large, hidden_size, dtype=dtype, device=device) * scale
+    residual = (
+        torch.randn(n_large, hidden_size, dtype=dtype, device=device) * scale
+        if add_residual
+        else None
+    )
+    weight = torch.empty(hidden_size, dtype=dtype, device=device).normal_(
+        mean=1.0, std=0.1
+    )
+    quant_scale = torch.tensor(1.0, dtype=torch.float32, device=device)
+
+    def run(x, res):
+        out = torch.empty_like(x, dtype=fp8_dtype)
+        if add_residual:
+            torch.ops._C.fused_add_rms_norm_static_fp8_quant(
+                out, x, res, weight, quant_scale, eps
+            )
+        else:
+            torch.ops._C.rms_norm_static_fp8_quant(out, x, weight, quant_scale, eps)
+        return out
+
+    # Large launch: all rows at once (num_tokens >= 256, block 256).
+    out_large = run(rows.clone(), residual.clone() if add_residual else None)
+
+    # Small launches: same rows in chunks of 8 (num_tokens < 256, block 1024).
+    out_small = torch.empty_like(rows, dtype=fp8_dtype)
+    for i in range(0, n_large, 8):
+        xi = rows[i : i + 8].clone()
+        ri = residual[i : i + 8].clone() if add_residual else None
+        out_small[i : i + 8] = run(xi, ri)
+
+    torch.testing.assert_close(
+        out_small.to(torch.float32),
+        out_large.to(torch.float32),
+        rtol=0.0,
+        atol=0.0,
+        msg="static-fp8-quant RMSNorm output must not depend on num_tokens "
+        "(block size) under VLLM_BATCH_INVARIANT=1",
+    )
+
+
+@skip_if_not_cuda
+@pytest.mark.parametrize("hidden_size", [2048, 4096])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_per_block_quant_invariant_across_block_size_boundary(
+    hidden_size: int,
+    dtype: torch.dtype,
+):
+    """Regression test for the num_tokens-dependent block size in the fused
+    RMSNorm + per-block-quant kernel.
+
+    ``rms_norm_per_block_quant``
+    (``fused_layernorm_dynamic_per_token_quant.cu``) picks
+    ``max_block_size = (num_tokens <= 256) ? 512 : 256``, which sets the fp32
+    reduction width in ``compute_rms``. Under ``VLLM_BATCH_INVARIANT=1`` the same
+    rows must produce bitwise-identical quantized output and scales whether fed
+    through small launches (block 512) or one launch crossing 256 (block 256).
+    Pinned to the ``num_tokens <= 256`` value (512) under batch invariance.
+    """
+    import vllm._custom_ops as ops
+
+    device = torch.device(DEVICE_TYPE)
+    quant_dtype = current_platform.fp8_dtype()
+    eps = 1e-6
+    group_size = 128
+    assert hidden_size % group_size == 0
+
+    torch.manual_seed(0)
+    n_large = 300  # > 256 -> block 256
+    rows = torch.randn(n_large, hidden_size, dtype=dtype, device=device)
+    weight = torch.empty(hidden_size, dtype=dtype, device=device).normal_(
+        mean=1.0, std=0.1
+    )
+
+    def run(x):
+        return ops.rms_norm_per_block_quant(
+            x, weight, eps, quant_dtype, [1, group_size]
+        )
+
+    out_large, scale_large = run(rows.clone())
+
+    out_small = torch.empty_like(out_large)
+    scale_small = torch.empty_like(scale_large)
+    for i in range(0, n_large, 8):
+        out_i, scale_i = run(rows[i : i + 8].clone())
+        out_small[i : i + 8] = out_i
+        scale_small[i : i + 8] = scale_i
+
+    torch.testing.assert_close(
+        out_small.to(torch.float32),
+        out_large.to(torch.float32),
+        rtol=0.0,
+        atol=0.0,
+        msg="per-block-quant RMSNorm output must not depend on num_tokens "
+        "(block size) under VLLM_BATCH_INVARIANT=1",
+    )
+    torch.testing.assert_close(
+        scale_small,
+        scale_large,
+        rtol=0.0,
+        atol=0.0,
+        msg="per-block-quant scales must not depend on num_tokens "
+        "(block size) under VLLM_BATCH_INVARIANT=1",
+    )
+
+
+@skip_if_not_cuda
 @pytest.mark.parametrize("batch_size", [1, 16, 128])
 @pytest.mark.parametrize("seq_len", [1, 32, 512])
 @pytest.mark.parametrize("hidden_size", [2048, 4096])
