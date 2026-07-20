@@ -8,6 +8,7 @@ import pytest
 import torch
 
 from tests.kernels.moe.utils import check_accuracy
+from tests.utils import multi_gpu_marks
 from vllm._aiter_ops import is_aiter_found, rocm_aiter_ops
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer
@@ -75,11 +76,27 @@ def enable_pickle(monkeypatch):
 @pytest.mark.parametrize(
     "model_case",
     [
-        ModelCase("fxmarty/qwen_1.5-moe-a2.7b-mxfp4", tp=2),
-        ModelCase("fxmarty/deepseek_r1_3_layers_mxfp4", tp=8),
-        ModelCase("mawong-amd/Llama-4-Scout-17B-16E-Instruct-2-layers-mxfp4", tp=1),
-        ModelCase("fxmarty/Llama-3.1-70B-Instruct-2-layers-mxfp6", tp=1),
-        ModelCase("fxmarty/Llama-3.1-70B-Instruct-2-layers-mxfp6", tp=4),
+        pytest.param(
+            ModelCase("fxmarty/qwen_1.5-moe-a2.7b-mxfp4", tp=2),
+            marks=multi_gpu_marks(num_gpus=2),
+            id="tp2_qwen15_moe_mxfp4",
+        ),
+        pytest.param(
+            ModelCase("fxmarty/deepseek_r1_3_layers_mxfp4", tp=8),
+            id="tp8_deepseek_r1_3_layers_mxfp4",
+        ),
+        pytest.param(
+            ModelCase("mawong-amd/Llama-4-Scout-17B-16E-Instruct-2-layers-mxfp4", tp=1),
+            id="tp1_llama4_scout_mxfp4",
+        ),
+        pytest.param(
+            ModelCase("fxmarty/Llama-3.1-70B-Instruct-2-layers-mxfp6", tp=1),
+            id="tp1_llama31_mxfp6",
+        ),
+        pytest.param(
+            ModelCase("fxmarty/Llama-3.1-70B-Instruct-2-layers-mxfp6", tp=4),
+            id="tp4_llama31_mxfp6",
+        ),
     ],
 )
 @pytest.mark.skipif(
