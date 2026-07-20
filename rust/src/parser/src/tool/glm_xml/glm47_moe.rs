@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 use super::{GlmXmlToolParser, Separator};
-use crate::tool::{Result, StructuralTagModel, Tool, ToolParser, ToolParserOutput};
+use crate::tool::{Result, StructuralTagBuilder, Tool, ToolParser, ToolParserOutput};
 
 /// Tool parser for GLM-4.7 MoE XML-style tool calls.
 ///
@@ -25,8 +25,8 @@ impl ToolParser for Glm47MoeToolParser {
         Ok(Box::new(Self::new(tools)))
     }
 
-    fn structural_tag_model(&self) -> Option<StructuralTagModel> {
-        Some(StructuralTagModel::Glm47)
+    fn structural_tag_builder(&self) -> Option<&dyn StructuralTagBuilder> {
+        Some(xgrammar_structural_tag::Model::Glm47.builder())
     }
 
     fn parse_into(&mut self, chunk: &str, output: &mut ToolParserOutput) -> Result<()> {

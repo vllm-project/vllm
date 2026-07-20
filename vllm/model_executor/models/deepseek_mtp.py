@@ -33,9 +33,12 @@ from .deepseek_v2 import (
     DeepseekV2MixtureOfExperts,
     DeepseekV2MoE,
     _try_load_fp8_indexer_wk,
-    get_spec_layer_idx_from_weight_name,
 )
-from .utils import get_pp_missing_layer_names, maybe_prefix
+from .utils import (
+    get_pp_missing_layer_names,
+    get_spec_layer_idx_from_weight_name,
+    maybe_prefix,
+)
 
 
 def _restore_full_token_layout_if_needed(
