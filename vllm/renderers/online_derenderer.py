@@ -7,6 +7,7 @@ from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
 from vllm.entrypoints.generate.base.serving import resolve_token_id_placeholder
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionLogProbs,
+    ChatCompletionNamedToolChoiceParam,
     ChatCompletionRequest,
     ChatCompletionResponseChoice,
     ChatMessage,
@@ -135,6 +136,13 @@ class OnlineDerenderer:
                     if tool_calls
                     else []
                 )
+
+                is_named_tool_choice = (
+                    type(chat_request.tool_choice) is ChatCompletionNamedToolChoiceParam
+                )
+                is_required_tool_choice = chat_request.tool_choice == "required"
+                if is_named_tool_choice or is_required_tool_choice:
+                    content = content or ""
 
                 message = ChatMessage(
                     role="assistant",

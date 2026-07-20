@@ -3,8 +3,9 @@ depends_on:
   - image-build
 steps:
 - label: Model Executor
+  device: h200_35gb
   key: model-executor
-  timeout_in_minutes: 35
+  timeout_in_minutes: 45
   source_file_dependencies:
   - vllm/engine/arg_utils.py
   - vllm/config/model.py
@@ -25,6 +26,7 @@ steps:
     - pytest -v -s entrypoints/openai/completion/test_tensorizer_entrypoint.py --timeout=900 --timeout-method=thread
   mirror:
     amd:
+      dind: false
       device: mi300_1
       depends_on:
       - image-build-amd

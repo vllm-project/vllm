@@ -26,6 +26,7 @@ _VLLM_RENDERERS = {
     "kimi_audio": ("hf", "HfRenderer"),
     "mistral": ("mistral", "MistralRenderer"),
     "terratorch": ("terratorch", "TerratorchRenderer"),
+    "inkling": ("inkling", "InklingRenderer"),
 }
 
 
