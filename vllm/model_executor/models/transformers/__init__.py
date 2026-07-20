@@ -64,12 +64,13 @@ def vllm_attention_forward(
     head_dim_v = value.shape[-1]
     query, key, value = (x.transpose(1, 2) for x in (query, key, value))
     query, key, value = (x.reshape(hidden, -1) for x in (query, key, value))
-    # Pad `value` up to the query/key head size when they differ (expanded MLA).
-    if head_dim_v != head_dim_qk:
+    # Pad `value` if the head sizes are different but we are not using a DiffKV backend.
+    pad_v = head_dim_v != head_dim_qk and self_attn.head_size == self_attn.head_size_v
+    if pad_v:
         value = F.pad(value.view(-1, head_dim_v), (0, head_dim_qk - head_dim_v))
         value = value.reshape(hidden, -1)
     attn_output = self_attn.forward(query, key, value)
-    if head_dim_v != head_dim_qk:
+    if pad_v:
         attn_output = attn_output.view(-1, head_dim_qk)[..., :head_dim_v]
         attn_output = attn_output.reshape(hidden, -1)
     return attn_output, None
