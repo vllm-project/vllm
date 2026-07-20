@@ -92,7 +92,11 @@ from vllm.entrypoints.openai.responses.protocol import (
 from vllm.entrypoints.openai.responses.streaming_events import (
     StreamingState,
     emit_content_delta_events,
+    emit_function_call_delta_events,
+    emit_function_call_done_events,
     emit_previous_item_done_events,
+    emit_text_delta_events,
+    emit_text_output_done_events,
     emit_tool_action_events,
 )
 from vllm.entrypoints.openai.responses.utils import (
@@ -1325,6 +1329,39 @@ class OpenAIServingResponses(OpenAIServing):
         reasoning_parser = None
         if self.parser and self.parser.reasoning_parser_cls:
             reasoning_parser = self.parser.reasoning_parser_cls(tokenizer)
+        # Tool-call streaming. Once reasoning ends, route the post-reasoning
+        # content through the tool parser so tool-call markup (e.g.
+        # qwen3-coder's <tool_call><function=...>) is emitted as structured
+        # function_call events instead of leaking as raw output_text.
+        # Mirrors the chat completions streaming reasoning->tool interleave.
+        tool_parser = None
+        if self.parser and self.parser.tool_parser_cls:
+            tool_parser = self.parser.tool_parser_cls(tokenizer)
+        # If there is no reasoning parser, reasoning is trivially "ended" and
+        # content flows straight into the tool parser.
+        reasoning_ended = reasoning_parser is None
+        # The tool parser works on a content-relative view of the stream (it
+        # must not see the reasoning tokens). These accumulate only the
+        # post-reasoning content, and are seeded once at the reasoning->content
+        # boundary (see chat completions serving for the same handoff).
+        tool_prev_text = ""
+        tool_prev_token_ids: list[int] = []
+        tool_content_handoff_done = False
+        # Active function-call streaming state (drives the emit helpers).
+        tool_state = StreamingState()
+        tool_call_active = False
+        tool_fn_name: str | None = None
+        tool_args_accum = ""
+        text_item_open = False
+        tool_text_accum = ""
+        # Buffer for residual content before a text item is opened. We only
+        # materialize a message item once non-whitespace content appears, so
+        # whitespace-only gaps around tool-call markup (e.g. the "\n\n" between
+        # </think> and <tool_call>) are dropped — matching the non-streaming
+        # completed output, which never emits a whitespace-only message. A
+        # stray whitespace message would otherwise be echoed back by the client
+        # on the next turn and fail request validation.
+        tool_text_pending = ""
         previous_text = ""
         previous_token_ids: list[int] = []
         first_delta_sent = False
@@ -1346,6 +1383,10 @@ class OpenAIServingResponses(OpenAIServing):
                         current_token_ids=previous_token_ids + output.token_ids,
                         delta_token_ids=output.token_ids,
                     )
+                    if not reasoning_ended and reasoning_parser.is_reasoning_end(
+                        list(output.token_ids)
+                    ):
+                        reasoning_ended = True
                 else:
                     delta_message = DeltaMessage(
                         content=output.text,
@@ -1354,6 +1395,166 @@ class OpenAIServingResponses(OpenAIServing):
                 previous_token_ids += output.token_ids
                 if not delta_message:
                     continue
+
+                # After reasoning has ended, feed content through the tool
+                # parser. It returns DeltaMessages carrying either residual
+                # `content` or incremental `tool_calls`.
+                if (
+                    tool_parser is not None
+                    and reasoning_ended
+                    and delta_message.content is not None
+                ):
+                    content_delta = delta_message.content
+                    if not tool_content_handoff_done:
+                        # First post-reasoning content: close the reasoning
+                        # item (if any was streamed) so the tool/text items
+                        # that follow start on a fresh output index, then seed
+                        # the parser's view with everything accumulated so far
+                        # as one delta with empty "previous" (mirrors chat
+                        # serving handoff).
+                        tool_content_handoff_done = True
+                        if first_delta_sent and any(
+                            pm.reasoning is not None for pm in previous_delta_messages
+                        ):
+                            reason_content = "".join(
+                                pm.reasoning or ""
+                                for pm in previous_delta_messages
+                                if pm.reasoning is not None
+                            )
+                            yield _increment_sequence_number_and_return(
+                                ResponseReasoningTextDoneEvent(
+                                    type="response.reasoning_text.done",
+                                    item_id=current_item_id,
+                                    sequence_number=-1,
+                                    output_index=current_output_index,
+                                    content_index=current_content_index,
+                                    text=reason_content,
+                                )
+                            )
+                            yield _increment_sequence_number_and_return(
+                                ResponseOutputItemDoneEvent(
+                                    type="response.output_item.done",
+                                    sequence_number=-1,
+                                    output_index=current_output_index,
+                                    item=ResponseReasoningItem(
+                                        type="reasoning",
+                                        content=[
+                                            ResponseReasoningTextContent(
+                                                text=reason_content,
+                                                type="reasoning_text",
+                                            ),
+                                        ],
+                                        status="completed",
+                                        id=current_item_id,
+                                        summary=[],
+                                    ),
+                                )
+                            )
+                            current_output_index += 1
+                        # Align the emit-helper state with the running index so
+                        # tool/text items get the correct output_index.
+                        tool_state.current_output_index = current_output_index
+                        tool_state.current_content_index = -1
+                        # Clear so the post-loop flush and reasoning branch do
+                        # not re-emit the reasoning we just closed.
+                        previous_delta_messages = []
+                        cur_text = content_delta
+                        cur_token_ids = list(output.token_ids)
+                        tool_delta = tool_parser.extract_tool_calls_streaming(
+                            previous_text="",
+                            current_text=cur_text,
+                            delta_text=content_delta,
+                            previous_token_ids=[],
+                            current_token_ids=cur_token_ids,
+                            delta_token_ids=cur_token_ids,
+                            request=request,
+                        )
+                        tool_prev_text = cur_text
+                        tool_prev_token_ids = cur_token_ids
+                    else:
+                        cur_text = tool_prev_text + content_delta
+                        cur_token_ids = tool_prev_token_ids + list(output.token_ids)
+                        tool_delta = tool_parser.extract_tool_calls_streaming(
+                            previous_text=tool_prev_text,
+                            current_text=cur_text,
+                            delta_text=content_delta,
+                            previous_token_ids=tool_prev_token_ids,
+                            current_token_ids=cur_token_ids,
+                            delta_token_ids=list(output.token_ids),
+                            request=request,
+                        )
+                        tool_prev_text = cur_text
+                        tool_prev_token_ids = cur_token_ids
+
+                    if tool_delta is None:
+                        previous_delta_messages.append(delta_message)
+                        continue
+
+                    # Residual plain content (before/after tool markup). Defer
+                    # emitting until we've seen non-whitespace, so a whitespace-
+                    # only gap never becomes a message item.
+                    if tool_delta.content:
+                        tool_text_pending += tool_delta.content
+                        if not text_item_open and tool_text_pending.strip():
+                            # Flush the buffered (now non-empty) text as the
+                            # first delta of a new message item.
+                            text_item_open = True
+                            tool_text_accum += tool_text_pending
+                            for ev in emit_text_delta_events(
+                                tool_text_pending, tool_state
+                            ):
+                                yield _increment_sequence_number_and_return(ev)
+                            tool_text_pending = ""
+                        elif text_item_open:
+                            tool_text_accum += tool_text_pending
+                            for ev in emit_text_delta_events(
+                                tool_text_pending, tool_state
+                            ):
+                                yield _increment_sequence_number_and_return(ev)
+                            tool_text_pending = ""
+
+                    # Incremental tool-call deltas.
+                    for tc in tool_delta.tool_calls or []:
+                        fn = tc.function
+                        if fn is None:
+                            continue
+                        # A new function call begins when a name arrives.
+                        if fn.name:
+                            # Close any open text item before starting a tool.
+                            if text_item_open:
+                                for ev in emit_text_output_done_events(
+                                    tool_text_accum, tool_state
+                                ):
+                                    yield _increment_sequence_number_and_return(ev)
+                                text_item_open = False
+                                tool_text_accum = ""
+                                tool_state.reset_for_new_item()
+                            # Drop any buffered whitespace-only residual content
+                            # that never became a message item.
+                            tool_text_pending = ""
+                            if tool_call_active:
+                                # Finish the previous tool call before the next.
+                                for ev in emit_function_call_done_events(
+                                    tool_fn_name or "", tool_args_accum, tool_state
+                                ):
+                                    yield _increment_sequence_number_and_return(ev)
+                                tool_state.reset_for_new_item()
+                            tool_call_active = True
+                            tool_fn_name = fn.name
+                            tool_args_accum = fn.arguments or ""
+                            for ev in emit_function_call_delta_events(
+                                fn.arguments or "", fn.name, tool_state
+                            ):
+                                yield _increment_sequence_number_and_return(ev)
+                        elif fn.arguments:
+                            tool_args_accum += fn.arguments
+                            for ev in emit_function_call_delta_events(
+                                fn.arguments, tool_fn_name or "", tool_state
+                            ):
+                                yield _increment_sequence_number_and_return(ev)
+                    previous_delta_messages.append(delta_message)
+                    continue
+
                 if not first_delta_sent:
                     current_item_id = str(uuid.uuid4())
                     if delta_message.reasoning:
@@ -1402,7 +1603,6 @@ class OpenAIServingResponses(OpenAIServing):
                     )
                     current_content_index += 1
                     first_delta_sent = True
-                # todo(kebe7jun) tool call support
 
                 # check delta message and previous delta message are
                 # same as content or reasoning content
@@ -1519,6 +1719,20 @@ class OpenAIServingResponses(OpenAIServing):
                 current_content_index += 1
 
                 previous_delta_messages.append(delta_message)
+        # If content was routed through the tool parser, close out the open
+        # function-call (or trailing text) item here and skip the generic
+        # post-loop text-done below — otherwise the raw tool-call markup would
+        # be re-emitted as an output_text item.
+        if tool_content_handoff_done:
+            if tool_call_active:
+                for ev in emit_function_call_done_events(
+                    tool_fn_name or "", tool_args_accum, tool_state
+                ):
+                    yield _increment_sequence_number_and_return(ev)
+            elif text_item_open:
+                for ev in emit_text_output_done_events(tool_text_accum, tool_state):
+                    yield _increment_sequence_number_and_return(ev)
+            return
         if previous_delta_messages:
             if previous_delta_messages[-1].reasoning is not None:
                 reason_content = "".join(

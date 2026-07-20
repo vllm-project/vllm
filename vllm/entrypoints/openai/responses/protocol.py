@@ -137,6 +137,122 @@ ResponseInputOutputMessage: TypeAlias = (
 ResponseInputOutputItem: TypeAlias = ResponseInputItemParam | ResponseOutputItem
 
 
+def _is_assistant_output_message(item: dict) -> bool:
+    """True if a message dict carries assistant output content (``output_text``
+    or ``refusal`` parts), i.e. a prior model turn replayed as input. Such items
+    must satisfy the output-message schema (requires ``id`` + ``status``),
+    unlike plain user input messages whose parts are ``input_text`` / strings.
+    """
+    content = item.get("content")
+    if not isinstance(content, list):
+        return False
+    for part in content:
+        if isinstance(part, dict) and part.get("type") in ("output_text", "refusal"):
+            return True
+    return False
+
+
+def _build_output_item_autofill() -> dict[str, dict[str, bool]]:
+    """Introspect the SDK ``ResponseOutputItem`` union once: for each output
+    item ``type`` literal, record whether ``id`` / ``status`` are *required*
+    fields.
+
+    Clients (e.g. Codex) replay a prior model turn's output items back as
+    request ``input``, but the SDK's output-item schemas require server-assigned
+    fields those clients often drop (``id``, ``status``). This table lets a
+    single normalizer backfill exactly those fields for any output item type,
+    instead of special-casing one type at a time.
+
+    Best-effort: returns ``{}`` on any introspection failure, so validation
+    falls back to stock pydantic behavior.
+    """
+    try:
+        import typing
+
+        from openai.types.responses.response_output_item import ResponseOutputItem
+
+        def _flatten(u: Any) -> list[Any]:
+            origin = typing.get_origin(u)
+            if origin is typing.Annotated:
+                # e.g. Annotated[Union[...], PropertyInfo(discriminator=...)]
+                return _flatten(typing.get_args(u)[0])
+            if origin is typing.Union:
+                out: list[Any] = []
+                for arg in typing.get_args(u):
+                    out.extend(_flatten(arg))
+                return out
+            return [u]
+
+        table: dict[str, dict[str, bool]] = {}
+        for member in _flatten(ResponseOutputItem):
+            fields = getattr(member, "model_fields", None)
+            if not fields or "type" not in fields:
+                continue
+            type_args = typing.get_args(fields["type"].annotation)
+            if not type_args or not isinstance(type_args[0], str):
+                continue
+            table[type_args[0]] = {
+                "id": "id" in fields and fields["id"].is_required(),
+                "status": "status" in fields and fields["status"].is_required(),
+            }
+        return table
+    except Exception:  # pragma: no cover - defensive
+        logger.debug("Failed to build ResponseOutputItem autofill table")
+        return {}
+
+
+# type literal -> {"id": required?, "status": required?} for output items.
+_OUTPUT_ITEM_AUTOFILL = _build_output_item_autofill()
+# Cosmetic id prefixes matching the ones the server assigns on generation.
+_OUTPUT_ITEM_ID_PREFIX = {
+    "message": "msg",
+    "reasoning": "rs",
+    "function_call": "fc",
+}
+
+
+def _normalize_replayed_output_item(item: dict[str, Any]) -> dict[str, Any]:
+    """Backfill server-assigned fields a client dropped when replaying a prior
+    model output item as request input.
+
+    Only fills fields that are (a) required by the SDK output-item schema and
+    (b) safe to synthesize because they carry no semantic meaning: ``id``,
+    ``status``, and each ``output_text`` content part's ``annotations``. Genuine
+    content fields (``call_id``, ``arguments``, ...) are never fabricated and
+    are left for pydantic to validate/reject.
+    """
+    item_type = item.get("type")
+    if not isinstance(item_type, str):
+        return item
+    spec = _OUTPUT_ITEM_AUTOFILL.get(item_type)
+    if spec is None:
+        return item
+    # A ``message`` dict only needs the output-message treatment when it carries
+    # output content parts; a plain input message must stay untouched.
+    if item_type == "message" and not _is_assistant_output_message(item):
+        return item
+
+    patched = dict(item)
+    if spec["id"] and not patched.get("id"):
+        prefix = _OUTPUT_ITEM_ID_PREFIX.get(item_type, item_type)
+        patched["id"] = f"{prefix}_{random_uuid()}"
+    if spec["status"] and not patched.get("status"):
+        patched["status"] = "completed"
+    content = patched.get("content")
+    if isinstance(content, list):
+        patched["content"] = [
+            {**part, "annotations": part.get("annotations", [])}
+            if (
+                isinstance(part, dict)
+                and part.get("type") == "output_text"
+                and "annotations" not in part
+            )
+            else part
+            for part in content
+        ]
+    return patched
+
+
 class ResponsesRequest(OpenAIBaseModel):
     # Ordered by official OpenAI API documentation
     # https://platform.openai.com/docs/api-reference/responses/create
@@ -427,12 +543,19 @@ class ResponsesRequest(OpenAIBaseModel):
         return data
 
     @model_validator(mode="before")
-    def function_call_parsing(cls, data):
-        """Parse function_call dictionaries into ResponseFunctionToolCall objects.
-        This ensures Pydantic can properly resolve union types in the input field.
-        Function calls provided as dicts are converted to ResponseFunctionToolCall
-        objects before validation, while invalid structures are left for Pydantic
-        to reject with appropriate error messages.
+    def normalize_replayed_input_items(cls, data):
+        """Normalize prior-turn output items that a client replays as ``input``.
+
+        Clients (e.g. Codex) feed a previous model turn's output items back in
+        as request ``input``. The SDK's output-item schemas require
+        server-assigned fields those clients often drop (``id``, ``status``,
+        ``output_text.annotations``), which would otherwise 400 the request as
+        an unresolvable union. This backfills exactly those safe-to-synthesize
+        fields for any output item type (data-driven via
+        ``_OUTPUT_ITEM_AUTOFILL``), and additionally coerces ``function_call``
+        dicts into ``ResponseFunctionToolCall`` objects so pydantic resolves the
+        union deterministically. Genuine content fields are never fabricated and
+        are left for pydantic to validate/reject.
         """
 
         input_data = data.get("input")
@@ -452,11 +575,19 @@ class ResponsesRequest(OpenAIBaseModel):
 
         processed_input = []
         for item in input_data:
-            if isinstance(item, dict) and item.get("type") == "function_call":
+            if not isinstance(item, dict):
+                processed_input.append(item)
+                continue
+            # Backfill dropped server-assigned fields for any replayed output
+            # item (id / status / output_text annotations).
+            item = _normalize_replayed_output_item(item)
+            if item.get("type") == "function_call":
+                # Coerce to a concrete object so pydantic resolves the union
+                # deterministically; leave malformed dicts for pydantic to
+                # reject with a useful error.
                 try:
                     processed_input.append(ResponseFunctionToolCall(**item))
                 except ValidationError:
-                    # Let Pydantic handle validation for malformed function calls
                     logger.debug(
                         "Failed to parse function_call to ResponseFunctionToolCall, "
                         "leaving for Pydantic validation"
