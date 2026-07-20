@@ -18,10 +18,9 @@
 
 from typing import TYPE_CHECKING
 
-from torch.nn import functional as F
+import torch.nn.functional as F
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 
-from vllm.logger import init_logger
 from vllm.model_executor.models.transformers.base import Base
 from vllm.model_executor.models.transformers.causal import CausalMixin
 from vllm.model_executor.models.transformers.legacy import LegacyMixin
@@ -43,8 +42,6 @@ if TYPE_CHECKING:
 
     from vllm.model_executor.layers.attention import Attention
 
-logger = init_logger(__name__)
-
 
 def vllm_attention_forward(
     # Transformers args
@@ -63,21 +60,18 @@ def vllm_attention_forward(
     if scaling is not None:
         self_attn.impl.scale = float(scaling)
     hidden = query.shape[-2]
-    qk_head_dim = query.shape[-1]
-    v_head_dim = value.shape[-1]
+    head_dim_qk = query.shape[-1]
+    head_dim_v = value.shape[-1]
     query, key, value = (x.transpose(1, 2) for x in (query, key, value))
     query, key, value = (x.reshape(hidden, -1) for x in (query, key, value))
-    # We must pad `value` when naively running MLA model with `Attention`
-    if v_head_dim != qk_head_dim:
-        logger.warning_once(
-            "MLA model detected but not using `MultiHeadLatentAttentionWrapper`. "
-            "Correctness should be preserved but performance will be suboptimal."
-        )
-        value = F.pad(value.view(-1, v_head_dim), (0, qk_head_dim - v_head_dim))
+    # Pad `value` if the head sizes are different but we are not using a DiffKV backend.
+    pad_v = head_dim_v != head_dim_qk and self_attn.head_size == self_attn.head_size_v
+    if pad_v:
+        value = F.pad(value.view(-1, head_dim_v), (0, head_dim_qk - head_dim_v))
         value = value.reshape(hidden, -1)
     attn_output = self_attn.forward(query, key, value)
-    if v_head_dim != qk_head_dim:
-        attn_output = attn_output.view(-1, qk_head_dim)[..., :v_head_dim]
+    if pad_v:
+        attn_output = attn_output.view(-1, head_dim_qk)[..., :head_dim_v]
         attn_output = attn_output.reshape(hidden, -1)
     return attn_output, None
 
