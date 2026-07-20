@@ -179,11 +179,14 @@ Every vLLM instance is a symmetric **peer**. Per request it acts as a **consumer
 
 Three role keys are defined, each mapping to a sub-dict. All are optional; a request with none of them uses the tier only as a local CPU cache.
 
+Each key names the **remote counterpart** this peer transfers with (not this
+peer's own role), so the name reads as "the remote ___ I transfer with".
+
 | Key | Set on | Value fields | Meaning |
 | --- | --- | --- | --- |
-| `decode` | prefill producer request | `kv_request_id` | Peer computes KV and keeps it available in CPU cache for a remote decoder to pull. |
-| `prefill` | decode consumer request | `kv_request_id`, `remote_host`, `remote_port` | Peer pulls KV from the prefiller at the given address (classic P/D disaggregation). |
-| `p2p` | P2P consumer request | `kv_request_id`, `remote_host`, `remote_port` | Peer looks up and pulls whatever blocks the remote peer currently holds in CPU cache. |
+| `remote_decoder` | prefill producer request | `kv_request_id` | Peer computes KV and keeps it available in CPU cache for the remote decoder to pull. |
+| `remote_prefiller` | decode consumer request | `kv_request_id`, `remote_host`, `remote_port` | Peer pulls KV from the remote prefiller at the given address (classic P/D disaggregation). |
+| `remote_kv_peer` | P2P consumer request | `kv_request_id`, `remote_host`, `remote_port` | Peer looks up and pulls whatever blocks the remote peer currently holds in CPU cache. |
 
 Field semantics:
 
@@ -193,18 +196,18 @@ Field semantics:
 
 Allowed and forbidden combinations:
 
-- **`decode` + `p2p`** is the only legal multi-key combination: a prefill producer may *also* act as a P2P consumer for the same request — skipping prefix prefill by pulling cached blocks from a peer while still keeping its own computed blocks available for a downstream decoder.
-- Forbidden: `prefill` + `decode` (contradictory roles), `prefill` + `p2p` (two competing fetch sources), and all three together.
+- **`remote_decoder` + `remote_kv_peer`** is the only legal multi-key combination: a prefill producer may *also* act as a P2P consumer for the same request — skipping prefix prefill by pulling cached blocks from a peer while still keeping its own computed blocks available for a downstream decoder.
+- Forbidden: `remote_prefiller` + `remote_decoder` (contradictory roles), `remote_prefiller` + `remote_kv_peer` (two competing fetch sources), and all three together.
 
 Minimal examples (values that would appear in the request's `kv_transfer_params`):
 
 ```python
 # Prefill producer — compute and keep KV for a remote decoder to pull
-kv_transfer_params = {"decode": {"kv_request_id": "<unique-transfer-id>"}}
+kv_transfer_params = {"remote_decoder": {"kv_request_id": "<unique-transfer-id>"}}
 
 # Decode consumer — pull KV from a specific prefiller (classic P/D)
 kv_transfer_params = {
-    "prefill": {
+    "remote_prefiller": {
         "kv_request_id": "<unique-transfer-id>",
         "remote_host": "<prefiller-node-ip>",
         "remote_port": 5710,
@@ -213,7 +216,7 @@ kv_transfer_params = {
 
 # P2P consumer — pull whatever the peer already has cached
 kv_transfer_params = {
-    "p2p": {
+    "remote_kv_peer": {
         "kv_request_id": "<unique-transfer-id>",
         "remote_host": "<peer-node-ip>",
         "remote_port": 5710,
@@ -231,7 +234,7 @@ Runtime handshake for a P2P (or P/D) pull, once the orchestrator has set the key
 6. The producer performs the **NIXL WRITE** transfer and sends **`TransferDone`** with a success status.
 7. On `get_finished`, hits are loaded into GPU as ordinary cache hits; misses are recomputed by the engine.
 
-In classic **P/D mode** (`prefill` set, no `p2p`), the lookup phase (steps 2–4) is skipped: the decode consumer assumes the prefiller holds all of the request's blocks, so every block `lookup()` returns an immediate hit and the consumer jumps straight to the **`FetchMsg`** in step 5. The `LookupMsg`/`LookupRespMsg` round-trip only happens in P2P mode, where the consumer does not know in advance which blocks the peer has cached.
+In classic **P/D mode** (`remote_prefiller` set, no `remote_kv_peer`), the lookup phase (steps 2–4) is skipped: the decode consumer assumes the prefiller holds all of the request's blocks, so every block `lookup()` returns an immediate hit and the consumer jumps straight to the **`FetchMsg`** in step 5. The `LookupMsg`/`LookupRespMsg` round-trip only happens in P2P mode, where the consumer does not know in advance which blocks the peer has cached.
 
 ## Tuning Tips
 
