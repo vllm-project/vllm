@@ -1,0 +1,10 @@
+# Build tools for VLLM_TARGET_DEVICE=empty after runtime dependencies are installed.
+# Keep synchronized with pyproject.toml [build-system].requires, excluding torch.
+cmake>=3.26.1
+ninja
+packaging>=24.2
+setuptools>=77.0.3,<81.0.0
+setuptools-scm>=8.0
+setuptools-rust>=1.9.0
+wheel
+jinja2
