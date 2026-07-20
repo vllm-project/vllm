@@ -17,11 +17,13 @@ class KVEventsConfig:
     """
 
     publisher: Literal["null", "zmq"] = None  # type: ignore[assignment]
-    """The publisher to use for publishing kv events. Can be "null", "zmq".
+    """The publisher to use for publishing kv events.
+    Can be "null" or "zmq".
     """
 
     endpoint: str = "tcp://*:5557"
-    """The zmq endpoint to use for publishing kv events.
+    """The endpoint to use for publishing kv events.
+    For ZMQ, this is the PUB endpoint.
     """
 
     replay_endpoint: str | None = None
@@ -47,6 +49,30 @@ class KVEventsConfig:
     this topic to receive events.
     """
 
+    prefix_cache_upload_endpoint: str | None = None
+    """Optional HTTP endpoint used by prefix-aware routing workers to upload
+    KV cache events to the routing master. This is a separate best-effort side
+    channel and does not replace the configured ``publisher``.
+    Example: http://master:8000/prefix_routing/kv_events/node0.
+    """
+
+    prefix_cache_upload_max_queue_size: int = 100_000
+    """Maximum number of KV event batches buffered for prefix-cache upload."""
+
+    prefix_cache_upload_timeout: float = 5.0
+    """HTTP request timeout in seconds for prefix-cache upload."""
+
+    prefix_cache_upload_token: str | None = None
+    """Bearer token used to authenticate prefix-cache HTTP uploads."""
+
     def __post_init__(self):
         if self.publisher is None:
             self.publisher = "zmq" if self.enable_kv_cache_events else "null"
+        if self.prefix_cache_upload_endpoint is not None and not (
+            isinstance(self.prefix_cache_upload_token, str)
+            and self.prefix_cache_upload_token
+        ):
+            raise ValueError(
+                "prefix_cache_upload_token must be a non-empty string when "
+                "prefix_cache_upload_endpoint is configured"
+            )

@@ -16,7 +16,11 @@ from vllm.distributed.ec_transfer.ec_connector.base import (
     ECConnectorRole,
 )
 from vllm.distributed.ec_transfer.ec_connector.factory import ECConnectorFactory
-from vllm.distributed.kv_events import EventPublisherFactory, KVEventBatch
+from vllm.distributed.kv_events import (
+    EventPublisherFactory,
+    KVEventBatch,
+    PrefixCacheEventUploaderFactory,
+)
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.distributed.kv_transfer.kv_connector.v1 import (
     KVConnectorBase_V1,
@@ -113,9 +117,9 @@ class Scheduler(SchedulerInterface):
             else self.scheduler_config.max_num_batched_tokens
         )
         self.max_model_len = vllm_config.model_config.max_model_len
-        self.enable_kv_cache_events = (
-            self.kv_events_config is not None
-            and self.kv_events_config.enable_kv_cache_events
+        self.enable_kv_cache_events = self.kv_events_config is not None and (
+            self.kv_events_config.enable_kv_cache_events
+            or self.kv_events_config.prefix_cache_upload_endpoint is not None
         )
         self.available_kv_cache_memory_bytes: int | None = None
         # Diffusion models may not sample any tokens for a denoising step.
@@ -271,6 +275,20 @@ class Scheduler(SchedulerInterface):
             hash_block_size=hash_block_size,
             metrics_collector=self.kv_metrics_collector,
             watermark=self.scheduler_config.watermark,
+        )
+        prefix_cache_snapshot = (
+            self.kv_cache_manager.get_prefix_cache_snapshot(
+                node_id="",
+                data_parallel_rank=self.parallel_config.data_parallel_index,
+            )
+            if self.kv_events_config is not None
+            and self.kv_events_config.prefix_cache_upload_endpoint is not None
+            else None
+        )
+        self.prefix_cache_event_uploader = PrefixCacheEventUploaderFactory.create(
+            self.kv_events_config,
+            self.parallel_config.data_parallel_index,
+            initial_snapshot=prefix_cache_snapshot,
         )
         # Bind GPU block pool to the KV connector. This must happen after
         # kv_cache_manager is constructed so block_pool is available.
@@ -1843,6 +1861,7 @@ class Scheduler(SchedulerInterface):
         if events:
             batch = KVEventBatch(ts=time.time(), events=events)
             self.kv_event_publisher.publish(batch)
+            self.prefix_cache_event_uploader.publish(batch)
 
         # Create EngineCoreOutputs for all clients that have requests with
         # outputs in this step.
@@ -2368,6 +2387,8 @@ class Scheduler(SchedulerInterface):
         logger.debug_once("[shutdown] Scheduler: start")
         if self.kv_event_publisher:
             self.kv_event_publisher.shutdown()
+        if self.prefix_cache_event_uploader:
+            self.prefix_cache_event_uploader.shutdown()
         if self.connector is not None:
             self.connector.shutdown()
 
