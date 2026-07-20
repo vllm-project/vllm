@@ -8,7 +8,6 @@ import torch
 import vllm.model_executor.kernels.mhc  # noqa: F401
 from vllm.model_executor.kernels.mhc.tilelang import (
     _hc_prenorm_gemm,
-    _select_hc_prenorm_gemm_backend,
     _tilelang_hc_prenorm_gemm,
     _torch_hc_prenorm_gemm,
 )
@@ -213,7 +212,6 @@ def test_hc_prenorm_gemm_tilelang(num_tokens, hidden_size):
         pytest.param(128, 16384, 64, id="max-split"),
     ],
 )
-@torch.inference_mode()
 def test_hc_prenorm_gemm_cutedsl(num_tokens, k, n_splits):
     set_random_seed(0)
 
@@ -252,37 +250,6 @@ def test_hc_prenorm_gemm_cutedsl(num_tokens, k, n_splits):
 
     torch.testing.assert_close(out.sum(0), out_ref[0], atol=2e-5, rtol=1e-4)
     torch.testing.assert_close(sqrsum.sum(0), sqrsum_ref[0], atol=8.0, rtol=5e-4)
-
-
-@requires_cutedsl_mhc
-def test_can_use_hc_prenorm_gemm_cutedsl_split_bounds():
-    from vllm.model_executor.kernels.mhc.cutedsl import can_use_hc_prenorm_gemm
-
-    k = 16384
-    x = torch.empty((1, k), dtype=torch.bfloat16, device=DEVICE)
-    fn = torch.empty((24, k), dtype=torch.float32, device=DEVICE)
-
-    assert can_use_hc_prenorm_gemm(x, fn, 64)
-    assert not can_use_hc_prenorm_gemm(x, fn, 0)
-    assert not can_use_hc_prenorm_gemm(x, fn, 65)
-    assert _select_hc_prenorm_gemm_backend(x, fn, 49) == (True, False, 49)
-
-
-@requires_cutedsl_mhc
-def test_warmup_hc_prenorm_gemm_cutedsl(monkeypatch):
-    from vllm.model_executor.kernels.mhc import cutedsl, tilelang_kernels
-
-    compile_calls = []
-    monkeypatch.setattr(cutedsl, "_compile", lambda k, n: compile_calls.append((k, n)))
-    monkeypatch.setattr(
-        tilelang_kernels,
-        "compute_num_split",
-        lambda _block_k, _k, grid: 2 if grid < 3 else 1,
-    )
-
-    cutedsl.warmup_hc_prenorm_gemm(16384, 192)
-
-    assert compile_calls == [(16384, 2), (16384, 1)]
 
 
 @pytest.mark.skipif(

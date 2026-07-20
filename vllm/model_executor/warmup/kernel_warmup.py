@@ -52,6 +52,10 @@ _LL_BF16_WARMUP_MODEL_SHAPES: tuple[tuple[int, int], ...] = (
     (14400, 256),  # DSV4-Flash
 )
 _LL_BF16_WARMUP_M_RANGE = range(1, 17)
+_HC_PRENORM_GEMM_WARMUP_K_VALUES: tuple[int, ...] = (
+    16384,  # DSV4-Flash
+    28672,  # DSV4-Pro
+)
 
 
 def _warmup_ll_bf16_router_gemm() -> None:
@@ -72,27 +76,17 @@ def _warmup_ll_bf16_router_gemm() -> None:
     )
 
 
-def _warmup_hc_prenorm_gemm(worker: "Worker") -> None:
+def _warmup_hc_prenorm_gemm(max_num_batched_tokens: int) -> None:
     from vllm.utils.import_utils import has_cutedsl
 
-    if not current_platform.is_device_capability(100) or not has_cutedsl():
-        return
-
-    config = getattr(worker.get_model(), "config", None)
-    if (
-        config is None
-        or getattr(config, "model_type", None) != "deepseek_v4"
-        or getattr(config, "hc_mult", None) != 4
-    ):
+    if not has_cutedsl():
         return
 
     from vllm.model_executor.kernels.mhc.cutedsl import warmup_hc_prenorm_gemm
 
     logger.info("Warming up CuTeDSL mHC prenorm GEMM kernels.")
-    warmup_hc_prenorm_gemm(
-        config.hc_mult * config.hidden_size,
-        worker.scheduler_config.max_num_batched_tokens,
-    )
+    for k in _HC_PRENORM_GEMM_WARMUP_K_VALUES:
+        warmup_hc_prenorm_gemm(k, max_num_batched_tokens)
 
 
 def kernel_warmup(worker: "Worker"):
@@ -147,7 +141,8 @@ def kernel_warmup(worker: "Worker"):
 
     if current_platform.has_device_capability(90):
         _warmup_ll_bf16_router_gemm()
-    _warmup_hc_prenorm_gemm(worker)
+    if current_platform.is_device_capability(100):
+        _warmup_hc_prenorm_gemm(worker.scheduler_config.max_num_batched_tokens)
 
     # FlashInfer attention warmup
     # Only warmup if the model has FlashInfer attention groups
