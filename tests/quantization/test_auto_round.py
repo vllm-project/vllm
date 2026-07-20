@@ -305,7 +305,7 @@ def test_inc_mxfp8() -> None:
 
 
 def test_inc_config_rejects_invalid_mxfp8_activation_config() -> None:
-    with pytest.raises(ValueError, match="act_dynamic=True"):
+    with pytest.raises(AssertionError, match="act_dynamic=True"):
         INCConfig.from_config(
             {
                 "bits": 8,

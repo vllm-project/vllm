@@ -113,29 +113,23 @@ class INCConfig(QuantizationConfig):
 
     def _validate_supported_quantization(self) -> None:
         if self.data_type == self.MXFP8_DATA_TYPE:
-            if self.weight_bits != self.MXFP8_BITS:
-                raise ValueError(
-                    "INC MXFP8 only supports bits=8, "
-                    f"but found bits={self.weight_bits}."
-                )
-            if self.group_size != self.MXFP8_GROUP_SIZE:
-                raise ValueError(
-                    "INC MXFP8 only supports group_size=32, "
-                    f"but found group_size={self.group_size}."
-                )
-            if not self.sym:
-                raise ValueError("INC MXFP8 only supports symmetric weights.")
-            if self.packing_format != self.MXFP8_PACKING_FORMAT:
-                raise ValueError(
-                    "INC MXFP8 only supports "
-                    f"packing_format={self.MXFP8_PACKING_FORMAT!r}, "
-                    f"but found {self.packing_format!r}."
-                )
-            if self.backend != "auto":
-                raise ValueError(
-                    "INC MXFP8 only supports backend='auto', "
-                    f"but found backend={self.backend!r}."
-                )
+            assert self.weight_bits == self.MXFP8_BITS, (
+                f"INC MXFP8 only supports bits=8, but found bits={self.weight_bits}."
+            )
+            assert self.group_size == self.MXFP8_GROUP_SIZE, (
+                "INC MXFP8 only supports group_size=32, "
+                f"but found group_size={self.group_size}."
+            )
+            assert self.sym, "INC MXFP8 only supports symmetric weights."
+            assert self.packing_format == self.MXFP8_PACKING_FORMAT, (
+                "INC MXFP8 only supports "
+                f"packing_format={self.MXFP8_PACKING_FORMAT!r}, "
+                f"but found {self.packing_format!r}."
+            )
+            assert self.backend == "auto", (
+                "INC MXFP8 only supports backend='auto', "
+                f"but found backend={self.backend!r}."
+            )
         elif self.packing_format == self.MXFP8_PACKING_FORMAT:
             raise ValueError(
                 f"packing_format={self.MXFP8_PACKING_FORMAT!r} requires "
@@ -156,12 +150,11 @@ class INCConfig(QuantizationConfig):
         }
         for field_name, expected_value in expected_fields.items():
             actual_value = self.get_from_keys_or(config, [field_name], expected_value)
-            if actual_value != expected_value:
-                raise ValueError(
-                    "INC MXFP8 only supports "
-                    f"{field_name}={expected_value!r}, "
-                    f"but found {field_name}={actual_value!r}."
-                )
+            assert actual_value == expected_value, (
+                "INC MXFP8 only supports "
+                f"{field_name}={expected_value!r}, "
+                f"but found {field_name}={actual_value!r}."
+            )
 
     @classmethod
     def get_name(cls) -> QuantizationMethods:
