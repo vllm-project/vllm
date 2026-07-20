@@ -22,6 +22,18 @@ def load_dspark_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mo
 
     draft_vllm_config = replace(
         vllm_config,
+        # Build the draft under its own model/quant config. Quantization
+        # dispatch can resolve lazily from the current vllm_config's model
+        # hf_config and memoize on the quant_config instance
+        # (e.g. DeepseekV4FP8Config.expert_dtype / moe_quant_algo), so
+        # reusing the target's quant_config builds the draft MoE with the
+        # target's expert format: a modelopt-NVFP4 target silently loads
+        # the natively-MXFP4 DSpark experts as NVFP4 (same shapes, ue8m0
+        # scales read as e4m3), producing garbage draft logits.
+        model_config=draft_model_config,
+        quant_config=VllmConfig.get_quantization_config(
+            draft_model_config, vllm_config.load_config
+        ),
         attention_config=replace(
             vllm_config.attention_config,
             use_non_causal=dflash_has_any_non_causal(draft_model_config.hf_config),

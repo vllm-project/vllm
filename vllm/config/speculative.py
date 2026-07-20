@@ -942,6 +942,14 @@ class SpeculativeConfig:
                         "DSparkDraftModel"
                     ]
                     self.update_arch_()
+                    # hf_config_override had rewritten model_type to
+                    # "deepseek_mtp" before ModelConfig._verify_quantization
+                    # ran, so the deepseek_v4_fp8 override never matched and
+                    # the draft quantization resolved to plain "fp8". Restore
+                    # it so draft MoE experts dispatch on the draft
+                    # checkpoint's expert_dtype (MXFP4 vs NVFP4 vs FP8).
+                    if self.draft_model_config.quantization == "fp8":
+                        self.draft_model_config.quantization = "deepseek_v4_fp8"
                 elif (
                     self.method == "dspark"
                     and "Gemma4DSparkModel" in self.draft_model_config.architectures
