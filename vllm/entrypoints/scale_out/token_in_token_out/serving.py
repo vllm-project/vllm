@@ -264,6 +264,8 @@ class ServingTokens(GenerateBaseServing):
         choices: list[GenerateResponseChoice] = []
         num_generated_tokens = 0
         for output in final_res.outputs:
+            self._raise_if_error(output.finish_reason, request_id)
+
             token_ids = output.token_ids
             out_logprobs = output.logprobs
 
