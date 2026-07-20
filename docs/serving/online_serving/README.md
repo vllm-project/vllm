@@ -137,8 +137,12 @@ For further details on renderer APIs, please refer to [this page](renderer.md).
 
 ### Derenderer APIs
 
-- `/v1/completions/derender` - Derenderer completion requests
-- `/v1/chat/completions/derender` - Derenderer chat completion requests
+For further details on derenderer APIs, please refer to [this page](derenderer.md).
+
+- [Chat Completions Derender API](derenderer.md) (`/v1/chat/completions/derender`)
+    - Derender chat completion requests
+- [Completions Derender API](derenderer.md) (`/v1/completions/derender`)
+    - Derender completion requests
 
 ## Tokenize APIs
 

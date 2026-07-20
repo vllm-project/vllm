@@ -15,6 +15,7 @@ steps:
     - pytest -v -s tests/kernels/ir
 
 - label: Kernels Core Operation Test
+  device: h200_35gb
   key: kernels-core-operation-test
   timeout_in_minutes: 120
   source_file_dependencies:
@@ -163,6 +164,7 @@ steps:
       - image-build-amd
 
 - label: Kernels Mamba Test
+  device: h200_35gb
   key: kernels-mamba-test
   timeout_in_minutes: 40
   source_file_dependencies:

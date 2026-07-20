@@ -1784,7 +1784,7 @@ def initialize_model_parallel(
             get_world_group().device_group
         )
 
-    # the layout order is: ExternalDP x DP x PP x TP
+    # the layout order is: ExternalDP x DP x PP x PCP x TP
     # ExternalDP is the data parallel group that is not part of the model,
     # every dp rank can generate independently (in verl integration).
     # DP is the data parallel group that is part of the model,
@@ -1821,17 +1821,13 @@ def initialize_model_parallel(
     # Build the DCP model-parallel groups.
     global _DCP
     assert _DCP is None, "decode context model parallel group is already initialized"
-    # Note(hc): In the current implementation of decode context parallel,
-    # dcp_size must not exceed tp_size, because the world size does not
-    # change by DCP, it simply reuses the GPUs of TP group, and split one
-    # TP group into tp_size//dcp_size DCP groups.
-    group_ranks = all_ranks.reshape(-1, decode_context_model_parallel_size).unbind(0)
+    dcp_size = decode_context_model_parallel_size or 1
+    dcp_ranks = local_all_ranks if enable_elastic_ep else all_ranks
+    if dcp_size > 1:
+        # DCP spans PCP first, then TP for full TP x PCP groups.
+        dcp_ranks = dcp_ranks.transpose(-1, -2)
+    group_ranks = dcp_ranks.reshape(-1, dcp_size).unbind(0)
     group_ranks = [x.tolist() for x in group_ranks]
-    if enable_elastic_ep:
-        group_ranks = local_all_ranks.reshape(
-            -1, decode_context_model_parallel_size
-        ).unbind(0)
-        group_ranks = [x.tolist() for x in group_ranks]
     _DCP = init_model_parallel_group(
         group_ranks,
         get_world_group().local_rank,
@@ -2004,6 +2000,13 @@ def ensure_model_parallel_initialized(
         "prefill context parallel group already initialized, but of unexpected size: "
         f"{pcp_world_size=} vs. "
         f"{prefill_context_model_parallel_size=}"
+    )
+    dcp_world_size = get_dcp_group().world_size
+    dcp_model_parallel_size = decode_context_model_parallel_size or 1
+    assert dcp_world_size == dcp_model_parallel_size, (
+        "decode context parallel group already initialized, but of unexpected size: "
+        f"{dcp_world_size=} vs. "
+        f"{dcp_model_parallel_size=}"
     )
 
 
