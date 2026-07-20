@@ -741,6 +741,19 @@ class ModelConfig:
 
             self.multimodal_config = MultiModalConfig(**mm_config_kwargs)  # type: ignore[arg-type]
 
+            pruning_spec = self.multimodal_config.get_video_pruning_spec()
+            supported_pruning = self._model_info.supported_video_pruning_methods
+            if (
+                pruning_spec is not None
+                and supported_pruning
+                and pruning_spec[0] not in supported_pruning
+            ):
+                raise ValueError(
+                    f"Video pruning method '{pruning_spec[0]}' is not "
+                    f"supported by {self._model_info.architecture} "
+                    f"(supported methods: {supported_pruning})."
+                )
+
             if (
                 self.renderer_num_workers > 1
                 and self.multimodal_config.mm_processor_cache_gb > 0

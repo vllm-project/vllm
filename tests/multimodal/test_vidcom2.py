@@ -4,7 +4,7 @@
 import pytest
 import torch
 
-from vllm.multimodal.vidcom2 import (
+from vllm.multimodal.video_prune.vidcom2 import (
     compute_retained_tokens_count,
     compute_retention_mask,
 )

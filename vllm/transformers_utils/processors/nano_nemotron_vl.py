@@ -23,9 +23,9 @@ from PIL import Image
 from transformers import BatchFeature, PretrainedConfig, TensorType
 
 from vllm.model_executor.models.parakeet import ParakeetExtractor
-from vllm.multimodal.evs import compute_retained_tokens_count
 from vllm.multimodal.inputs import AudioItem
 from vllm.multimodal.processing.processor import PromptUpdateDetails
+from vllm.multimodal.video_prune.evs import compute_retained_tokens_count
 from vllm.tokenizers.hf import HfTokenizer
 
 from .internvl import calculate_internvl_targets, get_internvl_target_ratios

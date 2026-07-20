@@ -52,6 +52,7 @@ from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.config.multimodal import (
     BaseDummyOptions,
+    MultiModalConfig,
     VideoDummyOptions,
     VideoPruningMethod,
 )
@@ -73,12 +74,6 @@ from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.evs import (
-    compute_mrope_for_media,
-    compute_retained_tokens_count,
-    compute_retention_mask,
-    recompute_mrope_positions,
-)
 from vllm.multimodal.inputs import (
     MultiModalFeatureSpec,
     MultiModalFieldConfig,
@@ -96,10 +91,16 @@ from vllm.multimodal.processing import (
     PromptUpdate,
     PromptUpdateDetails,
 )
-from vllm.multimodal.vidcom2 import (
+from vllm.multimodal.video_prune.evs import (
+    compute_mrope_for_media,
+    compute_retained_tokens_count,
+    compute_retention_mask,
+    recompute_mrope_positions,
+)
+from vllm.multimodal.video_prune.vidcom2 import (
     compute_retained_tokens_count as vidcom2_compute_retained_tokens_count,
 )
-from vllm.multimodal.vidcom2 import (
+from vllm.multimodal.video_prune.vidcom2 import (
     compute_retention_mask as vidcom2_compute_retention_mask,
 )
 from vllm.sequence import IntermediateTensors
@@ -1744,6 +1745,17 @@ class Qwen3VLForConditionalGeneration(
 
         raise ValueError("Only image or video modality is supported")
 
+    def _init_video_pruning(self, multimodal_config: MultiModalConfig) -> None:
+        pruning_spec = multimodal_config.get_video_pruning_spec()
+        if pruning_spec is None:
+            self.video_pruning_method: VideoPruningMethod | None = None
+            self.video_pruning_rate = multimodal_config.video_pruning_rate
+        else:
+            self.video_pruning_method, self.video_pruning_rate = pruning_spec
+        self.is_multimodal_pruning_enabled = (
+            multimodal_config.is_multimodal_pruning_enabled()
+        )
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "model"):
         super().__init__()
         config: Qwen3VLConfig = vllm_config.model_config.hf_config
@@ -1755,15 +1767,7 @@ class Qwen3VLForConditionalGeneration(
         self._tokenizer = cached_tokenizer_from_config(vllm_config.model_config)
         self.multimodal_config = multimodal_config
         self.use_data_parallel = multimodal_config.mm_encoder_tp_mode == "data"
-        pruning_spec = multimodal_config.get_video_pruning_spec()
-        if pruning_spec is None:
-            self.video_pruning_method: VideoPruningMethod | None = None
-            self.video_pruning_rate = multimodal_config.video_pruning_rate
-        else:
-            self.video_pruning_method, self.video_pruning_rate = pruning_spec
-        self.is_multimodal_pruning_enabled = (
-            multimodal_config.is_multimodal_pruning_enabled()
-        )
+        self._init_video_pruning(multimodal_config)
 
         self.use_deepstack = hasattr(config.vision_config, "deepstack_visual_indexes")
         self.deepstack_num_level = (
