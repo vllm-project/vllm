@@ -16,7 +16,7 @@ use vllm_tokenizer::DynTokenizer;
 
 use crate::reasoning::ReasoningError;
 use crate::tool::{
-    StructuralTagModel, Tool, ToolCallDelta, ToolParserError, ToolParserEvent, ToolParserOutput,
+    StructuralTagBuilder, Tool, ToolCallDelta, ToolParserError, ToolParserEvent, ToolParserOutput,
 };
 
 /// Result alias for unified parser operations.
@@ -171,8 +171,8 @@ pub trait UnifiedParser: Send {
         false
     }
 
-    /// Return the xgrammar structural-tag model used for strict tool calling.
-    fn structural_tag_model(&self) -> Option<StructuralTagModel> {
+    /// Return the xgrammar structural-tag builder used for strict tool calling.
+    fn structural_tag_builder(&self) -> Option<&dyn StructuralTagBuilder> {
         None
     }
 
