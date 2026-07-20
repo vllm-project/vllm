@@ -249,8 +249,8 @@ class IPCWeightTransferEngine(
         raise NotImplementedError(
             "The static IPC trainer path has been replaced by "
             "IPCTrainerWeightTransferEngine. Build it via "
-            "WeightTransferTrainerFactory.trainer_init(backend='ipc', ...) and "
-            "drive it with send_weights()."
+            "WeightTransferTrainerFactory.trainer_init(IPCTrainerInitInfo(...), "
+            "client=..., source=...) and drive it with send_weights()."
         )
 
 

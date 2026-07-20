@@ -119,10 +119,6 @@ class WeightTransferInitInfo(ABC):  # noqa: B024
 class TrainerInitInfo:
     """Base trainer-side init info: which trainer rank drives the transfer.
 
-    Deliberately *not* a `WeightTransferInitInfo` (that base is for the worker
-    side, with its own dict-parse machinery). The trainer and worker init-info
-    hierarchies are parallel and never interchanged.
-
     `rank` is this trainer process's rank, provided **explicitly** by the
     caller — the engine does not read it from a global process group, which is
     ambiguous once several groups (FSDP / TP / PP / EP) exist. Rank 0 is always
@@ -133,9 +129,8 @@ class TrainerInitInfo:
 
     Every concrete subclass sets a class-level `backend` string (the same key it
     registers under in `WeightTransferTrainerFactory`). The factory reads it to
-    dispatch, so callers pass only the init info — never a separate `backend`
-    argument. It is a `ClassVar` (a fixed per-backend constant), so it is not an
-    ``__init__`` field.
+    dispatch, so callers pass only the init info/ It is a `ClassVar`
+    (a fixed per-backend constant), so it is not an ``__init__`` field.
     """
 
     backend: ClassVar[str]
