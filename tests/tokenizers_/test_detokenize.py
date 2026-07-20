@@ -222,6 +222,38 @@ def test_decode_streaming(
     assert out_ids == all_input_ids[starting_index:]
 
 
+class _FakeRustTokenizer:
+    """Minimal tokenizer that mimics a fast (rust-backed) tokenizer's
+    behaviour on decode: out-of-vocab-but-representable ids decode to "",
+    while ids outside the u32 range raise OverflowError (as the rust
+    tokenizer does when converting the Python int to a u32)."""
+
+    def __init__(self, vocab_size: int):
+        self._vocab_size = vocab_size
+
+    def __len__(self) -> int:
+        return self._vocab_size
+
+    def decode(self, token_ids, *args, **kwargs) -> str:
+        for token_id in token_ids:
+            if token_id < 0 or token_id > 0xFFFFFFFF:
+                raise OverflowError("out of range integral type conversion attempted")
+        return ""
+
+
+@pytest.mark.parametrize("token_id", [-1, -12345, 2**32, 2**63])
+def test_convert_ids_list_to_tokens_out_of_range(token_id):
+    """Out-of-range prompt logprob token ids (e.g. from uninitialized
+    tensor slots) must not crash detokenization with OverflowError."""
+    from vllm.tokenizers.detokenizer_utils import convert_ids_list_to_tokens
+
+    tokenizer = _FakeRustTokenizer(vocab_size=32000)
+
+    tokens = convert_ids_list_to_tokens(tokenizer, [token_id])
+
+    assert tokens == [""]
+
+
 @pytest.mark.parametrize("tokenizer_name", TOKENIZERS)
 @pytest.mark.parametrize("fast", (True, False))
 def test_oov_decode(tokenizer, fast):
