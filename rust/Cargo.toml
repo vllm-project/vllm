@@ -142,7 +142,7 @@ vllm-server = { path = "src/server" }
 vllm-text = { path = "src/text" }
 vllm-tokenizer = { path = "src/tokenizer" }
 winnow = { version = "1.0.2", features = ["simd"] }
-xgrammar-structural-tag = "0.1.0"
+xgrammar-structural-tag = "0.2.0"
 zeromq = { version = "0.6.0", default-features = false, features = [
     "tokio-runtime",
     "all-transport",
