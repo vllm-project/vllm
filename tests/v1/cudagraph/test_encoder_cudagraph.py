@@ -12,6 +12,7 @@ Test organization:
     - TestEncoderCudaGraphVideoReplay   — video modality capture, replay
 """
 
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -105,6 +106,7 @@ def _make_manager_with_budgets(budgets: list[int]) -> EncoderCudaGraphManager:
     by patching the attributes directly after construction.
     """
     mgr = object.__new__(EncoderCudaGraphManager)
+    mgr.config = SimpleNamespace(enable_dual_path_graph=False)
     mgr.token_budgets = sorted(budgets)
     mgr.max_batch_size = 16
     mgr.use_dp = False
