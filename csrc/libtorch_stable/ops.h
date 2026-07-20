@@ -471,7 +471,7 @@ void reshape_and_cache(torch::stable::Tensor& key, torch::stable::Tensor& value,
                        torch::stable::Tensor& slot_mapping,
                        const std::string& kv_cache_dtype,
                        torch::stable::Tensor& k_scale,
-                       torch::stable::Tensor& v_scale);
+                       torch::stable::Tensor& v_scale, bool interleaved_v);
 
 void reshape_and_cache_flash(
     torch::stable::Tensor& key, torch::stable::Tensor& value,

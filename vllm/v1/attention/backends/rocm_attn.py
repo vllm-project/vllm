@@ -491,6 +491,12 @@ class RocmAttentionImpl(AttentionImpl):
         block_size = value_cache.shape[3]
         has_native_layout = has_native_kv_cache_layout(key_cache, value_cache)
 
+        # Match the fused writer's interleaved V-cache when fusion is active.
+        interleaved_v = self._use_interleaved_v_cache
+        interleaved_v_pack_factor = (
+            (16 // value_cache.element_size()) if interleaved_v else 0
+        )
+
         if block_size in (16, 32) and has_native_layout:
             # Normal 16, 32 with contiguous blocks: use vLLM native HIP C++ logic.
             PagedAttention.write_to_paged_cache(
@@ -502,6 +508,7 @@ class RocmAttentionImpl(AttentionImpl):
                 self.kv_cache_dtype,
                 layer._k_scale,
                 layer._v_scale,
+                interleaved_v,
             )
         else:
             # Non-standard blocks and hybrid attention/Mamba layouts need the
@@ -517,6 +524,7 @@ class RocmAttentionImpl(AttentionImpl):
                 self.kv_cache_dtype,
                 layer._k_scale,
                 layer._v_scale,
+                interleaved_v_pack_factor,
             )
 
     def fused_qk_norm_rope_kvcache_supported(self):

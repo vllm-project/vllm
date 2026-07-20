@@ -91,7 +91,7 @@ def _fwd_kernel(
     USE_FP8: tl.constexpr,
     CAUSAL: tl.constexpr = True,
     MAX_Q_LEN: tl.constexpr = 0,
-    INTERLEAVED_V_KX: tl.constexpr = 0,
+    INTERLEAVED_V_PACK_FACTOR: tl.constexpr = 0,
     MAX_CTX_LEN: tl.constexpr = 0,
     FP8_MIN: tl.constexpr = float8_info.min,
     FP8_MAX: tl.constexpr = float8_info.max,
@@ -185,15 +185,15 @@ def _fwd_kernel(
         )
 
         # Addressing of V (4D, or interleaved 5D mapped to flat)
-        if INTERLEAVED_V_KX > 0:
+        if INTERLEAVED_V_PACK_FACTOR > 0:
             off_v = (
                 bn[:, None] * stride_v_cache_bs
                 + cur_kv_head * stride_v_cache_h
-                + (internal_offsets[:, None] // INTERLEAVED_V_KX)
+                + (internal_offsets[:, None] // INTERLEAVED_V_PACK_FACTOR)
                 * BLOCK_DMODEL
-                * INTERLEAVED_V_KX
-                + offs_d[None, :] * INTERLEAVED_V_KX
-                + (internal_offsets[:, None] % INTERLEAVED_V_KX)
+                * INTERLEAVED_V_PACK_FACTOR
+                + offs_d[None, :] * INTERLEAVED_V_PACK_FACTOR
+                + (internal_offsets[:, None] % INTERLEAVED_V_PACK_FACTOR)
             )
         else:
             off_v = (
@@ -423,7 +423,7 @@ def _fwd_kernel_alibi(
     BLOCK_DMODEL_PADDED: tl.constexpr,  # head size padded to a power of 2
     BLOCK_N: tl.constexpr,
     SKIP_DECODE: tl.constexpr,
-    INTERLEAVED_V_KX: tl.constexpr = 0,
+    INTERLEAVED_V_PACK_FACTOR: tl.constexpr,
 ):
     # attn_bias[]
     cur_batch = tl.program_id(0)
@@ -492,14 +492,16 @@ def _fwd_kernel_alibi(
             + ((start_n + offs_n[None, :]) % block_size) * stride_k_cache_bl
             + (offs_d[:, None] % x) * stride_k_cache_x
         )
-        if INTERLEAVED_V_KX > 0:
+        if INTERLEAVED_V_PACK_FACTOR > 0:
             v_internal = (start_n + offs_n[:, None]) % block_size
             off_v = (
                 bn[:, None] * stride_v_cache_bs
                 + cur_kv_head * stride_v_cache_h
-                + (v_internal // INTERLEAVED_V_KX) * BLOCK_DMODEL * INTERLEAVED_V_KX
-                + offs_d[None, :] * INTERLEAVED_V_KX
-                + (v_internal % INTERLEAVED_V_KX)
+                + (v_internal // INTERLEAVED_V_PACK_FACTOR)
+                * BLOCK_DMODEL
+                * INTERLEAVED_V_PACK_FACTOR
+                + offs_d[None, :] * INTERLEAVED_V_PACK_FACTOR
+                + (v_internal % INTERLEAVED_V_PACK_FACTOR)
             )
         else:
             off_v = (
@@ -690,7 +692,7 @@ def context_attention_fwd(
     fp8_out_scale=None,
     sinks=None,
     is_block_table_ptr: bool = False,
-    interleaved_v_kx: int = 0,
+    interleaved_v_pack_factor: int = 0,
     causal: bool = True,
 ):
     q_dtype_is_f32 = q.dtype is torch.float32
@@ -813,7 +815,7 @@ def context_attention_fwd(
             BLOCK_DMODEL_PADDED=Lk_padded,
             BLOCK_N=BLOCK,
             SKIP_DECODE=skip_decode,
-            INTERLEAVED_V_KX=interleaved_v_kx,
+            INTERLEAVED_V_PACK_FACTOR=interleaved_v_pack_factor,
             num_warps=NUM_WARPS,
             num_stages=1,
         )
@@ -897,7 +899,7 @@ def context_attention_fwd(
         num_warps=4,
         num_stages=1,
         USE_SINKS=sinks is not None,
-        INTERLEAVED_V_KX=interleaved_v_kx,
+        INTERLEAVED_V_PACK_FACTOR=interleaved_v_pack_factor,
         CAUSAL=causal,
         **extra_kargs,
     )

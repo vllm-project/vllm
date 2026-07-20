@@ -262,7 +262,7 @@ __global__ void reshape_and_cache_kernel(
     const int64_t* __restrict__ slot_mapping,  // [num_tokens]
     const int key_stride, const int value_stride, const int num_heads,
     const int head_size, const int block_size, const int x,
-    const float* k_scale, const float* v_scale) {
+    const float* k_scale, const float* v_scale, const bool interleaved_v) {
   const int64_t token_idx = blockIdx.x;
   const int64_t slot_idx = slot_mapping[token_idx];
   if (slot_idx < 0) {
@@ -290,10 +290,20 @@ __global__ void reshape_and_cache_kernel(
       key_cache + block_idx * num_heads * h_block_count * block_size * x +
       head_idx * h_block_count * block_size * x + h_block * block_size * x +
       block_offset * x;
-  const int64_t tgt_value_start =
-      block_idx * num_heads * h_block_count * x * block_size +
-      head_idx * h_block_count * x * block_size + h_block * x * block_size +
-      block_offset;
+  // V cache target: standard [.., head_size, block_size], or the interleaved
+  // [.., block_size/x, head_size, x] the fused AITER writer/reader use.
+  const int64_t v_head_base = block_idx * num_heads * head_size * block_size +
+                              head_idx * head_size * block_size;
+  int64_t tgt_value_start;
+  int v_dim_stride;
+  if (interleaved_v) {
+    tgt_value_start = v_head_base + (block_offset / x) * (head_size * x) +
+                      (h_block * x) * x + (block_offset % x);
+    v_dim_stride = x;
+  } else {
+    tgt_value_start = v_head_base + h_block * x * block_size + block_offset;
+    v_dim_stride = block_size;
+  }
 
   constexpr int VEC_SIZE = (sizeof(scalar_t) == 2) ? 8 : 4;
   float k_scale_val = (kv_dt == Fp8KVCacheDataType::kAuto) ? 0.f : *k_scale;
@@ -307,7 +317,7 @@ __global__ void reshape_and_cache_kernel(
   cache_t* __restrict__ value_dst = value_cache + tgt_value_start;
 #pragma unroll
   for (int i = 0; i < x; i++) {
-    v_op(value_dst[i * block_size], value_src[i]);
+    v_op(value_dst[i * v_dim_stride], value_src[i]);
   }
 }
 
@@ -695,7 +705,7 @@ __global__ void cp_gather_indexer_k_quant_cache_kernel(
           slot_mapping.const_data_ptr<int64_t>(), key_stride, value_stride, \
           num_heads, head_size, block_size, x,                              \
           reinterpret_cast<const float*>(k_scale.data_ptr()),               \
-          reinterpret_cast<const float*>(v_scale.data_ptr()));
+          reinterpret_cast<const float*>(v_scale.data_ptr()), interleaved_v);
 
 void reshape_and_cache(
     torch::stable::Tensor& key,    // [num_tokens, num_heads, head_size]
@@ -703,10 +713,12 @@ void reshape_and_cache(
     torch::stable::Tensor&
         key_cache,  // [num_blocks, num_heads, head_size/x, block_size, x]
     torch::stable::Tensor&
-        value_cache,  // [num_blocks, num_heads, head_size, block_size]
+        value_cache,  // [num_blocks, num_heads, head_size, block_size], or the
+                      // interleaved [.., block_size/x, head_size, x] when
+                      // interleaved_v is set
     torch::stable::Tensor& slot_mapping,  // [num_tokens]
     const std::string& kv_cache_dtype, torch::stable::Tensor& k_scale,
-    torch::stable::Tensor& v_scale) {
+    torch::stable::Tensor& v_scale, bool interleaved_v) {
   int num_tokens = slot_mapping.size(0);
   int num_heads = key.size(1);
   int head_size = key.size(2);
