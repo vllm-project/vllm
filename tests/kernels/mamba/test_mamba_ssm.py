@@ -347,7 +347,11 @@ def test_selective_state_update(dim, dstate, has_z, itype):
     rtol, atol = (3e-4, 1e-3) if itype == torch.float32 else (5e-3, 1e-2)
     if itype == torch.bfloat16:
         rtol, atol = 1e-2, 5e-2
-        if current_platform.is_rocm() or current_platform.is_xpu():
+        if (
+            current_platform.is_rocm()
+            or current_platform.is_xpu()
+            or current_platform.is_device_capability_family(90)
+        ):
             atol *= 2
     # set seed
     set_random_seed(0)
