@@ -18,6 +18,7 @@
 
 from typing import TYPE_CHECKING
 
+import torch.nn.functional as F
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 
 from vllm.model_executor.models.transformers.base import Base
@@ -59,9 +60,20 @@ def vllm_attention_forward(
     if scaling is not None:
         self_attn.impl.scale = float(scaling)
     hidden = query.shape[-2]
+    head_dim_qk = query.shape[-1]
+    head_dim_v = value.shape[-1]
     query, key, value = (x.transpose(1, 2) for x in (query, key, value))
     query, key, value = (x.reshape(hidden, -1) for x in (query, key, value))
-    return self_attn.forward(query, key, value), None
+    # Pad `value` if the head sizes are different but we are not using a DiffKV backend.
+    pad_v = head_dim_v != head_dim_qk and self_attn.head_size == self_attn.head_size_v
+    if pad_v:
+        value = F.pad(value.view(-1, head_dim_v), (0, head_dim_qk - head_dim_v))
+        value = value.reshape(hidden, -1)
+    attn_output = self_attn.forward(query, key, value)
+    if pad_v:
+        attn_output = attn_output.view(-1, head_dim_qk)[..., :head_dim_v]
+        attn_output = attn_output.reshape(hidden, -1)
+    return attn_output, None
 
 
 ALL_ATTENTION_FUNCTIONS["vllm"] = vllm_attention_forward
