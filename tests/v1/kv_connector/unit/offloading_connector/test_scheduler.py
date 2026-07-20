@@ -64,6 +64,47 @@ def test_scheduler_reports_allocation_failure(request_runner):
     assert reduced[_ConnectorMetricName.ALLOCATION_FAILURE] == 1
 
 
+@pytest.mark.parametrize("async_scheduling", [True, False])
+@pytest.mark.parametrize("prompt_offset", [-1, -2])
+def test_last_block_offloaded_at_request_finish(
+    request_runner, async_scheduling: bool, prompt_offset: int
+):
+    """EOS fills the last block at request finish — verify req_status is kept alive.
+
+    prompt = block_size + prompt_offset tokens → not a full block at schedule time,
+    so _build_store_jobs creates no store job. After EOS, request_finished
+    keeps req_status alive so _build_store_jobs can process it on the next step.
+
+    prompt_offset=-1: EOS fills the block → store job created on next step.
+    prompt_offset=-2: block remains partial → no store job, cleanup in
+    _build_store_jobs deletes req_status.
+    """
+    block_size = 4
+    runner = request_runner(
+        block_size=block_size,
+        num_gpu_blocks=10,
+        async_scheduling=async_scheduling,
+    )
+    # prompt = block_size + prompt_offset tokens
+    runner.new_request(token_ids=[0] * (block_size + prompt_offset))
+    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+        generate_store_output(list(keys))
+    )
+
+    # Run with one step (EOS)
+    runner.run(
+        decoded_tokens=[EOS_TOKEN_ID],
+    )
+
+    cs = runner.connector_scheduler
+    # Verify req_status is kept alive for _build_store_jobs to process
+    # regardless of whether there are storable blocks
+    assert "0" in cs._req_status, (
+        "req_status was deleted but should be kept alive "
+        "for _build_store_jobs to process finished_req_ids."
+    )
+
+
 def test_scheduler_reports_lookup_sync_delay(request_runner):
     runner = request_runner(
         block_size=4,
@@ -560,11 +601,19 @@ def test_two_groups_full_and_sliding_window(request_runner, async_scheduling: bo
         # Group 1 (sliding window, window=2): only the last 2 blocks
         #   are within the window → loads blocks 1,2
         expected_loaded=((0, 0), (0, 1), (0, 2), (1, 1), (1, 2)),
+        # The deferred store from the previous request's last block
+        # completes during this step, and its blocks are flushed because
+        # they were reallocated to the new request.
+        # Only block 1 (sliding window group) is stored — block 0's
+        # deferred store is flushed because it was reallocated.
+        expected_stored=((0, 1),),
+        expected_flushed=((0, 1),),
     )
 
-    # one touch in get_num_new_matched_tokens x 2 groups
+    # 4 touch calls: 2 from get_num_new_matched_tokens (2 groups)
+    # + 2 from _get_reqs_to_store (2 groups)
     touch_calls = runner.manager.touch.call_args_list
-    assert len(touch_calls) == 2
+    assert len(touch_calls) == 4
     # full attention group touched all 3 blocks
     assert len(touch_calls[0].args[0]) == 3
     # sliding window group touched just the last 2 blocks
