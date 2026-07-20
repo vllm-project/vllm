@@ -81,6 +81,7 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
     ops_colqwen3="OpsColQwen3Config",
     qwen3_vl_nemotron_embed="Qwen3VLNemotronEmbedConfig",
     cosmos3_omni="Cosmos3Config",
+    cosmos3_edge="Cosmos3EdgeConfig",
     diffusion_gemma="DiffusionGemmaConfig",
     deepseek_vl_v2="DeepseekVLV2Config",
     deepseek_v32="DeepseekV3Config",
@@ -107,6 +108,7 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
     minimax_m3_vl="MiniMaxM3Config",
     minimax_m3_mtp="MiniMaxM3MTPConfig",
     moondream3="Moondream3Config",
+    moss_transcribe_diarize="MossTranscribeDiarizeConfig",
     eagle="EAGLEConfig",
     speculators="SpeculatorsConfig",
     nemotron="NemotronConfig",
@@ -125,11 +127,21 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
     laguna="LagunaConfig",
     lfm2_moe="Lfm2MoeConfig",
     **{"unlimited-ocr": "UnlimitedOCRConfig"},
+    inkling_mm_model="InklingMMConfig",
+    inkling_model="InklingModelConfig",
 )
 
 _SPECULATIVE_DECODING_CONFIGS: set[str] = {"eagle", "speculators", "medusa"}
 
 _PATCH_HF_VALIDATE_ROPE: set[str] = {"sarvam_mla"}
+
+# Model types whose checkpoints declare `layer_types` entries that upstream
+# transformers has not added to `ALLOWED_LAYER_TYPES` yet, so its strict config
+# validation rejects them (e.g.  GLM-5.2 `glm_moe_dsa` use
+# `deepseek_sparse_attention`). Extend the allowed set for these model types.
+_PATCH_HF_ALLOWED_LAYER_TYPES: dict[str, tuple[str, ...]] = {
+    "glm_moe_dsa": ("deepseek_sparse_attention",),
+}
 
 _CONFIG_ATTRS_MAPPING: dict[str, str] = {
     "llm_config": "text_config",
@@ -204,6 +216,24 @@ def _patch_hf_transformers_validate_rope():
     PretrainedConfig.validate_rope = patched_validate_rope
 
 
+def _patch_hf_transformers_allowed_layer_types(
+    extra_layer_types: tuple[str, ...],
+) -> None:
+    """Extend transformers' ``ALLOWED_LAYER_TYPES`` so its strict config
+    validation accepts layer types (e.g. ``deepseek_sparse_attention``) that a
+    checkpoint declares but upstream transformers has not registered yet.
+    """
+    import transformers.configuration_utils as hf_configuration_utils
+
+    missing = tuple(
+        layer_type
+        for layer_type in extra_layer_types
+        if layer_type not in hf_configuration_utils.ALLOWED_LAYER_TYPES
+    )
+    if missing:
+        hf_configuration_utils.ALLOWED_LAYER_TYPES += missing
+
+
 class HFConfigParser(ConfigParserBase):
     def parse(
         self,
@@ -245,6 +275,9 @@ class HFConfigParser(ConfigParserBase):
 
         if model_type in _PATCH_HF_VALIDATE_ROPE:
             _patch_hf_transformers_validate_rope()
+
+        if extra_layer_types := _PATCH_HF_ALLOWED_LAYER_TYPES.get(model_type):
+            _patch_hf_transformers_allowed_layer_types(extra_layer_types)
 
         if model_type in _SPECULATIVE_DECODING_CONFIGS:
             config_class = _CONFIG_REGISTRY[model_type]
