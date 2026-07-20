@@ -54,6 +54,7 @@ def gdn_replayssm_spec_circular_kernel(
     USE_QK_L2NORM_IN_KERNEL: tl.constexpr,
     IS_FLUSH: tl.constexpr,
     NULL_BLOCK_ID: tl.constexpr,
+    DOT_PRECISION: tl.constexpr,
 ):
     i_v = tl.program_id(0)
     i_n = tl.program_id(1)
@@ -141,7 +142,7 @@ def gdn_replayssm_spec_circular_kernel(
     b_d_all = tl.load(
         p_d_main, mask=mask_v[:, None] & cache_valid[None, :], other=0.0
     ).to(tl.float32)
-    b_d_scaled = (b_d_all * b_replay_decay[None, :]).to(mixed_qkv.dtype.element_ty)
+    b_d_scaled = b_d_all * b_replay_decay[None, :]
 
     if USE_QK_L2NORM_IN_KERNEL:
         qnorm_acc = tl.zeros([BS], dtype=tl.float32)
@@ -206,8 +207,8 @@ def gdn_replayssm_spec_circular_kernel(
             mask=ld_s,
             other=0.0,
         ).to(tl.float32)
-        q_tile = (q_tile * (q_rnorm * scale)[:, None]).to(mixed_qkv.dtype.element_ty)
-        k_tile = (k_tile * k_rnorm[:, None]).to(mixed_qkv.dtype.element_ty)
+        q_tile = q_tile * (q_rnorm * scale)[:, None]
+        k_tile = k_tile * k_rnorm[:, None]
 
         p_h0 = (
             h0
@@ -216,9 +217,9 @@ def gdn_replayssm_spec_circular_kernel(
             + o_v[:, None] * K
             + o_kt[None, :]
         )
-        sc_tile = tl.load(
-            p_h0, mask=mask_v[:, None] & mask_kt[None, :], other=0.0
-        ).to(mixed_qkv.dtype.element_ty)
+        sc_tile = tl.load(p_h0, mask=mask_v[:, None] & mask_kt[None, :], other=0.0).to(
+            tl.float32
+        )
         # cached-key history load -> phys_c
         p_k = k_cache + (
             state_idx * stride_k_slot
@@ -227,18 +228,22 @@ def gdn_replayssm_spec_circular_kernel(
         )
         khist_tile = tl.load(
             p_k, mask=cache_valid[:, None] & mask_kt[None, :], other=0.0
-        ).to(mixed_qkv.dtype.element_ty)
+        ).to(tl.float32)
 
         qT = tl.trans(q_tile)
         kT = tl.trans(k_tile)
-        kk_mat += tl.dot(k_tile, kT)
-        kq_mat += tl.dot(k_tile, qT)
+        kk_mat += tl.dot(k_tile, kT, input_precision=DOT_PRECISION)
+        kq_mat += tl.dot(k_tile, qT, input_precision=DOT_PRECISION)
 
         if IS_FLUSH:
-            sw_f = tl.dot(b_d_scaled, khist_tile, acc=b_total_decay * sc_tile.to(tl.float32))
-            sw_tile = sw_f.to(mixed_qkv.dtype.element_ty)
-            hw_q += tl.dot(sw_tile, qT)
-            hw_k += tl.dot(sw_tile, kT)
+            sw_f = tl.dot(
+                b_d_scaled,
+                khist_tile,
+                acc=b_total_decay * sc_tile,
+                input_precision=DOT_PRECISION,
+            )
+            hw_q += tl.dot(sw_f, qT, input_precision=DOT_PRECISION)
+            hw_k += tl.dot(sw_f, kT, input_precision=DOT_PRECISION)
             p_ht = (
                 ht
                 + state_idx * stride_state_slot
@@ -246,12 +251,17 @@ def gdn_replayssm_spec_circular_kernel(
                 + o_v[:, None] * K
                 + o_kt[None, :]
             )
-            tl.store(p_ht, sw_tile, mask=mask_v[:, None] & mask_kt[None, :])
+            # fp32 store to the fp32 checkpoint page
+            tl.store(
+                p_ht,
+                sw_f.to(p_ht.dtype.element_ty),
+                mask=mask_v[:, None] & mask_kt[None, :],
+            )
         else:
-            hw_q += tl.dot(sc_tile, qT)
-            hw_k += tl.dot(sc_tile, kT)
-            scores_q += tl.dot(khist_tile, qT)
-            scores_k += tl.dot(khist_tile, kT)
+            hw_q += tl.dot(sc_tile, qT, input_precision=DOT_PRECISION)
+            hw_k += tl.dot(sc_tile, kT, input_precision=DOT_PRECISION)
+            scores_q += tl.dot(khist_tile, qT, input_precision=DOT_PRECISION)
+            scores_k += tl.dot(khist_tile, kT, input_precision=DOT_PRECISION)
 
         if write_k:
             # spec key store -> phys_spec (circular)
@@ -262,15 +272,19 @@ def gdn_replayssm_spec_circular_kernel(
             )
             tl.store(
                 p_cur_k,
-                k_tile,
+                k_tile.to(p_cur_k.dtype.element_ty),
                 mask=mask_s[:, None]
                 & mask_kt[None, :]
                 & ((b_write_pos + o_s[:, None]) < MAX_CACHE_LEN),
             )
 
     if not IS_FLUSH:
-        hw_q = b_total_decay * hw_q + tl.dot(b_d_scaled, scores_q.to(b_d_scaled.dtype))
-        hw_k = b_total_decay * hw_k + tl.dot(b_d_scaled, scores_k.to(b_d_scaled.dtype))
+        hw_q = b_total_decay * hw_q + tl.dot(
+            b_d_scaled, scores_q, input_precision=DOT_PRECISION
+        )
+        hw_k = b_total_decay * hw_k + tl.dot(
+            b_d_scaled, scores_k, input_precision=DOT_PRECISION
+        )
 
     # ------------------------------------------------------------------
     # strictly-lower A and T = (I + A)^{-1}.
@@ -297,7 +311,9 @@ def gdn_replayssm_spec_circular_kernel(
         + i_hv * V
         + o_v[:, None]
     )
-    v_tile = tl.load(p_v, mask=mask_v[:, None] & mask_s[None, :], other=0.0).to(tl.float32)
+    v_tile = tl.load(p_v, mask=mask_v[:, None] & mask_s[None, :], other=0.0).to(
+        tl.float32
+    )
     R_mat = beta_s[None, :] * (v_tile - expG_s[None, :] * hw_k)
     D_spec = tl.zeros([BV, BS], dtype=tl.float32)
     for j in tl.static_range(BS):
@@ -366,9 +382,9 @@ def _advance_gdn_spec_cursors_kernel(
     write_pos = tl.load(write_pos_ptr + blk, mask=valid, other=0).to(tl.int32)
     cache_base = tl.load(cache_base_ptr + blk, mask=valid, other=0).to(tl.int32)
     is_flush_cur = tl.load(is_flush_ptr + blk, mask=valid, other=0).to(tl.int32)
-    num_acc = tl.load(
-        num_accepted_ptr + offs * stride_na, mask=valid, other=0
-    ).to(tl.int32)
+    num_acc = tl.load(num_accepted_ptr + offs * stride_na, mask=valid, other=0).to(
+        tl.int32
+    )
 
     total_commit = num_acc
     flush_now = (total_commit > 0) & (is_flush_cur != 0)
@@ -407,9 +423,9 @@ def _reset_gdn_replayssm_spec_cursors_kernel(
     blk = tl.load(
         state_batch_indices_ptr + offs * stride_sbi, mask=row_mask, other=NULL_BLOCK_ID
     ).to(tl.int64)
-    do_reset = tl.load(
-        do_reset_ptr + offs * stride_reset, mask=row_mask, other=0
-    ).to(tl.int32)
+    do_reset = tl.load(do_reset_ptr + offs * stride_reset, mask=row_mask, other=0).to(
+        tl.int32
+    )
     do = row_mask & (blk > NULL_BLOCK_ID) & (do_reset != 0)
 
     tl.store(write_pos_ptr + blk, tl.zeros_like(blk).to(tl.int32), mask=do)
@@ -450,6 +466,7 @@ def _launch_gdn_spec(
     num_stages,
     nk,
     null_block_id,
+    dot_precision,
 ):
     num_slots, HV, V, K = checkpoint_state.shape
     qkv_dim = mixed_qkv.shape[1]
@@ -520,6 +537,7 @@ def _launch_gdn_spec(
         USE_QK_L2NORM_IN_KERNEL=use_qk_l2norm_in_kernel,
         IS_FLUSH=is_flush_kernel,
         NULL_BLOCK_ID=null_block_id,
+        DOT_PRECISION=dot_precision,
         num_warps=num_warps,
         num_stages=num_stages,
     )
@@ -547,6 +565,8 @@ def gdn_replayssm_spec_decode(
     use_qk_l2norm_in_kernel: bool = True,
     null_block_id: int = 0,
     launch_mode: str = "both",
+    dot_precision: str = "tf32",
+    dot_precision_flush: str | None = None,
 ):
     """GDN cached speculative-decode on a CIRCULAR d/k/g cache (vLLM packed varlen).
 
@@ -560,22 +580,70 @@ def gdn_replayssm_spec_decode(
         scale = checkpoint_state.shape[-1] ** -0.5
     if is_flush.dtype != torch.int8:
         is_flush = is_flush.to(torch.int8)
-    vb, vw, vnk, vns = get_replayssm_config("gdn_spec_verify", max_spec_len=max_spec_len)
+    if dot_precision_flush is None:
+        dot_precision_flush = dot_precision
+    vb, vw, vnk, vns = get_replayssm_config(
+        "gdn_spec_verify", max_spec_len=max_spec_len
+    )
     fb, fw, fnk, fns = get_replayssm_config("gdn_spec_flush", max_spec_len=max_spec_len)
 
     if launch_mode in ("both", "verify"):
         _launch_gdn_spec(
-            mixed_qkv, a, b, A_log, dt_bias, out, checkpoint_state,
-            d_cache, k_cache, g_cache, query_start_loc, ssm_state_indices,
-            write_pos, cache_base, is_flush, scale, max_cache_len, max_spec_len,
-            use_qk_l2norm_in_kernel, False, vb, vw, vns, vnk, null_block_id,
+            mixed_qkv,
+            a,
+            b,
+            A_log,
+            dt_bias,
+            out,
+            checkpoint_state,
+            d_cache,
+            k_cache,
+            g_cache,
+            query_start_loc,
+            ssm_state_indices,
+            write_pos,
+            cache_base,
+            is_flush,
+            scale,
+            max_cache_len,
+            max_spec_len,
+            use_qk_l2norm_in_kernel,
+            False,
+            vb,
+            vw,
+            vns,
+            vnk,
+            null_block_id,
+            dot_precision,
         )
     if launch_mode in ("both", "flush"):
         _launch_gdn_spec(
-            mixed_qkv, a, b, A_log, dt_bias, out, checkpoint_state,
-            d_cache, k_cache, g_cache, query_start_loc, ssm_state_indices,
-            write_pos, cache_base, is_flush, scale, max_cache_len, max_spec_len,
-            use_qk_l2norm_in_kernel, True, fb, fw, fns, fnk, null_block_id,
+            mixed_qkv,
+            a,
+            b,
+            A_log,
+            dt_bias,
+            out,
+            checkpoint_state,
+            d_cache,
+            k_cache,
+            g_cache,
+            query_start_loc,
+            ssm_state_indices,
+            write_pos,
+            cache_base,
+            is_flush,
+            scale,
+            max_cache_len,
+            max_spec_len,
+            use_qk_l2norm_in_kernel,
+            True,
+            fb,
+            fw,
+            fns,
+            fnk,
+            null_block_id,
+            dot_precision_flush,
         )
     return out
 

@@ -184,19 +184,22 @@ class MambaStateDtypeCalculator:
     ) -> tuple[torch.dtype, ...]:
         """GDN ReplaySSM state dtypes for the SPECULATIVE-decode kernel.
 
-        Same ``d/k/g`` ring page as the non-spec ReplaySSM path, but the ``ssm``
-        checkpoint is forced to ``float32``. Call only when use_replayssm_spec
-        is on.
+        The ``ssm`` checkpoint is forced to ``float32``; the ``d``/``k`` ring
+        caches use fp16 for bf16 activations (same rule as the non-spec path).
+        Call only when use_replayssm_spec is on.
         """
         conv_dtype, ssm_dtype = cls._mamba_state_dtype(
             model_dtype, mamba_cache_dtype, mamba_ssm_cache_dtype
         )
         activation_dtype = get_kv_cache_torch_dtype("auto", model_dtype)
+        cache_dtype = (
+            torch.float16 if activation_dtype == torch.bfloat16 else activation_dtype
+        )
         return (
             conv_dtype,
             torch.float32,  # fp32 checkpoint
-            activation_dtype,  # d_cache
-            activation_dtype,  # k_cache
+            cache_dtype,  # d_cache
+            cache_dtype,  # k_cache
             torch.float32,  # g_cache
         )
 
