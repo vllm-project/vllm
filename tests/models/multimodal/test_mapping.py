@@ -111,6 +111,7 @@ def test_cosmos3_modelopt_quantizer_weights_mapper():
         "language_model.model.layers.0.mlp.down_proj.input_scale",
     ]
 
+
 def test_cosmos3_edge_checkpoint_weights_mapper():
     from vllm.model_executor.models.cosmos3_edge import (
         Cosmos3EdgeForConditionalGeneration,
