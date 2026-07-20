@@ -19,6 +19,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.scheduler import (
     OffloadingConnectorScheduler,
     RequestOffloadState,
+    is_store_reachable_swa_chunk,
 )
 from vllm.v1.core.kv_cache_utils import BlockHash
 from vllm.v1.kv_cache_interface import (
@@ -124,6 +125,55 @@ def test_scheduler_reports_lookup_sync_delay(request_runner):
     reduced = _reduce_kv_connector_stats(runner)
     assert reduced[f"{_ConnectorMetricName.LOOKUP_SYNC_DELAY}_count"] == 1
     assert reduced[f"{_ConnectorMetricName.LOOKUP_SYNC_DELAY}_sum"] > 0
+
+
+@pytest.mark.parametrize(
+    (
+        "absolute_chunk_index",
+        "storable_chunk_count",
+        "alignment_chunk_count",
+        "sliding_window_chunks",
+        "is_eagle_group",
+        "expected",
+    ),
+    [
+        # Full 64-chunk segment: ordinary SWA keeps 62-63; EAGLE also keeps 61.
+        (61, 64, 64, 2, False, False),
+        (62, 64, 64, 2, False, True),
+        (60, 64, 64, 2, True, False),
+        (61, 64, 64, 2, True, True),
+        # Partial 48-of-64 segment: the reachable tail ends at chunk 47.
+        (45, 48, 64, 2, False, False),
+        (46, 48, 64, 2, False, True),
+        (44, 48, 64, 2, True, False),
+        (45, 48, 64, 2, True, True),
+        # A later partial segment uses its own actual end (chunks 64-79).
+        (76, 80, 64, 3, False, False),
+        (77, 80, 64, 3, False, True),
+        # No alignment means no store-pruning optimization.
+        (0, 1, None, None, False, True),
+        # A tail at least as large as the segment keeps every chunk.
+        (0, 2, 64, 2, False, True),
+    ],
+)
+def test_is_store_reachable_swa_chunk(
+    absolute_chunk_index: int,
+    storable_chunk_count: int,
+    alignment_chunk_count: int | None,
+    sliding_window_chunks: int | None,
+    is_eagle_group: bool,
+    expected: bool,
+):
+    assert (
+        is_store_reachable_swa_chunk(
+            absolute_chunk_index,
+            storable_chunk_count,
+            alignment_chunk_count,
+            sliding_window_chunks,
+            is_eagle_group,
+        )
+        is expected
+    )
 
 
 def test_scheduler_reports_lookup_async_delay_on_resolve(request_runner):
