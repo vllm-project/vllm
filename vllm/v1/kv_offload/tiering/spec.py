@@ -36,17 +36,18 @@ from typing import Any
 import torch
 from typing_extensions import override
 
-from vllm.config import VllmConfig
 from vllm.logger import init_logger
-from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.kv_offload.base import (
     CanonicalKVCaches,
+    OffloadingHistogramMetadata,
     OffloadingManager,
     OffloadingMetricMetadata,
 )
+from vllm.v1.kv_offload.config import OffloadingConfig
 from vllm.v1.kv_offload.cpu.gpu_worker import CPUOffloadingWorker
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 from vllm.v1.kv_offload.cpu.spec import CPUOffloadingSpec
+from vllm.v1.kv_offload.tiering.base import TieringOffloadingMetrics
 from vllm.v1.kv_offload.tiering.factory import SecondaryTierFactory
 from vllm.v1.kv_offload.tiering.manager import (
     CPUPrimaryTierOffloadingManager,
@@ -77,6 +78,50 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
         cls, extra_config: dict[str, Any]
     ) -> dict[str, OffloadingMetricMetadata]:
         metrics = super().build_metric_definitions(extra_config)
+        metrics[TieringOffloadingMetrics.LOOKUP_SYNC_DELAY] = (
+            OffloadingHistogramMetadata(
+                documentation=(
+                    "Histogram of total blocking time spent querying secondary "
+                    "tiers for a request, accumulated from first lookup until "
+                    "the request is allocated or finishes, in seconds."
+                ),
+                buckets=(
+                    0.00001,
+                    0.00005,
+                    0.0001,
+                    0.0005,
+                    0.001,
+                    0.005,
+                    0.01,
+                    0.05,
+                    0.1,
+                    0.5,
+                    1,
+                ),
+            )
+        )
+        metrics[TieringOffloadingMetrics.LOOKUP_ASYNC_DELAY] = (
+            OffloadingHistogramMetadata(
+                documentation=(
+                    "Histogram of wall-clock time from a request's first deferred "
+                    "secondary-tier lookup until the request is allocated or "
+                    "finishes, in seconds."
+                ),
+                buckets=(
+                    0.0001,
+                    0.0005,
+                    0.001,
+                    0.005,
+                    0.01,
+                    0.05,
+                    0.1,
+                    0.5,
+                    1,
+                    5,
+                    10,
+                ),
+            )
+        )
         secondary_tier_configs = extra_config.get("secondary_tiers", [])
         if not isinstance(secondary_tier_configs, list):
             raise ValueError("secondary_tiers must be a list of tier configurations")
@@ -87,8 +132,8 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
             metrics.update(tier_cls.build_metric_definitions(tier_config))
         return metrics
 
-    def __init__(self, vllm_config: VllmConfig, kv_cache_config: KVCacheConfig):
-        super().__init__(vllm_config, kv_cache_config)
+    def __init__(self, config: OffloadingConfig):
+        super().__init__(config)
         # Redeclare for mypy: parent sets this but `--follow-imports skip` hides it
         self._manager: OffloadingManager | None = None
         if self.kv_events_config.self_describing_kv_events:
@@ -108,6 +153,11 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
         # Scheduler-side mmap (rank=None); kept for cleanup
         self._scheduler_mmap: SharedOffloadRegion | None = None
 
+        # engine_id is unique per DP replica (suffixed with _dp{rank} in both
+        # the Ray and multiprocessing paths), so it names a per-replica offload
+        # region.
+        self._engine_id = config.engine_id
+
     @override
     def get_manager(self) -> OffloadingManager:
         """
@@ -124,10 +174,10 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
             # Create scheduler-side SharedOffloadRegion (rank=None) so the
             # primary tier can eagerly create a memoryview over _base.
             scheduler_mmap = SharedOffloadRegion(
-                instance_id=self.vllm_config.instance_id,
+                engine_id=self._engine_id,
                 num_blocks=self.num_blocks,
                 rank=None,
-                kv_bytes_per_block=self.kv_bytes_per_offloaded_block,
+                kv_bytes_per_block=self.kv_bytes_per_chunk,
                 cpu_page_size=self.cpu_page_size_per_worker,
             )
             self._scheduler_mmap = scheduler_mmap
@@ -168,7 +218,6 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
             tiering_manager = TieringOffloadingManager(
                 primary_tier=primary_tier,
                 secondary_tiers=secondary_tiers,
-                enable_events=self.kv_events_config.enable_kv_cache_events,
             )
             if int(self.extra_config.get("store_threshold", 0)) >= 2:
                 raise ValueError(
@@ -188,17 +237,20 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
 
     @override
     def create_worker(self, kv_caches: CanonicalKVCaches) -> CPUOffloadingWorker:
-        rank = torch.accelerator.current_device_index()
+        # Fold the global physical device index into the replica-local
+        # [0, world_size) slot range.
+        world_size = self.config.parallel.world_size
+        rank = torch.accelerator.current_device_index() % world_size
         worker_mmap = SharedOffloadRegion(
-            instance_id=self.vllm_config.instance_id,
+            engine_id=self._engine_id,
             num_blocks=self.num_blocks,
             rank=rank,
-            kv_bytes_per_block=self.kv_bytes_per_offloaded_block,
+            kv_bytes_per_block=self.kv_bytes_per_chunk,
             cpu_page_size=self.cpu_page_size_per_worker,
         )
         return CPUOffloadingWorker(
             kv_caches=kv_caches,
-            block_size_factor=self.block_size_factor,
+            blocks_per_chunk=self.blocks_per_chunk,
             num_cpu_blocks=self.num_blocks,
             mmap_region=worker_mmap,
         )

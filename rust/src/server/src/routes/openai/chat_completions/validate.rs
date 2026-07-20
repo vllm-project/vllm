@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use super::types::ChatCompletionRequest;
 use crate::error::{ApiError, bail_invalid_request};
 use crate::routes::openai::utils::types::{ChatMessage, Tool};
@@ -93,11 +96,6 @@ pub(super) fn validate_request_compat(
         request.mm_processor_kwargs.as_ref(),
         "mm_processor_kwargs",
         "mm_processor_kwargs is not supported.",
-    )?;
-    reject_non_default(
-        request.repetition_detection.as_ref(),
-        "repetition_detection",
-        "repetition_detection is not supported.",
     )?;
 
     Ok(())
