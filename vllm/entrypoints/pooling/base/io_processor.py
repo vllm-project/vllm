@@ -75,7 +75,9 @@ class PoolingIOProcessor:
     def create_pooling_params(self, request):
         return request.to_pooling_params()
 
-    def get_request_factory_online(self, ctx: PoolingServeContext):
+    def get_request_factory_online(
+        self, ctx: PoolingServeContext
+    ) -> tuple[RequestFactory, int]:
         request = ctx.request
         renderer = self.renderer
 
@@ -96,7 +98,6 @@ class PoolingIOProcessor:
             )
 
             mm_config = self.model_config.multimodal_config
-
             tok_params = request.build_tok_params(self.model_config)
             chat_params = request.build_chat_params(
                 self.chat_template, self.chat_template_content_format
