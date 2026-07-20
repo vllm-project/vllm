@@ -160,8 +160,6 @@ def apply_split_decodes_and_prefills(
     decode_threshold: int,
     require_uniform: bool,
     padded_num_tokens: int | None = None,
-    is_prefilling: list[bool] | None = None,
-    treat_short_extends_as_decodes: bool = True,
 ):
     """Helper function to apply split_decodes_and_prefills and return
     the results."""
@@ -175,14 +173,11 @@ def apply_split_decodes_and_prefills(
 
     if padded_num_tokens is not None:
         common_metadata.num_actual_tokens = padded_num_tokens
-    if is_prefilling is not None:
-        common_metadata.is_prefilling = torch.tensor(is_prefilling)
 
     return split_decodes_and_prefills(
         common_metadata,
         decode_threshold=decode_threshold,
         require_uniform=require_uniform,
-        treat_short_extends_as_decodes=treat_short_extends_as_decodes,
     )
 
 
@@ -239,17 +234,6 @@ def test_split_decodes_and_prefills_uniform_all_ones():
     assert num_prefills == 0
     assert num_decode_tokens == 3
     assert num_prefill_tokens == 0
-
-
-def test_split_decodes_and_prefills_uniform_short_extend():
-    result = apply_split_decodes_and_prefills(
-        [1, 1],
-        decode_threshold=1,
-        require_uniform=True,
-        is_prefilling=[False, True],
-        treat_short_extends_as_decodes=False,
-    )
-    assert result == (1, 1, 1, 1)
 
 
 def test_split_decodes_and_prefills_uniform_all_short_decodes():
