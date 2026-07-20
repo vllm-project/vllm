@@ -364,6 +364,9 @@ class OffloadingConnectorScheduler:
         vllm_config: VllmConfig,
         kv_cache_config: KVCacheConfig,
     ):
+        # Kept for capability checks by the core scheduler
+        # (e.g. routed-experts offload buffer sizing).
+        self.spec = spec
         self.config = SchedulerOffloadConfig.from_spec(
             spec, vllm_config, kv_cache_config
         )

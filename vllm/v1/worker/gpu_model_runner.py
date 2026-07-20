@@ -59,8 +59,14 @@ from vllm.lora.layers import LoRAMapping, LoRAMappingType
 from vllm.model_executor.layers.attention import Attention, MLAAttention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.fused_moe.all2all_utils import get_ep_all2all_manager
-from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
+from vllm.model_executor.layers.fused_moe.routed_experts_capture import (
     RoutedExpertsCapturer,
+    RoutedExpertsTensors,
+    RoutedExpertsWorkerWriter,
+    RoutedExpertsWriteTask,
+    get_routed_experts_output_rank,
+    get_routing_slot_shape_and_dtype,
+    require_full_attn_group_id,
 )
 from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
     initialize_mamba_ssu_backend,
@@ -178,8 +184,6 @@ from vllm.v1.outputs import (
     LogprobsTensors,
     ModelRunnerOutput,
     PoolerOutput,
-    RoutedExpertsLists,
-    RoutedExpertsTensors,
     SamplerOutput,
     make_empty_encoder_model_runner_output,
 )
@@ -264,11 +268,12 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
         invalid_req_indices: list[int],
         async_output_copy_stream: torch.cuda.Stream,
         vocab_size: int,
-        routed_experts: RoutedExpertsTensors | None = None,
+        routed_experts_write_task: RoutedExpertsWriteTask | None = None,
         check_ep_fault: bool = False,
-    ):
+    ) -> None:
         self._model_runner_output = model_runner_output
         self._invalid_req_indices = invalid_req_indices
+        self._routed_experts_write_task = routed_experts_write_task
 
         # Event on the copy stream so we can synchronize the non-blocking copy.
         # Blocking (sleep) event to avoid busy-polling the CUDA driver lock.
@@ -279,7 +284,6 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
         self._sampled_token_ids = sampled_token_ids
         self.vocab_size = vocab_size
         self._logprobs_tensors = logprobs_tensors
-        self._routed_experts = routed_experts
         self._has_fault: torch.Tensor | None = None
 
         # Initiate the copy on a separate stream, but do not synchronize it.
@@ -294,11 +298,8 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
                 if self._logprobs_tensors
                 else None
             )
-            self._routed_experts_cpu = (
-                self._routed_experts.to_cpu_nonblocking()
-                if self._routed_experts is not None
-                else None
-            )
+            if self._routed_experts_write_task is not None:
+                self._routed_experts_write_task.start_copy()
             if check_ep_fault:
                 has_fault = get_ep_all2all_manager().query_fault()
                 self._has_fault = has_fault.to("cpu", non_blocking=True)
@@ -334,9 +335,9 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
         output.sampled_token_ids = valid_sampled_token_ids
         output.logprobs = logprobs_lists
 
-        if self._routed_experts_cpu is not None:
-            output.routed_experts = self._routed_experts_cpu.tolists()
-        del self._routed_experts
+        if self._routed_experts_write_task is not None:
+            self._routed_experts_write_task.finalize(output)
+        del self._routed_experts_write_task
 
         if self._has_fault is not None and self._has_fault.item():
             mask = get_ep_all2all_manager().query_active_mask()
@@ -492,9 +493,10 @@ class GPUModelRunner(
         # These will be overridden in load_model()
         self.is_multimodal_pruning_enabled = False
         self.requires_sequential_video_encoding = False
-        # Set to True after init_routed_experts_capturer() completes.
-        # Prevents routed experts code from running during profiling/dummy run.
+        # Disabled during profiling and dummy runs.
         self.routed_experts_initialized = False
+        # Only the scheduler-visible rank owns this writer.
+        self.routed_experts_writer = None
         self.max_model_len = model_config.max_model_len
 
         # Always set to false after the first forward pass
@@ -2321,17 +2323,12 @@ class GPUModelRunner(
         block_table_gid_0 = _get_block_table(0)
         slot_mapping_gid_0 = slot_mappings[0]
 
-        if self.routed_experts_initialized:
-            # Copy this step's attention slot_mapping into our private
-            # device buffer. The shared ``slot_mappings[attn_gid]`` is
-            # owned by the attention block table and will be overwritten
-            # by the next ``_prepare_inputs``; we need a stable snapshot
-            # because the async D2H may still be in flight on the copy
-            # stream when the next step runs.
-            attn_gid = self.routed_experts_attn_gid
-            slot_mapping_attn = slot_mappings[attn_gid]
+        if self.routed_experts_writer is not None:
+            # Snapshot the attention slot mapping before the next prepare pass.
+            full_attn_group_id = self.routed_experts_attn_group_id
+            attn_slot_mapping = slot_mappings[full_attn_group_id]
             self.routed_experts_slot_mapping_device[:num_tokens].copy_(
-                slot_mapping_attn[:num_tokens]
+                attn_slot_mapping[:num_tokens]
             )
 
         num_computed_tokens_cpu = self.input_batch.num_computed_tokens_cpu_tensor[
@@ -3705,18 +3702,19 @@ class GPUModelRunner(
         invalid_req_indices = []
         logprobs_lists = None
         if not self.use_async_scheduling:
-            # Sync scheduling: issue routed experts D2H into the pinned
-            # CPU buffer BEFORE ``_to_list`` below. ``_to_list`` does
-            # ``event.synchronize()`` on the async copy stream which
-            # waits for every D2H queued on the default stream since
-            # the last sync, so this enqueue is naturally covered
-            # without requiring its own synchronize.
-            if self.routed_experts_initialized:
-                buf = self.routed_experts_capturer.get_device_buffer()
-                total = scheduler_output.total_num_scheduled_tokens
-                self.routed_experts_cpu[:total].copy_(buf[:total], non_blocking=True)
-                self.routed_experts_slot_mapping_cpu[:total].copy_(
-                    self.routed_experts_slot_mapping_device[:total],
+            # Queue routed-experts D2H before _to_list synchronizes the copy.
+            # Only the output-rank writer consumes it, so other ranks skip it.
+            if self.routed_experts_writer is not None:
+                routing_buffer = self.routed_experts_capturer.get_device_buffer()
+                total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
+                self.routed_experts_cpu[:total_num_scheduled_tokens].copy_(
+                    routing_buffer[:total_num_scheduled_tokens],
+                    non_blocking=True,
+                )
+                self.routed_experts_slot_mapping_cpu[:total_num_scheduled_tokens].copy_(
+                    self.routed_experts_slot_mapping_device[
+                        :total_num_scheduled_tokens
+                    ],
                     non_blocking=True,
                 )
 
@@ -4720,45 +4718,40 @@ class GPUModelRunner(
                 else None,
                 num_nans_in_logits=num_nans_in_logits,
                 cudagraph_stats=cudagraph_stats,
-                routed_experts=None,
             )
 
         if not self.use_async_scheduling:
-            if self.routed_experts_initialized:
-                # Sync path: D2H was issued in ``_bookkeeping_sync`` and
-                # synchronized by ``_to_list``'s event.synchronize(), so
-                # the pinned buffers are ready to be wrapped as numpy.
-                total = scheduler_output.total_num_scheduled_tokens
-                output.routed_experts = RoutedExpertsLists(
-                    routing_data=self.routed_experts_cpu[:total].numpy(),
-                    slot_mapping=self.routed_experts_slot_mapping_cpu[:total].numpy(),
-                )
+            if self.routed_experts_writer is not None:
+                # _to_list has synchronized D2H; the store is CPU-only.
+                total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
+                routing_data = self.routed_experts_cpu[
+                    :total_num_scheduled_tokens
+                ].numpy()
+                slot_mapping = self.routed_experts_slot_mapping_cpu[
+                    :total_num_scheduled_tokens
+                ].numpy()
+                self.routed_experts_writer.store_batch(routing_data, slot_mapping)
+                output.routed_experts_slots = slot_mapping
             return output
 
         with record_function_or_nullcontext(
             "gpu_model_runner: AsyncGPUModelRunnerOutput"
         ):
-            # Async path: produce a device-side snapshot that the async
-            # copy stream can D2H later. Both tensors must be private
-            # clones because:
-            #   - ``routing_data`` source is the shared capturer buffer,
-            #     which is ``clear_buffer()``-ed at the start of the
-            #     next step on the default stream.
-            #   - ``slot_mapping`` source is our own
-            #     ``routed_experts_slot_mapping_device``, which the
-            #     next ``_prepare_inputs`` overwrites on the default
-            #     stream while the D2H is still pending on the copy
-            #     stream.
-            # Without clones, the copy stream would read torn data.
-            routed_experts_snapshot = None
-            if self.routed_experts_initialized:
-                buf = self.routed_experts_capturer.get_device_buffer()
-                total = scheduler_output.total_num_scheduled_tokens
-                routed_experts_snapshot = RoutedExpertsTensors(
-                    routing_data=buf[:total].clone(),
+            # Clone before the async copy stream; both sources are reused next
+            # step. Only the output-rank writer consumes it.
+            routed_experts_write_task = None
+            if self.routed_experts_writer is not None:
+                routing_buffer = self.routed_experts_capturer.get_device_buffer()
+                total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
+                routed_experts_tensors = RoutedExpertsTensors(
+                    routing_data=routing_buffer[:total_num_scheduled_tokens].clone(),
                     slot_mapping=self.routed_experts_slot_mapping_device[
-                        :total
+                        :total_num_scheduled_tokens
                     ].clone(),
+                )
+                routed_experts_write_task = RoutedExpertsWriteTask(
+                    routed_experts_tensors=routed_experts_tensors,
+                    writer=self.routed_experts_writer,
                 )
 
             async_output = AsyncGPUModelRunnerOutput(
@@ -4768,7 +4761,7 @@ class GPUModelRunner(
                 invalid_req_indices=invalid_req_indices,
                 async_output_copy_stream=self._get_or_create_async_output_copy_stream(),
                 vocab_size=self.input_batch.vocab_size,
-                routed_experts=routed_experts_snapshot,
+                routed_experts_write_task=routed_experts_write_task,
                 check_ep_fault=self.check_ep_fault,
             )
         with record_function_or_nullcontext(
@@ -7618,43 +7611,34 @@ class GPUModelRunner(
                 kv_transfer_group.register_kv_caches(kv_caches)
             kv_transfer_group.set_host_xfer_buffer_ops(copy_kv_blocks)
 
-    def _get_attention_kv_cache_gid(self) -> int:
-        """Find the KV cache group index for attention layers.
-
-        Must match :attr:`RoutedExpertsManager.attn_gid` in the scheduler:
-        both pick the first ``FullAttentionSpec`` group so hybrid models
-        (Mamba / linear-attention layers that use other AttentionSpec
-        subclasses) end up indexing the same slot layout on both sides.
-        Falls back to 0 only for legacy single-group configs.
-        """
-        for gid, group in enumerate(self.kv_cache_config.kv_cache_groups):
-            if isinstance(group.kv_cache_spec, FullAttentionSpec):
-                return gid
-        return 0
-
-    def init_routed_experts_capturer(self):
+    def init_routed_experts_capturer(self) -> None:
         logger.info(
             "Initializing routed experts capturer, enable_return_routed_experts: %s",
             self.model_config.enable_return_routed_experts,
         )
+        full_attn_group_id = require_full_attn_group_id(self.kv_cache_config)
         self.routed_experts_capturer = RoutedExpertsCapturer(
             max_num_batched_tokens=self.scheduler_config.max_num_batched_tokens,
             vllm_config=self.vllm_config,
         )
-        self.routed_experts_attn_gid = self._get_attention_kv_cache_gid()
+        self.routed_experts_attn_group_id = full_attn_group_id
         self._bind_routed_experts_capturer(self.routed_experts_capturer)
+        self.routed_experts_initialized = True
 
-        # Pinned CPU buffer for non-blocking D2H of ``routing_data`` on
-        # the sync scheduling path. Shape / dtype mirror the device
-        # capturer exactly so ``copy_`` is a straight memcpy.
+        # Only the scheduler-visible rank stages routing for the shared slot
+        # buffer; other ranks only need the capturer (for the SP all_gather).
+        parallel_config = self.parallel_config
+        self.routed_experts_writer: RoutedExpertsWorkerWriter | None = None
+        if parallel_config.rank != get_routed_experts_output_rank():
+            return
+
+        # Pinned memory keeps the routing D2H copy non-blocking.
         self.routed_experts_cpu = torch.empty(
             self.routed_experts_capturer.device_buffer.shape,
             dtype=self.routed_experts_capturer.device_buffer.dtype,
             device="cpu",
             pin_memory=PIN_MEMORY,
         )
-        # ``slot_mapping`` dtype is fixed to int64 by
-        # ``block_table.slot_mapping``; we mirror that here.
         max_tokens = self.scheduler_config.max_num_batched_tokens
         self.routed_experts_slot_mapping_cpu = torch.empty(
             (max_tokens,),
@@ -7662,17 +7646,22 @@ class GPUModelRunner(
             device="cpu",
             pin_memory=PIN_MEMORY,
         )
-        # Private device buffer so the shared ``block_table.slot_mapping``
-        # can be overwritten by the next ``_prepare_inputs`` while the
-        # D2H is still pending on the copy stream. Written in
-        # ``_prepare_inputs``, read in ``_bookkeeping_sync`` (sync path)
-        # or cloned into a snapshot (async path).
+        # Private copy; the attention block table reuses slot_mapping next step.
         self.routed_experts_slot_mapping_device = torch.empty(
             (max_tokens,),
             dtype=torch.int64,
             device=self.device,
         )
-        self.routed_experts_initialized = True
+
+        slot_shape, slot_dtype = get_routing_slot_shape_and_dtype(
+            self.vllm_config, self.kv_cache_config
+        )
+        self.routed_experts_writer = RoutedExpertsWorkerWriter(
+            instance_id=self.vllm_config.instance_id,
+            dp_rank=parallel_config.data_parallel_rank,
+            slot_shape=slot_shape,
+            dtype=slot_dtype,
+        )
 
     def _bind_routed_experts_capturer(self, capturer: RoutedExpertsCapturer) -> None:
         from vllm.model_executor.layers.fused_moe.layer import MoERunner
@@ -7684,7 +7673,11 @@ class GPUModelRunner(
             if isinstance(module, MoERunner) and isinstance(module.router, BaseRouter):
                 layer_id = module.layer_id
 
-                def _capture_fn(topk_ids, _layer_id=layer_id, _capturer=capturer):
+                def _capture_fn(
+                    topk_ids: torch.Tensor,
+                    _layer_id: int = layer_id,
+                    _capturer: RoutedExpertsCapturer = capturer,
+                ) -> None:
                     _capturer.capture(_layer_id, topk_ids)
 
                 module.router.set_capture_fn(_capture_fn)
