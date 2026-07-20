@@ -1221,9 +1221,11 @@ class DPAsyncMPClient(AsyncMPClient):
             client_index,
         )
 
-        # List of [waiting, running] pair per engine.
+        # List of [waiting, running, kv_cache_usage] per engine.
         # Used only by DPLBAsyncMPClient subclass.
-        self.lb_engines: list[list[int]] = [[0, 0] for _ in self.core_engines]
+        self.lb_engines: list[list[int | float]] = [
+            [0, 0, 0.0] for _ in self.core_engines
+        ]
 
         self.eep_scaling_cache: ElasticScalingCache | None = None
 
@@ -1301,7 +1303,7 @@ class DPAsyncMPClient(AsyncMPClient):
                             )
                             if len(self.lb_engines) < new_engine_count:
                                 self.lb_engines = self.lb_engines + [
-                                    [0, 0]
+                                    [0, 0, 0.0]
                                     for _ in range(
                                         new_engine_count - len(self.lb_engines)
                                     )
@@ -1421,15 +1423,20 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
             # TODO use P2C alg for larger DP sizes
             num_engines = len(current_counts)
             min_score = sys.maxsize
+            min_kv_usage = float("inf")
             eng_index = 0
             for i in range(num_engines):
                 # Start from client_index to help with balancing when engines
                 # are empty.
                 idx = (self.eng_start_index + i) % num_engines
-                waiting, running = current_counts[idx]
+                waiting, running, kv_usage = current_counts[idx]
                 score = waiting * 4 + running
                 if score < min_score:
                     min_score = score
+                    min_kv_usage = kv_usage
+                    eng_index = idx
+                elif score == min_score and kv_usage < min_kv_usage:
+                    min_kv_usage = kv_usage
                     eng_index = idx
             # Increment local waiting count for better balancing between stats
             # updates from the coordinator (which happen every 100ms).

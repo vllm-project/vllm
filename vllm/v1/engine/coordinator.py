@@ -139,7 +139,7 @@ class DPCoordinator:
 
 class EngineState:
     def __init__(self):
-        self.request_counts = [0, 0]  # [waiting, running]
+        self.request_counts = [0, 0, 0.0]  # [waiting, running, kv_cache_usage]
 
 
 class DPCoordinatorProc:
@@ -400,6 +400,7 @@ class DPCoordinatorProc:
                             )
                         stats[0] = scheduler_stats.num_waiting_reqs
                         stats[1] = scheduler_stats.num_running_reqs
+                        stats[2] = scheduler_stats.kv_cache_usage
                         stats_changed = True
 
                     # Wave coordination: handle wave completion and start notifications
@@ -452,8 +453,8 @@ class DPCoordinatorProc:
         wave_encoded = msgspec.msgpack.encode((wave, exclude_engine_index))
         socket.send_multipart((EngineCoreRequestType.START_DP_WAVE.value, wave_encoded))
 
-    def _get_engine_counts(self, do_copy=False) -> list[list[int]]:
-        """Return list of [waiting, running] count lists for each engine."""
+    def _get_engine_counts(self, do_copy=False) -> list[list[int | float]]:
+        """Return list of [waiting, running, kv_cache_usage] for each engine."""
         if do_copy:
             return [copy.copy(e.request_counts) for e in self.engines]
         return [e.request_counts for e in self.engines]
