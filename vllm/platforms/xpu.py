@@ -124,14 +124,6 @@ class XPUPlatform(Platform):
         attn_selector_config: "AttentionSelectorConfig",
         num_heads: int | None = None,
     ) -> str:
-        from vllm.v1.attention.backends.utils import set_kv_cache_layout
-
-        set_kv_cache_layout("NHD")
-        logger.info_once(
-            "Setting VLLM_KV_CACHE_LAYOUT to 'NHD' for XPU; "
-            "only NHD layout is supported by XPU attention kernels."
-        )
-
         # TurboQuant KV cache: route directly to TQ backend
         kv_cache_dtype = attn_selector_config.kv_cache_dtype
         if kv_cache_dtype is not None and kv_cache_dtype.startswith("turboquant_"):
@@ -150,8 +142,18 @@ class XPUPlatform(Platform):
             return AttentionBackendEnum.TRITON_ATTN.get_path()
         elif attn_selector_config.use_mm_prefix:
             # Flash Attention on XPU has no FA4 kernel, so it cannot apply the
-            # multimodal prefix-LM bidirectional mask. Fall back to Triton
-            # Attention, which supports mm_prefix.
+            # multimodal prefix-LM bidirectional mask. Honor an explicit Flash
+            # Attention request (for text-only workloads); otherwise fall back
+            # to Triton Attention, which supports mm_prefix.
+            if selected_backend == AttentionBackendEnum.FLASH_ATTN:
+                logger.warning_once(
+                    "Using Flash Attention on XPU for a multimodal prefix-LM "
+                    "model because it was explicitly requested. The prefix-LM "
+                    "bidirectional mask cannot be applied, so image/video "
+                    "inputs will produce incorrect results; only use this for "
+                    "text-only workloads."
+                )
+                return AttentionBackendEnum.FLASH_ATTN.get_path()
             logger.warning_once(
                 "Flash Attention on XPU does not support multimodal prefix-LM "
                 "attention. Falling back to Triton Attention backend."
@@ -265,10 +267,6 @@ class XPUPlatform(Platform):
         if compilation_config.compile_sizes is None:
             compilation_config.compile_sizes = []
 
-        attention_config = vllm_config.attention_config
-        if attention_config.backend is None:
-            attention_config.backend = AttentionBackendEnum.FLASH_ATTN
-
         # lazy import to avoid circular import
         from vllm.utils.torch_utils import supports_xpu_graph
 
@@ -295,6 +293,8 @@ class XPUPlatform(Platform):
             "fuse_attn_quant": "Attention + quant fusion",
             "fuse_act_padding": "Activation + padding fusion",
             "fuse_rope_kvcache": "RoPE + KV cache fusion",
+            "fuse_rope_kvcache_cat_mla": "RoPE + KV cache + MLA fusion",
+            "enable_qk_norm_rope_fusion": "QK Norm + RoPE fusion",
         }
         if compilation_config.mode != CompilationMode.NONE:
             for flag, feature_name in fusion_passes_to_disable.items():

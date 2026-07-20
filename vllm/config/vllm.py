@@ -68,8 +68,11 @@ logger = init_logger(__name__)
 DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES = frozenset(
     {
         "DeepseekV2ForCausalLM",
-        "Qwen2MoeForCausalLM",
         "GraniteMoeForCausalLM",
+        "InklingForCausalLM",
+        "InklingForConditionalGeneration",
+        "LongcatFlashNgramForCausalLM",
+        "Qwen2MoeForCausalLM",
     }
 )
 
@@ -190,6 +193,15 @@ def enable_mla_dual_rms_norm_fusion(cfg: "VllmConfig") -> bool:
     return rocm_aiter_ops.is_enabled() and check_aiter_fused_qk_rmsnorm()
 
 
+def enable_qk_norm_rope_kvcache(cfg: "VllmConfig") -> bool:
+    """Enable fused QK-norm + RoPE + KV cache update on ROCm with AITER."""
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    if not rocm_aiter_ops.is_enabled():
+        return False
+    return cfg.compilation_config.is_custom_op_enabled("rotary_embedding")
+
+
 OPTIMIZATION_LEVEL_00 = {
     "compilation_config": {
         "pass_config": {
@@ -202,6 +214,8 @@ OPTIMIZATION_LEVEL_00 = {
             "fuse_act_padding": False,
             "fuse_mla_dual_rms_norm": False,
             "fuse_rope_kvcache": False,
+            "fuse_qk_norm_rope_kvcache": False,
+            "enable_qk_norm_rope_fusion": False,
             "fuse_rope_kvcache_cat_mla": False,
         },
         "cudagraph_mode": CUDAGraphMode.NONE,
@@ -223,6 +237,8 @@ OPTIMIZATION_LEVEL_01 = {
             "fuse_act_padding": enable_norm_pad_fusion,
             "fuse_mla_dual_rms_norm": enable_mla_dual_rms_norm_fusion,
             "fuse_rope_kvcache": False,
+            "fuse_qk_norm_rope_kvcache": False,
+            "enable_qk_norm_rope_fusion": False,
             "fuse_rope_kvcache_cat_mla": False,
         },
         "cudagraph_mode": CUDAGraphMode.PIECEWISE,
@@ -244,6 +260,8 @@ OPTIMIZATION_LEVEL_02 = {
             "fuse_act_padding": enable_norm_pad_fusion,
             "fuse_mla_dual_rms_norm": enable_mla_dual_rms_norm_fusion,
             "fuse_rope_kvcache": enable_rope_kvcache_fusion,
+            "fuse_qk_norm_rope_kvcache": enable_qk_norm_rope_kvcache,
+            "enable_qk_norm_rope_fusion": False,
             "fuse_rope_kvcache_cat_mla": enable_rope_kvcache_mla_fusion,
         },
         "cudagraph_mode": CUDAGraphMode.FULL_AND_PIECEWISE,
@@ -265,6 +283,8 @@ OPTIMIZATION_LEVEL_03 = {
             "fuse_act_padding": enable_norm_pad_fusion,
             "fuse_mla_dual_rms_norm": enable_mla_dual_rms_norm_fusion,
             "fuse_rope_kvcache": enable_rope_kvcache_fusion,
+            "fuse_qk_norm_rope_kvcache": enable_qk_norm_rope_kvcache,
+            "enable_qk_norm_rope_fusion": False,
             "fuse_rope_kvcache_cat_mla": enable_rope_kvcache_mla_fusion,
         },
         "cudagraph_mode": CUDAGraphMode.FULL_AND_PIECEWISE,
@@ -502,6 +522,17 @@ class VllmConfig:
         return pp_size
 
     @property
+    def max_in_flight_tokens(self) -> int:
+        # Upper bound on tokens that are scheduled but not yet settled (freed):
+        # every concurrent batch may hold up to a full `max_num_batched_tokens`.
+        # Recycling-aware KV cache specs (sliding-window, chunked-local) reserve
+        # for this because out-of-window blocks are freed on the processed-token
+        # basis, so in-flight steps transiently keep their blocks.
+        return (
+            self.max_concurrent_batches * self.scheduler_config.max_num_batched_tokens
+        )
+
+    @property
     def num_speculative_tokens(self) -> int:
         if (
             self.speculative_config is not None
@@ -531,6 +562,11 @@ class VllmConfig:
         ):
             return True
 
+        # Mixed sliding/full DFlash drafts need multiple KV groups (V2 only);
+        # force V2 as for dspark, since a hybrid target otherwise defaults to V1.
+        if self._dflash_needs_multi_kv_group():
+            return True
+
         if self.model_config is not None and self.model_config.is_diffusion:
             return True
 
@@ -553,6 +589,18 @@ class VllmConfig:
             return False
 
         return True
+
+    def _dflash_needs_multi_kv_group(self) -> bool:
+        """Whether a DFlash draft mixes sliding-window and full attention."""
+        spec = self.speculative_config
+        if spec is None or spec.method != "dflash":
+            return False
+        draft_config = getattr(spec, "draft_model_config", None)
+        if draft_config is None:
+            return False
+        layer_types = getattr(draft_config.hf_config, "layer_types", None) or []
+        num_sliding = sum(lt == "sliding_attention" for lt in layer_types)
+        return 0 < num_sliding < len(layer_types)
 
     def _is_default_v2_model_runner_model(self) -> bool:
         model_config = self.model_config
@@ -1137,6 +1185,8 @@ class VllmConfig:
                 in (
                     "DeepseekV4ForCausalLM",
                     "DeepSeekV4MTPModel",
+                    "InklingForCausalLM",
+                    "InklingForConditionalGeneration",
                     "MiniMaxM3SparseForCausalLM",
                     "MiniMaxM3SparseForConditionalGeneration",
                 )
@@ -1938,6 +1988,21 @@ class VllmConfig:
                         compile_range_end,
                     )
 
+        if compilation_config.pass_config.fuse_qk_norm_rope_kvcache:
+            max_token_num = (
+                compilation_config.pass_config.rope_kvcache_fusion_max_token_num
+            )
+            if max_token_num is not None:
+                if compile_range_end is not None and max_token_num < compile_range_end:
+                    computed_compile_ranges_endpoints.append(max_token_num)
+                else:
+                    logger.debug(
+                        "Max num batched tokens below qk_norm+rope+kvcache "
+                        "fusion threshold, fusion enabled for "
+                        "num_tokens <= %d.",
+                        compile_range_end,
+                    )
+
         if compilation_config.compile_ranges_endpoints is not None:
             for x in compilation_config.compile_ranges_endpoints:
                 assert isinstance(x, int)
@@ -2065,9 +2130,10 @@ class VllmConfig:
         model_config = self.model_config
         speculative_config = self.speculative_config
 
-        if self.parallel_config.prefill_context_parallel_size > 1:
+        if self.parallel_config.prefill_context_parallel_size > 1 and not (
+            model_config is not None and model_config.use_mla
+        ):
             unsupported.append("prefill context parallelism")
-
         if self.compilation_config.mode == CompilationMode.STOCK_TORCH_COMPILE:
             unsupported.append("stock torch.compile")
 
@@ -2136,13 +2202,6 @@ class VllmConfig:
 
         if model_config is not None and model_config.enable_prompt_embeds:
             unsupported.append("prompt embeds")
-
-        if (
-            model_config is not None
-            and model_config.runner_type == "generate"
-            and model_config.logprobs_mode in ("raw_logits", "processed_logits")
-        ):
-            unsupported.append(f"logprobs mode '{model_config.logprobs_mode}'")
 
         if self.cache_config.kv_sharing_fast_prefill:
             # Will be added by https://github.com/vllm-project/vllm/pull/35045
