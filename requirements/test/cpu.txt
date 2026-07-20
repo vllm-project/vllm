@@ -379,7 +379,7 @@ inflect==5.6.2
     # via datamodel-code-generator
 iniconfig==2.0.0
     # via pytest
-instanttensor==0.1.5
+instanttensor==0.1.9
     # via -r requirements/test/cuda.in
 interegular==0.3.3
     # via lm-format-enforcer

@@ -364,6 +364,11 @@ def _layerwise_process(layer: torch.nn.Module, info: LayerReloadingInfo):
     quant_method = getattr(layer, "quant_method", None)
     if isinstance(quant_method, QuantizeMethodBase):
         quant_method.process_weights_after_loading(layer)
+        # Re-reconcile parameter TP state: process_weights_after_loading may
+        # have re-created Parameters (stamped with the global rank), which would
+        # otherwise break replicated (disable_tp) weights on a subsequent reload.
+        if hasattr(layer, "update_param_tp_status"):
+            layer.update_param_tp_status()
 
     # Copy processed values into original tensor storage (preserves cudagraph refs)
     # this code is a no-op if not reloading (because kernel tensors is empty)
