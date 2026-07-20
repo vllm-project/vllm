@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use std::collections::HashSet;
 use std::ffi::OsString;
 
@@ -77,6 +80,7 @@ impl ManagedEngineArgs {
         model: String,
         max_model_len: Option<u32>,
         max_logprobs: Option<i32>,
+        profiler_config: Option<String>,
         reasoning_parser: Option<&str>,
         language_model_only: bool,
         disable_log_stats: bool,
@@ -92,6 +96,10 @@ impl ManagedEngineArgs {
         if let Some(max_logprobs) = max_logprobs {
             python_args.push("--max-logprobs".to_string());
             python_args.push(max_logprobs.to_string());
+        }
+        if let Some(profiler_config) = profiler_config {
+            python_args.push("--profiler-config".to_string());
+            python_args.push(profiler_config);
         }
         if let Some(reasoning_parser) = reasoning_parser {
             python_args.push("--reasoning-parser".to_string());

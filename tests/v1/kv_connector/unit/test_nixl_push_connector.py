@@ -29,9 +29,11 @@ from typing import Any
 from unittest.mock import MagicMock, patch
 
 import msgspec
+import pytest
 
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     PUSH_REG_NOTIF_PREFIX,
+    NixlAgentMetadata,
     NixlConnectorMetadata,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.push_worker import (
@@ -485,7 +487,7 @@ class TestPushWriterStartLoadKv:
         # path here.
         w._send_heartbeats = lambda metadata: None
         # Stub logical-to-kernel mapping used by reqs_to_recv.
-        w._logical_to_kernel_block_ids = lambda x: x
+        w._logical_to_kernel_block_ids = lambda x, ratio: x
 
         meta = NixlConnectorMetadata()
         meta.push_registrations = {
@@ -512,7 +514,7 @@ class TestPushWriterNotifs:
         # Pretend the writer thread already forwarded a completion notif
         # for a request whose KV is being received.
         request_id = "req-recv-1"
-        w._recving_metadata[request_id] = MagicMock()
+        w._recving_metadata[request_id] = MagicMock(pp_size=1)
         # Compose the standard completion notif: req_id:tp_size.
         notif_msg = f"{request_id}:1".encode()
         w._pending_completion_notifs.put(notif_msg)
@@ -773,7 +775,7 @@ class TestPushWriterNegative:
         """Empty metadata must not wake the writer or enqueue anything."""
         w = _StubWriterWorker.fresh()
         w._send_heartbeats = lambda metadata: None
-        w._logical_to_kernel_block_ids = lambda x: x
+        w._logical_to_kernel_block_ids = lambda x, ratio: x
 
         meta = NixlConnectorMetadata()
         w.start_load_kv(meta)
@@ -813,3 +815,177 @@ class TestPushWriterNegative:
             assert w._reqs_to_send[rid] >= now
         # Unknown request must not be inserted by the heartbeat path.
         assert "req-unknown" not in w._reqs_to_send
+
+
+# ----------------------------------------------------------------- #
+#  Pipeline-parallel producer (push-mode PP-disagg)                  #
+# ----------------------------------------------------------------- #
+
+
+class TestPushPipelineParallel:
+    """PP-sharded producer: per-stage completion counting, pp_size plumbing,
+    and remote-region slicing."""
+
+    def test_completion_waits_for_one_notif_per_pp_stage(self):
+        """Each PP stage WRITEs its own layers and sends one notif; D must
+        collect pp_size notifs before reporting the recv done."""
+        w = _StubWriterWorker.fresh()
+        w.transfer_topo = MagicMock()
+        request_id = "req-pp-2"
+        w._recving_metadata[request_id] = MagicMock(pp_size=2)
+        notif = f"{request_id}:1".encode()
+
+        # First stage: counted, not yet done.
+        w._pending_completion_notifs.put(notif)
+        assert w._get_new_notifs() == set()
+        assert request_id not in w._recving_transfers
+        assert w.consumer_notification_counts_by_req[request_id] == 1
+
+        # Second (final) stage: now reported done.
+        w._pending_completion_notifs.put(notif)
+        assert w._get_new_notifs() == set()
+        assert request_id in w._recving_transfers
+        assert request_id not in w.consumer_notification_counts_by_req
+
+    def test_req_meta_reads_pp_size_from_kv_transfer_params(self):
+        """D learns the producer's pp_size from kv_transfer_params (forwarded
+        by the proxy) and defaults to 1 when absent."""
+        metadata = NixlConnectorMetadata()
+        params = {
+            "remote_block_ids": ([0],),
+            "remote_engine_id": "p-engine",
+            "remote_request_id": "p-req",
+            "remote_host": "localhost",
+            "remote_port": 1234,
+            "tp_size": 1,
+            "pp_size": 2,
+        }
+        metadata.add_new_req_to_recv("req", ([0],), params)
+        assert metadata.reqs_to_recv["req"].pp_size == 2
+
+        params.pop("pp_size")
+        metadata.add_new_req_to_recv("req-default", ([0],), params)
+        assert metadata.reqs_to_recv["req-default"].pp_size == 1
+
+    def test_add_remote_agent_slices_remote_regions_to_local_pp_window(self):
+        """With PP>1 the producer registered regions for the full model, but
+        this worker holds only a contiguous layer slice; add_remote_agent
+        trims the remote region list to [offset : offset + num_local_regions]
+        before building descriptors. We stop right after the slice via a
+        sentinel on the next collaborator call."""
+        block_len = 4096 * 16
+        w = _StubWriterWorker.fresh()  # seeds writer-thread state for teardown
+        w.pp_size = 2
+        w._remote_region_offset = 2  # this worker owns layers [2, 4)
+        w.block_len_per_layer = [block_len, block_len]  # 2 local layers
+        w.nixl_wrapper = MagicMock()
+
+        class _StopAfterSlice(RuntimeError):
+            pass
+
+        w.transfer_topo = MagicMock()
+        w.transfer_topo.register_remote_engine.side_effect = _StopAfterSlice()
+
+        meta = NixlAgentMetadata(
+            engine_id="p-engine",
+            agent_metadata=b"agent",
+            kv_caches_base_addr=[10, 11, 12, 13],  # full 4-layer model
+            device_id=0,
+            num_blocks=4,
+            block_lens=[block_len] * 4,
+            kv_cache_layout="HND",
+            block_size=16,
+            ssm_sizes=(0, 0),
+            attn_backend_name="FLASH_ATTN",
+            physical_blocks_per_logical_kv_block=1,
+        )
+
+        with pytest.raises(_StopAfterSlice):
+            w.add_remote_agent(meta, remote_tp_rank=0, remote_tp_size=1)
+
+        # Sliced down to this worker's layer window (regions [2:4]).
+        assert meta.kv_caches_base_addr == [12, 13]
+        assert meta.block_lens == [block_len, block_len]
+
+
+class TestPushWriterMlaReplication:
+    """MLA latent KV is replicated across D's TP ranks, so when D_TP > P_TP
+    (``tp_ratio < 0``) the producer must *WRITE* the latent into every D rank
+    it handshook -- not write one and merely notify the rest, which would
+    leave the un-written ranks decoding against stale KV."""
+
+    @staticmethod
+    def _mla_worker_writing_to(d_ranks):
+        from types import SimpleNamespace
+
+        from vllm.distributed.kv_transfer.kv_connector.v1.nixl.tp_mapping import (
+            TPMapping,
+        )
+
+        engine_id = "decode-engine"
+        w = _StubWriterWorker.fresh()
+        w.use_mla = True
+        w.nixl_wrapper = MagicMock()
+        w.transfer_topo = MagicMock()
+        w.transfer_topo.get_engine_info.return_value = SimpleNamespace(
+            remote_tp_size=len(d_ranks),
+            remote_block_size=16,
+            remote_physical_blocks_per_logical=1,
+        )
+        # D_TP > P_TP => negative ratio (one P rank feeds |ratio| D ranks).
+        w.transfer_topo.tp_ratio.return_value = -len(d_ranks)
+        # The tp-mapping collapses MLA to a single source rank (correct for
+        # the pull/read direction); the push path must fan it back out.
+        w.tp_mappings = {
+            engine_id: TPMapping(
+                source_ranks_per_group=((0,),),
+                all_source_ranks=(0,),
+                rank_to_attention_slot={0: 0},
+                rank_offset_factor=0,
+            )
+        }
+        w._logical_to_kernel_block_ids = lambda block_ids, ratio: block_ids
+        w.dst_xfer_side_handles = {engine_id: {r: 1000 + r for r in d_ranks}}
+        w.src_xfer_handles_by_block_size = {16: 2000}
+        w._remote_agents = {engine_id: {(0, r): f"agent-{r}" for r in d_ranks}}
+        return w, engine_id
+
+    def test_mla_hetero_tp_writes_every_d_rank(self):
+        from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
+            RemoteMeta,
+            ReqMeta,
+        )
+
+        w, engine_id = self._mla_worker_writing_to(d_ranks=(0, 1))
+
+        written: list[int] = []
+
+        def _fake_xfer(**kw):
+            rank = kw["read_spec"].remote_rank
+            written.append(rank)
+            return 1000 + rank  # in-flight handle, as the real method returns
+
+        w._xfer_blocks = _fake_xfer
+
+        meta = ReqMeta(
+            local_block_ids=([100, 101],),
+            local_physical_block_ids=([100, 101],),
+            tp_size=1,
+            remote=RemoteMeta(
+                block_ids=([200, 201],),
+                host="",
+                port=0,
+                engine_id=engine_id,
+                request_id="d-req",
+            ),
+        )
+
+        w._xfer_blocks_for_req(req_id="p-req", meta=meta)
+
+        # Every handshook D rank must receive a real WRITE of the latent...
+        assert sorted(written) == [0, 1]
+        # ...and no rank may be fobbed off with a bare completion notif.
+        assert w.nixl_wrapper.send_notif.call_count == 0
+        # All of the request's WRITE handles must be tracked together, so the
+        # engine thread never sees a partial set and double-frees the request.
+        assert sorted(w._sending_transfers["p-req"]) == [1000, 1001]

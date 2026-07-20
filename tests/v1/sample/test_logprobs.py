@@ -85,6 +85,7 @@ def _model_config(vocab_size: int = 10):
     return SimpleNamespace(
         max_logprobs=20,
         logits_processors=None,
+        is_diffusion=False,
         get_vocab_size=lambda: vocab_size,
     )
 
@@ -561,6 +562,44 @@ def test_logprobs_mode(logprobs_mode: LogprobsMode):
         del llm
         torch.accelerator.empty_cache()
         cleanup_dist_env_and_memory()
+
+
+def test_prompt_logprobs_mode():
+    """prompt_logprobs must respect logprobs_mode: *_logits and *_logprobs
+    must return different values. Prompt tokens skip sampling processors,
+    so processed_* == raw_* on the prompt side."""
+    from vllm import LLM
+
+    values: dict[str, float] = {}
+    for mode in get_args(LogprobsMode):
+        llm = LLM(
+            "facebook/opt-125m",
+            enable_prefix_caching=False,
+            gpu_memory_utilization=0.05,
+            max_model_len=16,
+            logprobs_mode=mode,
+        )
+        try:
+            results = llm.generate(
+                ["Hello world"],
+                sampling_params=SamplingParams(
+                    max_tokens=1, prompt_logprobs=0, temperature=0
+                ),
+            )
+            assert results[0].prompt_logprobs is not None
+            assert results[0].prompt_logprobs[1] is not None
+            tok_id = results[0].prompt_token_ids[1]
+            values[mode] = results[0].prompt_logprobs[1][tok_id].logprob
+        finally:
+            del llm
+            torch.accelerator.empty_cache()
+            cleanup_dist_env_and_memory()
+
+    assert values["raw_logprobs"] <= 0
+    assert values["processed_logprobs"] <= 0
+    assert values["raw_logits"] != values["raw_logprobs"]
+    assert values["processed_logits"] == values["raw_logits"]
+    assert values["processed_logprobs"] == values["raw_logprobs"]
 
 
 class TestCorrectDecodedToken:

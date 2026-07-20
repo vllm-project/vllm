@@ -27,6 +27,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.offloader.base import get_offloader
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
+from vllm.utils.math_utils import round_up
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
 from vllm.v1.worker.gpu.block_table import BlockTables
@@ -43,11 +44,6 @@ class AttentionState(NamedTuple):
     slot_mappings: dict[str, torch.Tensor]
 
 
-class AttentionStatePair(NamedTuple):
-    warmup: AttentionState
-    captured: AttentionState
-
-
 @dataclass(frozen=True)
 class BatchExecutionDescriptor:
     """Describes the shape of the batch and CG mode to run; this is used to make shape
@@ -61,15 +57,15 @@ class BatchExecutionDescriptor:
 
 
 class CreateForwardFn(Protocol):
-    """Factory that prepares inputs (OUTSIDE the graph) and returns a tuple of
-    (forward_fn, attn_state). Called with warmup=True for the warmup pass and
-    warmup=False for the captured pass."""
+    """Factory that prepares inputs (OUTSIDE the graph) and returns a
+    forward_fn. Called with warmup=True for the warmup pass and warmup=False
+    for the captured pass."""
 
     def __call__(
         self,
         desc: BatchExecutionDescriptor,
         warmup: bool,
-    ) -> tuple[Callable[[CUDAGraphMode], None], AttentionState]: ...
+    ) -> Callable[[CUDAGraphMode], None]: ...
 
 
 def _is_compatible(
@@ -141,11 +137,6 @@ class CudaGraphManager:
 
         self._candidates: dict[tuple[int, int], list[BatchExecutionDescriptor]] = {}
         self._capture_descs: dict[CUDAGraphMode, list[BatchExecutionDescriptor]] = {}
-        # adjust the cudagraph sizes to be a multiple of the uniform decode query length
-        self.compilation_config.adjust_cudagraph_sizes_for_spec_decode(
-            self.decode_query_len, self.tp_size
-        )
-        self._init_candidates()
 
         # Breakable CUDA graph (PW CUDA graph without torch.compile)
         self.use_breakable_cg = (
@@ -153,6 +144,8 @@ class CudaGraphManager:
             and self.cudagraph_mode.has_piecewise_cudagraphs()
         )
         self.breakable_cg_runner: BreakableCUDAGraphWrapper | None = None
+
+        self._init_candidates()
 
     def _build_lora_dispatch_map(self) -> tuple[dict[int, int], int]:
         """Precompute actual num_active_loras -> effective captured case.
@@ -191,41 +184,82 @@ class CudaGraphManager:
         decode_mode = self.cudagraph_mode.decode_mode()
         mixed_mode = self.cudagraph_mode.mixed_mode()
         separate_decode_routine = self.cudagraph_mode.separate_routine()
+        max_cg_capture_size = self.compilation_config.max_cudagraph_capture_size
 
         descs_by_token_lora: dict[tuple[int, int], list[BatchExecutionDescriptor]] = (
             defaultdict(list)
         )
-        descs_by_mode = defaultdict(list)
+        descs_by_mode: defaultdict[CUDAGraphMode, list[BatchExecutionDescriptor]] = (
+            defaultdict(list)
+        )
+
+        # When using Dynamic SD, num_speculative_tokens is the max number of
+        # draft tokens. The scheduler might use a smaller number so we need
+        # to capture graphs for all possible values during decode.
+        speculative_config = self.vllm_config.speculative_config
+        if (
+            speculative_config
+            and speculative_config.uses_dynamic_speculative_decoding()
+        ):
+            num_spec_per_batch_size = (
+                speculative_config.num_speculative_tokens_per_batch_size
+            )
+            # uses_dynamic_speculative_decoding() guarantees this is set.
+            assert num_spec_per_batch_size is not None
+            # decode_query_len = num_speculative_steps + num_new_sampled_tokens
+            # _per_step. Recover num_new_sampled_tokens_per_step
+            # from the values the manager already has.
+            num_new_sampled_tokens_per_step = (
+                self.decode_query_len - self.vllm_config.num_speculative_tokens
+            )
+            # Each entry is (range_start, range_end, num_speculative_tokens).
+            decode_query_lens = [
+                x[2] + num_new_sampled_tokens_per_step for x in num_spec_per_batch_size
+            ]
+        else:
+            decode_query_lens = [self.decode_query_len]
 
         for num_tokens, num_active_loras in product(
             capture_sizes, self.lora_capture_cases
         ):
             # Capture uniform decode specfifc graphs if required
             #  (i.e. separate decode routine)
-            if (
-                separate_decode_routine
-                and decode_mode
-                and self.decode_query_len <= num_tokens <= max_decode_tokens
-            ):
-                desc = BatchExecutionDescriptor(
-                    cg_mode=decode_mode,
-                    num_tokens=num_tokens,
-                    num_reqs=num_tokens // self.decode_query_len,
-                    uniform_token_count=self.decode_query_len,
-                    num_active_loras=num_active_loras,
-                )
-                descs_by_mode[decode_mode].append(desc)
-                descs_by_token_lora[(num_tokens, num_active_loras)].append(desc)
+            if separate_decode_routine and decode_mode:
+                for decode_query_len in decode_query_lens:
+                    rounded_num_tokens = round_up(num_tokens, decode_query_len)
+                    rounded_num_reqs = rounded_num_tokens // decode_query_len
+
+                    if (
+                        rounded_num_tokens > max_decode_tokens
+                        or rounded_num_tokens > max_cg_capture_size
+                        or rounded_num_reqs > self.max_num_reqs
+                    ):
+                        continue
+
+                    desc = BatchExecutionDescriptor(
+                        cg_mode=decode_mode,
+                        num_tokens=rounded_num_tokens,
+                        num_reqs=rounded_num_reqs,
+                        uniform_token_count=decode_query_len,
+                        num_active_loras=num_active_loras,
+                    )
+
+                    # avoid duplicate graphs
+                    if desc not in descs_by_mode[decode_mode]:
+                        descs_by_mode[decode_mode].append(desc)
+                        descs_by_token_lora[
+                            (rounded_num_tokens, num_active_loras)
+                        ].append(desc)
 
             if mixed_mode:
                 # for PIECEWISE graphs there is no limit on requests when replaying
                 # i.e. no request padding is needed
                 # so we leave it as None
-                num_reqs = (
-                    min(num_tokens, self.max_num_reqs)
-                    if mixed_mode == CUDAGraphMode.FULL
-                    else None
-                )
+                num_reqs = None
+                if mixed_mode == CUDAGraphMode.FULL or (
+                    mixed_mode == CUDAGraphMode.PIECEWISE and self.use_breakable_cg
+                ):
+                    num_reqs = min(num_tokens, self.max_num_reqs)
                 desc = BatchExecutionDescriptor(
                     cg_mode=mixed_mode,
                     num_tokens=num_tokens,
@@ -262,19 +296,16 @@ class CudaGraphManager:
         self,
         create_forward_fn: CreateForwardFn,
         progress_bar_desc: str = "Capturing CUDA graphs",
-    ) -> dict[BatchExecutionDescriptor, AttentionStatePair]:
+    ) -> None:
         """Capture CUDA graphs.
 
         Args:
             create_forward_fn: Factory that prepares inputs (OUTSIDE graph) and
-                returns a tuple of (forward_fn, attn_state). For FULL cudagraph
-                mode, it is invoked once with warmup=True for the warmup pass,
-                and again with warmup=False for the captured pass. For attention
-                backends that perform lazy metadata initialization (e.g. FlashMLA),
-                FULL cudagraph capture requires distinct metadatas for warmup and
-                capture.
+                returns a forward_fn. For FULL and breakable PIECEWISE modes,
+                it is invoked once with warmup=True and again with warmup=False
+                because attention backends may mutate or lazily initialize
+                metadata during warmup.
         """
-        attn_states: dict[BatchExecutionDescriptor, AttentionStatePair] = {}
         with graph_capture(device=self.device):
             # Capture in order: PIECEWISE first, then FULL. PIECEWISE has larger
             # activations so FULL activations should fit in already allocated
@@ -288,7 +319,7 @@ class CudaGraphManager:
                     descs = tqdm(descs, desc=f"{progress_bar_desc} ({mode.name})")
                 for desc in descs:
                     # Prepare inputs and get forward function
-                    forward_fn, warmup_attn_state = create_forward_fn(desc, warmup=True)
+                    forward_fn = create_forward_fn(desc, warmup=True)
 
                     # Warmup
                     forward_fn(CUDAGraphMode.NONE)
@@ -297,19 +328,17 @@ class CudaGraphManager:
                     logger.debug(
                         "CG Capture: mode=%s, batch_desc=%s", desc.cg_mode.name, desc
                     )
-                    if desc.cg_mode == CUDAGraphMode.PIECEWISE:
-                        attn_states[desc] = AttentionStatePair(
-                            warmup_attn_state, warmup_attn_state
-                        )
+                    if (
+                        desc.cg_mode == CUDAGraphMode.PIECEWISE
+                        and not self.use_breakable_cg
+                    ):
                         forward_fn(CUDAGraphMode.PIECEWISE)
                     else:
                         # Capture with fresh attention state.
-                        forward_fn, capture_attn_state = create_forward_fn(
-                            desc, warmup=False
-                        )
-                        attn_states[desc] = AttentionStatePair(
-                            warmup_attn_state, capture_attn_state
-                        )
+                        forward_fn = create_forward_fn(desc, warmup=False)
+                        if desc.cg_mode == CUDAGraphMode.PIECEWISE:
+                            forward_fn(CUDAGraphMode.PIECEWISE)
+                            continue
                         assert desc not in self.graphs, (
                             f"Graph already captured for {desc}"
                         )
@@ -327,7 +356,6 @@ class CudaGraphManager:
                         self.graphs[desc] = graph
                         compilation_counter.num_cudagraph_captured += 1
         self._graphs_captured = True
-        return attn_states
 
     def dispatch(
         self,
@@ -422,7 +450,7 @@ class ModelCudaGraphManager(CudaGraphManager):
         use_aux_hidden_state_outputs: bool = False,
         lora_capture_hook: Callable[[int, int, int], None] | None = None,
         progress_bar_desc: str = "Capturing CUDA graphs",
-    ) -> dict[BatchExecutionDescriptor, AttentionStatePair]:
+    ) -> None:
         """Capture CUDA graphs for model forward pass."""
         self.use_aux_hidden_state_outputs = use_aux_hidden_state_outputs
         if self.use_breakable_cg:
@@ -431,10 +459,7 @@ class ModelCudaGraphManager(CudaGraphManager):
         def create_forward_fn(
             desc: BatchExecutionDescriptor,
             warmup: bool,
-        ) -> tuple[
-            Callable[[CUDAGraphMode], None],
-            AttentionState,
-        ]:
+        ) -> Callable[[CUDAGraphMode], None]:
             num_tokens = desc.num_tokens
             num_reqs = desc.num_reqs or min(num_tokens, self.max_num_reqs)
 
@@ -468,7 +493,10 @@ class ModelCudaGraphManager(CudaGraphManager):
                 block_tables,
                 attn_groups,
                 kv_cache_config,
-                skip_attn=(desc.cg_mode == CUDAGraphMode.PIECEWISE),
+                skip_attn=(
+                    desc.cg_mode == CUDAGraphMode.PIECEWISE
+                    and not self.use_breakable_cg
+                ),
             )
 
             # Capture with dummy rows marked as padding.
@@ -477,7 +505,7 @@ class ModelCudaGraphManager(CudaGraphManager):
             def forward_fn(cg_mode: CUDAGraphMode) -> None:
                 batch_descriptor = None
                 if cg_mode == CUDAGraphMode.PIECEWISE:
-                    assert attn_metadata is None
+                    assert (attn_metadata is not None) == self.use_breakable_cg
                     batch_descriptor = BatchDescriptor(
                         num_tokens=num_tokens,
                         has_lora=has_lora,
@@ -532,9 +560,9 @@ class ModelCudaGraphManager(CudaGraphManager):
                     for k, v in intermediate_tensors.tensors.items():
                         self.intermediate_tensors[k][:num_tokens] = v
 
-            return forward_fn, AttentionState(attn_metadata, slot_mappings)
+            return forward_fn
 
-        return super().capture(create_forward_fn, progress_bar_desc)
+        super().capture(create_forward_fn, progress_bar_desc)
 
     def run_fullgraph(
         self, desc: BatchExecutionDescriptor
