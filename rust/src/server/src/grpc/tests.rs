@@ -1086,34 +1086,6 @@ async fn grpc_without_keepalive_keeps_unresponsive_connection_open() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
-async fn control_abort_is_idempotent_when_no_requests_match() {
-    let (generate_service, control_service, engine_health, _engine_task) =
-        setup_grpc_service(b"engine-grpc-abort", default_stream_output_specs()).await;
-    let (channel, server_task) = start_grpc_test_server(
-        generate_service,
-        control_service,
-        engine_health,
-        tokio_util::sync::CancellationToken::new(),
-    )
-    .await;
-    let mut client = ControlClient::new(channel);
-
-    for request_ids in [
-        Vec::new(),
-        vec!["unknown".to_string()],
-        vec!["unknown".to_string(), "unknown".to_string()],
-    ] {
-        client
-            .abort(pb::AbortRequest { request_ids })
-            .await
-            .expect("abort request should be idempotent");
-    }
-
-    server_task.abort();
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[serial]
 async fn control_abort_ends_active_generation() {
     let (generate_service, control_service, engine_health, engine_task) =
         setup_grpc_service(b"engine-grpc-abort-active", vec![(vec![b'h' as u32], None)]).await;
@@ -1145,7 +1117,11 @@ async fn control_abort_ends_active_generation() {
 
     control_client
         .abort(pb::AbortRequest {
-            request_ids: vec![request_id.to_string()],
+            request_ids: vec![
+                request_id.to_string(),
+                request_id.to_string(),
+                "unknown".to_string(),
+            ],
         })
         .await
         .expect("abort active generation");
@@ -1161,6 +1137,13 @@ async fn control_abort_ends_active_generation() {
         }
     };
     assert_eq!(finish_reason, pb::finish_info::FinishReason::Aborted as i32);
+
+    control_client
+        .abort(pb::AbortRequest {
+            request_ids: vec![request_id.to_string()],
+        })
+        .await
+        .expect("repeated abort should be idempotent");
 
     engine_task.await.expect("mock engine task");
     server_task.abort();
