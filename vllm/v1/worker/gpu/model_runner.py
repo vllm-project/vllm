@@ -1383,6 +1383,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             hidden_states=hidden_states,
             aux_hidden_states=aux_hidden_states,
             finished_req_ids=finished_req_ids,
+            num_spec_tokens_to_schedule=scheduler_output.num_spec_tokens_to_schedule,
         )
 
         if not self.is_last_pp_rank:
@@ -1405,6 +1406,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         hidden_states = self.execute_model_state.hidden_states
         aux_hidden_states = self.execute_model_state.aux_hidden_states
         finished_req_ids = self.execute_model_state.finished_req_ids
+        num_spec_tokens_to_schedule = (
+            self.execute_model_state.num_spec_tokens_to_schedule
+        )
         self.execute_model_state = None
 
         if not self.is_last_pp_rank:
@@ -1494,7 +1498,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             input_batch.query_start_loc,
         )
 
-        if self.speculator is not None:
+        if self.speculator is not None and num_spec_tokens_to_schedule > 0:
             assert self.sampler is not None
             # Let the target override the hidden state fed to the drafter
             # (e.g. DeepSeek V4 MTP needs the pre-hc_head residual). The
@@ -1504,6 +1508,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if hasattr(self.model, "get_mtp_target_hidden_states"):
                 pre_hc_hidden_states = self.model.get_mtp_target_hidden_states()
                 spec_hidden_states = pre_hc_hidden_states[: hidden_states.shape[0]]  # type: ignore[union-attr]
+            propose_kwargs = (
+                {"num_speculative_tokens": num_spec_tokens_to_schedule}
+                if self.speculator.supports_dynamic_draft_shapes
+                else {}
+            )
             draft_tokens = self.speculator.propose(
                 input_batch,
                 attn_metadata,
@@ -1517,16 +1526,24 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.sampler.sampling_states.temperature.gpu,
                 self.sampler.sampling_states.seeds.gpu,
                 mm_inputs=mm_inputs,
+                **propose_kwargs,
             )
-            self.req_states.draft_tokens[input_batch.idx_mapping] = draft_tokens
+            num_proposed_tokens = draft_tokens.shape[1]
+            self.req_states.draft_tokens[
+                input_batch.idx_mapping, :num_proposed_tokens
+            ] = draft_tokens
 
         if self.num_speculative_steps > 0:
             # Spec-decode and diffusion LLMs both use draft tokens but the latter does
             # not have a speculator (i.e. self.speculator is None)
-            self.draft_tokens_handler.set_draft_tokens(
-                input_batch,
-                self.req_states.draft_tokens[input_batch.idx_mapping],
+            draft_tokens = (
+                self.req_states.draft_tokens[input_batch.idx_mapping]
+                if self.speculator is None
+                else self.req_states.draft_tokens[
+                    input_batch.idx_mapping, :num_spec_tokens_to_schedule
+                ]
             )
+            self.draft_tokens_handler.set_draft_tokens(input_batch, draft_tokens)
 
         # Post-step KV connector related operations.
         kv_connector_output = self.kv_connector.post_forward(finished_req_ids)
@@ -1647,6 +1664,7 @@ class ExecuteModelState(NamedTuple):
     hidden_states: torch.Tensor | None
     aux_hidden_states: list[torch.Tensor] | None
     finished_req_ids: set[str]
+    num_spec_tokens_to_schedule: int
 
 
 def sort_batch_req_ids(

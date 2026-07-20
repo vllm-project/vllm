@@ -36,6 +36,7 @@ from vllm.v1.worker.gpu.spec_decode.dspark.utils import load_dspark_model
 
 class DSparkSpeculator(DFlashSpeculator):
     _speculator_name = "DSpark"
+    supports_dynamic_draft_shapes = False
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         super().__init__(vllm_config, device)
@@ -154,10 +155,12 @@ class DSparkSpeculator(DFlashSpeculator):
         attn_metadata: dict[str, Any] | None,
         slot_mappings: dict[str, torch.Tensor] | None,
         num_tokens_across_dp: torch.Tensor | None,
+        num_speculative_tokens: int,
         cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
     ) -> None:
         # Full draft step (captured under CUDA graph): parallel backbone forward
         # then sequential Markov sampling over its hidden state outputs.
+        assert num_speculative_tokens == self.num_speculative_steps
         head_hidden = self._run_model(
             num_tokens_padded,
             attn_metadata,

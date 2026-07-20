@@ -4,6 +4,7 @@ from collections.abc import Callable, Mapping
 
 import torch
 
+from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.attn_utils import (
@@ -63,6 +64,27 @@ class DFlashCudaGraphManager(CudaGraphManager):
     """DFlash CudaGraphManager for the parallel-drafting query forward,
     building its own attention metadata from scratch."""
 
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        device: torch.device,
+        cudagraph_mode: CUDAGraphMode,
+        decode_query_len: int,
+        lora_capture_cases: list[int] | None = None,
+        *,
+        query_len_offset: int,
+        dynamic_draft_shapes: bool,
+    ) -> None:
+        super().__init__(
+            vllm_config,
+            device,
+            cudagraph_mode,
+            decode_query_len,
+            lora_capture_cases,
+        )
+        self.query_len_offset = query_len_offset
+        self.dynamic_draft_shapes = dynamic_draft_shapes
+
     def capture(
         self,
         forward_fn: Callable,
@@ -80,6 +102,16 @@ class DFlashCudaGraphManager(CudaGraphManager):
         ) -> Callable[[CUDAGraphMode], None]:
             num_tokens = desc.num_tokens
             num_reqs = desc.num_reqs or min(num_tokens, self.max_num_reqs)
+            num_query_per_req = desc.uniform_token_count or num_tokens // num_reqs
+            scheduled_k = num_query_per_req - self.query_len_offset
+            # K=0 skips the drafter at runtime. Preserve the existing dummy
+            # capture behavior for that unreachable drafter graph.
+            num_speculative_tokens = (
+                scheduled_k
+                if self.dynamic_draft_shapes and scheduled_k > 0
+                else self.vllm_config.num_speculative_tokens
+            )
+            assert num_speculative_tokens > 0
             num_tokens_across_dp = (
                 torch.full((self.dp_size,), num_tokens, dtype=torch.int32, device="cpu")
                 if self.dp_size > 1
@@ -104,6 +136,7 @@ class DFlashCudaGraphManager(CudaGraphManager):
                 attn_metadata,
                 slot_mappings,
                 num_tokens_across_dp,
+                num_speculative_tokens,
                 cg_mode,
             )
 
