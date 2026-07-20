@@ -12,6 +12,9 @@ from tests.v1.kv_connector.unit.offloading_connector.utils import (
 )
 from tests.v1.kv_connector.unit.utils import EOS_TOKEN_ID
 from vllm.distributed.kv_events import MEDIUM_CPU, BlockRemoved, BlockStored
+from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
+    OffloadingConnectorMetadata,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
     OffloadingConnectorStats,
     _ConnectorMetricName,
@@ -106,6 +109,40 @@ def test_last_block_offloaded_at_request_finish(
         "req_status was deleted but should be kept alive "
         "for _build_store_jobs to process finished_req_ids."
     )
+
+
+@pytest.mark.parametrize("async_scheduling", [True, False])
+def test_abort_queued_request_does_not_build_store_job(
+    request_runner, async_scheduling: bool
+):
+    """Aborting a never-scheduled request must not store unallocated KV."""
+    block_size = 4
+    runner = request_runner(
+        block_size=block_size,
+        num_gpu_blocks=8,
+        async_scheduling=async_scheduling,
+    )
+
+    runner.new_request(token_ids=[0] * (block_size * 4))
+    runner.scheduler.schedule()
+
+    runner.new_request(token_ids=[1] * (block_size * 4))
+    queued_req_id = str(runner.req_id)
+    assert any(
+        request.request_id == queued_req_id for request in runner.scheduler.waiting
+    )
+
+    runner.scheduler.finish_requests(queued_req_id, RequestStatus.FINISHED_ABORTED)
+    req_status = runner.connector_scheduler._req_status[queued_req_id]
+    assert all(group_state.offload_keys for group_state in req_status.group_states)
+    assert all(not group_state.block_ids for group_state in req_status.group_states)
+
+    scheduler_output = runner.scheduler.schedule()
+
+    metadata = scheduler_output.kv_connector_metadata
+    assert isinstance(metadata, OffloadingConnectorMetadata)
+    assert all(job.req_id != queued_req_id for job in metadata.store_jobs.values())
+    assert queued_req_id not in runner.connector_scheduler._req_status
 
 
 def test_scheduler_reports_lookup_sync_delay(request_runner):
