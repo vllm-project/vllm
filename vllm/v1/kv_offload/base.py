@@ -53,6 +53,13 @@ class Medium(Enum):
     OBJ = "OBJ"
 
 
+class Locality(Enum):
+    """Locality of a tier's storage relative to the publishing instance."""
+
+    LOCAL = "LOCAL"
+    REMOTE = "REMOTE"
+
+
 @dataclass(frozen=True)
 class TierFilter:
     """Per-request filter controlling which tiers participate."""
@@ -123,13 +130,6 @@ class PrepareStoreOutput:
     keys_to_store: list[OffloadKey]
     store_spec: LoadStoreSpec
     evicted_keys: list[OffloadKey]
-
-
-class Locality(Enum):
-    """Locality of a tier's storage relative to the publishing instance."""
-
-    LOCAL = "LOCAL"
-    REMOTE = "REMOTE"
 
 
 @dataclass
