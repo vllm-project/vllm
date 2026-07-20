@@ -103,8 +103,15 @@ async def merge_async_iterators(
     """
     if len(iterators) == 1:
         # Fast-path single iterator case.
-        async for item in iterators[0]:
-            yield 0, item
+        iterator: AsyncGenerator[T, None] | None = iterators[0]
+        try:
+            async for item in iterator:  # type: ignore[union-attr]
+                yield 0, item
+            iterator = None
+        finally:
+            if iterator is not None:
+                with contextlib.suppress(BaseException):
+                    await iterator.aclose()
         return
 
     loop = asyncio.get_running_loop()

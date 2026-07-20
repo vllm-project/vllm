@@ -32,6 +32,7 @@ logger = init_logger(__name__)
 # - Add model type to MODELS_WITH_INCORRECT_HUB_TOKENIZER_CLASS in transformers (better)
 # - Fix tokenizer_class on the hub for the affected models (best)
 _MODEL_TYPES_WITH_INCORRECT_TOKENIZER_CLASS: set[str] = {
+    "internlm2",
     "step3_vl",
     "step3p7",
     "unlimited-ocr",
@@ -43,6 +44,10 @@ _VLLM_TOKENIZERS = {
     "hf": ("hf", "CachedHfTokenizer"),
     "kimi_audio": ("kimi_audio", "KimiAudioTokenizer"),
     "mistral": ("mistral", "MistralTokenizer"),
+    # Inkling uses the plain HF tokenizer for token operations; the "inkling"
+    # mode exists to select the InklingRenderer, which renders chat to
+    # token ids natively (Inkling has no Jinja chat template).
+    "inkling": ("hf", "CachedHfTokenizer"),
 }
 
 
