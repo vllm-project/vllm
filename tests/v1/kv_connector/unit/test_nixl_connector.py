@@ -204,13 +204,13 @@ class FakeNixlWrapper:
 def _make_fake_nixl_pkg():
     """Context manager that creates a temporary package making
        `from nixl._api import nixl_agent` resolve to our FakeNixlWrapper.
-       Also creates rixl package for ROCm compatibility.
+       Also creates the ROCm NIXL packages.
 
     Automatically cleans up the temporary directory when done.
     """
     with tempfile.TemporaryDirectory() as td:
-        # Create both nixl and rixl packages for cross-platform compatibility
-        for pkg_name in ["nixl", "rixl"]:
+        # Include legacy RIXL while ROCm installations migrate to upstream NIXL.
+        for pkg_name in ["nixl", "nixl_rocm", "rixl"]:
             pkg_root = os.path.join(td, pkg_name, "_api")
             os.makedirs(pkg_root, exist_ok=True)
 

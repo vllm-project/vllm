@@ -16,12 +16,14 @@ NixlWrapper: Any
 nixl_agent_config: Any
 nixlXferTelemetry: Any
 
+_ROCM_NIXL_PACKAGES = ("nixl_rocm", "rixl")
+
 
 def _maybe_set_ucx_rcache_limit() -> None:
     if "UCX_RCACHE_MAX_UNRELEASED" in os.environ:
         return
 
-    if "nixl" in sys.modules or "rixl" in sys.modules:
+    if "nixl" in sys.modules or any(pkg in sys.modules for pkg in _ROCM_NIXL_PACKAGES):
         logger.warning_once(
             "NIXL was already imported, we can't reset "
             "UCX_RCACHE_MAX_UNRELEASED. "
@@ -36,8 +38,20 @@ def _maybe_set_ucx_rcache_limit() -> None:
     os.environ["UCX_RCACHE_MAX_UNRELEASED"] = "1024"
 
 
+def _get_nixl_package_name() -> str:
+    if not current_platform.is_rocm():
+        return "nixl"
+
+    import importlib.util
+
+    for pkg in _ROCM_NIXL_PACKAGES:
+        if pkg in sys.modules or importlib.util.find_spec(pkg) is not None:
+            return pkg
+    return _ROCM_NIXL_PACKAGES[0]
+
+
 def _get_nixl_module_name(name: str) -> str:
-    package_name = "rixl" if current_platform.is_rocm() else "nixl"
+    package_name = _get_nixl_package_name()
     if name == "nixlXferTelemetry":
         return f"{package_name}._bindings"
     return f"{package_name}._api"
@@ -80,11 +94,11 @@ def __getattr__(name: str) -> Any:
 
 
 def is_nixl_available() -> bool:
-    """Lightweight check for nixl/rixl package without importing it."""
+    """Lightweight check for the platform's NIXL package without importing it."""
     import importlib.util
 
-    pkg = "rixl" if current_platform.is_rocm() else "nixl"
-    return importlib.util.find_spec(pkg) is not None
+    pkg = _get_nixl_package_name()
+    return pkg in sys.modules or importlib.util.find_spec(pkg) is not None
 
 
 __all__ = [
