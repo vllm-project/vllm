@@ -309,6 +309,42 @@ def _activate(
     session.poll()
 
 
+# --- Accessors for the server role's consolidated per-request state.
+# ServerRole keeps one _ServerRequestState per kv_request_id; entries are
+# garbage-collected once fully idle, so "no outbound"/"no abort" reads as
+# either a missing entry or a None field. These helpers paper over that.
+
+
+def _srv_outbound(session: P2PSession, kv_request_id: str):
+    """Outbound serve state for a kv_request_id, or None (idle / GC'd)."""
+    st = session._server._requests.get(kv_request_id)
+    return st.outbound if st is not None else None
+
+
+def _srv_lookups(session: P2PSession) -> list:
+    """Every parked inbound _LookupBlocks across all requests."""
+    return [
+        lu for st in session._server._requests.values() for lu in st.lookups.values()
+    ]
+
+
+def _srv_abort_started(session: P2PSession, kv_request_id: str) -> float | None:
+    """Pending-abort start time for a kv_request_id, or None."""
+    st = session._server._requests.get(kv_request_id)
+    return st.abort_started_at if st is not None else None
+
+
+def _srv_inflight_count(session: P2PSession, kv_request_id: str) -> int:
+    """Inflight-transfer count tracked for a kv_request_id (0 if idle)."""
+    st = session._server._requests.get(kv_request_id)
+    return st.inflight_count if st is not None else 0
+
+
+def _srv_total_inflight(session: P2PSession) -> int:
+    """Sum of per-request inflight counts across all requests."""
+    return sum(st.inflight_count for st in session._server._requests.values())
+
+
 # ---------------------------------------------------------------------------
 # Connect / handshake
 # ---------------------------------------------------------------------------
@@ -837,8 +873,8 @@ class TestServerLookupHandling:
         assert cs[1] == (b"hA", b"hB", b"hC")
         assert cb.calls[-1][0] == "on_request_finished"
 
-        # Hits are pinned in _outbound for the upcoming FetchMsg match.
-        assert set(session._server._outbound["req-1"].available) == {
+        # Hits are pinned in outbound state for the upcoming FetchMsg match.
+        assert set(_srv_outbound(session, "req-1").available) == {
             b"hA",
             b"hB",
             b"hC",
@@ -888,7 +924,7 @@ class TestServerLookupHandling:
         assert cs_calls[0][1] == (b"hA",)
         # Lookup is parked; on_request_finished not yet called.
         assert all(c[0] != "on_request_finished" for c in cb.calls)
-        assert len(session._server._inbound_lookups) == 1
+        assert len(_srv_lookups(session)) == 1
 
     def test_pending_resolves_then_aggregate_response_fires(self):
         """A HIT_PENDING hash that becomes HIT on a later poll releases
@@ -925,8 +961,8 @@ class TestServerLookupHandling:
         assert cs_calls[1][1] == (b"hB",)
         # on_request_finished fires once after the aggregate resolve.
         assert sum(1 for c in cb.calls if c[0] == "on_request_finished") == 1
-        assert b"hA" in session._server._outbound["req-1"].available
-        assert b"hB" in session._server._outbound["req-1"].available
+        assert b"hA" in _srv_outbound(session, "req-1").available
+        assert b"hB" in _srv_outbound(session, "req-1").available
 
     def test_pending_timeout_replies_miss_no_store_job(self):
         """A HIT_PENDING hash that stays pending past the batch
@@ -944,7 +980,7 @@ class TestServerLookupHandling:
         assert _lookup_resps(conn, sent_before) == []
 
         # Forge the deadline into the past to trigger the timeout branch.
-        lookup = next(iter(session._server._inbound_lookups.values()))
+        lookup = _srv_lookups(session)[0]
         lookup.deadline = time.monotonic() - 0.1
 
         _serve(session, cb)
@@ -990,7 +1026,7 @@ class TestServerLookupHandling:
         _send_lookup(conn, "req-1", [b"hA"])
         session.poll()
         _serve(session, cb)
-        assert len(session._server._inbound_lookups) == 1
+        assert len(_srv_lookups(session)) == 1
         assert all(c[0] != "on_request_finished" for c in cb.calls)
 
         result = session.close()
@@ -1014,14 +1050,12 @@ class TestServerLookupHandling:
         _send_lookup(conn, "req-2", [b"hB"])
         session.poll()
         _serve(session, cb)
-        assert len(session._server._inbound_lookups) == 2
+        assert len(_srv_lookups(session)) == 2
 
         session._server.finish("req-1")
 
         # req-1 batch dropped from parked lookups; its ctx queued for release.
-        remaining_kv_request_ids = {
-            b.kv_request_id for b in session._server._inbound_lookups.values()
-        }
+        remaining_kv_request_ids = {b.kv_request_id for b in _srv_lookups(session)}
         assert remaining_kv_request_ids == {"req-2"}
         queued = session._server._finished_lookup_ctxs
         assert len(queued) == 1
@@ -1035,7 +1069,7 @@ class TestServerLookupHandling:
 
     def test_incoming_fetch_drops_pending_lookups_for_kv_request_id(self):
         """A peer FetchMsg terminates the lookup phase for its id: parked
-        _inbound_lookups with matching kv_request_id are dropped and their
+        lookups with matching kv_request_id are dropped and their
         ctx queued for on_request_finished; other kv_request_ids untouched."""
         cb = FakeParent(pending={b"hA", b"hB"})
         session, conn, _ = _make_session()
@@ -1047,7 +1081,7 @@ class TestServerLookupHandling:
         _send_lookup(conn, "req-2", [b"hB"])
         session.poll()
         _serve(session, cb)
-        assert len(session._server._inbound_lookups) == 2
+        assert len(_srv_lookups(session)) == 2
 
         # Empty FetchMsg: peer signals "lookup phase done" without asking
         # for any blocks (the all-miss case).
@@ -1061,9 +1095,7 @@ class TestServerLookupHandling:
         )
         session.poll()
 
-        remaining_kv_request_ids = {
-            lu.kv_request_id for lu in session._server._inbound_lookups.values()
-        }
+        remaining_kv_request_ids = {lu.kv_request_id for lu in _srv_lookups(session)}
         assert remaining_kv_request_ids == {"req-2"}
         # Dispatch queues the ctx but does not call the parent yet.
         queued = session._server._finished_lookup_ctxs
@@ -1192,11 +1224,11 @@ class TestServerFlows:
         session.poll()
         ack = next(m for m in conn._sent if m[TYPE_KEY] == AbortAckMsg.TYPE)
         assert ack[AbortAckMsg.KV_REQUEST_ID] == "req-1"
-        assert "req-1" not in session._server._pending_aborts
+        assert _srv_abort_started(session, "req-1") is None
 
     def test_abort_fetch_defers_ack_when_cancel_pending(self):
         """If cancel(mode='wait') reports still-inflight tids, the ack is
-        deferred and the abort is parked in _pending_aborts."""
+        deferred and the abort is parked (abort_started_at set)."""
         session, conn, transport = _make_session()
         _activate(session, conn)
         # Seed an inflight transfer for req-1 that the transport pretends
@@ -1217,7 +1249,7 @@ class TestServerFlows:
         session.poll()
 
         assert not any(m[TYPE_KEY] == AbortAckMsg.TYPE for m in conn._sent)
-        assert "req-1" in session._server._pending_aborts
+        assert _srv_abort_started(session, "req-1") is not None
         # First attempt happens inside _on_abort_fetch; the per-tick
         # drain runs again at the end of poll() — both are wait-mode.
         assert all(mode == "wait" for _, mode in transport._cancel_calls)
@@ -1242,7 +1274,7 @@ class TestServerFlows:
             }
         )
         session.poll()
-        assert "req-1" in session._server._pending_aborts
+        assert _srv_abort_started(session, "req-1") is not None
 
         # Backend finishes draining: transport.poll() will return tid as
         # DONE, and the next cancel(mode='wait') call sees it's gone.
@@ -1253,7 +1285,7 @@ class TestServerFlows:
 
         ack = next(m for m in conn._sent if m[TYPE_KEY] == AbortAckMsg.TYPE)
         assert ack[AbortAckMsg.KV_REQUEST_ID] == "req-1"
-        assert "req-1" not in session._server._pending_aborts
+        assert _srv_abort_started(session, "req-1") is None
         assert tid not in session._server._inflight
 
     def test_abort_fetch_force_cancels_after_timeout(self):
@@ -1275,9 +1307,9 @@ class TestServerFlows:
             }
         )
         session.poll()
-        assert "req-1" in session._server._pending_aborts
+        assert _srv_abort_started(session, "req-1") is not None
         # Backdate past the drain deadline.
-        session._server._pending_aborts["req-1"] = (
+        session._server._requests["req-1"].abort_started_at = (
             time.monotonic() - _CANCEL_DRAIN_TIMEOUT_S - 1.0
         )
         # Even if the transport still claims it can't cancel, the
@@ -1288,7 +1320,7 @@ class TestServerFlows:
 
         ack = next(m for m in conn._sent if m[TYPE_KEY] == AbortAckMsg.TYPE)
         assert ack[AbortAckMsg.KV_REQUEST_ID] == "req-1"
-        assert "req-1" not in session._server._pending_aborts
+        assert _srv_abort_started(session, "req-1") is None
         assert tid not in session._server._inflight
         assert ([tid], "immediate") in transport._cancel_calls
 
@@ -1311,7 +1343,7 @@ class TestServerFlows:
             }
         )
         session.poll()
-        first_started_at = session._server._pending_aborts["req-1"]
+        first_started_at = _srv_abort_started(session, "req-1")
 
         # Second AbortFetchMsg for the same kv_request_id while still
         # draining must not reset the deadline.
@@ -1322,7 +1354,7 @@ class TestServerFlows:
             }
         )
         session.poll()
-        assert session._server._pending_aborts["req-1"] == first_started_at
+        assert _srv_abort_started(session, "req-1") == first_started_at
 
         # Now let the drain succeed and confirm exactly one ack ever.
         transport._cancel_still_inflight.discard(tid)
@@ -1432,7 +1464,7 @@ class TestFinishRequestServerSide:
             }
         )
         session.poll()
-        assert "req-1" in session._server._outbound
+        assert _srv_outbound(session, "req-1") is not None
 
         session.finish_request("req-1")
 
@@ -1440,7 +1472,7 @@ class TestFinishRequestServerSide:
         assert msg is not None
         assert msg[TransferDoneMsg.KV_REQUEST_ID] == "req-1"
         assert msg[TransferDoneMsg.SUCCESS] is False
-        assert "req-1" not in session._server._outbound
+        assert _srv_outbound(session, "req-1") is None
 
     def test_with_inflight_defers_then_fires_on_last_transfer(self):
         """finish_request with inflight defers; last transfer fires the
@@ -1464,8 +1496,8 @@ class TestFinishRequestServerSide:
         before = len(conn._sent)
         session.finish_request("req-1")
         assert len(conn._sent) == before
-        assert "req-1" in session._server._outbound
-        assert session._server._outbound["req-1"].finishing
+        assert _srv_outbound(session, "req-1") is not None
+        assert _srv_outbound(session, "req-1").finishing
 
         # Last inflight settles -> early-fail fires.
         tid = next(iter(transport._transfers))
@@ -1476,7 +1508,7 @@ class TestFinishRequestServerSide:
         assert msg is not None
         assert msg[TransferDoneMsg.KV_REQUEST_ID] == "req-1"
         assert msg[TransferDoneMsg.SUCCESS] is False
-        assert "req-1" not in session._server._outbound
+        assert _srv_outbound(session, "req-1") is None
 
     def test_full_demand_satisfied_still_sends_success(self):
         """finish_request must not override a fully-satisfied transfer:
@@ -1515,7 +1547,7 @@ class TestFinishRequestServerSide:
         session.add_stored_blocks("req-1", [b"k1"], [0], job_id=1)
         # finish_request first — no demand received yet -> defer.
         session.finish_request("req-1")
-        assert "req-1" in session._server._outbound
+        assert _srv_outbound(session, "req-1") is not None
         # Fetch arrives now: demand fully satisfied by available.
         conn.enqueue(
             {
@@ -1554,7 +1586,7 @@ class TestFinishRequestServerSide:
         session.poll()
         msg = next(m for m in conn._sent if m[TYPE_KEY] == TransferDoneMsg.TYPE)
         assert msg[TransferDoneMsg.SUCCESS] is False
-        assert "req-2" not in session._server._outbound
+        assert _srv_outbound(session, "req-2") is None
 
     def test_unknown_request_is_noop(self):
         session, conn, _ = _make_session()
@@ -1584,7 +1616,7 @@ class TestFinishRequestServerSide:
         # matches demand. Without the shortcut, job 42 sits in _store_jobs
         # for _STORE_TIMEOUT_S.
         session.add_stored_blocks("req-1", [b"unrelated"], [0], job_id=42)
-        assert session._server._outbound["req-1"].pending_job_ids == {42}
+        assert _srv_outbound(session, "req-1").pending_job_ids == {42}
 
         session.finish_request("req-1")
 
@@ -1592,7 +1624,7 @@ class TestFinishRequestServerSide:
         msg = self._last_transfer_done(conn)
         assert msg is not None
         assert msg[TransferDoneMsg.SUCCESS] is False
-        assert "req-1" not in session._server._outbound
+        assert _srv_outbound(session, "req-1") is None
 
         # Local store job surfaces on the next poll, success=False.
         stores = session.poll().stores
@@ -1617,7 +1649,7 @@ class TestFinishRequestServerSide:
         session.add_stored_blocks("req-1", [b"k1"], [0], job_id=7)
         # finish_request races with the inflight transfer.
         session.finish_request("req-1")
-        assert "req-1" in session._server._outbound  # deferred
+        assert _srv_outbound(session, "req-1") is not None  # deferred
 
         # Last inflight completes -> _finalize_outbound(success=True) fires.
         tid = next(iter(transport._transfers))
@@ -1628,7 +1660,7 @@ class TestFinishRequestServerSide:
         assert msg is not None
         assert msg[TransferDoneMsg.SUCCESS] is True
         assert StoreResult(job_id=7, success=True) in stores
-        assert "req-1" not in session._server._outbound
+        assert _srv_outbound(session, "req-1") is None
 
     def test_write_blocks_failure_finalizes_with_failure(self):
         """write_blocks returning None must not leave the request hanging.
@@ -1657,7 +1689,7 @@ class TestFinishRequestServerSide:
         session.add_stored_blocks("req-1", [b"k1"], [0], job_id=42)
 
         # Outbound was finalized immediately (no other inflight).
-        assert "req-1" not in session._server._outbound
+        assert _srv_outbound(session, "req-1") is None
         # Peer notified with success=False.
         msg = next(m for m in conn._sent if m[TYPE_KEY] == TransferDoneMsg.TYPE)
         assert msg[TransferDoneMsg.KV_REQUEST_ID] == "req-1"
@@ -1687,7 +1719,7 @@ class TestFinishRequestServerSide:
         session.poll()
         # Demand registered, no matches yet.
         assert session._server._inflight == {}
-        outbound = session._server._outbound["req-1"]
+        outbound = _srv_outbound(session, "req-1")
         assert outbound.remaining == 3
         assert set(outbound.demanded.keys()) == {b"k1", b"k2", b"k3"}
 
@@ -1708,7 +1740,7 @@ class TestFinishRequestServerSide:
         assert session._server._inflight == {}
         assert outbound.remaining == 2
         # Not yet finalized — still 2 blocks demanded.
-        assert "req-1" in session._server._outbound
+        assert _srv_outbound(session, "req-1") is not None
 
         # Round 2: k2 and k3 arrive together.
         session.add_stored_blocks("req-1", [b"k2", b"k3"], [1, 2], job_id=200)
@@ -1722,7 +1754,7 @@ class TestFinishRequestServerSide:
         stores = session.poll().stores
         assert StoreResult(job_id=200, success=True) in stores
         # _finalize_outbound fired — request gone, peer notified with success.
-        assert "req-1" not in session._server._outbound
+        assert _srv_outbound(session, "req-1") is None
         done = next(m for m in conn._sent if m.get(TYPE_KEY) == TransferDoneMsg.TYPE)
         assert done[TransferDoneMsg.KV_REQUEST_ID] == "req-1"
         assert done[TransferDoneMsg.SUCCESS] is True
@@ -1751,7 +1783,7 @@ class TestFinishRequestServerSide:
         session.add_stored_blocks("req-1", [b"k1"], [0], job_id=100)
         assert len(session._server._inflight) == 1
         tid_1 = next(iter(session._server._inflight))
-        outbound = session._server._outbound["req-1"]
+        outbound = _srv_outbound(session, "req-1")
         assert outbound.remaining == 2  # decrement happens on completion
         assert outbound.finishing is False
 
@@ -1762,7 +1794,7 @@ class TestFinishRequestServerSide:
         assert list(session._server._inflight.keys()) == [tid_1]
         # Marked finishing, but NOT finalized yet (transfer_1 still inflight).
         assert outbound.finishing is True
-        assert "req-1" in session._server._outbound
+        assert _srv_outbound(session, "req-1") is not None
         done_msgs = [m for m in conn._sent if m.get(TYPE_KEY) == TransferDoneMsg.TYPE]
         assert done_msgs == []
 
@@ -1774,7 +1806,7 @@ class TestFinishRequestServerSide:
         stores_first = session.poll().stores
         assert StoreResult(job_id=100, success=True) in stores_first
         # Outbound state cleaned up; peer notified with success=False.
-        assert "req-1" not in session._server._outbound
+        assert _srv_outbound(session, "req-1") is None
         done = next(m for m in conn._sent if m.get(TYPE_KEY) == TransferDoneMsg.TYPE)
         assert done[TransferDoneMsg.KV_REQUEST_ID] == "req-1"
         assert done[TransferDoneMsg.SUCCESS] is False
@@ -2167,10 +2199,10 @@ class TestDispatchErrorHandling:
 
 
 class TestInflightPerReqInvariant:
-    """`_inflight_per_req` is the O(1) replacement for the previous
-    O(N) scan in `_has_inflight_for`. These tests check that every
-    mutation site keeps the counter in sync with `_inflight` and that
-    the lookup is correct under high fan-out.
+    """Per-request `inflight_count` is the O(1) replacement for the
+    previous O(N) scan in `_has_inflight_for`. These tests check that
+    every mutation site keeps the counter in sync with `_inflight` and
+    that the lookup is correct under high fan-out.
     """
 
     def test_invariant_holds_through_lifecycle(self):
@@ -2181,10 +2213,7 @@ class TestInflightPerReqInvariant:
         _activate(session, conn)
 
         def _invariant_holds() -> bool:
-            counted = sum(session._server._inflight_per_req.values())
-            return counted == len(session._server._inflight) and all(
-                v > 0 for v in session._server._inflight_per_req.values()
-            )
+            return _srv_total_inflight(session) == len(session._server._inflight)
 
         assert _invariant_holds()
 
@@ -2222,7 +2251,7 @@ class TestInflightPerReqInvariant:
 
         assert _invariant_holds()
         assert not session._server._has_inflight_for("req-A")
-        assert "req-A" not in session._server._inflight_per_req  # entry was removed
+        assert _srv_inflight_count(session, "req-A") == 0  # entry drained
         assert session._server._has_inflight_for("req-B")
 
         # Complete req-B; counter must drain to empty.
@@ -2237,7 +2266,7 @@ class TestInflightPerReqInvariant:
 
         assert _invariant_holds()
         assert session._server._inflight == {}
-        assert session._server._inflight_per_req == {}
+        assert _srv_total_inflight(session) == 0
 
     def test_has_inflight_for_correct_with_many_requests(self):
         """Populate many inflight xfers across many ids; lookup must
@@ -2253,9 +2282,7 @@ class TestInflightPerReqInvariant:
                     tid,
                     _InflightXfer(kv_request_id=kv_id, block_count=1, job_ids={tid}),
                 )
-        assert sum(session._server._inflight_per_req.values()) == len(
-            session._server._inflight
-        )
+        assert _srv_total_inflight(session) == len(session._server._inflight)
         assert session._server._has_inflight_for("req-0")
         assert session._server._has_inflight_for("req-99")
         assert not session._server._has_inflight_for("req-missing")
@@ -2268,7 +2295,7 @@ class TestInflightPerReqInvariant:
         ]
         for tid in tids_50:
             session._server._inflight_pop(tid)
-        assert "req-50" not in session._server._inflight_per_req
+        assert _srv_inflight_count(session, "req-50") == 0
         assert not session._server._has_inflight_for("req-50")
         # Other ids unaffected.
         assert session._server._has_inflight_for("req-49")

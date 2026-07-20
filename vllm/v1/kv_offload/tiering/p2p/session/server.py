@@ -75,8 +75,8 @@ class _MatchResult(NamedTuple):
 class _OutboundRequestState:
     """Server-role state for a single peer fetch request.
 
-    The owning ``kv_request_id`` is the dict key in
-    ``ServerRole._outbound`` and is not duplicated on the value.
+    The owning ``kv_request_id`` is the ``ServerRole._requests`` dict key
+    and is not duplicated on the value.
     """
 
     demand_received: bool = False
@@ -175,6 +175,46 @@ class _LookupBlocks:
     deadline: float = 0.0
 
 
+class _PendingLookup(NamedTuple):
+    """A raw inbound LookupMsg awaiting resolution.
+
+    Enqueued by ``on_lookup`` during dispatch and drained by the next
+    ``serve_external_requests``. The deadline for any resulting
+    HIT_PENDING / RETRY hash is measured from ``enqueued_at``.
+    """
+
+    hashes: list[OffloadKey]
+    enqueued_at: float
+
+
+@dataclass
+class _ServerRequestState:
+    """Per-kv_request_id server-side state.
+
+    Consolidates the outbound serve/transfer state, the symmetric-P2P
+    inbound-lookup state, abort bookkeeping, and the inflight-transfer
+    count for one kv_request_id. The owning id is the ``_requests`` dict
+    key and is not duplicated here. An entry is dropped once every field
+    is idle — see ``ServerRole._maybe_gc``.
+    """
+
+    # Outbound serve state (PD + symmetric producer side). None until the
+    # first add_stored_blocks / on_fetch; reset to None on finalize/abort.
+    outbound: _OutboundRequestState | None = None
+    # Raw inbound LookupMsgs not yet processed against the ParentManager.
+    pending_lookups: list[_PendingLookup] = field(default_factory=list)
+    # Per-LookupMsg state parked with HIT_PENDING / RETRY hashes, keyed by
+    # the (globally unique) lookup_id and re-polled each serve.
+    lookups: dict[int, _LookupBlocks] = field(default_factory=dict)
+    # Start time of a pending abort drain (``time.monotonic``); None when
+    # no abort is in progress.
+    abort_started_at: float | None = None
+    # Number of entries in ``ServerRole._inflight`` for this id. Kept in
+    # sync via _inflight_add / _inflight_pop so ``> 0`` is an exact
+    # "has any inflight transfer" predicate.
+    inflight_count: int = 0
+
+
 class ServerRole:
     """Server-side store/serve state machine for one peer session.
 
@@ -193,40 +233,52 @@ class ServerRole:
         self._transport = transport
         self._send = send
 
-        self._outbound: dict[str, _OutboundRequestState] = {}
+        # All per-kv_request_id state lives here. Entries are created
+        # lazily and dropped by _maybe_gc once every field is idle.
+        self._requests: dict[str, _ServerRequestState] = {}
+        # kv_request_ids with lookup work (unprocessed pending_lookups or
+        # parked lookups) for the next serve to visit — the work-list that
+        # keeps serve_external_requests from scanning every request.
+        self._serve_pending: set[str] = set()
         # transfer_id → xfer. Mutate ONLY via _inflight_add / _inflight_pop
-        # so the per-request count below stays in sync.
+        # so the per-request inflight_count stays in sync.
         self._inflight: dict[int, _InflightXfer] = {}
-        # kv_request_id → number of entries in _inflight for that id.
-        # Kept in sync with _inflight; entries that hit zero are removed
-        # so `kv_request_id in self._inflight_per_req` is an exact
-        # "has any inflight transfer" predicate (O(1) replacement for
-        # the previous O(N) scan).
-        self._inflight_per_req: dict[str, int] = {}
         self._store_jobs: dict[int, float] = {}  # job_id → submitted_at
-        self._pending_aborts: dict[str, float] = {}  # kv_request_id → start
         # StoreResults queued by _finalize_outbound for the next poll
         # tick to surface. Mirrors the deferred-result pattern used for
         # load timeouts.
         self._pending_store_results: list[StoreResult] = []
-        # Raw inbound LookupMsgs enqueued by ``on_lookup`` during message
-        # dispatch and drained by ``serve_external_requests`` (the only
-        # window where the ParentManager handle is valid). Each entry is
-        # (kv_request_id, hashes, enqueued_at); the deadline for any
-        # resulting HIT_PENDING / RETRY hash is measured from enqueued_at.
-        self._pending_inbound_lookups: list[tuple[str, list[OffloadKey], float]] = []
-        # Per-LookupMsg state for hashes that resolved to HIT_PENDING /
-        # RETRY on first sight. Drained by ``_resolve_pending_lookups``
-        # during ``serve_external_requests``; entries leave the dict either
-        # when their last hash settles to HIT or MISS (definitive answer)
-        # or after ``_LOOKUP_PENDING_TIMEOUT_S`` has elapsed (force-MISS).
-        self._inbound_lookups: dict[int, _LookupBlocks] = {}
-        self._lookup_id_counter: int = 0
         # Synthetic lookup ctxs whose ``on_request_finished`` still needs to
         # fire but which were closed outside a serve window (FetchMsg / local
         # finish popped their parked lookup). Drained via
         # ``parent.on_request_finished`` in ``serve_external_requests``.
         self._finished_lookup_ctxs: list[ReqContext] = []
+        self._lookup_id_counter: int = 0
+
+    # ------------------------------------------------------------------
+    # State helpers
+    # ------------------------------------------------------------------
+
+    def _state(self, kv_request_id: str) -> _ServerRequestState:
+        """Get or create the state entry for a kv_request_id."""
+        st = self._requests.get(kv_request_id)
+        if st is None:
+            st = _ServerRequestState()
+            self._requests[kv_request_id] = st
+        return st
+
+    def _maybe_gc(self, kv_request_id: str) -> None:
+        """Drop the entry once it holds no live state."""
+        st = self._requests.get(kv_request_id)
+        if (
+            st is not None
+            and st.outbound is None
+            and st.inflight_count == 0
+            and not st.lookups
+            and not st.pending_lookups
+            and st.abort_started_at is None
+        ):
+            del self._requests[kv_request_id]
 
     # ------------------------------------------------------------------
     # Public API
@@ -241,9 +293,11 @@ class ServerRole:
     ) -> None:
         """New blocks stored locally — match against pending fetch demand."""
         self._store_jobs[job_id] = time.monotonic()
-        req = self._outbound.setdefault(kv_request_id, _OutboundRequestState())
-        result = req.add_stored_blocks(keys, block_ids, job_id)
-        if result.local_idxs and req.demand_received:
+        st = self._state(kv_request_id)
+        if st.outbound is None:
+            st.outbound = _OutboundRequestState()
+        result = st.outbound.add_stored_blocks(keys, block_ids, job_id)
+        if result.local_idxs and st.outbound.demand_received:
             self._submit_transfer(kv_request_id, result)
 
     def on_fetch(
@@ -258,14 +312,14 @@ class ServerRole:
         signal for ``kv_request_id``. Three consequences flow from that:
 
         - No further ``parent.create_store_job`` will fire for this id:
-          parked ``_inbound_lookups`` are popped here (via
+          the request's parked ``lookups`` are popped here (via
           ``_finish_inbound_lookups``) before the next
           ``serve_external_requests`` runs ``_resolve_pending_lookups``,
           so any HIT_PENDING / RETRY hash that would otherwise later
           promote to HIT and pin a slot is dropped instead. Any raw
           not-yet-processed LookupMsg for this id is dropped too.
         - All server-side lookup state for the id is cleaned up (the
-          ``_inbound_lookups`` entries themselves).
+          ``lookups`` entries themselves).
         - The synthetic ctx is queued for ``parent.on_request_finished``
           (fired by the next ``serve_external_requests``) so the
           TieringManager can release per-lookup bookkeeping.
@@ -284,13 +338,17 @@ class ServerRole:
             kv_request_id,
             len(block_hashes),
         )
-        existing = self._outbound.get(kv_request_id)
+        st = self._requests.get(kv_request_id)
+        existing = st.outbound if st is not None else None
         if existing is not None and existing.demand_received:
             # A second fetch for the same kv_request_id would overwrite
             # `remaining` and leak inflight bookkeeping. Treat as a
             # protocol violation.
             raise ValueError(f"duplicate fetch for kv_request_id={kv_request_id}")
-        req = self._outbound.setdefault(kv_request_id, _OutboundRequestState())
+        st = self._state(kv_request_id)
+        if st.outbound is None:
+            st.outbound = _OutboundRequestState()
+        req = st.outbound
         result = req.add_fetch_demand(block_hashes, block_indexes)
         if result.local_idxs:
             self._submit_transfer(kv_request_id, result)
@@ -310,9 +368,9 @@ class ServerRole:
         """Handle an AbortFetchMsg from the peer."""
         # Abort for an unknown id may be a benign race/duplicate or a
         # real protocol violation; we don't track completed ids, so warn.
-        if kv_request_id not in self._outbound and not self._has_inflight_for(
-            kv_request_id
-        ):
+        st = self._requests.get(kv_request_id)
+        has_outbound = st is not None and st.outbound is not None
+        if not has_outbound and not self._has_inflight_for(kv_request_id):
             logger.warning(
                 "P2PSession %s: abort_fetch for unknown kv_request_id=%s "
                 "(no outbound or inflight state); benign race or stale",
@@ -322,7 +380,9 @@ class ServerRole:
         # Idempotent: receiving AbortFetchMsg again before we've sent the
         # ack just triggers another drain attempt without resetting the
         # deadline.
-        self._pending_aborts.setdefault(kv_request_id, time.monotonic())
+        st = self._state(kv_request_id)
+        if st.abort_started_at is None:
+            st.abort_started_at = time.monotonic()
         self._drain_abort(kv_request_id)
 
     def on_lookup(
@@ -345,9 +405,10 @@ class ServerRole:
             kv_request_id,
             len(block_hashes),
         )
-        self._pending_inbound_lookups.append(
-            (kv_request_id, list(block_hashes), time.monotonic())
+        self._state(kv_request_id).pending_lookups.append(
+            _PendingLookup(hashes=list(block_hashes), enqueued_at=time.monotonic())
         )
+        self._serve_pending.add(kv_request_id)
 
     def serve_external_requests(self, parent: ParentManager) -> None:
         """Resolve inbound peer lookups against the tiering manager.
@@ -357,15 +418,23 @@ class ServerRole:
         any parked HIT_PENDING / RETRY hashes, and releases the
         bookkeeping for lookups closed since the last serve.
         """
-        if self._pending_inbound_lookups:
-            pending = self._pending_inbound_lookups
-            self._pending_inbound_lookups = []
-            for kv_request_id, block_hashes, enqueued_at in pending:
-                self._process_inbound_lookup(
-                    kv_request_id, block_hashes, enqueued_at, parent
-                )
-
-        self._resolve_pending_lookups(parent)
+        for kv_request_id in list(self._serve_pending):
+            st = self._requests.get(kv_request_id)
+            if st is None:
+                self._serve_pending.discard(kv_request_id)
+                continue
+            if st.pending_lookups:
+                pending = st.pending_lookups
+                st.pending_lookups = []
+                for pl in pending:
+                    self._process_inbound_lookup(
+                        kv_request_id, pl.hashes, pl.enqueued_at, parent
+                    )
+            self._resolve_pending_lookups(kv_request_id, parent)
+            st = self._requests.get(kv_request_id)
+            if st is None or (not st.pending_lookups and not st.lookups):
+                self._serve_pending.discard(kv_request_id)
+                self._maybe_gc(kv_request_id)
 
         if self._finished_lookup_ctxs:
             for ctx in self._finished_lookup_ctxs:
@@ -441,7 +510,7 @@ class ServerRole:
             self._pin_and_register_hits(kv_request_id, hit_hashes, ctx, parent)
 
         if lookup.pending:
-            self._inbound_lookups[lookup_id] = lookup
+            self._state(kv_request_id).lookups[lookup_id] = lookup
         else:
             # Every hash resolved on first sight — emit the aggregated
             # response now and close the synthetic request.
@@ -470,24 +539,26 @@ class ServerRole:
             meta.job_id,
         )
 
-    def _resolve_pending_lookups(self, parent: ParentManager) -> None:
-        """Re-poll deferred LookupMsg hashes; finalize when ready.
+    def _resolve_pending_lookups(
+        self, kv_request_id: str, parent: ParentManager
+    ) -> None:
+        """Re-poll a request's deferred LookupMsg hashes; finalize when ready.
 
-        Walks every parked :class:`_LookupBlocks` and re-calls
-        ``parent.lookup`` per still-pending hash, moving HIT/MISS results
-        into ``resolved``. If ``deadline`` has passed, remaining
+        Walks every parked :class:`_LookupBlocks` for ``kv_request_id`` and
+        re-calls ``parent.lookup`` per still-pending hash, moving HIT/MISS
+        results into ``resolved``. If ``deadline`` has passed, remaining
         ``pending`` hashes are force-resolved to MISS so the consumer
         can fall back instead of waiting on a stuck producer. Newly-HIT
         hashes are pinned via ``parent.create_store_job`` in one call per
-        affected ``kv_request_id``. Lookups whose ``pending`` empties
-        out get their aggregated LookupRespMsg sent by
-        :meth:`_finalize_lookup`.
+        affected lookup. Lookups whose ``pending`` empties out get their
+        aggregated LookupRespMsg sent by :meth:`_finalize_lookup`.
         """
-        if not self._inbound_lookups:
+        st = self._requests.get(kv_request_id)
+        if st is None or not st.lookups:
             return
         now = time.monotonic()
         finished_lookups: list[int] = []
-        for lookup_id, lookup in self._inbound_lookups.items():
+        for lookup_id, lookup in st.lookups.items():
             new_hits: list[OffloadKey] = []
             for h in list(lookup.pending):
                 result = parent.lookup(h, lookup.ctx)
@@ -515,7 +586,7 @@ class ServerRole:
                 finished_lookups.append(lookup_id)
 
         for lookup_id in finished_lookups:
-            lookup = self._inbound_lookups.pop(lookup_id)
+            lookup = st.lookups.pop(lookup_id)
             self._finalize_lookup(lookup, parent)
 
     def _finalize_lookup(self, lookup: _LookupBlocks, parent: ParentManager) -> None:
@@ -570,20 +641,15 @@ class ServerRole:
         per lookup-touched request, even if empty), and a local
         ``finish``. Whichever fires second is a no-op.
         """
-        if self._pending_inbound_lookups:
-            self._pending_inbound_lookups = [
-                entry
-                for entry in self._pending_inbound_lookups
-                if entry[0] != kv_request_id
-            ]
-        finished_lookup_ids = [
-            lid
-            for lid, lu in self._inbound_lookups.items()
-            if lu.kv_request_id == kv_request_id
-        ]
-        for lid in finished_lookup_ids:
-            lookup = self._inbound_lookups.pop(lid)
+        st = self._requests.get(kv_request_id)
+        if st is None:
+            return
+        st.pending_lookups.clear()
+        for lookup in st.lookups.values():
             self._finished_lookup_ctxs.append(lookup.ctx)
+        st.lookups.clear()
+        self._serve_pending.discard(kv_request_id)
+        self._maybe_gc(kv_request_id)
 
     def finish(self, kv_request_id: str) -> None:
         """Mark an outbound request finishing.
@@ -608,7 +674,8 @@ class ServerRole:
         """
         self._finish_inbound_lookups(kv_request_id)
 
-        req = self._outbound.get(kv_request_id)
+        st = self._requests.get(kv_request_id)
+        req = st.outbound if st is not None else None
         if req is None:
             return
         req.finishing = True
@@ -617,7 +684,7 @@ class ServerRole:
         if self._has_inflight_for(kv_request_id):
             return
         # Remaining > 0 here: if it had hit 0, the poll-done success
-        # branch would have already popped _outbound and we'd have
+        # branch would have already cleared outbound and we'd have
         # returned at `req is None` above. Helper derives success from
         # remaining and emits StoreResult(success=False) for any
         # leftover pending jobs.
@@ -660,7 +727,8 @@ class ServerRole:
                     tid,
                 )
                 continue
-            req = self._outbound.get(xfer.kv_request_id)
+            st = self._requests.get(xfer.kv_request_id)
+            req = st.outbound if st is not None else None
             for job_id in xfer.job_ids:
                 if self._store_jobs.pop(job_id, None) is None:
                     # Already reported (timeout, cancellation, etc.) —
@@ -678,6 +746,7 @@ class ServerRole:
                     self._finalize_outbound(xfer.kv_request_id, success=True)
                 elif req.finishing and not self._has_inflight_for(xfer.kv_request_id):
                     self._finalize_outbound(xfer.kv_request_id, success=False)
+            self._maybe_gc(xfer.kv_request_id)
 
         failed_kv_request_ids: set[str] | None = None
         for tid in poll_result.failed:
@@ -695,16 +764,18 @@ class ServerRole:
             if failed_kv_request_ids is None:
                 failed_kv_request_ids = set()
             failed_kv_request_ids.add(xfer.kv_request_id)
-            req_for_xfer = self._outbound.get(xfer.kv_request_id)
+            st = self._requests.get(xfer.kv_request_id)
+            req = st.outbound if st is not None else None
             for job_id in xfer.job_ids:
                 if self._store_jobs.pop(job_id, None) is None:
                     # Already reported (timeout, cancellation, etc.) —
                     # don't double-emit.
                     continue
                 results.append(StoreResult(job_id=job_id, success=False))
-                if req_for_xfer is not None:
-                    req_for_xfer.pending_job_ids.discard(job_id)
-            req = self._outbound.pop(xfer.kv_request_id, None)
+                if req is not None:
+                    req.pending_job_ids.discard(job_id)
+            if st is not None:
+                st.outbound = None
             if req is not None and req.demand_received:
                 self._send(
                     {
@@ -713,6 +784,7 @@ class ServerRole:
                         TransferDoneMsg.SUCCESS: False,
                     }
                 )
+            self._maybe_gc(xfer.kv_request_id)
 
         # Cancel other inflight for the same failed kv_request_ids
         if failed_kv_request_ids:
@@ -724,6 +796,8 @@ class ServerRole:
             for tid in ids_to_cancel:
                 self._inflight_pop(tid)
             self._transport.cancel(ids_to_cancel)
+            for kv_request_id in failed_kv_request_ids:
+                self._maybe_gc(kv_request_id)
 
         return results
 
@@ -738,9 +812,12 @@ class ServerRole:
 
     def drain_pending_aborts(self) -> None:
         """Re-attempt every parked abort once per poll tick."""
-        if not self._pending_aborts:
-            return
-        for kv_request_id in list(self._pending_aborts):
+        ids = [
+            kv_request_id
+            for kv_request_id, st in self._requests.items()
+            if st.abort_started_at is not None
+        ]
+        for kv_request_id in ids:
             self._drain_abort(kv_request_id)
 
     def close(self) -> tuple[list[int], list[ReqContext]]:
@@ -757,19 +834,18 @@ class ServerRole:
         if self._inflight:
             self._transport.cancel(list(self._inflight.keys()))
         self._inflight.clear()
-        self._inflight_per_req.clear()
-        self._outbound.clear()
-        self._pending_aborts.clear()
         self._pending_store_results.clear()
         # Surface every synthetic ctx still owing on_request_finished so
         # the manager can release the TieringManager's per-request
         # bookkeeping: parked lookups plus any already queued from a
         # FetchMsg / finish that closed them before this teardown.
-        failed_serves = [lu.ctx for lu in self._inbound_lookups.values()]
+        failed_serves = [
+            lu.ctx for st in self._requests.values() for lu in st.lookups.values()
+        ]
         failed_serves.extend(self._finished_lookup_ctxs)
-        self._inbound_lookups.clear()
+        self._requests.clear()
+        self._serve_pending.clear()
         self._finished_lookup_ctxs.clear()
-        self._pending_inbound_lookups.clear()
         return failed_stores, failed_serves
 
     # ------------------------------------------------------------------
@@ -777,29 +853,26 @@ class ServerRole:
     # ------------------------------------------------------------------
 
     def _has_inflight_for(self, kv_request_id: str) -> bool:
-        return kv_request_id in self._inflight_per_req
+        st = self._requests.get(kv_request_id)
+        return st is not None and st.inflight_count > 0
 
     def _inflight_add(self, tid: int, xfer: _InflightXfer) -> None:
         """Insert an inflight transfer and bump the per-request count."""
         self._inflight[tid] = xfer
-        self._inflight_per_req[xfer.kv_request_id] = (
-            self._inflight_per_req.get(xfer.kv_request_id, 0) + 1
-        )
+        self._state(xfer.kv_request_id).inflight_count += 1
 
     def _inflight_pop(self, tid: int) -> _InflightXfer | None:
         """Pop an inflight transfer and decrement the per-request count.
 
-        Removes the per-request entry once the count hits zero so the
-        dict stays bounded and `_has_inflight_for` remains exact.
+        Callers are responsible for the ``_maybe_gc`` that may follow once
+        the request's other state has also cleared.
         """
         xfer = self._inflight.pop(tid, None)
         if xfer is None:
             return None
-        new_count = self._inflight_per_req.get(xfer.kv_request_id, 0) - 1
-        if new_count > 0:
-            self._inflight_per_req[xfer.kv_request_id] = new_count
-        else:
-            self._inflight_per_req.pop(xfer.kv_request_id, None)
+        st = self._requests.get(xfer.kv_request_id)
+        if st is not None and st.inflight_count > 0:
+            st.inflight_count -= 1
         return xfer
 
     # ------------------------------------------------------------------
@@ -822,9 +895,11 @@ class ServerRole:
         The same flag is used for both the peer's TransferDoneMsg and
         the StoreResult(s) emitted for any leftover pending job_ids.
         """
-        req = self._outbound.pop(kv_request_id, None)
-        if req is None:
+        st = self._requests.get(kv_request_id)
+        if st is None or st.outbound is None:
             return
+        req = st.outbound
+        st.outbound = None
         if success is None:
             success = req.remaining == 0
         for job_id in req.pending_job_ids:
@@ -839,6 +914,7 @@ class ServerRole:
                 TransferDoneMsg.SUCCESS: success,
             }
         )
+        self._maybe_gc(kv_request_id)
 
     def _drain_abort(self, kv_request_id: str) -> None:
         """One drain attempt for a pending abort.
@@ -849,7 +925,9 @@ class ServerRole:
         inflight, or after ``_CANCEL_DRAIN_TIMEOUT_S`` falls back to
         ``mode="immediate"`` and acks anyway.
         """
-        self._outbound.pop(kv_request_id, None)
+        st = self._requests.get(kv_request_id)
+        if st is not None:
+            st.outbound = None
         ids = [
             tid
             for tid, xfer in self._inflight.items()
@@ -859,7 +937,7 @@ class ServerRole:
             self._finalize_abort(kv_request_id)
             return
 
-        started_at = self._pending_aborts.get(kv_request_id)
+        started_at = st.abort_started_at if st is not None else None
         expired = (
             started_at is not None
             and time.monotonic() - started_at >= _CANCEL_DRAIN_TIMEOUT_S
@@ -891,13 +969,16 @@ class ServerRole:
             self._finalize_abort(kv_request_id)
 
     def _finalize_abort(self, kv_request_id: str) -> None:
-        self._pending_aborts.pop(kv_request_id, None)
+        st = self._requests.get(kv_request_id)
+        if st is not None:
+            st.abort_started_at = None
         self._send(
             {
                 TYPE_KEY: AbortAckMsg.TYPE,
                 AbortAckMsg.KV_REQUEST_ID: kv_request_id,
             }
         )
+        self._maybe_gc(kv_request_id)
 
     # ------------------------------------------------------------------
     # Internal — transfers and store-job timeouts
@@ -949,7 +1030,8 @@ class ServerRole:
             # nothing else is in flight, finalize now so the peer
             # and the local store jobs don't wait for finish_request
             # or for _STORE_TIMEOUT_S / _LOAD_TIMEOUT_S.
-            req = self._outbound.get(kv_request_id)
+            st = self._requests.get(kv_request_id)
+            req = st.outbound if st is not None else None
             if req is not None:
                 req.finishing = True
                 if not self._has_inflight_for(kv_request_id):
