@@ -177,10 +177,7 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
                 self.passes += [ScatterSplitReplacementPass(config)]
                 self.passes += [QkNormRopeKvCacheFusionPass(config)]
 
-            if (
-                self.pass_config.fuse_mla_dual_rms_norm
-                and rocm_aiter_ops.is_enabled()
-            ):
+            if self.pass_config.fuse_mla_dual_rms_norm and rocm_aiter_ops.is_enabled():
                 self.passes += [MLADualRMSNormFusionPass(config)]
 
             if self.pass_config.fuse_rope_kvcache:
