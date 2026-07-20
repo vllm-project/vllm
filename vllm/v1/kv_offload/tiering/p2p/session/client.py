@@ -122,10 +122,11 @@ class ClientRole:
         """Drop the entry once it holds no live load or lookup state.
 
         The sticky ``fetch_sent`` / ``has_pending_responses`` flags are
-        only read by ``cancel_lookups``, and while either matters the
-        entry is kept alive by a non-empty ``probes`` (probes clear only
-        in cancel_lookups/close), so dropping on emptiness never loses a
-        flag that is still needed.
+        only read by ``cancel_lookups``. A probe clears when its fetch is
+        issued (``request_blocks``) or when the request finishes
+        (``cancel_lookups``/``close``); in the former case ``load`` is set
+        and keeps the entry alive, in the latter the flags are no longer
+        needed — so dropping on emptiness never loses a flag still in use.
         """
         st = self._requests.get(kv_request_id)
         if st is not None and st.load is None and not st.probes and not st.unsent:
@@ -172,6 +173,14 @@ class ClientRole:
                 FetchMsg.BLOCK_INDEXES: [int(idx) for idx in block_ids],
             }
         )
+        # Consume the probe cache for the fetched hashes. Once the peer
+        # serves this fetch both sides unpin, so the producer may evict the
+        # block; a stale cached True would otherwise let a re-scheduled
+        # lookup() return HIT without re-probing, pointing at a block the
+        # producer no longer holds. Dropping the entries forces a fresh
+        # LookupMsg on re-schedule so the producer answers from current state.
+        for key in keys:
+            st.probes.pop(key, None)
 
     def cancel(self, kv_request_id: str) -> None:
         """Cancel a pending load. Sends AbortFetchMsg if still active."""
@@ -258,12 +267,15 @@ class ClientRole:
         - Once a LookupRespMsg has resolved the entry: returns the cached
           bool result on every call without popping it.
 
-        Resolved entries are retained until ``cancel_lookups`` (via
-        finish_request) clears all entries for the id. A request's block
-        set can be re-probed across steps, so popping on read would make
-        a repeat probe of an already-resolved hash look brand-new and
+        A resolved entry is retained until its fetch is issued
+        (``request_blocks`` pops it) or the request finishes
+        (``cancel_lookups`` clears all entries for the id). A request's
+        block set can be re-probed across steps, so popping on read would
+        make a repeat probe of an already-resolved hash look brand-new and
         re-queue it, emitting a redundant LookupMsg for an answer we
-        already hold. Keeping the entry makes repeat probes free.
+        already hold. Keeping the entry until fetch makes repeat probes
+        free; clearing it at fetch forces a fresh probe if the request is
+        re-scheduled, since the block is unpinned once served.
         """
         st = self._state(kv_request_id)
         if block_hash in st.probes:

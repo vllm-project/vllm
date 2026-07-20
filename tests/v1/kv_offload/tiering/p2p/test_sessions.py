@@ -646,6 +646,42 @@ class TestLookupFlow:
             m for m in conn._sent[sent_before:] if m[TYPE_KEY] == LookupMsg.TYPE
         ] == []
 
+    def test_request_blocks_clears_probe_cache(self):
+        """A resolved HIT probe is popped when its fetch is issued, so a
+        re-scheduled request re-probes instead of trusting the stale True
+        (the served block is unpinned and may have been evicted)."""
+        session, conn, _ = _make_session()
+        _activate(session, conn)
+
+        # Probe hA, flush, and let the peer resolve it to a HIT.
+        assert session.register_lookup("req-1", b"hA") is None
+        session.flush_pending_lookups()
+        conn.enqueue(
+            {
+                TYPE_KEY: LookupRespMsg.TYPE,
+                LookupRespMsg.KV_REQUEST_ID: "req-1",
+                LookupRespMsg.BLOCK_HASHES: [b"hA"],
+                LookupRespMsg.HITS: [True],
+            }
+        )
+        session.poll()
+        assert session.register_lookup("req-1", b"hA") is True
+
+        # Fetch consumes the probe.
+        session.request_blocks(
+            job_id=1, kv_request_id="req-1", keys=[b"hA"], block_ids=[0]
+        )
+        assert b"hA" not in session._client._requests["req-1"].probes
+
+        # Re-scheduled probe of the same hash is treated as brand-new: it
+        # returns None and re-queues, so a flush emits a fresh LookupMsg.
+        assert session.register_lookup("req-1", b"hA") is None
+        sent_before = len(conn._sent)
+        session.flush_pending_lookups()
+        fresh = [m for m in conn._sent[sent_before:] if m[TYPE_KEY] == LookupMsg.TYPE]
+        assert len(fresh) == 1
+        assert fresh[0][LookupMsg.BLOCK_HASHES] == [b"hA"]
+
     def test_separate_lookup_msg_per_kv_request_id(self):
         """Hashes for different kv_request_ids flush as separate LookupMsgs."""
         session, conn, _ = _make_session()
