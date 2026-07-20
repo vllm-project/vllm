@@ -60,6 +60,7 @@ class NcclEPStandardPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         ep_group: nccl_ep.Group,
         num_dispatchers: int,
         dp_size: int,
+        max_tokens_per_rank: int,
         rank_expert_offset: int,
         num_experts: int,
         num_topk: int,
@@ -69,6 +70,7 @@ class NcclEPStandardPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         self.ep_group = ep_group
         self.num_dispatchers_ = num_dispatchers
         self.dp_size = dp_size
+        self.max_tokens_per_rank = max_tokens_per_rank
         self.rank_expert_offset = rank_expert_offset
         self.num_experts = num_experts
         self.num_topk = num_topk
@@ -87,7 +89,7 @@ class NcclEPStandardPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         return mk.FusedMoEActivationFormat.Standard
 
     def max_num_tokens_per_rank(self) -> int | None:
-        return None
+        return self.max_tokens_per_rank
 
     def topk_indices_dtype(self) -> torch.dtype | None:
         return torch.int64
@@ -104,6 +106,7 @@ class NcclEPStandardPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         defer_input_quant: bool,
     ) -> Callable:
         num_tokens = tokens.shape[0]
+        assert num_tokens <= self.max_tokens_per_rank
         hidden = tokens.shape[1]
         topk = rank_topk_ids.shape[1]
         stream = _get_cuda_stream()
@@ -117,10 +120,9 @@ class NcclEPStandardPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             stream=stream,
         )
 
-        # NCCL EP may receive up to max_dispatch_tokens_per_rank from every
-        # rank in the DP/EP group. num_dispatchers_ is the number of nodes for
-        # HT mode, not the number of sending ranks.
-        max_recv = num_tokens * self.dp_size
+        # During CUDA graph capture NCCL copies the group's full configured
+        # receive bound, regardless of the current invocation's token count.
+        max_recv = self.max_tokens_per_rank * self.dp_size
         recv_tokens = torch.empty(
             (max_recv, hidden),
             dtype=tokens.dtype,
