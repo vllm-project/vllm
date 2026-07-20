@@ -14,6 +14,16 @@ if TYPE_CHECKING:
     from vllm.v1.worker.gpu.block_table import BlockTables
 
 
+def get_num_logits_per_request(
+    num_computed_tokens: np.ndarray,
+    num_scheduled_tokens: np.ndarray,
+    prefill_lens: np.ndarray,
+) -> np.ndarray:
+    """Return one logit for requests that finish prefill in this step."""
+    seq_lens = num_computed_tokens + num_scheduled_tokens
+    return (seq_lens >= prefill_lens).astype(np.int32)
+
+
 class InputBuffers:
     def __init__(
         self,
