@@ -223,13 +223,6 @@ class GenerateStreamResponse(BaseModel):
     )
     choices: list[GenerateResponseStreamChoice]
     usage: UsageInfo | None = Field(default=None)
-    weight_version: int | None = Field(
-        default=None,
-        description=(
-            "The policy-weight generation bound when this request entered the "
-            "scheduler queue."
-        ),
-    )
 
 
 class GenerateResponse(BaseModel):
@@ -246,13 +239,6 @@ class GenerateResponse(BaseModel):
     choices: list[GenerateResponseChoice]
     usage: UsageInfo | None = Field(default=None)
     prompt_logprobs: list[dict[int, Logprob] | None] | None = None
-    weight_version: int | None = Field(
-        default=None,
-        description=(
-            "The policy-weight generation bound when this request entered the "
-            "scheduler queue."
-        ),
-    )
 
     kv_transfer_params: dict[str, Any] | None = Field(
         default=None,

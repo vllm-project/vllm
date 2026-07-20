@@ -84,7 +84,6 @@ fn request_output_with_stop_reason(
         prefill_stats: None,
         routed_experts: None,
         num_nans_in_logits: 0,
-        weight_version: None,
     }
 }
 
@@ -111,7 +110,6 @@ fn request_output_with_logprobs(
         prefill_stats: None,
         routed_experts: None,
         num_nans_in_logits: 0,
-        weight_version: None,
     }
 }
 
@@ -124,7 +122,6 @@ fn request_output_with_logprobs_and_kv(
     new_prompt_logprobs_tensors: Option<Logprobs>,
     kv_transfer_params: Option<serde_json::Value>,
     ec_transfer_params: Option<serde_json::Value>,
-    weight_version: Option<u64>,
 ) -> EngineCoreOutput {
     EngineCoreOutput {
         request_id: request_id.to_string(),
@@ -141,7 +138,6 @@ fn request_output_with_logprobs_and_kv(
         prefill_stats: None,
         routed_experts: None,
         num_nans_in_logits: 0,
-        weight_version,
     }
 }
 
@@ -3655,7 +3651,6 @@ async fn non_stream_raw_generate_returns_token_output_envelope() {
                                 None,
                                 Some(json!({"connector": "x"})),
                                 None,
-                                Some(3),
                             ),
                         ],
                         ..Default::default()
@@ -3730,7 +3725,6 @@ async fn non_stream_raw_generate_returns_token_output_envelope() {
         json["prompt_logprobs"][1]["22"]["decoded_token"],
         "token_id:22"
     );
-    assert_eq!(json["weight_version"], 3);
     assert_eq!(json["kv_transfer_params"], json!({"connector": "x"}));
 }
 
@@ -3756,17 +3750,14 @@ async fn stream_raw_generate_returns_sse_chunks_and_usage() {
                     push,
                     RequestBatchOutputs {
                         outputs: vec![
-                            EngineCoreOutput {
-                                weight_version: Some(3),
-                                ..request_output_with_logprobs(
-                                    &request.request_id,
-                                    vec![33],
-                                    None,
-                                    None,
-                                    Some(sample_logprobs_for_token(33, 34)),
-                                    None,
-                                )
-                            },
+                            request_output_with_logprobs(
+                                &request.request_id,
+                                vec![33],
+                                None,
+                                None,
+                                Some(sample_logprobs_for_token(33, 34)),
+                                None,
+                            ),
                             request_output_with_logprobs(
                                 &request.request_id,
                                 vec![44],
@@ -3851,20 +3842,17 @@ async fn stream_raw_generate_returns_sse_chunks_and_usage() {
     );
     assert_eq!(first["usage"]["prompt_tokens"], 2);
     assert_eq!(first["usage"]["completion_tokens"], 1);
-    assert_eq!(first["weight_version"], 3);
 
     let second: serde_json::Value = serde_json::from_str(payloads[1]).expect("second chunk json");
     assert_eq!(second["choices"][0]["token_ids"], json!([44]));
     assert_eq!(second["choices"][0]["finish_reason"], "stop");
     assert_eq!(second["usage"]["completion_tokens"], 2);
-    assert_eq!(second["weight_version"], 3);
 
     let usage: serde_json::Value = serde_json::from_str(payloads[2]).expect("usage chunk json");
     assert_eq!(usage["choices"], json!([]));
     assert_eq!(usage["usage"]["prompt_tokens"], 2);
     assert_eq!(usage["usage"]["completion_tokens"], 2);
     assert_eq!(usage["usage"]["total_tokens"], 4);
-    assert_eq!(usage["weight_version"], 3);
     assert_eq!(payloads[3], "[DONE]");
 }
 

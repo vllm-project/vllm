@@ -61,7 +61,6 @@ pub(super) struct GenerateStreamResponse {
     pub request_id: String,
     pub choices: Vec<GenerateResponseStreamChoice>,
     pub usage: Option<Usage>,
-    pub weight_version: Option<u64>,
 }
 
 /// Mirrors the Python vLLM `GenerateResponse` class.
@@ -70,7 +69,6 @@ pub(super) struct GenerateResponse {
     pub request_id: String,
     pub choices: Vec<GenerateResponseChoice>,
     pub prompt_logprobs: Option<Vec<Option<HashMap<u32, GenerateLogprob>>>>,
-    pub weight_version: Option<u64>,
     pub kv_transfer_params: Option<Value>,
     pub ec_transfer_params: Option<Value>,
 }
