@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
 import time
 from typing import TYPE_CHECKING, Literal, TypeAlias
 
@@ -161,10 +162,10 @@ class TranslationRequest(OpenAIBaseModel):
     max_completion_tokens: int | None = None
     """The maximum number of tokens to generate."""
 
-    vllm_xargs: dict[str, str | int | float | bool] | None = Field(
+    vllm_xargs: dict[str, str | int | float | list[str | int | float]] | None = Field(
         default=None,
         description=(
-            "Additional request parameters with string or "
+            "Additional request parameters with (list of) string or "
             "numeric values, used by custom extensions."
         ),
     )
@@ -282,6 +283,16 @@ class TranslationRequest(OpenAIBaseModel):
                 "Stream options can only be defined when `stream=True`.",
                 parameter=invalid_param,
             )
+
+        xargs = data.get("vllm_xargs")
+        if isinstance(xargs, str):
+            try:
+                data["vllm_xargs"] = json.loads(xargs)
+            except json.JSONDecodeError as e:
+                raise VLLMValidationError(
+                    f"Failed to parse vllm_xargs. Must be valid JSON: {e}",
+                    parameter="vllm_xargs",
+                ) from e
 
         return data
 
