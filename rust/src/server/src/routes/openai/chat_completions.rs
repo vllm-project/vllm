@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 pub(crate) mod convert;
 mod types;
 mod validate;
@@ -122,6 +125,7 @@ async fn collect_chat_completion(
         // Ignored: non-streaming responses are collected before usage is attached.
         include_continuous_usage: _,
         requested_logprobs,
+        output_top_logprobs,
         include_prompt_logprobs,
         include_reasoning,
         echo,
@@ -170,6 +174,7 @@ async fn collect_chat_completion(
             logprobs.as_ref().ok_or_else(|| {
                 server_error!("chat response requested logprobs but generation returned none")
             })?,
+            output_top_logprobs,
             return_tokens_as_token_ids,
         )?)
     } else {
@@ -245,6 +250,7 @@ async fn chat_completion_chunk_stream(
         include_usage,
         include_continuous_usage,
         requested_logprobs,
+        output_top_logprobs,
         // Ignored: chat streaming prompt logprobs are rejected for Python parity.
         include_prompt_logprobs: _,
         include_reasoning,
@@ -334,7 +340,13 @@ async fn chat_completion_chunk_stream(
                 let openai_logprobs = if include_metadata {
                     logprobs
                         .as_ref()
-                        .map(|lp| decoded_logprobs_to_openai_chat(lp, return_tokens_as_token_ids))
+                        .map(|lp| {
+                            decoded_logprobs_to_openai_chat(
+                                lp,
+                                output_top_logprobs,
+                                return_tokens_as_token_ids,
+                            )
+                        })
                         .transpose()?
                 } else {
                     None

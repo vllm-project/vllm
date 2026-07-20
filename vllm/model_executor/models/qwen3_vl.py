@@ -1272,6 +1272,19 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
                 # NOTE: a copy of is created to update do_sample_frames,
                 # otherwise mm_hash for the object will be incorrect.
                 video_mm_kwargs = dict(**mm_kwargs)
+                merged = self.info.ctx.get_merged_mm_kwargs(mm_kwargs)
+                if merged.keys() & {"size", "min_pixels", "max_pixels"}:
+                    video_size = dict(self.info.get_video_processor().size)
+                    size_override = merged.get("size")
+                    if size_override is not None:
+                        video_size = video_size | size_override
+                    min_pixels = merged.get("min_pixels")
+                    if min_pixels is not None:
+                        video_size["shortest_edge"] = min_pixels
+                    max_pixels = merged.get("max_pixels")
+                    if max_pixels is not None:
+                        video_size["longest_edge"] = max_pixels
+                    video_mm_kwargs["size"] = video_size
                 sampled_fps = video_mm_kwargs.get("fps")
                 if is_list_of(sampled_fps, float):
                     video_mm_kwargs["fps"] = sampled_fps[item_idx]

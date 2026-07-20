@@ -694,10 +694,22 @@ def _get_checkpoints_size_bytes(files: list[str]) -> int:
 
 
 def _get_available_ram_bytes() -> int:
-    """Return the available RAM in bytes."""
+    """Return available RAM, honoring cgroup limits on ROCm."""
     import psutil
 
-    return psutil.virtual_memory().available
+    host_available = psutil.virtual_memory().available
+    if not current_platform.is_rocm():
+        return host_available
+
+    from vllm.utils.cpu_resource_utils import get_cgroup_memory_limit
+
+    cgroup_limit, cgroup_usage = get_cgroup_memory_limit()
+    if cgroup_limit is None:
+        return host_available
+    cgroup_available = (
+        cgroup_limit if cgroup_usage is None else max(0, cgroup_limit - cgroup_usage)
+    )
+    return min(host_available, cgroup_available)
 
 
 def _get_fs_type(files: list[str]) -> str:
@@ -1108,7 +1120,7 @@ def instanttensor_weights_iterator(
         import instanttensor
     except ImportError as e:
         raise ImportError(
-            "Please install instanttensor via `pip install instanttensor`"
+            "Please install instanttensor via `pip install vllm[instanttensor]`"
         ) from e
 
     if not current_platform.is_cuda():
@@ -1124,18 +1136,33 @@ def instanttensor_weights_iterator(
 
     device = current_platform.current_device()
 
+    # copy=True yields tensors that own their memory, staying valid after the
+    # context exits or InstantTensor reuses its buffer.
     with instanttensor.safe_open(
-        hf_weights_files, framework="pt", device=device, process_group=process_group
+        hf_weights_files,
+        framework="pt",
+        device=device,
+        process_group=process_group,
+        copy=True,
     ) as f:
-        yield from tqdm(
-            f.tensors(),
+        # Track bytes so the bar reports load throughput (GB/s).
+        pbar = tqdm(
+            total=f.total_tensor_size,
             desc="Loading safetensors using InstantTensor loader",
             disable=not enable_tqdm(use_tqdm_on_load),
             bar_format=_BAR_FORMAT,
             position=tqdm._get_free_pos(),
-            total=len(f.keys()),
+            unit="B",
+            unit_scale=True,
+            unit_divisor=1024,
             mininterval=1.0,
         )
+        try:
+            for name, tensor in f.tensors():
+                pbar.update(tensor.numel() * tensor.element_size())
+                yield name, tensor
+        finally:
+            pbar.close()
 
 
 def pt_weights_iterator(
