@@ -177,6 +177,11 @@ class StructuredOutputManager:
     def _create_grammar(self, request: "Request") -> StructuredOutputGrammar:
         struct_request = request.structured_output_request
         assert struct_request is not None
+        stop_token_ids = (
+            request.sampling_params.all_stop_token_ids
+            if request.sampling_params is not None
+            else None
+        )
         # Note that the request was validated in the engine core client,
         # so at this point we know it is a supported type of request. Grammar
         # compilation may still fail; the Future carries that error to the
@@ -184,7 +189,9 @@ class StructuredOutputManager:
         try:
             request_type, grammar_spec = struct_request.structured_output_key
             assert self.backend is not None
-            return self.backend.compile_grammar(request_type, grammar_spec)
+            return self.backend.compile_grammar(
+                request_type, grammar_spec, stop_token_ids=stop_token_ids
+            )
         except Exception:
             logger.exception(
                 "Failed to compile grammar for request %s", request.request_id
