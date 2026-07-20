@@ -24,8 +24,12 @@ def test_indexer_builder_keeps_short_prefill_continuations_as_prefills(
     expected_treat_short_extends_as_decodes,
 ):
     builder = object.__new__(DeepseekV32IndexerMetadataBuilder)
+    builder.decode_threshold = 1
     builder.reorder_batch_threshold = 1
     builder.use_flattening = False
+    # PCP is off on this path, so treat_short_extends_as_decodes reduces to
+    # ``not has_prefilling_rows`` (the DSv4 ubatch-continuation guard).
+    builder.use_pcp = False
 
     captured = {}
 
