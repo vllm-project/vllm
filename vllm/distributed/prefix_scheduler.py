@@ -8,7 +8,7 @@ node and routes a new request to the node with the longest cached prefix.
 
 from collections import defaultdict
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from itertools import count
 from typing import TypeAlias
 
@@ -204,6 +204,21 @@ class GlobalPrefixScheduler:
         return state
 
     def update_snapshot(self, snapshot: PrefixCacheSnapshot) -> None:
+        defaults = self._node_defaults.get(snapshot.node_id)
+        if defaults is not None:
+            _, configured_rank, _ = defaults
+            if (
+                snapshot.data_parallel_rank is not None
+                and configured_rank is not None
+                and snapshot.data_parallel_rank != configured_rank
+            ):
+                raise ValueError(
+                    f"node {snapshot.node_id!r} is configured for data-parallel "
+                    f"rank {configured_rank}, but reported rank "
+                    f"{snapshot.data_parallel_rank}"
+                )
+            if snapshot.data_parallel_rank is None and configured_rank is not None:
+                snapshot = replace(snapshot, data_parallel_rank=configured_rank)
         self._node_defaults.setdefault(
             snapshot.node_id,
             (

@@ -42,7 +42,8 @@ from vllm.v1.request import Request as VllmRequest
 logger = init_logger(__name__)
 
 PREFIX_ROUTING_BYPASS_HEADER = "x-vllm-prefix-routing"
-PREFIX_ROUTING_BYPASS_VALUE = "bypass"
+DATA_PARALLEL_RANK_HEADER = "x-data-parallel-rank"
+DEFAULT_MAX_REQUEST_BODY_SIZE = 16 * 1024 * 1024
 
 router = APIRouter()
 
@@ -82,7 +83,13 @@ async def ingest_prefix_routing_kv_events(
     except msgspec.DecodeError as exc:
         raise HTTPException(status_code=400, detail="Invalid KV event batch") from exc
 
-    proxy.scheduler.apply_event_batch(node_id, batch)
+    try:
+        proxy.scheduler.apply_event_batch(node_id, batch)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail="KV event rank does not match the configured prefix node",
+        ) from exc
     return Response(status_code=204)
 
 
@@ -96,6 +103,7 @@ class PrefixRoutingNode:
     url: str | None
     event_endpoint: str | None = None
     data_parallel_rank: int | None = None
+    routing_token: str | None = None
     local: bool = False
 
 
@@ -106,6 +114,8 @@ class PrefixRoutingConfig:
     event_topic: str = ""
     request_timeout: float = 6 * 60 * 60
     event_ingest_token: str | None = None
+    routing_token: str | None = None
+    max_request_body_size: int = DEFAULT_MAX_REQUEST_BODY_SIZE
 
 
 class PrefixRoutingProxy:
@@ -120,6 +130,7 @@ class PrefixRoutingProxy:
         self.scheduler = GlobalPrefixScheduler()
         self.nodes = {node.node_id: node for node in config.nodes}
         self._tasks: list[asyncio.Task] = []
+        self._session: aiohttp.ClientSession | None = None
 
         vllm_config = app_state.vllm_config
         caching_hash_fn = get_hash_fn_by_name(
@@ -140,6 +151,12 @@ class PrefixRoutingProxy:
             )
 
     def start(self) -> None:
+        if self._session is None and any(
+            not node.local and node.url is not None for node in self.nodes.values()
+        ):
+            self._session = aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=self.config.request_timeout)
+            )
         for node in self.nodes.values():
             if node.event_endpoint is None:
                 continue
@@ -149,7 +166,18 @@ class PrefixRoutingProxy:
     async def shutdown(self) -> None:
         for task in self._tasks:
             task.cancel()
-        await asyncio.gather(*self._tasks, return_exceptions=True)
+        try:
+            await asyncio.gather(*self._tasks, return_exceptions=True)
+        finally:
+            if self._session is not None:
+                await self._session.close()
+                self._session = None
+
+    @property
+    def session(self) -> aiohttp.ClientSession:
+        if self._session is None:
+            raise RuntimeError("prefix routing HTTP session is not initialized")
+        return self._session
 
     async def choose_node_for_request(
         self, path: str, payload: Mapping[str, Any]
@@ -257,11 +285,7 @@ class PrefixRoutingMiddleware:
         path = URL(scope=scope).path.removeprefix(root_path)
         method = scope.get("method")
         headers = Headers(scope=scope)
-        if (
-            method != "POST"
-            or path not in ("/v1/completions", "/v1/chat/completions")
-            or headers.get(PREFIX_ROUTING_BYPASS_HEADER) == PREFIX_ROUTING_BYPASS_VALUE
-        ):
+        if method != "POST" or path not in ("/v1/completions", "/v1/chat/completions"):
             await self.app(scope, receive, send)
             return
 
@@ -270,7 +294,21 @@ class PrefixRoutingMiddleware:
             await self.app(scope, receive, send)
             return
 
-        body = await _receive_body(receive)
+        if _has_authenticated_bypass(headers, proxy.config.routing_token):
+            await self.app(scope, receive, send)
+            return
+
+        scope = _without_external_routing_headers(scope)
+        try:
+            body = await _receive_body(receive, proxy.config.max_request_body_size)
+        except RequestBodyTooLarge:
+            response = Response(
+                content="Prefix routing request body is too large",
+                status_code=413,
+                media_type="text/plain",
+            )
+            await response(scope, receive, send)
+            return
         try:
             payload = json.loads(body)
             decision = await proxy.choose_node_for_request(path, payload)
@@ -302,7 +340,7 @@ class PrefixRoutingMiddleware:
             body,
             send,
             node,
-            proxy.config.request_timeout,
+            proxy.session,
             decision.data_parallel_rank,
         )
         if not forwarded:
@@ -395,12 +433,24 @@ def _parse_prefix_routing_config(
                 "must be a non-negative integer"
             )
 
+        node_routing_token = node.get("routing_token")
+        if not local and (
+            not isinstance(node_routing_token, str) or not node_routing_token
+        ):
+            raise ValueError(
+                f"remote prefix routing node {node_id!r} requires a non-empty "
+                "routing_token"
+            )
+        if local:
+            node_routing_token = None
+
         nodes.append(
             PrefixRoutingNode(
                 node_id=node_id,
                 url=node_url,
                 event_endpoint=event_endpoint,
                 data_parallel_rank=data_parallel_rank,
+                routing_token=node_routing_token,
                 local=local,
             )
         )
@@ -432,24 +482,53 @@ def _parse_prefix_routing_config(
     ):
         raise ValueError("prefix routing event_ingest_token must be a non-empty string")
 
+    routing_token = raw_config.get("routing_token")
+    if routing_token is not None and (
+        not isinstance(routing_token, str) or not routing_token
+    ):
+        raise ValueError("prefix routing routing_token must be a non-empty string")
+
+    max_request_body_size = raw_config.get(
+        "max_request_body_size", DEFAULT_MAX_REQUEST_BODY_SIZE
+    )
+    if (
+        not isinstance(max_request_body_size, int)
+        or isinstance(max_request_body_size, bool)
+        or max_request_body_size <= 0
+    ):
+        raise ValueError(
+            "prefix routing max_request_body_size must be a positive integer"
+        )
+
     return PrefixRoutingConfig(
         nodes=nodes,
         hash_block_size=hash_block_size,
         event_topic=str(raw_config.get("event_topic", "")),
         request_timeout=float(request_timeout),
         event_ingest_token=event_ingest_token,
+        routing_token=routing_token,
+        max_request_body_size=max_request_body_size,
     )
 
 
-async def _receive_body(receive: Receive) -> bytes:
+class RequestBodyTooLarge(Exception):
+    pass
+
+
+async def _receive_body(receive: Receive, max_bytes: int) -> bytes:
     chunks: list[bytes] = []
+    body_size = 0
     while True:
         message = await receive()
         if message["type"] == "http.disconnect":
             break
         if message["type"] != "http.request":
             continue
-        chunks.append(message.get("body", b""))
+        chunk = message.get("body", b"")
+        body_size += len(chunk)
+        if body_size > max_bytes:
+            raise RequestBodyTooLarge
+        chunks.append(chunk)
         if not message.get("more_body", False):
             break
     return b"".join(chunks)
@@ -477,9 +556,35 @@ def _with_data_parallel_rank(scope: Scope, rank: int | None) -> Scope:
     routed_scope["headers"] = [
         (key, value)
         for key, value in scope["headers"]
-        if key.lower() != b"x-data-parallel-rank"
-    ] + [(b"x-data-parallel-rank", str(rank).encode("ascii"))]
+        if key.lower() != DATA_PARALLEL_RANK_HEADER.encode()
+    ] + [(DATA_PARALLEL_RANK_HEADER.encode(), str(rank).encode("ascii"))]
     return routed_scope
+
+
+def _without_external_routing_headers(scope: Scope) -> Scope:
+    routed_scope = dict(scope)
+    stripped_headers = {
+        PREFIX_ROUTING_BYPASS_HEADER.encode(),
+        DATA_PARALLEL_RANK_HEADER.encode(),
+    }
+    routed_scope["headers"] = [
+        (key, value)
+        for key, value in scope["headers"]
+        if key.lower() not in stripped_headers
+    ]
+    return routed_scope
+
+
+def _has_authenticated_bypass(headers: Headers, expected_token: str | None) -> bool:
+    if expected_token is None:
+        return False
+    token = headers.get(PREFIX_ROUTING_BYPASS_HEADER)
+    if token is None:
+        return False
+    return secrets.compare_digest(
+        hashlib.sha256(token.encode("utf-8")).digest(),
+        hashlib.sha256(expected_token.encode("utf-8")).digest(),
+    )
 
 
 async def _forward_request(
@@ -487,10 +592,11 @@ async def _forward_request(
     body: bytes,
     send: Send,
     node: PrefixRoutingNode,
-    request_timeout: float,
+    session: aiohttp.ClientSession,
     data_parallel_rank: int | None = None,
 ) -> bool:
-    assert node.url is not None
+    if node.url is None or node.routing_token is None:
+        raise RuntimeError("remote prefix routing node is missing forwarding config")
     url = f"{node.url.rstrip('/')}{scope['path']}"
     if scope.get("query_string"):
         url += "?" + scope["query_string"].decode("latin-1")
@@ -500,27 +606,23 @@ async def _forward_request(
         for key, value in scope["headers"]
         if key.lower() not in (b"host", b"content-length")
     ]
-    headers.append((PREFIX_ROUTING_BYPASS_HEADER, PREFIX_ROUTING_BYPASS_VALUE))
+    headers = [
+        (key, value)
+        for key, value in headers
+        if key.lower() not in (PREFIX_ROUTING_BYPASS_HEADER, DATA_PARALLEL_RANK_HEADER)
+    ]
+    headers.append((PREFIX_ROUTING_BYPASS_HEADER, node.routing_token))
     if data_parallel_rank is not None:
-        headers = [
-            (key, value)
-            for key, value in headers
-            if key.lower() != "x-data-parallel-rank"
-        ]
-        headers.append(("x-data-parallel-rank", str(data_parallel_rank)))
+        headers.append((DATA_PARALLEL_RANK_HEADER, str(data_parallel_rank)))
 
-    timeout = aiohttp.ClientTimeout(total=request_timeout)
     response_started = False
     try:
-        async with (
-            aiohttp.ClientSession(timeout=timeout) as session,
-            session.request(
-                method=scope["method"],
-                url=url,
-                data=body,
-                headers=headers,
-            ) as response,
-        ):
+        async with session.request(
+            method=scope["method"],
+            url=url,
+            data=body,
+            headers=headers,
+        ) as response:
             response_headers = [
                 (key.encode("latin-1"), value.encode("latin-1"))
                 for key, value in response.headers.items()

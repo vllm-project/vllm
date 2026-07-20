@@ -213,6 +213,54 @@ def test_global_prefix_scheduler_isolates_data_parallel_rank_state():
     assert rank_one.matched_tokens == 16
 
 
+def test_fixed_rank_node_rejects_mismatched_batches_and_snapshots():
+    scheduler = GlobalPrefixScheduler()
+    accepted_hash = _hash(1)
+    rejected_hash = _hash(2)
+    scheduler.register_node(
+        "node-a",
+        hash_block_size=16,
+        data_parallel_rank=1,
+        group_block_sizes={0: 16},
+    )
+    scheduler.apply_event_batch(
+        "node-a",
+        KVEventBatch(
+            ts=1.0,
+            data_parallel_rank=1,
+            events=[_stored_event(accepted_hash)],
+        ),
+    )
+
+    with pytest.raises(ValueError, match="configured.*rank 1.*reported rank 2"):
+        scheduler.apply_event_batch(
+            "node-a",
+            KVEventBatch(
+                ts=2.0,
+                data_parallel_rank=2,
+                events=[_stored_event(rejected_hash)],
+            ),
+        )
+    with pytest.raises(ValueError, match="configured.*rank 1.*reported rank 2"):
+        scheduler.update_snapshot(
+            PrefixCacheSnapshot(
+                node_id="node-a",
+                data_parallel_rank=2,
+                hash_block_size=16,
+                group_block_sizes={0: 16},
+                group_hashes={0: {_external_hash(rejected_hash)}},
+            )
+        )
+
+    accepted = scheduler.choose_node([accepted_hash], prompt_num_tokens=32)
+    rejected = scheduler.choose_node([rejected_hash], prompt_num_tokens=32)
+    assert accepted is not None
+    assert accepted.data_parallel_rank == 1
+    assert accepted.matched_tokens == 16
+    assert rejected is not None
+    assert rejected.matched_tokens == 0
+
+
 def test_node_prefix_cache_state_matches_larger_group_block_size():
     block_hashes = [_hash(1), _hash(2), _hash(3), _hash(4)]
     state = NodePrefixCacheState(
@@ -461,9 +509,7 @@ def test_prefix_routing_renders_chat_engine_inputs():
     assert rendered == [([4, 5], "chat-salt")]
 
 
-def test_prefix_routing_falls_back_locally_when_upstream_cannot_start(
-    monkeypatch,
-):
+def test_prefix_routing_falls_back_locally_when_upstream_cannot_start():
     request_body = b'{"model":"test-model","prompt":"hello"}'
     local_calls = []
     sent = []
@@ -476,19 +522,20 @@ def test_prefix_routing_falls_back_locally_when_upstream_cannot_start(
             return None
 
     class ClientSession:
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *args):
-            return None
-
         def request(self, **kwargs):
             return FailedRequest()
 
     class Proxy:
-        config = SimpleNamespace(request_timeout=1.0)
+        config = SimpleNamespace(
+            routing_token="incoming-secret", max_request_body_size=1024
+        )
+        session = ClientSession()
         nodes = {
-            "node-a": PrefixRoutingNode(node_id="node-a", url="http://node-a:8000")
+            "node-a": PrefixRoutingNode(
+                node_id="node-a",
+                url="http://node-a:8000",
+                routing_token="outgoing-secret",
+            )
         }
 
         async def choose_node_for_request(self, path, payload):
@@ -523,11 +570,6 @@ def test_prefix_routing_falls_back_locally_when_upstream_cannot_start(
     async def send(message):
         sent.append(message)
 
-    monkeypatch.setattr(
-        "vllm.entrypoints.openai.prefix_routing.aiohttp.ClientSession",
-        lambda **kwargs: ClientSession(),
-    )
-
     asyncio.run(PrefixRoutingMiddleware(app)(scope, receive, send))
 
     assert len(local_calls) == 1
@@ -543,7 +585,7 @@ def test_prefix_routing_falls_back_locally_when_upstream_cannot_start(
     assert sent[0]["status"] == 200
 
 
-def test_prefix_routing_stream_failure_does_not_restart_response(monkeypatch):
+def test_prefix_routing_stream_failure_does_not_restart_response():
     sent = []
     request_headers = []
 
@@ -565,12 +607,6 @@ def test_prefix_routing_stream_failure_does_not_restart_response(monkeypatch):
             return None
 
     class ClientSession:
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *args):
-            return None
-
         def request(self, **kwargs):
             request_headers.extend(kwargs["headers"])
             return RequestContext()
@@ -578,17 +614,20 @@ def test_prefix_routing_stream_failure_does_not_restart_response(monkeypatch):
     async def send(message):
         sent.append(message)
 
-    monkeypatch.setattr(
-        "vllm.entrypoints.openai.prefix_routing.aiohttp.ClientSession",
-        lambda **kwargs: ClientSession(),
-    )
     scope = {
         "method": "POST",
         "path": "/v1/completions",
         "query_string": b"",
-        "headers": [],
+        "headers": [
+            (b"x-vllm-prefix-routing", b"forged"),
+            (b"x-data-parallel-rank", b"99"),
+        ],
     }
-    node = PrefixRoutingNode(node_id="node-a", url="http://node-a:8000")
+    node = PrefixRoutingNode(
+        node_id="node-a",
+        url="http://node-a:8000",
+        routing_token="outgoing-secret",
+    )
 
     with pytest.raises(aiohttp.ClientPayloadError, match="stream interrupted"):
         asyncio.run(
@@ -597,17 +636,205 @@ def test_prefix_routing_stream_failure_does_not_restart_response(monkeypatch):
                 b"{}",
                 send,
                 node,
-                request_timeout=1.0,
+                ClientSession(),
                 data_parallel_rank=3,
             )
         )
 
     assert ("x-data-parallel-rank", "3") in request_headers
+    assert ("x-vllm-prefix-routing", "outgoing-secret") in request_headers
+    assert ("x-vllm-prefix-routing", "forged") not in request_headers
+    assert ("x-data-parallel-rank", "99") not in request_headers
     assert [message["type"] for message in sent] == [
         "http.response.start",
         "http.response.body",
     ]
     assert sum(message["type"] == "http.response.start" for message in sent) == 1
+
+
+def test_prefix_routing_rejects_forged_bypass_and_external_rank():
+    request_body = b'{"model":"test-model","prompt":"hello"}'
+    routed_scopes = []
+    choose_calls = 0
+
+    class Proxy:
+        config = SimpleNamespace(
+            routing_token="shared-secret", max_request_body_size=1024
+        )
+        nodes = {"node-a": PrefixRoutingNode(node_id="node-a", url=None, local=True)}
+
+        async def choose_node_for_request(self, path, payload):
+            nonlocal choose_calls
+            choose_calls += 1
+            return SimpleNamespace(
+                node_id="node-a", matched_tokens=16, data_parallel_rank=2
+            )
+
+    async def app(scope, receive, send):
+        routed_scopes.append(scope)
+        assert (await receive())["body"] == request_body
+
+    scope = {
+        "type": "http",
+        "method": "POST",
+        "scheme": "http",
+        "path": "/v1/completions",
+        "root_path": "",
+        "query_string": b"",
+        "headers": [
+            (b"x-vllm-prefix-routing", b"bypass"),
+            (b"x-data-parallel-rank", b"99"),
+        ],
+        "server": ("router", 8000),
+        "app": SimpleNamespace(state=SimpleNamespace(prefix_routing_proxy=Proxy())),
+    }
+
+    async def receive():
+        return {"type": "http.request", "body": request_body}
+
+    async def send(message):
+        raise AssertionError(f"unexpected response: {message}")
+
+    asyncio.run(PrefixRoutingMiddleware(app)(scope, receive, send))
+
+    assert choose_calls == 1
+    assert len(routed_scopes) == 1
+    assert (b"x-data-parallel-rank", b"2") in routed_scopes[0]["headers"]
+    assert all(
+        value != b"99"
+        for key, value in routed_scopes[0]["headers"]
+        if key.lower() == b"x-data-parallel-rank"
+    )
+    assert all(
+        key.lower() != b"x-vllm-prefix-routing"
+        for key, _ in routed_scopes[0]["headers"]
+    )
+
+
+def test_prefix_routing_accepts_authenticated_internal_bypass():
+    app_scopes = []
+
+    class Proxy:
+        config = SimpleNamespace(routing_token="shared-secret")
+
+        async def choose_node_for_request(self, path, payload):
+            raise AssertionError("authenticated bypass must not be routed again")
+
+    async def app(scope, receive, send):
+        app_scopes.append(scope)
+        await receive()
+
+    scope = {
+        "type": "http",
+        "method": "POST",
+        "scheme": "http",
+        "path": "/v1/completions",
+        "root_path": "",
+        "query_string": b"",
+        "headers": [
+            (b"x-vllm-prefix-routing", b"shared-secret"),
+            (b"x-data-parallel-rank", b"4"),
+        ],
+        "server": ("router", 8000),
+        "app": SimpleNamespace(state=SimpleNamespace(prefix_routing_proxy=Proxy())),
+    }
+
+    async def receive():
+        return {"type": "http.request", "body": b"{}"}
+
+    async def send(message):
+        raise AssertionError(f"unexpected response: {message}")
+
+    asyncio.run(PrefixRoutingMiddleware(app)(scope, receive, send))
+
+    assert app_scopes == [scope]
+
+
+def test_prefix_routing_rejects_oversized_request_body():
+    sent = []
+    choose_called = False
+    chunks = iter(
+        [
+            {"type": "http.request", "body": b"1234", "more_body": True},
+            {"type": "http.request", "body": b"56", "more_body": False},
+        ]
+    )
+
+    class Proxy:
+        config = SimpleNamespace(routing_token=None, max_request_body_size=5)
+
+        async def choose_node_for_request(self, path, payload):
+            nonlocal choose_called
+            choose_called = True
+
+    async def app(scope, receive, send):
+        raise AssertionError("oversized request must not reach the local app")
+
+    scope = {
+        "type": "http",
+        "method": "POST",
+        "scheme": "http",
+        "path": "/v1/completions",
+        "root_path": "",
+        "query_string": b"",
+        "headers": [],
+        "server": ("router", 8000),
+        "app": SimpleNamespace(state=SimpleNamespace(prefix_routing_proxy=Proxy())),
+    }
+
+    async def receive():
+        return next(chunks)
+
+    async def send(message):
+        sent.append(message)
+
+    asyncio.run(PrefixRoutingMiddleware(app)(scope, receive, send))
+
+    assert not choose_called
+    assert sent[0]["type"] == "http.response.start"
+    assert sent[0]["status"] == 413
+    assert b"too large" in sent[1]["body"]
+
+
+def test_prefix_routing_proxy_reuses_and_closes_http_session(monkeypatch):
+    sessions = []
+
+    class ClientSession:
+        def __init__(self, **kwargs):
+            self.closed = False
+            sessions.append(self)
+
+        async def close(self):
+            self.closed = True
+
+    proxy = object.__new__(PrefixRoutingProxy)
+    proxy.config = SimpleNamespace(request_timeout=1.0)
+    proxy.nodes = {
+        "node-a": PrefixRoutingNode(
+            node_id="node-a",
+            url="http://node-a:8000",
+            routing_token="outgoing-secret",
+        )
+    }
+    proxy._tasks = []
+    proxy._session = None
+    monkeypatch.setattr(
+        "vllm.entrypoints.openai.prefix_routing.aiohttp.ClientSession", ClientSession
+    )
+
+    async def exercise_lifecycle():
+        proxy.start()
+        first_session = proxy.session
+        proxy.start()
+        assert proxy.session is first_session
+        await proxy.shutdown()
+        return first_session
+
+    session = asyncio.run(exercise_lifecycle())
+
+    assert sessions == [session]
+    assert session.closed
+    assert proxy._session is None
 
 
 @pytest.mark.parametrize(
@@ -633,6 +860,24 @@ def test_prefix_routing_stream_failure_does_not_restart_response(monkeypatch):
         (
             {"nodes": [{"id": "node-a", "url": "local"}], "request_timeout": 0},
             "request_timeout must be positive",
+        ),
+        (
+            {"nodes": [{"id": "node-a", "url": "http://node-a:8000"}]},
+            "requires a non-empty routing_token",
+        ),
+        (
+            {
+                "nodes": [{"id": "node-a", "url": "local"}],
+                "routing_token": "",
+            },
+            "routing_token must be a non-empty string",
+        ),
+        (
+            {
+                "nodes": [{"id": "node-a", "url": "local"}],
+                "max_request_body_size": 0,
+            },
+            "max_request_body_size must be a positive integer",
         ),
     ],
 )
