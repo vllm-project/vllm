@@ -15,13 +15,13 @@ from vllm.triton_utils import tl, triton
 
 from .index import prepare_chunk_indices, prepare_chunk_offsets
 from .op import exp, exp2
-from .utils import FLA_CHUNK_SIZE, use_cuda_graph
+from .utils import FLA_CHUNK_SIZE, cpu_thread_choices, use_cuda_graph
 
 NUM_WARPS = [2, 4, 8, 16]
 # Triton's AMD backend fails to lower this kernel with num_stages=4.
 _CHUNK_DELTA_H_NUM_STAGES = [2, 3] if torch.version.hip else [2, 3, 4]
 IS_CPU = current_platform.is_cpu()
-CPU_THREADS = [16, 32, 64, 96]
+CPU_THREADS = cpu_thread_choices()
 
 if IS_CPU:
     _chunk_delta_h_configs = [triton.Config({}, num_cpu_threads=t) for t in CPU_THREADS]

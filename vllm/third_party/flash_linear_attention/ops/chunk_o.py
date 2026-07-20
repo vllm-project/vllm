@@ -17,12 +17,17 @@ from vllm.triton_utils import tl, triton
 
 from .index import prepare_chunk_indices
 from .op import exp
-from .utils import FLA_CHUNK_SIZE, check_shared_mem, is_nvidia_hopper
+from .utils import (
+    FLA_CHUNK_SIZE,
+    check_shared_mem,
+    cpu_thread_choices,
+    is_nvidia_hopper,
+)
 
 BKV_LIST = [64, 128] if check_shared_mem() else [32, 64]
 NUM_WARPS = [2, 4] if is_nvidia_hopper else [2, 4, 8]
 IS_CPU = current_platform.is_cpu()
-CPU_THREADS = [16, 32, 64, 96]
+CPU_THREADS = cpu_thread_choices()
 
 if IS_CPU:
     _chunk_o_configs = [triton.Config({}, num_cpu_threads=t) for t in CPU_THREADS]

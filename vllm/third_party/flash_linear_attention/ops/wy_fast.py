@@ -15,8 +15,9 @@ from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
 from .index import prepare_chunk_indices
+from .utils import cpu_thread_choices
 
-CPU_THREADS = [16, 32, 64, 96]
+CPU_THREADS = cpu_thread_choices()
 
 if current_platform.is_cpu():
     _wy_fast_configs = [triton.Config({}, num_cpu_threads=t) for t in CPU_THREADS]
