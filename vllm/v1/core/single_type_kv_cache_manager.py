@@ -784,9 +784,15 @@ class FullAttentionManager(SingleTypeKVCacheManager):
         block_idx = boundary_tokens // self.block_size
         if block_idx >= len(blocks):
             return
+        block = blocks[block_idx]
+        if (
+            block.block_hash_num_tokens is not None
+            and block.block_hash_num_tokens >= boundary_tokens
+        ):
+            return
         self.block_pool.cache_partial_block(
             request=request,
-            block=blocks[block_idx],
+            block=block,
             num_tokens=boundary_tokens,
             kv_cache_group_id=self.kv_cache_group_id,
             block_size=self.block_size,
