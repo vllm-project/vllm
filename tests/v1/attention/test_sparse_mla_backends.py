@@ -1114,6 +1114,13 @@ def test_sparse_backend_prefill_correctness(
 @pytest.mark.parametrize(
     "seq_lens,query_lens,workspace_size,max_logits_bytes,expected",
     [
+        (
+            torch.tensor([0]),
+            torch.tensor([0]),
+            100,
+            1000,
+            [],
+        ),
         # Logits constraint triggers split (M*N exceeds budget)
         # req0: M=10, N=100 -> 1000 elems (4000 bytes) - fits in 5000
         # req1: adding M=10, N=100 -> new_M=20, new_N=200 -> 4000 elems > 1250
