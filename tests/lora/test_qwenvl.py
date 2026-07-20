@@ -147,6 +147,7 @@ class Qwen2VLTester:
                     f"Generated {output_text} does not match expected {expected_text}"
                 )
 
+
 TEST_IMAGES = [
     ImageAsset("stop_sign"),
     ImageAsset("cherry_blossom"),
