@@ -351,7 +351,7 @@ def fused_indexer_q_rope_quant(
             device=index_q.device,
         )
         if current_platform.is_xpu():
-            torch.ops._xpu_C.deepseek_fused_indexer_q_rope_mxfp4(
+            torch.ops.vllm.deepseek_fused_indexer_q_rope_mxfp4(
                 index_q,
                 positions,
                 index_q_cos_sin_cache,
@@ -420,7 +420,7 @@ def fused_indexer_q_rope_quant(
     fp8_max = 224.0 if use_fnuz else 448.0
     index_q_fp8 = torch.empty_like(index_q, dtype=fp8_dtype)
     if current_platform.is_xpu():
-        torch.ops._xpu_C.deepseek_fused_indexer_q_rope_fp8(
+        torch.ops.vllm.deepseek_fused_indexer_q_rope_fp8(
             index_q,
             positions,
             index_q_cos_sin_cache,
