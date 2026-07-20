@@ -6,13 +6,13 @@ from typing import Literal
 
 from typing_extensions import override
 
-from vllm.distributed.kv_events import MEDIUM_CPU
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
     OffloadingConnectorStats,
 )
 from vllm.v1.kv_offload.base import (
     LoadStoreSpec,
     LookupResult,
+    Medium,
     OffloadingEvent,
     OffloadingManager,
     OffloadKey,
@@ -52,7 +52,7 @@ class CPUOffloadingManager(OffloadingManager):
         store_threshold: int = 1,
         max_tracker_size: int = 64_000,
     ):
-        self.event_medium: str = MEDIUM_CPU
+        self.medium: Medium = Medium.CPU
         self._num_blocks: int = num_blocks
         self._num_allocated_blocks: int = 0
         self._free_list: list[int] = []
@@ -219,7 +219,7 @@ class CPUOffloadingManager(OffloadingManager):
             self.events.append(
                 OffloadingEvent(
                     keys=to_evict,
-                    medium=self.event_medium,
+                    medium=self.medium,
                     removed=True,
                 )
             )
@@ -272,7 +272,7 @@ class CPUOffloadingManager(OffloadingManager):
             self.events.append(
                 OffloadingEvent(
                     keys=stored_keys,
-                    medium=self.event_medium,
+                    medium=self.medium,
                     removed=False,
                 )
             )

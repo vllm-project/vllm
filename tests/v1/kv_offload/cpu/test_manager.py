@@ -6,10 +6,10 @@ from dataclasses import dataclass
 import numpy as np
 import pytest
 
-from vllm.distributed.kv_events import MEDIUM_CPU
 from vllm.v1.kv_offload.base import (
     LoadStoreSpec,
     LookupResult,
+    Medium,
     OffloadingEvent,
     OffloadKey,
     PrepareStoreOutput,
@@ -115,7 +115,7 @@ def verify_events(
     stores: list[set[OffloadKey]] = []
     evictions: list[set[OffloadKey]] = []
     for event in events:
-        assert event.medium == MEDIUM_CPU
+        assert event.medium == Medium.CPU
         if event.removed:
             evictions.append(set(event.keys))
         else:
@@ -146,7 +146,7 @@ def test_cpu_eviction_removed_precedes_stored():
     stored_idx = [i for i, event in enumerate(events) if not event.removed]
     assert removed_idx and stored_idx, events
     assert max(removed_idx) < min(stored_idx)
-    assert all(event.medium == manager.event_medium for event in events)
+    assert all(event.medium == manager.medium for event in events)
 
 
 @pytest.mark.parametrize("eviction_policy", ["lru", "arc"])

@@ -7,7 +7,6 @@ import time
 from collections.abc import Iterable
 from typing import TYPE_CHECKING, ClassVar, NamedTuple
 
-from vllm.distributed.kv_events import MEDIUM_OBJ
 from vllm.distributed.nixl_utils import NixlWrapper as nixl_agent
 from vllm.distributed.nixl_utils import nixl_agent_config
 from vllm.logger import init_logger
@@ -99,8 +98,7 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
     primary tier. Object keys are formed as ``{prefix}/{hash_shard}/{hash}.bin``.
     """
 
-    medium: ClassVar[str] = MEDIUM_OBJ
-    filter_medium: ClassVar[Medium | None] = Medium.STORAGE
+    medium: ClassVar[Medium] = Medium.OBJ
 
     def __init__(
         self,
@@ -269,8 +267,8 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
         self._transfers[job_id] = TransferEntry(xfer_handle, files_desc, obj_handle)
 
     def lookup(self, key: OffloadKey, req_context: ReqContext) -> LookupResult:
-        if self.filter_medium is not None and not req_context.load_tier_filter.allows(
-            self.filter_medium
+        if self.medium is not None and not req_context.load_tier_filter.allows(
+            self.medium
         ):
             return LookupResult.MISS
         result = self._lookup_manager.lookup(key, req_context)
