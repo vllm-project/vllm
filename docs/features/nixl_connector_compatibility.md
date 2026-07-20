@@ -57,7 +57,10 @@ th:not(:first-child) {
 | Multimodal | ❔ | ❔ | ❔ | ❔ | ❔ | ❔ | ❔ |
 | Encoder-Decoder | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
 
-<sup>1</sup> P and D instances must use the same speculation configuration.
+<sup>1</sup> P and D instances must use compatible speculation configurations.
+For EAGLE/MTP methods, the method, draft model, revision, parallel-drafting
+mode, draft KV cache dtype, draft attention backend, and auxiliary hidden-state
+layers must match. The number of speculative tokens may differ between P and D.
 
 <sup>2</sup> Requires `FLASH_ATTN` or `FLASHINFER` backend **and** `HND` KV cache layout. Enable via `--kv-transfer-config '{"kv_connector_extra_config": {"enable_cross_layers_blocks": "True"}}'`.
 
@@ -79,6 +82,7 @@ By default, a **compatibility hash** is checked during handshake. P and D instan
 - Model (architecture, dtype, number of KV heads, head size, number of hidden layers)
 - Attention backend
 - KV cache dtype (`cache_dtype`)
+- EAGLE/MTP speculative method and draft-model configuration
 
 !!! warning
     Disable the hash check with `--kv-transfer-config '{"kv_connector_extra_config": {"enforce_handshake_compat": false}}'` at your own risk.
