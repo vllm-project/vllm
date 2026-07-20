@@ -402,11 +402,8 @@ class Ovis2_5MultiModalProcessor(BaseMultiModalProcessor[Ovis2_5ProcessingInfo])
         hf_processor_mm_kwargs: Mapping[str, object],
         out_mm_kwargs: MultiModalKwargsItems,
     ) -> list[PromptReplacement]:
-        # Resolve via the processor so the placeholder ids stay consistent with
-        # the ids actually used during tokenization. Under Transformers v5 the
-        # Ovis special tokens may be absent from `get_vocab()`, in which case
-        # the processor registers them (see Ovis2_5Processor.extra_special_tokens).
         hf_processor = self.info.get_hf_processor()
+
         placeholder = {
             "image": hf_processor.get_token_value("image_token"),
             "video": hf_processor.get_token_value("video_token"),

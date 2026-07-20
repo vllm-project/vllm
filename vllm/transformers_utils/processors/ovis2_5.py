@@ -78,7 +78,6 @@ class Ovis2_5Processor(ProcessorMixin):
 
     @cached_property
     def extra_special_tokens(self):
-        vocab = self.tokenizer.get_vocab()
         required_tokens = {
             "image_token": "<image>",
             "video_token": "<video>",
@@ -90,34 +89,16 @@ class Ovis2_5Processor(ProcessorMixin):
             "image_pad": "<|image_pad|>",
         }
 
-        extra_special_tokens = {}
-        suggestion = (
-            "please add '<image>', '<video>', '<ovis_visual_atom>', "
-            "'<ovis_image_start>', '<ovis_image_end>', '<ovis_video_start>', "
-            "'<ovis_video_end>' in 'additional_special_tokens' of "
-            "tokenizer_config.json, You can refer to "
-            "https://huggingface.co/AIDC-AI/Ovis2.6-30B-A3B/blob/main/tokenizer_config.json"
-        )
+        # The checkpoint defines both `additional_special_tokens` and
+        # `extra_special_tokens`, with the latter empty. Transformers ignores
+        # the former because the latter is explicitly empty, so the tokens are
+        # missing from the vocab. Re-add them to restore the expected ids.
+        self.tokenizer.add_tokens(list(required_tokens.values()), special_tokens=True)
 
-        # Transformers v4 auto-injected the `additional_special_tokens` declared
-        # in tokenizer_config.json into the tokenizer vocab; v5 no longer does,
-        # so these Ovis tokens may be missing from `get_vocab()`. They are
-        # always appended right after the base vocab in declaration order (this
-        # is how the model's embedding was built), so resolve any missing token
-        # deterministically instead of mutating the tokenizer (which is a no-op
-        # under vLLM's cached/thread-pooled tokenizer wrapper).
-        next_token_id = max(vocab.values()) + 1
-        for key, token_name in required_tokens.items():
-            if token_name in vocab:
-                extra_special_tokens[key] = vocab[token_name]
-            else:
-                extra_special_tokens[key] = next_token_id
-                next_token_id += 1
-
-        if not extra_special_tokens:
-            raise ValueError(f"Can not resolve Ovis special tokens, {suggestion}")
-
-        return extra_special_tokens
+        return {
+            key: self.tokenizer.convert_tokens_to_ids(token_name)
+            for key, token_name in required_tokens.items()
+        }
 
     def __call__(
         self,
