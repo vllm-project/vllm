@@ -100,6 +100,7 @@ def test_engine_core_process_entry_marks_process_exiting(monkeypatch):
         data_parallel_index=0,
         numa_bind=False,
         model_config=SimpleNamespace(is_moe=False),
+        reconfigure_for_independent_dp_rank=Mock(),
     )
     vllm_config = SimpleNamespace(
         parallel_config=parallel_config,
@@ -217,6 +218,7 @@ def test_gpu_worker_shutdown_gc_lifecycle(monkeypatch, collect_gc: bool):
     worker = object.__new__(Worker)
     worker.profiler = profiler
     worker.weight_transfer_engine = transfer
+    worker.elastic_ep_executor = Mock()
     worker.model_runner = model_runner
     monkeypatch.setattr(
         "vllm.v1.worker.gpu_worker.ensure_kv_transfer_shutdown", connector
@@ -241,6 +243,7 @@ def test_gpu_worker_shutdown_gc_lifecycle(monkeypatch, collect_gc: bool):
     ec_connector.assert_called_once_with()
     profiler.shutdown.assert_called_once_with()
     transfer.shutdown.assert_called_once_with()
+    worker.elastic_ep_executor.shutdown.assert_called_once_with()
     if collect_gc:
         model_runner.shutdown.assert_called_once_with()
     else:
@@ -334,6 +337,9 @@ def test_v1_model_runner_shutdown_forwards_gc_lifecycle(monkeypatch, collect_gc:
     monkeypatch.setattr(
         model_runner_v1_module.current_platform, "is_rocm", lambda: False
     )
+    monkeypatch.setattr(
+        model_runner_v1_module.current_platform, "is_xpu", lambda: False
+    )
     runner, layer = _v1_model_runner()
 
     runner.shutdown(collect_gc=collect_gc)
@@ -386,7 +392,12 @@ def test_distributed_cleanup_gc_lifecycle(monkeypatch, collect_gc: bool):
     mock_platform.is_cpu.return_value = False
     monkeypatch.setattr(platforms, "current_platform", mock_platform)
     monkeypatch.setattr(parallel_state.torch.accelerator, "empty_cache", empty_cache)
-    monkeypatch.setattr(parallel_state.torch._C, "_host_emptyCache", host_empty_cache)
+    monkeypatch.setattr(
+        parallel_state.torch.accelerator,
+        "empty_host_cache",
+        host_empty_cache,
+        raising=False,
+    )
 
     parallel_state.cleanup_dist_env_and_memory(collect_gc=collect_gc)
 
