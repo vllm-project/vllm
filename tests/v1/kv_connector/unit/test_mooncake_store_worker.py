@@ -1757,6 +1757,62 @@ def test_lookup_checks_all_potential_swa_hit_boundaries():
     ]
 
 
+def test_lookup_applies_swa_mask_before_accessing_hashes():
+    """Lookup must apply the sparse SWA mask before touching group hashes, so
+    false-mask chunks pay neither the hash access nor the key-construction cost.
+    """
+    from vllm.v1.kv_cache_interface import (
+        FullAttentionSpec,
+        KVCacheGroupSpec,
+        SlidingWindowSpec,
+    )
+
+    worker = _make_bare_worker(block_size=8)
+    full = FullAttentionSpec(block_size=32, num_kv_heads=8, head_size=64, dtype=None)
+    swa = SlidingWindowSpec(
+        block_size=8, num_kv_heads=8, head_size=64, dtype=None, sliding_window=8
+    )
+    worker._kv_cache_groups = [
+        KVCacheGroupSpec(["full"], full),
+        KVCacheGroupSpec(["swa"], swa),
+    ]
+    worker.token_dbs = [
+        ChunkedTokenDatabase(
+            KeyMetadata("test-model", 0, 0, 0, 0, group_id=0),
+            block_size=32,
+            hash_block_size=8,
+        ),
+        ChunkedTokenDatabase(
+            KeyMetadata("test-model", 0, 0, 0, 0, group_id=1),
+            block_size=8,
+            hash_block_size=8,
+        ),
+    ]
+    worker.coord = mooncake_store_worker.MooncakeStoreCoordinator(
+        worker._kv_cache_groups,
+        scheduler_block_size=32,
+        hash_block_size=8,
+        retention_interval=0,
+    )
+    worker._init_lookup_key_prefixes()
+
+    block_hashes = _RecordingBlockHashes([f"h{i}".encode() for i in range(12)])
+    accessed_before_rpc: list[int] = []
+
+    def exists(keys):
+        accessed_before_rpc.extend(block_hashes.accessed)
+        return [0] * len(keys)
+
+    worker.store.batch_is_exist.side_effect = exists
+
+    worker.lookup(96, block_hashes)
+
+    # Full-attention chunks (compact hashes at 3, 7, 11) plus only the reachable
+    # SWA boundary tails (chunks 3, 7, 11) are hash-accessed. Every masked SWA
+    # chunk in between is skipped before both the hash access and key build.
+    assert accessed_before_rpc == [3, 7, 11, 3, 7, 11]
+
+
 # ---------------------------------------------------------------------------
 # register_kv_caches tests
 # ---------------------------------------------------------------------------

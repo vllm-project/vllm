@@ -20,7 +20,7 @@ from vllm.config.multimodal import (
     MMTensorIPC,
     MultiModalConfig,
 )
-from vllm.config.pooler import PoolerConfig
+from vllm.config.pooler import POOLER_CONFIG_LOG_FIELDS, PoolerConfig
 from vllm.config.quantization import QuantizationConfigArgs
 from vllm.config.scheduler import RunnerType
 from vllm.config.utils import config, getattr_iter
@@ -83,7 +83,9 @@ _REGISTERED_MODEL_CLASS_OVERRIDES: set[tuple[str, str]] = set()
 RunnerOption = Literal["auto", RunnerType]
 ConvertType = Literal["none", "embed", "classify"]
 ConvertOption = Literal["auto", ConvertType]
-TokenizerMode = Literal["auto", "hf", "slow", "mistral", "deepseek_v32", "deepseek_v4"]
+TokenizerMode = Literal[
+    "auto", "hf", "slow", "mistral", "deepseek_v32", "deepseek_v4", "inkling"
+]
 ModelDType = Literal["auto", "half", "float16", "bfloat16", "float", "float32"]
 LogprobsMode = Literal[
     "raw_logits", "raw_logprobs", "processed_logits", "processed_logprobs"
@@ -231,6 +233,8 @@ class ModelConfig:
     Raw means the values before applying any logit processors, like bad words.
     Processed means the values after applying all processors, including
     temperature and top_k/top_p.
+    Note: for prompt_logprobs, processed_* and raw_* yield identical results
+    because prompt tokens do not go through sampling processors.
     """
     use_fp64_gumbel: bool = False
     """Whether to use FP64 (instead of FP32) random noise for Gumbel-max and
@@ -628,6 +632,8 @@ class ModelConfig:
                 self.tokenizer_mode = "deepseek_v32"
             elif arch == "DeepseekV4ForCausalLM":
                 self.tokenizer_mode = "deepseek_v4"
+            elif arch in ("InklingForCausalLM", "InklingForConditionalGeneration"):
+                self.tokenizer_mode = "inkling"
 
             if self.tokenizer_mode != "auto":
                 logger.info(
@@ -640,6 +646,13 @@ class ModelConfig:
         if self.runner_type == "pooling":
             if self.pooler_config is None:
                 self.pooler_config = PoolerConfig()
+                pooler_config_sources: dict[str, str] = {}
+            else:
+                pooler_config_sources = {
+                    k: "user"
+                    for k in POOLER_CONFIG_LOG_FIELDS
+                    if getattr(self.pooler_config, k) is not None
+                }
 
             base_config = get_pooling_config(self.model, self.revision)
             if base_config is not None:
@@ -647,13 +660,18 @@ class ModelConfig:
                 for k, v in base_config.items():
                     if getattr(self.pooler_config, k) is None:
                         setattr(self.pooler_config, k, v)
+                        pooler_config_sources[k] = "sentence_transformers"
 
             default_seq_pooling_type = self._model_info.default_seq_pooling_type
             if self.pooler_config.seq_pooling_type is None:
                 self.pooler_config.seq_pooling_type = default_seq_pooling_type
+                pooler_config_sources["seq_pooling_type"] = "model_default"
             default_tok_pooling_type = self._model_info.default_tok_pooling_type
             if self.pooler_config.tok_pooling_type is None:
                 self.pooler_config.tok_pooling_type = default_tok_pooling_type
+                pooler_config_sources["tok_pooling_type"] = "model_default"
+            pooler_config_sources.setdefault("use_activation", "pooler_default")
+            self._pooler_config_sources = pooler_config_sources
 
         self.dtype: torch.dtype = _get_and_verify_dtype(
             self.model,
@@ -1709,23 +1727,17 @@ class ModelConfig:
         such as the lm_head in a generation model,
         or the score or classifier in a classification model.
 
-        `head_dtype` currently only supports pooling models.
-
-        - The pooling model defaults to using fp32 head, you can use
+        - Pooling models default to an fp32 head; use
           --hf-overrides '{"head_dtype": "model"}' to disable it.
+        - Generation models default to the model dtype; set
+          --hf-overrides '{"head_dtype": "float32"}' to run the lm_head in
+          fp32, which is required for RL training-inference consistency
+          (the trainer computes logits in fp32).
         """
 
         head_dtype = _get_head_dtype(
             config=self.hf_config, dtype=self.dtype, runner_type=self.runner_type
         )
-
-        if self.runner_type != "pooling" and head_dtype != self.dtype:
-            logger.warning_once(
-                "`head_dtype` currently only supports pooling models, "
-                "fallback to model dtype [%s].",
-                self.dtype,
-            )
-            return self.dtype
 
         if head_dtype not in current_platform.supported_dtypes:
             logger.warning_once(
@@ -1881,11 +1893,8 @@ class ModelConfig:
         else:
             # for generative models
             if attn_type == "hybrid":
-                logger.debug(
-                    "Hybrid models do not support prefix caching since the feature "
-                    "is still experimental."
-                )
-                return False
+                logger.debug("Generative hybrid models support prefix caching.")
+                return True
             elif attn_type == "attention_free":
                 logger.debug(
                     "Attention free models do not support prefix caching since the "

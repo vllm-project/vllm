@@ -108,6 +108,7 @@ from .interfaces import (
 from .utils import (
     PPMissingLayer,
     get_pp_missing_layer_names,
+    get_spec_layer_idx_from_weight_name,
     is_pp_missing_parameter,
     make_empty_intermediate_tensors_factory,
     make_layers,
@@ -1156,7 +1157,12 @@ class DeepseekV2MLAAttention(nn.Module):
             cache_config,
             quant_config,
             prefix,
-            skip_topk=_skip_topk,
+            # MTP layers must never start with skip_topk=True: their indexer
+            # computes indices at draft step 0, and the runtime toggle
+            # (set_skip_topk, index_share_for_mtp_iteration) only exists in
+            # the V1 proposer. A frozen True would leave the draft reading a
+            # never-written topk buffer.
+            skip_topk=_skip_topk and not is_mtp_layer,
         )
 
     def forward(
@@ -1913,21 +1919,3 @@ class DeepseekV3ForCausalLM(DeepseekV2ForCausalLM):
 
 class GlmMoeDsaForCausalLM(DeepseekV2ForCausalLM):
     pass
-
-
-# Compatibility with
-# https://huggingface.co/deepseek-ai/DeepSeek-V3-Base/blob/main/configuration_deepseek.py
-def get_spec_layer_idx_from_weight_name(
-    config: DeepseekV2Config | DeepseekV3Config, weight_name: str
-) -> int | None:
-    if (
-        hasattr(config, "num_nextn_predict_layers")
-        and config.num_nextn_predict_layers > 0
-    ):
-        layer_idx = config.num_hidden_layers
-        for i in range(config.num_nextn_predict_layers):
-            if weight_name.startswith(
-                f"model.layers.{layer_idx + i}."
-            ) or weight_name.startswith(f"layers.{layer_idx + i}."):
-                return layer_idx + i
-    return None
