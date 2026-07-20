@@ -6,6 +6,7 @@ from dataclasses import dataclass
 import numpy as np
 import pytest
 
+from vllm.distributed.kv_events import MEDIUM_CPU
 from vllm.v1.kv_offload.base import (
     LoadStoreSpec,
     LookupResult,
@@ -91,6 +92,21 @@ def verify_load_output(
     assert np.array_equal(expected_array, prepare_load_output.block_ids)
 
 
+def check_split_usage_stats(
+    manager: CPUOffloadingManager, write: float, read: float, total: float
+):
+    stats = manager.get_stats()
+    assert stats is not None
+    reduced = stats.reduce()
+    assert reduced[CPUOffloadingMetrics.CPU_CACHE_WRITE_USAGE_PERC] == pytest.approx(
+        write
+    )
+    assert reduced[CPUOffloadingMetrics.CPU_CACHE_READ_USAGE_PERC] == pytest.approx(
+        read
+    )
+    assert reduced[CPUOffloadingMetrics.CPU_CACHE_USAGE_PERC] == pytest.approx(total)
+
+
 def verify_events(
     events: Iterable[OffloadingEvent],
     expected_stores: tuple[set[int], ...] = (),
@@ -99,7 +115,7 @@ def verify_events(
     stores: list[set[OffloadKey]] = []
     evictions: list[set[OffloadKey]] = []
     for event in events:
-        assert event.medium == CPULoadStoreSpec.medium()
+        assert event.medium == MEDIUM_CPU
         if event.removed:
             evictions.append(set(event.keys))
         else:
@@ -112,6 +128,25 @@ def verify_events(
 
     assert tuple(evictions) == to_key_sets(expected_evictions)
     assert tuple(stores) == to_key_sets(expected_stores)
+
+
+def test_cpu_eviction_removed_precedes_stored():
+    """An eviction is announced before the store that reuses its capacity."""
+    manager = make_cpu_manager(num_blocks=2, enable_events=True)
+
+    manager.prepare_store(to_keys([1, 2]), _EMPTY_REQ_CTX)
+    manager.complete_store(to_keys([1, 2]), _EMPTY_REQ_CTX)
+    list(manager.take_events())
+
+    manager.prepare_store(to_keys([3]), _EMPTY_REQ_CTX)
+    manager.complete_store(to_keys([3]), _EMPTY_REQ_CTX)
+
+    events = list(manager.take_events())
+    removed_idx = [i for i, event in enumerate(events) if event.removed]
+    stored_idx = [i for i, event in enumerate(events) if not event.removed]
+    assert removed_idx and stored_idx, events
+    assert max(removed_idx) < min(stored_idx)
+    assert all(event.medium == manager.medium for event in events)
 
 
 @pytest.mark.parametrize("eviction_policy", ["lru", "arc"])
@@ -222,6 +257,98 @@ def test_cpu_manager_reports_cache_usage_gauge():
     # and usage drops.
     manager.complete_store(to_keys([3, 4]), _EMPTY_REQ_CTX)
     check_usage_stats(manager, 0.0)
+
+
+def test_cpu_manager_reports_allocation_size_histogram():
+    manager = make_cpu_manager(num_blocks=4, cache_policy="lru")
+
+    manager.prepare_store(to_keys([1, 2]), _EMPTY_REQ_CTX)
+    manager.complete_store(to_keys([1, 2]), _EMPTY_REQ_CTX)
+    manager.prepare_store(to_keys([1, 2, 3]), _EMPTY_REQ_CTX)
+
+    stats = manager.get_stats()
+
+    assert stats is not None
+    reduced = stats.reduce()
+    assert reduced[f"{CPUOffloadingMetrics.CPU_ALLOCATION_SIZE}_count"] == 2
+    assert reduced[f"{CPUOffloadingMetrics.CPU_ALLOCATION_SIZE}_sum"] == 3
+
+    # The cache-usage gauge is always reported, so get_stats() never returns
+    # None, but the histogram has nothing new once its samples are consumed.
+    second_stats = manager.get_stats()
+    assert second_stats is not None
+    assert f"{CPUOffloadingMetrics.CPU_ALLOCATION_SIZE}_count" not in (
+        second_stats.reduce()
+    )
+
+
+def test_cpu_manager_reports_allocation_size_on_allocation_failure(monkeypatch):
+    manager = make_cpu_manager(num_blocks=4, cache_policy="lru")
+
+    def fail_allocate_blocks(keys):
+        raise RuntimeError("allocation failed")
+
+    monkeypatch.setattr(manager, "_allocate_blocks", fail_allocate_blocks)
+
+    with pytest.raises(RuntimeError, match="allocation failed"):
+        manager.prepare_store(to_keys([1, 2, 3]), _EMPTY_REQ_CTX)
+
+    stats = manager.get_stats()
+
+    assert stats is not None
+    reduced = stats.reduce()
+    assert reduced[f"{CPUOffloadingMetrics.CPU_ALLOCATION_SIZE}_count"] == 1
+    assert reduced[f"{CPUOffloadingMetrics.CPU_ALLOCATION_SIZE}_sum"] == 3
+
+
+def test_cpu_manager_reports_allocation_size_on_eviction_failure():
+    manager = make_cpu_manager(num_blocks=1, cache_policy="lru")
+
+    manager.prepare_store(to_keys([1]), _EMPTY_REQ_CTX)
+    manager.get_stats()
+
+    assert manager.prepare_store(to_keys([2]), _EMPTY_REQ_CTX) is None
+
+    stats = manager.get_stats()
+
+    assert stats is not None
+    reduced = stats.reduce()
+    assert reduced[f"{CPUOffloadingMetrics.CPU_ALLOCATION_SIZE}_count"] == 1
+    assert reduced[f"{CPUOffloadingMetrics.CPU_ALLOCATION_SIZE}_sum"] == 1
+
+
+def test_cpu_manager_reports_cache_write_and_read_usage_gauges():
+    manager = make_cpu_manager(num_blocks=4)
+
+    # Store path: pins write usage until complete_store.
+    manager.prepare_store(to_keys([1, 2]), _EMPTY_REQ_CTX)
+    check_split_usage_stats(manager, write=0.5, read=0.0, total=0.5)
+
+    manager.complete_store(to_keys([1, 2]), _EMPTY_REQ_CTX)
+    check_split_usage_stats(manager, write=0.0, read=0.0, total=0.0)
+
+    # Load path: pins read usage until complete_load.
+    assert manager.lookup(to_key(1), _EMPTY_REQ_CTX) is LookupResult.HIT
+    manager.prepare_load(to_keys([1]), _EMPTY_REQ_CTX)
+    check_split_usage_stats(manager, write=0.0, read=0.25, total=0.25)
+
+    manager.complete_load(to_keys([1]), _EMPTY_REQ_CTX)
+    check_split_usage_stats(manager, write=0.0, read=0.0, total=0.0)
+
+    # Concurrent write + read pins are both reflected and additive.
+    manager.prepare_store(to_keys([3, 4]), _EMPTY_REQ_CTX)
+    manager.prepare_load(to_keys([2]), _EMPTY_REQ_CTX)
+    check_split_usage_stats(manager, write=0.5, read=0.25, total=0.75)
+
+
+def test_cpu_manager_clears_write_usage_after_failed_store():
+    manager = make_cpu_manager(num_blocks=4)
+
+    manager.prepare_store(to_keys([1, 2]), _EMPTY_REQ_CTX)
+    check_split_usage_stats(manager, write=0.5, read=0.0, total=0.5)
+
+    manager.complete_store(to_keys([1, 2]), _EMPTY_REQ_CTX, success=False)
+    check_split_usage_stats(manager, write=0.0, read=0.0, total=0.0)
 
 
 def test_cpu_manager():
@@ -819,3 +946,26 @@ def test_evictable_cache_block_count():
     manager.complete_store(to_keys([14, 15]), _EMPTY_REQ_CTX)
     # cache state [10, 11, 14, 15] <- all blocks idle
     assert manager._num_evictable_cache_blocks == 4
+
+
+def test_touch_forwards_req_context_to_policy(monkeypatch):
+    """Regression: CPUOffloadingManager.touch forwards ReqContext to policy."""
+    manager = make_cpu_manager(num_blocks=4, cache_policy="lru")
+    received = []
+
+    def spy_touch(keys: Iterable[OffloadKey], req_context: ReqContext) -> None:
+        received.append((list(keys), req_context))
+
+    monkeypatch.setattr(manager._policy, "touch", spy_touch)
+
+    keys = to_keys([1, 2])
+    ctx = make_req_context(
+        req_id="test-req",
+        kv_transfer_params={"test_param": "test_value"},
+    )
+
+    manager.touch(keys, ctx)
+
+    assert len(received) == 1
+    assert received[0][0] == keys
+    assert received[0][1] is ctx

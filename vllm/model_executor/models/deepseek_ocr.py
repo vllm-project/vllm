@@ -220,8 +220,10 @@ class DeepseekOCRProcessingInfo(BaseProcessingInfo):
         patch_size = 16
         downsample_ratio = 4
 
-        if CROP_MODE:
-            if image_width <= 640 and image_height <= 640:
+        # Use the caller-supplied `cropping` flag so that callers that disable
+        # crop mode for multi-image requests get a consistent token count.
+        if cropping:
+            if image_width <= IMAGE_SIZE and image_height <= IMAGE_SIZE:
                 crop_ratio = [1, 1]
             else:
                 # find the closest aspect ratio to the target
