@@ -83,6 +83,10 @@ def compile_regex_with_timeout(fn: Callable[[str], _T], pattern: str) -> _T:
         return result
 
 
+# Cache to avoid per-step allocation overhead
+_STAGING_BUFFER = None
+
+
 def apply_grammar_bitmask(
     scheduler_output: SchedulerOutput,
     grammar_output: GrammarOutput,
@@ -97,6 +101,8 @@ def apply_grammar_bitmask(
         input_batch (InputBatch): The input of model runner.
         logits (torch.Tensor): The output logits of model forward.
     """
+    global _STAGING_BUFFER
+
     # Serialization of np.ndarray is much more efficient than a tensor,
     # so we receive it in that format.
     grammar_bitmask = grammar_output.grammar_bitmask
@@ -122,14 +128,29 @@ def apply_grammar_bitmask(
 
     out_indices = []
 
-    # Reorder the bitmask to match the order of the requests in the batch.
-    sorted_bitmask_tensor = torch.full(
-        (logits.shape[0], grammar_bitmask.shape[1]),
-        -1,
-        dtype=torch.from_numpy(grammar_bitmask[:0]).dtype,
-        pin_memory=PIN_MEMORY,
-    )
+    # Optimized staging buffer logic
+    req_shape = (logits.shape[0], grammar_bitmask.shape[1])
+    req_dtype = torch.from_numpy(grammar_bitmask[:0]).dtype
+
+    if (
+        _STAGING_BUFFER is None
+        or _STAGING_BUFFER.shape[0] < req_shape[0]
+        or _STAGING_BUFFER.shape[1] < req_shape[1]
+    ):
+        print(
+            f"\n[DEBUG] Allocating new _STAGING_BUFFER of shape {req_shape}"
+        )  # ADD THIS LINE
+        _STAGING_BUFFER = torch.full(
+            req_shape,
+            -1,
+            dtype=req_dtype,
+            pin_memory=PIN_MEMORY,
+        )
+
+    sorted_bitmask_tensor = _STAGING_BUFFER[: req_shape[0], : req_shape[1]]
+    sorted_bitmask_tensor.fill_(-1)
     sorted_bitmask = sorted_bitmask_tensor.numpy()
+
     cumulative_index = 0
     for req_id in grammar_output.structured_output_request_ids:
         num_spec_tokens = len(spec_tokens.get(req_id, ()))
