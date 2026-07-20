@@ -133,6 +133,11 @@ def _rocm_aiter_fused_moe_impl(
     bias2: torch.Tensor | None = None,
     moe_sorting_dispatch_policy: int = 0,
     swiglu_limit: float = 0.0,
+    shared_w1: torch.Tensor | None = None,
+    shared_w2: torch.Tensor | None = None,
+    shared_w1_scale: torch.Tensor | None = None,
+    shared_w2_scale: torch.Tensor | None = None,
+    shared_expert_id: int = -1,
 ) -> torch.Tensor:
     from aiter import ActivationType, QuantType
     from aiter.fused_moe import fused_moe
@@ -143,6 +148,24 @@ def _rocm_aiter_fused_moe_impl(
     extra_kwargs: dict = {}
     if gate_mode and rocm_aiter_ops.fused_moe_supports_gate_mode():
         extra_kwargs["gate_mode"] = gate_mode
+
+    shared_tensors = (shared_w1, shared_w2, shared_w1_scale, shared_w2_scale)
+    if any(tensor is not None for tensor in shared_tensors):
+        if not all(tensor is not None for tensor in shared_tensors):
+            raise ValueError(
+                "Heterogeneous fused MoE requires both shared weights and scales."
+            )
+        if shared_expert_id < 0:
+            raise ValueError(
+                "Heterogeneous fused MoE requires a non-negative shared expert ID."
+            )
+        extra_kwargs.update(
+            shared_w1=shared_w1,
+            shared_w2=shared_w2,
+            shared_w1_scale=shared_w1_scale,
+            shared_w2_scale=shared_w2_scale,
+            shared_expert_id=shared_expert_id,
+        )
 
     return fused_moe(
         hidden_states,
@@ -193,6 +216,11 @@ def _rocm_aiter_fused_moe_fake(
     bias2: torch.Tensor | None = None,
     moe_sorting_dispatch_policy: int = 0,
     swiglu_limit: float = 0.0,
+    shared_w1: torch.Tensor | None = None,
+    shared_w2: torch.Tensor | None = None,
+    shared_w1_scale: torch.Tensor | None = None,
+    shared_w2_scale: torch.Tensor | None = None,
+    shared_expert_id: int = -1,
 ) -> torch.Tensor:
     if output_dtype is not None:
         return torch.empty_like(hidden_states, dtype=output_dtype)
@@ -1843,6 +1871,27 @@ class rocm_aiter_ops:
 
         return "gate_mode" in inspect.signature(fused_moe).parameters
 
+    @classmethod
+    @if_aiter_supported
+    @functools.cache
+    def fused_moe_supports_heterogeneous_shared_expert(cls) -> bool:
+        """Whether AITER accepts native-FP8 shared-expert tensors."""
+        import inspect
+
+        from aiter.fused_moe import fused_moe
+
+        params = inspect.signature(fused_moe).parameters
+        return all(
+            name in params
+            for name in (
+                "shared_w1",
+                "shared_w2",
+                "shared_w1_scale",
+                "shared_w2_scale",
+                "shared_expert_id",
+            )
+        )
+
     @staticmethod
     @if_aiter_supported
     def register_ops_once() -> None:
@@ -2212,6 +2261,11 @@ class rocm_aiter_ops:
         bias2: torch.Tensor | None = None,
         moe_sorting_dispatch_policy: int = 0,
         swiglu_limit: float = 0.0,
+        shared_w1: torch.Tensor | None = None,
+        shared_w2: torch.Tensor | None = None,
+        shared_w1_scale: torch.Tensor | None = None,
+        shared_w2_scale: torch.Tensor | None = None,
+        shared_expert_id: int = -1,
     ) -> torch.Tensor:
         return torch.ops.vllm.rocm_aiter_fused_moe(
             hidden_states,
@@ -2236,6 +2290,11 @@ class rocm_aiter_ops:
             bias2,
             moe_sorting_dispatch_policy,
             swiglu_limit,
+            shared_w1,
+            shared_w2,
+            shared_w1_scale,
+            shared_w2_scale,
+            shared_expert_id,
         )
 
     @staticmethod
@@ -2789,6 +2848,13 @@ class rocm_aiter_ops:
         from aiter.ops.shuffle import shuffle_scale_a16w4
 
         return shuffle_scale_a16w4(tensor, num_experts, gate_up)
+
+    @staticmethod
+    def shuffle_scale(tensor: torch.Tensor) -> torch.Tensor:
+        """Shuffle a non-gate/up E8M0 scale tensor for AITER."""
+        from aiter.ops.shuffle import shuffle_scale
+
+        return shuffle_scale(tensor)
 
     @staticmethod
     def shuffle_weights(

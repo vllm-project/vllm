@@ -246,6 +246,11 @@ def rocm_aiter_fused_experts(
     num_local_tokens: torch.Tensor | None = None,
     output_dtype: torch.dtype | None = None,
     moe_sorting_dispatch_policy: int = 0,
+    shared_w1: torch.Tensor | None = None,
+    shared_w2: torch.Tensor | None = None,
+    shared_w1_scale: torch.Tensor | None = None,
+    shared_w2_scale: torch.Tensor | None = None,
+    shared_expert_id: int = -1,
 ) -> torch.Tensor:
     """ROCm AITER fused MoE expert computation."""
     if quant_config is None:
@@ -379,6 +384,9 @@ def rocm_aiter_fused_experts(
                 else GateMode.SEPARATED.value
             )
 
+        swiglu_limit = (
+            0.0 if moe_config.swiglu_limit is None else float(moe_config.swiglu_limit)
+        )
         return rocm_aiter_ops.fused_moe(
             hidden_states,
             w1,
@@ -401,6 +409,12 @@ def rocm_aiter_fused_experts(
             bias1=quant_config.w1_bias if quant_config.use_mxfp4_w4a16 else None,
             bias2=quant_config.w2_bias if quant_config.use_mxfp4_w4a16 else None,
             moe_sorting_dispatch_policy=moe_sorting_dispatch_policy,
+            swiglu_limit=swiglu_limit,
+            shared_w1=shared_w1,
+            shared_w2=shared_w2,
+            shared_w1_scale=shared_w1_scale,
+            shared_w2_scale=shared_w2_scale,
+            shared_expert_id=shared_expert_id,
         )
 
 
