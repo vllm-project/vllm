@@ -126,7 +126,10 @@ def test_matmul_config_block_k_fixed_across_shapes(dtype):
 
 @skip_unsupported
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-def test_matmul_batch_invariance_across_config_buckets(dtype):
+# n=3584 exercises the narrow-N (block_n=64) small-M branch; n=8192 exercises the
+# wide-N (block_n=256) branch, which selects a different tile from prefill.
+@pytest.mark.parametrize("n", [3584, 8192])
+def test_matmul_batch_invariance_across_config_buckets(dtype, n):
     """A row's output is bitwise identical no matter what batch size it lands in.
 
     In serving, M (number of batched tokens) changes every step, so the adaptive
@@ -138,7 +141,7 @@ def test_matmul_batch_invariance_across_config_buckets(dtype):
     device = torch.device(DEVICE_TYPE)
     torch.manual_seed(42)
 
-    n, k = 3584, 3584
+    k = 3584
     b = torch.rand((k, n), dtype=dtype, device=device)
     ref_row = torch.rand((1, k), dtype=dtype, device=device)
     reference = matmul_batch_invariant(ref_row, b)[0]
@@ -149,5 +152,5 @@ def test_matmul_batch_invariance_across_config_buckets(dtype):
         a[pos] = ref_row[0]
         out = matmul_batch_invariant(a, b)[pos]
         assert torch.equal(out, reference), (
-            f"batch invariance broke at M={m} for dtype={dtype}"
+            f"batch invariance broke at M={m}, N={n} for dtype={dtype}"
         )

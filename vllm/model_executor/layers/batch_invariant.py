@@ -171,10 +171,11 @@ def _matmul_config(M: int, N: int, dtype: torch.dtype) -> dict[str, int]:
         block_m = 128
         block_n = 256 if dtype == torch.float16 else 128
 
-    if dtype == torch.float16:
-        # Respect the shared-memory-derived cap chosen at enable time; never emit
-        # an N-tile wider than the device can hold for fp16.
-        block_n = min(block_n, _fp16_block_size_n)
+    # A BLOCK_SIZE_N=256 tile only fits the shared memory of large-smem SM80
+    # devices (A100). `_fp16_block_size_n` is the device's smem-derived cap
+    # (256 or 128), computed at enable time; apply it for every dtype so we
+    # never launch a tile too wide for SM86/SM89 (~100 KB smem).
+    block_n = min(block_n, _fp16_block_size_n)
 
     return {
         "BLOCK_SIZE_M": block_m,
