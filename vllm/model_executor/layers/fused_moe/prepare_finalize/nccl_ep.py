@@ -195,11 +195,7 @@ class NcclEPStandardPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             expert_num_tokens_list, device=expert_x.device
         )
 
-        if (
-            not quant_config.is_block_quantized
-            and not defer_input_quant
-            and expert_x.numel() != 0
-        ):
+        if not defer_input_quant and expert_x.numel() != 0:
             expert_x, expert_x_scale = moe_kernel_quantize_input(
                 expert_x,
                 a1_scale,
@@ -237,29 +233,23 @@ class NcclEPStandardPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             )
             a1 = a1 * topk_weights.to(a1.dtype)
 
-        if quant_config.is_block_quantized and not defer_input_quant:
-            a1q, a1q_scale = moe_kernel_quantize_input(
-                a1,
-                quant_config.a1_scale,
-                quant_dtype=quant_config.quant_dtype,
-                per_act_token_quant=quant_config.per_act_token_quant,
-                block_shape=quant_config.block_shape,
+        assert a1.dtype == torch.bfloat16, (
+            f"NCCL EP standard dispatch requires bfloat16, got {a1.dtype}"
+        )
+        if self.use_fp8_dispatch:
+            logger.debug_once(
+                "NCCL EP standard dispatch does not support FP8; dispatching "
+                "bfloat16 and quantizing after receive."
             )
-            if a1q_scale is not None and a1q_scale.numel() == 1:
-                a1q_scale = a1q_scale.view(1, 1)
-            a1_post_scale = None
-        else:
-            a1q = a1
-            a1q_scale = None
-            a1_post_scale = (
-                quant_config.a1_gscale
-                if quant_config.quant_dtype == "nvfp4"
-                else quant_config.a1_scale
-            )
+        a1_post_scale = (
+            quant_config.a1_gscale
+            if quant_config.quant_dtype == "nvfp4"
+            else quant_config.a1_scale
+        )
 
         return self._do_dispatch(
-            tokens=a1q,
-            token_scales=a1q_scale,
+            tokens=a1,
+            token_scales=None,
             rank_topk_ids=topk_ids,
             rank_topk_weights=topk_weights,
             num_experts=num_experts,
