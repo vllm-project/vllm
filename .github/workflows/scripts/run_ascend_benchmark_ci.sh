@@ -17,6 +17,7 @@ BENCHMARK_PUBLICATION_SYNC_SCRIPT=${BENCHMARK_PUBLICATION_SYNC_SCRIPT:-$VLLM_HUS
 SERVER_LOG=${SERVER_LOG:-$RESULT_ROOT/server.log}
 RUNNER_PREFLIGHT_FAILURE_FILE=${RUNNER_PREFLIGHT_FAILURE_FILE:-$RESULT_ROOT/runner_preflight_failure.txt}
 DIAGNOSTICS_DIR=${DIAGNOSTICS_DIR:-$RESULT_ROOT/diagnostics}
+DIAGNOSTIC_ENV_HELPER=${DIAGNOSTIC_ENV_HELPER:-$VLLM_HUST_REPO/.github/workflows/scripts/collect_ascend_diagnostic_env.py}
 NODE_ENV_FAILURE_FILE=${NODE_ENV_FAILURE_FILE:-$RESULT_ROOT/node_env_failure.txt}
 BENCH_SCENARIO=${BENCH_SCENARIO:-random-online}
 BENCH_DATASET_PATH=${BENCH_DATASET_PATH:-}
@@ -586,12 +587,10 @@ collect_ascend_diagnostics() {
     echo "phase=$phase"
     echo "run_id=$RUN_ID"
     echo "python_bin=$PYTHON_BIN"
-    echo "ascend_home_path=${ASCEND_HOME_PATH:-<unset>}"
-    echo "ascend_rt_visible_devices=${ASCEND_RT_VISIBLE_DEVICES:-<unset>}"
-    echo "ld_library_path=${LD_LIBRARY_PATH:-<unset>}"
   } >"$phase_dir/context.txt"
 
-  env | sort >"$phase_dir/env.txt" 2>/dev/null || true
+  "$PYTHON_BIN" "$DIAGNOSTIC_ENV_HELPER" \
+    --output "$phase_dir/environment.json" 2>/dev/null || true
 
   if command -v npu-smi >/dev/null 2>&1; then
     npu-smi info >"$phase_dir/npu-smi-info.txt" 2>&1 || true
