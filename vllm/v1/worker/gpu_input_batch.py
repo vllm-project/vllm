@@ -974,7 +974,8 @@ class InputBatch:
         # token_id of this value.
         prompt_lens = self.num_prompt_tokens_cpu_tensor[:num_reqs]
         padding = (
-            torch.arange(max_prompt_len).expand(num_reqs, -1) >= (prompt_lens[:, None])
+            torch.arange(max_prompt_len, device="cpu").expand(num_reqs, -1)
+            >= (prompt_lens[:, None])
         )
         prompt_token_ids_cpu_tensor.masked_fill_(padding, self.vocab_size)
         return prompt_token_ids_cpu_tensor
