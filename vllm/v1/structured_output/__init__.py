@@ -431,12 +431,18 @@ class StructuredOutputManager:
 
         Returns:
             The absolute index of the token at which
-            ``is_reasoning_end_streaming`` first fires. Falls back to the
-            final index when no single token triggers the detection (e.g.
-            a multi-token marker only recognized on the full delta), which
-            conservatively treats the whole step as reasoning content.
+            ``is_reasoning_end_streaming`` first fires. Returns ``start - 1``
+            when the parser reports reasoning ended on the pre-step history
+            alone (e.g. Mistral when ``[THINK]`` was never generated), so
+            that no step token is misclassified as reasoning content. Falls
+            back to the final index when no single token triggers the
+            detection (e.g. a multi-token marker only recognized on the full
+            delta), which conservatively treats the whole step as reasoning
+            content.
         """
         prefix = list(itertools.islice(all_token_ids, start))
+        if reasoner.is_reasoning_end_streaming(prefix, []):
+            return start - 1
         for idx in range(start, len(all_token_ids)):
             token = all_token_ids[idx]
             prefix.append(token)
