@@ -90,7 +90,7 @@ def _standard_prepare_finalize(module, group=None):
     return module.NcclEPStandardPrepareAndFinalize(
         ep_group=group or _Group(),
         num_dispatchers=2,
-        dp_size=2,
+        dp_size=4,
         rank_expert_offset=0,
         num_experts=4,
         num_topk=2,
@@ -181,11 +181,14 @@ def test_standard_dispatch_carries_fp8_scales_end_to_end(
     assert group.handle.dispatch_inputs.scales.shape == (4, 1)
     assert group.handle.dispatch_outputs.scales is not None
     assert group.handle.dispatch_outputs.scales.dtype == 2
-    assert group.handle.dispatch_outputs.scales.shape == (8, 1)
+    assert group.handle.dispatch_outputs.tokens.shape == (16, 128)
+    assert group.handle.dispatch_outputs.topk_weights.shape == (16, 2)
+    assert group.handle.dispatch_outputs.topk_idx.shape == (16, 2)
+    assert group.handle.dispatch_outputs.scales.shape == (16, 1)
 
     receiver()
     assert received["scales"] is not None
-    assert received["scales"].shape == (8, 1)
+    assert received["scales"].shape == (16, 1)
 
 
 def test_standard_expands_transport_scales_for_block_quantization(nccl_ep_module):

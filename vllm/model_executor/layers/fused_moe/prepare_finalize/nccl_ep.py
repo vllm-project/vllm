@@ -117,7 +117,10 @@ class NcclEPStandardPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             stream=stream,
         )
 
-        max_recv = num_tokens * self.num_dispatchers_
+        # NCCL EP may receive up to max_dispatch_tokens_per_rank from every
+        # rank in the DP/EP group. num_dispatchers_ is the number of nodes for
+        # HT mode, not the number of sending ranks.
+        max_recv = num_tokens * self.dp_size
         recv_tokens = torch.empty(
             (max_recv, hidden),
             dtype=tokens.dtype,
