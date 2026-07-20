@@ -10,8 +10,8 @@ MAX_NUM_SEQS=${MAX_NUM_SEQS:-2}
 GPU_MEMORY_UTILIZATION=${GPU_MEMORY_UTILIZATION:-0.92}
 MAX_TOKENS=${MAX_TOKENS:-8}
 PROMPT=${PROMPT:-The capital of France is}
-SERVER_LOG=${SERVER_LOG:-/tmp/vllm-e2e-smoke.log}
-RUNTIME_READY_LOG=${RUNTIME_READY_LOG:-/tmp/vllm-e2e-smoke-runtime-ready.log}
+SERVER_LOG=${SERVER_LOG:-}
+RUNTIME_READY_LOG=${RUNTIME_READY_LOG:-}
 PYTHON_BIN=${PYTHON_BIN:-python}
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 HTTP_REQUEST_SCRIPT=${E2E_HTTP_REQUEST_SCRIPT:-$SCRIPT_DIR/e2e_http_request.py}
@@ -356,6 +356,53 @@ ensure_runner_npu_ready() {
   return 1
 }
 
+prepare_ascend_device_for_server() {
+  local max_attempts=${ASCEND_DEVICE_SELECTION_ATTEMPTS:-3}
+  local attempt=1
+  local status=0
+
+  if [[ ! "$max_attempts" =~ ^[1-9][0-9]*$ ]]; then
+    echo "ASCEND_DEVICE_SELECTION_ATTEMPTS must be a positive integer, got: $max_attempts" >&2
+    return 1
+  fi
+
+  while [[ "$attempt" -le "$max_attempts" ]]; do
+    select_ascend_e2e_device "vLLM serve smoke test" || return 1
+
+    if [[ "$ASCEND_E2E_USE_SUDO" == "1" ]]; then
+      if wait_for_ascend_runtime_ready; then
+        status=0
+      else
+        status=$?
+      fi
+    elif ensure_runner_npu_ready; then
+      status=0
+    else
+      status=$?
+    fi
+
+    if [[ "$status" -ne 0 ]]; then
+      return "$status"
+    fi
+
+    # Runtime checks can be slow enough for the selected card's availability
+    # to change. Confirm it immediately before launching the server; if the
+    # card changed, select another card and repeat its device-bound preflight.
+    if confirm_selected_ascend_e2e_device "vLLM serve smoke test launch"; then
+      return 0
+    fi
+
+    if [[ "$attempt" -eq "$max_attempts" ]]; then
+      break
+    fi
+    echo "Ascend device availability changed during preflight; selecting again (${attempt}/${max_attempts})." >&2
+    attempt=$((attempt + 1))
+  done
+
+  echo "Ascend resource gate could not keep an eligible device through preflight after ${max_attempts} attempts." >&2
+  return 1
+}
+
 start_server() {
   if command -v setsid >/dev/null 2>&1; then
     if [[ "$ASCEND_E2E_USE_SUDO" == "1" ]]; then
@@ -465,13 +512,16 @@ if [[ -z "$PORT" ]]; then
 fi
 
 runtime_root=${VLLM_HUST_CI_RUNTIME_ROOT:-${GITHUB_WORKSPACE:-$PWD}/.ci-runtime}
+log_dir="$runtime_root/logs"
+SERVER_LOG=${SERVER_LOG:-$log_dir/vllm-e2e-smoke.log}
+RUNTIME_READY_LOG=${RUNTIME_READY_LOG:-$log_dir/vllm-e2e-smoke-runtime-ready.log}
 export HOME="$runtime_root/home"
 export XDG_CACHE_HOME="$runtime_root/cache"
 export XDG_CONFIG_HOME="$runtime_root/config"
 export VLLM_CACHE_ROOT="$XDG_CACHE_HOME/vllm"
 export VLLM_CONFIG_ROOT="$XDG_CONFIG_HOME/vllm"
 export PIP_CACHE_DIR="$XDG_CACHE_HOME/pip"
-mkdir -p "$HOME" "$XDG_CACHE_HOME" "$XDG_CONFIG_HOME" "$VLLM_CACHE_ROOT" "$VLLM_CONFIG_ROOT" "$PIP_CACHE_DIR"
+mkdir -p "$HOME" "$XDG_CACHE_HOME" "$XDG_CONFIG_HOME" "$VLLM_CACHE_ROOT" "$VLLM_CONFIG_ROOT" "$PIP_CACHE_DIR" "$log_dir"
 
 marker_dir="$runtime_root/process-markers"
 marker_pid_file="$marker_dir/vllm-server.pid"
@@ -486,32 +536,24 @@ echo "Ascend E2E use sudo: $ASCEND_E2E_USE_SUDO"
 # terminates workloads already using another device.
 # shellcheck source=/dev/null
 source "$ASCEND_RESOURCE_GATE_SCRIPT"
-select_ascend_e2e_device "vLLM serve smoke test"
 
 if [[ "$ASCEND_E2E_USE_SUDO" == "1" ]]; then
   echo "Ascend E2E root helper: $ASCEND_E2E_ROOT_HELPER"
-fi
-
-if [[ "$ASCEND_E2E_USE_SUDO" == "1" ]]; then
   if ! verify_root_helper_ready; then
     exit 1
   fi
-  if wait_for_ascend_runtime_ready; then
-    :
-  else
-    exit "$?"
-  fi
 else
   configure_ascend_python_runtime_paths
-  if ensure_runner_npu_ready; then
-    :
-  else
-    status=$?
-    if [[ "$status" -eq 2 ]]; then
-      exit 0
-    fi
-    exit "$status"
+fi
+
+if prepare_ascend_device_for_server; then
+  :
+else
+  status=$?
+  if [[ "$status" -eq 2 ]]; then
+    exit 0
   fi
+  exit "$status"
 fi
 
 start_server

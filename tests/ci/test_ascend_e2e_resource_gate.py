@@ -90,6 +90,123 @@ printf '%s|%s|%s\\n' "$ASCEND_RT_VISIBLE_DEVICES" \
     assert result.stdout.rstrip().endswith("3|unset|npu:0")
 
 
+def test_resource_gate_preserves_original_candidates_for_reselection(
+    tmp_path: Path,
+):
+    calls = tmp_path / "calls.txt"
+    fake_selector = tmp_path / "selector.py"
+    fake_selector.write_text(
+        "import os\n"
+        "import sys\n"
+        "from pathlib import Path\n"
+        "with Path(os.environ['SELECTOR_CALLS']).open('a') as handle:\n"
+        "    handle.write(' '.join(sys.argv[1:]) + '\\n')\n"
+        "print('selected\\t3\\tlogical-map\\t62000\\t65536\\t60294')\n",
+        encoding="utf-8",
+    )
+    command = f"""
+source {GATE_PATH}
+ASCEND_DEVICE_SELECTOR={fake_selector}
+PYTHON_BIN={sys.executable}
+select_ascend_e2e_device smoke
+select_ascend_e2e_device smoke
+"""
+
+    subprocess.run(
+        ["bash", "-c", command],
+        check=True,
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "ASCEND_VISIBLE_DEVICES": "0,1,2,3",
+            "SELECTOR_CALLS": str(calls),
+        },
+    )
+
+    recorded_calls = calls.read_text(encoding="utf-8").splitlines()
+    assert len(recorded_calls) == 2
+    assert all("--candidate-devices 0,1,2,3" in call for call in recorded_calls)
+
+
+def test_resource_gate_confirms_only_the_selected_device(tmp_path: Path):
+    calls = tmp_path / "calls.txt"
+    fake_selector = tmp_path / "selector.py"
+    fake_selector.write_text(
+        "import os\n"
+        "import sys\n"
+        "from pathlib import Path\n"
+        "with Path(os.environ['SELECTOR_CALLS']).open('a') as handle:\n"
+        "    handle.write(' '.join(sys.argv[1:]) + '\\n')\n"
+        "print('selected\\t3\\tlogical-map\\t62000\\t65536\\t60294')\n",
+        encoding="utf-8",
+    )
+    command = f"""
+source {GATE_PATH}
+ASCEND_DEVICE_SELECTOR={fake_selector}
+PYTHON_BIN={sys.executable}
+select_ascend_e2e_device smoke
+confirm_selected_ascend_e2e_device smoke-launch
+"""
+
+    subprocess.run(
+        ["bash", "-c", command],
+        check=True,
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "ASCEND_VISIBLE_DEVICES": "0,1,2,3",
+            "SELECTOR_CALLS": str(calls),
+        },
+    )
+
+    recorded_calls = calls.read_text(encoding="utf-8").splitlines()
+    assert "--candidate-devices 0,1,2,3" in recorded_calls[0]
+    assert "--candidate-devices 3" in recorded_calls[1]
+
+
+def test_resource_gate_rejects_a_selected_device_that_became_busy(
+    tmp_path: Path,
+):
+    call_count = tmp_path / "call-count.txt"
+    fake_selector = tmp_path / "selector.py"
+    fake_selector.write_text(
+        "import os\n"
+        "from pathlib import Path\n"
+        "path = Path(os.environ['SELECTOR_CALL_COUNT'])\n"
+        "count = int(path.read_text()) if path.exists() else 0\n"
+        "path.write_text(str(count + 1))\n"
+        "if count == 0:\n"
+        "    print('selected\\t3\\tlogical-map\\t62000\\t65536\\t60294')\n"
+        "else:\n"
+        "    print('unavailable\\t-\\t-\\t-\\t-\\t-\\tno_device')\n"
+        "    raise SystemExit(3)\n",
+        encoding="utf-8",
+    )
+    command = f"""
+source {GATE_PATH}
+ASCEND_DEVICE_SELECTOR={fake_selector}
+PYTHON_BIN={sys.executable}
+select_ascend_e2e_device smoke
+confirm_selected_ascend_e2e_device smoke-launch
+"""
+
+    result = subprocess.run(
+        ["bash", "-c", command],
+        capture_output=True,
+        text=True,
+        check=False,
+        env={
+            **os.environ,
+            "SELECTOR_CALL_COUNT": str(call_count),
+        },
+    )
+
+    assert result.returncode == 1
+    assert "no longer meets" in result.stderr
+
+
 def test_resource_gate_does_not_turn_unavailable_hardware_into_success(
     tmp_path: Path,
 ):
@@ -123,8 +240,22 @@ def test_serve_smoke_selects_before_preflight_and_passes_the_same_ratio():
     selection = text.index('select_ascend_e2e_device "vLLM serve smoke test"')
     sudo_branch = text.index('if [[ "$ASCEND_E2E_USE_SUDO" == "1" ]]; then', selection)
     preflight = text.index("if ensure_runner_npu_ready; then")
+    confirmation = text.index("confirm_selected_ascend_e2e_device", preflight)
+    prepare = text.rindex("\nif prepare_ascend_device_for_server; then")
+    launch = text.rindex("\nstart_server\n")
 
-    assert selection < sudo_branch < preflight
+    assert selection < sudo_branch < preflight < confirmation
+    assert prepare < launch
     assert "GPU_MEMORY_UTILIZATION=${GPU_MEMORY_UTILIZATION:-0.92}" in text
     assert '--gpu-memory-utilization "$GPU_MEMORY_UTILIZATION"' in text
     assert "ASCEND_RT_VISIBLE_DEVICES" in GATE_PATH.read_text(encoding="utf-8")
+
+
+def test_inference_logs_are_scoped_to_the_job_runtime_directory():
+    for path in (
+        SMOKE_PATH,
+        SCRIPT_DIR / "run_e2e_inference_regression.sh",
+    ):
+        text = path.read_text(encoding="utf-8")
+        assert 'log_dir="$runtime_root/logs"' in text
+        assert "/tmp/vllm-e2e-" not in text

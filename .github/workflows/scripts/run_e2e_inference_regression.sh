@@ -11,8 +11,8 @@ MAX_TOKENS=${MAX_TOKENS:-8}
 PROMPT=${PROMPT:-The capital of France is}
 CHAT_MESSAGE=${CHAT_MESSAGE:-Tell me one short fact about France.}
 BENCH_NUM_PROMPTS=${BENCH_NUM_PROMPTS:-5}
-SERVER_LOG=${SERVER_LOG:-/tmp/vllm-e2e-regression.log}
-RUNTIME_READY_LOG=${RUNTIME_READY_LOG:-/tmp/vllm-e2e-regression-runtime-ready.log}
+SERVER_LOG=${SERVER_LOG:-}
+RUNTIME_READY_LOG=${RUNTIME_READY_LOG:-}
 PYTHON_BIN=${PYTHON_BIN:-python}
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 HTTP_REQUEST_SCRIPT=${E2E_HTTP_REQUEST_SCRIPT:-$SCRIPT_DIR/e2e_http_request.py}
@@ -462,13 +462,16 @@ if [[ -z "$PORT" ]]; then
 fi
 
 runtime_root=${VLLM_HUST_CI_RUNTIME_ROOT:-${GITHUB_WORKSPACE:-$PWD}/.ci-runtime}
+log_dir="$runtime_root/logs"
+SERVER_LOG=${SERVER_LOG:-$log_dir/vllm-e2e-regression.log}
+RUNTIME_READY_LOG=${RUNTIME_READY_LOG:-$log_dir/vllm-e2e-regression-runtime-ready.log}
 export HOME="$runtime_root/home"
 export XDG_CACHE_HOME="$runtime_root/cache"
 export XDG_CONFIG_HOME="$runtime_root/config"
 export VLLM_CACHE_ROOT="$XDG_CACHE_HOME/vllm"
 export VLLM_CONFIG_ROOT="$XDG_CONFIG_HOME/vllm"
 export PIP_CACHE_DIR="$XDG_CACHE_HOME/pip"
-mkdir -p "$HOME" "$XDG_CACHE_HOME" "$XDG_CONFIG_HOME" "$VLLM_CACHE_ROOT" "$VLLM_CONFIG_ROOT" "$PIP_CACHE_DIR"
+mkdir -p "$HOME" "$XDG_CACHE_HOME" "$XDG_CONFIG_HOME" "$VLLM_CACHE_ROOT" "$VLLM_CONFIG_ROOT" "$PIP_CACHE_DIR" "$log_dir"
 
 marker_dir="$runtime_root/process-markers"
 marker_pid_file="$marker_dir/vllm-server.pid"
