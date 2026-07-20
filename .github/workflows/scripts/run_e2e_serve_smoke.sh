@@ -7,6 +7,7 @@ PORT=${PORT:-}
 DTYPE=${DTYPE:-float32}
 MAX_MODEL_LEN=${MAX_MODEL_LEN:-512}
 MAX_NUM_SEQS=${MAX_NUM_SEQS:-2}
+GPU_MEMORY_UTILIZATION=${GPU_MEMORY_UTILIZATION:-0.92}
 MAX_TOKENS=${MAX_TOKENS:-8}
 PROMPT=${PROMPT:-The capital of France is}
 SERVER_LOG=${SERVER_LOG:-/tmp/vllm-e2e-smoke.log}
@@ -14,6 +15,8 @@ RUNTIME_READY_LOG=${RUNTIME_READY_LOG:-/tmp/vllm-e2e-smoke-runtime-ready.log}
 PYTHON_BIN=${PYTHON_BIN:-python}
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 HTTP_REQUEST_SCRIPT=${E2E_HTTP_REQUEST_SCRIPT:-$SCRIPT_DIR/e2e_http_request.py}
+ASCEND_DEVICE_SELECTOR=${ASCEND_DEVICE_SELECTOR:-$SCRIPT_DIR/select_ascend_ci_device.py}
+ASCEND_RESOURCE_GATE_SCRIPT=${ASCEND_RESOURCE_GATE_SCRIPT:-$SCRIPT_DIR/ascend_e2e_resource_gate.sh}
 VLLM_ASCEND_HUST_REPO=${VLLM_ASCEND_HUST_REPO:-${GITHUB_WORKSPACE:-$PWD}/vllm-ascend-hust}
 SUDO_AUTH_EXIT_CODE=${SUDO_AUTH_EXIT_CODE:-76}
 ASCEND_E2E_USE_SUDO=${ASCEND_E2E_USE_SUDO:-0}
@@ -44,6 +47,7 @@ SUDO_PRESERVE_ENV_VARS=(
   ASCEND_VISIBLE_DEVICES
   ATB_HOME_PATH
   DTYPE
+  GPU_MEMORY_UTILIZATION
   HCCL_CONNECT_TIMEOUT
   HCCL_EXEC_TIMEOUT
   HF_ENDPOINT
@@ -373,6 +377,7 @@ start_server() {
         --dtype "$DTYPE" \
         --max-model-len "$MAX_MODEL_LEN" \
         --max-num-seqs "$MAX_NUM_SEQS" \
+        --gpu-memory-utilization "$GPU_MEMORY_UTILIZATION" \
         --enforce-eager >"$SERVER_LOG" 2>&1 &
     fi
     server_pid=$!
@@ -388,6 +393,7 @@ start_server() {
         --dtype "$DTYPE" \
         --max-model-len "$MAX_MODEL_LEN" \
         --max-num-seqs "$MAX_NUM_SEQS" \
+        --gpu-memory-utilization "$GPU_MEMORY_UTILIZATION" \
         --enforce-eager >"$SERVER_LOG" 2>&1 &
     fi
     server_pid=$!
@@ -475,6 +481,13 @@ mkdir -p "$marker_dir"
 echo "Starting vLLM serve smoke test for $MODEL_NAME"
 echo "Using smoke test port $PORT"
 echo "Ascend E2E use sudo: $ASCEND_E2E_USE_SUDO"
+# Bind the runtime-ready probe, tensor preflight, and server to the same card.
+# The selector may use passwordless npu-smi through sudo, but never modifies or
+# terminates workloads already using another device.
+# shellcheck source=/dev/null
+source "$ASCEND_RESOURCE_GATE_SCRIPT"
+select_ascend_e2e_device "vLLM serve smoke test"
+
 if [[ "$ASCEND_E2E_USE_SUDO" == "1" ]]; then
   echo "Ascend E2E root helper: $ASCEND_E2E_ROOT_HELPER"
 fi
