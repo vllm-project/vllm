@@ -93,6 +93,9 @@ def test_online_quantization(
     use_rocm_aiter: bool,
     monkeypatch,
 ) -> None:
+    if kv_cache_dtype == "fp8" and current_platform.is_device_capability_family(90):
+        pytest.skip("FA3 currently rejects FP8 KV cache output dtype on SM90")
+
     if use_rocm_aiter:
         monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
 
