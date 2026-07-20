@@ -426,7 +426,10 @@ class IterationStats:
                 [per_token_itl] * num_new_generation_tokens
             )
 
-        if num_new_generation_tokens > 0:
+        # The first output may carry no tokens (pooling requests, aborted or
+        # failed prefills); last_token_ts must still advance so finished
+        # request latencies stay non-negative.
+        if is_prefilling or num_new_generation_tokens > 0:
             req_stats.last_token_ts = engine_core_timestamp
 
     def update_from_events(
