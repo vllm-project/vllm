@@ -76,3 +76,17 @@ class KVEventsConfig:
                 "prefix_cache_upload_token must be a non-empty string when "
                 "prefix_cache_upload_endpoint is configured"
             )
+        if self.prefix_cache_upload_endpoint is not None and (
+            not isinstance(self.prefix_cache_upload_max_queue_size, int)
+            or isinstance(self.prefix_cache_upload_max_queue_size, bool)
+            or self.prefix_cache_upload_max_queue_size <= 0
+        ):
+            raise ValueError(
+                "prefix_cache_upload_max_queue_size must be a positive integer"
+            )
+        if self.prefix_cache_upload_endpoint is not None and (
+            not isinstance(self.prefix_cache_upload_timeout, int | float)
+            or isinstance(self.prefix_cache_upload_timeout, bool)
+            or self.prefix_cache_upload_timeout <= 0
+        ):
+            raise ValueError("prefix_cache_upload_timeout must be positive")

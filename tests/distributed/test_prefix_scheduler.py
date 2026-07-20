@@ -2,13 +2,17 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
+import http.server
+import threading
 import time
 import urllib.error
+import urllib.request
 from types import SimpleNamespace
 
 import aiohttp
 import msgspec
 import pytest
+import zmq
 from fastapi import HTTPException
 
 from vllm.config.kv_events import KVEventsConfig
@@ -21,6 +25,8 @@ from vllm.distributed.kv_events import (
     KVEventBatch,
     NullEventPublisher,
     PrefixCacheEventUploaderFactory,
+    _build_prefix_cache_opener,
+    _NoRedirectHandler,
 )
 from vllm.distributed.prefix_scheduler import (
     GlobalPrefixScheduler,
@@ -356,7 +362,7 @@ def test_prefix_cache_upload_queue_overflow_reconciles_latest_state():
     uploader.shutdown()
 
 
-def test_prefix_cache_upload_recovers_after_disconnect(monkeypatch):
+def test_prefix_cache_upload_recovers_after_disconnect():
     attempts = []
 
     class Response:
@@ -369,13 +375,13 @@ def test_prefix_cache_upload_recovers_after_disconnect(monkeypatch):
         def __exit__(self, *args):
             return None
 
-    def urlopen(request, timeout):
-        attempts.append((request.data, timeout))
-        if len(attempts) == 1:
-            raise urllib.error.URLError("disconnected")
-        return Response()
+    class Opener:
+        def open(self, request, timeout):
+            attempts.append((request.data, timeout))
+            if len(attempts) == 1:
+                raise urllib.error.URLError("disconnected")
+            return Response()
 
-    monkeypatch.setattr("urllib.request.urlopen", urlopen)
     uploader = HttpPrefixCacheEventUploader(
         data_parallel_rank=0,
         endpoint="http://127.0.0.1:9/prefix_routing",
@@ -388,6 +394,7 @@ def test_prefix_cache_upload_recovers_after_disconnect(monkeypatch):
         ),
         retry_interval=0.001,
         max_retry_interval=0.002,
+        _opener=Opener(),
     )
     deadline = time.monotonic() + 2
     while uploader._needs_snapshot.is_set() and time.monotonic() < deadline:
@@ -402,7 +409,96 @@ def test_prefix_cache_upload_recovers_after_disconnect(monkeypatch):
         uploader.shutdown()
 
 
-def _event_ingest_request(token: str | None, configured_token: str | None):
+def test_prefix_cache_upload_ignores_proxy_and_rejects_redirect(monkeypatch):
+    source_requests = []
+    redirected_requests = []
+
+    class RedirectTarget(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):
+            redirected_requests.append(dict(self.headers))
+            self.send_response(204)
+            self.end_headers()
+
+        def log_message(self, format, *args):
+            pass
+
+    target = http.server.ThreadingHTTPServer(("127.0.0.1", 0), RedirectTarget)
+    target_thread = threading.Thread(target=target.serve_forever, daemon=True)
+    target_thread.start()
+    target_url = f"http://127.0.0.1:{target.server_port}/stolen"
+
+    class RedirectSource(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):
+            source_requests.append(dict(self.headers))
+            self.send_response(307)
+            self.send_header("Location", target_url)
+            self.end_headers()
+
+        def log_message(self, format, *args):
+            pass
+
+    source = http.server.ThreadingHTTPServer(("127.0.0.1", 0), RedirectSource)
+    source_thread = threading.Thread(target=source.serve_forever, daemon=True)
+    source_thread.start()
+
+    # A process-level proxy must not receive authenticated cache events. Using
+    # an unreachable endpoint also proves the uploader is not silently falling
+    # back to environment proxy handling.
+    monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:1")
+    monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:1")
+    monkeypatch.setenv("NO_PROXY", "")
+    uploader = HttpPrefixCacheEventUploader(
+        data_parallel_rank=0,
+        endpoint=f"http://127.0.0.1:{source.server_port}/events",
+        token="shared-secret",
+        retry_interval=0.01,
+        max_retry_interval=0.01,
+    )
+    uploader.publish(KVEventBatch(ts=1.0, events=[]))
+    deadline = time.monotonic() + 2
+    while (
+        not source_requests or not uploader._needs_snapshot.is_set()
+    ) and time.monotonic() < deadline:
+        time.sleep(0.005)
+
+    try:
+        assert source_requests
+        assert source_requests[0]["Authorization"] == "Bearer shared-secret"
+        assert not redirected_requests
+        assert uploader._needs_snapshot.is_set()
+        assert not any(
+            isinstance(handler, urllib.request.ProxyHandler)
+            for handler in uploader._opener.handlers
+        )
+        assert any(
+            isinstance(handler, _NoRedirectHandler)
+            for handler in uploader._opener.handlers
+        )
+    finally:
+        uploader.shutdown()
+        source.shutdown()
+        target.shutdown()
+        source.server_close()
+        target.server_close()
+        source_thread.join(timeout=1)
+        target_thread.join(timeout=1)
+
+
+def test_prefix_cache_opener_has_no_environment_proxy():
+    opener = _build_prefix_cache_opener()
+
+    assert not any(
+        isinstance(handler, urllib.request.ProxyHandler) for handler in opener.handlers
+    )
+
+
+def _event_ingest_request(
+    token: str | None,
+    configured_token: str | None,
+    *,
+    body: bytes | None = None,
+    max_event_ingest_body_size: int = 16 * 1024 * 1024,
+):
     class Scheduler:
         batch = None
 
@@ -419,6 +515,7 @@ def _event_ingest_request(token: str | None, configured_token: str | None):
                     nodes=[],
                     hash_block_size=16,
                     event_ingest_token=configured_token,
+                    max_event_ingest_body_size=max_event_ingest_body_size,
                 ),
                 nodes={"node-a": object()},
                 scheduler=self.scheduler,
@@ -427,9 +524,13 @@ def _event_ingest_request(token: str | None, configured_token: str | None):
                 state=SimpleNamespace(prefix_routing_proxy=proxy)
             )
 
-        async def body(self):
-            return msgspec.msgpack.encode(
-                KVEventBatch(ts=1.0, data_parallel_rank=0, events=[])
+        async def stream(self):
+            yield (
+                body
+                if body is not None
+                else msgspec.msgpack.encode(
+                    KVEventBatch(ts=1.0, data_parallel_rank=0, events=[])
+                )
             )
 
     return Request()
@@ -465,6 +566,21 @@ def test_prefix_routing_http_event_ingest_accepts_shared_token():
     assert response.status_code == 204
     assert request.scheduler.batch is not None
     assert request.scheduler.batch[0] == "node-a"
+
+
+def test_prefix_routing_http_event_ingest_rejects_oversized_batch():
+    request = _event_ingest_request(
+        token="shared-secret",
+        configured_token="shared-secret",
+        body=b"x" * 9,
+        max_event_ingest_body_size=8,
+    )
+
+    with pytest.raises(HTTPException, match="batch is too large") as exc_info:
+        asyncio.run(ingest_prefix_routing_kv_events("node-a", request))
+
+    assert exc_info.value.status_code == 413
+    assert request.scheduler.batch is None
 
 
 def test_prefix_routing_renders_completion_engine_inputs():
@@ -842,6 +958,125 @@ def test_prefix_routing_proxy_reuses_and_closes_http_session(monkeypatch):
     assert proxy._session is None
 
 
+def test_prefix_routing_zmq_subscriber_isolates_invalid_messages(monkeypatch):
+    valid_hash = _hash(7)
+    mismatched = msgspec.msgpack.encode(
+        KVEventBatch(
+            ts=1.0,
+            data_parallel_rank=2,
+            events=[_stored_event(_hash(6))],
+        )
+    )
+    valid = msgspec.msgpack.encode(
+        KVEventBatch(
+            ts=2.0,
+            data_parallel_rank=1,
+            events=[_stored_event(valid_hash)],
+        )
+    )
+
+    class Socket:
+        def __init__(self):
+            self.messages = iter(
+                [
+                    [b"too", b"short"],
+                    [b"", b"0", b"\xc1"],
+                    [b"", b"1", mismatched],
+                    [b"", b"2", valid],
+                ]
+            )
+            self.closed = False
+
+        def setsockopt(self, *args):
+            pass
+
+        def connect(self, endpoint):
+            assert endpoint == "inproc://node-a"
+
+        async def recv_multipart(self):
+            try:
+                return next(self.messages)
+            except StopIteration:
+                raise asyncio.CancelledError from None
+
+        def close(self, *, linger):
+            assert linger == 0
+            self.closed = True
+
+    socket = Socket()
+    context = SimpleNamespace(socket=lambda socket_type: socket)
+    monkeypatch.setattr(zmq.asyncio.Context, "instance", lambda: context)
+
+    proxy = object.__new__(PrefixRoutingProxy)
+    proxy.config = SimpleNamespace(event_topic="")
+    proxy.scheduler = GlobalPrefixScheduler()
+    proxy.scheduler.register_node(
+        "node-a",
+        hash_block_size=16,
+        data_parallel_rank=1,
+        group_block_sizes={0: 16},
+    )
+    node = PrefixRoutingNode(
+        node_id="node-a",
+        url=None,
+        event_endpoint="inproc://node-a",
+        data_parallel_rank=1,
+        local=True,
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(proxy._subscribe_node_events(node))
+
+    decision = proxy.scheduler.choose_node([valid_hash], prompt_num_tokens=32)
+    assert decision is not None
+    assert decision.node_id == "node-a"
+    assert decision.data_parallel_rank == 1
+    assert decision.matched_tokens == 16
+    assert socket.closed
+
+
+@pytest.mark.parametrize(
+    "kwargs, error",
+    [
+        ({"max_queue_size": 0}, "max_queue_size must be a positive integer"),
+        ({"max_queue_size": True}, "max_queue_size must be a positive integer"),
+        ({"request_timeout": 0}, "request_timeout must be positive"),
+        ({"request_timeout": True}, "request_timeout must be positive"),
+    ],
+)
+def test_prefix_cache_uploader_rejects_invalid_limits(kwargs, error):
+    with pytest.raises(ValueError, match=error):
+        HttpPrefixCacheEventUploader(
+            data_parallel_rank=0,
+            endpoint="http://127.0.0.1:9/events",
+            token="shared-secret",
+            _start_thread=False,
+            **kwargs,
+        )
+
+
+@pytest.mark.parametrize(
+    "kwargs, error",
+    [
+        (
+            {"prefix_cache_upload_max_queue_size": 0},
+            "prefix_cache_upload_max_queue_size must be a positive integer",
+        ),
+        (
+            {"prefix_cache_upload_timeout": 0},
+            "prefix_cache_upload_timeout must be positive",
+        ),
+    ],
+)
+def test_prefix_cache_config_rejects_invalid_upload_limits(kwargs, error):
+    with pytest.raises(ValueError, match=error):
+        KVEventsConfig(
+            prefix_cache_upload_endpoint="http://127.0.0.1:9/events",
+            prefix_cache_upload_token="shared-secret",
+            **kwargs,
+        )
+
+
 @pytest.mark.parametrize(
     "config, error",
     [
@@ -884,6 +1119,20 @@ def test_prefix_routing_proxy_reuses_and_closes_http_session(monkeypatch):
             },
             "max_request_body_size must be a positive integer",
         ),
+        (
+            {
+                "nodes": [{"id": "node-a", "url": "local"}],
+                "max_event_ingest_body_size": 0,
+            },
+            "max_event_ingest_body_size must be a positive integer",
+        ),
+        (
+            {
+                "nodes": [{"id": "node-a", "url": "local"}],
+                "max_event_ingest_body_size": True,
+            },
+            "max_event_ingest_body_size must be a positive integer",
+        ),
     ],
 )
 def test_prefix_routing_config_rejects_invalid_values(config, error):
@@ -893,3 +1142,44 @@ def test_prefix_routing_config_rejects_invalid_values(config, error):
 
     with pytest.raises(ValueError, match=error):
         _parse_prefix_routing_config(config, vllm_config)
+
+
+def test_api_app_wires_prefix_routing_middleware_route_and_shutdown(monkeypatch):
+    from vllm.entrypoints.openai.api_server import build_app
+    from vllm.entrypoints.openai.cli_args import make_arg_parser
+    from vllm.platforms import current_platform
+    from vllm.utils.argparse_utils import FlexibleArgumentParser
+
+    monkeypatch.setattr(current_platform, "device_type", "cpu")
+    parser = FlexibleArgumentParser()
+    make_arg_parser(parser)
+    args = parser.parse_args([])
+    args.enable_prefix_routing = True
+    app = build_app(args, ())
+
+    assert any(
+        middleware.cls is PrefixRoutingMiddleware for middleware in app.user_middleware
+    )
+    assert any(
+        getattr(route, "path", None) == "/prefix_routing/kv_events/{node_id}"
+        for route in app.routes
+    )
+
+    class Proxy:
+        def __init__(self):
+            self.shutdown_called = False
+
+        async def shutdown(self):
+            self.shutdown_called = True
+
+    proxy = Proxy()
+    app.state.log_stats = False
+    app.state.prefix_routing_proxy = proxy
+
+    async def exercise_lifespan():
+        async with app.router.lifespan_context(app):
+            assert not proxy.shutdown_called
+
+    asyncio.run(exercise_lifespan())
+
+    assert proxy.shutdown_called

@@ -44,6 +44,7 @@ logger = init_logger(__name__)
 PREFIX_ROUTING_BYPASS_HEADER = "x-vllm-prefix-routing"
 DATA_PARALLEL_RANK_HEADER = "x-data-parallel-rank"
 DEFAULT_MAX_REQUEST_BODY_SIZE = 16 * 1024 * 1024
+DEFAULT_MAX_EVENT_INGEST_BODY_SIZE = 16 * 1024 * 1024
 
 router = APIRouter()
 
@@ -77,7 +78,14 @@ async def ingest_prefix_routing_kv_events(
     if node_id not in proxy.nodes:
         raise HTTPException(status_code=404, detail=f"Unknown prefix node {node_id!r}")
 
-    body = await raw_request.body()
+    try:
+        body = await _read_limited_fastapi_body(
+            raw_request, proxy.config.max_event_ingest_body_size
+        )
+    except RequestBodyTooLarge as exc:
+        raise HTTPException(
+            status_code=413, detail="KV event batch is too large"
+        ) from exc
     try:
         batch = msgspec.msgpack.decode(body, type=KVEventBatch)
     except msgspec.DecodeError as exc:
@@ -116,6 +124,7 @@ class PrefixRoutingConfig:
     event_ingest_token: str | None = None
     routing_token: str | None = None
     max_request_body_size: int = DEFAULT_MAX_REQUEST_BODY_SIZE
+    max_event_ingest_body_size: int = DEFAULT_MAX_EVENT_INGEST_BODY_SIZE
 
 
 class PrefixRoutingProxy:
@@ -256,12 +265,22 @@ class PrefixRoutingProxy:
         try:
             while True:
                 frames = await socket.recv_multipart()
-                if len(frames) != 3:
-                    logger.warning("Ignoring malformed KV event frames: %s", frames)
-                    continue
-                _, _, payload = frames
-                batch = decoder.decode(payload)
-                self.scheduler.apply_event_batch(node.node_id, batch)
+                try:
+                    if len(frames) != 3:
+                        logger.warning(
+                            "Ignoring malformed KV event message with %d frames",
+                            len(frames),
+                        )
+                        continue
+                    _, _, payload = frames
+                    batch = decoder.decode(payload)
+                    self.scheduler.apply_event_batch(node.node_id, batch)
+                except (msgspec.DecodeError, KeyError, ValueError) as exc:
+                    logger.warning(
+                        "Ignoring invalid KV event message from %s: %s",
+                        node.node_id,
+                        type(exc).__name__,
+                    )
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -500,6 +519,18 @@ def _parse_prefix_routing_config(
             "prefix routing max_request_body_size must be a positive integer"
         )
 
+    max_event_ingest_body_size = raw_config.get(
+        "max_event_ingest_body_size", DEFAULT_MAX_EVENT_INGEST_BODY_SIZE
+    )
+    if (
+        not isinstance(max_event_ingest_body_size, int)
+        or isinstance(max_event_ingest_body_size, bool)
+        or max_event_ingest_body_size <= 0
+    ):
+        raise ValueError(
+            "prefix routing max_event_ingest_body_size must be a positive integer"
+        )
+
     return PrefixRoutingConfig(
         nodes=nodes,
         hash_block_size=hash_block_size,
@@ -508,11 +539,23 @@ def _parse_prefix_routing_config(
         event_ingest_token=event_ingest_token,
         routing_token=routing_token,
         max_request_body_size=max_request_body_size,
+        max_event_ingest_body_size=max_event_ingest_body_size,
     )
 
 
 class RequestBodyTooLarge(Exception):
     pass
+
+
+async def _read_limited_fastapi_body(request: FastAPIRequest, max_bytes: int) -> bytes:
+    chunks: list[bytes] = []
+    body_size = 0
+    async for chunk in request.stream():
+        body_size += len(chunk)
+        if body_size > max_bytes:
+            raise RequestBodyTooLarge
+        chunks.append(chunk)
+    return b"".join(chunks)
 
 
 async def _receive_body(receive: Receive, max_bytes: int) -> bytes:

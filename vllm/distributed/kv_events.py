@@ -278,6 +278,18 @@ class NullEventPublisher(EventPublisher):
         return
 
 
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def _build_prefix_cache_opener() -> urllib.request.OpenerDirector:
+    return urllib.request.build_opener(
+        urllib.request.ProxyHandler({}),
+        _NoRedirectHandler(),
+    )
+
+
 class HttpPrefixCacheEventUploader(EventPublisher):
     """Non-blocking HTTP uploader with snapshot-based reconciliation.
 
@@ -299,6 +311,7 @@ class HttpPrefixCacheEventUploader(EventPublisher):
         retry_interval: float = 0.1,
         max_retry_interval: float = 5.0,
         _start_thread: bool = True,
+        _opener: urllib.request.OpenerDirector | None = None,
         **_: Any,
     ) -> None:
         super().__init__(data_parallel_rank)
@@ -307,8 +320,21 @@ class HttpPrefixCacheEventUploader(EventPublisher):
                 "HTTP prefix-cache upload endpoint must start with "
                 f"http:// or https://, got {endpoint!r}"
             )
+        if (
+            not isinstance(max_queue_size, int)
+            or isinstance(max_queue_size, bool)
+            or max_queue_size <= 0
+        ):
+            raise ValueError("max_queue_size must be a positive integer")
+        if (
+            not isinstance(request_timeout, int | float)
+            or isinstance(request_timeout, bool)
+            or request_timeout <= 0
+        ):
+            raise ValueError("request_timeout must be positive")
         self._endpoint = endpoint
         self._request_timeout = request_timeout
+        self._opener = _opener or _build_prefix_cache_opener()
         self._headers = {"Content-Type": "application/msgpack"}
         if token is not None:
             self._headers["Authorization"] = f"Bearer {token}"
@@ -449,7 +475,7 @@ class HttpPrefixCacheEventUploader(EventPublisher):
                     method="POST",
                     headers=self._headers,
                 )
-                with urllib.request.urlopen(
+                with self._opener.open(
                     request, timeout=self._request_timeout
                 ) as response:
                     if response.status >= 300:
