@@ -1053,13 +1053,32 @@ class NcclEPAll2AllManager(All2AllManagerBase):
         dist.broadcast_object_list(unique_id_list, src=0, group=cpu_group)
         unique_id = unique_id_list[0]
 
+        logger.info(
+            "Initializing NCCL EP communicator: rank=%d, world_size=%d",
+            self.rank,
+            self.world_size,
+        )
         self.nccl_comm = nccl_core.Communicator.init(
             nranks=self.world_size,
             rank=self.rank,
             unique_id=unique_id,
         )
+        logger.info(
+            "NCCL EP communicator initialized: rank=%d, world_size=%d, "
+            "device=%s, gin_type=%s, railed_gin_type=%s, n_lsa_teams=%s, "
+            "device_api_support=%s, host_rma_support=%s, multimem_support=%s",
+            self.rank,
+            self.world_size,
+            self.nccl_comm.device,
+            self.nccl_comm.gin_type,
+            self.nccl_comm.railed_gin_type,
+            self.nccl_comm.n_lsa_teams,
+            self.nccl_comm.device_api_support,
+            self.nccl_comm.host_rma_support,
+            self.nccl_comm.multimem_support,
+        )
 
-        self._ep_groups: dict[str, Any] = {}
+        self._ep_groups: dict[tuple[int, int, int, int], Any] = {}
         self._lock = threading.RLock()
 
     def _get_or_create_group(
@@ -1080,16 +1099,48 @@ class NcclEPAll2AllManager(All2AllManagerBase):
 
         with self._lock:
             if key not in self._ep_groups:
+                max_recv_tokens_per_rank = (
+                    max_dispatch_tokens_per_rank * self.world_size
+                )
                 config = nccl_ep.GroupConfig(
                     algorithm=algorithm,
                     num_experts=num_experts,
                     max_dispatch_tokens_per_rank=max_dispatch_tokens_per_rank,
-                    max_recv_tokens_per_rank=(
-                        max_dispatch_tokens_per_rank * self.world_size
-                    ),
+                    max_recv_tokens_per_rank=max_recv_tokens_per_rank,
                     max_token_bytes=max_token_bytes,
                 )
-                self._ep_groups[key] = nccl_ep.Group.create(self.nccl_comm, config)
+                logger.info(
+                    "Creating NCCL EP group: rank=%d, world_size=%d, "
+                    "algorithm=%s, num_experts=%d, "
+                    "max_dispatch_tokens_per_rank=%d, "
+                    "max_recv_tokens_per_rank=%d, max_token_bytes=%d",
+                    self.rank,
+                    self.world_size,
+                    algorithm,
+                    num_experts,
+                    max_dispatch_tokens_per_rank,
+                    max_recv_tokens_per_rank,
+                    max_token_bytes,
+                )
+                try:
+                    self._ep_groups[key] = nccl_ep.Group.create(
+                        self.nccl_comm, config
+                    )
+                except Exception:
+                    logger.exception(
+                        "NCCL EP group creation failed: rank=%d, "
+                        "world_size=%d, algorithm=%s",
+                        self.rank,
+                        self.world_size,
+                        algorithm,
+                    )
+                    raise
+                logger.info(
+                    "NCCL EP group created: rank=%d, world_size=%d, algorithm=%s",
+                    self.rank,
+                    self.world_size,
+                    algorithm,
+                )
             return self._ep_groups[key]
 
     def get_handle(self, kwargs):
