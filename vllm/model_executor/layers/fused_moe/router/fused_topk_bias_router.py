@@ -14,6 +14,10 @@ from vllm.model_executor.layers.fused_moe.config import (
     get_routing_method_type,
 )
 from vllm.model_executor.layers.fused_moe.router.base_router import BaseRouter
+from vllm.model_executor.layers.fused_moe.router.dsv4_topk import (
+    can_use_dsv4_topk,
+    dsv4_topk,
+)
 
 
 def vllm_topk_softmax(
@@ -181,6 +185,22 @@ def fused_topk_bias(
         assert hidden_states.size(0) == gating_output.size(0), (
             "Number of tokens mismatch"
         )
+
+        output_indices_dtype = torch.int32 if indices_type is None else indices_type
+        if scoring_func == "sqrtsoftplus" and can_use_dsv4_topk(
+            gating_output,
+            e_score_correction_bias,
+            topk,
+            renormalize,
+            output_indices_dtype,
+        ):
+            assert e_score_correction_bias is not None
+            return dsv4_topk(
+                gating_output,
+                e_score_correction_bias,
+                output_indices_dtype,
+                routed_scaling_factor,
+            )
 
         M, _ = hidden_states.size()
 
