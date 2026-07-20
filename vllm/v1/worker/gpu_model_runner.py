@@ -8,7 +8,7 @@ import threading
 import time
 from collections import defaultdict
 from collections.abc import Callable, Iterable, Iterator, Sequence
-from contextlib import contextmanager
+from contextlib import AbstractContextManager, contextmanager, nullcontext
 from copy import copy, deepcopy
 from dataclasses import dataclass, replace
 from functools import reduce
@@ -105,7 +105,12 @@ from vllm.multimodal.inputs import (
     MultiModalKwargsItem,
     PlaceholderRange,
 )
-from vllm.multimodal.utils import get_mm_features_in_window, group_and_batch_mm_kwargs
+from vllm.multimodal.utils import (
+    copy_mm_embedding_modality,
+    get_mm_features_in_window,
+    group_and_batch_mm_kwargs,
+    set_mm_embedding_modality,
+)
 from vllm.platforms import current_platform
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingType
@@ -120,6 +125,7 @@ from vllm.utils.platform_utils import num_compute_units
 from vllm.utils.torch_utils import (
     PIN_MEMORY,
     async_tensor_h2d,
+    current_stream,
     get_dtype_size,
     is_quantized_kv_cache,
     kv_cache_dtype_str_to_dtype,
@@ -3244,11 +3250,13 @@ class GPUModelRunner(
                     is_mm_embed[
                         req_start_pos + start_idx : req_start_pos + end_idx
                     ] |= is_embed
+                set_mm_embedding_modality(mm_embeds_item, mm_feature.modality)
                 mm_embeds_req.append(mm_embeds_item)
 
             if self.is_multimodal_pruning_enabled and self.uses_mrope:
                 assert req_state.mrope_positions is not None
                 should_sync_mrope_positions = True
+                old_mm_embeds_req = mm_embeds_req
                 mm_embeds_req, new_mrope_positions, new_delta = (
                     self.model.recompute_mrope_positions(
                         input_ids=req_state.prompt_token_ids,
@@ -3257,6 +3265,10 @@ class GPUModelRunner(
                         num_computed_tokens=req_state.num_computed_tokens,
                     )
                 )
+                mm_embeds_req = [
+                    copy_mm_embedding_modality(src, dst)
+                    for src, dst in zip(old_mm_embeds_req, mm_embeds_req)
+                ]
                 req_state.mrope_positions.copy_(new_mrope_positions)
                 req_state.mrope_position_delta = new_delta
 
@@ -3436,6 +3448,7 @@ class GPUModelRunner(
         )
 
         if raw_pooler_output is None or not any(finished_mask):
+            self._sync_device()
             model_runner_output.pooler_output = [None] * num_reqs
             return model_runner_output
 
@@ -5622,10 +5635,15 @@ class GPUModelRunner(
             # to gather the logprob for.
             tgt_token_ids = prompt_token_ids[start_tok : start_tok + num_logits]
 
-            # Compute prompt logprobs.
-            logprobs = self.sampler.compute_logprobs(logits)
+            # Compute prompt scores respecting logprobs_mode.
+            # NOTE: prompt tokens skip sampling processors, so
+            # processed_* and raw_* yield the same scores here.
+            if self.model_config.logprobs_mode in ("raw_logits", "processed_logits"):
+                scores = logits.to(torch.float32)
+            else:
+                scores = self.sampler.compute_logprobs(logits)
             token_ids, logprobs, ranks, _ = self.sampler.gather_logprobs(
-                logprobs, num_prompt_logprobs, tgt_token_ids
+                scores, num_prompt_logprobs, tgt_token_ids
             )
 
             # Transfer GPU->CPU async.
@@ -6608,17 +6626,19 @@ class GPUModelRunner(
         per_graph_estimate = {}
         encoder_memory_estimate = 0
 
-        # On ROCm, capture these throwaway profiling graphs on the current stream
-        # instead of the fresh side stream graph_capture() allocates by default.
-        # torch's allocator pools free blocks per stream, so a side-stream forward
-        # strands a persistent aiter scratch buffer in a separate pool, shifting
-        # the physical placement of the real KV cache allocated afterward and
-        # slowing bandwidth-bound decode ~20%. The graphs are discarded, so a
-        # side stream is unnecessary here.
-        # cap_ctx=None keeps the side-stream path on CUDA, where the current
-        # stream is the legacy default stream, on which capture cannot begin.
+        # On ROCm, capture these throwaway profiling graphs on vLLM's dedicated
+        # compute stream instead of the fresh side stream graph_capture()
+        # allocates by default. torch's allocator pools free blocks per stream,
+        # so a side-stream forward strands a persistent aiter scratch buffer in
+        # a separate pool, shifting the physical placement of the real KV cache
+        # allocated afterward and slowing bandwidth-bound decode ~20%. The
+        # graphs are discarded, so a side stream is unnecessary here.
+        # Use current_stream(), not torch.cuda.current_stream(): before vLLM
+        # initializes its dedicated stream, torch returns the per-thread default
+        # stream (cuda_stream=0), which cannot be used for cudagraph capture.
+        # cap_ctx=None keeps the side-stream path on CUDA.
         cap_ctx = (
-            GraphCaptureContext(torch.cuda.current_stream(self.device))
+            GraphCaptureContext(current_stream())
             if current_platform.is_rocm()
             else None
         )
@@ -6741,6 +6761,44 @@ class GPUModelRunner(
         # Capture the large shapes first so that the smaller shapes
         # can reuse the memory pool allocated for the large shapes.
         set_cudagraph_capturing_enabled(True)
+
+        # Setup torch profiler for graph capture traces (conditional)
+        from vllm.distributed.parallel_state import get_world_group
+
+        local_rank = get_world_group().local_rank
+        enable_profiler = (
+            local_rank == 0
+        ) and self.vllm_config.profiler_config.capture_torch_profiler
+        if enable_profiler:
+            trace_dir = (
+                self.vllm_config.profiler_config.torch_profiler_dir + "/capture_traces"
+            )
+            profiler = torch.profiler.profile(
+                activities=[
+                    torch.profiler.ProfilerActivity.CPU,
+                    torch.profiler.ProfilerActivity.CUDA,
+                ],
+                record_shapes=True,
+                profile_memory=True,
+                with_stack=True,
+                on_trace_ready=torch.profiler.tensorboard_trace_handler(
+                    trace_dir,
+                    worker_name=f"graph_capture_rank_{local_rank}",
+                    use_gzip=True,
+                ),
+            )
+            logger.info_once(
+                "Rank %d: Torch profiler enabled for CUDA graph capture, "
+                "traces will be saved to: %s",
+                local_rank,
+                trace_dir,
+            )
+        else:
+            profiler = nullcontext()
+            logger.info_once(
+                "Rank %d: Torch profiler disabled for CUDA graph capture", local_rank
+            )
+
         with self._freeze_gc(), graph_capture(device=self.device):
             torch.accelerator.synchronize()
             torch.accelerator.empty_cache()
@@ -6753,6 +6811,7 @@ class GPUModelRunner(
                 self._capture_cudagraphs(
                     batch_descriptors=batch_descs,
                     cudagraph_runtime_mode=runtime_mode,
+                    profiler=profiler,
                 )
                 torch.accelerator.synchronize()
 
@@ -6796,7 +6855,10 @@ class GPUModelRunner(
         profile_seq_lens: int | None = None,
         allow_microbatching: bool = False,
         num_warmups: int | None = None,
+        profiler: AbstractContextManager[Any] | None = None,
     ):
+        if profiler is None:
+            profiler = nullcontext()
         if num_warmups is None:
             num_warmups = self.compilation_config.cudagraph_num_of_warmups
         force_attention = cudagraph_runtime_mode == CUDAGraphMode.FULL
@@ -6812,22 +6874,29 @@ class GPUModelRunner(
                 num_active_loras=desc.num_active_loras,
                 profile_seq_lens=profile_seq_lens,
             )
-        self._dummy_run(
-            desc.num_tokens,
-            cudagraph_runtime_mode=cudagraph_runtime_mode,
-            uniform_decode=desc.uniform,
-            allow_microbatching=allow_microbatching,
-            skip_eplb=True,
-            remove_lora=False,
-            num_active_loras=desc.num_active_loras,
-            is_graph_capturing=True,
-            profile_seq_lens=profile_seq_lens,
-        )
+        with (
+            profiler,
+            torch.profiler.record_function(
+                f"capture_{desc.num_tokens}_{cudagraph_runtime_mode.name}"
+            ),
+        ):
+            self._dummy_run(
+                desc.num_tokens,
+                cudagraph_runtime_mode=cudagraph_runtime_mode,
+                uniform_decode=desc.uniform,
+                allow_microbatching=allow_microbatching,
+                skip_eplb=True,
+                remove_lora=False,
+                num_active_loras=desc.num_active_loras,
+                is_graph_capturing=True,
+                profile_seq_lens=profile_seq_lens,
+            )
 
     def _capture_cudagraphs(
         self,
         batch_descriptors: list[BatchDescriptor],
         cudagraph_runtime_mode: CUDAGraphMode,
+        profiler: AbstractContextManager[Any] | None = None,
     ):
         assert (
             cudagraph_runtime_mode != CUDAGraphMode.NONE
@@ -6870,6 +6939,7 @@ class GPUModelRunner(
                 batch_desc,
                 cudagraph_runtime_mode=cudagraph_runtime_mode,
                 allow_microbatching=allow_microbatching,
+                profiler=profiler,
             )
             torch.accelerator.synchronize()
         self.maybe_remove_all_loras(self.lora_config)
@@ -7061,12 +7131,14 @@ class GPUModelRunner(
         # Initialize drafter's cudagraph dispatcher if using spec decode.
         if self.speculative_config and (
             self.speculative_config.use_eagle()
+            or self.speculative_config.uses_draft_model()
             or self.speculative_config.uses_extract_hidden_states()
         ):
             assert isinstance(
                 self.drafter,
                 EagleProposer
                 | DFlashProposer
+                | DraftModelProposer
                 | ExtractHiddenStatesProposer
                 | Gemma4Proposer,
             )

@@ -21,6 +21,7 @@ from vllm.assets.image import ImageAsset
 from vllm.assets.video import VideoAsset
 from vllm.lora.request import LoRARequest
 from vllm.multimodal.image import convert_image_mode
+from vllm.platforms import current_platform
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 
@@ -2646,6 +2647,8 @@ def main(args):
     if args.tensor_parallel_size is not None:
         engine_args.tensor_parallel_size = args.tensor_parallel_size
     engine_args = maybe_add_vit_cuda_graph_compilation_config(args, engine_args)
+    if current_platform.is_rocm():
+        os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
     llm = LLM.from_engine_args(engine_args)
 
     # Don't want to check the flag multiple times, so just hijack `prompts`.
