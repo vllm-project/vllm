@@ -112,7 +112,6 @@ def get_attn_backend(
     num_heads: int | None = None,
     has_sliding_window: bool = False,
     backend_override: AttentionBackendEnum | None = None,
-    apply_required_layout: bool = True,
     use_non_causal_override: bool | None = None,
 ) -> type[AttentionBackend]:
     """Selects which attention backend to use and lazily imports it.
@@ -121,9 +120,6 @@ def get_attn_backend(
         backend_override: When set, resolve this backend enum instead of
             `attention_config.backend`. Used to resolve the prefill backend
             for batch routing.
-        apply_required_layout: When False, do not apply the resolved backend's
-            required KV cache layout globally. Used when resolving the prefill
-            backend so the decode backend keeps ownership of the KV layout.
         use_non_causal_override: When set, use this instead of
             `attention_config.use_non_causal`. Used to relax the non-causal
             requirement for the decode role (decode is causal / modality-
@@ -191,7 +187,6 @@ def get_attn_backend(
         backend=backend,
         attn_selector_config=attn_selector_config,
         num_heads=num_heads,
-        apply_required_layout=apply_required_layout,
     )
 
 
@@ -200,7 +195,6 @@ def _cached_get_attn_backend(
     backend,
     attn_selector_config: AttentionSelectorConfig,
     num_heads: int | None = None,
-    apply_required_layout: bool = True,
 ) -> type[AttentionBackend]:
     from vllm.platforms import current_platform
 
@@ -215,20 +209,16 @@ def _cached_get_attn_backend(
         )
     backend = resolve_obj_by_qualname(attention_cls)
 
-    # Adjust kv cache layout if the selected backend requires a specific one.
-    # Skipped for the prefill (routing) backend so the decode backend retains
-    # ownership of the shared KV layout.
-    if apply_required_layout:
-        required_layout = backend.get_required_kv_cache_layout()
-        if required_layout is not None:
-            from vllm.v1.attention.backends.utils import set_kv_cache_layout
+    required_layout = backend.get_required_kv_cache_layout()
+    if required_layout is not None:
+        from vllm.v1.attention.backends.utils import set_kv_cache_layout
 
-            set_kv_cache_layout(required_layout)
-            logger.info(
-                "Using %s KV cache layout for %s backend.",
-                required_layout,
-                backend.get_name(),
-            )
+        set_kv_cache_layout(required_layout)
+        logger.info(
+            "Using %s KV cache layout for %s backend.",
+            required_layout,
+            backend.get_name(),
+        )
 
     return backend
 

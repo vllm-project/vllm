@@ -497,6 +497,7 @@ class ModelCudaGraphManager(CudaGraphManager):
                     desc.cg_mode == CUDAGraphMode.PIECEWISE
                     and not self.use_breakable_cg
                 ),
+                use_prefill_backend=desc.cg_mode == CUDAGraphMode.PIECEWISE,
             )
 
             # Capture with dummy rows marked as padding.
@@ -520,6 +521,7 @@ class ModelCudaGraphManager(CudaGraphManager):
                     slot_mapping=slot_mappings,
                     batch_descriptor=batch_descriptor,
                     is_padding=input_buffers.is_padding[:num_tokens],
+                    use_prefill_backend=desc.cg_mode == CUDAGraphMode.PIECEWISE,
                 ):
                     if cg_mode == CUDAGraphMode.PIECEWISE:
                         # PIECEWISE graph (compiled PW or breakable, chosen inside
@@ -589,6 +591,7 @@ def prepare_inputs_to_capture(
     attn_groups: list[list[AttentionGroup]],
     kv_cache_config: KVCacheConfig,
     skip_attn: bool = False,
+    use_prefill_backend: bool = False,
 ) -> AttentionState:
     input_batch = InputBatch.make_dummy(num_reqs, num_tokens, input_buffers)
     input_block_tables = block_tables.get_dummy_block_tables(num_reqs)
@@ -619,5 +622,6 @@ def prepare_inputs_to_capture(
             attn_groups,
             kv_cache_config,
             for_capture=True,
+            use_prefill_backend=use_prefill_backend,
         )
     return AttentionState(attn_metadata, slot_mappings_by_layer)

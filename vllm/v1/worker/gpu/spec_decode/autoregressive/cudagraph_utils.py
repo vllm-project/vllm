@@ -60,6 +60,7 @@ class SpeculatorCudaGraphManager(CudaGraphManager):
                     desc.cg_mode == CUDAGraphMode.PIECEWISE
                     and not self.use_breakable_cg
                 ),
+                use_prefill_backend=desc.cg_mode == CUDAGraphMode.PIECEWISE,
             )
 
             return lambda cg_mode: forward_fn(

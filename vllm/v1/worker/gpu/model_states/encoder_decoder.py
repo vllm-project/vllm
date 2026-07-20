@@ -110,6 +110,7 @@ class EncoderDecoderModelState(ModelState):
         attn_groups: list[list[AttentionGroup]],
         kv_cache_config: KVCacheConfig,
         for_capture: bool = False,
+        use_prefill_backend: bool = False,
     ) -> dict[str, Any]:
         if cudagraph_mode == CUDAGraphMode.FULL:
             num_reqs = input_batch.num_reqs_after_padding
@@ -147,6 +148,7 @@ class EncoderDecoderModelState(ModelState):
             model_specific_attn_metadata=enc_dec_attn_metadata,
             for_cudagraph_capture=for_capture,
             rswa_prefix_lens=input_batch.prompt_lens,
+            use_prefill_backend=use_prefill_backend,
         )
         return attn_metadata
 

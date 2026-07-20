@@ -867,8 +867,6 @@ class GPUModelRunner(
         )
 
         self.reorder_batch_threshold: int | None = None
-        # True when any attention group has a prefill backend for batch routing;
-        # set in initialize_attn_backend.
         self.has_prefill_attn_backend: bool = False
 
         # Attention layers that are only in the KVCacheConfig of the runner
@@ -2275,7 +2273,7 @@ class GPUModelRunner(
         num_scheduled_tokens: dict[str, int] | None = None,
         cascade_attn_prefix_lens: list[list[int]] | None = None,
         slot_mappings: dict[int, torch.Tensor] | None = None,
-        use_prefill: bool = False,
+        use_prefill_backend: bool = False,
     ) -> tuple[PerLayerAttnMetadata, CommonAttentionMetadata | None]:
         """
         Returns:
@@ -2460,7 +2458,7 @@ class GPUModelRunner(
         ) -> None:
             attn_group = self.attn_groups[kv_cache_gid][attn_gid]
             builder = attn_group.get_metadata_builder(
-                ubid or 0, use_prefill=use_prefill
+                ubid or 0, use_prefill_backend=use_prefill_backend
             )
             kv_cache_spec = kv_cache_groups[kv_cache_gid].kv_cache_spec
             if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
@@ -4325,12 +4323,7 @@ class GPUModelRunner(
                 ubatch_slices=ubatch_slices_padded,
             )
 
-            # Batch routing: send prefill-containing batches to the prefill
-            # backend. A batch has prefill iff its max query length exceeds the
-            # decode reorder threshold (batch is reordered decodes-first). Never
-            # route on a FULL cudagraph step (uniform-decode ⇒ no prefill ⇒ this
-            # is already False; the check is a defensive backstop).
-            use_prefill_attn_backend = (
+            use_prefill_backend = (
                 self.has_prefill_attn_backend
                 and cudagraph_mode != CUDAGraphMode.FULL
                 and max_num_scheduled_tokens > (self.reorder_batch_threshold or 1)
@@ -4349,7 +4342,7 @@ class GPUModelRunner(
                     num_scheduled_tokens=scheduler_output.num_scheduled_tokens,
                     cascade_attn_prefix_lens=cascade_attn_prefix_lens,
                     slot_mappings=slot_mappings_by_group,
-                    use_prefill=use_prefill_attn_backend,
+                    use_prefill_backend=use_prefill_backend,
                 )
             )
 
@@ -4402,7 +4395,7 @@ class GPUModelRunner(
                 ubatch_slices=ubatch_slices_padded,
                 slot_mapping=slot_mappings,
                 skip_compiled=has_encoder_input,
-                use_prefill_attn_backend=use_prefill_attn_backend,
+                use_prefill_backend=use_prefill_backend,
             ),
             record_function_or_nullcontext("gpu_model_runner: forward"),
             self.maybe_get_kv_connector_output(
@@ -6989,9 +6982,6 @@ class GPUModelRunner(
             attn_backend: type[AttentionBackend]
             kv_cache_spec: KVCacheSpec
             num_heads_q: int
-            # Optional prefill backend for batch routing. Uniform within a group
-            # since it is resolved from the same config + head count as the
-            # decode backend.
             prefill_attn_backend: type[AttentionBackend] | None = None
 
         def get_attn_backends_for_group(
@@ -7010,15 +7000,17 @@ class GPUModelRunner(
             # layer.
             for layer_name in kv_cache_group_spec.layer_names:
                 attn_backend = layers[layer_name].get_attn_backend()
+                prefill_attn_backend = layers[layer_name].get_prefill_attn_backend()
 
                 if layer_name in self.kv_sharing_fast_prefill_eligible_layers:
                     attn_backend = create_fast_prefill_custom_backend(
                         "FastPrefill",
                         attn_backend,  # type: ignore[arg-type]
                     )
-
-                # Prefill backend for batch routing, if configured.
-                prefill_attn_backend = layers[layer_name].get_prefill_attn_backend()
+                    if prefill_attn_backend is not None:
+                        prefill_attn_backend = create_fast_prefill_custom_backend(
+                            "FastPrefill", prefill_attn_backend
+                        )
                 alt_cls_name = (
                     prefill_attn_backend.full_cls_name()
                     if prefill_attn_backend is not None
@@ -7197,11 +7189,11 @@ class GPUModelRunner(
             reorder_batch_thresholds.append(
                 group.get_metadata_builder().reorder_batch_threshold
             )
-            # The prefill (routing) backend runs over the same reordered batch,
-            # so its threshold must participate in the global minimum too.
             if group.prefill_backend is not None:
                 reorder_batch_thresholds.append(
-                    group.get_metadata_builder(use_prefill=True).reorder_batch_threshold
+                    group.get_metadata_builder(
+                        use_prefill_backend=True
+                    ).reorder_batch_threshold
                 )
         # If there are no attention groups (attention-free model) or no backend
         # reports a threshold, leave reordering disabled.

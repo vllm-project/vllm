@@ -120,27 +120,13 @@ class AttentionConfig:
         factors = get_hash_factors(self, ignored_factors)
         return hash_factors(factors)
 
-    @field_validator("backend", mode="before")
+    @field_validator("backend", "prefill_backend", mode="before")
     @classmethod
     def validate_backend_before(cls, value: Any) -> Any:
-        """Enable parsing of the `backend` enum type from string.
+        """Enable parsing of attention backend enums from strings.
 
         The special value "auto" is treated as None, which triggers
         automatic backend selection.
-        """
-        if isinstance(value, str):
-            if value.lower() == "auto":
-                return None
-            return AttentionBackendEnum[value.upper()]
-        return value
-
-    @field_validator("prefill_backend", mode="before")
-    @classmethod
-    def validate_prefill_backend_before(cls, value: Any) -> Any:
-        """Parse the `prefill_backend` enum from a string.
-
-        "auto" is treated as None (routing disabled); other strings parse into
-        `AttentionBackendEnum`.
         """
         if isinstance(value, str):
             if value.lower() == "auto":

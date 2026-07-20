@@ -34,6 +34,7 @@ from vllm.utils.torch_utils import (
 )
 from vllm.v1.attention.backend import (
     AttentionBackend,
+    AttentionImpl,
     AttentionMetadata,
     AttentionType,
 )
@@ -347,11 +348,6 @@ class Attention(nn.Module, AttentionLayerBase):
         # During model initialization, the default dtype is set as the model
         # weight and activation dtype.
         dtype = torch.get_default_dtype()
-        # Decode is modality-agnostic: when a prefill backend is configured for
-        # routing, the decode (primary) backend serves only pure-decode batches,
-        # so it need not satisfy mm_prefix / non-causal (prefill-only concerns,
-        # handled by the prefill backend). This lets decode pick a fast
-        # causal-only backend (e.g. FlashInfer) even for mm-prefix models.
         routing_enabled = (
             vllm_config.attention_config.prefill_backend is not None
             and attn_type == AttentionType.DECODER
@@ -446,17 +442,11 @@ class Attention(nn.Module, AttentionLayerBase):
         self.backend = AttentionBackendEnum[self.attn_backend.get_name()]
         self.dtype = dtype
 
-        # Optional prefill backend for batch routing: prefill-containing (prefill
-        # + mixed) batches are dispatched to this backend instead of the decode
-        # backend (pure-decode batches always use the decode backend). Only
-        # decoder attention participates; it shares the decode backend's KV
-        # cache layout.
         self.prefill_attn_backend: type[AttentionBackend] | None = None
-        self.prefill_impl = None
+        self.prefill_impl: AttentionImpl | None = None
         prefill_backend_enum = vllm_config.attention_config.prefill_backend
         if routing_enabled:
             from vllm.v1.attention.backends.utils import kv_layouts_compatible
-            from vllm.v1.attention.selector import AttentionSelectorConfig
 
             self.prefill_attn_backend = get_attn_backend(
                 head_size,
@@ -467,22 +457,20 @@ class Attention(nn.Module, AttentionLayerBase):
                 use_mm_prefix=self.use_mm_prefix,
                 use_per_head_quant_scales=use_per_head_quant_scales,
                 attn_type=attn_type,
+                has_sliding_window=sliding_window is not None,
                 backend_override=prefill_backend_enum,
-                apply_required_layout=False,
             )
             selector_block_size = (
                 cache_config.block_size
                 if cache_config is not None and cache_config.user_specified_block_size
                 else None
             )
-            selector_cfg = AttentionSelectorConfig(
-                head_size=head_size,
-                dtype=dtype,
-                kv_cache_dtype=kv_cache_dtype,
-                block_size=selector_block_size,
-            )
             if not kv_layouts_compatible(
-                self.attn_backend, self.prefill_attn_backend, selector_cfg
+                self.attn_backend,
+                self.prefill_attn_backend,
+                head_size=head_size,
+                block_size=selector_block_size,
+                kv_cache_dtype=kv_cache_dtype,
             ):
                 raise ValueError(
                     f"Prefill attention backend "
@@ -542,6 +530,10 @@ class Attention(nn.Module, AttentionLayerBase):
         self.query_quant = None
         if (
             self.impl.supports_quant_query_input
+            and (
+                self.prefill_impl is None
+                or self.prefill_impl.supports_quant_query_input
+            )
             and (
                 self.kv_cache_dtype.startswith("fp8") or self.kv_cache_dtype == "nvfp4"
             )
@@ -676,6 +668,8 @@ class Attention(nn.Module, AttentionLayerBase):
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):
         self.impl.process_weights_after_loading(act_dtype)
+        if self.prefill_impl is not None:
+            self.prefill_impl.process_weights_after_loading(act_dtype)
 
         # If we should not load quant weights, we initialize the scales to 1.0
         # as the default value. See [Note: Register q/k/v/prob scales in state dict]
@@ -848,19 +842,12 @@ def get_attention_context(
     return attn_metadata, attn_layer, kv_cache, layer_slot_mapping
 
 
-def _routed_attention_impl(attn_layer):
-    """Select the impl for the current step (batch routing).
-
-    Returns the layer's prefill impl when the forward context routes this step
-    to it, else the decode impl. Guards that the prefill impl never runs inside
-    a full CUDA graph (it can't: prefill-containing ⇒ not uniform-decode ⇒ not
-    FULL — the assert catches regressions).
-    """
+def _select_attention_impl(
+    attn_layer: "Attention | MLAAttention",
+) -> AttentionImpl:
     prefill_impl = getattr(attn_layer, "prefill_impl", None)
-    if prefill_impl is None:
-        return attn_layer.impl
-    forward_context: ForwardContext = get_forward_context()
-    if not forward_context.use_prefill_attn_backend:
+    forward_context = get_forward_context()
+    if prefill_impl is None or not forward_context.use_prefill_backend:
         return attn_layer.impl
     assert forward_context.cudagraph_runtime_mode != CUDAGraphMode.FULL, (
         "Prefill attention backend must not run inside a full CUDA graph."
@@ -880,7 +867,7 @@ def unified_kv_cache_update(
     layer_name = _resolve_layer_name(layer_name)
     _, attn_layer, kv_cache, layer_slot_mapping = get_attention_context(layer_name)
     if layer_slot_mapping is not None:
-        impl = _routed_attention_impl(attn_layer)
+        impl = _select_attention_impl(attn_layer)
         assert hasattr(impl, "do_kv_cache_update"), (
             f"{impl.__class__.__name__} does not support kv cache update"
         )
@@ -930,7 +917,7 @@ def unified_attention_with_output(
     layer_name = _resolve_layer_name(layer_name)
     attn_metadata, self, kv_cache, _ = get_attention_context(layer_name)
 
-    impl = _routed_attention_impl(self)
+    impl = _select_attention_impl(self)
     impl.forward(
         self,
         query,

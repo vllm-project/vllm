@@ -448,6 +448,20 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.attn_groups, attn_cg_support, self.kernel_block_sizes = init_attn_backend(
             self.kv_cache_config, self.vllm_config, self.device
         )
+        self.has_prefill_attn_backend = any(
+            group.prefill_backend is not None
+            for groups in self.attn_groups
+            for group in groups
+        )
+        if (
+            self.has_prefill_attn_backend
+            and self.compilation_config.cudagraph_mode == CUDAGraphMode.FULL
+        ):
+            logger.warning_once(
+                "Prefill/decode backend routing does not support FULL cudagraphs "
+                "for prefill batches; using FULL_DECODE_ONLY."
+            )
+            self.compilation_config.cudagraph_mode = CUDAGraphMode.FULL_DECODE_ONLY
         self.block_tables = BlockTables(
             block_sizes=block_sizes,
             max_num_reqs=self.max_num_reqs,
@@ -587,6 +601,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 dummy_run=True,
                 skip_attn_for_dummy_run=skip_attn,
                 is_profile=is_profile,
+                use_prefill_backend=(
+                    getattr(self, "has_prefill_attn_backend", False)
+                    and not uniform_decode
+                ),
             )
         self.kv_connector.set_disabled(False)
 
@@ -1155,6 +1173,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         dummy_run: bool = False,
         skip_attn_for_dummy_run: bool = False,
         is_profile: bool = False,
+        use_prefill_backend: bool | None = None,
     ) -> ModelRunnerOutput | IntermediateTensors | None:
         if not dummy_run:
             # Update the request states.
@@ -1174,6 +1193,18 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         num_toks = scheduler_output.total_num_scheduled_tokens
         max_query_len = max(scheduler_output.num_scheduled_tokens.values())
         uniform_tok_count = get_uniform_token_count(num_reqs, num_toks, max_query_len)
+        if use_prefill_backend is None:
+            req_indices = (
+                self.req_states.req_id_to_index[req_id]
+                for req_id in scheduler_output.num_scheduled_tokens
+            )
+            use_prefill_backend = self.has_prefill_attn_backend and any(
+                self.req_states.num_computed_prefill_tokens[req_idx]
+                < self.req_states.prefill_len.np[req_idx]
+                for req_idx in req_indices
+            )
+        if use_prefill_backend:
+            uniform_tok_count = None
 
         num_active_loras = 0
         if self.lora_config:
@@ -1204,6 +1235,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # All DP ranks have zero tokens to run.
             empty_output = self.kv_connector.no_forward(scheduler_output)
             return empty_output
+
+        assert not (use_prefill_backend and batch_desc.cg_mode == CUDAGraphMode.FULL), (
+            "Prefill attention backend cannot run in a full CUDA graph"
+        )
 
         if not dummy_run:
             # Common case.
@@ -1261,6 +1296,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 slot_mappings,
                 self.attn_groups,
                 self.kv_cache_config,
+                use_prefill_backend=use_prefill_backend,
             )
 
         input_ids = input_batch.input_ids
@@ -1346,6 +1382,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 slot_mapping=slot_mappings_by_layer,
                 skip_compiled=skip_compiled,
                 is_padding=input_batch.is_padding,
+                use_prefill_backend=use_prefill_backend,
             ):
                 self.kv_connector.pre_forward(scheduler_output)
                 if batch_desc.cg_mode == CUDAGraphMode.PIECEWISE:

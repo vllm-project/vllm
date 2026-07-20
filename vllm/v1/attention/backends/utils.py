@@ -21,7 +21,6 @@ from vllm.utils.torch_utils import PIN_MEMORY, async_tensor_h2d, np_to_pinned_te
 from vllm.v1.kv_cache_interface import KVCacheSpec, MambaSpec
 
 if TYPE_CHECKING:
-    from vllm.v1.attention.selector import AttentionSelectorConfig
     from vllm.v1.core.sched.output import SchedulerOutput
     from vllm.v1.worker.gpu_input_batch import InputBatch
 
@@ -639,7 +638,10 @@ def split_decodes_and_prefills(
 def kv_layouts_compatible(
     decode_backend: type[AttentionBackend],
     prefill_backend: type[AttentionBackend],
-    selector_config: "AttentionSelectorConfig",
+    *,
+    head_size: int,
+    block_size: int | None,
+    kv_cache_dtype: str | None,
 ) -> bool:
     """Whether two backends can share one physical KV cache.
 
@@ -652,8 +654,9 @@ def kv_layouts_compatible(
     Args:
         decode_backend: The default/decode backend (owns the KV layout).
         prefill_backend: The backend that must match the decode backend's layout.
-        selector_config: The resolved selection config (head size, block size,
-            cache dtype) used to probe the concrete KV cache shape.
+        head_size: Attention head size.
+        block_size: Configured cache block size, if fixed by the user.
+        kv_cache_dtype: KV cache data type.
 
     Returns:
         True if the two backends can share one KV cache.
@@ -669,7 +672,6 @@ def kv_layouts_compatible(
     ):
         return False
 
-    # Required layout must agree (or be unconstrained on one side).
     decode_layout = decode_backend.get_required_kv_cache_layout()
     prefill_layout = prefill_backend.get_required_kv_cache_layout()
     if (
@@ -679,26 +681,19 @@ def kv_layouts_compatible(
     ):
         return False
 
-    # The block size must be usable by both.
-    block_size = selector_config.block_size
     if not (
         decode_backend.supports_block_size(block_size)
         and prefill_backend.supports_block_size(block_size)
     ):
         return False
 
-    # `indexes_kv_by_block_stride` (num-blocks-first physical layout) must agree.
     if (
         decode_backend.indexes_kv_by_block_stride()
         != prefill_backend.indexes_kv_by_block_stride()
     ):
         return False
 
-    # Compare the concrete KV cache shape and physical stride order using the
-    # same representative dims for both backends, so any structural difference
-    # (e.g. NHD vs HND) surfaces.
-    head_size = selector_config.head_size
-    cache_dtype = selector_config.kv_cache_dtype or "auto"
+    cache_dtype = kv_cache_dtype or "auto"
     probe_block_size = block_size or 16
     probe_num_blocks = 1024
     probe_num_kv_heads = 8
@@ -720,8 +715,6 @@ def kv_layouts_compatible(
     if decode_shape != prefill_shape:
         return False
 
-    # Only the per-layer stride order must match; the cross-layer order is used
-    # solely by KV-connector/offloading paths, which are orthogonal to routing.
     return decode_backend.get_kv_cache_stride_order(
         include_num_layers_dimension=False
     ) == prefill_backend.get_kv_cache_stride_order(include_num_layers_dimension=False)

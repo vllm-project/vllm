@@ -251,10 +251,6 @@ class AttentionGroup:
     metadata_builders: list[AttentionMetadataBuilder] = field(
         default_factory=lambda: []
     )
-    # Optional prefill backend for batch routing: prefill-containing (prefill +
-    # mixed) batches are dispatched to this backend instead of `backend` (the
-    # decode backend). It shares this group's KV cache and layer set. None when
-    # routing is disabled.
     prefill_backend: type[AttentionBackend] | None = None
     prefill_metadata_builders: list[AttentionMetadataBuilder] = field(
         default_factory=lambda: []
@@ -293,11 +289,11 @@ class AttentionGroup:
             ]
 
     def get_metadata_builder(
-        self, ubatch_id: int = 0, use_prefill: bool = False
+        self, ubatch_id: int = 0, use_prefill_backend: bool = False
     ) -> AttentionMetadataBuilder:
         builders = (
             self.prefill_metadata_builders
-            if use_prefill and self.prefill_backend is not None
+            if use_prefill_backend and self.prefill_backend is not None
             else self.metadata_builders
         )
         assert len(builders) > ubatch_id
@@ -402,7 +398,12 @@ def prepare_kernel_block_sizes(
         if isinstance(kv_cache_spec, AttentionSpec):
             # This is an attention backend that supports virtual block splitting.
             kv_manager_block_size = kv_cache_group.kv_cache_spec.block_size
-            group_backends = [g.backend for g in attn_groups[kv_cache_gid]]
+            group_backends = [
+                backend
+                for group in attn_groups[kv_cache_gid]
+                for backend in (group.backend, group.prefill_backend)
+                if backend is not None
+            ]
             selected_kernel_size = select_common_block_size(
                 kv_manager_block_size, group_backends
             )

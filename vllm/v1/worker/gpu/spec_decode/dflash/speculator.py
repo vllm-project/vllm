@@ -94,6 +94,7 @@ class DFlashSpeculator(DraftModelSpeculator):
             attention_config=replace(
                 self.vllm_config.attention_config,
                 use_non_causal=self.requires_non_causal,
+                prefill_backend=None,
             ),
         )
 

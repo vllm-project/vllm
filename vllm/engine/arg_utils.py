@@ -2269,10 +2269,8 @@ class EngineArgs:
                     "attention_prefill_backend and "
                     "attention_config.prefill_backend are mutually exclusive"
                 )
-            attention_config.prefill_backend = (
-                AttentionConfig.validate_prefill_backend_before(
-                    self.attention_prefill_backend
-                )
+            attention_config.prefill_backend = AttentionConfig.validate_backend_before(
+                self.attention_prefill_backend
             )
 
         # TurboQuant requires FlashAttention 2 — FA3 boundary layers assert

@@ -438,6 +438,21 @@ def test_attention_config():
     vllm_config = engine_args.create_engine_config()
     assert vllm_config.attention_config.backend == AttentionBackendEnum.FLASH_ATTN
 
+    # test --attention-prefill-backend flows into VllmConfig.attention_config
+    args = parser.parse_args(
+        [
+            "--model",
+            "facebook/opt-125m",
+            "--attention-prefill-backend",
+            "TRITON_ATTN",
+        ]
+    )
+    engine_args = EngineArgs.from_cli_args(args)
+    vllm_config = engine_args.create_engine_config()
+    assert (
+        vllm_config.attention_config.prefill_backend == AttentionBackendEnum.TRITON_ATTN
+    )
+
     # test --attention-config.backend flows into VllmConfig.attention_config
     args = parser.parse_args(
         [
