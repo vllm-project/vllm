@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import hashlib
 import logging
 import math
 import os
@@ -589,30 +588,26 @@ class MoRIIOConnectorScheduler:
         that lets the producer RDMA-Write its KV into the freshly allocated
         decode blocks.
 
-        DP-rank pinning contract (override-primary / hash-failsafe)
-        ----------------------------------------------------------
+        DP-rank routing contract (router-authoritative)
+        ------------------------------------------------
         Both legs of a disagg pair must agree on a single prefill DP rank,
         otherwise the notify lands on a rank that never handshook and the
         request hangs until ``VLLM_MORIIO_DEFERRED_TIMEOUT_S``.
 
-        * Primary (production): the llm-d routing sidecar owns rank
-          selection. It computes ``H = pickDPRank(uuid, dp_size)``
-          (blake2s-256 of the canonical request UUID, see
-          ``dp_rank.go``) and stamps both legs with ``remote_dp_rank=H``
-          plus the sentinel ``remote_dp_rank_override=True``. When the
-          sentinel is present we honour ``H`` verbatim and our own hash
-          below never runs -- so the Go blake2s-256 vs Python blake2s-8
-          divergence is irrelevant (only the sidecar's value reaches the
-          wire).
+        The routing authority is the external router/sidecar, NOT the
+        connector. The llm-d routing sidecar computes ``H = pickDPRank(uuid,
+        dp_size)`` (see ``dp_rank.go``) once and pins BOTH legs to ``H`` two
+        ways: the ``X-data-parallel-rank`` dispatch header (which vLLM engine
+        the leg lands on) and ``kv_transfer_params.remote_dp_rank=H`` (which
+        prefill rank this notify targets), with ``remote_dp_rank_override=True``.
 
-        * Failsafe (sidecar-less debug, or a sidecar regression that drops
-          the sentinel): when ``remote_dp_rank_override`` is absent and
-          ``dp_size > 1`` we self-derive the rank from
-          ``blake2s(base_rid) % dp_size`` so the two legs still converge
-          on their own. ``base_rid`` strips MoRI-IO's per-transfer
-          ``-<8 hex>`` suffix so it matches the rid the dispatcher hashed.
+        The connector consumes ``remote_dp_rank`` verbatim and does NOT
+        self-derive a rank: an independent hash here could disagree with the
+        router's dispatch pin and misroute the notify. For the returnable paths
+        (READ / serial WRITE) the prefill leg also echoes back the rank it ran
+        on via ``request_finished`` so routing is pure propagation.
 
-        The owning rank is also the only one that originates the notify
+        The owning rank is the only one that originates the notify
         (``remote_dp_rank_override`` -> global-rank match; otherwise the
         ``_is_kv_master`` anti-duplicate gate). See the inline comments
         below for the exactly-once-across-pods reasoning.
@@ -680,7 +675,9 @@ class MoRIIOConnectorScheduler:
 
                 remote_dp_rank = request.kv_transfer_params.get("remote_dp_rank", 0)
 
-                # Hash-route to prefill DP rank (vLLM native router fallback).
+                # Effective DP fan-out for the per-pod port/host math below
+                # (see _remote_dp_rank_for_port / _pod_idx). Capped to the
+                # per-pod local size when the router advertises it (Wide-EP).
                 _dp_size = int(request.kv_transfer_params.get("remote_dp_size", 1) or 1)
                 try:
                     _dp_local = int(
@@ -690,18 +687,28 @@ class MoRIIOConnectorScheduler:
                         _dp_size = min(_dp_size, _dp_local)
                 except (TypeError, ValueError):
                     _dp_local = 0
-                # Use transfer_id for hashing (stable, not mutated).
+
+                # Rank routing is ROUTER-AUTHORITATIVE. We honor the prefill DP
+                # rank the router pinned (remote_dp_rank, matched to the
+                # X-data-parallel-rank dispatch pin). The connector deliberately
+                # does NOT self-derive a rank: an independent hash here could
+                # disagree with the router's dispatch pin and send the notify to
+                # a rank that never served the request. If the router failed to
+                # pin a rank in a multi-rank deployment, warn instead of guessing.
                 if (
                     _dp_size > 1
-                    and "remote_dp_rank_override" not in request.kv_transfer_params
+                    and "remote_dp_rank" not in request.kv_transfer_params
+                    and "is_request_leader" not in request.kv_transfer_params
                 ):
-                    _hash_key = request.kv_transfer_params.get(
-                        "transfer_id", request.request_id
+                    logger.warning(
+                        "MoRI-IO decode notify: remote_dp_size=%d but the router "
+                        "did not pin remote_dp_rank for request %s; defaulting to "
+                        "rank 0. The router must set remote_dp_rank (and the "
+                        "X-data-parallel-rank dispatch header) so the prefill and "
+                        "decode legs agree on the same rank.",
+                        _dp_size,
+                        request.request_id,
                     )
-                    _digest = hashlib.blake2s(
-                        str(_hash_key).encode("utf-8"), digest_size=8
-                    ).digest()
-                    remote_dp_rank = int.from_bytes(_digest, "big") % _dp_size
 
                 # Only the owning rank originates notify (exactly-once).
                 # Priority: is_request_leader > remote_dp_rank_override > _is_kv_master
@@ -942,7 +949,12 @@ class MoRIIOConnectorScheduler:
             )
 
         # Return KV transfer params forwarded verbatim to the decode instance by
-        # the router.
+        # the router. remote_dp_rank is the rank THIS prefill leg actually ran
+        # on: on the returnable paths (READ / serial WRITE) the router forwards
+        # it to the decode leg, so the decode->prefill notify is routed by pure
+        # propagation of the producer's real rank -- no hashing, no reliance on
+        # the router independently pinning the same rank. remote_dp_rank_override
+        # makes the decode side honor it via the global-rank match gate.
         return delay_free_blocks, dict(
             do_remote_prefill=True,
             do_remote_decode=False,
@@ -951,7 +963,12 @@ class MoRIIOConnectorScheduler:
             remote_host=self.host_ip,
             remote_handshake_port=self.handshake_port,
             remote_notify_port=self.side_notify_port,
+            remote_dp_rank=self._global_dp_rank,
+            remote_dp_rank_override=True,
             remote_dp_size=self.vllm_config.parallel_config.data_parallel_size,
+            remote_dp_size_local=(
+                self.vllm_config.parallel_config.data_parallel_size_local
+            ),
             tp_size=self.vllm_config.parallel_config.tensor_parallel_size,
             transfer_id=params["transfer_id"],
         )
