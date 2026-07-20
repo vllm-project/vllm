@@ -181,7 +181,14 @@ class StructuredOutputManager:
         request_type, grammar_spec = key
 
         assert self.backend is not None
-        return self.backend.compile_grammar(request_type, grammar_spec)
+        stop_token_ids = (
+            request.sampling_params.all_stop_token_ids
+            if request.sampling_params is not None
+            else None
+        )
+        return self.backend.compile_grammar(
+            request_type, grammar_spec, stop_token_ids=stop_token_ids
+        )
 
     def _fill_bitmasks(
         self, batch: Iterable[tuple[StructuredOutputGrammar, int, bool]]
