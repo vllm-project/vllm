@@ -217,6 +217,9 @@ class Worker(WorkerBase):
                     name: buffer.cpu().clone() for name, buffer in draft.named_buffers()
                 }
 
+        if has_kv_transfer_group():
+            get_kv_transfer_group().before_device_sleep()
+
         self._get_sleep_mode_backend().suspend(level)
 
         torch.accelerator.synchronize()
@@ -258,6 +261,8 @@ class Worker(WorkerBase):
 
         if tags is None or "kv_cache" in tags:
             self.model_runner.post_kv_cache_wake_up()
+            if has_kv_transfer_group():
+                get_kv_transfer_group().after_device_wake()
 
     def checkpoint_prepare(self) -> None:
         checkpoint_prepare_distributed_state()

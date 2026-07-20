@@ -172,6 +172,12 @@ class FlexKVConnectorV1(KVConnectorBase_V1):
         """
         self._flexkv_connector.register_kv_caches(kv_caches)
 
+    def before_device_sleep(self) -> None:
+        self._flexkv_connector.before_device_sleep()
+
+    def after_device_wake(self) -> None:
+        self._flexkv_connector.after_device_wake()
+
     # ==============================
     # Scheduler-side methods
     # ==============================

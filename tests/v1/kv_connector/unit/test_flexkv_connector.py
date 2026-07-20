@@ -172,6 +172,13 @@ class TestFlexKVConnectorDelegation:
         connector.register_kv_caches(kv_caches)
         impl.register_kv_caches.assert_called_once_with(kv_caches)
 
+    def test_device_sleep_lifecycle(self, connector_and_impl):
+        connector, impl = connector_and_impl
+        connector.before_device_sleep()
+        connector.after_device_wake()
+        impl.before_device_sleep.assert_called_once_with()
+        impl.after_device_wake.assert_called_once_with()
+
     def test_get_num_new_matched_tokens(self, connector_and_impl):
         connector, impl = connector_and_impl
         req = MagicMock()

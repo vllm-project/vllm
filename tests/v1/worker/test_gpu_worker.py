@@ -6,12 +6,62 @@ from unittest.mock import patch
 
 import pytest
 
+import vllm.v1.worker.gpu_worker as gpu_worker_module
+
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.v1.worker import startup_plan
+from vllm.v1.worker.gpu_worker import Worker
 from vllm.v1.worker.startup_plan import (
     maybe_apply_startup_plan,
     maybe_save_startup_plan,
 )
+
+
+def _sleep_worker(events):
+    worker = object.__new__(Worker)
+    worker._sleep_mode_backend = SimpleNamespace(
+        suspend=lambda level: events.append(("suspend", level)),
+        resume=lambda tags: events.append(("resume", tags)),
+    )
+    worker._sleep_saved_buffers = {}
+    worker._sleep_rebuild_draft_metadata_buffers = False
+    worker.model_runner = SimpleNamespace(
+        post_kv_cache_wake_up=lambda: events.append(("post_kv_wake", None))
+    )
+    return worker
+
+
+def test_kv_connector_brackets_device_sleep(monkeypatch):
+    events = []
+    worker = _sleep_worker(events)
+    connector = SimpleNamespace(
+        before_device_sleep=lambda: events.append(("connector_before", None)),
+        after_device_wake=lambda: events.append(("connector_after", None)),
+    )
+    monkeypatch.setattr(gpu_worker_module, "has_kv_transfer_group", lambda: True)
+    monkeypatch.setattr(
+        gpu_worker_module, "get_kv_transfer_group", lambda: connector
+    )
+    monkeypatch.setattr(
+        gpu_worker_module.torch.accelerator, "synchronize", lambda: None
+    )
+    monkeypatch.setattr(
+        gpu_worker_module.torch.accelerator,
+        "get_memory_info",
+        lambda: (100, 200),
+    )
+
+    worker.sleep(level=1)
+    worker.wake_up(tags=["kv_cache"])
+
+    assert events == [
+        ("connector_before", None),
+        ("suspend", 1),
+        ("resume", ["kv_cache"]),
+        ("post_kv_wake", None),
+        ("connector_after", None),
+    ]
+
 
 # Startup-plan persistence (vllm/v1/worker/startup_plan.py), applied and
 # saved by Worker.determine_available_memory / compile_or_warm_up_model.

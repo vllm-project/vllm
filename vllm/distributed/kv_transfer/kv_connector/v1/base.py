@@ -271,6 +271,14 @@ class KVConnectorBase_V1(ABC):
         """
         return
 
+    def before_device_sleep(self) -> None:
+        """Prepare connector-owned GPU mappings for device sleep."""
+        return
+
+    def after_device_wake(self) -> None:
+        """Restore connector-owned GPU mappings after KV cache wake-up."""
+        return
+
     def set_host_xfer_buffer_ops(self, copy_operation: CopyBlocksOp):
         """
         Set the xPU-specific ops for copying KV between host and device.

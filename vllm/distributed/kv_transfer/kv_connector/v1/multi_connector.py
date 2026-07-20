@@ -243,6 +243,14 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
         for c in self._connectors:
             c.register_kv_caches(kv_caches)
 
+    def before_device_sleep(self) -> None:
+        for c in self._connectors:
+            c.before_device_sleep()
+
+    def after_device_wake(self) -> None:
+        for c in self._connectors:
+            c.after_device_wake()
+
     def bind_gpu_block_pool(self, gpu_block_pool: "BlockPool") -> None:
         for c in self._connectors:
             c.bind_gpu_block_pool(gpu_block_pool)
