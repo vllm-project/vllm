@@ -55,3 +55,4 @@ opentelemetry-sdk >= 1.27.0
 opentelemetry-api >= 1.27.0
 opentelemetry-exporter-otlp >= 1.27.0
 opentelemetry-semantic-conventions-ai >= 0.4.1
+diffusers # Required for MiniCPM-Robot GR00T ActionHead (DiT transformer blocks)

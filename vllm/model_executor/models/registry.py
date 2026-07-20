@@ -500,6 +500,10 @@ _MULTIMODAL_MODELS = {
         "minicpmv4_6",
         "MiniCPMV4_6ForConditionalGeneration",
     ),
+    "MiniCPMRobotForHiddenStates": (
+        "minicpm_robot",
+        "MiniCPMRobotForHiddenStates",
+    ),
     "Mistral3ForConditionalGeneration": (
         "mistral3",
         "Mistral3ForConditionalGeneration",

@@ -1121,6 +1121,18 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         "openbmb/MiniCPM-V-4_6",
         min_transformers_version="5.7.0",
     ),
+    "MiniCPMRobotForHiddenStates": _HfExamplesInfo(
+        "openbmb/MiniCPM-V-4_6",
+        min_transformers_version="5.7.0",
+        hf_overrides={
+            "architectures": ["MiniCPMRobotForHiddenStates"],
+            "action_head_cfg": {
+                "action_dim": 80,
+                "state_dim": 80,
+                "action_horizon": 30,
+            },
+        },
+    ),
     "MiniMaxM3SparseForConditionalGeneration": _HfExamplesInfo(
         "MiniMaxAI/MiniMax-M3",
         trust_remote_code=True,
