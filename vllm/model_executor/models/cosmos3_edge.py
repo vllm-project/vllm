@@ -517,6 +517,7 @@ class Cosmos3EdgeForConditionalGeneration(
         },
         orig_to_new_substr={
             "_moe_gen": None,
+            "k_norm_und_for_gen": None,
             ".add_q_proj.": None,
             ".add_k_proj.": None,
             ".add_v_proj.": None,
