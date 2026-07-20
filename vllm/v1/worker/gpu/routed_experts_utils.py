@@ -57,18 +57,43 @@ class RoutedExpertsCaptureHelper:
 
     def bind(self, runner: Any, capturer: RoutedExpertsCapturer) -> None:
         from vllm.model_executor.layers.fused_moe.layer import FusedMoE
+        from vllm.model_executor.layers.fused_moe.modular_kernel import (
+            FusedMoEExpertsMonolithic,
+        )
         from vllm.model_executor.layers.fused_moe.router.base_router import (
             BaseRouter,
         )
 
         for module in runner.compilation_config.static_forward_context.values():
-            if isinstance(module, FusedMoE) and isinstance(module.router, BaseRouter):
-                layer_id = module.layer_id
+            if not isinstance(module, FusedMoE):
+                continue
+            layer_id = module.layer_id
 
-                def _capture_fn(topk_ids, _layer_id=layer_id, _capturer=capturer):
-                    _capturer.capture(_layer_id, topk_ids)
+            def _capture_fn(topk_ids, _layer_id=layer_id, _capturer=capturer):
+                _capturer.capture(_layer_id, topk_ids)
 
+            if isinstance(module.router, BaseRouter):
                 module.router.set_capture_fn(_capture_fn)
+
+            # Monolithic kernels run routing inside the expert kernel and
+            # therefore bypass BaseRouter.capture_fn. Only bind kernels that
+            # explicitly support the routing_replay_out callback; unsupported
+            # kernels must continue to run without an R3 capture callback.
+            quant_method = getattr(module, "quant_method", None)
+            moe_kernel = getattr(quant_method, "moe_kernel", None)
+            fused_experts = getattr(moe_kernel, "fused_experts", None)
+            if not isinstance(fused_experts, FusedMoEExpertsMonolithic):
+                continue
+            supports_capture = getattr(
+                fused_experts, "supports_routing_replay_capture", None
+            )
+            set_capture = getattr(fused_experts, "set_routing_replay_capture_fn", None)
+            if (
+                supports_capture is not None
+                and supports_capture()
+                and callable(set_capture)
+            ):
+                set_capture(_capture_fn)
 
     def before_execute(self) -> None:
         if not self._initialized:
