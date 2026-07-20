@@ -137,7 +137,11 @@ def _build_device_ids(args: argparse.Namespace, local_rank: int) -> list[int | s
     var (e.g. CUDA_VISIBLE_DEVICES), so integer IDs must stay env-relative
     here rather than being translated to physical IDs.
     """
-    devices_per_rank = args.tensor_parallel_size * args.pipeline_parallel_size
+    devices_per_rank = (
+        args.tensor_parallel_size
+        * args.pipeline_parallel_size
+        * args.prefill_context_parallel_size
+    )
     start = local_rank * devices_per_rank
     stop = start + devices_per_rank
     device_ids = getattr(args, "device_ids", None)

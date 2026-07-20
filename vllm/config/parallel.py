@@ -505,8 +505,6 @@ class ParallelConfig:
         tp = self.tensor_parallel_size
         pcp = self.prefill_context_parallel_size
         dcp = self.decode_context_parallel_size
-        if pcp > 1 and self.data_parallel_size > 1:
-            raise ValueError("PCP does not support data parallelism yet.")
         if pcp == 1:
             # DCP reuses the TP ranks when PCP is disabled.
             if tp % dcp != 0:
