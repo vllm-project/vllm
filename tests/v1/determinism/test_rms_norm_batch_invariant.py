@@ -77,17 +77,28 @@ def test_rms_norm_batch_invariant_vs_standard(
 @pytest.mark.parametrize("hidden_size", [512, 4096])
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("eps", [1e-6])
+@pytest.mark.parametrize("n_extra", [3, 299])
+@pytest.mark.parametrize("seed", list(range(16)))
 def test_fused_add_rms_norm_batch_invariant_residual_path(
     hidden_size: int,
     dtype: torch.dtype,
     eps: float,
+    n_extra: int,
+    seed: int,
 ):
     """
     Test the batch-invariant fused residual-add + RMSNorm helper directly.
+
+    The kernel picks ``max_block_size = (num_tokens < 256) ? 1024 : 256``, so a
+    token reduces with block=1024 when nearly alone but block=256 inside a batch
+    of >=256; the different reduction width can flip the last bit of the fp32
+    sum. ``n_extra=299`` (num_tokens=300) crosses that threshold while
+    ``n_extra=3`` stays below it, and ``seed`` sweeps inputs so the data-
+    dependent divergence cannot hide behind a single lucky seed.
     """
     device = torch.device(DEVICE_TYPE)
 
-    torch.manual_seed(42)
+    torch.manual_seed(seed)
     x_single = torch.randn(1, hidden_size, dtype=dtype, device=device)
     residual_single = torch.randn(1, hidden_size, dtype=dtype, device=device)
     weight = torch.randn(hidden_size, dtype=dtype, device=device)
@@ -95,14 +106,14 @@ def test_fused_add_rms_norm_batch_invariant_residual_path(
     x_batch = torch.cat(
         [
             x_single,
-            torch.randn(3, hidden_size, dtype=dtype, device=device),
+            torch.randn(n_extra, hidden_size, dtype=dtype, device=device),
         ],
         dim=0,
     )
     residual_batch = torch.cat(
         [
             residual_single,
-            torch.randn(3, hidden_size, dtype=dtype, device=device),
+            torch.randn(n_extra, hidden_size, dtype=dtype, device=device),
         ],
         dim=0,
     )

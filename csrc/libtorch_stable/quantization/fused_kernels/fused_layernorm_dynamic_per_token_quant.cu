@@ -2,6 +2,7 @@
 #include "../../torch_utils.h"
 
 #include "../../dispatch_utils.h"
+#include "../../../core/batch_invariant.hpp"
 #include "layernorm_utils.cuh"
 #include "quant_conversions.cuh"
 
@@ -231,7 +232,15 @@ void rms_norm_per_block_quant_dispatch(
   auto num_tokens = input.numel() / hidden_size;
 
   dim3 grid(num_tokens);
-  const int max_block_size = (num_tokens <= 256) ? 512 : 256;
+  /* When num_tokens is large, a smaller block size allows for increased block
+     occupancy and better latency hiding on global mem ops. In batch-invariant
+     mode the block size must not depend on num_tokens, otherwise the same token
+     would reduce with a different width (and thus a different floating-point
+     summation order) across batches; lock it to 512 to keep results bit-exact.
+   */
+  const bool batch_invariant_launch = vllm::vllm_is_batch_invariant();
+  const int max_block_size =
+      batch_invariant_launch ? 512 : ((num_tokens <= 256) ? 512 : 256);
   dim3 block(std::min(hidden_size, max_block_size));
   const torch::stable::accelerator::DeviceGuard device_guard(
       input.get_device_index());
