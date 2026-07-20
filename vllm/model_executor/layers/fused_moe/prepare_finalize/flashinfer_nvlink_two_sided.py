@@ -175,6 +175,7 @@ def flashinfer_alltoall_dispatch(
             # delay the swizzling until after the A2A.
             is_scale_swizzled=False,
             mx_alignment=quant_config.mx_alignment,
+            use_ue8m0=quant_config.use_ue8m0,
         )
 
         x = MnnvlMoe.mnnvl_moe_alltoallv(

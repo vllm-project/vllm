@@ -35,7 +35,10 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8Static128BlockSym,
 )
 from vllm.platforms import current_platform
-from vllm.utils.deep_gemm import should_auto_disable_deep_gemm
+from vllm.utils.deep_gemm import (
+    is_deep_gemm_e8m0_used,
+    should_auto_disable_deep_gemm,
+)
 
 logger = init_logger(__name__)
 
@@ -545,6 +548,19 @@ def make_fp8_moe_quant_config(
     a method of the modular kernel itself.
     """
 
+    # Activation scale format must follow the selected MoE backend, not the
+    # process-wide DeepGEMM setting. Other model components (notably sparse
+    # attention indexers) can legitimately keep DeepGEMM enabled while MoE
+    # falls back to a non-DeepGEMM backend for numerical safety.
+    use_ue8m0 = (
+        fp8_backend
+        in (
+            Fp8MoeBackend.DEEPGEMM,
+            Fp8MoeBackend.BATCHED_DEEPGEMM,
+        )
+        and is_deep_gemm_e8m0_used()
+    )
+
     # MARLIN and CPU are mixed precision W8A16 config.
     if fp8_backend == Fp8MoeBackend.MARLIN or fp8_backend == Fp8MoeBackend.CPU:
         return fp8_w8a16_moe_quant_config(
@@ -573,6 +589,7 @@ def make_fp8_moe_quant_config(
             a2_gscale=(1.0 / a2_scale),
             g1_alphas=(w1_scale * a1_scale).squeeze(),
             g2_alphas=(w2_scale * a2_scale).squeeze(),
+            use_ue8m0=use_ue8m0,
             gemm1_clamp_limit=swiglu_limit,
         )
     # MXFP8 (block [1, 32]) dispatches to the mxfp8 activation quant. Scales are
@@ -605,6 +622,7 @@ def make_fp8_moe_quant_config(
         block_shape=block_shape,
         per_act_token_quant=per_act_token_quant,
         per_out_ch_quant=per_out_ch_quant,
+        use_ue8m0=use_ue8m0,
         gemm1_alpha=gemm1_alpha,
         gemm1_beta=gemm1_beta,
         gemm1_clamp_limit=swiglu_limit,
