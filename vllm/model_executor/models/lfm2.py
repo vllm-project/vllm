@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from itertools import islice
 
+import regex as re
 import torch
 import torch.nn as nn
 from transformers import Lfm2Config
@@ -296,8 +297,10 @@ class Lfm2Model(nn.Module):
     # HF uses .conv. but vLLM uses .short_conv. to avoid LoRA regex collision
     # with the inner .conv.conv child (ShortConv has a child self.conv, so
     # naming the container .conv too makes _match_target_modules match both).
+    # Anchored on the layer index so it is idempotent (the mapper is applied
+    # both at the root and on recursion into this module).
     hf_to_vllm_mapper = WeightsMapper(
-        orig_to_new_substr={".conv.": ".short_conv."},
+        orig_to_new_regex={re.compile(r"(\d+)\.conv\."): r"\1.short_conv."},
         orig_to_new_stacked={
             ".q_proj": (".qkv_proj", "q"),
             ".k_proj": (".qkv_proj", "k"),
