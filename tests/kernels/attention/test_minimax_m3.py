@@ -1518,3 +1518,62 @@ def test_reshape_and_cache_flash_write_persists(kv_layout: str):
         blk, intra = divmod(slot, BLOCK_SIZE)
         torch.testing.assert_close(kv_cache[blk, :, intra, :HEAD_DIM], key[t])
         torch.testing.assert_close(kv_cache[blk, :, intra, HEAD_DIM:], value[t])
+
+def test_minimax_m3_decode_index_regression_non_power_of_2():
+    """Regression test for Issue #49158: Ensure Triton kernel does not fail
+    and produces correct results when num_idx_heads is not a power of 2."""
+    topk = 6
+    init_blocks = 0
+    local_blocks = 1
+    num_idx_heads = 6  # Critical non-power-of-2 configuration
+    head_dim = 16
+    decode_query_len = 1
+    max_decode_query_len = 1
+
+    active_seq_lens = torch.tensor((7, 129, 255), device="cuda", dtype=torch.int32)
+    q_lens = torch.full_like(active_seq_lens, decode_query_len)
+    prefix_lens = active_seq_lens - decode_query_len
+    active_batch = active_seq_lens.numel()
+
+    max_seq_len = active_seq_lens.max().item()
+    max_blocks = (max_seq_len + BLOCK_SIZE - 1) // BLOCK_SIZE
+    num_pages = active_batch * max_blocks
+
+    block_table = torch.randperm(
+        num_pages, device="cuda", dtype=torch.int32
+    ).reshape(active_batch, max_blocks)
+
+    idx_q = torch.randn(
+        active_batch * decode_query_len, num_idx_heads, head_dim, device="cuda"
+    )
+    index_kv_cache = torch.randn(num_pages, BLOCK_SIZE, head_dim, device="cuda")
+
+    # This call triggers the modified _decode_index_score_kernel
+    actual = minimax_m3_index_decode(
+        idx_q,
+        index_kv_cache,
+        block_table,
+        active_seq_lens,
+        max_seq_len=max_seq_len,
+        topk=topk,
+        init_blocks=init_blocks,
+        local_blocks=local_blocks,
+        num_kv_heads=num_idx_heads,
+        decode_query_len=decode_query_len,
+        max_decode_query_len=max_decode_query_len,
+    )
+
+    expected = torch.full_like(actual, -1)
+    active_tokens = active_batch * decode_query_len
+    expected[:, :active_tokens] = _reference_index_topk(
+        idx_q[:active_tokens],
+        index_kv_cache,
+        block_table[:active_batch],
+        q_lens,
+        active_seq_lens,
+        prefix_lens,
+        topk,
+        init_blocks,
+        local_blocks,
+    )
+    _assert_topk_indices_equal_unordered(actual, expected)
