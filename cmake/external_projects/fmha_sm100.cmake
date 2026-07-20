@@ -17,7 +17,7 @@ else()
   FetchContent_Declare(
     fmha_sm100
     GIT_REPOSITORY https://github.com/vllm-project/MSA.git
-    GIT_TAG TODO# wait this pr merge https://github.com/vllm-project/MSA/pull/7
+    GIT_TAG 890aaa1a37a598ad17ccff0827fea21540d381fa
     GIT_PROGRESS TRUE
     CONFIGURE_COMMAND ""
     BUILD_COMMAND ""
