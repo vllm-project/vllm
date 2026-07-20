@@ -1,6 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 MODEL_NAME=${MODEL_NAME:-facebook/opt-125m}
 HOST=${HOST:-127.0.0.1}
 PORT=${PORT:-}
@@ -14,6 +15,9 @@ RUNTIME_READY_LOG=${RUNTIME_READY_LOG:-/tmp/vllm-e2e-smoke-runtime-ready.log}
 PYTHON_BIN=${PYTHON_BIN:-python}
 VLLM_ASCEND_HUST_REPO=${VLLM_ASCEND_HUST_REPO:-${GITHUB_WORKSPACE:-$PWD}/vllm-ascend-hust}
 SUDO_AUTH_EXIT_CODE=${SUDO_AUTH_EXIT_CODE:-76}
+NPU_MEMORY_EXIT_CODE=${NPU_MEMORY_EXIT_CODE:-87}
+NPU_MEMORY_PREFLIGHT_SCRIPT=${NPU_MEMORY_PREFLIGHT_SCRIPT:-$SCRIPT_DIR/check_ascend_npu_memory.py}
+VLLM_ASCEND_REQUIRED_MEMORY_UTILIZATION=${VLLM_ASCEND_REQUIRED_MEMORY_UTILIZATION:-0.92}
 ASCEND_E2E_USE_SUDO=${ASCEND_E2E_USE_SUDO:-0}
 DEFAULT_SYSTEM_ASCEND_ROOT_HELPER=${DEFAULT_SYSTEM_ASCEND_ROOT_HELPER:-/usr/local/bin/run_ascend_benchmark_root_helper.sh}
 REPO_ASCEND_ROOT_HELPER=${REPO_ASCEND_ROOT_HELPER:-$VLLM_ASCEND_HUST_REPO/.github/workflows/scripts/run_ascend_benchmark_root_helper.sh}
@@ -255,22 +259,10 @@ run_runner_npu_preflight_once() {
     --python "$PYTHON_BIN" \
     --require-npu --json >/dev/null || return 1
 
-  # Device-specific torch.zeros allocation check
-  "$PYTHON_BIN" - <<'PY'
-import os
-
-import torch
-import torch_npu  # noqa: F401
-
-device = os.environ.get("VLLM_ASCEND_TORCH_PREFLIGHT_DEVICE", "npu:0")
-print(f"preflight device={device}")
-print("torch_npu import ok=True")
-if not torch.npu.is_available():
-    raise RuntimeError("torch.npu.is_available() returned False")
-torch.npu.set_device(device)
-_ = torch.zeros(1, device=device)
-print("torch.zeros preflight ok")
-PY
+  "$PYTHON_BIN" "$NPU_MEMORY_PREFLIGHT_SCRIPT" \
+    --device "${VLLM_ASCEND_TORCH_PREFLIGHT_DEVICE:-npu:0}" \
+    --utilization "$VLLM_ASCEND_REQUIRED_MEMORY_UTILIZATION" \
+    --insufficient-exit-code "$NPU_MEMORY_EXIT_CODE"
 }
 
 prepend_env_path() {
@@ -326,14 +318,22 @@ ensure_runner_npu_ready() {
   local delay_seconds=${RUNNER_NPU_PREFLIGHT_DELAY_SECONDS:-10}
   local attempt=1
   local preflight_output=""
+  local preflight_status=0
 
   while [[ "$attempt" -le "$max_attempts" ]]; do
     if preflight_output=$(run_runner_npu_preflight_once 2>&1); then
       return 0
+    else
+      preflight_status=$?
     fi
 
     echo "Runner NPU preflight failed ($attempt/$max_attempts)" >&2
     printf '%s\n' "$preflight_output" >&2
+
+    if [[ "$preflight_status" -eq "$NPU_MEMORY_EXIT_CODE" ]]; then
+      echo "Ascend NPU memory is insufficient; failing without retry." >&2
+      return "$NPU_MEMORY_EXIT_CODE"
+    fi
 
     if [[ "$attempt" -lt "$max_attempts" ]]; then
       sleep "$delay_seconds"
@@ -348,6 +348,12 @@ ensure_runner_npu_ready() {
   fi
 
   return 1
+}
+
+server_log_indicates_npu_memory_pressure() {
+  [[ -f "$SERVER_LOG" ]] && grep -Eqi \
+    'Free memory on device .* less than desired GPU memory utilization|NPU out of memory|out of memory|ACL_ERROR_RT_MEMORY_ALLOCATION' \
+    "$SERVER_LOG"
 }
 
 start_server() {
@@ -536,12 +542,20 @@ for attempt in $(seq 1 120); do
   if ! kill -0 "$server_pid" 2>/dev/null; then
     echo "vLLM server exited before becoming ready"
     cat "$SERVER_LOG"
+    if server_log_indicates_npu_memory_pressure; then
+      echo "Detected deterministic Ascend NPU memory pressure in server log." >&2
+      exit "$NPU_MEMORY_EXIT_CODE"
+    fi
     exit 1
   fi
 
   if [[ "$attempt" -eq 120 ]]; then
     echo "Timed out waiting for vLLM server to become ready"
     cat "$SERVER_LOG"
+    if server_log_indicates_npu_memory_pressure; then
+      echo "Detected deterministic Ascend NPU memory pressure in server log." >&2
+      exit "$NPU_MEMORY_EXIT_CODE"
+    fi
     exit 1
   fi
 
