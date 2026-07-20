@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from dataclasses import dataclass
+from enum import Enum
 from fnmatch import fnmatch
 from typing import TYPE_CHECKING, Any, cast
 
@@ -9,7 +11,8 @@ from torch.nn.parameter import Parameter
 
 import vllm.envs as envs
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
-from vllm.config import get_current_vllm_config
+from vllm.config import get_current_vllm_config_or_none
+from vllm.config.quantization import QuantSpec
 from vllm.logger import init_logger
 from vllm.model_executor.kernels.linear import (
     MarlinNvFp4LinearKernel,
@@ -51,6 +54,7 @@ from vllm.model_executor.layers.linear import (
     LinearBase,
     LinearMethodBase,
     UnquantizedLinearMethod,
+    register_weight_loader_v2_supported_method,
 )
 from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.model_executor.layers.quantization.base_config import (
@@ -75,12 +79,16 @@ from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     MXFP8_VALUE_DTYPE,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    GroupShape,
-    create_fp8_quant_key,
+    FP4_DTYPE,
+    QuantKey,
     is_layer_skipped,
+    kFp8Dynamic128Sym,
     kFp8DynamicTokenSym,
+    kFp8Static128BlockSym,
     kFp8StaticTensorSym,
     kFp8StaticTokenSym,
+    kMxfp8Dynamic,
+    kMxfp8Static,
     kNvfp4Dynamic,
     kNvfp4Static,
 )
@@ -91,7 +99,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.parameter import (
     BlockQuantScaleParameter,
     ChannelQuantScaleParameter,
-    GroupQuantScaleParameter,
     ModelWeightParameter,
     PerTensorScaleParameter,
 )
@@ -131,7 +138,6 @@ class ModelOptKVCacheMethod(BaseKVCacheMethod):
 
 
 class ModelOptQuantConfigBase(QuantizationConfig):
-    LinearMethodCls: type = LinearMethodBase
     FusedMoEMethodCls: type = FusedMoEMethodBase
     KVCacheMethodCls: type = BaseKVCacheMethod
 
@@ -141,6 +147,15 @@ class ModelOptQuantConfigBase(QuantizationConfig):
     ):
         super().__init__()
         self.exclude_modules: list[str] = exclude_modules
+
+    def linear_algo(self) -> str:
+        """ModelOpt quant-algo string used to resolve linear layers.
+
+        Fed to ``resolve()`` to build the ``QuantSpec`` for the generic
+        ``ModelOptLinearMethod``. Overridden per homogeneous config; the mixed
+        config resolves the algo per-prefix and does not use this.
+        """
+        raise NotImplementedError
 
     def is_layer_excluded(self, prefix: str) -> bool:
         """
@@ -207,10 +222,8 @@ class ModelOptQuantConfigBase(QuantizationConfig):
 
         # now, the layer is quantized, handle it here
         if isinstance(layer, (LinearBase, ParallelLMHead)):
-            quant_method = self.LinearMethodCls(self)
-            if getattr(quant_method, "backend", "") == "marlin":
-                quant_method.marlin_input_dtype = get_marlin_input_dtype(prefix)
-            return quant_method
+            spec, ctx, format_scheme = resolve(self.linear_algo(), self, prefix)
+            return ModelOptLinearMethod(spec, ctx, format_scheme)
         elif isinstance(layer, RoutedExperts):
             quant_method = self.FusedMoEMethodCls(
                 quant_config=self, moe_config=layer.moe_config
@@ -388,19 +401,20 @@ class ModelOptFp8Config(ModelOptQuantConfigBase):
                 quant_method,
             )
 
-        # Select LinearMethod implementation based on quant_algo.
-        if self.quant_method == "FP8":
-            self.LinearMethodCls = ModelOptFp8LinearMethod
-        elif self.quant_method == "FP8_PER_CHANNEL_PER_TOKEN":
-            self.LinearMethodCls = ModelOptFp8PcPtLinearMethod
-        elif self.quant_method == "FP8_PB_WO":
-            self.LinearMethodCls = ModelOptFp8PbWoLinearMethod
-        else:
+        # Validate the quant_algo; resolve() maps it to a QuantSpec at dispatch.
+        if self.quant_method not in (
+            "FP8",
+            "FP8_PER_CHANNEL_PER_TOKEN",
+            "FP8_PB_WO",
+        ):
             raise ValueError(
                 "Unsupported ModelOpt FP8 quant_algo for vLLM: "
                 f"{self.quant_method}. Supported: FP8 / "
                 "FP8_PER_CHANNEL_PER_TOKEN / FP8_PB_WO."
             )
+
+    def linear_algo(self) -> str:
+        return self.quant_method
 
     def get_name(self) -> QuantizationMethods:
         return "modelopt"
@@ -439,315 +453,6 @@ class ModelOptFp8Config(ModelOptQuantConfigBase):
             kv_cache_quant_method,
             exclude_modules,
         )
-
-
-class ModelOptFp8LinearMethod(LinearMethodBase):
-    """Linear method for Model Optimizer static quantization.
-    Supports loading FP8 checkpoints with static weight scale and
-    activation scale. Future support might be added for dynamic
-    scales.
-
-    Limitations:
-    1. Only support per-tensor quantization due to torch._scaled_mm support.
-    2. Only support float8_e4m3fn datatype
-        Args: quant_config: The ModelOpt quantization config.
-    """
-
-    def __init__(self, quant_config: ModelOptFp8Config) -> None:
-        self.quant_config = quant_config
-        self.out_dtype = torch.get_default_dtype()
-        self.input_dtype = get_current_vllm_config().model_config.dtype
-
-    def create_weights(
-        self,
-        layer: torch.nn.Module,
-        input_size_per_partition: int,
-        output_partition_sizes: list[int],
-        input_size: int,
-        output_size: int,
-        params_dtype: torch.dtype,
-        **extra_weight_attrs,
-    ):
-        del input_size, output_size
-        output_size_per_partition = sum(output_partition_sizes)
-        weight_loader = extra_weight_attrs.get("weight_loader")
-        layer.logical_widths = output_partition_sizes
-        layer.input_size_per_partition = input_size_per_partition
-        layer.output_size_per_partition = output_size_per_partition
-        layer.orig_dtype = params_dtype
-        weight_dtype = (
-            torch.float8_e4m3fn
-            if self.quant_config.is_checkpoint_fp8_serialized
-            else params_dtype
-        )
-        weight = ModelWeightParameter(
-            data=torch.empty(
-                output_size_per_partition, input_size_per_partition, dtype=weight_dtype
-            ),
-            input_dim=1,
-            output_dim=0,
-            weight_loader=weight_loader,
-        )
-        layer.register_parameter("weight", weight)
-
-        if self.quant_config.is_checkpoint_fp8_serialized:
-            # WEIGHT SCALE
-            weight_scale = PerTensorScaleParameter(
-                data=torch.empty(len(output_partition_sizes), dtype=torch.float32),
-                weight_loader=weight_loader,
-            )
-            weight_scale[:] = torch.finfo(torch.float32).min
-            layer.register_parameter("weight_scale", weight_scale)
-            # INPUT SCALE
-            scale = PerTensorScaleParameter(
-                data=torch.empty(len(output_partition_sizes), dtype=torch.float32),
-                weight_loader=weight_loader,
-            )
-
-            scale[:] = torch.finfo(torch.float32).min
-            layer.register_parameter("input_scale", scale)
-
-        self.fp8_linear = init_fp8_linear_kernel(
-            activation_quant_key=kFp8StaticTensorSym,
-            weight_quant_key=kFp8StaticTensorSym,
-            weight_shape=layer.weight.shape,
-            input_dtype=self.input_dtype,
-            out_dtype=self.out_dtype,
-            module_name=self.__class__.__name__,
-        )
-
-    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        weight = layer.weight
-        max_w_scale = layer.weight_scale.max()
-        if not (layer.weight_scale == layer.weight_scale[0]).all():
-            max_w_scale, weight = requantize_with_max_scale(
-                layer.weight, layer.weight_scale, layer.logical_widths
-            )
-        layer.weight = Parameter(weight.t(), requires_grad=False)
-        layer.weight_scale = Parameter(max_w_scale, requires_grad=False)
-        layer.input_scale = Parameter(layer.input_scale.max(), requires_grad=False)
-        self.fp8_linear.process_weights_after_loading(layer)
-
-    def apply(
-        self,
-        layer: torch.nn.Module,
-        x: torch.Tensor,
-        bias: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        return self.fp8_linear.apply_weights(layer, x, bias)
-
-
-class ModelOptFp8PcPtLinearMethod(LinearMethodBase):
-    """Linear method for ModelOpt FP8_PER_CHANNEL_PER_TOKEN checkpoints.
-
-    Expected checkpoint structure (per Linear):
-    - weight: fp8-e4m3fn, shape [out, in]
-    - weight_scale: fp32, shape [out] (per-output-channel)
-    - no input_scale (activations are dynamically quantized per-token)
-    """
-
-    def __init__(self, quant_config: ModelOptFp8Config) -> None:
-        self.quant_config = quant_config
-        self.out_dtype = torch.get_default_dtype()
-        self.input_dtype = get_current_vllm_config().model_config.dtype
-
-    def create_weights(
-        self,
-        layer: torch.nn.Module,
-        input_size_per_partition: int,
-        output_partition_sizes: list[int],
-        input_size: int,
-        output_size: int,
-        params_dtype: torch.dtype,
-        **extra_weight_attrs,
-    ):
-        del input_size, output_size
-
-        if not self.quant_config.is_checkpoint_fp8_serialized:
-            raise ValueError(
-                "FP8_PER_CHANNEL_PER_TOKEN currently only supports "
-                "FP8-serialized checkpoints."
-            )
-
-        output_size_per_partition = sum(output_partition_sizes)
-        weight_loader = extra_weight_attrs.get("weight_loader")
-        layer.logical_widths = output_partition_sizes
-        layer.input_size_per_partition = input_size_per_partition
-        layer.output_size_per_partition = output_size_per_partition
-
-        weight = ModelWeightParameter(
-            data=torch.empty(
-                output_size_per_partition,
-                input_size_per_partition,
-                dtype=torch.float8_e4m3fn,
-            ),
-            input_dim=1,
-            output_dim=0,
-            weight_loader=weight_loader,
-        )
-        layer.register_parameter("weight", weight)
-
-        weight_scale = ChannelQuantScaleParameter(
-            data=torch.empty(output_size_per_partition, dtype=torch.float32),
-            output_dim=0,
-            weight_loader=weight_loader,
-        )
-        weight_scale[:] = torch.finfo(torch.float32).min
-        layer.register_parameter("weight_scale", weight_scale)
-
-        self.fp8_linear = init_fp8_linear_kernel(
-            activation_quant_key=kFp8DynamicTokenSym,
-            weight_quant_key=kFp8StaticTokenSym,
-            weight_shape=layer.weight.shape,
-            input_dtype=self.input_dtype,
-            out_dtype=self.out_dtype,
-            module_name=self.__class__.__name__,
-        )
-
-    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        weight, weight_scale, _ = process_fp8_weight_channel_strategy(
-            layer.weight, layer.weight_scale.data
-        )
-        layer.weight = Parameter(weight.t(), requires_grad=False)
-        layer.weight_scale = Parameter(weight_scale, requires_grad=False)
-        self.fp8_linear.process_weights_after_loading(layer)
-
-    def apply(
-        self,
-        layer: torch.nn.Module,
-        x: torch.Tensor,
-        bias: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        return self.fp8_linear.apply_weights(layer, x, bias)
-
-
-class ModelOptFp8PbWoLinearMethod(LinearMethodBase):
-    """Linear method for ModelOpt FP8_PB_WO checkpoints.
-
-    ModelOpt exports `weight_scale` as a 4D tensor:
-      [out_blk, 1, in_blk, 1]
-    where block size is typically 128 for both dims.
-
-    vLLM executes it as FP8 GEMM with *dynamic per-token* activation quant.
-    """
-
-    _WEIGHT_BLOCK_SIZE: tuple[int, int] = (128, 128)
-
-    def __init__(self, quant_config: ModelOptFp8Config) -> None:
-        self.quant_config = quant_config
-        block_n, block_k = self._WEIGHT_BLOCK_SIZE
-        self.weight_block_size = list(self._WEIGHT_BLOCK_SIZE)
-
-        self.activation_quant_key = create_fp8_quant_key(
-            static=False, group_shape=GroupShape(1, block_k)
-        )
-        self.weight_quant_key = create_fp8_quant_key(
-            static=True, group_shape=GroupShape(block_n, block_k)
-        )
-
-        self.out_dtype = torch.get_default_dtype()
-        self.input_dtype = get_current_vllm_config().model_config.dtype
-
-    def create_weights(
-        self,
-        layer: torch.nn.Module,
-        input_size_per_partition: int,
-        output_partition_sizes: list[int],
-        input_size: int,
-        output_size: int,
-        params_dtype: torch.dtype,
-        **extra_weight_attrs,
-    ):
-        del input_size, output_size
-
-        if not self.quant_config.is_checkpoint_fp8_serialized:
-            raise ValueError(
-                "FP8_PB_WO currently only supports FP8-serialized checkpoints."
-            )
-
-        output_size_per_partition = sum(output_partition_sizes)
-        weight_loader = extra_weight_attrs.get("weight_loader")
-        layer.logical_widths = output_partition_sizes
-        layer.input_size_per_partition = input_size_per_partition
-        layer.output_size_per_partition = output_size_per_partition
-
-        # Expose block size so the v2 weight loaders can translate offsets from
-        # element-space -> block-space for BlockQuantScaleParameter.
-        layer.weight_block_size = self.weight_block_size
-
-        weight = ModelWeightParameter(
-            data=torch.empty(
-                output_size_per_partition,
-                input_size_per_partition,
-                dtype=torch.float8_e4m3fn,
-            ),
-            input_dim=1,
-            output_dim=0,
-            weight_loader=weight_loader,
-        )
-        layer.register_parameter("weight", weight)
-
-        block_n, block_k = self._WEIGHT_BLOCK_SIZE
-        if output_size_per_partition % block_n != 0:
-            raise ValueError(
-                "ModelOpt FP8_PB_WO requires out_features divisible by "
-                f"{block_n}, got {output_size_per_partition}."
-            )
-        if input_size_per_partition % block_k != 0:
-            raise ValueError(
-                "ModelOpt FP8_PB_WO requires in_features divisible by "
-                f"{block_k}, got {input_size_per_partition}."
-            )
-
-        out_blks = output_size_per_partition // block_n
-        in_blks = input_size_per_partition // block_k
-
-        # Match ModelOpt's exported shape so weight loading works without a
-        # custom loader: [out_blk, 1, in_blk, 1]
-        weight_scale = BlockQuantScaleParameter(
-            data=torch.empty((out_blks, 1, in_blks, 1), dtype=torch.float32),
-            input_dim=2,
-            output_dim=0,
-            weight_loader=weight_loader,
-        )
-        weight_scale[:] = torch.finfo(torch.float32).min
-        layer.register_parameter("weight_scale", weight_scale)
-
-        self.w8a8_block_fp8_linear = init_fp8_linear_kernel(
-            activation_quant_key=self.activation_quant_key,
-            weight_quant_key=self.weight_quant_key,
-            weight_shape=layer.weight.shape,
-            input_dtype=self.input_dtype,
-            out_dtype=self.out_dtype,
-            module_name=self.__class__.__name__,
-        )
-
-    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        # Keep weight in [out, in] layout for Fp8BlockScaledMMLinearKernel.
-        layer.weight = Parameter(layer.weight.data, requires_grad=False)
-
-        scale = layer.weight_scale
-        if scale.dim() == 4:
-            # [out_blk, 1, in_blk, 1] -> [out_blk, in_blk]
-            scale = scale.squeeze(1).squeeze(-1)
-        elif scale.dim() != 2:
-            raise ValueError(
-                "Unexpected ModelOpt FP8_PB_WO weight_scale shape: "
-                f"{tuple(scale.shape)}."
-            )
-
-        layer.weight_scale = Parameter(scale.contiguous(), requires_grad=False)
-
-        if hasattr(self, "fp8_linear"):
-            self.fp8_linear.process_weights_after_loading(layer)
-
-    def apply(
-        self,
-        layer: torch.nn.Module,
-        x: torch.Tensor,
-        bias: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        return self.w8a8_block_fp8_linear.apply_weights(layer, x, bias)
 
 
 class ModelOptFp8MoEMethod(FusedMoEMethodBase):
@@ -1009,7 +714,6 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
         )
 
 
-ModelOptFp8Config.LinearMethodCls = ModelOptFp8LinearMethod
 ModelOptFp8Config.FusedMoEMethodCls = ModelOptFp8MoEMethod
 ModelOptFp8Config.KVCacheMethodCls = ModelOptKVCacheMethod
 
@@ -1041,18 +745,17 @@ class ModelOptNvFp4Config(ModelOptQuantConfigBase):
             self.group_size = group_size
             self.kv_cache_quant_algo = kv_cache_quant_algo
 
-        # Select LinearMethod implementation based on quant_algo (FP8 pattern).
-        # NVFP4         -> W4A4: cutlass NVFP4 GEMM with input quantization
-        # W4A16_NVFP4   -> W4A16: FP4 Marlin GEMM with bf16/fp16 activations
-        if quant_method == "NVFP4":
-            self.LinearMethodCls = ModelOptNvFp4LinearMethod
-        elif quant_method == "W4A16_NVFP4":
-            self.LinearMethodCls = ModelOptNvFp4W4A16LinearMethod
-        else:
+        # Validate the quant_algo; resolve() maps it to a QuantSpec at dispatch.
+        # NVFP4       -> W4A4: cutlass NVFP4 GEMM with input quantization
+        # W4A16_NVFP4 -> W4A16: FP4 Marlin GEMM with bf16/fp16 activations
+        if quant_method not in ("NVFP4", "W4A16_NVFP4"):
             raise ValueError(
                 f"Unsupported ModelOpt NVFP4 quant_algo: {quant_method}. "
                 "Supported: NVFP4 / W4A16_NVFP4."
             )
+
+    def linear_algo(self) -> str:
+        return self.quant_method
 
     def get_name(self) -> QuantizationMethods:
         return "modelopt_fp4"
@@ -1110,286 +813,6 @@ class ModelOptNvFp4Config(ModelOptQuantConfigBase):
             exclude_modules,
             group_size,
         )
-
-
-class ModelOptNvFp4LinearMethod(LinearMethodBase):
-    """Linear method for Model Optimizer NVFP4.
-    Supports loading NVFP4 checkpoints with the following structure:
-
-    input_scale: torch.float32, scalar ,
-    weight: NVFP4(represented as byte) Shape: [1, X, y/2]
-    weight_scale: FP8-E4M3, Shape: [X, Y], aka per block scale,
-    weight_scale_2: torch.float32, scalar,
-    Args: quant_config: The ModelOpt quantization config.
-    """
-
-    def __init__(self, quant_config: ModelOptNvFp4Config) -> None:
-        self.quant_config = quant_config
-        self.marlin_input_dtype = None
-        self.kernel = init_nvfp4_linear_kernel()
-
-    def create_weights(
-        self,
-        layer: torch.nn.Module,
-        input_size_per_partition: int,
-        output_partition_sizes: list[int],
-        input_size: int,
-        output_size: int,
-        params_dtype: torch.dtype,
-        **extra_weight_attrs,
-    ):
-        del input_size, output_size
-        if not self.quant_config.is_checkpoint_nvfp4_serialized:
-            raise ValueError(
-                "NVFP4 quantization was selected, "
-                " dynamic quantization is not supported."
-            )
-        output_size_per_partition = sum(output_partition_sizes)
-        weight_loader = extra_weight_attrs.get("weight_loader")
-        layer.logical_widths = output_partition_sizes
-        layer.input_size_per_partition = input_size_per_partition
-        layer.output_size_per_partition = output_size_per_partition
-
-        if input_size_per_partition % 16 != 0:
-            raise ValueError(
-                "Unsupported model when in features size is not multiple of 16"
-            )
-        # The nvfp4 weight is still represented as
-        weight_dtype = (
-            torch.float8_e4m3fn
-            if self.quant_config.is_checkpoint_nvfp4_serialized
-            else params_dtype
-        )
-        # Weight
-        weight = ModelWeightParameter(
-            data=torch.empty(
-                # 2 fp4 items are packed in the input dimension
-                layer.output_size_per_partition,
-                layer.input_size_per_partition // 2,
-                dtype=torch.uint8,
-            ),
-            input_dim=1,
-            output_dim=0,
-            weight_loader=weight_loader,
-        )
-        layer.register_parameter("weight", weight)
-
-        # Input Global Scale
-        input_global_scale = PerTensorScaleParameter(
-            data=torch.empty(len(output_partition_sizes), dtype=torch.float32),
-            weight_loader=weight_loader,
-        )
-        layer.register_parameter("input_scale", input_global_scale)
-
-        # Weight Global Scale
-        weight_global_scale = PerTensorScaleParameter(
-            data=torch.empty(len(output_partition_sizes), dtype=torch.float32),
-            weight_loader=weight_loader,
-        )
-        layer.register_parameter("weight_scale_2", weight_global_scale)
-
-        # Per Block Weight Scale
-        weight_scale = ModelWeightParameter(
-            data=torch.empty(
-                output_size_per_partition,
-                input_size_per_partition // self.quant_config.group_size,
-                dtype=weight_dtype,
-            ),
-            input_dim=1,
-            output_dim=0,
-            weight_loader=weight_loader,
-        )
-
-        layer.register_parameter("weight_scale", weight_scale)
-
-        expose_input_quant_key(layer, self.kernel)
-
-    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        if (
-            torch.unique(layer.input_scale).numel() != 1
-            or torch.unique(layer.weight_scale_2).numel() != 1
-        ):
-            logger.warning_once(
-                "In NVFP4 linear, the global scale for input or weight are different"
-                " for parallel layers (e.g. q_proj, k_proj, v_proj). This "
-                " will likely results in reduce accuracy. Please verify the model"
-                " accuracy. Consider using a checkpoint with a shared global NVFP4"
-                " scale for parallel layers."
-            )
-
-        # Rename ModelOpt checkpoint names to standardized names
-        input_global_scale = layer.input_scale.max().to(torch.float32)
-        layer.input_global_scale = Parameter(input_global_scale, requires_grad=False)
-        del layer.input_scale
-
-        weight_global_scale = layer.weight_scale_2.max().to(torch.float32)
-        layer.weight_global_scale = Parameter(weight_global_scale, requires_grad=False)
-        del layer.weight_scale_2
-
-        # Pre-compute alpha and inverse for runtime quantization
-        layer.alpha = Parameter(
-            layer.input_global_scale * layer.weight_global_scale, requires_grad=False
-        )
-        layer.input_global_scale_inv = Parameter(
-            (1.0 / layer.input_global_scale).to(torch.float32), requires_grad=False
-        )
-
-        # Convert layer to NVFP4 linear kernel format
-        self.kernel.process_weights_after_loading(layer)
-
-    def apply(
-        self,
-        layer: torch.nn.Module,
-        x: torch.Tensor,
-        bias: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        return self.kernel.apply_weights(layer=layer, x=x, bias=bias)
-
-
-class ModelOptNvFp4W4A16LinearMethod(LinearMethodBase):
-    """Linear method for ModelOpt NVFP4 W4A16.
-
-    4-bit NVFP4 weights, fp16/bf16 activations. Loads ModelOpt-style names
-    directly (no on-disk conversion) and dispatches to the FP4 Marlin GEMM:
-
-        weight          uint8     packed NVFP4 (2 nibbles/byte along input dim)
-        weight_scale    fp8-e4m3  per 16-elem group along input dim
-        weight_scale_2  fp32      per-tensor global scale = amax / (6.0 * 448.0)
-
-    No activation quantization. Marlin expects the global scale in the same
-    form ModelOpt stores (amax/2688), so we rename weight_scale_2 ->
-    weight_global_scale **without reciprocation** -- the CT W4A16 path
-    reciprocates only because CT stores the inverse on disk.
-
-    We also register a placeholder input_scale parameter so that W4A4-shaped
-    checkpoints (which contain *_proj.input_scale tensors) can be loaded
-    under this method without the per-shard loader hitting a KeyError on
-    the merged-name lookup. The placeholder is discarded in
-    process_weights_after_loading -- its value is never used.
-    """
-
-    def __init__(self, quant_config: ModelOptNvFp4Config) -> None:
-        self.quant_config = quant_config
-        # Vestigial slot mirrored from ModelOptNvFp4LinearMethod: the parent
-        # config's get_quant_method only fills marlin_input_dtype when
-        # backend == "marlin"; we don't set that since we pin the kernel
-        # below, but we keep the attribute for shape parity.
-        self.marlin_input_dtype = None
-        # Direct-instantiate the Marlin NVFP4 adapter rather than going through
-        # init_nvfp4_linear_kernel(): the latter's priority list returns a
-        # cutlass W4A4 kernel as first-pick on this hardware, which would
-        # silently try to quantize activations (we have no input_scale). For
-        # W4A16 there is exactly one valid kernel, so we pin it.
-        self.kernel = MarlinNvFp4LinearKernel(NvFp4LinearLayerConfig())
-
-    def create_weights(
-        self,
-        layer: torch.nn.Module,
-        input_size_per_partition: int,
-        output_partition_sizes: list[int],
-        input_size: int,
-        output_size: int,
-        params_dtype: torch.dtype,
-        **extra_weight_attrs,
-    ):
-        del input_size, output_size
-        if not self.quant_config.is_checkpoint_nvfp4_serialized:
-            raise ValueError(
-                "W4A16_NVFP4 quantization was selected; "
-                "dynamic quantization is not supported."
-            )
-        output_size_per_partition = sum(output_partition_sizes)
-        weight_loader = extra_weight_attrs.get("weight_loader")
-        layer.logical_widths = output_partition_sizes
-        layer.input_size_per_partition = input_size_per_partition
-        layer.output_size_per_partition = output_size_per_partition
-
-        if input_size_per_partition % 16 != 0:
-            raise ValueError(
-                "Unsupported model: input feature size is not a multiple of 16."
-            )
-
-        # Packed NVFP4 weights: uint8, 2 nibbles per byte along the input dim.
-        weight = ModelWeightParameter(
-            data=torch.empty(
-                output_size_per_partition,
-                input_size_per_partition // 2,
-                dtype=torch.uint8,
-            ),
-            input_dim=1,
-            output_dim=0,
-            weight_loader=weight_loader,
-        )
-        layer.register_parameter("weight", weight)
-
-        # Per-tensor global weight scale (fp32). ModelOpt stores
-        # amax / (NVFP4_max * fp8_e4m3_max) = amax / 2688. PerTensorScaleParameter
-        # holds one entry per fused output partition (e.g. q/k/v in a fused QKV).
-        weight_scale_2 = PerTensorScaleParameter(
-            data=torch.empty(len(output_partition_sizes), dtype=torch.float32),
-            weight_loader=weight_loader,
-        )
-        layer.register_parameter("weight_scale_2", weight_scale_2)
-
-        # Per-group fp8 weight scale.
-        weight_scale = GroupQuantScaleParameter(
-            data=torch.empty(
-                output_size_per_partition,
-                input_size_per_partition // self.quant_config.group_size,
-                dtype=torch.float8_e4m3fn,
-            ),
-            input_dim=1,
-            output_dim=0,
-            weight_loader=weight_loader,
-        )
-        layer.register_parameter("weight_scale", weight_scale)
-
-        # Placeholder input_scale param so W4A4-shaped checkpoints can be
-        # loaded under this method without KeyError on the merged-name
-        # lookup (qwen2-style stacked-loader path renames *_proj.input_scale
-        # to e.g. qkv_proj.input_scale and looks it up unconditionally).
-        # Discarded in process_weights_after_loading; never read by the kernel.
-        # For native W4A16 checkpoints (no input_scale on disk) the param
-        # stays uninitialized and is simply deleted.
-        input_scale = PerTensorScaleParameter(
-            data=torch.empty(len(output_partition_sizes), dtype=torch.float32),
-            weight_loader=weight_loader,
-        )
-        layer.register_parameter("input_scale", input_scale)
-
-    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        # Discard the input_scale placeholder. Whether it carries values
-        # (W4A4 ckpt loaded as W4A16) or is uninitialized (native W4A16
-        # ckpt), W4A16 mode does not quantize activations, so this is unused.
-        if hasattr(layer, "input_scale"):
-            del layer.input_scale
-
-        if torch.unique(layer.weight_scale_2).numel() != 1:
-            logger.warning_once(
-                "In W4A16_NVFP4 linear, the global weight scale "
-                "(weight_scale_2) differs across fused parallel layers "
-                "(e.g. q/k/v_proj). This will likely reduce accuracy. "
-                "Consider a checkpoint with a shared global scale."
-            )
-
-        # Rename weight_scale_2 -> weight_global_scale. NO reciprocation:
-        # ModelOpt already stores amax/2688, which is exactly what Marlin
-        # consumes via nvfp4_marlin_process_global_scale (called inside the
-        # Marlin adapter's process_weights_after_loading).
-        layer.weight_global_scale = Parameter(
-            layer.weight_scale_2.max().to(torch.float32), requires_grad=False
-        )
-        del layer.weight_scale_2
-
-        self.kernel.process_weights_after_loading(layer)
-
-    def apply(
-        self,
-        layer: torch.nn.Module,
-        x: torch.Tensor,
-        bias: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        return self.kernel.apply_weights(layer=layer, x=x, bias=bias)
 
 
 class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
@@ -1681,7 +1104,6 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         )
 
 
-ModelOptNvFp4Config.LinearMethodCls = ModelOptNvFp4LinearMethod
 ModelOptNvFp4Config.FusedMoEMethodCls = ModelOptNvFp4FusedMoE
 ModelOptNvFp4Config.KVCacheMethodCls = ModelOptKVCacheMethod
 
@@ -1710,6 +1132,9 @@ class ModelOptMxFp8Config(ModelOptQuantConfigBase):
         )
 
         self.kv_cache_quant_algo = kv_cache_quant_algo
+
+    def linear_algo(self) -> str:
+        return "MXFP8"
 
     def get_name(self) -> QuantizationMethods:
         return "modelopt_mxfp8"
@@ -1777,117 +1202,6 @@ class ModelOptMxFp8Config(ModelOptQuantConfigBase):
             kv_cache_quant_method,
             exclude_modules,
         )
-
-
-class ModelOptMxFp8LinearMethod(LinearMethodBase):
-    """Linear method for ModelOpt MXFP8 quantization."""
-
-    def __init__(self, quant_config: ModelOptMxFp8Config) -> None:
-        self.quant_config = quant_config
-
-        if not self.quant_config.is_checkpoint_mxfp8_serialized:
-            raise ValueError(
-                "MXFP8 currently only supports serialized checkpoints. "
-                "Dynamic quantization is not supported."
-            )
-
-        self.kernel = init_mxfp8_linear_kernel()
-
-    def create_weights(
-        self,
-        layer: torch.nn.Module,
-        input_size_per_partition: int,
-        output_partition_sizes: list[int],
-        input_size: int,
-        output_size: int,
-        params_dtype: torch.dtype,
-        **extra_weight_attrs,
-    ):
-        del input_size, output_size
-
-        if not self.quant_config.is_checkpoint_mxfp8_serialized:
-            raise ValueError(
-                "MXFP8 quantization was selected, but checkpoint is not "
-                "MXFP8 serialized. Dynamic quantization is not supported."
-            )
-
-        output_size_per_partition = sum(output_partition_sizes)
-        weight_loader = extra_weight_attrs.get("weight_loader")
-        layer.logical_widths = output_partition_sizes
-        layer.input_size_per_partition = input_size_per_partition
-        layer.output_size_per_partition = output_size_per_partition
-
-        if input_size_per_partition % MXFP8_BLOCK_SIZE != 0:
-            raise ValueError(
-                f"MXFP8 requires input dimension to be divisible by "
-                f"{MXFP8_BLOCK_SIZE}, got {input_size_per_partition}"
-            )
-
-        # Weight tensor: FP8 E4M3 format
-        weight = ModelWeightParameter(
-            data=torch.empty(
-                output_size_per_partition,
-                input_size_per_partition,
-                dtype=MXFP8_VALUE_DTYPE,
-            ),
-            input_dim=1,
-            output_dim=0,
-            weight_loader=weight_loader,
-        )
-        layer.register_parameter("weight", weight)
-
-        # Weight scale tensor (E8M0 encoded as uint8), one scale per block of 32 along K
-        weight_scale = ModelWeightParameter(
-            data=torch.empty(
-                output_size_per_partition,
-                input_size_per_partition // MXFP8_BLOCK_SIZE,
-                dtype=MXFP8_SCALE_DTYPE,
-            ),
-            input_dim=1,
-            output_dim=0,
-            weight_loader=weight_loader,
-        )
-        layer.register_parameter("weight_scale", weight_scale)
-
-    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        # Idempotent: the emulation kernel may dequant the weight to BF16 at load
-        # time (>=2-byte). If already converted, there is nothing left to do --
-        # avoid re-running the MXFP8-only validation/conversion below.
-        if layer.weight.element_size() >= 2:
-            return
-
-        # Validate weight tensor
-        if layer.weight.ndim != 2:
-            raise ValueError(
-                f"MXFP8 weight must be 2D tensor [N, K], got {layer.weight.ndim}D "
-                f"with shape {tuple(layer.weight.shape)}"
-            )
-
-        if layer.weight.dtype != MXFP8_VALUE_DTYPE:
-            raise ValueError(
-                f"MXFP8 weight must be {MXFP8_VALUE_DTYPE} (FP8 E4M3), "
-                f"got {layer.weight.dtype}. The checkpoint may not be properly "
-                f"quantized with MXFP8."
-            )
-
-        # Validate weight scale tensor (should be 2D, not swizzled)
-        assert layer.weight_scale.ndim == 2, (
-            f"MXFP8 weight scale must be 2D, got {layer.weight_scale.ndim}D"
-        )
-        assert layer.weight_scale.dtype == MXFP8_SCALE_DTYPE, (
-            f"MXFP8 weight scale must be {MXFP8_SCALE_DTYPE},"
-            f" got {layer.weight_scale.dtype}"
-        )
-
-        self.kernel.process_weights_after_loading(layer)
-
-    def apply(
-        self,
-        layer: torch.nn.Module,
-        x: torch.Tensor,
-        bias: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        return self.kernel.apply_weights(layer, x, bias)
 
 
 class ModelOptMxFp8FusedMoE(FusedMoEMethodBase):
@@ -2271,7 +1585,6 @@ class ModelOptMxFp8FusedMoE(FusedMoEMethodBase):
 
 
 # Register the method classes for ModelOptMxFp8Config
-ModelOptMxFp8Config.LinearMethodCls = ModelOptMxFp8LinearMethod
 ModelOptMxFp8Config.FusedMoEMethodCls = ModelOptMxFp8FusedMoE
 ModelOptMxFp8Config.KVCacheMethodCls = ModelOptKVCacheMethod
 
@@ -2381,10 +1694,10 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
             group_size=group_size,
         )
         # Sibling config for layers that declare quant_algo: "W4A16_NVFP4".
-        # ModelOptNvFp4Config.__init__ keys LinearMethodCls off quant_method,
-        # so this instance auto-selects ModelOptNvFp4W4A16LinearMethod. The
-        # MoE side reads quant_config.quant_method == "W4A16_NVFP4" to set
-        # use_a16 → Marlin backend in ModelOptNvFp4FusedMoE.__init__.
+        # get_quant_method resolves this sub-config to the (kNvfp4Static, None)
+        # QuantSpec (W4A16) for the generic ModelOptLinearMethod. The MoE side
+        # reads quant_config.quant_method == "W4A16_NVFP4" to set use_a16 →
+        # Marlin backend in ModelOptNvFp4FusedMoE.__init__.
         w4a16_nvfp4_config = ModelOptNvFp4Config(
             quant_method="W4A16_NVFP4",
             is_checkpoint_nvfp4_serialized=True,
@@ -2524,16 +1837,21 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
         quant_algo = self._resolve_quant_algo(prefix)
 
         if isinstance(layer, (LinearBase, ParallelLMHead)):
-            if quant_algo == "FP8":
-                return ModelOptFp8LinearMethod(self.fp8_config)
-            if quant_algo == "NVFP4":
-                return ModelOptNvFp4LinearMethod(self.nvfp4_config)
-            if quant_algo == "W4A16_NVFP4":
-                return ModelOptNvFp4W4A16LinearMethod(self.w4a16_nvfp4_config)
-            if quant_algo == "MXFP8":
-                return ModelOptMxFp8LinearMethod(self.mxfp8_config)
-            # Layer not in quantized_layers — leave unquantized
-            return UnquantizedLinearMethod()
+            # Per-prefix algo -> its sub-config, then the generic linear method.
+            # resolve() reads is_checkpoint_*_serialized/group_size off whichever
+            # sub-config it is handed (read-only — never write back, or a
+            # linear-only change leaks into the shared imported MoE method).
+            subcfg = {
+                "FP8": self.fp8_config,
+                "NVFP4": self.nvfp4_config,
+                "W4A16_NVFP4": self.w4a16_nvfp4_config,
+                "MXFP8": self.mxfp8_config,
+            }.get(quant_algo)
+            if subcfg is None:
+                # Layer not in quantized_layers — leave unquantized
+                return UnquantizedLinearMethod()
+            spec, ctx, format_scheme = resolve(quant_algo, subcfg, prefix)
+            return ModelOptLinearMethod(spec, ctx, format_scheme)
 
         if isinstance(layer, RoutedExperts):
             if quant_algo == "FP8":
@@ -2564,3 +1882,578 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
         super().apply_vllm_mapper(hf_to_vllm_mapper)
         if self.quantized_layers:
             self.quantized_layers = hf_to_vllm_mapper.apply_dict(self.quantized_layers)
+
+
+# ===========================================================================
+# Generic QuantKey-driven linear method
+#
+# One ``ModelOptLinearMethod`` replaces the six per-format linear method
+# classes. It composes a per-QuantKey weight scheme + activation scheme (from
+# the ``QuantSpec`` pair produced by ``resolve``), runs a fixed create/process
+# lifecycle, selects the kernel from the pair, and applies. See
+# ``linear_design_concrete.md`` for the design and caveats C1-C13.
+# ===========================================================================
+
+
+class Role(Enum):
+    WEIGHT = "weight"
+    ACT = "activation"
+
+
+WEIGHT = Role.WEIGHT
+ACT = Role.ACT
+
+# Weight-loader "unloaded shard" marker — FP8 family fills scales with it; the
+# NVFP4/MXFP8 families deliberately do not (C3, load-bearing asymmetry).
+SENTINEL = torch.finfo(torch.float32).min
+
+
+@dataclass(frozen=True)
+class CkptCtx:
+    """Per-checkpoint facts a QuantKey cannot carry."""
+
+    serialized: bool
+    group_size: int | None = None
+
+
+@dataclass(frozen=True)
+class RuntimeDtypes:
+    """Runtime/model dtypes kernels need — format-agnostic."""
+
+    input_dtype: torch.dtype
+    out_dtype: torch.dtype
+    marlin_input_dtype: torch.dtype | None = None
+
+
+@dataclass(frozen=True)
+class Shapes:
+    """Layer geometry from create_weights args."""
+
+    out_parts: list[int]
+    in_: int
+    params_dtype: torch.dtype
+
+    @property
+    def out(self) -> int:
+        return sum(self.out_parts)
+
+    @property
+    def nparts(self) -> int:
+        return len(self.out_parts)
+
+
+class QuantKeyScheme:
+    """One scheme per QuantKey. Selected by key *content*; the base supplies the
+    ``role`` from the slot it fills the key into (wkey->WEIGHT, akey->ACT).
+
+    Every scheme branches on ``role`` explicitly and ``reject``s any role it has
+    not validated — never falling through to the wrong role's registration
+    (silent-garbage trap, C13).
+    """
+
+    key: QuantKey
+    requires_serialized: bool = True
+    # Whether the base advertises the kernel's input_quant_key on the layer
+    # (enables upstream activation-quant fusion). Behavior-preserving per-format:
+    # the old NVFP4 W4A4 method exposed it, the old FP8 method did NOT — and the
+    # FP8 kernel *does* return a static key, so exposing there flips activation
+    # quant into a fused path and diverges (C2). Read off the weight scheme;
+    # default True (NVFP4), False on the FP8 schemes to preserve today's
+    # behavior. Adopting FP8 fusion is a separate deliberate change.
+    exposes_input_quant_key: bool = True
+
+    def create_weights(self, layer, role, ctx, shapes, wl) -> None:
+        raise NotImplementedError
+
+    def process(self, layer, role) -> None:
+        pass
+
+    @staticmethod
+    def reject(role) -> None:
+        raise NotImplementedError(
+            f"role {role!r} not validated for this QuantKey scheme"
+        )
+
+    @staticmethod
+    def register_params(layer, name, shape, dtype, cls, wl, *, init=None, **dims):
+        p = cls(data=torch.empty(shape, dtype=dtype), weight_loader=wl, **dims)
+        if init is not None:
+            p.data.fill_(init)
+        layer.register_parameter(name, p)
+
+
+class KNvfp4Static(QuantKeyScheme):
+    """NVFP4 weight scheme (W4A4 and W4A16 share it). Weight-role only today."""
+
+    key = kNvfp4Static
+
+    def create_weights(self, layer, role, ctx, shapes, wl) -> None:
+        if role is not WEIGHT:
+            self.reject(role)
+        if shapes.in_ % 16 != 0:
+            raise ValueError(
+                "Unsupported model when in features size is not multiple of 16"
+            )
+        weight_dtype = (
+            torch.float8_e4m3fn if ctx.serialized else shapes.params_dtype
+        )
+        # Packed NVFP4 weight: 2 fp4 items per byte along the input dim.
+        self.register_params(
+            layer,
+            "weight",
+            (shapes.out, shapes.in_ // 2),
+            torch.uint8,
+            ModelWeightParameter,
+            wl,
+            input_dim=1,
+            output_dim=0,
+        )
+        # Per-tensor global weight scale.
+        self.register_params(
+            layer,
+            "weight_scale_2",
+            (shapes.nparts,),
+            torch.float32,
+            PerTensorScaleParameter,
+            wl,
+        )
+        # Per-block (group_size) weight scale.
+        self.register_params(
+            layer,
+            "weight_scale",
+            (shapes.out, shapes.in_ // ctx.group_size),
+            weight_dtype,
+            ModelWeightParameter,
+            wl,
+            input_dim=1,
+            output_dim=0,
+        )
+
+    def process(self, layer, role) -> None:
+        if role is not WEIGHT:
+            self.reject(role)
+        if torch.unique(layer.weight_scale_2).numel() != 1:
+            logger.warning_once(
+                "In NVFP4 linear, the global weight scale differs across "
+                "parallel layers (e.g. q_proj, k_proj, v_proj). This will "
+                "likely reduce accuracy. Consider a checkpoint with a shared "
+                "global NVFP4 scale for parallel layers."
+            )
+        # Raw max, no reciprocation — Marlin/cutlass want ModelOpt's amax/2688.
+        weight_global_scale = layer.weight_scale_2.max().to(torch.float32)
+        layer.weight_global_scale = Parameter(
+            weight_global_scale, requires_grad=False
+        )
+        del layer.weight_scale_2
+
+
+class KNvfp4Dynamic(QuantKeyScheme):
+    """NVFP4 activation scheme (W4A4). Has a static global input scale on disk;
+    the per-group scale is computed at runtime inside the kernel."""
+
+    key = kNvfp4Dynamic
+
+    def create_weights(self, layer, role, ctx, shapes, wl) -> None:
+        if role is not ACT:
+            self.reject(role)
+        self.register_params(
+            layer,
+            "input_scale",
+            (shapes.nparts,),
+            torch.float32,
+            PerTensorScaleParameter,
+            wl,
+        )
+
+    def process(self, layer, role) -> None:
+        if role is not ACT:
+            self.reject(role)
+        if torch.unique(layer.input_scale).numel() != 1:
+            logger.warning_once(
+                "In NVFP4 linear, the global input scale differs across "
+                "parallel layers (e.g. q_proj, k_proj, v_proj). This will "
+                "likely reduce accuracy. Consider a checkpoint with a shared "
+                "global NVFP4 scale for parallel layers."
+            )
+        input_global_scale = layer.input_scale.max().to(torch.float32)
+        layer.input_global_scale = Parameter(
+            input_global_scale, requires_grad=False
+        )
+        layer.input_global_scale_inv = Parameter(
+            (1.0 / layer.input_global_scale).to(torch.float32),
+            requires_grad=False,
+        )
+        del layer.input_scale
+
+
+class KFp8StaticTensor(QuantKeyScheme):
+    """Plain per-tensor static FP8 — bivalent: serves BOTH the weight slot and
+    the activation slot (W8A8). One key in both QuantSpec slots."""
+
+    key = kFp8StaticTensorSym
+    requires_serialized = False  # FP8 alone allows a non-serialized checkpoint
+    exposes_input_quant_key = False  # old FP8 method did not expose it (C2)
+
+    def create_weights(self, layer, role, ctx, shapes, wl) -> None:
+        if role is WEIGHT:
+            weight_dtype = (
+                torch.float8_e4m3fn if ctx.serialized else shapes.params_dtype
+            )
+            self.register_params(
+                layer, "weight", (shapes.out, shapes.in_), weight_dtype,
+                ModelWeightParameter, wl, input_dim=1, output_dim=0,
+            )
+            layer.orig_dtype = shapes.params_dtype
+            if ctx.serialized:
+                self.register_params(
+                    layer, "weight_scale", (shapes.nparts,), torch.float32,
+                    PerTensorScaleParameter, wl, init=SENTINEL,
+                )
+        elif role is ACT:
+            if ctx.serialized:
+                self.register_params(
+                    layer, "input_scale", (shapes.nparts,), torch.float32,
+                    PerTensorScaleParameter, wl, init=SENTINEL,
+                )
+        else:
+            self.reject(role)
+
+    def process(self, layer, role) -> None:
+        if role is WEIGHT:
+            weight = layer.weight
+            max_w_scale = layer.weight_scale.max()
+            if not (layer.weight_scale == layer.weight_scale[0]).all():
+                max_w_scale, weight = requantize_with_max_scale(
+                    layer.weight, layer.weight_scale, layer.logical_widths
+                )
+            # Transpose lives here (Scope A; belongs to the kernel — C1).
+            layer.weight = Parameter(weight.t(), requires_grad=False)
+            layer.weight_scale = Parameter(max_w_scale, requires_grad=False)
+        elif role is ACT:
+            layer.input_scale = Parameter(
+                layer.input_scale.max(), requires_grad=False
+            )
+        else:
+            self.reject(role)
+
+
+class KFp8StaticChannel(QuantKeyScheme):
+    """Per-channel static FP8 weight (the 'PcPt' weight). Weight-role only —
+    there is no static per-channel *activation* today."""
+
+    key = kFp8StaticTokenSym
+    exposes_input_quant_key = False  # old PcPt method did not expose it
+
+    def create_weights(self, layer, role, ctx, shapes, wl) -> None:
+        if role is not WEIGHT:
+            self.reject(role)
+        self.register_params(
+            layer, "weight", (shapes.out, shapes.in_), torch.float8_e4m3fn,
+            ModelWeightParameter, wl, input_dim=1, output_dim=0,
+        )
+        self.register_params(
+            layer, "weight_scale", (shapes.out,), torch.float32,
+            ChannelQuantScaleParameter, wl, output_dim=0, init=SENTINEL,
+        )
+
+    def process(self, layer, role) -> None:
+        if role is not WEIGHT:
+            self.reject(role)
+        weight, weight_scale, _ = process_fp8_weight_channel_strategy(
+            layer.weight, layer.weight_scale.data
+        )
+        layer.weight = Parameter(weight.t(), requires_grad=False)  # C1 (Scope A)
+        layer.weight_scale = Parameter(weight_scale, requires_grad=False)
+
+
+class KFp8Block128(QuantKeyScheme):
+    """128x128 block-static FP8 weight ('PbWo'). Weight-role only. ModelOpt
+    exports the scale 4-D [out_blk,1,in_blk,1] (C6); process squeezes to 2-D.
+    No transpose (block kernel keeps [out,in])."""
+
+    key = kFp8Static128BlockSym
+    exposes_input_quant_key = False
+
+    def create_weights(self, layer, role, ctx, shapes, wl) -> None:
+        if role is not WEIGHT:
+            self.reject(role)
+        if shapes.out % 128 != 0 or shapes.in_ % 128 != 0:
+            raise ValueError(
+                f"FP8_PB_WO requires out/in divisible by 128, got "
+                f"{shapes.out}x{shapes.in_}"
+            )
+        self.register_params(
+            layer, "weight", (shapes.out, shapes.in_), torch.float8_e4m3fn,
+            ModelWeightParameter, wl, input_dim=1, output_dim=0,
+        )
+        ob, ib = shapes.out // 128, shapes.in_ // 128
+        self.register_params(
+            layer, "weight_scale", (ob, 1, ib, 1), torch.float32,
+            BlockQuantScaleParameter, wl, input_dim=2, output_dim=0,
+            init=SENTINEL,
+        )
+        layer.weight_block_size = [128, 128]
+
+    def process(self, layer, role) -> None:
+        if role is not WEIGHT:
+            self.reject(role)
+        layer.weight = Parameter(layer.weight.data, requires_grad=False)
+        s = layer.weight_scale
+        if s.dim() == 4:
+            s = s.squeeze(1).squeeze(-1)  # [ob,1,ib,1] -> [ob,ib]
+        elif s.dim() != 2:
+            raise ValueError(
+                f"Unexpected FP8_PB_WO weight_scale shape {tuple(s.shape)}"
+            )
+        layer.weight_scale = Parameter(s.contiguous(), requires_grad=False)
+
+
+class KMxfp8Static(QuantKeyScheme):
+    """MXFP8 weight: fp8-e4m3 values + per-32-block e8m0 (uint8) scale.
+    Weight-role only. process is validate-only + idempotency guard (C13)."""
+
+    key = kMxfp8Static
+    exposes_input_quant_key = False
+
+    def create_weights(self, layer, role, ctx, shapes, wl) -> None:
+        if role is not WEIGHT:
+            self.reject(role)
+        if shapes.in_ % MXFP8_BLOCK_SIZE != 0:
+            raise ValueError(
+                f"MXFP8 requires in divisible by {MXFP8_BLOCK_SIZE}, "
+                f"got {shapes.in_}"
+            )
+        self.register_params(
+            layer, "weight", (shapes.out, shapes.in_), MXFP8_VALUE_DTYPE,
+            ModelWeightParameter, wl, input_dim=1, output_dim=0,
+        )
+        self.register_params(
+            layer, "weight_scale",
+            (shapes.out, shapes.in_ // MXFP8_BLOCK_SIZE), MXFP8_SCALE_DTYPE,
+            ModelWeightParameter, wl, input_dim=1, output_dim=0,
+        )
+
+    def process(self, layer, role) -> None:
+        if role is not WEIGHT:
+            self.reject(role)
+        # Idempotency: emulation kernel may dequant weight to >=2-byte at load.
+        if layer.weight.element_size() >= 2:
+            return
+        assert layer.weight.ndim == 2 and layer.weight.dtype == MXFP8_VALUE_DTYPE
+        assert layer.weight_scale.ndim == 2
+        assert layer.weight_scale.dtype == MXFP8_SCALE_DTYPE
+
+
+class KDynamicNoParam(QuantKeyScheme):
+    """Dynamic activation with no stored scale (W8A8): quantized at runtime in
+    the kernel. NOT the same as activation=None (weight-only) — init_fp8 needs a
+    non-None activation key. Activation-role only. Serves the fp8 per-token, fp8
+    per-block, and mxfp8 dynamic activation keys."""
+
+    requires_serialized = False
+
+    def create_weights(self, layer, role, ctx, shapes, wl) -> None:
+        if role is not ACT:
+            self.reject(role)
+        # dynamic -> nothing stored
+
+    def process(self, layer, role) -> None:
+        if role is not ACT:
+            self.reject(role)
+
+
+SCHEME_FOR: dict[QuantKey | None, QuantKeyScheme] = {
+    kNvfp4Static: KNvfp4Static(),
+    kNvfp4Dynamic: KNvfp4Dynamic(),
+    kFp8StaticTensorSym: KFp8StaticTensor(),
+    kFp8StaticTokenSym: KFp8StaticChannel(),
+    kFp8Static128BlockSym: KFp8Block128(),
+    kMxfp8Static: KMxfp8Static(),
+    kFp8DynamicTokenSym: KDynamicNoParam(),
+    kFp8Dynamic128Sym: KDynamicNoParam(),
+    kMxfp8Dynamic: KDynamicNoParam(),
+}
+
+
+def maybe_fuse_global_scales(layer) -> None:
+    """alpha = input_global_scale * weight_global_scale, presence-gated.
+
+    W4A4 has both -> computed; W4A16 has no input_global_scale -> skipped.
+    """
+    if hasattr(layer, "weight_global_scale") and hasattr(
+        layer, "input_global_scale"
+    ):
+        layer.alpha = Parameter(
+            layer.input_global_scale * layer.weight_global_scale,
+            requires_grad=False,
+        )
+
+
+def select_linear_kernel(spec: QuantSpec, layer, rt: RuntimeDtypes):
+    """Thin family dispatcher on the weight key: nvfp4 / mxfp8 / fp8."""
+    w = spec.weight
+    if w.dtype == FP4_DTYPE:
+        if spec.activation is None:
+            # W4A16: pin Marlin exactly like the old NVFP4 W4A16 method. We
+            # can't route through init_nvfp4_linear_kernel(use_a16=True): under
+            # VLLM_BATCH_INVARIANT its first branch force-selects Cutlass (W4A4),
+            # whose apply reads layer.input_global_scale_inv — absent for W4A16,
+            # so it AttributeErrors. Pinning matches old and is BI-safe.
+            return MarlinNvFp4LinearKernel(NvFp4LinearLayerConfig())
+        return init_nvfp4_linear_kernel(use_a16=False)  # W4A4 (Cutlass/etc.)
+    if w.scale.dtype == MXFP8_SCALE_DTYPE:
+        return init_mxfp8_linear_kernel()
+    # fp8 family: init_fp8 routes block-vs-plain itself off the activation key.
+    return init_fp8_linear_kernel(
+        activation_quant_key=spec.activation,
+        weight_quant_key=w,
+        input_dtype=rt.input_dtype,
+        out_dtype=rt.out_dtype,
+        weight_shape=layer.weight.shape,
+        module_name=type(layer).__name__,
+    )
+
+
+@register_weight_loader_v2_supported_method
+class ModelOptLinearMethod(LinearMethodBase):
+    """Generic, format-agnostic ModelOpt linear method. Holds a weight scheme +
+    an activation scheme (from the QuantSpec pair), runs a fixed lifecycle,
+    selects the kernel from the pair, and applies.
+
+    Registered for weight_loader_v2 (like every ModelOpt linear method) so the
+    ``BasevLLMParameter`` params route through the v2 fused loader, not the
+    legacy shape-assert path.
+    """
+
+    def __init__(
+        self,
+        spec: QuantSpec,
+        ctx: CkptCtx,
+        format_scheme=None,
+    ) -> None:
+        self.spec = spec
+        self.ctx = ctx
+        self.wkey = SCHEME_FOR[spec.weight]
+        self.akey = None if spec.activation is None else SCHEME_FOR[spec.activation]
+        self.out_dtype = torch.get_default_dtype()
+        # Only the fp8/mxfp8 kernels read input_dtype; nvfp4 ignores it. During
+        # real serving model_config is always set; fall back defensively when
+        # there is no config context (bare unit-test dispatch).
+        model_config = getattr(
+            get_current_vllm_config_or_none(), "model_config", None
+        )
+        self.input_dtype = (
+            model_config.dtype
+            if model_config is not None
+            else torch.get_default_dtype()
+        )
+        self.marlin_input_dtype = None
+        # Kernel/backend are chosen in create_weights (after get_quant_method),
+        # so the front-end marlin poke stays dormant here — same as the old
+        # NVFP4 methods.
+        self.kernel = None
+
+    def create_weights(
+        self,
+        layer,
+        input_size_per_partition: int,
+        output_partition_sizes: list[int],
+        input_size: int,
+        output_size: int,
+        params_dtype: torch.dtype,
+        **extra_weight_attrs,
+    ) -> None:
+        del input_size, output_size
+        if self.wkey.requires_serialized and not self.ctx.serialized:
+            raise ValueError(
+                f"{self.spec.weight} requires a serialized checkpoint"
+            )
+        weight_loader = extra_weight_attrs.get("weight_loader")
+        layer.logical_widths = output_partition_sizes
+        layer.input_size_per_partition = input_size_per_partition
+        layer.output_size_per_partition = sum(output_partition_sizes)
+        shapes = Shapes(output_partition_sizes, input_size_per_partition, params_dtype)
+
+        self.wkey.create_weights(layer, WEIGHT, self.ctx, shapes, weight_loader)
+        if self.akey:
+            self.akey.create_weights(layer, ACT, self.ctx, shapes, weight_loader)
+
+        rt = RuntimeDtypes(self.input_dtype, self.out_dtype, self.marlin_input_dtype)
+        self.kernel = select_linear_kernel(self.spec, layer, rt)
+        if self.wkey.exposes_input_quant_key:
+            expose_input_quant_key(layer, self.kernel)
+
+    def process_weights_after_loading(self, layer) -> None:
+        self.wkey.process(layer, WEIGHT)
+        if self.akey:
+            self.akey.process(layer, ACT)
+        maybe_fuse_global_scales(layer)
+        self.kernel.process_weights_after_loading(layer)
+
+    def apply(self, layer, x, bias=None):
+        return self.kernel.apply_weights(layer=layer, x=x, bias=bias)
+
+
+def resolve(algo: str, subcfg, prefix: str):
+    """Turn an existing (untouched) sub-config into (QuantSpec, CkptCtx,
+    format_scheme). Strictly read-only over ``subcfg`` — the one real hazard in
+    mixed mode is writing back to a config shared with the imported MoE method.
+    """
+    if algo == "FP8":
+        # Plain per-tensor static FP8 (W8A8): same key in both slots (bivalent).
+        ctx = CkptCtx(
+            serialized=subcfg.is_checkpoint_fp8_serialized, group_size=None
+        )
+        return (
+            QuantSpec(weight=kFp8StaticTensorSym, activation=kFp8StaticTensorSym),
+            ctx,
+            None,
+        )
+    if algo == "FP8_PER_CHANNEL_PER_TOKEN":
+        # PcPt: per-channel static weight, dynamic per-token activation (W8A8).
+        ctx = CkptCtx(
+            serialized=subcfg.is_checkpoint_fp8_serialized, group_size=None
+        )
+        return (
+            QuantSpec(
+                weight=kFp8StaticTokenSym, activation=kFp8DynamicTokenSym
+            ),
+            ctx,
+            None,
+        )
+    if algo == "FP8_PB_WO":
+        # PbWo: 128x128 block-static weight, dynamic per-block activation (W8A8).
+        # C12: the generic base runs the block kernel's post-load, which the old
+        # method skipped via a misnamed guard — validate vs CT block-FP8.
+        ctx = CkptCtx(
+            serialized=subcfg.is_checkpoint_fp8_serialized, group_size=None
+        )
+        return (
+            QuantSpec(
+                weight=kFp8Static128BlockSym, activation=kFp8Dynamic128Sym
+            ),
+            ctx,
+            None,
+        )
+    if algo == "MXFP8":
+        # MXFP8: block(32) e4m3 weight + e8m0 scale, dynamic activation.
+        ctx = CkptCtx(
+            serialized=subcfg.is_checkpoint_mxfp8_serialized, group_size=None
+        )
+        return QuantSpec(weight=kMxfp8Static, activation=kMxfp8Dynamic), ctx, None
+
+    # NVFP4 family (W4A4 / W4A16).
+    ctx = CkptCtx(
+        serialized=subcfg.is_checkpoint_nvfp4_serialized,
+        group_size=subcfg.group_size,
+    )
+    if algo == "NVFP4":
+        # W4A4: static fp4 weight + dynamic fp4 activation (has a static global
+        # input scale). alpha = weight_gs * input_gs.
+        return QuantSpec(weight=kNvfp4Static, activation=kNvfp4Dynamic), ctx, None
+    if algo == "W4A16_NVFP4":
+        # W4A16: same fp4 weight, no activation quant. activation=None drives
+        # use_a16=True in select_linear_kernel (-> Marlin) and skips alpha. The
+        # old method's placeholder input_scale is intentionally dropped (C4).
+        return QuantSpec(weight=kNvfp4Static, activation=None), ctx, None
+    raise NotImplementedError(f"resolve: unsupported ModelOpt linear algo {algo!r}")
