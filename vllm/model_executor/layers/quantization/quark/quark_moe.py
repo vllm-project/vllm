@@ -1063,12 +1063,9 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
             act_dtype=act_dtype,
             moe_parallel_config=moe_parallel_config,
         )
-        # In case quantization emulation backend is used, there is no need to apply
-        # MXFP4-specific padding logic as the compute happens in higher precision.
-        if (
-            self.mxfp4_backend is not None
-            and self.mxfp4_backend != Mxfp4MoeBackend.EMULATION
-        ):
+        # Round per-partition sizes up to each backend's requirement. Emulation is
+        # handled inside the helper too (OCP MX block alignment), so no special-case.
+        if self.mxfp4_backend is not None:
             hidden_size, intermediate_size_per_partition = (
                 mxfp4_round_up_hidden_size_and_intermediate_size(
                     self.mxfp4_backend, hidden_size, intermediate_size_per_partition
@@ -1280,6 +1277,7 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
                 gemm1_alpha=getattr(layer, "swiglu_alpha", None),
                 gemm1_beta=getattr(layer, "swiglu_beta", None),
                 swiglu_limit=getattr(layer, "swiglu_limit", None),
+                layer=layer,
             )
 
         # Emulation and other schemes
@@ -1320,6 +1318,11 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
                 gemm1_beta=getattr(layer, "swiglu_beta", None),
                 gemm1_clamp_limit=getattr(layer, "swiglu_limit", None),
             )
+
+    @property
+    def supports_eplb(self) -> bool:
+        # AITER shuffle keeps expert dim outermost, so EPLB row moves are layout-safe.
+        return True
 
     @property
     def is_monolithic(self) -> bool:
@@ -1556,7 +1559,9 @@ class QuarkNvfp4MoEMethod(QuarkMoEMethod):
                 moe_quant_config=self.moe_quant_config,
                 moe_config=self.moe,
                 experts_cls=self.experts_cls,
+                backend=self.nvfp4_backend,
                 routing_tables=layer._expert_routing_tables(),
+                layer=layer,
             )
 
     def get_fused_moe_quant_config(
@@ -1570,6 +1575,7 @@ class QuarkNvfp4MoEMethod(QuarkMoEMethod):
             w2_scale_2=layer.w2_weight_scale_2,
             a13_scale=layer.w13_input_scale_2,
             a2_scale=layer.w2_input_scale_2,
+            layer=layer,
         )
 
     def apply(

@@ -1,0 +1,26 @@
+{
+  "tools": [
+    {
+      "function": {
+        "name": "get_weather",
+        "description": "Get weather for a city.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "city": {
+              "type": "string"
+            }
+          },
+          "required": ["city"]
+        },
+        "strict": true
+      }
+    }
+  ],
+  "messages": [
+    {
+      "role": "user",
+      "content": "Check Hangzhou weather."
+    }
+  ]
+}

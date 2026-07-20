@@ -95,8 +95,23 @@ class ModelState(ABC):
     def apply_staged_writes(self) -> None:
         return None
 
+    def preprocess_state(
+        self,
+        input_batch: InputBatch,
+        block_tables: tuple[torch.Tensor, ...],
+        kv_cache_config: KVCacheConfig,
+        num_computed_tokens: torch.Tensor,
+    ) -> None:
+        """Hook run on real batches before the forward pass (after block tables
+        are gathered). Used by mamba "align" prefix caching to pre-copy state
+        across block boundaries. No-op by default."""
+        return None
+
     def postprocess_state(
-        self, idx_mapping: torch.Tensor, num_sampled: torch.Tensor
+        self,
+        idx_mapping: torch.Tensor,
+        num_sampled: torch.Tensor,
+        num_computed_tokens: torch.Tensor | None = None,
     ) -> None:
         return None
 
@@ -109,17 +124,21 @@ class ModelState(ABC):
     ) -> torch.Tensor | None:
         raise NotImplementedError
 
+    def dummy_inputs_embeds(self, num_tokens: int) -> torch.Tensor | None:
+        """Pre-allocated inputs_embeds buffer for dummy runs (contents unused)."""
+        return None
+
     def gather_mm_embeddings(
         self, input_batch: InputBatch, draft_lookahead: int = 0
     ) -> tuple[list[torch.Tensor], torch.Tensor]:
-        """Gather cached multimodal embeddings for a speculator's draft forward."""
+        """Gather cached multimodal embeddings."""
         return self.encoder_runner.gather_mm_embeddings(
             input_batch.req_ids,
             input_batch.num_tokens,
             input_batch.num_scheduled_tokens,
             input_batch.query_start_loc_np,
             input_batch.prefill_len_np,
-            input_batch.num_computed_prefill_tokens_np,
+            input_batch.num_computed_tokens_np,
             draft_lookahead=draft_lookahead,
         )
 
