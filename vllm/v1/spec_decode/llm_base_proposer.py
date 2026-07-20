@@ -1780,20 +1780,21 @@ class SpecDecodeBaseProposer:
                     attention_groups[backend_key].layer_names.append(layer_name)
 
         self.draft_attn_groups = list(attention_groups.values())
-        if kernel_block_sizes is not None and 0 <= self.kv_cache_gid < len(
-            kernel_block_sizes
-        ):
-            # Slot mappings are computed against the block table, which is
-            # stored at kernel-block granularity. Use the kernel block size
-            # rather than the KV cache manager's block size; the two differ
-            # when manager blocks are split for the attention kernel.
-            self.block_size = kernel_block_sizes[self.kv_cache_gid]
-        else:
-            self.block_size = (
-                self.draft_attn_groups[0]
-                .get_metadata_builder()
-                .kv_cache_spec.block_size
-            )
+        spec_block_size = (
+            self.draft_attn_groups[0].get_metadata_builder().kv_cache_spec.block_size
+        )
+        kernel_block_size = (
+            kernel_block_sizes[self.kv_cache_gid]
+            if kernel_block_sizes is not None
+            and self.kv_cache_gid < len(kernel_block_sizes)
+            else None
+        )
+        # eagle_step / compute_new_slot_mapping index the raw shared
+        # block_table, which for a virtually-split MLA is in kernel (storage)
+        # block-size units (e.g. 64) even though the scheduler/spec block_size
+        # is larger (e.g. 1024). Using the spec block_size here yields slot ids
+        # ~compress_ratio x too large -> OOB KV write, so prefer the kernel one.
+        self.block_size = kernel_block_size or spec_block_size
         logger.debug("Using block size %d for drafting layers", self.block_size)
 
     def _determine_batch_execution_and_padding(
