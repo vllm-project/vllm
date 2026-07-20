@@ -294,6 +294,15 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "   str? maybe_schedule"
       ") -> ()");
 
+  // CUTLASS W4AFP8 grouped GEMM
+  ops.def(
+      "cutlass_w4afp8_moe_mm("
+      "   Tensor! out_tensors, Tensor a_tensors, Tensor b_tensors,"
+      "   Tensor a_scales, Tensor b_scales, Tensor expert_offsets,"
+      "   Tensor problem_sizes, Tensor a_strides, Tensor b_strides,"
+      "   Tensor d_strides, Tensor s_strides, int chunk_size, int topk"
+      ") -> ()");
+
   ops.def(
       "cutlass_encode_and_reorder_int4b_grouped(Tensor b_tensors) -> (Tensor, "
       "Tensor)");
