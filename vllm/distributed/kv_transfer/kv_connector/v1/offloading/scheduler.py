@@ -463,15 +463,27 @@ class OffloadingConnectorScheduler:
             del self._req_status[req_id]
 
     def _maximal_prefix_lookup(
-        self, keys: Iterable[OffloadKey], req_context: ReqContext
+        self,
+        keys: Iterable[OffloadKey],
+        req_context: ReqContext,
+        req: Request,
+        group_config: GroupOffloadConfig,
+        start_chunk_idx: int,
     ) -> int | None:
         """Return the number of consecutive offloaded chunks from the start,
         or None if the backend deferred a lookup."""
         hit_count = 0
         defer_lookup = False
-        for key in keys:
-            match self.manager.lookup(key, req_context):
+        for local_idx, key in enumerate(keys):
+            result = self.manager.lookup(key, req_context)
+            match result:
                 case LookupResult.HIT:
+                    self._events_tracker.record_lookup(
+                        req,
+                        group_config,
+                        start_chunk_idx + local_idx,
+                        key,
+                    )
                     hit_count += 1
                 case LookupResult.HIT_PENDING:
                     defer_lookup = True
@@ -616,7 +628,11 @@ class OffloadingConnectorScheduler:
                 num_hit_chunks: int | None
                 if sliding_window_size_in_chunks is None:
                     num_hit_chunks = self._maximal_prefix_lookup(
-                        offload_keys, req_status.req_context
+                        offload_keys,
+                        req_status.req_context,
+                        req_status.req,
+                        group_config,
+                        start_chunk_idx,
                     )
                 else:
                     required_window = sliding_window_size_in_chunks
