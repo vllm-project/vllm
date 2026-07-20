@@ -163,11 +163,8 @@ class EngineCore:
         if self.scheduler.connector is not None:  # type: ignore
             self.model_executor.init_kv_output_aggregator(self.scheduler.connector)  # type: ignore
 
-        # True while the engine is asleep at level >= 1 (weights offloaded
-        # and KV cache discarded). Requests that arrive in this state cannot
-        # be scheduled until wake_up(), so they are aborted immediately
-        # instead of being parked in the waiting queue with no response.
-        self._asleep = False
+        # Reject new requests during level-1+ sleep instead of queueing them.
+        self._reject_new_requests = False
 
         mm_registry = MULTIMODAL_REGISTRY
         self.mm_receiver_cache = mm_registry.engine_receiver_cache_from_config(
@@ -785,10 +782,8 @@ class EngineCore:
         # Pause scheduler before sleeping.
         clear_prefix_cache = level >= 1
         if level >= 1:
-            # Mark as asleep *before* pausing so that requests racing with
-            # the pause cannot slip into the waiting queue, where they
-            # would be parked without a response until wake_up.
-            self._asleep = True
+            # Reject requests before pausing to close the race with sleep.
+            self._reject_new_requests = True
         pause_future = self.pause_scheduler(mode=mode, clear_cache=clear_prefix_cache)
         if level < 1:
             return pause_future
@@ -828,7 +823,7 @@ class EngineCore:
         # Partial wakes intentionally keep the remaining allocations asleep.
         # Resume scheduling only once all executor memory is resident again.
         if not self.model_executor.is_sleeping:
-            self._asleep = False
+            self._reject_new_requests = False
             self.resume_scheduler()
 
     def is_sleeping(self) -> bool:
@@ -1433,13 +1428,7 @@ class EngineCoreProc(EngineCore):
         return True
 
     def _reject_add_while_asleep(self, request: Request) -> bool:
-        """Abort requests that arrive while the engine is asleep (level >= 1).
-
-        The model weights are offloaded and the scheduler is paused, so such
-        requests cannot be scheduled until wake_up(). Without this, they
-        would be parked in the scheduler's waiting queue with no response,
-        and clients whose requests race with a sleep call would hang
-        indefinitely (see https://github.com/vllm-project/vllm/issues/45268).
+        """Reject new requests during level-1+ sleep instead of queueing them.
 
         Args:
             request: The incoming request.
@@ -1449,7 +1438,7 @@ class EngineCoreProc(EngineCore):
             client), False if the engine is awake and the request should
             be added normally.
         """
-        if not self._asleep:
+        if not self._reject_new_requests:
             return False
 
         logger.debug(
