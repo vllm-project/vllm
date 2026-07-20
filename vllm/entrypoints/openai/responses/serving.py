@@ -47,6 +47,7 @@ from vllm.entrypoints.chat_utils import (
 )
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.mcp.tool_server import ToolServer
+from vllm.entrypoints.openai.chat_completion.serving import _decode_raw_output
 from vllm.entrypoints.openai.engine.protocol import (
     DeltaMessage,
     ErrorResponse,
@@ -385,6 +386,14 @@ class OpenAIServingResponses(OpenAIServing):
             return self.create_error_response(e)
 
         request_metadata = RequestResponseMetadata(request_id=request.request_id)
+        # Capture the chat-template-rendered prompt strings so the opt-in
+        # `return_rendered_prompts` echo (read back from request_metadata in
+        # the generators) has a single source of truth. Cheap: just
+        # references to the upstream prompt strings. May be None for
+        # renderers that produce token ids directly (e.g. harmony).
+        request_metadata.rendered_prompts = [
+            self._extract_prompt_text(ep) for ep in engine_prompts
+        ]
         if raw_request:
             raw_request.state.request_metadata = request_metadata
 
@@ -779,6 +788,22 @@ class OpenAIServingResponses(OpenAIServing):
                 ],
             ),
         )
+        # vLLM-specific opt-in echoes. `return_raw_output` decodes the full
+        # accumulated output token-id sequence in one shot (see
+        # `_decode_raw_output`) so the captured text is the pristine model
+        # output before the reasoning/tool parser rewrites anything. Only the
+        # standard contexts expose `_accumulated_token_ids`; harmony is left
+        # as None in this pass. `rendered_prompts` was captured on the
+        # metadata in `create_responses`.
+        if request.return_raw_output and isinstance(
+            context, (SimpleContext, ParsableContext)
+        ):
+            raw_ids = getattr(context, "_accumulated_token_ids", None)
+            if raw_ids:
+                request_metadata.raw_output_texts = [
+                    _decode_raw_output(tokenizer, raw_ids)
+                ]
+
         response = ResponsesResponse.from_request(
             request,
             sampling_params,
@@ -787,6 +812,14 @@ class OpenAIServingResponses(OpenAIServing):
             model_name=model_name,
             created_time=created_time,
             output=output,
+            rendered_prompts=(
+                request_metadata.rendered_prompts
+                if request.return_rendered_prompts
+                else None
+            ),
+            raw_output_texts=(
+                request_metadata.raw_output_texts if request.return_raw_output else None
+            ),
             status=status,
             usage=usage,
         )
@@ -1712,10 +1745,21 @@ class OpenAIServingResponses(OpenAIServing):
                 request_metadata,
                 created_time=created_time,
             )
-            yield _increment_sequence_number_and_return(
-                ResponseCompletedEvent(
-                    type="response.completed",
-                    sequence_number=-1,
-                    response=final_response,
-                )
+            completed_event = ResponseCompletedEvent(
+                type="response.completed",
+                sequence_number=-1,
+                response=final_response,
             )
+            # Attach the vLLM-specific opt-in echoes at the event top level
+            # (not nested under `response`), mirroring the chat path's final
+            # streaming chunk. `ResponseCompletedEvent`'s base allows extra
+            # fields, so these serialize via model_dump().
+            if request.return_rendered_prompts and isinstance(
+                final_response, ResponsesResponse
+            ):
+                completed_event.rendered_prompts = final_response.rendered_prompts
+            if request.return_raw_output and isinstance(
+                final_response, ResponsesResponse
+            ):
+                completed_event.raw_output_texts = final_response.raw_output_texts
+            yield _increment_sequence_number_and_return(completed_event)

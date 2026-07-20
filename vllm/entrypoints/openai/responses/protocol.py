@@ -242,6 +242,29 @@ class ResponsesRequest(OpenAIBaseModel):
     seed: int | None = Field(None, ge=_LONG_INFO.min, le=_LONG_INFO.max)
     stop: str | list[str] | None = []
     ignore_eos: bool = False
+    return_rendered_prompts: bool | None = Field(
+        default=None,
+        description=(
+            "If true, the response includes a top-level `rendered_prompts` "
+            "field with the chat-template-rendered prompt string(s) that "
+            "were tokenized and fed to the engine. May be null for "
+            "renderers that produce token ids directly (e.g. Mistral, "
+            "harmony / gpt-oss). In streaming mode the field is attached "
+            "to the final `response.completed` event."
+        ),
+    )
+    return_raw_output: bool | None = Field(
+        default=None,
+        description=(
+            "If true, the response includes a top-level `raw_output_texts` "
+            "field with the model's pristine output (one entry per choice) "
+            "before the reasoning_parser / tool_parser strips or rewrites "
+            "anything. In streaming mode the field is attached to the final "
+            "`response.completed` event; the per-choice value ends with the "
+            "EOS token's literal form when generation stopped on a natural "
+            "EOS."
+        ),
+    )
     vllm_xargs: dict[str, str | int | float | list[str | int | float]] | None = Field(
         default=None,
         description=(
@@ -493,6 +516,12 @@ class ResponsesResponse(OpenAIBaseModel):
     )
     # --8<-- [end:responses-response-extra-params]
 
+    # vLLM-specific opt-in echoes, populated only when the request sets
+    # `return_rendered_prompts` / `return_raw_output`. Mirrors the chat
+    # completion path (see ChatCompletionResponse).
+    rendered_prompts: list[Any] | None = None
+    raw_output_texts: list[str] | None = None
+
     # NOTE: openAI harmony doesn't serialize TextContent properly,
     # TODO: this fixes for TextContent, but need to verify for tools etc
     # https://github.com/openai/harmony/issues/78
@@ -518,6 +547,8 @@ class ResponsesResponse(OpenAIBaseModel):
         usage: ResponseUsage | None = None,
         input_messages: ResponseInputOutputMessage | None = None,
         output_messages: ResponseInputOutputMessage | None = None,
+        rendered_prompts: list[Any] | None = None,
+        raw_output_texts: list[str] | None = None,
     ) -> "ResponsesResponse":
         incomplete_details: IncompleteDetails | None = None
         if status == "incomplete":
@@ -553,6 +584,8 @@ class ResponsesResponse(OpenAIBaseModel):
             truncation=request.truncation,
             user=request.user,
             usage=usage,
+            rendered_prompts=rendered_prompts,
+            raw_output_texts=raw_output_texts,
         )
 
 
