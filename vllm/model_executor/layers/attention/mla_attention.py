@@ -211,6 +211,7 @@ from vllm.config import (
 from vllm.config.cache import CacheDType
 from vllm.distributed.parallel_state import (
     get_dcp_group,
+    get_tp_group,
     is_global_first_rank,
 )
 from vllm.forward_context import ForwardContext, get_forward_context
@@ -224,6 +225,10 @@ from vllm.model_executor.layers.attention.attention import (
 )
 from vllm.model_executor.layers.attention.kv_transfer_utils import (
     maybe_transfer_kv_layer,
+)
+from vllm.model_executor.layers.attention.pcp import (
+    finalize_mla_pcp_decode,
+    maybe_gather_mla_latent_cache_inputs,
 )
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.linear import (
@@ -269,7 +274,7 @@ from vllm.v1.attention.backends.utils import (
     get_dcp_local_seq_lens,
     split_decodes_and_prefills,
 )
-from vllm.v1.attention.ops.common import cp_lse_ag_out_rs
+from vllm.v1.attention.ops.common import cp_lse_ag_out_ar, cp_lse_ag_out_rs
 from vllm.v1.attention.ops.dcp_alltoall import dcp_a2a_lse_reduce
 from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
 from vllm.v1.attention.selector import get_attn_backend
@@ -499,6 +504,8 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         self.use_direct_call = not current_platform.opaque_attention_op()
 
         vllm_config = get_current_vllm_config()
+        parallel_config = vllm_config.parallel_config
+        self.use_pcp = parallel_config.prefill_context_parallel_size > 1
         compilation_config = vllm_config.compilation_config
         if prefix in compilation_config.static_forward_context:
             raise ValueError(f"Duplicate layer name: {prefix}")
@@ -611,11 +618,23 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             assert isinstance(slot_mapping, dict), (
                 f"Expected slot_mapping to be a dict, got {type(slot_mapping)}. "
             )
+            layer_slot_mapping = slot_mapping.get(self.layer_name)
+            kv_for_cache, kpe_for_cache, layer_slot_mapping = (
+                maybe_gather_mla_latent_cache_inputs(
+                    kv_c_normed,
+                    k_pe,
+                    layer_slot_mapping,
+                    attn_metadata.num_decode_tokens
+                    if attn_metadata is not None
+                    else None,
+                    self.use_pcp,
+                )
+            )
             self.impl.do_kv_cache_update(  # type: ignore[attr-defined]
-                kv_c_normed,
-                k_pe,
+                kv_for_cache,
+                kpe_for_cache,
                 self_kv_cache,
-                slot_mapping.get(self.layer_name),
+                layer_slot_mapping,
                 self.kv_cache_dtype,
                 self._k_scale,
             )
@@ -710,6 +729,10 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         fp8_attention = is_quantized_kv_cache(self.kv_cache_dtype)
 
         num_actual_toks = attn_metadata.num_actual_tokens
+        if self.use_pcp and self.impl.dcp_world_size > 1 and quant_key is not None:
+            raise NotImplementedError(
+                "MRV2 MLA PCP+DCP does not support fused output quantization yet."
+            )
 
         # Inputs and outputs may be padded for CUDA graphs
         output_padded = output
@@ -833,11 +856,15 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             else:
                 mqa_q = (mqa_ql_nope, mqa_q_pe)
             if self.impl.dcp_world_size > 1:
-                if isinstance(mqa_q, tuple):
-                    # concatenate mqa_ql_nope and mqa_q_pe -> (B, N, L + P)
-                    mqa_q = torch.cat(mqa_q, dim=-1)
-                # mqa_q do allgather in head dim.
-                mqa_q = get_dcp_group().all_gather(mqa_q, dim=1)
+                if self.use_pcp:
+                    if self.impl.dcp_world_size > self.impl.pcp_world_size:
+                        if isinstance(mqa_q, tuple):
+                            mqa_q = torch.cat(mqa_q, dim=-1)
+                        mqa_q = get_tp_group().all_gather(mqa_q, dim=1)
+                else:
+                    if isinstance(mqa_q, tuple):
+                        mqa_q = torch.cat(mqa_q, dim=-1)
+                    mqa_q = get_dcp_group().all_gather(mqa_q, dim=1)
 
             # call decode attn
             if not self.impl.is_sparse:
@@ -846,8 +873,16 @@ class MLAAttention(nn.Module, AttentionLayerBase):
 
             # correct dcp attn_out with lse.
             if self.impl.dcp_world_size > 1:
+                assert lse is not None
                 if self.dcp_a2a:
                     attn_out = dcp_a2a_lse_reduce(
+                        attn_out,
+                        lse,
+                        get_dcp_group(),
+                        is_lse_base_on_e=self.impl.lse_base_on_e,
+                    )
+                elif self.use_pcp:
+                    attn_out = cp_lse_ag_out_ar(
                         attn_out,
                         lse,
                         get_dcp_group(),
@@ -860,6 +895,8 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                         get_dcp_group(),
                         is_lse_base_on_e=self.impl.lse_base_on_e,
                     )
+                if self.use_pcp:
+                    attn_out = finalize_mla_pcp_decode(attn_out, self.num_heads)
 
             # v_up projection
             self._v_up_proj(attn_out, out=mqa_output_slice)
@@ -903,6 +940,8 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 raise ValueError(f"Unsupported quant_key: {quant_key}")
             return quant_output
 
+        if self.use_pcp and output_padded.shape[0] > num_actual_toks:
+            output_padded[num_actual_toks:].zero_()
         return output_padded
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):
@@ -1082,8 +1121,17 @@ def unified_mla_kv_cache_update(
     the data dependency between them to ensure torch.compile preserves ordering.
     """
     layer_name = _resolve_layer_name(layer_name)
-    _, attn_layer, kv_cache, layer_slot_mapping = get_attention_context(layer_name)
+    attn_metadata, attn_layer, kv_cache, layer_slot_mapping = get_attention_context(
+        layer_name
+    )
     if layer_slot_mapping is not None:
+        kv_c_normed, k_pe, layer_slot_mapping = maybe_gather_mla_latent_cache_inputs(
+            kv_c_normed,
+            k_pe,
+            layer_slot_mapping,
+            attn_metadata.num_decode_tokens if attn_metadata is not None else None,
+            attn_layer.use_pcp,
+        )
         attn_layer.impl.do_kv_cache_update(  # type: ignore[attr-defined]
             kv_c_normed,
             k_pe,
@@ -1723,6 +1771,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         self.compilation_config = vllm_config.compilation_config
         self.vllm_config = vllm_config
         self.device = device
+        self.use_pcp = parallel_config.prefill_context_parallel_size > 1
 
         self.num_heads = self.model_config.get_num_attention_heads(parallel_config)
         self.mla_dims = get_mla_dims(self.model_config)
@@ -1735,11 +1784,9 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
 
         try:
             self.dcp_world_size = get_dcp_group().world_size
-            self.dcp_rank = get_dcp_group().rank_in_group
         except AssertionError:
             # DCP might not be initialized in testing
             self.dcp_world_size = 1
-            self.dcp_rank = 0
         self.dcp_local_block_size = parallel_config.cp_kv_cache_interleave_size
         self.dcp_virtual_block_size = self.dcp_local_block_size * self.dcp_world_size
         self.cp_kv_cache_interleave_size = parallel_config.cp_kv_cache_interleave_size
@@ -1857,6 +1904,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                 common_attn_metadata,
                 decode_threshold=self.reorder_batch_threshold,
                 require_uniform=(self.query_len_support != QueryLenSupport.VARLEN),
+                treat_short_extends_as_decodes=not self.use_pcp,
             )
         )
 

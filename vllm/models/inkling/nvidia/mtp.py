@@ -73,7 +73,6 @@ class InklingMTPDepthLayer(nn.Module):
             is_local=is_local,
             quant_config=None,
             prefix=f"{prefix}.transformer_block",
-            nvfp4_config=None,
             force_dense_mlp=True,
         )
 

@@ -15,10 +15,7 @@ from vllm.distributed import (
 )
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import Attention
-from vllm.model_executor.layers.fused_moe import (
-    FusedMoE,
-    fused_moe_make_expert_params_mapping,
-)
+from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
@@ -40,10 +37,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
-from vllm.model_executor.model_loader.weight_utils import (
-    default_weight_loader,
-    maybe_remap_moe_expert_param_name,
-)
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.lfm2_moe import Lfm2MoeConfig
 
@@ -60,7 +53,6 @@ from .utils import (
     PPMissingLayer,
     WeightsMapper,
     extract_layer_index,
-    is_pp_missing_parameter,
     make_empty_intermediate_tensors_factory,
     make_layers,
     maybe_prefix,
@@ -167,6 +159,7 @@ class Lfm2MoeSparseMoeBlock(nn.Module):
             scoring_func="sigmoid",
             e_score_correction_bias=self.gate.e_score_correction_bias,
             routed_scaling_factor=self.routed_scaling_factor,
+            ckpt_names=("w1", "w2", "w3"),
         )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -402,6 +395,22 @@ class Lfm2MoeShortConvDecoderLayer(nn.Module):
 
 @support_torch_compile
 class Lfm2MoeModel(nn.Module):
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_substr={
+            ".conv.": ".short_conv.",
+            "expert_bias": "gate.e_score_correction_bias",
+        },
+        orig_to_new_stacked={
+            ".q_proj": (".qkv_proj", "q"),
+            ".k_proj": (".qkv_proj", "k"),
+            ".v_proj": (".qkv_proj", "v"),
+            # Scoped (with trailing dots) to the dense MLP so routed experts.*.w1/w3
+            # (loaded by FusedMoE) are left untouched and .w1 does not match inside .w13
+            ".feed_forward.w1.": (".feed_forward.w13.", 0),
+            ".feed_forward.w3.": (".feed_forward.w13.", 1),
+        },
+    )
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
 
@@ -487,102 +496,9 @@ class Lfm2MoeModel(nn.Module):
         hidden_states, _ = self.embedding_norm(hidden_states, residual)
         return hidden_states
 
-    def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
-        return fused_moe_make_expert_params_mapping(
-            self,
-            ckpt_gate_proj_name="w1",
-            ckpt_down_proj_name="w2",
-            ckpt_up_proj_name="w3",
-            num_experts=self.config.num_experts,
-            num_redundant_experts=self.num_redundant_experts,
-        )
-
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        stacked_params_mapping = [
-            (".qkv_proj", ".q_proj", "q"),
-            (".qkv_proj", ".k_proj", "k"),
-            (".qkv_proj", ".v_proj", "v"),
-            (".w13", ".w1", 0),
-            (".w13", ".w3", 1),
-        ]
-        params_dict = dict(self.named_parameters())
-        loaded_params: set[str] = set()
-        expert_params_mapping = self.get_expert_mapping()
-        for name, loaded_weight in weights:
-            if "expert_bias" in name:
-                name = name.replace("expert_bias", "gate.e_score_correction_bias")
-
-            if ".conv." in name:
-                name = name.replace(".conv.", ".short_conv.", 1)
-
-            for param_name, weight_name, shard_id in stacked_params_mapping:
-                # Skip non-stacked layers and experts (experts handled below).
-                # Use segment-boundary matching (trailing dot) to prevent
-                # e.g. ".w1" from matching inside ".w13" in pre-fused keys.
-                if weight_name + "." not in name:
-                    continue
-
-                if ("feed_forward.experts." in name) and name not in params_dict:
-                    continue
-                name = name.replace(weight_name + ".", param_name + ".")
-                # Skip loading extra bias for GPTQ models.
-                if (
-                    name.endswith(".bias") or name.endswith("_bias")
-                ) and name not in params_dict:
-                    continue
-                # Skip layers on other devices.
-                if is_pp_missing_parameter(name, self):
-                    continue
-
-                param = params_dict[name]
-                weight_loader = param.weight_loader
-                weight_loader(param, loaded_weight, shard_id)
-                break
-            else:
-                for mapping in expert_params_mapping:
-                    param_name, weight_name, expert_id, shard_id = mapping
-
-                    if weight_name not in name:
-                        continue
-
-                    name = name.replace(weight_name, param_name)
-                    # Skip layers on other devices.
-                    if is_pp_missing_parameter(name, self):
-                        continue
-
-                    # Skip loading extra bias for GPTQ models.
-                    if (
-                        name.endswith(".bias") or name.endswith("_bias")
-                    ) and name not in params_dict:
-                        continue
-                    param = params_dict[name]
-
-                    weight_loader = param.weight_loader
-                    weight_loader(
-                        param,
-                        loaded_weight,
-                        name,
-                        shard_id=shard_id,
-                        expert_id=expert_id,
-                    )
-                    break
-                else:
-                    # Skip loading extra bias for GPTQ models.
-                    if (
-                        name.endswith(".bias") or name.endswith("_bias")
-                    ) and name not in params_dict:
-                        continue
-                    # Skip layers on other devices.
-                    if is_pp_missing_parameter(name, self):
-                        continue
-                    name = maybe_remap_moe_expert_param_name(name, params_dict)
-                    param = params_dict[name]
-                    weight_loader = getattr(
-                        param, "weight_loader", default_weight_loader
-                    )
-                    weight_loader(param, loaded_weight)
-            loaded_params.add(name)
-        return loaded_params
+        loader = AutoWeightsLoader(self, ignore_unexpected_suffixes=[".bias", "_bias"])
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
 class Lfm2MoeForCausalLM(
@@ -763,6 +679,3 @@ class Lfm2MoeForCausalLM(
             skip_prefixes=(["lm_head."] if self.config.tie_word_embeddings else None),
         )
         return loader.load_weights(weights)
-
-    def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
-        return self.model.get_expert_mapping()
