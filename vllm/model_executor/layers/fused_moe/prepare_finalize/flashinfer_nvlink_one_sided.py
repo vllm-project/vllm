@@ -108,7 +108,6 @@ class FlashInferNVLinkOneSidedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeMo
                 quant_config.block_shape,
                 is_scale_swizzled=False,  # delay swizzle to after comm
                 mx_alignment=quant_config.mx_alignment,
-                use_ue8m0=quant_config.use_ue8m0,
             )
 
         payloads = []

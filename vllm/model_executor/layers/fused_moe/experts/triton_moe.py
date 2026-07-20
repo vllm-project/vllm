@@ -250,7 +250,6 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
                 self.per_act_token_quant,
                 self.block_shape,
                 quantization_emulation=self.quantization_emulation,
-                use_ue8m0=self.quant_config.use_ue8m0,
             )
 
         E, num_tokens, N, K, top_k_num = self.moe_problem_size(
@@ -420,16 +419,12 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
         # Fuse SiLU+Mul + FP8 block quantize into a single kernel
         # when conditions permit (gated SiLU, fp8 block quant with
         # group_size=128, no LoRA requiring the BF16 intermediate).
-        use_ue8m0 = self.quant_config.use_ue8m0
-        if use_ue8m0 is None:
-            use_ue8m0 = is_deep_gemm_e8m0_used()
-
         if (
             activation == MoEActivation.SILU
             and self.quant_config.use_fp8_w8a8
             and self.block_shape == [128, 128]
             and lora_context is None
-            and not use_ue8m0
+            and not is_deep_gemm_e8m0_used()
         ):
             qintermediate_cache2, a2q_scale = ops.silu_and_mul_per_block_quant(
                 intermediate_cache1.view(-1, N),
@@ -448,7 +443,6 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
                 self.per_act_token_quant,
                 self.block_shape,
                 quantization_emulation=self.quantization_emulation,
-                use_ue8m0=use_ue8m0,
             )
 
         # LoRA w2: applied to intermediate_cache3 before moe_sum, using the
@@ -684,7 +678,6 @@ class TritonWNA16Experts(TritonExperts):
             self.quant_dtype,
             self.per_act_token_quant,
             self.block_shape,
-            use_ue8m0=self.quant_config.use_ue8m0,
         )
 
         invoke_fused_moe_wna16_triton_kernel(

@@ -658,7 +658,6 @@ def batched_moe_kernel_quantize_input(
     qtype: torch.dtype | None,
     per_act_token_quant: bool,
     block_shape: list[int] | None = None,
-    use_ue8m0: bool | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
     if torch.compiler.is_compiling() or torch.cuda.is_current_stream_capturing():
         # Note: this does a bunch of extra work because expert_num_tokens is
@@ -668,12 +667,7 @@ def batched_moe_kernel_quantize_input(
             f"{A_scale.shape if A_scale is not None else None}"
         )
         A_q, A_q_scale = moe_kernel_quantize_input(
-            A.view(-1, hidden_dim),
-            A_scale,
-            qtype,
-            per_act_token_quant,
-            block_shape,
-            use_ue8m0=use_ue8m0,
+            A.view(-1, hidden_dim), A_scale, qtype, per_act_token_quant, block_shape
         )
         A_q = A_q.view(E, -1, hidden_dim)
         A_q_scale = normalize_batched_scales_shape(A_q_scale, E)
@@ -713,7 +707,6 @@ def batched_moe_kernel_quantize_input(
                     qtype,
                     per_act_token_quant,
                     block_shape,
-                    use_ue8m0=use_ue8m0,
                 )
                 assert tmp_scale is not None
                 A_q_scale[e, : tmp_scale.shape[0]] = tmp_scale
@@ -963,7 +956,6 @@ class BatchedTritonExperts(mk.FusedMoEExpertsModular):
             self.quant_dtype,
             self.per_act_token_quant,
             self.block_shape,
-            use_ue8m0=self.quant_config.use_ue8m0,
         )
 
         invoke_moe_batched_triton_kernel(

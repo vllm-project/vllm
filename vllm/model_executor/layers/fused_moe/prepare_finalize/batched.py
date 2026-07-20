@@ -134,7 +134,6 @@ class BatchedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
                     quant_config.quant_dtype,
                     quant_config.per_act_token_quant,
                     quant_config.block_shape,
-                    use_ue8m0=quant_config.use_ue8m0,
                 )
                 assert b_s is not None
                 if quant_config.is_per_act_token:
