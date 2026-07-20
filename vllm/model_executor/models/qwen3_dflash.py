@@ -72,6 +72,22 @@ def dflash_has_any_non_causal(config: Qwen3Config) -> bool:
     )
 
 
+def _get_dflash_fc_input_size(vllm_config: VllmConfig, drafter_config: dict) -> int:
+    spec_config = vllm_config.speculative_config
+    config = spec_config.draft_model_config.hf_config
+    aux_layers = get_eagle3_aux_layers_from_config(spec_config)
+    if aux_layers:
+        num_features_to_use = len(aux_layers)
+    elif "layer_ids" in drafter_config:
+        num_features_to_use = len(drafter_config["layer_ids"])
+    else:
+        num_features_to_use = config.num_hidden_layers
+    target_hidden_size = (
+        getattr(config, "target_hidden_size", None) or config.hidden_size
+    )
+    return target_hidden_size * num_features_to_use
+
+
 def _resolve_layer_attention(
     config: Qwen3Config, layer_idx: int
 ) -> tuple[int | None, bool]:
@@ -398,21 +414,11 @@ class DFlashQwen3Model(nn.Module):
             ]
         )
         if self.use_aux_hidden_state:
-            # fc concatenates one target hidden state per aux layer, so its input
-            # width must match the number of aux layers the runner collects.
-            aux_layers = get_eagle3_aux_layers_from_config(
-                vllm_config.speculative_config
-            )
-            num_features_to_use = (
-                len(aux_layers) if aux_layers else self.config.num_hidden_layers
-            )
-            target_hidden_size = (
-                getattr(self.config, "target_hidden_size", None)
-                or self.config.hidden_size
-            )
-            fc_input_size = target_hidden_size * num_features_to_use
             self.fc = ReplicatedLinear(
-                input_size=fc_input_size,
+                input_size=_get_dflash_fc_input_size(
+                    vllm_config,
+                    drafter_config,
+                ),
                 output_size=self.config.hidden_size,
                 bias=False,
                 params_dtype=vllm_config.model_config.dtype,

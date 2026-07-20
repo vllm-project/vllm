@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Config-only resolution of DFlash draft attention causality.
+"""Config-only DFlash behavior.
 
 ``dflash_has_any_non_causal`` decides pre-build whether the draft needs a
 non-causal-capable backend, so its branch table (explicit override, SWA-derived
@@ -13,6 +13,7 @@ import pytest
 
 from vllm.model_executor.models.qwen3_dflash import (
     _dflash_layer_causal,
+    _get_dflash_fc_input_size,
     dflash_has_any_non_causal,
 )
 
@@ -53,3 +54,38 @@ def test_dflash_layer_causal_is_per_layer():
     config = _config(2, layer_types=["sliding_attention", "full_attention"])
     assert _dflash_layer_causal(config, 0) is True
     assert _dflash_layer_causal(config, 1) is False
+
+
+def _fc_vllm_config(**draft_config):
+    config = SimpleNamespace(**draft_config)
+    return SimpleNamespace(
+        speculative_config=SimpleNamespace(
+            draft_model_config=SimpleNamespace(hf_config=config)
+        )
+    )
+
+
+def test_dflash_fc_uses_aux_layer_count():
+    vllm_config = _fc_vllm_config(
+        num_hidden_layers=5,
+        hidden_size=4096,
+        target_hidden_size=None,
+        target_layer_ids=[1, 17, 32],
+    )
+
+    assert _get_dflash_fc_input_size(vllm_config, {}) == 3 * 4096
+
+
+def test_dflash_fc_preserves_legacy_layer_ids_count():
+    vllm_config = _fc_vllm_config(
+        num_hidden_layers=5,
+        hidden_size=4096,
+    )
+
+    assert (
+        _get_dflash_fc_input_size(
+            vllm_config,
+            {"layer_ids": [1, 17, 32]},
+        )
+        == 3 * 4096
+    )
