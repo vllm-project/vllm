@@ -32,7 +32,7 @@ _TORCH_TO_NCCL_DTYPE = {
     torch.float32: nccl_core.FLOAT32,
     torch.int64: nccl_core.INT64,
     torch.int32: nccl_core.INT32,
-    torch.float8_e4m3fn: nccl_core.UINT8,
+    torch.float8_e4m3fn: nccl_core.FLOAT8E4M3,
 }
 
 
@@ -130,14 +130,32 @@ class NcclEPStandardPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             dtype=torch.int64,
             device=tokens.device,
         )
+        recv_token_scales = None
+        if token_scales is not None:
+            assert token_scales.ndim == 2
+            assert token_scales.shape[0] == num_tokens
+            assert token_scales.dtype == torch.float32
+            recv_token_scales = torch.empty(
+                (max_recv, token_scales.shape[1]),
+                dtype=token_scales.dtype,
+                device=token_scales.device,
+            )
 
         dispatch_inputs = nccl_ep.DispatchInputs(
             tokens=_to_nccl_tensor(tokens),
             topk_weights=_to_nccl_tensor(rank_topk_weights),
+            scales=(
+                _to_nccl_tensor(token_scales) if token_scales is not None else None
+            ),
         )
         dispatch_outputs = nccl_ep.DispatchOutputs(
             tokens=_to_nccl_tensor(recv_tokens),
             topk_weights=_to_nccl_tensor(recv_topk_weights),
+            scales=(
+                _to_nccl_tensor(recv_token_scales)
+                if recv_token_scales is not None
+                else None
+            ),
             topk_idx=_to_nccl_tensor(recv_topk_idx),
         )
 
@@ -156,6 +174,7 @@ class NcclEPStandardPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
 
         return lambda: self._receiver(
             recv_tokens,
+            recv_token_scales,
             recv_topk_idx,
             recv_topk_weights,
             num_experts,
@@ -167,6 +186,7 @@ class NcclEPStandardPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
     def _receiver(
         self,
         recv_x: torch.Tensor,
+        recv_x_scale: torch.Tensor | None,
         recv_topk_idx: torch.Tensor | None,
         recv_topk_weights: torch.Tensor | None,
         num_experts: int,
@@ -175,7 +195,7 @@ class NcclEPStandardPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         defer_input_quant: bool,
     ) -> mk.PrepareResultType:
         expert_x = recv_x
-        expert_x_scale = None
+        expert_x_scale = recv_x_scale
 
         if recv_topk_idx is not None:
             recv_topk_idx = recv_topk_idx + self.rank_expert_offset
@@ -195,7 +215,11 @@ class NcclEPStandardPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             expert_num_tokens_list, device=expert_x.device
         )
 
-        if not defer_input_quant and expert_x.numel() != 0:
+        if (
+            expert_x_scale is None
+            and not defer_input_quant
+            and expert_x.numel() != 0
+        ):
             expert_x, expert_x_scale = moe_kernel_quantize_input(
                 expert_x,
                 a1_scale,
@@ -233,23 +257,34 @@ class NcclEPStandardPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             )
             a1 = a1 * topk_weights.to(a1.dtype)
 
-        assert a1.dtype == torch.bfloat16, (
-            f"NCCL EP standard dispatch requires bfloat16, got {a1.dtype}"
-        )
-        if self.use_fp8_dispatch:
-            logger.debug_once(
-                "NCCL EP standard dispatch does not support FP8; dispatching "
-                "bfloat16 and quantizing after receive."
+        if (
+            self.use_fp8_dispatch
+            and quant_config.is_block_quantized
+            and not defer_input_quant
+        ):
+            a1q, a1q_scale = moe_kernel_quantize_input(
+                a1,
+                quant_config.a1_scale,
+                quant_dtype=quant_config.quant_dtype,
+                per_act_token_quant=quant_config.per_act_token_quant,
+                block_shape=quant_config.block_shape,
             )
-        a1_post_scale = (
-            quant_config.a1_gscale
-            if quant_config.quant_dtype == "nvfp4"
-            else quant_config.a1_scale
-        )
+            assert a1q.dtype == torch.float8_e4m3fn
+            assert a1q_scale is not None
+            a1q_scale = a1q_scale.view(a1q.shape[0], -1)
+            a1_post_scale = None
+        else:
+            a1q = a1
+            a1q_scale = None
+            a1_post_scale = (
+                quant_config.a1_gscale
+                if quant_config.quant_dtype == "nvfp4"
+                else quant_config.a1_scale
+            )
 
         return self._do_dispatch(
-            tokens=a1,
-            token_scales=None,
+            tokens=a1q,
+            token_scales=a1q_scale,
             rank_topk_ids=topk_ids,
             rank_topk_weights=topk_weights,
             num_experts=num_experts,
