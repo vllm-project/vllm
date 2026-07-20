@@ -404,6 +404,23 @@ class TestMergeKwargsGpuBackendPolicy:
         )
         assert result["backend"] == "pynvvideocodec"
 
+    def test_strips_request_level_hw_decoders_when_not_static(self):
+        result = VideoMediaIO.merge_kwargs(
+            default_kwargs={"video_backend": "pynvvideocodec"},
+            runtime_kwargs={"hw_decoders": 4},
+        )
+        assert "hw_decoders" not in result
+
+    def test_prevents_request_level_hw_decoders_override(self):
+        result = VideoMediaIO.merge_kwargs(
+            default_kwargs={
+                "video_backend": "pynvvideocodec",
+                "hw_decoders": 2,
+            },
+            runtime_kwargs={"hw_decoders": 4},
+        )
+        assert result["hw_decoders"] == 2
+
     @pytest.mark.parametrize("backend", ["opencv", "pyav", "torchcodec"])
     def test_software_video_backend_passes_through(self, backend: str):
         result = VideoMediaIO.merge_kwargs(

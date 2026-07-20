@@ -818,16 +818,18 @@ Full example: [examples/generate/multimodal/openai_chat_completion_client_for_mu
 
 #### Video Decoding Backend
 
-vLLM decodes video bytes into frames using a selectable decoding backend. Three
+vLLM decodes video bytes into frames using a selectable decoding backend. Five
 backends are supported:
 
 - `opencv` (default): OpenCV-based decoder.
 - `pyav`: PyAV decoder.
 - `torchcodec`: TorchCodec (PyTorch-native) decoder.
+- `pynvvideocodec`: NVIDIA NVDEC-based decoder.
+- `deepstream`: NVIDIA DeepStream NVDEC-based decoder.
 
-All three backends are ultimately backed by FFmpeg. `torchcodec` lets
-you choose which FFmpeg version is used while `opencv` and `pyav` rely on
-whichever FFmpeg build they were linked against.
+The CPU backends are backed by FFmpeg. `torchcodec` lets you choose which FFmpeg
+version is used while `opencv` and `pyav` rely on whichever FFmpeg build they
+were linked against.
 
 Select the backend by passing the `backend` parameter via `--media-io-kwargs`:
 
@@ -852,6 +854,19 @@ The following parameters only apply to the `torchcodec` backend:
 # Example: TorchCodec with approximate seek mode and 4 FFmpeg threads
 vllm serve Qwen/Qwen3-VL-30B-A3B-Instruct \
   --media-io-kwargs '{"video": {"backend": "torchcodec", "seek_mode": "approximate", "num_ffmpeg_threads": 4}}'
+```
+
+**PyNvVideoCodec-specific parameters:**
+
+- `hw_decoders`: Maximum number of concurrent hardware decoder slots retained
+  by each API server process. It must be a positive integer and defaults to `1`.
+  Because vLLM reserves GPU memory for these slots at startup, this value cannot
+  be overridden per request.
+
+```bash
+# Example: PyNvVideoCodec with 4 concurrent hardware decoders
+vllm serve Qwen/Qwen3-VL-30B-A3B-Instruct \
+  --media-io-kwargs '{"video": {"backend": "pynvvideocodec", "hw_decoders": 4}}'
 ```
 
 #### Video Frame Recovery
