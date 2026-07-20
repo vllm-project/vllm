@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Iterable, Set
+from dataclasses import replace
 
 import regex as re
 import torch
@@ -419,6 +420,7 @@ class BertModel(nn.Module, SupportsQuant):
 
 class BertPoolingModel(BertModel):
     is_pooling_model = True
+    hf_to_vllm_mapper = replace(BertModel.hf_to_vllm_mapper, orig_to_new_prefix={})
 
     def __init__(
         self,
