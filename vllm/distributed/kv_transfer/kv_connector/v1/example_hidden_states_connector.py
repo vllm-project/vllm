@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import contextlib
 import fcntl
 import os
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -429,6 +430,24 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
         self._req_copy_events[pending.req_id] = copy_done
         self._req_futures[pending.req_id] = future
         future.add_done_callback(partial(self._on_write_done, pending.req_id))
+
+    def shutdown(self):
+        """Release the async-write thread pool and any held lock fds.
+
+        Called on worker teardown (see ``KVConnectorBase_V1.shutdown``).
+        Without this override the ThreadPoolExecutor's worker threads and
+        any still-open ``.lock`` fds holding ``LOCK_EX`` leak on shutdown,
+        which can also leave clients blocked on ``LOCK_SH`` hanging.
+        """
+        # Drain in-flight writes so their LOCK_EX is released normally,
+        # then tear down the pool's worker threads.
+        self._executor.shutdown(wait=True)
+        # Close any lock fds that were pre-created in wait_for_save but
+        # never consumed by _submit_async_write (e.g. request aborted).
+        for lock_fd in self._lock_fds.values():
+            with contextlib.suppress(OSError):
+                os.close(lock_fd)
+        self._lock_fds.clear()
 
     # ==============================
     # Scheduler-side methods
