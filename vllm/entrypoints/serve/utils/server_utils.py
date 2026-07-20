@@ -485,6 +485,25 @@ def clean_loc_for_param(loc: tuple) -> str:
     return ".".join(parts)
 
 
+# Cap how many individual validation errors are rendered into the response.
+# A single malformed request can fail validation thousands of times, and
+# each error otherwise echoes the full offending ``input`` value, inflating
+# the response body far beyond the request size (see #49239).
+_MAX_RENDERED_VALIDATION_ERRORS = 20
+
+
+def _format_validation_error(error: object) -> str:
+    """Render one validation error without its ``input`` value.
+
+    Pydantic embeds the offending input in every error dict; echoing it once
+    per error is the amplification vector. Keep ``type``/``loc``/``msg``/``ctx``
+    so the message stays actionable.
+    """
+    if isinstance(error, dict):
+        return str({k: v for k, v in error.items() if k != "input"})
+    return str(error)
+
+
 async def validation_exception_handler(req: Request, exc: RequestValidationError):
     if req.app.state.args.log_error_stack:
         logger.exception(
@@ -515,7 +534,10 @@ async def validation_exception_handler(req: Request, exc: RequestValidationError
         count = len(errors)
         label = "error" if count == 1 else "errors"
         message = f"{count} validation {label}:\n"
-        message += "".join(f"  {err}\n" for err in errors)
+        shown = errors[:_MAX_RENDERED_VALIDATION_ERRORS]
+        message += "".join(f"  {_format_validation_error(err)}\n" for err in shown)
+        if count > len(shown):
+            message += f"  ... and {count - len(shown)} more\n"
         message = message.rstrip()
     else:
         message = "Validation error"
