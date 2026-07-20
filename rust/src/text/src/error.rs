@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use thiserror::Error;
 use vllm_engine_core_client::Error as EngineCoreError;
 use vllm_llm::Error as LlmError;
