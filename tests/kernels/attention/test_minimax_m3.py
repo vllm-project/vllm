@@ -420,6 +420,246 @@ def test_fmha_sm100_indexer_matches_reference(q_lens, prefix_lens, index_dtype):
     _assert_topk_indices_equal_unordered(actual, expected)
 
 
+@pytest.mark.parametrize("num_idx_heads", [1, 4])
+def test_triton_indexer_mixed_batch_token_major_topk_buffer(
+    num_idx_heads: int,
+    monkeypatch,
+):
+    import vllm.models.minimax_m3.common.indexer as indexer_mod
+    from tests.v1.attention.utils import (
+        BatchSpec,
+        create_common_attn_metadata,
+        create_vllm_config,
+    )
+    from vllm.config import set_current_vllm_config
+    from vllm.forward_context import set_forward_context
+    from vllm.models.minimax_m3.common.indexer import (
+        MiniMaxM3IndexerTritonImpl,
+        MiniMaxM3IndexerTritonMetadataBuilder,
+    )
+
+    torch.manual_seed(0)
+
+    device = torch.device("cuda")
+    head_dim = HEAD_DIM
+    topk = 8
+    init_blocks = 0
+    local_blocks = 0
+
+    # TP=1 avoids requiring an initialized distributed process group.
+    monkeypatch.setattr(
+        indexer_mod,
+        "get_tensor_model_parallel_world_size",
+        lambda: 1,
+    )
+
+    vllm_config = create_vllm_config(
+        block_size=BLOCK_SIZE,
+        max_model_len=8192,
+        max_num_batched_tokens=8192,
+    )
+    vllm_config.model_config.hf_config.sparse_attention_config = {
+        "sparse_num_index_heads": num_idx_heads,
+    }
+
+    # Decode-first mixed batch:
+    # request 0: one decode token with a long prefix
+    # request 1: 64 prefill tokens with a long prefix
+    batch = BatchSpec(
+        seq_lens=[2305, 2624],
+        query_lens=[1, 64],
+    )
+    common = create_common_attn_metadata(
+        batch,
+        BLOCK_SIZE,
+        device,
+        arange_block_indices=True,
+    )
+
+    num_decode_tokens = 1
+    num_tokens = batch.compute_num_tokens()
+    num_prefill_tokens = num_tokens - num_decode_tokens
+
+    block_table = common.block_table_tensor
+    num_pages = int(block_table.max().item()) + 1
+
+    # Give every logical block a distinct monotonic value. This makes the
+    # expected top-k deterministic without depending on top-k output order.
+    index_cache = torch.zeros(
+        num_pages,
+        BLOCK_SIZE,
+        head_dim,
+        dtype=torch.bfloat16,
+        device=device,
+    )
+    for req_id, seq_len in enumerate(batch.seq_lens):
+        num_blocks = (seq_len + BLOCK_SIZE - 1) // BLOCK_SIZE
+        for block_id in range(num_blocks):
+            page = block_table[req_id, block_id]
+            index_cache[page].fill_(block_id + 1)
+
+    index_query = torch.ones(
+        num_tokens,
+        num_idx_heads * head_dim,
+        dtype=torch.bfloat16,
+        device=device,
+    )
+    index_query_htd = index_query.view(
+        num_tokens,
+        num_idx_heads,
+        head_dim,
+    )
+
+    spec = MLAAttentionSpec(
+        block_size=BLOCK_SIZE,
+        num_kv_heads=1,
+        head_size=head_dim,
+        dtype=DTYPE,
+    )
+
+    with set_current_vllm_config(vllm_config):
+        impl = MiniMaxM3IndexerTritonImpl(
+            prefix="triton_token_major_mixed_batch",
+            num_kv_heads=num_idx_heads,
+            scale=head_dim**-0.5,
+            topk_blocks=topk,
+            sparse_block_size=BLOCK_SIZE,
+            num_index_heads=num_idx_heads,
+            index_head_dim=head_dim,
+            init_blocks=init_blocks,
+            local_blocks=local_blocks,
+        )
+        builder = MiniMaxM3IndexerTritonMetadataBuilder(
+            spec,
+            [impl.index_cache.prefix],
+            vllm_config,
+            device,
+        )
+
+    impl.index_cache.kv_cache = index_cache
+
+    # Match the production allocation in MiniMaxM3Model:
+    # [tokens, index heads, top-k].
+    padded_num_tokens = (num_tokens + 3) // 4 * 4
+    sentinel = -2
+    topk_buffer = torch.full(
+        (padded_num_tokens, num_idx_heads, topk),
+        sentinel,
+        dtype=torch.int32,
+        device=device,
+    )
+    impl.topk_indices_buffer = topk_buffer
+
+    attn_metadata = {
+        impl.index_cache.prefix: builder.build(0, common),
+    }
+
+    with set_forward_context(attn_metadata, vllm_config):
+        decode_topk, prefill_topk = impl(index_query)
+
+    assert decode_topk is not None
+    assert prefill_topk is not None
+
+    assert decode_topk.shape == (
+        num_idx_heads,
+        num_decode_tokens,
+        topk,
+    )
+    assert prefill_topk.shape == (
+        num_idx_heads,
+        num_prefill_tokens,
+        topk,
+    )
+
+    # Build independent references for the decode and prefill portions.
+    decode_q_lens = torch.tensor(
+        [1],
+        dtype=torch.int32,
+        device=device,
+    )
+    decode_seq_lens = torch.tensor(
+        [batch.seq_lens[0]],
+        dtype=torch.int32,
+        device=device,
+    )
+    decode_prefix_lens = decode_seq_lens - decode_q_lens
+
+    expected_decode = _reference_index_topk(
+        index_query_htd[:num_decode_tokens],
+        index_cache,
+        block_table[:1],
+        decode_q_lens,
+        decode_seq_lens,
+        decode_prefix_lens,
+        topk,
+        init_blocks,
+        local_blocks,
+    )
+
+    prefill_q_lens = torch.tensor(
+        [batch.query_lens[1]],
+        dtype=torch.int32,
+        device=device,
+    )
+    prefill_seq_lens = torch.tensor(
+        [batch.seq_lens[1]],
+        dtype=torch.int32,
+        device=device,
+    )
+    prefill_prefix_lens = prefill_seq_lens - prefill_q_lens
+
+    expected_prefill = _reference_index_topk(
+        index_query_htd[num_decode_tokens:],
+        index_cache,
+        block_table[1:],
+        prefill_q_lens,
+        prefill_seq_lens,
+        prefill_prefix_lens,
+        topk,
+        init_blocks,
+        local_blocks,
+    )
+
+    _assert_topk_indices_equal_unordered(
+        decode_topk,
+        expected_decode,
+    )
+    _assert_topk_indices_equal_unordered(
+        prefill_topk,
+        expected_prefill,
+    )
+
+    # Triton kernels consume [H,T,K], while the persistent buffer is [T,H,K].
+    # The returned tensors must be views into the correctly transposed regions.
+    topk_buffer_htk = topk_buffer.transpose(0, 1)
+
+    expected_decode_view = topk_buffer_htk[
+        :,
+        :num_decode_tokens,
+        :,
+    ]
+    expected_prefill_view = topk_buffer_htk[
+        :,
+        num_decode_tokens:num_tokens,
+        :,
+    ]
+
+    assert decode_topk.data_ptr() == expected_decode_view.data_ptr()
+    assert prefill_topk.data_ptr() == expected_prefill_view.data_ptr()
+
+    _assert_topk_indices_equal_unordered(
+        expected_decode_view,
+        expected_decode,
+    )
+    _assert_topk_indices_equal_unordered(
+        expected_prefill_view,
+        expected_prefill,
+    )
+
+    # No kernel is allowed to write beyond the actual token region.
+    assert torch.all(topk_buffer[num_tokens:] == sentinel)
+
+
 # Full impl-level parity: drive both MiniMaxM3IndexerMSAImpl (fmha/CuteDSL score
 # + unified top-k) and MiniMaxM3IndexerTritonImpl through their real metadata
 # builders on the SAME CommonAttentionMetadata + index cache, and assert the
