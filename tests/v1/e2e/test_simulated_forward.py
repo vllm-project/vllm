@@ -66,8 +66,8 @@ def test_simulate_forward_model_matrix(
 
     _check_model_available(model)
 
-    # Generation must emit the caller-provided tokens and then terminate via
-    # EOS instead of padding to max_model_len.
+    # No max_tokens/ignore_eos: generation must emit the caller-provided
+    # tokens and then terminate via EOS instead of padding to max_model_len.
     simulated_output_token_ids = [501, 502]
     sampling_params = SamplingParams(
         temperature=0.0,

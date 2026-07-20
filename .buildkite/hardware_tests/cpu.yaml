@@ -93,10 +93,15 @@ steps:
   - vllm/config/
   - vllm/engine/arg_utils.py
   - vllm/platforms/cpu.py
+  - vllm/sampling_params.py
+  - vllm/triton_utils/
   - vllm/v1/core/
   - vllm/v1/kv_cache_interface.py
+  - vllm/v1/metrics/
   - vllm/v1/outputs.py
   - vllm/v1/worker/
+  - tests/conftest.py
+  - tests/models/registry.py
   - tests/v1/e2e/test_simulated_forward.py
   commands:
     - |
