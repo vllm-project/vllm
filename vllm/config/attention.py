@@ -1,16 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from dataclasses import field
 from typing import Any, Literal
 
 from pydantic import field_validator
 
 from vllm.config.utils import config
-from vllm.logger import init_logger
 from vllm.v1.attention.backends.mla.prefill.registry import MLAPrefillBackendEnum
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
-logger = init_logger(__name__)
+IndexerKVDType = Literal["bf16", "fp8", "mxfp4", "nvfp4"]
 
 
 @config
@@ -19,6 +19,17 @@ class AttentionConfig:
 
     backend: AttentionBackendEnum | None = None
     """Attention backend to use. Use "auto" or None for automatic selection."""
+
+    backend_per_kind: dict[str, AttentionBackendEnum] = field(default_factory=dict)
+    """Per-KV-cache-group attention backend overrides, keyed by
+    `KVCacheSpecKind` (e.g. `{"mla_attention": "FLASHINFER_MLA",
+    "sliding_window_mla": "TRITON_MLA"}`). This lets a model that splits its
+    layers across multiple KV-cache groups (e.g. interleaved full and
+    sliding-window attention) use a different backend per group.
+
+    An entry overrides `backend` for layers of the matching kind; kinds not
+    listed fall back to `backend` (or automatic selection). A selected backend
+    that is invalid for that kind raises at startup."""
 
     flash_attn_version: Literal[2, 3, 4] | None = None
     """Force vllm to use a specific flash-attention version (2, 3, or 4).
@@ -36,27 +47,16 @@ class AttentionConfig:
     Fixes the split count so grid dimensions are constant across captures,
     and buffers can be pre-allocated to avoid inflating the memory estimate."""
 
-    use_cudnn_prefill: bool = False
-    """Deprecated: cuDNN prefill backend has been removed."""
-
-    use_trtllm_ragged_deepseek_prefill: bool = False
-    """Whether to use TRTLLM ragged deepseek prefill."""
-
     use_trtllm_attention: bool | None = None
     """If set to True/False, use or don't use the TRTLLM attention backend
     in flashinfer. If None, auto-detect the attention backend in flashinfer."""
-
-    disable_flashinfer_prefill: bool | None = None
-    """Whether to disable flashinfer prefill."""
 
     disable_flashinfer_q_quantization: bool = False
     """If set, when using fp8 kv, do not quantize Q to fp8."""
 
     mla_prefill_backend: MLAPrefillBackendEnum | None = None
     """MLA prefill backend to use. If None, will be selected automatically.
-    Valid options: FLASH_ATTN (FA3/FA4), FLASHINFER, TRTLLM_RAGGED.
-    This option supersedes use_trtllm_ragged_deepseek_prefill
-    and disable_flashinfer_prefill which are deprecated."""
+    Valid options: FLASH_ATTN (FA3/FA4), FLASHINFER, TRTLLM_RAGGED."""
 
     use_prefill_query_quantization: bool = False
     """If set, quantize query for attention in prefill."""
@@ -64,8 +64,38 @@ class AttentionConfig:
     use_fp4_indexer_cache: bool = False
     """If set, use fp4 indexer cache for dsv32 family model (not support yet)"""
 
+    indexer_kv_dtype: IndexerKVDType = "bf16"
+    """Data type for the sparse-attention indexer K cache. Quantized formats
+    (fp8, mxfp4, nvfp4) require indexer kernel support in the backend."""
+
     use_non_causal: bool = False
     """Whether to use non-causal (bidirectional) attention."""
+
+    sparse_mla_force_mqa: bool = False
+    """Force sparse MLA to use forward_mqa for all requests, including prefill.
+    When False (default), pure prefill batches use forward_mha when implemented.
+    Set to True to always use the MQA path."""
+
+    flex_attn_block_m: int | None = None
+    """Triton kernel BLOCK_M tile size for flex attention.
+    Must be a power of 2 >= 16. If None and VLLM_BATCH_INVARIANT=1,
+    defaults to 16."""
+
+    flex_attn_block_n: int | None = None
+    """Triton kernel BLOCK_N tile size for flex attention.
+    Must be a power of 2 >= 16. If None and VLLM_BATCH_INVARIANT=1,
+    defaults to 16."""
+
+    flex_attn_q_block_size: int | None = None
+    """Logical Q block size for the flex attention block mask.
+    Must be a power of 2 and divisible by flex_attn_block_m.
+    If None, uses the default (16 on PyTorch >= 2.9, 128 otherwise)."""
+
+    flex_attn_kv_block_size: int | None = None
+    """Logical KV block size for the flex attention block mask.
+    Must be a power of 2 and divisible by flex_attn_block_n.
+    If None, uses the default (kv_cache_block_size on PyTorch >= 2.9,
+    128 otherwise)."""
 
     def compute_hash(self) -> str:
         """
@@ -103,39 +133,28 @@ class AttentionConfig:
             return MLAPrefillBackendEnum[value.upper()]
         return value
 
-    def __post_init__(self) -> None:
-        self._migrate_deprecated_mla_prefill_flags()
+    @field_validator("backend_per_kind", mode="before")
+    @classmethod
+    def validate_backend_per_kind_before(cls, value: Any) -> Any:
+        """Parse the `backend_per_kind` map from strings.
 
-    def _migrate_deprecated_mla_prefill_flags(self) -> None:
-        """Migrate deprecated MLA prefill flags to mla_prefill_backend."""
-        # If the new option is already set, it takes precedence
-        if self.mla_prefill_backend is not None:
-            return
+        Keys must be valid `KVCacheSpecKind` values; values are parsed like
+        `backend` (enum name, case-insensitive).
+        """
+        from vllm.v1.kv_cache_interface import KVCacheSpecKind
 
-        # Check for deprecated flags and migrate them.
-        # Only the first flag encountered sets the backend.
-        if self.use_cudnn_prefill:
-            raise ValueError(
-                "The cuDNN MLA prefill backend has been removed. "
-                "Use --attention-config.mla_prefill_backend=FLASH_ATTN or "
-                "FLASHINFER or TRTLLM_RAGGED instead."
-            )
-
-        if self.use_trtllm_ragged_deepseek_prefill:
-            if self.mla_prefill_backend is None:
-                self.mla_prefill_backend = MLAPrefillBackendEnum.TRTLLM_RAGGED
-            logger.warning_once(
-                "use_trtllm_ragged_deepseek_prefill is deprecated and "
-                "will be removed in v0.22. Use "
-                "--attention-config.mla_prefill_backend=TRTLLM_RAGGED "
-                "instead."
-            )
-
-        if self.disable_flashinfer_prefill:
-            if self.mla_prefill_backend is None:
-                self.mla_prefill_backend = MLAPrefillBackendEnum.FLASH_ATTN
-            logger.warning_once(
-                "disable_flashinfer_prefill is deprecated and will be removed "
-                "in v0.22. Use --attention-config.mla_prefill_backend="
-                "FLASH_ATTN instead."
-            )
+        if not isinstance(value, dict):
+            return value
+        valid_kinds = {kind.value for kind in KVCacheSpecKind}
+        parsed: dict[str, AttentionBackendEnum] = {}
+        for kind, backend in value.items():
+            if kind not in valid_kinds:
+                raise ValueError(
+                    f"Unknown KV cache group kind '{kind}' in "
+                    f"backend_per_kind. Valid kinds are: "
+                    f"{', '.join(sorted(valid_kinds))}."
+                )
+            if isinstance(backend, str):
+                backend = AttentionBackendEnum[backend.upper()]
+            parsed[kind] = backend
+        return parsed

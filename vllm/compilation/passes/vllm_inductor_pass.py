@@ -18,11 +18,14 @@ from torch._inductor.pattern_matcher import PatternMatcherPass, PatternPrettyPri
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 
 from .fx_utils import is_func
 from .inductor_pass import InductorPass, enable_fake_mode
 
 logger = init_logger(__name__)
+
+DEVICE_TYPE = current_platform.device_type
 
 
 @dataclass
@@ -227,29 +230,56 @@ class VllmPatternReplacement(ABC, Generic[P, R]):
     # Helpers for get_inputs: uninitialized tensors of common dtypes.
     @staticmethod
     def empty(*args, **kwargs) -> torch.Tensor:
-        return torch.empty(*args, device="cuda", **kwargs)
+        return torch.empty(*args, device=DEVICE_TYPE, **kwargs)
 
     @staticmethod
     def empty_bf16(*args, **kwargs) -> torch.Tensor:
-        return torch.empty(*args, dtype=torch.bfloat16, device="cuda", **kwargs)
+        return torch.empty(*args, dtype=torch.bfloat16, device=DEVICE_TYPE, **kwargs)
 
     @staticmethod
     def empty_fp16(*args, **kwargs) -> torch.Tensor:
-        return torch.empty(*args, dtype=torch.float16, device="cuda", **kwargs)
+        return torch.empty(*args, dtype=torch.float16, device=DEVICE_TYPE, **kwargs)
 
     @staticmethod
     def empty_fp32(*args, **kwargs) -> torch.Tensor:
-        return torch.empty(*args, dtype=torch.float32, device="cuda", **kwargs)
+        return torch.empty(*args, dtype=torch.float32, device=DEVICE_TYPE, **kwargs)
 
     @staticmethod
     def empty_i32(*args, **kwargs) -> torch.Tensor:
-        return torch.empty(*args, dtype=torch.int32, device="cuda", **kwargs)
+        return torch.empty(*args, dtype=torch.int32, device=DEVICE_TYPE, **kwargs)
 
 
 def _fx_view_to_reshape(gm: fx.GraphModule) -> None:
     from torch._inductor.fx_passes.post_grad import view_to_reshape
 
     view_to_reshape(gm)
+
+
+def fold_consecutive_reshapes(gm: fx.GraphModule) -> None:
+    """Fold consecutive reshape ops into a single reshape.
+
+    ``make_fx`` faithfully records every view/reshape the Python code performs,
+    so patterns like ``x.reshape(a, b).reshape(c, d)`` produce two reshape
+    nodes.  Inductor's own optimisation would fold these, but
+    ``pm.register_replacement``'s ``trace_fn`` runs before Inductor, so we
+    must fold them ourselves for the pattern to match the compiled graph.
+
+    When reshape(A, shape1) feeds only into reshape(result, shape2),
+    the first reshape is redundant -- replace with reshape(A, shape2).
+    """
+    aten_reshape = torch.ops.aten.reshape.default
+    for node in list(gm.graph.nodes):
+        if not is_func(node, aten_reshape):
+            continue
+        inp = node.args[0]
+        if not isinstance(inp, fx.Node) or not is_func(inp, aten_reshape):
+            continue
+        if len(inp.users) != 1:
+            continue
+        original_input = inp.args[0]
+        node.args = (original_input, node.args[1])
+        inp.replace_all_uses_with(original_input)
+        gm.graph.erase_node(inp)
 
 
 def _remove_noop_permutes(gm: fx.GraphModule) -> None:

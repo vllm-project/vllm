@@ -5,7 +5,6 @@
 import functools
 import json
 import os
-from collections.abc import Callable
 from typing import Any
 
 import torch
@@ -20,36 +19,19 @@ from vllm.model_executor.layers.fused_moe.activation import (
 )
 from vllm.model_executor.layers.fused_moe.config import (
     FUSED_MOE_UNQUANTIZED_CONFIG,
-    FusedMoEConfig,
-    FusedMoEParallelConfig,
     FusedMoEQuantConfig,
     _get_config_dtype_str,
 )
-from vllm.model_executor.layers.fused_moe.lora_experts_mixin import LoRAExpertsMixin
 from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
     moe_align_block_size,
 )
-from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
-    TopKWeightAndReduceNoOP,
-)
 from vllm.model_executor.layers.fused_moe.utils import (
-    _resize_cache,
-    disable_inplace,
+    enable_swap_ab,
     moe_kernel_quantize_input,
-)
-from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    QuantKey,
-    kFp8Dynamic128Sym,
-    kFp8DynamicTensorSym,
-    kFp8DynamicTokenSym,
-    kFp8Static128BlockSym,
-    kFp8StaticChannelSym,
-    kFp8StaticTensorSym,
-    kInt8DynamicTokenSym,
-    kInt8StaticChannelSym,
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
+from vllm.utils.platform_utils import get_device_name_as_file_name
 from vllm.utils.torch_utils import direct_register_custom_op
 
 logger = init_logger(__name__)
@@ -363,6 +345,7 @@ def fused_moe_kernel(
     use_int8_w8a16: tl.constexpr,
     per_channel_quant: tl.constexpr,
     HAS_BIAS: tl.constexpr,
+    SWAP_AB: tl.constexpr,
 ):
     """
     Implements the fused computation for a Mixture of Experts (MOE) using
@@ -452,15 +435,25 @@ def fused_moe_kernel(
 
     offs_bn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N).to(tl.int64)) % N
     offs_k = tl.arange(0, BLOCK_SIZE_K)
-    a_ptrs = a_ptr + (
-        offs_token[:, None] // top_k * stride_am + offs_k[None, :] * stride_ak
-    )
+    if SWAP_AB:
+        a_ptrs = a_ptr + (
+            offs_k[:, None] * stride_ak + offs_token[None, :] // top_k * stride_am
+        )
+        b_ptrs = (
+            b_ptr
+            + off_experts * stride_be
+            + (offs_bn[:, None] * stride_bn + offs_k[None, :] * stride_bk)
+        )
+    else:
+        a_ptrs = a_ptr + (
+            offs_token[:, None] // top_k * stride_am + offs_k[None, :] * stride_ak
+        )
+        b_ptrs = (
+            b_ptr
+            + off_experts * stride_be
+            + (offs_k[:, None] * stride_bk + offs_bn[None, :] * stride_bn)
+        )
 
-    b_ptrs = (
-        b_ptr
-        + off_experts * stride_be
-        + (offs_k[:, None] * stride_bk + offs_bn[None, :] * stride_bn)
-    )
     if use_int8_w8a16:
         b_scale_ptrs = (
             b_scale_ptr + off_experts * stride_bse + offs_bn[None, :] * stride_bsn
@@ -497,16 +490,25 @@ def fused_moe_kernel(
     # We accumulate into a `[BLOCK_SIZE_M, BLOCK_SIZE_N]` block
     # of fp32 values for higher accuracy.
     # `accumulator` will be converted back to fp16 after the loop.
-    accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
+    if SWAP_AB:
+        accumulator = tl.zeros((BLOCK_SIZE_N, BLOCK_SIZE_M), dtype=tl.float32)
+    else:
+        accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
     for k in range(0, tl.cdiv(K, BLOCK_SIZE_K)):
         # Load the next block of A and B, generate a mask by checking the
         # K dimension.
+        if SWAP_AB:
+            a_mask = (offs_k[:, None] < K - k * BLOCK_SIZE_K) & token_mask[None, :]
+            b_mask = offs_k[None, :] < K - k * BLOCK_SIZE_K
+        else:
+            a_mask = token_mask[:, None] & (offs_k[None, :] < K - k * BLOCK_SIZE_K)
+            b_mask = offs_k[:, None] < K - k * BLOCK_SIZE_K
         a = tl.load(
             a_ptrs,
-            mask=token_mask[:, None] & (offs_k[None, :] < K - k * BLOCK_SIZE_K),
+            mask=a_mask,
             other=0.0,
         )
-        b = tl.load(b_ptrs, mask=offs_k[:, None] < K - k * BLOCK_SIZE_K, other=0.0)
+        b = tl.load(b_ptrs, mask=b_mask, other=0.0)
         # We accumulate along the K dimension.
         if use_int8_w8a16:
             accumulator = tl.dot(a, b.to(compute_type), acc=accumulator)
@@ -518,12 +520,17 @@ def fused_moe_kernel(
                     a_scale_ptrs + offs_ks * stride_ask, mask=token_mask, other=0.0
                 )
                 b_scale = tl.load(b_scale_ptrs + offs_ks * stride_bsk)
-
-                accumulator += tl.dot(a, b) * a_scale[:, None] * b_scale[None, :]
+                if SWAP_AB:
+                    accumulator += tl.dot(b, a) * b_scale[:, None] * a_scale[None, :]
+                else:
+                    accumulator += tl.dot(a, b) * a_scale[:, None] * b_scale[None, :]
             else:
                 if use_fp8_w8a8:
                     # acc used to enable fp8_fast_accum
-                    accumulator = tl.dot(a, b, acc=accumulator)
+                    if SWAP_AB:
+                        accumulator = tl.dot(b, a, acc=accumulator)
+                    else:
+                        accumulator = tl.dot(a, b, acc=accumulator)
                 else:
                     accumulator += tl.dot(a, b)
         else:
@@ -531,6 +538,9 @@ def fused_moe_kernel(
         # Advance the ptrs to the next K block.
         a_ptrs += BLOCK_SIZE_K * stride_ak
         b_ptrs += BLOCK_SIZE_K * stride_bk
+
+    if SWAP_AB:
+        accumulator = tl.trans(accumulator, (1, 0))
 
     # Dequantization for supported quantization schemes:
     #   - int8_w8a16
@@ -749,6 +759,11 @@ def invoke_fused_moe_triton_kernel(
     assert topk_weights is None or topk_weights.stride(1) == 1
     assert sorted_token_ids is None or sorted_token_ids.stride(0) == 1
 
+    if use_fp8_w8a8:
+        SWAP_AB = enable_swap_ab(config["BLOCK_SIZE_M"], config["BLOCK_SIZE_N"])
+    else:
+        SWAP_AB = False
+
     if use_fp8_w8a8 or use_int8_w8a8:
         assert B_scale is not None
         assert block_shape is None or triton.cdiv(
@@ -830,6 +845,7 @@ def invoke_fused_moe_triton_kernel(
         naive_block_assignment=(sorted_token_ids is None),
         HAS_BIAS=HAS_BIAS,
         BLOCK_SIZE_K=BLOCK_SIZE_K,
+        SWAP_AB=SWAP_AB,
         **config,
     )
 
@@ -1019,7 +1035,7 @@ def zero_experts_compute_triton(
 def get_config_file_name(
     E: int, N: int, dtype: str | None, block_shape: list[int] | None = None
 ) -> str:
-    device_name = current_platform.get_device_name().replace(" ", "_")
+    device_name = get_device_name_as_file_name()
     # Set device_name to H200 if a device from the H200 family is detected
     if "H200" in device_name.split("_"):
         device_name = "NVIDIA_H200"
@@ -1242,19 +1258,38 @@ def get_default_config(
     num_stages_rocm = 2
 
     if dtype == "fp8_w8a8" and block_shape is not None:
-        # Block-wise quant: tile sizes are constrained by block_shape.
-        # Use a small M tile for decode-like batches where tokens are
-        # spread thin across experts. Larger batches benefit from
-        # GROUP_SIZE_M > 1 because the per-block scales add memory
-        # traffic that benefits from L2 tile reuse.
+        # Block-wise quant. Use a small M tile for decode-like batches where
+        # tokens are spread thin across experts. Larger batches benefit from
+        # GROUP_SIZE_M > 1 because the per-block scales add memory traffic
+        # that benefits from L2 tile reuse.
+        #
+        # BLOCK_SIZE_N need not equal block_shape[0]: the kernel indexes block
+        # scales per N element (offs_bn // group_n), so any N tile dividing the
+        # quant block is valid. At decode a 128-wide N tile leaves the gate-up
+        # GEMM SM-bound; a 64-wide tile exposes ~2x the thread blocks, and the
+        # swap-AB kernel keeps it efficient on Hopper down to the smallest
+        # batches, so prefer N=64 through low batch sizes. CUDA only (validated
+        # on NVIDIA); ROCm keeps its prior tile/pipeline sizes.
+        if current_platform.is_rocm():
+            block_n = block_shape[0]
+            num_stages = num_stages_rocm
+        elif M <= 8 and block_shape[0] % 64 == 0:
+            block_n = 64
+            # The smallest batches are memory-latency bound, so a deeper
+            # pipeline hides the weight loads; by M=8 it turns occupancy/SMEM
+            # bound and the extra stages hurt.
+            num_stages = 4 if M <= 4 else 3
+        else:
+            block_n = block_shape[0]
+            num_stages = 3
         config = {
             "BLOCK_SIZE_M": 16 if M <= 64 else 64,
-            "BLOCK_SIZE_N": block_shape[0],
+            "BLOCK_SIZE_N": block_n,
             "BLOCK_SIZE_K": block_shape[1],
             "GROUP_SIZE_M": 1 if M <= 16 else 32,
             "SPLIT_K": 1,
             "num_warps": 4,
-            "num_stages": 3 if not current_platform.is_rocm() else num_stages_rocm,
+            "num_stages": num_stages,
         }
     elif dtype in ["int4_w4a16", "int8_w8a16"] and block_shape is not None:
         # moe wna16 kernels
@@ -1352,99 +1387,7 @@ def try_get_optimal_moe_config(
     return config
 
 
-def inplace_fused_experts(
-    hidden_states: torch.Tensor,
-    w1: torch.Tensor,
-    w2: torch.Tensor,
-    topk_weights: torch.Tensor,
-    topk_ids: torch.Tensor,
-    activation: str = "silu",
-    apply_router_weight_on_input: bool = False,
-    use_fp8_w8a8: bool = False,
-    use_int8_w8a8: bool = False,
-    use_int8_w8a16: bool = False,
-    use_int4_w4a16: bool = False,
-    ocp_mx_scheme: str | None = None,
-    per_channel_quant: bool = False,
-    global_num_experts: int = -1,
-    expert_map: torch.Tensor | None = None,
-    w1_scale: torch.Tensor | None = None,
-    w2_scale: torch.Tensor | None = None,
-    w1_zp: torch.Tensor | None = None,
-    w2_zp: torch.Tensor | None = None,
-    a1_scale: torch.Tensor | None = None,
-    a2_scale: torch.Tensor | None = None,
-    block_shape: list[int] | None = None,
-    w1_bias: torch.Tensor | None = None,
-    w2_bias: torch.Tensor | None = None,
-) -> None:
-    fused_experts_impl(
-        hidden_states,
-        w1,
-        w2,
-        topk_weights,
-        topk_ids,
-        True,
-        activation,
-        apply_router_weight_on_input,
-        use_fp8_w8a8,
-        use_int8_w8a8,
-        use_int8_w8a16,
-        use_int4_w4a16,
-        ocp_mx_scheme,
-        per_channel_quant,
-        global_num_experts,
-        expert_map,
-        w1_scale,
-        w2_scale,
-        w1_zp,
-        w2_zp,
-        a1_scale,
-        a2_scale,
-        block_shape,
-        w1_bias,
-        w2_bias,
-    )
-
-
-def inplace_fused_experts_fake(
-    hidden_states: torch.Tensor,
-    w1: torch.Tensor,
-    w2: torch.Tensor,
-    topk_weights: torch.Tensor,
-    topk_ids: torch.Tensor,
-    activation: str = "silu",
-    apply_router_weight_on_input: bool = False,
-    use_fp8_w8a8: bool = False,
-    use_int8_w8a8: bool = False,
-    use_int8_w8a16: bool = False,
-    use_int4_w4a16: bool = False,
-    ocp_mx_scheme: str | None = None,
-    per_channel_quant: bool = False,
-    global_num_experts: int = -1,
-    expert_map: torch.Tensor | None = None,
-    w1_scale: torch.Tensor | None = None,
-    w2_scale: torch.Tensor | None = None,
-    w1_zp: torch.Tensor | None = None,
-    w2_zp: torch.Tensor | None = None,
-    a1_scale: torch.Tensor | None = None,
-    a2_scale: torch.Tensor | None = None,
-    block_shape: list[int] | None = None,
-    w1_bias: torch.Tensor | None = None,
-    w2_bias: torch.Tensor | None = None,
-) -> None:
-    pass
-
-
-direct_register_custom_op(
-    op_name="inplace_fused_experts",
-    op_func=inplace_fused_experts,
-    mutates_args=["hidden_states"],
-    fake_impl=inplace_fused_experts_fake,
-)
-
-
-def outplace_fused_experts(
+def fused_experts_op(
     hidden_states: torch.Tensor,
     w1: torch.Tensor,
     w2: torch.Tensor,
@@ -1476,7 +1419,6 @@ def outplace_fused_experts(
         w2,
         topk_weights,
         topk_ids,
-        False,
         activation,
         apply_router_weight_on_input,
         use_fp8_w8a8,
@@ -1499,7 +1441,7 @@ def outplace_fused_experts(
     )
 
 
-def outplace_fused_experts_fake(
+def fused_experts_op_fake(
     hidden_states: torch.Tensor,
     w1: torch.Tensor,
     w2: torch.Tensor,
@@ -1529,26 +1471,10 @@ def outplace_fused_experts_fake(
 
 
 direct_register_custom_op(
-    op_name="outplace_fused_experts",
-    op_func=outplace_fused_experts,
-    fake_impl=outplace_fused_experts_fake,
+    op_name="fused_experts",
+    op_func=fused_experts_op,
+    fake_impl=fused_experts_op_fake,
 )
-
-
-def torch_vllm_inplace_fused_experts(**kwargs) -> torch.Tensor:
-    torch.ops.vllm.inplace_fused_experts(**kwargs)
-    hidden_states = kwargs["hidden_states"]
-    return hidden_states
-
-
-def torch_vllm_outplace_fused_experts(**kwargs) -> torch.Tensor:
-    return torch.ops.vllm.outplace_fused_experts(**kwargs)
-
-
-def dispatch_fused_experts_func(inplace: bool) -> Callable[..., torch.Tensor]:
-    if inplace:
-        return torch_vllm_inplace_fused_experts
-    return torch_vllm_outplace_fused_experts
 
 
 def _prepare_expert_assignment(
@@ -1600,15 +1526,12 @@ def _prepare_expert_assignment(
     )
 
 
-# TODO (bnell): replace this with modular op.  Can get rid of inplace/outplace
-# torch ops.
 def fused_experts(
     hidden_states: torch.Tensor,
     w1: torch.Tensor,
     w2: torch.Tensor,
     topk_weights: torch.Tensor,
     topk_ids: torch.Tensor,
-    inplace: bool = False,
     activation: MoEActivation = MoEActivation.SILU,
     apply_router_weight_on_input: bool = False,
     global_num_experts: int = -1,
@@ -1619,9 +1542,7 @@ def fused_experts(
     if quant_config is None:
         quant_config = FUSED_MOE_UNQUANTIZED_CONFIG
 
-    assert not inplace or not disable_inplace()
-
-    return dispatch_fused_experts_func(inplace)(
+    return torch.ops.vllm.fused_experts(
         hidden_states=hidden_states,
         w1=w1,
         w2=w2,
@@ -1652,7 +1573,6 @@ def fused_experts(
 def _get_config_quant_dtype(
     use_fp8_w8a8: bool,
     use_int8_w8a8: bool,
-    ocp_mx_scheme: str | None,
 ) -> None | torch.dtype | str:
     """
     Get the quantization type based on the quantization strategy flags.
@@ -1663,18 +1583,8 @@ def _get_config_quant_dtype(
     """
     if use_fp8_w8a8:
         return current_platform.fp8_dtype()
-    elif use_int8_w8a8:
+    if use_int8_w8a8:
         return torch.int8
-    elif ocp_mx_scheme == "w_mxfp4_a_mxfp4":
-        return "mxfp4"
-    elif ocp_mx_scheme in {"w_mxfp4_a_mxfp6_e3m2", "w_mxfp6_e3m2_a_mxfp6_e3m2"}:
-        return "mxfp6_e3m2"
-    elif ocp_mx_scheme in {"w_mxfp4_a_mxfp6_e2m3", "w_mxfp6_e2m3_a_mxfp6_e2m3"}:
-        return "mxfp6_e2m3"
-    elif ocp_mx_scheme in {"w_mxfp4", "w_mxfp6_e3m2", "w_mxfp6_e2m3"}:
-        return torch.bfloat16
-    elif ocp_mx_scheme in {"w_mxfp4_a_fp8", "w_mxfp6_e3m2_a_fp8", "w_mxfp6_e2m3_a_fp8"}:
-        return torch.float8_e4m3fn
 
     return None
 
@@ -1685,7 +1595,6 @@ def fused_experts_impl(
     w2: torch.Tensor,
     topk_weights: torch.Tensor,
     topk_ids: torch.Tensor,
-    inplace: bool,
     activation: str = "silu",
     apply_router_weight_on_input: bool = False,
     use_fp8_w8a8: bool = False,
@@ -1750,7 +1659,6 @@ def fused_experts_impl(
     quant_dtype = _get_config_quant_dtype(
         use_fp8_w8a8=use_fp8_w8a8,
         use_int8_w8a8=use_int8_w8a8,
-        ocp_mx_scheme=None,
     )
 
     get_config_func = functools.partial(
@@ -1793,7 +1701,7 @@ def fused_experts_impl(
     else:
         raise ValueError(f"Unsupported compute_type: {hidden_states.dtype}")
 
-    out_hidden_states = hidden_states if inplace else torch.empty_like(hidden_states)
+    out_hidden_states = torch.empty_like(hidden_states)
 
     qhidden_states, a1q_scale = moe_kernel_quantize_input(
         A=hidden_states,
@@ -1885,477 +1793,3 @@ def fused_experts_impl(
     )
 
     return out_hidden_states
-
-
-class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
-    """Triton-based fused MoE expert implementation."""
-
-    def __init__(
-        self,
-        moe_config: FusedMoEConfig,
-        quant_config: FusedMoEQuantConfig,
-    ):
-        # Whether quantized MOE runs natively, or through
-        # higher-precision + activation QDQ.
-        self.quantization_emulation = False
-        super().__init__(moe_config, quant_config)
-
-    @staticmethod
-    def activation_format() -> mk.FusedMoEActivationFormat:
-        return mk.FusedMoEActivationFormat.Standard
-
-    @staticmethod
-    def _supports_current_device() -> bool:
-        return current_platform.is_cuda_alike() or current_platform.is_xpu()
-
-    @staticmethod
-    def _supports_no_act_and_mul() -> bool:
-        return True
-
-    @staticmethod
-    def _supports_quant_scheme(
-        weight_key: QuantKey | None,
-        activation_key: QuantKey | None,
-    ) -> bool:
-        # INT8 requires at least 7.5 (Turing).
-        device_supports_int8 = (
-            current_platform.is_cuda()
-            and current_platform.has_device_capability((7, 5))
-        )
-
-        supported: list[tuple[QuantKey | None, QuantKey | None]] = [(None, None)]
-        if device_supports_int8:
-            supported.append((kInt8StaticChannelSym, kInt8DynamicTokenSym))
-        if current_platform.supports_fp8():
-            supported += [
-                (kFp8Static128BlockSym, kFp8Dynamic128Sym),
-                (kFp8StaticChannelSym, kFp8DynamicTokenSym),
-                (kFp8StaticTensorSym, kFp8DynamicTokenSym),
-                (kFp8StaticTensorSym, kFp8StaticTensorSym),
-                (kFp8StaticTensorSym, kFp8DynamicTensorSym),
-            ]
-        return (weight_key, activation_key) in supported
-
-    @staticmethod
-    def _supports_activation(activation: MoEActivation) -> bool:
-        return activation in [
-            MoEActivation.SILU,
-            MoEActivation.GELU,
-            MoEActivation.SWIGLUOAI,
-            MoEActivation.SWIGLUSTEP,
-            MoEActivation.SILU_NO_MUL,
-            MoEActivation.GELU_NO_MUL,
-            MoEActivation.RELU2_NO_MUL,
-        ]
-
-    @staticmethod
-    def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
-        return not (
-            moe_parallel_config.use_fi_nvl_two_sided_kernels
-            or moe_parallel_config.use_fi_nvl_one_sided_kernels
-        )
-
-    @staticmethod
-    def _supports_batch_invariance():
-        return True
-
-    def supports_expert_map(self) -> bool:
-        return True
-
-    def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
-        return TopKWeightAndReduceNoOP()
-
-    def workspace_shapes(
-        self,
-        M: int,
-        N: int,
-        K: int,
-        topk: int,
-        global_num_experts: int,
-        local_num_experts: int,
-        expert_tokens_meta: mk.ExpertTokensMetadata | None,
-        activation: MoEActivation,
-    ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
-        activation_out_dim = self.adjust_N_for_activation(N, activation)
-        workspace1 = (M, topk, max(activation_out_dim, K))
-        workspace2 = (M, topk, max(N, K))
-        output = (M, K)
-        return (workspace1, workspace2, output)
-
-    def apply(
-        self,
-        output: torch.Tensor,
-        hidden_states: torch.Tensor,
-        w1: torch.Tensor,
-        w2: torch.Tensor,
-        topk_weights: torch.Tensor,
-        topk_ids: torch.Tensor,
-        activation: MoEActivation,
-        global_num_experts: int,
-        expert_map: torch.Tensor | None,
-        a1q_scale: torch.Tensor | None,
-        a2_scale: torch.Tensor | None,
-        workspace13: torch.Tensor,
-        workspace2: torch.Tensor,
-        expert_tokens_meta: mk.ExpertTokensMetadata | None,
-        apply_router_weight_on_input: bool,
-    ):
-        # Check constraints.
-        if self.quant_config.use_int4_w4a16:
-            assert hidden_states.size(-1) // 2 == w1.size(2), "Hidden size mismatch"
-        else:
-            assert hidden_states.size(-1) == w1.size(2), (
-                f"Hidden size mismatch {hidden_states.size(-1)} != {w1.size(2)}"
-            )
-
-        assert hidden_states.is_contiguous(), "Hidden_states must be contiguous"
-        assert hidden_states.dim() == 2
-        assert w1.stride(-1) == 1, "Stride of last dimension must be 1"
-        assert w2.stride(-1) == 1, "Stride of last dimension must be 1"
-        assert hidden_states.dtype in [
-            torch.float32,
-            torch.float16,
-            torch.bfloat16,
-            torch.float8_e4m3fn,
-            torch.float8_e4m3fnuz,
-        ]
-
-        E, num_tokens, N, K, top_k_num = self.moe_problem_size(
-            hidden_states, w1, w2, topk_ids
-        )
-
-        if global_num_experts == -1:
-            global_num_experts = E
-
-        config = try_get_optimal_moe_config(
-            w1.size(),
-            w2.size(),
-            top_k_num,
-            self.quant_config.config_name(hidden_states.dtype),
-            num_tokens,
-            block_shape=self.block_shape,
-        )
-
-        if hidden_states.dtype == torch.bfloat16:
-            compute_type = tl.bfloat16
-        elif hidden_states.dtype == torch.float16:
-            compute_type = tl.float16
-        elif hidden_states.dtype == torch.float32:
-            compute_type = tl.float32
-        elif (
-            hidden_states.dtype == torch.float8_e4m3fn
-            or hidden_states.dtype == torch.float8_e4m3fnuz
-        ):
-            compute_type = tl.bfloat16
-        else:
-            raise ValueError(f"Unsupported compute_type: {hidden_states.dtype}")
-
-        # Note that the output tensor might be in workspace1
-        intermediate_cache1 = _resize_cache(workspace2, (num_tokens, top_k_num, N))
-        cache2_dim = self.adjust_N_for_activation(N, activation)
-        intermediate_cache2 = _resize_cache(
-            workspace13, (num_tokens * top_k_num, cache2_dim)
-        )
-        intermediate_cache3 = _resize_cache(workspace2, (num_tokens, top_k_num, K))
-
-        sorted_token_ids, expert_ids, num_tokens_post_padded = (
-            _prepare_expert_assignment(
-                topk_ids,
-                config,
-                num_tokens,
-                top_k_num,
-                global_num_experts,
-                expert_map,
-                use_int8_w8a16=self.quant_config.use_int8_w8a16,
-                use_int4_w4a16=self.quant_config.use_int4_w4a16,
-                block_shape=self.block_shape,
-            )
-        )
-
-        invoke_fused_moe_triton_kernel(
-            hidden_states,
-            w1,
-            intermediate_cache1,
-            a1q_scale,
-            self.w1_scale,
-            None,  # topk_weights
-            sorted_token_ids,
-            expert_ids,
-            num_tokens_post_padded,
-            False,  # mul_routed_weights
-            top_k_num,
-            config,
-            compute_type=compute_type,
-            use_fp8_w8a8=self.quant_config.use_fp8_w8a8,
-            use_int8_w8a8=self.quant_config.use_int8_w8a8,
-            use_int8_w8a16=self.quant_config.use_int8_w8a16,
-            use_int4_w4a16=self.quant_config.use_int4_w4a16,
-            per_channel_quant=self.per_act_token_quant,
-            block_shape=self.block_shape,
-            B_bias=self.w1_bias,
-        )
-
-        # LoRA w13: applied to intermediate_cache1 before activation, using
-        # hidden_states as the lora_a input.  moe_lora_align_block_size is
-        # called once here and results reused for the w2 LoRA below.
-        sorted_token_ids_lora = None
-        expert_ids_lora = None
-        num_tokens_post_padded_lora = None
-        token_lora_mapping = None
-        lora_context = self._lora_context
-        if lora_context is not None:
-            (
-                sorted_token_ids_lora,
-                expert_ids_lora,
-                num_tokens_post_padded_lora,
-                token_lora_mapping,
-            ) = self.apply_w13_lora(
-                lora_context,
-                y=intermediate_cache1,
-                x=hidden_states,
-                topk_ids=topk_ids,
-                topk_weights=topk_weights,
-                expert_map=expert_map,
-                w1=w1,
-                w2=w2,
-                num_tokens=num_tokens,
-                top_k_num=top_k_num,
-            )
-
-        self.activation(
-            activation, intermediate_cache2, intermediate_cache1.view(-1, N)
-        )
-
-        a2q_scale: torch.Tensor | None = None
-
-        qintermediate_cache2, a2q_scale = moe_kernel_quantize_input(
-            intermediate_cache2,
-            a2_scale,
-            self.quant_dtype,
-            self.per_act_token_quant,
-            self.block_shape,
-            quantization_emulation=self.quantization_emulation,
-        )
-
-        invoke_fused_moe_triton_kernel(
-            qintermediate_cache2,
-            w2,
-            intermediate_cache3,
-            a2q_scale,
-            self.w2_scale,
-            topk_weights,
-            sorted_token_ids,
-            expert_ids,
-            num_tokens_post_padded,
-            not apply_router_weight_on_input,
-            1,
-            config,
-            compute_type=compute_type,
-            use_fp8_w8a8=self.quant_config.use_fp8_w8a8,
-            use_int8_w8a8=self.quant_config.use_int8_w8a8,
-            use_int8_w8a16=self.quant_config.use_int8_w8a16,
-            use_int4_w4a16=self.quant_config.use_int4_w4a16,
-            per_channel_quant=self.per_act_token_quant,
-            block_shape=self.block_shape,
-            B_bias=self.w2_bias,
-        )
-
-        # LoRA w2: applied to intermediate_cache3 before moe_sum, using the
-        # unquantized intermediate_cache2 as the lora_a input.  Reuses the
-        # sorted_token_ids_lora computed above.
-        if lora_context is not None:
-            self.apply_w2_lora(
-                lora_context,
-                y=intermediate_cache3,
-                x=intermediate_cache2,
-                topk_weights=topk_weights,
-                sorted_token_ids_lora=sorted_token_ids_lora,
-                expert_ids_lora=expert_ids_lora,
-                num_tokens_post_padded_lora=num_tokens_post_padded_lora,
-                token_lora_mapping=token_lora_mapping,
-                num_tokens=num_tokens,
-                w1=w1,
-                w2=w2,
-                top_k_num=top_k_num,
-            )
-
-        # separate function is required for MoE + LoRA
-        self.moe_sum(intermediate_cache3, output)
-
-    def moe_sum(self, input: torch.Tensor, output: torch.Tensor) -> None:
-        ops.moe_sum(input, output)
-
-
-class TritonWNA16Experts(TritonExperts):
-    @staticmethod
-    def _supports_current_device() -> bool:
-        raise NotImplementedError(
-            "TritonWNA16Experts is not yet used by an Oracle. "
-            "This method should not be called."
-        )
-
-    @staticmethod
-    def _supports_no_act_and_mul() -> bool:
-        raise NotImplementedError(
-            "TritonWNA16Experts is not yet used by an Oracle. "
-            "This method should not be called."
-        )
-
-    @staticmethod
-    def _supports_quant_scheme(
-        weight_key: QuantKey | None,
-        activation_key: QuantKey | None,
-    ) -> bool:
-        raise NotImplementedError(
-            "TritonWNA16Experts is not yet used by an Oracle. "
-            "This method should not be called."
-        )
-
-    @staticmethod
-    def _supports_activation(activation: MoEActivation) -> bool:
-        raise NotImplementedError(
-            "TritonWNA16Experts is not yet used by an Oracle. "
-            "This method should not be called."
-        )
-
-    @staticmethod
-    def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
-        raise NotImplementedError(
-            "TritonWNA16Experts is not yet used by an Oracle. "
-            "This method should not be called."
-        )
-
-    def apply(
-        self,
-        output: torch.Tensor,
-        hidden_states: torch.Tensor,
-        w1: torch.Tensor,
-        w2: torch.Tensor,
-        topk_weights: torch.Tensor,
-        topk_ids: torch.Tensor,
-        activation: MoEActivation,
-        global_num_experts: int,
-        expert_map: torch.Tensor | None,
-        a1q_scale: torch.Tensor | None,
-        a2_scale: torch.Tensor | None,
-        workspace13: torch.Tensor,
-        workspace2: torch.Tensor,
-        expert_tokens_meta: mk.ExpertTokensMetadata | None,
-        apply_router_weight_on_input: bool,
-    ):
-        # Check constraints.
-        if self.quant_config.use_int4_w4a16:
-            assert hidden_states.size(-1) // 2 == w1.size(2), "Hidden size mismatch"
-        else:
-            assert hidden_states.size(-1) == w1.size(2), (
-                f"Hidden size mismatch {hidden_states.size(-1)} != {w1.size(2)}"
-            )
-
-        assert hidden_states.is_contiguous(), "Hidden_states must be contiguous"
-        assert hidden_states.dim() == 2
-        assert w1.stride(-1) == 1, "Stride of last dimension must be 1"
-        assert w2.stride(-1) == 1, "Stride of last dimension must be 1"
-        assert hidden_states.dtype in [
-            torch.float32,
-            torch.float16,
-            torch.bfloat16,
-            torch.float8_e4m3fn,
-            torch.float8_e4m3fnuz,
-        ]
-
-        E, num_tokens, N, K, top_k_num = self.moe_problem_size(
-            hidden_states, w1, w2, topk_ids
-        )
-
-        if global_num_experts == -1:
-            global_num_experts = E
-
-        config = try_get_optimal_moe_config(
-            w1.size(),
-            w2.size(),
-            top_k_num,
-            self.quant_config.config_name(hidden_states.dtype),
-            num_tokens,
-            block_shape=self.block_shape,
-        )
-
-        if hidden_states.dtype == torch.bfloat16:
-            compute_type = tl.bfloat16
-        elif hidden_states.dtype == torch.float16:
-            compute_type = tl.float16
-        elif hidden_states.dtype == torch.float32:
-            compute_type = tl.float32
-        elif (
-            hidden_states.dtype == torch.float8_e4m3fn
-            or hidden_states.dtype == torch.float8_e4m3fnuz
-        ):
-            compute_type = tl.bfloat16
-        else:
-            raise ValueError(f"Unsupported compute_type: {hidden_states.dtype}")
-
-        # Note that the output tensor might be in workspace1
-        intermediate_cache1 = _resize_cache(workspace2, (num_tokens, top_k_num, N))
-        activation_out_dim = self.adjust_N_for_activation(N, activation)
-        intermediate_cache2 = _resize_cache(
-            workspace13, (num_tokens * top_k_num, activation_out_dim)
-        )
-        intermediate_cache3 = _resize_cache(workspace2, (num_tokens, top_k_num, K))
-
-        sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(
-            topk_ids, config["BLOCK_SIZE_M"], global_num_experts, expert_map
-        )
-
-        invoke_fused_moe_wna16_triton_kernel(
-            hidden_states,
-            w1,
-            intermediate_cache1,
-            self.w1_scale,
-            self.quant_config.w1_zp,
-            None,  # topk_weights
-            sorted_token_ids,
-            expert_ids,
-            num_tokens_post_padded,
-            False,  # mul_routed_weights
-            top_k_num,
-            config,
-            compute_type=compute_type,
-            use_int8_w8a16=self.quant_config.use_int8_w8a16,
-            use_int4_w4a16=self.quant_config.use_int4_w4a16,
-            block_shape=self.block_shape,
-        )
-
-        self.activation(
-            activation, intermediate_cache2, intermediate_cache1.view(-1, N)
-        )
-
-        a2q_scale: torch.Tensor | None = None
-
-        qintermediate_cache2, a2q_scale = moe_kernel_quantize_input(
-            intermediate_cache2,
-            a2_scale,
-            self.quant_dtype,
-            self.per_act_token_quant,
-            self.block_shape,
-        )
-
-        invoke_fused_moe_wna16_triton_kernel(
-            qintermediate_cache2,
-            w2,
-            intermediate_cache3,
-            self.w2_scale,
-            self.quant_config.w2_zp,
-            topk_weights,
-            sorted_token_ids,
-            expert_ids,
-            num_tokens_post_padded,
-            not apply_router_weight_on_input,
-            1,
-            config,
-            compute_type=compute_type,
-            use_int8_w8a16=self.quant_config.use_int8_w8a16,
-            use_int4_w4a16=self.quant_config.use_int4_w4a16,
-            block_shape=self.block_shape,
-        )
-
-        # separate function is required for MoE + LoRA
-        self.moe_sum(intermediate_cache3, output)

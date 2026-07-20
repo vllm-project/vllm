@@ -8,6 +8,7 @@ import torch
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.v1.attention.backend import AttentionBackend
+from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.attention.selector import get_mamba_attn_backend
 from vllm.v1.kv_cache_interface import KVCacheSpec, MambaSpec
 
@@ -21,6 +22,7 @@ class MambaBase(AttentionLayerBase):
     # Contains the KV cache (mamba state) for the layer
     # in the shape specified by `self.get_state_shape`.
     kv_cache: tuple[torch.Tensor, ...]
+    supports_dcp: bool = False
 
     @abstractmethod
     def get_state_shape(self) -> Iterable[tuple[int, ...]]:
@@ -33,7 +35,7 @@ class MambaBase(AttentionLayerBase):
 
     @property
     @abstractmethod
-    def mamba_type(self) -> str:
+    def mamba_type(self) -> MambaAttentionBackendEnum:
         pass
 
     @abstractmethod

@@ -36,9 +36,11 @@ TOP_KS = [2, 4, 6]
 NUM_EXPERTS = [8, 16, 64]
 
 
-def setup_eplb_state(enable_eplb: bool, global_num_experts: int) -> EplbLayerState:
+def setup_eplb_state(
+    enable_eplb: bool, global_num_experts: int
+) -> EplbLayerState | None:
     if not enable_eplb:
-        return EplbLayerState()
+        return None
 
     # Initialize EPLB state with proper tensors for testing
     # For testing purposes, we use a simple 1:1 mapping (no redundant experts)
@@ -59,12 +61,14 @@ def setup_eplb_state(enable_eplb: bool, global_num_experts: int) -> EplbLayerSta
         global_num_experts, dtype=torch.int64, device="cuda"
     )
     should_record_tensor = torch.ones((), dtype=torch.bool, device="cuda")
+    num_unpadded_tokens_tensors = [torch.tensor(0, dtype=torch.int32, device="cuda")]
 
     return EplbLayerState(
         expert_load_view=expert_load_view,
         logical_to_physical_map=logical_to_physical_map,
         logical_replica_count=logical_replica_count,
         should_record_tensor=should_record_tensor,
+        num_unpadded_tokens_tensors=num_unpadded_tokens_tensors,
     )
 
 
@@ -349,7 +353,6 @@ def test_fused_topk(
         top_k=top_k,
         global_num_experts=global_num_experts,
         renormalize=renormalize,
-        enable_eplb=enable_eplb,
         eplb_state=eplb_state,
     )
 
@@ -400,7 +403,6 @@ def test_fused_topk_bias(
         top_k=top_k,
         global_num_experts=global_num_experts,
         renormalize=renormalize,
-        enable_eplb=enable_eplb,
         eplb_state=eplb_state,
     )
 
@@ -469,7 +471,6 @@ def test_grouped_topk(
         top_k=top_k,
         global_num_experts=global_num_experts,
         renormalize=renormalize,
-        enable_eplb=enable_eplb,
         eplb_state=eplb_state,
     )
 
@@ -540,7 +541,6 @@ def test_custom(
         global_num_experts=global_num_experts,
         custom_routing_function=custom_routing_function,
         renormalize=renormalize,
-        enable_eplb=enable_eplb,
         eplb_state=eplb_state,
     )
 
@@ -580,7 +580,6 @@ def test_custom(
 #     router = create_fused_moe_router(
 #         top_k=top_k,
 #         global_num_experts=global_num_experts,
-#         enable_eplb=enable_eplb,
 #         eplb_state=eplb_state,
 #     )
 
@@ -785,3 +784,67 @@ def test_eplb_map_with_redundancy(
         torch.testing.assert_close(load, exp_load)
     else:
         assert load.sum().item() == 0
+
+
+@pytest.mark.parametrize(
+    "l2p_map, replica_count, num_physical, topk_ids, "
+    "num_unpadded, expected_out, expected_load",
+    [
+        pytest.param(
+            [[0], [1], [2], [3]],
+            [1, 1, 1, 1],
+            4,
+            [[0, 1], [2, 3], [0, 2], [1, 3]],
+            2,
+            [[0, 1], [2, 3], [0, 2], [1, 3]],
+            # only rows 0,1 counted: expert 0→1, 1→1, 2→1, 3→1
+            [1, 1, 1, 1],
+            id="half_padded",
+        ),
+        pytest.param(
+            # record everything (None = no padding info)
+            [[0], [1], [2], [3]],
+            [1, 1, 1, 1],
+            4,
+            [[0, 1], [2, 3], [0, 2], [1, 3]],
+            None,
+            [[0, 1], [2, 3], [0, 2], [1, 3]],
+            [2, 2, 2, 2],
+            id="no_padding_info",
+        ),
+    ],
+)
+def test_eplb_map_num_unpadded_tokens(
+    l2p_map,
+    replica_count,
+    num_physical,
+    topk_ids,
+    num_unpadded,
+    expected_out,
+    expected_load,
+):
+    l2p = torch.tensor(l2p_map, dtype=torch.int64, device="cuda")
+    rc = torch.tensor(replica_count, dtype=torch.int64, device="cuda")
+    load = torch.zeros(num_physical, dtype=torch.int32, device="cuda")
+    rec = torch.tensor(True, dtype=torch.bool, device="cuda")
+    ids = torch.tensor(topk_ids, dtype=torch.int32, device="cuda")
+    num_unpadded_t = (
+        torch.tensor(num_unpadded, dtype=torch.int32, device="cuda")
+        if num_unpadded is not None
+        else None
+    )
+
+    out = eplb_map_to_physical_and_record(
+        topk_ids=ids,
+        expert_load_view=load,
+        logical_to_physical_map=l2p,
+        logical_replica_count=rc,
+        record_enabled=rec,
+        num_unpadded_tokens=num_unpadded_t,
+    )
+
+    exp_out = torch.tensor(expected_out, dtype=out.dtype, device="cuda")
+    torch.testing.assert_close(out, exp_out)
+
+    exp_load = torch.tensor(expected_load, dtype=torch.int32, device="cuda")
+    torch.testing.assert_close(load, exp_load)

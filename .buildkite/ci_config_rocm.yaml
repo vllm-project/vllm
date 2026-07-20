@@ -1,0 +1,24 @@
+name: vllm_rocm_ci
+job_dirs:
+  - ".buildkite/hardware_tests"
+run_all_patterns:
+  - "docker/Dockerfile.rocm"
+  - "docker/Dockerfile.rocm_base"
+  - "docker/ci-rocm.hcl"
+  - "docker/docker-bake-rocm.hcl"
+  - ".buildkite/hardware_tests/amd.yaml"
+  - ".buildkite/scripts/ci-bake-rocm.sh"
+  - ".buildkite/scripts/rocm/"
+  - ".buildkite/scripts/hardware_ci/run-amd-test.py"
+  - ".buildkite/scripts/hardware_ci/run-amd-test.sh"
+  - "CMakeLists.txt"
+  - "requirements/common.txt"
+  - "requirements/rocm.txt"
+  - "requirements/build/rocm.txt"
+  - "requirements/test/rocm.txt"
+  - "setup.py"
+  - "csrc/"
+  - "cmake/"
+run_all_exclude_patterns:
+  - "csrc/cpu/"
+  - "cmake/cpu_extension.cmake"
