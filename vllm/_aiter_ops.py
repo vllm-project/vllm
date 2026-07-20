@@ -2459,6 +2459,128 @@ class rocm_aiter_ops:
         return y
 
     @staticmethod
+    def fused_qk_norm_rope_and_cache(
+        qkv: torch.Tensor,
+        q_weight: torch.Tensor,
+        k_weight: torch.Tensor,
+        cos_sin_cache: torch.Tensor,
+        positions: torch.Tensor,
+        num_heads_q: int,
+        num_heads_k: int,
+        num_heads_v: int,
+        head_dim: int,
+        is_neox: bool,
+        rms_norm_eps: float,
+        q_out: torch.Tensor,
+        k_cache: torch.Tensor,
+        v_cache: torch.Tensor,
+        slot_mapping: torch.Tensor,
+        k_scale: torch.Tensor,
+        v_scale: torch.Tensor,
+        k_out: torch.Tensor | None,
+        v_out: torch.Tensor | None,
+        return_kv: bool,
+        use_shuffle_layout: bool,
+        block_size: int,
+        x: int,
+        rotary_dim: int = 0,
+    ):
+        from aiter.ops.fused_qk_norm_rope_cache_quant import (
+            fused_qk_norm_rope_cache_pts_quant_shuffle,
+        )
+
+        fused_qk_norm_rope_cache_pts_quant_shuffle(
+            qkv,
+            q_weight,
+            k_weight,
+            cos_sin_cache,
+            positions,
+            qkv.size(0),
+            num_heads_q,
+            num_heads_k,
+            num_heads_v,
+            head_dim,
+            is_neox,
+            rms_norm_eps,
+            q_out,
+            k_cache,
+            v_cache,
+            slot_mapping,
+            k_scale,
+            v_scale,
+            k_out,
+            v_out,
+            return_kv,
+            use_shuffle_layout,
+            block_size,
+            x,
+            rotary_dim,
+        )
+
+    @staticmethod
+    def do_qk_norm_rope_kvcache_update(
+        qkv: torch.Tensor,
+        q_weight: torch.Tensor,
+        k_weight: torch.Tensor,
+        cos_sin_cache: torch.Tensor,
+        positions: torch.Tensor,
+        num_heads_q: int,
+        num_heads_k: int,
+        head_dim: int,
+        is_neox: bool,
+        rms_norm_eps: float,
+        q_out: torch.Tensor,
+        k_out: torch.Tensor,
+        key_cache: torch.Tensor,
+        value_cache: torch.Tensor,
+        slot_mapping: torch.Tensor,
+        k_scale: torch.Tensor,
+        v_scale: torch.Tensor,
+        kv_cache_dtype: str,
+        use_shuffle_layout: bool,
+    ) -> None:
+        """Run the fused QK-norm+RoPE+KV-cache op on already-split k/v caches.
+
+        Shared by the AITER FA and unified-attention impls. The caller splits
+        kv_cache, since the unbind dim depends on the layout (e.g. the unified
+        encoder-decoder path is K/V-first), and passes use_shuffle_layout
+        (unified reads NHD and must pass False).
+        """
+        if kv_cache_dtype.startswith("fp8"):
+            key_cache = key_cache.view(current_platform.fp8_dtype())
+            value_cache = value_cache.view(current_platform.fp8_dtype())
+        # Partial-rotary support (e.g. GLM-4.7 applies rotary to only a prefix
+        # of each head's channel dim).
+        rotary_dim = cos_sin_cache.shape[-1]
+        kernel_rotary_dim = 0 if rotary_dim == head_dim else rotary_dim
+        rocm_aiter_ops.fused_qk_norm_rope_and_cache(
+            qkv=qkv,
+            q_weight=q_weight,
+            k_weight=k_weight,
+            cos_sin_cache=cos_sin_cache,
+            positions=positions,
+            num_heads_q=num_heads_q,
+            num_heads_k=num_heads_k,
+            num_heads_v=num_heads_k,
+            head_dim=head_dim,
+            is_neox=is_neox,
+            rms_norm_eps=rms_norm_eps,
+            q_out=q_out,
+            k_cache=key_cache,
+            v_cache=value_cache,
+            slot_mapping=slot_mapping,
+            k_scale=k_scale,
+            v_scale=v_scale,
+            k_out=k_out,
+            v_out=None,
+            return_kv=True,
+            use_shuffle_layout=use_shuffle_layout,
+            block_size=key_cache.shape[1],
+            x=16 // key_cache.element_size(),
+            rotary_dim=kernel_rotary_dim,
+        )
+
+    @staticmethod
     def triton_rope_and_cache(
         query: torch.Tensor,
         key: torch.Tensor,
@@ -2637,7 +2759,8 @@ class rocm_aiter_ops:
 
         Args:
             tensor: The input weight tensor to be shuffled.
-            layout: The block layout to use, defaults to (16, 4).
+            nLane: Number of lanes in the shuffle layout.
+            gate_up: Whether the weight is for w13 (True) or w2 (False).
 
         Returns:
             torch.Tensor: The shuffled tensor.
@@ -2875,7 +2998,6 @@ class rocm_aiter_ops:
             hc_sinkhorn_eps: sinkhorn epsilon
             hc_post_mult_value: post-mix multiplier value
             sinkhorn_repeat: number of sinkhorn iterations
-            n_splits: split-k factor;
 
         Returns:
             post_mix: shape (..., hc_mult), dtype torch.float32
