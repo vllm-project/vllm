@@ -74,6 +74,20 @@ class SessionPollResult(NamedTuple):
     new_fetch_ids: list[str]
 
 
+class SessionCloseResult(NamedTuple):
+    """Result of tearing down a P2PSession.
+
+    `failed_loads`/`failed_stores` are the in-flight jobs the manager must
+    mark failed. `failed_serves`/`failed_probes` cover the symmetric-P2P
+    lookup state on each role that the dead peer can no longer resolve.
+    """
+
+    failed_loads: list[tuple[int, str]]  # (job_id, kv_request_id)
+    failed_stores: list[int]  # job_ids
+    failed_serves: list[ReqContext]  # server-side lookup ctxs needing release
+    failed_probes: list[str]  # client-side kv_request_ids never answered
+
+
 class P2PSession:
     """Bidirectional session — coordinator over ClientRole + ServerRole.
 
@@ -251,25 +265,21 @@ class P2PSession:
             loads=loads, stores=stores, new_fetch_ids=new_fetch_ids
         )
 
-    def close(
-        self,
-    ) -> tuple[list[tuple[int, str]], list[int], list[ReqContext], list[str]]:
+    def close(self) -> SessionCloseResult:
         """Shut down.
-
-        Returns (failed_loads, failed_stores, orphan_ctxs, stranded_lookups).
 
         failed_loads: list of (job_id, kv_request_id) pairs.
         failed_stores: list of job_ids.
-        orphan_ctxs: synthetic lookup ctxs still owing
+        failed_serves: synthetic lookup ctxs still owing
             ``parent.on_request_finished`` (the manager flushes these on
             its next ``serve_external_requests``).
-        stranded_lookups: kv_request_ids with an unresolved symmetric-P2P
+        failed_probes: kv_request_ids with an unresolved symmetric-P2P
             probe toward the now-dead peer. The manager fails these so the
             consumer's lookup() falls back to local prefill instead of
             deferring forever on an answer that can never arrive.
         """
-        failed_loads, stranded_lookups = self._client.close()
-        failed_stores, orphan_ctxs = self._server.close()
+        failed_loads, failed_probes = self._client.close()
+        failed_stores, failed_serves = self._server.close()
 
         if self._conn is not None:
             with contextlib.suppress(Exception):
@@ -277,7 +287,12 @@ class P2PSession:
             self._conn.close()
             self._conn = None
 
-        return failed_loads, failed_stores, orphan_ctxs, stranded_lookups
+        return SessionCloseResult(
+            failed_loads=failed_loads,
+            failed_stores=failed_stores,
+            failed_serves=failed_serves,
+            failed_probes=failed_probes,
+        )
 
     # ------------------------------------------------------------------
     # Message dispatch

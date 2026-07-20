@@ -483,7 +483,7 @@ class TestClientFlows:
         session.request_blocks(
             job_id=1, kv_request_id="req-1", keys=[b"k"], block_ids=[0]
         )
-        session._client._inbound["req-1"].submitted_at = time.monotonic() - 60.0
+        session._client._requests["req-1"].load.submitted_at = time.monotonic() - 60.0
         session.poll()
         abort = conn._sent[-1]
         assert abort[TYPE_KEY] == AbortFetchMsg.TYPE
@@ -491,7 +491,7 @@ class TestClientFlows:
     def test_load_abort_ack_timeout_surfaces_failure(self):
         """After load timeout sends AbortFetch, if no AbortAck arrives within
         _ABORT_ACK_TIMEOUT_S the request is surfaced as failed and removed
-        from _inbound — the engine cannot wait forever on a peer that won't
+        from _requests — the engine cannot wait forever on a peer that won't
         ack.
         """
         session, conn, _ = _make_session()
@@ -500,7 +500,7 @@ class TestClientFlows:
             job_id=7, kv_request_id="req-7", keys=[b"k"], block_ids=[0]
         )
         # 1) Trip the load timeout to send AbortFetch and stamp aborted_at.
-        session._client._inbound["req-7"].submitted_at = (
+        session._client._requests["req-7"].load.submitted_at = (
             time.monotonic() - _LOAD_TIMEOUT_S - 1.0
         )
         loads = session.poll().loads
@@ -510,32 +510,32 @@ class TestClientFlows:
             and m[AbortFetchMsg.KV_REQUEST_ID] == "req-7"
             for m in conn._sent
         )
-        assert session._client._inbound["req-7"].aborted_at is not None
+        assert session._client._requests["req-7"].load.aborted_at is not None
 
         # 2) Now backdate aborted_at past the abort-ack timeout. No ack ever
         # arrived from the peer.
-        session._client._inbound["req-7"].aborted_at = (
+        session._client._requests["req-7"].load.aborted_at = (
             time.monotonic() - _ABORT_ACK_TIMEOUT_S - 1.0
         )
         loads = session.poll().loads
         assert loads == [LoadResult(job_id=7, kv_request_id="req-7", success=False)]
-        assert "req-7" not in session._client._inbound
+        assert "req-7" not in session._client._requests
 
     def test_load_abort_ack_clears_request(self):
         """After load timeout sends AbortFetch, an arriving AbortAckMsg from
         the peer surfaces the failure cleanly and removes the request from
-        _inbound — covers the on_abort_ack arrival path."""
+        _requests — covers the on_abort_ack arrival path."""
         session, conn, _ = _make_session()
         _activate(session, conn)
         session.request_blocks(
             job_id=8, kv_request_id="req-8", keys=[b"k"], block_ids=[0]
         )
-        session._client._inbound["req-8"].submitted_at = (
+        session._client._requests["req-8"].load.submitted_at = (
             time.monotonic() - _LOAD_TIMEOUT_S - 1.0
         )
         # First poll: AbortFetch goes out.
         session.poll()
-        assert session._client._inbound["req-8"].aborted_at is not None
+        assert session._client._requests["req-8"].load.aborted_at is not None
 
         # Peer acks the abort.
         conn.enqueue(
@@ -546,7 +546,7 @@ class TestClientFlows:
         )
         loads = session.poll().loads
         assert loads == [LoadResult(job_id=8, kv_request_id="req-8", success=False)]
-        assert "req-8" not in session._client._inbound
+        assert "req-8" not in session._client._requests
 
 
 # ---------------------------------------------------------------------------
@@ -699,9 +699,8 @@ class TestLookupFlow:
         session.finish_request("req-1")
 
         # req-1 entries gone, req-2 untouched.
-        assert ("req-1", b"hA") not in session._client._lookups
-        assert ("req-1", b"hB") not in session._client._lookups
-        assert ("req-2", b"hC") in session._client._lookups
+        assert "req-1" not in session._client._requests
+        assert b"hC" in session._client._requests["req-2"].probes
 
     def test_finish_after_flushed_lookup_sends_empty_fetch(self):
         """LookupMsg flushed but no FetchMsg sent (all-miss case) →
@@ -979,10 +978,11 @@ class TestServerLookupHandling:
         assert ":req-1:" in finish_calls[0][1]
         assert ":req-1:" in finish_calls[1][1]
 
-    def test_close_returns_open_batch_ctxs_as_orphans(self):
+    def test_close_returns_open_batch_ctxs_as_failed_serves(self):
         """Tearing the session down with a parked batch returns the
-        synthetic ctx as an orphan (no parent handle at teardown) so the
-        manager can release the TieringManager's state on its next serve."""
+        synthetic ctx as a failed serve (no parent handle at teardown) so
+        the manager can release the TieringManager's state on its next
+        serve."""
         cb = FakeParent(pending={b"hA"})
         session, conn, _ = _make_session()
         _activate(session, conn)
@@ -993,10 +993,10 @@ class TestServerLookupHandling:
         assert len(session._server._inbound_lookups) == 1
         assert all(c[0] != "on_request_finished" for c in cb.calls)
 
-        _failed_loads, _failed_stores, orphan_ctxs, _stranded = session.close()
+        result = session.close()
 
-        assert len(orphan_ctxs) == 1
-        assert ":req-1:" in orphan_ctxs[0].req_id
+        assert len(result.failed_serves) == 1
+        assert ":req-1:" in result.failed_serves[0].req_id
         # close() itself must not call the parent.
         assert all(c[0] != "on_request_finished" for c in cb.calls)
 
@@ -1909,11 +1909,11 @@ class TestPendingSession:
         )
         session.add_stored_blocks("req-1", [b"k1"], [0], job_id=1)
         session.add_stored_blocks("req-2", [b"k2"], [1], job_id=2)
-        failed_loads, failed_stores, orphan_ctxs, stranded = session.close()
-        assert failed_loads == []
-        assert set(failed_stores) == {1, 2}
-        assert orphan_ctxs == []
-        assert stranded == []
+        result = session.close()
+        assert result.failed_loads == []
+        assert set(result.failed_stores) == {1, 2}
+        assert result.failed_serves == []
+        assert result.failed_probes == []
 
 
 # ---------------------------------------------------------------------------
@@ -1935,11 +1935,11 @@ class TestDisconnect:
         session.request_blocks(1, "req-1", [b"k"], [0])
         session.request_blocks(2, "req-2", [b"k"], [0])
         session.add_stored_blocks("req-srv", [b"k"], [0], job_id=10)
-        failed_loads, failed_stores, orphan_ctxs, stranded = session.close()
-        assert set(failed_loads) == {(1, "req-1"), (2, "req-2")}
-        assert set(failed_stores) == {10}
-        assert orphan_ctxs == []
-        assert stranded == []
+        result = session.close()
+        assert set(result.failed_loads) == {(1, "req-1"), (2, "req-2")}
+        assert set(result.failed_stores) == {10}
+        assert result.failed_serves == []
+        assert result.failed_probes == []
 
     def test_send_failure_marks_connection_dead(self):
         """A raising send must mark the connection dead, not silently drop
@@ -1976,8 +1976,8 @@ class TestDisconnect:
         )
         session.poll()
 
-        _loads, _stores, _orphans, stranded = session.close()
-        assert stranded == ["req-inflight"]
+        result = session.close()
+        assert result.failed_probes == ["req-inflight"]
 
 
 # ---------------------------------------------------------------------------

@@ -24,6 +24,7 @@ from vllm.v1.kv_offload.tiering.p2p.manager import (
 )
 from vllm.v1.kv_offload.tiering.p2p.session import (
     LoadResult,
+    SessionCloseResult,
     SessionPollResult,
     StoreResult,
 )
@@ -104,7 +105,7 @@ def _make_manager() -> P2PSecondaryTierManager:
     mgr._sessions = {}
     mgr._kv_to_session = {}
     mgr._unbound_stores = {}
-    mgr._orphan_finish_ctxs = []
+    mgr._failed_serve_ctxs = []
     return mgr
 
 
@@ -256,13 +257,13 @@ class _RecordingSession:
 
 
 class TestServeExternalRequests:
-    def test_flushes_orphan_ctxs_then_serves_each_session(self):
-        """serve_external_requests releases ctxs orphaned by reaped
-        sessions via parent.on_request_finished (clearing the queue),
-        then delegates to every live session with the same parent."""
+    def test_flushes_failed_serve_ctxs_then_serves_each_session(self):
+        """serve_external_requests releases the failed serves left by
+        reaped sessions via parent.on_request_finished (clearing the
+        queue), then delegates to every live session with the same parent."""
         mgr = _make_manager()
         ctx = ReqContext(req_id="p2p:peer:req-1:lu1")
-        mgr._orphan_finish_ctxs = [ctx]
+        mgr._failed_serve_ctxs = [ctx]
         sess_a = _RecordingSession()
         sess_b = _RecordingSession()
         mgr._sessions = {"a": sess_a, "b": sess_b}  # type: ignore[assignment]
@@ -270,14 +271,14 @@ class TestServeExternalRequests:
         parent = _RecordingParent()
         mgr.serve_external_requests(parent)  # type: ignore[arg-type]
 
-        # Orphan released and queue cleared.
+        # Failed serve released and queue cleared.
         assert parent.finished == ["p2p:peer:req-1:lu1"]
-        assert mgr._orphan_finish_ctxs == []
+        assert mgr._failed_serve_ctxs == []
         # Every live session served with the same parent handle.
         assert sess_a.served_with == [parent]
         assert sess_b.served_with == [parent]
 
-    def test_no_orphans_still_serves_sessions(self):
+    def test_no_failed_serves_still_serves_sessions(self):
         mgr = _make_manager()
         sess = _RecordingSession()
         mgr._sessions = {"a": sess}  # type: ignore[assignment]
@@ -539,6 +540,10 @@ class _FakeClientHalf:
     def __init__(self) -> None:
         self._inbound: dict[int, object] = {}
 
+    @property
+    def has_active_loads(self) -> bool:
+        return bool(self._inbound)
+
 
 class _FakeSession:
     """Fake bidirectional session that returns canned poll() results."""
@@ -553,8 +558,8 @@ class _FakeSession:
         new_fetch_ids: list[str] | None = None,
         close_loads: list[tuple[int, str]] | None = None,
         close_stores: list[int] | None = None,
-        close_orphans: list[ReqContext] | None = None,
-        close_stranded: list[str] | None = None,
+        close_failed_serves: list[ReqContext] | None = None,
+        close_failed_probes: list[str] | None = None,
     ) -> None:
         self.peer_id = peer_id
         self.alive = alive
@@ -565,15 +570,15 @@ class _FakeSession:
         self._new_fetch_ids = new_fetch_ids or []
         self._close_loads = close_loads or []
         self._close_stores = close_stores or []
-        self._close_orphans = close_orphans or []
-        self._close_stranded = close_stranded or []
+        self._close_failed_serves = close_failed_serves or []
+        self._close_failed_probes = close_failed_probes or []
         self.requests: list[tuple[int, str]] = []
         self.stores_added: list[tuple[str, list, object, int]] = []
         self.attached: list[object] = []
         self.finishes: list[str] = []
         # Mirror P2PSession._server._inflight (transfer_id → handle) and
-        # P2PSession._client._inbound for the shutdown-drain and drain_jobs
-        # paths. Tests populate _server._inflight when needed.
+        # P2PSession._client.has_active_loads for the shutdown-drain and
+        # drain_jobs paths. Tests populate _server._inflight when needed.
         self._server = _FakeServerHalf()
         self._client = _FakeClientHalf()
 
@@ -602,11 +607,11 @@ class _FakeSession:
         self.finishes.append(kv_request_id)
 
     def close(self):
-        return (
-            self._close_loads,
-            self._close_stores,
-            self._close_orphans,
-            self._close_stranded,
+        return SessionCloseResult(
+            failed_loads=self._close_loads,
+            failed_stores=self._close_stores,
+            failed_serves=self._close_failed_serves,
+            failed_probes=self._close_failed_probes,
         )
 
 
@@ -663,7 +668,7 @@ class TestGetFinished:
         assert "dead:1234" not in mgr._sessions
         assert "req-load" in mgr._failed_req_ids
 
-    def test_reap_fails_stranded_lookups(self):
+    def test_reap_fails_probes(self):
         """A reaped session's in-flight lookups land in _failed_req_ids so
         the consumer's lookup() returns MISS instead of RETRY forever."""
 
@@ -677,7 +682,7 @@ class TestGetFinished:
             peer_id="dead:1234",
             alive=False,
             connected=True,
-            close_stranded=["req-probe-1", "req-probe-2"],
+            close_failed_probes=["req-probe-1", "req-probe-2"],
         )
         mgr._sessions["dead:1234"] = dead  # type: ignore[assignment]
 

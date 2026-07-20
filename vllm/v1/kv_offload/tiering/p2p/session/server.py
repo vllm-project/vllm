@@ -746,8 +746,8 @@ class ServerRole:
     def close(self) -> tuple[list[int], list[ReqContext]]:
         """Tear down. Cancels inflight.
 
-        Returns ``(failed_store_job_ids, orphan_ctxs)`` where
-        ``orphan_ctxs`` are synthetic lookup ctxs still owing a
+        Returns ``(failed_store_job_ids, failed_serves)`` where
+        ``failed_serves`` are synthetic lookup ctxs still owing a
         ``parent.on_request_finished``. The session is going away with no
         parent handle in hand, so the manager flushes these in its next
         ``serve_external_requests``.
@@ -765,12 +765,12 @@ class ServerRole:
         # the manager can release the TieringManager's per-request
         # bookkeeping: parked lookups plus any already queued from a
         # FetchMsg / finish that closed them before this teardown.
-        orphan_ctxs = [lu.ctx for lu in self._inbound_lookups.values()]
-        orphan_ctxs.extend(self._finished_lookup_ctxs)
+        failed_serves = [lu.ctx for lu in self._inbound_lookups.values()]
+        failed_serves.extend(self._finished_lookup_ctxs)
         self._inbound_lookups.clear()
         self._finished_lookup_ctxs.clear()
         self._pending_inbound_lookups.clear()
-        return failed_stores, orphan_ctxs
+        return failed_stores, failed_serves
 
     # ------------------------------------------------------------------
     # Internal — inflight bookkeeping

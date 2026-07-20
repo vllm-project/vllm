@@ -248,10 +248,11 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         # rejects them so the request falls back to local prefill.
         self._failed_req_ids: set[str] = set()
         # Synthetic lookup ctxs from reaped sessions still owing a
-        # ``parent.on_request_finished``. The dead session had no parent
-        # handle at teardown; these are flushed at the top of the next
-        # ``serve_external_requests`` where the handle is valid.
-        self._orphan_finish_ctxs: list[ReqContext] = []
+        # ``parent.on_request_finished`` (the session's failed_serves). The
+        # dead session had no parent handle at teardown; these are flushed
+        # at the top of the next ``serve_external_requests`` where the
+        # handle is valid.
+        self._failed_serve_ctxs: list[ReqContext] = []
 
     # ------------------------------------------------------------------
     # SecondaryTierManager interface
@@ -402,7 +403,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
                 block_ids=block_ids,
             )
         )
-        logger.info(
+        logger.debug(
             "P2P %s: parked submit_store kv_request_id=%s job_id=%d blocks=%d",
             self._local_id,
             kv_request_id,
@@ -509,7 +510,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         while True:
             self._poll_once()
             pending = any(
-                s._client._inbound or s._server._inflight
+                s._client.has_active_loads or s._server._inflight
                 for s in self._sessions.values()
             )
             if not pending:
@@ -530,13 +531,13 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         ``on_schedule_end``) with a ``parent`` handle valid only for the
         duration of the call — the sole window in which the P2P server
         role may query the tiering manager. First release bookkeeping for
-        any lookups orphaned by a reaped session, then let every live
+        the failed serves left by a reaped session, then let every live
         session resolve its enqueued inbound LookupMsgs.
         """
-        if self._orphan_finish_ctxs:
-            for ctx in self._orphan_finish_ctxs:
+        if self._failed_serve_ctxs:
+            for ctx in self._failed_serve_ctxs:
                 parent.on_request_finished(ctx)
-            self._orphan_finish_ctxs = []
+            self._failed_serve_ctxs = []
         for session in self._sessions.values():
             session.serve_external_requests(parent)
 
@@ -637,21 +638,21 @@ class P2PSecondaryTierManager(SecondaryTierManager):
             ]
             for kid in stale_kv_ids:
                 del self._kv_to_session[kid]
-            failed_loads, failed_stores, orphan_ctxs, stranded_lookups = session.close()
-            for job_id, kv_request_id in failed_loads:
+            close_result = session.close()
+            for job_id, kv_request_id in close_result.failed_loads:
                 self._finished_jobs.append(JobResult(job_id=job_id, success=False))
                 self._failed_req_ids.add(kv_request_id)
-            for job_id in failed_stores:
+            for job_id in close_result.failed_stores:
                 self._finished_jobs.append(JobResult(job_id=job_id, success=False))
             # Fail any request whose symmetric-P2P probe was still in flight
             # toward the dead peer so lookup() returns MISS (local prefill)
             # instead of RETRY forever — even if a fresh session to the same
             # peer is later opened by another request.
-            for kv_request_id in stranded_lookups:
+            for kv_request_id in close_result.failed_probes:
                 self._failed_req_ids.add(kv_request_id)
             # Release the TieringManager's per-request bookkeeping for the
             # dead session's synthetic lookups on the next serve_external_requests.
-            self._orphan_finish_ctxs.extend(orphan_ctxs)
+            self._failed_serve_ctxs.extend(close_result.failed_serves)
             self._data.remove_remote_peer(pid)
             logger.warning("P2P %s: peer %s down", self._local_id, pid)
 
