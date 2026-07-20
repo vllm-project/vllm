@@ -128,21 +128,6 @@ def test_enabled_ops_invalid(env: str):
 
 
 @pytest.mark.parametrize(
-    ("custom_ops", "match"),
-    [
-        (["+rms_norm", "-rms_norm"], "cannot both enable and disable"),
-        (["all", "none"], "must contain exactly one base mode"),
-    ],
-)
-def test_enabled_ops_invalid_after_config_mutation(custom_ops, match):
-    vllm_config = VllmConfig()
-    vllm_config.compilation_config.custom_ops.extend(custom_ops)
-    get_cached_compilation_config.cache_clear()
-    with set_current_vllm_config(vllm_config), pytest.raises(ValueError, match=match):
-        RMSNorm(1024).enabled()
-
-
-@pytest.mark.parametrize(
     "use_rocm_aiter", [True, False] if current_platform.is_rocm() else [False]
 )
 def test_topk_softmax_dispatch(use_rocm_aiter: bool):

@@ -1355,10 +1355,16 @@ class CompilationConfig:
                 )
 
     def is_custom_op_enabled(self, op: str) -> bool:
-        if "all" in self.custom_ops:
+        count_all = self.custom_ops.count("all")
+        count_none = self.custom_ops.count("none")
+        if count_all + count_none != 1:
+            raise ValueError(
+                "custom_ops must contain exactly one base mode: 'all' or 'none'"
+            )
+
+        if count_all:
             return f"-{op}" not in self.custom_ops
 
-        assert "none" in self.custom_ops
         return f"+{op}" in self.custom_ops
 
     def resolve_cudagraph_mode_and_sizes(
