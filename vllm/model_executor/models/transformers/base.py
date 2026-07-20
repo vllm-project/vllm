@@ -74,6 +74,7 @@ if TYPE_CHECKING:
     from transformers import PreTrainedModel
 
     from vllm.config import VllmConfig
+    from vllm.v1.attention.backend import AttentionBackend
 
 logger = init_logger(__name__)
 
@@ -104,6 +105,7 @@ class Base(
         super().__init__()
         logger.info("Using Transformers modeling backend.")
 
+        self.vllm_config = vllm_config
         self.config = vllm_config.model_config.hf_config
         self.text_config = self.config.get_text_config()
         self.cache_config = vllm_config.cache_config
@@ -357,7 +359,7 @@ class Base(
             tip = get_feature_request_tip(
                 self.model_config.model, self.model_config.trust_remote_code
             )
-            logger.warning(
+            logger.warning_once(
                 "%s does not define a pipeline parallel plan. The Transformers "
                 "modeling backend will infer the split from the layers of %s in order "
                 "of declaration and keep parameter-free modules on every rank. This "
@@ -527,20 +529,29 @@ class Base(
 
         num_heads = self.model_config.get_num_attention_heads(self.parallel_config)
         head_size = self.model_config.get_head_size()
+        head_size_v = None
         num_kv_heads = self.model_config.get_num_kv_heads(self.parallel_config)
         logits_soft_cap = getattr(text_config, "attn_logit_softcapping", None)
 
-        # In encoder models, the attention layers will have `is_causal=False`
-        is_encoder = lambda module: not getattr(module, "is_causal", True)
-        has_encoder = lambda model: any(is_encoder(m) for m in model.modules())
-        is_multimodal = lambda config: config != config.get_text_config()
-        # vLLM does not support encoder-decoder models, so if any encoder layer is
-        # found in a text only model, we assume the whole model is an encoder model
-        if has_encoder(self.model) and not is_multimodal(self.config):
-            self.check_version("5.0.0", "encoder models support")
-            attn_type = AttentionType.ENCODER_ONLY
-        else:
-            attn_type = AttentionType.DECODER
+        if getattr(text_config, "kv_lora_rank", None) is not None:
+            # Model config must not tell the rest of vLLM that this is an MLA model
+            assert not self.model_config.use_mla
+            logger.warning_once(
+                "Transformers modeling backend does not yet fully support MLA models. "
+                "Using full attention and, if possible, DiffKV backend for KV cache "
+                "allocation. This may be suboptimal."
+            )
+            qk_nope_head_dim = getattr(text_config, "qk_nope_head_dim", 0)
+            qk_rope_head_dim = getattr(text_config, "qk_rope_head_dim", 0)
+            head_size = qk_nope_head_dim + qk_rope_head_dim or head_size
+            head_size_v = getattr(text_config, "v_head_dim", head_size)
+
+        attn_type = self._get_attn_type()
+        attn_cls = self._get_attn_cls(attn_type)
+        attn_backend = self._get_attn_backend(head_size, head_size_v)
+
+        if head_size_v and head_size_v != head_size and attn_backend is None:
+            head_size_v = head_size
 
         pp_rank = self.pp_group.rank_in_group
         pp_size = self.pp_group.world_size
@@ -556,14 +567,10 @@ class Base(
             ):
                 per_layer_sliding_window = self.config.sliding_window
 
-            attn_cls = (
-                EncoderOnlyAttention
-                if attn_type == AttentionType.ENCODER_ONLY
-                else Attention
-            )
             attention_instances[i] = attn_cls(
                 num_heads=num_heads,
                 head_size=head_size,
+                head_size_v=head_size_v,
                 # NOTE: We use Llama scale as default, if it's set by
                 # Transformers, it's updated in vllm_attention_forward
                 scale=head_size**-0.5,
@@ -574,8 +581,81 @@ class Base(
                 per_layer_sliding_window=per_layer_sliding_window,
                 prefix=f"{i}.attn",
                 attn_type=attn_type,
+                attn_backend=attn_backend,
             )
         return attention_instances
+
+    def _get_attn_cls(self, attn_type: AttentionType) -> type[Attention]:
+        """Return the `Attention` class to use for the given attention type."""
+        if attn_type == AttentionType.ENCODER_ONLY:
+            return EncoderOnlyAttention
+        return Attention
+
+    def _get_attn_type(self) -> AttentionType:
+        """Return the attention type for this model's layers.
+
+        vLLM does not support encoder-decoder models, so if any encoder layer
+        (`is_causal=False`) is found in a text-only model, treat the whole model
+        as encoder-only; otherwise it is a decoder.
+        """
+        is_encoder = lambda module: not getattr(module, "is_causal", True)
+        has_encoder = lambda model: any(is_encoder(m) for m in model.modules())
+        is_multimodal = lambda config: config != config.get_text_config()
+        if has_encoder(self.model) and not is_multimodal(self.config):
+            self.check_version("5.0.0", "encoder models support")
+            return AttentionType.ENCODER_ONLY
+        return AttentionType.DECODER
+
+    def _get_attn_backend(
+        self, head_size: int, head_size_v: int | None
+    ) -> "type[AttentionBackend] | None":
+        """Pick the attention backend for these head sizes, or None for default.
+
+        Symmetric heads use vLLM's default backend selection (returns None).
+        Asymmetric heads (decompressed MLA, head_size_v < head_size) can only be
+        cached by a DiffKV backend: prefer FlashAttention DiffKV when usable on
+        this device, else Triton DiffKV (which needs Triton, i.e. CUDA/ROCm). A
+        `*_DIFFKV` backend requested via `--attention-backend` wins. Returns None
+        when no DiffKV backend is available, so the caller falls back to padding.
+        """
+        if head_size_v is None or head_size_v == head_size:
+            return None
+
+        from vllm.platforms import current_platform
+        from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
+        requested = self.vllm_config.attention_config.backend
+        fa_diffkv = AttentionBackendEnum.FLASH_ATTN_DIFFKV
+        if requested is not None:
+            if not requested.name.endswith("_DIFFKV"):
+                logger.warning_once(
+                    "Requested attention backend %s is not a DiffKV backend, but "
+                    "the model has asymmetric heads (head_size_v=%d < head_size=%d). "
+                    "This will cause vLLM to pad the `value` tensor to preserve "
+                    "correctness, but this wastes KV cache. Consider using a DiffKV "
+                    "backend instead.",
+                    requested.name,
+                    head_size_v,
+                    head_size,
+                )
+                return None
+            backend_enum = requested
+        elif fa_diffkv.get_class().is_supported_on_current_device(
+            head_size=head_size, head_size_v=head_size_v, has_sinks=False
+        ):
+            backend_enum = fa_diffkv
+        elif current_platform.is_cuda() or current_platform.is_rocm():
+            backend_enum = AttentionBackendEnum.TRITON_ATTN_DIFFKV
+        else:
+            logger.warning_once(
+                "No DiffKV attention backend available."
+                "Padding `value` to preserve correctness, this wastes KV cache."
+            )
+            return None
+        attn_backend = backend_enum.get_class()
+        attn_backend.set_head_size_v(head_size_v)
+        logger.info("Using %s backend.", attn_backend.get_name())
+        return attn_backend
 
     def init_parameters(self, module: nn.Module, dtype: torch.dtype | None = None):
         """
