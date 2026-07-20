@@ -1177,6 +1177,33 @@ def _get_kv_cache_groups_uniform_page_size(
     for layer_name, layer_spec in kv_cache_spec.items():
         same_type_layers[layer_spec].append(layer_name)
 
+    # Separate speculator layers into their own group before the heuristic
+    # below runs, so drafter layers don't get scattered across groups.
+    # Separate speculator (drafter) layers into their own dedicated group(s),
+    # one per KV cache spec type. A hybrid draft model (e.g. LFM2.5: short_conv +
+    # attention) has multiple spec types among its layers; they must NOT be merged
+    # into a single group (a KV cache group must be spec-uniform), so we keep one
+    # dedicated group per spec type. A non-hybrid (EAGLE-style) drafter simply
+    # yields a single group.
+    speculator_groups_by_spec: dict[KVCacheSpec, list[str]] = {}
+    if speculator_layers:
+        for spec in list(same_type_layers.keys()):
+            layers = same_type_layers[spec]
+            spec_in_group = [n for n in layers if n in speculator_layers]
+            if spec_in_group:
+                non_spec = [n for n in layers if n not in speculator_layers]
+                if non_spec:
+                    same_type_layers[spec] = non_spec
+                else:
+                    del same_type_layers[spec]
+                speculator_groups_by_spec[spec] = spec_in_group
+        if speculator_groups_by_spec:
+            logger.info(
+                "Separated %d speculator layers into %d dedicated KV cache group(s)",
+                sum(len(v) for v in speculator_groups_by_spec.values()),
+                len(speculator_groups_by_spec),
+            )
+
     # Split each group into smaller groups, to make the number of layers in each
     # group identical. Add padding to the last group of each type if necessary.
     # E.g., (full.0, full.1), (sw.0, sw.1, sw.2)
@@ -1224,6 +1251,10 @@ def _get_kv_cache_groups_uniform_page_size(
         # instead of layers[i * group_size: (i + 1) * group_size]
         for i in range(num_groups):
             grouped_layers.append(layers[i::num_groups])
+    # Prepend speculator layers as their own dedicated group(s), one per spec type
+    for spec_layers in speculator_groups_by_spec.values():
+        grouped_layers.insert(0, spec_layers)
+
     return create_kv_cache_group_specs(kv_cache_spec, grouped_layers)
 
 
@@ -1692,6 +1723,53 @@ def _annotate_eagle_groups_deepseek_v4(
         if last_layer in group.layer_names:
             group.is_eagle_group = True
             break
+
+
+def _identify_speculator_layers(
+    vllm_config: VllmConfig, all_layer_names: list[str]
+) -> set[str] | None:
+    """Identify speculator (drafter) attention layers by finding layers
+    whose index exceeds the target model's total layer count.
+
+    For EAGLE-style drafters, drafter layers are appended after the target
+    model's layers (e.g., model.layers.24-27 for a 24-layer target model).
+    Layer names use global indices even under pipeline parallelism
+    (see make_layers() in model_executor/models/utils.py).
+    """
+    from vllm.model_executor.models.utils import extract_layer_index
+
+    spec_config = vllm_config.speculative_config
+    if spec_config is None:
+        return None
+
+    # Global count -- layer names use global indices under PP.
+    target_num_layers = vllm_config.model_config.get_total_num_hidden_layers()
+
+    speculator_layers: set[str] = set()
+    for name in all_layer_names:
+        # Classical separate draft model: layers are loaded with prefix
+        # "draft_model" (see spec_decode/draft_model.py). Their local layer
+        # indices do NOT exceed the target's layer count, so the index
+        # heuristic below misses them; detect them by prefix instead.
+        if "draft_model" in name:
+            speculator_layers.add(name)
+            continue
+        try:
+            layer_idx = extract_layer_index(name)
+            if layer_idx >= target_num_layers:
+                speculator_layers.add(name)
+        except (AssertionError, ValueError):
+            # Fallback for non-standard naming
+            if "drafter" in name.lower() or "eagle" in name.lower():
+                speculator_layers.add(name)
+
+    if speculator_layers:
+        logger.debug(
+            "Identified %d speculator layers for KV cache grouping: %s",
+            len(speculator_layers),
+            sorted(speculator_layers),
+        )
+    return speculator_layers if speculator_layers else None
 
 
 def get_kv_cache_groups(
