@@ -129,6 +129,63 @@ def matmul_kernel_persistent(
         tl.store(c_ptrs, c, mask=c_mask)
 
 
+# Per-dtype reduction-tile width. BLOCK_SIZE_K is the only tile parameter that
+# changes the per-output-element K-accumulation order, so it must stay constant
+# across all M buckets for a given dtype to preserve batch invariance. Everything
+# else (BLOCK_SIZE_M/N, GROUP_SIZE_M, num_warps, num_stages) only remaps tiles and
+# leaves each row's reduction order untouched, so it is free to vary by shape.
+_BLOCK_SIZE_K = {
+    torch.bfloat16: 64,
+    torch.float16: 64,
+    torch.float32: 32,
+}
+
+
+def _matmul_config(M: int, N: int, dtype: torch.dtype) -> dict[str, int]:
+    """Pick a persistent-matmul tile config for a given problem shape.
+
+    Heuristic tuned on SM80 (A100), where batch-invariant mode routes every
+    matmul through this Triton kernel. The base config (BLOCK_SIZE_M=128) wastes
+    most of each M-tile on masked padding for the small-M decode shapes that
+    dominate batch-invariant serving, so small M uses a narrower M-tile. Large M
+    (prefill) keeps the original base config, so that path is unchanged.
+
+    Any config returned here is batch-invariant: BLOCK_SIZE_K is pinned per dtype
+    and only tile-remapping parameters change with shape.
+    """
+    block_k = _BLOCK_SIZE_K[dtype]
+
+    if M <= 64:
+        # Small-M decode shapes: shrink the M-tile to the smallest that still
+        # covers M, so we stop paying for masked-out padding rows. Wide N
+        # (gate/up, lm_head) prefers a larger N-tile; otherwise a narrow one wins.
+        if M <= 8:
+            block_m = 16
+        elif M <= 16:
+            block_m = 32
+        else:
+            block_m = 64
+        block_n = 256 if N >= 8192 else 64
+    else:
+        # Large-M prefill: the original base config is already near-optimal.
+        block_m = 128
+        block_n = 256 if dtype == torch.float16 else 128
+
+    if dtype == torch.float16:
+        # Respect the shared-memory-derived cap chosen at enable time; never emit
+        # an N-tile wider than the device can hold for fp16.
+        block_n = min(block_n, _fp16_block_size_n)
+
+    return {
+        "BLOCK_SIZE_M": block_m,
+        "BLOCK_SIZE_N": block_n,
+        "BLOCK_SIZE_K": block_k,
+        "GROUP_SIZE_M": 8,
+        "num_stages": 3,
+        "num_warps": 8,
+    }
+
+
 def matmul_persistent(
     a: torch.Tensor, b: torch.Tensor, bias: torch.Tensor | None = None
 ):
@@ -155,32 +212,7 @@ def matmul_persistent(
             ),
         )
 
-    configs = {
-        torch.bfloat16: {
-            "BLOCK_SIZE_M": 128,
-            "BLOCK_SIZE_N": 128,
-            "BLOCK_SIZE_K": 64,
-            "GROUP_SIZE_M": 8,
-            "num_stages": 3,
-            "num_warps": 8,
-        },
-        torch.float16: {
-            "BLOCK_SIZE_M": 128,
-            "BLOCK_SIZE_N": _fp16_block_size_n,
-            "BLOCK_SIZE_K": 64,
-            "GROUP_SIZE_M": 8,
-            "num_stages": 3,
-            "num_warps": 8,
-        },
-        torch.float32: {
-            "BLOCK_SIZE_M": 128,
-            "BLOCK_SIZE_N": 128,
-            "BLOCK_SIZE_K": 32,
-            "GROUP_SIZE_M": 8,
-            "num_stages": 3,
-            "num_warps": 8,
-        },
-    }
+    config = _matmul_config(M, N, dtype)
     matmul_kernel_persistent[grid](
         a,
         b,
@@ -200,7 +232,7 @@ def matmul_persistent(
         B_LARGE=b.numel() > 2**31,
         C_LARGE=c.numel() > 2**31,
         HAS_BIAS=bias is not None,
-        **configs[dtype],
+        **config,
     )
     return c
 
