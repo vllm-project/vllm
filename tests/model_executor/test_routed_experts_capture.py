@@ -255,3 +255,42 @@ def test_gpu_model_runner_v2_binds_supported_monolithic_capture(monkeypatch):
     layer_id, topk_ids = capturer.calls[0]
     assert layer_id == 17
     assert torch.equal(topk_ids, torch.tensor([[12, 13]]))
+
+
+def test_gpu_model_runner_v2_skips_unsupported_monolithic_capture(monkeypatch):
+    from vllm.v1.worker.gpu.routed_experts_utils import RoutedExpertsCaptureHelper
+
+    class DummyMonolithicExperts:
+        def supports_routing_replay_capture(self):
+            return False
+
+    class DummyFusedMoE:
+        layer_id = 19
+        router = None
+        quant_method = types.SimpleNamespace(
+            moe_kernel=types.SimpleNamespace(
+                fused_experts=DummyMonolithicExperts()
+            )
+        )
+
+    import vllm.model_executor.layers.fused_moe.layer as fused_moe_layer
+    import vllm.model_executor.layers.fused_moe.modular_kernel as modular_kernel
+
+    monkeypatch.setattr(fused_moe_layer, "FusedMoE", DummyFusedMoE)
+    monkeypatch.setattr(
+        modular_kernel,
+        "FusedMoEExpertsMonolithic",
+        DummyMonolithicExperts,
+    )
+
+    runner = types.SimpleNamespace(
+        compilation_config=types.SimpleNamespace(
+            static_forward_context={"dummy": DummyFusedMoE()}
+        )
+    )
+    RoutedExpertsCaptureHelper().bind(runner, types.SimpleNamespace())
+    assert not hasattr(
+        runner.compilation_config.static_forward_context["dummy"]
+        .quant_method.moe_kernel.fused_experts,
+        "capture_fn",
+    )
