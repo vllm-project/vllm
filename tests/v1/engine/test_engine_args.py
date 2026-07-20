@@ -49,6 +49,18 @@ def test_prefix_caching_from_cli():
         args = parser.parse_args(["--prefix-caching-hash-algo", "invalid"])
 
 
+def test_extensible_kv_cache_from_cli():
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+
+    args = parser.parse_args([])
+    engine_args = EngineArgs.from_cli_args(args=args)
+    assert not engine_args.enable_extensible_kv_cache
+
+    args = parser.parse_args(["--enable-extensible-kv-cache"])
+    engine_args = EngineArgs.from_cli_args(args=args)
+    assert engine_args.enable_extensible_kv_cache
+
+
 @pytest.mark.skipif(_xxhash is None, reason="xxhash not installed")
 def test_prefix_caching_xxhash_from_cli():
     parser = EngineArgs.add_cli_args(FlexibleArgumentParser())

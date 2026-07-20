@@ -149,6 +149,30 @@ def test_has_cache_restores_from_freeable():
     assert manager.num_freeable_slots == 6
 
 
+def test_make_profiling_reservation():
+    assert (
+        EncoderCacheManager.make_profiling_reservation(
+            cache_size=0,
+            embed_size=8,
+            dtype=torch.float16,
+            device="cpu",
+        )
+        is None
+    )
+
+    reservation = EncoderCacheManager.make_profiling_reservation(
+        cache_size=7,
+        embed_size=8,
+        dtype=torch.float16,
+        device="cpu",
+    )
+
+    assert reservation is not None
+    assert reservation.shape == (7, 8)
+    assert reservation.dtype == torch.float16
+    assert reservation.device.type == "cpu"
+
+
 def test_get_freed_mm_hashes_clears_freed_list():
     manager = EncoderCacheManager(cache_size=10)
     req1 = MockRequest("reqA", ["a"], [5])
