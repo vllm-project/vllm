@@ -536,6 +536,23 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 vllm_config=vllm_config,
             )
 
+        # Some sparse MLA implementations only provide the top-k MQA path
+        # (forward_mqa) and no dense-MHA prefill (forward_mha), e.g. the ROCm
+        # aiter sparse backend. For those, drop the dense-MHA prefill backend
+        # so prefill also flows through the MQA path instead of hitting an
+        # unimplemented forward_mha.
+        if (
+            self.prefill_backend is not None
+            and self.impl.is_sparse
+            and not getattr(self.impl, "supports_mha_prefill", True)
+        ):
+            logger.warning_once(
+                "Sparse MLA impl %s does not implement dense-MHA prefill; "
+                "routing prefill through the top-k MQA path.",
+                type(self.impl).__name__,
+            )
+            self.prefill_backend = None
+
         self.kv_cache = torch.tensor([])
 
         self.use_sparse = use_sparse
