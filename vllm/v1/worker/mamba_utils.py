@@ -22,11 +22,9 @@ from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.gpu_input_batch import CachedRequestState
 from vllm.v1.worker.lora_model_runner_mixin import GPUInputBatch
 
-# Number of CTAs the u64 temporal body is split across (grid_z of the fused
-# postprocess/precopy kernels). 8 saturates HBM on H100/GB200 across the
-# reqs=1..128 range in the microbenchmark; small-model / small-batch cases
-# benefit most, and larger batches fold gracefully to a single wave.
-_TEMPORAL_TILES = 8
+# 16 saturates HBM on H100/GB200 across the reqs=8..128 range in
+# microbenchmarks
+_TEMPORAL_TILES = 16
 
 
 @triton.jit
