@@ -806,14 +806,18 @@ class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
         get_draft_kv_cache_layer_names."""
         return [layer.self_attn.causal for layer in self.model.layers]
 
-    def compute_logits(
+    def compute_draft_logits(
         self,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor | None:
-        logits = self.logits_processor(self.lm_head, hidden_states)
+        return self.logits_processor(self.lm_head, hidden_states)
+
+    def scatter_logits_to_target(
+        self,
+        logits: torch.Tensor,
+    ) -> torch.Tensor:
         if self.draft_id_to_target_id is None:
             return logits
-
         base = torch.arange(self.config.draft_vocab_size, device=logits.device)
         targets = base + self.draft_id_to_target_id
         logits_new = logits.new_full(
@@ -822,6 +826,15 @@ class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
         )
         logits_new[:, targets] = logits
         return logits_new
+
+    def compute_logits(
+        self,
+        hidden_states: torch.Tensor,
+    ) -> torch.Tensor | None:
+        logits = self.compute_draft_logits(hidden_states)
+        if logits is None:
+            return None
+        return self.scatter_logits_to_target(logits)
 
     def precompute_and_store_context_kv(
         self,

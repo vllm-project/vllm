@@ -290,19 +290,22 @@ class DFlashSpeculator(DraftModelSpeculator):
                 dim=1,
             )[:, : self.num_speculative_steps]
 
-        base_logits = self.model.compute_logits(
+        draft_logits = self.model.compute_draft_logits(
             sample_hidden_states.reshape(num_reqs * self.num_speculative_steps, -1)
         )
-        if base_logits is None:
+        if draft_logits is None:
             raise RuntimeError(
                 "Domino speculative decoding requires full draft logits on this rank."
             )
-        base_logits = base_logits.view(num_reqs, self.num_speculative_steps, -1)
+        draft_logits = draft_logits.view(num_reqs, self.num_speculative_steps, -1)
 
         if prefix_len > 0:
-            prefix_logits = base_logits[:, :prefix_len, :]
+            prefix_logits = draft_logits[:, :prefix_len, :]
+            prefix_logits_flat = self.model.scatter_logits_to_target(
+                prefix_logits.reshape(-1, prefix_logits.shape[-1])
+            )
             prefix_token_ids = self._sample_domino_logits(
-                prefix_logits.reshape(-1, prefix_logits.shape[-1]),
+                prefix_logits_flat,
                 sample_pos[:, :prefix_len].reshape(-1),
                 sample_idx_mapping[:, :prefix_len].reshape(-1),
                 sample_col[:, :prefix_len].reshape(-1),
@@ -316,7 +319,7 @@ class DFlashSpeculator(DraftModelSpeculator):
         correction_start = prefix_len
 
         for step in range(prefix_len, self.num_speculative_steps):
-            base_step_logits = base_logits[:, step, :]
+            base_step_logits = draft_logits[:, step, :]
             if step < correction_start:
                 logits = base_step_logits
             else:
@@ -324,6 +327,7 @@ class DFlashSpeculator(DraftModelSpeculator):
                 logits = self.model.compute_domino_logits(
                     hidden_step, gru_hidden, base_step_logits
                 )
+            logits = self.model.scatter_logits_to_target(logits)
             token = self._sample_domino_logits(
                 logits,
                 sample_pos[:, step],
