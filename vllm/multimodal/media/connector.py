@@ -309,11 +309,11 @@ class MediaConnector:
             raise ValueError(msg)
 
         media_type, sep, encoding = data_spec.rpartition(";")
-        if not sep or encoding.strip().lower() != "base64":
+        if not sep or encoding != "base64":
             msg = "Only base64 data URLs are supported for now."
             raise NotImplementedError(msg)
 
-        media_type = media_type.partition(";")[0].strip()
+        media_type = media_type.partition(";")[0]
         return media_io.load_base64(media_type, data)
 
     def _load_file_url(

@@ -255,6 +255,13 @@ def test_fetch_image_data_url_malformed():
     with pytest.raises(NotImplementedError, match="base64"):
         connector.fetch_image("data:base64,aGVsbG8=")
 
+    # Strict RFC 2397 grammar: lowercase "base64", no whitespace.
+    with pytest.raises(NotImplementedError, match="base64"):
+        connector.fetch_image("data:image/png;BASE64,aGVsbG8=")
+
+    with pytest.raises(NotImplementedError, match="base64"):
+        connector.fetch_image("data:image/png; base64,aGVsbG8=")
+
 
 @pytest.mark.asyncio
 async def test_fetch_image_error_conversion():
