@@ -29,12 +29,15 @@ from vllm.distributed.weight_transfer.packed_tensor import (
 
 @dataclass
 class NCCLWeightTransferInitInfo(WeightTransferInitInfo):
-    """Initialization info for NCCL-based weight transfer backends."""
+    """Worker-side initialization info for NCCL-based weight transfer backends."""
 
     master_address: str
     master_port: int
     rank_offset: int
     world_size: int
+    packed: bool = False
+    packed_buffer_size_bytes: int = DEFAULT_PACKED_BUFFER_SIZE_BYTES
+    packed_num_buffers: int = DEFAULT_PACKED_NUM_BUFFERS
 
 
 @dataclass
@@ -45,10 +48,9 @@ class NCCLTrainerInitInfo(TrainerInitInfo):
     `world_size` is the full trainer+worker NCCL group size. `rank` (from
     `TrainerInitInfo`) identifies this trainer process; rank 0 is the sender.
 
-    `packed` / buffer sizes are the transfer's wire params. The trainer engine
-    is their single source of truth: it stamps them onto every per-round update
-    payload, which is where the worker still reads them while the legacy static
-    trainer path exists. `backend` is the factory dispatch key."""
+    `packed` / buffer sizes are the transfer's wire params. The trainer
+    propagates them to the worker at `trainer_init` so the two sides cannot
+    disagree. `backend` is the factory dispatch key."""
 
     backend: ClassVar[str] = "nccl"
 

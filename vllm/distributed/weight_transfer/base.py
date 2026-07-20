@@ -402,8 +402,11 @@ class TrainerWeightTransferEngine(ABC, Generic[TTrainerInitInfo]):
     Symmetric to `WeightTransferEngine` but lives in the training process.
     Constructed via the `trainer_init` factory classmethod; carries any
     backend-specific state (NCCL communicators, IPC device info, transfer
-    plans) on `self`. The `WeightSource` is required at `trainer_init`,
-    then replayed each round by the no-argument `send_weights()`.
+    plans) on `self`. Full-resync backends (NCCL, IPC) take a `WeightSource` at
+    `trainer_init` and replay it each round via the no-argument
+    `send_weights()`. Backends that push per-round deltas instead (e.g. sparse
+    patches) leave `source` as `None` and take their payload as a `send_weights`
+    argument.
 
     Unlike the worker engine, the trainer side does not take a
     `WeightTransferConfig`: the backend is selected from the init info's
@@ -431,7 +434,7 @@ class TrainerWeightTransferEngine(ABC, Generic[TTrainerInitInfo]):
         self,
         *,
         client: "VLLMWeightSyncClient",
-        source: "WeightSource",
+        source: "WeightSource | None" = None,
         is_sender: bool = True,
     ) -> None:
         self.is_sender = is_sender
@@ -447,24 +450,24 @@ class TrainerWeightTransferEngine(ABC, Generic[TTrainerInitInfo]):
         init_info: TTrainerInitInfo,
         *,
         client: "VLLMWeightSyncClient",
-        source: "WeightSource",
+        source: "WeightSource | None" = None,
     ) -> Self:
         """Rendezvous with the inference side and return a ready instance.
 
         Called on every trainer rank. The sender drives the full handshake via
         `client` (build the worker-side init info, call
         `client.init_weight_transfer_engine`, open the trainer-side endpoint);
-        non-sender ranks skip the rendezvous and the RPC. `source` is stored on
-        `self.source`; after return, `send_weights()` is callable.
+        non-sender ranks skip the rendezvous and the RPC.
         """
         raise NotImplementedError
 
     @abstractmethod
     def send_weights(self) -> None:
-        """Push `self.source`'s weights to inference workers and drive the full
-        update round trip: `start_weight_update`, `update_weights` (run
-        concurrently with the trainer-side broadcast when the backend requires
-        it), then `finish_weight_update`. Called on every trainer rank."""
+        """Push weights to inference workers and drive the full update round
+        trip: `start_weight_update`, `update_weights` (run concurrently with the
+        trainer-side broadcast when the backend requires it), then
+        `finish_weight_update`. Called on every trainer rank.
+        """
         raise NotImplementedError
 
     def shutdown(self) -> None:
