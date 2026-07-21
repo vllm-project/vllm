@@ -433,21 +433,21 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             f"num_decodes: {num_decodes}, num_spec_decodes: {num_spec_decodes}"
         )
 
-        # Cached decode kernel: derive the per-request ring write position
-        # (write_pos = decode_step % max_cache_len). Only the non-spec decode
-        # path runs the cached kernel.
+        # Cached decode kernel: write_pos = decode steps since the ring's last
+        # full-state write, mod max_cache_len. decode_base re-anchors after
+        # preemption (a resumed request's prefill rewrites the checkpoint), so
+        # write_pos counts from that write, not the prompt boundary.
         write_pos_d = None
         if self.use_cached_kernel and spec_sequence_masks is None and num_decodes > 0:
-            num_prompt_tokens_cpu = m.num_prompt_tokens_cpu
+            decode_base_cpu = m.replayssm_decode_base_cpu
             num_computed_tokens_cpu = m._num_computed_tokens_cpu
-            if num_prompt_tokens_cpu is None or num_computed_tokens_cpu is None:
+            if decode_base_cpu is None or num_computed_tokens_cpu is None:
                 raise ValueError(
-                    "use_replayssm requires CPU prompt and "
+                    "use_replayssm requires CPU decode-base and "
                     "computed-token counts to derive decode write positions"
                 )
             decode_steps_cpu = (
-                num_computed_tokens_cpu[:num_decodes]
-                - num_prompt_tokens_cpu[:num_decodes]
+                num_computed_tokens_cpu[:num_decodes] - decode_base_cpu[:num_decodes]
             )
             query_lens_cpu = (
                 query_start_loc_cpu[1 : num_decodes + 1]
