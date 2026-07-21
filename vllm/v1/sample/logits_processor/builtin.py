@@ -81,13 +81,13 @@ class PLessLogitsProcessor(LogitsProcessor):
         if not self.p_less_count:
             return logits
 
-        # Convert logits to probabilities
-        probabilities = logits.softmax(dim=-1)
-        # Calculate threshold probabilities for the batch for filtering out invalid
-        # tokens
-        threshold_probabilities = probabilities.square().sum(dim=-1, keepdim=True)
+        # Calculate threshold logits
+        exps = logits.exp()
+        sum_exps = exps.sum(axis=-1, keepdim=True)
+        sum_squared_exps = exps.square().sum(axis=-1, keepdim=True)
+        threshold_logits = sum_squared_exps.log() - sum_exps.log()
         # Create boolean mask for invalid tokens
-        invalid_token_mask = probabilities < threshold_probabilities
+        invalid_token_mask = logits < threshold_logits
         # Apply mask to convert logits of invalid tokens to negative infinity
         logits.masked_fill_(invalid_token_mask, -float("inf"))
         return logits
