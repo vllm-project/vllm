@@ -663,7 +663,7 @@ class SpeculativeConfig:
         parts = model.split(".")
         return len(parts) >= 2 and all(part.isidentifier() for part in parts)
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         # Note: "method" is a new parameter that helps to extend the
         # configuration of non-model-based proposers, and the "model" parameter
         # will be used to set the draft model, eagle head, or additional weight
@@ -1047,7 +1047,6 @@ class SpeculativeConfig:
                         self.target_parallel_config, self.draft_tensor_parallel_size
                     )
                 )
-        return self
 
     def _validate_suffix_decoding(self):
         if not has_arctic_inference():

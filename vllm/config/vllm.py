@@ -933,7 +933,7 @@ class VllmConfig:
             "expandable_segments is automatically disabled)."
         )
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         """Verify configs are valid & consistent with each other."""
 
         # To give each torch profile run a unique instance name.
