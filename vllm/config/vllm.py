@@ -2312,7 +2312,8 @@ class VllmConfig:
         # and config paths. Reject others so the mamba page size cannot desync.
         if self.model_config is not None and not self.model_config.supports_replayssm:
             raise ValueError(
-                "--use-replayssm is only supported for Nemotron-H models "
+                "--use-replayssm is only supported for models that declare "
+                "ReplaySSM support via the SupportsReplaySSM interface "
                 f"(got architecture {self.model_config.architecture!r})"
             )
         if self.cache_config.mamba_cache_mode == "all":

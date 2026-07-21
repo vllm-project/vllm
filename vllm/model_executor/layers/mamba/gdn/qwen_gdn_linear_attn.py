@@ -344,18 +344,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
     def get_state_shape(
         self,
     ) -> tuple[tuple[int, ...], ...]:
-        if self.cache_config.use_replayssm:
-            return MambaStateShapeCalculator.gated_delta_net_replayssm_state_shape(
-                self.tp_size,
-                self.num_k_heads,
-                self.num_v_heads,
-                self.head_k_dim,
-                self.head_v_dim,
-                self.conv_kernel_size,
-                self.cache_config.replayssm_buffer_len,
-                self.num_spec,
-            )
-        return MambaStateShapeCalculator.gated_delta_net_state_shape(
+        base_shape = MambaStateShapeCalculator.gated_delta_net_state_shape(
             self.tp_size,
             self.num_k_heads,
             self.num_v_heads,
@@ -364,6 +353,14 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             self.conv_kernel_size,
             self.num_spec,
         )
+        if self.cache_config.use_replayssm:
+            return MambaStateShapeCalculator.append_gated_delta_net_replayssm_ring(
+                base_shape,
+                self.num_k_heads,
+                self.tp_size,
+                self.cache_config.replayssm_buffer_len,
+            )
+        return base_shape
 
     def __init__(
         self,
