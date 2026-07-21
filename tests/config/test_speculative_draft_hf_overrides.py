@@ -86,6 +86,32 @@ def test_arch_mapping_applies_before_callable_override():
 
 
 @pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    ("model_type", "extra", "expected_arch"),
+    [
+        ("deepseek_v3", {}, "DeepSeekMTPModel"),
+        ("deepseek_v32", {}, "DeepseekV32MTPModel"),
+        ("glm_moe_dsa", {}, "DeepseekV32MTPModel"),
+        ("deepseek_mtp", {"index_topk": 2048}, "DeepseekV32MTPModel"),
+    ],
+)
+def test_deepseek_mtp_override_selects_compatible_model(
+    model_type: str,
+    extra: dict[str, object],
+    expected_arch: str,
+):
+    config = _make_hf_config(
+        model_type=model_type,
+        num_nextn_predict_layers=1,
+        **extra,
+    )
+
+    out = SpeculativeConfig.hf_config_override(config)
+
+    assert out.architectures == [expected_arch]
+
+
+@pytest.mark.cpu_test
 def test_inkling_override_exposes_only_first_mtp_depth():
     text_config = _make_hf_config(
         architectures=["InklingForCausalLM"],
