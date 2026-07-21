@@ -5,6 +5,7 @@ mod cli;
 mod logging;
 
 use std::env;
+use std::ffi::OsStr;
 use std::process::ExitStatus;
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -82,7 +83,14 @@ fn shutdown_signal() -> CancellationToken {
 }
 
 fn main() -> Result<()> {
-    logging::init_tracing();
+    let process_label =
+        match env::args_os().nth(1).as_deref().and_then(OsStr::to_str).unwrap_or_default() {
+            "bench" => "Bench",
+            "serve" | "frontend" => "RustFrontend",
+            _ => "Rust",
+        };
+    logging::init_tracing(process_label);
+
     let cli = Cli::parse();
 
     let mut runtime = tokio::runtime::Builder::new_multi_thread();
