@@ -2625,20 +2625,48 @@ class Scheduler(SchedulerInterface):
         if self.connector is not None:
             self.connector.update_connector_output(kv_connector_output)
 
-        # KV Connector:: update recv and send status from last step.
+        # Process requests that have finished receiving KV blocks.
+        # We use a safe lookup (.get) instead of an assertion to gracefully handle
+        # scenarios where the external KV service is delayed or crashes, causing
+        # the request to fail and be removed from the scheduler prematurely.
         for req_id in kv_connector_output.finished_recving or ():
             logger.debug("Finished recving KV transfer for request %s", req_id)
-            assert req_id in self.requests
-            req = self.requests[req_id]
+
+            req = self.requests.get(req_id)
+            if req is None:
+                logger.warning(
+                    "Late KV xfer-finished (recv) for unknown request %s; ignoring. "
+                    "The request likely failed prior to transfer completion.",
+                    req_id,
+                )
+                continue
+
             if req.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
                 self.finished_recving_kv_req_ids.add(req_id)
+            elif RequestStatus.is_finished(req.status):
+                self._free_blocks(req)
             else:
-                assert RequestStatus.is_finished(req.status)
-                self._free_blocks(self.requests[req_id])
+                # Log a warning instead of crashing if the state machine drifts
+                logger.warning(
+                    "KV xfer-finished (recv) for %s in unexpected status %s; ignoring.",
+                    req_id,
+                    req.status,
+                )
+
+        # Process requests that have finished sending KV blocks.
         for req_id in kv_connector_output.finished_sending or ():
             logger.debug("Finished sending KV transfer for request %s", req_id)
-            assert req_id in self.requests
-            self._free_blocks(self.requests[req_id])
+
+            req = self.requests.get(req_id)
+            if req is None:
+                logger.warning(
+                    "Late KV xfer-finished (send) for unknown request %s; ignoring. "
+                    "The request likely failed prior to transfer completion.",
+                    req_id,
+                )
+                continue
+
+            self._free_blocks(req)
 
     def _update_requests_with_invalid_blocks(
         self,
