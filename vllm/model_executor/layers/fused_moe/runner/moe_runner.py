@@ -428,7 +428,6 @@ class MoERunner(MoERunnerInterface):
         if (
             shared_output is not None
             and not self.moe_config.is_sequence_parallel
-            and not self.moe_config.skip_final_all_reduce
             and self._fused_output_is_reduced
         ):
             shared_output = tensor_model_parallel_all_reduce(shared_output)
@@ -446,6 +445,13 @@ class MoERunner(MoERunnerInterface):
         here. Skipped when sequence-parallel is active (SP handles its
         own reduction) or when the early path already reduced both outputs.
         """
+        # skip_final_all_reduce must not coexist with a pre-reduced fused
+        # output. This should be enforced by MoE config initialization.
+        if self.moe_config.skip_final_all_reduce:
+            assert not self._fused_output_is_reduced, (
+                "skip_final_all_reduce requires an un-reduced fused output"
+            )
+
         # We don't need to reduce the final output if:
         # - We are not running with TP or DP
         # - The MK already reduced the fused output itself.
@@ -746,18 +752,12 @@ class MoERunner(MoERunnerInterface):
             assert len(result) == 2
             hidden_states, router_logits = result
 
-        # NOTE: Similar with DP, PCP also needs dispatch and combine. For
-        # simplicity, AgRsAll2All was added separately for PCP here. Maybe
-        # we should modify All2AllManager abstraction to better support PCP.
-        if self.moe_config.pcp_size > 1:
-            hidden_states = get_pcp_group().all_gather(
-                hidden_states,
-                dim=0,
-            )
-            router_logits = get_pcp_group().all_gather(
-                router_logits,
-                dim=0,
-            )
+        if (
+            self.moe_config.pcp_size > 1
+            and not self.moe_config.moe_parallel_config.use_all2all_kernels
+        ):
+            hidden_states = get_pcp_group().all_gather(hidden_states, dim=0)
+            router_logits = get_pcp_group().all_gather(router_logits, dim=0)
 
         return hidden_states, router_logits
 
@@ -771,11 +771,11 @@ class MoERunner(MoERunnerInterface):
                 hidden_states, self.moe_config.is_sequence_parallel
             )
 
-        if self.moe_config.pcp_size > 1:
-            hidden_states = get_pcp_group().reduce_scatter(
-                hidden_states,
-                dim=0,
-            )
+        if (
+            self.moe_config.pcp_size > 1
+            and not self.moe_config.moe_parallel_config.use_all2all_kernels
+        ):
+            hidden_states = get_pcp_group().reduce_scatter(hidden_states, dim=0)
 
         if self.shared_experts is not None:
             assert shared_output is not None

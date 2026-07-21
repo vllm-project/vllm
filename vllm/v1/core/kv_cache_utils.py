@@ -10,7 +10,7 @@ from collections import defaultdict
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass, replace
 from functools import partial
-from typing import Any, NewType, TypeAlias, cast, overload
+from typing import Any, NamedTuple, NewType, TypeAlias, cast, overload
 
 from vllm import envs
 from vllm.config import VllmConfig
@@ -126,7 +126,7 @@ class KVCacheBlock:
     # when the block is full and cached.
     _block_hash: BlockHashWithGroupId | None = None
     # Number of prefix tokens covered by _block_hash. For full blocks this is
-    # the full block boundary; partial aliases can end inside a cache block.
+    # the full block boundary; partial entries can end inside a cache block.
     _block_hash_num_tokens: int | None = None
 
     # Used to construct a doubly linked list for free blocks.
@@ -174,6 +174,11 @@ class KVCacheBlock:
             f"prev_free_block={prev_block_id}, "
             f"next_free_block={next_block_id})"
         )
+
+
+class KVCacheBlockCopy(NamedTuple):
+    src_block_id: int
+    dst_block_id: int
 
 
 class FreeKVCacheBlockQueue:
@@ -407,6 +412,20 @@ class FreeKVCacheBlockQueue:
             curr_block = curr_block.next_free_block
         return ret
 
+    def iter_blocks_after(
+        self,
+        cursor: KVCacheBlock | None,
+    ) -> Iterator[KVCacheBlock]:
+        """Iterate free blocks in eviction order after the cursor."""
+        if cursor is None:
+            curr_block = self.fake_free_list_head.next_free_block
+        else:
+            curr_block = cursor.next_free_block
+
+        while curr_block is not None and curr_block is not self.fake_free_list_tail:
+            yield curr_block
+            curr_block = curr_block.next_free_block
+
 
 def need_extra_keys(request: Request) -> bool:
     """Check whether the blocks allocated to this request need extra hash keys.
@@ -612,32 +631,31 @@ def resolve_kv_cache_block_sizes(
 
     - ``scheduler_block_size`` is the token-alignment invariant used by the
       scheduler (e.g. for ``num_computed_tokens`` rounding). Single group:
-      ``cache_config.block_size * dcp * pcp``. Multiple groups: LCM of every
-      group's block size — context parallelism is not supported here.
+      ``cache_config.block_size * dcp``. Multiple groups: LCM of every
+      group's effective block size. Attention groups are scaled by DCP;
+      Mamba groups keep their full per-rank state and are not scaled.
     - ``hash_block_size`` is the granularity at which ``Request.block_hashes``
       is computed. Single group: equals scheduler block size. Multiple groups:
-      ``cache_config.hash_block_size`` override if set, else the GCD of group
-      block sizes; every group's block size must be divisible by it. Returns
-      the scheduler block size (i.e. disables finer hashing) if block hashing
-      is inactive or a mamba group's block size diverges from the cache
-      block size (mamba_cache_mode != "align").
+      ``cache_config.prefix_match_unit`` override if set, else the GCD of
+      group block sizes; every group's block size must be divisible by it.
+      Returns the scheduler block size (i.e. disables finer hashing) if block
+      hashing is inactive or a mamba group's block size diverges from the
+      cache block size (mamba_cache_mode != "align").
     """
     cache_config = vllm_config.cache_config
     dcp = vllm_config.parallel_config.decode_context_parallel_size
-    pcp = vllm_config.parallel_config.prefill_context_parallel_size
     groups = kv_cache_config.kv_cache_groups
 
-    if len(groups) <= 1:  # Single group: block_size * dcp * pcp
-        bs = cache_config.block_size * dcp * pcp
+    if len(groups) <= 1:
+        bs = cache_config.block_size * dcp
         return bs, bs
 
-    if dcp != 1 or pcp != 1:
-        raise ValueError(
-            "Hybrid KV cache groups with multiple block sizes do not "
-            "support context parallelism (dcp_world_size/pcp_world_size > 1)."
-        )
-
-    group_block_sizes = [g.kv_cache_spec.block_size for g in groups]
+    group_block_sizes = [
+        g.kv_cache_spec.block_size * dcp
+        if isinstance(g.kv_cache_spec, AttentionSpec)
+        else g.kv_cache_spec.block_size
+        for g in groups
+    ]
     scheduler_block_size = math.lcm(*group_block_sizes)
 
     # Block hashes are only consumed by prefix caching and KV connectors
@@ -657,14 +675,14 @@ def resolve_kv_cache_block_sizes(
     ):
         return scheduler_block_size, scheduler_block_size
 
-    requested = cache_config.hash_block_size
+    requested = cache_config.prefix_match_unit
     hash_block_size = (
         requested if requested is not None else math.gcd(*group_block_sizes)
     )
     if any(bs % hash_block_size != 0 for bs in group_block_sizes):
         raise ValueError(
-            f"Invalid hash_block_size={hash_block_size}; all KV cache group "
-            f"block sizes must be divisible by hash_block_size. "
+            f"Invalid prefix_match_unit={hash_block_size}; all KV cache group "
+            f"block sizes must be divisible by prefix_match_unit. "
             f"Got group block sizes={group_block_sizes}."
         )
     return scheduler_block_size, hash_block_size
@@ -1323,9 +1341,6 @@ def _get_kv_cache_config_packed(
     return num_blocks, kv_cache_tensors
 
 
-_get_kv_cache_config_deepseek_v4 = _get_kv_cache_config_packed
-
-
 def get_kv_cache_config_from_groups(
     vllm_config: VllmConfig,
     kv_cache_groups: list[KVCacheGroupSpec],
@@ -1517,6 +1532,11 @@ def group_and_unify_kv_cache_specs(
     if not any(
         isinstance(spec, SlidingWindowMLASpec) for spec in kv_cache_spec.values()
     ):
+        return None
+
+    # SlidingWindowMLASpec models with uniform page sizes don't need tuple packing.
+    page_sizes = {spec.page_size_bytes for spec in kv_cache_spec.values()}
+    if len(page_sizes) <= 1:
         return None
 
     mla_specs: dict[str, KVCacheSpec] = {}
@@ -2238,3 +2258,36 @@ class BlockHashListWithBlockSize:
 
 
 BlockHashList = list[BlockHash] | BlockHashListWithBlockSize
+
+
+def resolve_block_hashes(
+    block_hashes: BlockHashList,
+    hash_block_size: int,
+    block_size: int,
+    *,
+    supports_fine_grained_hash_lookup: bool = False,
+    alignment_tokens: int | None = None,
+) -> BlockHashList:
+    """Resolve the block-hash view at ``block_size``.
+
+    When ``block_size`` equals ``hash_block_size``, reuse the precomputed block
+    hashes directly; otherwise view them at ``block_size`` granularity.
+    Fine-grained lookup keeps the original hashes for partial cache hits.
+    """
+    if block_size == hash_block_size:
+        return block_hashes
+    if isinstance(block_hashes, BlockHashListWithBlockSize):
+        # Already a block-size view
+        assert block_hashes.scale_factor == block_size // hash_block_size
+        return block_hashes
+    # Fine-grained partial hits keep the raw hashes. The caller passes
+    # alignment_tokens = hash_block_size to enable them, else >= block_size.
+    if (
+        supports_fine_grained_hash_lookup
+        and alignment_tokens is not None
+        and alignment_tokens < block_size
+        and block_size % alignment_tokens == 0
+    ):
+        return block_hashes
+    assert block_size % hash_block_size == 0
+    return BlockHashListWithBlockSize(block_hashes, hash_block_size, block_size)
