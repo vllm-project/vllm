@@ -21,6 +21,7 @@ from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import (
     STR_DTYPE_TO_TORCH_DTYPE,
+    is_quantized_kv_cache,
     is_torch_equal_or_newer,
     set_random_seed,
 )
@@ -44,6 +45,11 @@ BACKENDS_TO_TEST = [
 ]
 
 DEVICE_TYPE = current_platform.device_type
+
+FP8_KV_CACHE_DTYPES = {
+    "fp8": torch.float8_e4m3fn,
+    "fp8_e4m3": torch.float8_e4m3fn,
+}
 
 # Remove flashinfer from the list if it's not available
 try:
@@ -110,6 +116,7 @@ def create_and_prepopulate_kv_cache(
     num_blocks: int,
     common_attn_metadata: CommonAttentionMetadata,
     randomize_blocks: bool = True,
+    kv_cache_dtype: str = "auto",
 ) -> torch.Tensor:
     """Create and prepopulate a KV cache with context data.
 
@@ -140,8 +147,18 @@ def create_and_prepopulate_kv_cache(
     block_table = common_attn_metadata.block_table_tensor
     slot_mapping = common_attn_metadata.slot_mapping
 
+    # For an fp8 kv cache, store the cache in the fp8 dtype so that assigning
+    # the higher-precision context tensors quantizes them, mirroring runtime.
+    fp8_kv_cache = is_quantized_kv_cache(kv_cache_dtype)
+    storage_dtype = FP8_KV_CACHE_DTYPES[kv_cache_dtype] if fp8_kv_cache else dtype
+
     kv_cache = torch.zeros(
-        num_blocks, block_size, num_kv_heads, 2 * head_size, dtype=dtype, device=device
+        num_blocks,
+        block_size,
+        num_kv_heads,
+        2 * head_size,
+        dtype=storage_dtype,
+        device=device,
     )
     kv_cache_flat = kv_cache.view(-1, num_kv_heads, 2 * head_size)
 
@@ -195,7 +212,12 @@ def create_and_prepopulate_kv_cache(
         ] * block_size + token_inter_block_offsets.to(device)
 
     # Transpose to logical (num_blocks, num_kv_heads, block_size, 2*hs)
-    return kv_cache.transpose(1, 2).contiguous()
+    kv_cache = kv_cache.transpose(1, 2).contiguous()
+
+    if fp8_kv_cache:
+        kv_cache = kv_cache.view(torch.uint8)
+
+    return kv_cache
 
 
 class MockAttentionLayer:
@@ -224,6 +246,7 @@ def run_attention_backend(
     kv_cache: torch.Tensor,
     attn_type: AttentionType = AttentionType.DECODER,
     sliding_window: int | None = None,
+    kv_cache_dtype: str = "auto",
 ) -> torch.Tensor:
     """Run attention computation using the specified backend's AttentionImpl."""
 
@@ -291,12 +314,15 @@ def run_attention_backend(
         alibi_slopes=None,
         sliding_window=sliding_window,
         attn_type=attn_type,
-        kv_cache_dtype="auto",
+        kv_cache_dtype=kv_cache_dtype,
     )
 
     # Create mock layer and output buffer
     mock_layer = MockAttentionLayer(device)
     output = torch.empty_like(query)
+
+    if is_quantized_kv_cache(kv_cache_dtype) and impl.supports_quant_query_input:
+        query = query.to(current_platform.fp8_dtype())
 
     # Run forward pass
     # NOTE: The query, key, and value are already shaped correctly
@@ -324,6 +350,7 @@ def _test_backend_correctness(
     atol: float = 1e-2,
     rtol: float = 1e-2,
     tensor_parallel_size: int = 1,
+    kv_cache_dtype: str = "auto",
 ):
     """
     Test that all backends produce similar outputs to a reference implementation
@@ -372,6 +399,7 @@ def _test_backend_correctness(
         num_gpu_blocks=8192,
         hf_config_override=hf_config_override,
     )
+    vllm_config.cache_config.cache_dtype = kv_cache_dtype
     device = torch.device(f"{DEVICE_TYPE}:0")
 
     kv_cache_spec = create_standard_kv_cache_spec(vllm_config, attn_type)
@@ -392,6 +420,13 @@ def _test_backend_correctness(
     block_size = vllm_config.cache_config.block_size
     scale = 1.0 / (head_size**0.5)
 
+    fp8_kv_cache = is_quantized_kv_cache(kv_cache_dtype)
+    if fp8_kv_cache:
+        query_fp8_dtype = current_platform.fp8_dtype()
+        kv_fp8_dtype = FP8_KV_CACHE_DTYPES[kv_cache_dtype]
+        atol = max(atol, 6e-2)
+        rtol = max(rtol, 1e-1)
+
     # 2. Generate data and compute SDPA reference output
     all_q_vllm, all_k_vllm, all_v_vllm = [], [], []
     all_sdpa_outputs = []
@@ -407,10 +442,17 @@ def _test_backend_correctness(
         k_full = torch.randn(s_len, num_kv_heads, head_size, dtype=dtype, device=device)
         v_full = torch.randn(s_len, num_kv_heads, head_size, dtype=dtype, device=device)
 
+        if fp8_kv_cache:
+            q_ref = q.to(query_fp8_dtype).to(dtype)
+            k_ref = k_full.to(kv_fp8_dtype).to(dtype)
+            v_ref = v_full.to(kv_fp8_dtype).to(dtype)
+        else:
+            q_ref, k_ref, v_ref = q, k_full, v_full
+
         # SDPA expects (N, H, L, D), so unsqueeze batch and permute
-        q_sdpa_in = q.unsqueeze(0).transpose(1, 2)
-        k_sdpa_in = k_full.unsqueeze(0).transpose(1, 2)
-        v_sdpa_in = v_full.unsqueeze(0).transpose(1, 2)
+        q_sdpa_in = q_ref.unsqueeze(0).transpose(1, 2)
+        k_sdpa_in = k_ref.unsqueeze(0).transpose(1, 2)
+        v_sdpa_in = v_ref.unsqueeze(0).transpose(1, 2)
 
         if num_q_heads != num_kv_heads:
             assert num_q_heads % num_kv_heads == 0, (
@@ -471,6 +513,7 @@ def _test_backend_correctness(
         num_blocks=vllm_config.cache_config.num_gpu_blocks or 1000,
         common_attn_metadata=common_attn_metadata,
         randomize_blocks=True,
+        kv_cache_dtype=kv_cache_dtype,
     )
 
     # 4. Run vLLM backends and compare
@@ -487,6 +530,12 @@ def _test_backend_correctness(
             backend_cls = actual_backend.get_class()
         else:
             backend_cls = None
+
+        if is_quantized_kv_cache(kv_cache_dtype) and (
+            backend_cls is None
+            or not backend_cls.supports_kv_cache_dtype(kv_cache_dtype)
+        ):
+            continue
 
         if backend_name == AttentionBackendEnum.FLASHINFER:
             set_kv_cache_layout("HND")
@@ -521,6 +570,7 @@ def _test_backend_correctness(
                 kv_cache_for_backend,
                 sliding_window=sliding_window,
                 attn_type=attn_type,
+                kv_cache_dtype=kv_cache_dtype,
             )
         finally:
             if reset_kv_cache_layout:
@@ -570,8 +620,13 @@ def _test_backend_correctness(
 )
 @pytest.mark.parametrize("model", ["meta-llama/Meta-Llama-3-8B"])
 @pytest.mark.parametrize("tensor_parallel_size", [1, 2, 4])
+@pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8", "fp8_e4m3"])
 def test_causal_backend_correctness(
-    default_vllm_config, batch_spec_name: str, model: str, tensor_parallel_size: int
+    default_vllm_config,
+    batch_spec_name: str,
+    model: str,
+    tensor_parallel_size: int,
+    kv_cache_dtype: str,
 ):
     """Test backend's correctness with causal attention."""
 
@@ -612,6 +667,7 @@ def test_causal_backend_correctness(
         SMALL_BLOCK_BACKENDS,
         causal_mask_mod,
         tensor_parallel_size=tensor_parallel_size,
+        kv_cache_dtype=kv_cache_dtype,
     )
 
     # Fast FlexAttention needs to run with block_size=128
@@ -623,6 +679,7 @@ def test_causal_backend_correctness(
             causal_mask_mod,
             block_size=128,
             tensor_parallel_size=tensor_parallel_size,
+            kv_cache_dtype=kv_cache_dtype,
         )
 
 

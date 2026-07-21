@@ -445,9 +445,10 @@ pub fn load_sharegpt_multi_turn(
             conv.conversation_id = format!("{request_id_prefix}conv-{}", original_len + i);
             conversations.push(conv);
         }
-        println!(
-            "Oversampled multi-turn conversations from {original_len} to {} total.",
-            conversations.len()
+        tracing::info!(
+            original_conversations = original_len,
+            conversations = conversations.len(),
+            "oversampled multi-turn conversations"
         );
     }
 
