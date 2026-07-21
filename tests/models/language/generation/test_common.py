@@ -198,8 +198,18 @@ def test_models(
         # builder and layer consistent and preserves the L4 test path.
         vllm_kwargs["attention_config"] = {"flash_attn_version": 2}
 
+    # pythia-70m is tiny enough that many candidate tokens have near-uniform
+    # logits under bf16 (the default "auto" dtype). torch.compile's fused
+    # kernels use a different reduction order than eager PyTorch, and the
+    # resulting sub-ULP rounding difference is enough to flip the top-1 token
+    # vs. the HF eager baseline after 32 autoregressive decode steps. This is
+    # not XPU-specific: the same divergence has been confirmed to reproduce
+    # on CUDA as well. Force eager mode for this one model to avoid the
+    # flake; other models still exercise the compiled path.
+    enforce_eager = model == "EleutherAI/pythia-70m"
     with vllm_runner(
         model,
+        enforce_eager=enforce_eager,
         tokenizer_name=model_info.tokenizer or model,
         tokenizer_mode=model_info.tokenizer_mode,
         revision=model_info.revision,
