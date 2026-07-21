@@ -140,6 +140,10 @@ def _create_gdn_builder(
             num_speculative_tokens=num_speculative_tokens,
         )
     vllm_config.cache_config.mamba_cache_mode = mamba_cache_mode
+    if mamba_cache_mode == "all":
+        # all-mode requires the Triton/FLA prefill backend (the resolver
+        # fails fast on any other), exactly as production configs must.
+        vllm_config.additional_config = {"gdn_prefill_backend": "triton"}
     mamba_spec = MambaSpec(
         block_size=BLOCK_SIZE,
         shapes=((16, 64),),

@@ -208,10 +208,28 @@ def _resolve_gdn_prefill_backend(
             )
 
     if backend in ["flashinfer", "auto"] and supports_flashinfer:
-        return backend, "flashinfer"
-    if backend == "cutedsl" and supports_cutedsl:
-        return backend, "cutedsl"
-    return backend, "triton"
+        active_backend: Literal["triton", "flashinfer", "cutedsl"] = "flashinfer"
+    elif backend == "cutedsl" and supports_cutedsl:
+        active_backend = "cutedsl"
+    else:
+        active_backend = "triton"
+
+    # GDN all-mode prefix caching needs the per-chunk intermediate states
+    # that only the Triton/FLA prefill kernel exposes
+    # (``return_intermediate_states``); the FlashInfer/CuteDSL prefill paths
+    # cannot export them. Fail fast at startup instead of asserting on the
+    # first real prefill.
+    cache_config = getattr(vllm_config, "cache_config", None)
+    mamba_cache_mode = getattr(cache_config, "mamba_cache_mode", "none")
+    if mamba_cache_mode == "all" and active_backend != "triton":
+        raise ValueError(
+            "GDN mamba_cache_mode='all' (prefix caching) requires the "
+            "Triton/FLA prefill backend, but the resolved GDN prefill "
+            f"backend is '{active_backend}'. Set "
+            "additional_config={'gdn_prefill_backend': 'triton'} or disable "
+            "all-mode prefix caching."
+        )
+    return backend, active_backend
 
 
 def _log_gdn_backend_decision(

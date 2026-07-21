@@ -2246,6 +2246,28 @@ class VllmConfig:
                 "to schedule a multiple of block_size tokens even if they are "
                 "in the middle of a mm input"
             )
+        # Mamba all-mode with a kernel-chunk-aligned prefill split (GDN/FLA):
+        # the scheduler clips prefill chunk ends down to multiples of the
+        # align size, so the token budget must always cover at least one
+        # kernel chunk or the split floors a prefill step to 0 tokens and the
+        # engine makes no forward progress.
+        elif (
+            self.cache_config.mamba_cache_mode == "all"
+            and self.cache_config.mamba_all_mode_prefill_align_size is not None
+        ):
+            align_size = self.cache_config.mamba_all_mode_prefill_align_size
+            assert align_size <= self.scheduler_config.max_num_batched_tokens, (
+                "In Mamba cache all mode, the prefill align size "
+                f"({align_size}) must be <= max_num_batched_tokens "
+                f"({self.scheduler_config.max_num_batched_tokens})."
+            )
+            if self.scheduler_config.long_prefill_token_threshold > 0:
+                assert self.scheduler_config.long_prefill_token_threshold >= align_size
+            assert not self.scheduler_config.disable_chunked_mm_input, (
+                "Chunked MM input is required because we need the flexibility "
+                "to schedule a multiple of the prefill align size even if it "
+                "lands in the middle of a mm input"
+            )
 
     @model_validator(mode="after")
     def validate_nvfp4_kv_cache_with_mla(self) -> "VllmConfig":

@@ -332,3 +332,43 @@ def test_chunk_wrapper_rejects_intermediate_states_on_non_triton():
                 output_final_state=True,
                 return_intermediate_states=True,
             )
+
+
+def test_backend_resolver_allows_triton_for_all_mode():
+    """Requesting Triton with all-mode resolves cleanly on any platform."""
+    from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import (
+        _resolve_gdn_prefill_backend,
+    )
+
+    cfg = _make_vllm_config(64, "all")
+    requested, active = _resolve_gdn_prefill_backend(cfg)
+    assert (requested, active) == ("triton", "triton")
+
+
+@pytest.mark.skipif(
+    not current_platform.is_device_capability_family(100),
+    reason="CuteDSL GDN prefill resolves only on SM10x",
+)
+def test_backend_resolver_rejects_non_triton_for_all_mode():
+    """A non-Triton GDN prefill backend cannot export per-chunk states:
+    all-mode must fail fast at backend resolution (startup), not with a
+    kernel assert on the first real prefill. Align mode keeps its choice."""
+    from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import (
+        _resolve_gdn_prefill_backend,
+    )
+
+    def cutedsl_cfg(mode):
+        cfg = create_vllm_config(
+            model_name="Qwen/Qwen3.5-0.8B",
+            block_size=64,
+            hf_config_override={"linear_key_head_dim": 128},
+        )
+        cfg.additional_config = {"gdn_prefill_backend": "cutedsl"}
+        cfg.cache_config.mamba_cache_mode = mode
+        return cfg
+
+    with pytest.raises(ValueError, match="Triton/FLA"):
+        _resolve_gdn_prefill_backend(cutedsl_cfg("all"))
+
+    _, active = _resolve_gdn_prefill_backend(cutedsl_cfg("align"))
+    assert active == "cutedsl"
