@@ -8,10 +8,14 @@ from dataclasses import dataclass
 
 import torch
 
+from vllm.config import VllmConfig
+from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.warmup.jit_warmup import (
     VllmJitKernel,
     WarmupIntRange,
+    zip_inputs,
 )
+from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
 
 from .fa4_rel_attention import (
     bucket_max_seqlen_q,
@@ -103,38 +107,9 @@ def _materialized_num_reqs(
 class InklingFA4RelAttentionKernel(
     VllmJitKernel["InklingFA4RelAttentionKernel.CompileKey"]
 ):
-    def __init__(
-        self,
-        *,
-        num_heads: int,
-        num_kv_heads: int,
-        head_dim: int,
-        rel_extent: int,
-        window_size: tuple[int, int],
-        is_local: bool,
-        max_kv_len: int,
-        dtype: torch.dtype,
-        kv_dtype: torch.dtype,
-        block_size: int,
-        max_num_reqs: int,
-        max_num_batched_tokens: int,
-    ) -> None:
-        self.num_heads = num_heads
-        self.num_kv_heads = num_kv_heads
-        self.head_dim = head_dim
-        self.rel_extent = rel_extent
-        self.window_size = window_size
-        self.is_local = is_local
-        self.max_kv_len = max_kv_len
-        self.dtype = dtype
-        self.kv_dtype = kv_dtype
-        self.block_size = block_size
-        self.max_num_reqs = max_num_reqs
-        self.max_num_batched_tokens = max_num_batched_tokens
-        super().__init__()
-
     @dataclass(frozen=True)
     class CompileKey:
+        is_local: bool
         num_heads: int
         num_kv_heads: int
         head_dim: int
@@ -151,27 +126,38 @@ class InklingFA4RelAttentionKernel(
     def dispatch(  # type: ignore[override]
         self,
         *,
+        is_local: bool,
+        num_heads: int,
+        num_kv_heads: int,
+        head_dim: int,
+        rel_extent: int,
+        dtype: torch.dtype,
+        kv_dtype: torch.dtype,
+        block_size: int,
+        window_size: tuple[int, int],
+        max_kv_len: int,
         query_len: int,
         num_reqs: int,
     ) -> CompileKey:
         max_seqlen_q = bucket_max_seqlen_q(query_len)
         num_splits = inkling_fa4_num_splits(
-            is_local=self.is_local,
+            is_local=is_local,
             batch_size=num_reqs,
             max_query_len=max_seqlen_q,
-            num_heads=self.num_heads,
-            num_kv_heads=self.num_kv_heads,
-            max_kv_len=self.max_kv_len,
+            num_heads=num_heads,
+            num_kv_heads=num_kv_heads,
+            max_kv_len=max_kv_len,
         )
         return self.CompileKey(
-            num_heads=self.num_heads,
-            num_kv_heads=self.num_kv_heads,
-            head_dim=self.head_dim,
-            rel_extent=self.rel_extent,
-            dtype=self.dtype,
-            kv_dtype=self.kv_dtype,
-            block_size=self.block_size,
-            window_size=self.window_size,
+            is_local=is_local,
+            num_heads=num_heads,
+            num_kv_heads=num_kv_heads,
+            head_dim=head_dim,
+            rel_extent=rel_extent,
+            dtype=dtype,
+            kv_dtype=kv_dtype,
+            block_size=block_size,
+            window_size=window_size,
             max_seqlen_q=max_seqlen_q,
             num_splits=num_splits,
             num_warps_bucket=(_num_warps_bucket(num_reqs) if num_splits > 1 else None),
@@ -183,18 +169,71 @@ class InklingFA4RelAttentionKernel(
         *,
         query_len: int,
         num_reqs: int,
+        max_num_batched_tokens: int,
     ) -> bool:
         max_seqlen_q = bucket_max_seqlen_q(query_len)
         min_query_len = 1 if max_seqlen_q == 1 else max_seqlen_q // 2 + 1
-        return min_query_len + num_reqs <= self.max_num_batched_tokens + 1
+        return min_query_len + num_reqs <= max_num_batched_tokens + 1
 
-    def get_warmup_keys(self) -> list[CompileKey]:
-        if self.max_num_reqs <= 0 or self.max_num_batched_tokens <= 0:
+    def get_warmup_keys(self, vllm_config: VllmConfig) -> list[CompileKey]:
+        max_num_reqs = vllm_config.scheduler_config.max_num_seqs
+        max_num_batched_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+        if max_num_reqs <= 0 or max_num_batched_tokens <= 0:
             return []
 
+        config = vllm_config.model_config.hf_config
+        tp_size = get_tensor_model_parallel_world_size()
+        dtype = vllm_config.model_config.dtype
+        kv_dtype = kv_cache_dtype_str_to_dtype(
+            vllm_config.cache_config.cache_dtype,
+            vllm_config.model_config,
+        )
+        block_size = vllm_config.cache_config.block_size
+        local_extent = config.sliding_window_size
+
+        global_num_kv_heads = config.num_key_value_heads
+        local_num_kv_heads = config.swa_num_key_value_heads
+        assert config.num_attention_heads % tp_size == 0
+        assert config.swa_num_attention_heads % tp_size == 0
+        if global_num_kv_heads >= tp_size:
+            assert global_num_kv_heads % tp_size == 0
+        else:
+            assert tp_size % global_num_kv_heads == 0
+        if local_num_kv_heads >= tp_size:
+            assert local_num_kv_heads % tp_size == 0
+        else:
+            assert tp_size % local_num_kv_heads == 0
+
         return self._trace_dispatch(self.dispatch)(
-            query_len=WarmupIntRange(1, self.max_num_batched_tokens + 1),
-            num_reqs=WarmupIntRange(1, self.max_num_reqs + 1),
+            zip_inputs(
+                dict(
+                    is_local=False,
+                    num_heads=config.num_attention_heads // tp_size,
+                    num_kv_heads=max(1, global_num_kv_heads // tp_size),
+                    head_dim=config.head_dim,
+                    rel_extent=config.rel_extent,
+                    dtype=dtype,
+                    kv_dtype=kv_dtype,
+                    block_size=block_size,
+                    window_size=[(-1, -1)],
+                    max_kv_len=vllm_config.model_config.max_model_len,
+                ),
+                dict(
+                    is_local=True,
+                    num_heads=config.swa_num_attention_heads // tp_size,
+                    num_kv_heads=max(1, local_num_kv_heads // tp_size),
+                    head_dim=config.swa_head_dim,
+                    rel_extent=local_extent,
+                    dtype=dtype,
+                    kv_dtype=kv_dtype,
+                    block_size=block_size,
+                    window_size=[(local_extent - 1, 0)],
+                    max_kv_len=local_extent,
+                ),
+            ),
+            query_len=WarmupIntRange(1, max_num_batched_tokens + 1),
+            num_reqs=WarmupIntRange(1, max_num_reqs + 1),
+            max_num_batched_tokens=max_num_batched_tokens,
             _when=self._is_valid_warmup_dispatch,
         )
 
@@ -305,3 +344,6 @@ class InklingFA4RelAttentionKernel(
             num_splits=num_splits,
             out=out,
         )
+
+
+INKLING_FA4_REL_ATTENTION_KERNEL = InklingFA4RelAttentionKernel()

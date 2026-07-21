@@ -4,7 +4,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from vllm.v1.attention.backends.mla.prefill import get_mla_prefill_backend
 
@@ -31,11 +31,17 @@ def _warm_fa4_mla_prefill(worker: Worker) -> None:
 
 
 def _warm_inkling_fa4_rel_attention(worker: Worker) -> None:
-    seen_compile_keys: set[Any] = set()
-    for module in worker.get_model().modules():
-        warmup_kernel = getattr(module, "fa4_rel_attention_kernel", None)
-        if warmup_kernel is not None:
-            warmup_kernel.warmup(seen_compile_keys=seen_compile_keys)
+    from vllm.models.inkling.configs import InklingModelConfig
+    from vllm.models.inkling.nvidia.ops.fa4_warmup import (
+        INKLING_FA4_REL_ATTENTION_KERNEL,
+    )
+
+    vllm_config = worker.vllm_config
+    hf_config = vllm_config.model_config.hf_config
+    if not isinstance(hf_config, InklingModelConfig):
+        return
+
+    INKLING_FA4_REL_ATTENTION_KERNEL.warmup(vllm_config)
 
 
 def fa4_cutedsl_warmup(worker: Worker) -> None:
