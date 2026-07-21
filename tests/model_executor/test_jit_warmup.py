@@ -143,6 +143,38 @@ def test_trace_dispatch_combines_zipped_rows_with_independent_values() -> None:
     ]
 
 
+def test_trace_dispatch_filters_with_traced_predicate() -> None:
+    class PredicateKernel(ToyKernel):
+        def _is_valid_warmup_dispatch(
+            self,
+            *,
+            tokens: int,
+            lanes: int,
+            max_work: int,
+        ) -> bool:
+            block_size = _next_power_of_2(tokens)
+            return block_size * lanes <= max_work
+
+        def get_warmup_keys(
+            self, max_tokens: int, cfg: Any
+        ) -> list[ToyKernel.CompileKey]:
+            return self._trace_dispatch(self.dispatch)(
+                tokens=WarmupIntRange(1, max_tokens + 1),
+                lanes=(1, 2),
+                cfg=cfg,
+                max_work=4,
+                _when=self._is_valid_warmup_dispatch,
+            )
+
+    assert PredicateKernel().get_warmup_keys(5, _config()) == [
+        ToyKernel.CompileKey(1, 1, 1, ("base", "default", -1, 1, 1), True),
+        ToyKernel.CompileKey(1, 2, 1, ("base", "default", -1, 1, 1), True),
+        ToyKernel.CompileKey(2, 2, 1, ("base", "default", -2, 2, 4), True),
+        ToyKernel.CompileKey(2, 4, 1, ("base", "default", -2, 2, 4), True),
+        ToyKernel.CompileKey(4, 4, 1, ("base", "default", -4, 1, 16), True),
+    ]
+
+
 def test_zip_inputs_validates_input_rows() -> None:
     with pytest.raises(ValueError, match="requires at least one"):
         zip_inputs()

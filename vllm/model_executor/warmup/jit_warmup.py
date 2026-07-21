@@ -94,18 +94,14 @@ def _expand_warmup_input_rows(
     rows: tuple[Mapping[str, WarmupValues], ...],
     input_names: frozenset[str],
 ) -> tuple[dict[str, Any], ...]:
-    active_names = tuple(name for name in rows[0] if name in input_names)
+    active_names = frozenset(name for name in rows[0] if name in input_names)
     if not active_names:
         return ({},)
 
-    expanded_rows: list[dict[str, Any]] = []
-    for row in rows:
-        expanded_rows.extend(
-            _expand_warmup_value_grid(
-                {name: row[name] for name in active_names}, input_names
-            )
-        )
-    return tuple(expanded_rows)
+    return tuple(
+        {name: value for name, value in row.items() if name in active_names}
+        for row in rows
+    )
 
 
 def _merge_warmup_kwargs(parts: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
@@ -279,17 +275,14 @@ class _DispatchExprEvaluator(ast.NodeVisitor):
         return op(self.visit(node.left), self.visit(node.right))
 
     def visit_Call(self, node: ast.Call) -> Any:
+        args = [self.visit(arg) for arg in node.args]
+        fn = self.visit(node.func)
+        call_kwargs: dict[str, Any] = {}
         for keyword in node.keywords:
             if keyword.arg is None:
                 raise _dispatch_expr_error(
                     node, "Dispatch helper calls cannot use **kwargs"
                 )
-
-        args = [self.visit(arg) for arg in node.args]
-        fn = self.visit(node.func)
-        call_kwargs: dict[str, Any] = {}
-        for keyword in node.keywords:
-            assert keyword.arg is not None
             call_kwargs[keyword.arg] = self.visit(keyword.value)
         return fn(*args, **call_kwargs)
 
@@ -553,16 +546,7 @@ class VllmJitKernel(Generic[CompileKeyT], ABC):
         """Compile one warmup key."""
         raise NotImplementedError
 
-    def warmup(
-        self,
-        *args: Any,
-        seen_compile_keys: set[CompileKeyT] | None = None,
-        **kwargs: Any,
-    ) -> None:
+    def warmup(self, *args: Any, **kwargs: Any) -> None:
         """Compile this kernel's warmup keys."""
         for compile_key in self.get_warmup_keys(*args, **kwargs):
-            if seen_compile_keys is not None:
-                if compile_key in seen_compile_keys:
-                    continue
-                seen_compile_keys.add(compile_key)
             self.compile(compile_key)

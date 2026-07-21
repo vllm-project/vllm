@@ -215,7 +215,7 @@ class InklingFA4RelAttentionKernel(
                     dtype=dtype,
                     kv_dtype=kv_dtype,
                     block_size=block_size,
-                    window_size=[(-1, -1)],
+                    window_size=(-1, -1),
                     max_kv_len=vllm_config.model_config.max_model_len,
                 ),
                 dict(
@@ -227,7 +227,7 @@ class InklingFA4RelAttentionKernel(
                     dtype=dtype,
                     kv_dtype=kv_dtype,
                     block_size=block_size,
-                    window_size=[(local_extent - 1, 0)],
+                    window_size=(local_extent - 1, 0),
                     max_kv_len=local_extent,
                 ),
             ),
