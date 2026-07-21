@@ -32,10 +32,10 @@ class FileMapper:
         dcp_size: int,
         rank: int,
         dtype: str,
-        model_revision: str | None = None,
         kv_cache_groups: list[dict] | None = None,
         inference_engine: str = "vllm",
         parallel_agnostic: bool = False,
+        model_revision: str | None = None,
     ):
         """
         Initialize the file mapper. Each worker constructs its own, but
