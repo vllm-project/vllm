@@ -86,11 +86,18 @@ if [[ -n "${ASCEND_RT_VISIBLE_DEVICES:-}" || -n "${ASCEND_VISIBLE_DEVICES:-}" ]]
 fi
 
 NODE_ENV_RETRY_EXIT_CODE=86
+NPU_MEMORY_EXIT_CODE=${NPU_MEMORY_EXIT_CODE:-87}
+NPU_MEMORY_PREFLIGHT_SCRIPT=${NPU_MEMORY_PREFLIGHT_SCRIPT:-$VLLM_HUST_REPO/.github/workflows/scripts/check_ascend_npu_memory.py}
 INVALID_BENCHMARK_RESULT_EXIT_CODE=${INVALID_BENCHMARK_RESULT_EXIT_CODE:-77}
 
 is_node_env_failure_text() {
   local text=${1:-}
   printf '%s\n' "$text" | grep -Eq "DrvMngGetConsoleLogLevel failed|dcmi model initialized failed|ret is -8020|drvRet=87|drvRetCode=87|ErrCode=507899|error code is 507899|rtGetDeviceCount|Can't get ascend_hal device count|driver error:internal error|Resource_Busy\(EL0005\)|The resources are busy"
+}
+
+is_npu_memory_pressure_text() {
+  local text=${1:-}
+  printf '%s\n' "$text" | grep -Eqi 'Free memory on device .* less than desired GPU memory utilization|NPU out of memory|torch_npu.*OutOfMemoryError|ACL_ERROR_RT_MEMORY_ALLOCATION'
 }
 
 runtime_ready_log_indicates_sudo_auth_failure() {
@@ -774,6 +781,18 @@ print(probe.get("selected_device") or "npu:0")
 PY
   )" || return 1
 
+  local required_memory_utilization=${VLLM_ASCEND_REQUIRED_MEMORY_UTILIZATION:-}
+  if [[ -z "$required_memory_utilization" ]]; then
+    case "$SAME_SPEC_BENCHMARK_ENABLED" in
+      1) required_memory_utilization=${SAME_SPEC_GPU_MEMORY_UTILIZATION:-0.92} ;;
+      *) required_memory_utilization=0.92 ;;
+    esac
+  fi
+  "$PYTHON_BIN" "$NPU_MEMORY_PREFLIGHT_SCRIPT" \
+    --device "$selected_device" \
+    --utilization "$required_memory_utilization" \
+    --insufficient-exit-code "$NPU_MEMORY_EXIT_CODE" || return "$?"
+
   echo "selected_device=${selected_device}"
 }
 
@@ -782,6 +801,7 @@ ensure_runner_npu_ready() {
   local delay_seconds=${RUNNER_NPU_PREFLIGHT_DELAY_SECONDS:-10}
   local attempt=1
   local preflight_output=""
+  local preflight_status=0
 
   while [[ "$attempt" -le "$max_attempts" ]]; do
     if preflight_output=$(run_runner_npu_preflight_once 2>&1); then
@@ -793,11 +813,18 @@ ensure_runner_npu_ready() {
       fi
       rm -f "$RUNNER_PREFLIGHT_FAILURE_FILE"
       return 0
+    else
+      preflight_status=$?
     fi
 
     printf '%s\n' "$preflight_output" > "$RUNNER_PREFLIGHT_FAILURE_FILE"
     echo "Runner NPU preflight failed ($attempt/$max_attempts)" >&2
     cat "$RUNNER_PREFLIGHT_FAILURE_FILE" >&2
+
+    if [[ "$preflight_status" -eq "$NPU_MEMORY_EXIT_CODE" ]]; then
+      echo "Ascend NPU memory is insufficient; failing without retry." >&2
+      return "$NPU_MEMORY_EXIT_CODE"
+    fi
 
     if [[ "$attempt" -lt "$max_attempts" ]]; then
       sleep "$delay_seconds"
@@ -1099,6 +1126,10 @@ PY
   if [[ "$same_spec_status" -ne 0 ]]; then
     print_same_spec_server_log_tail
     collect_ascend_diagnostics "same-spec-current-failure"
+    if [[ -f "$same_spec_server_log" ]] && is_npu_memory_pressure_text "$(cat "$same_spec_server_log" 2>/dev/null || true)"; then
+      echo "Detected deterministic Ascend NPU memory pressure in same-spec server log." >&2
+      return "$NPU_MEMORY_EXIT_CODE"
+    fi
     if [[ -f "$same_spec_server_log" ]] && is_node_env_failure_text "$(cat "$same_spec_server_log" 2>/dev/null || true)"; then
       mark_node_env_failure "same-spec benchmark failed due to Ascend node-level runtime errors"
       return "$NODE_ENV_RETRY_EXIT_CODE"
@@ -1336,6 +1367,10 @@ else
       echo "vLLM server exited before becoming ready"
       cat "$SERVER_LOG"
       collect_ascend_diagnostics "server-exit-before-ready"
+      if is_npu_memory_pressure_text "$(cat "$SERVER_LOG" 2>/dev/null || true)"; then
+        echo "Detected deterministic Ascend NPU memory pressure in server log." >&2
+        exit "$NPU_MEMORY_EXIT_CODE"
+      fi
       if is_node_env_failure_text "$(cat "$SERVER_LOG" 2>/dev/null || true)"; then
         mark_node_env_failure "vllm server exited with Ascend node-level runtime error before ready"
         exit "$NODE_ENV_RETRY_EXIT_CODE"
@@ -1347,6 +1382,10 @@ else
       echo "Timed out waiting for vLLM server to become ready"
       cat "$SERVER_LOG"
       collect_ascend_diagnostics "server-ready-timeout"
+      if is_npu_memory_pressure_text "$(cat "$SERVER_LOG" 2>/dev/null || true)"; then
+        echo "Detected deterministic Ascend NPU memory pressure in server log." >&2
+        exit "$NPU_MEMORY_EXIT_CODE"
+      fi
       if is_node_env_failure_text "$(cat "$SERVER_LOG" 2>/dev/null || true)"; then
         mark_node_env_failure "vllm server readiness timeout with Ascend node-level runtime errors"
         exit "$NODE_ENV_RETRY_EXIT_CODE"
