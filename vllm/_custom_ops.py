@@ -3863,10 +3863,10 @@ def fusedQuantizeMx(
         raise ValueError(f"invalid method {method!r}, must be 'quest' or 'abs_max'")
 
 
-if hasattr(torch.ops._qutlass_C, "fusedQuantizeNv"):
+if hasattr(torch.ops._qutlass_C, "fusedQuantizeNvAbsMax"):
 
-    @register_fake("_qutlass_C::fusedQuantizeNv")
-    def _fake_fused_quantize_nv(
+    @register_fake("_qutlass_C::fusedQuantizeNvAbsMax")
+    def _fake_fused_quantize_nv_absmax(
         a: torch.Tensor,
         b: torch.Tensor,
         xh_e2m1: torch.Tensor,
@@ -3892,7 +3892,9 @@ def fusedQuantizeNv(
         padded_rows, padded_cols, dtype=torch.float8_e4m3fn, device=a.device
     )
 
-    return torch.ops._qutlass_C.fusedQuantizeNv(a, b, xh_e2m1, xh_e4m3, global_scale)
+    return torch.ops._qutlass_C.fusedQuantizeNvAbsMax(
+        a, b, xh_e2m1, xh_e4m3, global_scale
+    )
 
 
 def hadacore_transform(x: torch.Tensor, inplace: bool = True) -> torch.Tensor:
