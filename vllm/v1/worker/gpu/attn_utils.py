@@ -218,7 +218,7 @@ def _reshape_attention_kv_cache(
         kv_cache = (
             kv_raw_tensor.view(-1, block_stride)[:, offset : offset + page_bytes]
             .view(dtype)
-            .view(kv_cache_shape)
+            .view(permuted_kv_cache_shape)
         )
     elif kv_cache_spec.page_size_padded is not None:
         # Use a strided view to skip the padding between physical pages.
@@ -238,7 +238,7 @@ def _reshape_attention_kv_cache(
         page_stride = kv_cache_spec.page_size_bytes // dtype_size
 
         num_blocks_dim = inv_order[0]
-        strides = list(torch.empty(permuted_kv_cache_shape).stride())
+        strides = list(torch.empty(permuted_kv_cache_shape, device="meta").stride())
         strides[num_blocks_dim] = page_stride
 
         kv_cache = torch.as_strided(
@@ -540,7 +540,15 @@ def init_kv_cache(
         shared_kv_cache_layers=shared_kv_cache_layers,
         kv_cache_config=kv_cache_config,
     )
-    bind_kv_cache(kv_caches, forward_context, runner_kv_caches)
+    # Dual-attention models (e.g. LongCat-Flash) put two Attention modules per
+    # decoder layer, so a layer name carries two integers (layer + module index).
+    num_attn_module = (
+        2
+        if vllm_config.model_config.hf_config.model_type
+        in ("longcat_flash", "longcat_flash_ngram")
+        else 1
+    )
+    bind_kv_cache(kv_caches, forward_context, runner_kv_caches, num_attn_module)
     return kv_caches
 
 
@@ -570,6 +578,7 @@ def build_attn_metadata(
     seq_lens_cpu_upper_bound: torch.Tensor | None = None,
     dcp_local_seq_lens: torch.Tensor | None = None,
     positions: torch.Tensor | None = None,
+    is_prefilling: torch.Tensor | None = None,
     mm_req_doc_ranges: dict[int, list[tuple[int, int]]] | None = None,
     model_specific_attn_metadata: ModelSpecificAttnMetadata | None = None,
     for_cudagraph_capture: bool = False,
@@ -597,6 +606,11 @@ def build_attn_metadata(
             if model_specific_attn_metadata is not None
             else {}
         )
+        # Model-specific metadata (e.g. Mamba hybrid) may supply its own
+        # padding-aware is_prefilling, which takes precedence over the default.
+        group_is_prefilling = common_attn_metadata_extra_kwargs.pop(
+            "is_prefilling", is_prefilling
+        )
         common_attn_metadata = CommonAttentionMetadata(
             query_start_loc=query_start_loc_gpu,
             query_start_loc_cpu=query_start_loc_cpu,
@@ -611,6 +625,7 @@ def build_attn_metadata(
             causal=group_causal,
             dcp_local_seq_lens=dcp_local_seq_lens,
             positions=positions,
+            is_prefilling=group_is_prefilling,
             mm_req_doc_ranges=mm_req_doc_ranges,
             rswa_prefix_lens=rswa_prefix_lens,
             **common_attn_metadata_extra_kwargs,

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 //! CLI argument definitions for the `vllm-rs` binary.
 //!
 //! Python vLLM references:
@@ -76,13 +79,23 @@ impl Cli {
 }
 
 /// Supported top-level CLI commands.
-#[derive(Debug, Subcommand, PartialEq, Eq)]
+#[derive(Debug, Subcommand)]
 pub enum Command {
     /// Run the Rust OpenAI frontend as a Python-supervised worker.
     Frontend(FrontendArgs),
     /// Launch a managed Python headless engine, then run the Rust OpenAI
     /// frontend.
     Serve(ServeArgs),
+    /// Run vLLM benchmarks.
+    #[command(subcommand)]
+    Bench(BenchCommand),
+}
+
+/// Supported benchmark commands.
+#[derive(Debug, Subcommand)]
+pub enum BenchCommand {
+    /// Benchmark online serving throughput.
+    Serve(vllm_bench::BenchServeArgs),
 }
 
 /// A JSON-encoded list of strings, matching Python's `json.loads` CLI type for

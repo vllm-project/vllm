@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 //! Minimal OpenAI-compatible HTTP server above [`vllm_chat`].
 
 mod config;
@@ -37,6 +40,7 @@ use tokio::net::TcpListener;
 use tokio::time::{Instant, sleep_until};
 use tokio_util::sync::CancellationToken;
 use tonic::transport::Server as TonicServer;
+use tonic_health::server::health_reporter;
 use tower::ServiceExt as _;
 use tracing::{info, trace, warn};
 use vllm_chat::{ChatLlm, LoadModelBackendsOptions, load_model_backends};
@@ -205,14 +209,25 @@ where
             .transpose()
             .context("invalid gRPC TLS configuration")?
             .map(ReloadableTls::new);
-        let svc = grpc::GenerateServer::new(grpc::GenerateServiceImpl::new(state.clone()));
+        let (health_reporter, health_service) = health_reporter();
+        let engine_health = state.engine_core_client().subscribe_health();
+        health_reporter.set_serving::<grpc::GenerateGrpcService>().await;
+        let generate_service =
+            grpc::GenerateGrpcService::new(grpc::GenerateServiceImpl::new(state.clone()));
         let svc = TonicServer::builder()
             .http2_keepalive_interval(Some(GRPC_KEEPALIVE_INTERVAL))
             .http2_keepalive_timeout(Some(GRPC_KEEPALIVE_TIMEOUT))
             .layer(middleware::request_runtime_layer(state.clone()))
-            .add_service(svc);
+            .add_service(health_service)
+            .add_service(generate_service);
         info!(%addr, tls = grpc_cell.is_some(), "starting gRPC server");
-        Some((grpc_listener, svc, grpc_cell))
+        Some((
+            grpc_listener,
+            svc,
+            grpc_cell,
+            health_reporter,
+            engine_health,
+        ))
     } else {
         None
     };
@@ -264,7 +279,7 @@ where
     // Hot-reload the certs into the cells above when `--enable-ssl-refresh` is
     // set. The handle aborts the watcher when `serve` returns. Warn-and-skip if
     // TLS is off.
-    let reloader_grpc_cell = grpc_setup.as_ref().and_then(|(_, _, cell)| cell.clone());
+    let reloader_grpc_cell = grpc_setup.as_ref().and_then(|(_, _, cell, ..)| cell.clone());
     let _cert_reloader = match (config.enable_ssl_refresh, &config.tls, &http_cell) {
         (true, Some(tls), Some(cell)) => Some(spawn_cert_reloader(
             tls.clone(),
@@ -309,7 +324,8 @@ where
         let server_shutdown = server_shutdown.clone();
         let force_shutdown = force_shutdown.clone();
         async move {
-            let Some((grpc_listener, svc, grpc_cell)) = grpc_setup else {
+            let Some((grpc_listener, svc, grpc_cell, health_reporter, engine_health)) = grpc_setup
+            else {
                 // No gRPC configured: just wait for shutdown so we do not race the
                 // join! by resolving early and tripping the cancellation token.
                 shutdown.cancelled().await;
@@ -319,19 +335,26 @@ where
                 Some(cell) => MaybeTlsListener::tls(grpc_listener, cell),
                 None => MaybeTlsListener::plain(grpc_listener),
             };
-            let server = svc.serve_with_incoming_shutdown(incoming, shutdown.cancelled_owned());
+            let server =
+                svc.serve_with_incoming_shutdown(incoming, shutdown.clone().cancelled_owned());
+            let health_monitor = grpc::monitor_health(health_reporter, engine_health, shutdown);
 
-            let result = tokio::select! {
-                result = server => {
-                    result.context("gRPC server failed")
-                }
-                _ = force_shutdown.cancelled() => {
-                    warn!("gRPC graceful shutdown deadline elapsed; aborting server");
-                    Ok(())
-                }
+            let server = async move {
+                let result = tokio::select! {
+                    result = server => {
+                        result.context("gRPC server failed")
+                    }
+                    _ = force_shutdown.cancelled() => {
+                        warn!("gRPC graceful shutdown deadline elapsed; aborting server");
+                        Ok(())
+                    }
+                };
+
+                server_shutdown.cancel();
+                result
             };
 
-            server_shutdown.cancel();
+            let (result, ()) = tokio::join!(server, health_monitor);
             result
         }
     };
