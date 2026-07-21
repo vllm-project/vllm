@@ -14,15 +14,23 @@ from vllm.config import (
     set_current_vllm_config,
 )
 from vllm.config.attention import AttentionConfig
-from vllm.model_executor.layers.attention.attention import _select_attention_impl
+from vllm.model_executor.layers.attention.attention import (
+    Attention,
+    _select_attention_impl,
+)
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
+    AttentionImpl,
     MultipleOf,
 )
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
-from vllm.v1.attention.backends.utils import kv_layouts_compatible
+from vllm.v1.attention.backends.utils import (
+    get_kv_cache_layout,
+    kv_layouts_compatible,
+    set_kv_cache_layout,
+)
 from vllm.v1.attention.selector import get_attn_backend
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
@@ -83,6 +91,27 @@ def test_decode_auto_selection_ignores_general_backend():
     assert selector.call_args.kwargs["backend"] is None
 
 
+class _RoutingImpl(AttentionImpl):
+    def __init__(
+        self,
+        num_heads,
+        head_size,
+        scale,
+        num_kv_heads=None,
+        alibi_slopes=None,
+        sliding_window=None,
+        kv_cache_dtype="auto",
+        logits_soft_cap=None,
+        attn_type="decoder",
+        kv_sharing_target_layer_name=None,
+    ):
+        self.scale = scale
+        self.kv_cache_dtype = kv_cache_dtype
+
+    def forward(self, *args, **kwargs):
+        raise NotImplementedError
+
+
 class _Backend(AttentionBackend):
     forward_includes_kv_cache_update = False
 
@@ -92,7 +121,7 @@ class _Backend(AttentionBackend):
 
     @staticmethod
     def get_impl_cls():
-        raise NotImplementedError
+        return _RoutingImpl
 
     @staticmethod
     def get_builder_cls():
@@ -155,6 +184,18 @@ class _HNDBackend(_Backend):
         return "HND"
 
 
+class _FlexibleGeneralBackend(_Backend):
+    @staticmethod
+    def get_name() -> str:
+        return "FLASH_ATTN"
+
+
+class _HNDDecodeBackend(_HNDBackend):
+    @staticmethod
+    def get_name() -> str:
+        return "FLASHINFER"
+
+
 def _layouts_compatible(decode_backend, block_size=16):
     return kv_layouts_compatible(
         _Backend,
@@ -167,6 +208,31 @@ def _layouts_compatible(decode_backend, block_size=16):
 
 def test_layout_compatibility_ignores_cross_layer_packing():
     assert _layouts_compatible(_DifferentCrossLayerPackingBackend)
+
+
+def test_flexible_general_backend_adopts_decode_required_layout():
+    config = VllmConfig(device_config=DeviceConfig(device="cpu"))
+
+    set_kv_cache_layout("NHD")
+    try:
+        with (
+            set_current_vllm_config(config),
+            patch(
+                "vllm.model_executor.layers.attention.attention.get_attn_backend",
+                return_value=_HNDDecodeBackend,
+            ),
+        ):
+            layer = Attention(
+                num_heads=8,
+                head_size=128,
+                scale=0.1,
+                attn_backend=_FlexibleGeneralBackend,
+            )
+
+        assert layer.get_decode_attn_backend() is _HNDDecodeBackend
+        assert get_kv_cache_layout() == "HND"
+    finally:
+        set_kv_cache_layout(None)
 
 
 @pytest.mark.parametrize(

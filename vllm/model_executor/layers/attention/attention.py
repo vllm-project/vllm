@@ -470,19 +470,18 @@ class Attention(nn.Module, AttentionLayerBase):
                 if cache_config is not None and cache_config.user_specified_block_size
                 else None
             )
-            decode_required_layout = (
+            required_layout = (
                 selected_decode_backend.get_required_kv_cache_layout()
+                or self.attn_backend.get_required_kv_cache_layout()
             )
+            if required_layout is not None:
+                set_kv_cache_layout(required_layout)
             compatible = kv_layouts_compatible(
                 self.attn_backend,
                 selected_decode_backend,
                 head_size=head_size,
                 block_size=selector_block_size,
                 kv_cache_dtype=kv_cache_dtype,
-            ) and (
-                general_kv_layout is None
-                or decode_required_layout is None
-                or general_kv_layout == decode_required_layout
             )
             if not compatible:
                 set_kv_cache_layout(general_kv_layout)
