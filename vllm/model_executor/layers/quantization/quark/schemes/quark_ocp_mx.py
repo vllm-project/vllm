@@ -132,19 +132,22 @@ class QuarkOCP_MX(QuarkScheme):
     def get_min_capability(cls) -> int:
         return 70
 
+    def process_dynamic_mxfp4_weights_after_loading(
+        self, layer: torch.nn.Module
+    ) -> None:
+        from aiter.ops.triton.quant import dynamic_mxfp4_quant
+
+        w_q, w_s = dynamic_mxfp4_quant(layer.weight)
+        layer.weight_scale = torch.nn.Parameter(w_s.T.contiguous(), requires_grad=False)
+        layer.weight = torch.nn.Parameter(w_q, requires_grad=False)
+
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         layer.weight = torch.nn.Parameter(layer.weight.data, requires_grad=False)
 
         if self.dynamic_mxfp4_quant:
-            from aiter.ops.triton.quant import dynamic_mxfp4_quant
+            self.process_dynamic_mxfp4_weights_after_loading(layer)
 
-            weight_quantized, weight_scale = dynamic_mxfp4_quant(layer.weight)
-            layer.weight_scale = torch.nn.Parameter(
-                weight_scale.T.contiguous(), requires_grad=False
-            )
-            layer.weight = torch.nn.Parameter(weight_quantized, requires_grad=False)
-        else:
-            self.ocp_mx_linear.process_weights_after_loading(layer)
+        self.ocp_mx_linear.process_weights_after_loading(layer)
 
     def create_weights(
         self,
