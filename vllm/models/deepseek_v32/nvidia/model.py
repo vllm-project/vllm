@@ -6,6 +6,7 @@ from itertools import islice
 
 import torch
 
+from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.distributed import (
     get_pp_group,
@@ -178,6 +179,7 @@ class DeepseekV32DecoderLayer(torch.nn.Module):
         return hidden_states, residual
 
 
+@support_torch_compile
 class DeepseekV32Model(torch.nn.Module):
     fall_back_to_pt_during_load = False
 
