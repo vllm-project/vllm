@@ -111,8 +111,8 @@ export HSA_NO_SCRATCH_RECLAIM="${HSA_NO_SCRATCH_RECLAIM:-1}"
 #export TRANSFORMERS_OFFLINE="${TRANSFORMERS_OFFLINE:-1}"
 #
 #export HOME=/tmp
-#export HF_HOME="${HF_HOME:-/tmp/hf_home}"
-#export XDG_CACHE_HOME="${XDG_CACHE_HOME:-/tmp/.cache}"
+export HF_HOME="${HF_HOME:-/tmp/hf_home}"
+export XDG_CACHE_HOME="${XDG_CACHE_HOME:-/tmp/.cache}"
 # MoRIIO read-mode: decode pulls KV from prefill (matches the toy proxy READ path").
 export VLLM_MORIIO_CONNECTOR_READ_MODE="${VLLM_MORIIO_CONNECTOR_READ_MODE:-1}"
 export VLLM_ENGINE_READY_TIMEOUT_S="${VLLM_ENGINE_READY_TIMEOUT_S:-3600}"
