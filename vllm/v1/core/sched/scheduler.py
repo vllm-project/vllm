@@ -710,8 +710,20 @@ class Scheduler(SchedulerInterface):
                 # Get already-cached tokens.
                 if request.num_computed_tokens == 0:
                     # Get locally-cached tokens.
+                    # Per-group cache hit logic only applies to NIXL/PD
+                    # connectors. Offloading connectors have different
+                    # cache semantics (#46453, #48195).
+                    offloading = (
+                        self.vllm_config.kv_transfer_config is not None
+                        and self.vllm_config.kv_transfer_config.kv_connector
+                        is not None
+                        and "Offloading" in type(
+                            self.vllm_config.kv_transfer_config.kv_connector
+                        ).__name__
+                    )
                     if (
                         self.connector is not None
+                        and not offloading
                         and self.has_mamba_layers
                         and isinstance(
                             self.kv_cache_manager.coordinator,
@@ -726,15 +738,10 @@ class Scheduler(SchedulerInterface):
                         new_computed_blocks = (
                             self.kv_cache_manager.create_kv_cache_blocks(computed)
                         )
-                        # NOTE(ZhanqiuHu): For Mamba hybrid models,
-                        # num_new_local_computed_tokens should be the FA hit
-                        # length. This value is passed to the connector's
-                        # get_num_new_matched_tokens which computes:
-                        # external = total - local_computed.
-                        # Using the FA hit skips re-transferring FA blocks
-                        # already cached on D-side. The Mamba state (always
-                        # the last block) is transferred unconditionally by
-                        # _apply_prefix_caching in nixl/worker.py.
+                        # NOTE(ZhanqiuHu): For Mamba hybrid models with
+                        # NIXL/PD connectors: Mamba state (always the last
+                        # block) is transferred unconditionally by
+                        # _apply_prefix_caching, so max() is safe.
                         num_new_local_computed_tokens = max(per_group_hits)
                         # The per-group lookup does not detect an uncached shared
                         # prefix, so there is no junction to pin in this path.
