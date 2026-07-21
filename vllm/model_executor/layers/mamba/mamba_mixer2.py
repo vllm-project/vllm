@@ -509,14 +509,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
             if cache_config is not None and cache_config.use_replayssm
             else None
         )
-        # Stochastic rounding for the fp16 checkpoint store (gated to fp16 state
-        # + Blackwell by the config validators).
-        self.enable_stochastic_rounding = (
-            vllm_config.mamba_config.enable_stochastic_rounding
-        )
-        self.stochastic_rounding_philox_rounds = (
-            vllm_config.mamba_config.stochastic_rounding_philox_rounds
-        )
+        self.mamba_config = vllm_config.mamba_config
         if self.use_replayssm and self.num_heads % self.tp_size != 0:
             raise ValueError(
                 "--use-replayssm requires tensor-parallel heads to divide evenly"
@@ -1080,8 +1073,12 @@ class MambaMixer2(MambaBase, PluggableLayer):
                     max_cache_len=self.replayssm_buffer_len,
                     state_batch_indices=state_indices_tensor_d_input,
                     out=preallocated_ssm_out_d,
-                    enable_stochastic_rounding=self.enable_stochastic_rounding,
-                    cache_philox_rounds=self.stochastic_rounding_philox_rounds,
+                    enable_stochastic_rounding=(
+                        self.mamba_config.enable_stochastic_rounding
+                    ),
+                    cache_philox_rounds=(
+                        self.mamba_config.stochastic_rounding_philox_rounds
+                    ),
                 )
             else:
                 selective_state_update(
