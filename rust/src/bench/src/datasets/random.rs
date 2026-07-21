@@ -49,9 +49,12 @@ pub fn generate_random_dataset(
     let (input_low, input_high) = range_ratio.input_bounds(real_input_len);
     let (output_low, output_high) = range_ratio.output_bounds(output_len);
     if !range_ratio.is_fixed() {
-        println!(
-            "Sampling input_len from [{input_low}, {input_high}] and \
-             output_len from [{output_low}, {output_high}]"
+        tracing::info!(
+            input_low,
+            input_high,
+            output_low,
+            output_high,
+            "sampling random request lengths"
         );
     }
 
