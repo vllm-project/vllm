@@ -135,7 +135,10 @@ def test_abort_queued_request_does_not_build_store_job(
 
     runner.scheduler.finish_requests(queued_req_id, RequestStatus.FINISHED_ABORTED)
     req_status = runner.connector_scheduler._req_status[queued_req_id]
-    assert all(group_state.offload_keys for group_state in req_status.group_states)
+    # Never-scheduled request has no GPU blocks, so offload_keys must be empty
+    # (no KV data to offload). This is enforced by request_finished checking
+    # block_ids before calling update_offload_keys().
+    assert all(not group_state.offload_keys for group_state in req_status.group_states)
     assert all(not group_state.block_ids for group_state in req_status.group_states)
 
     scheduler_output = runner.scheduler.schedule()

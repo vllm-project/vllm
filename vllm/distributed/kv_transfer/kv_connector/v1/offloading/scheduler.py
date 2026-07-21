@@ -931,6 +931,7 @@ class OffloadingConnectorScheduler:
             if preempted:
                 for group_state in req_status.group_states:
                     group_state.block_ids.clear()
+                    group_state.offload_keys.clear()  # Invariant: keep in sync with block_ids
 
             if new_block_id_groups:
                 if self._sliding_window_groups:
@@ -1336,7 +1337,10 @@ class OffloadingConnectorScheduler:
 
         # Update offload keys with final block hash so _build_store_jobs can
         # create store jobs for the last block(s) on the next schedule step.
-        req_status.update_offload_keys()
+        # Only update if the request was actually scheduled (has GPU blocks),
+        # otherwise we'd populate offload_keys without corresponding block_ids.
+        if any(gs.block_ids for gs in req_status.group_states):
+            req_status.update_offload_keys()
 
         # Keep req_status alive: _build_store_jobs will process finished_req_ids
         # on the next step and handle cleanup after creating store jobs.
