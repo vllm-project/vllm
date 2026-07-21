@@ -18,7 +18,7 @@ def mask_empty_context_lse(
     num_heads, num_tokens = lse.shape
     num_reqs = query_start_loc.shape[0] - 1
     block_size = 128
-    # Upper bound for request-local blocks; blocks never span requests.
+    # Reserve the worst-case number of request-local blocks.
     num_query_blocks = num_tokens // block_size + num_reqs
     mask_empty_context_lse_kernel[(num_query_blocks,)](
         lse,
@@ -51,18 +51,18 @@ def mask_empty_context_lse_kernel(
     lanes = tl.arange(0, 32)
     chunk_start = 0
     req_idx = 0
-    move_on = True
-    while (chunk_start < num_reqs) & move_on:
+    req_idx_found = False
+    while (chunk_start < num_reqs) & (not req_idx_found):
         req_offsets = chunk_start + lanes
         req_mask = req_offsets < num_reqs
         query_starts = tl.load(query_start_loc + req_offsets, mask=req_mask)
-        # Each request boundary starts a new logical block.
+        # Assume the worst-case number of blocks for each request.
         req_block_starts = query_starts // BLOCK_SIZE + req_offsets
         match_count = tl.sum(
             (req_mask & (req_block_starts <= query_block_idx)).to(tl.int32)
         )
         req_idx = chunk_start + match_count - 1
-        move_on = match_count == 32
+        req_idx_found = match_count < 32
         chunk_start += 32
 
     query_start = tl.load(query_start_loc + req_idx)
@@ -81,16 +81,15 @@ def mask_empty_context_lse_kernel(
 
     token_offsets = token_offset + tl.arange(0, BLOCK_SIZE)
     token_indices = query_start + token_offsets
+    token_lse_offsets = token_indices * lse_token_stride
+    valid_tokens = token_offsets < query_len
     head_offsets = tl.arange(0, BLOCK_HEADS)
     for head_start in range(0, NUM_HEADS, BLOCK_HEADS):
         head_indices = head_start + head_offsets
         lse_ptrs = (
-            lse
-            + head_indices[:, None] * lse_head_stride
-            + token_indices[None, :] * lse_token_stride
+            lse + head_indices[:, None] * lse_head_stride + token_lse_offsets[None, :]
         )
         valid_heads = head_indices < NUM_HEADS
-        valid_tokens = token_offsets < query_len
         tl.store(
             lse_ptrs,
             float("-inf"),
