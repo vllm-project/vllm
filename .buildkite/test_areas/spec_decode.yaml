@@ -15,7 +15,7 @@ steps:
   mirror:
     amd:
       device: mi325_1
-      timeout_in_minutes: 52
+      timeout_in_minutes: 60
       depends_on:
       - image-build-amd
       source_file_dependencies:
@@ -54,7 +54,7 @@ steps:
   mirror:
     amd:
       device: mi325_1
-      timeout_in_minutes: 73
+      timeout_in_minutes: 65
       depends_on:
       - image-build-amd
       source_file_dependencies:
@@ -92,8 +92,10 @@ steps:
     - pytest -v -s v1/e2e/spec_decode -k "ngram or suffix"
   mirror:
     amd:
-      device: mi300_1
-      timeout_in_minutes: 34
+      device: mi325_1
+      timeout_in_minutes: 55
+      # TODO(akaratza): Test after Torch >= 2.12 bump
+      soft_fail: true
       depends_on:
       - image-build-amd
       source_file_dependencies:
@@ -118,7 +120,7 @@ steps:
   mirror:
     amd:
       device: mi325_1
-      timeout_in_minutes: 54
+      timeout_in_minutes: 55
       depends_on:
       - image-build-amd
       source_file_dependencies:

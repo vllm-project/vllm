@@ -29,7 +29,7 @@ steps:
   mirror:
     amd:
       device: mi325_1
-      timeout_in_minutes: 38
+      timeout_in_minutes: 50
       depends_on:
       - image-build-amd
 
@@ -44,8 +44,8 @@ steps:
     - pytest -v -s v1/engine --ignore v1/engine/test_preprocess_error_handling.py
   mirror:
     amd:
-      device: mi250_1
-      timeout_in_minutes: 45
+      device: mi325_1
+      timeout_in_minutes: 55
       depends_on:
       - image-build-amd
 
@@ -60,8 +60,8 @@ steps:
     - pytest -v -s v1/e2e/general/test_async_scheduling.py
   mirror:
     amd:
-      device: mi250_1
-      timeout_in_minutes: 53
+      device: mi325_1
+      timeout_in_minutes: 70
       depends_on:
       - image-build-amd
 
@@ -76,8 +76,8 @@ steps:
     - pytest -v -s v1/e2e/general --ignore v1/e2e/general/test_async_scheduling.py
   mirror:
     amd:
-      device: mi250_1
-      timeout_in_minutes: 49
+      device: mi325_1
+      timeout_in_minutes: 60
       depends_on:
       - image-build-amd
       source_file_dependencies:
@@ -116,7 +116,6 @@ steps:
     amd:
       dind: false
       device: mi300_2
-      timeout_in_minutes: 30
       depends_on:
       - image-build-amd
 

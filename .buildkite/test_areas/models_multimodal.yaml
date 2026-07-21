@@ -14,9 +14,7 @@ steps:
     - pytest -v -s models/multimodal/generation/test_ultravox.py -m core_model
   mirror:
     amd:
-      dind: false
-      device: mi300_1
-      timeout_in_minutes: 61
+      device: mi325_1
       depends_on:
       - image-build-amd
 
@@ -33,9 +31,7 @@ steps:
     - pytest -v -s models/multimodal/generation/test_qwen2_5_vl.py -m core_model
   mirror:
     amd:
-      dind: false
-      device: mi300_1
-      timeout_in_minutes: 52
+      device: mi325_1
       depends_on:
       - image-build-amd
 
@@ -51,8 +47,7 @@ steps:
     - pytest -v -s models/multimodal/generation/test_qwen2_vl.py -m core_model
   mirror:
     amd:
-      device: mi250_1
-      timeout_in_minutes: 53
+      device: mi325_1
       depends_on:
       - image-build-amd
 
@@ -71,7 +66,6 @@ steps:
   mirror:
     amd:
       device: mi325_1
-      timeout_in_minutes: 46
       depends_on:
       - image-build-amd
 
@@ -122,7 +116,6 @@ steps:
     amd:
       dind: false
       device: mi300_1
-      timeout_in_minutes: 32
       depends_on:
       - image-build-amd
       source_file_dependencies:
@@ -145,9 +138,7 @@ steps:
     - pytest -v -s models/multimodal/test_mapping.py
   mirror:
     amd:
-      dind: false
-      device: mi300_1
-      timeout_in_minutes: 89
+      device: mi325_1
       depends_on:
       - image-build-amd
 
@@ -197,7 +188,7 @@ steps:
   mirror:
     amd:
       device: mi325_1
-      timeout_in_minutes: 58
+      timeout_in_minutes: 75
       depends_on:
       - image-build-amd
       source_file_dependencies:

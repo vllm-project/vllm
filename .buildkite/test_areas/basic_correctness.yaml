@@ -18,8 +18,7 @@ steps:
   - pytest -v -s basic_correctness/test_cpu_offload.py
   mirror:
     amd:
-      dind: false
-      device: mi300_1
-      timeout_in_minutes: 56
+      device: mi325_1
+      timeout_in_minutes: 70
       depends_on:
       - image-build-amd

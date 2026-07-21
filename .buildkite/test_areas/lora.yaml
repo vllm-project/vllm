@@ -16,7 +16,7 @@ steps:
     amd:
       device: mi325_1
       working_dir: "/vllm-workspace/tests"
-      timeout_in_minutes: 81
+      timeout_in_minutes: 65
       source_file_dependencies:
       - vllm/lora
       - tests/lora
