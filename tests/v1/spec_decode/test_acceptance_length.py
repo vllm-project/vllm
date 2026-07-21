@@ -56,7 +56,7 @@ EAGLE3_MODEL_CONFIGS = [
         id="llama3-8b-eagle3",
         marks=[
             pytest.mark.slow_test,
-            large_gpu_mark(min_gb=30),
+            large_gpu_mark(min_gb=28),
         ],
     ),
     Eagle3ModelConfig(
@@ -67,7 +67,7 @@ EAGLE3_MODEL_CONFIGS = [
         id="qwen3-8b-eagle3",
         marks=[
             pytest.mark.slow_test,
-            large_gpu_mark(min_gb=30),
+            large_gpu_mark(min_gb=28),
         ],
     ),
     Eagle3ModelConfig(
@@ -82,7 +82,7 @@ EAGLE3_MODEL_CONFIGS = [
         rocm_expected_acceptance_lengths_per_pos=[0.7040, 0.4820, 0.3350],
         marks=[
             pytest.mark.slow_test,
-            large_gpu_mark(min_gb=30),
+            large_gpu_mark(min_gb=28),
         ],
     ),
     Eagle3ModelConfig(
