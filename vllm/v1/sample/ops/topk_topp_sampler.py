@@ -10,13 +10,19 @@ from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config.model import LogprobsMode
 from vllm.logger import init_logger
 from vllm.platforms import CpuArchEnum, current_platform
-from vllm.platforms.rocm import on_gfx1250
 from vllm.triton_utils import HAS_TRITON
 
 if HAS_TRITON:
     from vllm.v1.sample.ops.topk_topp_triton import apply_top_k_top_p_triton
 
 logger = init_logger(__name__)
+
+
+def _skip_aiter_sampler_on_gfx1250() -> bool:
+    # Lazy ROCm-only import; keeps arch detection out of import time on CUDA/CPU.
+    from vllm.platforms.rocm import on_gfx1250
+
+    return on_gfx1250()
 
 
 def flashinfer_sampler_supported() -> bool:
@@ -111,7 +117,7 @@ class TopKTopPSampler(nn.Module):
         elif (
             logprobs_mode not in ("processed_logits", "processed_logprobs")
             and rocm_aiter_ops.is_enabled()
-            and not on_gfx1250()  # TODO (JPVILLAM): Enable this path
+            and not _skip_aiter_sampler_on_gfx1250()  # TODO (JPVILLAM): Enable
         ):
             self.aiter_ops = None
             self._aiter_ops_import_failed = False

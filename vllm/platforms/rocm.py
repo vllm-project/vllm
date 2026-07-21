@@ -216,11 +216,8 @@ _ON_GFX950 = "gfx950" in _GCN_ARCH
 _ON_GFX1250 = "gfx1250" in _GCN_ARCH
 
 _ON_CDNA = any(arch in _GCN_ARCH for arch in ["gfx9", "gfx1250"])
-_ON_RDNA = any(
-    arch
-    for arch in _GCN_ARCH
-    if (arch.startswith("gfx11") or arch.startswith("gfx12")) and arch != "gfx1250"
-)
+# RDNA = gfx11/gfx12 minus the CDNA-classified gfx1250.
+_ON_RDNA = _ON_GFX1X and not _ON_CDNA
 
 
 def _capability_from_gcn_arch(gcn_arch: str) -> tuple[int, int] | None:

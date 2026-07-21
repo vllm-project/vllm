@@ -47,7 +47,8 @@ def granite_speech_attention_config():
     if current_platform.is_rocm():
         from vllm.platforms.rocm import get_cdna_version
 
-        if get_cdna_version():
+        # -1 (unknown arch) is truthy; gate on CDNA3+ like other call sites.
+        if get_cdna_version() > 2:
             return {"backend": "ROCM_AITER_FA"}
         return {"backend": "TRITON_ATTN"}
     return None
