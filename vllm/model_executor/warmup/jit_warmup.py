@@ -36,6 +36,18 @@ class WarmupIntRange:
 WarmupValues = Any
 CompileKeyDispatchFn = Callable[..., CompileKeyT]
 WarmupPredicateFn = Callable[..., bool]
+LocalExprs = tuple[tuple[str, ast.AST], ...]
+
+
+def _eval_local_exprs(
+    local_exprs: LocalExprs,
+    values: Mapping[str, Any],
+    globals_: Mapping[str, Any],
+) -> dict[str, Any]:
+    evaluated_values = dict(values)
+    for name, expr in local_exprs:
+        evaluated_values[name] = _eval_dispatch_expr(expr, evaluated_values, globals_)
+    return evaluated_values
 
 
 @dataclass(frozen=True)
@@ -118,7 +130,7 @@ def _merge_warmup_kwargs(parts: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
 
 @dataclass(frozen=True)
 class _CompileKeyDispatchTrace:
-    local_exprs: tuple[tuple[str, ast.AST], ...]
+    local_exprs: LocalExprs
     field_exprs: tuple[tuple[str, ast.AST], ...]
     globals: Mapping[str, Any]
     input_names: frozenset[str]
@@ -129,11 +141,9 @@ class _CompileKeyDispatchTrace:
         compile_key_type: type[CompileKeyT],
         kwargs: Mapping[str, Any],
     ) -> CompileKeyT:
-        dispatch_values = {**self.defaults, **kwargs}
-        for name, expr in self.local_exprs:
-            dispatch_values[name] = _eval_dispatch_expr(
-                expr, dispatch_values, self.globals
-            )
+        dispatch_values = _eval_local_exprs(
+            self.local_exprs, {**self.defaults, **kwargs}, self.globals
+        )
         return compile_key_type(
             **{
                 field: _eval_dispatch_expr(expr, dispatch_values, self.globals)
@@ -144,18 +154,16 @@ class _CompileKeyDispatchTrace:
 
 @dataclass(frozen=True)
 class _WarmupPredicateTrace:
-    local_exprs: tuple[tuple[str, ast.AST], ...]
+    local_exprs: LocalExprs
     return_expr: ast.AST
     globals: Mapping[str, Any]
     input_names: frozenset[str]
     defaults: Mapping[str, Any]
 
     def matches(self, kwargs: Mapping[str, Any]) -> bool:
-        dispatch_values = {**self.defaults, **kwargs}
-        for name, expr in self.local_exprs:
-            dispatch_values[name] = _eval_dispatch_expr(
-                expr, dispatch_values, self.globals
-            )
+        dispatch_values = _eval_local_exprs(
+            self.local_exprs, {**self.defaults, **kwargs}, self.globals
+        )
         return bool(
             _eval_dispatch_expr(self.return_expr, dispatch_values, self.globals)
         )
