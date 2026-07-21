@@ -40,7 +40,7 @@ from vllm.renderers.hf import (
 #   Qwen2TokenizerFast (SentencePiece BPE variant)
 #   BertTokenizerFast  (WordPiece)
 TOKENIZER_IDS: Final[list[str]] = [
-    "gpt2",
+    "openai-community/gpt2",
     "Qwen/Qwen2.5-1.5B-Instruct",
     "bert-base-uncased",
 ]

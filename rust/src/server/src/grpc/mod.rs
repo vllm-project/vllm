@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 //! gRPC Generate service backed by the shared [`vllm_text::TextLlm`] facade.
 
 mod convert;
@@ -71,6 +74,7 @@ impl pb::generate_server::Generate for GenerateServiceImpl {
             usage: collected.usage,
             finish_reason: collected.finish_reason,
             kv_transfer_params: collected.kv_transfer_params,
+            ec_transfer_params: collected.ec_transfer_params,
         };
 
         let outputs = convert::to_sequence_output(
