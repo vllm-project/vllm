@@ -78,6 +78,26 @@ class Handle(Protocol):
     def wait(self) -> None: ...
 
 
+class _RetainedHandle:
+    """Handle that retains source tensors until all posted work completes.
+
+    Used by ``isend_object`` to keep the serialized CPU tensors alive while
+    gloo copies them in the background; ``wait`` drops the refs once drained.
+    """
+
+    def __init__(self, works: list[Any], retained: list[torch.Tensor]) -> None:
+        self._works = works
+        self._retained = retained
+
+    def is_completed(self) -> bool:
+        return all(w.is_completed() for w in self._works)
+
+    def wait(self) -> None:
+        for w in self._works:
+            w.wait()
+        self._retained.clear()
+
+
 def _split_tensor_dict(
     tensor_dict: dict[str, torch.Tensor | Any],
 ) -> tuple[list[tuple[str, Any]], list[torch.Tensor]]:
@@ -858,6 +878,33 @@ class GroupCoordinator:
 
         return obj
 
+    def isend_object(self, obj: Any, dst: int) -> Handle:
+        """Non-blocking ``send_object``: isend size + pickled object on the
+        CPU group. Returns a handle that retains the serialized source
+        tensors until ``wait`` drains both sends.
+        """
+        assert dst < self.world_size, f"Invalid dst rank ({dst})"
+        assert dst != self.rank_in_group, (
+            "Invalid destination rank. Destination rank is the same "
+            "as the current rank."
+        )
+
+        object_tensor = torch.frombuffer(pickle.dumps(obj), dtype=torch.uint8)
+        size_tensor = torch.tensor(
+            [object_tensor.numel()], dtype=torch.long, device="cpu"
+        )
+
+        retained = [size_tensor, object_tensor]
+        works: list[Any] = []
+        for tensor in retained:
+            work = torch.distributed.isend(
+                tensor, dst=self.ranks[dst], group=self.cpu_group
+            )
+            if work is not None:
+                works.append(work)
+
+        return _RetainedHandle(works, retained)
+
     def broadcast_tensor_dict(
         self,
         tensor_dict: dict[str, torch.Tensor | Any] | None = None,
@@ -1024,12 +1071,11 @@ class GroupCoordinator:
         metadata_group = self.cpu_group
 
         metadata_list, tensor_list = _split_tensor_dict(tensor_dict)
-        self.send_object(metadata_list, dst=dst)
 
         tensor_keys = [k for k, v in tensor_dict.items() if isinstance(v, torch.Tensor)]
         assert len(tensor_keys) == len(tensor_list)
 
-        handles: list[Handle] = []
+        handles: list[Handle] = [self.isend_object(metadata_list, dst=dst)]
         for key, tensor in zip(tensor_keys, tensor_list):
             if tensor.numel() == 0:
                 continue

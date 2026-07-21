@@ -278,6 +278,67 @@ def test_irecv_tensor_dict_send_allgather_postprocess_binds_keys(
     torch.testing.assert_close(td["b"], torch.ones(4, dtype=torch.int32))
 
 
+def test_isend_object_posts_size_then_object_and_releases_on_wait(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    posted: list[tuple[torch.Tensor, _DummyWork]] = []
+
+    def fake_isend(t: torch.Tensor, *args: Any, **kwargs: Any) -> _DummyWork:
+        w = _DummyWork()
+        posted.append((t, w))
+        return w
+
+    monkeypatch.setattr(torch.distributed, "isend", fake_isend)
+
+    g = _make_group_for_unit_test(rank_in_group=0, world_size=2)
+    handle = g.isend_object({"k": [1, 2, 3]}, dst=1)
+
+    # two sends, in size-then-object order (preserves gloo FIFO).
+    assert len(posted) == 2
+    assert posted[0][0].dtype == torch.long
+    assert posted[0][0].shape == torch.Size([1])
+    assert posted[0][0].item() == posted[1][0].numel()
+    assert posted[1][0].dtype == torch.uint8
+
+    # retain holds both source tensors until wait.
+    assert handle._retained == [posted[0][0], posted[1][0]]
+
+    handle.wait()
+
+    # both underlying works drained, retain dropped.
+    assert all(w.wait_calls == 1 for _, w in posted)
+    assert handle._retained == []
+
+
+def test_isend_tensor_dict_includes_metadata_handle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    posted: list[torch.Tensor] = []
+
+    def fake_isend(t: torch.Tensor, *args: Any, **kwargs: Any) -> _DummyWork:
+        posted.append(t)
+        return _DummyWork()
+
+    monkeypatch.setattr(torch.distributed, "isend", fake_isend)
+
+    g = _make_group_for_unit_test(rank_in_group=0, world_size=2)
+    td = {"a": torch.arange(4, dtype=torch.float32, device="cpu")}
+    handles = g.isend_tensor_dict(td, dst=1)
+
+    # size + object (metadata) + one tensor send.
+    assert len(posted) == 3
+    assert posted[0].dtype == torch.long
+    assert posted[1].dtype == torch.uint8
+    assert posted[2].dtype == torch.float32
+
+    # composite metadata handle + one tensor handle.
+    assert len(handles) == 2
+
+    for handle in handles:
+        handle.wait()
+    assert handles[0]._retained == []
+
+
 def test_async_intermediate_tensors_lazy_wait() -> None:
     work = _DummyWork()
     post_calls = {"n": 0}
