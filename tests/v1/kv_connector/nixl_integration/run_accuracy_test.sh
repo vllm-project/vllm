@@ -83,6 +83,11 @@ DECODE_BLOCK_SIZE=${DECODE_BLOCK_SIZE:-128}
 ENFORCE_EAGER=${ENFORCE_EAGER:-1}
 # Comma-separated extra args for vllm serve (e.g. --max-model-len,2048)
 VLLM_SERVE_EXTRA_ARGS=${VLLM_SERVE_EXTRA_ARGS:-}
+# Pin concurrent prefiller and non-DP decoder engines to separate internal
+# port windows. DP decoder ranks retain their existing internal port selection.
+PREFILLER_INTERNAL_PORT_BASE=${PREFILLER_INTERNAL_PORT_BASE:-20000}
+DECODER_INTERNAL_PORT_BASE=${DECODER_INTERNAL_PORT_BASE:-30000}
+INTERNAL_PORT_STRIDE=${INTERNAL_PORT_STRIDE:-100}
 
 # Resolve the repository root from the script location instead of `.git`.
 # The ROCm CI image copies `/vllm-workspace` without the Git metadata, so
@@ -154,12 +159,14 @@ run_tests_for_model() {
     PORT=$((8100 + i))
     # Calculate side channel port. Avoid clash with with TP workers.
     SIDE_CHANNEL_PORT=$((5559 + i))
+    INTERNAL_PORT=$((PREFILLER_INTERNAL_PORT_BASE + i * INTERNAL_PORT_STRIDE))
 
     echo "Starting prefill instance $i on GPU $GPU_ID, port $PORT"
 
     # Build the command with or without model-specific args
     BASE_CMD="CUDA_VISIBLE_DEVICES=$GPU_ID \
     VLLM_KV_CACHE_LAYOUT='HND' \
+    VLLM_PORT=$INTERNAL_PORT \
     UCX_NET_DEVICES=all \
     VLLM_NIXL_SIDE_CHANNEL_PORT=$SIDE_CHANNEL_PORT \
     vllm serve $model_name \
@@ -208,12 +215,18 @@ run_tests_for_model() {
     PORT=$((8200 + i))
     # Calculate side channel port
     SIDE_CHANNEL_PORT=$((5659 + i * $DECODER_TP_SIZE))
+    INTERNAL_PORT=$((DECODER_INTERNAL_PORT_BASE + i * INTERNAL_PORT_STRIDE))
+    DECODER_INTERNAL_PORT_ENV=
+    if [[ -z "${DP_EP:-}" ]]; then
+      DECODER_INTERNAL_PORT_ENV="VLLM_PORT=$INTERNAL_PORT"
+    fi
 
     echo "Starting decode instance $i on GPU $GPU_ID, port $PORT"
 
     # Build the command with or without model-specific args
     BASE_CMD="CUDA_VISIBLE_DEVICES=$GPU_ID \
     VLLM_KV_CACHE_LAYOUT=$DECODER_KV_LAYOUT \
+    $DECODER_INTERNAL_PORT_ENV \
     UCX_NET_DEVICES=all \
     VLLM_NIXL_SIDE_CHANNEL_PORT=$SIDE_CHANNEL_PORT \
     vllm serve $model_name \
