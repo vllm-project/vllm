@@ -157,3 +157,31 @@ def test_mm_prefix_limits_noop_before_multimodal_config():
     result = ModelConfig._apply_mm_prefix_lm_limits(model_config, original_arch)
 
     assert result is original_arch
+
+
+def test_mm_prefix_limits_sticky_across_text_subconfig():
+    model_config = _make_mm_prefix_model_config(language_model_only=True)
+    first = ModelConfig._apply_mm_prefix_lm_limits(
+        model_config, model_config.model_arch_config
+    )
+    assert not first.is_mm_prefix_lm
+    assert model_config._mm_prefix_lm_disabled is True
+
+    # Simulate with_hf_config regenerating a text-only arch with the flag True.
+    text_arch = replace(model_config.model_arch_config, is_mm_prefix_lm=True)
+    second = ModelConfig._apply_mm_prefix_lm_limits(model_config, text_arch)
+    assert not second.is_mm_prefix_lm
+
+
+def test_mm_prefix_limits_skips_registry_for_text_architecture():
+    model_config = _make_mm_prefix_model_config()
+    original_arch = model_config.model_arch_config
+
+    with patch(
+        "vllm.multimodal.MULTIMODAL_REGISTRY.get_processing_info",
+        side_effect=ValueError("no multimodal processor"),
+    ):
+        result = ModelConfig._apply_mm_prefix_lm_limits(model_config, original_arch)
+
+    assert result is original_arch
+    assert not getattr(model_config, "_mm_prefix_lm_disabled", False)

@@ -775,6 +775,14 @@ class ModelConfig:
         config preserves the derived flag (including ``with_hf_config``).
         No-op until ``multimodal_config`` is initialized.
         """
+        # Sticky decision from the multimodal top-level config so text-only
+        # sub-configs (e.g. Gemma4ForCausalLM via with_hf_config) do not need
+        # the multimodal processor registry and cannot restore the flag.
+        if getattr(self, "_mm_prefix_lm_disabled", False):
+            return (
+                replace(arch, is_mm_prefix_lm=False) if arch.is_mm_prefix_lm else arch
+            )
+
         if not arch.is_mm_prefix_lm:
             return arch
 
@@ -787,7 +795,12 @@ class ModelConfig:
         else:
             from vllm.multimodal import MULTIMODAL_REGISTRY
 
-            info = MULTIMODAL_REGISTRY.get_processing_info(self)
+            try:
+                info = MULTIMODAL_REGISTRY.get_processing_info(self)
+            except ValueError:
+                # Current architectures are not multimodal (language submodule).
+                return arch
+
             vision_modalities = {"image", "video"} & info.supported_mm_limits.keys()
             if not vision_modalities or any(
                 info.allowed_mm_limits[modality] > 0 for modality in vision_modalities
@@ -798,6 +811,7 @@ class ModelConfig:
                 "--limit-mm-per-prompt"
             )
 
+        self._mm_prefix_lm_disabled = True
         logger.info_once(
             "Disabled mm_prefix attention mode because %s. Attention backends without "
             "mm_prefix support may now be selected.",
