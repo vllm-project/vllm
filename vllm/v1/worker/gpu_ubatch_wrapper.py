@@ -284,10 +284,15 @@ class UBatchWrapper:
             # Ensure any pre-capture prefetches from offloader are complete.
             get_offloader().sync_prev_onload()
 
+            # thread_local: match compilation/cuda_graph.py — helper threads'
+            # CUDA work must not invalidate this thread's capture. (The ubatch
+            # threads' own kernels are still captured: stream-capture status
+            # follows the stream, not the issuing thread's error mode.)
             with torch.cuda.graph(
                 cudagraph_metadata.cudagraph,
                 stream=compute_stream,
                 pool=self.graph_pool,
+                capture_error_mode="thread_local",
             ):
                 ubatch_metadata[0].context.cpu_wait_event.set()
                 for thread in ubatch_threads:

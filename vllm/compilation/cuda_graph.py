@@ -310,10 +310,14 @@ class CUDAGraphWrapper:
                 get_offloader().sync_prev_onload()
 
                 # mind-exploding: carefully manage the reference and memory.
+                # thread_local: CUDA work issued by helper threads (KV
+                # offloading daemons, out-of-tree plugins moving weights on
+                # side streams) must not invalidate this thread's capture.
                 with torch.cuda.graph(
                     cudagraph,
                     pool=self.graph_pool,
                     stream=current_stream(),
+                    capture_error_mode="thread_local",
                 ):
                     # `output` is managed by pytorch's cudagraph pool
                     output = self.runnable(*args, **kwargs)
