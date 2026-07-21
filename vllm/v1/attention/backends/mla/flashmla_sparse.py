@@ -5,8 +5,8 @@ from typing import TYPE_CHECKING, ClassVar
 
 import torch
 
-from vllm import envs
 from vllm import _custom_ops as ops
+from vllm import envs
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
