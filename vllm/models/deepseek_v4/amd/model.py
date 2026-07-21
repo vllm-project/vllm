@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import typing
+import weakref
 from collections.abc import Callable, Iterable
 from itertools import islice
 
@@ -8,17 +9,23 @@ import regex as re
 import torch
 import torch.nn as nn
 
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig
 from vllm.distributed import (
     get_pp_group,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
+from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul, SiluAndMulWithClamp
 from vllm.model_executor.layers.fused_moe import (
     FusedMoE,
     GateLinear,
+    RoutedExperts,
     fused_moe_make_expert_params_mapping,
+)
+from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
+    rocm_aiter_fused_experts,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
@@ -35,6 +42,7 @@ from vllm.model_executor.layers.mhc import (
     MHCPreOp,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.quantization.mxfp4 import Mxfp4MoEMethod
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
@@ -56,7 +64,293 @@ from vllm.model_executor.models.utils import (
 )
 from vllm.models.deepseek_v4.amd.rocm import DeepseekV4ROCMAiterMLAAttention
 from vllm.platforms import current_platform
+from vllm.platforms.rocm import on_gfx950
 from vllm.sequence import IntermediateTensors
+
+logger = init_logger(__name__)
+
+
+def _should_fuse_shared_expert(vllm_config: VllmConfig) -> bool:
+    config = vllm_config.model_config.hf_config
+    quant_config = vllm_config.quant_config
+    parallel_config = vllm_config.parallel_config
+    offload_config = getattr(vllm_config, "offload_config", None)
+    reasons = []
+
+    if not current_platform.is_rocm() or not on_gfx950():
+        reasons.append("the device is not ROCm gfx950")
+    if not rocm_aiter_ops.is_fusion_moe_shared_experts_enabled():
+        reasons.append("AITER fused MoE and/or shared expert fusion is not enabled")
+    if not rocm_aiter_ops.fused_moe_supports_heterogeneous_shared_expert():
+        reasons.append("AITER does not support heterogeneous shared experts")
+    if vllm_config.kernel_config.moe_backend != "aiter":
+        reasons.append("the MoE backend is not AITER")
+    if getattr(parallel_config, "tensor_parallel_size", None) != 8:
+        reasons.append("tensor parallelism is not the validated TP=8 layout")
+    if getattr(parallel_config, "enable_expert_parallel", False):
+        reasons.append("expert parallelism is enabled")
+    if getattr(parallel_config, "enable_eplb", False):
+        reasons.append("EPLB is enabled")
+    if offload_config is not None and (
+        getattr(getattr(offload_config, "uva", None), "cpu_offload_gb", 0) > 0
+        or getattr(getattr(offload_config, "prefetch", None), "offload_group_size", 0)
+        > 0
+    ):
+        reasons.append("weight offloading is enabled")
+    if getattr(config, "n_routed_experts", None) != 384:
+        reasons.append("the model does not have 384 routed experts")
+    if getattr(config, "hidden_size", None) != 7168:
+        reasons.append("the model hidden size is not 7168")
+    if getattr(config, "moe_intermediate_size", None) != 3072:
+        reasons.append("the model MoE intermediate size is not 3072")
+    if getattr(config, "num_experts_per_tok", None) != 6:
+        reasons.append("the model does not route to 6 experts per token")
+    if getattr(config, "n_shared_experts", None) != 1:
+        reasons.append("the model does not have exactly one shared expert")
+    if getattr(config, "expert_dtype", None) != "fp4":
+        reasons.append("routed experts are not FP4")
+    if getattr(config, "hidden_act", None) != "silu":
+        reasons.append("the model activation is not SiLU")
+    if getattr(vllm_config.model_config, "dtype", None) != torch.bfloat16:
+        reasons.append("the model dtype is not BF16")
+    if quant_config is None or quant_config.get_name() != "deepseek_v4_fp8":
+        reasons.append("the DeepSeek V4 FP8 quantization config is not active")
+    else:
+        if getattr(quant_config, "moe_quant_algo", "").upper() == "NVFP4":
+            reasons.append("routed experts use NVFP4 instead of MXFP4")
+        if getattr(quant_config, "weight_block_size", None) != [128, 128]:
+            reasons.append("shared experts are not 128x128 block FP8")
+        if not getattr(quant_config, "is_checkpoint_fp8_serialized", False):
+            reasons.append("shared experts are not serialized as FP8")
+        if not getattr(quant_config, "is_scale_e8m0", False):
+            reasons.append("shared-expert scales are not E8M0")
+        if getattr(quant_config, "ignored_layers", None):
+            reasons.append("the quantization config has ignored layers")
+
+    if reasons:
+        logger.debug_once(
+            "DeepSeek V4 shared-expert fusion is unavailable: %s. Using the "
+            "separate shared MLP.",
+            "; ".join(reasons),
+        )
+        return False
+
+    logger.info_once(
+        "Fusing the DeepSeek V4 native-FP8 shared expert into AITER MoE "
+        "(semantic top-k=6; internal E=385, top-k=7)."
+    )
+    return True
+
+
+@torch.no_grad()
+def _pad_and_expand_native_fp8_shared_expert(
+    w13: torch.Tensor,
+    w2: torch.Tensor,
+    w13_scale: torch.Tensor,
+    w2_scale: torch.Tensor,
+    padded_intermediate_size: int,
+    block_size: tuple[int, int] = (128, 128),
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Pad native FP8 weights and losslessly expand E8M0 scales to 1x32."""
+    block_n, block_k = block_size
+    if w13.dtype != torch.float8_e4m3fn or w2.dtype != torch.float8_e4m3fn:
+        raise ValueError("Heterogeneous shared-expert weights must be FP8 E4M3.")
+    if w13.ndim != 2 or w2.ndim != 2:
+        raise ValueError("Heterogeneous shared-expert weights must be 2D.")
+
+    native_intermediate, hidden_size = w13.shape[0] // 2, w13.shape[1]
+    if w13.shape[0] != 2 * native_intermediate or w2.shape != (
+        hidden_size,
+        native_intermediate,
+    ):
+        raise ValueError("Shared gate/up and down projection shapes do not match.")
+    if (
+        native_intermediate % block_n
+        or hidden_size % block_k
+        or padded_intermediate_size < native_intermediate
+        or padded_intermediate_size % block_n
+    ):
+        raise ValueError("Shared-expert dimensions are incompatible with 128x128 FP8.")
+
+    def scale_bytes(scale: torch.Tensor) -> torch.Tensor:
+        if scale.dtype == torch.float8_e8m0fnu:
+            return scale.contiguous().view(torch.uint8)
+        if scale.dtype == torch.uint8:
+            return scale.contiguous()
+        raise ValueError("Heterogeneous shared-expert scales must be E8M0 bytes.")
+
+    w13_scale_bytes = scale_bytes(w13_scale)
+    w2_scale_bytes = scale_bytes(w2_scale)
+    expected_w13_scale_shape = (
+        2 * native_intermediate // block_n,
+        hidden_size // block_k,
+    )
+    expected_w2_scale_shape = (
+        hidden_size // block_n,
+        native_intermediate // block_k,
+    )
+    if w13_scale_bytes.shape != expected_w13_scale_shape:
+        raise ValueError(
+            f"Expected shared W13 scale shape {expected_w13_scale_shape}, got "
+            f"{tuple(w13_scale_bytes.shape)}."
+        )
+    if w2_scale_bytes.shape != expected_w2_scale_shape:
+        raise ValueError(
+            f"Expected shared W2 scale shape {expected_w2_scale_shape}, got "
+            f"{tuple(w2_scale_bytes.shape)}."
+        )
+
+    padded_w13 = w13.new_zeros((2 * padded_intermediate_size, hidden_size))
+    padded_w13[:native_intermediate].copy_(w13[:native_intermediate])
+    padded_w13[
+        padded_intermediate_size : padded_intermediate_size + native_intermediate
+    ].copy_(w13[native_intermediate:])
+    padded_w2 = w2.new_zeros((hidden_size, padded_intermediate_size))
+    padded_w2[:, :native_intermediate].copy_(w2)
+
+    scale_k_expansion = block_k // 32
+    native_gate_scale, native_up_scale = w13_scale_bytes.chunk(2, dim=0)
+    native_gate_scale = native_gate_scale.repeat_interleave(block_n, dim=0)
+    native_gate_scale = native_gate_scale.repeat_interleave(scale_k_expansion, dim=1)
+    native_up_scale = native_up_scale.repeat_interleave(block_n, dim=0)
+    native_up_scale = native_up_scale.repeat_interleave(scale_k_expansion, dim=1)
+    native_w2_scale = w2_scale_bytes.repeat_interleave(block_n, dim=0)
+    native_w2_scale = native_w2_scale.repeat_interleave(scale_k_expansion, dim=1)
+
+    neutral_e8m0 = 0x7F
+    padded_w13_scale = torch.full(
+        (2 * padded_intermediate_size, hidden_size // 32),
+        neutral_e8m0,
+        dtype=torch.uint8,
+        device=w13.device,
+    )
+    padded_w13_scale[:native_intermediate].copy_(native_gate_scale)
+    padded_w13_scale[
+        padded_intermediate_size : padded_intermediate_size + native_intermediate
+    ].copy_(native_up_scale)
+    padded_w2_scale = torch.full(
+        (hidden_size, padded_intermediate_size // 32),
+        neutral_e8m0,
+        dtype=torch.uint8,
+        device=w2.device,
+    )
+    padded_w2_scale[:, : native_intermediate // 32].copy_(native_w2_scale)
+
+    return (
+        padded_w13.unsqueeze(0),
+        padded_w2.unsqueeze(0),
+        padded_w13_scale.view(torch.float8_e8m0fnu),
+        padded_w2_scale.view(torch.float8_e8m0fnu),
+    )
+
+
+class DeepseekV4HeterogeneousMxfp4MoEMethod(Mxfp4MoEMethod):
+    def process_weights_after_loading(self, layer: RoutedExperts) -> None:
+        super().process_weights_after_loading(layer)
+        assert isinstance(layer, DeepseekV4HeterogeneousSharedRoutedExperts)
+        layer.prepare_heterogeneous_shared_expert()
+
+
+class DeepseekV4HeterogeneousSharedRoutedExperts(RoutedExperts):
+    def __init__(
+        self,
+        *args,
+        shared_expert: "DeepseekV4MLP",
+        shared_expert_id: int,
+        **kwargs,
+    ):
+        self._shared_expert_ref = weakref.ref(shared_expert)
+        self.shared_expert_id = shared_expert_id
+        super().__init__(*args, **kwargs)
+        if self.expert_map_manager.num_fused_shared_experts != 1:
+            raise ValueError(
+                "DeepSeek V4 heterogeneous fusion requires one appended expert."
+            )
+        if self.shared_expert_id != self.global_num_experts:
+            raise ValueError(
+                "The shared expert ID must name the appended dummy routed row."
+            )
+        self.register_buffer("shared_w1", None, persistent=False)
+        self.register_buffer("shared_w2", None, persistent=False)
+        self.register_buffer("shared_w1_scale", None, persistent=False)
+        self.register_buffer("shared_w2_scale", None, persistent=False)
+
+    def _get_quant_method(self, prefix, quant_config, moe_config):
+        quant_method = super()._get_quant_method(prefix, quant_config, moe_config)
+        if not isinstance(quant_method, Mxfp4MoEMethod):
+            raise ValueError(
+                "DeepSeek V4 heterogeneous fusion requires MXFP4 routed experts."
+            )
+        return DeepseekV4HeterogeneousMxfp4MoEMethod(moe_config)
+
+    @torch.no_grad()
+    def prepare_heterogeneous_shared_expert(self) -> None:
+        shared_expert = self._shared_expert_ref()
+        if shared_expert is None:
+            raise RuntimeError("The native shared-expert module was released.")
+
+        shared_w1, shared_w2, shared_w1_scale, shared_w2_scale = (
+            _pad_and_expand_native_fp8_shared_expert(
+                shared_expert.gate_up_proj.weight,
+                shared_expert.down_proj.weight,
+                shared_expert.gate_up_proj.weight_scale_inv,
+                shared_expert.down_proj.weight_scale_inv,
+                self.moe_config.intermediate_size_per_partition,
+            )
+        )
+        self.shared_w1 = rocm_aiter_ops.shuffle_weight_a16w4(shared_w1, 16, True)
+        self.shared_w1_scale = rocm_aiter_ops.shuffle_scale_a16w4(
+            shared_w1_scale, 1, True
+        )
+        self.shared_w2 = rocm_aiter_ops.shuffle_weight_a16w4(shared_w2, 16, False)
+        self.shared_w2_scale = rocm_aiter_ops.shuffle_scale(shared_w2_scale)
+
+    def forward_modular(
+        self,
+        x: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        shared_experts=None,
+        shared_experts_input: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if shared_experts is not None or shared_experts_input is not None:
+            raise ValueError("The heterogeneous kernel owns the shared-expert path.")
+        if any(
+            tensor is None
+            for tensor in (
+                self.shared_w1,
+                self.shared_w2,
+                self.shared_w1_scale,
+                self.shared_w2_scale,
+            )
+        ):
+            raise RuntimeError(
+                "Heterogeneous shared-expert weights were not prepared after loading."
+            )
+
+        self._ensure_moe_quant_config_init()
+        quant_config = self.quant_method.moe_quant_config
+        if quant_config is None:
+            raise RuntimeError("The routed MXFP4 quantization config is unavailable.")
+        return rocm_aiter_fused_experts(
+            hidden_states=x,
+            w1=self.w13_weight,
+            w2=self.w2_weight,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            moe_config=self.moe_config,
+            activation=self.activation,
+            apply_router_weight_on_input=False,
+            expert_map=self.expert_map,
+            quant_config=quant_config,
+            output_dtype=x.dtype,
+            moe_sorting_dispatch_policy=rocm_aiter_ops.get_moe_dispatch_policy(),
+            shared_w1=self.shared_w1,
+            shared_w2=self.shared_w2,
+            shared_w1_scale=self.shared_w1_scale,
+            shared_w2_scale=self.shared_w2_scale,
+            shared_expert_id=self.shared_expert_id,
+        )
 
 
 class DeepseekV4MLP(nn.Module):
@@ -115,6 +409,7 @@ class DeepseekV4MoE(nn.Module):
         self,
         vllm_config: VllmConfig,
         prefix: str = "",
+        fuse_shared_expert: bool = False,
     ):
         super().__init__()
 
@@ -187,7 +482,7 @@ class DeepseekV4MoE(nn.Module):
         self.experts_end_idx = self.experts_start_idx + self.n_local_experts
 
         self.experts = FusedMoE(
-            shared_experts=self.shared_experts,
+            shared_experts=None if fuse_shared_expert else self.shared_experts,
             gate=self.gate,
             num_experts=config.n_routed_experts,
             top_k=config.num_experts_per_tok,
@@ -202,6 +497,20 @@ class DeepseekV4MoE(nn.Module):
             hash_indices_table=self.gate.tid2eid,
             swiglu_limit=self.swiglu_limit,
             router_logits_dtype=torch.float32,
+            n_shared_experts=(config.n_shared_experts if fuse_shared_expert else None),
+            routed_experts_cls=(
+                DeepseekV4HeterogeneousSharedRoutedExperts
+                if fuse_shared_expert
+                else None
+            ),
+            routed_experts_args=(
+                {
+                    "shared_expert": self.shared_experts,
+                    "shared_expert_id": config.n_routed_experts,
+                }
+                if fuse_shared_expert
+                else None
+            ),
         )
 
     def forward(
@@ -236,6 +545,7 @@ class DeepseekV4DecoderLayer(nn.Module):
         prefix,
         topk_indices_buffer: torch.Tensor | None = None,
         aux_stream_list: list[torch.cuda.Stream] | None = None,
+        fuse_shared_expert: bool = False,
     ):
         super().__init__()
 
@@ -253,7 +563,11 @@ class DeepseekV4DecoderLayer(nn.Module):
             topk_indices_buffer=topk_indices_buffer,
             aux_stream_list=aux_stream_list,
         )
-        self.ffn = DeepseekV4MoE(vllm_config, prefix=f"{prefix}.ffn")
+        self.ffn = DeepseekV4MoE(
+            vllm_config,
+            prefix=f"{prefix}.ffn",
+            fuse_shared_expert=fuse_shared_expert,
+        )
 
         self.attn_norm = RMSNorm(self.hidden_size, self.rms_norm_eps)
         self.ffn_norm = RMSNorm(self.hidden_size, self.rms_norm_eps)
@@ -453,6 +767,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         self.hc_mult = config.hc_mult
         self.hc_dim = self.hc_mult * config.hidden_size
         self.rms_norm_eps = config.rms_norm_eps
+        self.fuse_shared_expert = _should_fuse_shared_expert(vllm_config)
 
         # Three aux streams: one per non-default input GEMM in
         # DeepseekV4Attention.attn_gemm_parallel_execute
@@ -491,6 +806,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                 prefix=prefix,
                 topk_indices_buffer=self.topk_indices_buffer,
                 aux_stream_list=aux_stream_list,
+                fuse_shared_expert=self.fuse_shared_expert,
             ),
             prefix=f"{prefix}.layers",
         )

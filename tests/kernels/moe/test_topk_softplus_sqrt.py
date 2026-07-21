@@ -6,12 +6,14 @@ import pytest
 import torch
 import torch.nn.functional as F
 
+from vllm.model_executor.layers.fused_moe import layer as moe_layer
 from vllm.model_executor.layers.fused_moe.config import (
     RoutingMethodType,
     get_routing_method_type,
 )
 from vllm.model_executor.layers.fused_moe.router.dsv4_topk import dsv4_topk
 from vllm.model_executor.layers.fused_moe.router.fused_topk_bias_router import (
+    FusedTopKBiasRouter,
     fused_topk_bias,
 )
 from vllm.platforms import current_platform
@@ -67,6 +69,89 @@ def test_sqrtsoftplus_bias_uses_deepseek_v4_routing_method():
             has_e_score_bias=True,
         )
         == RoutingMethodType.Unspecified
+    )
+
+
+def test_deepseek_v4_fused_shared_expert_is_appended_after_routing(monkeypatch):
+    routed_weights = torch.tensor(
+        [
+            [0.25, 0.50, 0.25, 0.50, 0.50, 0.50],
+            [0.125, 0.375, 0.25, 0.75, 0.50, 0.50],
+        ],
+        dtype=torch.float32,
+    )
+    routed_ids = torch.tensor(
+        [[1, 2, 3, 4, 5, 6], [10, 20, 30, 40, 50, 60]],
+        dtype=torch.int32,
+    )
+
+    def fake_fused_topk_bias(**kwargs):
+        return routed_weights.clone(), routed_ids.clone()
+
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.fused_moe.router."
+        "fused_topk_bias_router.fused_topk_bias",
+        fake_fused_topk_bias,
+    )
+    router = FusedTopKBiasRouter(
+        top_k=6,
+        global_num_experts=384,
+        e_score_correction_bias=torch.zeros(384),
+        renormalize=True,
+        routed_scaling_factor=2.5,
+        scoring_func="sqrtsoftplus",
+        num_fused_shared_experts=1,
+        shared_expert_weight=1.0,
+    )
+
+    weights, ids = router.select_experts(
+        torch.empty(2, 8),
+        torch.empty(2, 384),
+        torch.int32,
+    )
+
+    assert weights.shape == ids.shape == (2, 7)
+    torch.testing.assert_close(weights[:, :6], routed_weights, rtol=0, atol=0)
+    torch.testing.assert_close(ids[:, :6], routed_ids, rtol=0, atol=0)
+    torch.testing.assert_close(
+        weights[:, :6].sum(-1), torch.full((2,), 2.5), rtol=0, atol=0
+    )
+    torch.testing.assert_close(weights[:, 6], torch.ones(2), rtol=0, atol=0)
+    torch.testing.assert_close(
+        ids[:, 6],
+        torch.full((2,), 384, dtype=torch.int32),
+        rtol=0,
+        atol=0,
+    )
+
+
+@pytest.mark.parametrize(
+    ("aiter_enabled", "env_enabled", "is_act_and_mul"),
+    [
+        (aiter_enabled, env_enabled, is_act_and_mul)
+        for aiter_enabled in (False, True)
+        for env_enabled in (False, True)
+        for is_act_and_mul in (False, True)
+    ],
+)
+def test_shared_expert_count_preserves_aiter_and_backend_neutral_gates(
+    monkeypatch, aiter_enabled, env_enabled, is_act_and_mul
+):
+    monkeypatch.setattr(
+        moe_layer.rocm_aiter_ops,
+        "is_fusion_moe_shared_experts_enabled",
+        lambda: aiter_enabled,
+    )
+    monkeypatch.setattr(
+        moe_layer.envs,
+        "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS",
+        env_enabled,
+    )
+    expected_fused_experts = int((aiter_enabled or env_enabled) and is_act_and_mul)
+    assert moe_layer.determine_expert_counts(384, 0, 1, is_act_and_mul) == (
+        384,
+        384,
+        expected_fused_experts,
     )
 
 
