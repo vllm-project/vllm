@@ -498,7 +498,7 @@ class ModelCudaGraphManager(CudaGraphManager):
                 block_tables,
                 attn_groups,
                 kv_cache_config,
-                capture_attn=desc.cg_mode == CUDAGraphMode.FULL,
+                full_cudagraph=desc.cg_mode == CUDAGraphMode.FULL,
             )
 
             # Capture with dummy rows marked as padding.
@@ -507,7 +507,6 @@ class ModelCudaGraphManager(CudaGraphManager):
             def forward_fn(cg_mode: CUDAGraphMode) -> None:
                 batch_descriptor = None
                 if cg_mode == CUDAGraphMode.PIECEWISE:
-                    assert (attn_metadata is not None) == self.use_breakable_cg
                     batch_descriptor = BatchDescriptor(
                         num_tokens=num_tokens,
                         has_lora=has_lora,
@@ -590,7 +589,7 @@ def prepare_inputs_to_capture(
     block_tables: BlockTables,
     attn_groups: list[list[AttentionGroup]],
     kv_cache_config: KVCacheConfig,
-    capture_attn: bool,
+    full_cudagraph: bool,
 ) -> AttentionState:
     input_batch = InputBatch.make_dummy(num_reqs, num_tokens, input_buffers)
     input_block_tables = block_tables.get_dummy_block_tables(num_reqs)
@@ -611,15 +610,29 @@ def prepare_inputs_to_capture(
         )
         input_batch.dcp_local_seq_lens = input_buffers.dcp_local_seq_lens[:num_reqs]
 
-    # During CUDA graph capture, we need to construct attention metadata for both
-    # PIECEWISE and FULL CUDA graph modes.
-    # - For FULL CUDA graphs, we set for_capture=True so that the attention backend
-    #   generates metadata that is compatible with graph capture.
-    # - For PIECEWISE CUDA graphs, the breakpoint may or may not allow the attention
-    #   operation itself to be captured. Nevertheless, we unconditionally build the
-    #   attention metadata with for_capture=False, indicating that dynamic or
-    #   uncapturable code paths may still be present. The captured attention op should
-    #   build the capturable metadata even with for_capture=False.
+    # NOTE(woosuk): Attention metadata is required not just by standard attention
+    # kernels, but also by specialized attention-like operations (e.g., Inkling's sconv,
+    # DSV4 compressor), which maintain their own states and require special metadata
+    # such as block tables.
+    # During CUDA graph capture:
+    # - For FULL CUDA graphs: We set for_capture=True so that both attention and
+    #   attention-like ops produce capturable metadata compatible with CUDA graphs.
+    # - For PIECEWISE CUDA graphs: We still build attention metadata, but set
+    #   for_capture=False. This is because:
+    #     * Attention-like ops (such as sconv or DSV4 compressor) may not be used as
+    #       breakpoints in PIECEWISE CUDA graphs, so we must generate their attention
+    #       metadata so they can execute and be captured during graph capture.
+    #     * Standard attention ops that are treated as breakpoints will be executed
+    #       eagerly at capture time (not included in the graph itself), and for these,
+    #       setting for_capture=False is essential. Some attention backends
+    #       (like linear attention) cannot generate capturable metadata for prefill,
+    #       so for_capture=False ensures they execute without issue.
+    #     * We assume that attention-like operations intended for capture will still
+    #       produce capturable metadata, even when for_capture=False. While this
+    #       assumption is brittle, it currently works in practice.
+    # In summary: We always generate attention metadata for both FULL and PIECEWISE
+    # CUDA graphs, setting for_capture=True for FULL graphs, and for_capture=False
+    # for PIECEWISE graphs, to ensure correct execution and capture.
     attn_metadata = model_state.prepare_attn(
         input_batch,
         CUDAGraphMode.NONE,
@@ -627,6 +640,6 @@ def prepare_inputs_to_capture(
         slot_mappings,
         attn_groups,
         kv_cache_config,
-        for_capture=capture_attn,
+        for_capture=full_cudagraph,
     )
     return AttentionState(attn_metadata, slot_mappings_by_layer)
