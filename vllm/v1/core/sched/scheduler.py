@@ -61,7 +61,7 @@ from vllm.v1.outputs import DraftTokenIds, KVConnectorOutput, ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus, StreamingUpdate
 from vllm.v1.spec_decode.dynamic.utils import build_dynamic_sd_schedule_lookup
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
-from vllm.v1.structured_output import StructuredOutputManager
+from vllm.v1.structured_output import StructuredOutputManager, StructuredOutputGrammar
 from vllm.v1.utils import record_function_or_nullcontext
 
 logger = init_logger(__name__)
@@ -1737,7 +1737,7 @@ class Scheduler(SchedulerInterface):
                 struct_output_request = request.structured_output_request
                 assert struct_output_request is not None
                 grammar = struct_output_request.grammar
-                assert grammar is not None and not isinstance(grammar, Exception)
+                assert isinstance(grammar, StructuredOutputGrammar)
                 # new_token_ids can be a mixed block of reasoning content, then
                 # the reasoning end marker, then the start of the grammar content.
                 # Trim the reasoning content so the grammar only sees grammar content.
