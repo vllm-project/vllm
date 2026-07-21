@@ -1438,17 +1438,40 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             ).transpose(0, 1)
         elif attn_metadata.num_decodes > 0:
             assert mixed_qkv_non_spec is not None
-            mixed_qkv_non_spec = causal_conv1d_update(
-                mixed_qkv_non_spec,
-                conv_state,
-                conv_weights,
-                self.conv1d.bias,
-                self.activation,
-                conv_state_indices=non_spec_state_indices_tensor[  # type: ignore[index]
-                    : attn_metadata.num_actual_tokens  # type: ignore[attr-defined]
-                ],
-                validate_data=True,
-            )
+            if is_all_mode:
+                # all-mode decode dual anchor (mirrors mamba_mixer2's decode
+                # conv): read the running conv state from the last computed
+                # block, write to the last scheduled block, in-kernel. Only
+                # buffer views are consumed — cudagraph-capturable.
+                mixed_qkv_non_spec = causal_conv1d_update(
+                    mixed_qkv_non_spec,
+                    conv_state,
+                    conv_weights,
+                    self.conv1d.bias,
+                    self.activation,
+                    conv_state_indices=attn_metadata.all_state_indices_tensor[
+                        :num_actual_tokens
+                    ],
+                    block_idx_last_scheduled_token=(
+                        attn_metadata.block_idx_last_scheduled_token[:num_actual_tokens]
+                    ),
+                    initial_state_idx=attn_metadata.block_idx_last_computed_token[
+                        :num_actual_tokens
+                    ],
+                    validate_data=False,
+                )
+            else:
+                mixed_qkv_non_spec = causal_conv1d_update(
+                    mixed_qkv_non_spec,
+                    conv_state,
+                    conv_weights,
+                    self.conv1d.bias,
+                    self.activation,
+                    conv_state_indices=non_spec_state_indices_tensor[  # type: ignore[index]
+                        : attn_metadata.num_actual_tokens  # type: ignore[attr-defined]
+                    ],
+                    validate_data=True,
+                )
         else:
             mixed_qkv_non_spec = None
 
@@ -1544,6 +1567,20 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             query_decode, key_decode, value_decode = self.rearrange_mixed_qkv(
                 mixed_qkv_non_spec[:num_decode_tokens]  # type: ignore[index]
             )
+            if is_all_mode:
+                # all-mode dual anchor for the peeled decode rows: read the
+                # last computed block, write the last scheduled block (K2
+                # dual-index). Mixed batches are eager-only, ns_* available.
+                assert ns_all_state_indices is not None
+                decode_state_indices = ns_all_state_indices.gather(
+                    1, ns_block_idx_last_computed.long().unsqueeze(1)
+                ).squeeze(1)
+                decode_state_indices_output = ns_all_state_indices.gather(
+                    1, ns_block_idx_last_scheduled.long().unsqueeze(1)
+                ).squeeze(1)
+            else:
+                decode_state_indices = non_spec_state_indices_tensor
+                decode_state_indices_output = None
             core_attn_out_decode, _ = fused_sigmoid_gating_delta_rule_update(
                 A_log=self.A_log,
                 a=a[:num_decode_tokens],
@@ -1557,7 +1594,8 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 cu_seqlens=non_spec_query_start_loc[  # type: ignore[index]
                     : attn_metadata.num_decodes + 1
                 ],
-                ssm_state_indices=non_spec_state_indices_tensor,
+                ssm_state_indices=decode_state_indices,
+                ssm_state_indices_output=decode_state_indices_output,
                 use_qk_l2norm_in_kernel=True,
             )
         else:
@@ -1645,6 +1683,27 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                     [core_attn_out_decode, core_attn_out_non_spec], dim=1
                 )
         elif attn_metadata.num_decodes > 0:
+            if is_all_mode:
+                # all-mode decode dual anchor: read the last computed block,
+                # write the last scheduled block (K2 dual-index). Same block
+                # within a mamba block; differs exactly at a block-boundary
+                # crossing, where the state migrates to the fresh block.
+                # torch.gather on buffer views — cudagraph-capturable.
+                decode_state_indices = attn_metadata.all_state_indices_tensor.gather(
+                    1,
+                    attn_metadata.block_idx_last_computed_token.long().unsqueeze(1),
+                ).squeeze(1)
+                decode_state_indices_output = (
+                    attn_metadata.all_state_indices_tensor.gather(
+                        1,
+                        attn_metadata.block_idx_last_scheduled_token.long().unsqueeze(
+                            1
+                        ),
+                    ).squeeze(1)
+                )
+            else:
+                decode_state_indices = non_spec_state_indices_tensor
+                decode_state_indices_output = None
             core_attn_out_non_spec, last_recurrent_state = (
                 fused_sigmoid_gating_delta_rule_update(
                     A_log=self.A_log,
@@ -1660,7 +1719,8 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                         : attn_metadata.num_decodes
                         + 1  # type: ignore[attr-defined]
                     ],
-                    ssm_state_indices=non_spec_state_indices_tensor,
+                    ssm_state_indices=decode_state_indices,
+                    ssm_state_indices_output=decode_state_indices_output,
                     use_qk_l2norm_in_kernel=True,
                 )
             )
@@ -1692,6 +1752,17 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
     ):
         non_spec_query_start_loc = attn_metadata.non_spec_query_start_loc
         non_spec_state_indices_tensor = attn_metadata.non_spec_state_indices_tensor  # noqa: E501
+        all_mode_read_idx = None
+        if attn_metadata.all_state_indices_tensor is not None:
+            # all-mode decode dual anchor — same carry pattern as the packed
+            # CUDA fast path (the AITER kernels update state in place).
+            all_idx = attn_metadata.all_state_indices_tensor
+            non_spec_state_indices_tensor = all_idx.gather(
+                1, attn_metadata.block_idx_last_scheduled_token.long().unsqueeze(1)
+            ).squeeze(1)
+            all_mode_read_idx = all_idx.gather(
+                1, attn_metadata.block_idx_last_computed_token.long().unsqueeze(1)
+            ).squeeze(1)
         self_kv_cache = self.kv_cache
         # conv_state must be (..., dim, width-1) for the conv kernels.
         # DS layout stores it that way directly; SD layout needs a transpose.
@@ -1701,6 +1772,13 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             else self_kv_cache[0].transpose(-1, -2)
         )
         ssm_state = self_kv_cache[1]
+
+        if all_mode_read_idx is not None:
+            num_actual_tokens = attn_metadata.num_actual_tokens
+            write_idx = non_spec_state_indices_tensor[:num_actual_tokens]
+            read_idx = all_mode_read_idx[:num_actual_tokens]
+            conv_state[write_idx] = conv_state[read_idx]
+            ssm_state[write_idx] = ssm_state[read_idx]
 
         # 1. Convolution sequence transformation
         conv_weights = self.conv1d.weight.view(
@@ -1760,6 +1838,23 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         Core attention computation with a packed non-spec decode fast path.
         """
         non_spec_state_indices_tensor = attn_metadata.non_spec_state_indices_tensor  # noqa: E501
+        all_mode_read_idx = None
+        if attn_metadata.all_state_indices_tensor is not None:
+            # all-mode decode dual anchor. The packed kernels update state
+            # strictly in place (no output-index support), so the running
+            # conv/SSM state is carried from the last computed block (read
+            # anchor) to the last scheduled block (write anchor) below, and
+            # the kernels run on the write anchor. Within a mamba block the
+            # anchors are the same physical block (self-copy, no behavioral
+            # change); at a block-boundary crossing the state migrates into
+            # the fresh block. Fixed-shape gathers — cudagraph-capturable.
+            all_idx = attn_metadata.all_state_indices_tensor
+            non_spec_state_indices_tensor = all_idx.gather(
+                1, attn_metadata.block_idx_last_scheduled_token.long().unsqueeze(1)
+            ).squeeze(1)
+            all_mode_read_idx = all_idx.gather(
+                1, attn_metadata.block_idx_last_computed_token.long().unsqueeze(1)
+            ).squeeze(1)
         self_kv_cache = self.kv_cache
         # conv_state must be (..., dim, width-1) for the conv kernels.
         # DS layout stores it that way directly; SD layout needs a transpose.
@@ -1774,6 +1869,12 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         mixed_qkv = mixed_qkv[:num_actual_tokens]
         b = b[:num_actual_tokens]
         a = a[:num_actual_tokens]
+
+        if all_mode_read_idx is not None:
+            write_idx = non_spec_state_indices_tensor[:num_actual_tokens]
+            read_idx = all_mode_read_idx[:num_actual_tokens]
+            conv_state[write_idx] = conv_state[read_idx]
+            ssm_state[write_idx] = ssm_state[read_idx]
 
         conv_weights = self.conv1d.weight.view(
             self.conv1d.weight.size(0), self.conv1d.weight.size(2)
