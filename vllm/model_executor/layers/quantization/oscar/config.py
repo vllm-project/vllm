@@ -6,9 +6,10 @@ from __future__ import annotations
 
 import logging
 import math
-import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
+
+from vllm import envs
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
@@ -26,12 +27,8 @@ OSCAR_PRESETS: dict[str, dict] = {
     "oscar_int2": {"key_quant_bits": 2, "value_quant_bits": 2},
 }
 
-# Environment knobs (defaults match the OSCAR README serving recipe).
-_ENV_K_ROTATION = "VLLM_OSCAR_K_ROTATION_PATH"
-_ENV_V_ROTATION = "VLLM_OSCAR_V_ROTATION_PATH"
-_ENV_K_CLIP = "VLLM_OSCAR_K_CLIP_RATIO"
-_ENV_V_CLIP = "VLLM_OSCAR_V_CLIP_RATIO"
-_ENV_GROUP_SIZE = "VLLM_OSCAR_GROUP_SIZE"
+# Environment knobs (defaults match the OSCAR README serving recipe); see
+# vllm/envs.py for the registered VLLM_OSCAR_* variables.
 
 
 @dataclass
@@ -74,6 +71,14 @@ class OscarConfig:
     v_clip_ratio: float = 0.0
     k_rotation_path: str = ""
     v_rotation_path: str = ""
+    # BF16 mixed-precision token windows (0/0 disables). The first
+    # ``sink_tokens`` and most recent ``recent_tokens`` of every sequence are
+    # attended in BF16 rather than INT2, matching the reference OSCAR serving
+    # configuration (its accuracy numbers are measured with sink 64 +
+    # recent 128-256).
+    sink_tokens: int = 64
+    recent_tokens: int = 256
+    staging_tokens: int = 8192
 
     # ----- derived geometry ------------------------------------------------
     @property
@@ -132,16 +137,28 @@ class OscarConfig:
                 f"Unknown OSCAR cache dtype: {cache_dtype!r}. Valid presets: {valid}"
             )
         preset = OSCAR_PRESETS[cache_dtype]
-        group_size = int(os.environ.get(_ENV_GROUP_SIZE, "128"))
+        group_size = envs.VLLM_OSCAR_GROUP_SIZE
+        if group_size < head_dim:
+            # The store/decode kernels quantize a single group per vector;
+            # a smaller group_size would silently change only the slot
+            # layout, not the quantization. Fail fast instead.
+            raise ValueError(
+                f"VLLM_OSCAR_GROUP_SIZE={group_size} < head_dim={head_dim} is "
+                "not supported: the OSCAR kernels use one quantization group "
+                "per head vector."
+            )
         return OscarConfig(
             head_dim=head_dim,
             key_quant_bits=preset["key_quant_bits"],
             value_quant_bits=preset["value_quant_bits"],
             group_size=group_size,
-            k_clip_ratio=float(os.environ.get(_ENV_K_CLIP, "0.0")),
-            v_clip_ratio=float(os.environ.get(_ENV_V_CLIP, "0.0")),
-            k_rotation_path=os.environ.get(_ENV_K_ROTATION, ""),
-            v_rotation_path=os.environ.get(_ENV_V_ROTATION, ""),
+            k_clip_ratio=envs.VLLM_OSCAR_K_CLIP_RATIO,
+            v_clip_ratio=envs.VLLM_OSCAR_V_CLIP_RATIO,
+            k_rotation_path=envs.VLLM_OSCAR_K_ROTATION_PATH,
+            v_rotation_path=envs.VLLM_OSCAR_V_ROTATION_PATH,
+            sink_tokens=max(0, envs.VLLM_OSCAR_SINK_TOKENS),
+            recent_tokens=max(0, envs.VLLM_OSCAR_RECENT_TOKENS),
+            staging_tokens=max(0, envs.VLLM_OSCAR_STAGING_TOKENS),
         )
 
     @staticmethod

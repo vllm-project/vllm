@@ -239,6 +239,14 @@ if TYPE_CHECKING:
     VLLM_NVTX_SCOPES_FOR_PROFILING: bool = False
     VLLM_KV_EVENTS_USE_INT_BLOCK_HASHES: bool = True
     VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME: str = "VLLM_OBJECT_STORAGE_SHM_BUFFER"
+    VLLM_OSCAR_K_ROTATION_PATH: str = ""
+    VLLM_OSCAR_V_ROTATION_PATH: str = ""
+    VLLM_OSCAR_K_CLIP_RATIO: float = 0.0
+    VLLM_OSCAR_V_CLIP_RATIO: float = 0.0
+    VLLM_OSCAR_GROUP_SIZE: int = 128
+    VLLM_OSCAR_SINK_TOKENS: int = 64
+    VLLM_OSCAR_RECENT_TOKENS: int = 256
+    VLLM_OSCAR_STAGING_TOKENS: int = 8192
     VLLM_DEEPEP_BUFFER_SIZE_MB: int = 1024
     VLLM_DEEPEP_HIGH_THROUGHPUT_FORCE_INTRA_NODE: bool = False
     VLLM_DEEPEP_LOW_LATENCY_USE_MNNVL: bool = False
@@ -1744,6 +1752,34 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME": get_env_or_set_default(
         "VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME",
         lambda: f"VLLM_OBJECT_STORAGE_SHM_BUFFER_{uuid.uuid4().hex}",
+    ),
+    # OSCAR INT2 KV-cache quantization (kv_cache_dtype="oscar_int2").
+    # Paths to the per-layer calibrated rotation checkpoints (RotationZoo).
+    "VLLM_OSCAR_K_ROTATION_PATH": lambda: os.getenv("VLLM_OSCAR_K_ROTATION_PATH", ""),
+    "VLLM_OSCAR_V_ROTATION_PATH": lambda: os.getenv("VLLM_OSCAR_V_ROTATION_PATH", ""),
+    # Percentile clip applied to rotated K/V before INT2 quantization
+    # (0 disables; the published recipe uses 0.96 / 0.92).
+    "VLLM_OSCAR_K_CLIP_RATIO": lambda: float(
+        os.getenv("VLLM_OSCAR_K_CLIP_RATIO", "0.0")
+    ),
+    "VLLM_OSCAR_V_CLIP_RATIO": lambda: float(
+        os.getenv("VLLM_OSCAR_V_CLIP_RATIO", "0.0")
+    ),
+    # Quantization group size along head_dim (must be >= head_dim; the
+    # kernels quantize one group per vector).
+    "VLLM_OSCAR_GROUP_SIZE": lambda: int(os.getenv("VLLM_OSCAR_GROUP_SIZE", "128")),
+    # BF16 mixed-precision token windows (0 disables): the first
+    # `sink` tokens and the most recent `recent` tokens of every sequence
+    # are attended in BF16 instead of INT2, matching the reference OSCAR
+    # serving configuration.
+    "VLLM_OSCAR_SINK_TOKENS": lambda: int(os.getenv("VLLM_OSCAR_SINK_TOKENS", "64")),
+    "VLLM_OSCAR_RECENT_TOKENS": lambda: int(
+        os.getenv("VLLM_OSCAR_RECENT_TOKENS", "256")
+    ),
+    # Capacity (in tokens, per attention layer) of the BF16 staging arena
+    # backing the sink/recent windows.
+    "VLLM_OSCAR_STAGING_TOKENS": lambda: int(
+        os.getenv("VLLM_OSCAR_STAGING_TOKENS", "8192")
     ),
     # The size in MB of the buffers (NVL and RDMA) used by DeepEP
     "VLLM_DEEPEP_BUFFER_SIZE_MB": lambda: int(

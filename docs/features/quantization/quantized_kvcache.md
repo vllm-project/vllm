@@ -208,11 +208,28 @@ auxiliary set of per-layer rotation matrices, supplied via environment variables
 | `VLLM_OSCAR_V_ROTATION_PATH` | Value rotation `.pt` | — |
 | `VLLM_OSCAR_K_CLIP_RATIO` | Key percentile clip (0 disables) | `0.96` |
 | `VLLM_OSCAR_V_CLIP_RATIO` | Value percentile clip (0 disables) | `0.92` |
+| `VLLM_OSCAR_SINK_TOKENS` | First tokens of each sequence attended in BF16 (0 disables) | `64` |
+| `VLLM_OSCAR_RECENT_TOKENS` | Most recent tokens attended in BF16 (0 disables) | `256` |
+| `VLLM_OSCAR_STAGING_TOKENS` | Per-layer BF16 staging capacity backing the windows | `8192` |
 
 Pre-computed rotations for several models (Qwen3-4B/8B/32B, GLM-4.7-FP8, …) are
 published at [`Zhongzhu/OSCAR-RotationZoo`](https://huggingface.co/Zhongzhu/OSCAR-RotationZoo).
 If no rotation path is set, OSCAR degrades gracefully to identity rotation (naive
 clipped INT2), which loses most of the accuracy benefit.
+
+The BF16 sink/recent windows match the reference OSCAR serving configuration:
+the first and the most recent tokens of every sequence are attended in BF16,
+and only the rest of the context is read as INT2 (each token still has an INT2
+copy, so an evicted staging entry just falls back to it). This is required for
+the published accuracy — with the windows disabled, short-range dependencies
+such as answer formatting degrade markedly (gsm8k strict-match drops by >10
+points on Qwen3-32B) even though the quantizer itself is unchanged. The
+default staging arena costs ~2 GB for a 32B model (64 layers, 8 KV heads).
+Staging rows are hash-addressed, so size `VLLM_OSCAR_STAGING_TOKENS` to
+~3× the working set, i.e. `3 × concurrent_requests × (sink + recent +
+2 × block_size)` tokens: with 16 concurrent Qwen3-32B requests, the default
+8192 loses ~2 gsm8k strict-match points to hash collisions, while 24576
+(~6 GB) reaches reference-parity accuracy.
 
 ### Example: Qwen3-32B with OSCAR INT2
 

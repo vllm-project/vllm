@@ -116,12 +116,18 @@ class OscarMetadata(AttentionMetadata):
     is_prefill: bool = False
     num_decodes: int = 0
     num_decode_tokens: int = 0
+    # True when any request in the batch attends context beyond its own new
+    # tokens (prefix-cache hit or chunked-prefill continuation). Guards the
+    # flash-attn first-chunk fast path.
+    has_context: bool = False
     query_start_loc_cpu: torch.Tensor | None = None
     seq_lens_cpu: torch.Tensor | None = None
 
 
 class OscarMetadataBuilder(AttentionMetadataBuilder[OscarMetadata]):
-    _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
+    # The BF16 sink/recent staging path uses data-dependent block allocation
+    # and has only been validated in eager mode.
+    _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.NEVER
 
     def __init__(self, kv_cache_spec, layer_names, vllm_config, device):
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
@@ -140,6 +146,10 @@ class OscarMetadataBuilder(AttentionMetadataBuilder[OscarMetadata]):
         num_decodes, num_prefills, num_decode_tokens, _ = split_decodes_and_prefills(
             cam, decode_threshold=self.reorder_batch_threshold
         )
+        has_context = False
+        if cam.query_start_loc_cpu is not None and cam.seq_lens_cpu is not None:
+            q_lens_cpu = cam.query_start_loc_cpu[1:] - cam.query_start_loc_cpu[:-1]
+            has_context = bool((cam.seq_lens_cpu > q_lens_cpu).any())
         return OscarMetadata(
             seq_lens=cam.seq_lens,
             slot_mapping=cam.slot_mapping,
@@ -151,6 +161,7 @@ class OscarMetadataBuilder(AttentionMetadataBuilder[OscarMetadata]):
             is_prefill=(cam.max_query_len > 1),
             num_decodes=num_decodes,
             num_decode_tokens=num_decode_tokens,
+            has_context=has_context,
             query_start_loc_cpu=cam.query_start_loc_cpu,
             seq_lens_cpu=cam.seq_lens_cpu_upper_bound,
         )
@@ -173,6 +184,12 @@ class OscarAttentionImpl(AttentionImpl["OscarMetadata"]):
         kv_sharing_target_layer_name: str | None = None,
         **kwargs,
     ):
+        if sliding_window is not None:
+            raise NotImplementedError(
+                "OSCAR INT2 KV cache does not support sliding-window attention "
+                "layers; add 'sliding_window' to kv_cache_dtype_skip_layers to "
+                "keep them in the native dtype."
+            )
         self.num_heads = num_heads
         self.head_size = head_size
         self.scale = scale
@@ -185,6 +202,11 @@ class OscarAttentionImpl(AttentionImpl["OscarMetadata"]):
         self.max_num_kv_splits = (
             vllm_config.attention_config.tq_max_kv_splits_for_cuda_graph
         )
+        # BF16 sink/recent windows (see OscarConfig). Resolved per-layer at
+        # first forward when the cache block size is known.
+        self.window_enabled = (
+            self.cfg.sink_tokens > 0 or self.cfg.recent_tokens > 0
+        ) and self.cfg.staging_tokens > 0
 
     # ---- rotation setup (one-time per layer) ------------------------------
     def _ensure_rotations(self, layer: Any, device: torch.device):
@@ -212,6 +234,99 @@ class OscarAttentionImpl(AttentionImpl["OscarMetadata"]):
             thr = torch.quantile(x_rot.abs(), clip_ratio, dim=-1, keepdim=True)
             x_rot = torch.clamp(x_rot, -thr, thr)
         return x_rot
+
+    # ---- BF16 sink/recent staging ------------------------------------------
+    # The reference OSCAR serving stack never attends the newest (and first,
+    # "sink") tokens in INT2: they stay BF16 and are only demoted once they
+    # age out of the recent window. Mirroring that here: sink/recent tokens
+    # are dual-written into a per-layer BF16 staging arena keyed by cache
+    # block id (owner-tagged per slot, so evictions/collisions degrade
+    # gracefully to the INT2 copy), and attention reads them in BF16.
+
+    def _ensure_staging(self, layer: Any, kv_cache: torch.Tensor):
+        if getattr(layer, "_oscar_stage_ready", False):
+            return
+        bs = kv_cache.shape[1]
+        cfg = self.cfg
+        self.stage_block = bs
+        self.sink_eff = (cfg.sink_tokens // bs) * bs
+        self.sink_pages = self.sink_eff // bs
+        # recent window can straddle one extra page
+        self.tail_pages = (cfg.recent_tokens + bs - 1) // bs + 1
+        rows = max(
+            (cfg.staging_tokens + bs - 1) // bs,
+            self.sink_pages + self.tail_pages + 2,
+        )
+        layer._oscar_stage_k = torch.zeros(
+            rows,
+            bs,
+            self.num_kv_heads,
+            self.head_size,
+            dtype=torch.bfloat16,
+            device=kv_cache.device,
+        )
+        layer._oscar_stage_v = torch.zeros_like(layer._oscar_stage_k)
+        layer._oscar_slot_owner = torch.full(
+            (rows, bs), -1, dtype=torch.int64, device=kv_cache.device
+        )
+        layer._oscar_stage_rows = rows
+        layer._oscar_stage_ready = True
+
+    def _staging_write(self, layer: Any, key, value, attn_metadata):
+        """Write this step's sink/recent tokens (raw BF16 K/V) into staging.
+
+        The INT2 copy is still written by ``do_kv_cache_update``, so a token
+        evicted from staging (row reuse or hash collision) simply falls back
+        to its quantized copy.
+        """
+        N = attn_metadata.num_actual_tokens
+        slot = attn_metadata.slot_mapping[:N].to(torch.int64)
+        seq = attn_metadata.seq_lens.to(torch.int64)
+        qsl = attn_metadata.query_start_loc.to(torch.int64)
+        q_lens = qsl[1:] - qsl[:-1]
+        req = torch.repeat_interleave(
+            torch.arange(seq.shape[0], device=slot.device), q_lens
+        )
+        # position of token j (global index) in its sequence
+        pos = seq[req] - qsl[req + 1] + torch.arange(N, device=slot.device)
+        keep = (slot >= 0) & (
+            (pos >= seq[req] - self.cfg.recent_tokens) | (pos < self.sink_eff)
+        )
+        bs = self.stage_block
+        rows = (slot // bs) % layer._oscar_stage_rows
+        kb, kr, ko = (slot // bs)[keep], rows[keep], (slot % bs)[keep]
+        if kb.numel() == 0:
+            return
+        # Owner tag first; only the winning writer of each (row, off) slot
+        # stores its data, so a stale tag can never point at mixed contents.
+        layer._oscar_slot_owner.index_put_((kr, ko), kb)
+        win = layer._oscar_slot_owner[kr, ko] == kb
+        sel = keep.nonzero(as_tuple=True)[0][win]
+        layer._oscar_stage_k.index_put_((kr[win], ko[win]), key[sel].to(torch.bfloat16))
+        layer._oscar_stage_v.index_put_(
+            (kr[win], ko[win]), value[sel].to(torch.bfloat16)
+        )
+
+    def _stage_splice(self, layer: Any, bt_row, cached_len: int, k_cached, v_cached):
+        """Replace INT2-reconstructed rows of a cached prefix with their exact
+        BF16 staged values wherever the staging tag still matches."""
+        bs = self.stage_block
+        rows_total = layer._oscar_stage_rows
+        dev = k_cached.device
+        npg = (cached_len + bs - 1) // bs
+        blk = bt_row[:npg].to(torch.int64)
+        rows = blk % rows_total
+        staged = layer._oscar_slot_owner[rows] == blk.unsqueeze(-1)  # [npg, bs]
+        pos = (torch.arange(npg, device=dev) * bs).unsqueeze(-1) + torch.arange(
+            bs, device=dev
+        )
+        staged = (staged & (pos < cached_len)).reshape(-1)[:cached_len]
+        ks = layer._oscar_stage_k[rows].reshape(npg * bs, self.num_kv_heads, -1)
+        vs = layer._oscar_stage_v[rows].reshape(npg * bs, self.num_kv_heads, -1)
+        m = staged.view(-1, 1, 1)
+        k_out = torch.where(m, ks[:cached_len].to(k_cached.dtype), k_cached)
+        v_out = torch.where(m, vs[:cached_len].to(v_cached.dtype), v_cached)
+        return k_out, v_out
 
     def do_kv_cache_update(
         self,
@@ -268,6 +383,15 @@ class OscarAttentionImpl(AttentionImpl["OscarMetadata"]):
 
         self._ensure_rotations(layer, query.device)
         q = query[:N].view(N, self.num_heads, self.head_size)
+
+        if self.window_enabled and kv_cache.numel() > 0:
+            self._ensure_staging(layer, kv_cache)
+            self._staging_write(
+                layer,
+                key[:N].view(N, self.num_kv_heads, self.head_size),
+                value[:N].view(N, self.num_kv_heads, self.head_size),
+                attn_metadata,
+            )
 
         num_decodes = attn_metadata.num_decodes
         num_decode_tokens = attn_metadata.num_decode_tokens
@@ -361,8 +485,16 @@ class OscarAttentionImpl(AttentionImpl["OscarMetadata"]):
         use_gqa = Hk < Hq
 
         # First-chunk prefill: all K/V are in the current batch — attend on the
-        # raw (uncompressed) K/V exactly like the standard backend.
-        if _HAS_FLASH_ATTN and attn_metadata.max_query_len == attn_metadata.max_seq_len:
+        # raw (uncompressed) K/V exactly like the standard backend. Note that
+        # max_query_len == max_seq_len alone does NOT imply this: a fresh
+        # request can share the batch with a shorter continuation (prefix-cache
+        # hit / chunked prefill), so also require that no request has prior
+        # context.
+        if (
+            _HAS_FLASH_ATTN
+            and attn_metadata.max_query_len == attn_metadata.max_seq_len
+            and not attn_metadata.has_context
+        ):
             return self._flash_attn_varlen(
                 query,
                 key,
@@ -418,6 +550,15 @@ class OscarAttentionImpl(AttentionImpl["OscarMetadata"]):
                 v_cached = torch.matmul(v_cached.float(), layer._oscar_RvT).to(
                     query.dtype
                 )
+                if self.window_enabled and getattr(layer, "_oscar_stage_ready", False):
+                    # exact BF16 values for any still-staged prefix positions
+                    k_cached, v_cached = self._stage_splice(
+                        layer,
+                        attn_metadata.block_table[i],
+                        cached_len,
+                        k_cached,
+                        v_cached,
+                    )
                 k_full = torch.cat([k_cached, k_seq], dim=0)
                 v_full = torch.cat([v_cached, v_seq], dim=0)
                 out = self._sdpa(q_seq, k_full, v_full, cached_len, seq_len, use_gqa)
@@ -444,6 +585,10 @@ class OscarAttentionImpl(AttentionImpl["OscarMetadata"]):
         return out[0].transpose(0, 1)
 
     def _decode_attention(self, query, kv_cache, attn_metadata, layer):
+        if self.window_enabled and getattr(layer, "_oscar_stage_ready", False):
+            return self._decode_attention_windowed(
+                query, kv_cache, attn_metadata, layer
+            )
         # Rotate the query into the same space as the rotated stored keys.
         q_rot = torch.matmul(query.float(), layer._oscar_Rk)
         out_rot = oscar_decode_attention(
@@ -461,4 +606,138 @@ class OscarAttentionImpl(AttentionImpl["OscarMetadata"]):
         )
         # Map attention output (rotated-V space) back: out_true = out_rot @ R_v^T.
         out = torch.matmul(out_rot, layer._oscar_RvT)
+        return out.to(query.dtype)
+
+    def _decode_attention_windowed(self, query, kv_cache, attn_metadata, layer):
+        """Decode attention with BF16 sink/recent windows.
+
+        Splits every sequence into three ranges: ``[0, sink)`` and
+        ``[cut, seq)`` are attended in BF16 from the staging arena, the
+        middle ``[sink, cut)`` runs through the fused INT2 kernel (with the
+        block table shifted past the sink pages so the kernel needs no
+        changes), and the two partial results are LSE-merged. ``cut`` is the
+        earliest position from which staging coverage is contiguous to the
+        end of the sequence, so evicted staging entries transparently fall
+        back to INT2.
+        """
+        B = query.shape[0]
+        Hq, Hk, D = self.num_heads, self.num_kv_heads, self.head_size
+        g = Hq // Hk
+        bs = self.stage_block
+        R = layer._oscar_stage_rows
+        dev = query.device
+        owner = layer._oscar_slot_owner
+        bt = attn_metadata.block_table
+        seq = attn_metadata.seq_lens.to(torch.int64)
+        maxpg = bt.shape[1]
+        S_nb, TP, S_eff = self.sink_pages, self.tail_pages, self.sink_eff
+        W = self.cfg.recent_tokens
+        offs = torch.arange(bs, device=dev)
+
+        # ---- sink coverage: BF16 only when every sink position is staged ----
+        if S_nb > 0:
+            sblk = bt[:, :S_nb].to(torch.int64)  # [B, S_nb]
+            sown = owner[(sblk % R).unsqueeze(-1), offs.view(1, 1, bs)]
+            s_staged = sown == sblk.unsqueeze(-1)  # [B, S_nb, bs]
+            sink_active = (seq > S_eff) & s_staged.reshape(B, -1).all(dim=1)
+            spos = (torch.arange(S_nb, device=dev) * bs).view(1, S_nb, 1) + offs.view(
+                1, 1, bs
+            )
+            s_valid = sink_active.view(B, 1, 1) & (spos < S_eff)
+            s_valid = s_valid.expand(B, S_nb, bs)
+        else:
+            sblk = torch.zeros(B, 0, dtype=torch.int64, device=dev)
+            s_valid = torch.zeros(B, 0, bs, dtype=torch.bool, device=dev)
+            sink_active = torch.zeros(B, dtype=torch.bool, device=dev)
+        si = torch.where(sink_active, torch.full_like(seq, S_nb), torch.zeros_like(seq))
+
+        # ---- recent-tail coverage: find the contiguous staged suffix ----
+        last_page = (seq - 1) // bs
+        pg = (last_page - (TP - 1)).unsqueeze(1) + torch.arange(
+            TP, device=dev
+        ).unsqueeze(0)  # [B, TP], ascending, may be < 0
+        pg_ok = pg >= 0
+        tblk = torch.gather(bt.to(torch.int64), 1, pg.clamp(0, maxpg - 1))
+        town = owner[(tblk % R).unsqueeze(-1), offs.view(1, 1, bs)]
+        t_staged = (town == tblk.unsqueeze(-1)) & pg_ok.unsqueeze(-1)
+        pos = (pg * bs).unsqueeze(-1) + offs.view(1, 1, bs)  # [B, TP, bs]
+        t0 = torch.maximum(seq - W, si * bs)
+        inrange = (pos >= t0.view(B, 1, 1)) & (pos < seq.view(B, 1, 1))
+        ok = torch.where(inrange, t_staged, torch.ones_like(t_staged))
+        sv = (
+            torch.flip(torch.cumprod(torch.flip(ok.reshape(B, -1).long(), [1]), 1), [1])
+            > 0
+        )
+        posf = pos.reshape(B, -1)
+        cand = sv & inrange.reshape(B, -1)
+        big = torch.iinfo(torch.int64).max
+        cut = torch.where(cand, posf, torch.full_like(posf, big)).amin(1)
+        cut = torch.minimum(cut, seq)  # no coverage -> empty BF16 tail
+        t_valid = t_staged & inrange & (pos >= cut.view(B, 1, 1))
+
+        # ---- INT2 kernel over [sink, cut): shift the block table by the
+        # sink pages so positions stay page-aligned and the kernel is unchanged
+        seq_eff = (cut - si * bs).to(torch.int32)
+        gidx = (torch.arange(maxpg, device=dev).unsqueeze(0) + si.unsqueeze(1)).clamp(
+            max=maxpg - 1
+        )
+        bt_eff = torch.gather(bt, 1, gidx)
+        q_rot = torch.matmul(query.float(), layer._oscar_Rk)
+        lse1 = torch.full((B, Hq), float("-inf"), dtype=torch.float32, device=dev)
+        out1 = oscar_decode_attention(
+            q_rot,
+            kv_cache,
+            bt_eff,
+            seq_eff,
+            self.scale,
+            key_levels=self.cfg.key_levels,
+            value_levels=self.cfg.value_levels,
+            key_data_bytes=self.cfg.key_data_bytes,
+            key_packed_size=self.cfg.key_packed_size,
+            value_data_bytes=self.cfg.value_data_bytes,
+            max_num_kv_splits=self.max_num_kv_splits,
+            lse_buf=lse1,
+        )
+        o1 = torch.matmul(out1, layer._oscar_RvT)  # true space, normalized
+        empty1 = (seq_eff <= 0).view(B, 1)
+        lse1 = torch.where(
+            empty1 | ~torch.isfinite(lse1),
+            torch.full_like(lse1, float("-inf")),
+            lse1,
+        )
+        o1 = torch.nan_to_num(o1)
+
+        # ---- BF16 attention over the staged sink + tail segments ----
+        all_blk = torch.cat([sblk, tblk], dim=1)  # [B, P]
+        valid = torch.cat([s_valid, t_valid], dim=1)  # [B, P, bs]
+        P = all_blk.shape[1]
+        L = P * bs
+        rowsP = all_blk % R
+        kseg = layer._oscar_stage_k[rowsP].reshape(B, L, Hk, D).float()
+        vseg = layer._oscar_stage_v[rowsP].reshape(B, L, Hk, D).float()
+        vmask = valid.reshape(B, L)
+        qh = query.float().view(B, Hk, g, D)
+        sc = torch.einsum("bkgd,blkd->bkgl", qh, kseg) * self.scale
+        sc = sc.masked_fill(~vmask.view(B, 1, 1, L), float("-inf"))
+        m2 = sc.amax(dim=-1)
+        m2s = torch.where(torch.isfinite(m2), m2, torch.zeros_like(m2))
+        p2 = torch.exp(sc - m2s.unsqueeze(-1))
+        p2 = torch.where(vmask.view(B, 1, 1, L), p2, torch.zeros_like(p2))
+        s2 = p2.sum(-1)
+        o2 = torch.einsum("bkgl,blkd->bkgd", p2, vseg) / s2.clamp_min(1e-38).unsqueeze(
+            -1
+        )
+        lse2 = torch.where(
+            s2 > 0,
+            m2s + torch.log(s2.clamp_min(1e-38)),
+            torch.full_like(s2, float("-inf")),
+        )
+        o2 = o2.reshape(B, Hq, D)
+        lse2 = lse2.reshape(B, Hq)
+
+        # ---- merge the two normalized partial attentions via LSE ----
+        new_lse = torch.logaddexp(lse1, lse2)
+        w1 = torch.exp(lse1 - new_lse).unsqueeze(-1)
+        w2 = torch.exp(lse2 - new_lse).unsqueeze(-1)
+        out = o1 * w1 + torch.nan_to_num(o2) * w2
         return out.to(query.dtype)
