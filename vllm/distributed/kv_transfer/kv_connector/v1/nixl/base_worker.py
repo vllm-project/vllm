@@ -1092,7 +1092,7 @@ class NixlBaseConnectorWorker:
         # to better exploit the memory layout (ie num_blocks is the first dim).
         tensor_size_bytes = None
 
-        for layer_name, cache_or_caches in xfer_buffers.items():
+        for layer_name, cache in xfer_buffers.items():
             # NOTE (NickLucche) Hybrid SSM models assume a layout that is similar to
             # that of FI, with block laid out as in `get_backend_aware_kv_block_len`.
             # However, physical page_size may differ when kernel requires a specific
@@ -1109,9 +1109,6 @@ class NixlBaseConnectorWorker:
             if isinstance(layer_spec, UniformTypeKVCacheSpecs):
                 # MLA DSv32 Indexer case: UniformTypeKVCacheSpecs merges kv_cache_specs
                 layer_spec = layer_spec.kv_cache_specs[layer_name]
-            cache_list = self.transfer_topo.get_transfer_cache_regions(
-                cache_or_caches, layer_spec
-            )
             # `layer_spec.page_size_bytes` only accounts for logical page_size, that is
             # the page_size assuming constant `self._logical_num_blocks`.
             physical_page_size = (
@@ -1120,8 +1117,6 @@ class NixlBaseConnectorWorker:
                 else layer_spec.page_size_bytes
                 // self._physical_blocks_per_logical_kv_block
             )
-            # For when registering multiple tensors eg K/V in separate regions.
-            physical_page_size = physical_page_size // len(cache_list)
             if self.transfer_topo._cross_layers_blocks:
                 # When cross-layers blocks are used, multiply by number of layers
                 physical_page_size = physical_page_size * len(
@@ -1136,65 +1131,60 @@ class NixlBaseConnectorWorker:
             # [`num_blocks` * `page_size`]
             curr_tensor_size_bytes = num_blocks * physical_page_size
 
-            # TODO (NickLucche) we could eventually unify how we handle FA/FI regions,
-            # registering a single tensor for both K/V and splitting logically like FI.
-            for cache in cache_list:
-                base_addr = cache.data_ptr()
-                if base_addr in seen_base_addresses:
-                    # NOTE (NickLucche) HMA employs memory pooling to share tensors
-                    # across groups. This results in skipping all tensors but the ones
-                    # pointed to by group0. Also, generally we will have more blocks
-                    # per tensor but fewer regions.
-                    logger.debug("Skipping %s because it's already seen", layer_name)
-                    continue
-                logger.debug(
-                    "Registering layer %s with cache shape: %s", layer_name, cache.shape
+            base_addr = cache.data_ptr()
+            if base_addr in seen_base_addresses:
+                # NOTE (NickLucche) HMA employs memory pooling to share tensors
+                # across groups. This results in skipping all tensors but the ones
+                # pointed to by group0. Also, generally we will have more blocks
+                # per tensor but fewer regions.
+                logger.debug("Skipping %s because it's already seen", layer_name)
+                continue
+            logger.debug(
+                "Registering layer %s with cache shape: %s", layer_name, cache.shape
+            )
+            seen_base_addresses.append(base_addr)
+            # Only record non-Mamba page sizes.
+            if isinstance(layer_spec, MambaSpec):
+                self.block_len_per_layer.append(
+                    physical_page_size // self._physical_blocks_per_logical_kv_block
                 )
-                seen_base_addresses.append(base_addr)
-                # Only record non-Mamba page sizes.
-                if isinstance(layer_spec, MambaSpec):
-                    self.block_len_per_layer.append(
-                        physical_page_size // self._physical_blocks_per_logical_kv_block
-                    )
-                else:
-                    self.block_len_per_layer.append(physical_page_size)
-                is_mla_region = isinstance(
-                    layer_spec, (MLAAttentionSpec, SlidingWindowMLASpec)
+            else:
+                self.block_len_per_layer.append(physical_page_size)
+            is_mla_region = isinstance(
+                layer_spec, (MLAAttentionSpec, SlidingWindowMLASpec)
+            )
+            self._region_is_mla.append(is_mla_region)
+
+            if not is_mla_region:
+                if tensor_size_bytes is None:
+                    tensor_size_bytes = curr_tensor_size_bytes
+                assert tensor_size_bytes == curr_tensor_size_bytes, (
+                    "All non-MLA kv cache tensors must have the same size"
                 )
-                self._region_is_mla.append(is_mla_region)
 
-                if not is_mla_region:
-                    if tensor_size_bytes is None:
-                        tensor_size_bytes = curr_tensor_size_bytes
-                    assert tensor_size_bytes == curr_tensor_size_bytes, (
-                        "All non-MLA kv cache tensors must have the same size"
-                    )
-
-                # When there's a mismatch between kbs<>bs, we rely on HMA to ensure
-                # caches are either [NB, PS] or [NB*r, PS/r] where r is bs/kbs.
-                if (
-                    self._physical_blocks_per_logical_kv_block == 1
-                    and cache.shape[0] != num_blocks
-                ):
-                    raise AssertionError(
-                        "All kv cache tensors must have the same number of "
-                        f"blocks; layer={layer_name}, "
-                        f"expected_num_blocks={num_blocks}, "
-                        f"cache_shape={tuple(cache.shape)}, "
-                        f"cache_stride={tuple(cache.stride())}, "
-                        f"layer_spec={type(layer_spec).__name__}, "
-                        f"backend={self.backend_name}, "
-                        "all_backends="
-                        f"{[backend.get_name() for backend in self.attn_backends]}, "
-                        f"kv_cache_layout={self.kv_cache_layout}"
-                    )
-
-                # Need to make sure the device ID is non-negative for NIXL,
-                # Torch uses -1 to indicate CPU tensors.
-                self.device_id = max(cache.get_device(), 0)
-                caches_data.append(
-                    (base_addr, curr_tensor_size_bytes, self.device_id, "")
+            # When there's a mismatch between kbs<>bs, we rely on HMA to ensure
+            # caches are either [NB, PS] or [NB*r, PS/r] where r is bs/kbs.
+            if (
+                self._physical_blocks_per_logical_kv_block == 1
+                and cache.shape[0] != num_blocks
+            ):
+                raise AssertionError(
+                    "All kv cache tensors must have the same number of "
+                    f"blocks; layer={layer_name}, "
+                    f"expected_num_blocks={num_blocks}, "
+                    f"cache_shape={tuple(cache.shape)}, "
+                    f"cache_stride={tuple(cache.stride())}, "
+                    f"layer_spec={type(layer_spec).__name__}, "
+                    f"backend={self.backend_name}, "
+                    "all_backends="
+                    f"{[backend.get_name() for backend in self.attn_backends]}, "
+                    f"kv_cache_layout={self.kv_cache_layout}"
                 )
+
+            # Need to make sure the device ID is non-negative for NIXL,
+            # Torch uses -1 to indicate CPU tensors.
+            self.device_id = max(cache.get_device(), 0)
+            caches_data.append((base_addr, curr_tensor_size_bytes, self.device_id, ""))
 
         logger.debug(
             "Different block lengths collected: %s", set(self.block_len_per_layer)
