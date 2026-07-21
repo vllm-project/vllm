@@ -22,18 +22,12 @@ pub(crate) async fn monitor_health(
         result = engine_health.wait_for(|healthy| !*healthy) => {
             match result {
                 Ok(_) => warn!(
-                    generate_service,
-                    control_service,
-                    overall_service = true,
                     status = ?status,
                     reason = "engine_unhealthy",
                     "marking gRPC health services as not serving"
                 ),
                 Err(error) => warn!(
                     %error,
-                    generate_service,
-                    control_service,
-                    overall_service = true,
                     status = ?status,
                     reason = "health_channel_closed",
                     "engine health channel closed; marking gRPC health services as not serving"
@@ -43,9 +37,6 @@ pub(crate) async fn monitor_health(
         }
         _ = shutdown.cancelled() => {
             info!(
-                generate_service,
-                control_service,
-                overall_service = true,
                 status = ?status,
                 reason = "server_shutdown",
                 "server shutting down; marking gRPC health services as not serving"
@@ -63,9 +54,6 @@ pub(crate) async fn monitor_health(
     if health_event_first {
         shutdown.cancelled().await;
         info!(
-            generate_service,
-            control_service,
-            overall_service = true,
             reason = "server_shutdown",
             "server shutting down; closing gRPC health watches"
         );
