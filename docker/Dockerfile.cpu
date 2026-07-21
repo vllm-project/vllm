@@ -187,6 +187,17 @@ COPY --from=rust-build /workspace/vllm/_rust_*.so vllm/
 
 RUN if [ "$GIT_REPO_CHECK" != 0 ]; then bash tools/check_repo.sh ; fi
 
+# For torch nightly, strip the torch/vision/audio/codec pins from the source
+# tree's requirements *after* `COPY . .` (which restored the pinned files) so
+# the wheel built below does not hard-pin the release torch (e.g.
+# torch==2.11.0+cpu). setup.py reads requirements/cpu.txt into install_requires;
+# leaving the pin makes `uv pip install dist/*.whl` unsatisfiable against the
+# nightly index. The nightly torch installed in the base image satisfies the
+# now-unpinned dependency.
+RUN if [ "${PYTORCH_NIGHTLY}" = "1" ]; then \
+        python3 /workspace/use_existing_torch.py --prefix; \
+    fi
+
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=cache,target=/root/.cache/ccache \
     --mount=type=cache,target=/vllm-workspace/.deps,sharing=locked \
