@@ -337,13 +337,6 @@ class IPCTrainerWeightTransferEngine(TrainerWeightTransferEngine[IPCTrainerInitI
         collects every rank's full list, then the sender merges per-index so
         each dict maps every GPU UUID to its args.
 
-        The merge lands on the sender (``self.is_sender``), not on
-        ``get_rank() == 0``: `rank` is the caller-supplied trainer rank and need
-        not equal the default-process-group global rank, and only the sender
-        ships (`_do_send`). Merging on global rank 0 instead would hand the
-        merged dict to a non-sender and leave the sender with empty handles.
-        Non-senders return a list of empty dicts (never shipped).
-
         The all-gather runs over the *default* process group; this assumes the
         default group is exactly the set of colocated trainer ranks and that the
         sender is a member. No-op (returns handles unchanged) when no distributed
