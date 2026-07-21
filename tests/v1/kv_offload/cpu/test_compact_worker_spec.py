@@ -433,16 +433,14 @@ def test_compact_spec_type_dispatch() -> None:
 
 
 def test_spec_compact_page_size_non_divisible_budget() -> None:
-    """Compact page size must evenly divide the per-rank budget even when
-    no individual group payload divides the budget evenly.
+    """A non-64KiB-aligned per-rank budget is rounded down to whole 64 KiB pages.
 
-    Regression test for defect 1: the old ``min(group payload)`` selection
-    fails whenever ``per_rank_budget % min_payload != 0``.  The fix uses
-    ``math.gcd(64 * 1024, per_rank_budget)`` which is always a divisor of
-    the budget (positive by construction).
+    Regression test: deriving the page size from ``gcd(64 KiB, per_rank_budget)``
+    let a budget with low 2-adic valuation collapse the page size to a few bytes,
+    so ``FixedPageAllocator`` eagerly built a multi-billion-entry free-page list
+    and OOM/hung at init. The fix rounds the budget down to a whole number of
+    fixed 64 KiB pages, keeping the page size fixed and the free-page count bounded.
     """
-    # Create slice accounting with per-rank payload of 50000 bytes.
-    # If per_rank_budget = 123456, then 123456 % 50000 = 23456 != 0.
     slice_cfg = CompactSliceConfig(
         offset_bytes=0,
         real_bytes_per_gpu_block=50000,
@@ -457,21 +455,9 @@ def test_spec_compact_page_size_non_divisible_budget() -> None:
             compact_padded_bytes_per_rank=50000,
         ),
     )
-    budget = 123456  # not divisible by 50000
-    # Math: gcd(65536, 123456) = gcd(65536, 123456 % 65536 = 57920)
-    #        = gcd(57920, 65536 % 57920 = 7616)
-    #        = gcd(7616, 57920 % 7616 = 4736)
-    #        = gcd(4736, 7616 % 4736 = 2880)
-    #        = gcd(2880, 4736 % 2880 = 1856)
-    #        = gcd(1856, 2880 % 1856 = 1024)
-    #        = gcd(1024, 1856 % 1024 = 832)
-    #        = gcd(832, 1024 % 832 = 192)
-    #        = gcd(192, 832 % 192 = 64)
-    #        = gcd(64, 192 % 64 = 0) = 64
-    expected_page_size = 64
-    assert 123456 % expected_page_size == 0, (
-        f"{expected_page_size} must divide {budget}"
-    )
+    page_size = 64 * 1024
+    budget = 123456  # not a multiple of 64 KiB (world_size=1)
+    rounded_budget = budget - (budget % page_size)  # 65536 == one page
 
     config = _make_offloading_config(
         compact_slice_accounting=groups,
@@ -481,15 +467,14 @@ def test_spec_compact_page_size_non_divisible_budget() -> None:
 
     spec = CPUOffloadingSpec(config)
     assert spec._enable_compact_layout is True
+    assert spec._compact_per_rank_budget == rounded_budget
 
     # get_manager constructs the FixedPageAllocator; it should not raise.
     manager = spec.get_manager()
     assert manager._compact_allocator is not None
-    # The page size should be the GCD-derived value, not the raw payload.
-    assert manager._compact_allocator.page_size == expected_page_size, (
-        f"expected page_size={expected_page_size}, "
-        f"got {manager._compact_allocator.page_size}"
-    )
+    # Fixed 64 KiB page that evenly divides the rounded budget; bounded count.
+    assert manager._compact_allocator.page_size == page_size
+    assert manager._compact_allocator.total_bytes == rounded_budget
 
 
 # ---------------------------------------------------------------------------

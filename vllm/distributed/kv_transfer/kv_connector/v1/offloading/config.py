@@ -36,10 +36,6 @@ def build_offloading_config(
     engine_id = kv_transfer_config.engine_id
 
     parallel_config = vllm_config.parallel_config
-    context_parallel_factor = (
-        parallel_config.decode_context_parallel_size
-        * parallel_config.prefill_context_parallel_size
-    )
 
     # Build groups, optionally populating compact_bytes_per_worker from
     # the transported signature.
@@ -65,7 +61,8 @@ def build_offloading_config(
         groups.append(
             OffloadingGroupConfig(
                 tokens_per_block=(
-                    group.kv_cache_spec.block_size * context_parallel_factor
+                    group.kv_cache_spec.block_size
+                    * parallel_config.decode_context_parallel_size
                 ),
                 layer_names=tuple(group.layer_names),
                 compact_bytes_per_native_block_per_worker=compact_bytes,
