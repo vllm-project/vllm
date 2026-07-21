@@ -212,6 +212,7 @@ if TYPE_CHECKING:
     VLLM_EC_SIDE_CHANNEL_HOST: str = "localhost"
     VLLM_EC_SIDE_CHANNEL_PORT: int = 5601
     VLLM_MOONCAKE_BOOTSTRAP_PORT: int = 8998
+    VLLM_MOONCAKE_CUSTOM_MEM_POOL: str | None = None
     VLLM_MOONCAKE_STORE_TIER_LOG: bool = False
     VLLM_MOONCAKE_LOAD_RECV_THREADS: int = 1
     VLLM_MOONCAKE_DISK_STAGING_USABLE_RATIO: float = 0.9
@@ -1708,6 +1709,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Timeout (in seconds) for MooncakeConnector in PD disaggregated setup.
     "VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT": lambda: int(
         os.getenv("VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT", "480")
+    ),
+    # Custom memory pool type for Mooncake PD disaggregation.
+    # Supported values: "NVLINK", "BAREX". Default: None (disabled).
+    # "NVLINK" uses NVLinkAllocator for NVLink-based GPU memory pool.
+    # "BAREX" uses BarexAllocator for RDMA-capable bare-device memory pool.
+    "VLLM_MOONCAKE_CUSTOM_MEM_POOL": lambda: os.getenv(
+        "VLLM_MOONCAKE_CUSTOM_MEM_POOL", None
     ),
     # If set, it means we pre-downloaded cubin files and flashinfer will
     # read the cubin files directly.
