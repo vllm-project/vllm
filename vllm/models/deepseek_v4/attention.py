@@ -365,7 +365,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         self.topk_indices_buffer = topk_indices_buffer
 
         self.indexer = None
-        if self.compress_ratio == 4 and not self.skip_topk:
+        if self.compress_ratio == 4:
             # Only C4A uses sparse attention and hence has indexer.
             # aux_stream_list[2] is free here (outer GEMMs joined) for the inner
             # overlap of wq_b+fused_indexer_q_rope_quant vs compressor. None on
