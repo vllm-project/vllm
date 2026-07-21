@@ -44,6 +44,12 @@ typedef __hip_bfloat162 __nv_bfloat162;
 namespace vllm {
 namespace moe {
 
+template <typename HashIndType>
+__device__ __forceinline__ int64_t load_index_as_int64(const HashIndType* ptr,
+                                                       int64_t offset) {
+  return static_cast<int64_t>(ptr[offset]);
+}
+
 /// Aligned array type
 template <typename T,
           /// Number of elements in the array
@@ -64,6 +70,73 @@ __device__ __forceinline__ float toFloat(T value) {
     return __half2float(value);
   }
 }
+
+#ifndef USE_ROCM
+// Adapted from:
+// https://github.com/sgl-project/sglang/blob/main/python/sglang/jit_kernel/csrc/deepseek_v4/hash_topk.cuh
+template <typename OutIndType, typename HashIndType>
+__launch_bounds__(128) __global__
+    void dsv4HashTopkSoftplusSqrt(const float* input, float* output,
+                                  OutIndType* indices, int num_rows,
+                                  int num_experts, float routed_scaling_factor,
+                                  const HashIndType* input_ids,
+                                  const HashIndType* tid2eid) {
+  const int warp = (blockIdx.x * blockDim.x + threadIdx.x) / 32;
+  const int lane = threadIdx.x % 32;
+  if (warp >= num_rows) return;
+  const int64_t token_id = load_index_as_int64(input_ids, warp);
+
+  #if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
+  cudaGridDependencySynchronize();
+  #endif
+  int expert = 0;
+  float weight = 0.f;
+  if (lane < 6) {
+    // only load and calculate for 6 experts
+    expert = static_cast<int>(tid2eid[token_id * 6 + lane]);
+    const float x = input[warp * num_experts + expert];
+    weight = sqrtf(fmaxf(x, 0.f) + __logf(1.f + __expf(-fabsf(x))));
+  }
+  float weight_sum = weight;
+  #pragma unroll
+  for (int mask = 16; mask > 0; mask >>= 1) {
+    // sum in warp
+    weight_sum += VLLM_SHFL_XOR_SYNC(weight_sum, mask);
+  }
+
+  #if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
+  cudaTriggerProgrammaticLaunchCompletion();
+  #endif
+  if (lane < 6) {
+    const int offset = warp * 6 + lane;
+    output[offset] =
+        weight * routed_scaling_factor / (weight_sum > 0.f ? weight_sum : 1.f);
+    indices[offset] = static_cast<OutIndType>(expert);
+  }
+}
+
+template <typename OutIndType, typename HashIndType>
+void launchDsv4HashTopk(const float* input, float* output, OutIndType* indices,
+                        int num_rows, int num_experts,
+                        double routed_scaling_factor,
+                        const HashIndType* input_ids,
+                        const HashIndType* tid2eid, cudaStream_t stream) {
+  if (num_rows == 0) return;
+  auto* kernel = &dsv4HashTopkSoftplusSqrt<OutIndType, HashIndType>;
+  cudaLaunchConfig_t config = {};
+  config.gridDim = (num_rows + 3) / 4;
+  config.blockDim = 128;
+  config.stream = stream;
+  cudaLaunchAttribute attr;
+  attr.id = cudaLaunchAttributeProgrammaticStreamSerialization;
+  attr.val.programmaticStreamSerializationAllowed = 1;
+  config.attrs = &attr;
+  config.numAttrs = 1;
+  const float scale = static_cast<float>(routed_scaling_factor);
+  cudaLaunchKernelEx(&config, kernel, input, output, indices, num_rows,
+                     num_experts, scale, input_ids, tid2eid);
+}
+#endif
 
 // ====================== TopK softplus_sqrt things
 // ===============================
@@ -86,14 +159,14 @@ __device__ __forceinline__ float toFloat(T value) {
 
 template <int VPT, int NUM_EXPERTS, int WARPS_PER_CTA, int BYTES_PER_LDG,
           int WARP_SIZE_PARAM, bool USE_HASH, typename IndType,
-          typename InputType = float>
+          typename HashIndType, typename InputType = float>
 __launch_bounds__(WARPS_PER_CTA* WARP_SIZE_PARAM) __global__
     void topkGatingSoftplusSqrt(
         const InputType* input, const bool* finished, float* output,
         const int num_rows, IndType* indices, int* source_rows, const int k,
         const int start_expert, const int end_expert, const bool renormalize,
         double routed_scaling_factor, const float* correction_bias,
-        const IndType* input_ids, const IndType* tid2eid) {
+        const HashIndType* input_ids, const HashIndType* tid2eid) {
   static_assert(std::is_same_v<InputType, float> ||
                     std::is_same_v<InputType, __nv_bfloat16> ||
                     std::is_same_v<InputType, __half>,
@@ -240,8 +313,8 @@ __launch_bounds__(WARPS_PER_CTA* WARP_SIZE_PARAM) __global__
 
   // Hash MoE path: indices are predetermined from lookup table
   if constexpr (USE_HASH) {
-    const IndType token_id = input_ids[thread_row];
-    const IndType* expert_indices_for_token = tid2eid + token_id * k;
+    const int64_t token_id = load_index_as_int64(input_ids, thread_row);
+    const int64_t token_expert_offset = token_id * static_cast<int64_t>(k);
 #pragma unroll
     for (int ii = 0; ii < VPT; ++ii) {
       float val = row_chunk[ii];
@@ -252,7 +325,8 @@ __launch_bounds__(WARPS_PER_CTA* WARP_SIZE_PARAM) __global__
     float selected_sum = 0.f;
 #pragma unroll
     for (int k_idx = 0; k_idx < k; ++k_idx) {
-      const int expert = expert_indices_for_token[k_idx];
+      const int expert = static_cast<int>(
+          load_index_as_int64(tid2eid, token_expert_offset + k_idx));
       const int idx = k * thread_row + k_idx;
       for (int ii = 0; ii < VPT; ++ii) {
         const int group_id = ii / ELTS_PER_LDG;
@@ -261,7 +335,7 @@ __launch_bounds__(WARPS_PER_CTA* WARP_SIZE_PARAM) __global__
                                group_id * THREADS_PER_ROW * ELTS_PER_LDG +
                                local_id;
         if (expert == expert_idx) {
-          indices[idx] = expert;
+          indices[idx] = static_cast<IndType>(expert);
           selected_sum += row_chunk[ii];
           break;
         }
@@ -285,7 +359,8 @@ __launch_bounds__(WARPS_PER_CTA* WARP_SIZE_PARAM) __global__
 
 #pragma unroll
     for (int k_idx = 0; k_idx < k; ++k_idx) {
-      const int expert = expert_indices_for_token[k_idx];
+      const int expert = static_cast<int>(
+          load_index_as_int64(tid2eid, token_expert_offset + k_idx));
       const int idx = k * thread_row + k_idx;
       for (int ii = 0; ii < VPT; ++ii) {
         const int group_id = ii / ELTS_PER_LDG;
@@ -461,14 +536,15 @@ struct TopkConstants {
   }
 
 template <int EXPERTS, int WARPS_PER_TB, int WARP_SIZE_PARAM,
-          int MAX_BYTES_PER_LDG, typename IndType, typename InputType>
+          int MAX_BYTES_PER_LDG, typename IndType, typename HashIndType,
+          typename InputType>
 void topkGatingSoftplusSqrtLauncherHelper(
     const InputType* input, const bool* finished, float* output,
     IndType* indices, int* source_row, const int num_rows, const int k,
     const int start_expert, const int end_expert, const bool renormalize,
     double routed_scaling_factor, const float* correction_bias,
-    const bool use_hash, const IndType* input_ids, const IndType* tid2eid,
-    cudaStream_t stream) {
+    const bool use_hash, const HashIndType* input_ids,
+    const HashIndType* tid2eid, cudaStream_t stream) {
   static constexpr int BYTES_PER_LDG =
       MIN(MAX_BYTES_PER_LDG, sizeof(InputType) * EXPERTS);
   using Constants =
@@ -481,7 +557,8 @@ void topkGatingSoftplusSqrtLauncherHelper(
   DISPATCH_HASH(use_hash, USE_HASH, {
     auto* kernel =
         &topkGatingSoftplusSqrt<VPT, EXPERTS, WARPS_PER_TB, BYTES_PER_LDG,
-                                WARP_SIZE_PARAM, USE_HASH, IndType, InputType>;
+                                WARP_SIZE_PARAM, USE_HASH, IndType, HashIndType,
+                                InputType>;
 #ifndef USE_ROCM
     cudaLaunchConfig_t config = {};
     config.gridDim = num_blocks;
@@ -538,13 +615,25 @@ void topkGatingSoftplusSqrtLauncherHelper(
     }
 #endif
 
-template <typename IndType, typename InputType>
+template <typename IndType, typename InputType, typename HashIndType = IndType>
 void topkGatingSoftplusSqrtKernelLauncher(
     const InputType* gating_output, float* topk_weights, IndType* topk_indices,
     int* token_expert_indices, const int num_tokens, const int num_experts,
     const int topk, const bool renormalize, double routed_scaling_factor,
-    const float* correction_bias, const bool use_hash, const IndType* input_ids,
-    const IndType* tid2eid, cudaStream_t stream) {
+    const float* correction_bias, const bool use_hash,
+    const HashIndType* input_ids, const HashIndType* tid2eid,
+    cudaStream_t stream) {
+#ifndef USE_ROCM
+  if constexpr (std::is_same_v<InputType, float>) {
+    if (use_hash && topk == 6 && renormalize &&
+        (num_experts == 256 || num_experts == 384)) {
+      launchDsv4HashTopk<IndType, HashIndType>(
+          gating_output, topk_weights, topk_indices, num_tokens, num_experts,
+          routed_scaling_factor, input_ids, tid2eid, stream);
+      return;
+    }
+  }
+#endif
   static constexpr int WARPS_PER_TB = 4;
   static constexpr int BYTES_PER_LDG_POWER_OF_2 = 16;
   // for bfloat16 dtype, we need 4 bytes loading to make sure num_experts
@@ -644,57 +733,55 @@ void dispatch_topk_softplus_sqrt_launch(
   if (correction_bias.has_value()) {
     bias_ptr = correction_bias.value().const_data_ptr<float>();
   }
-  bool use_hash = false;
-  if (tid2eid.has_value()) {
-    STD_TORCH_CHECK(input_ids.has_value(),
-                    "input_ids is required for hash MoE");
-    use_hash = true;
-  }
-  if (topk_indices.scalar_type() == torch::headeronly::ScalarType::Int) {
-    const int* input_ids_ptr = nullptr;
-    const int* tid2eid_ptr = nullptr;
-    if (tid2eid.has_value()) {
-      input_ids_ptr = input_ids.value().const_data_ptr<int>();
-      tid2eid_ptr = tid2eid.value().const_data_ptr<int>();
-    }
 
-    vllm::moe::topkGatingSoftplusSqrtKernelLauncher<int, ComputeType>(
-        gating_output, topk_weights.mutable_data_ptr<float>(),
-        topk_indices.mutable_data_ptr<int>(),
-        token_expert_indices.mutable_data_ptr<int>(), num_tokens, num_experts,
-        topk, renormalize, routed_scaling_factor, bias_ptr, use_hash,
-        input_ids_ptr, tid2eid_ptr, stream);
+  auto launch = [&](auto* topk_indices_ptr) {
+    using OutIndType =
+        typename std::remove_pointer<decltype(topk_indices_ptr)>::type;
+    if (tid2eid.has_value()) {
+      STD_TORCH_CHECK(input_ids.has_value(),
+                      "input_ids is required for hash MoE");
+      STD_TORCH_CHECK(
+          input_ids.value().scalar_type() == tid2eid.value().scalar_type(),
+          "input_ids and tid2eid must have the same dtype");
+      if (tid2eid.value().scalar_type() ==
+          torch::headeronly::ScalarType::Long) {
+        vllm::moe::topkGatingSoftplusSqrtKernelLauncher<OutIndType, ComputeType,
+                                                        int64_t>(
+            gating_output, topk_weights.mutable_data_ptr<float>(),
+            topk_indices_ptr, token_expert_indices.mutable_data_ptr<int>(),
+            num_tokens, num_experts, topk, renormalize, routed_scaling_factor,
+            bias_ptr, true, input_ids.value().const_data_ptr<int64_t>(),
+            tid2eid.value().const_data_ptr<int64_t>(), stream);
+      } else {
+        STD_TORCH_CHECK(tid2eid.value().scalar_type() ==
+                        torch::headeronly::ScalarType::Int);
+        vllm::moe::topkGatingSoftplusSqrtKernelLauncher<OutIndType, ComputeType,
+                                                        int>(
+            gating_output, topk_weights.mutable_data_ptr<float>(),
+            topk_indices_ptr, token_expert_indices.mutable_data_ptr<int>(),
+            num_tokens, num_experts, topk, renormalize, routed_scaling_factor,
+            bias_ptr, true, input_ids.value().const_data_ptr<int>(),
+            tid2eid.value().const_data_ptr<int>(), stream);
+      }
+    } else {
+      vllm::moe::topkGatingSoftplusSqrtKernelLauncher<OutIndType, ComputeType>(
+          gating_output, topk_weights.mutable_data_ptr<float>(),
+          topk_indices_ptr, token_expert_indices.mutable_data_ptr<int>(),
+          num_tokens, num_experts, topk, renormalize, routed_scaling_factor,
+          bias_ptr, false, static_cast<const OutIndType*>(nullptr),
+          static_cast<const OutIndType*>(nullptr), stream);
+    }
+  };
+
+  if (topk_indices.scalar_type() == torch::headeronly::ScalarType::Int) {
+    launch(topk_indices.mutable_data_ptr<int>());
   } else if (topk_indices.scalar_type() ==
              torch::headeronly::ScalarType::UInt32) {
-    const uint32_t* input_ids_ptr = nullptr;
-    const uint32_t* tid2eid_ptr = nullptr;
-    if (tid2eid.has_value()) {
-      input_ids_ptr = input_ids.value().const_data_ptr<uint32_t>();
-      tid2eid_ptr = tid2eid.value().const_data_ptr<uint32_t>();
-    }
-    vllm::moe::topkGatingSoftplusSqrtKernelLauncher<uint32_t, ComputeType>(
-        gating_output, topk_weights.mutable_data_ptr<float>(),
-        topk_indices.mutable_data_ptr<uint32_t>(),
-        token_expert_indices.mutable_data_ptr<int>(), num_tokens, num_experts,
-        topk, renormalize, routed_scaling_factor, bias_ptr, use_hash,
-        input_ids_ptr, tid2eid_ptr, stream);
+    launch(topk_indices.mutable_data_ptr<uint32_t>());
   } else {
     STD_TORCH_CHECK(topk_indices.scalar_type() ==
                     torch::headeronly::ScalarType::Long);
-
-    const int64_t* input_ids_ptr = nullptr;
-    const int64_t* tid2eid_ptr = nullptr;
-    if (tid2eid.has_value()) {
-      input_ids_ptr = input_ids.value().const_data_ptr<int64_t>();
-      tid2eid_ptr = tid2eid.value().const_data_ptr<int64_t>();
-    }
-
-    vllm::moe::topkGatingSoftplusSqrtKernelLauncher<int64_t, ComputeType>(
-        gating_output, topk_weights.mutable_data_ptr<float>(),
-        topk_indices.mutable_data_ptr<int64_t>(),
-        token_expert_indices.mutable_data_ptr<int>(), num_tokens, num_experts,
-        topk, renormalize, routed_scaling_factor, bias_ptr, use_hash,
-        input_ids_ptr, tid2eid_ptr, stream);
+    launch(topk_indices.mutable_data_ptr<int64_t>());
   }
 }
 
