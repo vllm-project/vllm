@@ -631,8 +631,8 @@ def resolve_kv_cache_block_sizes(
 
     - ``scheduler_block_size`` is the token-alignment invariant used by the
       scheduler (e.g. for ``num_computed_tokens`` rounding). Single group:
-      ``cache_config.block_size * dcp * pcp``. Multiple groups: LCM of every
-      group's effective block size. Attention groups are scaled by DCP/PCP;
+      ``cache_config.block_size * dcp``. Multiple groups: LCM of every
+      group's effective block size. Attention groups are scaled by DCP;
       Mamba groups keep their full per-rank state and are not scaled.
     - ``hash_block_size`` is the granularity at which ``Request.block_hashes``
       is computed. Single group: equals scheduler block size. Multiple groups:
@@ -644,15 +644,14 @@ def resolve_kv_cache_block_sizes(
     """
     cache_config = vllm_config.cache_config
     dcp = vllm_config.parallel_config.decode_context_parallel_size
-    pcp = vllm_config.parallel_config.prefill_context_parallel_size
     groups = kv_cache_config.kv_cache_groups
 
-    if len(groups) <= 1:  # Single group: block_size * dcp * pcp
-        bs = cache_config.block_size * dcp * pcp
+    if len(groups) <= 1:
+        bs = cache_config.block_size * dcp
         return bs, bs
 
     group_block_sizes = [
-        g.kv_cache_spec.block_size * dcp * pcp
+        g.kv_cache_spec.block_size * dcp
         if isinstance(g.kv_cache_spec, AttentionSpec)
         else g.kv_cache_spec.block_size
         for g in groups
@@ -940,19 +939,23 @@ def get_max_concurrency_for_kv_cache_config(
 ) -> float:
     """
     Get the maximum concurrency for the given KV cache configuration.
+
+    A request at max_model_len consumes whole blocks from each group's block
+    table — cdiv(per-request bytes, page bytes) of the group's spec — and all
+    groups draw those block ids from one shared pool, so the per-request
+    total is the sum over groups. The memory/page ratio is identical whether
+    a group carries an aggregated UniformTypeKVCacheSpecs (worker config) or
+    a representative per-layer spec (scheduler config), so both capacity
+    call sites agree.
     """
-    num_layer_per_group = max(
-        len(group.layer_names) for group in kv_cache_config.kv_cache_groups
+    num_blocks_per_request = sum(
+        cdiv(
+            group.kv_cache_spec.max_memory_usage_bytes(vllm_config),
+            group.kv_cache_spec.page_size_bytes,
+        )
+        for group in kv_cache_config.kv_cache_groups
     )
-    max_memory_usage_per_request = num_layer_per_group * max_memory_usage_bytes(
-        vllm_config, (group.kv_cache_spec for group in kv_cache_config.kv_cache_groups)
-    )
-    memory_per_block = (
-        kv_cache_config.kv_cache_groups[0].kv_cache_spec.page_size_bytes
-        * num_layer_per_group
-    )
-    num_block_per_request = cdiv(max_memory_usage_per_request, memory_per_block)
-    max_concurrency = kv_cache_config.num_blocks / num_block_per_request
+    max_concurrency = kv_cache_config.num_blocks / num_blocks_per_request
     return max_concurrency
 
 
@@ -1533,6 +1536,11 @@ def group_and_unify_kv_cache_specs(
     if not any(
         isinstance(spec, SlidingWindowMLASpec) for spec in kv_cache_spec.values()
     ):
+        return None
+
+    # SlidingWindowMLASpec models with uniform page sizes don't need tuple packing.
+    page_sizes = {spec.page_size_bytes for spec in kv_cache_spec.values()}
+    if len(page_sizes) <= 1:
         return None
 
     mla_specs: dict[str, KVCacheSpec] = {}
