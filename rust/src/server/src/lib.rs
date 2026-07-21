@@ -39,6 +39,7 @@ use tokio::net::TcpListener;
 use tokio::time::{Instant, sleep_until};
 use tokio_util::sync::CancellationToken;
 use tonic::transport::Server as TonicServer;
+use tonic_health::server::health_reporter;
 use tower::ServiceExt as _;
 use tracing::{info, trace, warn};
 use vllm_chat::{ChatLlm, LoadModelBackendsOptions, load_model_backends};
@@ -203,14 +204,19 @@ where
             .map(tls::build_grpc_server_config)
             .transpose()
             .context("invalid gRPC TLS configuration")?;
-        let svc = grpc::GenerateServer::new(grpc::GenerateServiceImpl::new(state.clone()));
+        let (health_reporter, health_service) = health_reporter();
+        let engine_health = state.engine_core_client().subscribe_health();
+        health_reporter.set_serving::<grpc::GenerateGrpcService>().await;
+        let generate_service =
+            grpc::GenerateGrpcService::new(grpc::GenerateServiceImpl::new(state.clone()));
         let svc = TonicServer::builder()
             .http2_keepalive_interval(Some(GRPC_KEEPALIVE_INTERVAL))
             .http2_keepalive_timeout(Some(GRPC_KEEPALIVE_TIMEOUT))
             .layer(middleware::request_runtime_layer(state.clone()))
-            .add_service(svc);
+            .add_service(health_service)
+            .add_service(generate_service);
         info!(%addr, tls = grpc_tls.is_some(), "starting gRPC server");
-        Some((grpc_listener, svc, grpc_tls))
+        Some((grpc_listener, svc, grpc_tls, health_reporter, engine_health))
     } else {
         None
     };
@@ -294,7 +300,8 @@ where
         let server_shutdown = server_shutdown.clone();
         let force_shutdown = force_shutdown.clone();
         async move {
-            let Some((grpc_listener, svc, grpc_tls)) = grpc_setup else {
+            let Some((grpc_listener, svc, grpc_tls, health_reporter, engine_health)) = grpc_setup
+            else {
                 // No gRPC configured: just wait for shutdown so we do not race the
                 // join! by resolving early and tripping the cancellation token.
                 shutdown.cancelled().await;
@@ -304,19 +311,26 @@ where
                 Some(context) => MaybeTlsListener::tls(grpc_listener, context),
                 None => MaybeTlsListener::plain(grpc_listener),
             };
-            let server = svc.serve_with_incoming_shutdown(incoming, shutdown.cancelled_owned());
+            let server =
+                svc.serve_with_incoming_shutdown(incoming, shutdown.clone().cancelled_owned());
+            let health_monitor = grpc::monitor_health(health_reporter, engine_health, shutdown);
 
-            let result = tokio::select! {
-                result = server => {
-                    result.context("gRPC server failed")
-                }
-                _ = force_shutdown.cancelled() => {
-                    warn!("gRPC graceful shutdown deadline elapsed; aborting server");
-                    Ok(())
-                }
+            let server = async move {
+                let result = tokio::select! {
+                    result = server => {
+                        result.context("gRPC server failed")
+                    }
+                    _ = force_shutdown.cancelled() => {
+                        warn!("gRPC graceful shutdown deadline elapsed; aborting server");
+                        Ok(())
+                    }
+                };
+
+                server_shutdown.cancel();
+                result
             };
 
-            server_shutdown.cancel();
+            let (result, ()) = tokio::join!(server, health_monitor);
             result
         }
     };
