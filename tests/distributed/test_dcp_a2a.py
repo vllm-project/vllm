@@ -319,6 +319,57 @@ class TestLSEWeightedCombine:
         assert _dcp_a2a_lse_pack_dim(torch.float32) == 1
 
 
+class _FakeGroupCoordinator:
+    device_group = None
+    cpu_group = None
+
+
+class TestDirectA2AGating:
+    """Test VLLM_USE_DIRECT_DCP_A2A gating (no GPU or process group needed)."""
+
+    def test_env_disabled_returns_none(self, monkeypatch):
+        from vllm.v1.attention.ops.dcp_direct_a2a import (
+            get_direct_dcp_a2a_workspace,
+        )
+
+        monkeypatch.setenv("VLLM_USE_DIRECT_DCP_A2A", "0")
+        get_direct_dcp_a2a_workspace.cache_clear()
+        workspace = get_direct_dcp_a2a_workspace(
+            _FakeGroupCoordinator(), torch.device("cpu"), 16, 2, 32, torch.bfloat16, 1
+        )
+        assert workspace is None
+
+    def test_forced_with_unsupported_dtype_raises(self, monkeypatch):
+        from vllm.v1.attention.ops.dcp_direct_a2a import (
+            get_direct_dcp_a2a_workspace,
+        )
+
+        monkeypatch.setenv("VLLM_USE_DIRECT_DCP_A2A", "1")
+        get_direct_dcp_a2a_workspace.cache_clear()
+        with pytest.raises(ValueError, match="does not support"):
+            get_direct_dcp_a2a_workspace(
+                _FakeGroupCoordinator(),
+                torch.device("cpu"),
+                16,
+                2,
+                32,
+                torch.float32,
+                1,
+            )
+
+    def test_auto_with_unsupported_dtype_returns_none(self, monkeypatch):
+        from vllm.v1.attention.ops.dcp_direct_a2a import (
+            get_direct_dcp_a2a_workspace,
+        )
+
+        monkeypatch.delenv("VLLM_USE_DIRECT_DCP_A2A", raising=False)
+        get_direct_dcp_a2a_workspace.cache_clear()
+        workspace = get_direct_dcp_a2a_workspace(
+            _FakeGroupCoordinator(), torch.device("cpu"), 16, 2, 32, torch.float32, 1
+        )
+        assert workspace is None
+
+
 class TestPackedA2AKernels:
     @pytest.mark.skipif(
         torch.accelerator.device_count() < 1, reason="CUDA is required."

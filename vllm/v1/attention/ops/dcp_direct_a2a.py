@@ -4,11 +4,24 @@
 from __future__ import annotations
 
 from functools import cache
+from typing import TYPE_CHECKING
 
 import torch
 from torch.distributed import ProcessGroup
 
+import vllm.envs as envs
+from vllm.platforms import current_platform
 from vllm.v1.worker.ubatching import dbo_current_ubatch_id
+
+if TYPE_CHECKING:
+    from vllm.distributed.parallel_state import GroupCoordinator
+
+try:
+    import torch.distributed._symmetric_memory  # noqa: F401
+
+    symm_mem_available = True
+except ImportError:
+    symm_mem_available = False
 
 
 class DirectDCPA2AWorkspace:
@@ -117,17 +130,35 @@ class DirectDCPA2AWorkspace:
 
 @cache
 def get_direct_dcp_a2a_workspace(
-    group: ProcessGroup,
+    group: GroupCoordinator,
     device: torch.device,
     max_num_tokens: int,
     heads_per_rank: int,
     head_dim: int,
     dtype: torch.dtype,
     num_ubatches: int,
-) -> DirectDCPA2AWorkspace:
-    """Return the process-local workspace shared by all MLA layers."""
+) -> DirectDCPA2AWorkspace | None:
+    """Return the workspace shared by all MLA layers, or None if disabled.
+
+    Unset ``VLLM_USE_DIRECT_DCP_A2A`` means auto: enabled on CUDA with
+    fp16/bf16 activations when the DCP group is within a single node.
+    ``1`` forces it on (e.g. for multi-node NVLink domains where symmetric
+    memory can rendezvous across nodes); ``0`` disables it.
+    """
+    from vllm.distributed.parallel_state import in_the_same_node_as
+
+    use_direct = envs.VLLM_USE_DIRECT_DCP_A2A
+    if use_direct is None:
+        use_direct = (
+            symm_mem_available
+            and current_platform.is_cuda()
+            and dtype in (torch.float16, torch.bfloat16)
+            and all(in_the_same_node_as(group.cpu_group, source_rank=0))
+        )
+    if not use_direct:
+        return None
     return DirectDCPA2AWorkspace(
-        group,
+        group.device_group,
         device,
         max_num_tokens,
         heads_per_rank,
