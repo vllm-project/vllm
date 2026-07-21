@@ -52,7 +52,6 @@ from .utils import (
     SupportsHash,
     _RuntimeDefaultValue,
     config,
-    initialize_runtime_default_fields_recursive,
     replace,
     validate_runtime_default_fields_recursive,
 )
@@ -1282,14 +1281,6 @@ class VllmConfig:
 
         default_config = OPTIMIZATION_LEVEL_TO_CONFIG[self.optimization_level]
         self._apply_optimization_level_defaults(default_config)
-
-        # Initialize runtime default fields in all nested sub-configs (must run after
-        # the optimization-level table is applied so the table's explicit values
-        # take priority over the RuntimeDefault fallbacks).
-        for _f in fields(self):  # type: ignore[arg-type]
-            _v = getattr(self, _f.name)
-            if _v is not None:
-                initialize_runtime_default_fields_recursive(_v, self)
 
         if self.kernel_config.enable_flashinfer_autotune is None:
             raise ValueError(

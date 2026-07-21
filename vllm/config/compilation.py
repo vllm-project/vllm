@@ -118,13 +118,6 @@ class PassConfig:
     improper state.
     """
 
-    # Fields initialized during VllmConfig.__post_init__.
-    #
-    # RuntimeDefault() fields have no fallback: they must be set by the user or by
-    # the optimization-level table (OPTIMIZATION_LEVEL_TO_CONFIG in vllm.py).
-    # RuntimeDefault(False) is reserved for fields absent from the optimization-level
-    # tables.
-
     fuse_norm_quant: bool = RuntimeDefault()
     """Fuse the custom RMSNorm + quant ops."""
     fuse_act_quant: bool = RuntimeDefault()
