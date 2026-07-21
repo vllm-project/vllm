@@ -6,6 +6,8 @@ Run `pytest tests/quantization/test_compressed_tensors.py`.
 """
 
 from contextlib import contextmanager
+from types import SimpleNamespace
+from typing import Any
 from unittest.mock import Mock
 
 import pytest
@@ -39,8 +41,14 @@ from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
     find_matched_target,
 )
 from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    GroupShape,
+    QuantKey,
+    ScaleDesc,
+)
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.platforms import current_platform
+from vllm.scalar_type import scalar_types
 from vllm.v1.attention.backends.fa_utils import get_flash_attn_version
 
 # AITER only supports per-channel-per-channel INT8 gemm
@@ -932,6 +940,169 @@ def test_wna16_marlin_moe_w2_scale_sharding(actorder, group_size, part, full, ex
         actorder, group_size, part, full
     )
     assert result == expected
+
+
+@pytest.mark.parametrize("num_bits", range(2, 9))
+def test_humming_supports_compressed_tensors_wna16_quant_key(num_bits):
+    from vllm.model_executor.layers.fused_moe.experts.fused_humming_moe import (
+        HummingExpertsBase,
+    )
+    from vllm.model_executor.layers.quantization.compressed_tensors.schemes.compressed_tensors_wNa16 import (  # noqa: E501
+        WNA16_SUPPORTED_TYPES_MAP,
+    )
+
+    weight_key = QuantKey(
+        dtype=WNA16_SUPPORTED_TYPES_MAP[num_bits],
+        scale=ScaleDesc(
+            dtype=torch.float16,
+            static=True,
+            group_shape=GroupShape(row=1, col=128),
+        ),
+        symmetric=True,
+    )
+
+    assert HummingExpertsBase._supports_quant_scheme(weight_key, None)
+
+
+@pytest.mark.parametrize("num_bits", range(2, 9))
+def test_humming_wna16_weight_schema_accepts_compressed_tensors_args(num_bits):
+    from vllm.model_executor.layers.fused_moe.oracle.int_wna16 import (
+        _humming_wna16_weight_schema,
+    )
+
+    quant_args = QuantizationArgs(
+        num_bits=num_bits,
+        type=QuantizationType.INT,
+        strategy=QuantizationStrategy.GROUP,
+        symmetric=True,
+        dynamic=False,
+        group_size=128,
+    )
+
+    assert _humming_wna16_weight_schema(quant_args) == {
+        "quant_method": "compressed-tensors",
+        "format": "pack-quantized",
+        "type": "int",
+        "num_bits": num_bits,
+        "strategy": "group",
+        "group_size": 128,
+        "symmetric": True,
+    }
+
+
+@pytest.mark.parametrize("num_bits", [2, 3, 5, 6, 7])
+def test_wna16_marlin_moe_allows_humming_only_bitwidths(monkeypatch, num_bits):
+    from vllm.model_executor.layers.fused_moe.oracle.int_wna16 import WNA16MoEBackend
+    from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe import (  # noqa: E501
+        compressed_tensors_moe_wna16_marlin as marlin_module,
+    )
+    from vllm.model_executor.layers.quantization.compressed_tensors.schemes.compressed_tensors_wNa16 import (  # noqa: E501
+        WNA16_SUPPORTED_TYPES_MAP,
+    )
+
+    captured = {}
+
+    def fake_select_wna16_moe_backend(*, config, weight_key):
+        del config
+        captured["weight_key"] = weight_key
+        return WNA16MoEBackend.HUMMING, object
+
+    monkeypatch.setattr(
+        marlin_module,
+        "select_wna16_moe_backend",
+        fake_select_wna16_moe_backend,
+    )
+
+    quant_args = QuantizationArgs(
+        num_bits=num_bits,
+        type=QuantizationType.INT,
+        strategy=QuantizationStrategy.GROUP,
+        symmetric=True,
+        dynamic=False,
+        group_size=128,
+    )
+
+    method = marlin_module.CompressedTensorsWNA16MarlinMoEMethod(
+        quant_args,
+        None,
+        Mock(),
+    )
+
+    assert method.wna16_backend == WNA16MoEBackend.HUMMING
+    assert captured["weight_key"].dtype == WNA16_SUPPORTED_TYPES_MAP[num_bits]
+    assert captured["weight_key"].scale.group_shape == GroupShape(row=1, col=128)
+
+
+@pytest.mark.parametrize("num_bits", range(2, 9))
+def test_humming_linear_kernel_uses_wna16_bitwidth(monkeypatch, num_bits):
+    from vllm.model_executor.kernels.linear.mixed_precision.humming import (
+        HummingLinearKernel,
+    )
+    from vllm.model_executor.kernels.linear.mixed_precision.MPLinearKernel import (
+        MPLinearLayerConfig,
+    )
+    from vllm.model_executor.layers.quantization.compressed_tensors.schemes.compressed_tensors_wNa16 import (  # noqa: E501
+        WNA16_SUPPORTED_TYPES_MAP,
+    )
+    from vllm.model_executor.layers.quantization.utils import humming_utils
+
+    captured: dict[str, Any] = {}
+
+    monkeypatch.setattr(
+        humming_utils,
+        "convert_linear_layer_to_humming_standard",
+        lambda layer, name_map: captured.setdefault("name_map", name_map),
+    )
+
+    def fake_prepare(layer, quant_config, input_quant_config=None):
+        del layer
+        captured["quant_config"] = quant_config
+        captured["input_quant_config"] = input_quant_config
+
+    monkeypatch.setattr(humming_utils, "prepare_humming_layer", fake_prepare)
+
+    kernel = HummingLinearKernel(
+        MPLinearLayerConfig(
+            full_weight_shape=(256, 128),
+            partition_weight_shape=(256, 128),
+            weight_type=WNA16_SUPPORTED_TYPES_MAP[num_bits],
+            act_type=torch.bfloat16,
+            group_size=128,
+            zero_points=False,
+            has_g_idx=False,
+        ),
+        "weight_packed",
+        "weight_scale",
+    )
+
+    kernel.process_weights_after_loading(SimpleNamespace())
+
+    assert captured["name_map"] == {
+        "weight": "weight_packed",
+        "weight_scale": "weight_scale",
+    }
+    assert captured["quant_config"] == {
+        "quant_method": "humming",
+        "dtype": f"int{num_bits}",
+        "group_size": 128,
+    }
+    assert captured["input_quant_config"] is None
+
+
+def test_quant_key_str_supports_scalar_type_dtypes():
+    quant_key = QuantKey(
+        dtype=scalar_types.uint2b2,
+        scale=ScaleDesc(
+            dtype=torch.float16,
+            static=True,
+            group_shape=GroupShape(row=1, col=128),
+        ),
+        symmetric=True,
+    )
+
+    assert str(quant_key) == (
+        "QuantKey(uint2b2,scale(f16,static,GroupShape(row=1, col=128)),symmetric)"
+    )
 
 
 @pytest.mark.skipif(
