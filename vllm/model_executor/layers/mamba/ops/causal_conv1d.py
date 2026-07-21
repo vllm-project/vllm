@@ -33,7 +33,6 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
     o_ptr,  # (dim, seqlen) - actually pointing to x_ptr
     # Matrix dimensions
     dim: tl.constexpr,
-    seqlen: tl.int32,  # cu_seqlen
     num_cache_lines: tl.constexpr,  # added to support vLLM larger cache lines
     # Strides
     stride_x_dim: tl.constexpr,  # stride to get to next feature-value,
@@ -715,7 +714,6 @@ def causal_conv1d_fn(
         out,
         # Matrix dimensions
         dim,
-        cu_seqlen,
         num_cache_lines,
         # stride
         stride_x_dim,
@@ -1239,3 +1237,15 @@ def causal_conv1d_update(
     if unsqueeze:
         out = out.squeeze(-1)
     return out.to(original_x_dtype)
+
+
+from vllm.platforms import current_platform  # noqa: E402
+
+if current_platform.is_cpu():
+    from vllm.model_executor.layers.mamba.ops.cpu.causal_conv1d import (
+        causal_conv1d_fn_cpu,
+        causal_conv1d_update_cpu,
+    )
+
+    causal_conv1d_fn = causal_conv1d_fn_cpu  # type: ignore
+    causal_conv1d_update = causal_conv1d_update_cpu  # type: ignore

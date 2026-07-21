@@ -34,7 +34,9 @@ from .utils import (
         (False, [0]),
     ],
 )
-@patch("vllm.distributed.kv_transfer.kv_connector.v1.nixl.scheduler.current_platform")
+@patch(
+    "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_scheduler.current_platform"
+)
 def test_sw_sizes(mock_platform, swa_enabled, expected_sw_sizes):
     """Test sw_sizes is correctly computed based on SWA enabled/disabled."""
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.scheduler import (
@@ -84,12 +86,58 @@ def test_logical_to_kernel_block_ids_with_hma():
 
     # Test conversion: FA + SW group
     logical_block_ids = [[0, 1, 2], [3, 4]]
-    kernel_block_ids = worker._logical_to_kernel_block_ids(logical_block_ids)
+    kernel_block_ids = worker._logical_to_kernel_block_ids(
+        logical_block_ids, worker._physical_blocks_per_logical_kv_block
+    )
 
     expected_kernel_block_ids = [[0, 1, 2, 3, 4, 5], [6, 7, 8, 9]]
     assert kernel_block_ids == expected_kernel_block_ids, (
         f"Expected {expected_kernel_block_ids}, got {kernel_block_ids}"
     )
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    "is_rocm,has_mamba,use_host_buffer,done_recving,failed_recving,expected_syncs",
+    [
+        (True, True, False, {"req"}, set(), 1),
+        (False, True, False, {"req"}, set(), 0),
+        (True, False, False, {"req"}, set(), 0),
+        (True, True, True, {"req"}, set(), 0),
+        (True, True, False, set(), set(), 0),
+        (True, True, False, {"req"}, {"req"}, 0),
+    ],
+)
+def test_sync_device_after_mamba_recv_gates(
+    monkeypatch,
+    is_rocm,
+    has_mamba,
+    use_host_buffer,
+    done_recving,
+    failed_recving,
+    expected_syncs,
+):
+    """Only direct-GPU Mamba receives on ROCm need a device fence."""
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl import base_worker
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
+        NixlConnectorWorker,
+    )
+
+    worker = object.__new__(NixlConnectorWorker)
+    worker._has_mamba = has_mamba
+    worker.use_host_buffer = use_host_buffer
+
+    sync_calls = []
+    monkeypatch.setattr(base_worker.current_platform, "is_rocm", lambda: is_rocm)
+    monkeypatch.setattr(
+        base_worker.torch.accelerator,
+        "synchronize",
+        lambda: sync_calls.append(True),
+    )
+
+    worker._sync_device_after_mamba_recv(done_recving, failed_recving)
+
+    assert len(sync_calls) == expected_syncs
 
 
 @pytest.mark.cpu_test
@@ -133,7 +181,7 @@ def test_read_blocks_for_req_expands_remote_ids(
     """_read_blocks_for_req must expand remote logical block IDs to kernel
     block IDs when kernel block size != logical block size.
 
-    The hot path always calls _logical_to_remote_kernel_block_ids with
+    The hot path always calls _logical_to_kernel_block_ids with
     remote_info.remote_physical_blocks_per_logical (model-agnostic).
     """
     from unittest.mock import MagicMock
@@ -162,6 +210,8 @@ def test_read_blocks_for_req_expands_remote_ids(
 
     worker = object.__new__(NixlConnectorWorker)
     worker._physical_blocks_per_logical_kv_block = local_physical_per_logical
+    worker._engine_last_active = {}
+    worker._bidirectional_kv_xfer_enabled = False
 
     has_mamba = any(t is MambaSpec for t in resolved_types)
     has_swa = any(t is SlidingWindowSpec for t in resolved_types)
@@ -251,6 +301,83 @@ def test_apply_prefix_caching_mamba_hybrid(
 ):
     """_apply_prefix_caching front-trims FA groups to
     min(local, remote) for Mamba hybrid models with heterogeneous TP.
+    """
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
+        NixlConnectorWorker,
+    )
+    from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec
+
+    worker = object.__new__(NixlConnectorWorker)
+    worker._has_mamba = True
+    worker._physical_blocks_per_logical_kv_block = local_physical_per_logical
+    worker._group_spec_types = (FullAttentionSpec, MambaSpec)
+    worker.kv_cache_config = make_kv_cache_config(block_size=16, mamba_enabled=True)
+
+    aligned_local, aligned_remote = worker._apply_prefix_caching(
+        local_block_ids, remote_block_ids, remote_physical_per_logical
+    )
+
+    assert aligned_local == expected_local, (
+        f"Expected local {expected_local}, got {aligned_local}"
+    )
+    assert aligned_remote == expected_remote, (
+        f"Expected remote {expected_remote}, got {aligned_remote}"
+    )
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    "local_physical_per_logical,remote_physical_per_logical,"
+    "local_block_ids,remote_block_ids,"
+    "expected_local,expected_remote",
+    [
+        # SSM prefix caching: remote has 3 placeholder + 1 real block,
+        # local has only the 1 real block. FA blocks are equal (no trim).
+        pytest.param(
+            10,
+            10,
+            [list(range(10)), [42]],
+            [list(range(10)), [40, 41, 42, 43]],
+            [list(range(10)), [42]],
+            [list(range(10)), [43]],
+            id="ssm_prefix_trim_only",
+        ),
+        # FA partial prefix cache hit with homogeneous TP: local has 4 FA
+        # blocks (prefix cached), remote has full 10. SSM equal (no trim).
+        pytest.param(
+            10,
+            10,
+            [list(range(6, 10)), [42]],
+            [list(range(10)), [42]],
+            [list(range(6, 10)), [42]],
+            [list(range(6, 10)), [42]],
+            id="fa_prefix_hit_homo_tp",
+        ),
+        # Both: FA partial prefix hit + SSM placeholder trim.
+        # local FA=[6..9] (4 blocks, prefix cached), remote FA=[0..9]
+        # local SSM=[99], remote SSM=[10, 20, 99] (2 placeholders + real)
+        pytest.param(
+            10,
+            10,
+            [[6, 7, 8, 9], [99]],
+            [list(range(10)), [10, 20, 99]],
+            [[6, 7, 8, 9], [99]],
+            [[6, 7, 8, 9], [99]],
+            id="fa_prefix_hit_and_ssm_trim",
+        ),
+    ],
+)
+def test_apply_prefix_caching_ssm_prefix_cache_hit(
+    local_physical_per_logical,
+    remote_physical_per_logical,
+    local_block_ids,
+    remote_block_ids,
+    expected_local,
+    expected_remote,
+):
+    """_apply_prefix_caching end-trims SSM remote blocks to match the single
+    local block (placeholders dropped) and end-trims FA remote blocks on
+    partial prefix cache hits when physical_per_logical matches.
     """
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
         NixlConnectorWorker,
@@ -376,7 +503,7 @@ def test_fewer_blocks_with_hma(monkeypatch, model_name, sw_size):
     """
     kv_transfer_config = KVTransferConfig(
         kv_connector="NixlConnector",
-        kv_role="kv_both",
+        kv_role="kv_consumer",
     )
     block_size = 16
     llm_kwargs = {
@@ -386,8 +513,6 @@ def test_fewer_blocks_with_hma(monkeypatch, model_name, sw_size):
         "kv_transfer_config": kv_transfer_config,
         "max_model_len": 2048,
         "max_num_seqs": 1,
-        # NOTE: Make sure HMA is enabled
-        "disable_hybrid_kv_cache_manager": False,
         "max_num_batched_tokens": 2048,
         "enable_prefix_caching": False,
         "block_size": block_size,
@@ -508,6 +633,19 @@ def _make_mock_worker_for_desc_ids(
     worker._has_mamba = has_mamba
     worker._group_spec_types = group_spec_types
     worker.block_len_per_layer = block_len_per_layer or [100]
+    worker._conv_decomp = None
+    if has_mamba:
+        from vllm.distributed.kv_transfer.kv_connector.v1.ssm_conv_transfer_utils import (  # noqa: E501
+            MambaConvSplitInfo,
+        )
+
+        # Mamba2/GDN layout: 3 conv sub-projections -> 4 NIXL regions per layer.
+        worker._conv_decomp = MambaConvSplitInfo(
+            conv_rows=3,
+            local_proj_dims=(1, 1, 1),
+            conv_dtype_size=2,
+            ssm_sizes=(0, 0),
+        )
     worker._compute_desc_ids = NixlConnectorWorker._compute_desc_ids.__get__(
         worker, NixlConnectorWorker
     )
@@ -614,6 +752,94 @@ def test_nixl_metadata_hybrid_ssm_block_ids():
     assert len(req_meta.remote.block_ids[0]) != len(req_meta.remote.block_ids[1])
 
 
+class _FakeBlock:
+    def __init__(self, block_id):
+        self.block_id = block_id
+
+
+class _FakeSingleTypeManager:
+    def __init__(self, records, block_size, block_ids):
+        self.records_new_block_ids = records
+        self.block_size = block_size
+        self.req_to_blocks = {"req-1": [_FakeBlock(b) for b in block_ids]}
+        self.new_block_ids: list[int] = []
+
+    def take_new_block_ids(self):
+        ids = self.new_block_ids
+        self.new_block_ids = []
+        return ids
+
+
+def _make_fake_kv_cache_manager():
+    from unittest.mock import MagicMock
+
+    from vllm.v1.core.kv_cache_manager import KVCacheManager
+
+    manager = object.__new__(KVCacheManager)
+    manager.coordinator = MagicMock()
+    manager.coordinator.single_type_managers = (
+        _FakeSingleTypeManager(True, 16, [10, 11, 12, 13, 14, 15]),  # attention
+        _FakeSingleTypeManager(False, 16, [20, 21, 22, 23, 24, 25]),  # mamba
+    )
+    return manager
+
+
+@pytest.mark.cpu_test
+def test_zeroing_block_ids_cover_only_loaded_attention_blocks():
+    """Only zero-recorded (attention) groups contribute, sliced to the
+    externally-loaded token range; Mamba state blocks are never zeroed."""
+    manager = _make_fake_kv_cache_manager()
+
+    # Tokens [0, 16) are locally cached; the load covers tokens [16, 56).
+    assert manager.get_zeroing_block_ids_in_range("req-1", 16, 56) == [11, 12, 13]
+
+
+@pytest.mark.cpu_test
+def test_scheduler_filters_connector_loaded_blocks_from_zeroing():
+    """Blocks that will be loaded by the connector must not be zeroed."""
+    from vllm.v1.core.sched.scheduler import Scheduler
+
+    class FakeKVCacheManager:
+        def take_new_block_ids(self):
+            return [9, 10, 11, 12]
+
+    scheduler = object.__new__(Scheduler)
+    scheduler.needs_kv_cache_zeroing = True
+    scheduler.kv_cache_manager = FakeKVCacheManager()
+    scheduler._skip_zero_block_ids = {10, 12}
+
+    assert scheduler._get_new_block_ids_to_zero() == [9, 11]
+    assert not scheduler._skip_zero_block_ids
+
+
+@pytest.mark.cpu_test
+def test_failed_load_rezeroes_unwritten_skipped_blocks():
+    """A failed async load leaves zeroing-skipped blocks unwritten beyond
+    the valid prefix; they must be zeroed before local recompute."""
+    from unittest.mock import MagicMock
+
+    from vllm.v1.core.sched.scheduler import Scheduler
+
+    scheduler = object.__new__(Scheduler)
+    scheduler.connector = MagicMock()
+    scheduler.needs_kv_cache_zeroing = True
+    scheduler.kv_cache_manager = _make_fake_kv_cache_manager()
+    scheduler.kv_cache_manager.cache_blocks = MagicMock()
+    scheduler.failed_recving_kv_req_ids = {"req-1"}
+    scheduler.finished_recving_kv_req_ids = {"req-1"}
+
+    request = MagicMock()
+    request.request_id = "req-1"
+    request.num_computed_tokens = 48  # Truncated at the first invalid block.
+
+    scheduler._update_waiting_for_remote_kv(request)
+
+    # Attention blocks covering tokens >= 48 are re-recorded for zeroing
+    # and flow into the next step's zero list; Mamba blocks are not.
+    scheduler._skip_zero_block_ids = set()
+    assert scheduler._get_new_block_ids_to_zero() == [13, 14, 15]
+
+
 # ── Mamba N-1 prefill tests ──────────────────────────────────────────────
 
 
@@ -706,7 +932,9 @@ def test_mamba_n1_p_side_truncation():
     ],
     ids=["fa_swa_mamba", "fa_swa_only", "fa_only"],
 )
-@patch("vllm.distributed.kv_transfer.kv_connector.v1.nixl.scheduler.current_platform")
+@patch(
+    "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_scheduler.current_platform"
+)
 def test_has_mamba_init(
     mock_platform,
     swa_enabled,
@@ -723,8 +951,7 @@ def test_has_mamba_init(
 
     block_size = 16
     vllm_config = create_vllm_config(block_size=block_size)
-    # VllmConfig.__post_init__ auto-disables HMA when kv_transfer_config
-    # is set; override so we can test the scheduler's own derivation.
+    # Explicitly enable HMA so we can test the scheduler's own derivation.
     vllm_config.scheduler_config.disable_hybrid_kv_cache_manager = False
     kv_cache_config = make_kv_cache_config(
         block_size=block_size,
@@ -853,6 +1080,37 @@ def test_compute_physical_blocks_per_logical(ssm_sizes, block_len, expected_rati
             (256, 256, 768),
             id="qwen35_27b_tp8",
         ),
+        # ai21labs/AI21-Jamba2-Mini (Mamba1)
+        # mamba d_inner = mamba_expand(2) * hidden_size(4096) = 8192
+        # mamba_d_state=16, mamba_d_conv=4 → conv_rows=3.
+        # Conv state holds only x: a single contiguous sub-projection.
+        pytest.param(
+            "mamba1",
+            1,
+            8192,
+            3,
+            (8192, 16),
+            (8192,),
+            id="jamba_mini_tp1",
+        ),
+        pytest.param(
+            "mamba1",
+            4,
+            2048,
+            3,
+            (2048, 16),
+            (2048,),
+            id="jamba_mini_tp4",
+        ),
+        pytest.param(
+            "mamba1",
+            8,
+            1024,
+            3,
+            (1024, 16),
+            (1024,),
+            id="jamba_mini_tp8",
+        ),
     ],
 )
 def test_derive_mamba_conv_split(
@@ -876,6 +1134,7 @@ def test_derive_mamba_conv_split(
     from vllm.v1.kv_cache_interface import MambaSpec
 
     _TYPE_MAP = {
+        "mamba1": MambaAttentionBackendEnum.MAMBA1,
         "mamba2": MambaAttentionBackendEnum.MAMBA2,
         "gdn_attention": MambaAttentionBackendEnum.GDN_ATTN,
     }
@@ -971,7 +1230,7 @@ def test_derive_mamba_conv_split(
         ),
     ],
 )
-def test_logical_to_remote_kernel_block_ids(
+def test_logical_to_kernel_block_ids_with_remote_ratio(
     mamba_enabled,
     swa_enabled,
     local_physical_per_logical,
@@ -979,7 +1238,7 @@ def test_logical_to_remote_kernel_block_ids(
     logical_block_ids,
     expected_kernel_block_ids,
 ):
-    """Verify _logical_to_remote_kernel_block_ids uses the remote
+    """Verify _logical_to_kernel_block_ids uses the remote
     physical_per_logical for FA expansion, not the local one.
 
     This was the root cause of silent accuracy corruption in Qwen3.5
@@ -1000,7 +1259,7 @@ def test_logical_to_remote_kernel_block_ids(
         swa_enabled=swa_enabled,
     )
 
-    result = worker._logical_to_remote_kernel_block_ids(
+    result = worker._logical_to_kernel_block_ids(
         logical_block_ids,
         remote_physical_per_logical,
     )

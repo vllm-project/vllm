@@ -79,4 +79,17 @@ def __getattr__(name: str) -> Any:
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
-__all__ = ["NixlWrapper", "nixl_agent_config", "nixlXferTelemetry"]
+def is_nixl_available() -> bool:
+    """Lightweight check for nixl/rixl package without importing it."""
+    import importlib.util
+
+    pkg = "rixl" if current_platform.is_rocm() else "nixl"
+    return importlib.util.find_spec(pkg) is not None
+
+
+__all__ = [
+    "NixlWrapper",
+    "nixl_agent_config",
+    "nixlXferTelemetry",
+    "is_nixl_available",
+]

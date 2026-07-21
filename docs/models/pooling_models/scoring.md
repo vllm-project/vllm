@@ -19,7 +19,7 @@ The score models is designed to compute similarity scores between two input prom
 - Offline APIs:
     - `LLM.score`
 - Online APIs:
-    - [Score API](scoring.md#score-api) (`/score`)
+    - [Score API](scoring.md#score-api) (`/score`, `/v1/score`)
     - [Cohere Rerank API](scoring.md#rerank-api) (`/rerank`, `/v1/rerank`, `/v2/rerank`)
 
 !!! note
@@ -103,7 +103,7 @@ The three supported scoring functions are as illustrated in the figure below.
 \* Feature support is the same as that of the original model.
 
 !!! note
-    Similar to Qwen3-Reranker, you need to use the following `--hf_overrides` to load the official original `Qwen3-VL-Reranker`.
+    Similar to Qwen3-Reranker, you need to use the following `--hf_overrides` to load the official original `Qwen3-VL-Reranker`. `Qwen3-VL` officially uses `qwen_vl_utils` for image preprocessing, while vLLM uses `transformers`' `video_processing_qwen3_vl`, which leads to slightly different results compared to the official Hugging Face repository examples.
 
     ```bash
     vllm serve Qwen/Qwen3-VL-Reranker-2B --hf_overrides '{"architectures": ["Qwen3VLForSequenceClassification"],"classifier_from_token": ["no", "yes"],"is_original_qwen3_reranker": true}'
@@ -157,7 +157,7 @@ A code example can be found here: [examples/basic/offline_inference/score.py](..
 
 ### Score API
 
-Our Score API (`/score`) is similar to `LLM.score`, compute similarity scores between two input prompts.
+Our Score API (`/score`, `/v1/score`) is similar to `LLM.score`, compute similarity scores between two input prompts.
 
 #### Parameters
 
@@ -440,7 +440,7 @@ More examples can be found here: [examples/pooling/score](../../../examples/pool
 
 ## Supported Features
 
-AS cross-encoder models are a subset of classification models that accept two prompts as input and output num_labels equal to 1, cross-encoder features should be consistent with (sequence) classification. For more information, see [this page](classify.md#supported-features).
+As cross-encoder models are a subset of classification models that accept two prompts as input and output num_labels equal to 1, cross-encoder features should be consistent with (sequence) classification. For more information, see [this page](classify.md#supported-features).
 
 ### Score Template
 

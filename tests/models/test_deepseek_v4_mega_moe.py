@@ -8,9 +8,9 @@ import torch
 
 from vllm.models.deepseek_v4.nvidia.model import (
     DeepseekV4MegaMoEExperts,
-    _stage_deepseek_v4_mega_moe_inputs,
     make_deepseek_v4_expert_params_mapping,
 )
+from vllm.models.deepseek_v4.nvidia.ops.prepare_megamoe import prepare_megamoe_inputs
 from vllm.platforms import current_platform
 
 pytestmark = pytest.mark.skipif(
@@ -46,7 +46,8 @@ def test_deepseek_v4_mega_moe_ue8m0_uint8_to_float():
 
 def test_deepseek_v4_mega_moe_weight_loader_uses_ep_expert_ownership():
     vllm_config = SimpleNamespace(
-        scheduler_config=SimpleNamespace(max_num_batched_tokens=4)
+        scheduler_config=SimpleNamespace(max_num_batched_tokens=4),
+        compilation_config=SimpleNamespace(static_forward_context={}),
     )
     experts = DeepseekV4MegaMoEExperts(
         vllm_config,
@@ -164,7 +165,7 @@ def test_deepseek_v4_mega_moe_fused_input_staging_is_bitwise_exact():
     fused_topk_idx = torch.empty_like(ref_topk_idx)
     fused_topk_weights = torch.empty_like(ref_topk_weights)
 
-    _stage_deepseek_v4_mega_moe_inputs(
+    prepare_megamoe_inputs(
         hidden_states,
         topk_weights,
         topk_ids,
@@ -172,6 +173,84 @@ def test_deepseek_v4_mega_moe_fused_input_staging_is_bitwise_exact():
         fused_x_sf,
         fused_topk_idx,
         fused_topk_weights,
+    )
+    torch.accelerator.synchronize()
+
+    assert torch.equal(fused_x.view(torch.uint8), ref_x.view(torch.uint8))
+    assert torch.equal(fused_x_sf, ref_x_sf)
+    assert torch.equal(fused_topk_idx, ref_topk_idx)
+    assert torch.equal(
+        fused_topk_weights.view(torch.uint8),
+        ref_topk_weights.view(torch.uint8),
+    )
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available(),
+    reason="DeepSeek V4 MegaMoE fused input staging requires CUDA.",
+)
+def test_deepseek_v4_mega_moe_fused_input_staging_masks_padding():
+    from vllm.third_party.deep_gemm.utils import per_token_cast_to_fp8
+
+    device = torch.device("cuda")
+    num_tokens = 7
+    hidden_size = 256
+    top_k = 8
+
+    generator = torch.Generator(device=device)
+    generator.manual_seed(1)
+    hidden_states = torch.randn(
+        num_tokens,
+        hidden_size,
+        device=device,
+        dtype=torch.bfloat16,
+        generator=generator,
+    )
+    topk_ids = torch.randint(
+        0,
+        256,
+        (num_tokens, top_k),
+        device=device,
+        dtype=torch.int32,
+        generator=generator,
+    )
+    topk_weights = torch.randn(
+        num_tokens,
+        top_k,
+        device=device,
+        dtype=torch.float32,
+        generator=generator,
+    )
+    is_padding = torch.tensor(
+        [False, True, False, False, True, False, True],
+        device=device,
+    )
+
+    ref_x, ref_x_sf = per_token_cast_to_fp8(
+        hidden_states,
+        use_ue8m0=True,
+        gran_k=32,
+        use_packed_ue8m0=True,
+    )
+    ref_topk_idx = topk_ids.to(torch.int64)
+    ref_topk_idx[is_padding] = -1
+    ref_topk_weights = topk_weights.clone()
+    ref_topk_weights[is_padding] = 0.0
+
+    fused_x = torch.empty_like(ref_x)
+    fused_x_sf = torch.empty_like(ref_x_sf)
+    fused_topk_idx = torch.empty_like(ref_topk_idx)
+    fused_topk_weights = torch.empty_like(ref_topk_weights)
+
+    prepare_megamoe_inputs(
+        hidden_states,
+        topk_weights,
+        topk_ids,
+        fused_x,
+        fused_x_sf,
+        fused_topk_idx,
+        fused_topk_weights,
+        is_padding=is_padding,
     )
     torch.accelerator.synchronize()
 

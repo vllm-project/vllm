@@ -7,6 +7,7 @@ from typing import Any, Literal
 import torch
 
 from vllm.config import VllmConfig
+from vllm.config.lora import LoRAConfig
 from vllm.exceptions import LoRAAdapterNotFoundError
 from vllm.logger import init_logger
 from vllm.lora.lora_model import LoRAModel
@@ -45,7 +46,10 @@ class WorkerLoRAManager:
             vllm_config.scheduler_config.max_num_batched_tokens
         )
         self.vocab_size = vllm_config.model_config.get_vocab_size()
-        self.lora_config = vllm_config.lora_config
+        lora_config = vllm_config.lora_config
+        if lora_config is None:
+            raise ValueError("LoRA config must be set for WorkerLoRAManager.")
+        self.lora_config: LoRAConfig = lora_config
 
         # Use get_text_config() in case of multimodal models
         text_config = vllm_config.model_config.hf_config.get_text_config()
@@ -81,8 +85,10 @@ class WorkerLoRAManager:
     def create_lora_manager(
         self,
         model: torch.nn.Module,
-        vllm_config: VllmConfig | None = None,
+        vllm_config: VllmConfig,
     ) -> Any:
+        if vllm_config is None:
+            raise ValueError("vllm_config must be provided to create a LoRA manager.")
         lora_manager = create_lora_manager(
             model,
             max_num_seqs=self.max_num_seqs,
@@ -122,9 +128,13 @@ class WorkerLoRAManager:
             peft_helper.validate_legal(self.lora_config)
 
             # For some models like Qwen2VL, we need to use hf_to_vllm_mapper
-            # to ensure correct loading of lora weights.
+            # to ensure correct loading of lora weights. Drop the QKV/MLP fusion
+            # substr maps so constituent names (e.g. `q_proj`) survive for the
+            # LoRA manager to pack, while keeping genuine renames/prefixes.
             model = self._adapter_manager.model
             hf_to_vllm_mapper = getattr(model, "hf_to_vllm_mapper", None)
+            if hf_to_vllm_mapper is not None:
+                hf_to_vllm_mapper = hf_to_vllm_mapper.get_unstacked_mapper()
 
             # Get model-defined prefixes to skip during LoRA loading.
             lora_skip_prefixes = getattr(model, "lora_skip_prefixes", None)
@@ -140,6 +150,7 @@ class WorkerLoRAManager:
                 tensorizer_config_dict=lora_request.tensorizer_config_dict,
                 weights_mapper=hf_to_vllm_mapper,
                 skip_prefixes=lora_skip_prefixes,
+                moe_ep_spec=self._adapter_manager.moe_ep_load_spec,
             )
             # Stamp the on-disk MoE layout onto the loaded model so the
             # adapter manager can route 3D-format checkpoints through the
@@ -239,8 +250,10 @@ class LRUCacheWorkerLoRAManager(WorkerLoRAManager):
     def create_lora_manager(
         self,
         model: torch.nn.Module,
-        vllm_config: VllmConfig | None = None,
+        vllm_config: VllmConfig,
     ) -> Any:
+        if vllm_config is None:
+            raise ValueError("vllm_config must be provided to create a LoRA manager.")
         lora_manager = create_lora_manager(
             model,
             lora_manager_cls=self._manager_cls,
