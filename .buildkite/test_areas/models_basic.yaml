@@ -27,7 +27,7 @@ steps:
     # subset of supported models (the complement of the small subset in the above
     # test.) Also run if model initialization test file is modified
     - pytest -v -s models/test_initialization.py -k 'not test_can_initialize_small_subset' --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
-  parallelism: 2
+  parallelism: 4
 
 - label: Basic Models Tests (Other)
   device: h200_35gb
@@ -45,6 +45,19 @@ steps:
       device: mi325_1
       depends_on:
       - image-build-amd
+
+- label: Inkling Unit Tests (B200)
+  key: inkling-unit-tests-b200
+  timeout_in_minutes: 40
+  device: b200-k8s
+  source_file_dependencies:
+  - vllm/models/inkling/
+  - vllm/cute_utils/
+  - cmake/external_projects/tml_fa4.cmake
+  - tests/models/inkling/
+  commands:
+    # FA4 kernel tests require SM100; the suite skips them elsewhere.
+    - pytest -v -s models/inkling
 
 - label: Basic Models Test (Other CPU) # 5min
   key: basic-models-test-other-cpu

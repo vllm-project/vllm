@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 mod convert;
 mod types;
 mod validate;
@@ -235,13 +238,18 @@ fn collect_generate(
         None
     };
     let prompt_logprobs = if include_prompt_logprobs {
-        let prompt_logprobs = collected.prompt_logprobs.as_ref().ok_or_else(|| {
-            ApiError::server_error(
-                "raw generate response requested prompt_logprobs but generation returned none"
-                    .to_string(),
-            )
-        })?;
-        Some(raw_prompt_logprobs_to_maps(prompt_logprobs))
+        match collected.prompt_logprobs.as_ref() {
+            Some(prompt_logprobs) => Some(raw_prompt_logprobs_to_maps(prompt_logprobs)),
+            // A single-token prompt has no scored positions; same mapping
+            // as /v1/completions.
+            None if collected.prompt_token_ids.len() == 1 => Some(vec![None]),
+            None => {
+                return Err(ApiError::server_error(
+                    "raw generate response requested prompt_logprobs but generation returned none"
+                        .to_string(),
+                ));
+            }
+        }
     } else {
         None
     };
@@ -266,6 +274,7 @@ fn collect_generate(
         }],
         prompt_logprobs,
         kv_transfer_params: collected.kv_transfer_params,
+        ec_transfer_params: collected.ec_transfer_params,
     })
 }
 
@@ -404,6 +413,7 @@ mod tests {
                 finish_reason: None,
                 cached_token_count: 0,
                 kv_transfer_params: None,
+                ec_transfer_params: None,
             }),
             Ok(GenerateOutput {
                 request_id: String::new(),
@@ -416,6 +426,7 @@ mod tests {
                 finish_reason: Some(FinishReason::stop_eos()),
                 cached_token_count: 2,
                 kv_transfer_params: None,
+                ec_transfer_params: None,
             }),
         ]);
 
@@ -465,5 +476,49 @@ mod tests {
                 .map(|details| details.cached_tokens),
             Some(2)
         );
+    }
+
+    #[test]
+    fn collect_generate_maps_prompt_logprobs_for_single_token_prompt() {
+        let output_without_payload = |prompt_token_ids: Vec<u32>| CollectedGenerateOutput {
+            request_id: "raw-1".to_string(),
+            prompt_logprobs: None,
+            token_ids: vec![3],
+            logprobs: None,
+            finish_reason: FinishReason::stop_eos(),
+            usage: vllm_llm::TokenUsage {
+                prompt_token_count: prompt_token_ids.len(),
+                output_token_count: 1,
+                cached_token_count: 0,
+            },
+            kv_transfer_params: None,
+            ec_transfer_params: None,
+            prompt_token_ids,
+        };
+
+        let response = collect_generate(
+            output_without_payload(vec![9707]),
+            "raw-1".to_string(),
+            ApiServerOptions::default(),
+            ResponseOptions {
+                include_prompt_logprobs: true,
+                ..Default::default()
+            },
+        )
+        .expect("single-token prompt without payload maps to [None]");
+        let prompt_logprobs = response.prompt_logprobs.expect("prompt logprobs present");
+        assert_eq!(prompt_logprobs.len(), 1);
+        assert!(prompt_logprobs[0].is_none());
+
+        collect_generate(
+            output_without_payload(vec![9707, 11]),
+            "raw-2".to_string(),
+            ApiServerOptions::default(),
+            ResponseOptions {
+                include_prompt_logprobs: true,
+                ..Default::default()
+            },
+        )
+        .expect_err("multi-token prompt without payload is an engine failure");
     }
 }
