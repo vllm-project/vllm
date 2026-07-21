@@ -928,7 +928,7 @@ class OffloadingConnectorScheduler:
             if preempted:
                 for group_state in req_status.group_states:
                     group_state.block_ids.clear()
-                    group_state.offload_keys.clear()  # Invariant: keep in sync with block_ids
+                    group_state.offload_keys.clear()
 
             if new_block_id_groups:
                 if self._sliding_window_groups:
