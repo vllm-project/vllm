@@ -202,16 +202,18 @@ class BiEncoderIOProcessor(ScoringIOProcessor):
                 scoring_data, max_tokens_per_query, max_tokens_per_doc
             )
 
-        prompts = scoring_data.data_1 + scoring_data.data_2
-        num_requests = len(prompts)
-        ctx.n_queries = len(scoring_data.data_1)
+        data_1 = score_data_to_prompts(scoring_data.data_1, "query", self.model_config)
+        data_2 = score_data_to_prompts(
+            scoring_data.data_2, "document", self.model_config
+        )
+        prompts = data_1 + data_2
+        ctx.n_queries = len(data_1)
 
         prompts_seq = prompt_to_seq(prompts)
-        num_requests = len(prompts_seq)
-
         parsed_prompts = [
             parse_model_prompt(self.model_config, prompt) for prompt in prompts_seq
         ]
+        num_requests = len(parsed_prompts)
 
         tok_params = request.build_tok_params(self.model_config)
         params_seq = self._params_to_seq(ctx.pooling_params, num_requests)

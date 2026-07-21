@@ -21,7 +21,7 @@ router = APIRouter()
 def embedding(request: Request) -> ServingEmbedding:
     handler = getattr(request.app.state, "serving_embedding", None)
     if handler is None:
-        raise NotImplementedError("The model does not support Classification API")
+        raise NotImplementedError("The model does not support Embeddings API")
     return handler
 
 
