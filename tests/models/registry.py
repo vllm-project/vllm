@@ -1407,7 +1407,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     ),
     "VibeVoiceAsrForConditionalGeneration": _HfExamplesInfo(
         "microsoft/VibeVoice-ASR-HF",
-        min_transformers_version="5.3.0",
+        min_transformers_version="5.13.0",
     ),
     "VoxtralForConditionalGeneration": _HfExamplesInfo(
         "mistralai/Voxtral-Mini-3B-2507",

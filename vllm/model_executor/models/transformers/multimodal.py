@@ -573,7 +573,7 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
         return list(torch.split(embeddings, token_split_sizes, dim=0))
 
     def _embed_audio(self, **kwargs) -> list[torch.Tensor] | None:
-        self.check_version("5.13.0.dev0", "audio models support")
+        self.check_version("5.13.0", "audio models support")
         input_features: torch.Tensor | None = kwargs.pop("input_features", None)
         if input_features is None:
             input_features = kwargs.pop("input_values", None)
