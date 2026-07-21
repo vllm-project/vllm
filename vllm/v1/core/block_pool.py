@@ -184,8 +184,8 @@ class BlockHashToBlockMap:
         if nodes is None or len(nodes) < threshold:
             return []
         
-        # Only promote to global at a (len(nodes)-threshold)/len(nodes) chance to slightly obfuscate results.
-        if rand_it and random.randint(1, len(nodes)) >= threshold:
+        # Only promote to global at an increasing chance as the number of duplicates increases, to avoid predictability.
+        if rand_it and random.randint(threshold, threshold + 100) <= len(nodes):
             return []
 
         canonical_block_id = min(nodes)
