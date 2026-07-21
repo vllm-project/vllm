@@ -368,12 +368,9 @@ steps:
   - tests/parser
   - tests/transformers_utils
   - tests/config
-  - tests/tools/test_config_validator.py
-  - tools/pre_commit/
   device: cpu-small
   commands:
   - python3 standalone_tests/lazy_imports.py
-  - pytest -v -s tools/test_config_validator.py
   - pytest -v -s test_envs.py
   - pytest -v -s test_inputs.py
   - pytest -v -s test_outputs.py

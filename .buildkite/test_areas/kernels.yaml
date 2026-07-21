@@ -70,7 +70,9 @@ steps:
 
 # Catch-all for test files at the tests/kernels root. This job collects
 # the whole root so new files are wired by default.
-# Files with dedicated jobs above are excluded via --ignore.
+# Files with dedicated jobs elsewhere in this file are excluded via --ignore
+# (test_kda, test_bf16x3_router_gemm_cutedsl and test_ll_bf16_gemm run in
+# their own jobs / Kernels (B200)).
 - label: Kernels Root Misc Test (B200)
   key: kernels-root-misc-test-b200
   timeout_in_minutes: 45
@@ -92,6 +94,9 @@ steps:
         --ignore=kernels/test_fused_qk_norm_rope_gate.py
         --ignore=kernels/test_fused_deepseek_v4_qnorm_rope_kv_insert.py
         --ignore=kernels/test_top_k_per_row.py
+        --ignore=kernels/test_kda.py
+        --ignore=kernels/test_bf16x3_router_gemm_cutedsl.py
+        --ignore=kernels/test_ll_bf16_gemm.py
         --ignore=kernels/test_cache_kernels.py
         --ignore=kernels/test_flex_attention.py
         --ignore=kernels/test_fused_inv_rope_fp8_quant.py

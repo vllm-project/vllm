@@ -91,7 +91,7 @@ steps:
     - tests/spec_decode/
   commands:
     - pytest -v -s v1/e2e/spec_decode -k "ngram or suffix"
-    - pytest -v -s spec_decode/test_custom_proposer.py
+    - python3 spec_decode/test_custom_proposer.py
   mirror:
     amd:
       device: mi325_1
