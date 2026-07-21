@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 import torch
 
+from vllm.models.inkling.configs import InklingMMConfig, InklingModelConfig
 from vllm.models.inkling.nvidia.ops import fa4_warmup
 from vllm.models.inkling.nvidia.ops.fa4_rel_attention import (
     bucket_max_seqlen_q,
@@ -19,15 +20,17 @@ from vllm.models.inkling.nvidia.ops.fa4_warmup import (
 def _vllm_config_from_reference_config(config: SimpleNamespace) -> SimpleNamespace:
     return SimpleNamespace(
         model_config=SimpleNamespace(
-            hf_config=SimpleNamespace(
-                num_attention_heads=config.num_heads,
-                num_key_value_heads=config.num_kv_heads,
-                head_dim=config.head_dim,
-                rel_extent=config.rel_extent,
-                swa_num_attention_heads=config.num_heads,
-                swa_num_key_value_heads=config.num_kv_heads,
-                swa_head_dim=config.head_dim,
-                sliding_window_size=config.rel_extent,
+            hf_config=InklingMMConfig(
+                text_config=InklingModelConfig(
+                    num_attention_heads=config.num_heads,
+                    num_key_value_heads=config.num_kv_heads,
+                    head_dim=config.head_dim,
+                    rel_extent=config.rel_extent,
+                    swa_num_attention_heads=config.num_heads,
+                    swa_num_key_value_heads=config.num_kv_heads,
+                    swa_head_dim=config.head_dim,
+                    sliding_window_size=config.rel_extent,
+                )
             ),
             max_model_len=config.max_kv_len,
             dtype=config.dtype,
