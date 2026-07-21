@@ -50,7 +50,7 @@ from vllm.v1.kv_offload.base import (
     make_offload_key,
 )
 from vllm.v1.outputs import KVConnectorOutput
-from vllm.v1.request import Request
+from vllm.v1.request import Request, RequestStatus
 
 logger = init_logger(__name__)
 
@@ -981,7 +981,14 @@ class OffloadingConnectorScheduler:
                 continue
             req = req_status.req
 
-            if req.is_finished():
+            if req.status == RequestStatus.FINISHED_ABORTED:
+                # For aborted requests, only store chunks with actual KV data
+                # (num_computed_tokens), not the entire prompt (num_tokens).
+                num_tokens_after_batch = req.num_computed_tokens
+            elif req.is_finished():
+                # For other finished requests (EOS, etc.), use num_tokens to
+                # handle the case where num_computed_tokens hasn't been updated
+                # yet due to scheduling delay.
                 num_tokens_after_batch = req.num_tokens
             else:
                 num_scheduled_tokens = scheduler_output.num_scheduled_tokens[req_id]
