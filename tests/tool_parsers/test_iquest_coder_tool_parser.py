@@ -183,3 +183,126 @@ def test_non_streaming_parallel_tools(iquest_tool_parser, sample_tools):
         "state": "FL",
         "unit": "celsius",
     }
+
+
+# Argument type conversion across tool shapes.
+#
+# The argument-config lookup drives type conversion (e.g. an integer parameter
+# is JSON-decoded rather than kept as a string). The base qwen3_coder parser
+# only understands the Chat Completions shape (`.function.parameters`); on the
+# /v1/responses path tools are Responses API FunctionTool / NamespaceTool with
+# `name`/`parameters` on the tool itself. iquest_coder overrides
+# `_get_arguments_config` to resolve all three shapes.
+
+_TYPED_OUTPUT = (
+    "<tool_call>\n<function={name}>\n"
+    "<parameter=command>\napt-get update\n</parameter>\n"
+    "<parameter=timeout_ms>\n300000\n</parameter>\n"
+    "</function>\n</tool_call>"
+)
+
+_TYPED_PROPERTIES = {
+    "type": "object",
+    "properties": {
+        "command": {"type": "string"},
+        "timeout_ms": {"type": "integer"},
+    },
+}
+
+
+def test_type_conversion_responses_function_tool(iquest_tool_parser):
+    """Responses API FunctionTool: integer param is decoded, not left a string."""
+    from types import SimpleNamespace
+
+    from openai.types.responses import FunctionTool
+
+    ft = FunctionTool(
+        type="function",
+        name="shell_command",
+        description="run a shell command",
+        strict=False,
+        parameters=_TYPED_PROPERTIES,
+    )
+    request = SimpleNamespace(tools=[ft], tool_choice="auto")
+    extracted = iquest_tool_parser.extract_tool_calls(
+        _TYPED_OUTPUT.format(name="shell_command"), request=request
+    )
+
+    args = json.loads(extracted.tool_calls[0].function.arguments)
+    assert args["command"] == "apt-get update"
+    assert args["timeout_ms"] == 300000
+    assert isinstance(args["timeout_ms"], int)
+
+
+def test_type_conversion_responses_namespace_tool(iquest_tool_parser):
+    """Namespace children resolve via the flattened `namespace__name`."""
+    from types import SimpleNamespace
+
+    from openai.types.responses import NamespaceTool
+
+    ns = NamespaceTool(
+        type="namespace",
+        name="agents",
+        description="agent bundle",
+        tools=[
+            {
+                "type": "function",
+                "name": "shell_command",
+                "description": "run a shell command",
+                "parameters": _TYPED_PROPERTIES,
+            }
+        ],
+    )
+    request = SimpleNamespace(tools=[ns], tool_choice="auto")
+    extracted = iquest_tool_parser.extract_tool_calls(
+        _TYPED_OUTPUT.format(name="agents__shell_command"), request=request
+    )
+
+    args = json.loads(extracted.tool_calls[0].function.arguments)
+    assert args["timeout_ms"] == 300000
+    assert isinstance(args["timeout_ms"], int)
+
+
+def test_type_conversion_chat_completion_tool_fallback(iquest_tool_parser):
+    """Chat Completions shape still works via the base-class lookup."""
+    tool = ChatCompletionToolsParam(
+        type="function",
+        function={"name": "shell_command", "parameters": _TYPED_PROPERTIES},
+    )
+    request = ChatCompletionRequest(model=MODEL, messages=[], tools=[tool])
+    extracted = iquest_tool_parser.extract_tool_calls(
+        _TYPED_OUTPUT.format(name="shell_command"), request=request
+    )
+
+    args = json.loads(extracted.tool_calls[0].function.arguments)
+    assert args["timeout_ms"] == 300000
+    assert isinstance(args["timeout_ms"], int)
+
+
+def test_string_param_not_decoded_responses_shape(iquest_tool_parser):
+    """A numeric-looking value for a string param stays a string."""
+    from types import SimpleNamespace
+
+    from openai.types.responses import FunctionTool
+
+    ft = FunctionTool(
+        type="function",
+        name="shell_command",
+        description="s",
+        strict=False,
+        parameters={
+            "type": "object",
+            "properties": {"command": {"type": "string"}},
+        },
+    )
+    request = SimpleNamespace(tools=[ft], tool_choice="auto")
+    model_output = (
+        "<tool_call>\n<function=shell_command>\n"
+        "<parameter=command>\n12345\n</parameter>\n"
+        "</function>\n</tool_call>"
+    )
+    extracted = iquest_tool_parser.extract_tool_calls(model_output, request=request)
+
+    args = json.loads(extracted.tool_calls[0].function.arguments)
+    assert args["command"] == "12345"
+    assert isinstance(args["command"], str)

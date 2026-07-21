@@ -4,6 +4,7 @@ from collections.abc import Sequence
 
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
+    ChatCompletionToolsParam,
 )
 from vllm.entrypoints.openai.engine.protocol import (
     DeltaMessage,
@@ -11,6 +12,7 @@ from vllm.entrypoints.openai.engine.protocol import (
 )
 from vllm.logger import init_logger
 from vllm.tool_parsers.qwen3coder_tool_parser import Qwen3CoderToolParser
+from vllm.tool_parsers.utils import iter_response_function_tool_info
 
 logger = init_logger(__name__)
 
@@ -40,6 +42,37 @@ class IquestCoderToolParser(Qwen3CoderToolParser):
     whitespace-only content whenever we are between tool calls
     (``current_tool_index > 0``). Genuine text is preserved in both paths.
     """
+
+    def _get_arguments_config(
+        self, func_name: str, tools: list[ChatCompletionToolsParam] | None
+    ) -> dict:
+        """Extract argument configuration for a function.
+
+        The base parser only understands the Chat Completions tool shape
+        (name/parameters nested under ``.function``). On the ``/v1/responses``
+        path ``request.tools`` are Responses API tools (``FunctionTool`` /
+        ``NamespaceTool`` with ``name``/``parameters`` on the tool itself, and
+        namespace children exposed as ``namespace__name``). Resolve those here
+        so typed parameters (e.g. an integer ``timeout_ms``) are converted from
+        their string form instead of leaking through as strings; fall back to
+        the base (chat-shape) lookup otherwise.
+        """
+        for tool in tools or []:
+            # Chat Completions tools have a nested ``.function``; leave those to
+            # the base implementation.
+            if getattr(tool, "function", None) is not None:
+                continue
+            if getattr(tool, "type", None) not in ("function", "namespace"):
+                continue
+            for name, params in iter_response_function_tool_info(tool):
+                if name != func_name:
+                    continue
+                if isinstance(params, dict) and "properties" in params:
+                    return params["properties"]
+                if isinstance(params, dict):
+                    return params
+                return {}
+        return super()._get_arguments_config(func_name, tools)
 
     def extract_tool_calls(
         self,
