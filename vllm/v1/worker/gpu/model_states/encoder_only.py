@@ -52,10 +52,10 @@ class EncoderOnlyModelState(DefaultModelState):
             kv_cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[cache_config.cache_dtype]
 
         # Build an attention group (and its non-causal metadata builder) for the
-        # encoder-only layers, grouped by backend + head config. Models are
-        # typically uniform, yielding a single group.
+        # encoder-only layers, grouped by backend + query/KV head config. Models
+        # are typically uniform, yielding a single group.
         attn_layers = get_layers_from_vllm_config(vllm_config, Attention)
-        groups: dict[tuple, AttentionGroup] = {}
+        groups: dict[tuple[tuple[str, str], int, int, int], AttentionGroup] = {}
         for name, layer in attn_layers.items():
             if layer.attn_type != AttentionType.ENCODER_ONLY:
                 continue
@@ -63,7 +63,12 @@ class EncoderOnlyModelState(DefaultModelState):
             # device tensor so the attention forward context is well-formed.
             layer.kv_cache = torch.empty(0, dtype=kv_cache_dtype, device=device)
             backend = layer.get_attn_backend()
-            key = (backend.full_cls_name(), layer.num_kv_heads, layer.head_size)
+            key = (
+                backend.full_cls_name(),
+                layer.num_heads,
+                layer.num_kv_heads,
+                layer.head_size,
+            )
             group = groups.get(key)
             if group is None:
                 spec = EncoderOnlyAttentionSpec(
