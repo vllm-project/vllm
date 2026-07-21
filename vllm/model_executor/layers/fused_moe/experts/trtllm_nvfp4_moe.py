@@ -435,6 +435,9 @@ class TrtLlmNvFp4ExpertsMonolithic(
     Monolithic version of the kernel (router + experts).
     """
 
+    def supports_routing_replay_capture(self) -> bool:
+        return True
+
     @staticmethod
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
         """The modular implementation should be used for the Dp/Ep or EPLB case."""
@@ -509,10 +512,14 @@ class TrtLlmNvFp4ExpertsMonolithic(
 
         output1_scale_gate_scalar = self.quant_config.g1_alphas
 
+        routing_replay_out = self._maybe_make_routing_replay_buffer(
+            num_tokens=hidden_states.shape[0],
+            device=hidden_states.device,
+        )
         # Invoke kernel.
         # NOTE: Activation padding and output
         # truncation are handled by the MoE runner's
-        return flashinfer.fused_moe.trtllm_fp4_block_scale_moe(
+        result = flashinfer.fused_moe.trtllm_fp4_block_scale_moe(
             routing_logits=router_logits,
             routing_bias=e_score_correction_bias,
             hidden_states=hidden_states,
@@ -544,4 +551,9 @@ class TrtLlmNvFp4ExpertsMonolithic(
             activation_type=activation_to_flashinfer_int(activation),
             per_token_scale=per_token_scale,
             tune_max_num_tokens=fi_moe_largest_bucket(self.moe_config),
+            routing_replay_out=routing_replay_out,
         )[0]
+        self._maybe_dispatch_routing_replay(
+            routing_replay_out, num_tokens=hidden_states.shape[0]
+        )
+        return result

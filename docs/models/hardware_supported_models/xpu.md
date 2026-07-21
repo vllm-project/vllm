@@ -31,10 +31,8 @@
 | THUDM/CodeGeex4-All-9B                             | CodeGeexForCausalLM                              | ✅                    |                        |       |
 | chuhac/TeleChat2-35B                               | LlamaForCausalLM (TeleChat2 based on Llama arch) | ✅                    |                        |       |
 | 01-ai/Yi1.5-34B-Chat                               | YiForCausalLM                                    | ✅                    |                        |       |
-| THUDM/CodeGeex4-All-9B                             | CodeGeexForCausalLM                              | ✅                    |                        |       |
 | deepseek-ai/DeepSeek-Coder-33B-base                | DeepSeekCoderForCausalLM                         | ✅                    |                        |       |
 | meta-llama/Llama-2-13b-chat-hf                     | LlamaForCausalLM                                 | ✅                    |                        |       |
-| THUDM/CodeGeex4-All-9B                             | CodeGeexForCausalLM                              | ✅                    |                        |       |
 | Qwen/Qwen1.5-14B-Chat                              | QwenForCausalLM                                  | ✅                    |                        |       |
 | Qwen/Qwen1.5-32B-Chat                              | QwenForCausalLM                                  | ✅                    |                        |       |
 | RedHatAI/Meta-Llama-3.1-8B-Instruct-FP8-dynamic    | LlamaForCausalLM                                 |                       | ✅                     |       |
