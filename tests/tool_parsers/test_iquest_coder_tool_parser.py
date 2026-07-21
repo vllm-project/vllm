@@ -306,3 +306,90 @@ def test_string_param_not_decoded_responses_shape(iquest_tool_parser):
     args = json.loads(extracted.tool_calls[0].function.arguments)
     assert args["command"] == "12345"
     assert isinstance(args["command"], str)
+
+
+def _typed_tool():
+    from openai.types.responses import FunctionTool
+
+    return FunctionTool(
+        type="function",
+        name="do_it",
+        description="every interesting param type",
+        strict=False,
+        parameters={
+            "type": "object",
+            "properties": {
+                "text": {"type": "string"},
+                "count": {"type": "integer"},
+                "ratio": {"type": "number"},
+                "flag": {"type": "boolean"},
+                "tags": {"type": "array", "items": {"type": "string"}},
+                "opts": {"type": "object"},
+                "numeric_str": {"type": "string"},
+            },
+        },
+    )
+
+
+_ALL_TYPES_OUTPUT = (
+    "<tool_call>\n<function=do_it>\n"
+    "<parameter=text>\nhello\n</parameter>\n"
+    "<parameter=count>\n42\n</parameter>\n"
+    "<parameter=ratio>\n3.14\n</parameter>\n"
+    "<parameter=flag>\ntrue\n</parameter>\n"
+    '<parameter=tags>\n["a", "b"]\n</parameter>\n'
+    '<parameter=opts>\n{"k": 1, "nested": [1, 2, 3]}\n</parameter>\n'
+    "<parameter=numeric_str>\n007\n</parameter>\n"
+    "</function>\n</tool_call>"
+)
+
+
+def _assert_all_types(args):
+    assert args["text"] == "hello" and isinstance(args["text"], str)
+    assert args["count"] == 42 and isinstance(args["count"], int)
+    assert args["ratio"] == 3.14 and isinstance(args["ratio"], float)
+    assert args["flag"] is True
+    assert args["tags"] == ["a", "b"] and isinstance(args["tags"], list)
+    assert args["opts"] == {"k": 1, "nested": [1, 2, 3]}
+    assert isinstance(args["opts"], dict)
+    # A string-typed parameter keeps its (numeric-looking) value verbatim.
+    assert args["numeric_str"] == "007" and isinstance(args["numeric_str"], str)
+
+
+def test_all_param_types_preserved_non_streaming(iquest_tool_parser):
+    """int/float/bool/array/object types survive /v1/responses (FunctionTool)."""
+    from types import SimpleNamespace
+
+    request = SimpleNamespace(tools=[_typed_tool()], tool_choice="auto")
+    extracted = iquest_tool_parser.extract_tool_calls(
+        _ALL_TYPES_OUTPUT, request=request
+    )
+    _assert_all_types(json.loads(extracted.tool_calls[0].function.arguments))
+
+
+def test_all_param_types_preserved_streaming(iquest_tokenizer):
+    """Same type preservation on the streaming path."""
+    from types import SimpleNamespace
+
+    parser = IquestCoderToolParser(iquest_tokenizer)
+    request = SimpleNamespace(tools=[_typed_tool()], tool_choice="auto")
+
+    ids = iquest_tokenizer.encode(_ALL_TYPES_OUTPUT, add_special_tokens=False)
+    prev_text = ""
+    prev_ids: list[int] = []
+    streamed_args = ""
+    for tid in ids:
+        cur_ids = prev_ids + [tid]
+        cur_text = iquest_tokenizer.decode(cur_ids, skip_special_tokens=False)
+        delta = cur_text[len(prev_text) :]
+        dm = parser.extract_tool_calls_streaming(
+            prev_text, cur_text, delta, prev_ids, cur_ids, [tid], request
+        )
+        if dm and dm.tool_calls:
+            for tc in dm.tool_calls:
+                if tc.function and tc.function.arguments:
+                    streamed_args += tc.function.arguments
+        prev_text = cur_text
+        prev_ids = cur_ids
+
+    _assert_all_types(json.loads(streamed_args))
