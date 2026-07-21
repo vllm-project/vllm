@@ -1,13 +1,13 @@
 #!/bin/bash
 set -euo pipefail
 
-SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 MODEL_NAME=${MODEL_NAME:-facebook/opt-125m}
 HOST=${HOST:-127.0.0.1}
 PORT=${PORT:-}
 DTYPE=${DTYPE:-float32}
 MAX_MODEL_LEN=${MAX_MODEL_LEN:-512}
 MAX_NUM_SEQS=${MAX_NUM_SEQS:-2}
+GPU_MEMORY_UTILIZATION=${GPU_MEMORY_UTILIZATION:-0.92}
 MAX_TOKENS=${MAX_TOKENS:-8}
 PROMPT=${PROMPT:-The capital of France is}
 CHAT_MESSAGE=${CHAT_MESSAGE:-Tell me one short fact about France.}
@@ -17,11 +17,13 @@ RUNTIME_READY_LOG=${RUNTIME_READY_LOG:-}
 PYTHON_BIN=${PYTHON_BIN:-python}
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 HTTP_REQUEST_SCRIPT=${E2E_HTTP_REQUEST_SCRIPT:-$SCRIPT_DIR/e2e_http_request.py}
+ASCEND_DEVICE_SELECTOR=${ASCEND_DEVICE_SELECTOR:-$SCRIPT_DIR/select_ascend_ci_device.py}
+ASCEND_RESOURCE_GATE_SCRIPT=${ASCEND_RESOURCE_GATE_SCRIPT:-$SCRIPT_DIR/ascend_e2e_resource_gate.sh}
 VLLM_ASCEND_HUST_REPO=${VLLM_ASCEND_HUST_REPO:-${GITHUB_WORKSPACE:-$PWD}/vllm-ascend-hust}
 SUDO_AUTH_EXIT_CODE=${SUDO_AUTH_EXIT_CODE:-76}
 NPU_MEMORY_EXIT_CODE=${NPU_MEMORY_EXIT_CODE:-87}
 NPU_MEMORY_PREFLIGHT_SCRIPT=${NPU_MEMORY_PREFLIGHT_SCRIPT:-$SCRIPT_DIR/check_ascend_npu_memory.py}
-VLLM_ASCEND_REQUIRED_MEMORY_UTILIZATION=${VLLM_ASCEND_REQUIRED_MEMORY_UTILIZATION:-0.92}
+VLLM_ASCEND_REQUIRED_MEMORY_UTILIZATION=${VLLM_ASCEND_REQUIRED_MEMORY_UTILIZATION:-$GPU_MEMORY_UTILIZATION}
 ASCEND_E2E_USE_SUDO=${ASCEND_E2E_USE_SUDO:-0}
 DEFAULT_SYSTEM_ASCEND_ROOT_HELPER=${DEFAULT_SYSTEM_ASCEND_ROOT_HELPER:-/usr/local/bin/run_ascend_benchmark_root_helper.sh}
 REPO_ASCEND_ROOT_HELPER=${REPO_ASCEND_ROOT_HELPER:-$VLLM_ASCEND_HUST_REPO/.github/workflows/scripts/run_ascend_benchmark_root_helper.sh}
@@ -51,6 +53,7 @@ SUDO_PRESERVE_ENV_VARS=(
   ASCEND_VISIBLE_DEVICES
   ATB_HOME_PATH
   DTYPE
+  GPU_MEMORY_UTILIZATION
   HCCL_CONNECT_TIMEOUT
   HCCL_EXEC_TIMEOUT
   HF_ENDPOINT
@@ -357,7 +360,7 @@ ensure_runner_npu_ready() {
 
 server_log_indicates_npu_memory_pressure() {
   [[ -f "$SERVER_LOG" ]] && grep -Eqi \
-    'Free memory on device .* less than desired GPU memory utilization|NPU out of memory|out of memory|ACL_ERROR_RT_MEMORY_ALLOCATION' \
+    'Free memory on device .* less than desired GPU memory utilization|NPU out of memory|torch_npu.*OutOfMemoryError|ACL_ERROR_RT_MEMORY_ALLOCATION' \
     "$SERVER_LOG"
 }
 
@@ -382,6 +385,7 @@ start_server() {
         --dtype "$DTYPE" \
         --max-model-len "$MAX_MODEL_LEN" \
         --max-num-seqs "$MAX_NUM_SEQS" \
+        --gpu-memory-utilization "$GPU_MEMORY_UTILIZATION" \
         --enforce-eager >"$SERVER_LOG" 2>&1 &
     fi
     server_pid=$!
@@ -397,6 +401,7 @@ start_server() {
         --dtype "$DTYPE" \
         --max-model-len "$MAX_MODEL_LEN" \
         --max-num-seqs "$MAX_NUM_SEQS" \
+        --gpu-memory-utilization "$GPU_MEMORY_UTILIZATION" \
         --enforce-eager >"$SERVER_LOG" 2>&1 &
     fi
     server_pid=$!
@@ -487,30 +492,27 @@ mkdir -p "$marker_dir"
 echo "Starting vLLM inference regression test for $MODEL_NAME"
 echo "Using regression test port $PORT"
 echo "Ascend E2E use sudo: $ASCEND_E2E_USE_SUDO"
-if [[ "$ASCEND_E2E_USE_SUDO" == "1" ]]; then
-  echo "Ascend E2E root helper: $ASCEND_E2E_ROOT_HELPER"
-fi
+# Bind the resource gate, runtime preflight, and server to the same card.
+# shellcheck source=/dev/null
+source "$ASCEND_RESOURCE_GATE_SCRIPT"
 
 if [[ "$ASCEND_E2E_USE_SUDO" == "1" ]]; then
+  echo "Ascend E2E root helper: $ASCEND_E2E_ROOT_HELPER"
   if ! verify_root_helper_ready; then
     exit 1
   fi
-  if wait_for_ascend_runtime_ready; then
-    :
-  else
-    exit "$?"
-  fi
 else
   configure_ascend_python_runtime_paths
-  if ensure_runner_npu_ready; then
-    :
-  else
-    status=$?
-    if [[ "$status" -eq 2 ]]; then
-      exit 0
-    fi
-    exit "$status"
+fi
+
+if prepare_ascend_device_for_server "vLLM inference regression test"; then
+  :
+else
+  status=$?
+  if [[ "$status" -eq 2 ]]; then
+    exit 0
   fi
+  exit "$status"
 fi
 
 start_server

@@ -13,6 +13,7 @@ SCRIPT_DIR = REPO_ROOT / ".github/workflows/scripts"
 SELECTOR_PATH = SCRIPT_DIR / "select_ascend_ci_device.py"
 GATE_PATH = SCRIPT_DIR / "ascend_e2e_resource_gate.sh"
 SMOKE_PATH = SCRIPT_DIR / "run_e2e_serve_smoke.sh"
+REGRESSION_PATH = SCRIPT_DIR / "run_e2e_inference_regression.sh"
 
 
 def load_selector_module():
@@ -180,7 +181,9 @@ def test_resource_gate_rejects_a_selected_device_that_became_busy(
         "if count == 0:\n"
         "    print('selected\\t3\\tlogical-map\\t62000\\t65536\\t60294')\n"
         "else:\n"
-        "    print('unavailable\\t-\\t-\\t-\\t-\\t-\\tno_device')\n"
+        "    print(\n"
+        "        'unavailable\\t3\\tlogical-map\\t4000\\t65536\\t60294\\tno_device'\n"
+        "    )\n"
         "    raise SystemExit(3)\n",
         encoding="utf-8",
     )
@@ -203,8 +206,10 @@ confirm_selected_ascend_e2e_device smoke-launch
         },
     )
 
-    assert result.returncode == 1
+    assert result.returncode == 87
     assert "no longer meets" in result.stderr
+    assert "ASCEND_NPU_MEMORY_STATUS=insufficient" in result.stderr
+    assert "device=npu:3" in result.stderr
 
 
 def test_resource_gate_does_not_turn_unavailable_hardware_into_success(
@@ -213,7 +218,7 @@ def test_resource_gate_does_not_turn_unavailable_hardware_into_success(
     fake_selector = tmp_path / "selector.py"
     fake_selector.write_text(
         "import sys\n"
-        "print('unavailable\\t-\\t-\\t-\\t-\\t-\\tno_device')\n"
+        "print('unavailable\\t3\\tlogical-map\\t4000\\t65536\\t60294\\tno_device')\n"
         "raise SystemExit(3)\n",
         encoding="utf-8",
     )
@@ -230,25 +235,75 @@ select_ascend_e2e_device smoke
         ["bash", "-c", command], capture_output=True, text=True, check=False
     )
 
-    assert result.returncode == 1
+    assert result.returncode == 87
     assert "Ascend resource gate failed" in result.stderr
+    assert "free_gib=3.91" in result.stderr
+    assert "required_gib=58.88" in result.stderr
     assert "Status: failed" in summary.read_text(encoding="utf-8")
 
 
-def test_serve_smoke_selects_before_preflight_and_passes_the_same_ratio():
-    text = SMOKE_PATH.read_text(encoding="utf-8")
-    selection = text.index('select_ascend_e2e_device "vLLM serve smoke test"')
-    sudo_branch = text.index('if [[ "$ASCEND_E2E_USE_SUDO" == "1" ]]; then', selection)
-    preflight = text.index("if ensure_runner_npu_ready; then")
-    confirmation = text.index("confirm_selected_ascend_e2e_device", preflight)
-    prepare = text.rindex("\nif prepare_ascend_device_for_server; then")
-    launch = text.rindex("\nstart_server\n")
+def test_shared_gate_selects_before_preflight_and_confirmation():
+    gate_text = GATE_PATH.read_text(encoding="utf-8")
+    selection = gate_text.index('select_ascend_e2e_device "$workload_name"')
+    sudo_branch = gate_text.index(
+        'if [[ "$ASCEND_E2E_USE_SUDO" == "1" ]]; then', selection
+    )
+    preflight = gate_text.index("elif ensure_runner_npu_ready; then", sudo_branch)
+    confirmation = gate_text.index("confirm_selected_ascend_e2e_device", preflight)
 
     assert selection < sudo_branch < preflight < confirmation
-    assert prepare < launch
-    assert "GPU_MEMORY_UTILIZATION=${GPU_MEMORY_UTILIZATION:-0.92}" in text
-    assert '--gpu-memory-utilization "$GPU_MEMORY_UTILIZATION"' in text
+
+    for path, workload in (
+        (SMOKE_PATH, "vLLM serve smoke test"),
+        (REGRESSION_PATH, "vLLM inference regression test"),
+    ):
+        text = path.read_text(encoding="utf-8")
+        prepare = text.rindex(
+            f'\nif prepare_ascend_device_for_server "{workload}"; then'
+        )
+        launch = text.rindex("\nstart_server\n")
+        assert prepare < launch
+        assert "GPU_MEMORY_UTILIZATION=${GPU_MEMORY_UTILIZATION:-0.92}" in text
+        assert '--gpu-memory-utilization "$GPU_MEMORY_UTILIZATION"' in text
+
     assert "ASCEND_RT_VISIBLE_DEVICES" in GATE_PATH.read_text(encoding="utf-8")
+
+
+def test_resource_gate_does_not_retry_a_deterministic_selection_failure(
+    tmp_path: Path,
+):
+    calls = tmp_path / "calls.txt"
+    fake_selector = tmp_path / "selector.py"
+    fake_selector.write_text(
+        "import os\n"
+        "from pathlib import Path\n"
+        "path = Path(os.environ['SELECTOR_CALLS'])\n"
+        "with path.open('a') as handle:\n"
+        "    handle.write('called\\n')\n"
+        "print('unavailable\\t3\\tlogical-map\\t4000\\t65536\\t60294\\tno_device')\n"
+        "raise SystemExit(3)\n",
+        encoding="utf-8",
+    )
+    command = f"""
+source {GATE_PATH}
+ASCEND_DEVICE_SELECTOR={fake_selector}
+PYTHON_BIN={sys.executable}
+ASCEND_DEVICE_SELECTION_ATTEMPTS=3
+ASCEND_E2E_USE_SUDO=0
+ensure_runner_npu_ready() {{ return 0; }}
+prepare_ascend_device_for_server smoke
+"""
+
+    result = subprocess.run(
+        ["bash", "-c", command],
+        capture_output=True,
+        text=True,
+        check=False,
+        env={**os.environ, "SELECTOR_CALLS": str(calls)},
+    )
+
+    assert result.returncode == 87
+    assert calls.read_text(encoding="utf-8").splitlines() == ["called"]
 
 
 def test_inference_logs_are_scoped_to_the_job_runtime_directory():

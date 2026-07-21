@@ -1,10 +1,11 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from __future__ import annotations
 
 import os
 import subprocess
 import sys
 from pathlib import Path
-
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = REPO_ROOT / ".github/workflows/scripts/check_ascend_npu_memory.py"
@@ -15,13 +16,17 @@ GIB = 1024**3
 def _write_fake_torch(root: Path, *, include_mem_get_info: bool = True) -> None:
     torch_dir = root / "torch"
     torch_dir.mkdir()
-    mem_get_info = """
+    mem_get_info = (
+        """
     def mem_get_info(self):
         return (
             int(os.environ["FAKE_NPU_FREE_BYTES"]),
             int(os.environ["FAKE_NPU_TOTAL_BYTES"]),
         )
-""" if include_mem_get_info else ""
+"""
+        if include_mem_get_info
+        else ""
+    )
     (torch_dir / "__init__.py").write_text(
         f"""import os
 
@@ -148,3 +153,23 @@ def test_ascend_ci_scripts_classify_memory_pressure_on_exit_and_timeout() -> Non
         assert "server exited before becoming ready" in content
         assert "Timed out waiting for vLLM server to become ready" in content
         assert content.count('exit "$NPU_MEMORY_EXIT_CODE"') >= 2
+
+
+def test_benchmark_classifies_memory_pressure_before_retryable_node_errors() -> None:
+    content = (CI_SCRIPT_DIR / "run_ascend_benchmark_ci.sh").read_text(encoding="utf-8")
+    same_spec_failure = content[
+        content.index('if [[ "$same_spec_status" -ne 0 ]]') : content.index(
+            'if [[ ! -f "$same_spec_raw_result" ]]'
+        )
+    ]
+    readiness_failure = content[
+        content.index('if ! kill -0 "$server_pid"') : content.index(
+            'if [[ "$attempt" -eq 120 ]]'
+        )
+    ]
+
+    for failure_path in (same_spec_failure, readiness_failure):
+        assert failure_path.index("is_npu_memory_pressure_text") < failure_path.index(
+            "is_node_env_failure_text"
+        )
+    assert "SAME_SPEC_GPU_MEMORY_UTILIZATION:-0.92" in content

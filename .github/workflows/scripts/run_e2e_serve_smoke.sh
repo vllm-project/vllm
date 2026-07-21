@@ -21,7 +21,7 @@ VLLM_ASCEND_HUST_REPO=${VLLM_ASCEND_HUST_REPO:-${GITHUB_WORKSPACE:-$PWD}/vllm-as
 SUDO_AUTH_EXIT_CODE=${SUDO_AUTH_EXIT_CODE:-76}
 NPU_MEMORY_EXIT_CODE=${NPU_MEMORY_EXIT_CODE:-87}
 NPU_MEMORY_PREFLIGHT_SCRIPT=${NPU_MEMORY_PREFLIGHT_SCRIPT:-$SCRIPT_DIR/check_ascend_npu_memory.py}
-VLLM_ASCEND_REQUIRED_MEMORY_UTILIZATION=${VLLM_ASCEND_REQUIRED_MEMORY_UTILIZATION:-0.92}
+VLLM_ASCEND_REQUIRED_MEMORY_UTILIZATION=${VLLM_ASCEND_REQUIRED_MEMORY_UTILIZATION:-$GPU_MEMORY_UTILIZATION}
 ASCEND_E2E_USE_SUDO=${ASCEND_E2E_USE_SUDO:-0}
 DEFAULT_SYSTEM_ASCEND_ROOT_HELPER=${DEFAULT_SYSTEM_ASCEND_ROOT_HELPER:-/usr/local/bin/run_ascend_benchmark_root_helper.sh}
 REPO_ASCEND_ROOT_HELPER=${REPO_ASCEND_ROOT_HELPER:-$VLLM_ASCEND_HUST_REPO/.github/workflows/scripts/run_ascend_benchmark_root_helper.sh}
@@ -357,55 +357,8 @@ ensure_runner_npu_ready() {
 
 server_log_indicates_npu_memory_pressure() {
   [[ -f "$SERVER_LOG" ]] && grep -Eqi \
-    'Free memory on device .* less than desired GPU memory utilization|NPU out of memory|out of memory|ACL_ERROR_RT_MEMORY_ALLOCATION' \
+    'Free memory on device .* less than desired GPU memory utilization|NPU out of memory|torch_npu.*OutOfMemoryError|ACL_ERROR_RT_MEMORY_ALLOCATION' \
     "$SERVER_LOG"
-}
-
-prepare_ascend_device_for_server() {
-  local max_attempts=${ASCEND_DEVICE_SELECTION_ATTEMPTS:-3}
-  local attempt=1
-  local status=0
-
-  if [[ ! "$max_attempts" =~ ^[1-9][0-9]*$ ]]; then
-    echo "ASCEND_DEVICE_SELECTION_ATTEMPTS must be a positive integer, got: $max_attempts" >&2
-    return 1
-  fi
-
-  while [[ "$attempt" -le "$max_attempts" ]]; do
-    select_ascend_e2e_device "vLLM serve smoke test" || return 1
-
-    if [[ "$ASCEND_E2E_USE_SUDO" == "1" ]]; then
-      if wait_for_ascend_runtime_ready; then
-        status=0
-      else
-        status=$?
-      fi
-    elif ensure_runner_npu_ready; then
-      status=0
-    else
-      status=$?
-    fi
-
-    if [[ "$status" -ne 0 ]]; then
-      return "$status"
-    fi
-
-    # Runtime checks can be slow enough for the selected card's availability
-    # to change. Confirm it immediately before launching the server; if the
-    # card changed, select another card and repeat its device-bound preflight.
-    if confirm_selected_ascend_e2e_device "vLLM serve smoke test launch"; then
-      return 0
-    fi
-
-    if [[ "$attempt" -eq "$max_attempts" ]]; then
-      break
-    fi
-    echo "Ascend device availability changed during preflight; selecting again (${attempt}/${max_attempts})." >&2
-    attempt=$((attempt + 1))
-  done
-
-  echo "Ascend resource gate could not keep an eligible device through preflight after ${max_attempts} attempts." >&2
-  return 1
 }
 
 start_server() {
@@ -551,7 +504,7 @@ else
   configure_ascend_python_runtime_paths
 fi
 
-if prepare_ascend_device_for_server; then
+if prepare_ascend_device_for_server "vLLM serve smoke test"; then
   :
 else
   status=$?

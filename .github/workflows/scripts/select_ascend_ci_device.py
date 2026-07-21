@@ -294,6 +294,24 @@ def emit_result(result: dict[str, Any], output_format: str) -> None:
             )
         )
         return
+    devices = result.get("devices")
+    if result["status"] == "unavailable" and isinstance(devices, list) and devices:
+        best = devices[0]
+        print(
+            "\t".join(
+                str(value)
+                for value in (
+                    result["status"],
+                    best["logical_id"],
+                    best["source"],
+                    best["free_memory_mb"],
+                    best["total_memory_mb"],
+                    best["required_free_memory_mb"],
+                    result["reason"],
+                )
+            )
+        )
+        return
     print(f"{result['status']}\t-\t-\t-\t-\t-\t{result['reason']}")
 
 
