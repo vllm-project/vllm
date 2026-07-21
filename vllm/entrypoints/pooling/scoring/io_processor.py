@@ -764,7 +764,7 @@ class JinaRankingIOProcessor(LateInteractionIOProcessor, JinaRankingIOProcessorM
         scoring_data = self.valid_inputs_online(request)
 
         max_tokens_per_query, max_tokens_per_doc = self._get_token_limits(
-            pooling_params=ctx.pooling_params
+            request=request
         )
 
         if max_tokens_per_query > 0 or max_tokens_per_doc > 0:
