@@ -294,6 +294,9 @@ FROM base AS rust-build
 ARG BUILD_OS
 ARG USE_SCCACHE
 ARG SCCACHE_ENDPOINT
+# Temporary default for the initial CI validation. Set this back to 0 when
+# ci-infra passes VLLM_RUST_COVERAGE=1 explicitly.
+ARG VLLM_RUST_COVERAGE=1
 
 # Install native tools needed only for Rust/protoc builds.
 RUN if [ "${BUILD_OS}" = "manylinux" ]; then \
@@ -901,6 +904,14 @@ COPY ./vllm/collect_env.py .
 # image to run unit testing suite
 # note that this uses vllm installed by `pip`
 FROM vllm-base AS test
+
+COPY --from=rust-build \
+    /workspace/rust-coverage-tools/ \
+    /opt/vllm-rust-coverage/
+
+ENV PATH=/opt/vllm-rust-coverage/bin:${PATH}
+ENV LD_LIBRARY_PATH=/opt/vllm-rust-coverage/lib:${LD_LIBRARY_PATH}
+ENV LLVM_PROFILE_FILE=/dev/null
 
 ADD . /vllm-workspace/
 
