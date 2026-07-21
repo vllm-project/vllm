@@ -36,7 +36,7 @@ pub use qwen_coder::Qwen3CoderToolParser;
 pub use seed_oss::SeedOssToolParser;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-pub use xgrammar_structural_tag::Model as StructuralTagModel;
+pub use xgrammar_structural_tag::builders::StructuralTagBuilder;
 
 use crate::utils;
 
@@ -187,8 +187,8 @@ pub trait ToolParser: Send {
         false
     }
 
-    /// Return the xgrammar structural-tag model used for strict tool calling.
-    fn structural_tag_model(&self) -> Option<StructuralTagModel> {
+    /// Return the xgrammar structural-tag builder used for strict tool calling.
+    fn structural_tag_builder(&self) -> Option<&dyn StructuralTagBuilder> {
         None
     }
 
