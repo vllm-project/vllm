@@ -73,9 +73,6 @@ from .inputs import DictPrompt
 from .inputs.preprocess import parse_dec_only_prompt
 from .params import ChatParams
 
-if TYPE_CHECKING:
-    pass
-
 logger = init_logger(__name__)
 
 

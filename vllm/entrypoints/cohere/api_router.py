@@ -18,8 +18,16 @@ body parameter into a query parameter and reject every request with
 422.
 """
 
-from fastapi import FastAPI
-
+from fastapi import FastAPI, APIRouter, Depends, Request
+from fastapi.responses import JSONResponse, StreamingResponse
+from http import HTTPStatus
+from vllm.entrypoints.openai.engine.protocol import ErrorResponse
+from vllm.entrypoints.serve.utils.api_utils import (
+    load_aware_call,
+    sanitize_message,
+    validate_json_request,
+    with_cancellation,
+)
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -34,24 +42,12 @@ else:
 
 
 if _SDK_AVAILABLE:
-    from http import HTTPStatus
-
-    from fastapi import APIRouter, Depends, Request
-    from fastapi.responses import JSONResponse, StreamingResponse
-
     from vllm.entrypoints.cohere.protocol import (
         CohereChatV2Request,
         CohereChatV2Response,
         CohereError,
     )
     from vllm.entrypoints.cohere.serving import CohereServingChatV2
-    from vllm.entrypoints.openai.engine.protocol import ErrorResponse
-    from vllm.entrypoints.serve.utils.api_utils import (
-        load_aware_call,
-        sanitize_message,
-        validate_json_request,
-        with_cancellation,
-    )
 
     router = APIRouter()
 
