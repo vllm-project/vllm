@@ -175,7 +175,7 @@ class ScoringIOProcessor(PoolingIOProcessor):
             data_1 = request.query
             data_2 = request.documents
         else:
-            raise ValueError(f"Invalid {self.name} request type")
+            raise ValueError(f"Invalid {request.__class__.__name__} request type")
 
         scoring_data = self.valid_inputs(data_1, data_2)
         return scoring_data
@@ -758,11 +758,23 @@ class JinaRankingIOProcessor(LateInteractionIOProcessor, JinaRankingIOProcessorM
         self, ctx: PoolingServeContext
     ) -> tuple[RequestFactory, int]:
         request = ctx.request
+        ctx.n_queries = 1
+
+        prompt_extras = ctx.prompt_extras
         scoring_data = self.valid_inputs_online(request)
+
+        max_tokens_per_query, max_tokens_per_doc = self._get_token_limits(
+            pooling_params=ctx.pooling_params
+        )
+
+        if max_tokens_per_query > 0 or max_tokens_per_doc > 0:
+            scoring_data = self._truncate_scoring_data(
+                scoring_data, max_tokens_per_query, max_tokens_per_doc
+            )
+
         queries = self.ensure_str(scoring_data.data_1)
         docs = self.ensure_str(scoring_data.data_2)
 
-        prompt_extras = ctx.pooling_params.extra_kwargs
         chat_template_kwargs = (
             prompt_extras.get("chat_template_kwargs") if prompt_extras else None
         )
@@ -784,9 +796,12 @@ class JinaRankingIOProcessor(LateInteractionIOProcessor, JinaRankingIOProcessorM
                 for q, d in zip(queries, docs)
             ]
 
-        proxy = PoolingCompletionRequest(task="token_embed", input=prompts)
-        ctx.request = proxy
-        return super().get_request_factory_online(ctx)
+        ctx.request = PoolingCompletionRequest(task="token_embed", input=prompts)
+        request_factory, num_requests = PoolingIOProcessor.get_request_factory_online(
+            self, ctx
+        )
+        ctx.request = request
+        return request_factory, num_requests
 
     def get_request_factory_offline(
         self, ctx: ALLOfflineInputsContext
