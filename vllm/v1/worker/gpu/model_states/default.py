@@ -139,7 +139,7 @@ class DefaultModelState(ModelState):
         attn_groups: list[list[AttentionGroup]],
         kv_cache_config: KVCacheConfig,
         for_capture: bool = False,
-        use_prefill_backend: bool = False,
+        use_decode_backend: bool = False,
     ) -> dict[str, Any]:
         if cudagraph_mode == CUDAGraphMode.FULL or (
             cudagraph_mode == CUDAGraphMode.PIECEWISE
@@ -193,6 +193,6 @@ class DefaultModelState(ModelState):
             mm_req_doc_ranges=req_doc_ranges,
             for_cudagraph_capture=for_capture,
             rswa_prefix_lens=input_batch.prompt_lens,
-            use_prefill_backend=use_prefill_backend,
+            use_decode_backend=use_decode_backend,
         )
         return attn_metadata

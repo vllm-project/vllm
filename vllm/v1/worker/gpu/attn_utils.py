@@ -113,7 +113,7 @@ def init_attn_backend(
 
         for layer_name in layer_names:
             attn_backend = attn_layers[layer_name].get_attn_backend()
-            prefill_backend = attn_layers[layer_name].get_prefill_attn_backend()
+            decode_backend = attn_layers[layer_name].get_decode_attn_backend()
 
             layer_kv_cache_spec: KVCacheSpec = kv_cache_group_spec.kv_cache_spec
             if isinstance(layer_kv_cache_spec, UniformTypeKVCacheSpecs):
@@ -125,9 +125,7 @@ def init_attn_backend(
             num_heads_q = getattr(attn_layers[layer_name], "num_heads", 0)
             key = (
                 attn_backend.full_cls_name(),
-                prefill_backend.full_cls_name()
-                if prefill_backend is not None
-                else None,
+                decode_backend.full_cls_name() if decode_backend is not None else None,
                 layer_kv_cache_spec,
                 num_heads_q,
             )
@@ -137,7 +135,7 @@ def init_attn_backend(
                     [layer_name],
                     layer_kv_cache_spec,
                     kv_cache_group_id,
-                    prefill_backend=prefill_backend,
+                    decode_backend=decode_backend,
                 )
                 group_order.append(key)
             else:
@@ -165,22 +163,27 @@ def init_attn_backend(
                 num_metadata_builders=1,
             )
             builders = [group.get_metadata_builder(0)]
-            if group.prefill_backend is not None:
-                builders.append(group.get_metadata_builder(0, use_prefill_backend=True))
+            if group.decode_backend is not None:
+                builders.append(group.get_metadata_builder(0, use_decode_backend=True))
             for builder in builders:
                 if attn_backend_workspace is None:
                     if hasattr(builder, "_get_workspace_buffer"):
                         attn_backend_workspace = builder._get_workspace_buffer()
                 elif hasattr(builder, "set_workspace_buffer"):
                     builder.set_workspace_buffer(attn_backend_workspace)
-            # Check cudagraph support for the attention backend
-            cg_support = builders[0].get_cudagraph_support(
-                vllm_config,
-                cast(AttentionSpec, group.kv_cache_spec),
-            )
-            if cg_support.value < min_cg_support.value:
-                min_cg_support = cg_support
-                min_cg_attn_backend = group.backend.__name__
+            # The decode specialist is used by full decode graphs, so both
+            # routed backends must support the resolved cudagraph mode.
+            backend_names = [group.backend.__name__]
+            if group.decode_backend is not None:
+                backend_names.append(group.decode_backend.__name__)
+            for builder, backend_name in zip(builders, backend_names):
+                cg_support = builder.get_cudagraph_support(
+                    vllm_config,
+                    cast(AttentionSpec, group.kv_cache_spec),
+                )
+                if cg_support.value < min_cg_support.value:
+                    min_cg_support = cg_support
+                    min_cg_attn_backend = backend_name
 
     attn_cg_support_info = AttentionCGSupportInfo(
         min_cg_support=min_cg_support, min_cg_attn_backend=min_cg_attn_backend
@@ -603,7 +606,7 @@ def build_attn_metadata(
     for_cudagraph_capture: bool = False,
     causal: bool | torch.Tensor | Mapping[int, bool] = True,
     rswa_prefix_lens: torch.Tensor | None = None,
-    use_prefill_backend: bool = False,
+    use_decode_backend: bool = False,
 ) -> dict[str, Any]:
     seq_lens = seq_lens[:num_reqs]
     if dcp_local_seq_lens is not None:
@@ -653,7 +656,7 @@ def build_attn_metadata(
 
         for attn_group in attn_groups[i]:
             attn_metadata_builder = attn_group.get_metadata_builder(
-                0, use_prefill_backend=use_prefill_backend
+                0, use_decode_backend=use_decode_backend
             )
             if for_cudagraph_capture:
                 metadata = attn_metadata_builder.build_for_cudagraph_capture(

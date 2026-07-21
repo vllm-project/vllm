@@ -18,16 +18,15 @@ class AttentionConfig:
     """Configuration for attention mechanisms in vLLM."""
 
     backend: AttentionBackendEnum | None = None
-    """Attention backend to use. Use "auto" or None for automatic selection.
-    This is the decode backend: it serves every batch by default and is the one
-    captured for full-CUDA-graph decode."""
+    """General attention backend to use. It serves every batch unless a
+    `decode_backend` is configured and the batch contains only decode requests.
+    Use "auto" or None for automatic selection."""
 
-    prefill_backend: AttentionBackendEnum | None = None
-    """Attention backend for prefill-containing (prefill + mixed) batches. When
-    set, any batch with at least one prefill request is routed to this backend
-    instead of `backend` (pure-decode batches always use `backend`, the decode
-    backend). Must share `backend`'s KV cache layout. Use "auto" or None to
-    disable routing (single-backend)."""
+    decode_backend: AttentionBackendEnum | None = None
+    """Optional non-MLA attention backend for pure-decode batches.
+    Prefill-containing and mixed batches continue to use `backend`. Must share
+    `backend`'s KV cache layout. Use "auto" or None to disable routing
+    (single-backend)."""
 
     backend_per_kind: dict[str, AttentionBackendEnum] = field(default_factory=dict)
     """Per-KV-cache-group attention backend overrides, keyed by
@@ -120,7 +119,7 @@ class AttentionConfig:
         factors = get_hash_factors(self, ignored_factors)
         return hash_factors(factors)
 
-    @field_validator("backend", "prefill_backend", mode="before")
+    @field_validator("backend", "decode_backend", mode="before")
     @classmethod
     def validate_backend_before(cls, value: Any) -> Any:
         """Enable parsing of attention backend enums from strings.

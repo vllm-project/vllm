@@ -251,8 +251,8 @@ class AttentionGroup:
     metadata_builders: list[AttentionMetadataBuilder] = field(
         default_factory=lambda: []
     )
-    prefill_backend: type[AttentionBackend] | None = None
-    prefill_metadata_builders: list[AttentionMetadataBuilder] = field(
+    decode_backend: type[AttentionBackend] | None = None
+    decode_metadata_builders: list[AttentionMetadataBuilder] = field(
         default_factory=lambda: []
     )
 
@@ -277,9 +277,9 @@ class AttentionGroup:
             )
             for _ in range(num_metadata_builders)
         ]
-        if self.prefill_backend is not None:
-            self.prefill_metadata_builders = [
-                self.prefill_backend.get_builder_cls()(
+        if self.decode_backend is not None:
+            self.decode_metadata_builders = [
+                self.decode_backend.get_builder_cls()(
                     kv_cache_spec_builder,
                     self.layer_names,
                     vllm_config,
@@ -289,11 +289,11 @@ class AttentionGroup:
             ]
 
     def get_metadata_builder(
-        self, ubatch_id: int = 0, use_prefill_backend: bool = False
+        self, ubatch_id: int = 0, use_decode_backend: bool = False
     ) -> AttentionMetadataBuilder:
         builders = (
-            self.prefill_metadata_builders
-            if use_prefill_backend and self.prefill_backend is not None
+            self.decode_metadata_builders
+            if use_decode_backend and self.decode_backend is not None
             else self.metadata_builders
         )
         assert len(builders) > ubatch_id
@@ -401,7 +401,7 @@ def prepare_kernel_block_sizes(
             group_backends = [
                 backend
                 for group in attn_groups[kv_cache_gid]
-                for backend in (group.backend, group.prefill_backend)
+                for backend in (group.backend, group.decode_backend)
                 if backend is not None
             ]
             selected_kernel_size = select_common_block_size(

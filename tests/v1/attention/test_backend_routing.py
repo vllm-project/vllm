@@ -22,6 +22,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
 )
+from vllm.v1.worker.cp_utils import check_attention_cp_compatibility
 from vllm.v1.worker.gpu.attn_utils import build_attn_metadata, init_attn_backend
 from vllm.v1.worker.utils import AttentionGroup, prepare_kernel_block_sizes
 
@@ -32,15 +33,15 @@ pytestmark = pytest.mark.skip_global_cleanup
     ("value", "expected"),
     [("FLASHINFER", "FLASHINFER"), ("auto", None), (None, None)],
 )
-def test_prefill_backend_parsing(value, expected):
-    backend = AttentionConfig(prefill_backend=value).prefill_backend
+def test_decode_backend_parsing(value, expected):
+    backend = AttentionConfig(decode_backend=value).decode_backend
     assert (backend.name if backend is not None else None) == expected
 
 
-def test_prefill_backend_affects_config_hash():
+def test_decode_backend_affects_config_hash():
     default_hash = AttentionConfig(backend="FLASH_ATTN").compute_hash()
     routed_hash = AttentionConfig(
-        backend="FLASH_ATTN", prefill_backend="FLASHINFER"
+        backend="FLASH_ATTN", decode_backend="FLASHINFER"
     ).compute_hash()
     assert default_hash != routed_hash
 
@@ -117,10 +118,10 @@ class _HNDBackend(_Backend):
         return "HND"
 
 
-def _layouts_compatible(prefill_backend, block_size=16):
+def _layouts_compatible(decode_backend, block_size=16):
     return kv_layouts_compatible(
         _Backend,
-        prefill_backend,
+        decode_backend,
         head_size=128,
         block_size=block_size,
         kv_cache_dtype=None,
@@ -132,7 +133,7 @@ def test_layout_compatibility_ignores_cross_layer_packing():
 
 
 @pytest.mark.parametrize(
-    "prefill_backend",
+    "decode_backend",
     [
         _DifferentLayerLayoutBackend,
         _DifferentShapeBackend,
@@ -140,11 +141,11 @@ def test_layout_compatibility_ignores_cross_layer_packing():
         _HNDBackend,
     ],
 )
-def test_layout_compatibility_rejects_unsafe_pairings(prefill_backend):
-    decode_backend = _NHDBackend if prefill_backend is _HNDBackend else _Backend
+def test_layout_compatibility_rejects_unsafe_pairings(decode_backend):
+    general_backend = _NHDBackend if decode_backend is _HNDBackend else _Backend
     assert not kv_layouts_compatible(
+        general_backend,
         decode_backend,
-        prefill_backend,
         head_size=128,
         block_size=16,
         kv_cache_dtype=None,
@@ -166,12 +167,24 @@ class _Builder:
         return type(self).__name__
 
 
+class _GeneralBuilder(_Builder):
+    pass
+
+
 class _DecodeBuilder(_Builder):
     pass
 
 
-class _PrefillBuilder(_Builder):
-    pass
+class _UniformDecodeBuilder(_DecodeBuilder):
+    @classmethod
+    def get_cudagraph_support(cls, vllm_config, kv_cache_spec):
+        return AttentionCGSupport.UNIFORM_BATCH
+
+
+class _GeneralBackend(_Backend):
+    @staticmethod
+    def get_builder_cls():
+        return _GeneralBuilder
 
 
 class _DecodeBackend(_Backend):
@@ -179,15 +192,15 @@ class _DecodeBackend(_Backend):
     def get_builder_cls():
         return _DecodeBuilder
 
-
-class _PrefillBackend(_Backend):
-    @staticmethod
-    def get_builder_cls():
-        return _PrefillBuilder
-
     @staticmethod
     def get_supported_kernel_block_sizes():
         return [32]
+
+
+class _UniformDecodeBackend(_DecodeBackend):
+    @staticmethod
+    def get_builder_cls():
+        return _UniformDecodeBuilder
 
 
 def _attention_spec(block_size=64):
@@ -201,28 +214,28 @@ def _attention_spec(block_size=64):
 
 def test_attention_group_selects_builder_for_routed_backend():
     group = AttentionGroup(
-        backend=_DecodeBackend,
+        backend=_GeneralBackend,
         layer_names=["layer"],
         kv_cache_spec=_attention_spec(),
         kv_cache_group_id=0,
-        prefill_backend=_PrefillBackend,
+        decode_backend=_DecodeBackend,
     )
     group.create_metadata_builders(None, torch.device("cpu"))
 
-    assert isinstance(group.get_metadata_builder(), _DecodeBuilder)
+    assert isinstance(group.get_metadata_builder(), _GeneralBuilder)
     assert isinstance(
-        group.get_metadata_builder(use_prefill_backend=True), _PrefillBuilder
+        group.get_metadata_builder(use_decode_backend=True), _DecodeBuilder
     )
 
 
 def test_kernel_block_size_is_supported_by_both_routed_backends():
     spec = _attention_spec()
     group = AttentionGroup(
-        backend=_DecodeBackend,
+        backend=_GeneralBackend,
         layer_names=["layer"],
         kv_cache_spec=spec,
         kv_cache_group_id=0,
-        prefill_backend=_PrefillBackend,
+        decode_backend=_DecodeBackend,
     )
     config = KVCacheConfig(
         num_blocks=1,
@@ -236,11 +249,11 @@ def test_kernel_block_size_is_supported_by_both_routed_backends():
 def test_mrv2_builds_metadata_with_the_routed_backend():
     spec = _attention_spec()
     group = AttentionGroup(
-        backend=_DecodeBackend,
+        backend=_GeneralBackend,
         layer_names=["layer"],
         kv_cache_spec=spec,
         kv_cache_group_id=0,
-        prefill_backend=_PrefillBackend,
+        decode_backend=_DecodeBackend,
     )
     group.create_metadata_builders(None, torch.device("cpu"))
     config = KVCacheConfig(
@@ -262,25 +275,30 @@ def test_mrv2_builds_metadata_with_the_routed_backend():
         kv_cache_config=config,
     )
 
-    decode_metadata = build_attn_metadata(**common_args)
-    prefill_metadata = build_attn_metadata(**common_args, use_prefill_backend=True)
+    general_metadata = build_attn_metadata(**common_args)
+    decode_metadata = build_attn_metadata(**common_args, use_decode_backend=True)
 
+    assert general_metadata["layer"] == "_GeneralBuilder"
     assert decode_metadata["layer"] == "_DecodeBuilder"
-    assert prefill_metadata["layer"] == "_PrefillBuilder"
 
 
 class _Layer(AttentionLayerBase):
     def get_attn_backend(self):
-        return _DecodeBackend
+        return _GeneralBackend
 
-    def get_prefill_attn_backend(self):
-        return _PrefillBackend
+    def get_decode_attn_backend(self):
+        return _DecodeBackend
 
     def get_kv_cache_spec(self, vllm_config):
         return _attention_spec()
 
 
-def test_mrv2_groups_decode_and_prefill_backends_together():
+class _UniformDecodeLayer(_Layer):
+    def get_decode_attn_backend(self):
+        return _UniformDecodeBackend
+
+
+def test_mrv2_groups_general_and_decode_backends_together():
     spec = _attention_spec()
     config = VllmConfig(device_config=DeviceConfig(device="cpu"))
     config.compilation_config.static_forward_context["layer"] = _Layer()
@@ -294,19 +312,35 @@ def test_mrv2_groups_decode_and_prefill_backends_together():
         kv_cache_config, config, torch.device("cpu")
     )
 
-    assert groups[0][0].backend is _DecodeBackend
-    assert groups[0][0].prefill_backend is _PrefillBackend
+    assert groups[0][0].backend is _GeneralBackend
+    assert groups[0][0].decode_backend is _DecodeBackend
     assert kernel_block_sizes == [32]
 
 
+def test_decode_backend_limits_cudagraph_support():
+    spec = _attention_spec()
+    config = VllmConfig(device_config=DeviceConfig(device="cpu"))
+    config.compilation_config.static_forward_context["layer"] = _UniformDecodeLayer()
+    kv_cache_config = KVCacheConfig(
+        num_blocks=1,
+        kv_cache_tensors=[],
+        kv_cache_groups=[KVCacheGroupSpec(["layer"], spec)],
+    )
+
+    _, cg_support, _ = init_attn_backend(kv_cache_config, config, torch.device("cpu"))
+
+    assert cg_support.min_cg_support == AttentionCGSupport.UNIFORM_BATCH
+    assert cg_support.min_cg_attn_backend == "_UniformDecodeBackend"
+
+
 @pytest.mark.parametrize(
-    ("use_prefill_backend", "expected"),
-    [(False, "decode"), (True, "prefill")],
+    ("use_decode_backend", "expected"),
+    [(False, "general"), (True, "decode")],
 )
-def test_select_attention_impl(use_prefill_backend, expected):
-    layer = SimpleNamespace(impl="decode", prefill_impl="prefill")
+def test_select_attention_impl(use_decode_backend, expected):
+    layer = SimpleNamespace(impl="general", decode_impl="decode")
     context = SimpleNamespace(
-        use_prefill_backend=use_prefill_backend,
+        use_decode_backend=use_decode_backend,
         cudagraph_runtime_mode=CUDAGraphMode.NONE,
     )
     with patch(
@@ -316,25 +350,42 @@ def test_select_attention_impl(use_prefill_backend, expected):
         assert _select_attention_impl(layer) == expected
 
 
-def test_prefill_backend_is_not_selected_in_full_cudagraph():
-    layer = SimpleNamespace(impl="decode", prefill_impl="prefill")
+def test_decode_backend_is_selected_in_full_cudagraph():
+    layer = SimpleNamespace(impl="general", decode_impl="decode")
     context = SimpleNamespace(
-        use_prefill_backend=True,
+        use_decode_backend=True,
         cudagraph_runtime_mode=CUDAGraphMode.FULL,
     )
-    with (
-        patch(
-            "vllm.model_executor.layers.attention.attention.get_forward_context",
-            return_value=context,
-        ),
-        pytest.raises(AssertionError, match="full CUDA graph"),
+    with patch(
+        "vllm.model_executor.layers.attention.attention.get_forward_context",
+        return_value=context,
     ):
-        _select_attention_impl(layer)
+        assert _select_attention_impl(layer) == "decode"
+
+
+def test_dcp_checks_decode_implementation():
+    general_impl = SimpleNamespace(need_to_return_lse_for_decode=False)
+    decode_impl = SimpleNamespace(need_to_return_lse_for_decode=True)
+    layer = SimpleNamespace(impl=general_impl, decode_impl=decode_impl)
+    config = SimpleNamespace(
+        parallel_config=SimpleNamespace(
+            prefill_context_parallel_size=1,
+            decode_context_parallel_size=2,
+            cp_kv_cache_interleave_size=1,
+        ),
+        speculative_config=None,
+    )
+
+    with patch(
+        "vllm.v1.worker.cp_utils.get_layers_from_vllm_config",
+        return_value={"layer": layer},
+    ):
+        check_attention_cp_compatibility(config)
 
 
 def test_model_runner_v2_allows_backend_routing():
     config = VllmConfig(
-        attention_config=AttentionConfig(prefill_backend="FLASHINFER"),
+        attention_config=AttentionConfig(decode_backend="FLASHINFER"),
         device_config=DeviceConfig(device="cpu"),
     )
     assert (

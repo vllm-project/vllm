@@ -8,7 +8,7 @@ import torch.nn as nn
 
 import vllm.envs as envs
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
-from vllm.config import CacheConfig, CUDAGraphMode, get_current_vllm_config
+from vllm.config import CacheConfig, get_current_vllm_config
 from vllm.config.vllm import VllmConfig
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.logger import init_logger
@@ -349,11 +349,9 @@ class Attention(nn.Module, AttentionLayerBase):
         # weight and activation dtype.
         dtype = torch.get_default_dtype()
         routing_enabled = (
-            vllm_config.attention_config.prefill_backend is not None
+            vllm_config.attention_config.decode_backend is not None
             and attn_type == AttentionType.DECODER
         )
-        decode_use_mm_prefix = self.use_mm_prefix and not routing_enabled
-        decode_use_non_causal_override = False if routing_enabled else None
         if attn_backend is None:
             self.attn_backend = get_attn_backend(
                 head_size,
@@ -361,11 +359,10 @@ class Attention(nn.Module, AttentionLayerBase):
                 kv_cache_dtype,
                 use_mla=False,
                 has_sink=self.has_sink,
-                use_mm_prefix=decode_use_mm_prefix,
+                use_mm_prefix=self.use_mm_prefix,
                 use_per_head_quant_scales=use_per_head_quant_scales,
                 attn_type=attn_type,
                 has_sliding_window=sliding_window is not None,
-                use_non_causal_override=decode_use_non_causal_override,
             )
         else:
             self.attn_backend = attn_backend
@@ -442,23 +439,24 @@ class Attention(nn.Module, AttentionLayerBase):
         self.backend = AttentionBackendEnum[self.attn_backend.get_name()]
         self.dtype = dtype
 
-        self.prefill_attn_backend: type[AttentionBackend] | None = None
-        self.prefill_impl: AttentionImpl | None = None
-        prefill_backend_enum = vllm_config.attention_config.prefill_backend
+        self.decode_attn_backend: type[AttentionBackend] | None = None
+        self.decode_impl: AttentionImpl | None = None
+        decode_backend_enum = vllm_config.attention_config.decode_backend
         if routing_enabled:
             from vllm.v1.attention.backends.utils import kv_layouts_compatible
 
-            self.prefill_attn_backend = get_attn_backend(
+            self.decode_attn_backend = get_attn_backend(
                 head_size,
                 dtype,
                 kv_cache_dtype,
                 use_mla=False,
                 has_sink=self.has_sink,
-                use_mm_prefix=self.use_mm_prefix,
+                use_mm_prefix=False,
                 use_per_head_quant_scales=use_per_head_quant_scales,
                 attn_type=attn_type,
                 has_sliding_window=sliding_window is not None,
-                backend_override=prefill_backend_enum,
+                use_non_causal_override=False,
+                backend_override=decode_backend_enum,
             )
             selector_block_size = (
                 cache_config.block_size
@@ -467,21 +465,21 @@ class Attention(nn.Module, AttentionLayerBase):
             )
             if not kv_layouts_compatible(
                 self.attn_backend,
-                self.prefill_attn_backend,
+                self.decode_attn_backend,
                 head_size=head_size,
                 block_size=selector_block_size,
                 kv_cache_dtype=kv_cache_dtype,
             ):
                 raise ValueError(
-                    f"Prefill attention backend "
-                    f"{self.prefill_attn_backend.get_name()} is not "
-                    f"KV-cache-layout compatible with the decode backend "
+                    f"Decode attention backend "
+                    f"{self.decode_attn_backend.get_name()} is not "
+                    f"KV-cache-layout compatible with the general backend "
                     f"{self.attn_backend.get_name()}; they cannot share one "
-                    f"physical KV cache. Choose a prefill backend with a "
+                    f"physical KV cache. Choose a decode backend with a "
                     f"matching KV layout."
                 )
-            prefill_impl_cls = self.prefill_attn_backend.get_impl_cls()
-            self.prefill_impl = prefill_impl_cls(  # type: ignore[assignment]
+            decode_impl_cls = self.decode_attn_backend.get_impl_cls()
+            self.decode_impl = decode_impl_cls(  # type: ignore[assignment]
                 num_heads,
                 head_size,
                 scale,
@@ -531,8 +529,7 @@ class Attention(nn.Module, AttentionLayerBase):
         if (
             self.impl.supports_quant_query_input
             and (
-                self.prefill_impl is None
-                or self.prefill_impl.supports_quant_query_input
+                self.decode_impl is None or self.decode_impl.supports_quant_query_input
             )
             and (
                 self.kv_cache_dtype.startswith("fp8") or self.kv_cache_dtype == "nvfp4"
@@ -668,8 +665,8 @@ class Attention(nn.Module, AttentionLayerBase):
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):
         self.impl.process_weights_after_loading(act_dtype)
-        if self.prefill_impl is not None:
-            self.prefill_impl.process_weights_after_loading(act_dtype)
+        if self.decode_impl is not None:
+            self.decode_impl.process_weights_after_loading(act_dtype)
 
         # If we should not load quant weights, we initialize the scales to 1.0
         # as the default value. See [Note: Register q/k/v/prob scales in state dict]
@@ -685,9 +682,9 @@ class Attention(nn.Module, AttentionLayerBase):
     def get_attn_backend(self) -> type[AttentionBackend]:
         return self.attn_backend
 
-    def get_prefill_attn_backend(self) -> type[AttentionBackend] | None:
-        """The prefill backend for batch routing, or None."""
-        return self.prefill_attn_backend
+    def get_decode_attn_backend(self) -> type[AttentionBackend] | None:
+        """The pure-decode backend for batch routing, or None."""
+        return self.decode_attn_backend
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec | None:
         # Block size may get updated after model loading, refresh it
@@ -845,14 +842,11 @@ def get_attention_context(
 def _select_attention_impl(
     attn_layer: "Attention | MLAAttention",
 ) -> AttentionImpl:
-    prefill_impl = getattr(attn_layer, "prefill_impl", None)
+    decode_impl = getattr(attn_layer, "decode_impl", None)
     forward_context = get_forward_context()
-    if prefill_impl is None or not forward_context.use_prefill_backend:
+    if decode_impl is None or not forward_context.use_decode_backend:
         return attn_layer.impl
-    assert forward_context.cudagraph_runtime_mode != CUDAGraphMode.FULL, (
-        "Prefill attention backend must not run inside a full CUDA graph."
-    )
-    return prefill_impl
+    return decode_impl
 
 
 def unified_kv_cache_update(

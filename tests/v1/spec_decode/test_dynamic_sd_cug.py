@@ -227,7 +227,7 @@ def test_cudagraph_dispatch_preserves_attention_backend_role(
         device=torch.device("cpu"),
         cudagraph_mode=cudagraph_mode,
         decode_query_len=2,
-        capture_prefill_backend=True,
+        capture_decode_backend=True,
     )
     manager._graphs_captured = True
 
@@ -236,20 +236,20 @@ def test_cudagraph_dispatch_preserves_attention_backend_role(
         num_tokens=2,
         uniform_token_count=2,
         num_active_loras=0,
+        use_decode_backend=True,
     )
-    prefill_desc = manager.dispatch(
+    general_desc = manager.dispatch(
         num_reqs=1,
         num_tokens=2,
         uniform_token_count=2,
         num_active_loras=0,
-        use_prefill_backend=True,
     )
 
     assert decode_desc.cg_mode == decode_mode
-    assert not decode_desc.use_prefill_backend
-    assert prefill_desc.cg_mode == CUDAGraphMode.PIECEWISE
-    assert prefill_desc.use_prefill_backend
-    assert decode_desc != prefill_desc
+    assert decode_desc.use_decode_backend
+    assert general_desc.cg_mode == CUDAGraphMode.PIECEWISE
+    assert not general_desc.use_decode_backend
+    assert decode_desc != general_desc
 
     if decode_mode == CUDAGraphMode.FULL:
         synced_decode_desc = manager.dispatch(
@@ -257,19 +257,20 @@ def test_cudagraph_dispatch_preserves_attention_backend_role(
             num_tokens=2,
             uniform_token_count=2,
             num_active_loras=0,
+            use_decode_backend=True,
             max_cudagraph_mode=CUDAGraphMode.PIECEWISE,
         )
         assert synced_decode_desc.cg_mode == CUDAGraphMode.PIECEWISE
-        assert not synced_decode_desc.use_prefill_backend
+        assert synced_decode_desc.use_decode_backend
 
     piecewise_roles = {
-        desc.use_prefill_backend
+        desc.use_decode_backend
         for desc in manager._capture_descs[CUDAGraphMode.PIECEWISE]
         if desc.num_tokens == 2
     }
     assert piecewise_roles == {False, True}
     assert BatchDescriptor(num_tokens=2) != BatchDescriptor(
-        num_tokens=2, use_prefill_backend=True
+        num_tokens=2, use_decode_backend=True
     )
 
 

@@ -381,6 +381,8 @@ def test_attention_config():
         [
             "--attention-config.backend",
             "FLASH_ATTN",
+            "--attention-config.decode_backend",
+            "FLASHINFER",
             "--attention-config.flash_attn_version",
             "3",
             "--attention-config.use_prefill_decode_attention",
@@ -397,6 +399,8 @@ def test_attention_config():
     engine_args = EngineArgs.from_cli_args(args)
     assert engine_args.attention_config.backend is not None
     assert engine_args.attention_config.backend.name == "FLASH_ATTN"
+    assert engine_args.attention_config.decode_backend is not None
+    assert engine_args.attention_config.decode_backend.name == "FLASHINFER"
     assert engine_args.attention_config.flash_attn_version == 3
     assert engine_args.attention_config.use_prefill_decode_attention is True
     assert engine_args.attention_config.flash_attn_max_num_splits_for_cuda_graph == 16
@@ -438,7 +442,7 @@ def test_attention_config():
     vllm_config = engine_args.create_engine_config()
     assert vllm_config.attention_config.backend == AttentionBackendEnum.FLASH_ATTN
 
-    # test --attention-prefill-backend flows into VllmConfig.attention_config
+    # test --attention-prefill-backend aliases --attention-backend
     args = parser.parse_args(
         [
             "--model",
@@ -449,8 +453,21 @@ def test_attention_config():
     )
     engine_args = EngineArgs.from_cli_args(args)
     vllm_config = engine_args.create_engine_config()
+    assert vllm_config.attention_config.backend == AttentionBackendEnum.TRITON_ATTN
+
+    # test --attention-decode-backend flows into VllmConfig.attention_config
+    args = parser.parse_args(
+        [
+            "--model",
+            "facebook/opt-125m",
+            "--attention-decode-backend",
+            "FLASHINFER",
+        ]
+    )
+    engine_args = EngineArgs.from_cli_args(args)
+    vllm_config = engine_args.create_engine_config()
     assert (
-        vllm_config.attention_config.prefill_backend == AttentionBackendEnum.TRITON_ATTN
+        vllm_config.attention_config.decode_backend == AttentionBackendEnum.FLASHINFER
     )
 
     # test --attention-config.backend flows into VllmConfig.attention_config
@@ -481,6 +498,21 @@ def test_attention_config():
     assert args is not None
     engine_args = EngineArgs.from_cli_args(args)
     with pytest.raises(ValueError, match="mutually exclusive"):
+        engine_args.create_engine_config()
+
+    # aliases cannot specify different general backends
+    args = parser.parse_args(
+        [
+            "--model",
+            "facebook/opt-125m",
+            "--attention-backend",
+            "FLASH_ATTN",
+            "--attention-prefill-backend",
+            "TRITON_ATTN",
+        ]
+    )
+    engine_args = EngineArgs.from_cli_args(args)
+    with pytest.raises(ValueError, match="aliases"):
         engine_args.create_engine_config()
 
 

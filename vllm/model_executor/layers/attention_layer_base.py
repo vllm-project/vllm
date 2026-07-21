@@ -26,7 +26,7 @@ class AttentionLayerBase(ABC):
         """Get the attention backend class for this layer."""
         pass
 
-    def get_prefill_attn_backend(self) -> type[AttentionBackend] | None:
+    def get_decode_attn_backend(self) -> type[AttentionBackend] | None:
         return None
 
     @abstractmethod

@@ -60,7 +60,7 @@ class SpeculatorCudaGraphManager(CudaGraphManager):
                     desc.cg_mode == CUDAGraphMode.PIECEWISE
                     and not self.use_breakable_cg
                 ),
-                use_prefill_backend=desc.use_prefill_backend,
+                use_decode_backend=desc.use_decode_backend,
             )
 
             return lambda cg_mode: forward_fn(
@@ -70,7 +70,7 @@ class SpeculatorCudaGraphManager(CudaGraphManager):
                 slot_mappings,
                 num_tokens_across_dp,
                 cg_mode,
-                use_prefill_backend=desc.use_prefill_backend,
+                use_decode_backend=desc.use_decode_backend,
             )
 
         super().capture(create_forward_fn, progress_bar_desc)
