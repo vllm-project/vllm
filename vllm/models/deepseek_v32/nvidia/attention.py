@@ -173,6 +173,11 @@ class DeepseekV32Attention(MLAAttention):
     ) -> None:
         quant_config = vllm_config.quant_config
         cache_config = vllm_config.cache_config
+        if cache_config is not None and cache_config.cache_dtype == "auto":
+            # This implementation requires an FP8 sparse cache. Start with the
+            # generic FP8 format; MLAAttention will canonicalize it for the
+            # selected sparse backend.
+            cache_config.cache_dtype = "fp8"
 
         hidden_size = config.hidden_size
         qk_nope_head_dim = config.qk_nope_head_dim
