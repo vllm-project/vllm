@@ -745,7 +745,6 @@ ENV MIOPEN_DEBUG_CONV_GEMM=0
 # See: https://github.com/ROCm/rocm-libraries/issues/6266
 ENV HSA_ENABLE_IPC_MODE_LEGACY=1
 ENV UCX_RMA_PPLN_ENABLE=y
-ENV UCX_ROCM_COPY_SIGPOOL_MAX_ELEMS=inf
 
 # ROCm profiler limits workaround.
 RUN echo "ROCTRACER_MAX_EVENTS=10000000" > ${COMMON_WORKDIR}/libkineto.conf
@@ -836,7 +835,6 @@ COPY --from=export_vllm /docker ${COMMON_WORKDIR}/vllm/docker
 # See: https://github.com/ROCm/rocm-libraries/issues/6266
 ENV HSA_ENABLE_IPC_MODE_LEGACY=1
 ENV UCX_RMA_PPLN_ENABLE=y
-ENV UCX_ROCM_COPY_SIGPOOL_MAX_ELEMS=inf
 
 ENV TOKENIZERS_PARALLELISM=false
 
