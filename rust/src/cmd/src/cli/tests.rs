@@ -5,7 +5,27 @@ use expect_test::expect;
 use vllm_engine_core_client::TransportMode;
 use vllm_server::{Config, HttpListenerMode, ParserSelection, RendererSelection};
 
-use super::{Cli, Command};
+use super::{BenchCommand, Cli, Command};
+
+#[test]
+fn bench_serve_args_parse_without_managed_engine_repartition() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "bench",
+        "serve",
+        "--backend",
+        "openai-chat",
+        "--request-rate",
+        "inf",
+    ])
+    .unwrap();
+
+    let Command::Bench(BenchCommand::Serve(args)) = cli.command else {
+        panic!("expected bench serve args");
+    };
+    assert_eq!(args.backend, vllm_bench::BackendKind::OpenaiChat);
+    assert!(args.request_rate.is_infinite());
+}
 
 #[test]
 fn serve_args_forward_python_flags_with_separator() {
