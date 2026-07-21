@@ -26,8 +26,19 @@ from vllm.utils.torch_utils import set_random_seed
 DEVICE = current_platform.device_type
 
 
-def _make_decode_inputs(num_reqs, num_k_heads, num_v_heads, head_k_dim, head_v_dim,
-                        dtype, tp_size=1):
+@pytest.fixture(autouse=True)
+def _default_device():
+    """Run every test with the CUDA default device, then restore —
+    a leaked default device makes later tests in the same process
+    silently materialize CPU tensors on CUDA."""
+    torch.set_default_device(DEVICE)
+    yield
+    torch.set_default_device(None)
+
+
+def _make_decode_inputs(
+    num_reqs, num_k_heads, num_v_heads, head_k_dim, head_v_dim, dtype, tp_size=1
+):
     """Build single-token-per-request decode inputs matching the existing
     ``test_fused_sigmoid_gating_delta_rule`` shapes."""
     key_dim = head_k_dim * num_k_heads
@@ -51,10 +62,18 @@ def _make_decode_inputs(num_reqs, num_k_heads, num_v_heads, head_k_dim, head_v_d
     b = torch.rand(num_tokens, num_v_heads, dtype=dtype)
     cu_seqlens = torch.arange(0, num_tokens + 1, dtype=torch.int32)
     return dict(
-        A_log=A_log, a=a, b=b, dt_bias=dt_bias,
-        q=query, k=key, v=value, cu_seqlens=cu_seqlens,
-        num_tokens=num_tokens, num_v_heads=num_v_heads,
-        head_k_dim=head_k_dim, head_v_dim=head_v_dim,
+        A_log=A_log,
+        a=a,
+        b=b,
+        dt_bias=dt_bias,
+        q=query,
+        k=key,
+        v=value,
+        cu_seqlens=cu_seqlens,
+        num_tokens=num_tokens,
+        num_v_heads=num_v_heads,
+        head_k_dim=head_k_dim,
+        head_v_dim=head_v_dim,
     )
 
 
@@ -70,7 +89,6 @@ def test_dual_index_read_write_isolation(
     """Reading from slot set A while writing to a *disjoint* slot set B must:
     (1) leave the A slots unchanged, (2) land the computed final state in B, and
     (3) produce the same attention output as the in-place run."""
-    torch.set_default_device(DEVICE)
     set_random_seed(0)
     ins = _make_decode_inputs(
         num_reqs, num_k_heads, num_v_heads, head_k_dim, head_v_dim, dtype
@@ -82,18 +100,26 @@ def test_dual_index_read_write_isolation(
     # disjoint read / write slot sets (avoid NULL_BLOCK_ID==0)
     perm = torch.randperm(total_entries - 1, dtype=torch.int32) + 1
     read_idx = perm[:num_tokens].contiguous()
-    write_idx = perm[num_tokens:2 * num_tokens].contiguous()
+    write_idx = perm[num_tokens : 2 * num_tokens].contiguous()
     assert set(read_idx.tolist()).isdisjoint(set(write_idx.tolist()))
 
     base_state = torch.rand(total_entries, HV, V, K, dtype=dtype)
 
     def call(state, out_idx):
         return fused_sigmoid_gating_delta_rule_update(
-            A_log=ins["A_log"], a=ins["a"], b=ins["b"], dt_bias=ins["dt_bias"],
-            q=ins["q"], k=ins["k"], v=ins["v"],
-            initial_state=state, inplace_final_state=True,
-            ssm_state_indices=read_idx, ssm_state_indices_output=out_idx,
-            cu_seqlens=ins["cu_seqlens"], use_qk_l2norm_in_kernel=True,
+            A_log=ins["A_log"],
+            a=ins["a"],
+            b=ins["b"],
+            dt_bias=ins["dt_bias"],
+            q=ins["q"],
+            k=ins["k"],
+            v=ins["v"],
+            initial_state=state,
+            inplace_final_state=True,
+            ssm_state_indices=read_idx,
+            ssm_state_indices_output=out_idx,
+            cu_seqlens=ins["cu_seqlens"],
+            use_qk_l2norm_in_kernel=True,
         )
 
     # Reference: in-place (output index defaults to read index) -> final lands in A.
@@ -123,7 +149,6 @@ def test_dual_index_read_write_isolation(
 def test_dual_index_none_is_inplace(dtype):
     """``ssm_state_indices_output=None`` must reproduce exactly the legacy
     in-place behavior (write index == read index)."""
-    torch.set_default_device(DEVICE)
     set_random_seed(0)
     ins = _make_decode_inputs(2, 16, 32, 128, 128, dtype)
     num_tokens = ins["num_tokens"]
@@ -136,11 +161,19 @@ def test_dual_index_none_is_inplace(dtype):
 
     def call(state, out_idx):
         return fused_sigmoid_gating_delta_rule_update(
-            A_log=ins["A_log"], a=ins["a"], b=ins["b"], dt_bias=ins["dt_bias"],
-            q=ins["q"], k=ins["k"], v=ins["v"],
-            initial_state=state, inplace_final_state=True,
-            ssm_state_indices=read_idx, ssm_state_indices_output=out_idx,
-            cu_seqlens=ins["cu_seqlens"], use_qk_l2norm_in_kernel=True,
+            A_log=ins["A_log"],
+            a=ins["a"],
+            b=ins["b"],
+            dt_bias=ins["dt_bias"],
+            q=ins["q"],
+            k=ins["k"],
+            v=ins["v"],
+            initial_state=state,
+            inplace_final_state=True,
+            ssm_state_indices=read_idx,
+            ssm_state_indices_output=out_idx,
+            cu_seqlens=ins["cu_seqlens"],
+            use_qk_l2norm_in_kernel=True,
         )
 
     # None (default) vs explicitly passing read_idx as the output index: identical.
@@ -163,7 +196,6 @@ def test_dual_index_spec_2d(num_speculative_tokens, dtype):
     position from one block row, write the per-token states into a different
     block row. Validates the read row stays intact and the write row receives
     the states for every speculative position."""
-    torch.set_default_device(DEVICE)
     set_random_seed(0)
     tp_size = 1
     num_k_heads, num_v_heads, head_k_dim, head_v_dim = 16, 32, 128, 128
@@ -187,26 +219,34 @@ def test_dual_index_spec_2d(num_speculative_tokens, dtype):
     dt_bias = torch.rand(num_v_heads // tp_size, dtype=dtype)
     a = torch.rand(num_tokens, num_v_heads, dtype=dtype)
     b = torch.rand(num_tokens, num_v_heads, dtype=dtype)
-    num_accepted_tokens = torch.randint(
-        1, seq + 1, (num_reqs,), dtype=torch.int32
-    )
+    num_accepted_tokens = torch.randint(1, seq + 1, (num_reqs,), dtype=torch.int32)
     cu_seqlens = torch.arange(0, num_tokens + 1, seq, dtype=torch.int32)
 
     HV, K, V = num_v_heads, head_k_dim, head_v_dim
     total_entries = num_tokens * 4
     perm = torch.randperm(total_entries - 1, dtype=torch.int32) + 1
-    read_2d = perm[:num_reqs * seq].view(num_reqs, seq).contiguous()
-    write_2d = perm[num_reqs * seq:2 * num_reqs * seq].view(num_reqs, seq).contiguous()
+    read_2d = perm[: num_reqs * seq].view(num_reqs, seq).contiguous()
+    write_2d = (
+        perm[num_reqs * seq : 2 * num_reqs * seq].view(num_reqs, seq).contiguous()
+    )
     base_state = torch.rand(total_entries, HV, V, K, dtype=dtype)
 
     def call(state, in_idx, out_idx):
         return fused_sigmoid_gating_delta_rule_update(
-            A_log=A_log, a=a, b=b, dt_bias=dt_bias,
-            q=query, k=key, v=value,
-            initial_state=state, inplace_final_state=True,
-            ssm_state_indices=in_idx, ssm_state_indices_output=out_idx,
+            A_log=A_log,
+            a=a,
+            b=b,
+            dt_bias=dt_bias,
+            q=query,
+            k=key,
+            v=value,
+            initial_state=state,
+            inplace_final_state=True,
+            ssm_state_indices=in_idx,
+            ssm_state_indices_output=out_idx,
             num_accepted_tokens=num_accepted_tokens,
-            cu_seqlens=cu_seqlens, use_qk_l2norm_in_kernel=True,
+            cu_seqlens=cu_seqlens,
+            use_qk_l2norm_in_kernel=True,
         )
 
     # in-place reference: read AND write through read_2d.
@@ -239,7 +279,6 @@ def test_dual_index_noncontiguous_2d(num_speculative_tokens, dtype):
     must produce identical results to its .contiguous() copy. The kernel
     indexes the token dim with an implicit stride of 1, so before the wrapper
     normalization a strided view silently read wrong offsets."""
-    torch.set_default_device(DEVICE)
     set_random_seed(0)
     tp_size = 1
     num_k_heads, num_v_heads, head_k_dim, head_v_dim = 16, 32, 128, 128
@@ -263,17 +302,15 @@ def test_dual_index_noncontiguous_2d(num_speculative_tokens, dtype):
     dt_bias = torch.rand(num_v_heads // tp_size, dtype=dtype)
     a = torch.rand(num_tokens, num_v_heads, dtype=dtype)
     b = torch.rand(num_tokens, num_v_heads, dtype=dtype)
-    num_accepted_tokens = torch.randint(
-        1, seq + 1, (num_reqs,), dtype=torch.int32
-    )
+    num_accepted_tokens = torch.randint(1, seq + 1, (num_reqs,), dtype=torch.int32)
     cu_seqlens = torch.arange(0, num_tokens + 1, seq, dtype=torch.int32)
 
     HV, K, V = num_v_heads, head_k_dim, head_v_dim
     total_entries = num_tokens * 4
     perm = torch.randperm(total_entries - 1, dtype=torch.int32) + 1
-    read_contig = perm[:num_reqs * seq].view(num_reqs, seq).contiguous()
+    read_contig = perm[: num_reqs * seq].view(num_reqs, seq).contiguous()
     write_contig = (
-        perm[num_reqs * seq:2 * num_reqs * seq].view(num_reqs, seq).contiguous()
+        perm[num_reqs * seq : 2 * num_reqs * seq].view(num_reqs, seq).contiguous()
     )
     # Same logical values, NON-contiguous layout: strides (1, num_reqs).
     read_strided = read_contig.t().contiguous().t()
@@ -284,12 +321,20 @@ def test_dual_index_noncontiguous_2d(num_speculative_tokens, dtype):
 
     def call(state, in_idx, out_idx):
         return fused_sigmoid_gating_delta_rule_update(
-            A_log=A_log, a=a, b=b, dt_bias=dt_bias,
-            q=query, k=key, v=value,
-            initial_state=state, inplace_final_state=True,
-            ssm_state_indices=in_idx, ssm_state_indices_output=out_idx,
+            A_log=A_log,
+            a=a,
+            b=b,
+            dt_bias=dt_bias,
+            q=query,
+            k=key,
+            v=value,
+            initial_state=state,
+            inplace_final_state=True,
+            ssm_state_indices=in_idx,
+            ssm_state_indices_output=out_idx,
             num_accepted_tokens=num_accepted_tokens,
-            cu_seqlens=cu_seqlens, use_qk_l2norm_in_kernel=True,
+            cu_seqlens=cu_seqlens,
+            use_qk_l2norm_in_kernel=True,
         )
 
     # REGRESSION: contiguous path (reference).
