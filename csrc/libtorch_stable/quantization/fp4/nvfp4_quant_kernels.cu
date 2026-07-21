@@ -246,11 +246,11 @@ void scaled_fp4_quant_sm1xxa(torch::stable::Tensor const& output,
           attrs[0].val.programmaticStreamSerializationAllowed = 1;
           config.numAttrs = (sm_version >= 90) ? 1 : 0;
           config.attrs = attrs;
-          cudaLaunchKernelEx(
-              &config, vllm::cvt_fp16_to_fp4<cuda_type, false>,
-              m, n, output_n, num_padded_cols, input_ptr, input_sf_ptr,
-              reinterpret_cast<uint32_t*>(output_ptr),
-              reinterpret_cast<uint32_t*>(sf_out));
+          cudaLaunchKernelEx(&config, vllm::cvt_fp16_to_fp4<cuda_type, false>,
+                             m, n, output_n, num_padded_cols, input_ptr,
+                             input_sf_ptr,
+                             reinterpret_cast<uint32_t*>(output_ptr),
+                             reinterpret_cast<uint32_t*>(sf_out));
         });
   } else {
     int num_packed_cols = output_n / CVT_FP4_ELTS_PER_THREAD;

@@ -91,9 +91,7 @@ def test_output_shape_and_dtype(hidden_dim: int, num_experts: int):
 
 @pytest.mark.parametrize("hidden_dim,num_experts", SHAPES)
 @pytest.mark.parametrize("num_tokens", [1, 2, 4, 8, 16, 24, 32])
-def test_topk_routing_consistency(
-    num_tokens: int, hidden_dim: int, num_experts: int
-):
+def test_topk_routing_consistency(num_tokens: int, hidden_dim: int, num_experts: int):
     """The gate feeds top-k expert selection: the kernel's top-8 must match
     an fp64 reference's top-8 per token (ties tolerated). This is the
     business-level correctness of the router — numeric error only matters
@@ -103,12 +101,8 @@ def test_topk_routing_consistency(
     device = torch.device("cuda")
     for seed in range(5):
         torch.manual_seed(1000 + seed)
-        mat_a = torch.randn(
-            num_tokens, hidden_dim, dtype=torch.bfloat16, device=device
-        )
-        mat_b = torch.randn(
-            num_experts, hidden_dim, dtype=torch.float32, device=device
-        )
+        mat_a = torch.randn(num_tokens, hidden_dim, dtype=torch.bfloat16, device=device)
+        mat_b = torch.randn(num_experts, hidden_dim, dtype=torch.float32, device=device)
         out = fp32_router_gemm(mat_a, mat_b)
         ref = mat_a.double() @ mat_b.double().t()
         kernel_idx = out.topk(top_k, dim=-1).indices

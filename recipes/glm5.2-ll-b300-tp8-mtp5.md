@@ -8,7 +8,7 @@ Validated on `glm5.2-LL` @ `8d407aee1`.
 ## Versions
 
 | Component | Version |
-|---|---|
+| --- | --- |
 | vLLM | `glm5.2-LL` @ `8d407aee1` |
 | flashinfer-python | `0.6.15` |
 | Model | `nvidia/GLM-5.2-NVFP4` (`modelopt_fp4`) |

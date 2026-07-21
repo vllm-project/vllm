@@ -21,11 +21,11 @@ static inline bool bf16_skinny_gemm_supported(int n, int k) {
   if (k == 12288 && (n == 768 || n == 1536 || n == 6144)) return true;
   // LL-mode backbone shapes (wire callers with an M <= 8 guard; the GEMV
   // family loses to cuBLAS at larger M).
-  if (k == 2048 && n == 2048) return true;  // q_b_proj (TP8)
-  if (k == 6144 && n == 2624) return true;  // fused_qkv_a (wire M <= 2 only)
-  if (k == 7168 && n == 2112) return true;  // DSv3.2 fused_qkv_a (M <= 2)
+  if (k == 2048 && n == 2048) return true;   // q_b_proj (TP8)
+  if (k == 6144 && n == 2624) return true;   // fused_qkv_a (wire M <= 2 only)
+  if (k == 7168 && n == 2112) return true;   // DSv3.2 fused_qkv_a (M <= 2)
   if (k == 14336 && n == 7168) return true;  // DSv3.2 eh_proj (M <= 2)
-  if (k == 6144 && n == 512) return true;   // shared-expert gate_up (TP8)
+  if (k == 6144 && n == 512) return true;    // shared-expert gate_up (TP8)
   return false;
 }
 
@@ -95,8 +95,7 @@ static void dispatchBf16SkinnyGemm(int n, int k, int num_tokens,
     SkinnyLoopUnroller<4, 512, 6144, 1, SKINNY_MAX_TOKENS>::unroll(
         num_tokens, output, mat_a, mat_b, out_stride, stream);
   } else {
-    throw std::invalid_argument(
-        "bf16_skinny_gemm: unsupported (N, K) pair");
+    throw std::invalid_argument("bf16_skinny_gemm: unsupported (N, K) pair");
   }
 }
 

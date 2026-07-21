@@ -807,8 +807,8 @@ void dsv3_fused_a_gemm(torch::stable::Tensor& output,
       invokeFusedAGemm<__nv_bfloat16, 6144, 2624, 8, 32>(out, a, b, num_tokens,
                                                          stream);
     } else {
-      invokeFusedAGemm<__nv_bfloat16, 6144, 2624, 16, 32>(out, a, b,
-                                                          num_tokens, stream);
+      invokeFusedAGemm<__nv_bfloat16, 6144, 2624, 16, 32>(out, a, b, num_tokens,
+                                                          stream);
     }
   } else if (is_glm_qb) {
     if (num_tokens <= 8) {
@@ -823,8 +823,8 @@ void dsv3_fused_a_gemm(torch::stable::Tensor& output,
       invokeFusedAGemm<__nv_bfloat16, 1536, 3072, 8, 32>(out, a, b, num_tokens,
                                                          stream);
     } else {
-      invokeFusedAGemm<__nv_bfloat16, 1536, 3072, 16, 32>(out, a, b,
-                                                          num_tokens, stream);
+      invokeFusedAGemm<__nv_bfloat16, 1536, 3072, 16, 32>(out, a, b, num_tokens,
+                                                          stream);
     }
   }
 }
