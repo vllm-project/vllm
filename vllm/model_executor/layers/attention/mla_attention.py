@@ -253,7 +253,6 @@ from vllm.utils.torch_utils import (
     LayerNameType,
     _encode_layer_name,
     _resolve_layer_name,
-    async_tensor_h2d,
     direct_register_custom_op,
     is_quantized_kv_cache,
     kv_cache_dtype_str_to_dtype,
@@ -278,6 +277,7 @@ from vllm.v1.attention.backends.utils import (
 from vllm.v1.attention.ops.common import cp_lse_ag_out_ar, cp_lse_ag_out_rs
 from vllm.v1.attention.ops.dcp_alltoall import dcp_a2a_lse_reduce
 from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
+from vllm.v1.attention.ops.triton_merge_attn_states import mask_empty_context_lse
 from vllm.v1.attention.selector import get_attn_backend
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
@@ -1343,8 +1343,6 @@ class MLACommonPrefillMetadata:
         workspace: torch.Tensor
         token_to_seq: torch.Tensor
         chunk_total_token: list[int]
-        token_context_lens: torch.Tensor
-        max_context_chunk: int
         has_empty_context: list[bool]
 
         # for mla DCP
@@ -1572,13 +1570,6 @@ def build_mla_chunked_context_metadata(
         token_to_seq = torch.repeat_interleave(req_indices, chunk_seq_lens[i])
         token_to_seq_cpu[i, : token_to_seq.shape[0]] = token_to_seq
 
-    prefill_query_lens_cpu = (
-        prefill_query_start_loc_cpu[1:] - prefill_query_start_loc_cpu[:-1]
-    )
-    token_context_lens = async_tensor_h2d(
-        torch.repeat_interleave(context_lens_cpu, prefill_query_lens_cpu), device
-    )
-
     prefill_tokens_with_context = prefill_query_start_loc_cpu[
         num_prefills_with_context
     ].item()
@@ -1641,8 +1632,6 @@ def build_mla_chunked_context_metadata(
             token_to_seq=token_to_seq_cpu.to(device, non_blocking=True),
             chunk_total_token=chunk_total_token.tolist(),
             workspace=chunked_prefill_workspace,
-            token_context_lens=token_context_lens,
-            max_context_chunk=max_context_chunk,
             has_empty_context=has_empty_context,
             prefill_tokens_with_context=prefill_tokens_with_context,
             padded_local_chunk_seq_lens=padded_local_chunk_seq_lens.tolist(),
@@ -1666,8 +1655,6 @@ def build_mla_chunked_context_metadata(
             token_to_seq=token_to_seq_cpu.to(device, non_blocking=True),
             chunk_total_token=chunk_total_token,
             workspace=chunked_prefill_workspace,
-            token_context_lens=token_context_lens,
-            max_context_chunk=max_context_chunk,
             has_empty_context=has_empty_context,
             prefill_tokens_with_context=prefill_tokens_with_context,
         )
@@ -2257,10 +2244,10 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
                 )
             )
             if prefill_metadata.chunked_context.has_empty_context[i]:
-                chunk_start = i * prefill_metadata.chunked_context.max_context_chunk
-                attn_softmax_lse.masked_fill_(
-                    prefill_metadata.chunked_context.token_context_lens <= chunk_start,
-                    float("-inf"),
+                mask_empty_context_lse(
+                    attn_softmax_lse,
+                    prefill_metadata.query_start_loc,
+                    prefill_metadata.chunked_context.cu_seq_lens[i],
                 )
 
             if output is None:
@@ -2413,10 +2400,10 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
                 )
             )
             if prefill_metadata.chunked_context.has_empty_context[i]:
-                chunk_start = i * prefill_metadata.chunked_context.max_context_chunk
-                attn_softmax_lse.masked_fill_(
-                    prefill_metadata.chunked_context.token_context_lens <= chunk_start,
-                    float("-inf"),
+                mask_empty_context_lse(
+                    attn_softmax_lse,
+                    prefill_metadata.query_start_loc,
+                    prefill_metadata.chunked_context.cu_seq_lens[i],
                 )
 
             if output is None:

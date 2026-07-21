@@ -12,6 +12,9 @@ from vllm._custom_ops import (
 )
 from vllm.platforms import current_platform
 from vllm.v1.attention.ops.triton_merge_attn_states import (
+    mask_empty_context_lse,
+)
+from vllm.v1.attention.ops.triton_merge_attn_states import (
     merge_attn_states as merge_attn_states_triton,
 )
 
@@ -71,6 +74,18 @@ HEAD_SIZES = [32, 48, 64, 96, 128, 256]
 DTYPES = [torch.float32, torch.half, torch.bfloat16]
 
 all_case_info: list[tuple] = []
+
+
+def test_mask_empty_context_lse() -> None:
+    query_start_loc = torch.tensor([0, 2, 133, 134], dtype=torch.int32, device="cuda")
+    context_start_loc = torch.tensor([0, 4, 4, 7], dtype=torch.int32, device="cuda")
+    lse = torch.randn(4, 134, device="cuda")
+    expected = lse.clone()
+    expected[:, 2:133] = float("-inf")
+
+    mask_empty_context_lse(lse, query_start_loc, context_start_loc)
+
+    torch.testing.assert_close(lse, expected)
 
 
 def generate_markdown_table():
