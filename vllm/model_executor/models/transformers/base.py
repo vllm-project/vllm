@@ -544,8 +544,10 @@ class Base(
                 for prefix, fuser in self.fusers.items()
                 if isinstance(fuser, MLAFuser)
             }
-            # MLA model but not using MLAAttention, recalculate head_size for full attn
-            if attn_cls is not MLAAttention:
+            if attn_cls is MLAAttention:
+                text_config._attn_implementation = "vllm_mla"
+            else:
+                # MLA model not using MLAAttention: recompute head_size for full attn
                 qk_nope_head_dim = getattr(text_config, "qk_nope_head_dim", 0)
                 qk_rope_head_dim = getattr(text_config, "qk_rope_head_dim", 0)
                 if qk_head_dim := qk_nope_head_dim + qk_rope_head_dim:

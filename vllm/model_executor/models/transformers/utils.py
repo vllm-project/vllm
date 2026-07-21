@@ -108,6 +108,7 @@ def replace_linear_class(
     linear: nn.Linear,
     style: Style = "replicate",
     quant_config: "QuantizationConfig | None" = None,
+    *,
     prefix: str = "",
 ) -> ColumnParallelLinear | RowParallelLinear | ReplicatedLinear:
     """

@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""MLA fuser: replace a Transformers MLA attention module with vLLM's MLA layer."""
+"""MLA fuser: adapt a Transformers MLA attention module for vLLM's MLA layer."""
 
 import ast
 from dataclasses import dataclass
@@ -63,66 +63,12 @@ def _norm_size(norm: nn.Module) -> int:
     return weight.numel() if weight is not None else -1
 
 
-def _callee_name(call: ast.Call) -> str | None:
-    """The bare name of what `call` calls (`torch.split(...)` -> `split`)."""
-    if isinstance(call.func, ast.Attribute):
-        return call.func.attr
-    if isinstance(call.func, ast.Name):
-        return call.func.id
-    return None
-
-
-def _enclosing_assign(funcdef: ast.FunctionDef, node: ast.AST) -> ast.Assign:
-    """The unique `Assign` statement whose value contains `node`."""
-    assigns = [
-        stmt
-        for stmt in ast.walk(funcdef)
-        if isinstance(stmt, ast.Assign)
-        and any(child is node for child in ast.walk(stmt.value))
-    ]
-    if len(assigns) != 1:
-        raise ValueError("expression is not inside exactly one assignment")
-    return assigns[0]
-
-
-def _single_target_name(assign: ast.Assign) -> str:
-    """The single plain `Name` this statement assigns to."""
-    if len(assign.targets) != 1 or not isinstance(assign.targets[0], ast.Name):
-        raise ValueError("statement does not assign to a single name")
-    return assign.targets[0].id
-
-
-def _tuple_target_names(assign: ast.Assign) -> list[str]:
-    """Names bound by a tuple-unpacking assignment."""
-    if len(assign.targets) != 1 or not isinstance(assign.targets[0], ast.Tuple):
-        raise ValueError("statement does not unpack into a tuple")
-    elements = assign.targets[0].elts
-    if not all(isinstance(element, ast.Name) for element in elements):
-        raise ValueError("tuple unpacking has a non-name target")
-    return [element.id for element in elements]  # type: ignore[attr-defined]
-
-
 def _top_level_index(funcdef: ast.FunctionDef, node: ast.AST) -> int:
     """Index in `funcdef.body` of the top-level statement containing `node`."""
     for index, stmt in enumerate(funcdef.body):
         if any(child is node for child in ast.walk(stmt)):
             return index
     raise ValueError("node is not in the function body")
-
-
-def _replace_stmt(funcdef: ast.FunctionDef, old: ast.stmt, new: ast.stmt) -> None:
-    """Replace statement `old` (by identity) with `new`, in place."""
-    for parent in ast.walk(funcdef):
-        for field in ("body", "orelse", "finalbody"):
-            block = getattr(parent, field, None)
-            if not isinstance(block, list):
-                continue
-            for index, stmt in enumerate(block):
-                if stmt is old:
-                    ast.copy_location(new, old)
-                    block[index] = new
-                    return
-    raise ValueError("statement not found in the function body")
 
 
 @dataclass
@@ -242,94 +188,55 @@ class MLAFuser(StackedFuser):
     def validate(self, module: nn.Module, vllm_config: "VllmConfig") -> bool:
         return vllm_config.model_config.use_mla
 
-    def _merge_down_projections(self, funcdef: ast.FunctionDef) -> None:
-        """`q_a_proj(x)`, `kv_a_proj_with_mqa(x)` -> one fused call plus a split.
-
-        Unlike `QKVFuser`, the two calls sit in *different* blocks (`q_a_proj` is
-        inside the `else` of `if self.q_lora_rank is None`), so the fused call is
-        inserted at the top-level statement preceding both.
-        """
-        q_call = single_self_call(funcdef, self.q_a_proj_name)
-        kv_call = single_self_call(funcdef, self.kv_a_proj_name)
-        if ast.dump(q_call.args[0]) != ast.dump(kv_call.args[0]):
-            raise ValueError("down-projections read different inputs")
-        names = {node.id for node in ast.walk(funcdef) if isinstance(node, ast.Name)}
-        if names & {_Q_A_TEMP, _KV_A_TEMP}:
-            raise ValueError("fused temporaries would shadow existing names")
-
-        merged = f"self.{self.merged_name}"
-        sections = f"[s // {merged}.tp_size for s in {merged}.output_sizes]"
-        source = f"{_Q_A_TEMP}, {_KV_A_TEMP} = {merged}(__arg__).split({sections}, -1)"
-        assign = ast.parse(source=source).body[0]
-        placeholder = next(
-            node
-            for node in ast.walk(assign)
-            if isinstance(node, ast.Name) and node.id == "__arg__"
-        )
-        replace_expr(assign, placeholder, q_call.args[0])
-
-        index = min(_top_level_index(funcdef, call) for call in (q_call, kv_call))
-        ast.copy_location(assign, funcdef.body[index])
-        funcdef.body.insert(index, assign)
-        replace_expr(funcdef, q_call, ast.Name(id=_Q_A_TEMP, ctx=ast.Load()))
-        replace_expr(funcdef, kv_call, ast.Name(id=_KV_A_TEMP, ctx=ast.Load()))
-
     def update_forward(self, module: nn.Module) -> None:
+        """Merge `q_a_proj(x)` and `kv_a_proj_with_mqa(x)` into one fused call plus a
+        split; the rest of the forward is unchanged, as Transformers now hands the
+        compressed latent straight to `vllm_mla`.
+
+        Unlike `QKVFuser`, the two calls sit in *different* blocks (`q_a_proj` is inside
+        the `else` of `if self.q_lora_rank is None`), so the fused call is inserted at
+        the top-level statement preceding both.
+        """
         funcdef, fn = recover_forward(type(module))
-
         if self.has_q_lora:
-            self._merge_down_projections(funcdef)
+            # Merge q_a_proj and kv_a_proj_with_mqa into one fused down proj then split.
+            # q_a_proj is inside the `else` of `if self.q_lora_rank is None`.
+            # The fused call is inserted at the top-level statement preceding both.
+            q_call = single_self_call(funcdef, self.q_a_proj_name)
+            kv_call = single_self_call(funcdef, self.kv_a_proj_name)
+            if ast.dump(q_call.args[0]) != ast.dump(kv_call.args[0]):
+                raise ValueError("down-projections read different inputs")
+            names = {n.id for n in ast.walk(funcdef) if isinstance(n, ast.Name)}
+            if names & {_Q_A_TEMP, _KV_A_TEMP}:
+                raise ValueError("fused temporaries would shadow existing names")
 
-        # `kv_b_proj(kv_a_layernorm(k_pass)).view(...).transpose(...)` -> the
-        # normalized latent, with a head axis so it still concatenates with the
-        # (already 4D) rope key. `.unsqueeze(1)` avoids naming batch/seq locals.
-        kv_b_call = single_self_call(funcdef, self.kv_b_proj_name)
-        kv_b_assign = _enclosing_assign(funcdef, kv_b_call)
-        latent_name = _single_target_name(kv_b_assign)
-        kv_b_assign.value = ast.Call(
-            func=ast.Attribute(
-                value=kv_b_call.args[0], attr="unsqueeze", ctx=ast.Load()
-            ),
-            args=[ast.Constant(value=1)],
-            keywords=[],
-        )
+            merged = f"self.{self.merged_name}"
+            targets = f"{_Q_A_TEMP}, {_KV_A_TEMP}"
+            sections = f"[s // {merged}.tp_size for s in {merged}.output_sizes]"
+            source = f"{targets} = {merged}(__arg__).split({sections}, -1)"
+            assign = ast.parse(source=source).body[0]
+            placeholder = next(
+                node
+                for node in ast.walk(assign)
+                if isinstance(node, ast.Name) and node.id == "__arg__"
+            )
+            replace_expr(assign, placeholder, q_call.args[0])
 
-        # Splitting the expanded key into (nope key, value) has no meaning now;
-        # `value_states` only has to stay bound for the interface call, which
-        # rejects a non-None value as proof the rewrite did not run.
-        splits = [
-            stmt
-            for stmt in ast.walk(funcdef)
-            if isinstance(stmt, ast.Assign)
-            and isinstance(stmt.value, ast.Call)
-            and _callee_name(stmt.value) == "split"
-            and stmt.value.args
-            and isinstance(stmt.value.args[0], ast.Name)
-            and stmt.value.args[0].id == latent_name
-        ]
-        if len(splits) != 1:
-            raise ValueError(f"{latent_name} is not split exactly once")
-        value_name = _tuple_target_names(splits[0])[1]
-        _replace_stmt(
-            funcdef,
-            splits[0],
-            ast.Assign(
-                targets=[ast.Name(id=value_name, ctx=ast.Store())],
-                value=ast.Constant(value=None),
-            ),
-        )
-        # The rope key's `.expand(*k_pass.shape[:-1], -1)` is left alone: the
-        # latent is now `[batch, 1, seq, kv_lora_rank]`, so it is already a no-op.
-
+            index = min(_top_level_index(funcdef, call) for call in (q_call, kv_call))
+            ast.copy_location(assign, funcdef.body[index])
+            funcdef.body.insert(index, assign)
+            replace_expr(funcdef, q_call, ast.Name(id=_Q_A_TEMP, ctx=ast.Load()))
+            replace_expr(funcdef, kv_call, ast.Name(id=_KV_A_TEMP, ctx=ast.Load()))
         self.fused_forward = compile_forward(funcdef, fn)
 
     def update_attrs(self, module: nn.Module, prefix: str, vllm_config: "VllmConfig"):
         quant_config = vllm_config.quant_config
 
-        def replace_linear_by_name(name: str, style: str) -> nn.Module:
+        def replace_linear_by_name(name: str, style: str):
             linear = module.get_submodule(name)
-            _prefix = maybe_prefix(prefix, name)
-            replacement = replace_linear_class(linear, style, quant_config, _prefix)
+            replacement = replace_linear_class(
+                linear, style, quant_config, prefix=maybe_prefix(prefix, name)
+            )
             setattr(module, name, replacement)
 
         if self.has_q_lora:
