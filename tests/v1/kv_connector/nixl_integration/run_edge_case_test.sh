@@ -3,8 +3,8 @@ set -xe
 
 # Parse command line arguments
 KV_BUFFER_DEVICE="cuda"  # Default to cuda
-PREFILL_GPU_ID=4         # Default GPU IDs
-DECODE_GPU_ID=5
+PREFILL_GPU_ID="${PREFILL_GPU_ID:-4}"  # Default GPU IDs
+DECODE_GPU_ID="${DECODE_GPU_ID:-5}"
 while [[ $# -gt 0 ]]; do
   case $1 in
     --kv_buffer_device)

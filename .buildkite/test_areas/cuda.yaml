@@ -16,6 +16,7 @@ steps:
   commands:
     - pytest -v -s cuda/test_cuda_context.py
     - pytest -v -s cuda/test_platform_no_cuda_init.py
+    - pytest -v -s cuda/test_cuda_compatibility_path.py
 
 - label: Cudagraph
   device: h200_35gb

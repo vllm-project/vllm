@@ -61,9 +61,55 @@ steps:
   source_file_dependencies:
   - csrc/fused_deepseek_v4_qnorm_rope_kv_insert_kernel.cu
   - vllm/models/deepseek_v4/common/ops/
+  - vllm/models/deepseek_v4/nvidia/
   - tests/kernels/test_fused_deepseek_v4_qnorm_rope_kv_insert.py
+  - tests/models/test_deepseek_v4_mega_moe.py
   commands:
     - pytest -v -s kernels/test_fused_deepseek_v4_*.py
+    - pytest -v -s models/test_deepseek_v4_mega_moe.py
+
+# Catch-all for test files at the tests/kernels root. This job collects
+# the whole root so new files are wired by default.
+# Files with dedicated jobs above are excluded via --ignore.
+- label: Kernels Root Misc Test (B200)
+  key: kernels-root-misc-test-b200
+  timeout_in_minutes: 45
+  device: b200-k8s
+  source_file_dependencies:
+  - csrc/
+  - vllm/
+  - tests/kernels/
+  commands:
+    - pytest -v -s kernels/
+        --ignore=kernels/attention
+        --ignore=kernels/core
+        --ignore=kernels/helion
+        --ignore=kernels/ir
+        --ignore=kernels/mamba
+        --ignore=kernels/moe
+        --ignore=kernels/quantization
+        --ignore=kernels/test_concat_mla_q.py
+        --ignore=kernels/test_fused_qk_norm_rope_gate.py
+        --ignore=kernels/test_fused_deepseek_v4_qnorm_rope_kv_insert.py
+        --ignore=kernels/test_top_k_per_row.py
+        --ignore=kernels/test_cache_kernels.py
+        --ignore=kernels/test_flex_attention.py
+        --ignore=kernels/test_fused_inv_rope_fp8_quant.py
+        --ignore=kernels/test_fused_minimax_m3_qknorm_rope_kv_insert.py
+        --ignore=kernels/test_fused_recurrent_packed_decode.py
+        --ignore=kernels/test_fused_sigmoid_gating_delta_rule.py
+        --ignore=kernels/test_mhc_kernels.py
+        --ignore=kernels/test_shuffle_rows.py
+    # BROKEN on main as of this job's addition (B200):
+    #   test_cache_kernels.py (1: test_gather_cache_oob)
+    #   test_flex_attention.py (3: custom_mask_full_cudagraphs, block_mask
+    #     direct-vs-slow, block_sparsity_hint)
+    #   test_fused_inv_rope_fp8_quant.py (5: test_einsum_end_to_end)
+    #   test_fused_minimax_m3_qknorm_rope_kv_insert.py (14: all fp8 variants)
+    #   test_fused_recurrent_packed_decode.py (4: all)
+    #   test_fused_sigmoid_gating_delta_rule.py (4)
+    #   test_mhc_kernels.py (3: test_hc_prenorm_gemm_tilelang)
+    #   test_shuffle_rows.py (1: test_shuffle_rows_edge_cases)
 
 - label: Kernels Attention Test %N
   key: kernels-attention-test

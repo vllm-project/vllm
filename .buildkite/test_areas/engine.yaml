@@ -39,9 +39,11 @@ steps:
   source_file_dependencies:
     - vllm/v1/engine/
     - tests/v1/engine/
+    - tests/v1/test_tensor_ipc_queue.py
   commands:
     - pytest -v -s v1/engine/test_preprocess_error_handling.py
     - pytest -v -s v1/engine --ignore v1/engine/test_preprocess_error_handling.py
+    - pytest -v -s v1/test_tensor_ipc_queue.py
   mirror:
     amd:
       device: mi325_1
