@@ -1546,6 +1546,13 @@ def record_gpu_memory_usage_stats(
             mem_info = amdsmi_get_gpu_vram_usage(dev_handle)
             gb_used = mem_info["vram_used"] / 2**10
             gb_total = mem_info["vram_total"] / 2**10
+        elif current_platform.is_xpu():
+            # nvml/amdsmi are unavailable on XPU. Query device memory through
+            # torch.accelerator.get_memory_info, which the XPU platform patches
+            # to return (free, total) bytes via Level Zero.
+            free_b, total_b = torch.accelerator.get_memory_info(device)
+            gb_used = (total_b - free_b) / 2**30
+            gb_total = total_b / 2**30
         else:
             dev_handle = get_nvml_device_handle(device)
             mem_info = nvmlDeviceGetMemoryInfo(dev_handle)
@@ -1699,6 +1706,37 @@ def wait_for_rocm_memory_to_settle(
     actually release VRAM before the next allocation. No-op off ROCm.
     """
     if not current_platform.is_rocm():
+        return
+
+    num_gpus = current_platform.device_count()
+    if num_gpus == 0:
+        return
+    if threshold_ratio is None:
+        threshold_ratio = 0.1
+
+    wait_for_gpu_memory_to_clear(
+        devices=list(range(num_gpus)),
+        threshold_ratio=threshold_ratio,
+        timeout_s=timeout_s,
+        stable_duration_s=2.0,
+        poll_interval_s=1.0,
+    )
+
+
+def wait_for_xpu_memory_to_settle(
+    *,
+    threshold_ratio: float | dict[int, float] | None = 0.1,
+    timeout_s: float = 240,
+) -> None:
+    """Block until XPU device memory usage drops below ``threshold_ratio``.
+
+    Like ROCm, XPU (Level Zero) can release device memory lazily after an
+    engine shuts down, so back-to-back model loads in a single test process
+    can OOM the *next* engine/model startup even after
+    ``cleanup_dist_env_and_memory``. This gives the driver time to actually
+    release device memory before the next allocation. No-op off XPU.
+    """
+    if not current_platform.is_xpu():
         return
 
     num_gpus = current_platform.device_count()

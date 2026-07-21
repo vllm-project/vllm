@@ -199,6 +199,10 @@ def test_chunked_prefill_with_parallel_sampling(
 @pytest.mark.parametrize("model", [SSM_MODELS[0], HYBRID_MODELS[0]])
 @pytest.mark.parametrize("max_tokens", [20])
 @pytest.mark.parametrize("conv_state_layout", ["SD", "DS"])
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(),
+    reason="flash attn is not yet available for use with the SYCL Graph extension",
+)
 def test_mamba_cache_cg_padding(
     vllm_runner,
     example_prompts,
