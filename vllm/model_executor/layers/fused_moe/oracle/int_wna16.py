@@ -104,11 +104,7 @@ def backend_to_kernel_cls(
         raise ValueError(f"Unknown WNA16 MoE backend: {backend.value}")
 
 
-def _get_priority_backends(
-    may_have_zp: bool,
-    may_have_bias: bool,
-    allow_marlin: bool,
-) -> list[WNA16MoEBackend]:
+def _get_priority_backends() -> list[WNA16MoEBackend]:
     """
     Get available backends in priority order based on platform and config.
     """
@@ -117,30 +113,56 @@ def _get_priority_backends(
     if current_platform.is_xpu():
         return [WNA16MoEBackend.XPU]
 
-    _AVAILABLE_BACKENDS = []
-
-    if not may_have_zp and not may_have_bias:
-        _AVAILABLE_BACKENDS.append(WNA16MoEBackend.FLASHINFER_TRTLLM)
-
-    # Marlin supports ZP and bias
-    if allow_marlin:
-        _AVAILABLE_BACKENDS += [
-            WNA16MoEBackend.MARLIN,
-            WNA16MoEBackend.BATCHED_MARLIN,
-        ]
-
-    _AVAILABLE_BACKENDS += [
+    return [
+        WNA16MoEBackend.FLASHINFER_TRTLLM,
+        WNA16MoEBackend.MARLIN,
+        WNA16MoEBackend.BATCHED_MARLIN,
         WNA16MoEBackend.TRITON,
         WNA16MoEBackend.HUMMING,
         WNA16MoEBackend.EMULATION,
     ]
 
-    return _AVAILABLE_BACKENDS
+
+def _backend_incompatibility_reason(
+    backend: WNA16MoEBackend,
+    quant_config: QuantizationConfig | QuantizationArgs,
+    may_have_zp: bool,
+    may_have_bias: bool,
+) -> str | None:
+    if backend == WNA16MoEBackend.FLASHINFER_TRTLLM and (may_have_zp or may_have_bias):
+        return "zero points and bias are not supported"
+
+    from vllm.model_executor.layers.quantization.auto_awq import AutoAWQConfig
+    from vllm.model_executor.layers.quantization.auto_gptq import AutoGPTQConfig
+    from vllm.model_executor.layers.quantization.moe_wna16 import MoeWNA16Config
+
+    if backend == WNA16MoEBackend.TRITON:
+        if may_have_bias:
+            return "expert bias is not supported"
+        if isinstance(quant_config, AutoAWQConfig):
+            return "the AutoAWQ weight layout is not supported"
+        if isinstance(quant_config, AutoGPTQConfig) and quant_config.desc_act:
+            return "GPTQ activation ordering is not supported"
+        if (
+            isinstance(quant_config, QuantizationArgs)
+            and quant_config.actorder == "group"
+        ):
+            return "group activation ordering is not supported"
+
+    if isinstance(quant_config, MoeWNA16Config) and backend in (
+        WNA16MoEBackend.MARLIN,
+        WNA16MoEBackend.BATCHED_MARLIN,
+        WNA16MoEBackend.EMULATION,
+    ):
+        return "the MoeWNA16 checkpoint layout is not supported"
+
+    return None
 
 
 def map_wna16_backend(runner_backend: MoEBackend) -> WNA16MoEBackend:
     """Map user's MoEBackend to WNA16MoEBackend."""
     mapping = {
+        "triton": WNA16MoEBackend.TRITON,
         "marlin": WNA16MoEBackend.MARLIN,
         "humming": WNA16MoEBackend.HUMMING,
         "flashinfer_trtllm": WNA16MoEBackend.FLASHINFER_TRTLLM,
@@ -157,9 +179,9 @@ def map_wna16_backend(runner_backend: MoEBackend) -> WNA16MoEBackend:
 def select_wna16_moe_backend(
     config: FusedMoEConfig,
     weight_key: QuantKey,
+    quant_config: QuantizationConfig | QuantizationArgs,
     may_have_zp: bool,
     may_have_bias: bool,
-    allow_marlin: bool = True,
 ) -> tuple[WNA16MoEBackend, type[mk.FusedMoEExperts]]:
     """Select the WNA16 MoE backend.
 
@@ -167,6 +189,9 @@ def select_wna16_moe_backend(
         config: the shared ``FusedMoEConfig`` for this layer.
         weight_key: The QuantKey describing the weight quantization.
                     Must have int4 or int8 type.
+        quant_config: Quantization structure and checkpoint format description.
+        may_have_zp: Whether the integration can provide weight zero points.
+        may_have_bias: Whether the integration can provide expert bias.
 
     Returns:
         A tuple of (``WNA16MoEBackend``, experts class or ``None``).
@@ -213,16 +238,25 @@ def select_wna16_moe_backend(
     runner_backend = config.moe_backend
     if runner_backend != "auto":
         requested_backend = map_wna16_backend(runner_backend)
+        reason = _backend_incompatibility_reason(
+            requested_backend, quant_config, may_have_zp, may_have_bias
+        )
+        if reason is not None:
+            raise ValueError(_make_log_unsupported(requested_backend, reason))
         return _return_or_raise(
             requested_backend, config, weight_key, None, activation_format
         )
 
     # Select kernels in order of backend.
-    AVAILABLE_BACKENDS = _get_priority_backends(
-        may_have_zp, may_have_bias, allow_marlin
-    )
+    AVAILABLE_BACKENDS = _get_priority_backends()
 
     for backend in AVAILABLE_BACKENDS:
+        reason = _backend_incompatibility_reason(
+            backend, quant_config, may_have_zp, may_have_bias
+        )
+        if reason is not None:
+            logger.debug_once(_make_log_unsupported(backend, reason), scope="local")
+            continue
         activation_key = None  # always BF16 activation for WNA16 MoE
         for k_cls in backend_to_kernel_cls(backend):
             supported, reason = k_cls.is_supported_config(
@@ -1044,9 +1078,66 @@ def _humming_wna16_weight_schema(
             "sym": quant_config.is_sym,
         }
     raise TypeError(
-        "Humming WNA16 MoE requires AutoAWQConfig or AutoGPTQConfig, "
+        "Humming WNA16 checkpoint schema requires AutoAWQConfig or "
+        "AutoGPTQConfig, "
         f"got {type(quant_config).__name__}."
     )
+
+
+def _convert_moe_wna16_humming_tensors(
+    tensors: dict[str, torch.Tensor], has_zero_point: bool
+) -> dict[str, torch.Tensor]:
+    """Convert MoeWNA16's N-first uint8 packing to Humming's int32 packing."""
+    if sys.byteorder != "little":
+        raise NotImplementedError(
+            "MoeWNA16 to Humming conversion requires a little-endian host."
+        )
+
+    output = {
+        "weight": tensors["qweight"].contiguous().view(torch.int32),
+        "weight_scale": tensors["scales"],
+    }
+    if has_zero_point:
+        qzeros = tensors["qzeros"]
+        output["zero_point"] = (
+            qzeros.transpose(-1, -2)
+            .contiguous()
+            .view(torch.int32)
+            .transpose(-1, -2)
+            .contiguous()
+        )
+    return output
+
+
+class _MoeWNA16HummingWeightSchema:
+    """Adapter from MoeWNA16's generic packed layout to Humming's layout."""
+
+    def __init__(self, bits: int, group_size: int, has_zero_point: bool) -> None:
+        self.bits = bits
+        self.group_size = group_size
+        self.has_zero_point = has_zero_point
+
+    def convert_humming(
+        self,
+        tensors: dict[str, torch.Tensor],
+        shape_n_stacks: list[int],
+        shape_k_stacks: list[int],
+        param_dtype: torch.dtype,
+        num_experts: int | None = None,
+    ) -> tuple[Any, dict[str, torch.Tensor]]:
+        del shape_n_stacks, shape_k_stacks, num_experts
+        from vllm.utils.humming import HummingWeightSchema, dtypes
+
+        output = _convert_moe_wna16_humming_tensors(
+            tensors, has_zero_point=self.has_zero_point
+        )
+        output["weight_scale"] = output["weight_scale"].to(param_dtype)
+        schema = HummingWeightSchema(
+            b_dtype=dtypes.DataType.from_str(f"uint{self.bits}"),
+            weight_scale_group_size=self.group_size,
+            has_zero_point=self.has_zero_point,
+        )
+        return schema, output
 
 
 def _unpack_and_dequant_int4_gptq(
@@ -1333,13 +1424,27 @@ def convert_to_wna16_moe_kernel_format(
         input_dtype: optional activation dtype, usually should be 16 bit.
     """
     if backend == WNA16MoEBackend.HUMMING:
+        from vllm.model_executor.layers.quantization.moe_wna16 import MoeWNA16Config
         from vllm.model_executor.layers.quantization.utils.humming_utils import (
             convert_to_humming_moe_kernel_format,
         )
 
-        convert_to_humming_moe_kernel_format(
-            layer, quant_config=_humming_wna16_weight_schema(quant_config)
-        )
+        if isinstance(quant_config, MoeWNA16Config):
+            from vllm.utils.humming import HummingInputSchema
+
+            convert_to_humming_moe_kernel_format(
+                layer,
+                weight_schema=_MoeWNA16HummingWeightSchema(
+                    bits=quant_config.weight_bits,
+                    group_size=layer.group_size,
+                    has_zero_point=quant_config.has_zp,
+                ),
+                input_schema=HummingInputSchema(),
+            )
+        else:
+            convert_to_humming_moe_kernel_format(
+                layer, quant_config=_humming_wna16_weight_schema(quant_config)
+            )
         return None
 
     if backend in (
@@ -1496,33 +1601,29 @@ def convert_to_wna16_moe_kernel_format(
             w2_qzeros,
         )
     elif backend == WNA16MoEBackend.TRITON:
-        # Three possible input layouts depending on the quantization source:
+        # Two possible input layouts depending on the quantization source:
         #
         # MoeWNA16 (uint8):              (E, N_out, K // bit8_pack)  — N-first
         #   → just view as uint8 (no-op)
         #
-        # AutoGPTQ (int32, K-first):    (E, K // pack32, N_out)
+        # AutoGPTQ/compressed-tensors (int32, K-first):
+        #   (E, K // pack32, N_out)
         #   → transpose to N-first, then view as uint8 to get
         #     (E, N_out, K // bit8_pack)  [int32 = 4 bytes → 4 uint8s]
         #   Scales: (E, K // gs, N_out) → transpose → (E, N_out, K // gs)
-        #
-        # compressed-tensors (int32, N-first "Flashinfer" layout):
-        #   (E, N_out, K // pack32)  — already N-first
-        #   → just view as uint8; scales are already (E, N_out, K // gs)
         from vllm.model_executor.layers.quantization.auto_gptq import (
             AutoGPTQConfig,
         )
 
-        if isinstance(quant_config, AutoGPTQConfig):
-            # AutoGPTQ always builds in Marlin (K-first) format even when
-            # the Triton backend is selected.  Transpose to N-first first.
+        if isinstance(quant_config, (AutoGPTQConfig, QuantizationArgs)):
+            # These integrations build in K-first format even when the Triton
+            # backend is selected. Transpose to N-first first.
             w13_uint8 = w13.transpose(1, 2).contiguous().view(torch.uint8)
             w2_uint8 = w2.transpose(1, 2).contiguous().view(torch.uint8)
             w13_scale = w13_scale.transpose(1, 2).contiguous()
             w2_scale = w2_scale.transpose(1, 2).contiguous()
         else:
-            # MoeWNA16 and compressed-tensors both use N-first layout when
-            # targeting the Triton backend.
+            # MoeWNA16 uses N-first uint8 weights and scales.
             w13_uint8 = w13.view(torch.uint8)
             w2_uint8 = w2.view(torch.uint8)
         return (

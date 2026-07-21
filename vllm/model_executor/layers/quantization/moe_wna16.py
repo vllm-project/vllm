@@ -235,9 +235,9 @@ class MoeWNA16Method(FusedMoEMethodBase):
         self.wna16_backend, self.experts_cls = select_wna16_moe_backend(
             config=self.moe,
             weight_key=weight_key,
+            quant_config=self.quant_config,
             may_have_zp=self.quant_config.has_zp,
             may_have_bias=False,
-            allow_marlin=False,
         )
 
     def create_weights(
@@ -363,6 +363,13 @@ class MoeWNA16Method(FusedMoEMethodBase):
     def get_fused_moe_quant_config(
         self, layer: RoutedExperts
     ) -> FusedMoEQuantConfig | None:
+        if self.wna16_backend == WNA16MoEBackend.HUMMING:
+            from vllm.model_executor.layers.quantization.utils.humming_utils import (
+                get_humming_moe_quant_config,
+            )
+
+            return get_humming_moe_quant_config(layer)
+
         has_zp = self.quant_config.has_zp
         return make_wna16_moe_quant_config(
             w1_scale=layer.w13_scales,
@@ -381,6 +388,8 @@ class MoeWNA16Method(FusedMoEMethodBase):
             moe_quant_config=self.moe_quant_config,
             moe_config=self.moe,
             experts_cls=self.experts_cls,
+            backend=self.wna16_backend,
+            layer=layer,
             routing_tables=layer._expert_routing_tables(),
         )
 
@@ -428,6 +437,8 @@ class MoeWNA16Method(FusedMoEMethodBase):
         replace_parameter(layer, "w2_qweight", w2_qweight)
         replace_parameter(layer, "w13_scales", w13_scales)
         replace_parameter(layer, "w2_scales", w2_scales)
+        layer.w13_weight = layer.w13_qweight
+        layer.w2_weight = layer.w2_qweight
 
         if has_zp:
             assert w13_qzeros is not None and w2_qzeros is not None
@@ -463,8 +474,8 @@ class MoeWNA16Method(FusedMoEMethodBase):
         assert self.moe_kernel is not None
         return self.moe_kernel.apply(
             x,
-            layer.w13_qweight,
-            layer.w2_qweight,
+            layer.w13_weight,
+            layer.w2_weight,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             activation=layer.activation,
@@ -486,8 +497,8 @@ class MoeWNA16Method(FusedMoEMethodBase):
         assert self.moe_kernel is not None
         return self.moe_kernel.apply_monolithic(
             x,
-            layer.w13_qweight,
-            layer.w2_qweight,
+            layer.w13_weight,
+            layer.w2_weight,
             router_logits,
             activation=layer.activation,
             global_num_experts=layer.global_num_experts,

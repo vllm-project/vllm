@@ -92,7 +92,8 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
         self.wna16_backend, self.experts_cls = select_wna16_moe_backend(
             config=self.moe,
             weight_key=weight_key,
-            may_have_zp=False,
+            quant_config=self.weight_quant,
+            may_have_zp=not self.symmetric,
             may_have_bias=False,
         )
         self.is_marlin = self.wna16_backend in [
