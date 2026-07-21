@@ -19,6 +19,7 @@ from vllm.entrypoints.openai.engine.protocol import (
     ErrorResponse,
     GenerationError,
     PerRequestTimingMetrics,
+    RequestRejectedError,
 )
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
@@ -175,6 +176,8 @@ class GenerateBaseServing(BaseServing, BeamSearchOnlineMixin):
                 request_id,
             )
             raise GenerationError("Internal server error")
+        if finish_reason == "rejected":
+            raise RequestRejectedError()
 
     def _convert_generation_error_to_streaming_response(
         self, e: GenerationError

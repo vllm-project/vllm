@@ -410,3 +410,11 @@ class GenerationError(Exception):
     def __init__(self, message: str = "Internal server error"):
         super().__init__(message)
         self.status_code = HTTPStatus.INTERNAL_SERVER_ERROR
+
+
+class RequestRejectedError(GenerationError):
+    """raised when a request is rejected because the waiting queue is full (429)"""
+
+    def __init__(self, message: str = "Server queue full, try again later"):
+        super().__init__(message)
+        self.status_code = HTTPStatus.TOO_MANY_REQUESTS
