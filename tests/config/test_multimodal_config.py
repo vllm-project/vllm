@@ -71,6 +71,9 @@ def _make_mm_prefix_model_config(
     is_mm_prefix_lm: bool = True,
 ) -> ModelConfig:
     model_config = MagicMock(spec=ModelConfig)
+    model_config.multimodal_config = MultiModalConfig(
+        language_model_only=language_model_only
+    )
     model_config.model_arch_config = ModelArchitectureConfig(
         architectures=["PrefixLMForConditionalGeneration"],
         model_type="prefix_lm",
@@ -87,9 +90,6 @@ def _make_mm_prefix_model_config(
         is_mm_prefix_lm=is_mm_prefix_lm,
         rswa_window=None,
         derived_max_model_len_and_key=(8192.0, "max_position_embeddings"),
-    )
-    model_config.get_multimodal_config.return_value = MultiModalConfig(
-        language_model_only=language_model_only
     )
     return model_config
 
@@ -123,23 +123,37 @@ def test_mm_prefix_lm_respects_vision_limits(
         "vllm.multimodal.MULTIMODAL_REGISTRY.get_processing_info",
         return_value=info,
     ):
-        ModelConfig._apply_mm_prefix_lm_limits(model_config)
+        result = ModelConfig._apply_mm_prefix_lm_limits(
+            model_config, model_config.model_arch_config
+        )
 
-    assert model_config.model_arch_config.is_mm_prefix_lm is expected
+    assert result.is_mm_prefix_lm is expected
 
 
 def test_language_model_only_disables_mm_prefix_lm():
     model_config = _make_mm_prefix_model_config(language_model_only=True)
 
-    ModelConfig._apply_mm_prefix_lm_limits(model_config)
+    result = ModelConfig._apply_mm_prefix_lm_limits(
+        model_config, model_config.model_arch_config
+    )
 
-    assert not model_config.model_arch_config.is_mm_prefix_lm
+    assert not result.is_mm_prefix_lm
 
 
 def test_mm_prefix_limits_noop_for_causal_model():
     model_config = _make_mm_prefix_model_config(is_mm_prefix_lm=False)
     original_arch = model_config.model_arch_config
 
-    ModelConfig._apply_mm_prefix_lm_limits(model_config)
+    result = ModelConfig._apply_mm_prefix_lm_limits(model_config, original_arch)
 
-    assert model_config.model_arch_config is original_arch
+    assert result is original_arch
+
+
+def test_mm_prefix_limits_noop_before_multimodal_config():
+    model_config = _make_mm_prefix_model_config()
+    model_config.multimodal_config = None
+    original_arch = model_config.model_arch_config
+
+    result = ModelConfig._apply_mm_prefix_lm_limits(model_config, original_arch)
+
+    assert result is original_arch
