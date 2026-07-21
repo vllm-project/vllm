@@ -219,7 +219,10 @@ class AttentionSpec(KVCacheSpec):
 
     def max_num_blocks_per_req(self, vllm_config: VllmConfig, max_len: int) -> int:
         parallel_config = vllm_config.parallel_config
-        kv_shard_count = parallel_config.decode_context_parallel_size
+        dcp = parallel_config.decode_context_parallel_size
+        # MRv2 PCP+DCP (dcp == pcp > 1): replicated cache, no sharding divisor.
+        pcp = parallel_config.prefill_context_parallel_size
+        kv_shard_count = 1 if (dcp > 1 and dcp == pcp) else dcp
         return cdiv(max_len, self.block_size * kv_shard_count)
 
 
@@ -257,9 +260,11 @@ class FullAttentionSpec(AttentionSpec):
 
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
         max_model_len = vllm_config.model_config.max_model_len
-        dcp_world_size = vllm_config.parallel_config.decode_context_parallel_size
-        if dcp_world_size > 1:
-            max_model_len = cdiv(max_model_len, dcp_world_size)
+        dcp = vllm_config.parallel_config.decode_context_parallel_size
+        pcp = vllm_config.parallel_config.prefill_context_parallel_size
+        # MRv2 PCP+DCP (dcp == pcp > 1): replicated cache, no 1/dcp saving.
+        if dcp > 1 and dcp != pcp:
+            max_model_len = cdiv(max_model_len, dcp)
         return cdiv(max_model_len, self.block_size) * self.page_size_bytes
 
     @classmethod

@@ -75,8 +75,12 @@ class SingleTypeKVCacheManager(ABC):
         self.block_size = kv_cache_spec.block_size
         self.dcp_world_size = dcp_world_size
         self.pcp_world_size = pcp_world_size
-        if dcp_world_size > 1:
-            self.block_size *= dcp_world_size
+        # MRv2 PCP+DCP (dcp == pcp > 1): replicated cache, so do not inflate the
+        # block size. Pure-DCP (dcp != pcp) keeps the sharded-KV inflation.
+        replicated = dcp_world_size > 1 and dcp_world_size == pcp_world_size
+        cache_dcp = 1 if replicated else dcp_world_size
+        if cache_dcp > 1:
+            self.block_size *= cache_dcp
         self.kv_cache_spec = kv_cache_spec
         self.block_pool = block_pool
         self.enable_caching = enable_caching
