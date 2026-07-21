@@ -6,6 +6,7 @@ import mimetypes
 import os
 import shutil
 import time
+from io import BytesIO
 from tempfile import NamedTemporaryFile, TemporaryDirectory
 
 import aiohttp
@@ -109,6 +110,34 @@ async def test_fetch_image_base64(
 
         data_image_async = await connector.fetch_image_async(data_url)
         assert _image_equals(data_image_sync, data_image_async)
+
+
+@pytest.mark.asyncio
+async def test_fetch_image_keep_original_mode():
+    """media_io_kwargs can disable the default RGB conversion."""
+    # RGBA image: opaque black pixel on a fully transparent background
+    rgba_image = Image.new("RGBA", (4, 4), (0, 0, 0, 0))
+    rgba_image.putpixel((2, 2), (0, 0, 0, 255))
+    buffer = BytesIO()
+    rgba_image.save(buffer, "PNG")
+    data_url = (
+        f"data:image/png;base64,{base64.b64encode(buffer.getvalue()).decode('utf-8')}"
+    )
+
+    # Default behavior: RGBA is composited onto a white background
+    default_image = MediaConnector().fetch_image(data_url)
+    assert default_image.mode == "RGB"
+    assert default_image.getpixel((0, 0)) == (255, 255, 255)
+    assert default_image.getpixel((2, 2)) == (0, 0, 0)
+
+    # image_mode=None via media_io_kwargs: original mode is preserved
+    connector = MediaConnector(media_io_kwargs={"image": {"image_mode": None}})
+    image_sync = connector.fetch_image(data_url)
+    image_async = await connector.fetch_image_async(data_url)
+    for image in (image_sync, image_async):
+        assert image.mode == "RGBA"
+        assert image.getpixel((0, 0)) == (0, 0, 0, 0)
+        assert image.getpixel((2, 2)) == (0, 0, 0, 255)
 
 
 @pytest.mark.asyncio
