@@ -1077,7 +1077,9 @@ def test_hybrid_cache_mamba_align_shared_prefix_detection():
     # junction (absolute) and stops the chunk there (req_2 has num_computed 0).
     # Create minimal mock with just the needed attributes
     mock = SimpleNamespace(
-        cache_config=SimpleNamespace(block_size=block_size),
+        cache_config=SimpleNamespace(
+            block_size=block_size, mamba_cache_mode="align"
+        ),
         use_eagle=False,
         hash_block_size=block_size,
         mamba_partial_cache_hit=False,

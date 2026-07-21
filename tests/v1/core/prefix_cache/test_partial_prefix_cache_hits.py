@@ -39,7 +39,9 @@ def test_mamba_align_split_partial_tail_schedule():
     block_size = 512
     hash_block_size = 32
     mock = SimpleNamespace(
-        cache_config=SimpleNamespace(block_size=block_size),
+        cache_config=SimpleNamespace(
+            block_size=block_size, mamba_cache_mode="align"
+        ),
         use_eagle=False,
         hash_block_size=hash_block_size,
         mamba_partial_cache_hit=True,
