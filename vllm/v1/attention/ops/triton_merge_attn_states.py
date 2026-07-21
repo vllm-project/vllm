@@ -15,16 +15,21 @@ def mask_empty_context_lse(
     context_start_loc: torch.Tensor,
 ) -> None:
     """Set LSE to -inf for queries whose context chunk is empty."""
-    num_heads = lse.shape[0]
+    num_heads, num_tokens = lse.shape
     num_reqs = query_start_loc.shape[0] - 1
     block_size = 128
-    mask_empty_context_lse_kernel[(num_reqs, num_heads)](
+    num_query_blocks = num_tokens // block_size + num_reqs
+    mask_empty_context_lse_kernel[(num_query_blocks,)](
         lse,
         query_start_loc,
         context_start_loc,
         lse.stride(0),
         lse.stride(1),
+        num_reqs,
+        NUM_HEADS=num_heads,
         BLOCK_SIZE=block_size,
+        BLOCK_HEADS=8,
+        num_warps=8,
     )
 
 
@@ -35,26 +40,54 @@ def mask_empty_context_lse_kernel(
     context_start_loc,
     lse_head_stride,
     lse_token_stride,
+    num_reqs,
+    NUM_HEADS: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
+    BLOCK_HEADS: tl.constexpr,
 ):
-    req_idx = tl.program_id(0)
-    head_idx = tl.program_id(1)
+    query_block_idx = tl.program_id(0)
+    lanes = tl.arange(0, 32)
+    req_chunk_start = 0
+    req_idx = 0
+    move_on = True
+    # Resolve the ragged request 32 boundaries at a time. The reduction stays
+    # warp-local, matching the expert-offset lookup used by EP kernels.
+    while (req_chunk_start < num_reqs) & move_on:
+        req_offsets = req_chunk_start + lanes
+        req_mask = req_offsets < num_reqs
+        query_starts = tl.load(query_start_loc + req_offsets, mask=req_mask)
+        req_block_starts = query_starts // BLOCK_SIZE + req_offsets
+        matches = req_mask & (req_block_starts <= query_block_idx)
+        match_count = tl.sum(matches.to(tl.int32))
+        req_idx = req_chunk_start + match_count - 1
+        move_on = match_count == 32
+        req_chunk_start += 32
+
+    query_start = tl.load(query_start_loc + req_idx)
+    query_end = tl.load(query_start_loc + req_idx + 1)
+    query_len = query_end - query_start
+    req_block_start = query_start // BLOCK_SIZE + req_idx
+    token_offset = (query_block_idx - req_block_start) * BLOCK_SIZE
+    if token_offset >= query_len:
+        return
 
     context_start = tl.load(context_start_loc + req_idx)
     context_end = tl.load(context_start_loc + req_idx + 1)
     if context_start != context_end:
         return
 
-    query_start = tl.load(query_start_loc + req_idx)
-    query_end = tl.load(query_start_loc + req_idx + 1)
-    query_len = query_end - query_start
-    for block_start in range(0, query_len, BLOCK_SIZE):
-        offsets = block_start + tl.arange(0, BLOCK_SIZE)
-        token_indices = query_start + offsets
+    token_offsets = token_offset + tl.arange(0, BLOCK_SIZE)
+    token_indices = query_start + token_offsets
+    head_offsets = tl.arange(0, BLOCK_HEADS)
+    for head_start in range(0, NUM_HEADS, BLOCK_HEADS):
+        head_indices = head_start + head_offsets
         tl.store(
-            lse + head_idx * lse_head_stride + token_indices * lse_token_stride,
+            lse
+            + head_indices[:, None] * lse_head_stride
+            + token_indices[None, :] * lse_token_stride,
             float("-inf"),
-            mask=offsets < query_len,
+            mask=(head_indices[:, None] < NUM_HEADS)
+            & (token_offsets[None, :] < query_len),
         )
 
 

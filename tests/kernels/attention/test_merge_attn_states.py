@@ -77,11 +77,17 @@ all_case_info: list[tuple] = []
 
 
 def test_mask_empty_context_lse() -> None:
-    query_start_loc = torch.tensor([0, 2, 133, 134], dtype=torch.int32, device="cuda")
-    context_start_loc = torch.tensor([0, 4, 4, 7], dtype=torch.int32, device="cuda")
-    lse = torch.randn(4, 134, device="cuda")
+    query_lens = torch.tensor([2] + [1] * 31 + [131, 1], dtype=torch.int32)
+    query_start_loc = torch.cat(
+        (torch.zeros(1, dtype=torch.int32), query_lens.cumsum(0))
+    ).cuda()
+    context_lens = torch.tensor([4] * 32 + [0, 3], dtype=torch.int32)
+    context_start_loc = torch.cat(
+        (torch.zeros(1, dtype=torch.int32), context_lens.cumsum(0))
+    ).cuda()
+    lse = torch.randn(4, 165, device="cuda")
     expected = lse.clone()
-    expected[:, 2:133] = float("-inf")
+    expected[:, 33:164] = float("-inf")
 
     mask_empty_context_lse(lse, query_start_loc, context_start_loc)
 
