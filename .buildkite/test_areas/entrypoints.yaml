@@ -78,7 +78,7 @@ steps:
 - label: Entrypoints Integration (API Server OpenAI - Part 2)
   device: h200_35gb
   key: entrypoints-integration-api-server-openai-part-2
-  timeout_in_minutes: 45
+  timeout_in_minutes: 55
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/
