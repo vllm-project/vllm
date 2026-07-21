@@ -125,6 +125,7 @@ GDN_BUILD_TEST_CASES = {
 def _create_gdn_builder(
     num_speculative_tokens: int = 0,
     full_cuda_graph: bool = False,
+    mamba_cache_mode: str = "align",
 ) -> GDNAttentionMetadataBuilder:
     """Create a GDNAttentionMetadataBuilder with minimal config."""
     vllm_config = create_vllm_config(
@@ -138,6 +139,7 @@ def _create_gdn_builder(
             method="ngram",
             num_speculative_tokens=num_speculative_tokens,
         )
+    vllm_config.cache_config.mamba_cache_mode = mamba_cache_mode
     mamba_spec = MambaSpec(
         block_size=BLOCK_SIZE,
         shapes=((16, 64),),
@@ -155,6 +157,7 @@ def _build(
     builder: GDNAttentionMetadataBuilder,
     batch_spec: BatchSpec,
     num_decode_draft_tokens: list[int] | None = None,
+    prev_last_scheduled_idx: list[int] | None = None,
 ) -> GDNAttentionMetadata:
     """Build GDN attention metadata, optionally with spec-decode kwargs."""
     common = create_common_attn_metadata(batch_spec, BLOCK_SIZE, DEVICE)
@@ -165,6 +168,10 @@ def _build(
         )
         kwargs["num_accepted_tokens"] = torch.ones(
             batch_spec.batch_size, dtype=torch.int32, device=DEVICE
+        )
+    if prev_last_scheduled_idx is not None:
+        kwargs["prev_last_scheduled_idx"] = torch.tensor(
+            prev_last_scheduled_idx, dtype=torch.int32, device=DEVICE
         )
     return builder.build(common_prefix_len=0, common_attn_metadata=common, **kwargs)
 
@@ -196,6 +203,141 @@ def test_has_initial_state_after_reclassification():
     assert meta.has_initial_state is not None
     # req0 has context_lens = 65 - 1 = 64 > 0, so has_initial_state[0] = True
     assert meta.has_initial_state[0].item() is True
+
+
+def test_align_mode_all_mode_fields_are_none():
+    """REGRESSION: outside "all" mode the block-index metadata stays None."""
+    builder = _create_gdn_builder()
+    batch = BatchSpec(seq_lens=[40, 30, 20], query_lens=[1, 1, 1])
+    meta = _build(builder, batch)
+
+    assert meta.block_idx_last_scheduled_token is None
+    assert meta.block_idx_first_scheduled_token is None
+    assert meta.block_idx_last_computed_token is None
+    assert meta.block_idx_last_scheduled_token_prev_step is None
+    assert meta.num_computed_tokens is None
+    assert meta.all_state_indices_tensor is None
+
+
+def test_all_mode_block_indices_match_hand_computed():
+    """All-mode decode batch: block indices follow the shared cdiv formulas
+    (mirrors BaseMambaAttentionMetadataBuilder) and the full block table is
+    exposed unsliced."""
+    builder = _create_gdn_builder(mamba_cache_mode="all")
+    batch = BatchSpec(seq_lens=[40, 30, 20], query_lens=[1, 1, 1])
+    meta = _build(builder, batch)
+
+    # num_computed = seq_len - query_len = [39, 29, 19]; block = 16.
+    assert meta.num_computed_tokens is not None
+    assert meta.num_computed_tokens.tolist() == [39, 29, 19]
+    # cdiv(ncomp, 16) - 1, clamped at 0.
+    assert meta.block_idx_last_computed_token.tolist() == [2, 1, 1]
+    # cdiv(ncomp + 1, 16) - 1.
+    assert meta.block_idx_first_scheduled_token.tolist() == [2, 1, 1]
+    # cdiv(seq_len, 16) - 1, clamped at 0.
+    assert meta.block_idx_last_scheduled_token.tolist() == [2, 1, 1]
+    # No spec rows in the batch -> no prev-step anchor.
+    assert meta.block_idx_last_scheduled_token_prev_step is None
+    assert meta.all_state_indices_tensor is not None
+    assert meta.all_state_indices_tensor.dim() == 2
+    assert meta.all_state_indices_tensor.shape[0] == batch.batch_size
+
+
+def test_all_mode_first_scheduled_crosses_block_boundary():
+    """A request whose next token starts a fresh block: first_scheduled must
+    exceed last_computed (ncomp = 32 = 2 full blocks -> first scheduled token
+    is the first of block 2, last computed is the last of block 1)."""
+    builder = _create_gdn_builder(mamba_cache_mode="all")
+    batch = BatchSpec(seq_lens=[33], query_lens=[1])
+    meta = _build(builder, batch)
+
+    assert meta.num_computed_tokens.tolist() == [32]
+    assert meta.block_idx_last_computed_token.tolist() == [1]
+    assert meta.block_idx_first_scheduled_token.tolist() == [2]
+    assert meta.block_idx_last_scheduled_token.tolist() == [2]
+
+
+def test_all_mode_spec_prev_step_where_semantics():
+    """Spec decode: prev_last_scheduled_idx >= 0 is used as-is; negative
+    entries fall back to the last computed block of the previous step."""
+    builder = _create_gdn_builder(num_speculative_tokens=2, mamba_cache_mode="all")
+    batch = BatchSpec(seq_lens=[50, 30], query_lens=[3, 3])
+    meta = _build(
+        builder,
+        batch,
+        num_decode_draft_tokens=[2, 2],
+        prev_last_scheduled_idx=[-1, 5],
+    )
+
+    # ncomp = [47, 27]; fallback = clamp((ncomp - 1) // 16, 0) = [2, 1].
+    assert meta.block_idx_last_scheduled_token_prev_step.tolist() == [2, 5]
+
+
+def test_all_mode_spec_prev_step_fallback_when_not_plumbed():
+    """Until the runner plumbs prev_last_scheduled_idx, the prev-step anchor
+    degrades to the last computed block (first-step semantics)."""
+    builder = _create_gdn_builder(num_speculative_tokens=2, mamba_cache_mode="all")
+    batch = BatchSpec(seq_lens=[50, 30], query_lens=[3, 3])
+    meta = _build(builder, batch, num_decode_draft_tokens=[2, 2])
+
+    assert meta.block_idx_last_scheduled_token_prev_step.tolist() == [2, 1]
+
+
+def test_all_mode_full_cudagraph_spec_uses_persistent_buffers():
+    """FULL cudagraph + all-mode pure-spec batch: the block-index metadata
+    must be views of the builder's persistent buffers (stable device pointers
+    across steps) with request-level padding."""
+    builder = _create_gdn_builder(
+        num_speculative_tokens=3,
+        full_cuda_graph=True,
+        mamba_cache_mode="all",
+    )
+    batch = BatchSpec(seq_lens=[80, 96], query_lens=[4, 4])
+    meta = _build(builder, batch, num_decode_draft_tokens=[3, 3])
+
+    assert meta.num_spec_decodes == batch.batch_size
+    assert (
+        meta.all_state_indices_tensor.data_ptr()
+        == builder.all_state_indices_tensor.data_ptr()
+    )
+    assert (
+        meta.block_idx_last_scheduled_token.data_ptr()
+        == builder.block_idx_last_scheduled_token.data_ptr()
+    )
+    assert (
+        meta.block_idx_last_computed_token.data_ptr()
+        == builder.block_idx_last_computed_token.data_ptr()
+    )
+    assert (
+        meta.block_idx_last_scheduled_token_prev_step.data_ptr()
+        == builder.block_idx_last_scheduled_token_prev_step.data_ptr()
+    )
+    # Values survive the buffer round-trip: ncomp = [76, 92], block = 16.
+    assert meta.block_idx_last_computed_token.tolist() == [4, 5]
+    assert meta.block_idx_last_scheduled_token.tolist() == [4, 5]
+
+
+def test_all_mode_full_cudagraph_decode_uses_persistent_buffers():
+    """FULL cudagraph + all-mode non-spec decode batch takes the second
+    capture branch and must also land in the persistent buffers."""
+    builder = _create_gdn_builder(full_cuda_graph=True, mamba_cache_mode="all")
+    batch = BatchSpec(seq_lens=[40, 30], query_lens=[1, 1])
+    meta = _build(builder, batch)
+
+    assert meta.num_decodes == batch.batch_size
+    assert (
+        meta.all_state_indices_tensor.data_ptr()
+        == builder.all_state_indices_tensor.data_ptr()
+    )
+    assert (
+        meta.block_idx_last_scheduled_token.data_ptr()
+        == builder.block_idx_last_scheduled_token.data_ptr()
+    )
+    assert (
+        meta.block_idx_last_computed_token.data_ptr()
+        == builder.block_idx_last_computed_token.data_ptr()
+    )
+    assert meta.block_idx_last_computed_token.tolist() == [2, 1]
 
 
 def test_full_cudagraph_spec_metadata_uses_request_count():
