@@ -5,7 +5,6 @@ import torch
 
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
-from vllm.v1.attention.ops.triton_attention_helpers import find_seq_idx_warp
 
 float8_info = torch.finfo(current_platform.fp8_dtype())
 
@@ -33,6 +32,30 @@ def mask_empty_context_lse(
         BLOCK_HEADS=8,
         num_warps=8,
     )
+
+
+@triton.jit
+def find_seq_idx_warp(
+    query_start_len_ptr,
+    target_idx,
+    num_seqs,
+    BLOCK_Q: tl.constexpr,
+):
+    """Resolve a ragged query block by scanning 32 boundaries at a time."""
+    lanes = tl.arange(0, 32)
+    chunk_start = 0
+    seq_idx = 0
+    move_on = True
+    while (chunk_start < num_seqs) & move_on:
+        seq_offsets = chunk_start + lanes
+        seq_mask = seq_offsets < num_seqs
+        query_starts = tl.load(query_start_len_ptr + seq_offsets, mask=seq_mask)
+        seq_block_starts = query_starts // BLOCK_Q + seq_offsets
+        match_count = tl.sum((seq_mask & (seq_block_starts <= target_idx)).to(tl.int32))
+        seq_idx = chunk_start + match_count - 1
+        move_on = match_count == 32
+        chunk_start += 32
+    return seq_idx
 
 
 @triton.jit
