@@ -69,6 +69,132 @@ def enable_pickle(monkeypatch):
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
 
 
+def test_quark_nvfp4_moe_forwards_swiglu_params():
+    from unittest.mock import MagicMock, patch
+
+    from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+    from vllm.model_executor.layers.fused_moe.config import (
+        FusedMoEConfig,
+        FusedMoEParallelConfig,
+        RoutingMethodType,
+    )
+    from vllm.model_executor.layers.quantization.quark import quark_moe
+    from vllm.model_executor.layers.quantization.quark.quark_moe import (
+        QuarkNvfp4MoEMethod,
+    )
+
+    moe_config = FusedMoEConfig(
+        num_experts=2,
+        experts_per_token=1,
+        hidden_dim=16,
+        intermediate_size=32,
+        num_local_experts=2,
+        num_logical_experts=2,
+        activation=MoEActivation.SWIGLUOAI,
+        device="cpu",
+        routing_method=RoutingMethodType.TopK,
+        moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
+        in_dtype=torch.bfloat16,
+        max_num_tokens=8,
+        intermediate_size_per_partition=32,
+    )
+
+    layer = torch.nn.Module()
+    layer.w13_weight_scale = torch.ones(2)
+    layer.w2_weight_scale = torch.ones(2)
+    layer.w13_weight_scale_2 = torch.ones(2)
+    layer.w2_weight_scale_2 = torch.ones(2)
+    layer.w13_input_scale_2 = torch.ones(2)
+    layer.w2_input_scale_2 = torch.ones(2)
+    layer.swiglu_limit = 7.0
+    layer.swiglu_alpha = 1.702
+    layer.swiglu_beta = 1.0
+
+    make_quant_config = MagicMock(return_value=object())
+    with (
+        patch.object(
+            quark_moe,
+            "select_nvfp4_moe_backend",
+            return_value=(object(), object()),
+        ),
+        patch.object(
+            quark_moe,
+            "make_nvfp4_moe_quant_config",
+            make_quant_config,
+        ),
+    ):
+        method = QuarkNvfp4MoEMethod({}, {}, moe_config, MagicMock())
+        method.get_fused_moe_quant_config(layer)
+
+    _, kwargs = make_quant_config.call_args
+    assert kwargs["swiglu_limit"] == 7.0
+    assert kwargs["swiglu_alpha"] == 1.702
+    assert kwargs["swiglu_beta"] == 1.0
+
+
+def test_quark_nvfp4_swiglu_limit_allows_emulation_backend(monkeypatch):
+    from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+    from vllm.model_executor.layers.fused_moe.config import (
+        FusedMoEConfig,
+        FusedMoEParallelConfig,
+        RoutingMethodType,
+    )
+    from vllm.model_executor.layers.fused_moe.oracle import nvfp4
+    from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
+        NvFp4MoeBackend,
+        select_nvfp4_moe_backend,
+    )
+    from vllm.model_executor.layers.quantization.utils.quant_utils import (
+        kNvfp4Dynamic,
+        kNvfp4Static,
+    )
+
+    class UnsupportedExperts:
+        @staticmethod
+        def is_supported_config(cls, config, weight_key, activation_key, fmt):
+            return False, "unsupported"
+
+    class SupportedExperts:
+        @staticmethod
+        def is_supported_config(cls, config, weight_key, activation_key, fmt):
+            return True, None
+
+    def backend_to_kernel_cls(backend):
+        if backend == NvFp4MoeBackend.EMULATION:
+            return [SupportedExperts]
+        return [UnsupportedExperts]
+
+    config = FusedMoEConfig(
+        num_experts=2,
+        experts_per_token=1,
+        hidden_dim=16,
+        intermediate_size=32,
+        num_local_experts=2,
+        num_logical_experts=2,
+        activation=MoEActivation.SWIGLUOAI,
+        device="cpu",
+        routing_method=RoutingMethodType.TopK,
+        moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
+        in_dtype=torch.bfloat16,
+        max_num_tokens=8,
+        swiglu_limit=7.0,
+        intermediate_size_per_partition=32,
+    )
+
+    monkeypatch.setattr(nvfp4.envs, "is_set", lambda _: False)
+    monkeypatch.setattr(nvfp4.envs, "VLLM_TEST_FORCE_FP8_MARLIN", False)
+    monkeypatch.setattr(nvfp4, "backend_to_kernel_cls", backend_to_kernel_cls)
+
+    backend, experts_cls = select_nvfp4_moe_backend(
+        config=config,
+        weight_key=kNvfp4Static,
+        activation_key=kNvfp4Dynamic,
+    )
+
+    assert backend == NvFp4MoeBackend.EMULATION
+    assert experts_cls is SupportedExperts
+
+
 @pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8"])
 @pytest.mark.parametrize("tp", [1])
 def test_quark_fp8_w_per_tensor_a_per_tensor(vllm_runner, kv_cache_dtype, tp):
