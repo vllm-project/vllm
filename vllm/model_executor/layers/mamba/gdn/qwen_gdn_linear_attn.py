@@ -37,6 +37,9 @@ from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
     RowParallelLinear,
 )
+from vllm.model_executor.layers.mamba.gdn.all_mode_utils import (
+    gdn_scatter_block_checkpoints,
+)
 from vllm.model_executor.layers.mamba.gdn.base import GatedDeltaNetAttention
 from vllm.model_executor.layers.mamba.mamba_mixer2 import mamba_v2_sharded_weight_loader
 from vllm.model_executor.layers.mamba.mamba_utils import (
@@ -324,7 +327,10 @@ class ChunkGatedDeltaRule(CustomOp):
         chunk_offsets: torch.Tensor | None = None,
         use_qk_l2norm_in_kernel: bool = True,
         core_attn_out: torch.Tensor | None = None,
+        return_intermediate_states: bool = False,
     ):
+        # Only the Triton/FLA backend exports per-chunk states (all-mode).
+        assert not return_intermediate_states
         o, final_state = fi_chunk_gated_delta_rule(
             q=q,
             k=k,
@@ -356,6 +362,7 @@ class ChunkGatedDeltaRule(CustomOp):
         chunk_offsets: torch.Tensor | None = None,
         use_qk_l2norm_in_kernel: bool = True,
         core_attn_out: torch.Tensor | None = None,
+        return_intermediate_states: bool = False,
     ):
         return fla_chunk_gated_delta_rule(
             q=q,
@@ -370,6 +377,7 @@ class ChunkGatedDeltaRule(CustomOp):
             chunk_offsets=chunk_offsets,
             use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
             core_attn_out=core_attn_out,
+            return_intermediate_states=return_intermediate_states,
         )
 
     def forward_cutedsl(
@@ -386,7 +394,11 @@ class ChunkGatedDeltaRule(CustomOp):
         chunk_offsets: torch.Tensor | None = None,
         use_qk_l2norm_in_kernel: bool = True,
         core_attn_out: torch.Tensor | None = None,
+        return_intermediate_states: bool = False,
     ):
+        # Only the Triton/FLA backend exports per-chunk states (all-mode).
+        assert not return_intermediate_states
+
         from vllm.model_executor.layers.mamba.ops.gdn_chunk_cutedsl import (
             chunk_gated_delta_rule_cutedsl,
         )
@@ -1315,6 +1327,44 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         num_actual_tokens = attn_metadata.num_actual_tokens
         num_accepted_tokens = attn_metadata.num_accepted_tokens
 
+        # all-mode prefix caching is active when the builder populated the
+        # full block table. The request-level block-index metadata is sliced
+        # to the NON-SPEC partition here (prefill + peeled decodes) because
+        # the prefill conv/kernel paths below process only the ~spec rows
+        # (has_initial_state is already ~spec-sliced by the builder). Gated on
+        # num_prefills so the boolean selects only run in eager batches:
+        # batches with prefills are never cudagraph-captured, and captured
+        # (pure-spec / decode-only) batches must not reach a nonzero()-based
+        # row select. With no spec rows this is the identity.
+        is_all_mode = attn_metadata.all_state_indices_tensor is not None
+        ns_all_state_indices = ns_block_idx_last_computed = None
+        ns_block_idx_first_scheduled = ns_block_idx_last_scheduled = None
+        ns_num_computed_tokens = None
+        if is_all_mode and attn_metadata.num_prefills > 0:
+            if attn_metadata.spec_sequence_masks is not None:
+                _ns = ~attn_metadata.spec_sequence_masks
+                ns_all_state_indices = attn_metadata.all_state_indices_tensor[_ns]
+                ns_block_idx_last_computed = (
+                    attn_metadata.block_idx_last_computed_token[_ns]
+                )
+                ns_block_idx_first_scheduled = (
+                    attn_metadata.block_idx_first_scheduled_token[_ns]
+                )
+                ns_block_idx_last_scheduled = (
+                    attn_metadata.block_idx_last_scheduled_token[_ns]
+                )
+                ns_num_computed_tokens = attn_metadata.num_computed_tokens[_ns]
+            else:
+                ns_all_state_indices = attn_metadata.all_state_indices_tensor
+                ns_block_idx_last_computed = attn_metadata.block_idx_last_computed_token
+                ns_block_idx_first_scheduled = (
+                    attn_metadata.block_idx_first_scheduled_token
+                )
+                ns_block_idx_last_scheduled = (
+                    attn_metadata.block_idx_last_scheduled_token
+                )
+                ns_num_computed_tokens = attn_metadata.num_computed_tokens
+
         mixed_qkv = mixed_qkv[:num_actual_tokens]
         b = b[:num_actual_tokens]
         a = a[:num_actual_tokens]
@@ -1360,6 +1410,10 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             mixed_qkv_non_spec_T = mixed_qkv_non_spec.transpose(0, 1)
             # - "cache_indices" updates the conv_state cache in positions
             #   pointed to by "state_indices_tensor"
+            # In all-mode the conv reads its initial state from the last
+            # computed block, writes block-aligned conv-state checkpoints,
+            # and indexes the full per-request block table (mirrors
+            # mamba_mixer2). The extra args are None/0 otherwise.
             mixed_qkv_non_spec = causal_conv1d_fn(
                 mixed_qkv_non_spec_T,
                 conv_weights,
@@ -1367,7 +1421,18 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 activation=self.activation,
                 conv_states=conv_state,
                 has_initial_state=has_initial_state,
-                cache_indices=non_spec_state_indices_tensor,
+                cache_indices=(
+                    ns_all_state_indices
+                    if is_all_mode
+                    else non_spec_state_indices_tensor
+                ),
+                block_idx_first_scheduled_token=ns_block_idx_first_scheduled,
+                block_idx_last_scheduled_token=ns_block_idx_last_scheduled,
+                initial_state_idx=ns_block_idx_last_computed,
+                num_computed_tokens=ns_num_computed_tokens,
+                block_size_to_align=(
+                    self.cache_config.mamba_block_size if is_all_mode else 0
+                ),
                 query_start_loc=non_spec_query_start_loc,
                 metadata=attn_metadata,
             ).transpose(0, 1)
@@ -1508,12 +1573,32 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             prefill_has_initial_state = attn_metadata.prefill_has_initial_state
             assert prefill_state_indices is not None
             assert prefill_has_initial_state is not None
-            initial_state = ssm_state[prefill_state_indices]
+            if is_all_mode:
+                # Peel decode rows off the non-spec slices: the chunk kernel
+                # and the checkpoint scatter process prefill rows only (the
+                # chunk metadata is already prefill-only, see the builder).
+                num_decodes = attn_metadata.num_decodes
+                assert ns_all_state_indices is not None
+                assert ns_block_idx_first_scheduled is not None
+                assert ns_block_idx_last_scheduled is not None
+                assert ns_block_idx_last_computed is not None
+                assert ns_num_computed_tokens is not None
+                p_all_state_indices = ns_all_state_indices[num_decodes:]
+                p_block_idx_first_scheduled = ns_block_idx_first_scheduled[num_decodes:]
+                p_block_idx_last_scheduled = ns_block_idx_last_scheduled[num_decodes:]
+                p_block_idx_last_computed = ns_block_idx_last_computed[num_decodes:]
+                p_num_computed_tokens = ns_num_computed_tokens[num_decodes:]
+                # Load the initial recurrent state from the last *computed*
+                # block boundary (the prefix-cache hit), not the leading
+                # block of the table.
+                init_idx = p_all_state_indices.gather(
+                    1, p_block_idx_last_computed.long().unsqueeze(1)
+                ).squeeze(1)
+                initial_state = ssm_state[init_idx]
+            else:
+                initial_state = ssm_state[prefill_state_indices]
             initial_state[~prefill_has_initial_state, ...] = 0
-            (
-                core_attn_out_non_spec,
-                last_recurrent_state,
-            ) = self.chunk_gated_delta_rule(
+            outputs = self.chunk_gated_delta_rule(
                 q=query_non_spec,
                 k=key_non_spec,
                 v=value_non_spec,
@@ -1525,9 +1610,33 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 chunk_indices=attn_metadata.chunk_indices,
                 chunk_offsets=attn_metadata.chunk_offsets,
                 use_qk_l2norm_in_kernel=False,
+                return_intermediate_states=is_all_mode,
             )
-            # Init cache
-            ssm_state[prefill_state_indices] = last_recurrent_state.to(ssm_state.dtype)
+            if is_all_mode:
+                core_attn_out_non_spec, last_recurrent_state, inter_states = outputs
+                # Scatter per-block SSM checkpoints into every scheduled
+                # block (final block from the final state; interior blocks
+                # from the per-chunk exports). Replaces the blanket
+                # final-state write below.
+                assert attn_metadata.chunk_offsets is not None
+                gdn_scatter_block_checkpoints(
+                    ssm_state,
+                    inter_states.squeeze(0),
+                    last_recurrent_state,
+                    p_all_state_indices,
+                    p_block_idx_first_scheduled,
+                    p_block_idx_last_scheduled,
+                    p_num_computed_tokens,
+                    attn_metadata.chunk_offsets,
+                    self.cache_config.mamba_block_size,
+                    FLA_CHUNK_SIZE,
+                )
+            else:
+                core_attn_out_non_spec, last_recurrent_state = outputs
+                # Init cache
+                ssm_state[prefill_state_indices] = last_recurrent_state.to(
+                    ssm_state.dtype
+                )
 
             if split_non_spec:
                 # Stitch the peeled decode outputs in front of the prefill
