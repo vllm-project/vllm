@@ -20,6 +20,13 @@ from vllm.config.parallel import ParallelConfig
 from vllm.utils.network_utils import get_open_port
 from vllm.utils.system_utils import update_environment_variables
 
+try:
+    from torch.distributed.distributed_c10d import _use_torchcomms_enabled
+except (ImportError, AttributeError):
+
+    def _use_torchcomms_enabled() -> bool:
+        return False
+
 mp.set_start_method("spawn", force=True)
 
 
@@ -380,7 +387,7 @@ def _distributed_packed_a2a_worker(env: dict[str, str]) -> None:
     update_environment_variables(env)
     local_rank = int(env["LOCAL_RANK"])
     torch.accelerator.set_device_index(local_rank)
-    if envs.VLLM_DISTRIBUTED_USE_SPLIT_GROUP:
+    if envs.VLLM_DISTRIBUTED_USE_SPLIT_GROUP or _use_torchcomms_enabled():
         dist.init_process_group(
             backend="cpu:gloo,cuda:nccl",
             device_id=torch.device(f"cuda:{local_rank}"),

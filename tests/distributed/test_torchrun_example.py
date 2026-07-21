@@ -12,11 +12,19 @@ import vllm.envs as envs
 from vllm import LLM, SamplingParams
 from vllm.distributed.parallel_state import get_world_group
 
+try:
+    from torch.distributed.distributed_c10d import _use_torchcomms_enabled
+except (ImportError, AttributeError):
+
+    def _use_torchcomms_enabled() -> bool:
+        return False
+
+
 # By default, let PyTorch choose the WORLD backend for the current device
-# type (legacy lazy-init path). When VLLM_DISTRIBUTED_USE_SPLIT_GROUP=1,
-# use the explicit eager-init pattern required by `split_group` (mixed
-# cpu:gloo,cuda:nccl backend + device_id binding).
-if envs.VLLM_DISTRIBUTED_USE_SPLIT_GROUP:
+# type (legacy lazy-init path). When VLLM_DISTRIBUTED_USE_SPLIT_GROUP=1 or torchcomms
+# is enabled, use the explicit eager-init pattern required by
+# ``split_group`` (mixed cpu:gloo,cuda:nccl backend + device_id binding).
+if envs.VLLM_DISTRIBUTED_USE_SPLIT_GROUP or _use_torchcomms_enabled():
     local_rank = int(os.environ["LOCAL_RANK"])
     torch.accelerator.set_device_index(local_rank)
     dist.init_process_group(
