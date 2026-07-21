@@ -13,7 +13,10 @@ import torch
 from vllm.config import CacheConfig, VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
-from vllm.model_executor.models.interfaces import MultiModalEmbeddings
+from vllm.model_executor.models.interfaces import (
+    MultiModalEmbeddings,
+    SupportsMultiModal,
+)
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
@@ -420,6 +423,47 @@ def sanity_check_mm_encoder_outputs(
         "instead. This is most likely due to incorrect implementation "
         "of the model's `embed_multimodal` method."
     )
+
+
+def profile_mm_embed_input_ids(
+    model: SupportsMultiModal,
+    mm_embeddings: MultiModalEmbeddings,
+    num_tokens: int,
+    device: torch.device,
+) -> None:
+    """Run the multimodal embedding merge once so profiling reserves it.
+
+    Dummy runs pass the model a slice of the pre-allocated `inputs_embeds`
+    buffer, so `embed_input_ids` never executes during memory profiling even
+    though every step carrying multimodal data calls it. Its temporaries scale
+    with `max_num_batched_tokens` (and, for models with deepstack embeddings,
+    with several times the hidden size), so run it on a full batch of
+    multimodal tokens to include that peak in the profiled memory.
+
+    Args:
+        model: The multimodal model being profiled.
+        mm_embeddings: Encoder outputs from the dummy encoder run.
+        num_tokens: Batch size to profile, i.e. `max_num_batched_tokens`.
+        device: Device to place the dummy input IDs on.
+    """
+    mm_embeds = list[torch.Tensor]()
+    num_mm_tokens = 0
+    for mm_embedding in mm_embeddings:
+        if num_mm_tokens >= num_tokens:
+            break
+        mm_embeds.append(mm_embedding[: num_tokens - num_mm_tokens])
+        num_mm_tokens += mm_embeds[-1].size(0)
+
+    # `is_multimodal` is kept on CPU by the serving path to avoid a D2H sync.
+    is_mm_embed = torch.zeros(num_tokens, dtype=torch.bool, device="cpu")
+    is_mm_embed[:num_mm_tokens] = True
+
+    inputs_embeds = model.embed_input_ids(
+        torch.zeros(num_tokens, dtype=torch.int32, device=device),
+        multimodal_embeddings=mm_embeds,
+        is_multimodal=is_mm_embed,
+    )
+    del inputs_embeds
 
 
 def request_memory(init_snapshot: MemorySnapshot, cache_config: CacheConfig) -> int:

@@ -9,6 +9,8 @@ and tolerated (token-embedding fallback) when it is not, while a miss within
 the processed range still fails loudly.
 """
 
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
 import torch
@@ -181,3 +183,51 @@ def test_gather_preserves_mixed_modalities():
     assert len(mm_embeds) == 2
     assert [e.modality for e in mm_embeds] == ["video", "audio"]
     assert int(is_mm_embed.sum()) == 8
+
+
+class _MergeRecordingModel:
+    """Stands in for a multimodal model, recording the merge-path inputs."""
+
+    def __init__(self):
+        self.calls: list[tuple[torch.Tensor, list[torch.Tensor], torch.Tensor]] = []
+
+    def embed_input_ids(self, input_ids, multimodal_embeddings=None, *, is_multimodal):
+        self.calls.append((input_ids, list(multimodal_embeddings), is_multimodal))
+        return torch.zeros(input_ids.size(0), HIDDEN)
+
+
+def test_profile_encoder_cache_profiles_the_embedding_merge():
+    """Startup profiling must run `embed_input_ids` on a full batch.
+
+    Dummy runs hand the model a slice of the pre-allocated `inputs_embeds`
+    buffer, so without this the merge path -- and temporaries that scale with
+    `max_num_batched_tokens`, such as Qwen3-VL's deepstack embeddings -- is
+    never allocated while profiling and first shows up on a live request,
+    OOMing an engine that started up fine.
+    """
+    model = _MergeRecordingModel()
+    runner = EncoderRunner(
+        model=model,
+        max_num_tokens=64,
+        hidden_size=HIDDEN,
+        encoder_cache=EncoderCache(),
+        dtype=torch.float32,
+        device=torch.device("cpu"),
+    )
+    dummy_outputs = [torch.zeros(8, HIDDEN)]
+    runner.execute_mm_encoder = lambda mm_kwargs: dummy_outputs
+    budget = SimpleNamespace(
+        get_encoder_budget=lambda: 64,
+        mm_max_toks_per_item={"image": 8},
+        model_config=SimpleNamespace(is_encoder_decoder=False),
+    )
+
+    runner.profile_encoder_cache([("image", None)], budget)
+
+    assert model.calls, "the multimodal merge path was not profiled"
+    input_ids, mm_embeds, is_mm_embed = model.calls[0]
+    assert input_ids.size(0) == runner.max_num_tokens
+    assert is_mm_embed.size(0) == runner.max_num_tokens
+    # `_merge_multimodal_embeddings` needs one embedding row per masked
+    # position; the mask must never claim more rows than were passed in.
+    assert sum(e.size(0) for e in mm_embeds) == int(is_mm_embed.sum())
