@@ -6,7 +6,7 @@ from vllm.config import ModelConfig
 from vllm.tasks import SupportedTask
 
 if TYPE_CHECKING:
-    from vllm.entrypoints.sagemaker.api_router import (
+    from vllm.entrypoints.serve.sagemaker.api_router import (
         EndpointFn,
         GetHandlerFn,
         RequestType,

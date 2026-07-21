@@ -245,8 +245,6 @@ def test_cutlass_fp8_blockwise_scale_gemm(
         return
     if m % a_scale_group_shape[0] != 0 or k % a_scale_group_shape[1] != 0:
         return
-    if m % 4 != 0 and current_platform.has_device_capability(100):
-        return
     cutlass_fp8_gemm_helper(m, n, k, a_scale_group_shape, b_scale_group_shape, use_bias)
 
 

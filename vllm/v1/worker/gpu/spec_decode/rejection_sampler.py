@@ -6,9 +6,12 @@ from vllm.config import SpeculativeConfig
 from vllm.triton_utils import tl, triton
 from vllm.v1.outputs import LogprobsTensors
 from vllm.v1.spec_decode.utils import unconditional_to_conditional_rates
-from vllm.v1.worker.gpu.input_batch import InputBatch
+from vllm.v1.worker.gpu.input_batch import (
+    InputBatch,
+    get_num_sampled_and_rejected,
+)
 from vllm.v1.worker.gpu.metrics.logits import get_num_nans
-from vllm.v1.worker.gpu.sample.logprob import compute_topk_logprobs
+from vllm.v1.worker.gpu.sample.logprob import compute_topk_scores
 from vllm.v1.worker.gpu.sample.output import SamplerOutput
 from vllm.v1.worker.gpu.sample.sampler import Sampler
 from vllm.v1.worker.gpu.sample.states import NO_LOGPROBS
@@ -46,9 +49,10 @@ class RejectionSampler:
     ):
         self.sampler = sampler
         self.num_speculative_steps = spec_config.num_speculative_tokens
-        self.rejection_sample_method = spec_config.rejection_sample_method
+        rejection_sample_method = spec_config.rejection_sample_method
+        self.use_block_verification: bool = False
         self.synthetic_conditional_rates: torch.Tensor | None = None
-        if self.rejection_sample_method == "synthetic":
+        if rejection_sample_method == "synthetic":
             assert spec_config.synthetic_acceptance_rates is not None
             self.synthetic_conditional_rates = torch.tensor(
                 unconditional_to_conditional_rates(
@@ -57,6 +61,8 @@ class RejectionSampler:
                 dtype=torch.float32,
                 device=device,
             )
+        elif rejection_sample_method == "block":
+            self.use_block_verification = True
 
     def _get_logprobs_tensors(
         self,
@@ -85,11 +91,13 @@ class RejectionSampler:
             num_warps=1,
         )
         expanded_logits = num_logits != input_batch.idx_mapping.shape[0]
-        return compute_topk_logprobs(
+        return compute_topk_scores(
             logits,
             max_num_logprobs,
             flat_sampled,
             input_batch.cu_num_logits_np.tolist() if expanded_logits else None,
+            logits_mode=self.sampler.logprobs_mode
+            in ("raw_logits", "processed_logits"),
         )
 
     def __call__(
@@ -126,14 +134,23 @@ class RejectionSampler:
             self.num_speculative_steps,
             self.synthetic_conditional_rates,
             use_fp64=self.sampler.use_fp64_gumbel,
+            use_block_verification=self.use_block_verification,
         )
         logprobs_tensors = self._get_logprobs_tensors(
             input_batch,
             sampled,
             num_sampled,
             processed_logits
-            if self.sampler.logprobs_mode == "processed_logprobs"
+            if self.sampler.logprobs_mode in ("processed_logprobs", "processed_logits")
             else logits,
+        )
+
+        num_sampled, num_rejected = get_num_sampled_and_rejected(
+            num_sampled,
+            input_batch.seq_lens,
+            input_batch.cu_num_logits,
+            input_batch.idx_mapping,
+            self.sampler.req_states.prefill_len.gpu,
         )
 
         return SamplerOutput(
@@ -141,4 +158,5 @@ class RejectionSampler:
             logprobs_tensors=logprobs_tensors,
             num_nans=num_nans,
             num_sampled=num_sampled,
+            num_rejected=num_rejected,
         )
