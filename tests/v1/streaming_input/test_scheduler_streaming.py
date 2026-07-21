@@ -53,6 +53,7 @@ def create_scheduler() -> Scheduler:
     vllm_config.model_config = MagicMock()
     vllm_config.model_config.skip_tokenizer_init = True
     vllm_config.model_config.is_multimodal_model = False
+    vllm_config.model_config.is_encoder_decoder = False
     vllm_config.model_config.max_model_len = 1024
     vllm_config.model_config.enable_return_routed_experts = False
     vllm_config.cache_config = MagicMock()
@@ -169,6 +170,65 @@ class TestStreamingScheduler(unittest.TestCase):
         assert session._all_token_ids == [1, 2, 3, 4, 5, 6]
         assert session.sampling_params.max_tokens == 10
         assert session.status == RequestStatus.WAITING
+
+    def test_update_request_as_session_clears_async_spec_state(self):
+        """Regression test for https://github.com/vllm-project/vllm/issues/42655
+
+        When a streaming session is rebuilt via _update_request_as_session,
+        stale async scheduling / speculative decode state must be cleared.
+        Otherwise the scheduler emits scheduled_spec_decode_tokens for the
+        rebuilt request, but the worker's prev_req_id_to_index no longer
+        contains it, causing a KeyError crash.
+        """
+        scheduler = create_scheduler()
+
+        session = DummyRequest(
+            request_id="session",
+            prompt_token_ids=[1, 2, 3],
+        )
+        session.append_output_token_ids([10, 11])
+        session.num_computed_tokens = 4
+        # Simulate stale async scheduling state from prior chunk.
+        session.spec_token_ids = [101, 102, 103]
+        session.num_output_placeholders = 4
+
+        new_request = DummyRequest(
+            request_id="session",
+            prompt_token_ids=[4, 5],
+        )
+        update = StreamingUpdate.from_request(new_request)
+
+        scheduler._update_request_as_session(session, update)
+
+        assert session._all_token_ids == [1, 2, 3, 10, 4, 5]
+        assert session.prompt_token_ids == [1, 2, 3, 10, 4, 5]
+        assert session.spec_token_ids == []
+        assert session.async_tokens_to_discard == 4
+        assert session.num_output_placeholders == 0
+        assert session.status == RequestStatus.WAITING
+
+    def test_handle_stopped_request_clears_spec_state(self):
+        """When a resumable request stops and waits for the next streaming
+        chunk, stale spec/async state must be cleared."""
+        scheduler = create_scheduler()
+
+        request = DummyRequest(
+            request_id="session",
+            prompt_token_ids=[1, 2, 3],
+        )
+        request.streaming_queue = __import__("collections").deque()
+        request.spec_token_ids = [101, 102]
+        request.num_output_placeholders = 3
+        request.status = RequestStatus.RUNNING
+        scheduler.requests[request.request_id] = request
+
+        finished = scheduler._handle_stopped_request(request)
+
+        assert not finished
+        assert request.status == RequestStatus.WAITING_FOR_STREAMING_REQ
+        assert request.spec_token_ids == []
+        assert request.async_tokens_to_discard == 3
+        assert request.num_output_placeholders == 0
 
     def test_update_request_as_session_with_multimodal(self):
         scheduler = create_scheduler()
