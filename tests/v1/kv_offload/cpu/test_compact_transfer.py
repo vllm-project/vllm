@@ -1053,3 +1053,35 @@ def test_address_scaling_mismatch_fails() -> None:
             ),
             block_size_factor=2,
         )
+
+
+def test_swap_blocks_batch_default_use_batch_api() -> None:
+    """Verify use_batch_api=True is the default in the Python wrapper."""
+    import inspect
+
+    from vllm import _custom_ops as ops
+
+    sig = inspect.signature(ops.swap_blocks_batch)
+    param = sig.parameters["use_batch_api"]
+    assert param.default is True, (
+        f"expected use_batch_api default True, got {param.default}"
+    )
+
+
+def test_compact_transfer_uses_batch_api_false() -> None:
+    """Verify use_batch_api=False is passed for compact transfers.
+
+    Reads the source of ``_transfer_compact`` to confirm it calls
+    ``_submit_descriptors`` with ``use_batch_api=False`` without
+    importing heavy GPU dependencies.
+    """
+    import inspect
+
+    from vllm.v1.kv_offload.cpu.gpu_worker import (
+        SingleDirectionOffloadingHandler,
+    )
+
+    src = inspect.getsource(SingleDirectionOffloadingHandler._transfer_compact)
+    assert "use_batch_api=False" in src, (
+        f"_transfer_compact must pass use_batch_api=False; got source:\n{src}"
+    )

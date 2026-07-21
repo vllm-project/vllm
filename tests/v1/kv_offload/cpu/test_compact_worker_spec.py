@@ -1026,6 +1026,7 @@ def test_handler_transfer_compact_both_directions() -> None:
         batch_sizes: torch.Tensor,
         num_copy_ops: int,
         num_transfer_bytes: int,
+        use_batch_api: bool = True,
     ) -> bool:
         captured.append(
             {
@@ -1035,6 +1036,7 @@ def test_handler_transfer_compact_both_directions() -> None:
                 "sizes": batch_sizes.clone(),
                 "num_copy_ops": num_copy_ops,
                 "num_transfer_bytes": num_transfer_bytes,
+                "use_batch_api": use_batch_api,
             }
         )
         return True
@@ -1070,6 +1072,11 @@ def test_handler_transfer_compact_both_directions() -> None:
     # Total: 7
     assert call["num_copy_ops"] == 7
     assert call["num_transfer_bytes"] == 3 * 120
+    # Compact transfer must pass use_batch_api=False to bypass the
+    # driver batch-API path that segfaults with large descriptor counts.
+    assert call["use_batch_api"] is False, (
+        "compact GPU->CPU must explicitly pass use_batch_api=False"
+    )
 
     # Verify types
     assert call["src"].dtype in (torch.int64, torch.uint64)
@@ -1128,6 +1135,7 @@ def test_handler_transfer_compact_both_directions() -> None:
         batch_sizes: torch.Tensor,
         num_copy_ops: int,
         num_transfer_bytes: int,
+        use_batch_api: bool = True,
     ) -> bool:
         captured.append(
             {
@@ -1137,6 +1145,7 @@ def test_handler_transfer_compact_both_directions() -> None:
                 "sizes": batch_sizes.clone(),
                 "num_copy_ops": num_copy_ops,
                 "num_transfer_bytes": num_transfer_bytes,
+                "use_batch_api": use_batch_api,
             }
         )
         return True
@@ -1180,6 +1189,11 @@ def test_handler_transfer_compact_both_directions() -> None:
     assert call["num_copy_ops"] == 6
     # Total real bytes = 3 * 120 = 360
     assert call["num_transfer_bytes"] == 360
+    # Compact transfer must pass use_batch_api=False to bypass the
+    # driver batch-API path that segfaults with large descriptor counts.
+    assert call["use_batch_api"] is False, (
+        "compact CPU->GPU must explicitly pass use_batch_api=False"
+    )
 
     # CPU->GPU: src = CPU pointers, dst = GPU pointers
     src_arr = call["src"].numpy()

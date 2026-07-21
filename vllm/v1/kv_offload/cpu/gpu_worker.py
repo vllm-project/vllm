@@ -320,6 +320,7 @@ class SingleDirectionOffloadingHandler:
         batch_sizes: torch.Tensor,
         num_copy_ops: int,
         num_transfer_bytes: int,
+        use_batch_api: bool = True,
     ) -> bool:
         """Submit descriptors through the one canonical async lifecycle path.
 
@@ -356,6 +357,7 @@ class SingleDirectionOffloadingHandler:
                     dst,
                     sizes,
                     is_src_access_order_any=is_src_access_order_any,
+                    use_batch_api=use_batch_api,
                 )
             end_event.record(stream)
 
@@ -441,6 +443,7 @@ class SingleDirectionOffloadingHandler:
             batch_sizes=batch_sizes,
             num_copy_ops=num_copy_ops,
             num_transfer_bytes=plan.num_bytes,
+            use_batch_api=False,
         )
 
     def transfer_async(

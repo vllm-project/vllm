@@ -782,10 +782,13 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C_cache_ops, ops) {
       "            int block_size_in_bytes, Tensor block_mapping) -> ()");
 
   // Batch swap: submit all block copies in a single driver call.
+  // When use_batch_api is false, skip cuMemcpyBatchAsync/hipMemcpyBatchAsync
+  // and use per-descriptor cudaMemcpyAsync fallback.
   ops.def(
       "swap_blocks_batch(Tensor src_ptrs, Tensor dst_ptrs,"
       "                  Tensor sizes,"
-      "                  bool is_src_access_order_any=False) -> ()");
+      "                  bool is_src_access_order_any=False,"
+      "                  bool use_batch_api=True) -> ()");
 
   // Reshape the key and value tensors and cache them.
   ops.def(
