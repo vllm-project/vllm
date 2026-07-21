@@ -339,6 +339,56 @@ class MoeWNA16Method(FusedMoEMethodBase):
             block_shape=[0, layer.group_size],
         )
 
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        super().process_weights_after_loading(layer)
+        # Repack int4 weights from K-packed uint8 [E,N,K//2] to N-packed
+        # int32 [E,K,N//8] for tl.interleave unpacking in the Triton kernel.
+        # Currently only for AMD RDNA
+        if not current_platform.is_rocm() or self.quant_config.weight_bits != 4:
+            return
+
+        from vllm.platforms.rocm import on_gfx1x
+
+        if not on_gfx1x():
+            return
+
+        from vllm.model_executor.layers.quantization.utils.moe_wna16_utils import (
+            repack_int4_to_int32,
+            unpack_zp_int4_to_fp16,
+        )
+
+        # All known int4 MoE models have N divisible by 8; skip
+        # gracefully if not and fall back to the scalar-shift kernel.
+        for qw_name, sc_name, zp_name in (
+            ("w13_qweight", "w13_scales", "w13_qzeros"),
+            ("w2_qweight", "w2_scales", "w2_qzeros"),
+        ):
+            qw = getattr(layer, qw_name)
+            if qw.data.shape[1] % 8 != 0:
+                continue
+
+            layer.register_parameter(
+                qw_name,
+                torch.nn.Parameter(repack_int4_to_int32(qw.data), requires_grad=False),
+            )
+
+            sc = getattr(layer, sc_name)
+            layer.register_parameter(
+                sc_name,
+                torch.nn.Parameter(
+                    sc.data.permute(0, 2, 1).contiguous(), requires_grad=False
+                ),
+            )
+
+            if self.quant_config.has_zp:
+                zp = getattr(layer, zp_name)
+                layer.register_parameter(
+                    zp_name,
+                    torch.nn.Parameter(
+                        unpack_zp_int4_to_fp16(zp.data), requires_grad=False
+                    ),
+                )
+
     def apply(
         self,
         layer: RoutedExperts,
