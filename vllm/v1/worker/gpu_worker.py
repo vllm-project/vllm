@@ -488,33 +488,18 @@ class Worker(WorkerBase):
         ) as profile_result:
             self.model_runner.profile_run()
 
-            profile_torch_peak = torch.accelerator.memory_stats(self.device).get(
-                "allocated_bytes.all.peak", 0
-            )
-
-            # Profile CUDA graph memory if graphs will be captured.
-            # ROCm is included: #44825 moved the profiler to
-            # torch.accelerator.get_memory_info (reliable on ROCm, as used by
-            # the AMD-CI mem tests), and graph_pool_handle resolves to the same
-            # torch.cuda handle the live capture path already uses on ROCm.
-            # XPU stays excluded (see #39977).
-            cudagraph_memory_estimate = 0
-            if (
-                current_platform.is_cuda_alike()
-                and self.vllm_config.compilation_config.cudagraph_mode
-                != CUDAGraphMode.NONE
-            ):
-                cudagraph_memory_estimate = self.model_runner.profile_cudagraph_memory()
-
-        # Use the pre-cudagraph torch peak to avoid double-counting.
-        profile_result.torch_peak_increase = (
-            profile_torch_peak - profile_result.before_profile.torch_peak
-        )
-        profile_result.non_kv_cache_memory = (
-            profile_result.non_torch_increase
-            + profile_result.torch_peak_increase
-            + profile_result.weights_memory
-        )
+        # Profile CUDA graph memory if graphs will be captured.
+        # ROCm is included: #44825 moved the profiler to
+        # torch.accelerator.get_memory_info (reliable on ROCm, as used by
+        # the AMD-CI mem tests), and graph_pool_handle resolves to the same
+        # torch.cuda handle the live capture path already uses on ROCm.
+        # XPU stays excluded (see #39977).
+        cudagraph_memory_estimate = 0
+        if (
+            current_platform.is_cuda_alike()
+            and self.vllm_config.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
+        ):
+            cudagraph_memory_estimate = self.model_runner.profile_cudagraph_memory()
 
         # Respect the opt-in flag as originally designed.
         cudagraph_memory_estimate_applied = (
@@ -523,8 +508,10 @@ class Worker(WorkerBase):
             else 0
         )
 
-        self.non_torch_memory = profile_result.non_torch_increase
-        self.peak_activation_memory = profile_result.torch_peak_increase
+        self.total_consumed = profile_result.total_consumed
+        self.peak_activation_memory = (
+            profile_result.transient_peak_headroom + cudagraph_memory_estimate_applied
+        )
         self.cudagraph_memory_estimate = cudagraph_memory_estimate
 
         free_gpu_memory = profile_result.after_profile.free_memory
@@ -817,9 +804,8 @@ class Worker(WorkerBase):
             redundancy_buffer_memory = 150 * (1 << 20)
 
             non_kv_cache_memory = (
-                self.model_runner.model_memory_usage
+                self.total_consumed
                 + self.peak_activation_memory
-                + self.non_torch_memory
                 + cuda_graph_memory_bytes
             )
             kv_cache_memory_bytes_to_gpu_limit = (
@@ -840,10 +826,10 @@ class Worker(WorkerBase):
                 f"Desired GPU memory utilization is "
                 f"({self.cache_config.gpu_memory_utilization}, "
                 f"{format_gib(self.requested_memory)} GiB). "
-                f"Actual usage is {format_gib(self.model_runner.model_memory_usage)} "
-                f"GiB for weight, {format_gib(self.peak_activation_memory)} GiB "
-                f"for peak activation, {format_gib(self.non_torch_memory)} GiB "
-                f"for non-torch memory, and {format_gib(cuda_graph_memory_bytes)} "
+                f"Actual usage is {format_gib(self.total_consumed)} "
+                f"GiB for consumed memory (weights + non-torch), "
+                f"{format_gib(self.peak_activation_memory)} GiB "
+                f"for peak activation, and {format_gib(cuda_graph_memory_bytes)} "
                 f"GiB for CUDAGraph memory. Replace gpu_memory_utilization "
                 f"config with `--kv-cache-memory="
                 f"{kv_cache_memory_bytes_to_requested_limit}` "
