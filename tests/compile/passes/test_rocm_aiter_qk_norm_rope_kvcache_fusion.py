@@ -378,15 +378,14 @@ def _run_qk_norm_rope_kvcache_fusion_test(
         # Should be bit exact since no processing had been done on v for both paths
         torch.testing.assert_close(v_unfused, v_fused, atol=0.0, rtol=0.0)
 
-        # fp8 vs triton-rope ref requires loosening tolerance to 1.25e-1.
-        if is_fp8_cache and enable_aiter_triton_rope:
+        # fp8: fused vs unfused writers can round to adjacent fp8 codes (~1 ULP,
+        # 1.25e-1). Tolerate it; a real layout bug corrupts many elements by >>1 ULP.
+        if is_fp8_cache:
             cache_atol = cache_rtol = 1.25e-1
         else:
             cache_atol, cache_rtol = ATOL, RTOL
 
-        # Compare the whole cache so the interleaved V-cache write is validated
-        # (for ROCM_ATTN the V half is kv_cache[1]); K packing is layout-identical
-        # across the fused and unfused paths.
+        # Whole cache, so the interleaved V write (ROCM_ATTN kv_cache[1]) is checked.
         torch.testing.assert_close(
             kv_cache_unfused.float(),
             kv_cache_fused.float(),
