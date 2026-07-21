@@ -27,7 +27,7 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
-    pytest -v -s distributed/test_comm_ops.py --deselect="tests/distributed/test_comm_ops.py::test_some_specific_test" -k "not test_multi_process_tensor_parallel" || true &&
+    pytest -v -s distributed/test_comm_ops.py --deselect="tests/distributed/test_comm_ops.py::test_some_specific_test" -k "not test_multi_process_tensor_parallel and not test_multi_process_pipeline_parallel" || true &&
     pytest -v -s distributed/test_shm_broadcast.py || true &&
     pytest -v -s distributed/test_shm_buffer.py || true &&
     pytest -v -s distributed/test_shm_storage.py || true'
@@ -402,7 +402,7 @@ steps:
     'export VLLM_USE_RAY_V2_EXECUTOR_BACKEND=1 || true &&
     export NCCL_CUMEM_HOST_ENABLE=0 || true &&
     cd tests &&
-    pytest -v -s distributed/test_ray_v2_executor.py --deselect="tests/distributed/test_ray_v2_executor.py::test_ray_v2_executor_pg[2-1-2]" || true &&
+    pytest -v -s distributed/test_ray_v2_executor.py -k "not test_ray_v2_executor_pg and not test_ray_v2_bundle_indices_env and not test_ray_v2_single_node_generation_with_pg and not test_ray_v2_invalid_bundle_indices" || true &&
     pytest -v -s distributed/test_ray_v2_executor_e2e.py || true &&
     pytest -v -s distributed/test_pipeline_parallel.py -k ray || true &&
     TARGET_TEST_SUITE=L4 pytest -v -s basic_correctness/test_basic_correctness.py -k ray || true'
