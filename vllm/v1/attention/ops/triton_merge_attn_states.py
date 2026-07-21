@@ -225,6 +225,9 @@ def merge_attn_states_kernel(
 
     if OUTPUT_LSE:
         out_lse = tl.log(out_se) + max_lse
+        # Both sides empty (max_lse == -inf) => undefined merge; keep -inf so
+        # downstream merges continue to treat the token as empty.
+        out_lse = tl.where(max_lse == float("-inf"), float("-inf"), out_lse)
         tl.store(output_lse + head_idx * num_tokens + token_idx, out_lse)
 
     p_out = tl.load(
@@ -247,7 +250,13 @@ def merge_attn_states_kernel(
     # Do not multiply the output with tl.exp(p_lse) or tl.exp(s_lse) directly.
     p_scale = p_se / out_se
     s_scale = s_se / out_se
-    out = p_out * p_scale + s_out * s_scale
+    # A side whose LSE is -inf attended to no keys (e.g. an empty context
+    # chunk), so its softmax weight is zero. Its attention output is undefined
+    # and may be NaN/Inf (uninitialized backend scratch), and NaN/Inf * 0 = NaN
+    # would poison the merge. Drop such a side explicitly instead of scaling it.
+    out = tl.where(p_scale > 0.0, p_out * p_scale, 0.0) + tl.where(
+        s_scale > 0.0, s_out * s_scale, 0.0
+    )
 
     if USE_FP8:
         out = out * (1.0 / tl.load(output_scale))

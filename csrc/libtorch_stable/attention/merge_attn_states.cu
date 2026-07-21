@@ -151,6 +151,15 @@ __global__ void merge_attn_states_kernel(
     input_pack_t s_out_pack = reinterpret_cast<const input_pack_t*>(
         suffix_head_ptr)[pack_offset / pack_size];
 
+    // A side whose LSE is -inf attended to no keys (e.g. an empty context
+    // chunk), so its softmax weight is exactly zero. Its attention output is
+    // undefined and may be NaN/Inf (uninitialized backend scratch), and
+    // NaN/Inf * 0 == NaN would poison the merge, so drop such a side instead
+    // of scaling it. (The both-empty case is handled by the max_lse == -inf
+    // branch above.)
+    const bool use_prefix = p_scale > 0.0f;
+    const bool use_suffix = s_scale > 0.0f;
+
     // Compute merged values in float32
     float o_out_f[pack_size];
 #pragma unroll
@@ -159,7 +168,8 @@ __global__ void merge_attn_states_kernel(
           vllm::to_float(reinterpret_cast<const scalar_t*>(&p_out_pack)[i]);
       const float s_out_f =
           vllm::to_float(reinterpret_cast<const scalar_t*>(&s_out_pack)[i]);
-      o_out_f[i] = p_out_f * p_scale + (s_out_f * s_scale);
+      o_out_f[i] = (use_prefix ? p_out_f * p_scale : 0.0f) +
+                   (use_suffix ? s_out_f * s_scale : 0.0f);
     }
 
     // Convert and store

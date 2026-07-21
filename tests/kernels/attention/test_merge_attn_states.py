@@ -94,6 +94,34 @@ def test_mask_empty_context_lse() -> None:
     torch.testing.assert_close(lse, expected)
 
 
+@pytest.mark.parametrize("merge_fn", [merge_attn_states_cuda, merge_attn_states_triton])
+@pytest.mark.parametrize("output_dtype", [torch.float32, torch.half, torch.bfloat16])
+def test_merge_attn_states_ignores_empty_side(merge_fn, output_dtype) -> None:
+    """A side whose LSE is -inf (an empty chunk) must be dropped without
+    reading its output, which the backend may leave as NaN/Inf scratch."""
+    num_tokens, num_heads, head_size = 6, 8, 128
+    prefix_output = torch.randn(
+        num_tokens, num_heads, head_size, device="cuda", dtype=output_dtype
+    )
+    prefix_lse = torch.randn(num_heads, num_tokens, device="cuda")
+    suffix_output = torch.randn(
+        num_tokens, num_heads, head_size, device="cuda", dtype=output_dtype
+    )
+    suffix_lse = torch.randn(num_heads, num_tokens, device="cuda")
+
+    # Tokens 2 and 3 have an empty suffix chunk: -inf LSE, undefined output.
+    empty = slice(2, 4)
+    suffix_lse[:, empty] = float("-inf")
+    suffix_output[empty] = float("nan")
+
+    output = torch.empty_like(prefix_output)
+    merge_fn(output, prefix_output, prefix_lse, suffix_output, suffix_lse)
+
+    assert not output.isnan().any()
+    # Empty-suffix tokens must resolve to the (valid) prefix output.
+    torch.testing.assert_close(output[empty], prefix_output[empty])
+
+
 def generate_markdown_table():
     global all_case_info
     table_header = (
