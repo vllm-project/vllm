@@ -489,6 +489,31 @@ def test_modelopt_nvfp4_config_dispatches_w4a16_method():
     assert method.spec.activation is None
 
 
+def test_modelopt_linear_method_builder_registry_override(monkeypatch):
+    """The bespoke-method escape hatch: a format registered in
+    ``LINEAR_METHOD_BUILDERS`` routes that algo to its own method instead of the
+    generic ``ModelOptLinearMethod``. This is how a format that cannot be a
+    ``(weight, activation)`` key pair plugs into dispatch."""
+    from vllm.model_executor.layers.linear import LinearBase
+    from vllm.model_executor.layers.quantization import modelopt as m
+
+    sentinel = object()
+    monkeypatch.setitem(
+        m.LINEAR_METHOD_BUILDERS, "NVFP4", lambda cfg, prefix: sentinel
+    )
+
+    config = ModelOptNvFp4Config(
+        quant_method="NVFP4",
+        is_checkpoint_nvfp4_serialized=True,
+        kv_cache_quant_algo=None,
+        exclude_modules=[],
+    )
+    method = config.get_quant_method(
+        MagicMock(spec=LinearBase), "model.layers.0.fake_proj"
+    )
+    assert method is sentinel  # bespoke builder wins over the generic path
+
+
 @pytest.mark.parametrize(
     "quant_method, expected_use_a16, act_key_is_none",
     [

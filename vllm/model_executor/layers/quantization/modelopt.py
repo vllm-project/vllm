@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
 from fnmatch import fnmatch
@@ -222,8 +223,7 @@ class ModelOptQuantConfigBase(QuantizationConfig):
 
         # now, the layer is quantized, handle it here
         if isinstance(layer, (LinearBase, ParallelLMHead)):
-            spec, ctx, format_scheme = resolve(self.linear_algo(), self, prefix)
-            return ModelOptLinearMethod(spec, ctx, format_scheme)
+            return build_linear_method(self, self.linear_algo(), prefix)
         elif isinstance(layer, RoutedExperts):
             quant_method = self.FusedMoEMethodCls(
                 quant_config=self, moe_config=layer.moe_config
@@ -1850,8 +1850,7 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
             if subcfg is None:
                 # Layer not in quantized_layers — leave unquantized
                 return UnquantizedLinearMethod()
-            spec, ctx, format_scheme = resolve(quant_algo, subcfg, prefix)
-            return ModelOptLinearMethod(spec, ctx, format_scheme)
+            return build_linear_method(subcfg, quant_algo, prefix)
 
         if isinstance(layer, RoutedExperts):
             if quant_algo == "FP8":
@@ -1892,6 +1891,17 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
 # the ``QuantSpec`` pair produced by ``resolve``), runs a fixed create/process
 # lifecycle, selects the kernel from the pair, and applies. See
 # ``linear_design_concrete.md`` for the design and caveats C1-C13.
+#
+# Adding a format (developer guide):
+#   * Composes as a (weight, activation) key pair -> add a QuantKeyScheme per
+#     new key to SCHEME_FOR, plus a resolve() row returning the QuantSpec. No
+#     new method class. (This is how all six existing formats are built.)
+#   * Needs format-wide residue but the same lifecycle -> also return a
+#     FormatScheme subclass from that resolve() row (extra_weights / pre_process
+#     / post_process hooks).
+#   * Genuinely cannot be a key pair (different lifecycle) -> write a bespoke
+#     LinearMethodBase and register it in LINEAR_METHOD_BUILDERS by algo.
+#   In all cases add the algo to the owning config's linear_algo()/validation.
 # ===========================================================================
 
 
@@ -2314,11 +2324,34 @@ def select_linear_kernel(spec: QuantSpec, layer, rt: RuntimeDtypes):
     )
 
 
+class FormatScheme:
+    """Optional per-format hooks that compose *around* the QuantKey schemes.
+
+    Extension seam for residue that belongs to a format as a whole rather than a
+    single QuantKey — an extra parameter the weight/activation schemes don't
+    cover, or a tweak before/after their ``process``. All hooks default to
+    no-ops; most formats need none (they are a pure ``(weight, activation)`` key
+    pair). To add one: subclass, override the hooks you need, and return an
+    instance from the format's ``resolve()`` branch — no change to
+    ``ModelOptLinearMethod`` itself.
+    """
+
+    def extra_weights(self, layer, shapes: "Shapes", ctx: CkptCtx, wl) -> None:
+        """Register format-level params (after the key schemes' weights)."""
+
+    def pre_process(self, layer) -> None:
+        """Run before the key schemes' ``process``."""
+
+    def post_process(self, layer) -> None:
+        """Run after the key schemes' ``process``, before the kernel's."""
+
+
 @register_weight_loader_v2_supported_method
 class ModelOptLinearMethod(LinearMethodBase):
     """Generic, format-agnostic ModelOpt linear method. Holds a weight scheme +
-    an activation scheme (from the QuantSpec pair), runs a fixed lifecycle,
-    selects the kernel from the pair, and applies.
+    an activation scheme (from the QuantSpec pair) and an optional
+    ``FormatScheme``, runs a fixed lifecycle, selects the kernel from the pair,
+    and applies.
 
     Registered for weight_loader_v2 (like every ModelOpt linear method) so the
     ``BasevLLMParameter`` params route through the v2 fused loader, not the
@@ -2333,6 +2366,7 @@ class ModelOptLinearMethod(LinearMethodBase):
     ) -> None:
         self.spec = spec
         self.ctx = ctx
+        self.fmt = format_scheme or FormatScheme()
         self.wkey = SCHEME_FOR[spec.weight]
         self.akey = None if spec.activation is None else SCHEME_FOR[spec.activation]
         self.out_dtype = torch.get_default_dtype()
@@ -2377,6 +2411,7 @@ class ModelOptLinearMethod(LinearMethodBase):
         self.wkey.create_weights(layer, WEIGHT, self.ctx, shapes, weight_loader)
         if self.akey:
             self.akey.create_weights(layer, ACT, self.ctx, shapes, weight_loader)
+        self.fmt.extra_weights(layer, shapes, self.ctx, weight_loader)
 
         rt = RuntimeDtypes(self.input_dtype, self.out_dtype, self.marlin_input_dtype)
         self.kernel = select_linear_kernel(self.spec, layer, rt)
@@ -2384,10 +2419,12 @@ class ModelOptLinearMethod(LinearMethodBase):
             expose_input_quant_key(layer, self.kernel)
 
     def process_weights_after_loading(self, layer) -> None:
+        self.fmt.pre_process(layer)
         self.wkey.process(layer, WEIGHT)
         if self.akey:
             self.akey.process(layer, ACT)
         maybe_fuse_global_scales(layer)
+        self.fmt.post_process(layer)
         self.kernel.process_weights_after_loading(layer)
 
     def apply(self, layer, x, bias=None):
@@ -2457,3 +2494,33 @@ def resolve(algo: str, subcfg, prefix: str):
         # old method's placeholder input_scale is intentionally dropped (C4).
         return QuantSpec(weight=kNvfp4Static, activation=None), ctx, None
     raise NotImplementedError(f"resolve: unsupported ModelOpt linear algo {algo!r}")
+
+
+# Bespoke-method escape hatch. Almost every ModelOpt linear format is a
+# (weight, activation) QuantKey pair handled by the generic ModelOptLinearMethod
+# (optionally + a FormatScheme), so this stays empty. A format that genuinely
+# cannot be expressed that way — a fundamentally different create/process/apply
+# lifecycle — registers its own LinearMethodBase here, keyed by algo:
+#
+#     LINEAR_METHOD_BUILDERS["FOO"] = lambda cfg, prefix: ModelOptFooLinearMethod(cfg)
+#
+# Keep the ModelOpt* class-name prefix and decorate the class with
+# @register_weight_loader_v2_supported_method if it uses BasevLLMParameter
+# params. Also add the algo to the owning config's linear_algo()/validation.
+LINEAR_METHOD_BUILDERS: dict[str, Callable[..., LinearMethodBase]] = {}
+
+
+def build_linear_method(config, algo: str, prefix: str) -> LinearMethodBase:
+    """Construct the linear method for ``algo``.
+
+    Returns a bespoke method if one is registered in ``LINEAR_METHOD_BUILDERS``,
+    else the generic ``ModelOptLinearMethod`` built from ``resolve(algo, config,
+    prefix)``. Single indirection point shared by the homogeneous and
+    mixed-precision dispatch, so a new format plugs in without editing either
+    ``get_quant_method``.
+    """
+    builder = LINEAR_METHOD_BUILDERS.get(algo)
+    if builder is not None:
+        return builder(config, prefix)
+    spec, ctx, format_scheme = resolve(algo, config, prefix)
+    return ModelOptLinearMethod(spec, ctx, format_scheme)
