@@ -12,15 +12,17 @@ name, the op chain the loader applied (the slice) and the destination
 param/offsets. Every ``update_weights`` replays that plan: the worker sends
 the specs to the trainer in packed chunk pulls (one contiguous NIXL blob per
 pull, received into a pre-registered ring of arenas) and scatters/quantizes
-on background threads. The trainer side is the shared
-:class:`rdt_producer.RDTShardedProducer`.
+on background threads.
 
-This is the minimal, single-node (3 GPU: 1 trainer + TP-2 inference),
-gather-free variant: the trainer holds the full model resident and serves
-slices of the LIVE parameters, so there is no gather plan and the engine's
-per-group ``free_gather`` calls are no-ops. See rlhf_sharded_rdt_fsdp_ep.py
-(FSDP-sharded trainer, per-group gathers) and rlhf_sharded_rdt_kimi.py
-(1T FP8 MoE) for the full-scale variants.
+This is the minimal, single-node (3 GPU: 1 trainer + TP-2 inference)
+variant: the trainer holds the full model resident. The trainer-side
+complexity -- the NIXL serve actor, gather cache, serve rings, free
+ref-counting -- is entirely hidden behind
+:class:`ShardedRDTTrainerWeightTransferEngine`: the trainer actor is a plain
+Ray actor that builds the engine with a :class:`ModuleSource` over its model
+and calls ``send_weights()``. See rlhf_sharded_rdt_fsdp_ep.py (FSDP-sharded
+trainer) and rlhf_sharded_rdt_kimi.py (1T FP8 MoE) for the full-scale
+variants.
 
 Prerequisites:
     pip install nixl
@@ -30,21 +32,24 @@ import os
 import sys
 
 import ray
-import torch
 from ray.util.placement_group import placement_group
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 from transformers import AutoModelForCausalLM
 
 from vllm import LLM, SamplingParams
 from vllm.config import WeightTransferConfig
-
-from rdt_producer import RDTShardedProducer, layerwise_groups
+from vllm.distributed.weight_transfer import (
+    ModuleSource,
+    RayVLLMWeightSyncClient,
+    WeightTransferTrainerFactory,
+)
+from vllm.distributed.weight_transfer.sharded_rdt_trainer import (
+    ShardedRDTTrainerInitInfo,
+)
 
 MODEL_NAME = "Qwen/Qwen3-30B-A3B"
-TRAINER_ACTOR_NAME = "sharded_rdt_trainer"
-# Explicit namespace so vLLM workers -- which run in an EngineCore
-# subprocess that does its own ray.init() -- can resolve the named
-# trainer actor.
+# tensor_parallel_size * data_parallel_size inference workers.
+NUM_INFERENCE_CONSUMERS = 2
 RAY_NAMESPACE = "sharded_rdt_example"
 
 
@@ -56,52 +61,59 @@ class MyLLM(LLM):
         super().__init__(*args, **kwargs)
 
 
-@ray.remote(num_gpus=1, max_concurrency=8, enable_tensor_transport=True)
-class TrainModel(RDTShardedProducer):
-    """Trainer actor: the full HF model resident on one GPU, serving packed
-    slice pulls of its LIVE parameters (no gather plan needed — the shared
-    producer's cache is pre-populated once and never freed)."""
+@ray.remote(num_gpus=1)
+class TrainModel:
+    """Trainer actor: the full HF model resident on one GPU. All RDT serving
+    lives inside the trainer engine (which spawns its own NIXL serve actor), so
+    this actor needs no producer mixin and no tensor-transport / concurrency
+    actor options."""
 
     def __init__(self, model_name: str):
         self.model = AutoModelForCausalLM.from_pretrained(model_name).to("cuda:0")
-        # M:N: this single trainer serves TP-2 inference (2 consumers), so per-
-        # consumer serve rings keep their interleaved pulls off each other's slots.
-        # (gather-free -> free_gather is a no-op, but the ring count still matters.)
-        self.init_rdt_producer(num_consumers=2)  # tensor_parallel_size * data_parallel_size
-        # Live parameters ARE the serve cache: produce replays each spec's op
-        # chain on them and packs the slices into the registered serve ring.
-        # PyTorch parameters mutate in place during training, so the cached
-        # references stay valid across syncs.
-        with self._cache_cond:
-            self._cache.update(dict(self.model.named_parameters()))
-            self._cache_cond.notify_all()
+        self.engine = None
 
-    def get_weight_metadata(self):
-        """Weight names/dtypes/shapes for the engine's bake at init."""
-        names, dtype_names, shapes = [], [], []
-        for name, p in self.model.named_parameters():
-            names.append(name)
-            dtype_names.append(str(p.dtype).split(".")[-1])
-            shapes.append(list(p.shape))
-        return names, dtype_names, shapes
+    def setup_engine(self, llm_handle):
+        """Build the trainer engine. Its trainer_init spawns the per-rank NIXL
+        serve actor and (as the single sender, rank 0) drives the inference
+        side's init_weight_transfer_engine, which bakes the replay plan."""
+        self.engine = WeightTransferTrainerFactory.trainer_init(
+            ShardedRDTTrainerInitInfo(
+                rank=0,
+                num_consumers=NUM_INFERENCE_CONSUMERS,
+                num_rdt_buffers=int(os.environ.get("NUM_RDT_BUFFERS", "2")),
+                trainer_actor_namespace=RAY_NAMESPACE,
+            ),
+            client=RayVLLMWeightSyncClient(llm_handle),
+            source=ModuleSource(self.model),
+        )
+
+    def sync_weights(self):
+        """One full weight-sync round: gather + serve + drive the inference
+        handshake (start/update/finish)."""
+        self.engine.send_weights()
 
 
-# Pin Ray-actor processes to the same Python interpreter as the driver, and
-# ship this example directory so actors can import rdt_producer.
+# Pin Ray-actor processes to the same Python interpreter as the driver.
 _RUNTIME_ENV: dict[str, object] = {
     "py_executable": sys.executable,
     "working_dir": os.path.dirname(os.path.abspath(__file__)),
 }
 _FORWARDED_ENV_VARS = {
     k: os.environ[k]
-    for k in ("NCCL_CUMEM_ENABLE", "VLLM_NCCL_SO_PATH", "LD_PRELOAD")
+    for k in (
+        "NCCL_CUMEM_ENABLE",
+        "VLLM_NCCL_SO_PATH",
+        "LD_PRELOAD",
+        "LD_LIBRARY_PATH",
+        "NUM_RDT_BUFFERS",
+    )
     if k in os.environ
 }
 if _FORWARDED_ENV_VARS:
     _RUNTIME_ENV["env_vars"] = _FORWARDED_ENV_VARS
 ray.init(runtime_env=_RUNTIME_ENV, namespace=RAY_NAMESPACE)
 
-train_model = TrainModel.options(name=TRAINER_ACTOR_NAME).remote(MODEL_NAME)
+train_model = TrainModel.remote(MODEL_NAME)
 
 pg_inference = placement_group([{"GPU": 1, "CPU": 0}] * 2)
 ray.get(pg_inference.ready())
@@ -113,7 +125,7 @@ scheduling_inference = PlacementGroupSchedulingStrategy(
 
 # distributed_executor_backend="ray" is REQUIRED: each vLLM worker
 # must be a Ray actor so it can call ray.get_actor() and submit
-# .remote() tasks against the trainer.
+# .remote() tasks against the trainer's serve actor.
 llm = ray.remote(
     num_cpus=0,
     num_gpus=0,
@@ -148,39 +160,17 @@ for output in outputs:
 
 ray.get(llm.sleep.remote(level=0))
 
-# The engine bakes its replay plan over ALL names at init (a meta dry run of
-# model.load_weights), so the metadata goes in the INIT info.
-names, dtype_names, shapes = ray.get(train_model.get_weight_metadata.remote())
-ray.get(
-    llm.init_weight_transfer_engine.remote(
-        dict(
-            init_info=dict(
-                trainer_actor_name=TRAINER_ACTOR_NAME,
-                trainer_actor_namespace=RAY_NAMESPACE,
-                names=names,
-                dtype_names=dtype_names,
-                shapes=shapes,
-            )
-        )
-    )
-)
+# Build the trainer engine: spawns the NIXL serve actor and drives the
+# inference side's init_weight_transfer_engine (bakes the replay plan over all
+# names). The engine derives names/dtypes/shapes/group_lens from the
+# ModuleSource, so the driver no longer marshals metadata by hand.
+ray.get(train_model.setup_engine.remote(llm))
 
-# is_checkpoint_format=True is MANDATORY for the sharded backend --
-# it requires the layerwise reload path.
-ray.get(llm.start_weight_update.remote(is_checkpoint_format=True))
+# One call does the whole round: start_weight_update, the concurrent
+# update_weights (workers pull their slices over NIXL while the trainer serves),
+# and finish_weight_update.
+ray.get(train_model.sync_weights.remote())
 
-# ONE update_weights for the whole sync. group_lens partitions the names into
-# per-layer groups: the group is the packed pull's chunk budget, so the
-# receive/serve arenas stay layer-sized instead of ballooning to the whole
-# model. (The trainer serves live params, so there is no gather plan and the
-# engine's per-group free_gather calls are no-ops.)
-groups = layerwise_groups(names)
-ray.get(llm.update_weights.remote(dict(update_info=dict(
-    names=[n for g in groups for n in g],
-    group_lens=[len(g) for g in groups],
-)))) 
-
-ray.get(llm.finish_weight_update.remote())
 ray.get(llm.wake_up.remote(tags=["scheduling"]))
 
 # Second generation: output should now be coherent.

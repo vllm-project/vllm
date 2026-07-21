@@ -909,7 +909,9 @@ class RoutedExperts(PluggableLayer):
                     start = expert_id
 
                 # Unified loading logic for fused and non-fused experts
-                loaded_experts = experts_shard.unbind()
+                loaded_experts = [
+                    experts_shard[i] for i in range(experts_shard.size(0))
+                ]
                 for expert_id, loaded_expert in enumerate(loaded_experts, start=start):
                     success = param.weight_loader(
                         param=param,

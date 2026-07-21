@@ -27,7 +27,9 @@ from vllm.distributed.weight_transfer import (
     WeightTransferTrainerFactory,
 )
 from vllm.distributed.weight_transfer.base import (
+    ParamMeta,
     TrainerInitInfo,
+    WeightSource,
     WeightTransferInitRequest,
     WeightTransferUpdateRequest,
 )
@@ -48,6 +50,11 @@ from vllm.distributed.weight_transfer.nccl_engine import (
 from vllm.distributed.weight_transfer.packed_tensor import (
     DEFAULT_PACKED_BUFFER_SIZE_BYTES,
     DEFAULT_PACKED_NUM_BUFFERS,
+)
+from vllm.distributed.weight_transfer.sharded_rdt_common import layerwise_groups
+from vllm.distributed.weight_transfer.sharded_rdt_trainer import (
+    ShardedRDTTrainerInitInfo,
+    ShardedRDTTrainerWeightTransferEngine,
 )
 from vllm.distributed.weight_transfer.sparse_nccl_engine import (
     SparseNCCLTrainerInitInfo,
@@ -1725,3 +1732,228 @@ def test_sparse_nccl_trainer_non_sender_skips_client():
     assert isinstance(engine, SparseNCCLTrainerWeightTransferEngine)
     engine.send_weights([_sparse_patch()])
     assert client.order == []
+
+
+# ---------------------------------------------------------------------------
+# Sharded RDT trainer engine
+# ---------------------------------------------------------------------------
+
+
+class _ListSource(WeightSource):
+    """A WeightSource over an explicit ordered (name, cpu-tensor) list, so the
+    sharded-RDT group/order logic can be tested without a real model."""
+
+    def __init__(self, pairs):
+        self._pairs = list(pairs)
+
+    def metadata(self):
+        return [ParamMeta(n, t.dtype, tuple(t.shape)) for n, t in self._pairs]
+
+    def __iter__(self):
+        return iter(self._pairs)
+
+
+class _FakeProducerServer:
+    """In-process stand-in for the _RDTProducerServer Ray actor. Records the
+    engine->server call sequence and, by default, frees each group as soon as
+    it is published (simulating the consumer's free_gather back-edge) so the
+    gather loop's backpressure never blocks."""
+
+    def __init__(self, auto_free=True):
+        self.order: list[str] = []
+        self.published: list[tuple] = []
+        self.inflight: list[tuple] = []
+        self.auto_free = auto_free
+        self._pending_freed: list[tuple] = []
+
+    def begin_sync(self):
+        self.order.append("begin")
+
+    def publish_group(self, key, entries):
+        self.order.append("publish")
+        self.published.append(key)
+        self.inflight.append(key)
+        freed: list[tuple] = self._pending_freed
+        self._pending_freed = []
+        if self.auto_free:
+            self.inflight.remove(key)
+            freed = freed + [key]
+        return freed
+
+    def free_one(self):
+        """Manually free the oldest in-flight group (backpressure test)."""
+        key = self.inflight.pop(0)
+        self._pending_freed.append(key)
+
+    def end_sync(self):
+        self.order.append("end")
+        freed = self._pending_freed
+        self._pending_freed = []
+        return freed
+
+    def set_gather_error(self, message):
+        self.order.append("error")
+
+
+def _rdt_engine_with_fake_server(source, *, is_sender, client, server, monkeypatch):
+    """Build a ShardedRDTTrainerWeightTransferEngine wired to an in-process fake
+    server (no Ray, no CUDA IPC): bypass trainer_init's spawn, set the
+    group-major metadata, and route _rpc to the fake."""
+    import vllm.distributed.weight_transfer.sharded_rdt_trainer as mod
+
+    # reduce_tensor needs CUDA; the fake server never rebuilds, so stub it.
+    monkeypatch.setattr(mod, "reduce_tensor", lambda t: (None, ("fake",)))
+
+    init_info = ShardedRDTTrainerInitInfo(num_consumers=1, rank=0 if is_sender else 1)
+    engine = ShardedRDTTrainerWeightTransferEngine(
+        client=client, source=source, is_sender=is_sender, init_info=init_info
+    )
+    engine._meta = list(source.metadata())
+    names = [m.name for m in engine._meta]
+    engine._groups = layerwise_groups(names)
+    engine._server = server
+    engine._rpc = lambda method, *args: getattr(server, method)(*args)
+    return engine
+
+
+def _rdt_source_two_layers():
+    return _ListSource(
+        [
+            ("embed.weight", torch.zeros(2)),
+            ("model.layers.0.w", torch.zeros(2)),
+            ("model.layers.1.w", torch.zeros(2)),
+            ("norm.weight", torch.zeros(2)),
+        ]
+    )
+
+
+class TestShardedRDTTrainerInitInfo:
+    def test_declares_backend(self):
+        assert ShardedRDTTrainerInitInfo.backend == "sharded_rdt"
+
+    def test_rank_is_keyword_only_and_drives_is_sender(self):
+        assert ShardedRDTTrainerInitInfo(num_consumers=4, rank=0).is_sender is True
+        assert ShardedRDTTrainerInitInfo(num_consumers=4, rank=1).is_sender is False
+        with pytest.raises(TypeError):
+            # rank is keyword-only.
+            ShardedRDTTrainerInitInfo(4, 0)  # type: ignore[misc]
+
+    def test_registered_in_trainer_factory(self):
+        cls = WeightTransferTrainerFactory._registry["sharded_rdt"]()
+        assert cls is ShardedRDTTrainerWeightTransferEngine
+
+
+def test_sharded_rdt_trainer_init_requires_source():
+    with pytest.raises(ValueError, match="requires a WeightSource"):
+        ShardedRDTTrainerWeightTransferEngine.trainer_init(
+            ShardedRDTTrainerInitInfo(num_consumers=1, rank=0),
+            client=RecordingClient(),
+            source=None,
+        )
+
+
+def test_sharded_rdt_worker_init_info_is_group_major(monkeypatch):
+    source = _rdt_source_two_layers()
+    engine = _rdt_engine_with_fake_server(
+        source,
+        is_sender=True,
+        client=RecordingClient(),
+        server=_FakeProducerServer(),
+        monkeypatch=monkeypatch,
+    )
+    worker_init = engine._build_worker_init_info(["srv_rk0"])
+    # 4 params -> pre / layer0 / layer1 / post = 4 groups of length 1.
+    assert worker_init.names == [
+        "embed.weight",
+        "model.layers.0.w",
+        "model.layers.1.w",
+        "norm.weight",
+    ]
+    assert worker_init.group_lens == [1, 1, 1, 1]
+    assert worker_init.trainer_actor_names == ["srv_rk0"]
+    assert worker_init.produce_method_name == "rdt_produce_weights_batched"
+    assert sum(worker_init.group_lens) == len(worker_init.names)
+
+
+def test_sharded_rdt_send_weights_drives_client_in_order(monkeypatch):
+    server = _FakeProducerServer(auto_free=True)
+    client = RecordingClient()
+    engine = _rdt_engine_with_fake_server(
+        _rdt_source_two_layers(),
+        is_sender=True,
+        client=client,
+        server=server,
+        monkeypatch=monkeypatch,
+    )
+    engine.send_weights()
+
+    assert client.order == ["start", "update", "finish"]
+    # begin, one publish per group (4), end.
+    assert server.order == ["begin", "publish", "publish", "publish", "publish", "end"]
+    assert len(server.published) == 4
+    # every group freed -> no engine-held refs remain.
+    assert engine._inflight == {}
+
+
+def test_sharded_rdt_send_weights_group_order_mismatch_raises(monkeypatch):
+    # Source whose iteration order disagrees with its metadata order.
+    class _BadSource(_ListSource):
+        def __iter__(self):
+            reordered = list(self._pairs)
+            reordered[0], reordered[1] = reordered[1], reordered[0]
+            return iter(reordered)
+
+    server = _FakeProducerServer()
+    engine = _rdt_engine_with_fake_server(
+        _BadSource(_rdt_source_two_layers()._pairs),
+        is_sender=True,
+        client=RecordingClient(),
+        server=server,
+        monkeypatch=monkeypatch,
+    )
+    with pytest.raises(RuntimeError, match="iteration order must match"):
+        engine.send_weights()
+    assert "error" in server.order  # gather error propagated to the server
+
+
+def test_sharded_rdt_non_sender_skips_client(monkeypatch):
+    class _RaisingClient(RecordingClient):
+        def start_weight_update(self):
+            raise AssertionError("non-sender must not touch the client")
+
+        def update_weights(self, update_info):
+            raise AssertionError("non-sender must not touch the client")
+
+        def finish_weight_update(self):
+            raise AssertionError("non-sender must not touch the client")
+
+    server = _FakeProducerServer(auto_free=True)
+    client = _RaisingClient()
+    engine = _rdt_engine_with_fake_server(
+        _rdt_source_two_layers(),
+        is_sender=False,
+        client=client,
+        server=server,
+        monkeypatch=monkeypatch,
+    )
+    engine.send_weights()  # gathers only; must not raise
+    assert client.order == []
+    assert server.order == ["begin", "publish", "publish", "publish", "publish", "end"]
+
+
+def test_sharded_rdt_send_weights_surfaces_update_error(monkeypatch):
+    class _FailingUpdateClient(RecordingClient):
+        def update_weights(self, update_info):
+            self.order.append("update")
+            raise RuntimeError("inference side rejected update")
+
+    server = _FakeProducerServer(auto_free=True)
+    engine = _rdt_engine_with_fake_server(
+        _rdt_source_two_layers(),
+        is_sender=True,
+        client=_FailingUpdateClient(),
+        server=server,
+        monkeypatch=monkeypatch,
+    )
+    with pytest.raises(RuntimeError, match="inference side rejected update"):
+        engine.send_weights()

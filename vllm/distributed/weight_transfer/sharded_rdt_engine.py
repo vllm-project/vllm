@@ -46,6 +46,19 @@ from vllm.distributed.weight_transfer.base import (
     WeightTransferInitInfo,
     WeightTransferUpdateInfo,
 )
+
+# M:N binding / arena sizing / split helpers live in sharded_rdt_common so the
+# producer (trainer) side agrees with the consumer here. Re-exported under the
+# names the engine body already uses.
+from vllm.distributed.weight_transfer.sharded_rdt_common import (
+    arena_alloc_bytes as _arena_alloc_bytes,
+)
+from vllm.distributed.weight_transfer.sharded_rdt_common import (
+    assign_producer_indices,
+)
+from vllm.distributed.weight_transfer.sharded_rdt_common import (
+    greedy_run_starts as _greedy_run_starts,
+)
 from vllm.logger import init_logger
 
 if TYPE_CHECKING:
@@ -101,64 +114,9 @@ def _freeze_kwargs(kwargs: dict[str, Any]) -> tuple[tuple[str, Any], ...]:
 #             serve rings + N-free ref-counting on the producer).
 #   * P == C: identity (today's 1:1).
 # Both partitions cover every producer at least once (surjective), so no gathered
-# group is ever left unfreed. These helpers are the single source of truth: the
-# producer mixin imports ``count_consumers`` to size its free ref-count.
-
-
-def assign_producer_indices(
-    num_producers: int, num_consumers: int, consumer_idx: int
-) -> list[int]:
-    """Producers (global indices) that consumer ``consumer_idx`` binds."""
-    p = max(1, num_producers)
-    c = max(1, num_consumers)
-    if p >= c:
-        return list(range(consumer_idx * p // c, (consumer_idx + 1) * p // c))
-    return [consumer_idx * p // c]
-
-
-def count_consumers(
-    num_producers: int, num_consumers: int, producer_idx: int
-) -> int:
-    """Number of consumers that bind producer ``producer_idx`` (its free target)."""
-    p = max(1, num_producers)
-    c = max(1, num_consumers)
-    if p >= c:
-        return 1
-    return sum(
-        1 for ci in range(c) if ci * p // c == producer_idx
-    )
-
-
-def _arena_alloc_bytes(nbytes: int, presize: int = 0) -> int:
-    """Size a NIXL arena / ring slot for ``nbytes``, rounded up so the buffer is
-    allocated ONCE and never regrows: the max of the request, an optional
-    ``presize`` floor, and a coarse 256MB round-up. Sizing once matters beyond
-    perf — Ray's NIXL desc cache is keyed by ``data_ptr`` and its entries outlive
-    their tensors, so repeated small regrowths can false-hit a recycled pointer
-    and skip registering the new extent (see ``arena_presize_gb``). Shared by both
-    sides (consumer receive arenas + producer serve rings)."""
-    return max(nbytes, presize, -(-nbytes // (256 << 20)) * (256 << 20))
-
-
-def _greedy_run_starts(weights: "list[int]", n: int) -> "list[int]":
-    """Greedy contiguous byte-balanced partition of ``weights`` into at most
-    ``n`` runs; returns the START index of each run (the first is always 0).
-    Walks left to right, accumulating into the current run and cutting before an
-    item that would push the run past the ``ceil(total/n)`` target — never
-    emitting more than ``n`` runs. An item heavier than the target simply makes
-    its run oversized (accepted). Shared by the gather-group -> chunk split
-    (``_chunk_group_scatters``) and the M:N per-pull producer split
-    (``_split_chunk_pull``); both are the same greedy cut over different weights."""
-    total = sum(weights)
-    target = -(-total // max(1, n))  # ceil
-    starts = [0]
-    cur = 0
-    for i, w in enumerate(weights):
-        if i > 0 and cur + w > target and len(starts) < n:
-            starts.append(i)
-            cur = 0
-        cur += w
-    return starts
+# group is ever left unfreed. ``assign_producer_indices`` / ``count_consumers``
+# (and the arena/split helpers) live in ``sharded_rdt_common`` — imported above —
+# so the producer (trainer) side sizes its free ref-count with the same rule.
 
 
 @dataclass
@@ -640,8 +598,10 @@ class ShardedRDTWeightTransferInitInfo(WeightTransferInitInfo):
     """Optional Ray namespace the trainer actor(s) live in."""
 
     produce_method_name: str = "rdt_produce_weights_batched"
-    """Name of the trainer-side producer method (see examples/rl/rdt_producer.py
-    for the reference implementation). Must be decorated with
+    """Name of the trainer-side producer method (implemented by the serve actor
+    the trainer engine spawns; see
+    vllm/distributed/weight_transfer/sharded_rdt_trainer.py). Must be decorated
+    with
     ``@ray.method(tensor_transport="nixl")``. Contract: given a batched specs
     list ``[(name, [(op_name, args, kwargs_items), ...]), ...]``, replay each
     chain on the named tensor and return ONE contiguous uint8 blob with every
@@ -773,7 +733,12 @@ class ShardedRDTWeightTransferEngine(
     # receive_weights pulls synchronously but defers the GPU post-processing
     # (materialize/scatter/quant/kernel-copy) to a background thread so it
     # overlaps the next chunk's pull. See _run_chunk_pipeline / _process_item.
+    # ``update_weights`` therefore skips the base's per-update device sync, and
+    # ``finish_weight_update`` drains the deferred work before finalize.
     defers_processing = True
+    # The baked replay plan is a function of one concrete model's parameter
+    # layout, so a separate draft model cannot reuse it.
+    supports_draft_weight_update = False
 
     def __init__(
         self,
@@ -847,7 +812,7 @@ class ShardedRDTWeightTransferEngine(
         # reused every sync (each _Chunk self-describes its work; nothing is
         # rebuilt per sync). Non-None means update_weights ignores its (empty or
         # redundant) per-sync names.
-        self._cached_plan: "_CallPlan | None" = None
+        self._cached_plan: _CallPlan | None = None
         # Completed sync iterations (bumped in drain_pending). The FIRST sync
         # still grows/registers arenas on both sides; a producer-side
         # registration churns its NIXL agent-metadata version, and with pulls
@@ -888,7 +853,9 @@ class ShardedRDTWeightTransferEngine(
         self._arena_presize = int(float(init_info.arena_presize_gb) * (1 << 30))
         logger.info(
             "[RDT-RING] num_rdt_buffers=%d layerwise_split=%d presize=%.2fGiB",
-            k, self._split, self._arena_presize / (1 << 30),
+            k,
+            self._split,
+            self._arena_presize / (1 << 30),
         )
         try:
             import ray
@@ -947,9 +914,7 @@ class ShardedRDTWeightTransferEngine(
             # enable_tensor_transport=True. Force it back on.
             actor._ray_enable_tensor_transport = True
             self._producer_actors.append(actor)
-            self._produce_methods.append(
-                getattr(actor, init_info.produce_method_name)
-            )
+            self._produce_methods.append(getattr(actor, init_info.produce_method_name))
         logger.info(
             "Sharded RDT engine (consumer %d) bound to %d/%d producers %r "
             "(batched method %r)",
@@ -1042,9 +1007,7 @@ class ShardedRDTWeightTransferEngine(
         import ray
 
         refs = [
-            self._producer_actors[p].reserve_serve_arena.remote(
-                self._consumer_id, nb
-            )
+            self._producer_actors[p].reserve_serve_arena.remote(self._consumer_id, nb)
             for p, nb in enumerate(serve_bytes)
             if nb > 0
         ]
@@ -1106,10 +1069,36 @@ class ShardedRDTWeightTransferEngine(
             num_producers, self._num_consumers(), self._global_worker_index()
         )
 
+    def start_weight_update(self) -> None:
+        """Put the model's params on meta so layerwise reload streams them in
+        as each layer's slices land. Baked replay uses checkpoint format."""
+        from vllm.model_executor.model_loader.reload import (
+            initialize_layerwise_reload,
+        )
+
+        initialize_layerwise_reload(self.model)
+
+    def finish_weight_update(self) -> None:
+        """Drain the deferred pull/process pipeline (so every layer is fully
+        loaded) before finalizing the layerwise reload."""
+        from vllm.model_executor.model_loader.reload import (
+            finalize_layerwise_reload,
+        )
+
+        self.drain_pending()
+        finalize_layerwise_reload(self.model, self.model_config)
+
+    def update_weights(self, update_info: dict[str, Any]) -> None:
+        """Receive one update. Unlike the base, does NOT issue a per-update
+        device sync: post-processing is deferred to background threads and a
+        sync here would block on them and serialize the pull/process pipeline.
+        Completion is guaranteed by ``drain_pending`` in
+        ``finish_weight_update``."""
+        self.receive_weights(self.parse_update_info(update_info))
+
     def receive_weights(
         self,
         update_info: ShardedRDTWeightTransferUpdateInfo,
-        load_weights: Callable[[list[tuple[str, torch.Tensor]]], None],
     ) -> None:
         """Pull + replay the baked leaf modules the sync covers.
 
@@ -1149,7 +1138,7 @@ class ShardedRDTWeightTransferEngine(
             # Rare/absent path (0% once unbaked-skip prunes dead names); runs
             # inline after the pipeline. It touches only non-baked layers, so it
             # does not race the background threads' baked layers.
-            self._load_unbaked(residual, load_weights)
+            self._load_unbaked(residual)
 
     def _build_lazy_weights(
         self,
@@ -1259,6 +1248,7 @@ class ShardedRDTWeightTransferEngine(
         # produce_wait vs recv_wall. With chunks in flight the cleave is
         # approximate (issues overlap completions) but the transfer sums stand.
         from vllm.distributed.weight_transfer import _nixl_profile
+
         _nixl_profile.mark_pull_start()
         # M:N split: one produce RPC per bound producer, each serving a contiguous
         # run of keys into its own disjoint sub-range of this receive slot's arena.
@@ -1290,9 +1280,7 @@ class ShardedRDTWeightTransferEngine(
             slot_sync_seconds=_slot_sync,
         )
 
-    def _complete_pull(
-        self, pending: "_PendingPull"
-    ) -> "dict[FetchKey, torch.Tensor]":
+    def _complete_pull(self, pending: "_PendingPull") -> "dict[FetchKey, torch.Tensor]":
         """Blocking half of a pull: the NIXL read lands during this ``ray.get``."""
         import ray
 
@@ -1313,6 +1301,7 @@ class ShardedRDTWeightTransferEngine(
             # materializes 8x the blob (OOM on the consumer).
             import json as _json
             import os as _os
+
             _os.makedirs("/tmp/rdt_profile", exist_ok=True)
             _w = 32 << 20
             with open("/tmp/rdt_profile/packcheck_cons.jsonl", "a") as f:
@@ -1321,8 +1310,9 @@ class ShardedRDTWeightTransferEngine(
                     s = 0
                     for _i in range(0, n, _w):
                         s += int(sub[_i : min(_i + _w, n)].sum(dtype=torch.int64))
-                    f.write(_json.dumps(
-                        {"pid": _os.getpid(), "bytes": n, "sum": s}) + "\n")
+                    f.write(
+                        _json.dumps({"pid": _os.getpid(), "bytes": n, "sum": s}) + "\n"
+                    )
         return dict(zip(pending.keys, pending.targets))
 
     # ---------------- Bake (dry run, at init) / replay ----------------
@@ -1330,7 +1320,6 @@ class ShardedRDTWeightTransferEngine(
     def _load_unbaked(
         self,
         names: list[str],
-        load_weights: Callable[[list[tuple[str, torch.Tensor]]], None],
     ) -> None:
         """Plain load for a call whose names aren't all baked: rebuild lazies
         for ``names`` (dtype/shape from the init metadata) and run vLLM's stock
@@ -1342,7 +1331,7 @@ class ShardedRDTWeightTransferEngine(
         shapes = [self._name_meta[n][1] for n in names]
         device = torch.empty(0).device
         _t = time.perf_counter()
-        load_weights(
+        self.model.load_weights(
             self._build_lazy_weights(
                 # Producer is bound on this path: ``receive_weights`` raises before
                 # calling ``_load_unbaked`` if none is. Any bound producer holds
@@ -1685,9 +1674,7 @@ class ShardedRDTWeightTransferEngine(
             for r, st in enumerate(starts)
         ]
 
-    def _build_call_plan(
-        self, names: list[str], group_lens: list[int]
-    ) -> "_CallPlan":
+    def _build_call_plan(self, names: list[str], group_lens: list[int]) -> "_CallPlan":
         """[RDT-SINGLE-CALL] Build the STATIC plan for one whole-sync call.
 
         PURE — no pulls, no side effects — so the result is cached and reused
@@ -1765,20 +1752,22 @@ class ShardedRDTWeightTransferEngine(
             cur = 0
             for k in keys:
                 dt, shape = kmeta[k]
-                n = prod(shape) or 1
+                numel = prod(shape) or 1  # type: ignore[arg-type]
                 off = (cur + 15) & ~15
-                pack_layout.append((off, dt, n, shape))
-                cur = off + n * dt.itemsize
-            chunks.append(_Chunk(
-                scatters=scatters,
-                keys=keys,
-                pack_layout=pack_layout,
-                pack_bytes=cur,
-                materialize=materialize_at.get(ci, []),
-                quant=quant_at.get(ci, []),
-                free=free_at.get(ci, []),
-                subpulls=self._split_chunk_pull(keys, pack_layout, cur),
-            ))
+                pack_layout.append((off, dt, numel, shape))
+                cur = off + numel * dt.itemsize
+            chunks.append(
+                _Chunk(
+                    scatters=scatters,
+                    keys=keys,
+                    pack_layout=pack_layout,
+                    pack_bytes=cur,
+                    materialize=materialize_at.get(ci, []),
+                    quant=quant_at.get(ci, []),
+                    free=free_at.get(ci, []),
+                    subpulls=self._split_chunk_pull(keys, pack_layout, cur),
+                )
+            )
         return _CallPlan(chunks=chunks, pre_free=pre_free, residual=residual)
 
     def _split_chunk_pull(
@@ -1862,7 +1851,7 @@ class ShardedRDTWeightTransferEngine(
 
         from vllm.distributed.weight_transfer import _nixl_profile
 
-        inflight: "deque[tuple[_PendingPull, _Chunk]]" = deque()
+        inflight: deque[tuple[_PendingPull, _Chunk]] = deque()
 
         # Gather groups with no chunk on this worker (plan.pre_free): free before
         # the pipeline — the trainer gathered them under the lockstep plan but
@@ -1882,15 +1871,17 @@ class ShardedRDTWeightTransferEngine(
             # jsonl (per-pid sums via the driver's aggregation).
             delta["slot_wait_seconds"] = pending.slot_wait_seconds
             delta["slot_sync_seconds"] = pending.slot_sync_seconds
-            self._dispatch_item(_ProcItem(
-                chunk=chunk,
-                results=results,
-                slot=pending.slot,
-                t_recv=_t_recv,
-                pull_seconds=pull_seconds,
-                nixl_delta=delta,
-                pull_bytes=sum(sc.nbytes for sc in chunk.scatters),
-            ))
+            self._dispatch_item(
+                _ProcItem(
+                    chunk=chunk,
+                    results=results,
+                    slot=pending.slot,
+                    t_recv=_t_recv,
+                    pull_seconds=pull_seconds,
+                    nixl_delta=delta,
+                    pull_bytes=sum(sc.nbytes for sc in chunk.scatters),
+                )
+            )
             # Each gather group whose LAST chunk this is: its read is done, so
             # every serve of that group is done -> the producer can drop the
             # gather buffers (fire-and-forget, off the critical path).
@@ -2023,6 +2014,7 @@ class ShardedRDTWeightTransferEngine(
         )
 
         stream = self._quant_stream or self._proc_stream
+        assert stream is not None  # created in _ensure_proc_worker before use
         ph = PhaseTimer(stream)
         _t0 = time.perf_counter()
         with (
@@ -2033,14 +2025,11 @@ class ShardedRDTWeightTransferEngine(
             stream.wait_event(ready)
             for layer in layers:
                 info = LAYERWISE_INFO.get(layer)
+                assert info is not None  # completed leaf module is set up for reload
                 quant_method = getattr(layer, "quant_method", None)
                 if isinstance(quant_method, QuantizeMethodBase):
-                    if hasattr(
-                        layer, "_already_called_process_weights_after_loading"
-                    ):
-                        delattr(
-                            layer, "_already_called_process_weights_after_loading"
-                        )
+                    if hasattr(layer, "_already_called_process_weights_after_loading"):
+                        delattr(layer, "_already_called_process_weights_after_loading")
                     with ph.phase("quant_seconds"):
                         quant_method.process_weights_after_loading(layer)
                 # Copy into persistent kernel storage (preserves cudagraph refs).
@@ -2123,7 +2112,10 @@ class ShardedRDTWeightTransferEngine(
         import json
         import os
 
-        os.makedirs(os.path.dirname(ShardedRDTWeightTransferEngine._CONSUMER_TIMING_FILE), exist_ok=True)
+        os.makedirs(
+            os.path.dirname(ShardedRDTWeightTransferEngine._CONSUMER_TIMING_FILE),
+            exist_ok=True,
+        )
         record = {
             "pid": os.getpid(),
             "mode": mode,
