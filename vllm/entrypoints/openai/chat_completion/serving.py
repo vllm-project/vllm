@@ -90,15 +90,21 @@ def _get_mm_token_counts(engine_input: EngineInput) -> dict[str, int]:
 def _make_prompt_tokens_details(
     enable_prompt_tokens_details: bool,
     num_cached_tokens: int | None,
+    num_cache_creation_tokens: int | None,
     mm_token_counts: dict[str, int] | None,
 ) -> PromptTokenUsageInfo | None:
     """Build ``prompt_tokens_details`` from cached + multimodal token counts."""
     if not enable_prompt_tokens_details:
         return None
-    if num_cached_tokens is None and not mm_token_counts:
+    if (
+        num_cached_tokens is None
+        and num_cache_creation_tokens is None
+        and not mm_token_counts
+    ):
         return None
     return PromptTokenUsageInfo(
         cached_tokens=num_cached_tokens,
+        created_cache_tokens=num_cache_creation_tokens,
         multimodal_tokens=mm_token_counts or None,
     )
 
@@ -455,6 +461,7 @@ class OpenAIServingChat(GenerateBaseServing):
         finish_reason_sent = [False] * num_choices
         num_prompt_tokens = 0
         num_cached_tokens = None
+        num_cache_creation_tokens = None
         tools_streamed = [False] * num_choices
 
         if isinstance(request.tool_choice, ChatCompletionNamedToolChoiceParam):
@@ -507,6 +514,7 @@ class OpenAIServingChat(GenerateBaseServing):
                 # response (by the try...catch).
                 if first_iteration:
                     num_cached_tokens = res.num_cached_tokens
+                    num_cache_creation_tokens = res.num_cache_creation_tokens
                     # Send first response for each request.n (index) with
                     # the role
                     role = self.get_chat_request_role(request)
@@ -784,6 +792,7 @@ class OpenAIServingChat(GenerateBaseServing):
                 final_usage.prompt_tokens_details = _make_prompt_tokens_details(
                     self.enable_prompt_tokens_details,
                     num_cached_tokens,
+                    num_cache_creation_tokens,
                     mm_token_counts,
                 )
 
@@ -1076,6 +1085,7 @@ class OpenAIServingChat(GenerateBaseServing):
         usage.prompt_tokens_details = _make_prompt_tokens_details(
             self.enable_prompt_tokens_details,
             final_res.num_cached_tokens,
+            final_res.num_cache_creation_tokens,
             mm_token_counts,
         )
 
