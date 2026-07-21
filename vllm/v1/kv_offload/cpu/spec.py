@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import math
 from typing import Any
 
 from typing_extensions import override
@@ -24,6 +23,10 @@ from vllm.v1.kv_offload.cpu.gpu_worker import CPUOffloadingWorker
 from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
 
 logger = init_logger(__name__)
+
+# Fixed compact-offload page size. The per-rank budget is rounded down to a whole
+# number of these pages so FixedPageAllocator's free-page count is always bounded.
+_COMPACT_PAGE_SIZE = 64 * 1024
 
 
 class CPUOffloadingSpec(OffloadingSpec):
@@ -144,6 +147,19 @@ class CPUOffloadingSpec(OffloadingSpec):
                     f"(remainder: {cpu_bytes % world_size})"
                 )
             per_rank_budget = cpu_bytes // world_size
+            # Round the per-rank budget down to a whole number of fixed 64 KiB
+            # pages. Deriving the page size from gcd(64 KiB, budget) instead lets
+            # a budget with low 2-adic valuation (e.g. a round decimal byte count)
+            # collapse the page size to a few bytes, making FixedPageAllocator
+            # eagerly build a multi-billion-entry free-page list and OOM/hang at
+            # init. A fixed page keeps the count bounded and wastes < 64 KiB/rank.
+            if per_rank_budget < _COMPACT_PAGE_SIZE:
+                raise ValueError(
+                    f"compact per-rank budget ({per_rank_budget} bytes) is smaller "
+                    f"than one {_COMPACT_PAGE_SIZE}-byte page; increase "
+                    "cpu_bytes_to_use"
+                )
+            per_rank_budget -= per_rank_budget % _COMPACT_PAGE_SIZE
 
             payload_map: dict[int, int] = {}
             for group_idx, payload in enumerate(compact_group_payloads):
@@ -195,18 +211,11 @@ class CPUOffloadingSpec(OffloadingSpec):
                 assert self._compact_per_rank_budget is not None
                 assert self._compact_policy_capacity is not None
                 assert self._compact_group_payload_map is not None
-                # Use a stable 64 KiB fixed-page target reduced by GCD, ensuring
-                # the page size always evenly divides the per-rank budget regardless
-                # of the model-dependent group payload (which may not divide the
-                # budget evenly).  This matches the final product's fixed-page
-                # scatter geometry without shared/bounded-tail features.
-                compact_page_size = math.gcd(64 * 1024, self._compact_per_rank_budget)
-                if compact_page_size <= 0:
-                    raise ValueError(
-                        "compact page size must be positive; "
-                        f"got {compact_page_size} from "
-                        f"gcd(65536, {self._compact_per_rank_budget})"
-                    )
+                # Stable 64 KiB fixed page. The per-rank budget was rounded down
+                # to a whole number of these pages when compact layout was
+                # resolved, so the page size always evenly divides it and the
+                # free-page count stays bounded.
+                compact_page_size = _COMPACT_PAGE_SIZE
                 self._manager = CPUOffloadingManager(
                     num_blocks=self._compact_policy_capacity,
                     cache_policy=self.eviction_policy,  # type: ignore[arg-type]
