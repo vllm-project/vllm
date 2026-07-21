@@ -348,10 +348,7 @@ class RequestOffloadState:
         is_decoding = num_offloadable_tokens > self.req.num_prompt_tokens
         if group_config.is_eagle_group and is_decoding:
             num_chunks = max(0, num_chunks - 1)
-        num_allocated_chunks = (
-            len(group_state.block_ids) // self.config.blocks_per_chunk
-        )
-        return min(num_chunks, num_allocated_chunks)
+        return num_chunks
 
     def advance_stored_idx(self, num_offloadable_tokens: int) -> None:
         # max(): at the prefill->decode transition of a chunk-aligned prompt,
