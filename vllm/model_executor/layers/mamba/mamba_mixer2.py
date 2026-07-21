@@ -882,63 +882,56 @@ class MambaMixer2(MambaBase, PluggableLayer):
                 # then chunk_stride = 2
                 chunk_stride = mamba_block_size // chunk_size
 
-                # Save state for sequences with more than just final state
-                for seq_idx in range(num_prefills):
-                    # Block index for the first scheduled token
-                    block_idx_first_scheduled_token = block_idx_first_scheduled_token_p[
-                        seq_idx
-                    ]
+                # Save state for sequences with more than just final state.
+                # The copy is batched across all sequences, since a
+                # per-sequence loop causes one kernel launch and one GPU->CPU
+                # sync per prefill request.
 
-                    # Block index for the last scheduled token
-                    block_idx_last_scheduled_token = block_idx_last_scheduled_token_p[
-                        seq_idx
-                    ]
+                # Number of blocks that need to be written per sequence
+                n_blocks_to_fill = (
+                    block_idx_last_scheduled_token_p - block_idx_first_scheduled_token_p
+                ).clamp(min=0)
+                total_fill = int(n_blocks_to_fill.sum().item())
+                if total_fill > 0:
+                    # First chunk index for each sequence
+                    first_chunk = torch.zeros_like(last_chunk_indices_p)
+                    first_chunk[1:] = last_chunk_indices_p[:-1] + 1
 
-                    # Number of blocks that need to be written
-                    n_blocks_to_fill = (
-                        block_idx_last_scheduled_token - block_idx_first_scheduled_token
-                    )
-
-                    # Skip sequences that don't have any blocks to fill
-                    if n_blocks_to_fill == 0:
-                        continue
-
-                    # Look up the state indices
-                    cache_blocks_to_fill = state_indices_tensor_p[
-                        seq_idx,
-                        block_idx_first_scheduled_token:block_idx_last_scheduled_token,
-                    ]
-
-                    # First chunk index for this sequence
-                    if seq_idx == 0:
-                        first_chunk = 0
-                    else:
-                        first_chunk = 1 + last_chunk_indices_p[seq_idx - 1]
-
-                    # First chunk that is aligned on the mamba block boundary
-                    first_aligned_chunk = first_chunk + chunk_stride - 1
-
-                    # Calculate the number of computed tokens that were not
-                    # already cached
+                    # First chunk that is aligned on the mamba block boundary.
+                    # When the computed tokens are not block aligned, the
+                    # first boundary comes earlier by
+                    # (num_unaligned_computed_tokens // chunk_size) chunks.
                     num_unaligned_computed_tokens = (
-                        num_computed_tokens_p[seq_idx] % mamba_block_size
+                        num_computed_tokens_p % mamba_block_size
+                    )
+                    unaligned_chunk_shift = num_unaligned_computed_tokens // chunk_size
+                    first_aligned_chunk = (
+                        first_chunk + (chunk_stride - 1) - unaligned_chunk_shift
                     )
 
-                    if num_unaligned_computed_tokens > 0:
-                        # If the number of computed tokens is not block aligned,
-                        # then we need to shift the index accordingly
-                        first_aligned_chunk -= (
-                            num_unaligned_computed_tokens // chunk_size
-                        )
+                    # Flatten the writes of all sequences into one list,
+                    # e.g. fill_counts=[2,1,2] -> seq_ids=[0,0,1,2,2],
+                    # write_offsets=[0,1,0,0,1]
+                    fill_counts = n_blocks_to_fill.long()
+                    seq_ids = torch.repeat_interleave(
+                        torch.arange(num_prefills, device=ssm_state.device),
+                        fill_counts,
+                    )
+                    write_starts = torch.cumsum(fill_counts, dim=0) - fill_counts
+                    write_offsets = torch.arange(
+                        total_fill, device=ssm_state.device
+                    ) - torch.repeat_interleave(write_starts, fill_counts)
 
-                    # Get states to write
-                    from_where = varlen_states[
-                        first_aligned_chunk : first_aligned_chunk
-                        + n_blocks_to_fill * chunk_stride : chunk_stride
+                    cache_blocks_to_fill = state_indices_tensor_p[
+                        seq_ids,
+                        block_idx_first_scheduled_token_p[seq_ids] + write_offsets,
                     ]
-
-                    # Write the states
-                    ssm_state[cache_blocks_to_fill] = from_where
+                    # Each write goes to a distinct cache block, so there are
+                    # no duplicate indices and the indexed copy is
+                    # deterministic.
+                    ssm_state[cache_blocks_to_fill] = varlen_states[
+                        first_aligned_chunk[seq_ids] + write_offsets * chunk_stride
+                    ]
 
                 # For all seqs, store the last state (note: might be partial):
                 assert state_indices_tensor_p is not None
