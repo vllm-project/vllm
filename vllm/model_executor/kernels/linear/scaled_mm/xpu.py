@@ -197,6 +197,37 @@ class XPUFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
             return False, "XPUFp8BlockScaledMM only support on XPU"
         return True, None
 
+    def process_weights_after_loading(self, layer: torch.nn.Module):
+        super().process_weights_after_loading(layer)
+        scale_attr = (
+            "weight_scale_inv" if hasattr(layer, "weight_scale_inv") else "weight_scale"
+        )
+        scale = getattr(layer, scale_attr)
+        # Transpose scale from checkpoint layout [N/128, K/128] to
+        # oneDNN expected layout [K/128, N/128] at load time (one-time cost).
+        scale_t = scale.data.t().contiguous()
+        replace_parameter(layer, scale_attr, scale_t)
+
+        # For BMM layers (e.g. wo_a), precompute 3D scale and weight:
+        # [K/bs, N/bs] -> [batch, K/bs, N_per_batch/bs]
+        if getattr(layer, "is_bmm", False):
+            batch = layer.bmm_batch_size
+            k_blocks = scale_t.shape[0]
+            n_per_batch_blocks = scale_t.shape[1] // batch
+            layer.bmm_scale = (
+                scale_t.reshape(k_blocks, batch, n_per_batch_blocks)
+                .permute(1, 0, 2)
+                .contiguous()
+            )
+            # Precompute [G, K, N] weight for fp8_bmm.
+            # Original weight is [N_total, K] where N_total = G * N_per_group.
+            w = layer.weight.data
+            N_total, K = w.shape
+            N_per_group = N_total // batch
+            layer.bmm_weight = w.reshape(batch, N_per_group, K).permute(
+                0, 2, 1
+            )  # [G, K, N]
+
     def apply_block_scaled_mm(
         self,
         A: torch.Tensor,
@@ -205,12 +236,12 @@ class XPUFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
         Bs: torch.Tensor,
     ) -> torch.Tensor:
         # Weight is [N, K]. Use .t() to create a [K, N] view without copying.
-        # Bs is [N/128, K/128] — transpose to [K/128, N/128] for oneDNN.
+        # Bs is already [K/128, N/128] from process_weights_after_loading.
         return torch.ops._xpu_C.fp8_gemm(
             A,
             B.t(),
             self.config.out_dtype,
             As,
-            Bs.t().contiguous(),
+            Bs,
             torch.Tensor(),
         )

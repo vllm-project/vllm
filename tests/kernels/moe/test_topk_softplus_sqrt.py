@@ -10,6 +10,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     RoutingMethodType,
     get_routing_method_type,
 )
+from vllm.model_executor.layers.fused_moe.router.dsv4_topk import dsv4_topk
 from vllm.model_executor.layers.fused_moe.router.fused_topk_bias_router import (
     fused_topk_bias,
 )
@@ -186,3 +187,47 @@ def test_fused_topk_softplus_sqrt_hash(
     sorted_w_ref = topk_weights_ref.gather(1, idx_ref)
     sorted_w = topk_weights.gather(1, idx_ops)
     torch.testing.assert_close(sorted_w_ref, sorted_w, atol=2e-2, rtol=1e-2)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda(),
+    reason="The DeepSeek V4 fast path is CUDA-only.",
+)
+@pytest.mark.parametrize(
+    ("num_tokens", "num_experts", "indices_type"),
+    [
+        (0, 256, torch.uint32),
+        (17, 256, torch.uint32),
+        (17, 384, torch.int64),
+    ],
+)
+def test_dsv4_fast_topk(
+    num_tokens: int,
+    num_experts: int,
+    indices_type: torch.dtype,
+):
+    torch.manual_seed(0)
+    gating_output = torch.randn(
+        (num_tokens, num_experts), dtype=torch.float32, device="cuda"
+    )
+    correction_bias = torch.randn(num_experts, dtype=torch.float32, device="cuda")
+
+    topk_weights_ref, topk_ids_ref = _torch_topk_softplus_sqrt(
+        gating_output=gating_output,
+        topk=6,
+        renormalize=True,
+        routed_scaling_factor=1.5,
+        e_score_correction_bias=correction_bias,
+    )
+    topk_weights, topk_ids = dsv4_topk(
+        gating_output, correction_bias, indices_type, 1.5
+    )
+
+    assert topk_ids.dtype == indices_type
+    torch.testing.assert_close(topk_ids_ref.to(indices_type), topk_ids, atol=0, rtol=0)
+    torch.testing.assert_close(
+        topk_weights_ref,
+        topk_weights,
+        atol=2e-5,
+        rtol=2e-5,
+    )

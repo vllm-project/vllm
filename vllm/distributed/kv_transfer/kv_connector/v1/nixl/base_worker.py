@@ -1852,7 +1852,7 @@ class NixlBaseConnectorWorker:
 
         for req_id, meta in metadata.reqs_to_save.items():
             meta.local_physical_block_ids = self._logical_to_kernel_block_ids(
-                meta.local_block_ids
+                meta.local_block_ids, self._physical_blocks_per_logical_kv_block
             )
             if logger.isEnabledFor(logging.DEBUG):
                 logger.debug(
@@ -1935,13 +1935,8 @@ class NixlBaseConnectorWorker:
         indices = torch.tensor(block_ids, device=self.device_type, dtype=torch.long)
 
         for _, cache_or_caches in self.device_kv_caches.items():
-            blocks_to_update = cache_or_caches.index_select(1, indices)
             current_platform.pack_kv_cache(
-                key=blocks_to_update[0],
-                value=blocks_to_update[1],
-                key_cache=cache_or_caches[0],
-                value_cache=cache_or_caches[1],
-                block_ids=block_ids,
+                kv_cache=cache_or_caches,
                 indices=indices,
             )
 
@@ -2207,30 +2202,36 @@ class NixlBaseConnectorWorker:
 
         return mapped_2d.flatten().astype(np.int64)
 
-    def _logical_to_kernel_block_ids(self, block_ids: BlockIds) -> BlockIds:
+    def _logical_to_kernel_block_ids(self, block_ids: BlockIds, ratio: int) -> BlockIds:
         """
-        Convert logical block ids to kernel physical block ids.
+        Convert block ids to kernel physical block ids.
         This is required when the logical block size (the one set by the user)
         does not match the one required by the attn backend.
+        `ratio` is the number of physical blocks per logical block.
+        We always receive logical blocks from the engine, so we expand them here eg:
+        logical block ids: [(SW-clipped) [1], (FA) [2, 3]], ratio=2
+        physical block ids: [(SW-clipped) [2, 3], (FA) [4, 5, 6, 7]]
         """
-        if self._physical_blocks_per_logical_kv_block == 1:
+        if ratio == 1:
             # Noop when physical and logical block sizes are the same
             return block_ids
-        block_arange = np.arange(0, self._physical_blocks_per_logical_kv_block).reshape(
-            1, -1
-        )
-        # Mamba blocks have no logical<>physical discrepancy
+        block_arange = np.arange(0, ratio).reshape(1, -1)
+        # Mamba blocks have no logical<>physical discrepancy (block-size=1)
         group_specs = self.kv_cache_config.kv_cache_groups
-        return [
-            BlockTable.map_to_kernel_blocks(
-                np.array(group),
-                self._physical_blocks_per_logical_kv_block,
-                block_arange,
-            ).tolist()
-            if not isinstance(group_specs[i].kv_cache_spec, MambaSpec)
-            else group
-            for i, group in enumerate(block_ids)
-        ]
+        physical_block_ids = []
+        for i, group in enumerate(block_ids):
+            spec = group_specs[i].kv_cache_spec
+            if isinstance(spec, MambaSpec):
+                physical_block_ids.append(group)
+            else:
+                physical_block_ids.append(
+                    BlockTable.map_to_kernel_blocks(
+                        np.array(group),
+                        ratio,
+                        block_arange,
+                    ).tolist()
+                )
+        return physical_block_ids
 
     def _apply_prefix_caching(
         self,
@@ -2307,39 +2308,6 @@ class NixlBaseConnectorWorker:
                     local_block_ids[i] = local_block_ids[i][:num_blocks]
                     remote_block_ids[i] = remote_group[:num_blocks]
         return local_block_ids, remote_block_ids
-
-    def _logical_to_remote_kernel_block_ids(
-        self, block_ids: BlockIds, remote_physical_per_logical: int
-    ) -> BlockIds:
-        """Map logical block IDs to physical kernel block IDs on the remote.
-
-        Args:
-            block_ids: per-group lists of logical block IDs.
-            remote_physical_per_logical: remote engine's physical blocks
-                per logical block.
-
-        Returns:
-            Same structure with FA groups expanded (each logical block L
-            becomes kernel blocks [L*remote_physical_per_logical, ..
-            L*remote_physical_per_logical +
-            remote_physical_per_logical - 1]).
-            Mamba groups are passed through unchanged.
-        """
-        if remote_physical_per_logical == 1:
-            return block_ids
-        remote_arange = np.arange(remote_physical_per_logical).reshape(1, -1)
-        group_specs = self.kv_cache_config.kv_cache_groups
-        result = [
-            BlockTable.map_to_kernel_blocks(
-                np.array(group),
-                remote_physical_per_logical,
-                remote_arange,
-            ).tolist()
-            if not isinstance(group_specs[i].kv_cache_spec, MambaSpec)
-            else group
-            for i, group in enumerate(block_ids)
-        ]
-        return result
 
     def get_backend_aware_kv_block_len(
         self, layer_idx: int, first_split: bool = True, mamba_view: bool = False
