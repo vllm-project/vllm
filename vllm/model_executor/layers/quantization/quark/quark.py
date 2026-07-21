@@ -43,6 +43,7 @@ from vllm.model_executor.models.utils import WeightsMapper
 from vllm.platforms import current_platform
 
 if TYPE_CHECKING:
+    from vllm.config.quantization import QuantizationConfigArgs
     from vllm.model_executor.models.utils import WeightsMapper
 
 __all__ = ["QuarkLinearMethod"]
@@ -52,6 +53,31 @@ logger = init_logger(__name__)
 # model_type values that use dynamic MXFP4 re-quantization for
 # OCP MX fp4 Quark checkpoints
 _DEEPSEEK_V3_FAMILY_MODEL_TYPES = frozenset({"deepseek_v3", "deepseek_v32"})
+
+
+def _online_requant_overlay() -> "QuantizationConfigArgs | None":
+    """User-supplied online-requant overlay for a Quark (mixed-precision)
+    checkpoint's unquantized (bf16/fp16) layers.
+
+    Set via ``--quantization-config`` (a ``QuantizationConfigArgs`` with a
+    ``linear`` spec + ``ignore`` patterns), it lets a checkpoint that ships some
+    layers unquantized re-quantize those layers on the fly using the shared
+    online methods in ``quantization/online`` -- e.g. FP8 ptpc for the bf16 MLA
+    / dense-MLP projections of a Quark MXFP4 MoE checkpoint. The actual quant
+    lives in ``online/fp8.py``; Quark only routes to it (per the maintainer
+    guidance on PR #31672 that online quant must not live inside the loader).
+
+    Returns None unless an overlay with a linear spec is present, so default
+    Quark behavior is unchanged. Mirrors the MXFP4 MoE oracle's use of
+    ``quantization_config`` for activation overrides.
+    """
+    from vllm.config import get_current_vllm_config
+    from vllm.config.quantization import QuantizationConfigArgs
+
+    args = get_current_vllm_config().model_config.quantization_config
+    if isinstance(args, QuantizationConfigArgs) and args.linear is not None:
+        return args
+    return None
 
 
 class QuarkConfig(QuantizationConfig):
@@ -143,6 +169,39 @@ class QuarkConfig(QuantizationConfig):
 
         self.quant_config = quant_config_with_hf_to_vllm_mapper
 
+    def _online_requant_method(
+        self, overlay: "QuantizationConfigArgs", prefix: str
+    ) -> "QuantizeMethodBase | None":
+        """Route an unquantized (bf16/fp16) Linear layer to a shared online
+        quant method per the user overlay, or None if the overlay's ``ignore``
+        patterns exclude it (so it stays unquantized)."""
+        if should_ignore_layer(
+            prefix,
+            ignore=overlay.ignore,
+            fused_mapping=self.packed_modules_mapping,
+        ):
+            return None
+
+        from vllm.model_executor.layers.quantization.online.base import (
+            _ONLINE_LINEAR_METHODS,
+        )
+
+        weight_key = overlay.linear.weight
+        method_cls = _ONLINE_LINEAR_METHODS.get(weight_key)
+        if method_cls is None:
+            raise ValueError(
+                f"online requant weight={weight_key} is not supported for "
+                f"Quark unquantized layers; supported weight keys: "
+                f"{sorted(str(k) for k in _ONLINE_LINEAR_METHODS)}"
+            )
+        logger.info_once(
+            "Quark online-requant active: unquantized layers -> %s "
+            "(e.g. %s); scoped by quantization_config.ignore.",
+            method_cls.__name__,
+            prefix,
+        )
+        return method_cls()
+
     def get_quant_method(
         self, layer: torch.nn.Module, prefix: str
     ) -> "QuantizeMethodBase | None":
@@ -154,8 +213,20 @@ class QuarkConfig(QuantizationConfig):
             fused_mapping=self.packed_modules_mapping,
             check_children=isinstance(layer, RoutedExperts),
         ):
+            # This layer ships unquantized (bf16/fp16) in the checkpoint.
             if isinstance(layer, RoutedExperts):
                 return UnquantizedFusedMoEMethod(layer.moe_config)
+
+            # Optional user overlay (--quantization-config): online-requant the
+            # unquantized Linear layers via the shared online methods, scoped by
+            # the overlay's own ``ignore`` patterns. No model-specific logic;
+            # default Quark behavior is unchanged when no overlay is set.
+            overlay = _online_requant_overlay()
+            if overlay is not None and isinstance(layer, LinearBase):
+                method = self._online_requant_method(overlay, prefix)
+                if method is not None:
+                    return method
+
             if (
                 "self_attn" not in prefix  # only quantize attention projections
                 or not getattr(self, "dynamic_mxfp4_quant", False)
