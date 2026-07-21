@@ -156,3 +156,65 @@ class TestAsyncLookupManager:
         mgr = InMemoryLookupManager()
         mgr.shutdown()
         assert not mgr._thread.is_alive()
+
+    def test_invalidate_drops_cached_verdict(self):
+        """Regression for the failed-load livelock (#49176): after
+        invalidate(), the cached True is gone and the next lookup re-runs a
+        fresh existence check instead of serving the stale verdict."""
+        existing = {_key(1)}
+        mgr = InMemoryLookupManager(existing_keys=existing)
+        ctx = _ctx("livelock")
+        assert mgr.lookup(_key(1), ctx) is None
+        mgr.flush()
+        mgr._results_ready.wait()
+        mgr._results_ready.clear()
+        assert mgr.lookup(_key(1), ctx) is True
+
+        # The backing data goes away and the load fails; the tier calls
+        # invalidate. The same request must now get a fresh (negative)
+        # answer, not the cached True.
+        existing.discard(_key(1))
+        mgr.invalidate([_key(1)])
+        assert mgr.lookup(_key(1), ctx) is None  # re-enqueued, not cached
+        mgr.flush()
+        mgr._results_ready.wait()
+        mgr._results_ready.clear()
+        assert mgr.lookup(_key(1), ctx) is False
+        mgr.shutdown()
+
+    def test_invalidate_keeps_reverse_index_consistent(self):
+        """cleanup() direct-indexes _lookup_state for every key in its
+        reverse index; invalidate() must maintain both structures or a
+        later cleanup() raises KeyError."""
+        mgr = InMemoryLookupManager(existing_keys={_key(1), _key(2)})
+        ctx = _ctx("reqA")
+        mgr.lookup(_key(1), ctx)
+        mgr.lookup(_key(2), ctx)
+        mgr.flush()
+        mgr._results_ready.wait()
+        mgr._results_ready.clear()
+
+        mgr.invalidate([_key(1)])
+        mgr.cleanup("reqA")  # must not raise
+        assert _key(1) not in mgr._lookup_state
+        assert _key(2) not in mgr._lookup_state
+        assert "reqA" not in mgr._req_keys
+        mgr.shutdown()
+
+    def test_invalidate_unknown_key_is_noop(self):
+        mgr = InMemoryLookupManager()
+        mgr.invalidate([_key(99)])  # must not raise
+        mgr.shutdown()
+
+    def test_late_result_cannot_resurrect_invalidated_entry(self):
+        """A worker result that arrives after invalidate() must be
+        discarded, not recreate the entry (drain_results' .get() guard)."""
+        mgr = InMemoryLookupManager(existing_keys={_key(1)})
+        ctx = _ctx("late")
+        mgr.lookup(_key(1), ctx)
+        mgr.invalidate([_key(1)])
+        # Simulate the in-flight batch resolving late.
+        mgr._pending_results.put([(_key(1), True)])
+        mgr.drain_results()
+        assert _key(1) not in mgr._lookup_state
+        mgr.shutdown()

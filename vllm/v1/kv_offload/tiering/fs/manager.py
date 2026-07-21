@@ -72,11 +72,31 @@ class FsAsyncLookupManager(AsyncLookupManager):
     def batch_lookup(
         self, keys: list[OffloadKey], req_context: ReqContext
     ) -> Iterable[bool]:
+        # Validate SIZE, not bare existence. Stores in this tier are atomic
+        # (fs/io.store_block writes a tmp file with O_CREAT|O_EXCL|O_TRUNC
+        # then os.replace), so a wrong-size destination file never results
+        # from a normal write — it only arises from external corruption /
+        # bit-rot or a foreign, older-layout file sharing the directory.
+        # The check is not catching a common write failure: it costs roughly
+        # one stat and makes lookup agree with what load will accept, so a
+        # truncated or foreign-layout file is an up-front miss instead of a
+        # hit that fails fatally at load time. The C extension gets each size
+        # in one GIL-released syscall batch; the pure-Python fallback stats
+        # per file (os.stat costs the same as the os.path.exists it replaced).
+        expected = self._tier._block_size
         paths = [self._tier.file_mapper.get_file_name(k) for k in keys]
         if _HAS_BATCH_LOOKUP_C:
-            # C extension: GIL released for the entire faccessat() batch.
-            return batch_lookup_C(paths)
-        return (os.path.exists(p) for p in paths)
+            # batch_lookup returns st_size per path, or -1 on stat failure —
+            # a negative sentinel that never equals a valid block size.
+            return (size == expected for size in batch_lookup_C(paths))
+        return (self._size_matches(p, expected) for p in paths)
+
+    @staticmethod
+    def _size_matches(path: str, expected: int) -> bool:
+        try:
+            return os.stat(path).st_size == expected
+        except OSError:
+            return False
 
 
 class FileSystemTierManager(SecondaryTierManager):
@@ -144,6 +164,10 @@ class FileSystemTierManager(SecondaryTierManager):
                 )
         # Keys of in-flight store jobs, tracked only when events are enabled.
         self._store_job_keys: dict[JobId, list[OffloadKey]] = {}
+        # Keys of in-flight load (promotion) jobs, so a failed load can
+        # self-invalidate its own stale lookup verdicts (see
+        # get_finished_jobs). Always tracked; loads are always promotions.
+        self._load_job_keys: dict[JobId, list[OffloadKey]] = {}
 
         # Extract block size from primary view
         assert primary_kv_view.strides is not None, (
@@ -205,6 +229,7 @@ class FileSystemTierManager(SecondaryTierManager):
 
     @override
     def submit_load(self, job_metadata: JobMetadata) -> None:
+        self._load_job_keys[job_metadata.job_id] = list(job_metadata.keys)
         tasks = (
             functools.partial(
                 load_block,
@@ -221,6 +246,13 @@ class FileSystemTierManager(SecondaryTierManager):
     def get_finished_jobs(self) -> Iterable[JobResult]:
         """
         Collect completed jobs from the finished-jobs queue.
+
+        Runs on the scheduler thread (see SecondaryTierManager), which is the
+        only thread allowed to touch the async lookup cache. It is therefore
+        where the tier self-invalidates its own failed load jobs: a failed
+        promotion whose cached positive verdict is left in place would make
+        the scheduler re-initiate the same doomed promotion every step for the
+        life of the requesting request (request-level livelock, #49176).
         """
         results = []
         for job_id, success in self._pool.get_finished():
@@ -235,6 +267,13 @@ class FileSystemTierManager(SecondaryTierManager):
                             locality=self.locality,
                         )
                     )
+            # Loads are always promotions. A failed one means our copy of
+            # these blocks is unusable; drop the stale positive verdicts so
+            # the next lookup re-checks the disk (a size-validated miss for a
+            # truncated/missing file) instead of re-issuing the same promotion.
+            load_keys = self._load_job_keys.pop(job_id, None)
+            if load_keys is not None and not success:
+                self._lookup_manager.invalidate(load_keys)
             results.append(JobResult(job_id=job_id, success=success))
         return results
 

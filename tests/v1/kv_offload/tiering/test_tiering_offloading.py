@@ -244,6 +244,61 @@ class TestTieringOffloadingManager:
         if req_context.req_id not in self.manager._req_state:
             self.manager.on_new_request(req_context)
 
+    def test_failed_promotion_finalizes_primary_with_failure(self, manager_setup):
+        """A failed promotion job must still finalize the primary slots with
+        success=False. Stale-verdict invalidation is now the owning tier's own
+        responsibility (it self-invalidates from get_finished_jobs on the
+        scheduler thread), so the manager only forwards the outcome — it no
+        longer calls back into the tier. Regression for the failed-load
+        livelock plumbing (#49176)."""
+        from unittest.mock import patch
+
+        from vllm.v1.kv_offload.tiering.base import JobResult
+
+        self._start_request()
+        # Register an in-flight promotion job for tier1 by hand.
+        job_id = self.manager._next_job_id()
+        self.manager._transfer_jobs[job_id] = JobMetadata(
+            job_id=job_id,
+            keys=to_keys([1, 2]),
+            block_ids=[0, 1],
+            is_promotion=True,
+            req_context=_CTX,
+        )
+        failed = JobResult(job_id=job_id, success=False)
+        with (
+            patch.object(
+                self.secondary_tier1, "get_finished_jobs", return_value=[failed]
+            ),
+            patch.object(self.primary_tier, "complete_write") as completed,
+        ):
+            self.manager._process_finished_jobs()
+        completed.assert_called_once_with(to_keys([1, 2]), _CTX, False)
+        # The manager no longer calls back into the tier on failure.
+        assert not hasattr(SecondaryTierManager, "on_load_failed")
+
+    def test_successful_promotion_finalizes_primary_with_success(self, manager_setup):
+        from unittest.mock import patch
+
+        from vllm.v1.kv_offload.tiering.base import JobResult
+
+        self._start_request()
+        job_id = self.manager._next_job_id()
+        self.manager._transfer_jobs[job_id] = JobMetadata(
+            job_id=job_id,
+            keys=to_keys([1]),
+            block_ids=[0],
+            is_promotion=True,
+            req_context=_CTX,
+        )
+        ok = JobResult(job_id=job_id, success=True)
+        with (
+            patch.object(self.secondary_tier1, "get_finished_jobs", return_value=[ok]),
+            patch.object(self.primary_tier, "complete_write") as completed,
+        ):
+            self.manager._process_finished_jobs()
+        completed.assert_called_once_with(to_keys([1]), _CTX, True)
+
     def test_take_events_aggregates_tier_owned_events(self, manager_setup):
         primary_event = OffloadingEvent(to_keys([1]), "CPU", removed=False)
         secondary_event1 = OffloadingEvent(to_keys([2]), "tier-1", removed=False)

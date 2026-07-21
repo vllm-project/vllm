@@ -34,7 +34,7 @@ lookup() is a pure OrderedDict operation.
 import queue
 import threading
 from abc import ABC, abstractmethod
-from collections.abc import Iterable
+from collections.abc import Collection, Iterable
 from dataclasses import dataclass, field
 
 from vllm.logger import init_logger
@@ -171,6 +171,32 @@ class AsyncLookupManager(ABC):
                 state = self._lookup_state.get(key)
                 if state is not None:
                     state.result = result
+
+    def invalidate(self, keys: Collection[OffloadKey]) -> None:
+        """Drop cached verdicts for keys whose backing data proved wrong.
+
+        Called from the scheduler thread when a load of these keys failed
+        (the cached True would otherwise be served for the life of every
+        requesting request, re-initiating the same doomed promotion each
+        step). Dropping the entry, rather than writing False, means the
+        next lookup re-runs a fresh existence check, so a legitimate
+        re-store of the key is picked up naturally.
+
+        Thread-safety: _lookup_state and _req_keys are scheduler-owned
+        (see module docstring); this runs on the scheduler thread. A late
+        worker result for a dropped key is discarded by drain_results()'s
+        .get() guard and cannot resurrect the entry.
+        """
+        for key in keys:
+            state = self._lookup_state.pop(key, None)
+            if state is None:
+                continue
+            # Keep the reverse index consistent: cleanup() direct-indexes
+            # _lookup_state for every key it finds in _req_keys.
+            for req_id in state.request_ids:
+                req_keys = self._req_keys.get(req_id)
+                if req_keys is not None:
+                    req_keys.discard(key)
 
     def cleanup(self, req_id: str) -> None:
         """Remove entries no longer needed by any active request.

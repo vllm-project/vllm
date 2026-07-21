@@ -263,6 +263,9 @@ class TieringOffloadingManager(OffloadingManager):
 
                 if job_metadata.is_promotion:
                     # secondary→primary transfer (promotion) completed.
+                    # On failure the tier self-invalidates its own stale
+                    # lookup verdicts (in get_finished_jobs, on the scheduler
+                    # thread); the manager only finalizes the primary slots.
                     # Make blocks available in primary tier.
                     self.primary_tier.complete_write(
                         job_metadata.keys,
