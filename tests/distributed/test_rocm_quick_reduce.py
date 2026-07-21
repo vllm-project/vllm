@@ -60,6 +60,8 @@ def _make_quick_allreduce(
     qar.use_fp16_kernels = use_fp16_kernels
     qar.qr_quant_level = QuickReduceRegime[quant_level]
     qar.qr_max_size = qr_max_size
+    qar.qr_min_size = None
+    qar.qr_quantization_min_size = None
     return qar
 
 
@@ -511,13 +513,21 @@ def test_quick_reduce_regime_values():
     assert QuickReduceRegime.INT8.value == 1
     assert QuickReduceRegime.INT6.value == 2
     assert QuickReduceRegime.INT4.value == 3
-    assert QuickReduceRegime.NONE.value == 4
+    assert QuickReduceRegime.INT3.value == 4
+    assert QuickReduceRegime.NONE.value == 5
 
 
 def test_quick_reduce_regime_names():
     from vllm.distributed.device_communicators.quick_all_reduce import QuickReduceRegime
 
-    assert set(QuickReduceRegime.__members__) == {"FP", "INT8", "INT6", "INT4", "NONE"}
+    assert set(QuickReduceRegime.__members__) == {
+        "FP",
+        "INT8",
+        "INT6",
+        "INT4",
+        "INT3",
+        "NONE",
+    }
 
 
 @pytest.mark.parametrize("quant_level", QUANT_LEVELS + ["NONE"])
@@ -693,7 +703,7 @@ def test_quick_allreduce_min_size_table():
     for dtype in [torch.float16, torch.bfloat16]:
         for world_size in QuickAllReduce._SUPPORTED_WORLD_SIZES:
             min_sizes = QuickAllReduce._QR_MIN_SIZE[(dtype, world_size)]
-            assert len(min_sizes) == 4
+            assert len(min_sizes) == 5
             assert all(size > 0 for size in min_sizes)
 
 

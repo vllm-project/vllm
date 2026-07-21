@@ -445,9 +445,10 @@ pub fn load_sharegpt_multi_turn(
             conv.conversation_id = format!("{request_id_prefix}conv-{}", original_len + i);
             conversations.push(conv);
         }
-        println!(
-            "Oversampled multi-turn conversations from {original_len} to {} total.",
-            conversations.len()
+        tracing::info!(
+            original_conversations = original_len,
+            conversations = conversations.len(),
+            "oversampled multi-turn conversations"
         );
     }
 
@@ -525,10 +526,12 @@ mod tests {
         len
     }
 
-    #[test]
+    #[tokio::test]
     #[ignore]
-    fn test_prefix_sharing_structure() {
-        let tok = crate::tokenizer::load_tokenizer("nvidia/Kimi-K2.5-NVFP4", false, None).unwrap();
+    async fn test_prefix_sharing_structure() {
+        let tok = crate::tokenizer::load_tokenizer("nvidia/Kimi-K2.5-NVFP4", false, None)
+            .await
+            .unwrap();
 
         let cfg = MultiTurnRandomConfig {
             num_conversations: 5,
@@ -610,10 +613,12 @@ mod tests {
         println!("All prefix sharing checks passed!");
     }
 
-    #[test]
+    #[tokio::test]
     #[ignore]
-    fn test_per_turn_input_len_default_mode() {
-        let tok = crate::tokenizer::load_tokenizer("nvidia/Kimi-K2.5-NVFP4", false, None).unwrap();
+    async fn test_per_turn_input_len_default_mode() {
+        let tok = crate::tokenizer::load_tokenizer("nvidia/Kimi-K2.5-NVFP4", false, None)
+            .await
+            .unwrap();
 
         let cfg = MultiTurnRandomConfig {
             num_conversations: 4,
@@ -650,10 +655,12 @@ mod tests {
         println!("per_turn_input_len default-mode checks passed!");
     }
 
-    #[test]
+    #[tokio::test]
     #[ignore]
-    fn test_variable_turns_range() {
-        let tok = crate::tokenizer::load_tokenizer("nvidia/Kimi-K2.5-NVFP4", false, None).unwrap();
+    async fn test_variable_turns_range() {
+        let tok = crate::tokenizer::load_tokenizer("nvidia/Kimi-K2.5-NVFP4", false, None)
+            .await
+            .unwrap();
 
         let cfg = MultiTurnRandomConfig {
             num_conversations: 50,
@@ -684,10 +691,12 @@ mod tests {
         println!("variable_turns_range checks passed! counts: {distinct_counts:?}");
     }
 
-    #[test]
+    #[tokio::test]
     #[ignore]
-    fn test_variable_turns_fixed() {
-        let tok = crate::tokenizer::load_tokenizer("nvidia/Kimi-K2.5-NVFP4", false, None).unwrap();
+    async fn test_variable_turns_fixed() {
+        let tok = crate::tokenizer::load_tokenizer("nvidia/Kimi-K2.5-NVFP4", false, None)
+            .await
+            .unwrap();
 
         let cfg = MultiTurnRandomConfig {
             num_conversations: 10,
@@ -709,10 +718,12 @@ mod tests {
         println!("variable_turns_fixed checks passed!");
     }
 
-    #[test]
+    #[tokio::test]
     #[ignore]
-    fn test_per_turn_input_len_prefix_sharing() {
-        let tok = crate::tokenizer::load_tokenizer("nvidia/Kimi-K2.5-NVFP4", false, None).unwrap();
+    async fn test_per_turn_input_len_prefix_sharing() {
+        let tok = crate::tokenizer::load_tokenizer("nvidia/Kimi-K2.5-NVFP4", false, None)
+            .await
+            .unwrap();
 
         // Turn 0 input_len=1000, turns 1+ per_turn_input_len=600
         // global_len ≈ 100 (10%), conv_len ≈ 800 (80%), unique ≈ 100
