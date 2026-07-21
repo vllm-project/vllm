@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 //! OpenTelemetry trace-exporter bootstrap: a gRPC OTLP exporter (insecure by
 //! default) feeding a batch span processor on a `TracerProvider` tagged with the
 //! `vllm.*` resource attributes. No span is emitted here; this module only stands
