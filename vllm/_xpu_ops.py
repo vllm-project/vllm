@@ -375,7 +375,7 @@ def _topk_topp_sample_fake(
     return
 
 
-def _deepseek_fused_indexer_q_rope_fp8_impl(
+def _xpu_deepseek_fused_indexer_q_rope_fp8_impl(
     index_q: torch.Tensor,
     positions: torch.Tensor,
     index_q_cos_sin_cache: torch.Tensor,
@@ -413,7 +413,7 @@ def _deepseek_fused_indexer_q_rope_fp8_impl(
     )
 
 
-def _deepseek_fused_indexer_q_rope_fp8_fake(
+def _xpu_deepseek_fused_indexer_q_rope_fp8_fake(
     index_q: torch.Tensor,
     positions: torch.Tensor,
     index_q_cos_sin_cache: torch.Tensor,
@@ -426,7 +426,7 @@ def _deepseek_fused_indexer_q_rope_fp8_fake(
     return
 
 
-def _deepseek_fused_indexer_q_rope_mxfp4_impl(
+def _xpu_deepseek_fused_indexer_q_rope_mxfp4_impl(
     index_q: torch.Tensor,
     positions: torch.Tensor,
     index_q_cos_sin_cache: torch.Tensor,
@@ -470,7 +470,7 @@ def _deepseek_fused_indexer_q_rope_mxfp4_impl(
     )
 
 
-def _deepseek_fused_indexer_q_rope_mxfp4_fake(
+def _xpu_deepseek_fused_indexer_q_rope_mxfp4_fake(
     index_q: torch.Tensor,
     positions: torch.Tensor,
     index_q_cos_sin_cache: torch.Tensor,
@@ -1251,21 +1251,21 @@ class xpu_ops:
             )
 
             direct_register_custom_op(
-                op_name="deepseek_fused_indexer_q_rope_fp8",
-                op_func=_deepseek_fused_indexer_q_rope_fp8_impl,
+                op_name="xpu_deepseek_fused_indexer_q_rope_fp8",
+                op_func=_xpu_deepseek_fused_indexer_q_rope_fp8_impl,
                 mutates_args=["index_q_fp8", "index_weights_out"],
-                fake_impl=_deepseek_fused_indexer_q_rope_fp8_fake,
+                fake_impl=_xpu_deepseek_fused_indexer_q_rope_fp8_fake,
             )
 
             direct_register_custom_op(
-                op_name="deepseek_fused_indexer_q_rope_mxfp4",
-                op_func=_deepseek_fused_indexer_q_rope_mxfp4_impl,
+                op_name="xpu_deepseek_fused_indexer_q_rope_mxfp4",
+                op_func=_xpu_deepseek_fused_indexer_q_rope_mxfp4_impl,
                 mutates_args=[
                     "index_q_packed",
                     "index_q_scale",
                     "index_weights_out",
                 ],
-                fake_impl=_deepseek_fused_indexer_q_rope_mxfp4_fake,
+                fake_impl=_xpu_deepseek_fused_indexer_q_rope_mxfp4_fake,
             )
 
             _OPS_REGISTERED = True
