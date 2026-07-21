@@ -8,6 +8,8 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 
+import regex as re
+
 from vllm.parser.engine.events import EventType, SemanticEvent
 from vllm.parser.engine.incremental_lexer import (
     CONTENT_TERMINAL,
@@ -28,6 +30,10 @@ from vllm.parser.engine.token_id_scanner import (
     TextChunk,
     TokenIDScanner,
 )
+
+# Identifier-shaped tool names accepted on validated recovery
+# transitions: no whitespace, no angle brackets, non-empty.
+_RECOVERED_TOOL_NAME_RE = re.compile(r"[A-Za-z0-9_.-]+")
 
 
 @dataclass(slots=True)
@@ -158,6 +164,11 @@ class StreamingParserEngine:
         )
 
         self.skip_tool_parsing = False
+        # Function names declared by the request, or None when unknown.
+        # Consulted only by transitions with ``validate_tool_name``;
+        # set per request by the owning ParserEngine, like
+        # ``skip_tool_parsing`` it survives reset().
+        self.allowed_tool_names: frozenset[str] | None = None
         self.reset(initial_state=initial_state)
 
     def _reset_args_state(self) -> None:
@@ -186,6 +197,12 @@ class StreamingParserEngine:
         self._scanner.reset()
         self._lexer.reset()
         self._reset_args_state()
+        self._hold_active = False
+        self._held_events: list[SemanticEvent] = []
+        self._held_raw: list[str] = []
+        self._held_name: list[str] = []
+        self._held_prior_state: ParserState = self.state
+        self._held_prior_tool_index: int = -1
 
     def feed(
         self,
@@ -238,6 +255,12 @@ class StreamingParserEngine:
         events = self._process_scanner_items(self._scanner.flush_pending())
 
         events.extend(self._process_lex_tokens(self._lexer.flush()))
+
+        if self._hold_active:
+            # Stream ended before the recovered tool name completed:
+            # the held events never validated, so flush the raw text
+            # as content in the pre-recovery state.
+            events.extend(self._abort_hold("".join(self._held_raw)))
 
         if self._args_buffer:
             events.append(
@@ -352,6 +375,17 @@ class StreamingParserEngine:
         return self._apply_transition(transition, value)
 
     def _emit_for_state(self, text: str) -> list[SemanticEvent]:
+        if self._hold_active and self.state == ParserState.TOOL_NAME:
+            self._held_raw.append(text)
+            self._held_name.append(text)
+            self._held_events.append(
+                SemanticEvent(
+                    EventType.TOOL_NAME,
+                    value=text,
+                    tool_index=self.tool_index,
+                )
+            )
+            return []
         if self.state == ParserState.TOOL_ARGS:
             if self.config.tool_args_json:
                 return self._feed_args_text(text)
@@ -373,6 +407,71 @@ class StreamingParserEngine:
         return self._emit_for_state(text)
 
     def _apply_transition(
+        self,
+        transition: Transition,
+        value: str,
+    ) -> list[SemanticEvent]:
+        if self._hold_active:
+            return self._resolve_hold(transition, value)
+        if transition.validate_tool_name:
+            return self._begin_hold(transition, value)
+        return self._run_transition(transition, value)
+
+    def _begin_hold(
+        self,
+        transition: Transition,
+        value: str,
+    ) -> list[SemanticEvent]:
+        """Apply a ``validate_tool_name`` transition but hold its events.
+
+        The events (and every TOOL_NAME chunk that follows) stay
+        buffered until the name completes and validates, so a false
+        positive can be undone without having emitted anything.
+        """
+        prior_state = self.state
+        prior_tool_index = self.tool_index
+        self._held_events = self._run_transition(transition, value)
+        self._held_raw = [value]
+        self._held_name = []
+        self._held_prior_state = prior_state
+        self._held_prior_tool_index = prior_tool_index
+        self._hold_active = True
+        return []
+
+    def _resolve_hold(
+        self,
+        transition: Transition,
+        value: str,
+    ) -> list[SemanticEvent]:
+        """End the hold window at the name-completing transition."""
+        name = "".join(self._held_name)
+        if self._is_allowed_recovered_name(name):
+            events = self._held_events
+            self._clear_hold()
+            events.extend(self._run_transition(transition, value))
+            return events
+        return self._abort_hold("".join(self._held_raw) + value)
+
+    def _abort_hold(self, raw: str) -> list[SemanticEvent]:
+        """Discard held events and re-emit the raw text as content."""
+        self.state = self._held_prior_state
+        self.tool_index = self._held_prior_tool_index
+        self._clear_hold()
+        return self._emit_for_state(raw)
+
+    def _clear_hold(self) -> None:
+        self._hold_active = False
+        self._held_events = []
+        self._held_raw = []
+        self._held_name = []
+
+    def _is_allowed_recovered_name(self, name: str) -> bool:
+        if not _RECOVERED_TOOL_NAME_RE.fullmatch(name):
+            return False
+        allowed = self.allowed_tool_names
+        return allowed is None or name in allowed
+
+    def _run_transition(
         self,
         transition: Transition,
         value: str,

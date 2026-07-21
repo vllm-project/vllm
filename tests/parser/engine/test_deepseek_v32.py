@@ -185,6 +185,69 @@ class TestNonStreaming:
         assert args == {"location": "Beijing"}
 
 
+# ── Orphan invoke name validation ────────────────────────────────────
+
+
+class TestOrphanInvokeNameValidation:
+    """Recovered (orphan) invokes must carry a plausible tool name.
+
+    Mirrors the V4 coverage: when the request declares tools, the
+    (CONTENT, INVOKE_PREFIX) recovery path only commits to a tool call
+    if the parsed name is one of the declared functions; otherwise the
+    consumed text is re-emitted as plain content.
+    """
+
+    @pytest.fixture
+    def weather_tool(self):
+        return _make_tool("get_weather", {"city": {"type": "string"}})
+
+    def test_declared_name_recovered(self, mock_tokenizer, mock_request, weather_tool):
+        parser = DeepSeekV32Parser(mock_tokenizer, tools=[weather_tool])
+        mock_request.tools = [weather_tool]
+        text = _invoke("get_weather", _param("city", "true", "SF")) + DSML_FUNC_END
+        result = parser.extract_tool_calls(text, mock_request)
+
+        assert result.tools_called
+        assert len(result.tool_calls) == 1
+        assert result.tool_calls[0].function.name == "get_weather"
+        args = json.loads(result.tool_calls[0].function.arguments)
+        assert args == {"city": "SF"}
+        assert result.content is None
+
+    def test_undeclared_name_stays_content(
+        self, mock_tokenizer, mock_request, weather_tool
+    ):
+        parser = DeepSeekV32Parser(mock_tokenizer, tools=[weather_tool])
+        mock_request.tools = [weather_tool]
+        text = (
+            "Quoting "
+            + DSML_INVOKE_PREFIX
+            + "made_up_tool"
+            + DSML_INVOKE_NAME_END
+            + " literally."
+        )
+        result = parser.extract_tool_calls(text, mock_request)
+
+        assert not result.tools_called
+        assert result.tool_calls == []
+        assert result.content == text
+
+    def test_char_by_char_undeclared_name_stays_content(
+        self, mock_tokenizer, mock_request, weather_tool
+    ):
+        parser = DeepSeekV32Parser(mock_tokenizer, tools=[weather_tool])
+        mock_request.tools = [weather_tool]
+        text = DSML_INVOKE_PREFIX + "made_up_tool" + DSML_INVOKE_NAME_END + " after."
+        results = simulate_tool_streaming(parser, mock_request, list(text))
+        finish_delta = parser.finish_streaming()
+
+        assert collect_function_name(results) is None
+        content = collect_content(results) + (
+            finish_delta.content if finish_delta and finish_delta.content else ""
+        )
+        assert content == text
+
+
 # ── Initial state ────────────────────────────────────────────────────
 
 

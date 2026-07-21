@@ -74,10 +74,14 @@ def deepseek_v32_config() -> ParserEngineConfig:
                 (),
             ),
             # Orphan invoke: at long context the model may omit the
-            # <｜DSML｜function_calls> wrapper and emit the invoke directly
+            # <｜DSML｜function_calls> wrapper and emit the invoke
+            # directly.  The invoke marker has no dedicated special
+            # token, so hold events and validate the parsed name
+            # before committing.
             (ParserState.CONTENT, "INVOKE_PREFIX"): Transition(
                 ParserState.TOOL_NAME,
                 (EventType.TOOL_CALL_START,),
+                validate_tool_name=True,
             ),
             # V4-style tool_calls wrapper is foreign to V3.2: pass it
             # and its contents through as plain content

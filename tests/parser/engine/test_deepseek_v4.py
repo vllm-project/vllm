@@ -377,6 +377,209 @@ class TestMissingToolStart:
         assert result.content == text
 
 
+# ── Orphan invoke name validation ────────────────────────────────────
+
+
+class TestOrphanInvokeNameValidation:
+    """Recovered (orphan) invokes must carry a plausible tool name.
+
+    The invoke marker has no dedicated special token in the DeepSeek
+    vocab, so prose that literally quotes the marker would otherwise be
+    misparsed as a tool call.  The (CONTENT, INVOKE_PREFIX) recovery
+    transition holds its events until the name completes and validates
+    the name (identifier shape, and membership in the request's declared
+    tools when any are declared) before committing to a tool call.
+    The wrapped (TOOL_PREAMBLE, INVOKE_PREFIX) path is not validated.
+    """
+
+    @pytest.fixture
+    def weather_tool(self):
+        return _make_tool("get_weather", {"location": {"type": "string"}})
+
+    def _declared_parser(self, mock_tokenizer, mock_request, *tools):
+        parser = DeepSeekV4Parser(mock_tokenizer, tools=list(tools))
+        mock_request.tools = list(tools)
+        return parser
+
+    def test_declared_name_recovered_matches_wrapped(
+        self, mock_tokenizer, mock_request, weather_tool
+    ):
+        invoke = _invoke("get_weather", ("location", "true", "NYC"))
+
+        wrapped_parser = self._declared_parser(
+            mock_tokenizer, mock_request, weather_tool
+        )
+        wrapped = wrapped_parser.extract_tool_calls(
+            DSML_TOOL_START + invoke + DSML_TOOL_END, mock_request
+        )
+        orphan_parser = self._declared_parser(
+            mock_tokenizer, mock_request, weather_tool
+        )
+        orphan = orphan_parser.extract_tool_calls(invoke + DSML_TOOL_END, mock_request)
+
+        assert orphan.tools_called is wrapped.tools_called is True
+        assert (
+            orphan.tool_calls[0].function.name
+            == wrapped.tool_calls[0].function.name
+            == "get_weather"
+        )
+        assert (
+            orphan.tool_calls[0].function.arguments
+            == wrapped.tool_calls[0].function.arguments
+        )
+
+    def test_undeclared_name_stays_content(
+        self, mock_tokenizer, mock_request, weather_tool
+    ):
+        parser = self._declared_parser(mock_tokenizer, mock_request, weather_tool)
+        text = (
+            "The marker "
+            + DSML_INVOKE_PREFIX
+            + "made_up_tool"
+            + DSML_INVOKE_NAME_END
+            + " is reserved syntax."
+        )
+        result = parser.extract_tool_calls(text, mock_request)
+
+        assert result.tools_called is False
+        assert result.tool_calls == []
+        assert result.content == text
+
+    def test_undeclared_orphan_then_wrapped_call_still_parses(
+        self, mock_tokenizer, mock_request, weather_tool
+    ):
+        parser = self._declared_parser(mock_tokenizer, mock_request, weather_tool)
+        text = (
+            DSML_INVOKE_PREFIX
+            + "made_up_tool"
+            + DSML_INVOKE_NAME_END
+            + " then a real call: "
+            + _tool_calls(_invoke("get_weather", ("location", "true", "NYC")))
+        )
+        result = parser.extract_tool_calls(text, mock_request)
+
+        assert result.tools_called is True
+        assert len(result.tool_calls) == 1
+        assert result.tool_calls[0].function.name == "get_weather"
+        args = json.loads(result.tool_calls[0].function.arguments)
+        assert args == {"location": "NYC"}
+        assert DSML_INVOKE_PREFIX + "made_up_tool" in result.content
+
+    def test_no_tools_name_with_space_stays_content(self, mock_tokenizer, mock_request):
+        parser = DeepSeekV4Parser(mock_tokenizer)
+        text = DSML_INVOKE_PREFIX + "not a name" + DSML_INVOKE_NAME_END + " more text."
+        result = parser.extract_tool_calls(text, mock_request)
+
+        assert result.tools_called is False
+        assert result.content == text
+
+    def test_no_tools_empty_name_stays_content(self, mock_tokenizer, mock_request):
+        parser = DeepSeekV4Parser(mock_tokenizer)
+        text = DSML_INVOKE_PREFIX + DSML_INVOKE_NAME_END + " more text."
+        result = parser.extract_tool_calls(text, mock_request)
+
+        assert result.tools_called is False
+        assert result.content == text
+
+    def test_truncated_name_flushes_content(
+        self, mock_tokenizer, mock_request, weather_tool
+    ):
+        parser = self._declared_parser(mock_tokenizer, mock_request, weather_tool)
+        text = "Say " + DSML_INVOKE_PREFIX + "get_wea"
+        result = parser.extract_tool_calls(text, mock_request)
+
+        assert result.tools_called is False
+        assert result.tool_calls == []
+        assert result.content == text
+
+    def test_streaming_ends_mid_name_flushes_content(
+        self, mock_tokenizer, mock_request, weather_tool
+    ):
+        parser = self._declared_parser(mock_tokenizer, mock_request, weather_tool)
+        chunks = ["Say ", DSML_INVOKE_PREFIX, "get_wea"]
+        results = simulate_tool_streaming(parser, mock_request, chunks)
+        finish_delta = parser.finish_streaming()
+
+        assert collect_function_name(results) is None
+        assert finish_delta is not None
+        assert not finish_delta.tool_calls
+        content = collect_content(results) + (finish_delta.content or "")
+        assert content == "Say " + DSML_INVOKE_PREFIX + "get_wea"
+
+    def test_char_by_char_declared_name_recovers(
+        self, mock_tokenizer, mock_request, weather_tool
+    ):
+        parser = self._declared_parser(mock_tokenizer, mock_request, weather_tool)
+        text = _invoke("get_weather", ("location", "true", "NYC")) + DSML_TOOL_END
+        results = simulate_tool_streaming(parser, mock_request, list(text))
+
+        assert collect_function_name(results) == "get_weather"
+        args = json.loads(collect_tool_arguments(results))
+        assert args == {"location": "NYC"}
+        assert "DSML" not in collect_content(results)
+
+    def test_char_by_char_undeclared_name_stays_content(
+        self, mock_tokenizer, mock_request, weather_tool
+    ):
+        parser = self._declared_parser(mock_tokenizer, mock_request, weather_tool)
+        text = DSML_INVOKE_PREFIX + "made_up_tool" + DSML_INVOKE_NAME_END + " after."
+        results = simulate_tool_streaming(parser, mock_request, list(text))
+        finish_delta = parser.finish_streaming()
+
+        assert collect_function_name(results) is None
+        content = collect_content(results) + (
+            finish_delta.content if finish_delta and finish_delta.content else ""
+        )
+        assert content == text
+
+    def test_wrapped_path_not_validated(
+        self, mock_tokenizer, mock_request, weather_tool
+    ):
+        """An undeclared name inside the tool_calls wrapper still parses:
+        validation applies only to the orphan recovery path."""
+        parser = self._declared_parser(mock_tokenizer, mock_request, weather_tool)
+        text = _tool_calls(_invoke("undeclared_fn", ("location", "true", "NYC")))
+        result = parser.extract_tool_calls(text, mock_request)
+
+        assert result.tools_called is True
+        assert len(result.tool_calls) == 1
+        assert result.tool_calls[0].function.name == "undeclared_fn"
+
+    def test_wrapped_path_never_holds_events(
+        self, mock_tokenizer, mock_request, weather_tool
+    ):
+        """TOOL_CALL_START fires immediately on the wrapped path, before
+        the name completes: no hold window and no tool_index rewind."""
+        parser = self._declared_parser(mock_tokenizer, mock_request, weather_tool)
+        simulate_tool_streaming(
+            parser, mock_request, [DSML_TOOL_START, DSML_INVOKE_PREFIX]
+        )
+        engine = parser._engine
+
+        assert engine._hold_active is False
+        assert engine.tool_index == 0
+
+    def test_parallel_orphan_invokes_with_declared_tools(
+        self, mock_tokenizer, mock_request, weather_tool
+    ):
+        time_tool = _make_tool("get_time", {"timezone": {"type": "string"}})
+        parser = self._declared_parser(
+            mock_tokenizer, mock_request, weather_tool, time_tool
+        )
+        text = (
+            _invoke("get_weather", ("location", "true", "NYC"))
+            + "\n"
+            + _invoke("get_time", ("timezone", "true", "EST"))
+            + DSML_TOOL_END
+        )
+        result = parser.extract_tool_calls(text, mock_request)
+
+        assert result.tools_called is True
+        assert len(result.tool_calls) == 2
+        assert result.tool_calls[0].function.name == "get_weather"
+        assert result.tool_calls[1].function.name == "get_time"
+
+
 # ── Thinking mode initial state ──────────────────────────────────────
 
 
