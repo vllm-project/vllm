@@ -7676,17 +7676,37 @@ class GPUModelRunner(
 
     def _bind_routed_experts_capturer(self, capturer: RoutedExpertsCapturer) -> None:
         from vllm.model_executor.layers.fused_moe.layer import MoERunner
+        from vllm.model_executor.layers.fused_moe.modular_kernel import (
+            FusedMoEExpertsMonolithic,
+        )
         from vllm.model_executor.layers.fused_moe.router.base_router import (
             BaseRouter,
         )
 
         for module in self.model.modules():
-            if isinstance(module, MoERunner) and isinstance(module.router, BaseRouter):
-                layer_id = module.layer_id
+            if not isinstance(module, MoERunner):
+                continue
+            layer_id = module.layer_id
 
-                def _capture_fn(topk_ids, _layer_id=layer_id, _capturer=capturer):
-                    _capturer.capture(_layer_id, topk_ids)
+            def _capture_fn(topk_ids, _layer_id=layer_id, _capturer=capturer):
+                _capturer.capture(_layer_id, topk_ids)
 
+            quant_method = module._quant_method
+            moe_kernel = getattr(quant_method, "moe_kernel", None)
+            impl = getattr(moe_kernel, "impl", None)
+            fused_experts = getattr(impl, "fused_experts", None)
+            if quant_method.is_monolithic:
+                if not (
+                    isinstance(fused_experts, FusedMoEExpertsMonolithic)
+                    and fused_experts.supports_routing_replay_capture()
+                ):
+                    raise ValueError(
+                        "--enable-return-routed-experts is not supported with "
+                        f"monolithic MoE kernel {type(fused_experts).__name__}; "
+                        "routed expert IDs would be silently all-zero."
+                    )
+                fused_experts.set_capture_fn(_capture_fn)
+            elif isinstance(module.router, BaseRouter):
                 module.router.set_capture_fn(_capture_fn)
 
     def may_add_encoder_only_layers_to_kv_cache_config(self) -> None:
