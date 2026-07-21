@@ -41,11 +41,13 @@ pub fn generate_prefix_repetition_dataset(
     }
     let total = prompts_per_prefix * num_prefixes;
     if total != num_requests {
-        println!(
-            "prefix_repetition: generating {total} requests \
-             ({num_prefixes} prefixes x {prompts_per_prefix} prompts each; \
-             {} dropped to divide evenly)",
-            num_requests - total
+        tracing::info!(
+            requested = num_requests,
+            generated = total,
+            prefixes = num_prefixes,
+            prompts_per_prefix,
+            dropped = num_requests - total,
+            "adjusted prefix-repetition request count"
         );
     }
 
