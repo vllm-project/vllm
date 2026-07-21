@@ -207,6 +207,21 @@ def _resolve_gdn_prefill_backend(
                 "--no-deps nvidia-cutlass-dsl-libs-cu13"
             )
 
+    # GDN all-mode prefix caching needs the per-chunk intermediate states
+    # that only the Triton/FLA prefill kernel exposes
+    # (``return_intermediate_states``); the FlashInfer/CuteDSL prefill paths
+    # cannot export them. With "auto", all-mode simply resolves to Triton;
+    # an explicitly requested non-Triton backend fails fast at startup
+    # instead of asserting on the first real prefill.
+    cache_config = getattr(vllm_config, "cache_config", None)
+    mamba_cache_mode = getattr(cache_config, "mamba_cache_mode", "none")
+    if mamba_cache_mode == "all" and backend == "auto":
+        logger.info_once(
+            "GDN prefill backend resolved to Triton/FLA: mamba_cache_mode="
+            "'all' needs its per-chunk state export."
+        )
+        return backend, "triton"
+
     if backend in ["flashinfer", "auto"] and supports_flashinfer:
         active_backend: Literal["triton", "flashinfer", "cutedsl"] = "flashinfer"
     elif backend == "cutedsl" and supports_cutedsl:
@@ -214,13 +229,6 @@ def _resolve_gdn_prefill_backend(
     else:
         active_backend = "triton"
 
-    # GDN all-mode prefix caching needs the per-chunk intermediate states
-    # that only the Triton/FLA prefill kernel exposes
-    # (``return_intermediate_states``); the FlashInfer/CuteDSL prefill paths
-    # cannot export them. Fail fast at startup instead of asserting on the
-    # first real prefill.
-    cache_config = getattr(vllm_config, "cache_config", None)
-    mamba_cache_mode = getattr(cache_config, "mamba_cache_mode", "none")
     if mamba_cache_mode == "all" and active_backend != "triton":
         raise ValueError(
             "GDN mamba_cache_mode='all' (prefix caching) requires the "

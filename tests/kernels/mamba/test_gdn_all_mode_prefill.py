@@ -345,6 +345,20 @@ def test_backend_resolver_allows_triton_for_all_mode():
     assert (requested, active) == ("triton", "triton")
 
 
+def test_backend_resolver_auto_prefers_triton_for_all_mode():
+    """'auto' + all-mode must resolve to Triton on every platform (all-mode
+    is the default for supporting models with prefix caching on, so 'auto'
+    configs must keep working rather than fail the explicit-backend guard)."""
+    from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import (
+        _resolve_gdn_prefill_backend,
+    )
+
+    cfg = _make_vllm_config(64, "all")
+    cfg.additional_config = {}
+    requested, active = _resolve_gdn_prefill_backend(cfg)
+    assert (requested, active) == ("auto", "triton")
+
+
 @pytest.mark.skipif(
     not current_platform.is_device_capability_family(100),
     reason="CuteDSL GDN prefill resolves only on SM10x",
