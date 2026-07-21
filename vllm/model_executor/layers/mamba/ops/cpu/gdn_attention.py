@@ -307,10 +307,6 @@ def _cpu_gdn_attention_spec_aware(
     width: int,
     state_len: int,
 ) -> None:
-    mixed_qkv = mixed_qkv.contiguous()
-    a = a.contiguous()
-    b = b.contiguous()
-
     spec_sequence_masks = attn_metadata_i.spec_sequence_masks
     conv_buf = _conv_buffer_view(layer)  # (num_slots, dim, state_len)
     ssm_state = _ssm_state_view(layer)
@@ -323,9 +319,9 @@ def _cpu_gdn_attention_spec_aware(
         _spec_aware_nonspec(
             layer,
             attn_metadata_i,
-            mixed_qkv,
-            b,
-            a,
+            mixed_qkv.contiguous(),
+            b.contiguous(),
+            a.contiguous(),
             core_attn_out,
             conv_buf,
             ssm_state,
@@ -340,9 +336,9 @@ def _cpu_gdn_attention_spec_aware(
     num_decodes = attn_metadata_i.num_decodes
 
     if num_prefills == 0 and num_decodes == 0:
-        mixed_qkv_spec = mixed_qkv
-        b_spec = b
-        a_spec = a
+        mixed_qkv_spec = mixed_qkv.contiguous()
+        b_spec = b.contiguous()
+        a_spec = a.contiguous()
         spec_out_indx = None
     else:
         assert spec_token_indx is not None
@@ -406,14 +402,12 @@ def _spec_forward(
     assert spec_qsl is not None
     assert num_accepted is not None
 
-    spec_qsl_cpu = spec_qsl[: num_spec_decodes + 1].to("cpu", torch.int64)
+    spec_qsl_cpu = spec_qsl[: num_spec_decodes + 1]
     seq_starts = spec_qsl_cpu[:-1]
     seq_lens = spec_qsl_cpu[1:] - spec_qsl_cpu[:-1]
 
     # ---- 1. Convolution (per-sequence rolling buffer) ----
-    w2d = _unpacked_conv_weight(layer)  # (dim, width)
-    dim = w2d.size(0)
-    w = w2d.unsqueeze(1)  # (dim, 1, width) for F.conv1d depthwise
+    dim = mixed_qkv_spec.size(-1)
     bias = layer.conv1d.bias
     silu = layer.activation == "silu"
 
@@ -442,8 +436,9 @@ def _spec_forward(
             .contiguous(),
         ).reshape_as(mixed_qkv_spec)
     else:
-        col0 = spec_state_indices[:, 0].to("cpu", torch.int64)
-        num_acc_cpu = num_accepted[:num_spec_decodes].to("cpu", torch.int64)
+        w = _unpacked_conv_weight(layer).unsqueeze(1)
+        col0 = spec_state_indices[:num_spec_decodes, 0]
+        num_acc_cpu = num_accepted[:num_spec_decodes]
         conv_out = torch.empty_like(mixed_qkv_spec)
         for i in range(num_spec_decodes):
             q_i = int(seq_lens[i].item())
@@ -471,9 +466,9 @@ def _spec_forward(
     # draft tokens internally, resumes from slot ``num_accepted-1`` and stores
     # the state after token ``t`` into slot ``t`` (rollback for the next step).
     query, key, value = layer.rearrange_mixed_qkv(conv_out)
-    query = query.squeeze(0).contiguous()
-    key = key.squeeze(0).contiguous()
-    value = value.squeeze(0).contiguous()
+    query = query.squeeze(0)
+    key = key.squeeze(0)
+    value = value.squeeze(0)
     spec_idx = spec_state_indices[:num_spec_decodes].to(torch.int32).contiguous()
     num_acc = num_accepted[:num_spec_decodes].to(torch.int32).contiguous()
     cu = spec_qsl[: num_spec_decodes + 1].to(torch.int32).contiguous()
@@ -483,8 +478,8 @@ def _spec_forward(
         q=query,
         k=key,
         v=value,
-        a=a_spec.contiguous(),
-        b=b_spec.contiguous(),
+        a=a_spec,
+        b=b_spec,
         initial_state_source=ssm_state,
         spec_state_indices=spec_idx,
         num_accepted_tokens=num_acc,
@@ -492,15 +487,6 @@ def _spec_forward(
         use_qk_l2norm_in_kernel=True,
     )
     return out_spec
-
-
-def core_attn_out_like(layer, mixed_qkv_spec: torch.Tensor) -> torch.Tensor:
-    num_tokens = mixed_qkv_spec.size(0)
-    return torch.zeros(
-        (num_tokens, layer.num_v_heads // layer.tp_size, layer.head_v_dim),
-        dtype=mixed_qkv_spec.dtype,
-        device=mixed_qkv_spec.device,
-    )
 
 
 def _spec_aware_nonspec(
@@ -572,19 +558,14 @@ def _spec_aware_nonspec(
                 )
 
         query, key, value = layer.rearrange_mixed_qkv(decode_mixed_qkv)
-        # rearrange_mixed_qkv can return views whose last dim is not
-        # contiguous; the fused CPU kernel requires a contiguous last dim.
-        query = query.contiguous()
-        key = key.contiguous()
-        value = value.contiguous()
         attn_out = ops.fused_sigmoid_gating_delta_rule_update_cpu(
             A_log=layer.A_log,
             dt_bias=layer.dt_bias,
             q=query,
             k=key,
             v=value,
-            a=decode_a.contiguous(),
-            b=decode_b.contiguous(),
+            a=decode_a,
+            b=decode_b,
             initial_state_source=ssm_state,
             initial_state_indices=decode_state_indices,
             cu_seqlens=query_start_loc[: num_decodes + 1],
@@ -672,7 +653,6 @@ def _spec_aware_nonspec_subset(
 
     Returns outputs ordered like ``non_spec_token_indx``.
     """
-    out = core_attn_out_like(layer, mixed_qkv)
     has_initial_state = attn_metadata_i.has_initial_state
     prefill_state_indices = attn_metadata_i.prefill_state_indices
     prefill_qsl = attn_metadata_i.prefill_query_start_loc
@@ -730,8 +710,7 @@ def _spec_aware_nonspec_subset(
     ssm_state[prefill_state_indices] = last_recurrent_state.to(
         ssm_state.dtype, copy=False
     )
-    out[:] = attn_out.squeeze(0)
-    return out
+    return attn_out.squeeze(0)
 
 
 def cpu_gdn_attention_core_fake(
