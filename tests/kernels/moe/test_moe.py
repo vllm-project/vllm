@@ -36,6 +36,9 @@ from vllm.model_executor.layers.fused_moe.experts.marlin_moe import (
     batched_fused_marlin_moe,
     fused_marlin_moe,
 )
+from vllm.model_executor.layers.fused_moe.utils import (
+    moe_use_td_hw_supported,
+)
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     marlin_permute_bias,
 )
@@ -53,8 +56,11 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils_test import (
 from vllm.model_executor.layers.quantization.utils.quant_utils import quantize_weights
 from vllm.platforms import current_platform
 from vllm.scalar_type import ScalarType, scalar_types
+from vllm.triton_utils import tl
 from vllm.utils.math_utils import next_power_of_2
 from vllm.utils.torch_utils import set_random_seed
+
+DEVICE_TYPE = current_platform.device_type
 
 
 def iterative_moe(
@@ -289,6 +295,7 @@ def run_moe_test(
 @pytest.mark.parametrize("ep_size", EP_SIZE)
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
 @pytest.mark.parametrize("padding", [True, False])
+@pytest.mark.parametrize("use_td", [False, True])
 def test_fused_moe(
     m: int,
     n: int,
@@ -298,9 +305,19 @@ def test_fused_moe(
     ep_size: int,
     dtype: torch.dtype,
     padding: bool,
+    use_td: bool,
     monkeypatch,
     workspace_init,
 ):
+    if use_td and not hasattr(tl, "make_tensor_descriptor"):
+        pytest.skip("Triton < 3.6 lacks tl.make_tensor_descriptor")
+    if use_td and not moe_use_td_hw_supported():
+        pytest.skip(
+            "tensor_descriptor.gather requires XPU or NVIDIA Blackwell "
+            "(sm100+); lowers to tile::gather4 (tcgen05/TMEM), which ptxas "
+            "rejects on Hopper (sm90) and earlier"
+        )
+    monkeypatch.setenv("VLLM_TRITON_USE_TD", "1" if use_td else "0")
     set_random_seed(7)
 
     #
@@ -311,17 +328,17 @@ def test_fused_moe(
     # Setup test data
     #
 
-    a = torch.randn((m, k), device="cuda", dtype=dtype) / 10
-    w1 = torch.randn((e, 2 * n, k), device="cuda", dtype=dtype) / 10
-    w2 = torch.randn((e, k, n), device="cuda", dtype=dtype) / 10
+    a = torch.randn((m, k), device=DEVICE_TYPE, dtype=dtype) / 10
+    w1 = torch.randn((e, 2 * n, k), device=DEVICE_TYPE, dtype=dtype) / 10
+    w2 = torch.randn((e, k, n), device=DEVICE_TYPE, dtype=dtype) / 10
 
-    score = torch.randn((m, e), device="cuda", dtype=dtype)
+    score = torch.randn((m, e), device=DEVICE_TYPE, dtype=dtype)
 
     if ep_size > 1:
         local_e = e // ep_size
-        e_ids = torch.randint(0, e, (local_e,), device="cuda", dtype=torch.int32)
-        e_map = torch.full((e,), -1, device="cuda", dtype=torch.int32)
-        e_map[e_ids] = torch.arange(local_e, device="cuda", dtype=torch.int32)
+        e_ids = torch.randint(0, e, (local_e,), device=DEVICE_TYPE, dtype=torch.int32)
+        e_map = torch.full((e,), -1, device=DEVICE_TYPE, dtype=torch.int32)
+        e_map[e_ids] = torch.arange(local_e, device=DEVICE_TYPE, dtype=torch.int32)
         w1 = w1[e_ids]
         w2 = w2[e_ids]
     else:
