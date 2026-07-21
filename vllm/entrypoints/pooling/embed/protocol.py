@@ -13,7 +13,7 @@ from collections.abc import Sequence
 from typing import Annotated, Any, Literal, TypeAlias
 
 import pybase64 as base64
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, BeforeValidator, Field, model_validator
 
 from vllm import PoolingParams
 from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
@@ -27,6 +27,7 @@ from ..base.protocol import (
     EmbeddingTokenizeParamsMixin,
     EmbedRequestMixin,
     PoolingBasicRequestMixin,
+    reject_removed_pooling_parameters,
 )
 
 
@@ -154,13 +155,14 @@ class EmbeddingBatchChatInputRequest(EmbeddingBatchChatRequest):
         return normalized
 
 
-EmbeddingRequest: TypeAlias = (
+EmbeddingRequest: TypeAlias = Annotated[
     EmbeddingCompletionRequest
     | EmbeddingChatRequest
     | EmbeddingBatchChatRequest
     | EmbeddingChatInputRequest
-    | EmbeddingBatchChatInputRequest
-)
+    | EmbeddingBatchChatInputRequest,
+    BeforeValidator(reject_removed_pooling_parameters),
+]
 
 
 # ---------------------------------------------------------------------------
