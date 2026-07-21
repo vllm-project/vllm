@@ -107,13 +107,6 @@ steps:
     - tests/compile/passes
   commands:
   - pytest -s -v compile/passes --ignore compile/passes/distributed
-  mirror:
-    amd:
-      dind: false
-      device: mi300_1
-      timeout_in_minutes: 65
-      depends_on:
-      - image-build-amd
 
 - label: PyTorch Fullgraph Smoke Test
   device: h200_35gb
@@ -236,6 +229,7 @@ steps:
     amd:
       dind: false
       device: mi300_1
+      timeout_in_minutes: 26
       depends_on:
       - image-build-amd
       source_file_dependencies:

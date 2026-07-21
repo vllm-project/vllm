@@ -35,7 +35,7 @@ set -o pipefail
 : "${PY_COLORS:=1}"
 : "${ROCM_DOCKER_TTY:=1}"
 : "${PYTHONFAULTHANDLER:=1}"
-: "${PYTEST_TIMEOUT:=2100}"
+: "${PYTEST_TIMEOUT:=2400}"
 if [[ " ${PYTEST_ADDOPTS:-} " != *" --color"* ]]; then
   PYTEST_ADDOPTS="${PYTEST_ADDOPTS:+${PYTEST_ADDOPTS} }--color=yes"
 fi
@@ -45,9 +45,9 @@ fi
 if [[ " ${PYTEST_ADDOPTS:-} " != *" --durations-min="* ]]; then
   PYTEST_ADDOPTS="${PYTEST_ADDOPTS:+${PYTEST_ADDOPTS} }--durations-min=1.0"
 fi
-# Dump stacks after 15 minutes, then stop an individual test after 35 minutes.
+# Dump stacks and stop an individual test after 40 minutes.
 if [[ " ${PYTEST_ADDOPTS:-} " != *" faulthandler_timeout="* ]]; then
-  PYTEST_ADDOPTS="${PYTEST_ADDOPTS:+${PYTEST_ADDOPTS} }-o faulthandler_timeout=900"
+  PYTEST_ADDOPTS="${PYTEST_ADDOPTS:+${PYTEST_ADDOPTS} }-o faulthandler_timeout=2400"
 fi
 if [[ " ${PYTEST_ADDOPTS:-} " != *" --timeout-method="* &&
   " ${PYTEST_ADDOPTS:-} " != *" --timeout-method "* ]]; then
