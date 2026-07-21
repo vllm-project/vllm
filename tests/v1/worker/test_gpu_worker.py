@@ -7,6 +7,7 @@ from unittest.mock import patch
 import pytest
 
 import vllm.v1.worker.gpu_worker as gpu_worker_module
+from vllm.distributed.parallel_state import GroupCoordinator
 from vllm.multimodal.video import (
     PYNVVIDEOCODEC_CUDA_CONTEXT_BYTES,
     PYNVVIDEOCODEC_DECODER_GPU_MEMORY_BYTES,
@@ -186,3 +187,146 @@ def test_startup_plan_apply_gate(plan_env):
     explicit = _plan_worker(kv_bytes=7 * GiB_bytes)
     maybe_apply_startup_plan(explicit)
     assert explicit.cache_config.kv_cache_memory_bytes == 7 * GiB_bytes
+
+
+# Suspend/resume orchestration: Worker.sleep/wake_up consume the
+# SleepModeBackend capability flags (vllm/device_allocator/sleep_mode_backend.py).
+
+
+class _FlaggedBackend:
+    """Minimal stand-in for a SleepModeBackend with configurable flags."""
+
+    _preserves_communicators = True
+    _preserves_graphs = True
+
+    def __init__(self):
+        self.calls: list[tuple] = []
+
+    def suspend(self, level: int = 1) -> None:
+        self.calls.append(("suspend", level))
+
+    def resume(self, tags: list[str] | None = None) -> None:
+        self.calls.append(("resume", tags))
+
+    @classmethod
+    def preserves_communicators(cls) -> bool:
+        return cls._preserves_communicators
+
+    @classmethod
+    def preserves_graphs_with_communicators(cls) -> bool:
+        return cls._preserves_graphs
+
+
+class _PreservingBackend(_FlaggedBackend):
+    """cumem-shaped: communicators survive suspend untouched."""
+
+
+class _RebuildingBackend(_FlaggedBackend):
+    """checkpoint-shaped: communicators are destroyed by suspend and must be
+    rebuilt on resume; captured graphs do not survive the rebuild."""
+
+    _preserves_communicators = False
+    _preserves_graphs = False
+
+
+def _sleep_worker(backend: _FlaggedBackend) -> Worker:
+    worker = object.__new__(Worker)
+    worker._sleep_mode_backend = backend
+    worker._sleep_saved_buffers = {}
+    worker.model_runner = SimpleNamespace(
+        post_kv_cache_wake_up=lambda: None,
+    )
+    return worker
+
+
+def _record_comm_hooks(monkeypatch: pytest.MonkeyPatch, events: list[str]) -> None:
+    monkeypatch.setattr(
+        gpu_worker_module,
+        "prepare_communicators_for_suspend",
+        lambda: events.append("prepare_comms"),
+    )
+    monkeypatch.setattr(
+        gpu_worker_module,
+        "reinit_communicators_after_resume",
+        lambda: events.append("reinit_comms"),
+    )
+
+
+def _stub_accelerator(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        gpu_worker_module.torch.accelerator, "synchronize", lambda: None
+    )
+    monkeypatch.setattr(
+        gpu_worker_module.torch.accelerator, "get_memory_info", lambda: (0, 0)
+    )
+
+
+def test_sleep_prepares_communicators_before_suspend(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    events: list[str] = []
+    _record_comm_hooks(monkeypatch, events)
+    _stub_accelerator(monkeypatch)
+    backend = _RebuildingBackend()
+    worker = _sleep_worker(backend)
+
+    worker.sleep(level=1)
+
+    # Teardown must land before the backend snapshots/frees GPU state.
+    assert events == ["prepare_comms"]
+    assert backend.calls == [("suspend", 1)]
+
+
+def test_wake_up_rebuilds_communicators_then_invalidates_graphs(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    events: list[str] = []
+    _record_comm_hooks(monkeypatch, events)
+    backend = _RebuildingBackend()
+    worker = _sleep_worker(backend)
+
+    # Graphs embedding comm handles are stale after the rebuild; the draft
+    # contract fails loudly until discard+recapture exists.
+    with pytest.raises(NotImplementedError, match="invalidates captured"):
+        worker.wake_up()
+
+    assert backend.calls == [("resume", None)]
+    assert events == ["reinit_comms"]
+
+
+def test_preserving_backend_skips_comm_orchestration(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    events: list[str] = []
+    _record_comm_hooks(monkeypatch, events)
+    _stub_accelerator(monkeypatch)
+    backend = _PreservingBackend()
+    worker = _sleep_worker(backend)
+
+    worker.sleep(level=1)
+    worker.wake_up()
+
+    # cumem-shaped backends keep today's exact path: no hook is invoked.
+    assert events == []
+    assert backend.calls == [("suspend", 1), ("resume", None)]
+
+
+def _group_with_world_size(world_size: int) -> GroupCoordinator:
+    group = object.__new__(GroupCoordinator)
+    group.world_size = world_size
+    group.unique_name = f"test_group_ws{world_size}"
+    return group
+
+
+def test_group_suspend_hooks_noop_for_single_member_groups():
+    group = _group_with_world_size(1)
+    group.prepare_for_suspend()
+    group.reinit_after_resume()
+
+
+def test_group_suspend_hooks_fail_loudly_for_multi_member_groups():
+    group = _group_with_world_size(2)
+    with pytest.raises(NotImplementedError, match="nccl_checkpoint"):
+        group.prepare_for_suspend()
+    with pytest.raises(NotImplementedError, match="nccl_checkpoint"):
+        group.reinit_after_resume()
