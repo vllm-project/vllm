@@ -24,13 +24,12 @@ from vllm.config import set_current_vllm_config
 from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.platforms import current_platform
 
-# TODO: Integrate ROCMAiterMLASparseBackend for ROCm.
-# The ROCm sparse MLA backend (rocm_aiter_mla_sparse.py) has a compatible
-# forward_mqa interface but needs validation on ROCm hardware.
-if not current_platform.is_cuda():
+# This module's end-to-end sparse-backend correctness test supports CUDA and
+# ROCm.  The remaining tests exercise CUDA-specific FlashMLA/FlashInfer APIs
+# and are skipped by the autouse fixture below when collecting on ROCm.
+if not (current_platform.is_cuda() or current_platform.is_rocm()):
     pytest.skip(
-        "Sparse MLA backend tests currently only support CUDA. "
-        "ROCm support requires integrating ROCMAiterMLASparseBackend.",
+        "Sparse MLA backend tests require CUDA or ROCm.",
         allow_module_level=True,
     )
 
@@ -52,9 +51,41 @@ from vllm.v1.attention.backends.utils import (
 )
 from vllm.v1.attention.ops import flashmla
 
+if current_platform.is_rocm():
+    from vllm.v1.attention.backends.mla.rocm_aiter_mla_sparse import (
+        ROCMAiterMLASparseBackend,
+    )
+
+    SPARSE_BACKENDS = [ROCMAiterMLASparseBackend]
+    SPARSE_BACKEND_IDS = ["ROCMAiterMLA"]
+    SPARSE_KV_CACHE_DTYPES = ["auto", "fp8"]
+    SPARSE_BLOCK_SIZES = [64]
+else:
+    SPARSE_BACKENDS = [FlashMLASparseBackend, FlashInferMLASparseTRTLLMBackend]
+    SPARSE_BACKEND_IDS = ["FlashMLA", "FlashInferTRTLLM"]
+    SPARSE_KV_CACHE_DTYPES = ["auto", "fp8", "fp8_ds_mla"]
+    SPARSE_BLOCK_SIZES = [32, 64]
+
+
+@pytest.fixture(autouse=True)
+def _skip_cuda_specific_sparse_mla_tests_on_rocm(request):
+    """Skip tests whose helpers exercise CUDA-only sparse MLA APIs."""
+    rocm_portable_tests = {
+        "test_sparse_backend_decode_correctness",
+        "test_sparse_backend_prefill_correctness",
+    }
+    if (
+        current_platform.is_rocm()
+        and getattr(request.node, "originalname", request.node.name)
+        not in rocm_portable_tests
+    ):
+        pytest.skip("This sparse MLA test exercises a CUDA-specific API")
+
+
 SPARSE_BACKEND_BATCH_SPECS = {
     name: BATCH_SPECS[name]
     for name in [
+        "small_decode",
         "mixed_small",
         "mixed_medium",
         "small_prefill",
@@ -68,6 +99,9 @@ SPARSE_BACKEND_BATCH_SPECS["large_q_prefill"] = BatchSpec(
 )
 SPARSE_BACKEND_BATCH_SPECS["large_q_pure_prefill"] = BatchSpec(
     seq_lens=[256] * 2, query_lens=[256] * 2
+)
+SPARSE_BACKEND_BATCH_SPECS["large_decode_over_topk"] = BatchSpec(
+    seq_lens=[256, 384], query_lens=[1, 1]
 )
 
 DEVICE_TYPE = current_platform.device_type
@@ -180,13 +214,13 @@ def _quantize_dequantize_fp8_ds_mla(
 
 @pytest.mark.parametrize(
     "backend_cls",
-    [FlashMLASparseBackend, FlashInferMLASparseTRTLLMBackend],
-    ids=["FlashMLA", "FlashInferTRTLLM"],
+    SPARSE_BACKENDS,
+    ids=SPARSE_BACKEND_IDS,
 )
 @pytest.mark.parametrize("batch_name", list(SPARSE_BACKEND_BATCH_SPECS.keys()))
-@pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8", "fp8_ds_mla"])
+@pytest.mark.parametrize("kv_cache_dtype", SPARSE_KV_CACHE_DTYPES)
 @pytest.mark.parametrize("tensor_parallel_size", [1, 2, 4])
-@pytest.mark.parametrize("block_size", [32, 64])
+@pytest.mark.parametrize("block_size", SPARSE_BLOCK_SIZES)
 @pytest.mark.parametrize(("q_scale", "k_scale"), [(1.0, 1.0), (2.0, 3.0)])
 def test_sparse_backend_decode_correctness(
     default_vllm_config,
@@ -264,6 +298,12 @@ def test_sparse_backend_decode_correctness(
             "attn_module_list_cfg": [{"topk_tokens": topk_tokens}],
         },
     )
+    # This shared correctness test constructs a sparse SDPA reference for every
+    # query token. ROCm normally routes short prefills to dense MHA, whose
+    # output intentionally differs from that sparse reference. Keep this test
+    # on the sparse-MQA path; dense-prefill routing has dedicated ROCm tests.
+    if current_platform.is_rocm():
+        vllm_config.attention_config.sparse_mla_force_mqa = True
     model_config = vllm_config.model_config
     model_config.hf_text_config = SimpleNamespace(
         q_lora_rank=None,
@@ -866,11 +906,11 @@ PREFILL_BATCH_SPECS = {
 
 
 @pytest.mark.skipif(
-    torch.cuda.get_device_capability()[0] < 10,
+    current_platform.is_cuda() and torch.cuda.get_device_capability()[0] < 10,
     reason="Sparse MLA forward_mha requires FA4 (SM100+)",
 )
 @pytest.mark.parametrize("batch_name", list(PREFILL_BATCH_SPECS.keys()))
-@pytest.mark.parametrize("kv_cache_dtype", ["auto"])
+@pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8"])
 def test_sparse_backend_prefill_correctness(
     default_vllm_config,
     dist_init,
@@ -878,11 +918,15 @@ def test_sparse_backend_prefill_correctness(
     kv_cache_dtype,
     workspace_init,
 ):
-    """Test single-pass FA4 dense forward_mha for sparse MLA prefill."""
-    backend_cls = FlashMLASparseBackend
+    """Test the normal dense forward_mha path for sparse MLA short prefill."""
+    backend_cls = (
+        ROCMAiterMLASparseBackend
+        if current_platform.is_rocm()
+        else FlashMLASparseBackend
+    )
     batch_spec = PREFILL_BATCH_SPECS[batch_name]
 
-    device = torch.device("cuda")
+    device = torch.device(DEVICE_TYPE)
     dtype = torch.bfloat16
     block_size = 64
 
@@ -1108,7 +1152,10 @@ def test_sparse_backend_prefill_correctness(
 
     assert out_buffer.shape == ref_output.shape
     assert torch.isfinite(out_buffer).all(), "Non-finite values in output"
-    torch.testing.assert_close(out_buffer, ref_output, rtol=0.01, atol=0.01)
+    if kv_cache_dtype.startswith("fp8"):
+        torch.testing.assert_close(out_buffer, ref_output, rtol=0.065, atol=0.05)
+    else:
+        torch.testing.assert_close(out_buffer, ref_output, rtol=0.01, atol=0.01)
 
 
 @pytest.mark.parametrize(

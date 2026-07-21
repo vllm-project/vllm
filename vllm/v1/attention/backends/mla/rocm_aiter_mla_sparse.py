@@ -125,6 +125,10 @@ def triton_convert_req_index_to_global_index(
     assert req_id.dtype == torch.int32
     assert block_table.dtype == torch.int32
     assert token_indices.dtype == torch.int32
+    assert req_id.shape[0] == token_indices.shape[0], (
+        f"req_id ({req_id.shape[0]}) and token_indices ({token_indices.shape[0]}) "
+        "must cover the same tokens"
+    )
     assert token_indices.shape[1] == NUM_TOPK_TOKENS
     assert NUM_TOPK_TOKENS % BLOCK_N == 0, (
         f"NUM_TOPK_TOKENS ({NUM_TOPK_TOKENS}) must be divisible byBLOCK_N ({BLOCK_N})"
@@ -427,9 +431,15 @@ class ROCMAiterMLASparseMetadataBuilder(
         kv_cache_dtype_str = getattr(vllm_config.cache_config, "cache_dtype", "auto")
         if kv_cache_dtype_str in ("fp8", "fp8_e4m3", "fp8_e5m2"):
             kv_cache_dtype_str = "fp8"
+            q_dtype = dtypes.fp8
         else:
             kv_cache_dtype_str = "bf16"
         kv_dtype = dtypes.d_dtypes.get(kv_cache_dtype_str, dtypes.bf16)
+        # get_mla_metadata_info_v1 and get_mla_metadata_v1 must use the same
+        # query/KV dtypes. In particular, gfx950's FP8 nhead=32 fold path uses
+        # a different split/reduce layout than the BF16 path.
+        self._mla_q_dtype = q_dtype
+        self._mla_kv_dtype = kv_dtype
 
         (
             (work_meta_data_size, work_meta_data_type),
@@ -573,7 +583,18 @@ class ROCMAiterMLASparseMetadataBuilder(
             clamped_context_lens.tobytes(),
             seg_lengths.tobytes(),
         )
-        if num_tokens > 0 and metadata_key != self._prev_metadata_key:
+        is_long_pure_bf16_prefill = (
+            self._mla_kv_dtype == torch.bfloat16
+            and metadata.num_decodes == 0
+            and metadata.num_prefills > 0
+            and metadata.prefill_max_seq_len > metadata.topk_tokens
+        )
+        use_persistent_metadata = not is_long_pure_bf16_prefill
+        if (
+            use_persistent_metadata
+            and num_tokens > 0
+            and metadata_key != self._prev_metadata_key
+        ):
             from aiter import get_mla_metadata_v1
 
             max_split_per_batch = self._sparse_decode_max_split(
@@ -598,6 +619,8 @@ class ROCMAiterMLASparseMetadataBuilder(
                 uni_seqlen_qo=1,
                 fast_mode=True,
                 max_split_per_batch=max_split_per_batch,
+                dtype_q=self._mla_q_dtype,
+                dtype_kv=self._mla_kv_dtype,
             )
             # The persistent metadata buffers are read by graph replay. Order
             # the async metadata write before the graph-captured decode kernel.
@@ -610,12 +633,29 @@ class ROCMAiterMLASparseMetadataBuilder(
         metadata.paged_kv_last_page_len = paged_kv_last_page_len
         metadata.paged_kv_indices = paged_kv_indices
         metadata.paged_kv_indptr = paged_kv_indptr
-        metadata.work_meta_data = self._mla_work_meta_data
-        metadata.work_indptr = self._mla_work_indptr
-        metadata.work_info_set = self._mla_work_info_set
-        metadata.reduce_indptr = self._mla_reduce_indptr
-        metadata.reduce_final_map = self._mla_reduce_final_map
-        metadata.reduce_partial_map = self._mla_reduce_partial_map
+        # A long pure prefill is modeled as many separate qseqlen=1 entries.
+        # AITER's BF16 persistent split reduction is numerically unstable for
+        # that shape, so let AITER build its non-persistent work metadata. Keep
+        # the persistent path for decode/mixed batches and FP8, whose fallback
+        # kernel has different support constraints.
+        metadata.work_meta_data = (
+            self._mla_work_meta_data if use_persistent_metadata else None
+        )
+        metadata.work_indptr = (
+            self._mla_work_indptr if use_persistent_metadata else None
+        )
+        metadata.work_info_set = (
+            self._mla_work_info_set if use_persistent_metadata else None
+        )
+        metadata.reduce_indptr = (
+            self._mla_reduce_indptr if use_persistent_metadata else None
+        )
+        metadata.reduce_final_map = (
+            self._mla_reduce_final_map if use_persistent_metadata else None
+        )
+        metadata.reduce_partial_map = (
+            self._mla_reduce_partial_map if use_persistent_metadata else None
+        )
         return metadata
 
 
