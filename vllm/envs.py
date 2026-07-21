@@ -272,6 +272,10 @@ if TYPE_CHECKING:
     VLLM_MULTI_STREAM_GEMM_TOKEN_THRESHOLD: int = 1024
     VLLM_COMPILE_CACHE_SAVE_FORMAT: Literal["binary", "unpacked"] = "binary"
     VLLM_USE_V2_MODEL_RUNNER: bool | None = None
+    # MRv2 PCP+DCP: when set, use a DCP-SHARDED KV cache (each rank stores
+    # 1/dcp of positions) instead of the default replicated cache. Gives the
+    # decode-KV memory win at the cost of a sharded attention/write path.
+    VLLM_PCP_DCP_SHARDED_KV_CACHE: bool = False
     VLLM_LOG_MODEL_INSPECTION: bool = False
     VLLM_DEBUG_MFU_METRICS: bool = False
     VLLM_WEIGHT_OFFLOADING_DISABLE_PIN_MEMORY: bool = False
@@ -1921,6 +1925,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Flag to control the v2 model runner. If unset, use config defaults.
     "VLLM_USE_V2_MODEL_RUNNER": lambda: maybe_convert_bool(
         os.getenv("VLLM_USE_V2_MODEL_RUNNER", None)
+    ),
+    "VLLM_PCP_DCP_SHARDED_KV_CACHE": lambda: maybe_convert_bool(
+        os.getenv("VLLM_PCP_DCP_SHARDED_KV_CACHE", "0")
     ),
     # Log model inspection after loading.
     # If enabled, logs a transformers-style hierarchical view of the model

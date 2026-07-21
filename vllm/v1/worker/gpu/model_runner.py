@@ -184,7 +184,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # decode-KV memory win); the sharded-cache path is Phase 2b.
         self.pcp_size = self.parallel_config.prefill_context_parallel_size
         self.pcp_dcp_replicated_cache = (
-            self.use_dcp and self.pcp_size == self.dcp_size
+            self.use_dcp
+            and self.pcp_size == self.dcp_size
+            and not envs.VLLM_PCP_DCP_SHARDED_KV_CACHE
         )
         self.cache_dcp_size = 1 if self.pcp_dcp_replicated_cache else self.dcp_size
         self.cache_dcp_rank = 0 if self.pcp_dcp_replicated_cache else self.dcp_rank

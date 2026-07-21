@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING
 import torch
 from typing_extensions import Self
 
+from vllm import envs
 from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.torch_utils import get_dtype_size, nvfp4_kv_cache_full_dim
@@ -220,9 +221,11 @@ class AttentionSpec(KVCacheSpec):
     def max_num_blocks_per_req(self, vllm_config: VllmConfig, max_len: int) -> int:
         parallel_config = vllm_config.parallel_config
         dcp = parallel_config.decode_context_parallel_size
-        # MRv2 PCP+DCP (dcp == pcp > 1): replicated cache, no sharding divisor.
+        # MRv2 PCP+DCP (dcp == pcp > 1): replicated cache (default) -> no
+        # sharding divisor; with VLLM_PCP_DCP_SHARDED_KV_CACHE it shards.
         pcp = parallel_config.prefill_context_parallel_size
-        kv_shard_count = 1 if (dcp > 1 and dcp == pcp) else dcp
+        replicated = dcp > 1 and dcp == pcp and not envs.VLLM_PCP_DCP_SHARDED_KV_CACHE
+        kv_shard_count = 1 if replicated else dcp
         return cdiv(max_len, self.block_size * kv_shard_count)
 
 
@@ -262,8 +265,10 @@ class FullAttentionSpec(AttentionSpec):
         max_model_len = vllm_config.model_config.max_model_len
         dcp = vllm_config.parallel_config.decode_context_parallel_size
         pcp = vllm_config.parallel_config.prefill_context_parallel_size
-        # MRv2 PCP+DCP (dcp == pcp > 1): replicated cache, no 1/dcp saving.
-        if dcp > 1 and dcp != pcp:
+        # MRv2 PCP+DCP (dcp == pcp > 1): replicated (default) -> no 1/dcp saving;
+        # with VLLM_PCP_DCP_SHARDED_KV_CACHE it shards -> apply the 1/dcp saving.
+        replicated = dcp > 1 and dcp == pcp and not envs.VLLM_PCP_DCP_SHARDED_KV_CACHE
+        if dcp > 1 and not replicated:
             max_model_len = cdiv(max_model_len, dcp)
         return cdiv(max_model_len, self.block_size) * self.page_size_bytes
 
