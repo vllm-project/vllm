@@ -16,6 +16,7 @@
 # limitations under the License.
 """Transformers modeling backend base class."""
 
+import os
 from collections.abc import Callable, Iterable
 from itertools import chain
 from operator import attrgetter
@@ -40,7 +41,10 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import (
     Attention,
     EncoderOnlyAttention,
+    MLAAttention,
 )
+from vllm.model_executor.layers.attention.mla_attention import get_mla_dims
+from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.fused_moe import MoERunner
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.model_executor.models.interfaces import (
@@ -52,6 +56,7 @@ from vllm.model_executor.models.interfaces import (
 )
 from vllm.model_executor.models.interfaces_base import VllmModel
 from vllm.model_executor.models.transformers.fuser import BaseFuser, Fusers
+from vllm.model_executor.models.transformers.fusers import MLAFuser
 from vllm.model_executor.models.transformers.utils import (
     can_enable_torch_compile,
     get_feature_request_tip,
@@ -64,17 +69,16 @@ from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     PPMissingLayer,
     WeightsMapper,
+    extract_layer_index,
     make_empty_intermediate_tensors_factory,
     maybe_prefix,
 )
 from vllm.sequence import IntermediateTensors
-from vllm.v1.attention.backend import AttentionType
 
 if TYPE_CHECKING:
     from transformers import PreTrainedModel
 
     from vllm.config import VllmConfig
-    from vllm.v1.attention.backend import AttentionBackend
 
 logger = init_logger(__name__)
 
@@ -130,6 +134,9 @@ class Base(
         self.packed_modules_mapping: dict[str, list[str]] = {}
         """Fused module -> constituent projections, populated by `recursive_replace`
         for the quantization machinery and loaders (e.g. bitsandbytes)."""
+        self.fusers: dict[str, BaseFuser] = {}
+        """Module qualname -> the fuser applied to it, populated
+        by `recursive_replace` for `create_attention_instances`."""
 
         # Attrs for Eagle3 (see self.set_aux_hidden_state_layers)
         self._target_class: type[nn.Module] = nn.Module
@@ -458,6 +465,8 @@ class Base(
 
         def register_fusion(fuser: BaseFuser, prefix: str):
             """Register a fused layer's mappings just before it is built."""
+            self.fusers[prefix] = fuser
+
             orig_to_new_stacked = fuser.orig_to_new_stacked(prefix)
             self.hf_to_vllm_mapper.orig_to_new_stacked.update(orig_to_new_stacked)
 
@@ -523,141 +532,97 @@ class Base(
         """
         Create `Attention` instances to inform KV cache allocation.
         """
-        # vLLMs MLA replaces the entire attn module, so attention_instances are not used
-        if self.model_config.use_mla:
-            return {}
-
+        mla_fusers = {}
+        attention_instances = {}
         text_config = self.text_config
+        attn_cls = self._get_attn_cls()
+
+        # kv_lora_rank indicates that this is an MLA model
+        if getattr(text_config, "kv_lora_rank", None) is not None:
+            mla_fusers = {
+                extract_layer_index(prefix): (prefix, fuser)
+                for prefix, fuser in self.fusers.items()
+                if isinstance(fuser, MLAFuser)
+            }
+            # MLA model but not using MLAAttention, recalculate head_size for full attn
+            if attn_cls is not MLAAttention:
+                qk_nope_head_dim = getattr(text_config, "qk_nope_head_dim", 0)
+                qk_rope_head_dim = getattr(text_config, "qk_rope_head_dim", 0)
+                if qk_head_dim := qk_nope_head_dim + qk_rope_head_dim:
+                    self.model_config.model_arch_config.head_size = qk_head_dim
 
         num_heads = self.model_config.get_num_attention_heads(self.parallel_config)
         head_size = self.model_config.get_head_size()
-        head_size_v = None
         num_kv_heads = self.model_config.get_num_kv_heads(self.parallel_config)
         logits_soft_cap = getattr(text_config, "attn_logit_softcapping", None)
-
-        if getattr(text_config, "kv_lora_rank", None) is not None:
-            # Only reached when MLA fusion is off (e.g. VLLM_MLA_DISABLE), since
-            # `use_mla` returns above
-            logger.warning_once(
-                "Transformers modeling backend does not yet fully support MLA models. "
-                "Using full attention and, if possible, DiffKV backend for KV cache "
-                "allocation. This may be suboptimal."
-            )
-            qk_nope_head_dim = getattr(text_config, "qk_nope_head_dim", 0)
-            qk_rope_head_dim = getattr(text_config, "qk_rope_head_dim", 0)
-            head_size = qk_nope_head_dim + qk_rope_head_dim or head_size
-            head_size_v = getattr(text_config, "v_head_dim", head_size)
-
-        attn_type = self._get_attn_type()
-        attn_cls = self._get_attn_cls(attn_type)
-        attn_backend = self._get_attn_backend(head_size, head_size_v)
-
-        if head_size_v and head_size_v != head_size and attn_backend is None:
-            head_size_v = head_size
 
         pp_rank = self.pp_group.rank_in_group
         pp_size = self.pp_group.world_size
         start, end = get_pp_indices(text_config.num_hidden_layers, pp_rank, pp_size)
 
-        attention_instances = {}
         for i in range(start, end):
-            # Handle interleaved sliding window attention
-            per_layer_sliding_window = None
-            if (
-                hasattr(self.config, "layer_types")
-                and self.config.layer_types[i] == "sliding_attention"
-            ):
-                per_layer_sliding_window = self.config.sliding_window
-
-            attention_instances[i] = attn_cls(
+            kwargs = dict(
                 num_heads=num_heads,
-                head_size=head_size,
-                head_size_v=head_size_v,
                 # NOTE: We use Llama scale as default, if it's set by
                 # Transformers, it's updated in vllm_attention_forward
                 scale=head_size**-0.5,
-                num_kv_heads=num_kv_heads,
                 cache_config=self.cache_config,
                 quant_config=self.quant_config,
-                logits_soft_cap=logits_soft_cap,
-                per_layer_sliding_window=per_layer_sliding_window,
                 prefix=f"{i}.attn",
-                attn_type=attn_type,
-                attn_backend=attn_backend,
             )
+
+            if attn_cls is MLAAttention:
+                prefix, fuser = mla_fusers[i]
+                mla_module = self.model.get_submodule(prefix)
+                dims = get_mla_dims(self.model_config)
+                kwargs.update(
+                    scale=mla_module.scaling,
+                    qk_nope_head_dim=dims.qk_nope_head_dim,
+                    qk_rope_head_dim=dims.qk_rope_head_dim,
+                    v_head_dim=dims.v_head_dim,
+                    q_lora_rank=dims.q_lora_rank,
+                    kv_lora_rank=dims.kv_lora_rank,
+                    kv_b_proj=mla_module.get_submodule(fuser.kv_b_proj_name),
+                )
+            else:
+                kwargs.update(
+                    head_size=head_size,
+                    num_kv_heads=num_kv_heads,
+                    logits_soft_cap=logits_soft_cap,
+                )
+
+                # Handle interleaved sliding window attention
+                if (
+                    hasattr(text_config, "layer_types")
+                    and text_config.layer_types[i] == "sliding_attention"
+                ):
+                    kwargs["per_layer_sliding_window"] = text_config.sliding_window
+
+            attention_instances[i] = attn_cls(**kwargs)
         return attention_instances
 
-    def _get_attn_cls(self, attn_type: AttentionType) -> type[Attention]:
-        """Return the `Attention` class to use for the given attention type."""
-        if attn_type == AttentionType.ENCODER_ONLY:
-            return EncoderOnlyAttention
-        return Attention
-
-    def _get_attn_type(self) -> AttentionType:
-        """Return the attention type for this model's layers.
-
-        vLLM does not support encoder-decoder models, so if any encoder layer
-        (`is_causal=False`) is found in a text-only model, treat the whole model
-        as encoder-only; otherwise it is a decoder.
-        """
+    def _get_attn_cls(self) -> type[AttentionLayerBase]:
+        """Return the `Attention` class to use for this model's layers."""
+        # In encoder models, the attention layers will have `is_causal=False`
         is_encoder = lambda module: not getattr(module, "is_causal", True)
         has_encoder = lambda model: any(is_encoder(m) for m in model.modules())
         is_multimodal = lambda config: config != config.get_text_config()
+        # vLLM does not support encoder-decoder models, so if any encoder layer is
+        # found in a text only model, we assume the whole model is an encoder model
         if has_encoder(self.model) and not is_multimodal(self.config):
             self.check_version("5.0.0", "encoder models support")
-            return AttentionType.ENCODER_ONLY
-        return AttentionType.DECODER
-
-    def _get_attn_backend(
-        self, head_size: int, head_size_v: int | None
-    ) -> "type[AttentionBackend] | None":
-        """Pick the attention backend for these head sizes, or None for default.
-
-        Symmetric heads use vLLM's default backend selection (returns None).
-        Asymmetric heads (decompressed MLA, head_size_v < head_size) can only be
-        cached by a DiffKV backend: prefer FlashAttention DiffKV when usable on
-        this device, else Triton DiffKV (which needs Triton, i.e. CUDA/ROCm). A
-        `*_DIFFKV` backend requested via `--attention-backend` wins. Returns None
-        when no DiffKV backend is available, so the caller falls back to padding.
-        """
-        if head_size_v is None or head_size_v == head_size:
-            return None
-
-        from vllm.platforms import current_platform
-        from vllm.v1.attention.backends.registry import AttentionBackendEnum
-
-        requested = self.vllm_config.attention_config.backend
-        fa_diffkv = AttentionBackendEnum.FLASH_ATTN_DIFFKV
-        if requested is not None:
-            if not requested.name.endswith("_DIFFKV"):
-                logger.warning_once(
-                    "Requested attention backend %s is not a DiffKV backend, but "
-                    "the model has asymmetric heads (head_size_v=%d < head_size=%d). "
-                    "This will cause vLLM to pad the `value` tensor to preserve "
-                    "correctness, but this wastes KV cache. Consider using a DiffKV "
-                    "backend instead.",
-                    requested.name,
-                    head_size_v,
-                    head_size,
-                )
-                return None
-            backend_enum = requested
-        elif fa_diffkv.get_class().is_supported_on_current_device(
-            head_size=head_size, head_size_v=head_size_v, has_sinks=False
-        ):
-            backend_enum = fa_diffkv
-        elif current_platform.is_cuda() or current_platform.is_rocm():
-            backend_enum = AttentionBackendEnum.TRITON_ATTN_DIFFKV
-        else:
+            return EncoderOnlyAttention
+        if self.model_config.use_mla:
+            self.check_version("5.15.0.dev0", "optimized MLA support")
+            if any(isinstance(fuser, MLAFuser) for fuser in self.fusers.values()):
+                return MLAAttention
             logger.warning_once(
-                "No DiffKV attention backend available."
-                "Padding `value` to preserve correctness, this wastes KV cache."
+                "This model uses MLA but `MLAFuser` failed to match and/or fuse any "
+                "MLA attention layers. Falling back to full attention with a padded "
+                "`value` head dimension."
             )
-            return None
-        attn_backend = backend_enum.get_class()
-        attn_backend.set_head_size_v(head_size_v)
-        logger.info("Using %s backend.", attn_backend.get_name())
-        return attn_backend
+            os.environ["VLLM_MLA_DISABLE"] = "1"
+        return Attention
 
     def init_parameters(self, module: nn.Module, dtype: torch.dtype | None = None):
         """
