@@ -357,6 +357,16 @@ class TestDirectA2AGating:
                 1,
             )
 
+    def test_zero_ubatches_raises(self):
+        """num_ubatches=0 (DBO disabled) must fail loudly, not allocate
+        zero-sized symmetric buffers whose rendezvous returns None."""
+        from vllm.v1.attention.ops.dcp_direct_a2a import DirectDCPA2AWorkspace
+
+        with pytest.raises(ValueError, match="ubatch"):
+            DirectDCPA2AWorkspace(
+                None, torch.device("cpu"), 16, 2, 32, torch.bfloat16, num_ubatches=0
+            )
+
     def test_auto_with_unsupported_dtype_returns_none(self, monkeypatch):
         from vllm.v1.attention.ops.dcp_direct_a2a import (
             get_direct_dcp_a2a_workspace,

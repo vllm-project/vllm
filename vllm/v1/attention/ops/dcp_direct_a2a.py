@@ -41,6 +41,10 @@ class DirectDCPA2AWorkspace:
 
         if dtype not in (torch.float16, torch.bfloat16):
             raise ValueError(f"Direct DCP A2A does not support {dtype}")
+        if num_ubatches < 1:
+            raise ValueError(
+                f"Direct DCP A2A requires at least one ubatch slot, got {num_ubatches}"
+            )
         self.group = group
         self.world_size = group.size()
         self.rank = group.rank()
@@ -82,6 +86,7 @@ class DirectDCPA2AWorkspace:
         storage.zero_()
         torch.accelerator.synchronize()
         handle = symm_mem.rendezvous(storage, self.group.group_name)
+        assert handle is not None, "DCP symmetric memory rendezvous returned None"
         handle.barrier()
         views = [
             handle.get_buffer(peer, list(shape), dtype, 0)

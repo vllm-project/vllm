@@ -569,7 +569,8 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                     self.num_heads,
                     self.kv_lora_rank,
                     dtype,
-                    parallel_config.num_ubatches,
+                    # One staging slot without DBO (num_ubatches is 0 then).
+                    max(parallel_config.num_ubatches, 1),
                 )
             if self.dcp_direct_a2a_workspace is not None:
                 logger.info_once("Using direct symmetric-memory DCP A2A for MLA.")
