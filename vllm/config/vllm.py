@@ -2307,6 +2307,14 @@ class VllmConfig:
     def validate_mamba_cached_kernel(self) -> "VllmConfig":
         if not self.cache_config.use_replayssm:
             return self
+        # ReplaySSM adds a 3-tensor ring to the mamba state; only models that
+        # opt in (supports_replayssm) build a consistent shape on both the layer
+        # and config paths. Reject others so the mamba page size cannot desync.
+        if self.model_config is not None and not self.model_config.supports_replayssm:
+            raise ValueError(
+                "--use-replayssm is only supported for Nemotron-H models "
+                f"(got architecture {self.model_config.architecture!r})"
+            )
         if self.cache_config.mamba_cache_mode == "all":
             raise ValueError(
                 "--use-replayssm supports prefix caching only in align mode; "

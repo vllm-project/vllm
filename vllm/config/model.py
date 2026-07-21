@@ -1693,6 +1693,10 @@ class ModelConfig:
         return self._model_info.supports_mamba_prefix_caching
 
     @property
+    def supports_replayssm(self) -> bool:
+        return self._model_info.supports_replayssm
+
+    @property
     def use_mla(self) -> bool:
         return self.is_deepseek_mla and not envs.VLLM_MLA_DISABLE
 
