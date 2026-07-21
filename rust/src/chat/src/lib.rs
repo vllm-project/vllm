@@ -255,6 +255,33 @@ impl ChatLlm {
         self.text.engine_core_client()
     }
 
+    /// Whether the loaded backend has a registered multimodal processor.
+    pub fn supports_multimodal(&self) -> bool {
+        self.backend.multimodal_model_info().is_some()
+    }
+
+    /// Effective tool-call parser name for this model, if parsing is enabled.
+    pub fn tool_call_parser_name(&self) -> Option<&str> {
+        match &self.tool_call_parser {
+            ParserSelection::Auto => {
+                ToolParserFactory::global().resolve_name_for_model(self.model_id())
+            }
+            ParserSelection::None => None,
+            ParserSelection::Explicit(name) => Some(name),
+        }
+    }
+
+    /// Effective reasoning parser name for this model, if parsing is enabled.
+    pub fn reasoning_parser_name(&self) -> Option<&str> {
+        match &self.reasoning_parser {
+            ParserSelection::Auto => {
+                ReasoningParserFactory::global().resolve_name_for_model(self.model_id())
+            }
+            ParserSelection::None => None,
+            ParserSelection::Explicit(name) => Some(name),
+        }
+    }
+
     /// Render, tokenize, and submit one chat request.
     pub async fn chat(&self, request: ChatRequest) -> Result<ChatEventStream> {
         let (text_request, output_processor) = self

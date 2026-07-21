@@ -1010,6 +1010,7 @@ class EngineCoreProc(EngineCore):
         tensor_queue: Queue | None = None,
         *,
         engine_index: int = 0,
+        logical_data_parallel_size: int | None = None,
     ):
         self.input_queue = queue.Queue[tuple[EngineCoreRequestType, Any]]()
         self.output_queue = queue.Queue[tuple[int, EngineCoreOutputs] | bytes]()
@@ -1018,6 +1019,11 @@ class EngineCoreProc(EngineCore):
         )
 
         self.engine_index = engine_index
+        self.logical_data_parallel_size = (
+            logical_data_parallel_size
+            if logical_data_parallel_size is not None
+            else vllm_config.parallel_config.data_parallel_size
+        )
         identity = self.engine_index.to_bytes(length=2, byteorder="little")
         self.engines_running = False
         self.shutdown_state = EngineShutdownState.RUNNING
@@ -1261,6 +1267,7 @@ class EngineCoreProc(EngineCore):
         try:
             vllm_config: VllmConfig = kwargs["vllm_config"]
             parallel_config: ParallelConfig = vllm_config.parallel_config
+            logical_data_parallel_size = parallel_config.data_parallel_size
             data_parallel = parallel_config.data_parallel_size > 1 or dp_rank > 0
             if data_parallel:
                 parallel_config.data_parallel_rank_local = local_dp_rank
@@ -1296,7 +1303,12 @@ class EngineCoreProc(EngineCore):
                 parallel_config.data_parallel_size = 1
                 parallel_config.data_parallel_size_local = 1
                 parallel_config.data_parallel_rank = 0
-                engine_core = EngineCoreProc(*args, engine_index=dp_rank, **kwargs)
+                engine_core = EngineCoreProc(
+                    *args,
+                    engine_index=dp_rank,
+                    logical_data_parallel_size=logical_data_parallel_size,
+                    **kwargs,
+                )
 
             assert engine_core is not None
 
@@ -1621,6 +1633,8 @@ class EngineCoreProc(EngineCore):
 
             # Register sockets with poller.
             poller = zmq.Poller()
+            parallel_config = self.vllm_config.parallel_config
+            scheduler_config = self.vllm_config.scheduler_config
             ready_response = EngineCoreReadyResponse(
                 max_model_len=self.vllm_config.model_config.max_model_len,
                 num_gpu_blocks=self.vllm_config.cache_config.num_gpu_blocks or 0,
@@ -1629,13 +1643,22 @@ class EngineCoreProc(EngineCore):
                 dtype=str(self.vllm_config.model_config.dtype).removeprefix("torch."),
                 vllm_version=VLLM_VERSION,
                 world_size=self.vllm_config.parallel_config.world_size,
-                data_parallel_size=self.vllm_config.parallel_config.data_parallel_size,
+                data_parallel_size=self.logical_data_parallel_size,
                 kv_cache_size_tokens=(
                     self.vllm_config.cache_config.kv_cache_size_tokens
                 ),
                 kv_cache_max_concurrency=(
                     self.vllm_config.cache_config.kv_cache_max_concurrency
                 ),
+                tensor_parallel_size=parallel_config.tensor_parallel_size,
+                pipeline_parallel_size=parallel_config.pipeline_parallel_size,
+                decode_context_parallel_size=(
+                    parallel_config.decode_context_parallel_size
+                ),
+                data_parallel_rank=self.engine_index,
+                max_num_seqs=scheduler_config.max_num_seqs,
+                max_num_batched_tokens=scheduler_config.max_num_batched_tokens,
+                instance_id=self.vllm_config.instance_id,
             )
             ready_payload = msgspec.msgpack.encode(ready_response)
             for input_socket in input_sockets:

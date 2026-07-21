@@ -257,6 +257,13 @@ def test_apply_ready_response_syncs_block_size():
             vllm_version="test",
             world_size=1,
             data_parallel_size=1,
+            tensor_parallel_size=1,
+            pipeline_parallel_size=1,
+            decode_context_parallel_size=1,
+            data_parallel_rank=0,
+            max_num_seqs=256,
+            max_num_batched_tokens=8192,
+            instance_id="test-instance",
         )
     )
     client._apply_ready_response(payload)

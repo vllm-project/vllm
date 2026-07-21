@@ -25,6 +25,10 @@ use vllm_chat::{
     ChatBackend, ChatLlm, ChatRenderer, ChatRequest, ChatTextBackend, DefaultChatOutputProcessor,
     DynChatOutputProcessor, DynChatRenderer, NewChatOutputProcessorOptions, RenderedPrompt,
 };
+use vllm_engine_core_client::mock_engine::{
+    DEFAULT_MOCK_BLOCK_SIZE, DEFAULT_MOCK_MAX_MODEL_LEN, DEFAULT_MOCK_NUM_GPU_BLOCKS,
+    default_ready_response,
+};
 use vllm_engine_core_client::protocol::output::{
     EngineCoreFinishReason, EngineCoreOutput, EngineCoreOutputs, RequestBatchOutputs,
 };
@@ -1171,6 +1175,60 @@ async fn control_abort_resolves_external_id_and_empty_is_noop() {
     server_task.abort();
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn control_reports_server_and_model_info() {
+    let (generate_service, control_service, engine_health, _engine_task) =
+        setup_grpc_service(b"engine-grpc-info", default_stream_output_specs()).await;
+    let (channel, server_task) = start_grpc_test_server(
+        generate_service,
+        control_service,
+        engine_health,
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await;
+    let mut client = ControlClient::new(channel);
+
+    let server = client
+        .get_server_info(pb::GetServerInfoRequest {})
+        .await
+        .expect("get server info")
+        .into_inner();
+    assert_eq!(server.engine_version, "test-vllm-version");
+    assert_eq!(server.api_version, "vllm");
+    assert_eq!(server.instance_id, "test-instance");
+    assert_eq!(server.max_model_len, DEFAULT_MOCK_MAX_MODEL_LEN as u32);
+    assert_eq!(server.kv_block_size, DEFAULT_MOCK_BLOCK_SIZE as u32);
+    assert_eq!(server.total_kv_blocks, DEFAULT_MOCK_NUM_GPU_BLOCKS);
+    assert_eq!(server.max_running_requests, 256);
+    assert_eq!(server.max_batched_tokens, 8_192);
+    assert_eq!(server.max_loras, 0);
+    let parallelism = server.parallelism.expect("parallelism metadata");
+    assert_eq!(parallelism.tensor_parallel_size, 1);
+    assert_eq!(parallelism.pipeline_parallel_size, 1);
+    assert_eq!(parallelism.data_parallel_size, 1);
+    assert_eq!(parallelism.data_parallel_rank, 0);
+    assert_eq!(parallelism.data_parallel_start_rank, 0);
+    assert_eq!(parallelism.decode_context_parallel_size, 1);
+
+    let model = client
+        .get_model_info(pb::GetModelInfoRequest {})
+        .await
+        .expect("get model info")
+        .into_inner();
+    assert_eq!(model.model_id, "test-model");
+    assert_eq!(model.served_model_name, "test-model");
+    assert!(model.served_model_aliases.is_empty());
+    assert!(model.tokenizer_modes.is_empty());
+    assert!(model.supports_text_input);
+    assert!(model.supports_token_ids_input);
+    assert!(!model.supports_lora);
+    assert!(!model.supports_multimodal);
+    assert!(model.reasoning_parser.is_empty());
+    assert!(model.tool_call_parser.is_empty());
+
+    server_task.abort();
+}
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn grpc_health_transitions_to_not_serving_when_engine_becomes_unhealthy() {
