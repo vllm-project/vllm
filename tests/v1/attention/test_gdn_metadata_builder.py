@@ -225,75 +225,148 @@ def test_full_cudagraph_spec_metadata_uses_request_count():
 
 @dataclass
 class GDNReplaySSMBuildCase:
-    """A decode batch and its expected per-row ReplaySSM write position.
+    """A decode batch and its expected per-row ReplaySSM write_pos / is_flush.
 
-    num_computed = seq_len - query_len; write_pos =
-    (num_computed - decode_base) % buffer_len. decode_base is the ring origin
-    (num_computed at the request's last full-state write): the prompt length
-    for a fresh request and prompt+generated for one resumed after preemption.
+    num_computed = seq_len - query_len; write_pos = (num_computed -
+    effective_base) % buffer_len; is_flush = write_pos == buffer_len - 1, or a
+    forced one-token flush when num_computed < decode_base. In align mode the
+    anchor re-bases at each block start and the block-completing step flushes.
     """
 
     seq_lens: list[int]
     query_lens: list[int]
+    is_prefilling: list[bool]
     decode_base: list[int]
     buffer_len: int
     expected_write_pos: list[int]
+    expected_is_flush: list[int]
+    mamba_cache_mode: str = "none"
 
 
 GDN_REPLAYSSM_BUILD_CASES = {
-    # Fresh request: decode_base is the prompt length.
+    # decode_base == prompt length (fresh request).
     "fresh_decode": GDNReplaySSMBuildCase(
         seq_lens=[106],
         query_lens=[1],
+        is_prefilling=[False],
         decode_base=[100],
         buffer_len=16,
         expected_write_pos=[5],
+        expected_is_flush=[0],
     ),
-    # Flush slot: write_pos lands on the last buffer position (L - 1).
-    "flush_boundary": GDNReplaySSMBuildCase(
-        seq_lens=[116],
-        query_lens=[1],
-        decode_base=[100],
-        buffer_len=16,
-        expected_write_pos=[15],
-    ),
-    # More decode steps than the buffer length wraps the ring.
-    "buffer_wrap": GDNReplaySSMBuildCase(
-        seq_lens=[121],
-        query_lens=[1],
-        decode_base=[100],
-        buffer_len=16,
-        expected_write_pos=[4],
-    ),
-    # Resumed request re-anchors at prompt+generated, so the same token count
-    # yields write_pos 0 instead of the fresh request's 5.
-    "resumed_reanchor": GDNReplaySSMBuildCase(
+    # decode_base > prompt anchors write_pos at the resume point.
+    "resumed_reanchors_to_zero": GDNReplaySSMBuildCase(
         seq_lens=[106],
         query_lens=[1],
+        is_prefilling=[False],
         decode_base=[105],
         buffer_len=16,
         expected_write_pos=[0],
+        expected_is_flush=[0],
     ),
-    # Mixed batch: a fresh, a flush-slot, and a wrapped row together.
-    "mixed_batch": GDNReplaySSMBuildCase(
-        seq_lens=[106, 116, 121],
+    # write_pos == buffer_len - 1 flushes.
+    "flush_boundary": GDNReplaySSMBuildCase(
+        seq_lens=[116],
+        query_lens=[1],
+        is_prefilling=[False],
+        decode_base=[100],
+        buffer_len=16,
+        expected_write_pos=[15],
+        expected_is_flush=[1],
+    ),
+    # Per-row write_pos / is_flush are independent.
+    "mixed_rows": GDNReplaySSMBuildCase(
+        seq_lens=[104, 106, 216],
         query_lens=[1, 1, 1],
+        is_prefilling=[False, False, False],
+        decode_base=[100, 105, 200],
+        buffer_len=16,
+        expected_write_pos=[3, 0, 15],
+        expected_is_flush=[0, 0, 1],
+    ),
+    # write_pos wraps within the buffer (6 % 4 == 2).
+    "small_buffer_wrap": GDNReplaySSMBuildCase(
+        seq_lens=[112],
+        query_lens=[1],
+        is_prefilling=[False],
+        decode_base=[105],
+        buffer_len=4,
+        expected_write_pos=[2],
+        expected_is_flush=[0],
+    ),
+    # Single-token prompt step replayed as decode (num_computed < decode_base):
+    # forced one-token flush off the checkpoint.
+    "leftover_prompt_one_token_flush": GDNReplaySSMBuildCase(
+        seq_lens=[100],
+        query_lens=[1],
+        is_prefilling=[False],
+        decode_base=[101],
+        buffer_len=16,
+        expected_write_pos=[0],
+        expected_is_flush=[1],
+    ),
+    # Align mode (block_size 16): past the first boundary the anchor re-bases at
+    # block_start 112, so write_pos is 5 (vs 1 in none mode).
+    "align_reanchor_past_boundary": GDNReplaySSMBuildCase(
+        seq_lens=[118],
+        query_lens=[1],
+        is_prefilling=[False],
+        decode_base=[100],
+        buffer_len=16,
+        expected_write_pos=[5],
+        expected_is_flush=[0],
+        mamba_cache_mode="align",
+    ),
+    # Block-completing step forces a flush even though write_pos (11) != L - 1.
+    "align_block_boundary_flush": GDNReplaySSMBuildCase(
+        seq_lens=[112],
+        query_lens=[1],
+        is_prefilling=[False],
+        decode_base=[100],
+        buffer_len=16,
+        expected_write_pos=[11],
+        expected_is_flush=[1],
+        mamba_cache_mode="align",
+    ),
+    # First step of a new block re-anchors write_pos to 0.
+    "align_new_block_start_zero": GDNReplaySSMBuildCase(
+        seq_lens=[113],
+        query_lens=[1],
+        is_prefilling=[False],
+        decode_base=[100],
+        buffer_len=16,
+        expected_write_pos=[0],
+        expected_is_flush=[0],
+        mamba_cache_mode="align",
+    ),
+    # block_size % buffer_len != 0 (L 6): the boundary still flushes at wp 3.
+    "align_unaligned_buffer_forces_flush": GDNReplaySSMBuildCase(
+        seq_lens=[128],
+        query_lens=[1],
+        is_prefilling=[False],
+        decode_base=[100],
+        buffer_len=6,
+        expected_write_pos=[3],
+        expected_is_flush=[1],
+        mamba_cache_mode="align",
+    ),
+    # Per-row independence in align mode: partial-block / new-block / boundary.
+    "align_mixed_rows": GDNReplaySSMBuildCase(
+        seq_lens=[105, 113, 112],
+        query_lens=[1, 1, 1],
+        is_prefilling=[False, False, False],
         decode_base=[100, 100, 100],
         buffer_len=16,
-        expected_write_pos=[5, 15, 4],
-    ),
-    # Mixed fresh + resumed rows keep independent anchors in one batch.
-    "mixed_fresh_and_resumed": GDNReplaySSMBuildCase(
-        seq_lens=[106, 106],
-        query_lens=[1, 1],
-        decode_base=[100, 105],
-        buffer_len=16,
-        expected_write_pos=[5, 0],
+        expected_write_pos=[4, 0, 11],
+        expected_is_flush=[0, 0, 1],
+        mamba_cache_mode="align",
     ),
 }
 
 
-def _create_replayssm_gdn_builder(buffer_len: int) -> GDNAttentionMetadataBuilder:
+def _create_replayssm_gdn_builder(
+    buffer_len: int, mamba_cache_mode: str = "none"
+) -> GDNAttentionMetadataBuilder:
     """Create a GDNAttentionMetadataBuilder with ReplaySSM cached decode on."""
     vllm_config = create_vllm_config(
         model_name="Qwen/Qwen3.5-0.8B",
@@ -303,7 +376,7 @@ def _create_replayssm_gdn_builder(buffer_len: int) -> GDNAttentionMetadataBuilde
     # only) does not run; the builder reads the flags in __init__.
     vllm_config.cache_config.use_replayssm = True
     vllm_config.cache_config.replayssm_buffer_len = buffer_len
-    vllm_config.cache_config.mamba_cache_mode = "none"
+    vllm_config.cache_config.mamba_cache_mode = mamba_cache_mode
     mamba_spec = MambaSpec(
         block_size=BLOCK_SIZE,
         shapes=((16, 64),),
@@ -323,7 +396,7 @@ def _build_replayssm(
 ) -> GDNAttentionMetadata:
     batch = BatchSpec(seq_lens=case.seq_lens, query_lens=case.query_lens)
     common = create_common_attn_metadata(batch, BLOCK_SIZE, DEVICE).replace(
-        is_prefilling=torch.zeros(len(case.seq_lens), dtype=torch.bool),
+        is_prefilling=torch.tensor(case.is_prefilling, dtype=torch.bool),
         replayssm_decode_base_cpu=torch.tensor(case.decode_base, dtype=torch.int32),
     )
     return builder.build(common_prefix_len=0, common_attn_metadata=common)
@@ -335,24 +408,10 @@ def _build_replayssm(
     ids=GDN_REPLAYSSM_BUILD_CASES.keys(),
 )
 def test_replayssm_write_pos(case: GDNReplaySSMBuildCase):
-    builder = _create_replayssm_gdn_builder(case.buffer_len)
+    builder = _create_replayssm_gdn_builder(case.buffer_len, case.mamba_cache_mode)
     meta = _build_replayssm(builder, case)
 
-    assert meta.write_pos_d is not None
+    assert meta.write_pos_d is not None and meta.is_flush_d is not None
     n = len(case.expected_write_pos)
     assert meta.write_pos_d[:n].tolist() == case.expected_write_pos
-
-
-def test_resumed_request_reanchors_write_pos():
-    """A preemption-resumed request replays prompt+generated through prefill,
-    which rewrites the checkpoint state, so its decode_base moves to the resume
-    point. The first decode after resume starts at write_pos 0 even though a
-    fresh request at the same token count sits mid-ring."""
-    builder = _create_replayssm_gdn_builder(16)
-    # write_pos_d aliases a reused builder buffer, so read each before the next.
-    fresh = _build_replayssm(builder, GDN_REPLAYSSM_BUILD_CASES["fresh_decode"])
-    fresh_write_pos = fresh.write_pos_d[0].item()
-    resumed = _build_replayssm(builder, GDN_REPLAYSSM_BUILD_CASES["resumed_reanchor"])
-    resumed_write_pos = resumed.write_pos_d[0].item()
-    assert fresh_write_pos == 5
-    assert resumed_write_pos == 0
+    assert meta.is_flush_d[:n].tolist() == case.expected_is_flush

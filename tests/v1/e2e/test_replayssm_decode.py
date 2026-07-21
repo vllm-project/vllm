@@ -97,6 +97,9 @@ def _check_replayssm_prefix_caching_parity(
         mamba_cache_mode="align",
         disable_log_stats=False,  # required for llm.get_metrics()
         tensor_parallel_size=tensor_parallel_size,
+        # GDN prefill JIT-compiles under FlashInfer; the backend is irrelevant
+        # to the decode parity measured here and Triton avoids the JIT.
+        additional_config={"gdn_prefill_backend": "triton"},
     )
     with vllm_runner(model_name, **common) as llm:
         baseline = llm.generate_greedy_logprobs(

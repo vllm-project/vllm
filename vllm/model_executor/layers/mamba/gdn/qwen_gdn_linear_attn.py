@@ -1450,6 +1450,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                         : attn_metadata.num_decodes
                     ],
                     write_pos=attn_metadata.write_pos_d,
+                    is_flush=attn_metadata.is_flush_d,
                     use_qk_l2norm_in_kernel=True,
                 )
                 core_attn_out_decode = out_decode.transpose(0, 1)
@@ -1687,6 +1688,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         """
         non_spec_state_indices_tensor = attn_metadata.non_spec_state_indices_tensor  # noqa: E501
         write_pos_d = attn_metadata.write_pos_d
+        is_flush_d = attn_metadata.is_flush_d
         self_kv_cache = self.kv_cache
         # conv_state must be (..., dim, width-1) for the conv kernels.
         # DS layout stores it that way directly; SD layout needs a transpose.
@@ -1732,6 +1734,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             out=out_buf,
             ssm_state_indices=non_spec_state_indices_tensor[:num_actual_tokens],  # type: ignore[index]
             write_pos=write_pos_d,
+            is_flush=is_flush_d,
             use_qk_l2norm_in_kernel=True,
         )
         return
