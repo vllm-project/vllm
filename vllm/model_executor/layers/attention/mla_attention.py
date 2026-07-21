@@ -506,10 +506,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         self.q_pad_num_heads = getattr(self.impl, "q_pad_num_heads", None)
         self.use_direct_call = not current_platform.opaque_attention_op()
 
-        # the fused sparse-MLA Q-prep kernel folds the main RoPE into
-        # the decode kernel, so it needs the rotary embedding's cos/sin cache.
-        # Without a rotary embedding there is no RoPE to fold, so disable the
-        # fused path to keep the wrapper / KV-write / decode branches consistent.
+        # Disable fused Q-prep path when no rotary_emb is available.
         self.rotary_emb = rotary_emb
         self._fused_rope_cos_sin: tuple[torch.Tensor, torch.Tensor] | None = None
         if getattr(self.impl, "use_fused_qk_rope_cache", False) and rotary_emb is None:
@@ -885,14 +882,11 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 mqa_ql_nope = mqa_ql_nope.transpose(0, 1)
 
             use_fused_qk_rope_cache = (
-                is_sparse_impl
+                self.impl.is_sparse
                 and getattr(self.impl, "use_fused_qk_rope_cache", False)
                 and self.rotary_emb is not None
             )
             if use_fused_qk_rope_cache:
-                # fold RoPE + Q-concat + KV-concat + KV-cache-write
-                # into one kernel. positions is threaded in as a real argument
-                # (survives torch.compile / CUDA graph replay).
                 if positions is None:
                     raise RuntimeError(
                         "Fused MLA Q-prep is enabled but `positions` was not "

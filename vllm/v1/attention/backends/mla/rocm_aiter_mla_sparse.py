@@ -690,8 +690,6 @@ class ROCMAiterMLASparseImpl(MLAAttentionImpl[ROCMAiterMLASparseMetadata]):
             (q_concat_shape, vllm_config.model_config.dtype),
         )
 
-        # fold decode RoPE + Q-concat + KV-concat + KV-cache-write into
-        # a single aiter kernel (fused_qk_rope_concat_and_cache_mla).
         self.use_fused_qk_rope_cache = (
             rocm_aiter_ops.is_fused_mla_qkprep_enabled()
             and self.kv_cache_dtype.startswith("fp8")
@@ -708,8 +706,6 @@ class ROCMAiterMLASparseImpl(MLAAttentionImpl[ROCMAiterMLASparseMetadata]):
         k_scale: torch.Tensor,
     ) -> None:
         if self.use_fused_qk_rope_cache:
-            # The KV-cache write (concat + RoPE + fp8 quant) is folded into
-            # fused_qk_rope_concat_and_cache_mla
             return
         super().do_kv_cache_update(
             kv_c_normed, k_pe, kv_cache, slot_mapping, kv_cache_dtype, k_scale
@@ -729,20 +725,10 @@ class ROCMAiterMLASparseImpl(MLAAttentionImpl[ROCMAiterMLASparseMetadata]):
         sin_cache: torch.Tensor,
         is_neox: bool,
     ) -> torch.Tensor:
-        """Fused decode Q-prep.
-
-        Applies RoPE to ``q_pe``/``k_pe``, concatenates ``ql_nope`` with the
-        RoPE'd ``q_pe`` into ``q_out``, and writes the concatenated,
-        fp8-quantized latent+rope KV row into ``kv_cache``. The fused path only
-        runs with an fp8 KV cache, so ``q_out`` is produced directly in fp8
-        (quantized by the kernel with ``q_scale``).
-        """
+        """Fused RoPE + Q-concat + KV-concat + fp8 KV-cache write."""
         num_tokens, num_q_heads = ql_nope.shape[:2]
-        # The aiter kernel builds the nope half of q_out (and the KV latent) by
-        # copying ql_nope and REQUIRES it to be contiguous: a strided ql_nope
-        # silently yields wrong q_out values. Force contiguity here.
+        # aiter kernel requires contiguous ql_nope
         ql_nope = ql_nope.contiguous()
-        # Emit q_out directly in fp8 when the KV cache is fp8
         q_out_dtype = (
             current_platform.fp8_dtype()
             if self.kv_cache_dtype.startswith("fp8")

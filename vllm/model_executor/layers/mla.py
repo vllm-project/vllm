@@ -121,9 +121,6 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
             rotary_emb=self.rotary_emb,
         )
 
-        # when the decode impl fuses RoPE into its Q-prep kernel
-        # (fused_qk_rope_concat_and_cache_mla), defer the main RoPE here and
-        # pass positions down to the impl as a forward() argument.
         self._defer_rope_to_fused_kernel = self.rotary_emb is not None and getattr(
             self.mla_attn.impl, "use_fused_qk_rope_cache", False
         )
