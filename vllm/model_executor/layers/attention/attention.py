@@ -348,10 +348,7 @@ class Attention(nn.Module, AttentionLayerBase):
         # During model initialization, the default dtype is set as the model
         # weight and activation dtype.
         dtype = torch.get_default_dtype()
-        routing_enabled = (
-            vllm_config.attention_config.decode_backend is not None
-            and attn_type == AttentionType.DECODER
-        )
+        routing_enabled = attn_type == AttentionType.DECODER
         if attn_backend is None:
             self.attn_backend = get_attn_backend(
                 head_size,
@@ -441,11 +438,16 @@ class Attention(nn.Module, AttentionLayerBase):
 
         self.decode_attn_backend: type[AttentionBackend] | None = None
         self.decode_impl: AttentionImpl | None = None
-        decode_backend_enum = vllm_config.attention_config.decode_backend
+        decode_backend = vllm_config.attention_config.decode_backend
         if routing_enabled:
-            from vllm.v1.attention.backends.utils import kv_layouts_compatible
+            from vllm.v1.attention.backends.utils import (
+                get_kv_cache_layout,
+                kv_layouts_compatible,
+                set_kv_cache_layout,
+            )
 
-            self.decode_attn_backend = get_attn_backend(
+            general_kv_layout = get_kv_cache_layout()
+            selected_decode_backend = get_attn_backend(
                 head_size,
                 dtype,
                 kv_cache_dtype,
@@ -456,42 +458,68 @@ class Attention(nn.Module, AttentionLayerBase):
                 attn_type=attn_type,
                 has_sliding_window=sliding_window is not None,
                 use_non_causal_override=False,
-                backend_override=decode_backend_enum,
+                backend_override=(
+                    decode_backend
+                    if isinstance(decode_backend, AttentionBackendEnum)
+                    else None
+                ),
+                use_global_backend=False,
             )
             selector_block_size = (
                 cache_config.block_size
                 if cache_config is not None and cache_config.user_specified_block_size
                 else None
             )
-            if not kv_layouts_compatible(
+            decode_required_layout = (
+                selected_decode_backend.get_required_kv_cache_layout()
+            )
+            compatible = kv_layouts_compatible(
                 self.attn_backend,
-                self.decode_attn_backend,
+                selected_decode_backend,
                 head_size=head_size,
                 block_size=selector_block_size,
                 kv_cache_dtype=kv_cache_dtype,
-            ):
-                raise ValueError(
-                    f"Decode attention backend "
-                    f"{self.decode_attn_backend.get_name()} is not "
-                    f"KV-cache-layout compatible with the general backend "
-                    f"{self.attn_backend.get_name()}; they cannot share one "
-                    f"physical KV cache. Choose a decode backend with a "
-                    f"matching KV layout."
-                )
-            decode_impl_cls = self.decode_attn_backend.get_impl_cls()
-            self.decode_impl = decode_impl_cls(  # type: ignore[assignment]
-                num_heads,
-                head_size,
-                scale,
-                num_kv_heads,
-                alibi_slopes,
-                sliding_window,
-                kv_cache_dtype,
-                logits_soft_cap,
-                attn_type,
-                kv_sharing_target_layer_name,
-                **extra_impl_args,
+            ) and (
+                general_kv_layout is None
+                or decode_required_layout is None
+                or general_kv_layout == decode_required_layout
             )
+            if not compatible:
+                set_kv_cache_layout(general_kv_layout)
+                if decode_backend is None:
+                    logger.info_once(
+                        "Automatically selected decode backend %s is not "
+                        "KV-cache-layout compatible with general backend %s; "
+                        "using the general backend for decode.",
+                        selected_decode_backend.get_name(),
+                        self.attn_backend.get_name(),
+                    )
+                    selected_decode_backend = self.attn_backend
+                else:
+                    raise ValueError(
+                        f"Decode attention backend "
+                        f"{selected_decode_backend.get_name()} is not "
+                        f"KV-cache-layout compatible with the general backend "
+                        f"{self.attn_backend.get_name()}; they cannot share one "
+                        f"physical KV cache. Choose a decode backend with a "
+                        f"matching KV layout."
+                    )
+            if selected_decode_backend is not self.attn_backend:
+                self.decode_attn_backend = selected_decode_backend
+                decode_impl_cls = selected_decode_backend.get_impl_cls()
+                self.decode_impl = decode_impl_cls(  # type: ignore[assignment]
+                    num_heads,
+                    head_size,
+                    scale,
+                    num_kv_heads,
+                    alibi_slopes,
+                    sliding_window,
+                    kv_cache_dtype,
+                    logits_soft_cap,
+                    attn_type,
+                    kv_sharing_target_layer_name,
+                    **extra_impl_args,
+                )
 
         # For cuda-alike (CUDA and ROCM) and cpu platforms, we control how
         # torch.compile works by registering the attention as one giant

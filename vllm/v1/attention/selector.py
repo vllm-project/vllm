@@ -112,6 +112,7 @@ def get_attn_backend(
     num_heads: int | None = None,
     has_sliding_window: bool = False,
     backend_override: AttentionBackendEnum | None = None,
+    use_global_backend: bool = True,
     use_non_causal_override: bool | None = None,
 ) -> type[AttentionBackend]:
     """Selects which attention backend to use and lazily imports it."""
@@ -165,8 +166,16 @@ def get_attn_backend(
     # A per-KV-group override (keyed by KVCacheSpecKind) takes precedence over
     # the global backend; kinds not present in the map fall back to it.
     attention_config = vllm_config.attention_config
-    backend = backend_override or attention_config.backend
-    if backend_override is None and attention_config.backend_per_kind:
+    backend = (
+        backend_override or attention_config.backend
+        if use_global_backend
+        else backend_override
+    )
+    if (
+        use_global_backend
+        and backend_override is None
+        and attention_config.backend_per_kind
+    ):
         kind = get_attn_spec_kind(
             use_mla=use_mla,
             has_sliding_window=has_sliding_window,

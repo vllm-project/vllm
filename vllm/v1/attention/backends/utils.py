@@ -636,8 +636,8 @@ def split_decodes_and_prefills(
 
 
 def kv_layouts_compatible(
+    general_backend: type[AttentionBackend],
     decode_backend: type[AttentionBackend],
-    prefill_backend: type[AttentionBackend],
     *,
     head_size: int,
     block_size: int | None,
@@ -652,8 +652,8 @@ def kv_layouts_compatible(
     backend runs).
 
     Args:
-        decode_backend: The default/decode backend (owns the KV layout).
-        prefill_backend: The backend that must match the decode backend's layout.
+        general_backend: The general backend that owns the KV layout.
+        decode_backend: The pure-decode backend that must match its layout.
         head_size: Attention head size.
         block_size: Configured cache block size, if fixed by the user.
         kv_cache_dtype: KV cache data type.
@@ -662,34 +662,34 @@ def kv_layouts_compatible(
         True if the two backends can share one KV cache.
     """
     # Never mix attention families (standard vs MLA).
-    if decode_backend.is_mla() != prefill_backend.is_mla():
+    if general_backend.is_mla() != decode_backend.is_mla():
         return False
 
     # Both must externalize the KV write (the layer writes KV once per step).
     if (
-        decode_backend.forward_includes_kv_cache_update
-        or prefill_backend.forward_includes_kv_cache_update
+        general_backend.forward_includes_kv_cache_update
+        or decode_backend.forward_includes_kv_cache_update
     ):
         return False
 
+    general_layout = general_backend.get_required_kv_cache_layout()
     decode_layout = decode_backend.get_required_kv_cache_layout()
-    prefill_layout = prefill_backend.get_required_kv_cache_layout()
     if (
-        decode_layout is not None
-        and prefill_layout is not None
-        and decode_layout != prefill_layout
+        general_layout is not None
+        and decode_layout is not None
+        and general_layout != decode_layout
     ):
         return False
 
     if not (
-        decode_backend.supports_block_size(block_size)
-        and prefill_backend.supports_block_size(block_size)
+        general_backend.supports_block_size(block_size)
+        and decode_backend.supports_block_size(block_size)
     ):
         return False
 
     if (
-        decode_backend.indexes_kv_by_block_stride()
-        != prefill_backend.indexes_kv_by_block_stride()
+        general_backend.indexes_kv_by_block_stride()
+        != decode_backend.indexes_kv_by_block_stride()
     ):
         return False
 
@@ -698,6 +698,13 @@ def kv_layouts_compatible(
     probe_num_blocks = 1024
     probe_num_kv_heads = 8
 
+    general_shape = general_backend.get_kv_cache_shape(
+        probe_num_blocks,
+        probe_block_size,
+        probe_num_kv_heads,
+        head_size,
+        cache_dtype_str=cache_dtype,
+    )
     decode_shape = decode_backend.get_kv_cache_shape(
         probe_num_blocks,
         probe_block_size,
@@ -705,19 +712,12 @@ def kv_layouts_compatible(
         head_size,
         cache_dtype_str=cache_dtype,
     )
-    prefill_shape = prefill_backend.get_kv_cache_shape(
-        probe_num_blocks,
-        probe_block_size,
-        probe_num_kv_heads,
-        head_size,
-        cache_dtype_str=cache_dtype,
-    )
-    if decode_shape != prefill_shape:
+    if general_shape != decode_shape:
         return False
 
-    return decode_backend.get_kv_cache_stride_order(
+    return general_backend.get_kv_cache_stride_order(
         include_num_layers_dimension=False
-    ) == prefill_backend.get_kv_cache_stride_order(include_num_layers_dimension=False)
+    ) == decode_backend.get_kv_cache_stride_order(include_num_layers_dimension=False)
 
 
 def split_prefill_chunks(

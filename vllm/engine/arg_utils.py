@@ -2281,14 +2281,15 @@ class EngineArgs:
                 )
             attention_config.backend = attention_backend
         if self.attention_decode_backend is not None:
+            attention_decode_backend = AttentionConfig.validate_backend_before(
+                self.attention_decode_backend
+            )
             if attention_config.decode_backend is not None:
                 raise ValueError(
                     "attention_decode_backend and "
                     "attention_config.decode_backend are mutually exclusive"
                 )
-            attention_config.decode_backend = AttentionConfig.validate_backend_before(
-                self.attention_decode_backend
-            )
+            attention_config.decode_backend = attention_decode_backend
 
         # TurboQuant requires FlashAttention 2 — FA3 boundary layers assert
         # FlashAttentionImpl which fails with TurboQuantAttentionImpl.

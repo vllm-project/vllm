@@ -7,7 +7,12 @@ from unittest.mock import patch
 import pytest
 import torch
 
-from vllm.config import CUDAGraphMode, DeviceConfig, VllmConfig
+from vllm.config import (
+    CUDAGraphMode,
+    DeviceConfig,
+    VllmConfig,
+    set_current_vllm_config,
+)
 from vllm.config.attention import AttentionConfig
 from vllm.model_executor.layers.attention.attention import _select_attention_impl
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
@@ -16,7 +21,9 @@ from vllm.v1.attention.backend import (
     AttentionCGSupport,
     MultipleOf,
 )
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.attention.backends.utils import kv_layouts_compatible
+from vllm.v1.attention.selector import get_attn_backend
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
@@ -35,7 +42,13 @@ pytestmark = pytest.mark.skip_global_cleanup
 )
 def test_decode_backend_parsing(value, expected):
     backend = AttentionConfig(decode_backend=value).decode_backend
-    assert (backend.name if backend is not None else None) == expected
+    assert (backend.name if isinstance(backend, AttentionBackendEnum) else backend) == (
+        expected
+    )
+
+
+def test_decode_backend_defaults_to_auto():
+    assert AttentionConfig().decode_backend is None
 
 
 def test_decode_backend_affects_config_hash():
@@ -44,6 +57,30 @@ def test_decode_backend_affects_config_hash():
         backend="FLASH_ATTN", decode_backend="FLASHINFER"
     ).compute_hash()
     assert default_hash != routed_hash
+
+
+def test_decode_auto_selection_ignores_general_backend():
+    config = VllmConfig(
+        attention_config=AttentionConfig(backend="FLASH_ATTN", decode_backend="auto"),
+        device_config=DeviceConfig(device="cpu"),
+    )
+    selected_backend = object()
+    with (
+        set_current_vllm_config(config),
+        patch(
+            "vllm.v1.attention.selector._cached_get_attn_backend",
+            return_value=selected_backend,
+        ) as selector,
+    ):
+        result = get_attn_backend(
+            head_size=128,
+            dtype=torch.bfloat16,
+            kv_cache_dtype=None,
+            use_global_backend=False,
+        )
+
+    assert result is selected_backend
+    assert selector.call_args.kwargs["backend"] is None
 
 
 class _Backend(AttentionBackend):

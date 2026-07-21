@@ -18,15 +18,14 @@ class AttentionConfig:
     """Configuration for attention mechanisms in vLLM."""
 
     backend: AttentionBackendEnum | None = None
-    """General attention backend to use. It serves every batch unless a
-    `decode_backend` is configured and the batch contains only decode requests.
+    """General attention backend for prefill-containing and mixed batches.
     Use "auto" or None for automatic selection."""
 
     decode_backend: AttentionBackendEnum | None = None
-    """Optional non-MLA attention backend for pure-decode batches.
+    """Non-MLA attention backend for pure-decode batches.
     Prefill-containing and mixed batches continue to use `backend`. Must share
-    `backend`'s KV cache layout. Use "auto" or None to disable routing
-    (single-backend)."""
+    `backend`'s KV cache layout. Use "auto" or None for independent automatic
+    selection."""
 
     backend_per_kind: dict[str, AttentionBackendEnum] = field(default_factory=dict)
     """Per-KV-cache-group attention backend overrides, keyed by
