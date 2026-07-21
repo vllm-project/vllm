@@ -91,13 +91,17 @@ def mask_empty_context_lse_kernel(
     head_offsets = tl.arange(0, BLOCK_HEADS)
     for head_start in range(0, NUM_HEADS, BLOCK_HEADS):
         head_indices = head_start + head_offsets
-        tl.store(
+        lse_ptrs = (
             lse
             + head_indices[:, None] * lse_head_stride
-            + token_indices[None, :] * lse_token_stride,
+            + token_indices[None, :] * lse_token_stride
+        )
+        valid_heads = head_indices < NUM_HEADS
+        valid_tokens = token_offsets < query_len
+        tl.store(
+            lse_ptrs,
             float("-inf"),
-            mask=(head_indices[:, None] < NUM_HEADS)
-            & (token_offsets[None, :] < query_len),
+            mask=valid_heads[:, None] & valid_tokens[None, :],
         )
 
 
