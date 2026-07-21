@@ -433,7 +433,7 @@ RUN cd /opt/nixl && \
         --exclude 'libcore*' \
         --exclude 'libpull*' \
         /tmp/nixl_wheels/nixl_rocm*.whl \
-        --plat manylinux_2_39_$(uname -m) \
+        --plat manylinux_2_34_$(uname -m) \
         --wheel-dir /tmp/nixl_wheels/repaired && \
     ./contrib/wheel_add_ucx_plugins.py \
         --ucx-plugins-dir ${UCX_HOME}/lib/ucx \
@@ -745,6 +745,7 @@ ENV MIOPEN_DEBUG_CONV_GEMM=0
 # See: https://github.com/ROCm/rocm-libraries/issues/6266
 ENV HSA_ENABLE_IPC_MODE_LEGACY=1
 ENV UCX_RMA_PPLN_ENABLE=y
+ENV UCX_ROCM_COPY_SIGPOOL_MAX_ELEMS=inf
 
 # ROCm profiler limits workaround.
 RUN echo "ROCTRACER_MAX_EVENTS=10000000" > ${COMMON_WORKDIR}/libkineto.conf
@@ -835,6 +836,7 @@ COPY --from=export_vllm /docker ${COMMON_WORKDIR}/vllm/docker
 # See: https://github.com/ROCm/rocm-libraries/issues/6266
 ENV HSA_ENABLE_IPC_MODE_LEGACY=1
 ENV UCX_RMA_PPLN_ENABLE=y
+ENV UCX_ROCM_COPY_SIGPOOL_MAX_ELEMS=inf
 
 ENV TOKENIZERS_PARALLELISM=false
 
