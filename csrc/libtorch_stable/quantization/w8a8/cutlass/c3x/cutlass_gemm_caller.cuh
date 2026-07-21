@@ -37,6 +37,7 @@ void cutlass_gemm_caller(
     typename GemmKernel::MainloopArguments mainloop_args,
     typename GemmKernel::EpilogueArguments epilogue_args,
     typename GemmKernel::TileSchedulerArguments scheduler = {}) {
+  const torch::stable::accelerator::DeviceGuard device_guard(device.index());
   cutlass::KernelHardwareInfo hw_info;
   typename GemmKernel::Arguments args{cutlass::gemm::GemmUniversalMode::kGemm,
                                       prob_shape,

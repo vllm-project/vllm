@@ -39,6 +39,7 @@ class EngineCoreSamplingParams(msgspec.Struct, dict=True, omit_defaults=True):
     seed: int | None = None
     max_tokens: int = 16
     min_tokens: int = 0
+    thinking_token_budget: int | None = None
     min_p: float = 0.0
     frequency_penalty: float = 0.0
     presence_penalty: float = 0.0
@@ -90,6 +91,7 @@ class EngineCoreOutput(
     stop_reason: int | str | None = None
     events: object | None = None
     kv_transfer_params: object | None = None
+    ec_transfer_params: object | None = None
     trace_headers: object | None = None
     prefill_stats: object | None = None
     routed_experts: object | None = None
@@ -122,6 +124,7 @@ request = EngineCoreRequest(
         seed=None,
         max_tokens=32,
         min_tokens=1,
+        thinking_token_budget=256,
         min_p=0.0,
         frequency_penalty=0.0,
         presence_penalty=0.0,

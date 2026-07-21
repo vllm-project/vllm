@@ -221,17 +221,6 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
     ) -> None:
         """LLM constructor."""
 
-        if "swap_space" in kwargs:
-            kwargs.pop("swap_space")
-            import warnings
-
-            warnings.warn(
-                "The 'swap_space' parameter is deprecated and ignored. "
-                "It will be removed in a future version.",
-                DeprecationWarning,
-                stacklevel=2,
-            )
-
         if "disable_log_stats" not in kwargs:
             kwargs["disable_log_stats"] = True
 
@@ -367,7 +356,7 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
         # path; the synchronous `LLM` entrypoint runs multimodal
         # preprocessing serially. Warn so the setting is not a silent
         # no-op. See vllm-project/vllm#42901.
-        if self.model_config.renderer_num_workers > 1:
+        if self.model_config.renderer_num_workers > 1 and self.runner_type != "pooling":
             logger.warning_once(
                 "`renderer_num_workers=%d` was set, but the offline `LLM` "
                 "entrypoint uses the synchronous renderer path and runs "
@@ -873,12 +862,13 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
             "init_weight_transfer_engine", kwargs={"init_info": init_info_dict}
         )
 
-    def start_weight_update(self, is_checkpoint_format: bool = True) -> None:
+    def start_weight_update(self) -> None:
         """Start a new weight update."""
-        self.llm_engine.collective_rpc(
-            "start_weight_update",
-            kwargs={"is_checkpoint_format": is_checkpoint_format},
-        )
+        self.llm_engine.collective_rpc("start_weight_update")
+
+    def start_draft_weight_update(self) -> None:
+        """Start a new weight update targeting the speculative draft model."""
+        self.llm_engine.collective_rpc("start_draft_weight_update")
 
     def update_weights(self, request: WeightTransferUpdateRequest | dict) -> None:
         """
@@ -898,12 +888,6 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
     def finish_weight_update(self) -> None:
         """Finish the current weight update."""
         self.llm_engine.collective_rpc("finish_weight_update")
-        # Invalidate cached state computed with the old weights so it isn't
-        # reused for subsequent requests:
-        # - prefix cache: KV blocks computed with the old weights
-        # - encoder cache: multimodal embeddings keyed only by mm_hash
-        self.llm_engine.reset_prefix_cache()
-        self.llm_engine.reset_encoder_cache()
 
     def __repr__(self) -> str:
         """Return a transformers-style hierarchical view of the model."""

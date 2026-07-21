@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import copy
 import hashlib
 import importlib
 from collections.abc import Callable
@@ -32,6 +33,7 @@ from vllm.v1.core.kv_cache_utils import (
     get_kv_cache_configs,
     get_max_concurrency_for_kv_cache_config,
     get_request_block_hasher,
+    group_and_unify_kv_cache_specs,
     hash_block_tokens,
     init_none_hash,
     is_kv_cache_spec_uniform,
@@ -46,6 +48,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
     KVCacheSpecKind,
     KVCacheTensor,
+    KVQuantMode,
     MambaSpec,
     MLAAttentionSpec,
     SinkFullAttentionSpec,
@@ -117,6 +120,8 @@ def new_kv_cache_spec(
     page_size_padded=None,
     sliding_window=None,
     attention_chunk_size=None,
+    indexes_kv_by_block_stride=False,
+    kv_quant_mode=KVQuantMode.NONE,
 ):
     return FullAttentionSpec(
         block_size=block_size,
@@ -126,6 +131,8 @@ def new_kv_cache_spec(
         page_size_padded=page_size_padded,
         sliding_window=sliding_window,
         attention_chunk_size=attention_chunk_size,
+        indexes_kv_by_block_stride=indexes_kv_by_block_stride,
+        kv_quant_mode=kv_quant_mode,
     )
 
 
@@ -136,6 +143,7 @@ def new_sliding_window_spec(
     dtype=torch.float32,
     page_size_padded=None,
     sliding_window=1,
+    indexes_kv_by_block_stride=False,
 ):
     return SlidingWindowSpec(
         block_size=block_size,
@@ -144,6 +152,7 @@ def new_sliding_window_spec(
         dtype=dtype,
         page_size_padded=page_size_padded,
         sliding_window=sliding_window,
+        indexes_kv_by_block_stride=indexes_kv_by_block_stride,
     )
 
 
@@ -221,7 +230,7 @@ def test_kv_cache_block():
 
     # Test block hash setting and resetting
     block_hash = make_block_hash_with_group_id(BlockHash(b"abc"), 0)
-    block.block_hash = block_hash
+    block.set_block_hash(block_hash)
     assert block.block_hash == block_hash
 
     block.reset_hash()
@@ -1400,12 +1409,15 @@ def test_get_max_concurrency_for_kv_cache_config():
         enable_chunked_prefill=True,
         max_model_len=model_config.max_model_len,
         is_encoder_decoder=model_config.is_encoder_decoder,
+        # Pin to sync: SWA per-request bounds grow with overlapping batches.
+        async_scheduling=False,
     )
 
     vllm_config = VllmConfig(
         model_config=model_config,
         scheduler_config=scheduler_config,
     )
+    assert vllm_config.max_concurrent_batches == 1
 
     full_attention_spec = FullAttentionSpec(
         block_size=16,
@@ -1465,6 +1477,128 @@ def test_get_max_concurrency_for_kv_cache_config():
     )
     assert num_tokens == max_concurrency_hybrid_model * max_model_len
     assert max_concurrency == max_concurrency_hybrid_model
+
+    # Unequal group sizes in the standard layout: each group's pages cost
+    # whole pool blocks, so a request needs 1024 + 129 = 1153 blocks — the
+    # same as the equal-hybrid case above, regardless of the second group
+    # holding only 2 layers.
+    kv_cache_config_unequal_groups = KVCacheConfig(
+        num_blocks=1153 * 3,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec([f"layer_{i}" for i in range(32)], full_attention_spec),
+            KVCacheGroupSpec(["layer_32", "layer_33"], sliding_window_spec),
+        ],
+    )
+    assert (
+        get_max_concurrency_for_kv_cache_config(
+            vllm_config, kv_cache_config_unequal_groups
+        )
+        == 3
+    )
+
+    # UniformTypeKVCacheSpecs group (worker config shape): the aggregated
+    # spec's memory/page ratio equals a single layer's page count, so the
+    # group needs 1024 blocks and the request 1153 in total. The previous
+    # formula normalized both groups' memory by the first group's page size,
+    # reporting 3459/1057 = 3.27 here instead of 3 — and a different value
+    # again for the scheduler-config shape below.
+    uniform_full_spec = UniformTypeKVCacheSpecs(
+        block_size=full_attention_spec.block_size,
+        kv_cache_specs={f"layer_{i}": full_attention_spec for i in range(4)},
+    )
+    kv_cache_config_uniform_group = KVCacheConfig(
+        num_blocks=1153 * 3,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec([f"layer_{i}" for i in range(4)], uniform_full_spec),
+            KVCacheGroupSpec(["layer_4", "layer_5"], sliding_window_spec),
+        ],
+    )
+    assert (
+        get_max_concurrency_for_kv_cache_config(
+            vllm_config, kv_cache_config_uniform_group
+        )
+        == 3
+    )
+
+    # Scheduler-config shape: generate_scheduler_kv_cache_config replaces the
+    # uniform-type group's spec with a representative per-layer spec.
+    # Capacity must not change between the two shapes (the engine computes
+    # on the scheduler config, the worker loop on the worker config).
+    kv_cache_config_scheduler_shape = generate_scheduler_kv_cache_config(
+        [copy.deepcopy(kv_cache_config_uniform_group)]
+    )
+    assert get_max_concurrency_for_kv_cache_config(
+        vllm_config, kv_cache_config_scheduler_shape
+    ) == get_max_concurrency_for_kv_cache_config(
+        vllm_config, kv_cache_config_uniform_group
+    )
+
+
+def test_get_max_concurrency_packed_kv_cache_config():
+    from vllm.v1.core.kv_cache_utils import (
+        _get_kv_cache_config_packed,
+        _use_packed_kv_cache_config,
+    )
+
+    model_config = ModelConfig(
+        "Qwen/Qwen1.5-7B",
+        runner="generate",
+        dtype="float16",
+        max_model_len=16384,
+    )
+    scheduler_config = SchedulerConfig(
+        max_num_batched_tokens=1024,
+        enable_chunked_prefill=True,
+        max_model_len=model_config.max_model_len,
+        is_encoder_decoder=model_config.is_encoder_decoder,
+        async_scheduling=False,
+    )
+    vllm_config = VllmConfig(
+        model_config=model_config,
+        scheduler_config=scheduler_config,
+    )
+
+    # All-UniformTypeKVCacheSpecs groups select the packed layout.
+    mla_specs = {f"layer_{i}": new_mla_spec() for i in range(4)}
+    swa_specs = {
+        f"layer_{i}": SlidingWindowMLASpec(
+            block_size=16,
+            num_kv_heads=1,
+            head_size=576,
+            dtype=torch.float32,
+            sliding_window=128,
+        )
+        for i in range(4, 6)
+    }
+    kv_cache_groups = [
+        KVCacheGroupSpec(
+            list(mla_specs),
+            UniformTypeKVCacheSpecs(block_size=16, kv_cache_specs=mla_specs),
+        ),
+        KVCacheGroupSpec(
+            list(swa_specs),
+            UniformTypeKVCacheSpecs(block_size=16, kv_cache_specs=swa_specs),
+        ),
+    ]
+    assert _use_packed_kv_cache_config(vllm_config, kv_cache_groups)
+    num_blocks, kv_cache_tensors = _get_kv_cache_config_packed(
+        vllm_config, kv_cache_groups, 2 * GiB_bytes
+    )
+    assert num_blocks > 0
+    kv_cache_config_packed = KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=kv_cache_tensors,
+        kv_cache_groups=kv_cache_groups,
+    )
+    # Per-request blocks: the MLA group needs cdiv(16384, 16) = 1024 pages;
+    # the SWA group cdiv(min(128 - 1 + 1024, 16384), 16) + 1 = 73. The
+    # previous formula normalized by the first group's page size and gave
+    # 1061 blocks per request instead of 1097.
+    assert get_max_concurrency_for_kv_cache_config(
+        vllm_config, kv_cache_config_packed
+    ) == num_blocks / (1024 + 73)
 
 
 def test_allocate_with_lookahead():
@@ -1799,16 +1933,38 @@ def test_get_kv_cache_config_one_worker():
         ],
     )
 
-    # different hidden size that cannot be aligned by using different block size
+    # different hidden size that cannot be aligned by using different block size,
+    # but can be aligned by padding the smaller physical page.
+    swa_spec = new_sliding_window_spec(head_size=96, indexes_kv_by_block_stride=True)
     kv_cache_specs_hybrid = {
-        "layer_1": new_kv_cache_spec(head_size=64),
-        "layer_2": new_sliding_window_spec(head_size=96),
+        "layer_1": new_kv_cache_spec(head_size=64, indexes_kv_by_block_stride=True),
+        "layer_2": swa_spec,
     }
 
-    with pytest.raises(NotImplementedError):
-        get_kv_cache_configs(
-            vllm_config, [kv_cache_specs_hybrid], [mem_per_block_per_layer * 2 * 32]
-        )[0]
+    kv_cache_config_hybrid = get_kv_cache_configs(
+        vllm_config, [kv_cache_specs_hybrid], [mem_per_block_per_layer * 2 * 32]
+    )[0]
+    padded_page_size = swa_spec.page_size_bytes
+    assert kv_cache_config_hybrid == KVCacheConfig(
+        num_blocks=42,
+        kv_cache_tensors=[
+            KVCacheTensor(size=padded_page_size * 42, shared_by=["layer_1", "layer_2"]),
+        ],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["layer_1"],
+                new_kv_cache_spec(
+                    head_size=64,
+                    page_size_padded=padded_page_size,
+                    indexes_kv_by_block_stride=True,
+                ),
+            ),
+            KVCacheGroupSpec(
+                ["layer_2"],
+                new_sliding_window_spec(head_size=96, indexes_kv_by_block_stride=True),
+            ),
+        ],
+    )
 
     # Test num_gpu_blocks_override
     vllm_config.cache_config.num_gpu_blocks_override = 16
@@ -1920,6 +2076,48 @@ def new_mla_spec(cache_dtype_str=None):
         dtype=torch.float32,
         cache_dtype_str=cache_dtype_str,
     )
+
+
+def new_swa_mla_spec(head_size=576, sliding_window=128):
+    return SlidingWindowMLASpec(
+        block_size=16,
+        num_kv_heads=1,
+        head_size=head_size,
+        dtype=torch.float32,
+        sliding_window=sliding_window,
+    )
+
+
+def test_group_and_unify_kv_cache_specs_no_swa_mla_returns_none():
+    # Without any SlidingWindowMLASpec the function does not apply.
+    specs = {"mla.0": new_mla_spec(), "mla.1": new_mla_spec()}
+    assert group_and_unify_kv_cache_specs(specs) is None
+
+
+def test_group_and_unify_kv_cache_specs_uniform_page_size_returns_none():
+    # A non-DeepseekV4 model that mixes full MLA and sliding-window MLA layers
+    # with a uniform page size must not fall into the DeepseekV4 tuple-packing
+    # path; it should defer to the generic uniform-page-size grouping instead.
+    mla_spec = new_mla_spec()
+    swa_spec = new_swa_mla_spec()
+    assert mla_spec.page_size_bytes == swa_spec.page_size_bytes
+    specs = {"mla.0": mla_spec, "mla.1": new_mla_spec(), "swa.0": swa_spec}
+    assert group_and_unify_kv_cache_specs(specs) is None
+
+
+def test_group_and_unify_kv_cache_specs_mixed_page_size_groups():
+    # DeepseekV4-style: differing page sizes across MLA and sliding-window MLA
+    # layers do require tuple packing, so grouping must still be produced.
+    mla_spec = new_mla_spec()
+    swa_spec = new_swa_mla_spec(head_size=1024)
+    assert mla_spec.page_size_bytes != swa_spec.page_size_bytes
+    specs = {"mla.0": mla_spec, "mla.1": new_mla_spec(), "swa.0": swa_spec}
+    grouped = group_and_unify_kv_cache_specs(specs)
+    assert grouped is not None
+    # One MLA group plus one sliding-window MLA group.
+    assert len(grouped) == 2
+    layer_names = {name for g in grouped for name in g.kv_cache_specs}
+    assert layer_names == {"mla.0", "mla.1", "swa.0"}
 
 
 def test_get_kv_cache_spec_kind_prefers_specific_attention_subclasses():
@@ -2322,6 +2520,103 @@ def test_check_enough_kv_cache_memory_respects_num_gpu_blocks_override():
         get_kv_cache_configs(vllm_config, [kv_cache_specs], [large_available_memory])
 
 
+def test_unify_kv_cache_page_size_uses_padding_for_non_divisible_sizes():
+    """DFlash drafters can have a smaller head size than the target model.
+
+    For example, MiMo uses 192-dim target KV heads while its DFlash draft uses
+    128-dim KV heads. The resulting page sizes are 3:2 rather than an integer
+    block-size multiple, so the smaller page must be padded instead.
+    """
+    # Both layers' backends opt into the padded-page strided view (e.g.
+    # FlashAttention / its DiffKV subclass), so padding is allowed.
+    target_spec = new_kv_cache_spec(
+        block_size=16,
+        num_kv_heads=1,
+        head_size=192,
+        dtype=torch.bfloat16,
+        indexes_kv_by_block_stride=True,
+    )
+    draft_spec = new_sliding_window_spec(
+        block_size=16,
+        num_kv_heads=1,
+        head_size=128,
+        dtype=torch.bfloat16,
+        sliding_window=1024,
+        indexes_kv_by_block_stride=True,
+    )
+
+    unified_specs = kv_cache_utils.unify_kv_cache_spec_page_size(
+        {
+            "target_attn": target_spec,
+            "draft_attn": draft_spec,
+        }
+    )
+
+    assert unified_specs["target_attn"] == target_spec
+    unified_draft_spec = unified_specs["draft_attn"]
+    assert unified_draft_spec.block_size == draft_spec.block_size
+    assert unified_draft_spec.real_page_size_bytes == draft_spec.real_page_size_bytes
+    assert unified_draft_spec.page_size_padded == target_spec.page_size_bytes
+    assert unified_draft_spec.page_size_bytes == target_spec.page_size_bytes
+
+
+def test_unify_kv_cache_page_size_padding_requires_backend_support():
+    """Padding is gated on the backend declaring ``indexes_kv_by_block_stride``.
+
+    A backend that does not support the strided padded-page view must raise
+    rather than silently padding (and misreading KV at runtime).
+    """
+    target_spec = new_kv_cache_spec(
+        block_size=16,
+        num_kv_heads=1,
+        head_size=192,
+        dtype=torch.bfloat16,
+        indexes_kv_by_block_stride=True,
+    )
+    # The non-divisible draft layer needs padding but its backend does not
+    # support the strided padded-page view -> must raise, not silently pad.
+    draft_spec = new_sliding_window_spec(
+        block_size=16,
+        num_kv_heads=1,
+        head_size=128,
+        dtype=torch.bfloat16,
+        sliding_window=1024,
+        indexes_kv_by_block_stride=False,
+    )
+    specs = {"target_attn": target_spec, "draft_attn": draft_spec}
+
+    with pytest.raises(NotImplementedError):
+        kv_cache_utils.unify_kv_cache_spec_page_size(specs)
+
+
+def test_unpadded_page_size_without_quant_matches_real_page():
+    # Without quantization the offload transfer width is just the raw page.
+    spec = new_kv_cache_spec()
+    assert spec.unpadded_page_size_bytes == spec.real_page_size_bytes
+    assert spec.page_size_bytes == spec.unpadded_page_size_bytes
+
+
+def test_unpadded_page_size_includes_per_token_head_scales():
+    # Per-token-head quant carries inline fp32 scales that are carved from the
+    # raw KV allocation, so they must be budgeted into the offload width.
+    spec = new_kv_cache_spec(
+        dtype=torch.uint8, kv_quant_mode=KVQuantMode.FP8_PER_TOKEN_HEAD
+    )
+    scales = 2 * spec.block_size * spec.num_kv_heads * 4
+    assert spec.unpadded_page_size_bytes == spec.real_page_size_bytes + scales
+    assert spec.page_size_bytes == spec.unpadded_page_size_bytes
+
+
+def test_page_size_padded_wins():
+    # An explicit padded page size takes precedence over the unpadded size.
+    spec = new_kv_cache_spec(
+        dtype=torch.uint8,
+        kv_quant_mode=KVQuantMode.FP8_PER_TOKEN_HEAD,
+        page_size_padded=65536,
+    )
+    assert spec.page_size_bytes == 65536
+
+
 def test_unify_hybrid_kv_cache_specs():
     # 1. has_full_attention and has_sliding_window
     before_spec_1 = new_kv_cache_spec()
@@ -2389,6 +2684,91 @@ def test_unify_hybrid_kv_cache_specs():
         kv_cache_utils.unify_hybrid_kv_cache_specs(kv_cache_spec)
 
 
+def test_unify_kv_cache_spec_page_size_mamba():
+    """Regression test for https://github.com/vllm-project/vllm/issues/43626.
+
+    MambaSpec's page_size_bytes is determined by its state shapes and does not
+    change with block_size, so unify_kv_cache_spec_page_size must pad the Mamba
+    page instead of scaling its block_size. This situation arises when a layer
+    with a page larger than the (already platform-aligned) Mamba page joins the
+    specs, e.g. a dense draft model with more KV heads than the hybrid main
+    model.
+    """
+    # 1. Hybrid main model (Mamba + full attention, pages already aligned at
+    # 16KB) plus a dense draft model layer with a 2x larger page (32KB).
+    # Reproduces the bare AssertionError from #43626: 32768 % 16384 == 0, so
+    # the old code scaled the Mamba block_size, which left page_size_bytes
+    # unchanged at 16384.
+    mamba_spec = new_mamba_spec()  # page_size_bytes = 16384
+    main_attn_spec = new_kv_cache_spec()  # page_size_bytes = 16384
+    draft_attn_spec = new_kv_cache_spec(num_kv_heads=4)  # page_size_bytes = 32768
+    assert mamba_spec.page_size_bytes == main_attn_spec.page_size_bytes == 16384
+    assert draft_attn_spec.page_size_bytes == 32768
+
+    unified = kv_cache_utils.unify_kv_cache_spec_page_size(
+        {
+            "mamba_layer": mamba_spec,
+            "main_attn_layer": main_attn_spec,
+            "draft_attn_layer": draft_attn_spec,
+        }
+    )
+    # Mamba page is padded; block_size (caching granularity) is unchanged.
+    assert unified["mamba_layer"].page_size_bytes == 32768
+    assert unified["mamba_layer"].page_size_padded == 32768
+    assert unified["mamba_layer"].block_size == mamba_spec.block_size
+    # Attention layer with smaller page still unifies by scaling block_size.
+    assert unified["main_attn_layer"].page_size_bytes == 32768
+    assert unified["main_attn_layer"].block_size == 2 * main_attn_spec.block_size
+    assert unified["main_attn_layer"].page_size_padded is None
+    # Layer already at max page size is unchanged.
+    assert unified["draft_attn_layer"] == draft_attn_spec
+
+    # 2. Mamba page already padded by the platform (state smaller than the
+    # padded page); the padding is re-applied at the new maximum.
+    padded_mamba_spec = new_mamba_spec(
+        shapes=((2, 256), (3, 32, 32)), page_size_padded=16384
+    )
+    assert padded_mamba_spec.page_size_bytes == 16384
+    unified = kv_cache_utils.unify_kv_cache_spec_page_size(
+        {
+            "mamba_layer": padded_mamba_spec,
+            "draft_attn_layer": draft_attn_spec,
+        }
+    )
+    assert unified["mamba_layer"].page_size_bytes == 32768
+    assert unified["mamba_layer"].page_size_padded == 32768
+
+    # 3. Mamba page that does not evenly divide the maximum page size is
+    # padded as well (the divisibility constraint only applies to block_size
+    # scaling).
+    odd_mamba_spec = new_mamba_spec(shapes=((6144,),))
+    assert odd_mamba_spec.page_size_bytes == 24576
+    assert 32768 % odd_mamba_spec.page_size_bytes != 0
+    unified = kv_cache_utils.unify_kv_cache_spec_page_size(
+        {
+            "mamba_layer": odd_mamba_spec,
+            "draft_attn_layer": draft_attn_spec,
+        }
+    )
+    assert unified["mamba_layer"].page_size_bytes == 32768
+
+    # 4. Attention layers with non-divisible page sizes still raise.
+    with pytest.raises(NotImplementedError):
+        kv_cache_utils.unify_kv_cache_spec_page_size(
+            {
+                "attn_layer": new_kv_cache_spec(block_size=24),  # 24576
+                "draft_attn_layer": draft_attn_spec,  # 32768
+            }
+        )
+
+    # 5. Uniform page sizes are returned unchanged.
+    specs = {
+        "mamba_layer": new_mamba_spec(),
+        "attn_layer": new_kv_cache_spec(),
+    }
+    assert kv_cache_utils.unify_kv_cache_spec_page_size(specs) == specs
+
+
 def test_hma_not_disabled_when_kv_events_enabled():
     """
     Test enabling KV events must not force disable_hybrid_kv_cache_manager to True.
@@ -2414,3 +2794,63 @@ def test_hma_not_disabled_when_kv_events_enabled():
     assert vllm_config.scheduler_config.disable_hybrid_kv_cache_manager is False, (
         "kv_events_config must not force-disable the hybrid KV cache manager."
     )
+
+
+def test_resolve_block_hashes_gate():
+    # Resolve symbols through the module so they stay consistent with each other
+    # even after other tests reload ``kv_cache_utils``.
+    resolve_block_hashes = kv_cache_utils.resolve_block_hashes
+    BlockHashListWithBlockSize = kv_cache_utils.BlockHashListWithBlockSize
+    # Raw, hash_block_size-granularity hashes (contents are opaque here).
+    raw = [BlockHash(bytes([i])) for i in range(8)]
+
+    # block_size == hash_block_size: always reuse the raw hashes.
+    assert resolve_block_hashes(raw, 2, 2, alignment_tokens=2) is raw
+    assert (
+        resolve_block_hashes(
+            raw, 2, 2, supports_fine_grained_hash_lookup=True, alignment_tokens=2
+        )
+        is raw
+    )
+
+    # Fine-grained manager, partial hits ON (alignment_tokens == hash_block_size
+    # < block_size): keep raw hashes so the manager can scan at hash granularity.
+    assert (
+        resolve_block_hashes(
+            raw, 2, 4, supports_fine_grained_hash_lookup=True, alignment_tokens=2
+        )
+        is raw
+    )
+
+    # Fine-grained manager, partial hits OFF (alignment_tokens ==
+    # scheduler_block_size >= block_size): must fall back to a block-size view,
+    # exactly like the pre-refactor coordinator did.
+    off = resolve_block_hashes(
+        raw, 2, 4, supports_fine_grained_hash_lookup=True, alignment_tokens=4
+    )
+    assert isinstance(off, BlockHashListWithBlockSize)
+    assert off.scale_factor == 2
+
+    # Non-fine-grained manager (e.g. sliding window): always a block-size view
+    # when block_size != hash_block_size, regardless of alignment_tokens.
+    swa = resolve_block_hashes(
+        raw, 2, 4, supports_fine_grained_hash_lookup=False, alignment_tokens=2
+    )
+    assert isinstance(swa, BlockHashListWithBlockSize)
+    assert swa.scale_factor == 2
+
+
+def test_resolve_block_hashes_rejects_mismatched_view():
+    resolve_block_hashes = kv_cache_utils.resolve_block_hashes
+    BlockHashListWithBlockSize = kv_cache_utils.BlockHashListWithBlockSize
+    raw = [BlockHash(bytes([i])) for i in range(8)]
+
+    # A view built at this block_size is returned as-is (idempotent).
+    view = BlockHashListWithBlockSize(raw, 2, 4)
+    assert resolve_block_hashes(view, 2, 4) is view
+
+    # A view built at a different block_size must fail loudly rather than be
+    # silently reinterpreted at the wrong granularity.
+    mismatched = BlockHashListWithBlockSize(raw, 2, 8)
+    with pytest.raises(AssertionError):
+        resolve_block_hashes(mismatched, 2, 4)

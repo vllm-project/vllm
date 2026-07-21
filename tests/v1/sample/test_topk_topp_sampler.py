@@ -4,11 +4,14 @@ import pytest
 import torch
 from torch import Generator
 
+from tests.utils import large_gpu_mark
+from vllm.model_executor.layers.vocab_parallel_embedding import pad_vocab_size
 from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON
 from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.sample.ops.topk_topp_sampler import (
     apply_top_k_top_p_pytorch,
+    flashinfer_sample,
     random_sample,
 )
 from vllm.v1.sample.sampler import Sampler
@@ -403,6 +406,45 @@ class TestTritonTopkTopp:
         p = torch.rand(batch_size, generator=self.generator) * 0.5 + 0.5
 
         self._compare_results(logits, k, p)
+
+    @large_gpu_mark(min_gb=24)
+    def test_large_batch_int64_row_offset(self):
+        """Regression: per-row offset (row * vocab_size) must not overflow int32.
+
+        Speculative decoding expands the logits batch (e.g. DFlash drafts K
+        tokens per request), so batch_size * vocab_size can exceed 2**31. With
+        int32 offset arithmetic the per-row pointer wraps to a negative address
+        and the kernel hits a CUDA illegal memory access. Use a batch where
+        batch_size * vocab_size > 2**31 and give the highest-offset row the same
+        logits as row 0: an overflow there would read a different row and change
+        the kept set.
+        """
+        from vllm.v1.sample.ops.topk_topp_triton import apply_top_k_top_p_triton
+
+        if not current_platform.is_cuda():
+            pytest.skip("int32 row-offset overflow is a CUDA kernel issue")
+        vocab_size = 131072
+        batch_size = 2**31 // vocab_size + 64  # batch_size * vocab_size > 2**31
+        # logits is modified in place; the only extra device memory is the
+        # per-SM scratch buffer (~num_sm * vocab), so allow ~1 GB of headroom.
+        required_bytes = batch_size * vocab_size * 4 + (1 << 30)
+        if torch.accelerator.get_memory_info()[0] < required_bytes:
+            pytest.skip(f"needs ~{required_bytes / 1e9:.0f} GB of free GPU memory")
+
+        logits = torch.randn(
+            batch_size, vocab_size, generator=self.generator, dtype=torch.float32
+        )
+        logits[batch_size - 1] = logits[0]
+        k = torch.full((batch_size,), 5, dtype=torch.int32)
+        result = apply_top_k_top_p_triton(logits, k, None)
+        torch.accelerator.synchronize()  # surface any async illegal memory access
+        kept_first = (result[0] > float("-inf")).nonzero(as_tuple=True)[0]
+        kept_last = (result[batch_size - 1] > float("-inf")).nonzero(as_tuple=True)[0]
+        assert kept_first.numel() == 5, f"row 0 kept {kept_first.numel()}, expected 5"
+        assert torch.equal(kept_first, kept_last), (
+            "highest-offset row produced a different top-k mask than the "
+            "identical row 0 (int32 row-offset overflow)"
+        )
 
     @pytest.mark.parametrize(
         "mode",
@@ -1003,3 +1045,39 @@ class TestFlashInferDistributionMatch:
             f"{label}: distribution differs from theoretical: "
             f"chi2={chi2:.2f} p_value={p_value:.2e} alpha={self.ALPHA}"
         )
+
+
+@pytest.mark.skipif(
+    not FLASHINFER_TOPK_TOPP_SUPPORTED,
+    reason="FlashInfer top-k/top-p sampler is not available on this platform.",
+)
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
+@pytest.mark.parametrize("k, p", [(20, 0.95), (20, None), (None, 0.95)])
+def test_flashinfer_sample_padded_vocab(
+    dtype: torch.dtype, k: int | None, p: float | None
+):
+    """flashinfer_sample must accept the logits the sampler actually hands it.
+
+    compute_logits slices the padding off the vocab, so for a vocab that isn't a
+    multiple of 64 (e.g. opt's 50272) the logits are a strided view in the model
+    dtype, while FlashInfer requires contiguous fp32.
+    """
+    torch.set_default_device(DEVICE_TYPE)
+    batch_size = 8
+    org_vocab_size = 50272
+    padded_vocab_size = pad_vocab_size(org_vocab_size)
+    assert padded_vocab_size != org_vocab_size
+
+    logits = torch.randn(batch_size, padded_vocab_size, dtype=dtype)[
+        ..., :org_vocab_size
+    ]
+    # A single row stays contiguous despite the padded stride, hence batch_size > 1.
+    assert not logits.is_contiguous()
+
+    token_ids = flashinfer_sample(
+        logits,
+        torch.full((batch_size,), k, dtype=torch.int32) if k is not None else None,
+        torch.full((batch_size,), p, dtype=torch.float32) if p is not None else None,
+    )
+    assert token_ids.shape == (batch_size,)
+    assert torch.all((token_ids >= 0) & (token_ids < org_vocab_size))

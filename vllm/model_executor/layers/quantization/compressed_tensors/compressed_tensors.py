@@ -13,6 +13,7 @@ from compressed_tensors.quantization import (
 )
 from compressed_tensors.transform import TransformConfig
 
+from vllm.config import get_current_vllm_config_or_none
 from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
@@ -37,7 +38,6 @@ from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tenso
     CompressedTensorsMoEMethod,
 )
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
-    WNA16_SUPPORTED_BITS,
     CompressedTensorsScheme,
     CompressedTensorsW4A4Fp4,
     CompressedTensorsW4A4Mxfp4,
@@ -47,6 +47,8 @@ from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsW8A8Int8,
     CompressedTensorsW8A8Mxfp8,
     CompressedTensorsW8A16Fp8,
+    CompressedTensorsWNA4Int,
+    CompressedTensorsWNA8Int,
     CompressedTensorsWNA8O8Int,
     CompressedTensorsWNA16,
 )
@@ -680,14 +682,42 @@ class CompressedTensorsConfig(QuantizationConfig):
             and output_quant.num_bits == 8
             and not output_quant.dynamic
         )
-        # Static int8-activation layers, plus sub-byte weight-only layers (e.g.
-        # 2-bit lm_head) that marlin-backed WNA16 cannot serve. Standard 4/8-bit
-        # weight-only (no activations) falls through to WNA16.
-        is_subbyte_weight_only = weight_quant.num_bits not in WNA16_SUPPORTED_BITS
-        needs_wNa8o8 = is_intN_weight and (
-            (is_static_int8_in and is_static_int8_out) or is_subbyte_weight_only
+        return is_intN_weight and (is_static_int8_in and is_static_int8_out)
+
+    @staticmethod
+    def _is_wNaM_int(
+        weight_quant: QuantizationArgs,
+        input_quant: QuantizationArgs | None,
+        format: str | None,
+    ) -> bool:
+        """Weight N-bit INT with symmetric dynamic INT activation quant
+        via Humming kernel."""
+        if input_quant is None:
+            return False
+        is_pack_format = format == CompressionFormat.pack_quantized.value
+        is_channel_group = weight_quant.strategy in (
+            QuantizationStrategy.CHANNEL.value,
+            QuantizationStrategy.GROUP.value,
         )
-        return needs_wNa8o8
+        is_int_N_weight = (
+            weight_quant.type == QuantizationType.INT and not weight_quant.dynamic
+        )
+        is_int_input = input_quant.type == QuantizationType.INT
+        is_symmetric_input = input_quant.symmetric
+        is_dynamic_input = input_quant.dynamic
+        is_per_token_or_group_input = input_quant.strategy in (
+            QuantizationStrategy.TOKEN.value,
+            QuantizationStrategy.GROUP.value,
+        )
+        return (
+            is_int_N_weight
+            and is_channel_group
+            and is_pack_format
+            and is_int_input
+            and is_symmetric_input
+            and is_dynamic_input
+            and is_per_token_or_group_input
+        )
 
     def _get_scheme_from_parts(
         self,
@@ -741,9 +771,32 @@ class CompressedTensorsConfig(QuantizationConfig):
             )
 
         if (
-            self._is_wNa16_group_channel(weight_quant, input_quant)
-            and (format == CompressionFormat.pack_quantized.value)
-            and (weight_quant.num_bits in WNA16_SUPPORTED_BITS)
+            self._is_wNaM_int(weight_quant, input_quant, format)
+            and input_quant.num_bits == 8
+        ):
+            return CompressedTensorsWNA8Int(
+                num_bits=weight_quant.num_bits,
+                strategy=weight_quant.strategy,
+                group_size=weight_quant.group_size,
+                input_quant=input_quant,
+                layer_name=layer_name,
+                quant_format=format,
+            )
+        if (
+            self._is_wNaM_int(weight_quant, input_quant, format)
+            and input_quant.num_bits == 4
+        ):
+            return CompressedTensorsWNA4Int(
+                num_bits=weight_quant.num_bits,
+                strategy=weight_quant.strategy,
+                group_size=weight_quant.group_size,
+                input_quant=input_quant,
+                layer_name=layer_name,
+                quant_format=format,
+            )
+
+        if self._is_wNa16_group_channel(weight_quant, input_quant) and (
+            format == CompressionFormat.pack_quantized.value
         ):
             return CompressedTensorsWNA16(
                 num_bits=weight_quant.num_bits,
@@ -757,9 +810,18 @@ class CompressedTensorsConfig(QuantizationConfig):
         act_quant_format = is_activation_quantization_format(format)
         if act_quant_format:
             if self._is_fp8_w8a8(weight_quant, input_quant):
-                is_fp8_w8a8_supported = self._check_scheme_supported(
-                    CompressedTensorsW8A8Fp8.get_min_capability(), error=False
-                )
+                if current_platform.is_xpu():
+                    # On XPU, --linear-backend xpu opts into W8A8 FP8
+                    # linear kernel; otherwise default to W8A16.
+                    config = get_current_vllm_config_or_none()
+                    is_fp8_w8a8_supported = (
+                        config is not None
+                        and config.kernel_config.linear_backend == "xpu"
+                    )
+                else:
+                    is_fp8_w8a8_supported = self._check_scheme_supported(
+                        CompressedTensorsW8A8Fp8.get_min_capability(), error=False
+                    )
                 if is_fp8_w8a8_supported:
                     return CompressedTensorsW8A8Fp8(
                         weight_quant=weight_quant,
@@ -1137,6 +1199,10 @@ class CompressedTensorsKVCacheMethod(BaseKVCacheMethod):
         layer._k_scale_float = _to_scalar(layer.k_scale)
         layer._v_scale_float = _to_scalar(layer.v_scale)
         layer._q_scale_float = _to_scalar(layer.q_scale)
+
+        # Sync host (cpu) scale copies read by AITER fused kernels.
+        layer._k_scale_cpu.fill_(layer._k_scale_float)
+        layer._v_scale_cpu.fill_(layer._v_scale_float)
 
         # Discard all placeholders.
         del layer.k_scale
