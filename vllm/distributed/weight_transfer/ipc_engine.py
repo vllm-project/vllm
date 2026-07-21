@@ -310,32 +310,44 @@ class IPCTrainerWeightTransferEngine(TrainerWeightTransferEngine[IPCTrainerInitI
         source = self.source
         if self.is_sender:
             self.client.start_weight_update()
-        self._send(source)
+        # Unpacked returns strong refs to its IPC-shared copies; they must stay
+        # alive across `finish_weight_update` too.
+        weight_refs = self._send(source)
         if self.is_sender:
             self.client.finish_weight_update()
         self._post_send_sync()
+        del weight_refs
 
     # ---- data plane (runs on all ranks; only the sender ships) ----
 
-    def _send(self, source: WeightSource) -> None:
+    def _send(self, source: WeightSource) -> list[torch.Tensor] | None:
         if self.packed:
             self._send_packed(source)
-        else:
-            self._send_unpacked(source)
+            return None
+        return self._send_unpacked(source)
 
-    @staticmethod
     def _all_gather_and_merge_handles(
+        self,
         handles: list[dict[str, tuple]],
     ) -> list[dict[str, tuple]]:
         """All-gather and merge IPC handle dicts across ranks in one call.
 
         Each rank contributes a list of {gpu_uuid: ipc_args} dicts (one
         per parameter or one per chunk). A single all_gather_object
-        collects every rank's full list, then rank 0 merges per-index so
+        collects every rank's full list, then the sender merges per-index so
         each dict maps every GPU UUID to its args.
 
-        Non-rank-0 returns a list of empty dicts.
-        No-op (returns handles unchanged) when no distributed group exists.
+        The merge lands on the sender (``self.is_sender``), not on
+        ``get_rank() == 0``: `rank` is the caller-supplied trainer rank and need
+        not equal the default-process-group global rank, and only the sender
+        ships (`_do_send`). Merging on global rank 0 instead would hand the
+        merged dict to a non-sender and leave the sender with empty handles.
+        Non-senders return a list of empty dicts (never shipped).
+
+        The all-gather runs over the *default* process group; this assumes the
+        default group is exactly the set of colocated trainer ranks and that the
+        sender is a member. No-op (returns handles unchanged) when no distributed
+        group exists.
         """
         if (
             not torch.distributed.is_initialized()
@@ -349,7 +361,7 @@ class IPCTrainerWeightTransferEngine(TrainerWeightTransferEngine[IPCTrainerInitI
         torch.distributed.barrier()
         torch.cuda.synchronize()
 
-        if torch.distributed.get_rank() == 0:
+        if self.is_sender:
             merged: list[dict[str, tuple]] = []
             for param_idx in range(len(handles)):
                 m: dict[str, tuple] = {}
@@ -370,18 +382,19 @@ class IPCTrainerWeightTransferEngine(TrainerWeightTransferEngine[IPCTrainerInitI
             torch.distributed.barrier()
         torch.cuda.ipc_collect()
 
-    def _send_unpacked(self, source: WeightSource) -> None:
+    def _send_unpacked(self, source: WeightSource) -> list[torch.Tensor]:
         """Iterate the source, build one IPC handle per param, all-gather the
-        handles across ranks, and (sender) ship them in one update call."""
+        handles across ranks, and (sender) ship them in one update call.
+
+        Returns the strong refs to every contiguous copy. reduce_tensor's args
+        do NOT keep storage alive, and non-contiguous inputs allocate fresh
+        storage in .contiguous(); the caller must keep these alive until the
+        post-send barrier (past `finish`) so the consumer's IPC views stay valid.
+        """
         names: list[str] = []
         dtype_names: list[str] = []
         shapes: list[list[int]] = []
         ipc_handles: list[dict[str, tuple]] = []
-        # Hold strong refs to every contiguous copy until the send + post-send
-        # sync completes. reduce_tensor's returned args do NOT keep storage
-        # alive, and non-contiguous inputs allocate fresh storage in
-        # .contiguous() that would otherwise be GC'd before the consumer opens
-        # the IPC handle.
         weight_refs: list[torch.Tensor] = []
 
         for name, tensor in source:
@@ -402,6 +415,7 @@ class IPCTrainerWeightTransferEngine(TrainerWeightTransferEngine[IPCTrainerInitI
             shapes=shapes,
             ipc_handles=ipc_handles,
         )
+        return weight_refs
 
     def _send_packed(self, source: WeightSource) -> None:
         """Send weights in bounded-memory chunks (packed mode)."""
