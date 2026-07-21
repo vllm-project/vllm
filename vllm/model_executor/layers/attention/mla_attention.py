@@ -754,7 +754,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
 
         if self.impl.is_sparse and num_mha_tokens > 0:
             prefill_metadata = getattr(attn_metadata, "prefill", None)
-            if not getattr(prefill_metadata, "use_mha", False):
+            if not getattr(prefill_metadata, "use_dense_mha", False):
                 num_mqa_tokens = q.size(0)
                 num_mha_tokens = 0
 
@@ -1354,8 +1354,10 @@ class MLACommonPrefillMetadata:
     q_data_type: torch.dtype | None = None
     output_dtype: torch.dtype | None = None
     prefill_backend: MLAPrefillBackend | None = None
-    # Whether sparse MLA routes this batch's prefill suffix through dense MHA.
-    use_mha: bool = False
+    # Whether the prefill suffix is routed through dense MHA.
+    # Indexer scoring may be skipped only for a pure-prefill batch,
+    # since decode tokens still consume top-k indices.
+    use_dense_mha: bool = False
 
 
 @dataclass

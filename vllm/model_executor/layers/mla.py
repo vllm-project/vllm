@@ -118,21 +118,22 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
         )
         indexer_op = getattr(self.indexer, "indexer_op", None)
         if indexer_op is not None and hasattr(
-            indexer_op, "short_prefill_mla_layer_name"
+            indexer_op, "dense_mha_metadata_layer_name"
         ):
             enable_short_prefill_scoring_skip = (
                 allow_short_prefill_indexer_scoring_skip
                 and not self.skip_topk
                 and not getattr(indexer_op, "use_pcp", False)
                 and current_platform.is_cuda()
-                and int(getattr(self.indexer, "topk_tokens", 0)) > 0
-                and self.mla_attn.impl.is_sparse
-                and self.mla_attn.prefill_backend is not None
-                and not self.mla_attn._vllm_config.attention_config.sparse_mla_force_mqa
             )
-            # The indexer and main MLA use different decode thresholds. Bind
-            # the main layer so the eager indexer op can inspect its final route.
-            indexer_op.short_prefill_mla_layer_name = (
+            # The indexer and main MLA use independent decode thresholds and
+            # may classify the same short extend differently. Bind the main
+            # MLA layer name so the eager indexer op can check whether the
+            # batch's top-k indices will be consumed.
+            # PCP is excluded because indexer cache/scoring ownership differs
+            # across ranks and the no-consumer invariant has not been
+            # established there.
+            indexer_op.dense_mha_metadata_layer_name = (
                 self.mla_attn.layer_name if enable_short_prefill_scoring_skip else ""
             )
         self.prefix = prefix

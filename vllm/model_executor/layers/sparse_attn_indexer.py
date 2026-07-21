@@ -310,7 +310,7 @@ def sparse_attn_indexer(
     topk_indices_buffer: torch.Tensor,
     skip_k_cache_insert: bool,
     use_pcp: bool,
-    short_prefill_mla_layer_name: LayerNameType,
+    dense_mha_metadata_layer_name: LayerNameType,
     use_fp4_cache: bool = False,
     dcp_rank: int = 0,
     dcp_world_size: int = 1,
@@ -359,7 +359,7 @@ def sparse_attn_indexer(
             topk_indices_buffer,
             skip_k_cache_insert,
             use_pcp,
-            short_prefill_mla_layer_name,
+            dense_mha_metadata_layer_name,
             use_fp4_cache,
         )
     attn_metadata_narrowed = attn_metadata[k_cache_prefix]
@@ -386,7 +386,7 @@ def sparse_attn_indexer(
     if k is not None:
         k = k[:num_tokens]
 
-    if not skip_k_cache_insert and num_tokens > 0:
+    if not skip_k_cache_insert:
         assert k is not None
         k, slot_mapping_for_cache = maybe_gather_indexer_k(
             k,
@@ -409,15 +409,18 @@ def sparse_attn_indexer(
     # because they use independent decode thresholds. Only the main MLA route
     # can determine whether the top-k indices will be consumed.
     if forward_context.cudagraph_runtime_mode != CUDAGraphMode.FULL:
-        short_prefill_mla_layer_name = _resolve_layer_name(short_prefill_mla_layer_name)
-        if short_prefill_mla_layer_name:
-            mla_metadata = attn_metadata.get(short_prefill_mla_layer_name)
+        dense_mha_layer = _resolve_layer_name(dense_mha_metadata_layer_name)
+        if dense_mha_layer:
+            mla_metadata = attn_metadata.get(dense_mha_layer)
             prefill_metadata = getattr(mla_metadata, "prefill", None)
             if (
-                getattr(prefill_metadata, "use_mha", False)
+                getattr(prefill_metadata, "use_dense_mha", False)
                 and getattr(mla_metadata, "num_decode_tokens", -1) == 0
                 and not torch.cuda.is_current_stream_capturing()
             ):
+                # Deliberately leave the buffer untouched. Dense MHA does not
+                # consume top-k indices for this batch; clearing it would be
+                # unnecessary work.
                 return topk_indices_buffer
 
     # The buffer must be pre-filled with -1 (the "no token" sentinel) before the
@@ -702,7 +705,7 @@ def sparse_attn_indexer_fake(
     topk_indices_buffer: torch.Tensor | None,
     skip_k_cache_insert: bool,
     use_pcp: bool,
-    short_prefill_mla_layer_name: LayerNameType,
+    dense_mha_metadata_layer_name: LayerNameType,
     use_fp4_cache: bool = False,
     dcp_rank: int = 0,
     dcp_world_size: int = 1,
@@ -758,7 +761,7 @@ class SparseAttnIndexer(CustomOp):
         self.topk_indices_buffer = topk_indices_buffer
         self.skip_k_cache_insert = skip_k_cache_insert
         self.use_fp4_cache = use_fp4_cache
-        self.short_prefill_mla_layer_name = ""
+        self.dense_mha_metadata_layer_name = ""
         # DCP scalars are constant for the run; resolve them here (config is set
         # during model construction) and pass them into the custom op, rather
         # than threading them through per-step metadata.
@@ -820,7 +823,7 @@ class SparseAttnIndexer(CustomOp):
             self.topk_indices_buffer,
             self.skip_k_cache_insert,
             self.use_pcp,
-            _encode_layer_name(self.short_prefill_mla_layer_name),
+            _encode_layer_name(self.dense_mha_metadata_layer_name),
             self.use_fp4_cache,
             self.dcp_rank,
             self.dcp_world_size,

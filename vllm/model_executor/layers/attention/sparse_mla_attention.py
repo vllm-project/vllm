@@ -208,7 +208,7 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
                 q_data_type=self.model_config.dtype,
                 output_dtype=self.model_config.dtype,
                 prefill_backend=self._prefill_backend,
-                use_mha=(
+                use_dense_mha=(
                     num_prefill_tokens > 0
                     and prefill_max_seq_len <= self.topk_tokens
                     and not self.vllm_config.attention_config.sparse_mla_force_mqa
