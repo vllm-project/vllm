@@ -27,7 +27,7 @@ Currently, there are no pre-built XPU wheels.
 
 - First, install required [driver](https://dgpu-docs.intel.com/driver/installation.html#installing-gpu-drivers).
 - Second, install Python packages for vLLM XPU backend building (Intel OneAPI dependencies are installed automatically as part of `torch-xpu`, see [PyTorch XPU get started](https://docs.pytorch.org/docs/stable/notes/get_start_xpu.html)):
-- Start from vllm-xpu-kernels v0.1.10, we recommend user upgrade driver to [compute runtime 26.18](https://github.com/intel/compute-runtime/releases/tag/26.14.37833.4) release, to avoid potential compatibility issue.
+- Start from vllm-xpu-kernels v0.1.10, we recommend user upgrade driver to [compute runtime 26.18](https://github.com/intel/compute-runtime/releases/tag/26.18.38308.1) release, to avoid potential compatibility issue.
 
 ```bash
 git clone https://github.com/vllm-project/vllm.git
