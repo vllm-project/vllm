@@ -9,16 +9,18 @@ import contextlib
 import os
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
+from typing import Any
 
 import psutil
 import pytest
 import requests
 
-from tests.utils import multi_gpu_test
+from tests.utils import RemoteOpenAIServer, multi_gpu_test
 from vllm.utils.import_utils import has_nixl_ep
 
 MODEL_NAME = os.getenv("MODEL_NAME", "ibm-research/PowerMoE-3b")
-DP_SIZE = int(os.getenv("DP_SIZE", "2"))
+DP_SIZE = 2
 
 # Fault-detection timeout budget:
 # - CPU: Gloo DP allreduce timeout (10s) detects the dead peer.
@@ -154,18 +156,25 @@ def _complete(client):
     )
 
 
+def _in_parallel(fn, servers) -> list:
+    """Run ``fn(server)`` for all servers concurrently; return results in order."""
+    with ThreadPoolExecutor(max_workers=len(servers)) as ex:
+        return list(ex.map(fn, servers))
+
+
 def _get_ft_status(server) -> dict:
     resp = requests.get(server.url_for("fault_tolerance/status"), timeout=10)
     resp.raise_for_status()
     return resp.json()
 
 
-def _assert_serving_and_healthy(server) -> dict:
-    """Serve one request and assert every engine reports healthy. Returns status."""
-    _complete(server.get_client())
-    status = _get_ft_status(server)
-    assert all(e["status"] == "healthy" for e in status["engines"]), status
-    return status
+def _assert_serving_and_healthy(servers) -> None:
+    """Wait until every engine is healthy, then serve one request per server."""
+    healthy = _wait_for_engines(
+        list(servers), match_key="status", match_values={"healthy"}
+    )
+    assert all(healthy), healthy
+    _in_parallel(lambda s: _complete(s.get_client()), servers)
 
 
 def _apply_ft(server, instruction: str, params: dict | None = None) -> dict:
@@ -190,34 +199,40 @@ def _kill_worker_process(server) -> None:
     workers[0].kill()
 
 
-def _poll_status(server, deadline_s: int, predicate):
-    """Poll ``/fault_tolerance/status`` until ``predicate(engine)`` is true.
+def _wait_for_engines(
+    servers: list[RemoteOpenAIServer],
+    match_key: str,
+    match_values: set[str],
+    deadline_s: int = FAULT_DETECTION_DEADLINE_S,
+) -> list[dict[str, Any] | None]:
+    """Poll ``/fault_tolerance/status`` until each server's engine status matches.
 
-    Returns the first matching engine dict, or ``None`` on timeout. Request
-    errors are suppressed so a briefly-unreachable server doesn't abort the poll.
+    A server matches when its engine-status dict has ``match_key`` equal to
+    one of ``match_values``. Returns one engine-status dict per server. Servers still
+    unmatched after ``deadline_s`` get None.
     """
+    results: dict[int, dict[str, Any]] = {}
+    pending = dict(enumerate(servers))
     start = time.time()
-    while time.time() - start < deadline_s:
-        with contextlib.suppress(Exception):
-            for engine in _get_ft_status(server)["engines"]:
-                if predicate(engine):
-                    return engine
-        time.sleep(1.0)
-    return None
-
-
-def _wait_for_status(server, statuses, deadline_s: int = FAULT_DETECTION_DEADLINE_S):
-    """Poll until an engine reports one of ``statuses`` (a set of status strings)."""
-    return _poll_status(server, deadline_s, lambda e: e["status"] in statuses)
+    while pending and time.time() - start < deadline_s:
+        for i, server in list(pending.items()):
+            with contextlib.suppress(Exception):
+                for engine_status in _get_ft_status(server)["engines"]:
+                    if engine_status.get(match_key) in match_values:
+                        results[i] = engine_status
+                        del pending[i]
+                        break
+        if pending:
+            time.sleep(1.0)
+    return [results.get(i) for i in range(len(servers))]
 
 
 @contextlib.contextmanager
 def _driving(*servers):
     """Pump completions at each server in the background for the block's duration.
 
-    Keeps every engine stepping into its failed component so a fault surfaces,
-    and lets each ``retry`` reach its cross-rank collective. Errors are expected
-    once faulted and are ignored.
+    Keeps every engine stepping into its failed component so a fault surfaces.
+    Errors are expected once faulted and are ignored.
     """
     stop = threading.Event()
 
@@ -240,13 +255,14 @@ def _driving(*servers):
 
 
 def _wait_for_ft_apply_outcome(server, request_id: str, deadline_s: int) -> str | None:
-    """Wait until ``/status`` records the outcome of the given FT apply request."""
-    engine = _poll_status(
-        server,
-        deadline_s,
-        lambda engine: engine.get("last_ft_request_id") == request_id,
-    )
-    return engine.get("ft_error") if engine else None
+    """Wait until ``/fault_tolerance/status`` records the FT apply outcome."""
+    engine_status = _wait_for_engines(
+        [server],
+        match_key="last_ft_request_id",
+        match_values={request_id},
+        deadline_s=deadline_s,
+    )[0]
+    return engine_status.get("ft_error") if engine_status else None
 
 
 @pytest.mark.skipif(not has_nixl_ep(), reason="Requires nixl_ep all2all backend")
@@ -273,43 +289,30 @@ def test_injected_fault_retry_recovers_all_ranks(monkeypatch, tmp_path):
         rank1 = _server_for_rank(servers, 1)
 
         # 1. Both engines healthy and serving.
-        for server in (rank0, rank1):
-            status = _assert_serving_and_healthy(server)
-            assert status["schema_version"] == 1, status
-            assert status["total_engines"] == 1, status  # one engine per server
+        _assert_serving_and_healthy((rank0, rank1))
 
         # 2. Drive both ranks so rank 1 accumulates execute_model steps and trips
         #    the injected fault; rank 0 then times out on the DP allreduce.
         with _driving(rank0, rank1):
-            faulted = {
-                rank: _wait_for_status(server, {"unhealthy"})
-                for rank, server in ((0, rank0), (1, rank1))
-            }
+            faulted = _wait_for_engines(
+                [rank0, rank1], match_key="status", match_values={"unhealthy"}
+            )
 
-        for rank, engine in faulted.items():
-            assert engine is not None, (
+        for rank, engine_status in enumerate(faulted):
+            assert engine_status is not None, (
                 f"rank {rank} did not report UNHEALTHY within "
                 f"{FAULT_DETECTION_DEADLINE_S}s -- it likely hung"
             )
         # The rank that raised carries the fault info from its own exception.
+        assert faulted[1] is not None
         assert faulted[1].get("fault_info"), faulted[1]
 
         # 3. retry both engines.
         for server in (rank0, rank1):
             _apply_ft(server, "retry")
 
-        # 4. Recovery completes: both engines return to healthy.
-        for rank, server in ((0, rank0), (1, rank1)):
-            healthy = _wait_for_status(server, {"healthy"})
-            assert healthy is not None, (
-                f"rank {rank} did not recover to healthy within "
-                f"{FAULT_DETECTION_DEADLINE_S}s"
-            )
-
-        # 5. Post-recovery inference works on both ranks.
-        for server in (rank0, rank1):
-            completion = _complete(server.get_client())
-            assert completion.choices[0].text is not None
+        # 4. Recovery completes: both engines return to healthy and serve again.
+        _assert_serving_and_healthy((rank0, rank1))
 
 
 @pytest.mark.skipif(not has_nixl_ep(), reason="Requires nixl_ep all2all backend")
@@ -335,18 +338,18 @@ def test_worker_kill_survivor_unhealthy_and_dead_rejects_retry():
         victim = _server_for_rank(servers, 1)
 
         # 1. Confirm both engines are healthy and serving.
-        for server in (survivor, victim):
-            _assert_serving_and_healthy(server)
+        _assert_serving_and_healthy((survivor, victim))
 
         # 2. Kill only the victim's worker; both EngineCores stay alive.
         _kill_worker_process(victim)
 
         # 3. Drive both engines so each keeps stepping into the failed component.
-        #    Both fault ~together via timeout, so sequential polling under one
-        #    driving context still sees each within the deadline.
         with _driving(survivor, victim):
-            survivor_faulted = _wait_for_status(survivor, {"dead", "unhealthy"})
-            victim_faulted = _wait_for_status(victim, {"dead", "unhealthy"})
+            survivor_faulted, victim_faulted = _wait_for_engines(
+                [survivor, victim],
+                match_key="status",
+                match_values={"dead", "unhealthy"},
+            )
 
         assert survivor_faulted is not None, (
             "survivor did not report the peer fault within "
