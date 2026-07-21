@@ -31,6 +31,7 @@ from vllm.model_executor.layers.fused_moe.utils import (
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
+from vllm.triton_utils.allocation import set_triton_allocator
 from vllm.utils.platform_utils import get_device_name_as_file_name
 from vllm.utils.torch_utils import direct_register_custom_op
 
@@ -346,6 +347,7 @@ def fused_moe_kernel(
     per_channel_quant: tl.constexpr,
     HAS_BIAS: tl.constexpr,
     SWAP_AB: tl.constexpr,
+    USE_TMA: tl.constexpr,
 ):
     """
     Implements the fused computation for a Mixture of Experts (MOE) using
@@ -439,20 +441,33 @@ def fused_moe_kernel(
         a_ptrs = a_ptr + (
             offs_k[:, None] * stride_ak + offs_token[None, :] // top_k * stride_am
         )
-        b_ptrs = (
-            b_ptr
-            + off_experts * stride_be
-            + (offs_bn[:, None] * stride_bn + offs_k[None, :] * stride_bk)
-        )
     else:
         a_ptrs = a_ptr + (
             offs_token[:, None] // top_k * stride_am + offs_k[None, :] * stride_ak
         )
-        b_ptrs = (
-            b_ptr
-            + off_experts * stride_be
-            + (offs_k[:, None] * stride_bk + offs_bn[None, :] * stride_bn)
+
+    if USE_TMA:
+        # B is (E, N, K), K contiguous. Describe one expert as (N, K); expert
+        # selected by base offset. Loads (BN, BK) tiles (matches SWAP_AB layout).
+        b_desc = tl.make_tensor_descriptor(
+            base=b_ptr + off_experts * stride_be,
+            shape=(N, K),
+            strides=(stride_bn, stride_bk),
+            block_shape=(BLOCK_SIZE_N, BLOCK_SIZE_K),
         )
+    else:
+        if SWAP_AB:
+            b_ptrs = b_ptr + (
+                off_experts * stride_be
+                + offs_bn[:, None] * stride_bn
+                + offs_k[None, :] * stride_bk
+            )
+        else:
+            b_ptrs = b_ptr + (
+                off_experts * stride_be
+                + offs_k[:, None] * stride_bk
+                + offs_bn[None, :] * stride_bn
+            )
 
     if use_int8_w8a16:
         b_scale_ptrs = (
@@ -499,16 +514,23 @@ def fused_moe_kernel(
         # K dimension.
         if SWAP_AB:
             a_mask = (offs_k[:, None] < K - k * BLOCK_SIZE_K) & token_mask[None, :]
-            b_mask = offs_k[None, :] < K - k * BLOCK_SIZE_K
         else:
             a_mask = token_mask[:, None] & (offs_k[None, :] < K - k * BLOCK_SIZE_K)
-            b_mask = offs_k[:, None] < K - k * BLOCK_SIZE_K
         a = tl.load(
             a_ptrs,
             mask=a_mask,
             other=0.0,
         )
-        b = tl.load(b_ptrs, mask=b_mask, other=0.0)
+        if USE_TMA:
+            # TMA returns (BN, BK). SWAP uses it as-is; otherwise transpose.
+            b_block = b_desc.load([pid_n * BLOCK_SIZE_N, k * BLOCK_SIZE_K])
+            b = b_block if SWAP_AB else tl.trans(b_block)
+        else:
+            if SWAP_AB:
+                b_mask = offs_k[None, :] < K - k * BLOCK_SIZE_K
+            else:
+                b_mask = offs_k[:, None] < K - k * BLOCK_SIZE_K
+            b = tl.load(b_ptrs, mask=b_mask, other=0.0)
         # We accumulate along the K dimension.
         if use_int8_w8a16:
             accumulator = tl.dot(a, b.to(compute_type), acc=accumulator)
@@ -537,7 +559,8 @@ def fused_moe_kernel(
             accumulator += tl.dot(a, b)
         # Advance the ptrs to the next K block.
         a_ptrs += BLOCK_SIZE_K * stride_ak
-        b_ptrs += BLOCK_SIZE_K * stride_bk
+        if not USE_TMA:
+            b_ptrs += BLOCK_SIZE_K * stride_bk
 
     if SWAP_AB:
         accumulator = tl.trans(accumulator, (1, 0))
@@ -764,6 +787,11 @@ def invoke_fused_moe_triton_kernel(
     else:
         SWAP_AB = False
 
+    # Hopper+ (SM90): load B via TMA descriptor.
+    USE_TMA = current_platform.has_device_capability(90)
+    if USE_TMA:
+        set_triton_allocator(current_platform.current_device())
+
     if use_fp8_w8a8 or use_int8_w8a8:
         assert B_scale is not None
         assert block_shape is None or triton.cdiv(
@@ -846,6 +874,7 @@ def invoke_fused_moe_triton_kernel(
         HAS_BIAS=HAS_BIAS,
         BLOCK_SIZE_K=BLOCK_SIZE_K,
         SWAP_AB=SWAP_AB,
+        USE_TMA=USE_TMA,
         **config,
     )
 
