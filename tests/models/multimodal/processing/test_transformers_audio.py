@@ -111,3 +111,28 @@ def test_audio_multimodal_processor(model_id):
     assert has_features, (
         f"No audio features (input_features/input_values) in {item_keys} for {model_id}"
     )
+
+
+def test_audio_multiple_inputs():
+    """Multiple audios per prompt are each detected as a separate placeholder
+    and multi-modal item by the Transformers backend."""
+    model_id = "ibm-granite/granite-speech-3.3-2b"
+    model_config = ModelConfig(model=model_id, model_impl="transformers")
+    mm_processor = MULTIMODAL_REGISTRY.create_processor(model_config)
+
+    audio_token = mm_processor.info.get_hf_processor().audio_token
+    # One token per audio; the processor expands each to its placeholder run.
+    prompt = (
+        "<|start_of_role|>user<|end_of_role|>"
+        f"{audio_token} and {audio_token} transcribe<|end_of_text|>\n"
+    )
+    audios = [np.zeros(16000, dtype=np.float32), np.zeros(24000, dtype=np.float32)]
+
+    result = mm_processor(
+        prompt=prompt,
+        mm_items=mm_processor.info.parse_mm_data({"audio": audios}),
+        hf_processor_mm_kwargs={},
+    )
+
+    assert len(result["mm_placeholders"]["audio"]) == 2
+    assert len(result["mm_kwargs"]["audio"]) == 2
