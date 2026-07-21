@@ -70,8 +70,18 @@ def test_inference_workflows_install_matching_ascend_torch_stack():
         text = workflow_path.read_text(encoding="utf-8")
 
         assert "Install Ascend torch stack for preflight" in text
-        assert '"$PYTHON_BIN" -c "import torch, torch_npu;' in text
-        assert '"$PYTHON_BIN" -m pip install "torch==2.9.0" "torch-npu==2.9.0"' in text
+        assert "bash .github/workflows/scripts/ensure_ascend_torch_stack.sh" in text
+
+    helper_text = (
+        REPO_ROOT / ".github/workflows/scripts/ensure_ascend_torch_stack.sh"
+    ).read_text(encoding="utf-8")
+    assert 'ASCEND_TORCH_VERSION="${ASCEND_TORCH_VERSION:-2.10.0}"' in helper_text
+    assert (
+        'ASCEND_TORCH_NPU_VERSION="${ASCEND_TORCH_NPU_VERSION:-2.10.0}"' in helper_text
+    )
+    assert '"torch==$ASCEND_TORCH_VERSION"' in helper_text
+    assert '"torch-npu==$ASCEND_TORCH_NPU_VERSION"' in helper_text
+    assert "import torch\nimport torch_npu" in helper_text
 
 
 def test_inference_workflows_disable_backend_autoload_during_install_checks():

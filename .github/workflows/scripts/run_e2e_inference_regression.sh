@@ -12,9 +12,11 @@ MAX_TOKENS=${MAX_TOKENS:-8}
 PROMPT=${PROMPT:-The capital of France is}
 CHAT_MESSAGE=${CHAT_MESSAGE:-Tell me one short fact about France.}
 BENCH_NUM_PROMPTS=${BENCH_NUM_PROMPTS:-5}
-SERVER_LOG=${SERVER_LOG:-/tmp/vllm-e2e-regression.log}
-RUNTIME_READY_LOG=${RUNTIME_READY_LOG:-/tmp/vllm-e2e-regression-runtime-ready.log}
+SERVER_LOG=${SERVER_LOG:-}
+RUNTIME_READY_LOG=${RUNTIME_READY_LOG:-}
 PYTHON_BIN=${PYTHON_BIN:-python}
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+HTTP_REQUEST_SCRIPT=${E2E_HTTP_REQUEST_SCRIPT:-$SCRIPT_DIR/e2e_http_request.py}
 VLLM_ASCEND_HUST_REPO=${VLLM_ASCEND_HUST_REPO:-${GITHUB_WORKSPACE:-$PWD}/vllm-ascend-hust}
 SUDO_AUTH_EXIT_CODE=${SUDO_AUTH_EXIT_CODE:-76}
 NPU_MEMORY_EXIT_CODE=${NPU_MEMORY_EXIT_CODE:-87}
@@ -25,7 +27,7 @@ DEFAULT_SYSTEM_ASCEND_ROOT_HELPER=${DEFAULT_SYSTEM_ASCEND_ROOT_HELPER:-/usr/loca
 REPO_ASCEND_ROOT_HELPER=${REPO_ASCEND_ROOT_HELPER:-$VLLM_ASCEND_HUST_REPO/.github/workflows/scripts/run_ascend_benchmark_root_helper.sh}
 REPO_ASCEND_ROOT_HELPER_INSTALL_SCRIPT=${REPO_ASCEND_ROOT_HELPER_INSTALL_SCRIPT:-$VLLM_ASCEND_HUST_REPO/scripts/install_ascend_benchmark_root_helper.sh}
 if [[ -n "${ASCEND_E2E_ROOT_HELPER:-}" ]]; then
-  ASCEND_E2E_ROOT_HELPER=${ASCEND_E2E_ROOT_HELPER}
+  : # Keep the explicitly configured helper.
 elif [[ -x "$DEFAULT_SYSTEM_ASCEND_ROOT_HELPER" ]]; then
   ASCEND_E2E_ROOT_HELPER=$DEFAULT_SYSTEM_ASCEND_ROOT_HELPER
 else
@@ -122,7 +124,7 @@ export_sudo_preserved_env_vars() {
 
   for var_name in "${SUDO_PRESERVE_ENV_VARS[@]}"; do
     if [[ -n "${!var_name+x}" ]]; then
-      export "$var_name"
+      export "${var_name?}"
     fi
   done
 }
@@ -426,57 +428,30 @@ print_server_log_tail() {
   fi
 }
 
-http_request() {
-  local method=$1
-  local url=$2
-  local payload=${3:-}
-
-  "$PYTHON_BIN" - "$method" "$url" "$payload" <<'PY'
-import os
-import sys
-import urllib.error
-import urllib.request
-
-method, url, payload = sys.argv[1:4]
-data = payload.encode("utf-8") if payload else None
-request = urllib.request.Request(url, data=data, method=method)
-if data is not None:
-    request.add_header("Content-Type", "application/json")
-
-opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-timeout = float(os.environ.get("E2E_HTTP_REQUEST_TIMEOUT_SECONDS", "10"))
-try:
-    with opener.open(request, timeout=timeout) as response:
-        sys.stdout.buffer.write(response.read())
-except (OSError, urllib.error.URLError) as exc:
-    print(f"HTTP request failed: {exc}", file=sys.stderr)
-    raise SystemExit(1) from None
-PY
-}
-
-http_request_with_server_log() {
+http_with_server_log() {
   local description=$1
   shift
   local max_attempts=${E2E_HTTP_REQUEST_ATTEMPTS:-5}
   local delay_seconds=${E2E_HTTP_REQUEST_DELAY_SECONDS:-2}
+  local timeout_seconds=${E2E_HTTP_REQUEST_TIMEOUT_SECONDS:-30}
   local attempt=1
   local rc=0
 
   while [[ "$attempt" -le "$max_attempts" ]]; do
-    if http_request "$@"; then
+    if "$PYTHON_BIN" "$HTTP_REQUEST_SCRIPT" --timeout "$timeout_seconds" "$@"; then
       return 0
     else
       rc=$?
     fi
 
     if [[ -n "$server_pid" ]] && ! kill -0 "$server_pid" 2>/dev/null; then
-      echo "$description failed because the vLLM server exited (HTTP client exit $rc)" >&2
+      echo "$description failed because the vLLM server exited (HTTP probe exit $rc)" >&2
       print_server_log_tail
       return "$rc"
     fi
 
     if [[ "$attempt" -eq "$max_attempts" ]]; then
-      echo "$description failed after ${max_attempts} attempts (HTTP client exit $rc)" >&2
+      echo "$description failed after ${max_attempts} attempts (HTTP probe exit $rc)" >&2
       print_server_log_tail
       return "$rc"
     fi
@@ -493,13 +468,16 @@ if [[ -z "$PORT" ]]; then
 fi
 
 runtime_root=${VLLM_HUST_CI_RUNTIME_ROOT:-${GITHUB_WORKSPACE:-$PWD}/.ci-runtime}
+log_dir="$runtime_root/logs"
+SERVER_LOG=${SERVER_LOG:-$log_dir/vllm-e2e-regression.log}
+RUNTIME_READY_LOG=${RUNTIME_READY_LOG:-$log_dir/vllm-e2e-regression-runtime-ready.log}
 export HOME="$runtime_root/home"
 export XDG_CACHE_HOME="$runtime_root/cache"
 export XDG_CONFIG_HOME="$runtime_root/config"
 export VLLM_CACHE_ROOT="$XDG_CACHE_HOME/vllm"
 export VLLM_CONFIG_ROOT="$XDG_CONFIG_HOME/vllm"
 export PIP_CACHE_DIR="$XDG_CACHE_HOME/pip"
-mkdir -p "$HOME" "$XDG_CACHE_HOME" "$XDG_CONFIG_HOME" "$VLLM_CACHE_ROOT" "$VLLM_CONFIG_ROOT" "$PIP_CACHE_DIR"
+mkdir -p "$HOME" "$XDG_CACHE_HOME" "$XDG_CONFIG_HOME" "$VLLM_CACHE_ROOT" "$VLLM_CONFIG_ROOT" "$PIP_CACHE_DIR" "$log_dir"
 
 marker_dir="$runtime_root/process-markers"
 marker_pid_file="$marker_dir/vllm-server.pid"
@@ -538,7 +516,9 @@ fi
 start_server
 
 for attempt in $(seq 1 120); do
-  if http_request GET "http://$HOST:$PORT/v1/models" >/dev/null 2>&1; then
+  if "$PYTHON_BIN" "$HTTP_REQUEST_SCRIPT" \
+    --timeout "${E2E_HTTP_REQUEST_TIMEOUT_SECONDS:-30}" \
+    "http://$HOST:$PORT/v1/models" >/dev/null 2>&1; then
     break
   fi
 
@@ -565,14 +545,16 @@ for attempt in $(seq 1 120); do
   sleep 2
 done
 
-http_request_with_server_log \
+http_with_server_log \
   "vLLM models endpoint readiness confirmation" \
-  GET "http://$HOST:$PORT/v1/models" >/dev/null
+  "http://$HOST:$PORT/v1/models" >/dev/null
 
 completion_response=$(mktemp)
-http_request_with_server_log "vLLM completions request" \
-  POST "http://$HOST:$PORT/v1/completions" \
-  "{\"model\": \"$MODEL_NAME\", \"prompt\": \"$PROMPT\", \"max_tokens\": $MAX_TOKENS, \"temperature\": 0}" \
+http_with_server_log "vLLM completions request" \
+  --method POST \
+  --header "Content-Type: application/json" \
+  --data "{\"model\": \"$MODEL_NAME\", \"prompt\": \"$PROMPT\", \"max_tokens\": $MAX_TOKENS, \"temperature\": 0}" \
+  "http://$HOST:$PORT/v1/completions" \
   > "$completion_response"
 
 "$PYTHON_BIN" - "$completion_response" "$MODEL_NAME" <<'PY'
@@ -595,9 +577,11 @@ PY
 rm -f "$completion_response"
 
 chat_response=$(mktemp)
-http_request_with_server_log "vLLM chat completions request" \
-  POST "http://$HOST:$PORT/v1/chat/completions" \
-  "{\"model\": \"$MODEL_NAME\", \"messages\": [{\"role\": \"user\", \"content\": \"$CHAT_MESSAGE\"}], \"max_tokens\": $MAX_TOKENS, \"temperature\": 0}" \
+http_with_server_log "vLLM chat completions request" \
+  --method POST \
+  --header "Content-Type: application/json" \
+  --data "{\"model\": \"$MODEL_NAME\", \"messages\": [{\"role\": \"user\", \"content\": \"$CHAT_MESSAGE\"}], \"max_tokens\": $MAX_TOKENS, \"temperature\": 0}" \
+  "http://$HOST:$PORT/v1/chat/completions" \
   > "$chat_response"
 
 "$PYTHON_BIN" - "$chat_response" "$MODEL_NAME" <<'PY'
