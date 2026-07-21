@@ -706,20 +706,21 @@ class Scheduler(SchedulerInterface):
                 num_external_computed_tokens = 0
                 load_kv_async = False
                 connector_prefix_cache_queries, connector_prefix_cache_hits = 0, 0
+                hybrid_hits_diverged = False
 
                 # Get already-cached tokens.
                 if request.num_computed_tokens == 0:
                     # Get locally-cached tokens.
+                    coordinator = self.kv_cache_manager.coordinator
                     if (
                         self.connector is not None
                         and self.has_mamba_layers
-                        and isinstance(
-                            self.kv_cache_manager.coordinator,
-                            HybridKVCacheCoordinator,
-                        )
+                        and isinstance(coordinator, HybridKVCacheCoordinator)
+                        and coordinator.full_attention_group_id is not None
                     ):
+                        fa_group_id = coordinator.full_attention_group_id
                         computed, per_group_hits = (
-                            self.kv_cache_manager.coordinator.find_longest_cache_hit_per_group(
+                            coordinator.find_longest_cache_hit_per_group(
                                 request.block_hashes, request.num_tokens - 1
                             )
                         )
@@ -728,14 +729,18 @@ class Scheduler(SchedulerInterface):
                         )
                         # NOTE(ZhanqiuHu): For Mamba hybrid models,
                         # num_new_local_computed_tokens should be the FA hit
-                        # length. This value is passed to the connector's
-                        # get_num_new_matched_tokens which computes:
-                        # external = total - local_computed.
+                        # length, passed to the connector's
+                        # get_num_new_matched_tokens (external = total - local).
                         # Using the FA hit skips re-transferring FA blocks
-                        # already cached on D-side. The Mamba state (always
-                        # the last block) is transferred unconditionally by
+                        # already cached on the D-side. The Mamba state (the last
+                        # block) is transferred unconditionally by
                         # _apply_prefix_caching in nixl/worker.py.
-                        num_new_local_computed_tokens = max(per_group_hits)
+                        num_new_local_computed_tokens = per_group_hits[fa_group_id]
+                        # A group hitting deeper than FA holds that prefix only
+                        # in a sparse-retention (Mamba) state block; the
+                        # divergence is reconciled once the external length is
+                        # known (see below).
+                        hybrid_hits_diverged = min(per_group_hits) < max(per_group_hits)
                         # The per-group lookup does not detect an uncached shared
                         # prefix, so there is no junction to pin in this path.
                         request.shared_prefix_boundary = 0
@@ -774,6 +779,56 @@ class Scheduler(SchedulerInterface):
                             continue
 
                         num_external_computed_tokens = ext_tokens
+
+                        # Reconcile the divergence now that ext_tokens is known.
+                        if hybrid_hits_diverged:
+                            num_computed = (
+                                num_new_local_computed_tokens
+                                + num_external_computed_tokens
+                            )
+                            if num_external_computed_tokens:
+                                # ext > 0: the connector supplies the prefix
+                                # (incl. the Mamba state) up to num_computed.
+                                # Trim each group's hit to that depth so a
+                                # surviving deeper state block can't drive
+                                # external allocation negative.
+                                groups = coordinator.kv_cache_config.kv_cache_groups
+                                for gid, group in enumerate(groups):
+                                    keep = (
+                                        num_computed // group.kv_cache_spec.block_size
+                                    )
+                                    del computed[gid][keep:]
+                                new_computed_blocks = (
+                                    self.kv_cache_manager.create_kv_cache_blocks(
+                                        computed
+                                    )
+                                )
+                            else:
+                                # ext == 0: nothing external backs the deeper
+                                # hits. Re-query the convergent hit (a boundary
+                                # all groups agree on, with a valid Mamba state
+                                # there); a plain trim would drop the sparse
+                                # Mamba state instead of re-finding it.
+                                (
+                                    computed,
+                                    num_new_local_computed_tokens,
+                                    num_uncached,
+                                ) = coordinator.find_longest_cache_hit(
+                                    request.block_hashes, request.num_tokens - 1
+                                )
+                                new_computed_blocks = (
+                                    self.kv_cache_manager.create_kv_cache_blocks(
+                                        computed
+                                    )
+                                )
+                                # Pin the junction where the lagging Mamba group
+                                # stops (Marconi-style APC), mirroring
+                                # get_computed_blocks().
+                                request.shared_prefix_boundary = (
+                                    num_new_local_computed_tokens + num_uncached
+                                    if num_uncached
+                                    else 0
+                                )
 
                         connector_prefix_cache_queries = (
                             request.num_tokens - num_new_local_computed_tokens

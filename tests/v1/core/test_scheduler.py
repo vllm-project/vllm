@@ -25,14 +25,17 @@ from vllm.multimodal.inputs import (
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.utils.hashing import sha256
 from vllm.v1.core.encoder_cache_manager import EncoderCacheManager
+from vllm.v1.core.kv_cache_coordinator import HybridKVCacheCoordinator
 from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
 from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
 from vllm.v1.core.sched.scheduler import Scheduler
+from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
 from vllm.v1.engine import FinishReason
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
+    MambaSpec,
 )
 from vllm.v1.outputs import DraftTokenIds, KVConnectorOutput, ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
@@ -5329,3 +5332,207 @@ def test_async_load_reservation_prevents_wedge_e2e():
     assert b.status == RequestStatus.WAITING
     assert b.num_preemptions == 0
     assert b.request_id not in req_to_blocks
+
+
+def _create_hybrid_mamba_connector_scheduler(
+    matched_tokens: int,
+    block_size: int = 16,
+    num_blocks: int = 100,
+) -> Scheduler:
+    """FA + Mamba ("all" cache mode) hybrid scheduler with a MockKVConnector
+    that reports ``matched_tokens`` external tokens (issue #46453)."""
+    model_config = ModelConfig(
+        model="facebook/opt-125m",
+        trust_remote_code=True,
+        dtype="float16",
+        seed=42,
+        skip_tokenizer_init=True,
+    )
+    vllm_config = VllmConfig(
+        scheduler_config=SchedulerConfig(
+            max_num_seqs=4,
+            max_num_batched_tokens=8192,
+            max_model_len=8192,
+            enable_chunked_prefill=True,
+            is_encoder_decoder=False,
+            watermark=0.0,
+        ),
+        model_config=model_config,
+        cache_config=CacheConfig(
+            block_size=block_size,
+            enable_prefix_caching=True,
+            mamba_cache_mode="all",
+        ),
+        kv_transfer_config=KVTransferConfig(
+            kv_connector="MockKVConnector",
+            kv_role="kv_both",
+            kv_connector_extra_config={
+                "matched_tokens": matched_tokens,
+                "is_async": False,
+            },
+        ),
+    )
+    vllm_config.cache_config.num_gpu_blocks = num_blocks
+    kv_cache_config = KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["fa"],
+                FullAttentionSpec(
+                    block_size=block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
+            ),
+            KVCacheGroupSpec(
+                ["mamba"],
+                MambaSpec(
+                    block_size=block_size,
+                    shapes=((1, 1),),
+                    dtypes=(torch.float32,),
+                    mamba_cache_mode="all",
+                ),
+            ),
+        ],
+    )
+    register_all_kvcache_specs(vllm_config)
+    scheduler = Scheduler(
+        vllm_config=vllm_config,
+        kv_cache_config=kv_cache_config,
+        structured_output_manager=StructuredOutputManager(vllm_config),
+        block_size=block_size,
+        hash_block_size=block_size,
+        log_stats=True,
+    )
+    assert isinstance(scheduler.kv_cache_manager.coordinator, HybridKVCacheCoordinator)
+    return scheduler
+
+
+def _seed_hybrid_prefix(
+    scheduler: Scheduler, num_prefix_blocks: int, block_size: int
+) -> tuple[list[int], list[int]]:
+    """Cache a full ``num_prefix_blocks`` prefix in both groups (mamba "all"
+    mode caches every block's state), then free it so all blocks are evictable.
+    Returns the FA and Mamba block ids in sequence order."""
+    manager = scheduler.kv_cache_manager
+    [fill] = create_requests(
+        num_requests=1,
+        num_tokens=num_prefix_blocks * block_size,
+        max_tokens=1,
+        same_prompt=True,
+        block_size=block_size,
+        req_ids=["fill"],
+    )
+    computed_blocks, num_computed, _ = manager.get_computed_blocks(fill)
+    blocks = manager.allocate_slots(
+        fill, fill.num_tokens, num_computed, computed_blocks
+    )
+    fa_ids = [b.block_id for b in blocks.blocks[0]]
+    mamba_ids = [b.block_id for b in blocks.blocks[1]]
+    manager.free(fill)
+    return fa_ids, mamba_ids
+
+
+@pytest.mark.parametrize(
+    "matched_tokens,expected_num_computed",
+    [
+        # ext == 0: nothing external backs the deeper Mamba hit, so the
+        # scheduler falls back to the convergent boundary every group agrees on
+        # (FA[0] + the resident state@0), NOT the over-reported FA/Mamba depth.
+        (0, 16),
+        # ext > 0: the connector supplies the prefix (incl. the Mamba state) up
+        # to num_computed = spine(32) + ext; each group's hit is trimmed there.
+        (16, 48),
+        (32, 64),
+    ],
+)
+def test_hybrid_per_group_hit_divergence_mamba_deeper(
+    matched_tokens: int, expected_num_computed: int
+):
+    """#46453: per-group prefix hits diverge with the FA prefix tail evicted
+    while a deeper Mamba state survives -> (FA=short, Mamba=deep). The scheduler
+    must admit the request at a boundary consistent for every group; it reports
+    the spine (FA) hit to the connector and reconciles once the external length
+    is known (ext==0 -> convergent re-query, ext>0 -> trim to num_computed)."""
+    block_size = 16
+    scheduler = _create_hybrid_mamba_connector_scheduler(matched_tokens, block_size)
+    manager = scheduler.kv_cache_manager
+    block_pool = manager.block_pool
+
+    # Seed FA[0..3] + mamba m0..m3, then evict the FA tail and the *middle*
+    # mamba states. FA reaches 2 blocks; the mamba hit only needs its deepest
+    # resident state (m3), so it reaches 4 blocks -> diverged (FA < Mamba).
+    fa_ids, mamba_ids = _seed_hybrid_prefix(scheduler, 4, block_size)
+    block_pool.evict_blocks({fa_ids[2], fa_ids[3], mamba_ids[1], mamba_ids[2]})
+
+    [replay] = create_requests(
+        num_requests=1,
+        num_tokens=5 * block_size,
+        max_tokens=1,
+        same_prompt=True,
+        block_size=block_size,
+        req_ids=["replay"],
+    )
+    _, per_group_hits = manager.coordinator.find_longest_cache_hit_per_group(
+        replay.block_hashes, replay.num_tokens - 1
+    )
+    assert per_group_hits == (2 * block_size, 4 * block_size)  # diverged
+
+    scheduler.add_request(replay)
+    output = scheduler.schedule()
+    num_scheduled = output.num_scheduled_tokens[replay.request_id]
+    assert replay.num_tokens - num_scheduled == expected_num_computed
+
+    if matched_tokens == 0:
+        # The convergent re-query (not a trim of the sparse Mamba list) must
+        # leave a real Mamba state at the resume boundary.
+        blocks = manager.get_blocks(replay.request_id).blocks
+        local_mamba = blocks[1][: expected_num_computed // block_size]
+        assert any(
+            b is not block_pool.null_block and b.block_hash is not None
+            for b in local_mamba
+        )
+
+
+def test_hybrid_per_group_hit_divergence_fa_deeper_no_external():
+    """The opposite divergence: the FA prefix survives deeper than the Mamba
+    state, and the connector returns no external match. Reporting the deep FA
+    hit as local would resume with no valid Mamba state at that boundary (silent
+    bad output). With ext==0 the scheduler must fall back to the convergent
+    boundary (16), where FA[0] and the resident state@0 agree."""
+    block_size = 16
+    scheduler = _create_hybrid_mamba_connector_scheduler(
+        matched_tokens=0, block_size=block_size
+    )
+    manager = scheduler.kv_cache_manager
+    block_pool = manager.block_pool
+
+    # Keep all FA blocks; evict every mamba state but m0. FA reaches 4 blocks,
+    # the mamba hit only reaches 1 block -> diverged (FA > Mamba).
+    _, mamba_ids = _seed_hybrid_prefix(scheduler, 4, block_size)
+    block_pool.evict_blocks({mamba_ids[1], mamba_ids[2], mamba_ids[3]})
+
+    [replay] = create_requests(
+        num_requests=1,
+        num_tokens=5 * block_size,
+        max_tokens=1,
+        same_prompt=True,
+        block_size=block_size,
+        req_ids=["replay"],
+    )
+    _, per_group_hits = manager.coordinator.find_longest_cache_hit_per_group(
+        replay.block_hashes, replay.num_tokens - 1
+    )
+    assert per_group_hits == (4 * block_size, 1 * block_size)  # FA deeper
+
+    scheduler.add_request(replay)
+    output = scheduler.schedule()
+    num_scheduled = output.num_scheduled_tokens[replay.request_id]
+    # Must resume at the convergent boundary (16), not the deep FA hit (64).
+    assert replay.num_tokens - num_scheduled == block_size
+
+    blocks = manager.get_blocks(replay.request_id).blocks
+    assert blocks[1][0] is not block_pool.null_block
+    assert blocks[1][0].block_hash is not None

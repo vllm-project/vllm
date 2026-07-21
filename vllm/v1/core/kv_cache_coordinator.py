@@ -634,6 +634,16 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
             key=lambda g: not isinstance(g.spec, FullAttentionSpec)
         )
 
+        # Full-attention reference group for per-group lookups (None when the
+        # model has no full-attention layers). It bounds the GPU-resident
+        # reusable prefix reported to a KV connector; a group hitting deeper
+        # holds that prefix only in a sparse-retention (Mamba) state block
+        # (#46453).
+        first = self.attention_groups[0]
+        self.full_attention_group_id: int | None = (
+            first.group_ids[0] if isinstance(first.spec, FullAttentionSpec) else None
+        )
+
         # Propagate the eagle bit to each manager (default to ``use_eagle=False``).
         for group in self.attention_groups:
             if group.use_eagle:
