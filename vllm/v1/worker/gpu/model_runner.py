@@ -1267,6 +1267,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 block_tables = None
                 slot_mappings = None
 
+        if self.pcp_manager is not None and self.dp_size > 1:
+            # The earlier DP sync used the global, pre-PCP token count.
+            # Recompute MoE metadata from the rank-local batch.
+            num_tokens_across_dp = None
+
         attn_metadata = None
         slot_mappings_by_layer = None
         if not (dummy_run and skip_attn_for_dummy_run):

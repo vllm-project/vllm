@@ -84,6 +84,7 @@ def _make_unit_args(**overrides) -> argparse.Namespace:
         "node_rank": 1,
         "tensor_parallel_size": 1,
         "pipeline_parallel_size": 1,
+        "prefill_context_parallel_size": 1,
         "uvicorn_log_level": "info",
         "shutdown_timeout": 5.0,
     }
@@ -119,6 +120,7 @@ def _make_args(**overrides) -> argparse.Namespace:
         node_rank=0,
         tensor_parallel_size=1,
         pipeline_parallel_size=1,
+        prefill_context_parallel_size=1,
         uvicorn_log_level="warning",
         shutdown_timeout=0.0,
     )
@@ -174,6 +176,22 @@ def test_build_multi_port_external_lb_child_args_sets_external_rank_server():
     assert child_args.data_parallel_hybrid_lb is False
     assert child_args.data_parallel_multi_port_external_lb is False
     assert child_args.api_server_count == 1
+
+
+def test_build_multi_port_external_lb_child_args_assigns_pcp_devices():
+    args = _make_unit_args(
+        data_parallel_size=2,
+        data_parallel_size_local=2,
+        data_parallel_start_rank=0,
+        node_rank=0,
+        prefill_context_parallel_size=2,
+    )
+
+    child_0 = _build_vllm_dp_server_args(args, local_rank=0)
+    child_1 = _build_vllm_dp_server_args(args, local_rank=1)
+
+    assert child_0.device_ids == [0, 1]
+    assert child_1.device_ids == [2, 3]
 
 
 def test_run_vllm_dp_server_uses_python_server_by_default(monkeypatch):

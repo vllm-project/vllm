@@ -49,22 +49,40 @@ class AgRsAll2AllManager(All2AllManagerBase):
     def __init__(self, cpu_group, tcp_store_group=None):
         super().__init__(cpu_group, tcp_store_group)
 
-    def _get_comm_group(self, is_sequence_parallel: bool) -> Any:
+    def _get_comm_groups(self, is_sequence_parallel: bool) -> list[Any]:
         if is_sequence_parallel:
-            return get_ep_group()
+            return [get_ep_group()]
+
+        # Compose the token-sharding axes and reverse them during combine.
+        groups = []
         if self.dp_world_size > 1:
-            return get_dp_group()
-        return get_pcp_group()
+            groups.append(get_dp_group())
+        if get_pcp_group().world_size > 1:
+            groups.append(get_pcp_group())
+        return groups
 
     def _get_sizes(self, num_local_tokens: int, comm_group: Any) -> list[int]:
-        if self.dp_world_size == 1:
+        if comm_group is get_pcp_group():
             return [num_local_tokens] * comm_group.world_size
 
         dp_metadata = get_forward_context().dp_metadata
         assert dp_metadata is not None
+        if comm_group is get_dp_group():
+            return dp_metadata.num_tokens_across_dp_cpu.tolist()
         sizes = dp_metadata.get_chunk_sizes_across_dp_rank()
         assert sizes is not None
         return sizes
+
+    def _all_gatherv(
+        self, tensors: list[torch.Tensor], is_sequence_parallel: bool
+    ) -> list[torch.Tensor]:
+        for dist_group in self._get_comm_groups(is_sequence_parallel):
+            sizes = self._get_sizes(tensors[0].shape[0], dist_group)
+            assert sizes[dist_group.rank_in_group] == tensors[0].shape[0]
+            gathered = dist_group.all_gatherv(tensors, dim=0, sizes=sizes)
+            assert isinstance(gathered, list)
+            tensors = gathered
+        return tensors
 
     def dispatch_router_logits(
         self,
@@ -77,21 +95,13 @@ class AgRsAll2AllManager(All2AllManagerBase):
         | tuple[torch.Tensor, torch.Tensor, list[torch.Tensor]]
     ):
         """
-        Gather hidden_states and router_logits from all dp ranks.
+        Gather hidden_states and router_logits from all token-sharded ranks.
         """
-        dist_group = self._get_comm_group(is_sequence_parallel)
-        sizes = self._get_sizes(hidden_states.shape[0], dist_group)
-        assert sizes[dist_group.rank_in_group] == hidden_states.shape[0]
-
         tensors_to_gather = [hidden_states, router_logits]
         if extra_tensors is not None:
             tensors_to_gather.extend(extra_tensors)
 
-        gathered_tensors = dist_group.all_gatherv(
-            tensors_to_gather,
-            dim=0,
-            sizes=sizes,
-        )
+        gathered_tensors = self._all_gatherv(tensors_to_gather, is_sequence_parallel)
 
         if extra_tensors is not None:
             return (gathered_tensors[0], gathered_tensors[1], gathered_tensors[2:])
@@ -109,21 +119,13 @@ class AgRsAll2AllManager(All2AllManagerBase):
         | tuple[torch.Tensor, torch.Tensor, torch.Tensor, list[torch.Tensor]]
     ):
         """
-        Gather hidden_states and router_logits from all dp ranks.
+        Gather hidden states and routing outputs from all token-sharded ranks.
         """
-        dist_group = self._get_comm_group(is_sequence_parallel)
-        sizes = self._get_sizes(hidden_states.shape[0], dist_group)
-        assert sizes[dist_group.rank_in_group] == hidden_states.shape[0]
-
         tensors_to_gather = [hidden_states, topk_weights, topk_ids]
         if extra_tensors is not None:
             tensors_to_gather.extend(extra_tensors)
 
-        gathered_tensors = dist_group.all_gatherv(
-            tensors_to_gather,
-            dim=0,
-            sizes=sizes,
-        )
+        gathered_tensors = self._all_gatherv(tensors_to_gather, is_sequence_parallel)
 
         hidden_states = gathered_tensors[0]
         topk_weights = gathered_tensors[1]
@@ -138,14 +140,16 @@ class AgRsAll2AllManager(All2AllManagerBase):
         self, hidden_states: torch.Tensor, is_sequence_parallel: bool = False
     ) -> torch.Tensor:
         """
-        Reduce-scatter hidden_states across all dp ranks.
+        Reduce-scatter hidden states back to the local token shard.
         """
-        dist_group = self._get_comm_group(is_sequence_parallel)
-        sizes = self._get_sizes(
-            hidden_states.shape[0] // dist_group.world_size,
-            dist_group,
-        )
-        hidden_states = dist_group.reduce_scatterv(hidden_states, dim=0, sizes=sizes)
+        for dist_group in reversed(self._get_comm_groups(is_sequence_parallel)):
+            sizes = self._get_sizes(
+                hidden_states.shape[0] // dist_group.world_size,
+                dist_group,
+            )
+            hidden_states = dist_group.reduce_scatterv(
+                hidden_states, dim=0, sizes=sizes
+            )
         return hidden_states
 
     def destroy(self):

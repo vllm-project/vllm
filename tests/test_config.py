@@ -1532,6 +1532,17 @@ def test_needs_dp_coordination(
     assert vllm_config.needs_dp_coordinator == expected_needs_coordinator
 
 
+def test_parallel_config_supports_dp_with_pcp():
+    parallel_config = ParallelConfig(
+        data_parallel_size=2,
+        prefill_context_parallel_size=2,
+        enable_expert_parallel=True,
+    )
+
+    assert parallel_config.world_size == 2
+    assert parallel_config.world_size_across_dp == 4
+
+
 def test_renderer_num_workers_with_mm_cache():
     """Disallow renderer_num_workers > 1 when mm processor cache is enabled,
     since neither cache type is thread-safe."""
