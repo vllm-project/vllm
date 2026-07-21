@@ -336,8 +336,12 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
     ) -> torch.Tensor | IntermediateTensors:
         # Positions shape handling for MRoPE models
         if self.model_config.uses_mrope:
-            # [3, seq_len] -> [3, 1, seq_len]
-            positions = positions[:, None].contiguous()
+            # [3, seq_len] -> [3, 1, seq_len] with a stride decoupled from seq_len
+            # for more information: https://github.com/vllm-project/vllm/pull/49292
+            positions = positions.as_strided(
+                (3, 1, positions.shape[1]),
+                (positions.shape[1], positions.shape[1], 1),
+            )
         model_output = super().forward(
             input_ids, positions, intermediate_tensors, inputs_embeds
         )
