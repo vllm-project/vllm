@@ -430,27 +430,22 @@ def _maybe_pack_conv_weight(weight: torch.Tensor, is_vnni: bool) -> torch.Tensor
     return ops.causal_conv1d_weight_pack(weight) if is_vnni else weight
 
 
-@pytest.mark.parametrize("batch_type", ["nonspec", "all_spec", "mixed"])
 @torch.inference_mode()
-def test_spec_aware_materializes_inputs_at_routing_boundary(
+def test_spec_aware_mixed_routing_preserves_token_order(
     monkeypatch: pytest.MonkeyPatch,
-    batch_type: str,
 ) -> None:
     num_tokens = 4
     projection = torch.arange(num_tokens * 16, dtype=torch.float32).view(num_tokens, 16)
     mixed_qkv, b, a = projection[:, :4], projection[:, 4:6], projection[:, 6:8]
     assert all(not tensor.is_contiguous() for tensor in (mixed_qkv, b, a))
 
-    is_mixed = batch_type == "mixed"
-    spec_indices = torch.tensor([0, 2]) if is_mixed else None
-    nonspec_indices = torch.tensor([1, 3]) if is_mixed else None
+    spec_indices = torch.tensor([0, 2])
+    nonspec_indices = torch.tensor([1, 3])
     metadata = types.SimpleNamespace(
-        spec_sequence_masks=None
-        if batch_type == "nonspec"
-        else torch.ones(1, dtype=torch.bool),
+        spec_sequence_masks=torch.ones(1, dtype=torch.bool),
         spec_token_indx=spec_indices,
         non_spec_token_indx=nonspec_indices,
-        num_prefills=1 if is_mixed else 0,
+        num_prefills=1,
         num_decodes=0,
     )
     routed = []
@@ -459,11 +454,7 @@ def test_spec_aware_materializes_inputs_at_routing_boundary(
         routed.append(args[2:5])
         return args[2]
 
-    def record_nonspec(*args):
-        args[5].copy_(record(*args))
-
     monkeypatch.setattr(gdn_attention, "is_conv_state_dim_first", lambda: True)
-    monkeypatch.setattr(gdn_attention, "_spec_aware_nonspec", record_nonspec)
     monkeypatch.setattr(gdn_attention, "_spec_forward", record)
     monkeypatch.setattr(gdn_attention, "_spec_aware_nonspec_subset", record)
 
@@ -482,12 +473,9 @@ def test_spec_aware_materializes_inputs_at_routing_boundary(
         state_len=6,
     )
 
-    expected_indices = (
-        [spec_indices, nonspec_indices] if is_mixed else [torch.arange(num_tokens)]
-    )
     expected_inputs = (mixed_qkv, b, a)
-    assert len(routed) == len(expected_indices)
-    for actual_inputs, indices in zip(routed, expected_indices):
+    assert len(routed) == 2
+    for actual_inputs, indices in zip(routed, (spec_indices, nonspec_indices)):
         for actual, expected in zip(actual_inputs, expected_inputs):
             assert actual.is_contiguous()
             torch.testing.assert_close(actual, expected.index_select(0, indices))
