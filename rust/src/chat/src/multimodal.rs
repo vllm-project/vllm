@@ -495,11 +495,7 @@ pub(crate) async fn finalize_rendered_prompt(
     }
     let info = info.ok_or(Error::UnsupportedMultimodalRenderer)?;
     let mut prompt_token_ids = match rendered.prompt {
-        Prompt::Text(prompt) => info
-            .context
-            .tokenizer()
-            .encode(&prompt, request.add_special_tokens)
-            .map_err(|error| multimodal!("{error}"))?,
+        Prompt::Text(prompt) => info.tokenize_prompt(&prompt, request.add_special_tokens)?,
         Prompt::TokenIds(token_ids) => token_ids,
     };
     let media_parts = extract_media_parts(request)?;
@@ -573,6 +569,74 @@ fn input_audio_data_url(data: &str, format: Option<&str>) -> Result<String> {
 }
 
 impl MultimodalModelInfo {
+    fn tokenize_prompt(&self, prompt: &str, add_special_tokens: bool) -> Result<Vec<u32>> {
+        let tokenizer = self.context.tokenizer();
+        let placeholders = [
+            self.image.as_ref().map(|support| &support.placeholder),
+            self.video.as_ref().map(|support| &support.placeholder),
+            self.audio.as_ref().map(|support| &support.placeholder),
+        ]
+        .into_iter()
+        .flatten()
+        .filter(|placeholder| placeholder.marker_token_ids.len() > 1)
+        .collect::<Vec<_>>();
+
+        if placeholders.is_empty() {
+            return tokenizer
+                .encode(prompt, add_special_tokens)
+                .map_err(|error| multimodal!("{error}"));
+        }
+
+        let mut token_ids = Vec::new();
+        let mut cursor = 0;
+        while cursor < prompt.len() {
+            let next = placeholders
+                .iter()
+                .filter_map(|placeholder| {
+                    prompt[cursor..]
+                        .find(&placeholder.token)
+                        .map(|offset| (cursor + offset, *placeholder))
+                })
+                .min_by_key(|(offset, _)| *offset);
+            let Some((offset, placeholder)) = next else {
+                break;
+            };
+
+            token_ids.extend(
+                tokenizer
+                    .encode(&prompt[cursor..offset], false)
+                    .map_err(|error| multimodal!("{error}"))?,
+            );
+            token_ids.extend_from_slice(&placeholder.marker_token_ids);
+            cursor = offset + placeholder.token.len();
+        }
+        token_ids.extend(
+            tokenizer
+                .encode(&prompt[cursor..], false)
+                .map_err(|error| multimodal!("{error}"))?,
+        );
+
+        if !add_special_tokens {
+            return Ok(token_ids);
+        }
+
+        let plain = tokenizer.encode(prompt, false).map_err(|error| multimodal!("{error}"))?;
+        let with_special =
+            tokenizer.encode(prompt, true).map_err(|error| multimodal!("{error}"))?;
+        let Some(content_offset) =
+            with_special.windows(plain.len()).position(|window| window == plain)
+        else {
+            return Ok(with_special);
+        };
+
+        let mut wrapped =
+            Vec::with_capacity(with_special.len().saturating_sub(plain.len()) + token_ids.len());
+        wrapped.extend_from_slice(&with_special[..content_offset]);
+        wrapped.extend(token_ids);
+        wrapped.extend_from_slice(&with_special[content_offset + plain.len()..]);
+        Ok(wrapped)
+    }
+
     /// Run media fetch, per-modality preprocessing, prompt expansion, and
     /// feature build.
     ///
