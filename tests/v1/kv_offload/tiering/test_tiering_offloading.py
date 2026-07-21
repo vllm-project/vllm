@@ -988,6 +988,8 @@ class TestTieringOffloadingManager:
         self.manager.complete_store(blocks[:1], _CTX, success=True)
         self.secondary_tier1.blocks[blocks[1]] = True
 
+        self.secondary_tier1.lookup = MagicMock(wraps=self.secondary_tier1.lookup)
+
         # Filter allows only FS; secondaries have medium=CPU
         ctx = ReqContext(
             req_id="r1",
@@ -996,6 +998,7 @@ class TestTieringOffloadingManager:
         )
         assert self.manager.lookup(blocks[0], ctx) is LookupResult.HIT
         assert self.manager.lookup(blocks[1], ctx) is LookupResult.MISS
+        self.secondary_tier1.lookup.assert_not_called()
 
     @pytest.mark.parametrize(
         "load_tier_filter",
