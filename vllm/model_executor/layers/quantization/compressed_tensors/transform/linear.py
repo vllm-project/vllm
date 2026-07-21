@@ -51,7 +51,7 @@ class CompressedTensorsLinearTransformMethod(LinearMethodBase):
 
         if is_qutlass_fp4_scheme(
             quant_scheme, input_tfms
-        ) and current_platform.has_device_capability(90):
+        ) and current_platform.has_device_capability(100):
             return QutlassNvFP4LinearMethod(quant_method, input_tfms, output_tfms)
 
         # hadacore or dense gemm is selected by Transform module
