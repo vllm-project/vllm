@@ -1,6 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Tests for GPUWorker weight-transfer pass-through behavior."""
+"""Tests for GPUWorker weight-transfer pass-through behavior.
+
+The worker no longer contains transport, layerwise, or sparse logic: it only
+delegates to the configured weight transfer engine and tracks whether an update
+session is active. These tests verify that delegation and the session guard.
+"""
 
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -8,6 +13,7 @@ from unittest.mock import MagicMock
 import pytest
 import torch
 
+from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.v1.worker.gpu_worker import Worker
 
 
@@ -25,6 +31,10 @@ class _RecordingEngine:
         self.update_calls: list[dict] = []
         self.target = None
         self.requires_model_reload = True
+        self.seen_configs: list[VllmConfig] = []
+
+    def _record_config(self) -> None:
+        self.seen_configs.append(get_current_vllm_config())
 
     def set_weight_update_target(
         self, target, model_config, *, requires_model_reload=True
@@ -34,9 +44,11 @@ class _RecordingEngine:
         self.requires_model_reload = requires_model_reload
 
     def start_weight_update(self) -> None:
+        self._record_config()
         self.started = True
 
     def update_weights(self, update_info: dict) -> None:
+        self._record_config()
         self.update_calls.append(update_info)
         if self.raise_on_update:
             raise ValueError("boom")
@@ -44,6 +56,7 @@ class _RecordingEngine:
             self.target.load_weights(update_info["weights"])
 
     def finish_weight_update(self) -> None:
+        self._record_config()
         self.finished = True
 
     def reset_weight_update_target(self) -> None:
@@ -52,8 +65,17 @@ class _RecordingEngine:
         self.requires_model_reload = True
 
 
+class _RecordingModelRunner:
+    def __init__(self) -> None:
+        self.seen_config: VllmConfig | None = None
+
+    def reload_weights(self) -> None:
+        self.seen_config = get_current_vllm_config()
+
+
 def _make_worker(engine: _RecordingEngine | None) -> Worker:
     worker = object.__new__(Worker)
+    worker.vllm_config = VllmConfig()
     worker.weight_transfer_engine = engine
     worker._weight_update_active = False
     worker._lora_weight_update_target = None
@@ -69,6 +91,16 @@ def _attach_lora_manager(worker: Worker, adapter_ids: set[int]):
         _ensure_lora_enabled=lambda: None,
     )
     return lora_manager
+
+
+def test_reload_weights_sets_current_config():
+    worker = _make_worker(None)
+    model_runner = _RecordingModelRunner()
+    worker.model_runner = model_runner  # type: ignore[assignment]
+
+    Worker.reload_weights(worker)
+
+    assert model_runner.seen_config is worker.vllm_config
 
 
 def test_start_update_finish_delegates_to_engine():
@@ -87,6 +119,7 @@ def test_start_update_finish_delegates_to_engine():
     assert engine.finished is True
     assert engine.reset_count == 1
     assert worker._weight_update_active is False
+    assert engine.seen_configs == [worker.vllm_config] * 3
 
 
 def test_double_start_raises():
@@ -116,6 +149,7 @@ def test_update_resets_active_on_error():
     with pytest.raises(ValueError, match="boom"):
         Worker.update_weights(worker, {"names": ["w"]})
 
+    # A failed update ends the session so the next start is clean.
     assert engine.reset_count == 1
     assert worker._weight_update_active is False
 
