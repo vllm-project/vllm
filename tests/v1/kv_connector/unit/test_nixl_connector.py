@@ -494,6 +494,9 @@ class FakeNixlConnectorWorker(NixlConnectorWorker):
             total_num_kv_heads=self.model_config.get_total_num_kv_heads(),
             attn_backends=self.attn_backends,
             tensor_shape=test_shape,
+            dcp_rank=self.dcp_rank,
+            dcp_size=self.dcp_size,
+            pcp_size=self.pcp_size,
         )
 
         self.compat_hash = compute_nixl_compatibility_hash(
@@ -507,6 +510,8 @@ class FakeNixlConnectorWorker(NixlConnectorWorker):
         remote_tp_size: int,
         expected_engine_id: str,
         remote_pp_size: int = 1,
+        remote_dcp_size: int = 1,
+        remote_pcp_size: int = 1,
         notif_agents_only: bool = False,
     ) -> tuple[dict[tuple[int, int], str], float]:
         # Mimic slow _nixl_handshake, as well as bypass zmq communication.
@@ -555,16 +560,71 @@ class FakeNixlConnectorWorker(NixlConnectorWorker):
                     ssm_sizes=(0, 0),
                     attn_backend_name=self.backend_name,
                     physical_blocks_per_logical_kv_block=1,
+                    dcp_rank=0,
+                    tp_size=remote_tp_size,
+                    dcp_size=remote_dcp_size,
+                    pcp_size=remote_pcp_size,
+                    tp_rank=remote_tp_rank,
                 ),
                 remote_tp_rank=remote_tp_rank,
                 remote_tp_size=remote_tp_size,
+                remote_dcp_size=remote_dcp_size,
+                remote_pcp_size=remote_pcp_size,
             )
-            remote_agents[(0, remote_tp_rank)] = remote_agent_name
+            remote_agents[(remote_tp_rank, 0)] = remote_agent_name
         # Handshake bypasses zmq, so report a zero clock offset to the peer.
         return remote_agents, 0.0
 
 
 class TestNixlHandshake:
+    @patch(
+        "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
+        FakeNixlWrapper,
+    )
+    def test_pcp_producer_publishes_one_replica_per_dcp_rank(
+        self, default_vllm_config, dist_init
+    ):
+        vllm_config = create_vllm_config(kv_role="kv_producer")
+        connector = NixlConnector(
+            vllm_config,
+            KVConnectorRole.WORKER,
+            make_kv_cache_config(block_size=16),
+        )
+        payload = MagicMock(spec=NixlHandshakePayload)
+        worker = connector.connector_worker
+        assert worker is not None
+        worker.xfer_handshake_metadata = payload
+
+        worker.pcp_rank = 0
+        assert connector.get_handshake_metadata() is payload
+
+        worker.pcp_rank = 1
+        assert connector.get_handshake_metadata() is None
+
+        vllm_config.parallel_config.decode_context_parallel_size = 2
+        assert connector.get_handshake_metadata() is payload
+
+        worker.pcp_rank = 2
+        assert connector.get_handshake_metadata() is None
+
+    def test_pcp_producer_waits_only_for_published_replicas(
+        self, default_vllm_config, dist_init
+    ):
+        vllm_config = create_vllm_config(kv_role="kv_producer")
+        vllm_config.parallel_config.tensor_parallel_size = 2
+        vllm_config.parallel_config.prefill_context_parallel_size = 2
+        vllm_config.parallel_config.pipeline_parallel_size = 2
+        connector = NixlConnector(
+            vllm_config,
+            KVConnectorRole.SCHEDULER,
+            make_kv_cache_config(block_size=16),
+        )
+
+        assert connector.get_finished_count() == 4
+
+        vllm_config.parallel_config.decode_context_parallel_size = 2
+        assert connector.get_finished_count() == 8
+
     @patch(
         "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
         FakeNixlWrapper,
@@ -758,7 +818,8 @@ class TestNixlHandshake:
 
         def check_handshake(remote_tp_size: int):
             tp_ratio = remote_tp_size // local_tp_size
-            assert set(remote_agents.keys()) == {(0, r) for r in range(tp_ratio)}
+            expected_worker_keys = {(rank, 0) for rank in range(tp_ratio)}
+            assert set(remote_agents) == expected_worker_keys
 
             remote_engine_id = worker.REMOTE_ENGINE_ID
             remote_info = worker.transfer_topo.get_engine_info(remote_engine_id)
@@ -768,8 +829,8 @@ class TestNixlHandshake:
             assert -tp_ratio in worker.src_xfer_handles_by_tp_ratio
             assert len(worker.src_xfer_handles_by_tp_ratio[-tp_ratio]) == tp_ratio
             assert remote_engine_id in worker.dst_xfer_side_handles
-            assert set(worker.dst_xfer_side_handles[remote_engine_id].keys()) == set(
-                range(tp_ratio)
+            assert set(worker.dst_xfer_side_handles[remote_engine_id]) == (
+                expected_worker_keys
             )
 
         remote_agents, _ = worker._nixl_handshake(
