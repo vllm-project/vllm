@@ -8,13 +8,13 @@ metrics exposed at `/metrics`.
 
 ## Enabling
 
-Start the server with `--speculative-decoding-stats` set to `summary` or
+Start the server with `--per-request-spec-decode-stats` set to `summary` or
 `detailed` (default `none`):
 
 ```bash
 vllm serve <target-model> \
   --speculative-config '{"method": "ngram", "num_speculative_tokens": 3, "prompt_lookup_min": 1, "prompt_lookup_max": 3}' \
-  --speculative-decoding-stats summary
+  --per-request-spec-decode-stats summary
 ```
 
 | Level | Behavior |
