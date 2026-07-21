@@ -99,6 +99,26 @@ def is_deep_gemm_supported() -> bool:
     return envs.VLLM_USE_DEEP_GEMM and has_deep_gemm() and is_supported_arch
 
 
+def is_deep_gemm_bf16_grouped_supported() -> bool:
+    """Return ``True`` if the DeepGEMM bf16 grouped contiguous GEMM kernel
+    is available on this platform (used by the bf16 MoE experts backend).
+    """
+    if not is_deep_gemm_supported():
+        return False
+    _lazy_init()
+    return _grouped_bf16_impl is not None
+
+
+def is_deep_gemm_bf16_masked_supported() -> bool:
+    """Return ``True`` if the DeepGEMM bf16 masked grouped GEMM kernel is
+    available (used by the batched/EP bf16 MoE experts backend).
+    """
+    if not is_deep_gemm_supported():
+        return False
+    _lazy_init()
+    return _grouped_bf16_masked_impl is not None
+
+
 @functools.cache
 def is_deep_gemm_e8m0_used() -> bool:
     """Return `True` if vLLM is configured to use DeepGEMM "
@@ -138,6 +158,9 @@ _fp8_gemm_nt_impl: Callable[..., Any] | None = None
 _fp8_einsum_impl: Callable[..., Any] | None = None
 _grouped_impl: Callable[..., Any] | None = None
 _grouped_masked_impl: Callable[..., Any] | None = None
+_grouped_bf16_impl: Callable[..., Any] | None = None
+_grouped_bf16_masked_impl: Callable[..., Any] | None = None
+_bf16_gemm_nt_impl: Callable[..., Any] | None = None
 _grouped_fp4_impl: Callable[..., Any] | None = None
 _fp8_fp4_mqa_logits_impl: Callable[..., Any] | None = None
 _fp8_fp4_paged_mqa_logits_impl: Callable[..., Any] | None = None
@@ -213,6 +236,7 @@ def _lazy_init() -> None:
     global _cublaslt_gemm_nt_impl
     global _fp8_gemm_nt_impl, _fp8_einsum_impl
     global _grouped_impl, _grouped_masked_impl, _grouped_fp4_impl
+    global _grouped_bf16_impl, _grouped_bf16_masked_impl, _bf16_gemm_nt_impl
     global _fp8_fp4_mqa_logits_impl, _fp8_fp4_paged_mqa_logits_impl
     global _get_paged_mqa_logits_metadata_impl
     global _tf32_hc_prenorm_gemm_impl
@@ -230,6 +254,9 @@ def _lazy_init() -> None:
         or _fp8_einsum_impl is not None
         or _grouped_impl is not None
         or _grouped_masked_impl is not None
+        or _grouped_bf16_impl is not None
+        or _grouped_bf16_masked_impl is not None
+        or _bf16_gemm_nt_impl is not None
         or _grouped_fp4_impl is not None
         or _fp8_fp4_mqa_logits_impl is not None
         or _fp8_fp4_paged_mqa_logits_impl is not None
@@ -265,6 +292,9 @@ def _lazy_init() -> None:
     _fp8_einsum_impl = getattr(_dg, "fp8_einsum", None)
     _grouped_impl = getattr(_dg, "m_grouped_fp8_gemm_nt_contiguous", None)
     _grouped_masked_impl = getattr(_dg, "fp8_m_grouped_gemm_nt_masked", None)
+    _grouped_bf16_impl = getattr(_dg, "m_grouped_bf16_gemm_nt_contiguous", None)
+    _grouped_bf16_masked_impl = getattr(_dg, "m_grouped_bf16_gemm_nt_masked", None)
+    _bf16_gemm_nt_impl = getattr(_dg, "bf16_gemm_nt", None)
     _grouped_fp4_impl = getattr(_dg, "m_grouped_fp8_fp4_gemm_nt_contiguous", None)
     # DeepGEMM exposes fp8_fp4_*_mqa_logits as the canonical symbols that
     # handle both the FP8 and FP4 Q/K paths via a tuple-typed `q`.
@@ -467,6 +497,31 @@ def m_grouped_fp8_gemm_nt_contiguous(*args, **kwargs):
     return _grouped_impl(
         *args, disable_ue8m0_cast=not is_deep_gemm_e8m0_used(), **kwargs
     )
+
+
+def m_grouped_bf16_gemm_nt_contiguous(*args, **kwargs):
+    # BF16 grouped GEMM: activations/weights are plain bf16 tensors, so there
+    # are no block scales and no ue8m0 cast to disable (unlike the fp8 path).
+    _lazy_init()
+    if _grouped_bf16_impl is None:
+        return _missing(*args, **kwargs)
+    return _grouped_bf16_impl(*args, **kwargs)
+
+
+def m_grouped_bf16_gemm_nt_masked(*args, **kwargs):
+    # BF16 masked grouped GEMM (batched/EP layout): plain bf16 tensors, no
+    # scales and no ue8m0 cast (unlike fp8_m_grouped_gemm_nt_masked).
+    _lazy_init()
+    if _grouped_bf16_masked_impl is None:
+        return _missing(*args, **kwargs)
+    return _grouped_bf16_masked_impl(*args, **kwargs)
+
+
+def bf16_gemm_nt(*args, **kwargs):
+    _lazy_init()
+    if _bf16_gemm_nt_impl is None:
+        return _missing(*args, **kwargs)
+    return _bf16_gemm_nt_impl(*args, **kwargs)
 
 
 def m_grouped_fp8_fp4_gemm_nt_contiguous(*args, **kwargs):
@@ -725,6 +780,11 @@ __all__ = [
     "fp8_gemm_nt",
     "fp8_einsum",
     "m_grouped_fp8_gemm_nt_contiguous",
+    "m_grouped_bf16_gemm_nt_contiguous",
+    "m_grouped_bf16_gemm_nt_masked",
+    "bf16_gemm_nt",
+    "is_deep_gemm_bf16_grouped_supported",
+    "is_deep_gemm_bf16_masked_supported",
     "m_grouped_fp8_fp4_gemm_nt_contiguous",
     "fp8_m_grouped_gemm_nt_masked",
     "fp8_fp4_mqa_logits",

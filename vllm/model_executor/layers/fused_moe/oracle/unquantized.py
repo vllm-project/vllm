@@ -39,6 +39,7 @@ class UnquantizedMoeBackend(Enum):
     AITER = "ROCm AITER"
     TRITON = "TRITON"
     BATCHED_TRITON = "BATCHED_TRITON"
+    DEEP_GEMM = "DeepGEMM BF16"
     CPU = "CPU"
     XPU = "XPU"
     TPU = "TPU"
@@ -138,6 +139,14 @@ def backend_to_kernel_cls(
 
         return [BatchedTritonExperts]
 
+    elif backend == UnquantizedMoeBackend.DEEP_GEMM:
+        from vllm.model_executor.layers.fused_moe.experts.deep_gemm_bf16_moe import (  # noqa: E501
+            DeepGemmBf16BatchedExperts,
+            DeepGemmBf16Experts,
+        )
+
+        return [DeepGemmBf16Experts, DeepGemmBf16BatchedExperts]
+
     elif backend == UnquantizedMoeBackend.XPU:
         from vllm.model_executor.layers.fused_moe.experts.xpu_moe import XPUExperts
 
@@ -154,6 +163,7 @@ def map_unquantized_backend(runner_backend: MoEBackend) -> UnquantizedMoeBackend
         "flashinfer_trtllm": UnquantizedMoeBackend.FLASHINFER_TRTLLM,
         "flashinfer_cutlass": UnquantizedMoeBackend.FLASHINFER_CUTLASS,
         "aiter": UnquantizedMoeBackend.AITER,
+        "deep_gemm": UnquantizedMoeBackend.DEEP_GEMM,
     }
     if backend := mapping.get(runner_backend):
         return backend

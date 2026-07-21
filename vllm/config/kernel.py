@@ -186,7 +186,8 @@ class KernelConfig:
 
     - "auto": Automatically select the best backend based on model and hardware
     - "triton": Use Triton-based fused MoE kernels
-    - "deep_gemm": Use DeepGEMM kernels (FP8 block-quantized only)
+    - "deep_gemm": Use DeepGEMM kernels (FP8 block-quantized, or
+      grouped BF16 GEMM for unquantized bf16 MoE)
     - "deep_gemm_mega_moe": Use DeepGEMM mega MoE kernels
     - "cutlass": Use vLLM CUTLASS kernels
     - "flashinfer_trtllm": Use FlashInfer with TRTLLM-GEN kernels
