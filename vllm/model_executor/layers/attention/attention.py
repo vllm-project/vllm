@@ -136,10 +136,12 @@ def set_default_quant_scales(layer: nn.Module, register_buffer: bool = False) ->
 
     # We also keep q/k/v_scale on host (cpu) memory for attention
     # backends that require the scales to be on host instead of on device.
-    # e.g. Flashinfer
+    # e.g. Flashinfer & AITER
     layer._q_scale_float = 1.0
     layer._k_scale_float = 1.0
     layer._v_scale_float = 1.0
+    layer._k_scale_cpu = torch.tensor(1.0, dtype=torch.float32)
+    layer._v_scale_cpu = torch.tensor(1.0, dtype=torch.float32)
     layer._prob_scale_float = 1.0
 
     # Initialize q/k/v range constants used by calc_kv_scales
@@ -355,6 +357,7 @@ class Attention(nn.Module, AttentionLayerBase):
                 use_mm_prefix=self.use_mm_prefix,
                 use_per_head_quant_scales=use_per_head_quant_scales,
                 attn_type=attn_type,
+                has_sliding_window=sliding_window is not None,
             )
         else:
             self.attn_backend = attn_backend
@@ -585,6 +588,8 @@ class Attention(nn.Module, AttentionLayerBase):
         self._q_scale_float = self._q_scale.item()
         self._k_scale_float = self._k_scale.item()
         self._v_scale_float = self._v_scale.item()
+        self._k_scale_cpu.fill_(self._k_scale_float)
+        self._v_scale_cpu.fill_(self._v_scale_float)
         # We only calculate the scales once
         self.calculate_kv_scales = False
 
@@ -627,8 +632,8 @@ class Attention(nn.Module, AttentionLayerBase):
         assert self.attn_type == AttentionType.DECODER
         quant_mode = get_kv_quant_mode(self.kv_cache_dtype)
         if self.sliding_window is not None:
-            assert not vllm_config.model_config.use_mla, (
-                "MLA is not supported for slidingwindow"
+            assert not self.attn_backend.is_mla(), (
+                "MLA is not supported for sliding window"
             )
             # SW chooses its own block_size, decoupled from the user's
             # ``--block-size`` (which only constrains primary attention).

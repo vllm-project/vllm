@@ -43,6 +43,65 @@ from .utils import EOS_TOKEN_ID, create_requests, create_scheduler, mock_kv
 pytestmark = pytest.mark.cpu_test
 
 
+def test_make_scheduled_encoder_input_stats_output_embeddings():
+    scheduler = create_scheduler()
+    mm_features = [
+        MultiModalFeatureSpec(
+            data=MultiModalKwargsItem.dummy(),
+            modality="image",
+            identifier="image-0",
+            mm_position=PlaceholderRange(offset=0, length=196),
+        ),
+        MultiModalFeatureSpec(
+            data=MultiModalKwargsItem.dummy(),
+            modality="video",
+            identifier="video-0",
+            mm_position=PlaceholderRange(offset=200, length=196),
+        ),
+        MultiModalFeatureSpec(
+            data=MultiModalKwargsItem.dummy(),
+            modality="audio",
+            identifier="audio-0",
+            mm_position=PlaceholderRange(offset=400, length=49),
+        ),
+    ]
+    scheduler.requests["req"] = Mock(mm_features=mm_features)
+
+    stats = scheduler._make_scheduled_encoder_input_stats({"req": [0, 1, 2]})
+
+    assert stats is not None
+    assert stats.num_inputs == 3
+    assert stats.output_tokens == 441
+
+
+def test_scheduled_encoder_input_stats_disabled_without_iteration_logging(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    scheduler = create_scheduler()
+    make_stats = Mock(side_effect=AssertionError("stats should not be computed"))
+    monkeypatch.setattr(scheduler, "_make_scheduled_encoder_input_stats", make_stats)
+
+    scheduler_output = scheduler.schedule()
+
+    make_stats.assert_not_called()
+    assert scheduler_output.scheduled_encoder_input_stats is None
+
+
+def test_scheduled_encoder_input_stats_disabled_without_log_stats(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    scheduler = create_scheduler()
+    scheduler.log_stats = False
+    scheduler.observability_config.enable_logging_iteration_details = True
+    make_stats = Mock(side_effect=AssertionError("stats should not be computed"))
+    monkeypatch.setattr(scheduler, "_make_scheduled_encoder_input_stats", make_stats)
+
+    scheduler_output = scheduler.schedule()
+
+    make_stats.assert_not_called()
+    assert scheduler_output.scheduled_encoder_input_stats is None
+
+
 def test_add_requests():
     scheduler = create_scheduler()
     requests = create_requests(num_requests=10)
@@ -106,6 +165,29 @@ def test_schedule(enable_prefix_caching: bool, prompt_logprobs: int | None):
     assert len(scheduler.running) == len(requests)
     for i, request in enumerate(requests):
         assert scheduler.running[i] == request
+
+
+def test_scheduler_stats_route_to_existing_output_client():
+    scheduler = create_scheduler()
+    request = create_requests(num_requests=1)[0]
+    request.client_index = 1
+    scheduler.add_request(request)
+
+    scheduler_output = scheduler.schedule()
+    model_output = ModelRunnerOutput(
+        req_ids=[request.request_id],
+        req_id_to_index={request.request_id: 0},
+        sampled_token_ids=[[1000]],
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=[],
+    )
+
+    engine_core_outputs = scheduler.update_from_output(scheduler_output, model_output)
+
+    assert 0 not in engine_core_outputs
+    assert engine_core_outputs[1].scheduler_stats is not None
+    assert len(engine_core_outputs[1].outputs) == 1
 
 
 def test_schedule_multimodal_requests():
@@ -984,6 +1066,141 @@ def test_preempt_during_execution():
     # sampled token id.
     assert len(requests[1].output_token_ids) == 1
     assert requests[1].output_token_ids[0] == 42
+
+
+def test_prefix_cache_query_not_inflated_by_connector_defer():
+    """The GPU prefix-cache query is recorded at admission, so a request the
+    connector defers several times is counted once, not once per retry."""
+    num_defers_before_matching = 3
+    scheduler = create_scheduler(
+        enable_prefix_caching=True,
+        use_kv_connector=mock_kv(
+            matched_tokens=0,
+            is_async=False,
+            num_defers_before_matching=num_defers_before_matching,
+        ),
+    )
+    request = create_requests(num_requests=1, num_tokens=32, block_size=16)[0]
+    scheduler.add_request(request)
+
+    # Each deferred step re-runs the lookup but records nothing.
+    for _ in range(num_defers_before_matching):
+        assert not scheduler.schedule().scheduled_new_reqs
+
+    output = scheduler.schedule()
+    assert any(r.req_id == request.request_id for r in output.scheduled_new_reqs)
+
+    stats = scheduler.kv_cache_manager.prefix_cache_stats
+    assert stats is not None
+    assert stats.requests == 1
+    assert stats.queries == request.num_tokens
+
+
+def test_preemption_re_records_prefix_cache_query():
+    """A preempted request re-enters the lookup on resume, so its recomputation
+    is counted again into the preempted stats."""
+    scheduler = create_scheduler(enable_prefix_caching=True)
+    request = create_requests(num_requests=1)[0]
+    scheduler.add_request(request)
+
+    scheduler.schedule()
+    stats = scheduler.kv_cache_manager.prefix_cache_stats
+    assert stats is not None
+    assert (stats.requests, stats.preempted_requests) == (1, 0)
+
+    scheduler.running.remove(request)
+    scheduler._preempt_request(request, 0.0)
+    assert request.status == RequestStatus.PREEMPTED
+
+    scheduler.schedule()
+    assert request.status == RequestStatus.RUNNING
+    assert stats.preempted_requests == 1
+
+
+def test_prefix_cache_stats_not_recorded_when_caching_disabled():
+    """With prefix caching off there is no local lookup, so admitting a request
+    records no phantom miss."""
+    scheduler = create_scheduler(enable_prefix_caching=False)
+    for request in create_requests(num_requests=2):
+        scheduler.add_request(request)
+
+    scheduler.schedule()
+
+    stats = scheduler.kv_cache_manager.prefix_cache_stats
+    assert stats is not None
+    assert (stats.requests, stats.queries, stats.hits) == (0, 0, 0)
+
+
+def test_prefix_cache_stats_counted_once_for_retried_then_scheduled_request():
+    """A real cache hit rejected once by allocate_slots and admitted on the next
+    step is counted exactly once, hits included."""
+    block_size = 16
+    scheduler = create_scheduler(
+        enable_prefix_caching=True,
+        enable_chunked_prefill=False,
+        block_size=block_size,
+    )
+
+    # Seed the cache so the next request with the same prompt hits it.
+    seed = create_requests(
+        num_requests=1,
+        num_tokens=block_size * 2,
+        max_tokens=2,
+        same_prompt=True,
+        block_size=block_size,
+        req_ids=["seed"],
+    )[0]
+    scheduler.add_request(seed)
+    _step_until_done(
+        scheduler,
+        scheduler.schedule(),
+        ModelRunnerOutput(
+            req_ids=["seed"],
+            req_id_to_index={"seed": 0},
+            sampled_token_ids=[[1000]],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        ),
+    )
+
+    # The seeding step swapped in a fresh accumulator, so re-read it; the
+    # retried request must be the only thing recorded from here on.
+    stats = scheduler.kv_cache_manager.prefix_cache_stats
+    assert stats is not None
+    assert (stats.requests, stats.queries, stats.hits) == (0, 0, 0)
+
+    retried = create_requests(
+        num_requests=1,
+        num_tokens=block_size * 3,
+        max_tokens=1,
+        same_prompt=True,
+        block_size=block_size,
+        req_ids=["retried"],
+    )[0]
+    scheduler.add_request(retried)
+
+    # Reject the first allocation attempt, then delegate to the real one.
+    orig_allocate_slots = scheduler.kv_cache_manager.allocate_slots
+    allocate_results: list = []
+
+    def spy_allocate_slots(*args, **kwargs):
+        result = None if not allocate_results else orig_allocate_slots(*args, **kwargs)
+        allocate_results.append(result)
+        return result
+
+    scheduler.kv_cache_manager.allocate_slots = spy_allocate_slots
+
+    assert not scheduler.schedule().scheduled_new_reqs
+    assert (stats.requests, stats.queries, stats.hits) == (0, 0, 0)
+
+    assert "retried" in scheduler.schedule().num_scheduled_tokens
+    assert allocate_results[0] is None and allocate_results[1] is not None
+    assert (stats.requests, stats.queries, stats.hits) == (
+        1,
+        retried.num_tokens,
+        block_size * 2,
+    )
 
 
 def test_scheduler_reset_prefix_cache():
@@ -2954,6 +3171,7 @@ def test_abort_request_when_structured_output_fsm_cannot_advance():
     scheduler.waiting = Mock()
     scheduler.kv_cache_manager = Mock()
     scheduler.kv_cache_manager.take_events.return_value = None
+    scheduler.kv_cache_manager.estimate_cached_tokens.return_value = 0
     scheduler.kv_event_publisher = Mock()
     scheduler.finished_req_ids = set()
     scheduler.finished_req_ids_dict = None
@@ -2968,7 +3186,7 @@ def test_abort_request_when_structured_output_fsm_cannot_advance():
     def free_request(req: Request, delay_free_blocks: bool = False):
         scheduler.finished_req_ids.add(req.request_id)
         scheduler.requests.pop(req.request_id, None)
-        return None
+        return None, None
 
     scheduler._free_request = Mock(side_effect=free_request)
 
