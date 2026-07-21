@@ -398,8 +398,6 @@ steps:
   device: intel_gpu
   optional: true
   num_devices: 1
-  depends_on:
-  - arm64-image-build
   no_plugin: true
   working_dir: .
   env:
