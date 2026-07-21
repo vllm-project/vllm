@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 //! Hot-reload of the TLS certificate material (`--enable-ssl-refresh`), mirroring
 //! Python's `SSLCertRefresher`: when the cert/key/CA files change on disk, new
 //! handshakes serve the new material without a restart.
