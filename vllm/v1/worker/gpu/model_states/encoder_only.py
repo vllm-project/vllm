@@ -63,6 +63,7 @@ class EncoderOnlyModelState(DefaultModelState):
             # device tensor so the attention forward context is well-formed.
             layer.kv_cache = torch.empty(0, dtype=kv_cache_dtype, device=device)
             backend = layer.get_attn_backend()
+            # Metadata builders require a uniform query-head count per group.
             key = (
                 backend.full_cls_name(),
                 layer.num_heads,
