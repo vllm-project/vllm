@@ -544,8 +544,8 @@ class ElasticEPScalingExecutor:
         if get_ep_group().rank == 0:
             logger.info("[Elastic EP] Expert resharding completed")
 
-    def commit_scale_up(self, switch: bool) -> None:
-        if switch:
+    def commit_scale_up(self, is_existing_worker: bool) -> None:
+        if is_existing_worker:
             self.broadcast_expert_mapping()
             self.switch_and_prepare()
         else:
