@@ -431,3 +431,41 @@ def test_block_idx_prev_step_cudagraph_capture_uses_persistent_buffer():
 
     # Tail values past num_decodes: zero-filled padding for cudagraph capture.
     assert torch.all(out.block_idx_last_scheduled_token_prev_step[num_decodes:] == 0)
+
+
+def test_num_state_writes_p_matches_block_idx_tensors():
+    """The prefill state save sizes its batched copy from
+    num_state_writes_p instead of reading the block index tensors back from
+    the GPU, so the host count must equal what those tensors say."""
+
+    # (block_size, seq_lens, query_lens, is_prefilling)
+    cases = [
+        # block-aligned and unaligned computed tokens, and a chunked prefill
+        (16, [64, 33, 17], [48, 17, 1], [True, True, True]),
+        (32, [200, 100, 64], [200, 36, 64], [True, True, True]),
+        # decode rows ahead of the prefills
+        (16, [40, 41, 100, 200], [1, 1, 60, 200], [False, False, True, True]),
+        # prefills that stay inside their first block: nothing to write
+        (16, [65, 66, 67], [1, 2, 3], [True, True, True]),
+    ]
+
+    for block_size, seq_lens, query_lens, is_prefilling in cases:
+        metadata = MockMambaBuilder.build_mamba_metadata(
+            _make_vllm_config(4096, len(seq_lens), block_size=block_size),
+            seq_lens=seq_lens,
+            query_lens=query_lens,
+            is_prefilling=is_prefilling,
+        )
+        num_reqs, num_prefills = metadata.num_reqs, metadata.num_prefills
+        block_idx_last_p = metadata.block_idx_last_scheduled_token[
+            num_reqs - num_prefills : num_reqs
+        ]
+        expected = int(
+            (block_idx_last_p - metadata.block_idx_first_scheduled_token_p)
+            .clamp(min=0)
+            .sum()
+        )
+
+        assert metadata.num_state_writes_p == expected, (
+            f"seq_lens={seq_lens} query_lens={query_lens} block_size={block_size}"
+        )
