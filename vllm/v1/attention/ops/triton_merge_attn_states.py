@@ -61,7 +61,7 @@ def mask_empty_context_lse_kernel(
         matched_idx = tl.sum(
             (req_mask & (req_block_starts <= query_block_idx)).to(tl.int32)
         )
-        # matched_idx == 32 means the match is past this warp.
+        # matched_idx == 32 means the match is past this warp chunk.
         req_idx = chunk_start + matched_idx - 1
         req_idx_found = matched_idx < 32
         chunk_start += 32
