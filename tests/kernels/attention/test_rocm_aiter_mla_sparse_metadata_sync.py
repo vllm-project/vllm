@@ -135,6 +135,7 @@ def _make_builder():
     builder.model_dtype = torch.bfloat16
     builder.topk_tokens = topk_tokens
     # SparseMLACommonMetadataBuilder state consumed by its build() method.
+    builder.use_pcp = False
     builder.cp_kv_cache_interleave_size = 1
     builder.req_id_per_token_buffer = torch.zeros(
         max_num_batched_tokens, dtype=torch.int32, device="cpu"
@@ -152,7 +153,7 @@ def _make_builder():
         max_num_batched_tokens + 1, dtype=torch.int32, device="cpu"
     )
     builder._num_attention_heads = 16
-    builder._num_compute_units = 1
+    builder._num_compute_units = current_platform.num_compute_units()
     builder._mla_q_dtype = torch.bfloat16
     builder._mla_kv_dtype = torch.bfloat16
     builder._mla_work_meta_data = torch.empty(1, dtype=torch.int32, device="cpu")
@@ -215,6 +216,7 @@ def test_sparse_persistent_metadata_syncs_only_after_recompute(monkeypatch):
     assert fake_get_mla_metadata_v1_mock.call_count == 1
     assert fake_get_mla_metadata_v1_mock.call_args.kwargs["dtype_q"] == torch.bfloat16
     assert fake_get_mla_metadata_v1_mock.call_args.kwargs["dtype_kv"] == torch.bfloat16
+    assert fake_get_mla_metadata_v1_mock.call_args.kwargs["max_split_per_batch"] == 1
 
     events.clear()
 
