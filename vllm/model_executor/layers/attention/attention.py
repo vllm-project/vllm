@@ -683,7 +683,6 @@ class Attention(nn.Module, AttentionLayerBase):
         return self.attn_backend
 
     def get_decode_attn_backend(self) -> type[AttentionBackend] | None:
-        """The pure-decode backend for batch routing, or None."""
         return self.decode_attn_backend
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec | None:
