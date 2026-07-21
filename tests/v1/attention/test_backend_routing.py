@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from dataclasses import dataclass
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -37,6 +38,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
 )
+from vllm.v1.spec_decode.llm_base_proposer import SpecDecodeBaseProposer
 from vllm.v1.worker.cp_utils import check_attention_cp_compatibility
 from vllm.v1.worker.gpu.attn_utils import build_attn_metadata, init_attn_backend
 from vllm.v1.worker.utils import AttentionGroup, prepare_kernel_block_sizes
@@ -89,6 +91,35 @@ def test_decode_auto_selection_ignores_general_backend():
 
     assert result is selected_backend
     assert selector.call_args.kwargs["backend"] is None
+
+
+def test_draft_attention_backends_are_independent_from_target():
+    @dataclass
+    class TargetConfig:
+        attention_config: AttentionConfig
+
+    target_config = TargetConfig(
+        attention_config=AttentionConfig(
+            backend=AttentionBackendEnum.TRITON_ATTN,
+            decode_backend=AttentionBackendEnum.TRITON_ATTN,
+        )
+    )
+    proposer = SimpleNamespace(
+        vllm_config=target_config,
+        speculative_config=SimpleNamespace(
+            moe_backend=None,
+            attention_backend=AttentionBackendEnum.FLASH_ATTN,
+            attention_decode_backend=AttentionBackendEnum.FLASHINFER,
+            kv_cache_dtype=None,
+        ),
+    )
+
+    draft_config = SpecDecodeBaseProposer._create_draft_vllm_config(proposer)
+
+    assert draft_config.attention_config.backend == AttentionBackendEnum.FLASH_ATTN
+    assert (
+        draft_config.attention_config.decode_backend == AttentionBackendEnum.FLASHINFER
+    )
 
 
 class _RoutingImpl(AttentionImpl):

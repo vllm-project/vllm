@@ -35,6 +35,7 @@ from vllm.config.vllm import (
 )
 from vllm.platforms import current_platform
 from vllm.v1.attention.backend import AttentionCGSupport
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 DEVICE_TYPE = current_platform.device_type
 
@@ -1589,6 +1590,32 @@ def test_draft_sample_method_gumbel_is_rejected():
             method="ngram",
             num_speculative_tokens=1,
             draft_sample_method="gumbel",
+        )
+
+
+@pytest.mark.skip_global_cleanup
+def test_speculative_attention_backend_routing_config():
+    speculative_config = SpeculativeConfig(
+        method="ngram",
+        num_speculative_tokens=1,
+        attention_prefill_backend="FLASH_ATTN",
+        attention_decode_backend="FLASHINFER",
+    )
+
+    assert speculative_config.attention_backend == AttentionBackendEnum.FLASH_ATTN
+    assert (
+        speculative_config.attention_decode_backend == AttentionBackendEnum.FLASHINFER
+    )
+
+
+@pytest.mark.skip_global_cleanup
+def test_speculative_attention_backend_aliases_must_match():
+    with pytest.raises(ValueError, match="are aliases and must match"):
+        SpeculativeConfig(
+            method="ngram",
+            num_speculative_tokens=1,
+            attention_backend="FLASH_ATTN",
+            attention_prefill_backend="FLASHINFER",
         )
 
 

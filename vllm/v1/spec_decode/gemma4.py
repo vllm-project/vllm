@@ -155,7 +155,10 @@ class Gemma4Proposer(SpecDecodeBaseProposer):
         """
         base = super()._create_draft_vllm_config()
         target_backend = self.vllm_config.attention_config.backend
-        if target_backend is not None:
+        if (
+            target_backend is not None
+            and self.speculative_config.attention_backend is None
+        ):
             base = replace(
                 base,
                 attention_config=replace(

@@ -26,7 +26,7 @@ def load_dspark_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mo
             vllm_config.attention_config,
             use_non_causal=dflash_has_any_non_causal(draft_model_config.hf_config),
             backend=speculative_config.attention_backend,
-            decode_backend=None,
+            decode_backend=speculative_config.attention_decode_backend,
         ),
         cache_config=(
             replace(

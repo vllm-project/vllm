@@ -60,16 +60,21 @@ class Gemma4Speculator(AutoRegressiveSpeculator):
             self.vllm_config,
             model_config=draft_model_config,
         )
-        target_backend = self.vllm_config.attention_config.backend
-        if target_backend is not None:
-            draft_vllm_config = replace(
-                draft_vllm_config,
-                attention_config=replace(
-                    draft_vllm_config.attention_config,
-                    backend=target_backend,
+        target_attention_config = self.vllm_config.attention_config
+        return replace(
+            draft_vllm_config,
+            attention_config=replace(
+                target_attention_config,
+                backend=(
+                    self.speculative_config.attention_backend
+                    or target_attention_config.backend
                 ),
-            )
-        return draft_vllm_config
+                decode_backend=(
+                    self.speculative_config.attention_decode_backend
+                    or target_attention_config.decode_backend
+                ),
+            ),
+        )
 
     def _setup_gemma4_kv_sharing(
         self,
