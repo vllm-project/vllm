@@ -402,21 +402,16 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         WRITE, and re-drive this request via ``_deferred_push_inbox`` once
         the handshake resolves -- so the writer thread never blocks on the
         network (mirrors ``_send_registration_to_p``).
-
-        ``local_block_ids`` are P's *logical* block IDs (from the P
-        scheduler's metadata). ``registration_data["local_block_ids"]``
-        are D's *logical* block IDs (from D's scheduler, sent over the
-        PUSH_REG notif). All conversion to physical block IDs is
-        deferred to ``_xfer_blocks_for_req`` so each side uses its own
-        physical-blocks-per-logical ratio (P uses
-        ``self._physical_blocks_per_logical_kv_block``; D's ratio is
-        learned during the NIXL handshake)."""
-        decode_engine_id = registration_data["decode_engine_id"]
-        remote_block_ids = registration_data["local_block_ids"]
-        decode_request_id = registration_data["request_id"]
+        """
         if not local_block_ids:
             logger.warning("No local blocks to push for request %s", request_id)
             return
+
+        # ``local_block_ids`` are P's logical block IDs; ``remote_block_ids``
+        # (D's, from the PUSH_REG notif) are also logical.
+        decode_engine_id = registration_data["decode_engine_id"]
+        remote_block_ids = registration_data["local_block_ids"]
+        decode_request_id = registration_data["request_id"]
 
         # Runs on the background executor; defer the WRITE until it's ready.
         fut = self._ensure_handshake(
@@ -433,9 +428,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                 blocks: BlockIds = local_block_ids,
                 rd: dict[str, Any] = registration_data,
             ) -> None:
-                try:
-                    f.result()
-                except Exception as e:
+                if (e := f.exception()) is not None:
                     # The engine reclaims the blocks via the TTL so we dont free here
                     self._log_failure(
                         failure_type="push_handshake_failed", req_id=rid, error=e
@@ -447,8 +440,10 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
             fut.add_done_callback(_on_handshake)
             return
 
-        # Both sides are kept in logical form here; ``_xfer_blocks_for_req``
-        # expands each side using the appropriate ratio.
+        # Both sides stay logical here; ``_xfer_blocks_for_req`` converts each
+        # to physical with its own physical-blocks-per-logical ratio -- P uses
+        # ``self._physical_blocks_per_logical_kv_block``, D's is learned during
+        # the NIXL handshake.
         logical_local = self._as_grouped_block_ids(local_block_ids)
         logical_remote = self._as_grouped_block_ids(remote_block_ids)
         physical_local = self._logical_to_kernel_block_ids(logical_local)
