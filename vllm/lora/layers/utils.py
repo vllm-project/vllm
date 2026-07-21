@@ -121,9 +121,14 @@ def try_get_optimal_moe_lora_config(
         "fused_moe_lora_w2_shrink",
     ]:
         block_size_n = config.get("BLOCK_SIZE_N")
-        config["BLOCK_SIZE_N"] = min(
-            block_size_n if block_size_n is not None else 64,
-            next_power_of_2(rank),
+        # Triton's tl.dot requires N >= 16; clamp the floor so small LoRA
+        # ranks (e.g. rank < 16) don't produce an unsupported tile size.
+        config["BLOCK_SIZE_N"] = max(
+            16,
+            min(
+                block_size_n if block_size_n is not None else 64,
+                next_power_of_2(rank),
+            ),
         )
     elif op_type in [
         "fused_moe_lora_w13_expand",
