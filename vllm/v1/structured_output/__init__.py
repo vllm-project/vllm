@@ -255,8 +255,7 @@ class StructuredOutputManager:
                     assert structured_output_request is not None
                 grammar = structured_output_request.grammar
                 if TYPE_CHECKING:
-                    assert grammar is not None
-                    assert not isinstance(grammar, Exception)
+                    assert isinstance(grammar, StructuredOutputGrammar)
 
                 apply_bitmask = self.should_fill_bitmask(request)
                 batch.append((grammar, cumulative_index, apply_bitmask))
@@ -281,8 +280,7 @@ class StructuredOutputManager:
                     assert structured_output_request is not None
                 grammar = structured_output_request.grammar
                 if TYPE_CHECKING:
-                    assert grammar is not None
-                    assert not isinstance(grammar, Exception)
+                    assert isinstance(grammar, StructuredOutputGrammar)
                 apply_bitmask = self.should_fill_bitmask(request)
 
                 reasoner = self._get_reasoner(request)
