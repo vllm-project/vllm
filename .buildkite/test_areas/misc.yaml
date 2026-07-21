@@ -23,6 +23,7 @@ steps:
     - pytest -v -s -m 'not slow_test' v1/spec_decode
   mirror:
     amd:
+      dind: false
       device: mi300_1
       timeout_in_minutes: 75
       depends_on:
@@ -63,8 +64,9 @@ steps:
       - image-build-amd
 
 - label: V1 Core + KV + Metrics
+  device: h200_35gb
   key: v1-core-kv-metrics
-  timeout_in_minutes: 60
+  timeout_in_minutes: 80
   source_file_dependencies:
     - vllm/config/
     - vllm/distributed/
@@ -141,6 +143,7 @@ steps:
     - pytest -v -s -m 'cpu_test' v1/core
     - pytest -v -s v1/structured_output
     - pytest -v -s v1/test_serial_utils.py
+    - pytest -v -s v1/cudagraph/test_cudagraph_manager.py
     - pytest -v -s -m 'cpu_test' v1/kv_connector/unit
     - pytest -v -s -m 'cpu_test' v1/metrics
 
