@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 // Route tests should use `Service::call` rather than `ServiceExt::oneshot`.
 // `oneshot` consumes the router and can drop `AppState` before a streaming
 // response body is fully drained, which closes the mock engine connection too
@@ -76,6 +79,7 @@ fn request_output_with_stop_reason(
         stop_reason,
         events: None,
         kv_transfer_params: None,
+        ec_transfer_params: None,
         trace_headers: None,
         prefill_stats: None,
         routed_experts: None,
@@ -101,6 +105,7 @@ fn request_output_with_logprobs(
         stop_reason,
         events: None,
         kv_transfer_params: None,
+        ec_transfer_params: None,
         trace_headers: None,
         prefill_stats: None,
         routed_experts: None,
@@ -116,6 +121,7 @@ fn request_output_with_logprobs_and_kv(
     new_logprobs: Option<Logprobs>,
     new_prompt_logprobs_tensors: Option<Logprobs>,
     kv_transfer_params: Option<serde_json::Value>,
+    ec_transfer_params: Option<serde_json::Value>,
 ) -> EngineCoreOutput {
     EngineCoreOutput {
         request_id: request_id.to_string(),
@@ -127,6 +133,7 @@ fn request_output_with_logprobs_and_kv(
         stop_reason,
         events: None,
         kv_transfer_params,
+        ec_transfer_params,
         trace_headers: None,
         prefill_stats: None,
         routed_experts: None,
@@ -504,7 +511,7 @@ impl ChatRenderer for FakeChatBackend {
         let placeholder = self
             .multimodal_model_info
             .as_ref()
-            .map(|info| info.placeholder_token())
+            .and_then(|info| info.placeholder_token(llm_multimodal::Modality::Image))
             .unwrap_or("<image>");
         let mut prompt = String::new();
         for message in &request.messages {
@@ -544,7 +551,10 @@ fn render_fake_content(content: &ChatContent, placeholder: &str) -> vllm_chat::R
             for part in parts {
                 match part {
                     ChatContentPart::Text { text } => out.push_str(text),
-                    ChatContentPart::ImageUrl { .. } => out.push_str(placeholder),
+                    ChatContentPart::ImageUrl { .. }
+                    | ChatContentPart::VideoUrl { .. }
+                    | ChatContentPart::InputAudio { .. }
+                    | ChatContentPart::AudioUrl { .. } => out.push_str(placeholder),
                 }
             }
             out
@@ -565,8 +575,10 @@ fn qwen_multimodal_model_info() -> vllm_chat::multimodal::MultimodalModelInfo {
     let info = vllm_chat::multimodal::MultimodalModelInfo::from_paths(
         "qwen2-vl-test".to_string(),
         Some("qwen2_vl".to_string()),
-        Some(&config_path),
-        None,
+        vllm_chat::multimodal::MultimodalConfigFiles {
+            config: Some(&config_path),
+            ..Default::default()
+        },
         Arc::new(fake_chat_tokenizer()),
     )
     .expect("load multimodal info")
@@ -2368,6 +2380,14 @@ async fn non_stream_chat_includes_logprobs_and_prompt_logprobs() {
         json["choices"][0]["logprobs"]["content"][1]["token"],
         json!("i")
     );
+    assert_eq!(
+        json["choices"][0]["logprobs"]["content"][0]["top_logprobs"],
+        json!([])
+    );
+    assert_eq!(
+        json["choices"][0]["logprobs"]["content"][1]["top_logprobs"],
+        json!([])
+    );
     assert_eq!(json["prompt_logprobs"][0], serde_json::Value::Null);
     assert!(json["prompt_logprobs"][1].is_object());
 }
@@ -3630,6 +3650,7 @@ async fn non_stream_raw_generate_returns_token_output_envelope() {
                                 Some(sample_logprobs_for_token(44, 45)),
                                 None,
                                 Some(json!({"connector": "x"})),
+                                None,
                             ),
                         ],
                         ..Default::default()
@@ -4796,7 +4817,10 @@ async fn reset_prefix_cache_route_sends_expected_utility_call() {
     let status = response.status();
     let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
     assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
-    assert!(body.is_empty());
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&body).expect("json body"),
+        json!({"success": true})
+    );
     engine_task.await.expect("mock engine task");
 }
 
@@ -5269,10 +5293,12 @@ async fn abort_requests_route_returns_ok_for_well_formed_body() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
-async fn abort_requests_route_rejects_missing_request_ids() {
+async fn abort_requests_route_aborts_all_when_request_ids_missing() {
     let (app, engine_task) =
         test_admin_app_with_engine_script(|_dealer, _push| boxed_test_future(async move {})).await;
 
+    // Missing `request_ids` means "abort all in-flight requests"; with no
+    // in-flight requests this is a no-op that still succeeds.
     let response = app
         .clone()
         .call(
@@ -5286,11 +5312,10 @@ async fn abort_requests_route_rejects_missing_request_ids() {
         .await
         .expect("call app");
 
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let status = response.status();
     let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
-    let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
-    assert_eq!(json["error"]["type"], "invalid_request_error");
-    assert_eq!(json["error"]["param"], "request_ids");
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    assert!(body.is_empty());
     engine_task.abort_and_join().await;
 }
 
