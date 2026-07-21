@@ -326,9 +326,12 @@ class RequestOffloadState:
             group_state.block_ids.extend(new_blocks)
 
     def storable_chunks(
-        self, group_config: "GroupOffloadConfig", num_offloadable_tokens: int
+        self,
+        group_config: "GroupOffloadConfig",
+        group_state: RequestGroupState,
+        num_offloadable_tokens: int,
     ) -> int:
-        """Number of leading offloaded chunks eligible for store.
+        """Number of allocated leading offloaded chunks eligible for store.
 
         For eagle/MTP groups the volatile trailing chunk of the offloadable
         range is excluded while decoding: the draft-layer KV of the last
@@ -345,7 +348,10 @@ class RequestOffloadState:
         is_decoding = num_offloadable_tokens > self.req.num_prompt_tokens
         if group_config.is_eagle_group and is_decoding:
             num_chunks = max(0, num_chunks - 1)
-        return num_chunks
+        num_allocated_chunks = (
+            len(group_state.block_ids) // self.config.blocks_per_chunk
+        )
+        return min(num_chunks, num_allocated_chunks)
 
     def advance_stored_idx(self, num_offloadable_tokens: int) -> None:
         # max(): at the prefill->decode transition of a chunk-aligned prompt,
@@ -356,7 +362,7 @@ class RequestOffloadState:
         ):
             group_state.next_stored_chunk_idx = max(
                 group_state.next_stored_chunk_idx,
-                self.storable_chunks(group_config, num_offloadable_tokens),
+                self.storable_chunks(group_config, group_state, num_offloadable_tokens),
             )
 
     def update_num_hit_chunks(self, num_cached_tokens: int) -> None:
@@ -991,7 +997,7 @@ class OffloadingConnectorScheduler:
                 self.config.kv_group_configs, req_status.group_states
             ):
                 num_chunks = req_status.storable_chunks(
-                    group_config, num_offloadable_tokens
+                    group_config, group_state, num_offloadable_tokens
                 )
 
                 start_chunk_idx = group_state.next_stored_chunk_idx
@@ -1068,7 +1074,7 @@ class OffloadingConnectorScheduler:
                     group_config.sliding_window_size_in_chunks is not None
                 )
                 num_chunks = req_status.storable_chunks(
-                    group_config, num_offloadable_tokens
+                    group_config, group_state, num_offloadable_tokens
                 )
                 start_chunk_idx = group_state.next_stored_chunk_idx
                 block_ids = group_state.block_ids
