@@ -638,8 +638,8 @@ class EngineArgs:
     collect_detailed_traces: list[DetailedTraceModules] | None = (
         ObservabilityConfig.collect_detailed_traces
     )
-    speculative_decoding_stats: Literal["none", "summary", "detailed"] = (
-        ObservabilityConfig.speculative_decoding_stats
+    per_request_spec_decode_stats: Literal["none", "summary", "detailed"] = (
+        ObservabilityConfig.per_request_spec_decode_stats
     )
     kv_cache_metrics: bool = ObservabilityConfig.kv_cache_metrics
     kv_cache_metrics_sample: float = get_field(
@@ -1389,8 +1389,8 @@ class EngineArgs:
             **observability_kwargs["collect_detailed_traces"],
         )
         observability_group.add_argument(
-            "--speculative-decoding-stats",
-            **observability_kwargs["speculative_decoding_stats"],
+            "--per-request-spec-decode-stats",
+            **observability_kwargs["per_request_spec_decode_stats"],
         )
         observability_group.add_argument(
             "--kv-cache-metrics", **observability_kwargs["kv_cache_metrics"]
@@ -1837,7 +1837,7 @@ class EngineArgs:
             show_hidden_metrics_for_version=self.show_hidden_metrics_for_version,
             otlp_traces_endpoint=self.otlp_traces_endpoint,
             collect_detailed_traces=self.collect_detailed_traces,
-            speculative_decoding_stats=self.speculative_decoding_stats,
+            per_request_spec_decode_stats=self.per_request_spec_decode_stats,
             kv_cache_metrics=self.kv_cache_metrics,
             kv_cache_metrics_sample=self.kv_cache_metrics_sample,
             cudagraph_metrics=self.cudagraph_metrics,

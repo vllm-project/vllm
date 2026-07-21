@@ -130,7 +130,7 @@ The `/metrics` Prometheus endpoint exposes server-level histograms (e.g.
 
 When speculative decoding is enabled, per-request acceptance statistics
 (mean acceptance length and the accepted-draft-length distribution) can be
-returned on each response choice via `--speculative-decoding-stats`. Unlike the
+returned on each response choice via `--per-request-spec-decode-stats`. Unlike the
 timing `metrics` object, these are attached per choice and are available for
 `n > 1`. See
 [Per-Request Acceptance Metrics](speculative_decoding/acceptance_metrics.md).

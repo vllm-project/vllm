@@ -112,7 +112,7 @@ class ChatCompletionResponseChoice(OpenAIBaseModel):
     routed_experts: str | None = None
     # Per-sequence speculative-decoding stats (mean acceptance length +
     # step-by-draft-length histogram). Present only under speculative decoding
-    # with --speculative-decoding-stats. See RequestSpecDecodeStats.to_dict().
+    # with --per-request-spec-decode-stats. See RequestSpecDecodeStats.to_dict().
     speculative_decoding_stats: dict[str, Any] | None = None
 
 

@@ -197,7 +197,7 @@ class Request:
         self.prefill_stats: PrefillStats | None = PrefillStats()
 
         # Per-request speculative-decoding acceptance accumulator. Created
-        # lazily on the first verify step when --speculative-decoding-stats
+        # lazily on the first verify step when --per-request-spec-decode-stats
         # (see Scheduler.update_from_output); stays None otherwise.
         self.spec_decode_stats: RequestSpecDecodeStats | None = None
 
