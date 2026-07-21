@@ -47,3 +47,45 @@ def test_moe_wna16_apply_passes_layer_activation(monkeypatch):
 
     assert output.shape == (1, 2)
     assert captured_kwargs["activation"] is MoEActivation.GELU_TANH
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Only test on CUDA")
+def test_moe_wna16_gemm_checks_sorted_token_ids_bounds():
+    from vllm import _custom_ops as ops
+
+    size_m = 17
+    size_k = 32
+    size_n = 16
+    block_size_m = 16
+    top_k = 1
+
+    x = torch.zeros(size_m, size_k, dtype=torch.float16, device="cuda")
+    output = torch.empty(size_m * top_k, size_n, dtype=torch.float16, device="cuda")
+    qweight = torch.empty(1, size_n, size_k // 2, dtype=torch.uint8, device="cuda")
+    scales = torch.ones(1, size_n, 1, dtype=torch.float16, device="cuda")
+
+    # Regression for #45496: num_tokens_post_pad can cover 9 blocks (144
+    # tokens) while sorted_token_ids has only 129 entries. The last block must
+    # not read sorted_token_ids[129].
+    sorted_token_ids = torch.zeros(129, dtype=torch.int32, device="cuda")
+    expert_ids = torch.full((9,), -1, dtype=torch.int32, device="cuda")
+    num_tokens_post_pad = torch.tensor([144], dtype=torch.int32, device="cuda")
+
+    ops.moe_wna16_gemm(
+        x,
+        output,
+        qweight,
+        scales,
+        None,
+        None,
+        sorted_token_ids,
+        expert_ids,
+        num_tokens_post_pad,
+        top_k,
+        block_size_m,
+        size_n,
+        size_k,
+        4,
+    )
+    torch.cuda.synchronize()
+    torch.testing.assert_close(output, torch.zeros_like(output))

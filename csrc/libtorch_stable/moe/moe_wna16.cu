@@ -26,8 +26,8 @@ __global__ void moe_wna16_gemm_kernel(
 
     uint16_t num_experts, uint16_t group_size, uint16_t top_k, uint32_t size_m,
     uint32_t size_n, uint32_t size_k, uint16_t BLOCK_SIZE_M,
-    uint16_t BLOCK_SIZE_N, uint16_t BLOCK_SIZE_K, bool has_zp,
-    bool mul_topk_weight) {
+    uint16_t BLOCK_SIZE_N, uint16_t BLOCK_SIZE_K,
+    int64_t sorted_token_ids_len, bool has_zp, bool mul_topk_weight) {
 #if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ < 800
   if constexpr (std::is_same<scalar_t, nv_bfloat16>::value) {
     return;
@@ -51,7 +51,8 @@ __global__ void moe_wna16_gemm_kernel(
 
     // load BLOCK_SIZE_M * BLOCK_SIZE_K into shared memory
     for (int m = 0; m < BLOCK_SIZE_M; m++) {
-      const int32_t offset_m = blockIdx.x * BLOCK_SIZE_M + m;
+      const int64_t offset_m = blockIdx.x * BLOCK_SIZE_M + m;
+      if (offset_m >= sorted_token_ids_len) break;
       const int32_t token_index = sorted_token_ids[offset_m];
       if (token_index / top_k >= size_m) break;
 
@@ -83,7 +84,7 @@ __global__ void moe_wna16_gemm_kernel(
       }
     }
 
-    if (expert_id == -1) return;
+    if (num_valid_tokens == 0 || expert_id == -1) return;
     __syncthreads();
     if (threadIdx.x >= BLOCK_SIZE_N || offset_n >= size_n) return;
 
@@ -211,8 +212,10 @@ __global__ void moe_wna16_gemm_kernel(
     }
 
     for (int m = 0; m < num_valid_tokens; ++m) {
+      const int64_t offset_m = blockIdx.x * BLOCK_SIZE_M + m;
+      if (offset_m >= sorted_token_ids_len) break;
       const int32_t token_index =
-          sorted_token_ids[blockIdx.x * BLOCK_SIZE_M + m];
+          sorted_token_ids[offset_m];
       if (mul_topk_weight) {
         res[m] *= topk_weights[token_index];
       }
@@ -235,7 +238,8 @@ void run_moe_wna16_gemm(const scalar_t* input, scalar_t* output,
                         int group_size, int num_token_blocks, int top_k,
                         int size_m, int size_n, int size_k, int BLOCK_SIZE_M,
                         int BLOCK_SIZE_N, int BLOCK_SIZE_K, int bit,
-                        bool has_zp, bool mul_topk_weight) {
+                        int64_t sorted_token_ids_len, bool has_zp,
+                        bool mul_topk_weight) {
   dim3 blockDim, gridDim;
   blockDim.x = BLOCK_SIZE_N;
   blockDim.y = 1;
@@ -271,7 +275,7 @@ void run_moe_wna16_gemm(const scalar_t* input, scalar_t* output,
       input, output, b_qweight, b_scales, b_qzeros, topk_weights,
       sorted_token_ids, expert_ids, num_tokens_post_pad, num_experts,
       group_size, top_k, size_m, size_n, size_k, BLOCK_SIZE_M, BLOCK_SIZE_N,
-      BLOCK_SIZE_K, has_zp, mul_topk_weight);
+      BLOCK_SIZE_K, sorted_token_ids_len, has_zp, mul_topk_weight);
 }
 
 torch::stable::Tensor moe_wna16_gemm(
@@ -294,6 +298,7 @@ torch::stable::Tensor moe_wna16_gemm(
   const int group_size = size_k / b_scales.size(2);
 
   int64_t EM = sorted_token_ids.size(0);
+  const int64_t sorted_token_ids_len = EM;
   if (size_m <= BLOCK_SIZE_M) {
     EM = std::min(EM, size_m * BLOCK_SIZE_M * top_k);
   }
@@ -328,8 +333,8 @@ torch::stable::Tensor moe_wna16_gemm(
         expert_ids.const_data_ptr<int32_t>(),
         num_tokens_post_pad.const_data_ptr<int32_t>(), num_experts, group_size,
         num_token_blocks, top_k, size_m, size_n, size_k, BLOCK_SIZE_M,
-        BLOCK_SIZE_N, BLOCK_SIZE_K, bit, b_qzeros.has_value(),
-        topk_weights.has_value());
+        BLOCK_SIZE_N, BLOCK_SIZE_K, bit, sorted_token_ids_len,
+        b_qzeros.has_value(), topk_weights.has_value());
   } else if (input.scalar_type() == torch::headeronly::ScalarType::BFloat16) {
     run_moe_wna16_gemm<nv_bfloat16>(
         reinterpret_cast<const nv_bfloat16*>(input.const_data_ptr()),
@@ -341,8 +346,8 @@ torch::stable::Tensor moe_wna16_gemm(
         expert_ids.const_data_ptr<int32_t>(),
         num_tokens_post_pad.const_data_ptr<int32_t>(), num_experts, group_size,
         num_token_blocks, top_k, size_m, size_n, size_k, BLOCK_SIZE_M,
-        BLOCK_SIZE_N, BLOCK_SIZE_K, bit, b_qzeros.has_value(),
-        topk_weights.has_value());
+        BLOCK_SIZE_N, BLOCK_SIZE_K, bit, sorted_token_ids_len,
+        b_qzeros.has_value(), topk_weights.has_value());
   } else {
     STD_TORCH_CHECK(false, "moe_wna16_gemm only supports bfloat16 and float16");
   }
