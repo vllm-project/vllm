@@ -568,6 +568,16 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         self.chunk_gated_delta_rule = ChunkGatedDeltaRule()
         self.gdn_prefill_backend = self.chunk_gated_delta_rule.gdn_prefill_backend
         self._prefill_kernels_warmed_up = False
+        if self.num_spec > 0:
+            # all-mode spec-decode dual anchor: per-spec-token column offsets
+            # [0..num_spec] for gathering the read/write state indices of the
+            # 1 + num_spec speculative tokens from the full block table
+            # (mirrors mamba_mixer2). int64 so the gather index is Long.
+            self.register_buffer(
+                "_decode_state_offsets",
+                torch.arange(1 + self.num_spec, dtype=torch.int64).unsqueeze(0),
+                persistent=False,
+            )
         self.enable_packed_recurrent_decode = (
             envs.VLLM_ENABLE_FLA_PACKED_RECURRENT_DECODE
         )
@@ -1386,23 +1396,96 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             mixed_qkv_non_spec = mixed_qkv
 
         # 1.1: Process the multi-query part
+        # all-mode spec dual-anchor read/write state indices for the SSM
+        # update (set below when all-mode; None means in-place update at
+        # spec_state_indices_tensor).
+        spec_ssm_indices_input = None
+        spec_ssm_indices_output = None
         if spec_sequence_masks is not None:
             # spec_state_indices_tensor is always set when spec_sequence_masks is set
             assert spec_state_indices_tensor is not None
-            mixed_qkv_spec = causal_conv1d_update(
-                mixed_qkv_spec,
-                conv_state,
-                conv_weights,
-                self.conv1d.bias,
-                self.activation,
-                conv_state_indices=spec_state_indices_tensor[:, 0][  # type: ignore[index]
-                    : attn_metadata.num_spec_decodes  # type: ignore[attr-defined]
-                ],
-                num_accepted_tokens=num_accepted_tokens,
-                query_start_loc=spec_query_start_loc,
-                max_query_len=spec_state_indices_tensor.size(-1),
-                validate_data=False,
-            )
+            if is_all_mode:
+                # all-mode spec dual anchor: gather the read/write state
+                # indices of the 1 + num_spec speculative tokens from the
+                # full block table. Read anchor = the previous step's
+                # last-scheduled block (where that step wrote its per-token
+                # states); write anchor = this step's last-scheduled block.
+                # In a pure-spec batch (the only cudagraph-captured case)
+                # every request is a spec row, so the request-level buffer
+                # views are used directly (fixed-shape gathers, capture-
+                # safe); a mixed batch is eager-only and boolean-selects the
+                # spec rows. Mirrors mamba_mixer2's spec decode.
+                assert (
+                    attn_metadata.block_idx_last_scheduled_token_prev_step is not None
+                )
+                if attn_metadata.num_prefills == 0 and attn_metadata.num_decodes == 0:
+                    spec_table = attn_metadata.all_state_indices_tensor
+                    spec_block_idx_last_scheduled = (
+                        attn_metadata.block_idx_last_scheduled_token
+                    )
+                    spec_block_idx_last_computed = (
+                        attn_metadata.block_idx_last_computed_token
+                    )
+                    spec_block_idx_prev_step = (
+                        attn_metadata.block_idx_last_scheduled_token_prev_step
+                    )
+                else:
+                    spec_table = attn_metadata.all_state_indices_tensor[
+                        spec_sequence_masks
+                    ]
+                    spec_block_idx_last_scheduled = (
+                        attn_metadata.block_idx_last_scheduled_token[
+                            spec_sequence_masks
+                        ]
+                    )
+                    spec_block_idx_last_computed = (
+                        attn_metadata.block_idx_last_computed_token[spec_sequence_masks]
+                    )
+                    spec_block_idx_prev_step = (
+                        attn_metadata.block_idx_last_scheduled_token_prev_step[
+                            spec_sequence_masks
+                        ]
+                    )
+                spec_ssm_indices_input = spec_table.gather(
+                    1,
+                    spec_block_idx_prev_step.unsqueeze(1) + self._decode_state_offsets,
+                )
+                spec_ssm_indices_output = spec_table.gather(
+                    1,
+                    spec_block_idx_last_scheduled.unsqueeze(1)
+                    + self._decode_state_offsets,
+                )
+                # The conv reads its initial state from the last *computed*
+                # block and writes to the last *scheduled* block in-kernel.
+                mixed_qkv_spec = causal_conv1d_update(
+                    mixed_qkv_spec,
+                    conv_state,
+                    conv_weights,
+                    self.conv1d.bias,
+                    self.activation,
+                    conv_state_indices=spec_table,
+                    block_idx_last_scheduled_token=spec_block_idx_last_scheduled,
+                    initial_state_idx=spec_block_idx_last_computed,
+                    num_accepted_tokens=num_accepted_tokens,
+                    query_start_loc=spec_query_start_loc,
+                    max_query_len=spec_table.size(-1),
+                    validate_data=False,
+                )
+            else:
+                mixed_qkv_spec = causal_conv1d_update(
+                    mixed_qkv_spec,
+                    conv_state,
+                    conv_weights,
+                    self.conv1d.bias,
+                    self.activation,
+                    conv_state_indices=spec_state_indices_tensor[:, 0][  # type: ignore[index]
+                        : attn_metadata.num_spec_decodes  # type: ignore[attr-defined]
+                    ],
+                    num_accepted_tokens=num_accepted_tokens,
+                    query_start_loc=spec_query_start_loc,
+                    max_query_len=spec_state_indices_tensor.size(-1),
+                    validate_data=False,
+                )
 
         # 1.2: Process the remaining part
         if attn_metadata.num_prefills > 0:
@@ -1554,7 +1637,18 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                         : attn_metadata.num_spec_decodes
                         + 1  # type: ignore[attr-defined]
                     ],
-                    ssm_state_indices=spec_state_indices_tensor,
+                    # all-mode: read via the prev-step anchor, write the
+                    # updated per-token states via the current-step anchor
+                    # (dual anchor); align/none: in-place at
+                    # spec_state_indices_tensor.
+                    ssm_state_indices=(
+                        spec_ssm_indices_input
+                        if is_all_mode
+                        else spec_state_indices_tensor
+                    ),
+                    ssm_state_indices_output=(
+                        spec_ssm_indices_output if is_all_mode else None
+                    ),
                     num_accepted_tokens=num_accepted_tokens,
                     use_qk_l2norm_in_kernel=True,
                 )
