@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Callable
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -13,6 +14,9 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
     get_conv_copy_spec,
     get_temporal_copy_spec,
 )
+from vllm.v1.attention.backends.mamba_attn import (
+    compute_mamba_prefix_caching_block_indices,
+)
 from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheGroupSpec, MambaSpec
 from vllm.v1.worker.mamba_utils import (
@@ -20,7 +24,9 @@ from vllm.v1.worker.mamba_utils import (
     MambaSpecDecodeGPUContext,
     collect_mamba_copy_meta,
     do_mamba_copy_block,
+    postprocess_mamba_all,
     preprocess_mamba,
+    preprocess_mamba_all_specdec,
 )
 
 MambaStateCopyFunc = Callable[..., Any]
@@ -149,6 +155,101 @@ def test_resumed_req_ids_cleared_from_mamba_state_idx():
         )
 
     assert mamba_state_idx == {"keep": 99}
+
+
+# -----------------------------------------------------------------------------
+# All-mode spec-decode prev-step anchor tracking. postprocess_mamba_all
+# records where each full spec step wrote its running state;
+# preprocess_mamba_all_specdec feeds it to the metadata builders as
+# prev_last_scheduled_idx (Mamba2 and GDN — the next step's read window).
+# -----------------------------------------------------------------------------
+
+
+def _run_postprocess_mamba_all(
+    mamba_state_idx, scheduled, requests, num_spec, block_size=64
+):
+    spec = MagicMock(block_size=block_size)
+    sched = MagicMock(num_scheduled_tokens=scheduled)
+    input_batch = MagicMock(req_ids=list(scheduled.keys()))
+    with patch(
+        "vllm.v1.worker.mamba_utils.get_mamba_groups",
+        return_value=([0], spec),
+    ):
+        postprocess_mamba_all(
+            sched,
+            MagicMock(),  # kv_cache_config (consumed by the patched getter)
+            input_batch,
+            requests,
+            mamba_state_idx,
+            num_spec,
+            len(scheduled),
+        )
+
+
+def test_postprocess_mamba_all_anchor_matches_builder_formula():
+    """CONTRACT: the recorded prev-step anchor must equal the
+    block_idx_last_scheduled_token the attention builders compute for the
+    same step (the shared cdiv formula) — the next step's spec-decode read
+    window is anchored exactly where this step wrote its per-token states.
+    Covers in-block, at-boundary and just-past-boundary positions."""
+    block_size = 64
+    num_spec = 2
+    ncomps = [0, 61, 64, 100, 125, 128, 129, 189]
+    req_ids = [f"r{i}" for i in range(len(ncomps))]
+    scheduled = dict.fromkeys(req_ids, 1 + num_spec)
+    requests = {
+        rid: SimpleNamespace(num_computed_tokens=nc) for rid, nc in zip(req_ids, ncomps)
+    }
+    mamba_state_idx: dict[str, int] = {}
+    _run_postprocess_mamba_all(
+        mamba_state_idx, scheduled, requests, num_spec, block_size
+    )
+
+    ncomp_t = torch.tensor(ncomps, dtype=torch.int32)
+    seq_lens = ncomp_t + 1 + num_spec
+    _, _, block_idx_last_scheduled = compute_mamba_prefix_caching_block_indices(
+        ncomp_t, seq_lens, block_size
+    )
+    for rid, expected in zip(req_ids, block_idx_last_scheduled.tolist()):
+        assert mamba_state_idx[rid] == expected
+
+
+def test_postprocess_mamba_all_untracks_partial_and_nospec_steps():
+    """Only a full spec decode step (1 + num_spec scheduled tokens) leaves a
+    tracked anchor; anything else (prefill chunk, partial step) pops the
+    entry so the builder falls back to the last computed block. With no
+    speculation the function is a no-op."""
+    num_spec = 2
+    scheduled = {"full": 3, "chunk": 512, "single": 1}
+    requests = {rid: SimpleNamespace(num_computed_tokens=100) for rid in scheduled}
+    mamba_state_idx = {"chunk": 5, "single": 7}
+    _run_postprocess_mamba_all(mamba_state_idx, scheduled, requests, num_spec)
+    assert mamba_state_idx == {"full": 1}  # (100 + 3 - 1) // 64
+
+    untouched = {"full": 42}
+    _run_postprocess_mamba_all(untouched, scheduled, requests, num_spec=0)
+    assert untouched == {"full": 42}
+
+
+def test_preprocess_mamba_all_specdec_buffer_convention():
+    """The prev_last_scheduled_idx buffer gets the tracked anchor per request
+    and -1 everywhere else (untracked rows and the padded tail) — the
+    builders' where(prev >= 0, prev, fallback) contract. Stale entries of
+    finished requests are cleaned before filling."""
+    buf = SimpleNamespace(np=np.full(6, 99, dtype=np.int32), copy_to_gpu=lambda: None)
+    mamba_state_idx = {"a": 3, "gone": 7}
+    sched = _make_scheduler_output(
+        finished_req_ids={"gone"},
+        preempted_req_ids=set(),
+        resumed_req_ids=set(),
+    )
+    input_batch = MagicMock(req_ids=["a", "b"])
+    preprocess_mamba_all_specdec(sched, input_batch, mamba_state_idx, 2, buf)
+
+    assert buf.np[0] == 3  # tracked
+    assert buf.np[1] == -1  # untracked -> builder fallback
+    assert (buf.np[2:] == -1).all()  # padded tail
+    assert "gone" not in mamba_state_idx
 
 
 # -----------------------------------------------------------------------------
