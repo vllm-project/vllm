@@ -118,10 +118,11 @@ tokio = { version = "1.47.1", features = [
 tokio-openssl = "0.6"
 tokio-stream = "0.1"
 tokio-util = { version = "0.7.18", features = ["rt"] }
-tonic = "0.14.5"
-tonic-build = "0.14.5"
-tonic-prost = "0.14.5"
-tonic-prost-build = "0.14.5"
+tonic = "0.14.6"
+tonic-build = "0.14.6"
+tonic-health = "0.14.6"
+tonic-prost = "0.14.6"
+tonic-prost-build = "0.14.6"
 tool-parser = "1.2.0"
 tower = { version = "0.5.3", features = ["util"] }
 tower-http = { version = "0.6.8", features = ["cors", "trace"] }
@@ -143,7 +144,7 @@ vllm-server = { path = "src/server" }
 vllm-text = { path = "src/text" }
 vllm-tokenizer = { path = "src/tokenizer" }
 winnow = { version = "1.0.2", features = ["simd"] }
-xgrammar-structural-tag = "0.1.0"
+xgrammar-structural-tag = "0.2.0"
 zeromq = { version = "0.6.0", default-features = false, features = [
     "tokio-runtime",
     "all-transport",
