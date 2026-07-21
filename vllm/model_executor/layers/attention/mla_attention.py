@@ -367,6 +367,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         q_lora_rank: int | None,
         kv_lora_rank: int,
         kv_b_proj: ColumnParallelLinear,
+        dcp_q_replicate: bool = False,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
@@ -385,10 +386,11 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         self.q_lora_rank = q_lora_rank
         self.kv_lora_rank = kv_lora_rank
         self.kv_b_proj = kv_b_proj
+        self.dcp_q_replicate = dcp_q_replicate
+        self.W_UK_T_dcp_qrep: torch.Tensor | None = None
         self.head_size = kv_lora_rank + qk_rope_head_dim
         self.layer_name = prefix
         self.indexer = indexer
-
         self.num_kv_heads = 1
         self.qk_head_dim = self.qk_nope_head_dim + self.qk_rope_head_dim
 
@@ -592,6 +594,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         kv_c_normed: torch.Tensor,
         k_pe: torch.Tensor,
         output_shape: torch.Size | None = None,
+        q_dcp_replicated: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if self.calculate_kv_scales:
             torch.ops.vllm.maybe_calc_kv_scales(
@@ -647,6 +650,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 self_kv_cache,
                 attn_metadata,
                 output=output,
+                q_dcp_replicated=q_dcp_replicated,
             )
             return output
         else:
@@ -666,6 +670,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 output,
                 encoded,
                 kv_cache_dummy_dep=kv_cache_dummy_dep,
+                q_dcp_replicated=q_dcp_replicated,
             )
             return output
 
@@ -683,6 +688,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         quant_scale_ue8m0: bool | None = None,
         quant_col_major: bool | None = None,
         quant_tma_aligned: bool | None = None,
+        q_dcp_replicated: torch.Tensor | None = None,
     ) -> torch.Tensor:
         assert output is not None, "Output tensor must be provided."
 
@@ -739,6 +745,8 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         output_padded = output
         output = output[:num_actual_toks, ...]
         q = q[:num_actual_toks, ...]
+        if q_dcp_replicated is not None:
+            q_dcp_replicated = q_dcp_replicated[:num_actual_toks, ...]
         k_c_normed = k_c_normed[:num_actual_toks, ...]
         k_pe = k_pe[:num_actual_toks, ...]
 
@@ -794,7 +802,12 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             )
 
         if num_mqa_tokens > 0:
-            mqa_q = q[:num_mqa_tokens]
+            if q_dcp_replicated is not None:
+                mqa_q = q_dcp_replicated[:num_mqa_tokens]
+                qrep_decode = True
+            else:
+                mqa_q = q[:num_mqa_tokens]
+                qrep_decode = False
             mqa_output_slice = output[:num_mqa_tokens]
 
             mqa_q_nope, mqa_q_pe = mqa_q.split(
@@ -834,7 +847,9 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             else:
                 # Pads the head_dim if necessary (for the underlying kernel)
                 N, B, P = mqa_q_nope.shape
-                _, _, L = self.W_UK_T.shape
+                W_UK_T = self.W_UK_T_dcp_qrep if qrep_decode else self.W_UK_T
+                assert W_UK_T is not None
+                _, _, L = W_UK_T.shape
 
                 if self.q_pad_num_heads is not None:
                     mqa_ql_nope = mqa_q_nope.new_empty((self.q_pad_num_heads, B, L))
@@ -843,7 +858,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                     mqa_ql_nope = mqa_q_nope.new_empty((N, B, L))
 
                 # Multiply (N, B, P) x (N, P, L) -> (N, B, L)
-                torch.bmm(mqa_q_nope, self.W_UK_T, out=mqa_ql_nope)
+                torch.bmm(mqa_q_nope, W_UK_T, out=mqa_ql_nope)
 
                 # Convert from (N, B, L) to (B, N, L)
                 mqa_ql_nope = mqa_ql_nope.transpose(0, 1)
@@ -856,6 +871,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 )
             else:
                 mqa_q = (mqa_ql_nope, mqa_q_pe)
+            # concatenate nope + pe -> (B, N, L + P) (fp8 op above may have fused)
             if self.impl.dcp_world_size > 1:
                 if self.use_pcp:
                     if self.impl.dcp_world_size > self.impl.pcp_world_size:
@@ -864,8 +880,11 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                         mqa_q = get_tp_group().all_gather(mqa_q, dim=1)
                 else:
                     if isinstance(mqa_q, tuple):
+                        # concatenate mqa_ql_nope and mqa_q_pe -> (B, N, L + P)
                         mqa_q = torch.cat(mqa_q, dim=-1)
-                    mqa_q = get_dcp_group().all_gather(mqa_q, dim=1)
+                    if not qrep_decode:
+                        # mqa_q do allgather in head dim.
+                        mqa_q = get_dcp_group().all_gather(mqa_q, dim=1)
 
             # call decode attn
             if not self.impl.is_sparse:
@@ -953,6 +972,21 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             self.kv_b_proj, out_dtype=act_dtype
         ).T
 
+        if self.dcp_q_replicate:
+            # qrep wired here: validate unsupported decode backends once.
+            assert self.q_pad_num_heads in (None, self.num_heads), (
+                "DCP query replication is unsupported on head-padding MLA "
+                "backends (q_pad_num_heads)."
+            )
+            if (
+                self.is_aiter_triton_fp4_bmm_enabled
+                or self.is_aiter_triton_fp8_bmm_enabled
+            ):
+                raise NotImplementedError(
+                    "DCP query replication is not implemented for the aiter "
+                    "FP4/FP8 MLA BMM paths."
+                )
+
         assert kv_b_proj_weight.shape == (
             self.kv_lora_rank,
             self.num_heads * (self.qk_nope_head_dim + self.v_head_dim),
@@ -1033,6 +1067,10 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             replace_parameter(self, "W_UV", W_UV.transpose(0, 1), prefer_copy=True)
             # Convert from (L, N, P) to (N, P, L)
             replace_parameter(self, "W_UK_T", W_UK.permute(1, 2, 0), prefer_copy=True)
+            if self.dcp_q_replicate:
+                self.W_UK_T_dcp_qrep = get_dcp_group().all_gather(
+                    self.W_UK_T.contiguous(), dim=0
+                )
 
         # If we should not load quant weights, we initialize the scales to 1.0
         # as the default value. See [Note: Register q/k/v/prob scales in state dict]
@@ -1177,6 +1215,7 @@ def unified_mla_attention_with_output(
     quant_scale_ue8m0: bool | None = None,
     quant_col_major: bool | None = None,
     quant_tma_aligned: bool | None = None,
+    q_dcp_replicated: torch.Tensor | None = None,
 ) -> None:
     # kv_cache_dummy_dep is not used but accepting it creates a data dependency
     # that ensures torch.compile preserves ordering between KV cache update and
@@ -1197,6 +1236,7 @@ def unified_mla_attention_with_output(
         quant_scale_ue8m0=quant_scale_ue8m0,
         quant_col_major=quant_col_major,
         quant_tma_aligned=quant_tma_aligned,
+        q_dcp_replicated=q_dcp_replicated,
     )
 
 
@@ -1213,6 +1253,7 @@ def unified_mla_attention_with_output_fake(
     quant_scale_ue8m0: bool | None = None,
     quant_col_major: bool | None = None,
     quant_tma_aligned: bool | None = None,
+    q_dcp_replicated: torch.Tensor | None = None,
 ) -> None:
     return
 
