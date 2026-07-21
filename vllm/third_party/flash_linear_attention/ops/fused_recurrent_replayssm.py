@@ -27,6 +27,7 @@ def fused_recurrent_gated_delta_rule_replayssm_kernel(
     g_cache,
     ssm_state_indices,
     write_pos,
+    is_flush,
     scale,
     stride_mixed_qkv_tok: tl.constexpr,
     stride_a_tok: tl.constexpr,
@@ -69,9 +70,10 @@ def fused_recurrent_gated_delta_rule_replayssm_kernel(
         return
 
     # Per-row buffer cursor and flush flag; valid (committed) cache positions.
-    # vLLM: write_pos is per decode row (i_n), not per physical slot.
+    # write_pos and is_flush are per decode row (i_n). is_flush is a builder
+    # input (not derived) so align mode can force a flush mid-buffer.
     b_write_pos = tl.load(write_pos + i_n).to(tl.int64)
-    b_is_flush = b_write_pos == MAX_CACHE_LEN - 1
+    b_is_flush = tl.load(is_flush + i_n) != 0
     cache_valid = o_c < b_write_pos
 
     # Gate for the current token: decay g, its exp alpha, and the beta mixing weight.
@@ -279,6 +281,7 @@ def fused_recurrent_gated_delta_rule_replayssm(
     out: torch.Tensor,
     ssm_state_indices: torch.Tensor,
     write_pos: torch.Tensor,
+    is_flush: torch.Tensor,
     use_qk_l2norm_in_kernel: bool = False,
     block_v: int | None = None,
     num_warps: int | None = None,
@@ -312,6 +315,8 @@ def fused_recurrent_gated_delta_rule_replayssm(
         raise ValueError("`out` must be contiguous.")
     if write_pos.ndim != 1 or write_pos.dtype != torch.int32:
         raise ValueError("`write_pos` must be a 1D int32 tensor.")
+    if is_flush.ndim != 1 or is_flush.dtype != torch.int8:
+        raise ValueError("`is_flush` must be a 1D int8 tensor.")
 
     B = mixed_qkv.shape[0]
     num_state_slots, HV, V, K = initial_state.shape
@@ -391,6 +396,7 @@ def fused_recurrent_gated_delta_rule_replayssm(
         g_cache=g_cache,
         ssm_state_indices=ssm_state_indices,
         write_pos=write_pos,
+        is_flush=is_flush,
         scale=scale,
         stride_mixed_qkv_tok=mixed_qkv.stride(0),
         stride_a_tok=a.stride(0),

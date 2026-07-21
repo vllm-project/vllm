@@ -148,6 +148,7 @@ def _run_gdn_teacher_equivalence(
         write_pos = torch.full(
             (batch,), t % max_cache_len, device=device, dtype=torch.int32
         )
+        is_flush = (write_pos == max_cache_len - 1).to(torch.int8)
 
         out_b = torch.empty(batch, 1, HV, V, device=device, dtype=act_dtype)
         fused_recurrent_gated_delta_rule_packed_decode(
@@ -179,6 +180,7 @@ def _run_gdn_teacher_equivalence(
             out=out_d,
             ssm_state_indices=ssm_state_indices,
             write_pos=write_pos,
+            is_flush=is_flush,
             use_qk_l2norm_in_kernel=True,
         )
         y_dec[:, t] = out_d[:, 0]
