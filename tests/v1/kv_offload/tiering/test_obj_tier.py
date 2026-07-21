@@ -15,14 +15,23 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import numpy as np
+import pytest
 import torch
 
 from vllm.v1.kv_offload.base import (
+    Locality,
     LookupResult,
+    OffloadingKVEventsConfig,
     OffloadKey,
     ReqContext,
     ScheduleEndContext,
     make_offload_key,
+)
+from vllm.v1.kv_offload.config import (
+    OffloadingCacheConfig,
+    OffloadingConfig,
+    OffloadingModelConfig,
+    OffloadingParallelConfig,
 )
 from vllm.v1.kv_offload.tiering.base import JobMetadata, JobResult
 from vllm.v1.kv_offload.tiering.obj.config import ObjStoreConfig
@@ -33,24 +42,30 @@ from vllm.v1.kv_offload.tiering.obj.manager import ObjectStoreSecondaryTierManag
 # ---------------------------------------------------------------------------
 
 
-def _make_vllm_config():
-    return SimpleNamespace(
-        model_config=SimpleNamespace(model="test/model"),
-        cache_config=SimpleNamespace(block_size=16, cache_dtype="float16"),
-        parallel_config=SimpleNamespace(
-            tensor_parallel_size=1,
-            pipeline_parallel_size=1,
-            prefill_context_parallel_size=1,
-            decode_context_parallel_size=1,
+def _make_offloading_config(enable_kv_cache_events: bool) -> OffloadingConfig:
+    return OffloadingConfig(
+        groups=(),
+        worker_kv_bytes_per_block=0,
+        enable_kv_cache_events=enable_kv_cache_events,
+        extra_config={},
+        engine_id="test-engine",
+        model=OffloadingModelConfig(name="test/model", dtype="float16"),
+        cache=OffloadingCacheConfig(tokens_per_hash=16, blocks_per_chunk=1),
+        parallel=OffloadingParallelConfig(
             rank=0,
+            world_size=1,
+            tp_size=1,
+            pp_size=1,
+            pcp_size=1,
+            dcp_size=1,
+            data_parallel_index=0,
+            is_parallelism_agnostic=False,
         ),
-        use_v2_model_runner=False,
     )
 
 
 _OFFLOADING_SPEC = SimpleNamespace(
-    vllm_config=_make_vllm_config(),
-    kv_cache_config=SimpleNamespace(kv_cache_groups=[]),
+    config=_make_offloading_config(enable_kv_cache_events=False),
 )
 
 _STORE_CONFIG = {
@@ -182,9 +197,11 @@ class MockNixlAgent:
 def _make_events_spec(enable_kv_cache_events: bool) -> SimpleNamespace:
     """Offloading spec stub with an explicit global KV events flag."""
     return SimpleNamespace(
-        vllm_config=_make_vllm_config(),
-        kv_cache_config=SimpleNamespace(kv_cache_groups=[]),
-        kv_events_config=SimpleNamespace(enable_kv_cache_events=enable_kv_cache_events),
+        config=_make_offloading_config(enable_kv_cache_events),
+        kv_events_config=OffloadingKVEventsConfig(
+            enable_kv_cache_events=enable_kv_cache_events,
+            self_describing_kv_events=False,
+        ),
     )
 
 
@@ -248,6 +265,12 @@ def lookup_and_wait(
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("locality", ["local", ""])
+def test_invalid_locality_raises_at_construction(locality):
+    with pytest.raises(ValueError, match="Locality"):
+        _make_tier(locality=locality)
 
 
 class TestMockObjTierBasic:
@@ -438,6 +461,7 @@ class TestObjTierKVEvents:
         self.tier, self.agent = _make_tier(
             offloading_spec=_make_events_spec(enable_kv_cache_events=True),
             enable_kv_events=True,
+            locality="REMOTE",
         )
 
     def test_successful_store_emits_stored_event(self):
@@ -451,9 +475,31 @@ class TestObjTierKVEvents:
         assert events[0].keys == keys
         # Literal medium pins the wire contract, not just the constant choice.
         assert events[0].medium == "OBJ"
+        assert events[0].locality is Locality.REMOTE
         assert not events[0].removed
         # take_events drains the buffer.
         assert list(self.tier.take_events()) == []
+
+    @pytest.mark.parametrize(
+        ("locality", "expected"),
+        [(None, None), ("LOCAL", Locality.LOCAL)],
+    )
+    def test_store_event_uses_configured_locality(self, locality, expected):
+        locality_config = {} if locality is None else {"locality": locality}
+        tier, _ = _make_tier(
+            offloading_spec=_make_events_spec(enable_kv_cache_events=True),
+            enable_kv_events=True,
+            **locality_config,
+        )
+        try:
+            tier.submit_store(make_job(1, [key(1)], [0]))
+            assert all(r.success for r in drain(tier))
+
+            events = list(tier.take_events())
+            assert len(events) == 1
+            assert events[0].locality is expected
+        finally:
+            tier.shutdown()
 
     def test_mixed_job_results_emit_event_only_for_successful_job(self):
         """With a failed and a successful store job resolving in the same

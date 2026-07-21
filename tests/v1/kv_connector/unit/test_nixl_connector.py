@@ -13,6 +13,7 @@ from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
 import msgspec
+import numpy as np
 import pytest
 import ray
 import torch
@@ -508,7 +509,7 @@ class FakeNixlConnectorWorker(NixlConnectorWorker):
         expected_engine_id: str,
         remote_pp_size: int = 1,
         notif_agents_only: bool = False,
-    ) -> dict[tuple[int, int], str]:
+    ) -> tuple[dict[tuple[int, int], str], float]:
         # Mimic slow _nixl_handshake, as well as bypass zmq communication.
         time.sleep(self._hand_shake_latency)
         # These should've been done in register_kv_caches(), called by
@@ -560,7 +561,8 @@ class FakeNixlConnectorWorker(NixlConnectorWorker):
                 remote_tp_size=remote_tp_size,
             )
             remote_agents[(0, remote_tp_rank)] = remote_agent_name
-        return remote_agents
+        # Handshake bypasses zmq, so report a zero clock offset to the peer.
+        return remote_agents, 0.0
 
 
 class TestNixlHandshake:
@@ -749,7 +751,10 @@ class TestNixlHandshake:
         worker.block_len_per_layer = [4096 * worker.block_size]
         worker.num_blocks = 1
         worker.dst_num_blocks[worker.engine_id] = worker.num_blocks
-        worker.src_blocks_data = [(0, worker.block_len_per_layer[0], worker.tp_rank)]
+        worker.src_blocks_data = np.array(
+            [(0, worker.block_len_per_layer[0], worker.tp_rank)],
+            dtype=np.uint64,
+        )
         worker.num_descs = len(worker.src_blocks_data)
 
         def check_handshake(remote_tp_size: int):
@@ -768,7 +773,7 @@ class TestNixlHandshake:
                 range(tp_ratio)
             )
 
-        remote_agents = worker._nixl_handshake(
+        remote_agents, _ = worker._nixl_handshake(
             host="localhost",
             port=1234,
             remote_tp_size=4,
@@ -780,7 +785,7 @@ class TestNixlHandshake:
         # discovered. This is not a scenario we actively support right now, but
         # the connector allows it.
         worker.REMOTE_ENGINE_ID = "remote_engine_2"
-        remote_agents = worker._nixl_handshake(
+        remote_agents, _ = worker._nixl_handshake(
             host="localhost",
             port=1234,
             remote_tp_size=6,
@@ -1123,8 +1128,8 @@ class TestNixlHandshake:
             == worker._mamba_ssm_size[1]
         )
 
-        assert worker._build_fa_remote(plan, meta, block_size_ratio=1) == [
-            (0x1000 + local_block_len, local_block_len, 0)
+        assert worker._build_fa_remote(plan, meta, block_size_ratio=1).tolist() == [
+            [0x1000 + local_block_len, local_block_len, 0]
         ]
 
     @patch(
@@ -1157,10 +1162,13 @@ class TestNixlHandshake:
             worker._region_is_mla = [False, True]
             worker.num_blocks = 1
             worker.dst_num_blocks[worker.engine_id] = worker.num_blocks
-            worker.src_blocks_data = [
-                (0, fa_len, worker.tp_rank),
-                (0, idx_len, worker.tp_rank),
-            ]
+            worker.src_blocks_data = np.array(
+                [
+                    (0, fa_len, worker.tp_rank),
+                    (0, idx_len, worker.tp_rank),
+                ],
+                dtype=np.uint64,
+            )
             worker.num_descs = len(worker.src_blocks_data)
 
             # D_TP=2, P_TP=1 -> tp_ratio=2. SPLIT region scales by tp_ratio;
@@ -2878,7 +2886,10 @@ def test_compatibility_hash_validation(
 
     # Mock ZMQ socket to return our handshake payload
     mock_socket = MagicMock()
-    mock_socket.recv.return_value = msgspec.msgpack.encode(handshake_payload)
+    mock_socket.recv_multipart.return_value = [
+        msgspec.msgpack.encode(handshake_payload),
+        msgspec.msgpack.encode(time.perf_counter()),
+    ]
 
     # Mock add_remote_agent to avoid actual NIXL operations
     # Patch zmq_ctx to return our mock socket
@@ -2897,7 +2908,7 @@ def test_compatibility_hash_validation(
                     expected_engine_id=FakeNixlConnectorWorker.REMOTE_ENGINE_ID,
                 )
         else:
-            result = decode_worker._nixl_handshake(
+            result, _ = decode_worker._nixl_handshake(
                 host="localhost",
                 port=1234,
                 remote_tp_size=1,
@@ -2981,7 +2992,10 @@ def test_handshake_decode_errors(default_vllm_config, dist_init, error_scenario)
         raise AssertionError(f"{error_scenario} not a valid scenario")
 
     mock_socket = MagicMock()
-    mock_socket.recv.return_value = msg_bytes
+    mock_socket.recv_multipart.return_value = [
+        msg_bytes,
+        msgspec.msgpack.encode(time.perf_counter()),
+    ]
     with (
         patch.object(decode_worker, "add_remote_agent", return_value="fake_agent"),
         patch.object(nixl.base_worker, "zmq_ctx") as mock_zmq_ctx,
