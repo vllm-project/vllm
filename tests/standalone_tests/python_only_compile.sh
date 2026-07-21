@@ -28,8 +28,62 @@ fi
 # test whether the metadata.json url is valid, retry each 3 minutes up to 5 times
 # this avoids cumbersome error messages & manual retries in case the precompiled wheel
 # for the given commit is still being built in the release pipeline
-meta_json_url="https://wheels.vllm.ai/$merge_base_commit/vllm/metadata.json"
-echo "INFO: will use metadata.json from $meta_json_url"
+_vllm_target_lower="$(printf '%s' "${VLLM_TARGET_DEVICE:-}" | tr '[:upper:]' '[:lower:]')"
+if [[ "${_vllm_target_lower}" == "rocm" ]] || [[ -d /opt/rocm ]] || command -v rocminfo >/dev/null 2>&1; then
+    if [[ -n "${VLLM_PRECOMPILED_WHEEL_VARIANT:-}" ]]; then
+        _rocm_variant="${VLLM_PRECOMPILED_WHEEL_VARIANT}"
+    else
+        _rocm_env_variant="$(python3 - <<'PY'
+import ctypes
+import os
+from pathlib import Path
+
+def get_rocm_version() -> str | None:
+    rocm_home = os.environ.get("ROCM_HOME") or os.environ.get("ROCM_PATH") or "/opt/rocm"
+    try:
+        librocm_core = Path(rocm_home) / "lib" / "librocm-core.so"
+        if not librocm_core.is_file():
+            return None
+        librocm = ctypes.CDLL(str(librocm_core))
+        get_rocm_core_version = librocm.getROCmVersion
+        major = ctypes.c_uint32()
+        minor = ctypes.c_uint32()
+        patch = ctypes.c_uint32()
+        if get_rocm_core_version(
+            ctypes.byref(major), ctypes.byref(minor), ctypes.byref(patch)
+        ) == 0:
+            return f"{major.value}.{minor.value}.{patch.value}"
+    except Exception:
+        return None
+    return None
+
+version = get_rocm_version()
+if version:
+    print(f"rocm{version.replace('.', '')}", end="")
+PY
+)"
+        _available_variants="$(curl -sf "https://wheels.vllm.ai/rocm/${merge_base_commit}/" \
+            | grep -oP 'rocm\d+' | sort -u | tr '\n' ' ')"
+        if [[ -n "${_rocm_env_variant}" ]] \
+                && [[ " ${_available_variants} " == *" ${_rocm_env_variant} "* ]]; then
+            _rocm_variant="${_rocm_env_variant}"
+        else
+            echo "WARN: Environment ROCm variant '${_rocm_env_variant:-unknown}' not available (${_available_variants}) for commit ${merge_base_commit}"
+            _rocm_variant=""
+        fi
+        unset -v _rocm_env_variant _available_variants
+    fi
+    if [[ -n "${_rocm_variant}" ]]; then
+        meta_json_url="https://wheels.vllm.ai/rocm/${merge_base_commit}/${_rocm_variant}/vllm/metadata.json"
+    else
+        meta_json_url="https://wheels.vllm.ai/rocm/${merge_base_commit}/vllm/metadata.json"
+    fi
+    unset -v _rocm_variant
+else
+    meta_json_url="https://wheels.vllm.ai/${merge_base_commit}/vllm/metadata.json"
+fi
+unset -v _vllm_target_lower
+echo "INFO: will use metadata.json from ${meta_json_url}"
 
 for i in {1..5}; do
     echo "Checking metadata.json URL (attempt $i)..."
