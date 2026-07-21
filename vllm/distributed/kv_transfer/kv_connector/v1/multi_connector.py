@@ -124,6 +124,15 @@ class MultiKVConnectorPromMetrics(KVConnectorPromMetrics):
             )
             self._prom_metrics[connector_id].observe(stats_data["data"], engine_idx)
 
+    def record_config_info(
+        self, config_info: dict[str, dict[str, str]], engine_idx: int = 0
+    ):
+        # config_info is flat (metric_name -> labels), merged across children;
+        # hand it to every child prom, each of which emits only the metrics it
+        # owns (unknown metric names are skipped).
+        for prom in self._prom_metrics.values():
+            prom.record_config_info(config_info, engine_idx)
+
 
 class MultiConnector(KVConnectorBase_V1, SupportsHMA):
     """
@@ -632,6 +641,19 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
             else:
                 stats_by_connector[connector_id] = stats
         return stats_by_connector
+
+    def get_config_info(self) -> dict[str, dict[str, str]] | None:
+        # Merge nested connectors' startup config-info (metric_name -> labels)
+        # so a connector wrapped inside MultiConnector still emits at startup.
+        merged: dict[str, dict[str, str]] | None = None
+        for c in self._connectors:
+            info = c.get_config_info()
+            if info is None:
+                continue
+            if merged is None:
+                merged = {}
+            merged.update(info)
+        return merged
 
     @classmethod
     def build_prom_metrics(

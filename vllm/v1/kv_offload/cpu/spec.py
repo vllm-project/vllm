@@ -17,7 +17,10 @@ from vllm.v1.kv_offload.base import (
     OffloadingWorker,
 )
 from vllm.v1.kv_offload.config import OffloadingConfig
-from vllm.v1.kv_offload.cpu.common import CPUOffloadingMetrics
+from vllm.v1.kv_offload.cpu.common import (
+    CPU_CONFIG_INFO_LABELS,
+    CPUOffloadingMetrics,
+)
 from vllm.v1.kv_offload.cpu.gpu_worker import CPUOffloadingWorker
 from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
 
@@ -51,6 +54,19 @@ class CPUOffloadingSpec(OffloadingSpec):
                     "in-flight loads that have not yet "
                     "completed (0.0 = idle, 1.0 = saturated)."
                 ),
+            ),
+            CPUOffloadingMetrics.CPU_CONFIG_INFO: OffloadingGaugeMetadata(
+                documentation=(
+                    "Static configuration of the CPU KV offload tier; the "
+                    "value is always 1 and the config is carried in the "
+                    "labels. num_blocks is the offload capacity in offload "
+                    "blocks and blocks_per_chunk the number of GPU blocks per "
+                    "offload block (num_gpu_blocks equivalents = num_blocks * "
+                    "blocks_per_chunk); kv_bytes_per_chunk is the byte size of "
+                    "one offload block, cpu_page_size_per_worker the per-worker "
+                    "page size in bytes, and eviction_policy the cache policy."
+                ),
+                labelnames=CPU_CONFIG_INFO_LABELS,
             ),
             CPUOffloadingMetrics.CPU_ALLOCATION_SIZE: OffloadingHistogramMetadata(
                 documentation=(
@@ -125,6 +141,13 @@ class CPUOffloadingSpec(OffloadingSpec):
 
             self._manager = CPUOffloadingManager(
                 num_blocks=self.num_blocks,
+                config_info={
+                    "num_blocks": str(self.num_blocks),
+                    "blocks_per_chunk": str(self.blocks_per_chunk),
+                    "kv_bytes_per_chunk": str(self.kv_bytes_per_chunk),
+                    "cpu_page_size_per_worker": str(self.cpu_page_size_per_worker),
+                    "eviction_policy": self.eviction_policy,
+                },
                 cache_policy=self.eviction_policy,  # type: ignore[arg-type]
                 enable_events=self.kv_events_config.enable_kv_cache_events,
                 store_threshold=store_threshold,

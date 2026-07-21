@@ -744,6 +744,17 @@ class MPClient(EngineCoreClient):
             else response.kv_cache_max_concurrency
         )
 
+        # Static per-connector config (metric_name -> {label: value}), emitted
+        # as Info-style metrics at startup. Per-engine (last writer wins), not
+        # summed across DP; identical across replicas.
+        if (
+            response.kv_connector_config_info is not None
+            and vllm_config.kv_transfer_config is not None
+        ):
+            vllm_config.kv_transfer_config.kv_connector_config_info = (
+                response.kv_connector_config_info
+            )
+
         # In external DP LB mode, the coordinator address that the
         # front-end procs connect to is obtained by each engine via it's
         # initial handshake with the rank 0 front-end.

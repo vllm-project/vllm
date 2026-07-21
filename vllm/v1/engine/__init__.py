@@ -83,6 +83,10 @@ class EngineCoreReadyResponse:
     # KV cache capacity (None for encoder-only/attention-free models).
     kv_cache_size_tokens: int | None = None
     kv_cache_max_concurrency: float | None = None
+    # Static per-connector config to emit as Info-style metrics at startup,
+    # mapping metric_name -> {label: value}. None when no KV connector or the
+    # connector exposes no startup config.
+    kv_connector_config_info: dict[str, dict[str, str]] | None = None
 
 
 class EngineCoreRequest(

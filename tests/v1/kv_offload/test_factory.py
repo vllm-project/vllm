@@ -649,3 +649,190 @@ def test_blocks_per_chunk_must_be_positive():
 
     with pytest.raises(ValueError, match="greater than 0"):
         _create_spec(config, _make_kv_cache_config())
+
+
+# ---------------------------------------------------------------------------
+# CPU_CONFIG_INFO metric — spec wiring and Prometheus emission
+# ---------------------------------------------------------------------------
+
+
+def test_cpu_config_info_wiring_matches_declared_labels():
+    """The config_info the spec hands the manager must line up exactly with the
+    declared CPU_CONFIG_INFO labels.
+
+    Guards two things record_config_info() relies on but the manager-level test
+    cannot see: the dict keys equal the label set (a drift would KeyError at
+    emit time) and the values reflect the spec's computed static config.
+    """
+    from vllm.v1.kv_offload.cpu.common import (
+        CPU_CONFIG_INFO_LABELS,
+        CPUOffloadingMetrics,
+    )
+
+    config = _make_vllm_config(cpu_bytes_to_use=65536)
+    spec = _create_spec(config, _make_kv_cache_config())
+    manager = spec.get_manager()
+
+    # Keys are exactly the declared labels (anti-drift).
+    assert manager._config_info is not None
+    assert set(manager._config_info) == set(CPU_CONFIG_INFO_LABELS)
+
+    # Values reflect the spec's computed static config.
+    assert manager._config_info == {
+        "num_blocks": str(spec.num_blocks),
+        "blocks_per_chunk": str(spec.blocks_per_chunk),
+        "kv_bytes_per_chunk": str(spec.kv_bytes_per_chunk),
+        "cpu_page_size_per_worker": str(spec.cpu_page_size_per_worker),
+        "eviction_policy": spec.eviction_policy,
+    }
+
+    # The metric is declared with those exact labelnames.
+    metrics = type(spec).build_metric_definitions(_get_extra_config(config))
+    assert (
+        tuple(metrics[CPUOffloadingMetrics.CPU_CONFIG_INFO].labelnames)
+        == CPU_CONFIG_INFO_LABELS
+    )
+
+
+def test_cpu_config_info_reflects_tensor_parallel_sizing():
+    """config_info labels fold in TP/PP world size.
+
+    cpu_bytes_to_use is the total across all TP ranks, so with world_size=6
+    (TP=3, PP=2) and block_size=32 the offload block sizing shrinks
+    accordingly; the emitted labels must reflect the per-world computation,
+    not the single-rank one.
+    """
+    config = _make_layout_vllm_config(
+        cpu_bytes_to_use=1920,
+        extra_config={"block_size": 32},
+        tensor_parallel_size=3,
+        pipeline_parallel_size=2,
+    )
+    spec = _create_spec(config, _make_sizing_kv_cache_config(packed=False))
+
+    assert spec.get_manager()._config_info == {
+        "num_blocks": "10",  # 1920 // kv_bytes_per_chunk(192)
+        "blocks_per_chunk": "2",
+        "kv_bytes_per_chunk": "192",  # worker_kv_bytes_per_block * world_size(6) * ...
+        "cpu_page_size_per_worker": "32",
+        "eviction_policy": "lru",
+    }
+
+
+def test_kv_offload_cpu_config_info_startup_emission():
+    """The CPU offload static config is exposed via get_config_info() and can
+    be emitted as an Info-style gauge at startup, with no request/step."""
+    from prometheus_client import CollectorRegistry, Counter, Gauge, Histogram
+
+    from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
+    from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
+        OffloadPromMetrics,
+    )
+    from vllm.distributed.kv_transfer.kv_connector.v1.offloading_connector import (
+        OffloadingConnector,
+    )
+    from vllm.v1.kv_offload.cpu.common import (
+        CPU_CONFIG_INFO_LABELS,
+        CPUOffloadingMetrics,
+    )
+
+    vllm_config = _make_vllm_config(cpu_bytes_to_use=65536)
+    connector = OffloadingConnector(
+        vllm_config, KVConnectorRole.SCHEDULER, _make_kv_cache_config()
+    )
+
+    config_info = connector.get_config_info()
+    assert config_info is not None
+    labels = config_info[CPUOffloadingMetrics.CPU_CONFIG_INFO]
+    assert set(labels) == set(CPU_CONFIG_INFO_LABELS)
+
+    registry = CollectorRegistry()
+
+    def _bind(metric_cls):
+        def _make(**kwargs):
+            return metric_cls(**kwargs, registry=registry)
+
+        return _make
+
+    prom = OffloadPromMetrics(
+        vllm_config,
+        {Gauge: _bind(Gauge), Counter: _bind(Counter), Histogram: _bind(Histogram)},
+        ["model_name", "engine"],
+        {0: ["facebook/opt-125m", "0"]},
+    )
+    # Built with multiprocess_mode="mostrecent" so it collapses to one series
+    # per engine under DP + multiple API-server processes (no per-pid dup).
+    gauge = prom._offloading_metric_defs[CPUOffloadingMetrics.CPU_CONFIG_INFO]
+    assert gauge._multiprocess_mode == "mostrecent"
+
+    # Startup emission path: no observe()/stats/step involved.
+    prom.record_config_info(config_info, engine_idx=0)
+
+    sample_labels = {"model_name": "facebook/opt-125m", "engine": "0", **labels}
+    assert (
+        registry.get_sample_value(CPUOffloadingMetrics.CPU_CONFIG_INFO, sample_labels)
+        == 1.0
+    )
+
+
+def test_kv_offload_cpu_config_info_startup_emission_via_multi_connector():
+    """Startup emission must also work when OffloadingConnector is nested in a
+    MultiConnector (the PD case): MultiConnector aggregates its children's
+    get_config_info(), and its prom fans record_config_info() to each child."""
+    from prometheus_client import CollectorRegistry, Counter, Gauge, Histogram
+
+    from vllm.config import KVTransferConfig
+    from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
+    from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import (
+        MultiConnector,
+    )
+    from vllm.v1.kv_offload.cpu.common import (
+        CPU_CONFIG_INFO_LABELS,
+        CPUOffloadingMetrics,
+    )
+
+    vllm_config = _make_vllm_config(cpu_bytes_to_use=65536)
+    vllm_config.kv_transfer_config = KVTransferConfig(
+        kv_connector="MultiConnector",
+        kv_role="kv_both",
+        kv_connector_extra_config={
+            "connectors": [
+                {
+                    "kv_connector": "OffloadingConnector",
+                    "kv_role": "kv_both",
+                    "kv_connector_extra_config": {
+                        "cpu_bytes_to_use": 65536,
+                        "spec_name": "CPUOffloadingSpec",
+                    },
+                },
+            ]
+        },
+    )
+
+    mc = MultiConnector(vllm_config, KVConnectorRole.SCHEDULER, _make_kv_cache_config())
+    config_info = mc.get_config_info()
+    assert config_info is not None
+    labels = config_info[CPUOffloadingMetrics.CPU_CONFIG_INFO]
+    assert set(labels) == set(CPU_CONFIG_INFO_LABELS)
+
+    registry = CollectorRegistry()
+
+    def _bind(metric_cls):
+        def _make(**kwargs):
+            return metric_cls(**kwargs, registry=registry)
+
+        return _make
+
+    prom = MultiConnector.build_prom_metrics(
+        vllm_config,
+        {Gauge: _bind(Gauge), Counter: _bind(Counter), Histogram: _bind(Histogram)},
+        ["model_name", "engine"],
+        {0: ["facebook/opt-125m", "0"]},
+    )
+    prom.record_config_info(config_info, engine_idx=0)
+
+    sample_labels = {"model_name": "facebook/opt-125m", "engine": "0", **labels}
+    assert (
+        registry.get_sample_value(CPUOffloadingMetrics.CPU_CONFIG_INFO, sample_labels)
+        == 1.0
+    )

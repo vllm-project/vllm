@@ -839,6 +839,11 @@ class TieringOffloadingManager(OffloadingManager):
 
         return stats
 
+    def get_config_info(self) -> dict[str, dict[str, str]] | None:
+        # Only the CPU primary tier carries startup config-info; secondary
+        # (storage) tiers expose none. Surfaces it for startup emission.
+        return self.primary_tier.get_config_info()
+
     @override
     def shutdown(self) -> None:
         """Shutdown all tiers and release resources."""
