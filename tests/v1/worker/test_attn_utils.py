@@ -53,6 +53,7 @@ def test_reshape_padded_flash_attention_kv_cache_strides_by_page():
     attn_groups = [
         AttentionGroup(
             backend=FakeFlashAttentionBackend,
+            decode_backend=FakeFlashAttentionBackend,
             layer_names=["layer"],
             kv_cache_spec=spec,
             kv_cache_group_id=0,
@@ -94,6 +95,7 @@ def test_reshape_padded_hnd_flash_attention_kv_cache_strides_by_page():
     attn_groups = [
         AttentionGroup(
             backend=FakeHNDFlashAttentionBackend,
+            decode_backend=FakeHNDFlashAttentionBackend,
             layer_names=["layer"],
             kv_cache_spec=spec,
             kv_cache_group_id=0,
@@ -165,6 +167,7 @@ def test_reshape_padded_diff_kv_cache_does_not_infer_kv_dim():
     attn_groups = [
         AttentionGroup(
             backend=FakeDiffKVBackend,
+            decode_backend=FakeDiffKVBackend,
             layer_names=["layer"],
             kv_cache_spec=spec,
             kv_cache_group_id=0,
@@ -222,6 +225,7 @@ def test_reshape_padded_quantized_kv_cache_preserves_scale_stride():
     attn_groups = [
         AttentionGroup(
             backend=FakePerTokenScaleBackend,
+            decode_backend=FakePerTokenScaleBackend,
             layer_names=["layer"],
             kv_cache_spec=spec,
             kv_cache_group_id=0,

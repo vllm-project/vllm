@@ -436,8 +436,8 @@ class Attention(nn.Module, AttentionLayerBase):
         self.backend = AttentionBackendEnum[self.attn_backend.get_name()]
         self.dtype = dtype
 
-        self.decode_attn_backend: type[AttentionBackend] | None = None
-        self.decode_impl: AttentionImpl | None = None
+        self.decode_attn_backend = self.attn_backend
+        self.decode_impl = self.impl
         decode_backend = vllm_config.attention_config.decode_backend
         if routing_enabled:
             from vllm.v1.attention.backends.utils import (
@@ -556,9 +556,7 @@ class Attention(nn.Module, AttentionLayerBase):
         self.query_quant = None
         if (
             self.impl.supports_quant_query_input
-            and (
-                self.decode_impl is None or self.decode_impl.supports_quant_query_input
-            )
+            and self.decode_impl.supports_quant_query_input
             and (
                 self.kv_cache_dtype.startswith("fp8") or self.kv_cache_dtype == "nvfp4"
             )
@@ -693,7 +691,7 @@ class Attention(nn.Module, AttentionLayerBase):
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):
         self.impl.process_weights_after_loading(act_dtype)
-        if self.decode_impl is not None:
+        if self.decode_impl is not self.impl:
             self.decode_impl.process_weights_after_loading(act_dtype)
 
         # If we should not load quant weights, we initialize the scales to 1.0
@@ -710,7 +708,7 @@ class Attention(nn.Module, AttentionLayerBase):
     def get_attn_backend(self) -> type[AttentionBackend]:
         return self.attn_backend
 
-    def get_decode_attn_backend(self) -> type[AttentionBackend] | None:
+    def get_decode_attn_backend(self) -> type[AttentionBackend]:
         return self.decode_attn_backend
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec | None:
@@ -869,11 +867,10 @@ def get_attention_context(
 def _select_attention_impl(
     attn_layer: "Attention | MLAAttention",
 ) -> AttentionImpl:
-    decode_impl = getattr(attn_layer, "decode_impl", None)
     forward_context = get_forward_context()
-    if decode_impl is None or not forward_context.use_decode_backend:
+    if not forward_context.use_decode_backend:
         return attn_layer.impl
-    return decode_impl
+    return getattr(attn_layer, "decode_impl", attn_layer.impl)
 
 
 def unified_kv_cache_update(

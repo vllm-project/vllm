@@ -252,10 +252,10 @@ def _attention_spec(block_size=64):
 def test_attention_group_selects_builder_for_routed_backend():
     group = AttentionGroup(
         backend=_GeneralBackend,
+        decode_backend=_DecodeBackend,
         layer_names=["layer"],
         kv_cache_spec=_attention_spec(),
         kv_cache_group_id=0,
-        decode_backend=_DecodeBackend,
     )
     group.create_metadata_builders(None, torch.device("cpu"))
 
@@ -265,14 +265,30 @@ def test_attention_group_selects_builder_for_routed_backend():
     )
 
 
+def test_attention_group_accepts_same_backend_for_both_roles():
+    group = AttentionGroup(
+        backend=_GeneralBackend,
+        decode_backend=_GeneralBackend,
+        layer_names=["layer"],
+        kv_cache_spec=_attention_spec(),
+        kv_cache_group_id=0,
+    )
+    group.create_metadata_builders(None, torch.device("cpu"))
+
+    assert group.decode_backend is _GeneralBackend
+    assert isinstance(
+        group.get_metadata_builder(use_decode_backend=True), _GeneralBuilder
+    )
+
+
 def test_kernel_block_size_is_supported_by_both_routed_backends():
     spec = _attention_spec()
     group = AttentionGroup(
         backend=_GeneralBackend,
+        decode_backend=_DecodeBackend,
         layer_names=["layer"],
         kv_cache_spec=spec,
         kv_cache_group_id=0,
-        decode_backend=_DecodeBackend,
     )
     config = KVCacheConfig(
         num_blocks=1,
@@ -287,10 +303,10 @@ def test_mrv2_builds_metadata_with_the_routed_backend():
     spec = _attention_spec()
     group = AttentionGroup(
         backend=_GeneralBackend,
+        decode_backend=_DecodeBackend,
         layer_names=["layer"],
         kv_cache_spec=spec,
         kv_cache_group_id=0,
-        decode_backend=_DecodeBackend,
     )
     group.create_metadata_builders(None, torch.device("cpu"))
     config = KVCacheConfig(

@@ -229,6 +229,7 @@ class Step3p5MTPProposer(EagleProposer):
                 )
                 attn_group = AttentionGroup(
                     backend=attn_backend,
+                    decode_backend=attn_backend,
                     layer_names=[layer_name],
                     kv_cache_spec=spec,
                     kv_cache_group_id=gid,

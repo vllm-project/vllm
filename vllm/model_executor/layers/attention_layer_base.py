@@ -26,8 +26,8 @@ class AttentionLayerBase(ABC):
         """Get the attention backend class for this layer."""
         pass
 
-    def get_decode_attn_backend(self) -> type[AttentionBackend] | None:
-        return None
+    def get_decode_attn_backend(self) -> type[AttentionBackend]:
+        return self.get_attn_backend()
 
     @abstractmethod
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec | None:

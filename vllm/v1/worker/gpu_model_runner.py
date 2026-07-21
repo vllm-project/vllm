@@ -867,7 +867,6 @@ class GPUModelRunner(
         )
 
         self.reorder_batch_threshold: int | None = None
-        self.has_decode_attn_backend: bool = False
 
         # Attention layers that are only in the KVCacheConfig of the runner
         # (e.g., KV sharing, encoder-only attention), but not in the
@@ -4327,9 +4326,7 @@ class GPUModelRunner(
                 self.input_batch.num_computed_tokens_cpu_tensor[:num_reqs]
                 < self.input_batch.num_prompt_tokens_cpu_tensor[:num_reqs]
             )
-            use_decode_backend = self.has_decode_attn_backend and not bool(
-                is_prefilling.any()
-            )
+            use_decode_backend = not bool(is_prefilling.any())
 
             attn_metadata, spec_decode_common_attn_metadata = (
                 self._build_attention_metadata(
@@ -6982,9 +6979,9 @@ class GPUModelRunner(
             """
 
             attn_backend: type[AttentionBackend]
+            decode_attn_backend: type[AttentionBackend]
             kv_cache_spec: KVCacheSpec
             num_heads_q: int
-            decode_attn_backend: type[AttentionBackend] | None = None
 
         def get_attn_backends_for_group(
             kv_cache_group_spec: KVCacheGroupSpec,
@@ -7009,15 +7006,10 @@ class GPUModelRunner(
                         "FastPrefill",
                         attn_backend,  # type: ignore[arg-type]
                     )
-                    if decode_attn_backend is not None:
-                        decode_attn_backend = create_fast_prefill_custom_backend(
-                            "FastPrefill", decode_attn_backend
-                        )
-                alt_cls_name = (
-                    decode_attn_backend.full_cls_name()
-                    if decode_attn_backend is not None
-                    else None
-                )
+                    decode_attn_backend = create_fast_prefill_custom_backend(
+                        "FastPrefill", decode_attn_backend
+                    )
+                alt_cls_name = decode_attn_backend.full_cls_name()
 
                 full_cls_name = attn_backend.full_cls_name()
                 layer_kv_cache_spec = kv_cache_group_spec.kv_cache_spec
@@ -7033,9 +7025,9 @@ class GPUModelRunner(
                 key = (full_cls_name, layer_kv_cache_spec, num_heads_q, alt_cls_name)
                 attn_backends[key] = AttentionGroupKey(
                     attn_backend,
+                    decode_attn_backend,
                     layer_kv_cache_spec,
                     num_heads_q,
-                    decode_attn_backend,
                 )
                 attn_backend_layers[key].append(layer_name)
             return (
@@ -7047,7 +7039,6 @@ class GPUModelRunner(
                         group_key.attn_backend,
                         group_key.decode_attn_backend,
                     )
-                    if backend is not None
                 },
             )
 
@@ -7058,11 +7049,11 @@ class GPUModelRunner(
             attn_groups: list[AttentionGroup] = []
             for key, layer_names in attn_backends_map.items():
                 attn_group = AttentionGroup(
-                    key.attn_backend,
-                    layer_names,
-                    key.kv_cache_spec,
-                    kv_cache_group_id,
+                    backend=key.attn_backend,
                     decode_backend=key.decode_attn_backend,
+                    layer_names=layer_names,
+                    kv_cache_spec=key.kv_cache_spec,
+                    kv_cache_group_id=kv_cache_group_id,
                 )
 
                 attn_groups.append(attn_group)
@@ -7087,10 +7078,6 @@ class GPUModelRunner(
 
         for i, attn_backend_map in enumerate(attention_backend_maps):
             self.attn_groups.append(create_attn_groups(attn_backend_map, i))
-
-        self.has_decode_attn_backend = any(
-            group.decode_backend is not None for group in self._attn_group_iterator()
-        )
 
     def initialize_metadata_builders(
         self, kv_cache_config: KVCacheConfig, kernel_block_sizes: list[int]
@@ -7199,12 +7186,11 @@ class GPUModelRunner(
             reorder_batch_thresholds.append(
                 group.get_metadata_builder().reorder_batch_threshold
             )
-            if group.decode_backend is not None:
-                reorder_batch_thresholds.append(
-                    group.get_metadata_builder(
-                        use_decode_backend=True
-                    ).reorder_batch_threshold
-                )
+            reorder_batch_thresholds.append(
+                group.get_metadata_builder(
+                    use_decode_backend=True
+                ).reorder_batch_threshold
+            )
         # If there are no attention groups (attention-free model) or no backend
         # reports a threshold, leave reordering disabled.
         if len(reorder_batch_thresholds) == 0:

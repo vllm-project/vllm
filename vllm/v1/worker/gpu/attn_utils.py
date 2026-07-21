@@ -104,11 +104,11 @@ def init_attn_backend(
         attn_layers = get_layers_from_vllm_config(vllm_config, layer_type, layer_names)
 
         group_map: dict[
-            tuple[tuple[str, str], tuple[str, str] | None, KVCacheSpec, int],
+            tuple[tuple[str, str], tuple[str, str], KVCacheSpec, int],
             AttentionGroup,
         ] = {}
         group_order: list[
-            tuple[tuple[str, str], tuple[str, str] | None, KVCacheSpec, int]
+            tuple[tuple[str, str], tuple[str, str], KVCacheSpec, int]
         ] = []
 
         for layer_name in layer_names:
@@ -125,17 +125,17 @@ def init_attn_backend(
             num_heads_q = getattr(attn_layers[layer_name], "num_heads", 0)
             key = (
                 attn_backend.full_cls_name(),
-                decode_backend.full_cls_name() if decode_backend is not None else None,
+                decode_backend.full_cls_name(),
                 layer_kv_cache_spec,
                 num_heads_q,
             )
             if key not in group_map:
                 group_map[key] = AttentionGroup(
-                    attn_backend,
-                    [layer_name],
-                    layer_kv_cache_spec,
-                    kv_cache_group_id,
+                    backend=attn_backend,
                     decode_backend=decode_backend,
+                    layer_names=[layer_name],
+                    kv_cache_spec=layer_kv_cache_spec,
+                    kv_cache_group_id=kv_cache_group_id,
                 )
                 group_order.append(key)
             else:
@@ -163,8 +163,7 @@ def init_attn_backend(
                 num_metadata_builders=1,
             )
             builders = [group.get_metadata_builder(0)]
-            if group.decode_backend is not None:
-                builders.append(group.get_metadata_builder(0, use_decode_backend=True))
+            builders.append(group.get_metadata_builder(0, use_decode_backend=True))
             for builder in builders:
                 if attn_backend_workspace is None:
                     if hasattr(builder, "_get_workspace_buffer"):
@@ -173,9 +172,10 @@ def init_attn_backend(
                     builder.set_workspace_buffer(attn_backend_workspace)
             # The decode specialist is used by full decode graphs, so both
             # routed backends must support the resolved cudagraph mode.
-            backend_names = [group.backend.__name__]
-            if group.decode_backend is not None:
-                backend_names.append(group.decode_backend.__name__)
+            backend_names = [
+                group.backend.__name__,
+                group.decode_backend.__name__,
+            ]
             for builder, backend_name in zip(builders, backend_names):
                 cg_support = builder.get_cudagraph_support(
                     vllm_config,

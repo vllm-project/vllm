@@ -1895,6 +1895,7 @@ def test_register_kv_caches(
                             [
                                 AttentionGroup(
                                     backend=backend_cls,
+                                    decode_backend=backend_cls,
                                     layer_names=[],
                                     kv_cache_spec=kv_cache_spec,
                                     kv_cache_group_id=0,
