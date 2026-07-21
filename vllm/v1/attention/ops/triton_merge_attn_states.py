@@ -58,11 +58,11 @@ def mask_empty_context_lse_kernel(
         query_starts = tl.load(query_start_loc + req_offsets, mask=req_mask)
         # Assume the worst-case number of blocks for each request.
         req_block_starts = query_starts // BLOCK_SIZE + req_offsets
-        match_count = tl.sum(
+        num_started_reqs = tl.sum(
             (req_mask & (req_block_starts <= query_block_idx)).to(tl.int32)
         )
-        req_idx = chunk_start + match_count - 1
-        req_idx_found = match_count < 32
+        req_idx = chunk_start + num_started_reqs - 1
+        req_idx_found = num_started_reqs < 32
         chunk_start += 32
 
     query_start = tl.load(query_start_loc + req_idx)
