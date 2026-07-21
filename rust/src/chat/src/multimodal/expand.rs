@@ -222,7 +222,9 @@ mod tests {
         assert_eq!(tensor.shape, vec![expected.len()]);
         assert_eq!(
             tensor.data,
-            WireArrayData::RawView(expected.iter().map(|value| u8::from(*value)).collect())
+            WireArrayData::RawView(
+                expected.iter().map(|value| u8::from(*value)).collect::<Vec<_>>().into(),
+            )
         );
     }
 

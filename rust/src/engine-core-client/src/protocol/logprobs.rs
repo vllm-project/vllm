@@ -209,17 +209,17 @@ impl WireLogprobs {
             logprob_token_ids: WireNdArray {
                 dtype: "<i8".to_string(),
                 shape: vec![rows, cols],
-                data: WireArrayData::RawView(token_ids),
+                data: WireArrayData::RawView(token_ids.into()),
             },
             logprobs: WireNdArray {
                 dtype: "<f4".to_string(),
                 shape: vec![rows, cols],
-                data: WireArrayData::RawView(logprobs),
+                data: WireArrayData::RawView(logprobs.into()),
             },
             token_ranks: WireNdArray {
                 dtype: "<i8".to_string(),
                 shape: vec![rows],
-                data: WireArrayData::RawView(token_ranks),
+                data: WireArrayData::RawView(token_ranks.into()),
             },
             cu_num_generated_tokens: None,
         })

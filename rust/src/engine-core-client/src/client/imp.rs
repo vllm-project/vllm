@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use arc_swap::ArcSwapOption;
+use bytes::Bytes;
 use parking_lot::Mutex;
 use thiserror_ext::AsReport as _;
 use tokio::runtime::Handle;
@@ -21,7 +22,9 @@ use crate::error::{client_closed, dispatcher_closed, unexpected_dispatcher_outpu
 use crate::metrics::{LoraInfoExporter, SchedulerStatsRecorder};
 use crate::protocol::encode_msgpack;
 use crate::protocol::output::{EngineCoreOutput, EngineCoreOutputs};
-use crate::protocol::request::EngineCoreRequestType;
+use crate::protocol::request::{
+    DEFAULT_AUX_FRAME_THRESHOLD, EngineCoreRequest, EngineCoreRequestType,
+};
 use crate::protocol::stats::SchedulerStats;
 use crate::protocol::utility::UtilityOutput;
 use crate::transport::{ConnectedEngine, EngineId};
@@ -229,9 +232,29 @@ impl ClientInner {
     where
         T: serde::Serialize + std::fmt::Debug,
     {
-        // TODO: for `EngineCoreRequest`, split outbound tensor raw views into aux
-        // frames instead of always producing a single msgpack frame.
-        let payload = encode_msgpack(payload)?;
+        let payload = Bytes::from(encode_msgpack(payload)?);
+        self.send_encoded_to_engine(engine_id, request_type, payload, Vec::new()).await
+    }
+
+    /// Send an add request, moving large tensor buffers into auxiliary frames.
+    pub async fn send_request_to_engine(
+        &self,
+        engine_id: &EngineId,
+        mut payload: EngineCoreRequest,
+    ) -> Result<()> {
+        let aux_frames = payload.extract_aux_frames(DEFAULT_AUX_FRAME_THRESHOLD);
+        let payload = Bytes::from(encode_msgpack(&payload)?);
+        self.send_encoded_to_engine(engine_id, EngineCoreRequestType::Add, payload, aux_frames)
+            .await
+    }
+
+    async fn send_encoded_to_engine(
+        &self,
+        engine_id: &EngineId,
+        request_type: EngineCoreRequestType,
+        payload: Bytes,
+        aux_frames: Vec<Bytes>,
+    ) -> Result<()> {
         let mut input_send = self.input_send.clone();
         let engine_id = engine_id.clone();
 
@@ -242,6 +265,7 @@ impl ClientInner {
                     &engine_id,
                     request_type.to_frame(),
                     payload,
+                    aux_frames,
                 )
                 .await
             })
