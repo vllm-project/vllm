@@ -47,6 +47,7 @@ class CPUOffloadingManager(OffloadingManager):
     def __init__(
         self,
         num_blocks: int,
+        blocks_per_chunk: int = 1,
         cache_policy: Literal["lru", "arc"] = "lru",
         enable_events: bool = False,
         store_threshold: int = 1,
@@ -54,6 +55,9 @@ class CPUOffloadingManager(OffloadingManager):
     ):
         self.medium: str = MEDIUM_CPU
         self._num_blocks: int = num_blocks
+        # GPU blocks coalesced into one offload chunk. Used to report the
+        # total offload capacity in GPU-block-equivalent units.
+        self._blocks_per_chunk: int = blocks_per_chunk
         self._num_allocated_blocks: int = 0
         self._free_list: list[int] = []
         self.events: list[OffloadingEvent] | None = [] if enable_events else None
@@ -308,6 +312,14 @@ class CPUOffloadingManager(OffloadingManager):
         )
         usage = num_used / self._num_blocks if self._num_blocks > 0 else 0.0
         stats.set_gauge(CPUOffloadingMetrics.CPU_CACHE_USAGE_PERC, usage)
+
+        # Total offload capacity in GPU-block-equivalent units (constant after
+        # init). Reported for observability alongside the usage gauges;
+        # multiply by the cache block_size for a token count.
+        stats.set_gauge(
+            CPUOffloadingMetrics.CPU_TOTAL_BLOCKS,
+            self._num_blocks * self._blocks_per_chunk,
+        )
 
         for allocation_size in self.allocation_sizes_in_current_batch:
             stats.observe_histogram(

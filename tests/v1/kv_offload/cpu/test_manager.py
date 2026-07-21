@@ -40,9 +40,11 @@ def make_cpu_manager(
     enable_events: bool = False,
     store_threshold: int = 0,
     max_tracker_size: int = 64_000,
+    blocks_per_chunk: int = 1,
 ) -> CPUOffloadingManager:
     return CPUOffloadingManager(
         num_blocks=num_blocks,
+        blocks_per_chunk=blocks_per_chunk,
         cache_policy=cache_policy,
         enable_events=enable_events,
         store_threshold=store_threshold,
@@ -257,6 +259,28 @@ def test_cpu_manager_reports_cache_usage_gauge():
     # and usage drops.
     manager.complete_store(to_keys([3, 4]), _EMPTY_REQ_CTX)
     check_usage_stats(manager, 0.0)
+
+
+def test_cpu_manager_reports_total_blocks_gauge():
+    def total_blocks(manager: CPUOffloadingManager) -> float:
+        stats = manager.get_stats()
+        assert stats is not None
+        return stats.reduce()[CPUOffloadingMetrics.CPU_TOTAL_BLOCKS]
+
+    # Zero-capacity manager reports 0.
+    assert total_blocks(make_cpu_manager(num_blocks=0)) == 0
+
+    # blocks_per_chunk defaults to 1: total == num_blocks.
+    assert total_blocks(make_cpu_manager(num_blocks=4)) == 4
+
+    # Capacity is reported in GPU-block-equivalent units:
+    # total == num_blocks * blocks_per_chunk.
+    manager = make_cpu_manager(num_blocks=4, blocks_per_chunk=8)
+    assert total_blocks(manager) == 32
+
+    # The gauge is a static capacity: it does not change as blocks fill up.
+    manager.prepare_store(to_keys([1, 2]), _EMPTY_REQ_CTX)
+    assert total_blocks(manager) == 32
 
 
 def test_cpu_manager_reports_allocation_size_histogram():

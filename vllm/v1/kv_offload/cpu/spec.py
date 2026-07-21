@@ -52,6 +52,14 @@ class CPUOffloadingSpec(OffloadingSpec):
                     "completed (0.0 = idle, 1.0 = saturated)."
                 ),
             ),
+            CPUOffloadingMetrics.CPU_TOTAL_BLOCKS: OffloadingGaugeMetadata(
+                documentation=(
+                    "Total CPU KV-cache offload capacity, in GPU-block "
+                    "equivalents (the same unit as num_gpu_blocks; multiply "
+                    "by the cache block_size for a token count). 0 when CPU "
+                    "offloading is disabled or too small to hold a block."
+                ),
+            ),
             CPUOffloadingMetrics.CPU_ALLOCATION_SIZE: OffloadingHistogramMetadata(
                 documentation=(
                     "Histogram of the number of CPU blocks requested by each "
@@ -125,6 +133,7 @@ class CPUOffloadingSpec(OffloadingSpec):
 
             self._manager = CPUOffloadingManager(
                 num_blocks=self.num_blocks,
+                blocks_per_chunk=self.blocks_per_chunk,
                 cache_policy=self.eviction_policy,  # type: ignore[arg-type]
                 enable_events=self.kv_events_config.enable_kv_cache_events,
                 store_threshold=store_threshold,
