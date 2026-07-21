@@ -5,6 +5,7 @@ pub mod custom;
 pub mod hf_dataset;
 pub mod multi_turn;
 pub mod prefix_repetition;
+mod progress;
 pub mod random;
 pub mod random_mm;
 pub mod random_rerank;
@@ -13,20 +14,6 @@ pub mod sonnet;
 pub mod speed_bench;
 
 use std::sync::Arc;
-
-use indicatif::{ProgressBar, ProgressStyle};
-
-pub(super) fn row_download_progress() -> ProgressBar {
-    let progress = ProgressBar::new(0);
-    progress.set_style(
-        ProgressStyle::with_template(
-            "{spinner:.green} Fetching rows [{bar:30.cyan/blue}] {pos}/{len}",
-        )
-        .unwrap()
-        .progress_chars("#>-"),
-    );
-    progress
-}
 
 /// Represents a single inference request for benchmarking.
 /// Matches Python's SampleRequest dataclass from datasets.py:71-82.

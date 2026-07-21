@@ -7,7 +7,8 @@ use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
 use rand::{Rng, SeedableRng};
 
-use super::{SampleRequest, row_download_progress};
+use super::SampleRequest;
+use super::progress::RowDownloadReporter;
 use crate::error::{BenchError, Result};
 use crate::tokenizer::TokenizerKind;
 
@@ -239,7 +240,7 @@ pub fn download_hf_dataset(
     let mut all_rows: Vec<serde_json::Value> = Vec::new();
     let mut offset = 0usize;
     let page_size = 100usize;
-    let progress = row_download_progress();
+    let mut progress = RowDownloadReporter::new();
 
     loop {
         let url = format!(
@@ -271,15 +272,14 @@ pub fn download_hf_dataset(
         offset += fetched;
 
         let total = data["num_rows_total"].as_u64().unwrap_or(0);
-        progress.set_length(total.max(offset as u64));
-        progress.set_position(offset as u64);
+        progress.update(offset, total);
 
         // Stop if we have enough rows or reached end of dataset
         if all_rows.len() >= num_rows_needed || fetched < page_size {
             break;
         }
     }
-    progress.finish_and_clear();
+    progress.finish();
 
     if all_rows.is_empty() {
         return Err(BenchError::Config(format!(
