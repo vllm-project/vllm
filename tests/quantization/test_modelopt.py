@@ -498,9 +498,7 @@ def test_modelopt_linear_method_builder_registry_override(monkeypatch):
     from vllm.model_executor.layers.quantization import modelopt as m
 
     sentinel = object()
-    monkeypatch.setitem(
-        m.LINEAR_METHOD_BUILDERS, "NVFP4", lambda cfg, prefix: sentinel
-    )
+    monkeypatch.setitem(m.LINEAR_METHOD_BUILDERS, "NVFP4", lambda cfg, prefix: sentinel)
 
     config = ModelOptNvFp4Config(
         quant_method="NVFP4",

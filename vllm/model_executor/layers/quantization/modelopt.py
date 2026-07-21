@@ -2004,9 +2004,7 @@ class KNvfp4Static(QuantKeyScheme):
             raise ValueError(
                 "Unsupported model when in features size is not multiple of 16"
             )
-        weight_dtype = (
-            torch.float8_e4m3fn if ctx.serialized else shapes.params_dtype
-        )
+        weight_dtype = torch.float8_e4m3fn if ctx.serialized else shapes.params_dtype
         # Packed NVFP4 weight: 2 fp4 items per byte along the input dim.
         self.register_params(
             layer,
@@ -2051,9 +2049,7 @@ class KNvfp4Static(QuantKeyScheme):
             )
         # Raw max, no reciprocation — Marlin/cutlass want ModelOpt's amax/2688.
         weight_global_scale = layer.weight_scale_2.max().to(torch.float32)
-        layer.weight_global_scale = Parameter(
-            weight_global_scale, requires_grad=False
-        )
+        layer.weight_global_scale = Parameter(weight_global_scale, requires_grad=False)
         del layer.weight_scale_2
 
 
@@ -2086,9 +2082,7 @@ class KNvfp4Dynamic(QuantKeyScheme):
                 "global NVFP4 scale for parallel layers."
             )
         input_global_scale = layer.input_scale.max().to(torch.float32)
-        layer.input_global_scale = Parameter(
-            input_global_scale, requires_grad=False
-        )
+        layer.input_global_scale = Parameter(input_global_scale, requires_grad=False)
         layer.input_global_scale_inv = Parameter(
             (1.0 / layer.input_global_scale).to(torch.float32),
             requires_grad=False,
@@ -2110,20 +2104,36 @@ class KFp8StaticTensor(QuantKeyScheme):
                 torch.float8_e4m3fn if ctx.serialized else shapes.params_dtype
             )
             self.register_params(
-                layer, "weight", (shapes.out, shapes.in_), weight_dtype,
-                ModelWeightParameter, wl, input_dim=1, output_dim=0,
+                layer,
+                "weight",
+                (shapes.out, shapes.in_),
+                weight_dtype,
+                ModelWeightParameter,
+                wl,
+                input_dim=1,
+                output_dim=0,
             )
             layer.orig_dtype = shapes.params_dtype
             if ctx.serialized:
                 self.register_params(
-                    layer, "weight_scale", (shapes.nparts,), torch.float32,
-                    PerTensorScaleParameter, wl, init=SENTINEL,
+                    layer,
+                    "weight_scale",
+                    (shapes.nparts,),
+                    torch.float32,
+                    PerTensorScaleParameter,
+                    wl,
+                    init=SENTINEL,
                 )
         elif role is ACT:
             if ctx.serialized:
                 self.register_params(
-                    layer, "input_scale", (shapes.nparts,), torch.float32,
-                    PerTensorScaleParameter, wl, init=SENTINEL,
+                    layer,
+                    "input_scale",
+                    (shapes.nparts,),
+                    torch.float32,
+                    PerTensorScaleParameter,
+                    wl,
+                    init=SENTINEL,
                 )
         else:
             self.reject(role)
@@ -2140,9 +2150,7 @@ class KFp8StaticTensor(QuantKeyScheme):
             layer.weight = Parameter(weight.t(), requires_grad=False)
             layer.weight_scale = Parameter(max_w_scale, requires_grad=False)
         elif role is ACT:
-            layer.input_scale = Parameter(
-                layer.input_scale.max(), requires_grad=False
-            )
+            layer.input_scale = Parameter(layer.input_scale.max(), requires_grad=False)
         else:
             self.reject(role)
 
@@ -2158,12 +2166,24 @@ class KFp8StaticChannel(QuantKeyScheme):
         if role is not WEIGHT:
             self.reject(role)
         self.register_params(
-            layer, "weight", (shapes.out, shapes.in_), torch.float8_e4m3fn,
-            ModelWeightParameter, wl, input_dim=1, output_dim=0,
+            layer,
+            "weight",
+            (shapes.out, shapes.in_),
+            torch.float8_e4m3fn,
+            ModelWeightParameter,
+            wl,
+            input_dim=1,
+            output_dim=0,
         )
         self.register_params(
-            layer, "weight_scale", (shapes.out,), torch.float32,
-            ChannelQuantScaleParameter, wl, output_dim=0, init=SENTINEL,
+            layer,
+            "weight_scale",
+            (shapes.out,),
+            torch.float32,
+            ChannelQuantScaleParameter,
+            wl,
+            output_dim=0,
+            init=SENTINEL,
         )
 
     def process(self, layer, role) -> None:
@@ -2193,13 +2213,25 @@ class KFp8Block128(QuantKeyScheme):
                 f"{shapes.out}x{shapes.in_}"
             )
         self.register_params(
-            layer, "weight", (shapes.out, shapes.in_), torch.float8_e4m3fn,
-            ModelWeightParameter, wl, input_dim=1, output_dim=0,
+            layer,
+            "weight",
+            (shapes.out, shapes.in_),
+            torch.float8_e4m3fn,
+            ModelWeightParameter,
+            wl,
+            input_dim=1,
+            output_dim=0,
         )
         ob, ib = shapes.out // 128, shapes.in_ // 128
         self.register_params(
-            layer, "weight_scale", (ob, 1, ib, 1), torch.float32,
-            BlockQuantScaleParameter, wl, input_dim=2, output_dim=0,
+            layer,
+            "weight_scale",
+            (ob, 1, ib, 1),
+            torch.float32,
+            BlockQuantScaleParameter,
+            wl,
+            input_dim=2,
+            output_dim=0,
             init=SENTINEL,
         )
         layer.weight_block_size = [128, 128]
@@ -2230,17 +2262,27 @@ class KMxfp8Static(QuantKeyScheme):
             self.reject(role)
         if shapes.in_ % MXFP8_BLOCK_SIZE != 0:
             raise ValueError(
-                f"MXFP8 requires in divisible by {MXFP8_BLOCK_SIZE}, "
-                f"got {shapes.in_}"
+                f"MXFP8 requires in divisible by {MXFP8_BLOCK_SIZE}, got {shapes.in_}"
             )
         self.register_params(
-            layer, "weight", (shapes.out, shapes.in_), MXFP8_VALUE_DTYPE,
-            ModelWeightParameter, wl, input_dim=1, output_dim=0,
+            layer,
+            "weight",
+            (shapes.out, shapes.in_),
+            MXFP8_VALUE_DTYPE,
+            ModelWeightParameter,
+            wl,
+            input_dim=1,
+            output_dim=0,
         )
         self.register_params(
-            layer, "weight_scale",
-            (shapes.out, shapes.in_ // MXFP8_BLOCK_SIZE), MXFP8_SCALE_DTYPE,
-            ModelWeightParameter, wl, input_dim=1, output_dim=0,
+            layer,
+            "weight_scale",
+            (shapes.out, shapes.in_ // MXFP8_BLOCK_SIZE),
+            MXFP8_SCALE_DTYPE,
+            ModelWeightParameter,
+            wl,
+            input_dim=1,
+            output_dim=0,
         )
 
     def process(self, layer, role) -> None:
@@ -2290,9 +2332,7 @@ def maybe_fuse_global_scales(layer) -> None:
 
     W4A4 has both -> computed; W4A16 has no input_global_scale -> skipped.
     """
-    if hasattr(layer, "weight_global_scale") and hasattr(
-        layer, "input_global_scale"
-    ):
+    if hasattr(layer, "weight_global_scale") and hasattr(layer, "input_global_scale"):
         layer.alpha = Parameter(
             layer.input_global_scale * layer.weight_global_scale,
             requires_grad=False,
@@ -2373,9 +2413,7 @@ class ModelOptLinearMethod(LinearMethodBase):
         # Only the fp8/mxfp8 kernels read input_dtype; nvfp4 ignores it. During
         # real serving model_config is always set; fall back defensively when
         # there is no config context (bare unit-test dispatch).
-        model_config = getattr(
-            get_current_vllm_config_or_none(), "model_config", None
-        )
+        model_config = getattr(get_current_vllm_config_or_none(), "model_config", None)
         self.input_dtype = (
             model_config.dtype
             if model_config is not None
@@ -2399,9 +2437,7 @@ class ModelOptLinearMethod(LinearMethodBase):
     ) -> None:
         del input_size, output_size
         if self.wkey.requires_serialized and not self.ctx.serialized:
-            raise ValueError(
-                f"{self.spec.weight} requires a serialized checkpoint"
-            )
+            raise ValueError(f"{self.spec.weight} requires a serialized checkpoint")
         weight_loader = extra_weight_attrs.get("weight_loader")
         layer.logical_widths = output_partition_sizes
         layer.input_size_per_partition = input_size_per_partition
@@ -2438,9 +2474,7 @@ def resolve(algo: str, subcfg, prefix: str):
     """
     if algo == "FP8":
         # Plain per-tensor static FP8 (W8A8): same key in both slots (bivalent).
-        ctx = CkptCtx(
-            serialized=subcfg.is_checkpoint_fp8_serialized, group_size=None
-        )
+        ctx = CkptCtx(serialized=subcfg.is_checkpoint_fp8_serialized, group_size=None)
         return (
             QuantSpec(weight=kFp8StaticTensorSym, activation=kFp8StaticTensorSym),
             ctx,
@@ -2448,13 +2482,9 @@ def resolve(algo: str, subcfg, prefix: str):
         )
     if algo == "FP8_PER_CHANNEL_PER_TOKEN":
         # PcPt: per-channel static weight, dynamic per-token activation (W8A8).
-        ctx = CkptCtx(
-            serialized=subcfg.is_checkpoint_fp8_serialized, group_size=None
-        )
+        ctx = CkptCtx(serialized=subcfg.is_checkpoint_fp8_serialized, group_size=None)
         return (
-            QuantSpec(
-                weight=kFp8StaticTokenSym, activation=kFp8DynamicTokenSym
-            ),
+            QuantSpec(weight=kFp8StaticTokenSym, activation=kFp8DynamicTokenSym),
             ctx,
             None,
         )
@@ -2462,21 +2492,15 @@ def resolve(algo: str, subcfg, prefix: str):
         # PbWo: 128x128 block-static weight, dynamic per-block activation (W8A8).
         # C12: the generic base runs the block kernel's post-load, which the old
         # method skipped via a misnamed guard — validate vs CT block-FP8.
-        ctx = CkptCtx(
-            serialized=subcfg.is_checkpoint_fp8_serialized, group_size=None
-        )
+        ctx = CkptCtx(serialized=subcfg.is_checkpoint_fp8_serialized, group_size=None)
         return (
-            QuantSpec(
-                weight=kFp8Static128BlockSym, activation=kFp8Dynamic128Sym
-            ),
+            QuantSpec(weight=kFp8Static128BlockSym, activation=kFp8Dynamic128Sym),
             ctx,
             None,
         )
     if algo == "MXFP8":
         # MXFP8: block(32) e4m3 weight + e8m0 scale, dynamic activation.
-        ctx = CkptCtx(
-            serialized=subcfg.is_checkpoint_mxfp8_serialized, group_size=None
-        )
+        ctx = CkptCtx(serialized=subcfg.is_checkpoint_mxfp8_serialized, group_size=None)
         return QuantSpec(weight=kMxfp8Static, activation=kMxfp8Dynamic), ctx, None
 
     # NVFP4 family (W4A4 / W4A16).
