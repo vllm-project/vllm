@@ -53,6 +53,8 @@ class TopologyInfo:
     has_nvswitch: bool = False  # 是否有 NVSwitch / HCCS
     has_rdma: bool = False  # 是否支持 RDMA
     device_type: str = "cuda"  # 设备类型
+    nic_count: int = 1  # 可用于 RDMA 的 NIC 数
+    nic_names: list[str] = field(default_factory=list)  # 参与通信的 NIC 列表
 
 
 @dataclass

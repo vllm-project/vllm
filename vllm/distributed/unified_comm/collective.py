@@ -565,10 +565,18 @@ class CollectiveGroup:
             if nccl_ib == "0":
                 has_rdma = self._probe_rdma()
 
+        # 多网卡探测：优先读取 NCCL_IB_HCA（显式配置），否则回退系统枚举。
+        nic_names = self._detect_inter_node_nics()
+        nic_count = max(1, len(nic_names))
+
         # 带宽估计
         intra_bw = 600.0 if has_nvswitch else 300.0
 
-        inter_bw = 100.0 if has_rdma else 25.0
+        if has_rdma:
+            # 估算聚合能力：单 NIC 100Gbps，按 NIC 数线性叠加并限制上限。
+            inter_bw = min(800.0, 100.0 * nic_count)
+        else:
+            inter_bw = 25.0
 
         return TopologyInfo(
             num_nodes=num_nodes,
@@ -578,6 +586,8 @@ class CollectiveGroup:
             has_nvswitch=has_nvswitch,
             has_rdma=has_rdma,
             device_type=device_type,
+            nic_count=nic_count,
+            nic_names=nic_names,
         )
 
     def _is_intra_node(self) -> bool:
@@ -593,6 +603,25 @@ class CollectiveGroup:
             result = False
         self._cached_is_intra_node = result
         return result
+
+    @staticmethod
+    def _detect_inter_node_nics() -> list[str]:
+        """探测可用于跨节点通信的 NIC 列表。"""
+        import os
+
+        nccl_hcas = os.environ.get("NCCL_IB_HCA", "").strip()
+        if nccl_hcas:
+            return [x.strip() for x in nccl_hcas.split(",") if x.strip()]
+
+        ib_path = "/sys/class/infiniband"
+        if os.path.exists(ib_path):
+            with contextlib.suppress(Exception):
+                devs = sorted(os.listdir(ib_path))
+                if devs:
+                    return devs
+
+        # 最后兜底：默认单网卡
+        return []
 
     @staticmethod
     def _probe_nvswitch() -> bool:

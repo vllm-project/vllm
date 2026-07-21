@@ -19,8 +19,11 @@ Two execution modes are supported:
 from __future__ import annotations
 
 import contextlib
+import fnmatch
 import logging
+import os
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import torch
@@ -34,6 +37,25 @@ from vllm.distributed.unified_comm.backend import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+_DEFAULT_MULTI_NIC_ENABLE = True
+_DEFAULT_MULTI_NIC_COUNT = 8
+_DEFAULT_MULTI_NIC_QPS_PER_CONNECTION = 4
+_DEFAULT_MULTI_NIC_FORCE = False
+_DEFAULT_MULTI_NIC_VERIFY_PEERS = True
+
+
+def _env_enabled(name: str, default: bool = False) -> bool:
+    """Parse a boolean env var with common truthy/falsey spellings."""
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in ("1", "true", "yes", "on")
+
+
+def _split_csv(value: str) -> list[str]:
+    return [item.strip() for item in value.split(",") if item.strip()]
 
 
 # ============================================================
@@ -141,6 +163,251 @@ class NCCLBackend(CommBackend):
     # 生命周期管理
     # ----------------------------------------------------------
 
+    def _discover_rdma_hcas(self, include_down: bool = False) -> list[str]:
+        """自动发现 RDMA 网卡（兼容 mlx5 / mlx5_bond 命名）。"""
+        ib_root = Path("/sys/class/infiniband")
+        net_root = Path("/sys/class/net")
+
+        ib_names: set[str] = set()
+        if ib_root.exists():
+            for dev in ib_root.iterdir():
+                if dev.is_dir():
+                    ib_names.add(dev.name)
+
+        net_names: set[str] = set()
+        if net_root.exists():
+            for dev in net_root.iterdir():
+                name = dev.name
+                if fnmatch.fnmatch(name, "mlx5*"):
+                    if not include_down:
+                        operstate = dev / "operstate"
+                        if operstate.exists():
+                            with contextlib.suppress(Exception):
+                                if operstate.read_text().strip() != "up":
+                                    continue
+                    net_names.add(name)
+
+        # 保持稳定顺序，优先 bond 设备
+        all_names = sorted(ib_names | net_names)
+        all_names.sort(key=lambda x: (0 if "bond" in x else 1, x))
+        return all_names
+
+    def _read_hca_gids(self, hca: str) -> set[str]:
+        """读取 HCA 的 GID，作为跨节点连通性的轻量指纹。"""
+        gid_root = Path(f"/sys/class/infiniband/{hca}/ports")
+        if not gid_root.exists():
+            return set()
+
+        gid_index_env = os.environ.get("NCCL_IB_GID_INDEX", "").strip()
+        gid_index: str | None = gid_index_env if gid_index_env else None
+
+        gids: set[str] = set()
+        for gid_file in gid_root.glob("*/gids/*"):
+            if gid_index is not None and gid_file.name != gid_index:
+                continue
+            with contextlib.suppress(Exception):
+                gid = gid_file.read_text().strip().lower()
+                if not gid:
+                    continue
+                # 全零 GID 没有路由意义
+                if gid == "::":
+                    continue
+                if gid.replace(":", "") == "0" * 32:
+                    continue
+                gids.add(gid)
+        return gids
+
+    def _filter_hcas_by_peer_connectivity(
+        self,
+        candidates: list[str],
+        group_info: CommGroupInfo,
+        config: CommConfig,
+    ) -> list[str]:
+        """
+        基于跨 rank 的 GID 信息过滤本地 HCA，保留“更可能真实互通”的网卡。
+
+        说明：
+        - 这是轻量联通性探测（通过 GID 子网交集），比“共同可见设备名”更接近真实网络。
+        - 仍不替代 ib_write_bw 等压测工具。
+        """
+        verify_peers = config.extra.get(
+            "multi_nic_verify_peers",
+            _env_enabled(
+                "UNIFIED_COMM_NCCL_MULTI_NIC_VERIFY_PEERS",
+                default=_DEFAULT_MULTI_NIC_VERIFY_PEERS,
+            ),
+        )
+        if not verify_peers or group_info.world_size <= 1:
+            return candidates
+
+        if not dist.is_available() or not dist.is_initialized():
+            logger.warning(
+                "Skip peer NIC connectivity verification because torch.distributed is not initialized."
+            )
+            return candidates
+
+        local_hca_to_gids = {hca: sorted(self._read_hca_gids(hca)) for hca in candidates}
+
+        tmp_group: dist.ProcessGroup | None = None
+        try:
+            tmp_group = dist.new_group(ranks=group_info.ranks, backend="gloo")
+            local_payload = {
+                "rank": group_info.rank_in_group,
+                "hca_to_gids": local_hca_to_gids,
+            }
+            gathered: list[dict[str, Any]] = [
+                {} for _ in range(group_info.world_size)
+            ]
+            dist.all_gather_object(gathered, local_payload, group=tmp_group)
+
+            peer_gid_sets: list[set[str]] = []
+            for item in gathered:
+                if item.get("rank") == group_info.rank_in_group:
+                    continue
+                peer_map = item.get("hca_to_gids", {})
+                one_peer_gids: set[str] = set()
+                for gid_list in peer_map.values():
+                    one_peer_gids.update(gid_list)
+                peer_gid_sets.append(one_peer_gids)
+
+            filtered: list[str] = []
+            dropped: list[str] = []
+            for hca in candidates:
+                local_gids = set(local_hca_to_gids.get(hca, []))
+                if not local_gids:
+                    dropped.append(hca)
+                    continue
+
+                # 要求与每个 peer 至少有一个 GID 交集，减少“本机可见但对端不可达”。
+                reachable_all_peers = all(
+                    bool(local_gids & peer_gids) for peer_gids in peer_gid_sets
+                )
+                if reachable_all_peers:
+                    filtered.append(hca)
+                else:
+                    dropped.append(hca)
+
+            if filtered:
+                if dropped:
+                    logger.info(
+                        "Filtered non-connective HCAs by peer GID check: dropped=%s, kept=%s",
+                        dropped,
+                        filtered,
+                    )
+                return filtered
+
+            logger.warning(
+                "Peer GID connectivity check filtered out all HCAs; fallback to local candidates=%s",
+                candidates,
+            )
+            return candidates
+        except Exception as e:
+            logger.warning(
+                "Peer NIC connectivity verification failed; fallback to local candidates %s, err=%s",
+                candidates,
+                e,
+            )
+            return candidates
+        finally:
+            if tmp_group is not None:
+                with contextlib.suppress(Exception):
+                    dist.destroy_process_group(tmp_group)
+
+    def _maybe_enable_multi_nic_aggregation(
+        self,
+        config: CommConfig,
+        group_info: CommGroupInfo,
+    ) -> None:
+        """
+        在 NCCLBackend 内部启用多网卡带宽聚合。
+
+        开关：
+          - UNIFIED_COMM_NCCL_MULTI_NIC_ENABLE (默认 1)
+          - UNIFIED_COMM_NCCL_MULTI_NIC_COUNT (默认 8)
+          - UNIFIED_COMM_NCCL_MULTI_NIC_DEVICES (显式设备列表，逗号分隔)
+          - UNIFIED_COMM_NCCL_MULTI_NIC_FORCE (默认 0；为 1 时覆盖已存在 NCCL_IB_HCA)
+        """
+        # 允许通过 config.extra 覆盖环境变量，便于上层策略化控制
+        enabled = config.extra.get(
+            "multi_nic_enable",
+            _env_enabled("UNIFIED_COMM_NCCL_MULTI_NIC_ENABLE", default=True),
+        )
+        if not enabled:
+            return
+
+        force_override = config.extra.get(
+            "multi_nic_force",
+            _env_enabled(
+                "UNIFIED_COMM_NCCL_MULTI_NIC_FORCE",
+                default=_DEFAULT_MULTI_NIC_FORCE,
+            ),
+        )
+
+        if os.environ.get("NCCL_IB_HCA") and not force_override:
+            logger.info(
+                "Skip multi-NIC auto-config because NCCL_IB_HCA is already set "
+                "(set UNIFIED_COMM_NCCL_MULTI_NIC_FORCE=1 to override)."
+            )
+            return
+
+        explicit = config.extra.get("multi_nic_devices")
+        if explicit is None:
+            explicit = os.environ.get("UNIFIED_COMM_NCCL_MULTI_NIC_DEVICES")
+
+        if isinstance(explicit, str) and explicit.strip():
+            explicit_str = explicit.strip()
+            if explicit_str.lower() in (
+                "auto",
+                "auto-detect",
+                "autodetect",
+                "default",
+            ):
+                candidates = self._discover_rdma_hcas()
+            else:
+                candidates = _split_csv(explicit_str)
+        elif isinstance(explicit, (list, tuple)):
+            candidates = [str(x).strip() for x in explicit if str(x).strip()]
+        else:
+            candidates = self._discover_rdma_hcas()
+
+        if not candidates:
+            logger.warning(
+                "Multi-NIC aggregation requested but no RDMA HCA found; "
+                "keep NCCL default device selection."
+            )
+            return
+
+        max_count_raw = config.extra.get(
+            "multi_nic_count",
+            os.environ.get(
+                "UNIFIED_COMM_NCCL_MULTI_NIC_COUNT",
+                str(_DEFAULT_MULTI_NIC_COUNT),
+            ),
+        )
+        with contextlib.suppress(Exception):
+            max_count = max(1, int(max_count_raw))
+            candidates = candidates[:max_count]
+
+        hca_csv = ",".join(candidates)
+        os.environ["NCCL_IB_HCA"] = hca_csv
+        # 跨 NIC 连接默认打开，有助于聚合多网卡带宽
+        os.environ.setdefault("NCCL_CROSS_NIC", "1")
+
+        qps_raw = config.extra.get(
+            "multi_nic_qps_per_connection",
+            os.environ.get("UNIFIED_COMM_NCCL_MULTI_NIC_QPS_PER_CONNECTION"),
+        )
+        if qps_raw is not None:
+            os.environ["NCCL_IB_QPS_PER_CONNECTION"] = str(qps_raw)
+
+        logger.info(
+            "NCCL multi-NIC aggregation enabled: NCCL_IB_HCA=%s, "
+            "NCCL_CROSS_NIC=%s, NCCL_IB_QPS_PER_CONNECTION=%s",
+            hca_csv,
+            os.environ.get("NCCL_CROSS_NIC", ""),
+            os.environ.get("NCCL_IB_QPS_PER_CONNECTION", ""),
+        )
+
     def init_comm_group(
         self, group_info: CommGroupInfo, config: CommConfig
     ) -> NCCLCommHandle:
@@ -151,6 +418,9 @@ class NCCLBackend(CommBackend):
         A) 复用已有 ProcessGroup（通过 config.extra 传入）
         B) 新建 ProcessGroup（默认行为）
         """
+        # 在构建 PG 前尽早注入 NCCL 多网卡配置，确保生效。
+        self._maybe_enable_multi_nic_aggregation(config, group_info)
+
         existing_device_group = config.extra.get("existing_device_group", None)
         existing_cpu_group = config.extra.get("existing_cpu_group", None)
 
