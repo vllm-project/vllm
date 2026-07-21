@@ -18,7 +18,7 @@ def mask_empty_context_lse(
     num_heads, num_tokens = lse.shape
     num_reqs = query_start_loc.shape[0] - 1
     block_size = 128
-    # Each ragged query may contribute one partial block.
+    # Upper bound for request-local blocks; blocks never span requests.
     num_query_blocks = num_tokens // block_size + num_reqs
     mask_empty_context_lse_kernel[(num_query_blocks,)](
         lse,
@@ -35,27 +35,30 @@ def mask_empty_context_lse(
 
 
 @triton.jit
-def find_seq_idx_warp(
-    query_start_len_ptr,
-    target_idx,
-    num_seqs,
+def find_req_idx_warp(
+    query_start_loc,
+    query_block_idx,
+    num_reqs,
     BLOCK_Q: tl.constexpr,
 ):
-    """Resolve a ragged query block by scanning 32 boundaries at a time."""
+    """Map a request-local query block to its request."""
     lanes = tl.arange(0, 32)
     chunk_start = 0
-    seq_idx = 0
+    req_idx = 0
     move_on = True
-    while (chunk_start < num_seqs) & move_on:
-        seq_offsets = chunk_start + lanes
-        seq_mask = seq_offsets < num_seqs
-        query_starts = tl.load(query_start_len_ptr + seq_offsets, mask=seq_mask)
-        seq_block_starts = query_starts // BLOCK_Q + seq_offsets
-        match_count = tl.sum((seq_mask & (seq_block_starts <= target_idx)).to(tl.int32))
-        seq_idx = chunk_start + match_count - 1
+    while (chunk_start < num_reqs) & move_on:
+        req_offsets = chunk_start + lanes
+        req_mask = req_offsets < num_reqs
+        query_starts = tl.load(query_start_loc + req_offsets, mask=req_mask)
+        # Each request boundary starts a new logical block.
+        req_block_starts = query_starts // BLOCK_Q + req_offsets
+        match_count = tl.sum(
+            (req_mask & (req_block_starts <= query_block_idx)).to(tl.int32)
+        )
+        req_idx = chunk_start + match_count - 1
         move_on = match_count == 32
         chunk_start += 32
-    return seq_idx
+    return req_idx
 
 
 @triton.jit
@@ -71,13 +74,14 @@ def mask_empty_context_lse_kernel(
     BLOCK_HEADS: tl.constexpr,
 ):
     query_block_idx = tl.program_id(0)
-    req_idx = find_seq_idx_warp(query_start_loc, query_block_idx, num_reqs, BLOCK_SIZE)
+    req_idx = find_req_idx_warp(query_start_loc, query_block_idx, num_reqs, BLOCK_SIZE)
 
     query_start = tl.load(query_start_loc + req_idx)
     query_end = tl.load(query_start_loc + req_idx + 1)
     query_len = query_end - query_start
-    req_block_start = query_start // BLOCK_SIZE + req_idx
-    token_offset = (query_block_idx - req_block_start) * BLOCK_SIZE
+    req_first_block = query_start // BLOCK_SIZE + req_idx
+    block_in_req = query_block_idx - req_first_block
+    token_offset = block_in_req * BLOCK_SIZE
     if token_offset >= query_len:
         return
 
