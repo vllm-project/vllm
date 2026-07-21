@@ -923,12 +923,13 @@ class OffloadingConnectorScheduler:
 
         for req_id, new_block_id_groups, preempted in yield_req_data(scheduler_output):
             req_status = self._req_status[req_id]
-            req_status.update_offload_keys()
 
             if preempted:
                 for group_state in req_status.group_states:
                     group_state.block_ids.clear()
                     group_state.offload_keys.clear()
+            else:
+                req_status.update_offload_keys()
 
             if new_block_id_groups:
                 if self._sliding_window_groups:
