@@ -51,12 +51,24 @@ class MooncakeBootstrapServer:
         self,
         host: str,
         port: int,
-        expected_tp_size: int = 1,
-        expected_pp_size: int = 1,
+        expected_tp_size: int | None = None,
+        expected_pp_size: int | None = None,
         wait_for_complete_topology: bool = False,
     ):
-        if expected_tp_size < 1 or expected_pp_size < 1:
+        self.server_thread: threading.Thread | None = None
+        self.server: uvicorn.Server | None = None
+
+        if expected_tp_size is not None and expected_tp_size < 1:
             raise ValueError("Expected TP and PP sizes must be positive.")
+        if expected_pp_size is not None and expected_pp_size < 1:
+            raise ValueError("Expected TP and PP sizes must be positive.")
+        if wait_for_complete_topology and (
+            expected_tp_size is None or expected_pp_size is None
+        ):
+            raise ValueError(
+                "Expected TP and PP sizes are required when waiting for a "
+                "complete topology."
+            )
 
         self.workers: dict[int, EngineEntry] = {}
         self.expected_tp_size = expected_tp_size
@@ -67,8 +79,6 @@ class MooncakeBootstrapServer:
         self.port = port
         self.app = FastAPI()
         self._register_routes()
-        self.server_thread: threading.Thread | None = None
-        self.server: uvicorn.Server | None = None
 
     def __del__(self):
         self.shutdown()
@@ -102,7 +112,9 @@ class MooncakeBootstrapServer:
 
     async def register_worker(self, payload: RegisterWorkerPayload):
         """Handles registration of a prefiller worker."""
-        if payload.tp_rank < 0 or payload.tp_rank >= self.expected_tp_size:
+        if self.expected_tp_size is not None and (
+            payload.tp_rank < 0 or payload.tp_rank >= self.expected_tp_size
+        ):
             raise HTTPException(
                 status_code=400,
                 detail=(
@@ -110,7 +122,9 @@ class MooncakeBootstrapServer:
                     f"{self.expected_tp_size}."
                 ),
             )
-        if payload.pp_rank < 0 or payload.pp_rank >= self.expected_pp_size:
+        if self.expected_pp_size is not None and (
+            payload.pp_rank < 0 or payload.pp_rank >= self.expected_pp_size
+        ):
             raise HTTPException(
                 status_code=400,
                 detail=(
@@ -173,6 +187,8 @@ class MooncakeBootstrapServer:
         if not self.workers:
             return False
 
+        assert self.expected_tp_size is not None
+        assert self.expected_pp_size is not None
         expected_tp_ranks = set(range(self.expected_tp_size))
         expected_pp_ranks = set(range(self.expected_pp_size))
         return all(

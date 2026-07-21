@@ -14,6 +14,7 @@ from fastapi import HTTPException
 
 from vllm import envs
 from vllm.config import set_current_vllm_config
+from vllm.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector import (
     KVConnectorRole,
     MooncakeConnector,
@@ -40,6 +41,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
 )
+from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import RequestStatus
 
 from .utils import create_request, create_scheduler, create_vllm_config
@@ -534,10 +536,28 @@ async def test_bootstrap_server(bootstrap_server: MooncakeBootstrapServer):
 
 
 @pytest.mark.asyncio
-async def test_bootstrap_server_preserves_legacy_query_behavior():
+@pytest.mark.skip_global_cleanup
+async def test_bootstrap_server_preserves_legacy_registration_and_query_behavior():
     server = MooncakeBootstrapServer("127.0.0.1", get_open_port())
+    payload = RegisterWorkerPayload(
+        engine_id="eng-1",
+        dp_rank=0,
+        tp_rank=2,
+        pp_rank=3,
+        addr="tcp://1.1.1.1:1111",
+    )
 
-    assert await server.query() == {}
+    assert await server.register_worker(payload) == {"status": "ok"}
+    workers = await server.query()
+    assert workers[0].worker_addr == {2: {3: "tcp://1.1.1.1:1111"}}
+
+
+@pytest.mark.skip_global_cleanup
+def test_bootstrap_server_requires_sizes_for_complete_topology():
+    with pytest.raises(ValueError, match="sizes are required"):
+        MooncakeBootstrapServer(
+            "127.0.0.1", get_open_port(), wait_for_complete_topology=True
+        )
 
 
 @pytest.mark.parametrize(
@@ -548,6 +568,7 @@ async def test_bootstrap_server_preserves_legacy_query_behavior():
     ],
 )
 @pytest.mark.asyncio
+@pytest.mark.skip_global_cleanup
 async def test_bootstrap_server_rejects_rank_outside_configured_topology(
     tp_rank: int, pp_rank: int, match: str
 ):
@@ -773,21 +794,28 @@ def patch_worker_dependencies():
         }
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("pcp_rank, expected_posts", [(0, 1), (1, 0)])
-async def test_prefill_worker_registers_only_canonical_pcp_replica(
-    pcp_rank: int, expected_posts: int
-):
+def _make_registering_prefill_worker(
+    *, tp_rank: int, pcp_rank: int
+) -> MooncakeConnectorWorker:
     worker = object.__new__(MooncakeConnectorWorker)
     worker.pcp_rank = pcp_rank
     worker.vllm_config = SimpleNamespace()
     worker.engine_id = "engine-1"
     worker.dp_rank = 0
-    worker.tp_rank = 1
+    worker.tp_rank = tp_rank
     worker.pp_rank = 0
     worker.hostname = "127.0.0.1"
-    worker.side_channel_port = 12345
+    worker.side_channel_port = 12345 + tp_rank
     worker.shutdown = MagicMock()
+    return worker
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("pcp_rank, expected_posts", [(0, 1), (1, 0)])
+async def test_prefill_worker_registers_only_canonical_pcp_replica(
+    pcp_rank: int, expected_posts: int
+):
+    worker = _make_registering_prefill_worker(tp_rank=1, pcp_rank=pcp_rank)
 
     with (
         patch(
@@ -816,6 +844,77 @@ async def test_prefill_worker_registers_only_canonical_pcp_replica(
             }
 
     del worker
+
+
+@pytest.mark.asyncio
+@pytest.mark.skip_global_cleanup
+async def test_pcp_canonical_ownership_controls_discovery_and_completion():
+    server = MooncakeBootstrapServer(
+        "127.0.0.1",
+        get_open_port(),
+        expected_tp_size=2,
+        expected_pp_size=1,
+        wait_for_complete_topology=True,
+    )
+
+    async def register(_url: str, *, json: dict):
+        response = MagicMock()
+        response.raise_for_status = MagicMock()
+        await server.register_worker(RegisterWorkerPayload(**json))
+        return response
+
+    with (
+        patch(
+            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake."
+            "mooncake_connector.get_mooncake_bootstrap_addr",
+            return_value=("bootstrap", 8998),
+        ),
+        patch("httpx.AsyncClient") as mock_async_client,
+    ):
+        mock_post = mock_async_client.return_value.__aenter__.return_value.post
+        mock_post.side_effect = register
+
+        for pcp_rank in range(2):
+            worker = _make_registering_prefill_worker(tp_rank=0, pcp_rank=pcp_rank)
+            await worker.register_worker_with_bootstrap()
+
+        with pytest.raises(HTTPException, match="topology is not ready"):
+            await server.query()
+
+        for pcp_rank in range(2):
+            worker = _make_registering_prefill_worker(tp_rank=1, pcp_rank=pcp_rank)
+            await worker.register_worker_with_bootstrap()
+
+    assert mock_post.await_count == 2
+    workers = await server.query()
+    assert workers[0].worker_addr == {
+        0: {0: "tcp://127.0.0.1:12345"},
+        1: {0: "tcp://127.0.0.1:12346"},
+    }
+
+    vllm_config = _make_scheduler_vllm_config(
+        kv_role="kv_producer", tp_size=2, pcp_size=2
+    )
+    connector = MooncakeConnector(
+        vllm_config,
+        KVConnectorRole.SCHEDULER,
+        _make_test_kv_cache_config(),
+    )
+    aggregator = KVOutputAggregator.from_connector(connector, world_size=4)
+
+    first = SimpleNamespace(
+        kv_connector_output=KVConnectorOutput(finished_sending={"req-1"})
+    )
+    aggregated = aggregator.aggregate([first])
+    assert aggregated is not None
+    assert not aggregated.kv_connector_output.finished_sending
+
+    second = SimpleNamespace(
+        kv_connector_output=KVConnectorOutput(finished_sending={"req-1"})
+    )
+    aggregated = aggregator.aggregate([second])
+    assert aggregated is not None
+    assert aggregated.kv_connector_output.finished_sending == {"req-1"}
 
 
 @pytest.mark.asyncio
