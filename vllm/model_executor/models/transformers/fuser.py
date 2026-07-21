@@ -31,9 +31,14 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
-@cached(cache={}, key=type)
+def key(module: nn.Module) -> tuple:
+    """Cache key for `get_fuser`. Considers module type and its immediate children."""
+    return (type(module), tuple(name for name, _ in module.named_children()))
+
+
+@cached(cache={}, key=key)
 def get_fuser(module: nn.Module) -> BaseFuser | None:
-    """The fuser for `type(module)` (cached per class), or `None` if no match."""
+    """The fuser for `module`'s class and shape (cached), or `None` if no match."""
     # Projection fusions need >=2 sibling linears; the RMSNorm fusion needs a
     # leaf module (raw tensor math, no submodules). Nothing else can match, and
     # tracing is skipped for it.
