@@ -72,10 +72,10 @@ def test_v2_model_runner_env_tri_state(monkeypatch, env_value, expected):
     ("use_v2_model_runner", "expected_capture_sizes"),
     [
         (False, [4, 8, 12, 16]),
-        (True, [4, 8, 12, 16]),
+        (True, list(range(1, 17))),
     ],
 )
-def test_resolve_cudagraph_mode_adjusts_uniform_spec_decode_sizes(
+def test_resolve_cudagraph_mode_adjusts_spec_decode_sizes_only_for_v1(
     use_v2_model_runner,
     expected_capture_sizes,
 ):

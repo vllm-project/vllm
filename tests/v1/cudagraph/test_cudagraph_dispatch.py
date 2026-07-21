@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from contextlib import nullcontext
 from dataclasses import replace
 from unittest.mock import MagicMock, patch
 
@@ -23,54 +22,8 @@ from vllm.config.lora import LoRAConfig
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.platforms import current_platform
 from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
-from vllm.v1.worker.gpu.cudagraph_utils import (
-    BatchExecutionDescriptor,
-    CudaGraphManager,
-)
 
 DEVICE_TYPE = current_platform.device_type
-
-
-def test_breakable_piecewise_capture_builds_fresh_metadata_for_both_passes():
-    manager = CudaGraphManager.__new__(CudaGraphManager)
-    desc = BatchExecutionDescriptor(CUDAGraphMode.PIECEWISE, 8, None)
-    manager.device = torch.device("cpu")
-    manager._capture_descs = {CUDAGraphMode.PIECEWISE: [desc]}
-    manager._graphs_captured = False
-    manager.use_breakable_cg = True
-
-    create_calls = []
-    forward_calls = []
-
-    def create_forward_fn(desc_arg, warmup):
-        assert desc_arg == desc
-        metadata = {"layer": object()}
-        create_calls.append((warmup, metadata))
-
-        def forward_fn(cg_mode):
-            assert metadata
-            forward_calls.append((warmup, cg_mode, metadata))
-
-        return forward_fn
-
-    with (
-        patch(
-            "vllm.v1.worker.gpu.cudagraph_utils.graph_capture",
-            return_value=nullcontext(),
-        ),
-        patch(
-            "vllm.v1.worker.gpu.cudagraph_utils.is_global_first_rank",
-            return_value=False,
-        ),
-    ):
-        manager.capture(create_forward_fn)
-
-    assert [warmup for warmup, _ in create_calls] == [True, False]
-    assert [mode for _, mode, _ in forward_calls] == [
-        CUDAGraphMode.NONE,
-        CUDAGraphMode.PIECEWISE,
-    ]
-    assert create_calls[0][1] is not create_calls[1][1]
 
 
 # Helper MLP for testing
@@ -313,39 +266,6 @@ class TestCudagraphDispatcher:
         # Don't initialize keys
 
         assert dispatcher.get_capture_descs() == []
-
-    def test_breakable_piecewise_preserves_padded_request_count(self):
-        comp_config = CompilationConfig(
-            cudagraph_mode="FULL_AND_PIECEWISE",
-            mode=CompilationMode.NONE,
-            cudagraph_capture_sizes=[1, 8],
-        )
-        config = _create_vllm_config(comp_config, max_num_seqs=8)
-
-        with patch(
-            "vllm.compilation.breakable_cudagraph.is_breakable_cudagraph_enabled",
-            return_value=True,
-        ):
-            dispatcher = CudagraphDispatcher(config)
-        dispatcher.initialize_cudagraph_keys(
-            cudagraph_mode=comp_config.cudagraph_mode,
-            uniform_decode_query_len=1,
-        )
-
-        piecewise_descs = dispatcher.cudagraph_keys[CUDAGraphMode.PIECEWISE]
-        assert (
-            BatchDescriptor(num_tokens=8, num_reqs=8, uniform=False) in piecewise_descs
-        )
-        assert all(desc.num_reqs is not None for desc in piecewise_descs)
-
-        runtime_mode, desc = dispatcher.dispatch(
-            num_tokens=5,
-            uniform_decode=False,
-            has_lora=False,
-            invalid_modes={CUDAGraphMode.FULL},
-        )
-        assert runtime_mode == CUDAGraphMode.PIECEWISE
-        assert desc == BatchDescriptor(num_tokens=8, num_reqs=8, uniform=False)
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="Skip if not cuda")

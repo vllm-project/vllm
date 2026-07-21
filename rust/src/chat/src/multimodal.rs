@@ -173,12 +173,7 @@ impl ResolvedPlaceholder {
         let marker_token_id = context.tokenizer().token_to_id(&token).ok_or_else(|| {
             multimodal!("placeholder token `{token}` is not in the tokenizer vocabulary")
         })?;
-        let embed_token_id = raw.placeholder_token_id_for(&metadata, modality)?;
-        let embed_token_id = u32::try_from(embed_token_id).map_err(|_| {
-            multimodal!(
-                "placeholder token id `{embed_token_id}` for `{modality}` must be non-negative"
-            )
-        })?;
+        let embed_token_id = raw.placeholder_token_id_for(&metadata, modality)? as u32;
 
         Ok(Self {
             token,
