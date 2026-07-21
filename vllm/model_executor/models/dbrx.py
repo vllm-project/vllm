@@ -383,7 +383,9 @@ class DbrxModel(nn.Module):
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         expert_params_mapping = [
             (
-                "w13" if weight_name in ["w1", "v1"] else "w2",
+                "routed_experts.w13"
+                if weight_name in ["w1", "v1"]
+                else "routed_experts.w2",
                 f"mlp.{weight_name}",
             )
             for weight_name in ["w1", "v1", "w2"]
