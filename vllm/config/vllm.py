@@ -565,7 +565,7 @@ class VllmConfig:
             # V1 Model Runner does not fully support async scheduling with PP.
             if pp_size <= 1:
                 return 2
-        return pp_size
+        return pp_size + 1
 
     @property
     def max_in_flight_tokens(self) -> int:

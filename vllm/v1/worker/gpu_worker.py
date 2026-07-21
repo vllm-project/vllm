@@ -173,8 +173,6 @@ class Worker(WorkerBase):
             raise ValueError(f"Unknown profiler type: {self.profiler_config.profiler}")
 
         self.use_v2_model_runner = vllm_config.use_v2_model_runner
-        # pending non-blocking PP send work from the previous iteration
-        self._pp_send_work: list[Handle] = []
 
         # Resolved lazily on first sleep/wake; persists worker-process state.
         self._sleep_mode_backend: SleepModeBackend | None = None
@@ -1024,12 +1022,6 @@ class Worker(WorkerBase):
     def execute_model(
         self, scheduler_output: "SchedulerOutput"
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput | None:
-        # ensure any previous non-blocking PP sends are complete
-        if self._pp_send_work:
-            for handle in self._pp_send_work:
-                handle.wait()
-            self._pp_send_work = []
-
         intermediate_tensors = None
         forward_pass = scheduler_output.total_num_scheduled_tokens > 0
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
@@ -1102,11 +1094,16 @@ class Worker(WorkerBase):
             and not get_pp_group().is_last_rank
         )
 
-        # launch non-blocking send of intermediate tensors
-        self._pp_send_work = get_pp_group().isend_tensor_dict(
+        # launch non-blocking send of intermediate tensors; the
+        # GroupCoordinator self-retains the source tensors and the
+        # metadata handle in ``_pending_isends`` and reaps them lazily on
+        # the next ``isend_tensor_dict(is_async=True)`` call, so this
+        # step returns without waiting for the receiver to drain.
+        get_pp_group().isend_tensor_dict(
             output.tensors,
             all_gather_group=get_tp_group(),
             all_gather_tensors=all_gather_tensors,
+            is_async=True,
         )
 
         return None
