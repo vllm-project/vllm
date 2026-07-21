@@ -422,7 +422,7 @@ def _spec_forward(
     if can_use_native_conv:
         q_i = int(seq_lens[0].item())
         conv_out = ops.causal_conv1d_update_cpu(
-            x=mixed_qkv_spec.reshape(num_spec_decodes, q_i, dim),
+            x=mixed_qkv_spec.view(num_spec_decodes, q_i, dim),
             conv_states=conv_buf,
             weight=layer.conv1d.weight,
             bias=bias,
@@ -432,7 +432,7 @@ def _spec_forward(
             .contiguous(),
             is_vnni=True,
             num_accepted_tokens=num_accepted[:num_spec_decodes].to("cpu", torch.int32),
-        ).reshape_as(mixed_qkv_spec)
+        ).view_as(mixed_qkv_spec)
     else:
         w = _unpacked_conv_weight(layer).unsqueeze(1)
         col0 = spec_state_indices[:num_spec_decodes, 0]
