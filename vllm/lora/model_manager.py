@@ -34,6 +34,7 @@ from vllm.lora.utils import (
 from vllm.model_executor.layers.fused_moe import MoERunner
 from vllm.model_executor.models import (
     SupportsLoRA,
+    SupportsMultiModal,
     is_pooling_model,
     supports_multimodal,
 )
@@ -42,12 +43,18 @@ from vllm.model_executor.models.utils import PPMissingLayer
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.encoder_budget import MultiModalBudget
 from vllm.utils.cache import LRUCache
-from vllm.utils.platform_utils import is_pin_memory_available
+from vllm.utils.torch_utils import PIN_MEMORY
 
 logger = init_logger(__name__)
 
 T = TypeVar("T")
 DEFAULT_LANGUAGE_WRAPPER_KEY = "language_model"
+
+
+class SupportsLoRAModel(nn.Module, SupportsLoRA): ...
+
+
+class SupportsLoRAMultiModalModel(SupportsLoRAModel, SupportsMultiModal): ...
 
 
 class AdapterLRUCache(LRUCache[int, T]):
@@ -66,13 +73,13 @@ class LoRAModelManager:
 
     def __init__(
         self,
-        model: SupportsLoRA,
+        model: SupportsLoRAModel,
         max_num_seqs: int,
         max_num_batched_tokens: int,
         vocab_size: int,
         lora_config: LoRAConfig,
         device: torch.device,
-        vllm_config: VllmConfig | None = None,
+        vllm_config: VllmConfig,
     ):
         """Create a LoRAModelManager and adapter for a given model.
 
@@ -85,20 +92,23 @@ class LoRAModelManager:
             vocab_size: the vocab size of the model.
             lora_config: the LoRA configuration.
         """
-        self.model: SupportsLoRA = model
+        self.model: SupportsLoRAModel = model
         self.supported_lora_modules = get_supported_lora_modules(self.model)
         assert self.supported_lora_modules, (
             f"No supported LoRA modules found in {self.model.__class__.__name__}."
         )
 
-        self._registered_adapters: dict[int, LoRAModel] = {}
-        # Dict instead of a set for compatibility with LRUCache.
-        self._active_adapters: dict[int, None] = {}
         self.adapter_type = "LoRA"
         self.lora_config = lora_config
         self.device = device
         self.max_num_seqs = max_num_seqs
         assert self.capacity >= self.lora_slots
+        self._registered_adapters: AdapterLRUCache[LoRAModel] = AdapterLRUCache(
+            self.capacity, self.deactivate_adapter
+        )
+        self._active_adapters: AdapterLRUCache[None] = AdapterLRUCache(
+            self.lora_slots, self._deactivate_adapter
+        )
         self.max_num_batched_tokens = math.ceil(max_num_batched_tokens / 8) * 8
         self.lora_index_to_id: list[int | None] = [None] * self.lora_slots
         self.vocab_size = vocab_size
@@ -106,8 +116,8 @@ class LoRAModelManager:
         self.is_pooling_model = is_pooling_model(self.model)
         self.packed_modules: dict[str, list[str]] = {}
         self.modules: dict[str, BaseLayerWithLoRA] = {}
-        # Dict instead of a set for compatibility with LRUCache.
         self._last_mapping: LoRAMapping | None = None
+        self._last_slot_layout: tuple[int | None, ...] | None = None
         is_moe = is_moe_model(self.model)
         self._is_moe = is_moe
 
@@ -122,8 +132,13 @@ class LoRAModelManager:
             and self.model.is_3d_moe_weight
             and not self._enable_mixed_moe_lora_format
         )
+        # Shared MoE adapters: w13 lora_A / w2 lora_B shared across experts,
+        # stored as pre-stacked experts.w{1,2,3} tensors (startup opt-in).
+        self._enable_moe_shared_loras = is_moe and lora_config.enable_moe_shared_loras
         self.packed_modules_mapping = process_packed_modules_mapping(
-            self.model, force_2d_moe=self._enable_mixed_moe_lora_format
+            self.model,
+            force_2d_moe=self._enable_mixed_moe_lora_format,
+            enable_moe_shared_loras=self._enable_moe_shared_loras,
         )
         self._is_non_gated_moe = is_moe and self.model.is_non_gated_moe
         self._use_ep = bool(
@@ -272,6 +287,7 @@ class LoRAModelManager:
 
     @property
     def capacity(self) -> int:
+        assert self.lora_config.max_cpu_loras is not None
         return self.lora_config.max_cpu_loras
 
     @property
@@ -750,6 +766,16 @@ class LoRAModelManager:
                 if lora_model.check_lora_name(replaced_module_name):
                     module_name = replaced_module_name
             if module_name.endswith(".experts"):
+                if self._enable_moe_shared_loras:
+                    lora_model.loras[module_name] = (
+                        PackedLoRALayerWeights.pack_moe_stacked(
+                            replacement_loras,
+                            module_name,
+                        )
+                    )
+                    for module in packed_module_names:
+                        lora_model.loras.pop(module, None)
+                    continue
                 if self._is_non_gated_moe and len(replacement_loras) > 0:
                     replacement_loras = self._pad_lora_pairs_to_triplets(
                         replacement_loras
@@ -801,7 +827,7 @@ class LoRAModelManager:
         # 2. The weight packing above (e.g., pack_moe) may invalidate the
         # pin_memory allocation, so we execute it after packing.
 
-        pin_memory = str(lora_device) == "cpu" and is_pin_memory_available()
+        pin_memory = str(lora_device) == "cpu" and PIN_MEMORY
         if pin_memory:
             for lora in lora_model.loras.values():
                 if isinstance(lora.lora_a, list):
@@ -1008,20 +1034,10 @@ class LoRAModelManager:
         module: FusedMoEWithLoRA,
         module_name: str,
     ) -> None:
-        """Slice the cached LoRA tensors down to this rank's local experts.
+        """Slice cached LoRA tensors down to this rank's local experts.
 
-        The 2D MoE checkpoint enters as a list of per-(w1/w2/w3) tensors of
-        shape (num_experts, rank, in) / (num_experts, out, rank). When EP
-        is active each rank only owns local_num_experts; without this slice
-        the CPU LoRAModel keeps the full global weight and set_lora has to
-        re-slice on every activation.
-
-        With the load-time / pack-time slicing in
-        ``_restrict_to_local_experts``, the stacked tensors already match
-        ``local_num_experts`` and the inner branch becomes a no-op. The
-        guard remains so checkpoints that bypassed the pre-slicing (e.g.
-        ``.bin``/``.pt`` adapters with weights mappers we don't recognize)
-        still get sliced here.
+        Shared factors have expert dimension one and remain available on every
+        rank. Per-expert factors are narrowed to the local expert block.
         """
         if not module.use_ep:
             return
@@ -1035,16 +1051,13 @@ class LoRAModelManager:
         expert_start = ep_rank * local_num_experts
         expert_end = expert_start + local_num_experts
 
-        new_lora_a: list[torch.Tensor | None] = []
-        new_lora_b: list[torch.Tensor | None] = []
-        for a, b in zip(module_lora.lora_a, module_lora.lora_b):
-            if a is not None and b is not None and a.shape[0] == global_num_experts:
-                a = a[expert_start:expert_end].contiguous()
-                b = b[expert_start:expert_end].contiguous()
-            new_lora_a.append(a)
-            new_lora_b.append(b)
-        module_lora.lora_a = new_lora_a
-        module_lora.lora_b = new_lora_b
+        def _slice_local(t: torch.Tensor | None) -> torch.Tensor | None:
+            if t is not None and t.shape[0] == global_num_experts:
+                return t[expert_start:expert_end].contiguous()
+            return t
+
+        module_lora.lora_a = [_slice_local(a) for a in module_lora.lora_a]
+        module_lora.lora_b = [_slice_local(b) for b in module_lora.lora_b]
 
     def _restrict_to_local_experts(
         self, module_name: str, new_module_names: list[str]
@@ -1137,9 +1150,14 @@ class LoRAModelManager:
         return True
 
     def set_adapter_mapping(self, mapping: LoRAMapping) -> None:
-        if self._last_mapping != mapping:
+        # The punica metadata derives from the slot layout as well as the
+        # mapping: an out-of-band add_lora() can LRU-evict and reassign slots
+        # while the running batch, and thus the mapping, is unchanged.
+        slot_layout = tuple(self.lora_index_to_id)
+        if self._last_mapping != mapping or self._last_slot_layout != slot_layout:
             self._set_adapter_mapping(mapping)
             self._last_mapping = mapping
+            self._last_slot_layout = slot_layout
 
     def remove_adapter(self, adapter_id: int) -> bool:
         self.deactivate_adapter(adapter_id)
@@ -1149,49 +1167,14 @@ class LoRAModelManager:
         return True
 
     def list_adapters(self) -> dict[int, LoRAModel]:
-        return dict(self._registered_adapters)
+        return dict(self._registered_adapters.cache)
 
     def get_adapter(self, adapter_id: int) -> LoRAModel | None:
         return self._registered_adapters.get(adapter_id)
 
 
-class LoRALRUCache(AdapterLRUCache[LoRAModel]):
-    def __init__(self, capacity: int, deactivate_lora_fn: Callable[[int], bool]):
-        super().__init__(capacity, deactivate_lora_fn)
-
-
 class LRUCacheLoRAModelManager(LoRAModelManager):
     """A model manager that manages multiple LoRAs with LRU cache."""
-
-    def __init__(
-        self,
-        model: nn.Module,
-        max_num_seqs: int,
-        max_num_batched_tokens: int,
-        vocab_size: int,
-        lora_config: LoRAConfig,
-        device: torch.device,
-        vllm_config: VllmConfig | None = None,
-    ):
-        super().__init__(
-            model,
-            max_num_seqs,
-            max_num_batched_tokens,
-            vocab_size,
-            lora_config,
-            device,
-            vllm_config,
-        )
-        self._registered_adapters: LoRALRUCache = LoRALRUCache(
-            self.capacity, self.deactivate_adapter
-        )
-        self._active_adapters: LoRALRUCache = LoRALRUCache(
-            self.lora_slots, self._deactivate_adapter
-        )
-
-    def list_adapters(self) -> dict[int, LoRAModel]:
-        """List all registered LoRAModels."""
-        return dict(self._registered_adapters.cache)
 
     def add_adapter(self, lora: LoRAModel) -> bool:
         """Add a LoRAModel to the manager."""
@@ -1248,7 +1231,7 @@ class LRUCacheLoRAModelManager(LoRAModelManager):
 
 
 def create_lora_manager(
-    model: nn.Module,
+    model: SupportsLoRAModel,
     max_num_seqs: int,
     max_num_batched_tokens: int,
     vocab_size: int,
