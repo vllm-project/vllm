@@ -9,7 +9,11 @@ ARG PYTORCH_AUDIO_BRANCH="v2.9.0"
 ARG PYTORCH_AUDIO_REPO="https://github.com/pytorch/audio.git"
 ARG FA_BRANCH="0e60e394"
 ARG FA_REPO="https://github.com/Dao-AILab/flash-attention.git"
-ARG AITER_BRANCH="v0.1.16.post3"
+# AITER is pinned to a commit (not a tag) so we can pull in the gfx942
+# fp8_mqa_logits Gluon kernel as soon as it merges.
+# WIP: set AITER_COMMIT to the ROCm/aiter#4232 merge SHA on ROCm/aiter:main
+# before this PR leaves draft. See https://github.com/ROCm/aiter/pull/4232
+ARG AITER_COMMIT="TODO_SET_TO_AITER_PR4232_MERGE_SHA"
 ARG AITER_REPO="https://github.com/ROCm/aiter.git"
 ARG MORI_BRANCH="v1.1.0"
 ARG MORI_REPO="https://github.com/ROCm/mori.git"
@@ -230,13 +234,14 @@ RUN mkdir -p /app/install && cp /app/flash-attention/dist/*.whl /app/install
 ### AITER Build
 ###
 FROM base AS build_aiter
-ARG AITER_BRANCH
+ARG AITER_COMMIT
 ARG AITER_REPO
 ARG USE_SCCACHE
 RUN --mount=type=bind,from=build_pytorch,src=/app/install/,target=/install \
     pip install /install/*.whl
-RUN git clone --recursive --branch ${AITER_BRANCH} ${AITER_REPO}
+RUN git clone --recursive ${AITER_REPO}
 RUN cd aiter \
+    && git checkout ${AITER_COMMIT} \
     && git submodule update --init --recursive \
     && pip install -r requirements.txt
 RUN pip install pyyaml && cd aiter \
@@ -300,7 +305,7 @@ ARG PYTORCH_AUDIO_BRANCH
 ARG PYTORCH_AUDIO_REPO
 ARG FA_BRANCH
 ARG FA_REPO
-ARG AITER_BRANCH
+ARG AITER_COMMIT
 ARG AITER_REPO
 ARG MORI_BRANCH
 ARG MORI_REPO

@@ -569,18 +569,6 @@ def rocm_fp8_mqa_logits(
 
     k_fp8, scale = kv
 
-    # Temporarily route gfx942 to the vendored ROCm/aiter#3257 workaround.
-    # Remove this branch once vLLM bumps AITER to a version that includes
-    # ROCm/aiter#3257.
-    if _ON_GFX942 and rocm_aiter_ops.is_enabled():
-        from vllm.v1.attention.ops.triton_fp8_mqa_logits import (
-            fp8_mqa_logits_gfx942,
-        )
-
-        return fp8_mqa_logits_gfx942(
-            q, k_fp8, scale, weights, cu_seqlen_ks, cu_seqlen_ke
-        )
-
     aiter_mqa_logits_module = None
     if rocm_aiter_ops.is_enabled():
         aiter_mqa_logits_module = mqa_logits_module()
