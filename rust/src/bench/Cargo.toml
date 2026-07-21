@@ -20,7 +20,7 @@ mimalloc.workspace = true
 rand.workspace = true
 rand_distr.workspace = true
 rayon.workspace = true
-reqwest = { workspace = true, features = ["json", "stream", "blocking", "http2"] }
+reqwest = { workspace = true, features = ["json", "stream", "http2"] }
 rlimit.workspace = true
 rustc-hash.workspace = true
 serde = { workspace = true, features = ["rc"] }
