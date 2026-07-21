@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections import OrderedDict
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 
 from typing_extensions import override
 
@@ -31,7 +31,7 @@ class ARCCachePolicy(CachePolicy):
            - If in B1 ghost list: Increase target_t1_size.
            - If in B2 ghost list: Decrease target_t1_size.
 
-        3. Block eviction (evict) - Adaptive Replacement:
+        3. Block eviction (evict_until) - Adaptive Replacement:
            Determines eviction source based on adaptive target:
            - If T1 size >= target_t1_size: Evict from T1, add to B1.
            - Otherwise: Evict from T2, add to B2.
@@ -101,6 +101,14 @@ class ARCCachePolicy(CachePolicy):
                 self.b2.move_to_end(key)
 
     @override
+    def evict(
+        self, n: int, protected: set[OffloadKey]
+    ) -> list[tuple[OffloadKey, BlockStatus]] | None:
+        if n == 0:
+            return []
+        return self.evict_until(lambda c: len(c) >= n, protected)
+
+    @override
     def clear(self) -> None:
         self.t1.clear()
         self.t2.clear()
@@ -109,21 +117,26 @@ class ARCCachePolicy(CachePolicy):
         self.target_t1_size = 0.0
 
     @override
-    def evict(
-        self, n: int, protected: set[OffloadKey]
+    def evict_until(
+        self,
+        can_fit: Callable[[list[tuple[OffloadKey, BlockStatus]]], bool],
+        protected: set[OffloadKey],
     ) -> list[tuple[OffloadKey, BlockStatus]] | None:
-        if n == 0:
-            return []
+        """
+        Yield eviction candidates in exact ARC order (virtual T1 → T2),
+        calling ``can_fit`` after each.  If the predicate returns True the
+        collected prefix is committed atomically — removals, ghost-list
+        promotion, and ghost-list trimming all happen at commit time.  On
+        exhaustion returns None with zero mutation.
 
-        # Collect candidates atomically: simulate T1 size changes as we select,
-        # but do not modify actual data structures until all n are found.
-        candidates: list[
-            tuple[OffloadKey, BlockStatus, bool]
-        ] = []  # (key, block, from_t1)
+        Protected keys and entries with non-zero ``ref_cnt`` are never
+        selected.
+        """
+        candidates: list[tuple[OffloadKey, BlockStatus, bool]] = []
         already_selected: set[OffloadKey] = set()
-        virtual_t1_size = len(self.t1)
+        virtual_t1_size: int = len(self.t1)
 
-        for _ in range(n):
+        while True:
             candidate: tuple[OffloadKey, BlockStatus, bool] | None = None
 
             if virtual_t1_size >= int(self.target_t1_size):
@@ -146,26 +159,26 @@ class ARCCachePolicy(CachePolicy):
                     ):
                         candidate = (key, block, False)
                         break
-                if candidate is None:
-                    return None
+
+            if candidate is None:
+                return None
 
             candidates.append(candidate)
             already_selected.add(candidate[0])
 
-        # Apply all evictions now that we know n candidates exist.
-        result: list[tuple[OffloadKey, BlockStatus]] = []
-        for key, block, from_t1 in candidates:
-            if from_t1:
-                del self.t1[key]
-                self.b1[key] = None
-            else:
-                del self.t2[key]
-                self.b2[key] = None
-            result.append((key, block))
+            if can_fit([(k, b) for k, b, _ in candidates]):
+                result: list[tuple[OffloadKey, BlockStatus]] = []
+                for key, block, from_t1 in candidates:
+                    if from_t1:
+                        del self.t1[key]
+                        self.b1[key] = None
+                    else:
+                        del self.t2[key]
+                        self.b2[key] = None
+                    result.append((key, block))
 
-        # Trim ghost lists to cache_capacity.
-        for ghost in (self.b1, self.b2):
-            for _ in range(len(ghost) - self.cache_capacity):
-                ghost.popitem(last=False)
+                for ghost in (self.b1, self.b2):
+                    for _ in range(len(ghost) - self.cache_capacity):
+                        ghost.popitem(last=False)
 
-        return result
+                return result

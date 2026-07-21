@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections import OrderedDict
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 
 from typing_extensions import override
 
@@ -47,17 +47,30 @@ class LRUCachePolicy(CachePolicy):
             # will eventually reach the end of evictable_blocks when they finish.
 
     @override
-    def clear(self) -> None:
-        self.evictable_blocks.clear()
-        self.blocks.clear()
-
-    @override
     def evict(
         self, n: int, protected: set[OffloadKey]
     ) -> list[tuple[OffloadKey, BlockStatus]] | None:
         if n == 0:
             return []
+        return self.evict_until(lambda c: len(c) >= n, protected)
 
+    @override
+    def clear(self) -> None:
+        self.evictable_blocks.clear()
+        self.blocks.clear()
+
+    @override
+    def evict_until(
+        self,
+        can_fit: Callable[[list[tuple[OffloadKey, BlockStatus]]], bool],
+        protected: set[OffloadKey],
+    ) -> list[tuple[OffloadKey, BlockStatus]] | None:
+        """
+        Walk evictable blocks in LRU order, calling ``can_fit`` after each
+        candidate.  On predicate success the collected prefix is removed
+        from both data structures and returned.  On exhaustion returns None
+        with zero mutation.
+        """
         candidates: list[tuple[OffloadKey, BlockStatus]] = []
         for key, _ in self.evictable_blocks.items():
             if key in protected:
@@ -66,15 +79,14 @@ class LRUCachePolicy(CachePolicy):
             block = self.blocks[key]
             assert block.ref_cnt == 0
             candidates.append((key, block))
-            if len(candidates) == n:
-                break
 
-        if len(candidates) < n:
-            return None
-        for key, _ in candidates:
-            del self.evictable_blocks[key]
-            del self.blocks[key]
-        return candidates
+            if can_fit(candidates):
+                for k, _ in candidates:
+                    del self.evictable_blocks[k]
+                    del self.blocks[k]
+                return candidates
+
+        return None
 
     @override
     def mark_evictable(self, key: OffloadKey) -> None:

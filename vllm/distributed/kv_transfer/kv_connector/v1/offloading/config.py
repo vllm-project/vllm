@@ -36,16 +36,42 @@ def build_offloading_config(
     engine_id = kv_transfer_config.engine_id
 
     parallel_config = vllm_config.parallel_config
-    groups = tuple(
-        OffloadingGroupConfig(
-            tokens_per_block=(
-                group.kv_cache_spec.block_size
-                * parallel_config.decode_context_parallel_size
-            ),
-            layer_names=tuple(group.layer_names),
-        )
-        for group in kv_cache_config.kv_cache_groups
+    context_parallel_factor = (
+        parallel_config.decode_context_parallel_size
+        * parallel_config.prefill_context_parallel_size
     )
+
+    # Build groups, optionally populating compact_bytes_per_worker from
+    # the transported signature.
+    signature = kv_cache_config.compact_aggregate_signature
+    groups = []
+
+    # Validate group count matches signature before any positional access.
+    if signature is not None:
+        assert len(kv_cache_config.kv_cache_groups) == len(signature), (
+            f"Group count {len(kv_cache_config.kv_cache_groups)} "
+            f"does not match signature count {len(signature)}"
+        )
+
+    for group_idx, group in enumerate(kv_cache_config.kv_cache_groups):
+        compact_bytes = None
+        if signature is not None:
+            charge = signature[group_idx]
+            assert charge.group_idx == group_idx, (
+                f"Signature group index {charge.group_idx} "
+                f"does not match builder group index {group_idx}"
+            )
+            compact_bytes = charge.compact_bytes_per_native_block_per_worker
+        groups.append(
+            OffloadingGroupConfig(
+                tokens_per_block=(
+                    group.kv_cache_spec.block_size * context_parallel_factor
+                ),
+                layer_names=tuple(group.layer_names),
+                compact_bytes_per_native_block_per_worker=compact_bytes,
+            )
+        )
+    groups = tuple(groups)
 
     _, tokens_per_hash = resolve_kv_cache_block_sizes(kv_cache_config, vllm_config)
     for group in groups:
@@ -117,6 +143,11 @@ def build_offloading_config(
         and not isinstance(single_group, MLAAttentionSpec)
     )
 
+    # Physical compact slices are stamped only on rich worker KV configs before
+    # scheduler projection. The collapsed scheduler config carries only the
+    # aggregate signature above.
+    compact_slice_accounting = kv_cache_config.compact_slice_accounting
+
     kv_events_config = vllm_config.kv_events_config
     return OffloadingConfig(
         groups=groups,
@@ -144,4 +175,5 @@ def build_offloading_config(
             data_parallel_index=parallel_config.data_parallel_index,
             is_parallelism_agnostic=is_parallelism_agnostic,
         ),
+        compact_slice_accounting=compact_slice_accounting,
     )

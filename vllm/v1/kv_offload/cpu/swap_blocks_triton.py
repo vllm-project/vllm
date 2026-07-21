@@ -53,6 +53,7 @@ def swap_blocks_batch(
     is_src_access_order_any: bool = False,
     *,
     bytes_per_chunk: int,
+    use_batch_api: bool = True,
 ) -> None:
     """Triton implementation of ``swap_blocks_batch`` for small CPU->GPU batches."""
     n = src_addrs.numel()
@@ -63,6 +64,7 @@ def swap_blocks_batch(
             dst_addrs,
             sizes,
             is_src_access_order_any=is_src_access_order_any,
+            use_batch_api=use_batch_api,
         )
         return
     _swap_blocks_kernel[(min(NUM_SMS, n),)](
