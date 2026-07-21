@@ -4,6 +4,7 @@
 use std::collections::HashSet;
 use std::path::Path;
 
+use thiserror_ext::AsReport as _;
 use tokenizers::Tokenizer;
 
 use crate::error::{BenchError, Result};
@@ -214,29 +215,46 @@ pub fn load_tokenizer(
     // 1. Try local HuggingFace tokenizer (tokenizer.json)
     match try_load_local(model_id) {
         Ok(tok) => {
-            println!("Tokenizer: Local (vocab_size={})", tok.get_vocab_size(true));
+            tracing::info!(
+                model = model_id,
+                kind = "local",
+                vocab_size = tok.get_vocab_size(true),
+                "loaded tokenizer"
+            );
             Ok(TokenizerKind::Local(Box::new(tok)))
         }
         Err(local_err) => {
             // 2. Try tiktoken format
-            println!("No tokenizer.json for '{model_id}', trying tiktoken format...");
+            tracing::info!(
+                model = model_id,
+                error = %local_err.as_report(),
+                "local tokenizer unavailable; trying tiktoken"
+            );
             match crate::tiktoken::try_load_tiktoken(model_id) {
                 Ok(tok) => {
-                    println!("Tokenizer: Tiktoken (vocab_size={})", tok.vocab_size());
+                    tracing::info!(
+                        model = model_id,
+                        kind = "tiktoken",
+                        vocab_size = tok.vocab_size(),
+                        "loaded tokenizer"
+                    );
                     Ok(TokenizerKind::Tiktoken(tok))
                 }
                 Err(tiktoken_err) => {
                     // 3. Try server-side fallback
                     if let Some((base_url, model)) = server_info {
-                        println!(
-                            "Tiktoken also not available ({tiktoken_err}), \
-                             trying server-side tokenization..."
+                        tracing::info!(
+                            model = model_id,
+                            error = %tiktoken_err.as_report(),
+                            "tiktoken unavailable; trying server-side tokenization"
                         );
                         match ServerTokenizer::new(base_url, model) {
                             Ok(srv) => {
-                                println!(
-                                    "Tokenizer: Server (vocab_size≈{})",
-                                    srv.cached_vocab_size
+                                tracing::info!(
+                                    model = model_id,
+                                    kind = "server",
+                                    vocab_size = srv.cached_vocab_size,
+                                    "loaded tokenizer"
                                 );
                                 return Ok(TokenizerKind::Server(srv));
                             }
