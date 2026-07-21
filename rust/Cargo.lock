@@ -5498,10 +5498,13 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.18",
+ "thiserror-ext",
  "tiktoken-rs 0.9.1",
  "tokenizers",
  "tokio",
  "tokio-stream",
+ "tracing",
+ "tracing-subscriber",
  "url",
  "uuid",
 ]
