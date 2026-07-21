@@ -4,10 +4,8 @@ from typing import Any
 
 from typing_extensions import override
 
-from vllm.config import VllmConfig
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import round_up
-from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.kv_offload.base import (
     CanonicalKVCaches,
     OffloadingCounterMetadata,
@@ -18,6 +16,7 @@ from vllm.v1.kv_offload.base import (
     OffloadingSpec,
     OffloadingWorker,
 )
+from vllm.v1.kv_offload.config import OffloadingConfig
 from vllm.v1.kv_offload.cpu.common import CPUOffloadingMetrics
 from vllm.v1.kv_offload.cpu.gpu_worker import CPUOffloadingWorker
 from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
@@ -37,6 +36,20 @@ class CPUOffloadingSpec(OffloadingSpec):
                     "transfers (0.0 = idle, 1.0 = saturated). Sustained high "
                     "values indicate transfers (stores or promotions) may be "
                     "dropped due to insufficient capacity."
+                ),
+            ),
+            CPUOffloadingMetrics.CPU_CACHE_WRITE_USAGE_PERC: OffloadingGaugeMetadata(
+                documentation=(
+                    "Fraction of CPU KV-cache space currently pinned by "
+                    "in-flight stores that have not yet "
+                    "completed (0.0 = idle, 1.0 = saturated)."
+                ),
+            ),
+            CPUOffloadingMetrics.CPU_CACHE_READ_USAGE_PERC: OffloadingGaugeMetadata(
+                documentation=(
+                    "Fraction of CPU KV-cache space currently pinned by "
+                    "in-flight loads that have not yet "
+                    "completed (0.0 = idle, 1.0 = saturated)."
                 ),
             ),
             CPUOffloadingMetrics.CPU_ALLOCATION_SIZE: OffloadingHistogramMetadata(
@@ -59,8 +72,8 @@ class CPUOffloadingSpec(OffloadingSpec):
             )
         return definitions
 
-    def __init__(self, vllm_config: VllmConfig, kv_cache_config: KVCacheConfig):
-        super().__init__(vllm_config, kv_cache_config)
+    def __init__(self, config: OffloadingConfig):
+        super().__init__(config)
 
         cpu_bytes_to_use = self.extra_config.get("cpu_bytes_to_use")
         if not cpu_bytes_to_use:
@@ -68,42 +81,28 @@ class CPUOffloadingSpec(OffloadingSpec):
                 "cpu_bytes_to_use must be specified in kv_connector_extra_config"
             )
 
-        world_size = vllm_config.parallel_config.world_size
+        world_size = config.parallel.world_size
         self.num_blocks = 0
-        self.kv_bytes_per_offloaded_block = 0
+        self.kv_bytes_per_chunk = 0
         self.cpu_page_size_per_worker = 0
-        assert kv_cache_config is not None
-        if kv_cache_config.num_blocks > 0 and world_size > 0:
-            is_packed = any(t.block_stride for t in kv_cache_config.kv_cache_tensors)
-            assert not is_packed or all(
-                t.block_stride for t in kv_cache_config.kv_cache_tensors
-            )
-            total_gpu_kv_bytes = (
-                kv_cache_config.kv_cache_tensors[0].size
-                if is_packed
-                else sum(t.size for t in kv_cache_config.kv_cache_tensors)
-            )
-            kv_bytes_per_block = (
-                total_gpu_kv_bytes // kv_cache_config.num_blocks
-            ) * world_size
-            kv_bytes_per_offloaded_block = kv_bytes_per_block * self.block_size_factor
+        if config.worker_kv_bytes_per_block > 0 and world_size > 0:
+            kv_bytes_per_block = config.worker_kv_bytes_per_block * world_size
+            kv_bytes_per_chunk = kv_bytes_per_block * self.blocks_per_chunk
 
             # calculate cpu_page_size_per_worker
-            self.cpu_page_size_per_worker = kv_bytes_per_offloaded_block // world_size
+            self.cpu_page_size_per_worker = kv_bytes_per_chunk // world_size
 
             # calculate num_blocks
-            aligned_kv_bytes_per_offloaded_block = round_up(
-                kv_bytes_per_offloaded_block, self.BLOCK_SIZE_ALIGNMENT
+            aligned_kv_bytes_per_chunk = round_up(
+                kv_bytes_per_chunk, self.BLOCK_SIZE_ALIGNMENT
             )
-            self.num_blocks = (
-                int(cpu_bytes_to_use) // aligned_kv_bytes_per_offloaded_block
-            )
+            self.num_blocks = int(cpu_bytes_to_use) // aligned_kv_bytes_per_chunk
 
-            # Expose aligned_kv_bytes_per_offloaded_block as
-            # kv_bytes_per_offloaded_block. Note that this might contain
+            # Expose aligned_kv_bytes_per_chunk as
+            # kv_bytes_per_chunk. Note that this might contain
             # some padding. i.e. each offloaded block is of the form,
             # |--- W0-B0---|---- W1-B0---| ... |---- Wn-B0---| *** maybe-pad *** |
-            self.kv_bytes_per_offloaded_block = aligned_kv_bytes_per_offloaded_block
+            self.kv_bytes_per_chunk = aligned_kv_bytes_per_chunk
 
         # scheduler-side
         self._manager: OffloadingManager | None = None
@@ -136,7 +135,7 @@ class CPUOffloadingSpec(OffloadingSpec):
     def create_worker(self, kv_caches: CanonicalKVCaches) -> CPUOffloadingWorker:
         return CPUOffloadingWorker(
             kv_caches=kv_caches,
-            block_size_factor=self.block_size_factor,
+            blocks_per_chunk=self.blocks_per_chunk,
             num_cpu_blocks=self.num_blocks,
         )
 
