@@ -407,7 +407,6 @@ def _spec_forward(
     assert num_accepted is not None
 
     spec_qsl_cpu = spec_qsl[: num_spec_decodes + 1].to("cpu", torch.int64)
-    num_acc_cpu = num_accepted[:num_spec_decodes].to("cpu", torch.int64)
     seq_starts = spec_qsl_cpu[:-1]
     seq_lens = spec_qsl_cpu[1:] - spec_qsl_cpu[:-1]
 
@@ -417,8 +416,6 @@ def _spec_forward(
     w = w2d.unsqueeze(1)  # (dim, 1, width) for F.conv1d depthwise
     bias = layer.conv1d.bias
     silu = layer.activation == "silu"
-
-    col0 = spec_state_indices[:, 0].to("cpu", torch.int64)
 
     can_use_native_conv = (
         torch.cpu._is_amx_tile_supported()
@@ -431,18 +428,22 @@ def _spec_forward(
     if can_use_native_conv:
         q_i = int(seq_lens[0].item())
         conv_out = ops.causal_conv1d_update_cpu(
-            x=mixed_qkv_spec.reshape(num_spec_decodes, q_i, dim).contiguous(),
+            x=mixed_qkv_spec.reshape(num_spec_decodes, q_i, dim),
             conv_states=conv_buf,
             weight=layer.conv1d.weight,
             bias=bias,
             silu_activation=silu,
-            conv_state_indices=col0[:num_spec_decodes].to(torch.int32).contiguous(),
+            conv_state_indices=spec_state_indices[:num_spec_decodes, 0]
+            .to("cpu", torch.int32)
+            .contiguous(),
             is_vnni=True,
-            num_accepted_tokens=num_acc_cpu[:num_spec_decodes]
-            .to(torch.int32)
+            num_accepted_tokens=num_accepted[:num_spec_decodes]
+            .to("cpu", torch.int32)
             .contiguous(),
         ).reshape_as(mixed_qkv_spec)
     else:
+        col0 = spec_state_indices[:, 0].to("cpu", torch.int64)
+        num_acc_cpu = num_accepted[:num_spec_decodes].to("cpu", torch.int64)
         conv_out = torch.empty_like(mixed_qkv_spec)
         for i in range(num_spec_decodes):
             q_i = int(seq_lens[i].item())

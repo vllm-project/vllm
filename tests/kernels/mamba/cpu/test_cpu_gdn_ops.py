@@ -505,21 +505,26 @@ def test_spec_aware_nonspec_materializes_state_indices(
 
 
 @torch.inference_mode()
-def test_spec_forward_forwards_accepted_counts_to_native_conv(
+def test_spec_forward_materializes_native_conv_metadata(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    accepted_counts = torch.tensor([1, 0, 4], dtype=torch.int64)[::2]
+    block_table = torch.tensor([[0, 1], [4, 5]], dtype=torch.int32)
+    state_indices = block_table[:, 0]
+    accepted_counts = torch.tensor([1, 0, 4], dtype=torch.int32)[::2]
+    assert not state_indices.is_contiguous()
     assert not accepted_counts.is_contiguous()
     metadata = types.SimpleNamespace(
         num_spec_decodes=2,
-        spec_state_indices_tensor=torch.tensor([[0], [4]], dtype=torch.int32),
+        spec_state_indices_tensor=block_table,
         spec_query_start_loc=torch.tensor([0, 4, 8], dtype=torch.int32),
         num_accepted_tokens=accepted_counts,
     )
+    forwarded_indices = None
     forwarded_counts = None
 
     def causal_conv1d_update_cpu(**kwargs):
-        nonlocal forwarded_counts
+        nonlocal forwarded_counts, forwarded_indices
+        forwarded_indices = kwargs["conv_state_indices"]
         forwarded_counts = kwargs["num_accepted_tokens"]
         return kwargs["x"]
 
@@ -553,12 +558,15 @@ def test_spec_forward_forwards_accepted_counts_to_native_conv(
         state_len=0,
     )
 
-    assert forwarded_counts is not None
-    assert forwarded_counts.is_contiguous()
-    assert forwarded_counts.dtype == torch.int32
-    torch.testing.assert_close(
-        forwarded_counts, torch.tensor([1, 4], dtype=torch.int32)
+    expected = (
+        (forwarded_indices, torch.tensor([0, 4], dtype=torch.int32)),
+        (forwarded_counts, torch.tensor([1, 4], dtype=torch.int32)),
     )
+    for actual, reference in expected:
+        assert actual is not None
+        assert actual.is_contiguous()
+        assert actual.dtype == torch.int32
+        torch.testing.assert_close(actual, reference)
 
 
 @pytest.mark.parametrize("total_tokens, split", TWO_CALL_SPLITS)
