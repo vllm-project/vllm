@@ -346,6 +346,36 @@ def test_proton_is_not_initialized_without_cuda_graph_capture(runner):
 
 
 @pytest.mark.parametrize(
+    ("dp_size", "dp_rank", "rank_suffix", "expected"),
+    [
+        (1, 0, "rank1", "rank1"),
+        (1, 3, "rank1", "dp3_rank1"),
+        (4, 3, "dp3_pp0_tp1_rank1", "dp3_pp0_tp1_rank1"),
+    ],
+)
+def test_proton_uses_unique_names_for_dp_workers(
+    dp_size, dp_rank, rank_suffix, expected
+):
+    worker = MagicMock()
+    worker.rank = 1
+    worker.parallel_config.data_parallel_size = dp_size
+    worker.parallel_config.data_parallel_index = dp_rank
+    worker.profiler = None
+    worker.profiler_config.profiler = "proton"
+
+    with (
+        patch(
+            "vllm.distributed.utils.get_worker_rank_suffix",
+            return_value=rank_suffix,
+        ),
+        patch("vllm.v1.worker.gpu_worker.ProtonProfilerWrapper") as wrapper,
+    ):
+        Worker._get_or_create_profiler(worker)
+
+    wrapper.assert_called_once_with(worker.profiler_config, worker_name=expected)
+
+
+@pytest.mark.parametrize(
     ("worker_cls", "device"), [(CPUWorker, "CPU"), (XPUWorker, "XPU")]
 )
 def test_non_gpu_worker_rejects_proton(worker_cls, device):

@@ -1218,6 +1218,10 @@ class Worker(WorkerBase):
         from vllm.distributed.utils import get_worker_rank_suffix
 
         rank_suffix = get_worker_rank_suffix(global_rank=self.rank)
+        dp_rank = self.parallel_config.data_parallel_index
+        is_dp_worker = self.parallel_config.data_parallel_size > 1 or dp_rank > 0
+        if is_dp_worker and not rank_suffix.startswith(f"dp{dp_rank}_"):
+            rank_suffix = f"dp{dp_rank}_{rank_suffix}"
         trace_name = (
             f"{profile_prefix}_{rank_suffix}" if profile_prefix else rank_suffix
         )
