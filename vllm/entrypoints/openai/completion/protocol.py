@@ -353,12 +353,12 @@ class CompletionRequest(OpenAIBaseModel):
             seed=self.seed,
             stop=self.stop,
             stop_token_ids=stop_token_ids,
-            logprobs=None if self.logprob_token_ids else self.logprobs,
+            logprobs=None if self.logprob_token_ids is not None else self.logprobs,
             ignore_eos=self.ignore_eos,
             max_tokens=max_tokens if not echo_without_generation else 1,
             min_tokens=self.min_tokens,
             prompt_logprobs=prompt_logprobs,
-            logprob_token_ids=self.logprob_token_ids or None,
+            logprob_token_ids=self.logprob_token_ids,
             skip_special_tokens=self.skip_special_tokens,
             spaces_between_special_tokens=self.spaces_between_special_tokens,
             include_stop_str_in_output=self.include_stop_str_in_output,
@@ -445,28 +445,28 @@ class CompletionRequest(OpenAIBaseModel):
     @model_validator(mode="before")
     @classmethod
     def check_logprobs(cls, data):
-        if data.get("logprob_token_ids") and data.get("use_beam_search"):
-            raise VLLMValidationError(
-                "`logprob_token_ids` is not supported with beam search.",
-                parameter="logprob_token_ids",
-            )
-
-        if (
-            data.get("logprob_token_ids")
-            and data.get("echo")
-            and data.get("max_tokens") == 0
-        ):
-            raise VLLMValidationError(
-                "`logprob_token_ids` is not supported when `echo=True` and "
-                "`max_tokens=0` because no output tokens are generated.",
-                parameter="logprob_token_ids",
-            )
-
-        if data.get("logprob_token_ids") and data.get("logprobs") is None:
-            raise VLLMValidationError(
-                "when using `logprob_token_ids`, `logprobs` must be set.",
-                parameter="logprob_token_ids",
-            )
+        if data.get("logprob_token_ids") is not None:
+            if len(data["logprob_token_ids"]) == 0:
+                raise VLLMValidationError(
+                    "`logprob_token_ids` must not be an empty list.",
+                    parameter="logprob_token_ids",
+                )
+            if data.get("use_beam_search"):
+                raise VLLMValidationError(
+                    "`logprob_token_ids` is not supported with beam search.",
+                    parameter="logprob_token_ids",
+                )
+            if data.get("echo") and data.get("max_tokens") == 0:
+                raise VLLMValidationError(
+                    "`logprob_token_ids` is not supported when `echo=True` and "
+                    "`max_tokens=0` because no output tokens are generated.",
+                    parameter="logprob_token_ids",
+                )
+            if data.get("logprobs") is None:
+                raise VLLMValidationError(
+                    "when using `logprob_token_ids`, `logprobs` must be set.",
+                    parameter="logprob_token_ids",
+                )
 
         # These fields are integers, but `mode="before"` runs on the raw
         # request data, so a non-numeric value (e.g. a JSON string) would
