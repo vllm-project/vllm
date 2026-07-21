@@ -44,6 +44,7 @@ from .protocol import (
     CohereEmbedInput,
     CohereEmbedRequest,
     EmbeddingBatchChatInputRequest,
+    EmbeddingBatchChatRequest,
     EmbeddingChatInputRequest,
     EmbeddingCompletionRequest,
 )
@@ -278,9 +279,7 @@ class EmbedIOProcessor(PoolingIOProcessor):
 
     def _get_request_factory_chat_input_online(
         self,
-        ctx: PoolingServeContext[
-            EmbeddingChatInputRequest | EmbeddingBatchChatInputRequest
-        ],
+        ctx: PoolingServeContext,
     ) -> tuple[RequestFactory, int]:
         request = ctx.request
         renderer = self.renderer
@@ -291,7 +290,12 @@ class EmbedIOProcessor(PoolingIOProcessor):
             trust_request_chat_template=self.trust_request_chat_template,
         )
 
-        all_messages = request.messages
+        if isinstance(
+            request, (EmbeddingBatchChatRequest, EmbeddingBatchChatInputRequest)
+        ):
+            all_messages = request.messages
+        else:
+            all_messages = [request.messages]
         num_requests = len(all_messages)
 
         default_template_kwargs = merge_kwargs(
@@ -569,9 +573,9 @@ class EmbedIOProcessor(PoolingIOProcessor):
     ) -> tuple[RequestFactory, int]:
         """Batch-render multiple conversations through the chat template."""
         request = ctx.request
-        proxy = EmbeddingBatchChatInputRequest(
+        proxy = EmbeddingBatchChatRequest(
             model=request.model,
-            input=all_messages,
+            messages=all_messages,
             dimensions=request.output_dimension,
             encoding_format="float",
             truncate_prompt_tokens=truncate_prompt_tokens,

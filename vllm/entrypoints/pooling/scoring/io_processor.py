@@ -210,12 +210,7 @@ class BiEncoderIOProcessor(ScoringIOProcessor):
         num_requests = len(prompts_seq)
 
         parsed_prompts = [
-            (
-                prompt
-                if isinstance(prompt, bytes)
-                else parse_model_prompt(self.model_config, prompt)
-            )
-            for prompt in prompts_seq
+            parse_model_prompt(self.model_config, prompt) for prompt in prompts_seq
         ]
 
         tok_params = request.build_tok_params(self.model_config)
@@ -763,7 +758,6 @@ class JinaRankingIOProcessor(LateInteractionIOProcessor, JinaRankingIOProcessorM
     def get_request_factory_online(
         self, ctx: PoolingServeContext
     ) -> tuple[RequestFactory, int]:
-
         request = ctx.request
         scoring_data = self.valid_inputs_online(request)
         queries = self.ensure_str(scoring_data.data_1)

@@ -20,14 +20,14 @@ router = APIRouter()
 logger = init_logger(__name__)
 
 
-def score(request: Request) -> ServingScores | None:
+def score(request: Request) -> ServingScores:
     handler = getattr(request.app.state, "serving_scores", None)
     if handler is None:
         raise NotImplementedError("The model does not support Score API")
     return handler
 
 
-def rerank(request: Request) -> ServingScores | None:
+def rerank(request: Request) -> ServingScores:
     handler = getattr(request.app.state, "serving_scores", None)
     if handler is None:
         raise NotImplementedError("The model does not support Rerank (Score) API")

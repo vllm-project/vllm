@@ -93,9 +93,9 @@ class EmbeddingBatchChatRequest(
     ``messages`` instead of introducing a separate batch-specific field.
     """
 
-    messages: list[Annotated[list[ChatCompletionMessageParam], Field(min_length=1)]] = (
-        Field(..., min_length=1)
-    )
+    messages: Sequence[
+        Annotated[list[ChatCompletionMessageParam], Field(min_length=1)]
+    ] = Field(..., min_length=1)
 
     def to_pooling_params(self):
         return PoolingParams(

@@ -88,7 +88,7 @@ class PoolingServeContext(Generic[PoolingRequestT]):
     raw_request: Request | None = None
     model_name: str
     request_id: str
-    pooling_params: PoolingParams | list[PoolingParams]
+    pooling_params: PoolingParams
     lora_request: LoRARequest | None
     priorities: int | Sequence[int] | None
     prompt_extras: dict[str, Any] | None

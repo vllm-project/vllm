@@ -237,6 +237,9 @@ class ServingScores(PoolingServing):
             pooling_params=query_pooling_params_list,
             prompt_request_ids=query_keys,
             engine_inputs=query_engine_inputs,
+            lora_request=ctx.lora_request,
+            priorities=ctx.priorities,
+            prompt_extras=ctx.prompt_extras,
         )
 
         await self._prepare_generators(query_ctx)
@@ -279,6 +282,9 @@ class ServingScores(PoolingServing):
             pooling_params=doc_pooling_params_list,
             prompt_request_ids=doc_keys,
             engine_inputs=doc_engine_inputs,
+            lora_request=ctx.lora_request,
+            priorities=ctx.priorities,
+            prompt_extras=ctx.prompt_extras,
         )
 
         await self._prepare_generators(doc_ctx)
