@@ -14,9 +14,7 @@ from torch_abi_audit.report import ExtensionReport, PackageReport
 # Shrink and remove over time.
 ALLOWED_UNSTABLE_LIBRARIES: tuple[str, ...] = (
     "vllm_flash_attn/_vllm_fa2_C.abi3.so",
-    "_flashmla_C.abi3.so",
-    "_flashmla_extension_C.abi3.so",
-    "_qutlass_C.abi3.so",
+    "vllm_flash_attn/_vllm_fa3_C.abi3.so",
     "third_party/deep_gemm/_C*.so",
 )
 
