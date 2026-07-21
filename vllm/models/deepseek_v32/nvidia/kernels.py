@@ -19,7 +19,14 @@ def _can_use_fused_q_cutedsl() -> bool:
 
 @torch.compiler.assume_constant_result
 def _is_arch_support_pdl() -> bool:
-    return current_platform.is_arch_support_pdl()
+    # PyTorch's Triton HOP functionalization cannot analyze the inline asm
+    # emitted by PDL on Hopper. Keep the compiled Hopper path identical to the
+    # pre-PDL implementation while retaining PDL on the Blackwell targets this
+    # kernel is tuned for.
+    return (
+        current_platform.has_device_capability(100)
+        and current_platform.is_arch_support_pdl()
+    )
 
 
 def _fused_q_cutedsl_impl(

@@ -66,6 +66,15 @@ def test_platform_capability_queries_are_constant_during_compile(monkeypatch):
     torch.testing.assert_close(compiled(x), torch.ones_like(x))
 
 
+def test_pdl_is_disabled_before_blackwell(monkeypatch):
+    monkeypatch.setattr(
+        K.current_platform, "has_device_capability", lambda capability: False
+    )
+    monkeypatch.setattr(K.current_platform, "is_arch_support_pdl", lambda: True)
+
+    assert not K._is_arch_support_pdl()
+
+
 # ── reference helpers ────────────────────────────────────────────────────────
 
 
