@@ -1227,7 +1227,8 @@ class ModelOptNvFp4W4A16LinearMethod(LinearMethodBase):
     """Linear method for ModelOpt NVFP4 W4A16.
 
     4-bit NVFP4 weights, fp16/bf16 activations. Loads ModelOpt-style names
-    directly (no on-disk conversion) and dispatches to a W4A16 GEMM:
+    directly (no on-disk conversion) and dispatches to a W4A16 GEMM
+    (Marlin, or FlashInfer's bf16 x fp4 kernel where selected):
 
         weight          uint8     packed NVFP4 (2 nibbles/byte along input dim)
         weight_scale    fp8-e4m3  per 16-elem group along input dim

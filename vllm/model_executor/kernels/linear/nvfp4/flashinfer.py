@@ -20,10 +20,13 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import (
+    flashinfer_scaled_bf16_fp4_mm,
     flashinfer_scaled_fp4_mm,
     has_flashinfer,
     has_flashinfer_b12x_gemm,
+    has_flashinfer_bf16_fp4_gemm,
 )
+from vllm.utils.math_utils import round_up
 
 from .base import NvFp4LinearKernel, NvFp4LinearLayerConfig
 
@@ -296,6 +299,123 @@ class FlashInferCudnnNvFp4LinearKernel(NvFp4LinearKernel):
             layer.alpha,
             output_dtype,
             backend="cudnn",
+        )
+
+        out = slice_nvfp4_output(out, output_size)
+
+        if bias is not None:
+            out = out + bias
+        return out.view(*output_shape)
+
+
+class FlashInferW4A16NvFp4LinearKernel(NvFp4LinearKernel):
+    """Weight-only NVFP4 GEMM (bf16 activations) via FlashInfer's mm_bf16_fp4.
+
+    Unlike the other FlashInfer kernels in this file, activations are not
+    quantized: the kernel dequantizes the FP4 weight and runs the matrix
+    multiply in bf16.
+    """
+
+    # FlashInfer repacks the weight in 64-row tiles of N; K is padded to
+    # the same granularity to satisfy the kernel's K tiling.
+    N_ALIGN = 64
+    K_ALIGN = 64
+
+    @classmethod
+    def is_supported(
+        cls, compute_capability: int | None = None
+    ) -> tuple[bool, str | None]:
+        if not (
+            current_platform.is_device_capability_family(100)
+            or current_platform.is_device_capability_family(110)
+            or current_platform.is_device_capability_family(120)
+        ):
+            return False, "FlashInfer W4A16 NVFP4 requires SM100/SM110/SM12x"
+        if not has_flashinfer_bf16_fp4_gemm():
+            return False, "FlashInfer with mm_bf16_fp4 (>= 0.6.14) required"
+        return True, None
+
+    @classmethod
+    def can_implement(cls, config: NvFp4LinearLayerConfig) -> tuple[bool, str | None]:
+        # mm_bf16_fp4 only accepts bfloat16 activations; fp16 models must
+        # fall back to Marlin. Without an active vLLM config the dtype is
+        # unknown here; process_weights_after_loading checks the layer's
+        # params_dtype as a backstop.
+        from vllm.config import get_current_vllm_config_or_none
+
+        vllm_config = get_current_vllm_config_or_none()
+        if (
+            vllm_config is not None
+            and vllm_config.model_config is not None
+            and vllm_config.model_config.dtype != torch.bfloat16
+        ):
+            return False, "FlashInfer W4A16 NVFP4 requires bfloat16 activations"
+        return True, None
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        from flashinfer import prepare_bf16_fp4_weights
+
+        params_dtype = getattr(layer, "params_dtype", torch.bfloat16)
+        if params_dtype != torch.bfloat16:
+            raise ValueError(
+                f"FlashInfer W4A16 NVFP4 requires bfloat16 activations; "
+                f"this model runs {params_dtype}. Use --linear-backend "
+                f"marlin."
+            )
+
+        weight = layer.weight.data  # (N, K // 2) packed uint8
+        weight_scale = layer.weight_scale.data  # (N, K // 16) fp8-e4m3
+        n = weight.shape[0]
+        k = weight.shape[1] * 2
+
+        # Zero-pad N and K to the repack tile sizes. The padded rows and
+        # columns have zero block scales, so they dequantize to zero;
+        # apply_weights pads the activation K to match and slices the
+        # extra output columns off.
+        n_padded = round_up(n, self.N_ALIGN)
+        k_padded = round_up(k, self.K_ALIGN)
+        if n_padded != n or k_padded != k:
+            pad_rows = n_padded - n
+            pad_weight_cols = (k_padded - k) // 2
+            pad_scale_cols = (k_padded - k) // 16
+            weight = torch.nn.functional.pad(weight, (0, pad_weight_cols, 0, pad_rows))
+            weight_scale = torch.nn.functional.pad(
+                weight_scale.view(torch.uint8), (0, pad_scale_cols, 0, pad_rows)
+            ).view(torch.float8_e4m3fn)
+        layer.w4a16_k_pad = k_padded - k
+
+        alpha = layer.weight_global_scale.data.to(
+            device=weight.device, dtype=torch.float32
+        ).reshape(1)
+        b_prepared, sf_prepared, alpha_prepared = prepare_bf16_fp4_weights(
+            weight,
+            swizzle_blockscale(weight_scale),
+            alpha,
+            backend="cute-dsl",
+        )
+        layer.weight = torch.nn.Parameter(b_prepared, requires_grad=False)
+        layer.weight_scale = torch.nn.Parameter(sf_prepared, requires_grad=False)
+        layer.alpha = torch.nn.Parameter(alpha_prepared, requires_grad=False)
+
+    def apply_weights(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        bias: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        output_size = layer.output_size_per_partition
+        output_shape = [*x.shape[:-1], output_size]
+
+        x2d = x.reshape(-1, x.shape[-1])
+        k_pad = getattr(layer, "w4a16_k_pad", 0)
+        if k_pad:
+            x2d = torch.nn.functional.pad(x2d, (0, k_pad))
+
+        out = flashinfer_scaled_bf16_fp4_mm(
+            x2d,
+            layer.weight,
+            layer.weight_scale,
+            layer.alpha,
         )
 
         out = slice_nvfp4_output(out, output_size)
