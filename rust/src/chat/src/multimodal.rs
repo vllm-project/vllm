@@ -152,8 +152,8 @@ impl ResolvedMultimodalSpec {
 #[derive(Debug, Clone)]
 struct ResolvedPlaceholder {
     token: String,
-    /// The token ID emitted for `token` in the rendered prompt.
-    marker_token_id: u32,
+    /// The token IDs emitted for `token` in the rendered prompt.
+    marker_token_ids: Vec<u32>,
     /// The model-declared embed token ID marked in `is_embed` masks.
     embed_token_id: u32,
 }
@@ -166,18 +166,21 @@ impl ResolvedPlaceholder {
     ) -> Result<Self> {
         let metadata = context.metadata();
         let token = raw.placeholder_token_for(&metadata, modality)?;
-        // This is the rendered prompt marker, so resolve it from the token
-        // string itself. Do not use `ModelProcessorSpec::placeholder_token_id_for()`:
-        // for some specs that ID is the replacement vision/patch token,
-        // not necessarily the token ID of the placeholder token.
-        let marker_token_id = context.tokenizer().token_to_id(&token).ok_or_else(|| {
-            multimodal!("placeholder token `{token}` is not in the tokenizer vocabulary")
-        })?;
+        // This is the rendered prompt marker. It may be ordinary text that
+        // encodes to multiple tokens, while `placeholder_token_id_for()` is
+        // the model's replacement vision/patch token ID.
+        let marker_token_ids = context
+            .tokenizer()
+            .token_to_id(&token)
+            .map(|token_id| vec![token_id])
+            .or_else(|| context.tokenizer().encode(&token, false).ok())
+            .filter(|token_ids| !token_ids.is_empty())
+            .ok_or_else(|| multimodal!("placeholder `{token}` could not be tokenized"))?;
         let embed_token_id = raw.placeholder_token_id_for(&metadata, modality)? as u32;
 
         Ok(Self {
             token,
-            marker_token_id,
+            marker_token_ids,
             embed_token_id,
         })
     }
@@ -409,10 +412,12 @@ impl MultimodalModelInfo {
         });
 
         let video = resolve_placeholder(Modality::Video).and_then(|placeholder| {
-            // Placeholder expansion attributes markers to modalities by token
-            // ID, so a marker shared with the image modality is ambiguous.
-            let image_marker = image.as_ref().map(|image| image.placeholder.marker_token_id);
-            if image_marker == Some(placeholder.marker_token_id) {
+            // Placeholder expansion attributes marker sequences to modalities,
+            // so a marker shared with the image modality is ambiguous.
+            let image_marker = image
+                .as_ref()
+                .map(|image| &image.placeholder.marker_token_ids);
+            if image_marker == Some(&placeholder.marker_token_ids) {
                 warn!(
                     model_id = context.model_id,
                     token = placeholder.token,
@@ -808,8 +813,8 @@ mod tests {
             Some("<|video_pad|>")
         );
         assert_ne!(
-            info.image.as_ref().unwrap().placeholder.marker_token_id,
-            info.video.as_ref().unwrap().placeholder.marker_token_id,
+            info.image.as_ref().unwrap().placeholder.marker_token_ids,
+            info.video.as_ref().unwrap().placeholder.marker_token_ids,
         );
     }
 
