@@ -11,6 +11,7 @@ import pytest
 import torch
 
 from tests.kernels.helion.utils import skip_if_platform_unsupported
+from tests.kernels.utils import opcheck
 from vllm.kernels.helion.case_key import CaseKey
 from vllm.kernels.helion.config_manager import ConfigManager
 from vllm.kernels.helion.ops.scaled_mm import (
@@ -218,3 +219,16 @@ class TestScaledMmIntegration:
 
         args = _generate_input(16, 4096, 4096)
         assert fake_impl(*args) is None
+
+    def test_customop_opcheck(self):
+        skip_if_platform_unsupported("scaled_mm")
+        from vllm.kernels.helion.register import get_registered_kernels
+
+        registered_kernels = get_registered_kernels()
+        kernel_wrapper = registered_kernels["scaled_mm"]
+
+        # opcheck if registered as custom op
+        if hasattr(torch.ops.vllm_helion, kernel_wrapper.op_name):
+            fn = getattr(torch.ops.vllm_helion, kernel_wrapper.op_name)
+            args = _generate_input(16, 4096, 4096)
+            opcheck(fn, args)
