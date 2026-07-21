@@ -20,9 +20,6 @@ import torch
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
     OffloadingConnectorStats,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.offloading.scheduler import (
-    KV_LOAD_TIERS_KEY,
-)
 from vllm.v1.kv_offload.base import (
     LookupResult,
     Medium,
@@ -978,7 +975,17 @@ class TestTieringOffloadingManager:
         self.secondary_tier2.drain_jobs.assert_called_once()
         assert self.manager._transfer_jobs == {}
 
-    def test_tier_filter_skips_filtered_secondary(self, manager_setup):
+    @pytest.mark.parametrize(
+        "load_tier_filter",
+        [
+            TierFilter(matchers=({"medium": Medium.FS.value},)),
+            TierFilter(matchers=()),
+        ],
+        ids=["non_matching_medium", "empty_no_load"],
+    )
+    def test_tier_filter_skips_filtered_secondary(
+        self, manager_setup, load_tier_filter
+    ):
         """Filter excluding secondary medium returns MISS from secondaries
         even when they hold the block; primary is unaffected."""
         blocks = to_keys(range(2))
@@ -988,14 +995,10 @@ class TestTieringOffloadingManager:
         self.manager.complete_store(blocks[:1], _CTX, success=True)
         self.secondary_tier1.blocks[blocks[1]] = True
 
+        # Secondaries have medium=CPU, so load_tier_filter skips them.
         self.secondary_tier1.lookup = MagicMock(wraps=self.secondary_tier1.lookup)
 
-        # Filter allows only FS; secondaries have medium=CPU
-        ctx = ReqContext(
-            req_id="r1",
-            kv_transfer_params={KV_LOAD_TIERS_KEY: [{"medium": Medium.FS.value}]},
-            load_tier_filter=TierFilter(matchers=({"medium": Medium.FS.value},)),
-        )
+        ctx = ReqContext(req_id="r1", load_tier_filter=load_tier_filter)
         assert self.manager.lookup(blocks[0], ctx) is LookupResult.HIT
         assert self.manager.lookup(blocks[1], ctx) is LookupResult.MISS
         self.secondary_tier1.lookup.assert_not_called()
