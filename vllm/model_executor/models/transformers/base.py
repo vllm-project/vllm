@@ -575,7 +575,7 @@ class Base(
 
             if attn_cls is MLAAttention:
                 prefix, fuser = mla_fusers[i]
-                mla_module = self.model.get_submodule(prefix)
+                mla_module = self.get_submodule(prefix)
                 dims = get_mla_dims(self.model_config)
                 kwargs.update(
                     scale=mla_module.scaling,
