@@ -794,6 +794,9 @@ class OpenAIServingResponses(GenerateBaseServing):
                     pass
             except asyncio.CancelledError:
                 return self.create_error_response("Client disconnected")
+            except Exception as e:
+                logger.exception("Error in responses full generator.")
+                return self.create_error_response(e)
 
         # NOTE: Implementation of status is still WIP, but for now
         # we guarantee that if the status is not "completed", it is accurate.
@@ -1522,6 +1525,13 @@ class OpenAIServingResponses(GenerateBaseServing):
                     yield event_data
             except GenerationError as e:
                 error_json = self._convert_generation_error_to_streaming_response(e)
+                yield _increment_sequence_number_and_return(
+                    TypeAdapter(StreamingResponsesResponse).validate_json(error_json)
+                )
+                return
+            except Exception as e:
+                logger.exception("Error in responses stream generator.")
+                error_json = self.create_streaming_error_response(e)
                 yield _increment_sequence_number_and_return(
                     TypeAdapter(StreamingResponsesResponse).validate_json(error_json)
                 )
