@@ -336,6 +336,7 @@ class _StubWriterWorker(NixlPushConnectorWorker):
         w.world_size = 1
         w.engine_id = "test-decode-engine"
         w._remote_agents = {}
+        w._physical_blocks_per_logical_kv_block = 1
 
         # Track _do_start_push_kv invocations.
         calls: list[tuple[str, Any, dict[str, Any]]] = []
@@ -523,7 +524,7 @@ def test_do_start_push_kv_defers_then_writes_when_handshake_ready():
     re-drive with the handshake ready the WRITE is issued with a correct
     ReqMeta."""
     w = _StubWriterWorker.fresh()
-    w._logical_to_kernel_block_ids = lambda x: x
+    w._logical_to_kernel_block_ids = lambda x, ratio: x
     xfer_calls: list[dict[str, Any]] = []
     w._xfer_blocks_for_req = lambda **kw: xfer_calls.append(kw)
 
