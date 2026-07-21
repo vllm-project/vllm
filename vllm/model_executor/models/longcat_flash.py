@@ -318,7 +318,7 @@ class LongcatMoe(nn.Module):
         hidden_states = hidden_states.view(-1, hidden_dim)
 
         # Align to FusedMoE padded hidden size to avoid dim mismatch
-        padded_hidden = self.experts.hidden_size
+        padded_hidden = self.experts.moe_config.hidden_dim
         if hidden_dim < padded_hidden:
             hidden_states_padded = torch.nn.functional.pad(
                 hidden_states,
@@ -687,14 +687,23 @@ class FlashModel(nn.Module):
                 ).split([self_attn.qk_nope_head_dim, self_attn.v_head_dim], dim=1)
                 self_attn.w_kc = w_kc.transpose(1, 2).contiguous().transpose(1, 2)
                 self_attn.w_vc = w_vc.contiguous().transpose(1, 2)
-                if self.config.mla_scale_q_lora:
+                # Guard against compounding on incremental load_weights calls:
+                # the in-place ``*=`` would otherwise re-apply the MLA LoRA
+                # scaling to the layernorm weights on each pass.
+                if self.config.mla_scale_q_lora and not getattr(
+                    self_attn, "_mla_q_lora_scaled", False
+                ):
                     self_attn.q_a_layernorm.weight.data *= (
                         self.config.hidden_size / self.config.q_lora_rank
                     ) ** 0.5
-                if self.config.mla_scale_kv_lora:
+                    self_attn._mla_q_lora_scaled = True
+                if self.config.mla_scale_kv_lora and not getattr(
+                    self_attn, "_mla_kv_lora_scaled", False
+                ):
                     self_attn.kv_a_layernorm.weight.data *= (
                         self.config.hidden_size / self.config.kv_lora_rank
                     ) ** 0.5
+                    self_attn._mla_kv_lora_scaled = True
         return loaded_params
 
 

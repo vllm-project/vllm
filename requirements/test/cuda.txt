@@ -43,7 +43,7 @@ anyio==4.14.1
     #   sse-starlette
     #   starlette
     #   watchfiles
-apache-tvm-ffi==0.1.9
+apache-tvm-ffi==0.1.10
     # via
     #   -c requirements/cuda.txt
     #   xgrammar
@@ -194,10 +194,6 @@ dill==0.3.8
     #   evaluate
     #   lm-eval
     #   multiprocess
-diskcache==5.6.3
-    # via
-    #   -c requirements/common.txt
-    #   -r requirements/test/../common.txt
 distlib==0.3.9
     # via virtualenv
 distro==1.9.0
@@ -402,7 +398,7 @@ inflect==5.6.2
     # via datamodel-code-generator
 iniconfig==2.0.0
     # via pytest
-instanttensor==0.1.5
+instanttensor==0.1.9
     # via -r requirements/test/cuda.in
 interegular==0.3.3
     # via lm-format-enforcer
@@ -1053,7 +1049,7 @@ s3transfer==0.10.3
     # via boto3
 sacrebleu==2.4.3
     # via lm-eval
-safetensors==0.7.0
+safetensors==0.8.0
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
@@ -1261,7 +1257,7 @@ tqdm==4.67.3
     #   segmentation-models-pytorch
     #   sentence-transformers
     #   transformers
-transformers==5.10.4
+transformers==5.13.1
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt

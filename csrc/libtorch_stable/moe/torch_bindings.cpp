@@ -23,8 +23,13 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_moe_C, m) {
       "bias, Tensor? input_ids, Tensor? tid2eid) -> ()");
 
   // Calculate the result of moe by summing up the partial results
-  // from all selected experts.
-  m.def("moe_sum(Tensor input, Tensor! output) -> ()");
+  // from all selected experts. topk_ids/expert_map are optional and, when
+  // both given, enable pad-aware reduce that skips (token, expert)
+  // slots that were never actually computed (unrouted, or routed to an
+  // expert not owned by this rank under expert parallelism).
+  m.def(
+      "moe_sum(Tensor input, Tensor! output, Tensor? topk_ids=None, "
+      "Tensor? expert_map=None) -> ()");
 
   // Aligning the number of tokens to be processed by each expert such
   // that it is divisible by the block size.

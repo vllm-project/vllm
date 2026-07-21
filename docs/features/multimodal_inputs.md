@@ -879,6 +879,55 @@ vllm serve Qwen/Qwen3-VL-30B-A3B-Instruct \
 
 Works with common video formats like MP4 when using OpenCV backends.
 
+#### GPU Video Decoding with DeepStream (NVDEC)
+
+By default vLLM decodes video on the CPU. On NVIDIA GPUs you can instead decode
+directly on the hardware video engine (NVDEC) with the DeepStream backend, which
+keeps decoding off the CPU and can significantly increase video throughput.
+
+Install the backend (Linux x86-64 only):
+
+```bash
+pip install vllm[deepstream]
+```
+
+The pip wheel bundles the DeepStream libraries but still relies on a few system
+packages that pip cannot install. On Ubuntu:
+
+```bash
+apt-get install -y \
+  gstreamer1.0-tools gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
+  gstreamer1.0-plugins-bad gstreamer1.0-libav \
+  python3-gi python3-gst-1.0 libv4l-0 cuda-libraries-13-0
+```
+
+Select the backend either with an environment variable:
+
+```bash
+export VLLM_VIDEO_LOADER_BACKEND=deepstream
+vllm serve Qwen/Qwen3-VL-30B-A3B-Instruct
+```
+
+or per request via `--media-io-kwargs`:
+
+```bash
+vllm serve Qwen/Qwen3-VL-30B-A3B-Instruct \
+  --media-io-kwargs '{"video": {"backend": "deepstream"}}'
+```
+
+**Parameters:**
+
+- `pool_size`: Number of GPU decode workers in the process-wide decode pool
+  (clamped to `[1, 16]`). When unset it defaults to
+  `VLLM_MEDIA_LOADING_THREAD_COUNT` (default `8`). The pool is a singleton, so
+  the first request's value wins.
+
+```bash
+# Example: 12 decode workers
+vllm serve Qwen/Qwen3-VL-30B-A3B-Instruct \
+  --media-io-kwargs '{"video": {"backend": "deepstream", "pool_size": 12}}'
+```
+
 #### Pre-extracted Frame Sequences with `media_io_kwargs`
 
 When you extract video frames on the client side and send them as `video/jpeg` (base64-concatenated JPEG frames), you can preserve the original video metadata by using `media_io_kwargs` in your request. This enables more accurate video understanding by preserving temporal information that would otherwise be lost during client-side frame extraction.

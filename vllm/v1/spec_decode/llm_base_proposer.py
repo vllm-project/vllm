@@ -1300,6 +1300,15 @@ class SpecDecodeBaseProposer:
             ),
         )
 
+        if spec_cfg.kv_cache_dtype is not None:
+            base = replace(
+                base,
+                cache_config=replace(
+                    base.cache_config,
+                    cache_dtype=spec_cfg.kv_cache_dtype,
+                ),
+            )
+
         return base
 
     def _get_model(self) -> nn.Module:

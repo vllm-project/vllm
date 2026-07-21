@@ -22,6 +22,7 @@ from vllm.model_executor.kernels.mhc.tilelang import (
     hc_head_fused_kernel_tilelang,
     mhc_fused_post_pre_tilelang,
     mhc_post_tilelang,
+    mhc_pre_broadcast_tilelang,
     mhc_pre_tilelang,
 )
 from vllm.model_executor.layers.activation import SiluAndMul, SiluAndMulWithClamp
@@ -827,6 +828,7 @@ class DeepseekV4DecoderLayer(nn.Module):
             ),
             requires_grad=False,
         )
+        self.hc_attn_fn_broadcast: torch.Tensor | None = None
         self.hc_ffn_fn = nn.Parameter(
             torch.empty(
                 (mix_hc, hc_dim),
@@ -876,20 +878,37 @@ class DeepseekV4DecoderLayer(nn.Module):
         attn_norm_eps = self.attn_norm.variance_epsilon
         if residual is None:
             # Run standalone mhc_pre on first layer
-            residual = x
-            post_mix, res_mix, x = mhc_pre_tilelang(
-                x,
-                self.hc_attn_fn,
-                self.hc_attn_scale,
-                self.hc_attn_base,
-                self.rms_norm_eps,
-                self.hc_eps,
-                self.hc_eps,
-                self.hc_post_alpha,
-                self.hc_sinkhorn_iters,
-                norm_weight=attn_norm_weight,
-                norm_eps=attn_norm_eps,
-            )
+            if x.dim() == 2:
+                assert self.hc_attn_fn_broadcast is not None
+                residual, post_mix, res_mix, x = mhc_pre_broadcast_tilelang(
+                    x,
+                    self.hc_attn_fn,
+                    self.hc_attn_scale,
+                    self.hc_attn_base,
+                    self.rms_norm_eps,
+                    self.hc_eps,
+                    self.hc_eps,
+                    self.hc_post_alpha,
+                    self.hc_sinkhorn_iters,
+                    norm_weight=attn_norm_weight,
+                    norm_eps=attn_norm_eps,
+                    fn_broadcast=self.hc_attn_fn_broadcast,
+                )
+            else:
+                residual = x
+                post_mix, res_mix, x = mhc_pre_tilelang(
+                    x,
+                    self.hc_attn_fn,
+                    self.hc_attn_scale,
+                    self.hc_attn_base,
+                    self.rms_norm_eps,
+                    self.hc_eps,
+                    self.hc_eps,
+                    self.hc_post_alpha,
+                    self.hc_sinkhorn_iters,
+                    norm_weight=attn_norm_weight,
+                    norm_eps=attn_norm_eps,
+                )
         else:
             residual, post_mix, res_mix, x = mhc_fused_post_pre_tilelang(
                 x,
@@ -1070,7 +1089,6 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                 hidden_states = inputs_embeds
             else:
                 hidden_states = self.embed_input_ids(input_ids)
-            hidden_states = hidden_states.unsqueeze(-2).repeat(1, self.hc_mult, 1)
         else:
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
@@ -1278,6 +1296,17 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         for layer in islice(self.layers, self.start_layer, self.end_layer):
             layer.ffn.finalize_mega_moe_weights()
 
+    def finalize_mhc_broadcast_weights(self) -> None:
+        if not get_pp_group().is_first_rank or self.start_layer >= self.end_layer:
+            return
+        layer = self.layers[self.start_layer]
+        if isinstance(layer, DeepseekV4DecoderLayer):
+            layer.hc_attn_fn_broadcast = (
+                layer.hc_attn_fn.detach()
+                .view(-1, layer.hc_mult, layer.hidden_size)
+                .sum(dim=1)
+            )
+
 
 def _make_deepseek_v4_weights_mapper(expert_dtype: str) -> WeightsMapper:
     if expert_dtype == "fp4":
@@ -1440,6 +1469,7 @@ class DeepseekV4ForCausalLM(
         loader = AutoWeightsLoader(self, skip_substrs=["mtp."])
         loaded_params = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
         self.model.finalize_mega_moe_weights()
+        self.model.finalize_mhc_broadcast_weights()
         return loaded_params
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:

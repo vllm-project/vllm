@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use std::collections::HashMap;
 
 use serde::Serialize;
@@ -31,9 +34,15 @@ pub use template::{load_chat_template, resolve_chat_template};
 
 pub use self::format::ChatTemplateContentFormatOption;
 
-#[derive(Debug, Clone)]
+/// Template-visible placeholder tokens per supported modality.
+///
+/// A `None` token means the loaded model does not support that modality, and
+/// content parts of that modality are rejected during rendering.
+#[derive(Debug, Clone, Default)]
 pub struct MultimodalRenderInfo {
-    pub placeholder_token: String,
+    pub image_token: Option<String>,
+    pub video_token: Option<String>,
+    pub audio_token: Option<String>,
 }
 
 /// Hugging Face chat-template renderer backed by the local Jinja chat-template
@@ -254,6 +263,8 @@ enum TemplateContent {
 enum TemplateContentPart {
     Text { text: String },
     Image,
+    Video,
+    Audio,
 }
 
 #[derive(Debug, Serialize)]
@@ -417,8 +428,22 @@ fn to_template_openai_content(
                 }
                 // All multimodal contents are normalized to `{ "type": <modality> }`.
                 ChatContentPart::ImageUrl { .. } => {
-                    multimodal.ok_or(Error::UnsupportedMultimodalContent("image_url"))?;
+                    multimodal
+                        .and_then(|multimodal| multimodal.image_token.as_ref())
+                        .ok_or(Error::UnsupportedMultimodalContent("image_url"))?;
                     Ok(TemplateContentPart::Image)
+                }
+                ChatContentPart::VideoUrl { .. } => {
+                    multimodal
+                        .and_then(|multimodal| multimodal.video_token.as_ref())
+                        .ok_or(Error::UnsupportedMultimodalContent("video_url"))?;
+                    Ok(TemplateContentPart::Video)
+                }
+                ChatContentPart::InputAudio { .. } | ChatContentPart::AudioUrl { .. } => {
+                    multimodal
+                        .and_then(|multimodal| multimodal.audio_token.as_ref())
+                        .ok_or(Error::UnsupportedMultimodalContent("audio"))?;
+                    Ok(TemplateContentPart::Audio)
                 }
             })
             .collect(),
@@ -437,9 +462,22 @@ fn to_template_string_content(
                 match part {
                     ChatContentPart::Text { text } => out.push_str(text),
                     ChatContentPart::ImageUrl { .. } => {
-                        let multimodal =
-                            multimodal.ok_or(Error::UnsupportedMultimodalContent("image_url"))?;
-                        out.push_str(&multimodal.placeholder_token);
+                        let image_token = multimodal
+                            .and_then(|multimodal| multimodal.image_token.as_ref())
+                            .ok_or(Error::UnsupportedMultimodalContent("image_url"))?;
+                        out.push_str(image_token);
+                    }
+                    ChatContentPart::VideoUrl { .. } => {
+                        let video_token = multimodal
+                            .and_then(|multimodal| multimodal.video_token.as_ref())
+                            .ok_or(Error::UnsupportedMultimodalContent("video_url"))?;
+                        out.push_str(video_token);
+                    }
+                    ChatContentPart::InputAudio { .. } | ChatContentPart::AudioUrl { .. } => {
+                        let audio_token = multimodal
+                            .and_then(|multimodal| multimodal.audio_token.as_ref())
+                            .ok_or(Error::UnsupportedMultimodalContent("audio"))?;
+                        out.push_str(audio_token);
                     }
                 }
             }
@@ -468,7 +506,9 @@ fn append_continue_final_message_tag(message: &mut TemplateMessage) -> Result<St
         // Pick the last text part in the message.
         TemplateContent::OpenAi(parts) => parts.iter_mut().rev().find_map(|part| match part {
             TemplateContentPart::Text { text } => Some(text),
-            TemplateContentPart::Image => None,
+            TemplateContentPart::Image
+            | TemplateContentPart::Video
+            | TemplateContentPart::Audio => None,
         }),
     };
     let text = text.ok_or_else(|| {
@@ -577,7 +617,9 @@ mod tests {
     ) -> Result<crate::RenderedPrompt> {
         HfChatRenderer::new(Some(template.to_string()), HashMap::new(), content_format)?
             .with_multimodal(Some(MultimodalRenderInfo {
-                placeholder_token: "<image>".to_string(),
+                image_token: Some("<image>".to_string()),
+                video_token: Some("<video>".to_string()),
+                audio_token: Some("<audio>".to_string()),
             }))
             .render(request)
     }
@@ -586,6 +628,23 @@ mod tests {
         sample_request(vec![ChatMessage::user(vec![
             ChatContentPart::text("a"),
             ChatContentPart::image_url("data:image/png;base64,test"),
+            ChatContentPart::text("b"),
+        ])])
+    }
+
+    fn video_request() -> ChatRequest {
+        sample_request(vec![ChatMessage::user(vec![
+            ChatContentPart::text("a"),
+            ChatContentPart::video_url("https://example.com/demo.mp4"),
+            ChatContentPart::text("b"),
+        ])])
+    }
+
+    fn audio_request() -> ChatRequest {
+        sample_request(vec![ChatMessage::user(vec![
+            ChatContentPart::text("a"),
+            ChatContentPart::input_audio("dGVzdA==", Some("wav".to_string())),
+            ChatContentPart::audio_url("https://example.com/demo.mp3"),
             ChatContentPart::text("b"),
         ])])
     }
@@ -603,6 +662,33 @@ mod tests {
     }
 
     #[test]
+    fn string_content_format_replaces_video_with_placeholder_text() {
+        let rendered = render_mm(
+            "{{ messages[0].content }}",
+            &video_request(),
+            ChatTemplateContentFormatOption::String,
+        )
+        .unwrap();
+
+        assert_eq!(rendered.prompt, Prompt::Text("a<video>b".to_string()));
+    }
+
+    #[test]
+    fn string_content_format_replaces_audio_with_placeholder_text() {
+        let rendered = render_mm(
+            "{{ messages[0].content }}",
+            &audio_request(),
+            ChatTemplateContentFormatOption::String,
+        )
+        .unwrap();
+
+        assert_eq!(
+            rendered.prompt,
+            Prompt::Text("a<audio><audio>b".to_string())
+        );
+    }
+
+    #[test]
     fn openai_content_format_normalizes_image_url_for_template() {
         let rendered = render_mm(
             "{% for item in messages[0].content %}{% if item.type == 'image' %}<|image_pad|>{% else %}{{ item.text }}{% endif %}{% endfor %}",
@@ -612,6 +698,55 @@ mod tests {
         .unwrap();
 
         assert_eq!(rendered.prompt, Prompt::Text("a<|image_pad|>b".to_string()));
+    }
+
+    #[test]
+    fn openai_content_format_normalizes_video_url_for_template() {
+        let rendered = render_mm(
+            "{% for item in messages[0].content %}{% if item.type == 'video' %}<|video_pad|>{% else %}{{ item.text }}{% endif %}{% endfor %}",
+            &video_request(),
+            ChatTemplateContentFormatOption::OpenAi,
+        )
+        .unwrap();
+
+        assert_eq!(rendered.prompt, Prompt::Text("a<|video_pad|>b".to_string()));
+    }
+
+    #[test]
+    fn openai_content_format_normalizes_audio_for_template() {
+        let rendered = render_mm(
+            "{% for item in messages[0].content %}{% if item.type == 'audio' %}<|audio_pad|>{% else %}{{ item.text }}{% endif %}{% endfor %}",
+            &audio_request(),
+            ChatTemplateContentFormatOption::OpenAi,
+        )
+        .unwrap();
+
+        assert_eq!(
+            rendered.prompt,
+            Prompt::Text("a<|audio_pad|><|audio_pad|>b".to_string())
+        );
+    }
+
+    #[test]
+    fn video_parts_are_rejected_when_model_lacks_video_support() {
+        let error = HfChatRenderer::new(
+            Some("{{ messages[0].content }}".to_string()),
+            HashMap::new(),
+            ChatTemplateContentFormatOption::String,
+        )
+        .unwrap()
+        .with_multimodal(Some(MultimodalRenderInfo {
+            image_token: Some("<image>".to_string()),
+            video_token: None,
+            audio_token: None,
+        }))
+        .render(&video_request())
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            Error::UnsupportedMultimodalContent("video_url")
+        ));
     }
 
     #[test]
@@ -1172,6 +1307,26 @@ mod tests {
             <think>
         "#]]
         .assert_eq(&rendered);
+    }
+
+    #[test]
+    fn qwen35_template_auto_detects_openai_multimodal_content() {
+        let mut request = image_request();
+        request.chat_options.generation_prompt_mode = GenerationPromptMode::NoGenerationPrompt;
+
+        let rendered = render_mm(
+            QWEN3_5_0_8B_TEMPLATE,
+            &request,
+            ChatTemplateContentFormatOption::Auto,
+        )
+        .unwrap();
+
+        expect![[r#"
+            Text(
+                "<|im_start|>user\na<|vision_start|><|image_pad|><|vision_end|>b<|im_end|>\n",
+            )
+        "#]]
+        .assert_debug_eq(&rendered.prompt);
     }
 
     #[test]

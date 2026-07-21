@@ -14,6 +14,10 @@ from vllm.model_executor.layers.fused_moe.config import (
     get_routing_method_type,
 )
 from vllm.model_executor.layers.fused_moe.router.base_router import BaseRouter
+from vllm.model_executor.layers.fused_moe.router.dsv4_topk import (
+    can_use_dsv4_topk,
+    dsv4_topk,
+)
 
 
 def vllm_topk_softmax(
@@ -170,18 +174,33 @@ def fused_topk_bias(
     hash_indices_table: torch.Tensor | None = None,
     routed_scaling_factor: float = 1.0,
 ):
-    # The topk kernel dispatches dtype based on topk_ids (set by
-    # indices_type) and assumes input_tokens/hash_indices_table match.
-    if indices_type is not None:
-        if input_tokens is not None and input_tokens.dtype != indices_type:
-            input_tokens = input_tokens.to(dtype=indices_type)
-        if hash_indices_table is not None and hash_indices_table.dtype != indices_type:
-            hash_indices_table = hash_indices_table.to(dtype=indices_type)
+    if (
+        input_tokens is not None
+        and hash_indices_table is not None
+        and input_tokens.dtype != hash_indices_table.dtype
+    ):
+        input_tokens = input_tokens.to(dtype=hash_indices_table.dtype)
 
     if not rocm_aiter_ops.is_fused_moe_enabled():
         assert hidden_states.size(0) == gating_output.size(0), (
             "Number of tokens mismatch"
         )
+
+        output_indices_dtype = torch.int32 if indices_type is None else indices_type
+        if scoring_func == "sqrtsoftplus" and can_use_dsv4_topk(
+            gating_output,
+            e_score_correction_bias,
+            topk,
+            renormalize,
+            output_indices_dtype,
+        ):
+            assert e_score_correction_bias is not None
+            return dsv4_topk(
+                gating_output,
+                e_score_correction_bias,
+                output_indices_dtype,
+                routed_scaling_factor,
+            )
 
         M, _ = hidden_states.size()
 
@@ -304,6 +323,7 @@ def fused_topk_bias(
         scores_for_choice = scores.view(-1, n_routed_experts)
     # For batch invariance, use sorted=True to ensure deterministic expert selection
     if hash_indices_table is not None:
+        assert input_tokens is not None
         topk_indices = hash_indices_table[input_tokens]
     else:
         use_sorted = envs.VLLM_BATCH_INVARIANT

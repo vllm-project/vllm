@@ -4,7 +4,7 @@ depends_on:
 steps:
 - label: Distributed Comm Ops
   key: distributed-comm-ops
-  timeout_in_minutes: 20
+  timeout_in_minutes: 25
   working_dir: "/vllm-workspace/tests"
   num_devices: 2
   source_file_dependencies:
@@ -18,7 +18,7 @@ steps:
 
 - label: Distributed DP Tests (2 GPUs)
   key: distributed-dp-tests-2-gpus
-  timeout_in_minutes: 20
+  timeout_in_minutes: 35
   working_dir: "/vllm-workspace/tests"
   num_devices: 2
   source_file_dependencies:
@@ -39,6 +39,7 @@ steps:
   - DP_SIZE=2 pytest -v -s entrypoints/openai/test_multi_api_servers.py
   mirror:
     amd:
+      dind: false
       device: mi300_2
       depends_on:
       - image-build-amd
@@ -55,7 +56,7 @@ steps:
 
 - label: Distributed Compile + RPC Tests (2 GPUs)
   key: distributed-compile-rpc-tests-2-gpus
-  timeout_in_minutes: 20
+  timeout_in_minutes: 65
   working_dir: "/vllm-workspace/tests"
   num_devices: 2
   source_file_dependencies:
@@ -78,7 +79,7 @@ steps:
 
 - label: Distributed Torchrun + Shutdown Tests (2 GPUs)
   key: distributed-torchrun-shutdown-tests-2-gpus
-  timeout_in_minutes: 20
+  timeout_in_minutes: 30
   working_dir: "/vllm-workspace/tests"
   num_devices: 2
   source_file_dependencies:
@@ -133,7 +134,7 @@ steps:
 
 - label: Distributed DP Tests (4 GPUs)
   key: distributed-dp-tests-4-gpus
-  timeout_in_minutes: 30
+  timeout_in_minutes: 45
   working_dir: "/vllm-workspace/tests"
   num_devices: 4
   source_file_dependencies:
@@ -154,7 +155,7 @@ steps:
 
 - label: Distributed Compile + Comm (4 GPUs)
   key: distributed-compile-comm-4-gpus
-  timeout_in_minutes: 30
+  timeout_in_minutes: 70
   working_dir: "/vllm-workspace/tests"
   num_devices: 4
   source_file_dependencies:
@@ -176,7 +177,7 @@ steps:
 
 - label: Distributed Tests (8xH100)
   key: distributed-tests-8xh100
-  timeout_in_minutes: 10
+  timeout_in_minutes: 20
   device: h100
   num_devices: 8
   working_dir: "/vllm-workspace/tests"
@@ -212,7 +213,7 @@ steps:
 
 - label: Distributed Tests (2xH100-2xMI300)
   key: distributed-tests-2xh100-2xmi300
-  timeout_in_minutes: 15
+  timeout_in_minutes: 30
   device: h100
   optional: true
   working_dir: "/vllm-workspace/"
@@ -259,7 +260,7 @@ steps:
 
 - label: Pipeline + Context Parallelism (4 GPUs)
   key: pipeline-context-parallelism-4-gpus
-  timeout_in_minutes: 60
+  timeout_in_minutes: 55
   working_dir: "/vllm-workspace/tests"
   num_devices: 4
   source_file_dependencies:
@@ -274,7 +275,7 @@ steps:
 
 - label: RayExecutorV2 (4 GPUs)
   key: rayexecutorv2-4-gpus
-  timeout_in_minutes: 60
+  timeout_in_minutes: 45
   working_dir: "/vllm-workspace/tests"
   num_devices: 4
   source_file_dependencies:

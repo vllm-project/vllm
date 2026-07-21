@@ -152,7 +152,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         # D-side: track reqs waiting for P to push.
         for req_id, meta in metadata.reqs_to_recv.items():
             meta.local_physical_block_ids = self._logical_to_kernel_block_ids(
-                meta.local_block_ids
+                meta.local_block_ids, self._physical_blocks_per_logical_kv_block
             )
             assert meta.remote is not None
             remote_engine_id = meta.remote.engine_id
@@ -294,7 +294,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
             return
 
         def _on_handshake(
-            f: Future[dict[tuple[int, int], str]],
+            f: Future[tuple[dict[tuple[int, int], str], float]],
             rid: str = req_id,
             rd: dict[str, Any] = reg_data,
         ) -> None:
@@ -414,7 +414,9 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         # expands each side using the appropriate ratio.
         logical_local = self._as_grouped_block_ids(local_block_ids)
         logical_remote = self._as_grouped_block_ids(remote_block_ids)
-        physical_local = self._logical_to_kernel_block_ids(logical_local)
+        physical_local = self._logical_to_kernel_block_ids(
+            logical_local, self._physical_blocks_per_logical_kv_block
+        )
 
         push_meta = ReqMeta(
             local_block_ids=logical_local,
@@ -456,7 +458,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         if decode_engine_id in self._remote_agents:
             return True
         try:
-            remote_agents = self._nixl_handshake(
+            remote_agents, _ = self._nixl_handshake(
                 decode_host,
                 decode_port,
                 decode_tp_size,
@@ -501,7 +503,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         # Expand D's logical IDs using the ratio learned during the
         # NIXL handshake. ``meta`` is freshly built by
         # ``_do_start_push_kv`` so mutating it here is safe.
-        meta.remote.block_ids = self._logical_to_remote_kernel_block_ids(
+        meta.remote.block_ids = self._logical_to_kernel_block_ids(
             meta.remote.block_ids,
             remote_info.remote_physical_blocks_per_logical,
         )

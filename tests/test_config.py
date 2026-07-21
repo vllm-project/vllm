@@ -213,6 +213,26 @@ def test_resolve_cudagraph_mode_adjusts_spec_decode_sizes_only_for_v1(
         ),
         (
             SimpleNamespace(
+                model="thinkingmachines/Inkling",
+                architectures=["InklingForCausalLM"],
+                runner_type="generate",
+                is_moe=True,
+                is_quantized=False,
+            ),
+            True,
+        ),
+        (
+            SimpleNamespace(
+                model="thinkingmachines/Inkling",
+                architectures=["InklingForConditionalGeneration"],
+                runner_type="generate",
+                is_moe=True,
+                is_quantized=False,
+            ),
+            True,
+        ),
+        (
+            SimpleNamespace(
                 model="mistralai/Mixtral-8x7B-Instruct-v0.1",
                 architectures=["MixtralForCausalLM"],
                 runner_type="generate",
@@ -1121,14 +1141,14 @@ def test_is_chunked_prefill_supported(
         (
             "Qwen/Qwen3-Next-80B-A3B-Instruct",
             "hybrid",
-            False,
-            "Hybrid models do not support prefix caching since the feature is still experimental.",  # noqa: E501
+            True,
+            "Generative hybrid models support prefix caching.",  # noqa: E501
         ),
         (
             "ibm-granite/granite-4.0-h-small",
             "hybrid",
-            False,
-            "Hybrid models do not support prefix caching since the feature is still experimental.",  # noqa: E501
+            True,
+            "Generative hybrid models support prefix caching.",  # noqa: E501
         ),
         (
             "state-spaces/mamba-130m-hf",

@@ -18,8 +18,8 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.sequence import IntermediateTensors
 
-from .step3p5 import Step3p5DecoderLayer, get_spec_layer_idx_from_weight_name
-from .utils import maybe_prefix
+from .step3p5 import Step3p5DecoderLayer
+from .utils import get_spec_layer_idx_from_weight_name, maybe_prefix
 
 logger = init_logger(__name__)
 

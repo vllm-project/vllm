@@ -206,6 +206,36 @@ requires_deep_ep_v2 = pytest.mark.skipif(
 # should run even when FlashInfer NVLink backends are not installed.
 
 
+@pytest.mark.parametrize("supports_output", [False, True])
+def test_one_sided_combine_into_compatibility(supports_output):
+    from vllm.distributed.device_communicators.all2all import (
+        FlashInferNVLinkOneSidedManager,
+    )
+
+    class FakeMoeAlltoAll:
+        def combine(
+            self,
+            payload,
+            runtime_max_tokens_per_rank,
+            output=None,
+        ):
+            result = payload + runtime_max_tokens_per_rank
+            if output is None:
+                return result
+            output.copy_(result)
+            return output
+
+    manager = FlashInferNVLinkOneSidedManager.__new__(FlashInferNVLinkOneSidedManager)
+    manager.moe_alltoall = FakeMoeAlltoAll()
+    manager._combine_supports_output = supports_output
+    payload = torch.arange(4, dtype=torch.float32)
+    output = torch.empty_like(payload)
+
+    manager.combine_into(payload, runtime_max_tokens_per_rank=2, output=output)
+
+    torch.testing.assert_close(output, payload + 2)
+
+
 # ---------------------------------------------------------------------------
 # Test 1: Two-sided manager lifecycle (init, cleanup, reinit, ensure_init)
 # ---------------------------------------------------------------------------

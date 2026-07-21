@@ -30,7 +30,7 @@ repos:
   - id: markdownlint-cli2
     language_version: lts
     args: [--fix]
-    exclude: ^CLAUDE\.md$
+    exclude: (^|/)CLAUDE\.md$
 - repo: https://github.com/rhysd/actionlint
   rev: v1.7.7
   hooks:
@@ -210,7 +210,7 @@ repos:
     name: Check SPDX headers
     entry: python tools/pre_commit/check_spdx_header.py
     language: python
-    types: [python]
+    types_or: [python, rust, proto]
   - id: check-root-lazy-imports
     name: Check root lazy imports
     entry: python tools/pre_commit/check_init_lazy_imports.py

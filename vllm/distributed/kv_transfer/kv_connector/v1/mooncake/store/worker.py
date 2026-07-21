@@ -1523,7 +1523,9 @@ class MooncakeStoreWorker:
         }
 
         _masks, hit_length = self.coord.find_longest_cache_hit(
-            block_hashes, token_len, ExternalCachedBlockPool(exists_set)
+            block_hashes,
+            token_len,
+            ExternalCachedBlockPool(self.hash_block_size, exists_set),
         )
         return hit_length
 

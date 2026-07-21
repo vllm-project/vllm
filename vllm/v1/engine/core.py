@@ -22,6 +22,7 @@ import zmq
 
 import vllm.envs as envs
 from vllm.config import ParallelConfig, VllmConfig
+from vllm.config.pooler import POOLER_CONFIG_LOG_FIELDS
 from vllm.distributed import (
     cleanup_dist_env_and_memory,
     stateless_destroy_torch_distributed_process_group,
@@ -78,15 +79,16 @@ from vllm.v1.engine.utils import (
 )
 from vllm.v1.executor import Executor
 from vllm.v1.kv_cache_interface import KVCacheConfig, get_kv_cache_spec_kind
-from vllm.v1.metrics.stats import SchedulerStats
+from vllm.v1.metrics.stats import SchedulerIterationDetails, SchedulerStats
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 from vllm.v1.structured_output import StructuredOutputManager
-from vllm.v1.utils import IterationDetails, compute_iteration_details
+from vllm.v1.utils import compute_iteration_details
 from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
+
 
 HANDSHAKE_TIMEOUT_MINS = 5
 
@@ -121,6 +123,7 @@ class EngineCore:
 
         # Setup Model.
         self.model_executor = executor_class(vllm_config)
+        self._pooler_config_logged = False
         if executor_fail_callback is not None:
             self.model_executor.register_failure_callback(executor_fail_callback)
 
@@ -348,7 +351,63 @@ class EngineCore:
         return scheduler_kv_cache_config
 
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
-        return self.model_executor.supported_tasks
+        supported_tasks = self.model_executor.supported_tasks
+        self._log_pooler_config(supported_tasks)
+        return supported_tasks
+
+    def _log_pooler_config(self, supported_tasks: tuple[SupportedTask, ...]) -> None:
+        if self._pooler_config_logged:
+            return
+
+        model_config = self.vllm_config.model_config
+        pooler_config = model_config.pooler_config
+        if (
+            self.vllm_config.parallel_config.data_parallel_rank_local
+            or model_config.runner_type != "pooling"
+            or pooler_config is None
+        ):
+            return
+
+        supported_pooling_tasks = tuple(
+            sorted(set(supported_tasks) & set(POOLING_TASKS))
+        )
+        if not supported_pooling_tasks:
+            return
+
+        self._pooler_config_logged = True
+        task_set = set(supported_pooling_tasks)
+        use_activation = pooler_config.use_activation
+        if use_activation is None:
+            use_activation = True
+        sources = getattr(model_config, "_pooler_config_sources", {})
+        pooling_type_field = (
+            "seq_pooling_type"
+            if task_set & {"embed", "classify"}
+            else "tok_pooling_type"
+        )
+
+        def log_field(name: str, field: str) -> str:
+            value = (
+                use_activation
+                if field == "use_activation"
+                else getattr(pooler_config, field)
+            )
+            source = sources.get(field, "unknown")
+            return f"{name}={value}(source={source})"
+
+        log_items = [("pooling_type", pooling_type_field)]
+        log_items.extend(
+            (field, field)
+            for field in POOLER_CONFIG_LOG_FIELDS
+            if field != pooling_type_field
+        )
+        config_fields = ", ".join(log_field(name, field) for name, field in log_items)
+
+        logger.info_once(
+            "Resolved pooling config: %s, supported_tasks=%s",
+            config_fields,
+            supported_pooling_tasks,
+        )
 
     def get_kv_cache_group_metadata(self) -> list[dict[str, int | str | None]]:
         """Return msgspec-serializable metadata for scheduler KV cache groups."""
@@ -400,6 +459,15 @@ class EngineCore:
                 "Disabling KVTransfer for this request."
             )
 
+        if (
+            request.ec_transfer_params is not None
+            and self.scheduler.get_ec_connector() is None
+        ):
+            logger.warning(
+                "Got ec_transfer_params, but no ECConnector found. "
+                "Disabling ECTransfer for this request."
+            )
+
         self.scheduler.add_request(request)
         if request.abort_immediately:
             # Immediately abort so the connector's request_finished hook runs
@@ -431,45 +499,74 @@ class EngineCore:
             raise err
 
     @contextmanager
-    def log_iteration_details(self, scheduler_output: SchedulerOutput | None):
-        if not self.vllm_config.observability_config.enable_logging_iteration_details:
-            yield
+    def capture_iteration_details(
+        self, scheduler_output: SchedulerOutput | None
+    ) -> Generator[SchedulerIterationDetails | None, None, None]:
+        enable_details = (
+            self.vllm_config.observability_config.enable_logging_iteration_details
+        )
+        if not self.log_stats or not enable_details:
+            yield None
             return
         # 0-token step: let the dummy_batch wrapper log it (avoids double-log).
-        if scheduler_output and scheduler_output.total_num_scheduled_tokens == 0:
-            yield
+        if (
+            scheduler_output is not None
+            and scheduler_output.total_num_scheduled_tokens == 0
+        ):
+            yield None
             return
-        self._iteration_index = getattr(self, "_iteration_index", 0)
+
+        iteration_index = getattr(self, "_iteration_index", 0)
         # scheduler_output=None marks a DP dummy iteration.
         if scheduler_output is None:
-            iteration_details = IterationDetails(0, 0, 0, 0)
-            is_dummy = True
-        else:
-            iteration_details = compute_iteration_details(scheduler_output)
-            is_dummy = False
-        before = time.monotonic()
-        yield
-        logger.info(
-            "".join(
-                [
-                    "Iteration(",
-                    str(self._iteration_index),
-                    "): ",
-                    str(iteration_details.num_ctx_requests),
-                    " context requests, ",
-                    str(iteration_details.num_ctx_tokens),
-                    " context tokens, ",
-                    str(iteration_details.num_generation_requests),
-                    " generation requests, ",
-                    str(iteration_details.num_generation_tokens),
-                    " generation tokens, iteration elapsed time: ",
-                    format((time.monotonic() - before) * 1000, ".2f"),
-                    " ms",
-                    " (dummy)" if is_dummy else "",
-                ]
+            iteration_details = SchedulerIterationDetails(
+                iteration_index=iteration_index,
+                num_ctx_requests=0,
+                num_ctx_tokens=0,
+                num_generation_requests=0,
+                num_generation_tokens=0,
+                elapsed_ms=0.0,
+                is_dummy=True,
             )
-        )
-        self._iteration_index += 1
+        else:
+            details = compute_iteration_details(scheduler_output)
+            iteration_details = SchedulerIterationDetails(
+                iteration_index=iteration_index,
+                num_ctx_requests=details.num_ctx_requests,
+                num_ctx_tokens=details.num_ctx_tokens,
+                num_generation_requests=details.num_generation_requests,
+                num_generation_tokens=details.num_generation_tokens,
+                elapsed_ms=0.0,
+                num_encoder_inputs=details.num_encoder_inputs,
+                num_encoder_output_tokens=details.num_encoder_output_tokens,
+            )
+
+        start_time = time.monotonic()
+        yield iteration_details
+        iteration_details.elapsed_ms = (time.monotonic() - start_time) * 1000
+        self._iteration_index = iteration_index + 1
+
+    def _make_iteration_details_stats(
+        self, iteration_details: SchedulerIterationDetails
+    ) -> SchedulerStats:
+        stats = self.scheduler.make_stats() or SchedulerStats()
+        stats.iteration_details = iteration_details
+        return stats
+
+    def _attach_iteration_details(
+        self,
+        outputs: dict[int, EngineCoreOutputs],
+        iteration_details: SchedulerIterationDetails | None,
+    ) -> None:
+        if iteration_details is None:
+            return
+
+        if (eco := next(iter(outputs.values()), None)) is None:
+            outputs[0] = eco = EngineCoreOutputs()
+        if eco.scheduler_stats is None:
+            eco.scheduler_stats = self._make_iteration_details_stats(iteration_details)
+        else:
+            eco.scheduler_stats.iteration_details = iteration_details
 
     def _should_throttle_prefills(self) -> bool:
         """Whether to defer new prefills this step (DP prefill balancing).
@@ -491,8 +588,8 @@ class EngineCore:
         future = self.model_executor.execute_model(scheduler_output, non_block=True)
         grammar_output = self.scheduler.get_grammar_bitmask(scheduler_output)
         with (
+            self.capture_iteration_details(scheduler_output) as iteration_details,
             self.log_error_detail(scheduler_output),
-            self.log_iteration_details(scheduler_output),
         ):
             model_output = future.result()
             if model_output is None:
@@ -504,6 +601,7 @@ class EngineCore:
         engine_core_outputs = self.scheduler.update_from_output(
             scheduler_output, model_output
         )
+        self._attach_iteration_details(engine_core_outputs, iteration_details)
 
         return engine_core_outputs, scheduler_output.total_num_scheduled_tokens > 0
 
@@ -589,8 +687,8 @@ class EngineCore:
         # Block until the next result is available.
         future, scheduler_output, exec_model_fut = batch_queue.pop()
         with (
+            self.capture_iteration_details(scheduler_output) as iteration_details,
             self.log_error_detail(scheduler_output),
-            self.log_iteration_details(scheduler_output),
         ):
             model_output = future.result()
             if model_output is None:
@@ -605,6 +703,7 @@ class EngineCore:
         engine_core_outputs = self.scheduler.update_from_output(
             scheduler_output, model_output
         )
+        self._attach_iteration_details(engine_core_outputs, iteration_details)
 
         # NOTE(nick): We can either handle the deferred tasks here or save
         # in a field and do it immediately once step_with_batch_queue is
@@ -1952,8 +2051,13 @@ class DPEngineCoreProc(EngineCoreProc):
                 # Execute a dummy pass when no ready requests ran, unless the
                 # engine is sleeping.
                 elif not self.model_executor.is_sleeping:
-                    with self.log_iteration_details(None):
+                    with self.capture_iteration_details(None) as iteration_details:
                         self.execute_dummy_batch()
+                    if iteration_details is not None and not self.has_coordinator:
+                        stats = self._make_iteration_details_stats(iteration_details)
+                        self.output_queue.put_nowait(
+                            (0, EngineCoreOutputs(scheduler_stats=stats))
+                        )
 
             # 3) All-reduce operation to determine global unfinished reqs.
             self.engines_running = self._has_global_unfinished_reqs(

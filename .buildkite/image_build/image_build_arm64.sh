@@ -19,13 +19,14 @@ if docker manifest inspect "$IMAGE" >/dev/null 2>&1; then
   echo "Image found"
 else
   echo "Image not found, proceeding with build..."
-  # build for arm64 GPU targets: Grace/GH200 (sm_90) and DGX Spark/GB10
+  # build for arm64 GPU targets: Grace/GH200 (sm_90),
+  # Blackwell/Thor (sm_100/sm_103/sm_110), and DGX Spark/GB10
   # (sm_121, family-covered by 12.0 under CUDA 13)
   docker build --file docker/Dockerfile \
     --platform linux/arm64 \
     --build-arg max_jobs=16 \
     --build-arg nvcc_threads=4 \
-    --build-arg torch_cuda_arch_list="9.0 12.0" \
+    --build-arg torch_cuda_arch_list="9.0 10.0 11.0 12.0" \
     --build-arg USE_SCCACHE=1 \
     --build-arg buildkite_commit="$BUILDKITE_COMMIT" \
     --tag "$IMAGE" \

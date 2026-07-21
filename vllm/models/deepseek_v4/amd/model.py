@@ -40,7 +40,11 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.models.interfaces import SupportsPP
+from vllm.model_executor.models.interfaces import (
+    EagleModelMixin,
+    SupportsEagle3,
+    SupportsPP,
+)
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     PPMissingLayer,
@@ -437,7 +441,7 @@ class DeepseekV4DecoderLayer(nn.Module):
         )
 
 
-class DeepseekV4Model(nn.Module):
+class DeepseekV4Model(nn.Module, EagleModelMixin):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
 
@@ -573,7 +577,19 @@ class DeepseekV4Model(nn.Module):
             hidden_states = intermediate_tensors["hidden_states"]
 
         residual, post_mix, res_mix = None, None, None
-        for layer in islice(self.layers, self.start_layer, self.end_layer):
+        # EAGLE3 / DSpark / DFlash aux hidden states: reconstructed (post-mhc)
+        # hidden state at the configured target layers, averaged over the
+        # hc_mult streams to [T, hidden_size]. Empty unless a draft model set
+        # aux_hidden_state_layers.
+        aux_hidden_states: list[torch.Tensor] = []
+        # On the fused path the final layer's hc_post output is reused below
+        # (avoids computing hc_post twice when the last layer is also an aux
+        # layer).
+        final_aux_recon: torch.Tensor | None = None
+        for idx, layer in enumerate(
+            islice(self.layers, self.start_layer, self.end_layer),
+            start=self.start_layer,
+        ):
             hidden_states, residual, post_mix, res_mix = layer(
                 hidden_states,
                 positions,
@@ -582,8 +598,30 @@ class DeepseekV4Model(nn.Module):
                 res_mix,
                 residual,
             )
+            if (idx + 1) in self.aux_hidden_state_layers:
+                # On the unfused (aiter) path the layer already applied hc_post,
+                # so hidden_states is the reconstructed stream; on the fused
+                # path reconstruct it via hc_post before averaging.
+                if layer.use_fused_mhc:
+                    aux_recon = layer.hc_post(
+                        hidden_states, residual, post_mix, res_mix
+                    )
+                    final_aux_recon = aux_recon
+                else:
+                    aux_recon = hidden_states
+                aux_hidden_states.append(aux_recon.mean(dim=1))
         if layer is not None and layer.use_fused_mhc:
-            hidden_states = layer.hc_post(hidden_states, residual, post_mix, res_mix)
+            # Reuse the last layer's hc_post output if it was already computed
+            # for the aux hidden state above; otherwise compute it now.
+            if (
+                final_aux_recon is not None
+                and self.end_layer in self.aux_hidden_state_layers
+            ):
+                hidden_states = final_aux_recon
+            else:
+                hidden_states = layer.hc_post(
+                    hidden_states, residual, post_mix, res_mix
+                )
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({"hidden_states": hidden_states})
@@ -601,6 +639,8 @@ class DeepseekV4Model(nn.Module):
             self.hc_eps,
         )
         hidden_states = self.norm(hidden_states)
+        if len(aux_hidden_states) > 0:
+            return hidden_states, aux_hidden_states
         return hidden_states
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
@@ -751,7 +791,7 @@ def _make_deepseek_v4_weights_mapper(expert_dtype: str) -> WeightsMapper:
     )
 
 
-class DeepseekV4ForCausalLM(nn.Module, SupportsPP):
+class DeepseekV4ForCausalLM(nn.Module, SupportsPP, SupportsEagle3):
     model_cls = DeepseekV4Model
 
     # Default mapper assumes the original FP4-expert checkpoint layout.

@@ -5,6 +5,7 @@ from typing import Any
 import torch
 import torch.nn as nn
 
+from vllm.compilation.breakable_cudagraph import is_breakable_cudagraph_enabled
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.core.sched.output import NewRequestData
@@ -139,7 +140,10 @@ class DefaultModelState(ModelState):
         kv_cache_config: KVCacheConfig,
         for_capture: bool = False,
     ) -> dict[str, Any]:
-        if cudagraph_mode == CUDAGraphMode.FULL:
+        if cudagraph_mode == CUDAGraphMode.FULL or (
+            cudagraph_mode == CUDAGraphMode.PIECEWISE
+            and is_breakable_cudagraph_enabled()
+        ):
             # Use padded sizes - padding is handled by model_runner.prepare_attn.
             num_reqs = input_batch.num_reqs_after_padding
             num_tokens = input_batch.num_tokens_after_padding
@@ -147,7 +151,10 @@ class DefaultModelState(ModelState):
             # For piecewise cudagraphs and eager, use unpadded sizes.
             num_reqs = input_batch.num_reqs
             num_tokens = input_batch.num_tokens
-        query_start_loc_cpu = torch.from_numpy(input_batch.query_start_loc_np)
+        query_start_loc_cpu = torch.from_numpy(
+            input_batch.query_start_loc_np[: num_reqs + 1]
+        )
+        query_start_loc_gpu = input_batch.query_start_loc[: num_reqs + 1]
         max_query_len = input_batch.num_scheduled_tokens.max().item()
         seq_lens_cpu_upper_bound = input_batch.seq_lens_cpu_upper_bound
         if for_capture:
@@ -170,7 +177,7 @@ class DefaultModelState(ModelState):
             attn_groups=attn_groups,
             num_reqs=num_reqs,
             num_tokens=num_tokens,
-            query_start_loc_gpu=input_batch.query_start_loc,
+            query_start_loc_gpu=query_start_loc_gpu,
             query_start_loc_cpu=query_start_loc_cpu,
             max_query_len=max_query_len,
             seq_lens=input_batch.seq_lens,
@@ -181,6 +188,7 @@ class DefaultModelState(ModelState):
             seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
             dcp_local_seq_lens=input_batch.dcp_local_seq_lens,
             positions=input_batch.positions,
+            is_prefilling=torch.from_numpy(input_batch.is_prefilling_np),
             mm_req_doc_ranges=req_doc_ranges,
             for_cudagraph_capture=for_capture,
             rswa_prefix_lens=input_batch.prompt_lens,

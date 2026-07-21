@@ -44,6 +44,10 @@ _VLLM_TOKENIZERS = {
     "hf": ("hf", "CachedHfTokenizer"),
     "kimi_audio": ("kimi_audio", "KimiAudioTokenizer"),
     "mistral": ("mistral", "MistralTokenizer"),
+    # Inkling uses the plain HF tokenizer for token operations; the "inkling"
+    # mode exists to select the InklingRenderer, which renders chat to
+    # token ids natively (Inkling has no Jinja chat template).
+    "inkling": ("hf", "CachedHfTokenizer"),
 }
 
 
