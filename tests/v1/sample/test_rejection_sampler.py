@@ -1,9 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import os
-import subprocess
-import sys
-from pathlib import Path
+import math
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import Mock
 
@@ -13,7 +11,9 @@ import torch.nn.functional as F
 
 from tests.v1.sample.utils import create_allowed_token_ids
 from vllm.platforms import current_platform
+from vllm.sampling_params import SamplingParams
 from vllm.v1.sample.logits_processor import LogitsProcessors
+from vllm.v1.sample.logits_processor.interface import BatchUpdate
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.rejection_sampler import (
     PLACEHOLDER_TOKEN_ID,
@@ -22,12 +22,10 @@ from vllm.v1.sample.rejection_sampler import (
     sample_recovered_tokens,
 )
 from vllm.v1.sample.sampler import Sampler, SamplerOutput
+from vllm.v1.sample.thinking_budget_state import ThinkingBudgetStateHolder
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 
 DEVICE_TYPE = current_platform.device_type
-# Repo root (…/tests/v1/sample/test_rejection_sampler.py -> parents[3]) so the
-# CPU accept-rule subprocess can import the ``tests`` package.
-REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
 @pytest.fixture
@@ -137,10 +135,57 @@ def create_sampling_metadata(
     )
 
 
+def _make_relaxed_holder(
+    num_reqs: int,
+    *,
+    think_start: int = 10,
+    think_end: int = 11,
+    num_spec_tokens: int = 1,
+    relaxed_thinking: bool = True,
+    device: str = DEVICE_TYPE,
+) -> ThinkingBudgetStateHolder:
+    """Build a REAL ThinkingBudgetStateHolder (not a stub) and register one
+    budget-less row per request through sync_batch, so the relaxed path
+    exercises the actual gate + refresh_in_think + in_think_mask code."""
+    reasoning_config = SimpleNamespace(
+        reasoning_start_token_ids=[think_start],
+        reasoning_end_token_ids=[think_end],
+    )
+    holder = ThinkingBudgetStateHolder(
+        reasoning_config,
+        num_reqs,
+        num_spec_tokens,
+        torch.device(device),
+        False,
+        relaxed_thinking=relaxed_thinking,
+    )
+    holder.sync_batch(
+        BatchUpdate(
+            batch_size=num_reqs,
+            removed=[],
+            added=[(i, SamplingParams(), [], []) for i in range(num_reqs)],
+            moved=[],
+        )
+    )
+    return holder
+
+
+def _committed_for(
+    thinking: bool | None, think_start: int, think_end: int
+) -> list[int]:
+    """Committed output tokens that leave a request inside/outside a thinking
+    span, so the holder's refresh_in_think derives the intended in_think."""
+    if thinking:
+        return [think_start]
+    if thinking is None:
+        return []
+    return [think_start, think_end]
+
+
 def run_relaxed_rejection_sample(
     draft_token_ids: list[int],
     target_logits: torch.Tensor,
-    thinking_state: bool | None,
+    thinking: bool | None,
     *,
     relax_ratio: float = 0.5,
     relax_top_k: int = 3,
@@ -149,12 +194,26 @@ def run_relaxed_rejection_sample(
     sampling_metadata: SamplingMetadata | None = None,
     device: str = DEVICE_TYPE,
 ) -> list[int]:
+    """Drive ``rejection_sample`` on the relaxed path through the REAL holder:
+    the committed output on ``sampling_metadata`` establishes the thinking
+    span, ``rejection_sample`` refreshes in_think from it and lets the mask
+    drive the kernel -- the production path, with no stub."""
     num_draft_tokens = [len(draft_token_ids)]
-    thinking_states = (
-        None
-        if thinking_state is None
-        else torch.tensor([thinking_state], dtype=torch.bool, device=device)
+    committed = [
+        _committed_for(thinking, think_start_token_id, think_end_token_id)
+    ]
+    if sampling_metadata is None:
+        sampling_metadata = create_sampling_metadata(
+            all_greedy=True, output_token_ids=committed
+        )
+    holder = _make_relaxed_holder(
+        1,
+        think_start=think_start_token_id,
+        think_end=think_end_token_id,
+        num_spec_tokens=len(draft_token_ids),
+        device=device,
     )
+    sampling_metadata.thinking_budget_state_holder = holder
     output = rejection_sample(
         draft_token_ids=torch.tensor(draft_token_ids, dtype=torch.int32, device=device),
         num_draft_tokens=num_draft_tokens,
@@ -165,19 +224,121 @@ def run_relaxed_rejection_sample(
         draft_probs=None,
         target_logits=target_logits,
         bonus_token_ids=torch.tensor([12], dtype=torch.int64, device=device),
-        sampling_metadata=sampling_metadata
-        if sampling_metadata is not None
-        else create_sampling_metadata(all_greedy=True),
+        sampling_metadata=sampling_metadata,
         relaxed_thinking=True,
         relax_ratio=relax_ratio,
         relax_top_k=relax_top_k,
-        thinking_states=thinking_states,
-        think_start_token_id=think_start_token_id,
-        think_end_token_id=think_end_token_id,
     )
     return output[0].tolist()
 
 
+def _relaxed_accept_reference(
+    draft_ids: list[int],
+    target_logits: torch.Tensor,
+    thinking: bool,
+    *,
+    relax_ratio: float = 0.5,
+    relax_top_k: int = 3,
+    think_start: int = 10,
+    think_end: int = 11,
+    bonus: int = 12,
+) -> list[int]:
+    """Pure-torch CPU mirror of ``relaxed_thinking_sample_kernel`` for one
+    request. An independent reimplementation used as a ground-truth oracle so
+    the GPU kernel tests can cross-check it (neither can silently drift)."""
+    num_draft = len(draft_ids)
+    log_ratio = math.log(relax_ratio)
+    out = [PLACEHOLDER_TOKEN_ID] * (num_draft + 1)
+    argmax = target_logits.argmax(dim=-1).tolist()
+    k = min(relax_top_k, target_logits.shape[-1])
+    topk_vals, topk_idx = torch.topk(target_logits, k=k, dim=-1)
+    rejected = False
+    for pos in range(num_draft):
+        if rejected:
+            break
+        draft = draft_ids[pos]
+        token = argmax[pos]
+        accepted = False
+        if thinking:
+            floor = topk_vals[pos, 0].item() + log_ratio
+            for i in range(k):
+                if (
+                    not accepted
+                    and topk_vals[pos, i].item() >= floor
+                    and draft == int(topk_idx[pos, i])
+                ):
+                    token = draft
+                    accepted = True
+        else:
+            accepted = draft == argmax[pos]
+            if accepted:
+                token = draft
+        rejected = not accepted
+        out[pos] = token
+        if accepted and draft in (think_start, think_end):
+            rejected = True
+    if not rejected:
+        out[num_draft] = bonus
+    return out
+
+
+def test_relaxed_accept_rule_reference_oracle():
+    # accept: draft id7 is in the target top-K AND above the ratio floor
+    # (top1 id5 @ 10.0 -> floor 10.0 + log(0.5) ~= 9.307, id7 @ 9.4 >= floor).
+    logits = torch.full((1, 16), -100.0)
+    logits[0, 5] = 10.0
+    logits[0, 7] = 9.4
+    assert _relaxed_accept_reference([7], logits, True) == [7, 12]
+
+    # reject: draft id7 @ 8.0 is below the floor -> strict argmax id5.
+    logits = torch.full((1, 16), -100.0)
+    logits[0, 5] = 10.0
+    logits[0, 7] = 8.0
+    assert _relaxed_accept_reference([7], logits, True) == [5, PLACEHOLDER_TOKEN_ID]
+
+    # thinking False -> strict argmax (draft id7 != argmax id5 -> reject).
+    logits = torch.full((1, 16), -100.0)
+    logits[0, 5] = 10.0
+    logits[0, 7] = 9.4
+    assert _relaxed_accept_reference([7], logits, False) == [5, PLACEHOLDER_TOKEN_ID]
+
+    # accepted boundary token (think_end id11) truncates the rest.
+    logits = torch.full((3, 16), -100.0)
+    logits[0, 7] = 10.0
+    logits[1, 11] = 10.0
+    logits[2, 8] = 10.0
+    assert _relaxed_accept_reference([7, 11, 8], logits, True) == [
+        7,
+        11,
+        PLACEHOLDER_TOKEN_ID,
+        PLACEHOLDER_TOKEN_ID,
+    ]
+
+
+def test_relaxed_holder_tracks_in_think_when_enabled():
+    # Faithful check of the refactor's shared-holder change: with
+    # relaxed_thinking the budget-less row is tracked, and refresh_in_think
+    # derives in_think from committed output (last boundary wins). CPU-only,
+    # no kernel.
+    holder = _make_relaxed_holder(1, device="cpu")
+    assert holder.has_tracked_requests()
+    holder.refresh_in_think([[10]])  # opened, not closed -> inside span
+    assert holder._state[0]["in_think"] is True
+    holder.refresh_in_think([[10, 11]])  # closed -> outside span
+    assert holder._state[0]["in_think"] is False
+
+
+def test_relaxed_holder_untracked_without_relaxed_thinking():
+    # The gate preserves the original thinking-budget contract: without
+    # relaxed_thinking a budget-less row is not tracked at all.
+    holder = _make_relaxed_holder(1, relaxed_thinking=False, device="cpu")
+    assert not holder.has_tracked_requests()
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(),
+    reason="relaxed kernel needs CUDA/HIP",
+)
 def test_relaxed_thinking_accepts_top_k_token_above_ratio():
     target_logits = torch.full((1, 16), -100.0, device=DEVICE_TYPE)
     target_logits[0, 5] = 10.0
@@ -186,8 +347,13 @@ def test_relaxed_thinking_accepts_top_k_token_above_ratio():
     output = run_relaxed_rejection_sample([7], target_logits, True)
 
     assert output == [7, 12]
+    assert output == _relaxed_accept_reference([7], target_logits, True)
 
 
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(),
+    reason="relaxed kernel needs CUDA/HIP",
+)
 def test_relaxed_thinking_false_uses_strict_argmax():
     target_logits = torch.full((1, 16), -100.0, device=DEVICE_TYPE)
     target_logits[0, 5] = 10.0
@@ -196,8 +362,13 @@ def test_relaxed_thinking_false_uses_strict_argmax():
     output = run_relaxed_rejection_sample([7], target_logits, False)
 
     assert output == [5, PLACEHOLDER_TOKEN_ID]
+    assert output == _relaxed_accept_reference([7], target_logits, False)
 
 
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(),
+    reason="relaxed kernel needs CUDA/HIP",
+)
 def test_relaxed_thinking_fallback_truncates_after_boundary_token():
     target_logits = torch.full((2, 16), -100.0, device=DEVICE_TYPE)
     target_logits[0, 10] = 10.0
@@ -205,13 +376,14 @@ def test_relaxed_thinking_fallback_truncates_after_boundary_token():
 
     output = run_relaxed_rejection_sample([10, 8], target_logits, None)
 
-    assert output == [
-        10,
-        PLACEHOLDER_TOKEN_ID,
-        PLACEHOLDER_TOKEN_ID,
-    ]
+    assert output == [10, PLACEHOLDER_TOKEN_ID, PLACEHOLDER_TOKEN_ID]
+    assert output == _relaxed_accept_reference([10, 8], target_logits, False)
 
 
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(),
+    reason="relaxed kernel needs CUDA/HIP",
+)
 def test_relaxed_thinking_rejects_token_below_ratio_floor():
     target_logits = torch.full((1, 16), -100.0, device=DEVICE_TYPE)
     target_logits[0, 5] = 10.0
@@ -220,8 +392,13 @@ def test_relaxed_thinking_rejects_token_below_ratio_floor():
     output = run_relaxed_rejection_sample([7], target_logits, True)
 
     assert output == [5, PLACEHOLDER_TOKEN_ID]
+    assert output == _relaxed_accept_reference([7], target_logits, True)
 
 
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(),
+    reason="relaxed kernel needs CUDA/HIP",
+)
 def test_relaxed_thinking_truncates_after_accepted_boundary_token():
     target_logits = torch.full((3, 16), -100.0, device=DEVICE_TYPE)
     target_logits[0, 7] = 10.0
@@ -231,6 +408,7 @@ def test_relaxed_thinking_truncates_after_accepted_boundary_token():
     output = run_relaxed_rejection_sample([7, 11, 8], target_logits, True)
 
     assert output == [7, 11, PLACEHOLDER_TOKEN_ID, PLACEHOLDER_TOKEN_ID]
+    assert output == _relaxed_accept_reference([7, 11, 8], target_logits, True)
 
 
 def test_relaxed_thinking_rejects_non_greedy_sampling():
@@ -249,91 +427,26 @@ def test_relaxed_thinking_rejects_non_greedy_sampling():
         )
 
 
-def test_relaxed_thinking_rejects_misaligned_thinking_states():
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(),
+    reason="relaxed kernel needs CUDA/HIP",
+)
+def test_rejection_sample_reads_thinking_from_holder():
+    # id7 is not the argmax (id5) but sits in the target top-K above the floor,
+    # so it is accepted ONLY when the holder reports the request inside a
+    # thinking span. rejection_sample must derive that from the committed
+    # output via the real holder: flipping the committed span flips the result.
     target_logits = torch.full((1, 16), -100.0, device=DEVICE_TYPE)
-    target_logits[0, 7] = 10.0
+    target_logits[0, 5] = 10.0
+    target_logits[0, 7] = 9.4
 
-    with pytest.raises(ValueError, match="thinking_states"):
-        rejection_sample(
-            draft_token_ids=torch.tensor([7], dtype=torch.int32, device=DEVICE_TYPE),
-            num_draft_tokens=[1],
-            max_spec_len=1,
-            cu_num_draft_tokens=torch.tensor(
-                [1], dtype=torch.int32, device=DEVICE_TYPE
-            ),
-            draft_probs=None,
-            target_logits=target_logits,
-            bonus_token_ids=torch.tensor([12], dtype=torch.int64, device=DEVICE_TYPE),
-            sampling_metadata=create_sampling_metadata(all_greedy=True),
-            relaxed_thinking=True,
-            thinking_states=torch.tensor(
-                [True, False], dtype=torch.bool, device=DEVICE_TYPE
-            ),
-        )
-
-
-def _cpu_accept_rule_checks() -> None:
-    """Assert the relaxed accept rule against the REAL kernel on CPU.
-
-    Run in a subprocess by ``test_relaxed_thinking_accept_rule_runs_on_cpu``
-    with ``TRITON_INTERPRET=1`` set (before ``triton.jit`` decorates the
-    kernel) so ``relaxed_thinking_sample_kernel`` executes on CPU tensors with
-    no GPU. Raises ``AssertionError`` (non-zero exit) if the rule regresses.
-    """
-    # top1 = id5 @ 10.0 -> ratio floor = 10.0 + log(0.5) ~= 9.307.
-    # Draft id7 @ 9.4 is in the target top-3 AND >= floor, so the relaxed rule
-    # ACCEPTS id7 even though argmax is id5. Strict argmax would emit id5, so
-    # this case is what distinguishes the relaxed rule from strict decoding.
-    logits = torch.full((1, 16), -100.0)
-    logits[0, 5] = 10.0
-    logits[0, 7] = 9.4
-    accepted = run_relaxed_rejection_sample([7], logits, True, device="cpu")
-    assert accepted == [7, 12], f"relaxed should accept id7, got {accepted}"
-
-    # Draft id7 @ 8.0 is below the ratio floor -> REJECTED, strict argmax id5.
-    logits = torch.full((1, 16), -100.0)
-    logits[0, 5] = 10.0
-    logits[0, 7] = 8.0
-    rejected = run_relaxed_rejection_sample([7], logits, True, device="cpu")
-    assert rejected == [5, PLACEHOLDER_TOKEN_ID], (
-        f"draft below floor should fall back to argmax, got {rejected}"
-    )
-
-
-def test_relaxed_thinking_accept_rule_runs_on_cpu():
-    """Defend the relaxed accept rule on a CPU-only box (no GPU).
-
-    The existing relaxed tests dispatch to the Triton kernel and need CUDA/HIP,
-    so a revert of the accept rule to strict argmax is invisible without a GPU.
-    This runs the SAME production kernel under Triton's interpreter on CPU
-    tensors. ``TRITON_INTERPRET`` must be set before ``triton.jit`` decorates
-    the kernel, so the checks run in a fresh subprocess with the env applied
-    and all GPUs hidden. Fails if the relaxed rule is reverted to strict argmax.
-    """
-    env = {
-        **os.environ,
-        "TRITON_INTERPRET": "1",
-        "CUDA_VISIBLE_DEVICES": "",
-        "HIP_VISIBLE_DEVICES": "",
-        "ROCR_VISIBLE_DEVICES": "",
-    }
-    result = subprocess.run(
-        [
-            sys.executable,
-            "-c",
-            "from tests.v1.sample.test_rejection_sampler import "
-            "_cpu_accept_rule_checks; _cpu_accept_rule_checks()",
-        ],
-        cwd=REPO_ROOT,
-        env=env,
-        capture_output=True,
-        text=True,
-    )
-    assert result.returncode == 0, (
-        "CPU relaxed accept-rule checks failed "
-        f"(rc={result.returncode})\nstdout:\n{result.stdout}\n"
-        f"stderr:\n{result.stderr}"
-    )
+    # committed opened a span -> in_think True -> relaxed accept of id7
+    assert run_relaxed_rejection_sample([7], target_logits, True) == [7, 12]
+    # committed closed the span -> in_think False -> strict argmax rejects id7
+    assert run_relaxed_rejection_sample([7], target_logits, False) == [
+        5,
+        PLACEHOLDER_TOKEN_ID,
+    ]
 
 
 ########################### Tests for Greedy Sampling ###################

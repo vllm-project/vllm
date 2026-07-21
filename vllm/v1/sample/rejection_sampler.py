@@ -109,9 +109,6 @@ class RejectionSampler(nn.Module):
         # [num_tokens + batch_size, vocab_size]
         logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,
-        thinking_states: torch.Tensor | None = None,
-        think_start_token_id: int | None = None,
-        think_end_token_id: int | None = None,
     ) -> SamplerOutput:
         """
         Args:
@@ -199,9 +196,6 @@ class RejectionSampler(nn.Module):
             relaxed_thinking=self.relaxed_thinking,
             relax_ratio=self.relax_ratio,
             relax_top_k=self.relax_top_k,
-            thinking_states=thinking_states,
-            think_start_token_id=think_start_token_id,
-            think_end_token_id=think_end_token_id,
             use_fp64_gumbel=self.use_fp64_gumbel,
         )
 
@@ -432,9 +426,6 @@ def rejection_sample(
     relaxed_thinking: bool = False,
     relax_ratio: float = RELAXED_THINKING_RATIO,
     relax_top_k: int = RELAXED_THINKING_TOP_K,
-    thinking_states: torch.Tensor | None = None,
-    think_start_token_id: int | None = None,
-    think_end_token_id: int | None = None,
     use_fp64_gumbel: bool = False,
 ) -> torch.Tensor:
     assert draft_token_ids.ndim == 1
@@ -451,16 +442,25 @@ def rejection_sample(
     assert bonus_token_ids.is_contiguous()
     assert target_logits.shape == (num_tokens, vocab_size)
 
+    thinking_states: torch.Tensor | None = None
+    think_start_token_id: int | None = None
+    think_end_token_id: int | None = None
     if relaxed_thinking:
         if not sampling_metadata.all_greedy:
             raise ValueError(
                 "relaxed_thinking speculative decoding only supports greedy sampling."
             )
-        if thinking_states is not None and thinking_states.numel() != batch_size:
-            raise ValueError(
-                "thinking_states must have one entry per request when "
-                "relaxed_thinking is enabled."
-            )
+        # Source per-request thinking state from the budget-state holder
+        # (batch-row aligned) rather than a forwarded tensor. Refresh in_think
+        # from committed output before verifying this step's drafts.
+        holder = sampling_metadata.thinking_budget_state_holder
+        if holder is not None and holder.has_tracked_requests():
+            holder.refresh_in_think(sampling_metadata.output_token_ids)
+            thinking_states = holder.in_think_mask(batch_size, device)
+            if holder.think_start_token_ids:
+                think_start_token_id = holder.think_start_token_ids[0]
+            if holder.think_end_token_ids:
+                think_end_token_id = holder.think_end_token_ids[0]
 
     # Create output buffer.
     output_token_ids = torch.full(
