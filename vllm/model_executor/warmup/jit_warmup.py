@@ -36,11 +36,11 @@ class WarmupIntRange:
 WarmupValues = Any
 CompileKeyDispatchFn = Callable[..., CompileKeyT]
 WarmupPredicateFn = Callable[..., bool]
-LocalExprs = tuple[tuple[str, ast.AST], ...]
+_LocalExprs = tuple[tuple[str, ast.AST], ...]
 
 
 def _eval_local_exprs(
-    local_exprs: LocalExprs,
+    local_exprs: _LocalExprs,
     values: Mapping[str, Any],
     globals_: Mapping[str, Any],
 ) -> dict[str, Any]:
@@ -130,7 +130,7 @@ def _merge_warmup_kwargs(parts: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
 
 @dataclass(frozen=True)
 class _CompileKeyDispatchTrace:
-    local_exprs: LocalExprs
+    local_exprs: _LocalExprs
     field_exprs: tuple[tuple[str, ast.AST], ...]
     globals: Mapping[str, Any]
     input_names: frozenset[str]
@@ -154,7 +154,7 @@ class _CompileKeyDispatchTrace:
 
 @dataclass(frozen=True)
 class _WarmupPredicateTrace:
-    local_exprs: LocalExprs
+    local_exprs: _LocalExprs
     return_expr: ast.AST
     globals: Mapping[str, Any]
     input_names: frozenset[str]
@@ -363,7 +363,8 @@ def _collect_expression_body(
                 statement.targets[0], ast.Name
             ):
                 raise _dispatch_expr_error(
-                    statement, "Dispatch assignments must target one local name"
+                    statement,
+                    "Traced warmup helper assignments must target one local name",
                 )
             local_exprs.append((statement.targets[0].id, statement.value))
             continue
@@ -371,11 +372,12 @@ def _collect_expression_body(
         if isinstance(statement, ast.AnnAssign):
             if statement.value is None:
                 raise _dispatch_expr_error(
-                    statement, "Dispatch annotations must assign a value"
+                    statement, "Traced warmup helper annotations must assign a value"
                 )
             if not isinstance(statement.target, ast.Name):
                 raise _dispatch_expr_error(
-                    statement, "Dispatch assignments must target one local name"
+                    statement,
+                    "Traced warmup helper assignments must target one local name",
                 )
             local_exprs.append((statement.target.id, statement.value))
             continue
@@ -409,7 +411,9 @@ def _collect_dispatch_body(
     return local_exprs, return_expr
 
 
-def _function_defaults(fn: Callable[..., Any]) -> dict[str, Any]:
+def _function_trace_inputs(
+    fn: Callable[..., Any],
+) -> tuple[dict[str, Any], set[str]]:
     signature = inspect.signature(fn)
     defaults = {
         name: parameter.default
@@ -419,11 +423,7 @@ def _function_defaults(fn: Callable[..., Any]) -> dict[str, Any]:
     bound_self = getattr(fn, "__self__", None)
     if bound_self is not None:
         defaults["self"] = bound_self
-    return defaults
-
-
-def _function_candidate_names(fn: Callable[..., Any]) -> set[str]:
-    return set(inspect.signature(fn).parameters)
+    return defaults, set(signature.parameters)
 
 
 def _trace_compile_key_dispatch(
@@ -436,8 +436,7 @@ def _trace_compile_key_dispatch(
     local_exprs, return_call = _collect_dispatch_body(fn, function_def)
 
     field_exprs: list[tuple[str, ast.AST]] = []
-    defaults = _function_defaults(fn)
-    candidate_names = _function_candidate_names(fn)
+    defaults, candidate_names = _function_trace_inputs(fn)
     input_names: set[str] = set()
     local_names = {name for name, _ in local_exprs}
     for _, expr in local_exprs:
@@ -467,8 +466,7 @@ def _trace_warmup_predicate(
     function_def = get_function_source_node(fn)
 
     local_exprs, return_expr = _collect_expression_body(fn, function_def)
-    defaults = _function_defaults(fn)
-    candidate_names = _function_candidate_names(fn)
+    defaults, candidate_names = _function_trace_inputs(fn)
     input_names: set[str] = set()
     local_names = {name for name, _ in local_exprs}
     for _, expr in local_exprs:
@@ -523,19 +521,18 @@ class VllmJitKernel(Generic[CompileKeyT], ABC):
             )
             expanded_kwargs = _expand_warmup_value_grid(kwargs, input_names)
             dispatch_value_groups = (*expanded_input_groups, expanded_kwargs)
-            return list(
-                dict.fromkeys(
-                    compile_key_dispatch_trace.compile_key(
-                        self.CompileKey, dispatch_values
-                    )
-                    for dispatch_value_group in itertools.product(
-                        *dispatch_value_groups
-                    )
-                    for dispatch_values in (_merge_warmup_kwargs(dispatch_value_group),)
-                    if predicate_trace is None
-                    or predicate_trace.matches(dispatch_values)
+            compile_keys: dict[CompileKeyT, None] = {}
+            for dispatch_value_group in itertools.product(*dispatch_value_groups):
+                dispatch_values = _merge_warmup_kwargs(dispatch_value_group)
+                if predicate_trace is not None and not predicate_trace.matches(
+                    dispatch_values
+                ):
+                    continue
+                compile_key = compile_key_dispatch_trace.compile_key(
+                    self.CompileKey, dispatch_values
                 )
-            )
+                compile_keys[compile_key] = None
+            return list(compile_keys)
 
         return traced
 
