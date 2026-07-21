@@ -401,6 +401,9 @@ Supported models:
 
 * `zai-org/GLM-4.7`
 * `zai-org/GLM-4.7-Flash`
+* GLM-5.x tool calling commonly pairs `--tool-call-parser glm47` with
+  `--reasoning-parser glm45` (see [reasoning outputs](reasoning_outputs.md#thinking-budget-control)
+  for `thinking_token_budget` guidance on short / agentic requests).
 
 Flags: `--tool-call-parser glm47`
 

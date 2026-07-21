@@ -19,7 +19,7 @@ vLLM currently supports the following reasoning models:
 | [DeepSeek-V3.1](https://huggingface.co/collections/deepseek-ai/deepseek-v31-68a491bed32bd77e7fca048f) | `deepseek_v3` | `json`, `regex` | ❌ |
 | [ERNIE-4.5-VL series](https://huggingface.co/baidu/ERNIE-4.5-VL-28B-A3B-PT) | `ernie45` | `json`, `regex` | ❌ |
 | [ERNIE-4.5-21B-A3B-Thinking](https://huggingface.co/baidu/ERNIE-4.5-21B-A3B-Thinking) | `ernie45` | `json`, `regex` | ✅ |
-| [GLM-4.5 series](https://huggingface.co/collections/zai-org/glm-45-687c621d34bda8c9e4bf503b) | `glm45` | `json`, `regex` | ✅ |
+| [GLM-4.5 / GLM-5.x series](https://huggingface.co/collections/zai-org/glm-45-687c621d34bda8c9e4bf503b) | `glm45` | `json`, `regex` | ✅ |
 | [Holo2 series](https://huggingface.co/collections/Hcompany/holo2) | `holo2` | `json`, `regex` | ✅ |
 | [Hunyuan A13B series](https://huggingface.co/collections/tencent/hunyuan-a13b-685ec38e5b46321e3ea7c4be) | `hunyuan_a13b` | `json`, `regex` | ✅ |
 | [IBM Granite 3.2 language models](https://huggingface.co/collections/ibm-granite/granite-32-language-models-67b3bc8c13508f6d064cff9a) | `granite` | ❌ | ❌ |
@@ -256,6 +256,35 @@ To use this feature:
 - `thinking_token_budget` (a sampling parameter) sets the per-request reasoning token limit.
 
 If `thinking_token_budget` is not specified, no explicit reasoning limit is applied beyond normal generation constraints such as `max_tokens`.
+
+!!! tip "GLM-5.x / GLM-4.5 (`glm45`) recommended budgets"
+    GLM-5.x models often keep thinking enabled by default. Without a budget, short
+    completions (`max_tokens` around a few hundred) can be consumed entirely by the
+    reasoning phase, leaving empty `content` and `finish_reason=length`.
+
+    Recommended `thinking_token_budget` starting points when serving with
+    `--reasoning-parser glm45` (and typically `--tool-call-parser glm47` for
+    GLM-5.x tool calling):
+
+    | Workload | Suggested `thinking_token_budget` |
+    | -------- | --------------------------------- |
+    | Tool / agent / MCP-style calls | `16`–`32`, or disable thinking |
+    | Ordinary short QA | `32`–`64` |
+    | Complex reasoning | Caller-specified, often `128+` |
+
+    Example serve flags for GLM-5.2:
+
+    ```bash
+    vllm serve <glm-5.2> \
+        --reasoning-parser glm45 \
+        --tool-call-parser glm47 \
+        --enable-auto-tool-choice \
+        --chat-template-content-format string
+    ```
+
+    Then pass `"thinking_token_budget": 32` (or similar) in the chat-completions
+    body so the model still transitions to final content / `tool_calls`. See
+    [#48201](https://github.com/vllm-project/vllm/issues/48201).
 
 `--reasoning-config` accepts a JSON object corresponding to  
 [ReasoningConfig][vllm.config.ReasoningConfig] with the following fields:
