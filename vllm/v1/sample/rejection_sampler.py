@@ -527,8 +527,6 @@ def rejection_sample(
                 K=relax_top_k,
                 num_warps=1,
             )
-            if sampling_metadata.all_greedy:
-                return output_token_ids
         else:
             rejection_greedy_sample_kernel[(batch_size,)](
                 output_token_ids,
@@ -544,8 +542,8 @@ def rejection_sample(
                 synthetic_conditional_rates,
                 SYNTHETIC_MODE=synthetic_mode,
             )
-            if sampling_metadata.all_greedy:
-                return output_token_ids
+        if sampling_metadata.all_greedy:
+            return output_token_ids
 
     # Compute probability distribution from target logits.
     target_probs = target_logits.softmax(dim=-1, dtype=torch.float32)
