@@ -7,11 +7,11 @@ import threading
 import time
 import urllib.error
 import urllib.request
+import uuid
 from abc import ABC, abstractmethod
 from collections import Counter, deque
 from collections.abc import Callable
 from dataclasses import asdict
-from itertools import count
 from queue import Queue
 from typing import Any
 
@@ -113,6 +113,23 @@ class AllBlocksCleared(KVCacheEvent):
 
 class KVEventBatch(EventBatch):
     events: list[BlockStored | BlockRemoved | AllBlocksCleared]
+
+
+class ZmqEventReplayRequest(msgspec.Struct, omit_defaults=True):
+    """Request replay from ``start_seq`` or a full reconciliation snapshot."""
+
+    publisher_epoch: str | None = None
+    start_seq: int = 0
+    force_snapshot: bool = False
+
+
+class ZmqEventReplayResponse(msgspec.Struct, omit_defaults=True):
+    """Atomic response from the ZMQ replay control plane."""
+
+    publisher_epoch: str
+    next_seq: int
+    replayed_batches: list[tuple[int, bytes]]
+    snapshot: bytes | None = None
 
 
 class KVEventAggregator:
@@ -308,6 +325,7 @@ class HttpPrefixCacheEventUploader(EventPublisher):
         request_timeout: float = 5.0,
         token: str | None = None,
         initial_snapshot: Any | None = None,
+        snapshot_interval: float = 30.0,
         retry_interval: float = 0.1,
         max_retry_interval: float = 5.0,
         _start_thread: bool = True,
@@ -332,6 +350,12 @@ class HttpPrefixCacheEventUploader(EventPublisher):
             or request_timeout <= 0
         ):
             raise ValueError("request_timeout must be positive")
+        if (
+            not isinstance(snapshot_interval, int | float)
+            or isinstance(snapshot_interval, bool)
+            or snapshot_interval < 0
+        ):
+            raise ValueError("snapshot_interval must be non-negative")
         self._endpoint = endpoint
         self._request_timeout = request_timeout
         self._opener = _opener or _build_prefix_cache_opener()
@@ -345,6 +369,8 @@ class HttpPrefixCacheEventUploader(EventPublisher):
         self._state_lock = threading.Lock()
         self._group_block_sizes: dict[int, int] = {}
         self._group_hashes: dict[int, set[ExternalBlockHash]] = {}
+        self._snapshot_interval = float(snapshot_interval)
+        self._next_snapshot_at = time.monotonic() + self._snapshot_interval
         self._needs_snapshot = threading.Event()
         self._reconcile_generation = 0
         if initial_snapshot is not None:
@@ -399,6 +425,17 @@ class HttpPrefixCacheEventUploader(EventPublisher):
             self._reconcile_generation += 1
             self._needs_snapshot.set()
 
+    def _maybe_mark_periodic_snapshot(self) -> None:
+        if self._snapshot_interval <= 0:
+            return
+        with self._state_lock:
+            if (
+                not self._needs_snapshot.is_set()
+                and time.monotonic() >= self._next_snapshot_at
+            ):
+                self._reconcile_generation += 1
+                self._needs_snapshot.set()
+
     def _build_snapshot_batch(self) -> tuple[KVEventBatch, int]:
         with self._state_lock:
             generation = self._reconcile_generation
@@ -452,6 +489,7 @@ class HttpPrefixCacheEventUploader(EventPublisher):
     def _publisher_thread(self) -> None:
         retry_delay = self._retry_interval
         while self._running or self._event_queue.qsize() > 0:
+            self._maybe_mark_periodic_snapshot()
             is_snapshot = self._needs_snapshot.is_set()
             generation = None
             event: EventBatch | None
@@ -491,6 +529,9 @@ class HttpPrefixCacheEventUploader(EventPublisher):
                     with self._state_lock:
                         if generation == self._reconcile_generation:
                             self._needs_snapshot.clear()
+                            self._next_snapshot_at = (
+                                time.monotonic() + self._snapshot_interval
+                            )
             except urllib.error.URLError as exc:
                 logger.warning("HTTP prefix-cache upload failed: %s", exc)
                 self._mark_snapshot_needed()
@@ -518,8 +559,8 @@ class ZmqEventPublisher(EventPublisher):
         connect.
     replay_endpoint:
         Optional ROUTER address for replay requests. When given, subscribers can
-        request missed batches by sending the starting sequence number as an
-        8-byte big-endian integer.
+        request missed batches or a reconciliation snapshot. The original
+        8-byte sequence request remains supported for existing consumers.
     buffer_steps:
         Number of past batches to keep for replay.
     hwm:
@@ -547,6 +588,9 @@ class ZmqEventPublisher(EventPublisher):
         super().__init__(data_parallel_rank)
         self._event_queue = Queue[EventBatch | None](maxsize=max_queue_size)
         self._buffer = deque[tuple[int, bytes]](maxlen=buffer_steps)
+        self._state_lock = threading.Lock()
+        self._group_block_sizes: dict[int, int] = {}
+        self._group_hashes: dict[int, set[ExternalBlockHash]] = {}
 
         # ZMQ sockets
         self._ctx = zmq.Context.instance()
@@ -562,7 +606,8 @@ class ZmqEventPublisher(EventPublisher):
         self._socket_setup()
 
         # Payload
-        self._seq_gen = count()
+        self._publisher_epoch = uuid.uuid4().hex
+        self._next_seq = 0
         self._topic_bytes = topic.encode("utf-8")
 
         # Thread
@@ -579,6 +624,8 @@ class ZmqEventPublisher(EventPublisher):
             raise RuntimeError("Publisher is closed")
         if events.data_parallel_rank is None:
             events.data_parallel_rank = self._data_parallel_rank
+        if self._replay_endpoint is not None:
+            self._apply_to_mirror(events.events)
         self._event_queue.put(events)
 
     def shutdown(self) -> None:
@@ -662,7 +709,8 @@ class ZmqEventPublisher(EventPublisher):
                 continue
 
             try:
-                seq = next(self._seq_gen)
+                seq = self._next_seq
+                self._next_seq += 1
 
                 payload = self._pack.encode(event)
                 seq_bytes = seq.to_bytes(8, "big")
@@ -681,23 +729,122 @@ class ZmqEventPublisher(EventPublisher):
         assert self._replay is not None  # narrows type for mypy
 
         frame = self._replay.recv_multipart()
-        if len(frame) != 3:
+        if len(frame) not in (2, 3) or (len(frame) == 3 and frame[1] != b""):
             logger.warning("Invalid replay request: %s", frame)
             return
-        client_id, _, start_seq_bytes = frame
+        client_id = frame[0]
+        delimiter = (b"",) if len(frame) == 3 else ()
+        request_payload = frame[-1]
+
+        try:
+            request = msgspec.msgpack.decode(
+                request_payload,
+                type=ZmqEventReplayRequest,
+            )
+        except msgspec.DecodeError:
+            if len(request_payload) == 8:
+                self._service_legacy_replay(client_id, delimiter, request_payload)
+            else:
+                logger.warning("Invalid replay request payload")
+            return
+
+        response = self._build_replay_response(request)
+        self._replay.send_multipart(
+            (client_id, *delimiter, self._pack.encode(response))
+        )
+
+    def _service_legacy_replay(
+        self,
+        client_id: bytes,
+        delimiter: tuple[bytes, ...],
+        start_seq_bytes: bytes,
+    ) -> None:
+        """Serve the original streamed replay protocol for existing consumers."""
+        assert self._replay is not None
         start_seq = int.from_bytes(start_seq_bytes, "big")
 
         for seq, buf in self._buffer:
             if seq >= start_seq:
-                # [identity, empty_delim, seq_bytes, payload]
-                # (identity, empty_delim) are stripped off by the router
-                # receiving payload is (seq_bytes, payload)
                 self._replay.send_multipart(
-                    (client_id, b"", seq.to_bytes(8, "big"), buf)
+                    (client_id, *delimiter, seq.to_bytes(8, "big"), buf)
                 )
-        # Send end of sequence marker
-        # receiving payload is (-1, b""")
-        self._replay.send_multipart((client_id, b"", self.END_SEQ, b""))
+        self._replay.send_multipart((client_id, *delimiter, self.END_SEQ, b""))
+
+    def _build_replay_response(
+        self, request: ZmqEventReplayRequest
+    ) -> ZmqEventReplayResponse:
+        oldest_seq = self._buffer[0][0] if self._buffer else self._next_seq
+        replayed_batches = [
+            (seq, payload) for seq, payload in self._buffer if seq >= request.start_seq
+        ]
+        replay_is_contiguous = (
+            request.start_seq >= 0
+            and len(replayed_batches) == self._next_seq - request.start_seq
+            and all(
+                seq == request.start_seq + index
+                for index, (seq, _) in enumerate(replayed_batches)
+            )
+        )
+        needs_snapshot = (
+            request.force_snapshot
+            or request.publisher_epoch != self._publisher_epoch
+            or request.start_seq < oldest_seq
+            or request.start_seq > self._next_seq
+            or not replay_is_contiguous
+        )
+        if needs_snapshot:
+            with self._state_lock:
+                snapshot = self._pack.encode(self._build_snapshot_batch())
+            return ZmqEventReplayResponse(
+                publisher_epoch=self._publisher_epoch,
+                next_seq=self._next_seq,
+                replayed_batches=[],
+                snapshot=snapshot,
+            )
+
+        return ZmqEventReplayResponse(
+            publisher_epoch=self._publisher_epoch,
+            next_seq=self._next_seq,
+            replayed_batches=replayed_batches,
+        )
+
+    def _apply_to_mirror(self, events: list[Any]) -> None:
+        with self._state_lock:
+            for event in events:
+                if isinstance(event, BlockStored):
+                    group_idx = 0 if event.group_idx is None else event.group_idx
+                    self._group_block_sizes[group_idx] = event.block_size
+                    self._group_hashes.setdefault(group_idx, set()).update(
+                        event.block_hashes
+                    )
+                elif isinstance(event, BlockRemoved):
+                    group_idx = 0 if event.group_idx is None else event.group_idx
+                    self._group_hashes.setdefault(group_idx, set()).difference_update(
+                        event.block_hashes
+                    )
+                elif isinstance(event, AllBlocksCleared):
+                    self._group_hashes.clear()
+
+    def _build_snapshot_batch(self) -> KVEventBatch:
+        events: list[KVCacheEvent] = [AllBlocksCleared()]
+        for group_idx, block_size in self._group_block_sizes.items():
+            events.append(
+                BlockStored(
+                    block_hashes=list(self._group_hashes.get(group_idx, set())),
+                    parent_block_hash=None,
+                    token_ids=[],
+                    block_size=block_size,
+                    lora_id=None,
+                    medium=None,
+                    lora_name=None,
+                    group_idx=group_idx,
+                )
+            )
+        return KVEventBatch(
+            ts=time.time(),
+            events=events,
+            data_parallel_rank=self._data_parallel_rank,
+        )
 
     @staticmethod
     def offset_endpoint_port(
@@ -766,6 +913,7 @@ class EventPublisherFactory:
         config_dict.pop("prefix_cache_upload_endpoint")
         config_dict.pop("prefix_cache_upload_max_queue_size")
         config_dict.pop("prefix_cache_upload_timeout")
+        config_dict.pop("prefix_cache_upload_snapshot_interval")
         config_dict.pop("prefix_cache_upload_token")
         try:
             constructor = cls._registry[kind]
@@ -791,6 +939,7 @@ class PrefixCacheEventUploaderFactory:
             endpoint=config.prefix_cache_upload_endpoint,
             max_queue_size=config.prefix_cache_upload_max_queue_size,
             request_timeout=config.prefix_cache_upload_timeout,
+            snapshot_interval=config.prefix_cache_upload_snapshot_interval,
             token=config.prefix_cache_upload_token,
             initial_snapshot=initial_snapshot,
         )

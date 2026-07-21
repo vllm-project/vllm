@@ -21,7 +21,11 @@ from fastapi.responses import Response
 from starlette.datastructures import URL, Headers
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
-from vllm.distributed.kv_events import KVEventBatch
+from vllm.distributed.kv_events import (
+    KVEventBatch,
+    ZmqEventReplayRequest,
+    ZmqEventReplayResponse,
+)
 from vllm.distributed.prefix_scheduler import (
     GlobalPrefixScheduler,
     PrefixRouteDecision,
@@ -29,11 +33,13 @@ from vllm.distributed.prefix_scheduler import (
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.completion.protocol import CompletionRequest
 from vllm.entrypoints.openai.engine.protocol import ErrorResponse
+from vllm.inputs import EngineInput
 from vllm.logger import init_logger
+from vllm.lora.request import LoRARequest
 from vllm.sampling_params import SamplingParams
+from vllm.tasks import SupportedTask
 from vllm.utils.hashing import get_hash_fn_by_name
 from vllm.v1.core.kv_cache_utils import (
-    BlockHash,
     get_request_block_hasher,
     init_none_hash,
 )
@@ -110,6 +116,7 @@ class PrefixRoutingNode:
     node_id: str
     url: str | None
     event_endpoint: str | None = None
+    replay_endpoint: str | None = None
     data_parallel_rank: int | None = None
     routing_token: str | None = None
     local: bool = False
@@ -123,8 +130,16 @@ class PrefixRoutingConfig:
     request_timeout: float = 6 * 60 * 60
     event_ingest_token: str | None = None
     routing_token: str | None = None
+    event_replay_timeout: float = 2.0
+    event_sync_interval: float = 5.0
     max_request_body_size: int = DEFAULT_MAX_REQUEST_BODY_SIZE
     max_event_ingest_body_size: int = DEFAULT_MAX_EVENT_INGEST_BODY_SIZE
+
+
+@dataclass
+class _ZmqRecoveryState:
+    publisher_epoch: str | None = None
+    next_seq: int | None = None
 
 
 class PrefixRoutingProxy:
@@ -191,16 +206,25 @@ class PrefixRoutingProxy:
     async def choose_node_for_request(
         self, path: str, payload: Mapping[str, Any]
     ) -> PrefixRouteDecision | None:
-        rendered_requests = await self._render_request(path, payload)
-        if not rendered_requests:
+        rendered = await self._render_request(path, payload)
+        if rendered is None:
+            return None
+        engine_inputs, lora_request = rendered
+        if not engine_inputs:
             return None
 
+        supported_tasks = await self.app_state.engine_client.get_supported_tasks()
+
         best_decision: PrefixRouteDecision | None = None
-        for token_ids, cache_salt in rendered_requests:
-            block_hashes = self._make_block_hashes(token_ids, cache_salt)
+        for engine_input in engine_inputs:
+            cache_key_request = self._make_cache_key_request(
+                engine_input,
+                lora_request,
+                supported_tasks,
+            )
             decision = self.scheduler.choose_node(
-                block_hashes=block_hashes,
-                prompt_num_tokens=len(token_ids),
+                block_hashes=cache_key_request.block_hashes,
+                prompt_num_tokens=cache_key_request.num_prompt_tokens,
             )
             if decision is None:
                 continue
@@ -213,82 +237,269 @@ class PrefixRoutingProxy:
 
     async def _render_request(
         self, path: str, payload: Mapping[str, Any]
-    ) -> list[tuple[list[int], str | None]]:
-        renderer = self.app_state.online_renderer
+    ) -> tuple[list[EngineInput], LoRARequest | None] | None:
         if path == "/v1/completions":
+            serving = getattr(self.app_state, "openai_serving_completion", None)
+            if serving is None:
+                return None
             completion_request = CompletionRequest.model_validate(payload)
-            result = await renderer.render_completion(completion_request)
+            result = await serving.render_completion_request(completion_request)
             if isinstance(result, ErrorResponse):
-                return []
-            return [
-                (list(engine_input["prompt_token_ids"]), engine_input.get("cache_salt"))
-                for engine_input in result
-            ]
+                return None
+            return result, serving._maybe_get_adapters(completion_request)
         if path == "/v1/chat/completions":
+            serving = getattr(self.app_state, "openai_serving_chat", None)
+            if serving is None:
+                return None
             chat_request = ChatCompletionRequest.model_validate(payload)
-            result = await renderer.render_chat(chat_request)
+            result = await serving.render_chat_request(chat_request)
             if isinstance(result, ErrorResponse):
-                return []
+                return None
             _, engine_inputs = result
-            return [
-                (list(engine_input["prompt_token_ids"]), engine_input.get("cache_salt"))
-                for engine_input in engine_inputs
-            ]
-        return []
+            lora_request = serving._maybe_get_adapters(
+                chat_request, supports_default_mm_loras=True
+            )
+            return engine_inputs, lora_request
+        return None
 
-    def _make_block_hashes(
-        self, token_ids: list[int], cache_salt: str | None
-    ) -> list[BlockHash]:
-        request = VllmRequest(
+    def _make_cache_key_request(
+        self,
+        engine_input: EngineInput,
+        lora_request: LoRARequest | None,
+        supported_tasks: tuple[SupportedTask, ...],
+    ) -> VllmRequest:
+        input_processor = self.app_state.engine_client.input_processor
+        engine_core_request = input_processor.process_inputs(
             request_id="prefix-routing",
-            prompt_token_ids=token_ids,
-            sampling_params=SamplingParams(max_tokens=1),
-            pooling_params=None,
-            cache_salt=cache_salt,
-            block_hasher=self._block_hasher,
+            prompt=engine_input,
+            params=SamplingParams(max_tokens=1),
+            supported_tasks=supported_tasks,
+            lora_request=lora_request,
         )
-        return request.block_hashes
+        return VllmRequest.from_engine_core_request(
+            engine_core_request,
+            self._block_hasher,
+        )
 
     async def _subscribe_node_events(self, node: PrefixRoutingNode) -> None:
         assert node.event_endpoint is not None
         ctx = zmq.asyncio.Context.instance()
         decoder = msgspec.msgpack.Decoder(type=KVEventBatch)
         topic = self.config.event_topic.encode("utf-8")
-        socket = ctx.socket(zmq.SUB)
-        socket.setsockopt(zmq.SUBSCRIBE, topic)
-        socket.connect(node.event_endpoint)
-        logger.info(
-            "Prefix routing subscribed to KV events from %s at %s",
-            node.node_id,
-            node.event_endpoint,
-        )
+        recovery_state = _ZmqRecoveryState()
+        recovery_lock = asyncio.Lock()
+        recovery_task: asyncio.Task | None = None
+        reconnect_delay = 0.1
         try:
             while True:
-                frames = await socket.recv_multipart()
+                socket = ctx.socket(zmq.SUB)
                 try:
-                    if len(frames) != 3:
-                        logger.warning(
-                            "Ignoring malformed KV event message with %d frames",
-                            len(frames),
-                        )
-                        continue
-                    _, _, payload = frames
-                    batch = decoder.decode(payload)
-                    self.scheduler.apply_event_batch(node.node_id, batch)
-                except (msgspec.DecodeError, KeyError, ValueError) as exc:
-                    logger.warning(
-                        "Ignoring invalid KV event message from %s: %s",
+                    socket.setsockopt(zmq.SUBSCRIBE, topic)
+                    socket.connect(node.event_endpoint)
+                    logger.info(
+                        "Prefix routing subscribed to KV events from %s at %s",
                         node.node_id,
-                        type(exc).__name__,
+                        node.event_endpoint,
                     )
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            logger.exception(
-                "Prefix routing event subscriber failed for %s", node.node_id
+                    if node.replay_endpoint is not None:
+                        async with recovery_lock:
+                            await self._recover_zmq_events(
+                                node,
+                                recovery_state,
+                                force_snapshot=recovery_task is None,
+                            )
+                        if recovery_task is None:
+                            recovery_task = asyncio.create_task(
+                                self._periodic_zmq_recovery(
+                                    node,
+                                    recovery_state,
+                                    recovery_lock,
+                                )
+                            )
+
+                    while True:
+                        frames = await socket.recv_multipart()
+                        reconnect_delay = 0.1
+                        try:
+                            await self._process_zmq_event_frames(
+                                node,
+                                recovery_state,
+                                recovery_lock,
+                                decoder,
+                                frames,
+                            )
+                        except (msgspec.DecodeError, KeyError, ValueError) as exc:
+                            logger.warning(
+                                "Ignoring invalid KV event message from %s: %s",
+                                node.node_id,
+                                type(exc).__name__,
+                            )
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.exception(
+                        "Prefix routing event subscriber disconnected from %s; "
+                        "reconnecting",
+                        node.node_id,
+                    )
+                    await asyncio.sleep(reconnect_delay)
+                    reconnect_delay = min(reconnect_delay * 2, 5.0)
+                finally:
+                    socket.close(linger=0)
+        finally:
+            if recovery_task is not None:
+                recovery_task.cancel()
+                await asyncio.gather(recovery_task, return_exceptions=True)
+
+    async def _process_zmq_event_frames(
+        self,
+        node: PrefixRoutingNode,
+        recovery_state: "_ZmqRecoveryState",
+        recovery_lock: asyncio.Lock,
+        decoder: Any,
+        frames: list[bytes],
+    ) -> None:
+        if len(frames) != 3:
+            logger.warning(
+                "Ignoring malformed KV event message with %d frames",
+                len(frames),
             )
+            return
+        _, seq_bytes, payload = frames
+        if len(seq_bytes) != 8:
+            raise ValueError("invalid ZMQ event sequence number")
+        if node.replay_endpoint is None:
+            batch = decoder.decode(payload)
+            self.scheduler.apply_event_batch(node.node_id, batch)
+            return
+        seq = int.from_bytes(seq_bytes, "big")
+        async with recovery_lock:
+            await self._apply_live_zmq_event(
+                node,
+                recovery_state,
+                seq,
+                payload,
+                decoder,
+            )
+
+    async def _apply_live_zmq_event(
+        self,
+        node: PrefixRoutingNode,
+        state: "_ZmqRecoveryState",
+        seq: int,
+        payload: bytes,
+        decoder: Any,
+    ) -> None:
+        if state.next_seq is None:
+            # Recovery may be temporarily unavailable. Keep consuming live
+            # events; the periodic control-plane sync will reconcile later.
+            state.next_seq = seq
+
+        if seq > state.next_seq:
+            await self._recover_zmq_events(node, state)
+        if seq < state.next_seq:
+            return
+        if seq > state.next_seq:
+            logger.warning(
+                "Deferring out-of-order KV event from %s: expected %d, got %d",
+                node.node_id,
+                state.next_seq,
+                seq,
+            )
+            return
+
+        try:
+            batch = decoder.decode(payload)
+            self.scheduler.apply_event_batch(node.node_id, batch)
+        except (msgspec.DecodeError, KeyError, ValueError):
+            await self._recover_zmq_events(node, state, force_snapshot=True)
+            raise
+        state.next_seq += 1
+
+    async def _periodic_zmq_recovery(
+        self,
+        node: PrefixRoutingNode,
+        state: "_ZmqRecoveryState",
+        recovery_lock: asyncio.Lock,
+    ) -> None:
+        while True:
+            await asyncio.sleep(self.config.event_sync_interval)
+            async with recovery_lock:
+                await self._recover_zmq_events(node, state)
+
+    async def _recover_zmq_events(
+        self,
+        node: PrefixRoutingNode,
+        state: "_ZmqRecoveryState",
+        *,
+        force_snapshot: bool = False,
+    ) -> bool:
+        if node.replay_endpoint is None:
+            return False
+
+        ctx = zmq.asyncio.Context.instance()
+        socket = ctx.socket(zmq.REQ)
+        socket.setsockopt(zmq.LINGER, 0)
+        socket.connect(node.replay_endpoint)
+        request = ZmqEventReplayRequest(
+            publisher_epoch=state.publisher_epoch,
+            start_seq=0 if state.next_seq is None else state.next_seq,
+            force_snapshot=force_snapshot,
+        )
+        try:
+            await socket.send(msgspec.msgpack.encode(request))
+            payload = await asyncio.wait_for(
+                socket.recv(),
+                timeout=self.config.event_replay_timeout,
+            )
+            response = msgspec.msgpack.decode(payload, type=ZmqEventReplayResponse)
+            self._apply_zmq_recovery_response(node, state, response)
+            return True
+        except (TimeoutError, msgspec.DecodeError, KeyError, ValueError, zmq.ZMQError):
+            logger.warning(
+                "ZMQ event recovery failed for %s; retaining last known state",
+                node.node_id,
+                exc_info=True,
+            )
+            return False
         finally:
             socket.close(linger=0)
+
+    def _apply_zmq_recovery_response(
+        self,
+        node: PrefixRoutingNode,
+        state: "_ZmqRecoveryState",
+        response: ZmqEventReplayResponse,
+    ) -> None:
+        if response.next_seq < 0:
+            raise ValueError("negative ZMQ recovery sequence")
+
+        decoder = msgspec.msgpack.Decoder(type=KVEventBatch)
+        decoded: list[KVEventBatch] = []
+        if response.snapshot is not None:
+            if response.replayed_batches:
+                raise ValueError("snapshot response also contains replay batches")
+            decoded.append(decoder.decode(response.snapshot))
+        else:
+            if state.publisher_epoch != response.publisher_epoch:
+                raise ValueError("publisher epoch changed without a snapshot")
+            expected_seq = 0 if state.next_seq is None else state.next_seq
+            for seq, payload in response.replayed_batches:
+                if seq != expected_seq:
+                    raise ValueError(
+                        f"non-contiguous replay: expected {expected_seq}, got {seq}"
+                    )
+                decoded.append(decoder.decode(payload))
+                expected_seq += 1
+            if expected_seq != response.next_seq:
+                raise ValueError(
+                    "replay response does not reach the advertised sequence"
+                )
+
+        for batch in decoded:
+            self.scheduler.apply_event_batch(node.node_id, batch)
+        state.publisher_epoch = response.publisher_epoch
+        state.next_seq = response.next_seq
 
 
 class PrefixRoutingMiddleware:
@@ -441,6 +652,24 @@ def _parse_prefix_routing_config(
                 f"prefix routing node {node_id!r} event_endpoint must be a string"
             )
 
+        replay_endpoint = node.get("replay_endpoint")
+        if replay_endpoint is not None and (
+            not isinstance(replay_endpoint, str) or not replay_endpoint
+        ):
+            raise ValueError(
+                f"prefix routing node {node_id!r} replay_endpoint must be a string"
+            )
+        if event_endpoint is not None and replay_endpoint is None:
+            raise ValueError(
+                f"prefix routing node {node_id!r} with event_endpoint requires "
+                "replay_endpoint"
+            )
+        if replay_endpoint is not None and event_endpoint is None:
+            raise ValueError(
+                f"prefix routing node {node_id!r} replay_endpoint requires "
+                "event_endpoint"
+            )
+
         data_parallel_rank = node.get("data_parallel_rank")
         if data_parallel_rank is not None and (
             not isinstance(data_parallel_rank, int)
@@ -468,6 +697,7 @@ def _parse_prefix_routing_config(
                 node_id=node_id,
                 url=node_url,
                 event_endpoint=event_endpoint,
+                replay_endpoint=replay_endpoint,
                 data_parallel_rank=data_parallel_rank,
                 routing_token=node_routing_token,
                 local=local,
@@ -507,6 +737,22 @@ def _parse_prefix_routing_config(
     ):
         raise ValueError("prefix routing routing_token must be a non-empty string")
 
+    event_replay_timeout = raw_config.get("event_replay_timeout", 2.0)
+    if (
+        not isinstance(event_replay_timeout, int | float)
+        or isinstance(event_replay_timeout, bool)
+        or event_replay_timeout <= 0
+    ):
+        raise ValueError("prefix routing event_replay_timeout must be positive")
+
+    event_sync_interval = raw_config.get("event_sync_interval", 5.0)
+    if (
+        not isinstance(event_sync_interval, int | float)
+        or isinstance(event_sync_interval, bool)
+        or event_sync_interval <= 0
+    ):
+        raise ValueError("prefix routing event_sync_interval must be positive")
+
     max_request_body_size = raw_config.get(
         "max_request_body_size", DEFAULT_MAX_REQUEST_BODY_SIZE
     )
@@ -538,6 +784,8 @@ def _parse_prefix_routing_config(
         request_timeout=float(request_timeout),
         event_ingest_token=event_ingest_token,
         routing_token=routing_token,
+        event_replay_timeout=float(event_replay_timeout),
+        event_sync_interval=float(event_sync_interval),
         max_request_body_size=max_request_body_size,
         max_event_ingest_body_size=max_event_ingest_body_size,
     )

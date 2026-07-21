@@ -7,6 +7,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from collections import deque
 from types import SimpleNamespace
 
 import aiohttp
@@ -25,6 +26,9 @@ from vllm.distributed.kv_events import (
     KVEventBatch,
     NullEventPublisher,
     PrefixCacheEventUploaderFactory,
+    ZmqEventPublisher,
+    ZmqEventReplayRequest,
+    ZmqEventReplayResponse,
     _build_prefix_cache_opener,
     _NoRedirectHandler,
 )
@@ -40,13 +44,22 @@ from vllm.entrypoints.openai.prefix_routing import (
     PrefixRoutingProxy,
     _forward_request,
     _parse_prefix_routing_config,
+    _ZmqRecoveryState,
     ingest_prefix_routing_kv_events,
 )
+from vllm.lora.request import LoRARequest
+from vllm.multimodal.inputs import MultiModalFeatureSpec, PlaceholderRange
+from vllm.sampling_params import SamplingParams
+from vllm.utils.hashing import sha256_cbor
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     ExternalBlockHash,
+    get_request_block_hasher,
+    init_none_hash,
     maybe_convert_block_hash,
 )
+from vllm.v1.engine import EngineCoreRequest
+from vllm.v1.request import Request as VllmRequest
 
 pytestmark = pytest.mark.skip_global_cleanup
 
@@ -296,6 +309,7 @@ def test_prefix_cache_upload_is_independent_from_event_publisher():
         enable_kv_cache_events=False,
         publisher="null",
         prefix_cache_upload_endpoint="http://127.0.0.1:9/prefix_routing",
+        prefix_cache_upload_snapshot_interval=17.0,
         prefix_cache_upload_token="shared-secret",
     )
 
@@ -306,6 +320,7 @@ def test_prefix_cache_upload_is_independent_from_event_publisher():
         assert isinstance(publisher, NullEventPublisher)
         assert isinstance(uploader, HttpPrefixCacheEventUploader)
         assert uploader._headers["Authorization"] == "Bearer shared-secret"
+        assert uploader._snapshot_interval == 17.0
     finally:
         uploader.shutdown()
 
@@ -359,6 +374,51 @@ def test_prefix_cache_upload_queue_overflow_reconciles_latest_state():
         _external_hash(first_hash),
         _external_hash(second_hash),
     }
+    uploader.shutdown()
+
+
+def test_prefix_cache_upload_periodically_reconciles_idle_state():
+    uploader = HttpPrefixCacheEventUploader(
+        data_parallel_rank=0,
+        endpoint="http://127.0.0.1:9/prefix_routing",
+        snapshot_interval=30.0,
+        token="shared-secret",
+        _start_thread=False,
+    )
+    block_hash = _hash(1)
+    uploader.publish(KVEventBatch(ts=1.0, events=[_stored_event(block_hash)]))
+    uploader._discard_queued_batches()
+
+    uploader._next_snapshot_at = 0
+    generation = uploader._reconcile_generation
+    uploader._maybe_mark_periodic_snapshot()
+
+    assert uploader._needs_snapshot.is_set()
+    assert uploader._reconcile_generation == generation + 1
+
+    # A pending snapshot is not scheduled repeatedly on every uploader tick.
+    uploader._maybe_mark_periodic_snapshot()
+    assert uploader._reconcile_generation == generation + 1
+
+    snapshot, _ = uploader._build_snapshot_batch()
+    state = NodePrefixCacheState(node_id="node-a", hash_block_size=16)
+    state.apply_events(snapshot.events)
+    assert state.group_hashes[0] == {_external_hash(block_hash)}
+    uploader.shutdown()
+
+
+def test_prefix_cache_upload_can_disable_periodic_snapshots():
+    uploader = HttpPrefixCacheEventUploader(
+        data_parallel_rank=0,
+        endpoint="http://127.0.0.1:9/prefix_routing",
+        snapshot_interval=0,
+        token="shared-secret",
+        _start_thread=False,
+    )
+    uploader._next_snapshot_at = 0
+    uploader._maybe_mark_periodic_snapshot()
+
+    assert not uploader._needs_snapshot.is_set()
     uploader.shutdown()
 
 
@@ -584,15 +644,25 @@ def test_prefix_routing_http_event_ingest_rejects_oversized_batch():
 
 
 def test_prefix_routing_renders_completion_engine_inputs():
-    class Renderer:
-        async def render_completion(self, request):
+    lora_request = LoRARequest("completion-lora", 1, "/tmp/completion-lora")
+
+    class Serving:
+        async def render_completion_request(self, request):
             return [
-                {"prompt_token_ids": [1, 2], "cache_salt": "salt"},
-                {"prompt_token_ids": [3]},
+                {
+                    "type": "token",
+                    "prompt_token_ids": [1, 2],
+                    "cache_salt": "salt",
+                },
+                {"type": "token", "prompt_token_ids": [3]},
             ]
 
+        def _maybe_get_adapters(self, request):
+            assert request.model == "test-model"
+            return lora_request
+
     proxy = object.__new__(PrefixRoutingProxy)
-    proxy.app_state = SimpleNamespace(online_renderer=Renderer())
+    proxy.app_state = SimpleNamespace(openai_serving_completion=Serving())
 
     rendered = asyncio.run(
         proxy._render_request(
@@ -601,16 +671,38 @@ def test_prefix_routing_renders_completion_engine_inputs():
         )
     )
 
-    assert rendered == [([1, 2], "salt"), ([3], None)]
+    assert rendered == (
+        [
+            {
+                "type": "token",
+                "prompt_token_ids": [1, 2],
+                "cache_salt": "salt",
+            },
+            {"type": "token", "prompt_token_ids": [3]},
+        ],
+        lora_request,
+    )
 
 
 def test_prefix_routing_renders_chat_engine_inputs():
-    class Renderer:
-        async def render_chat(self, request):
-            return [], [{"prompt_token_ids": [4, 5], "cache_salt": "chat-salt"}]
+    lora_request = LoRARequest("image", 2, "/tmp/image-lora")
+
+    class Serving:
+        async def render_chat_request(self, request):
+            return [], [
+                {
+                    "type": "token",
+                    "prompt_token_ids": [4, 5],
+                    "cache_salt": "chat-salt",
+                }
+            ]
+
+        def _maybe_get_adapters(self, request, supports_default_mm_loras=False):
+            assert supports_default_mm_loras
+            return lora_request
 
     proxy = object.__new__(PrefixRoutingProxy)
-    proxy.app_state = SimpleNamespace(online_renderer=Renderer())
+    proxy.app_state = SimpleNamespace(openai_serving_chat=Serving())
 
     rendered = asyncio.run(
         proxy._render_request(
@@ -622,7 +714,94 @@ def test_prefix_routing_renders_chat_engine_inputs():
         )
     )
 
-    assert rendered == [([4, 5], "chat-salt")]
+    assert rendered == (
+        [
+            {
+                "type": "token",
+                "prompt_token_ids": [4, 5],
+                "cache_salt": "chat-salt",
+            }
+        ],
+        lora_request,
+    )
+
+
+def test_prefix_routing_hashes_match_engine_core_cache_key_path():
+    init_none_hash(sha256_cbor)
+    block_hasher = get_request_block_hasher(8, sha256_cbor)
+    engine_input = {"type": "token", "prompt_token_ids": list(range(24))}
+
+    def make_engine_core_request(
+        *, mm_identifier: str, lora_name: str, cache_salt: str
+    ) -> EngineCoreRequest:
+        return EngineCoreRequest(
+            request_id="production-request",
+            prompt_token_ids=list(range(24)),
+            mm_features=[
+                MultiModalFeatureSpec(
+                    data=None,
+                    modality="image",
+                    identifier=mm_identifier,
+                    mm_position=PlaceholderRange(offset=8, length=8),
+                    mm_hash="base-mm-hash",
+                )
+            ],
+            sampling_params=SamplingParams(max_tokens=1),
+            pooling_params=None,
+            arrival_time=1.0,
+            lora_request=LoRARequest(lora_name, 1, f"/tmp/{lora_name}"),
+            cache_salt=cache_salt,
+            data_parallel_rank=None,
+        )
+
+    class InputProcessor:
+        request: EngineCoreRequest
+
+        def process_inputs(self, **kwargs):
+            assert kwargs["prompt"] is engine_input
+            assert kwargs["supported_tasks"] == ("generate",)
+            assert kwargs["lora_request"] is self.request.lora_request
+            return self.request
+
+    input_processor = InputProcessor()
+    proxy = object.__new__(PrefixRoutingProxy)
+    proxy._block_hasher = block_hasher
+    proxy.app_state = SimpleNamespace(
+        engine_client=SimpleNamespace(input_processor=input_processor)
+    )
+
+    routing_hashes = {}
+    variants = {
+        "base": ("mm-a", "lora-a", "salt-a"),
+        "different-mm": ("mm-b", "lora-a", "salt-a"),
+        "different-lora": ("mm-a", "lora-b", "salt-a"),
+        "different-salt": ("mm-a", "lora-a", "salt-b"),
+    }
+    for name, (mm_identifier, lora_name, cache_salt) in variants.items():
+        input_processor.request = make_engine_core_request(
+            mm_identifier=mm_identifier,
+            lora_name=lora_name,
+            cache_salt=cache_salt,
+        )
+        routing_request = proxy._make_cache_key_request(
+            engine_input,
+            input_processor.request.lora_request,
+            ("generate",),
+        )
+        production_request = VllmRequest.from_engine_core_request(
+            input_processor.request,
+            block_hasher,
+        )
+
+        assert routing_request.block_hashes == production_request.block_hashes
+        assert routing_request.mm_features == production_request.mm_features
+        assert routing_request.lora_request == production_request.lora_request
+        assert routing_request.cache_salt == production_request.cache_salt
+        routing_hashes[name] = routing_request.block_hashes
+
+    assert routing_hashes["different-mm"] != routing_hashes["base"]
+    assert routing_hashes["different-lora"] != routing_hashes["base"]
+    assert routing_hashes["different-salt"] != routing_hashes["base"]
 
 
 def test_prefix_routing_falls_back_locally_when_upstream_cannot_start():
@@ -980,9 +1159,9 @@ def test_prefix_routing_zmq_subscriber_isolates_invalid_messages(monkeypatch):
             self.messages = iter(
                 [
                     [b"too", b"short"],
-                    [b"", b"0", b"\xc1"],
-                    [b"", b"1", mismatched],
-                    [b"", b"2", valid],
+                    [b"", (0).to_bytes(8, "big"), b"\xc1"],
+                    [b"", (1).to_bytes(8, "big"), mismatched],
+                    [b"", (2).to_bytes(8, "big"), valid],
                 ]
             )
             self.closed = False
@@ -1035,6 +1214,380 @@ def test_prefix_routing_zmq_subscriber_isolates_invalid_messages(monkeypatch):
     assert socket.closed
 
 
+def test_prefix_routing_zmq_subscriber_reconnects_after_socket_failure(monkeypatch):
+    valid_hash = _hash(8)
+    valid = msgspec.msgpack.encode(
+        KVEventBatch(ts=1.0, events=[_stored_event(valid_hash)])
+    )
+
+    class Socket:
+        def __init__(self, messages):
+            self.messages = iter(messages)
+            self.closed = False
+
+        def setsockopt(self, *args):
+            pass
+
+        def connect(self, endpoint):
+            assert endpoint == "inproc://node-a"
+
+        async def recv_multipart(self):
+            message = next(self.messages)
+            if isinstance(message, Exception):
+                raise message
+            if message is None:
+                raise asyncio.CancelledError
+            return message
+
+        def close(self, *, linger):
+            assert linger == 0
+            self.closed = True
+
+    failed_socket = Socket([RuntimeError("disconnected")])
+    recovered_socket = Socket([[b"", b"0" * 8, valid], None])
+    sockets = iter([failed_socket, recovered_socket])
+    context = SimpleNamespace(socket=lambda socket_type: next(sockets))
+    monkeypatch.setattr(zmq.asyncio.Context, "instance", lambda: context)
+
+    async def no_sleep(delay):
+        return None
+
+    monkeypatch.setattr(asyncio, "sleep", no_sleep)
+    proxy = object.__new__(PrefixRoutingProxy)
+    proxy.config = SimpleNamespace(event_topic="")
+    proxy.scheduler = GlobalPrefixScheduler()
+    proxy.scheduler.register_node("node-a", hash_block_size=16)
+    node = PrefixRoutingNode(
+        node_id="node-a",
+        url=None,
+        event_endpoint="inproc://node-a",
+        local=True,
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(proxy._subscribe_node_events(node))
+
+    assert failed_socket.closed
+    assert recovered_socket.closed
+    decision = proxy.scheduler.choose_node([valid_hash], prompt_num_tokens=32)
+    assert decision is not None
+    assert decision.matched_tokens == 16
+
+
+def _make_replay_publisher(buffer_steps=2):
+    publisher = object.__new__(ZmqEventPublisher)
+    publisher._buffer = deque(maxlen=buffer_steps)
+    publisher._state_lock = threading.Lock()
+    publisher._group_block_sizes = {}
+    publisher._group_hashes = {}
+    publisher._publisher_epoch = "worker-epoch-a"
+    publisher._next_seq = 0
+    publisher._data_parallel_rank = 0
+    publisher._pack = msgspec.msgpack.Encoder()
+    return publisher
+
+
+def _record_replay_batch(publisher, batch):
+    seq = publisher._next_seq
+    publisher._next_seq += 1
+    payload = publisher._pack.encode(batch)
+    publisher._buffer.append((seq, payload))
+    publisher._apply_to_mirror(batch.events)
+    return seq, payload
+
+
+def test_zmq_replay_uses_buffer_then_snapshot_after_eviction():
+    publisher = _make_replay_publisher(buffer_steps=2)
+    hashes = [_hash(1), _hash(2), _hash(3)]
+    for index, block_hash in enumerate(hashes):
+        _record_replay_batch(
+            publisher,
+            KVEventBatch(ts=float(index), events=[_stored_event(block_hash)]),
+        )
+
+    replay = publisher._build_replay_response(
+        ZmqEventReplayRequest(
+            publisher_epoch="worker-epoch-a",
+            start_seq=1,
+        )
+    )
+    assert replay.snapshot is None
+    assert [seq for seq, _ in replay.replayed_batches] == [1, 2]
+    assert replay.next_seq == 3
+
+    evicted = publisher._build_replay_response(
+        ZmqEventReplayRequest(
+            publisher_epoch="worker-epoch-a",
+            start_seq=0,
+        )
+    )
+    assert evicted.replayed_batches == []
+    assert evicted.snapshot is not None
+    snapshot = msgspec.msgpack.decode(evicted.snapshot, type=KVEventBatch)
+    state = NodePrefixCacheState(node_id="node-a", hash_block_size=16)
+    state.apply_events(snapshot.events)
+    assert state.group_hashes[0] == {_external_hash(value) for value in hashes}
+
+
+def test_zmq_replay_returns_snapshot_after_publisher_restart():
+    publisher = _make_replay_publisher()
+    block_hash = _hash(4)
+    _record_replay_batch(
+        publisher,
+        KVEventBatch(ts=1.0, events=[_stored_event(block_hash)]),
+    )
+
+    response = publisher._build_replay_response(
+        ZmqEventReplayRequest(
+            publisher_epoch="previous-worker-epoch",
+            start_seq=1,
+        )
+    )
+
+    assert response.publisher_epoch == "worker-epoch-a"
+    assert response.next_seq == 1
+    assert response.snapshot is not None
+
+
+def test_zmq_replay_returns_snapshot_for_internal_sequence_gap():
+    publisher = _make_replay_publisher(buffer_steps=3)
+    publisher._next_seq = 3
+    publisher._buffer.extend(
+        [
+            (
+                0,
+                msgspec.msgpack.encode(
+                    KVEventBatch(ts=0.0, events=[_stored_event(_hash(1))])
+                ),
+            ),
+            (
+                2,
+                msgspec.msgpack.encode(
+                    KVEventBatch(ts=2.0, events=[_stored_event(_hash(2))])
+                ),
+            ),
+        ]
+    )
+
+    response = publisher._build_replay_response(
+        ZmqEventReplayRequest(
+            publisher_epoch="worker-epoch-a",
+            start_seq=1,
+        )
+    )
+
+    assert response.snapshot is not None
+    assert response.replayed_batches == []
+
+
+def test_prefix_routing_applies_contiguous_replay_and_restart_snapshot():
+    old_hash = _hash(1)
+    replayed_hash = _hash(2)
+    restarted_hash = _hash(3)
+    proxy = object.__new__(PrefixRoutingProxy)
+    proxy.scheduler = GlobalPrefixScheduler()
+    proxy.scheduler.register_node(
+        "node-a",
+        hash_block_size=16,
+        data_parallel_rank=0,
+        group_block_sizes={0: 16},
+    )
+    proxy.scheduler.apply_event_batch(
+        "node-a",
+        KVEventBatch(
+            ts=0.0,
+            data_parallel_rank=0,
+            events=[_stored_event(old_hash)],
+        ),
+    )
+    node = PrefixRoutingNode(
+        node_id="node-a",
+        url=None,
+        event_endpoint="inproc://events",
+        replay_endpoint="inproc://replay",
+        data_parallel_rank=0,
+        local=True,
+    )
+    state = _ZmqRecoveryState(publisher_epoch="epoch-a", next_seq=1)
+    replay_batches = [
+        (
+            1,
+            msgspec.msgpack.encode(
+                KVEventBatch(
+                    ts=1.0,
+                    data_parallel_rank=0,
+                    events=[
+                        BlockRemoved(
+                            block_hashes=[_external_hash(old_hash)],
+                            medium="GPU",
+                            group_idx=0,
+                        )
+                    ],
+                )
+            ),
+        ),
+        (
+            2,
+            msgspec.msgpack.encode(
+                KVEventBatch(
+                    ts=2.0,
+                    data_parallel_rank=0,
+                    events=[_stored_event(replayed_hash)],
+                )
+            ),
+        ),
+    ]
+    proxy._apply_zmq_recovery_response(
+        node,
+        state,
+        ZmqEventReplayResponse(
+            publisher_epoch="epoch-a",
+            next_seq=3,
+            replayed_batches=replay_batches,
+        ),
+    )
+    assert state.next_seq == 3
+    assert (
+        proxy.scheduler.choose_node(
+            [replayed_hash], prompt_num_tokens=32
+        ).matched_tokens
+        == 16
+    )
+    assert (
+        proxy.scheduler.choose_node([old_hash], prompt_num_tokens=32).matched_tokens
+        == 0
+    )
+
+    snapshot = KVEventBatch(
+        ts=3.0,
+        data_parallel_rank=0,
+        events=[AllBlocksCleared(), _stored_event(restarted_hash)],
+    )
+    proxy._apply_zmq_recovery_response(
+        node,
+        state,
+        ZmqEventReplayResponse(
+            publisher_epoch="epoch-b",
+            next_seq=0,
+            replayed_batches=[],
+            snapshot=msgspec.msgpack.encode(snapshot),
+        ),
+    )
+    assert state == _ZmqRecoveryState(publisher_epoch="epoch-b", next_seq=0)
+    assert (
+        proxy.scheduler.choose_node(
+            [restarted_hash], prompt_num_tokens=32
+        ).matched_tokens
+        == 16
+    )
+    assert (
+        proxy.scheduler.choose_node(
+            [replayed_hash], prompt_num_tokens=32
+        ).matched_tokens
+        == 0
+    )
+
+
+def test_prefix_routing_live_gap_recovers_before_applying_new_event(monkeypatch):
+    replayed_hash = _hash(1)
+    live_hash = _hash(2)
+    proxy = object.__new__(PrefixRoutingProxy)
+    proxy.scheduler = GlobalPrefixScheduler()
+    proxy.scheduler.register_node("node-a", hash_block_size=16)
+    node = PrefixRoutingNode(
+        node_id="node-a",
+        url=None,
+        event_endpoint="inproc://events",
+        replay_endpoint="inproc://replay",
+        local=True,
+    )
+    state = _ZmqRecoveryState(publisher_epoch="epoch-a", next_seq=1)
+    recovery_calls = []
+
+    async def recover(node, recovery_state, *, force_snapshot=False):
+        recovery_calls.append((node.node_id, force_snapshot))
+        proxy._apply_zmq_recovery_response(
+            node,
+            recovery_state,
+            ZmqEventReplayResponse(
+                publisher_epoch="epoch-a",
+                next_seq=2,
+                replayed_batches=[
+                    (
+                        1,
+                        msgspec.msgpack.encode(
+                            KVEventBatch(
+                                ts=1.0,
+                                events=[_stored_event(replayed_hash)],
+                            )
+                        ),
+                    )
+                ],
+            ),
+        )
+        return True
+
+    monkeypatch.setattr(proxy, "_recover_zmq_events", recover)
+    asyncio.run(
+        proxy._apply_live_zmq_event(
+            node,
+            state,
+            2,
+            msgspec.msgpack.encode(
+                KVEventBatch(ts=2.0, events=[_stored_event(live_hash)])
+            ),
+            msgspec.msgpack.Decoder(type=KVEventBatch),
+        )
+    )
+
+    assert recovery_calls == [("node-a", False)]
+    assert state.next_seq == 3
+    assert (
+        proxy.scheduler.choose_node(
+            [replayed_hash], prompt_num_tokens=32
+        ).matched_tokens
+        == 16
+    )
+    assert (
+        proxy.scheduler.choose_node([live_hash], prompt_num_tokens=32).matched_tokens
+        == 16
+    )
+
+
+def test_prefix_routing_rejects_non_contiguous_zmq_replay():
+    proxy = object.__new__(PrefixRoutingProxy)
+    proxy.scheduler = GlobalPrefixScheduler()
+    proxy.scheduler.register_node("node-a", hash_block_size=16)
+    node = PrefixRoutingNode(
+        node_id="node-a",
+        url=None,
+        event_endpoint="inproc://events",
+        replay_endpoint="inproc://replay",
+        local=True,
+    )
+    state = _ZmqRecoveryState(publisher_epoch="epoch-a", next_seq=1)
+    payload = msgspec.msgpack.encode(
+        KVEventBatch(ts=2.0, events=[_stored_event(_hash(2))])
+    )
+
+    with pytest.raises(ValueError, match="expected 1, got 2"):
+        proxy._apply_zmq_recovery_response(
+            node,
+            state,
+            ZmqEventReplayResponse(
+                publisher_epoch="epoch-a",
+                next_seq=3,
+                replayed_batches=[(2, payload)],
+            ),
+        )
+
+    assert state == _ZmqRecoveryState(publisher_epoch="epoch-a", next_seq=1)
+    assert (
+        proxy.scheduler.choose_node([_hash(2)], prompt_num_tokens=32).matched_tokens
+        == 0
+    )
+
+
 @pytest.mark.parametrize(
     "kwargs, error",
     [
@@ -1042,6 +1595,8 @@ def test_prefix_routing_zmq_subscriber_isolates_invalid_messages(monkeypatch):
         ({"max_queue_size": True}, "max_queue_size must be a positive integer"),
         ({"request_timeout": 0}, "request_timeout must be positive"),
         ({"request_timeout": True}, "request_timeout must be positive"),
+        ({"snapshot_interval": -1}, "snapshot_interval must be non-negative"),
+        ({"snapshot_interval": True}, "snapshot_interval must be non-negative"),
     ],
 )
 def test_prefix_cache_uploader_rejects_invalid_limits(kwargs, error):
@@ -1065,6 +1620,14 @@ def test_prefix_cache_uploader_rejects_invalid_limits(kwargs, error):
         (
             {"prefix_cache_upload_timeout": 0},
             "prefix_cache_upload_timeout must be positive",
+        ),
+        (
+            {"prefix_cache_upload_snapshot_interval": -1},
+            "prefix_cache_upload_snapshot_interval must be non-negative",
+        ),
+        (
+            {"prefix_cache_upload_snapshot_interval": True},
+            "prefix_cache_upload_snapshot_interval must be non-negative",
         ),
     ],
 )
@@ -1133,6 +1696,32 @@ def test_prefix_cache_config_rejects_invalid_upload_limits(kwargs, error):
             },
             "max_event_ingest_body_size must be a positive integer",
         ),
+        (
+            {
+                "nodes": [
+                    {
+                        "id": "node-a",
+                        "url": "local",
+                        "event_endpoint": "tcp://node-a:5557",
+                    }
+                ]
+            },
+            "with event_endpoint requires replay_endpoint",
+        ),
+        (
+            {
+                "nodes": [{"id": "node-a", "url": "local"}],
+                "event_replay_timeout": 0,
+            },
+            "event_replay_timeout must be positive",
+        ),
+        (
+            {
+                "nodes": [{"id": "node-a", "url": "local"}],
+                "event_sync_interval": 0,
+            },
+            "event_sync_interval must be positive",
+        ),
     ],
 )
 def test_prefix_routing_config_rejects_invalid_values(config, error):
@@ -1160,10 +1749,9 @@ def test_api_app_wires_prefix_routing_middleware_route_and_shutdown(monkeypatch)
     assert any(
         middleware.cls is PrefixRoutingMiddleware for middleware in app.user_middleware
     )
-    assert any(
-        getattr(route, "path", None) == "/prefix_routing/kv_events/{node_id}"
-        for route in app.routes
-    )
+    assert str(
+        app.url_path_for("ingest_prefix_routing_kv_events", node_id="node-a")
+    ) == ("/prefix_routing/kv_events/node-a")
 
     class Proxy:
         def __init__(self):
