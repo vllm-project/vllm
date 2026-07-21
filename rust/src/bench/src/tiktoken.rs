@@ -199,7 +199,12 @@ pub fn load_builtin_tiktoken(encoding: &str) -> Result<TiktokenTokenizer> {
         }
     };
     let bpe = bpe.map_err(|e| BenchError::Tokenizer(format!("Failed to load {encoding}: {e}")))?;
-    println!("Tokenizer: Built-in tiktoken {encoding} (vocab_size={vocab_size})");
+    tracing::info!(
+        encoding,
+        kind = "built-in-tiktoken",
+        vocab_size,
+        "loaded tokenizer"
+    );
     Ok(TiktokenTokenizer::from_builtin_bpe(bpe, vocab_size))
 }
 
@@ -309,15 +314,16 @@ fn build_tiktoken(
         }
     }
 
-    println!(
-        "Loading tiktoken model for '{model_id}' (base={}, special={}, pat={})...",
-        num_base_tokens,
-        all_special_tokens.len(),
-        if pattern.is_some() {
+    tracing::info!(
+        model = model_id,
+        base_tokens = num_base_tokens,
+        special_tokens = all_special_tokens.len(),
+        pattern = if pattern.is_some() {
             "custom"
         } else {
             "default"
         },
+        "loading tiktoken model"
     );
 
     TiktokenTokenizer::from_file(
@@ -438,9 +444,9 @@ fn extract_pat_str_from_source(source: &str) -> Option<String> {
 
                 if !fragments.is_empty() {
                     let pattern = fragments.join("|");
-                    println!(
-                        "Extracted pat_str from Python source: {} fragments",
-                        fragments.len()
+                    tracing::debug!(
+                        fragments = fragments.len(),
+                        "extracted tiktoken pattern from Python source"
                     );
                     return Some(pattern);
                 }
