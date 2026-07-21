@@ -132,10 +132,12 @@ class PassConfig:
     """Enable async TP."""
     fuse_allreduce_rms: bool = RuntimeDefault()
     """Enable flashinfer allreduce fusion."""
-    enable_qk_norm_rope_fusion: bool = None  # type: ignore[assignment]
+    enable_qk_norm_rope_fusion: bool = RuntimeDefault()
     """Enable fused Q/K RMSNorm + RoPE pass."""
-    fuse_rope_kvcache_cat_mla: bool = None  # type: ignore[assignment]
+    fuse_rope_kvcache_cat_mla: bool = RuntimeDefault()
     """Enable fused MLA KV cache update with RoPE."""
+    eliminate_noops: bool = Field(default=True)
+    """Eliminate no-op ops."""
 
     # ROCm/AITER specific fusions
     fuse_act_padding: bool = RuntimeDefault()
@@ -149,9 +151,6 @@ class PassConfig:
     kernel. Supersedes both enable_qk_norm_rope_fusion and fuse_rope_kvcache
     for layers that support it. Auto-enabled at O1+ on ROCm for models
     with QK-norm (e.g. Qwen3-MoE)."""
-
-    eliminate_noops: bool = Field(default=True)
-    """Eliminate no-op ops."""
 
     rope_kvcache_fusion_max_token_num: int = 256
     """The threshold for ROCm AITER RoPE+KVCache fusion e.g. for small batch decode.
