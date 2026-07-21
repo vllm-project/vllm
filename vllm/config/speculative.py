@@ -346,9 +346,7 @@ class SpeculativeConfig:
                 {
                     "n_predict": n_predict,
                     "architectures": [
-                        "DeepseekV32MTPModel"
-                        if use_sparse_mtp
-                        else "DeepSeekMTPModel"
+                        "DeepseekV32MTPModel" if use_sparse_mtp else "DeepSeekMTPModel"
                     ],
                 }
             )
