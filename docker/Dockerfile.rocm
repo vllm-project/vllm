@@ -407,7 +407,12 @@ RUN --mount=type=cache,target=/root/.cache/ccache \
                      -Dbuild_examples=false && \
     cd build && \
     ninja -j$(nproc) && \
-    ninja install
+    ninja install && \
+    echo "${NIXL_HOME}/lib/$(uname -m)-linux-gnu" \
+        > /etc/ld.so.conf.d/nixl.conf && \
+    echo "${NIXL_HOME}/lib/$(uname -m)-linux-gnu/plugins" \
+        >> /etc/ld.so.conf.d/nixl.conf && \
+    ldconfig
 
 # Generate the ROCm NIXL wheel. Upstream's generic wheel helper detects CUDA,
 # so configure the ROCm wheel variant directly through Meson.
