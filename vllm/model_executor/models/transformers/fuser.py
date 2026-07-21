@@ -54,11 +54,14 @@ def get_fuser(module: nn.Module) -> BaseFuser | None:
                 try:
                     fuser.update_forward(module)
                 except Exception as exc:
-                    # An unrecognised source just means we cannot fuse here.
                     logger.debug(
-                        "Could not rewrite %s for fusion: %s", type(module), exc
+                        "Attempted to fuse %s using %s but failed "
+                        "to update its forward method: %s",
+                        type(module),
+                        fuser_cls.__name__,
+                        exc,
                     )
-                    return None
+                    continue
             return fuser
     # A norm we could not match structurally is left unfused; flag likely misses.
     if module.__class__.__name__.endswith("RMSNorm"):
