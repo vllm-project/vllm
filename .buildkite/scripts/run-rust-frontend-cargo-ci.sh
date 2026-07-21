@@ -29,6 +29,7 @@ PYO3_PYTHON_VERSION="${PYO3_PYTHON_VERSION:-3.12}"
 CARGO_SORT_VERSION_REQ="${CARGO_SORT_VERSION_REQ:-2}"
 CARGO_DENY_VERSION_REQ="${CARGO_DENY_VERSION_REQ:-0.20}"
 CARGO_NEXTEST_VERSION_REQ="${CARGO_NEXTEST_VERSION_REQ:-0.9}"
+CARGO_LLVM_COV_VERSION="${CARGO_LLVM_COV_VERSION:-0.8.7}"
 
 log_section() {
   echo "--- $*"
@@ -106,6 +107,18 @@ install_cargo_nextest() {
     "cargo-nextest@${CARGO_NEXTEST_VERSION_REQ}"
 }
 
+install_cargo_llvm_cov() {
+  log_section "Installing cargo-llvm-cov ${CARGO_LLVM_COV_VERSION}"
+  local toolchain
+  toolchain="$(rust_toolchain)"
+  rustup component add --toolchain "$toolchain" llvm-tools-preview
+  cargo binstall \
+    --no-confirm \
+    --force \
+    --secure \
+    "cargo-llvm-cov@${CARGO_LLVM_COV_VERSION}"
+}
+
 install_uv() {
   log_section "Installing uv ${UV_VERSION}"
   curl -L --proto '=https' --tlsv1.2 -sSf \
@@ -176,14 +189,60 @@ run_tests() {
   setup_pyo3_python
   install_cargo_binstall
   install_cargo_nextest
+  install_cargo_llvm_cov
 
-  log_section "Running cargo nextest"
-  cargo nextest run \
+  log_section "Running cargo nextest with Rust coverage"
+  mkdir -p artifacts
+  export LLVM_PROFILE_FILE_NAME="vllm-rust-unit-%4m.profraw"
+  cargo llvm-cov clean \
+    --manifest-path rust/Cargo.toml \
+    --profraw-only
+
+  set +e
+  cargo llvm-cov nextest \
     --manifest-path rust/Cargo.toml \
     --workspace \
     --all-features \
     --locked \
-    --no-fail-fast
+    --no-fail-fast \
+    --no-report
+  local test_rc=$?
+
+  cargo llvm-cov report \
+    --manifest-path rust/Cargo.toml \
+    --lcov \
+    --output-path artifacts/rust-unit.raw.lcov \
+    --ignore-filename-regex='/\.cargo/(registry|git)/|/rustc/|/target/'
+  local report_rc=$?
+
+  local normalize_rc=0
+  if [[ $report_rc -eq 0 ]]; then
+    "$PYO3_PYTHON" .buildkite/scripts/normalize-rust-lcov.py \
+      --input artifacts/rust-unit.raw.lcov \
+      --output artifacts/rust-unit.lcov \
+      --repo-root "$ROOT_DIR"
+    normalize_rc=$?
+  fi
+
+  local upload_rc=0
+  if [[ $report_rc -eq 0 && $normalize_rc -eq 0 ]]; then
+    # shellcheck source=.buildkite/scripts/rust-coverage.sh
+    source .buildkite/scripts/rust-coverage.sh
+    rust_coverage_upload artifacts/rust-unit.lcov rust-unit
+    upload_rc=$?
+  fi
+  set -e
+
+  if [[ $test_rc -ne 0 ]]; then
+    return "$test_rc"
+  fi
+  if [[ $report_rc -ne 0 ]]; then
+    return "$report_rc"
+  fi
+  if [[ $normalize_rc -ne 0 ]]; then
+    return "$normalize_rc"
+  fi
+  return "$upload_rc"
 }
 
 install_protoc

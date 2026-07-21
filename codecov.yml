@@ -10,3 +10,29 @@ fixes:
   - "/usr/local/lib/python3.*/site-packages/vllm/::vllm/"
   - "/usr/lib/python3.*/dist-packages/vllm/::vllm/"
   - "/usr/lib/python3.*/site-packages/vllm/::vllm/"
+
+flags:
+  rust-unit:
+    paths:
+      - rust/
+    carryforward: false
+  rust-e2e-openai:
+    paths:
+      - rust/
+    carryforward: false
+  rust-e2e-serve-admin:
+    paths:
+      - rust/
+    carryforward: false
+  rust-e2e-core:
+    paths:
+      - rust/
+    carryforward: false
+  rust-e2e-tool-use:
+    paths:
+      - rust/
+    carryforward: false
+  rust-e2e-distributed:
+    paths:
+      - rust/
+    carryforward: false

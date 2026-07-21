@@ -12,6 +12,9 @@ steps:
   - rust-toolchain.toml
   - .buildkite/test_areas/rust_frontend_cargo.yaml
   - .buildkite/scripts/run-rust-frontend-cargo-ci.sh
+  - .buildkite/scripts/rust-coverage.sh
+  - .buildkite/scripts/normalize-rust-lcov.py
+  - codecov.yml
   commands:
   - .buildkite/scripts/run-rust-frontend-cargo-ci.sh style-clippy
 
@@ -26,5 +29,8 @@ steps:
   - rust-toolchain.toml
   - .buildkite/test_areas/rust_frontend_cargo.yaml
   - .buildkite/scripts/run-rust-frontend-cargo-ci.sh
+  - .buildkite/scripts/rust-coverage.sh
+  - .buildkite/scripts/normalize-rust-lcov.py
+  - codecov.yml
   commands:
   - .buildkite/scripts/run-rust-frontend-cargo-ci.sh test
