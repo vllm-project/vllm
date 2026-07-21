@@ -6,10 +6,6 @@ import torch
 from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
     xpu_mxfp4_quantize as quant_mxfp4,
 )
-from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    kMxfp4Dynamic,
-    kMxfp4Static,
-)
 from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
 
@@ -28,11 +24,7 @@ class XPUMxFp4LinearKernel(MxFp4LinearKernel):
         return True, None
 
     @classmethod
-    def can_implement(cls, config: MxFp4LinearLayerConfig) -> tuple[bool, str | None]:
-        if config.weight_quant_key != kMxfp4Static:
-            return False, "only supports MXFP4 weights"
-        if config.activation_quant_key != kMxfp4Dynamic:
-            return False, "only supports MXFP4 dynamic activation"
+    def can_implement(cls, c: MxFp4LinearLayerConfig) -> tuple[bool, str | None]:
         return True, None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:

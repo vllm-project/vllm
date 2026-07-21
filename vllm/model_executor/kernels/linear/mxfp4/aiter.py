@@ -5,10 +5,6 @@ import torch
 from torch.nn.parameter import Parameter
 
 from vllm._aiter_ops import is_aiter_found_and_supported, rocm_aiter_ops
-from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    kMxfp4Dynamic,
-    kMxfp4Static,
-)
 from vllm.platforms import current_platform
 
 from .base import MxFp4LinearKernel, MxFp4LinearLayerConfig
@@ -140,11 +136,7 @@ class AiterMxfp4LinearKernel(MxFp4LinearKernel):
         return False, "AITER not found or not supported on the current platform"
 
     @classmethod
-    def can_implement(cls, config: MxFp4LinearLayerConfig) -> tuple[bool, str | None]:
-        if config.weight_quant_key != kMxfp4Static:
-            return False, "only supports MXFP4 weights"
-        if config.activation_quant_key != kMxfp4Dynamic:
-            return False, "only supports MXFP4 dynamic activation"
+    def can_implement(cls, c: MxFp4LinearLayerConfig) -> tuple[bool, str | None]:
         return True, None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:

@@ -3,23 +3,26 @@
 
 from collections.abc import Callable
 from fractions import Fraction
+from functools import partial
 from typing import Any
 
 import torch
+import torch.nn.functional as F
 
+from vllm._aiter_ops import is_aiter_found_and_supported
 from vllm.logger import init_logger
 from vllm.model_executor.kernels.linear import init_mxfp4_linear_kernel
+from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
+    dequant_mxfp4,
+    quant_dequant_mxfp4,
+)
+from vllm.model_executor.layers.quantization.utils.mxfp6_utils import (
+    dequant_mxfp6,
+    quant_dequant_mxfp6,
+)
 from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import (
     OCP_MX_BLOCK_SIZE,
-)
-from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    QuantKey,
-    kMxfp4Dynamic,
-    kMxfp4Static,
-    kMxfp6E2M3Dynamic,
-    kMxfp6E2M3Static,
-    kMxfp6E3M2Dynamic,
-    kMxfp6E3M2Static,
+    OCP_MX_Scheme,
 )
 from vllm.model_executor.parameter import (
     GroupQuantScaleParameter,
@@ -33,18 +36,6 @@ from .quark_scheme import QuarkScheme
 
 logger = init_logger(__name__)
 
-_WEIGHT_QUANT_KEY_MAP: dict[str, QuantKey] = {
-    "mxfp4": kMxfp4Static,
-    "mxfp6_e3m2": kMxfp6E3M2Static,
-    "mxfp6_e2m3": kMxfp6E2M3Static,
-}
-
-_ACTIVATION_QUANT_KEY_MAP: dict[str, QuantKey] = {
-    "mxfp4": kMxfp4Dynamic,
-    "mxfp6_e3m2": kMxfp6E3M2Dynamic,
-    "mxfp6_e2m3": kMxfp6E2M3Dynamic,
-}
-
 
 class QuarkOCP_MX(QuarkScheme):
     def __init__(
@@ -53,34 +44,41 @@ class QuarkOCP_MX(QuarkScheme):
         input_quant_spec: dict[str, Any] | None,
         dynamic_mxfp4_quant: bool = False,
     ):
-        self.out_dtype = torch.get_default_dtype()
-        self.qscheme = "per_group"
         self.weight_quant_spec = weight_quant_spec
         self.input_quant_spec = input_quant_spec
         self.dynamic_mxfp4_quant = dynamic_mxfp4_quant
         self.weight_dtype = weight_quant_spec["dtype"].replace("fp", "mxfp")
         self.input_dtype: str | None = None
         if input_quant_spec is not None:
-            self.input_dtype = input_quant_spec["dtype"].replace("fp", "mxfp")
+            input_quant = input_quant_spec["dtype"]
+            if input_quant == "fp8_e4m3":
+                self.input_dtype = "fp8"
+            else:
+                self.input_dtype = input_quant.replace("fp", "mxfp")
 
-        if self.input_dtype not in [None, *_ACTIVATION_QUANT_KEY_MAP]:
-            raise ValueError(
-                f"Unsupported input_dtype={self.input_dtype} for QuarkOCP_MX. "
-                f"Supported activation dtypes are {_ACTIVATION_QUANT_KEY_MAP.keys()}, "
-                "or None for weight-only quantization."
-            )
-
-        self.weight_quant_key = _WEIGHT_QUANT_KEY_MAP[self.weight_dtype]
-        self.activation_quant_key = (
-            _ACTIVATION_QUANT_KEY_MAP[self.input_dtype]
-            if self.input_dtype is not None
-            else None
+        self.ocp_mx_scheme = OCP_MX_Scheme.from_quant_dtype(
+            self.input_dtype, self.weight_dtype
         )
 
         if self.weight_dtype == "mxfp4":
             self.packed_factor: int | Fraction = 2
+            self.dequant_func = dequant_mxfp4
         else:
             self.packed_factor = Fraction(numerator=8, denominator=6)
+            self.dequant_func = partial(
+                dequant_mxfp6, quant_dtype=self.weight_dtype.replace("mx", "")
+            )
+
+        if self.input_dtype is None:
+            self.quant_dequant_func: Callable[[torch.Tensor], torch.Tensor] = (
+                lambda x: x
+            )  # no input Q/DQ for weight-only
+        elif self.input_dtype == "mxfp4":
+            self.quant_dequant_func = quant_dequant_mxfp4
+        else:
+            self.quant_dequant_func = partial(
+                quant_dequant_mxfp6, quant_dtype=self.input_dtype.replace("mx", "")
+            )
 
         if input_quant_spec is None:
             self.static_input_scales = False
@@ -92,6 +90,21 @@ class QuarkOCP_MX(QuarkScheme):
                 "QuarkOCP_MX with static input scales is currently not "
                 "implemented. Please open an issue."
             )
+
+        # TODO: integrate (or test) mixed-precision kernel.
+        self.emulate = not current_platform.supports_mx() or (
+            self.input_dtype != "mxfp4" or self.weight_dtype != "mxfp4"
+        )
+
+        if not self.emulate:
+            if not is_aiter_found_and_supported():
+                # Currently need AITER kernels if not emulating
+                raise NotImplementedError(
+                    f"{self.__class__.__name__} requires AITER to be installed "
+                    "for non-emulation mode! Please refer to "
+                    "https://github.com/ROCm/aiter for installation details."
+                )
+            self.ocp_mx_linear = init_mxfp4_linear_kernel()
 
         if not current_platform.supports_mx():
             logger.warning_once(
@@ -144,10 +157,17 @@ class QuarkOCP_MX(QuarkScheme):
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         layer.weight = torch.nn.Parameter(layer.weight.data, requires_grad=False)
 
-        if self.dynamic_mxfp4_quant:
-            self.process_dynamic_mxfp4_weights_after_loading(layer)
-
-        self.ocp_mx_linear.process_weights_after_loading(layer)
+        if self.emulate:
+            if self.dynamic_mxfp4_quant:
+                self.process_dynamic_mxfp4_weights_after_loading(layer)
+            else:
+                layer.weight_scale = torch.nn.Parameter(
+                    layer.weight_scale.data, requires_grad=False
+                )
+        else:
+            if self.dynamic_mxfp4_quant:
+                self.process_dynamic_mxfp4_weights_after_loading(layer)
+            self.ocp_mx_linear.process_weights_after_loading(layer)
 
     def create_weights(
         self,
@@ -204,15 +224,14 @@ class QuarkOCP_MX(QuarkScheme):
             )
             layer.register_parameter("weight_scale", weight_scale)
 
-        self.ocp_mx_linear = init_mxfp4_linear_kernel(
-            weight_quant_key=self.weight_quant_key,
-            activation_quant_key=self.activation_quant_key,
-        )
-
     def apply_weights(
         self,
         layer: torch.nn.Module,
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        if self.emulate:
+            dq_w = self.dequant_func(layer.weight, layer.weight_scale, x.dtype)
+            qdq_x = self.quant_dequant_func(x)
+            return F.linear(qdq_x, dq_w, bias)
         return self.ocp_mx_linear.apply_weights(layer, x, bias)

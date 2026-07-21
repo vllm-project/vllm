@@ -12,157 +12,20 @@ import torch
 
 from vllm.model_executor.kernels.linear import (
     AiterMxfp4LinearKernel,
-    EmulationOcpMxLinearKernel,
-    FlashInferMxFp4LinearKernel,
-    HummingMxFp4LinearKernel,
-    MarlinMxFp4LinearKernel,
     MxFp4LinearKernel,
     MxFp4LinearLayerConfig,
-    XPUMxFp4LinearKernel,
     init_mxfp4_linear_kernel,
     register_linear_kernel,
-)
-from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
-    dequant_mxfp4,
-    quant_dequant_mxfp4,
-)
-from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    kMxfp4Dynamic,
-    kMxfp4Static,
-    kMxfp6E3M2Dynamic,
-    kMxfp6E3M2Static,
 )
 from vllm.platforms import PlatformEnum
 
 pytestmark = pytest.mark.cpu_test
-
-# Kernels that quantize activations themselves (true W4A4): they require an
-# explicit MXFP4-dynamic activation key.
-_TRUE_W4A4_KERNELS = [
-    FlashInferMxFp4LinearKernel,
-    XPUMxFp4LinearKernel,
-    AiterMxfp4LinearKernel,
-]
-
-# Weight-only (A16) kernels: they never quantize activations. They still accept
-# MXFP4 activation keys as an intentional compatibility fallback.
-_WEIGHT_ONLY_KERNELS = [MarlinMxFp4LinearKernel, HummingMxFp4LinearKernel]
 
 
 def test_can_implement_is_abstract():
     """Test that can_implement()/is_supported() are properly defined."""
     assert hasattr(MxFp4LinearKernel, "can_implement")
     assert hasattr(MxFp4LinearKernel, "is_supported")
-
-
-@pytest.mark.parametrize(
-    "kernel_cls", _TRUE_W4A4_KERNELS + _WEIGHT_ONLY_KERNELS + [AiterMxfp4LinearKernel]
-)
-def test_all_kernels_reject_non_mxfp4_weights(kernel_cls):
-    """No MXFP4 kernel should implement a non-MXFP4 weight format."""
-    config = MxFp4LinearLayerConfig(weight_quant_key=kMxfp6E3M2Static)
-    can_implement, reason = kernel_cls.can_implement(config)
-    assert not can_implement
-    assert reason
-
-
-@pytest.mark.parametrize("kernel_cls", _TRUE_W4A4_KERNELS)
-def test_true_w4a4_kernels_accept_dynamic_mxfp4_activation(kernel_cls):
-    config = MxFp4LinearLayerConfig(
-        weight_quant_key=kMxfp4Static, activation_quant_key=kMxfp4Dynamic
-    )
-    can_implement, reason = kernel_cls.can_implement(config)
-    assert can_implement, reason
-
-
-@pytest.mark.parametrize("kernel_cls", _TRUE_W4A4_KERNELS)
-def test_true_w4a4_kernels_reject_unset_activation(kernel_cls):
-    """None means weight-only/unquantized activations, not dynamic MXFP4."""
-    config = MxFp4LinearLayerConfig(weight_quant_key=kMxfp4Static)
-    can_implement, reason = kernel_cls.can_implement(config)
-    assert not can_implement
-    assert reason
-
-
-@pytest.mark.parametrize("kernel_cls", _TRUE_W4A4_KERNELS)
-def test_true_w4a4_kernels_reject_explicit_non_mxfp4_activation(kernel_cls):
-    """FlashInfer/XPU/Aiter quantize activations to MXFP4 internally, so an
-    explicit request for a different activation format must be rejected."""
-    config = MxFp4LinearLayerConfig(
-        weight_quant_key=kMxfp4Static, activation_quant_key=kMxfp6E3M2Dynamic
-    )
-    can_implement, reason = kernel_cls.can_implement(config)
-    assert not can_implement
-    assert reason
-
-
-@pytest.mark.parametrize("kernel_cls", _WEIGHT_ONLY_KERNELS)
-@pytest.mark.parametrize("activation_quant_key", [None, kMxfp4Dynamic, kMxfp4Static])
-def test_weight_only_kernels_accept_unquantized_or_mxfp4_activation(
-    kernel_cls, activation_quant_key
-):
-    """Marlin/Humming never quantize activations, so an unset activation key,
-    or one that already describes MXFP4-shaped data, is tolerated."""
-    config = MxFp4LinearLayerConfig(
-        weight_quant_key=kMxfp4Static, activation_quant_key=activation_quant_key
-    )
-    can_implement, reason = kernel_cls.can_implement(config)
-    assert can_implement, reason
-
-
-@pytest.mark.parametrize("kernel_cls", _WEIGHT_ONLY_KERNELS)
-def test_weight_only_kernels_reject_non_mxfp4_activation(kernel_cls):
-    config = MxFp4LinearLayerConfig(
-        weight_quant_key=kMxfp4Static, activation_quant_key=kMxfp6E3M2Dynamic
-    )
-    can_implement, reason = kernel_cls.can_implement(config)
-    assert not can_implement
-    assert reason
-
-
-@pytest.mark.parametrize(
-    "weight_quant_key,activation_quant_key",
-    [
-        (kMxfp4Static, None),
-        (kMxfp4Static, kMxfp4Dynamic),
-        (kMxfp6E3M2Static, kMxfp6E3M2Dynamic),
-    ],
-)
-def test_emulation_kernel_accepts_any_config(weight_quant_key, activation_quant_key):
-    """EmulationOcpMxLinearKernel is the universal fallback: it must accept
-    every supported weight/activation format combination when explicitly
-    selected."""
-    config = MxFp4LinearLayerConfig(
-        weight_quant_key=weight_quant_key, activation_quant_key=activation_quant_key
-    )
-    with patch(
-        "vllm.model_executor.kernels.linear._get_linear_backend",
-        return_value="emulation",
-    ):
-        can_implement, reason = EmulationOcpMxLinearKernel.can_implement(config)
-    assert can_implement, reason
-
-
-def test_emulation_kernel_derives_dequant_funcs_from_config():
-    """dequant_func/quant_dequant_func must be derived purely from the
-    config's weight/activation QuantKeys, not set externally."""
-    with patch(
-        "vllm.model_executor.kernels.linear._get_linear_backend",
-        return_value="emulation",
-    ):
-        weight_only_config = MxFp4LinearLayerConfig(weight_quant_key=kMxfp4Static)
-        kernel = EmulationOcpMxLinearKernel(weight_only_config)
-        assert kernel.dequant_func is dequant_mxfp4
-        x = torch.randn(4)
-        # identity for weight-only
-        assert torch.equal(kernel.quant_dequant_func(x), x)
-
-        w4a4_config = MxFp4LinearLayerConfig(
-            weight_quant_key=kMxfp4Static, activation_quant_key=kMxfp4Dynamic
-        )
-        kernel = EmulationOcpMxLinearKernel(w4a4_config)
-        assert kernel.dequant_func is dequant_mxfp4
-        assert kernel.quant_dequant_func is quant_dequant_mxfp4
 
 
 def test_aiter_kernel_is_supported_requires_native_mx_support():
@@ -203,19 +66,14 @@ class OOTMxFp4LinearKernel(MxFp4LinearKernel):
 @patch("vllm.model_executor.kernels.linear.current_platform")
 def test_init_mxfp4_linear_kernel_dispatches_to_registered_kernel(platform_mock):
     """init_mxfp4_linear_kernel should select a registered kernel that
-    reports itself as supported/able to implement the given config, and
-    construct it with that exact config."""
+    reports itself as supported, and construct it with a fresh config."""
     platform_mock._enum = PlatformEnum.OOT
     register_linear_kernel(OOTMxFp4LinearKernel, PlatformEnum.OOT, "mxfp4")
 
-    kernel = init_mxfp4_linear_kernel(
-        weight_quant_key=kMxfp4Static, activation_quant_key=kMxfp4Dynamic
-    )
+    kernel = init_mxfp4_linear_kernel()
 
     assert isinstance(kernel, OOTMxFp4LinearKernel)
-    assert kernel.config == MxFp4LinearLayerConfig(
-        weight_quant_key=kMxfp4Static, activation_quant_key=kMxfp4Dynamic
-    )
+    assert kernel.config == MxFp4LinearLayerConfig()
 
 
 class UnsupportedMxFp4LinearKernel(MxFp4LinearKernel):
@@ -249,4 +107,4 @@ def test_init_mxfp4_linear_kernel_raises_when_no_kernel_matches(platform_mock):
     )
 
     with pytest.raises(ValueError, match="Failed to find a kernel"):
-        init_mxfp4_linear_kernel(weight_quant_key=kMxfp4Static)
+        init_mxfp4_linear_kernel()

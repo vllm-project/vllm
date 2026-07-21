@@ -7,10 +7,6 @@ from torch.nn.parameter import Parameter
 from vllm.model_executor.layers.fused_moe.experts.cutlass_moe import (
     swizzle_mxfp4_scales,
 )
-from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    kMxfp4Dynamic,
-    kMxfp4Static,
-)
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer_cutedsl
 
@@ -32,10 +28,6 @@ class FlashInferMxFp4LinearKernel(MxFp4LinearKernel):
 
     @classmethod
     def can_implement(cls, config: MxFp4LinearLayerConfig) -> tuple[bool, str | None]:
-        if config.weight_quant_key != kMxfp4Static:
-            return False, "only supports MXFP4 weights"
-        if config.activation_quant_key != kMxfp4Dynamic:
-            return False, "only supports MXFP4 dynamic activation"
         return True, None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
@@ -64,7 +56,9 @@ class FlashInferMxFp4LinearKernel(MxFp4LinearKernel):
         out_shape = x.shape[:-1] + (layer.output_size_per_partition,)
         x_2d = x.reshape(-1, x.shape[-1])
 
-        x_fp4, x_scale = flashinfer_mxfp4_quantize(x_2d.contiguous())
+        x_fp4, x_scale = flashinfer_mxfp4_quantize(
+            x_2d.contiguous(), backend="cute-dsl"
+        )
         out = flashinfer_scaled_fp4_mm(
             x_fp4,
             weight,
