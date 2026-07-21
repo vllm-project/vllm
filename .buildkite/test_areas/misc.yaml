@@ -31,7 +31,7 @@ steps:
 
 - label: V1 Sample + Logits
   key: v1-sample-logits
-  timeout_in_minutes: 45
+  timeout_in_minutes: 55
   device: h200_18gb
   source_file_dependencies:
     - vllm/config/
