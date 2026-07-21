@@ -163,7 +163,8 @@ def init_attn_backend(
                 num_metadata_builders=1,
             )
             builders = [group.get_metadata_builder(0)]
-            builders.append(group.get_metadata_builder(0, use_decode_backend=True))
+            if group.decode_backend is not group.backend:
+                builders.append(group.get_metadata_builder(0, use_decode_backend=True))
             for builder in builders:
                 if attn_backend_workspace is None:
                     if hasattr(builder, "_get_workspace_buffer"):
@@ -172,10 +173,9 @@ def init_attn_backend(
                     builder.set_workspace_buffer(attn_backend_workspace)
             # The decode specialist is used by full decode graphs, so both
             # routed backends must support the resolved cudagraph mode.
-            backend_names = [
-                group.backend.__name__,
-                group.decode_backend.__name__,
-            ]
+            backend_names = [group.backend.__name__]
+            if group.decode_backend is not group.backend:
+                backend_names.append(group.decode_backend.__name__)
             for builder, backend_name in zip(builders, backend_names):
                 cg_support = builder.get_cudagraph_support(
                     vllm_config,

@@ -256,6 +256,10 @@ class AttentionGroup:
         default_factory=lambda: []
     )
 
+    def __post_init__(self) -> None:
+        if self.decode_backend.full_cls_name() == self.backend.full_cls_name():
+            self.decode_backend = self.backend
+
     def create_metadata_builders(
         self,
         vllm_config,
@@ -277,6 +281,9 @@ class AttentionGroup:
             )
             for _ in range(num_metadata_builders)
         ]
+        if self.decode_backend is self.backend:
+            self.decode_metadata_builders = self.metadata_builders
+            return
         self.decode_metadata_builders = [
             self.decode_backend.get_builder_cls()(
                 kv_cache_spec_builder,

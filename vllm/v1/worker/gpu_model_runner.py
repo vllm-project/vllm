@@ -867,6 +867,7 @@ class GPUModelRunner(
         )
 
         self.reorder_batch_threshold: int | None = None
+        self.has_distinct_decode_attn_backend = False
 
         # Attention layers that are only in the KVCacheConfig of the runner
         # (e.g., KV sharing, encoder-only attention), but not in the
@@ -4326,7 +4327,9 @@ class GPUModelRunner(
                 self.input_batch.num_computed_tokens_cpu_tensor[:num_reqs]
                 < self.input_batch.num_prompt_tokens_cpu_tensor[:num_reqs]
             )
-            use_decode_backend = not bool(is_prefilling.any())
+            use_decode_backend = self.has_distinct_decode_attn_backend and not bool(
+                is_prefilling.any()
+            )
 
             attn_metadata, spec_decode_common_attn_metadata = (
                 self._build_attention_metadata(
@@ -7079,6 +7082,11 @@ class GPUModelRunner(
         for i, attn_backend_map in enumerate(attention_backend_maps):
             self.attn_groups.append(create_attn_groups(attn_backend_map, i))
 
+        self.has_distinct_decode_attn_backend = any(
+            group.decode_backend is not group.backend
+            for group in self._attn_group_iterator()
+        )
+
     def initialize_metadata_builders(
         self, kv_cache_config: KVCacheConfig, kernel_block_sizes: list[int]
     ) -> None:
@@ -7186,11 +7194,12 @@ class GPUModelRunner(
             reorder_batch_thresholds.append(
                 group.get_metadata_builder().reorder_batch_threshold
             )
-            reorder_batch_thresholds.append(
-                group.get_metadata_builder(
-                    use_decode_backend=True
-                ).reorder_batch_threshold
-            )
+            if group.decode_backend is not group.backend:
+                reorder_batch_thresholds.append(
+                    group.get_metadata_builder(
+                        use_decode_backend=True
+                    ).reorder_batch_threshold
+                )
         # If there are no attention groups (attention-free model) or no backend
         # reports a threshold, leave reordering disabled.
         if len(reorder_batch_thresholds) == 0:

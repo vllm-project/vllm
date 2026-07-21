@@ -373,8 +373,9 @@ def test_attention_group_accepts_same_backend_for_both_roles():
     group.create_metadata_builders(None, torch.device("cpu"))
 
     assert group.decode_backend is _GeneralBackend
-    assert isinstance(
-        group.get_metadata_builder(use_decode_backend=True), _GeneralBuilder
+    assert (
+        group.get_metadata_builder(use_decode_backend=True)
+        is group.get_metadata_builder()
     )
 
 

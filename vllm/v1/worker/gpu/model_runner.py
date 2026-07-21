@@ -448,13 +448,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.attn_groups, attn_cg_support, self.kernel_block_sizes = init_attn_backend(
             self.kv_cache_config, self.vllm_config, self.device
         )
-        self.has_decode_attn_backend = any(
-            group.decode_backend is not None
+        self.has_distinct_decode_attn_backend = any(
+            group.decode_backend is not group.backend
             for groups in self.attn_groups
             for group in groups
         )
         if (
-            self.has_decode_attn_backend
+            self.has_distinct_decode_attn_backend
             and self.compilation_config.cudagraph_mode == CUDAGraphMode.FULL
         ):
             logger.warning_once(
@@ -498,7 +498,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             cudagraph_mode,
             decode_query_len=self.decode_query_len,
             lora_capture_cases=self.lora_capture_cases,
-            capture_decode_backend=self.has_decode_attn_backend,
+            capture_decode_backend=self.has_distinct_decode_attn_backend,
         )
         check_attention_cp_compatibility(self.vllm_config)
         if isinstance(self.speculator, DraftModelSpeculator):
@@ -603,7 +603,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 skip_attn_for_dummy_run=skip_attn,
                 is_profile=is_profile,
                 use_decode_backend=(
-                    getattr(self, "has_decode_attn_backend", False) and uniform_decode
+                    getattr(self, "has_distinct_decode_attn_backend", False)
+                    and uniform_decode
                 ),
             )
         self.kv_connector.set_disabled(False)
@@ -1198,7 +1199,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.req_states.req_id_to_index[req_id]
                 for req_id in scheduler_output.num_scheduled_tokens
             )
-            use_decode_backend = self.has_decode_attn_backend and not any(
+            use_decode_backend = self.has_distinct_decode_attn_backend and not any(
                 self.req_states.num_computed_prefill_tokens[req_idx]
                 < self.req_states.prefill_len.np[req_idx]
                 for req_idx in req_indices

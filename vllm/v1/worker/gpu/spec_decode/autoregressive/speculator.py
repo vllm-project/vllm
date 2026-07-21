@@ -47,7 +47,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
 
         self.prefill_cudagraph_manager: SpeculatorCudaGraphManager | None = None
         self.decode_cudagraph_manager: SpeculatorCudaGraphManager | None = None
-        self.has_decode_attn_backend = False
+        self.has_distinct_decode_attn_backend = False
 
     @property
     def advance_draft_positions(self) -> bool:
@@ -60,8 +60,8 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
         return True
 
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
-        self.has_decode_attn_backend = any(
-            group.decode_backend is not None
+        self.has_distinct_decode_attn_backend = any(
+            group.decode_backend is not group.backend
             for groups in self.target_attn_groups
             for group in groups
         )
@@ -71,7 +71,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             self.device,
             cudagraph_mode,
             self.num_speculative_steps + 1,
-            capture_decode_backend=self.has_decode_attn_backend,
+            capture_decode_backend=self.has_distinct_decode_attn_backend,
         )
 
         # PIECEWISE cudagraphs are not supported for draft decodes.
@@ -167,7 +167,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
         self.draft_max_seq_len = min(
             max_seq_len + self.num_speculative_steps, self.max_model_len
         )
-        use_decode_backend = self.has_decode_attn_backend and not bool(
+        use_decode_backend = self.has_distinct_decode_attn_backend and not bool(
             input_batch.is_prefilling_np.any()
         )
 
