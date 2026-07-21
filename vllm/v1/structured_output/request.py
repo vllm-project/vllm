@@ -46,14 +46,10 @@ class StructuredOutputRequest:
         return StructuredOutputRequest(params=params)
 
     def _check_grammar_completion(self) -> bool:
-        # NOTE: We have to lazy import to gate circular imports
-        from vllm.v1.request import RequestStatus
-
         if isinstance(self._grammar, Future):
             try:
                 # We will check whether the future is ready within 100 us
                 self._grammar = self._grammar.result(timeout=0.0001)
-                self.status = RequestStatus.WAITING
             except TimeoutError:
                 return False
         return True

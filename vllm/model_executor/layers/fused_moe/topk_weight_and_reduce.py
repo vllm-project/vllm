@@ -71,7 +71,7 @@ class TopKWeightAndReduceNoOP(mk.TopKWeightAndReduce):
         assert output.size() == fused_expert_output.size(), (
             "output shape is expected to match the fused_expert_output shape. "
             f"But got output={output.size()}, "
-            f"used_expert_output={fused_expert_output.size()}"
+            f"fused_expert_output={fused_expert_output.size()}"
         )
         output.copy_(fused_expert_output, non_blocking=True)
         return output
