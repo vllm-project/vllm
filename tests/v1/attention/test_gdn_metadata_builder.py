@@ -221,3 +221,138 @@ def test_full_cudagraph_spec_metadata_uses_request_count():
     assert meta.spec_query_start_loc.shape == (batch.batch_size + 1,)
     assert meta.num_accepted_tokens is not None
     assert meta.num_accepted_tokens.shape == (batch.batch_size,)
+
+
+@dataclass
+class GDNReplaySSMBuildCase:
+    """A decode batch and its expected per-row ReplaySSM write position.
+
+    num_computed = seq_len - query_len; write_pos =
+    (num_computed - decode_base) % buffer_len. decode_base is the ring origin
+    (num_computed at the request's last full-state write): the prompt length
+    for a fresh request and prompt+generated for one resumed after preemption.
+    """
+
+    seq_lens: list[int]
+    query_lens: list[int]
+    decode_base: list[int]
+    buffer_len: int
+    expected_write_pos: list[int]
+
+
+GDN_REPLAYSSM_BUILD_CASES = {
+    # Fresh request: decode_base is the prompt length.
+    "fresh_decode": GDNReplaySSMBuildCase(
+        seq_lens=[106],
+        query_lens=[1],
+        decode_base=[100],
+        buffer_len=16,
+        expected_write_pos=[5],
+    ),
+    # Flush slot: write_pos lands on the last buffer position (L - 1).
+    "flush_boundary": GDNReplaySSMBuildCase(
+        seq_lens=[116],
+        query_lens=[1],
+        decode_base=[100],
+        buffer_len=16,
+        expected_write_pos=[15],
+    ),
+    # More decode steps than the buffer length wraps the ring.
+    "buffer_wrap": GDNReplaySSMBuildCase(
+        seq_lens=[121],
+        query_lens=[1],
+        decode_base=[100],
+        buffer_len=16,
+        expected_write_pos=[4],
+    ),
+    # Resumed request re-anchors at prompt+generated, so the same token count
+    # yields write_pos 0 instead of the fresh request's 5.
+    "resumed_reanchor": GDNReplaySSMBuildCase(
+        seq_lens=[106],
+        query_lens=[1],
+        decode_base=[105],
+        buffer_len=16,
+        expected_write_pos=[0],
+    ),
+    # Mixed batch: a fresh, a flush-slot, and a wrapped row together.
+    "mixed_batch": GDNReplaySSMBuildCase(
+        seq_lens=[106, 116, 121],
+        query_lens=[1, 1, 1],
+        decode_base=[100, 100, 100],
+        buffer_len=16,
+        expected_write_pos=[5, 15, 4],
+    ),
+    # Mixed fresh + resumed rows keep independent anchors in one batch.
+    "mixed_fresh_and_resumed": GDNReplaySSMBuildCase(
+        seq_lens=[106, 106],
+        query_lens=[1, 1],
+        decode_base=[100, 105],
+        buffer_len=16,
+        expected_write_pos=[5, 0],
+    ),
+}
+
+
+def _create_replayssm_gdn_builder(buffer_len: int) -> GDNAttentionMetadataBuilder:
+    """Create a GDNAttentionMetadataBuilder with ReplaySSM cached decode on."""
+    vllm_config = create_vllm_config(
+        model_name="Qwen/Qwen3.5-0.8B",
+        block_size=BLOCK_SIZE,
+    )
+    # Enable after config construction so validate_mamba_cached_kernel (Triton
+    # only) does not run; the builder reads the flags in __init__.
+    vllm_config.cache_config.use_replayssm = True
+    vllm_config.cache_config.replayssm_buffer_len = buffer_len
+    vllm_config.cache_config.mamba_cache_mode = "none"
+    mamba_spec = MambaSpec(
+        block_size=BLOCK_SIZE,
+        shapes=((16, 64),),
+        dtypes=(torch.float16,),
+    )
+    return GDNAttentionMetadataBuilder(
+        kv_cache_spec=mamba_spec,
+        layer_names=["layer.0"],
+        vllm_config=vllm_config,
+        device=DEVICE,
+    )
+
+
+def _build_replayssm(
+    builder: GDNAttentionMetadataBuilder,
+    case: GDNReplaySSMBuildCase,
+) -> GDNAttentionMetadata:
+    batch = BatchSpec(seq_lens=case.seq_lens, query_lens=case.query_lens)
+    common = create_common_attn_metadata(batch, BLOCK_SIZE, DEVICE).replace(
+        is_prefilling=torch.zeros(len(case.seq_lens), dtype=torch.bool),
+        replayssm_decode_base_cpu=torch.tensor(case.decode_base, dtype=torch.int32),
+    )
+    return builder.build(common_prefix_len=0, common_attn_metadata=common)
+
+
+@pytest.mark.parametrize(
+    "case",
+    GDN_REPLAYSSM_BUILD_CASES.values(),
+    ids=GDN_REPLAYSSM_BUILD_CASES.keys(),
+)
+def test_replayssm_write_pos(case: GDNReplaySSMBuildCase):
+    builder = _create_replayssm_gdn_builder(case.buffer_len)
+    meta = _build_replayssm(builder, case)
+
+    assert meta.write_pos_d is not None
+    n = len(case.expected_write_pos)
+    assert meta.write_pos_d[:n].tolist() == case.expected_write_pos
+
+
+def test_resumed_request_reanchors_write_pos():
+    """A preemption-resumed request replays prompt+generated through prefill,
+    which rewrites the checkpoint state, so its decode_base moves to the resume
+    point. The first decode after resume starts at write_pos 0 even though a
+    fresh request at the same token count sits mid-ring."""
+    builder = _create_replayssm_gdn_builder(16)
+    # write_pos_d aliases a reused builder buffer, so read each before the next.
+    fresh = _build_replayssm(builder, GDN_REPLAYSSM_BUILD_CASES["fresh_decode"])
+    fresh_write_pos = fresh.write_pos_d[0].item()
+    resumed = _build_replayssm(builder, GDN_REPLAYSSM_BUILD_CASES["resumed_reanchor"])
+    resumed_write_pos = resumed.write_pos_d[0].item()
+    assert fresh_write_pos == 5
+    assert resumed_write_pos == 0
