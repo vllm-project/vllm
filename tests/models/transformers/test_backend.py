@@ -36,11 +36,9 @@ def get_num_fused(model) -> tuple[int, int]:
 
 
 def count_mla_layers(model) -> int:
-    from vllm.model_executor.models.transformers.fusers.mla import (
-        TransformersMLAAttention,
-    )
+    from vllm.model_executor.layers.attention import MLAAttention
 
-    return sum(isinstance(m, TransformersMLAAttention) for m in model.modules())
+    return sum(isinstance(m, MLAAttention) for m in model.attention_instances.values())
 
 
 def check_implementation(
@@ -143,7 +141,7 @@ def test_hybrid_attention(vllm_runner: type[VllmRunner]) -> None:
 def test_mla(vllm_runner: type[VllmRunner], example_prompts: list[str]) -> None:
     """MLA models route through vLLM's MLA attention in the Transformers backend.
 
-    Checks every attention layer was replaced with `TransformersMLAAttention` and
+    Checks every attention layer owns an `MLAAttention`, and
     that logprobs match vLLM's native DeepSeek implementation.
     """
     model = get_model("DeepseekV2ForCausalLM")  # DeepSeek-V2-Lite, MLA + MoE

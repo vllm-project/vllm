@@ -15,8 +15,9 @@ import torch.nn.functional as F
 
 from vllm.model_executor.models.transformers.fuser import get_fuser
 from vllm.model_executor.models.transformers.fusers import MLAFuser
-from vllm.model_executor.models.transformers.fusers.mla import _FUSED_QKV_A_PROJ
 from vllm.model_executor.models.transformers.fx_utils import trace
+
+_FUSED_QKV_A_PROJ = MLAFuser.merged_name
 
 
 def _match(q_lora_rank: int | None) -> MLAFuser | None:
@@ -125,8 +126,12 @@ class RenamedMLA(nn.Module):
 
 
 def test_discovers_modules_under_arbitrary_names():
+    """Discovery is structural, and independent of whether the source can be
+    rewritten: `RenamedMLA` never expands the latent, so only `match` applies to
+    it (the full `get_fuser` pipeline would reject the un-rewritable forward)."""
     with torch.device("meta"):
-        fuser = get_fuser(RenamedMLA())
+        module = RenamedMLA()
+        fuser = MLAFuser.match(trace(module), module)
     assert isinstance(fuser, MLAFuser)
     assert not fuser.has_q_lora
     assert fuser.q_proj_name == "alpha"
