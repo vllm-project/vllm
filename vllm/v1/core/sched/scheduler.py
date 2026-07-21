@@ -271,7 +271,7 @@ class Scheduler(SchedulerInterface):
             log_stats=self.log_stats,
             enable_kv_cache_events=self.enable_kv_cache_events,
             dcp_world_size=self.dcp_world_size,
-            pcp_world_size=self.pcp_world_size,
+            pcp_world_size=1,
             scheduler_block_size=self.block_size,
             hash_block_size=hash_block_size,
             metrics_collector=self.kv_metrics_collector,
@@ -706,46 +706,47 @@ class Scheduler(SchedulerInterface):
                 num_external_computed_tokens = 0
                 load_kv_async = False
                 connector_prefix_cache_queries, connector_prefix_cache_hits = 0, 0
+                did_prefix_cache_lookup = False
 
                 # Get already-cached tokens.
                 if request.num_computed_tokens == 0:
+                    did_prefix_cache_lookup = True
                     # Get locally-cached tokens.
                     if (
                         self.connector is not None
                         and self.has_mamba_layers
                         and isinstance(
-                            self.kv_cache_manager.coordinator,
-                            HybridKVCacheCoordinator,
+                            self.kv_cache_manager.coordinator, HybridKVCacheCoordinator
                         )
                     ):
-                        computed, per_group_hits = (
-                            self.kv_cache_manager.coordinator.find_longest_cache_hit_per_group(
-                                request.block_hashes, request.num_tokens - 1
-                            )
-                        )
-                        new_computed_blocks = (
-                            self.kv_cache_manager.create_kv_cache_blocks(computed)
-                        )
-                        # NOTE(ZhanqiuHu): For Mamba hybrid models,
-                        # num_new_local_computed_tokens should be the FA hit
-                        # length. This value is passed to the connector's
-                        # get_num_new_matched_tokens which computes:
-                        # external = total - local_computed.
-                        # Using the FA hit skips re-transferring FA blocks
-                        # already cached on D-side. The Mamba state (always
-                        # the last block) is transferred unconditionally by
-                        # _apply_prefix_caching in nixl/worker.py.
-                        num_new_local_computed_tokens = max(per_group_hits)
                         # The per-group lookup does not detect an uncached shared
                         # prefix, so there is no junction to pin in this path.
                         request.shared_prefix_boundary = 0
-                        if self.kv_cache_manager.log_stats:
-                            assert self.kv_cache_manager.prefix_cache_stats is not None
-                            self.kv_cache_manager.prefix_cache_stats.record(
-                                num_tokens=request.num_tokens,
-                                num_hits=num_new_local_computed_tokens,
-                                preempted=request.num_preemptions > 0,
+                        kv_cache_manager = self.kv_cache_manager
+                        if not kv_cache_manager.prefix_cache_lookup_enabled(request):
+                            # Mirror the get_computed_blocks() early-out: the
+                            # request must recompute its prompt.
+                            new_computed_blocks = kv_cache_manager.empty_kv_cache_blocks
+                            num_new_local_computed_tokens = 0
+                        else:
+                            computed, per_group_hits = (
+                                self.kv_cache_manager.coordinator.find_longest_cache_hit_per_group(
+                                    request.block_hashes, request.num_tokens - 1
+                                )
                             )
+                            new_computed_blocks = (
+                                self.kv_cache_manager.create_kv_cache_blocks(computed)
+                            )
+                            # NOTE(ZhanqiuHu): For Mamba hybrid models,
+                            # num_new_local_computed_tokens should be the FA hit
+                            # length. This value is passed to the connector's
+                            # get_num_new_matched_tokens which computes:
+                            # external = total - local_computed.
+                            # Using the FA hit skips re-transferring FA blocks
+                            # already cached on D-side. The Mamba state (always
+                            # the last block) is transferred unconditionally by
+                            # _apply_prefix_caching in nixl/worker.py.
+                            num_new_local_computed_tokens = max(per_group_hits)
                     else:
                         (
                             new_computed_blocks,
@@ -799,7 +800,7 @@ class Scheduler(SchedulerInterface):
                         continue
 
                     # Track first scheduled prefill, not post-preemption repeat prefills
-                    if request.prefill_stats is not None:
+                    if request.prefill_stats and request.num_preemptions <= 0:
                         assert num_computed_tokens <= request.num_prompt_tokens
                         request.prefill_stats.set(
                             num_prompt_tokens=request.num_prompt_tokens,
@@ -967,6 +968,12 @@ class Scheduler(SchedulerInterface):
                             num_hits=connector_prefix_cache_hits,
                             preempted=request.num_preemptions > 0,
                         )
+
+                # Record at admission so unscheduled lookups are not counted.
+                if did_prefix_cache_lookup:
+                    self.kv_cache_manager.record_prefix_cache_stats(
+                        request, num_new_local_computed_tokens
+                    )
 
                 request = request_queue.pop_request()
                 if load_kv_async:
@@ -1708,6 +1715,7 @@ class Scheduler(SchedulerInterface):
             pooler_output = pooler_outputs[req_index] if pooler_outputs else None
             kv_transfer_params = None
             ec_transfer_params = None
+            prefill_stats = None
             status_before_stop = request.status
             num_output_tokens_before = len(request._output_token_ids)
 
@@ -1787,6 +1795,16 @@ class Scheduler(SchedulerInterface):
                         # Normal decode / re-prefill: token(s) at the END.
                         routed_experts = routing_data[end - len(new_token_ids) : end]
 
+            should_emit_output = bool(
+                new_token_ids or pooler_output is not None or stopped
+            )
+            if should_emit_output:
+                prefill_stats = request.take_prefill_stats()
+                if prefill_stats is not None:
+                    prefill_stats.finalize(
+                        self.kv_cache_manager.estimate_cached_tokens(request)
+                    )
+
             finish_reason = None
             if stopped:
                 # Capture finish_reason BEFORE _handle_stopped_request, which may
@@ -1814,13 +1832,7 @@ class Scheduler(SchedulerInterface):
 
             # Get prompt logprobs for this request.
             prompt_logprobs_tensors = prompt_logprobs_dict.get(req_id)
-            if (
-                new_token_ids
-                or pooler_output is not None
-                or kv_transfer_params
-                or ec_transfer_params
-                or stopped
-            ):
+            if should_emit_output:
                 # Add EngineCoreOutput for this Request.
                 outputs[request.client_index].append(
                     EngineCoreOutput(
@@ -1832,7 +1844,7 @@ class Scheduler(SchedulerInterface):
                         pooling_output=pooler_output,
                         stop_reason=request.stop_reason,
                         events=request.take_events(),
-                        prefill_stats=request.take_prefill_stats(),
+                        prefill_stats=prefill_stats,
                         kv_transfer_params=kv_transfer_params,
                         ec_transfer_params=ec_transfer_params,
                         trace_headers=request.trace_headers,
