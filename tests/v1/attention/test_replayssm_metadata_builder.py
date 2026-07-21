@@ -34,7 +34,6 @@ class ReplaySSMBuildCase:
     seq_lens: list[int]
     query_lens: list[int]
     is_prefilling: list[bool]
-    num_prompt_tokens: list[int]
     decode_base: list[int]
     buffer_len: int
     expected_write_pos: list[int]
@@ -48,7 +47,6 @@ REPLAYSSM_BUILD_CASES = {
         seq_lens=[106],
         query_lens=[1],
         is_prefilling=[False],
-        num_prompt_tokens=[100],
         decode_base=[100],
         buffer_len=16,
         expected_write_pos=[5],
@@ -59,7 +57,6 @@ REPLAYSSM_BUILD_CASES = {
         seq_lens=[106],
         query_lens=[1],
         is_prefilling=[False],
-        num_prompt_tokens=[100],
         decode_base=[105],
         buffer_len=16,
         expected_write_pos=[0],
@@ -70,7 +67,6 @@ REPLAYSSM_BUILD_CASES = {
         seq_lens=[116],
         query_lens=[1],
         is_prefilling=[False],
-        num_prompt_tokens=[100],
         decode_base=[100],
         buffer_len=16,
         expected_write_pos=[15],
@@ -81,7 +77,6 @@ REPLAYSSM_BUILD_CASES = {
         seq_lens=[121],
         query_lens=[1],
         is_prefilling=[False],
-        num_prompt_tokens=[100],
         decode_base=[105],
         buffer_len=16,
         expected_write_pos=[15],
@@ -92,7 +87,6 @@ REPLAYSSM_BUILD_CASES = {
         seq_lens=[104, 106, 216],
         query_lens=[1, 1, 1],
         is_prefilling=[False, False, False],
-        num_prompt_tokens=[100, 100, 200],
         decode_base=[100, 105, 200],
         buffer_len=16,
         expected_write_pos=[3, 0, 15],
@@ -103,7 +97,6 @@ REPLAYSSM_BUILD_CASES = {
         seq_lens=[112],
         query_lens=[1],
         is_prefilling=[False],
-        num_prompt_tokens=[100],
         decode_base=[105],
         buffer_len=4,
         expected_write_pos=[2],
@@ -115,7 +108,6 @@ REPLAYSSM_BUILD_CASES = {
         seq_lens=[100],
         query_lens=[1],
         is_prefilling=[True],
-        num_prompt_tokens=[100],
         decode_base=[100],
         buffer_len=16,
         expected_write_pos=[0],
@@ -128,7 +120,6 @@ REPLAYSSM_BUILD_CASES = {
         seq_lens=[118],
         query_lens=[1],
         is_prefilling=[False],
-        num_prompt_tokens=[100],
         decode_base=[100],
         buffer_len=16,
         expected_write_pos=[5],
@@ -141,7 +132,6 @@ REPLAYSSM_BUILD_CASES = {
         seq_lens=[112],
         query_lens=[1],
         is_prefilling=[False],
-        num_prompt_tokens=[100],
         decode_base=[100],
         buffer_len=16,
         expected_write_pos=[11],
@@ -153,7 +143,6 @@ REPLAYSSM_BUILD_CASES = {
         seq_lens=[113],
         query_lens=[1],
         is_prefilling=[False],
-        num_prompt_tokens=[100],
         decode_base=[100],
         buffer_len=16,
         expected_write_pos=[0],
@@ -166,7 +155,6 @@ REPLAYSSM_BUILD_CASES = {
         seq_lens=[128],
         query_lens=[1],
         is_prefilling=[False],
-        num_prompt_tokens=[100],
         decode_base=[100],
         buffer_len=16,
         expected_write_pos=[15],
@@ -179,7 +167,6 @@ REPLAYSSM_BUILD_CASES = {
         seq_lens=[128],
         query_lens=[1],
         is_prefilling=[False],
-        num_prompt_tokens=[100],
         decode_base=[100],
         buffer_len=6,
         expected_write_pos=[3],
@@ -191,7 +178,6 @@ REPLAYSSM_BUILD_CASES = {
         seq_lens=[105, 113, 112],
         query_lens=[1, 1, 1],
         is_prefilling=[False, False, False],
-        num_prompt_tokens=[100, 100, 100],
         decode_base=[100, 100, 100],
         buffer_len=16,
         expected_write_pos=[4, 0, 11],
@@ -236,7 +222,6 @@ def _build(builder: MockMambaBuilder, case: ReplaySSMBuildCase):
     batch = BatchSpec(seq_lens=case.seq_lens, query_lens=case.query_lens)
     common = create_common_attn_metadata(batch, BLOCK_SIZE, DEVICE).replace(
         is_prefilling=torch.tensor(case.is_prefilling, dtype=torch.bool),
-        num_prompt_tokens_cpu=torch.tensor(case.num_prompt_tokens, dtype=torch.int32),
         replayssm_decode_base_cpu=torch.tensor(case.decode_base, dtype=torch.int32),
     )
     return builder.build(0, common)
@@ -263,7 +248,6 @@ def test_resumed_request_differs_from_fresh():
     batch = BatchSpec(seq_lens=[106, 106], query_lens=[1, 1])
     common = create_common_attn_metadata(batch, BLOCK_SIZE, DEVICE).replace(
         is_prefilling=torch.tensor([False, False]),
-        num_prompt_tokens_cpu=torch.tensor([100, 100], dtype=torch.int32),
         replayssm_decode_base_cpu=torch.tensor([100, 105], dtype=torch.int32),
     )
     meta = builder.build(0, common)
