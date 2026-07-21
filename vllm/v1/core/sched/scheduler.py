@@ -947,6 +947,10 @@ class Scheduler(SchedulerInterface):
                     # manager
                     if request.has_encoder_inputs:
                         self.encoder_cache_manager.free(request)
+                    if self._try_preempt_waiting_streaming_request(
+                        request, scheduled_timestamp
+                    ):
+                        continue
                     break
 
                 # KVTransfer: the connector uses this info to determine
@@ -1232,6 +1236,41 @@ class Scheduler(SchedulerInterface):
         # Put the request back to the waiting queue.
         self.waiting.prepend_request(request)
         self.reset_preempted_req_ids.add(request.request_id)
+
+    def _try_preempt_waiting_streaming_request(
+        self, request: Request, timestamp: float
+    ) -> bool:
+        """Reclaim retained KV when no running request can be preempted."""
+        if self.running or not request.resumable:
+            return False
+
+        candidates = (
+            candidate
+            for candidate in itertools.chain(self.waiting, self.skipped_waiting)
+            if candidate is not request
+            and candidate.resumable
+            and candidate.status == RequestStatus.WAITING
+            and candidate.num_computed_tokens > 0
+        )
+        victim = max(
+            candidates,
+            key=lambda candidate: (candidate.priority, candidate.arrival_time),
+            default=None,
+        )
+        if victim is None:
+            return False
+
+        self._free_request_blocks(victim)
+        self.encoder_cache_manager.free(victim)
+        self._inflight_prefills.discard(victim)
+        victim.num_computed_tokens = 0
+        if victim.spec_token_ids:
+            victim.spec_token_ids = []
+        victim.num_preemptions += 1
+        if self.log_stats:
+            victim.record_event(EngineCoreEventType.PREEMPTED, timestamp)
+        self.reset_preempted_req_ids.add(victim.request_id)
+        return True
 
     def _update_after_schedule(self, scheduler_output: SchedulerOutput) -> None:
         # Advance the number of computed tokens for the request AFTER
