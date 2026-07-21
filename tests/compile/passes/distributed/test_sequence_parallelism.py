@@ -6,7 +6,7 @@ import torch
 
 import vllm.envs as envs
 from tests.compile.backend import TestBackend
-from tests.utils import TestFP8Layer, multi_gpu_test
+from tests.utils import TestFP8Layer, TestMXFP8Layer, multi_gpu_test
 from vllm.compilation.passes.fusion.rms_quant_fusion import RMSNormQuantFusionPass
 from vllm.compilation.passes.fusion.sequence_parallelism import SequenceParallelismPass
 from vllm.compilation.passes.utility.noop_elimination import NoOpEliminationPass
@@ -38,7 +38,10 @@ from vllm.utils.torch_utils import set_random_seed
 
 DEVICE_TYPE = current_platform.device_type
 
-pytestmark = pytest.mark.skipif(not current_platform.is_cuda(), reason="Only test CUDA")
+pytestmark = pytest.mark.skipif(
+    not (current_platform.is_cuda() or current_platform.is_xpu()),
+    reason="Only test on CUDA or XPU",
+)
 
 FP8_DTYPE = current_platform.fp8_dtype()
 prompts = [
@@ -80,6 +83,9 @@ class TestAllReduceRMSNormModel(torch.nn.Module):
 
     def ops_in_model_before(self):
         return [torch.ops.vllm.all_reduce.default]
+
+    def ops_count_after(self, op) -> int:
+        return 4
 
     def ops_in_model_after(self):
         return [
@@ -145,6 +151,9 @@ class TestAllReduceRMSNormStaticQuantFP8Model(torch.nn.Module):
             torch.ops.vllm.all_reduce.default,
         ]
 
+    def ops_count_after(self, op) -> int:
+        return 4
+
     def ops_in_model(self):
         if self.vllm_config.compilation_config.pass_config.fuse_norm_quant:
             return [torch.ops._C.fused_add_rms_norm_static_fp8_quant.default]
@@ -159,6 +168,110 @@ class TestAllReduceRMSNormStaticQuantFP8Model(torch.nn.Module):
                 torch.ops.vllm_ir.fused_add_rms_norm,
                 *quant_ops,
             ]
+
+
+class TestAllReduceRMSNormXPUMxFP8Model(torch.nn.Module):
+    """Model with all_reduce → rms_norm/fused_add_rms_norm → xpu_mxfp8_quantize.
+
+    Tests FirstAllReduceRMSNormXPUMxFP8Pattern (layer 0) and
+    MiddleAllReduceRMSNormXPUMxFP8Pattern (layers 1-3).
+    hidden_size must be divisible by 32 (MXFP8 block size).
+    """
+
+    def __init__(self, hidden_size=32, eps=1e-6):
+        super().__init__()
+        self.vllm_config = get_current_vllm_config()
+        self.hidden_size = hidden_size
+        self.eps = eps
+        self.dtype = torch.bfloat16
+        self.norm = [RMSNorm(hidden_size, eps) for _ in range(4)]
+        self.mxfp8_linear_layers = [
+            TestMXFP8Layer(
+                hidden_size=hidden_size,
+            )
+            for _ in range(4)
+        ]
+
+    def forward(self, hidden_states):
+        z = torch.relu(hidden_states)
+        x = resid = tensor_model_parallel_all_reduce(z)
+        y = self.norm[0](x)
+        # First pattern: rms_norm → xpu_mxfp8_quantize
+        z2 = self.mxfp8_linear_layers[0](y)
+
+        x2 = tensor_model_parallel_all_reduce(z2)
+        y2, resid = self.norm[1](x2, resid)
+        # Middle pattern 1
+        z3 = self.mxfp8_linear_layers[1](y2)
+
+        x3 = tensor_model_parallel_all_reduce(z3)
+        y3, resid = self.norm[2](x3, resid)
+        # Middle pattern 2
+        z4 = self.mxfp8_linear_layers[2](y3)
+
+        x4 = tensor_model_parallel_all_reduce(z4)
+        y4, resid = self.norm[3](x4, resid)
+        # Middle pattern 3: fp8_gemm uses both fp8 and scale; return resid so
+        # residual_out has a consumer → full 3-tuple pattern matches (2 all_gathers)
+        z5 = self.mxfp8_linear_layers[3](y4)
+        return z5, resid
+
+    def ops_in_model_after(self):
+        return [
+            torch.ops.vllm.all_gather.default,
+            torch.ops.vllm.reduce_scatter.default,
+        ]
+
+    def ops_count_after(self, op) -> int:
+        # After SP pass: reduce_scatter × 4, all_gather × 8 (fp8 + scale per layer,
+        # all 4 layers match the full 3-tuple pattern variant)
+        if op == torch.ops.vllm.all_gather.default:
+            return 8
+        return 4
+
+    def ops_in_model_before(self):
+        return [
+            torch.ops.vllm.all_reduce.default,
+        ]
+
+    def ops_in_model(self):
+        return [
+            torch.ops.vllm_ir.rms_norm,
+            torch.ops.vllm_ir.fused_add_rms_norm,
+            torch.ops.vllm.xpu_mxfp8_quantize.default,
+        ]
+
+
+def _run_sequence_parallelism_pass_test(
+    test_model_cls: type[torch.nn.Module],
+    custom_ops: str,
+    batch_size: int,
+    seq_len: int,
+    hidden_size: int,
+    dtype: torch.dtype,
+    fuse_norm_quant: bool,
+    dynamic: bool,
+    model_name: str,
+):
+    # need to use torch.mp.spawn otherwise will have problems with
+    # torch.distributed and cuda
+    num_processes = 2
+    torch.multiprocessing.spawn(
+        sequence_parallelism_pass_on_test_model,
+        args=(
+            num_processes,
+            test_model_cls,
+            custom_ops,
+            batch_size,
+            seq_len,
+            hidden_size,
+            dtype,
+            fuse_norm_quant,
+            dynamic,
+            model_name,
+        ),
+        nprocs=num_processes,
+    )
 
 
 @multi_gpu_test(num_gpus=2)
@@ -190,28 +303,61 @@ def test_sequence_parallelism_pass(
     fuse_norm_quant: bool,
     dynamic: bool,
 ):
-    num_processes = 2
+    _run_sequence_parallelism_pass_test(
+        test_model_cls,
+        custom_ops,
+        batch_size,
+        seq_len,
+        hidden_size,
+        dtype,
+        fuse_norm_quant,
+        dynamic,
+        "RedHatAI/Llama-3.2-1B-Instruct-FP8",
+    )
 
-    def run_torch_spawn(fn, nprocs):
-        # need to use torch.mp.spawn otherwise will have problems with
-        # torch.distributed and cuda
-        torch.multiprocessing.spawn(
-            fn,
-            args=(
-                num_processes,
-                test_model_cls,
-                custom_ops,
-                batch_size,
-                seq_len,
-                hidden_size,
-                dtype,
-                fuse_norm_quant,
-                dynamic,
-            ),
-            nprocs=nprocs,
-        )
 
-    run_torch_spawn(sequence_parallelism_pass_on_test_model, num_processes)
+@multi_gpu_test(num_gpus=2)
+@pytest.mark.parametrize(
+    "test_model_cls, custom_ops",
+    [
+        (
+            TestAllReduceRMSNormXPUMxFP8Model,
+            "+rms_norm",
+        ),
+        (
+            TestAllReduceRMSNormXPUMxFP8Model,
+            "-rms_norm",
+        ),
+    ],
+)
+@pytest.mark.parametrize("batch_size", [8])
+@pytest.mark.parametrize("seq_len", [16])
+@pytest.mark.parametrize("hidden_size", [32])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("dynamic", [False, True])
+@pytest.mark.skipif(envs.VLLM_TARGET_DEVICE not in ["xpu"], reason="Only test on XPU")
+def test_sequence_parallelism_pass_xpu_mxfp8(
+    test_model_cls: type[torch.nn.Module],
+    custom_ops: str,
+    batch_size: int,
+    seq_len: int,
+    hidden_size: int,
+    dtype: torch.dtype,
+    dynamic: bool,
+):
+    # MXFP8 has no fused rms_norm+quant kernel yet, so fuse_norm_quant
+    # doesn't change the traced graph; keep it fixed at False.
+    _run_sequence_parallelism_pass_test(
+        test_model_cls,
+        custom_ops,
+        batch_size,
+        seq_len,
+        hidden_size,
+        dtype,
+        False,
+        dynamic,
+        "INCModel/Qwen3-30B-A3B-Instruct-2507-MXFP8-CT-AutoRound",
+    )
 
 
 def test_sequence_parallelism_pass_requires_full_graph_compilation():
@@ -243,6 +389,7 @@ def sequence_parallelism_pass_on_test_model(
     dtype: torch.dtype,
     fuse_norm_quant: bool,
     dynamic: bool,
+    model_name: str,
 ):
     set_random_seed(0)
 
@@ -262,7 +409,7 @@ def sequence_parallelism_pass_on_test_model(
     )
 
     # initialize distributed
-    init_distributed_environment()
+    init_distributed_environment(backend=current_platform.dist_backend)
 
     # configure vllm config for SequenceParallelismPass
     custom_ops_list = custom_ops.split(",") if custom_ops else []
@@ -280,7 +427,6 @@ def sequence_parallelism_pass_on_test_model(
 
     # this is a fake model name to construct the model config
     # in the vllm_config, it's not really used.
-    model_name = "RedHatAI/Llama-3.2-1B-Instruct-FP8"
     model_config = ModelConfig(
         model=model_name, trust_remote_code=True, dtype=dtype, seed=42
     )
@@ -337,7 +483,7 @@ def sequence_parallelism_pass_on_test_model(
         # In post-nodes, reduce scatter and all gather should be there,
         # all reduce should not
         for op in model.ops_in_model_after():
-            assert backend.op_count(op, before=False) == 4
+            assert backend.op_count(op, before=False) == model.ops_count_after(op)
 
         for op in model.ops_in_model():
             assert backend.op_count(op, before=False) > 0
