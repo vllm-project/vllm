@@ -102,9 +102,10 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
                 and weight_quant.actorder
                 in (ActivationOrdering.GROUP, ActivationOrdering.DYNAMIC)
             )
-            # Prefer to use the MarlinMoE kernel when it is supported.
+            # The native method is needed for Triton. Other explicit backends
+            # are dispatched by the Marlin wrapper's backend oracle.
             use_marlin = (
-                moe_backend in ("auto", "marlin")
+                moe_backend != "triton"
                 and check_moe_marlin_supports_layer(
                     layer, group_size, allow_tile_padding=not is_actorder
                 )
