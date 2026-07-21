@@ -34,6 +34,9 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
+from vllm.utils.flashinfer import (
+    nvfp4_block_scale_interleave as block_scale_interleave,
+)
 from vllm.utils.math_utils import cdiv
 
 if TYPE_CHECKING:
@@ -385,14 +388,10 @@ def restore_dispatched_scale_layout(
         or quant_dtype not in _SWIZZLED_SCALE_DTYPES
     ):
         return a1q_scale
-    # despite its name, this is flashinfer's generic block_scale_interleave
-    # and handles mxfp8 scale vectors as well
-    from vllm.utils.flashinfer import (
-        nvfp4_block_scale_interleave as block_scale_interleave,
-    )
-
     if a1q_scale.element_size() == 1:
         a1q_scale = a1q_scale.view(torch.uint8)
+    # despite its name, this is flashinfer's generic block_scale_interleave
+    # and handles mxfp8 scale vectors as well
     return block_scale_interleave(a1q_scale)
 
 
