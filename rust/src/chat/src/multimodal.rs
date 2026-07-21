@@ -11,7 +11,7 @@
 //! Raw media stays above `vllm-text`; this module lowers it into token IDs and
 //! opaque tensor payloads before the request is handed to text generation.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
 use std::sync::{Arc, LazyLock};
@@ -52,7 +52,15 @@ pub struct MultimodalModelInfo {
     video: Option<ModalitySupport>,
     audio: Option<AudioModalitySupport>,
     media_connector: Arc<MediaConnector>,
+    /// Maximum number of input items allowed per prompt for each modality.
+    /// Modalities absent from the map fall back to `DEFAULT_MM_LIMIT`.
+    limit_mm_per_prompt: HashMap<Modality, usize>,
 }
+
+/// Default per-modality item limit when `--limit-mm-per-prompt` doesn't
+/// configure one, matching `vllm/config/multimodal.py`'s `limit_per_prompt`
+/// default.
+const DEFAULT_MM_LIMIT: usize = 999;
 
 /// Model metadata and tokenizer access shared by all multimodal specs.
 #[derive(Clone)]
@@ -287,7 +295,20 @@ impl MultimodalModelInfo {
         model_type: Option<String>,
         files: MultimodalConfigFiles<'_>,
         tokenizer: DynTokenizer,
+        limit_mm_per_prompt: HashMap<String, usize>,
     ) -> Result<Option<Self>> {
+        let limit_mm_per_prompt = limit_mm_per_prompt
+            .into_iter()
+            .map(|(key, limit)| {
+                let modality =
+                    serde_json::from_value::<Modality>(serde_json::Value::String(key.clone()))
+                        .map_err(|_| {
+                            multimodal!("unknown modality `{key}` in --limit-mm-per-prompt")
+                        })?;
+                Ok((modality, limit))
+            })
+            .collect::<Result<HashMap<_, _>>>()?;
+
         let config = match files.config {
             Some(path) => {
                 let text = fs::read_to_string(path)
@@ -319,7 +340,12 @@ impl MultimodalModelInfo {
             tokenizer: TokenizerResolver(tokenizer),
         };
 
-        Self::from_loaded(context, preprocessor_config, video_preprocessor_config)
+        Self::from_loaded(
+            context,
+            preprocessor_config,
+            video_preprocessor_config,
+            limit_mm_per_prompt,
+        )
     }
 
     /// Resolve multimodal support from an assembled context and parsed
@@ -328,6 +354,7 @@ impl MultimodalModelInfo {
         context: MultimodalModelContext,
         preprocessor_config: PreProcessorConfig,
         video_preprocessor_config: PreProcessorConfig,
+        limit_mm_per_prompt: HashMap<Modality, usize>,
     ) -> Result<Option<Self>> {
         let (image, video) = Self::resolve_vision_lanes(
             &context,
@@ -356,6 +383,7 @@ impl MultimodalModelInfo {
             video,
             audio,
             media_connector,
+            limit_mm_per_prompt,
         }))
     }
 
@@ -567,7 +595,49 @@ fn input_audio_data_url(data: &str, format: Option<&str>) -> Result<String> {
     Ok(format!("data:{mime_type};base64,{data}"))
 }
 
+/// The `Modality` a content part carries, or `None` for plain text.
+fn media_part_modality(part: &MediaContentPart) -> Option<Modality> {
+    match part {
+        MediaContentPart::Text { .. } => None,
+        MediaContentPart::ImageUrl { .. } | MediaContentPart::ImageData { .. } => {
+            Some(Modality::Image)
+        }
+        MediaContentPart::ImageEmbeds { .. } => Some(Modality::ImageEmbeds),
+        MediaContentPart::AudioUrl { .. } | MediaContentPart::AudioData { .. } => {
+            Some(Modality::Audio)
+        }
+        MediaContentPart::VideoUrl { .. } | MediaContentPart::VideoData { .. } => {
+            Some(Modality::Video)
+        }
+    }
+}
+
 impl MultimodalModelInfo {
+    /// Reject requests exceeding `--limit-mm-per-prompt`'s configured (or
+    /// default-999) per-modality item count, before any fetch/decode work
+    /// is spent on them.
+    fn validate_mm_limits(&self, media_parts: &[MediaContentPart]) -> Result<()> {
+        let mut counts: HashMap<Modality, usize> = HashMap::new();
+        for part in media_parts {
+            if let Some(modality) = media_part_modality(part) {
+                *counts.entry(modality).or_default() += 1;
+            }
+        }
+
+        for (modality, count) in counts {
+            let limit =
+                self.limit_mm_per_prompt.get(&modality).copied().unwrap_or(DEFAULT_MM_LIMIT);
+            if count > limit {
+                return Err(Error::MmLimitExceeded {
+                    modality: modality.to_string(),
+                    limit,
+                });
+            }
+        }
+
+        Ok(())
+    }
+
     /// Run media fetch, per-modality preprocessing, prompt expansion, and
     /// feature build.
     ///
@@ -584,8 +654,7 @@ impl MultimodalModelInfo {
         if media_parts_len == 0 {
             return Ok(Vec::new());
         }
-        // TODO: enforce per-modality item-count limits, aligned with the
-        // engine's `--limit-mm-per-prompt` semantics.
+        self.validate_mm_limits(&media_parts)?;
         let fetched = self.fetch_media(media_parts).await?;
 
         let mut prepared = Vec::new();
@@ -753,10 +822,11 @@ mod tests {
             .with_regular_token("<|video_pad|>", QWEN3_VIDEO_PAD_ID)
     }
 
-    fn test_info(
+    fn test_info_with_limits(
         model_type: &str,
         config: serde_json::Value,
         tokenizer: TestTokenizer,
+        limit_mm_per_prompt: HashMap<Modality, usize>,
     ) -> MultimodalModelInfo {
         let context = MultimodalModelContext {
             model_id: format!("{model_type}-test"),
@@ -769,9 +839,18 @@ mod tests {
             context,
             PreProcessorConfig::default(),
             PreProcessorConfig::default(),
+            limit_mm_per_prompt,
         )
         .unwrap()
         .unwrap_or_else(|| panic!("{model_type} multimodal support should resolve"))
+    }
+
+    fn test_info(
+        model_type: &str,
+        config: serde_json::Value,
+        tokenizer: TestTokenizer,
+    ) -> MultimodalModelInfo {
+        test_info_with_limits(model_type, config, tokenizer, HashMap::new())
     }
 
     fn llama4_info() -> MultimodalModelInfo {
@@ -783,16 +862,19 @@ mod tests {
         test_info("llama4", config, llama4_tokenizer())
     }
 
-    pub(super) fn qwen3_vl_info() -> MultimodalModelInfo {
-        let config = serde_json::json!({
+    fn qwen3_vl_config() -> serde_json::Value {
+        serde_json::json!({
             "model_type": "qwen3_vl",
             "image_token_id": QWEN3_IMAGE_PAD_ID,
             "video_token_id": QWEN3_VIDEO_PAD_ID,
             "vision_start_token_id": 151652,
             "vision_end_token_id": 151653,
             "vision_config": {"patch_size": 16}
-        });
-        test_info("qwen3_vl", config, qwen3_vl_tokenizer())
+        })
+    }
+
+    pub(super) fn qwen3_vl_info() -> MultimodalModelInfo {
+        test_info("qwen3_vl", qwen3_vl_config(), qwen3_vl_tokenizer())
     }
 
     #[test]
@@ -852,5 +934,87 @@ mod tests {
             "data:application/octet-stream;base64,CCCC"
         );
         assert!(input_audio_data_url("AAAA", Some("flac")).is_err());
+    }
+
+    fn image_url_part() -> MediaContentPart {
+        MediaContentPart::ImageUrl {
+            url: "https://example.com/image.png".to_string(),
+            detail: None,
+            uuid: None,
+        }
+    }
+
+    fn qwen3_vl_info_with_limits(
+        limit_mm_per_prompt: HashMap<Modality, usize>,
+    ) -> MultimodalModelInfo {
+        test_info_with_limits(
+            "qwen3_vl",
+            qwen3_vl_config(),
+            qwen3_vl_tokenizer(),
+            limit_mm_per_prompt,
+        )
+    }
+
+    #[test]
+    fn validate_mm_limits_ignores_text_parts() {
+        let info = qwen3_vl_info();
+        let parts = vec![
+            MediaContentPart::Text {
+                text: "hello".to_string(),
+            },
+            MediaContentPart::Text {
+                text: "world".to_string(),
+            },
+        ];
+        assert!(info.validate_mm_limits(&parts).is_ok());
+    }
+
+    #[test]
+    fn validate_mm_limits_enforces_default_limit_of_999_at_the_boundary() {
+        let info = qwen3_vl_info();
+        let at_limit: Vec<_> =
+            std::iter::repeat_with(image_url_part).take(DEFAULT_MM_LIMIT).collect();
+        assert!(info.validate_mm_limits(&at_limit).is_ok());
+
+        let over_limit: Vec<_> =
+            std::iter::repeat_with(image_url_part).take(DEFAULT_MM_LIMIT + 1).collect();
+        let error = info.validate_mm_limits(&over_limit).unwrap_err();
+        assert_eq!(
+            error.to_report_string(),
+            "At most 999 image(s) may be provided in one prompt."
+        );
+    }
+
+    #[test]
+    fn validate_mm_limits_enforces_configured_limit_at_the_boundary() {
+        let info = qwen3_vl_info_with_limits(HashMap::from([(Modality::Image, 1)]));
+        assert!(info.validate_mm_limits(&[image_url_part()]).is_ok());
+
+        let error = info.validate_mm_limits(&[image_url_part(), image_url_part()]).unwrap_err();
+        assert_eq!(
+            error.to_report_string(),
+            "At most 1 image(s) may be provided in one prompt."
+        );
+        // Confirms the HTTP-mapping bug found during implementation stays fixed:
+        // this must map to 400, not 500.
+        assert!(error.is_request_validation_error());
+    }
+
+    #[test]
+    fn from_paths_rejects_unknown_modality_key_in_limit_map() {
+        let error = match MultimodalModelInfo::from_paths(
+            "qwen3_vl-test".to_string(),
+            Some("qwen3_vl".to_string()),
+            MultimodalConfigFiles::default(),
+            Arc::new(qwen3_vl_tokenizer()),
+            HashMap::from([("not_a_real_modality".to_string(), 5)]),
+        ) {
+            Err(error) => error,
+            Ok(_) => panic!("expected from_paths to reject unknown modality key"),
+        };
+        assert_eq!(
+            error.to_report_string(),
+            "multimodal preprocessing error: unknown modality `not_a_real_modality` in --limit-mm-per-prompt"
+        );
     }
 }

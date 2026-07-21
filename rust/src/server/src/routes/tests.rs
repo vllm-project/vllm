@@ -563,6 +563,12 @@ fn render_fake_content(content: &ChatContent, placeholder: &str) -> vllm_chat::R
 }
 
 fn qwen_multimodal_model_info() -> vllm_chat::multimodal::MultimodalModelInfo {
+    qwen_multimodal_model_info_with_limits(std::collections::HashMap::new())
+}
+
+fn qwen_multimodal_model_info_with_limits(
+    limit_mm_per_prompt: std::collections::HashMap<String, usize>,
+) -> vllm_chat::multimodal::MultimodalModelInfo {
     let config_path = std::env::temp_dir().join(format!(
         "vllm-server-qwen-config-{}.json",
         uuid::Uuid::new_v4()
@@ -580,6 +586,7 @@ fn qwen_multimodal_model_info() -> vllm_chat::multimodal::MultimodalModelInfo {
             ..Default::default()
         },
         Arc::new(fake_chat_tokenizer()),
+        limit_mm_per_prompt,
     )
     .expect("load multimodal info")
     .expect("qwen multimodal info is registered");
@@ -2291,6 +2298,74 @@ async fn non_stream_chat_image_url_reaches_engine_mm_features() {
 
     assert_eq!(json["object"], "chat.completion");
     assert_eq!(json["choices"][0]["message"]["content"], "hi");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn non_stream_chat_rejects_when_image_count_exceeds_limit_mm_per_prompt() {
+    // The request is rejected by `--limit-mm-per-prompt` validation before
+    // ever reaching the engine, so the mock engine task is never awaited.
+    let (chat, _engine_task) = test_models_with_engine_outputs_and_backend(
+        b"engine-openai-mm-limit",
+        default_stream_output_specs(),
+        Arc::new(FakeChatBackend::with_multimodal_model_info(
+            qwen_multimodal_model_info_with_limits(std::collections::HashMap::from([(
+                "image".to_string(),
+                1,
+            )])),
+        )),
+    )
+    .await;
+    let app = build_router(Arc::new(AppState::new(
+        vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
+        chat,
+    )));
+
+    let response = app
+        .clone()
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "Qwen/Qwen1.5-0.5B-Chat",
+                        "stream": false,
+                        "messages": [{
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": "describe "},
+                                {
+                                    "type": "image_url",
+                                    "image_url": {
+                                        "url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+                                    }
+                                },
+                                {
+                                    "type": "image_url",
+                                    "image_url": {
+                                        "url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+                                    }
+                                }
+                            ]
+                        }]
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
+    assert_eq!(json["error"]["type"], "invalid_request_error");
+    assert_eq!(
+        json["error"]["message"],
+        "At most 1 image(s) may be provided in one prompt."
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
