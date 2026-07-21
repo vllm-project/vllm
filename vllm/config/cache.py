@@ -119,6 +119,13 @@ class CacheConfig:
     mamba_page_size_padded: int | None = None
     """ Optional override for mamba page size; used by hybrid mamba/attention
     models to ensure exact alignment with attention page size."""
+    mamba_all_mode_prefill_align_size: int | None = field(default=None, init=False)
+    """Set during block-size alignment for mamba_cache_mode='all' models whose
+    prefill kernel materializes per-chunk states on a fixed grid relative to
+    each scheduled chunk's start (e.g. GDN/FLA, which lacks the SSD kernels'
+    short-first-chunk realignment). The scheduler clips prefill chunks to
+    multiples of this size so chunk starts stay kernel-chunk aligned and every
+    block-boundary SSM checkpoint is exactly materializable."""
     skip_page_size_padded: int | None = None
     """Optional override for the page size of layers skipped from KV cache
     quantization (``--kv-cache-dtype-skip-layers``); set during block-size
@@ -211,6 +218,7 @@ class CacheConfig:
             # Prefix-caching implementation detail (doesn't affect compiled graph).
             "prefix_match_unit",
             "mamba_page_size_padded",
+            "mamba_all_mode_prefill_align_size",
             "skip_page_size_padded",
             "user_specified_block_size",
             "user_specified_mamba_block_size",

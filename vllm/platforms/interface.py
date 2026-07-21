@@ -929,6 +929,21 @@ class Platform:
             validate_all_mode_mamba_block_size(
                 attn_block_size, model_config.get_mamba_chunk_size()
             )
+            # GDN/FLA prefill kernels materialize per-chunk states on a fixed
+            # grid relative to each scheduled chunk's start (no SSD-style
+            # short-first-chunk realignment), so all-mode per-block SSM
+            # checkpoints are only exact when chunk starts stay kernel-chunk
+            # aligned. Ask the scheduler to clip prefill chunks accordingly
+            # (a much weaker constraint than align mode's block-size split).
+            if (
+                getattr(
+                    model_config.hf_text_config, "linear_conv_kernel_dim", None
+                )
+                is not None
+            ):
+                cache_config.mamba_all_mode_prefill_align_size = (
+                    model_config.get_mamba_chunk_size()
+                )
         else:
             # Without prefix caching, use minimum block size that satisfies
             # both backend alignment and mamba page size compatibility
