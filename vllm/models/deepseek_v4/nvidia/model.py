@@ -17,6 +17,7 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
 )
 from vllm.distributed.eplb.eplb_state import EplbLayerState
+from vllm.distributed.utils import get_pp_indices
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.model_executor.kernels.mhc.tilelang import (
     hc_head_fused_kernel_tilelang,
@@ -65,7 +66,10 @@ from vllm.model_executor.models.utils import (
     maybe_prefix,
 )
 from vllm.model_executor.utils import set_weight_attrs
-from vllm.models.deepseek_v4.attention import DeepseekV4Attention
+from vllm.models.deepseek_v4.attention import (
+    DeepseekV4Attention,
+    compute_dsv4_index_cache_skip_flags,
+)
 from vllm.models.deepseek_v4.nvidia.flashinfer_sparse import (
     DeepseekV4FlashInferMLAAttention,
     DeepseekV4FlashInferSM120Attention,
@@ -791,6 +795,36 @@ def _select_dsv4_attn_cls(vllm_config: VllmConfig) -> type[DeepseekV4Attention]:
     return DeepseekV4FlashMLAAttention
 
 
+def _validate_dsv4_index_cache_platform(skip_topk: bool) -> None:
+    if not skip_topk:
+        return
+    device_capability = current_platform.get_device_capability()
+    if device_capability is None or device_capability.major != 9:
+        raise NotImplementedError(
+            "DeepSeek V4 IndexCache is currently supported only on Hopper "
+            "(SM90). Set index_topk_freq=1 or run on H100/H200."
+        )
+
+
+def _validate_dsv4_index_cache_ubatching(skip_topk: bool, vllm_config) -> None:
+    if not skip_topk or not vllm_config.parallel_config.use_ubatching:
+        return
+    raise NotImplementedError(
+        "DeepSeek V4 IndexCache does not support ubatching yet because "
+        "skipped layers reuse a shared topk_indices_buffer. Set "
+        "index_topk_freq=1 or disable DBO/ubatching."
+    )
+
+
+def _is_dsv4_skipped_indexer_weight(
+    weight_name: str, skipped_layer_ids: frozenset[int]
+) -> bool:
+    return any(
+        f"layers.{layer_id}.attn.indexer." in weight_name
+        for layer_id in skipped_layer_ids
+    )
+
+
 class DeepseekV4DecoderLayer(nn.Module):
     def __init__(
         self,
@@ -798,6 +832,7 @@ class DeepseekV4DecoderLayer(nn.Module):
         prefix,
         topk_indices_buffer: torch.Tensor | None = None,
         aux_stream_list: list[torch.cuda.Stream] | None = None,
+        skip_topk: bool = False,
     ):
         super().__init__()
 
@@ -810,6 +845,7 @@ class DeepseekV4DecoderLayer(nn.Module):
             prefix=f"{prefix}.attn",
             topk_indices_buffer=topk_indices_buffer,
             aux_stream_list=aux_stream_list,
+            skip_topk=skip_topk,
         )
         self.ffn = DeepseekV4MoE(vllm_config, prefix=f"{prefix}.ffn")
 
@@ -993,6 +1029,31 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             config.index_topk,
             dtype=torch.int32,
         )
+        start_layer, end_layer = get_pp_indices(
+            config.num_hidden_layers,
+            get_pp_group().rank_in_group,
+            get_pp_group().world_size,
+        )
+        index_cache_skip_flags = compute_dsv4_index_cache_skip_flags(
+            config.compress_ratios,
+            config.num_hidden_layers,
+            index_topk_freq=getattr(config, "index_topk_freq", 1),
+            index_topk_pattern=getattr(config, "index_topk_pattern", None),
+            index_skip_topk_offset=getattr(config, "index_skip_topk_offset", 2),
+            local_start_layer=start_layer,
+            local_end_layer=end_layer,
+        )
+        local_index_cache_skip_flags = index_cache_skip_flags[start_layer:end_layer]
+        local_uses_index_cache = any(local_index_cache_skip_flags)
+        _validate_dsv4_index_cache_platform(local_uses_index_cache)
+        _validate_dsv4_index_cache_ubatching(local_uses_index_cache, vllm_config)
+        self.index_cache_skipped_layer_ids = frozenset(
+            layer_id
+            for layer_id, skip in enumerate(
+                index_cache_skip_flags[start_layer:end_layer], start=start_layer
+            )
+            if skip
+        )
 
         if get_pp_group().is_first_rank:
             self.embed_tokens = VocabParallelEmbedding(
@@ -1011,6 +1072,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                 prefix=prefix,
                 topk_indices_buffer=self.topk_indices_buffer,
                 aux_stream_list=aux_stream_list,
+                skip_topk=index_cache_skip_flags[extract_layer_index(prefix)],
             ),
             prefix=f"{prefix}.layers",
         )
@@ -1467,6 +1529,13 @@ class DeepseekV4ForCausalLM(
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self, skip_substrs=["mtp."])
+        # skipped_layer_ids = self.model.index_cache_skipped_layer_ids
+        # if skipped_layer_ids:
+        #     weights = (
+        #         (name, weight)
+        #         for name, weight in weights
+        #         if not _is_dsv4_skipped_indexer_weight(name, skipped_layer_ids)
+        #     )
         loaded_params = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
         self.model.finalize_mega_moe_weights()
         self.model.finalize_mhc_broadcast_weights()
