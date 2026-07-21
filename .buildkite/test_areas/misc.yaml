@@ -64,8 +64,9 @@ steps:
       - image-build-amd
 
 - label: V1 Core + KV + Metrics
+  device: h200_35gb
   key: v1-core-kv-metrics
-  timeout_in_minutes: 60
+  timeout_in_minutes: 80
   source_file_dependencies:
     - vllm/config/
     - vllm/distributed/

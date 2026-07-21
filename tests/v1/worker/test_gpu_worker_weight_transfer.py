@@ -9,6 +9,7 @@ session is active. These tests verify that delegation and the session guard.
 
 import pytest
 
+from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.v1.worker.gpu_worker import Worker
 
 
@@ -21,27 +22,53 @@ class _RecordingEngine:
         self.finished = False
         self.reset_count = 0
         self.update_calls: list[dict] = []
+        self.seen_configs: list[VllmConfig] = []
+
+    def _record_config(self) -> None:
+        self.seen_configs.append(get_current_vllm_config())
 
     def start_weight_update(self) -> None:
+        self._record_config()
         self.started = True
 
     def update_weights(self, update_info: dict) -> None:
+        self._record_config()
         self.update_calls.append(update_info)
         if self.raise_on_update:
             raise ValueError("boom")
 
     def finish_weight_update(self) -> None:
+        self._record_config()
         self.finished = True
 
     def reset_weight_update_target(self) -> None:
         self.reset_count += 1
 
 
+class _RecordingModelRunner:
+    def __init__(self) -> None:
+        self.seen_config: VllmConfig | None = None
+
+    def reload_weights(self) -> None:
+        self.seen_config = get_current_vllm_config()
+
+
 def _make_worker(engine: _RecordingEngine | None) -> Worker:
     worker = object.__new__(Worker)
+    worker.vllm_config = VllmConfig()
     worker.weight_transfer_engine = engine
     worker._weight_update_active = False
     return worker
+
+
+def test_reload_weights_sets_current_config():
+    worker = _make_worker(None)
+    model_runner = _RecordingModelRunner()
+    worker.model_runner = model_runner  # type: ignore[assignment]
+
+    Worker.reload_weights(worker)
+
+    assert model_runner.seen_config is worker.vllm_config
 
 
 def test_start_update_finish_delegates_to_engine():
@@ -60,6 +87,7 @@ def test_start_update_finish_delegates_to_engine():
     assert engine.finished is True
     assert engine.reset_count == 1
     assert worker._weight_update_active is False
+    assert engine.seen_configs == [worker.vllm_config] * 3
 
 
 def test_double_start_raises():
