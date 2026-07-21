@@ -460,6 +460,12 @@ impl EngineCoreClient {
         self.inner.is_healthy()
     }
 
+    /// Subscribe to engine health changes. The current value is `true` while
+    /// the client is healthy and changes permanently to `false` on failure.
+    pub fn subscribe_health(&self) -> tokio::sync::watch::Receiver<bool> {
+        self.inner.subscribe_health()
+    }
+
     /// Return the first persistent health error observed by the client, if any.
     pub fn health_error(&self) -> Option<Arc<Error>> {
         self.inner.health_error()
