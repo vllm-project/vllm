@@ -72,16 +72,11 @@ def dflash_has_any_non_causal(config: Qwen3Config) -> bool:
     )
 
 
-def _get_dflash_fc_input_size(vllm_config: VllmConfig, drafter_config: dict) -> int:
+def _get_dflash_fc_input_size(vllm_config: VllmConfig) -> int:
     spec_config = vllm_config.speculative_config
     config = spec_config.draft_model_config.hf_config
     aux_layers = get_eagle3_aux_layers_from_config(spec_config)
-    if aux_layers:
-        num_features_to_use = len(aux_layers)
-    elif "layer_ids" in drafter_config:
-        num_features_to_use = len(drafter_config["layer_ids"])
-    else:
-        num_features_to_use = config.num_hidden_layers
+    num_features_to_use = len(aux_layers) if aux_layers else config.num_hidden_layers
     target_hidden_size = (
         getattr(config, "target_hidden_size", None) or config.hidden_size
     )
@@ -417,7 +412,6 @@ class DFlashQwen3Model(nn.Module):
             self.fc = ReplicatedLinear(
                 input_size=_get_dflash_fc_input_size(
                     vllm_config,
-                    drafter_config,
                 ),
                 output_size=self.config.hidden_size,
                 bias=False,

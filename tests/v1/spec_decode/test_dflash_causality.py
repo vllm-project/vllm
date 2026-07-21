@@ -16,6 +16,9 @@ from vllm.model_executor.models.qwen3_dflash import (
     _get_dflash_fc_input_size,
     dflash_has_any_non_causal,
 )
+from vllm.v1.worker.gpu.spec_decode.eagle.eagle3_utils import (
+    get_eagle3_aux_layers_from_config,
+)
 
 
 def _config(num_hidden_layers, layer_types=None, causal_override=None):
@@ -56,7 +59,7 @@ def test_dflash_layer_causal_is_per_layer():
     assert _dflash_layer_causal(config, 1) is False
 
 
-def _fc_vllm_config(**draft_config):
+def _vllm_config(**draft_config):
     config = SimpleNamespace(**draft_config)
     return SimpleNamespace(
         speculative_config=SimpleNamespace(
@@ -66,26 +69,23 @@ def _fc_vllm_config(**draft_config):
 
 
 def test_dflash_fc_uses_aux_layer_count():
-    vllm_config = _fc_vllm_config(
+    vllm_config = _vllm_config(
         num_hidden_layers=5,
         hidden_size=4096,
         target_hidden_size=None,
         target_layer_ids=[1, 17, 32],
     )
 
-    assert _get_dflash_fc_input_size(vllm_config, {}) == 3 * 4096
+    assert _get_dflash_fc_input_size(vllm_config) == 3 * 4096
 
 
-def test_dflash_fc_preserves_legacy_layer_ids_count():
-    vllm_config = _fc_vllm_config(
-        num_hidden_layers=5,
-        hidden_size=4096,
+@pytest.mark.parametrize("config_name", ["dflash_config", "eagle_config"])
+def test_eagle_aux_layers_preserves_legacy_layer_ids(config_name):
+    layer_ids = [1, 17, 32]
+    vllm_config = _vllm_config(
+        **{config_name: {"layer_ids": layer_ids}},
     )
 
-    assert (
-        _get_dflash_fc_input_size(
-            vllm_config,
-            {"layer_ids": [1, 17, 32]},
-        )
-        == 3 * 4096
+    assert get_eagle3_aux_layers_from_config(vllm_config.speculative_config) == tuple(
+        layer_ids
     )
