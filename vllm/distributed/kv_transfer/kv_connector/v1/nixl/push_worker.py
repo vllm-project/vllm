@@ -286,8 +286,10 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
             reg_data["remote_port"],
             reg_data["remote_tp_size"],
             pp_size=remote_pp_size,
-            # D never addresses P memory in push mode; just load P's agents.
-            notif_agents_only=remote_pp_size > 1,
+            # D only ever sends PUSH_REG notifs to P and never reads or writes
+            # P's memory in push mode, so it never needs the transfer
+            # descriptors set up by the full add_remote_agent path.
+            notif_agents_only=True,
         )
         if fut is None:
             self._do_send_reg_notif(req_id, reg_data)

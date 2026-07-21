@@ -701,8 +701,9 @@ class NixlBaseConnectorWorker:
                     )
                 setup_agent_time = time.perf_counter()
                 logger.debug(
-                    "NIXL handshake: add agent took: %s",
+                    "NIXL handshake: add agent took: %s (notif_agents_only=%s)",
                     setup_agent_time - got_metadata_time,
+                    notif_agents_only,
                 )
                 remote_ranks = (remote_pp_rank, remote_rank)
                 remote_rank_to_agent_name[remote_ranks] = remote_agent_name
