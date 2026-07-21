@@ -5,10 +5,72 @@ import torch
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.import_utils import has_cutedsl
+from vllm.utils.torch_utils import direct_register_custom_op
 
 # Cache of tiny 1-element dummy tensors (per device, dtype) reused by the
 # has_indexer=False path so the indexer args don't allocate every call.
 _DUMMY_CACHE: dict[tuple, torch.Tensor] = {}
+
+
+@torch.compiler.assume_constant_result
+def _can_use_fused_q_cutedsl() -> bool:
+    return current_platform.has_device_capability(100) and has_cutedsl()
+
+
+@torch.compiler.assume_constant_result
+def _is_arch_support_pdl() -> bool:
+    return current_platform.is_arch_support_pdl()
+
+
+def _fused_q_cutedsl_impl(
+    positions: torch.Tensor,
+    q_pe: torch.Tensor,
+    rope_cache: torch.Tensor,
+    ql_nope: torch.Tensor,
+    q_scale: torch.Tensor,
+    mqa_output: torch.Tensor,
+    idx_q: torch.Tensor,
+    idx_rope_cache: torch.Tensor,
+    idx_weights: torch.Tensor,
+    idx_weights_softmax_scale: float,
+    idx_weights_head_scale: float,
+    idx_q_fp8: torch.Tensor,
+    idx_weights_out: torch.Tensor,
+    has_indexer: bool,
+    index_rope_interleave: bool,
+) -> None:
+    from .ops.fused_q_cutedsl import fused_q_cutedsl
+
+    fused_q_cutedsl(
+        positions,
+        q_pe,
+        rope_cache,
+        ql_nope,
+        q_scale,
+        mqa_output,
+        idx_q,
+        idx_rope_cache,
+        idx_weights,
+        idx_weights_softmax_scale,
+        idx_weights_head_scale,
+        idx_q_fp8,
+        idx_weights_out,
+        has_indexer=has_indexer,
+        index_rope_interleave=index_rope_interleave,
+    )
+
+
+def _fused_q_cutedsl_fake(*args, **kwargs) -> None:
+    pass
+
+
+direct_register_custom_op(
+    op_name="fused_q_cutedsl",
+    op_func=_fused_q_cutedsl_impl,
+    mutates_args=["mqa_output", "idx_q_fp8", "idx_weights_out"],
+    fake_impl=_fused_q_cutedsl_fake,
+    dispatch_key="CUDA",
+)
 
 
 def _dummy(shape: tuple, dtype: torch.dtype, device: torch.device) -> torch.Tensor:
@@ -478,7 +540,7 @@ def fused_norm_rope(
 
     if q_c_out is None:
         q_c_out = torch.empty_like(q_c)
-    use_pdl = current_platform.is_arch_support_pdl()
+    use_pdl = _is_arch_support_pdl()
     _fused_norm_rope_kernel[(4, num_tokens)](
         positions,
         # Q RMS norm
@@ -811,7 +873,7 @@ def fused_q(
     num_index_q_heads = index_q.shape[1]
     index_q_head_dim = index_q.shape[2]
     use_cutedsl = False
-    if current_platform.has_device_capability(100) and has_cutedsl():
+    if _can_use_fused_q_cutedsl():
         from .ops.fused_q_cutedsl import is_fused_q_cutedsl_supported
 
         use_cutedsl = is_fused_q_cutedsl_supported(
@@ -843,9 +905,7 @@ def fused_q(
     index_q_fp8 = torch.empty_like(index_q, dtype=torch.float8_e4m3fn)
     index_weights_out = torch.empty_like(index_weights, dtype=torch.float32)
     if use_cutedsl:
-        from .ops.fused_q_cutedsl import fused_q_cutedsl
-
-        fused_q_cutedsl(
+        torch.ops.vllm.fused_q_cutedsl(
             positions,
             q_pe,
             q_pe_cos_sin_cache,
@@ -864,7 +924,7 @@ def fused_q(
         )
         return index_q_fp8, index_weights_out, mqa_q
 
-    use_pdl = current_platform.is_arch_support_pdl()
+    use_pdl = _is_arch_support_pdl()
     _fused_q_kernel[(3, num_tokens, grid_heads)](
         positions,
         q_pe,

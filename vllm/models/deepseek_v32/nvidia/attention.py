@@ -22,10 +22,7 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8,
 )
 from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.model_executor.layers.sparse_attn_indexer import (
-    SparseAttnIndexer,
-    sparse_attn_indexer,
-)
+from vllm.model_executor.layers.sparse_attn_indexer import SparseAttnIndexer
 from vllm.model_executor.models.deepseek_v2 import (
     DeepSeekV2FusedQkvAProjLinear,
     DeepseekV32IndexerCache,
@@ -33,7 +30,7 @@ from vllm.model_executor.models.deepseek_v2 import (
 )
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.platforms import current_platform
-from vllm.utils.torch_utils import is_quantized_kv_cache
+from vllm.utils.torch_utils import _encode_layer_name, is_quantized_kv_cache
 
 from .kernels import fused_norm_rope, fused_q
 
@@ -540,9 +537,9 @@ class DeepseekV32Attention(MLAAttention):
         )
 
         if self.indexer is not None and not self.skip_topk:
-            sparse_attn_indexer(
+            torch.ops.vllm.sparse_attn_indexer(
                 q_c,
-                self.indexer.k_cache.prefix,
+                _encode_layer_name(self.indexer.k_cache.prefix),
                 self.indexer.k_cache.kv_cache,
                 index_q_fp8,
                 None,  # q_scale folded into weights on the fp8 path

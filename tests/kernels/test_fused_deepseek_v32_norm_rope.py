@@ -49,6 +49,23 @@ pytestmark = pytest.mark.skipif(
 )
 
 
+def test_platform_capability_queries_are_constant_during_compile(monkeypatch):
+    monkeypatch.setattr(
+        K.current_platform, "has_device_capability", lambda capability: True
+    )
+    monkeypatch.setattr(K, "has_cutedsl", lambda: True)
+    monkeypatch.setattr(K.current_platform, "is_arch_support_pdl", lambda: True)
+
+    def capability_branches(x: torch.Tensor) -> torch.Tensor:
+        if K._can_use_fused_q_cutedsl() and K._is_arch_support_pdl():
+            return x + 1
+        return x - 1
+
+    compiled = torch.compile(capability_branches, backend="eager", fullgraph=True)
+    x = torch.zeros(1, device="cuda")
+    torch.testing.assert_close(compiled(x), torch.ones_like(x))
+
+
 # ── reference helpers ────────────────────────────────────────────────────────
 
 
