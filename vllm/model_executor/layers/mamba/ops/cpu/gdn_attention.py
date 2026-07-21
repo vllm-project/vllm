@@ -431,9 +431,7 @@ def _spec_forward(
             .to("cpu", torch.int32)
             .contiguous(),
             is_vnni=True,
-            num_accepted_tokens=num_accepted[:num_spec_decodes]
-            .to("cpu", torch.int32)
-            .contiguous(),
+            num_accepted_tokens=num_accepted[:num_spec_decodes].to("cpu", torch.int32),
         ).reshape_as(mixed_qkv_spec)
     else:
         w = _unpacked_conv_weight(layer).unsqueeze(1)

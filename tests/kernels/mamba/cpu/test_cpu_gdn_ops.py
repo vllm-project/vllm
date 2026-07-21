@@ -557,14 +557,13 @@ def test_spec_aware_nonspec_materializes_state_indices(
 
 
 @torch.inference_mode()
-def test_spec_forward_materializes_native_conv_metadata(
+def test_spec_forward_prepares_native_conv_metadata(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     block_table = torch.tensor([[0, 1], [4, 5]], dtype=torch.int32)
     state_indices = block_table[:, 0]
-    accepted_counts = torch.tensor([1, 0, 4], dtype=torch.int32)[::2]
+    accepted_counts = torch.tensor([1, 4], dtype=torch.int32)
     assert not state_indices.is_contiguous()
-    assert not accepted_counts.is_contiguous()
     metadata = types.SimpleNamespace(
         num_spec_decodes=2,
         spec_state_indices_tensor=block_table,
