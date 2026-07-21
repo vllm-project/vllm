@@ -5,7 +5,6 @@ import torch
 
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
-from vllm.v1.attention.ops.triton_attention_helpers import find_seq_idx
 
 float8_info = torch.finfo(current_platform.fp8_dtype())
 
@@ -16,17 +15,15 @@ def mask_empty_context_lse(
     context_start_loc: torch.Tensor,
 ) -> None:
     """Set LSE to -inf for queries whose context chunk is empty."""
-    num_heads, num_tokens = lse.shape
+    num_heads = lse.shape[0]
     num_reqs = query_start_loc.shape[0] - 1
     block_size = 128
-    num_query_blocks = num_tokens // block_size + num_reqs
-    mask_empty_context_lse_kernel[(num_query_blocks, num_heads)](
+    mask_empty_context_lse_kernel[(num_reqs, num_heads)](
         lse,
         query_start_loc,
         context_start_loc,
         lse.stride(0),
         lse.stride(1),
-        num_reqs,
         BLOCK_SIZE=block_size,
     )
 
@@ -38,34 +35,27 @@ def mask_empty_context_lse_kernel(
     context_start_loc,
     lse_head_stride,
     lse_token_stride,
-    num_reqs,
     BLOCK_SIZE: tl.constexpr,
 ):
-    query_block_idx = tl.program_id(0)
+    req_idx = tl.program_id(0)
     head_idx = tl.program_id(1)
-
-    req_idx = find_seq_idx(query_start_loc, query_block_idx, num_reqs, BLOCK_SIZE, True)
-    req_query_start = tl.load(query_start_loc + req_idx)
-    req_query_end = tl.load(query_start_loc + req_idx + 1)
-    req_query_len = req_query_end - req_query_start
-    req_block_start = req_query_start // BLOCK_SIZE + req_idx
-    req_block_idx = query_block_idx - req_block_start
-    token_offset = req_block_idx * BLOCK_SIZE
-    if token_offset >= req_query_len:
-        return
 
     context_start = tl.load(context_start_loc + req_idx)
     context_end = tl.load(context_start_loc + req_idx + 1)
     if context_start != context_end:
         return
 
-    offsets = token_offset + tl.arange(0, BLOCK_SIZE)
-    token_indices = req_query_start + offsets
-    tl.store(
-        lse + head_idx * lse_head_stride + token_indices * lse_token_stride,
-        float("-inf"),
-        mask=offsets < req_query_len,
-    )
+    query_start = tl.load(query_start_loc + req_idx)
+    query_end = tl.load(query_start_loc + req_idx + 1)
+    query_len = query_end - query_start
+    for block_start in range(0, query_len, BLOCK_SIZE):
+        offsets = block_start + tl.arange(0, BLOCK_SIZE)
+        token_indices = query_start + offsets
+        tl.store(
+            lse + head_idx * lse_head_stride + token_indices * lse_token_stride,
+            float("-inf"),
+            mask=offsets < query_len,
+        )
 
 
 # Implements section 2.2 of https://www.arxiv.org/pdf/2501.01005
