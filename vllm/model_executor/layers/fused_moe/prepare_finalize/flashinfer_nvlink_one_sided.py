@@ -130,7 +130,7 @@ class FlashInferNVLinkOneSidedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeMo
         )
         if a1q_scale is not None:
             a1q_recv, a1q_scale_recv, topk_ids_recv, topk_weights_recv = recv_payloads
-            # Apply scale interleaving only for CUTLASS (not TRT-LLM)
+            # Swizzle after the A2A if the MoE kernel expects swizzled scales.
             a1q_scale_recv = restore_dispatched_scale_layout(
                 a1q_scale_recv.view(-1, a1q_scale_recv.shape[-1]),
                 quant_config.quant_dtype,

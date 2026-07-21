@@ -29,9 +29,9 @@ from vllm.utils.flashinfer import has_flashinfer
 if not current_platform.is_cuda():
     pytest.skip("CUDA required", allow_module_level=True)
 
-if current_platform.has_device_capability(100) and not has_flashinfer():
-    # mxfp8_e4m3_quantize dispatches to flashinfer on >=SM100.
-    pytest.skip("flashinfer required on SM100+", allow_module_level=True)
+if not has_flashinfer():
+    # restore_dispatched_scale_layout uses flashinfer's block_scale_interleave.
+    pytest.skip("flashinfer required", allow_module_level=True)
 
 
 def _quantize_both_layouts(

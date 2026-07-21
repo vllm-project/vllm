@@ -34,6 +34,12 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
+
+# despite its name, this is flashinfer's generic block_scale_interleave
+# and handles mxfp8 scale vectors as well
+from vllm.utils.flashinfer import (
+    nvfp4_block_scale_interleave as block_scale_interleave,
+)
 from vllm.utils.math_utils import cdiv
 
 if TYPE_CHECKING:
@@ -359,8 +365,9 @@ def moe_kernel_quantize_input(
         return A, A_scale
 
 
-# Quant dtypes whose activation scales use the swizzled 128x4 layout
-# when the kernel declares is_scale_swizzled=True.
+# Quant dtypes whose activation scales use the swizzled 128x4 layout when the
+# kernel declares is_scale_swizzled=True. Must cover every quant_dtype branch in
+# moe_kernel_quantize_input that honors is_scale_swizzled.
 _SWIZZLED_SCALE_DTYPES = ("nvfp4", "mxfp8")
 
 
@@ -384,12 +391,6 @@ def restore_dispatched_scale_layout(
         or quant_dtype not in _SWIZZLED_SCALE_DTYPES
     ):
         return a1q_scale
-    # despite its name, this is flashinfer's generic block_scale_interleave
-    # and handles mxfp8 scale vectors as well
-    from vllm.utils.flashinfer import (
-        nvfp4_block_scale_interleave as block_scale_interleave,
-    )
-
     if a1q_scale.element_size() == 1:
         a1q_scale = a1q_scale.view(torch.uint8)
     return block_scale_interleave(a1q_scale)
