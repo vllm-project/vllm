@@ -35,6 +35,13 @@ def build_offloading_config(
     assert kv_transfer_config.engine_id is not None
     engine_id = kv_transfer_config.engine_id
 
+    model_config = vllm_config.model_config
+    model_revision = getattr(model_config.hf_config, "_commit_hash", None)
+    if not isinstance(model_revision, str):
+        model_revision = (
+            model_config.revision if isinstance(model_config.revision, str) else None
+        )
+
     parallel_config = vllm_config.parallel_config
     groups = tuple(
         OffloadingGroupConfig(
@@ -127,8 +134,9 @@ def build_offloading_config(
         extra_config=extra_config,
         engine_id=engine_id,
         model=OffloadingModelConfig(
-            name=vllm_config.model_config.model,
+            name=model_config.model,
             dtype=str(vllm_config.cache_config.cache_dtype).replace("torch.", ""),
+            revision=model_revision,
         ),
         cache=OffloadingCacheConfig(
             tokens_per_hash=tokens_per_hash,

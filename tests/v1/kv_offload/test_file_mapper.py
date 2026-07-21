@@ -122,6 +122,26 @@ def test_get_run_config_fields():
     }
 
 
+def test_model_revision_namespaces_cache_files():
+    common = dict(
+        root_dir="/tmp/cache",
+        model_name="org/model",
+        tokens_per_hash=16,
+        blocks_per_file=1,
+        tp_size=1,
+        pp_size=1,
+        pcp_size=1,
+        dcp_size=1,
+        rank=0,
+        dtype="float16",
+    )
+
+    revision_a = FileMapper(**common, model_revision="commit-a")
+    revision_b = FileMapper(**common, model_revision="commit-b")
+
+    assert revision_a.base_path != revision_b.base_path
+
+
 def test_get_config_file_path():
     fm = make_mapper_from_offloading_spec()
     config_path = fm.get_config_file_path()

@@ -32,6 +32,7 @@ class FileMapper:
         dcp_size: int,
         rank: int,
         dtype: str,
+        model_revision: str | None = None,
         kv_cache_groups: list[dict] | None = None,
         inference_engine: str = "vllm",
         parallel_agnostic: bool = False,
@@ -58,6 +59,8 @@ class FileMapper:
             "kv_cache_groups": kv_cache_groups or [],
             "inference_engine": inference_engine,
         }
+        if model_revision is not None:
+            self.fields["model_revision"] = model_revision
         self.base_path: str = self._compute_base_path(root_dir, self.fields)
 
     @classmethod
@@ -89,6 +92,7 @@ class FileMapper:
             dcp_size=parallel.dcp_size,
             rank=parallel.rank,
             dtype=config.model.dtype,
+            model_revision=config.model.revision,
             kv_cache_groups=kv_cache_groups,
             parallel_agnostic=(parallel_agnostic and parallel.is_parallelism_agnostic),
         )
