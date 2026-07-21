@@ -600,7 +600,12 @@ class Base(
                 ):
                     kwargs["per_layer_sliding_window"] = text_config.sliding_window
 
-            attention_instances[i] = attn_cls(**kwargs)
+            attn_instance = attn_cls(**kwargs)
+            if attn_cls is MLAAttention:
+                # Attach MLA attn_instance to mla_module so it appears in
+                # model.named_modules() and runs its process_weights_after_loading
+                mla_module._vllm_mla_attn = attn_instance
+            attention_instances[i] = attn_instance
         return attention_instances
 
     def _get_attn_cls(self) -> type[AttentionLayerBase]:
