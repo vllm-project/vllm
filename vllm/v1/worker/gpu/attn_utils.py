@@ -46,6 +46,18 @@ class AttentionCGSupportInfo:
     min_cg_support: AttentionCGSupport = AttentionCGSupport.ALWAYS
     min_cg_attn_backend: str | None = None
 
+    def narrow(
+        self, support: AttentionCGSupport, backend: str | None
+    ) -> "AttentionCGSupportInfo":
+        """Return an info tightened by ``support`` if it is more restrictive.
+
+        Lets attention groups built outside ``init_attn_backend`` (e.g.
+        encoder-only layers) contribute to the runner's cudagraph decision.
+        """
+        if support.value < self.min_cg_support.value:
+            return AttentionCGSupportInfo(support, backend)
+        return self
+
 
 def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
     kv_cache_spec: dict[str, KVCacheSpec] = {}

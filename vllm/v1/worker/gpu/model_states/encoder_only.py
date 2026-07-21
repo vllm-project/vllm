@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Any
+from typing import Any, cast
 
 import torch
 import torch.nn as nn
@@ -9,8 +9,16 @@ from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.config.compilation import CUDAGraphMode
 from vllm.model_executor.layers.attention import Attention
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
-from vllm.v1.attention.backend import AttentionType, CommonAttentionMetadata
-from vllm.v1.kv_cache_interface import EncoderOnlyAttentionSpec, KVCacheConfig
+from vllm.v1.attention.backend import (
+    AttentionCGSupport,
+    AttentionType,
+    CommonAttentionMetadata,
+)
+from vllm.v1.kv_cache_interface import (
+    AttentionSpec,
+    EncoderOnlyAttentionSpec,
+    KVCacheConfig,
+)
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.model_states.default import DefaultModelState
@@ -81,6 +89,21 @@ class EncoderOnlyModelState(DefaultModelState):
         self._dummy_slot_mapping = torch.zeros(
             self.max_num_tokens, dtype=torch.int64, device=device
         )
+
+    def get_additional_cg_support(self) -> tuple[AttentionCGSupport, str | None]:
+        # Encoder groups are built here rather than in init_attn_backend, so
+        # their cudagraph support must be surfaced to the runner separately.
+        support = AttentionCGSupport.ALWAYS
+        backend: str | None = None
+        for group in self.encoder_attn_groups:
+            builder = group.get_metadata_builder(0)
+            cg_support = builder.get_cudagraph_support(
+                self.vllm_config, cast(AttentionSpec, group.kv_cache_spec)
+            )
+            if cg_support.value < support.value:
+                support = cg_support
+                backend = group.backend.__name__
+        return support, backend
 
     def prepare_attn(
         self,
