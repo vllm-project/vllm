@@ -37,7 +37,7 @@ class CompletionOutput:
         lora_request: The LoRA request that was used to generate the output.
         spec_decode_stats: Per-sequence speculative-decoding acceptance stats,
             populated on finish when speculative decoding ran and
-            ``--speculative-decoding-stats`` is enabled; None otherwise.
+            ``--per-request-spec-decode-stats`` is enabled; None otherwise.
     """
 
     index: int

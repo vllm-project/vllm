@@ -92,7 +92,7 @@ class Scheduler(SchedulerInterface):
         self.log_stats = log_stats
         self.observability_config = vllm_config.observability_config
         self.spec_decode_stats_level = (
-            self.observability_config.speculative_decoding_stats
+            self.observability_config.per_request_spec_decode_stats
         )
         self.kv_metrics_collector: KVCacheMetricsCollector | None = None
         if self.observability_config.kv_cache_metrics:

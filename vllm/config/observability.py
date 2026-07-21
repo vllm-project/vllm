@@ -45,13 +45,15 @@ class ObservabilityConfig:
     Note that collecting detailed timing information for each request can be
     expensive."""
 
-    speculative_decoding_stats: Literal["none", "summary", "detailed"] = "none"
-    """Include per-sequence speculative-decoding stats in the response
-    (`choices[].speculative_decoding_stats`). `none` disables; `summary` adds
-    mean acceptance length, draft acceptance rate, and the step-by-draft-length
-    histogram; `detailed` additionally records the ordered per-step
-    accepted/proposed arrays (one entry per verify step). No effect unless
-    speculative decoding is enabled. Independent of `--disable-log-stats`."""
+    per_request_spec_decode_stats: Literal["none", "summary", "detailed"] = "none"
+    """Include per-request speculative-decoding acceptance stats on each response
+    choice (`choices[].speculative_decoding_stats`). `none` disables; `summary`
+    adds mean acceptance length, draft acceptance rate, and the
+    step-by-draft-length histogram; `detailed` additionally records the ordered
+    per-step accepted/proposed arrays (one entry per verify step). No effect
+    unless speculative decoding is enabled. Independent of `--disable-log-stats`.
+    This is the per-request response-body counterpart of the aggregate
+    `vllm:spec_decode_*` Prometheus metrics."""
 
     kv_cache_metrics: bool = False
     """Enable KV cache residency metrics (lifetime, idle time, reuse gaps).
