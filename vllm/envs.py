@@ -271,6 +271,7 @@ if TYPE_CHECKING:
     VLLM_DISABLE_SHARED_EXPERTS_STREAM: bool = False
     VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD: int = 256
     VLLM_MULTI_STREAM_GEMM_TOKEN_THRESHOLD: int = 1024
+    VLLM_ENABLE_HPC_ROUTER_GEMM: bool = False
     VLLM_COMPILE_CACHE_SAVE_FORMAT: Literal["binary", "unpacked"] = "binary"
     VLLM_USE_V2_MODEL_RUNNER: bool | None = None
     VLLM_LOG_MODEL_INSPECTION: bool = False
@@ -1911,6 +1912,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # for the default value of 1024 tokens.
     "VLLM_MULTI_STREAM_GEMM_TOKEN_THRESHOLD": lambda: int(
         os.getenv("VLLM_MULTI_STREAM_GEMM_TOKEN_THRESHOLD", "1024")
+    ),
+    # Enable the experimental HPC BF16xFP32 router GEMM path on Hopper.
+    "VLLM_ENABLE_HPC_ROUTER_GEMM": lambda: bool(
+        int(os.getenv("VLLM_ENABLE_HPC_ROUTER_GEMM", "0"))
     ),
     # Format for saving torch.compile cache artifacts
     # - "binary": saves as binary file
