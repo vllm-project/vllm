@@ -44,12 +44,14 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from vllm import LLM, SamplingParams
 from vllm.config import WeightTransferConfig
-from vllm.distributed.weight_transfer.nccl_engine import (
-    NCCLTrainerSendWeightsArgs,
-    NCCLWeightTransferEngine,
+from vllm.distributed.weight_transfer import (
+    ModuleSource,
+    RayVLLMWeightSyncClient,
+    WeightTransferTrainerFactory,
 )
+from vllm.distributed.weight_transfer.nccl_common import NCCLTrainerInitInfo
 from vllm.distributed.weight_transfer.sparse_nccl_engine import (
-    SparseNCCLWeightTransferEngine,
+    SparseNCCLTrainerInitInfo,
     SparseWeightPatch,
 )
 from vllm.utils.network_utils import get_ip, get_open_port
@@ -87,7 +89,8 @@ class TrainModel:
         self.model = None
         self.patched_param = None
         self.pending_sparse_patches: list[SparseWeightPatch] | None = None
-        self.model_update_group = None
+        self.dense_engine = None
+        self.sparse_engine = None
         self.master_address = get_ip()
         self.port = get_open_port()
         self.reset_model()
@@ -112,34 +115,23 @@ class TrainModel:
         self.port = get_open_port()
         return self.master_address, self.port
 
-    def init_weight_transfer_group(self, world_size: int) -> None:
-        self.model_update_group = NCCLWeightTransferEngine.trainer_init(
-            dict(
+    def init_dense_engine(self, world_size: int, llm_handle) -> None:
+        """Build the dense NCCL trainer engine"""
+        self.dense_engine = WeightTransferTrainerFactory.trainer_init(
+            init_info=NCCLTrainerInitInfo(
                 master_address=self.master_address,
                 master_port=self.port,
                 world_size=world_size,
-            )
+                rank=0,  # single-GPU trainer is the sole (sender) rank
+                packed=True,
+            ),
+            client=RayVLLMWeightSyncClient(llm_handle),
+            source=ModuleSource(self.model),
         )
 
-    def get_dense_update_info(self, packed: bool = False) -> tuple[dict, int]:
-        names = []
-        dtype_names = []
-        shapes = []
-        payload_bytes = 0
-        for name, param in self.model.named_parameters():
-            names.append(name)
-            dtype_names.append(str(param.dtype).split(".")[-1])
-            shapes.append(list(param.shape))
-            payload_bytes += param.numel() * param.element_size()
-
-        return (
-            dict(
-                names=names,
-                dtype_names=dtype_names,
-                shapes=shapes,
-                packed=packed,
-            ),
-            payload_bytes,
+    def dense_payload_bytes(self) -> int:
+        return sum(
+            param.numel() * param.element_size() for param in self.model.parameters()
         )
 
     @torch.inference_mode()
@@ -226,6 +218,7 @@ class TrainModel:
                 name=PATCHED_PARAM_NAME,
                 indices=flat_indices.to(torch.int32),
                 values=flat_values,
+                full_shape=tuple(self.patched_param.shape),
             )
         ]
         patch_digest = hashlib.sha256(
@@ -250,33 +243,40 @@ class TrainModel:
         )
         return update_info, selected_token_ids, patch_digest, sparse_payload_bytes
 
-    def broadcast_weights(self, packed: bool = False) -> float:
-        if self.model_update_group is None:
-            raise RuntimeError("Weight transfer group is not initialized")
+    def send_dense_weights(self) -> float:
+        """One call drives start/update/finish on the inference side
+        concurrently with the NCCL broadcast."""
+        if self.dense_engine is None:
+            raise RuntimeError("Dense engine is not initialized")
 
-        trainer_args = NCCLTrainerSendWeightsArgs(
-            group=self.model_update_group,
-            packed=packed,
-        )
         start = time.perf_counter()
-        NCCLWeightTransferEngine.trainer_send_weights(
-            iterator=self.model.named_parameters(),
-            trainer_args=trainer_args,
-        )
+        self.dense_engine.send_weights()
         torch.accelerator.synchronize()
         return (time.perf_counter() - start) * 1000.0
 
-    def broadcast_pending_sparse_patch(self) -> float:
-        if self.model_update_group is None:
-            raise RuntimeError("Weight transfer group is not initialized")
+    def init_sparse_engine(self, world_size: int, llm_handle) -> None:
+        """Build the sparse trainer engine"""
+        self.sparse_engine = WeightTransferTrainerFactory.trainer_init(
+            init_info=SparseNCCLTrainerInitInfo(
+                master_address=self.master_address,
+                master_port=self.port,
+                world_size=world_size,
+                rank=0,  # single-GPU trainer is the sole (sender) rank
+            ),
+            client=RayVLLMWeightSyncClient(llm_handle),
+        )
+
+    def send_pending_sparse_patch(self) -> float:
+        """One call drives start/update/finish on the inference side
+        concurrently with the patch broadcasts. Sparse deltas differ each round,
+        so the patches are passed to `send_weights` rather than fixed at init."""
+        if self.sparse_engine is None:
+            raise RuntimeError("Sparse engine is not initialized")
         if self.pending_sparse_patches is None:
             raise RuntimeError("Sparse patch has not been prepared")
 
         start = time.perf_counter()
-        SparseNCCLWeightTransferEngine.trainer_send_weights(
-            iter(self.pending_sparse_patches),
-            NCCLTrainerSendWeightsArgs(group=self.model_update_group),
-        )
+        self.sparse_engine.send_weights(self.pending_sparse_patches)
         torch.accelerator.synchronize()
         self.pending_sparse_patches = None
         return (time.perf_counter() - start) * 1000.0
@@ -340,39 +340,17 @@ def run_dense_phase(
         dense_before = collect_vllm_generations(llm)
 
         ray.get(llm.sleep.remote(level=0))
-        master_address, master_port = ray.get(train_model.create_rendezvous.remote())
+        ray.get(train_model.create_rendezvous.remote())
         world_size = ray.get(llm.get_world_size.remote()) + 1
-        inference_init = llm.init_weight_transfer_engine.remote(
-            dict(
-                init_info=dict(
-                    master_address=master_address,
-                    master_port=master_port,
-                    rank_offset=1,
-                    world_size=world_size,
-                )
-            )
-        )
-        trainer_init = train_model.init_weight_transfer_group.remote(world_size)
-        ray.get([trainer_init, inference_init])
-        ray.get(llm.start_weight_update.remote())
+        ray.get(train_model.init_dense_engine.remote(world_size, llm))
 
-        dense_update_info, dense_payload_bytes = ray.get(
-            train_model.get_dense_update_info.remote()
-        )
+        dense_payload_bytes = ray.get(train_model.dense_payload_bytes.remote())
         _, selected_token_ids, patch_digest, _ = ray.get(
             train_model.prepare_sparse_patch.remote(PROMPTS)
         )
 
-        inference_update = llm.update_weights.remote(
-            dict(update_info=dense_update_info)
-        )
-        dense_send_ms, _ = ray.get(
-            [
-                train_model.broadcast_weights.remote(packed=False),
-                inference_update,
-            ]
-        )
-        ray.get(llm.finish_weight_update.remote())
+        # One call drives start/update/finish + the NCCL broadcast.
+        dense_send_ms = ray.get(train_model.send_dense_weights.remote())
         ray.get(llm.wake_up.remote(tags=["scheduling"]))
 
         dense_after = collect_vllm_generations(llm)
@@ -399,36 +377,14 @@ def run_sparse_phase(
         sparse_before = collect_vllm_generations(llm)
 
         ray.get(llm.sleep.remote(level=0))
-        master_address, master_port = ray.get(train_model.create_rendezvous.remote())
+        ray.get(train_model.create_rendezvous.remote())
         world_size = ray.get(llm.get_world_size.remote()) + 1
-        inference_init = llm.init_weight_transfer_engine.remote(
-            dict(
-                init_info=dict(
-                    master_address=master_address,
-                    master_port=master_port,
-                    rank_offset=1,
-                    world_size=world_size,
-                )
-            )
-        )
-        trainer_init = train_model.init_weight_transfer_group.remote(world_size)
-        ray.get([trainer_init, inference_init])
-        ray.get(llm.start_weight_update.remote())
+        ray.get(train_model.init_sparse_engine.remote(world_size, llm))
 
-        sparse_update_info, selected_token_ids, patch_digest, sparse_payload_bytes = (
-            ray.get(train_model.prepare_sparse_patch.remote(PROMPTS))
+        _, selected_token_ids, patch_digest, sparse_payload_bytes = ray.get(
+            train_model.prepare_sparse_patch.remote(PROMPTS)
         )
-
-        inference_update = llm.update_weights.remote(
-            dict(update_info=sparse_update_info)
-        )
-        sparse_send_ms, _ = ray.get(
-            [
-                train_model.broadcast_pending_sparse_patch.remote(),
-                inference_update,
-            ]
-        )
-        ray.get(llm.finish_weight_update.remote())
+        sparse_send_ms = ray.get(train_model.send_pending_sparse_patch.remote())
         ray.get(llm.wake_up.remote(tags=["scheduling"]))
 
         sparse_after = collect_vllm_generations(llm)
