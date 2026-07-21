@@ -5,6 +5,7 @@ import torch
 
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
+from vllm.v1.attention.ops.triton_attention_helpers import find_seq_idx_warp
 
 float8_info = torch.finfo(current_platform.fp8_dtype())
 
@@ -18,6 +19,7 @@ def mask_empty_context_lse(
     num_heads, num_tokens = lse.shape
     num_reqs = query_start_loc.shape[0] - 1
     block_size = 128
+    # Each ragged query may contribute one partial block.
     num_query_blocks = num_tokens // block_size + num_reqs
     mask_empty_context_lse_kernel[(num_query_blocks,)](
         lse,
@@ -46,22 +48,7 @@ def mask_empty_context_lse_kernel(
     BLOCK_HEADS: tl.constexpr,
 ):
     query_block_idx = tl.program_id(0)
-    lanes = tl.arange(0, 32)
-    req_chunk_start = 0
-    req_idx = 0
-    move_on = True
-    # Resolve the ragged request 32 boundaries at a time. The reduction stays
-    # warp-local, matching the expert-offset lookup used by EP kernels.
-    while (req_chunk_start < num_reqs) & move_on:
-        req_offsets = req_chunk_start + lanes
-        req_mask = req_offsets < num_reqs
-        query_starts = tl.load(query_start_loc + req_offsets, mask=req_mask)
-        req_block_starts = query_starts // BLOCK_SIZE + req_offsets
-        matches = req_mask & (req_block_starts <= query_block_idx)
-        match_count = tl.sum(matches.to(tl.int32))
-        req_idx = req_chunk_start + match_count - 1
-        move_on = match_count == 32
-        req_chunk_start += 32
+    req_idx = find_seq_idx_warp(query_start_loc, query_block_idx, num_reqs, BLOCK_SIZE)
 
     query_start = tl.load(query_start_loc + req_idx)
     query_end = tl.load(query_start_loc + req_idx + 1)
