@@ -137,6 +137,9 @@ def test_mp_client_uses_env_timeout(monkeypatch: pytest.MonkeyPatch):
         def setsockopt(self, *_args, **_kwargs):
             pass
 
+        def getsockopt_string(self, _option):
+            return "inproc://dummy"
+
     monkeypatch.setattr(core_client_mod.zmq.Socket, "shadow", lambda *_: ShadowSocket())
     monkeypatch.setattr(
         core_client_mod, "make_zmq_socket", lambda *_, **__: DummySocket()

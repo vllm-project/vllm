@@ -260,29 +260,6 @@ def _wait_for_scale_requests(
     pytest.fail("Timed out waiting for all existing ranks to start scaling")
 
 
-def test_external_lb_server_info(server_manager):
-    servers = server_manager.servers
-    api_server_count = server_manager.api_server_count
-
-    for i, (server, _) in enumerate(servers):
-        print(f"Testing {i=}")
-
-        # Each request will hit one of the API servers
-        # `n_reqs` is set so that there is a good chance each server
-        # receives at least one request
-        n_reqs = 2 * api_server_count * api_server_count
-        parallel_configs = [_get_parallel_config(server) for _ in range(n_reqs)]
-        api_process_counts = [c["_api_process_count"] for c in parallel_configs]
-        api_process_ranks = [c["_api_process_rank"] for c in parallel_configs]
-
-        assert all(c == api_server_count for c in api_process_counts), (
-            api_process_counts
-        )
-        assert all(0 <= r < api_server_count for r in api_process_ranks), (
-            api_process_ranks
-        )
-
-
 @pytest.mark.distributed(num_gpus=3)
 @pytest.mark.skipif(
     TP_SIZE != 1 or current_platform.device_count() < 3,
@@ -340,6 +317,29 @@ def test_external_lb_elastic_ep_scale_up(default_server_args) -> None:
                     temperature=0.0,
                 )
             assert completion.choices[0].finish_reason in ("length", "stop")
+
+
+def test_external_lb_server_info(server_manager):
+    servers = server_manager.servers
+    api_server_count = server_manager.api_server_count
+
+    for i, (server, _) in enumerate(servers):
+        print(f"Testing {i=}")
+
+        # Each request will hit one of the API servers
+        # `n_reqs` is set so that there is a good chance each server
+        # receives at least one request
+        n_reqs = 2 * api_server_count * api_server_count
+        parallel_configs = [_get_parallel_config(server) for _ in range(n_reqs)]
+        api_process_counts = [c["_api_process_count"] for c in parallel_configs]
+        api_process_ranks = [c["_api_process_rank"] for c in parallel_configs]
+
+        assert all(c == api_server_count for c in api_process_counts), (
+            api_process_counts
+        )
+        assert all(0 <= r < api_server_count for r in api_process_ranks), (
+            api_process_ranks
+        )
 
 
 @pytest.mark.asyncio
