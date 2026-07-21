@@ -435,7 +435,6 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
         )
 
         tok_params = request.build_tok_params(self.model_config)
-        prompt_extras = ctx.pooling_params.extra_kwargs
         seq_lora_requests = self._lora_request_to_seq(ctx.lora_request, num_requests)
         seq_priority = self._priority_to_seq(ctx.priorities, num_requests)
 
@@ -448,7 +447,7 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
                     max_tokens_per_query=max_tokens_per_query,
                     max_tokens_per_doc=max_tokens_per_doc,
                     tok_params=tok_params,
-                    prompt_extras=prompt_extras,
+                    prompt_extras=ctx.prompt_extras,
                     skip_mm_cache=False,
                     params=ctx.pooling_params,
                     lora_requests=seq_lora_requests[i],
@@ -475,11 +474,9 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
         max_tokens_per_query, max_tokens_per_doc = self._get_token_limits(
             pooling_params=ctx.pooling_params
         )
-
         tok_params = self.renderer.default_cmpl_tok_params.with_kwargs(
             **(ctx.tokenization_kwargs or {})
         )
-
         prompt_extras = ctx.pooling_params.extra_kwargs
 
         seq_lora_requests = self._lora_request_to_seq(ctx.lora_request, num_requests)

@@ -155,12 +155,7 @@ class PoolingBaseServing(ABC, BaseServing):
 
         assert ctx.pooling_params is not None
         pooling_params = ctx.pooling_params
-
-        if isinstance(pooling_params, list):
-            for params in pooling_params:
-                params.verify(self.model_config)
-        else:
-            pooling_params.verify(self.model_config)
+        pooling_params.verify(self.model_config)
 
         for i, engine_input in enumerate(ctx.engine_inputs):
             prompt_request_id = (
