@@ -123,6 +123,9 @@ class ParserEngine(Parser):
         self._deferred_reasoning: str = ""
         self._content_has_nonws: bool = False
         self._suppress_tool_calls: bool = False
+        self._content_ws_pending: str = ""
+        self._strip_leading_content: bool = False
+        self._any_tool_call_seen: bool = False
 
         self._arg_converter = parser_engine_config.arg_converter
         self._arg_structural_chars = parser_engine_config.arg_structural_chars
@@ -188,9 +191,10 @@ class ParserEngine(Parser):
 
     def finish_streaming(self) -> DeltaMessage | None:
         events = self._engine.finish()
+        delta = None
         if events or self._deferred_content:
-            return self._events_to_delta(events, finished=True)
-        return None
+            delta = self._events_to_delta(events, finished=True)
+        return self._strip_boundary_content_ws(delta, finished=True)
 
     def _reset(self, initial_state: ParserState | None = None) -> None:
         self._engine.reset(initial_state=initial_state)
@@ -200,6 +204,9 @@ class ParserEngine(Parser):
         self._deferred_reasoning = ""
         self._content_has_nonws = False
         self._prompt_streaming_prepared = False
+        self._content_ws_pending = ""
+        self._strip_leading_content = False
+        self._any_tool_call_seen = False
 
     def adjust_request(
         self, request: ChatCompletionRequest | ResponsesRequest
@@ -446,6 +453,7 @@ class ParserEngine(Parser):
             events.extend(self._engine.finish())
         result = self._events_to_delta(events, finished=finished)
         result = self._strip_trailing_reasoning(result)
+        result = self._strip_boundary_content_ws(result, finished=finished)
 
         # Suppress reasoning deltas if not requested
         if result and not request.include_reasoning:
@@ -483,6 +491,76 @@ class ParserEngine(Parser):
                 return None
         elif self._deferred_reasoning and self._reasoning_ended:
             self._deferred_reasoning = ""
+        return delta
+
+    def _strip_boundary_content_ws(
+        self,
+        delta: DeltaMessage | None,
+        finished: bool,
+    ) -> DeltaMessage | None:
+        """Trim content whitespace at tool-call boundaries during streaming.
+
+        The non-streaming path applies ``content.strip()`` to the aggregate
+        content when tool calls are present (see
+        :meth:`_strip_content_whitespace`), which reduces to trimming the
+        leading whitespace of the first content chunk and the trailing
+        whitespace of the last, with interior whitespace preserved. This
+        reproduces that incrementally: leading whitespace of content emitted
+        right after a tool call is dropped, and trailing whitespace is
+        withheld until either more content follows (released as interior
+        whitespace) or a tool call / end-of-stream drops it.
+
+        Gated by ``strip_content_whitespace_with_tools``; when disabled (e.g.
+        DeepSeek, Kimi K2), passes through unchanged.
+
+        Args:
+            delta: The assembled streaming delta, or ``None``.
+            finished: Whether this is the final delta of the stream.
+
+        Returns:
+            The delta with boundary content whitespace resolved, or ``None``.
+        """
+        if not self._strip_content_ws_with_tools:
+            return delta
+
+        tool_in_delta = delta is not None and bool(delta.tool_calls)
+
+        if delta is not None and delta.content:
+            text = self._content_ws_pending + delta.content
+            self._content_ws_pending = ""
+            if self._strip_leading_content:
+                text = text.lstrip()
+                if text:
+                    self._strip_leading_content = False
+            kept = text.rstrip()
+            self._content_ws_pending = text[len(kept) :]
+            delta.content = kept or None
+
+        if tool_in_delta:
+            self._any_tool_call_seen = True
+            self._content_ws_pending = ""
+            self._strip_leading_content = True
+
+        if finished:
+            if self._any_tool_call_seen:
+                self._content_ws_pending = ""
+            elif self._content_ws_pending:
+                flushed = self._content_ws_pending
+                self._content_ws_pending = ""
+                if delta is None:
+                    delta = DeltaMessage(content=flushed)
+                elif delta.content is None:
+                    delta.content = flushed
+                else:
+                    delta.content += flushed
+
+        if (
+            delta is not None
+            and delta.content is None
+            and not delta.tool_calls
+            and delta.reasoning is None
+        ):
+            return None
         return delta
 
     # ── Non-streaming: extract_reasoning ──────────────────────────────
@@ -588,7 +666,8 @@ class ParserEngine(Parser):
         self.initialize_streaming()
         self._check_skip_tool_parsing(request)
         events = self._feed(delta_text, delta_token_ids)
-        return self._strip_trailing_reasoning(self._events_to_delta(events))
+        result = self._strip_trailing_reasoning(self._events_to_delta(events))
+        return self._strip_boundary_content_ws(result, finished=False)
 
     # ── Reasoning state queries ───────────────────────────────────────
 
