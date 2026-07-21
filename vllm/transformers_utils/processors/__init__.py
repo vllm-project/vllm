@@ -88,13 +88,7 @@ _CLASS_TO_MODULE: dict[str, str] = {
 def __getattr__(name: str):
     if name in _CLASS_TO_MODULE:
         module_name = _CLASS_TO_MODULE[name]
-        try:
-            module = importlib.import_module(module_name)
-        except ModuleNotFoundError as e:
-            # Let getattr(processors, name, None) gracefully fall back.
-            raise AttributeError(
-                f"module 'processors' has no attribute '{name}'"
-            ) from e
+        module = importlib.import_module(module_name)
         return getattr(module, name)
 
     raise AttributeError(f"module 'processors' has no attribute '{name}'")

@@ -548,16 +548,6 @@ class MiniCPMVProcessingInfo(BaseProcessingInfo):
 
     def get_hf_processor(self, **kwargs: object):
         hf_processor = self.ctx.get_hf_processor(**kwargs)
-        """
-        from vllm.transformers_utils.processors.minicpmv import MiniCPMVProcessor
-
-        vendored_processor = MiniCPMVProcessor(
-            image_processor=hf_processor.image_processor,
-            tokenizer=hf_processor.tokenizer,
-            version=self.get_model_version(),
-        )
-        hf_processor = vendored_processor
-        """
 
         # NumPy arrays are considered as Iterable but not Sequence in
         # https://github.com/huggingface/transformers/blob/main/src/transformers/image_transforms.py#L428
@@ -724,7 +714,7 @@ class MiniCPMVDummyInputsBuilder(BaseDummyInputsBuilder[_I]):
         # placeholder text is tokenized differently inside chat templates.
         # Keep dummy startup prompts aligned with the real online prompt shape
         # so encoder-budget initialization exercises the same path.
-        if self.info.get_model_version() in {(4, 0), (4, 5), (4, 6)}:
+        if self.info.get_model_version() in {(4, 0), (4, 5)}:
             return f"<|im_start|>user\n{prompt_text}<|im_end|>\n<|im_start|>assistant\n"
 
         return prompt_text
@@ -983,7 +973,7 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
         # encoded standalone versus inside chat templates, so token-mode
         # replacement may miss them. Add a V-series-only insertion fallback at
         # the stable user prefix instead of changing the generic processor.
-        if self.info.get_model_version() in {(4, 0), (4, 5), (4, 6)}:
+        if self.info.get_model_version() in {(4, 0), (4, 5)}:
             user_prefix_ids = tokenizer.encode(
                 "<|im_start|>user",
                 add_special_tokens=False,
