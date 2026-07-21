@@ -55,7 +55,7 @@ from __future__ import annotations
 import copy
 import json
 from enum import Enum
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from vllm.config import VllmConfig
 from vllm.entrypoints.chat_utils import (
