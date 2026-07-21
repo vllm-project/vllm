@@ -2130,9 +2130,10 @@ class VllmConfig:
         model_config = self.model_config
         speculative_config = self.speculative_config
 
-        if self.parallel_config.prefill_context_parallel_size > 1:
+        if self.parallel_config.prefill_context_parallel_size > 1 and not (
+            model_config is not None and model_config.use_mla
+        ):
             unsupported.append("prefill context parallelism")
-
         if self.compilation_config.mode == CompilationMode.STOCK_TORCH_COMPILE:
             unsupported.append("stock torch.compile")
 
@@ -2201,13 +2202,6 @@ class VllmConfig:
 
         if model_config is not None and model_config.enable_prompt_embeds:
             unsupported.append("prompt embeds")
-
-        if (
-            model_config is not None
-            and model_config.runner_type == "generate"
-            and model_config.logprobs_mode in ("raw_logits", "processed_logits")
-        ):
-            unsupported.append(f"logprobs mode '{model_config.logprobs_mode}'")
 
         if self.cache_config.kv_sharing_fast_prefill:
             # Will be added by https://github.com/vllm-project/vllm/pull/35045

@@ -46,6 +46,7 @@ class LoRAExpertsMixin:
         num_tokens: int,
         top_k_num: int,
         add_inputs: bool = True,
+        swap_w13_slices: bool = False,
     ) -> tuple[
         torch.Tensor | None,
         torch.Tensor | None,
@@ -53,6 +54,7 @@ class LoRAExpertsMixin:
         torch.Tensor | None,
     ]:
         w13_lora_a_stacked = lora_context.w13_lora_a_stacked
+        w13_lora_b_stacked = lora_context.w13_lora_b_stacked
         if lora_context.enable_moe_shared_loras:
             # w13 lora_A is shared across experts (collapsed expert-dim 1);
             # broadcast to local_num_experts via a stride-0 view. The kernel
@@ -61,11 +63,19 @@ class LoRAExpertsMixin:
                 a.expand(-1, lora_context.local_num_experts, -1, -1)
                 for a in w13_lora_a_stacked
             )
+        if swap_w13_slices:
+            # The expand kernel writes slice j into the j-th half of y's last
+            # dim. Reversing the (gate, up) slice tuples makes it emit
+            # [up, gate] order directly -- used by the FlashInfer trtllm path,
+            # whose SwiGLU expects the up half first, to avoid an out-of-place
+            # concat swap afterwards.
+            w13_lora_a_stacked = w13_lora_a_stacked[::-1]
+            w13_lora_b_stacked = w13_lora_b_stacked[::-1]
         return lora_context.punica_wrapper.add_lora_w13(
             y,
             x,
             w13_lora_a_stacked,
-            lora_context.w13_lora_b_stacked,
+            w13_lora_b_stacked,
             topk_ids,
             topk_weights,
             expert_map,
