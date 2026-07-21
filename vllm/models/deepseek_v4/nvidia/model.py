@@ -1874,13 +1874,13 @@ class DeepseekV4ForCausalLM(
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
-        skipped_layer_ids = self.model.index_cache_skipped_layer_ids
-        if skipped_layer_ids:
-            weights = (
-                (name, weight)
-                for name, weight in weights
-                if not _is_dsv4_skipped_indexer_weight(name, skipped_layer_ids)
-            )
+        # skipped_layer_ids = self.model.index_cache_skipped_layer_ids
+        # if skipped_layer_ids:
+        #     weights = (
+        #         (name, weight)
+        #         for name, weight in weights
+        #         if not _is_dsv4_skipped_indexer_weight(name, skipped_layer_ids)
+        #     )
         loaded_params = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
         self.process_weights_after_loading()
         return loaded_params
