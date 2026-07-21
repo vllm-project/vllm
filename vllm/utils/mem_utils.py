@@ -206,6 +206,7 @@ class MemoryProfilingResult:
     torch_peak_increase: int = 0
     non_torch_increase: int = 0
     total_consumed: int = 0
+    transient_peak_headroom: int = 0
     weights_memory: int = 0
     before_create: MemorySnapshot = field(default_factory=MemorySnapshot)
     profile_time: float = 0.0
@@ -319,7 +320,7 @@ def memory_profiling(
 
     # total_consumed already covers persistent torch allocations; add only the
     # transient peak headroom to avoid double-counting.
-    transient_peak_headroom = (
+    result.transient_peak_headroom = (
         result.after_profile.torch_peak - result.after_profile.torch_allocated
     )
-    result.non_kv_cache_memory = result.total_consumed + transient_peak_headroom
+    result.non_kv_cache_memory = result.total_consumed + result.transient_peak_headroom
