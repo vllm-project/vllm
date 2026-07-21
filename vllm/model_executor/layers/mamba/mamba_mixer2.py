@@ -1073,6 +1073,9 @@ class MambaMixer2(MambaBase, PluggableLayer):
                     max_cache_len=self.replayssm_buffer_len,
                     state_batch_indices=state_indices_tensor_d_input,
                     out=preallocated_ssm_out_d,
+                    # Stochastic Rounding for the vanilla decode path is read
+                    # from mamba_config inside ssu_dispatch; the replay kernel
+                    # isn't a dispatch backend, so pass it here.
                     enable_stochastic_rounding=(
                         self.mamba_config.enable_stochastic_rounding
                     ),
