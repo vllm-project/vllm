@@ -131,6 +131,10 @@ _ONLINE_SHORTHANDS: dict[str, QuantizationConfigArgs] = {
         linear=QuantSpec(weight=kMxfp8Dynamic),
         moe=QuantSpec(weight=kMxfp8Dynamic),
     ),
+    "mxfp4": QuantizationConfigArgs(
+        linear=QuantSpec(weight=kMxfp4Dynamic),
+        moe=QuantSpec(weight=kMxfp4Dynamic),
+    ),
     # INT8 weight-only on MoE; linear stays unquantized (no `linear` field).
     "int8_per_channel_weight_only": QuantizationConfigArgs(
         moe=QuantSpec(weight=kInt8StaticChannelSym),
