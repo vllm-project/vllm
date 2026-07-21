@@ -8,11 +8,15 @@ torch==2.11.0
 torchaudio==2.11.0
 # These must be updated alongside torch
 torchvision==0.26.0 # Required for phi3v processor. See https://github.com/pytorch/vision?tab=readme-ov-file#installation for corresponding version
-PyNvVideoCodec==2.1.0
+torchcodec >= 0.14
+PyNvVideoCodec==2.0.4
 # FlashInfer should be updated together with the Dockerfile
-flashinfer-python==0.6.13
-flashinfer-cubin==0.6.13
-apache-tvm-ffi==0.1.9
+# flashinfer-cubin is not on PyPI since 0.6.14; setup.py excludes it from
+# install_requires so the published wheel does not carry an unresolvable pin
+--extra-index-url https://flashinfer.ai/whl/
+flashinfer-python==0.6.14
+flashinfer-cubin==0.6.14
+apache-tvm-ffi==0.1.10
 tilelang==0.1.9
 nvidia-cudnn-frontend>=1.19.1
 # Required for LLM_NVTX_SCOPES_FOR_PROFILING=1
@@ -21,11 +25,11 @@ nvtx==0.2.15
 fastsafetensors >= 0.3.2
 
 # QuACK and Cutlass DSL for FA4 (cute-DSL implementation)
-nvidia-cutlass-dsl[cu13]==4.5.2
-quack-kernels>=0.3.3
+nvidia-cutlass-dsl[cu13]==4.6.0
+quack-kernels>=0.4.0  # Required for tml-fa4
 
 # Tokenspeed_MLA for faster mla with spec decode
-tokenspeed-mla==0.1.2; platform_system == "Linux"
+tokenspeed-mla==0.1.8; platform_system == "Linux"
 
 # Humming kernels for quantization gemm
-humming-kernels[cu13]==0.1.6
+humming-kernels[cu13]==0.1.10

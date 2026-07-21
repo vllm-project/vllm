@@ -24,8 +24,8 @@ from vllm.v1.attention.backend import (
     AttentionMetadata,
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
+    MLAAttentionImpl,
     MultipleOf,
-    SparseMLAAttentionImpl,
 )
 from vllm.v1.attention.backends.mla.rocm_aiter_mla import (
     AiterMLAHelper,
@@ -347,9 +347,7 @@ class ROCMAiterMLASparseMetadata(AttentionMetadata):
 class ROCMAiterMLASparseMetadataBuilder(
     AttentionMetadataBuilder[ROCMAiterMLASparseMetadata]
 ):
-    _cudagraph_support: ClassVar[AttentionCGSupport] = (
-        AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
-    )
+    _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
 
     def __init__(
         self,
@@ -365,9 +363,14 @@ class ROCMAiterMLASparseMetadataBuilder(
         self.device = device
         max_num_batched_tokens = vllm_config.scheduler_config.max_num_batched_tokens
 
+        self.vllm_config = vllm_config
+        self._init_reorder_batch_threshold(1, supports_spec_as_decode=True)
+
         self.num_heads = self.model_config.get_num_attention_heads(parallel_config)
         self.mla_dims = get_mla_dims(self.model_config)
         self.topk_tokens = vllm_config.model_config.hf_config.index_topk
+        # Bounds the KV-split heuristic (see `_sparse_decode_max_split`).
+        self._num_compute_units = current_platform.num_compute_units()
         self.max_model_len_tensor = torch.tensor(
             [self.model_config.max_model_len], device=device, dtype=torch.int32
         )
@@ -463,6 +466,21 @@ class ROCMAiterMLASparseMetadataBuilder(
         self._prev_indices_extent: int = 0
         self._prev_metadata_key: tuple | None = None
 
+    def _sparse_decode_max_split(self, max_seq_len: int) -> int:
+        """Cap ``max_split_per_batch`` for the aiter sparse-MLA decode reduce.
+
+        The reduce only covers the selected tokens per row (``<= topk_tokens``),
+        so aiter's default (``-1`` => split across every CU) over-fragments it.
+        Mirror ``triton_mla.py``: aim for a minimum work per split, round to a
+        power of two, and cap by the CU count. Numerics are unchanged.
+        """
+        effective_len = min(max_seq_len, self.topk_tokens)
+        min_work_per_split = 128
+        ideal_splits = triton.next_power_of_2(
+            max(1, effective_len // min_work_per_split)
+        )
+        return min(ideal_splits, self._num_compute_units)
+
     def build(
         self,
         common_prefix_len: int,
@@ -522,12 +540,17 @@ class ROCMAiterMLASparseMetadataBuilder(
         # treated as its own batch entry), so persistent metadata can always
         # be precomputed here. The kernel switches to the persistent
         # work-stealing path automatically when work_meta_data is non-None.
-        # The output is a deterministic function of (num_tokens, max_query_len,
-        # num_heads, min(seq_lens, topk_tokens)); fingerprint those CPU-side
-        # and skip the launch when nothing changed.
+        # The output is a deterministic function of the per-request query and
+        # context lengths (both clamped to topk_tokens, past which per-token KV
+        # length saturates) and num_heads; fingerprint those CPU-side and skip
+        # the launch when nothing changed.
         num_reqs = common_attn_metadata.num_reqs
         clamped_seq_lens = np.minimum(
             common_attn_metadata.seq_lens_cpu[:num_reqs].numpy(),
+            self.topk_tokens,
+        )
+        clamped_context_lens = np.minimum(
+            common_attn_metadata.seq_lens_cpu[:num_reqs].numpy() - seg_lengths,
             self.topk_tokens,
         )
         metadata_key = (
@@ -535,20 +558,15 @@ class ROCMAiterMLASparseMetadataBuilder(
             int(common_attn_metadata.max_query_len),
             self._num_attention_heads,
             clamped_seq_lens.tobytes(),
+            clamped_context_lens.tobytes(),
+            seg_lengths.tobytes(),
         )
-        # The persistent MLA kernel is numerically wrong for multi-token prefill
-        # batches; errors compound across chunked prefill and break long-context
-        # decode (vllm#47042). Use it only for decode and single-chunk prefills,
-        # not chunked-prefill continuations (>1 query token, seq_len > query_len).
-        step_query_lens = seg_lengths
-        total_seq_lens = common_attn_metadata.seq_lens_cpu[:num_reqs].numpy()
-        is_chunked_continuation = (step_query_lens > 1) & (
-            total_seq_lens > step_query_lens
-        )
-        use_persistent = not is_chunked_continuation.any()
-        if use_persistent and metadata_key != self._prev_metadata_key:
+        if metadata_key != self._prev_metadata_key:
             from aiter import get_mla_metadata_v1
 
+            max_split_per_batch = self._sparse_decode_max_split(
+                int(common_attn_metadata.max_seq_len)
+            )
             get_mla_metadata_v1(
                 qo_indptr,
                 paged_kv_indptr,
@@ -567,7 +585,11 @@ class ROCMAiterMLASparseMetadataBuilder(
                 max_seqlen_qo=1,
                 uni_seqlen_qo=1,
                 fast_mode=True,
+                max_split_per_batch=max_split_per_batch,
             )
+            # The persistent metadata buffers are read by graph replay. Order
+            # the async metadata write before the graph-captured decode kernel.
+            torch.cuda.current_stream(self.device).synchronize()
             self._prev_metadata_key = metadata_key
 
         metadata = ROCMAiterMLASparseMetadata(
@@ -586,7 +608,7 @@ class ROCMAiterMLASparseMetadataBuilder(
             paged_kv_last_page_len=paged_kv_last_page_len,
             paged_kv_indices=paged_kv_indices,
             paged_kv_indptr=paged_kv_indptr,
-            work_meta_data=self._mla_work_meta_data if use_persistent else None,
+            work_meta_data=self._mla_work_meta_data,
             work_indptr=self._mla_work_indptr,
             work_info_set=self._mla_work_info_set,
             reduce_indptr=self._mla_reduce_indptr,
@@ -625,7 +647,9 @@ def reference_mla_sparse_prefill(
     return (result, lse)
 
 
-class ROCMAiterMLASparseImpl(SparseMLAAttentionImpl[ROCMAiterMLASparseMetadata]):
+class ROCMAiterMLASparseImpl(MLAAttentionImpl[ROCMAiterMLASparseMetadata]):
+    is_sparse = True
+
     def __init__(
         self,
         num_heads: int,

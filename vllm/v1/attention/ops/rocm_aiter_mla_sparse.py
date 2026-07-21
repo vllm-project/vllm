@@ -1187,10 +1187,12 @@ def _sparse_attn_prefill_ragged_kernel(
     kv_len = kv_end - kv_start
 
     k_offsets = tl.arange(0, BLOCK_K)
+    slot = tl.load(
+        kv_indices_ptr + kv_start + k_offsets, mask=k_offsets < kv_len, other=-1
+    )
     for k_start in tl.range(0, kv_len, BLOCK_K):
         k_pos = k_start + k_offsets
         in_range = k_pos < kv_len
-        slot = tl.load(kv_indices_ptr + kv_start + k_pos, mask=in_range, other=-1)
         valid = in_range & (slot >= 0) & (slot < num_kv)
         safe_slot = tl.where(valid, slot, 0)
 
@@ -1201,7 +1203,11 @@ def _sparse_attn_prefill_ragged_kernel(
             mask=valid[:, None] & dim_mask[None, :],
             other=0.0,
         )
-        kv = tl.where(valid[:, None] & dim_mask[None, :], kv, 0.0)
+
+        next_k_pos = k_start + BLOCK_K + k_offsets
+        slot = tl.load(
+            kv_indices_ptr + kv_start + next_k_pos, mask=next_k_pos < kv_len, other=-1
+        )
 
         scores = tl.dot(q, tl.trans(kv)) * scale
         scores = tl.where(head_mask[:, None] & valid[None, :], scores, neg_large)
@@ -1865,6 +1871,7 @@ def _rocm_sparse_attn_prefill_ragged_triton(
     block_h = 16
     block_d = triton.next_power_of_2(head_dim)
     block_k = 16 if head_dim >= 256 else 32
+    num_warps = 4
     out = torch.empty_like(q, dtype=torch.bfloat16)
     _sparse_attn_prefill_ragged_kernel[(num_queries, triton.cdiv(num_heads, block_h))](
         q,
@@ -1889,7 +1896,7 @@ def _rocm_sparse_attn_prefill_ragged_triton(
         BLOCK_H=block_h,
         BLOCK_D=block_d,
         BLOCK_K=block_k,
-        num_warps=8,
+        num_warps=num_warps,
     )
     return out
 
@@ -2097,7 +2104,7 @@ def _rocm_sparse_attn_decode_ragged_triton(
     comb_dim = nope_head_dim + rope_head_dim
     is_fnuz = current_platform.is_fp8_fnuz()
 
-    if not _ON_GFX950:  # Fallback path for un-tuned architectures.
+    if not (_ON_GFX942 or _ON_GFX950):  # Fallback path for un-tuned architectures.
         block_k = 16 if head_dim >= 256 else 32
         _sparse_attn_decode_ragged_kernel[(num_queries, heads_blocks)](
             q,
@@ -2198,7 +2205,7 @@ def _rocm_sparse_attn_decode_ragged_triton(
         num_warps=4,
     )
 
-    _sparse_attn_decode_reduce_kernel[(num_queries, heads_blocks)](
+    _sparse_attn_decode_reduce_kernel[(num_queries, num_heads)](
         part_m,
         part_l,
         part_acc,
@@ -2214,7 +2221,7 @@ def _rocm_sparse_attn_decode_ragged_triton(
         num_heads,
         HAS_ATTN_SINK=has_attn_sink,
         COMB_DIM=comb_dim,
-        BLOCK_H=block_h,
+        BLOCK_H=1,
         NUM_SPLITS=num_splits,
         SPLITS_PAD=triton.next_power_of_2(num_splits),
         num_warps=4,

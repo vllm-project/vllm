@@ -14,6 +14,7 @@ __all__ = [
     "BagelProcessor",
     "CheersProcessor",
     "CohereASRProcessor",
+    "Cosmos3EdgeProcessor",
     "DeepseekVLV2Processor",
     "FireRedASR2Processor",
     "FireRedLIDProcessor",
@@ -21,8 +22,6 @@ __all__ = [
     "GLM4VProcessor",
     "Granite4VisionProcessor",
     "H2OVLProcessor",
-    "HunYuanVLProcessor",
-    "HunYuanVLImageProcessor",
     "Moondream3Processor",
     "InternVLProcessor",
     "IsaacProcessor",
@@ -45,12 +44,16 @@ __all__ = [
     "Ovis2_5Processor",
     "Qwen3ASRProcessor",
     "Step3VLProcessor",
+    "InklingProcessor",
+    "InklingImageProcessor",
+    "InklingAudioFeatureExtractor",
 ]
 
 _CLASS_TO_MODULE: dict[str, str] = {
     "BagelProcessor": "vllm.transformers_utils.processors.bagel",
     "CheersProcessor": "vllm.transformers_utils.processors.cheers",
     "CohereASRProcessor": "vllm.transformers_utils.processors.cohere_asr",
+    "Cosmos3EdgeProcessor": "vllm.transformers_utils.processors.cosmos3_edge",
     "DeepseekVLV2Processor": "vllm.transformers_utils.processors.deepseek_vl2",
     "FireRedASR2Processor": "vllm.transformers_utils.processors.fireredasr2",
     "FireRedLIDProcessor": "vllm.transformers_utils.processors.fireredlid",
@@ -58,8 +61,6 @@ _CLASS_TO_MODULE: dict[str, str] = {
     "GLM4VProcessor": "vllm.transformers_utils.processors.glm4v",
     "Granite4VisionProcessor": "vllm.transformers_utils.processors.granite4_vision",
     "H2OVLProcessor": "vllm.transformers_utils.processors.h2ovl",
-    "HunYuanVLProcessor": "vllm.transformers_utils.processors.hunyuan_vl",
-    "HunYuanVLImageProcessor": "vllm.transformers_utils.processors.hunyuan_vl_image",
     "InternVLProcessor": "vllm.transformers_utils.processors.internvl",
     "IsaacProcessor": "vllm.transformers_utils.processors.isaac",
     "KimiAudioProcessor": "vllm.transformers_utils.processors.kimi_audio",
@@ -82,6 +83,9 @@ _CLASS_TO_MODULE: dict[str, str] = {
     "Ovis2_5Processor": "vllm.transformers_utils.processors.ovis2_5",
     "Qwen3ASRProcessor": "vllm.transformers_utils.processors.qwen3_asr",
     "Step3VLProcessor": "vllm.transformers_utils.processors.step3_vl",
+    "InklingProcessor": "vllm.transformers_utils.processors.inkling",
+    "InklingImageProcessor": "vllm.transformers_utils.processors.inkling",
+    "InklingAudioFeatureExtractor": "vllm.transformers_utils.processors.inkling",
 }
 
 

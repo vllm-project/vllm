@@ -10,6 +10,7 @@ import ast
 import asyncio
 import json
 import os
+import tempfile
 import time
 from collections.abc import Generator
 
@@ -25,7 +26,7 @@ INVALID = -9999999
 def download_and_cache_file(url: str, filename: str | None = None) -> str:
     """Download and cache a file from a URL."""
     if filename is None:
-        filename = os.path.join("/tmp", url.split("/")[-1])
+        filename = os.path.join(tempfile.gettempdir(), url.split("/")[-1])
 
     if os.path.exists(filename):
         return filename
@@ -146,6 +147,7 @@ async def call_vllm_chat_api(
 def _build_gsm8k_prompts(
     num_questions: int = 1319,
     num_shots: int = 5,
+    gen_prefix: str = "",
 ) -> tuple[list[str], list[int]]:
     """Build few-shot GSM8K completion prompts and ground-truth labels."""
     if num_questions == 0:
@@ -157,14 +159,15 @@ def _build_gsm8k_prompts(
     for i in range(num_shots):
         few_shot_examples += (
             f"Question: {train_data[i]['question']}\n"
-            f"Answer: {train_data[i]['answer']}\n\n"
+            f"Answer:{gen_prefix} {train_data[i]['answer']}\n\n"
         )
 
     prompts = []
     labels = []
     for i in range(num_questions):
         prompts.append(
-            few_shot_examples + f"Question: {test_data[i]['question']}\nAnswer:"
+            few_shot_examples
+            + f"Question: {test_data[i]['question']}\nAnswer:{gen_prefix}"
         )
         labels.append(get_answer_value(test_data[i]["answer"]))
 
@@ -213,6 +216,8 @@ def evaluate_gsm8k(
     temperature: float = 0.0,
     seed: int | None = 42,
     request_timeout_seconds: float = 600,
+    gen_prefix: str = "",
+    max_concurrency: int | None = None,
 ) -> dict[str, float | int]:
     """
     Evaluate GSM8K accuracy using vLLM serve endpoint.
@@ -220,7 +225,7 @@ def evaluate_gsm8k(
     Returns dict with accuracy, invalid_rate, latency, etc.
     """
     base_url = f"{host}:{port}"
-    prompts, labels = _build_gsm8k_prompts(num_questions, num_shots)
+    prompts, labels = _build_gsm8k_prompts(num_questions, num_shots, gen_prefix)
     num_questions = len(prompts)
 
     async def run_async_evaluation():
@@ -257,7 +262,14 @@ def evaluate_gsm8k(
             return answer, tokens
 
         timeout = aiohttp.ClientTimeout(total=request_timeout_seconds)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
+        connector = (
+            aiohttp.TCPConnector(limit=max_concurrency)
+            if max_concurrency is not None
+            else None
+        )
+        async with aiohttp.ClientSession(
+            timeout=timeout, connector=connector
+        ) as session:
             tasks = [get_answer(session, i) for i in range(num_questions)]
             await tqdm.gather(*tasks, desc="Evaluating")
 
@@ -278,28 +290,37 @@ def evaluate_gsm8k_offline(
     num_shots: int = 5,
     max_tokens: int = 256,
     temperature: float = 0.0,
+    gen_prefix: str = "",
+    use_chat_completions: bool = False,
 ) -> dict[str, float | int]:
     """Evaluate GSM8K accuracy using an offline vllm.LLM object.
 
     Same prompts and scoring as evaluate_gsm8k(), but runs generation
     directly via llm.generate() instead of calling a server over HTTP.
+
+    When ``use_chat_completions=True``, prompts go through the chat template via
+    ``llm.chat()`` instead of raw completion (for instruction-tuned models).
     """
     from vllm import SamplingParams
 
-    prompts, labels = _build_gsm8k_prompts(num_questions, num_shots)
-
+    prompts, labels = _build_gsm8k_prompts(num_questions, num_shots, gen_prefix)
     sampling_params = SamplingParams(
         temperature=temperature,
         max_tokens=max_tokens,
         stop=["Question", "Assistant:", "<|separator|>"],
     )
-
+    mode = "chat" if use_chat_completions else "completion"
     print(
-        f"Running offline GSM8K evaluation: {len(prompts)} questions, {num_shots}-shot"
+        f"Running offline GSM8K evaluation: {len(prompts)} questions, "
+        f"{num_shots}-shot, {mode}"
     )
 
     tic = time.perf_counter()
-    outputs = llm.generate(prompts, sampling_params)
+    if use_chat_completions:
+        conversations = [[{"role": "user", "content": p}] for p in prompts]
+        outputs = llm.chat(conversations, sampling_params)
+    else:
+        outputs = llm.generate(prompts, sampling_params)
     latency = time.perf_counter() - tic
 
     states = [o.outputs[0].text for o in outputs]
@@ -330,6 +351,11 @@ def main() -> None:
     parser.add_argument(
         "--seed", type=int, default=42, help="Random seed for reproducibility"
     )
+    parser.add_argument(
+        "--max-concurrency",
+        type=int,
+        help="Maximum number of concurrent requests",
+    )
     parser.add_argument("--save-results", type=str, help="Save results to JSON file")
 
     args = parser.parse_args()
@@ -342,6 +368,7 @@ def main() -> None:
         port=args.port,
         temperature=args.temperature,
         seed=args.seed,
+        max_concurrency=args.max_concurrency,
     )
 
     # Print results to terminal
