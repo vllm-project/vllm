@@ -12,8 +12,6 @@ import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.config import get_current_vllm_config
 from vllm.logger import init_logger
 from vllm.model_executor.kernels.linear import (
-    MarlinNvFp4LinearKernel,
-    NvFp4LinearLayerConfig,
     init_fp8_linear_kernel,
     init_mxfp8_linear_kernel,
     init_nvfp4_linear_kernel,
@@ -1250,14 +1248,15 @@ class ModelOptNvFp4W4A16LinearMethod(LinearMethodBase):
     """Linear method for ModelOpt NVFP4 W4A16.
 
     4-bit NVFP4 weights, fp16/bf16 activations. Loads ModelOpt-style names
-    directly (no on-disk conversion) and dispatches to the FP4 Marlin GEMM:
+    directly (no on-disk conversion) and dispatches to a weight-only NVFP4
+    GEMM (Marlin, or FlashInfer's bf16 x fp4 kernel where selected):
 
         weight          uint8     packed NVFP4 (2 nibbles/byte along input dim)
         weight_scale    fp8-e4m3  per 16-elem group along input dim
         weight_scale_2  fp32      per-tensor global scale = amax / (6.0 * 448.0)
 
-    No activation quantization. Marlin expects the global scale in the same
-    form ModelOpt stores (amax/2688), so we rename weight_scale_2 ->
+    No activation quantization. The W4A16 kernels expect the global scale in
+    the same form ModelOpt stores (amax/2688), so we rename weight_scale_2 ->
     weight_global_scale **without reciprocation** -- the CT W4A16 path
     reciprocates only because CT stores the inverse on disk.
 
@@ -1272,15 +1271,9 @@ class ModelOptNvFp4W4A16LinearMethod(LinearMethodBase):
         self.quant_config = quant_config
         # Vestigial slot mirrored from ModelOptNvFp4LinearMethod: the parent
         # config's get_quant_method only fills marlin_input_dtype when
-        # backend == "marlin"; we don't set that since we pin the kernel
-        # below, but we keep the attribute for shape parity.
+        # backend == "marlin"; we keep the attribute for shape parity.
         self.marlin_input_dtype = None
-        # Direct-instantiate the Marlin NVFP4 adapter rather than going through
-        # init_nvfp4_linear_kernel(): the latter's priority list returns a
-        # cutlass W4A4 kernel as first-pick on this hardware, which would
-        # silently try to quantize activations (we have no input_scale). For
-        # W4A16 there is exactly one valid kernel, so we pin it.
-        self.kernel = MarlinNvFp4LinearKernel(NvFp4LinearLayerConfig())
+        self.kernel = init_nvfp4_linear_kernel(use_a16=True)
 
     def create_weights(
         self,

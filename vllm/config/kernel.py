@@ -216,7 +216,8 @@ class KernelConfig:
     - "auto": Automatically select the best backend based on model and hardware
     - "cutlass": Use CUTLASS-based kernels
     - "flashinfer_cutlass": Use FlashInfer with CUTLASS kernels
-    - "flashinfer_cutedsl": Use FlashInfer with CuTe-DSL kernels (NVFP4, MXFP8)
+    - "flashinfer_cutedsl": Use FlashInfer with CuTe-DSL kernels (NVFP4,
+      MXFP8; for weight-only NVFP4 this selects the bf16 x fp4 W4A16 GEMM)
     - "flashinfer_trtllm": Use FlashInfer with TensorRT-LLM kernels
     - "flashinfer_cudnn": Use FlashInfer with cuDNN kernels
     - "flashinfer_b12x": Use FlashInfer b12x CuteDSL NVFP4 GEMM (SM120+)

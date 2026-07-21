@@ -128,6 +128,7 @@ from vllm.model_executor.kernels.linear.nvfp4.flashinfer import (
     FlashInferCuteDslNvFp4LinearKernel,
     FlashInferCutlassNvFp4LinearKernel,
     FlashInferTrtllmNvFp4LinearKernel,
+    FlashInferW4A16NvFp4LinearKernel,
 )
 from vllm.model_executor.kernels.linear.nvfp4.humming import (
     HummingNvFp4LinearKernel,
@@ -231,6 +232,7 @@ _LINEAR_BACKEND_KERNEL_MAP: dict[str, set[type]] = {
     "flashinfer_cutedsl": {
         FlashInferCuteDslNvFp4LinearKernel,
         FlashInferCutedslMxfp8LinearKernel,
+        FlashInferW4A16NvFp4LinearKernel,
     },
     "flashinfer_trtllm": {
         FlashInferTrtllmNvFp4LinearKernel,
@@ -880,6 +882,63 @@ def init_wfp8_a16_linear_kernel(
     )
 
 
+def _select_nvfp4_a16_kernel(
+    linear_backend: str, config: NvFp4LinearLayerConfig
+) -> type[NvFp4LinearKernel]:
+    """Pick the kernel for weight-only (W4A16) NVFP4 layers.
+
+    W4A16 layers can never use the W4A4 priority list, because those
+    kernels quantize activations and a weight-only checkpoint has no input
+    scale. The choice is between Marlin and FlashInfer's bf16 x fp4 GEMM:
+    the FlashInfer kernel is the default on SM121 (DGX Spark), where it is
+    tuned, and opt-in via --linear-backend flashinfer_cutedsl elsewhere.
+    Explicit --linear-backend values that only contain W4A4 kernels are
+    rejected. The caller validates the returned kernel with is_supported().
+    """
+    fi_kernel = FlashInferW4A16NvFp4LinearKernel
+    marlin_kernel = MarlinNvFp4LinearKernel
+
+    def usable(kernel: type[NvFp4LinearKernel]) -> tuple[bool, str | None]:
+        if kernel.__name__ in envs.VLLM_DISABLED_KERNELS:
+            return False, f"{kernel.__name__} is disabled via VLLM_DISABLED_KERNELS"
+        is_supported, reason = kernel.is_supported()
+        if not is_supported:
+            return False, reason
+        return kernel.can_implement(config)
+
+    if linear_backend != "auto":
+        requested = _LINEAR_BACKEND_KERNEL_MAP.get(linear_backend, set())
+        for kernel in (fi_kernel, marlin_kernel):
+            if kernel not in requested:
+                continue
+            ok, reason = usable(kernel)
+            if not ok:
+                raise ValueError(
+                    f"--linear-backend={linear_backend} cannot serve W4A16 "
+                    f"NVFP4 layers: {reason}"
+                )
+            return kernel
+        raise ValueError(
+            f"--linear-backend={linear_backend} has no kernel for W4A16 "
+            f"NVFP4 layers; use marlin or flashinfer_cutedsl."
+        )
+
+    # Auto selection. VLLM_BATCH_INVARIANT keeps the deterministic Marlin
+    # path; otherwise prefer FlashInfer where its kernel is tuned.
+    if (
+        not envs.VLLM_BATCH_INVARIANT
+        and current_platform.is_device_capability(121)
+        and usable(fi_kernel)[0]
+    ):
+        return fi_kernel
+    if marlin_kernel.__name__ not in envs.VLLM_DISABLED_KERNELS:
+        return marlin_kernel
+    ok, reason = usable(fi_kernel)
+    if ok:
+        return fi_kernel
+    raise ValueError(f"No W4A16 NVFP4 kernel is available: {reason}")
+
+
 def init_nvfp4_linear_kernel(use_a16: bool = False) -> NvFp4LinearKernel:
     """Select and instantiate the best NVFP4 linear kernel for the
     current platform."""
@@ -890,7 +949,12 @@ def init_nvfp4_linear_kernel(use_a16: bool = False) -> NvFp4LinearKernel:
     # back to emulation. It overrides --linear-backend.
     force_kernel: type[NvFp4LinearKernel] | None = None
     linear_backend = _get_linear_backend()
-    if envs.VLLM_BATCH_INVARIANT:
+    if use_a16:
+        # Weight-only layers must never reach the W4A4 kernels (including
+        # the batch-invariant CUTLASS path below): those quantize
+        # activations, and a W4A16 checkpoint has no input scale.
+        force_kernel = _select_nvfp4_a16_kernel(linear_backend, config)
+    elif envs.VLLM_BATCH_INVARIANT:
         bi_supported, reason = CutlassNvFp4LinearKernel.is_supported()
         if bi_supported:
             if linear_backend not in ("auto", "cutlass"):
@@ -919,9 +983,6 @@ def init_nvfp4_linear_kernel(use_a16: bool = False) -> NvFp4LinearKernel:
                 reason,
             )
             force_kernel = EmulationNvFp4LinearKernel
-    elif linear_backend == "auto" and use_a16:
-        # Force a16 (Marlin) when running weight-only quantization.
-        force_kernel = MarlinNvFp4LinearKernel
 
     if force_kernel is not None:
         is_supported, reason = force_kernel.is_supported()
@@ -1094,6 +1155,7 @@ __all__ = [
     "FlashInferCutlassNvFp4LinearKernel",
     "FlashInferTrtllmNvFp4LinearKernel",
     "FlashInferCudnnNvFp4LinearKernel",
+    "FlashInferW4A16NvFp4LinearKernel",
     "MarlinNvFp4LinearKernel",
     "_KernelT",
     "DeepGemmFp8BlockScaledMMKernel",
