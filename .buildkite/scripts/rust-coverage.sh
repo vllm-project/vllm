@@ -171,8 +171,13 @@ rust_coverage_upload() {
     fi
 
     rust_cov_upload_log="$rust_cov_upload_codecov_dir/codecov.log"
-    "$rust_cov_upload_codecov_dir/codecov" "$@" \
-        >"$rust_cov_upload_log" 2>&1
+    # The CLI still resolves codecov.yml file-fix paths against its process
+    # working directory even when --dir and --network-root-folder are set.
+    # E2E steps run from tests/, so execute it from the repository root.
+    (
+        cd "$rust_cov_upload_repo_root" || exit 1
+        "$rust_cov_upload_codecov_dir/codecov" "$@"
+    ) >"$rust_cov_upload_log" 2>&1
     rust_cov_upload_rc=$?
     cat "$rust_cov_upload_log"
     # v11.3.1 can log API failures while returning zero even with
