@@ -419,25 +419,7 @@ class Attention(nn.Module, AttentionLayerBase):
             if block_n is not None:
                 extra_impl_args.setdefault("block_n", block_n)
 
-        impl_cls = self.attn_backend.get_impl_cls()
-        self.impl = impl_cls(  # type: ignore[assignment]  # impl_cls always returns an AttentionImpl subclass
-            num_heads,
-            head_size,
-            scale,
-            num_kv_heads,
-            alibi_slopes,
-            sliding_window,
-            kv_cache_dtype,
-            logits_soft_cap,
-            attn_type,
-            kv_sharing_target_layer_name,
-            **extra_impl_args,
-        )
-        self.backend = AttentionBackendEnum[self.attn_backend.get_name()]
-        self.dtype = dtype
-
-        self.decode_attn_backend = self.attn_backend
-        self.decode_impl = self.impl
+        selected_decode_backend = self.attn_backend
         decode_backend = vllm_config.attention_config.decode_backend
         if routing_enabled:
             from vllm.v1.attention.backends.utils import (
@@ -503,22 +485,41 @@ class Attention(nn.Module, AttentionLayerBase):
                         f"physical KV cache. Choose a decode backend with a "
                         f"matching KV layout."
                     )
-            if selected_decode_backend is not self.attn_backend:
-                self.decode_attn_backend = selected_decode_backend
-                decode_impl_cls = selected_decode_backend.get_impl_cls()
-                self.decode_impl = decode_impl_cls(  # type: ignore[assignment]
-                    num_heads,
-                    head_size,
-                    scale,
-                    num_kv_heads,
-                    alibi_slopes,
-                    sliding_window,
-                    kv_cache_dtype,
-                    logits_soft_cap,
-                    attn_type,
-                    kv_sharing_target_layer_name,
-                    **extra_impl_args,
-                )
+
+        impl_cls = self.attn_backend.get_impl_cls()
+        decode_impl_cls = selected_decode_backend.get_impl_cls()
+        self.impl = impl_cls(  # type: ignore[assignment]  # impl_cls always returns an AttentionImpl subclass
+            num_heads,
+            head_size,
+            scale,
+            num_kv_heads,
+            alibi_slopes,
+            sliding_window,
+            kv_cache_dtype,
+            logits_soft_cap,
+            attn_type,
+            kv_sharing_target_layer_name,
+            **extra_impl_args,
+        )
+        if selected_decode_backend is self.attn_backend:
+            self.decode_impl = self.impl
+        else:
+            self.decode_impl = decode_impl_cls(  # type: ignore[assignment]
+                num_heads,
+                head_size,
+                scale,
+                num_kv_heads,
+                alibi_slopes,
+                sliding_window,
+                kv_cache_dtype,
+                logits_soft_cap,
+                attn_type,
+                kv_sharing_target_layer_name,
+                **extra_impl_args,
+            )
+        self.backend = AttentionBackendEnum[self.attn_backend.get_name()]
+        self.decode_attn_backend = selected_decode_backend
+        self.dtype = dtype
 
         # For cuda-alike (CUDA and ROCM) and cpu platforms, we control how
         # torch.compile works by registering the attention as one giant
