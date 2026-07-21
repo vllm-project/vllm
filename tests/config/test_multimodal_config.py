@@ -1,15 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from dataclasses import replace
-from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
+from transformers import PretrainedConfig
 
 from vllm.config.model import ModelConfig
-from vllm.config.model_arch import ModelArchitectureConfig
 from vllm.config.multimodal import MultiModalConfig
+from vllm.transformers_utils.model_arch_config_convertor import (
+    ModelArchConfigConvertorBase,
+)
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 
@@ -69,120 +70,90 @@ def test_mm_encoder_attn_dtype_hash_updates(tmp_path):
 def _make_mm_prefix_model_config(
     *,
     language_model_only: bool = False,
-    is_mm_prefix_lm: bool = True,
 ) -> ModelConfig:
     model_config = MagicMock(spec=ModelConfig)
     model_config.multimodal_config = MultiModalConfig(
         language_model_only=language_model_only
     )
-    model_config.model_arch_config = ModelArchitectureConfig(
-        architectures=["PrefixLMForConditionalGeneration"],
-        model_type="prefix_lm",
-        text_model_type=None,
-        hidden_size=1,
-        total_num_hidden_layers=1,
-        total_num_attention_heads=1,
-        head_size=1,
-        vocab_size=1,
-        total_num_kv_heads=1,
-        num_experts=0,
-        quantization_config=None,
-        is_deepseek_mla=False,
-        is_mm_prefix_lm=is_mm_prefix_lm,
-        rswa_window=None,
-        derived_max_model_len_and_key=(8192.0, "max_position_embeddings"),
+    # Bind real helper methods onto the mock.
+    model_config._supports_multimodal_for_mm_prefix = (
+        ModelConfig._supports_multimodal_for_mm_prefix.__get__(model_config, ModelConfig)
     )
     return model_config
 
 
-@pytest.mark.parametrize(
-    ("supported_limits", "allowed_limits", "expected"),
-    [
-        ({"image": None, "video": None}, {"image": 1, "video": 1}, True),
-        ({"image": None, "video": None}, {"image": 0, "video": 0}, False),
-        ({"image": None}, {"image": 0}, False),
-        (
-            {"image": None, "video": None, "audio": None},
-            {"image": 0, "video": 1, "audio": 1},
-            True,
-        ),
-        ({"audio": None}, {"audio": 0}, True),
-    ],
-)
-def test_mm_prefix_lm_respects_vision_limits(
-    supported_limits: dict[str, int | None],
-    allowed_limits: dict[str, int],
-    expected: bool,
-):
+@pytest.mark.parametrize("supports_mm", [True, False])
+def test_supports_multimodal_for_mm_prefix_uses_registry(supports_mm: bool):
     model_config = _make_mm_prefix_model_config()
-    info = SimpleNamespace(
-        supported_mm_limits=supported_limits,
-        allowed_mm_limits=allowed_limits,
-    )
 
     with patch(
-        "vllm.multimodal.MULTIMODAL_REGISTRY.get_processing_info",
-        return_value=info,
+        "vllm.multimodal.MULTIMODAL_REGISTRY.supports_multimodal_inputs",
+        return_value=supports_mm,
+    ) as mocked:
+        assert model_config._supports_multimodal_for_mm_prefix() is supports_mm
+        mocked.assert_called_once_with(model_config)
+
+    # Sticky cache — registry must not be consulted again.
+    with patch(
+        "vllm.multimodal.MULTIMODAL_REGISTRY.supports_multimodal_inputs",
+        side_effect=AssertionError("should use cache"),
     ):
-        result = ModelConfig._apply_mm_prefix_lm_limits(
-            model_config, model_config.model_arch_config
-        )
-
-    assert result.is_mm_prefix_lm is expected
+        assert model_config._supports_multimodal_for_mm_prefix() is supports_mm
 
 
-def test_language_model_only_disables_mm_prefix_lm():
-    model_config = _make_mm_prefix_model_config(language_model_only=True)
-
-    result = ModelConfig._apply_mm_prefix_lm_limits(
-        model_config, model_config.model_arch_config
-    )
-
-    assert not result.is_mm_prefix_lm
-
-
-def test_mm_prefix_limits_noop_for_causal_model():
-    model_config = _make_mm_prefix_model_config(is_mm_prefix_lm=False)
-    original_arch = model_config.model_arch_config
-
-    result = ModelConfig._apply_mm_prefix_lm_limits(model_config, original_arch)
-
-    assert result is original_arch
-
-
-def test_mm_prefix_limits_noop_before_multimodal_config():
+def test_supports_multimodal_for_mm_prefix_before_multimodal_config():
     model_config = _make_mm_prefix_model_config()
     model_config.multimodal_config = None
-    original_arch = model_config.model_arch_config
 
-    result = ModelConfig._apply_mm_prefix_lm_limits(model_config, original_arch)
-
-    assert result is original_arch
+    assert model_config._supports_multimodal_for_mm_prefix() is True
+    assert not hasattr(model_config, "_supports_multimodal_inputs_cached")
 
 
-def test_mm_prefix_limits_sticky_across_text_subconfig():
+def test_language_model_only_disables_via_supports_multimodal_inputs():
+    """language_model_only zeros all limits, so registry reports text-only."""
     model_config = _make_mm_prefix_model_config(language_model_only=True)
-    first = ModelConfig._apply_mm_prefix_lm_limits(
-        model_config, model_config.model_arch_config
-    )
-    assert not first.is_mm_prefix_lm
-    assert model_config._mm_prefix_lm_disabled is True
-
-    # Simulate with_hf_config regenerating a text-only arch with the flag True.
-    text_arch = replace(model_config.model_arch_config, is_mm_prefix_lm=True)
-    second = ModelConfig._apply_mm_prefix_lm_limits(model_config, text_arch)
-    assert not second.is_mm_prefix_lm
-
-
-def test_mm_prefix_limits_skips_registry_for_text_architecture():
-    model_config = _make_mm_prefix_model_config()
-    original_arch = model_config.model_arch_config
 
     with patch(
-        "vllm.multimodal.MULTIMODAL_REGISTRY.get_processing_info",
-        side_effect=ValueError("no multimodal processor"),
+        "vllm.multimodal.MULTIMODAL_REGISTRY.supports_multimodal_inputs",
+        return_value=False,
     ):
-        result = ModelConfig._apply_mm_prefix_lm_limits(model_config, original_arch)
+        assert model_config._supports_multimodal_for_mm_prefix() is False
 
-    assert result is original_arch
-    assert not getattr(model_config, "_mm_prefix_lm_disabled", False)
+
+def test_convertor_clears_mm_prefix_when_multimodal_disabled():
+    hf_config = PretrainedConfig(
+        model_type="gemma3",
+        architectures=["Gemma3ForConditionalGeneration"],
+    )
+    hf_config.is_mm_prefix_lm = True
+    convertor = ModelArchConfigConvertorBase(hf_config, hf_config)
+
+    assert convertor.is_mm_prefix_lm(supports_multimodal=True) is True
+    assert convertor.is_mm_prefix_lm(supports_multimodal=False) is False
+
+    enabled = convertor.convert(supports_multimodal=True)
+    disabled = convertor.convert(supports_multimodal=False)
+    assert enabled.is_mm_prefix_lm is True
+    assert disabled.is_mm_prefix_lm is False
+
+
+def test_sticky_cache_survives_text_subconfig_regeneration():
+    """with_hf_config deepcopies the cached decision onto text submodules."""
+    model_config = _make_mm_prefix_model_config()
+    with patch(
+        "vllm.multimodal.MULTIMODAL_REGISTRY.supports_multimodal_inputs",
+        return_value=False,
+    ):
+        assert model_config._supports_multimodal_for_mm_prefix() is False
+
+    # Simulate deepcopy onto a Gemma4ForCausalLM-like config that would
+    # otherwise fail registry lookup / return False incorrectly.
+    text_config = _make_mm_prefix_model_config()
+    text_config._supports_multimodal_inputs_cached = (
+        model_config._supports_multimodal_inputs_cached
+    )
+    with patch(
+        "vllm.multimodal.MULTIMODAL_REGISTRY.supports_multimodal_inputs",
+        side_effect=AssertionError("must not re-query registry"),
+    ):
+        assert text_config._supports_multimodal_for_mm_prefix() is False

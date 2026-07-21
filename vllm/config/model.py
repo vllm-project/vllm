@@ -3,7 +3,7 @@
 
 import warnings
 from collections.abc import Callable
-from dataclasses import InitVar, field, replace
+from dataclasses import InitVar, field
 from functools import cached_property
 from typing import TYPE_CHECKING, Any, Literal, cast, get_args
 
@@ -751,7 +751,8 @@ class ModelConfig:
                     "disable the cache with --mm-processor-cache-gb 0."
                 )
 
-            # Rebuild after multimodal_config exists so mm_prefix limits apply.
+            # Rebuild after multimodal_config exists so text-only mm_prefix
+            # clearing is applied (and cached for later with_hf_config calls).
             self.model_arch_config = self.get_model_arch_config()
 
         if self.disable_sliding_window:
@@ -766,58 +767,33 @@ class ModelConfig:
         self._verify_cuda_graph()
         self._verify_bnb_config()
 
-    def _apply_mm_prefix_lm_limits(
-        self, arch: ModelArchitectureConfig
-    ) -> ModelArchitectureConfig:
-        """Disable multimodal prefix attention for text-only serving.
+    def _supports_multimodal_for_mm_prefix(self) -> bool:
+        """Whether multimodal inputs can still appear for this deployment.
 
-        Applied inside ``get_model_arch_config`` so every regenerated arch
-        config preserves the derived flag (including ``with_hf_config``).
-        No-op until ``multimodal_config`` is initialized.
+        Cached after ``multimodal_config`` exists so ``with_hf_config``
+        regenerations for text-only submodules (e.g. Gemma4ForCausalLM)
+        reuse the top-level decision instead of re-querying the multimodal
+        processor registry.
         """
-        # Sticky decision from the multimodal top-level config so text-only
-        # sub-configs (e.g. Gemma4ForCausalLM via with_hf_config) do not need
-        # the multimodal processor registry and cannot restore the flag.
-        if getattr(self, "_mm_prefix_lm_disabled", False):
-            return (
-                replace(arch, is_mm_prefix_lm=False) if arch.is_mm_prefix_lm else arch
+        cached = getattr(self, "_supports_multimodal_inputs_cached", None)
+        if cached is not None:
+            return cached
+
+        if self.multimodal_config is None:
+            # Early call before multimodal init — do not clear mm_prefix yet.
+            return True
+
+        from vllm.multimodal import MULTIMODAL_REGISTRY
+
+        supports_mm = MULTIMODAL_REGISTRY.supports_multimodal_inputs(self)
+        self._supports_multimodal_inputs_cached = supports_mm
+        if not supports_mm:
+            logger.info_once(
+                "Disabled mm_prefix attention mode because multimodal inputs "
+                "are configuration-disabled. Attention backends without "
+                "mm_prefix support may now be selected."
             )
-
-        if not arch.is_mm_prefix_lm:
-            return arch
-
-        mm_config = self.multimodal_config
-        if mm_config is None:
-            return arch
-
-        if mm_config.language_model_only:
-            reason = "--language-model-only is set"
-        else:
-            from vllm.multimodal import MULTIMODAL_REGISTRY
-
-            try:
-                info = MULTIMODAL_REGISTRY.get_processing_info(self)
-            except ValueError:
-                # Current architectures are not multimodal (language submodule).
-                return arch
-
-            vision_modalities = {"image", "video"} & info.supported_mm_limits.keys()
-            if not vision_modalities or any(
-                info.allowed_mm_limits[modality] > 0 for modality in vision_modalities
-            ):
-                return arch
-            reason = (
-                "all supported vision modalities are limited to zero via "
-                "--limit-mm-per-prompt"
-            )
-
-        self._mm_prefix_lm_disabled = True
-        logger.info_once(
-            "Disabled mm_prefix attention mode because %s. Attention backends without "
-            "mm_prefix support may now be selected.",
-            reason,
-        )
-        return replace(arch, is_mm_prefix_lm=False)
+        return supports_mm
 
     def get_model_arch_config(
         self,
@@ -826,7 +802,9 @@ class ModelConfig:
             self.hf_config.model_type, ModelArchConfigConvertorBase
         )
         convertor = convertor_cls(self.hf_config, self.hf_text_config)
-        return self._apply_mm_prefix_lm_limits(convertor.convert())
+        return convertor.convert(
+            supports_multimodal=self._supports_multimodal_for_mm_prefix()
+        )
 
     @field_validator("tokenizer", "max_model_len", mode="wrap")
     @classmethod
