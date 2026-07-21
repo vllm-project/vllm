@@ -35,33 +35,6 @@ def mask_empty_context_lse(
 
 
 @triton.jit
-def find_req_idx_warp(
-    query_start_loc,
-    query_block_idx,
-    num_reqs,
-    BLOCK_Q: tl.constexpr,
-):
-    """Map a request-local query block to its request."""
-    lanes = tl.arange(0, 32)
-    chunk_start = 0
-    req_idx = 0
-    move_on = True
-    while (chunk_start < num_reqs) & move_on:
-        req_offsets = chunk_start + lanes
-        req_mask = req_offsets < num_reqs
-        query_starts = tl.load(query_start_loc + req_offsets, mask=req_mask)
-        # Each request boundary starts a new logical block.
-        req_block_starts = query_starts // BLOCK_Q + req_offsets
-        match_count = tl.sum(
-            (req_mask & (req_block_starts <= query_block_idx)).to(tl.int32)
-        )
-        req_idx = chunk_start + match_count - 1
-        move_on = match_count == 32
-        chunk_start += 32
-    return req_idx
-
-
-@triton.jit
 def mask_empty_context_lse_kernel(
     lse,
     query_start_loc,
@@ -74,7 +47,23 @@ def mask_empty_context_lse_kernel(
     BLOCK_HEADS: tl.constexpr,
 ):
     query_block_idx = tl.program_id(0)
-    req_idx = find_req_idx_warp(query_start_loc, query_block_idx, num_reqs, BLOCK_SIZE)
+
+    lanes = tl.arange(0, 32)
+    chunk_start = 0
+    req_idx = 0
+    move_on = True
+    while (chunk_start < num_reqs) & move_on:
+        req_offsets = chunk_start + lanes
+        req_mask = req_offsets < num_reqs
+        query_starts = tl.load(query_start_loc + req_offsets, mask=req_mask)
+        # Each request boundary starts a new logical block.
+        req_block_starts = query_starts // BLOCK_SIZE + req_offsets
+        match_count = tl.sum(
+            (req_mask & (req_block_starts <= query_block_idx)).to(tl.int32)
+        )
+        req_idx = chunk_start + match_count - 1
+        move_on = match_count == 32
+        chunk_start += 32
 
     query_start = tl.load(query_start_loc + req_idx)
     query_end = tl.load(query_start_loc + req_idx + 1)
