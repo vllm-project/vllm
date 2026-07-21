@@ -14,7 +14,7 @@ def _min_p_kernel(
     vocab_size,
     BLOCK_SIZE: tl.constexpr,
 ):
-    token_idx = tl.program_id(0)
+    token_idx = tl.program_id(0).to(tl.int64)
     req_state_idx = tl.load(expanded_idx_mapping_ptr + token_idx)
     min_p = tl.load(min_p_ptr + req_state_idx).to(tl.float32)
     if min_p == 0.0:

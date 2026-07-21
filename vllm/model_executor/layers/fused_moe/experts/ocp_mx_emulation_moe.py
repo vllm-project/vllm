@@ -26,6 +26,7 @@ from vllm.model_executor.layers.quantization.utils.mxfp6_utils import dequant_mx
 from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import (
     OCP_MX_Scheme,
 )
+from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
 
@@ -83,8 +84,7 @@ class OCP_MXQuantizationEmulationTritonExperts(TritonExperts):
             OCP_MX_Scheme.w_mxfp4_a_fp8,
             OCP_MX_Scheme.w_mxfp6_e3m2_a_fp8,
         ]:
-            # TODO: double check this one
-            self._quant_dtype = "mxfp8"
+            self._quant_dtype = current_platform.fp8_dtype()
 
     @property
     def quant_dtype(self) -> torch.dtype | str | None:

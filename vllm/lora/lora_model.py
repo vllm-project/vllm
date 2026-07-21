@@ -245,9 +245,10 @@ class LoRAModel:
             from tensorizer import TensorDeserializer
 
             tensorizer_config = TensorizerConfig(**tensorizer_config_dict)
-            lora_tensor_path = os.path.join(
-                tensorizer_config.tensorizer_dir, "adapter_model.tensors"
-            )
+            tensorizer_dir = tensorizer_config.tensorizer_dir
+            if tensorizer_dir is None:
+                raise ValueError("tensorizer_dir must be set in tensorizer config.")
+            lora_tensor_path = os.path.join(tensorizer_dir, "adapter_model.tensors")
             tensorizer_args = tensorizer_config._construct_tensorizer_args()
             tensors = TensorDeserializer(
                 lora_tensor_path,
