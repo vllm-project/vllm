@@ -17,9 +17,12 @@ DEFAULT_REPO_SLUG="vllm-project/vllm"
 DEFAULT_CI_HCL_SOURCE="docker/ci-rocm.hcl"
 DEFAULT_CI_BASE_CONTENT_FILES="requirements/common.txt requirements/rocm.txt requirements/test/rocm.txt docker/Dockerfile.rocm_base docker/ci-rocm.hcl docker/docker-bake-rocm.hcl tools/install_torchcodec_rocm.sh tools/install_protoc.sh rust-toolchain.toml tests/vllm_test_utils .buildkite/scripts/ci-bake-rocm.sh .buildkite/scripts/rocm/build-ci-base.sh"
 DEFAULT_CI_BASE_DOCKERFILE="docker/Dockerfile.rocm"
-DEFAULT_CI_BASE_DOCKERFILE_STAGES="base rust_toolchain_input_0 rust_toolchain_input_1 rust-toolchain-input rust-toolchain build_rixl build_rocshmem build_deepep mori_base ci_base"
-DEFAULT_CI_BASE_METADATA_VERSION="1"
+DEFAULT_CI_BASE_DOCKERFILE_STAGES="base rust_toolchain_input_0 rust_toolchain_input_1 rust-toolchain-input rust-toolchain build_rixl build_rocshmem build_deepep mori_base ci_rixl_wheel_manifest ci_comm_runtime ci_base"
+DEFAULT_CI_BASE_METADATA_VERSION="2"
 IMAGE_EXISTED_BEFORE_BUILD=0
+BASE_IMAGE_DIGEST_CACHE_REF=""
+BASE_IMAGE_DIGEST_CACHE_VALUE=""
+BASE_IMAGE_DIGEST_CACHE_READY=0
 
 TARGET=""
 CI_HCL_SOURCE="${CI_HCL_SOURCE:-}"
@@ -187,7 +190,10 @@ hash_dockerfile_stages() {
             }
             emit = 1
         }
-        $1 == "FROM" {
+        {
+            sub(/\r$/, "")
+        }
+        tolower($1) == "from" {
             stage = ""
             for (idx = 1; idx <= NF; idx++) {
                 if (tolower($idx) == "as" && idx < NF) {
@@ -225,8 +231,9 @@ discover_dockerfile_stage_args() {
             emit = 1
         }
         {
+            sub(/\r$/, "")
             line = $0
-            if ($1 == "FROM") {
+            if (tolower($1) == "from") {
                 stage = ""
                 for (idx = 1; idx <= NF; idx++) {
                     if (tolower($idx) == "as" && idx < NF) {
@@ -285,6 +292,13 @@ get_content_arg_names() {
     fi | awk 'NF && !seen[$0]++'
 }
 
+filter_content_hash_arg_names() {
+    # These select where remote inputs are fetched from. The hashes already
+    # include the exact checked-out file contents, so including a commit/ref or
+    # repository URL would defeat cross-commit reuse for identical inputs.
+    awk '$0 != "VLLM_BRANCH" && $0 != "VLLM_REPO"'
+}
+
 compute_ci_base_content_hash_once() {
     local -a content_paths=()
     local -a content_args=()
@@ -293,7 +307,8 @@ compute_ci_base_content_hash_once() {
 
     read -r -a content_paths <<< "${CI_BASE_CONTENT_FILES}"
     mapfile -t content_args < <(
-        get_content_arg_names "${dockerfile}" "${stages}" "${CI_BASE_CONTENT_ARGS:-}"
+        get_content_arg_names "${dockerfile}" "${stages}" "${CI_BASE_CONTENT_ARGS:-}" \
+            | filter_content_hash_arg_names
     )
 
     {
@@ -372,10 +387,20 @@ extract_dockerfile_arg_default() {
 
 resolve_image_digest() {
     local image_ref="$1"
+    local digest=""
 
-    docker buildx imagetools inspect "${image_ref}" 2>/dev/null \
-        | sed -n -E 's/^Digest:[[:space:]]+//p' \
-        | head -1
+    if ((BASE_IMAGE_DIGEST_CACHE_READY)) \
+        && [[ "${image_ref}" == "${BASE_IMAGE_DIGEST_CACHE_REF}" ]]; then
+        printf '%s\n' "${BASE_IMAGE_DIGEST_CACHE_VALUE}"
+        return 0
+    fi
+
+    digest=$(
+        docker buildx imagetools inspect "${image_ref}" 2>/dev/null \
+            | sed -n -E 's/^Digest:[[:space:]]+//p' \
+            | head -1 || true
+    )
+    printf '%s\n' "${digest}"
 }
 
 resolve_dockerfile_arg_value() {
@@ -387,6 +412,9 @@ resolve_dockerfile_arg_value() {
     case "${arg_name}" in
         ARG_PYTORCH_ROCM_ARCH)
             env_name="PYTORCH_ROCM_ARCH"
+            ;;
+        max_jobs)
+            env_name="CI_MAX_JOBS"
             ;;
     esac
 
@@ -421,6 +449,24 @@ hash_dockerfile_arg_values() {
             printf 'arg:%s.digest=%s\n' "${arg_name}" "${digest}"
         fi
     done
+}
+
+prime_base_image_digest_cache() {
+    local dockerfile="${CI_BASE_DOCKERFILE:-${DEFAULT_CI_BASE_DOCKERFILE}}"
+    local base_image=""
+
+    base_image=$(resolve_dockerfile_arg_value "${dockerfile}" "BASE_IMAGE")
+    [[ -n "${base_image}" ]] || return 0
+
+    BASE_IMAGE_DIGEST_CACHE_REF="${base_image}"
+    BASE_IMAGE_DIGEST_CACHE_VALUE=$(resolve_image_digest "${base_image}")
+    if [[ -z "${BASE_IMAGE_DIGEST_CACHE_VALUE}" ]]; then
+        echo "Error: could not resolve base image digest for ${base_image}" >&2
+        echo "Refusing to compute content-addressed cache keys from a mutable tag." >&2
+        return 1
+    fi
+    BASE_IMAGE_DIGEST_CACHE_READY=1
+    echo "Resolved base image digest once for cache metadata: ${BASE_IMAGE_DIGEST_CACHE_VALUE}"
 }
 
 is_ci_base_target() {
@@ -1037,6 +1083,12 @@ prepare_git_cache_metadata() {
     local target_repo_slug=""
     local target_repo_url=""
     local merge_base_ref=""
+    local local_base_ref=""
+
+    if is_ci_base_target; then
+        echo "Skipping commit-cache ancestry lookup for content-addressed ci_base"
+        return 0
+    fi
 
     if [[ -z "${PARENT_COMMIT:-}" || -z "${VLLM_MERGE_BASE_COMMIT:-}" ]] \
         && git rev-parse --is-shallow-repository 2>/dev/null | grep -q "true"; then
@@ -1093,9 +1145,15 @@ prepare_git_cache_metadata() {
     if [[ -z "${VLLM_MERGE_BASE_COMMIT:-}" ]]; then
         target_repo_url=$(get_buildkite_target_repo_url)
         merge_base_ref="refs/remotes/vllm-cache-upstream/${cache_base_branch}"
-        git_fetch_for_cache --no-tags --depth=200 "${target_repo_url}" \
-            "+refs/heads/${cache_base_branch}:${merge_base_ref}" 2>/dev/null || true
-        VLLM_MERGE_BASE_COMMIT=$(git merge-base HEAD "${merge_base_ref}" 2>/dev/null || echo "")
+        local_base_ref="refs/remotes/origin/${cache_base_branch}"
+        VLLM_MERGE_BASE_COMMIT=$(git merge-base HEAD "${local_base_ref}" 2>/dev/null || echo "")
+        if [[ -n "${VLLM_MERGE_BASE_COMMIT}" ]]; then
+            echo "Using local ${local_base_ref} for cache merge base"
+        else
+            git_fetch_for_cache --no-tags --depth=200 "${target_repo_url}" \
+                "+refs/heads/${cache_base_branch}:${merge_base_ref}" 2>/dev/null || true
+            VLLM_MERGE_BASE_COMMIT=$(git merge-base HEAD "${merge_base_ref}" 2>/dev/null || echo "")
+        fi
         if [[ -z "${VLLM_MERGE_BASE_COMMIT}" ]]; then
             git_fetch_for_cache --no-tags --deepen=1000 "${target_repo_url}" \
                 "+refs/heads/${cache_base_branch}:${merge_base_ref}" 2>/dev/null || true
@@ -1128,7 +1186,8 @@ ci_base_metadata_pairs() {
         content_files_hash=$(compute_content_hash "${content_paths[@]}")
     fi
     mapfile -t content_args < <(
-        get_content_arg_names "${dockerfile}" "${stages}" "${CI_BASE_CONTENT_ARGS:-}"
+        get_content_arg_names "${dockerfile}" "${stages}" "${CI_BASE_CONTENT_ARGS:-}" \
+            | filter_content_hash_arg_names
     )
 
     base_image=$(resolve_dockerfile_arg_value "${dockerfile}" "BASE_IMAGE")
@@ -1274,6 +1333,17 @@ uses_rocm_rust_cache() {
     esac
 }
 
+uses_rocm_dependency_cache() {
+    case "${TARGET}" in
+        ci-base-rocm-ci|ci-base-rocm-ci-with-deps|rixl-rocm-ci|rocshmem-rocm-ci|deepep-rocm-ci)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
 compute_rocm_csrc_content_hash() {
     local bake_dir=""
     local dockerfile_rocm=""
@@ -1343,7 +1413,8 @@ compute_rocm_rust_content_hash() {
     bake_dir=$(dirname "${VLLM_BAKE_FILE}")
     dockerfile_rocm="${bake_dir}/Dockerfile.rocm"
     mapfile -t content_args < <(
-        get_content_arg_names "${dockerfile_rocm}" "base rust_toolchain_input_0 rust_toolchain_input_1 rust-toolchain-input rust_input_0 rust_input_1 rust-input rust-toolchain rust-build" "${ROCM_RUST_CONTENT_ARGS:-}"
+        get_content_arg_names "${dockerfile_rocm}" "base rust_toolchain_input_0 rust_toolchain_input_1 rust-toolchain-input rust_input_0 rust_input_1 rust-input rust-toolchain rust-build" "${ROCM_RUST_CONTENT_ARGS:-}" \
+            | filter_content_hash_arg_names
     )
 
     {
@@ -2145,15 +2216,22 @@ main() {
     validate_inputs
     load_ci_hcl
     init_bake_files
+    prime_base_image_digest_cache
     compute_ci_base_hash_if_needed
     configure_ci_base_image_refs
     maybe_skip_existing_image
     setup_builder
     prepare_git_cache_metadata
-    extract_dependency_pins
+    if uses_rocm_dependency_cache; then
+        extract_dependency_pins
+    fi
     write_rocm_build_arg_override
-    compute_dependency_cache_keys
-    write_ci_base_label_override
+    if uses_rocm_dependency_cache; then
+        compute_dependency_cache_keys
+    fi
+    if is_ci_base_target; then
+        write_ci_base_label_override
+    fi
     compute_rocm_csrc_content_hash_if_needed
     compute_rocm_rust_content_hash_if_needed
     write_rocm_cache_override
@@ -2173,4 +2251,6 @@ main() {
     upload_wheel_artifacts_if_present
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main "$@"
+fi
