@@ -58,7 +58,40 @@ VLLM_TARGET_DEVICE=xpu pip install --no-build-isolation -e . -v
 --8<-- [end:build-wheel-from-source]
 --8<-- [start:pre-built-images]
 
-Currently, we release prebuilt XPU images at docker [hub](https://hub.docker.com/r/intel/vllm/tags) based on vLLM released version. For more information, please refer release [note](https://github.com/intel/ai-containers/blob/main/vllm).
+vLLM offers official Docker images for deployment.
+The images can be used to run OpenAI compatible server and are available on Docker Hub as [vllm/vllm-openai-xpu](https://hub.docker.com/r/vllm/vllm-openai-xpu/tags).
+
+- `vllm/vllm-openai-xpu:latest` — stable release, available starting from v0.26.0
+- `vllm/vllm-openai-xpu:nightly` — preview build from the latest development branch, use this if you want the latest features and fixes
+
+```bash
+docker run --rm \
+    --network=host \
+    --device /dev/dri:/dev/dri \
+    -v /dev/dri/by-path:/dev/dri/by-path \
+    -v ~/.cache/huggingface:/root/.cache/huggingface \
+    --env "HF_TOKEN=$HF_TOKEN" \
+    --ipc=host \
+    --privileged \
+    vllm/vllm-openai-xpu:<tag> \
+    --model Qwen/Qwen3-0.6B
+```
+
+To use the docker image as base for development, you can launch it in interactive session through overriding the entrypoint.
+
+???+ console "Commands"
+    ```bash
+    docker run --rm -it \
+        --network=host \
+        --device /dev/dri:/dev/dri \
+        -v /dev/dri/by-path:/dev/dri/by-path \
+        -v ~/.cache/huggingface:/root/.cache/huggingface \
+        --env "HF_TOKEN=$HF_TOKEN" \
+        --ipc=host \
+        --privileged \
+        --entrypoint /bin/bash \
+        vllm/vllm-openai-xpu:<tag>
+    ```
 
 --8<-- [end:pre-built-images]
 --8<-- [start:build-image-from-source]
