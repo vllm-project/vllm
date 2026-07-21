@@ -770,10 +770,18 @@ class ModelConfig:
     def _supports_multimodal_for_mm_prefix(self) -> bool:
         """Whether multimodal inputs can still appear for this deployment.
 
-        Cached after ``multimodal_config`` exists so ``with_hf_config``
-        regenerations for text-only submodules (e.g. Gemma4ForCausalLM)
-        reuse the top-level decision instead of re-querying the multimodal
-        processor registry.
+        This runs more than once per config: once early in ``__post_init__``
+        (before ``multimodal_config`` exists), again after it is created, and
+        then for every ``get_model_arch_config`` regeneration -- notably
+        ``with_hf_config``, which deep-copies this ``ModelConfig`` and swaps
+        ``hf_config`` for a text-only submodule (e.g. ``Gemma4ForCausalLM``).
+
+        The result is cached for correctness, not just to save work: on the
+        ``with_hf_config`` copy the submodule architecture has no registered
+        multimodal processor, so re-querying the registry would raise and be
+        treated as text-only, wrongly clearing ``is_mm_prefix_lm`` even when a
+        vision modality is still enabled (e.g. ``image=0`` but video allowed).
+        The deep-copied cache preserves the top-level decision instead.
         """
         cached = getattr(self, "_supports_multimodal_inputs_cached", None)
         if cached is not None:
