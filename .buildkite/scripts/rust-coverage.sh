@@ -156,7 +156,11 @@ rust_coverage_upload() {
     set --
     set -- "$@" upload-process
     set -- "$@" --file "$rust_cov_upload_lcov"
-    set -- "$@" --disable-search --fail-on-error --git-service github
+    # The normalizer already validates every source path. The test image moves
+    # vllm/ to src/vllm/, so generic repository file fixes cannot resolve all
+    # tracked paths inside that image.
+    set -- "$@" --disable-search --disable-file-fixes
+    set -- "$@" --fail-on-error --git-service github
     set -- "$@" --build "${BUILDKITE_BUILD_NUMBER:?BUILDKITE_BUILD_NUMBER is required}"
     set -- "$@" --branch "$rust_cov_upload_branch"
     set -- "$@" --sha "${BUILDKITE_COMMIT:?BUILDKITE_COMMIT is required}"
