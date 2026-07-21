@@ -181,7 +181,10 @@ class InklingFA4RelAttentionKernel(
         if max_num_reqs <= 0 or max_num_batched_tokens <= 0:
             return []
 
-        config = vllm_config.model_config.hf_config
+        hf_config = vllm_config.model_config.hf_config
+        get_text_config = getattr(hf_config, "get_text_config", None)
+        config = get_text_config() if callable(get_text_config) else hf_config
+
         tp_size = get_tensor_model_parallel_world_size()
         dtype = vllm_config.model_config.dtype
         kv_dtype = kv_cache_dtype_str_to_dtype(
