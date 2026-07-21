@@ -18,10 +18,10 @@ import numpy as np
 import pytest
 import torch
 
-from vllm.distributed.kv_events import MEDIUM_FS
 from vllm.v1.kv_offload.base import (
     Locality,
     LookupResult,
+    Medium,
     OffloadingEvent,
     OffloadingKVEventsConfig,
     OffloadKey,
@@ -477,8 +477,7 @@ def test_successful_store_emits_stored_event(fs_tier_with_events):
     events = list(tier.take_events())
     assert len(events) == 1
     assert events[0].keys == keys
-    # Literal medium pins the wire contract, not just the constant choice.
-    assert events[0].medium == "FS"
+    assert events[0].medium == Medium.FS
     assert events[0].locality is Locality.LOCAL
     assert not events[0].removed
     # take_events drains the buffer.
@@ -648,7 +647,7 @@ def test_cascade_store_emits_fs_event_through_tiering_manager(tmp_path):
             events.extend(manager.take_events())
             time.sleep(0.01)
 
-        fs_events = [e for e in events if e.medium == MEDIUM_FS]
+        fs_events = [e for e in events if e.medium == Medium.FS]
         assert len(fs_events) == 1
         assert set(fs_events[0].keys) == set(keys)
         assert not fs_events[0].removed

@@ -9,8 +9,6 @@ from tests.v1.kv_connector.unit.utils import create_vllm_config
 from vllm.config import KVEventsConfig, KVTransferConfig
 from vllm.distributed.kv_events import (
     MEDIUM_CPU,
-    MEDIUM_FS,
-    MEDIUM_OBJ,
     BlockRemoved,
     BlockStored,
 )
@@ -445,8 +443,8 @@ def test_pending_cpu_removal_consumes_hit_backfill_until_next_hit():
     ]
 
 
-@pytest.mark.parametrize("medium", [MEDIUM_FS, MEDIUM_OBJ])
-def test_secondary_stored_event_does_not_mutate_cpu_metadata(medium: str):
+@pytest.mark.parametrize("medium", [Medium.FS, Medium.OBJ])
+def test_secondary_stored_event_does_not_mutate_cpu_metadata(medium: Medium):
     tracker, _, _, key = _lookup_chunk()
     expected_metadata = dict(tracker._pending_event_metadata)
 
