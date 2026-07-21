@@ -53,37 +53,10 @@ def vllm_attention_forward(
     # Transformers kwargs
     scaling: float | None = None,
     # vLLM kwargs
-    attention_instances: "dict[int, Attention | MLAAttention] | None" = None,
+    attention_instances: "dict[int, Attention] | None" = None,
     **kwargs,
 ):
     self_attn = attention_instances[module.layer_idx]
-
-    if (attn_backend := self_attn.get_attn_backend()).is_mla():
-        if value is not None or key.shape[1] != 1:
-            raise RuntimeError(
-                f"Using {attn_backend.get_name()} for {type(module).__name__} but "
-                "the attention forward was not correctly rewritten by `MLAFuser`."
-            )
-
-        # [batch=1, heads, num_tokens, qk_head_dim] -> [num_tokens, heads, qk_head_dim]
-        query = query.transpose(1, 2).flatten(0, 1)
-        num_tokens, num_heads = query.shape[:2]
-        # [batch=1, heads=1, num_tokens, latent] -> [num_tokens, latent]
-        key = key.reshape(-1, key.shape[-1])
-        # [num_tokens, latent] -> [num_tokens, kv_lora_rank], [num_tokens, qk_rope]
-        kv_lora_rank = self_attn.kv_lora_rank
-        split_size = [kv_lora_rank, key.shape[-1] - kv_lora_rank]
-        kv_c_normed, k_pe = key.split(split_size, dim=-1)
-
-        attn_output = self_attn.forward(
-            query,
-            kv_c_normed,
-            # [num_tokens, qk_rope] -> [num_tokens, 1, qk_rope]
-            k_pe.unsqueeze(1),
-            output_shape=(num_tokens, num_heads * self_attn.v_head_dim),
-        )
-        return attn_output, None
-
     if scaling is not None:
         self_attn.impl.scale = float(scaling)
     hidden = query.shape[-2]
@@ -91,7 +64,7 @@ def vllm_attention_forward(
     head_dim_v = value.shape[-1]
     query, key, value = (x.transpose(1, 2) for x in (query, key, value))
     query, key, value = (x.reshape(hidden, -1) for x in (query, key, value))
-    # Pad `value` up to the query/key head size when they differ (decompressed MLA).
+    # Pad `value` up to the query/key head size when they differ (expanded MLA).
     if head_dim_v != head_dim_qk:
         value = F.pad(value.view(-1, head_dim_v), (0, head_dim_qk - head_dim_v))
         value = value.reshape(hidden, -1)
@@ -102,7 +75,38 @@ def vllm_attention_forward(
     return attn_output, None
 
 
-ALL_ATTENTION_FUNCTIONS["vllm"] = vllm_attention_forward
+def vllm_mla_attention_forward(
+    # Transformers args
+    module: "torch.nn.Module",
+    query: "torch.Tensor",
+    kv_c_normed: "torch.Tensor",
+    k_pe: "torch.Tensor",
+    attention_mask: "torch.Tensor",
+    # Transformers kwargs
+    scaling: float | None = None,
+    # vLLM kwargs
+    attention_instances: "dict[int, MLAAttention] | None" = None,
+    **kwargs,
+):
+    self_attn = attention_instances[module.layer_idx]
+    # [batch=1, heads, num_tokens, qk_head_dim] -> [num_tokens, heads, qk_head_dim]
+    query = query.transpose(1, 2).flatten(0, 1)
+    num_tokens, num_heads = query.shape[:2]
+    # [batch=1, num_tokens, kv_lora_rank] -> [num_tokens, kv_lora_rank]
+    kv_c_normed = kv_c_normed.reshape(-1, kv_c_normed.shape[-1])
+    # [batch=1, heads=1, num_tokens, qk_rope] -> [num_tokens, 1, qk_rope]
+    k_pe = k_pe.reshape(-1, 1, k_pe.shape[-1])
+    attn_output = self_attn.forward(
+        query,
+        kv_c_normed,
+        k_pe,
+        output_shape=(num_tokens, num_heads * self_attn.v_head_dim),
+    )
+    return attn_output, None
+
+
+ALL_ATTENTION_FUNCTIONS.register("vllm", vllm_attention_forward)
+ALL_ATTENTION_FUNCTIONS.register("vllm_mla", vllm_mla_attention_forward)
 
 
 # Text only models

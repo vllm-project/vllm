@@ -3,9 +3,8 @@
 """Unit tests for the Transformers modeling backend's MLA fuser.
 
 The fuser must discover every MLA submodule structurally (never by assuming the
-Transformers attribute names) and, when the query is low-rank, remap the
-checkpoint's separate `q_a_proj`/`kv_a_proj_with_mqa` weights into the single
-fused down-projection the vLLM MLA layer requires.
+Transformers attribute names) and, when the query is low-rank, merge the checkpoint's
+separate `q_a_proj`/`kv_a_proj_with_mqa` weights into the single fused down-projection.
 """
 
 import pytest
@@ -126,9 +125,8 @@ class RenamedMLA(nn.Module):
 
 
 def test_discovers_modules_under_arbitrary_names():
-    """Discovery is structural, and independent of whether the source can be
-    rewritten: `RenamedMLA` never expands the latent, so only `match` applies to
-    it (the full `get_fuser` pipeline would reject the un-rewritable forward)."""
+    """Discovery is purely structural: `RenamedMLA` gives its children non-standard
+    names, and `match` still locates each projection by dataflow."""
     with torch.device("meta"):
         module = RenamedMLA()
         fuser = MLAFuser.match(trace(module), module)
