@@ -135,6 +135,7 @@ def _run_gdn_standard_decode(
         write_pos = torch.full(
             (padded_batch,), step % max_cache_len, device=device, dtype=torch.int32
         )
+        is_flush = (write_pos == max_cache_len - 1).to(torch.int8)
 
         out_packed = torch.empty(
             padded_batch, 1, num_v_heads, head_v_dim, device=device, dtype=act_dtype
@@ -169,6 +170,7 @@ def _run_gdn_standard_decode(
             out=out_cached,
             ssm_state_indices=ssm_state_indices,
             write_pos=write_pos,
+            is_flush=is_flush,
             use_qk_l2norm_in_kernel=True,
         )
 
@@ -293,6 +295,7 @@ def test_replayssm_standard_decode_gdn_per_row_write_pos(
     )
 
     def decode_step(mixed_qkv, a, b, idx, write_pos):
+        is_flush = (write_pos == max_cache_len - 1).to(torch.int8)
         out_p = torch.empty(
             mixed_qkv.shape[0],
             1,
@@ -328,6 +331,7 @@ def test_replayssm_standard_decode_gdn_per_row_write_pos(
             out=out_c,
             ssm_state_indices=idx,
             write_pos=write_pos,
+            is_flush=is_flush,
             use_qk_l2norm_in_kernel=True,
         )
         return out_p, out_c
