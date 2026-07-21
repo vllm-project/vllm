@@ -847,6 +847,12 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         if self.vllm_config.attention_config.disable_flashinfer_q_quantization:
             return self.model_config.dtype
 
+        # Builders serving non-causal layers (e.g. DFlash drafters) route
+        # prefill to FlashInfer's fa2 path, which cannot consume FP8 queries;
+        # keep the model dtype for Q there.
+        if self.vllm_config.attention_config.use_non_causal:
+            return self.model_config.dtype
+
         # self.cache_dtype is resolved per KV-cache group: it is "auto" when
         # this group is unquantized (e.g. --kv-cache-dtype-skip-layers), even
         # if cache_config requests a quantized dtype globally.
@@ -1597,6 +1603,7 @@ class FlashInferImpl(AttentionImpl):
             and current_platform.is_device_capability_family(100)
             and vllm_config is not None
             and not vllm_config.attention_config.disable_flashinfer_q_quantization
+            and not vllm_config.attention_config.use_non_causal
         )
         self.bmm1_scale: float | None = None
         self.bmm2_scale: float | None = None
