@@ -436,8 +436,7 @@ class ROCMAiterMLASparseMetadataBuilder(
             kv_cache_dtype_str = "bf16"
         kv_dtype = dtypes.d_dtypes.get(kv_cache_dtype_str, dtypes.bf16)
         # get_mla_metadata_info_v1 and get_mla_metadata_v1 must use the same
-        # query/KV dtypes. In particular, gfx950's FP8 nhead=32 fold path uses
-        # a different split/reduce layout than the BF16 path.
+        # query/KV dtypes.
         self._mla_q_dtype = q_dtype
         self._mla_kv_dtype = kv_dtype
 
