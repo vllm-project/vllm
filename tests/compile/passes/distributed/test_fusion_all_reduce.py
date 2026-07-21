@@ -222,6 +222,25 @@ class TestAllReduceRMSNormStaticQuantFP8Model(torch.nn.Module):
         ]
 
 
+class TestAllReduceGemmaRMSNormStaticQuantFP8Model(
+    TestAllReduceRMSNormStaticQuantFP8Model
+):
+    def __init__(
+        self,
+        hidden_size=16,
+        token_num=16,
+        eps=1e-6,
+        dtype: torch.dtype = torch.float16,
+    ):
+        super().__init__(hidden_size, token_num, eps, dtype)
+        self.norm = [GemmaRMSNorm(hidden_size, eps) for _ in range(4)]
+        for norm in self.norm:
+            norm.weight.requires_grad_(False)
+
+    def ops_in_model_before(self):
+        return [torch.ops.vllm.all_reduce.default]
+
+
 class TestAiterAllReduceRMSNormGroupQuantFP8Model(torch.nn.Module):
     """Exercises the new ROCm AITER AR+RMS+per-group-FP8-quant patterns.
 
@@ -409,6 +428,15 @@ class TestAllReduceFusedAddRMSNormStaticQuantFP4Model(torch.nn.Module):
         ),
         pytest.param(
             TestAllReduceRMSNormStaticQuantFP8Model,
+            True,
+            False,
+            marks=pytest.mark.skipif(
+                current_platform.is_rocm(),
+                reason="Not supported on ROCm platform",
+            ),
+        ),
+        pytest.param(
+            TestAllReduceGemmaRMSNormStaticQuantFP8Model,
             True,
             False,
             marks=pytest.mark.skipif(
@@ -606,7 +634,10 @@ def all_reduce_fusion_pass_on_test_model(
         )
         backend.check_before_ops(model.ops_in_model_before(), fully_replaced=False)
         backend.check_after_ops(model.ops_in_model_after())
-        if test_model_cls is TestAllReduceGemmaRMSNormModel:
+        if test_model_cls in (
+            TestAllReduceGemmaRMSNormModel,
+            TestAllReduceGemmaRMSNormStaticQuantFP8Model,
+        ):
             fused_op = torch.ops.vllm.flashinfer_trtllm_fused_allreduce_norm.default
             fused_nodes = list(find_op_nodes(fused_op, backend.graph_post_pass))
             assert fused_nodes
