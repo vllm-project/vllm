@@ -41,6 +41,36 @@ from vllm.v1.worker.utils import (
 logger = init_logger(__name__)
 
 
+def resolve_layer_kv_cache_dtype_str(
+    kv_cache_spec: AttentionSpec,
+    default_cache_dtype: str,
+) -> str:
+    """Resolve ``cache_dtype_str`` for ``get_kv_cache_shape`` / layout helpers.
+
+    Prefer the per-spec layout string when present (MLA ``fp8_ds_mla``,
+    TurboQuant presets, etc.). Those specs encode the packed page layout in
+    ``cache_dtype_str`` even when ``kv_quant_mode`` is left at ``NONE`` or a
+    generic fp8 mode. Using only ``kv_quant_mode == NONE → "auto"`` forces the
+    unquantized head-size shape (e.g. 576) while raw tensors are allocated with
+    the packed byte layout (e.g. 656 B/token), which crashes reshape during
+    CUDA-graph profiling (see #48896 / #48378).
+
+    Fallbacks:
+    - ``TQFullAttentionSpec`` without ``cache_dtype_str``: use
+      ``default_cache_dtype`` (TurboQuant layout is not "auto").
+    - true skip layers (``kv_quant_mode is NONE``, no layout string): ``"auto"``
+    - otherwise: ``default_cache_dtype``
+    """
+    spec_dtype = getattr(kv_cache_spec, "cache_dtype_str", None)
+    if spec_dtype is not None:
+        return spec_dtype
+    if isinstance(kv_cache_spec, TQFullAttentionSpec):
+        return default_cache_dtype
+    if kv_cache_spec.kv_quant_mode == KVQuantMode.NONE:
+        return "auto"
+    return default_cache_dtype
+
+
 @dataclass(frozen=True)
 class AttentionCGSupportInfo:
     min_cg_support: AttentionCGSupport = AttentionCGSupport.ALWAYS
@@ -306,14 +336,10 @@ def _reshape_kv_cache(
                     kv_cache_spec.storage_block_size // kernel_block_size
                 )
                 kernel_num_blocks = num_blocks * num_blocks_per_kv_block
-                # Skipped layers (--kv-cache-dtype-skip-layers) keep the
-                # unquantized shape; only the quantized primary uses the
-                # quantized cache dtype's (possibly packed) layout.
-                layer_cache_dtype = (
-                    "auto"
-                    if kv_cache_spec.kv_quant_mode == KVQuantMode.NONE
-                    and not isinstance(kv_cache_spec, TQFullAttentionSpec)
-                    else cache_dtype
+                # Prefer per-spec cache_dtype_str (MLA fp8_ds_mla, etc.);
+                # skip layers without a layout string fall back to "auto".
+                layer_cache_dtype = resolve_layer_kv_cache_dtype_str(
+                    kv_cache_spec, cache_dtype
                 )
                 kv_cache_shape = group.backend.get_kv_cache_shape(
                     kernel_num_blocks,
@@ -475,11 +501,8 @@ def _update_hybrid_attention_layout(
         # above. The block-dim index is dtype-independent for current backends
         # (quantization only changes the last dim), so this is a no-op today,
         # but it keeps both call sites consistent for skip layers.
-        layer_cache_dtype = (
-            "auto"
-            if kv_cache_spec.kv_quant_mode == KVQuantMode.NONE
-            and not isinstance(kv_cache_spec, TQFullAttentionSpec)
-            else cache_dtype
+        layer_cache_dtype = resolve_layer_kv_cache_dtype_str(
+            kv_cache_spec, cache_dtype
         )
         block_dim = group.backend.get_kv_cache_block_dim(
             kernel_block_sizes[group.kv_cache_group_id],
