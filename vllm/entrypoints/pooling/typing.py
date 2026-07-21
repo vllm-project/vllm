@@ -181,6 +181,8 @@ class ScoringRenderParams(RenderParams):
     data_1: ScoreData
     data_2: ScoreData
     chat_template: str | None
+    max_tokens_per_query: int
+    max_tokens_per_doc: int
 
 
 class PoolingEngineInput(TypedDict):

@@ -190,7 +190,7 @@ class ServingScores(PoolingServing):
 
     async def flash_late_interaction(self, *args, **kwargs) -> Response:
         ctx = await self._init_ctx(self.io_processor, *args, **kwargs)
-        await self._preprocessing_async(self.io_processor, ctx)
+        await self._preprocessing(self.io_processor, ctx)
 
         # stage 1: encode queries and cache token embeddings on workers.
         await self._flash_late_interaction_encode_queries(ctx)
