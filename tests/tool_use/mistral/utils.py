@@ -1,9 +1,48 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Any
+from copy import deepcopy
+from typing import Any, Literal
 
-from tests.tool_use.utils import ServerConfig
+from typing_extensions import TypedDict
+
+
+class MistralServerConfig(TypedDict, total=False):
+    model: str
+    arguments: list[str]
+    system_prompt: str | list[dict[str, Any]] | None
+    supports_parallel: bool | None
+    supports_rocm: bool | None
+    reasoning_mode: Literal["none", "intrinsic", "effort"]
+    supports_grammar: bool
+    # Some models are not trained for multi-turn tool-call conversations.
+    supports_multi_turn: bool
+    # Seconds to wait for the server to start; large models (e.g. 119B fp8 on
+    # TP=2) need longer to load and quantize weights than the default.
+    startup_timeout: int
+
+
+def patch_system_prompt(
+    messages: list[dict[str, Any]],
+    system_prompt: str | list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    new_messages = deepcopy(messages)
+    if new_messages[0]["role"] == "system":
+        new_messages[0]["content"] = system_prompt
+    else:
+        new_messages.insert(0, {"role": "system", "content": system_prompt})
+    return new_messages
+
+
+def ensure_system_prompt(
+    messages: list[dict[str, Any]],
+    config: MistralServerConfig,
+) -> list[dict[str, Any]]:
+    prompt = config.get("system_prompt")
+    if prompt:
+        return patch_system_prompt(messages, prompt)
+    return messages
+
 
 # Shared across every model: cap context to 32k and limit concurrency to keep
 # VRAM usage modest during CI/local runs.
@@ -86,7 +125,7 @@ _REASONING_SYSTEM_PROMPT: list[dict[str, Any]] = [
     },
 ]
 
-CONFIGS: dict[str, ServerConfig] = {
+CONFIGS: dict[str, MistralServerConfig] = {
     "mistral": {
         "model": "mistralai/Mistral-7B-Instruct-v0.3",
         "arguments": _MISTRAL_7B_ARGS,
@@ -101,6 +140,8 @@ CONFIGS: dict[str, ServerConfig] = {
         "reasoning_mode": "none",
         "supports_grammar": True,
         "supports_parallel": True,
+        # Not trained for multi-turn tool-call conversations.
+        "supports_multi_turn": False,
     },
     "ministral-8b-reasoning": {
         "model": "mistralai/Ministral-3-8B-reasoning-2512",

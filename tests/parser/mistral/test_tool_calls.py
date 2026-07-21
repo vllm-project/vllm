@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, patch
 
 import partial_json_parser
 import pytest
+import regex as re
 from mistral_common.protocol.instruct.messages import AssistantMessage
 from mistral_common.protocol.instruct.request import InstructRequest
 from mistral_common.protocol.instruct.tool_calls import (
@@ -28,12 +29,13 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
 )
 from vllm.entrypoints.openai.engine.protocol import (
+    DeltaFunctionCall,
     DeltaMessage,
     DeltaToolCall,
     ExtractedToolCallInformation,
     StructuralTagResponseFormat,
 )
-from vllm.parser.engine.events import EventType, SemanticEvent
+from vllm.parser.engine.events import EventType
 from vllm.parser.engine.streaming_parser_engine import StreamingParserEngine
 from vllm.parser.mistral import _DEFAULT_JSON_SCHEMA, MistralParser, mistral_config
 from vllm.parser.parser_manager import ParserManager
@@ -102,9 +104,18 @@ def assert_tool_calls(
         assert actual_tool_call.function.name == expected_tool_call.function.name, (
             f"got wrong function name:${actual_tool_call.function.name}"
         )
-        assert (
-            actual_tool_call.function.arguments == expected_tool_call.function.arguments
-        ), f"got wrong function argument:${actual_tool_call.function.arguments}"
+        actual_args = actual_tool_call.function.arguments
+        # Streaming deltas (DeltaToolCall) may have partial JSON because the
+        # engine holds back the final closing brace until finish() is called.
+        # Apply partial_json_parser so the comparison works for both the
+        # legacy (complete JSON) and engine (potentially partial) paths.
+        if isinstance(actual_tool_call, DeltaToolCall) and actual_args is not None:
+            actual_args = partial_json_parser.ensure_json(
+                actual_args, Allow.OBJ | Allow.STR
+            )
+        assert actual_args == expected_tool_call.function.arguments, (
+            f"got wrong function argument:${actual_tool_call.function.arguments}"
+        )
 
 
 def fix_tool_call_tokenization(
@@ -112,37 +123,69 @@ def fix_tool_call_tokenization(
     mistral_tool_parser: MistralToolParser,
     mistral_tokenizer: TokenizerLike,
 ):
-    """
-    Replaces the textual token sequence for [TOOL_CALLS]
-    with its single special token ID.
-    """
-    textual_tool_call_token_ids = mistral_tokenizer.encode(
-        text=mistral_tool_parser._parser_engine.bot_token,
-        add_special_tokens=False,
-    )
-    # textual_tool_call_token_ids must not contain special tokens like bos, eos etc
-    special_tool_call_token_ids = [mistral_tool_parser._parser_engine.bot_token_id]
+    """Replace textual token sequences for the control markers ([TOOL_CALLS]
+    and [ARGS]) with their single special token IDs.
 
-    # If the input is too short to contain the sequence, no replacement is possible
-    if not tokens or len(tokens) < len(textual_tool_call_token_ids):
-        return tokens
+    Real generation emits these as control tokens; encoding the marker *string*
+    can instead yield literal text tokens. The engine detects markers by id, so
+    the test stream must carry the special ids.
+    """
+    vocab = mistral_tokenizer.get_vocab()
+    markers: list[tuple[str, int]] = [
+        (
+            mistral_tool_parser._parser_engine.bot_token,
+            mistral_tool_parser._parser_engine.bot_token_id,
+        )
+    ]
+    args_id = vocab.get("[ARGS]")
+    if args_id is not None:
+        markers.append(("[ARGS]", args_id))
 
-    result_tokens = []
+    # (textual token sequence, special id) pairs to replace.
+    replacements: list[tuple[list[int], int]] = []
+    for text, special_id in markers:
+        if special_id is None:
+            continue
+        textual = mistral_tokenizer.encode(text=text, add_special_tokens=False)
+        if textual:
+            replacements.append((textual, special_id))
+
+    result_tokens: list[int] = []
     i = 0
-    target_len = len(textual_tool_call_token_ids)
-
     while i < len(tokens):
-        # Check if the slice from the current position matches the target sequence
-        if tokens[i : i + target_len] == textual_tool_call_token_ids:
-            # If it matches, add the replacement and jump the index forward
-            result_tokens.extend(special_tool_call_token_ids)
-            i += target_len
+        for textual, special_id in replacements:
+            if tokens[i : i + len(textual)] == textual:
+                result_tokens.append(special_id)
+                i += len(textual)
+                break
         else:
-            # Otherwise, just add the current token and move to the next one
             result_tokens.append(tokens[i])
             i += 1
 
     return result_tokens
+
+
+def encode_mistral_output(tokenizer: MistralTokenizer, text: str) -> list[int]:
+    """Encode generated output with control markers as their special-token ids.
+
+    Real generation emits ``[TOOL_CALLS]``/``[ARGS]`` as single control tokens.
+    Encoding the marker *strings* can instead glue them to neighbours (e.g.
+    ``}[``) and yield literal text tokens, which the id-based engine never sees.
+    Split on the markers and insert their special ids so the token stream
+    matches real generation.
+    """
+    vocab = tokenizer.get_vocab()
+    marker_ids = {
+        "[TOOL_CALLS]": vocab.get("[TOOL_CALLS]"),
+        "[ARGS]": vocab.get("[ARGS]"),
+    }
+    ids: list[int] = []
+    for part in re.split(r"(\[TOOL_CALLS\]|\[ARGS\])", text):
+        if part in marker_ids and marker_ids[part] is not None:
+            ids.append(marker_ids[part])
+        elif part:
+            ids.extend(tokenizer.encode(part, add_special_tokens=False))
+    return ids
 
 
 def stream_delta_message_generator(
@@ -187,18 +230,13 @@ def stream_delta_message_generator(
         all_token_ids, mistral_tool_parser, mistral_tokenizer
     )
 
-    if reasoning_parser is not None and isinstance(mistral_tokenizer, MistralTokenizer):
-        # encode_instruct prepends BOS which produces no delta_text; this
-        # causes scanner deferral that blocks streaming [TOOL_CALLS] detection
-        # when skip_tool_parsing=True in the reasoning adapter.  Strip context
-        # tokens (BOS/EOS) so only model-generated tokens are streamed —
-        # matching the real serving-layer behaviour.
-        bot_id = mistral_tool_parser._parser_engine.bot_token_id
-        start = next((i for i, t in enumerate(all_token_ids) if t == bot_id), 0)
-        all_token_ids = all_token_ids[start:]
-        vocab = mistral_tokenizer.get_vocab()
-        eos_id = vocab.get("</s>", 2)
-        if all_token_ids and all_token_ids[-1] == eos_id:
+    if isinstance(mistral_tokenizer, MistralTokenizer):
+        # Real serving streams only generated tokens; encode_instruct adds
+        # framing (BOS/EOS) the parser never receives. Strip them so the
+        # id-based engine detection sees a realistic stream.
+        if all_token_ids and all_token_ids[0] == mistral_tokenizer.bos_token_id:
+            all_token_ids = all_token_ids[1:]
+        if all_token_ids and all_token_ids[-1] == mistral_tokenizer.eos_token_id:
             all_token_ids = all_token_ids[:-1]
 
     if driver == "engine":
@@ -279,6 +317,14 @@ def stream_delta_message_generator(
         previous_text = current_text
         pending_text = ""
         pending_token_ids = []
+
+    # For the legacy driver the engine holds back the final closing brace
+    # in _args_buffer until finish_streaming() is called, mirroring how
+    # the real serving layer flushes at end of stream.
+    if driver == "legacy":
+        flush_delta = mistral_tool_parser.finish_streaming()
+        if flush_delta:
+            yield flush_delta
 
 
 @pytest.mark.parametrize(
@@ -624,13 +670,20 @@ def test_extract_tool_calls(
 
 
 def test_extract_tool_calls_v11_without_args_skipped(mistral_tool_parser):
+    # Before Stage 2: the legacy path skipped tool calls with no arg separator,
+    # returning tools_called=True with an empty list.  After Stage 2 the engine
+    # path is used for v11; it recognises the name and emits a tool call with
+    # empty arguments ("{}").  The semantic result is equivalent — a valid zero-
+    # argument call — and is strictly more correct than silently dropping it.
     model_output = "[TOOL_CALLS]toolname_no_args"
     result = mistral_tool_parser.extract_tool_calls(
         model_output, request=_DUMMY_REQUEST
     )
-    assert result == ExtractedToolCallInformation(
-        tools_called=True, tool_calls=[], content=None
-    )
+    assert result.tools_called
+    assert len(result.tool_calls) == 1
+    assert result.tool_calls[0].function.name == "toolname_no_args"
+    assert result.tool_calls[0].function.arguments == "{}"
+    assert result.content is None
 
 
 def _test_extract_tool_calls_streaming(
@@ -666,6 +719,32 @@ def _test_extract_tool_calls_streaming(
         streamed_tool_calls = delta_message.tool_calls
 
         if streamed_tool_calls and len(streamed_tool_calls) > 0:
+            # On the final finished=True delta the engine's _flush_engine_parsers
+            # may append the flushed '}' as a separate DeltaToolCall for the
+            # same index without coalescing.  Merge entries sharing an index so
+            # the "one diff per delta" invariant can be checked after merging.
+            if len(streamed_tool_calls) > 1:
+                assert len({tc.index for tc in streamed_tool_calls}) == 1, (
+                    "only within-chunk finish/flush of one tool is allowed; "
+                    "distinct indices in one delta indicate a regression: "
+                    f"{[tc.index for tc in streamed_tool_calls]}"
+                )
+                by_index: dict[int, DeltaToolCall] = {}
+                for tc in streamed_tool_calls:
+                    existing = by_index.get(tc.index)
+                    if existing is None:
+                        by_index[tc.index] = tc
+                    else:
+                        if tc.id and not existing.id:
+                            existing.id = tc.id
+                        if tc.type and not existing.type:
+                            existing.type = tc.type
+                        if tc.function and existing.function and tc.function.arguments:
+                            existing.function.arguments = (
+                                existing.function.arguments or ""
+                            ) + tc.function.arguments
+                streamed_tool_calls = list(by_index.values())
+
             # make sure only one diff is present - correct even for parallel
             assert len(streamed_tool_calls) == 1
             tool_call = streamed_tool_calls[0]
@@ -945,10 +1024,8 @@ def test_extract_tool_calls_streaming_v11_no_tools(
     mistral_tool_parser, mistral_tokenizer
 ):
     model_output = "This is a test"
-    if isinstance(mistral_tokenizer, MistralTokenizer):
-        all_token_ids = mistral_tokenizer.encode(model_output)
-    else:
-        all_token_ids = mistral_tokenizer.encode(model_output, add_special_tokens=False)
+    # add_special_tokens=False: real serving streams only generated tokens.
+    all_token_ids = mistral_tokenizer.encode(model_output, add_special_tokens=False)
     skip_special = isinstance(mistral_tokenizer, MistralTokenizer)
     collected_content = ""
     previous_text = ""
@@ -994,37 +1071,44 @@ def test_extract_tool_calls_streaming_v11_no_tools(
 
 
 def test_mistral_parser_drops_eos_from_output(mistral_tokenizer):
-    """The EOS terminator must never surface as Mistral content/reasoning.
+    """EOS token must never surface as content/reasoning; literal EOS string
+    must be preserved when the EOS token id is absent.
 
-    The engine emits EOS as a chunk during the reasoning pass
-    (skip_tool_parsing preserves drop tokens); MistralParser drops it so it
-    cannot corrupt output.
+    Case A: the real EOS token id causes the text to be dropped.
+    Case B: the same EOS string with a non-EOS token id is preserved —
+    this is the point of the structural (id-gated) fix.
     """
     if not isinstance(mistral_tokenizer, MistralTokenizer):
         pytest.skip("Requires MistralTokenizer")
 
-    parser = MistralParser(mistral_tokenizer)
-    eos_text = mistral_tokenizer.decode([mistral_tokenizer.eos_token_id])
+    eos_id: int = mistral_tokenizer.eos_token_id
+    eos_text: str = mistral_tokenizer.decode([eos_id])
     assert eos_text
 
-    content_delta = parser._events_to_delta(
-        [
-            SemanticEvent(EventType.TEXT_CHUNK, value='{"a": 1}'),
-            SemanticEvent(EventType.TEXT_CHUNK, value=eos_text),
-        ],
-        finished=True,
-    )
-    assert content_delta is not None
-    assert content_delta.content == '{"a": 1}'
+    # Case A: real EOS token — text must be dropped.
+    parser_a = MistralParser(mistral_tokenizer)
+    parser_a.initialize_streaming()
+    events_a = parser_a._feed(eos_text, [eos_id])
+    events_a.extend(parser_a._engine.finish())
+    delta_a = parser_a._events_to_delta(events_a, finished=True)
+    content_a = (delta_a.content if delta_a else None) or ""
+    reasoning_a = (delta_a.reasoning if delta_a else None) or ""
+    assert eos_text not in content_a
+    assert eos_text not in reasoning_a
 
-    reasoning_delta = parser._events_to_delta(
-        [
-            SemanticEvent(EventType.REASONING_CHUNK, value="thinking"),
-            SemanticEvent(EventType.REASONING_CHUNK, value=eos_text),
-        ]
-    )
-    assert reasoning_delta is not None
-    assert reasoning_delta.reasoning == "thinking"
+    # Case B: EOS text with a non-EOS token id — text must be preserved.
+    # This proves content equal to the EOS string is not silently dropped
+    # when it did not come from the real EOS token.
+    non_eos_ids = mistral_tokenizer.encode(text="hello", add_special_tokens=False)
+    non_eos_id = next(tid for tid in non_eos_ids if tid != eos_id)
+    parser_b = MistralParser(mistral_tokenizer)
+    parser_b.initialize_streaming()
+    events_b = parser_b._feed(eos_text, [non_eos_id])
+    events_b.extend(parser_b._engine.finish())
+    delta_b = parser_b._events_to_delta(events_b, finished=True)
+    content_b = (delta_b.content if delta_b else None) or ""
+    reasoning_b = (delta_b.reasoning if delta_b else None) or ""
+    assert eos_text in content_b or eos_text in reasoning_b
 
 
 @pytest.mark.parametrize(
@@ -1301,11 +1385,15 @@ def test_extract_tool_calls_streaming_one_chunk(
     tool_parser = request.getfixturevalue(parser_fixture)
     tokenizer = request.getfixturevalue(tokenizer_fixture)
 
-    if isinstance(tokenizer, MistralTokenizer):
-        all_token_ids = tokenizer.encode(model_output)
+    # Real serving streams only generated tokens (no BOS/EOS framing) with the
+    # control markers as special ids.
+    if isinstance(tokenizer, MistralTokenizer) and tokenizer.version >= 11:
+        all_token_ids = encode_mistral_output(tokenizer, model_output)
     else:
         all_token_ids = tokenizer.encode(model_output, add_special_tokens=False)
-    all_token_ids = fix_tool_call_tokenization(all_token_ids, tool_parser, tokenizer)
+        all_token_ids = fix_tool_call_tokenization(
+            all_token_ids, tool_parser, tokenizer
+        )
 
     delta_message = tool_parser.extract_tool_calls_streaming(
         previous_text="",
@@ -1316,6 +1404,26 @@ def test_extract_tool_calls_streaming_one_chunk(
         delta_token_ids=all_token_ids,
         request=_DUMMY_REQUEST,
     )
+    # The engine buffers the final closing brace ('}') in _args_buffer until
+    # finish_streaming() is called, mirroring real serving.  Flush it and
+    # merge the result so the asserted arguments are complete.
+    flush_delta = tool_parser.finish_streaming()
+    if flush_delta is not None and flush_delta.tool_calls:
+        if delta_message is not None and delta_message.tool_calls:
+            for flush_tc in flush_delta.tool_calls:
+                for existing_tc in delta_message.tool_calls:
+                    if existing_tc.index == flush_tc.index and flush_tc.function:
+                        existing_tc.function = (
+                            existing_tc.function or DeltaFunctionCall()
+                        )
+                        existing_tc.function.arguments = (
+                            existing_tc.function.arguments or ""
+                        ) + (flush_tc.function.arguments or "")
+        elif delta_message is not None:
+            delta_message.tool_calls = flush_delta.tool_calls
+        else:
+            delta_message = flush_delta
+
     assert isinstance(delta_message, DeltaMessage)
     assert len(delta_message.tool_calls) == len(expected_tool_calls)
 
@@ -1331,13 +1439,6 @@ def test_extract_tool_calls_streaming_one_chunk(
     "parser_fixture, model_output, fake_count, two_phase",
     [
         pytest.param(
-            "mistral_tool_parser",
-            '[TOOL_CALLS]add{"a": 1, "b": 2}',
-            20,
-            True,
-            id="v11",
-        ),
-        pytest.param(
             "mistral_pre_v11_tool_parser",
             '[TOOL_CALLS] [{"name": "add", "arguments":{"a": 1, "b": 2}}]',
             30,
@@ -1349,7 +1450,11 @@ def test_extract_tool_calls_streaming_one_chunk(
 def test_fast_detokenization_text_detection(
     parser_fixture, model_output, fake_count, two_phase, request
 ):
-    """Regression: bot_token in text but not token_ids (PR #37209)."""
+    """Regression: bot_token in text but not token_ids (PR #37209).
+
+    Only the pre-v11 legacy path detects the marker from text; v11+ routes
+    through the engine and detects the marker by token id.
+    """
     parser = request.getfixturevalue(parser_fixture)
     # Token IDs that do NOT contain bot_token_id.
     fake_token_ids = list(range(99, 99 + fake_count))
@@ -1395,26 +1500,14 @@ def test_fast_detokenization_text_detection(
     assert delta_message.tool_calls[0].function.name == "add"
 
 
-@pytest.mark.parametrize(
-    "parser_fixture, patched_method, current_text",
-    [
-        (
-            "mistral_tool_parser",
-            "_extract_tool_calls_streaming",
-            "[TOOL_CALLS]add{}",
-        ),
-        (
-            "mistral_pre_v11_tool_parser",
-            "_extract_tool_calls_streaming_pre_v11_tokenizer",
-            '[TOOL_CALLS] [{"name":"a","arguments":{}}]',
-        ),
-    ],
-    ids=["v11", "pre_v11"],
-)
 def test_extract_tool_calls_streaming_exception_returns_none(
-    parser_fixture, patched_method, current_text, request
+    mistral_pre_v11_tool_parser,
 ):
-    parser = request.getfixturevalue(parser_fixture)
+    # v11 routes through the ParserEngine and does not swallow exceptions;
+    # only the pre-v11 legacy state-machine path has explicit exception handling.
+    parser = mistral_pre_v11_tool_parser
+    patched_method = "_extract_tool_calls_streaming_pre_v11_tokenizer"
+    current_text = '[TOOL_CALLS] [{"name":"a","arguments":{}}]'
     with patch.object(
         parser._parser_engine, patched_method, side_effect=RuntimeError("boom")
     ):

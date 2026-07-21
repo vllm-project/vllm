@@ -1,15 +1,43 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
+
 import pytest
+from mistral_common.protocol.instruct.messages import (
+    AssistantMessage,
+    ThinkChunk,
+    ToolMessage,
+    UserMessage,
+)
+from mistral_common.protocol.instruct.request import InstructRequest
+from mistral_common.protocol.instruct.tool_calls import FunctionCall, ToolCall
 
 from tests.reasoning.utils import run_reasoning_extraction_mistral
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+from vllm.parser.parser_manager import ParserManager
 from vllm.reasoning import ReasoningParser, ReasoningParserManager
+from vllm.tokenizers.detokenizer_utils import detokenize_incrementally
 from vllm.tokenizers.mistral import MistralTokenizer
 
 _PARSER_NAME = "mistral"
 _MODEL_V13 = "mistralai/Magistral-Small-2509"
 _MODEL_V11 = "mistralai/Magistral-Small-2506"
+
+_SAMPLE_TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "get_weather",
+            "description": "Get the current weather in a city.",
+            "parameters": {
+                "type": "object",
+                "properties": {"city": {"type": "string"}},
+                "required": ["city"],
+            },
+        },
+    }
+]
 
 
 @pytest.fixture(scope="module")
@@ -312,3 +340,260 @@ def test_is_reasoning_end(
         + [tool_calls_token_id]
     )
     assert parser.is_reasoning_end(implicit_end_ids)
+
+
+def _stream_parse_delta(parser, tokenizer, gen_ids, request, prompt_ids):
+    """Stream `gen_ids` through `parse_delta` and reconstruct reasoning/content."""
+    reasoning = ""
+    content = ""
+    previous_tokens: list[str] | None = None
+    prefix_offset = 0
+    read_offset = 0
+    for i, tok in enumerate(gen_ids):
+        new_tokens, delta_text, prefix_offset, read_offset = detokenize_incrementally(
+            tokenizer=tokenizer,
+            all_input_ids=gen_ids[: i + 1],
+            prev_tokens=previous_tokens,
+            prefix_offset=prefix_offset,
+            read_offset=read_offset,
+            skip_special_tokens=True,
+            spaces_between_special_tokens=True,
+        )
+        previous_tokens = (
+            previous_tokens + new_tokens if previous_tokens else new_tokens
+        )
+        delta_message = parser.parse_delta(
+            delta_text=delta_text,
+            delta_token_ids=[tok],
+            request=request,
+            prompt_token_ids=prompt_ids,
+            finished=(i == len(gen_ids) - 1),
+        )
+        if delta_message is not None:
+            reasoning += delta_message.reasoning or ""
+            content += delta_message.content or ""
+    return reasoning, content
+
+
+def test_parse_delta_keeps_reasoning_open_after_closed_think_prompt(
+    mistral_tokenizer: MistralTokenizer,
+) -> None:
+    """A closed `[THINK]` block in the prompt must not finalize reasoning.
+
+    Regression: reasoning system prompts end the prompt with a closed
+    `[THINK]...[/THINK]` block. With a parser-injected grammar the generation's
+    reasoning must still be captured as ``reasoning_content`` rather than
+    leaking into ``content`` (the prompt-based reasoning-end heuristic must be
+    skipped). This exercises ``DelegatingParser.parse_delta``'s prompt check,
+    which the isolated reasoning-parser tests do not cover.
+    """
+    parser_cls = ParserManager.get_parser(
+        tool_parser_name="mistral",
+        reasoning_parser_name="mistral",
+        enable_auto_tools=True,
+    )
+    parser = parser_cls(mistral_tokenizer, None)
+    request = parser.adjust_request(
+        ChatCompletionRequest(
+            messages=[],
+            model="test",
+            tools=_SAMPLE_TOOLS,
+            tool_choice="auto",
+        )
+    )
+    assert getattr(request, "_grammar_from_parser", False)
+
+    prompt_ids = _encode_v13(mistral_tokenizer, "[THINK]system reasoning[/THINK]")
+    gen_ids = _encode_v13(
+        mistral_tokenizer,
+        "[THINK]because two plus two is four[/THINK]The answer is 4.",
+    )
+
+    reasoning, content = _stream_parse_delta(
+        parser, mistral_tokenizer, gen_ids, request, prompt_ids
+    )
+
+    assert "because two plus two is four" in reasoning
+    assert "because two plus two is four" not in content
+    assert "The answer is 4." in content
+
+
+def _encode_gen(tokenizer: MistralTokenizer, text: str) -> list[int]:
+    """Encode `text` mapping `[THINK]`, `[/THINK]`, `[TOOL_CALLS]`, `[ARGS]`
+    to their special-token IDs; all other text uses the base tokenizer.
+    """
+    vocab = tokenizer.get_vocab()
+    markers: dict[str, int] = {
+        "[THINK]": tokenizer.instruct.BEGIN_THINK,
+        "[/THINK]": tokenizer.instruct.END_THINK,
+        "[TOOL_CALLS]": vocab["[TOOL_CALLS]"],
+        "[ARGS]": vocab["[ARGS]"],
+    }
+    out: list[int] = []
+    remaining = text
+    while remaining:
+        earliest: int | None = None
+        earliest_marker: str | None = None
+        for marker in markers:
+            idx = remaining.find(marker)
+            if idx != -1 and (earliest is None or idx < earliest):
+                earliest = idx
+                earliest_marker = marker
+        if earliest_marker is None:
+            out += tokenizer.tokenizer.encode(remaining, False, False)
+            break
+        assert earliest is not None  # set together with earliest_marker
+        if earliest > 0:
+            out += tokenizer.tokenizer.encode(remaining[:earliest], False, False)
+        out.append(markers[earliest_marker])
+        remaining = remaining[earliest + len(earliest_marker) :]
+    return out
+
+
+def _stream_turn(
+    parser,
+    tokenizer: MistralTokenizer,
+    gen_ids: list[int],
+    request,
+    prompt_ids: list[int],
+) -> tuple[str, str, list[tuple[str, str]]]:
+    """Stream `gen_ids` through `parse_delta`, returning `(reasoning, content,
+    tool_calls)`.
+
+    `tool_calls` is a list of `(name, arguments)` tuples ordered by
+    `DeltaToolCall.index`.  Arguments are concatenated across deltas.
+    """
+    reasoning = ""
+    content = ""
+    tool_call_acc: dict[int, dict[str, str]] = {}
+    previous_tokens: list[str] | None = None
+    prefix_offset = 0
+    read_offset = 0
+    for i, tok in enumerate(gen_ids):
+        new_tokens, delta_text, prefix_offset, read_offset = detokenize_incrementally(
+            tokenizer=tokenizer,
+            all_input_ids=gen_ids[: i + 1],
+            prev_tokens=previous_tokens,
+            prefix_offset=prefix_offset,
+            read_offset=read_offset,
+            skip_special_tokens=True,
+            spaces_between_special_tokens=True,
+        )
+        previous_tokens = (
+            previous_tokens + new_tokens if previous_tokens else new_tokens
+        )
+        delta_message = parser.parse_delta(
+            delta_text=delta_text,
+            delta_token_ids=[tok],
+            request=request,
+            prompt_token_ids=prompt_ids,
+            finished=(i == len(gen_ids) - 1),
+        )
+        if delta_message is not None:
+            reasoning += delta_message.reasoning or ""
+            content += delta_message.content or ""
+            for tc in delta_message.tool_calls:
+                if tc.index not in tool_call_acc:
+                    tool_call_acc[tc.index] = {"name": "", "args": ""}
+                if tc.function:
+                    if tc.function.name:
+                        tool_call_acc[tc.index]["name"] = tc.function.name
+                    if tc.function.arguments:
+                        tool_call_acc[tc.index]["args"] += tc.function.arguments
+    tool_calls = [
+        (tool_call_acc[k]["name"], tool_call_acc[k]["args"])
+        for k in sorted(tool_call_acc)
+    ]
+    return reasoning, content, tool_calls
+
+
+def test_parse_delta_multi_turn_reason_and_tool(
+    mistral_tokenizer: MistralTokenizer,
+) -> None:
+    """Two-turn loop: each assistant turn carries reasoning + a tool call.
+
+    For each turn, the mistral-common conversation is encoded into `prompt_ids`
+    before streaming the next generation.  Turn 2's prompt therefore contains
+    a `[THINK]`/`[/THINK]` block and `[TOOL_CALLS]` from turn 1 — the
+    accumulated tool-call/result history that single-turn tests never exercise.
+
+    Asserts that across both turns the parser correctly classifies think tokens
+    as `reasoning_content` (never leaking into `content`), and that the tool
+    call name/arguments are reconstructed correctly from the streaming deltas.
+    """
+    parser_cls = ParserManager.get_parser(
+        tool_parser_name="mistral",
+        reasoning_parser_name="mistral",
+        enable_auto_tools=True,
+    )
+    request = parser_cls(mistral_tokenizer, None).adjust_request(
+        ChatCompletionRequest(
+            messages=[],
+            model="test",
+            tools=_SAMPLE_TOOLS,
+            tool_choice="auto",
+        )
+    )
+    assert getattr(request, "_grammar_from_parser", False)
+
+    cities = ["Dallas", "Paris"]
+    conversation: list = [UserMessage(content="What is the weather in Dallas?")]
+
+    for i, city in enumerate(cities):
+        # Fresh parser per turn: streaming state must not bleed across turns.
+        parser = parser_cls(mistral_tokenizer, None)
+
+        prompt_ids = mistral_tokenizer.instruct.encode_instruct(
+            InstructRequest(messages=conversation)
+        ).tokens
+
+        gen_str = (
+            f"[THINK]I should check {city} weather.[/THINK]"
+            f'[TOOL_CALLS]get_weather[ARGS]{{"city": "{city}"}}'
+        )
+        gen_ids = _encode_gen(mistral_tokenizer, gen_str)
+
+        reasoning, content, tool_calls = _stream_turn(
+            parser, mistral_tokenizer, gen_ids, request, prompt_ids
+        )
+
+        assert f"check {city} weather" in reasoning, f"turn {i}: reasoning not captured"
+        assert f"check {city} weather" not in content, (
+            f"turn {i}: reasoning leaked into content"
+        )
+        assert "[THINK]" not in content, f"turn {i}: [THINK] leaked"
+        assert "[TOOL_CALLS]" not in content, f"turn {i}: [TOOL_CALLS] leaked"
+        assert len(tool_calls) == 1, f"turn {i}: expected 1 tool call"
+        name, args = tool_calls[0]
+        assert name == "get_weather", f"turn {i}: wrong tool name {name!r}"
+        assert city in args, f"turn {i}: city not in args {args!r}"
+
+        # Extend conversation with this turn's history for the next turn.
+        tc_id = f"tc{i:07d}"  # 9-char alphanumeric id: "tc0000000", "tc0000001"
+        conversation.extend(
+            [
+                AssistantMessage(
+                    content=[
+                        ThinkChunk(
+                            thinking=f"I should check {city} weather.",
+                            closed=True,
+                        )
+                    ],
+                    tool_calls=[
+                        ToolCall(
+                            id=tc_id,
+                            function=FunctionCall(
+                                name="get_weather",
+                                arguments=json.dumps({"city": city}),
+                            ),
+                        )
+                    ],
+                ),
+                ToolMessage(
+                    content=f"{city}: 70F sunny",
+                    tool_call_id=tc_id,
+                ),
+            ]
+        )
+        if i < len(cities) - 1:
+            conversation.append(UserMessage(content=f"And in {cities[i + 1]}?"))

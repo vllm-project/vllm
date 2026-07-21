@@ -8,7 +8,7 @@ from huggingface_hub import snapshot_download
 from tests.utils import RemoteOpenAIServer
 from vllm.platforms import current_platform
 
-from .utils import ARGS, CONFIGS, ServerConfig
+from .utils import ARGS, CONFIGS, MistralServerConfig
 
 
 # for each server config, download the model and return the config
@@ -28,7 +28,7 @@ def server_config(request):
 
 # run this for each server config
 @pytest.fixture(scope="package")
-def server(request, server_config: ServerConfig):
+def server(request, server_config: MistralServerConfig):
     model = server_config["model"]
     args_for_model = server_config["arguments"]
     with RemoteOpenAIServer(

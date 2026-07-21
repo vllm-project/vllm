@@ -812,13 +812,9 @@ class DelegatingParser(Parser):
 
         if not state.prompt_reasoning_checked and prompt_token_ids is not None:
             state.prompt_reasoning_checked = True
-            if self._reasoning_parser is None:
-                state.reasoning_ended = True
-            elif getattr(request, "_grammar_from_parser", False):
-                # The parser injected a grammar whose optional reasoning rule
-                # (e.g. Mistral's `think?`) controls the reasoning structure.
-                state.reasoning_ended = False
-            elif self.is_reasoning_end(prompt_token_ids):
+            if self._reasoning_parser is None or self.is_reasoning_end(
+                prompt_token_ids
+            ):
                 state.reasoning_ended = True
             else:
                 # Reasoning is still open at the end of the prompt; let the

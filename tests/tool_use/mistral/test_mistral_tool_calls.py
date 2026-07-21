@@ -14,10 +14,9 @@ from tests.tool_use.utils import (
     SEARCH_TOOL,
     SEED,
     WEATHER_TOOL,
-    ensure_system_prompt,
 )
 
-from .utils import ServerConfig
+from .utils import MistralServerConfig, ensure_system_prompt
 
 AUTO = object()
 
@@ -181,7 +180,7 @@ SO_SCENARIOS: list[SOScenario] = [
 ]
 
 
-def _requires_tool_parser(server_config: ServerConfig) -> None:
+def _requires_tool_parser(server_config: MistralServerConfig) -> None:
     """Skip if server was not started with --tool-call-parser."""
     if "--tool-call-parser" not in server_config.get("arguments", []):
         pytest.skip(
@@ -189,7 +188,7 @@ def _requires_tool_parser(server_config: ServerConfig) -> None:
         )
 
 
-def _requires_parallel(server_config: ServerConfig) -> None:
+def _requires_parallel(server_config: MistralServerConfig) -> None:
     """Skip if the model does not support parallel tool calls."""
     if not server_config.get("supports_parallel"):
         pytest.skip(
@@ -197,14 +196,16 @@ def _requires_parallel(server_config: ServerConfig) -> None:
         )
 
 
-def _reasoning_effort_values(config: ServerConfig) -> list[str | None]:
+def _reasoning_effort_values(config: MistralServerConfig) -> list[str | None]:
     """Valid reasoning_effort values for a model."""
     if config.get("reasoning_mode") == "effort":
         return [None, "none", "high"]
     return [None]
 
 
-def _expect_reasoning(config: ServerConfig, reasoning_effort: str | None) -> bool:
+def _expect_reasoning(
+    config: MistralServerConfig, reasoning_effort: str | None
+) -> bool:
     """Resolve whether reasoning_content must be present in the response."""
     mode = config.get("reasoning_mode")
     if mode == "intrinsic":
@@ -255,7 +256,7 @@ def _assert_tool_call(
     function_args_str: str,
     tool_call_id: str,
     expected_name: str | None,
-    config: ServerConfig,
+    config: MistralServerConfig,
 ) -> dict:
     """Validate a single tool call and return parsed args."""
     assert function_name is not None
@@ -268,7 +269,7 @@ def _assert_tool_call(
 
 
 def _assert_content_only(
-    *, content: str, tool_calls_present: bool, config: ServerConfig
+    *, content: str, tool_calls_present: bool, config: MistralServerConfig
 ) -> None:
     """Validate a content-only response.
 
@@ -463,7 +464,7 @@ async def _collect_streamed_parallel_tool_calls(
 
 async def _run_tool_cell(
     client: openai.AsyncOpenAI,
-    server_config: ServerConfig,
+    server_config: MistralServerConfig,
     scenario: Scenario,
     stream: bool,
     reasoning_effort: str | None,
@@ -577,7 +578,7 @@ async def _run_tool_cell(
 @pytest.mark.parametrize("scenario", TOOL_SCENARIOS, ids=lambda s: s.id)
 async def test_tool_matrix(
     client: openai.AsyncOpenAI,
-    server_config: ServerConfig,
+    server_config: MistralServerConfig,
     scenario: Scenario,
     stream: bool,
 ) -> None:
@@ -603,7 +604,7 @@ async def test_tool_matrix(
 @pytest.mark.parametrize("so_scenario", SO_SCENARIOS, ids=lambda s: s.id)
 async def test_structured_output_matrix(
     client: openai.AsyncOpenAI,
-    server_config: ServerConfig,
+    server_config: MistralServerConfig,
     so_scenario: SOScenario,
     stream: bool,
 ) -> None:
@@ -639,7 +640,7 @@ async def test_structured_output_matrix(
 
 @pytest.mark.asyncio
 async def test_tool_call_parallel(
-    client: openai.AsyncOpenAI, server_config: ServerConfig
+    client: openai.AsyncOpenAI, server_config: MistralServerConfig
 ) -> None:
     _requires_tool_parser(server_config)
     _requires_parallel(server_config)
@@ -709,3 +710,148 @@ async def test_tool_call_parallel(
         assert "city" in streamed_args
 
     assert len(result.function_names) == len(non_streaming_tool_calls)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True], ids=["non_stream", "stream"])
+async def test_tool_call_multi_turn(
+    client: openai.AsyncOpenAI,
+    server_config: MistralServerConfig,
+    stream: bool,
+) -> None:
+    """Exercises repeated reason+tool turns with growing tool-call/result history.
+
+    Two consecutive non-streaming assistant turns each produce a tool call
+    (Dallas then Paris), building up assistant-tool-call + tool-result history
+    in the prompt.  Turn 2's prompt therefore contains the prior tool call and
+    tool result that single-turn tests never reach.  A final summarization turn
+    (streamed or not per `stream`) asserts that reasoning does not leak into
+    content across the full multi-turn conversation — the failure mode that
+    prompted this test.
+    """
+    _requires_tool_parser(server_config)
+    if not server_config.get("supports_multi_turn", True):
+        pytest.skip(
+            f"Skipping: {server_config['model']} is not trained for multi-turn "
+            "tool-call conversations."
+        )
+    models = await client.models.list()
+    model_name: str = models.data[0].id
+    expect_reasoning = _expect_reasoning(config=server_config, reasoning_effort=None)
+
+    cities = ["Dallas", "Paris"]
+    tool_results = {
+        "Dallas": "The weather in Dallas is 98 degrees fahrenheit and sunny.",
+        "Paris": "The weather in Paris is 60 degrees fahrenheit and cloudy.",
+    }
+
+    messages = ensure_system_prompt(MESSAGES_ASKING_FOR_TOOLS, server_config)
+
+    for i, city in enumerate(cities):
+        kwargs = _build_request_kwargs(
+            model=model_name,
+            messages=messages,
+            tools=[WEATHER_TOOL],
+            expect_reasoning=expect_reasoning,
+        )
+        chat = await client.chat.completions.create(**kwargs)
+        choice = chat.choices[0]
+        turn_tool_calls = choice.message.tool_calls
+
+        if not server_config.get("supports_grammar") and (
+            turn_tool_calls is None or len(turn_tool_calls) == 0
+        ):
+            pytest.skip(
+                f"Non-grammar model did not produce a tool call on turn {i}"
+                f" (city={city}); skipping multi-turn test."
+            )
+
+        assert turn_tool_calls is not None and len(turn_tool_calls) >= 1
+        tc = turn_tool_calls[0]
+        _assert_tool_call(
+            function_name=tc.function.name,
+            function_args_str=tc.function.arguments,
+            tool_call_id=tc.id,
+            expected_name="get_current_weather",
+            config=server_config,
+        )
+
+        turn_reasoning = getattr(choice.message, "reasoning", None) or getattr(
+            choice.message, "reasoning_content", None
+        )
+        turn_content = choice.message.content or ""
+        _assert_reasoning(
+            reasoning_content=turn_reasoning,
+            expected=expect_reasoning,
+            optional=True,
+        )
+        assert "[THINK]" not in turn_content
+        assert "[/THINK]" not in turn_content
+        assert "</think>" not in turn_content
+
+        messages = list(messages) + [
+            {
+                "role": "assistant",
+                "tool_calls": [
+                    {
+                        "id": tc.id,
+                        "type": "function",
+                        "function": {
+                            "name": tc.function.name,
+                            "arguments": tc.function.arguments,
+                        },
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": tc.id,
+                "content": tool_results[city],
+            },
+        ]
+        if i < len(cities) - 1:
+            messages = list(messages) + [
+                {"role": "user", "content": f"And what about {cities[i + 1]}?"}
+            ]
+
+    # Final turn: ask for a summary, respecting the `stream` parameter.
+    messages = list(messages) + [
+        {
+            "role": "user",
+            "content": "Thanks, can you summarize both weather results?",
+        }
+    ]
+    final_kwargs = _build_request_kwargs(
+        model=model_name,
+        messages=messages,
+        tools=[WEATHER_TOOL],
+        stream=stream,
+        expect_reasoning=expect_reasoning,
+    )
+
+    if stream:
+        raw = await client.chat.completions.create(**final_kwargs)
+        ct_result = await _collect_streamed_content(raw, no_tool_calls=False)
+        content = "".join(ct_result.chunks)
+        finish_reason = ct_result.finish_reason
+        reasoning_content: str | None = ct_result.reasoning or None
+    else:
+        final_chat = await client.chat.completions.create(**final_kwargs)
+        final_choice = final_chat.choices[0]
+        content = final_choice.message.content or ""
+        finish_reason = final_choice.finish_reason
+        reasoning_content = getattr(final_choice.message, "reasoning", None) or getattr(
+            final_choice.message, "reasoning_content", None
+        )
+
+    assert finish_reason in {"stop", "length", "tool_calls"}
+    assert "[THINK]" not in content
+    assert "[/THINK]" not in content
+    assert "</think>" not in content
+    if finish_reason != "tool_calls":
+        assert len(content) > 0
+    _assert_reasoning(
+        reasoning_content=reasoning_content,
+        expected=expect_reasoning,
+        optional=True,
+    )

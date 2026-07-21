@@ -78,7 +78,7 @@ _OPEN_BRACE = "{"
 
 
 class StreamingState(Enum):
-    """Streaming parsing state for legacy (non-grammar) tool call extraction."""
+    """Streaming parsing state for pre-v11 tool call extraction."""
 
     WAITING_FOR_TOOL_START = auto()
     WAITING_FOR_TOOL_KEY = auto()
@@ -193,11 +193,13 @@ def mistral_config(
         terminals={
             **reasoning_terminals,
             "TOOL_CALLS": _TOOL_CALLS,
+            "ARGS": _ARGS,
             "OPEN_BRACE": _OPEN_BRACE,
         },
         token_id_terminals={
             **reasoning_token_id_terminals,
             "TOOL_CALLS": _TOOL_CALLS,
+            "ARGS": _ARGS,
         },
         transitions={
             **reasoning_transitions,
@@ -208,8 +210,13 @@ def mistral_config(
                 if reasoning_encoding != "none"
                 else (EventType.TOOL_CALL_START,),
             ),
-            # NAME→ARGS: "{" ends the name and is carried as ARG_VALUE_CHUNK
-            # so the opening brace lands in the JSON argument buffer.
+            # NAME→ARGS via explicit [ARGS] separator (v11+): consumed, no events.
+            (ParserState.TOOL_NAME, "ARGS"): Transition(
+                ParserState.TOOL_ARGS,
+                (),
+            ),
+            # NAME→ARGS via "{": carried as ARG_VALUE_CHUNK so the opening
+            # brace lands in the JSON argument buffer (fallback for name{args}).
             (ParserState.TOOL_NAME, "OPEN_BRACE"): Transition(
                 ParserState.TOOL_ARGS,
                 (EventType.ARG_VALUE_CHUNK,),
@@ -270,8 +277,9 @@ class MistralParser(ParserEngine):
 
         self._tool_calls_token_id: int | None = self.vocab.get(_TOOL_CALLS)
 
-        # EOS text, dropped from streamed output in _events_to_delta.
+        # EOS stripped in _feed by token id; keep text for the endswith check.
         eos_id = getattr(tokenizer, "eos_token_id", None)
+        self._eos_id: int | None = eos_id
         self._eos_text: str | None = None
         if eos_id is not None:
             try:
@@ -305,23 +313,18 @@ class MistralParser(ParserEngine):
             )
         self.tool_call_regex = re.compile(r"\[{.*}\]", re.DOTALL)
 
-    def _events_to_delta(
+    def _feed(
         self,
-        events: list[SemanticEvent],
-        finished: bool = False,
-    ) -> DeltaMessage | None:
-        # EOS must never surface as output; the engine emits it as a
-        # content/reasoning chunk during the reasoning pass, so drop it.
-        if self._eos_text:
-            events = [
-                event
-                for event in events
-                if not (
-                    event.type in (EventType.TEXT_CHUNK, EventType.REASONING_CHUNK)
-                    and event.value == self._eos_text
-                )
-            ]
-        return super()._events_to_delta(events, finished=finished)
+        delta_text: str,
+        delta_token_ids: Sequence[int],
+    ) -> list[SemanticEvent]:
+        # EOS is a stop token, not output; strip it before the engine emits it.
+        if self._eos_id is not None and self._eos_id in delta_token_ids:
+            new_ids = [tid for tid in delta_token_ids if tid != self._eos_id]
+            if self._eos_text and delta_text.endswith(self._eos_text):
+                delta_text = delta_text[: -len(self._eos_text)]
+            return super()._feed(delta_text, new_ids)
+        return super()._feed(delta_text, delta_token_ids)
 
     def adjust_request(
         self, request: ChatCompletionRequest | ResponsesRequest
@@ -448,17 +451,18 @@ class MistralParser(ParserEngine):
         content: str,
         request: ChatCompletionRequest,
     ) -> ExtractedToolCallInformation:
-        return self._legacy_extract_tool_calls(content, request)
+        if self._is_pre_v11:
+            return self._legacy_extract_tool_calls(content, request)
+        return super().extract_tool_calls_from_content(content, request)
 
     def _legacy_extract_tool_calls(
         self,
         model_output: str,
         request: ChatCompletionRequest,
     ) -> ExtractedToolCallInformation:
-        """Legacy non-streaming extraction for non-grammar tokenizers.
+        """Pre-v11 non-streaming extraction.
 
-        Handles both pre-v11 (JSON array) and v11+ (name{args}) formats.
-        Behavior-equivalent to the removed MistralToolParser.extract_tool_calls.
+        Handles the ``[TOOL_CALLS][{...}]`` JSON-array format.
         """
         if self.bot_token not in model_output:
             return ExtractedToolCallInformation(
@@ -469,57 +473,22 @@ class MistralParser(ParserEngine):
         content = content_and_raw_tool_calls[0]
         raw_tool_calls = content_and_raw_tool_calls[1:]
 
-        # >= v11: content[BOT]name1[ARGS]{args1}[BOT]name2[ARGS]{args2}
-        if not self._is_pre_v11:
-            tool_calls: list[dict[str, Any]] = []
-            for raw_tool_call in raw_tool_calls:
-                args_found = _ARGS in raw_tool_call
-                if not args_found and "{" not in raw_tool_call:
-                    continue
-                end_name = raw_tool_call.find(_ARGS if args_found else "{")
-                tool_name, args = (
-                    raw_tool_call[:end_name].strip(),
-                    raw_tool_call[end_name + (len(_ARGS) if args_found else 0) :],
-                )
-                tool_calls.append({"name": tool_name, "arguments": args})
-
-        # < v11: content[BOT] [{tool_call1},{tool_call2}]
-        else:
-            if len(raw_tool_calls) != 1:
-                raise ValueError(
-                    "Only one BOT token should have been outputted, "
-                    f"but got {model_output}."
-                )
-            stringified_tool_calls = raw_tool_calls[0].strip()
+        # pre-v11: content[BOT] [{tool_call1},{tool_call2}]
+        if len(raw_tool_calls) != 1:
+            raise ValueError(
+                "Only one BOT token should have been outputted, "
+                f"but got {model_output}."
+            )
+        stringified_tool_calls = raw_tool_calls[0].strip()
+        try:
+            # Use raw_decode to parse the first valid JSON value,
+            # ignoring trailing tokens the model may emit after
+            # the tool call array.
+            tool_calls, _ = json.JSONDecoder().raw_decode(stringified_tool_calls)
+        except json.JSONDecodeError:
             try:
-                # Use raw_decode to parse the first valid JSON value,
-                # ignoring trailing tokens the model may emit after
-                # the tool call array.
-                tool_calls, _ = json.JSONDecoder().raw_decode(stringified_tool_calls)
-            except json.JSONDecodeError:
-                try:
-                    raw_tool_call = self.tool_call_regex.findall(
-                        stringified_tool_calls
-                    )[0]
-                    tool_calls = json.loads(raw_tool_call)
-                    tool_calls = [
-                        {
-                            "name": tool_call["name"],
-                            "arguments": json.dumps(
-                                tool_call.get("arguments", {}),
-                                ensure_ascii=False,
-                            ),
-                        }
-                        for tool_call in tool_calls
-                    ]
-                except (IndexError, json.JSONDecodeError):
-                    logger.exception("Error in extracting tool call from response.")
-                    return ExtractedToolCallInformation(
-                        tools_called=False,
-                        tool_calls=[],
-                        content=stringified_tool_calls,
-                    )
-            else:
+                raw_tool_call = self.tool_call_regex.findall(stringified_tool_calls)[0]
+                tool_calls = json.loads(raw_tool_call)
                 tool_calls = [
                     {
                         "name": tool_call["name"],
@@ -530,6 +499,24 @@ class MistralParser(ParserEngine):
                     }
                     for tool_call in tool_calls
                 ]
+            except (IndexError, json.JSONDecodeError):
+                logger.exception("Error in extracting tool call from response.")
+                return ExtractedToolCallInformation(
+                    tools_called=False,
+                    tool_calls=[],
+                    content=stringified_tool_calls,
+                )
+        else:
+            tool_calls = [
+                {
+                    "name": tool_call["name"],
+                    "arguments": json.dumps(
+                        tool_call.get("arguments", {}),
+                        ensure_ascii=False,
+                    ),
+                }
+                for tool_call in tool_calls
+            ]
 
         mistral_tool_calls: list[MistralToolCall] = [
             MistralToolCall(
@@ -558,138 +545,29 @@ class MistralParser(ParserEngine):
         delta_token_ids: Sequence[int],
         request: ChatCompletionRequest | ResponsesRequest,
     ) -> DeltaMessage | None:
-        # Under the engine, delta_token_ids is a per-delta window, so latch on
-        # the delta carrying [TOOL_CALLS] rather than scanning full history.
+        if not self._is_pre_v11:
+            return super().extract_tool_calls_streaming(
+                previous_text,
+                current_text,
+                delta_text,
+                previous_token_ids,
+                current_token_ids,
+                delta_token_ids,
+                request,
+            )
+        # Pre-v11: latch on [TOOL_CALLS] then delegate to legacy state machine.
         if self.bot_token_id in delta_token_ids or self.bot_token in delta_text:
             self.tool_call_started = True
         if not self.tool_call_started:
             return DeltaMessage(content=delta_text)
-
         try:
-            if self._is_pre_v11:
-                return self._extract_tool_calls_streaming_pre_v11_tokenizer(
-                    delta_text=delta_text,
-                    delta_token_ids=delta_token_ids,
-                )
-            else:
-                return self._extract_tool_calls_streaming(
-                    delta_text=delta_text, delta_token_ids=delta_token_ids
-                )
+            return self._extract_tool_calls_streaming_pre_v11_tokenizer(
+                delta_text=delta_text,
+                delta_token_ids=delta_token_ids,
+            )
         except Exception:
             logger.exception("Error trying to handle streaming tool call.")
             return None
-
-    def _extract_tool_calls_streaming(
-        self,
-        delta_text: str,
-        delta_token_ids: Sequence[int],
-    ) -> DeltaMessage | None:
-        """Extract tool calls for v11+ non-grammar Mistral models.
-
-        Handles ``[TOOL_CALLS]add[ARGS]{"a": 3.5, "b": 4}`` format.
-        """
-        additional_content: str = ""
-        if self.streaming_state == StreamingState.WAITING_FOR_TOOL_START:
-            if self.bot_token not in delta_text:
-                return DeltaMessage(content=delta_text)
-            if not delta_text.startswith(self.bot_token):
-                additional_content += delta_text.split(self.bot_token)[0]
-                delta_text = self.bot_token + "".join(
-                    delta_text.split(self.bot_token)[1:]
-                )
-
-        delta_tool_calls = self._generate_delta_tool_call(delta_text)
-        if not additional_content and len(delta_tool_calls) == 0:
-            if self.streaming_state in [
-                StreamingState.PARSING_ARGUMENTS,
-                StreamingState.PARSING_ARGUMENTS_COMPLETED,
-                StreamingState.TOOL_COMPLETE,
-                StreamingState.ALL_TOOLS_COMPLETE,
-            ]:
-                # Return an empty DeltaMessage once the tool calls are all done
-                # so that finish_reason gets set.
-                return DeltaMessage()
-            else:
-                # Name still being parsed; wait before emitting.
-                return None
-
-        delta = DeltaMessage()
-        if additional_content:
-            delta.content = additional_content
-        if len(delta_tool_calls) > 0:
-            delta.tool_calls = delta_tool_calls
-
-        return delta
-
-    def _generate_delta_tool_call(self, delta_text: str) -> list[DeltaToolCall]:
-        if not delta_text:
-            return []
-        delta_function_name = None
-        tool_id = None
-        if self.streaming_state not in [
-            StreamingState.PARSING_NAME,
-            StreamingState.PARSING_ARGUMENTS,
-        ] and delta_text.startswith(self.bot_token):
-            self.current_tool_id += 1
-            self.streamed_args_for_tool.append("")
-            self.prev_tool_call_arr.append({})
-            self.streaming_state = StreamingState.PARSING_NAME
-            delta_text = delta_text.replace(self.bot_token, "", 1)
-        if self.streaming_state == StreamingState.PARSING_NAME:
-            if self.current_tool_name is None:
-                self.current_tool_name = ""
-            # The name ends where the arguments start ([ARGS] or "{").
-            args_found = _ARGS in delta_text
-            if args_found or "{" in delta_text:
-                tool_id = MistralToolCall.generate_random_id()
-                split_char = _ARGS if args_found else "{"
-                delta_function_name = delta_text.split(split_char)[0]
-                # Reasoning checkpoints may emit newlines between the
-                # [TOOL_CALLS] marker and the name; keep the name clean.
-                self.current_tool_name = (
-                    self.current_tool_name + delta_function_name
-                ).strip()
-                self.prev_tool_call_arr[self.current_tool_id]["name"] = (
-                    self.current_tool_name
-                )
-                skip = len(delta_function_name) + (len(_ARGS) if args_found else 0)
-                delta_text = delta_text[skip:]
-                self.streaming_state = StreamingState.PARSING_ARGUMENTS
-            else:
-                # Wait for the full name before emitting it.
-                self.current_tool_name += delta_text
-                return []
-        if self.streaming_state == StreamingState.PARSING_ARGUMENTS:
-            next_function_text = None
-            if self.bot_token in delta_text:
-                delta_arguments = ""
-                delta_arguments += delta_text.split(self.bot_token)[0]
-                next_function_text = delta_text[len(delta_arguments) :]
-                self.streaming_state = StreamingState.TOOL_COMPLETE
-            else:
-                delta_arguments = delta_text
-            self.streamed_args_for_tool[self.current_tool_id] += delta_arguments
-            self.prev_tool_call_arr[self.current_tool_id]["arguments"] = (
-                self.streamed_args_for_tool[self.current_tool_id]
-            )
-            ret = []
-            if self.current_tool_name or delta_arguments:
-                ret += [
-                    DeltaToolCall(
-                        index=self.current_tool_id,
-                        type="function",
-                        id=tool_id,
-                        function=DeltaFunctionCall(
-                            name=self.current_tool_name, arguments=delta_arguments
-                        ).model_dump(exclude_none=True),
-                    )
-                ]
-                self.current_tool_name = None
-            if next_function_text:
-                ret += self._generate_delta_tool_call(next_function_text)
-            return ret
-        # Should not happen
-        return []
 
     @ijson.coroutine
     def update_stream_state_pre_v11_tokenizer(self):
