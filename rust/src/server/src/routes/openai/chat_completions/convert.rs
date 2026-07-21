@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use itertools::Itertools as _;
 use vllm_chat::{
     AssistantContentBlock, AssistantToolCall, ChatContent, ChatContentPart,
@@ -13,7 +16,9 @@ use crate::routes::openai::utils::structured_outputs::convert_from_response_form
 use crate::routes::openai::utils::types::{
     ChatMessage, ContentPart, MessageContent, Tool, ToolChoice, ToolChoiceValue,
 };
-use crate::utils::{ResolvedRequestContext, convert_logit_bias, merge_kv_transfer_params};
+use crate::utils::{
+    ResolvedRequestContext, convert_logit_bias, merge_ec_transfer_params, merge_kv_transfer_params,
+};
 
 /// Lowered chat request plus the public response metadata carried by every SSE
 /// chunk.
@@ -37,6 +42,8 @@ pub(super) struct ResponseOptions {
     pub include_continuous_usage: bool,
     /// Whether the caller requested output logprobs on chat choices.
     pub requested_logprobs: bool,
+    /// Number of top logprobs to include for each output token.
+    pub output_top_logprobs: i32,
     /// Whether the caller requested top-level prompt logprobs.
     pub include_prompt_logprobs: bool,
     /// Whether to include reasoning content in OpenAI responses.
@@ -132,7 +139,7 @@ pub(super) fn prepare_chat_request(
             structured_outputs,
             skip_reading_prefix_cache: None,
             vllm_xargs: merge_kv_transfer_params(
-                request.vllm_xargs,
+                merge_ec_transfer_params(request.vllm_xargs, request.ec_transfer_params.as_ref()),
                 request.kv_transfer_params.as_ref(),
             ),
         },
@@ -167,6 +174,7 @@ pub(super) fn prepare_chat_request(
             include_usage,
             include_continuous_usage,
             requested_logprobs,
+            output_top_logprobs: top_logprobs,
             include_prompt_logprobs,
             include_reasoning,
             echo,
@@ -290,7 +298,19 @@ fn convert_content(content: MessageContent) -> Result<ChatContent, ApiError> {
                     detail: image_url.detail,
                     uuid,
                 }),
-                _ => bail_invalid_request!("Only text and image_url content parts are supported."),
+                ContentPart::VideoUrl { video_url, uuid } => Ok(ChatContentPart::VideoUrl {
+                    video_url: video_url.url,
+                    uuid,
+                }),
+                ContentPart::AudioUrl { audio_url, uuid } => Ok(ChatContentPart::AudioUrl {
+                    audio_url: audio_url.url,
+                    uuid,
+                }),
+                ContentPart::InputAudio { input_audio, uuid } => Ok(ChatContentPart::InputAudio {
+                    data: input_audio.data,
+                    format: input_audio.format,
+                    uuid,
+                }),
             })
             .try_collect()
             .map(ChatContent::Parts),
@@ -394,8 +414,8 @@ mod tests {
         AssistantRole, ChatCompletionMessage, ChatCompletionRequest,
     };
     use crate::routes::openai::utils::types::{
-        ChatMessage, ContentPart, Function, FunctionCallResponse, ImageUrl, MessageContent,
-        StreamOptions, Tool, ToolCall, ToolChoice, ToolChoiceValue, VideoUrl,
+        AudioUrl, ChatMessage, ContentPart, Function, FunctionCallResponse, ImageUrl, InputAudio,
+        MessageContent, StreamOptions, Tool, ToolCall, ToolChoice, ToolChoiceValue, VideoUrl,
     };
     use crate::utils::{ResolvedRequestContext, resolve_request_context};
 
@@ -772,28 +792,79 @@ mod tests {
     }
 
     #[test]
-    fn prepare_chat_request_rejects_video_content_parts() {
+    fn prepare_chat_request_accepts_video_content_parts() {
         let request = ChatCompletionRequest {
             messages: vec![ChatMessage::User {
                 content: MessageContent::Parts(vec![ContentPart::VideoUrl {
                     video_url: VideoUrl {
                         url: "https://example.com/video.mp4".to_string(),
                     },
+                    uuid: Some("video-uuid".to_string()),
                 }]),
                 name: None,
             }],
             ..base_request()
         };
 
-        let error = prepare_chat_request(
+        let prepared = prepare_chat_request(
             request,
             &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
             ResolvedRequestContext::default(),
         )
-        .unwrap_err();
+        .expect("request is valid");
 
-        expect!["Only text and image_url content parts are supported."]
-            .assert_eq(&error.to_error_response().error.message);
+        assert_eq!(
+            prepared.chat_request.messages,
+            vec![VllmChatMessage::user(vec![ChatContentPart::VideoUrl {
+                video_url: "https://example.com/video.mp4".to_string(),
+                uuid: Some("video-uuid".to_string()),
+            }])]
+        );
+    }
+
+    #[test]
+    fn prepare_chat_request_accepts_audio_content_parts() {
+        let request = ChatCompletionRequest {
+            model: "Qwen/Qwen3-ASR-1.7B".to_string(),
+            messages: vec![ChatMessage::User {
+                content: MessageContent::Parts(vec![
+                    ContentPart::InputAudio {
+                        input_audio: InputAudio {
+                            data: "dGVzdA==".to_string(),
+                            format: Some("wav".to_string()),
+                        },
+                        uuid: Some("audio-1".to_string()),
+                    },
+                    ContentPart::AudioUrl {
+                        audio_url: AudioUrl {
+                            url: "https://example.com/audio.mp3".to_string(),
+                        },
+                        uuid: None,
+                    },
+                ]),
+                name: None,
+            }],
+            ..base_request()
+        };
+
+        let prepared = prepare_chat_request(
+            request,
+            &served(&["Qwen/Qwen3-ASR-1.7B"]),
+            ResolvedRequestContext::default(),
+        )
+        .expect("request is valid");
+
+        assert_eq!(
+            prepared.chat_request.messages,
+            vec![VllmChatMessage::user(vec![
+                ChatContentPart::InputAudio {
+                    data: "dGVzdA==".to_string(),
+                    format: Some("wav".to_string()),
+                    uuid: Some("audio-1".to_string()),
+                },
+                ChatContentPart::audio_url("https://example.com/audio.mp3"),
+            ])]
+        );
     }
 
     #[test]
@@ -830,7 +901,7 @@ mod tests {
         let message = ChatCompletionMessage {
             role: AssistantRole,
             content: Some("answer".to_string()),
-            tool_calls: None,
+            tool_calls: Vec::new(),
             reasoning: Some("inner".to_string()),
         };
         let message_json = serde_json::to_value(message).expect("message serializes");
