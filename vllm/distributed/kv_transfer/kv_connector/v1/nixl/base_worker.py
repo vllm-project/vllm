@@ -1935,13 +1935,8 @@ class NixlBaseConnectorWorker:
         indices = torch.tensor(block_ids, device=self.device_type, dtype=torch.long)
 
         for _, cache_or_caches in self.device_kv_caches.items():
-            blocks_to_update = cache_or_caches.index_select(1, indices)
             current_platform.pack_kv_cache(
-                key=blocks_to_update[0],
-                value=blocks_to_update[1],
-                key_cache=cache_or_caches[0],
-                value_cache=cache_or_caches[1],
-                block_ids=block_ids,
+                kv_cache=cache_or_caches,
                 indices=indices,
             )
 

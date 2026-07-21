@@ -973,5 +973,22 @@ class KVCacheConfig:
         return any(isinstance(g.kv_cache_spec, MambaSpec) for g in self.kv_cache_groups)
 
     @property
+    def has_mixed_precision_kv_cache(self) -> bool:
+        """Whether attention groups store their KV cache at more than one precision."""
+        kv_cache_precisions = {
+            (group.kv_cache_spec.dtype, group.kv_cache_spec.kv_quant_mode)
+            for group in self.kv_cache_groups
+            if isinstance(group.kv_cache_spec, AttentionSpec)
+        }
+        return len(kv_cache_precisions) > 1
+
+    @property
     def needs_kv_cache_zeroing(self) -> bool:
-        return self.has_mamba_layers
+        """Whether newly allocated KV cache blocks must be zeroed before use.
+
+        Required for Mamba layers, whose state is read before it is fully written
+        (#35219), and for mixed-precision caches, where a block reused across
+        groups can be reinterpreted under a different precision and decode stale
+        bytes to NaN/Inf. Uniform-precision caches skip zeroing.
+        """
+        return self.has_mamba_layers or self.has_mixed_precision_kv_cache
