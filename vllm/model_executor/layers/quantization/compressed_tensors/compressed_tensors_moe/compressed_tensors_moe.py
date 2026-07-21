@@ -88,11 +88,10 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
 
             if not valid_format_and_bits:
                 raise ValueError(
-                    "For Fused MoE layers, only format: ",
-                    f"{CompressionFormat.pack_quantized.value} ",
-                    f" and bits: {WNA16_SUPPORTED_BITS} is supported ",
-                    f"but got format: {CompressionFormat.pack_quantized.value} "
-                    f" and bits: {weight_quant.num_bits}",
+                    f"For Fused MoE layers, only format "
+                    f"{CompressionFormat.pack_quantized.value!r} and bits "
+                    f"{WNA16_SUPPORTED_BITS} are supported, "
+                    f"but got format {format!r} and bits {weight_quant.num_bits}."
                 )
 
             # Prefer to use the MarlinMoE kernel when it is supported.
@@ -142,32 +141,22 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
                         return CompressedTensorsW4A16FlydslMoEMethod(
                             weight_quant, input_quant, layer.moe_config
                         )
-                    elif moe_backend == "emulation":
-                        # Although this is called 'Marlin', actually it selects
-                        # emulation backend by calling select_wna16_moe_backend.
-                        # TODO: we need to update CompressedTensorsWNA16MoeMethod
-                        # to honor "--moe-backend" option
-                        from .compressed_tensors_moe_wna16_marlin import (
-                            CompressedTensorsWNA16MarlinMoEMethod,
-                        )
 
-                        logger.info_once(
-                            "Using CompressedTensorsWNA16MarlinMoEMethod "
-                            "(emulation backend requested)"
-                        )
-                        return CompressedTensorsWNA16MarlinMoEMethod(
-                            weight_quant, input_quant, layer.moe_config, layer_name
-                        )
-
-                from .compressed_tensors_moe_wna16 import (
-                    CompressedTensorsWNA16MoEMethod,
+                # Route through the oracle-based method.
+                # CompressedTensorsWNA16MarlinMoEMethod calls
+                # select_wna16_moe_backend which reads moe_backend from
+                # FusedMoEConfig, so --moe-backend is fully honoured.
+                from .compressed_tensors_moe_wna16_marlin import (
+                    CompressedTensorsWNA16MarlinMoEMethod,
                 )
 
-                logger.info_once("Using CompressedTensorsWNA16MoEMethod")
-                return CompressedTensorsWNA16MoEMethod(
-                    weight_quant, input_quant, layer.moe_config
+                logger.info_once("Using CompressedTensorsWNA16MarlinMoEMethod")
+                return CompressedTensorsWNA16MarlinMoEMethod(
+                    weight_quant, input_quant, layer.moe_config, layer_name
                 )
             else:
+                # CompressedTensorsWNA16MarlinMoEMethod also honours
+                # --moe-backend on CUDA via select_wna16_moe_backend.
                 from .compressed_tensors_moe_wna16_marlin import (
                     CompressedTensorsWNA16MarlinMoEMethod,
                 )

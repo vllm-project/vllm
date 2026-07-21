@@ -43,10 +43,10 @@ class Int4EmulationTritonExperts(TritonExperts):
         super().__init__(moe_config, quant_config)
         logger.warning_once(
             "Using Int4EmulationTritonExperts MoE backend. Int4 weights are "
-            "dequantized to BF16 at load time "
+            "dequantized to BF16 at load time."
         )
         # Weights are dequantized to BF16 before apply() is called, so
-        # TritonExperts must see them as plain float — clear the int4 dtype
+        # TritonExperts must see them as plain float -- clear the int4 dtype
         # and scales so the hidden-size assertion and kernel dispatch treat
         # them as unquantized.
         self.quant_config._w1.dtype = None

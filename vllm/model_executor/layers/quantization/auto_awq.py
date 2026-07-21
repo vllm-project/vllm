@@ -28,6 +28,7 @@ from vllm.model_executor.layers.fused_moe import (
 from vllm.model_executor.layers.fused_moe.oracle.int_wna16 import (
     WNA16MoEBackend,
     convert_to_wna16_moe_kernel_format,
+    make_group_size_adjusted_weight_loader,
     make_wna16_moe_kernel,
     make_wna16_moe_quant_config,
     select_wna16_moe_backend,
@@ -46,7 +47,6 @@ from vllm.model_executor.layers.quantization.utils import replace_parameter
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     check_marlin_supported,
     check_marlin_supports_layer,
-    check_moe_marlin_supports_layer,
     get_marlin_input_dtype,
     marlin_make_workspace_new,
     verify_marlin_supported,
@@ -54,6 +54,7 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     is_layer_skipped,
     kInt4Static,
+    kInt4StaticAsym,
 )
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.parameter import (
@@ -110,12 +111,12 @@ def _convert_awq_to_standard_format(
     )
     shifts = torch.arange(0, 32, size_bits, dtype=torch.int32, device=device)
 
-    # --- Convert qweight: (K, N // pack) packed_dim=1 → (K // pack, N) packed_dim=0
+    # --- Convert qweight: (K, N // pack) packed_dim=1 -> (K // pack, N) packed_dim=0
     qw = getattr(layer, w_q_name).data
     K, N_packed = qw.shape
     N = N_packed * pack_factor
 
-    # Unpack int32 → individual values, fix AWQ ordering
+    # Unpack int32 -> individual values, fix AWQ ordering
     unpacked = (qw.unsqueeze(-1) >> shifts) & mask  # (K, N_packed, pack_factor)
     unpacked = unpacked[:, :, reverse_order]
     unpacked = unpacked.reshape(K, N)  # (K, N)
@@ -243,8 +244,8 @@ class AutoAWQConfig(QuantizationConfig):
         modules_to_not_convert = cls.get_from_keys_or(
             config, ["modules_to_not_convert"], None
         )
-        # Ensure full_config uses "awq" as quant_method for MoE fallback compatibility.
-        # MoeWNA16Config only accepts "gptq" or "awq", so we normalize here.
+        # Normalize quant_method so downstream config consumers see a
+        # consistent value ("awq") regardless of the source checkpoint format.
         full_config = config.copy()
         full_config["quant_method"] = "awq"
         return cls(
@@ -340,21 +341,9 @@ class AutoAWQConfig(QuantizationConfig):
             ):
                 return UnquantizedFusedMoEMethod(layer.moe_config)
 
-            if not check_moe_marlin_supports_layer(
-                layer, self.group_size, allow_tile_padding=True
-            ):
-                logger.warning_once(
-                    f"Layer '{prefix}' is not supported by AutoAWQMoEMarlin. "
-                    "Falling back to Moe WNA16 kernels."
-                )
-                from vllm.model_executor.layers.quantization.moe_wna16 import (
-                    MoeWNA16Config,
-                )
-
-                return MoeWNA16Config.from_config(self.full_config).get_quant_method(
-                    layer, prefix
-                )
-
+            # AutoAWQMoEMethod calls select_wna16_moe_backend which reads
+            # FusedMoEConfig.moe_backend, so --moe-backend is fully honoured
+            # on all platforms including ROCm.
             return AutoAWQMoEMethod(self, layer.moe_config)
 
         return None
@@ -557,9 +546,10 @@ class AutoAWQMoEMethod(FusedMoEMethodBase):
         self.quant_type = scalar_types.uint4
         self.input_dtype = None
         self.use_marlin = True
+        weight_key = kInt4StaticAsym if self.quant_config.zero_point else kInt4Static
         self.wna16_moe_backend, self.experts_cls = select_wna16_moe_backend(
             moe,
-            kInt4Static,
+            weight_key,
         )
 
     def create_weights(
@@ -578,7 +568,6 @@ class AutoAWQMoEMethod(FusedMoEMethodBase):
                 "quant_method": FusedMoeWeightScaleSupported.GROUP.value,
             }
         )
-
         intermediate_size_full = extra_weight_attrs.pop(
             "intermediate_size_full", intermediate_size_per_partition
         )
@@ -609,9 +598,40 @@ class AutoAWQMoEMethod(FusedMoEMethodBase):
         set_weight_attrs(w2_qweight, extra_weight_attrs)
 
         num_groups_w13 = hidden_size // self.quant_config.group_size
-        num_groups_w2 = intermediate_size_per_partition // self.quant_config.group_size
+        # When intermediate_size_per_partition % group_size != 0 (but
+        # intermediate_size_per_partition >= group_size), find the largest
+        # adjusted_gs that divides it, then expand scale rows at load time.
+        # When intermediate_size_per_partition < group_size, raise -- the
+        # checkpoint has 0 scale rows for this TP rank and cannot be recovered.
+        if intermediate_size_per_partition < self.quant_config.group_size:
+            raise ValueError(
+                f"MoE expert w2 (down proj) intermediate_size_per_partition "
+                f"({intermediate_size_per_partition}) is smaller than group_size "
+                f"({self.quant_config.group_size}). The TP sharding splits "
+                f"a single quantization group across ranks; the checkpoint "
+                f"scale has 0 rows for this rank and cannot be recovered. "
+                f"Reduce --tensor-parallel-size so that "
+                f"moe_intermediate_size / tp >= group_size."
+            )
+        adjusted_gs = self.quant_config.group_size
+        while intermediate_size_per_partition % adjusted_gs != 0:
+            adjusted_gs //= 2
+            assert adjusted_gs >= 1, (
+                f"Cannot find a valid adjusted group_size for "
+                f"intermediate_size_per_partition={intermediate_size_per_partition}"
+            )
+        group_size_div_factor = self.quant_config.group_size // adjusted_gs
+        num_groups_w2 = intermediate_size_per_partition // adjusted_gs
         layer.num_groups_w13 = num_groups_w13
         layer.num_groups_w2 = num_groups_w2
+        layer.group_size_div_factor = group_size_div_factor
+        if group_size_div_factor > 1:
+            weight_loader = extra_weight_attrs["weight_loader"]
+            extra_weight_attrs["weight_loader"] = (
+                make_group_size_adjusted_weight_loader(
+                    weight_loader, group_size_div_factor
+                )
+            )
 
         # WEIGHT_SCALES
         # Allocate 2 scales for w1 and w3 respectively.
@@ -660,8 +680,9 @@ class AutoAWQMoEMethod(FusedMoEMethodBase):
         layer.register_parameter("w2_qzeros", w2_qzeros)
         set_weight_attrs(w2_qzeros, extra_weight_attrs)
 
-        device = layer.w13_qweight.device
-        layer.workspace = marlin_make_workspace_new(device, 4)
+        if self.wna16_moe_backend != WNA16MoEBackend.EMULATION:
+            device = layer.w13_qweight.device
+            layer.workspace = marlin_make_workspace_new(device, 4)
 
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:
         converted = convert_to_wna16_moe_kernel_format(
@@ -677,6 +698,7 @@ class AutoAWQMoEMethod(FusedMoEMethodBase):
             w2_qzeros=layer.w2_qzeros,
             w13_bias=getattr(layer, "w13_bias", None),
             w2_bias=getattr(layer, "w2_bias", None),
+            experts_cls=self.experts_cls,
         )
 
         if converted is None:
@@ -759,6 +781,32 @@ class AutoAWQMoEMethod(FusedMoEMethodBase):
             )
 
             return get_humming_moe_quant_config(layer)
+
+        from vllm.model_executor.layers.fused_moe.experts.triton_moe import (
+            TritonWNA16OTFExperts,
+        )
+
+        if self.experts_cls is TritonWNA16OTFExperts:
+            from vllm.model_executor.layers.fused_moe.config import (
+                int4_w4a16_moe_quant_config,
+            )
+
+            gs_eff = (
+                layer.w2_qweight.shape[1] // layer.w13_scales.shape[2]
+                if layer.w13_scales.shape[2] > 0
+                else self.quant_config.group_size
+            )
+            use_zp = self.quant_config.zero_point
+            return int4_w4a16_moe_quant_config(
+                w1_scale=layer.w13_scales,
+                w2_scale=layer.w2_scales,
+                w1_zp=getattr(layer, "w13_qzeros", None) if use_zp else None,
+                w2_zp=getattr(layer, "w2_qzeros", None) if use_zp else None,
+                w1_bias=getattr(layer, "w13_bias", None),
+                w2_bias=getattr(layer, "w2_bias", None),
+                block_shape=[0, gs_eff],
+            )
+
         return make_wna16_moe_quant_config(
             w1_scale=layer.w13_scales,
             w2_scale=layer.w2_scales,

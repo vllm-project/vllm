@@ -3,10 +3,17 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Correctness tests for Int4EmulationTritonExperts MoE backend.
 
-Tests the weight dequantization helpers (_unpack_and_dequant_int4_gptq,
-_unpack_and_dequant_int4_awq) and full MoE forward pass
-(_process_weights_emulation_gptq, _process_weights_emulation_awq)
-for both symmetric and asymmetric zero-point cases.
+Int4EmulationTritonExperts is one of the fallback backends under EMULATION
+(after TritonWNA16OTFExperts). It handles kInt4Static, kInt4Static32,
+kInt4StaticAsym, and kInt4Static32Asym (GPTQ/AWQ int4, sym and asym).
+Weights are dequantized from packed int4 to BF16 once at load time.
+
+Tests:
+  - _unpack_and_dequant_int4_gptq/_int4_awq: vs reference dequant
+  - _process_weights_emulation_gptq/_awq: output shapes and values
+  - End-to-end forward: sym and asym (GPTQ/AWQ) vs float reference, EP
+  - _supports_quant_scheme: int4 accepted, int8 and unquantized rejected
+  - Position within EMULATION backend: comes after TritonWNA16OTFExperts
 
 Run `pytest tests/kernels/quantization/test_int4_emulation_moe.py`.
 """
@@ -35,12 +42,17 @@ from vllm.model_executor.layers.fused_moe.oracle.int_wna16 import (
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     awq_pack,
     gptq_pack,
+    kInt4Static,
+    kInt4Static32,
+    kInt4Static32Asym,
+    kInt4StaticAsym,
+    kInt8Static,
 )
 from vllm.platforms import current_platform
 
 pytestmark = pytest.mark.skipif(
     not current_platform.is_cuda_alike(),
-    reason="Int4EmulationTritonExperts requires CUDA.",
+    reason="Int4EmulationTritonExperts requires CUDA/ROCm.",
 )
 
 device = "cuda"
@@ -634,6 +646,8 @@ def test_gptq_vs_awq_forward_agree(E, K, N, top_k, group_size, num_tokens):
     w13_gptq, w2_gptq = gptq_res[0], gptq_res[1]
     w13_awq, w2_awq = awq_res[0], awq_res[1]
 
+    # Int4EmulationTritonExperts nulls out scale fields in __init__;
+    # dummy value is fine since weights are already dequantized before apply().
     dummy_scale = torch.ones(1, dtype=torch.float16, device=device)
     experts_gptq = Int4EmulationTritonExperts(
         moe_config, int4_w4a16_moe_quant_config(dummy_scale, dummy_scale)
@@ -964,7 +978,7 @@ def test_ep_partial_rank_no_active_experts(
     )
     w13_all, w2_all = res[0], res[1]
 
-    # Force topk_ids to only use experts in [0, num_local) — rank 0's slice
+    # Force topk_ids to only use experts in [0, num_local) -- rank 0's slice
     topk_ids = torch.zeros(num_tokens, top_k, dtype=torch.int32, device=device)
     topk_weights = torch.softmax(
         torch.randn(num_tokens, top_k, dtype=torch.float32, device=device), dim=-1
@@ -1186,4 +1200,136 @@ def test_emulation_output_close_to_bf16_reference(
         torch.norm(out_emulation.float() - ref.float())
         / torch.norm(ref.float()).clamp(min=1e-6)
     ).item()
-    assert rel_l2 < 0.15, f"[{fmt}] relative L2 = {rel_l2:.4f} (threshold 0.15)"
+    # 1% threshold: weights are already dequantized to BF16 before the kernel,
+    # so the only error source is BF16 GEMM reduction order vs the reference loop.
+    assert rel_l2 < 0.01, f"[{fmt}] relative L2 = {rel_l2:.4f} (threshold 0.01)"
+
+
+@pytest.mark.parametrize("E, K, N, top_k, group_size, num_tokens", E2E_CONFIGS)
+@pytest.mark.parametrize("fmt", ["gptq", "awq"])
+def test_emulation_asym_output_close_to_bf16_reference(
+    E, K, N, top_k, group_size, num_tokens, fmt
+):
+    """Asym emulation output is close to a direct BF16 MoE forward."""
+    torch.manual_seed(12)
+    moe_config = _make_moe_config(E, K, N)
+
+    w13_fp = torch.randn(E, K, 2 * N, dtype=torch.bfloat16, device=device) * 0.02
+    w2_fp = torch.randn(E, N, K, dtype=torch.bfloat16, device=device) * 0.02
+
+    packed13_list, scales13_list, zeros13_list = [], [], []
+    packed2_list, scales2_list, zeros2_list = [], [], []
+    for e in range(E):
+        q13, s13, z13 = _quantize_asym(w13_fp[e].float(), group_size)
+        q2, s2, z2 = _quantize_asym(w2_fp[e].float(), group_size)
+        if fmt == "gptq":
+            packed13_list.append(gptq_pack(q13, 4, K, 2 * N))
+            packed2_list.append(gptq_pack(q2, 4, N, K))
+            zeros13_list.append(_pack_gptq_zeros(z13, 2 * N))
+            zeros2_list.append(_pack_gptq_zeros(z2, K))
+        else:
+            packed13_list.append(awq_pack(q13, 4, K, 2 * N))
+            packed2_list.append(awq_pack(q2, 4, N, K))
+            zeros13_list.append(_pack_awq_zeros(z13, 2 * N))
+            zeros2_list.append(_pack_awq_zeros(z2, K))
+        scales13_list.append(s13)
+        scales2_list.append(s2)
+
+    process_fn = (
+        _process_weights_emulation_gptq
+        if fmt == "gptq"
+        else _process_weights_emulation_awq
+    )
+    res = process_fn(
+        torch.stack(packed13_list),
+        torch.stack(packed2_list),
+        torch.stack(scales13_list),
+        torch.stack(scales2_list),
+        torch.stack(zeros13_list),
+        torch.stack(zeros2_list),
+    )
+    w13_bf16, w2_bf16 = res[0], res[1]
+
+    # Int4EmulationTritonExperts nulls out scale fields; dummy value is fine.
+    dummy_scale = torch.ones(1, dtype=torch.float16, device=device)
+    experts = Int4EmulationTritonExperts(
+        moe_config, int4_w4a16_moe_quant_config(dummy_scale, dummy_scale)
+    )
+
+    hidden_states = torch.randn(num_tokens, K, dtype=torch.bfloat16, device=device)
+    topk_weights = torch.softmax(
+        torch.randn(num_tokens, top_k, dtype=torch.float32, device=device), dim=-1
+    )
+    topk_ids = torch.stack(
+        [torch.randperm(E, device=device)[:top_k] for _ in range(num_tokens)]
+    ).to(torch.int32)
+
+    out_emulation = _run_emulation_forward(
+        experts, w13_bf16, w2_bf16, hidden_states, topk_weights, topk_ids, E, K, N
+    )
+
+    ref = torch.zeros(num_tokens, K, dtype=torch.bfloat16, device=device)
+    for m in range(num_tokens):
+        acc = torch.zeros(K, dtype=torch.float32, device=device)
+        for k in range(top_k):
+            e = topk_ids[m, k].item()
+            w = topk_weights[m, k].item()
+            gate_up = hidden_states[m] @ w13_bf16[e].T
+            gate, up = gate_up.chunk(2)
+            act = F.silu(gate) * up
+            acc += w * (act @ w2_bf16[e].T).float()
+        ref[m] = acc.bfloat16()
+
+    rel_l2 = (
+        torch.norm(out_emulation.float() - ref.float())
+        / torch.norm(ref.float()).clamp(min=1e-6)
+    ).item()
+    # 1% threshold: weights are already dequantized to BF16 before the kernel,
+    # so the only error source is BF16 GEMM reduction order vs the reference loop.
+    assert rel_l2 < 0.01, f"[{fmt} asym] relative L2 = {rel_l2:.4f} (threshold 0.01)"
+
+
+# ---------------------------------------------------------------------------
+# Tests: _supports_quant_scheme
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "wk,ak,expected",
+    [
+        (kInt4Static, None, True),  # GPTQ int4 sym
+        (kInt4Static32, None, True),  # GPTQ int4 sym gs=32
+        (kInt4StaticAsym, None, True),  # GPTQ/AWQ int4 asym
+        (kInt4Static32Asym, None, True),  # int4 asym gs=32
+        (kInt8Static, None, False),  # int8: handled by Int8Emulation, not here
+        (None, None, False),  # unquantized: not supported
+        (kInt4Static, kInt4Static, False),  # W4A4: not supported
+    ],
+)
+def test_supports_quant_scheme(wk, ak, expected):
+    assert Int4EmulationTritonExperts._supports_quant_scheme(wk, ak) == expected
+
+
+# ---------------------------------------------------------------------------
+# Tests: position within EMULATION backend
+# ---------------------------------------------------------------------------
+
+
+def test_int4_emulation_position_in_emulation_backend():
+    """Int4EmulationTritonExperts must come after TritonWNA16OTFExperts in EMULATION."""
+    from vllm.model_executor.layers.fused_moe.experts.triton_moe import (
+        TritonWNA16OTFExperts,
+    )
+    from vllm.model_executor.layers.fused_moe.oracle.int_wna16 import (
+        WNA16MoEBackend,
+        backend_to_kernel_cls,
+    )
+
+    classes = backend_to_kernel_cls(WNA16MoEBackend.EMULATION)
+    assert Int4EmulationTritonExperts in classes
+    idx_int4 = classes.index(Int4EmulationTritonExperts)
+    idx_otf = classes.index(TritonWNA16OTFExperts)
+    assert idx_otf < idx_int4, (
+        f"TritonWNA16OTFExperts (idx={idx_otf}) must precede "
+        f"Int4EmulationTritonExperts (idx={idx_int4})"
+    )

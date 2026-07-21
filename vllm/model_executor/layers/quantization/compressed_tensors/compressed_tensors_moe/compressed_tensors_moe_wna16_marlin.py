@@ -429,6 +429,7 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
             w2_g_idx=layer.w2_weight_g_idx,
             w13_qzeros=getattr(layer, "w13_weight_zero_point", None),
             w2_qzeros=getattr(layer, "w2_weight_zero_point", None),
+            experts_cls=self.experts_cls,
         )
         if converted is None:
             # In-place backends (e.g. Humming) are not wired through this
@@ -490,7 +491,7 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
                     torch.nn.Parameter(w2_input_global_scale, requires_grad=False),
                 )
 
-            # Marlin workspace — only needed for Marlin-family backends, not emulation.
+            # Marlin workspace -- only needed for Marlin-family backends, not emulation.
             if (
                 self.experts_cls is not None
                 and issubclass(self.experts_cls, FusedMoEExpertsModular)
