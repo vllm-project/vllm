@@ -210,6 +210,11 @@ class FakeSelfAttn(nn.Module):
         super().__init__()
         self.impl = SimpleNamespace(scale=None)
 
+    def get_attn_backend(self):
+        # `vllm_attention_forward` asks the layer's backend whether this is MLA;
+        # a non-MLA backend selects the standard expanded-key path.
+        return SimpleNamespace(is_mla=lambda: False)
+
     def forward(self, q, k, v):
         # MHA-shaped stub: any deterministic combination of q/k/v will do
         return q + 2 * k + 3 * v
@@ -368,12 +373,14 @@ def test_qkv_identifies_output_projection():
         assert get_fuser(PerHeadQKNormAttention()).o_name == "o_proj"
 
 
-def test_fuser_is_cached_per_class():
+def test_fuser_is_cached_per_class_and_structure():
+    """Cached on the class *and* its child names: one Transformers class can have
+    structurally different instances whose forward rewrites differ."""
     with torch.device("meta"):
         fuser_a = get_fuser(GLUMLP())
         fuser_b = get_fuser(GLUMLP())
     assert fuser_a is fuser_b
-    assert GLUMLP in get_fuser.cache
+    assert any(key[0] is GLUMLP for key in get_fuser.cache)
 
 
 @pytest.mark.parametrize("cls", [NotAnMLP, UntraceableMLP])
