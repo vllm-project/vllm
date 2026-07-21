@@ -277,7 +277,7 @@ from vllm.v1.attention.backends.utils import (
 from vllm.v1.attention.ops.common import cp_lse_ag_out_ar, cp_lse_ag_out_rs
 from vllm.v1.attention.ops.dcp_alltoall import dcp_a2a_lse_reduce
 from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
-from vllm.v1.attention.ops.triton_merge_attn_states import mask_empty_context_lse
+from vllm.v1.attention.ops.triton_merge_attn_states import mask_empty_context
 from vllm.v1.attention.selector import get_attn_backend
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
@@ -2285,8 +2285,9 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
                 )
             )
             if prefill_metadata.chunked_context.has_empty_context[i]:
-                mask_empty_context_lse(
+                mask_empty_context(
                     attn_softmax_lse,
+                    attn_output,
                     prefill_metadata.query_start_loc,
                     prefill_metadata.chunked_context.cu_seq_lens[i],
                 )
@@ -2441,8 +2442,9 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
                 )
             )
             if prefill_metadata.chunked_context.has_empty_context[i]:
-                mask_empty_context_lse(
+                mask_empty_context(
                     attn_softmax_lse,
+                    attn_output,
                     prefill_metadata.query_start_loc,
                     prefill_metadata.chunked_context.cu_seq_lens[i],
                 )

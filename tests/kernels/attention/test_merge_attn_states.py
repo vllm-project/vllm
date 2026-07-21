@@ -12,7 +12,7 @@ from vllm._custom_ops import (
 )
 from vllm.platforms import current_platform
 from vllm.v1.attention.ops.triton_merge_attn_states import (
-    mask_empty_context_lse,
+    mask_empty_context,
 )
 from vllm.v1.attention.ops.triton_merge_attn_states import (
     merge_attn_states as merge_attn_states_triton,
@@ -76,7 +76,7 @@ DTYPES = [torch.float32, torch.half, torch.bfloat16]
 all_case_info: list[tuple] = []
 
 
-def test_mask_empty_context_lse() -> None:
+def test_mask_empty_context() -> None:
     query_lens = torch.tensor([2] + [1] * 31 + [131, 1], dtype=torch.int32)
     query_start_loc = torch.cat(
         (torch.zeros(1, dtype=torch.int32), query_lens.cumsum(0))
@@ -85,41 +85,48 @@ def test_mask_empty_context_lse() -> None:
     context_start_loc = torch.cat(
         (torch.zeros(1, dtype=torch.int32), context_lens.cumsum(0))
     ).cuda()
-    lse = torch.randn(4, 165, device="cuda")
-    expected = lse.clone()
-    expected[:, 33:164] = float("-inf")
+    num_heads, num_tokens, head_dim = 4, 165, 16
+    lse = torch.randn(num_heads, num_tokens, device="cuda")
+    output = torch.randn(num_tokens, num_heads, head_dim, device="cuda")
+    # Empty-context rows carry undefined (possibly non-finite) attention output.
+    output[33:164] = float("nan")
 
-    mask_empty_context_lse(lse, query_start_loc, context_start_loc)
+    expected_lse = lse.clone()
+    expected_lse[:, 33:164] = float("-inf")
+    expected_output = output.clone()
+    expected_output[33:164] = 0.0
 
-    torch.testing.assert_close(lse, expected)
+    mask_empty_context(lse, output, query_start_loc, context_start_loc)
+
+    torch.testing.assert_close(lse, expected_lse)
+    torch.testing.assert_close(output, expected_output)
 
 
 @pytest.mark.parametrize("merge_fn", [merge_attn_states_cuda, merge_attn_states_triton])
 @pytest.mark.parametrize("output_dtype", [torch.float32, torch.half, torch.bfloat16])
-def test_merge_attn_states_ignores_empty_side(merge_fn, output_dtype) -> None:
-    """A side whose LSE is -inf (an empty chunk) must be dropped without
-    reading its output, which the backend may leave as NaN/Inf scratch."""
+def test_merge_attn_states_both_empty(merge_fn, output_dtype) -> None:
+    """When a token is empty on both sides (both LSE -inf), the 0/0 softmax
+    scales must not surface as NaN in the merged output."""
     num_tokens, num_heads, head_size = 6, 8, 128
-    prefix_output = torch.randn(
+    prefix_output = torch.zeros(
         num_tokens, num_heads, head_size, device="cuda", dtype=output_dtype
     )
     prefix_lse = torch.randn(num_heads, num_tokens, device="cuda")
-    suffix_output = torch.randn(
+    suffix_output = torch.zeros(
         num_tokens, num_heads, head_size, device="cuda", dtype=output_dtype
     )
     suffix_lse = torch.randn(num_heads, num_tokens, device="cuda")
 
-    # Tokens 2 and 3 have an empty suffix chunk: -inf LSE, undefined output.
+    # Tokens 2 and 3 are empty on both sides (mask_empty_context already zeroed
+    # their outputs and set both LSEs to -inf).
     empty = slice(2, 4)
+    prefix_lse[:, empty] = float("-inf")
     suffix_lse[:, empty] = float("-inf")
-    suffix_output[empty] = float("nan")
 
     output = torch.empty_like(prefix_output)
     merge_fn(output, prefix_output, prefix_lse, suffix_output, suffix_lse)
 
     assert not output.isnan().any()
-    # Empty-suffix tokens must resolve to the (valid) prefix output.
-    torch.testing.assert_close(output[empty], prefix_output[empty])
 
 
 def generate_markdown_table():

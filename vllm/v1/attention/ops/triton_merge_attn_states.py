@@ -9,19 +9,39 @@ from vllm.triton_utils import tl, triton
 float8_info = torch.finfo(current_platform.fp8_dtype())
 
 
-def mask_empty_context_lse(
+def mask_empty_context(
     lse: torch.Tensor,
+    output: torch.Tensor,
     query_start_loc: torch.Tensor,
     context_start_loc: torch.Tensor,
 ) -> None:
-    """Set LSE to -inf for queries whose context chunk is empty."""
+    """Neutralize context chunks that cover no keys before merging.
+
+    A prefill query whose context chunk is empty attended to no keys, so its
+    partial attention is undefined: the backend leaves the output rows as
+    uninitialized scratch (which may hold NaN/Inf) even when it reports an LSE
+    of -inf. Sanitize both here so ``merge_attn_states`` can stay generic:
+    force the LSE to -inf (zero softmax weight) and zero the undefined output
+    rows (so a zero weight cannot combine with NaN/Inf). Emptiness is derived
+    from the context offsets, not from the -inf LSE, so no merge kernel has to
+    reason about undefined partials.
+
+    Args:
+        lse: Chunk log-sum-exp, shape [num_heads, num_tokens].
+        output: Chunk attention output, shape [num_tokens, num_heads, ...].
+        query_start_loc: Prefill query cumulative offsets, shape [num_reqs + 1].
+        context_start_loc: Chunk context cumulative offsets,
+            shape [num_reqs + 1]; an empty chunk has a zero-length span.
+    """
     num_heads, num_tokens = lse.shape
     num_reqs = query_start_loc.shape[0] - 1
     block_size = 128
     # Reserve the worst-case number of request-local blocks.
     num_query_blocks = num_tokens // block_size + num_reqs
-    mask_empty_context_lse_kernel[(num_query_blocks,)](
+    is_empty = torch.zeros(num_tokens, dtype=torch.bool, device=lse.device)
+    mask_empty_context_kernel[(num_query_blocks,)](
         lse,
+        is_empty,
         query_start_loc,
         context_start_loc,
         lse.stride(0),
@@ -32,11 +52,13 @@ def mask_empty_context_lse(
         BLOCK_HEADS=8,
         num_warps=8,
     )
+    output.masked_fill_(is_empty[:, None, None], 0.0)
 
 
 @triton.jit
-def mask_empty_context_lse_kernel(
+def mask_empty_context_kernel(
     lse,
+    is_empty,
     query_start_loc,
     context_start_loc,
     lse_head_stride,
@@ -84,6 +106,7 @@ def mask_empty_context_lse_kernel(
     token_indices = query_start + token_offsets
     token_lse_offsets = token_indices * lse_token_stride
     valid_tokens = token_offsets < query_len
+    tl.store(is_empty + token_indices, True, mask=valid_tokens)
     head_offsets = tl.arange(0, BLOCK_HEADS)
     for head_start in range(0, NUM_HEADS, BLOCK_HEADS):
         head_indices = head_start + head_offsets
@@ -250,13 +273,11 @@ def merge_attn_states_kernel(
     # Do not multiply the output with tl.exp(p_lse) or tl.exp(s_lse) directly.
     p_scale = p_se / out_se
     s_scale = s_se / out_se
-    # A side whose LSE is -inf attended to no keys (e.g. an empty context
-    # chunk), so its softmax weight is zero. Its attention output is undefined
-    # and may be NaN/Inf (uninitialized backend scratch), and NaN/Inf * 0 = NaN
-    # would poison the merge. Drop such a side explicitly instead of scaling it.
-    out = tl.where(p_scale > 0.0, p_out * p_scale, 0.0) + tl.where(
-        s_scale > 0.0, s_out * s_scale, 0.0
-    )
+    out = p_out * p_scale + s_out * s_scale
+    # If both sides are empty (max_lse == -inf) the scales are 0/0 = NaN; emit
+    # zeros rather than NaN. Callers with empty chunks (see mask_empty_context)
+    # zero those inputs, so this only guards the fully-undefined corner.
+    out = tl.where(max_lse == float("-inf"), 0.0, out)
 
     if USE_FP8:
         out = out * (1.0 / tl.load(output_scale))
