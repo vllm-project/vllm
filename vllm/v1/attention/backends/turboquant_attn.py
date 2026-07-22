@@ -159,6 +159,19 @@ class TurboQuantAttentionBackend(AttentionBackend):
             TurboQuantConfig,
         )
 
+        # When the caller passes a non-TQ dtype (e.g. "auto"), recover the real
+        # preset from the global config's cache dtype. Without this the
+        # from_cache_dtype lookup below raises on "auto" during CPU init.
+        if not (cache_dtype_str and cache_dtype_str.startswith("turboquant")):
+            from vllm.config import get_current_vllm_config
+
+            cfg = get_current_vllm_config()
+            recovered = cfg.cache_config.cache_dtype if cfg is not None else None
+            if recovered and str(recovered).startswith("turboquant"):
+                cache_dtype_str = str(recovered)
+            else:
+                cache_dtype_str = "turboquant_4bit_nc"
+
         tq_config = TurboQuantConfig.from_cache_dtype(cache_dtype_str, head_size)
         return (num_blocks, num_kv_heads, block_size, tq_config.slot_size_aligned)
 
@@ -786,13 +799,19 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
         # Reuse cached buffers to avoid per-call allocation (~16MB at 8K).
         alloc_len = math.ceil(cached_len / block_size) * block_size
         buf_shape = (1, Hk, alloc_len, D)
-        # Use WorkspaceManager for dequant buffers.
-        # Shared across all layers — saves 60× memory at long context.
-        # Required for CUDA Graph capture (per-layer growth incompatible with CG).
-        k_buf, v_buf = current_workspace_manager().get_simultaneous(
-            (buf_shape, torch.float16),
-            (buf_shape, torch.float16),
-        )
+        # Use WorkspaceManager for dequant buffers when it's initialized
+        # (GPU path): shared across all layers — saves 60× memory at long
+        # context and is required for CUDA Graph capture. On CPU (e.g. the
+        # triton-cpu path) the workspace manager is never initialized, so
+        # allocate the dequant buffers directly instead of asserting.
+        if is_workspace_manager_initialized():
+            k_buf, v_buf = current_workspace_manager().get_simultaneous(
+                (buf_shape, torch.float16),
+                (buf_shape, torch.float16),
+            )
+        else:
+            k_buf = torch.empty(buf_shape, dtype=torch.float16, device=device)
+            v_buf = torch.empty(buf_shape, dtype=torch.float16, device=device)
         # Skip .zero_() — kernel writes all positions up to cached_len,
         # and we only read [:cached_len] afterwards.
         k_cached = k_buf[:, :, :alloc_len, :]

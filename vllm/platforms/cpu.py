@@ -78,6 +78,27 @@ class CpuPlatform(Platform):
         attn_selector_config: "AttentionSelectorConfig",
         num_heads: int | None = None,
     ) -> str:
+        # EXPERIMENT: route TurboQuant KV-cache dtypes to the GPU Triton
+        # backend (compiled for CPU via triton-cpu) when explicitly requested
+        # via VLLM_CPU_TURBOQUANT_BACKEND=triton. The plain CPU_ATTN backend
+        # cannot handle the packed uint8 turboquant slot layout, so without
+        # this the cache reshape fails. Gated so default CPU behavior is
+        # unchanged.
+        from vllm import envs
+
+        kv_cache_dtype = attn_selector_config.kv_cache_dtype
+        if (
+            envs.VLLM_CPU_TURBOQUANT_BACKEND == "triton"
+            and kv_cache_dtype is not None
+            and kv_cache_dtype.startswith("turboquant")
+        ):
+            logger.info(
+                "Routing TurboQuant KV cache (%s) to the Triton backend on CPU "
+                "(VLLM_CPU_TURBOQUANT_BACKEND=triton).",
+                kv_cache_dtype,
+            )
+            return AttentionBackendEnum.TURBOQUANT.get_path()
+
         if selected_backend and selected_backend != AttentionBackendEnum.CPU_ATTN:
             logger.info("Cannot use %s backend on CPU.", selected_backend)
         if attn_selector_config.use_mla:

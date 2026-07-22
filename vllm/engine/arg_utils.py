@@ -1928,7 +1928,13 @@ class EngineArgs:
                 TurboQuantConfig,
             )
 
-            boundary = TurboQuantConfig.get_boundary_skip_layers(model_config)
+            # Number of first/last layers to leave uncompressed (default 2).
+            # VLLM_TURBOQUANT_BOUNDARY_LAYERS=0 compresses ALL layers.
+            # (envs is already imported at module scope; do NOT re-import
+            # locally or it shadows the global for the whole function.)
+            boundary = TurboQuantConfig.get_boundary_skip_layers(
+                model_config, n=envs.VLLM_TURBOQUANT_BOUNDARY_LAYERS
+            )
             existing = set(cache_config.kv_cache_dtype_skip_layers)
             cache_config.kv_cache_dtype_skip_layers = sorted(
                 existing | set(boundary), key=int
