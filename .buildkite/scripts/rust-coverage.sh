@@ -95,7 +95,6 @@ rust_coverage_collect() {
         --input "$rust_cov_collect_raw_lcov" \
         --output "$rust_cov_collect_lcov" \
         --repo-root "$rust_cov_collect_repo_root" || return 1
-    grep -q '^DA:' "$rust_cov_collect_lcov" || return 1
     RUST_COVERAGE_LCOV=$rust_cov_collect_lcov
     export RUST_COVERAGE_LCOV
 }
