@@ -926,12 +926,11 @@ class OffloadingConnectorScheduler:
 
         for req_id, new_block_id_groups, preempted in yield_req_data(scheduler_output):
             req_status = self._req_status[req_id]
+            req_status.update_offload_keys()
 
             if preempted:
                 for group_state in req_status.group_states:
                     group_state.block_ids.clear()
-            else:
-                req_status.update_offload_keys()
 
             if new_block_id_groups:
                 if self._sliding_window_groups:
@@ -981,18 +980,10 @@ class OffloadingConnectorScheduler:
                 continue
             req = req_status.req
 
-            if req.status in (
-                RequestStatus.FINISHED_STOPPED,
-                RequestStatus.FINISHED_LENGTH_CAPPED,
-                RequestStatus.FINISHED_REPETITION,
-            ):
-                # Normal termination: use num_tokens to handle scheduling
-                # delay with async scheduling.
-                num_tokens_after_batch = req.num_tokens
-            elif req.is_finished():
-                # Abnormal termination (abort/error): store all computed KV data.
-                # num_computed_tokens represents actual computed tokens.
+            if req.status is RequestStatus.FINISHED_ABORTED:
                 num_tokens_after_batch = req.num_computed_tokens
+            elif req.is_finished():
+                num_tokens_after_batch = req.num_tokens
             else:
                 num_scheduled_tokens = scheduler_output.num_scheduled_tokens[req_id]
                 num_tokens_after_batch = req.num_computed_tokens + num_scheduled_tokens
