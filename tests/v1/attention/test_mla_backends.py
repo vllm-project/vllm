@@ -42,7 +42,10 @@ from vllm.v1.attention.backends.mla.prefill import (
 )
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.attention.ops.flashmla import is_flashmla_dense_supported
-from vllm.v1.kv_cache_interface import MLAAttentionSpec
+from vllm.v1.kv_cache_interface import (
+    KVQuantMode,
+    MLAAttentionSpec,
+)
 
 BACKENDS_TO_TEST = [
     AttentionBackendEnum.CUTLASS_MLA,
@@ -54,6 +57,31 @@ BACKENDS_TO_TEST = [
 ]
 
 DEVICE_TYPE = current_platform.device_type
+
+
+@pytest.mark.parametrize(
+    ("cache_dtype", "expected_quant_mode"),
+    [
+        ("auto", KVQuantMode.NONE),
+        ("fp8_ds_mla", KVQuantMode.FP8_PER_TENSOR),
+    ],
+)
+def test_mla_kv_cache_spec_uses_layer_cache_dtype(
+    cache_dtype: str, expected_quant_mode: KVQuantMode
+):
+    layer = SimpleNamespace(kv_cache_dtype=cache_dtype, head_size=576)
+    vllm_config = SimpleNamespace(
+        cache_config=SimpleNamespace(block_size=64), model_config=None
+    )
+
+    spec = MLAAttention.get_kv_cache_spec(layer, vllm_config)
+
+    assert isinstance(spec, MLAAttentionSpec)
+    assert spec.cache_dtype_str == cache_dtype
+    assert spec.kv_quant_mode == expected_quant_mode
+    if cache_dtype == "fp8_ds_mla":
+        assert spec.page_size_bytes == 64 * 656
+
 
 # Remove sm100 backends from the list if not using sm100
 if not torch.cuda.is_available() or torch.cuda.get_device_properties(0).major < 10:
@@ -75,6 +103,46 @@ if AttentionBackendEnum.TOKENSPEED_MLA in BACKENDS_TO_TEST:
         import tokenspeed_mla  # noqa: F401
     except ImportError:
         BACKENDS_TO_TEST.remove(AttentionBackendEnum.TOKENSPEED_MLA)
+
+
+def test_mla_post_load_preserves_runtime_weight_addresses(monkeypatch):
+    layer = MLAAttention.__new__(MLAAttention)
+    torch.nn.Module.__init__(layer)
+    layer.kv_lora_rank = 2
+    layer.num_heads = 2
+    layer.qk_nope_head_dim = 3
+    layer.v_head_dim = 4
+    layer.kv_b_proj = torch.nn.Module()
+    layer.kv_b_proj.weight = torch.nn.Parameter(
+        torch.arange(28.0, dtype=torch.float16).reshape(14, 2)
+    )
+    layer.kv_b_proj.quant_method = None
+    layer.is_aiter_triton_fp4_bmm_enabled = False
+    layer.is_aiter_triton_fp8_bmm_enabled = False
+    layer.dcp_q_replicate = False
+    layer.quant_config = None
+    layer.layer_name = "test"
+
+    monkeypatch.setattr(
+        mla_attention_module, "set_default_quant_scales", lambda *_, **__: None
+    )
+
+    with torch.no_grad():
+        layer.process_weights_after_loading(torch.float32)
+        assert isinstance(layer.W_UV, torch.nn.Parameter)
+        assert isinstance(layer.W_UK_T, torch.nn.Parameter)
+        w_uv_ptr = layer.W_UV.data_ptr()
+        w_uk_t_ptr = layer.W_UK_T.data_ptr()
+        old_w_uv = layer.W_UV.clone()
+        old_w_uk_t = layer.W_UK_T.clone()
+
+        layer.kv_b_proj.weight.add_(100)
+        layer.process_weights_after_loading(torch.float32)
+
+    assert layer.W_UV.data_ptr() == w_uv_ptr
+    assert layer.W_UK_T.data_ptr() == w_uk_t_ptr
+    torch.testing.assert_close(layer.W_UV, old_w_uv + 100)
+    torch.testing.assert_close(layer.W_UK_T, old_w_uk_t + 100)
 
 
 # Filtered per-test via validate_configuration (capability/deps/dims).
@@ -1031,6 +1099,11 @@ def run_attention_backend(
 @pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8", "fp8_e4m3"])
 @pytest.mark.parametrize(("q_scale", "k_scale"), [(1.0, 1.0), (2.0, 3.0)])
 @pytest.mark.parametrize("prefill_backend", PREFILL_BACKENDS_TO_TEST)
+@pytest.mark.parametrize(
+    ("qk_nope_head_dim", "v_head_dim"),
+    [(128, 128), (192, 256)],
+    ids=["deepseek", "glm"],
+)
 def test_backend_correctness(
     default_vllm_config,
     dist_init,
@@ -1042,6 +1115,8 @@ def test_backend_correctness(
     q_scale: float,
     k_scale: float,
     prefill_backend: MLAPrefillBackendEnum,
+    qk_nope_head_dim: int,
+    v_head_dim: int,
 ):
     """
     Test that all backends produce similar outputs to a reference implementation
@@ -1090,9 +1165,9 @@ def test_backend_correctness(
             MLAPrefillSelectorConfig(
                 dtype=torch.bfloat16,
                 mla_dimensions=MLADimensions(
-                    qk_nope_head_dim=128,
+                    qk_nope_head_dim=qk_nope_head_dim,
                     qk_rope_head_dim=64,
-                    v_head_dim=128,
+                    v_head_dim=v_head_dim,
                 ),
             ),
         )
@@ -1168,8 +1243,6 @@ def test_backend_correctness(
     dtype = _convert_dtype_to_torch(vllm_config.model_config.dtype)
     kv_lora_rank = 512
     qk_rope_head_dim = 64
-    qk_nope_head_dim = 128
-    v_head_dim = 128
     total_head_size = kv_lora_rank + qk_rope_head_dim
     assert kv_lora_rank + qk_rope_head_dim == head_size, (
         f"MLA dimensions don't match: {total_head_size} != {head_size}"

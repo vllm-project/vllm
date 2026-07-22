@@ -19,7 +19,7 @@ else()
   FetchContent_Declare(
         flashmla
         GIT_REPOSITORY https://github.com/vllm-project/FlashMLA
-        GIT_TAG b70aff3d110a2b1a037e62eac295166b5143643a
+        GIT_TAG a8f794d1251cbfd88a5011445dd5582289c727e4
         GIT_PROGRESS TRUE
         CONFIGURE_COMMAND ""
         BUILD_COMMAND ""
@@ -35,7 +35,7 @@ set(FLASHMLA_VENDOR_DIR "${CMAKE_SOURCE_DIR}/vllm/third_party/flashmla")
 file(MAKE_DIRECTORY "${FLASHMLA_VENDOR_DIR}")
 file(READ "${flashmla_SOURCE_DIR}/flash_mla/flash_mla_interface.py"
      FLASHMLA_INTERFACE_CONTENT)
-string(REPLACE "import flash_mla.cuda as flash_mla_cuda"
+string(REPLACE "flash_mla_cuda = torch.ops._flashmla_C"
                "import vllm._flashmla_C\nflash_mla_cuda = torch.ops._flashmla_C"
                FLASHMLA_INTERFACE_CONTENT
                "${FLASHMLA_INTERFACE_CONTENT}")
@@ -72,7 +72,7 @@ if(FLASH_MLA_ARCHS)
     list(APPEND VLLM_FLASHMLA_GPU_FLAGS "--expt-relaxed-constexpr" "--expt-extended-lambda" "--use_fast_math")
 
     set(FlashMLA_SOURCES
-        ${flashmla_SOURCE_DIR}/csrc/torch_api.cpp
+        ${flashmla_SOURCE_DIR}/csrc/api/api.cpp
 
         # Misc kernels for decoding
         ${flashmla_SOURCE_DIR}/csrc/smxx/decode/get_decoding_sched_meta/get_decoding_sched_meta.cu
@@ -128,6 +128,7 @@ if(FLASH_MLA_ARCHS)
 
     set(FlashMLA_Extension_INCLUDES
         ${flashmla_SOURCE_DIR}/csrc
+        ${flashmla_SOURCE_DIR}/csrc/kerutils/include
         ${flashmla_SOURCE_DIR}/csrc/extension/sm90/dense_fp8/
         ${flashmla_SOURCE_DIR}/csrc/cutlass/include
         ${flashmla_SOURCE_DIR}/csrc/cutlass/tools/util/include
@@ -152,14 +153,17 @@ if(FLASH_MLA_ARCHS)
         USE_SABI 3
         WITH_SOABI)
 
-    # Keep Stable ABI for the module, but *not* for CUDA/C++ files.
-    # This prevents Py_LIMITED_API from affecting nvcc and C++ compiles.
-    # Also enable C++20 for the FlashMLA sources (required for std::span, requires, etc.)
+    # Enable C++20 for the FlashMLA sources (required for std::span, requires, etc.)
     target_compile_options(_flashmla_C PRIVATE
-        $<$<COMPILE_LANGUAGE:CUDA>:-UPy_LIMITED_API>
-        $<$<COMPILE_LANGUAGE:CXX>:-UPy_LIMITED_API>
         $<$<COMPILE_LANGUAGE:CXX>:-std=c++20>
         $<$<COMPILE_LANGUAGE:CUDA>:-std=c++20>)
+
+    # _flashmla_C is now ABI-stable torch 2.11+
+    target_compile_definitions(_flashmla_C PRIVATE
+        TORCH_TARGET_VERSION=0x020B000000000000ULL)
+    if(VLLM_GPU_LANG STREQUAL "CUDA")
+        target_compile_definitions(_flashmla_C PRIVATE USE_CUDA)
+    endif()
 
     define_extension_target(
         _flashmla_extension_C
@@ -172,11 +176,12 @@ if(FLASH_MLA_ARCHS)
         USE_SABI 3
         WITH_SOABI)
 
-    # Keep Stable ABI for the module, but *not* for CUDA/C++ files.
-    # This prevents Py_LIMITED_API from affecting nvcc and C++ compiles.
-    target_compile_options(_flashmla_extension_C PRIVATE
-        $<$<COMPILE_LANGUAGE:CUDA>:-UPy_LIMITED_API>
-        $<$<COMPILE_LANGUAGE:CXX>:-UPy_LIMITED_API>)
+    # _flashmla_extension_C is now ABI-stable w/ torch 2.11+
+    target_compile_definitions(_flashmla_extension_C PRIVATE
+        TORCH_TARGET_VERSION=0x020B000000000000ULL)
+    if(VLLM_GPU_LANG STREQUAL "CUDA")
+        target_compile_definitions(_flashmla_extension_C PRIVATE USE_CUDA)
+    endif()
 else()
     message(STATUS "FlashMLA will not compile: unsupported CUDA architecture ${CUDA_ARCHS}")
     # Create empty targets for setup.py on unsupported systems
