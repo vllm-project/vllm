@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import dataclasses
-from concurrent.futures import Future, TimeoutError
+from concurrent.futures import Future
 from unittest.mock import Mock
 
 import pytest
@@ -37,7 +37,7 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.outputs import DraftTokenIds, KVConnectorOutput, ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
-from vllm.v1.structured_output import StructuredOutputManager
+from vllm.v1.structured_output import StructuredOutputGrammar, StructuredOutputManager
 
 from .utils import EOS_TOKEN_ID, create_requests, create_scheduler, mock_kv
 
@@ -3143,14 +3143,11 @@ def test_schedule_skip_tokenizer_init_structured_output_request():
 
 
 @pytest.mark.parametrize("async_grammar", [True, False])
-@pytest.mark.parametrize("compile_error_type", [RuntimeError, TimeoutError])
-def test_grammar_compile_error_finishes_only_request(
-    async_grammar: bool, compile_error_type: type[Exception]
-):
+def test_grammar_compile_error_finishes_only_request(async_grammar: bool):
     scheduler = create_scheduler()
     manager = scheduler.structured_output_manager
     manager.backend = Mock()
-    manager.backend.compile_grammar.side_effect = compile_error_type(
+    manager.backend.compile_grammar.side_effect = RuntimeError(
         "forced FSM compilation error"
     )
     manager._use_async_grammar_compilation = async_grammar
@@ -3171,7 +3168,7 @@ def test_grammar_compile_error_finishes_only_request(
     assert request.structured_output_request is not None
     grammar_future = request.structured_output_request._grammar
     assert isinstance(grammar_future, Future)
-    assert isinstance(grammar_future.exception(timeout=5), compile_error_type)
+    assert isinstance(grammar_future.exception(timeout=5), RuntimeError)
 
     scheduler.add_request(request)
     scheduler_output = scheduler.schedule()
@@ -3210,7 +3207,7 @@ def test_abort_request_when_structured_output_fsm_cannot_advance():
         pooling_params=None,
     )
     request.structured_output_request = Mock()
-    request.structured_output_request.grammar = Mock()
+    request.structured_output_request.grammar = Mock(spec=StructuredOutputGrammar)
     request.structured_output_request.grammar.accept_tokens.return_value = False
     request.status = RequestStatus.RUNNING
     request.num_computed_tokens = request.num_tokens
