@@ -195,7 +195,7 @@ class _ServerRequestState:
     inbound-lookup state, abort bookkeeping, and the inflight-transfer
     count for one kv_request_id. The owning id is the ``_requests`` dict
     key and is not duplicated here. An entry is dropped once every field
-    is idle — see ``ServerRole._maybe_gc``.
+    is idle — see ``ServerRole._maybe_prune``.
     """
 
     # Outbound serve state (PD + symmetric producer side). None until the
@@ -234,7 +234,7 @@ class ServerRole:
         self._send = send
 
         # All per-kv_request_id state lives here. Entries are created
-        # lazily and dropped by _maybe_gc once every field is idle.
+        # lazily and dropped by _maybe_prune once every field is idle.
         self._requests: dict[str, _ServerRequestState] = {}
         # kv_request_ids with lookup work (unprocessed pending_lookups or
         # parked lookups) for the next serve to visit — the work-list that
@@ -259,7 +259,7 @@ class ServerRole:
     # State helpers
     # ------------------------------------------------------------------
 
-    def _state(self, kv_request_id: str) -> _ServerRequestState:
+    def _get_or_create_request(self, kv_request_id: str) -> _ServerRequestState:
         """Get or create the state entry for a kv_request_id."""
         st = self._requests.get(kv_request_id)
         if st is None:
@@ -267,7 +267,7 @@ class ServerRole:
             self._requests[kv_request_id] = st
         return st
 
-    def _maybe_gc(self, kv_request_id: str) -> None:
+    def _maybe_prune(self, kv_request_id: str) -> None:
         """Drop the entry once it holds no live state."""
         st = self._requests.get(kv_request_id)
         if (
@@ -293,7 +293,7 @@ class ServerRole:
     ) -> None:
         """New blocks stored locally — match against pending fetch demand."""
         self._store_jobs[job_id] = time.monotonic()
-        st = self._state(kv_request_id)
+        st = self._get_or_create_request(kv_request_id)
         if st.outbound is None:
             st.outbound = _OutboundRequestState()
         result = st.outbound.add_stored_blocks(keys, block_ids, job_id)
@@ -345,7 +345,7 @@ class ServerRole:
             # `remaining` and leak inflight bookkeeping. Treat as a
             # protocol violation.
             raise ValueError(f"duplicate fetch for kv_request_id={kv_request_id}")
-        st = self._state(kv_request_id)
+        st = self._get_or_create_request(kv_request_id)
         if st.outbound is None:
             st.outbound = _OutboundRequestState()
         req = st.outbound
@@ -380,7 +380,7 @@ class ServerRole:
         # Idempotent: receiving AbortFetchMsg again before we've sent the
         # ack just triggers another drain attempt without resetting the
         # deadline.
-        st = self._state(kv_request_id)
+        st = self._get_or_create_request(kv_request_id)
         if st.abort_started_at is None:
             st.abort_started_at = time.monotonic()
         self._drain_abort(kv_request_id)
@@ -405,7 +405,7 @@ class ServerRole:
             kv_request_id,
             len(block_hashes),
         )
-        self._state(kv_request_id).pending_lookups.append(
+        self._get_or_create_request(kv_request_id).pending_lookups.append(
             _PendingLookup(hashes=list(block_hashes), enqueued_at=time.monotonic())
         )
         self._serve_pending.add(kv_request_id)
@@ -434,7 +434,7 @@ class ServerRole:
             st = self._requests.get(kv_request_id)
             if st is None or (not st.pending_lookups and not st.lookups):
                 self._serve_pending.discard(kv_request_id)
-                self._maybe_gc(kv_request_id)
+                self._maybe_prune(kv_request_id)
 
         if self._finished_lookup_ctxs:
             for ctx in self._finished_lookup_ctxs:
@@ -535,7 +535,7 @@ class ServerRole:
         )
 
         if lookup.pending:
-            self._state(kv_request_id).lookups[lookup_id] = lookup
+            self._get_or_create_request(kv_request_id).lookups[lookup_id] = lookup
         else:
             # Every hash resolved on first sight — emit the aggregated
             # response now and close the synthetic request.
@@ -658,7 +658,7 @@ class ServerRole:
             self._finished_lookup_ctxs.append(lookup.ctx)
         st.lookups.clear()
         self._serve_pending.discard(kv_request_id)
-        self._maybe_gc(kv_request_id)
+        self._maybe_prune(kv_request_id)
 
     def finish(self, kv_request_id: str) -> None:
         """Mark an outbound request finishing.
@@ -755,7 +755,7 @@ class ServerRole:
                     self._finalize_outbound(xfer.kv_request_id, success=True)
                 elif req.finishing and not self._has_inflight_for(xfer.kv_request_id):
                     self._finalize_outbound(xfer.kv_request_id, success=False)
-            self._maybe_gc(xfer.kv_request_id)
+            self._maybe_prune(xfer.kv_request_id)
 
         failed_kv_request_ids: set[str] | None = None
         for tid in poll_result.failed:
@@ -793,7 +793,7 @@ class ServerRole:
                         TransferDoneMsg.SUCCESS: False,
                     }
                 )
-            self._maybe_gc(xfer.kv_request_id)
+            self._maybe_prune(xfer.kv_request_id)
 
         # Cancel other inflight for the same failed kv_request_ids
         if failed_kv_request_ids:
@@ -806,7 +806,7 @@ class ServerRole:
                 self._inflight_pop(tid)
             self._transport.cancel(ids_to_cancel)
             for kv_request_id in failed_kv_request_ids:
-                self._maybe_gc(kv_request_id)
+                self._maybe_prune(kv_request_id)
 
         return results
 
@@ -873,12 +873,12 @@ class ServerRole:
     def _inflight_add(self, tid: int, xfer: _InflightXfer) -> None:
         """Insert an inflight transfer and bump the per-request count."""
         self._inflight[tid] = xfer
-        self._state(xfer.kv_request_id).inflight_count += 1
+        self._get_or_create_request(xfer.kv_request_id).inflight_count += 1
 
     def _inflight_pop(self, tid: int) -> _InflightXfer | None:
         """Pop an inflight transfer and decrement the per-request count.
 
-        Callers are responsible for the ``_maybe_gc`` that may follow once
+        Callers are responsible for the ``_maybe_prune`` that may follow once
         the request's other state has also cleared.
         """
         xfer = self._inflight.pop(tid, None)
@@ -928,7 +928,7 @@ class ServerRole:
                 TransferDoneMsg.SUCCESS: success,
             }
         )
-        self._maybe_gc(kv_request_id)
+        self._maybe_prune(kv_request_id)
 
     def _drain_abort(self, kv_request_id: str) -> None:
         """One drain attempt for a pending abort.
@@ -990,7 +990,7 @@ class ServerRole:
                 AbortAckMsg.KV_REQUEST_ID: kv_request_id,
             }
         )
-        self._maybe_gc(kv_request_id)
+        self._maybe_prune(kv_request_id)
 
     # ------------------------------------------------------------------
     # Internal — transfers and store-job timeouts
