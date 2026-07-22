@@ -90,13 +90,6 @@ def test_fused_add_rms_norm_batch_invariant_residual_path(
 ):
     """
     Test the batch-invariant fused residual-add + RMSNorm helper directly.
-
-    The kernel picks ``max_block_size = (num_tokens < 256) ? 1024 : 256``, so a
-    token reduces with block=1024 when nearly alone but block=256 inside a batch
-    of >=256; the different reduction width can flip the last bit of the fp32
-    sum. ``n_extra=299`` (num_tokens=300) crosses that threshold while
-    ``n_extra=3`` stays below it, and ``seed`` sweeps inputs so the data-
-    dependent divergence cannot hide behind a single lucky seed.
     """
     device = torch.device(DEVICE_TYPE)
 
