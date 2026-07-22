@@ -165,6 +165,11 @@ class GateLinear(ReplicatedLinear):
                 and is_available()
             )
 
+    def _get_ll_bf16_warmup_shapes(self) -> tuple[tuple[int, int], ...]:
+        if not self.allow_ll_bf16_gemm:
+            return ()
+        return ((self.weight.shape[1], self.weight.shape[0]),)
+
     def forward(
         self, x: torch.Tensor
     ) -> torch.Tensor | tuple[torch.Tensor, Parameter | None]:

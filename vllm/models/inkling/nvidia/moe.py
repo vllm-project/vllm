@@ -240,6 +240,11 @@ class InklingGate(nn.Module):
         """fp32 gate logits [T, n_total_experts + pad] (pad columns are junk)."""
         return _linear_with_fp32_out(x, self.weight)
 
+    def _get_ll_bf16_warmup_shapes(self) -> tuple[tuple[int, int], ...]:
+        if self.weight.dtype != torch.bfloat16:
+            return ()
+        return ((self.weight.shape[1], self.weight.shape[0]),)
+
     def select_experts(
         self, gating_output: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:

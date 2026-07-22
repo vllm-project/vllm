@@ -318,6 +318,57 @@ def test_fused_norm_rope_no_indexer(num_tokens: int):
     assert (topk == 7).all(), "topk buffer should be untouched on shared layer"
 
 
+def test_fused_norm_rope_profile_without_cache_compiles():
+    """The cache-free profiling path must still compile and produce Q."""
+    torch.manual_seed(2)
+    dev = "cuda"
+    num_tokens = 4
+    pos = torch.arange(num_tokens, device=dev, dtype=torch.int64)
+    q_c = torch.randn(num_tokens, Q_LORA, device=dev, dtype=torch.bfloat16)
+    kv_c = torch.randn(num_tokens, KV_LORA, device=dev, dtype=torch.bfloat16)
+    k_pe = torch.randn(num_tokens, ROPE_DIM, device=dev, dtype=torch.bfloat16)
+    qw = torch.randn(Q_LORA, device=dev, dtype=torch.bfloat16)
+    kvw = torch.randn(KV_LORA, device=dev, dtype=torch.bfloat16)
+    index_k = torch.randn(num_tokens, INDEX_HEAD_DIM, device=dev, dtype=torch.bfloat16)
+    index_w = torch.randn(INDEX_HEAD_DIM, device=dev, dtype=torch.float32)
+    index_b = torch.randn(INDEX_HEAD_DIM, device=dev, dtype=torch.float32)
+    cos_sin = make_cos_sin(64, ROPE_DIM, dev)
+    topk = torch.empty(num_tokens, 2048, device=dev, dtype=torch.int32)
+
+    def profile_run(
+        q_c: torch.Tensor,
+        kv_c: torch.Tensor,
+        k_pe: torch.Tensor,
+        index_k: torch.Tensor,
+    ) -> torch.Tensor:
+        return K.fused_norm_rope(
+            pos,
+            q_c,
+            qw,
+            EPS,
+            kv_c,
+            kvw,
+            EPS,
+            k_pe,
+            cos_sin,
+            index_k,
+            index_w,
+            index_b,
+            EPS,
+            cos_sin,
+            topk,
+            slot_mapping=None,
+            indexer_k_cache=None,
+            mla_kv_cache=None,
+            has_indexer=True,
+            index_rope_interleave=False,
+        )
+
+    compiled = torch.compile(profile_run, fullgraph=True)
+    q_out = compiled(q_c, kv_c, k_pe, index_k)
+    assert_bf16(q_out, rms_norm(q_c, qw), "q_c rmsnorm (profiling)")
+
+
 @pytest.mark.parametrize("num_tokens", [1, 4, 17, 512])
 def test_fused_norm_rope_ds_mla(num_tokens: int):
     """fp8_ds_mla MLA cache layout (FlashMLA sparse, bf16-query path; SM90/SM100).

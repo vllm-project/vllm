@@ -19,10 +19,6 @@ def _can_use_fused_q_cutedsl() -> bool:
 
 @torch.compiler.assume_constant_result
 def _is_arch_support_pdl() -> bool:
-    # PyTorch's Triton HOP functionalization cannot analyze the inline asm
-    # emitted by PDL on Hopper. Keep the compiled Hopper path identical to the
-    # pre-PDL implementation while retaining PDL on the Blackwell targets this
-    # kernel is tuned for.
     return (
         current_platform.has_device_capability(100)
         and current_platform.is_arch_support_pdl()
@@ -242,6 +238,17 @@ def _fused_norm_rope_kernel(
             )
         return
 
+    if pid == 2:
+        # Q RMS norm does not depend on cache availability. In particular,
+        # profiling uses a negative dummy slot mapping but still consumes Q.
+        q_block = tl.arange(0, Q_BLOCK_SIZE)
+        q_mask = q_block < Q_DIM
+        q_c = tl.load(q_c_ptr + tok_idx * q_c_stride + q_block, mask=q_mask, other=0.0)
+        q_c_rms_w = tl.load(q_rms_norm_w_ptr + q_block, mask=q_mask)
+        q_c = _rms_norm(q_c, q_c_rms_w, q_rms_eps, Q_DIM)
+        tl.store(q_c_out_ptr + tok_idx * q_c_out_stride + q_block, q_c, mask=q_mask)
+        return
+
     if slot_mapping_ptr is None:
         # Memory profiling run.
         return
@@ -250,15 +257,7 @@ def _fused_norm_rope_kernel(
         # Padding
         return
 
-    if pid == 2:
-        # Q RMS norm
-        q_block = tl.arange(0, Q_BLOCK_SIZE)
-        q_mask = q_block < Q_DIM
-        q_c = tl.load(q_c_ptr + tok_idx * q_c_stride + q_block, mask=q_mask, other=0.0)
-        q_c_rms_w = tl.load(q_rms_norm_w_ptr + q_block, mask=q_mask)
-        q_c = _rms_norm(q_c, q_c_rms_w, q_rms_eps, Q_DIM)
-        tl.store(q_c_out_ptr + tok_idx * q_c_out_stride + q_block, q_c, mask=q_mask)
-    elif pid == 1:
+    if pid == 1:
         # KV RMS Norm + KV RoPE + MLA concat_and_cache.
         # Merged so the normed kv_c and RoPE'd k_pe can be written
         # to the MLA KV cache directly without a separate kernel.
@@ -287,9 +286,6 @@ def _fused_norm_rope_kernel(
         r2 = x2 * cos + x1 * sin
 
         # MLA concat_and_cache: write [kv_c_normed, k_pe_roped] to cache.
-        if mla_cache_entry_stride == 0:
-            return
-
         mla_block_size = mla_cache_block_stride // mla_cache_entry_stride
         mla_block_idx = slot_idx // mla_block_size
         mla_block_off = slot_idx % mla_block_size
@@ -439,7 +435,7 @@ def _fused_norm_rope_kernel(
         )
 
 
-def fused_norm_rope(
+def _fused_norm_rope_impl(
     positions: torch.Tensor,
     q_c: torch.Tensor,
     q_rms_norm_w: torch.Tensor,
@@ -541,8 +537,12 @@ def fused_norm_rope(
         # Dummy values — pid 2 will skip the MLA cache write because
         # slot_mapping is all -1.
         mla_kv_cache = torch.empty(0, dtype=torch.bfloat16, device=device)
-        mla_block_stride = 0
-        mla_entry_stride = 0
+        # Torch's Triton HOP mutation analysis compiles every program-id
+        # branch even though the dummy slot mapping returns before cache
+        # access. Keep the unused strides nonzero so that analysis can lower
+        # the block-size calculation safely.
+        mla_block_stride = 1
+        mla_entry_stride = 1
         mla_k_scale = torch.ones(1, dtype=torch.float32, device=device)
 
     if q_c_out is None:
@@ -608,6 +608,155 @@ def fused_norm_rope(
         INDEX_ROPE_INTERLEAVE=index_rope_interleave,
         USE_PDL=use_pdl,
         launch_pdl=use_pdl,
+    )
+    return q_c_out
+
+
+def _fused_norm_rope_op(
+    positions: torch.Tensor,
+    q_c: torch.Tensor,
+    q_rms_norm_w: torch.Tensor,
+    q_rms_eps: float,
+    kv_c: torch.Tensor,
+    kv_rms_norm_w: torch.Tensor,
+    kv_rms_eps: float,
+    k_pe: torch.Tensor,
+    k_rope_cos_sin_cache: torch.Tensor,
+    index_k: torch.Tensor | None,
+    index_k_layer_norm_w: torch.Tensor | None,
+    index_k_layer_norm_bias: torch.Tensor | None,
+    index_k_layer_norm_eps: float,
+    index_k_rope_cos_sin_cache: torch.Tensor | None,
+    topk_indices_buffer: torch.Tensor,
+    slot_mapping: torch.Tensor | None,
+    indexer_k_cache: torch.Tensor | None,
+    mla_kv_cache: torch.Tensor | None,
+    mla_kv_cache_dtype: str,
+    mla_k_scale: torch.Tensor | None,
+    has_indexer: bool,
+    index_rope_interleave: bool,
+    q_c_out: torch.Tensor,
+) -> None:
+    _fused_norm_rope_impl(
+        positions,
+        q_c,
+        q_rms_norm_w,
+        q_rms_eps,
+        kv_c,
+        kv_rms_norm_w,
+        kv_rms_eps,
+        k_pe,
+        k_rope_cos_sin_cache,
+        index_k,
+        index_k_layer_norm_w,
+        index_k_layer_norm_bias,
+        index_k_layer_norm_eps,
+        index_k_rope_cos_sin_cache,
+        topk_indices_buffer,
+        slot_mapping=slot_mapping,
+        indexer_k_cache=indexer_k_cache,
+        mla_kv_cache=mla_kv_cache,
+        mla_kv_cache_dtype=mla_kv_cache_dtype,
+        mla_k_scale=mla_k_scale,
+        has_indexer=has_indexer,
+        index_rope_interleave=index_rope_interleave,
+        q_c_out=q_c_out,
+    )
+
+
+def _fused_norm_rope_fake(
+    positions: torch.Tensor,
+    q_c: torch.Tensor,
+    q_rms_norm_w: torch.Tensor,
+    q_rms_eps: float,
+    kv_c: torch.Tensor,
+    kv_rms_norm_w: torch.Tensor,
+    kv_rms_eps: float,
+    k_pe: torch.Tensor,
+    k_rope_cos_sin_cache: torch.Tensor,
+    index_k: torch.Tensor | None,
+    index_k_layer_norm_w: torch.Tensor | None,
+    index_k_layer_norm_bias: torch.Tensor | None,
+    index_k_layer_norm_eps: float,
+    index_k_rope_cos_sin_cache: torch.Tensor | None,
+    topk_indices_buffer: torch.Tensor,
+    slot_mapping: torch.Tensor | None,
+    indexer_k_cache: torch.Tensor | None,
+    mla_kv_cache: torch.Tensor | None,
+    mla_kv_cache_dtype: str,
+    mla_k_scale: torch.Tensor | None,
+    has_indexer: bool,
+    index_rope_interleave: bool,
+    q_c_out: torch.Tensor,
+) -> None:
+    return
+
+
+direct_register_custom_op(
+    op_name="fused_norm_rope_deepseek_v32",
+    op_func=_fused_norm_rope_op,
+    mutates_args=[
+        "topk_indices_buffer",
+        "indexer_k_cache",
+        "mla_kv_cache",
+        "q_c_out",
+    ],
+    fake_impl=_fused_norm_rope_fake,
+    dispatch_key="CUDA",
+)
+
+
+def fused_norm_rope(
+    positions: torch.Tensor,
+    q_c: torch.Tensor,
+    q_rms_norm_w: torch.Tensor,
+    q_rms_eps: float,
+    kv_c: torch.Tensor,
+    kv_rms_norm_w: torch.Tensor,
+    kv_rms_eps: float,
+    k_pe: torch.Tensor,
+    k_rope_cos_sin_cache: torch.Tensor,
+    index_k: torch.Tensor | None,
+    index_k_layer_norm_w: torch.Tensor | None,
+    index_k_layer_norm_bias: torch.Tensor | None,
+    index_k_layer_norm_eps: float,
+    index_k_rope_cos_sin_cache: torch.Tensor | None,
+    topk_indices_buffer: torch.Tensor,
+    slot_mapping: torch.Tensor | None = None,
+    indexer_k_cache: torch.Tensor | None = None,
+    mla_kv_cache: torch.Tensor | None = None,
+    mla_kv_cache_dtype: str = "auto",
+    mla_k_scale: torch.Tensor | None = None,
+    has_indexer: bool = True,
+    index_rope_interleave: bool = False,
+    q_c_out: torch.Tensor | None = None,
+) -> torch.Tensor:
+    if q_c_out is None:
+        q_c_out = torch.empty_like(q_c)
+    torch.ops.vllm.fused_norm_rope_deepseek_v32(
+        positions,
+        q_c,
+        q_rms_norm_w,
+        q_rms_eps,
+        kv_c,
+        kv_rms_norm_w,
+        kv_rms_eps,
+        k_pe,
+        k_rope_cos_sin_cache,
+        index_k,
+        index_k_layer_norm_w,
+        index_k_layer_norm_bias,
+        index_k_layer_norm_eps,
+        index_k_rope_cos_sin_cache,
+        topk_indices_buffer,
+        slot_mapping,
+        indexer_k_cache,
+        mla_kv_cache,
+        mla_kv_cache_dtype,
+        mla_k_scale,
+        has_indexer,
+        index_rope_interleave,
+        q_c_out,
     )
     return q_c_out
 

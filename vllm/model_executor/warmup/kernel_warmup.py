@@ -45,16 +45,25 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-_LL_BF16_WARMUP_MODEL_SHAPES: tuple[tuple[int, int], ...] = (
-    (6144, 264),  # Inkling
-    (7168, 256),  # DSV3
-    (7168, 384),  # DSV4-Pro
-    (14400, 256),  # DSV4-Flash
-)
 _LL_BF16_WARMUP_M_RANGE = range(1, 17)
 
 
-def _warmup_ll_bf16_router_gemm() -> None:
+def _get_ll_bf16_router_warmup_shapes(
+    model: torch.nn.Module,
+) -> tuple[tuple[int, int], ...]:
+    shapes: set[tuple[int, int]] = set()
+    for module in model.modules():
+        get_shapes = getattr(module, "_get_ll_bf16_warmup_shapes", None)
+        if get_shapes is not None:
+            shapes.update(get_shapes())
+    return tuple(sorted(shapes))
+
+
+def _warmup_ll_bf16_router_gemm(model: torch.nn.Module) -> None:
+    shapes = _get_ll_bf16_router_warmup_shapes(model)
+    if not shapes:
+        return
+
     from vllm.model_executor.kernels.linear.cute_dsl.ll_bf16 import (
         is_available as is_ll_bf16_gemm_available,
     )
@@ -67,7 +76,7 @@ def _warmup_ll_bf16_router_gemm() -> None:
 
     logger.info("Warming up ll_bf16 router GEMM kernels.")
     ll_bf16_gemm_kernel.warmup(
-        shapes=_LL_BF16_WARMUP_MODEL_SHAPES,
+        shapes=shapes,
         m_values=_LL_BF16_WARMUP_M_RANGE,
     )
 
@@ -123,7 +132,7 @@ def kernel_warmup(worker: "Worker"):
         flashinfer_autotune(worker.model_runner)
 
     if current_platform.has_device_capability(90):
-        _warmup_ll_bf16_router_gemm()
+        _warmup_ll_bf16_router_gemm(worker.get_model())
 
     # FlashInfer attention warmup
     # Only warmup if the model has FlashInfer attention groups
