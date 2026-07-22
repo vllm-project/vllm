@@ -14,6 +14,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
+from vllm.platforms.rocm import on_gfx1250
 
 from .BlockScaledMMLinearKernel import (
     Fp8BlockScaledMMLinearKernel,
@@ -370,9 +371,8 @@ class AiterFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
         super().__init__(config)
         n, k = config.weight_shape
 
-        self.use_triton = (
-            not current_platform.is_fp8_fnuz()
-            and rocm_aiter_ops.is_triton_gemm_w8a8_tuned(n, k)
+        self.use_triton = not current_platform.is_fp8_fnuz() and (
+            rocm_aiter_ops.is_triton_gemm_w8a8_tuned(n, k) or on_gfx1250()
         )
 
     @classmethod

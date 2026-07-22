@@ -71,12 +71,6 @@ def _swizzle_mxfp4(quant_tensor, scale, num_warps=8):
 
                 scale_layout = CDNA4MXScaleLayout
         else:
-            # gfx1250 (and other ROCm archs): the vendored triton_kernels has no
-            # gfx1250 scale-swizzle, and the gfx1250 aiter `moe_gemm_a8w4` kernel
-            # reads a CDNA4-swizzled scale as garbage (validated on the FFM sim:
-            # CDNA4_SCALE -> maxrel ~7e4, plain/None -> ~6e-3). Keep the scale
-            # unswizzled (StridedLayout) and pass swizzle_mx_scale=None in the
-            # W4A8 path (gpt_oss_triton_kernels_moe._try_apply_aiter_w4a8).
             scale_layout = StridedLayout
     else:
         value_layout, value_layout_opts = layout.make_default_matmul_mxfp4_w_layout(
