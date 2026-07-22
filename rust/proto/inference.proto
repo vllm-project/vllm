@@ -13,6 +13,7 @@ service Inference {
   // Generates text given a prompt, streaming the outputs
   rpc GenerateStream (GenerateRequest) returns (stream GenerateResponse) {}
 }
+
 // ======================================================================================
 // Generate Request
 // ======================================================================================

@@ -52,6 +52,7 @@ pub struct EngineCoreReadyResponse {
     pub world_size: u64,
     /// Data parallelism size from the parallel config.
     pub data_parallel_size: u64,
+    // Required discovery metadata; EngineCore and client versions must match.
     /// Tensor-parallel size of this engine.
     pub tensor_parallel_size: u32,
     /// Pipeline-parallel size of this engine.

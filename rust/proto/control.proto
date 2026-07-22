@@ -22,7 +22,6 @@ message ServerInfo {
   uint64 total_kv_blocks = 7;
   uint64 max_running_requests = 8;
   uint64 max_batched_tokens = 9;
-  uint32 max_loras = 10;
 }
 
 message ParallelismInfo {
@@ -30,7 +29,6 @@ message ParallelismInfo {
   uint32 pipeline_parallel_size = 2;
   uint32 data_parallel_size = 3;
   uint32 data_parallel_rank = 4;
-  uint32 data_parallel_start_rank = 5;
   uint32 decode_context_parallel_size = 6;
 }
 
@@ -40,11 +38,9 @@ message ModelInfo {
   string model_id = 1;
   string served_model_name = 2;
   repeated string served_model_aliases = 3;
-  repeated string tokenizer_modes = 4;
 
   bool supports_text_input = 20;
   bool supports_token_ids_input = 21;
-  bool supports_lora = 22;
   bool supports_multimodal = 23;
   string reasoning_parser = 24;
   string tool_call_parser = 25;

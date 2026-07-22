@@ -6,7 +6,6 @@ use std::sync::Arc;
 use thiserror_ext::AsReport as _;
 use tonic::{Request, Response, Status};
 use vllm_engine_core_client::protocol::handshake::EngineCoreReadyResponse;
-use vllm_text::TextBackend as _;
 
 use super::{ControlServer, pb};
 use crate::state::AppState;
@@ -27,16 +26,6 @@ impl ControlServiceImpl {
         self.state.engine_core_client().ready_response()
     }
 
-    fn per_rank_kv_blocks(&self) -> u64 {
-        self.state
-            .engine_core_client()
-            .ready_responses()
-            .into_iter()
-            .map(|response| response.num_gpu_blocks)
-            .min()
-            .unwrap_or(0)
-    }
-
     fn parallelism_info(&self) -> pb::ParallelismInfo {
         let ready = self.ready();
         pb::ParallelismInfo {
@@ -44,7 +33,6 @@ impl ControlServiceImpl {
             pipeline_parallel_size: ready.pipeline_parallel_size,
             data_parallel_size: ready.data_parallel_size.min(u64::from(u32::MAX)) as u32,
             data_parallel_rank: ready.data_parallel_rank,
-            data_parallel_start_rank: ready.data_parallel_rank,
             decode_context_parallel_size: ready.decode_context_parallel_size,
         }
     }
@@ -64,12 +52,11 @@ impl pb::control_server::Control for ControlServiceImpl {
             api_version: GRPC_API_VERSION.to_string(),
             instance_id: ready.instance_id.clone(),
             parallelism: Some(self.parallelism_info()),
-            max_model_len: ready.max_model_len.min(u64::from(u32::MAX)) as u32,
+            max_model_len: self.state.engine_core_client().max_model_len(),
             kv_block_size: ready.block_size.min(u64::from(u32::MAX)) as u32,
-            total_kv_blocks: self.per_rank_kv_blocks(),
+            total_kv_blocks: self.state.engine_core_client().total_num_gpu_blocks(),
             max_running_requests: ready.max_num_seqs,
             max_batched_tokens: ready.max_num_batched_tokens,
-            max_loras: 0,
         }))
     }
 
@@ -82,10 +69,9 @@ impl pb::control_server::Control for ControlServiceImpl {
             model_id: self.state.chat.text().model_id().to_string(),
             served_model_name: self.state.primary_model_name().to_string(),
             served_model_aliases: served.iter().skip(1).cloned().collect(),
-            tokenizer_modes: Vec::new(),
+            // GenerateRequest accepts both prompt representations.
             supports_text_input: true,
             supports_token_ids_input: true,
-            supports_lora: false,
             supports_multimodal: self.state.chat.supports_multimodal(),
             reasoning_parser: self
                 .state

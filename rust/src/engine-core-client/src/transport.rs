@@ -493,7 +493,7 @@ async fn wait_for_input_registrations(
         ready_responses.insert(actual_id, ready_response);
     }
 
-    let engines = expected_engines
+    Ok(expected_engines
         .into_iter()
         .map(|engine_id| {
             let ready_response = ready_responses
@@ -504,78 +504,7 @@ async fn wait_for_input_registrations(
                 ready_response,
             }
         })
-        .collect::<Vec<_>>();
-    validate_ready_responses(&engines)?;
-    Ok(engines)
-}
-
-/// Validate engine metadata before making the client available.
-fn validate_ready_responses(engines: &[ConnectedEngine]) -> Result<()> {
-    let Some(first) = engines.first() else {
-        bail_unexpected_handshake_message!("no engine ready responses were received");
-    };
-    let expected = &first.ready_response;
-    let mut ranks = BTreeSet::new();
-
-    for engine in engines {
-        let response = &engine.ready_response;
-        if response.world_size == 0
-            || response.tensor_parallel_size == 0
-            || response.pipeline_parallel_size == 0
-            || response.data_parallel_size == 0
-            || response.max_num_seqs == 0
-            || response.max_num_batched_tokens == 0
-        {
-            bail_unexpected_handshake_message!(
-                "engine {:?} reported zero topology or scheduler capacity: {:?}",
-                engine.engine_id,
-                response
-            );
-        }
-        if response.data_parallel_rank as u64 >= response.data_parallel_size {
-            bail_unexpected_handshake_message!(
-                "engine {:?} reported data-parallel rank {} outside size {}",
-                engine.engine_id,
-                response.data_parallel_rank,
-                response.data_parallel_size
-            );
-        }
-        if response.data_parallel_size > 1 && !ranks.insert(response.data_parallel_rank) {
-            bail_unexpected_handshake_message!(
-                "duplicate data-parallel rank {} in engine ready responses",
-                response.data_parallel_rank
-            );
-        }
-        if response.data_parallel_size > 1
-            && let Some(engine_index) = engine.engine_id.engine_index()
-            && engine_index != response.data_parallel_rank
-        {
-            bail_unexpected_handshake_message!(
-                "engine identity rank {engine_index} does not match reported data-parallel rank {}",
-                response.data_parallel_rank
-            );
-        }
-
-        let uniform = response.block_size == expected.block_size
-            && response.dtype == expected.dtype
-            && response.vllm_version == expected.vllm_version
-            && response.world_size == expected.world_size
-            && response.data_parallel_size == expected.data_parallel_size
-            && response.tensor_parallel_size == expected.tensor_parallel_size
-            && response.pipeline_parallel_size == expected.pipeline_parallel_size
-            && response.decode_context_parallel_size == expected.decode_context_parallel_size
-            && response.max_num_seqs == expected.max_num_seqs
-            && response.max_num_batched_tokens == expected.max_num_batched_tokens;
-        if !uniform {
-            bail_unexpected_handshake_message!(
-                "engine {:?} reported topology or scheduler limits inconsistent with engine {:?}",
-                engine.engine_id,
-                first.engine_id
-            );
-        }
-    }
-
-    Ok(())
+        .collect())
 }
 
 /// Send an encoded message to the engine through the input socket.
@@ -656,9 +585,7 @@ pub async fn run_output_loop(
 
 #[cfg(test)]
 mod tests {
-    use super::{ConnectedEngine, bind_local_sockets, validate_ready_responses};
-    use crate::EngineId;
-    use crate::mock_engine::default_ready_response;
+    use super::bind_local_sockets;
 
     #[tokio::test]
     async fn bind_local_sockets_resolves_zero_port_bindings() {
@@ -668,27 +595,5 @@ mod tests {
         assert!(input_address.starts_with("tcp://127.0.0.1:"));
         assert!(output_address.starts_with("tcp://127.0.0.1:"));
         assert_ne!(input_address, output_address);
-    }
-
-    #[test]
-    fn ready_validation_enforces_data_parallel_metadata() {
-        let engines = [0, 1].map(|rank| {
-            let mut ready_response = default_ready_response();
-            ready_response.data_parallel_size = 2;
-            ready_response.data_parallel_rank = rank;
-            ConnectedEngine {
-                engine_id: EngineId::from_engine_index(rank),
-                ready_response,
-            }
-        });
-        validate_ready_responses(&engines).expect("valid ready responses");
-
-        let mut duplicate_rank = engines.clone();
-        duplicate_rank[1].ready_response.data_parallel_rank = 0;
-        assert!(validate_ready_responses(&duplicate_rank).is_err());
-
-        let mut inconsistent_topology = engines;
-        inconsistent_topology[1].ready_response.tensor_parallel_size = 2;
-        assert!(validate_ready_responses(&inconsistent_topology).is_err());
     }
 }
