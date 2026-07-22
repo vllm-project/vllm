@@ -171,6 +171,17 @@ def get_flash_attn_version(
         ):
             fa_version = vllm_config.attention_config.flash_attn_version
 
+        if (
+            envs.VLLM_BATCH_INVARIANT
+            and device_capability.major == 9
+            and fa_version == 3
+        ):
+            logger.warning_once(
+                "Cannot use FlashAttention 3 with batch invariance on "
+                "Hopper; defaulting to FlashAttention 2."
+            )
+            fa_version = 2
+
         # 3. fallback for unsupported combinations
         if device_capability.major >= 10 and fa_version == 3:
             logger.warning_once(
