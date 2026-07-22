@@ -56,9 +56,7 @@ class OffloadingConnectorWorker:
     def _init_worker(self, kv_caches: CanonicalKVCaches) -> None:
         self.worker = self.spec.get_worker(kv_caches)
 
-    def register_kv_caches(
-        self, kv_caches: dict[str, torch.Tensor | list[torch.Tensor]]
-    ):
+    def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         kv_cache_config = self.kv_cache_config
         num_blocks = kv_cache_config.num_blocks
 
@@ -120,24 +118,13 @@ class OffloadingConnectorWorker:
                     )
 
                 elif isinstance(layer_kv_cache_spec, MambaSpec):
-                    state_tensors = kv_caches[layer_name]
-                    assert isinstance(state_tensors, list)
-
-                    # re-construct the raw (num_blocks, page_size) tensor
-                    # from the first state tensor
-                    assert len(state_tensors) > 0
-                    first_state_tensor = state_tensors[0]
-                    assert first_state_tensor.storage_offset() == 0
-                    tensor = (
-                        torch.tensor(
-                            [],
-                            dtype=torch.int8,
-                            device=first_state_tensor.device,
-                        )
-                        .set_(first_state_tensor.untyped_storage())
-                        .view((num_blocks, layer_kv_cache_spec.page_size_bytes))
+                    layer_kv_cache = kv_caches[layer_name]
+                    assert layer_kv_cache.dtype == torch.int8
+                    tensors_per_block[layer_name] = (
+                        layer_kv_cache.view(
+                            num_blocks, layer_kv_cache_spec.page_size_bytes
+                        ),
                     )
-                    tensors_per_block[layer_name] = (tensor,)
 
                     page_size_bytes[layer_name] = layer_kv_cache_spec.page_size_bytes
                     unpadded_page_size_bytes[layer_name] = replace(
