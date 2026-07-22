@@ -90,8 +90,8 @@ def test_draft_attention_backends_are_independent_from_target():
         vllm_config=target_config,
         speculative_config=SimpleNamespace(
             moe_backend=None,
-            attention_backend=AttentionBackendEnum.FLASH_ATTN,
-            attention_decode_backend=AttentionBackendEnum.FLASHINFER,
+            resolved_attention_backend=AttentionBackendEnum.FLASH_ATTN,
+            resolved_attention_decode_backend=AttentionBackendEnum.FLASHINFER,
             kv_cache_dtype=None,
         ),
     )

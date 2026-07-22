@@ -117,11 +117,14 @@ class SpeculativeConfig:
     drafter and generator require different MoE kernels (e.g. quantized
     generator with unquantized drafter)."""
     attention_backend: AttentionBackendEnum | None = None
-    """General attention backend for the draft model. When `None`, the backend
-    is automatically selected."""
+    """Attention backend for all draft batches. Use the role-specific options
+    to configure prefill and decode independently."""
+    attention_prefill_backend: AttentionBackendEnum | None = None
+    """General attention backend for prefill-containing and mixed draft batches.
+    When `None`, the backend is automatically selected."""
     attention_decode_backend: AttentionBackendEnum | None = None
     """Attention backend for pure-decode draft batches. When `None`, the backend
-    is selected automatically and independently from `attention_backend`."""
+    is selected automatically and independently from the prefill backend."""
     kv_cache_dtype: CacheDType | None = None
     """KV cache dtype for the draft model. When `None`, the draft inherits the
     target model's `--kv-cache-dtype`."""
@@ -1208,6 +1211,7 @@ class SpeculativeConfig:
 
     @field_validator(
         "attention_backend",
+        "attention_prefill_backend",
         "attention_decode_backend",
         mode="before",
     )
@@ -1221,6 +1225,15 @@ class SpeculativeConfig:
 
     @model_validator(mode="after")
     def _verify_args(self) -> Self:
+        if self.attention_backend is not None and (
+            self.attention_prefill_backend is not None
+            or self.attention_decode_backend is not None
+        ):
+            raise ValueError(
+                "attention_backend is mutually exclusive with "
+                "attention_prefill_backend and attention_decode_backend"
+            )
+
         if self.tensor_parallel_size is not None:
             raise ValueError(
                 "'tensor_parallel_size' is not a valid argument in the "
@@ -1277,6 +1290,14 @@ class SpeculativeConfig:
         if not self.use_heterogeneous_vocab:
             self.verify_equal_vocab_size_if_draft_model()
         return self
+
+    @property
+    def resolved_attention_backend(self) -> AttentionBackendEnum | None:
+        return self.attention_prefill_backend or self.attention_backend
+
+    @property
+    def resolved_attention_decode_backend(self) -> AttentionBackendEnum | None:
+        return self.attention_decode_backend or self.attention_backend
 
     def verify_equal_vocab_size_if_draft_model(self):
         if (

@@ -44,10 +44,10 @@ def load_eagle_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mod
         attention_config=replace(
             vllm_config.attention_config,
             backend=(
-                speculative_config.attention_backend
+                speculative_config.resolved_attention_backend
                 or vllm_config.attention_config.backend
             ),
-            decode_backend=speculative_config.attention_decode_backend,
+            decode_backend=speculative_config.resolved_attention_decode_backend,
         ),
     )
     if speculative_config.kv_cache_dtype is not None:

@@ -361,6 +361,7 @@ def test_attention_config():
     assert args is not None
     engine_args = EngineArgs.from_cli_args(args)
     assert engine_args.attention_config == AttentionConfig()
+    assert engine_args.attention_prefill_backend is None
     assert engine_args.attention_decode_backend is None
 
     # set backend via dot notation
@@ -442,8 +443,11 @@ def test_attention_config():
     engine_args = EngineArgs.from_cli_args(args)
     vllm_config = engine_args.create_engine_config()
     assert vllm_config.attention_config.backend == AttentionBackendEnum.FLASH_ATTN
+    assert (
+        vllm_config.attention_config.decode_backend == AttentionBackendEnum.FLASH_ATTN
+    )
 
-    # test --attention-prefill-backend aliases --attention-backend
+    # test --attention-prefill-backend only sets the general backend
     args = parser.parse_args(
         [
             "--model",
@@ -455,6 +459,7 @@ def test_attention_config():
     engine_args = EngineArgs.from_cli_args(args)
     vllm_config = engine_args.create_engine_config()
     assert vllm_config.attention_config.backend == AttentionBackendEnum.TRITON_ATTN
+    assert vllm_config.attention_config.decode_backend is None
 
     # test --attention-decode-backend flows into VllmConfig.attention_config
     args = parser.parse_args(
@@ -470,6 +475,7 @@ def test_attention_config():
     assert (
         vllm_config.attention_config.decode_backend == AttentionBackendEnum.FLASHINFER
     )
+    assert vllm_config.attention_config.backend is None
 
     # test --attention-config.backend flows into VllmConfig.attention_config
     args = parser.parse_args(
@@ -501,9 +507,23 @@ def test_attention_config():
     with pytest.raises(ValueError, match="mutually exclusive"):
         engine_args.create_engine_config()
 
+    args = parser.parse_args(
+        [
+            "--model",
+            "facebook/opt-125m",
+            "--attention-backend",
+            "FLASH_ATTN",
+            "--attention-decode-backend",
+            "FLASHINFER",
+        ]
+    )
+    engine_args = EngineArgs.from_cli_args(args)
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        engine_args.create_engine_config()
+
 
 @pytest.mark.skip_global_cleanup
-def test_speculative_attention_prefill_backend_alias():
+def test_speculative_attention_role_specific_backends():
     from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
     engine_args = EngineArgs(
@@ -517,8 +537,8 @@ def test_speculative_attention_prefill_backend_alias():
     config = engine_args.create_speculative_config(None, None)  # type: ignore[arg-type]
 
     assert config is not None
-    assert config.attention_backend == AttentionBackendEnum.FLASH_ATTN
-    assert config.attention_decode_backend == AttentionBackendEnum.FLASHINFER
+    assert config.resolved_attention_backend == AttentionBackendEnum.FLASH_ATTN
+    assert config.resolved_attention_decode_backend == AttentionBackendEnum.FLASHINFER
 
 
 def test_prefix_cache_default():

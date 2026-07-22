@@ -66,11 +66,11 @@ class Gemma4Speculator(AutoRegressiveSpeculator):
             attention_config=replace(
                 target_attention_config,
                 backend=(
-                    self.speculative_config.attention_backend
+                    self.speculative_config.resolved_attention_backend
                     or target_attention_config.backend
                 ),
                 decode_backend=(
-                    self.speculative_config.attention_decode_backend
+                    self.speculative_config.resolved_attention_decode_backend
                     or target_attention_config.decode_backend
                 ),
             ),

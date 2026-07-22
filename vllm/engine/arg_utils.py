@@ -685,6 +685,7 @@ class EngineArgs:
     model_impl: str = ModelConfig.model_impl
     override_attention_dtype: str | None = ModelConfig.override_attention_dtype
     attention_backend: AttentionBackendEnum | None = AttentionConfig.backend
+    attention_prefill_backend: AttentionBackendEnum | None = AttentionConfig.backend
     attention_decode_backend: AttentionBackendEnum | None = (
         AttentionConfig.decode_backend
     )
@@ -927,10 +928,14 @@ class EngineArgs:
             title="AttentionConfig",
             description=AttentionConfig.__doc__,
         )
+        attention_backend_kwargs = attention_kwargs["backend"].copy()
+        attention_backend_kwargs["help"] = (
+            "Attention backend for all batches. Use role-specific backend "
+            "options to configure prefill and decode independently."
+        )
+        attention_group.add_argument("--attention-backend", **attention_backend_kwargs)
         attention_group.add_argument(
-            "--attention-backend",
-            "--attention-prefill-backend",
-            **attention_kwargs["backend"],
+            "--attention-prefill-backend", **attention_kwargs["backend"]
         )
         attention_group.add_argument(
             "--attention-decode-backend", **attention_kwargs["decode_backend"]
@@ -1763,13 +1768,9 @@ class EngineArgs:
         if self.speculative_config is None:
             return None
 
-        normalized_config = {}
-        for key, value in self.speculative_config.items():
-            key = key.replace("-", "_")
-            if key == "attention_prefill_backend":
-                key = "attention_backend"
-            normalized_config[key] = value
-        self.speculative_config = normalized_config
+        self.speculative_config = {
+            k.replace("-", "_"): v for k, v in self.speculative_config.items()
+        }
 
         # Note(Shangming): These parameters are not obtained from the cli arg
         # '--speculative-config' and must be passed in when creating the engine
@@ -2248,25 +2249,51 @@ class EngineArgs:
 
         # Attention config overrides
         attention_config = copy.deepcopy(self.attention_config)
-        if self.attention_backend is not None:
-            if attention_config.backend is not None:
+        if self.attention_backend is not None and (
+            self.attention_prefill_backend is not None
+            or self.attention_decode_backend is not None
+        ):
+            raise ValueError(
+                "attention_backend is mutually exclusive with "
+                "attention_prefill_backend and attention_decode_backend"
+            )
+
+        def apply_attention_override(
+            arg_name: str,
+            value: AttentionBackendEnum | None,
+            config_name: str,
+        ) -> None:
+            if value is None:
+                return
+            if getattr(attention_config, config_name) is not None:
                 raise ValueError(
-                    "attention_backend and attention_config.backend "
+                    f"{arg_name} and attention_config.{config_name} "
                     "are mutually exclusive"
                 )
-            attention_config.backend = AttentionConfig.validate_backend_before(
-                self.attention_backend
+            setattr(
+                attention_config,
+                config_name,
+                AttentionConfig.validate_backend_before(value),
             )
-        if self.attention_decode_backend is not None:
-            attention_decode_backend = AttentionConfig.validate_backend_before(
-                self.attention_decode_backend
+
+        if self.attention_backend is not None:
+            apply_attention_override(
+                "attention_backend", self.attention_backend, "backend"
             )
-            if attention_config.decode_backend is not None:
-                raise ValueError(
-                    "attention_decode_backend and "
-                    "attention_config.decode_backend are mutually exclusive"
-                )
-            attention_config.decode_backend = attention_decode_backend
+            apply_attention_override(
+                "attention_backend", self.attention_backend, "decode_backend"
+            )
+        else:
+            apply_attention_override(
+                "attention_prefill_backend",
+                self.attention_prefill_backend,
+                "backend",
+            )
+            apply_attention_override(
+                "attention_decode_backend",
+                self.attention_decode_backend,
+                "decode_backend",
+            )
 
         # TurboQuant requires FlashAttention 2 — FA3 boundary layers assert
         # FlashAttentionImpl which fails with TurboQuantAttentionImpl.

@@ -1690,6 +1690,10 @@ There are two ways to specify the backend from the command line:
 vllm serve <model> --attention-backend FLASH_ATTN
 ```
 
+This legacy option forces the same backend for both prefill and decode. Use
+`--attention-prefill-backend` or `--attention-decode-backend` to configure one
+role while leaving the other automatically selected.
+
 **Option 2: Using `--attention-config.backend` / `-ac.backend` (structured config)**
 
 ```bash
@@ -1702,8 +1706,11 @@ vllm serve <model> --attention-config '{"backend": "FLASH_ATTN"}'
 vllm serve <model> -ac '{"backend": "FLASH_ATTN"}'
 ```
 
-> **Note:** `--attention-backend` and `--attention-config.backend` are mutually
-> exclusive. Use one or the other, not both.
+`backend` configures prefill-containing and mixed batches; `decode_backend`
+configures pure-decode batches.
+
+> **Note:** `--attention-backend` is mutually exclusive with the role-specific
+> options and their corresponding structured config fields.
 
 ### Python API
 
