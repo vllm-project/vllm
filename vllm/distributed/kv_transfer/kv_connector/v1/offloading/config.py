@@ -16,12 +16,7 @@ from vllm.v1.kv_offload.config import (
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
-    from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheTensor
-
-
-def is_kv_cache_tensor_packed(kv_cache_tensor: "KVCacheTensor") -> bool:
-    """Return whether a KV cache tensor uses a packed block stride."""
-    return bool(kv_cache_tensor.block_stride)
+    from vllm.v1.kv_cache_interface import KVCacheConfig
 
 
 def build_offloading_config(
@@ -89,16 +84,8 @@ def build_offloading_config(
 
     worker_kv_bytes_per_block = 0
     if kv_cache_config.num_blocks > 0:
-        packed_tensors = tuple(
-            is_kv_cache_tensor_packed(tensor)
-            for tensor in kv_cache_config.kv_cache_tensors
-        )
-        is_packed = any(packed_tensors)
-        assert not is_packed or all(packed_tensors)
-        total_gpu_kv_bytes = (
-            kv_cache_config.kv_cache_tensors[0].size
-            if is_packed
-            else sum(tensor.size for tensor in kv_cache_config.kv_cache_tensors)
+        total_gpu_kv_bytes = sum(
+            tensor.size for tensor in kv_cache_config.kv_cache_tensors
         )
         worker_kv_bytes_per_block = total_gpu_kv_bytes // kv_cache_config.num_blocks
 

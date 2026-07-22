@@ -10,11 +10,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
     OffloadingWorkerMetadata,
     ReqId,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.offloading.config import (
-    is_kv_cache_tensor_packed,
-)
 from vllm.logger import init_logger
-from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheConfig,
@@ -56,21 +52,14 @@ class OffloadingConnectorWorker:
     def _init_worker(self, kv_caches: CanonicalKVCaches) -> None:
         self.worker = self.spec.get_worker(kv_caches)
 
-    def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
+    def register_kv_caches(
+        self, kv_caches: dict[str, torch.Tensor | list[torch.Tensor]]
+    ):
         kv_cache_config = self.kv_cache_config
         num_blocks = kv_cache_config.num_blocks
 
-        # Packed layouts (e.g. DSv4) set block_stride > 0; their tensors use
-        # stride(0) as the manager-block stride (equals total_num_bytes_per_block).
-        # General (non-packed) layouts size the tensor at page_size_bytes per
-        # manager block, so page_size_bytes is the correct offloading stride.
-        layer_is_packed: dict[str, bool] = {
-            ln: is_kv_cache_tensor_packed(kv_tensor)
-            for kv_tensor in kv_cache_config.kv_cache_tensors
-            for ln in kv_tensor.shared_by
-        }
-
-        # layer_name -> (num_blocks, page_size_bytes) tensor
+        # layer_name -> (num_blocks, page_size_bytes) int8 view.
+        # Standardized layouts always have num_blocks as the leading dim.
         tensors_per_block: dict[str, tuple[torch.Tensor, ...]] = {}
         # layer_name -> size of (un-padded) page in bytes
         unpadded_page_size_bytes: dict[str, int] = {}
@@ -87,63 +76,62 @@ class OffloadingConnectorWorker:
                 layer_kv_cache_spec = per_layer_specs.get(
                     layer_name, group_kv_cache_spec
                 )
-                if isinstance(layer_kv_cache_spec, AttentionSpec):
-                    layer_kv_cache = kv_caches[layer_name]
-                    assert isinstance(layer_kv_cache, torch.Tensor)
+                layer_kv_cache = kv_caches[layer_name]
+                # AttentionSpec yields a single tensor; MambaSpec yields a
+                # list of typed state tensors that share one underlying
+                # buffer. Either way, the first tensor's storage_offset
+                # marks the start of this layer's region.
+                ref = (
+                    layer_kv_cache[0]
+                    if isinstance(layer_kv_cache, list)
+                    else layer_kv_cache
+                )
+                page = layer_kv_cache_spec.page_size_bytes
+                elem_size = ref.element_size()
+                byte_offset = ref.storage_offset() * elem_size
+                # Packed layouts (e.g. DSv4) interleave layers per block, so
+                # the attention tensor's stride(0) (the manager-block stride)
+                # exceeds page_size_bytes. Non-packed layouts have
+                # stride(0) == page_size_bytes.
+                block_stride_bytes = (
+                    ref.stride(0) * elem_size
+                    if isinstance(layer_kv_cache_spec, AttentionSpec)
+                    else page
+                )
+                tensors_per_block[layer_name] = (
+                    torch.tensor([], dtype=torch.int8, device=ref.device).set_(
+                        ref.untyped_storage(),
+                        byte_offset,
+                        (num_blocks, page),
+                        (block_stride_bytes, 1),
+                    ),
+                )
+                page_size_bytes[layer_name] = page
 
-                    page = layer_kv_cache_spec.page_size_bytes
-                    elem_size = layer_kv_cache.element_size()
-                    byte_offset = layer_kv_cache.storage_offset() * elem_size
-                    block_stride_bytes = (
-                        layer_kv_cache.stride(0) * elem_size
-                        if layer_is_packed[layer_name]
-                        else page
-                    )
-                    raw = torch.empty(
-                        0,
-                        dtype=torch.int8,
-                        device=layer_kv_cache.device,
-                    ).set_(layer_kv_cache.untyped_storage())
-                    tensors_per_block[layer_name] = (
-                        torch.as_strided(
-                            raw,
-                            (num_blocks, page),
-                            (block_stride_bytes, 1),
-                            byte_offset,
-                        ),
-                    )
-                    page_size_bytes[layer_name] = layer_kv_cache_spec.page_size_bytes
+                if isinstance(layer_kv_cache_spec, AttentionSpec):
                     unpadded_page_size_bytes[layer_name] = (
                         layer_kv_cache_spec.unpadded_page_size_bytes
                     )
-
                 elif isinstance(layer_kv_cache_spec, MambaSpec):
-                    layer_kv_cache = kv_caches[layer_name]
-                    assert layer_kv_cache.dtype == torch.int8
-                    tensors_per_block[layer_name] = (
-                        layer_kv_cache.view(
-                            num_blocks, layer_kv_cache_spec.page_size_bytes
-                        ),
-                    )
-
-                    page_size_bytes[layer_name] = layer_kv_cache_spec.page_size_bytes
                     unpadded_page_size_bytes[layer_name] = replace(
                         layer_kv_cache_spec, page_size_padded=None
                     ).page_size_bytes
-
                 else:
                     raise NotImplementedError
 
-        packed_kv_cache_tensor = next(
+        # Packed layouts (e.g. DSv4) interleave all layers within each
+        # manager block: a layer view's block stride exceeds its page size.
+        # Offload the whole packed block as a single transfer region.
+        packed_layer_name = next(
             (
-                t
-                for t in kv_cache_config.kv_cache_tensors
-                if is_kv_cache_tensor_packed(t) and t.shared_by
+                layer_name
+                for layer_name, (tensor,) in tensors_per_block.items()
+                if tensor.stride(0) != tensor.shape[1]
             ),
             None,
         )
-        if packed_kv_cache_tensor is not None:
-            (tensor,) = tensors_per_block[packed_kv_cache_tensor.shared_by[0]]
+        if packed_layer_name is not None:
+            (tensor,) = tensors_per_block[packed_layer_name]
             block_stride = tensor.stride(0)
             packed_tensor = tensor.as_strided(
                 (num_blocks, block_stride),
@@ -164,45 +152,42 @@ class OffloadingConnectorWorker:
         block_tensors: list[CanonicalKVCacheTensor] = []
         block_data_refs: dict[str, list[CanonicalKVCacheRef]] = defaultdict(list)
         for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
-            # Filter to layers that were actually processed above.
-            # Packed KV allocation emits KVCacheTensor entries for
-            # every (tuple_idx, page_size) slot; slots where no group has a
-            # layer at that index produce an empty shared_by (reserved memory
-            # with no corresponding model layer).
-            tensor_layer_names = [
-                n for n in kv_cache_tensor.shared_by if n in tensors_per_block
-            ]
-            if not tensor_layer_names:
-                continue
+            for slot_layers in kv_cache_tensor.shared_by:
+                # Filter to layers that were actually processed above.
+                # Some slots may have no corresponding model layer (reserved
+                # memory with no group layer at that index).
+                tensor_layer_names = [n for n in slot_layers if n in tensors_per_block]
+                if not tensor_layer_names:
+                    continue
 
-            # verify all layers in the group reference the exact same tensors
-            assert len({len(tensors_per_block[n]) for n in tensor_layer_names}) == 1
-            assert (
-                len({tensors_per_block[n][0].data_ptr() for n in tensor_layer_names})
-                == 1
-            )
-            assert (
-                len({tensors_per_block[n][0].stride() for n in tensor_layer_names}) == 1
-            )
-
-            # pick the first layer to represent the group
-            first_layer_name = tensor_layer_names[0]
-            for tensor in tensors_per_block[first_layer_name]:
-                block_tensors.append(
-                    CanonicalKVCacheTensor(
-                        tensor=tensor,
-                        page_size_bytes=page_size_bytes[first_layer_name],
-                    )
+                # Verify all layers in the slot reference the same tensors.
+                assert len({len(tensors_per_block[n]) for n in tensor_layer_names}) == 1
+                data_ptrs = {
+                    n: tensors_per_block[n][0].data_ptr() for n in tensor_layer_names
+                }
+                assert len(set(data_ptrs.values())) == 1, data_ptrs
+                assert (
+                    len({tensors_per_block[n][0].stride() for n in tensor_layer_names})
+                    == 1
                 )
 
-                curr_tensor_idx = len(block_tensors) - 1
-                for layer_name in tensor_layer_names:
-                    block_data_refs[layer_name].append(
-                        CanonicalKVCacheRef(
-                            tensor_idx=curr_tensor_idx,
-                            page_size_bytes=(unpadded_page_size_bytes[layer_name]),
+                first_layer_name = tensor_layer_names[0]
+                for tensor in tensors_per_block[first_layer_name]:
+                    block_tensors.append(
+                        CanonicalKVCacheTensor(
+                            tensor=tensor,
+                            page_size_bytes=page_size_bytes[first_layer_name],
                         )
                     )
+
+                    curr_tensor_idx = len(block_tensors) - 1
+                    for layer_name in tensor_layer_names:
+                        block_data_refs[layer_name].append(
+                            CanonicalKVCacheRef(
+                                tensor_idx=curr_tensor_idx,
+                                page_size_bytes=(unpadded_page_size_bytes[layer_name]),
+                            )
+                        )
 
         group_data_refs: list[list[CanonicalKVCacheRef]] = []
         for kv_cache_group in kv_cache_config.kv_cache_groups:
@@ -214,53 +199,6 @@ class OffloadingConnectorWorker:
         canonical_kv_caches = CanonicalKVCaches(
             tensors=block_tensors,
             group_data_refs=group_data_refs,
-        )
-
-        self._init_worker(canonical_kv_caches)
-
-    def register_cross_layers_kv_cache(
-        self, kv_cache: torch.Tensor, attn_backend: type[AttentionBackend]
-    ):
-        # verify that num_blocks is at physical position 0 in the cross-layers
-        # tensor layout.
-        test_shape = attn_backend.get_kv_cache_shape(
-            num_blocks=1234, block_size=16, num_kv_heads=1, head_size=256
-        )
-        num_blocks_logical_dim = test_shape.index(1234) + 1
-        physical_to_logical = attn_backend.get_kv_cache_stride_order(
-            include_num_layers_dimension=True
-        )
-        num_blocks_physical_dim = physical_to_logical.index(num_blocks_logical_dim)
-        assert num_blocks_physical_dim == 0
-
-        kv_cache_groups = self.kv_cache_config.kv_cache_groups
-        assert len(kv_cache_groups) == 1
-        kv_cache_spec = kv_cache_groups[0].kv_cache_spec
-        num_layers = len(kv_cache_groups[0].layer_names)
-        page_size_bytes = kv_cache_spec.page_size_bytes * num_layers
-
-        assert kv_cache.storage_offset() == 0
-        storage = kv_cache.untyped_storage()
-        assert len(storage) % page_size_bytes == 0
-        num_blocks = len(storage) // page_size_bytes
-        tensor = (
-            torch.tensor(
-                [],
-                dtype=torch.int8,
-                device=kv_cache.device,
-            )
-            .set_(storage)
-            .view(num_blocks, page_size_bytes)
-        )
-        kv_cache_tensor = CanonicalKVCacheTensor(
-            tensor=tensor, page_size_bytes=page_size_bytes
-        )
-        # in cross layers layout, there's currently only a single group
-        kv_cache_data_ref = CanonicalKVCacheRef(
-            tensor_idx=0, page_size_bytes=page_size_bytes
-        )
-        canonical_kv_caches = CanonicalKVCaches(
-            tensors=[kv_cache_tensor], group_data_refs=[[kv_cache_data_ref]]
         )
 
         self._init_worker(canonical_kv_caches)

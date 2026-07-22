@@ -169,9 +169,7 @@ def _make_kv_cache_config():
     head_size = 1
     dtype = torch.float32
     page_size = 2 * num_kv_heads * head_size * torch.finfo(dtype).bits // 8
-    kv_tensor = KVCacheTensor(
-        size=num_blocks * page_size, shared_by=["layer"], block_stride=0
-    )
+    kv_tensor = KVCacheTensor(size=num_blocks * page_size, shared_by=[["layer"]])
     return KVCacheConfig(
         num_blocks=num_blocks,
         kv_cache_tensors=[kv_tensor],
@@ -189,22 +187,12 @@ def _make_kv_cache_config():
     )
 
 
-def _make_sizing_kv_cache_config(packed: bool) -> KVCacheConfig:
+def _make_sizing_kv_cache_config() -> KVCacheConfig:
     num_blocks = 4
-    if packed:
-        kv_cache_tensors = [
-            KVCacheTensor(
-                size=64,
-                shared_by=[layer_name],
-                block_stride=16,
-            )
-            for layer_name in ("layer0", "layer1")
-        ]
-    else:
-        kv_cache_tensors = [
-            KVCacheTensor(size=40, shared_by=["layer0"]),
-            KVCacheTensor(size=24, shared_by=["layer1"]),
-        ]
+    kv_cache_tensors = [
+        KVCacheTensor(size=40, shared_by=[["layer0"]]),
+        KVCacheTensor(size=24, shared_by=[["layer1"]]),
+    ]
 
     return KVCacheConfig(
         num_blocks=num_blocks,
@@ -227,8 +215,8 @@ def _make_hybrid_kv_cache_config() -> KVCacheConfig:
     return KVCacheConfig(
         num_blocks=4,
         kv_cache_tensors=[
-            KVCacheTensor(size=40, shared_by=["full_layer"]),
-            KVCacheTensor(size=24, shared_by=["mla_layer"]),
+            KVCacheTensor(size=40, shared_by=[["full_layer"]]),
+            KVCacheTensor(size=24, shared_by=[["mla_layer"]]),
         ],
         kv_cache_groups=[
             KVCacheGroupSpec(
@@ -325,8 +313,7 @@ def test_create_cpu_offloading_spec_end_to_end():
     assert spec.num_blocks > 0
 
 
-@pytest.mark.parametrize("packed", [False, True])
-def test_cpu_spec_sizing_preserves_tensor_layout(packed: bool):
+def test_cpu_spec_sizing_preserves_tensor_layout():
     cpu_bytes_to_use = 1920
     config = _make_layout_vllm_config(
         cpu_bytes_to_use=cpu_bytes_to_use,
@@ -335,35 +322,12 @@ def test_cpu_spec_sizing_preserves_tensor_layout(packed: bool):
         pipeline_parallel_size=2,
     )
 
-    spec = _create_spec(config, _make_sizing_kv_cache_config(packed))
+    spec = _create_spec(config, _make_sizing_kv_cache_config())
 
     assert isinstance(spec, CPUOffloadingSpec)
     assert spec.cpu_page_size_per_worker == 32
     assert spec.kv_bytes_per_chunk == 192
     assert spec.num_blocks == cpu_bytes_to_use // 192
-
-
-def test_cpu_spec_rejects_partially_packed_tensor_layout():
-    config = _make_layout_vllm_config(cpu_bytes_to_use=65536)
-    kv_cache_config = _make_sizing_kv_cache_config(packed=False)
-    kv_cache_config.kv_cache_tensors[0].block_stride = 16
-
-    with pytest.raises(AssertionError):
-        _create_spec(config, kv_cache_config)
-
-
-def test_cpu_spec_zero_blocks_skips_tensor_layout_validation():
-    config = _make_layout_vllm_config(cpu_bytes_to_use=65536)
-    kv_cache_config = _make_sizing_kv_cache_config(packed=False)
-    kv_cache_config.num_blocks = 0
-    kv_cache_config.kv_cache_tensors[0].block_stride = 16
-
-    spec = _create_spec(config, kv_cache_config)
-
-    assert isinstance(spec, CPUOffloadingSpec)
-    assert spec.cpu_page_size_per_worker == 0
-    assert spec.kv_bytes_per_chunk == 0
-    assert spec.num_blocks == 0
 
 
 def test_tiering_spec_aligns_row_size():
@@ -377,7 +341,7 @@ def test_tiering_spec_aligns_row_size():
         pipeline_parallel_size=2,
     )
 
-    spec = _create_spec(config, _make_sizing_kv_cache_config(packed=False))
+    spec = _create_spec(config, _make_sizing_kv_cache_config())
 
     assert isinstance(spec, TieringOffloadingSpec)
     assert spec.cpu_page_size_per_worker == 32

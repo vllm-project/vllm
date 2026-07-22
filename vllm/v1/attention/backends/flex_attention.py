@@ -101,6 +101,12 @@ class FlexAttentionBackend(AttentionBackend):
         return "FLEX_ATTENTION"
 
     @classmethod
+    def get_required_kv_cache_layout(cls) -> str | None:
+        if current_platform.is_rocm():
+            return "LBNHC"
+        return "BLNHC"
+
+    @classmethod
     def supports_sliding_window(cls) -> bool:
         return True
 
@@ -125,25 +131,6 @@ class FlexAttentionBackend(AttentionBackend):
     @staticmethod
     def get_impl_cls() -> type["FlexAttentionImpl"]:
         return FlexAttentionImpl
-
-    @staticmethod
-    def get_kv_cache_shape(
-        num_blocks: int,
-        block_size: int,
-        num_kv_heads: int,
-        head_size: int,
-        cache_dtype_str: str = "auto",
-    ) -> tuple[int, ...]:
-        # K and V are packed into the content dim: logical (B, H, N, 2*hs).
-        return (num_blocks, num_kv_heads, block_size, 2 * head_size)
-
-    @staticmethod
-    def get_kv_cache_stride_order(
-        include_num_layers_dimension: bool = False,
-    ) -> tuple[int, ...]:
-        if include_num_layers_dimension:
-            return (1, 0, 3, 2, 4)
-        return (0, 2, 1, 3)
 
     @staticmethod
     def get_builder_cls() -> type["FlexAttentionMetadataBuilder"]:
@@ -1279,7 +1266,7 @@ class FlexAttentionImpl(AttentionImpl):
             key: shape = [num_tokens, num_kv_heads, head_size]
             value: shape = [num_tokens, num_kv_heads, head_size]
             kv_cache: shape =
-                [num_blocks, num_kv_heads, block_size, 2 * head_size]
+                [num_blocks, 2, block_size, num_kv_heads, head_size]
             attn_metadata: Metadata for attention.
         Returns:
             shape = [num_tokens, num_heads * head_size]
@@ -1354,12 +1341,12 @@ class FlexAttentionImpl(AttentionImpl):
         else:
             assert self.attn_type == AttentionType.DECODER
             kv_cache = kv_cache.transpose(1, 2)
-            hs = self.head_size
-            key_cache, value_cache = kv_cache.split(hs, dim=-1)
+            key_cache, value_cache = kv_cache.split(self.head_size, dim=-1)
 
             # Flatten (num_blocks, block_size) into a single token dim.
-            key_cache = key_cache.view(-1, self.num_kv_heads, self.head_size)
-            value_cache = value_cache.view(-1, self.num_kv_heads, self.head_size)
+            # The transposed views are non-contiguous, so use reshape.
+            key_cache = key_cache.reshape(-1, self.num_kv_heads, self.head_size)
+            value_cache = value_cache.reshape(-1, self.num_kv_heads, self.head_size)
             query, key_tensor, value_tensor = map(
                 lambda x: self.view_as_4d(x).permute(0, 2, 1, 3),
                 (query, key_cache, value_cache),

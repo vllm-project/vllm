@@ -66,16 +66,6 @@ class XPUMLASparseBackend(AttentionBackend):
     def is_sparse(cls) -> bool:
         return True
 
-    @staticmethod
-    def get_kv_cache_shape(
-        num_blocks: int,
-        block_size: int,
-        num_kv_heads: int,  # assumed to be 1 for MLA
-        head_size: int,
-        cache_dtype_str: str = "auto",
-    ) -> tuple[int, ...]:
-        return (num_blocks, block_size, head_size)
-
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
         return [576]

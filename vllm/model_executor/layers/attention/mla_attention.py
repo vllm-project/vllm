@@ -578,6 +578,10 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             compile_native=True,
         )
 
+    def bind_kv_cache(self, kv_cache: torch.Tensor) -> None:
+        # [B, H=1, N, C] -> [B, N, C]
+        self.kv_cache = kv_cache.squeeze(1)
+
     @property
     def chunked_prefill_workspace_size(self) -> int:
         if self._chunked_prefill_workspace_size is None:
@@ -1337,27 +1341,6 @@ class MLACommonBackend(AttentionBackend):
     @staticmethod
     def get_builder_cls() -> type["MLACommonMetadataBuilder"]:
         return MLACommonMetadataBuilder
-
-    @staticmethod
-    def get_kv_cache_shape(
-        num_blocks: int,
-        block_size: int,
-        num_kv_heads: int,  # assumed to be 1 for MLA
-        head_size: int,
-        cache_dtype_str: str = "auto",
-    ) -> tuple[int, ...]:
-        return (num_blocks, block_size, head_size)
-
-    @staticmethod
-    def get_kv_cache_stride_order(
-        include_num_layers_dimension: bool = False,
-    ) -> tuple[int, ...]:
-        if include_num_layers_dimension:
-            # Default to identity permutation to signal cross-layer allocation
-            # is unsupported. Each MLA backend must opt in to support cross-layer
-            # allocation by overriding this method.
-            return (0, 1, 2, 3)
-        return (0, 1, 2)
 
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
@@ -2224,7 +2207,7 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
                 )
             elif not use_fp8_prefill:
                 ops.gather_and_maybe_dequant_cache(
-                    src_cache=kv_c_and_k_pe_cache,
+                    src_cache=kv_c_and_k_pe_cache.squeeze(1),
                     dst=workspace,
                     block_table=prefill_metadata.block_table,
                     cu_seq_lens=prefill_metadata.chunked_context.cu_seq_lens[i],
@@ -2237,7 +2220,7 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
             else:
                 # FP8 path: gather cache without dequantization
                 ops.cp_gather_cache(
-                    src_cache=kv_c_and_k_pe_cache,
+                    src_cache=kv_c_and_k_pe_cache.squeeze(1),
                     dst=workspace,
                     block_table=prefill_metadata.block_table,
                     cu_seq_lens=prefill_metadata.chunked_context.cu_seq_lens[i],
@@ -2356,7 +2339,7 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
             elif is_quantized_kv_cache(self.kv_cache_dtype):
                 assert k_scale is not None
                 ops.gather_and_maybe_dequant_cache(
-                    src_cache=kv_c_and_k_pe_cache,
+                    src_cache=kv_c_and_k_pe_cache.squeeze(1),
                     dst=workspace,
                     block_table=prefill_metadata.block_table,
                     cu_seq_lens=padded_local_cu_seq_lens,
@@ -2370,7 +2353,7 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
                 )
             else:
                 ops.cp_gather_cache(
-                    src_cache=kv_c_and_k_pe_cache,
+                    src_cache=kv_c_and_k_pe_cache.squeeze(1),
                     dst=workspace,
                     block_table=prefill_metadata.block_table,
                     cu_seq_lens=padded_local_cu_seq_lens,

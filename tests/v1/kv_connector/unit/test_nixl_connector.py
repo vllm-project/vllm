@@ -53,7 +53,6 @@ from vllm.outputs import RequestOutput
 from vllm.platforms import current_platform
 from vllm.platforms.interface import Platform
 from vllm.sampling_params import SamplingParams
-from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
 from vllm.v1.attention.backends.utils import set_kv_cache_layout
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.output_processor import OutputProcessor
@@ -62,12 +61,12 @@ from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
-    KVCacheTensor,
+    KVCacheLayout,
+    compute_layer_kv_cache_shape_bytes,
+    reshape_kv_cache,
 )
 from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
 from vllm.v1.request import RequestStatus
-from vllm.v1.worker.kv_connector_model_runner_mixin import KVConnectorModelRunnerMixin
-from vllm.v1.worker.utils import AttentionGroup
 
 from .utils import (
     create_request,
@@ -97,6 +96,12 @@ def clear_kv_transfer():
         ensure_kv_transfer_shutdown()
     # Reset any KV cache layout override set during tests so it doesn't
     # leak into tests in other modules.
+    set_kv_cache_layout(None)
+
+
+@pytest.fixture(autouse=True)
+def reset_kv_cache_layout():
+    yield
     set_kv_cache_layout(None)
 
 
@@ -349,8 +354,8 @@ def test_abort_immediately_remote_prefill_enqueues_empty_recv():
 )
 def test_kv_transfer_handshake(dist_init):
     """Unit test for basic NixlConnector interface functionality."""
-    from vllm.config import set_current_vllm_config
 
+    set_kv_cache_layout("BLHNC")
     # Test setup, we creates a scheduler that contains a NixlConnector
     # of role SCHEDULER, and expect it to be serving NixlAgentMetadata from
     # all workers of the instance.
@@ -385,18 +390,19 @@ def test_kv_transfer_handshake(dist_init):
         kv_cache_spec = cast(
             AttentionSpec, kv_cache_config.kv_cache_groups[0].kv_cache_spec
         )
-        kv_cache_shape = FlashAttentionBackend.get_kv_cache_shape(
-            num_blocks=kv_cache_config.num_blocks,
-            block_size=kv_cache_spec.block_size,
-            num_kv_heads=kv_cache_spec.num_kv_heads,
-            head_size=kv_cache_spec.head_size,
+        raw = torch.zeros(
+            kv_cache_spec.page_size_bytes * kv_cache_config.num_blocks * 3,
+            dtype=torch.int8,
         )
-        shared_tensor = torch.zeros(*kv_cache_shape, dtype=kv_cache_spec.dtype)
-        unique_tensor = torch.zeros(*kv_cache_shape, dtype=kv_cache_spec.dtype)
+        caches = reshape_kv_cache(
+            raw,
+            kv_cache_spec,
+            kv_cache_config.num_blocks,
+            num_layer_slots=3,
+            layout=KVCacheLayout.BLHNC,
+        )
         kv_caches = {
-            "layer0": shared_tensor,
-            "layer1": unique_tensor,
-            "layer2": shared_tensor,
+            f"layer{layer_idx}": cache for layer_idx, cache in enumerate(caches)
         }
         prefill_connector.register_kv_caches(kv_caches)
 
@@ -470,7 +476,7 @@ class FakeNixlConnectorWorker(NixlConnectorWorker):
         self,
         *args,
         hand_shake_latency: float = 1.8,
-        kv_cache_layout="HND",
+        kv_cache_layout="LBHNC",
         kv_cache_config=None,
         **kwargs,
     ):
@@ -481,9 +487,8 @@ class FakeNixlConnectorWorker(NixlConnectorWorker):
         self.kv_cache_layout = kv_cache_layout
         # Mock register_kv_caches attribute needed for tests that do not call it.
         self.src_xfer_handles_by_block_size = {self.block_size: 1}
-        test_shape = self.attn_backends[0].get_kv_cache_shape(
-            num_blocks=1, block_size=16, num_kv_heads=1, head_size=1
-        )
+        rep_spec = self.kv_cache_config.kv_cache_groups[0].kv_cache_spec
+        test_shape = compute_layer_kv_cache_shape_bytes(rep_spec, 1)
         self.transfer_topo = TransferTopology(
             tp_rank=self.tp_rank,
             tp_size=self.world_size,
@@ -497,7 +502,7 @@ class FakeNixlConnectorWorker(NixlConnectorWorker):
         )
 
         self.compat_hash = compute_nixl_compatibility_hash(
-            self.vllm_config, self.backend_name, self.transfer_topo.cross_layers_blocks
+            self.vllm_config, self.backend_name
         )
 
     def _nixl_handshake(
@@ -548,9 +553,8 @@ class FakeNixlConnectorWorker(NixlConnectorWorker):
                     device_id=remote_tp_rank,
                     num_blocks=1,
                     block_lens=remote_block_lens,
-                    # `self.kv_cache_layout` is only forced to HND when vllm engine
-                    # is started. We mock HND here.
-                    kv_cache_layout="HND",
+                    block_strides=remote_block_lens,
+                    kv_cache_layout="LBHNC",
                     block_size=self.block_size,
                     ssm_sizes=(0, 0),
                     attn_backend_name=self.backend_name,
@@ -599,7 +603,7 @@ class TestNixlHandshake:
         worker.dst_xfer_side_handles = {
             FakeNixlConnectorWorker.REMOTE_ENGINE_ID: {0: 1}
         }
-        worker.kv_cache_layout = "HND"
+        worker.kv_cache_layout = "LBHNC"
         num_xfers = 4
         while True:
             # For the same request_id, initiate multiple xfers across different
@@ -995,7 +999,9 @@ class TestNixlHandshake:
             worker.dst_num_blocks[worker.engine_id] = worker.num_blocks
 
             # Metadata with different kv_cache_layout than local worker
-            mismatched_layout = "HND" if worker.kv_cache_layout != "HND" else "NHD"
+            mismatched_layout = (
+                "LBHNC" if worker.kv_cache_layout != "LBHNC" else "LBNHC"
+            )
             meta = NixlAgentMetadata(
                 engine_id=FakeNixlConnectorWorker.REMOTE_ENGINE_ID,
                 agent_metadata=FakeNixlWrapper.AGENT_METADATA,
@@ -1003,6 +1009,7 @@ class TestNixlHandshake:
                 device_id=0,
                 num_blocks=1,
                 block_lens=worker.block_len_per_layer,
+                block_strides=worker.block_len_per_layer,
                 kv_cache_layout=mismatched_layout,
                 block_size=worker.block_size,
                 ssm_sizes=(0, 0),
@@ -1042,7 +1049,7 @@ class TestNixlHandshake:
                 vllm_config,
                 connector.engine_id,
                 hand_shake_latency=0,
-                kv_cache_layout="NHD",
+                kv_cache_layout="LBNHC",
             )
             worker = connector.connector_worker
 
@@ -1053,15 +1060,16 @@ class TestNixlHandshake:
             worker.dst_num_blocks[worker.engine_id] = worker.num_blocks
 
             # Metadata with different kv_cache_layout than local worker
+            remote_block_lens = [i * 2 for i in worker.block_len_per_layer]
             meta = NixlAgentMetadata(
                 engine_id=FakeNixlConnectorWorker.REMOTE_ENGINE_ID,
                 agent_metadata=FakeNixlWrapper.AGENT_METADATA,
                 kv_caches_base_addr=[0],
                 device_id=0,
                 num_blocks=1,
-                # prefill TP=1, decode TP=2, remote block_lens is double to local
-                block_lens=[i * 2 for i in worker.block_len_per_layer],
-                kv_cache_layout="HND",
+                block_lens=remote_block_lens,
+                block_strides=remote_block_lens,
+                kv_cache_layout="LBHNC",
                 block_size=worker.block_size,
                 ssm_sizes=(0, 0),
                 attn_backend_name=worker.backend_name,
@@ -1071,65 +1079,6 @@ class TestNixlHandshake:
             # We don't check layout for homogeneous TP and MLA for now, as the
             # whole block is moved.
             worker.add_remote_agent(meta, remote_tp_size=1)
-
-    @patch(
-        "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
-        FakeNixlWrapper,
-    )
-    def test_hybrid_mamba_attention_remote_descs_use_packed_head_slices(
-        self, default_vllm_config, dist_init
-    ):
-        worker = FakeNixlConnectorWorker(
-            create_vllm_config(), "engine", hand_shake_latency=0
-        )
-
-        remote_block_len = 2048
-        local_block_len = remote_block_len // 2
-        worker.block_len_per_layer = [local_block_len]
-        worker._region_is_mla = [False]
-        worker.num_blocks = 1
-        worker.num_regions = 1
-        worker._has_mamba = True
-        worker._mamba_ssm_size = (128, 256)
-        worker.transfer_topo = TransferTopology(
-            tp_rank=1,
-            tp_size=2,
-            block_size=worker.block_size,
-            engine_id=worker.engine_id,
-            is_mla=False,
-            is_mamba=True,
-            total_num_kv_heads=2,
-            attn_backends=worker.attn_backends,
-            tensor_shape=None,
-        )
-        assert worker.transfer_topo.virtually_split_kv_in_blocks
-
-        plan = MagicMock(
-            source_ranks_per_group=((0,), (0,)),
-            rank_offset_factor=1,
-        )
-        meta = MagicMock(
-            kv_caches_base_addr=[0x1000],
-            device_id=0,
-            num_blocks=1,
-            block_lens=[remote_block_len],
-        )
-
-        assert worker.get_backend_aware_kv_block_len(0, mamba_view=False) == (
-            local_block_len
-        )
-        assert (
-            worker.get_backend_aware_kv_block_len(0, first_split=True, mamba_view=True)
-            == worker._mamba_ssm_size[0]
-        )
-        assert (
-            worker.get_backend_aware_kv_block_len(0, first_split=False, mamba_view=True)
-            == worker._mamba_ssm_size[1]
-        )
-
-        assert worker._build_fa_remote(plan, meta, block_size_ratio=1).tolist() == [
-            [0x1000 + local_block_len, local_block_len, 0]
-        ]
 
     @patch(
         "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
@@ -1180,6 +1129,7 @@ class TestNixlHandshake:
                 device_id=0,
                 num_blocks=1,
                 block_lens=[fa_len * tp_ratio, idx_len],
+                block_strides=[fa_len * tp_ratio, idx_len],
                 kv_cache_layout=worker.kv_cache_layout,
                 block_size=worker.block_size,
                 ssm_sizes=(0, 0),
@@ -1206,6 +1156,7 @@ class TestNixlHandshake:
                 num_blocks=1,
                 # WRONG: MLA region scaled by tp_ratio (it should be replicated).
                 block_lens=[fa_len * tp_ratio, idx_len * tp_ratio],
+                block_strides=[fa_len * tp_ratio, idx_len * tp_ratio],
                 kv_cache_layout=worker2.kv_cache_layout,
                 block_size=worker2.block_size,
                 ssm_sizes=(0, 0),
@@ -1249,7 +1200,7 @@ class TestNixlHandshake:
 
             worker.transfer_topo.total_num_kv_heads = 8
             worker.transfer_topo.local_physical_heads = 1
-            worker.kv_cache_layout = "HND"
+            worker.kv_cache_layout = "LBHNC"
 
             worker.slot_size_per_layer = [4096]
             worker.block_len_per_layer = [4096 * worker.block_size]
@@ -1265,7 +1216,8 @@ class TestNixlHandshake:
                 device_id=0,
                 num_blocks=1,
                 block_lens=list(worker.block_len_per_layer),
-                kv_cache_layout="HND",
+                block_strides=list(worker.block_len_per_layer),
+                kv_cache_layout="LBHNC",
                 block_size=worker.block_size,
                 ssm_sizes=(0, 0),
                 attn_backend_name=worker.backend_name,
@@ -1304,7 +1256,7 @@ class TestNixlHandshake:
 
             worker.transfer_topo.total_num_kv_heads = 32
             worker.transfer_topo.local_physical_heads = 8  # 32 // 4
-            worker.kv_cache_layout = "HND"
+            worker.kv_cache_layout = "LBHNC"
 
             slot_size = 4096
             worker.slot_size_per_layer = [slot_size]
@@ -1322,7 +1274,8 @@ class TestNixlHandshake:
                 device_id=0,
                 num_blocks=1,
                 block_lens=list(worker.block_len_per_layer),
-                kv_cache_layout="HND",
+                block_strides=list(worker.block_len_per_layer),
+                kv_cache_layout="LBHNC",
                 block_size=worker.block_size,
                 ssm_sizes=(0, 0),
                 attn_backend_name=worker.backend_name,
@@ -1746,7 +1699,6 @@ def _run_abort_timeout_test(llm: LLM, timeout: int):
     llm.llm_engine.engine_core.shutdown()
 
 
-@pytest.mark.parametrize("enable_cross_layers", ["False", "True"])
 @pytest.mark.parametrize(
     "attn_backend",
     [
@@ -1760,8 +1712,14 @@ def _run_abort_timeout_test(llm: LLM, timeout: int):
         "TRITON_ATTN",
     ],
 )
+@pytest.mark.parametrize("layout", [layout.name for layout in KVCacheLayout])
+@pytest.mark.parametrize("separate_kv_head_groups", [False, True])
 def test_register_kv_caches(
-    default_vllm_config, dist_init, attn_backend, enable_cross_layers
+    default_vllm_config,
+    dist_init,
+    attn_backend,
+    layout,
+    separate_kv_head_groups,
 ):
     """
     Test that register_kv_caches() properly calls nixl_wrapper methods with
@@ -1775,12 +1733,7 @@ def test_register_kv_caches(
     """
 
     vllm_config = create_vllm_config(attention_backend=attn_backend)
-
-    # Enable cross layers blocks
-    vllm_config.kv_transfer_config.kv_connector_extra_config[
-        "enable_cross_layers_blocks"
-    ] = enable_cross_layers
-    set_kv_cache_layout("HND")
+    set_kv_cache_layout(layout)
 
     # Import the appropriate backend based on the parameter
     if attn_backend == "FLASH_ATTN":
@@ -1797,59 +1750,34 @@ def test_register_kv_caches(
         backend_cls = TritonAttentionBackend
 
     nixl_worker = "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker"
-    nixl_connector = "vllm.distributed.kv_transfer.kv_connector.v1.nixl.connector"
     with (
         patch(f"{nixl_worker}.NixlWrapper") as mock_nixl_wrapper,
         patch(f"{nixl_worker}.threading.Event"),
         patch(f"{nixl_worker}.threading.Thread") as mock_thread,
-        patch(f"{nixl_connector}.get_current_attn_backend") as mock_get_attn_backend,
         patch(f"{nixl_worker}.get_current_attn_backends") as mock_get_attn_backends,
     ):
-        # Ensure get_attn_backend returns the correct value due to
-        # _cached_get_attn_backend returning the backend from previous
-        # test run if not mocking.
-        mock_get_attn_backend.return_value = backend_cls
         mock_get_attn_backends.return_value = [backend_cls]
-        num_layers = 32
-        block_size = 16
         num_blocks = 8
+        block_size = 16
         num_heads = 4
         head_size = 16
 
-        # TODO (NickLucche) the fact that connector depends on kv_cache_config for init
-        # but cross-layer preference cant be inferred prior to creating kv_cache_config
-        # is a bit awkward.
-        dummy_connector = NixlConnector(
-            vllm_config,
-            KVConnectorRole.WORKER,
-            make_kv_cache_config(block_size=block_size),
-        )
         kv_cache_spec = FullAttentionSpec(
             block_size=block_size,
             num_kv_heads=num_heads,
             head_size=head_size,
             dtype=torch.float16,
+            separate_kv_head_groups=separate_kv_head_groups,
         )
-        if dummy_connector.prefer_cross_layer_blocks:
-            kv_cache_config = KVCacheConfig(
-                num_blocks=num_blocks,
-                kv_cache_tensors=[
-                    KVCacheTensor(
-                        size=kv_cache_spec.page_size_bytes * num_blocks,
-                        shared_by=["all-layers"],
-                    )
-                    for _ in range(num_layers)
-                ],
-                kv_cache_groups=[KVCacheGroupSpec(["all-layers"], kv_cache_spec)],
-            )
-        else:
-            kv_cache_config = KVCacheConfig(
-                num_blocks=num_blocks,
-                kv_cache_tensors=[],
-                kv_cache_groups=[
-                    KVCacheGroupSpec(["layer0", "layer1", "layer2"], kv_cache_spec)
-                ],
-            )
+        kv_cache_config = KVCacheConfig(
+            num_blocks=num_blocks,
+            kv_cache_tensors=[],
+            kv_cache_groups=[
+                KVCacheGroupSpec(
+                    ["layer0", "layer1", "layer2", "layer3"], kv_cache_spec
+                )
+            ],
+        )
         # Create connector
         connector = NixlConnector(vllm_config, KVConnectorRole.WORKER, kv_cache_config)
         connector.connector_worker = FakeNixlConnectorWorker(
@@ -1869,93 +1797,60 @@ def test_register_kv_caches(
         # Reassure the shutdown() check that the thread is terminated
         mock_thread.return_value.is_alive.return_value = False
 
-        expected_tensor_size: int
-        expected_base_addrs: list[int]
-        expected_num_entries: int
-        kv_caches: dict[str, torch.Tensor]
-        if str(enable_cross_layers).lower() == "true":
-            assert connector.prefer_cross_layer_blocks == (
-                attn_backend in ("FLASH_ATTN", "FLASHINFER", "TRITON_ATTN")
-            )
-        else:
-            assert not connector.prefer_cross_layer_blocks
-
-        test_shape = backend_cls.get_kv_cache_shape(
-            num_blocks=1, block_size=16, num_kv_heads=1, head_size=1
+        raw0 = torch.zeros(
+            kv_cache_spec.page_size_bytes * kv_cache_config.num_blocks * 2,
+            dtype=torch.int8,
+            device=current_platform.device_type,
         )
-        is_blocks_first = len(test_shape) == 4 and test_shape[0] == 1
+        raw1 = torch.zeros(
+            kv_cache_spec.page_size_bytes * kv_cache_config.num_blocks,
+            dtype=torch.int8,
+            device=current_platform.device_type,
+        )
+        tensor0, tensor1 = reshape_kv_cache(
+            raw0,
+            kv_cache_spec,
+            kv_cache_config.num_blocks,
+            num_layer_slots=2,
+            layout=KVCacheLayout[layout],
+        )
+        (tensor2,) = reshape_kv_cache(
+            raw1,
+            kv_cache_spec,
+            kv_cache_config.num_blocks,
+            num_layer_slots=1,
+            layout=KVCacheLayout[layout],
+        )
+        kv_caches = {
+            "layer0": tensor0,
+            "layer1": tensor1,
+            "layer2": tensor2,
+            "layer3": tensor0,
+        }
 
-        if connector.prefer_cross_layer_blocks:
-            with set_current_vllm_config(vllm_config):
-                _, cross_layers_kv_cache, _ = (
-                    KVConnectorModelRunnerMixin.allocate_uniform_kv_caches(
-                        kv_cache_config=kv_cache_config,
-                        attn_groups=[
-                            [
-                                AttentionGroup(
-                                    backend=backend_cls,
-                                    layer_names=[],
-                                    kv_cache_spec=kv_cache_spec,
-                                    kv_cache_group_id=0,
-                                )
-                            ]
-                        ],
-                        cache_dtype="bfloat16",
-                        device=torch.accelerator.current_device_index(),
-                        kernel_block_sizes=[block_size],
-                    )
-                )
-            # Store tensor info for validation
-            expected_tensor_size = (
-                cross_layers_kv_cache.element_size() * cross_layers_kv_cache.numel()
-            )
+        if separate_kv_head_groups:
             expected_base_addrs = [
-                cross_layers_kv_cache.data_ptr(),
+                cache[:, head_idx].data_ptr()
+                for cache in (tensor0, tensor1, tensor2)
+                for head_idx in range(cache.shape[1])
             ]
-            expected_num_entries = 1
-
-            expected_blocks_count = num_blocks
-
-            kv_caches = {"all-layers": cross_layers_kv_cache}
+            expected_block_len = block_size * head_size * torch.float16.itemsize
+            expected_blocks_count = num_blocks * len(expected_base_addrs)
+        elif layout in ("LBHNC", "LBNHC", "BLHNC"):
+            expected_base_addrs = [
+                tensor0.data_ptr(),
+                tensor1.data_ptr(),
+                tensor2.data_ptr(),
+            ]
+            expected_block_len = kv_cache_spec.page_size_bytes
+            expected_blocks_count = kv_cache_config.num_blocks * 3
         else:
-            # Create test kv cache tensors using proper backend shape
-            kv_cache_shape = backend_cls.get_kv_cache_shape(
-                num_blocks=kv_cache_config.num_blocks,
-                block_size=kv_cache_spec.block_size,
-                num_kv_heads=kv_cache_spec.num_kv_heads,
-                head_size=kv_cache_spec.head_size,
-            )
-            shared_tensor = torch.zeros(*kv_cache_shape, dtype=kv_cache_spec.dtype)
-            unique_tensor = torch.zeros(*kv_cache_shape, dtype=kv_cache_spec.dtype)
-            kv_caches = {
-                "layer0": shared_tensor,
-                "layer1": unique_tensor,
-                "layer2": shared_tensor,
+            expected_base_addrs = [raw0.data_ptr(), raw1.data_ptr()]
+            expected_block_len = {
+                raw0.nbytes // num_blocks,
+                raw1.nbytes // num_blocks,
             }
-
-            # Store tensor info for validation
-            if is_blocks_first:
-                expected_tensor_size = (
-                    shared_tensor.element_size() * shared_tensor.numel()
-                )
-                expected_base_addrs = [
-                    shared_tensor.data_ptr(),
-                    unique_tensor.data_ptr(),
-                ]
-                expected_num_entries = 2
-                expected_blocks_count = kv_cache_config.num_blocks * 2
-            else:
-                expected_tensor_size = (
-                    shared_tensor[0].element_size() * shared_tensor[0].numel()
-                )
-                expected_base_addrs = [
-                    shared_tensor[0].data_ptr(),
-                    shared_tensor[1].data_ptr(),
-                    unique_tensor[0].data_ptr(),
-                    unique_tensor[1].data_ptr(),
-                ]
-                expected_num_entries = 4
-                expected_blocks_count = kv_cache_config.num_blocks * 4
+            expected_blocks_count = kv_cache_config.num_blocks * 2
 
         # Execute register_kv_caches
         connector.register_kv_caches(kv_caches)
@@ -1963,17 +1858,12 @@ def test_register_kv_caches(
         # Verify get_reg_descs was called with caches_data
         assert mock_wrapper_instance.get_reg_descs.called
         caches_data, _ = mock_wrapper_instance.get_reg_descs.call_args[0]
-        assert len(caches_data) == expected_num_entries
+        assert len(caches_data) == 2
 
-        for i, cache_entry in enumerate(caches_data):
+        for cache_entry, raw in zip(caches_data, (raw0, raw1)):
             base_addr, size, _tp_rank, _ = cache_entry
-            assert size == expected_tensor_size, (
-                f"Entry {i}: Expected tensor size {expected_tensor_size}, got {size}"
-            )
-            assert base_addr == expected_base_addrs[i], (
-                f"Entry {i}: Expected base address {expected_base_addrs[i]}, "
-                f"got {base_addr}"
-            )
+            assert size == raw.nbytes
+            assert base_addr == raw.data_ptr()
 
         # Verify get_xfer_descs was called with blocks_data
         assert mock_wrapper_instance.get_xfer_descs.called
@@ -1984,19 +1874,19 @@ def test_register_kv_caches(
             f"Expected {expected_blocks_count} blocks, got {len(blocks_data)}"
         )
 
-        if connector.prefer_cross_layer_blocks:
-            num_blocks = 8
-        else:
-            num_blocks = kv_cache_config.num_blocks
-
-        expected_block_len = expected_tensor_size // num_blocks
-
         for i, block_entry in enumerate(blocks_data):
             block_start_addr, block_len, tp_rank = block_entry
-            assert block_len == expected_block_len, (
-                f"Block entry {i}: Expected block len {expected_block_len}, "
-                f"got {block_len}"
-            )
+            if isinstance(expected_block_len, set):
+                assert block_len in expected_block_len
+            else:
+                assert block_len == expected_block_len
+
+        assert (
+            connector.connector_worker.kv_caches_base_addr[
+                connector.connector_worker.engine_id
+            ][0]
+            == expected_base_addrs
+        )
 
         assert connector.connector_worker.block_size == 16
 
@@ -2225,6 +2115,8 @@ def test_engine_ttl_disabled(default_vllm_config, dist_init):
 
 def test_transfer_topology_unregister():
     """TransferTopology.unregister_remote_engine removes the engine."""
+    from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
+
     topo = TransferTopology(
         tp_rank=0,
         tp_size=1,
@@ -2819,14 +2711,11 @@ def test_compatibility_hash_validation(
     kv_cache_spec = cast(
         AttentionSpec, kv_cache_config.kv_cache_groups[0].kv_cache_spec
     )
-    kv_cache_shape = decode_worker.attn_backends[0].get_kv_cache_shape(
-        num_blocks=kv_cache_config.num_blocks,
-        block_size=kv_cache_spec.block_size,
-        num_kv_heads=kv_cache_spec.num_kv_heads,
-        head_size=kv_cache_spec.head_size,
+    shape = compute_layer_kv_cache_shape_bytes(
+        kv_cache_spec, kv_cache_config.num_blocks
     )
-    shared_tensor = torch.zeros(*kv_cache_shape, dtype=kv_cache_spec.dtype)
-    unique_tensor = torch.zeros(*kv_cache_shape, dtype=kv_cache_spec.dtype)
+    shared_tensor = torch.zeros(*shape, dtype=torch.int8).view(kv_cache_spec.dtype)
+    unique_tensor = torch.zeros(*shape, dtype=torch.int8).view(kv_cache_spec.dtype)
     # Build kv_caches from the actual layer names in kv_cache_config so that
     # _layer_specs lookups in register_kv_caches always find a matching key.
     layer_names = [
@@ -2861,18 +2750,19 @@ def test_compatibility_hash_validation(
         remote_hash = compute_nixl_compatibility_hash(
             remote_vllm_config,
             decode_worker.backend_name,
-            decode_worker.transfer_topo.cross_layers_blocks,
         )
 
     prefill_block_size = config_overrides.get("block_size", 16)
+    prefill_block_lens = [4096 * prefill_block_size]
     prefill_metadata = NixlAgentMetadata(
         engine_id=FakeNixlConnectorWorker.REMOTE_ENGINE_ID,
         agent_metadata=FakeNixlWrapper.AGENT_METADATA,
         kv_caches_base_addr=[0],
         device_id=0,
         num_blocks=1,
-        block_lens=[4096 * prefill_block_size],  # slot_size * block_size
-        kv_cache_layout="HND",
+        block_lens=prefill_block_lens,
+        block_strides=prefill_block_lens,
+        kv_cache_layout="LBHNC",
         block_size=prefill_block_size,
         ssm_sizes=(0, 0),
         attn_backend_name=decode_worker.backend_name,
@@ -2949,9 +2839,8 @@ def test_handshake_decode_errors(default_vllm_config, dist_init, error_scenario)
     decode_worker = decode_connector.connector_worker
 
     backend = get_current_attn_backend(local_vllm_config)
-    test_shape = backend.get_kv_cache_shape(
-        num_blocks=1, block_size=16, num_kv_heads=1, head_size=1
-    )
+    probe_spec = decode_worker.kv_cache_config.kv_cache_groups[0].kv_cache_spec
+    test_shape = compute_layer_kv_cache_shape_bytes(probe_spec, 1)
     decode_worker.transfer_topo = TransferTopology(
         tp_rank=decode_worker.tp_rank,
         tp_size=decode_worker.world_size,
@@ -2967,7 +2856,6 @@ def test_handshake_decode_errors(default_vllm_config, dist_init, error_scenario)
     decode_worker.compat_hash = compute_nixl_compatibility_hash(
         decode_worker.vllm_config,
         decode_worker.backend_name,
-        decode_worker.transfer_topo.cross_layers_blocks,
     )
 
     if error_scenario == "handshake_decode_error":

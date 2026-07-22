@@ -4,6 +4,7 @@
 import pytest
 import torch
 
+from vllm.v1.attention.backends.mla.xpu_mla_sparse import XPUMLASparseImpl
 from vllm.v1.attention.ops.xpu_mla_sparse import triton_bf16_mla_sparse_interface
 
 
@@ -73,6 +74,39 @@ def reference_mla_sparse_prefill(
     lonely_q_mask = orig_lse == float("-inf")  # [s_q, h_q]
     orig_lse[lonely_q_mask] = float("+inf")
     return (out.to(kv.dtype), out, max_logits, orig_lse)
+
+
+def test_xpu_sparse_backend_flattens_standard_cache_to_three_dims(monkeypatch):
+    captured = {}
+
+    def fake_sparse_interface(q, kv, indices, sm_scale):
+        captured["kv"] = kv
+        output = torch.zeros(q.shape[0], q.shape[1], 512, dtype=q.dtype)
+        return output, None, None
+
+    monkeypatch.setattr(
+        "vllm.v1.attention.backends.mla.xpu_mla_sparse."
+        "triton_bf16_mla_sparse_interface",
+        fake_sparse_interface,
+    )
+    impl = type("StubImpl", (), {"num_heads": 4, "softmax_scale": 1.0})()
+    q = torch.zeros(2, 4, 576, dtype=torch.bfloat16)
+    kv_cache = (
+        torch.arange(3 * 8 * 576, dtype=torch.int32)
+        .remainder(127)
+        .to(torch.bfloat16)
+        .view(3, 8, 576)
+    )
+    topk_indices = torch.zeros(2, 128, dtype=torch.int32)
+
+    output = XPUMLASparseImpl._forward_bf16_kv(
+        impl, q, kv_cache, topk_indices, attn_metadata=None
+    )
+
+    expected_kv = kv_cache.reshape(24, 1, 576)
+    assert captured["kv"].shape == expected_kv.shape
+    assert torch.equal(captured["kv"], expected_kv)
+    assert output.shape == (2, 4, 512)
 
 
 @pytest.mark.parametrize("device_str", ["xpu"])

@@ -50,7 +50,6 @@ from vllm.utils.torch_utils import (
     canonicalize_singleton_dim_strides,
     is_quantized_kv_cache,
     is_strictly_contiguous,
-    nvfp4_kv_cache_full_dim,
     nvfp4_split_data_scale,
 )
 from vllm.v1.attention.backend import (
@@ -63,12 +62,12 @@ from vllm.v1.attention.backend import (
     MultipleOf,
 )
 from vllm.v1.attention.backends.utils import (
-    KVCacheLayoutType,
     get_dcp_local_seq_lens,
-    get_kv_cache_layout,
+    get_flashinfer_layout_string,
     get_num_attention_heads_from_layers,
     get_per_layer_parameters,
     infer_global_hyperparameters,
+    resolve_kv_cache_layout,
     split_decodes_and_prefills,
 )
 from vllm.v1.attention.ops.common import cp_lse_ag_out_rs
@@ -238,7 +237,7 @@ class BatchDCPPrefillWrapper:
         else:
             self._dcp_combine = partial(cp_lse_ag_out_rs, is_lse_base_on_e=False)
         self._context = BatchPrefillWithPagedKVCacheWrapper(
-            workspace_buffer, get_kv_cache_layout()
+            workspace_buffer, get_flashinfer_layout_string()
         )
         self._new_tokens = BatchPrefillWithRaggedKVCacheWrapper(workspace_buffer)
 
@@ -394,44 +393,6 @@ class FlashInferBackend(AttentionBackend):
         return FlashInferMetadataBuilder
 
     @staticmethod
-    def get_kv_cache_shape(
-        num_blocks: int,
-        block_size: int,
-        num_kv_heads: int,
-        head_size: int,
-        cache_dtype_str: str = "auto",
-    ) -> tuple[int, ...]:
-        if cache_dtype_str == "nvfp4":
-            full_dim = nvfp4_kv_cache_full_dim(head_size)
-            return (num_blocks, 2 * num_kv_heads, block_size, full_dim)
-        # Pack K and V in the content dim (B, H, N, 2*hs).
-        return (num_blocks, num_kv_heads, block_size, 2 * head_size)
-
-    @staticmethod
-    def get_kv_cache_stride_order(
-        include_num_layers_dimension: bool = False,
-    ) -> tuple[int, ...]:
-        # `stride_order` indicates the permutation that gets us from
-        # `get_kv_cache_shape` (logical (B, H, N, 2*hs)) to the actual memory
-        # layout we want.
-        cache_layout = get_kv_cache_layout()
-        if cache_layout == "NHD" and include_num_layers_dimension:
-            # (num_blocks, num_layers, block_size, num_kv_heads, 2*head_size)
-            return (1, 0, 3, 2, 4)
-        elif cache_layout == "NHD":
-            # (num_blocks, block_size, num_kv_heads, 2*head_size)
-            stride_order = (0, 2, 1, 3)
-        elif cache_layout == "HND" and include_num_layers_dimension:
-            # (num_blocks, num_kv_heads, num_layers, block_size, 2*head_size)
-            return (1, 2, 0, 3, 4)
-        elif cache_layout == "HND":
-            # (num_blocks, num_kv_heads, block_size, 2*head_size)
-            stride_order = (0, 1, 2, 3)
-        else:
-            raise ValueError(f"Unknown cache layout format {cache_layout}.")
-        return stride_order
-
-    @staticmethod
     def get_dtype_for_flashinfer(kv_cache_dtype: str) -> torch.dtype:
         if kv_cache_dtype in ("fp8", "fp8_e4m3"):
             return torch.float8_e4m3fn
@@ -489,7 +450,7 @@ class FlashInferBackend(AttentionBackend):
         ) and supports_trtllm_attention(is_prefill=True)
 
     @classmethod
-    def get_required_kv_cache_layout(cls) -> KVCacheLayoutType | None:
+    def get_required_kv_cache_layout(cls) -> str | None:
         capability = current_platform.get_device_capability()
         if capability is not None and capability.major == 10:
             return "HND"
@@ -985,7 +946,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             if self._noncausal_prefill_wrapper is None:
                 self._noncausal_prefill_wrapper = BatchPrefillWithPagedKVCacheWrapper(
                     self._get_workspace_buffer(),
-                    get_kv_cache_layout(),
+                    get_flashinfer_layout_string(),
                     backend="auto",
                 )
             return self._noncausal_prefill_wrapper
@@ -1002,7 +963,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 backend = "trtllm-gen" if self.is_kvcache_nvfp4 else "auto"
                 self._prefill_wrapper = BatchPrefillWithPagedKVCacheWrapper(
                     self._get_workspace_buffer(),
-                    get_kv_cache_layout(),
+                    get_flashinfer_layout_string(),
                     backend=backend,
                 )
         assert self._prefill_wrapper is not None
@@ -1028,7 +989,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             backend = "trtllm-gen" if self.is_kvcache_nvfp4 else "auto"
             decode_wrapper = BatchDecodeWithPagedKVCacheWrapper(
                 self._get_workspace_buffer(),
-                get_kv_cache_layout(),
+                get_flashinfer_layout_string(),
                 use_cuda_graph=use_cudagraph,
                 paged_kv_indptr_buffer=paged_kv_indptr,
                 paged_kv_indices_buffer=paged_kv_indices,
@@ -1051,7 +1012,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
     def _get_cascade_wrapper(self):
         if self._cascade_wrapper is None:
             self._cascade_wrapper = MultiLevelCascadeAttentionWrapper(
-                2, self._get_workspace_buffer(), get_kv_cache_layout()
+                2, self._get_workspace_buffer(), get_flashinfer_layout_string()
             )
         return self._cascade_wrapper
 
@@ -1694,9 +1655,7 @@ class FlashInferImpl(AttentionImpl):
             query: shape = [num_tokens, num_heads, head_size]
             key: shape = [num_tokens, num_kv_heads, head_size]
             value: shape = [num_tokens, num_kv_heads, head_size]
-            kv_cache: KV cache tensor with different possible shapes:
-                - NHD: [num_blocks, 2, block_size, num_kv_heads, head_size]
-                - HND: [num_blocks, 2, num_kv_heads, block_size, head_size]
+            kv_cache: [num_blocks, num_kv_heads, block_size, 2*head_size]
             attn_metadata: Metadata for attention.
         Returns:
             shape = [num_tokens, num_heads * head_size]
@@ -1791,31 +1750,9 @@ class FlashInferImpl(AttentionImpl):
         output_padded = output
         output = output[:num_actual_tokens]
 
-        if attn_metadata.use_cascade:
-            # Cascade attention (rare case).
-            assert attn_metadata.cascade_wrapper is not None
-            stride_order = FlashInferBackend.get_kv_cache_stride_order()
-            if self.is_kvcache_nvfp4:
-                kv_cache_views = tuple(
-                    cache.permute(*stride_order)
-                    for cache in kv_cache.split(self.num_kv_heads, dim=1)
-                )
-            else:
-                kv_perm = kv_cache.permute(*stride_order)
-                kv_cache_views = kv_perm.split(self.head_size, dim=-1)
-            kv_tuple = tuple(
-                canonicalize_singleton_dim_strides(cache) for cache in kv_cache_views
-            )
-            output.copy_(attn_metadata.cascade_wrapper.run(query, kv_tuple))
-            return output
-
-        # When using spec decoding, num_decodes can be < num_decode_tokens
-        # because some decode requests may have more than one query token.
-        num_decode_tokens = attn_metadata.num_decode_tokens
-        num_prefill_tokens = attn_metadata.num_prefill_tokens
-
-        stride_order = FlashInferBackend.get_kv_cache_stride_order()
-        kv_cache_permute = kv_cache.permute(*stride_order)  # HND and contiguous
+        # Permute to FlashInfer's expected layout (metadata-only).
+        stride_order = resolve_kv_cache_layout().layer_view_order
+        kv_cache_permute = kv_cache.permute(*stride_order)
         # Fix degenerate strides on any size-1 dimension (e.g. num_kv_heads=1
         # with TP=8).  PyTorch permits non-canonical strides on size-1 dims;
         # CUDA TMA requires ≥16-byte alignment on all non-outermost strides.
@@ -1849,6 +1786,14 @@ class FlashInferImpl(AttentionImpl):
             nvfp4_kv_block_scales = (k_sf, v_sf)
         else:
             kv_cache_tuple = kv_cache_permute.split(hs, dim=-1)
+
+        if attn_metadata.use_cascade:
+            assert attn_metadata.cascade_wrapper is not None
+            output.copy_(attn_metadata.cascade_wrapper.run(query, kv_cache_tuple))
+            return output
+
+        num_decode_tokens = attn_metadata.num_decode_tokens
+        num_prefill_tokens = attn_metadata.num_prefill_tokens
 
         use_dcp = self.dcp_world_size > 1
 
@@ -1949,7 +1894,7 @@ class FlashInferImpl(AttentionImpl):
                 seq_lens_prefill = attn_metadata.prefill.seq_lens
 
                 # This path needs to be enabled with VLLM_KV_CACHE_LAYOUT = HND
-                assert get_kv_cache_layout() == "HND"
+                assert get_flashinfer_layout_string() == "HND"
                 assert is_strictly_contiguous(prefill_query)
                 assert is_strictly_contiguous(workspace_buffer)
                 assert is_strictly_contiguous(block_tables_prefill)
@@ -2132,7 +2077,7 @@ class FlashInferImpl(AttentionImpl):
                 # trtllm-gen needs HND layout on SM100. XQA is selected
                 # separately on SM90 and does not use this SM100 layout gate.
                 if decode_with_trtllm_gen:
-                    assert get_kv_cache_layout() == "HND"
+                    assert get_flashinfer_layout_string() == "HND"
                 else:
                     assert decode_with_xqa
                 assert is_strictly_contiguous(decode_query)
@@ -2226,7 +2171,7 @@ class FlashInferImpl(AttentionImpl):
                     sinks=self.sinks,
                     o_sf_scale=self.o_sf_scale,
                     out=out,
-                    kv_layout=get_kv_cache_layout(),
+                    kv_layout=get_flashinfer_layout_string(),
                     backend=attn_metadata.decode.kernel.value,
                     q_len_per_req=q_len_per_req,
                     kv_cache_sf=(

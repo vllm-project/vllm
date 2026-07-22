@@ -10,7 +10,7 @@ from collections import defaultdict
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass, replace
 from functools import partial
-from typing import Any, NamedTuple, NewType, TypeAlias, cast, overload
+from typing import Any, NamedTuple, NewType, TypeAlias, overload
 
 from vllm import envs
 from vllm.config import VllmConfig
@@ -19,6 +19,7 @@ from vllm.utils.hashing import sha256_cbor, xxhash_cbor
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.mem_utils import format_gib
 from vllm.utils.torch_utils import get_dtype_size
+from vllm.v1.attention.backends.utils import resolve_kv_cache_layout
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     ChunkedLocalAttentionSpec,
@@ -26,6 +27,7 @@ from vllm.v1.kv_cache_interface import (
     HiddenStateCacheSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
+    KVCacheLayout,
     KVCacheSpec,
     KVCacheTensor,
     MambaSpec,
@@ -969,26 +971,15 @@ def may_override_num_blocks(vllm_config: VllmConfig, num_blocks: int) -> int:
     return num_blocks
 
 
-def _pool_bytes_per_block(
-    vllm_config: VllmConfig, kv_cache_groups: list[KVCacheGroupSpec]
-) -> int:
+def _pool_bytes_per_block(kv_cache_groups: list[KVCacheGroupSpec]) -> int:
     """
     Bytes consumed by one block in the worker's shared KV cache pool, mirroring
     the divisor used by `get_kv_cache_config_from_groups` to convert
     `available_memory` into `num_blocks`. Used to compute the effective KV cache
     capacity once `num_gpu_blocks_override` is applied.
     """
-    if len(kv_cache_groups) == 1 and isinstance(
-        kv_cache_groups[0].kv_cache_spec, UniformTypeKVCacheSpecs
-    ):
-        return kv_cache_groups[0].kv_cache_spec.page_size_bytes
-    if _use_packed_kv_cache_config(vllm_config, kv_cache_groups):
-        # buckets = {page_size: [[layer_names], [layer_names], ...]}
-        buckets = _bucket_layers_by_page_size(kv_cache_groups)
-        return sum(ps * len(slots) for ps, slots in buckets.items())
-    group_size = max(len(g.layer_names) for g in kv_cache_groups)
-    page_size = get_uniform_page_size([g.kv_cache_spec for g in kv_cache_groups])
-    return page_size * group_size
+    buckets = _bucket_layers_by_page_size(kv_cache_groups)
+    return sum(ps * len(slots) for ps, slots in buckets.items())
 
 
 def get_num_blocks(
@@ -1285,64 +1276,54 @@ def _bucket_layers_by_page_size(
     return buckets
 
 
-def _use_packed_kv_cache_config(
-    vllm_config: VllmConfig,
+def _get_per_layer_spec(
+    group: KVCacheGroupSpec,
+    layer_name: str,
+) -> KVCacheSpec:
+    """Return the concrete KVCacheSpec for a specific layer."""
+    spec = group.kv_cache_spec
+    if isinstance(spec, UniformTypeKVCacheSpecs):
+        return spec.kv_cache_specs[layer_name]
+    return spec
+
+
+def _validate_layout_compatibility(
+    kv_cache_tensors: list[KVCacheTensor],
     kv_cache_groups: list[KVCacheGroupSpec],
-) -> bool:
-    is_dsv4 = all(
-        isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs)
-        for group in kv_cache_groups
-    )
-    kv_transfer_config = vllm_config.kv_transfer_config
-    extra_config = (
-        kv_transfer_config.kv_connector_extra_config
-        if kv_transfer_config is not None
-        else {}
-    )
-    # NOTE: enable_cross_layers_blocks is an experimental API and subject to change with
-    # https://github.com/vllm-project/vllm/issues/42082
-    enable_cross_layers = (
-        str(extra_config.get("enable_cross_layers_blocks", "False")).lower() == "true"
-    )
-    return is_dsv4 or (enable_cross_layers and len(kv_cache_groups) > 1)
+) -> None:
+    """Ensure [H, N, C] is contiguous when layers sharing a tensor differ."""
+    layout = resolve_kv_cache_layout()
 
+    # The per-layer-per-block content [H, N, C] is contiguous therefore
+    # these layouts are always valid.
+    if layout in (KVCacheLayout.LBHNC, KVCacheLayout.BLHNC):
+        return
 
-def _get_kv_cache_config_packed(
-    vllm_config: VllmConfig,
-    kv_cache_groups: list[KVCacheGroupSpec],
-    available_memory: int,
-) -> tuple[int, list[KVCacheTensor]]:
-    """Plan a packed per-block KV cache tensor layout.
+    layer_spec_map: dict[str, KVCacheSpec] = {}
+    for group in kv_cache_groups:
+        for layer_name in group.layer_names:
+            layer_spec_map[layer_name] = _get_per_layer_spec(group, layer_name)
 
-    Emit one KVCacheTensor per (slot_idx, page_size). Layers from different
-    groups at the same slot share a tensor (they have independent block
-    tables so block-id namespaces never collide). Each emitted tensor aliases
-    one physical backing allocation, with per-block data laid out contiguously.
-    """
-    # buckets = {page_size: [[layer_names], [layer_names], ...]}
-    buckets = _bucket_layers_by_page_size(kv_cache_groups)
-    total_num_bytes_per_block = sum(ps * len(slots) for ps, slots in buckets.items())
-
-    num_blocks = available_memory // total_num_bytes_per_block
-    num_blocks = may_override_num_blocks(vllm_config, num_blocks)
-
-    total_size = total_num_bytes_per_block * num_blocks
-
-    kv_cache_tensors: list[KVCacheTensor] = []
-    byte_offset = 0
-    for ps, slots in buckets.items():
-        for slot in slots:
-            kv_cache_tensors.append(
-                KVCacheTensor(
-                    size=total_size,
-                    shared_by=slot,
-                    offset=byte_offset,
-                    block_stride=total_num_bytes_per_block,
-                )
+    for tensor in kv_cache_tensors:
+        all_layer_names = [name for slot in tensor.shared_by for name in slot]
+        if len(all_layer_names) <= 1:
+            continue
+        attn_specs = [
+            layer_spec_map[n]
+            for n in all_layer_names
+            if isinstance(layer_spec_map[n], AttentionSpec)
+        ]
+        if len(attn_specs) <= 1:
+            continue
+        shapes = {(s.num_heads, s.state_content_size_bytes) for s in attn_specs}
+        if len(shapes) > 1:
+            raise ValueError(
+                f"Groups {kv_cache_groups} share a KVCacheTensor but"
+                f" have different (num_heads, state_content_size_bytes)"
+                f" for layers {all_layer_names}. Use a layout where"
+                f" [H, N, C] is contiguous (e.g."
+                f" VLLM_KV_CACHE_LAYOUT=LBHNC or BLHNC)."
             )
-            byte_offset += ps
-
-    return num_blocks, kv_cache_tensors
 
 
 def get_kv_cache_config_from_groups(
@@ -1350,8 +1331,7 @@ def get_kv_cache_config_from_groups(
     kv_cache_groups: list[KVCacheGroupSpec],
     available_memory: int,
 ) -> KVCacheConfig:
-    """
-    Generate the KV cache configuration from the KV cache groups and spec
+    """Generate the KV cache configuration from the KV cache groups and spec
     of each layer.
 
     Args:
@@ -1370,58 +1350,24 @@ def get_kv_cache_config_from_groups(
             kv_cache_groups=kv_cache_groups,
         )
 
-    # Determine how model runners should initialize the KV cache tensors.
-    if len(kv_cache_groups) == 1 and isinstance(
-        kv_cache_groups[0].kv_cache_spec, UniformTypeKVCacheSpecs
-    ):
-        # Special case: all layers have the same type of KV cache but with
-        # different hidden sizes. Allocate different amount of memory for each
-        # layer based on its hidden size.
-        num_blocks = (
-            available_memory // kv_cache_groups[0].kv_cache_spec.page_size_bytes
-        )
-        num_blocks = may_override_num_blocks(vllm_config, num_blocks)
-        per_layer_specs = kv_cache_groups[0].kv_cache_spec.kv_cache_specs
-        kv_cache_tensors = [
-            KVCacheTensor(
-                size=per_layer_specs[layer_name].page_size_bytes * num_blocks,
-                shared_by=[layer_name],
-            )
-            for layer_name in kv_cache_groups[0].layer_names
-        ]
-    elif _use_packed_kv_cache_config(vllm_config, kv_cache_groups):
-        # DeepSeek V4 uses the packed layout by default. Other multi-group
-        # layouts can opt in with --enable-cross-layers.
-        num_blocks, kv_cache_tensors = _get_kv_cache_config_packed(
-            vllm_config, kv_cache_groups, available_memory
-        )
-    else:
-        # General case:
-        # We will have group_size memory pools, each is shared by one layer from
-        # each group. As layers of different groups have different block table,
-        # they will use different parts of the shared Tensor.
-        # The memory layout for 3 groups (full.0, full.1), (sw.0, sw.2),
-        # (sw.1, padding) will be: (group_size = 2)
-        # full.0, sw.0, sw.1: share a Tensor with size=available_memory//2
-        # full.1, sw.2: share another Tensor with size=available_memory//2
-        group_size = max(len(group.layer_names) for group in kv_cache_groups)
+    buckets = _bucket_layers_by_page_size(kv_cache_groups)
 
-        page_size = get_uniform_page_size(
-            [group.kv_cache_spec for group in kv_cache_groups]
-        )
-        assert group_size > 0, "group_size must be greater than 0"
-        num_blocks = get_num_blocks(
-            vllm_config, group_size, available_memory, page_size
-        )
-        kv_cache_tensors = []
-        for i in range(group_size):
-            shared_by = []
-            for j in range(len(kv_cache_groups)):
-                if i < len(kv_cache_groups[j].layer_names):
-                    shared_by.append(kv_cache_groups[j].layer_names[i])
-            kv_cache_tensors.append(
-                KVCacheTensor(size=page_size * num_blocks, shared_by=shared_by)
+    page_sizes = list(buckets.keys())
+    bytes_per_block = sum(ps * len(buckets[ps]) for ps in page_sizes)
+    num_blocks = available_memory // bytes_per_block
+    num_blocks = may_override_num_blocks(vllm_config, num_blocks)
+
+    kv_cache_tensors: list[KVCacheTensor] = []
+    for ps in page_sizes:
+        shared_by = buckets[ps]
+        kv_cache_tensors.append(
+            KVCacheTensor(
+                size=ps * num_blocks * len(shared_by),
+                shared_by=shared_by,
             )
+        )
+
+    _validate_layout_compatibility(kv_cache_tensors, kv_cache_groups)
 
     return KVCacheConfig(
         num_blocks=num_blocks,
@@ -1492,7 +1438,7 @@ def unify_hybrid_kv_cache_specs(kv_cache_spec: dict[str, KVCacheSpec]):
                     page_size_padded=spec.page_size_padded,
                     cache_dtype_str=spec.cache_dtype_str,
                     alignment=spec.alignment,
-                    compress_ratio=spec.compress_ratio,
+                    tokens_per_state=spec.tokens_per_state,
                     model_version=spec.model_version,
                 )
             elif isinstance(spec, SlidingWindowSpec):
@@ -1840,60 +1786,30 @@ def _max_memory_usage_bytes_from_groups(
     """
     Calculate maximum memory usage in bytes from KV cache groups.
 
-    This correctly accounts for padding in hybrid models. For example, if a
-    model has 8 full attention layers and 9 sliding window layers, they will
-    be padded to 9 full + 9 sliding window for uniform group sizes.
+    A request needs blocks from *every* group simultaneously. The total
+    blocks consumed per request is the **sum** across groups (each group
+    independently claims blocks from the shared pool). Total memory is
+    ``bytes_per_block * sum_of_blocks``.
     """
     if not kv_cache_groups:
         return 0
 
-    if len(kv_cache_groups) == 1 and isinstance(
-        kv_cache_groups[0].kv_cache_spec, UniformTypeKVCacheSpecs
-    ):
-        # UniformTypeKVCacheSpecs special case (single group, per-layer specs)
-        per_layer_specs = kv_cache_groups[0].kv_cache_spec.kv_cache_specs
-        return sum(
-            spec.max_memory_usage_bytes(vllm_config)
-            for spec in per_layer_specs.values()
-        )
-    elif all(
-        isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs)
-        for group in kv_cache_groups
-    ):
-        # Special case (only DeepseekV4 for now): all groups are
-        # UniformTypeKVCacheSpecs.
-        # They must already be page_size aligned and share a common padded
-        # layer-tuple layout. Even groups with fewer actual tuples still reserve
-        # the global number of tuple slots in the shared tensor layout.
-        full_mla_spec = cast(UniformTypeKVCacheSpecs, kv_cache_groups[0].kv_cache_spec)
-        layer_tuple_bytes = sum(full_mla_spec.get_page_sizes())
-        num_layer_tuples = max(
-            cast(UniformTypeKVCacheSpecs, group.kv_cache_spec).get_num_layer_tuples()
-            for group in kv_cache_groups
-        )
+    bytes_per_block = _pool_bytes_per_block(kv_cache_groups)
+    if bytes_per_block == 0:
+        return 0
 
-        total_max_mem_usage_bytes = 0
-        for group in kv_cache_groups:
-            group_spec = cast(UniformTypeKVCacheSpecs, group.kv_cache_spec)
-            g_max_mem_usage_pages = group_spec.max_memory_usage_pages(vllm_config)
-            g_max_mem_usage_page_bytes = (
-                num_layer_tuples * g_max_mem_usage_pages * layer_tuple_bytes
+    total_blocks = 0
+    for group in kv_cache_groups:
+        spec = group.kv_cache_spec
+        if isinstance(spec, UniformTypeKVCacheSpecs):
+            total_blocks += spec.max_memory_usage_pages(vllm_config)
+        else:
+            total_blocks += cdiv(
+                spec.max_memory_usage_bytes(vllm_config),
+                spec.page_size_bytes,
             )
-            total_max_mem_usage_bytes += g_max_mem_usage_page_bytes
-        return total_max_mem_usage_bytes
 
-    # General case: group_size pools, each shared by one layer per group
-    # Memory = group_size * page_size * blocks_for_max_len
-    group_size = max(len(group.layer_names) for group in kv_cache_groups)
-    page_size = get_uniform_page_size(
-        [group.kv_cache_spec for group in kv_cache_groups]
-    )
-    blocks_needed = sum(
-        cdiv(group.kv_cache_spec.max_memory_usage_bytes(vllm_config), page_size)
-        for group in kv_cache_groups
-    )
-
-    return group_size * page_size * blocks_needed
+    return bytes_per_block * total_blocks
 
 
 def _estimate_max_model_len_from_groups(
@@ -2115,7 +2031,7 @@ def get_kv_cache_configs(
             if not groups:
                 adjusted_memory.append(avail_mem)
                 continue
-            bytes_per_block = _pool_bytes_per_block(vllm_config, groups)
+            bytes_per_block = _pool_bytes_per_block(groups)
             logger.info(
                 "Overriding num_gpu_blocks=%d with num_gpu_blocks_override=%d",
                 avail_mem // bytes_per_block,

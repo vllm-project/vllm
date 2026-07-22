@@ -3,14 +3,14 @@
 """
 Standalone unit tests for trtllm_prefill_attn_kvfp8_dequant.
 
-Tests both contiguous and non-contiguous (cross-layer unified) KV cache
-layouts against a pure-PyTorch reference implementation.
+Tests KV cache layouts against a pure-PyTorch reference implementation.
 """
 
 import pytest
 import torch
 
 from vllm.platforms import current_platform
+from vllm.v1.kv_cache_interface import KVCacheLayout
 
 if current_platform.is_rocm():
     pytest.skip(
@@ -34,51 +34,32 @@ def to_float8(x, dtype=None):
     return x_scl_sat.to(dtype), scale.float().reciprocal()
 
 
-def make_contiguous_kv_cache(num_blocks, num_kv_heads, block_size, head_size):
-    """Create a standard contiguous fp8 KV cache (HND layout)."""
-    raw = torch.randn(
-        num_blocks,
-        2,
-        num_kv_heads,
-        block_size,
-        head_size,
-        dtype=torch.bfloat16,
-        device="cuda",
-    )
-    kv_cache, scale = to_float8(raw)
-    return kv_cache, scale
-
-
-def make_cross_layer_kv_cache(
-    num_blocks,
-    num_kv_heads,
-    block_size,
-    head_size,
-    num_layers=4,
+def make_random_kv_cache(
+    num_blocks, num_kv_heads, block_size, head_size, layout=KVCacheLayout.LBHNC
 ):
-    """
-    Create a non-contiguous per-layer view mimicking cross-layer allocation.
+    """Create a random fp8 KV cache in 5D ``(B, 2, H, N, hs)`` format.
 
-    Physical layout: (num_blocks, 2, num_kv_heads, num_layers, block_size, head_size)
-    Returned view:   (num_blocks, 2, num_kv_heads, block_size, head_size)
-    with non-contiguous strides on dims 0, 1, 2 (they skip over num_layers).
+    The cache is allocated in the physical 5D layout, then one logical layer
+    is selected and reshaped. Cross-layer layouts therefore retain their
+    inter-layer stride gaps, matching the actual forward path.
     """
-    raw = torch.randn(
+    logical_4d = (num_blocks, num_kv_heads, block_size, 2 * head_size)
+    num_layers = 1 if layout.is_layer_compact else 2
+    logical_5d = (num_layers, *logical_4d)
+    physical_5d = tuple(logical_5d[i] for i in layout.stride_order)
+    inv_order = [layout.stride_order.index(i) for i in range(5)]
+
+    raw_phys = torch.randn(*physical_5d, dtype=torch.bfloat16, device="cuda")
+    fp8_phys, scale = to_float8(raw_phys)
+    fp8_4d = fp8_phys.permute(*inv_order)[0]
+    kv_5d = fp8_4d.view(
         num_blocks,
-        2,
         num_kv_heads,
-        num_layers,
         block_size,
+        2,
         head_size,
-        dtype=torch.bfloat16,
-        device="cuda",
-    )
-    fp8_full, scale = to_float8(raw)
-    layer_view = fp8_full[:, :, :, 0, :, :]
-    assert not layer_view.is_contiguous(), (
-        f"Expected non-contiguous view, got strides {layer_view.stride()}"
-    )
-    return layer_view, scale
+    ).permute(0, 3, 1, 2, 4)
+    return kv_5d, scale
 
 
 def ref_dequant(kv_cache, block_tables, k_scale, v_scale, dequant_dtype):
@@ -114,7 +95,7 @@ def ref_dequant(kv_cache, block_tables, k_scale, v_scale, dequant_dtype):
 @pytest.mark.parametrize("block_size", [16, 32])
 @pytest.mark.parametrize("batch_size", [1, 4])
 @pytest.mark.parametrize("num_pages_per_seq", [3, 8])
-@pytest.mark.parametrize("contiguous", [True, False])
+@pytest.mark.parametrize("layout", list(KVCacheLayout))
 @torch.inference_mode()
 def test_trtllm_kvfp8_dequant(
     num_kv_heads: int,
@@ -122,7 +103,7 @@ def test_trtllm_kvfp8_dequant(
     block_size: int,
     batch_size: int,
     num_pages_per_seq: int,
-    contiguous: bool,
+    layout: KVCacheLayout,
 ):
     from vllm.v1.attention.backends.flashinfer import (
         trtllm_prefill_attn_kvfp8_dequant,
@@ -130,20 +111,13 @@ def test_trtllm_kvfp8_dequant(
 
     torch.set_default_device("cuda")
 
-    if contiguous:
-        kv_cache, scale = make_contiguous_kv_cache(
-            NUM_BLOCKS,
-            num_kv_heads,
-            block_size,
-            head_size,
-        )
-    else:
-        kv_cache, scale = make_cross_layer_kv_cache(
-            NUM_BLOCKS,
-            num_kv_heads,
-            block_size,
-            head_size,
-        )
+    kv_cache, scale = make_random_kv_cache(
+        NUM_BLOCKS,
+        num_kv_heads,
+        block_size,
+        head_size,
+        layout=layout,
+    )
 
     k_scale = scale.clone()
     v_scale = scale.clone()
@@ -187,7 +161,7 @@ def test_block_tables_with_zero_pages():
     torch.set_default_device("cuda")
     num_kv_heads, block_size, head_size = 8, 16, 64
 
-    kv_cache, scale = make_contiguous_kv_cache(
+    kv_cache, scale = make_random_kv_cache(
         NUM_BLOCKS,
         num_kv_heads,
         block_size,
@@ -234,7 +208,7 @@ def test_all_zero_block_tables():
     torch.set_default_device("cuda")
     num_kv_heads, block_size, head_size = 4, 16, 64
 
-    kv_cache, scale = make_contiguous_kv_cache(
+    kv_cache, scale = make_random_kv_cache(
         NUM_BLOCKS,
         num_kv_heads,
         block_size,
@@ -266,7 +240,7 @@ def test_different_k_v_scales():
     torch.set_default_device("cuda")
     num_kv_heads, block_size, head_size = 8, 16, 64
 
-    kv_cache, _ = make_contiguous_kv_cache(
+    kv_cache, _ = make_random_kv_cache(
         NUM_BLOCKS,
         num_kv_heads,
         block_size,
@@ -299,7 +273,7 @@ def test_single_page_per_seq():
     torch.set_default_device("cuda")
     num_kv_heads, block_size, head_size = 8, 16, 128
 
-    kv_cache, scale = make_contiguous_kv_cache(
+    kv_cache, scale = make_random_kv_cache(
         NUM_BLOCKS,
         num_kv_heads,
         block_size,
@@ -332,7 +306,7 @@ def test_large_page_indices():
     num_kv_heads, block_size, head_size = 8, 16, 128
     large_num_blocks = 32768
 
-    kv_cache, scale = make_contiguous_kv_cache(
+    kv_cache, scale = make_random_kv_cache(
         large_num_blocks,
         num_kv_heads,
         block_size,
@@ -369,7 +343,7 @@ def test_large_block_size():
     torch.set_default_device("cuda")
     num_kv_heads, block_size, head_size = 4, 64, 128
 
-    kv_cache, scale = make_contiguous_kv_cache(
+    kv_cache, scale = make_random_kv_cache(
         NUM_BLOCKS,
         num_kv_heads,
         block_size,
@@ -381,49 +355,6 @@ def test_large_block_size():
         1,
         NUM_BLOCKS,
         (2, 4),
-        dtype=torch.int32,
-        device="cuda",
-    )
-
-    mock_kv_cache, _ = trtllm_prefill_attn_kvfp8_dequant(
-        kv_cache,
-        block_tables,
-        k_scale,
-        v_scale,
-        torch.bfloat16,
-    )
-    ref = ref_dequant(kv_cache, block_tables, k_scale, v_scale, torch.bfloat16)
-
-    torch.testing.assert_close(mock_kv_cache[1:], ref[1:], atol=1e-3, rtol=1e-3)
-
-
-@torch.inference_mode()
-def test_cross_layer_many_layers():
-    """
-    Non-contiguous with 36 layers -- matches real gpt-oss-120b.
-    Strides are far from contiguous (factor of 36 in the gaps).
-    """
-    from vllm.v1.attention.backends.flashinfer import (
-        trtllm_prefill_attn_kvfp8_dequant,
-    )
-
-    torch.set_default_device("cuda")
-    num_kv_heads, block_size, head_size = 8, 16, 64
-    num_layers = 36
-
-    kv_cache, scale = make_cross_layer_kv_cache(
-        NUM_BLOCKS,
-        num_kv_heads,
-        block_size,
-        head_size,
-        num_layers=num_layers,
-    )
-    k_scale = v_scale = scale.clone()
-
-    block_tables = torch.randint(
-        1,
-        NUM_BLOCKS,
-        (4, 6),
         dtype=torch.int32,
         device="cuda",
     )

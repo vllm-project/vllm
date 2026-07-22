@@ -761,19 +761,6 @@ class AiterFlashAttentionBackend(AttentionBackend):
     def get_builder_cls() -> type["AiterFlashAttentionMetadataBuilder"]:
         return AiterFlashAttentionMetadataBuilder
 
-    @staticmethod
-    def get_kv_cache_shape(
-        num_blocks: int,
-        block_size: int,
-        num_kv_heads: int,
-        head_size: int,
-        cache_dtype_str: str = "auto",
-    ) -> tuple[int, ...]:
-        if block_size % 16 != 0:
-            raise ValueError("Block size must be a multiple of 16.")
-        # K and V are packed into the content dim: logical (B, H, N, 2*hs).
-        return (num_blocks, num_kv_heads, block_size, 2 * head_size)
-
     @classmethod
     def supports_compute_capability(cls, capability: DeviceCapability) -> bool:
         from vllm.platforms.rocm import on_mi3xx
@@ -1449,7 +1436,9 @@ class AiterFlashAttentionImpl(AttentionImpl):
         )
 
     def fused_qk_norm_rope_kvcache_supported(self):
-        return rocm_aiter_ops.is_enabled()
+        # AITER requires K/V to be contiguous within each cache block, but
+        # standardized caches pack K/V in the content dimension.
+        return False
 
     def do_qk_norm_rope_kvcache_update(
         self,
@@ -1466,7 +1455,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
         kv_cache: torch.Tensor,
         layer_slot_mapping: torch.Tensor,
     ):
-        key_cache, value_cache = kv_cache.unbind(1)
+        key_cache, value_cache = kv_cache.transpose(1, 2).split(self.head_size, dim=-1)
         rocm_aiter_ops.do_qk_norm_rope_kvcache_update(
             qkv=qkv,
             q_weight=q_weight,

@@ -59,7 +59,7 @@ th:not(:first-child) {
 
 <sup>1</sup> P and D instances must use the same speculation configuration.
 
-<sup>2</sup> Requires `FLASH_ATTN` or `FLASHINFER` backend **and** `HND` KV cache layout. Enable via `--kv-transfer-config '{"kv_connector_extra_config": {"enable_cross_layers_blocks": "True"}}'`.
+<sup>2</sup> Cross-layer contiguity is achieved by using a `BLHNC` layout (set via `VLLM_KV_CACHE_LAYOUT=BLHNC` or `--enable-cross-layers`).
 
 <sup>3</sup> Supported only when HMA is **not** required (i.e., non-hybrid models). Block IDs are remapped automatically. Only P block size < D block size is supported.
 
