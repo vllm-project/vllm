@@ -119,8 +119,6 @@ class SpeculativeConfig:
     attention_backend: AttentionBackendEnum | None = None
     """General attention backend for the draft model. When `None`, the backend
     is automatically selected."""
-    attention_prefill_backend: AttentionBackendEnum | None = None
-    """Alias for `attention_backend`."""
     attention_decode_backend: AttentionBackendEnum | None = None
     """Attention backend for pure-decode draft batches. When `None`, the backend
     is selected automatically and independently from `attention_backend`."""
@@ -1210,7 +1208,6 @@ class SpeculativeConfig:
 
     @field_validator(
         "attention_backend",
-        "attention_prefill_backend",
         "attention_decode_backend",
         mode="before",
     )
@@ -1224,19 +1221,6 @@ class SpeculativeConfig:
 
     @model_validator(mode="after")
     def _verify_args(self) -> Self:
-        if (
-            self.attention_backend is not None
-            and self.attention_prefill_backend is not None
-            and self.attention_backend != self.attention_prefill_backend
-        ):
-            raise ValueError(
-                "attention_backend and attention_prefill_backend are aliases "
-                "and must match when both are specified."
-            )
-        self.attention_backend = (
-            self.attention_backend or self.attention_prefill_backend
-        )
-
         if self.tensor_parallel_size is not None:
             raise ValueError(
                 "'tensor_parallel_size' is not a valid argument in the "

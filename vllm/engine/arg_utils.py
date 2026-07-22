@@ -1763,9 +1763,13 @@ class EngineArgs:
         if self.speculative_config is None:
             return None
 
-        self.speculative_config = {
-            k.replace("-", "_"): v for k, v in self.speculative_config.items()
-        }
+        normalized_config = {}
+        for key, value in self.speculative_config.items():
+            key = key.replace("-", "_")
+            if key == "attention_prefill_backend":
+                key = "attention_backend"
+            normalized_config[key] = value
+        self.speculative_config = normalized_config
 
         # Note(Shangming): These parameters are not obtained from the cli arg
         # '--speculative-config' and must be passed in when creating the engine

@@ -502,6 +502,25 @@ def test_attention_config():
         engine_args.create_engine_config()
 
 
+@pytest.mark.skip_global_cleanup
+def test_speculative_attention_prefill_backend_alias():
+    from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
+    engine_args = EngineArgs(
+        speculative_config={
+            "method": "ngram",
+            "num_speculative_tokens": 1,
+            "attention_prefill_backend": "FLASH_ATTN",
+            "attention_decode_backend": "FLASHINFER",
+        }
+    )
+    config = engine_args.create_speculative_config(None, None)  # type: ignore[arg-type]
+
+    assert config is not None
+    assert config.attention_backend == AttentionBackendEnum.FLASH_ATTN
+    assert config.attention_decode_backend == AttentionBackendEnum.FLASHINFER
+
+
 def test_prefix_cache_default():
     parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
     args = parser.parse_args([])
