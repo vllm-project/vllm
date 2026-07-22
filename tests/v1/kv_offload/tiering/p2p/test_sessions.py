@@ -322,7 +322,7 @@ def _srv_outbound(session: P2PSession, kv_request_id: str):
 
 
 def _srv_lookups(session: P2PSession) -> list:
-    """Every parked inbound _LookupBlocks across all requests."""
+    """Every parked inbound _ActiveLookup across all requests."""
     return [
         lu for st in session._server._requests.values() for lu in st.lookups.values()
     ]

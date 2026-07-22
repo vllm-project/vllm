@@ -146,7 +146,7 @@ class _OutboundRequestState:
 
 
 @dataclass
-class _LookupBlocks:
+class _ActiveLookup:
     """In-flight state for one inbound LookupMsg.
 
     Aggregates per-hash HIT/MISS resolutions and defers the single
@@ -205,7 +205,7 @@ class _ServerRequestState:
     pending_lookups: list[_PendingLookup] = field(default_factory=list)
     # Per-LookupMsg state parked with HIT_PENDING / RETRY hashes, keyed by
     # the (globally unique) lookup_id and re-polled each serve.
-    lookups: dict[int, _LookupBlocks] = field(default_factory=dict)
+    lookups: dict[int, _ActiveLookup] = field(default_factory=dict)
     # Start time of a pending abort drain (``time.monotonic``); None when
     # no abort is in progress.
     abort_started_at: float | None = None
@@ -443,7 +443,7 @@ class ServerRole:
 
     def _poll_lookup_hashes(
         self,
-        lookup: _LookupBlocks,
+        lookup: _ActiveLookup,
         hashes: Iterable[OffloadKey],
         parent: ParentManager,
     ) -> list[OffloadKey]:
@@ -493,7 +493,7 @@ class ServerRole:
         and pin any HITs immediately via ``parent.create_store_job``
         (plumbed into the existing ``add_stored_blocks`` matching path so
         the eventual FetchMsg finds them). HIT_PENDING / RETRY hashes park
-        in :class:`_LookupBlocks` for re-polling by
+        in :class:`_ActiveLookup` for re-polling by
         :meth:`_resolve_pending_lookups`.
 
         The outbound ``LookupRespMsg`` is deferred until every hash has
@@ -505,7 +505,7 @@ class ServerRole:
         self._lookup_id_counter += 1
         lookup_id = self._lookup_id_counter
         ctx = ReqContext(req_id=f"p2p:{self._peer_id}:{kv_request_id}:lu{lookup_id}")
-        lookup = _LookupBlocks(
+        lookup = _ActiveLookup(
             lookup_id=lookup_id,
             kv_request_id=kv_request_id,
             ctx=ctx,
@@ -569,7 +569,7 @@ class ServerRole:
     ) -> None:
         """Re-poll a request's deferred LookupMsg hashes; finalize when ready.
 
-        Walks every parked :class:`_LookupBlocks` for ``kv_request_id`` and
+        Walks every parked :class:`_ActiveLookup` for ``kv_request_id`` and
         re-calls ``parent.lookup`` per still-pending hash, moving HIT/MISS
         results into ``resolved``. If ``deadline`` has passed, remaining
         ``pending`` hashes are force-resolved to MISS so the consumer
@@ -598,7 +598,7 @@ class ServerRole:
             lookup = st.lookups.pop(lookup_id)
             self._finalize_lookup(lookup, parent)
 
-    def _finalize_lookup(self, lookup: _LookupBlocks, parent: ParentManager) -> None:
+    def _finalize_lookup(self, lookup: _ActiveLookup, parent: ParentManager) -> None:
         """Emit the aggregated LookupRespMsg and close the synthetic request.
 
         Called once per lookup when ``pending`` is empty — either every
@@ -631,7 +631,7 @@ class ServerRole:
     def _finish_inbound_lookups(self, kv_request_id: str) -> None:
         """Close the server-side lookup phase for ``kv_request_id``.
 
-        Pops every parked ``_LookupBlocks`` for this id (so
+        Pops every parked ``_ActiveLookup`` for this id (so
         ``_resolve_pending_lookups`` cannot promote a HIT_PENDING /
         RETRY hash into a fresh ``parent.create_store_job`` after this
         point) and queues each ``lookup.ctx`` for
