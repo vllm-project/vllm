@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 mod array;
 #[cfg(test)]
 mod tests;
@@ -262,6 +265,19 @@ impl WireLogprobs {
             bail_ext_value_decode!(
                 "{field_prefix}: token_ranks length {} does not match row count {}",
                 token_ranks.len(),
+                token_ids.rows
+            );
+        }
+
+        // Empty position lists may be encoded as either [0, 0] or [0, k + 1].
+        if token_ids.rows == 0 {
+            return Ok(Logprobs {
+                positions: Vec::new(),
+            });
+        }
+        if token_ids.cols == 0 {
+            bail_ext_value_decode!(
+                "{field_prefix}: zero-column logprobs payload with {} rows",
                 token_ids.rows
             );
         }

@@ -330,6 +330,12 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         "naver-hyperclovax/HyperCLOVAX-SEED-Think-14B",
         min_transformers_version="5.9.0",
     ),
+    "InklingForCausalLM": _HfExamplesInfo(
+        "thinkingmachines/Inkling-NVFP4",
+        tokenizer_mode="inkling",
+        trust_remote_code=True,
+        max_model_len=4096,
+    ),
     "InternLM2ForCausalLM": _HfExamplesInfo(
         "internlm/internlm2-chat-7b", trust_remote_code=True
     ),
@@ -576,6 +582,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
 _EMBEDDING_EXAMPLE_MODELS = {
     # [Text-only]
     "BertModel": _HfExamplesInfo("BAAI/bge-base-en-v1.5"),
+    "BertForMaskedLM": _HfExamplesInfo("google-bert/bert-base-uncased"),
     "BertSpladeSparseEmbeddingModel": _HfExamplesInfo(
         "naver/splade-v3",
         hf_overrides={"architectures": ["BertSpladeSparseEmbeddingModel"]},
@@ -712,6 +719,12 @@ _TOKEN_CLASSIFICATION_EXAMPLE_MODELS = {
         "openai/privacy-filter",
         min_transformers_version="5.6.0.dev0",
     ),
+    "RobertaForTokenClassification": _HfExamplesInfo(
+        "Jean-Baptiste/roberta-large-ner-english"
+    ),
+    "XLMRobertaForTokenClassification": _HfExamplesInfo(
+        "Davlan/xlm-roberta-base-ner-hrl"
+    ),
 }
 
 _SEQUENCE_CLASSIFICATION_EXAMPLE_MODELS = {
@@ -809,6 +822,11 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         extras={"super": "nvidia/Cosmos3-Super"},
         max_model_len=4096,
         min_transformers_version="4.57",
+    ),
+    "Cosmos3EdgeForConditionalGeneration": _HfExamplesInfo(
+        "nvidia/Cosmos3-Edge",
+        max_model_len=4096,
+        is_available_online=False,
     ),
     "DeepseekVLV2ForCausalLM": _HfExamplesInfo(
         "deepseek-ai/deepseek-vl2-tiny",
@@ -943,6 +961,12 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "Idefics3ForConditionalGeneration": _HfExamplesInfo(
         "HuggingFaceM4/Idefics3-8B-Llama3",
         extras={"tiny": "HuggingFaceTB/SmolVLM-256M-Instruct"},
+    ),
+    "InklingForConditionalGeneration": _HfExamplesInfo(
+        "thinkingmachines/Inkling-NVFP4",
+        tokenizer_mode="inkling",
+        trust_remote_code=True,
+        max_model_len=4096,
     ),
     "IsaacForConditionalGeneration": _HfExamplesInfo(
         "PerceptronAI/Isaac-0.1",
@@ -1308,6 +1332,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     ),
     "Qwen3_5ForConditionalGeneration": _HfExamplesInfo(
         "Qwen/Qwen3.5-0.8B",
+        extras={"4b": "Qwen/Qwen3.5-4B"},
         max_model_len=4096,
     ),
     "Qwen3_5MoeForConditionalGeneration": _HfExamplesInfo(
@@ -1353,7 +1378,15 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         "HuggingFaceTB/SmolVLM2-2.2B-Instruct"
     ),
     "Step3VLForConditionalGeneration": _HfExamplesInfo(
-        "stepfun-ai/step3", trust_remote_code=True
+        "stepfun-ai/step3",
+        trust_remote_code=True,
+        max_transformers_version="5.3",
+        transformers_version_reason={
+            "hf": (
+                "Transformers v5.4 removed the ignore_keys param from "
+                "validate_rope(); vLLM has vendored the config and is unaffected"
+            )
+        },
     ),
     "StepVLForConditionalGeneration": _HfExamplesInfo(
         "stepfun-ai/Step3-VL-10B", trust_remote_code=True
@@ -1444,6 +1477,12 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         is_available_online=False,
         use_original_num_layers=True,  # DSpark backbone requires all layers
     ),
+    "Gemma4DSparkModel": _HfExamplesInfo(
+        "google/gemma-4-12B-it",
+        speculative_model="deepseek-ai/dspark_gemma4_12b_block7",
+        is_available_online=False,
+        use_original_num_layers=True,
+    ),
     # [Eagle]
     "EagleCohereForCausalLM": _HfExamplesInfo(
         "/host/engines/cohere-moe",
@@ -1512,7 +1551,7 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         tokenizer="meta-llama/Llama-4-Scout-17B-16E-Instruct",
     ),
     "EagleMiniCPMForCausalLM": _HfExamplesInfo(
-        "openbmb/MiniCPM-1B-sft-bf16",
+        "openbmb/MiniCPM-2B-sft-bf16",
         trust_remote_code=True,
         speculative_model="openbmb/MiniCPM-2B-sft-bf16",
         speculative_method="eagle",
@@ -1622,6 +1661,13 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
     "HYV3MTPModel": _HfExamplesInfo(
         "tencent/Hy3-preview",
         speculative_model="tencent/Hy3-preview",
+    ),
+    "InklingMTPModel": _HfExamplesInfo(
+        "thinkingmachines/Inkling-NVFP4",
+        speculative_model="thinkingmachines/Inkling-NVFP4",
+        tokenizer_mode="inkling",
+        trust_remote_code=True,
+        max_model_len=4096,
     ),
     "LongCatFlashMTPModel": _HfExamplesInfo(
         "meituan-longcat/LongCat-Flash-Chat",
