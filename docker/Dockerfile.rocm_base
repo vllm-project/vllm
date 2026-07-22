@@ -85,10 +85,10 @@ ENV SCCACHE_S3_USE_SSL=${USE_SCCACHE:+on}
 ###
 ARG PIP_EXTRA_INDEX_URL=https://rocm.nightlies.amd.com/whl-multi-arch/
 ENV PIP_EXTRA_INDEX_URL=${PIP_EXTRA_INDEX_URL}
-ARG ROCM_SDK_VERSION=7.14.0a20260624
-ARG TORCH_VERSION=2.11.0+rocm7.14.0a20260625
-ARG TORCHAUDIO_VERSION=2.11.0+rocm7.14.0a20260625
-ARG TORCHVISION_VERSION=0.26.0+rocm7.14.0a20260625
+ARG ROCM_SDK_VERSION=7.15.0a20260721
+ARG TORCH_VERSION=2.12.0+rocm7.15.0a20260721
+ARG TORCHAUDIO_VERSION=2.11.0+rocm7.15.0a20260721
+ARG TORCHVISION_VERSION=0.27.0+rocm7.15.0a20260721
 # DEVICE_EXTRAS: set to install device-specific packages (e.g. "device-all" or
 # "gfx90a;gfx942;gfx950"). When unset, only base torch wheels are installed.
 ARG DEVICE_EXTRAS
@@ -102,10 +102,10 @@ ARG PYTORCH_AUDIO_BRANCH="v2.9.0"
 # USE_CUSTOM_TRITON: set to 1 (default) to build triton from source and remove
 # any triton that came bundled with the PyTorch wheel. Set to 0 to keep the
 # TheRock triton from the PyTorch wheel instead.
-ARG USE_CUSTOM_TRITON=1
+ARG USE_CUSTOM_TRITON=0
 
-# Install ROCm SDK
-RUN uv pip install --index-url ${PIP_EXTRA_INDEX_URL} \
+# Install ROCm SDK (--prerelease=allow needed for nightly versions like 7.14.0a20260624)
+RUN uv pip install --prerelease=allow --index-url ${PIP_EXTRA_INDEX_URL} \
     "rocm[libraries,devel]${ROCM_SDK_VERSION:+==${ROCM_SDK_VERSION}}" \
     && rocm-sdk init
 
@@ -116,7 +116,7 @@ RUN set -e; \
     TORCH_INSTALLED=0; \
     if [ -n "${ROCM_SDK_VERSION}" ]; then \
         echo "Trying PyTorch wheels from TheRock index..." \
-        && if uv pip install --index-url ${PIP_EXTRA_INDEX_URL} \
+        && if uv pip install --prerelease=allow --index-url ${PIP_EXTRA_INDEX_URL} \
                 "torch==${TORCH_VERSION}" \
                 "torchaudio==${TORCHAUDIO_VERSION}" \
                 "torchvision==${TORCHVISION_VERSION}"; then \
@@ -181,7 +181,7 @@ RUN if [ -n "${DEVICE_EXTRAS}" ] && [ -n "${ROCM_SDK_VERSION}" ]; then \
         done; \
         if [ -n "${DEVICE_PKGS}" ]; then \
             echo "Installing device packages: ${DEVICE_PKGS}" \
-            && uv pip install --index-url ${PIP_EXTRA_INDEX_URL} ${DEVICE_PKGS}; \
+            && uv pip install --prerelease=allow --index-url ${PIP_EXTRA_INDEX_URL} ${DEVICE_PKGS}; \
         fi; \
     fi
 SHELL ["/bin/sh", "-c"]
