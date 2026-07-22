@@ -40,10 +40,16 @@ from vllm.v1.attention.backends.mla.flashinfer_mla_sparse import (
 )
 from vllm.v1.attention.backends.mla.flashmla_sparse import (
     FlashMLASparseBackend,
+    FlashMLASparseImpl,
+    FlashMLASparseMetadata,
+    FlashMLASparseMetadataBuilder,
     triton_convert_req_index_to_global_index,
 )
 from vllm.v1.attention.backends.mla.indexer import split_indexer_prefill_chunks
-from vllm.v1.attention.backends.utils import split_prefill_chunks
+from vllm.v1.attention.backends.utils import (
+    split_decodes_and_prefills,
+    split_prefill_chunks,
+)
 from vllm.v1.attention.ops import flashmla
 
 SPARSE_BACKEND_BATCH_SPECS = {
@@ -442,6 +448,23 @@ def test_sparse_backend_decode_correctness(
         scale=kv_cache_scale,
     )
 
+    # The sparse builder clones the layer's dense-MHA prefill backend from
+    # static_forward_context; register a mock layer carrying one.
+    from vllm.v1.attention.backends.mla.prefill import get_mla_prefill_backend
+
+    prefill_backend = get_mla_prefill_backend(vllm_config)(
+        num_heads=num_heads,
+        scale=scale,
+        kv_lora_rank=kv_lora_rank,
+        qk_nope_head_dim=qk_nope_head_dim,
+        qk_rope_head_dim=qk_rope_head_dim,
+        v_head_dim=v_head_dim,
+        vllm_config=vllm_config,
+    )
+    vllm_config.compilation_config.static_forward_context["placeholder"] = (
+        SimpleNamespace(prefill_backend=prefill_backend)
+    )
+
     builder_cls = backend_cls.get_builder_cls()
     builder = builder_cls(kv_cache_spec, ["placeholder"], vllm_config, device)
     metadata = builder.build(
@@ -704,6 +727,120 @@ def test_triton_convert_req_index_to_global_index_with_prefill_workspace(block_s
     torch.testing.assert_close(result, reference_result, rtol=0, atol=0)
 
 
+@pytest.mark.skipif(
+    torch.cuda.get_device_capability() < (9, 0),
+    reason="FlashMLASparseBackend requires CUDA 9.0 or higher",
+)
+def test_triton_convert_rejects_req_id_longer_than_token_indices():
+    """Guard against the #47327 regression: the kernel grid is sized by
+    req_id but the output is allocated like token_indices, so a full-batch
+    req_id combined with an MQA-subset token_indices wrote past the end of
+    the output buffer. The wrapper must reject the length mismatch instead
+    of corrupting memory."""
+    device = torch.device(DEVICE_TYPE)
+    num_topk_tokens = 128
+    block_size = 64
+    block_table = torch.arange(40, dtype=torch.int32, device=device).view(4, 10)
+
+    # Full batch: 2 decode tokens + 10 prefill tokens
+    req_id_full = torch.tensor(
+        [0, 1, 2, 2, 2, 2, 2, 3, 3, 3, 3, 3], dtype=torch.int32, device=device
+    )
+    num_mqa_tokens = 2
+    token_indices = torch.randint(
+        0,
+        block_size * 10,
+        (num_mqa_tokens, num_topk_tokens),
+        dtype=torch.int32,
+        device=device,
+    )
+
+    with pytest.raises(AssertionError, match="must cover the same tokens"):
+        triton_convert_req_index_to_global_index(
+            req_id_full,
+            block_table,
+            token_indices,
+            BLOCK_SIZE=block_size,
+            NUM_TOPK_TOKENS=num_topk_tokens,
+        )
+
+    # The sliced call is the intended usage and must match the reference.
+    result = triton_convert_req_index_to_global_index(
+        req_id_full[:num_mqa_tokens],
+        block_table,
+        token_indices,
+        BLOCK_SIZE=block_size,
+        NUM_TOPK_TOKENS=num_topk_tokens,
+    )
+    reference = _triton_convert_reference_impl(
+        req_id_full[:num_mqa_tokens],
+        block_table,
+        token_indices,
+        block_size,
+        num_topk_tokens,
+    )
+    torch.testing.assert_close(result, reference, rtol=0, atol=0)
+
+
+@pytest.mark.skipif(
+    torch.cuda.get_device_capability() < (9, 0),
+    reason="FlashMLASparseBackend requires CUDA 9.0 or higher",
+)
+def test_flashmla_forward_bf16_kv_slices_req_id_to_mqa_tokens():
+    """Guard against the #47327 regression: when the dense-MHA prefill split
+    is active, forward_mqa only receives the leading decode tokens, but
+    _forward_bf16_kv passed the full-batch req_id_per_token to the index
+    conversion, making it write past the end of its output buffer. The call
+    site must slice req_id_per_token to the MQA tokens."""
+    device = torch.device(DEVICE_TYPE)
+    num_topk_tokens = 128
+    block_size = 64
+    num_batch_tokens = 12
+    num_mqa_tokens = 2
+
+    attn_metadata = SimpleNamespace(
+        req_id_per_token=torch.tensor(
+            [0, 1] + [2] * 5 + [3] * 5, dtype=torch.int32, device=device
+        ),
+        block_table=torch.arange(40, dtype=torch.int32, device=device).view(4, 10),
+        block_size=block_size,
+    )
+    assert attn_metadata.req_id_per_token.shape[0] == num_batch_tokens
+
+    q = torch.zeros(num_mqa_tokens, 4, 576, dtype=torch.bfloat16, device=device)
+    kv_cache = torch.zeros(40 * block_size, 576, dtype=torch.bfloat16, device=device)
+    topk_indices = torch.randint(
+        0,
+        block_size * 10,
+        (num_mqa_tokens, num_topk_tokens),
+        dtype=torch.int32,
+        device=device,
+    )
+
+    captured = {}
+
+    def _stub_kernel(q, kv, indices, lengths):
+        captured["indices"] = indices
+        return torch.zeros(q.shape[0], q.shape[1], 512, dtype=q.dtype, device=q.device)
+
+    stub_impl = SimpleNamespace(_bf16_flash_mla_kernel=_stub_kernel)
+
+    out = FlashMLASparseImpl._forward_bf16_kv(
+        stub_impl, q, kv_cache, topk_indices, attn_metadata
+    )
+
+    assert out.shape[0] == num_mqa_tokens
+    assert captured["indices"].shape[0] == num_mqa_tokens
+    reference = _triton_convert_reference_impl(
+        attn_metadata.req_id_per_token[:num_mqa_tokens],
+        attn_metadata.block_table,
+        topk_indices,
+        block_size,
+        num_topk_tokens,
+    )
+    torch.testing.assert_close(captured["indices"], reference, rtol=0, atol=0)
+
+
 @pytest.mark.parametrize(
     "seq_lens,max_buf,expected",
     [
@@ -722,9 +859,268 @@ def test_split_prefill_chunks(seq_lens, max_buf, expected):
     assert out == expected
 
 
+PREFILL_BATCH_SPECS = {
+    "short_dense_mha": BatchSpec(seq_lens=[64, 128], query_lens=[64, 128]),
+    "short_context_dense_mha": BatchSpec(seq_lens=[128, 160], query_lens=[64, 32]),
+}
+
+
+@pytest.mark.skipif(
+    torch.cuda.get_device_capability()[0] < 10,
+    reason="Sparse MLA forward_mha requires FA4 (SM100+)",
+)
+@pytest.mark.parametrize("batch_name", list(PREFILL_BATCH_SPECS.keys()))
+@pytest.mark.parametrize("kv_cache_dtype", ["auto"])
+def test_sparse_backend_prefill_correctness(
+    default_vllm_config,
+    dist_init,
+    batch_name,
+    kv_cache_dtype,
+    workspace_init,
+):
+    """Test single-pass FA4 dense forward_mha for sparse MLA prefill."""
+    backend_cls = FlashMLASparseBackend
+    batch_spec = PREFILL_BATCH_SPECS[batch_name]
+
+    device = torch.device("cuda")
+    dtype = torch.bfloat16
+    block_size = 64
+
+    num_heads = 128
+    kv_lora_rank = 512
+    qk_nope_head_dim = 128
+    qk_rope_head_dim = 64
+    v_head_dim = 128
+    head_size = kv_lora_rank + qk_rope_head_dim
+    topk_tokens = 512
+
+    max_seqlen = max(batch_spec.seq_lens)
+    total_cache_tokens = sum(batch_spec.seq_lens)
+
+    vllm_config = create_vllm_config(
+        model_name="deepseek-ai/DeepSeek-V2-Lite-Chat",
+        tensor_parallel_size=1,
+        max_model_len=max_seqlen,
+        num_gpu_blocks=max(2048, cdiv(total_cache_tokens, block_size) + 1),
+        block_size=block_size,
+        hf_config_override={
+            "index_topk": topk_tokens,
+            "attn_module_list_cfg": [{"topk_tokens": topk_tokens}],
+        },
+    )
+    model_config = vllm_config.model_config
+    model_config.hf_text_config = SimpleNamespace(
+        q_lora_rank=None,
+        kv_lora_rank=kv_lora_rank,
+        qk_nope_head_dim=qk_nope_head_dim,
+        qk_rope_head_dim=qk_rope_head_dim,
+        v_head_dim=v_head_dim,
+        model_type="deepseek_v2",
+    )
+    model_config.dtype = dtype
+    model_config.get_num_attention_heads = MethodType(
+        lambda self, parallel_config: num_heads, model_config
+    )
+    model_config.get_num_kv_heads = MethodType(
+        lambda self, parallel_config: 1, model_config
+    )
+    model_config.get_head_size = MethodType(lambda self: head_size, model_config)
+    model_config.get_sliding_window = MethodType(lambda self: None, model_config)
+
+    kv_cache_spec = create_standard_kv_cache_spec(vllm_config)
+    scale = 1.0 / math.sqrt(qk_nope_head_dim + qk_rope_head_dim)
+
+    torch.manual_seed(42)
+
+    W_UK = torch.rand(
+        kv_lora_rank, num_heads, qk_nope_head_dim, dtype=dtype, device=device
+    )
+    W_UV = torch.rand(kv_lora_rank, num_heads, v_head_dim, dtype=dtype, device=device)
+
+    seq_lens = batch_spec.seq_lens
+    query_lens = batch_spec.query_lens
+
+    # Compute dense reference outputs.
+    total_query_tokens = sum(query_lens)
+    sparse_indices = torch.zeros(
+        total_query_tokens, topk_tokens, dtype=torch.int32, device=device
+    )
+
+    all_q, all_kv_c_new, all_k_pe_new = [], [], []
+    kv_c_contexts, k_pe_contexts = [], []
+    reference_outputs = []
+
+    for i in range(batch_spec.batch_size):
+        s_len = seq_lens[i]
+        q_len = query_lens[i]
+        ctx_len = s_len - q_len
+
+        q_mha = torch.rand(
+            q_len,
+            num_heads,
+            qk_nope_head_dim + qk_rope_head_dim,
+            dtype=dtype,
+            device=device,
+        )
+        kv_c_full = torch.rand(s_len, kv_lora_rank, dtype=dtype, device=device)
+        k_pe_full = torch.rand(s_len, 1, qk_rope_head_dim, dtype=dtype, device=device)
+
+        # Decompress all KV for reference
+        kv_b_weight = torch.cat([W_UK, W_UV], dim=-1).view(
+            kv_lora_rank, num_heads * (qk_nope_head_dim + v_head_dim)
+        )
+        kv_decompressed = (kv_c_full @ kv_b_weight).view(
+            s_len, num_heads, qk_nope_head_dim + v_head_dim
+        )
+        k_nope_all, v_all = kv_decompressed.split(
+            [qk_nope_head_dim, v_head_dim], dim=-1
+        )
+        k_pe_expanded = k_pe_full.expand(-1, num_heads, -1)
+        k_all = torch.cat([k_nope_all, k_pe_expanded], dim=-1)
+
+        for j in range(q_len):
+            attend_end = ctx_len + j + 1
+            q_tok = q_mha[j : j + 1]  # (1, H, D_qk)
+            k_attend = k_all[:attend_end]  # (N, H, D_qk)
+            v_attend = v_all[:attend_end]  # (N, H, D_v)
+
+            q_sdpa = q_tok.unsqueeze(0).transpose(1, 2).float()
+            k_sdpa = k_attend.unsqueeze(0).transpose(1, 2).float()
+            v_sdpa = v_attend.unsqueeze(0).transpose(1, 2).float()
+
+            out = torch.nn.functional.scaled_dot_product_attention(
+                q_sdpa, k_sdpa, v_sdpa, scale=scale
+            )
+            out = out.transpose(1, 2).squeeze(0)  # (1, H, D_v)
+            reference_outputs.append(out.to(dtype).flatten(start_dim=-2))
+
+        all_q.append(q_mha)
+        all_kv_c_new.append(kv_c_full[ctx_len:])
+        all_k_pe_new.append(k_pe_full[ctx_len:])
+        kv_c_contexts.append(kv_c_full)
+        k_pe_contexts.append(k_pe_full)
+
+    query_cat = torch.cat(all_q, dim=0)
+    kv_c_cat = torch.cat(all_kv_c_new, dim=0)
+    k_pe_cat = torch.cat(all_k_pe_new, dim=0)
+    ref_output = torch.cat(reference_outputs, dim=0)
+
+    vllm_config.cache_config.cache_dtype = kv_cache_dtype
+    vllm_config.model_config.hf_config.index_topk = topk_tokens
+
+    common_attn_metadata = create_common_attn_metadata(
+        batch_spec,
+        vllm_config.cache_config.block_size,
+        device,
+        arange_block_indices=True,
+    )
+
+    kv_cache = create_and_prepopulate_kv_cache(
+        kv_c_contexts=kv_c_contexts,
+        k_pe_contexts=k_pe_contexts,
+        block_size=block_size,
+        head_size=head_size,
+        dtype=dtype,
+        device=device,
+        num_blocks=vllm_config.cache_config.num_gpu_blocks,
+        common_attn_metadata=common_attn_metadata,
+        randomize_blocks=False,
+        kv_cache_dtype=kv_cache_dtype,
+    )
+
+    # The sparse builder clones the layer's dense-MHA prefill backend from
+    # static_forward_context; register a mock layer carrying one.
+    from vllm.v1.attention.backends.mla.prefill import get_mla_prefill_backend
+
+    prefill_backend = get_mla_prefill_backend(vllm_config)(
+        num_heads=num_heads,
+        scale=scale,
+        kv_lora_rank=kv_lora_rank,
+        qk_nope_head_dim=qk_nope_head_dim,
+        qk_rope_head_dim=qk_rope_head_dim,
+        v_head_dim=v_head_dim,
+        vllm_config=vllm_config,
+    )
+    vllm_config.compilation_config.static_forward_context["placeholder"] = (
+        SimpleNamespace(prefill_backend=prefill_backend)
+    )
+
+    builder_cls = backend_cls.get_builder_cls()
+    builder = builder_cls(kv_cache_spec, ["placeholder"], vllm_config, device)
+    # Drive the queries through the dense-MHA prefill path directly (the routing
+    # threshold would otherwise classify these short queries as MQA decodes).
+    builder.reorder_batch_threshold = 1
+    metadata = builder.build(
+        common_prefix_len=0, common_attn_metadata=common_attn_metadata
+    )
+
+    mock_indexer = SimpleNamespace(topk_indices_buffer=sparse_indices)
+
+    kv_b_proj_weight = torch.cat([W_UK, W_UV], dim=-1).view(
+        kv_lora_rank, num_heads * (qk_nope_head_dim + v_head_dim)
+    )
+
+    mock_kv_b_proj = ColumnParallelLinear(
+        input_size=kv_lora_rank,
+        output_size=num_heads * (qk_nope_head_dim + v_head_dim),
+        bias=False,
+    ).to(device=device, dtype=dtype)
+    mock_kv_b_proj.weight = torch.nn.Parameter(kv_b_proj_weight.T.contiguous())
+
+    impl_cls = backend_cls.get_impl_cls()
+    with set_current_vllm_config(vllm_config):
+        impl = impl_cls(
+            num_heads=num_heads,
+            head_size=head_size,
+            scale=scale,
+            num_kv_heads=1,
+            alibi_slopes=None,
+            sliding_window=None,
+            kv_cache_dtype=kv_cache_dtype,
+            logits_soft_cap=None,
+            attn_type="decoder",
+            kv_sharing_target_layer_name=None,
+            q_lora_rank=None,
+            kv_lora_rank=kv_lora_rank,
+            qk_nope_head_dim=qk_nope_head_dim,
+            qk_rope_head_dim=qk_rope_head_dim,
+            qk_head_dim=qk_nope_head_dim + qk_rope_head_dim,
+            v_head_dim=v_head_dim,
+            kv_b_proj=mock_kv_b_proj,
+            indexer=mock_indexer,
+        )
+        impl.process_weights_after_loading(dtype)
+
+    out_buffer = torch.empty(
+        total_query_tokens, num_heads * v_head_dim, dtype=dtype, device=device
+    )
+
+    with torch.inference_mode():
+        impl.forward_mha(
+            q=query_cat,
+            kv_c_normed=kv_c_cat,
+            k_pe=k_pe_cat,
+            kv_c_and_k_pe_cache=kv_cache,
+            attn_metadata=metadata,
+            k_scale=torch.tensor(1.0, device=device),
+            output=out_buffer,
+        )
+
+    assert out_buffer.shape == ref_output.shape
+    assert torch.isfinite(out_buffer).all(), "Non-finite values in output"
+    torch.testing.assert_close(out_buffer, ref_output, rtol=0.01, atol=0.01)
+
+
 @pytest.mark.parametrize(
     "seq_lens,query_lens,workspace_size,max_logits_bytes,expected",
     [
+        (
+            torch.tensor([0]),
+            torch.tensor([0]),
+            100,
+            1000,
+            [],
+        ),
         # Logits constraint triggers split (M*N exceeds budget)
         # req0: M=10, N=100 -> 1000 elems (4000 bytes) - fits in 5000
         # req1: adding M=10, N=100 -> new_M=20, new_N=200 -> 4000 elems > 1250
@@ -855,3 +1251,203 @@ def test_triton_convert_returns_valid_counts():
     )
     assert isinstance(result_only, torch.Tensor)
     torch.testing.assert_close(result_only, result, rtol=0, atol=0)
+
+
+def test_flashmla_cache_dtype_aliases_use_ds_layout():
+    from vllm.model_executor.layers.attention.mla_attention import (
+        _canonicalize_sparse_mla_kv_cache_dtype,
+    )
+
+    # kv-cache dtype aliases are canonicalized to fp8_ds_mla before the layer
+    # stores kv_cache_dtype, so they cannot bypass the gate.
+    for alias in ("fp8", "fp8_e4m3"):
+        assert (
+            _canonicalize_sparse_mla_kv_cache_dtype(FlashMLASparseBackend, alias)
+            == "fp8_ds_mla"
+        )
+
+
+def test_flashmla_fp8_metadata_reuses_common_batch_split():
+    builder = SimpleNamespace(
+        device=torch.device(DEVICE_TYPE),
+        vllm_config=SimpleNamespace(model_config=SimpleNamespace(max_model_len=8)),
+    )
+    common_metadata = SimpleNamespace(
+        num_actual_tokens=1,
+        seq_lens_cpu_upper_bound=torch.tensor([1]),
+        query_start_loc_cpu=torch.tensor([0, 1]),
+        block_table_tensor=torch.zeros(1, 1, dtype=torch.int32, device=DEVICE_TYPE),
+    )
+    metadata = FlashMLASparseMetadata(
+        num_reqs=1,
+        max_query_len=1,
+        max_seq_len=1,
+        num_actual_tokens=1,
+        query_start_loc=torch.tensor([0, 1], device=DEVICE_TYPE),
+        slot_mapping=torch.tensor([0], device=DEVICE_TYPE),
+        block_table=torch.zeros(1, 1, dtype=torch.int32, device=DEVICE_TYPE),
+        req_id_per_token=torch.zeros(1, dtype=torch.int32, device=DEVICE_TYPE),
+        num_decodes=0,
+        num_prefills=1,
+        num_decode_tokens=0,
+    )
+
+    fp8_metadata = FlashMLASparseMetadataBuilder._build_fp8_separate_prefill_decode(
+        builder, common_metadata, metadata
+    )
+
+    assert fp8_metadata.num_decodes == 0
+    assert fp8_metadata.num_prefills == 1
+    assert fp8_metadata.num_decode_tokens == 0
+    assert fp8_metadata.num_prefill_tokens == 1
+
+
+def test_flashmla_common_metadata_requires_uniform_decodes():
+    common_metadata = SimpleNamespace(
+        max_query_len=3,
+        num_reqs=3,
+        num_actual_tokens=6,
+        query_start_loc_cpu=torch.tensor([0, 1, 3, 6]),
+        is_prefilling=None,
+    )
+
+    split = split_decodes_and_prefills(
+        common_metadata,
+        decode_threshold=128,
+        require_uniform=FlashMLASparseMetadataBuilder.require_uniform_decodes,
+    )
+
+    assert split == (1, 2, 1, 5)
+
+
+def test_flashmla_fp8_metadata_excludes_zero_token_decode_padding(monkeypatch):
+    monkeypatch.setattr(
+        "vllm.v1.attention.backends.mla.flashmla_sparse.get_mla_metadata",
+        lambda: (object(), None),
+    )
+    builder = SimpleNamespace(
+        device=torch.device(DEVICE_TYPE),
+        dummy_block_table=torch.zeros(7, 1, device=DEVICE_TYPE),
+        max_model_len_tensor=torch.zeros(7, device=DEVICE_TYPE),
+    )
+    query_start_loc_cpu = torch.tensor([0, 110, 220, 330, 440, 550, 660, 660])
+    common_metadata = SimpleNamespace(
+        num_actual_tokens=660,
+        query_start_loc_cpu=query_start_loc_cpu,
+        seq_lens=torch.arange(7, device=DEVICE_TYPE),
+    )
+    metadata = FlashMLASparseMetadata(
+        num_reqs=7,
+        max_query_len=110,
+        max_seq_len=110,
+        num_actual_tokens=660,
+        query_start_loc=query_start_loc_cpu.to(DEVICE_TYPE),
+        slot_mapping=torch.arange(660, device=DEVICE_TYPE),
+        block_table=torch.zeros(7, 1, dtype=torch.int32, device=DEVICE_TYPE),
+        req_id_per_token=torch.zeros(660, dtype=torch.int32, device=DEVICE_TYPE),
+        num_decodes=7,
+        num_prefills=0,
+        num_decode_tokens=660,
+    )
+
+    fp8_metadata = FlashMLASparseMetadataBuilder._build_fp8_separate_prefill_decode(
+        builder, common_metadata, metadata
+    )
+
+    assert fp8_metadata.num_decodes == 6
+    assert fp8_metadata.num_decode_tokens == 660
+    assert fp8_metadata.decode is not None
+    assert fp8_metadata.decode.decode_query_len == 110
+    torch.testing.assert_close(
+        fp8_metadata.decode.seq_lens, torch.arange(6, device=DEVICE_TYPE)
+    )
+
+
+@pytest.mark.parametrize("use_mixed_batch", [False, True])
+def test_flashmla_fp8_paths_accept_decode_subset(monkeypatch, use_mixed_batch: bool):
+    num_decode_tokens = 2
+    num_batch_tokens = 5
+    q = torch.empty(num_decode_tokens, 2, 3, device=DEVICE_TYPE)
+    topk_indices = torch.empty(num_decode_tokens, 4, device=DEVICE_TYPE)
+    kernel_q_shapes = []
+
+    def convert_indices(*args, **kwargs):  # noqa: ARG001
+        assert not kwargs.get("HAS_PREFILL_WORKSPACE", False)
+        if not kwargs.get("return_valid_counts", False):
+            return topk_indices
+        valid_counts = torch.full(
+            (num_decode_tokens,), 4, dtype=torch.int32, device=DEVICE_TYPE
+        )
+        return topk_indices, valid_counts
+
+    monkeypatch.setattr(
+        "vllm.v1.attention.backends.mla.flashmla_sparse."
+        "triton_convert_req_index_to_global_index",
+        convert_indices,
+    )
+
+    def run_kernel(**kwargs):
+        kernel_q_shapes.append(kwargs["q"].shape)
+        return kwargs["q"][..., :1], None
+
+    if use_mixed_batch:
+        fp8_metadata = FlashMLASparseMetadata.FP8KernelMetadata(
+            scheduler_metadata=object(),  # type: ignore[arg-type]
+            dummy_block_table=torch.empty(1, 1, dtype=torch.int32, device=DEVICE_TYPE),
+            cache_lens=torch.empty(1, dtype=torch.int32, device=DEVICE_TYPE),
+        )
+    else:
+        FP8Meta = FlashMLASparseMetadata.FP8SeparatePrefillDecode
+        fp8_metadata = FP8Meta(
+            num_decodes=1,
+            num_prefills=1,
+            num_decode_tokens=num_decode_tokens,
+            num_prefill_tokens=num_batch_tokens - num_decode_tokens,
+            decode=FP8Meta.Decode(
+                seq_lens=torch.empty(1, dtype=torch.int32, device=DEVICE_TYPE),
+                kernel_metadata=object(),  # type: ignore[arg-type]
+                decode_query_len=num_decode_tokens,
+            ),
+            prefill=FP8Meta.Prefill(
+                request_ids=torch.empty(
+                    num_batch_tokens, dtype=torch.int32, device=DEVICE_TYPE
+                ),
+                workspace_starts=torch.empty(1, dtype=torch.int32, device=DEVICE_TYPE),
+                chunks=[],
+            ),
+        )
+    metadata = SimpleNamespace(
+        fp8_extra_metadata=fp8_metadata,
+        fp8_use_mixed_batch=use_mixed_batch,
+        num_actual_tokens=num_batch_tokens,
+        req_id_per_token=torch.empty(
+            num_batch_tokens, dtype=torch.int32, device=DEVICE_TYPE
+        ),
+        block_table=torch.empty(1, 1, dtype=torch.int32, device=DEVICE_TYPE),
+        block_size=64,
+    )
+    impl = SimpleNamespace(
+        kv_cache_dtype="fp8_ds_mla",
+        topk_indices_buffer=topk_indices,
+        num_heads=2,
+        kv_lora_rank=1,
+        _fp8_flash_mla_kernel=run_kernel,
+    )
+    impl._forward_fp8_kv_mixed_batch = MethodType(
+        FlashMLASparseImpl._forward_fp8_kv_mixed_batch, impl
+    )
+    impl._forward_fp8_kv_separate_prefill_decode = MethodType(
+        FlashMLASparseImpl._forward_fp8_kv_separate_prefill_decode, impl
+    )
+
+    output, lse = FlashMLASparseImpl.forward_mqa(
+        impl,
+        q,
+        torch.empty(0, device=DEVICE_TYPE),
+        metadata,
+        None,
+    )
+
+    assert kernel_q_shapes == [(1, num_decode_tokens, 2, 3)]
+    assert output.shape == (num_decode_tokens, 2, 1)
+    assert lse is None
