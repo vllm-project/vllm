@@ -461,10 +461,9 @@ class ClientRole:
         now = time.monotonic()
         to_remove: list[str] = []
         for req_id in self._active_loads:
-            st = self._requests.get(req_id)
-            load = st.load if st is not None else None
-            if load is None:
-                continue
+            st = self._requests[req_id]
+            assert st.load is not None
+            load = st.load
             if load.aborted_at is None:
                 if now - load.submitted_at >= _LOAD_TIMEOUT_S:
                     load.aborted_at = now
