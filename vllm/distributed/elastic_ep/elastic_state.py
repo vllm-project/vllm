@@ -219,6 +219,7 @@ class ElasticEPScalingState:
             return True
 
         elif state == ScaleUpNewEngineState.PREPARE:
+            self._collective_rpc("elastic_ep_execute", args=("warmup_local_kernels",))
             self._mark_ready_for_switch()
             tensor = torch.tensor([0, 0, 0], dtype=torch.int32, device="cpu")
             torch.distributed.all_reduce(
