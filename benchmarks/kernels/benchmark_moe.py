@@ -816,13 +816,23 @@ def get_model_params(config):
         # recurse to get their parameters
         return get_model_params(config.get_text_config())
     else:
-        # Support for llama4
-        config = config.get_text_config()
-        # Default: Mixtral.
-        E = config.num_local_experts
-        topk = config.num_experts_per_tok
-        intermediate_size = config.intermediate_size
-        hidden_size = config.hidden_size
+        # Fallback: Mixtral/Llama4-style fields on the text config.
+        try:
+            text_config = config.get_text_config()
+            E = text_config.num_local_experts
+            topk = text_config.num_experts_per_tok
+            intermediate_size = text_config.intermediate_size
+            hidden_size = text_config.hidden_size
+        except AttributeError as e:
+            raise NotImplementedError(
+                f"Architecture {architecture!r} is not recognized by "
+                "benchmark_moe.py. The Mixtral/Llama4-style fallback failed "
+                f"with: {e}. To add support, introduce a new `elif` branch in "
+                "`get_model_params()` that reads the MoE shape "
+                "(num_experts, topk, intermediate_size, hidden_size) from "
+                "this architecture's config. See existing branches for "
+                "examples."
+            ) from e
     return E, topk, intermediate_size, hidden_size
 
 
