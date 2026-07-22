@@ -25,7 +25,8 @@ steps:
     - >-
       bash .buildkite/scripts/hardware_ci/run-intel-test.sh
       'apt-get update && apt-get install -y curl libsodium23 &&
+      pip3 install runai-model-streamer[s3,gcs,azure]\>=0.15.7 &&
       export VLLM_WORKER_MULTIPROC_METHOD=spawn &&
       export PYTHONFAULTHANDLER=1 &&
       cd tests &&
-      pytest -v -s model_executor -m "(not slow_test)" --timeout=900 --timeout-method=thread'
+      pytest -v -s model_executor -m "not slow_test"'
