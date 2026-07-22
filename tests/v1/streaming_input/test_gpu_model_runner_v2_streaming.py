@@ -16,7 +16,8 @@ from vllm.v1.core.sched.output import (
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 from vllm.v1.worker.gpu.states import RequestState
 
-pytestmark = pytest.mark.cpu_test
+# Not cpu_test: RequestState allocates pinned (UVA) memory, which requires a
+# CUDA device even though the request state itself lives on the CPU.
 
 
 @pytest.fixture
@@ -31,13 +32,12 @@ def mock_model_runner_with_req_states():
         num_speculative_steps=0,
         vocab_size=32000,
         device=torch.device("cpu"),
-        model_dtype=torch.float32,
-        cache_draft_logits=False,
     )
     runner.encoder_cache = None
     runner.model_state = Mock()
     runner.block_tables = Mock()
     runner.lora_state = Mock()
+    runner.pp_handler = None
     runner.sampler = None
     runner.prompt_logprobs_worker = None
     runner.is_last_pp_rank = False

@@ -155,7 +155,7 @@ void cpu_gemm_wna16_impl(
   constexpr int32_t gemm_m_tile_size = gemm_t::MaxMSize;
   constexpr int32_t n_block_size = 16;
   static_assert(gemm_n_tile_size % n_block_size == 0);
-  const int32_t thread_num = omp_get_max_threads();
+  const int32_t thread_num = cpu_utils::get_max_threads();
 
   // a simple schedule policy, just to hold more B tiles in L2 and make sure
   // each thread has tasks

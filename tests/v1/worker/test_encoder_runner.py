@@ -53,14 +53,14 @@ def _make_runner(
 
 
 def _gather(runner: EncoderRunner, *, num_scheduled: int, draft_lookahead: int):
-    # Single prefilling request, computed_prefill=0, prefill_len large.
+    # Single prefilling request, num_computed_tokens=0, prefill_len large.
     return runner.gather_mm_embeddings(
         req_ids=["req0"],
         total_num_scheduled_tokens=num_scheduled,
         num_scheduled_tokens=np.array([num_scheduled]),
         query_start_loc=np.array([0]),
         prefill_lens=np.array([1000]),
-        computed_prefill_lens=np.array([0]),
+        num_computed_tokens=np.array([0]),
         draft_lookahead=draft_lookahead,
     )
 
@@ -78,6 +78,7 @@ def test_draft_lookahead_uses_boundary_feature_when_cached():
 
     # f0 covers positions 0..6 (+1 skew); f1's first embed covers position 7.
     assert len(mm_embeds) == 2
+    assert [e.modality for e in mm_embeds] == ["image", "image"]
     assert bool(is_mm_embed[7])
     assert int(is_mm_embed.sum()) == 8
 
@@ -94,6 +95,7 @@ def test_draft_lookahead_tolerates_missing_boundary_feature():
 
     # Only f0 is gathered; f1's boundary position falls back silently.
     assert len(mm_embeds) == 1
+    assert [e.modality for e in mm_embeds] == ["image"]
     assert not bool(is_mm_embed[7])
     assert int(is_mm_embed.sum()) == 7
 
@@ -147,11 +149,35 @@ def test_multi_request_batch_gathers_per_request(draft_lookahead):
         num_scheduled_tokens=np.array([8, 8]),
         query_start_loc=np.array([0, 8]),
         prefill_lens=np.array([1000, 1000]),
-        computed_prefill_lens=np.array([0, 0]),
+        num_computed_tokens=np.array([0, 0]),
         draft_lookahead=draft_lookahead,
     )
 
     # Both requests contribute a feature; with the +1 skew each marks 7 of its
     # 8 positions (the skew drops one), otherwise all 8.
     assert len(mm_embeds) == 2
+    assert [e.modality for e in mm_embeds] == ["image", "image"]
     assert int(is_mm_embed.sum()) == (14 if draft_lookahead else 16)
+
+
+def test_gather_preserves_mixed_modalities():
+    """Modalities must be attached on tensors in gather order."""
+    video = MultiModalFeatureSpec(
+        data=None,
+        modality="video",
+        identifier="v0",
+        mm_position=PlaceholderRange(offset=0, length=4),
+    )
+    audio = MultiModalFeatureSpec(
+        data=None,
+        modality="audio",
+        identifier="a0",
+        mm_position=PlaceholderRange(offset=4, length=4),
+    )
+    runner = _make_runner([video, audio], cached=[video, audio])
+
+    mm_embeds, is_mm_embed = _gather(runner, num_scheduled=8, draft_lookahead=0)
+
+    assert len(mm_embeds) == 2
+    assert [e.modality for e in mm_embeds] == ["video", "audio"]
+    assert int(is_mm_embed.sum()) == 8
