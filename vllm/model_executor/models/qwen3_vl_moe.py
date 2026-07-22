@@ -54,7 +54,7 @@ from .qwen3_vl import (
     Qwen3VLMultiModalProcessor,
     Qwen3VLProcessingInfo,
 )
-from .utils import maybe_prefix
+from .utils import StageMissingLayer, maybe_prefix
 
 logger = init_logger(__name__)
 
@@ -242,15 +242,14 @@ class Qwen3VLMoeForConditionalGeneration(
                 prefix=maybe_prefix(prefix, "visual"),
             )
 
-            # register buffer for deepstack
-            if self.use_deepstack:
-                self.deepstack_input_embeds = [
-                    torch.zeros(
-                        vllm_config.scheduler_config.max_num_batched_tokens,
-                        config.text_config.hidden_size,
-                    )
-                    for _ in range(self.deepstack_num_level)
-                ]
+        if self.use_deepstack and not isinstance(self.visual, StageMissingLayer):
+            self.deepstack_input_embeds = [
+                torch.zeros(
+                    vllm_config.scheduler_config.max_num_batched_tokens,
+                    config.text_config.hidden_size,
+                )
+                for _ in range(self.deepstack_num_level)
+            ]
 
         with self._mark_language_model(vllm_config):
             self.language_model = Qwen3MoeLLMForCausalLM(
