@@ -388,6 +388,8 @@ class SamplingParams(
         skip_clone: bool = False,
         repetition_detection: RepetitionDetectionParams | None = None,
         logprob_token_ids: list[int] | None = None,
+        routed_experts_prompt_start: int = 0,
+        indexer_topk_prompt_start: int = 0,
     ) -> "SamplingParams":
         if logit_bias is not None:
             # Fast path uses a dict comprehension; on failure we iterate once
@@ -449,6 +451,8 @@ class SamplingParams(
             extra_args=extra_args,
             skip_clone=skip_clone,
             repetition_detection=repetition_detection,
+            routed_experts_prompt_start=routed_experts_prompt_start,
+            indexer_topk_prompt_start=indexer_topk_prompt_start,
         )
 
     def __post_init__(self) -> None:

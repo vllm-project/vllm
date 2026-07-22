@@ -406,6 +406,22 @@ class ChatCompletionRequest(OpenAIBaseModel):
             "need to map generated text back to input tokens."
         ),
     )
+    routed_experts_prompt_start: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "When enable_return_routed_experts is active, skip the first "
+            "N prompt tokens from the returned routing data."
+        ),
+    )
+    indexer_topk_prompt_start: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "When enable_return_indexer_topk is active, skip the first "
+            "N prompt tokens from the returned indexer topk indices."
+        ),
+    )
     return_token_offsets: bool | None = Field(
         default=False,
         description=(
@@ -707,6 +723,8 @@ class ChatCompletionRequest(OpenAIBaseModel):
             extra_args=extra_args or None,
             skip_clone=True,  # Created fresh per request, safe to skip clone
             repetition_detection=self.repetition_detection,
+            routed_experts_prompt_start=self.routed_experts_prompt_start,
+            indexer_topk_prompt_start=self.indexer_topk_prompt_start,
         )
 
     @model_validator(mode="before")
