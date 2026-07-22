@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Launch-config selection for the ReplaySSM Mamba2 output_only decode kernel.
+"""Launch-config selection for the ReplaySSM decode kernels (Mamba2
+output_only and GDN).
 
 Mirrors ``mamba_ssm.py``: a hard-coded heuristic per kernel, plus an
 ``override`` context manager for benchmarks/tests/config sweeps. Hardware is
@@ -53,6 +54,7 @@ def _mamba2_output_only(dstate, L, is_blackwell):
 
 
 def _gdn_decode(L, is_blackwell):
+    # (block_v, num_warps, num_stages, nk); serving-batch optimum per device.
     if is_blackwell:
         return 128, 1, 3, 4
     return 64, 1, 3, 2
