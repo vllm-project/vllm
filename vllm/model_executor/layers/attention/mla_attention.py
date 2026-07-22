@@ -194,6 +194,8 @@ from enum import Enum
 from typing import ClassVar, Generic, TypeVar, cast
 
 import torch
+
+from vllm.model_executor.reload_arena import get_reload_arena
 import torch.nn as nn
 from tqdm import tqdm
 
@@ -956,10 +958,17 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                     x, self.W_V, self.W_V_scale, group_size=128, transpose_bm=True
                 )
         else:
+            # Publish through the reload arena: these derived decode weights
+            # are read by graph-captured BMMs, and a bare rebind on each
+            # post-load pass leaves captured graphs holding the previous
+            # storage. put() adopts once and copies re-derived values into
+            # the same storage on reload, so the address stays valid and the
+            # value refreshes.
+            arena = get_reload_arena(self)
             # Convert from (L, N, V) to (N, L, V)
-            self.W_UV = W_UV.transpose(0, 1)
+            self.W_UV = arena.put("W_UV", W_UV.transpose(0, 1))
             # Convert from (L, N, P) to (N, P, L)
-            self.W_UK_T = W_UK.permute(1, 2, 0)
+            self.W_UK_T = arena.put("W_UK_T", W_UK.permute(1, 2, 0))
 
         # If we should not load quant weights, we initialize the scales to 1.0
         # as the default value. See [Note: Register q/k/v/prob scales in state dict]

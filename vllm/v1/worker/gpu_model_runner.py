@@ -4,6 +4,7 @@
 import functools
 import gc
 import itertools
+import os
 import threading
 import time
 from collections import defaultdict
@@ -5480,25 +5481,57 @@ class GPUModelRunner(
                 Iterable[tuple[str, torch.Tensor]], weights_iterator
             )
 
+        # Commit-gate snapshot: every arena slot a captured graph may hold.
+        from vllm.model_executor.reload_arena import (
+            snapshot_model_arenas, verify_model_arenas)
+        arena_snaps = snapshot_model_arenas(model)
+
         # begin loading weights
         logger.info_once("Reloading weights inplace...")
-        if is_checkpoint_format:
-            # load weights from checkpoint/ original model format
-            initialize_layerwise_reload(model)
-            loaded_weights = model.load_weights(weights_iterator)
-            finalize_layerwise_reload(model, self.model_config)
+        # The config context must span post-load processing: PWAL rebuild
+        # paths (e.g. QuantFP8 CustomOp construction) read the global config,
+        # and reload runs outside the startup context that initial loading
+        # had. Boundary-wide context rather than per-field snapshots so new
+        # config consumers stay covered.
+        with set_current_vllm_config(self.vllm_config):
+            if is_checkpoint_format:
+                # load weights from checkpoint/ original model format
+                initialize_layerwise_reload(model)
+                loaded_weights = model.load_weights(weights_iterator)
+                finalize_layerwise_reload(model, self.model_config)
 
-        else:
-            # load weights from kernel format
-            logger.warning_once(
-                "Reloading with `is_checkpoint_format=True` requires that "
-                "weights be in kernel format and already sharded",
-            )
-            loaded_weights = set()
-            for name, loaded_weight in weights_iterator:
-                param = model.get_parameter(name)  # TODO: buffers?
-                param.copy_(loaded_weight)
-                loaded_weights.add(name)
+            else:
+                # load weights from kernel format
+                logger.warning_once(
+                    "Reloading with `is_checkpoint_format=True` requires that "
+                    "weights be in kernel format and already sharded",
+                )
+                loaded_weights = set()
+                for name, loaded_weight in weights_iterator:
+                    param = model.get_parameter(name)  # TODO: buffers?
+                    param.copy_(loaded_weight)
+                    loaded_weights.add(name)
+
+        # Commit gate: refuse to serve if any graph-visible slot moved,
+        # vanished, or changed layout. Same-weights output checks cannot
+        # catch this (stale allocations stay bit-identical until reclaimed),
+        # so identity is checked directly and failure is closed.
+        arena_problems = verify_model_arenas(model, arena_snaps)
+        if arena_problems:
+            gate = os.environ.get("VLLM_RELOAD_GATE", "strict")
+            msg = ("Reload violated graph-visible storage identity on "
+                   f"{len(arena_problems)} slot(s):\n  " +
+                   "\n  ".join(arena_problems[:20]))
+            if gate == "off":
+                pass
+            elif gate == "warn":
+                logger.warning(msg)
+            else:
+                raise RuntimeError(
+                    msg + "\nCaptured CUDA graphs may reference freed or "
+                    "stale storage; serving would risk corruption or an "
+                    "illegal memory access. Set VLLM_RELOAD_GATE=warn to "
+                    "downgrade (unsafe).")
 
         # logging and validation
         counter_after_reloading = time.perf_counter()

@@ -3,6 +3,9 @@
 
 
 import torch
+
+from vllm.model_executor.reload_arena import (arena_scope,
+                                               get_reload_arena)
 from compressed_tensors.quantization import (
     QuantizationArgs,
 )
@@ -194,15 +197,19 @@ class CompressedTensorsW4A8Fp8MoEMethod(CompressedTensorsMoEMethod):
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
         if self.moe_quant_config is not None:
             assert self.experts_cls is not None
-            self.moe_kernel = make_w4a8_moe_kernel(
-                moe_quant_config=self.moe_quant_config,
-                moe_config=self.moe,
-                experts_cls=self.experts_cls,
-                b_strides1=self.b_strides1,
-                b_strides2=self.b_strides2,
-                group_size=self.group_size,
-                routing_tables=layer._expert_routing_tables(),
-            )
+            # The kernel rebuild replaces the experts object; graph-visible
+            # tensors it allocates (strides, permute scratch) must land in
+            # the layer's arena so the rebuilt object reuses their storage.
+            with arena_scope(get_reload_arena(layer)):
+                self.moe_kernel = make_w4a8_moe_kernel(
+                    moe_quant_config=self.moe_quant_config,
+                    moe_config=self.moe,
+                    experts_cls=self.experts_cls,
+                    b_strides1=self.b_strides1,
+                    b_strides2=self.b_strides2,
+                    group_size=self.group_size,
+                    routing_tables=layer._expert_routing_tables(),
+                )
 
     def get_fused_moe_quant_config(self, layer: torch.nn.Module) -> FusedMoEQuantConfig:
         return make_w4a8_moe_quant_config(
