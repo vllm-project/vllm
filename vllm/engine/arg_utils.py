@@ -746,11 +746,11 @@ class EngineArgs:
             self.attention_config = AttentionConfig(**self.attention_config)
         if isinstance(self.mamba_config, dict):
             self.mamba_config = MambaConfig(**self.mamba_config)
-        if self.mamba_decode_backend is not None and self.mamba_backend is not None:
-            raise ValueError(
-                "mamba_decode_backend and mamba_backend are mutually exclusive"
-            )
         if self.mamba_backend is not None:
+            if self.mamba_decode_backend is not None:
+                raise ValueError(
+                    "mamba_backend and mamba_decode_backend are mutually exclusive"
+                )
             self.mamba_decode_backend = self.mamba_backend
         if isinstance(self.kernel_config, dict):
             self.kernel_config = KernelConfig(**self.kernel_config)
@@ -944,14 +944,16 @@ class EngineArgs:
         )
         mamba_kwargs["decode_backend"]["default"] = None
         mamba_group.add_argument(
-            "--mamba-decode-backend", **mamba_kwargs["decode_backend"]
+            "--mamba-decode-backend",
+            **mamba_kwargs["decode_backend"],
         )
-        mamba_backend_alias_kwargs = mamba_kwargs["decode_backend"].copy()
-        mamba_backend_alias_kwargs["help"] = "Alias for --mamba-decode-backend."
+        mamba_backend_kwargs = mamba_kwargs["decode_backend"].copy()
+        mamba_backend_kwargs["help"] = "Deprecated alias for --mamba-decode-backend."
         mamba_group.add_argument(
             "--mamba-backend",
             dest="mamba_backend",
-            **mamba_backend_alias_kwargs,
+            deprecated=True,
+            **mamba_backend_kwargs,
         )
         mamba_kwargs["prefill_backend"]["default"] = None
         mamba_group.add_argument(
@@ -2284,21 +2286,16 @@ class EngineArgs:
 
         # Mamba config overrides
         mamba_config = copy.deepcopy(self.mamba_config)
-        # Convert string to enum if needed (CLI parsing returns a string)
         if self.mamba_decode_backend is not None:
-            if isinstance(self.mamba_decode_backend, str):
-                mamba_config.decode_backend = MambaDecodeBackendEnum[
-                    self.mamba_decode_backend.upper()
-                ]
-            else:
-                mamba_config.decode_backend = self.mamba_decode_backend
+            mamba_config.decode_backend = MambaConfig.validate_decode_backend_before(
+                self.mamba_decode_backend
+            )
         if self.mamba_prefill_backend is not None:
-            if isinstance(self.mamba_prefill_backend, str):
-                mamba_config.prefill_backend = MambaPrefillBackendEnum[
-                    self.mamba_prefill_backend.upper()
-                ]
-            else:
-                mamba_config.prefill_backend = self.mamba_prefill_backend
+            mamba_config.prefill_backend = (
+                MambaConfig.validate_prefill_backend_before(
+                    self.mamba_prefill_backend
+                )
+            )
         if self.enable_mamba_cache_stochastic_rounding:
             mamba_config.enable_stochastic_rounding = (
                 self.enable_mamba_cache_stochastic_rounding

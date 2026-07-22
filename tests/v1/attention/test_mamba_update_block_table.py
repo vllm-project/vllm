@@ -16,8 +16,10 @@ from types import SimpleNamespace
 
 import torch
 
+import vllm.v1.attention.backends.mamba2_attn as mamba2_attn
 from tests.v1.attention.utils import MockMambaBuilder
 from vllm.config.compilation import CUDAGraphMode
+from vllm.v1.attention.backends.mamba2_attn import Mamba2AttentionMetadataBuilder
 from vllm.v1.attention.backends.mamba_attn import BaseMambaAttentionMetadata
 from vllm.v1.kv_cache_interface import MambaSpec
 
@@ -53,6 +55,26 @@ def _make_vllm_config(
         scheduler_config=SimpleNamespace(max_num_seqs=max_num_seqs),
         model_config=SimpleNamespace(max_model_len=max_model_len),
     )
+
+
+def test_flashinfer_metadata_splits_sequences_and_physical_chunks(monkeypatch):
+    monkeypatch.setattr(mamba2_attn, "async_tensor_h2d", torch.as_tensor)
+    query_start_loc = torch.tensor([0, 1, 201, 401], dtype=torch.int32)
+    builder = object.__new__(Mamba2AttentionMetadataBuilder)
+    builder.chunk_size = 128
+
+    metadata = builder._build_flashinfer_ssd_metadata(
+        SimpleNamespace(num_prefills=2, num_decode_tokens=1),
+        SimpleNamespace(
+            query_start_loc_cpu=query_start_loc,
+            query_start_loc=query_start_loc,
+        ),
+    )
+
+    starts = metadata.chunk_indices * 128 + metadata.chunk_offsets
+    assert starts.tolist() == [0, 128, 200, 256, 384]
+    assert metadata.seq_chunk_cumsum.tolist() == [0, 2, 5]
+    assert metadata.seq_idx.tolist() == [[0] * 200 + [1] * 312]
 
 
 def test_mamba_single_token_prompt_runs_as_prefill():

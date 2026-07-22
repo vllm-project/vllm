@@ -4,25 +4,29 @@
 from enum import Enum, EnumMeta
 from typing import Any
 
-from pydantic import AliasChoices, Field, field_validator
+from pydantic import field_validator
 
 from vllm.config.utils import config
 
 
-class _MambaDecodeBackendEnumMeta(EnumMeta):
-    """Metaclass providing actionable Mamba decode backend errors."""
+class _MambaBackendEnumMeta(EnumMeta):
+    """Metaclass providing actionable Mamba backend errors."""
 
     def __getitem__(cls, name: str):
         try:
             return super().__getitem__(name)
         except KeyError:
-            valid = ", ".join(cls.__members__.keys())
+            backend_kind = (
+                cls.__name__.removeprefix("Mamba").removesuffix("BackendEnum").lower()
+            )
+            valid = ", ".join(cls.__members__)
             raise ValueError(
-                f"Unknown Mamba decode backend: '{name}'. Valid options are: {valid}"
+                f"Unknown Mamba {backend_kind} backend: '{name}'. "
+                f"Valid options are: {valid}"
             ) from None
 
 
-class MambaDecodeBackendEnum(Enum, metaclass=_MambaDecodeBackendEnumMeta):
+class MambaDecodeBackendEnum(Enum, metaclass=_MambaBackendEnumMeta):
     """Enumeration of Mamba selective-state-update backends used for decode."""
 
     TRITON = "triton"
@@ -30,24 +34,8 @@ class MambaDecodeBackendEnum(Enum, metaclass=_MambaDecodeBackendEnumMeta):
     CPU = "cpu"
 
 
-MambaBackendEnum = MambaDecodeBackendEnum
-
-
-class _MambaPrefillBackendEnumMeta(EnumMeta):
-    """Metaclass providing actionable Mamba prefill backend errors."""
-
-    def __getitem__(cls, name: str):
-        try:
-            return super().__getitem__(name)
-        except KeyError:
-            valid = ", ".join(cls.__members__.keys())
-            raise ValueError(
-                f"Unknown Mamba prefill backend: '{name}'. Valid options are: {valid}"
-            ) from None
-
-
-class MambaPrefillBackendEnum(Enum, metaclass=_MambaPrefillBackendEnumMeta):
-    """Enumeration of supported Mamba2 SSD prefill backends."""
+class MambaPrefillBackendEnum(Enum, metaclass=_MambaBackendEnumMeta):
+    """Enumeration of Mamba2 SSD prefill backends."""
 
     TRITON = "triton"
     FLASHINFER = "flashinfer"
@@ -55,12 +43,9 @@ class MambaPrefillBackendEnum(Enum, metaclass=_MambaPrefillBackendEnumMeta):
 
 @config
 class MambaConfig:
-    """Configuration for Mamba SSM backends."""
+    """Configuration for Mamba decode and prefill backends."""
 
-    decode_backend: MambaDecodeBackendEnum = Field(
-        default=MambaDecodeBackendEnum.TRITON,
-        validation_alias=AliasChoices("decode_backend", "backend"),
-    )
+    decode_backend: MambaDecodeBackendEnum = MambaDecodeBackendEnum.TRITON
     """Mamba selective-state-update backend used for decode."""
 
     prefill_backend: MambaPrefillBackendEnum = MambaPrefillBackendEnum.TRITON
@@ -91,14 +76,6 @@ class MambaConfig:
         if isinstance(value, str):
             return MambaPrefillBackendEnum[value.upper()]
         return value
-
-    @property
-    def backend(self) -> MambaDecodeBackendEnum:
-        return self.decode_backend
-
-    @backend.setter
-    def backend(self, value: MambaDecodeBackendEnum) -> None:
-        self.decode_backend = value
 
     def __post_init__(self):
         if self.enable_stochastic_rounding:
