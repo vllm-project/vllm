@@ -207,6 +207,12 @@ class CudaCommunicator(DeviceCommunicatorBase):
                 self.all2all_manager = FlashInferEPHTAll2AllManager(
                     self.cpu_group, tcp_store_group
                 )
+            elif self.all2all_backend == "flashinfer_ep_nixl":
+                from .all2all import FlashInferEPNixlAll2AllManager
+
+                self.all2all_manager = FlashInferEPNixlAll2AllManager(
+                    self.cpu_group, tcp_store_group
+                )
             else:
                 raise ValueError(f"Unknown all2all backend: {self.all2all_backend}")
 

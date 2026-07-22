@@ -213,12 +213,13 @@ def has_flashinfer_moe() -> bool:
 
 
 @functools.cache
-def has_flashinfer_moe_ep() -> bool:
-    """Return `True` if FlashInfer MoE expert-parallel (NCCL-EP) is available.
+def has_flashinfer_moe_ep(transport: str = "nccl_ep") -> bool:
+    """Return `True` if FlashInfer MoE expert-parallel is available.
 
-    Requires both the `flashinfer.moe_ep` package AND a built NCCL-EP transport
-    backend (i.e. `nccl.ep` importable). FlashInfer must have been installed with
-    `BUILD_NCCL_EP=1`; without it `available_backends()` will not list `nccl_ep`.
+    Requires both the `flashinfer.moe_ep` package AND a built transport
+    backend: `nccl_ep` (from the nccl4py wheel, `BUILD_NCCL_EP=1`) or
+    `nixl_ep` (in-tree meson build, `BUILD_NIXL_EP=1`). Without the
+    corresponding build, `available_backends()` will not list `transport`.
     """
     if not has_flashinfer():
         return False
@@ -227,7 +228,7 @@ def has_flashinfer_moe_ep() -> bool:
     try:
         from flashinfer.moe_ep import available_backends
 
-        return "nccl_ep" in available_backends()
+        return transport in available_backends()
     except Exception:
         return False
 

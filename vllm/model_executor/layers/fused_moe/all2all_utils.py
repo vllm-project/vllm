@@ -56,7 +56,7 @@ if current_platform.is_cuda_alike():
         )
     from vllm.utils.flashinfer import has_flashinfer_moe_ep
 
-    if has_flashinfer_moe_ep():
+    if has_flashinfer_moe_ep("nccl_ep") or has_flashinfer_moe_ep("nixl_ep"):
         from .prepare_finalize.flashinfer_ep_ht import (
             FlashInferEPHTPrepareAndFinalize,
         )

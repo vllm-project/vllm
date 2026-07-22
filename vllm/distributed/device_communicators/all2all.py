@@ -1037,14 +1037,18 @@ class FlashInferEPAll2AllManagerBase(All2AllManagerBase):
     lazily-created, config-cached `Fleet` (durable transport sizing); the
     prepare/finalize objects create a fresh per-forward `Handle` from it.
 
-    Subclasses fix the EP algorithm (LL vs HT).
+    Subclasses fix the EP algorithm (LL vs HT) and the transport
+    (`_transport`: "nccl_ep" or "nixl_ep").
     """
 
+    _transport = "nccl_ep"
+
     def __init__(self, cpu_group, tcp_store_group=None):
-        assert has_flashinfer_moe_ep(), (
-            "flashinfer.moe_ep with a built NCCL-EP backend is required for the "
-            "flashinfer_ep_* all2all backends. Install flashinfer with "
-            "BUILD_NCCL_EP=1 (see docker/Dockerfile.flashinfer-ep-pytorch)."
+        assert has_flashinfer_moe_ep(self._transport), (
+            f"flashinfer.moe_ep with a built {self._transport} backend is "
+            "required for the flashinfer_ep_* all2all backends. Install "
+            "flashinfer with BUILD_NCCL_EP=1 / BUILD_NIXL_EP=1 "
+            "(see docker/Dockerfile.flashinfer-ep-pytorch)."
         )
         super().__init__(cpu_group, tcp_store_group)
         self.support_fault_tolerance = False
@@ -1084,8 +1088,10 @@ class FlashInferEPAll2AllManagerBase(All2AllManagerBase):
         )
         # GAP 2: draw EP transport buffers from torch's caching allocator so they
         # count against vLLM's memory budget rather than a hidden cudaMalloc arena.
+        # (nixl_ep does not consume this knob yet — its Buffer owns the RDMA
+        # arena; harmless to pass.)
         knobs = [FleetAlgoKnobAllocator(torch_caching=True)]
-        return create_fleet(bootstrap, params, knobs, backend="nccl_ep")
+        return create_fleet(bootstrap, params, knobs, backend=self._transport)
 
     def get_handle(self, kwargs):
         """Return the (cached) FlashInfer `Fleet` for this MoE config.
@@ -1125,3 +1131,14 @@ class FlashInferEPHTAll2AllManager(FlashInferEPAll2AllManagerBase):
         from flashinfer.moe_ep import EpAlgorithm
 
         return EpAlgorithm.HIGH_THROUGHPUT
+
+
+class FlashInferEPNixlAll2AllManager(FlashInferEPLLAll2AllManager):
+    """FlashInfer moe_ep low-latency over the NIXL-EP (UCX/GDAKI) transport.
+
+    Same LL EXPERT_MAJOR / BatchedExperts contract as the NCCL-EP LL manager —
+    the prepare/finalize adapter is shared — only the `flashinfer.moe_ep`
+    transport differs. The fleet derives its rendezvous store from the EP
+    process group (no separate TCPStore needed)."""
+
+    _transport = "nixl_ep"
