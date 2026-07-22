@@ -493,8 +493,10 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         # Cached-decode kernel (reuses the engine-level mamba_* flags). When
         # enabled, the paged GDN page grows to 5 tensors and the non-spec decode
         # branch decodes through fused_recurrent_gated_delta_rule_replayssm.
-        self.use_cache_kernel = self.cache_config.use_replayssm
-        self.max_cache_len = self.cache_config.replayssm_buffer_len
+        self.use_replayssm = self.cache_config.use_replayssm
+        self.replayssm_buffer_len = (
+            self.cache_config.replayssm_buffer_len if self.use_replayssm else None
+        )
 
         compilation_config = get_current_vllm_config().compilation_config
         if prefix in compilation_config.static_forward_context:
@@ -1226,7 +1228,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
 
         # Cached decode kernel (own kernel; independent of the packed-recurrent
         # env flag).
-        if self.use_cache_kernel and is_non_spec_decode:
+        if self.use_replayssm and is_non_spec_decode:
             return self._forward_core_decode_non_spec_cached(
                 mixed_qkv=mixed_qkv,
                 b=b,
@@ -1425,7 +1427,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
 
         # 2.2: Process non-spec-decode part
         if split_non_spec:
-            if self.use_cache_kernel:
+            if self.use_replayssm:
                 out_decode = torch.empty(
                     num_decode_tokens,
                     1,
@@ -1683,8 +1685,8 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         """
         Cached non-spec decode: amortizes the SSM-state HBM traffic by caching
         the per-step d/k/g vectors in a ring buffer and reconstructing the
-        output from a checkpoint that is only rewritten every max_cache_len
-        steps.
+        output from a checkpoint that is only rewritten every
+        replayssm_buffer_len steps.
         """
         non_spec_state_indices_tensor = attn_metadata.non_spec_state_indices_tensor  # noqa: E501
         write_pos_d = attn_metadata.write_pos_d
