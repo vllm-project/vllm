@@ -3,9 +3,15 @@
 
 import contextlib
 import enum
+import faulthandler
 import json
+import os
+import sys
+import threading
+from types import TracebackType
 
 import torch
+from typing_extensions import Self
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
@@ -61,17 +67,46 @@ def dump_engine_exception(
     # NOTE: ensure we can log extra info without risking raises
     # unexpected errors during logging
     with contextlib.suppress(Exception):
-        _dump_engine_exception(config, scheduler_output, scheduler_stats)
+        _dump_engine_execution_context(
+            "exception", config, scheduler_output, scheduler_stats
+        )
 
 
-def _dump_engine_exception(
+def dump_engine_execution_timeout(
+    config: VllmConfig,
+    scheduler_output: SchedulerOutput,
+    scheduler_stats: SchedulerStats | None,
+    timeout_s: float,
+    stage: str,
+):
+    with contextlib.suppress(Exception):
+        logger.error(
+            "V1 LLM engine stage '%s' has not completed after %.2f seconds "
+            "(pid=%d). Dumping scheduler state and Python stack traces. "
+            "Set VLLM_ENGINE_ITERATION_TIMEOUT_S=0 to disable this diagnostic.",
+            stage,
+            timeout_s,
+            os.getpid(),
+        )
+        _dump_engine_execution_context(
+            "timeout", config, scheduler_output, scheduler_stats
+        )
+
+    with contextlib.suppress(Exception):
+        faulthandler.dump_traceback(file=sys.stderr, all_threads=True)
+
+
+def _dump_engine_execution_context(
+    reason: str,
     config: VllmConfig,
     scheduler_output: SchedulerOutput,
     scheduler_stats: SchedulerStats | None,
 ):
     logger.error(
-        "Dumping input data for V1 LLM engine (v%s) with config: %s, ",
+        "Dumping input data for V1 LLM engine (v%s, reason=%s) "
+        "with config: %s, ",
         VLLM_VERSION,
+        reason,
         config,
     )
     try:
@@ -81,3 +116,49 @@ def _dump_engine_exception(
             logger.error("Dumping scheduler stats: %s", scheduler_stats)
     except Exception:
         logger.exception("Error preparing object to dump")
+
+
+class EngineExecutionTimeoutDumper:
+    """Dumps engine state if a model execution stage exceeds a timeout."""
+
+    def __init__(
+        self,
+        config: VllmConfig,
+        scheduler_output: SchedulerOutput,
+        scheduler_stats: SchedulerStats | None,
+        timeout_s: float | None,
+        stage: str,
+    ) -> None:
+        self.config = config
+        self.scheduler_output = scheduler_output
+        self.scheduler_stats = scheduler_stats
+        self.timeout_s = timeout_s
+        self.stage = stage
+        self._timer: threading.Timer | None = None
+
+    def __enter__(self) -> Self:
+        if self.timeout_s is None or self.timeout_s <= 0:
+            return self
+
+        self._timer = threading.Timer(self.timeout_s, self._dump_timeout)
+        self._timer.daemon = True
+        self._timer.start()
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        if self._timer is not None:
+            self._timer.cancel()
+
+    def _dump_timeout(self) -> None:
+        dump_engine_execution_timeout(
+            self.config,
+            self.scheduler_output,
+            self.scheduler_stats,
+            self.timeout_s or 0,
+            self.stage,
+        )

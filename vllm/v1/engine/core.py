@@ -29,7 +29,10 @@ from vllm.distributed import (
 )
 from vllm.envs import enable_envs_cache
 from vllm.logger import init_logger
-from vllm.logging_utils.dump_input import dump_engine_exception
+from vllm.logging_utils.dump_input import (
+    EngineExecutionTimeoutDumper,
+    dump_engine_exception,
+)
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.tasks import POOLING_TASKS, SupportedTask
@@ -499,6 +502,19 @@ class EngineCore:
             raise err
 
     @contextmanager
+    def dump_on_slow_execution(
+        self, scheduler_output: SchedulerOutput, stage: str
+    ) -> Generator[None, None, None]:
+        with EngineExecutionTimeoutDumper(
+            config=self.vllm_config,
+            scheduler_output=scheduler_output,
+            scheduler_stats=self.scheduler.make_stats(),
+            timeout_s=envs.VLLM_ENGINE_ITERATION_TIMEOUT_S,
+            stage=stage,
+        ):
+            yield
+
+    @contextmanager
     def capture_iteration_details(
         self, scheduler_output: SchedulerOutput | None
     ) -> Generator[SchedulerIterationDetails | None, None, None]:
@@ -590,6 +606,7 @@ class EngineCore:
         with (
             self.capture_iteration_details(scheduler_output) as iteration_details,
             self.log_error_detail(scheduler_output),
+            self.dump_on_slow_execution(scheduler_output, "model_execution"),
         ):
             model_output = future.result()
             if model_output is None:
@@ -689,6 +706,7 @@ class EngineCore:
         with (
             self.capture_iteration_details(scheduler_output) as iteration_details,
             self.log_error_detail(scheduler_output),
+            self.dump_on_slow_execution(scheduler_output, "model_execution"),
         ):
             model_output = future.result()
             if model_output is None:
