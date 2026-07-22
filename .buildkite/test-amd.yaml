@@ -1463,8 +1463,12 @@ steps:
   source_file_dependencies:
   - csrc/quantization/cutlass_w8a8/moe/
   - csrc/moe/
+  - csrc/rocm/
   - tests/kernels/moe
+  - tests/kernels/utils.py
   - vllm/model_executor/layers/fused_moe/
+  - vllm/model_executor/layers/quantization/mxfp4.py
+  - vllm/model_executor/layers/quantization/utils/quant_utils.py
   - vllm/distributed/device_communicators/
   - vllm/envs.py
   - vllm/config
@@ -1485,17 +1489,16 @@ steps:
   source_file_dependencies:
   - csrc/quantization/
   - csrc/rocm/
-  - vllm/model_executor/layers/quantization/
-  - vllm/model_executor/kernels/
+  - vllm/model_executor/layers/quantization
+  - tests/kernels/quantization
+  - tests/kernels/quant_utils.py
+  - tests/kernels/utils.py
   - vllm/_aiter_ops.py
   - vllm/_custom_ops.py
   - vllm/envs.py
   - vllm/platforms/rocm.py
-  - vllm/utils/platform_utils.py
+  - vllm/model_executor/kernels/
   - vllm/v1/attention/backends/rocm_aiter_fa.py
-  - tests/kernels/quantization/
-  - tests/kernels/quant_utils.py
-  - tests/kernels/utils.py
   commands:
   - pytest -v -s kernels/quantization --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
 
@@ -3342,7 +3345,7 @@ steps:
 
 #----------------------------------------------------------  mi355 · kernels  ----------------------------------------------------------#
 
-- label: Kernels (2xB200-1xMI355) # TBD
+- label: Kernels (B200-MI355) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   agent_pool: mi355_1
@@ -3350,6 +3353,8 @@ steps:
   source_file_dependencies:
   - csrc/quantization/fp4/
   - csrc/attention/mla/
+  - csrc/quantization/cutlass_w8a8/moe/
+  - vllm/model_executor/layers/fused_moe/cutlass_moe.py
   - vllm/v1/attention/backends/triton_attn.py
   - vllm/v1/attention/backends/rocm_attn.py
   - vllm/v1/attention/backends/rocm_aiter_fa.py
@@ -3360,34 +3365,10 @@ steps:
   - vllm/platforms/rocm.py
   - vllm/_aiter_ops.py
   commands:
-  - amd-smi
+  - rocm-smi
   - python3 examples/basic/offline_inference/chat.py --attention-backend TRITON_ATTN
   - pytest -v -s tests/kernels/attention/test_attention_selector.py
   - pytest -v -s tests/kernels/attention/test_rocm_aiter_mla_decode_metadata.py
-  - pytest -v -s tests/kernels/quantization/test_rocm_mxfp4.py
-  - pytest -v -s tests/kernels/quantization/test_rocm_skinny_gemms.py
-
-- label: Kernels Fp4 MoE Test (2xB200-2xMI355) # TBD
-  timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
-  agent_pool: mi355_2
-  num_gpus: 2
-  optional: true
-  working_dir: "/vllm-workspace/tests"
-  source_file_dependencies:
-  - csrc/quantization/fp4/
-  - csrc/attention/mla/
-  - vllm/v1/attention/backends/triton_attn.py
-  - vllm/v1/attention/backends/rocm_attn.py
-  - vllm/v1/attention/backends/rocm_aiter_fa.py
-  - vllm/v1/attention/backends/rocm_aiter_unified_attn.py
-  - vllm/v1/attention/backends/mla/aiter_triton_mla.py
-  - vllm/v1/attention/backends/mla/rocm_aiter_mla.py
-  - vllm/v1/attention/selector.py
-  - vllm/platforms/rocm.py
-  - vllm/_aiter_ops.py
-  commands:
-  - pytest -v -s kernels/moe/test_ocp_mx_moe.py::test_mxfp4_loading_and_execution_moe[tp2_qwen15_moe_mxfp4]
 
 - label: Kernels Attention Test %N # TBD
   timeout_in_minutes: 180
@@ -3414,32 +3395,20 @@ steps:
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - csrc/quantization/cutlass_w8a8/moe/
-  - csrc/quantization/fp4/
   - csrc/moe/
   - csrc/rocm/
   - tests/kernels/moe
   - tests/kernels/utils.py
   - vllm/model_executor/layers/fused_moe/
-  - vllm/model_executor/layers/fused_moe/oracle/mxfp4.py
   - vllm/model_executor/layers/quantization/mxfp4.py
+  - vllm/model_executor/layers/quantization/utils/quant_utils.py
   - vllm/distributed/device_communicators/
   - vllm/envs.py
   - vllm/config
   - vllm/_aiter_ops.py
   - vllm/platforms/rocm.py
   commands:
-  # Run separately below: test_modular_oai_triton_moe.py (CUDA-only, needs triton_kernels).
-  # Not supported / no-op on gfx950: test_moe, test_block_int8, test_triton_moe_no_act_mul,
-  # test_triton_moe_ptpc_fp8, test_deepep_moe (deep_ep + multi-GPU).
-  # test_ocp_mx_moe tp2/tp4/tp8 cases skip here (need >1 GPU); tp2 runs in the 2xMI355 lane above.
-  - pytest -v -s kernels/moe
-      --ignore=kernels/moe/test_modular_oai_triton_moe.py
-      --ignore=kernels/moe/test_moe.py
-      --ignore=kernels/moe/test_block_int8.py
-      --ignore=kernels/moe/test_triton_moe_no_act_mul.py
-      --ignore=kernels/moe/test_triton_moe_ptpc_fp8.py
-      --ignore=kernels/moe/test_deepep_moe.py
-      --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+  - pytest -v -s kernels/moe --ignore=kernels/moe/test_modular_oai_triton_moe.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
   - pytest -v -s kernels/moe/test_modular_oai_triton_moe.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
 
 - label: Kernels Quantization Test %N # TBD
@@ -3451,22 +3420,18 @@ steps:
   source_file_dependencies:
   - csrc/quantization/
   - csrc/rocm/
-  - vllm/model_executor/layers/quantization/
-  - vllm/model_executor/kernels/
+  - vllm/model_executor/layers/quantization
+  - tests/kernels/quantization
+  - tests/kernels/quant_utils.py
+  - tests/kernels/utils.py
   - vllm/_aiter_ops.py
   - vllm/_custom_ops.py
   - vllm/envs.py
   - vllm/platforms/rocm.py
-  - vllm/utils/platform_utils.py
+  - vllm/model_executor/kernels/
   - vllm/v1/attention/backends/rocm_aiter_fa.py
-  - tests/kernels/quantization/
-  - tests/kernels/quant_utils.py
-  - tests/kernels/utils.py
   commands:
-  - pytest -v -s kernels/quantization
-      --ignore=kernels/quantization/test_rocm_mxfp4.py
-      --ignore=kernels/quantization/test_rocm_skinny_gemms.py
-      --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+  - pytest -v -s kernels/quantization --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
 
 - label: Kernels FP8 MoE Test (2xH100-2xMI355) # TBD
   timeout_in_minutes: 180
