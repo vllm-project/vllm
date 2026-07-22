@@ -934,9 +934,8 @@ class ServerRole:
         inflight, or after ``_CANCEL_DRAIN_TIMEOUT_S`` falls back to
         ``mode="immediate"`` and acks anyway.
         """
-        st = self._requests.get(kv_request_id)
-        if st is not None:
-            st.outbound = None
+        st = self._requests[kv_request_id]
+        st.outbound = None
         ids = [
             tid
             for tid, xfer in self._inflight.items()
