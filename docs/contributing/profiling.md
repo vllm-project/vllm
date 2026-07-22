@@ -26,6 +26,7 @@ To use the `torch.profiler` module, set the `profiler` entry to `'torch'` and `t
   platform-specific: `["CPU"]` on CPU, `["CPU", "CUDA"]` on NVIDIA GPUs, and
   `["CPU", "XPU"]` on Intel GPUs. Selecting `["CUDA"]` omits CPU annotations
   and the AsyncLLM CPU trace to reduce profiling overhead and trace size.
+- `torch_profiler_execution_trace` to also capture a PyTorch execution trace (ET) alongside the Kineto trace, saved as `execution_trace_<worker_name>.json` under `torch_profiler_dir`, off by default
 
 When using `vllm bench serve`, you can enable profiling by passing the `--profile` flag.
 
