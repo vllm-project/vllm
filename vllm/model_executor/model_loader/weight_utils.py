@@ -161,6 +161,12 @@ def _shuffle_files(files: list[str], shuffle: bool) -> None:
     else:
         rank = 0
     random.Random(42 + rank).shuffle(files)
+    logger.info(
+        "Shuffled %d safetensors files with seed %d (rank=%d)",
+        len(files),
+        42 + rank,
+        rank,
+    )
 
 
 def maybe_download_from_modelscope(
