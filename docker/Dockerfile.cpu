@@ -20,7 +20,7 @@
 #
 
 ######################### COMMON BASE IMAGE #########################
-FROM ubuntu:22.04 AS base-common
+FROM ubuntu:25.04 AS base-common
 
 WORKDIR /workspace
 
@@ -34,12 +34,18 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     apt-get update -y \
     && apt-get install -y --no-install-recommends sudo ccache git curl wget ca-certificates zlib1g-dev \
-    gcc-12 g++-12 libtcmalloc-minimal4 libnuma-dev ffmpeg libsm6 libxext6 libgl1 jq lsof make xz-utils \
-    && update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-12 10 --slave /usr/bin/g++ g++ /usr/bin/g++-12 \
+    software-properties-common libtcmalloc-minimal4 libnuma-dev ffmpeg libsm6 libxext6 libgl1 jq lsof make xz-utils \
+    && for i in 1 2 3; do \
+        add-apt-repository -y ppa:ubuntu-toolchain-r/test && break || \
+        { echo "Attempt $i failed, retrying toolchain PPA..."; sleep 5; }; \
+    done \
+    && apt-get update -y \
+    && apt-get install -y --no-install-recommends gcc-15 g++-15 \
+    && update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-15 10 --slave /usr/bin/g++ g++ /usr/bin/g++-15 \
     && curl -LsSf https://astral.sh/uv/install.sh | sh
 
 # Compiler and linker environment
-ENV CC=/usr/bin/gcc-12 CXX=/usr/bin/g++-12
+ENV CC=/usr/bin/gcc-15 CXX=/usr/bin/g++-15
 ENV CCACHE_DIR=/root/.cache/ccache
 ENV CMAKE_CXX_COMPILER_LAUNCHER=ccache
 
@@ -85,7 +91,7 @@ RUN echo 'ulimit -c 0' >> ~/.bashrc
 # Build the Rust frontend (`vllm-rs`) in a dedicated stage so the wheel build
 # stage doesn't need the rust toolchain or protoc. This stage runs in parallel
 # with the main vllm-build stage.
-FROM ubuntu:22.04 AS rust-build
+FROM ubuntu:25.04 AS rust-build
 ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update -y \
@@ -99,7 +105,7 @@ RUN /tmp/install_protoc.sh && rm /tmp/install_protoc.sh
 WORKDIR /workspace
 
 COPY requirements/build/rust.txt requirements/build/rust.txt
-RUN python3 -m pip install --no-cache-dir -r requirements/build/rust.txt
+RUN python3 -m pip install --break-system-packages --no-cache-dir -r requirements/build/rust.txt
 
 # Copy only the Rust build inputs; build_rust.sh publishes artifacts needed
 # by the wheel build stage.
