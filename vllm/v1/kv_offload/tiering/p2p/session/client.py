@@ -130,7 +130,7 @@ class ClientRole:
     # State helpers
     # ------------------------------------------------------------------
 
-    def _state(self, kv_request_id: str) -> _ClientRequestState:
+    def _get_or_create_request(self, kv_request_id: str) -> _ClientRequestState:
         """Get or create the state entry for a kv_request_id."""
         st = self._requests.get(kv_request_id)
         if st is None:
@@ -179,7 +179,7 @@ class ClientRole:
             len(block_ids),
             send_ready,
         )
-        st = self._state(kv_request_id)
+        st = self._get_or_create_request(kv_request_id)
         st.load = _InboundLoadState(
             job_id=job_id,
             submitted_at=time.monotonic(),
@@ -301,7 +301,7 @@ class ClientRole:
         free; clearing it at fetch forces a fresh probe if the request is
         re-scheduled, since the block is unpinned once served.
         """
-        st = self._state(kv_request_id)
+        st = self._get_or_create_request(kv_request_id)
         key = OffloadKey(block_hash)
         if key in st.probes:
             return st.probes[key]
