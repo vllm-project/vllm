@@ -422,14 +422,10 @@ def test_check_shm_free_space_passes_when_sufficient(tmp_path):
 
 
 def test_check_shm_free_space_skipped_when_path_missing(tmp_path):
-    # A missing backing dir (e.g. non-Linux) must be a no-op, even for a
-    # request larger than any real machine.
     check_shm_free_space(1 << 60, shm_path=str(tmp_path / "does-not-exist"))
 
 
 def test_shm_ring_buffer_creation_checks_free_space():
-    # The guard must fire before SharedMemory allocation: a 240 MiB buffer
-    # cannot fit in 1 MiB of free space, so no segment is ever created.
     with (
         mock.patch.object(
             shm_broadcast.shutil, "disk_usage", return_value=_fake_disk_usage(1 << 20)
