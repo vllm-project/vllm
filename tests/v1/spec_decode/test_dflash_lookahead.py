@@ -55,12 +55,14 @@ def _dflash_speculative_config(num_speculative_tokens: int) -> SpeculativeConfig
 def _dspark_speculative_config(
     num_speculative_tokens: int,
     *,
-    bonus_anchor: bool = True,
+    sample_from_anchor: bool | None = None,
 ) -> SpeculativeConfig:
     speculative_config = _dflash_speculative_config(num_speculative_tokens)
     speculative_config.method = "dspark"
-    if bonus_anchor:
-        speculative_config.draft_model_config.hf_config.dspark_bonus_anchor = True
+    if sample_from_anchor is not None:
+        speculative_config.draft_model_config.hf_config.sample_from_anchor = (
+            sample_from_anchor
+        )
     return speculative_config
 
 
@@ -157,7 +159,9 @@ def test_dflash_first_prefill_query_window_fits_allocated_blocks():
 
 def test_bonus_anchor_dspark_reserves_full_query_window(monkeypatch):
     monkeypatch.setattr("vllm.config.vllm.HAS_TRITON", True)
-    speculative_config = _dspark_speculative_config(NUM_SPECULATIVE_TOKENS)
+    speculative_config = _dspark_speculative_config(
+        NUM_SPECULATIVE_TOKENS, sample_from_anchor=False
+    )
     scheduler = _create_parallel_drafter_scheduler(speculative_config)
 
     assert scheduler.num_lookahead_tokens == NUM_SPECULATIVE_TOKENS + 1
@@ -179,13 +183,17 @@ def test_bonus_anchor_dspark_reserves_full_query_window(monkeypatch):
 
 
 def test_dspark_query_width_follows_anchor_layout():
-    bonus_anchor = _dspark_speculative_config(NUM_SPECULATIVE_TOKENS)
-    anchor_as_first = _dspark_speculative_config(
-        NUM_SPECULATIVE_TOKENS, bonus_anchor=False
+    default_anchor_as_first = _dspark_speculative_config(NUM_SPECULATIVE_TOKENS)
+    configured_anchor_as_first = _dspark_speculative_config(
+        NUM_SPECULATIVE_TOKENS, sample_from_anchor=True
+    )
+    bonus_anchor = _dspark_speculative_config(
+        NUM_SPECULATIVE_TOKENS, sample_from_anchor=False
     )
 
+    assert default_anchor_as_first.num_drafter_query_tokens == NUM_SPECULATIVE_TOKENS
+    assert configured_anchor_as_first.num_drafter_query_tokens == NUM_SPECULATIVE_TOKENS
     assert bonus_anchor.num_drafter_query_tokens == NUM_SPECULATIVE_TOKENS + 1
-    assert anchor_as_first.num_drafter_query_tokens == NUM_SPECULATIVE_TOKENS
 
 
 def test_dflash_drafter_window_reserves_bonus_token():
@@ -206,7 +214,7 @@ def test_dflash_drafter_window_reserves_bonus_token():
     dspark_runner = SimpleNamespace(
         effective_drafter_max_model_len=100,
         speculative_config=_dspark_speculative_config(
-            NUM_SPECULATIVE_TOKENS, bonus_anchor=False
+            NUM_SPECULATIVE_TOKENS, sample_from_anchor=True
         ),
     )
     assert input_fits_in_drafter(dspark_runner, SimpleNamespace(max_seq_len=97))
@@ -216,7 +224,9 @@ def test_bonus_anchor_dspark_drafter_window_reserves_bonus_token():
     input_fits_in_drafter = GPUModelRunner._input_fits_in_drafter
     dspark_runner = SimpleNamespace(
         effective_drafter_max_model_len=100,
-        speculative_config=_dspark_speculative_config(NUM_SPECULATIVE_TOKENS),
+        speculative_config=_dspark_speculative_config(
+            NUM_SPECULATIVE_TOKENS, sample_from_anchor=False
+        ),
     )
 
     assert input_fits_in_drafter(dspark_runner, SimpleNamespace(max_seq_len=96))
