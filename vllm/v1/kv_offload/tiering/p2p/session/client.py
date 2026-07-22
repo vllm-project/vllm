@@ -11,6 +11,7 @@ callback injected by the coordinator (which gates on ConnectAck).
 
 from __future__ import annotations
 
+import enum
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
@@ -34,6 +35,20 @@ _LOAD_TIMEOUT_S = 30.0
 _ABORT_ACK_TIMEOUT_S = 10.0
 
 
+class ClientPhase(enum.Enum):
+    """Lifecycle of a request's client-side lookup/fetch signalling.
+
+    Advances monotonically. Only ``cancel_lookups`` reads it, to decide
+    whether a terminal empty FetchMsg is owed to release the peer's
+    lookup state (owed only from ``PROBING``: a LookupMsg went out but no
+    FetchMsg has since closed the peer's lookup phase).
+    """
+
+    REGISTERED = enum.auto()  # hashes in probes/unsent, nothing sent yet
+    PROBING = enum.auto()  # LookupMsg flushed, awaiting responses
+    FETCH_SENT = enum.auto()  # FetchMsg sent (real or terminal empty)
+
+
 @dataclass
 class _InboundLoadState:
     """Client-role state for a single in-flight load request.
@@ -52,9 +67,9 @@ class _ClientRequestState:
     """Per-kv_request_id client-side state.
 
     One entry per kv_request_id we're driving. Lookup-phase fields are
-    used only by symmetric P2P (``do_p2p_fetch``); PD-only loads touch
-    just ``fetch_sent`` and ``load``. An entry is dropped once every
-    field is idle — see ``ClientRole._maybe_gc``.
+    used only by symmetric P2P (``do_p2p_fetch``); PD-only loads leave
+    ``probes``/``unsent`` empty and drive just ``phase`` and ``load``. An
+    entry is dropped once every field is idle — see ``ClientRole._maybe_gc``.
     """
 
     # -- Lookup phase (symmetric P2P only; untouched for PD) --
@@ -67,17 +82,9 @@ class _ClientRequestState:
     # OffloadKeys registered but not yet flushed onto the wire. Drained and
     # cleared by the next flush_pending_lookups.
     unsent: list[OffloadKey] = field(default_factory=list)
-    # True once at least one LookupMsg has been flushed for this id, so
-    # the peer holds lookup state. cancel_lookups reads this to decide
-    # whether a terminal empty FetchMsg is owed to close the peer's
-    # lookup phase.
-    has_pending_responses: bool = False
 
-    # -- Fetch/load phase --
-    # True once we've emitted any FetchMsg for this id (real or terminal
-    # empty). cancel_lookups reads this to avoid sending a duplicate
-    # terminal FetchMsg.
-    fetch_sent: bool = False
+    # Monotonic lookup/fetch signalling phase; see ``ClientPhase``.
+    phase: ClientPhase = ClientPhase.REGISTERED
     # Set while a fetch is in flight; cleared on completion/abort/timeout.
     load: _InboundLoadState | None = None
 
@@ -134,12 +141,12 @@ class ClientRole:
     def _maybe_gc(self, kv_request_id: str) -> None:
         """Drop the entry once it holds no live load or lookup state.
 
-        The sticky ``fetch_sent`` / ``has_pending_responses`` flags are
-        only read by ``cancel_lookups``. A probe clears when its fetch is
-        issued (``request_blocks``) or when the request finishes
-        (``cancel_lookups``/``close``); in the former case ``load`` is set
-        and keeps the entry alive, in the latter the flags are no longer
-        needed — so dropping on emptiness never loses a flag still in use.
+        The sticky ``phase`` is only read by ``cancel_lookups``. A probe
+        clears when its fetch is issued (``request_blocks``) or when the
+        request finishes (``cancel_lookups``/``close``); in the former case
+        ``load`` is set and keeps the entry alive, in the latter the phase
+        is no longer needed — so dropping on emptiness never loses a phase
+        still in use.
         """
         st = self._requests.get(kv_request_id)
         if st is not None and st.load is None and not st.probes and not st.unsent:
@@ -178,7 +185,7 @@ class ClientRole:
             submitted_at=time.monotonic(),
         )
         self._active_loads.add(kv_request_id)
-        st.fetch_sent = True
+        st.phase = ClientPhase.FETCH_SENT
         self._send(
             {
                 TYPE_KEY: FetchMsg.TYPE,
@@ -335,9 +342,12 @@ class ClientRole:
             if st is None or not st.unsent:
                 continue
             # Record that the peer now holds lookup state for this id so
-            # cancel_lookups knows a terminal empty FetchMsg may be owed;
-            # idempotent across the request's multiple LookupMsgs.
-            st.has_pending_responses = True
+            # cancel_lookups knows a terminal empty FetchMsg may be owed.
+            # Only promote from REGISTERED: once a fetch has gone out
+            # (FETCH_SENT) a later LookupMsg must not regress the phase, as
+            # no terminal FetchMsg is owed for an already-fetched request.
+            if st.phase is ClientPhase.REGISTERED:
+                st.phase = ClientPhase.PROBING
             logger.debug(
                 "P2P LOOKUP client %s: SEND LookupMsg kv_request_id=%s hashes=%d",
                 self._peer_id,
@@ -397,15 +407,17 @@ class ClientRole:
         emit an empty FetchMsg purely to trigger those semantics on
         the peer.
 
-        We only send the terminal FetchMsg when a LookupMsg was actually
-        flushed (``st.has_pending_responses``): if the peer never received
-        a LookupMsg for this id, it has no state to release.
+        We only send the terminal FetchMsg from the ``PROBING`` phase: a
+        LookupMsg was flushed but no FetchMsg has since closed the peer's
+        lookup phase. In ``REGISTERED`` the peer never received a LookupMsg
+        so it has no state to release; in ``FETCH_SENT`` a FetchMsg already
+        closed it, so a second one would be a duplicate.
         """
         st = self._requests.get(kv_request_id)
         if st is None:
             return
-        if st.has_pending_responses and not st.fetch_sent:
-            st.fetch_sent = True
+        if st.phase is ClientPhase.PROBING:
+            st.phase = ClientPhase.FETCH_SENT
             self._send(
                 {
                     TYPE_KEY: FetchMsg.TYPE,
@@ -416,7 +428,6 @@ class ClientRole:
             )
         st.probes.clear()
         st.unsent.clear()
-        st.has_pending_responses = False
         self._flush_pending.discard(kv_request_id)
         self._maybe_gc(kv_request_id)
 
