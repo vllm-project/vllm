@@ -489,7 +489,7 @@ class AutoGPTQMoEMethod(FusedMoEMethodBase):
         self.wna16_moe_backend, self.experts_cls = select_wna16_moe_backend(
             moe,
             weight_key,
-            group_size=self.quant_config.group_size,
+            quant_config=self.quant_config,
             may_have_zp=not self.quant_config.is_sym,
             may_have_bias=True,
             allow_tile_padding=not self.quant_config.desc_act,
@@ -648,6 +648,26 @@ class AutoGPTQMoEMethod(FusedMoEMethodBase):
         layer.register_parameter("w2_g_idx_sort_indices", w2_g_idx_sort_indices)
         set_weight_attrs(w2_g_idx_sort_indices, extra_weight_attrs)
 
+        # Some GPTQ checkpoints contain expert biases even when the model
+        # architecture does not declare them. Zero initialization keeps
+        # checkpoints without biases equivalent to the bias-free path.
+        w13_bias = torch.nn.Parameter(
+            torch.zeros(
+                num_experts,
+                2 * intermediate_size_per_partition,
+                dtype=params_dtype,
+            ),
+            requires_grad=False,
+        )
+        layer.register_parameter("w13_bias", w13_bias)
+        set_weight_attrs(w13_bias, extra_weight_attrs)
+        w2_bias = torch.nn.Parameter(
+            torch.zeros(num_experts, hidden_size, dtype=params_dtype),
+            requires_grad=False,
+        )
+        layer.register_parameter("w2_bias", w2_bias)
+        set_weight_attrs(w2_bias, extra_weight_attrs)
+
         if self.experts_cls is not None and issubclass(
             self.experts_cls, FusedMoEExpertsModular
         ):
@@ -672,6 +692,15 @@ class AutoGPTQMoEMethod(FusedMoEMethodBase):
             "W8A8-INT8 is not supported by marlin kernel."
         )
 
+        w13_bias = getattr(layer, "w13_bias", None)
+        if "w13_bias" not in layer._loaded_expert_biases:
+            layer.register_parameter("w13_bias", None)
+            w13_bias = None
+        w2_bias = getattr(layer, "w2_bias", None)
+        if "w2_bias" not in layer._loaded_expert_biases:
+            layer.register_parameter("w2_bias", None)
+            w2_bias = None
+
         converted = convert_to_wna16_moe_kernel_format(
             backend=self.wna16_moe_backend,
             layer=layer,
@@ -683,8 +712,8 @@ class AutoGPTQMoEMethod(FusedMoEMethodBase):
             w2_scale=layer.w2_scales,
             w13_g_idx=layer.w13_g_idx,
             w2_g_idx=layer.w2_g_idx,
-            w13_bias=getattr(layer, "w13_bias", None),
-            w2_bias=getattr(layer, "w2_bias", None),
+            w13_bias=w13_bias,
+            w2_bias=w2_bias,
             w13_qzeros=getattr(layer, "w13_qzeros", None),
             w2_qzeros=getattr(layer, "w2_qzeros", None),
         )

@@ -560,7 +560,7 @@ class AutoAWQMoEMethod(FusedMoEMethodBase):
         self.wna16_moe_backend, self.experts_cls = select_wna16_moe_backend(
             moe,
             kInt4Static,
-            group_size=self.quant_config.group_size,
+            quant_config=self.quant_config,
             may_have_zp=self.quant_config.zero_point,
             may_have_bias=True,
             allow_tile_padding=True,
