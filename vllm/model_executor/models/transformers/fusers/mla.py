@@ -261,4 +261,6 @@ class MLAFuser(StackedFuser):
             replace_linear_by_name(self.q_proj_name, "colwise")
 
         replace_linear_by_name(self.kv_b_proj_name, "colwise")
+        # MLAAttention calls kv_b_proj and expects vLLM's default return_bias=True
+        module.get_submodule(self.kv_b_proj_name).return_bias = True
         replace_linear_by_name(self.o_proj_name, "rowwise")
