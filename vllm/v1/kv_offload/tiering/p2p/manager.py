@@ -28,9 +28,9 @@ from vllm.v1.kv_offload.base import (
 )
 from vllm.v1.kv_offload.file_mapper import FileMapper
 from vllm.v1.kv_offload.tiering.base import (
-    JobMetadata,
     JobResult,
     SecondaryTierManager,
+    TransferJob,
 )
 from vllm.v1.kv_offload.tiering.p2p.control import ControlTransport, ZmqTransport
 from vllm.v1.kv_offload.tiering.p2p.data import DataTransport, NixlTransport
@@ -411,7 +411,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
             return
 
     @override
-    def submit_store(self, job_metadata: JobMetadata) -> None:
+    def submit_store(self, job_metadata: TransferJob) -> None:
         job_id = job_metadata.job_id
         keys = list(job_metadata.keys)
         block_ids = job_metadata.block_ids
@@ -444,8 +444,6 @@ class P2PSecondaryTierManager(SecondaryTierManager):
             self._finished_jobs.append(JobResult(job_id=job_id, success=False))
             return
 
-
-
         # Fast path: a session has already received FetchMsg for this id,
         # so we can route the batch straight into its ServerRole.
         session = self._kv_to_session.get(kv_request_id)
@@ -472,7 +470,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         )
 
     @override
-    def submit_load(self, job_metadata: JobMetadata) -> None:
+    def submit_load(self, job_metadata: TransferJob) -> None:
         job_id = job_metadata.job_id
         keys = list(job_metadata.keys)
         block_ids = job_metadata.block_ids

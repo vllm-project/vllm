@@ -23,9 +23,9 @@ from vllm.v1.kv_offload.base import (
     RequestOffloadingContext,
 )
 from vllm.v1.kv_offload.tiering.base import (
-    JobMetadata,
     JobResult,
     SecondaryTierManager,
+    TransferJob,
 )
 
 logger = logging.getLogger(__name__)
@@ -91,7 +91,7 @@ class ExampleSecondaryTierManager(SecondaryTierManager):
         return LookupResult.HIT if key in self.blocks else LookupResult.MISS
 
     @override
-    def submit_store(self, job_metadata: JobMetadata) -> None:
+    def submit_store(self, job_metadata: TransferJob) -> None:
         """
         Submit a job to store blocks from primary tier to this tier.
 
@@ -112,13 +112,12 @@ class ExampleSecondaryTierManager(SecondaryTierManager):
             JobResult(
                 job_id=job_metadata.job_id,
                 success=True,
-                transfer_size=len(keys) * self._block_size,
                 transfer_time=0.0,
             )
         )
 
     @override
-    def submit_load(self, job_metadata: JobMetadata) -> None:
+    def submit_load(self, job_metadata: TransferJob) -> None:
         """
         Submit a job to load blocks from this tier to primary tier.
 
@@ -144,7 +143,6 @@ class ExampleSecondaryTierManager(SecondaryTierManager):
             JobResult(
                 job_id=job_metadata.job_id,
                 success=True,
-                transfer_size=len(keys) * self._block_size,
                 transfer_time=0.0,
             )
         )
