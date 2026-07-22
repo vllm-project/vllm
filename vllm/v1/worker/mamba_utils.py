@@ -41,35 +41,39 @@ def _memcpy_u64_tiled(
 ):
     """Head/body/tail memcpy with the u64 body split across ``NUM_TILES`` CTAs.
 
-    Tile 0 owns the byte head (aligning dst to 8B) and the 0-7 byte tail;
-    body tiles vectorize as u64 over the aligned interior. ``NUM_TILES=1``
-    collapses to a single-CTA memcpy. Loads pay the misaligned-sector cost
-    when ``src`` and ``dst`` don't share sub-8B alignment; stores stay
-    coalesced.
-    """
-    dst_addr_i = dst_addr.to(tl.int64)
-    head_bytes = tl.minimum(((-dst_addr_i) & 7).to(tl.int64), copy_size)
-    if tile_idx == 0:
-        head_off = tl.arange(0, 8)
-        head_mask = head_off < head_bytes
-        head_src = src_addr.to(tl.pointer_type(tl.uint8))
-        head_dst = dst_addr.to(tl.pointer_type(tl.uint8))
-        tl.store(
-            head_dst + head_off,
-            tl.load(head_src + head_off, mask=head_mask),
-            mask=head_mask,
-        )
+    Fast path (``src`` and ``dst`` share sub-8B alignment): tile 0 owns the
+    byte head that lifts dst to 8B and the 0-7 byte tail; body tiles vectorize
+    as u64 over the aligned interior. ``NUM_TILES=1`` collapses to a single-
+    CTA memcpy. Production callers derive both addresses from the same
+    ``state_base_addr + block_id * stride`` and always take this path.
 
-    # Body: u64 tiled. Rounding per_tile up to COPY_BLOCK_SIZE keeps every
-    # inner-loop iteration full-width vectorized; only the last non-empty
-    # tile can be masked. Late tiles fall off the end and iterate zero
-    # times.
-    body_bytes = copy_size - head_bytes
-    body_u64 = body_bytes // 8
-    # Skip when there is no body work: the uint64* base would otherwise be
-    # constructed on a sub-8B-aligned address, which Triton lowers to an
-    # LDG/STG with a natural-alignment assumption and CUDA rejects.
-    if body_u64 > 0:
+    Slow path (mismatched sub-8B alignment): byte-wide tiled copy. Some
+    NVIDIA parts (e.g. GB200) reject misaligned u64 loads with
+    ``cudaErrorMisalignedAddress`` instead of accepting the misaligned-sector
+    cost, so we can't just let the fast path run with a misaligned src.
+    """
+    src_addr_i = src_addr.to(tl.int64)
+    dst_addr_i = dst_addr.to(tl.int64)
+
+    if ((src_addr_i ^ dst_addr_i) & 7) == 0:
+        head_bytes = tl.minimum(((-dst_addr_i) & 7).to(tl.int64), copy_size)
+        if tile_idx == 0:
+            head_off = tl.arange(0, 8)
+            head_mask = head_off < head_bytes
+            head_src = src_addr.to(tl.pointer_type(tl.uint8))
+            head_dst = dst_addr.to(tl.pointer_type(tl.uint8))
+            tl.store(
+                head_dst + head_off,
+                tl.load(head_src + head_off, mask=head_mask),
+                mask=head_mask,
+            )
+
+        # Body: u64 tiled. Rounding per_tile up to COPY_BLOCK_SIZE keeps every
+        # inner-loop iteration full-width vectorized; only the last non-empty
+        # tile can be masked. Late tiles fall off the end and iterate zero
+        # times.
+        body_bytes = copy_size - head_bytes
+        body_u64 = body_bytes // 8
         per_tile_u64_raw = tl.cdiv(body_u64, NUM_TILES)
         per_tile_u64 = tl.cdiv(per_tile_u64_raw, COPY_BLOCK_SIZE) * COPY_BLOCK_SIZE
         tile_start = tile_idx.to(tl.int64) * per_tile_u64
@@ -83,18 +87,30 @@ def _memcpy_u64_tiled(
             data = tl.load(src_body_u64 + i + offsets, mask=mask)
             tl.store(dst_body_u64 + i + offsets, data, mask=mask)
 
-    if tile_idx == 0:
-        tail_start = head_bytes + body_u64 * 8
-        tail_bytes = copy_size - tail_start
-        tail_off = tl.arange(0, 8)
-        tail_src = (src_addr + tail_start).to(tl.pointer_type(tl.uint8))
-        tail_dst = (dst_addr + tail_start).to(tl.pointer_type(tl.uint8))
-        tail_mask = tail_off < tail_bytes
-        tl.store(
-            tail_dst + tail_off,
-            tl.load(tail_src + tail_off, mask=tail_mask),
-            mask=tail_mask,
-        )
+        if tile_idx == 0:
+            tail_start = head_bytes + body_u64 * 8
+            tail_bytes = copy_size - tail_start
+            tail_off = tl.arange(0, 8)
+            tail_src = (src_addr + tail_start).to(tl.pointer_type(tl.uint8))
+            tail_dst = (dst_addr + tail_start).to(tl.pointer_type(tl.uint8))
+            tail_mask = tail_off < tail_bytes
+            tl.store(
+                tail_dst + tail_off,
+                tl.load(tail_src + tail_off, mask=tail_mask),
+                mask=tail_mask,
+            )
+    else:
+        src_u8 = src_addr.to(tl.pointer_type(tl.uint8))
+        dst_u8 = dst_addr.to(tl.pointer_type(tl.uint8))
+        per_tile_bytes_raw = tl.cdiv(copy_size, NUM_TILES)
+        per_tile_bytes = tl.cdiv(per_tile_bytes_raw, COPY_BLOCK_SIZE) * COPY_BLOCK_SIZE
+        tile_start = tile_idx.to(tl.int64) * per_tile_bytes
+        tile_end = tl.minimum(tile_start + per_tile_bytes, copy_size)
+        offsets = tl.arange(0, COPY_BLOCK_SIZE)
+        for i in range(tile_start, tile_end, COPY_BLOCK_SIZE):
+            mask = (i + offsets) < tile_end
+            data = tl.load(src_u8 + i + offsets, mask=mask)
+            tl.store(dst_u8 + i + offsets, data, mask=mask)
 
 
 @triton.jit
