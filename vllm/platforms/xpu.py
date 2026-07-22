@@ -282,6 +282,14 @@ class XPUPlatform(Platform):
                 "XPU Graph is disabled by environment variable, "
                 "please set VLLM_XPU_ENABLE_XPU_GRAPH=1 to enable it."
             )
+        else:
+            logger.warning_once(
+                "XPU Graph support is experimental and has known limitations: "
+                "(1) only single-GPU execution is supported; "
+                "(2) FLASH_ATTN supports PIECEWISE mode only; use TRITON_ATTN "
+                "for FULL mode; "
+                "(3) graph capture may use significantly more memory than CUDA."
+            )
 
         # Disable fusion passes not yet supported on XPU.
         from vllm.config.compilation import CompilationMode
