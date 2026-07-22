@@ -44,7 +44,7 @@ class MockDistinctEndReasoningConfig:
 def _make_req_states(tokens: list[int], prompt_len: int = 1) -> RequestState:
     req_states = RequestState(
         max_num_reqs=4,
-        max_model_len=64,
+        max_model_len=max(64, len(tokens) + 1),
         max_num_batched_tokens=16,
         num_speculative_steps=4,
         vocab_size=VOCAB_SIZE,
@@ -213,3 +213,22 @@ def test_v2_thinking_budget_uses_latest_prefill_start_boundary():
     out = _apply(state, logits, input_ids=[16], local_pos=[0])
 
     assert out[0, END] == pytest.approx(1.0e9)
+
+
+def test_v2_thinking_budget_incrementally_scans_long_generation():
+    """Guard against rescanning the full token history on every decode step."""
+    tokens = [1, START, *([10] * 16382)]
+    req_states = _make_req_states(tokens)
+    state = ThinkingBudgetState(req_states, MockReasoningConfig())
+    state.add_request(3, SamplingParams(thinking_token_budget=32768))
+    state.apply_staged_writes()
+
+    _apply(state, torch.zeros((1, VOCAB_SIZE), device=DEVICE), [10], [0])
+    assert state.cached_scan_pos[3].item() == len(tokens)
+
+    req_states.all_token_ids.stage_write(3, len(tokens), [10])
+    req_states.total_len.stage_write_elem(3, len(tokens) + 1)
+    req_states.apply_staged_writes()
+    _apply(state, torch.zeros((1, VOCAB_SIZE), device=DEVICE), [10], [0])
+
+    assert state.cached_scan_pos[3].item() == len(tokens) + 1
