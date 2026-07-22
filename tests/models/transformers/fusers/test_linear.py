@@ -210,11 +210,6 @@ class FakeSelfAttn(nn.Module):
         super().__init__()
         self.impl = SimpleNamespace(scale=None)
 
-    def get_attn_backend(self):
-        # `vllm_attention_forward` asks the layer's backend whether this is MLA;
-        # a non-MLA backend selects the standard expanded-key path.
-        return SimpleNamespace(is_mla=lambda: False)
-
     def forward(self, q, k, v):
         # MHA-shaped stub: any deterministic combination of q/k/v will do
         return q + 2 * k + 3 * v
