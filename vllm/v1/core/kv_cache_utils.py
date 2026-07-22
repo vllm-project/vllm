@@ -6,6 +6,7 @@ import copy
 import hashlib
 import math
 import os
+from bisect import bisect_left
 from collections import defaultdict
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass, replace
@@ -711,12 +712,17 @@ def get_request_block_hasher(
             return []
 
         curr_mm_idx = 0
-        if start_token_idx > 0:
-            # Set curr_mm_idx = -1 to indicate the last mm input.
-            # Note that since we reach to this branch only when the block is
-            # completed with generated tokens, we only need to consider the
-            # last mm input.
-            curr_mm_idx = -1
+        mm_features = request.mm_features
+        if start_token_idx > 0 and mm_features:
+            last_pos = mm_features[-1].mm_position
+            if last_pos.offset + last_pos.length > start_token_idx:
+                curr_mm_idx = bisect_left(
+                    mm_features,
+                    start_token_idx + 1,
+                    key=lambda feature: (
+                        feature.mm_position.offset + feature.mm_position.length
+                    ),
+                )
 
         prev_block_hash_value = (
             request.block_hashes[-1] if request.block_hashes else None

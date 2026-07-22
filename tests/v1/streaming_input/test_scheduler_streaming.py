@@ -13,6 +13,8 @@ from vllm.multimodal.inputs import (
     PlaceholderRange,
 )
 from vllm.sampling_params import SamplingParams
+from vllm.utils.hashing import sha256
+from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.engine import FinishReason
 from vllm.v1.kv_cache_interface import (
@@ -35,6 +37,7 @@ class DummyRequest(Request):
         prompt_token_ids=None,
         mm_features: list[MultiModalFeatureSpec] | None = None,
         max_tokens: int | None = 16,
+        block_hasher=None,
     ):
         super().__init__(
             request_id=request_id,
@@ -44,11 +47,14 @@ class DummyRequest(Request):
             ),
             pooling_params=None,
             mm_features=mm_features,
+            block_hasher=block_hasher,
             resumable=resumable,
         )
 
 
-def create_scheduler() -> Scheduler:
+def create_scheduler(
+    block_size: int = 16, enable_prefix_caching: bool = False
+) -> Scheduler:
     vllm_config = VllmConfig(device_config=DeviceConfig("cpu"))
     vllm_config.model_config = MagicMock()
     vllm_config.model_config.skip_tokenizer_init = True
@@ -59,7 +65,7 @@ def create_scheduler() -> Scheduler:
     vllm_config.model_config.enable_return_routed_experts = False
     vllm_config.cache_config = MagicMock()
     vllm_config.cache_config.num_gpu_blocks = 1000
-    vllm_config.cache_config.enable_prefix_caching = False
+    vllm_config.cache_config.enable_prefix_caching = enable_prefix_caching
     kv_cache_config = KVCacheConfig(
         num_blocks=1000,
         kv_cache_tensors=[],
@@ -67,7 +73,10 @@ def create_scheduler() -> Scheduler:
             KVCacheGroupSpec(
                 ["layer"],
                 FullAttentionSpec(
-                    block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32
+                    block_size=block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
                 ),
             )
         ],
@@ -77,8 +86,8 @@ def create_scheduler() -> Scheduler:
         kv_cache_config=kv_cache_config,
         log_stats=True,
         structured_output_manager=StructuredOutputManager(vllm_config),
-        block_size=16,
-        hash_block_size=16,
+        block_size=block_size,
+        hash_block_size=block_size,
     )
 
 
@@ -171,6 +180,237 @@ class TestStreamingScheduler(unittest.TestCase):
         assert session._all_token_ids == [1, 2, 3, 4, 5, 6]
         assert session.sampling_params.max_tokens == 10
         assert session.status == RequestStatus.WAITING
+
+    def test_update_request_as_session_invalidates_completed_hash(self):
+        init_none_hash(sha256)
+        block_size = 4
+        block_hasher = get_request_block_hasher(block_size, sha256)
+        cases = [
+            ("before-full-boundary", [0, 1], [2]),
+            ("exactly-completes-block", [0, 1, 2], [3]),
+            ("immediately-after-boundary", list(range(4)), [4]),
+            ("starts-at-zero", [], list(range(4))),
+            (
+                "nonzero-block-boundary",
+                list(range(4)),
+                list(range(4, 8)),
+            ),
+            (
+                "multiple-retained-and-later-blocks",
+                list(range(11)),
+                list(range(11, 20)),
+            ),
+        ]
+
+        for name, kept_tokens, replacement_token_ids in cases:
+            with self.subTest(name=name):
+                scheduler = create_scheduler(block_size)
+                expected_tokens = kept_tokens + replacement_token_ids
+                session = DummyRequest(
+                    request_id=f"session-{name}",
+                    prompt_token_ids=list(kept_tokens),
+                    block_hasher=block_hasher,
+                )
+                retained_hashes = list(session.block_hashes)
+                session.append_output_token_ids(99)
+                discarded_hashes = list(session.block_hashes)
+                session.num_computed_tokens = len(kept_tokens)
+
+                update_request = DummyRequest(
+                    request_id=f"session-{name}",
+                    prompt_token_ids=replacement_token_ids,
+                )
+                scheduler._update_request_as_session(
+                    session, StreamingUpdate.from_request(update_request)
+                )
+                fresh = DummyRequest(
+                    request_id=f"fresh-{name}",
+                    prompt_token_ids=expected_tokens,
+                    block_hasher=block_hasher,
+                )
+
+                num_retained_hashes = len(kept_tokens) // block_size
+                assert list(session.all_token_ids) == expected_tokens
+                assert (
+                    session.block_hashes[:num_retained_hashes]
+                    == retained_hashes[:num_retained_hashes]
+                )
+                assert session.block_hashes == fresh.block_hashes
+
+                if len(discarded_hashes) > num_retained_hashes:
+                    assert (
+                        session.block_hashes[num_retained_hashes]
+                        != discarded_hashes[num_retained_hashes]
+                    )
+
+    def test_update_request_as_session_rehashes_multimodal_suffix(self):
+        init_none_hash(sha256)
+        block_size = 4
+        block_hasher = get_request_block_hasher(block_size, sha256)
+        scheduler = create_scheduler(block_size)
+        session = DummyRequest(
+            request_id="session",
+            prompt_token_ids=list(range(7)),
+            mm_features=[
+                MultiModalFeatureSpec(
+                    data=MultiModalKwargsItem.dummy(),
+                    modality="image",
+                    identifier="A",
+                    mm_position=PlaceholderRange(offset=4, length=2),
+                )
+            ],
+            block_hasher=block_hasher,
+        )
+        session.append_output_token_ids(99)
+        retained_hash = session.block_hashes[0]
+        session.num_computed_tokens = 7
+
+        update_request = DummyRequest(
+            request_id="session",
+            prompt_token_ids=list(range(7, 12)),
+            mm_features=[
+                MultiModalFeatureSpec(
+                    data=MultiModalKwargsItem.dummy(),
+                    modality="image",
+                    identifier="B",
+                    mm_position=PlaceholderRange(offset=0, length=1),
+                )
+            ],
+        )
+        scheduler._update_request_as_session(
+            session, StreamingUpdate.from_request(update_request)
+        )
+        fresh = DummyRequest(
+            request_id="fresh",
+            prompt_token_ids=list(range(12)),
+            mm_features=[
+                MultiModalFeatureSpec(
+                    data=MultiModalKwargsItem.dummy(),
+                    modality="image",
+                    identifier="A",
+                    mm_position=PlaceholderRange(offset=4, length=2),
+                ),
+                MultiModalFeatureSpec(
+                    data=MultiModalKwargsItem.dummy(),
+                    modality="image",
+                    identifier="B",
+                    mm_position=PlaceholderRange(offset=7, length=1),
+                ),
+            ],
+            block_hasher=block_hasher,
+        )
+
+        assert session.block_hashes[0] == retained_hash
+        assert session.block_hashes == fresh.block_hashes
+
+    def test_session_replacement_uses_only_correct_prefix_cache_identity(self):
+        init_none_hash(sha256)
+        block_size = 4
+        block_hasher = get_request_block_hasher(block_size, sha256)
+        scheduler = create_scheduler(block_size, enable_prefix_caching=True)
+        manager = scheduler.kv_cache_manager
+
+        def make_feature(
+            identifier: str, offset: int, length: int
+        ) -> MultiModalFeatureSpec:
+            return MultiModalFeatureSpec(
+                data=MultiModalKwargsItem.dummy(),
+                modality="image",
+                identifier=identifier,
+                mm_position=PlaceholderRange(offset=offset, length=length),
+            )
+
+        session = DummyRequest(
+            request_id="session",
+            prompt_token_ids=list(range(7)),
+            mm_features=[make_feature("A", 4, 2)],
+            block_hasher=block_hasher,
+        )
+        computed_blocks, num_computed_tokens, _ = manager.get_computed_blocks(session)
+        assert num_computed_tokens == 0
+        allocated = manager.allocate_slots(
+            session,
+            num_new_tokens=7,
+            num_new_computed_tokens=num_computed_tokens,
+            new_computed_blocks=computed_blocks,
+            has_scheduled_reqs=False,
+        )
+        assert allocated is not None
+        session.num_computed_tokens = 7
+        session.append_output_token_ids(99)
+        discarded_hash = session.block_hashes[1]
+
+        update_request = DummyRequest(
+            request_id="session",
+            prompt_token_ids=[7, 8],
+            mm_features=[make_feature("B", 0, 1)],
+        )
+        scheduler._update_request_as_session(
+            session, StreamingUpdate.from_request(update_request)
+        )
+
+        discarded = DummyRequest(
+            request_id="discarded",
+            prompt_token_ids=list(range(7)) + [99, 8],
+            mm_features=[make_feature("A", 4, 2)],
+            block_hasher=block_hasher,
+        )
+        mm_omitted = DummyRequest(
+            request_id="mm-omitted",
+            prompt_token_ids=list(range(9)),
+            mm_features=[make_feature("B", 7, 1)],
+            block_hasher=block_hasher,
+        )
+        replacement = DummyRequest(
+            request_id="replacement",
+            prompt_token_ids=list(range(9)),
+            mm_features=[make_feature("A", 4, 2), make_feature("B", 7, 1)],
+            block_hasher=block_hasher,
+        )
+        probes = [discarded, mm_omitted, replacement]
+
+        assert discarded.block_hashes[1] == discarded_hash
+        assert len({probe.block_hashes[1] for probe in probes}) == len(probes)
+        assert session.block_hashes == replacement.block_hashes
+        for probe in probes:
+            hit_blocks, hit_tokens, _ = manager.get_computed_blocks(probe)
+            assert hit_tokens == block_size
+            assert hit_blocks.get_block_ids()[0] == allocated.get_block_ids()[0][:1]
+            assert (
+                manager.block_pool.get_cached_block(
+                    probe.block_hashes[1], kv_cache_group_ids=[0]
+                )
+                is None
+            )
+
+        continuation_blocks = manager.allocate_slots(
+            session,
+            num_new_tokens=2,
+            has_scheduled_reqs=False,
+        )
+        assert continuation_blocks is not None
+        session.num_computed_tokens += 2
+        session_block_ids = manager.get_blocks(session.request_id).get_block_ids()[0]
+
+        for wrong_identity in (discarded, mm_omitted):
+            hit_blocks, hit_tokens, _ = manager.get_computed_blocks(wrong_identity)
+            assert hit_tokens == block_size
+            assert hit_blocks.get_block_ids()[0] == session_block_ids[:1]
+            assert (
+                manager.block_pool.get_cached_block(
+                    wrong_identity.block_hashes[1], kv_cache_group_ids=[0]
+                )
+                is None
+            )
+
+        hit_blocks, hit_tokens, _ = manager.get_computed_blocks(replacement)
+        assert hit_tokens == 2 * block_size
+        assert hit_blocks.get_block_ids()[0] == session_block_ids[:2]
+        cached_replacement = manager.block_pool.get_cached_block(
+            replacement.block_hashes[1], kv_cache_group_ids=[0]
+        )
+        assert cached_replacement is not None
+        assert cached_replacement[0].block_id == session_block_ids[1]
 
     def test_update_request_as_session_with_multimodal(self):
         scheduler = create_scheduler()

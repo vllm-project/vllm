@@ -1295,6 +1295,7 @@ class Scheduler(SchedulerInterface):
         # Current streaming input behaviour: Keep only computed output tokens
         # (discard final sampled output token).
         num_computed_tokens = session.num_computed_tokens
+        del session.block_hashes[num_computed_tokens // self.hash_block_size :]
         kept_output_tokens = session._all_token_ids[
             session.num_prompt_tokens : num_computed_tokens
         ]
