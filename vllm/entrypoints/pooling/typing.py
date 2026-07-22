@@ -143,7 +143,7 @@ class OfflinePluginInputsContext(OfflineInputsContext):
     pooling_params: PoolingParams | Sequence[PoolingParams] | None
 
 
-ALLOfflineInputsContext: TypeAlias = (
+AnyOfflineInputsContext: TypeAlias = (
     OfflineEncodeInputsContext
     | OfflineScoringInputsContext
     | OfflinePluginInputsContext
@@ -185,10 +185,10 @@ class ScoringRenderParams(RenderParams):
     max_tokens_per_doc: int
 
 
-AllRenderParam: TypeAlias = (
+AnyRenderParam: TypeAlias = (
     EncodeCMPLRenderParams | EncodeChatRenderParams | ScoringRenderParams
 )
-RequestGenerator: TypeAlias = Generator[AllRenderParam]
+RequestGenerator: TypeAlias = Generator[AnyRenderParam]
 RequestFactory: TypeAlias = Callable[[], RequestGenerator]
 
 

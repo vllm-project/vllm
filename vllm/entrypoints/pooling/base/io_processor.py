@@ -20,8 +20,8 @@ from vllm.utils.async_utils import make_async
 from vllm.utils.mistral import is_mistral_tokenizer
 
 from ..typing import (
-    ALLOfflineInputsContext,
-    AllRenderParam,
+    AnyOfflineInputsContext,
+    AnyRenderParam,
     EncodeChatRenderParams,
     EncodeCMPLRenderParams,
     OfflineEncodeInputsContext,
@@ -78,10 +78,10 @@ class PoolingIOProcessor:
 
     def get_request_factory_online(
         self, ctx: PoolingServeContext
-    ) -> Sequence[AllRenderParam]:
+    ) -> Sequence[AnyRenderParam]:
         request = ctx.request
         renderer = self.renderer
-        requests: Sequence[AllRenderParam]
+        requests: Sequence[AnyRenderParam]
 
         if isinstance(request, PoolingChatLikeRequest):
             self._validate_chat_template(
@@ -180,7 +180,7 @@ class PoolingIOProcessor:
     # offline APIs
 
     def get_request_factory_offline(
-        self, ctx: ALLOfflineInputsContext
+        self, ctx: AnyOfflineInputsContext
     ) -> tuple[RequestFactory, int]:
         assert isinstance(ctx, OfflineEncodeInputsContext)
 

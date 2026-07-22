@@ -21,9 +21,9 @@ from ...chat_utils import ChatTemplateResolutionError
 from ..base.io_processor import PoolingIOProcessor
 from ..pooling.protocol import PoolingCompletionRequest
 from ..typing import (
-    ALLOfflineInputsContext,
-    AllRenderParam,
+    AnyOfflineInputsContext,
     AnyPoolingRequest,
+    AnyRenderParam,
     EncodeChatRenderParams,
     EncodeCMPLRenderParams,
     OfflineEncodeInputsContext,
@@ -192,7 +192,7 @@ class BiEncoderIOProcessor(ScoringIOProcessor):
 
     def get_request_factory_online(
         self, ctx: PoolingServeContext
-    ) -> Sequence[AllRenderParam]:
+    ) -> Sequence[AnyRenderParam]:
         request = ctx.request
         scoring_data = self.valid_inputs_online(request)
 
@@ -251,7 +251,7 @@ class BiEncoderIOProcessor(ScoringIOProcessor):
     # offline APIs
 
     def get_request_factory_offline(
-        self, ctx: ALLOfflineInputsContext
+        self, ctx: AnyOfflineInputsContext
     ) -> tuple[RequestFactory, int]:
         assert isinstance(ctx, OfflineScoringInputsContext)
 
@@ -424,7 +424,7 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
 
     def get_request_factory_online(
         self, ctx: PoolingServeContext
-    ) -> Sequence[AllRenderParam]:
+    ) -> Sequence[AnyRenderParam]:
         request = ctx.request
         scoring_data = self.valid_inputs_online(request)
         data_1 = scoring_data.data_1
@@ -465,7 +465,7 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
     # offline APIs
 
     def get_request_factory_offline(
-        self, ctx: ALLOfflineInputsContext
+        self, ctx: AnyOfflineInputsContext
     ) -> tuple[RequestFactory, int]:
         assert isinstance(ctx, OfflineScoringInputsContext)
 
@@ -780,7 +780,7 @@ class JinaRankingIOProcessor(LateInteractionIOProcessor, JinaRankingIOProcessorM
 
     def get_request_factory_online(
         self, ctx: PoolingServeContext
-    ) -> Sequence[AllRenderParam]:
+    ) -> Sequence[AnyRenderParam]:
         request = ctx.request
         ctx.n_queries = 1
 
@@ -826,7 +826,7 @@ class JinaRankingIOProcessor(LateInteractionIOProcessor, JinaRankingIOProcessorM
         return requests
 
     def get_request_factory_offline(
-        self, ctx: ALLOfflineInputsContext
+        self, ctx: AnyOfflineInputsContext
     ) -> tuple[RequestFactory, int]:
         assert isinstance(ctx, OfflineScoringInputsContext)
 

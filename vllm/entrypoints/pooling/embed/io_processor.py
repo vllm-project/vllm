@@ -28,8 +28,8 @@ from vllm.utils.mistral import is_mistral_tokenizer
 from ..base.io_processor import PoolingIOProcessor
 from ..scoring.io_processor import JinaRankingIOProcessorMixin
 from ..typing import (
-    ALLOfflineInputsContext,
-    AllRenderParam,
+    AnyOfflineInputsContext,
+    AnyRenderParam,
     ChunkedEmbeddingMetadata,
     EncodeChatRenderParams,
     OfflineEncodeInputsContext,
@@ -81,7 +81,7 @@ class EmbedIOProcessor(PoolingIOProcessor):
 
     def get_request_factory_online(
         self, ctx: PoolingServeContext
-    ) -> Sequence[AllRenderParam]:
+    ) -> Sequence[AnyRenderParam]:
         if isinstance(ctx.request, CohereEmbedRequest):
             requests = self._get_request_factory_cohere_online(ctx)
         elif isinstance(
@@ -281,7 +281,7 @@ class EmbedIOProcessor(PoolingIOProcessor):
     def _get_request_factory_chat_input_online(
         self,
         ctx: PoolingServeContext,
-    ) -> Sequence[AllRenderParam]:
+    ) -> Sequence[AnyRenderParam]:
         request = ctx.request
         renderer = self.renderer
 
@@ -454,7 +454,7 @@ class EmbedIOProcessor(PoolingIOProcessor):
 
     def _get_request_factory_cohere_online(
         self, ctx: PoolingServeContext
-    ) -> Sequence[AllRenderParam]:
+    ) -> Sequence[AnyRenderParam]:
         """Convert a ``CohereEmbedRequest`` into engine prompts.
 
         If a model has a chat template the task instruction are rendered
@@ -551,7 +551,7 @@ class EmbedIOProcessor(PoolingIOProcessor):
         texts: list[str],
         truncate_prompt_tokens: int | None,
         truncation_side: Literal["left", "right"] | None,
-    ) -> Sequence[AllRenderParam]:
+    ) -> Sequence[AnyRenderParam]:
         request = ctx.request
         proxy = EmbeddingCompletionRequest(
             model=request.model,
@@ -572,7 +572,7 @@ class EmbedIOProcessor(PoolingIOProcessor):
         all_messages: Sequence[list[ChatCompletionMessageParam]],
         truncate_prompt_tokens: int | None,
         truncation_side: Literal["left", "right"] | None,
-    ) -> Sequence[AllRenderParam]:
+    ) -> Sequence[AnyRenderParam]:
         """Batch-render multiple conversations through the chat template."""
         request = ctx.request
         proxy = EmbeddingBatchChatRequest(
@@ -639,7 +639,7 @@ class JinaRankingTokenEmbedIOProcessor(
 ):
     def get_request_factory_online(
         self, ctx: PoolingServeContext
-    ) -> Sequence[AllRenderParam]:
+    ) -> Sequence[AnyRenderParam]:
         request = ctx.request
         if isinstance(request, PoolingCompletionLikeRequest):
             prompts = request.input
@@ -662,7 +662,7 @@ class JinaRankingTokenEmbedIOProcessor(
             raise ValueError(f"Invalid {self.name} request type")
 
     def get_request_factory_offline(
-        self, ctx: ALLOfflineInputsContext
+        self, ctx: AnyOfflineInputsContext
     ) -> tuple[RequestFactory, int]:
         assert isinstance(ctx, OfflineEncodeInputsContext)
         if not isinstance(ctx.prompts, Sequence) or len(ctx.prompts) < 2:
