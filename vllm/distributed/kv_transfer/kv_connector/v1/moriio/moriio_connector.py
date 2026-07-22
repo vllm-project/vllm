@@ -1030,6 +1030,16 @@ class MoRIIOConnectorWorker:
             use_mla=self.use_mla,
         )
         self.transfer_id_to_request_id: dict[TransferId, ReqId] = {}
+        # READ-mode producer: a decode release-ACK can arrive BEFORE
+        # start_load_kv populates transfer_id_to_request_id (the notify races
+        # ahead of the scheduler->worker sync). Buffer such ACKs and retry them
+        # next get_finished tick instead of dropping them -- dropping loses the
+        # completion, so the request is never marked done_sending, its KV blocks
+        # leak, and the prefill KV cache wedges at high concurrency. Buffered
+        # BEFORE resolve_moriio_transfer_ack, so each ACK is counted exactly once
+        # (on the tick its mapping exists) -- the heterogeneous-TP ack-counting
+        # is preserved.
+        self._pending_unmapped_acks: list = []
 
         # TODO: consider the integration of flashinfer or other backends.
         self.backend_name = backend.get_name()
@@ -1542,16 +1552,22 @@ class MoRIIOConnectorWorker:
             # pop_finished_req_ids returns release ACKs sent by decode. Keep
             # duplicate ACKs because heterogeneous TP can fan multiple decode
             # ranks into one prefill rank for the same transfer_id.
-            finished_acks = self.moriio_wrapper.pop_finished_req_ids()
+            # Combine freshly-arrived ACKs with any buffered from prior ticks
+            # whose transfer_id wasn't mapped yet (notify raced ahead of
+            # start_load_kv); retry the lookup every tick. Buffered before
+            # resolve_moriio_transfer_ack so each ACK is counted exactly once.
+            finished_acks = self._pending_unmapped_acks + list(
+                self.moriio_wrapper.pop_finished_req_ids()
+            )
+            self._pending_unmapped_acks = []
             resolved_transfer_ids: set[TransferId] = set()
             for ack in finished_acks:
                 transfer_id = ack if isinstance(ack, str) else ack.transfer_id
                 if transfer_id not in self.transfer_id_to_request_id:
-                    logger.warning(
-                        "Could not find %s in transfer_id_to_request_id "
-                        "lookup table. This could lead to a possible hang.",
-                        transfer_id,
-                    )
+                    # Mapping not populated yet -- buffer and retry next tick,
+                    # do NOT drop (dropping leaks producer KV at high conc and
+                    # wedges the prefill).
+                    self._pending_unmapped_acks.append(ack)
                     continue
                 resolved_transfer_id = resolve_moriio_transfer_ack(
                     ack,
@@ -1933,6 +1949,23 @@ class MoRIIOConnectorWorker:
             ),
         )
 
+    @staticmethod
+    def _is_sq_full_status(status) -> bool:
+        """True if a MoRIIO transfer status is a transient RDMA send-queue-full
+        rejection (retryable backpressure), not a terminal failure.
+
+        read_remote_data posts the RDMA READ synchronously (the mori executor
+        joins its worker before returning and marks the status on the calling
+        thread), so a send-queue-full rejection is a Failed() status the moment
+        the call returns. mori surfaces it as a generic ERR_RDMA_OP carrying
+        "SQ full" in the message (no distinct code), so we match the message.
+        Only meaningful once status.Failed() is True.
+        """
+        try:
+            return bool(status.Failed()) and "SQ full" in (status.Message() or "")
+        except Exception:
+            return False
+
     def _read_blocks(
         self,
         local_block_ids: list[int],
@@ -1950,6 +1983,8 @@ class MoRIIOConnectorWorker:
         dp0_engine_id = self.get_engine_name_with_dp(dst_engine_id, 0)
         sessions, remote_moriio_meta = self._get_built_session(dp0_engine_id)
 
+        # SQ-full backpressure deadline, shared across this request's layers.
+        _sq_deadline = time.monotonic() + self.moriio_config.transfer_timeout
         for layer_name in self.layer_name_to_local_kv_cache_metadata:
             sess_idx = list(self.layer_name_to_local_kv_cache_metadata.keys()).index(
                 layer_name
@@ -1962,9 +1997,35 @@ class MoRIIOConnectorWorker:
                 remote_tp_size=remote_tp_size,
             )
             # TODO : apply multi-session batch-read when moriio support it
-            transfer_status = self.moriio_wrapper.read_remote_data(
-                offs[2], offs[0], offs[1], sessions[sess_idx]
-            )
+            #
+            # SQ-full backpressure: read_remote_data posts the RDMA READ
+            # SYNCHRONOUSLY, so a send-queue-full rejection (per-QP HW cap) comes
+            # back as a Failed() status right here. A SEPARATE CQ-poll thread
+            # drains completions and frees SQ depth, so back off and RE-POST
+            # rather than let a transient rejection abort the request. No
+            # self-deadlock (the drain is off-thread); the reserve is
+            # all-or-nothing (nothing posted on a rejected attempt). Bounded by
+            # transfer_timeout; on sustained overload store the failed status and
+            # let get_finished handle it non-fatally (notify prefill + drop).
+            _backoff = 0.001
+            while True:
+                transfer_status = self.moriio_wrapper.read_remote_data(
+                    offs[2], offs[0], offs[1], sessions[sess_idx]
+                )
+                if not self._is_sq_full_status(transfer_status):
+                    break
+                if time.monotonic() > _sq_deadline:
+                    logger.warning(
+                        "MoRIIO READ send queue stayed full past "
+                        "transfer_timeout for req %s layer %s; storing failed "
+                        "status (get_finished notifies prefill and drops the "
+                        "request). Raise qp_per_transfer if frequent.",
+                        request_id,
+                        layer_name,
+                    )
+                    break
+                time.sleep(_backoff)
+                _backoff = min(_backoff * 2, 0.05)
             with self.moriio_wrapper.lock:
                 self._recving_transfers[request_id].append(transfer_status)
                 self._recving_transfers_callback_addr[request_id] = (

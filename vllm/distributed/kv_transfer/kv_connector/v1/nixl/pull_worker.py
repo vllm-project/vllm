@@ -48,7 +48,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         """
         for req_id, meta in metadata.reqs_to_recv.items():
             meta.local_physical_block_ids = self._logical_to_kernel_block_ids(
-                meta.local_block_ids
+                meta.local_block_ids, self._physical_blocks_per_logical_kv_block
             )
             assert meta.remote is not None
             # Remote block IDs are kept logical here; expanded in
@@ -134,7 +134,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         remote_info = self.transfer_topo.get_engine_info(engine_id)
         tp_ratio = self.transfer_topo.tp_ratio(remote_info.remote_tp_size)
 
-        meta.remote.block_ids = self._logical_to_remote_kernel_block_ids(
+        meta.remote.block_ids = self._logical_to_kernel_block_ids(
             meta.remote.block_ids,
             remote_info.remote_physical_blocks_per_logical,
         )
@@ -161,9 +161,9 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         ]
 
         # D may have to perform multiple reads from different remote ranks.
-        # MLA opt: when P TP > D TP, only a single read is executed for
-        # the first remote rank (cache is duplicated)..
-        if self.use_mla and tp_ratio < 0:
+        # Pure MLA reads once because its cache is replicated. Hybrid
+        # MLA+SSM still needs one read per SSM source rank.
+        if self.use_mla and tp_ratio < 0 and not self._has_mamba:
             assert len(read_specs) == 1
 
         for i, spec in enumerate(read_specs):
@@ -177,7 +177,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                 req_id,
             )
             # Get side handles.
-            if tp_ratio < 0 and not self.use_mla:
+            if tp_ratio < 0 and (not self.use_mla or len(read_specs) > 1):
                 assert remote_block_size == self.block_size
                 # Remote tp_size > local tp_size: we must perform multiple
                 # reads. Get the memory chunk onto which we will write to.
@@ -203,7 +203,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                 remote_xfer_side_handle=remote_xfer_side_handle,
             )
 
-        if self.use_mla and tp_ratio < 0 and read_specs:
+        if self.use_mla and tp_ratio < 0 and len(read_specs) == 1:
             # ..but we still need to notify the other remote ranks that we
             # have the blocks we need so they can update the request state.
             notif_id = f"{meta.remote.request_id}:{self.world_size}".encode()
