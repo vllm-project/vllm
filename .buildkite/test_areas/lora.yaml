@@ -14,7 +14,8 @@ steps:
   parallelism: 4
   mirror:
     amd:
-      device: mi325_1
+      dind: false
+      device: mi300_1
       working_dir: "/vllm-workspace/tests"
       timeout_in_minutes: 85
       source_file_dependencies:

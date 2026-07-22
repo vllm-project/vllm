@@ -71,7 +71,8 @@ steps:
   parallelism: 2
   mirror:
     amd:
-      device: mi325_1
+      dind: false
+      device: mi300_1
       timeout_in_minutes: 60
       depends_on:
       - image-build-amd

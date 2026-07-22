@@ -70,7 +70,8 @@ steps:
     - cd .. && VLLM_WORKER_MULTIPROC_METHOD=spawn pytest -v -s tests/models/multimodal/generation/test_whisper.py -m core_model  # Otherwise, mp_method="spawn" doesn't work
   mirror:
     amd:
-      device: mi325_1
+      dind: false
+      device: mi300_1
       timeout_in_minutes: 50
       depends_on:
       - image-build-amd
@@ -175,7 +176,8 @@ steps:
     - pytest -v -s models/multimodal/pooling -m 'not core_model'
   mirror:
     amd:
-      device: mi325_1
+      dind: false
+      device: mi300_1
       timeout_in_minutes: 60
       depends_on:
       - image-build-amd
