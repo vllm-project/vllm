@@ -4,6 +4,8 @@
 
 from typing import Literal
 
+from pydantic import ValidationInfo, field_validator
+
 from vllm.config.utils import config
 
 
@@ -17,11 +19,13 @@ class KVEventsConfig:
     """
 
     publisher: Literal["null", "zmq"] = None  # type: ignore[assignment]
-    """The publisher to use for publishing kv events. Can be "null", "zmq".
+    """The publisher to use for publishing kv events.
+    Can be "null" or "zmq".
     """
 
     endpoint: str = "tcp://*:5557"
-    """The zmq endpoint to use for publishing kv events.
+    """The endpoint to use for publishing kv events.
+    For ZMQ, this is the PUB endpoint.
     """
 
     replay_endpoint: str | None = None
@@ -47,6 +51,82 @@ class KVEventsConfig:
     this topic to receive events.
     """
 
+    prefix_cache_upload_endpoint: str | None = None
+    """Optional HTTP endpoint used by prefix-aware routing workers to upload
+    KV cache events to the routing master. This is a separate best-effort side
+    channel and does not replace the configured ``publisher``.
+    Example: http://master:8000/prefix_routing/kv_events/node0.
+    """
+
+    prefix_cache_upload_max_queue_size: int = 100_000
+    """Maximum number of KV event batches buffered for prefix-cache upload."""
+
+    prefix_cache_upload_timeout: float = 5.0
+    """HTTP request timeout in seconds for prefix-cache upload."""
+
+    prefix_cache_upload_snapshot_interval: float = 30.0
+    """Interval in seconds for periodic full prefix-cache snapshots.
+    Set to 0 to disable periodic snapshots.
+    """
+
+    prefix_cache_upload_token: str | None = None
+    """Bearer token used to authenticate prefix-cache HTTP uploads."""
+
+    @field_validator(
+        "prefix_cache_upload_max_queue_size",
+        "prefix_cache_upload_timeout",
+        "prefix_cache_upload_snapshot_interval",
+        mode="before",
+    )
+    @classmethod
+    def reject_boolean_upload_limits(
+        cls, value: object, info: ValidationInfo
+    ) -> object:
+        if not isinstance(value, bool):
+            return value
+        errors = {
+            "prefix_cache_upload_max_queue_size": (
+                "prefix_cache_upload_max_queue_size must be a positive integer"
+            ),
+            "prefix_cache_upload_timeout": (
+                "prefix_cache_upload_timeout must be positive"
+            ),
+            "prefix_cache_upload_snapshot_interval": (
+                "prefix_cache_upload_snapshot_interval must be non-negative"
+            ),
+        }
+        raise ValueError(errors[info.field_name])
+
     def __post_init__(self):
         if self.publisher is None:
             self.publisher = "zmq" if self.enable_kv_cache_events else "null"
+        if self.prefix_cache_upload_endpoint is not None and not (
+            isinstance(self.prefix_cache_upload_token, str)
+            and self.prefix_cache_upload_token
+        ):
+            raise ValueError(
+                "prefix_cache_upload_token must be a non-empty string when "
+                "prefix_cache_upload_endpoint is configured"
+            )
+        if self.prefix_cache_upload_endpoint is not None and (
+            not isinstance(self.prefix_cache_upload_max_queue_size, int)
+            or isinstance(self.prefix_cache_upload_max_queue_size, bool)
+            or self.prefix_cache_upload_max_queue_size <= 0
+        ):
+            raise ValueError(
+                "prefix_cache_upload_max_queue_size must be a positive integer"
+            )
+        if self.prefix_cache_upload_endpoint is not None and (
+            not isinstance(self.prefix_cache_upload_timeout, int | float)
+            or isinstance(self.prefix_cache_upload_timeout, bool)
+            or self.prefix_cache_upload_timeout <= 0
+        ):
+            raise ValueError("prefix_cache_upload_timeout must be positive")
+        if self.prefix_cache_upload_endpoint is not None and (
+            not isinstance(self.prefix_cache_upload_snapshot_interval, int | float)
+            or isinstance(self.prefix_cache_upload_snapshot_interval, bool)
+            or self.prefix_cache_upload_snapshot_interval < 0
+        ):
+            raise ValueError(
+                "prefix_cache_upload_snapshot_interval must be non-negative"
+            )
