@@ -19,6 +19,8 @@ from vllm.platforms import current_platform
 
 from .gsm8k_eval import evaluate_gsm8k
 
+DEFAULT_STARTUP_MAX_WAIT_SECONDS = 1200
+
 
 def run_gsm8k_eval(eval_config: dict, server_url: str) -> dict:
     """Run GSM8K evaluation using our isolated script."""
@@ -49,9 +51,15 @@ def run_gsm8k_eval(eval_config: dict, server_url: str) -> dict:
         num_questions=eval_config["num_questions"],
         num_shots=eval_config["num_fewshot"],
         max_tokens=eval_config.get("max_tokens", 256),
+        model=eval_config["model_name"],
+        use_chat_completions=eval_config.get("use_chat_completions", False),
         host=host,
         port=port,
+        temperature=eval_config.get("temperature", 0.0),
+        seed=eval_config.get("seed", 42),
         request_timeout_seconds=request_timeout_seconds,
+        gen_prefix=eval_config.get("gen_prefix", ""),
+        max_concurrency=eval_config.get("max_concurrency"),
     )
 
     return results
@@ -68,6 +76,15 @@ def test_gsm8k_correctness(config_filename):
         pytest.skip(
             "Skipping Qwen3-30B-A3B-MXFP4A16 on non-CUDA platforms. "
             "Marlin kernels are not supported."
+        )
+
+    if (
+        not current_platform.is_cuda()
+        and "gemma-4-E4B-it-qat-mobile-ct" in eval_config["model_name"]
+    ):
+        pytest.skip(
+            "Skipping gemma-4-E4B-it-qat-mobile-ct on non-CUDA platforms. "
+            "Its W2A16 (uint2b2) scheme has no kernel outside CUDA."
         )
 
     # TODO(akaratza): Enable DeepSeek-V3.2 and DeepSeek-R1 on ROCm platforms
@@ -101,7 +118,11 @@ def test_gsm8k_correctness(config_filename):
         ]
     )
 
-    env_dict = eval_config.get("env", None)
+    startup_max_wait_seconds = eval_config.get(
+        "startup_max_wait_seconds", DEFAULT_STARTUP_MAX_WAIT_SECONDS
+    )
+    env_dict = dict(eval_config.get("env") or {})
+    env_dict["VLLM_ENGINE_READY_TIMEOUT_S"] = str(int(startup_max_wait_seconds))
 
     print(f"Starting GSM8K evaluation for model: {eval_config['model_name']}")
     print(f"Expected metric threshold: {eval_config['accuracy_threshold']}")
@@ -113,6 +134,7 @@ def test_gsm8k_correctness(config_filename):
             "rocm_request_timeout_seconds", request_timeout_seconds
         )
     print(f"Request timeout: {request_timeout_seconds}s")
+    print(f"Startup max wait: {startup_max_wait_seconds}s")
     print(f"Server args: {' '.join(server_args)}")
     print(f"Environment variables: {env_dict}")
 
@@ -121,7 +143,7 @@ def test_gsm8k_correctness(config_filename):
         eval_config["model_name"],
         server_args,
         env_dict=env_dict,
-        max_wait_seconds=eval_config.get("startup_max_wait_seconds", 600),
+        max_wait_seconds=startup_max_wait_seconds,
     ) as remote_server:
         server_url = remote_server.url_for("v1")
         print(f"Server started at: {server_url}")

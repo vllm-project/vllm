@@ -86,6 +86,7 @@ only apply to model-based methods such as `draft_model`, `mtp`, `eagle3`, and
 | `parallel_drafting` | `boolean` | `false` | Enable parallel draft token generation. Only compatible with EAGLE and draft-model methods. |
 | `rejection_sample_method` | `string` | `strict` | `strict`, `probabilistic`, or `synthetic`. |
 | `synthetic_acceptance_rate` | `float` | `None` | Average acceptance rate to target when `rejection_sample_method` is `synthetic`. Valid range is `[0, 1]`. |
+ | `use_heterogeneous_vocab` | `boolean` | `false` | Allow draft and target models with different vocabularies. Builds a token-level intersection at initialisation and constrains draft logits to shared tokens only. Only compatible with `method=draft_model`. Probabilistic draft sampling (`draft_sample_method='probabilistic'`) is not yet supported when this option is enabled. |
 
 !!! note
     Gemma 4 assistant checkpoints are handled as Gemma 4 MTP speculators, not
@@ -142,6 +143,33 @@ vllm serve <target-model> \
   }'
 ```
 
+#### Cross-Vocabulary Draft Models (TLI)
+
+  By default, vLLM requires the draft and target models to share the same
+  vocabulary. Setting `use_heterogeneous_vocab: true` enables the
+  **Token-Level Intersection (TLI)** algorithm, which allows draft models
+  from a different model family with a different tokenizer.
+
+  At initialisation, vLLM builds a mapping between the two vocabularies by
+  normalising token strings and computing their intersection. Draft logits are
+  constrained to the shared tokens before sampling, and the sampled token IDs
+  are translated to the target vocabulary before rejection sampling.
+
+  ```python
+  from vllm import LLM, SamplingParams
+
+  llm = LLM(
+      model="Qwen/Qwen3-8B",
+      speculative_config={                               
+          "method": "draft_model",
+          "model": "HuggingFaceTB/SmolLM2-135M-Instruct",
+          "num_speculative_tokens": 3,
+          "use_heterogeneous_vocab": True,
+      },
+      gpu_memory_utilization=0.5,
+  )
+```
+
 ### Notes
 
 - `--speculative-config` expects a JSON object on the CLI. In YAML config
@@ -153,6 +181,7 @@ vllm serve <target-model> \
 - Internal fields such as `target_model_config`, `draft_model_config`,
   `target_parallel_config`, `draft_parallel_config`, and `draft_load_config`
   are populated by vLLM and are not intended to be set by users.
+- `use_heterogeneous_vocab` currently supports greedy draft sampling only. Probabilistic acceptance (temperature > 0 draft sampling) is not yet supported and will be added in a future release.
 
 ## Lossless guarantees of Speculative Decoding
 
@@ -190,7 +219,7 @@ For mitigation strategies, please refer to the FAQ entry *Can the output of a pr
 
 ## Known Feature Incompatibility
 
-1. Pipeline parallelism is not composible with speculative decoding as of `vllm<=0.15.0`
+1. Pipeline parallelism is not composable with speculative decoding as of `vllm<=0.15.0`
 2. Speculative decoding with a draft models is not supported in `vllm<=0.10.0`
 
 ## Resources for vLLM contributors

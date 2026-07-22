@@ -38,6 +38,7 @@ from vllm.inputs import ModalityData, MultiModalDataDict, PromptType, TokensProm
 from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import (
     MultiModalEmbeddings,
+    StreamingTranscriptionPostProcessor,
     SupportsLoRA,
     SupportsMRoPE,
     SupportsMultiModal,
@@ -45,9 +46,12 @@ from vllm.model_executor.models.interfaces import (
     SupportsTranscription,
 )
 from vllm.model_executor.models.module_mapping import MultiModelKeys
+from vllm.model_executor.models.qwen2_5_omni_thinker import (
+    Qwen2_5OmniAudioFeatureInputs,
+    unpad_and_flat_audio_features,
+)
 from vllm.model_executor.models.qwen3 import Qwen3ForCausalLM
 from vllm.model_executor.models.qwen3_omni_moe_thinker import (
-    Qwen2_5OmniAudioFeatureInputs,
     Qwen3OmniMoeAudioEncoder,
     Qwen3OmniMoeThinkerMultiModalProcessor,
 )
@@ -93,6 +97,53 @@ logger = init_logger(__name__)
 _ASR_TEXT_TAG = "<asr_text>"
 # User-supplied `prompt` / `response_prefix` must not inject extra ChatML turns.
 _CHATML_LIKE_TOKEN = re.compile(r"<\|[^|]+\|>")
+_LANGUAGE_PREFIX = "language "
+_MAX_STREAMING_PREFIX_CHARS = 50
+
+
+def _post_process_qwen3_asr_output(text: str) -> str:
+    if not text or _ASR_TEXT_TAG not in text:
+        return text
+
+    _, text_part = text.rsplit(_ASR_TEXT_TAG, 1)
+    return text_part
+
+
+class Qwen3ASRStreamingPostProcessor(StreamingTranscriptionPostProcessor):
+    def __init__(self) -> None:
+        self.raw_text = ""
+        self.emitted_text = ""
+        self.is_structured_output: bool | None = None
+
+    def process_delta(self, text_delta: str, finished: bool) -> str:
+        self.raw_text += text_delta
+
+        if self.is_structured_output is None:
+            text_without_leading_space = self.raw_text.lstrip()
+            maybe_structured_output = (
+                text_without_leading_space == ""
+                or _LANGUAGE_PREFIX.startswith(text_without_leading_space)
+                or (
+                    text_without_leading_space.startswith(_LANGUAGE_PREFIX)
+                    and len(text_without_leading_space) < _MAX_STREAMING_PREFIX_CHARS
+                    and "\n" not in text_without_leading_space
+                )
+            )
+            if maybe_structured_output and _ASR_TEXT_TAG not in self.raw_text:
+                if not finished:
+                    return ""
+                self.is_structured_output = False
+            else:
+                self.is_structured_output = _ASR_TEXT_TAG in self.raw_text
+
+        processed_text = (
+            _post_process_qwen3_asr_output(self.raw_text)
+            if self.is_structured_output
+            else self.raw_text
+        )
+        new_text = processed_text[len(self.emitted_text) :]
+        self.emitted_text = processed_text
+        return new_text
 
 
 def _sanitize_transcription_user_text(text: str) -> str:
@@ -315,6 +366,11 @@ class Qwen3ASRForConditionalGeneration(
             "thinker.lm_head.": "language_model.lm_head.",
             "thinker.model.": "language_model.model.",
             "thinker.": "",
+            # HF format mapper
+            "model.audio_tower.": "audio_tower.",
+            "model.language_model.": "language_model.model.",
+            "model.multi_modal_projector.linear_1.": "audio_tower.proj1.",
+            "model.multi_modal_projector.linear_2.": "audio_tower.proj2.",
         }
     )
 
@@ -363,6 +419,17 @@ class Qwen3ASRForConditionalGeneration(
         feature_attention_mask = kwargs.pop("feature_attention_mask", None)
         if input_audio_features is None:
             return None
+
+        # inputs features from rust frontend is batched and padded
+        # with shape [batch_size, n_mels, padded_seq_len], different
+        # from python's shape [n_mels, batch_size * seq_len]
+        if (
+            isinstance(input_audio_features, torch.Tensor)
+            and input_audio_features.dim() == 3
+        ):
+            input_audio_features = unpad_and_flat_audio_features(
+                input_audio_features, audio_feature_lengths
+            )
 
         return Qwen2_5OmniAudioFeatureInputs(
             type="audio_features",
@@ -632,12 +699,10 @@ class Qwen3ASRForConditionalGeneration(
         The model outputs in format: "language {lang}<asr_text>{transcription}"
         This method strips the language prefix and asr_text tags.
         """
-        if not text:
-            return ""
+        return _post_process_qwen3_asr_output(text)
 
-        if _ASR_TEXT_TAG not in text:
-            return text
-
-        # Split on <asr_text> tag and take the transcription part
-        _, text_part = text.rsplit(_ASR_TEXT_TAG, 1)
-        return text_part
+    @classmethod
+    def get_streaming_post_processor_cls(
+        cls,
+    ) -> type[StreamingTranscriptionPostProcessor]:
+        return Qwen3ASRStreamingPostProcessor

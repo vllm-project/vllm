@@ -43,7 +43,10 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8Static128BlockSym,
     kFp8StaticChannelSym,
     kFp8StaticTensorSym,
+    kInt4Static,
+    kInt4Static32,
     kInt8DynamicTokenSym,
+    kInt8Static,
     kInt8StaticChannelSym,
 )
 from vllm.platforms import current_platform
@@ -245,7 +248,7 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
             lora_unquantized_hidden_states = hidden_states
             hidden_states, a1q_scale = moe_kernel_quantize_input(
                 hidden_states,
-                self.a1_scale or self.a1_gscale,
+                self.a1_scale,
                 self.quant_dtype,
                 self.per_act_token_quant,
                 self.block_shape,
@@ -332,12 +335,23 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
         else:
             lora_x = hidden_states
 
+        # TODO: The fallback to self.a1_scale was added for deferred static
+        # activation quantization in https://github.com/vllm-project/vllm/pull/40857.
+        # Activation emulation relies solely on `a1q_scale` output of
+        # `moe_kernel_quantize_input` - this should be adapted to
+        # always solely rely on `a1q_scale`.
+        input_scale = (
+            a1q_scale
+            if self.quantization_emulation
+            else (a1q_scale if a1q_scale is not None else self.a1_scale)
+        )
+
         def _base_w13_fn():
             invoke_fused_moe_triton_kernel(
                 hidden_states,
                 w1,
                 intermediate_cache1,
-                a1q_scale if a1q_scale is not None else self.a1_scale,
+                input_scale,
                 self.w1_scale,
                 None,  # topk_weights
                 sorted_token_ids,
@@ -531,40 +545,45 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
 class TritonWNA16Experts(TritonExperts):
     @staticmethod
     def _supports_current_device() -> bool:
-        raise NotImplementedError(
-            "TritonWNA16Experts is not yet used by an Oracle. "
-            "This method should not be called."
-        )
+        return current_platform.is_cuda_alike() or current_platform.is_xpu()
 
     @staticmethod
     def _supports_no_act_and_mul() -> bool:
-        raise NotImplementedError(
-            "TritonWNA16Experts is not yet used by an Oracle. "
-            "This method should not be called."
-        )
+        return True
 
     @staticmethod
     def _supports_quant_scheme(
         weight_key: QuantKey | None,
         activation_key: QuantKey | None,
     ) -> bool:
-        raise NotImplementedError(
-            "TritonWNA16Experts is not yet used by an Oracle. "
-            "This method should not be called."
-        )
+        SUPPORTED_W = [
+            kInt4Static,
+            kInt8Static,
+            kInt4Static32,
+            # other group sizes?
+        ]
+        return weight_key in SUPPORTED_W
 
     @staticmethod
     def _supports_activation(activation: MoEActivation) -> bool:
-        raise NotImplementedError(
-            "TritonWNA16Experts is not yet used by an Oracle. "
-            "This method should not be called."
-        )
+        return activation in [
+            MoEActivation.SILU,
+            MoEActivation.GELU,
+            MoEActivation.GELU_TANH,
+            MoEActivation.SWIGLUOAI,
+            MoEActivation.SWIGLUSTEP,
+            MoEActivation.SILU_NO_MUL,
+            MoEActivation.GELU_NO_MUL,
+            MoEActivation.GELU_TANH_NO_MUL,
+            MoEActivation.RELU2_NO_MUL,
+        ]
 
     @staticmethod
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
-        raise NotImplementedError(
-            "TritonWNA16Experts is not yet used by an Oracle. "
-            "This method should not be called."
+        # Why?
+        return not (
+            moe_parallel_config.use_fi_nvl_two_sided_kernels
+            or moe_parallel_config.use_fi_nvl_one_sided_kernels
         )
 
     def apply(
@@ -587,7 +606,9 @@ class TritonWNA16Experts(TritonExperts):
     ):
         # Check constraints.
         if self.quant_config.use_int4_w4a16:
-            assert hidden_states.size(-1) // 2 == w1.size(2), "Hidden size mismatch"
+            assert hidden_states.size(-1) // 2 == w1.size(2), (
+                f"Hidden size mismatch {hidden_states.size(-1) // 2} == {w1.size(2)}"
+            )
         else:
             assert hidden_states.size(-1) == w1.size(2), (
                 f"Hidden size mismatch {hidden_states.size(-1)} != {w1.size(2)}"

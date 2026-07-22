@@ -127,7 +127,12 @@ void swap_blocks_batch(const torch::stable::Tensor& src_ptrs,
     return reinterpret_cast<BatchFn>(fn_ptr);
   }();
 
-  if (batch_fn != nullptr) {
+  // cuMemcpyBatchAsync rejects the legacy default stream (handle 0 /
+  // cudaStreamLegacy) with CUDA_ERROR_INVALID_VALUE; route it to the per-copy
+  // fallback below, which is correct on any stream. Real and per-thread-default
+  // streams take the batch fast path.
+  const bool usable_stream = stream != nullptr && stream != cudaStreamLegacy;
+  if (batch_fn != nullptr && usable_stream) {
     CUmemcpyAttributes attr = {};
     // ANY lets the DMA engine prefetch source bytes out of stream order,
     // which is only safe when no GPU stream is concurrently writing the
@@ -1169,7 +1174,8 @@ __global__ void cp_gather_and_upconvert_fp8_kv_cache(
     const int32_t num_reqs, const int32_t block_size,
     const int32_t total_tokens, const int64_t block_table_stride,
     const int64_t cache_block_stride, const int64_t cache_entry_stride,
-    const int64_t dst_entry_stride) {
+    const int64_t dst_entry_stride,
+    const int32_t* __restrict__ seq_starts) {  // Optional source offsets
   const int flat_warp_id = (blockIdx.x * blockDim.x + threadIdx.x) >> 5;
   if (flat_warp_id >= total_tokens) return;
   const int lane_id = threadIdx.x & 31;
@@ -1187,7 +1193,8 @@ __global__ void cp_gather_and_upconvert_fp8_kv_cache(
 
   // Compute physical token address via block table
   const int out_token_id = flat_warp_id;
-  const int token_offset = out_token_id - workspace_starts[req_id];
+  int token_offset = out_token_id - workspace_starts[req_id];
+  if (seq_starts != nullptr) token_offset += seq_starts[req_id];
   const int cache_block_idx = token_offset / block_size;
   const int offset_in_block = token_offset % block_size;
   const int physical_block =
@@ -1378,9 +1385,9 @@ void cp_gather_and_upconvert_fp8_kv_cache(
     torch::stable::Tensor const& src_cache,    // [NUM_BLOCKS, BLOCK_SIZE, 656]
     torch::stable::Tensor const& dst,          // [TOT_TOKENS, 576]
     torch::stable::Tensor const& block_table,  // [BATCH, BLOCK_INDICES]
-    torch::stable::Tensor const& seq_lens,     // [BATCH]
     torch::stable::Tensor const& workspace_starts,  // [BATCH]
-    int64_t batch_size) {
+    int64_t batch_size,
+    std::optional<torch::stable::Tensor> seq_starts = std::nullopt) {
   torch::stable::accelerator::DeviceGuard device_guard(
       src_cache.get_device_index());
   const cudaStream_t stream = get_current_cuda_stream();
@@ -1391,20 +1398,25 @@ void cp_gather_and_upconvert_fp8_kv_cache(
   STD_TORCH_CHECK(
       block_table.scalar_type() == torch::headeronly::ScalarType::Int,
       "block_table must be int32");
-  STD_TORCH_CHECK(seq_lens.scalar_type() == torch::headeronly::ScalarType::Int,
-                  "seq_lens must be int32");
   STD_TORCH_CHECK(
       workspace_starts.scalar_type() == torch::headeronly::ScalarType::Int,
       "workspace_starts must be int32");
+  if (seq_starts.has_value()) {
+    STD_TORCH_CHECK(
+        seq_starts.value().scalar_type() == torch::headeronly::ScalarType::Int,
+        "seq_starts must be int32");
+  }
 
   STD_TORCH_CHECK(src_cache.device() == dst.device(),
                   "src_cache and dst must be on the same device");
   STD_TORCH_CHECK(src_cache.device() == block_table.device(),
                   "src_cache and block_table must be on the same device");
-  STD_TORCH_CHECK(src_cache.device() == seq_lens.device(),
-                  "src_cache and seq_lens must be on the same device");
   STD_TORCH_CHECK(src_cache.device() == workspace_starts.device(),
                   "src_cache and workspace_starts must be on the same device");
+  if (seq_starts.has_value()) {
+    STD_TORCH_CHECK(src_cache.device() == seq_starts.value().device(),
+                    "src_cache and seq_starts must be on the same device");
+  }
   auto dtype = src_cache.scalar_type();
   STD_TORCH_CHECK(
       dtype == torch::headeronly::ScalarType::Byte ||               // uint8
@@ -1433,6 +1445,9 @@ void cp_gather_and_upconvert_fp8_kv_cache(
   constexpr int warps_per_block = 8;
   const int grid_size = (total_tokens + warps_per_block - 1) / warps_per_block;
   const int block_size_threads = warps_per_block * 32;  // 256 threads
+  const int32_t* seq_starts_ptr =
+      seq_starts.has_value() ? seq_starts.value().const_data_ptr<int32_t>()
+                             : nullptr;
 
   vllm::cp_gather_and_upconvert_fp8_kv_cache<<<grid_size, block_size_threads, 0,
                                                stream>>>(
@@ -1441,7 +1456,7 @@ void cp_gather_and_upconvert_fp8_kv_cache(
       workspace_starts.const_data_ptr<int32_t>(),
       static_cast<int32_t>(batch_size), block_size, total_tokens,
       block_table_stride, cache_block_stride, cache_entry_stride,
-      dst_entry_stride);
+      dst_entry_stride, seq_starts_ptr);
 }
 
 // Macro to dispatch the kernel based on the data type.
