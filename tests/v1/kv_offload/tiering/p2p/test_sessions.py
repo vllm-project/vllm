@@ -882,6 +882,17 @@ class TestLookupFlow:
 
         session.register_lookup("req-1", b"hA")
         session.flush_pending_lookups()
+        # Resolve the probe to a HIT before fetching, as the manager only
+        # loads confirmed hits (an unresolved probe yields RETRY).
+        conn.enqueue(
+            {
+                TYPE_KEY: LookupRespMsg.TYPE,
+                LookupRespMsg.KV_REQUEST_ID: "req-1",
+                LookupRespMsg.BLOCK_HASHES: [b"hA"],
+                LookupRespMsg.HITS: [True],
+            }
+        )
+        session.poll()
         session.request_blocks(
             job_id=1, kv_request_id="req-1", keys=[b"hA"], block_ids=[7]
         )

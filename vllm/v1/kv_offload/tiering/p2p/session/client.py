@@ -194,14 +194,18 @@ class ClientRole:
                 FetchMsg.BLOCK_INDEXES: [int(idx) for idx in block_ids],
             }
         )
-        # Consume the probe cache for the fetched hashes. Once the peer
-        # serves this fetch both sides unpin, so the producer may evict the
-        # block; a stale cached True would otherwise let a re-scheduled
-        # lookup() return HIT without re-probing, pointing at a block the
-        # producer no longer holds. Dropping the entries forces a fresh
-        # LookupMsg on re-schedule so the producer answers from current state.
-        for key in keys:
-            st.probes.pop(OffloadKey(key), None)
+        # Issuing the fetch ends this request's lookup phase, so drop all
+        # probe state. Once the peer serves this fetch both sides unpin, so
+        # the producer may evict the block; a stale cached True would
+        # otherwise let a re-scheduled lookup() return HIT without
+        # re-probing, pointing at a block the producer no longer holds.
+        # Clearing forces a fresh LookupMsg on re-schedule so the producer
+        # answers from current state. For a symmetric-P2P request (probes
+        # populated) every fetched block was a confirmed HIT; a PD-only load
+        # never probes, so probes is empty and the clear is a no-op.
+        if st.probes:
+            assert all(st.probes.get(OffloadKey(key)) is True for key in keys)
+        st.probes.clear()
 
     def cancel(self, kv_request_id: str) -> None:
         """Cancel a pending load. Sends AbortFetchMsg if still active."""
