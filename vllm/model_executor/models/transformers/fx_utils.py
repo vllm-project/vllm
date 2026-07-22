@@ -49,7 +49,32 @@ def _infer_len(node: fx.Node, root: nn.Module | None) -> int | None:
     # Nodes wrapped with `_as_leaf_call` declare their length explicitly.
     if node.op == "call_function" and node.target in _LEAF_CALL_LENGTHS:
         return _LEAF_CALL_LENGTHS[node.target]
+    # `topk` returns a `(values, indices)` pair.
+    if is_op(node, "topk"):
+        return 2
+    # A submodule call has the arity of the child's own traced output.
+    if node.op == "call_module" and root is not None:
+        try:
+            child = root.get_submodule(str(node.target))
+        except AttributeError:
+            return None
+        return _module_arity(child)
     return None
+
+
+_MODULE_ARITY: dict[type, int | None] = {}
+
+
+def _module_arity(module: nn.Module) -> int | None:
+    """Number of values `module.forward` returns, read from its trace (cached)."""
+    cls = type(module)
+    if cls not in _MODULE_ARITY:
+        _MODULE_ARITY[cls] = None  # terminates recursive module structures
+        graph = trace(module)
+        value = output_value(graph) if graph is not None else None
+        if isinstance(value, (tuple, list)):
+            _MODULE_ARITY[cls] = len(value)
+    return _MODULE_ARITY[cls]
 
 
 def is_leaf_call(node: object) -> bool:
@@ -109,15 +134,33 @@ def _rank(node: object, root: nn.Module | None) -> int | None:
     return None
 
 
-class _SizedProxy(fx.Proxy):
-    """Proxy whose `len` is inferred from the graph (see `_infer_len`)."""
+class _SizedMixin:
+    """`len` support for proxies, inferred from the graph (see `_infer_len`)."""
+
+    node: fx.Node
+    tracer: fx.Tracer
 
     def __len__(self) -> int:
         assert isinstance(self.tracer, _AllLeafTracer)
         length = self.tracer.infer_len(self.node)
         if length is None:
-            return super().__len__()
+            return super().__len__()  # type: ignore[misc]
         return length
+
+    def __getattr__(self, k: str) -> "_SizedAttribute":
+        return _SizedAttribute(self, k)
+
+
+class _SizedProxy(_SizedMixin, fx.Proxy):
+    """Proxy whose `len` is inferred from the graph."""
+
+
+class _SizedAttribute(_SizedMixin, fx.proxy.Attribute):
+    """Attribute proxy (e.g. `x.shape`) whose `len` is inferred from the graph.
+
+    `Proxy.__getattr__` constructs `Attribute` directly, bypassing
+    `Tracer.proxy`, so sized `len` must be grafted on here too.
+    """
 
 
 class _AllLeafTracer(fx.Tracer):

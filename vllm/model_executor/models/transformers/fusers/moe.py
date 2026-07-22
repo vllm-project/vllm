@@ -8,7 +8,6 @@ import textwrap
 import types
 from collections.abc import Iterator
 from dataclasses import dataclass
-from itertools import chain
 
 import torch
 from torch import fx, nn
@@ -21,12 +20,8 @@ from vllm.model_executor.models.transformers.fx_utils import (
     peel,
     trace,
 )
+from vllm.model_executor.models.transformers.utils import named_state
 from vllm.model_executor.models.utils import maybe_prefix, sequence_parallel_chunk
-
-
-def named_state(module: nn.Module) -> Iterator[tuple[str, torch.Tensor]]:
-    """`module`'s own state (i.e. named parameters and buffers)."""
-    return chain(module.named_parameters(), module.named_buffers())
 
 
 def _own_returns(node: ast.AST) -> Iterator[ast.Return]:
@@ -135,14 +130,17 @@ class MoEBlockFuser:
     @staticmethod
     def _match_router(gate: nn.Module) -> str | None:
         """Matches `topk(score(linear(x)))`, `score` being `softmax`/`sigmoid`."""
-        if [name for name, _ in named_state(gate)] != ["weight"]:
+        state = {name for name, _ in named_state(gate)}
+        if "weight" not in state or state - {"weight", "e_score_correction_bias"}:
             return None
         graph = trace(gate)
         if graph is None:
             return None
-        topk = find_node(graph, lambda n: is_op(n, "topk"))
-        if topk is None:
+        # The routing top-k is the last one; any earlier one scores expert groups.
+        topks = [node for node in graph.nodes if is_op(node, "topk")]
+        if not topks:
             return None
+        topk = topks[-1]
         # Exactly one scoring op upstream of the top-k, fed (transitively) by a linear.
         scorers = [
             n
@@ -233,13 +231,16 @@ class MoEBlockFuser:
 
     def gate(self, moe_block: nn.Module, prefix: str) -> ReplicatedLinear:
         """Rebuild the HF gate as a `ReplicatedLinear` for vLLM's fused MoE."""
-        num_experts, hidden_size = getattr(moe_block, self.gate_name).weight.shape
+        hf_gate = getattr(moe_block, self.gate_name)
+        num_experts, hidden_size = hf_gate.weight.shape
         gate = ReplicatedLinear(
             hidden_size,
             num_experts,
             bias=False,
             prefix=maybe_prefix(prefix, self.gate_name),
         )
+        if (bias := getattr(hf_gate, "e_score_correction_bias", None)) is not None:
+            gate.register_buffer("e_score_correction_bias", bias)
         setattr(moe_block, self.gate_name, gate)
         return gate
 

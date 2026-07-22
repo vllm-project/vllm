@@ -62,6 +62,7 @@ from vllm.model_executor.models.transformers.utils import (
     get_feature_request_tip,
     init_on_device_without_buffers,
     log_replacement,
+    named_state,
     replace_conv_class,
     replace_linear_class,
 )
@@ -199,6 +200,9 @@ class Base(
 
         # Initialize any parameters that have not had their modules replaced
         self.init_parameters(self.model)
+
+        # Upcast weights Transformers always keeps in fp32
+        self.keep_in_fp32(self.model)
 
         # Pipeline parallel intermediate tensors
         self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
@@ -658,6 +662,18 @@ class Base(
                 _init_parameters(child)
 
         _init_parameters(module)
+
+    def keep_in_fp32(self, module: nn.Module):
+        """Honor `_keep_in_fp32_modules_strict` as `from_pretrained` would."""
+        if self.model_config.dtype not in (torch.float16, torch.bfloat16):
+            return
+        fragments = getattr(module, "_keep_in_fp32_modules_strict", None)
+        if not fragments:
+            return
+        pattern = re.compile("|".join(re.escape(f) for f in fragments))
+        for name, tensor in named_state(module):
+            if not hasattr(tensor, "weight_loader") and pattern.search(name):
+                tensor.data = tensor.data.to(torch.float32)
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.get_input_embeddings()(input_ids)
