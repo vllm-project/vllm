@@ -18,6 +18,7 @@ from vllm.v1.structured_output.backend_types import (
     StructuredOutputOptions,
 )
 from vllm.v1.structured_output.backend_xgrammar import XgrammarBackend
+from vllm.v1.structured_output.utils import grammar_compile_max_workers
 
 if TYPE_CHECKING:
     import numpy as np
@@ -69,13 +70,15 @@ class StructuredOutputManager:
             self.executor_for_fillmask = ThreadPoolExecutor(max_workers=max_workers)
 
         if not self.vllm_config.model_config.skip_tokenizer_init:
-            # The default max_workers if not specified is the number of
-            # CPUs * 5, which is way too high since these tasks are CPU-bound,
-            # not I/O bound. We also know we would never dominate CPU usage
-            # with just grammar compilation, so we set it to half the number
-            # of CPUs.
-            max_workers = max(1, (multiprocessing.cpu_count() + 1) // 2)
-            self.executor = ThreadPoolExecutor(max_workers=max_workers)
+            # Grammar compilation is CPU-bound, so the pool is capped at 8
+            # workers like the fill-bitmask pool above rather than scaling
+            # with the (cgroup-unaware) host CPU count, which oversubscribes
+            # container CPU quotas and stalls the engine loop through CFS
+            # throttling. Override with
+            # VLLM_STRUCTURED_OUTPUT_MAX_COMPILE_WORKERS if needed.
+            self.executor = ThreadPoolExecutor(
+                max_workers=grammar_compile_max_workers()
+            )
             self.tokenizer = cached_tokenizer_from_config(
                 model_config=self.vllm_config.model_config
             )

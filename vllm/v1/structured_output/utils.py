@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib.metadata
+import multiprocessing
 import os
 import sqlite3
 import tempfile
@@ -81,6 +82,27 @@ def compile_regex_with_timeout(fn: Callable[[str], _T], pattern: str) -> _T:
     else:
         executor.shutdown(wait=False)
         return result
+
+
+def grammar_compile_max_workers(cpu_count: int | None = None) -> int:
+    """Number of workers for the grammar-compilation thread pool.
+
+    Grammar compilation is CPU-bound, so the pool is capped at 8 workers
+    (mirroring the fill-bitmask pool) instead of scaling with the host CPU
+    count: ``multiprocessing.cpu_count()`` is not cgroup-aware, so inside a
+    container with a CFS quota (e.g. a Kubernetes pod with a low ``cpu``
+    limit scheduled on a many-core host) an uncapped pool oversubscribes
+    the quota, triggers CFS throttling, and stalls the engine loop.
+
+    Set ``VLLM_STRUCTURED_OUTPUT_MAX_COMPILE_WORKERS`` to a positive value
+    to override the automatic sizing.
+    """
+    override = envs.VLLM_STRUCTURED_OUTPUT_MAX_COMPILE_WORKERS
+    if override > 0:
+        return override
+    if cpu_count is None:
+        cpu_count = multiprocessing.cpu_count()
+    return max(1, min(cpu_count // 2, 8))
 
 
 def apply_grammar_bitmask(
