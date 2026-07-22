@@ -464,6 +464,12 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         vllm_config: VllmConfig,
         kv_cache_spec: KVCacheSpec,
     ) -> AttentionCGSupport:
+        # FULL-mode cudagraph is supported: every tensor this builder exports
+        # in the decode path is either a view of a runner-refreshed input
+        # (block_table / seq_lens / query_start_loc / slot_mapping) or a
+        # persistent builder buffer overwritten each step (the __init__
+        # buffers, incl. indexer_decode_block_table_buffer). Captured pointers
+        # therefore stay valid on replay.
         return AttentionCGSupport.UNIFORM_BATCH
 
     def __init__(self, *args, block_table_width: int, **kwargs) -> None:
@@ -607,6 +613,17 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 dtype=torch.int32,
                 device=self.device,
             )
+        # Persistent buffer for the decode block_table translated to
+        # indexer-page granularity. Required for FULL-mode cudagraph: the
+        # captured graph dereferences the address recorded at capture time, so
+        # the translated table must live at a stable address that build()
+        # overwrites each step (a fresh .contiguous() would be frozen at
+        # capture-time content). Lazily allocated on first decode at the exact
+        # compressed width -- constant across batches, so the address is fixed
+        # before any graph captures it and the buffer is ~compress_ratio x
+        # smaller than the raw block table.
+        self.indexer_decode_block_table_buffer: torch.Tensor | None = None
+        self._max_num_batched_tokens = scheduler_config.max_num_batched_tokens
 
     def _dcp_localize_decode_seq_lens(
         self,
@@ -964,7 +981,22 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                     and self.kv_cache_spec.block_size % _kbs == 0
                 ):
                     _factor = self.kv_cache_spec.block_size // _kbs
-                    block_table = (block_table[:, ::_factor] // _factor).contiguous()
+                    # Copy into the persistent buffer (not a fresh
+                    # .contiguous()) so FULL-mode cudagraph replay reads
+                    # content overwritten each step by build(); a one-shot
+                    # allocation would be frozen at capture-time values.
+                    compressed = block_table[:, ::_factor] // _factor
+                    rows, cols = compressed.shape
+                    if self.indexer_decode_block_table_buffer is None:
+                        self.indexer_decode_block_table_buffer = torch.zeros(
+                            (self._max_num_batched_tokens, cols),
+                            dtype=torch.int32,
+                            device=self.device,
+                        )
+                    self.indexer_decode_block_table_buffer[:rows, :cols].copy_(
+                        compressed
+                    )
+                    block_table = self.indexer_decode_block_table_buffer[:rows, :cols]
             seq_lens_is_buffer_view = (use_native and next_n > 1) or (
                 not use_native and max_decode_len > 1
             )

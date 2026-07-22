@@ -257,9 +257,11 @@ if flashinfer_comm is not None:
             residual_out = allreduce_in
 
         layout_code = None
-        # vLLM quant patterns use swizzled scale-factor layout. Non-quant
-        # patterns ignore layout_code.
-        if workspace.backend in ("trtllm", "mnnvl"):
+        # SWIZZLED_128x4 is the quant scale-factor layout, honored only by the
+        # trtllm backend. mnnvl does not support quantization fusion and raises
+        # "MNNVL AllReduce does not support quantization fusion" if given a
+        # non-None layout_code, so only trtllm gets one.
+        if workspace.backend == "trtllm":
             layout_code = flashinfer_comm.QuantizationSFLayout.SWIZZLED_128x4
 
         flashinfer_comm.allreduce_fusion(
