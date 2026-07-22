@@ -209,10 +209,12 @@ class _ServerRequestState:
     # Start time of a pending abort drain (``time.monotonic``); None when
     # no abort is in progress.
     abort_started_at: float | None = None
-    # Number of entries in ``ServerRole._inflight`` for this id. Kept in
-    # sync via _inflight_add / _inflight_pop so ``> 0`` is an exact
-    # "has any inflight transfer" predicate.
-    inflight_count: int = 0
+    # Transfer ids in ``ServerRole._inflight`` for this id. Kept in sync
+    # via _inflight_add / _inflight_pop so a non-empty set is an exact
+    # "has any inflight transfer" predicate and the abort drain can
+    # enumerate this request's transfers without scanning all of
+    # ``_inflight``.
+    inflight_tids: set[int] = field(default_factory=set)
 
 
 class ServerRole:
@@ -241,7 +243,7 @@ class ServerRole:
         # keeps serve_external_requests from scanning every request.
         self._serve_pending: set[str] = set()
         # transfer_id → xfer. Mutate ONLY via _inflight_add / _inflight_pop
-        # so the per-request inflight_count stays in sync.
+        # so the per-request inflight_tids stays in sync.
         self._inflight: dict[int, _InflightXfer] = {}
         self._store_jobs: dict[int, float] = {}  # job_id → submitted_at
         # StoreResults queued by _finalize_outbound for the next poll
@@ -273,7 +275,7 @@ class ServerRole:
         if (
             st is not None
             and st.outbound is None
-            and st.inflight_count == 0
+            and not st.inflight_tids
             and not st.lookups
             and not st.pending_lookups
             and st.abort_started_at is None
@@ -868,15 +870,15 @@ class ServerRole:
 
     def _has_inflight_for(self, kv_request_id: str) -> bool:
         st = self._requests.get(kv_request_id)
-        return st is not None and st.inflight_count > 0
+        return st is not None and bool(st.inflight_tids)
 
     def _inflight_add(self, tid: int, xfer: _InflightXfer) -> None:
-        """Insert an inflight transfer and bump the per-request count."""
+        """Insert an inflight transfer and record it on the request."""
         self._inflight[tid] = xfer
-        self._get_or_create_request(xfer.kv_request_id).inflight_count += 1
+        self._get_or_create_request(xfer.kv_request_id).inflight_tids.add(tid)
 
     def _inflight_pop(self, tid: int) -> _InflightXfer | None:
-        """Pop an inflight transfer and decrement the per-request count.
+        """Pop an inflight transfer and drop it from the request's set.
 
         Callers are responsible for the ``_maybe_prune`` that may follow once
         the request's other state has also cleared.
@@ -885,8 +887,8 @@ class ServerRole:
         if xfer is None:
             return None
         st = self._requests.get(xfer.kv_request_id)
-        if st is not None and st.inflight_count > 0:
-            st.inflight_count -= 1
+        if st is not None:
+            st.inflight_tids.discard(tid)
         return xfer
 
     # ------------------------------------------------------------------
@@ -941,11 +943,7 @@ class ServerRole:
         """
         st = self._requests[kv_request_id]
         st.outbound = None
-        ids = [
-            tid
-            for tid, xfer in self._inflight.items()
-            if xfer.kv_request_id == kv_request_id
-        ]
+        ids = list(st.inflight_tids)
         if not ids:
             self._finalize_abort(kv_request_id)
             return

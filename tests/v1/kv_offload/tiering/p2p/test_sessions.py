@@ -337,12 +337,12 @@ def _srv_abort_started(session: P2PSession, kv_request_id: str) -> float | None:
 def _srv_inflight_count(session: P2PSession, kv_request_id: str) -> int:
     """Inflight-transfer count tracked for a kv_request_id (0 if idle)."""
     st = session._server._requests.get(kv_request_id)
-    return st.inflight_count if st is not None else 0
+    return len(st.inflight_tids) if st is not None else 0
 
 
 def _srv_total_inflight(session: P2PSession) -> int:
     """Sum of per-request inflight counts across all requests."""
-    return sum(st.inflight_count for st in session._server._requests.values())
+    return sum(len(st.inflight_tids) for st in session._server._requests.values())
 
 
 # ---------------------------------------------------------------------------
@@ -2313,9 +2313,9 @@ class TestDispatchErrorHandling:
 
 
 class TestInflightPerReqInvariant:
-    """Per-request `inflight_count` is the O(1) replacement for the
+    """Per-request `inflight_tids` is the O(1) replacement for the
     previous O(N) scan in `_has_inflight_for`. These tests check that
-    every mutation site keeps the counter in sync with `_inflight` and
+    every mutation site keeps the set in sync with `_inflight` and
     that the lookup is correct under high fan-out.
     """
 
