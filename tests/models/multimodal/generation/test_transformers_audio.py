@@ -138,6 +138,9 @@ def test_transformers_audio_generation(monkeypatch, model_id):
         sampling_params=sampling_params,
     )
     assert len(outputs) == 1
+    generated = outputs[0].outputs[0]
+    print(f"{model_id} transcription: {generated.text.strip()!r}")
+    print(f"{model_id} token_ids: {list(generated.token_ids)}")
     assert_output_matches(
         outputs[0],
         expected["transcriptions"][0],
