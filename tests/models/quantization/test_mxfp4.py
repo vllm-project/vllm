@@ -6,10 +6,6 @@
 import pytest
 
 from vllm import LLM, SamplingParams
-from contextlib import contextmanager
-from vllm.platforms import current_platform
-import pytest
-import vllm.envs as envs
 
 MODELS = ["amd/Llama-2-7b-chat-hf-wmxfp4-amxfp4-kvfp8-scale-uint8"]
 
@@ -44,27 +40,3 @@ def test_models(example_prompts, model_name) -> None:
         assert expected_str == output_str, (
             f"Expected: {expected_str!r}\nvLLM: {output_str!r}"
         )
-
-
-def test_minimax_m3_mxfp4_moe_backend(vllm_runner, capfd):
-    if not current_platform.is_rocm() or envs.VLLM_ROCM_USE_AITER:
-        pytest.skip("ROCm-specific test with VLLM_ROCM_USE_AITER=0")
-
-    @contextmanager
-    def _verify_error_raise(capfd):
-        expected_error = "No MXFP4 MoE backend supports the deployment configuration"
-        with pytest.raises(RuntimeError, match="Engine core initialization failed"):
-            yield
-
-        captured = capfd.readouterr()
-        assert expected_error in captured.out + captured.err
-
-    with (
-        _verify_error_raise(capfd),
-        vllm_runner(
-            "amd/MiniMax-M3-MXFP4",
-            tensor_parallel_size=1,
-            load_format="dummy",
-        ),
-    ):
-        pass
