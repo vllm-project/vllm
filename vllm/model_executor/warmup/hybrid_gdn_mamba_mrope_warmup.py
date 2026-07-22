@@ -1,150 +1,127 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Warm up hybrid GDN/Mamba and MRoPE kernels."""
+"""Compile hybrid GDN packed-decode and MRoPE Triton keys."""
 
 from __future__ import annotations
 
-from collections.abc import Iterable
-from typing import Any
+from typing import TYPE_CHECKING
 
 import torch
 
-from vllm.logger import init_logger
-from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import (
-    QwenGatedDeltaNetAttention,
-)
-from vllm.model_executor.layers.rotary_embedding.mrope import MRotaryEmbedding
-
-logger = init_logger(__name__)
+if TYPE_CHECKING:
+    from vllm.v1.worker.gpu_worker import Worker
 
 
-def _iter_qwen_gdn_layers(
-    model: torch.nn.Module,
-) -> Iterable[QwenGatedDeltaNetAttention]:
-    for module in model.modules():
-        if isinstance(module, QwenGatedDeltaNetAttention):
-            yield module
+def _is_non_empty_tensor(value: object) -> bool:
+    return isinstance(value, torch.Tensor) and value.numel() > 0
 
 
-def _iter_mrope_attention_modules(
-    model: torch.nn.Module,
-) -> Iterable[tuple[Any, MRotaryEmbedding]]:
-    for module in model.modules():
-        rotary_emb = getattr(module, "rotary_emb", None)
-        if (
-            isinstance(rotary_emb, MRotaryEmbedding)
-            and rotary_emb.mrope_section
-            and all(
-                hasattr(module, attr)
-                for attr in ("num_heads", "num_kv_heads", "head_dim")
+def _packed_gdn_configs(model: torch.nn.Module, model_dtype: torch.dtype):
+    from vllm.third_party.flash_linear_attention.ops.fused_recurrent import (
+        PackedGdnDecodeWarmupConfig,
+    )
+
+    configs: list[PackedGdnDecodeWarmupConfig] = []
+    for layer in model.modules():
+        if not all(
+            hasattr(layer, attr)
+            for attr in (
+                "num_k_heads",
+                "num_v_heads",
+                "head_k_dim",
+                "head_v_dim",
+                "tp_size",
+                "A_log",
+                "dt_bias",
+                "kv_cache",
             )
         ):
-            yield module, rotary_emb
+            continue
+        kv_cache = layer.kv_cache
+        if not isinstance(kv_cache, (tuple, list)) or len(kv_cache) < 2:
+            continue
+        state = kv_cache[1]
+        if not _is_non_empty_tensor(state):
+            continue
 
-
-def _warmup_qwen_gdn_layer(
-    layer: QwenGatedDeltaNetAttention,
-    *,
-    model_dtype: torch.dtype,
-) -> None:
-    qkv_dim = (layer.key_dim * 2 + layer.value_dim) // layer.tp_size
-    device = layer.A_log.device
-    qkv = torch.empty((1, qkv_dim), device=device, dtype=model_dtype)
-    layer._warmup_prefill_kernels(qkv, 0)
-
-
-def _warmup_mrope_module(
-    module: Any,
-    rotary_emb: MRotaryEmbedding,
-    *,
-    model_dtype: torch.dtype,
-) -> None:
-    device = rotary_emb.cos_sin_cache.device
-    num_tokens = 1
-    positions = torch.zeros((3, num_tokens), device=device, dtype=torch.long)
-    q = torch.empty(
-        (num_tokens, module.num_heads * module.head_dim),
-        device=device,
-        dtype=model_dtype,
-    )
-    k = torch.empty(
-        (num_tokens, module.num_kv_heads * module.head_dim),
-        device=device,
-        dtype=model_dtype,
-    )
-    rotary_emb.forward_cuda(positions, q, k)
-
-
-def hybrid_gdn_mamba_mrope_warmup(
-    model: torch.nn.Module,
-    *,
-    model_dtype: torch.dtype,
-) -> None:
-    """Warm kernels missed by generic model dummy runs.
-
-    Qwen3.5/Qwen3-Next style hybrid models use GDN/Mamba kernels for linear
-    attention layers and MRoPE for some full-attention layers.  These kernels
-    can be first compiled on the first real request if profile/dummy runs do not
-    exercise their exact runtime variants.
-    """
-    with torch.inference_mode():
-        warmed_gdn_keys: set[tuple[Any, ...]] = set()
-        warmed_gdn_count = 0
-        for layer in _iter_qwen_gdn_layers(model):
-            gdn_key = (
-                str(layer.A_log.device),
-                model_dtype,
-                layer.key_dim,
-                layer.value_dim,
-                layer.tp_size,
-                layer.num_k_heads,
-                layer.num_v_heads,
-                layer.head_k_dim,
-                layer.head_v_dim,
-                layer.gqa_interleaved_layout,
+        H = int(layer.num_k_heads) // int(layer.tp_size)
+        HV = int(layer.num_v_heads) // int(layer.tp_size)
+        K = int(layer.head_k_dim)
+        V = int(layer.head_v_dim)
+        configs.append(
+            PackedGdnDecodeWarmupConfig(
+                mixed_qkv_dtype=model_dtype,
+                a_dtype=model_dtype,
+                b_dtype=model_dtype,
+                A_log_dtype=layer.A_log.dtype,
+                dt_bias_dtype=layer.dt_bias.dtype,
+                output_dtype=model_dtype,
+                state_dtype=state.dtype,
+                scale=K**-0.5,
+                stride_mixed_qkv_tok=2 * H * K + HV * V,
+                stride_a_tok=HV,
+                stride_b_tok=HV,
+                stride_init_state_token=state.stride(0),
+                stride_final_state_token=state.stride(0),
+                stride_indices_seq=1,
+                H=H,
+                HV=HV,
+                K=K,
+                V=V,
+                use_qk_l2norm_in_kernel=True,
             )
-            if gdn_key in warmed_gdn_keys:
-                continue
-            warmed_gdn_keys.add(gdn_key)
-            try:
-                _warmup_qwen_gdn_layer(layer, model_dtype=model_dtype)
-                warmed_gdn_count += 1
-            except Exception:
-                logger.warning(
-                    "GDN/Mamba JIT warmup failed for layer %s. "
-                    "First inference may JIT compile.",
-                    layer.prefix,
-                    exc_info=True,
-                )
-
-        warmed_mrope_keys: set[tuple[Any, ...]] = set()
-        warmed_mrope_count = 0
-        for module, rotary_emb in _iter_mrope_attention_modules(model):
-            mrope_key = (
-                str(rotary_emb.cos_sin_cache.device),
-                model_dtype,
-                module.num_heads,
-                module.num_kv_heads,
-                module.head_dim,
-                rotary_emb.rotary_dim,
-                tuple(rotary_emb.mrope_section or ()),
-                rotary_emb.mrope_interleaved,
-            )
-            if mrope_key in warmed_mrope_keys:
-                continue
-            warmed_mrope_keys.add(mrope_key)
-            try:
-                _warmup_mrope_module(module, rotary_emb, model_dtype=model_dtype)
-                warmed_mrope_count += 1
-            except Exception:
-                logger.warning(
-                    "MRoPE JIT warmup failed. First inference may JIT compile.",
-                    exc_info=True,
-                )
-
-    if warmed_gdn_count or warmed_mrope_count:
-        logger.info(
-            "Warmed up %d GDN/Mamba and %d MRoPE JIT kernel variant(s).",
-            warmed_gdn_count,
-            warmed_mrope_count,
         )
+    return configs
+
+
+def _mrope_configs(model: torch.nn.Module, model_dtype: torch.dtype):
+    from vllm.model_executor.layers.rotary_embedding.mrope import (
+        MropeWarmupConfig,
+        MRotaryEmbedding,
+    )
+
+    configs: list[MropeWarmupConfig] = []
+    for module in model.modules():
+        rotary_emb = getattr(module, "rotary_emb", None)
+        if not isinstance(rotary_emb, MRotaryEmbedding):
+            continue
+        section = rotary_emb.mrope_section
+        if section is None or len(section) != 3:
+            continue
+        if not all(
+            hasattr(module, attr) for attr in ("num_heads", "num_kv_heads", "head_dim")
+        ):
+            continue
+        cache_dtype = rotary_emb.cos_sin_cache.dtype
+        configs.append(
+            MropeWarmupConfig(
+                q_dtype=model_dtype,
+                k_dtype=model_dtype,
+                cos_dtype=cache_dtype,
+                sin_dtype=cache_dtype,
+                n_qh=int(module.num_heads),
+                n_kh=int(module.num_kv_heads),
+                head_size=int(module.head_dim),
+                rotary_dim=int(rotary_emb.rotary_dim),
+                mrope_section=(int(section[0]), int(section[1]), int(section[2])),
+                is_interleaved=bool(rotary_emb.mrope_interleaved),
+            )
+        )
+    return configs
+
+
+def hybrid_gdn_mamba_mrope_warmup(worker: Worker) -> None:
+    runner = worker.model_runner
+    if runner.is_pooling_model:
+        return
+
+    model = worker.get_model()
+    model_dtype = worker.vllm_config.model_config.dtype
+
+    from vllm.model_executor.layers.rotary_embedding.mrope import _MROPE_KERNEL
+    from vllm.third_party.flash_linear_attention.ops.fused_recurrent import (
+        _PACKED_GDN_DECODE_KERNEL,
+    )
+
+    _PACKED_GDN_DECODE_KERNEL.warmup(_packed_gdn_configs(model, model_dtype))
+    _MROPE_KERNEL.warmup(_mrope_configs(model, model_dtype))

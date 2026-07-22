@@ -1,10 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections.abc import Iterable
+from dataclasses import dataclass
 
 import numpy as np
 import torch
 
+from vllm.model_executor.warmup.jit_warmup import VllmJitKernel
+from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    TritonPointerInputVariant,
+)
 from vllm.triton_utils import tl, triton
 
 from .base import RotaryEmbeddingBase
@@ -130,6 +136,196 @@ def _triton_mrope_forward(
     tl.store(k_ptr + second_half_k_offsets, new_k_tile_2, mask=second_k_mask)
 
 
+@dataclass(frozen=True)
+class MropeWarmupConfig:
+    q_dtype: torch.dtype
+    k_dtype: torch.dtype
+    cos_dtype: torch.dtype
+    sin_dtype: torch.dtype
+    n_qh: int
+    n_kh: int
+    head_size: int
+    rotary_dim: int
+    mrope_section: tuple[int, int, int]
+    is_interleaved: bool
+
+
+class MropeKernel(VllmJitKernel["MropeKernel.CompileKey"]):
+    @dataclass(frozen=True)
+    class CompileKey:
+        q_dtype: torch.dtype
+        k_dtype: torch.dtype
+        cos_dtype: torch.dtype
+        sin_dtype: torch.dtype
+        input_variant: TritonPointerInputVariant
+        num_tokens_divisible_by_16: bool
+        n_qh: int
+        n_kh: int
+        hd: int
+        rd: int
+        pad_n_qh: int
+        pad_n_kh: int
+        pad_hd: int
+        mrope_section_t: int
+        mrope_section_h: int
+        mrope_section_w: int
+        is_interleaved: bool
+
+    kernel = _triton_mrope_forward
+
+    def dispatch(  # type: ignore[override]
+        self,
+        *,
+        q_dtype: torch.dtype,
+        k_dtype: torch.dtype,
+        cos_dtype: torch.dtype,
+        sin_dtype: torch.dtype,
+        q_aligned: bool,
+        k_aligned: bool,
+        cos_aligned: bool,
+        sin_aligned: bool,
+        num_tokens: int,
+        n_qh: int,
+        n_kh: int,
+        head_size: int,
+        rotary_dim: int,
+        mrope_section_t: int,
+        mrope_section_h: int,
+        mrope_section_w: int,
+        is_interleaved: bool,
+    ) -> CompileKey:
+        input_variant = TritonPointerInputVariant.from_alignment(
+            q=q_aligned,
+            k=k_aligned,
+            cos=cos_aligned,
+            sin=sin_aligned,
+        )
+        return self.CompileKey(
+            q_dtype=q_dtype,
+            k_dtype=k_dtype,
+            cos_dtype=cos_dtype,
+            sin_dtype=sin_dtype,
+            input_variant=input_variant,
+            num_tokens_divisible_by_16=num_tokens % 16 == 0,
+            n_qh=n_qh,
+            n_kh=n_kh,
+            hd=head_size,
+            rd=rotary_dim,
+            pad_n_qh=triton.next_power_of_2(n_qh),
+            pad_n_kh=triton.next_power_of_2(n_kh),
+            pad_hd=triton.next_power_of_2(head_size),
+            mrope_section_t=mrope_section_t,
+            mrope_section_h=mrope_section_h,
+            mrope_section_w=mrope_section_w,
+            is_interleaved=is_interleaved,
+        )
+
+    def get_warmup_keys(self, configs: Iterable[MropeWarmupConfig]) -> list[CompileKey]:
+        keys: list[MropeKernel.CompileKey] = []
+        for config in configs:
+            keys.extend(
+                self._trace_dispatch(self.dispatch)(
+                    q_dtype=config.q_dtype,
+                    k_dtype=config.k_dtype,
+                    cos_dtype=config.cos_dtype,
+                    sin_dtype=config.sin_dtype,
+                    q_aligned=True,
+                    k_aligned=True,
+                    cos_aligned=True,
+                    sin_aligned=True,
+                    num_tokens=(1, 16),
+                    n_qh=config.n_qh,
+                    n_kh=config.n_kh,
+                    head_size=config.head_size,
+                    rotary_dim=config.rotary_dim,
+                    mrope_section_t=config.mrope_section[0],
+                    mrope_section_h=config.mrope_section[1],
+                    mrope_section_w=config.mrope_section[2],
+                    is_interleaved=config.is_interleaved,
+                )
+            )
+        return list(dict.fromkeys(keys))
+
+    def compile(self, compile_key: CompileKey) -> None:
+        variant = compile_key.input_variant
+        num_tokens = 16 if compile_key.num_tokens_divisible_by_16 else 1
+        self.kernel.warmup(
+            variant.pointer("q", compile_key.q_dtype),
+            variant.pointer("k", compile_key.k_dtype),
+            variant.pointer("cos", compile_key.cos_dtype),
+            variant.pointer("sin", compile_key.sin_dtype),
+            num_tokens,
+            n_qh=compile_key.n_qh,
+            n_kh=compile_key.n_kh,
+            hd=compile_key.hd,
+            rd=compile_key.rd,
+            pad_n_qh=compile_key.pad_n_qh,
+            pad_n_kh=compile_key.pad_n_kh,
+            pad_hd=compile_key.pad_hd,
+            mrope_section_t=compile_key.mrope_section_t,
+            mrope_section_h=compile_key.mrope_section_h,
+            mrope_section_w=compile_key.mrope_section_w,
+            is_interleaved=compile_key.is_interleaved,
+            grid=(1,),
+        )
+
+    def __call__(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+        *,
+        mrope_section: tuple[int, int, int],
+        head_size: int,
+        rotary_dim: int,
+        is_interleaved: bool,
+    ) -> None:
+        num_tokens = q.size(0)
+        n_qh = q.size(1) // head_size
+        n_kh = k.size(1) // head_size
+        key = self.dispatch(
+            q_dtype=q.dtype,
+            k_dtype=k.dtype,
+            cos_dtype=cos.dtype,
+            sin_dtype=sin.dtype,
+            q_aligned=q.data_ptr() % 16 == 0,
+            k_aligned=k.data_ptr() % 16 == 0,
+            cos_aligned=cos.data_ptr() % 16 == 0,
+            sin_aligned=sin.data_ptr() % 16 == 0,
+            num_tokens=num_tokens,
+            n_qh=n_qh,
+            n_kh=n_kh,
+            head_size=head_size,
+            rotary_dim=rotary_dim,
+            mrope_section_t=mrope_section[0],
+            mrope_section_h=mrope_section[1],
+            mrope_section_w=mrope_section[2],
+            is_interleaved=is_interleaved,
+        )
+        self.kernel[(num_tokens,)](
+            q,
+            k,
+            cos,
+            sin,
+            num_tokens,
+            n_qh=key.n_qh,
+            n_kh=key.n_kh,
+            hd=key.hd,
+            rd=key.rd,
+            pad_n_qh=key.pad_n_qh,
+            pad_n_kh=key.pad_n_kh,
+            pad_hd=key.pad_hd,
+            mrope_section_t=key.mrope_section_t,
+            mrope_section_h=key.mrope_section_h,
+            mrope_section_w=key.mrope_section_w,
+            is_interleaved=key.is_interleaved,
+        )
+
+
+_MROPE_KERNEL = MropeKernel()
+
+
 def triton_mrope(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -152,13 +348,6 @@ def triton_mrope(
         mrope_section: [t, h, w]
         head_size: int
     """
-    n_row, n_q_head_head_dim = q.shape
-    n_q_head = n_q_head_head_dim // head_size
-    n_kv_head = k.shape[1] // head_size
-    pad_hd = triton.next_power_of_2(head_size)
-    pad_n_q_head = triton.next_power_of_2(n_q_head)
-    pad_n_kv_head = triton.next_power_of_2(n_kv_head)
-
     # ensure tensors passed into the kernel are contiguous.
     # It will be no-op if they are already contiguous
     q = q.contiguous()
@@ -166,23 +355,15 @@ def triton_mrope(
     cos = cos.contiguous()
     sin = sin.contiguous()
 
-    _triton_mrope_forward[(n_row,)](
+    _MROPE_KERNEL(
         q,
         k,
         cos,
         sin,
-        n_row,
-        n_q_head,
-        n_kv_head,
-        head_size,
-        rotary_dim,
-        pad_n_q_head,
-        pad_n_kv_head,
-        pad_hd,
-        mrope_section[0],
-        mrope_section[1],
-        mrope_section[2],
-        mrope_interleaved,
+        mrope_section=(mrope_section[0], mrope_section[1], mrope_section[2]),
+        head_size=head_size,
+        rotary_dim=rotary_dim,
+        is_interleaved=mrope_interleaved,
     )
     return q, k
 

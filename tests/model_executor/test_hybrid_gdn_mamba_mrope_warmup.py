@@ -1,217 +1,100 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import sys
-from types import ModuleType, SimpleNamespace
-from typing import Any
+from types import SimpleNamespace
 
 import torch
 
+from vllm.model_executor.layers.rotary_embedding.mrope import (
+    MropeKernel,
+    MropeWarmupConfig,
+)
+from vllm.third_party.flash_linear_attention.ops.fused_recurrent import (
+    PackedGdnDecodeKernel,
+    PackedGdnDecodeWarmupConfig,
+)
 
-def _install_flash_attn_stub(monkeypatch) -> None:
-    flash_attn_stub = ModuleType("vllm.vllm_flash_attn")
-    flash_attn_stub.__dict__["flash_attn_varlen_func"] = lambda *args, **kwargs: None
-    flash_attn_stub.__dict__["get_scheduler_metadata"] = lambda *args, **kwargs: None
-    monkeypatch.setitem(sys.modules, "vllm.vllm_flash_attn", flash_attn_stub)
 
-
-def _import_qwen_gdn_module(monkeypatch):
-    _install_flash_attn_stub(monkeypatch)
-    from vllm.model_executor.layers.mamba.gdn import (
-        qwen_gdn_linear_attn as qwen_gdn,
+def test_mrope_warmup_keys_cover_integer_specializations() -> None:
+    config = MropeWarmupConfig(
+        q_dtype=torch.bfloat16,
+        k_dtype=torch.bfloat16,
+        cos_dtype=torch.float32,
+        sin_dtype=torch.float32,
+        n_qh=28,
+        n_kh=4,
+        head_size=128,
+        rotary_dim=128,
+        mrope_section=(16, 24, 24),
+        is_interleaved=False,
     )
 
-    return qwen_gdn
+    keys = MropeKernel().get_warmup_keys([config, config])
+
+    assert len(keys) == 2
+    assert {key.num_tokens_divisible_by_16 for key in keys} == {False, True}
+    assert all(key.pad_n_qh == 32 for key in keys)
+    assert all(key.pad_n_kh == 4 for key in keys)
+    assert all(key.pad_hd == 128 for key in keys)
 
 
-def test_kernel_warmup_runs_hybrid_warmup(monkeypatch) -> None:
-    _install_flash_attn_stub(monkeypatch)
-    from vllm.model_executor.warmup import kernel_warmup
+def test_packed_gdn_warmup_key_matches_kernel_meta_parameters() -> None:
+    config = PackedGdnDecodeWarmupConfig(
+        mixed_qkv_dtype=torch.bfloat16,
+        a_dtype=torch.bfloat16,
+        b_dtype=torch.bfloat16,
+        A_log_dtype=torch.float32,
+        dt_bias_dtype=torch.float32,
+        output_dtype=torch.bfloat16,
+        state_dtype=torch.float32,
+        scale=128**-0.5,
+        stride_mixed_qkv_tok=8192,
+        stride_a_tok=32,
+        stride_b_tok=32,
+        stride_init_state_token=524288,
+        stride_final_state_token=524288,
+        stride_indices_seq=1,
+        H=16,
+        HV=32,
+        K=128,
+        V=128,
+        use_qk_l2norm_in_kernel=True,
+    )
 
-    calls: list[str] = []
+    keys = PackedGdnDecodeKernel().get_warmup_keys([config, config])
 
-    model = object()
+    assert len(keys) == 1
+    assert keys[0].BK == 128
+    assert keys[0].BV == 32
+    assert keys[0].USE_QK_L2NORM_IN_KERNEL is True
 
-    def fake_hybrid_warmup(*args, **kwargs) -> None:
-        assert args == (model,)
-        assert kwargs == {"model_dtype": torch.bfloat16}
-        calls.append("hybrid")
 
-    def fake_dummy_run(**kwargs) -> None:
-        assert kwargs == {
-            "num_tokens": 16,
-            "skip_eplb": True,
-            "is_profile": True,
-            "force_attention": True,
-            "create_mixed_batch": True,
-        }
-        calls.append("dummy")
+def test_shared_warmup_uses_kernel_owned_compile_only_paths(monkeypatch) -> None:
+    from vllm.model_executor.warmup import hybrid_gdn_mamba_mrope_warmup as warmup
 
-    monkeypatch.setattr(kernel_warmup.envs, "VLLM_USE_DEEP_GEMM", False)
-    monkeypatch.setattr(kernel_warmup, "has_flashinfer", lambda: False)
-    monkeypatch.setattr(kernel_warmup, "qwen_triton_warmup", lambda *args: None)
+    packed_configs = [object()]
+    mrope_configs = [object()]
+    calls: list[tuple[str, list[object]]] = []
+
+    monkeypatch.setattr(warmup, "_packed_gdn_configs", lambda *args: packed_configs)
+    monkeypatch.setattr(warmup, "_mrope_configs", lambda *args: mrope_configs)
     monkeypatch.setattr(
-        kernel_warmup, "deepseek_v4_mhc_warmup", lambda *args, **kw: None
+        "vllm.third_party.flash_linear_attention.ops.fused_recurrent"
+        "._PACKED_GDN_DECODE_KERNEL.warmup",
+        lambda configs: calls.append(("packed", configs)),
     )
     monkeypatch.setattr(
-        kernel_warmup,
-        "sparse_mla_triton_warmup_if_needed",
-        lambda *args: None,
-    )
-    monkeypatch.setattr(
-        kernel_warmup,
-        "flashinfer_sparse_mla_decode_autotune_warmup",
-        lambda *args: None,
-    )
-    monkeypatch.setattr(
-        kernel_warmup,
-        "deepseek_v4_sparse_mla_attention_warmup",
-        lambda *args: None,
-    )
-    monkeypatch.setattr(
-        "vllm.model_executor.warmup.hybrid_gdn_mamba_mrope_warmup"
-        ".hybrid_gdn_mamba_mrope_warmup",
-        fake_hybrid_warmup,
-    )
-    monkeypatch.setattr(
-        "vllm.model_executor.warmup.minimax_m3_msa_warmup.minimax_m3_msa_warmup",
-        lambda worker: None,
+        "vllm.model_executor.layers.rotary_embedding.mrope._MROPE_KERNEL.warmup",
+        lambda configs: calls.append(("mrope", configs)),
     )
 
+    model = torch.nn.Module()
     worker = SimpleNamespace(
         get_model=lambda: model,
-        use_v2_model_runner=True,
-        scheduler_config=SimpleNamespace(max_num_batched_tokens=16),
-        vllm_config=SimpleNamespace(
-            compilation_config=SimpleNamespace(cudagraph_capture_sizes=[]),
-            kernel_config=SimpleNamespace(enable_flashinfer_autotune=False),
-            model_config=SimpleNamespace(),
-        ),
-        model_runner=SimpleNamespace(
-            dtype=torch.bfloat16,
-            _dummy_run=fake_dummy_run,
-            is_pooling_model=True,
-            attn_groups=[],
-        ),
+        model_runner=SimpleNamespace(is_pooling_model=False),
+        vllm_config=SimpleNamespace(model_config=SimpleNamespace(dtype=torch.bfloat16)),
     )
 
-    kernel_warmup.kernel_warmup(worker)
+    warmup.hybrid_gdn_mamba_mrope_warmup(worker)
 
-    assert calls == ["hybrid"]
-
-
-def test_qwen_gdn_update_warmup_uses_bound_ssm_cache(monkeypatch) -> None:
-    qwen_gdn = _import_qwen_gdn_module(monkeypatch)
-    captured: dict[str, Any] = {}
-    calls: list[str] = []
-
-    def fake_update(**kwargs):
-        calls.append("update")
-        captured.update(kwargs)
-        return torch.empty(0), kwargs["initial_state"]
-
-    monkeypatch.setattr(
-        qwen_gdn,
-        "fused_sigmoid_gating_delta_rule_update",
-        fake_update,
-    )
-
-    ssm_state = torch.empty((2, 3, 4, 5), dtype=torch.float32)
-    layer = SimpleNamespace(
-        kv_cache=(torch.empty(0), ssm_state),
-        A_log=torch.empty(3, dtype=torch.float32),
-        dt_bias=torch.empty(3, dtype=torch.float32),
-        head_k_dim=5,
-        head_v_dim=4,
-        _continuous_batching_update_kernel_warmed_up=False,
-    )
-
-    qwen_gdn.QwenGatedDeltaNetAttention._warmup_continuous_batching_update_kernel(
-        layer,
-        device=torch.device("cpu"),
-        dtype=torch.float32,
-        num_k_heads=2,
-        num_v_heads=3,
-    )
-
-    assert captured["initial_state"] is ssm_state
-    assert captured["A_log"] is layer.A_log
-    assert captured["dt_bias"] is layer.dt_bias
-    assert captured["inplace_final_state"] is True
-    assert captured["use_qk_l2norm_in_kernel"] is True
-    assert captured["q"].shape == (1, 1, 2, 5)
-    assert captured["k"].shape == (1, 1, 2, 5)
-    assert captured["v"].shape == (1, 1, 3, 4)
-    assert captured["a"].shape == (1, 3)
-    assert captured["b"].shape == (1, 3)
-    assert captured["cu_seqlens"].tolist() == [0, 1]
-    assert captured["ssm_state_indices"].tolist() == [0]
-    assert layer._continuous_batching_update_kernel_warmed_up is True
-
-    qwen_gdn.QwenGatedDeltaNetAttention._warmup_continuous_batching_update_kernel(
-        layer,
-        device=torch.device("cpu"),
-        dtype=torch.float32,
-        num_k_heads=2,
-        num_v_heads=3,
-    )
-
-    assert calls == ["update"]
-
-
-def test_qwen_gdn_update_warmup_skips_without_bound_ssm_cache(
-    monkeypatch,
-) -> None:
-    qwen_gdn = _import_qwen_gdn_module(monkeypatch)
-    calls: list[str] = []
-
-    def fake_update(**kwargs):
-        calls.append("update")
-        return torch.empty(0), kwargs["initial_state"]
-
-    monkeypatch.setattr(
-        qwen_gdn,
-        "fused_sigmoid_gating_delta_rule_update",
-        fake_update,
-    )
-
-    layer = SimpleNamespace(
-        kv_cache=(torch.empty(0), torch.empty(0)),
-        A_log=torch.empty(3, dtype=torch.float32),
-        dt_bias=torch.empty(3, dtype=torch.float32),
-        head_k_dim=5,
-        head_v_dim=4,
-        _continuous_batching_update_kernel_warmed_up=False,
-    )
-
-    qwen_gdn.QwenGatedDeltaNetAttention._warmup_continuous_batching_update_kernel(
-        layer,
-        device=torch.device("cpu"),
-        dtype=torch.float32,
-        num_k_heads=2,
-        num_v_heads=3,
-    )
-
-    layer.kv_cache = None
-    qwen_gdn.QwenGatedDeltaNetAttention._warmup_continuous_batching_update_kernel(
-        layer,
-        device=torch.device("cpu"),
-        dtype=torch.float32,
-        num_k_heads=2,
-        num_v_heads=3,
-    )
-
-    assert calls == []
-    assert layer._continuous_batching_update_kernel_warmed_up is False
-
-    layer.kv_cache = (torch.empty(0), torch.empty((2, 3, 4, 5), dtype=torch.float32))
-    qwen_gdn.QwenGatedDeltaNetAttention._warmup_continuous_batching_update_kernel(
-        layer,
-        device=torch.device("cpu"),
-        dtype=torch.float32,
-        num_k_heads=2,
-        num_v_heads=3,
-    )
-
-    assert calls == ["update"]
-    assert layer._continuous_batching_update_kernel_warmed_up is True
+    assert calls == [("packed", packed_configs), ("mrope", mrope_configs)]
