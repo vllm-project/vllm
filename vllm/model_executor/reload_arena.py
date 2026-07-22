@@ -105,18 +105,48 @@ def _identity(t: torch.Tensor) -> SlotIdentity:
 
 
 def _canonical_device(device) -> torch.device:
-    """Resolve an unindexed accelerator device to its concrete index.
+    """Resolve an unindexed accelerator device to the one torch would
+    actually allocate on.
 
-    Callers commonly pass the config-level ``"cuda"`` while the tensor a
-    slot holds reports ``cuda:0``; comparing them literally makes a
-    re-acquire after reload fail spuriously (observed live: the mismatch
-    aborted the first post-reload forward mid-capture).
+    Callers commonly pass a config-level ``"cuda"``/``"xpu"`` while the
+    tensor a slot holds reports ``cuda:0``; comparing them literally makes
+    a re-acquire after reload fail spuriously (observed live on CUDA: the
+    mismatch aborted the first post-reload forward mid-capture).
+
+    Resolution goes through torch's per-type device module rather than
+    ``current_platform``, for two reasons. The argument being canonicalized
+    is a specific device, not necessarily the platform vLLM is running on
+    (a CPU slot on a CUDA platform is legitimate), so the current platform
+    is not the right question to ask. And ``torch.get_device_module``
+    covers any backend registered with torch, including out-of-tree ones,
+    which the platform enum does not. This mirrors what vLLM's own
+    platform code does per device type, e.g. XpuPlatform's
+    ``device.index if device.index is not None else torch.xpu.current_device()``.
+
+    CPU is deliberately excluded: CPU tensors report a bare ``cpu`` with no
+    index, so canonicalizing to ``cpu:0`` would introduce the very mismatch
+    this exists to prevent.
     """
     device = torch.device(device)
-    if device.type == "cuda" and device.index is None and \
-            torch.cuda.is_available():
-        return torch.device("cuda", torch.cuda.current_device())
-    return device
+    if device.index is not None or device.type == "cpu":
+        return device
+
+    get_device_module = getattr(torch, "get_device_module", None)
+    if get_device_module is None:
+        return device
+    try:
+        module = get_device_module(device.type)
+        if not (module.is_available() and hasattr(module, "current_device")):
+            return device
+        index = module.current_device()
+    except Exception:
+        # Unknown/unavailable backend: leave the device as given rather
+        # than guessing. Worst case the caller sees a spec mismatch, which
+        # is loud and safe.
+        return device
+    if not isinstance(index, int):
+        return device
+    return torch.device(device.type, index)
 
 
 class ReloadArena:
