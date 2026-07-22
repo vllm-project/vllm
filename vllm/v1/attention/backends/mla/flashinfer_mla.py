@@ -60,7 +60,6 @@ def _get_kv_counter_buffer(
     batch_size: int, num_qo_heads: int, device: torch.device
 ) -> torch.Tensor:
     """Return the MLA KV counter buffer.
-    
     ``kv_counter_buffer`` is used by the
     ``trtllm_batch_decode_with_kv_cache_mla`` kernel to initialize
     ``multi_ctas_kv_counter_buffer`` in the first iteration. It only needs to be
