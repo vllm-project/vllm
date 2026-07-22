@@ -8,6 +8,7 @@ import regex as re
 import torch
 import torch.nn as nn
 
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig
 from vllm.distributed import (
     get_pp_group,
@@ -103,8 +104,50 @@ class DeepseekV4MLP(nn.Module):
         else:
             self.act_fn = SiluAndMul()
 
+        # gate_up_proj B-preshuffle (ColumnParallel -> no all-reduce); set at load.
+        self._gateup = rocm_aiter_ops.is_enabled()
+        # Block scale for the preshuffled gate_up weight; None = not preshuffled.
+        self._gateup_scale: torch.Tensor | None = None
+
+    def prepare_gateup_preshuffle(self) -> None:
+        # B-preshuffle the gate_up_proj weight in place (single weight).
+        if not self._gateup:
+            return
+        from vllm.model_executor.utils import replace_parameter
+
+        w = getattr(self.gate_up_proj, "weight", None)
+        ws = getattr(self.gate_up_proj, "weight_scale_inv", None)  # per-block scale
+        if w is None or ws is None or w.dim() != 2:
+            return
+        # K % 128 (group-128 quant) and N % 16 (shuffle_weight) must hold.
+        if w.shape[-1] % 128 != 0 or w.shape[0] % 16 != 0:
+            return
+        if ws.dtype == torch.float8_e8m0fnu:
+            from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+                _upcast_e8m0_to_fp32,
+            )
+
+            ws = _upcast_e8m0_to_fp32(ws).contiguous()
+        replace_parameter(
+            self.gate_up_proj,
+            "weight",
+            rocm_aiter_ops.shuffle_weight(w.data, layout=(16, 16)),
+        )
+        self._gateup_scale = ws
+
     def forward(self, x):
-        gate_up, _ = self.gate_up_proj(x)
+        if self._gateup_scale is not None and x.dim() == 2:
+            # gate_up via fp8 group-quant (col-major) + B-preshuffle GEMM.
+            x_fp8, x_scale = rocm_aiter_ops.group_fp8_quant(x, transpose_scale=True)
+            gate_up = rocm_aiter_ops.gemm_a8w8_blockscale_bpreshuffle(
+                x_fp8,
+                self.gate_up_proj.weight,
+                x_scale,
+                self._gateup_scale,
+                output_dtype=x.dtype,
+            )
+        else:
+            gate_up, _ = self.gate_up_proj(x)
         x = self.act_fn(gate_up)
         x, _ = self.down_proj(x)
         return x
@@ -853,8 +896,15 @@ class DeepseekV4ForCausalLM(nn.Module, SupportsPP, SupportsEagle3):
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self, skip_substrs=["mtp."])
-        loaded_params = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
-        return loaded_params
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+
+    def process_weights_after_loading(self) -> None:
+        # After per-layer quant finalize, so we preshuffle the final fp8 weights.
+        for module in self.modules():
+            if isinstance(module, DeepseekV4ROCMAiterMLAAttention):
+                module.prepare_attn_preshuffle()
+            elif isinstance(module, DeepseekV4MLP):
+                module.prepare_gateup_preshuffle()
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         return self.model.get_expert_mapping()
