@@ -4,7 +4,7 @@ RUST_CODECOV_VERSION="v11.3.1"
 RUST_CODECOV_SHA256="ca1d64196d2d34771084afe76ea657d581bf628e31d993ff8e52ea09cc88a56d"
 
 rust_coverage_repo_root() {
-    if [ -f /vllm-workspace/.buildkite/scripts/normalize-rust-lcov.py ]; then
+    if [ -f /vllm-workspace/.buildkite/scripts/rust-coverage.sh ]; then
         printf '%s\n' /vllm-workspace
     elif [ -n "${BUILDKITE_BUILD_CHECKOUT_PATH:-}" ] \
         && [ -d "$BUILDKITE_BUILD_CHECKOUT_PATH" ]; then
@@ -44,8 +44,6 @@ PY
 
 rust_coverage_collect() {
     rust_cov_collect_flag=${1:?coverage flag is required}
-    rust_cov_collect_repo_root=$(rust_coverage_repo_root) || return 1
-    rust_cov_collect_raw_lcov="$RUST_COVERAGE_DIR/$rust_cov_collect_flag.raw.lcov"
     rust_cov_collect_lcov="$RUST_COVERAGE_DIR/$rust_cov_collect_flag.lcov"
 
     command -v llvm-profdata >/dev/null || return 1
@@ -90,11 +88,7 @@ rust_coverage_collect() {
         --format=lcov \
         --instr-profile="$RUST_COVERAGE_DIR/merged.profdata" \
         --ignore-filename-regex='/\.cargo/(registry|git)/|/rustc/|/target/' \
-        > "$rust_cov_collect_raw_lcov" || return 1
-    python3 "$rust_cov_collect_repo_root/.buildkite/scripts/normalize-rust-lcov.py" \
-        --input "$rust_cov_collect_raw_lcov" \
-        --output "$rust_cov_collect_lcov" \
-        --repo-root "$rust_cov_collect_repo_root" || return 1
+        > "$rust_cov_collect_lcov" || return 1
     RUST_COVERAGE_LCOV=$rust_cov_collect_lcov
     export RUST_COVERAGE_LCOV
 }
@@ -155,9 +149,8 @@ rust_coverage_upload() {
     set --
     set -- "$@" upload-process
     set -- "$@" --file "$rust_cov_upload_lcov"
-    # The normalizer already validates every source path. The test image moves
-    # vllm/ to src/vllm/, so generic repository file fixes cannot resolve all
-    # tracked paths inside that image.
+    # LCOV paths are mapped server-side by codecov.yml. Skip the CLI's local
+    # source-line fix scanning, which is unrelated to path mapping.
     set -- "$@" --disable-search --disable-file-fixes
     set -- "$@" --fail-on-error --git-service github
     set -- "$@" --build "${BUILDKITE_BUILD_NUMBER:?BUILDKITE_BUILD_NUMBER is required}"
@@ -174,9 +167,8 @@ rust_coverage_upload() {
     fi
 
     rust_cov_upload_log="$rust_cov_upload_codecov_dir/codecov.log"
-    # The CLI still resolves codecov.yml file-fix paths against its process
-    # working directory even when --dir and --network-root-folder are set.
-    # E2E steps run from tests/, so execute it from the repository root.
+    # E2E steps run from tests/, so execute from the repository root to resolve
+    # codecov.yml and repository paths consistently.
     (
         cd "$rust_cov_upload_repo_root" || exit 1
         "$rust_cov_upload_codecov_dir/codecov" "$@"

@@ -205,27 +205,14 @@ run_tests() {
     --all-features \
     --locked \
     --no-fail-fast \
-    --no-report
-  local test_rc=$?
-
-  cargo llvm-cov report \
-    --manifest-path rust/Cargo.toml \
+    --no-clean \
     --lcov \
-    --output-path artifacts/rust-unit.raw.lcov \
+    --output-path artifacts/rust-unit.lcov \
     --ignore-filename-regex='/\.cargo/(registry|git)/|/rustc/|/target/'
-  local report_rc=$?
-
-  local normalize_rc=0
-  if [[ $report_rc -eq 0 ]]; then
-    "$PYO3_PYTHON" .buildkite/scripts/normalize-rust-lcov.py \
-      --input artifacts/rust-unit.raw.lcov \
-      --output artifacts/rust-unit.lcov \
-      --repo-root "$ROOT_DIR"
-    normalize_rc=$?
-  fi
+  local coverage_rc=$?
 
   local upload_rc=0
-  if [[ $report_rc -eq 0 && $normalize_rc -eq 0 ]]; then
+  if [[ $coverage_rc -eq 0 ]]; then
     # shellcheck source=.buildkite/scripts/rust-coverage.sh
     source .buildkite/scripts/rust-coverage.sh
     rust_coverage_upload artifacts/rust-unit.lcov rust-unit
@@ -233,14 +220,8 @@ run_tests() {
   fi
   set -e
 
-  if [[ $test_rc -ne 0 ]]; then
-    return "$test_rc"
-  fi
-  if [[ $report_rc -ne 0 ]]; then
-    return "$report_rc"
-  fi
-  if [[ $normalize_rc -ne 0 ]]; then
-    return "$normalize_rc"
+  if [[ $coverage_rc -ne 0 ]]; then
+    return "$coverage_rc"
   fi
   return "$upload_rc"
 }

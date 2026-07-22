@@ -12,7 +12,6 @@ steps:
   - tools/build_rust.py
   - rust-toolchain.toml
   - .buildkite/scripts/rust-coverage.sh
-  - .buildkite/scripts/normalize-rust-lcov.py
   - codecov.yml
   - vllm/benchmarks/
   - vllm/entrypoints/openai/
@@ -54,7 +53,6 @@ steps:
   - tools/build_rust.py
   - rust-toolchain.toml
   - .buildkite/scripts/rust-coverage.sh
-  - .buildkite/scripts/normalize-rust-lcov.py
   - codecov.yml
   - vllm/entrypoints/openai/
   - vllm/entrypoints/serve/
@@ -90,7 +88,6 @@ steps:
   - tools/build_rust.py
   - rust-toolchain.toml
   - .buildkite/scripts/rust-coverage.sh
-  - .buildkite/scripts/normalize-rust-lcov.py
   - codecov.yml
   - vllm/entrypoints/openai/
   - tests/utils.py
@@ -111,7 +108,6 @@ steps:
   - tools/build_rust.py
   - rust-toolchain.toml
   - .buildkite/scripts/rust-coverage.sh
-  - .buildkite/scripts/normalize-rust-lcov.py
   - codecov.yml
   - vllm/entrypoints/openai/
   - vllm/tool_parsers/
@@ -133,7 +129,6 @@ steps:
   - tools/build_rust.py
   - rust-toolchain.toml
   - .buildkite/scripts/rust-coverage.sh
-  - .buildkite/scripts/normalize-rust-lcov.py
   - codecov.yml
   - vllm/distributed/
   - vllm/engine/
