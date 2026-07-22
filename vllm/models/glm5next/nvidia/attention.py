@@ -222,30 +222,36 @@ class Indexer(nn.Module):
         q, _ = self.wq_b(qr)
         q = q.view(-1, self.n_head, self.head_dim)
 
-        q_pe, q_nope = torch.split(
-            q, [self.rope_dim, self.head_dim - self.rope_dim], dim=-1
-        )
         # Fused wk + weights_proj: one GEMM, then split
         kw, _ = self.wk_weights_proj(hidden_states)
         k = kw[:, : self.head_dim]
         weights = kw[:, self.head_dim :]
 
         k = self.k_norm(k)
-        k_pe, k_nope = torch.split(
-            k, [self.rope_dim, self.head_dim - self.rope_dim], dim=-1
-        )
 
-        q_pe, k_pe = rotary_emb(positions, q_pe, k_pe.unsqueeze(1))
-        # Note: RoPE (NeoX) can introduce extra leading dimensions during
-        # compilation so we need to reshape back to token-flattened shapes
-        q_pe = q_pe.reshape(-1, self.n_head, self.rope_dim)
-        k_pe = k_pe.reshape(-1, 1, self.rope_dim)
+        if self.rope_dim > 0:
+            q_pe, q_nope = torch.split(
+                q, [self.rope_dim, self.head_dim - self.rope_dim], dim=-1
+            )
+            k_pe, k_nope = torch.split(
+                k, [self.rope_dim, self.head_dim - self.rope_dim], dim=-1
+            )
 
-        # `rotary_emb` is shape-preserving; `q_pe` is already
-        # [num_tokens, n_head, rope_dim].
-        q = torch.cat([q_pe, q_nope], dim=-1)
-        # `k_pe` is [num_tokens, 1, rope_dim] (MQA).
-        k = torch.cat([k_pe.squeeze(-2), k_nope], dim=-1)
+            q_pe, k_pe = rotary_emb(positions, q_pe, k_pe.unsqueeze(1))
+            # Note: RoPE (NeoX) can introduce extra leading dimensions during
+            # compilation so we need to reshape back to token-flattened shapes
+            q_pe = q_pe.reshape(-1, self.n_head, self.rope_dim)
+            k_pe = k_pe.reshape(-1, 1, self.rope_dim)
+
+            # `rotary_emb` is shape-preserving; `q_pe` is already
+            # [num_tokens, n_head, rope_dim].
+            q = torch.cat([q_pe, q_nope], dim=-1)
+            # `k_pe` is [num_tokens, 1, rope_dim] (MQA).
+            k = torch.cat([k_pe.squeeze(-2), k_nope], dim=-1)
+        # else: qk_rope_head_dim=0 — no rope component. q is already
+        # [num_tokens, n_head, head_dim] and k is [num_tokens, head_dim] (all
+        # nope), so skip the rope split / rotary / cat entirely; otherwise the
+        # split/reshape would build 0-element tensors (breaks dynamo tracing).
 
         # we only quant q here since k quant is fused with cache insertion
         q = q.view(-1, self.head_dim)
