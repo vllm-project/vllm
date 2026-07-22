@@ -203,10 +203,10 @@ class XPUFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
             "weight_scale_inv" if hasattr(layer, "weight_scale_inv") else "weight_scale"
         )
         scale = getattr(layer, scale_attr)
-        # Transpose scale from checkpoint layout [N/128, K/128] to
-        # oneDNN expected layout [K/128, N/128] at load time (one-time cost).
+        # Keep the canonical scale for dequantization and cache the oneDNN layout.
         scale_t = scale.data.t().contiguous()
-        replace_parameter(layer, scale_attr, scale_t)
+        layer.xpu_weight_scale = scale_t
+        self.xpu_weight_scale = layer.xpu_weight_scale
 
         # For BMM layers (e.g. wo_a), precompute 3D scale and weight:
         # [K/bs, N/bs] -> [batch, K/bs, N_per_batch/bs]
@@ -242,6 +242,6 @@ class XPUFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
             B.t(),
             self.config.out_dtype,
             As,
-            Bs,
+            self.xpu_weight_scale,
             torch.Tensor(),
         )
