@@ -443,6 +443,7 @@ def test_evictable_cached_blocks_not_double_allocated():
 
     manager.add_local_computed_blocks(
         request_id,
+        0,
         [evictable_block],
         num_local_computed_tokens=block_size,
         num_external_computed_tokens=0,

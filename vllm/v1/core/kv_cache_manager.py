@@ -4,11 +4,12 @@
 import itertools
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Literal, overload
+from typing import TYPE_CHECKING, Literal, overload
 
 from vllm.distributed.kv_events import BlockStored, KVCacheEvent
 from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv
+from vllm.v1.core.block_pool import KVCacheEvictionPolicy
 from vllm.v1.core.kv_cache_coordinator import get_kv_cache_coordinator
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import KVCacheBlock, KVCacheBlockCopy
@@ -22,6 +23,9 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.metrics.stats import PrefixCacheStats
 from vllm.v1.request import Request, RequestStatus
+
+if TYPE_CHECKING:
+    from vllm.config.scheduler import SchedulerPolicy
 
 logger = init_logger(__name__)
 
@@ -127,6 +131,7 @@ class KVCacheManager:
         pcp_world_size: int = 1,
         metrics_collector: KVCacheMetricsCollector | None = None,
         watermark: float = 0.0,
+        policy: "SchedulerPolicy" = "fcfs",
     ) -> None:
         self.max_model_len = max_model_len
         # When unset, fall back to `max_model_len` so the recycling-aware cap
@@ -144,6 +149,9 @@ class KVCacheManager:
         # this comment because when the log stats is enabled there are still
         # potential configs we could expose in the future.
         self.prefix_cache_stats = PrefixCacheStats() if log_stats else None
+        kv_cache_eviction_policy: KVCacheEvictionPolicy = (
+            "priority-aware" if policy == "priority" else "lru"
+        )
 
         self.coordinator = get_kv_cache_coordinator(
             kv_cache_config=kv_cache_config,
@@ -156,6 +164,7 @@ class KVCacheManager:
             pcp_world_size=pcp_world_size,
             scheduler_block_size=scheduler_block_size,
             hash_block_size=hash_block_size,
+            kv_cache_eviction_policy=kv_cache_eviction_policy,
             metrics_collector=self.metrics_collector,
         )
         self.num_kv_cache_groups = len(kv_cache_config.kv_cache_groups)
@@ -480,6 +489,7 @@ class KVCacheManager:
             # avoid the case where the new blocks cannot be allocated.
             self.coordinator.allocate_new_computed_blocks(
                 request_id=request.request_id,
+                request_priority=request.priority,
                 new_computed_blocks=new_computed_block_list,
                 num_local_computed_tokens=num_local_computed_tokens,
                 num_external_computed_tokens=num_external_computed_tokens,

@@ -1935,13 +1935,15 @@ def test_prefill_not_enough_free_blocks_with_computed_blocks():
     assert {block.ref_cnt for block in block_part1[3:]} == {0}
 
 
-def test_reset_prefix_cache():
+@pytest.mark.parametrize("policy", ["fcfs", "priority"])
+def test_reset_prefix_cache(policy: str):
     block_size = 16
     manager = make_kv_cache_manager(
         make_kv_cache_config(block_size, 11),
         max_model_len=8192,
         enable_caching=True,
         hash_block_size=block_size,
+        policy=policy,
     )
 
     full_block_token_ids = [i for i in range(3) for _ in range(16)]
@@ -2047,6 +2049,193 @@ def test_maybe_evict_cached_block():
     # Evict block3
     pool._maybe_evict_cached_block(block3)
     assert pool.cached_block_hash_to_block._cache == {}
+
+
+def _set_cached_block(
+    pool: BlockPool,
+    block: KVCacheBlock,
+    block_hash: bytes,
+    retention_priority: int,
+) -> None:
+    block_hash_with_group_id = make_block_hash_with_group_id(BlockHash(block_hash), 0)
+    block.set_block_hash(block_hash_with_group_id)
+    block.retention_priority = retention_priority
+    pool.cached_block_hash_to_block.insert(block_hash_with_group_id, block)
+
+
+def test_priority_aware_eviction_prefers_low_priority_blocks():
+    pool = BlockPool(
+        num_gpu_blocks=4,
+        enable_caching=True,
+        hash_block_size=16,
+        kv_cache_eviction_policy="priority-aware",
+    )
+    high_priority, low_priority, medium_priority = pool.get_new_blocks(3)
+    _set_cached_block(pool, high_priority, b"high", retention_priority=0)
+    _set_cached_block(pool, low_priority, b"low", retention_priority=3)
+    _set_cached_block(pool, medium_priority, b"medium", retention_priority=2)
+
+    pool.free_blocks([high_priority, low_priority, medium_priority])
+
+    evicted = pool.get_new_blocks(1)[0]
+    assert evicted is low_priority
+    assert evicted.block_hash is None
+    assert evicted.retention_priority is None
+
+
+def test_priority_aware_eviction_preserves_lru_within_priority():
+    pool = BlockPool(
+        num_gpu_blocks=4,
+        enable_caching=True,
+        hash_block_size=16,
+        kv_cache_eviction_policy="priority-aware",
+    )
+    first, second, third = pool.get_new_blocks(3)
+    _set_cached_block(pool, first, b"first", retention_priority=3)
+    _set_cached_block(pool, second, b"second", retention_priority=3)
+    _set_cached_block(pool, third, b"third", retention_priority=3)
+
+    pool.free_blocks([first, second, third])
+
+    assert pool.get_new_blocks(1)[0] is first
+
+
+def test_priority_aware_eviction_limits_high_priority_cache():
+    pool = BlockPool(
+        num_gpu_blocks=9,
+        enable_caching=True,
+        hash_block_size=16,
+        kv_cache_eviction_policy="priority-aware",
+    )
+    blocks = pool.get_new_blocks(8)
+    for index, block in enumerate(blocks):
+        retention_priority = 0 if index < 3 else 3
+        _set_cached_block(
+            pool,
+            block,
+            f"block-{index}".encode(),
+            retention_priority=retention_priority,
+        )
+    pool.free_blocks(blocks)
+
+    assert pool.get_new_blocks(1)[0] is blocks[3]
+    assert pool.get_new_blocks(4) == blocks[4:8]
+    assert pool.get_new_blocks(1)[0] is blocks[2]
+    assert pool.get_new_blocks(1)[0] is blocks[0]
+
+
+def test_priority_aware_cursor_resumes_in_constant_time_order():
+    pool = BlockPool(
+        num_gpu_blocks=5,
+        enable_caching=True,
+        hash_block_size=16,
+        kv_cache_eviction_policy="priority-aware",
+    )
+    blocks = pool.get_new_blocks(4)
+    for index, block in enumerate(blocks):
+        _set_cached_block(
+            pool,
+            block,
+            f"cursor-{index}".encode(),
+            retention_priority=3 - index,
+        )
+    pool.free_blocks(blocks)
+
+    iterator = pool.free_block_queue.iter_blocks_after(None)
+    cursor, first = next(iterator)
+    assert first is blocks[0]
+
+    resumed = [block for _, block in pool.free_block_queue.iter_blocks_after(cursor)]
+    assert resumed == blocks[1:]
+
+
+def test_priority_aware_cursor_resets_after_cross_bucket_move():
+    pool = BlockPool(
+        num_gpu_blocks=3,
+        enable_caching=True,
+        hash_block_size=16,
+        kv_cache_eviction_policy="priority-aware",
+    )
+    first, second = pool.get_new_blocks(2)
+    _set_cached_block(pool, first, b"first", retention_priority=3)
+    _set_cached_block(pool, second, b"second", retention_priority=3)
+    pool.free_blocks([first, second])
+
+    cursor, cursor_block = next(pool.free_block_queue.iter_blocks_after(None))
+    pool.touch([cursor_block], retention_priority=0)
+    pool.free_blocks([cursor_block])
+
+    resumed = [block for _, block in pool.free_block_queue.iter_blocks_after(cursor)]
+    assert resumed == [second, first]
+
+
+def test_priority_aware_eviction_keeps_existing_lru_on_priority_ties():
+    pool = BlockPool(
+        num_gpu_blocks=3,
+        enable_caching=True,
+        hash_block_size=16,
+        kv_cache_eviction_policy="priority-aware",
+    )
+    old_block, new_block = pool.get_new_blocks(2)
+    _set_cached_block(pool, old_block, b"old", retention_priority=3)
+    _set_cached_block(pool, new_block, b"new", retention_priority=3)
+
+    pool.free_blocks([old_block])
+    pool.free_blocks([new_block])
+
+    assert pool.get_new_blocks(1)[0] is old_block
+
+
+def test_lru_eviction_policy_ignores_retention_priority():
+    pool = BlockPool(
+        num_gpu_blocks=4,
+        enable_caching=True,
+        hash_block_size=16,
+        kv_cache_eviction_policy="lru",
+    )
+    first, second, third = pool.get_new_blocks(3)
+    _set_cached_block(pool, first, b"first", retention_priority=0)
+    _set_cached_block(pool, second, b"second", retention_priority=10)
+    _set_cached_block(pool, third, b"third", retention_priority=5)
+
+    pool.free_blocks([first, second, third])
+
+    assert pool.get_new_blocks(1)[0] is first
+
+
+def test_touch_upgrades_retention_priority():
+    pool = BlockPool(
+        num_gpu_blocks=3,
+        enable_caching=True,
+        hash_block_size=16,
+        kv_cache_eviction_policy="priority-aware",
+    )
+    shared_block, low_priority_block = pool.get_new_blocks(2)
+    _set_cached_block(pool, shared_block, b"shared", retention_priority=10)
+    _set_cached_block(pool, low_priority_block, b"low", retention_priority=10)
+    pool.free_blocks([shared_block, low_priority_block])
+
+    pool.touch([shared_block], retention_priority=0)
+    assert shared_block.retention_priority == 0
+    pool.free_blocks([shared_block])
+
+    assert pool.get_new_blocks(1)[0] is low_priority_block
+
+
+def test_move_block_hashes_preserves_retention_priority():
+    pool = BlockPool(
+        num_gpu_blocks=3,
+        enable_caching=True,
+        hash_block_size=16,
+        kv_cache_eviction_policy="priority-aware",
+    )
+    source_block, destination_block = pool.get_new_blocks(2)
+    _set_cached_block(pool, source_block, b"source", retention_priority=1)
+
+    pool.move_block_hashes(source_block, destination_block)
+
+    assert source_block.retention_priority is None
+    assert destination_block.retention_priority == 1
 
 
 @pytest.mark.parametrize("blocks_to_cache", [2, 3, 10])

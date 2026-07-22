@@ -31,7 +31,10 @@ from vllm.v1.simple_kv_offload.metadata import (
 
 if TYPE_CHECKING:
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
-    from vllm.v1.core.kv_cache_utils import KVCacheBlock
+    from vllm.v1.core.kv_cache_utils import (
+        FreeKVCacheBlockQueueCursor,
+        KVCacheBlock,
+    )
     from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.request import Request
 
@@ -150,7 +153,7 @@ class SimpleCPUOffloadScheduler:
         # Store metadata
         self._lazy_mode = lazy_offload
         # Lazy mode: use a cursor to track the last scanned block in the GPU free queue.
-        self._cursor: KVCacheBlock | None = None
+        self._cursor: FreeKVCacheBlockQueueCursor | None = None
         if self._lazy_mode:
             self._target_free = self._estimate_lazy_target_blocks(
                 kv_cache_config,
@@ -483,18 +486,20 @@ class SimpleCPUOffloadScheduler:
         num_cpu_free = cpu_pool.get_num_free_blocks()
 
         # Validate cursor: stale if block was removed from free queue.
-        if self._cursor is not None and self._cursor.ref_cnt > 0:
+        if self._cursor is not None and self._cursor.block.ref_cnt > 0:
             self._cursor = None
 
         gpu_ids: list[int] = []
         block_hashes: list[bytes] = []
         last_visited = self._cursor
 
-        for covered, node in enumerate(free_queue.iter_blocks_after(self._cursor)):
+        for covered, (cursor, node) in enumerate(
+            free_queue.iter_blocks_after(self._cursor)
+        ):
             if covered >= self._target_free or len(gpu_ids) >= num_cpu_free:
                 break
 
-            last_visited = node
+            last_visited = cursor
             bhash = node.block_hash
 
             if (
