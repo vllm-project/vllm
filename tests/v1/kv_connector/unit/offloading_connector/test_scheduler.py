@@ -12,6 +12,9 @@ from tests.v1.kv_connector.unit.offloading_connector.utils import (
 )
 from tests.v1.kv_connector.unit.utils import EOS_TOKEN_ID
 from vllm.distributed.kv_events import MEDIUM_CPU, BlockRemoved, BlockStored
+from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
+    OffloadingConnectorMetadata,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
     OffloadingConnectorStats,
     _ConnectorMetricName,
@@ -19,6 +22,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.scheduler import (
     OffloadingConnectorScheduler,
     RequestOffloadState,
+    is_store_reachable_swa_chunk,
 )
 from vllm.v1.core.kv_cache_utils import BlockHash
 from vllm.v1.kv_cache_interface import (
@@ -108,6 +112,40 @@ def test_last_block_offloaded_at_request_finish(
     )
 
 
+@pytest.mark.parametrize("async_scheduling", [True, False])
+def test_abort_queued_request_does_not_build_store_job(
+    request_runner, async_scheduling: bool
+):
+    """Aborting a never-scheduled request must not store unallocated KV."""
+    block_size = 4
+    runner = request_runner(
+        block_size=block_size,
+        num_gpu_blocks=8,
+        async_scheduling=async_scheduling,
+    )
+
+    runner.new_request(token_ids=[0] * (block_size * 4))
+    runner.scheduler.schedule()
+
+    runner.new_request(token_ids=[1] * (block_size * 4))
+    queued_req_id = str(runner.req_id)
+    assert any(
+        request.request_id == queued_req_id for request in runner.scheduler.waiting
+    )
+
+    runner.scheduler.finish_requests(queued_req_id, RequestStatus.FINISHED_ABORTED)
+    req_status = runner.connector_scheduler._req_status[queued_req_id]
+    assert all(group_state.offload_keys for group_state in req_status.group_states)
+    assert all(not group_state.block_ids for group_state in req_status.group_states)
+
+    scheduler_output = runner.scheduler.schedule()
+
+    metadata = scheduler_output.kv_connector_metadata
+    assert isinstance(metadata, OffloadingConnectorMetadata)
+    assert all(job.req_id != queued_req_id for job in metadata.store_jobs.values())
+    assert queued_req_id not in runner.connector_scheduler._req_status
+
+
 def test_scheduler_reports_lookup_sync_delay(request_runner):
     runner = request_runner(
         block_size=4,
@@ -124,6 +162,55 @@ def test_scheduler_reports_lookup_sync_delay(request_runner):
     reduced = _reduce_kv_connector_stats(runner)
     assert reduced[f"{_ConnectorMetricName.LOOKUP_SYNC_DELAY}_count"] == 1
     assert reduced[f"{_ConnectorMetricName.LOOKUP_SYNC_DELAY}_sum"] > 0
+
+
+@pytest.mark.parametrize(
+    (
+        "absolute_chunk_index",
+        "storable_chunk_count",
+        "alignment_chunk_count",
+        "sliding_window_chunks",
+        "is_eagle_group",
+        "expected",
+    ),
+    [
+        # Full 64-chunk segment: ordinary SWA keeps 62-63; EAGLE also keeps 61.
+        (61, 64, 64, 2, False, False),
+        (62, 64, 64, 2, False, True),
+        (60, 64, 64, 2, True, False),
+        (61, 64, 64, 2, True, True),
+        # Partial 48-of-64 segment: the reachable tail ends at chunk 47.
+        (45, 48, 64, 2, False, False),
+        (46, 48, 64, 2, False, True),
+        (44, 48, 64, 2, True, False),
+        (45, 48, 64, 2, True, True),
+        # A later partial segment uses its own actual end (chunks 64-79).
+        (76, 80, 64, 3, False, False),
+        (77, 80, 64, 3, False, True),
+        # No alignment means no store-pruning optimization.
+        (0, 1, None, None, False, True),
+        # A tail at least as large as the segment keeps every chunk.
+        (0, 2, 64, 2, False, True),
+    ],
+)
+def test_is_store_reachable_swa_chunk(
+    absolute_chunk_index: int,
+    storable_chunk_count: int,
+    alignment_chunk_count: int | None,
+    sliding_window_chunks: int | None,
+    is_eagle_group: bool,
+    expected: bool,
+):
+    assert (
+        is_store_reachable_swa_chunk(
+            absolute_chunk_index,
+            storable_chunk_count,
+            alignment_chunk_count,
+            sliding_window_chunks,
+            is_eagle_group,
+        )
+        is expected
+    )
 
 
 def test_scheduler_reports_lookup_async_delay_on_resolve(request_runner):
