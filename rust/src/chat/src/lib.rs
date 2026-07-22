@@ -257,7 +257,7 @@ impl ChatLlm {
 
     /// Whether the loaded backend has a registered multimodal processor.
     pub fn supports_multimodal(&self) -> bool {
-        self.backend.multimodal_model_info().is_some()
+        self.processor.backend.multimodal_model_info().is_some()
     }
 
     /// Effective tool-call parser name for this model, if parsing is enabled.
