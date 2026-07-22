@@ -5541,22 +5541,7 @@ class GPUModelRunner(
                 param.copy_(loaded_weight)
                 loaded_weights.add(name)
 
-        # LoRA GPU state lives in plain tensor attributes, not parameters
-        # or buffers, so the reload machinery does not restore it and
-        # level-2 sleep leaves it undefined. Drop all adapters — they are
-        # re-loaded lazily on next use, and activation rewrites their
-        # slots — and rebuild the TP>1 logits index mapping, which is the
-        # one piece of LoRA state adapter activation does not rewrite.
-        # Dropping adapters is also correct for non-sleep reloads (base
-        # weight hot-swap): adapters trained on the old base weights are
-        # invalid after a base weight change.
-        if self.lora_config:
-            from vllm.lora.layers.logits_processor import LogitsProcessorWithLoRA
-
-            self.lora_manager.remove_all_adapters()
-            for module in model.modules():
-                if isinstance(module, LogitsProcessorWithLoRA):
-                    module.reset_sharded_to_full_mapping()
+        self.reset_lora_state()
 
         # logging and validation
         counter_after_reloading = time.perf_counter()

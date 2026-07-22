@@ -10,6 +10,7 @@ session is active. These tests verify that delegation and the session guard.
 import pytest
 
 from vllm.config import VllmConfig, get_current_vllm_config
+from vllm.config.lora import LoRAConfig
 from vllm.v1.worker.gpu_worker import Worker
 
 
@@ -46,18 +47,28 @@ class _RecordingEngine:
 
 
 class _RecordingModelRunner:
+    """Minimal stand-in for the model runner."""
+
     def __init__(self) -> None:
         self.seen_config: VllmConfig | None = None
+        self.reset_lora_calls = 0
 
     def reload_weights(self) -> None:
         self.seen_config = get_current_vllm_config()
 
+    def reset_lora_state(self) -> None:
+        self.reset_lora_calls += 1
 
-def _make_worker(engine: _RecordingEngine | None) -> Worker:
+
+def _make_worker(engine: _RecordingEngine | None, enable_lora: bool = True) -> Worker:
     worker = object.__new__(Worker)
     worker.vllm_config = VllmConfig()
+    if enable_lora:
+        worker.vllm_config.lora_config = LoRAConfig()
     worker.weight_transfer_engine = engine
     worker._weight_update_active = False
+    worker._weight_update_is_draft = False
+    worker.model_runner = _RecordingModelRunner()
     return worker
 
 
@@ -88,6 +99,34 @@ def test_start_update_finish_delegates_to_engine():
     assert engine.reset_count == 1
     assert worker._weight_update_active is False
     assert engine.seen_configs == [worker.vllm_config] * 3
+    # The transfer engines never go through reload_weights(), so LoRA
+    # state (adapter registry, TP>1 logits mapping) must be invalidated
+    # when the session finishes.
+    assert worker.model_runner.reset_lora_calls == 1
+
+
+def test_finish_draft_session_keeps_lora_state():
+    engine = _RecordingEngine()
+    engine.supports_draft_weight_update = True
+    worker = _make_worker(engine)
+    # Bypass draft-model plumbing; only the session bookkeeping matters here.
+    worker._set_draft_weight_update_target = lambda: None
+
+    Worker.start_draft_weight_update(worker)
+    Worker.finish_weight_update(worker)
+
+    # Draft-model updates don't touch the target model's weights, so its
+    # LoRA state stays valid.
+    assert worker.model_runner.reset_lora_calls == 0
+
+
+def test_finish_without_lora_skips_reset():
+    worker = _make_worker(_RecordingEngine(), enable_lora=False)
+
+    Worker.start_weight_update(worker)
+    Worker.finish_weight_update(worker)
+
+    assert worker.model_runner.reset_lora_calls == 0
 
 
 def test_double_start_raises():
