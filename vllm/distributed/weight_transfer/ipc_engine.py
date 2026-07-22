@@ -3,26 +3,29 @@
 """IPC-based weight transfer engine using CUDA IPC for communication."""
 
 import pickle
-from collections.abc import Callable, Iterator
 from dataclasses import asdict, dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 
 import pybase64 as base64
-import ray
-import requests
 import torch
 from torch.multiprocessing.reductions import rebuild_cuda_tensor, reduce_tensor
+from typing_extensions import Self
 
 from vllm import envs
 from vllm.config.weight_transfer import WeightTransferConfig
+
+if TYPE_CHECKING:
+    from vllm.config import VllmConfig
 from vllm.distributed.weight_transfer.base import (
+    TrainerInitInfo,
+    TrainerWeightTransferEngine,
+    VLLMWeightSyncClient,
+    WeightSource,
     WeightTransferEngine,
     WeightTransferInitInfo,
     WeightTransferUpdateInfo,
 )
 
-if TYPE_CHECKING:
-    from vllm.config import VllmConfig
 from vllm.distributed.weight_transfer.packed_tensor import (
     DEFAULT_PACKED_BUFFER_SIZE_BYTES,
     packed_ipc_consumer,
@@ -31,47 +34,40 @@ from vllm.distributed.weight_transfer.packed_tensor import (
 
 
 @dataclass
-class IPCTrainerSendWeightsArgs:
-    """Arguments for IPC trainer_send_weights method."""
+class IPCWeightTransferInitInfo(WeightTransferInitInfo):
+    """Worker-side init info for IPC weight transfer. No rendezvous needed.
 
-    send_mode: str | Callable[["IPCWeightTransferUpdateInfo"], None]
-    """How to send updates to vLLM. Either a string ('ray' or 'http') for
-    built-in transports, or a callable that receives an
-    IPCWeightTransferUpdateInfo and performs the send."""
-    llm_handle: Any = None
-    """Ray actor handle or list of handles (required for 'ray' send_mode)."""
-    url: str | None = None
-    """Base URL for HTTP endpoint (required for 'http' send_mode)."""
+    `packed` is a must-agree wire param: the trainer ships it here at the init
+    handshake so the worker decodes with the same setting the trainer encoded
+    with. The consumer rebuilds from the IPC handle + `tensor_sizes`, so it does
+    not need the buffer size (producer-only)."""
+
     packed: bool = False
-    """Whether to use packed tensor transfer for bounded-memory chunking."""
-    packed_buffer_size_bytes: int = DEFAULT_PACKED_BUFFER_SIZE_BYTES
-    """Size in bytes for each packed tensor buffer when packed=True."""
-
-    def __post_init__(self):
-        """Validate that required arguments are provided for the selected mode."""
-        if callable(self.send_mode):
-            return
-        if self.send_mode == "ray" and self.llm_handle is None:
-            raise ValueError("llm_handle is required for 'ray' send_mode")
-        if self.send_mode == "http" and self.url is None:
-            raise ValueError("url is required for 'http' send_mode")
-        if self.send_mode not in ("ray", "http"):
-            raise ValueError(
-                f"send_mode must be 'ray', 'http', or a callable, "
-                f"got {self.send_mode!r}"
-            )
 
 
 @dataclass
-class IPCWeightTransferInitInfo(WeightTransferInitInfo):
-    """Initialization info for IPC weight transfer backend. No init needed for IPC."""
+class IPCTrainerInitInfo(TrainerInitInfo):
+    """Trainer-side init info for IPC weight transfer. No rendezvous needed;
+    `rank` (from `TrainerInitInfo`) identifies this trainer process — rank 0
+    ships the merged IPC handles. All ranks still join the handle all-gather.
 
-    pass
+    `packed` / `packed_buffer_size_bytes` are the transfer's wire params. The
+    trainer propagates `packed` to the worker at `trainer_init` so the two sides
+    cannot disagree. `backend` is the factory dispatch key."""
+
+    backend: ClassVar[str] = "ipc"
+    packed: bool = False
+    packed_buffer_size_bytes: int = DEFAULT_PACKED_BUFFER_SIZE_BYTES
 
 
 @dataclass
 class IPCWeightTransferUpdateInfo(WeightTransferUpdateInfo):
-    """Update info for IPC weight transfer backend."""
+    """Per-round update info for the IPC weight transfer backend.
+
+    Whether the transfer is packed is a must-agree wire param carried on the
+    init info (`IPCTrainerInitInfo` / `IPCWeightTransferInitInfo`), not here;
+    this carries only per-round metadata and the IPC handles.
+    """
 
     names: list[str]
     dtype_names: list[str]
@@ -85,8 +81,6 @@ class IPCWeightTransferUpdateInfo(WeightTransferUpdateInfo):
     tensor_sizes: list[int] | None = None
     """Per-parameter sizes in bytes within the packed buffer.
     Required when packed=True, unused otherwise."""
-    packed: bool = False
-    """Whether this update uses packed tensor format."""
 
     def __post_init__(self):
         if self.ipc_handles_pickled is not None:
@@ -119,17 +113,14 @@ class IPCWeightTransferUpdateInfo(WeightTransferUpdateInfo):
                 f"`shapes` should be of the same size as `names`: "
                 f"got {len(self.shapes)} and {len(self.names)}"
             )
-        if (
-            not self.packed
-            and isinstance(self.ipc_handles, list)
-            and len(self.ipc_handles) != num_params
-        ):
+        # Unpacked transfers carry a per-parameter handle dict (a list); packed
+        # transfers carry a single dict for the whole buffer, so the list check
+        # only applies to the list case.
+        if isinstance(self.ipc_handles, list) and len(self.ipc_handles) != num_params:
             raise ValueError(
                 f"`ipc_handles` should be of the same size as `names`: "
                 f"got {len(self.ipc_handles)} and {len(self.names)}"
             )
-        if self.packed and self.tensor_sizes is None:
-            raise ValueError("`tensor_sizes` is required when packed=True")
 
 
 class IPCWeightTransferEngine(
@@ -154,57 +145,21 @@ class IPCWeightTransferEngine(
         device: torch.device,
         model: torch.nn.Module,
     ) -> None:
-        """
-        Initialize the IPC weight transfer engine.
-
-        Args:
-            config: The configuration for the weight transfer engine
-            vllm_config: The full vLLM config
-            device: The device this worker's model lives on
-            model: The local model instance which will receive the weights
-        """
         super().__init__(config, vllm_config, device, model)
-
-    def parse_update_info(
-        self, update_dict: dict[str, Any]
-    ) -> IPCWeightTransferUpdateInfo:
-        """Parse update dict, deserializing pickled IPC handles if present.
-
-        HTTP transport sends IPC handles as a base64-encoded pickle under the
-        key ``ipc_handles_pickled``. This method deserializes them back into
-        ``ipc_handles`` before constructing the typed dataclass, keeping
-        serialization concerns out of the dataclass itself.
-
-        Requires ``VLLM_ALLOW_INSECURE_SERIALIZATION=1`` because the
-        payload is deserialized via ``pickle.loads``.
-        """
-        pickled = update_dict.pop("ipc_handles_pickled", None)
-        if pickled is not None:
-            if update_dict.get("ipc_handles") is not None:
-                raise ValueError(
-                    "Cannot specify both `ipc_handles` and `ipc_handles_pickled`"
-                )
-
-            if not envs.VLLM_ALLOW_INSECURE_SERIALIZATION:
-                raise ValueError(
-                    "Refusing to deserialize `ipc_handles_pickled` without "
-                    "VLLM_ALLOW_INSECURE_SERIALIZATION=1"
-                )
-
-            update_dict["ipc_handles"] = pickle.loads(base64.b64decode(pickled))
-
-        return super().parse_update_info(update_dict)
+        # Set from the trainer-supplied init info at the handshake; defaults are
+        # only for the (unreachable) receive-before-init case.
+        self.packed = False
 
     def init_transfer_engine(self, init_info: IPCWeightTransferInitInfo) -> None:
         """
-        Initialize the weight transfer mechanism.
-        This is called once at the beginning of training.
-        No initialization needed for IPC backend.
+        Initialize the weight transfer mechanism. No data-plane rendezvous is
+        needed for IPC; this just records the trainer-supplied wire params so the
+        worker decodes exactly as the trainer encoded.
 
         Args:
-            init_info: IPC initialization info (empty)
+            init_info: IPC initialization info (carries `packed`).
         """
-        pass
+        self.packed = init_info.packed
 
     def start_weight_update(self) -> None:
         """Initialize layerwise reloading for the incoming checkpoint weights."""
@@ -226,6 +181,10 @@ class IPCWeightTransferEngine(
         """
         Receive weights from the trainer via CUDA IPC handles and load them.
 
+        Whether the transfer is packed is read from `self.packed`, set at the
+        init handshake from the trainer's init info, so it is guaranteed to
+        match how the trainer encoded.
+
         Args:
             update_info: IPC update info containing parameter names, dtypes, shapes,
                         and IPC handles. Each IPC handle is a mapping between physical
@@ -238,8 +197,9 @@ class IPCWeightTransferEngine(
         # rebuilt on the device the model lives on.
         device_index = self.device.index
 
-        if update_info.packed:
-            assert update_info.tensor_sizes is not None
+        if self.packed:
+            if update_info.tensor_sizes is None:
+                raise ValueError("`tensor_sizes` is required when packed=True")
             assert isinstance(update_info.ipc_handles, dict)
             weights = packed_ipc_consumer(
                 ipc_handle=update_info.ipc_handles,
@@ -280,51 +240,92 @@ class IPCWeightTransferEngine(
         pass
 
     @staticmethod
-    def trainer_send_weights(
-        iterator: Iterator[tuple[str, torch.Tensor]],
-        trainer_args: dict[str, Any] | IPCTrainerSendWeightsArgs,
-    ) -> None:
-        """Send weights from trainer to inference workers via CUDA IPC.
+    def trainer_send_weights(*args: Any, **kwargs: Any) -> None:
+        """Removed. Use the stateful `IPCTrainerWeightTransferEngine` instead.
 
-        Supports two transport modes ('ray' and 'http') and two transfer
-        strategies:
-        - Non-packed (default): all weights in a single API call.
-        - Packed (packed=True): chunked transfer with bounded GPU memory.
-
-        For multi-GPU training, all ranks must call this method in
-        parallel. IPC handles are all-gathered across ranks and merged
-        so that each vLLM worker can find its own GPU UUID. Only rank 0
-        sends the payload to vLLM.
-
-        .. note::
-            This method calls ``update_weights`` internally. The caller must
-            call ``start_weight_update`` before and ``finish_weight_update``
-            after this method.
-
-        Args:
-            iterator: Iterator of (name, tensor) pairs. For multi-GPU,
-                     each rank should yield the full tensor on its own GPU
-                     (e.g. via FSDP full_tensor()).
-            trainer_args: IPCTrainerSendWeightsArgs or equivalent dict.
+        Transitional stub kept only to satisfy the (still abstract)
+        `WeightTransferEngine.trainer_send_weights`; that member is dropped from
+        the worker ABC once every backend has migrated to the trainer engine.
         """
-        args = (
-            IPCTrainerSendWeightsArgs(**trainer_args)
-            if isinstance(trainer_args, dict)
-            else trainer_args
+        raise NotImplementedError(
+            "The static IPC trainer path has been replaced by "
+            "IPCTrainerWeightTransferEngine. Build it via "
+            "WeightTransferTrainerFactory.trainer_init(IPCTrainerInitInfo(...), "
+            "client=..., source=...) and drive it with send_weights()."
         )
-        device_index = torch.accelerator.current_device_index()
-        gpu_uuid = str(torch.cuda.get_device_properties(device_index).uuid)
-        if args.packed:
-            IPCWeightTransferEngine._send_packed(iterator, args, gpu_uuid)
-        else:
-            IPCWeightTransferEngine._send_unpacked(iterator, args, gpu_uuid)
 
-    @staticmethod
-    def _is_rank_zero() -> bool:
-        """Return True if this is rank 0 or no distributed group exists."""
-        if not torch.distributed.is_initialized():
-            return True
-        return torch.distributed.get_rank() == 0
+
+class IPCTrainerWeightTransferEngine(TrainerWeightTransferEngine[IPCTrainerInitInfo]):
+    """Trainer-side CUDA IPC weight transfer engine.
+
+    Called on every trainer rank. For multi-rank (e.g. FSDP) trainers all ranks
+    iterate the source (materializing each tensor) and contribute to the
+    IPC-handle all-gather; only the sender (rank 0) ships the merged handles to
+    the inference side. IPC transfer is straight-line (no concurrent broadcast
+    like NCCL): `update_weights` *is* the transfer, and it rides the client, so
+    it no-ops on non-senders.
+
+    `packed` / `packed_buffer_size_bytes` come from `IPCTrainerInitInfo`; the
+    sender propagates `packed` to the worker at `trainer_init`.
+    """
+
+    init_info_cls = IPCTrainerInitInfo
+
+    def __init__(
+        self,
+        *,
+        client: VLLMWeightSyncClient,
+        source: WeightSource,
+        is_sender: bool = True,
+        packed: bool = False,
+        packed_buffer_size_bytes: int = DEFAULT_PACKED_BUFFER_SIZE_BYTES,
+    ) -> None:
+        super().__init__(client=client, source=source, is_sender=is_sender)
+        self.packed = packed
+        self.packed_buffer_size_bytes = packed_buffer_size_bytes
+        self.device_index = torch.accelerator.current_device_index()
+        self.gpu_uuid = str(torch.cuda.get_device_properties(self.device_index).uuid)
+
+    @classmethod
+    def trainer_init(
+        cls,
+        init_info: IPCTrainerInitInfo,
+        *,
+        client: VLLMWeightSyncClient,
+        source: WeightSource | None = None,
+    ) -> Self:
+        if source is None:
+            raise ValueError("IPC trainer weight transfer requires a WeightSource.")
+        engine = cls(
+            client=client,
+            source=source,
+            is_sender=init_info.is_sender,
+            packed=init_info.packed,
+            packed_buffer_size_bytes=init_info.packed_buffer_size_bytes,
+        )
+        # IPC needs no data-plane rendezvous. The sender ships the must-agree
+        # `packed` flag so the worker decodes exactly as this trainer encodes.
+        if engine.is_sender:
+            engine.client.init_weight_transfer_engine({"packed": init_info.packed})
+        return engine
+
+    def send_weights(self) -> None:
+        assert self.source is not None
+        source = self.source
+        if self.is_sender:
+            self.client.start_weight_update()
+        self._send(source)
+        if self.is_sender:
+            self.client.finish_weight_update()
+        self._post_send_sync()
+
+    # ---- data plane (runs on all ranks; only the sender ships) ----
+
+    def _send(self, source: WeightSource) -> None:
+        if self.packed:
+            self._send_packed(source)
+        else:
+            self._send_unpacked(source)
 
     @staticmethod
     def _all_gather_and_merge_handles(
@@ -373,13 +374,9 @@ class IPCWeightTransferEngine(
             torch.distributed.barrier()
         torch.cuda.ipc_collect()
 
-    @staticmethod
-    def _send_unpacked(
-        iterator: Iterator[tuple[str, torch.Tensor]],
-        args: IPCTrainerSendWeightsArgs,
-        gpu_uuid: str,
-    ) -> None:
-        """Send all weights in a single API call (non-packed mode)."""
+    def _send_unpacked(self, source: WeightSource) -> None:
+        """Iterate the source, build one IPC handle per param, all-gather the
+        handles across ranks, and (sender) ship them in one update call."""
         names: list[str] = []
         dtype_names: list[str] = []
         shapes: list[list[int]] = []
@@ -391,7 +388,8 @@ class IPCWeightTransferEngine(
         # the IPC handle.
         weight_refs: list[torch.Tensor] = []
 
-        for name, tensor in iterator:
+        for name, tensor in source:
+            # FSDP shards were gathered by the source; ensure contiguity here.
             names.append(name)
             dtype_names.append(str(tensor.dtype).split(".")[-1])
             shapes.append(list(tensor.shape))
@@ -399,98 +397,63 @@ class IPCWeightTransferEngine(
             weight = tensor.detach().contiguous()
             weight_refs.append(weight)
             _, ipc_args = reduce_tensor(weight)
-            ipc_handles.append({gpu_uuid: ipc_args})
+            ipc_handles.append({self.gpu_uuid: ipc_args})
 
-        ipc_handles = IPCWeightTransferEngine._all_gather_and_merge_handles(ipc_handles)
+        ipc_handles = self._all_gather_and_merge_handles(ipc_handles)
+        self._do_send(
+            names=names,
+            dtype_names=dtype_names,
+            shapes=shapes,
+            ipc_handles=ipc_handles,
+        )
 
-        if IPCWeightTransferEngine._is_rank_zero():
-            IPCWeightTransferEngine._do_send(
-                args=args,
-                names=names,
-                dtype_names=dtype_names,
-                shapes=shapes,
-                ipc_handles=ipc_handles,
-            )
-
-        IPCWeightTransferEngine._post_send_sync()
-
-    @staticmethod
-    def _send_packed(
-        iterator: Iterator[tuple[str, torch.Tensor]],
-        args: IPCTrainerSendWeightsArgs,
-        gpu_uuid: str,
-    ) -> None:
+    def _send_packed(self, source: WeightSource) -> None:
         """Send weights in bounded-memory chunks (packed mode)."""
-        post_iter_func: Callable = lambda item: item[1]
-
         for chunk in packed_ipc_producer(
-            iterator=iterator,
-            gpu_uuid=gpu_uuid,
-            post_iter_func=post_iter_func,
-            buffer_size_bytes=args.packed_buffer_size_bytes,
+            iterator=iter(source),
+            gpu_uuid=self.gpu_uuid,
+            post_iter_func=lambda item: item[1],
+            buffer_size_bytes=self.packed_buffer_size_bytes,
         ):
-            ipc_handle = IPCWeightTransferEngine._all_gather_and_merge_handles(
-                [chunk.ipc_handle]
-            )[0]
+            ipc_handle = self._all_gather_and_merge_handles([chunk.ipc_handle])[0]
+            self._do_send(
+                names=chunk.names,
+                dtype_names=chunk.dtype_names,
+                shapes=chunk.shapes,
+                ipc_handles=ipc_handle,
+                tensor_sizes=chunk.tensor_sizes,
+            )
+            # Per-chunk barrier: the producer reuses a single IPC buffer across
+            # chunks, but only the sender waits for the consumers (via _do_send).
+            # Without syncing every rank here, non-sender ranks race ahead and
+            # overwrite their buffer while their colocated worker is still
+            # reading the current chunk, silently corrupting the transfer.
+            self._post_send_sync()
 
-            if IPCWeightTransferEngine._is_rank_zero():
-                IPCWeightTransferEngine._do_send(
-                    args=args,
-                    names=chunk.names,
-                    dtype_names=chunk.dtype_names,
-                    shapes=chunk.shapes,
-                    ipc_handles=ipc_handle,
-                    tensor_sizes=chunk.tensor_sizes,
-                    packed=True,
-                )
-
-            IPCWeightTransferEngine._post_send_sync()
-
-    @staticmethod
     def _do_send(
-        args: IPCTrainerSendWeightsArgs,
+        self,
         names: list[str],
         dtype_names: list[str],
         shapes: list[list[int]],
         ipc_handles: list[dict[str, tuple]] | dict[str, tuple],
         tensor_sizes: list[int] | None = None,
-        packed: bool = False,
     ) -> None:
-        """Send a single update payload via the configured transport."""
+        """Build one update payload and ship it via the client. Only the sender
+        ships (non-sender ranks already contributed to the handle all-gather).
+
+        Emits raw `ipc_handles`; transports that cannot carry them natively
+        (HTTP/JSON) pickle them in their client (see `HTTPVLLMWeightSyncClient`).
+        """
+        if not self.is_sender:
+            return
         update_fields: dict[str, Any] = {
             "names": names,
             "dtype_names": dtype_names,
             "shapes": shapes,
-            "packed": packed,
+            "ipc_handles": ipc_handles,
         }
         if tensor_sizes is not None:
             update_fields["tensor_sizes"] = tensor_sizes
 
-        update_fields["ipc_handles"] = ipc_handles
         update_info = IPCWeightTransferUpdateInfo(**update_fields)
-
-        if callable(args.send_mode):
-            args.send_mode(update_info)
-        elif args.send_mode == "ray":
-            handles = (
-                args.llm_handle
-                if isinstance(args.llm_handle, list)
-                else [args.llm_handle]
-            )
-            ray.get(
-                [
-                    h.update_weights.remote(dict(update_info=asdict(update_info)))
-                    for h in handles
-                ]
-            )
-        elif args.send_mode == "http":
-            pickled_handles = base64.b64encode(pickle.dumps(ipc_handles)).decode(
-                "utf-8"
-            )
-            http_fields = {k: v for k, v in update_fields.items() if k != "ipc_handles"}
-            http_fields["ipc_handles_pickled"] = pickled_handles
-
-            url = f"{args.url}/update_weights"
-            payload = {"update_info": http_fields}
-            response = requests.post(url, json=payload, timeout=300)
-            response.raise_for_status()
+        self.client.update_weights(asdict(update_info))

@@ -41,7 +41,6 @@ causes unexpected behavior.
 
 import asyncio
 import uuid
-from dataclasses import asdict
 
 import ray
 import torch
@@ -50,16 +49,12 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 import vllm
 from vllm import SamplingParams
 from vllm.config import WeightTransferConfig
-from vllm.distributed.weight_transfer.base import (
-    WeightTransferInitRequest,
-    WeightTransferUpdateRequest,
+from vllm.distributed.weight_transfer import (
+    ModuleSource,
+    RayVLLMWeightSyncClient,
+    WeightTransferTrainerFactory,
 )
-from vllm.distributed.weight_transfer.nccl_engine import (
-    NCCLTrainerSendWeightsArgs,
-    NCCLWeightTransferEngine,
-    NCCLWeightTransferInitInfo,
-    NCCLWeightTransferUpdateInfo,
-)
+from vllm.distributed.weight_transfer.nccl_common import NCCLTrainerInitInfo
 from vllm.platforms import current_platform
 from vllm.utils.network_utils import get_ip, get_open_port
 from vllm.v1.executor import Executor
@@ -144,37 +139,23 @@ class TrainModel:
     def get_master_address_and_port(self):
         return self.master_address, self.port
 
-    def get_weight_metadata(self):
-        """Return weight names, dtypes, and shapes for weight transfer."""
-        names = []
-        dtype_names = []
-        shapes = []
-        for name, p in self.model.named_parameters():
-            names.append(name)
-            dtype_names.append(str(p.dtype).split(".")[-1])
-            shapes.append(list(p.shape))
-        return names, dtype_names, shapes
-
-    def init_weight_transfer_group(self, world_size):
-        """Initialize the NCCL process group for weight transfer."""
-        self.model_update_group = NCCLWeightTransferEngine.trainer_init(
-            dict(
+    def init_weight_transfer(self, world_size, llm_handle):
+        """Build the trainer-side weight-transfer engine and rendezvous."""
+        self.engine = WeightTransferTrainerFactory.trainer_init(
+            init_info=NCCLTrainerInitInfo(
                 master_address=self.master_address,
                 master_port=self.port,
                 world_size=world_size,
+                rank=0,  # single-GPU trainer is the sole (sender) rank
+                packed=True,
             ),
+            client=RayVLLMWeightSyncClient(llm_handle),
+            source=ModuleSource(self.model),
         )
 
-    def broadcast_weights(self, packed: bool = True):
-        """Broadcast weights to the inference engine."""
-        trainer_args = NCCLTrainerSendWeightsArgs(
-            group=self.model_update_group,
-            packed=packed,
-        )
-        NCCLWeightTransferEngine.trainer_send_weights(
-            iterator=self.model.named_parameters(),
-            trainer_args=trainer_args,
-        )
+    def broadcast_weights(self):
+        """Push weights to the inference engine (drives start/update/finish)."""
+        self.engine.send_weights()
 
     @torch.inference_mode()
     def generate(self, token_ids: list[int], max_new_tokens: int) -> list[int]:
@@ -263,31 +244,11 @@ batch_prompt_token_ids = [
 
 # Set up the communication channel between the training process and the
 # inference engine.
-master_address, master_port = ray.get(train_model.get_master_address_and_port.remote())
-
 world_size = 2  # 1 trainer + 1 inference worker
-inference_handle = llm.init_weight_transfer_engine.remote(
-    WeightTransferInitRequest(
-        init_info=asdict(
-            NCCLWeightTransferInitInfo(
-                master_address=master_address,
-                master_port=master_port,
-                rank_offset=1,
-                world_size=world_size,
-            )
-        )
-    )
-)
-
-# Initialize weight transfer group on both the training actor and inference engine
-train_handle = train_model.init_weight_transfer_group.remote(world_size)
-ray.get([train_handle, inference_handle])
+ray.get(train_model.init_weight_transfer.remote(world_size, llm))
 
 
 N_NEW_TOKENS = 100
-
-# Collect weight metadata once
-names, dtype_names, shapes = ray.get(train_model.get_weight_metadata.remote())
 
 # ── Phase 1: concurrent requests with weight sync ───────────────────
 print(f"\n{'=' * 50}")
@@ -306,24 +267,7 @@ gen_futures = [
 
 ray.get(llm.pause_after_n_tokens.remote())
 
-ray.get(llm.start_weight_update.remote())
-
-inference_handle = llm.update_weights.remote(
-    WeightTransferUpdateRequest(
-        update_info=asdict(
-            NCCLWeightTransferUpdateInfo(
-                names=names,
-                dtype_names=dtype_names,
-                shapes=shapes,
-                packed=True,
-            )
-        )
-    )
-)
-train_handle = train_model.broadcast_weights.remote(packed=True)
-ray.get([train_handle, inference_handle])
-
-ray.get(llm.finish_weight_update.remote())
+ray.get(train_model.broadcast_weights.remote())
 
 ray.get(llm.resume_generation.remote())
 results = ray.get(gen_futures)
