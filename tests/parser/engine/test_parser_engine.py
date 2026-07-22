@@ -570,6 +570,111 @@ class TestPostToolContentDeferral:
         assert not flush.tool_calls
 
 
+# ── TestStreamingContentBoundaryWhitespace ──────────────────────────
+
+
+class TestStreamingContentBoundaryWhitespace:
+    """Regression tests for ParserEngine._strip_boundary_content_ws.
+
+    Non-streaming (``extract_tool_calls``) strips whitespace from content
+    associated with tool calls via ``_strip_content_whitespace``;
+    streaming (``extract_tool_calls_streaming`` + ``finish_streaming``)
+    must match it exactly for the same model output, at any chunk size,
+    since a real client sees one token at a time.
+    """
+
+    @staticmethod
+    def _stream_content(engine, request, text, chunk):
+        parts = []
+        prev = ""
+        for i in range(0, len(text), chunk):
+            piece = text[i : i + chunk]
+            cur = prev + piece
+            delta = engine.extract_tool_calls_streaming(
+                previous_text=prev,
+                current_text=cur,
+                delta_text=piece,
+                previous_token_ids=[],
+                current_token_ids=[],
+                delta_token_ids=[],
+                request=request,
+            )
+            if delta is not None and delta.content:
+                parts.append(delta.content)
+            prev = cur
+        finish = engine.finish_streaming()
+        if finish is not None and finish.content:
+            parts.append(finish.content)
+        return "".join(parts) or None
+
+    @pytest.mark.parametrize("chunk", [1, 3, 1000])
+    def test_content_after_tool_call_strips_leading_space(self, mock_request, chunk):
+        text = '<tool_call>{"name": "f", "arguments": {}}</tool_call> done.'
+
+        streaming = _make_engine(_hermes_config())
+        streamed = self._stream_content(streaming, mock_request, text, chunk)
+
+        non_streamed = _make_engine(_hermes_config()).extract_tool_calls(
+            text, mock_request
+        )
+
+        assert non_streamed.content == "done."
+        assert streamed == non_streamed.content
+
+    @pytest.mark.parametrize("chunk", [1, 3, 1000])
+    def test_content_between_tool_calls_keeps_interior_whitespace(
+        self, mock_request, chunk
+    ):
+        call = '<tool_call>{"name": "f", "arguments": {}}</tool_call>'
+        text = call + " middle " + call
+
+        streaming = _make_engine(_hermes_config())
+        streamed = self._stream_content(streaming, mock_request, text, chunk)
+
+        non_streamed = _make_engine(_hermes_config()).extract_tool_calls(
+            text, mock_request
+        )
+
+        assert non_streamed.content == "middle"
+        assert streamed == non_streamed.content
+
+    @pytest.mark.parametrize("chunk", [1, 3, 1000])
+    def test_content_before_first_tool_call_strips_trailing_space(
+        self, mock_request, chunk
+    ):
+        # _hermes_config() has no reasoning terminals, so its initial state
+        # is CONTENT — this exercises leading content the same way a
+        # CONTENT-initial-state parser (e.g. gemma4) does.
+        text = 'Here you go: <tool_call>{"name": "f", "arguments": {}}</tool_call>'
+
+        streaming = _make_engine(_hermes_config())
+        streamed = self._stream_content(streaming, mock_request, text, chunk)
+
+        non_streamed = _make_engine(_hermes_config()).extract_tool_calls(
+            text, mock_request
+        )
+
+        assert non_streamed.content == "Here you go:"
+        assert streamed == non_streamed.content
+
+    @pytest.mark.parametrize("chunk", [1, 3, 1000])
+    def test_no_tool_calls_whitespace_left_unchanged(self, mock_request, chunk):
+        """Regression guard: without any tool call, boundary whitespace
+        must survive untouched in both paths — the strip only applies to
+        tool-associated content."""
+        text = "  hello world  "
+
+        streaming = _make_engine(_hermes_config())
+        streamed = self._stream_content(streaming, mock_request, text, chunk)
+
+        non_streamed = _make_engine(_hermes_config()).extract_tool_calls(
+            text, mock_request
+        )
+
+        assert non_streamed.content == text
+        assert streamed == non_streamed.content
+
+
 # ── TestFixArgTypes ──────────────────────────────────────────────────
 
 
