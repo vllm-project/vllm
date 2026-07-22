@@ -545,14 +545,15 @@ def select_mxfp4_moe_backend(
 
     unsupported_log = "; ".join(
         [
-            f"backend: {backend}, reason: {reason}"
+            f"backend: {backend.value}, reason: {reason}"
             for backend, reason in unsupported_reasons
         ]
     )
     raise NotImplementedError(
         "No MXFP4 MoE backend supports the deployment configuration. "
         f"weight_key=kMxfp4Static, activation_key={activation_key}. "
-        f"Candidate backends were: {AVAILABLE_BACKENDS}. "
+        f"Candidate backends were: "
+        f"{[backend.value for backend in AVAILABLE_BACKENDS]}. "
         f"Unsupported reasons: {unsupported_log}. "
     )
 
