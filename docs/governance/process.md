@@ -113,6 +113,27 @@ While there isn't a quantitative bar, past committers have:
 
 vLLM runs informal working groups such as CI, CI infrastructure, torch compile, and startup UX. These can be loosely tracked via `#sig-` (or `#feat-`) channels in vLLM Slack. Some groups have regular sync meetings.
 
+Current SIG list (community-maintained, scope may evolve):
+
+| SIG | Scope | Slack Channel |
+| --- | --- | --- |
+| Core | Engine core architecture and runtime fundamentals: scheduler, KV cache manager, distributed execution, model runner, KV connector paths. | `#sig-core` |
+| Large Scale Serving | Disaggregated and elastic large-cluster serving, especially EP scalability and production hardening. | `#sig-large-scale-serving` |
+| Model Performance | Performance and reliability engineering, including trace-driven optimization and continuous benchmark/accuracy tracking. | `#sig-model-performance` |
+| Benchmarks | Benchmark methodology, coverage, and reporting for reproducible performance tracking across models and hardware. | `#sig-benchmarks` |
+| Quantization | Quantization support and backend integration, including online quantization, kernel coverage, and production readiness. | `#sig-quantization` |
+| Speculative Decoding | Speculative decoding architecture, hardening, scaling, and Speculators ecosystem support. | `#sig-spec-decode` (and `#speculators`) |
+| Torch Compile | `torch.compile` integration, compile-time/runtime optimization, and compiler-related developer productivity. | `#sig-torch-compile` |
+| Post-Training (RL) | RL rollout enablement in vLLM, including weight sync, cache reset behavior, and launcher/runtime ergonomics. | `#sig-reinforcement-learning` |
+| Multi-Modality | Multi-modal abstractions, model enablement, and performance optimization for multimodal workloads. | `#sig-multi-modality` |
+| Omni | vLLM-Omni model support and serving workflows. | `#sig-omni` |
+| CI / Build | CI signal quality, build reliability, and test coverage infrastructure. | `#sig-ci` |
+| Release Management | Release process coordination, release quality gates, and release operations. | `#sig-release-management` |
+| AMD Hardware | AMD/ROCm platform enablement, compatibility, and performance tuning. | `#sig-amd` |
+| TPU | TPU backend enablement, integration, and performance tuning. | `#sig-tpu` |
+
+For meeting schedules, see [vLLM Events](https://vllm.ai/events) which includes SIG meeting schedules.
+
 ### Advisory Board
 
 vLLM project leads consult with an informal advisory board that is composed of model providers, hardware vendors, and ecosystem partners. This manifests as a collaboration channel in Slack and frequent communications.
