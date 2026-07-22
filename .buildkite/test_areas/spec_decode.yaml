@@ -170,3 +170,19 @@ steps:
     - tests/v1/e2e/spec_decode/
   commands:
     - pytest -v -s v1/e2e/spec_decode -k "qwen3_5-hybrid"
+
+- label: Spec Decode DeepSeek MTP Parallel Load (B200)
+  key: spec-decode-deepseek-mtp-parallel-load-b200
+  timeout_in_minutes: 30
+  device: b200-k8s
+  optional: true
+  num_devices: 2
+  source_file_dependencies:
+    - vllm/v1/spec_decode/llm_base_proposer.py
+    - vllm/v1/spec_decode/eagle.py
+    - vllm/v1/worker/gpu/spec_decode/eagle/
+    - vllm/model_executor/models/deepseek_mtp.py
+    - vllm/model_executor/models/deepseek_v2.py
+    - tests/v1/e2e/spec_decode/test_mtp_parallel_load.py
+  commands:
+    - pytest -v -s v1/e2e/spec_decode/test_mtp_parallel_load.py

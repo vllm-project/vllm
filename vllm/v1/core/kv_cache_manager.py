@@ -204,6 +204,21 @@ class KVCacheManager:
         self.prefix_cache_stats = PrefixCacheStats()
         return stats
 
+    def prefix_cache_lookup_enabled(self, request: Request) -> bool:
+        """Whether a local prefix cache lookup may be run for this request."""
+        return self.enable_caching and not request.skip_reading_prefix_cache
+
+    def record_prefix_cache_stats(self, request: Request, num_hits: int) -> None:
+        # Don't count a request that skipped the cache lookup.
+        if not self.log_stats or not self.prefix_cache_lookup_enabled(request):
+            return
+        assert self.prefix_cache_stats is not None
+        self.prefix_cache_stats.record(
+            num_tokens=request.num_tokens,
+            num_hits=num_hits,
+            preempted=request.num_preemptions > 0,
+        )
+
     def get_computed_blocks(self, request: Request) -> tuple[KVCacheBlocks, int, int]:
         """Get the computed (cached) blocks for the request.
         Note that the computed blocks must be full.
@@ -225,7 +240,7 @@ class KVCacheManager:
         # disabled or the request is marked as skipping kv cache read
         # (which happens when the request requires prompt logprobs
         # or calls a pooling model with all pooling).
-        if not self.enable_caching or request.skip_reading_prefix_cache:
+        if not self.prefix_cache_lookup_enabled(request):
             return self.empty_kv_cache_blocks, 0, 0
 
         # NOTE: When all tokens hit the cache, we must recompute the last token
@@ -268,14 +283,6 @@ class KVCacheManager:
         shared_prefix_boundary = (
             num_new_computed_tokens + num_uncached if num_uncached else 0
         )
-
-        if self.log_stats:
-            assert self.prefix_cache_stats is not None
-            self.prefix_cache_stats.record(
-                num_tokens=request.num_tokens,
-                num_hits=num_new_computed_tokens,
-                preempted=request.num_preemptions > 0,
-            )
 
         blocks = self.create_kv_cache_blocks(computed_blocks)
         return blocks, num_new_computed_tokens, shared_prefix_boundary

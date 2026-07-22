@@ -204,13 +204,12 @@ class FakeNixlWrapper:
 def _make_fake_nixl_pkg():
     """Context manager that creates a temporary package making
        `from nixl._api import nixl_agent` resolve to our FakeNixlWrapper.
-       Also creates rixl package for ROCm compatibility.
+       Also creates the ROCm NIXL packages.
 
     Automatically cleans up the temporary directory when done.
     """
     with tempfile.TemporaryDirectory() as td:
-        # Create both nixl and rixl packages for cross-platform compatibility
-        for pkg_name in ["nixl", "rixl"]:
+        for pkg_name in ["nixl", "nixl_rocm"]:
             pkg_root = os.path.join(td, pkg_name, "_api")
             os.makedirs(pkg_root, exist_ok=True)
 
@@ -3130,10 +3129,12 @@ def test_handshake_decode_errors(default_vllm_config, dist_init, error_scenario)
             )
 
 
+@patch(
+    "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
+    FakeNixlWrapper,
+)
 def test_kv_both_deprecation_warning(default_vllm_config, dist_init):
     """kv_role='kv_both' should emit a deprecation log warning."""
-    from unittest.mock import patch
-
     from vllm.logger import _print_warning_once
 
     _print_warning_once.cache_clear()
@@ -3156,10 +3157,12 @@ def test_kv_both_deprecation_warning(default_vllm_config, dist_init):
     assert "deprecated" in msg
 
 
+@patch(
+    "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
+    FakeNixlWrapper,
+)
 def test_explicit_kv_role_no_deprecation_warning(default_vllm_config, dist_init):
     """kv_role='kv_consumer' or 'kv_producer' should NOT emit a warning."""
-    from unittest.mock import patch
-
     for role in ("kv_consumer", "kv_producer"):
         vllm_config = create_vllm_config(kv_role=role)
         with patch(

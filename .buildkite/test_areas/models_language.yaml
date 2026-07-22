@@ -137,7 +137,7 @@ steps:
 
 - label: Language Models Test (MTEB)
   key: language-models-test-mteb
-  timeout_in_minutes: 45
+  timeout_in_minutes: 68
   device: h200_18gb
   optional: true
   source_file_dependencies:

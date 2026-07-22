@@ -130,6 +130,35 @@ jobs:
                   },
                 ],
               },
+              "intel-gpu": {
+                // Keyword search - matches whole words only (with word boundaries)
+                keywords: [
+                  {
+                    term: "B50",
+                    searchIn: "both"
+                  },
+                  {
+                    term: "B60",
+                    searchIn: "both"
+                  },
+                  {
+                    term: "B70",
+                    searchIn: "both"
+                  },
+                  {
+                    term: "intel gpu",
+                    searchIn: "both"
+                  },
+                  {
+                    term: "Arc GPU",
+                    searchIn: "both"
+                  },
+                  {
+                    term: "BMG",
+                    searchIn: "both"
+                  },
+                ],
+              },
               // Add more label configurations here as needed
               // example: {
               //   keywords: [...],

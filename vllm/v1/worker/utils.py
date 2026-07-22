@@ -533,9 +533,12 @@ def bind_kv_cache(
         for layer_name in layer_names:
             runner_kv_caches.append(kv_caches[layer_name])
 
-    # Bind kv_caches to forward context
+    # Bind kv_caches to forward context. Each layer's bind_kv_cache unpacks
+    # its raw allocation into the per-layer view(s) it needs (e.g. Mamba
+    # splits conv/ssm), so the kv_caches dict can hold a single tensor per
+    # layer for the KV connector to register.
     for layer_name, kv_cache in kv_caches.items():
-        forward_context[layer_name].kv_cache = kv_cache
+        forward_context[layer_name].bind_kv_cache(kv_cache)
 
 
 def copy_kv_cache_blocks_inplace(

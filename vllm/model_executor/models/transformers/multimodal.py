@@ -337,7 +337,7 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
         # Positions shape handling for MRoPE models
         if self.model_config.uses_mrope:
             # [3, seq_len] -> [3, 1, seq_len]
-            positions = positions[:, None]
+            positions = positions[:, None].contiguous()
         model_output = super().forward(
             input_ids, positions, intermediate_tensors, inputs_embeds
         )
@@ -481,12 +481,8 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
         image_grid_thw = kwargs.get("image_grid_thw", [])
         video_grid_thw = kwargs.get("video_grid_thw", [])
 
-        image_grid_thw = (torch.stack if image_grid_thw else torch.tensor)(
-            image_grid_thw
-        )
-        video_grid_thw = (torch.stack if video_grid_thw else torch.tensor)(
-            video_grid_thw
-        )
+        image_grid_thw = torch.stack(image_grid_thw) if image_grid_thw else None
+        video_grid_thw = torch.stack(video_grid_thw) if video_grid_thw else None
 
         # `get_rope_index` doesn't always accept arbitrary `kwargs`
         kwargs = {}
