@@ -17,7 +17,7 @@ steps:
     amd:
       dind: false
       device: mi300_1
-      timeout_in_minutes: 44
+      timeout_in_minutes: 45
       depends_on:
       - image-build-amd
 
@@ -72,7 +72,7 @@ steps:
   mirror:
     amd:
       device: mi325_1
-      timeout_in_minutes: 56
+      timeout_in_minutes: 60
       depends_on:
       - image-build-amd
       commands:

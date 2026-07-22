@@ -119,7 +119,7 @@ steps:
   mirror:
     amd:
       device: mi325_1
-      timeout_in_minutes: 117
+      timeout_in_minutes: 120
       source_file_dependencies:
       - csrc/quantization/
       - vllm/model_executor/layers/quantization
