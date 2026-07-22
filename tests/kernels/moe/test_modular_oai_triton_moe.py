@@ -6,10 +6,6 @@ Test modular OAI Triton MoE
 
 from __future__ import annotations
 
-import json
-import os
-from pathlib import Path
-
 import pytest
 import torch
 
@@ -55,12 +51,9 @@ MNK = [
 
 
 def deepseek_v4_flash_moe_topology():
-    """MoE sizes for the MODEL path used by ``launch_dsv4.sh``.
-
-    Default weights path: ``/data/deepseek-ai/DeepSeek-V4-Flash/config.json``.
-    When that file is readable, values come from ``hidden_size``,
+    """MoE sizes for the DeepSeek-V4-Flash`.
+    Default weights from: ``deepseek-ai/DeepSeek-V4-Flash`.
     ``moe_intermediate_size``, ``n_routed_experts``, and ``num_experts_per_tok``.
-    Otherwise fall back to the same numeric constants.
     """
     defaults = {
         "hidden_size": 4096,
@@ -68,21 +61,7 @@ def deepseek_v4_flash_moe_topology():
         "n_routed_experts": 256,
         "num_experts_per_tok": 6,
     }
-    cfg_path = Path(
-        os.environ.get(
-            "DEEPSEEK_V4_FLASH_CONFIG",
-            "/data/deepseek-ai/DeepSeek-V4-Flash/config.json",
-        )
-    )
-    if cfg_path.is_file():
-        with cfg_path.open() as f:
-            cfg = json.load(f)
-        return {
-            "hidden_size": int(cfg["hidden_size"]),
-            "moe_intermediate_size": int(cfg["moe_intermediate_size"]),
-            "n_routed_experts": int(cfg["n_routed_experts"]),
-            "num_experts_per_tok": int(cfg["num_experts_per_tok"]),
-        }
+
     return defaults
 
 
@@ -212,8 +191,8 @@ def oai_triton_moe_impl(
     x: torch.Tensor,
     w1: torch.Tensor,
     w2: torch.Tensor,
-    w1_scale: "PrecisionConfig",
-    w2_scale: "PrecisionConfig",
+    w1_scale: PrecisionConfig,
+    w2_scale: PrecisionConfig,
     w1_bias: torch.Tensor | None,
     w2_bias: torch.Tensor | None,
     num_experts: int,
@@ -383,9 +362,7 @@ def test_unfused_oai_triton_experts_apply_direct_deepseek_v4_topology(workspace_
     output = torch.empty(out_shape, dtype=dtype, device="cuda")
 
     with set_current_vllm_config(VllmConfig()):
-        out_ref = torch_moe_impl(
-            x, w1, w2, w1_bias, w2_bias, topk_weights, topk_ids
-        )
+        out_ref = torch_moe_impl(x, w1, w2, w1_bias, w2_bias, topk_weights, topk_ids)
         experts.apply(
             output=output,
             hidden_states=x,
