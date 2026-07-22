@@ -16,7 +16,7 @@ import torch
 from typing_extensions import runtime_checkable
 
 from vllm.config import VllmConfig, get_layers_from_vllm_config
-from vllm.utils.math_utils import cdiv
+from vllm.utils.math_utils import cdiv, next_power_of_2
 from vllm.utils.torch_utils import PIN_MEMORY, async_tensor_h2d, np_to_pinned_tensor
 from vllm.v1.kv_cache_interface import KVCacheSpec, MambaSpec
 
@@ -50,11 +50,14 @@ def compute_mm_prefix_range_tensor(
     mm_prefix_range: dict[int, list[tuple[int, int]]] | None,
     num_seqs: int,
     device: torch.device,
+    *,
+    pad_to_power_of_two: bool = False,
 ) -> torch.Tensor | None:
     """Convert mm_prefix_range dict to padded tensor for Triton kernel.
 
     Returns shape: (num_seqs, max_ranges, 2) with 0-padding for empty ranges.
     Empty ranges have start==end==0, which kernel skips via is_valid check.
+    Optionally bucket max_ranges to the next power of two.
     """
     if mm_prefix_range is None:
         return None
@@ -67,6 +70,8 @@ def compute_mm_prefix_range_tensor(
         return None
 
     max_ranges = max(len(r) for r in range_lists)
+    if pad_to_power_of_two:
+        max_ranges = next_power_of_2(max_ranges)
     padded = []
     for r in range_lists:
         padded_r = list(r) + [(0, 0)] * (max_ranges - len(r))

@@ -32,6 +32,7 @@ from vllm.v1.attention.backend import (
 )
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.attention.backends.utils import (
+    compute_mm_prefix_range_tensor,
     set_kv_cache_layout,
 )
 from vllm.v1.kv_cache_interface import FullAttentionSpec
@@ -53,6 +54,56 @@ FP8_KV_CACHE_DTYPES = {
     "fp8": current_platform.fp8_dtype(),
     "fp8_e4m3": current_platform.fp8_dtype(),
 }
+
+
+def test_compute_mm_prefix_range_tensor_power_of_two_padding() -> None:
+    ranges = {0: [(0, 1), (2, 3), (4, 5)], 1: [(6, 7)]}
+    device = torch.device("cpu")
+
+    unbucketed = compute_mm_prefix_range_tensor(ranges, 2, device)
+    bucketed = compute_mm_prefix_range_tensor(
+        ranges, 2, device, pad_to_power_of_two=True
+    )
+    assert unbucketed is not None
+    assert bucketed is not None
+
+    expected_unbucketed = torch.tensor(
+        [
+            [[0, 1], [2, 3], [4, 5]],
+            [[6, 7], [0, 0], [0, 0]],
+        ],
+        dtype=torch.int32,
+        device=device,
+    )
+    expected_bucketed = torch.tensor(
+        [
+            [[0, 1], [2, 3], [4, 5], [0, 0]],
+            [[6, 7], [0, 0], [0, 0], [0, 0]],
+        ],
+        dtype=torch.int32,
+        device=device,
+    )
+    torch.testing.assert_close(unbucketed, expected_unbucketed)
+    torch.testing.assert_close(bucketed, expected_bucketed)
+    assert bucketed.device == device
+    assert bucketed.dtype == torch.int32
+
+    already_bucketed = compute_mm_prefix_range_tensor(
+        {0: [(0, 1), (2, 3), (4, 5), (6, 7)]},
+        1,
+        device,
+        pad_to_power_of_two=True,
+    )
+    assert already_bucketed is not None
+    torch.testing.assert_close(
+        already_bucketed,
+        torch.tensor(
+            [[[0, 1], [2, 3], [4, 5], [6, 7]]],
+            dtype=torch.int32,
+            device=device,
+        ),
+    )
+
 
 # Remove flashinfer from the list if it's not available
 try:
