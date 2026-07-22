@@ -1,4 +1,6 @@
 ARG BASE_IMAGE=ubuntu:24.04
+ARG TRITON_BRANCH="0f380657"
+ARG TRITON_REPO="https://github.com/ROCm/triton.git"
 ARG FA_BRANCH="0e60e394"
 ARG FA_REPO="https://github.com/Dao-AILab/flash-attention.git"
 ARG AITER_BRANCH="v0.1.16.post5"
@@ -10,7 +12,7 @@ ARG SCCACHE_DOWNLOAD_URL
 
 FROM ${BASE_IMAGE} AS base
 
-ARG PYTORCH_ROCM_ARCH="gfx90a;gfx942;gfx950"
+ARG PYTORCH_ROCM_ARCH="gfx90a;gfx942;gfx950;gfx1100;gfx1101;gfx1200;gfx1201;gfx1150;gfx1151"
 ENV PYTORCH_ROCM_ARCH="${PYTORCH_ROCM_ARCH}"
 ARG AITER_ROCM_ARCH="gfx942;gfx950"
 ENV AITER_ROCM_ARCH="${AITER_ROCM_ARCH}"
@@ -205,6 +207,26 @@ RUN if [ "$USE_SCCACHE" = "1" ]; then \
     fi
 
 ###
+### Triton Build
+###
+FROM base AS build_triton
+ARG TRITON_BRANCH
+ARG TRITON_REPO
+RUN git clone ${TRITON_REPO}
+# Cherry picking the following
+# https://github.com/triton-lang/triton/pull/8991
+RUN cd triton \
+    && git checkout ${TRITON_BRANCH} \
+    && git config --global user.email "you@example.com" && git config --global user.name "Your Name" \
+    && git cherry-pick 555d04f \
+    && if [ ! -f setup.py ]; then cd python; fi \
+    && python3 setup.py bdist_wheel --dist-dir=dist \
+    && mkdir -p /app/install && cp dist/*.whl /app/install
+RUN if [ -d triton/python/triton_kernels ]; then pip install build && cd triton/python/triton_kernels \
+    && python3 -m build --wheel && cp dist/*.whl /app/install; fi
+
+
+###
 ### FlashAttention Build
 ###
 FROM base AS build_fa
@@ -275,6 +297,8 @@ RUN --mount=type=secret,id=sccache_aws_access_key \
 # only includes dependencies used by wheel release pipeline
 FROM base AS debs_wheel_release
 RUN mkdir /app/debs
+RUN --mount=type=bind,from=build_triton,src=/app/install/,target=/install \
+    cp /install/*.whl /app/debs
 RUN --mount=type=bind,from=build_fa,src=/app/install/,target=/install \
     cp /install/*.whl /app/debs
 RUN --mount=type=bind,from=build_aiter,src=/app/install/,target=/install \
@@ -282,6 +306,8 @@ RUN --mount=type=bind,from=build_aiter,src=/app/install/,target=/install \
 
 FROM base AS debs
 RUN mkdir /app/debs
+RUN --mount=type=bind,from=build_triton,src=/app/install/,target=/install \
+    cp /install/*.whl /app/debs
 RUN --mount=type=bind,from=build_fa,src=/app/install/,target=/install \
     cp /install/*.whl /app/debs
 RUN --mount=type=bind,from=build_aiter,src=/app/install/,target=/install \
@@ -292,11 +318,15 @@ RUN --mount=type=bind,from=debs,src=/app/debs,target=/install \
     uv pip install /install/*.whl
 
 ARG BASE_IMAGE
+ARG TRITON_BRANCH
+ARG TRITON_REPO
 ARG FA_BRANCH
 ARG FA_REPO
 ARG AITER_BRANCH
 ARG AITER_REPO
 RUN echo "BASE_IMAGE: ${BASE_IMAGE}" > /app/versions.txt \
+    && echo "TRITON_BRANCH: ${TRITON_BRANCH}" >> /app/versions.txt \
+    && echo "TRITON_REPO: ${TRITON_REPO}" >> /app/versions.txt \
     && echo "FA_BRANCH: ${FA_BRANCH}" >> /app/versions.txt \
     && echo "FA_REPO: ${FA_REPO}" >> /app/versions.txt \
     && echo "AITER_BRANCH: ${AITER_BRANCH}" >> /app/versions.txt \
