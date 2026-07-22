@@ -19,7 +19,7 @@ ENV AITER_ROCM_ARCH="${AITER_ROCM_ARCH}"
 # Prebuild AITER kernels at wheel-build time (CDNA only). 1=on, 0=off.
 ARG PREBUILD_KERNELS=0
 ARG PYTHON_VERSION=3.14.6
-ARG MAX_JOBS=64
+ARG MAX_JOBS=128
 ENV MAX_JOBS=${MAX_JOBS}
 
 # Required for RCCL in ROCm7.1
@@ -99,6 +99,10 @@ ARG PYTORCH_VISION_REPO="https://github.com/pytorch/vision.git"
 ARG PYTORCH_VISION_BRANCH="v0.24.1"
 ARG PYTORCH_AUDIO_REPO="https://github.com/pytorch/audio.git"
 ARG PYTORCH_AUDIO_BRANCH="v2.9.0"
+# USE_CUSTOM_TRITON: set to 1 (default) to build triton from source and remove
+# any triton that came bundled with the PyTorch wheel. Set to 0 to keep the
+# TheRock triton from the PyTorch wheel instead.
+ARG USE_CUSTOM_TRITON=1
 
 # Install ROCm SDK
 RUN uv pip install --index-url ${PIP_EXTRA_INDEX_URL} \
@@ -120,6 +124,10 @@ RUN set -e; \
                 "torchaudio==${TORCHAUDIO_VERSION}${ROCM_TORCH_SUFFIX}" \
                 "torchvision==${TORCHVISION_VERSION}${ROCM_TORCH_SUFFIX}" 2>/dev/null; then \
             echo "PyTorch wheels installed successfully"; \
+            if [ "${USE_CUSTOM_TRITON}" = "1" ] && python3 -c "import triton" 2>/dev/null; then \
+                echo "Removing TheRock triton (USE_CUSTOM_TRITON=1, will be replaced by from-source build)"; \
+                pip uninstall -y triton triton-kernels; \
+            fi; \
             TORCH_INSTALLED=1; \
         else \
             echo "PyTorch wheels not found, will build from source"; \
@@ -153,6 +161,7 @@ RUN set -e; \
     fi
 
 # Install device-specific packages when DEVICE_EXTRAS is set.
+SHELL ["/bin/bash", "-c"]
 RUN if [ -n "${DEVICE_EXTRAS}" ] && [ -n "${ROCM_SDK_VERSION}" ]; then \
         if echo "${ROCM_SDK_VERSION}" | grep -q '\.dev0'; then \
             ROCM_TORCH_SUFFIX="+devrocm$(echo ${ROCM_SDK_VERSION} | tr '+' '.')"; \
@@ -177,8 +186,13 @@ RUN if [ -n "${DEVICE_EXTRAS}" ] && [ -n "${ROCM_SDK_VERSION}" ]; then \
             && uv pip install --index-url ${PIP_EXTRA_INDEX_URL} ${DEVICE_PKGS}; \
         fi; \
     fi
+SHELL ["/bin/sh", "-c"]
 
-ENV SITE_PACKAGES=/opt/python/lib/python${PYTHON_VERSION}/site-packages
+RUN SITE_PACKAGES=$(python3 -c "import sysconfig; print(sysconfig.get_path('purelib'))") \
+    && echo "SITE_PACKAGES=${SITE_PACKAGES}" \
+    && echo "${SITE_PACKAGES}" > /tmp/site_packages_path \
+    && ln -sf "${SITE_PACKAGES}" /opt/python/site-packages
+ENV SITE_PACKAGES=/opt/python/site-packages
 ENV ROCM_PATH="$SITE_PACKAGES/_rocm_sdk_devel" \
     ROCM_HOME="$SITE_PACKAGES/_rocm_sdk_devel" \
     HIP_PATH="$SITE_PACKAGES/_rocm_sdk_devel" \
@@ -227,23 +241,29 @@ RUN if [ "$USE_SCCACHE" = "1" ]; then \
     fi
 
 ###
-### Triton Build (always from source)
+### Triton Build (from source when USE_CUSTOM_TRITON=1)
 ###
 FROM base AS build_triton
 ARG TRITON_BRANCH
 ARG TRITON_REPO
-RUN git clone ${TRITON_REPO}
-# Cherry picking the following
-# https://github.com/triton-lang/triton/pull/8991
-RUN cd triton \
-    && git checkout ${TRITON_BRANCH} \
-    && git config --global user.email "you@example.com" && git config --global user.name "Your Name" \
-    && git cherry-pick 555d04f \
-    && if [ ! -f setup.py ]; then cd python; fi \
-    && python3 setup.py bdist_wheel --dist-dir=dist \
-    && mkdir -p /app/install && cp dist/*.whl /app/install
-RUN if [ -d triton/python/triton_kernels ]; then pip install build && cd triton/python/triton_kernels \
-    && python3 -m build --wheel && cp dist/*.whl /app/install; fi
+ARG USE_CUSTOM_TRITON
+RUN mkdir -p /app/install && \
+    if [ "${USE_CUSTOM_TRITON}" != "1" ]; then \
+        echo "USE_CUSTOM_TRITON=0: skipping triton source build (using TheRock triton)"; \
+    else \
+        git clone ${TRITON_REPO} \
+        && cd triton \
+        && git checkout ${TRITON_BRANCH} \
+        && git config --global user.email "you@example.com" && git config --global user.name "Your Name" \
+        && git cherry-pick 555d04f \
+        && if [ ! -f setup.py ]; then cd python; fi \
+        && python3 setup.py bdist_wheel --dist-dir=dist \
+        && cp dist/*.whl /app/install; \
+    fi
+RUN if [ "${USE_CUSTOM_TRITON}" = "1" ] && [ -d triton/python/triton_kernels ]; then \
+        pip install build && cd triton/python/triton_kernels \
+        && python3 -m build --wheel && cp dist/*.whl /app/install; \
+    fi
 
 
 ###
@@ -318,7 +338,7 @@ RUN --mount=type=secret,id=sccache_aws_access_key \
 FROM base AS debs_wheel_release
 RUN mkdir /app/debs
 RUN --mount=type=bind,from=build_triton,src=/app/install/,target=/install \
-    cp /install/*.whl /app/debs
+    cp /install/*.whl /app/debs 2>/dev/null || echo "No triton wheels (USE_CUSTOM_TRITON=0)"
 RUN --mount=type=bind,from=build_fa,src=/app/install/,target=/install \
     cp /install/*.whl /app/debs
 RUN --mount=type=bind,from=build_aiter,src=/app/install/,target=/install \
@@ -327,7 +347,7 @@ RUN --mount=type=bind,from=build_aiter,src=/app/install/,target=/install \
 FROM base AS debs
 RUN mkdir /app/debs
 RUN --mount=type=bind,from=build_triton,src=/app/install/,target=/install \
-    cp /install/*.whl /app/debs
+    cp /install/*.whl /app/debs 2>/dev/null || echo "No triton wheels (USE_CUSTOM_TRITON=0)"
 RUN --mount=type=bind,from=build_fa,src=/app/install/,target=/install \
     cp /install/*.whl /app/debs
 RUN --mount=type=bind,from=build_aiter,src=/app/install/,target=/install \
