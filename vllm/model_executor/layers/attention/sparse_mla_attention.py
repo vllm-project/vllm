@@ -16,7 +16,6 @@ from vllm.model_executor.layers.attention.mla_attention import (
     align_mla_chunked_context_workspace_size,
     build_mla_chunked_context_metadata,
     get_mla_dims,
-    maybe_get_dcp_kv_gather,
 )
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer
@@ -26,6 +25,7 @@ from vllm.v1.attention.backend import (
     AttentionMetadataBuilder,
 )
 from vllm.v1.attention.backends.utils import split_decodes_and_prefills
+from vllm.v1.attention.ops.dcp_utils import MLADCPManager
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -88,15 +88,19 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
             dtype=self.model_config.dtype,
             device=device,
         )
-        self.dcp_kv_gather = maybe_get_dcp_kv_gather(
-            self.chunked_prefill_workspace,
-            self.chunked_prefill_workspace_size,
-            self.dcp_world_size,
-            max(parallel_config.num_ubatches, 1),
-        )
-        layer_prefill_backend = vllm_config.compilation_config.static_forward_context[
+        attention_layer = vllm_config.compilation_config.static_forward_context[
             layer_names[0]
-        ].prefill_backend
+        ]
+        layer_prefill_backend = attention_layer.prefill_backend
+        self.dcp_manager: MLADCPManager | None = None
+        if self.dcp_world_size > 1:
+            self.dcp_manager = getattr(attention_layer, "dcp_manager", None)
+            assert isinstance(self.dcp_manager, MLADCPManager)
+            if layer_prefill_backend is not None:
+                self.dcp_manager.init_kv_gather(
+                    self.chunked_prefill_workspace,
+                    self.chunked_prefill_workspace_size,
+                )
         self._prefill_backend = (
             layer_prefill_backend.clone() if layer_prefill_backend is not None else None
         )
@@ -116,10 +120,13 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
             64 * 1024,
             scheduler_config.max_num_seqs * topk_tokens,
         )
-        return align_mla_chunked_context_workspace_size(
-            vllm_config,
+        workspace_size = max(
             workspace_size,
+            scheduler_config.max_num_seqs * cache_config.block_size,
         )
+        if vllm_config.parallel_config.decode_context_parallel_size > 1:
+            return align_mla_chunked_context_workspace_size(vllm_config, workspace_size)
+        return workspace_size
 
     def _build_req_id_per_token(
         self,
@@ -168,7 +175,7 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
             dcp_world_size=self.dcp_world_size,
             dcp_local_block_size=self.dcp_local_block_size,
             dcp_virtual_block_size=self.dcp_virtual_block_size,
-            dcp_kv_gather=self.dcp_kv_gather,
+            dcp_manager=self.dcp_manager,
         )
 
     def build(

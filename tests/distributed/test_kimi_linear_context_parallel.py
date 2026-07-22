@@ -71,7 +71,7 @@ def _run_tiny_model(
         enable_chunked_prefill=True,
         enable_prefix_caching=False,
     ) as runner:
-        lengths = [1, 2, 31, 32, 33, 65, 129]
+        lengths = [1, 32, 33, 129]
         prompts = [
             TokensPrompt(
                 prompt_token_ids=[

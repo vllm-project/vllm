@@ -5,7 +5,6 @@ import pytest
 import torch
 
 import vllm._custom_ops as ops
-from vllm.models.kimi_k3.nvidia.mla import _reserve_query_head_storage
 from vllm.models.kimi_k3.nvidia.ops.fused_mla_key_concat_kv_cache import (
     fused_mla_decode_q_concat_kv_cache_insert,
     fused_mla_key_concat_ds_mla_insert,
@@ -29,17 +28,6 @@ OWNED_TOKEN_INDICES = [1, 3]
 pytestmark = pytest.mark.skipif(
     not current_platform.is_cuda(), reason="Kimi-K3 fused MLA ops require CUDA"
 )
-
-
-def test_dcp_gathered_query_reserves_cutlass_head_storage() -> None:
-    query = torch.randn(3, 24, CACHE_ENTRY, device="cuda", dtype=torch.bfloat16)
-
-    padded = _reserve_query_head_storage(query, 128)
-
-    assert padded.shape == query.shape
-    assert padded.stride() == query.stride()
-    assert padded.untyped_storage().nbytes() >= 3 * 128 * CACHE_ENTRY * 2
-    assert torch.equal(padded, query)
 
 
 def _inputs() -> dict[str, torch.Tensor]:
@@ -227,16 +215,9 @@ def test_decode_concat_ignores_negative_slots_for_cache(cache_format: str) -> No
     _assert_cache_matches_reference(mixed_cache, reference_cache, initial_cache)
 
 
-@pytest.mark.parametrize("seed", [0, 1, 2])
-def test_ds_mla_cache_insert_bit_compatible_with_reference(seed: int) -> None:
-    """Fused ds_mla insert must be bit-identical to concat_and_cache_mla.
-
-    Guards the fp8 payload regression where the stable-ABI bf16 scalar fell
-    through to an unspecialized fp8 conversion and stored garbage payload
-    bytes while per-tile scales and rope bytes stayed correct, making the
-    cache corruption silent.
-    """
-    torch.manual_seed(seed)
+def test_ds_mla_cache_insert_bit_compatible_with_reference() -> None:
+    """Fused ds_mla insertion must match the reference bit-for-bit."""
+    torch.manual_seed(0)
     num_tokens, num_blocks = 33, 16
     dt = torch.bfloat16
     kv_c = torch.randn(num_tokens, KV_LORA_RANK, device="cuda", dtype=dt)

@@ -1,28 +1,48 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+// Direct symmetric-memory DCP A2A LSE reduction.
 
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
-#include <cuda_runtime.h>
 #include <math_constants.h>
 #include <torch/csrc/stable/library.h>
 #include <torch/headeronly/core/ScalarType.h>
 
-#include <cstdint>
 #include <cstdio>
 #include <optional>
-#include <string>
 #include <type_traits>
 
-#include "../torch_utils.h"
+#include "dcp_direct_common.cuh"
 
 namespace {
 
-constexpr uint64_t kSpinLimit = 100000000;
+using vllm::direct_dcp::check_cuda_launch;
+using vllm::direct_dcp::get_peer_ptr;
+using vllm::direct_dcp::increment_epoch_kernel;
+using vllm::direct_dcp::store_release_system;
+using vllm::direct_dcp::wait_for_epoch;
+
+__device__ __forceinline__ int64_t find_sequence(const int32_t* query_start_loc,
+                                                 int64_t token_idx,
+                                                 int64_t num_seqs) {
+  int64_t left = 0;
+  int64_t right = num_seqs;
+  while (left < right) {
+    int64_t mid = (left + right) / 2;
+    if (query_start_loc[mid] <= token_idx) {
+      left = mid + 1;
+    } else {
+      right = mid;
+    }
+  }
+  return left - 1;
+}
 
 template <typename scalar_t>
 __device__ __forceinline__ float to_float(scalar_t value) {
-  if constexpr (std::is_same_v<scalar_t, __half>) {
+  if constexpr (std::is_same_v<scalar_t, float>) {
+    return value;
+  } else if constexpr (std::is_same_v<scalar_t, __half>) {
     return __half2float(value);
   } else {
     return __bfloat162float(value);
@@ -38,58 +58,30 @@ __device__ __forceinline__ scalar_t from_float(float value) {
   }
 }
 
-// Emit the system-scope release store used to make a completion flag visible
-// throughout the symmetric-memory domain.
-__device__ __forceinline__ void store_release_system(uint32_t* ptr,
-                                                     uint32_t value) {
-  uint64_t address = reinterpret_cast<uint64_t>(ptr);
-  asm volatile("st.global.release.sys.u32 [%0], %1;"
-               :
-               : "l"(address), "r"(value)
-               : "memory");
-}
-
-// Observe a peer's completion flag and order subsequent payload reads after
-// the matching system-scope release store.
-__device__ __forceinline__ uint32_t load_acquire_system(const uint32_t* ptr) {
-  uint32_t value;
-  uint64_t address = reinterpret_cast<uint64_t>(ptr);
-  asm volatile("ld.global.acquire.sys.u32 %0, [%1];"
-               : "=r"(value)
-               : "l"(address)
-               : "memory");
-  return value;
-}
-
-// Advance the invocation ID; its low bit selects one of two staging slots.
-__global__ void increment_epoch_kernel(int64_t* epoch) {
-  if (blockIdx.x == 0 && threadIdx.x == 0) {
-    epoch[0] += 1;
-  }
-}
-
-// Dispatch each destination's head slice and LSE directly into that GPU's
-// symmetric receive buffers.
-//
-// `seq_lens` (optional) holds this rank's local KV shard lengths. Under DCP a
-// rank can hold an empty shard for a live request, in which case the
-// attention kernel leaves this row's output and LSE undefined (possibly
-// NaN/Inf). Mask the row at the source -- publish LSE = -inf instead of the
-// garbage value and skip the payload copy -- so peers deterministically weight
-// this rank's contribution to zero before the value enters any exp/max.
+// Send each destination's head slice and LSE to its symmetric buffer. Mask
+// undefined empty-shard rows at the source so peers give them zero weight.
+template <typename lse_t>
 __global__ void dispatch_output_lse_kernel(
-    const uint4* partial_output, const float* partial_lse,
-    const int32_t* seq_lens, const int64_t* peer_output_ptrs,
-    const int64_t* peer_lse_ptrs, const int64_t* epoch_ptr, int64_t world_size,
-    int64_t rank, int64_t num_tokens, int64_t max_num_tokens,
-    int64_t heads_per_rank, int64_t head_dim, int64_t tokens_per_seq,
-    int64_t output_token_stride, int64_t lse_token_stride) {
+    const uint4* partial_output, const lse_t* partial_lse,
+    const int32_t* seq_lens, const int32_t* query_start_loc,
+    const int64_t* peer_output_ptrs, const int64_t* peer_lse_ptrs,
+    const int64_t* epoch_ptr, int64_t world_size, int64_t rank,
+    int64_t num_tokens, int64_t max_num_tokens, int64_t num_seqs,
+    int64_t heads_per_rank, int64_t head_dim, int64_t output_token_stride,
+    int64_t lse_token_stride) {
   int64_t item = static_cast<int64_t>(blockIdx.x);
   int64_t destination_rank = item / num_tokens;
   int64_t token_idx = item - destination_rank * num_tokens;
 
-  bool empty_kv =
-      seq_lens != nullptr && seq_lens[token_idx / tokens_per_seq] == 0;
+  __shared__ bool empty_kv;
+  if (threadIdx.x == 0) {
+    empty_kv = false;
+    if (seq_lens != nullptr) {
+      int64_t seq_idx = find_sequence(query_start_loc, token_idx, num_seqs);
+      empty_kv = seq_lens[seq_idx] == 0;
+    }
+  }
+  __syncthreads();
 
   uint32_t epoch = static_cast<uint32_t>(epoch_ptr[0]);
   int64_t parity = static_cast<int64_t>(epoch & 1u);
@@ -99,8 +91,8 @@ __global__ void dispatch_output_lse_kernel(
   int64_t source_head = destination_rank * heads_per_rank;
 
   if (!empty_kv) {
-    uint4* peer_output = reinterpret_cast<uint4*>(
-        static_cast<uintptr_t>(peer_output_ptrs[destination_rank]));
+    uint4* peer_output =
+        get_peer_ptr<uint4>(peer_output_ptrs, destination_rank);
     int64_t vectors_per_item = heads_per_rank * head_dim / 8;
     int64_t source_vector =
         (token_idx * output_token_stride + source_head * head_dim) / 8;
@@ -112,18 +104,16 @@ __global__ void dispatch_output_lse_kernel(
     }
   }
 
-  float* peer_lse = reinterpret_cast<float*>(
-      static_cast<uintptr_t>(peer_lse_ptrs[destination_rank]));
+  float* peer_lse = get_peer_ptr<float>(peer_lse_ptrs, destination_rank);
   int64_t source_lse = token_idx * lse_token_stride + source_head;
   for (int64_t head_idx = threadIdx.x; head_idx < heads_per_rank;
        head_idx += blockDim.x) {
     peer_lse[destination_item + head_idx] =
-        empty_kv ? -CUDART_INF_F : partial_lse[source_lse + head_idx];
+        empty_kv ? -CUDART_INF_F : to_float(partial_lse[source_lse + head_idx]);
   }
 }
 
-// Publish one completion flag per destination. Stream ordering makes
-// this kernel run only after all peer payload writes above have completed.
+// Publish completion after the stream-ordered payload writes.
 __global__ void signal_kernel(const int64_t* peer_signal_ptrs,
                               const int64_t* epoch_ptr, int64_t world_size,
                               int64_t rank) {
@@ -135,14 +125,13 @@ __global__ void signal_kernel(const int64_t* peer_signal_ptrs,
 
   uint32_t epoch = static_cast<uint32_t>(epoch_ptr[0]);
   int64_t parity = static_cast<int64_t>(epoch & 1u);
-  uint32_t* peer_signal = reinterpret_cast<uint32_t*>(
-      static_cast<uintptr_t>(peer_signal_ptrs[destination_rank]));
+  uint32_t* peer_signal =
+      get_peer_ptr<uint32_t>(peer_signal_ptrs, destination_rank);
   int64_t signal_item = parity * world_size + rank;
   store_release_system(peer_signal + signal_item, epoch);
 }
 
-// Wait for every source rank, form stable base-2 LSE weights, and combine the
-// received 16-bit partial outputs using FP32 accumulation.
+// Form stable base-2 LSE weights and combine in FP32.
 template <typename scalar_t>
 __global__ void wait_lse_combine_kernel(
     const scalar_t* received_output, const float* received_lse,
@@ -166,17 +155,14 @@ __global__ void wait_lse_combine_kernel(
               heads_per_rank +
           head_idx;
       int64_t signal_item = parity * world_size + source_rank;
-      uint64_t spins = 0;
-      while (load_acquire_system(received_signal + signal_item) != epoch) {
-        if (++spins >= kSpinLimit) {
-          printf(
-              "direct DCP A2A timeout source=%lld token=%lld head=%lld "
-              "epoch=%u\n",
-              static_cast<long long>(source_rank),
-              static_cast<long long>(token_idx),
-              static_cast<long long>(head_idx), epoch);
-          asm volatile("trap;");
-        }
+      if (!wait_for_epoch(received_signal + signal_item, epoch)) {
+        printf(
+            "direct DCP A2A timeout source=%lld token=%lld head=%lld "
+            "epoch=%u\n",
+            static_cast<long long>(source_rank),
+            static_cast<long long>(token_idx), static_cast<long long>(head_idx),
+            epoch);
+        asm volatile("trap;");
       }
       float value = received_lse[source_item];
       if (isnan(value) || value == CUDART_INF_F) {
@@ -208,10 +194,7 @@ __global__ void wait_lse_combine_kernel(
        dim_idx += blockDim.x) {
     float accumulator = 0.0f;
     for (int64_t source_rank = 0; source_rank < world_size; ++source_rank) {
-      // Skip zero-weight sources instead of multiplying by zero: a source
-      // rank with an empty KV shard never sent its payload, so the staging
-      // slot holds stale bytes that may decode to NaN/Inf. When every source
-      // is empty all weights are zero and the row combines to zeros.
+      // Empty shards leave stale payloads, so never read zero-weight sources.
       float weight = weights[source_rank];
       if (weight == 0.0f) {
         continue;
@@ -228,39 +211,29 @@ __global__ void wait_lse_combine_kernel(
   }
 }
 
-// Surface immediate CUDA launch errors as Torch exceptions.
-void check_launch() {
-  cudaError_t error = cudaGetLastError();
-  STD_TORCH_CHECK(error == cudaSuccess,
-                  "direct DCP A2A kernel launch failed: " +
-                      std::string(cudaGetErrorString(error)));
-}
-
-// Validate the tensors, advance the epoch, then enqueue dispatch, signal, and
-// combine phases on the caller's current CUDA stream.
-void direct_dcp_a2a_lse_reduce(const torch::stable::Tensor& partial_output,
-                               const torch::stable::Tensor& partial_lse,
-                               const std::optional<torch::stable::Tensor>&
-                                   seq_lens,
-                               const torch::stable::Tensor& peer_output_ptrs,
-                               const torch::stable::Tensor& peer_lse_ptrs,
-                               const torch::stable::Tensor& peer_signal_ptrs,
-                               torch::stable::Tensor& received_output,
-                               torch::stable::Tensor& received_lse,
-                               torch::stable::Tensor& received_signal,
-                               torch::stable::Tensor& epoch,
-                               torch::stable::Tensor& combined_output,
-                               int64_t world_size, int64_t rank,
-                               int64_t max_num_tokens, bool is_lse_base_on_e) {
+void direct_dcp_a2a_lse_reduce(
+    const torch::stable::Tensor& partial_output,
+    const torch::stable::Tensor& partial_lse,
+    const std::optional<torch::stable::Tensor>& seq_lens,
+    const std::optional<torch::stable::Tensor>& query_start_loc,
+    const torch::stable::Tensor& peer_output_ptrs,
+    const torch::stable::Tensor& peer_lse_ptrs,
+    const torch::stable::Tensor& peer_signal_ptrs,
+    torch::stable::Tensor& received_output, torch::stable::Tensor& received_lse,
+    torch::stable::Tensor& received_signal, torch::stable::Tensor& epoch,
+    torch::stable::Tensor& combined_output, int64_t world_size, int64_t rank,
+    int64_t max_num_tokens, bool is_lse_base_on_e) {
   STD_TORCH_CHECK(partial_output.is_cuda() && partial_lse.is_cuda(),
                   "partial output and LSE must be CUDA tensors");
   auto output_dtype = partial_output.scalar_type();
   STD_TORCH_CHECK(output_dtype == torch::headeronly::ScalarType::Half ||
                       output_dtype == torch::headeronly::ScalarType::BFloat16,
                   "direct DCP A2A only supports FP16 and BF16 output");
-  STD_TORCH_CHECK(
-      partial_lse.scalar_type() == torch::headeronly::ScalarType::Float,
-      "partial LSE must be FP32");
+  auto lse_dtype = partial_lse.scalar_type();
+  STD_TORCH_CHECK(lse_dtype == torch::headeronly::ScalarType::Float ||
+                      lse_dtype == torch::headeronly::ScalarType::Half ||
+                      lse_dtype == torch::headeronly::ScalarType::BFloat16,
+                  "partial LSE must be FP32, FP16, or BF16");
   STD_TORCH_CHECK(partial_output.dim() == 3 && partial_lse.dim() == 2,
                   "expected output [T,H,D] and LSE [T,H]");
   STD_TORCH_CHECK(world_size > 1, "world_size must be greater than 1");
@@ -307,18 +280,27 @@ void direct_dcp_a2a_lse_reduce(const torch::stable::Tensor& partial_output,
           peer_signal_ptrs.scalar_type() == torch::headeronly::ScalarType::Long,
       "peer pointer tables must be int64");
   const int32_t* seq_lens_ptr = nullptr;
-  int64_t tokens_per_seq = 1;
-  if (seq_lens.has_value()) {
+  const int32_t* query_start_loc_ptr = nullptr;
+  int64_t num_seqs = 0;
+  STD_TORCH_CHECK(seq_lens.has_value() == query_start_loc.has_value(),
+                  "seq_lens and query_start_loc must be provided together");
+  if (seq_lens.has_value() && query_start_loc.has_value()) {
     STD_TORCH_CHECK(
         seq_lens->is_cuda() && seq_lens->dim() == 1 &&
             seq_lens->stride(0) == 1 &&
             seq_lens->scalar_type() == torch::headeronly::ScalarType::Int,
         "seq_lens must be a contiguous 1-D int32 CUDA tensor");
-    int64_t num_seqs = seq_lens->size(0);
-    STD_TORCH_CHECK(num_seqs > 0 && num_tokens % num_seqs == 0,
-                    "token count must be a multiple of the seq_lens length");
+    STD_TORCH_CHECK(
+        query_start_loc->is_cuda() && query_start_loc->dim() == 1 &&
+            query_start_loc->stride(0) == 1 &&
+            query_start_loc->scalar_type() ==
+                torch::headeronly::ScalarType::Int,
+        "query_start_loc must be a contiguous 1-D int32 CUDA tensor");
+    num_seqs = seq_lens->size(0);
+    STD_TORCH_CHECK(num_seqs > 0 && query_start_loc->size(0) == num_seqs + 1,
+                    "query_start_loc must contain one boundary per sequence");
     seq_lens_ptr = seq_lens->const_data_ptr<int32_t>();
-    tokens_per_seq = num_tokens / num_seqs;
+    query_start_loc_ptr = query_start_loc->const_data_ptr<int32_t>();
   }
 
   const torch::stable::accelerator::DeviceGuard device_guard(
@@ -329,23 +311,35 @@ void direct_dcp_a2a_lse_reduce(const torch::stable::Tensor& partial_output,
 
   increment_epoch_kernel<<<1, 1, 0, stream>>>(
       epoch.mutable_data_ptr<int64_t>());
-  check_launch();
+  check_cuda_launch("direct DCP A2A");
   int64_t dispatch_blocks = world_size * num_tokens;
-  dispatch_output_lse_kernel<<<dispatch_blocks, kExchangeThreads, 0, stream>>>(
-      reinterpret_cast<const uint4*>(partial_output.data_ptr()),
-      partial_lse.const_data_ptr<float>(), seq_lens_ptr,
-      peer_output_ptrs.const_data_ptr<int64_t>(),
-      peer_lse_ptrs.const_data_ptr<int64_t>(), epoch.const_data_ptr<int64_t>(),
-      world_size, rank, num_tokens, max_num_tokens, heads_per_rank, head_dim,
-      tokens_per_seq, output_token_stride, lse_token_stride);
-  check_launch();
+  auto launch_dispatch = [&]<typename lse_t>() {
+    dispatch_output_lse_kernel<lse_t>
+        <<<dispatch_blocks, kExchangeThreads, 0, stream>>>(
+            reinterpret_cast<const uint4*>(partial_output.data_ptr()),
+            reinterpret_cast<const lse_t*>(partial_lse.data_ptr()),
+            seq_lens_ptr, query_start_loc_ptr,
+            peer_output_ptrs.const_data_ptr<int64_t>(),
+            peer_lse_ptrs.const_data_ptr<int64_t>(),
+            epoch.const_data_ptr<int64_t>(), world_size, rank, num_tokens,
+            max_num_tokens, num_seqs, heads_per_rank, head_dim,
+            output_token_stride, lse_token_stride);
+  };
+  if (lse_dtype == torch::headeronly::ScalarType::Float) {
+    launch_dispatch.operator()<float>();
+  } else if (lse_dtype == torch::headeronly::ScalarType::BFloat16) {
+    launch_dispatch.operator()<__nv_bfloat16>();
+  } else {
+    launch_dispatch.operator()<__half>();
+  }
+  check_cuda_launch("direct DCP A2A");
   int64_t signal_items = world_size;
   int64_t signal_blocks =
       (signal_items + kExchangeThreads - 1) / kExchangeThreads;
   signal_kernel<<<signal_blocks, kExchangeThreads, 0, stream>>>(
       peer_signal_ptrs.const_data_ptr<int64_t>(),
       epoch.const_data_ptr<int64_t>(), world_size, rank);
-  check_launch();
+  check_cuda_launch("direct DCP A2A");
   int64_t combine_blocks = num_tokens * heads_per_rank;
   size_t shared_memory_bytes = world_size * sizeof(float);
   auto launch_combine = [&]<typename scalar_t>() {
@@ -365,7 +359,7 @@ void direct_dcp_a2a_lse_reduce(const torch::stable::Tensor& partial_output,
   } else {
     launch_combine.operator()<__half>();
   }
-  check_launch();
+  check_cuda_launch("direct DCP A2A");
 }
 
 }  // namespace
@@ -374,7 +368,7 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, direct_dcp_a2a_ops) {
   direct_dcp_a2a_ops.def(
       "direct_dcp_a2a_lse_reduce("
       "Tensor partial_output, Tensor partial_lse, Tensor? seq_lens, "
-      "Tensor peer_output_ptrs, "
+      "Tensor? query_start_loc, Tensor peer_output_ptrs, "
       "Tensor peer_lse_ptrs, Tensor peer_signal_ptrs, Tensor! received_output, "
       "Tensor! received_lse, Tensor! received_signal, Tensor! epoch, "
       "Tensor! combined_output, int world_size, int rank, "
