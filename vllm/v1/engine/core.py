@@ -307,7 +307,9 @@ class EngineCore:
                 )
             # The workers' drivers must support virtual memory management
             # (e.g. WSL2 and non-GPU platforms do not); fall back gracefully.
-            reasons = self.collective_rpc("extensible_kv_cache_unsupported_reason")
+            reasons: list[str | None] = self.collective_rpc(
+                "extensible_kv_cache_unsupported_reason"
+            )
             if reason := next((r for r in reasons if r), None):
                 logger.warning(
                     "Disabling extensible KV cache; falling back to standard "

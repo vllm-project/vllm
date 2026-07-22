@@ -563,6 +563,7 @@ class GPUModelRunner(
         # self.model: nn.Module  # Set after load_model
         # Initialize in initialize_kv_cache
         self.kv_caches: list[torch.Tensor] = []
+        self.extensible_kv_buffers: ExtensibleKVCacheBuffers | None = None
         # Initialize in initialize_kv_cache_tensors
         self.cross_layers_kv_cache: torch.Tensor | None = None
         self.cross_layers_attn_backend: type[AttentionBackend] | None = None
@@ -6525,7 +6526,7 @@ class GPUModelRunner(
             self.attn_groups.clear()
         if hasattr(self, "kv_cache_config"):
             delattr(self, "kv_cache_config")
-        if getattr(self, "extensible_kv_buffers", None) is not None:
+        if self.extensible_kv_buffers is not None:
             self.extensible_kv_buffers.free()
             self.extensible_kv_buffers = None
         self.cache_config.num_gpu_blocks = None
@@ -7605,7 +7606,7 @@ class GPUModelRunner(
         segment, so captured graphs stay valid as more pages are mapped under
         the stable base pointer. Newly committed blocks are zeroed.
         """
-        if getattr(self, "extensible_kv_buffers", None) is None:
+        if self.extensible_kv_buffers is None:
             raise RuntimeError("extend_kv_cache requires an extensible KV cache.")
         self.extensible_kv_buffers.commit(num_blocks, defragment=defragment)
         logger.info("Extended KV cache to %d blocks.", num_blocks)

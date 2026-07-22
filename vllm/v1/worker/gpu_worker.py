@@ -798,6 +798,7 @@ class Worker(WorkerBase):
             # The final size is committed; now the connector may register the
             # (physically backed) KV cache memory.
             ensure_kv_transfer_initialized(self.vllm_config, kv_cache_config)
+            assert hasattr(self.model_runner, "init_deferred_kv_connector")
             self.model_runner.init_deferred_kv_connector()
 
     def extensible_kv_cache_unsupported_reason(self) -> str | None:

@@ -124,7 +124,7 @@ class _VirtualBuffer:
         driver = self._driver
         driver.ensure_context(self.device_index)
         if self._handles:
-            torch.cuda.synchronize(self.device_index)
+            torch.accelerator.synchronize(self.device_index)
         for handle, offset, size in self._handles:
             driver.unmap(self.base_ptr + offset, size)
             driver.release(handle)
@@ -248,12 +248,14 @@ class ExtensibleTensor:
             )
 
         if device is None:
-            device = torch.cuda.current_device()
+            device = torch.accelerator.current_device_index()
         dev = device if isinstance(device, torch.device) else torch.device(device)
         if dev.type != "cuda":
             raise ValueError(f"ExtensibleTensor requires a cuda device, got {dev}.")
         self._device_index: int = (
-            dev.index if dev.index is not None else torch.cuda.current_device()
+            dev.index
+            if dev.index is not None
+            else torch.accelerator.current_device_index()
         )
 
         torch.cuda.init()

@@ -45,6 +45,7 @@ from vllm.model_executor.model_loader import get_model_loader
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
+from vllm.utils.extensible_tensor import ExtensibleKVCacheBuffers
 from vllm.utils.math_utils import cdiv
 from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
 from vllm.utils.torch_utils import PIN_MEMORY, STR_DTYPE_TO_TORCH_DTYPE
@@ -252,6 +253,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # KV Connector if configured.
         self.kv_connector: KVConnector = NO_OP_KV_CONNECTOR
+        self.extensible_kv_buffers: ExtensibleKVCacheBuffers | None = None
 
         # For transferring state from execute_model to subsequent sample_tokens call.
         self.execute_model_state: ExecuteModelState | None = None
@@ -412,7 +414,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def initialize_kv_cache(
         self, kv_cache_config: KVCacheConfig, extensible: bool = False
     ) -> None:
-        if getattr(self, "extensible_kv_buffers", None) is not None:
+        if self.extensible_kv_buffers is not None:
             self.extensible_kv_buffers.free()
         self.extensible_kv_buffers = None
         kv_cache_config = deepcopy(kv_cache_config)
@@ -1660,7 +1662,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.attn_groups.clear()
         if hasattr(self, "kv_cache_config"):
             del self.kv_cache_config
-        if getattr(self, "extensible_kv_buffers", None) is not None:
+        if self.extensible_kv_buffers is not None:
             self.extensible_kv_buffers.free()
             self.extensible_kv_buffers = None
         free_before_shutdown(self.vllm_config)

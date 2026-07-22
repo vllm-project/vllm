@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import ctypes
 from functools import cache
+from typing import Any
 
 from vllm.logger import init_logger
 
@@ -88,7 +89,7 @@ class VmmDriver:
 
     def __init__(self) -> None:
         self._lib = self._load_library()
-        self._fns: dict[str, ctypes._CFuncPtr] = {}
+        self._fns: dict[str, Any] = {}
         for logical, symbol in self._symbols.items():
             self._fns[logical] = getattr(self._lib, symbol)
         self._configure_signatures()
@@ -339,11 +340,11 @@ def vmm_unavailable_reason() -> str | None:
     try:
         import torch
 
-        if not torch.cuda.is_available():
+        if not torch.accelerator.is_available():
             return "no CUDA/ROCm device is available"
         torch.cuda.init()
         driver = get_vmm_driver()
-        device_index = torch.cuda.current_device()
+        device_index = torch.accelerator.current_device_index()
         driver.ensure_context(device_index)
         granularity = driver.granularity(device_index)
         ptr = driver.reserve(granularity)
