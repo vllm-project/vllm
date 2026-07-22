@@ -256,10 +256,10 @@ def test_rms_norm_static_fp8_quant_batch_invariant(
             torch.ops._C.rms_norm_static_fp8_quant(out, x, weight, quant_scale, 1e-6)
         return out
 
-    large = quant(rows.clone(), residual.clone() if add_residual else None)
+    large = quant(rows.clone(), residual.clone() if residual is not None else None)
     small = quant(
         rows[:_SMALL_TOKENS].clone(),
-        residual[:_SMALL_TOKENS].clone() if add_residual else None,
+        residual[:_SMALL_TOKENS].clone() if residual is not None else None,
     )
     _assert_rows_bit_identical(
         small,
