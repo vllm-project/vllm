@@ -180,7 +180,7 @@ def test_extensible_split_layout_grows_both_halves() -> None:
         # Only block 0 is committed -- in each half.
         kv_cache[0, 0].fill_(1)  # K, block 0
         kv_cache[1, 0].fill_(2)  # V, block 0
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
 
         runner.extend_kv_cache(NUM_BLOCKS)
         # Old data survives the grow; new blocks are usable in both halves and
@@ -189,7 +189,7 @@ def test_extensible_split_layout_grows_both_halves() -> None:
         assert torch.all(kv_cache[1, 0] == 2)
         kv_cache[0, NUM_BLOCKS - 1].fill_(3)
         kv_cache[1, NUM_BLOCKS - 1].fill_(4)
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
         assert torch.all(kv_cache[0, NUM_BLOCKS - 1] == 3)
         assert torch.all(kv_cache[1, NUM_BLOCKS - 1] == 4)
         assert torch.count_nonzero(kv_cache[:, 1 : NUM_BLOCKS - 1]) == 0
@@ -216,7 +216,7 @@ def test_extensible_block_major_layout() -> None:
         kv_cache[0].fill_(1)
         runner.extend_kv_cache(NUM_BLOCKS)
         kv_cache[NUM_BLOCKS - 1].fill_(2)
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
         assert torch.all(kv_cache[0] == 1)
         assert torch.all(kv_cache[NUM_BLOCKS - 1] == 2)
         assert torch.count_nonzero(kv_cache[1 : NUM_BLOCKS - 1]) == 0
@@ -234,7 +234,7 @@ def test_legacy_split_layout_commits_everything() -> None:
     kv_cache = kv_caches["layer.0"]
     kv_cache[0, NUM_BLOCKS - 1].fill_(1)
     kv_cache[1, NUM_BLOCKS - 1].fill_(2)
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
     assert torch.all(kv_cache[0, NUM_BLOCKS - 1] == 1)
     assert torch.all(kv_cache[1, NUM_BLOCKS - 1] == 2)
     with pytest.raises(RuntimeError, match="extensible"):
@@ -281,12 +281,12 @@ def test_extensible_mamba_grows_per_layer() -> None:
         for name in layer_names:
             for state_tensor in kv_caches[name]:
                 state_tensor[0].fill_(1)
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
         runner.extend_kv_cache(num_blocks)
         for name in layer_names:
             for state_tensor in kv_caches[name]:
                 state_tensor[num_blocks - 1].fill_(2)
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
         for name in layer_names:
             for state_tensor in kv_caches[name]:
                 assert torch.all(state_tensor[0] == 1)
@@ -356,14 +356,14 @@ def test_extensible_hybrid_attention_mamba() -> None:
         attn_cache[1, 0].fill_(2)  # V, block 0
         for state_tensor in kv_caches["mamba.0"]:
             state_tensor[0].fill_(3)
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
 
         runner.extend_kv_cache(NUM_BLOCKS)
         attn_cache[0, NUM_BLOCKS - 1].fill_(4)
         attn_cache[1, NUM_BLOCKS - 1].fill_(5)
         for state_tensor in kv_caches["mamba.0"]:
             state_tensor[NUM_BLOCKS - 1].fill_(6)
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
         assert torch.all(attn_cache[0, 0] == 1)
         assert torch.all(attn_cache[1, 0] == 2)
         assert torch.all(attn_cache[0, NUM_BLOCKS - 1] == 4)
@@ -435,19 +435,19 @@ def test_v2_extensible_split_layout_grows_incrementally() -> None:
 
         kv_cache[0, 0].fill_(1)  # K, block 0
         kv_cache[1, 0].fill_(2)  # V, block 0
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
 
         # Warmup-style prefix commit, then the final post-warmup commit.
         buffers.commit(8)
         kv_cache[0, 7].fill_(3)
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
         buffers.commit(NUM_BLOCKS)
         # Shrink requests are ignored.
         buffers.commit(1)
         assert buffers.num_blocks_committed == NUM_BLOCKS
 
         kv_cache[1, NUM_BLOCKS - 1].fill_(4)
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
         assert torch.all(kv_cache[0, 0] == 1)
         assert torch.all(kv_cache[1, 0] == 2)
         assert torch.all(kv_cache[0, 7] == 3)
@@ -510,14 +510,14 @@ def test_v2_extensible_hybrid_attention_mamba() -> None:
         attn_cache[1, 0].fill_(2)
         for state_tensor in kv_caches["mamba.0"]:
             state_tensor[0].fill_(3)
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
 
         buffers.commit(NUM_BLOCKS)
         attn_cache[0, NUM_BLOCKS - 1].fill_(4)
         attn_cache[1, NUM_BLOCKS - 1].fill_(5)
         for state_tensor in kv_caches["mamba.0"]:
             state_tensor[NUM_BLOCKS - 1].fill_(6)
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
         assert torch.all(attn_cache[0, 0] == 1)
         assert torch.all(attn_cache[1, 0] == 2)
         assert torch.all(attn_cache[0, NUM_BLOCKS - 1] == 4)
@@ -573,10 +573,10 @@ def test_v2_extensible_packed_layout() -> None:
 
         cache0[0].fill_(1)
         cache1[0].fill_(2)
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
         buffers.commit(NUM_BLOCKS)
         cache0[NUM_BLOCKS - 1].fill_(3)
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
         assert torch.all(cache0[0] == 1)
         assert torch.all(cache1[0] == 2)
         assert torch.all(cache0[NUM_BLOCKS - 1] == 3)
@@ -619,7 +619,7 @@ def test_v2_extensible_release_and_recommit() -> None:
         base_ptr = buffers.buffers[0][0].base_ptr
         buffers.commit(NUM_BLOCKS)
         kv_cache.fill_(7)
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
         assert buffers.physical_bytes > 0
 
         buffers.release_physical()
@@ -629,12 +629,12 @@ def test_v2_extensible_release_and_recommit() -> None:
         buffers.recommit()
         assert buffers.num_blocks_committed == NUM_BLOCKS
         assert buffers.buffers[0][0].base_ptr == base_ptr
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
         # Data was discarded; fresh pages are zeroed and writable through
         # the original views.
         assert torch.count_nonzero(kv_cache) == 0
         kv_cache[1, NUM_BLOCKS - 1].fill_(9)
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
         assert torch.all(kv_cache[1, NUM_BLOCKS - 1] == 9)
     finally:
         buffers.free()
@@ -678,7 +678,7 @@ def test_v2_narrow_kv_caches_to_num_blocks() -> None:
         # The narrowed views cover only committed memory.
         trimmed[0, committed - 1].fill_(1)
         trimmed[1, committed - 1].fill_(2)
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
         assert torch.all(full[0, committed - 1] == 1)
         assert torch.all(full[1, committed - 1] == 2)
     finally:
@@ -698,7 +698,7 @@ def test_v2_extensible_defragment_on_commit() -> None:
         buffers.commit(8)
         buffers.commit(NUM_BLOCKS // 2)
         kv_cache[0, 0].fill_(1)
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
         [(buffer, _)] = buffers.buffers
         assert len(buffer._buffer._handles) > 2
 
@@ -706,10 +706,10 @@ def test_v2_extensible_defragment_on_commit() -> None:
         # One chunk per segment; data discarded (zeroed); views still work.
         assert len(buffer._buffer._handles) == 2
         assert buffers.num_blocks_committed == NUM_BLOCKS
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
         assert torch.count_nonzero(kv_cache) == 0
         kv_cache[1, NUM_BLOCKS - 1].fill_(3)
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
         assert torch.all(kv_cache[1, NUM_BLOCKS - 1] == 3)
     finally:
         buffers.free()
