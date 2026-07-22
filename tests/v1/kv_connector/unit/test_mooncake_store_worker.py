@@ -90,7 +90,7 @@ def _make_store_sending_thread(
         block_size=block_size,
         coord=coord,
         tp_rank=tp_rank,
-        put_step=put_step,
+        group_put_steps=[put_step] * len(token_databases),
         kv_role="kv_producer",
         ready_event=threading.Event(),
         replicate_config=replicate_config,
@@ -525,6 +525,33 @@ def test_store_sending_thread_delta_strides_with_local_phase():
         "test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:0@6132",
     ]
     assert store.batch_put_from_multi_buffers.call_args.args[0] == keys
+
+
+def test_tp_sharded_group_saves_every_block_on_every_rank():
+    # Mamba state is TP-sharded (different bytes per rank), so the cross-rank
+    # PUT striping that dedups replicated MLA/GQA KV must not apply: a rank
+    # skipping a block would leave its shard unwritten, and consumers would
+    # load another rank's shard (silent state corruption on TP>1 warm hits).
+    store = MagicMock()
+    store.batch_is_exist.side_effect = lambda keys: [0] * len(keys)
+    store.batch_put_from_multi_buffers.side_effect = lambda keys, *a: [256] * len(keys)
+    thread = _make_store_sending_thread(store, tp_rank=0, put_step=2)
+    thread.group_put_steps = [1]
+
+    thread.add_stored_request("req-a")
+    thread._handle_request(
+        ReqMeta(
+            req_id="req-a",
+            token_len_chunk=64,
+            block_ids=([0, 1, 2, 3],),
+            block_hashes=[b"a0", b"a1", b"a2", b"a3"],
+            can_save=True,
+        )
+    )
+
+    keys = store.batch_is_exist.call_args.args[0]
+    # All four blocks written, not the strided half.
+    assert len(keys) == 4
 
 
 def test_store_sending_thread_retries_skipped_range_after_pressure():
@@ -1212,7 +1239,8 @@ def test_worker_put_striding_covers_every_rank_get_namespace(
         ]
         assert len(keys) == len(block_hashes)
         # PUT side: mirrors KVCacheStoreSendingThread's striding slice.
-        put_keys.update(keys[w.tp_rank % w.put_step :: w.put_step])
+        put_step = w._group_tp_replication_factors()[0]
+        put_keys.update(keys[w.tp_rank % put_step :: put_step])
         # GET side: KVCacheStoreRecvingThread fetches every key.
         get_keys_per_rank[tp_rank] = set(keys)
 
@@ -1568,11 +1596,9 @@ def _make_bare_worker(
     worker.cache_config.num_gpu_blocks = num_gpu_blocks
     worker.store = MagicMock()
     worker.store.register_buffer.return_value = 0
-    worker.use_mla = False
     worker.kv_role = kv_role
     worker.block_size = block_size
     worker.tp_rank = 0
-    worker.put_step = 1
     worker.enable_kv_events = False
     worker.kv_send_thread = None
     worker.kv_recv_threads = []
@@ -1602,7 +1628,6 @@ def _make_bare_worker(
     worker.pcp_size = 1
     worker.dcp_size = 1
     worker.hash_block_size = block_size
-    worker.metadata = KeyMetadata("test-model", 0, 0, 0, 0)
     # Pre-build a single-group token_dbs so lookup-only tests don't have to
     # call register_kv_caches.
     worker.token_dbs = [
@@ -1628,7 +1653,6 @@ def test_lookup_key_prefixes_cover_dcp_rank_namespaces():
     worker.dcp_size = 4
     worker._init_lookup_key_prefixes()
 
-    assert worker._lookup_expected_per_key == 4
     assert worker._lookup_key_prefixes[0] == (
         "test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:0",
         "test-model@tp_rank:1@pcp0@dcp1@pp_rank:0@group:0",
@@ -1645,11 +1669,154 @@ def test_lookup_key_prefixes_cover_pcp_rank_namespaces():
     worker.dcp_size = 1
     worker._init_lookup_key_prefixes()
 
-    assert worker._lookup_expected_per_key == 2
     assert worker._lookup_key_prefixes[0] == (
         "test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:0",
         "test-model@tp_rank:0@pcp1@dcp0@pp_rank:0@group:0",
     )
+
+
+def test_lookup_key_prefixes_expand_tp_sharded_groups_per_rank():
+    # Under MLA KV-head dedup the replicated attention group probes a single
+    # shared namespace, but a TP-sharded Mamba group has one shard per rank:
+    # a boundary is only usable when every rank's shard exists.
+    from vllm.v1.kv_cache_interface import (
+        FullAttentionSpec,
+        KVCacheGroupSpec,
+        MambaSpec,
+    )
+
+    worker = _make_bare_worker(block_size=16)
+    worker.tp_size = 2
+    worker.num_kv_head = 1
+    fa = FullAttentionSpec(block_size=16, num_kv_heads=8, head_size=64, dtype=None)
+    mamba = MambaSpec(
+        block_size=16,
+        shapes=((1, 1),),
+        dtypes=(torch.float32,),
+        mamba_cache_mode="align",
+    )
+    worker._kv_cache_groups = [
+        KVCacheGroupSpec(["l0"], fa),
+        KVCacheGroupSpec(["l1"], mamba),
+    ]
+    worker.token_dbs = [
+        ChunkedTokenDatabase(
+            KeyMetadata("test-model", 0, 0, 0, 0, group_id=0), block_size=16
+        ),
+        ChunkedTokenDatabase(
+            KeyMetadata("test-model", 1, 0, 0, 0, group_id=1), block_size=16
+        ),
+    ]
+    worker._init_lookup_key_prefixes()
+
+    assert worker._lookup_key_prefixes[0] == (
+        "test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:0",
+    )
+    assert worker._lookup_key_prefixes[1] == (
+        "test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:1",
+        "test-model@tp_rank:1@pcp0@dcp0@pp_rank:0@group:1",
+    )
+
+
+def test_group_tp_replication_factors_mixed_mla_gqa_mamba():
+    # Replication is a per-group property: MLA latent KV is replicated on
+    # every rank, each GQA KV head on tp_size // num_kv_head ranks, Mamba
+    # state on none. Namespace count per group is tp_size // factor.
+    from vllm.v1.kv_cache_interface import (
+        FullAttentionSpec,
+        KVCacheGroupSpec,
+        MambaSpec,
+        MLAAttentionSpec,
+    )
+
+    worker = _make_bare_worker(block_size=16)
+    worker.tp_size = 4
+    worker.num_kv_head = 2
+    mla = MLAAttentionSpec(block_size=16, num_kv_heads=1, head_size=64, dtype=None)
+    gqa = FullAttentionSpec(block_size=16, num_kv_heads=8, head_size=64, dtype=None)
+    mamba = MambaSpec(
+        block_size=16,
+        shapes=((1, 1),),
+        dtypes=(torch.float32,),
+        mamba_cache_mode="align",
+    )
+    worker._kv_cache_groups = [
+        KVCacheGroupSpec(["l0"], mla),
+        KVCacheGroupSpec(["l1"], gqa),
+        KVCacheGroupSpec(["l2"], mamba),
+    ]
+    worker.token_dbs = [
+        ChunkedTokenDatabase(
+            KeyMetadata("test-model", 0, 0, 0, 0, group_id=g_idx), block_size=16
+        )
+        for g_idx in range(3)
+    ]
+
+    assert worker._group_tp_replication_factors() == [4, 2, 1]
+
+    worker._init_lookup_key_prefixes()
+    assert worker._lookup_key_prefixes[0] == (
+        "test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:0",
+    )
+    assert worker._lookup_key_prefixes[1] == (
+        "test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:1",
+        "test-model@tp_rank:1@pcp0@dcp0@pp_rank:0@group:1",
+    )
+    assert worker._lookup_key_prefixes[2] == (
+        "test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:2",
+        "test-model@tp_rank:1@pcp0@dcp0@pp_rank:0@group:2",
+        "test-model@tp_rank:2@pcp0@dcp0@pp_rank:0@group:2",
+        "test-model@tp_rank:3@pcp0@dcp0@pp_rank:0@group:2",
+    )
+
+
+def test_lookup_rejects_boundary_missing_one_mamba_shard():
+    # Mixed model: the deduped attention group probes 1 namespace per hash,
+    # the TP-sharded Mamba group probes tp_size. Exercises the per-group
+    # exists accounting in lookup(): a boundary whose Mamba shard is absent
+    # on one rank (what PUT striping used to produce) must not be a hit.
+    from vllm.v1.kv_cache_interface import (
+        FullAttentionSpec,
+        KVCacheGroupSpec,
+        MambaSpec,
+    )
+
+    worker = _make_bare_worker(block_size=16)
+    worker.tp_size = 2
+    worker.num_kv_head = 1
+    fa = FullAttentionSpec(block_size=16, num_kv_heads=8, head_size=64, dtype=None)
+    mamba = MambaSpec(
+        block_size=16,
+        shapes=((1, 1),),
+        dtypes=(torch.float32,),
+        mamba_cache_mode="align",
+    )
+    worker._kv_cache_groups = [
+        KVCacheGroupSpec(["l0"], fa),
+        KVCacheGroupSpec(["l1"], mamba),
+    ]
+    worker.token_dbs = [
+        ChunkedTokenDatabase(
+            KeyMetadata("test-model", 0, 0, 0, 0, group_id=0), block_size=16
+        ),
+        ChunkedTokenDatabase(
+            KeyMetadata("test-model", 1, 0, 0, 0, group_id=1), block_size=16
+        ),
+    ]
+    worker.coord = mooncake_store_worker.MooncakeStoreCoordinator(
+        worker._kv_cache_groups,
+        scheduler_block_size=16,
+        hash_block_size=16,
+    )
+    worker._init_lookup_key_prefixes()
+
+    worker.store.batch_is_exist.side_effect = lambda keys: [1] * len(keys)
+    assert worker.lookup(32, [b"h0", b"h1"]) == 32
+
+    worker.store.batch_is_exist.side_effect = lambda keys: [
+        0 if "tp_rank:1" in k and "group:1" in k else 1 for k in keys
+    ]
+    assert worker.lookup(32, [b"h0", b"h1"]) == 0
 
 
 def test_lookup_requires_all_dcp_rank_namespaces():
