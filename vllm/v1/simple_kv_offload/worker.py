@@ -99,12 +99,14 @@ class SimpleCPUOffloadWorker:
         num_blocks = self.kv_cache_config.num_blocks
 
         # Deduplicate: multiple layers may share the same backing storage.
-        seen_ptrs: dict[int, tuple[str, torch.Tensor]] = {}
+        seen_ptrs: dict[
+            int, tuple[str, torch.Tensor, torch.Tensor | list[torch.Tensor]]
+        ] = {}
         for name, value in kv_caches.items():
             tensor = _repr_tensor(value)
             ptr = tensor.untyped_storage().data_ptr()
             if ptr not in seen_ptrs:
-                seen_ptrs[ptr] = (name, tensor)
+                seen_ptrs[ptr] = (name, tensor, value)
 
         # Build [num_blocks, block_bytes] int8 views from each unique
         # storage so that stride(0) gives block_bytes for the copy op.
@@ -112,28 +114,51 @@ class SimpleCPUOffloadWorker:
         # The physical layout varies across attention backends:
         #   FlashAttn/ROCm:  (2, num_blocks, ...) -> K/V outermost, 2 segments
         #   FlashInfer/MLA:  (num_blocks, ...)    -> blocks outermost, 1 segment
-        # We derive page_size_bytes = storage.nbytes() // num_blocks, then
-        # classify dims: any dim whose byte-stride exceeds page_size_bytes
-        # must be an outer segment dim (e.g. the K/V dim of size 2). A less
-        # hacky way is to update the interface with the layout.
+        # We derive the per-block data size from the registration view rather
+        # than storage.nbytes(): with the extensible KV cache, the storage
+        # spans the reserved capacity while only the view's (per-segment
+        # prefix) extent is physically committed. Packed layouts keep the
+        # storage-based size (their bounded storage holds every layer's data
+        # per block, of which each layer's view only covers a slice). Dims
+        # whose byte-stride exceeds the per-block size are outer segment dims
+        # (e.g. the K/V dim of size 2); each segment's committed blocks form
+        # a prefix of that segment.
+        layer_is_packed: dict[str, bool] = {
+            ln: kv_tensor.block_stride > 0
+            for kv_tensor in self.kv_cache_config.kv_cache_tensors
+            for ln in kv_tensor.shared_by
+        }
         unique_gpu_caches: dict[str, torch.Tensor] = {}
-        for name, tensor in seen_ptrs.values():
+        for name, tensor, value in seen_ptrs.values():
             storage = tensor.untyped_storage()
             raw = torch.empty(0, dtype=torch.int8, device=self.device).set_(
                 storage, 0, (storage.nbytes(),)
             )
             el = tensor.element_size()
-            page_size_bytes = storage.nbytes() // num_blocks
+            if layer_is_packed.get(name, False):
+                # Bounded packed storage: every layer's data for all
+                # committed blocks.
+                page_size_bytes = storage.nbytes() // num_blocks
+            else:
+                # Sum over all state tensors of the layer (Mamba layers pack
+                # several per block); attention layers have a single tensor.
+                tensors = [value] if isinstance(value, torch.Tensor) else value
+                data_bytes = sum(t.numel() * t.element_size() for t in tensors)
+                page_size_bytes = data_bytes // num_blocks
             outer_dims = [
                 d for d in range(tensor.ndim) if tensor.stride(d) * el > page_size_bytes
             ]
             if not outer_dims:
-                unique_gpu_caches[name] = raw.view(num_blocks, -1)
+                unique_gpu_caches[name] = raw[: num_blocks * page_size_bytes].view(
+                    num_blocks, -1
+                )
             else:
+                n_outer = tensor.shape[outer_dims[0]]
                 seg_stride = tensor.stride(outer_dims[0]) * el
-                for idx in range(tensor.shape[outer_dims[0]]):
+                seg_block_bytes = page_size_bytes // n_outer
+                for idx in range(n_outer):
                     offset = idx * seg_stride
-                    chunk = raw[offset : offset + seg_stride]
+                    chunk = raw[offset : offset + num_blocks * seg_block_bytes]
                     unique_gpu_caches[f"{name}.{idx}"] = chunk.view(num_blocks, -1)
 
         # Compute per-tensor bytes_per_block. Tensors may have different
