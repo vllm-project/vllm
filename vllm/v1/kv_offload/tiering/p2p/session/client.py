@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, NamedTuple
 
 from vllm.logger import init_logger
+from vllm.v1.kv_offload.base import OffloadKey
 from vllm.v1.kv_offload.tiering.p2p.session.protocol import (
     TYPE_KEY,
     AbortFetchMsg,
@@ -57,15 +58,15 @@ class _ClientRequestState:
     """
 
     # -- Lookup phase (symmetric P2P only; untouched for PD) --
-    # Probe outcome per block_hash: None while in-flight (registered/sent
+    # Probe outcome per OffloadKey: None while in-flight (registered/sent
     # but unresolved), True/False once a LookupRespMsg lands. There is no
     # timeout — cancel_lookups (via finish_request) is guaranteed after
     # the request's lookup() calls and clears every probe, so an
     # unanswered probe simply stays None until then.
-    probes: dict[bytes, bool | None] = field(default_factory=dict)
-    # Hashes registered but not yet flushed onto the wire. Drained and
+    probes: dict[OffloadKey, bool | None] = field(default_factory=dict)
+    # OffloadKeys registered but not yet flushed onto the wire. Drained and
     # cleared by the next flush_pending_lookups.
-    unsent: list[bytes] = field(default_factory=list)
+    unsent: list[OffloadKey] = field(default_factory=list)
     # True once at least one LookupMsg has been flushed for this id, so
     # the peer holds lookup state. cancel_lookups reads this to decide
     # whether a terminal empty FetchMsg is owed to close the peer's
@@ -193,7 +194,7 @@ class ClientRole:
         # producer no longer holds. Dropping the entries forces a fresh
         # LookupMsg on re-schedule so the producer answers from current state.
         for key in keys:
-            st.probes.pop(key, None)
+            st.probes.pop(OffloadKey(key), None)
 
     def cancel(self, kv_request_id: str) -> None:
         """Cancel a pending load. Sends AbortFetchMsg if still active."""
@@ -294,10 +295,11 @@ class ClientRole:
         re-scheduled, since the block is unpinned once served.
         """
         st = self._state(kv_request_id)
-        if block_hash in st.probes:
-            return st.probes[block_hash]
-        st.probes[block_hash] = None
-        st.unsent.append(block_hash)
+        key = OffloadKey(block_hash)
+        if key in st.probes:
+            return st.probes[key]
+        st.probes[key] = None
+        st.unsent.append(key)
         self._flush_pending.add(kv_request_id)
         logger.debug(
             "P2P LOOKUP client %s: REGISTER kv_request_id=%s hash=%s (unsent=%d)",
@@ -378,8 +380,9 @@ class ClientRole:
         if st is None:
             return
         for h, hit in zip(block_hashes, hits):
-            if h in st.probes:
-                st.probes[h] = hit
+            key = OffloadKey(h)
+            if key in st.probes:
+                st.probes[key] = hit
 
     def cancel_lookups(self, kv_request_id: str) -> None:
         """Drop lookup state and, if needed, close the peer's request.
