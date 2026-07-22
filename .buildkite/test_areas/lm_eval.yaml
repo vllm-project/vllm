@@ -14,6 +14,7 @@ steps:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-small.txt
   mirror:
     amd:
+      dind: false
       device: mi355_1
       timeout_in_minutes: 55
       depends_on:
@@ -139,6 +140,7 @@ steps:
     - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-h200.txt
   mirror:
     amd:
+      dind: false
       device: mi355_8
       timeout_in_minutes: 60
       depends_on:

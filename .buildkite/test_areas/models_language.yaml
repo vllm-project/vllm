@@ -15,6 +15,7 @@ steps:
     - pytest -v -s models/language -m 'core_model and (not slow_test)'
   mirror:
     amd:
+      dind: false
       device: mi355_1
       depends_on:
       - image-build-amd
@@ -36,6 +37,7 @@ steps:
   parallelism: 2
   mirror:
     amd:
+      dind: false
       device: mi355_1
       depends_on:
       - image-build-amd
@@ -67,6 +69,7 @@ steps:
   parallelism: 2
   mirror:
     amd:
+      dind: false
       device: mi355_1
       timeout_in_minutes: 70
       depends_on:
@@ -128,6 +131,7 @@ steps:
     - pytest -v -s models/language/pooling -m 'not core_model'
   mirror:
     amd:
+      dind: false
       device: mi355_1
       timeout_in_minutes: 120
       depends_on:
