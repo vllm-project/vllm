@@ -57,6 +57,9 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         # For non-gated MoE (is_act_and_mul=False), only 1 slice is needed
         # since there's only up_proj (w1), not gate_proj + up_proj (w1 + w3)
         self._w13_slices = 2 if base_layer.moe_config.is_act_and_mul else 1
+        # Set from lora_config.enable_moe_shared_loras in create_lora_weights.
+        # When True, w13 lora_A and w2 lora_B are stored once for all experts.
+        self.enable_moe_shared_loras = False
         # Mirrors per-(lora_id) layout of `self.lora_a_stacked` (built in
         # `create_lora_weights`) so `create_dummy_lora`'s n_slices fallback
         # matches `lora_a_stacked` length under EP.
@@ -150,9 +153,20 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
             local_num_experts=self.local_num_experts,
             punica_wrapper=self.punica_wrapper,
             use_tuned_config=bool(envs.VLLM_TUNED_CONFIG_FOLDER),
+            enable_moe_shared_loras=self.enable_moe_shared_loras,
             aux_stream=self._lora_stream if use_dual_stream else None,
             events=self._events if use_dual_stream else None,
         )
+
+    @property
+    def _w13_a_num_experts(self) -> int:
+        """Expert-dim of the w13 lora_A buffer: 1 when shared."""
+        return 1 if self.enable_moe_shared_loras else self.local_num_experts
+
+    @property
+    def _w2_b_num_experts(self) -> int:
+        """Expert-dim of the w2 lora_B buffer: 1 when shared."""
+        return 1 if self.enable_moe_shared_loras else self.local_num_experts
 
     def _create_lora_a_weights(
         self,
@@ -163,7 +177,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
             torch.zeros(
                 (
                     max_loras,
-                    self.local_num_experts,
+                    self._w13_a_num_experts,
                     lora_config.max_lora_rank
                     if not self.fully_sharded
                     else divide(lora_config.max_lora_rank, self.tp_size),
@@ -205,7 +219,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
             torch.zeros(
                 (
                     max_loras,
-                    self.local_num_experts,
+                    self._w2_b_num_experts,
                     self.hidden_size
                     if not self.fully_sharded
                     else divide(self.hidden_size, self.tp_size),
@@ -247,6 +261,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         self._verify_ep_fs(lora_config)
         self.max_loras = lora_config.max_loras
         self.fully_sharded = lora_config.fully_sharded_loras
+        self.enable_moe_shared_loras = lora_config.enable_moe_shared_loras
 
         self.adapter_enabled = torch.tensor(
             [0] * (max_loras + 1), dtype=torch.int, device=self.device
@@ -263,8 +278,11 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
             for experts_id in range(self.local_num_experts):
                 # For gated MoE: gate_proj (w1), down_proj (w2), up_proj (w3)
                 # For non-gated MoE: up_proj (w1), down_proj (w2)
+                # Shared factors are collapsed (expert-dim 1): index 0.
+                w13_a_eid = 0 if self.enable_moe_shared_loras else experts_id
+                w2_b_eid = 0 if self.enable_moe_shared_loras else experts_id
                 self.lora_a_stacked.append(
-                    self.w13_lora_a_stacked[0][lora_id][experts_id]
+                    self.w13_lora_a_stacked[0][lora_id][w13_a_eid]
                 )
                 self.lora_a_stacked.append(
                     self.w2_lora_a_stacked[0][lora_id][experts_id]
@@ -273,14 +291,12 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                 self.lora_b_stacked.append(
                     self.w13_lora_b_stacked[0][lora_id][experts_id]
                 )
-                self.lora_b_stacked.append(
-                    self.w2_lora_b_stacked[0][lora_id][experts_id]
-                )
+                self.lora_b_stacked.append(self.w2_lora_b_stacked[0][lora_id][w2_b_eid])
 
                 # Only add w3 (up_proj) for gated MoE (_w13_slices == 2)
                 if self._w13_slices == 2:
                     self.lora_a_stacked.append(
-                        self.w13_lora_a_stacked[1][lora_id][experts_id]
+                        self.w13_lora_a_stacked[1][lora_id][w13_a_eid]
                     )
                     self.lora_b_stacked.append(
                         self.w13_lora_b_stacked[1][lora_id][experts_id]
@@ -340,6 +356,22 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
 
         return w2_lora_b[:, start_idx:end_idx, :]
 
+    def _match_expert_dim(
+        self, src: torch.Tensor, buffer: torch.Tensor
+    ) -> torch.Tensor:
+        """Align a LoRA factor's expert-dim (dim 0) to its stacked buffer.
+
+        Equal dims pass through. When the buffer is collapsed to expert-dim 1
+        (a shared factor) but the source carries per-expert copies, keep
+        the first — every expert shares the same factor, so the copies are
+        identical for a real adapter and irrelevant (zeros) for the dummy.
+        """
+        tgt = buffer.shape[1]
+        if src.shape[0] == tgt:
+            return src
+        assert tgt == 1, f"expert-dim mismatch: source {src.shape[0]} vs buffer {tgt}"
+        return src[:1]
+
     def reset_lora(self, index: int):
         """Resets the lora weights at index back to 0."""
         for pos in range(self._w13_slices):
@@ -366,20 +398,24 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         self.reset_lora(index)
         self.adapter_enabled[index] = 1
 
-        num_experts = self.w13_lora_a_stacked[0].shape[1]
-
         w1_lora_a, w2_lora_a, w3_lora_a = lora_a
         w1_lora_b, w2_lora_b, w3_lora_b = lora_b
 
         # EP slicing is done once at add time in
         # LoRAModelManager._slice_moe_lora_ep, so by here the cached
         # tensors already match the local-expert dim of the stacked buffers.
-        assert (
-            num_experts
-            == w1_lora_a.shape[0]
-            == w2_lora_a.shape[0]
-            == w3_lora_a.shape[0]
-        )
+        # For shared-loras adapters the w13 lora_A and w2 lora_B buffers are
+        # collapsed to expert-dim 1: match each factor to the expert-dim of
+        # the buffer it is copied into. A real shared factor already has
+        # expert-dim 1 (no-op); a per-expert source (e.g. the warmup dummy
+        # LoRA, which always stacks to num_experts) is collapsed to the shared
+        # slot since every expert shares the same factor.
+        w1_lora_a = self._match_expert_dim(w1_lora_a, self.w13_lora_a_stacked[0])
+        w3_lora_a = self._match_expert_dim(w3_lora_a, self.w13_lora_a_stacked[-1])
+        w2_lora_a = self._match_expert_dim(w2_lora_a, self.w2_lora_a_stacked[0])
+        w1_lora_b = self._match_expert_dim(w1_lora_b, self.w13_lora_b_stacked[0])
+        w3_lora_b = self._match_expert_dim(w3_lora_b, self.w13_lora_b_stacked[-1])
+        w2_lora_b = self._match_expert_dim(w2_lora_b, self.w2_lora_b_stacked[0])
 
         slliced_w1_lora_a = self._slice_w13_a(w1_lora_a)
         slliced_w1_lora_b = self._slice_w13_b(w1_lora_b)

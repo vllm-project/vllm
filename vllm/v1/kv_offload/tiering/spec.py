@@ -136,14 +136,6 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
         super().__init__(config)
         # Redeclare for mypy: parent sets this but `--follow-imports skip` hides it
         self._manager: OffloadingManager | None = None
-        if self.kv_events_config.self_describing_kv_events:
-            raise ValueError(
-                "self_describing_kv_events is not supported by "
-                "TieringOffloadingSpec. Tier promotions can emit primary-tier "
-                "store events that do not correspond to GPU store jobs, so the "
-                "current self-describing side table cannot describe them "
-                "correctly."
-            )
 
         # Parse secondary tier configurations
         self.secondary_tier_configs = self.extra_config.get("secondary_tiers", [])
