@@ -59,23 +59,26 @@ class Locality(Enum):
     REMOTE = "REMOTE"
 
 
+class TierMatcher(NamedTuple):
+    medium: Medium | None = None
+    locality: Locality | None = None
+
+
 @dataclass(frozen=True)
 class TierFilter:
     """Per-request filter controlling which tiers participate."""
 
-    matchers: tuple[dict[str, str], ...] = ()
+    matchers: tuple[TierMatcher, ...] = ()
 
     ALL: ClassVar["TierFilter"]
 
     def allows(self, medium: Medium) -> bool:
         if self is TierFilter.ALL:
             return True
-        return any(
-            "medium" not in m or m["medium"] == medium.value for m in self.matchers
-        )
+        return any(m.medium is None or m.medium == medium for m in self.matchers)
 
 
-TierFilter.ALL = TierFilter(matchers=({},))
+TierFilter.ALL = TierFilter(matchers=(TierMatcher(),))
 
 
 @dataclass

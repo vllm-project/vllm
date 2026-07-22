@@ -40,6 +40,7 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.kv_offload.base import (
     GPULoadStoreSpec,
     LookupResult,
+    Medium,
     OffloadingManager,
     OffloadingSpec,
     OffloadKey,
@@ -48,6 +49,7 @@ from vllm.v1.kv_offload.base import (
     RequestOffloadingContext,
     ScheduleEndContext,
     TierFilter,
+    TierMatcher,
     make_offload_key,
 )
 from vllm.v1.outputs import KVConnectorOutput
@@ -383,7 +385,13 @@ def _create_req_context(req: Request) -> ReqContext:
     if params:
         raw = params.get(KV_LOAD_TIERS_KEY)
         if raw is not None:
-            load_filter = TierFilter(matchers=tuple(raw))
+            matchers = tuple(
+                TierMatcher(
+                    medium=Medium(m["medium"].upper()) if "medium" in m else None,
+                )
+                for m in raw
+            )
+            load_filter = TierFilter(matchers=matchers)
     return ReqContext(
         req_id=req.request_id,
         kv_transfer_params=params,
