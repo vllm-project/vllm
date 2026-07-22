@@ -91,12 +91,15 @@ def test_q_lora_stacks_qkv_a_proj():
 
 
 class _Norm(nn.Module):
+    """A real RMSNorm computation: `match` verifies chain norms via `RMSNormFuser`."""
+
     def __init__(self, n: int):
         super().__init__()
         self.weight = nn.Parameter(torch.ones(n))
 
     def forward(self, x):
-        return x * self.weight
+        variance = x.pow(2).mean(-1, keepdim=True)
+        return self.weight * (x * torch.rsqrt(variance + 1e-6))
 
 
 class RenamedMLA(nn.Module):
@@ -105,12 +108,12 @@ class RenamedMLA(nn.Module):
 
     def __init__(self):
         super().__init__()
-        heads, kv_lora, rope, nope, v, hidden = 4, 32, 8, 8, 8, 64
+        heads, kv_lora, rope, nope, v, hidden = 4, 32, 8, 8, 16, 64
         self.alpha = nn.Linear(hidden, heads * (nope + rope))  # q_proj
         self.beta = nn.Linear(hidden, kv_lora + rope)  # kv_a_proj_with_mqa
         self.gamma = _Norm(kv_lora)  # kv_a_layernorm
         self.delta = nn.Linear(kv_lora, heads * (nope + v))  # kv_b_proj
-        self.omega = nn.Linear(heads * v, hidden)  # o_proj
+        self.omega = nn.Linear(heads * v, hidden)  # o_proj (uncalled)
         self.kv_lora, self.rope = kv_lora, rope
 
     def forward(self, hidden_states):
@@ -118,10 +121,12 @@ class RenamedMLA(nn.Module):
         kv_lora, k_pe = torch.split(
             self.beta(hidden_states), [self.kv_lora, self.rope], dim=-1
         )
-        kv = self.delta(self.gamma(kv_lora))
-        width = self.omega.in_features
-        attn = kv[..., :width] + q[..., :width] + k_pe.sum()
-        return self.omega(attn)
+        expanded = self.delta(self.gamma(kv_lora))
+        # Stand-in for the attention interface; `match` finds `o_proj` (omega) from
+        # the source as the Linear producing the returned value.
+        attn_output = expanded.sum() + q.sum() + k_pe.sum()
+        attn_output = self.omega(attn_output)
+        return attn_output
 
 
 def test_discovers_modules_under_arbitrary_names():
