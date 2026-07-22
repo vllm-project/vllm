@@ -825,23 +825,73 @@ class EplbState:
                     eplb_model_state.physical_to_logical_map.cpu(),
                 )
 
-                # Update expert weights
-                rearrange_expert_weights_inplace(
-                    eplb_model_state.physical_to_logical_map,
-                    new_physical_to_logical_map,
-                    eplb_model_state.model.expert_weights,
-                    eplb_model_state.expert_buffer,
-                    ep_group,
-                    eplb_model_state.communicator,
-                    is_profile,
-                    rank_mapping,
-                )
+                # Skip lateral rearranges that don't materially improve balance.
+                skip_rearrange = False
+                if (
+                    not is_profile
+                    and rank_mapping is None
+                    and bool((eplb_model_state.physical_to_logical_map >= 0).all())
+                ):
+                    _gl = global_expert_load_window
+                    _ep = ep_group.size()
 
-                if not is_profile:
-                    _commit_eplb_maps(
-                        eplb_model_state,
-                        new_physical_to_logical_map=new_physical_to_logical_map,
+                    def _rank_imbalance(
+                        _p2l: torch.Tensor, _gl: torch.Tensor, _ep: int
+                    ) -> float:
+                        _p2l = _p2l.to(_gl.device)
+                        _pl = torch.gather(_gl, 1, _p2l.clamp(min=0).long())
+                        _pl = _pl * (_p2l >= 0)
+                        _P = _p2l.shape[1]
+                        _per_rank = (
+                            _pl.reshape(_pl.shape[0], _ep, _P // _ep)
+                            .sum(dim=(0, 2))
+                            .float()
+                        )
+                        _mean = _per_rank.mean()
+                        if _mean <= 0:
+                            return 1.0
+                        return (_per_rank.max() / _mean).item()
+
+                    _old_imb = _rank_imbalance(
+                        eplb_model_state.physical_to_logical_map, _gl, _ep
                     )
+                    _new_imb = _rank_imbalance(new_physical_to_logical_map, _gl, _ep)
+                    local_skip = (
+                        _old_imb <= 1e-6 or (_old_imb - _new_imb) / _old_imb < 0.05
+                    )
+                    _vote = torch.tensor(
+                        [1 if local_skip else 0],
+                        device=_gl.device,
+                        dtype=torch.int32,
+                    )
+                    all_reduce(_vote, group=ep_group)
+                    skip_rearrange = int(_vote.item()) == _ep
+                    if skip_rearrange and is_main_rank:
+                        logger.info(
+                            "[EPLB] Skip rearrange: imbalance %.4f -> "
+                            "%.4f (no material gain)",
+                            _old_imb,
+                            _new_imb,
+                        )
+
+                if not skip_rearrange:
+                    # Update expert weights
+                    rearrange_expert_weights_inplace(
+                        eplb_model_state.physical_to_logical_map,
+                        new_physical_to_logical_map,
+                        eplb_model_state.model.expert_weights,
+                        eplb_model_state.expert_buffer,
+                        ep_group,
+                        eplb_model_state.communicator,
+                        is_profile,
+                        rank_mapping,
+                    )
+
+                    if not is_profile:
+                        _commit_eplb_maps(
+                            eplb_model_state,
+                            new_physical_to_logical_map=new_physical_to_logical_map,
+                        )
 
                 if is_main_rank:
                     assert start_event is not None
