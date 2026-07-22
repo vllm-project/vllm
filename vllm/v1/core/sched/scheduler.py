@@ -402,7 +402,7 @@ class Scheduler(SchedulerInterface):
             )
         return (
             connector_scheduler.spec.num_blocks,
-            connector_scheduler.config.block_size_factor,
+            connector_scheduler.spec.blocks_per_chunk,
         )
 
     def _mamba_block_aligned_split(
@@ -1693,9 +1693,19 @@ class Scheduler(SchedulerInterface):
                 offset += num_scheduled_tokens[request_id]
 
         if self.enable_return_routed_experts and self.connector is not None:
-            self.routed_experts_manager.apply_offload_transfers(
-                scheduler_output.kv_connector_metadata
+            from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (  # noqa: E501
+                OffloadingConnectorMetadata,
             )
+
+            offload_metadata = scheduler_output.kv_connector_metadata
+            if offload_metadata is not None:
+                if not isinstance(offload_metadata, OffloadingConnectorMetadata):
+                    raise RuntimeError(
+                        "routed-experts offload requires "
+                        "OffloadingConnectorMetadata, got "
+                        f"{type(offload_metadata).__name__}"
+                    )
+                self.routed_experts_manager.apply_offload_transfers(offload_metadata)
 
         # NOTE(woosuk): As len(num_scheduled_tokens) can be up to 1K or more,
         # the below loop can be a performance bottleneck. We should do our best
@@ -1829,10 +1839,14 @@ class Scheduler(SchedulerInterface):
                         prompt_start = (
                             request.sampling_params.routed_experts_prompt_start
                         )
-                        if prompt_start >= request.num_prompt_tokens:
+                        if (
+                            prompt_start < 0
+                            or prompt_start >= request.num_prompt_tokens
+                        ):
                             raise ValueError(
                                 "routed_experts_prompt_start "
-                                f"({prompt_start}) must be < num_prompt_tokens "
+                                f"({prompt_start}) must be >= 0 and "
+                                "< num_prompt_tokens "
                                 f"({request.num_prompt_tokens})"
                             )
                     else:
