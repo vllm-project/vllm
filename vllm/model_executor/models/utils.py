@@ -43,6 +43,81 @@ logger = init_logger(__name__)
 ShardId: TypeAlias = str | int | tuple[int, ...]
 
 
+def make_suppress_token_ids(
+    suppress_tokens: Any,
+    device: torch.device,
+    vocab_size: int,
+) -> torch.Tensor | None:
+    """Convert suppress-token values to a one-dimensional long tensor.
+
+    Args:
+        suppress_tokens: Token IDs or ``None``.
+        device: Device on which to create the tensor.
+        vocab_size: Number of tokens in the vocabulary.
+
+    Returns:
+        A one-dimensional long tensor of token IDs, or ``None`` if empty.
+    """
+    if suppress_tokens is None:
+        return None
+
+    try:
+        token_ids = torch.as_tensor(suppress_tokens, device="cpu").reshape(-1)
+    except (TypeError, ValueError, RuntimeError) as exc:
+        raise ValueError("suppress_tokens must contain integer token IDs") from exc
+    if token_ids.numel() == 0:
+        return None
+    if token_ids.dtype == torch.bool or token_ids.is_floating_point():
+        raise ValueError("suppress_tokens must contain integer token IDs")
+    if token_ids.is_complex():
+        raise ValueError("suppress_tokens must contain integer token IDs")
+
+    token_values = token_ids.tolist()
+    if any(token_id < 0 or token_id >= vocab_size for token_id in token_values):
+        raise ValueError(
+            f"suppress_tokens must be in [0, {vocab_size}), got {token_values}"
+        )
+    if len(set(token_values)) == vocab_size:
+        raise ValueError("suppress_tokens cannot contain the entire vocabulary")
+    return token_ids.to(dtype=torch.long, device=device)
+
+
+def register_suppress_token_ids(
+    module: nn.Module,
+    suppress_tokens: Any,
+    reference_tensor: torch.Tensor,
+    vocab_size: int,
+) -> None:
+    """Register suppress-token IDs on the model parameter's device."""
+    token_ids = make_suppress_token_ids(
+        suppress_tokens,
+        reference_tensor.device,
+        vocab_size,
+    )
+    module.register_buffer(
+        "_suppress_token_ids",
+        token_ids,
+        persistent=False,
+    )
+    fallback_token_id = None
+    if token_ids is not None:
+        suppressed = set(
+            torch.as_tensor(suppress_tokens, device="cpu").reshape(-1).tolist()
+        )
+        fallback_token_id = torch.tensor(
+            next(
+                token_id for token_id in range(vocab_size) if token_id not in suppressed
+            ),
+            dtype=torch.long,
+            device=reference_tensor.device,
+        )
+    module.register_buffer(
+        "_suppress_fallback_token_id",
+        fallback_token_id,
+        persistent=False,
+    )
+
+
 @dataclass
 class WeightsMapper:
     """Maps the name of each weight if they match the following patterns.

@@ -53,6 +53,7 @@ from .utils import (
     extract_layer_index,
     get_draft_quant_config,
     maybe_prefix,
+    register_suppress_token_ids,
 )
 
 logger = init_logger(__name__)
@@ -139,10 +140,27 @@ class Gemma4MTPMaskedEmbedder(nn.Module):
         self,
         hidden_states: torch.Tensor,
         lm_head_weight: torch.Tensor,
+        suppress_token_ids: torch.Tensor | None = None,
+        suppress_fallback_token_id: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Sparse argmax — returns vocab token IDs without full-vocab tensor."""
         logits, indices = self._select_and_score(hidden_states, lm_head_weight)
-        return indices.gather(-1, logits.argmax(-1, keepdim=True)).squeeze(-1)
+        all_candidates_suppressed = None
+        if suppress_token_ids is not None:
+            suppressed = (indices.unsqueeze(-1) == suppress_token_ids).any(-1)
+            logits.masked_fill_(suppressed, -float("inf"))
+            all_candidates_suppressed = suppressed.all(-1)
+        top_tokens = indices.gather(-1, logits.argmax(-1, keepdim=True)).squeeze(-1)
+        if (
+            all_candidates_suppressed is not None
+            and suppress_fallback_token_id is not None
+        ):
+            top_tokens = torch.where(
+                all_candidates_suppressed,
+                suppress_fallback_token_id,
+                top_tokens,
+            )
+        return top_tokens
 
 
 class Gemma4MTPAttention(nn.Module):
@@ -529,7 +547,13 @@ class Gemma4MTP(nn.Module):
 
         draft_cfg = vllm_config.speculative_config.draft_model_config
         gen_cfg = draft_cfg.try_get_generation_config()
-        self._suppress_token_ids = gen_cfg.get("suppress_tokens") if gen_cfg else None
+        suppress_token_ids = gen_cfg.get("suppress_tokens") if gen_cfg else None
+        register_suppress_token_ids(
+            self,
+            suppress_token_ids,
+            self.lm_head.weight,
+            text_config.vocab_size,
+        )
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)
@@ -581,8 +605,8 @@ class Gemma4MTP(nn.Module):
             )
         else:
             logits = self.logits_processor(self.lm_head, hidden_states)
-        if logits is not None and self._suppress_token_ids:
-            logits[:, self._suppress_token_ids] = -float("inf")
+        if logits is not None and self._suppress_token_ids is not None:
+            logits.index_fill_(1, self._suppress_token_ids, -float("inf"))
         return logits
 
     def get_top_tokens(
@@ -593,6 +617,8 @@ class Gemma4MTP(nn.Module):
         return self.masked_embedding.get_top_tokens(
             hidden_states,
             self._get_full_lm_head_weight(),
+            self._suppress_token_ids,
+            self._suppress_fallback_token_id,
         )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:

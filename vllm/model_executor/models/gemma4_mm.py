@@ -82,6 +82,7 @@ from .utils import (
     WeightsMapper,
     init_vllm_registered_model,
     maybe_prefix,
+    register_suppress_token_ids,
 )
 
 if TYPE_CHECKING:
@@ -1134,7 +1135,13 @@ class Gemma4ForConditionalGeneration(
         self.num_redundant_experts = self.language_model.num_redundant_experts
 
         gen_cfg = vllm_config.model_config.try_get_generation_config()
-        self._suppress_token_ids = gen_cfg.get("suppress_tokens") if gen_cfg else None
+        suppress_token_ids = gen_cfg.get("suppress_tokens") if gen_cfg else None
+        register_suppress_token_ids(
+            self,
+            suppress_token_ids,
+            self.language_model.lm_head.weight,
+            text_config.vocab_size,
+        )
 
     # ------------------------------------------------------------------ #
     # Input parsing
@@ -1615,8 +1622,8 @@ class Gemma4ForConditionalGeneration(
         hidden_states: torch.Tensor,
     ) -> torch.Tensor | None:
         logits = self.language_model.compute_logits(hidden_states)
-        if logits is not None and self._suppress_token_ids:
-            logits[:, self._suppress_token_ids] = -float("inf")
+        if logits is not None and self._suppress_token_ids is not None:
+            logits.index_fill_(1, self._suppress_token_ids, -float("inf"))
         return logits
 
     # ------------------------------------------------------------------ #
