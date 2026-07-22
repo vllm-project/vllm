@@ -10,7 +10,7 @@ import torch
 from tqdm import tqdm
 
 import vllm.envs as envs
-from vllm.distributed.parallel_state import get_dp_group, is_global_first_rank
+from vllm.distributed.parallel_state import is_global_first_rank
 from vllm.model_executor.layers.fused_moe import MoERunner
 from vllm.model_executor.layers.fused_moe.deep_gemm_utils import (
     compute_aligned_M_and_alignment,
@@ -247,9 +247,6 @@ def _get_grouped_gemm_params(
     block_m = get_mk_alignment_for_contiguous_layout()[0]
     num_experts = w1.size(0)
     device = w1.device
-
-    # Assumes all ranks have the same max_num_batched_tokens
-    max_tokens = get_dp_group().world_size * max_tokens
 
     request_m_values = _generate_optimal_warmup_m_values(
         max_tokens,
