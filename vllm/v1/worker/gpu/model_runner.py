@@ -457,15 +457,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             for groups in self.attn_groups
             for group in groups
         )
-        if (
-            self.has_distinct_decode_attn_backend
-            and self.compilation_config.cudagraph_mode == CUDAGraphMode.FULL
-        ):
-            logger.warning_once(
-                "Attention backend routing only uses FULL cudagraphs for "
-                "pure-decode batches; using FULL_DECODE_ONLY."
-            )
-            self.compilation_config.cudagraph_mode = CUDAGraphMode.FULL_DECODE_ONLY
         self.block_tables = BlockTables(
             block_sizes=block_sizes,
             max_num_reqs=self.max_num_reqs,

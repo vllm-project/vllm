@@ -149,15 +149,19 @@ def init_attn_backend(
             )
             builder = group.get_metadata_builder(0)
             builders = builder.get_builder_variants()
+            workspace_provider = None
             if attn_backend_workspace is None:
                 for variant_builder in builders:
                     if hasattr(variant_builder, "_get_workspace_buffer"):
                         attn_backend_workspace = variant_builder._get_workspace_buffer()
                         if attn_backend_workspace is not None:
+                            workspace_provider = variant_builder
                             break
             if attn_backend_workspace is not None:
                 for variant_builder in builders:
-                    if hasattr(variant_builder, "set_workspace_buffer"):
+                    if variant_builder is not workspace_provider and hasattr(
+                        variant_builder, "set_workspace_buffer"
+                    ):
                         variant_builder.set_workspace_buffer(attn_backend_workspace)
             backends = group.backend.get_backend_variants()
             assert len(builders) == len(backends)

@@ -273,13 +273,8 @@ class CudaGraphManager:
                 num_reqs = None
                 if mixed_mode == CUDAGraphMode.FULL:
                     num_reqs = min(num_tokens, self.max_num_reqs)
-                backend_roles = [0]
-                if (
-                    self.capture_attention_backend_variants
-                    and mixed_mode == CUDAGraphMode.PIECEWISE
-                ):
-                    backend_roles.append(1)
-                for attention_backend_variant in backend_roles:
+                num_backend_variants = 1 + self.capture_attention_backend_variants
+                for attention_backend_variant in range(num_backend_variants):
                     desc = BatchExecutionDescriptor(
                         cg_mode=mixed_mode,
                         num_tokens=num_tokens,

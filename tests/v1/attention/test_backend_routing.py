@@ -115,6 +115,7 @@ class _RoutingImpl(AttentionImpl):
 
 class _Backend(AttentionBackend):
     forward_includes_kv_cache_update = False
+    kernel_block_sizes = [MultipleOf(16)]
 
     @staticmethod
     def get_name() -> str:
@@ -128,9 +129,9 @@ class _Backend(AttentionBackend):
     def get_builder_cls():
         return _Builder
 
-    @staticmethod
-    def get_supported_kernel_block_sizes():
-        return [MultipleOf(16)]
+    @classmethod
+    def get_supported_kernel_block_sizes(cls):
+        return cls.kernel_block_sizes
 
     @staticmethod
     def get_kv_cache_shape(
@@ -161,6 +162,14 @@ class _DifferentShapeBackend(_Backend):
         num_blocks, block_size, num_kv_heads, head_size, cache_dtype_str="auto"
     ):
         return (num_blocks, num_kv_heads, block_size, head_size)
+
+
+class _Fixed16Backend(_Backend):
+    kernel_block_sizes = [16]
+
+
+class _Fixed64Backend(_Backend):
+    kernel_block_sizes = [64]
 
 
 class _WritesInForwardBackend(_Backend):
@@ -256,11 +265,25 @@ def test_layout_compatibility_rejects_unsafe_pairings(decode_backend):
     )
 
 
+def test_disjoint_kernel_block_sizes_are_incompatible():
+    """Backends must have at least one common kernel block size."""
+    assert not kv_layouts_compatible(
+        _Fixed16Backend,
+        _Fixed64Backend,
+        head_size=128,
+        block_size=None,
+        kv_cache_dtype=None,
+    )
+    with pytest.raises(ValueError, match="no common kernel block size"):
+        create_composite_attention_backend(_Fixed16Backend, _Fixed64Backend)
+
+
 class _Builder:
     supports_update_block_table = False
 
     def __init__(self, *args):
         self.reorder_batch_threshold = 1
+        self.workspace_buffer = None
 
     @classmethod
     def get_cudagraph_support(cls, vllm_config, kv_cache_spec):
@@ -272,9 +295,17 @@ class _Builder:
     def build_for_cudagraph_capture(self, common_attn_metadata):
         return SimpleNamespace(builder=type(self).__name__)
 
+    def set_workspace_buffer(self, workspace_buffer):
+        self.workspace_buffer = workspace_buffer
+
 
 class _GeneralBuilder(_Builder):
-    pass
+    def __init__(self, *args):
+        super().__init__(*args)
+        self.provided_workspace = object()
+
+    def _get_workspace_buffer(self):
+        return self.provided_workspace
 
 
 class _DecodeBuilder(_Builder):
@@ -294,13 +325,11 @@ class _GeneralBackend(_Backend):
 
 
 class _DecodeBackend(_Backend):
+    kernel_block_sizes = [32]
+
     @staticmethod
     def get_builder_cls():
         return _DecodeBuilder
-
-    @staticmethod
-    def get_supported_kernel_block_sizes():
-        return [32]
 
 
 class _UniformDecodeBackend(_DecodeBackend):
@@ -408,8 +437,7 @@ class _UniformDecodeLayer(AttentionLayerBase):
         return _attention_spec()
 
 
-def test_decode_backend_limits_cudagraph_support():
-    """The weaker child must bound graph support and identify the culprit."""
+def _init_uniform_decode_backend():
     spec = _attention_spec()
     config = VllmConfig(device_config=DeviceConfig(device="cpu"))
     config.compilation_config.static_forward_context["layer"] = _UniformDecodeLayer()
@@ -418,11 +446,27 @@ def test_decode_backend_limits_cudagraph_support():
         kv_cache_tensors=[],
         kv_cache_groups=[KVCacheGroupSpec(["layer"], spec)],
     )
+    return init_attn_backend(kv_cache_config, config, torch.device("cpu"))
 
-    _, cg_support, _ = init_attn_backend(kv_cache_config, config, torch.device("cpu"))
+
+def test_decode_backend_limits_cudagraph_support():
+    """The weaker child must bound graph support and identify the culprit."""
+    _, cg_support, _ = _init_uniform_decode_backend()
 
     assert cg_support.min_cg_support == AttentionCGSupport.UNIFORM_BATCH
     assert cg_support.min_cg_attn_backend == "_UniformDecodeBackend"
+
+
+def test_workspace_provider_is_not_reset_with_its_own_buffer():
+    """Only sibling builders receive a newly provided workspace buffer."""
+    attn_groups, _, _ = _init_uniform_decode_backend()
+    builder = attn_groups[0][0].get_metadata_builder()
+
+    assert builder.general_builder.workspace_buffer is None
+    assert (
+        builder.decode_builder.workspace_buffer
+        is builder.general_builder.provided_workspace
+    )
 
 
 @pytest.mark.parametrize("backend_variant", [0, 1])
@@ -435,6 +479,14 @@ def test_composite_impl_selects_from_metadata(backend_variant):
     selected = impl.get_impl_for_metadata(metadata)
 
     assert selected is (impl.decode_impl if backend_variant else impl.general_impl)
+
+
+def test_composite_impl_defaults_untagged_metadata_to_general():
+    """Metadata built outside the composite must safely use the general impl."""
+    backend = create_composite_attention_backend(_GeneralBackend, _DecodeBackend)
+    impl = backend.get_impl_cls()(8, 128, 0.1)
+
+    assert impl.get_impl_for_metadata(SimpleNamespace()) is impl.general_impl
 
 
 def test_composite_impl_exposes_backend_specific_variants():

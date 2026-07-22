@@ -102,6 +102,12 @@ def create_composite_attention_backend(
     decode_impl_cls = decode_backend.get_impl_cls()
     general_builder_cls = general_backend.get_builder_cls()
     decode_builder_cls = decode_backend.get_builder_cls()
+    kernel_block_sizes = _intersect_kernel_block_sizes(general_backend, decode_backend)
+    if not kernel_block_sizes:
+        raise ValueError(
+            f"Attention backends {general_backend.get_name()} and "
+            f"{decode_backend.get_name()} have no common kernel block size"
+        )
 
     class CompositeAttentionImpl(AttentionImpl):
         def __init__(self, *args, **kwargs) -> None:
@@ -134,7 +140,7 @@ def create_composite_attention_backend(
         def get_impl_for_metadata(self, attn_metadata):
             return (
                 self.decode_impl
-                if attn_metadata._attention_backend_variant
+                if getattr(attn_metadata, "_attention_backend_variant", 0)
                 else self.general_impl
             )
 
@@ -277,7 +283,7 @@ def create_composite_attention_backend(
 
         @staticmethod
         def get_supported_kernel_block_sizes():
-            return _intersect_kernel_block_sizes(general_backend, decode_backend)
+            return kernel_block_sizes
 
         @classmethod
         def full_cls_name(cls):
@@ -920,6 +926,9 @@ def kv_layouts_compatible(
         general_backend.supports_block_size(block_size)
         and decode_backend.supports_block_size(block_size)
     ):
+        return False
+
+    if not _intersect_kernel_block_sizes(general_backend, decode_backend):
         return False
 
     if (

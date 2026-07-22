@@ -197,15 +197,24 @@ def test_dynamic_sd_non_uniform_batch_falls_back_to_piecewise(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    ("cudagraph_mode", "decode_mode"),
+    ("cudagraph_mode", "decode_mode", "general_mode"),
     [
-        (CUDAGraphMode.PIECEWISE, CUDAGraphMode.PIECEWISE),
-        (CUDAGraphMode.FULL_AND_PIECEWISE, CUDAGraphMode.FULL),
+        (
+            CUDAGraphMode.PIECEWISE,
+            CUDAGraphMode.PIECEWISE,
+            CUDAGraphMode.PIECEWISE,
+        ),
+        (
+            CUDAGraphMode.FULL_AND_PIECEWISE,
+            CUDAGraphMode.FULL,
+            CUDAGraphMode.PIECEWISE,
+        ),
+        (CUDAGraphMode.FULL, CUDAGraphMode.FULL, CUDAGraphMode.FULL),
     ],
 )
 @pytest.mark.skip_global_cleanup
 def test_cudagraph_dispatch_preserves_attention_backend_variant(
-    monkeypatch, cudagraph_mode, decode_mode
+    monkeypatch, cudagraph_mode, decode_mode, general_mode
 ):
     """Graph lookup must not collapse captures for distinct backend variants."""
     monkeypatch.setattr(
@@ -247,7 +256,7 @@ def test_cudagraph_dispatch_preserves_attention_backend_variant(
 
     assert decode_desc.cg_mode == decode_mode
     assert decode_desc.attention_backend_variant == 1
-    assert general_desc.cg_mode == CUDAGraphMode.PIECEWISE
+    assert general_desc.cg_mode == general_mode
     assert general_desc.attention_backend_variant == 0
 
     if decode_mode == CUDAGraphMode.FULL:
@@ -259,7 +268,12 @@ def test_cudagraph_dispatch_preserves_attention_backend_variant(
             attention_backend_variant=1,
             max_cudagraph_mode=CUDAGraphMode.PIECEWISE,
         )
-        assert synced_decode_desc.cg_mode == CUDAGraphMode.PIECEWISE
+        expected_mode = (
+            CUDAGraphMode.PIECEWISE
+            if cudagraph_mode == CUDAGraphMode.FULL_AND_PIECEWISE
+            else CUDAGraphMode.NONE
+        )
+        assert synced_decode_desc.cg_mode == expected_mode
         assert synced_decode_desc.attention_backend_variant == 1
 
 
