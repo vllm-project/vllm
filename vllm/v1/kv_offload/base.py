@@ -63,6 +63,13 @@ class TierMatcher(NamedTuple):
     medium: Medium | None = None
     locality: Locality | None = None
 
+    def matches(self, medium: Medium | None, locality: Locality | None) -> bool:
+        medium_matches = self.medium is None or medium is None or self.medium == medium
+        locality_matches = (
+            self.locality is None or locality is None or self.locality == locality
+        )
+        return medium_matches and locality_matches
+
 
 @dataclass(frozen=True)
 class TierFilter:
@@ -72,10 +79,10 @@ class TierFilter:
 
     ALL: ClassVar["TierFilter"]
 
-    def allows(self, medium: Medium) -> bool:
+    def allows(self, medium: Medium | None, locality: Locality | None) -> bool:
         if self is TierFilter.ALL:
             return True
-        return any(m.medium is None or m.medium == medium for m in self.matchers)
+        return any(m.matches(medium, locality) for m in self.matchers)
 
 
 TierFilter.ALL = TierFilter(matchers=(TierMatcher(),))
