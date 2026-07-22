@@ -6,7 +6,7 @@ Abstract interfaces and data types for the secondary tiering layer.
 
 from abc import ABC, abstractmethod
 from collections.abc import Collection, Iterable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -54,7 +54,7 @@ class TieringOffloadingMetrics:
 
 
 @dataclass
-class JobMetadata:
+class TransferJob:
     """Metadata for an in-flight async transfer job."""
 
     job_id: JobId
@@ -70,8 +70,7 @@ class JobResult:
 
     job_id: JobId
     success: bool
-    transfer_size: int | None = field(default=None, compare=False)
-    transfer_time: float | None = field(default=None, compare=False)
+    transfer_time: float | None = None
 
 
 class ParentManager(ABC):
@@ -105,7 +104,7 @@ class ParentManager(ABC):
         self,
         keys: Collection[OffloadKey],
         req_context: ReqContext,
-    ) -> JobMetadata: ...
+    ) -> TransferJob: ...
 
     @abstractmethod
     def on_request_finished(self, req_context: ReqContext) -> None: ...
@@ -159,7 +158,7 @@ class SecondaryTierManager(ABC):
         pass
 
     @abstractmethod
-    def submit_store(self, job_metadata: JobMetadata) -> None:
+    def submit_store(self, job_metadata: TransferJob) -> None:
         """
         Submit an async job to store blocks from the primary tier to this
         secondary tier.
@@ -187,7 +186,7 @@ class SecondaryTierManager(ABC):
         pass
 
     @abstractmethod
-    def submit_load(self, job_metadata: JobMetadata) -> None:
+    def submit_load(self, job_metadata: TransferJob) -> None:
         """
         Submit an async job to load blocks from this secondary tier to the
         primary tier.

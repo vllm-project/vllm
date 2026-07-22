@@ -33,10 +33,10 @@ from vllm.v1.kv_offload.base import (
     make_offload_key,
 )
 from vllm.v1.kv_offload.tiering.base import (
-    JobMetadata,
     JobResult,
     SecondaryTierManager,
     TieringOffloadingMetrics,
+    TransferJob,
 )
 from vllm.v1.kv_offload.tiering.example.manager import ExampleSecondaryTierManager
 from vllm.v1.kv_offload.tiering.factory import SecondaryTierFactory
@@ -98,17 +98,17 @@ class MetricsSecondaryTierManager(SecondaryTierManager):
         self.stats: OffloadingConnectorStats | None = None
         self.lookup_result = LookupResult.MISS
         self.finished_jobs: list[JobResult] = []
-        self.submitted_loads: list[JobMetadata] = []
-        self.submitted_stores: list[JobMetadata] = []
+        self.submitted_loads: list[TransferJob] = []
+        self.submitted_stores: list[TransferJob] = []
 
     def lookup(self, key: OffloadKey, req_context: ReqContext) -> LookupResult:
         return self.lookup_result
 
-    def submit_store(self, job_metadata: JobMetadata) -> None:
+    def submit_store(self, job_metadata: TransferJob) -> None:
         self.submitted_stores.append(job_metadata)
         return
 
-    def submit_load(self, job_metadata: JobMetadata) -> None:
+    def submit_load(self, job_metadata: TransferJob) -> None:
         self.submitted_loads.append(job_metadata)
         return
 
@@ -219,16 +219,20 @@ def test_tiering_manager_records_secondary_lookup_metrics():
         primary_tier=primary_tier,
         secondary_tiers=[tier0, tier1],
     )
+    manager.on_new_request(_CTX)
 
-    assert manager.lookup(to_keys([1])[0], _CTX) is LookupResult.RETRY
+    key = to_keys([1])[0]
+    assert manager.lookup(key, _CTX) is LookupResult.RETRY
+    assert manager.lookup(key, _CTX) is LookupResult.HIT_PENDING
 
     stats = manager.get_stats()
     assert stats is not None
     values = stats.data["data"]
-    assert values[TieringOffloadingMetrics.BLOCK_QUERIES][("0:fs",)] == 1
-    assert values[TieringOffloadingMetrics.BLOCK_QUERIES][("1:p2p",)] == 1
-    assert values[TieringOffloadingMetrics.BLOCK_HITS][("1:p2p",)] == 1
-    assert ("0:fs",) not in values[TieringOffloadingMetrics.BLOCK_HITS]
+    assert values[TieringOffloadingMetrics.BLOCK_QUERIES][("0:primary",)] == 1
+    assert values[TieringOffloadingMetrics.BLOCK_QUERIES][("1:fs",)] == 1
+    assert values[TieringOffloadingMetrics.BLOCK_QUERIES][("2:p2p",)] == 1
+    assert values[TieringOffloadingMetrics.BLOCK_HITS][("2:p2p",)] == 1
+    assert ("1:fs",) not in values[TieringOffloadingMetrics.BLOCK_HITS]
 
 
 def test_tiering_manager_records_finished_job_metrics():
@@ -253,42 +257,40 @@ def test_tiering_manager_records_finished_job_metrics():
     prepared = primary_tier.prepare_store([cascade_key, failed_cascade_key], _CTX)
     assert prepared is not None
     primary_tier.complete_store(prepared.keys_to_store, _CTX, success=True)
-    cascade_job = manager.create_store_job([cascade_key], _CTX)
-    failed_cascade_job = manager.create_store_job([failed_cascade_key], _CTX)
+    cascade_job = manager.create_store_job([cascade_key], _CTX, 0)
+    failed_cascade_job = manager.create_store_job([failed_cascade_key], _CTX, 0)
 
     promotion_prepared = primary_tier.prepare_write([promotion_key], _CTX)
     assert promotion_prepared is not None
-    promotion_job = JobMetadata(
+    promotion_job = TransferJob(
         job_id=manager._next_job_id(),
         keys=[promotion_key],
         block_ids=promotion_prepared.store_spec.block_ids,
         is_promotion=True,
         req_context=_CTX,
     )
-    manager._transfer_jobs[promotion_job.job_id] = promotion_job
+    manager._register_job(promotion_job, 0)
 
     failed_promotion_prepared = primary_tier.prepare_write([failed_promotion_key], _CTX)
     assert failed_promotion_prepared is not None
-    failed_promotion_job = JobMetadata(
+    failed_promotion_job = TransferJob(
         job_id=manager._next_job_id(),
         keys=[failed_promotion_key],
         block_ids=failed_promotion_prepared.store_spec.block_ids,
         is_promotion=True,
         req_context=_CTX,
     )
-    manager._transfer_jobs[failed_promotion_job.job_id] = failed_promotion_job
+    manager._register_job(failed_promotion_job, 0)
 
     tier.finished_jobs = [
         JobResult(
             job_id=cascade_job.job_id,
             success=True,
-            transfer_size=100,
             transfer_time=0.5,
         ),
         JobResult(
             job_id=promotion_job.job_id,
             success=True,
-            transfer_size=80,
             transfer_time=0.25,
         ),
         JobResult(job_id=failed_cascade_job.job_id, success=False),
@@ -300,10 +302,10 @@ def test_tiering_manager_records_finished_job_metrics():
     stats = manager.get_stats()
     assert stats is not None
     values = stats.data["data"]
-    label = ("0:fs",)
-    assert values[TieringOffloadingMetrics.WRITE_BYTES][label] == 100
+    label = ("1:fs",)
+    assert values[TieringOffloadingMetrics.WRITE_BYTES][label] == 16
     assert values[TieringOffloadingMetrics.WRITE_TIME][label] == 0.5
-    assert values[TieringOffloadingMetrics.READ_BYTES][label] == 80
+    assert values[TieringOffloadingMetrics.READ_BYTES][label] == 16
     assert values[TieringOffloadingMetrics.READ_TIME][label] == 0.25
     assert values[TieringOffloadingMetrics.CASCADE_JOB_FAILURES][label] == 1
     assert values[TieringOffloadingMetrics.PROMOTION_JOB_FAILURES][label] == 1
@@ -342,8 +344,8 @@ def test_tiering_manager_reports_active_job_and_primary_usage_gauges():
     stats = manager.get_stats()
     assert stats is not None
     values = stats.data["data"]
-    fs_label = ("0:fs",)
-    p2p_label = ("1:p2p",)
+    fs_label = ("1:fs",)
+    p2p_label = ("2:p2p",)
     assert values[TieringOffloadingMetrics.PRIMARY_READ_USAGE_PERC][
         fs_label
     ] == pytest.approx(2 / 6)
@@ -1126,13 +1128,13 @@ class TestTieringOffloadingManager:
         primary tier; pending submissions are dropped without being sent
         to the secondary tier. Active request state is retained."""
         # Cascade — populates primary blocks and leaves cascade jobs
-        # in _transfer_jobs (the synchronous example tier has already
+        # in _jobs (the synchronous example tier has already
         # queued completions); reset_cache's drain loop will pick them up.
         blocks = to_keys(range(3))
         self._start_request()
         self.manager.prepare_store(blocks, _CTX)
         self.manager.complete_store(blocks, _CTX, success=True)
-        assert self.manager._transfer_jobs
+        assert self.manager._jobs
 
         # Pending promotion submission (deferred — no on_schedule_end after
         # the lookup that staged it).
@@ -1165,7 +1167,7 @@ class TestTieringOffloadingManager:
         self.manager.reset_cache()
 
         # Orchestrator state cleared.
-        assert self.manager._transfer_jobs == {}
+        assert self.manager._jobs == {}
         assert self.manager._pending_load_submissions == {}
         assert set(self.manager._req_state) == {_CTX.req_id, rl_ctx.req_id}
         assert self.manager._processed_jobs_this_step is False
@@ -1193,18 +1195,18 @@ class TestTieringOffloadingManager:
             wraps=self.secondary_tier2.drain_jobs
         )
 
-        # Drive a cascade so a job lands in _transfer_jobs.
+        # Drive a cascade so a job lands in _jobs.
         blocks = to_keys(range(3))
         self._start_request()
         self.manager.prepare_store(blocks, _CTX)
         self.manager.complete_store(blocks, _CTX, success=True)
-        assert self.manager._transfer_jobs
+        assert self.manager._jobs
 
         self.manager.reset_cache()
 
         self.secondary_tier1.drain_jobs.assert_called_once()
         self.secondary_tier2.drain_jobs.assert_called_once()
-        assert self.manager._transfer_jobs == {}
+        assert self.manager._jobs == {}
 
 
 class TestTieringOffloadingWithoutSecondaryTiers:

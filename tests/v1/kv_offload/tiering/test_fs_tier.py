@@ -35,7 +35,7 @@ from vllm.v1.kv_offload.config import (
     OffloadingModelConfig,
     OffloadingParallelConfig,
 )
-from vllm.v1.kv_offload.tiering.base import JobMetadata
+from vllm.v1.kv_offload.tiering.base import TransferJob
 from vllm.v1.kv_offload.tiering.factory import SecondaryTierFactory
 from vllm.v1.kv_offload.tiering.fs.manager import (
     FileSystemTierManager,
@@ -93,10 +93,10 @@ def make_job(
     keys: list[OffloadKey],
     block_ids: list[int] | None = None,
     is_promotion: bool = False,
-) -> JobMetadata:
+) -> TransferJob:
     if block_ids is None:
         block_ids = list(range(len(keys)))
-    return JobMetadata(
+    return TransferJob(
         job_id=job_id,
         keys=keys,
         block_ids=np.array(block_ids, dtype=np.int64),

@@ -124,46 +124,60 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
                 ),
             )
         )
-        for metric_name, documentation in (
-            (
-                TieringOffloadingMetrics.READ_BYTES,
-                "Total bytes read from secondary tiers into the primary tier.",
+        metrics[TieringOffloadingMetrics.READ_BYTES] = OffloadingCounterMetadata(
+            documentation=(
+                "Total bytes read from secondary tiers into the primary tier, "
+                "labeled by tier."
             ),
-            (
-                TieringOffloadingMetrics.READ_TIME,
+            labelnames=("tier",),
+        )
+        metrics[TieringOffloadingMetrics.READ_TIME] = OffloadingCounterMetadata(
+            documentation=(
                 "Total time spent reading from secondary tiers into the primary "
-                "tier, in seconds.",
+                "tier, in seconds, labeled by tier."
             ),
-            (
-                TieringOffloadingMetrics.WRITE_BYTES,
-                "Total bytes written from the primary tier to secondary tiers.",
+            labelnames=("tier",),
+        )
+        metrics[TieringOffloadingMetrics.WRITE_BYTES] = OffloadingCounterMetadata(
+            documentation=(
+                "Total bytes written from the primary tier to secondary tiers, "
+                "labeled by tier."
             ),
-            (
-                TieringOffloadingMetrics.WRITE_TIME,
+            labelnames=("tier",),
+        )
+        metrics[TieringOffloadingMetrics.WRITE_TIME] = OffloadingCounterMetadata(
+            documentation=(
                 "Total time spent writing from the primary tier to secondary "
-                "tiers, in seconds.",
+                "tiers, in seconds, labeled by tier."
             ),
-            (
-                TieringOffloadingMetrics.PROMOTION_JOB_FAILURES,
-                "Number of failed secondary-tier promotion jobs.",
-            ),
-            (
-                TieringOffloadingMetrics.CASCADE_JOB_FAILURES,
-                "Number of failed secondary-tier cascade jobs.",
-            ),
-            (
-                TieringOffloadingMetrics.BLOCK_QUERIES,
-                "Number of block lookup queries sent to secondary tiers.",
-            ),
-            (
-                TieringOffloadingMetrics.BLOCK_HITS,
-                "Number of block lookup hits in secondary tiers.",
-            ),
-        ):
-            metrics[metric_name] = OffloadingCounterMetadata(
-                documentation=documentation,
+            labelnames=("tier",),
+        )
+        metrics[TieringOffloadingMetrics.PROMOTION_JOB_FAILURES] = (
+            OffloadingCounterMetadata(
+                documentation=(
+                    "Number of failed secondary-tier promotion jobs, labeled by tier."
+                ),
                 labelnames=("tier",),
             )
+        )
+        metrics[TieringOffloadingMetrics.CASCADE_JOB_FAILURES] = (
+            OffloadingCounterMetadata(
+                documentation=(
+                    "Number of failed secondary-tier cascade jobs, labeled by tier."
+                ),
+                labelnames=("tier",),
+            )
+        )
+        metrics[TieringOffloadingMetrics.BLOCK_QUERIES] = OffloadingCounterMetadata(
+            documentation=(
+                "Number of block lookup queries sent to a tier, labeled by tier."
+            ),
+            labelnames=("tier",),
+        )
+        metrics[TieringOffloadingMetrics.BLOCK_HITS] = OffloadingCounterMetadata(
+            documentation="Number of block lookup hits in a tier, labeled by tier.",
+            labelnames=("tier",),
+        )
         metrics[TieringOffloadingMetrics.PROMOTION_ALLOCATION_FAILURES] = (
             OffloadingCounterMetadata(
                 documentation=(
@@ -172,30 +186,38 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
                 ),
             )
         )
-        for metric_name, documentation in (
-            (
-                TieringOffloadingMetrics.PRIMARY_WRITE_USAGE_PERC,
-                "Current fraction of primary-tier space used by writes from "
-                "secondary tiers.",
-            ),
-            (
-                TieringOffloadingMetrics.PRIMARY_READ_USAGE_PERC,
-                "Current fraction of primary-tier space used by reads to "
-                "secondary tiers.",
-            ),
-            (
-                TieringOffloadingMetrics.ACTIVE_PROMOTION_JOBS,
-                "Number of active secondary-tier promotion jobs.",
-            ),
-            (
-                TieringOffloadingMetrics.ACTIVE_CASCADE_JOBS,
-                "Number of active secondary-tier cascade jobs.",
-            ),
-        ):
-            metrics[metric_name] = OffloadingGaugeMetadata(
-                documentation=documentation,
+        metrics[TieringOffloadingMetrics.PRIMARY_WRITE_USAGE_PERC] = (
+            OffloadingGaugeMetadata(
+                documentation=(
+                    "Current fraction of primary-tier space used by writes from "
+                    "secondary tiers, labeled by tier."
+                ),
                 labelnames=("tier",),
             )
+        )
+        metrics[TieringOffloadingMetrics.PRIMARY_READ_USAGE_PERC] = (
+            OffloadingGaugeMetadata(
+                documentation=(
+                    "Current fraction of primary-tier space used by reads to "
+                    "secondary tiers, labeled by tier."
+                ),
+                labelnames=("tier",),
+            )
+        )
+        metrics[TieringOffloadingMetrics.ACTIVE_PROMOTION_JOBS] = (
+            OffloadingGaugeMetadata(
+                documentation=(
+                    "Number of active secondary-tier promotion jobs, labeled by tier."
+                ),
+                labelnames=("tier",),
+            )
+        )
+        metrics[TieringOffloadingMetrics.ACTIVE_CASCADE_JOBS] = OffloadingGaugeMetadata(
+            documentation=(
+                "Number of active secondary-tier cascade jobs, labeled by tier."
+            ),
+            labelnames=("tier",),
+        )
         secondary_tier_configs = extra_config.get("secondary_tiers", [])
         if not isinstance(secondary_tier_configs, list):
             raise ValueError("secondary_tiers must be a list of tier configurations")

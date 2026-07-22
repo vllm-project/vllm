@@ -26,10 +26,10 @@ from vllm.v1.kv_offload.base import (
 )
 from vllm.v1.kv_offload.file_mapper import FileMapper
 from vllm.v1.kv_offload.tiering.base import (
-    JobMetadata,
     JobResult,
     ScheduleEndContext,
     SecondaryTierManager,
+    TransferJob,
 )
 from vllm.v1.kv_offload.tiering.p2p.control import ControlTransport, ZmqTransport
 from vllm.v1.kv_offload.tiering.p2p.data import DataTransport, NixlTransport
@@ -210,8 +210,6 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         # kv_request_ids that hit a transport/session failure; On load lookup()
         # rejects them so the request falls back to local prefill.
         self._failed_req_ids: set[str] = set()
-        self._job_transfer_sizes: dict[int, int] = {}
-        self._job_submitted_at: dict[int, float] = {}
 
     # ------------------------------------------------------------------
     # SecondaryTierManager interface
@@ -288,7 +286,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
             return
 
     @override
-    def submit_store(self, job_metadata: JobMetadata) -> None:
+    def submit_store(self, job_metadata: TransferJob) -> None:
         job_id = job_metadata.job_id
         keys = list(job_metadata.keys)
         block_ids = job_metadata.block_ids
@@ -321,8 +319,6 @@ class P2PSecondaryTierManager(SecondaryTierManager):
             self._finished_jobs.append(JobResult(job_id=job_id, success=False))
             return
 
-        self._track_job(job_id, len(block_ids))
-
         # Fast path: a session has already received FetchMsg for this id,
         # so we can route the batch straight into its ServerRole.
         session = self._kv_to_session.get(kv_request_id)
@@ -349,11 +345,10 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         )
 
     @override
-    def submit_load(self, job_metadata: JobMetadata) -> None:
+    def submit_load(self, job_metadata: TransferJob) -> None:
         job_id = job_metadata.job_id
         keys = list(job_metadata.keys)
         block_ids = job_metadata.block_ids
-        self._track_job(job_id, len(block_ids))
 
         prefill = _prefill_params(job_metadata.req_context.kv_transfer_params)
         logger.debug(
@@ -478,21 +473,8 @@ class P2PSecondaryTierManager(SecondaryTierManager):
             return f"{host}:{port}"
         return None
 
-    def _track_job(self, job_id: int, num_blocks: int) -> None:
-        self._job_transfer_sizes[job_id] = num_blocks * self._data.block_len
-        self._job_submitted_at[job_id] = time.monotonic()
-
     def _make_job_result(self, job_id: int, success: bool) -> JobResult:
-        submitted_at = self._job_submitted_at.pop(job_id, None)
-        transfer_time = (
-            None if submitted_at is None else time.monotonic() - submitted_at
-        )
-        return JobResult(
-            job_id=job_id,
-            success=success,
-            transfer_size=self._job_transfer_sizes.pop(job_id, None),
-            transfer_time=transfer_time,
-        )
+        return JobResult(job_id=job_id, success=success)
 
     def _get_or_create_session(self, peer_id: str) -> P2PSession:
         """Return the existing session for peer_id, or open one outbound.
