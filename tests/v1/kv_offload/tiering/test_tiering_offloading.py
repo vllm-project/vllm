@@ -31,6 +31,7 @@ from vllm.v1.kv_offload.base import (
     RequestOffloadingContext,
     ScheduleEndContext,
     TierFilter,
+    TierMatcher,
     make_offload_key,
 )
 from vllm.v1.kv_offload.tiering.base import (
@@ -978,7 +979,7 @@ class TestTieringOffloadingManager:
     @pytest.mark.parametrize(
         "load_tier_filter",
         [
-            TierFilter(matchers=({"medium": Medium.STORAGE.value},)),
+            TierFilter(matchers=(TierMatcher(medium=Medium.STORAGE),)),
             TierFilter(matchers=()),
         ],
         ids=["non_matching_medium", "empty_no_load"],
@@ -1007,8 +1008,8 @@ class TestTieringOffloadingManager:
         "load_tier_filter",
         [
             TierFilter.ALL,
-            TierFilter(matchers=({"medium": Medium.CPU.value},)),
-            TierFilter(matchers=({},)),
+            TierFilter(matchers=(TierMatcher(medium=Medium.CPU),)),
+            TierFilter(matchers=(TierMatcher(),)),
         ],
         ids=["all", "explicit_cpu", "unconstrained_matcher"],
     )
