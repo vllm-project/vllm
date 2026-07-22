@@ -3929,14 +3929,6 @@ class GPUModelRunner(
         has_lora = num_active_loras > 0 if force_has_lora is None else force_has_lora
 
         num_tokens_padded = self._pad_for_sequence_parallelism(num_tokens)
-        routing_disables_full = (
-            self.has_distinct_decode_attn_backend
-            and force_uniform_decode is None
-            and (
-                has_prefill
-                or not self.cudagraph_dispatcher.cudagraph_mode.separate_routine()
-            )
-        )
 
         def dispatch_cudagraph(num_tokens, disable_full=False, valid_modes=None):
             return self.cudagraph_dispatcher.dispatch(
@@ -3945,9 +3937,7 @@ class GPUModelRunner(
                 uniform_decode=uniform_decode,
                 num_active_loras=num_active_loras,
                 valid_modes={CUDAGraphMode.NONE} if force_eager else valid_modes,
-                invalid_modes={CUDAGraphMode.FULL}
-                if disable_full or routing_disables_full
-                else None,
+                invalid_modes={CUDAGraphMode.FULL} if disable_full else None,
             )
 
         cudagraph_mode, batch_descriptor = dispatch_cudagraph(
@@ -7034,11 +7024,7 @@ class GPUModelRunner(
                 attn_backend_layers[key].append(layer_name)
             return (
                 {attn_backends[k]: v for k, v in attn_backend_layers.items()},
-                {
-                    backend
-                    for group_key in attn_backends.values()
-                    for backend in group_key.attn_backend.get_backend_variants()
-                },
+                set(group_key.attn_backend for group_key in attn_backends.values()),
             )
 
         def create_attn_groups(

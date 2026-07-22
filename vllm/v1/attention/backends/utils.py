@@ -35,6 +35,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.v1.attention.backend import (
     AttentionBackend,
+    AttentionCGSupport,
     AttentionImpl,
     AttentionMetadata,
     AttentionMetadataBuilder,
@@ -216,6 +217,15 @@ def create_composite_attention_backend(
                 default=None,
             )
 
+        @classmethod
+        def get_cudagraph_support(cls, vllm_config, kv_cache_spec):
+            return min(
+                general_builder_cls.get_cudagraph_support(vllm_config, kv_cache_spec),
+                decode_builder_cls.get_cudagraph_support(vllm_config, kv_cache_spec),
+                AttentionCGSupport.UNIFORM_BATCH,
+                key=lambda support: support.value,
+            )
+
         @staticmethod
         def _select_backend_variant(common_attn_metadata):
             is_prefilling = common_attn_metadata.is_prefilling
@@ -301,6 +311,9 @@ def create_composite_attention_backend(
         def get_backend_variants(cls):
             return general_backend, decode_backend
 
+    CompositeAttentionBackend.__name__ = (
+        f"Composite[{general_backend.__name__},{decode_backend.__name__}]"
+    )
     return CompositeAttentionBackend
 
 

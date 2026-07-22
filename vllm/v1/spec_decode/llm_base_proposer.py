@@ -411,7 +411,10 @@ class SpecDecodeBaseProposer:
     def initialize_cudagraph_keys(self, cudagraph_mode: CUDAGraphMode) -> None:
         """Initialize cudagraph dispatcher keys for the drafter.
 
-        Only supports PIECEWISE cudagraphs (via mixed_mode).
+        Only supports PIECEWISE cudagraphs (via mixed_mode). This also keeps
+        composite (routed) draft attention backends safe: piecewise graphs
+        never bake attention kernels, so the impl is selected per batch from
+        the built metadata.
         This should be called after adjust_cudagraph_sizes_for_spec_decode.
         """
         if (

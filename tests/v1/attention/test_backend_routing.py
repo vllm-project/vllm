@@ -517,6 +517,34 @@ def test_decode_backend_limits_cudagraph_support():
     assert cg_support.min_cg_attn_backend == "_UniformDecodeBackend"
 
 
+class _SingleTokenDecodeBuilder(_DecodeBuilder):
+    @classmethod
+    def get_cudagraph_support(cls, vllm_config, kv_cache_spec):
+        return AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
+
+
+class _SingleTokenDecodeBackend(_DecodeBackend):
+    @staticmethod
+    def get_builder_cls():
+        return _SingleTokenDecodeBuilder
+
+
+@pytest.mark.parametrize(
+    ("decode_backend", "expected_support"),
+    [
+        (_DecodeBackend, AttentionCGSupport.UNIFORM_BATCH),
+        (_SingleTokenDecodeBackend, AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE),
+    ],
+)
+def test_composite_builder_caps_cudagraph_support(decode_backend, expected_support):
+    """One FULL graph cannot serve both variants of a mixed batch, so the
+    composite must advertise at most UNIFORM_BATCH (or the weaker child)."""
+    backend = create_composite_attention_backend(_GeneralBackend, decode_backend)
+    support = backend.get_builder_cls().get_cudagraph_support(None, _attention_spec())
+
+    assert support == expected_support
+
+
 def test_workspace_provider_is_not_reset_with_its_own_buffer():
     """Only sibling builders receive a newly provided workspace buffer."""
     attn_groups, _, _ = _init_uniform_decode_backend()
