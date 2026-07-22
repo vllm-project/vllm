@@ -11,8 +11,9 @@ import torch
 from torch import nn
 
 from vllm.model_executor.reload_arena import (
-    InitPolicy, ReloadArena, arena_scope, current_arena, get_reload_arena,
-    peek_reload_arena, snapshot_model_arenas, verify_model_arenas)
+    InitPolicy, ReloadArena, _canonical_device, arena_scope, current_arena,
+    get_reload_arena, peek_reload_arena, snapshot_model_arenas,
+    verify_model_arenas)
 
 
 class TestGetOrAlloc:
@@ -58,7 +59,7 @@ class TestGetOrAlloc:
             arena.get_or_alloc("ws", (8, ), torch.int32, "cpu")
 
     @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs cuda")
-    def test_unindexed_cuda_device_matches_indexed(self):
+    def test_unindexed_accelerator_device_matches_indexed(self):
         # observed live: config-level "cuda" vs slot tensor's "cuda:0"
         # must not be treated as a respecification -- the mismatch aborted
         # the first post-reload forward
@@ -68,6 +69,48 @@ class TestGetOrAlloc:
         c = arena.get_or_alloc("s", (4, ), torch.int32,
                                torch.device("cuda"))
         assert a.data_ptr() == b.data_ptr() == c.data_ptr()
+
+
+class TestDeviceCanonicalization:
+    """Device resolution must not be CUDA-specific: the same unindexed-vs-
+    indexed mismatch would otherwise recur on every other accelerator."""
+
+    def test_cpu_is_not_given_an_index(self):
+        # CPU tensors report a bare "cpu"; canonicalizing to cpu:0 would
+        # manufacture the mismatch this function exists to prevent
+        assert _canonical_device("cpu") == torch.device("cpu")
+        assert _canonical_device(torch.device("cpu")) == torch.device("cpu")
+        arena = ReloadArena("layer")
+        a = arena.get_or_alloc("s", (4, ), torch.int32, "cpu")
+        b = arena.get_or_alloc("s", (4, ), torch.int32, torch.device("cpu"))
+        assert a.data_ptr() == b.data_ptr()
+
+    def test_explicit_index_is_left_alone(self):
+        assert _canonical_device("cuda:3") == torch.device("cuda", 3)
+        assert _canonical_device("xpu:2") == torch.device("xpu", 2)
+
+    def test_unavailable_backend_left_as_given(self):
+        # no guessing for a backend torch cannot resolve; a later spec
+        # mismatch is loud and safe, a wrong guess is not
+        assert _canonical_device("xpu").type == "xpu"
+
+    def test_resolution_is_generic_over_device_type(self, monkeypatch):
+        """Any torch-registered accelerator resolves through its own device
+        module -- this is what keeps the fix from being CUDA-only."""
+
+        class FakeModule:
+            @staticmethod
+            def is_available():
+                return True
+
+            @staticmethod
+            def current_device():
+                return 7
+
+        monkeypatch.setattr(torch, "get_device_module",
+                            lambda t: FakeModule if t == "xpu"
+                            else torch.get_device_module(t))
+        assert _canonical_device("xpu") == torch.device("xpu", 7)
 
 
 class TestPut:
