@@ -6,7 +6,6 @@ import torch
 from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     xpu_mxfp8_quantize as quant_mxfp8,
 )
-from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
 
 from .Mxfp8LinearKernel import Mxfp8LinearKernel, Mxfp8LinearLayerConfig
@@ -29,10 +28,11 @@ class XPUMxFp8LinearKernel(Mxfp8LinearKernel):
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         # Transpose scale from checkpoint [N, K//32] to oneDNN [K//32, N]
-        # at load time (one-time cost, eliminates per-call .t().contiguous()).
+        # at load time, while keeping the original.
         weight_scale = layer.weight_scale.view(torch.float8_e8m0fnu)
-        scale_t = weight_scale.data.t().contiguous()
-        replace_parameter(layer, "weight_scale", scale_t)
+        scale_t = weight_scale.t().contiguous()
+        layer.xpu_weight_scale = scale_t
+        self.xpu_weight_scale = layer.xpu_weight_scale
 
         # For BMM layers (e.g. wo_a), precompute 3D scale and weight:
         if getattr(layer, "is_bmm", False):
@@ -67,6 +67,6 @@ class XPUMxFp8LinearKernel(Mxfp8LinearKernel):
             layer.weight.t(),
             out_dtype,
             x_scale,
-            layer.weight_scale,
+            self.xpu_weight_scale,
             bias,
         )
