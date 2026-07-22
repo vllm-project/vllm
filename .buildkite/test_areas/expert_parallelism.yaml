@@ -16,6 +16,7 @@ steps:
   - pytest -v -s distributed/test_eplb_utils.py
   mirror:
     amd:
+      dind: false
       device: mi300_1
       depends_on:
       - image-build-amd
