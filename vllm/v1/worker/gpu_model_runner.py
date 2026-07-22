@@ -5689,7 +5689,7 @@ class GPUModelRunner(
             snapshot_model_arenas,
             verify_model_arenas,
         )
-
+        from vllm.model_executor.reload_manifest import check_global_storage
         arena_snaps = snapshot_model_arenas(model)
 
         # begin loading weights
@@ -5726,6 +5726,25 @@ class GPUModelRunner(
                 raise RuntimeError(msg)
 
         self.reset_lora_state()
+
+        # Module-level storage the arena cannot own. Defaults to warn rather
+        # than strict: unlike the arena check this has no field data yet, and
+        # a new gate whose false-positive rate is unknown gets switched off
+        # wholesale the first time it misfires.
+        manifest_gate = os.environ.get("VLLM_RELOAD_GLOBAL_MANIFEST", "warn")
+        if manifest_gate != "off":
+            report = check_global_storage()
+            if report is not None and not report.is_clean:
+                msg = ("Reload rebound module-level storage that was live "
+                       "when graphs were captured:\n" + report.format())
+                if manifest_gate == "strict":
+                    raise RuntimeError(
+                        msg + "\nSet VLLM_RELOAD_GLOBAL_MANIFEST=warn to "
+                        "downgrade.")
+                logger.warning(msg)
+            elif report is not None:
+                logger.debug("Global storage manifest clean (%d checked)",
+                             report.checked)
 
         # logging and validation
         counter_after_reloading = time.perf_counter()
@@ -7065,6 +7084,16 @@ class GPUModelRunner(
             elapsed_time,
             cuda_graph_size / (1 << 30),
         )
+
+        # Record module-level tensor storage as the graphs just captured it.
+        # These have no owning layer, so neither copy-back nor the reload
+        # arena covers them; the manifest is what lets a reload notice if a
+        # global cache rebinds an address a graph baked in.
+        if os.environ.get("VLLM_RELOAD_GLOBAL_MANIFEST", "warn") != "off":
+            from vllm.model_executor.reload_manifest import (
+                record_global_storage)
+            record_global_storage()
+
         return cuda_graph_size
 
     def _warmup_and_capture(
