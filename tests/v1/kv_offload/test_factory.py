@@ -231,7 +231,6 @@ def test_tiering_spec_create_worker_uses_single_slot_for_replicated_layout(monke
     spec.create_worker(kv_caches)
 
     assert region_calls[0]["rank"] == 0
-    assert region_calls[0]["replicated_layout"] is True
     assert region_calls[0]["kv_bytes_per_block"] == worker_kv_bytes_per_block
     assert worker_calls[0]["kv_caches"] is kv_caches
     assert worker_calls[0]["mmap_region"] is region
@@ -264,7 +263,6 @@ def test_tiering_spec_create_worker_folds_device_index_for_sharded_layout(monkey
     spec.create_worker(MagicMock())
 
     assert region_calls[0]["rank"] == 1
-    assert region_calls[0]["replicated_layout"] is False
 
 
 @pytest.mark.parametrize("world_size", [2, 4, 8])

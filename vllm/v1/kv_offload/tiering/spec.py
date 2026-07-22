@@ -172,7 +172,6 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
                 rank=None,
                 kv_bytes_per_block=self.kv_bytes_per_chunk,
                 cpu_page_size=self.cpu_page_size_per_worker,
-                replicated_layout=self.replicated_layout,
             )
             self._scheduler_mmap = scheduler_mmap
 
@@ -244,7 +243,6 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
             rank=rank,
             kv_bytes_per_block=self.kv_bytes_per_chunk,
             cpu_page_size=self.cpu_page_size_per_worker,
-            replicated_layout=self.replicated_layout,
         )
         return CPUOffloadingWorker(
             kv_caches=kv_caches,

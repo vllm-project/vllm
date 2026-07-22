@@ -109,7 +109,6 @@ def test_transfer(
             rank=0,
             kv_bytes_per_block=kv_bytes_per_block,
             cpu_page_size=cpu_page_size,
-            replicated_layout=replicated_layout,
         )
 
     worker = CPUOffloadingWorker(
