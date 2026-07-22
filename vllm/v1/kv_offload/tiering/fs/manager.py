@@ -100,7 +100,7 @@ class FileSystemTierManager(SecondaryTierManager):
         content.
     """
 
-    medium: ClassVar[Medium] = Medium.FS
+    medium: ClassVar[Medium] = Medium.STORAGE
 
     def __init__(
         self,

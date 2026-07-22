@@ -474,7 +474,7 @@ class TestObjTierKVEvents:
         events = list(self.tier.take_events())
         assert len(events) == 1
         assert events[0].keys == keys
-        assert events[0].medium == Medium.OBJ
+        assert events[0].medium == Medium.STORAGE
         assert events[0].locality is Locality.REMOTE
         assert not events[0].removed
         # take_events drains the buffer.

@@ -98,7 +98,7 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
     primary tier. Object keys are formed as ``{prefix}/{hash_shard}/{hash}.bin``.
     """
 
-    medium: ClassVar[Medium] = Medium.OBJ
+    medium: ClassVar[Medium] = Medium.STORAGE
 
     def __init__(
         self,

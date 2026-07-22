@@ -248,8 +248,8 @@ class TestTieringOffloadingManager:
 
     def test_take_events_aggregates_tier_owned_events(self, manager_setup):
         primary_event = OffloadingEvent(to_keys([1]), Medium.CPU, removed=False)
-        secondary_event1 = OffloadingEvent(to_keys([2]), Medium.FS, removed=False)
-        secondary_event2 = OffloadingEvent(to_keys([3]), Medium.OBJ, removed=True)
+        secondary_event1 = OffloadingEvent(to_keys([2]), Medium.STORAGE, removed=False)
+        secondary_event2 = OffloadingEvent(to_keys([3]), Medium.STORAGE, removed=True)
 
         self.primary_tier.take_events = MagicMock(return_value=[primary_event])
         self.secondary_tier1.take_events = MagicMock(return_value=[secondary_event1])
@@ -978,7 +978,7 @@ class TestTieringOffloadingManager:
     @pytest.mark.parametrize(
         "load_tier_filter",
         [
-            TierFilter(matchers=({"medium": Medium.FS.value},)),
+            TierFilter(matchers=({"medium": Medium.STORAGE.value},)),
             TierFilter(matchers=()),
         ],
         ids=["non_matching_medium", "empty_no_load"],
