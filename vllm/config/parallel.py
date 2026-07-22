@@ -92,7 +92,7 @@ class EPLBConfig:
     Backend for EPLB expert weight communication:
     - "torch_nccl": Use torch.distributed on the device process group
     - "torch_gloo": Use torch.distributed gloo with CPU staging
-    - "nixl": Use NIXL/ RIXL with staged send/recv buffers
+    - "nixl": Use NIXL with staged send/recv buffers
     - "pynccl": Use PyNccl send/recv
     - None: Auto-select backend (prefers "nixl", falls back to "torch_gloo")
     """
