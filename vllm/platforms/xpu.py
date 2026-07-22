@@ -288,7 +288,9 @@ class XPUPlatform(Platform):
                 "(1) only single-GPU execution is supported; "
                 "(2) FLASH_ATTN supports PIECEWISE mode only; use TRITON_ATTN "
                 "for FULL mode; "
-                "(3) graph capture may use significantly more memory than CUDA."
+                "(3) XPU Graph may increase device memory usage, "
+                "potentially causing OOM errors or leaving less memory "
+                "for the KV cache and reducing performance."
             )
 
         # Disable fusion passes not yet supported on XPU.
