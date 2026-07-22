@@ -47,6 +47,7 @@ def test_vision_disabled_skips_deepstack_buffers(monkeypatch):
     )
 
     assert isinstance(model.visual, StageMissingLayer)
+    assert not model.use_deepstack
     assert not hasattr(model, "deepstack_input_embeds")
 
 
