@@ -2741,6 +2741,29 @@ def concat_and_cache_mla(
     kv_cache_dtype: str,
     scale: torch.Tensor,
 ) -> None:
+    # NOTE: The C++ ``concat_and_cache_mla`` op is only registered for
+    # ``torch::kCUDA``. On CPU we provide a pure-PyTorch fallback so that
+    # the CPU MLA backend can write the compressed latent KV cache without
+    # relying on a native kernel. Correctness first, performance later.
+    if kv_cache.device.type == "cpu":
+        # kv_cache_dtype and scale are unused on CPU (no fp8 quantization).
+        _ = (kv_cache_dtype, scale)
+        kv_lora_rank = kv_c.shape[-1]
+        pe_dim = k_pe.shape[-1]
+        flat = kv_cache.view(-1, kv_lora_rank + pe_dim)
+        slots = slot_mapping.to(torch.long).view(-1)
+        # Only write valid slots. Padding slots are set to -1 by the
+        # scheduler and must be skipped, otherwise indexing wraps around
+        # to the last cache entry and corrupts real tokens.
+        valid_mask = slots >= 0
+        if not valid_mask.all().item():
+            slots = slots[valid_mask]
+            kv_c = kv_c[valid_mask]
+            k_pe = k_pe[valid_mask]
+        target_dtype = flat.dtype
+        flat[slots, :kv_lora_rank] = kv_c.to(target_dtype)
+        flat[slots, kv_lora_rank:] = k_pe.view(-1, pe_dim).to(target_dtype)
+        return
     torch.ops._C_cache_ops.concat_and_cache_mla(
         kv_c, k_pe, kv_cache, slot_mapping, kv_cache_dtype, scale
     )
