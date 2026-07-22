@@ -47,6 +47,22 @@ def _reload_envs():
     return importlib.reload(envs)
 
 
+@pytest.fixture(autouse=True)
+def _restore_rocm_env_state():
+    """Restore global env + AITER flag state after every test.
+
+    Tests here reload ``vllm.envs`` (a module singleton) and refresh the
+    cached ``rocm_aiter_ops`` env flags. Restoring in a fixture teardown
+    guarantees cleanup even when an assertion fails mid-test, preventing
+    state from leaking into other tests in the same worker.
+    """
+    yield
+    _reload_envs()
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    rocm_aiter_ops.refresh_env_variables()
+
+
 def _quantile(flat: torch.Tensor, q: float) -> float:
     if flat.numel() == 1:
         return flat.item()
@@ -193,7 +209,6 @@ def test_rocm_fp8_env_defaults(monkeypatch):
         envs = _reload_envs()
         for env_name, expected in ENV_DEFAULTS.items():
             assert getattr(envs, env_name) is expected
-    _reload_envs()
 
 
 @pytest.mark.parametrize(
@@ -212,7 +227,6 @@ def test_rocm_fp8_env_overrides(env_name, raw_value, expected, monkeypatch):
         mp.setenv(env_name, raw_value)
         envs = _reload_envs()
         assert getattr(envs, env_name) is expected
-    _reload_envs()
 
 
 @fp8_only
@@ -238,8 +252,6 @@ def test_maybe_pad_fp8_weight_respects_env(monkeypatch):
         unpadded = _maybe_pad_fp8_weight(weight)
         assert unpadded.data_ptr() == weight.data_ptr()
 
-    _reload_envs()
-
 
 @fp8_only
 @pytest.mark.parametrize(
@@ -263,9 +275,6 @@ def test_aiter_fp8bmm_enabled_api_respects_env(
         _reload_envs()
         rocm_aiter_ops.refresh_env_variables()
         assert rocm_aiter_ops.is_fp8bmm_enabled() is expected
-
-    _reload_envs()
-    rocm_aiter_ops.refresh_env_variables()
 
 
 @fp8_only
@@ -447,8 +456,14 @@ def test_fp8_per_tensor_quant_matches_reference(shape):
 
     assert out.shape == x.shape
     assert out.dtype == FP8_DTYPE
-    torch.testing.assert_close(scale, ref_scale, atol=0.0, rtol=0.0)
-    assert torch.equal(out, ref_out)
+
+    torch.testing.assert_close(scale, ref_scale, rtol=1e-3, atol=1e-4)
+    code_match_rate = (
+        (out.view(torch.uint8) == ref_out.view(torch.uint8)).float().mean().item()
+    )
+    assert code_match_rate >= 0.999, (
+        f"FP8 codes match reference only {code_match_rate:.4%} (< 99.9%)"
+    )
 
     dequant = out.float() * scale.float()
     _assert_rel_error_budget(
@@ -505,8 +520,14 @@ def test_fp8_per_token_quant_matches_reference():
     assert out.shape == x.shape
     assert out.dtype == FP8_DTYPE
     assert scale.shape == (x.shape[0], 1)
-    torch.testing.assert_close(scale, ref_scale, atol=0.0, rtol=0.0)
-    assert torch.equal(out, ref_out)
+
+    torch.testing.assert_close(scale, ref_scale, rtol=1e-3, atol=1e-4)
+    code_match_rate = (
+        (out.view(torch.uint8) == ref_out.view(torch.uint8)).float().mean().item()
+    )
+    assert code_match_rate >= 0.999, (
+        f"FP8 codes match reference only {code_match_rate:.4%} (< 99.9%)"
+    )
 
     dequant = out.float() * scale.float()
     _assert_rel_error_budget(

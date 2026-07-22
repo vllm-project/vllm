@@ -60,6 +60,16 @@ def _reload_envs():
     return importlib.reload(envs)
 
 
+@pytest.fixture(autouse=True)
+def _restore_rocm_env_state():
+    """Restore global env + AITER flag state after every test."""
+    yield
+    _reload_envs()
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    rocm_aiter_ops.refresh_env_variables()
+
+
 def _assert_aiter_supported() -> None:
     from vllm._aiter_ops import is_aiter_found_and_supported
 
@@ -169,7 +179,6 @@ def test_rocm_aiter_fp4_enablement_follows_env_and_arch(
 ):
     """The ROCm FP4 AITER gates should depend only on the env toggles and the
     gfx950 hardware check."""
-    import vllm._aiter_ops as aiter_ops
     from vllm._aiter_ops import rocm_aiter_ops
 
     _assert_aiter_supported()
@@ -189,9 +198,6 @@ def test_rocm_aiter_fp4_enablement_follows_env_and_arch(
             rocm_aiter_ops.is_asm_fp4_gemm_dynamic_quant_enabled() is expected_asm_gemm
         )
         assert rocm_aiter_ops.is_fp4bmm_enabled() is expected_fp4bmm
-
-    _reload_envs()
-    aiter_ops.rocm_aiter_ops.refresh_env_variables()
 
 
 # Large-shape MXFP4 wrapper tests -----------------------------------------
@@ -306,20 +312,7 @@ def test_aiter_dynamic_mxfp4_quant_determinism():
     torch.manual_seed(7)
     x = torch.randn(128, 256, dtype=torch.bfloat16)
 
-    fp4_results = []
-    scale_results = []
-    for _ in range(4):
-        fp4, scale = dynamic_mxfp4_quant(x)
-        fp4_results.append(fp4)
-        scale_results.append(scale)
-
-    for i in range(1, 4):
-        assert torch.equal(fp4_results[0], fp4_results[i]), (
-            f"dynamic_mxfp4_quant FP4 output not deterministic on run {i}"
-        )
-        assert torch.equal(scale_results[0], scale_results[i]), (
-            f"dynamic_mxfp4_quant scale not deterministic on run {i}"
-        )
+    _assert_deterministic(dynamic_mxfp4_quant, x, n_runs=4)
 
 
 # gfx950 hardware FP4 GEMM tests ------------------------------------------

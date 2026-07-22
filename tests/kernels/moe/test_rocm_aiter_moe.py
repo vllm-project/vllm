@@ -47,6 +47,16 @@ def _reload_envs():
     return importlib.reload(envs)
 
 
+@pytest.fixture(autouse=True)
+def _restore_rocm_env_state():
+    """Restore global env + AITER flag state after every test."""
+    yield
+    _reload_envs()
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    rocm_aiter_ops.refresh_env_variables()
+
+
 def _assert_aiter_supported() -> None:
     from vllm._aiter_ops import is_aiter_found_and_supported
 
@@ -497,7 +507,6 @@ def test_aiter_moe_enablement_follows_env(
 ):
     """The fused-MoE gate should depend only on the main AITER toggle and the
     MoE-specific toggle."""
-    import vllm._aiter_ops as aiter_ops
     from vllm._aiter_ops import rocm_aiter_ops
 
     _assert_aiter_supported()
@@ -509,9 +518,6 @@ def test_aiter_moe_enablement_follows_env(
         rocm_aiter_ops.refresh_env_variables()
 
         assert rocm_aiter_ops.is_fused_moe_enabled() is expected
-
-    _reload_envs()
-    aiter_ops.rocm_aiter_ops.refresh_env_variables()
 
 
 @pytest.mark.parametrize(
@@ -532,7 +538,6 @@ def test_aiter_moe_shared_experts_enablement_follows_env(
 ):
     """Shared-expert fusion should only be enabled when the fused-MoE path is
     enabled too."""
-    import vllm._aiter_ops as aiter_ops
     from vllm._aiter_ops import rocm_aiter_ops
 
     _assert_aiter_supported()
@@ -549,9 +554,6 @@ def test_aiter_moe_shared_experts_enablement_follows_env(
 
         assert rocm_aiter_ops.is_fusion_moe_shared_experts_enabled() is expected
 
-    _reload_envs()
-    aiter_ops.rocm_aiter_ops.refresh_env_variables()
-
 
 @pytest.mark.parametrize("moe_padding", [True, False])
 def test_aiter_moe_padding_env_var(
@@ -563,8 +565,6 @@ def test_aiter_moe_padding_env_var(
         mp.setenv("VLLM_ROCM_MOE_PADDING", "1" if moe_padding else "0")
         envs = _reload_envs()
         assert envs.VLLM_ROCM_MOE_PADDING is moe_padding
-
-    _reload_envs()
 
 
 # Enum tests --------------------------------------------------------------
