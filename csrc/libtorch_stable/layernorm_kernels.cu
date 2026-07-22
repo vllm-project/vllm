@@ -249,8 +249,6 @@ void rms_norm(torch::stable::Tensor& out,    // [..., hidden_size]
   int64_t input_shape_d3 = (num_dims >= 4) ? input.size(-3) : 0;
 
   // For large num_tokens, use smaller blocks to increase SM concurrency.
-  // In batch-invariant mode, lock the block size to 1024 to ensure the
-  // reduction width and floating-point summation order are independent of batch size.
   const bool batch_invariant_launch = vllm::vllm_is_batch_invariant();
   const int max_block_size =
       batch_invariant_launch ? 1024 : ((num_tokens < 256) ? 1024 : 256);
