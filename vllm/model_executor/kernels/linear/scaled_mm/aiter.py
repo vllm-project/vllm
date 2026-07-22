@@ -374,12 +374,24 @@ class AiterFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
             not current_platform.is_fp8_fnuz()
             and rocm_aiter_ops.is_triton_gemm_w8a8_tuned(n, k)
         )
-        # Cache the fp32 upcast of the static e8m0 weight scale keyed by its
-        # storage pointer. Without this the `<<23` + `.contiguous()` upcast in
-        # apply_block_scaled_mm re-runs every decode step for every layer even
-        # though the weight scale never changes, showing up as ~3.5% aten
-        # lshift + direct_copy GPU time in profiles.
-        self._weight_scale_fp32_cache: dict[int, torch.Tensor] = {}
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+            _upcast_e8m0_to_fp32,
+        )
+        from vllm.model_executor.utils import replace_parameter
+
+        from .BlockScaledMMLinearKernel import FP8BlockParams
+
+        super().process_weights_after_loading(layer)
+
+        params = FP8BlockParams.from_layer(layer)
+        if params.weight_scale_inv is not None:
+            ws, attr = params.weight_scale_inv, params.WEIGHT_SCALE_INV
+        else:
+            ws, attr = params.weight_scale, params.WEIGHT_SCALE
+        if ws is not None and ws.dtype == torch.float8_e8m0fnu:
+            replace_parameter(layer, attr, _upcast_e8m0_to_fp32(ws).contiguous())
 
     @classmethod
     def is_supported(cls, compute_capability=None):
@@ -421,17 +433,7 @@ class AiterFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
             else:
                 As = As.to(torch.float32)
 
-            # Bs is the static weight scale: upcast once and cache. As is the
-            # per-step activation scale and must not be cached.
-            if Bs.dtype == torch.float8_e8m0fnu:
-                cache_key = Bs.data_ptr()
-                Bs_fp32 = self._weight_scale_fp32_cache.get(cache_key)
-                if Bs_fp32 is None:
-                    Bs_fp32 = _upcast_e8m0_to_fp32(Bs).contiguous()
-                    self._weight_scale_fp32_cache[cache_key] = Bs_fp32
-                Bs = Bs_fp32
-            else:
-                Bs = Bs.to(torch.float32)
+            Bs = Bs.to(torch.float32)
 
         out_dtype = self.config.out_dtype
         if self.use_triton:
