@@ -7,7 +7,7 @@ package vllm;
 import "google/protobuf/struct.proto";
 
 
-service Generate {
+service Inference {
   // Generates text given a prompt
   rpc Generate (GenerateRequest) returns (GenerateResponse) {}
   // Generates text given a prompt, streaming the outputs

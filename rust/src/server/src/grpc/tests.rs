@@ -39,8 +39,8 @@ use zeromq::prelude::{SocketRecv, SocketSend};
 use zeromq::{DealerSocket, PushSocket, ZmqMessage};
 
 use super::pb::control_client::ControlClient;
-use super::pb::generate_client::GenerateClient;
-use super::{ControlServer, ControlServiceImpl, GenerateServer, GenerateServiceImpl, pb};
+use super::pb::inference_client::InferenceClient;
+use super::{ControlServer, ControlServiceImpl, InferenceServer, InferenceServiceImpl, pb};
 use crate::listener::{Listener, MaybeTlsListener};
 use crate::state::AppState;
 use crate::tls;
@@ -202,7 +202,7 @@ async fn setup_grpc_service(
     engine_id: impl Into<EngineId>,
     output_specs: Vec<(Vec<u32>, Option<EngineCoreFinishReason>)>,
 ) -> (
-    GenerateServer<GenerateServiceImpl>,
+    InferenceServer<InferenceServiceImpl>,
     ControlServer<ControlServiceImpl>,
     tokio::sync::watch::Receiver<bool>,
     MockEngineTask,
@@ -246,7 +246,7 @@ async fn setup_grpc_service(
     );
     let state = Arc::new(AppState::new(vec!["test-model".to_string()], chat));
     (
-        GenerateServer::new(GenerateServiceImpl::new(state.clone())),
+        InferenceServer::new(InferenceServiceImpl::new(state.clone())),
         ControlServer::new(ControlServiceImpl::new(state)),
         engine_health,
         engine_task,
@@ -259,30 +259,30 @@ async fn grpc_test_server(
     engine_id: impl Into<EngineId>,
     output_specs: Vec<(Vec<u32>, Option<EngineCoreFinishReason>)>,
 ) -> (
-    GenerateClient<tonic::transport::Channel>,
+    InferenceClient<tonic::transport::Channel>,
     tokio::task::JoinHandle<()>,
     MockEngineTask,
 ) {
-    let (generate_service, control_service, engine_health, engine_task) =
+    let (inference_service, control_service, engine_health, engine_task) =
         setup_grpc_service(engine_id, output_specs).await;
     let (channel, server_task) = start_grpc_test_server(
-        generate_service,
+        inference_service,
         control_service,
         engine_health,
         tokio_util::sync::CancellationToken::new(),
     )
     .await;
-    (GenerateClient::new(channel), server_task, engine_task)
+    (InferenceClient::new(channel), server_task, engine_task)
 }
 
 async fn start_grpc_test_server(
-    generate_service: GenerateServer<GenerateServiceImpl>,
+    inference_service: InferenceServer<InferenceServiceImpl>,
     control_service: ControlServer<ControlServiceImpl>,
     engine_health: tokio::sync::watch::Receiver<bool>,
     shutdown: tokio_util::sync::CancellationToken,
 ) -> (Channel, tokio::task::JoinHandle<()>) {
     let (health_reporter, health_service) = health_reporter();
-    health_reporter.set_serving::<GenerateServer<GenerateServiceImpl>>().await;
+    health_reporter.set_serving::<InferenceServer<InferenceServiceImpl>>().await;
     health_reporter.set_serving::<ControlServer<ControlServiceImpl>>().await;
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind grpc listener");
@@ -293,7 +293,7 @@ async fn start_grpc_test_server(
         let server = TonicServer::builder()
             .add_service(health_service)
             .add_service(control_service)
-            .add_service(generate_service)
+            .add_service(inference_service)
             .serve_with_incoming_shutdown(incoming, shutdown.clone().cancelled_owned());
         let health_monitor =
             super::monitor_health(health_reporter, engine_health, shutdown.clone());
@@ -323,7 +323,7 @@ async fn grpc_tls_test_server(
     certs: &TestCerts,
     cert_reqs: i32,
 ) -> (String, tokio::task::JoinHandle<()>, MockEngineTask) {
-    let (generate_service, control_service, _engine_health, engine_task) =
+    let (inference_service, control_service, _engine_health, engine_task) =
         setup_grpc_service(engine_id, output_specs).await;
     let context = tls::build_grpc_server_config(&server_tls(certs, cert_reqs))
         .expect("build grpc tls config");
@@ -335,7 +335,7 @@ async fn grpc_tls_test_server(
         let incoming = MaybeTlsListener::tls(Listener::Tcp(listener), context);
         TonicServer::builder()
             .add_service(control_service)
-            .add_service(generate_service)
+            .add_service(inference_service)
             .serve_with_incoming(incoming)
             .await
             .expect("grpc tls server");
@@ -351,7 +351,7 @@ async fn grpc_tls_client(
     certs: &TestCerts,
     addr: &str,
     identity: Option<&str>,
-) -> Result<GenerateClient<Channel>, tonic::transport::Error> {
+) -> Result<InferenceClient<Channel>, tonic::transport::Error> {
     let ca = certs.path("ca.pem");
     let identity = identity.map(|name| {
         (
@@ -388,7 +388,7 @@ async fn grpc_tls_client(
         .expect("grpc endpoint")
         .connect_with_connector(connector)
         .await?;
-    Ok(GenerateClient::new(channel))
+    Ok(InferenceClient::new(channel))
 }
 
 /// Complete a raw TLS handshake against the gRPC port (offering ALPN `h2`) for
@@ -415,7 +415,7 @@ async fn grpc_server_with_keepalive(
     engine_id: impl Into<EngineId>,
     keepalive: Option<Duration>,
 ) -> (String, tokio::task::JoinHandle<()>, MockEngineTask) {
-    let (generate_service, control_service, _engine_health, engine_task) =
+    let (inference_service, control_service, _engine_health, engine_task) =
         setup_grpc_service(engine_id, default_stream_output_specs()).await;
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind grpc listener");
@@ -432,7 +432,7 @@ async fn grpc_server_with_keepalive(
         let incoming = MaybeTlsListener::plain(Listener::Tcp(listener));
         builder
             .add_service(control_service)
-            .add_service(generate_service)
+            .add_service(inference_service)
             .serve_with_incoming(incoming)
             .await
             .expect("grpc server");
@@ -1083,20 +1083,20 @@ async fn grpc_without_keepalive_keeps_unresponsive_connection_open() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn control_abort_resolves_external_id_and_empty_is_noop() {
-    let (generate_service, control_service, engine_health, engine_task) =
+    let (inference_service, control_service, engine_health, engine_task) =
         setup_grpc_service(b"engine-grpc-abort-active", vec![(vec![b'h' as u32], None)]).await;
     let (channel, server_task) = start_grpc_test_server(
-        generate_service,
+        inference_service,
         control_service,
         engine_health,
         tokio_util::sync::CancellationToken::new(),
     )
     .await;
-    let mut generate_client = GenerateClient::new(channel.clone());
+    let mut inference_client = InferenceClient::new(channel.clone());
     let mut control_client = ControlClient::new(channel);
     let request_id = "test-abort-active";
 
-    let mut stream = generate_client
+    let mut stream = inference_client
         .generate_stream(pb::GenerateRequest {
             request_id: request_id.to_string(),
             model: "test-model".to_string(),
@@ -1174,11 +1174,11 @@ async fn control_abort_resolves_external_id_and_empty_is_noop() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn grpc_health_transitions_to_not_serving_when_engine_becomes_unhealthy() {
-    let (generate_service, control_service, _connected_engine_health, _engine_task) =
+    let (inference_service, control_service, _connected_engine_health, _engine_task) =
         setup_grpc_service(b"engine-grpc-health-failure", default_stream_output_specs()).await;
     let (engine_health_tx, engine_health) = tokio::sync::watch::channel(true);
     let (channel, server_task) = start_grpc_test_server(
-        generate_service,
+        inference_service,
         control_service,
         engine_health,
         tokio_util::sync::CancellationToken::new(),
@@ -1187,7 +1187,7 @@ async fn grpc_health_transitions_to_not_serving_when_engine_becomes_unhealthy() 
     let mut health_client = HealthClient::new(channel);
 
     let mut health_streams = Vec::new();
-    for service in ["vllm.Generate", "vllm.Control", ""] {
+    for service in ["vllm.Inference", "vllm.Control", ""] {
         let service_label = if service.is_empty() {
             "overall"
         } else {
@@ -1242,14 +1242,14 @@ async fn grpc_health_transitions_to_not_serving_when_engine_becomes_unhealthy() 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn grpc_health_watch_closes_on_graceful_shutdown() {
-    let (generate_service, control_service, engine_health, _engine_task) = setup_grpc_service(
+    let (inference_service, control_service, engine_health, _engine_task) = setup_grpc_service(
         b"engine-grpc-health-shutdown",
         default_stream_output_specs(),
     )
     .await;
     let shutdown = tokio_util::sync::CancellationToken::new();
     let (channel, server_task) = start_grpc_test_server(
-        generate_service,
+        inference_service,
         control_service,
         engine_health,
         shutdown.clone(),
@@ -1258,43 +1258,43 @@ async fn grpc_health_watch_closes_on_graceful_shutdown() {
     let mut health_client = HealthClient::new(channel);
     let mut stream = health_client
         .watch(HealthCheckRequest {
-            service: "vllm.Generate".to_string(),
+            service: "vllm.Inference".to_string(),
         })
         .await
-        .expect("start health watch for vllm.Generate")
+        .expect("start health watch for vllm.Inference")
         .into_inner();
 
     let initial = stream
         .message()
         .await
-        .expect("read initial health status for vllm.Generate")
+        .expect("read initial health status for vllm.Inference")
         .expect("health watch ended before its initial status");
     assert_eq!(
         initial.status,
         HealthServingStatus::Serving as i32,
-        "unexpected initial health status for vllm.Generate"
+        "unexpected initial health status for vllm.Inference"
     );
 
     shutdown.cancel();
 
     let update = tokio::time::timeout(Duration::from_secs(2), stream.message())
         .await
-        .expect("timed out waiting for shutdown health update for vllm.Generate")
-        .expect("failed to read shutdown health update for vllm.Generate")
+        .expect("timed out waiting for shutdown health update for vllm.Inference")
+        .expect("failed to read shutdown health update for vllm.Inference")
         .expect("health watch ended before its shutdown update");
     assert_eq!(
         update.status,
         HealthServingStatus::NotServing as i32,
-        "unexpected shutdown health status for vllm.Generate"
+        "unexpected shutdown health status for vllm.Inference"
     );
 
     let stream_end = tokio::time::timeout(Duration::from_secs(2), stream.message())
         .await
-        .expect("timed out waiting for vllm.Generate health watch to close")
-        .expect("failed while closing vllm.Generate health watch");
+        .expect("timed out waiting for vllm.Inference health watch to close")
+        .expect("failed while closing vllm.Inference health watch");
     assert!(
         stream_end.is_none(),
-        "vllm.Generate health watch remained open"
+        "vllm.Inference health watch remained open"
     );
 
     tokio::time::timeout(Duration::from_secs(2), server_task)
