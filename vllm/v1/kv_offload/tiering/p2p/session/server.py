@@ -857,6 +857,11 @@ class ServerRole:
         self._finished_lookup_ctxs.clear()
         return failed_stores, failed_serves
 
+    @property
+    def has_inflight_transfers(self) -> bool:
+        """True if any outbound store transfer is still in flight."""
+        return bool(self._inflight)
+
     # ------------------------------------------------------------------
     # Internal — inflight bookkeeping
     # ------------------------------------------------------------------

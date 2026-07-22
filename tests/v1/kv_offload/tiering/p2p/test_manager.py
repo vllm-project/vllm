@@ -112,10 +112,8 @@ def _make_manager() -> P2PSecondaryTierManager:
 def _init_offloading_spec() -> SimpleNamespace:
     """Minimal offloading_spec for driving the real __init__."""
     return SimpleNamespace(
-        vllm_config=SimpleNamespace(
-            parallel_config=SimpleNamespace(data_parallel_index=0)
-        ),
-        block_size_factor=1,
+        config=SimpleNamespace(parallel=SimpleNamespace(data_parallel_index=0)),
+        blocks_per_chunk=1,
     )
 
 
@@ -535,6 +533,10 @@ class _FakeServerHalf:
     def __init__(self) -> None:
         self._inflight: dict[int, object] = {}
 
+    @property
+    def has_inflight_transfers(self) -> bool:
+        return bool(self._inflight)
+
 
 class _FakeClientHalf:
     def __init__(self) -> None:
@@ -581,6 +583,10 @@ class _FakeSession:
         # drain_jobs paths. Tests populate _server._inflight when needed.
         self._server = _FakeServerHalf()
         self._client = _FakeClientHalf()
+
+    @property
+    def has_pending_work(self) -> bool:
+        return self._client.has_active_loads or self._server.has_inflight_transfers
 
     def poll(self):
         result = SessionPollResult(

@@ -515,10 +515,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         warned = False
         while True:
             self._poll_once()
-            pending = any(
-                s._client.has_active_loads or s._server._inflight
-                for s in self._sessions.values()
-            )
+            pending = any(s.has_pending_work for s in self._sessions.values())
             if not pending:
                 return
             if not warned and time.monotonic() - start > 5.0:

@@ -162,6 +162,11 @@ class P2PSession:
         """True after the peer acked our ConnectMsg (we may send freely)."""
         return self._send_ready
 
+    @property
+    def has_pending_work(self) -> bool:
+        """True while inbound loads or outbound transfers are outstanding."""
+        return self._client.has_active_loads or self._server.has_inflight_transfers
+
     # ------------------------------------------------------------------
     # Connection lifecycle
     # ------------------------------------------------------------------
