@@ -52,6 +52,7 @@ from vllm.entrypoints.serve.utils.server_utils import (
     validation_exception_handler,
 )
 from vllm.exceptions import (
+    GracefulHTTPError,
     VLLMNotFoundError,
     VLLMUnprocessableEntityError,
     VLLMValidationError,
@@ -297,6 +298,7 @@ def build_app(
     app.exception_handler(VLLMValidationError)(exception_handler)
     app.exception_handler(VLLMUnprocessableEntityError)(exception_handler)
     app.exception_handler(VLLMNotFoundError)(exception_handler)
+    app.exception_handler(GracefulHTTPError)(exception_handler)
     app.exception_handler(ValueError)(exception_handler)
     app.exception_handler(TypeError)(exception_handler)
     app.exception_handler(OverflowError)(exception_handler)
