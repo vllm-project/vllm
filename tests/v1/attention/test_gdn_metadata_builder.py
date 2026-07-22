@@ -415,3 +415,18 @@ def test_replayssm_write_pos(case: GDNReplaySSMBuildCase):
     n = len(case.expected_write_pos)
     assert meta.write_pos_d[:n].tolist() == case.expected_write_pos
     assert meta.is_flush_d[:n].tolist() == case.expected_is_flush
+
+
+def test_replayssm_rejects_stochastic_rounding():
+    # The GDN cached kernel has no stochastic rounding; the builder must reject
+    # the combination rather than silently ignore it.
+    builder = _create_replayssm_gdn_builder(16)
+    vllm_config = builder.vllm_config
+    vllm_config.mamba_config.enable_stochastic_rounding = True
+    with pytest.raises(ValueError, match="stochastic rounding"):
+        GDNAttentionMetadataBuilder(
+            kv_cache_spec=builder.kv_cache_spec,
+            layer_names=["layer.0"],
+            vllm_config=vllm_config,
+            device=DEVICE,
+        )
