@@ -103,10 +103,11 @@ class PLessLogitsProcessor(LogitsProcessor):
             return logits
 
         # Calculate threshold logits
-        exps = logits.exp()
-        sum_exps = exps.sum(axis=-1, keepdim=True)
-        sum_squared_exps = exps.square().sum(axis=-1, keepdim=True)
-        threshold_logits = sum_squared_exps.log() - sum_exps.log()
+        max_logits = logits.amax(dim=-1, keepdim=True)
+        exps = (logits - max_logits).exp()
+        sum_exps = exps.sum(dim=-1, keepdim=True)
+        sum_squared_exps = exps.square().sum(dim=-1, keepdim=True)
+        threshold_logits = sum_squared_exps.log() - sum_exps.log() + max_logits
         # Create boolean mask for invalid tokens
         invalid_token_mask = (logits < threshold_logits) & self.p_less
         # Apply mask to convert logits of invalid tokens to negative infinity
