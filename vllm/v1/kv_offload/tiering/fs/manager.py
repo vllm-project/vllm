@@ -18,7 +18,6 @@ File naming:  <base_path>_r<rank>/<hhh>/<hh>_g<group_idx>/<hash_hex>.bin
 import functools
 import json
 import os
-import time
 from collections.abc import Iterable
 from typing import TYPE_CHECKING, ClassVar
 
@@ -44,11 +43,11 @@ from vllm.v1.kv_offload.file_mapper import FileMapper
 from vllm.v1.kv_offload.tiering.async_lookup import AsyncLookupManager
 from vllm.v1.kv_offload.tiering.base import (
     JobId,
-    JobMetadata,
     JobResult,
     RequestOffloadingContext,
     ScheduleEndContext,
     SecondaryTierManager,
+    TransferJob,
 )
 from vllm.v1.kv_offload.tiering.fs.io import (
     batch_load_block,
@@ -202,8 +201,7 @@ class FileSystemTierManager(SecondaryTierManager):
         )
 
         self._lookup_manager = FsAsyncLookupManager(tier=self, tier_type=self.tier_type)
-        self._job_transfer_sizes: dict[int, int] = {}
-        self._job_submitted_at: dict[int, float] = {}
+        self._job_transfer_sizes: dict[JobId, int] = {}
 
     @override
     def on_new_request(self, req_context: ReqContext) -> RequestOffloadingContext:
@@ -217,7 +215,7 @@ class FileSystemTierManager(SecondaryTierManager):
         return LookupResult.HIT if result else LookupResult.MISS
 
     @override
-    def submit_store(self, job_metadata: JobMetadata) -> None:
+    def submit_store(self, job_metadata: TransferJob) -> None:
         keys = list(job_metadata.keys)
         if self.events is not None:
             self._store_job_keys[job_metadata.job_id] = keys
@@ -230,11 +228,10 @@ class FileSystemTierManager(SecondaryTierManager):
             self._use_o_direct,
         )
         self._job_transfer_sizes[job_metadata.job_id] = len(keys) * self._block_size
-        self._job_submitted_at[job_metadata.job_id] = time.monotonic()
         self._pool.enqueue_store(job_metadata.job_id, 1, [task])
 
     @override
-    def submit_load(self, job_metadata: JobMetadata) -> None:
+    def submit_load(self, job_metadata: TransferJob) -> None:
         job_id = job_metadata.job_id
         # Track this load's keys so a failed promotion can mark only its failed
         # keys as a miss (see get_finished_jobs).
@@ -271,7 +268,6 @@ class FileSystemTierManager(SecondaryTierManager):
                 raise
 
         self._job_transfer_sizes[job_id] = len(keys) * self._block_size
-        self._job_submitted_at[job_id] = time.monotonic()
         self._pool.enqueue_load(job_id, 1, [load_task])
 
     @override
@@ -279,8 +275,7 @@ class FileSystemTierManager(SecondaryTierManager):
         """Collect finished jobs; a failed promotion marks only its failed keys
         as a miss here (scheduler thread)."""
         results = []
-        now = time.monotonic()
-        for job_id, success in self._pool.get_finished():
+        for job_id, success, transfer_time in self._pool.get_finished():
             if self.events is not None:
                 keys = self._store_job_keys.pop(job_id, None)
                 if success and keys:
@@ -292,8 +287,6 @@ class FileSystemTierManager(SecondaryTierManager):
                             locality=self.locality,
                         )
                     )
-            submitted_at = self._job_submitted_at.pop(job_id, None)
-            transfer_time = None if submitted_at is None else now - submitted_at
             transfer_size = self._job_transfer_sizes.pop(job_id, None)
             load_keys = self._load_job_keys.pop(job_id, None)
             num_succeeded = self._load_progress.pop(job_id, 0)
@@ -319,15 +312,15 @@ class FileSystemTierManager(SecondaryTierManager):
                         transfer_time=transfer_time,
                     )
                 )
-            else:
-                results.append(
-                    JobResult(
-                        job_id=job_id,
-                        success=success,
-                        transfer_size=transfer_size,
-                        transfer_time=transfer_time,
-                    )
+                continue
+            results.append(
+                JobResult(
+                    job_id=job_id,
+                    success=success,
+                    transfer_size=transfer_size,
+                    transfer_time=transfer_time,
                 )
+            )
         return results
 
     @override
