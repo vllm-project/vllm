@@ -21,7 +21,6 @@
 # limitations under the License.
 """Inference-only OLMo Hybrid model compatible with HuggingFace weights."""
 
-from collections.abc import Iterable
 from functools import partial
 from itertools import islice
 
@@ -67,7 +66,6 @@ from vllm.sequence import IntermediateTensors
 
 from .interfaces import HasInnerState, IsHybrid, SupportsLoRA, SupportsPP
 from .utils import (
-    AutoWeightsLoader,
     WeightsMapper,
     extract_layer_index,
     make_empty_intermediate_tensors_factory,
@@ -372,10 +370,6 @@ class OlmoHybridModel(nn.Module):
         hidden_states = self.norm(hidden_states)
         return hidden_states
 
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
-
 
 class OlmoHybridForCausalLM(
     nn.Module, HasInnerState, SupportsPP, SupportsLoRA, IsHybrid
@@ -473,12 +467,3 @@ class OlmoHybridForCausalLM(
     @classmethod
     def get_mamba_state_copy_func(cls) -> tuple[MambaStateCopyFunc, MambaStateCopyFunc]:
         return MambaStateCopyFuncCalculator.gated_delta_net_state_copy_func()
-
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
-        loader = AutoWeightsLoader(
-            self,
-            skip_prefixes=(
-                ["lm_head.weight"] if self.config.tie_word_embeddings else None
-            ),
-        )
-        return loader.load_weights(weights)

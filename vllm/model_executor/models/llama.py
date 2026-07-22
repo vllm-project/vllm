@@ -24,7 +24,6 @@
 # limitations under the License.
 """Inference-only LLaMA model compatible with HuggingFace weights."""
 
-from collections.abc import Iterable
 from itertools import islice
 
 import torch
@@ -66,7 +65,6 @@ from .interfaces import (
     SupportsQuant,
 )
 from .utils import (
-    AutoWeightsLoader,
     PPMissingLayer,
     WeightsMapper,
     extract_layer_index,
@@ -438,10 +436,6 @@ class LlamaModel(nn.Module, EagleModelMixin):
             return hidden_states, aux_hidden_states
         return hidden_states
 
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
-
 
 class LlamaForCausalLM(
     LocalArgmaxMixin,
@@ -531,13 +525,6 @@ class LlamaForCausalLM(
     ) -> torch.Tensor | None:
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
-
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(
-            self,
-            skip_prefixes=(["lm_head."] if self.config.tie_word_embeddings else None),
-        )
-        return loader.load_weights(weights)
 
 
 class LlamaBidirectionalForSequenceClassification(as_seq_cls_model(LlamaForCausalLM)):

@@ -37,11 +37,10 @@ class CausalMixin(VllmModelForTextGeneration):
             vllm_config=vllm_config, prefix=prefix
         )
 
-        # Tell `Base.load_weights` to skip
-        # `lm_head` if the model has tied word embeddings
+        # Skip loading `lm_head` if the model has tied word embeddings
         tie_word_embeddings = self._get_tie_word_embeddings()
         if tie_word_embeddings:
-            self.skip_prefixes.append("lm_head.")
+            self.hf_to_vllm_mapper.orig_to_new_prefix["lm_head."] = None
 
         if self.pp_group.is_last_rank:
             self.lm_head = ParallelLMHead(

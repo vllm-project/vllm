@@ -24,6 +24,7 @@ from vllm.config.speech_to_text import SpeechToTextParams
 from vllm.inputs import MultiModalDataDict, PromptType, TokensPrompt
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.model_loader.utils import autoload_weights
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models import SupportsPP
 from vllm.model_executor.models.module_mapping import MultiModelKeys
@@ -556,7 +557,7 @@ class VoxtralForConditionalGeneration(
                 else:
                     yield (name, w)
 
-        for name in self.language_model.load_weights(llm_weights_generator()):
+        for name in autoload_weights(self.language_model, llm_weights_generator()):
             loaded_weights.add(f"language_model.{name}")
 
         # potentially manually add position embeddings

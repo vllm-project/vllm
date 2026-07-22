@@ -16,7 +16,7 @@
 # limitations under the License.
 """Inference-only Idefics3 model compatible with HuggingFace weights."""
 
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from typing import Annotated, Literal, TypeAlias
 
 import torch
@@ -62,7 +62,7 @@ from .interfaces import (
     SupportsMultiModal,
 )
 from .llama import LlamaModel
-from .utils import AutoWeightsLoader, maybe_prefix
+from .utils import maybe_prefix
 
 
 class Idefics3ImagePixelInputs(TensorSchema):
@@ -678,10 +678,6 @@ class Idefics3ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsLo
     def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
-
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights)
 
     def get_mm_mapping(self) -> MultiModelKeys:
         """

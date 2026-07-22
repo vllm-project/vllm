@@ -25,7 +25,7 @@
 """Inference-only IBM Granite speech model."""
 
 import math
-from collections.abc import Iterable, Mapping
+from collections.abc import Mapping
 from typing import Annotated
 
 import torch
@@ -70,7 +70,7 @@ from .interfaces import (
     SupportsPP,
     SupportsTranscription,
 )
-from .utils import AutoWeightsLoader, init_vllm_registered_model, maybe_prefix
+from .utils import init_vllm_registered_model, maybe_prefix
 
 # NOTE lang support is based on what is written here:
 # https://huggingface.co/ibm-granite/granite-speech-3.3-2b
@@ -841,13 +841,6 @@ class GraniteSpeechForConditionalGeneration(
         hidden_states: torch.Tensor,
     ) -> torch.Tensor | None:
         return self.language_model.compute_logits(hidden_states)
-
-    def load_weights(
-        self,
-        weights: Iterable[tuple[str, torch.Tensor]],
-    ) -> set[str]:
-        loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights)
 
     def get_mm_mapping(self) -> MultiModelKeys:
         """Get the module prefix in multimodal models."""

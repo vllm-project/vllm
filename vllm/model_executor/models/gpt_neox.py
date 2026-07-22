@@ -19,7 +19,6 @@
 # limitations under the License.
 """Inference-only GPT-NeoX model compatible with HuggingFace weights."""
 
-from collections.abc import Iterable
 from itertools import islice
 
 import torch
@@ -47,7 +46,7 @@ from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsPP
 from .utils import (
-    AutoWeightsLoader,
+    WeightsMapper,
     make_empty_intermediate_tensors_factory,
     make_layers,
     maybe_prefix,
@@ -79,6 +78,7 @@ class GPTNeoXAttention(nn.Module):
             bias=self.bias,
             quant_config=quant_config,
             prefix=f"{prefix}.query_key_value",
+            fused_qkv_interleaved=True,
         )
         self.dense = RowParallelLinear(
             config.hidden_size,
@@ -196,6 +196,10 @@ class GPTNeoXLayer(nn.Module):
 
 @support_torch_compile
 class GPTNeoXModel(nn.Module):
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_substr={"attention.bias": None, "attention.masked_bias": None}
+    )
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
 
@@ -247,26 +251,6 @@ class GPTNeoXModel(nn.Module):
         hidden_states = self.final_layer_norm(hidden_states)
         return hidden_states
 
-    def _repack_qkv(
-        self, weights: Iterable[tuple[str, torch.Tensor]]
-    ) -> Iterable[tuple[str, torch.Tensor]]:
-        # GPT-NeoX's fused QKV is laid out as (num_heads * 3 * head_size) on
-        # its output dim (0), while vLLM expects (3 * num_heads * head_size).
-        num_heads = self.config.num_attention_heads
-        for name, loaded_weight in weights:
-            if "query_key_value" in name:
-                shape = loaded_weight.shape
-                loaded_weight = loaded_weight.view((num_heads, 3, -1) + shape[1:])
-                loaded_weight = loaded_weight.transpose(0, 1)
-                loaded_weight = loaded_weight.reshape(shape)
-            yield name, loaded_weight
-
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(
-            self, skip_substrs=["attention.bias", "attention.masked_bias"]
-        )
-        return loader.load_weights(self._repack_qkv(weights))
-
 
 class GPTNeoXForCausalLM(nn.Module, SupportsPP):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -312,7 +296,3 @@ class GPTNeoXForCausalLM(nn.Module, SupportsPP):
     ) -> torch.Tensor | None:
         logits = self.logits_processor(self.embed_out, hidden_states)
         return logits
-
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights)

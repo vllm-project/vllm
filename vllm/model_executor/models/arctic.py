@@ -44,7 +44,6 @@ from vllm.transformers_utils.configs.arctic import ArcticConfig
 
 from .interfaces import SupportsPP, SupportsQuant
 from .utils import (
-    AutoWeightsLoader,
     extract_layer_index,
     is_pp_missing_parameter,
     make_empty_intermediate_tensors_factory,
@@ -587,10 +586,3 @@ class ArcticForCausalLM(nn.Module, SupportsPP, SupportsQuant):
     ) -> torch.Tensor | None:
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
-
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(
-            self,
-            skip_prefixes=(["lm_head."] if self.config.tie_word_embeddings else None),
-        )
-        return loader.load_weights(weights)

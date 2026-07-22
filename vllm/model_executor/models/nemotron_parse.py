@@ -33,6 +33,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
+from vllm.model_executor.model_loader.utils import autoload_weights
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.interfaces import (
     MultiModalEmbeddings,
@@ -570,7 +571,7 @@ class RadioWithNeck(nn.Module):
                 with torch.no_grad():
                     default_weight_loader(param, w)
 
-        self.model_encoder.load_weights(model_encoder_weights)
+        autoload_weights(self.model_encoder, model_encoder_weights)
 
 
 @MULTIMODAL_REGISTRY.register_processor(
@@ -720,6 +721,6 @@ class NemotronParseForConditionalGeneration(nn.Module, SupportsMultiModal):
                 logger.info("Found unexpected weight: %s", name)
 
         # Load encoder weights
-        self.encoder.load_weights(encoder_weights)
+        autoload_weights(self.encoder, encoder_weights)
         # Load decoder weights
-        self.decoder.load_weights(decoder_weights)
+        autoload_weights(self.decoder, decoder_weights)

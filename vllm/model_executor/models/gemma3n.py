@@ -15,7 +15,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from collections.abc import Iterable
 
 import torch
 from torch import nn
@@ -49,7 +48,6 @@ from vllm.v1.attention.backends.utils import KVSharingFastPrefillMetadata
 
 from .interfaces import SupportsQuant
 from .utils import (
-    AutoWeightsLoader,
     WeightsMapper,
     extract_layer_index,
     make_layers,
@@ -1050,12 +1048,13 @@ class Gemma3nTextModel(nn.Module, SupportsQuant):
         hidden_states = self.altup_unembed(hidden_states)
         return self.norm(hidden_states)
 
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
-
 
 class Gemma3nForCausalLM(nn.Module):
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_substr=dict.fromkeys(
+            ["embed_audio.", "embed_vision.", "audio_tower.", "vision_tower."], None
+        )
+    )
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -1110,12 +1109,3 @@ class Gemma3nForCausalLM(nn.Module):
     ) -> torch.Tensor | None:
         logits = self.logits_processor(self.model.embed_tokens, hidden_states)
         return logits
-
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(
-            self,
-            skip_substrs=(
-                ["embed_audio.", "embed_vision.", "audio_tower.", "vision_tower."]
-            ),
-        )
-        return loader.load_weights(weights)

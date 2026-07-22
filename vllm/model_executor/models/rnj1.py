@@ -4,7 +4,6 @@
 # RNJ-1 model: Gemma3-based architecture with chunked (block-local) attention.
 # Chunked attention restricts local layers to attend within aligned blocks,
 # with lookback to one previous block.
-from collections.abc import Iterable
 from itertools import islice
 
 import torch
@@ -35,7 +34,6 @@ from vllm.v1.attention.backend import AttentionType
 
 from .interfaces import SupportsLoRA, SupportsPP
 from .utils import (
-    AutoWeightsLoader,
     WeightsMapper,
     extract_layer_index,
     make_empty_intermediate_tensors_factory,
@@ -393,10 +391,3 @@ class Rnj1ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
     ) -> torch.Tensor | None:
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
-
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(
-            self,
-            skip_prefixes=(["lm_head."] if self.config.tie_word_embeddings else None),
-        )
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)

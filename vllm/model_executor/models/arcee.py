@@ -8,7 +8,6 @@
 # Inference-only Arcee (AFM) model – adds support for ReLU^2 feed-forward
 # activation.
 
-from collections.abc import Iterable
 from itertools import islice
 from typing import Any
 
@@ -36,7 +35,6 @@ from .interfaces import (
     SupportsPP,
 )
 from .utils import (
-    AutoWeightsLoader,
     PPMissingLayer,
     WeightsMapper,
     make_empty_intermediate_tensors_factory,
@@ -280,12 +278,13 @@ class ArceeForCausalLM(
     runtime."""
 
     hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_substr={"gate_proj": None},
         orig_to_new_stacked={
             # weight_name: (param_name, shard_id)
             ".q_proj": (".qkv_proj", "q"),
             ".k_proj": (".qkv_proj", "k"),
             ".v_proj": (".qkv_proj", "v"),
-        }
+        },
     )
     # Map fused module names to their submodule components
     # (for quantization and LoRA)
@@ -352,15 +351,3 @@ class ArceeForCausalLM(
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)
-
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        """Load weights into the model (delegates to inner model and handles
-        tied embeddings)."""
-        loader = AutoWeightsLoader(
-            self,
-            skip_prefixes=(["lm_head."] if self.config.tie_word_embeddings else None),
-            skip_substrs=["gate_proj"],
-        )
-        # AutoWeightLoader handles weight name remapping, including fusing
-        # separate q_proj, k_proj, v_proj into qkv_proj
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)

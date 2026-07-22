@@ -32,7 +32,7 @@ from vllm.sequence import IntermediateTensors
 
 from .granitemoe import GraniteMoeAttention, GraniteMoeModel, GraniteMoeMoE
 from .interfaces import SupportsLoRA, SupportsPP
-from .utils import AutoWeightsLoader, make_layers, maybe_prefix
+from .utils import make_layers, maybe_prefix
 
 
 class GraniteMoeSharedMLP(nn.Module):
@@ -318,10 +318,3 @@ class GraniteMoeSharedForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                 ),
             }
         )
-
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(
-            self,
-            skip_prefixes=(["lm_head."] if self.config.tie_word_embeddings else None),
-        )
-        return loader.load_weights(weights)

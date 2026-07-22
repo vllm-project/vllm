@@ -31,7 +31,7 @@ from vllm.model_executor.layers.linear import (
     RowParallelLinear,
 )
 from vllm.model_executor.model_loader.base_loader import BaseModelLoader
-from vllm.model_executor.model_loader.utils import ParamMapping
+from vllm.model_executor.model_loader.utils import ParamMapping, autoload_weights
 from vllm.model_executor.model_loader.weight_utils import (
     download_safetensors_index_file_from_hf,
     download_weights_from_hf,
@@ -336,9 +336,8 @@ class BitsAndBytesModelLoader(BaseModelLoader):
 
         global_tp_size = get_tensor_model_parallel_world_size()
         global_tp_rank = get_tensor_model_parallel_rank()
-        check_match = (
-            lambda weight_name, module_name: weight_name.removesuffix(".weight")
-            == module_name
+        check_match = lambda weight_name, module_name: (
+            weight_name.removesuffix(".weight") == module_name
         )
         for (
             org_weight_name,
@@ -524,12 +523,6 @@ class BitsAndBytesModelLoader(BaseModelLoader):
         """
         Verify that the model is compatible with BitsAndBytes quantization.
         """
-        if not hasattr(model, "load_weights"):
-            raise AttributeError(
-                "The required method 'load_weights' is not defined in class"
-                f" {type(model).__name__}."
-            )
-
         if not hasattr(model, "packed_modules_mapping"):
             raise AttributeError(
                 f"Model {type(model).__name__} does not support BitsAndBytes "
@@ -808,7 +801,7 @@ class BitsAndBytesModelLoader(BaseModelLoader):
             model_config.revision,
         )
         weights_to_load = {name for name, _ in model.named_parameters()}
-        loaded_weights = model.load_weights(qweight_iterator)
+        loaded_weights = autoload_weights(model, qweight_iterator)
         # Some models may have weights loading tracker unimplemented.
         if loaded_weights is not None:
             weights_not_loaded = weights_to_load - loaded_weights

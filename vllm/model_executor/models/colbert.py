@@ -25,7 +25,11 @@ from torch import nn
 from vllm.config import PoolerConfig, VllmConfig
 from vllm.model_executor.layers.pooler import Pooler
 from vllm.model_executor.layers.pooler.tokwise import pooler_for_token_embed
-from vllm.model_executor.models.utils import AutoWeightsLoader, WeightsMapper
+from vllm.model_executor.model_loader.utils import autoload_weights
+from vllm.model_executor.models.utils import (
+    AutoWeightsLoader,
+    WeightsMapper,
+)
 
 from .bert import BertEmbeddingModel, BertModel
 from .interfaces import HasInnerState, IsHybrid, SupportsLateInteraction
@@ -284,7 +288,7 @@ class ColBERTModernBertModel(ColBERTMixin, nn.Module):
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         other_weights, colbert_loaded = self._load_colbert_weights(weights)
 
-        loaded_model = self.model.load_weights(other_weights)
+        loaded_model = autoload_weights(self.model, other_weights)
         loaded = {f"model.{name}" for name in loaded_model} | colbert_loaded
 
         # When the ST projector is loaded via `_build_colbert_pooler`, the weights
@@ -358,10 +362,10 @@ class ColBERTJinaRobertaModel(ColBERTMixin, nn.Module):
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         other_weights, colbert_loaded = self._load_colbert_weights(weights)
 
-        mapper = WeightsMapper(orig_to_new_prefix={"roberta.": "model."})
-
-        # Skip HF pooler weights (model.pooler.*) as they not used in ColBERT
-        loader = AutoWeightsLoader(self, skip_prefixes=["model.pooler."])
+        mapper = WeightsMapper(
+            orig_to_new_prefix={"roberta.": "model.", "model.pooler.": None}
+        )
+        loader = AutoWeightsLoader(self)
 
         loaded = loader.load_weights(other_weights, mapper=mapper)
         return loaded | colbert_loaded
@@ -441,7 +445,7 @@ class ColBERTLfm2Model(ColBERTMixin, nn.Module, HasInnerState, IsHybrid):
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         other_weights, colbert_loaded = self._load_colbert_weights(weights)
 
-        loaded_model = self.model.load_weights(other_weights)
+        loaded_model = autoload_weights(self.model, other_weights)
 
         loaded = {f"model.{name}" for name in loaded_model} | colbert_loaded
 

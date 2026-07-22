@@ -117,10 +117,6 @@ class Base(
         self.tp_group = get_tp_group()
 
         # Attrs for weight loading (see self.load_weights)
-        self.skip_prefixes: list[str] = []
-        """Skip loading weights whose qualname starts with these prefixes."""
-        self.skip_substrs: list[str] = []
-        """Skip loading weights whose qualname contains these substrings."""
         self.ignore_unexpected_prefixes: list[str] = []
         """Ignore unexpected weights whose qualname starts with these prefixes."""
         self.ignore_unexpected_suffixes: list[str] = []
@@ -662,8 +658,6 @@ class Base(
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(
             self,
-            skip_prefixes=self.skip_prefixes,
-            skip_substrs=self.skip_substrs,
             ignore_unexpected_prefixes=self.ignore_unexpected_prefixes,
             ignore_unexpected_suffixes=self.ignore_unexpected_suffixes,
         )

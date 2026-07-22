@@ -15,7 +15,7 @@
 # limitations under the License.
 
 import math
-from collections.abc import Iterable, Iterator, Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from functools import partial
 from typing import Annotated, Literal
 
@@ -73,12 +73,7 @@ from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from .ernie45 import Ernie4_5ForCausalLM
 from .interfaces import MultiModalEmbeddings, SupportsMRoPE, SupportsMultiModal
 from .siglip import SiglipMLP
-from .utils import (
-    AutoWeightsLoader,
-    PPMissingLayer,
-    WeightsMapper,
-    maybe_prefix,
-)
+from .utils import PPMissingLayer, WeightsMapper, maybe_prefix
 from .vision import get_vit_attn_backend
 
 
@@ -880,11 +875,20 @@ class SiglipVisionTransformer(nn.Module):
 
 class SiglipVisionModel(nn.Module):
     hf_to_vllm_mapper = WeightsMapper(
+        # Skip the SigLIP attention pooling head and packing pos embedding
+        # present in the checkpoint but absent from this vision tower.
+        orig_to_new_substr={
+            "head.attention": None,
+            "head.layernorm": None,
+            "head.mlp": None,
+            "head.probe": None,
+            "packing_position_embedding": None,
+        },
         orig_to_new_stacked={
             ".q_proj": (".qkv_proj", "q"),
             ".k_proj": (".qkv_proj", "k"),
             ".v_proj": (".qkv_proj", "v"),
-        }
+        },
     )
 
     def __init__(
@@ -929,21 +933,6 @@ class SiglipVisionModel(nn.Module):
             image_grid_thw=image_grid_thw,
             cu_seqlens=cu_seqlens,
         )
-
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        # Skip the SigLIP attention pooling head and packing pos embedding
-        # present in the checkpoint but absent from this vision tower.
-        loader = AutoWeightsLoader(
-            self,
-            skip_substrs=[
-                "head.attention",
-                "head.layernorm",
-                "head.mlp",
-                "head.probe",
-                "packing_position_embedding",
-            ],
-        )
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
 @MULTIMODAL_REGISTRY.register_processor(
@@ -1167,8 +1156,3 @@ class PaddleOCRVLForConditionalGeneration(nn.Module, SupportsMultiModal, Support
         multimodal_embeddings += tuple(image_embeds)
 
         return multimodal_embeddings
-
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self)
-        autoloaded_weights = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
-        return autoloaded_weights

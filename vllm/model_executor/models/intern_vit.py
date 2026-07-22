@@ -7,7 +7,6 @@
 # Copyright (c) 2023 OpenGVLab
 # Licensed under The MIT License [see LICENSE for details]
 # --------------------------------------------------------
-from collections.abc import Iterable
 from functools import partial
 
 import torch
@@ -37,7 +36,6 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
 
-from .utils import AutoWeightsLoader
 from .vision import is_vit_use_data_parallel, run_dp_sharded_vision_model
 
 NORM2FN = {
@@ -443,7 +441,3 @@ class InternVisionModel(nn.Module):
             encoder_outputs = self.encoder(inputs_embeds=hidden_states)
 
         return encoder_outputs
-
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights)

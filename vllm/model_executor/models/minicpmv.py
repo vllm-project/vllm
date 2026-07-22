@@ -93,7 +93,7 @@ from .interfaces import (
     SupportsMultiModal,
     SupportsPP,
 )
-from .utils import AutoWeightsLoader, flatten_bn, maybe_prefix
+from .utils import AutoWeightsLoader, WeightsMapper, flatten_bn, maybe_prefix
 
 # For profile run
 _MAX_FRAMES_PER_VIDEO = 16
@@ -1513,8 +1513,11 @@ class MiniCPMV2_6(MiniCPMVBaseModel, SupportsLoRA):
         return self.resampler(vision_embedding, tgt_sizes)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self, skip_prefixes=["apm.", "audio", "tts"])
-        loaded = loader.load_weights(weights)
+        loader = AutoWeightsLoader(self)
+        drop = WeightsMapper(
+            orig_to_new_prefix={"apm.": None, "audio": None, "tts": None}
+        )
+        loaded = loader.load_weights(weights, mapper=drop)
         self._ensure_resampler_device()
         return loaded
 
@@ -1610,8 +1613,11 @@ class MiniCPMV4_0(MiniCPMVBaseModel, SupportsLoRA):
         return self.resampler(vision_embedding, tgt_sizes)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self, skip_prefixes=["apm.", "audio", "tts"])
-        loaded = loader.load_weights(weights)
+        loader = AutoWeightsLoader(self)
+        drop = WeightsMapper(
+            orig_to_new_prefix={"apm.": None, "audio": None, "tts": None}
+        )
+        loaded = loader.load_weights(weights, mapper=drop)
         self._ensure_resampler_device()
         return loaded
 
@@ -1712,8 +1718,11 @@ class MiniCPMV4_5(MiniCPMVBaseModel, SupportsLoRA):
         return self.resampler(vision_embedding, tgt_sizes, all_temporal_ids)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self, skip_prefixes=["apm.", "audio", "tts"])
-        loaded = loader.load_weights(weights)
+        loader = AutoWeightsLoader(self)
+        drop = WeightsMapper(
+            orig_to_new_prefix={"apm.": None, "audio": None, "tts": None}
+        )
+        loaded = loader.load_weights(weights, mapper=drop)
         self._ensure_resampler_device()
         return loaded
 

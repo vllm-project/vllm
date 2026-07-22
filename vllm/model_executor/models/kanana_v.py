@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from functools import partial
 from typing import Annotated, Literal, TypeAlias
 
@@ -40,7 +40,7 @@ from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
 from .qwen2_vl import Qwen2VisionTransformer
-from .utils import AutoWeightsLoader, init_vllm_registered_model, maybe_prefix
+from .utils import init_vllm_registered_model, maybe_prefix
 
 logger = init_logger(__name__)
 
@@ -752,7 +752,3 @@ class KananaVForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP)
 
     def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
         return self.language_model.compute_logits(hidden_states)
-
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights)

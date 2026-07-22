@@ -296,6 +296,7 @@ class Qwen3_5ForCausalLMBase(
         "in_proj_qkvz": ["in_proj_qkv", "in_proj_z"],
         "in_proj_ba": ["in_proj_b", "in_proj_a"],
     }
+    hf_to_vllm_mapper = WeightsMapper(orig_to_new_prefix={"mtp.": None})
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         config = vllm_config.model_config.hf_text_config
@@ -366,13 +367,6 @@ class Qwen3_5ForCausalLMBase(
     ) -> torch.Tensor | None:
         return self.logits_processor(self.lm_head, hidden_states)
 
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(
-            self,
-            skip_prefixes=["mtp."],
-        )
-        return loader.load_weights(weights)
-
 
 class Qwen3_5ForCausalLM(Qwen3_5ForCausalLMBase):
     pass
@@ -404,6 +398,10 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid)
         "in_proj_qkvz": ["in_proj_qkv", "in_proj_z"],
         "in_proj_ba": ["in_proj_b", "in_proj_a"],
     }
+    hf_to_vllm_mapper = (
+        Qwen3VLForConditionalGeneration.hf_to_vllm_mapper
+        | WeightsMapper(orig_to_new_prefix={"mtp.": None})
+    )
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "model"):
         # protocols have not __init__ method, so we need to use nn.Module.__init__
@@ -511,13 +509,6 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid)
         )
 
         return hidden_states
-
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(
-            self,
-            skip_prefixes=["mtp."],
-        )
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     @classmethod
     def get_mamba_state_dtype_from_config(

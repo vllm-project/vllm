@@ -1,12 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Iterable
 
 import regex
-import torch
 
 from vllm.model_executor.models.deepseek_v2 import DeepseekV3ForCausalLM
-from vllm.model_executor.models.utils import AutoWeightsLoader, WeightsMapper
+from vllm.model_executor.models.utils import WeightsMapper
 
 
 class MistralLarge3ForCausalLM(DeepseekV3ForCausalLM):
@@ -82,11 +80,3 @@ class MistralLarge3ForCausalLM(DeepseekV3ForCausalLM):
             ".qscale_weight": ".weight_scale",
         },
     )
-
-    # Bypass super().load_weights() and construct AutoWeightsLoader(self)
-    # directly (same pattern as Qwen2ForCausalLM). Any logic in the parent
-    # class's load_weights is a thin wrapper around AutoWeightsLoader, and
-    # we must apply hf_to_vllm_mapper before the loader walks the tree.
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)

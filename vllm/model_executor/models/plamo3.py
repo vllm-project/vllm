@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Inference-only PLaMo3 model."""
 
-from collections.abc import Iterable
 from itertools import islice
 from typing import TYPE_CHECKING, Any
 
@@ -37,7 +36,6 @@ from vllm.model_executor.model_loader.weight_utils import (
 )
 from vllm.model_executor.models.interfaces import SupportsLoRA, SupportsPP
 from vllm.model_executor.models.utils import (
-    AutoWeightsLoader,
     extract_layer_index,
     make_empty_intermediate_tensors_factory,
     make_layers,
@@ -428,10 +426,3 @@ class Plamo3ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
     ) -> torch.Tensor | None:
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
-
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
-        loader = AutoWeightsLoader(
-            self,
-            skip_prefixes=(["lm_head."] if self.config.tie_word_embeddings else None),
-        )
-        return loader.load_weights(weights)

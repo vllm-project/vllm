@@ -264,10 +264,6 @@ class LlamaModel(nn.Module):
         },
     )
 
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
-
 
 class Eagle3LlamaForCausalLM(LlamaForCausalLM):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -415,18 +411,15 @@ class Eagle3LlamaForCausalLM(LlamaForCausalLM):
                 "Please provide mask_hidden in the weights."
             )
 
-        skip_substrs = ["mask_hidden"]
+        orig_to_new_substr = {"mask_hidden": None}
         if not includes_draft_id_mapping:
-            skip_substrs.append("draft_id_to_target_id")
+            orig_to_new_substr["draft_id_to_target_id"] = None
         if not includes_embed_tokens:
-            skip_substrs.append("embed_tokens")
+            orig_to_new_substr["embed_tokens"] = None
         if not self.model.use_aux_hidden_state:
-            skip_substrs.append("fc.")
+            orig_to_new_substr["fc."] = None
         if not self.model.norm_before_fc:
-            skip_substrs.append("input_norm.")
-        loader = AutoWeightsLoader(
-            self,
-            skip_prefixes=None,
-            skip_substrs=skip_substrs,
-        )
-        loader.load_weights(model_weights.items())
+            orig_to_new_substr["input_norm."] = None
+        drop = WeightsMapper(orig_to_new_substr=orig_to_new_substr)
+        loader = AutoWeightsLoader(self)
+        loader.load_weights(model_weights.items(), mapper=drop)

@@ -17,7 +17,6 @@
 # limitations under the License.
 """Inference-only Gemma model compatible with HuggingFace weights."""
 
-from collections.abc import Iterable
 from functools import cache
 from itertools import islice
 from typing import Any
@@ -46,7 +45,6 @@ from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsLoRA, SupportsPP, SupportsQuant
 from .utils import (
-    AutoWeightsLoader,
     WeightsMapper,
     make_empty_intermediate_tensors_factory,
     make_layers,
@@ -379,10 +377,3 @@ class GemmaForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsQuant):
     ) -> torch.Tensor | None:
         logits = self.logits_processor(self.model.embed_tokens, hidden_states)
         return logits
-
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(
-            self,
-            skip_prefixes=(["lm_head."] if self.config.tie_word_embeddings else None),
-        )
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)

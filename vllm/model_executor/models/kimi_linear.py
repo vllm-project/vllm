@@ -50,7 +50,6 @@ from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
 
 from .interfaces import HasInnerState, IsHybrid, MixtureOfExperts, SupportsPP
 from .utils import (
-    AutoWeightsLoader,
     PPMissingLayer,
     get_spec_layer_idx_from_weight_name,
     is_pp_missing_parameter,
@@ -637,10 +636,3 @@ class KimiLinearForCausalLM(
         hidden_states: torch.Tensor,
     ) -> torch.Tensor | None:
         return self.logits_processor(self.lm_head, hidden_states)
-
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(
-            self,
-            skip_prefixes=(["lm_head."] if self.config.tie_word_embeddings else None),
-        )
-        return loader.load_weights(weights)

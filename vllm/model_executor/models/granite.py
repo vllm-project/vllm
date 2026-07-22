@@ -24,7 +24,6 @@
 # limitations under the License.
 """Inference-only IBM Granite model compatible with HuggingFace weights."""
 
-from collections.abc import Iterable
 from itertools import islice
 
 import torch
@@ -53,7 +52,6 @@ from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsLoRA, SupportsPP, SupportsQuant
 from .utils import (
-    AutoWeightsLoader,
     PPMissingLayer,
     WeightsMapper,
     make_layers,
@@ -328,10 +326,6 @@ class GraniteModel(nn.Module):
         hidden_states = self.norm(hidden_states)
         return hidden_states
 
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
-
 
 class GraniteForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsQuant):
     hf_to_vllm_mapper = GraniteModel.hf_to_vllm_mapper
@@ -406,15 +400,3 @@ class GraniteForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsQuant):
                 ),
             }
         )
-
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        # With tie_word_embeddings, we can skip lm_head.weight
-        # The weight might appear unnecessarily in the files if the model is
-        # processed with quantization, LoRA, fine-tuning, etc.
-        skip_prefixes = ["lm_head."] if self.config.tie_word_embeddings else None
-
-        loader = AutoWeightsLoader(
-            self,
-            skip_prefixes=skip_prefixes,
-        )
-        return loader.load_weights(weights)

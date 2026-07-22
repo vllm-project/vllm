@@ -49,7 +49,6 @@ from vllm.v1.attention.backend import AttentionType
 
 from .interfaces import MixtureOfExperts, SupportsPP
 from .utils import (
-    AutoWeightsLoader,
     PPMissingLayer,
     WeightsMapper,
     extract_layer_index,
@@ -975,7 +974,3 @@ class Step3p5ForCausalLM(nn.Module, SupportsPP, MixtureOfExperts):
             layer.n_physical_experts = num_physical_experts
             layer.n_redundant_experts = self.num_redundant_experts
             layer.experts.update_expert_map()
-
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)

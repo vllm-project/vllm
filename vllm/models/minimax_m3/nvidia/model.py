@@ -60,7 +60,6 @@ from vllm.model_executor.models.interfaces import (
     SupportsPP,
 )
 from vllm.model_executor.models.utils import (
-    AutoWeightsLoader,
     PPMissingLayer,
     WeightsMapper,
     init_vllm_registered_model,
@@ -1039,10 +1038,6 @@ class MiniMaxM3SparseForCausalLM(nn.Module, SupportsPP, SupportsEagle3):
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         return self.model.get_expert_mapping()
 
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights)
-
 
 @MULTIMODAL_REGISTRY.register_processor(
     MiniMaxM3VLMultiModalProcessor,
@@ -1251,7 +1246,3 @@ class MiniMaxM3SparseForConditionalGeneration(
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         return self.language_model.get_expert_mapping()
-
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)

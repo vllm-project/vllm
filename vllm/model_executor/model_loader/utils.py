@@ -4,6 +4,7 @@
 
 import inspect
 import warnings
+from collections.abc import Iterable
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any
@@ -310,3 +311,23 @@ def configure_quant_config(
             quant_config.apply_vllm_mapper(hf_to_vllm_mapper.get_unstacked_mapper())
         if packed_mapping is not None:
             quant_config.packed_modules_mapping = packed_mapping
+
+
+def autoload_weights(
+    model: nn.Module, weights: Iterable[tuple[str, torch.Tensor]]
+) -> set[str]:
+    """Load `weights` into `model` via its `load_weights`, or AutoWeightsLoader.
+
+    Models whose loading is fully handled by `AutoWeightsLoader` (mapper as a
+    class attribute, tied lm_head auto-skipped) need not define a trivial
+    `load_weights`. This is the single entry point every caller should use so
+    such models load correctly whether or not the method exists.
+    """
+    # Imported lazily to avoid a circular import: `AutoWeightsLoader` lives in
+    # `models.utils`, which imports from `model_loader`.
+    from vllm.model_executor.models.utils import AutoWeightsLoader
+
+    model_load_weights = getattr(model, "load_weights", None)
+    if callable(model_load_weights):
+        return model_load_weights(weights)
+    return AutoWeightsLoader(model).load_weights(weights)

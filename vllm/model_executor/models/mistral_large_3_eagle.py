@@ -23,7 +23,12 @@ from vllm.model_executor.models.deepseek_v2 import (
 from vllm.model_executor.models.mistral_large_3 import MistralLarge3ForCausalLM
 
 from .interfaces import SupportsMultiModal
-from .utils import WeightsMapper, make_empty_intermediate_tensors_factory, maybe_prefix
+from .utils import (
+    AutoWeightsLoader,
+    WeightsMapper,
+    make_empty_intermediate_tensors_factory,
+    maybe_prefix,
+)
 
 logger = init_logger(__name__)
 
@@ -149,7 +154,9 @@ class EagleMistralLarge3ForCausalLM(MistralLarge3ForCausalLM):
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         # Pretend we've loaded the embedding and lm_head weights
         # (later copied from target model)
-        return super().load_weights(weights) | {
+        loader = AutoWeightsLoader(self)
+        loaded = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+        return loaded | {
             "model.embed_tokens.weight",
             "lm_head.weight",
         }

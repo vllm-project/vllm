@@ -250,8 +250,5 @@ class EagleDeepseekV3ForCausalLM(DeepseekV3ForCausalLM):
             process_eagle_weight(self, name)
             return name, loaded_weight
 
-        loader = AutoWeightsLoader(
-            self,
-            skip_prefixes=None,
-        )
+        loader = AutoWeightsLoader(self)
         loader.load_weights(map(transform, weights))

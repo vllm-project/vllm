@@ -805,10 +805,6 @@ class MolmoVisionBackbone(nn.Module, SupportsQuant):
         # image_features: (batch_size, num_image, num_patch, d_model)
         return image_features
 
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
-
 
 @support_torch_compile
 class MolmoModel(nn.Module, SupportsQuant):
@@ -884,9 +880,6 @@ class MolmoModel(nn.Module, SupportsQuant):
         else:
             hidden_states = self.norm(hidden_states)
         return hidden_states
-
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        return AutoWeightsLoader(self).load_weights(weights)
 
 
 def _lowest_multiple(x: int, k: int) -> int:

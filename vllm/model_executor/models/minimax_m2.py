@@ -417,16 +417,14 @@ class MiniMaxM2Model(nn.Module, EagleModelMixin):
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         # Skip spec-decode (MTP) layers; they are appended after the main
         # decoder layers and have no destination in the main model.
-        skip_prefixes = None
+        orig_to_new_prefix = {}
         num_mtp = getattr(self.config, "num_mtp_modules", 0)
         if num_mtp:
             base = self.config.num_hidden_layers
-            skip_prefixes = [f"layers.{base + i}." for i in range(num_mtp)]
-        loader = AutoWeightsLoader(
-            self,
-            skip_prefixes=skip_prefixes,
-        )
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+            orig_to_new_prefix = {f"layers.{base + i}.": None for i in range(num_mtp)}
+        drop = WeightsMapper(orig_to_new_prefix=orig_to_new_prefix)
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper | drop)
 
 
 class MiniMaxM2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsEagle3):
@@ -486,7 +484,3 @@ class MiniMaxM2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsEagle3):
     ) -> torch.Tensor | None:
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
-
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights)

@@ -188,31 +188,33 @@ class AutoWeightsLoader:
 
     # Models trained using early version ColossalAI or quantized by
     # GPTQModel may include these tensors in checkpoint. Skip them.
-    ROTARY_EMBEDS_UNUSED_WEIGHTS = [
-        "rotary_pos_emb.inv_freq",
-        "rotary_emb.inv_freq",
-        "rotary_emb.cos_cached",
-        "rotary_emb.sin_cached",
-    ]
+    REMOVE_UNUSED_ROTARY_EMBEDS_MAPPER = WeightsMapper(
+        orig_to_new_substr={
+            "rotary_pos_emb.inv_freq": None,
+            "rotary_emb.inv_freq": None,
+            "rotary_emb.cos_cached": None,
+            "rotary_emb.sin_cached": None,
+        }
+    )
+    REMOVE_TIED_LM_HEAD_MAPPER = WeightsMapper(orig_to_new_prefix={"lm_head.": None})
 
     def __init__(
         self,
         module: nn.Module,
         *,
-        skip_prefixes: list[str] | None = None,
-        skip_substrs: list[str] | None = None,
         ignore_unexpected_prefixes: list[str] | None = None,
         ignore_unexpected_suffixes: list[str] | None = None,
     ) -> None:
         super().__init__()
 
         self.module = module
-        self.skip_prefixes = skip_prefixes or []
-        self.skip_substrs = skip_substrs or []
         self.ignore_unexpected_prefixes = ignore_unexpected_prefixes or []
         self.ignore_unexpected_suffixes = ignore_unexpected_suffixes or []
-        # update default skip_substrs
-        self.skip_substrs += self.ROTARY_EMBEDS_UNUSED_WEIGHTS
+        # If the module has a `mtp_start_layer_idx` attribute,
+        # it is an MTP head and should only load spec layers.
+        self.loads_spec_layers_only = any(
+            hasattr(m, "mtp_start_layer_idx") for m in module.modules()
+        )
 
     def _groupby_prefix(
         self,
@@ -242,11 +244,6 @@ class AutoWeightsLoader:
 
         return ".".join((prefix, rest))
 
-    def _can_skip(self, qualname: str) -> bool:
-        return any(qualname.startswith(p) for p in self.skip_prefixes) or any(
-            substr in qualname for substr in self.skip_substrs
-        )
-
     def _can_ignore_unexpected(self, qualname: str) -> bool:
         iup = (qualname.startswith(p) for p in self.ignore_unexpected_prefixes)
         ius = (qualname.endswith(s) for s in self.ignore_unexpected_suffixes)
@@ -260,11 +257,6 @@ class AutoWeightsLoader:
     ) -> Iterable[str]:
         for weight_name, weight_data in weights:
             weight_qualname = self._get_qualname(base_prefix, weight_name)
-
-            if self._can_skip(weight_qualname):
-                logger.debug("Skipping weight %s", weight_qualname)
-
-                continue
 
             if weight_name != "":
                 if self._can_ignore_unexpected(weight_qualname):
@@ -339,6 +331,12 @@ class AutoWeightsLoader:
                         loaded_params,
                     )
 
+        # If the module has a `hf_to_vllm_mapper` attribute, apply it to the weights.
+        if not callable(getattr(module, "load_weights", None)):
+            module_mapper = getattr(module, "hf_to_vllm_mapper", None)
+            if module_mapper is not None:
+                weights = module_mapper.apply(weights)
+
         child_modules = dict(module.named_children())
         child_params = dict(module.named_parameters(recurse=False))
 
@@ -350,37 +348,36 @@ class AutoWeightsLoader:
             prefix = self._get_qualname(base_prefix, child_prefix)
 
             if child_prefix in child_modules:
-                if self._can_skip(prefix + "."):
-                    logger.debug("Skipping module %s", prefix)
-
-                    continue
-
                 yield from self._load_module(
                     prefix, child_modules[child_prefix], child_weights
                 )
             elif child_prefix in child_params:
-                if self._can_skip(prefix):
-                    logger.debug("Skipping param %s", prefix)
-
-                    continue
-
                 yield from self._load_param(
                     prefix, child_params[child_prefix], child_weights
                 )
             else:
-                can_skip_module = self._can_skip(prefix + ".")
-                can_skip_param = self._can_skip(prefix)
-                if can_skip_module or can_skip_param:
-                    logger.debug("Skipping missing %s", prefix)
-
-                    continue
-
                 can_ignore_module = self._can_ignore_unexpected(prefix + ".")
                 can_ignore_param = self._can_ignore_unexpected(prefix)
                 if can_ignore_module or can_ignore_param:
                     logger.debug("Ignoring missing %s", prefix)
 
                     continue
+
+                # Skip spec layers on base models and skip base layers on spec models.
+                config = getattr(self.module, "config", None)
+                if config is not None:
+                    is_spec_layer = (
+                        get_spec_layer_idx_from_weight_name(config, prefix + ".")
+                        is not None
+                    )
+                    if is_spec_layer != self.loads_spec_layers_only:
+                        logger.debug(
+                            "Skipping %s model layer %s",
+                            "base" if self.loads_spec_layers_only else "speculative",
+                            prefix,
+                        )
+
+                        continue
 
                 named_parameters = module.named_parameters(recurse=True)
                 desc_param_keys = {
@@ -404,22 +401,25 @@ class AutoWeightsLoader:
         # Ignore unexpected biases (typically from GPTQ models)
         self.ignore_unexpected_suffixes.append(".bias")
 
+        # Ensure we have a mapper
+        mapper = mapper or WeightsMapper()
         # Many models store quant_config in the base model instead of the causal model.
         # We look at the causal model's direct children for this reason.
         modules = (self.module, *self.module.children())
         iterator = (m.quant_config for m in modules if hasattr(m, "quant_config"))
         if quant_config := next(iterator, None):
             # Get mappings and ignore prefixes for KV cache quantization scales
-            mapper = mapper or WeightsMapper()
             mapper |= quant_config.get_cache_scale_mapper()
             ignore_unexpected_suffixes = quant_config._ignore_unexpected_suffixes
             self.ignore_unexpected_suffixes.extend(ignore_unexpected_suffixes)
-        if mapper is not None:
-            weights = mapper.apply(weights)
-        # filter out weights with first-prefix/substr to skip in name
-        weights = (
-            (name, weight) for name, weight in weights if not self._can_skip(name)
-        )
+        # Always drop the known-unused rotary buffers some checkpoints ship.
+        mapper |= self.REMOVE_UNUSED_ROTARY_EMBEDS_MAPPER
+        # Drop lm_head weights when the model ties them to the input embeddings.
+        config = getattr(self.module, "config", None)
+        if config is not None and getattr(config, "tie_word_embeddings", False):
+            mapper |= self.REMOVE_TIED_LM_HEAD_MAPPER
+
+        weights = mapper.apply(weights)
 
         autoloaded_weights = set(self._load_module("", self.module, weights))
         return autoloaded_weights

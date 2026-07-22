@@ -618,10 +618,6 @@ class SiglipTextTransformer(nn.Module):
 
         return last_hidden_state
 
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
-
 
 class SiglipMultiheadAttentionPoolingHead(nn.Module):
     """Multihead Attention Pooling."""
@@ -796,13 +792,6 @@ class SiglipVisionTransformer(nn.Module):
         return encoder_outputs
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        skip_prefixes = []
-        if self.post_layernorm is None:
-            skip_prefixes.append("post_layernorm.")
-        if self.head is None:
-            skip_prefixes.append("head.")
-        loader = AutoWeightsLoader(self, skip_prefixes=skip_prefixes)
-
         layer_count = len(self.encoder.layers)
 
         def _filter(ws):
@@ -814,7 +803,13 @@ class SiglipVisionTransformer(nn.Module):
                     continue
                 yield name, w
 
-        return loader.load_weights(_filter(weights), mapper=self.hf_to_vllm_mapper)
+        mapper = self.hf_to_vllm_mapper
+        if self.post_layernorm is None:
+            mapper |= WeightsMapper(orig_to_new_prefix={"post_layernorm.": None})
+        if self.head is None:
+            mapper |= WeightsMapper(orig_to_new_prefix={"head.": None})
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(_filter(weights), mapper=mapper)
 
 
 class SiglipVisionModel(nn.Module):
@@ -910,6 +905,7 @@ class SiglipTextEmbeddings(nn.Module):
 )
 class SiglipEmbeddingModel(nn.Module, SupportsMultiModal, SupportsQuant):
     is_pooling_model = True
+    hf_to_vllm_mapper = WeightsMapper(orig_to_new_substr={".position_ids": None})
 
     packed_modules_mapping = {"qkv_proj": ["q_proj", "k_proj", "v_proj"]}
 
@@ -1149,8 +1145,6 @@ class SiglipEmbeddingModel(nn.Module, SupportsMultiModal, SupportsQuant):
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         loader = AutoWeightsLoader(
             self,
-            skip_substrs=[".position_ids"],
             ignore_unexpected_prefixes=["logit_scale.", "logit_bias."],
         )
-
-        return loader.load_weights(weights)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)

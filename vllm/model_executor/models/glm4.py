@@ -48,6 +48,7 @@ from .llama import LlamaModel
 from .utils import (
     AutoWeightsLoader,
     PPMissingLayer,
+    WeightsMapper,
     maybe_prefix,
 )
 
@@ -293,13 +294,14 @@ class Glm4ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        skip_prefixes = ["lm_head."] if self.config.tie_word_embeddings else []
         # Skip the speculative (MTP) layers, which are loaded by the
         # draft model instead.
         num_nextn_layers = getattr(self.config, "num_nextn_predict_layers", 0)
-        skip_prefixes += [
-            f"model.layers.{self.config.num_hidden_layers + i}."
-            for i in range(num_nextn_layers)
-        ]
-        loader = AutoWeightsLoader(self, skip_prefixes=skip_prefixes)
-        return loader.load_weights(weights)
+        drop = WeightsMapper(
+            orig_to_new_prefix={
+                f"model.layers.{self.config.num_hidden_layers + i}.": None
+                for i in range(num_nextn_layers)
+            }
+        )
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(weights, mapper=drop)

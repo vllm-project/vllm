@@ -23,7 +23,6 @@
 # This file is based on the LLama model definition file in transformers
 """PyTorch Cohere model."""
 
-from collections.abc import Iterable
 from itertools import islice
 
 import torch
@@ -44,16 +43,13 @@ from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
-from vllm.model_executor.model_loader.weight_utils import (
-    row_parallel_weight_loader,
-)
+from vllm.model_executor.model_loader.weight_utils import row_parallel_weight_loader
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsLoRA, SupportsPP, SupportsQuant
 from .utils import (
-    AutoWeightsLoader,
     WeightsMapper,
     extract_layer_index,
     make_empty_intermediate_tensors_factory,
@@ -411,9 +407,3 @@ class CohereForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsQuant):
             )
 
         return logits
-
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(
-            self, skip_prefixes=["lm_head", "rotary_emb.inv_freq"]
-        )
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)

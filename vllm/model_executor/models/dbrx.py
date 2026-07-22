@@ -39,7 +39,6 @@ from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsPP
 from .utils import (
-    AutoWeightsLoader,
     is_pp_missing_parameter,
     make_empty_intermediate_tensors_factory,
     make_layers,
@@ -464,7 +463,3 @@ class DbrxForCausalLM(nn.Module, SupportsPP):
     ) -> torch.Tensor | None:
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
-
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights)

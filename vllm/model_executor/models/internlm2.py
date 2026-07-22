@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections.abc import Iterable
 from functools import partial
 from itertools import islice
 from typing import Any
@@ -40,7 +39,6 @@ from vllm.sequence import IntermediateTensors
 from .interfaces import SupportsLoRA, SupportsPP, SupportsQuant
 from .interfaces_base import default_pooling_type
 from .utils import (
-    AutoWeightsLoader,
     StageMissingLayer,
     WeightsMapper,
     make_empty_intermediate_tensors_factory,
@@ -316,13 +314,11 @@ class InternLM2Model(nn.Module):
         hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states
 
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
-
 
 class InternLM2ForCausalLM(nn.Module, SupportsPP, SupportsLoRA, SupportsQuant):
-    hf_to_vllm_mapper = InternLM2Model.hf_to_vllm_mapper
+    hf_to_vllm_mapper = InternLM2Model.hf_to_vllm_mapper | WeightsMapper(
+        orig_to_new_prefix={"output.": "lm_head."}
+    )
     packed_modules_mapping = {
         "wqkv": ["wqkv"],
         "gate_up_proj": ["w1", "w3"],
@@ -345,14 +341,14 @@ class InternLM2ForCausalLM(nn.Module, SupportsPP, SupportsLoRA, SupportsQuant):
         self.model = model_type(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
-        self.output = ParallelLMHead(
+        self.lm_head = ParallelLMHead(
             config.vocab_size,
             config.hidden_size,
             quant_config=quant_config,
-            prefix=maybe_prefix(prefix, "output"),
+            prefix=maybe_prefix(prefix, "lm_head"),
         )
         if self.config.tie_word_embeddings:
-            self.output.weight = self.model.tok_embeddings.weight
+            self.lm_head.weight = self.model.tok_embeddings.weight
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors
@@ -377,15 +373,8 @@ class InternLM2ForCausalLM(nn.Module, SupportsPP, SupportsLoRA, SupportsQuant):
         self,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor | None:
-        logits = self.logits_processor(self.output, hidden_states)
+        logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
-
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(
-            self,
-            skip_prefixes=(["output."] if self.config.tie_word_embeddings else None),
-        )
-        return loader.load_weights(weights)
 
 
 @default_pooling_type(tok_pooling_type="ALL")
@@ -401,7 +390,7 @@ class InternLM2ForRewardModel(InternLM2ForCausalLM):
     ):
         with no_init_weights(
             self,
-            lambda mod: StageMissingLayer("output", mod),
+            lambda mod: StageMissingLayer("lm_head", mod),
             targets=(LogitsProcessor, ParallelLMHead),
         ):
             super().__init__(

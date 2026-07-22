@@ -2004,7 +2004,15 @@ class CohereAsrForConditionalGeneration(
     }
 
     hf_to_vllm_mapper = WeightsMapper(
-        orig_to_new_substr={".fc1.": ".mlp.fc1.", ".fc2.": ".mlp.fc2."}
+        orig_to_new_prefix={
+            "model.preprocessor.featurizer.fb": None,
+            "model.preprocessor.featurizer.window": None,
+        },
+        orig_to_new_substr={
+            ".fc1.": ".mlp.fc1.",
+            ".fc2.": ".mlp.fc2.",
+            "model.conv.batch_norm.num_batches_tracked": None,
+        },
     )
 
     supports_transcription_only = True
@@ -2258,15 +2266,7 @@ class CohereAsrForConditionalGeneration(
 
             return name, loaded_weight
 
-        loader = AutoWeightsLoader(
-            self,
-            skip_prefixes=[
-                "model.preprocessor.featurizer.fb",
-                "model.preprocessor.featurizer.window",
-            ],
-            skip_substrs=["model.conv.batch_norm.num_batches_tracked"],
-        )
-
+        loader = AutoWeightsLoader(self)
         return loader.load_weights(
             map(transform, weights), mapper=self.hf_to_vllm_mapper
         )

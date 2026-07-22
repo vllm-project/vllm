@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Inference-only FalconH1 model."""
 
-from collections.abc import Iterable
 from itertools import islice
 
 import torch
@@ -46,7 +45,6 @@ from .interfaces import (
     SupportsPP,
 )
 from .utils import (
-    AutoWeightsLoader,
     PPMissingLayer,
     WeightsMapper,
     make_empty_intermediate_tensors_factory,
@@ -641,10 +639,3 @@ class FalconH1ForCausalLM(
         logits = self.logits_processor(self.lm_head, hidden_states)
 
         return logits
-
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(
-            self,
-            skip_prefixes=(["lm_head."] if self.tie_word_embeddings else None),
-        )
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)

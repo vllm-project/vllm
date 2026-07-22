@@ -71,7 +71,7 @@ from .minicpmv import (
     MiniCPMVProcessingInfo,
     _minicpmv_field_config,
 )
-from .utils import AutoWeightsLoader, cast_overflow_tensors, maybe_prefix
+from .utils import AutoWeightsLoader, WeightsMapper, cast_overflow_tensors, maybe_prefix
 
 CPU_DEVICE = torch.device("cpu")
 
@@ -672,6 +672,8 @@ class MiniCPMWhisperEncoder(WhisperEncoder):
 class MiniCPMOBaseModel:
     """Base mixin class for MiniCPM-O models with audio support."""
 
+    hf_to_vllm_mapper: WeightsMapper = WeightsMapper(orig_to_new_prefix={"tts": None})
+
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -718,8 +720,8 @@ class MiniCPMOBaseModel:
         return model
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self, skip_prefixes=["tts"])
-        loaded = loader.load_weights(weights)
+        loader = AutoWeightsLoader(self)
+        loaded = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
         self._ensure_resampler_device()
         return loaded
 

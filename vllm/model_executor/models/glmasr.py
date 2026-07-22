@@ -915,6 +915,9 @@ class GlmAsrForConditionalGeneration(
     nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA, SupportsTranscription
 ):
     supported_languages = ISO639_1_SUPPORTED_LANGS
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_prefix={"audio_tower.embed_positions": None}
+    )
 
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
@@ -1081,11 +1084,6 @@ class GlmAsrForConditionalGeneration(
         hidden_states: torch.Tensor,
     ) -> torch.Tensor | None:
         return self.language_model.compute_logits(hidden_states)
-
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        skip_prefixes = ["audio_tower.embed_positions"]
-        loader = AutoWeightsLoader(self, skip_prefixes=skip_prefixes)
-        return loader.load_weights(weights)
 
     @classmethod
     def _get_audio_token(cls, model_config: ModelConfig) -> str:

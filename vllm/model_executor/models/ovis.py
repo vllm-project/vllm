@@ -19,7 +19,7 @@
 """PyTorch Ovis model."""
 
 import math
-from collections.abc import Iterable, Mapping
+from collections.abc import Mapping
 from typing import Annotated, Literal
 
 import torch
@@ -36,7 +36,6 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.models.aimv2 import AIMv2Model
 from vllm.model_executor.models.siglip import SiglipVisionModel
 from vllm.model_executor.models.utils import (
-    AutoWeightsLoader,
     flatten_bn,
     init_vllm_registered_model,
     maybe_prefix,
@@ -553,7 +552,3 @@ class Ovis(nn.Module, SupportsMultiModal, SupportsPP):
         hidden_states: torch.Tensor,
     ) -> torch.Tensor | None:
         return self.llm.compute_logits(hidden_states)
-
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights)

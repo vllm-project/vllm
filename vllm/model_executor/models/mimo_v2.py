@@ -60,7 +60,6 @@ from .interfaces import (
     SupportsPP,
 )
 from .utils import (
-    AutoWeightsLoader,
     PPMissingLayer,
     extract_layer_index,
     is_pp_missing_parameter,
@@ -893,10 +892,6 @@ class MiMoV2FlashForCausalLM(nn.Module, SupportsPP, MixtureOfExperts, SupportsEa
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         return self.model.get_expert_mapping()
-
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights)
 
 
 class MiMoV2ForCausalLM(MiMoV2FlashForCausalLM):

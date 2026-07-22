@@ -25,7 +25,6 @@
 # limitations under the License.
 """Inference-only Qwen2 model compatible with HuggingFace weights."""
 
-from collections.abc import Iterable
 from itertools import islice
 from typing import Any
 
@@ -67,7 +66,6 @@ from .interfaces import (
     SupportsQuant,
 )
 from .utils import (
-    AutoWeightsLoader,
     PPMissingLayer,
     WeightsMapper,
     extract_layer_index,
@@ -433,10 +431,6 @@ class Qwen2Model(nn.Module, EagleModelMixin):
 
         return hidden_states
 
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
-
 
 class Qwen2ForCausalLM(
     nn.Module, SupportsLoRA, SupportsPP, SupportsEagle, SupportsEagle3, SupportsQuant
@@ -499,10 +493,3 @@ class Qwen2ForCausalLM(
     ) -> torch.Tensor | None:
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
-
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(
-            self,
-            skip_prefixes=(["lm_head."] if self.config.tie_word_embeddings else None),
-        )
-        return loader.load_weights(weights)

@@ -706,10 +706,3 @@ class Param2MoEForCausalLM(
         if not get_pp_group().is_last_rank:
             return None
         return self.logits_processor(self.lm_head, hidden_states)
-
-    def load_weights(
-        self,
-        weights: Iterable[tuple[str, torch.Tensor]],
-    ) -> set[str]:
-        loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights)

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import math
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from math import sqrt
 from typing import Annotated, Any, Literal, TypeAlias
 
@@ -53,7 +53,6 @@ from .interfaces import (
     SupportsPP,
 )
 from .utils import (
-    AutoWeightsLoader,
     WeightsMapper,
     init_vllm_registered_model,
     maybe_prefix,
@@ -962,7 +961,3 @@ class Step3VLForConditionalGeneration(
         hidden_states: torch.Tensor,
     ) -> torch.Tensor | None:
         return self.language_model.compute_logits(hidden_states)
-
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
-        loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)

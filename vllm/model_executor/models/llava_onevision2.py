@@ -26,7 +26,7 @@ import hashlib
 import importlib
 import json
 import os
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from functools import lru_cache
 from typing import (
     Annotated,
@@ -70,7 +70,6 @@ from vllm.model_executor.models.interfaces import (
 )
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.models.utils import (
-    AutoWeightsLoader,
     WeightsMapper,
     init_vllm_registered_model,
     maybe_prefix,
@@ -2253,10 +2252,6 @@ class LlavaOnevision2ForConditionalGeneration(
 
     def compute_logits(self, hidden_states: torch.Tensor):
         return self.language_model.compute_logits(hidden_states)
-
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     def get_mm_mapping(self) -> MultiModelKeys:
         return MultiModelKeys.from_string_field(

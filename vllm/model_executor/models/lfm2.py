@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Iterable
 from itertools import islice
 
+import regex as re
 import torch
 import torch.nn as nn
 from transformers import Lfm2Config
@@ -36,7 +36,6 @@ from vllm.sequence import IntermediateTensors
 
 from .interfaces import HasInnerState, IsHybrid, SupportsLoRA, SupportsPP, SupportsQuant
 from .utils import (
-    AutoWeightsLoader,
     PPMissingLayer,
     WeightsMapper,
     extract_layer_index,
@@ -299,8 +298,10 @@ class Lfm2Model(nn.Module):
     # HF uses .conv. but vLLM uses .short_conv. to avoid LoRA regex collision
     # with the inner .conv.conv child (ShortConv has a child self.conv, so
     # naming the container .conv too makes _match_target_modules match both).
+    # Anchored on the layer index so it is idempotent (the mapper is applied
+    # both at the root and on recursion into this module).
     hf_to_vllm_mapper = WeightsMapper(
-        orig_to_new_substr={".conv.": ".short_conv."},
+        orig_to_new_regex={re.compile(r"(\d+)\.conv\."): r"\1.short_conv."},
         orig_to_new_stacked={
             ".q_proj": (".qkv_proj", "q"),
             ".k_proj": (".qkv_proj", "k"),
@@ -386,10 +387,6 @@ class Lfm2Model(nn.Module):
             )
         hidden_states, _ = self.embedding_norm(hidden_states, residual)
         return hidden_states
-
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
 class Lfm2ForCausalLM(
@@ -506,10 +503,3 @@ class Lfm2ForCausalLM(
     def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
-
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(
-            self,
-            skip_prefixes=(["lm_head."] if self.config.tie_word_embeddings else None),
-        )
-        return loader.load_weights(weights)

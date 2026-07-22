@@ -21,9 +21,7 @@ from vllm.distributed import get_pp_group
 from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.vocab_parallel_embedding import (
-    ParallelLMHead,
-)
+from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.models.llama import LlamaModel
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -1029,9 +1027,7 @@ class Phi4MMForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
     }
 
     hf_to_vllm_mapper = WeightsMapper(
-        orig_to_new_substr={
-            "base_layer.": "",
-        },
+        orig_to_new_substr={"base_layer.": ""},
         orig_to_new_prefix={
             "model.embed_tokens_extend.audio_embed.audio_projection.vision.": "embed_tokens_extend.audio_projection_for_vision.",  # noqa: E501
             "model.embed_tokens_extend.audio_embed.audio_projection.speech.": "embed_tokens_extend.audio_projection.",  # noqa: E501
@@ -1273,8 +1269,13 @@ class Phi4MMForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> None:
-        loader = AutoWeightsLoader(self, skip_substrs=["lora"])
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+        # Drop the frozen base-model LoRA weights at load time only.
+        # This must not live in `hf_to_vllm_mapper`: the LoRA loader
+        # also consults that mapper to translate adapter weight names.
+        loader = AutoWeightsLoader(self)
+        drop = WeightsMapper(orig_to_new_substr={"lora": None})
+        mapper = self.hf_to_vllm_mapper | drop
+        return loader.load_weights(weights, mapper=mapper)
 
     def get_mm_mapping(self) -> MultiModelKeys:
         """

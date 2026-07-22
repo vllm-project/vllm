@@ -26,7 +26,6 @@
 # limitations under the License.
 """Inference-only Ouro model compatible with HuggingFace weights."""
 
-from collections.abc import Iterable
 from typing import Any
 
 import torch
@@ -56,7 +55,6 @@ from vllm.v1.attention.backend import AttentionType
 
 from .interfaces import SupportsLoRA
 from .utils import (
-    AutoWeightsLoader,
     WeightsMapper,
     extract_layer_index,
     make_empty_intermediate_tensors_factory,
@@ -439,10 +437,3 @@ class OuroForCausalLM(nn.Module, SupportsLoRA):
     ) -> torch.Tensor | None:
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
-
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(
-            self,
-            skip_prefixes=(["lm_head."] if self.config.tie_word_embeddings else None),
-        )
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)

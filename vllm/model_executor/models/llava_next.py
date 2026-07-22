@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from abc import abstractmethod
-from collections.abc import Iterable, Mapping
+from collections.abc import Mapping
 from typing import Annotated, Final, Literal, Protocol, TypeAlias, TypeVar
 
 import torch
@@ -32,7 +32,6 @@ from .llava import (
 )
 from .siglip import SiglipVisionModel
 from .utils import (
-    AutoWeightsLoader,
     WeightsMapper,
     init_vllm_registered_model,
     maybe_prefix,
@@ -580,7 +579,3 @@ model_executor.models.llava_next.LlavaNextProcessingInfo.get_num_image_tokens].
         hidden_states: torch.Tensor,
     ) -> torch.Tensor | None:
         return self.language_model.compute_logits(hidden_states)
-
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)

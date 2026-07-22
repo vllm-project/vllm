@@ -120,10 +120,3 @@ class TeleChat2ForCausalLM(LlamaForCausalLM):
         layer_type: type[nn.Module] = LlamaDecoderLayer,
     ):
         return TeleChat2Model(vllm_config=vllm_config, prefix=prefix)
-
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(
-            self,
-            skip_prefixes=(["lm_head."] if self.config.tie_word_embeddings else None),
-        )
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)

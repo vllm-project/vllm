@@ -89,6 +89,10 @@ class NemotronVLProcessingInfo(BaseInternVLProcessingInfo):
     dummy_inputs=BaseInternVLDummyInputsBuilder[NemotronVLProcessingInfo],
 )
 class LlamaNemotronVLChatModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_substr={"norm_mean": None, "norm_std": None}
+    )
+
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
         if modality.startswith("image"):
@@ -376,13 +380,6 @@ class LlamaNemotronVLChatModel(nn.Module, SupportsMultiModal, SupportsPP, Suppor
     ) -> torch.Tensor | None:
         return self.language_model.compute_logits(hidden_states)
 
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        ## Ignore registered_buffers
-        ## see https://huggingface.co/nvidia/C-RADIOv2-H/blob/main/input_conditioner.py#L28 # noqa: E501
-        skip_substrs = ["norm_mean", "norm_std"]
-        loader = AutoWeightsLoader(self, skip_substrs=skip_substrs)
-        return loader.load_weights(weights)
-
     def get_mm_mapping(self) -> MultiModelKeys:
         """
         Get the module prefix in multimodal models
@@ -530,11 +527,6 @@ class LlamaNemotronVLForEmbedding(LlamaNemotronVLChatModel, VllmModelForPooling)
         """Override to handle SigLIP interface."""
         return self.vision_model(pixel_values)
 
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        """Override to use different weight mapping for SigLIP."""
-        loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
-
 
 class LlamaNemotronVLForSequenceClassification(
     LlamaNemotronVLForEmbedding, SupportsCrossEncoding
@@ -569,7 +561,8 @@ class LlamaNemotronVLForSequenceClassification(
         self.pooler = DispatchPooler.for_seq_cls(pooler_config, classifier=self.score)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loaded_weights = super().load_weights(weights)
+        loader = AutoWeightsLoader(self)
+        loaded_weights = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
         # reranker checkpoint omits the inner LM seq-cls head
         # (`language_model.score.*`). It is unused by this outer model, but

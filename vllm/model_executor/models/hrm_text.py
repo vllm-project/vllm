@@ -21,7 +21,6 @@ its weight loader auto-splits the fused tensor along the output dim by
 ``output_sizes`` (the same path used by Phi-3's fused gate_up_proj).
 """
 
-from collections.abc import Iterable
 from typing import Literal
 
 import torch
@@ -47,7 +46,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 )
 from vllm.sequence import IntermediateTensors
 
-from .utils import AutoWeightsLoader, WeightsMapper, maybe_prefix
+from .utils import WeightsMapper, maybe_prefix
 
 
 class HrmTextMLP(nn.Module):
@@ -520,8 +519,3 @@ class HrmTextForCausalLM(nn.Module):
         hidden_states: torch.Tensor,
     ) -> torch.Tensor | None:
         return self.logits_processor(self.lm_head, hidden_states)
-
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        skip_prefixes = ["lm_head."] if self.config.tie_word_embeddings else None
-        loader = AutoWeightsLoader(self, skip_prefixes=skip_prefixes)
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)

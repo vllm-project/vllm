@@ -18,7 +18,7 @@
 # limitations under the License.
 """Inference-only NemotronH model."""
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Mapping
 from itertools import islice
 
 import torch
@@ -71,7 +71,6 @@ from vllm.model_executor.models.interfaces import (
     SupportsQuant,
 )
 from vllm.model_executor.models.utils import (
-    AutoWeightsLoader,
     WeightsMapper,
     make_empty_intermediate_tensors_factory,
     make_layers,
@@ -712,7 +711,7 @@ class NemotronHForCausalLM(
     is_non_gated_moe: bool = True
 
     hf_to_vllm_mapper = WeightsMapper(
-        orig_to_new_prefix={"backbone": "model"},
+        orig_to_new_prefix={"backbone": "model", "mtp": None},
         orig_to_new_substr={"A_log": "A", "embeddings": "embed_tokens"},
         orig_to_new_stacked={
             ".q_proj": (".qkv_proj", "q"),
@@ -873,7 +872,3 @@ class NemotronHForCausalLM(
     ) -> torch.Tensor | None:
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
-
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self, skip_prefixes=["mtp"])
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)

@@ -122,10 +122,6 @@ class LlamaModel(nn.Module):
         hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states, hidden_states
 
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
-
     def validate_and_update_config(
         self, start_layer_id: int, quant_config: QuantizationConfig | None = None
     ) -> None:
@@ -206,9 +202,5 @@ class EagleLlama4ForCausalLM(Llama4ForCausalLM):
             process_eagle_weight(self, name)
             return name, weight
 
-        loader = AutoWeightsLoader(
-            self,
-            # lm_head is tied with target model (Llama4ForCausalLM)
-            skip_prefixes=([]),
-        )
+        loader = AutoWeightsLoader(self)
         loader.load_weights(map(transform, weights))

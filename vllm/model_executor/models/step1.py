@@ -5,7 +5,6 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Iterable
 
 import torch
 from torch import nn
@@ -37,7 +36,6 @@ from vllm.model_executor.models.interfaces import (
     SupportsPP,
 )
 from vllm.model_executor.models.utils import (
-    AutoWeightsLoader,
     PPMissingLayer,
     WeightsMapper,
     make_empty_intermediate_tensors_factory,
@@ -381,7 +379,3 @@ class Step1ForCausalLM(nn.Module, SupportsPP, SupportsEagle, SupportsEagle3):
         if not get_pp_group().is_last_rank:
             return None
         return self.logits_processor(self.lm_head, hidden_states)
-
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)

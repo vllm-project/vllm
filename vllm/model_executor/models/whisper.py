@@ -771,6 +771,7 @@ class WhisperForConditionalGeneration(
     }
 
     hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_prefix={"proj_out.": None},
         orig_to_new_substr={".fc1.": ".mlp.fc1.", ".fc2.": ".mlp.fc2."},
         orig_to_new_stacked={
             # weight_name: (param_name, shard_id)
@@ -990,7 +991,7 @@ class WhisperForConditionalGeneration(
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self, skip_prefixes=["proj_out."])
+        loader = AutoWeightsLoader(self)
 
         # add fake zeros bias for k_proj to state_dict
         weights = _create_fake_bias_for_k_proj(weights, ".k_proj.weight")

@@ -23,7 +23,6 @@
 # limitations under the License.
 """Inference-only Qwen3 model compatible with HuggingFace weights."""
 
-from collections.abc import Iterable
 from typing import Any
 
 import torch
@@ -57,7 +56,7 @@ from .interfaces import (
 )
 from .qwen2 import Qwen2MLP as Qwen3MLP
 from .qwen2 import Qwen2Model
-from .utils import AutoWeightsLoader, PPMissingLayer, extract_layer_index, maybe_prefix
+from .utils import PPMissingLayer, extract_layer_index, maybe_prefix
 
 logger = init_logger(__name__)
 
@@ -334,10 +333,3 @@ class Qwen3ForCausalLM(
     ) -> torch.Tensor | None:
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
-
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(
-            self,
-            skip_prefixes=(["lm_head."] if self.config.tie_word_embeddings else None),
-        )
-        return loader.load_weights(weights)

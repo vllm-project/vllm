@@ -1,8 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Iterable
-
-import torch
 from transformers import AutoProcessor
 
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -13,7 +10,7 @@ from .qwen3_vl import (
     Qwen3VLMultiModalProcessor,
     Qwen3VLProcessingInfo,
 )
-from .utils import AutoWeightsLoader
+from .utils import WeightsMapper
 
 
 class InternS2PreviewProcessingInfo(Qwen3VLProcessingInfo):
@@ -30,9 +27,13 @@ class InternS2PreviewProcessingInfo(Qwen3VLProcessingInfo):
     dummy_inputs=Qwen3VLDummyInputsBuilder,
 )
 class InternS2PreviewForConditionalGeneration(Qwen3_5MoeForConditionalGeneration):
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(
-            self,
-            skip_prefixes=["mtp.", "model.time_series.", "time_series."],
+    hf_to_vllm_mapper = (
+        Qwen3_5MoeForConditionalGeneration.hf_to_vllm_mapper
+        | WeightsMapper(
+            orig_to_new_prefix={
+                "mtp.": None,
+                "model.time_series.": None,
+                "time_series.": None,
+            }
         )
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+    )
