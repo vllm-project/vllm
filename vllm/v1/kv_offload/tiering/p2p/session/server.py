@@ -738,16 +738,9 @@ class ServerRole:
                     tid,
                 )
                 continue
+            results.extend(self._settle_xfer_jobs(xfer, success=True))
             st = self._requests.get(xfer.kv_request_id)
             req = st.outbound if st is not None else None
-            for job_id in xfer.job_ids:
-                if self._store_jobs.pop(job_id, None) is None:
-                    # Already reported (timeout, cancellation, etc.) —
-                    # don't double-emit a contradictory success result.
-                    continue
-                results.append(StoreResult(job_id=job_id, success=True))
-                if req is not None:
-                    req.pending_job_ids.discard(job_id)
             if req is not None and req.demand_received:
                 req.remaining -= xfer.block_count
                 assert req.remaining >= 0, (
@@ -775,16 +768,9 @@ class ServerRole:
             if failed_kv_request_ids is None:
                 failed_kv_request_ids = set()
             failed_kv_request_ids.add(xfer.kv_request_id)
+            results.extend(self._settle_xfer_jobs(xfer, success=False))
             st = self._requests.get(xfer.kv_request_id)
             req = st.outbound if st is not None else None
-            for job_id in xfer.job_ids:
-                if self._store_jobs.pop(job_id, None) is None:
-                    # Already reported (timeout, cancellation, etc.) —
-                    # don't double-emit.
-                    continue
-                results.append(StoreResult(job_id=job_id, success=False))
-                if req is not None:
-                    req.pending_job_ids.discard(job_id)
             if st is not None:
                 st.outbound = None
             if req is not None and req.demand_received:
@@ -890,6 +876,26 @@ class ServerRole:
         if st is not None:
             st.inflight_tids.discard(tid)
         return xfer
+
+    def _settle_xfer_jobs(
+        self, xfer: _InflightXfer, success: bool
+    ) -> list[StoreResult]:
+        """Emit StoreResults for a completed transfer's store jobs.
+
+        Pops each attached job from ``_store_jobs`` and clears it from the
+        request's pending set. A job already popped (via timeout, cancel,
+        etc.) is skipped so we never double-emit a contradictory result.
+        """
+        results: list[StoreResult] = []
+        st = self._requests.get(xfer.kv_request_id)
+        req = st.outbound if st is not None else None
+        for job_id in xfer.job_ids:
+            if self._store_jobs.pop(job_id, None) is None:
+                continue
+            results.append(StoreResult(job_id=job_id, success=success))
+            if req is not None:
+                req.pending_job_ids.discard(job_id)
+        return results
 
     # ------------------------------------------------------------------
     # Internal — finalize / abort drain
