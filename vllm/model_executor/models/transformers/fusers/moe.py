@@ -117,7 +117,7 @@ def _moe_block_forward(self: nn.Module, hidden_states: torch.Tensor) -> torch.Te
     is_sequence_parallel = self.experts.moe_config.is_sequence_parallel
     if is_sequence_parallel:
         hidden_states = sequence_parallel_chunk(hidden_states)
-    out = self.experts(hidden_states, router_logits=hidden_states)
+    out = self.experts(hidden_states)
     if is_sequence_parallel:
         out = tensor_model_parallel_all_gather(out, 0)[:num_tokens]
     return out.reshape(orig_shape)
