@@ -16,6 +16,8 @@ from vllm.config import (
     VllmConfig,
 )
 from vllm.distributed.device_communicators import pynccl_allocator
+from vllm.forward_context import ForwardContext, override_forward_context
+from vllm.model_executor.layers.attention.attention import get_attention_context
 from vllm.v1.worker.gpu import cudagraph_utils as gpu_cudagraph_utils
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 
@@ -44,6 +46,29 @@ def _create_vllm_config() -> MagicMock:
     vllm_config.speculative_config = None
     vllm_config.num_speculative_tokens = 0
     return vllm_config
+
+
+def test_skip_attention_preserves_raw_metadata():
+    layer_name = "model.layers.0.self_attn"
+    attn_metadata = object()
+    attn_layer = SimpleNamespace(kv_cache=object())
+    slot_mapping = object()
+    forward_context = ForwardContext(
+        no_compile_layers={layer_name: attn_layer},
+        attn_metadata={layer_name: attn_metadata},
+        slot_mapping={layer_name: slot_mapping},
+        skip_attention=True,
+    )
+
+    with override_forward_context(forward_context):
+        resolved_metadata, resolved_layer, _, resolved_slot_mapping = (
+            get_attention_context(layer_name)
+        )
+
+    assert forward_context.attn_metadata[layer_name] is attn_metadata
+    assert resolved_metadata is None
+    assert resolved_layer is attn_layer
+    assert resolved_slot_mapping is slot_mapping
 
 
 def test_full_capture_sets_graph_pool_id_before_cuda_graph(monkeypatch):

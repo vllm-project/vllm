@@ -521,6 +521,10 @@ class ModelCudaGraphManager(CudaGraphManager):
                     slot_mapping=slot_mappings,
                     batch_descriptor=batch_descriptor,
                     is_padding=input_buffers.is_padding[:num_tokens],
+                    skip_attention=(
+                        cg_mode == CUDAGraphMode.PIECEWISE
+                        and not self.use_breakable_cg
+                    ),
                 ):
                     if cg_mode == CUDAGraphMode.PIECEWISE:
                         # PIECEWISE graph (compiled PW or breakable, chosen inside

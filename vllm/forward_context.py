@@ -158,6 +158,10 @@ class ForwardContext:
     # If True, bypass the compiled model call, e.g. by using .forward() directly
     skip_compiled: bool = False
 
+    # If True, generic attention ops use their profiling path while the full
+    # metadata dictionary remains available to model-specific attention-like ops.
+    skip_attention: bool = False
+
     # For torch.compile cold start times, we need to avoid hard-coding
     # any strings into the graph. Right now, the vllm.moe_forward
     # and vllm.moe_forward_shared custom operators hard-code strings into
@@ -220,6 +224,7 @@ def create_forward_context(
     additional_kwargs: dict[str, Any] | None = None,
     skip_compiled: bool = False,
     is_padding: torch.Tensor | None = None,
+    skip_attention: bool = False,
 ):
     if vllm_config.compilation_config.fast_moe_cold_start:
         all_moe_layers = vllm_config.compilation_config.static_all_moe_layers
@@ -236,6 +241,7 @@ def create_forward_context(
         batch_descriptor=batch_descriptor,
         ubatch_slices=ubatch_slices,
         skip_compiled=skip_compiled,
+        skip_attention=skip_attention,
         additional_kwargs=additional_kwargs or {},
         is_padding=is_padding,
     )
@@ -268,6 +274,7 @@ def set_forward_context(
     slot_mapping: dict[str, torch.Tensor] | list[dict[str, torch.Tensor]] | None = None,
     skip_compiled: bool = False,
     is_padding: torch.Tensor | None = None,
+    skip_attention: bool = False,
 ):
     """A context manager that stores the current forward context,
     can be attention metadata, etc.
@@ -337,6 +344,7 @@ def set_forward_context(
         additional_kwargs,
         skip_compiled,
         is_padding=is_padding,
+        skip_attention=skip_attention,
     )
 
     try:

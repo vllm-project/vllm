@@ -282,6 +282,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
         num_tokens_across_dp: torch.Tensor | None,
         cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
+        skip_attention: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         batch_descriptor = BatchDescriptor(num_tokens=num_tokens)
         with set_forward_context(
@@ -292,6 +293,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             num_tokens_across_dp=num_tokens_across_dp,
             slot_mapping=slot_mappings,
             batch_descriptor=batch_descriptor,
+            skip_attention=skip_attention,
         ):
             inputs_embeds = None
             if self.supports_mm_inputs:
@@ -341,6 +343,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
         num_tokens_across_dp: torch.Tensor | None,
         cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
+        skip_attention: bool = False,
     ) -> None:
         last_token_indices = self.last_token_indices[:num_reqs]
         positions = self.input_buffers.positions[last_token_indices]
@@ -353,6 +356,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             num_tokens_across_dp=num_tokens_across_dp,
             cudagraph_runtime_mode=cudagraph_runtime_mode,
             mm_inputs=mm_inputs,
+            skip_attention=skip_attention,
         )
         sample_hidden_states = last_hidden_states[last_token_indices]
 
@@ -431,6 +435,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
         slot_mappings: dict[str, torch.Tensor] | None,
         num_tokens_across_dp: torch.Tensor | None,
         cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
+        skip_attention: bool = False,
     ) -> None:
         self._prepare_eplb_forward(num_reqs)
 
@@ -443,6 +448,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             slot_mappings,
             num_tokens_across_dp,
             cudagraph_runtime_mode,
+            skip_attention=skip_attention,
         )
         last_hidden_states = last_hidden_states[:num_reqs]
 

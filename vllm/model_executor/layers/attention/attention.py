@@ -752,8 +752,10 @@ def get_attention_context(
     """
     forward_context: ForwardContext = get_forward_context()
     attn_metadata_raw = forward_context.attn_metadata
-    attn_metadata: AttentionMetadata
-    if isinstance(attn_metadata_raw, dict):
+    attn_metadata: AttentionMetadata | None
+    if forward_context.skip_attention:
+        attn_metadata = None
+    elif isinstance(attn_metadata_raw, dict):
         attn_metadata = attn_metadata_raw[layer_name]
     elif isinstance(attn_metadata_raw, list):
         # list[dict[str, AttentionMetadata]]: used in speculative decoding
