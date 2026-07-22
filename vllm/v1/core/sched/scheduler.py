@@ -238,7 +238,10 @@ class Scheduler(SchedulerInterface):
         self.num_spec_tokens = vllm_config.num_speculative_tokens
         self.num_lookahead_tokens = 0
         self.dynamic_sd_lookup: DynamicSDLookup | None = None
+        self.dynamic_sd_ctx_agg: str = "mean"
         if speculative_config is not None:
+            if getattr(speculative_config, "ctx_agg", None):
+                self.dynamic_sd_ctx_agg = speculative_config.ctx_agg
             if speculative_config.num_speculative_tokens_per_batch_size:
                 self.dynamic_sd_lookup = build_dynamic_sd_schedule_lookup(
                     speculative_config.num_speculative_tokens_per_batch_size,
@@ -1135,12 +1138,24 @@ class Scheduler(SchedulerInterface):
         # Dynamic speculative decoding: compute optimal K
         num_spec_tokens_to_schedule = self.num_spec_tokens
         if self.dynamic_sd_lookup is not None and len(num_scheduled_tokens) > 0:
-            ctx_values = sorted(
+            decode_ctx = [
                 self.requests[req_id].num_computed_tokens
                 for req_id in num_scheduled_tokens
-            )
-            p50_ctx = ctx_values[len(ctx_values) // 2]
-            ctx_bucket = self.dynamic_sd_lookup.bucket_of(p50_ctx)
+                if self.requests[req_id].num_computed_tokens
+                >= self.requests[req_id].num_prompt_tokens
+            ]
+            ctx_pool = decode_ctx or [
+                self.requests[req_id].num_computed_tokens
+                for req_id in num_scheduled_tokens
+            ]
+            if self.dynamic_sd_ctx_agg == "max":
+                ctx_repr = max(ctx_pool)
+            elif self.dynamic_sd_ctx_agg == "mean":
+                ctx_repr = sum(ctx_pool) // len(ctx_pool)
+            else:
+                sorted_ctx = sorted(ctx_pool)
+                ctx_repr = sorted_ctx[len(sorted_ctx) // 2]
+            ctx_bucket = self.dynamic_sd_lookup.bucket_of(ctx_repr)
             num_spec_tokens_to_schedule = self.dynamic_sd_lookup.dense[
                 len(num_scheduled_tokens)
             ][ctx_bucket]

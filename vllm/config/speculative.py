@@ -176,15 +176,17 @@ class SpeculativeConfig:
 
     # dynamic speculative decoding control
     num_speculative_tokens_per_batch_size: (
-        list[tuple[int, int, int]]
-        | list[tuple[int, int, int, int, int]]
-        | None
+        list[tuple[int, int, int]] | list[tuple[int, int, int, int, int]] | None
     ) = None
     """Schedule used to dynamically choose speculative-token count. Entries are
     ``(bs_lo, bs_hi, K)`` for context-independent schedules or
     ``(bs_lo, bs_hi, ctx_lo, ctx_hi, K)`` for schedules forming a rectangular
     ``(batch_size x context)`` grid. Forms cannot be mixed in one schedule.
     """
+
+    ctx_agg: Literal["median", "mean", "max"] = "mean"
+    """Aggregation across decode requests' num_computed_tokens used to pick
+    the ctx bucket for 5-item schedules."""
 
     # params generated in the post-init stage
     draft_model_config: SkipValidation[ModelConfig] = None  # type: ignore
