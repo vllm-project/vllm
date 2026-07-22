@@ -11,7 +11,7 @@ from vllm.renderers import TokenizeParams
 from vllm.renderers.hf import safe_apply_chat_template
 from vllm.renderers.inputs.preprocess import (
     parse_model_prompt,
-    prompt_to_seq,
+    prompt_to_seq, extract_target_prompt,
 )
 from vllm.tasks import PoolingTask
 from vllm.utils.mistral import is_mistral_tokenizer
@@ -550,6 +550,20 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
                 **(params.extra_kwargs or {}),
                 "compressed_token_type_ids": compressed,
             }
+
+        engine_prompt_extras = (
+            {
+                k: v
+                for k in ("mm_processor_kwargs", "cache_salt")
+                if (v := prompt_extras.get(k)) is not None
+            }
+            if prompt_extras
+            else None
+        )
+
+        if engine_prompt_extras:
+            target_prompt = extract_target_prompt(self.model_config, engine_prompt)
+            target_prompt.update(engine_prompt_extras)
 
         engine_input = self.renderer.process_for_engine(engine_prompt, arrival_time)
 

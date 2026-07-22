@@ -83,7 +83,6 @@ class PoolingBaseServing(ABC, BaseServing):
     def get_io_processor(self, request: AnyPoolingRequest) -> PoolingIOProcessor:
         raise NotImplementedError
 
-    @torch.inference_mode()
     async def _preprocessing(
         self, io_processor: PoolingIOProcessor, ctx: PoolingServeContext
     ):
