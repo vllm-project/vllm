@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for direct symmetric-memory DCP A2A."""
 
+from unittest.mock import MagicMock
+
 import multiprocess as mp
 import pytest
 import torch
@@ -60,6 +62,14 @@ class _FakeGroupCoordinator:
     cpu_group = None
 
 
+class _FakeProcessGroup:
+    def size(self) -> int:
+        return 4
+
+    def rank(self) -> int:
+        return 0
+
+
 class TestDirectA2AGating:
     """Test VLLM_USE_DIRECT_DCP_A2A gating (no GPU or process group needed)."""
 
@@ -114,6 +124,171 @@ class TestDirectA2AGating:
             _FakeGroupCoordinator(), torch.device("cpu"), 16, 2, 32, torch.float32, 1
         )
         assert workspace is None
+
+    def test_kv_gather_env_disabled_returns_none(self, monkeypatch):
+        from vllm.v1.attention.ops.dcp_direct_kv_gather import (
+            get_direct_dcp_kv_gather_workspace,
+        )
+
+        monkeypatch.setenv("VLLM_USE_DIRECT_DCP_KV_GATHER", "0")
+        monkeypatch.setenv("VLLM_USE_DIRECT_DCP_A2A", "1")
+        get_direct_dcp_kv_gather_workspace.cache_clear()
+        workspace = get_direct_dcp_kv_gather_workspace(
+            _FakeGroupCoordinator(), torch.device("cpu"), 64, 576, torch.bfloat16, 1
+        )
+        assert workspace is None
+
+    def test_kv_gather_flag_is_independent(self, monkeypatch):
+        from vllm.v1.attention.ops import dcp_direct_kv_gather
+
+        monkeypatch.setenv("VLLM_USE_DIRECT_DCP_KV_GATHER", "1")
+        monkeypatch.setenv("VLLM_USE_DIRECT_DCP_A2A", "0")
+        dcp_direct_kv_gather.get_direct_dcp_kv_gather_workspace.cache_clear()
+        workspace = object()
+        init_workspace = MagicMock(return_value=workspace)
+        monkeypatch.setattr(
+            dcp_direct_kv_gather,
+            "DirectDCPKVGatherWorkspace",
+            init_workspace,
+        )
+
+        result = dcp_direct_kv_gather.get_direct_dcp_kv_gather_workspace(
+            _FakeGroupCoordinator(), torch.device("cpu"), 64, 576, torch.bfloat16, 1
+        )
+        assert result is workspace
+
+    def test_kv_gather_rejects_invalid_workspace_geometry(self):
+        from vllm.v1.attention.ops.dcp_direct_kv_gather import (
+            DirectDCPKVGatherWorkspace,
+        )
+
+        with pytest.raises(ValueError, match="ubatch"):
+            DirectDCPKVGatherWorkspace(
+                None, torch.device("cpu"), 64, 576, num_ubatches=0
+            )
+        with pytest.raises(ValueError, match="divide evenly"):
+            DirectDCPKVGatherWorkspace(
+                _FakeProcessGroup(), torch.device("cpu"), 63, 576
+            )
+
+
+def test_dcp_kv_gather_selected_at_initialization(monkeypatch):
+    import vllm.model_executor.layers.attention.mla_attention as mla_attention
+
+    group = MagicMock(world_size=2)
+    monkeypatch.setattr(mla_attention, "get_dcp_group", lambda: group)
+    direct_workspace = MagicMock()
+    get_direct_workspace = MagicMock(return_value=direct_workspace)
+    monkeypatch.setattr(
+        mla_attention,
+        "get_direct_dcp_kv_gather_workspace",
+        get_direct_workspace,
+    )
+    workspace = torch.empty(96, 8)
+
+    gather = mla_attention.maybe_get_dcp_kv_gather(workspace, 64, 2, 1)
+    assert gather == direct_workspace.gather
+
+    get_direct_workspace.return_value = None
+    all_gather = MagicMock()
+    monkeypatch.setattr(torch.distributed, "all_gather_into_tensor", all_gather)
+    gather = mla_attention.maybe_get_dcp_kv_gather(workspace, 64, 2, 1)
+    assert gather is not None
+    output, local = torch.empty(4, 8), torch.empty(2, 8)
+    gather(output, local)
+    all_gather.assert_called_once_with(output, local, group=group.device_group)
+
+
+def test_dcp_chunk_workspace_alignment_covers_interleave():
+    from vllm.model_executor.layers.attention.mla_attention import (
+        align_mla_chunked_context_workspace_size,
+    )
+
+    config = MagicMock()
+    config.cache_config.block_size = 32
+    config.parallel_config.decode_context_parallel_size = 8
+    config.parallel_config.cp_kv_cache_interleave_size = 8
+    config.scheduler_config.max_num_seqs = 3
+
+    assert align_mla_chunked_context_workspace_size(config, 100) == 192
+
+
+def _distributed_direct_kv_gather_worker(env: dict[str, str]) -> None:
+    update_environment_variables(env)
+    local_rank = int(env["LOCAL_RANK"])
+    device = torch.device(f"cuda:{local_rank}")
+    torch.accelerator.set_device_index(local_rank)
+    dist.init_process_group(backend="nccl")
+    try:
+        from vllm.v1.attention.ops import dcp_direct_kv_gather
+
+        rank = dist.get_rank()
+        world_size = dist.get_world_size()
+        token_dim = 576
+        max_gathered_tokens = 128 * world_size
+        active_ubatch = [0]
+        dcp_direct_kv_gather.dbo_current_ubatch_id = lambda: active_ubatch[0]
+
+        for dtype_idx, dtype_name in enumerate(("bfloat16", "float16")):
+            dtype = _dtype_from_name(dtype_name)
+            workspace = dcp_direct_kv_gather.DirectDCPKVGatherWorkspace(
+                dist.group.WORLD,
+                device,
+                max_gathered_tokens,
+                token_dim,
+                dtype,
+                num_ubatches=2,
+            )
+
+            # Mimic the chunked-context layout: source and destination are
+            # disjoint slices of one persistent workspace tensor.
+            storage = torch.zeros(
+                (world_size + 1) * 128, token_dim, device=device, dtype=dtype
+            )
+            for iteration, num_tokens in enumerate((1, 128, 17, 5, 33)):
+                generator = torch.Generator(device=device)
+                generator.manual_seed(7000 + rank * 101 + dtype_idx * 977 + iteration)
+                local_kv = storage[:num_tokens]
+                local_kv.copy_(
+                    torch.randn(
+                        num_tokens,
+                        token_dim,
+                        device=device,
+                        dtype=torch.float32,
+                        generator=generator,
+                    ).to(dtype)
+                )
+                gathered = storage[128 : 128 + num_tokens * world_size]
+                active_ubatch[0] = iteration % 2
+                workspace.gather(gathered, local_kv)
+                torch.accelerator.synchronize()
+
+                expected = torch.empty_like(gathered)
+                dist.all_gather_into_tensor(expected, local_kv.contiguous())
+                assert torch.equal(
+                    gathered.view(torch.uint8), expected.view(torch.uint8)
+                )
+    finally:
+        dist.destroy_process_group()
+
+
+@pytest.mark.parametrize(
+    "world_size",
+    [
+        pytest.param(
+            4,
+            marks=pytest.mark.skipif(
+                torch.accelerator.device_count() < 4, reason="Need at least 4 GPUs."
+            ),
+        ),
+    ],
+)
+def test_distributed_direct_kv_gather_matches_reference(world_size: int):
+    _distributed_run(
+        _distributed_direct_kv_gather_worker,
+        world_size=world_size,
+        extra_env={},
+    )
 
 
 def _distributed_direct_a2a_worker(env: dict[str, str]) -> None:
@@ -279,9 +454,7 @@ def _distributed_direct_a2a_worker(env: dict[str, str]) -> None:
                 ],
                 device=device,
             ).repeat_interleave(tokens_per_seq)
-            assert torch.equal(
-                actual[all_empty], torch.zeros_like(actual[all_empty])
-            )
+            assert torch.equal(actual[all_empty], torch.zeros_like(actual[all_empty]))
             assert not torch.isnan(actual.float()).any()
             _assert_close(actual, expected, dtype)
 

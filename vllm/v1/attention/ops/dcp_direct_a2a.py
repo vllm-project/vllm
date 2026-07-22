@@ -25,19 +25,6 @@ except ImportError:
     symm_mem = None  # type: ignore[assignment]
     symm_mem_available = False
 
-_workspace_created = False
-
-
-def direct_dcp_a2a_active() -> bool:
-    """True once any attention layer owns a direct DCP A2A workspace.
-
-    The direct combine kernel masks empty-KV-shard rows internally (see
-    ``DirectDCPA2AWorkspace.lse_reduce``), so callers use this to skip
-    redundant python-side masking and to relax CUDA-graph gating. Only valid
-    after model construction; all MLA layers share one combine configuration.
-    """
-    return _workspace_created
-
 
 class DirectDCPA2AWorkspace:
     """Persistent symmetric buffers for direct DCP output exchange."""
@@ -183,7 +170,7 @@ def get_direct_dcp_a2a_workspace(
         )
     if not use_direct:
         return None
-    workspace = DirectDCPA2AWorkspace(
+    return DirectDCPA2AWorkspace(
         group.device_group,
         device,
         max_num_tokens,
@@ -192,6 +179,3 @@ def get_direct_dcp_a2a_workspace(
         dtype,
         num_ubatches,
     )
-    global _workspace_created
-    _workspace_created = True
-    return workspace

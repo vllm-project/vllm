@@ -112,6 +112,31 @@ def _get_multi_ctas_kv_counter_buffer(
     return _fi_multi_ctas_kv_counter
 
 
+def _flatten_and_mask_empty_kv_rows(
+    output: torch.Tensor,
+    lse: torch.Tensor | None,
+    seq_lens: torch.Tensor,
+    mask_empty_shards: bool,
+) -> tuple[torch.Tensor, torch.Tensor | None]:
+    queries_per_request = output.shape[1]
+    output = output.view(-1, output.shape[-2], output.shape[-1])
+    if lse is None:
+        return output, None
+    lse = lse.view(output.shape[0], -1)
+
+    if not mask_empty_shards:
+        return output, lse
+
+    # FlashInfer leaves outputs undefined for zero-length sequences. DCP can
+    # produce an empty local KV shard for a non-empty request; the fallback
+    # combine paths (ag_rs / NCCL a2a) consume the LSE as-is, so zero the
+    # affected rows in place before they cross ranks.
+    empty_rows = (seq_lens == 0).repeat_interleave(queries_per_request)
+    output.masked_fill_(empty_rows[:, None, None], 0)
+    lse.masked_fill_(empty_rows[:, None], float("-inf"))
+    return output, lse
+
+
 class FlashInferMLAMetadataBuilder(MLACommonMetadataBuilder[MLACommonMetadata]):
     _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
     query_len_support: ClassVar[QueryLenSupport] = QueryLenSupport.UNIFORM
@@ -311,7 +336,7 @@ class FlashInferMLAImpl(MLACommonImpl[MLACommonMetadata]):
         workspace_buffer = _get_workspace_buffer(return_lse)
         # trtllm-gen rejects MLA head counts it can't tile (e.g. 96);
         # fall back to cute-dsl for those.
-        decode_backend = _select_mla_decode_backend(self.num_heads)
+        decode_backend = _select_mla_decode_backend(q.shape[-2])
         extra_kwargs = {}
         if decode_backend:
             extra_kwargs["backend"] = decode_backend
@@ -352,7 +377,9 @@ class FlashInferMLAImpl(MLACommonImpl[MLACommonMetadata]):
         else:
             o, lse = kernel_out, None
 
-        # Flatten the output for consistent shape
-        o = o.view(-1, o.shape[-2], o.shape[-1])
-
-        return o, lse
+        return _flatten_and_mask_empty_kv_rows(
+            o,
+            lse,
+            attn_metadata.decode.seq_lens,
+            not getattr(layer, "dcp_combine_masks_empty_shards", False),
+        )

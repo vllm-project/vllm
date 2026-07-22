@@ -447,7 +447,8 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
 
   if(VLLM_GPU_LANG STREQUAL "CUDA")
     list(APPEND VLLM_STABLE_EXT_SRC
-      "csrc/libtorch_stable/attention/dcp_direct_a2a.cu")
+      "csrc/libtorch_stable/attention/dcp_direct_a2a.cu"
+      "csrc/libtorch_stable/attention/dcp_direct_kv_gather.cu")
 
     SET(CUTLASS_ENABLE_HEADERS_ONLY ON CACHE BOOL "Enable only the header library")
 
