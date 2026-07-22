@@ -387,7 +387,7 @@ class RequestOffloadState:
 def _parse_tier_filter(raw: Any) -> TierFilter:
     """Parse raw kv_transfer_params tier matchers into a TierFilter."""
     if not isinstance(raw, list):
-        logger.warning_once(
+        logger.warning(
             "_parse_tier_filter: expected list, got %s; ignoring",
             type(raw).__name__,
         )
@@ -395,7 +395,7 @@ def _parse_tier_filter(raw: Any) -> TierFilter:
     matchers: list[TierMatcher] = []
     for entry in raw:
         if not isinstance(entry, dict):
-            logger.warning_once("_parse_tier_filter: entry is not a dict; skipping")
+            logger.warning("_parse_tier_filter: entry is not a dict; skipping")
             continue
         medium: Medium | None = None
         locality: Locality | None = None
@@ -404,7 +404,7 @@ def _parse_tier_filter(raw: Any) -> TierFilter:
             try:
                 medium = Medium(raw_medium.upper())
             except (ValueError, AttributeError):
-                logger.warning_once(
+                logger.warning(
                     "_parse_tier_filter: unknown medium %r; skipping entry",
                     raw_medium,
                 )
@@ -414,7 +414,7 @@ def _parse_tier_filter(raw: Any) -> TierFilter:
             try:
                 locality = Locality(raw_locality.upper())
             except (ValueError, AttributeError):
-                logger.warning_once(
+                logger.warning(
                     "_parse_tier_filter: unknown locality %r; skipping entry",
                     raw_locality,
                 )
