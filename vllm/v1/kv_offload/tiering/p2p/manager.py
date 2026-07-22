@@ -83,15 +83,15 @@ def _remote_decoder_params(kv_params: dict | None) -> dict | None:
     return kv_params.get("remote_decoder")
 
 
-def _remote_kv_peer_params(kv_params: dict | None) -> dict | None:
-    """Return the ``remote_kv_peer`` sub-dict, or None if absent.
+def _remote_kv_source_params(kv_params: dict | None) -> dict | None:
+    """Return the ``remote_kv_source`` sub-dict, or None if absent.
 
-    Set on symmetric-P2P consumer requests to name the remote peer they
+    Set on symmetric-P2P consumer requests to name the remote source they
     pull from; carries kv_request_id, remote_host, remote_port.
     """
     if not kv_params:
         return None
-    return kv_params.get("remote_kv_peer")
+    return kv_params.get("remote_kv_source")
 
 
 def _peer_id_from_params(role_params: dict) -> str | None:
@@ -109,7 +109,7 @@ class P2PSourceInfo:
 
     kv_request_id: str
     peer_id: str
-    do_probe: bool  # False for remote_prefiller (PD), True for remote_kv_peer
+    do_probe: bool  # False for remote_prefiller (PD), True for remote_kv_source
 
 
 @dataclass(slots=True)
@@ -126,11 +126,11 @@ class P2PDestInfo:
 
 def _parse_source(kv_params: dict | None) -> P2PSourceInfo | None:
     """Parse the consumer sub-dict (PD ``remote_prefiller`` or symmetric
-    ``remote_kv_peer``) into a ``P2PSourceInfo``, or None if absent/incomplete."""
+    ``remote_kv_source``) into a ``P2PSourceInfo``, or None if absent/incomplete."""
     role = _remote_prefiller_params(kv_params)
     do_probe = False
     if role is None:
-        role = _remote_kv_peer_params(kv_params)
+        role = _remote_kv_source_params(kv_params)
         do_probe = True
     if not role:
         return None
@@ -333,7 +333,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         if source.kv_request_id in self._failed_req_ids:
             return LookupResult.MISS
 
-        # Symmetric-P2P consumer (``remote_kv_peer`` sub-dict): probe the
+        # Symmetric-P2P consumer (``remote_kv_source`` sub-dict): probe the
         # peer asynchronously. First call registers the (kv_request_id,
         # block_hash) entry and returns RETRY; flush_pending_lookups()
         # in on_schedule_end batches the LookupMsg; a later step's
@@ -360,7 +360,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
 
         Parses the P2P routing state onto ``req_context`` (cached for the
         later lookup/submit/finish calls). On the consumer side
-        (``remote_prefiller`` for PD or ``remote_kv_peer`` for symmetric
+        (``remote_prefiller`` for PD or ``remote_kv_source`` for symmetric
         P2P), open a session toward the producer at remote_host:remote_port
         so submit_load can issue FetchMsg as soon as it fires. On the
         prefiller side, sessions are created when the consumer's inbound
@@ -377,7 +377,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
     def on_request_finished(self, req_context: ReqContext) -> None:
         """Cancels pending loads and prunes session-scoped state.
 
-        Consumer side (``remote_prefiller`` for PD or ``remote_kv_peer``
+        Consumer side (``remote_prefiller`` for PD or ``remote_kv_source``
         for symmetric-P2P): looks up the session by peer_id because the
         producer's address is what addresses the client-role load to
         cancel; also drops any pending symmetric-P2P lookup state via
@@ -606,7 +606,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         """Return the existing session for peer_id, or open one outbound.
 
         Consumer-side helper for on_new_request: when ``remote_prefiller``
-        (PD) or ``remote_kv_peer`` (symmetric P2P) is set, the consumer must reach the
+        (PD) or ``remote_kv_source`` (symmetric P2P) is set, the consumer must reach the
         producer at peer_id. If we already have a session toward that
         peer (from a prior load or a peer-initiated inbound), reuse it;
         otherwise open an outbound ControlConnection and build a

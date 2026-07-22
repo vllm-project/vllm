@@ -51,15 +51,15 @@ def _remote_prefiller_kv_params(
     }
 
 
-def _remote_kv_peer_kv_params(
+def _remote_kv_source_kv_params(
     remote_host: str = "10.0.0.1",
     remote_port: int = 8000,
     kv_request_id: str = "req-1",
 ) -> dict:
-    """Symmetric-P2P consumer kv_transfer_params: ``remote_kv_peer`` sub-dict has
+    """Symmetric-P2P consumer kv_transfer_params: ``remote_kv_source`` sub-dict has
     the same shape as ``remote_prefiller`` (kv_request_id + remote_host + port)."""
     return {
-        "remote_kv_peer": {
+        "remote_kv_source": {
             "kv_request_id": kv_request_id,
             "remote_host": remote_host,
             "remote_port": remote_port,
@@ -483,14 +483,14 @@ class TestOnRequestFinished:
         assert session.finishes == ["req-1"]
 
     def test_p2p_consumer_side_calls_session_finish_request(self):
-        """Symmetric-P2P consumer finish (``remote_kv_peer`` set) routes via peer_id
+        """Symmetric-P2P consumer finish (``remote_kv_source`` set) routes via peer_id
         so the session drops any pending lookups (cancel_lookups) and
         cancels any inbound load."""
         mgr = _make_manager()
         peer_id = "10.0.0.1:8000"
         session = _FakeSession(peer_id=peer_id)
         mgr._sessions[peer_id] = session
-        ctx = _req_context(kv_params=_remote_kv_peer_kv_params(kv_request_id="req-1"))
+        ctx = _req_context(kv_params=_remote_kv_source_kv_params(kv_request_id="req-1"))
         mgr.on_request_finished(ctx)
         assert session.finishes == ["req-1"]
 

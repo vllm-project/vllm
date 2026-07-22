@@ -191,7 +191,7 @@ peer's own role), so the name reads as "the remote ___ I transfer with".
 | --- | --- | --- | --- |
 | `remote_decoder` | prefill producer request | `kv_request_id` | Peer computes KV and keeps it available in CPU cache for the remote decoder to pull. |
 | `remote_prefiller` | decode consumer request | `kv_request_id`, `remote_host`, `remote_port` | Peer pulls KV from the remote prefiller at the given address (classic P/D disaggregation). |
-| `remote_kv_peer` | P2P consumer request | `kv_request_id`, `remote_host`, `remote_port` | Peer looks up and pulls whatever blocks the remote peer currently holds in CPU cache. |
+| `remote_kv_source` | P2P consumer request | `kv_request_id`, `remote_host`, `remote_port` | Peer looks up and pulls whatever blocks the remote source currently holds in CPU cache. |
 
 Field semantics:
 
@@ -201,8 +201,8 @@ Field semantics:
 
 Allowed and forbidden combinations:
 
-- **`remote_decoder` + `remote_kv_peer`** is the only legal multi-key combination: a prefill producer may *also* act as a P2P consumer for the same request — skipping prefix prefill by pulling cached blocks from a peer while still keeping its own computed blocks available for a downstream decoder.
-- Forbidden: `remote_prefiller` + `remote_decoder` (contradictory roles), `remote_prefiller` + `remote_kv_peer` (two competing fetch sources), and all three together.
+- **`remote_decoder` + `remote_kv_source`** is the only legal multi-key combination: a prefill producer may *also* act as a P2P consumer for the same request — skipping prefix prefill by pulling cached blocks from a source while still keeping its own computed blocks available for a downstream decoder.
+- Forbidden: `remote_prefiller` + `remote_decoder` (contradictory roles), `remote_prefiller` + `remote_kv_source` (two competing fetch sources), and all three together.
 
 Minimal examples (values that would appear in the request's `kv_transfer_params`):
 
@@ -219,11 +219,11 @@ kv_transfer_params = {
     }
 }
 
-# P2P consumer — pull whatever the peer already has cached
+# P2P consumer — pull whatever the source already has cached
 kv_transfer_params = {
-    "remote_kv_peer": {
+    "remote_kv_source": {
         "kv_request_id": "<unique-transfer-id>",
-        "remote_host": "<peer-node-ip>",
+        "remote_host": "<source-node-ip>",
         "remote_port": 5710,
     }
 }
@@ -239,7 +239,7 @@ Runtime handshake for a P2P (or P/D) pull, once the orchestrator has set the key
 6. The producer performs the **NIXL WRITE** transfer and sends **`TransferDone`** with a success status.
 7. On `get_finished`, hits are loaded into GPU as ordinary cache hits; misses are recomputed by the engine.
 
-In classic **P/D mode** (`remote_prefiller` set, no `remote_kv_peer`), the lookup phase (steps 2–4) is skipped: the decode consumer assumes the prefiller holds all of the request's blocks, so every block `lookup()` returns an immediate hit and the consumer jumps straight to the **`FetchMsg`** in step 5. The `LookupMsg`/`LookupRespMsg` round-trip only happens in P2P mode, where the consumer does not know in advance which blocks the peer has cached.
+In classic **P/D mode** (`remote_prefiller` set, no `remote_kv_source`), the lookup phase (steps 2–4) is skipped: the decode consumer assumes the prefiller holds all of the request's blocks, so every block `lookup()` returns an immediate hit and the consumer jumps straight to the **`FetchMsg`** in step 5. The `LookupMsg`/`LookupRespMsg` round-trip only happens in P2P mode, where the consumer does not know in advance which blocks the peer has cached.
 
 ## Tuning Tips
 

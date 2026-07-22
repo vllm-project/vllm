@@ -225,7 +225,7 @@ class P2PSession:
         """Register or resolve one (kv_request_id, block_hash) probe.
 
         Called from the manager's lookup() for symmetric-P2P consumers
-        (``remote_kv_peer`` sub-dict in kv_transfer_params). See
+        (``remote_kv_source`` sub-dict in kv_transfer_params). See
         ``ClientRole.register_lookup`` for the state-machine contract.
         """
         return self._client.register_lookup(kv_request_id, block_hash)
