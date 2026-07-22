@@ -4,7 +4,7 @@
 import pytest
 import torch
 
-from vllm.config.mamba import MambaBackendEnum, MambaConfig
+from vllm.config.mamba import MambaConfig, MambaDecodeBackendEnum
 from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
     FlashInferSSUBackend,
     TritonSSUBackend,
@@ -44,25 +44,27 @@ def _kv_cache_config_with_ssu(
     )
 
 
-def test_default_backend_is_triton():
+def test_default_decode_backend_is_triton():
     initialize_mamba_ssu_backend(MambaConfig(), _kv_cache_config_with_ssu())
     backend = get_mamba_ssu_backend()
     assert isinstance(backend, TritonSSUBackend)
     assert backend.name == "triton"
 
 
-def test_explicit_triton_backend():
+def test_explicit_triton_decode_backend():
     initialize_mamba_ssu_backend(
-        MambaConfig(backend=MambaBackendEnum.TRITON), _kv_cache_config_with_ssu()
+        MambaConfig(decode_backend=MambaDecodeBackendEnum.TRITON),
+        _kv_cache_config_with_ssu(),
     )
     backend = get_mamba_ssu_backend()
     assert isinstance(backend, TritonSSUBackend)
 
 
 @pytest.mark.skipif(not HAS_FLASHINFER, reason="flashinfer not installed")
-def test_flashinfer_backend_init():
+def test_flashinfer_decode_backend_init():
     initialize_mamba_ssu_backend(
-        MambaConfig(backend=MambaBackendEnum.FLASHINFER), _kv_cache_config_with_ssu()
+        MambaConfig(decode_backend=MambaDecodeBackendEnum.FLASHINFER),
+        _kv_cache_config_with_ssu(),
     )
     backend = get_mamba_ssu_backend()
     assert isinstance(backend, FlashInferSSUBackend)
@@ -112,7 +114,8 @@ def test_flashinfer_import_error():
 def test_triton_basic_call():
     set_random_seed(0)
     initialize_mamba_ssu_backend(
-        MambaConfig(backend=MambaBackendEnum.TRITON), _kv_cache_config_with_ssu()
+        MambaConfig(decode_backend=MambaDecodeBackendEnum.TRITON),
+        _kv_cache_config_with_ssu(),
     )
     device = "cuda"
     batch_size = 2

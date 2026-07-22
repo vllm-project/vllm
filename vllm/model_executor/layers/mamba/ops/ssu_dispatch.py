@@ -5,7 +5,7 @@ Dispatch module for Mamba selective state update (SSU) backends.
 
 Provides a unified `selective_state_update` function that dispatches to
 the Triton, FlashInfer, or CPU backend based on the configured
-`MambaBackendEnum`. On CPU-only platforms (PowerPC, x86 without CUDA)
+`MambaDecodeBackendEnum`. On CPU-only platforms (PowerPC, x86 without CUDA)
 the backend defaults to 'cpu'.
 """
 
@@ -13,7 +13,7 @@ from abc import ABC, abstractmethod
 
 import torch
 
-from vllm.config.mamba import MambaBackendEnum, MambaConfig
+from vllm.config.mamba import MambaConfig, MambaDecodeBackendEnum
 from vllm.logger import init_logger
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
@@ -248,10 +248,10 @@ class CPUSSUBackend(MambaSSUBackend):
         )
 
 
-_BACKEND_REGISTRY: dict[MambaBackendEnum, type[MambaSSUBackend]] = {
-    MambaBackendEnum.TRITON: TritonSSUBackend,
-    MambaBackendEnum.FLASHINFER: FlashInferSSUBackend,
-    MambaBackendEnum.CPU: CPUSSUBackend,
+_BACKEND_REGISTRY: dict[MambaDecodeBackendEnum, type[MambaSSUBackend]] = {
+    MambaDecodeBackendEnum.TRITON: TritonSSUBackend,
+    MambaDecodeBackendEnum.FLASHINFER: FlashInferSSUBackend,
+    MambaDecodeBackendEnum.CPU: CPUSSUBackend,
 }
 
 _mamba_ssu_backend: MambaSSUBackend | None = None
@@ -276,12 +276,12 @@ def initialize_mamba_ssu_backend(
 
     global _mamba_ssu_backend
 
-    backend = mamba_config.backend
+    backend = mamba_config.decode_backend
 
     # On CPU-only platforms (PowerPC, x86 without CUDA) Triton JIT is
     # unstable or unavailable.  Silently fall back to the CPU
     # backend unless the user explicitly chose something other than "triton".
-    if backend == MambaBackendEnum.TRITON:
+    if backend == MambaDecodeBackendEnum.TRITON:
         from vllm.platforms import current_platform
 
         if current_platform.is_cpu():
@@ -289,7 +289,7 @@ def initialize_mamba_ssu_backend(
                 "CPU platform detected: overriding Mamba SSU backend "
                 "from 'triton' to 'cpu'."
             )
-            backend = MambaBackendEnum.CPU
+            backend = MambaDecodeBackendEnum.CPU
 
     if backend not in _BACKEND_REGISTRY:
         raise ValueError(

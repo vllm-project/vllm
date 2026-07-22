@@ -76,7 +76,7 @@ from vllm.config.device import Device
 from vllm.config.kernel import IrOpPriorityConfig, LinearBackend, MoEBackend
 from vllm.config.load import SafetensorsLoadStrategy
 from vllm.config.lora import MaxLoRARanks
-from vllm.config.mamba import MambaBackendEnum, MambaPrefillBackendEnum
+from vllm.config.mamba import MambaDecodeBackendEnum, MambaPrefillBackendEnum
 from vllm.config.model import (
     ConvertOption,
     HfOverrides,
@@ -696,8 +696,9 @@ class EngineArgs:
     prefix_match_unit: int | None = get_field(CacheConfig, "prefix_match_unit")
     mamba_cache_mode: MambaCacheMode = CacheConfig.mamba_cache_mode
 
-    mamba_backend: MambaBackendEnum = MambaBackendEnum.TRITON
-    mamba_prefill_backend: MambaPrefillBackendEnum = MambaPrefillBackendEnum.TRITON
+    mamba_decode_backend: MambaDecodeBackendEnum | None = None
+    mamba_backend: MambaDecodeBackendEnum | None = None
+    mamba_prefill_backend: MambaPrefillBackendEnum | None = None
     enable_mamba_cache_stochastic_rounding: bool = (
         MambaConfig.enable_stochastic_rounding
     )
@@ -745,6 +746,12 @@ class EngineArgs:
             self.attention_config = AttentionConfig(**self.attention_config)
         if isinstance(self.mamba_config, dict):
             self.mamba_config = MambaConfig(**self.mamba_config)
+        if self.mamba_decode_backend is not None and self.mamba_backend is not None:
+            raise ValueError(
+                "mamba_decode_backend and mamba_backend are mutually exclusive"
+            )
+        if self.mamba_backend is not None:
+            self.mamba_decode_backend = self.mamba_backend
         if isinstance(self.kernel_config, dict):
             self.kernel_config = KernelConfig(**self.kernel_config)
         if isinstance(self.eplb_config, dict):
@@ -935,7 +942,18 @@ class EngineArgs:
             title="MambaConfig",
             description=MambaConfig.__doc__,
         )
-        mamba_group.add_argument("--mamba-backend", **mamba_kwargs["backend"])
+        mamba_kwargs["decode_backend"]["default"] = None
+        mamba_group.add_argument(
+            "--mamba-decode-backend", **mamba_kwargs["decode_backend"]
+        )
+        mamba_backend_alias_kwargs = mamba_kwargs["decode_backend"].copy()
+        mamba_backend_alias_kwargs["help"] = "Alias for --mamba-decode-backend."
+        mamba_group.add_argument(
+            "--mamba-backend",
+            dest="mamba_backend",
+            **mamba_backend_alias_kwargs,
+        )
+        mamba_kwargs["prefill_backend"]["default"] = None
         mamba_group.add_argument(
             "--mamba-prefill-backend", **mamba_kwargs["prefill_backend"]
         )
@@ -2267,16 +2285,20 @@ class EngineArgs:
         # Mamba config overrides
         mamba_config = copy.deepcopy(self.mamba_config)
         # Convert string to enum if needed (CLI parsing returns a string)
-        if isinstance(self.mamba_backend, str):
-            mamba_config.backend = MambaBackendEnum[self.mamba_backend.upper()]
-        else:
-            mamba_config.backend = self.mamba_backend
-        if isinstance(self.mamba_prefill_backend, str):
-            mamba_config.prefill_backend = MambaPrefillBackendEnum[
-                self.mamba_prefill_backend.upper()
-            ]
-        else:
-            mamba_config.prefill_backend = self.mamba_prefill_backend
+        if self.mamba_decode_backend is not None:
+            if isinstance(self.mamba_decode_backend, str):
+                mamba_config.decode_backend = MambaDecodeBackendEnum[
+                    self.mamba_decode_backend.upper()
+                ]
+            else:
+                mamba_config.decode_backend = self.mamba_decode_backend
+        if self.mamba_prefill_backend is not None:
+            if isinstance(self.mamba_prefill_backend, str):
+                mamba_config.prefill_backend = MambaPrefillBackendEnum[
+                    self.mamba_prefill_backend.upper()
+                ]
+            else:
+                mamba_config.prefill_backend = self.mamba_prefill_backend
         if self.enable_mamba_cache_stochastic_rounding:
             mamba_config.enable_stochastic_rounding = (
                 self.enable_mamba_cache_stochastic_rounding

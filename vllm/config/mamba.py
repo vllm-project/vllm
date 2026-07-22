@@ -4,13 +4,13 @@
 from enum import Enum, EnumMeta
 from typing import Any
 
-from pydantic import field_validator
+from pydantic import AliasChoices, Field, field_validator
 
 from vllm.config.utils import config
 
 
-class _MambaBackendEnumMeta(EnumMeta):
-    """Metaclass for MambaBackendEnum to provide better error messages."""
+class _MambaDecodeBackendEnumMeta(EnumMeta):
+    """Metaclass providing actionable Mamba decode backend errors."""
 
     def __getitem__(cls, name: str):
         try:
@@ -18,16 +18,19 @@ class _MambaBackendEnumMeta(EnumMeta):
         except KeyError:
             valid = ", ".join(cls.__members__.keys())
             raise ValueError(
-                f"Unknown Mamba SSU backend: '{name}'. Valid options are: {valid}"
+                f"Unknown Mamba decode backend: '{name}'. Valid options are: {valid}"
             ) from None
 
 
-class MambaBackendEnum(Enum, metaclass=_MambaBackendEnumMeta):
-    """Enumeration of supported Mamba SSU (selective state update) backends."""
+class MambaDecodeBackendEnum(Enum, metaclass=_MambaDecodeBackendEnumMeta):
+    """Enumeration of Mamba selective-state-update backends used for decode."""
 
     TRITON = "triton"
     FLASHINFER = "flashinfer"
     CPU = "cpu"
+
+
+MambaBackendEnum = MambaDecodeBackendEnum
 
 
 class _MambaPrefillBackendEnumMeta(EnumMeta):
@@ -39,8 +42,7 @@ class _MambaPrefillBackendEnumMeta(EnumMeta):
         except KeyError:
             valid = ", ".join(cls.__members__.keys())
             raise ValueError(
-                f"Unknown Mamba prefill backend: '{name}'. "
-                f"Valid options are: {valid}"
+                f"Unknown Mamba prefill backend: '{name}'. Valid options are: {valid}"
             ) from None
 
 
@@ -55,8 +57,11 @@ class MambaPrefillBackendEnum(Enum, metaclass=_MambaPrefillBackendEnumMeta):
 class MambaConfig:
     """Configuration for Mamba SSM backends."""
 
-    backend: MambaBackendEnum = MambaBackendEnum.TRITON
-    """Mamba SSU backend to use."""
+    decode_backend: MambaDecodeBackendEnum = Field(
+        default=MambaDecodeBackendEnum.TRITON,
+        validation_alias=AliasChoices("decode_backend", "backend"),
+    )
+    """Mamba selective-state-update backend used for decode."""
 
     prefill_backend: MambaPrefillBackendEnum = MambaPrefillBackendEnum.TRITON
     """Mamba2 SSD prefill backend to use. This is independent of the SSU
@@ -71,12 +76,12 @@ class MambaConfig:
     generation. 0 uses the Triton default. Higher values improve randomness
     quality at the cost of compute."""
 
-    @field_validator("backend", mode="before")
+    @field_validator("decode_backend", mode="before")
     @classmethod
-    def validate_backend_before(cls, value: Any) -> Any:
-        """Enable parsing of the `backend` enum type from string."""
+    def validate_decode_backend_before(cls, value: Any) -> Any:
+        """Enable parsing of the decode backend enum from string."""
         if isinstance(value, str):
-            return MambaBackendEnum[value.upper()]
+            return MambaDecodeBackendEnum[value.upper()]
         return value
 
     @field_validator("prefill_backend", mode="before")
@@ -86,6 +91,14 @@ class MambaConfig:
         if isinstance(value, str):
             return MambaPrefillBackendEnum[value.upper()]
         return value
+
+    @property
+    def backend(self) -> MambaDecodeBackendEnum:
+        return self.decode_backend
+
+    @backend.setter
+    def backend(self, value: MambaDecodeBackendEnum) -> None:
+        self.decode_backend = value
 
     def __post_init__(self):
         if self.enable_stochastic_rounding:
@@ -98,7 +111,7 @@ class MambaConfig:
                     "`--enable-mamba-cache-stochastic-rounding`."
                 )
             if (
-                self.backend == MambaBackendEnum.TRITON
+                self.decode_backend == MambaDecodeBackendEnum.TRITON
                 and not current_platform.is_device_capability_family(100)
             ):
                 raise ValueError(
@@ -106,5 +119,5 @@ class MambaConfig:
                     "compute capability 10.0 (data center Blackwell). The `cvt.rs` "
                     "PTX instruction is not supported on your GPU. Please do not "
                     "specify `--enable-mamba-cache-stochastic-rounding`, "
-                    "or set `--mamba-backend flashinfer`."
+                    "or set `--mamba-decode-backend flashinfer`."
                 )
