@@ -628,7 +628,7 @@ class MessageQueue:
             self.deadline = sys.maxsize if timeout is None else self.started + timeout
 
             # if should_warn, we need to wake up periodically to log
-            self.warning_wait_time_ms = (
+            self.warning_wait_time_ms: int | None = (
                 VLLM_RINGBUFFER_WARNING_INTERVAL * 1000 if should_warn else None
             )
 
@@ -715,16 +715,14 @@ class MessageQueue:
                     try:
                         yield buf
                     finally:
-                        # caller has read from the buffer
-                        # set the read flag
+                        # caller has read from the buffer; set the read flag.
                         metadata_buffer[self.local_reader_rank + 1] = 1
                         # Memory fence ensures the read flag is visible to the writer.
                         # Without this, writer may not see our read completion and
                         # could wait indefinitely for all readers to finish.
                         memory_fence()
-                        self.current_idx = (
-                            self.current_idx + 1
-                        ) % self.buffer.max_chunks
+                        next_idx = self.current_idx + 1
+                        self.current_idx = next_idx % self.buffer.max_chunks
                         self._spin_condition.record_read()
                 break
 
