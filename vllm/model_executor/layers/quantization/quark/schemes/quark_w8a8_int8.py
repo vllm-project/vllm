@@ -63,6 +63,7 @@ class QuarkW8A8Int8(QuarkScheme):
             is_static_input_scheme=(self.is_static_input_scheme is True),
             input_symmetric=(self.input_symmetric is True),
             module_name=self.__class__.__name__,
+            weight_shape=(sum(output_partition_sizes), input_size_per_partition),
         )
 
         # WEIGHT
