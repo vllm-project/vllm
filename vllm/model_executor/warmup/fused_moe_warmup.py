@@ -1,270 +1,216 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Warm up fused MoE kernels that are not reliably exercised by model-level dummy
-runs.
-"""
-
-from collections.abc import Iterable
-from typing import Any
+"""Compile WNA16 MoE Triton kernels through the shared JIT contract."""
 
 import torch
 
-from vllm.logger import init_logger
+from vllm.model_executor.layers.fused_moe.experts.triton_moe import (
+    TritonWNA16Experts,
+)
 from vllm.model_executor.layers.fused_moe.fused_moe import (
-    should_moe_wna16_use_cuda,
+    _WNA16_TRITON_KERNEL,
+    Wna16TritonWarmupConfig,
+    get_moe_wna16_block_config,
+    try_get_optimal_moe_config,
 )
 from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
 from vllm.model_executor.layers.quantization.moe_wna16 import MoeWNA16Method
-
-logger = init_logger(__name__)
-
-_WNA16_M_BUCKET_STARTS = (1, 21, 41)
+from vllm.triton_utils import tl
 
 
-def _wna16_uses_triton_path(
+def _compute_type(dtype: torch.dtype) -> tl.dtype:
+    if dtype == torch.bfloat16:
+        return tl.bfloat16
+    if dtype == torch.float16:
+        return tl.float16
+    if dtype == torch.float32:
+        return tl.float32
+    if dtype in (torch.float8_e4m3fn, torch.float8_e4m3fnuz):
+        return tl.bfloat16
+    raise ValueError(f"Unsupported WNA16 MoE dtype: {dtype}")
+
+
+def _kernel_config(
+    config: dict[str, int],
     *,
-    m: int,
-    call_top_k: int,
-    num_experts: int,
+    num_valid_tokens: int,
+    size_k: int,
+    size_n: int,
     group_size: int,
-    weight_bits: int,
-) -> bool:
-    return not should_moe_wna16_use_cuda(
-        num_valid_tokens=m * call_top_k,
+    real_top_k: int,
+) -> dict[str, int]:
+    kernel_config = config.copy()
+    kernel_config.update(
+        get_moe_wna16_block_config(
+            config=kernel_config,
+            use_moe_wna16_cuda=False,
+            num_valid_tokens=num_valid_tokens,
+            size_k=size_k,
+            size_n=size_n,
+            num_experts=size_n,
+            group_size=group_size,
+            real_top_k=real_top_k,
+            block_size_m=kernel_config["BLOCK_SIZE_M"],
+        )
+    )
+    return kernel_config
+
+
+def _warmup_config(
+    *,
+    dtype: torch.dtype,
+    weight: torch.Tensor,
+    scale: torch.Tensor,
+    zero_point: torch.Tensor | None,
+    input_size: int,
+    config: dict[str, int],
+    group_size: int,
+    mul_routed_weight: bool,
+    top_k: int,
+    topk_weights_dtype: torch.dtype | None,
+    use_int4_w4a16: bool,
+    use_int8_w8a16: bool,
+) -> Wna16TritonWarmupConfig:
+    return Wna16TritonWarmupConfig(
+        a_dtype=dtype,
+        b_dtype=weight.dtype,
+        c_dtype=dtype,
+        b_scale_dtype=scale.dtype,
+        b_zp_dtype=None if zero_point is None else zero_point.dtype,
+        topk_weights_dtype=topk_weights_dtype,
+        N=weight.size(1),
+        K=input_size,
+        stride_am=input_size,
+        stride_ak=1,
+        stride_be=weight.stride(0),
+        stride_bk=weight.stride(2),
+        stride_bn=weight.stride(1),
+        stride_cm=weight.size(1),
+        stride_cn=1,
+        stride_bse=scale.stride(0),
+        stride_bsk=scale.stride(2),
+        stride_bsn=scale.stride(1),
+        stride_bze=zero_point.stride(0) if zero_point is not None else 0,
+        stride_bzk=zero_point.stride(2) if zero_point is not None else 0,
+        stride_bzn=zero_point.stride(1) if zero_point is not None else 0,
+        block_k_diviable=input_size % config["BLOCK_SIZE_K"] == 0,
         group_size=group_size,
-        num_experts=num_experts,
-        bit=weight_bits,
+        BLOCK_SIZE_M=config["BLOCK_SIZE_M"],
+        BLOCK_SIZE_N=config["BLOCK_SIZE_N"],
+        BLOCK_SIZE_K=config["BLOCK_SIZE_K"],
+        GROUP_SIZE_M=config["GROUP_SIZE_M"],
+        SPLIT_K=config["SPLIT_K"],
+        MUL_ROUTED_WEIGHT=mul_routed_weight,
+        top_k=top_k,
+        compute_type=_compute_type(dtype),
+        has_zp=zero_point is not None,
+        use_int4_w4a16=use_int4_w4a16,
+        use_int8_w8a16=use_int8_w8a16,
+        num_warps=config.get("num_warps", 4),
+        num_stages=config.get("num_stages", 3),
     )
 
 
-def _first_wna16_triton_m(
-    *,
+def _layer_warmup_configs(
+    layer: RoutedExperts,
+    experts: TritonWNA16Experts,
     max_num_batched_tokens: int,
-    call_top_k: int,
-    num_experts: int,
-    group_size: int,
-    weight_bits: int,
-) -> int | None:
+) -> list[Wna16TritonWarmupConfig]:
     if max_num_batched_tokens <= 0:
-        return None
-
-    if _wna16_uses_triton_path(
-        m=1,
-        call_top_k=call_top_k,
-        num_experts=num_experts,
-        group_size=group_size,
-        weight_bits=weight_bits,
-    ):
-        return 1
-
-    # should_moe_wna16_use_cuda() uses:
-    #   num_valid_tokens / num_experts <= 6
-    # so the first Triton M is floor(6 * E / top_k) + 1. Keep the final
-    # predicate check below so this stays tied to the real dispatch helper.
-    m = (6 * num_experts) // call_top_k + 1
-    while m <= max_num_batched_tokens:
-        if _wna16_uses_triton_path(
-            m=m,
-            call_top_k=call_top_k,
-            num_experts=num_experts,
-            group_size=group_size,
-            weight_bits=weight_bits,
-        ):
-            return m
-        m += 1
-    return None
-
-
-def _generate_wna16_triton_m_values(
-    *,
-    max_num_batched_tokens: int,
-    num_experts: int,
-    top_k: int,
-    group_size: int,
-    weight_bits: int,
-) -> list[int]:
-    if max_num_batched_tokens <= 0 or num_experts <= 0 or top_k <= 0:
         return []
 
-    m_values: set[int] = set()
-    # fused_experts_impl dispatches WNA16 twice:
-    # - w13/gate-up with the model top-k
-    # - w2/down with top_k=1
-    # Warm up both dispatch thresholds because either GEMM can be the first
-    # one to reach the Triton WNA16 path.
-    for call_top_k in {top_k, 1}:
-        first_triton_m = _first_wna16_triton_m(
-            max_num_batched_tokens=max_num_batched_tokens,
-            call_top_k=call_top_k,
-            num_experts=num_experts,
-            group_size=group_size,
-            weight_bits=weight_bits,
-        )
-        if first_triton_m is None:
-            continue
-
-        for bucket_start in _WNA16_M_BUCKET_STARTS:
-            m = max(first_triton_m, bucket_start)
-            if m > max_num_batched_tokens:
-                continue
-            if _wna16_uses_triton_path(
-                m=m,
-                call_top_k=call_top_k,
-                num_experts=num_experts,
-                group_size=group_size,
-                weight_bits=weight_bits,
-            ):
-                m_values.add(m)
-
-    return sorted(m_values)
-
-
-def _get_warmup_expert_ids(
-    layer: RoutedExperts,
-    device: torch.device,
-) -> torch.Tensor:
-    expert_map = layer.expert_map
-    if expert_map is None:
-        return torch.arange(
-            layer.global_num_experts,
-            device=device,
-            dtype=torch.int32,
-        )
-
-    if getattr(layer, "rocm_aiter_fmoe_enabled", False):
-        expert_ids = torch.nonzero(expert_map == 1, as_tuple=False).flatten()
-    else:
-        expert_ids = torch.nonzero(expert_map >= 0, as_tuple=False).flatten()
-    return expert_ids.to(device=device, dtype=torch.int32)
-
-
-def _make_warmup_topk_ids(
-    m: int,
-    top_k: int,
-    expert_ids: torch.Tensor,
-) -> torch.Tensor:
-    expert_indices = torch.arange(m * top_k, device=expert_ids.device)
-    return expert_ids[expert_indices % expert_ids.numel()].view(m, top_k)
-
-
-def _get_wna16_moe_warmup_key(layer: RoutedExperts) -> tuple[Any, ...]:
-    quant_method = layer.quant_method
-    assert isinstance(quant_method, MoeWNA16Method)
-
-    w13_zp = getattr(layer, "w13_qzeros", None)
-    w2_zp = getattr(layer, "w2_qzeros", None)
-    w13_qweight = layer.w13_qweight
-    w2_qweight = layer.w2_qweight
-    w13_scales = layer.w13_scales
-    w2_scales = layer.w2_scales
-    return (
-        str(w13_qweight.device),
-        layer.moe_config.in_dtype,
-        tuple(w13_qweight.shape),
-        tuple(w2_qweight.shape),
-        tuple(w13_scales.shape),
-        tuple(w2_scales.shape),
-        None if w13_zp is None else tuple(w13_zp.shape),
-        None if w2_zp is None else tuple(w2_zp.shape),
-        getattr(layer, "group_size", quant_method.quant_config.group_size),
-        layer.top_k,
-        layer.activation,
-        layer.apply_router_weight_on_input,
-    )
-
-
-def _iter_wna16_moe_layers(model: torch.nn.Module) -> Iterable[RoutedExperts]:
-    for module in model.modules():
-        if isinstance(module, RoutedExperts) and isinstance(
-            module.quant_method, MoeWNA16Method
-        ):
-            yield module
-
-
-def _warmup_wna16_moe_layer(
-    layer: RoutedExperts,
-    m_values: list[int],
-) -> None:
-    if not m_values:
-        return
-
-    layer._ensure_moe_quant_config_init()
-
-    w13_qweight = layer.w13_qweight
-    device = w13_qweight.device
     dtype = layer.moe_config.in_dtype
-    expert_ids = _get_warmup_expert_ids(layer, device)
-    if expert_ids.numel() == 0:
-        return
-
+    w1 = layer.w13_weight
+    w2 = layer.w2_weight
     top_k = layer.top_k
-    hidden_dim = layer.moe_config.hidden_dim
+    assert experts.block_shape is not None
+    group_size = experts.block_shape[1]
+    pack_factor = 2 if experts.quant_config.use_int4_w4a16 else 1
+    w1_input_size = w1.size(2) * pack_factor
+    w2_input_size = w2.size(2) * pack_factor
+    config_name = experts.quant_config.config_name(dtype)
+    w1_zp = experts.quant_config.w1_zp
+    w2_zp = experts.quant_config.w2_zp
 
-    with torch.inference_mode():
-        for m in m_values:
-            x = torch.zeros((m, hidden_dim), device=device, dtype=dtype)
-            topk_ids = _make_warmup_topk_ids(m, top_k, expert_ids)
-            topk_weights = torch.full(
-                (m, top_k),
-                1.0 / top_k,
-                device=device,
+    configs: list[Wna16TritonWarmupConfig] = []
+    for num_tokens in range(1, max_num_batched_tokens + 1):
+        base_config = try_get_optimal_moe_config(
+            w1.size(),
+            w2.size(),
+            top_k,
+            config_name,
+            num_tokens,
+            block_shape=experts.block_shape,
+        )
+        num_valid_tokens = num_tokens * top_k
+        w1_config = _kernel_config(
+            base_config,
+            num_valid_tokens=num_valid_tokens,
+            size_k=w1_input_size,
+            size_n=w1.size(1),
+            group_size=group_size,
+            real_top_k=top_k,
+        )
+        w2_config = _kernel_config(
+            base_config,
+            num_valid_tokens=num_valid_tokens,
+            size_k=w2_input_size,
+            size_n=w2.size(1),
+            group_size=group_size,
+            real_top_k=1,
+        )
+        configs.append(
+            _warmup_config(
                 dtype=dtype,
+                weight=w1,
+                scale=experts.w1_scale,
+                zero_point=w1_zp,
+                input_size=w1_input_size,
+                config=w1_config,
+                group_size=group_size,
+                mul_routed_weight=False,
+                top_k=top_k,
+                topk_weights_dtype=None,
+                use_int4_w4a16=experts.quant_config.use_int4_w4a16,
+                use_int8_w8a16=experts.quant_config.use_int8_w8a16,
             )
-            out = None
-            try:
-                out = layer.quant_method.apply(
-                    layer,
-                    x,
-                    topk_weights,
-                    topk_ids,
-                    shared_experts=None,
-                    shared_experts_input=None,
-                )
-                if device.type != "cpu":
-                    torch.accelerator.synchronize()
-            finally:
-                del out, x, topk_ids, topk_weights
-
-    if device.type != "cpu":
-        torch.accelerator.empty_cache()
+        )
+        configs.append(
+            _warmup_config(
+                dtype=dtype,
+                weight=w2,
+                scale=experts.w2_scale,
+                zero_point=w2_zp,
+                input_size=w2_input_size,
+                config=w2_config,
+                group_size=group_size,
+                mul_routed_weight=not layer.apply_router_weight_on_input,
+                top_k=1,
+                topk_weights_dtype=torch.float32,
+                use_int4_w4a16=experts.quant_config.use_int4_w4a16,
+                use_int8_w8a16=experts.quant_config.use_int8_w8a16,
+            )
+        )
+    return configs
 
 
 def fused_moe_wna16_warmup(
     model: torch.nn.Module,
     max_num_batched_tokens: int,
 ) -> None:
-    seen: set[tuple[Any, ...]] = set()
-    num_warmed = 0
-
-    for layer in _iter_wna16_moe_layers(model):
-        warmup_key = _get_wna16_moe_warmup_key(layer)
-        if warmup_key in seen:
+    configs: list[Wna16TritonWarmupConfig] = []
+    for module in model.modules():
+        if not isinstance(module, RoutedExperts):
             continue
-        seen.add(warmup_key)
-
-        quant_method = layer.quant_method
-        assert isinstance(quant_method, MoeWNA16Method)
-        group_size = getattr(layer, "group_size", quant_method.quant_config.group_size)
-        w13_qweight = layer.w13_qweight
-        num_experts = w13_qweight.size(0)
-        m_values = _generate_wna16_triton_m_values(
-            max_num_batched_tokens=max_num_batched_tokens,
-            num_experts=num_experts,
-            top_k=layer.top_k,
-            group_size=group_size,
-            weight_bits=quant_method.quant_config.weight_bits,
-        )
-        if not m_values:
+        quant_method = module.quant_method
+        if not isinstance(quant_method, MoeWNA16Method):
             continue
+        moe_kernel = quant_method.moe_kernel
+        if moe_kernel is None:
+            continue
+        experts = moe_kernel.fused_experts
+        if not isinstance(experts, TritonWNA16Experts):
+            continue
+        configs.extend(_layer_warmup_configs(module, experts, max_num_batched_tokens))
 
-        logger.debug(
-            "Warming up WNA16 MoE Triton kernels for layer %s with M values %s",
-            getattr(layer, "layer_name", "<unknown>"),
-            m_values,
-        )
-        _warmup_wna16_moe_layer(layer, m_values)
-        num_warmed += 1
-
-    if num_warmed:
-        logger.info("Warmed up WNA16 MoE Triton kernels for %d config(s).", num_warmed)
+    _WNA16_TRITON_KERNEL.warmup(configs)

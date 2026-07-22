@@ -7,175 +7,124 @@ import torch
 
 import vllm.model_executor.warmup.fused_moe_warmup as fused_moe_warmup
 from vllm.model_executor.layers.fused_moe.fused_moe import (
+    Wna16TritonKernel,
+    Wna16TritonWarmupConfig,
     fused_moe_kernel_gptq_awq,
 )
+from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    trace_triton_kernel_specialization_args,
+)
+from vllm.triton_utils import tl
 
 
-def _fake_wna16_cuda_dispatch(
-    num_valid_tokens: int,
-    group_size: int,
-    num_experts: int,
-    bit: int,
-) -> bool:
-    return (
-        bit == 4 and group_size in [32, 64, 128] and num_valid_tokens / num_experts <= 6
+def _warmup_config(**overrides) -> Wna16TritonWarmupConfig:
+    values = dict(
+        a_dtype=torch.bfloat16,
+        b_dtype=torch.uint8,
+        c_dtype=torch.bfloat16,
+        b_scale_dtype=torch.bfloat16,
+        b_zp_dtype=None,
+        topk_weights_dtype=None,
+        N=256,
+        K=128,
+        stride_am=128,
+        stride_ak=1,
+        stride_be=16384,
+        stride_bk=1,
+        stride_bn=64,
+        stride_cm=256,
+        stride_cn=1,
+        stride_bse=512,
+        stride_bsk=1,
+        stride_bsn=2,
+        stride_bze=0,
+        stride_bzk=0,
+        stride_bzn=0,
+        block_k_diviable=True,
+        group_size=64,
+        BLOCK_SIZE_M=16,
+        BLOCK_SIZE_N=32,
+        BLOCK_SIZE_K=64,
+        GROUP_SIZE_M=1,
+        SPLIT_K=1,
+        MUL_ROUTED_WEIGHT=False,
+        top_k=2,
+        compute_type=tl.bfloat16,
+        has_zp=False,
+        use_int4_w4a16=True,
+        use_int8_w8a16=False,
+        num_warps=4,
+        num_stages=3,
     )
+    values.update(overrides)
+    return Wna16TritonWarmupConfig(**values)
 
 
-def test_fused_moe_gptq_awq_kernel_does_not_specialize_token_counts():
+def test_fused_moe_gptq_awq_kernel_does_not_specialize_token_counts() -> None:
+    specialization_args = set(
+        trace_triton_kernel_specialization_args(fused_moe_kernel_gptq_awq)
+    )
+    compile_key_fields = set(Wna16TritonKernel.CompileKey.__dataclass_fields__)
+
+    assert "EM" not in specialization_args
+    assert "num_valid_tokens" not in specialization_args
+    assert specialization_args <= compile_key_fields
     assert set(fused_moe_kernel_gptq_awq.do_not_specialize) >= {
         "EM",
         "num_valid_tokens",
     }
 
 
-def test_wna16_warmup_m_values_cover_first_and_second_gemm(monkeypatch):
+def test_wna16_compile_keys_dedupe_and_cover_static_meta() -> None:
+    kernel = Wna16TritonKernel()
+    config = _warmup_config()
+
+    keys = kernel.get_warmup_keys([config, config, _warmup_config(BLOCK_SIZE_M=32)])
+
+    assert len(keys) == 2
+    assert {key.BLOCK_SIZE_M for key in keys} == {16, 32}
+    assert all(key.N == 256 and key.K == 128 for key in keys)
+
+
+def test_layer_warmup_configs_cover_all_runtime_config_buckets(monkeypatch) -> None:
     monkeypatch.setattr(
         fused_moe_warmup,
-        "should_moe_wna16_use_cuda",
-        _fake_wna16_cuda_dispatch,
+        "try_get_optimal_moe_config",
+        lambda *args, **kwargs: {
+            "BLOCK_SIZE_M": 16 if args[4] <= 20 else 32,
+            "GROUP_SIZE_M": 1,
+            "SPLIT_K": 1,
+        },
     )
 
-    # 128 local experts, top_k=2:
-    # - w13 uses top_k=2, first Triton M is floor(6 * 128 / 2) + 1 = 385
-    # - w2 uses top_k=1, first Triton M is floor(6 * 128 / 1) + 1 = 769
-    assert fused_moe_warmup._generate_wna16_triton_m_values(
-        max_num_batched_tokens=4096,
-        num_experts=128,
+    w1 = torch.empty((4, 256, 64), dtype=torch.uint8)
+    w2 = torch.empty((4, 128, 64), dtype=torch.uint8)
+    layer = SimpleNamespace(
+        moe_config=SimpleNamespace(in_dtype=torch.bfloat16),
+        w13_weight=w1,
+        w2_weight=w2,
         top_k=2,
-        group_size=128,
-        weight_bits=4,
-    ) == [385, 769]
-
-
-def test_wna16_warmup_m_values_cover_reachable_default_buckets(monkeypatch):
-    monkeypatch.setattr(
-        fused_moe_warmup,
-        "should_moe_wna16_use_cuda",
-        _fake_wna16_cuda_dispatch,
+        apply_router_weight_on_input=False,
+    )
+    quant_config = SimpleNamespace(
+        use_int4_w4a16=True,
+        use_int8_w8a16=False,
+        w1_zp=None,
+        w2_zp=None,
+        config_name=lambda dtype: "int4_w4a16",
+    )
+    experts = SimpleNamespace(
+        block_shape=[0, 64],
+        quant_config=quant_config,
+        w1_scale=torch.empty((4, 256, 2), dtype=torch.bfloat16),
+        w2_scale=torch.empty((4, 128, 2), dtype=torch.bfloat16),
     )
 
-    assert fused_moe_warmup._generate_wna16_triton_m_values(
-        max_num_batched_tokens=64,
-        num_experts=4,
-        top_k=2,
-        group_size=128,
-        weight_bits=4,
-    ) == [13, 21, 25, 41]
+    configs = fused_moe_warmup._layer_warmup_configs(layer, experts, 21)
+    keys = Wna16TritonKernel().get_warmup_keys(configs)
 
-
-def test_wna16_warmup_m_values_cover_int8_default_buckets(monkeypatch):
-    monkeypatch.setattr(
-        fused_moe_warmup,
-        "should_moe_wna16_use_cuda",
-        _fake_wna16_cuda_dispatch,
-    )
-
-    assert fused_moe_warmup._generate_wna16_triton_m_values(
-        max_num_batched_tokens=64,
-        num_experts=128,
-        top_k=2,
-        group_size=128,
-        weight_bits=8,
-    ) == [1, 21, 41]
-
-
-class _FakeWNA16Method:
-    def __init__(self):
-        self.quant_config = SimpleNamespace(weight_bits=4, group_size=128)
-        self.calls = []
-
-    def apply(
-        self,
-        layer,
-        x: torch.Tensor,
-        topk_weights: torch.Tensor,
-        topk_ids: torch.Tensor,
-        shared_experts,
-        shared_experts_input: torch.Tensor | None,
-    ) -> torch.Tensor:
-        self.calls.append(
-            {
-                "x_shape": tuple(x.shape),
-                "topk_weights_shape": tuple(topk_weights.shape),
-                "topk_ids": topk_ids.clone(),
-                "shared_experts_input": shared_experts_input,
-            }
-        )
-        return x
-
-
-class _FakeRoutedExperts(torch.nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.quant_method = _FakeWNA16Method()
-        self.w13_qweight = torch.empty((2, 8, 2), dtype=torch.uint8)
-        self.w2_qweight = torch.empty((2, 4, 4), dtype=torch.uint8)
-        self.w13_scales = torch.empty((2, 8, 1))
-        self.w2_scales = torch.empty((2, 4, 1))
-        self.group_size = 128
-        self.top_k = 2
-        self.global_num_experts = 4
-        self.expert_map = torch.tensor([-1, 0, -1, 1], dtype=torch.int32)
-        self.rocm_aiter_fmoe_enabled = False
-        self.activation = "silu"
-        self.apply_router_weight_on_input = False
-        self.moe_config = SimpleNamespace(
-            in_dtype=torch.float16,
-            hidden_dim=4,
-        )
-        self.ensure_moe_quant_config_init_called = False
-
-    def _ensure_moe_quant_config_init(self):
-        self.ensure_moe_quant_config_init_called = True
-
-
-def test_wna16_warmup_uses_local_experts_and_quant_config(monkeypatch):
-    monkeypatch.setattr(fused_moe_warmup, "RoutedExperts", _FakeRoutedExperts)
-    monkeypatch.setattr(fused_moe_warmup, "MoeWNA16Method", _FakeWNA16Method)
-    monkeypatch.setattr(
-        fused_moe_warmup,
-        "should_moe_wna16_use_cuda",
-        lambda *args, **kwargs: False,
-    )
-
-    layer = _FakeRoutedExperts()
-    model = torch.nn.Sequential(layer)
-
-    fused_moe_warmup.fused_moe_wna16_warmup(
-        model,
-        max_num_batched_tokens=2,
-    )
-
-    assert layer.ensure_moe_quant_config_init_called
-    assert len(layer.quant_method.calls) == 1
-    call = layer.quant_method.calls[0]
-    assert call["x_shape"] == (1, 4)
-    assert call["topk_weights_shape"] == (1, 2)
-    assert call["shared_experts_input"] is None
-    assert call["topk_ids"].tolist() == [[1, 3]]
-
-
-def test_wna16_warmup_rocm_aiter_expert_mask(monkeypatch):
-    # ROCm AITER returns a binary expert mask from the expert_map property.
-    monkeypatch.setattr(fused_moe_warmup, "RoutedExperts", _FakeRoutedExperts)
-    monkeypatch.setattr(fused_moe_warmup, "MoeWNA16Method", _FakeWNA16Method)
-    monkeypatch.setattr(
-        fused_moe_warmup,
-        "should_moe_wna16_use_cuda",
-        lambda *args, **kwargs: False,
-    )
-
-    layer = _FakeRoutedExperts()
-    layer.rocm_aiter_fmoe_enabled = True
-    layer.expert_map = torch.tensor([0, 1, 0, 1], dtype=torch.int32)
-    model = torch.nn.Sequential(layer)
-
-    fused_moe_warmup.fused_moe_wna16_warmup(
-        model,
-        max_num_batched_tokens=2,
-    )
-
-    assert len(layer.quant_method.calls) == 1
-    call = layer.quant_method.calls[0]
-    assert call["topk_ids"].tolist() == [[1, 3]]
+    assert len(configs) == 42
+    assert {key.BLOCK_SIZE_M for key in keys} == {16, 32}
+    assert {key.MUL_ROUTED_WEIGHT for key in keys} == {False, True}
+    assert {key.top_k for key in keys} == {1, 2}
+    assert {key.topk_weights_dtype for key in keys} == {None, torch.float32}
