@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import dataclasses
+from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
@@ -5464,3 +5465,29 @@ def test_async_load_reservation_prevents_wedge_e2e():
     assert b.status == RequestStatus.WAITING
     assert b.num_preemptions == 0
     assert b.request_id not in req_to_blocks
+
+
+def _split_with_mtp_cache_retention(enabled: bool, num_tokens: int = 14) -> int:
+    scheduler = Scheduler.__new__(Scheduler)
+    scheduler.use_eagle = True
+    scheduler.retain_mamba_align_mtp_cache_block = enabled
+    scheduler.cache_config = SimpleNamespace(block_size=4)
+    scheduler.hash_block_size = 4
+    scheduler.mamba_partial_cache_hit = False
+    request = SimpleNamespace(
+        num_computed_tokens=0,
+        num_prompt_tokens=num_tokens,
+        num_tokens=num_tokens,
+        shared_prefix_boundary=0,
+    )
+    return scheduler._mamba_block_aligned_split(request, num_new_tokens=14)
+
+
+def test_mamba_align_mtp_can_retain_final_cache_boundary() -> None:
+    """MTP should not discard a complete Mamba block before the prompt tail."""
+    # The legacy EAGLE rule drops the final complete block (12 -> 8).
+    assert _split_with_mtp_cache_retention(enabled=False) == 8
+    # MTP still computes the two-token tail, so the 12-token state is valid.
+    assert _split_with_mtp_cache_retention(enabled=True) == 12
+    # Without a tail, preserve EAGLE's safety block.
+    assert _split_with_mtp_cache_retention(enabled=True, num_tokens=12) == 8
