@@ -77,7 +77,9 @@ def _make_mm_prefix_model_config(
     )
     # Bind real helper methods onto the mock.
     model_config._supports_multimodal_for_mm_prefix = (
-        ModelConfig._supports_multimodal_for_mm_prefix.__get__(model_config, ModelConfig)
+        ModelConfig._supports_multimodal_for_mm_prefix.__get__(
+            model_config, ModelConfig
+        )
     )
     return model_config
 
