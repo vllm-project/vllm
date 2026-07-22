@@ -75,7 +75,10 @@ def _probe(cls: type):
         obj.config = NvFp4LinearLayerConfig()
     elif issubclass(cls, Int8ScaledMMLinearKernel):
         obj.config = Int8ScaledMMLinearLayerConfig(
-            is_static_input_scheme=True, is_channelwise=False, input_symmetric=True
+            is_static_input_scheme=True,
+            is_channelwise=False,
+            input_symmetric=True,
+            weight_shape=(16, 16),
         )
     else:
         obj.config = FP8ScaledMMLinearLayerConfig(
