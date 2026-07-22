@@ -192,7 +192,7 @@ class P2PSession:
         self,
         job_id: JobId,
         kv_request_id: str,
-        keys: Sequence[bytes],
+        keys: Sequence[OffloadKey],
         block_ids: Sequence[int],
     ) -> None:
         """Send fetch to the peer."""

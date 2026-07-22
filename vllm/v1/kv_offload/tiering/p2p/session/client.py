@@ -180,7 +180,7 @@ class ClientRole:
         self,
         job_id: JobId,
         kv_request_id: str,
-        keys: Sequence[bytes],
+        keys: Sequence[OffloadKey],
         block_ids: Sequence[int],
         send_ready: bool,
     ) -> None:
@@ -219,7 +219,7 @@ class ClientRole:
         # populated) every fetched block was a confirmed HIT; a PD-only load
         # never probes, so probes is empty and the clear is a no-op.
         if st.probes:
-            assert all(st.probes.get(OffloadKey(key)) is True for key in keys)
+            assert all(st.probes.get(key) is True for key in keys)
         st.probes.clear()
 
     def finish(self, kv_request_id: str) -> None:
