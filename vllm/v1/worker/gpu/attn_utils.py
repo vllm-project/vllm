@@ -276,7 +276,7 @@ def narrow_kv_caches_to_num_blocks(
     kernel_block_sizes: list[int],
     cache_dtype: str,
     num_blocks: int,
-    kv_cache_config: KVCacheConfig | None = None,
+    kv_cache_config: KVCacheConfig,
 ) -> dict[str, Any]:
     """Return views of the KV caches narrowed to the first `num_blocks` blocks.
 
@@ -324,8 +324,7 @@ def narrow_kv_caches_to_num_blocks(
                     state.narrow(0, 0, num_blocks) for state in kv_cache
                 ]
 
-    if kv_cache_config is not None:
-        _bound_packed_kv_cache_storages(narrowed, kv_cache_config, num_blocks)
+    _bound_packed_kv_cache_storages(narrowed, kv_cache_config, num_blocks)
     return narrowed
 
 
@@ -413,7 +412,10 @@ def _allocate_extensible_kv_cache(
             # occupying the b-th `block_stride`-byte row (holding every
             # layer's page). The backing is block-major by construction, so
             # one shared single-segment buffer commits a prefix of blocks.
-            assert bytes_per_block % kv_cache_tensor.block_stride == 0
+            # One packed row per logical block: _reshape_kv_cache, NIXL's
+            # packed registration, and _bound_packed_kv_cache_storages all
+            # rely on this equality.
+            assert bytes_per_block == kv_cache_tensor.block_stride
             if packed_view is None:
                 packed_buffer = ExtensibleTensor(
                     max_num_bytes=kv_cache_tensor.size,
