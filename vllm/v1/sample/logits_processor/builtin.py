@@ -32,6 +32,15 @@ class PLessLogitsProcessor(LogitsProcessor):
         )
         self.p_less_cpu = self.p_less_cpu_tensor.numpy()
 
+        self.use_double_tensor = torch.device(device).type != "cpu"
+        if self.use_double_tensor:
+            self.p_less_device = torch.zeros(
+                (max_num_reqs,), dtype=torch.bool, device=device
+            )
+        else:
+            self.p_less_device = self.p_less_cpu_tensor
+        self.p_less: torch.Tensor = self.p_less_device[:0]
+
     def is_argmax_invariant(self) -> bool:
         """
         p-less does not change the argmax.
@@ -42,11 +51,13 @@ class PLessLogitsProcessor(LogitsProcessor):
         if not batch_update:
             return
 
+        needs_update = False
         # Process added requests.
         for index, params, _, __ in batch_update.added:
             p_less = params.p_less
             p_less_before = self.p_less_cpu[index]
             if p_less_before != p_less:
+                needs_update = True
                 self.p_less_cpu[index] = p_less
                 if p_less and not p_less_before:
                     self.p_less_count += 1
@@ -56,6 +67,7 @@ class PLessLogitsProcessor(LogitsProcessor):
         if self.p_less_count:
             # Process removed requests.
             if batch_update.removed:
+                needs_update = True
                 for index in batch_update.removed:
                     if self.p_less_cpu[index]:
                         self.p_less_cpu[index] = False
@@ -65,6 +77,7 @@ class PLessLogitsProcessor(LogitsProcessor):
             for a_index, b_index, direction in batch_update.moved:
                 p_less_a, p_less_b = self.p_less_cpu[a_index], self.p_less_cpu[b_index]
                 if p_less_a != p_less_b:
+                    needs_update = True
                     self.p_less_cpu[b_index] = p_less_a
                     if direction == MoveDirectionality.SWAP:
                         self.p_less_cpu[a_index] = p_less_b
@@ -73,6 +86,14 @@ class PLessLogitsProcessor(LogitsProcessor):
                         self.p_less_cpu[a_index] = False
                     if p_less_b:
                         self.p_less_count -= 1
+
+        # Update p_less tensor if needed.
+        size = batch_update.batch_size
+        if self.p_less_count and (needs_update or self.p_less.shape[0] != size):
+            self.p_less = self.p_less_device[:size]
+            if self.use_double_tensor:
+                self.p_less.copy_(self.p_less_cpu_tensor[:size], non_blocking=True)
+            self.p_less.unsqueeze_(-1)
 
     def apply(self, logits: torch.Tensor) -> torch.Tensor:
         """
@@ -87,7 +108,7 @@ class PLessLogitsProcessor(LogitsProcessor):
         sum_squared_exps = exps.square().sum(axis=-1, keepdim=True)
         threshold_logits = sum_squared_exps.log() - sum_exps.log()
         # Create boolean mask for invalid tokens
-        invalid_token_mask = logits < threshold_logits
+        invalid_token_mask = (logits < threshold_logits) & self.p_less
         # Apply mask to convert logits of invalid tokens to negative infinity
         logits.masked_fill_(invalid_token_mask, -float("inf"))
         return logits
