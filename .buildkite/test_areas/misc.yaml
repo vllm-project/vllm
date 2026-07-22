@@ -31,7 +31,7 @@ steps:
 
 - label: V1 Sample + Logits
   key: v1-sample-logits
-  timeout_in_minutes: 45
+  timeout_in_minutes: 83
   device: h200_18gb
   source_file_dependencies:
     - vllm/config/
@@ -90,6 +90,7 @@ steps:
     - tests/v1/kv_offload
     - tests/v1/simple_kv_offload
     - tests/v1/worker
+    - tests/v1/streaming_input
     - tests/v1/kv_connector/unit
     - tests/v1/ec_connector/unit
     - tests/v1/metrics
@@ -103,6 +104,7 @@ steps:
     - pytest -v -s v1/kv_offload
     - pytest -v -s v1/simple_kv_offload
     - pytest -v -s v1/worker
+    - pytest -v -s v1/streaming_input
     - pytest -v -s -m 'not cpu_test' v1/kv_connector/unit
     - pytest -v -s -m 'not cpu_test' v1/ec_connector/unit
     - pytest -v -s -m 'not cpu_test' v1/metrics
@@ -143,6 +145,7 @@ steps:
     - pytest -v -s -m 'cpu_test' v1/core
     - pytest -v -s v1/structured_output
     - pytest -v -s v1/test_serial_utils.py
+    - pytest -v -s v1/cudagraph/test_cudagraph_manager.py
     - pytest -v -s -m 'cpu_test' v1/kv_connector/unit
     - pytest -v -s -m 'cpu_test' v1/metrics
 
