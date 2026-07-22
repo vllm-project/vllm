@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from __future__ import annotations
+
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from math import prod
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import torch
 
@@ -39,6 +41,10 @@ from vllm.v1.worker.utils import (
 )
 
 logger = init_logger(__name__)
+
+if TYPE_CHECKING:
+    from vllm.distributed.device_communicators.cuda_vmm import RankMajorPeerView
+    from vllm.v1.worker.gpu.pcp_manager import PCPManager
 
 
 @dataclass(frozen=True)
@@ -170,22 +176,45 @@ def init_attn_backend(
 
 
 def _allocate_kv_cache(
-    kv_cache_config: KVCacheConfig, shared_layers: dict[str, str], device: torch.device
+    kv_cache_config: KVCacheConfig,
+    shared_layers: dict[str, str],
+    device: torch.device,
+    pcp_manager: PCPManager | None = None,
 ):
     kv_cache_raw_tensors: dict[str, torch.Tensor] = {}
+    peer_allocations: dict[str, RankMajorPeerView] = {}
     packed_backing: torch.Tensor | None = None
+    packed_peer_allocation: RankMajorPeerView | None = None
     for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
         if kv_cache_tensor.block_stride > 0:
             # Allocate once; all packed tensors alias the same backing.
             if packed_backing is None:
-                packed_backing = torch.zeros(
+                if pcp_manager is not None and pcp_manager.direct_kv_enabled:
+                    packed_peer_allocation = pcp_manager.allocate_peer_cache(
+                        kv_cache_tensor.size
+                    )
+                    packed_backing = packed_peer_allocation.local_view.narrow(
+                        0, 0, kv_cache_tensor.size
+                    )
+                else:
+                    packed_backing = torch.zeros(
+                        kv_cache_tensor.size, dtype=torch.int8, device=device
+                    )
+            tensor = packed_backing
+            peer_allocation = packed_peer_allocation
+        else:
+            if pcp_manager is not None and pcp_manager.direct_kv_enabled:
+                peer_allocation = pcp_manager.allocate_peer_cache(kv_cache_tensor.size)
+                tensor = peer_allocation.local_view.narrow(0, 0, kv_cache_tensor.size)
+            else:
+                peer_allocation = None
+                tensor = torch.zeros(
                     kv_cache_tensor.size, dtype=torch.int8, device=device
                 )
-            tensor = packed_backing
-        else:
-            tensor = torch.zeros(kv_cache_tensor.size, dtype=torch.int8, device=device)
         for layer_name in kv_cache_tensor.shared_by:
             kv_cache_raw_tensors[layer_name] = tensor
+            if peer_allocation is not None:
+                peer_allocations[layer_name] = peer_allocation
 
     layer_names = set()
     for group in kv_cache_config.kv_cache_groups:
@@ -194,7 +223,7 @@ def _allocate_kv_cache(
     assert layer_names == (kv_cache_raw_tensors.keys() | shared_layers.keys()), (
         "Some layers are not correctly initialized"
     )
-    return kv_cache_raw_tensors
+    return kv_cache_raw_tensors, peer_allocations
 
 
 def _reshape_attention_kv_cache(
@@ -259,7 +288,7 @@ def _reshape_kv_cache(
     cache_dtype: str,
     kernel_block_sizes: list[int],
     shared_kv_cache_layers: dict[str, str],
-    kv_cache_config: "KVCacheConfig | None" = None,
+    kv_cache_config: KVCacheConfig | None = None,
 ) -> dict[str, Any]:
     kv_caches: dict[str, Any] = {}
     has_attn = False
@@ -441,7 +470,7 @@ def _restride_blocks_first_kv_cache_to_kv_first_storage(
     )
 
 
-def init_kv_cache(
+def _init_kv_cache(
     runner_kv_caches: list[torch.Tensor | list[torch.Tensor]],
     forward_context: dict[str, Any],
     kv_cache_config: KVCacheConfig,
@@ -450,10 +479,11 @@ def init_kv_cache(
     cache_dtype: str,
     kernel_block_sizes: list[int],
     vllm_config: VllmConfig,
+    pcp_manager: PCPManager | None = None,
 ) -> dict[str, Any]:
     shared_kv_cache_layers = get_shared_kv_cache_layers(vllm_config)
-    kv_cache_raw_tensors = _allocate_kv_cache(
-        kv_cache_config, shared_kv_cache_layers, device
+    kv_cache_raw_tensors, peer_allocations = _allocate_kv_cache(
+        kv_cache_config, shared_kv_cache_layers, device, pcp_manager
     )
     flattened_attn_groups = list(group for groups in attn_groups for group in groups)
     kv_caches = _reshape_kv_cache(
@@ -473,7 +503,53 @@ def init_kv_cache(
         else 1
     )
     bind_kv_cache(kv_caches, forward_context, runner_kv_caches, num_attn_module)
+    if peer_allocations:
+        assert pcp_manager is not None and pcp_manager.direct_kv_enabled
+        from vllm.model_executor.layers.attention.pcp_peer_cache import (
+            make_rank_major_tensor_view,
+        )
+
+        for layer_name, target_layer_name in shared_kv_cache_layers.items():
+            peer_allocations[layer_name] = peer_allocations[target_layer_name]
+        fence = pcp_manager.get_peer_cache_fence()
+        for layer_name, kv_cache in kv_caches.items():
+            peer_kv_cache = make_rank_major_tensor_view(
+                peer_allocations[layer_name], kv_cache
+            )
+            forward_context[layer_name].bind_pcp_peer_kv_cache(peer_kv_cache, fence)
     return kv_caches
+
+
+def init_kv_cache(
+    runner_kv_caches: list[torch.Tensor | list[torch.Tensor]],
+    forward_context: dict[str, Any],
+    kv_cache_config: KVCacheConfig,
+    attn_groups: list[list[AttentionGroup]],
+    device: torch.device,
+    cache_dtype: str,
+    kernel_block_sizes: list[int],
+    vllm_config: VllmConfig,
+    pcp_manager: PCPManager | None = None,
+) -> dict[str, Any]:
+    try:
+        return _init_kv_cache(
+            runner_kv_caches,
+            forward_context,
+            kv_cache_config,
+            attn_groups,
+            device,
+            cache_dtype,
+            kernel_block_sizes,
+            vllm_config,
+            pcp_manager,
+        )
+    except BaseException:
+        if pcp_manager is not None and pcp_manager.direct_kv_enabled:
+            try:
+                pcp_manager.close()
+            except Exception:
+                logger.exception("Failed to roll back direct PCP KV allocations")
+        raise
 
 
 def build_slot_mappings_by_layer(
