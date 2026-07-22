@@ -977,9 +977,8 @@ class ServerRole:
             self._finalize_abort(kv_request_id)
 
     def _finalize_abort(self, kv_request_id: str) -> None:
-        st = self._requests.get(kv_request_id)
-        if st is not None:
-            st.abort_started_at = None
+        st = self._requests[kv_request_id]
+        st.abort_started_at = None
         self._send(
             {
                 TYPE_KEY: AbortAckMsg.TYPE,
