@@ -172,7 +172,9 @@ class MLAFuser(StackedFuser):
         return self.q_a_proj_name is not None
 
     def info(self, name: str) -> str:
-        info_str = f"Fused: {name} ({self.source_cls}) -> MLAAttention"
+        info_str = (
+            f"Fused: {name} ({self.source_cls}) -> MLAAttention (attention interface)"
+        )
         if self.has_q_lora:
             info_str += "; " + super().info(name).removeprefix("Fused: ")
         return info_str
