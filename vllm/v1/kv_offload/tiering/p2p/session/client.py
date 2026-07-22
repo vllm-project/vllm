@@ -38,7 +38,7 @@ _ABORT_ACK_TIMEOUT_S = 10.0
 class ClientPhase(enum.Enum):
     """Lifecycle of a request's client-side lookup/fetch signalling.
 
-    Advances monotonically. Only ``cancel_lookups`` reads it, to decide
+    Advances monotonically. Only ``finish`` reads it, to decide
     whether a terminal empty FetchMsg is owed to release the peer's
     lookup state (owed only from ``PROBING``: a LookupMsg went out but no
     FetchMsg has since closed the peer's lookup phase).
@@ -75,7 +75,7 @@ class _ClientRequestState:
     # -- Lookup phase (symmetric P2P only; untouched for PD) --
     # Probe outcome per OffloadKey: None while in-flight (registered/sent
     # but unresolved), True/False once a LookupRespMsg lands. There is no
-    # timeout — cancel_lookups (via finish_request) is guaranteed after
+    # timeout — finish (via finish_request) is guaranteed after
     # the request's lookup() calls and clears every probe, so an
     # unanswered probe simply stays None until then.
     probes: dict[OffloadKey, bool | None] = field(default_factory=dict)
@@ -97,6 +97,21 @@ class LoadResult(NamedTuple):
     success: bool
 
 
+class ClientCloseResult(NamedTuple):
+    """What the manager must fail when a peer session is torn down.
+
+    ``failed_jobs`` is the ``job_id`` of every load still in flight; each
+    becomes a ``JobResult(success=False)``. ``failed_req_ids`` is every
+    kv_request_id whose lookup() would otherwise defer forever on the dead
+    peer — the in-flight loads plus any request holding an unresolved
+    symmetric-P2P probe. ``failed_jobs`` is the subset of ``failed_req_ids``
+    that had a load job.
+    """
+
+    failed_jobs: list[int]
+    failed_req_ids: list[str]
+
+
 class ClientRole:
     """Client-side load state machine for one peer session.
 
@@ -116,7 +131,7 @@ class ClientRole:
         # visit — the work-list that keeps flush_pending_lookups from
         # scanning every request each scheduler step. Mirrors the server's
         # _serve_pending. Populated by register_lookup, drained by
-        # flush_pending_lookups, and discarded on cancel_lookups/close.
+        # flush_pending_lookups, and discarded on finish/close.
         self._flush_pending: set[str] = set()
         # kv_request_ids with a fetch in flight (``st.load is not None``) —
         # the work-list collect_results walks for timeouts, and the
@@ -141,9 +156,9 @@ class ClientRole:
     def _maybe_prune(self, kv_request_id: str) -> None:
         """Drop the entry once it holds no live load or lookup state.
 
-        The sticky ``phase`` is only read by ``cancel_lookups``. A probe
+        The sticky ``phase`` is only read by ``finish``. A probe
         clears when its fetch is issued (``request_blocks``) or when the
-        request finishes (``cancel_lookups``/``close``); in the former case
+        request finishes (``finish``/``close``); in the former case
         ``load`` is set and keeps the entry alive, in the latter the phase
         is no longer needed — so dropping on emptiness never loses a phase
         still in use.
@@ -207,20 +222,55 @@ class ClientRole:
             assert all(st.probes.get(OffloadKey(key)) is True for key in keys)
         st.probes.clear()
 
-    def cancel(self, kv_request_id: str) -> None:
-        """Cancel a pending load. Sends AbortFetchMsg if still active."""
+    def finish(self, kv_request_id: str) -> None:
+        """Finish a request: abort any in-flight load and release lookup state.
+
+        Called from the session's ``finish_request``. The two branches are
+        mutually exclusive: ``load`` is set only by ``request_blocks``, which
+        also advances ``phase`` to ``FETCH_SENT``, and nothing moves it back
+        to ``PROBING`` — so a fetch in flight never coexists with the
+        ``PROBING`` phase.
+
+        - Fetch in flight (``load`` set, phase ``FETCH_SENT``): send an
+          AbortFetchMsg unless the load is already aborting, then drop it.
+        - Outstanding lookups (``PROBING``): a LookupMsg was flushed but no
+          FetchMsg has closed the peer's lookup phase. Every FetchMsg the
+          server receives in p2p mode is its "request finished" signal (it
+          releases lookup state and fires ``cb.finish_request``); when the
+          client's lookups all missed no FetchMsg is otherwise sent, so emit
+          a terminal empty one purely to trigger those semantics. In
+          ``REGISTERED`` the peer never received a LookupMsg and in
+          ``FETCH_SENT`` a FetchMsg already closed the phase, so neither owes
+          a terminal FetchMsg.
+
+        Then drop all probe/lookup state and prune the entry.
+        """
         st = self._requests.get(kv_request_id)
-        if st is None or st.load is None:
+        if st is None:
             return
-        if st.load.aborted_at is None:
+        if st.load is not None:
+            if st.load.aborted_at is None:
+                self._send(
+                    {
+                        TYPE_KEY: AbortFetchMsg.TYPE,
+                        AbortFetchMsg.KV_REQUEST_ID: kv_request_id,
+                    }
+                )
+            st.load = None
+            self._active_loads.discard(kv_request_id)
+        elif st.phase is ClientPhase.PROBING:
+            st.phase = ClientPhase.FETCH_SENT
             self._send(
                 {
-                    TYPE_KEY: AbortFetchMsg.TYPE,
-                    AbortFetchMsg.KV_REQUEST_ID: kv_request_id,
+                    TYPE_KEY: FetchMsg.TYPE,
+                    FetchMsg.KV_REQUEST_ID: kv_request_id,
+                    FetchMsg.BLOCK_HASHES: [],
+                    FetchMsg.BLOCK_INDEXES: [],
                 }
             )
-        st.load = None
-        self._active_loads.discard(kv_request_id)
+        st.probes.clear()
+        st.unsent.clear()
+        self._flush_pending.discard(kv_request_id)
         self._maybe_prune(kv_request_id)
 
     def on_transfer_done(self, kv_request_id: str, success: bool) -> None:
@@ -297,7 +347,7 @@ class ClientRole:
 
         A resolved entry is retained until its fetch is issued
         (``request_blocks`` pops it) or the request finishes
-        (``cancel_lookups`` clears all entries for the id). A request's
+        (``finish`` clears all entries for the id). A request's
         block set can be re-probed across steps, so popping on read would
         make a repeat probe of an already-resolved hash look brand-new and
         re-queue it, emitting a redundant LookupMsg for an answer we
@@ -333,7 +383,7 @@ class ClientRole:
         first probed in that step. The peer's lookup phase for the id is
         still closed by exactly one FetchMsg, which the client contract
         guarantees is sent after every lookup for the id has resolved
-        (see request_blocks / cancel_lookups). Send-gating is handled by
+        (see request_blocks / finish). Send-gating is handled by
         the injected ``_send`` callback (queues until ConnectAckMsg if
         needed).
 
@@ -346,7 +396,7 @@ class ClientRole:
             if st is None or not st.unsent:
                 continue
             # Record that the peer now holds lookup state for this id so
-            # cancel_lookups knows a terminal empty FetchMsg may be owed.
+            # finish knows a terminal empty FetchMsg may be owed.
             # Only promote from REGISTERED: once a fetch has gone out
             # (FETCH_SENT) a later LookupMsg must not regress the phase, as
             # no terminal FetchMsg is owed for an already-fetched request.
@@ -397,43 +447,6 @@ class ClientRole:
             key = OffloadKey(h)
             if key in st.probes:
                 st.probes[key] = hit
-
-    def cancel_lookups(self, kv_request_id: str) -> None:
-        """Drop lookup state and, if needed, close the peer's request.
-
-        Every FetchMsg the server receives in p2p mode is the
-        server-side "request finished" signal for its kv_request_id:
-        no further ``cb.create_store_job`` will fire, all server-side
-        lookup state for the id is released, and ``cb.finish_request``
-        fires on the TieringManager. In the happy path the FetchMsg
-        carrying blocks is that signal. But if the client's lookups
-        all missed no FetchMsg is ever sent, so on the finish path we
-        emit an empty FetchMsg purely to trigger those semantics on
-        the peer.
-
-        We only send the terminal FetchMsg from the ``PROBING`` phase: a
-        LookupMsg was flushed but no FetchMsg has since closed the peer's
-        lookup phase. In ``REGISTERED`` the peer never received a LookupMsg
-        so it has no state to release; in ``FETCH_SENT`` a FetchMsg already
-        closed it, so a second one would be a duplicate.
-        """
-        st = self._requests.get(kv_request_id)
-        if st is None:
-            return
-        if st.phase is ClientPhase.PROBING:
-            st.phase = ClientPhase.FETCH_SENT
-            self._send(
-                {
-                    TYPE_KEY: FetchMsg.TYPE,
-                    FetchMsg.KV_REQUEST_ID: kv_request_id,
-                    FetchMsg.BLOCK_HASHES: [],
-                    FetchMsg.BLOCK_INDEXES: [],
-                }
-            )
-        st.probes.clear()
-        st.unsent.clear()
-        self._flush_pending.discard(kv_request_id)
-        self._maybe_prune(kv_request_id)
 
     def collect_results(self) -> list[LoadResult]:
         """Walk load timeouts and drain completed loads.
@@ -490,29 +503,23 @@ class ClientRole:
         self._completed_loads = []
         return results
 
-    def close(self) -> tuple[list[tuple[int, str]], list[str]]:
-        """Tear down.
+    def close(self) -> ClientCloseResult:
+        """Tear down, reporting work the dead peer can no longer complete.
 
-        Returns:
-            A ``(failed_loads, failed_probes)`` pair. ``failed_loads``
-            is ``(job_id, kv_request_id)`` for every load still in flight.
-            ``failed_probes`` is the kv_request_ids holding an
-            unresolved (in-flight) symmetric-P2P probe: with the peer gone
-            the probe can never be answered, so the manager must fail these
-            ids or the consumer's lookup() defers on them forever.
+        A request is failed if it has a load in flight (its job fails) or
+        holds an unresolved symmetric-P2P probe (its lookup() would defer
+        forever on an answer that can never arrive). See ``ClientCloseResult``.
         """
-        failed = [
-            (st.load.job_id, req_id)
-            for req_id, st in self._requests.items()
-            if st.load is not None
+        failed_jobs = [
+            st.load.job_id for st in self._requests.values() if st.load is not None
         ]
-        failed_probes = [
+        failed_req_ids = [
             req_id
             for req_id, st in self._requests.items()
-            if any(hit is None for hit in st.probes.values())
+            if st.load is not None or any(hit is None for hit in st.probes.values())
         ]
         self._requests.clear()
         self._flush_pending.clear()
         self._active_loads.clear()
         self._completed_loads.clear()
-        return failed, failed_probes
+        return ClientCloseResult(failed_jobs=failed_jobs, failed_req_ids=failed_req_ids)

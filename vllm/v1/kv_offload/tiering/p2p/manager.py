@@ -679,16 +679,15 @@ class P2PSecondaryTierManager(SecondaryTierManager):
             for kid in stale_kv_ids:
                 del self._kv_to_session[kid]
             close_result = session.close()
-            for job_id, kv_request_id in close_result.failed_loads:
+            for job_id in close_result.failed_jobs:
                 self._finished_jobs.append(JobResult(job_id=job_id, success=False))
-                self._failed_req_ids.add(kv_request_id)
             for job_id in close_result.failed_stores:
                 self._finished_jobs.append(JobResult(job_id=job_id, success=False))
-            # Fail any request whose symmetric-P2P probe was still in flight
-            # toward the dead peer so lookup() returns MISS (local prefill)
-            # instead of RETRY forever — even if a fresh session to the same
-            # peer is later opened by another request.
-            self._failed_req_ids.update(close_result.failed_probes)
+            # Fail every client-side request (in-flight loads plus unresolved
+            # symmetric-P2P probes) toward the dead peer so lookup() returns
+            # MISS (local prefill) instead of RETRY forever — even if a fresh
+            # session to the same peer is later opened by another request.
+            self._failed_req_ids.update(close_result.failed_req_ids)
             # Release the TieringManager's per-request bookkeeping for the
             # dead session's synthetic lookups on the next serve_external_requests.
             self._failed_serve_ctxs.extend(close_result.failed_serves)

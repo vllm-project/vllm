@@ -561,10 +561,10 @@ class _FakeSession:
         loads: list[LoadResult] | None = None,
         stores: list[StoreResult] | None = None,
         new_fetch_ids: list[str] | None = None,
-        close_loads: list[tuple[int, str]] | None = None,
+        close_jobs: list[int] | None = None,
+        close_req_ids: list[str] | None = None,
         close_stores: list[int] | None = None,
         close_failed_serves: list[ReqContext] | None = None,
-        close_failed_probes: list[str] | None = None,
     ) -> None:
         self.peer_id = peer_id
         self.alive = alive
@@ -573,10 +573,10 @@ class _FakeSession:
         self._loads = loads or []
         self._stores = stores or []
         self._new_fetch_ids = new_fetch_ids or []
-        self._close_loads = close_loads or []
+        self._close_jobs = close_jobs or []
+        self._close_req_ids = close_req_ids or []
         self._close_stores = close_stores or []
         self._close_failed_serves = close_failed_serves or []
-        self._close_failed_probes = close_failed_probes or []
         self.requests: list[tuple[int, str]] = []
         self.stores_added: list[tuple[str, list, object, int]] = []
         self.attached: list[object] = []
@@ -617,10 +617,10 @@ class _FakeSession:
 
     def close(self):
         return SessionCloseResult(
-            failed_loads=self._close_loads,
+            failed_jobs=self._close_jobs,
+            failed_req_ids=self._close_req_ids,
             failed_stores=self._close_stores,
             failed_serves=self._close_failed_serves,
-            failed_probes=self._close_failed_probes,
         )
 
 
@@ -663,7 +663,8 @@ class TestGetFinished:
             peer_id="dead:1234",
             alive=False,
             connected=True,
-            close_loads=[(20, "req-load")],
+            close_jobs=[20],
+            close_req_ids=["req-load"],
             close_stores=[10, 11],
         )
         mgr._sessions["dead:1234"] = dead  # type: ignore[assignment]
@@ -691,7 +692,7 @@ class TestGetFinished:
             peer_id="dead:1234",
             alive=False,
             connected=True,
-            close_failed_probes=["req-probe-1", "req-probe-2"],
+            close_req_ids=["req-probe-1", "req-probe-2"],
         )
         mgr._sessions["dead:1234"] = dead  # type: ignore[assignment]
 
@@ -1267,7 +1268,8 @@ class TestPollOnce:
             peer_id=peer_dead,
             alive=False,
             connected=True,
-            close_loads=[(33, "req-33")],
+            close_jobs=[33],
+            close_req_ids=["req-33"],
             close_stores=[44],
         )
         mgr._sessions[peer_dead] = dead  # type: ignore[assignment]

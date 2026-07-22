@@ -2055,10 +2055,10 @@ class TestPendingSession:
         session.add_stored_blocks("req-1", [b"k1"], [0], job_id=1)
         session.add_stored_blocks("req-2", [b"k2"], [1], job_id=2)
         result = session.close()
-        assert result.failed_loads == []
+        assert result.failed_jobs == []
+        assert result.failed_req_ids == []
         assert set(result.failed_stores) == {1, 2}
         assert result.failed_serves == []
-        assert result.failed_probes == []
 
 
 # ---------------------------------------------------------------------------
@@ -2081,10 +2081,10 @@ class TestDisconnect:
         session.request_blocks(2, "req-2", [b"k"], [0])
         session.add_stored_blocks("req-srv", [b"k"], [0], job_id=10)
         result = session.close()
-        assert set(result.failed_loads) == {(1, "req-1"), (2, "req-2")}
+        assert set(result.failed_jobs) == {1, 2}
+        assert set(result.failed_req_ids) == {"req-1", "req-2"}
         assert set(result.failed_stores) == {10}
         assert result.failed_serves == []
-        assert result.failed_probes == []
 
     def test_send_failure_marks_connection_dead(self):
         """A raising send must mark the connection dead, not silently drop
@@ -2122,7 +2122,8 @@ class TestDisconnect:
         session.poll()
 
         result = session.close()
-        assert result.failed_probes == ["req-inflight"]
+        assert result.failed_jobs == []
+        assert result.failed_req_ids == ["req-inflight"]
 
 
 # ---------------------------------------------------------------------------

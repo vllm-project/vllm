@@ -77,15 +77,17 @@ class SessionPollResult(NamedTuple):
 class SessionCloseResult(NamedTuple):
     """Result of tearing down a P2PSession.
 
-    `failed_loads`/`failed_stores` are the in-flight jobs the manager must
-    mark failed. `failed_serves`/`failed_probes` cover the symmetric-P2P
-    lookup state on each role that the dead peer can no longer resolve.
+    `failed_jobs`/`failed_stores` are the in-flight jobs (client loads /
+    server stores) the manager must mark failed. `failed_req_ids` is every
+    client-side kv_request_id whose lookup() must fail (in-flight loads plus
+    unresolved probes); `failed_serves` is the server-side lookup state the
+    dead peer can no longer resolve.
     """
 
-    failed_loads: list[tuple[int, str]]  # (job_id, kv_request_id)
-    failed_stores: list[int]  # job_ids
+    failed_jobs: list[int]  # client load job_ids
+    failed_req_ids: list[str]  # client kv_request_ids (loads + probes)
+    failed_stores: list[int]  # server store job_ids
     failed_serves: list[ReqContext]  # server-side lookup ctxs needing release
-    failed_probes: list[str]  # client-side kv_request_ids never answered
 
 
 class P2PSession:
@@ -211,13 +213,12 @@ class P2PSession:
     def finish_request(self, kv_request_id: str) -> None:
         """Called when the request is finishing locally.
 
-        Cancels any inbound load (client role), drops any pending
-        symmetric-P2P lookup state (client role), and finalizes any
-        outbound serving (server role) for this id. Roles that aren't
-        active for this id are silent no-ops.
+        Finishes the client role (aborts any inbound load and drops any
+        pending symmetric-P2P lookup state) and finalizes any outbound
+        serving (server role) for this id. Roles that aren't active for
+        this id are silent no-ops.
         """
-        self._client.cancel(kv_request_id)
-        self._client.cancel_lookups(kv_request_id)
+        self._client.finish(kv_request_id)
         self._server.finish(kv_request_id)
 
     def register_lookup(self, kv_request_id: str, block_hash: bytes) -> bool | None:
@@ -273,17 +274,18 @@ class P2PSession:
     def close(self) -> SessionCloseResult:
         """Shut down.
 
-        failed_loads: list of (job_id, kv_request_id) pairs.
-        failed_stores: list of job_ids.
+        failed_jobs: client load job_ids to fail.
+        failed_req_ids: client kv_request_ids to fail — in-flight loads plus
+            requests with an unresolved symmetric-P2P probe toward the
+            now-dead peer. The manager fails these so the consumer's lookup()
+            falls back to local prefill instead of deferring forever on an
+            answer that can never arrive.
+        failed_stores: server store job_ids to fail.
         failed_serves: synthetic lookup ctxs still owing
             ``parent.on_request_finished`` (the manager flushes these on
             its next ``serve_external_requests``).
-        failed_probes: kv_request_ids with an unresolved symmetric-P2P
-            probe toward the now-dead peer. The manager fails these so the
-            consumer's lookup() falls back to local prefill instead of
-            deferring forever on an answer that can never arrive.
         """
-        failed_loads, failed_probes = self._client.close()
+        client_result = self._client.close()
         failed_stores, failed_serves = self._server.close()
 
         if self._conn is not None:
@@ -293,10 +295,10 @@ class P2PSession:
             self._conn = None
 
         return SessionCloseResult(
-            failed_loads=failed_loads,
+            failed_jobs=client_result.failed_jobs,
+            failed_req_ids=client_result.failed_req_ids,
             failed_stores=failed_stores,
             failed_serves=failed_serves,
-            failed_probes=failed_probes,
         )
 
     # ------------------------------------------------------------------
