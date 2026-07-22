@@ -48,7 +48,7 @@ def require_full_attn_group_id(kv_cache_config: KVCacheConfig) -> int:
             "%s; anchoring routing on group %d only. Routing for tokens whose "
             "KV lives in the other group(s) is not offloaded.",
             len(full_attn_group_ids),
-            full_attn_group_ids,
+            tuple(full_attn_group_ids),
             full_attn_group_ids[0],
         )
     return full_attn_group_ids[0]

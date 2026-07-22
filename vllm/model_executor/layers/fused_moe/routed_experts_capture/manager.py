@@ -171,7 +171,7 @@ class RoutedExpertsManager:
             vllm_config, kv_cache_config
         )
         self.expert_id_dtype = np.dtype(slot_dtype)
-        self._slot_region = SharedRoutingRegion(
+        slot_region = SharedRoutingRegion(
             path=shared_routing_mmap_path(
                 vllm_config.instance_id,
                 vllm_config.parallel_config.data_parallel_rank,
@@ -179,7 +179,8 @@ class RoutedExpertsManager:
             shape=slot_shape,
             dtype=slot_dtype,
         )
-        self.routed_experts_by_slot = self._slot_region.array
+        self._slot_region: SharedRoutingRegion | None = slot_region
+        self.routed_experts_by_slot = slot_region.array
         self._blocks_view = self.routed_experts_by_slot.reshape(
             kv_cache_config.num_blocks,
             self.block_size,

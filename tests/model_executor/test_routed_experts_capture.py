@@ -13,14 +13,39 @@ from vllm.model_executor.layers.fused_moe.routed_experts_capture import (
     RoutedExpertsCapturer,
     RoutedExpertsTensors,
     RoutedExpertsWriteTask,
+    require_full_attn_group_id,
 )
 from vllm.model_executor.layers.fused_moe.router.base_router import BaseRouter
+from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
+    KVCacheConfig,
+    KVCacheGroupSpec,
+)
 
 pytestmark = pytest.mark.cpu_test
 
 _CAPTURER_MODULE = (
     "vllm.model_executor.layers.fused_moe.routed_experts_capture.capturer"
 )
+
+
+def test_multiple_full_attention_groups_use_hashable_warning_args():
+    kv_cache_spec = FullAttentionSpec(
+        block_size=16,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float32,
+    )
+    kv_cache_config = KVCacheConfig(
+        num_blocks=1,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(["layer.0"], kv_cache_spec),
+            KVCacheGroupSpec(["layer.1"], kv_cache_spec),
+        ],
+    )
+
+    assert require_full_attn_group_id(kv_cache_config) == 0
 
 
 def test_routed_experts_write_task_publishes_copied_tensors():
