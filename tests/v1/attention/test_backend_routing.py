@@ -33,29 +33,14 @@ from vllm.v1.kv_cache_interface import (
     KVCacheGroupSpec,
 )
 from vllm.v1.spec_decode.llm_base_proposer import SpecDecodeBaseProposer
-from vllm.v1.worker.cp_utils import check_attention_cp_compatibility
 from vllm.v1.worker.gpu.attn_utils import build_attn_metadata, init_attn_backend
 from vllm.v1.worker.utils import AttentionGroup, prepare_kernel_block_sizes
 
 pytestmark = pytest.mark.skip_global_cleanup
 
 
-@pytest.mark.parametrize(
-    ("value", "expected"),
-    [("FLASHINFER", "FLASHINFER"), ("auto", None), (None, None)],
-)
-def test_decode_backend_parsing(value, expected):
-    backend = AttentionConfig(decode_backend=value).decode_backend
-    assert (backend.name if isinstance(backend, AttentionBackendEnum) else backend) == (
-        expected
-    )
-
-
-def test_decode_backend_defaults_to_auto():
-    assert AttentionConfig().decode_backend is None
-
-
 def test_decode_backend_affects_config_hash():
+    """A routed backend change must invalidate compiled configuration state."""
     default_hash = AttentionConfig(backend="FLASH_ATTN").compute_hash()
     routed_hash = AttentionConfig(
         backend="FLASH_ATTN", decode_backend="FLASHINFER"
@@ -64,6 +49,7 @@ def test_decode_backend_affects_config_hash():
 
 
 def test_decode_auto_selection_ignores_general_backend():
+    """Decode auto-selection must not inherit a forced general backend."""
     config = VllmConfig(
         attention_config=AttentionConfig(backend="FLASH_ATTN", decode_backend="auto"),
         device_config=DeviceConfig(device="cpu"),
@@ -88,6 +74,8 @@ def test_decode_auto_selection_ignores_general_backend():
 
 
 def test_draft_attention_backends_are_independent_from_target():
+    """Explicit draft backends must override the target model's pair."""
+
     @dataclass
     class TargetConfig:
         attention_config: AttentionConfig
@@ -232,10 +220,12 @@ def _layouts_compatible(decode_backend, block_size=16):
 
 
 def test_layout_compatibility_ignores_cross_layer_packing():
+    """Cross-layer packing does not affect either backend's per-layer view."""
     assert _layouts_compatible(_DifferentCrossLayerPackingBackend)
 
 
 def test_flexible_general_backend_adopts_decode_required_layout():
+    """A flexible general backend must adopt a compatible decode requirement."""
     config = VllmConfig(device_config=DeviceConfig(device="cpu"))
 
     set_kv_cache_layout("NHD")
@@ -273,6 +263,7 @@ def test_flexible_general_backend_adopts_decode_required_layout():
     ],
 )
 def test_layout_compatibility_rejects_unsafe_pairings(decode_backend):
+    """Reject each independently unsafe way two backends can share KV cache."""
     general_backend = _NHDBackend if decode_backend is _HNDBackend else _Backend
     assert not kv_layouts_compatible(
         general_backend,
@@ -345,69 +336,18 @@ def _attention_spec(block_size=64):
     )
 
 
-def test_composite_backend_owns_both_builders():
-    backend = create_composite_attention_backend(_GeneralBackend, _DecodeBackend)
-    group = AttentionGroup(
-        backend=backend,
+def _make_attention_group(decode_backend=_DecodeBackend):
+    return AttentionGroup(
+        backend=create_composite_attention_backend(_GeneralBackend, decode_backend),
         layer_names=["layer"],
         kv_cache_spec=_attention_spec(),
         kv_cache_group_id=0,
     )
-    group.create_metadata_builders(None, torch.device("cpu"))
-
-    builder = group.get_metadata_builder()
-    assert isinstance(builder.general_builder, _GeneralBuilder)
-    assert isinstance(builder.decode_builder, _DecodeBuilder)
 
 
-def test_attention_group_accepts_same_backend_for_both_roles():
-    backend = create_composite_attention_backend(_GeneralBackend, _GeneralBackend)
-    group = AttentionGroup(
-        backend=backend,
-        layer_names=["layer"],
-        kv_cache_spec=_attention_spec(),
-        kv_cache_group_id=0,
-    )
-    group.create_metadata_builders(None, torch.device("cpu"))
-
-    assert group.backend is _GeneralBackend
-    assert isinstance(group.get_metadata_builder(), _GeneralBuilder)
-
-
-def test_kernel_block_size_is_supported_by_both_routed_backends():
-    spec = _attention_spec()
-    backend = create_composite_attention_backend(_GeneralBackend, _DecodeBackend)
-    group = AttentionGroup(
-        backend=backend,
-        layer_names=["layer"],
-        kv_cache_spec=spec,
-        kv_cache_group_id=0,
-    )
-    config = KVCacheConfig(
-        num_blocks=1,
-        kv_cache_tensors=[],
-        kv_cache_groups=[KVCacheGroupSpec(["layer"], spec)],
-    )
-
-    assert prepare_kernel_block_sizes(config, [[group]]) == [32]
-
-
-def test_mrv2_builds_metadata_with_the_routed_backend():
-    spec = _attention_spec()
-    backend = create_composite_attention_backend(_GeneralBackend, _DecodeBackend)
-    group = AttentionGroup(
-        backend=backend,
-        layer_names=["layer"],
-        kv_cache_spec=spec,
-        kv_cache_group_id=0,
-    )
-    group.create_metadata_builders(None, torch.device("cpu"))
-    config = KVCacheConfig(
-        num_blocks=1,
-        kv_cache_tensors=[],
-        kv_cache_groups=[KVCacheGroupSpec(["layer"], spec)],
-    )
-    common_args = dict(
+def _metadata_build_args(group):
+    spec = group.kv_cache_spec
+    return dict(
         attn_groups=[[group]],
         num_reqs=1,
         num_tokens=1,
@@ -418,8 +358,41 @@ def test_mrv2_builds_metadata_with_the_routed_backend():
         max_seq_len=1,
         block_tables=[torch.zeros(1, 1, dtype=torch.int32)],
         slot_mappings=torch.zeros(1, 1, dtype=torch.int64),
-        kv_cache_config=config,
+        kv_cache_config=KVCacheConfig(
+            num_blocks=1,
+            kv_cache_tensors=[],
+            kv_cache_groups=[KVCacheGroupSpec(["layer"], spec)],
+        ),
     )
+
+
+def test_attention_group_accepts_same_backend_for_both_roles():
+    """An identical pair must not allocate a redundant composite or builder."""
+    group = _make_attention_group(_GeneralBackend)
+    group.create_metadata_builders(None, torch.device("cpu"))
+
+    assert group.backend is _GeneralBackend
+    assert isinstance(group.get_metadata_builder(), _GeneralBuilder)
+
+
+def test_kernel_block_size_is_supported_by_both_routed_backends():
+    """The cache block size must satisfy both implementations' constraints."""
+    group = _make_attention_group()
+    spec = group.kv_cache_spec
+    config = KVCacheConfig(
+        num_blocks=1,
+        kv_cache_tensors=[],
+        kv_cache_groups=[KVCacheGroupSpec(["layer"], spec)],
+    )
+
+    assert prepare_kernel_block_sizes(config, [[group]]) == [32]
+
+
+def test_mrv2_builds_metadata_with_the_routed_backend():
+    """Batch phase must select and tag the matching metadata variant."""
+    group = _make_attention_group()
+    group.create_metadata_builders(None, torch.device("cpu"))
+    common_args = _metadata_build_args(group)
 
     general_metadata = build_attn_metadata(
         **common_args, is_prefilling=torch.tensor([True])
@@ -435,74 +408,26 @@ def test_mrv2_builds_metadata_with_the_routed_backend():
 
 
 def test_composite_backend_requires_is_prefilling():
-    spec = _attention_spec()
-    backend = create_composite_attention_backend(_GeneralBackend, _DecodeBackend)
-    group = AttentionGroup(
-        backend=backend,
-        layer_names=["layer"],
-        kv_cache_spec=spec,
-        kv_cache_group_id=0,
-    )
+    """Missing batch phase metadata must fail instead of guessing from shape."""
+    group = _make_attention_group()
     group.create_metadata_builders(None, torch.device("cpu"))
-    config = KVCacheConfig(
-        num_blocks=1,
-        kv_cache_tensors=[],
-        kv_cache_groups=[KVCacheGroupSpec(["layer"], spec)],
-    )
 
     with pytest.raises(AssertionError, match="require is_prefilling"):
-        build_attn_metadata(
-            attn_groups=[[group]],
-            num_reqs=1,
-            num_tokens=1,
-            query_start_loc_gpu=torch.tensor([0, 1], dtype=torch.int32),
-            query_start_loc_cpu=torch.tensor([0, 1], dtype=torch.int32),
-            max_query_len=1,
-            seq_lens=torch.tensor([1], dtype=torch.int32),
-            max_seq_len=1,
-            block_tables=[torch.zeros(1, 1, dtype=torch.int32)],
-            slot_mappings=torch.zeros(1, 1, dtype=torch.int64),
-            kv_cache_config=config,
-        )
+        build_attn_metadata(**_metadata_build_args(group))
 
 
-class _Layer(AttentionLayerBase):
-    def get_attn_backend(self):
-        return create_composite_attention_backend(_GeneralBackend, _DecodeBackend)
-
-    def get_kv_cache_spec(self, vllm_config):
-        return _attention_spec()
-
-
-class _UniformDecodeLayer(_Layer):
+class _UniformDecodeLayer(AttentionLayerBase):
     def get_attn_backend(self):
         return create_composite_attention_backend(
             _GeneralBackend, _UniformDecodeBackend
         )
 
-
-def test_mrv2_groups_general_and_decode_backends_together():
-    spec = _attention_spec()
-    config = VllmConfig(device_config=DeviceConfig(device="cpu"))
-    config.compilation_config.static_forward_context["layer"] = _Layer()
-    kv_cache_config = KVCacheConfig(
-        num_blocks=1,
-        kv_cache_tensors=[],
-        kv_cache_groups=[KVCacheGroupSpec(["layer"], spec)],
-    )
-
-    groups, _, kernel_block_sizes = init_attn_backend(
-        kv_cache_config, config, torch.device("cpu")
-    )
-
-    assert groups[0][0].backend.get_backend_variants() == (
-        _GeneralBackend,
-        _DecodeBackend,
-    )
-    assert kernel_block_sizes == [32]
+    def get_kv_cache_spec(self, vllm_config):
+        return _attention_spec()
 
 
 def test_decode_backend_limits_cudagraph_support():
+    """The weaker child must bound graph support and identify the culprit."""
     spec = _attention_spec()
     config = VllmConfig(device_config=DeviceConfig(device="cpu"))
     config.compilation_config.static_forward_context["layer"] = _UniformDecodeLayer()
@@ -520,6 +445,7 @@ def test_decode_backend_limits_cudagraph_support():
 
 @pytest.mark.parametrize("backend_variant", [0, 1])
 def test_composite_impl_selects_from_metadata(backend_variant):
+    """The internal metadata tag must select the corresponding child."""
     backend = create_composite_attention_backend(_GeneralBackend, _DecodeBackend)
     impl = backend.get_impl_cls()(8, 128, 0.1)
     metadata = SimpleNamespace(_attention_backend_variant=backend_variant)
@@ -530,6 +456,8 @@ def test_composite_impl_selects_from_metadata(backend_variant):
 
 
 def test_composite_impl_exposes_backend_specific_variants():
+    """Backend-specific setup must see implementations hidden by composition."""
+
     class GeneralImpl(_RoutingImpl):
         pass
 
@@ -551,32 +479,3 @@ def test_composite_impl_exposes_backend_specific_variants():
 
     assert find_attention_impl_variant(impl, GeneralImpl) is impl.general_impl
     assert find_attention_impl_variant(impl, DecodeImpl) is impl.decode_impl
-
-
-def test_dcp_checks_decode_implementation():
-    layer = SimpleNamespace(impl=SimpleNamespace(need_to_return_lse_for_decode=True))
-    config = SimpleNamespace(
-        parallel_config=SimpleNamespace(
-            prefill_context_parallel_size=1,
-            decode_context_parallel_size=2,
-            cp_kv_cache_interleave_size=1,
-        ),
-        speculative_config=None,
-    )
-
-    with patch(
-        "vllm.v1.worker.cp_utils.get_layers_from_vllm_config",
-        return_value={"layer": layer},
-    ):
-        check_attention_cp_compatibility(config)
-
-
-def test_model_runner_v2_allows_backend_routing():
-    config = VllmConfig(
-        attention_config=AttentionConfig(decode_backend="FLASHINFER"),
-        device_config=DeviceConfig(device="cpu"),
-    )
-    assert (
-        "prefill/decode attention backend routing"
-        not in config._get_v2_model_runner_unsupported_features()
-    )

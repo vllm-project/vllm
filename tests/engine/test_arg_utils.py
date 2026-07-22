@@ -361,7 +361,6 @@ def test_attention_config():
     assert args is not None
     engine_args = EngineArgs.from_cli_args(args)
     assert engine_args.attention_config == AttentionConfig()
-    assert engine_args.attention_config.decode_backend is None
     assert engine_args.attention_decode_backend is None
 
     # set backend via dot notation

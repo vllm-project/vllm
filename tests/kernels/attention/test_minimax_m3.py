@@ -1360,7 +1360,6 @@ def test_decode_wrong_layout_breaks_parity():
 def _make_attn_group(backend, spec):
     return AttentionGroup(
         backend=backend,
-        decode_backend=backend,
         layer_names=["main"],
         kv_cache_spec=spec,
         kv_cache_group_id=0,
@@ -1403,7 +1402,6 @@ def test_main_cache_byte_identical_through_production_allocator():
         iraw = torch.zeros(nb * ispec.page_size_bytes, dtype=torch.int8)
         igroup = AttentionGroup(
             backend=MiniMaxM3IndexerBackend,
-            decode_backend=MiniMaxM3IndexerBackend,
             layer_names=["idx"],
             kv_cache_spec=ispec,
             kv_cache_group_id=0,
@@ -1435,7 +1433,6 @@ def test_indexer_inherited_stride_order_trips_allocator_assert():
     iraw = torch.zeros(nb * ispec.page_size_bytes, dtype=torch.int8)
     igroup = AttentionGroup(
         backend=_BrokenIndexerBackend,
-        decode_backend=_BrokenIndexerBackend,
         layer_names=["idx"],
         kv_cache_spec=ispec,
         kv_cache_group_id=0,

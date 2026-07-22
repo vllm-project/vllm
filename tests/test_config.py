@@ -1595,6 +1595,7 @@ def test_draft_sample_method_gumbel_is_rejected():
 
 @pytest.mark.skip_global_cleanup
 def test_speculative_attention_backend_routing_config():
+    """Draft prefill alias and decode backend must populate independent fields."""
     speculative_config = SpeculativeConfig(
         method="ngram",
         num_speculative_tokens=1,
@@ -1610,6 +1611,7 @@ def test_speculative_attention_backend_routing_config():
 
 @pytest.mark.skip_global_cleanup
 def test_speculative_attention_backend_aliases_must_match():
+    """Conflicting names for the same draft backend must be rejected."""
     with pytest.raises(ValueError, match="are aliases and must match"):
         SpeculativeConfig(
             method="ngram",
