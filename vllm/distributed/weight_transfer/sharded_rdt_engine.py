@@ -93,6 +93,9 @@ _SUPPORTED_OPS: dict[Callable, str] = {
     torch.Tensor.flatten: "flatten",
     torch.Tensor.contiguous: "contiguous",
     torch.Tensor.chunk: "chunk",
+    # Multi-return, handled like chunk: _intercept emits one child per output
+    # with a trailing __getitem__(i); the trainer replays unbind()[i].
+    torch.Tensor.unbind: "unbind",
 }
 
 

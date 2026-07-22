@@ -30,6 +30,7 @@ ALLOWED_OPS = frozenset(
         "split",
         "select",
         "flatten",
+        "unbind",
     )
 )
 
