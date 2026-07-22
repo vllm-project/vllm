@@ -452,6 +452,7 @@ def test_processing_correctness(
             "audio placeholders from processed audio lengths. Its vLLM "
             "processor paths are covered by test_moss_audio.py."
         )
+    # TODO: Remove once https://github.com/huggingface/transformers/pull/47483 lands.
     if model_id == "microsoft/VibeVoice-ASR-HF":
         pytest.skip(
             "VibeVoice ASR requires audio as a positional argument and hence "

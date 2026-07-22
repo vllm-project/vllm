@@ -1,27 +1,27 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import json
-import os
 from typing import Any
 
 import pytest
+from transformers import AutoModelForSeq2SeqLM
 
-from vllm import LLM, SamplingParams
 from vllm.assets.audio import AudioAsset
 from vllm.envs import disable_envs_cache
+from vllm.multimodal.audio import AudioResampler
+
+from ....conftest import HfRunner, VllmRunner
+from ...utils import check_logprobs_close
 
 AUDIO_ASSET = AudioAsset("mary_had_lamb")
 
 AUDIO_MODEL_SETTINGS: dict[str, dict[str, Any]] = {
-    "ibm-granite/granite-speech-3.3-2b": {
+    # NOTE: granite-4.0 has its audio LoRA already merged into the weights; the
+    # Transformers backend does not load granite-3.3-2b's separate PEFT adapter.
+    "ibm-granite/granite-4.0-1b-speech": {
         "prompt": (
-            "<|start_of_role|>system<|end_of_role|>"
-            "You are a helpful AI assistant<|end_of_text|>\n"
-            "<|start_of_role|>user<|end_of_role|>"
-            "<|audio|>can you transcribe the speech into a written format?"
-            "<|end_of_text|>\n"
-            "<|start_of_role|>assistant<|end_of_role|>"
+            "USER: <|audio|>can you transcribe the speech into a written format?\n"
+            " ASSISTANT:"
         ),
     },
     "nvidia/audio-flamingo-3-hf": {
@@ -32,7 +32,7 @@ AUDIO_MODEL_SETTINGS: dict[str, dict[str, Any]] = {
             "<sound>Transcribe the input speech.<|im_end|>\n"
             "<|im_start|>assistant\n"
         ),
-        "llm_kwargs": {
+        "vllm_runner_kwargs": {
             "gpu_memory_utilization": 0.85,
         },
     },
@@ -48,7 +48,8 @@ AUDIO_MODEL_SETTINGS: dict[str, dict[str, Any]] = {
             "<|im_end|>\n"
             "<|im_start|>assistant\n"
         ),
-        "llm_kwargs": {
+        "sampling_rate": 24000,
+        "vllm_runner_kwargs": {
             "max_num_batched_tokens": 2048,
             "gpu_memory_utilization": 0.85,
         },
@@ -64,33 +65,13 @@ AUDIO_MODEL_SETTINGS: dict[str, dict[str, Any]] = {
 }
 
 
-FIXTURE_PATH = os.path.join(
-    os.path.dirname(__file__),
-    "../../fixtures/transformers_audio_expected_results.json",
-)
-
-
-def assert_output_matches(output, expected_text, expected_token_ids):
-    generated = output.outputs[0]
-    assert generated.text.strip() == expected_text
-    actual_token_ids = list(generated.token_ids)
-    assert (
-        actual_token_ids == expected_token_ids
-        or actual_token_ids == expected_token_ids[:-1]
-        or actual_token_ids[:-1] == expected_token_ids
-    )
-
-
-@pytest.mark.parametrize(
-    "model_id",
-    [
-        "ibm-granite/granite-speech-3.3-2b",
-        "nvidia/audio-flamingo-3-hf",
-        "microsoft/VibeVoice-ASR-HF",
-        "zai-org/GLM-ASR-Nano-2512",
-    ],
-)
-def test_transformers_audio_generation(monkeypatch, model_id):
+@pytest.mark.parametrize("model_id", list(AUDIO_MODEL_SETTINGS))
+def test_transformers_audio_generation(
+    hf_runner: type[HfRunner],
+    vllm_runner: type[VllmRunner],
+    monkeypatch,
+    model_id: str,
+):
     """Single-process workaround for V1 fork safety deadlock issue
     (vllm-project/vllm/issues/17676). Running multiple audio models together
     under pytest can cause (possibly flaky) hangs, so they are grouped under
@@ -102,47 +83,37 @@ def test_transformers_audio_generation(monkeypatch, model_id):
     disable_envs_cache()
     monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
 
-    if not os.path.exists(FIXTURE_PATH):
-        pytest.skip(f"Fixture not found: {FIXTURE_PATH}")
-
-    with open(FIXTURE_PATH) as f:
-        all_expected = json.load(f)
-
-    if model_id not in all_expected:
-        pytest.skip(f"No fixture data for {model_id}")
-
-    expected = all_expected[model_id]
     settings = AUDIO_MODEL_SETTINGS[model_id]
 
-    try:
-        llm = LLM(
-            model=model_id,
-            model_impl="transformers",
-            max_model_len=2048,
-            enforce_eager=True,
-            limit_mm_per_prompt={"audio": 1},
-            **settings.get("llm_kwargs", {}),
+    audio, orig_sr = AUDIO_ASSET.audio_and_sample_rate
+    target_sr = settings.get("sampling_rate", orig_sr)
+    if orig_sr != target_sr:
+        audio = AudioResampler(target_sr=target_sr).resample(audio, orig_sr=orig_sr)
+    audio = (audio, target_sr)
+
+    with vllm_runner(
+        model_id,
+        model_impl="transformers",
+        dtype="bfloat16",
+        max_model_len=2048,
+        enforce_eager=True,
+        limit_mm_per_prompt={"audio": 1},
+        **settings.get("vllm_runner_kwargs", {}),
+    ) as vllm_model:
+        vllm_outputs = vllm_model.generate_greedy_logprobs(
+            [settings["prompt"]], 128, num_logprobs=10, audios=[audio]
         )
-    except Exception as e:
-        pytest.skip(f"Failed to load model {model_id}: {e}")
 
-    sampling_params = SamplingParams(temperature=0.0, max_tokens=128)
+    with hf_runner(
+        model_id, dtype="bfloat16", auto_cls=AutoModelForSeq2SeqLM
+    ) as hf_model:
+        hf_outputs = hf_model.generate_greedy_logprobs_limit(
+            [settings["prompt"]], 128, num_logprobs=10, audios=[audio]
+        )
 
-    outputs = llm.generate(
-        prompts=[
-            {
-                "prompt": settings["prompt"],
-                "multi_modal_data": {"audio": AUDIO_ASSET.audio_and_sample_rate},
-            }
-        ],
-        sampling_params=sampling_params,
-    )
-    assert len(outputs) == 1
-    generated = outputs[0].outputs[0]
-    print(f"{model_id} transcription: {generated.text.strip()!r}")
-    print(f"{model_id} token_ids: {list(generated.token_ids)}")
-    assert_output_matches(
-        outputs[0],
-        expected["transcriptions"][0],
-        expected["token_ids"][0],
+    check_logprobs_close(
+        outputs_0_lst=hf_outputs,
+        outputs_1_lst=vllm_outputs,
+        name_0="hf",
+        name_1="vllm",
     )
