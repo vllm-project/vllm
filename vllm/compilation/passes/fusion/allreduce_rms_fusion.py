@@ -1416,8 +1416,7 @@ class AiterAllreduceFusedAddRMSNormGroupQuantWithIndexerPattern(
     The trailing FP8 group-quant is matched via ``MatcherQuantFP8`` (consistent
     with the sibling patterns above), which traces both ``QuantFP8.forward_hip``
     and ``forward_native`` paths and so matches whichever op the call site
-    lowers to (``vllm.triton_per_token_group_quant_fp8`` or
-    ``vllm.rocm_aiter_group_fp8_quant``).
+    lowers to (``vllm.rocm_aiter_group_fp8_quant``).
     """
 
     def __init__(
