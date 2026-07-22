@@ -331,46 +331,6 @@ def rmsnorm_fn(
     )
 
 
-class LayerNormGated(nn.Module):
-    def __init__(
-        self,
-        hidden_size,
-        eps: float = 1e-5,
-        group_size: int | None = None,
-        norm_before_gate: bool = True,
-        device: torch.device | None = None,
-        dtype: torch.dtype | None = None,
-    ):
-        """If group_size is not None, we do GroupNorm with each group having group_size elements.
-        group_size=None is equivalent to group_size=hidden_size (i.e. there's only 1 group).
-        """
-
-        factory_kwargs = {"device": device, "dtype": dtype}
-        super().__init__()
-        self.eps = eps
-        self.weight = nn.Parameter(torch.empty(hidden_size, **factory_kwargs))
-        self.bias = nn.Parameter(torch.empty(hidden_size, **factory_kwargs))
-        self.group_size = group_size
-        self.norm_before_gate = norm_before_gate
-        self.reset_parameters()
-
-    def reset_parameters(self):
-        torch.nn.init.ones_(self.weight)
-        torch.nn.init.zeros_(self.bias)
-
-    def forward(self, x, z=None):
-        """If z is not None, we do norm(x) * silu(z) if norm_before_gate, else norm(x * silu(z))"""
-        return layernorm_fn(
-            x,
-            self.weight,
-            self.bias,
-            z=z,
-            group_size=self.group_size,
-            eps=self.eps,
-            norm_before_gate=self.norm_before_gate,
-        )
-
-
 class RMSNormGated(nn.Module):
     def __init__(
         self,

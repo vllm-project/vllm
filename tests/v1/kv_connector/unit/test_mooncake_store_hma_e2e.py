@@ -65,6 +65,7 @@ def _minimal_vllm_config(cache_block_size=16):
     cfg.cache_config.block_size = cache_block_size
     cfg.cache_config.num_gpu_blocks = 4
     cfg.cache_config.hash_block_size = None
+    cfg.cache_config.prefix_match_unit = None
     cfg.cache_config.enable_prefix_caching = True
     cfg.parallel_config.prefill_context_parallel_size = 1
     cfg.parallel_config.decode_context_parallel_size = 1
@@ -337,5 +338,5 @@ def test_chunked_token_database_hash_block_size_smaller_than_block_size():
     assert out[1][0] == 16 and out[1][1] == 32
     # Each chunk's hash is its last (4th) fine hash, which already chains the
     # prior three.
-    assert out[0][2].chunk_hash == fine_hashes[3].hex()
-    assert out[1][2].chunk_hash == fine_hashes[7].hex()
+    assert out[0][2].hex() == fine_hashes[3].hex()
+    assert out[1][2].hex() == fine_hashes[7].hex()

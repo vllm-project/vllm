@@ -44,7 +44,7 @@ from vllm.v1.kv_offload.base import (
     OffloadingManager,
     OffloadingMetricMetadata,
 )
-from vllm.v1.kv_offload.cpu.gpu_worker import CpuGpuOffloadingHandlers
+from vllm.v1.kv_offload.cpu.gpu_worker import CPUOffloadingWorker
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 from vllm.v1.kv_offload.cpu.spec import CPUOffloadingSpec
 from vllm.v1.kv_offload.tiering.factory import SecondaryTierFactory
@@ -108,6 +108,13 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
         # Scheduler-side mmap (rank=None); kept for cleanup
         self._scheduler_mmap: SharedOffloadRegion | None = None
 
+        # engine_id is unique per DP replica (suffixed with _dp{rank} in both
+        # the Ray and multiprocessing paths), so it names a per-replica offload
+        # region. Non-None is guaranteed by OffloadingSpec.__init__.
+        assert vllm_config.kv_transfer_config is not None
+        assert vllm_config.kv_transfer_config.engine_id is not None
+        self._engine_id: str = vllm_config.kv_transfer_config.engine_id
+
     @override
     def get_manager(self) -> OffloadingManager:
         """
@@ -124,7 +131,7 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
             # Create scheduler-side SharedOffloadRegion (rank=None) so the
             # primary tier can eagerly create a memoryview over _base.
             scheduler_mmap = SharedOffloadRegion(
-                instance_id=self.vllm_config.instance_id,
+                engine_id=self._engine_id,
                 num_blocks=self.num_blocks,
                 rank=None,
                 kv_bytes_per_block=self.kv_bytes_per_offloaded_block,
@@ -163,12 +170,11 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
                     raise
 
             # Create TieringOffloadingManager. GPU↔CPU transfers use the inherited
-            # get_handlers(); secondary tier transfers are handled by the
-            # secondary tier managers and need no additional handlers here.
+            # get_worker(). Secondary tier transfers are handled by the
+            # secondary tier managers and need no additional workers here.
             tiering_manager = TieringOffloadingManager(
                 primary_tier=primary_tier,
                 secondary_tiers=secondary_tiers,
-                enable_events=self.kv_events_config.enable_kv_cache_events,
             )
             if int(self.extra_config.get("store_threshold", 0)) >= 2:
                 raise ValueError(
@@ -187,16 +193,19 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
         return self._manager
 
     @override
-    def create_handlers(self, kv_caches: CanonicalKVCaches) -> CpuGpuOffloadingHandlers:
-        rank = torch.accelerator.current_device_index()
+    def create_worker(self, kv_caches: CanonicalKVCaches) -> CPUOffloadingWorker:
+        # Fold the global physical device index into the replica-local
+        # [0, world_size) slot range.
+        world_size = self.vllm_config.parallel_config.world_size
+        rank = torch.accelerator.current_device_index() % world_size
         worker_mmap = SharedOffloadRegion(
-            instance_id=self.vllm_config.instance_id,
+            engine_id=self._engine_id,
             num_blocks=self.num_blocks,
             rank=rank,
             kv_bytes_per_block=self.kv_bytes_per_offloaded_block,
             cpu_page_size=self.cpu_page_size_per_worker,
         )
-        return CpuGpuOffloadingHandlers(
+        return CPUOffloadingWorker(
             kv_caches=kv_caches,
             block_size_factor=self.block_size_factor,
             num_cpu_blocks=self.num_blocks,
