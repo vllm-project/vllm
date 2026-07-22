@@ -75,7 +75,6 @@ SpeculativeMethod = Literal[
     DSparkModelTypes,
 ]
 RejectionSampleMethod = Literal["standard", "synthetic", "block"]
-DraftSampleMethod = Literal["greedy", "probabilistic"]
 
 
 @config
@@ -144,8 +143,7 @@ class SpeculativeConfig:
     use_local_argmax_reduction: bool = False
     """Use vocab-parallel local argmax instead of all-gathering full logits
     for draft token generation. Reduces communication from O(vocab_size) to
-    O(2 * tp_size) per token. Only applies to greedy draft selection in
-    non-tree speculation."""
+    O(2 * tp_size) per token."""
 
     use_heterogeneous_vocab: bool = False
     """Allow draft and target models to use different vocabularies.
@@ -215,11 +213,17 @@ class SpeculativeConfig:
 
     rejection_sample_method: RejectionSampleMethod = "standard"
     """The rejection sampling method to use. 'standard' uses probabilistic
-    rejection sampling (with or without cached draft logits, controlled by
-    draft_sample_method). 'synthetic' accepts draft tokens with a decaying
+    rejection sampling. 'synthetic' accepts draft tokens with a decaying
     probability calibrated to synthetic_acceptance_rate. 'block' uses block
     verification (Sun et al.), which jointly verifies the draft tokens as a
     block instead of one at a time."""
+
+    draft_logits_buffer_gb: float = 1.0
+    """Upper bound (in GiB) on the FP32 draft logits buffer preallocated for
+    rejection sampling. The buffer holds one [num_speculative_tokens, vocab_size]
+    slot per request. For requests that cannot be accommodated into the buffer,
+    the speculator will fallback to greedy sampling, and the rejection sampler
+    will assume one-hot draft probabilities for that decode step."""
 
     synthetic_acceptance_rates: list[float] | None = None
     """Per-position *unconditional* acceptance rates for synthetic rejection
@@ -279,14 +283,6 @@ class SpeculativeConfig:
                 f"synthetic_acceptance_length must be in [1, {n + 1}], got {length}."
             )
         return SpeculativeConfig._acceptance_length_to_rates(length, n)
-
-    draft_sample_method: DraftSampleMethod = "greedy"
-    """How the draft model samples tokens. 'greedy' always picks the argmax
-    token, and the draft probabilities are treated as one-hot during rejection
-    sampling. 'probabilistic' samples stochastically from the draft
-    distribution and uses the full draft logits for the probability ratio test
-    during rejection sampling. This comes at the cost of additional GPU memory
-    usage."""
 
     def compute_hash(self) -> str:
         """
@@ -1261,11 +1257,10 @@ class SpeculativeConfig:
                 "use_heterogeneous_vocab only works with method='draft_model'"
             )
 
-        if self.use_heterogeneous_vocab and self.draft_sample_method != "greedy":
+        if self.draft_logits_buffer_gb <= 0:
             raise ValueError(
-                "use_heterogeneous_vocab currently only supports greedy draft "
-                "sampling. Set draft_sample_method='greedy' (the default) or "
-                "omit it."
+                f"draft_logits_buffer_gb must be positive, got "
+                f"{self.draft_logits_buffer_gb}."
             )
 
         if not self.use_heterogeneous_vocab:

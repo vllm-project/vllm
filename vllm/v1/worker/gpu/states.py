@@ -25,7 +25,9 @@ class RequestState:
 
         self.req_id_to_index: dict[str, int] = {}
         self.index_to_req_id: dict[int, str] = {}
-        self.free_indices = list(range(max_num_reqs))
+        # LIFO stack is used to maximize the number of active requests that
+        # fall inside capped per-slot buffers (e.g. draft logits).
+        self.free_indices = list(range(max_num_reqs - 1, -1, -1))
 
         # NOTE(woosuk): This tensor can be extremely large (e.g., several GBs)
         # depending on the configured max_num_reqs and max_model_len.
