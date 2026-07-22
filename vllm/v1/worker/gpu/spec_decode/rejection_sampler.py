@@ -200,7 +200,7 @@ class RejectionSampler:
             chunk_logprobs = self._get_logprobs_tensors(
                 sampled,
                 num_sampled,
-                (processed_logits if use_processed_logits else logits[lo:hi]),
+                processed_logits if use_processed_logits else logits[lo:hi],
                 chunk_cu_num_logits,
                 chunk_cu_num_logits_np,
                 max_num_logprobs,
@@ -212,11 +212,8 @@ class RejectionSampler:
             num_sampled_chunks.append(num_sampled)
 
         if len(sampled_chunks) == 1:
-            return (
-                sampled_chunks[0],
-                num_sampled_chunks[0],
-                logprobs_chunks[0] if logprobs_chunks else None,
-            )
+            logprobs_tensors = logprobs_chunks[0] if logprobs_chunks else None
+            return sampled_chunks[0], num_sampled_chunks[0], logprobs_tensors
 
         logprobs_tensors = None
         if logprobs_chunks:
