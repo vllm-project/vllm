@@ -159,14 +159,14 @@ class BaseFrontendArgs:
     endpoints."""
     cohere_format: str = "cmd4"
     """Cohere ``--tokenizer-mode cohere`` only. Which Cohere prompt
-    format to render: ``cmd4`` (current Command A / R+ 2025+ models;
-    default) or ``cmd3`` (legacy Command R / R+ 2024 models). Selecting
+    format to render: ``cmd4`` (current Command A+ models);
+    default) or ``cmd3`` (earlier Cmd-A and Cmd-A reasoning models). Selecting
     the wrong format silently produces a prompt the model wasn't trained
     on, which most commonly manifests as the model emitting text but no
     citations / tool calls / thinking blocks. Equivalent to passing
     ``--default-chat-template-kwargs '{"cohere_format": "..."}'`` -- any
-    explicit request-level ``chat_template_kwargs.cohere_format`` still
-    wins."""
+    explicit request-level ``chat_template_kwargs.cohere_format`` takes
+    priority."""
     log_error_stack: bool = envs.VLLM_SERVER_DEV_MODE
     """If set to True, log the stack trace of error responses"""
     tokens_only: bool = False

@@ -84,7 +84,7 @@ if _SDK_AVAILABLE:
         return JSONResponse(
             status_code=status,
             content=CohereError(
-                message=info.message,
+                message=sanitize_message(info.message),
                 id=_request_id(raw_request),
             ).model_dump(exclude_none=True),
         )
