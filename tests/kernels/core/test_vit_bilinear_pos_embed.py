@@ -36,8 +36,6 @@ def test_shape_args_do_not_specialize() -> None:
     assert set(_bilinear_pos_embed_kernel.do_not_specialize) == {
         "H",
         "W",
-        "h_scale",
-        "w_scale",
     }
 
 
