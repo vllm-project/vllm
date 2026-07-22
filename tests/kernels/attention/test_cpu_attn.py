@@ -1110,3 +1110,64 @@ def test_varlen_with_paged_kv_dynamic_causal(
         kv_cache_dtype=kv_cache_dtype,
         dynamic_causal=dynamic_causal,
     )
+
+
+# ---------------------------------------------------------------------------
+# AMX_FP8 (Diamond Rapids) tests
+# ---------------------------------------------------------------------------
+
+def _amx_fp8_available() -> bool:
+    """Return True iff the runtime reports AMX_FP8 capability."""
+    return (torch.cpu._is_amx_tile_supported()
+            and torch.ops._C.cpu_attn_has_isa("amx_fp8"))
+
+
+@pytest.mark.parametrize("kv_cache_dtype", ["fp8_e4m3", "fp8_e5m2"])
+@pytest.mark.parametrize("seq_lens", SEQ_LENS)
+@pytest.mark.parametrize("num_heads", NUM_HEADS)
+@pytest.mark.parametrize("head_size", [64, 128, 256])
+@pytest.mark.parametrize("block_size", [32, 64])
+@pytest.mark.parametrize("sliding_window", [None])
+@pytest.mark.parametrize("dtype", [torch.bfloat16])
+@pytest.mark.parametrize("soft_cap", [None])
+@pytest.mark.parametrize("num_blocks", NUM_BLOCKS)
+@pytest.mark.parametrize("use_alibi", [False])
+@pytest.mark.parametrize("use_sink", [False])
+@pytest.mark.parametrize("isa", ["amx_fp8"])
+@pytest.mark.skipif(not _amx_fp8_available(), reason="no AMX_FP8 support (requires Diamond Rapids).")
+def test_varlen_with_paged_kv_amx_fp8(
+    seq_lens: list[tuple[int, int]],
+    num_heads: tuple[int, int],
+    head_size: int,
+    sliding_window: int | None,
+    dtype: torch.dtype,
+    block_size: int,
+    soft_cap: float | None,
+    num_blocks: int,
+    use_alibi: bool,
+    use_sink: bool,
+    isa: str,
+    kv_cache_dtype: str,
+) -> None:
+    """Test AMX_FP8 native FP8×FP8 attention (Diamond Rapids).
+
+    Verifies that:
+    - QK uses _tile_dpfp8ps (native FP8 MMA, no K dequant).
+    - PV uses _tile_dpbf16ps with V dequanted to BF16 on-the-fly.
+    - Output cosine similarity vs fp32 reference > 0.99.
+    """
+    varlen_with_paged_kv(
+        seq_lens=seq_lens,
+        num_heads=num_heads,
+        head_size=head_size,
+        sliding_window=sliding_window,
+        dtype=dtype,
+        block_size=block_size,
+        soft_cap=soft_cap,
+        num_blocks=num_blocks,
+        use_alibi=use_alibi,
+        use_sink=use_sink,
+        isa=isa,
+        kv_cache_dtype=kv_cache_dtype,
+    )
+

@@ -16,6 +16,7 @@ HEAD_DIMS_16 = [48, 80, 112]
 # ISA types
 ISA_TYPES = {
     "AMX": 0,
+    "AMX_FP8": 7,
     "VEC": 1,
     "VEC16": 2,
     "NEON": 3,
@@ -39,13 +40,13 @@ KV_CACHE_CPP_TYPES = {
 }
 
 # ISAs supported for head_dims divisible by 32
-ISA_FOR_32 = ["AMX", "NEON", "VEC", "VEC16", "VXE", "RVV", "VSX"]
+ISA_FOR_32 = ["AMX", "AMX_FP8", "NEON", "VEC", "VEC16", "VXE", "RVV", "VSX"]
 
 # ISAs supported for head_dims divisible by 16 only
 ISA_FOR_16 = ["VEC16"]
 
 # ISAs that support FP8 KV cache (x86 AVX2/AVX-512 required)
-ISA_FOR_FP8 = ["AMX", "VEC"]
+ISA_FOR_FP8 = ["AMX_FP8", "AMX", "VEC"]
 
 
 def encode_params(head_dim: int, isa_type: str, kv_cache: str = "auto") -> int:
@@ -138,6 +139,10 @@ def generate_header_file() -> str:
 #include "cpu_attn_vec.hpp"
 #include "cpu_attn_vec16.hpp"
 
+#ifdef CPU_CAPABILITY_AMXFP8
+    #include "cpu_attn_amx_fp8.hpp"
+#endif
+
 #ifdef CPU_CAPABILITY_AMXBF16
   #include "cpu_attn_amx.hpp"
 #endif
@@ -206,7 +211,12 @@ def generate_header_file() -> str:
         )
 
     header += _macro_block(
-        "#if defined(CPU_CAPABILITY_AMXBF16)",
+        "#if defined(CPU_CAPABILITY_AMXFP8)",
+        ["AMX_FP8", "AMX", "VEC", "VEC16"],
+        fp8=True,
+    )
+    header += _macro_block(
+        "#elif defined(CPU_CAPABILITY_AMXBF16)",
         ["AMX", "VEC", "VEC16"],
         fp8=True,
     )

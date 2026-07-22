@@ -485,6 +485,12 @@ def _get_attn_isa(
         raise NotImplementedError(
             "FP8 KV cache on CPU requires x86 with AVX-512 or AMX."
         )
+    # AMX_FP8: prefer native FP8 MMA on DMR when FP8 KV cache is in use.
+    # torch.ops._C.cpu_attn_has_isa("amx_fp8") checks runtime capability.
+    if (supports_amx and fp8_kv and dtype in (torch.bfloat16,)
+            and block_size % 32 == 0
+            and torch.ops._C.cpu_attn_has_isa("amx_fp8")):
+        return "amx_fp8"
     if supports_amx and dtype in (torch.bfloat16,) and block_size % 32 == 0:
         return "amx"
     elif block_size % 32 == 0:

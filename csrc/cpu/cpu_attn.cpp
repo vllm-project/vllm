@@ -20,6 +20,13 @@ bool cpu_attn_has_isa(const std::string& isa) {
     return false;
 #endif
   }
+  if (isa == "amx_fp8") {
+#ifdef CPU_CAPABILITY_AMXFP8
+    return true;
+#else
+    return false;
+#endif
+  }
   return false;
 }
 
@@ -34,6 +41,8 @@ torch::Tensor get_scheduler_metadata(
   cpu_attention::ISA isa;
   if (isa_hint == "amx") {
     isa = cpu_attention::ISA::AMX;
+  } else if (isa_hint == "amx_fp8") {
+    isa = cpu_attention::ISA::AMX_FP8;
   } else if (isa_hint == "vec") {
     isa = cpu_attention::ISA::VEC;
   } else if (isa_hint == "vec16") {
@@ -127,6 +136,8 @@ void cpu_attn_reshape_and_cache(
   cpu_attention::ISA isa_tag = [&]() {
     if (isa == "amx") {
       return cpu_attention::ISA::AMX;
+    } else if (isa == "amx_fp8") {
+      return cpu_attention::ISA::AMX_FP8;
     } else if (isa == "vec") {
       return cpu_attention::ISA::VEC;
     } else if (isa == "vec16") {
@@ -146,8 +157,9 @@ void cpu_attn_reshape_and_cache(
 
   if (is_fp8) {
     TORCH_CHECK(isa_tag == cpu_attention::ISA::AMX ||
+                    isa_tag == cpu_attention::ISA::AMX_FP8 ||
                     isa_tag == cpu_attention::ISA::VEC,
-                "FP8 KV cache is only supported on x86 (AMX/VEC) ISA");
+                "FP8 KV cache is only supported on x86 (AMX_FP8/AMX/VEC) ISA");
   }
 
   VLLM_DISPATCH_FLOATING_TYPES(
@@ -234,8 +246,9 @@ void cpu_attention_with_kv_cache(
     input.k_scale_fp8 = static_cast<float>(k_scale);
     input.v_scale_fp8 = static_cast<float>(v_scale);
     TORCH_CHECK(input.metadata->isa == cpu_attention::ISA::AMX ||
+                    input.metadata->isa == cpu_attention::ISA::AMX_FP8 ||
                     input.metadata->isa == cpu_attention::ISA::VEC,
-                "FP8 KV cache is only supported on x86 (AMX/VEC) ISA");
+                "FP8 KV cache is only supported on x86 (AMX_FP8/AMX/VEC) ISA");
   }
 
   VLLM_DISPATCH_FLOATING_TYPES(

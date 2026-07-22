@@ -12,7 +12,7 @@
 #include "cpu/utils.hpp"
 
 namespace cpu_attention {
-enum class ISA { AMX, VEC, VEC16, NEON, VXE, RVV, VSX };
+enum class ISA { AMX, AMX_FP8, VEC, VEC16, NEON, VXE, RVV, VSX };
 
 // Mirrors csrc/attention/dtype_fp8.cuh Fp8KVCacheDataType exactly.
 enum class Fp8KVCacheDataType {
@@ -151,6 +151,9 @@ struct AttentionMetadata {
     switch (isa) {
       case ISA::AMX:
         ss << "AMX, ";
+        break;
+      case ISA::AMX_FP8:
+        ss << "AMX_FP8, ";
         break;
       case ISA::VEC:
         ss << "VEC, ";
@@ -885,6 +888,8 @@ struct AttentionInput {
   // FP8 KV cache scales (used by FP8 attention implementations)
   float k_scale_fp8 = 1.0f;
   float v_scale_fp8 = 1.0f;
+  // FP8 query scale (used by AMX_FP8 which quantizes query inside the kernel)
+  float q_scale_fp8 = 1.0f;
 };
 
 #define DEFINE_CPU_ATTENTION_PARAMS                                         \

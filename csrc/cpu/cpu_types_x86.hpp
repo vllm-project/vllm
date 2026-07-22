@@ -349,6 +349,64 @@ struct BF16Vec32 : public Vec<BF16Vec32> {
 };
 #endif
 
+// ---------------------------------------------------------------------------
+// Vectorized BF16 → FP8 E4M3 quantization helpers.
+// ---------------------------------------------------------------------------
+
+// Quantize 16 FP32 values to 16 FP8-E4M3 bytes using AVX-512.
+// inv_scale = 1.0f / q_scale (pre-computed by caller).
+// Returns 16 packed uint8_t in the low 128-bits of an __m128i.
+#if defined(__AVX512F__)
+FORCE_INLINE __m128i quant_fp32x16_to_fp8e4m3_avx512(const float* src,
+                                                      float inv_scale) {
+  __m512 v = _mm512_loadu_ps(src);
+  v = _mm512_mul_ps(v, _mm512_set1_ps(inv_scale));
+  // Clamp to FP8-E4M3 representable range [-448, 448]
+  v = _mm512_min_ps(v, _mm512_set1_ps(448.0f));
+  v = _mm512_max_ps(v, _mm512_set1_ps(-448.0f));
+  // Shift exponent bias: FP32 bias=127 → E4M3 bias=7, delta=120
+  // Multiply by 2^-120 to move the exponent bias from 127 to 7.
+  v = _mm512_mul_ps(v, _mm512_set1_ps(0x1p-120f));
+  __m512i vi = _mm512_castps_si512(v);
+  // sign: bit31 → bit7
+  __m512i sign = _mm512_srli_epi32(
+      _mm512_and_si512(vi, _mm512_set1_epi32(0x80000000u)), 24);
+  // payload: bits[26:20] → bits[6:0]  (7-bit mantissa field after bias shift)
+  __m512i payload = _mm512_srli_epi32(
+      _mm512_and_si512(vi, _mm512_set1_epi32(0x7FFFFFu << 0)), 20);
+  // Keep 0x7F (all-ones) reserved as NaN encoding: clamp to 0x7E
+  payload = _mm512_min_epu32(payload, _mm512_set1_epi32(0x7E));
+  __m512i fp8 = _mm512_or_si512(sign, payload);
+  // Pack 16 × int32 → 16 × uint8  (cvt truncates, so the int32 values must
+  // fit in uint8; they do since max is 0xFF = sign|payload).
+  return _mm512_cvtepi32_epi8(fp8);
+}
+
+// Quantize 32 BF16 values to 32 FP8-E4M3 bytes using AVX-512.
+// Writes 32 bytes to dst.  inv_scale = 1.0f / q_scale.
+FORCE_INLINE void quant_bf16x32_to_fp8e4m3_avx512(const c10::BFloat16* src,
+                                                   uint8_t* dst,
+                                                   float inv_scale) {
+  // Convert 32 BF16 → 2x16 FP32 then quantize each half.
+  const uint16_t* u16 = reinterpret_cast<const uint16_t*>(src);
+  __m256i b16_lo = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(u16));
+  __m256i b16_hi =
+    _mm256_loadu_si256(reinterpret_cast<const __m256i*>(u16 + 16));
+  // Zero-extend uint16 -> uint32, then shift left by 16 to form FP32 bits.
+  __m512 lo_fp32 = _mm512_castsi512_ps(
+    _mm512_slli_epi32(_mm512_cvtepu16_epi32(b16_lo), 16));
+  __m512 hi_fp32 = _mm512_castsi512_ps(
+    _mm512_slli_epi32(_mm512_cvtepu16_epi32(b16_hi), 16));
+  alignas(64) float fp32_buf[32];
+  _mm512_store_ps(fp32_buf, lo_fp32);
+  _mm512_store_ps(fp32_buf + 16, hi_fp32);
+  __m128i lo8 = quant_fp32x16_to_fp8e4m3_avx512(fp32_buf, inv_scale);
+  __m128i hi8 = quant_fp32x16_to_fp8e4m3_avx512(fp32_buf + 16, inv_scale);
+  _mm_storeu_si128(reinterpret_cast<__m128i*>(dst), lo8);
+  _mm_storeu_si128(reinterpret_cast<__m128i*>(dst + 16), hi8);
+}
+#endif  // __AVX512F__
+
 struct FP32Vec4 : public Vec<FP32Vec4> {
   constexpr static int VEC_ELEM_NUM = 4;
   union AliasReg {
