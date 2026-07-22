@@ -61,7 +61,13 @@ def test_fused_sigmoid_gating_delta_rule_update_non_spec(
     ssm_state = torch.rand(
         total_entries, num_v_heads, head_k_dim, head_v_dim, dtype=dtype
     )
-    state_indices = torch.randperm(total_entries, dtype=torch.int32)[:num_tokens]
+    # Index 0 is NULL_BLOCK_ID: the kernel intentionally skips sequences whose
+    # state index is 0 and leaves their output slot unwritten. Draw indices from
+    # [1, total_entries) so every active sequence maps to a valid state and the
+    # output is fully defined for comparison.
+    state_indices = (torch.randperm(total_entries - 1, dtype=torch.int32) + 1)[
+        :num_tokens
+    ]
     cu_seqlens = torch.arange(0, num_tokens + 1, dtype=torch.int32)
 
     beta = b.sigmoid()
@@ -147,10 +153,12 @@ def test_fused_sigmoid_gating_delta_rule_update_spec(
     ssm_state = torch.rand(
         total_entries, num_v_heads, head_k_dim, head_v_dim, dtype=dtype
     )
-    state_indices = torch.randperm(
-        total_entries,
-        dtype=torch.int32,
-    )[:num_tokens].view(num_reqs, num_speculative_tokens + 1)
+    # Index 0 is NULL_BLOCK_ID (skipped by the kernel, output left unwritten), so
+    # draw active state indices from [1, total_entries) to keep every output slot
+    # defined for comparison.
+    state_indices = (torch.randperm(total_entries - 1, dtype=torch.int32) + 1)[
+        :num_tokens
+    ].view(num_reqs, num_speculative_tokens + 1)
     num_accepted_tokens = torch.randint(
         1, num_speculative_tokens + 1, (num_reqs,), dtype=torch.int32
     )
