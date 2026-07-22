@@ -160,6 +160,55 @@ _TOOL_CALL_SAMPLES = [
     if s.expected_tool_calls
 ]
 
+_TOOL_ONLY_SAMPLES = [
+    (p.parser_cls, p.name, s)
+    for p in _PAIRINGS
+    for s in p.samples
+    if s.expected_tool_calls and not s.expected_reasoning and not s.expected_content
+]
+
+
+@pytest.mark.parametrize("chunk_size", CHUNK_SIZES, ids=lambda c: f"chunk={c}")
+@pytest.mark.parametrize(
+    "parser_cls,parser_name,sample",
+    _TOOL_ONLY_SAMPLES,
+    ids=lambda v: v.id if hasattr(v, "id") else "",
+)
+def test_delegating_replay_no_tools_recovers_suppressed_output(
+    parser_cls, parser_name, sample, chunk_size
+):
+    """A request with no tools defaults tool_choice to "none". When the
+    model emits a tool call anyway and the whole response is tool syntax,
+    the text must surface as content instead of being stripped to an
+    entirely empty message (#49254)."""
+    tokenizer = make_mock_tokenizer(sample)
+    parser = parser_cls(
+        tokenizer, None, chat_template_kwargs=sample.chat_template_kwargs
+    )
+
+    deltas = replay_streaming(
+        parser,
+        sample.tokens,
+        chunk_size=chunk_size,
+        finished_on_last=True,
+        tools=None,
+        prompt_token_ids=sample.prompt_token_ids,
+    )
+    output = collect_output(deltas)
+
+    assert output.tool_calls == [], (
+        f"Expected no tool calls without declared tools, got {output.tool_calls}"
+    )
+    for expected_call in sample.expected_tool_calls:
+        assert expected_call["name"] in output.content, (
+            f"parser={parser_name}: tool name lost: {output.content!r}"
+        )
+        for value in expected_call["arguments"].values():
+            if isinstance(value, str) and value:
+                assert value in output.content, (
+                    f"parser={parser_name}: argument {value!r} lost: {output.content!r}"
+                )
+
 
 @pytest.mark.parametrize(
     "parser_cls,parser_name,sample",
