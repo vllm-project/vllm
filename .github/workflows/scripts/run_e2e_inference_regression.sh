@@ -7,21 +7,29 @@ PORT=${PORT:-}
 DTYPE=${DTYPE:-float32}
 MAX_MODEL_LEN=${MAX_MODEL_LEN:-512}
 MAX_NUM_SEQS=${MAX_NUM_SEQS:-2}
+GPU_MEMORY_UTILIZATION=${GPU_MEMORY_UTILIZATION:-0.92}
 MAX_TOKENS=${MAX_TOKENS:-8}
 PROMPT=${PROMPT:-The capital of France is}
 CHAT_MESSAGE=${CHAT_MESSAGE:-Tell me one short fact about France.}
 BENCH_NUM_PROMPTS=${BENCH_NUM_PROMPTS:-5}
-SERVER_LOG=${SERVER_LOG:-/tmp/vllm-e2e-regression.log}
-RUNTIME_READY_LOG=${RUNTIME_READY_LOG:-/tmp/vllm-e2e-regression-runtime-ready.log}
+SERVER_LOG=${SERVER_LOG:-}
+RUNTIME_READY_LOG=${RUNTIME_READY_LOG:-}
 PYTHON_BIN=${PYTHON_BIN:-python}
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+HTTP_REQUEST_SCRIPT=${E2E_HTTP_REQUEST_SCRIPT:-$SCRIPT_DIR/e2e_http_request.py}
+ASCEND_DEVICE_SELECTOR=${ASCEND_DEVICE_SELECTOR:-$SCRIPT_DIR/select_ascend_ci_device.py}
+ASCEND_RESOURCE_GATE_SCRIPT=${ASCEND_RESOURCE_GATE_SCRIPT:-$SCRIPT_DIR/ascend_e2e_resource_gate.sh}
 VLLM_ASCEND_HUST_REPO=${VLLM_ASCEND_HUST_REPO:-${GITHUB_WORKSPACE:-$PWD}/vllm-ascend-hust}
 SUDO_AUTH_EXIT_CODE=${SUDO_AUTH_EXIT_CODE:-76}
+NPU_MEMORY_EXIT_CODE=${NPU_MEMORY_EXIT_CODE:-87}
+NPU_MEMORY_PREFLIGHT_SCRIPT=${NPU_MEMORY_PREFLIGHT_SCRIPT:-$SCRIPT_DIR/check_ascend_npu_memory.py}
+VLLM_ASCEND_REQUIRED_MEMORY_UTILIZATION=${VLLM_ASCEND_REQUIRED_MEMORY_UTILIZATION:-$GPU_MEMORY_UTILIZATION}
 ASCEND_E2E_USE_SUDO=${ASCEND_E2E_USE_SUDO:-0}
 DEFAULT_SYSTEM_ASCEND_ROOT_HELPER=${DEFAULT_SYSTEM_ASCEND_ROOT_HELPER:-/usr/local/bin/run_ascend_benchmark_root_helper.sh}
 REPO_ASCEND_ROOT_HELPER=${REPO_ASCEND_ROOT_HELPER:-$VLLM_ASCEND_HUST_REPO/.github/workflows/scripts/run_ascend_benchmark_root_helper.sh}
 REPO_ASCEND_ROOT_HELPER_INSTALL_SCRIPT=${REPO_ASCEND_ROOT_HELPER_INSTALL_SCRIPT:-$VLLM_ASCEND_HUST_REPO/scripts/install_ascend_benchmark_root_helper.sh}
 if [[ -n "${ASCEND_E2E_ROOT_HELPER:-}" ]]; then
-  ASCEND_E2E_ROOT_HELPER=${ASCEND_E2E_ROOT_HELPER}
+  : # Keep the explicitly configured helper.
 elif [[ -x "$DEFAULT_SYSTEM_ASCEND_ROOT_HELPER" ]]; then
   ASCEND_E2E_ROOT_HELPER=$DEFAULT_SYSTEM_ASCEND_ROOT_HELPER
 else
@@ -45,6 +53,7 @@ SUDO_PRESERVE_ENV_VARS=(
   ASCEND_VISIBLE_DEVICES
   ATB_HOME_PATH
   DTYPE
+  GPU_MEMORY_UTILIZATION
   HCCL_CONNECT_TIMEOUT
   HCCL_EXEC_TIMEOUT
   HF_ENDPOINT
@@ -118,7 +127,7 @@ export_sudo_preserved_env_vars() {
 
   for var_name in "${SUDO_PRESERVE_ENV_VARS[@]}"; do
     if [[ -n "${!var_name+x}" ]]; then
-      export "$var_name"
+      export "${var_name?}"
     fi
   done
 }
@@ -258,22 +267,10 @@ run_runner_npu_preflight_once() {
     --python "$PYTHON_BIN" \
     --require-npu --json >/dev/null || return 1
 
-  # Device-specific torch.zeros allocation check
-  "$PYTHON_BIN" - <<'PY'
-import os
-
-import torch
-import torch_npu  # noqa: F401
-
-device = os.environ.get("VLLM_ASCEND_TORCH_PREFLIGHT_DEVICE", "npu:0")
-print(f"preflight device={device}")
-print("torch_npu import ok=True")
-if not torch.npu.is_available():
-    raise RuntimeError("torch.npu.is_available() returned False")
-torch.npu.set_device(device)
-_ = torch.zeros(1, device=device)
-print("torch.zeros preflight ok")
-PY
+  "$PYTHON_BIN" "$NPU_MEMORY_PREFLIGHT_SCRIPT" \
+    --device "${VLLM_ASCEND_TORCH_PREFLIGHT_DEVICE:-npu:0}" \
+    --utilization "$VLLM_ASCEND_REQUIRED_MEMORY_UTILIZATION" \
+    --insufficient-exit-code "$NPU_MEMORY_EXIT_CODE"
 }
 
 prepend_env_path() {
@@ -329,14 +326,22 @@ ensure_runner_npu_ready() {
   local delay_seconds=${RUNNER_NPU_PREFLIGHT_DELAY_SECONDS:-10}
   local attempt=1
   local preflight_output=""
+  local preflight_status=0
 
   while [[ "$attempt" -le "$max_attempts" ]]; do
     if preflight_output=$(run_runner_npu_preflight_once 2>&1); then
       return 0
+    else
+      preflight_status=$?
     fi
 
     echo "Runner NPU preflight failed ($attempt/$max_attempts)" >&2
     printf '%s\n' "$preflight_output" >&2
+
+    if [[ "$preflight_status" -eq "$NPU_MEMORY_EXIT_CODE" ]]; then
+      echo "Ascend NPU memory is insufficient; failing without retry." >&2
+      return "$NPU_MEMORY_EXIT_CODE"
+    fi
 
     if [[ "$attempt" -lt "$max_attempts" ]]; then
       sleep "$delay_seconds"
@@ -351,6 +356,12 @@ ensure_runner_npu_ready() {
   fi
 
   return 1
+}
+
+server_log_indicates_npu_memory_pressure() {
+  [[ -f "$SERVER_LOG" ]] && grep -Eqi \
+    'Free memory on device .* less than desired GPU memory utilization|NPU out of memory|torch_npu.*OutOfMemoryError|ACL_ERROR_RT_MEMORY_ALLOCATION' \
+    "$SERVER_LOG"
 }
 
 start_server() {
@@ -374,6 +385,7 @@ start_server() {
         --dtype "$DTYPE" \
         --max-model-len "$MAX_MODEL_LEN" \
         --max-num-seqs "$MAX_NUM_SEQS" \
+        --gpu-memory-utilization "$GPU_MEMORY_UTILIZATION" \
         --enforce-eager >"$SERVER_LOG" 2>&1 &
     fi
     server_pid=$!
@@ -389,6 +401,7 @@ start_server() {
         --dtype "$DTYPE" \
         --max-model-len "$MAX_MODEL_LEN" \
         --max-num-seqs "$MAX_NUM_SEQS" \
+        --gpu-memory-utilization "$GPU_MEMORY_UTILIZATION" \
         --enforce-eager >"$SERVER_LOG" 2>&1 &
     fi
     server_pid=$!
@@ -420,29 +433,30 @@ print_server_log_tail() {
   fi
 }
 
-curl_with_server_log() {
+http_with_server_log() {
   local description=$1
   shift
   local max_attempts=${E2E_HTTP_REQUEST_ATTEMPTS:-5}
   local delay_seconds=${E2E_HTTP_REQUEST_DELAY_SECONDS:-2}
+  local timeout_seconds=${E2E_HTTP_REQUEST_TIMEOUT_SECONDS:-30}
   local attempt=1
   local rc=0
 
   while [[ "$attempt" -le "$max_attempts" ]]; do
-    if curl -fsS "$@"; then
+    if "$PYTHON_BIN" "$HTTP_REQUEST_SCRIPT" --timeout "$timeout_seconds" "$@"; then
       return 0
     else
       rc=$?
     fi
 
     if [[ -n "$server_pid" ]] && ! kill -0 "$server_pid" 2>/dev/null; then
-      echo "$description failed because the vLLM server exited (curl exit $rc)" >&2
+      echo "$description failed because the vLLM server exited (HTTP probe exit $rc)" >&2
       print_server_log_tail
       return "$rc"
     fi
 
     if [[ "$attempt" -eq "$max_attempts" ]]; then
-      echo "$description failed after ${max_attempts} attempts (curl exit $rc)" >&2
+      echo "$description failed after ${max_attempts} attempts (HTTP probe exit $rc)" >&2
       print_server_log_tail
       return "$rc"
     fi
@@ -459,13 +473,16 @@ if [[ -z "$PORT" ]]; then
 fi
 
 runtime_root=${VLLM_HUST_CI_RUNTIME_ROOT:-${GITHUB_WORKSPACE:-$PWD}/.ci-runtime}
+log_dir="$runtime_root/logs"
+SERVER_LOG=${SERVER_LOG:-$log_dir/vllm-e2e-regression.log}
+RUNTIME_READY_LOG=${RUNTIME_READY_LOG:-$log_dir/vllm-e2e-regression-runtime-ready.log}
 export HOME="$runtime_root/home"
 export XDG_CACHE_HOME="$runtime_root/cache"
 export XDG_CONFIG_HOME="$runtime_root/config"
 export VLLM_CACHE_ROOT="$XDG_CACHE_HOME/vllm"
 export VLLM_CONFIG_ROOT="$XDG_CONFIG_HOME/vllm"
 export PIP_CACHE_DIR="$XDG_CACHE_HOME/pip"
-mkdir -p "$HOME" "$XDG_CACHE_HOME" "$XDG_CONFIG_HOME" "$VLLM_CACHE_ROOT" "$VLLM_CONFIG_ROOT" "$PIP_CACHE_DIR"
+mkdir -p "$HOME" "$XDG_CACHE_HOME" "$XDG_CONFIG_HOME" "$VLLM_CACHE_ROOT" "$VLLM_CONFIG_ROOT" "$PIP_CACHE_DIR" "$log_dir"
 
 marker_dir="$runtime_root/process-markers"
 marker_pid_file="$marker_dir/vllm-server.pid"
@@ -475,63 +492,71 @@ mkdir -p "$marker_dir"
 echo "Starting vLLM inference regression test for $MODEL_NAME"
 echo "Using regression test port $PORT"
 echo "Ascend E2E use sudo: $ASCEND_E2E_USE_SUDO"
-if [[ "$ASCEND_E2E_USE_SUDO" == "1" ]]; then
-  echo "Ascend E2E root helper: $ASCEND_E2E_ROOT_HELPER"
-fi
+# Bind the resource gate, runtime preflight, and server to the same card.
+# shellcheck source=/dev/null
+source "$ASCEND_RESOURCE_GATE_SCRIPT"
 
 if [[ "$ASCEND_E2E_USE_SUDO" == "1" ]]; then
+  echo "Ascend E2E root helper: $ASCEND_E2E_ROOT_HELPER"
   if ! verify_root_helper_ready; then
     exit 1
   fi
-  if wait_for_ascend_runtime_ready; then
-    :
-  else
-    exit "$?"
-  fi
 else
   configure_ascend_python_runtime_paths
-  if ensure_runner_npu_ready; then
-    :
-  else
-    status=$?
-    if [[ "$status" -eq 2 ]]; then
-      exit 0
-    fi
-    exit "$status"
+fi
+
+if prepare_ascend_device_for_server "vLLM inference regression test"; then
+  :
+else
+  status=$?
+  if [[ "$status" -eq 2 ]]; then
+    exit 0
   fi
+  exit "$status"
 fi
 
 start_server
 
 for attempt in $(seq 1 120); do
-  if curl -fsS "http://$HOST:$PORT/v1/models" >/dev/null; then
+  if "$PYTHON_BIN" "$HTTP_REQUEST_SCRIPT" \
+    --timeout "${E2E_HTTP_REQUEST_TIMEOUT_SECONDS:-30}" \
+    "http://$HOST:$PORT/v1/models" >/dev/null 2>&1; then
     break
   fi
 
   if ! kill -0 "$server_pid" 2>/dev/null; then
     echo "vLLM server exited before becoming ready"
     cat "$SERVER_LOG"
+    if server_log_indicates_npu_memory_pressure; then
+      echo "Detected deterministic Ascend NPU memory pressure in server log." >&2
+      exit "$NPU_MEMORY_EXIT_CODE"
+    fi
     exit 1
   fi
 
   if [[ "$attempt" -eq 120 ]]; then
     echo "Timed out waiting for vLLM server to become ready"
     cat "$SERVER_LOG"
+    if server_log_indicates_npu_memory_pressure; then
+      echo "Detected deterministic Ascend NPU memory pressure in server log." >&2
+      exit "$NPU_MEMORY_EXIT_CODE"
+    fi
     exit 1
   fi
 
   sleep 2
 done
 
-curl_with_server_log \
+http_with_server_log \
   "vLLM models endpoint readiness confirmation" \
   "http://$HOST:$PORT/v1/models" >/dev/null
 
 completion_response=$(mktemp)
-curl_with_server_log "vLLM completions request" \
+http_with_server_log "vLLM completions request" \
+  --method POST \
+  --header "Content-Type: application/json" \
+  --data "{\"model\": \"$MODEL_NAME\", \"prompt\": \"$PROMPT\", \"max_tokens\": $MAX_TOKENS, \"temperature\": 0}" \
   "http://$HOST:$PORT/v1/completions" \
-  -H "Content-Type: application/json" \
-  -d "{\"model\": \"$MODEL_NAME\", \"prompt\": \"$PROMPT\", \"max_tokens\": $MAX_TOKENS, \"temperature\": 0}" \
   > "$completion_response"
 
 "$PYTHON_BIN" - "$completion_response" "$MODEL_NAME" <<'PY'
@@ -554,10 +579,11 @@ PY
 rm -f "$completion_response"
 
 chat_response=$(mktemp)
-curl_with_server_log "vLLM chat completions request" \
+http_with_server_log "vLLM chat completions request" \
+  --method POST \
+  --header "Content-Type: application/json" \
+  --data "{\"model\": \"$MODEL_NAME\", \"messages\": [{\"role\": \"user\", \"content\": \"$CHAT_MESSAGE\"}], \"max_tokens\": $MAX_TOKENS, \"temperature\": 0}" \
   "http://$HOST:$PORT/v1/chat/completions" \
-  -H "Content-Type: application/json" \
-  -d "{\"model\": \"$MODEL_NAME\", \"messages\": [{\"role\": \"user\", \"content\": \"$CHAT_MESSAGE\"}], \"max_tokens\": $MAX_TOKENS, \"temperature\": 0}" \
   > "$chat_response"
 
 "$PYTHON_BIN" - "$chat_response" "$MODEL_NAME" <<'PY'
