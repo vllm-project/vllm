@@ -638,11 +638,15 @@ def _replicated_layout(
 
 
 @pytest.mark.parametrize("world_size", [2, 4, 8])
+@pytest.mark.parametrize("use_v2_model_runner", [False, True], ids=["v1", "v2"])
 def test_replicated_layout_enabled_for_pure_mla_tp_mp_single_node(
     world_size: int,
+    use_v2_model_runner: bool,
 ):
     assert _replicated_layout(
-        _make_mla_kv_cache_config(), tensor_parallel_size=world_size
+        _make_mla_kv_cache_config(),
+        tensor_parallel_size=world_size,
+        use_v2_model_runner=use_v2_model_runner,
     )
 
 
@@ -843,7 +847,6 @@ def test_replicated_layout_rejects_bare_mla_with_mixed_page_accounting():
         ({"distributed_executor_backend": "uni"}, "uni"),
         ({"distributed_executor_backend": type("DummyExecutor", (), {})}, "class"),
         ({"nnodes": 2}, "multi-node"),
-        ({"use_v2_model_runner": True}, "v2-runner"),
     ],
     ids=[
         "tp1",
@@ -856,7 +859,6 @@ def test_replicated_layout_rejects_bare_mla_with_mixed_page_accounting():
         "uni",
         "class",
         "multi-node",
-        "v2-runner",
     ],
 )
 def test_replicated_layout_parallel_gate(kwargs: dict[str, Any], case: str):

@@ -181,8 +181,6 @@ MODELS = [
             "--tensor-parallel-size",
             "2",
         ],
-        # DeepseekV2ForCausalLM defaults to V2; replicated MVP requires V1.
-        env_dict={"VLLM_USE_V2_MODEL_RUNNER": "0"},
         cpu_offload_gib=8,
         startup_timeout=1200,
         spec_name="TieringOffloadingSpec",

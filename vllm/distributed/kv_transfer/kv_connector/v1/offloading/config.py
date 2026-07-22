@@ -125,8 +125,6 @@ def build_offloading_config(
         # Shared /dev/shm mmap layout is single-node mp only.
         and parallel_config.distributed_executor_backend == "mp"
         and parallel_config.nnodes_within_dp == 1
-        # V2 runner KV layout is not proven for this replicated host row.
-        and not vllm_config.use_v2_model_runner
     )
 
     # Only a single non-MLA full-attention group is parallelism-invariant:
