@@ -441,6 +441,10 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "MptForCausalLM": _HfExamplesInfo("mpt", is_available_online=False),
     # FIXME: mosaicml/mpt-7b has been deleted
     "MPTForCausalLM": _HfExamplesInfo("mosaicml/mpt-7b", is_available_online=False),
+    "NanbeigeForCausalLM": _HfExamplesInfo(
+        "Nanbeige/Nanbeige4.2-3B",
+        trust_remote_code=True,
+    ),
     "NemotronForCausalLM": _HfExamplesInfo("nvidia/Minitron-8B-Base"),
     "NemotronHForCausalLM": _HfExamplesInfo(
         "nvidia/Nemotron-H-8B-Base-8K", trust_remote_code=True
