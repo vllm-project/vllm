@@ -14,10 +14,6 @@ service Inference {
   rpc GenerateStream (GenerateRequest) returns (stream GenerateResponse) {}
 }
 
-service Control {
-  rpc Abort (AbortRequest) returns (AbortResponse) {}
-}
-
 // ======================================================================================
 // Generate Request
 // ======================================================================================
@@ -204,13 +200,3 @@ message CandidateTokenInfo {
 message TokenIds {
   repeated uint32 ids = 1;
 }
-
-// ======================================================================================
-// Control
-// ======================================================================================
-
-message AbortRequest {
-  repeated string request_ids = 1;
-}
-
-message AbortResponse {}

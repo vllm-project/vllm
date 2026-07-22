@@ -1,0 +1,15 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+syntax = "proto3";
+package vllm;
+
+service Control {
+  rpc Abort (AbortRequest) returns (AbortResponse) {}
+}
+
+message AbortRequest {
+  repeated string request_ids = 1;
+}
+
+message AbortResponse {}
