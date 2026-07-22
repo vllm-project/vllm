@@ -847,13 +847,6 @@ class Lfm2VLForConditionalGeneration(
 
         return EncoderCudaGraphConfig(
             modalities=["image"],
-            buffer_keys=[
-                "pixel_values_packed",
-                "pos_embeds",
-                "cu_seqlens",
-                "max_seqlen",
-                "gather_idx",
-            ],
             out_hidden_size=self.config.text_config.hidden_size,
             padding_logics={
                 "cu_seqlens": _pad_cumulative_seqlens_buffer,
@@ -928,6 +921,7 @@ class Lfm2VLForConditionalGeneration(
     def get_encoder_cudagraph_item_specs(
         self,
         mm_kwargs: dict[str, Any],
+        modality: str,
     ):
         from vllm.v1.worker.encoder_cudagraph_defs import EncoderItemSpec
 
@@ -945,176 +939,6 @@ class Lfm2VLForConditionalGeneration(
             for start, end in self._get_lfm2vl_item_tile_slices(num_patches)
         ]
 
-    def select_encoder_cudagraph_items(
-        self,
-        mm_kwargs: dict[str, Any],
-        indices: list[int],
-    ) -> dict[str, Any]:
-        pixel_values = mm_kwargs["pixel_values"]
-        spatial_shapes = mm_kwargs["spatial_shapes"]
-        num_patches = mm_kwargs["num_patches"]
-
-        tile_slices = self._get_lfm2vl_item_tile_slices(num_patches)
-
-        if len(indices) == 0:
-            return {
-                "pixel_values": pixel_values[:0],
-                "spatial_shapes": spatial_shapes[:0],
-                "num_patches": num_patches[:0],
-            }
-
-        tile_indices: list[int] = []
-        for image_idx in indices:
-            start, end = tile_slices[image_idx]
-            tile_indices.extend(range(start, end))
-
-        return {
-            "pixel_values": pixel_values[tile_indices],
-            "spatial_shapes": spatial_shapes[tile_indices],
-            "num_patches": num_patches[indices],
-        }
-
-    def _pack_lfm2vl_pixel_values(
-        self,
-        pixel_values: torch.Tensor,
-        spatial_shapes_list: list[list[int]],
-    ) -> torch.Tensor:
-        input_lengths = self._get_lfm2vl_tile_input_lengths(spatial_shapes_list)
-        total_tokens = sum(input_lengths)
-        packed = pixel_values.new_empty((total_tokens, pixel_values.shape[-1]))
-
-        offset = 0
-        for i, length in enumerate(input_lengths):
-            if length <= 0:
-                continue
-            packed[offset : offset + length].copy_(pixel_values[i, :length])
-            offset += length
-        return packed
-
-    def _get_lfm2vl_pos_embeds(
-        self,
-        spatial_shapes: torch.Tensor,
-        spatial_shapes_list: list[list[int]],
-    ) -> torch.Tensor:
-        embeddings = self.vision_tower.vision_model.embeddings
-        positional_embeddings = embeddings.position_embedding.weight.reshape(
-            embeddings.position_embedding_size,
-            embeddings.position_embedding_size,
-            -1,
-        )
-        lengths_list = self._get_lfm2vl_tile_input_lengths(spatial_shapes_list)
-        return embeddings.resize_positional_embeddings_packed(
-            positional_embeddings,
-            spatial_shapes,
-            lengths_list=lengths_list,
-        )
-
-    def _get_lfm2vl_cu_seqlens(
-        self,
-        spatial_shapes_list: list[list[int]],
-        device: torch.device,
-    ) -> torch.Tensor:
-        lengths = torch.tensor(
-            self._get_lfm2vl_tile_input_lengths(spatial_shapes_list),
-            dtype=torch.int32,
-            device=device,
-        )
-        cu_seqlens = torch.zeros(
-            lengths.shape[0] + 1,
-            dtype=torch.int32,
-            device=device,
-        )
-        if lengths.numel() > 0:
-            cu_seqlens[1:] = torch.cumsum(lengths, dim=0)
-        return cu_seqlens
-
-    def _get_lfm2vl_max_seqlen(
-        self,
-        spatial_shapes_list: list[list[int]],
-    ) -> torch.Tensor:
-        input_lengths = self._get_lfm2vl_tile_input_lengths(spatial_shapes_list)
-        max_seqlen = max(input_lengths) if input_lengths else 0
-        return torch.tensor(max_seqlen, dtype=torch.int32)
-
-    def _get_lfm2vl_projector_gather_idx(
-        self,
-        spatial_shapes_list: list[list[int]],
-        device: torch.device,
-    ) -> torch.Tensor:
-        factor = self.multi_modal_projector.factor
-        dh = torch.arange(factor, dtype=torch.int64)
-        dw = torch.arange(factor, dtype=torch.int64)
-        dh_grid, dw_grid = torch.meshgrid(dh, dw, indexing="ij")
-        dh_flat = dh_grid.reshape(-1)
-        dw_flat = dw_grid.reshape(-1)
-
-        gather_idx_parts: list[torch.Tensor] = []
-        offset = 0
-        for height, width in spatial_shapes_list:
-            length = height * width
-            if length <= 0:
-                continue
-            if height % factor != 0 or width % factor != 0:
-                raise ValueError(
-                    "spatial_shapes must be divisible by downsample_factor: "
-                    f"got ({height}, {width}) with factor={factor}."
-                )
-
-            rows_out = torch.arange(height // factor, dtype=torch.int64)
-            cols_out = torch.arange(width // factor, dtype=torch.int64)
-            rr, cc = torch.meshgrid(rows_out, cols_out, indexing="ij")
-            rr = rr.reshape(-1)
-            cc = cc.reshape(-1)
-            token_idx = (rr[:, None] * factor + dh_flat[None, :]) * width + (
-                cc[:, None] * factor + dw_flat[None, :]
-            )
-            gather_idx_parts.append(token_idx.reshape(-1) + offset)
-            offset += length
-
-        if not gather_idx_parts:
-            return torch.empty(0, dtype=torch.int64, device=device)
-        return torch.cat(gather_idx_parts).to(device=device)
-
-    def _prepare_lfm2vl_cudagraph_values(
-        self,
-        pixel_values: torch.Tensor,
-        spatial_shapes: torch.Tensor,
-    ) -> dict[str, torch.Tensor]:
-        spatial_shapes_list = self._get_spatial_shapes_list(spatial_shapes)
-        pixel_values_packed = self._pack_lfm2vl_pixel_values(
-            pixel_values,
-            spatial_shapes_list,
-        )
-        pos_embeds = self._get_lfm2vl_pos_embeds(spatial_shapes, spatial_shapes_list)
-        device = pixel_values.device
-
-        return {
-            "pixel_values_packed": pixel_values_packed,
-            "pos_embeds": pos_embeds,
-            "cu_seqlens": self._get_lfm2vl_cu_seqlens(spatial_shapes_list, device),
-            "max_seqlen": self._get_lfm2vl_max_seqlen(spatial_shapes_list),
-            "gather_idx": self._get_lfm2vl_projector_gather_idx(
-                spatial_shapes_list,
-                device,
-            ),
-        }
-
-    def _get_lfm2vl_capture_spatial_shapes(
-        self,
-        token_budget: int,
-    ) -> torch.Tensor:
-        factor = self.multi_modal_projector.factor
-        min_image_tokens = self._get_lfm2vl_min_image_tokens()
-        remaining = token_budget
-        shapes: list[list[int]] = []
-
-        while remaining > 0:
-            out_tokens = min(remaining, min_image_tokens)
-            shapes.append([factor, out_tokens * factor])
-            remaining -= out_tokens
-
-        return torch.tensor(shapes, dtype=torch.int64)
-
     def prepare_encoder_cudagraph_capture_inputs(
         self,
         token_budget: int,
@@ -1124,10 +948,6 @@ class Lfm2VLForConditionalGeneration(
         dtype: torch.dtype,
         path: str = "default",
     ):
-        from vllm.v1.worker.encoder_cudagraph_defs import (
-            EncoderCudaGraphCaptureInputs,
-        )
-
         spatial_shapes = self._get_lfm2vl_capture_spatial_shapes(token_budget)
         spatial_shapes_list = self._get_spatial_shapes_list(spatial_shapes)
         input_lengths = self._get_lfm2vl_tile_input_lengths(spatial_shapes_list)
@@ -1161,24 +981,21 @@ class Lfm2VLForConditionalGeneration(
             ),
         }
 
-        return EncoderCudaGraphCaptureInputs(values=values)
+        return values
 
     def prepare_encoder_cudagraph_replay_buffers(
         self,
         mm_kwargs: dict[str, Any],
+        modality: str,
         max_batch_size: int,
         max_frames_per_batch: int,
         path: str = "default",
     ):
-        from vllm.v1.worker.encoder_cudagraph_defs import (
-            EncoderCudaGraphReplayBuffers,
-        )
-
         values = self._prepare_lfm2vl_cudagraph_values(
             mm_kwargs["pixel_values"],
             mm_kwargs["spatial_shapes"],
         )
-        return EncoderCudaGraphReplayBuffers(values=values)
+        return values
 
     def encoder_cudagraph_forward(
         self,
@@ -1207,19 +1024,6 @@ class Lfm2VLForConditionalGeneration(
             vision_features_packed=encoder_outputs[0],
             gather_idx=values["gather_idx"],
         )
-
-    def encoder_eager_forward(
-        self,
-        mm_kwargs: dict[str, Any],
-        path: str = "default",
-    ) -> torch.Tensor:
-        image_input = LFM2VLImageInputs(
-            type="pixel_values",
-            pixel_values=mm_kwargs["pixel_values"],
-            spatial_shapes=mm_kwargs["spatial_shapes"],
-            num_patches=mm_kwargs["num_patches"],
-        )
-        return torch.cat(self._process_image_input(image_input), dim=0)
 
     def forward(
         self,

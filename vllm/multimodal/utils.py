@@ -19,8 +19,10 @@ from vllm.utils.import_utils import LazyLoader
 from .hasher import MultiModalHasher
 from .inputs import (
     BatchedTensorInputs,
+    MultiModalBatchedField,
     MultiModalFeatureSpec,
     MultiModalFieldElem,
+    MultiModalFlatField,
     MultiModalKwargsItem,
     MultiModalSharedField,
 )
@@ -185,6 +187,69 @@ def _batch_mm_items(
         )
         for key, elems in elems.items()
     }
+
+
+def select_mm_items(
+    items: Sequence[MultiModalKwargsItem],
+    batched_data: BatchedTensorInputs,
+    indices: Sequence[int],
+) -> BatchedTensorInputs:
+    """Select and re-batch items without copying data back through the CPU."""
+    if not items:
+        if indices:
+            raise IndexError("Cannot select from an empty multimodal batch")
+        return dict(batched_data)
+
+    selected_data: BatchedTensorInputs = {}
+    for key, data in batched_data.items():
+        elems = [item[key] for item in items]
+        field = elems[0].field
+
+        if isinstance(field, MultiModalSharedField):
+            selected_data[key] = data
+            continue
+
+        if isinstance(field, MultiModalBatchedField):
+            if isinstance(data, torch.Tensor):
+                selected_data[key] = data[list(indices)]
+            elif isinstance(data, tuple):
+                selected_data[key] = tuple(data[i] for i in indices)
+            else:
+                selected_data[key] = [data[i] for i in indices]
+            continue
+
+        if not isinstance(field, MultiModalFlatField):
+            raise TypeError(f"Unsupported multimodal field type: {type(field)}")
+
+        if isinstance(data, torch.Tensor):
+            dim = field.dim % data.ndim
+            offsets = [0]
+            for elem in elems:
+                elem_data = elem.data
+                if not isinstance(elem_data, torch.Tensor):
+                    raise TypeError(
+                        f"Tensor data required to select flat field {key!r}"
+                    )
+                offsets.append(offsets[-1] + elem_data.shape[dim])
+
+            parts = [
+                data.narrow(dim, offsets[i], offsets[i + 1] - offsets[i])
+                for i in indices
+            ]
+            selected_data[key] = (
+                torch.cat(parts, dim=dim) if parts else data.narrow(dim, 0, 0)
+            )
+        else:
+            if field.dim != 0:
+                raise ValueError("Only dim=0 supports non-tensor flat fields")
+            offsets = [0]
+            for elem in elems:
+                offsets.append(offsets[-1] + len(elem.data))
+            selected_data[key] = [
+                value for i in indices for value in data[offsets[i] : offsets[i + 1]]
+            ]
+
+    return selected_data
 
 
 def group_and_batch_mm_items(

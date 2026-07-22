@@ -3087,6 +3087,12 @@ class GPUModelRunner(
             mm_kwargs, device=self.device, pin_memory=PIN_MEMORY
         ):
             batch_outputs: MultiModalEmbeddings
+            batch_items = [
+                item
+                for _, item in mm_kwargs[
+                    current_item_idx : current_item_idx + num_items
+                ]
+            ]
 
             # EVS and dynamic res video related change.
             # (ekhvedchenia): Temporary hack to limit peak memory usage when
@@ -3147,6 +3153,8 @@ class GPUModelRunner(
                         and self.encoder_cudagraph_manager.supports_modality(modality)
                     ):
                         cudagraph_output = self.encoder_cudagraph_manager.execute(
+                            modality,
+                            batch_items,
                             mm_kwargs_batch,
                         )
 

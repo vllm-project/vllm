@@ -52,9 +52,7 @@ if TYPE_CHECKING:
     from vllm.sequence import IntermediateTensors
     from vllm.tasks import ScoreType
     from vllm.v1.worker.encoder_cudagraph_defs import (
-        EncoderCudaGraphCaptureInputs,
         EncoderCudaGraphConfig,
-        EncoderCudaGraphReplayBuffers,
         EncoderItemSpec,
     )
 
@@ -1578,19 +1576,6 @@ class SupportsEncoderCudaGraph(Protocol):
 
     def get_encoder_cudagraph_config(self) -> "EncoderCudaGraphConfig": ...
 
-    def get_input_modality(
-        self,
-        mm_kwargs: dict[str, Any],
-    ) -> str:
-        """Return the modality of the inputs (default: image-only)."""
-        return "image"
-
-    def get_max_frames_per_video(
-        self,
-    ) -> int:
-        """Return model-specific max frames per video."""
-        ...
-
     def get_encoder_cudagraph_budget_range(
         self,
         vllm_config: "VllmConfig",
@@ -1611,6 +1596,7 @@ class SupportsEncoderCudaGraph(Protocol):
     def get_encoder_cudagraph_item_specs(
         self,
         mm_kwargs: dict[str, Any],
+        modality: str,
     ) -> list["EncoderItemSpec"]:
         """Return specs describing each item in the batch.
 
@@ -1620,33 +1606,14 @@ class SupportsEncoderCudaGraph(Protocol):
         """
         ...
 
-    def select_encoder_cudagraph_items(
-        self,
-        mm_kwargs: dict[str, Any],
-        indices: list[int],
-    ) -> dict[str, Any]:
-        """Select a subset of items and return mm_kwargs for the sub-batch.
-
-        Called by the manager during greedy packing and DP sharding to
-        extract inputs for a specific set of items (e.g. images at
-        indices [0, 3, 5]).  The implementation is model-specific
-        because input formats differ:
-
-        - Qwen-family: slice concatenated pixel_values by cumulative
-          patch offsets, subset grid_thw by indices.
-        - Batched models (CLIP): index pixel_values along dim 0.
-        """
-        ...
-
     def postprocess_encoder_output(
         self,
-        output: torch.Tensor,
+        outputs: dict[str, torch.Tensor],
         indices: list[int],
         per_item_out_tokens: list[int],
         dest: dict[int, torch.Tensor] | list[torch.Tensor | None],
         clone: bool = False,
         batch_mm_kwargs: dict[str, Any] | None = None,
-        local_output: torch.Tensor | None = None,
     ) -> None:
         """
         Post-process encoder output, directly call scatter_output_slices by default.
@@ -1658,7 +1625,9 @@ class SupportsEncoderCudaGraph(Protocol):
         """
         from vllm.model_executor.models.utils import scatter_output_slices
 
-        scatter_output_slices(output, indices, per_item_out_tokens, dest, clone)
+        scatter_output_slices(
+            outputs["default"], indices, per_item_out_tokens, dest, clone
+        )
 
     def prepare_encoder_cudagraph_capture_inputs(
         self,
@@ -1668,17 +1637,18 @@ class SupportsEncoderCudaGraph(Protocol):
         device: torch.device,
         dtype: torch.dtype,
         path: str = "default",
-    ) -> "EncoderCudaGraphCaptureInputs":
+    ) -> dict[str, torch.Tensor]:
         """Create dummy inputs and buffers for CUDA graph capture."""
         ...
 
     def prepare_encoder_cudagraph_replay_buffers(
         self,
         mm_kwargs: dict[str, Any],
+        modality: str,
         max_batch_size: int,
         max_frames_per_batch: int,
         path: str = "default",
-    ) -> "EncoderCudaGraphReplayBuffers":
+    ) -> dict[str, torch.Tensor | None]:
         """Compute buffer values from actual batch inputs for replay."""
         ...
 
@@ -1690,17 +1660,6 @@ class SupportsEncoderCudaGraph(Protocol):
         """Run the encoder forward pass with precomputed buffers.
 
         Used during both CUDA graph capture and replay.
-        """
-        ...
-
-    def encoder_eager_forward(
-        self,
-        mm_kwargs: dict[str, Any],
-        path: str = "default",
-    ) -> torch.Tensor:
-        """Run the encoder forward pass without precomputed buffers.
-
-        Used as eager fallback when inputs exceed all budgets.
         """
         ...
 
