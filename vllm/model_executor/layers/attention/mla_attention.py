@@ -277,6 +277,7 @@ from vllm.v1.attention.backends.utils import (
 from vllm.v1.attention.ops.common import cp_lse_ag_out_ar, cp_lse_ag_out_rs
 from vllm.v1.attention.ops.dcp_alltoall import dcp_a2a_lse_reduce
 from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
+from vllm.v1.attention.ops.triton_merge_attn_states import mask_empty_context
 from vllm.v1.attention.selector import get_attn_backend
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
@@ -1342,6 +1343,7 @@ class MLACommonPrefillMetadata:
         workspace: torch.Tensor
         token_to_seq: torch.Tensor
         chunk_total_token: list[int]
+        has_empty_context: list[bool]
 
         # for mla DCP
         padded_local_chunk_seq_lens: list[list[int]] | None = None
@@ -1551,6 +1553,7 @@ def build_mla_chunked_context_metadata(
     )
     chunk_seq_lens = chunk_ends - chunk_starts
     chunk_seq_lens.clamp_(min=0)
+    has_empty_context = torch.any(chunk_seq_lens == 0, dim=1).tolist()
 
     cu_seq_lens_cpu = torch.zeros(
         num_chunks, num_prefills + 1, dtype=torch.int32, pin_memory=True
@@ -1629,6 +1632,7 @@ def build_mla_chunked_context_metadata(
             token_to_seq=token_to_seq_cpu.to(device, non_blocking=True),
             chunk_total_token=chunk_total_token.tolist(),
             workspace=chunked_prefill_workspace,
+            has_empty_context=has_empty_context,
             prefill_tokens_with_context=prefill_tokens_with_context,
             padded_local_chunk_seq_lens=padded_local_chunk_seq_lens.tolist(),
             local_context_lens_allranks=local_context_lens_allranks.tolist(),
@@ -1651,6 +1655,7 @@ def build_mla_chunked_context_metadata(
             token_to_seq=token_to_seq_cpu.to(device, non_blocking=True),
             chunk_total_token=chunk_total_token,
             workspace=chunked_prefill_workspace,
+            has_empty_context=has_empty_context,
             prefill_tokens_with_context=prefill_tokens_with_context,
         )
 
@@ -2238,6 +2243,13 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
                     v=v,
                 )
             )
+            if prefill_metadata.chunked_context.has_empty_context[i]:
+                mask_empty_context(
+                    attn_softmax_lse,
+                    attn_output,
+                    prefill_metadata.query_start_loc,
+                    prefill_metadata.chunked_context.cu_seq_lens[i],
+                )
 
             if output is None:
                 output = attn_output
@@ -2388,6 +2400,13 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
                     v=v,
                 )
             )
+            if prefill_metadata.chunked_context.has_empty_context[i]:
+                mask_empty_context(
+                    attn_softmax_lse,
+                    attn_output,
+                    prefill_metadata.query_start_loc,
+                    prefill_metadata.chunked_context.cu_seq_lens[i],
+                )
 
             if output is None:
                 output = attn_output
