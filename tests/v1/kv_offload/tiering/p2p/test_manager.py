@@ -21,6 +21,7 @@ from vllm.v1.kv_offload.tiering.p2p import manager as manager_module
 from vllm.v1.kv_offload.tiering.p2p.manager import (
     _UNBOUND_STORE_TIMEOUT_S,
     P2PSecondaryTierManager,
+    _annotate_req_context,
 )
 from vllm.v1.kv_offload.tiering.p2p.session import (
     LoadResult,
@@ -73,7 +74,11 @@ def _remote_decoder_kv_params(kv_request_id: str = "req-1") -> dict:
 
 
 def _req_context(kv_params: dict | None = None) -> ReqContext:
-    return ReqContext(req_id="test", kv_transfer_params=kv_params)
+    ctx = ReqContext(req_id="test", kv_transfer_params=kv_params)
+    # Mirror on_new_request: parse the P2P routing state once and cache it,
+    # so lookup/submit_*/on_request_finished can read it back via get_state.
+    _annotate_req_context(ctx)
+    return ctx
 
 
 def _job_metadata(
@@ -150,29 +155,27 @@ class TestInitHashSeedAssertion:
 
 
 # ---------------------------------------------------------------------------
-# Tests for _remote_id_from_params
+# Tests for _peer_id_from_params
 # ---------------------------------------------------------------------------
 
 
-class TestRemoteIdFromParams:
+class TestPeerIdFromParams:
     def test_valid_params(self):
-        result = P2PSecondaryTierManager._remote_id_from_params(
+        result = manager_module._peer_id_from_params(
             {"remote_host": "10.0.0.1", "remote_port": 8000}
         )
         assert result == "10.0.0.1:8000"
 
     def test_missing_host(self):
-        result = P2PSecondaryTierManager._remote_id_from_params({"remote_port": 8000})
+        result = manager_module._peer_id_from_params({"remote_port": 8000})
         assert result is None
 
     def test_missing_port(self):
-        result = P2PSecondaryTierManager._remote_id_from_params(
-            {"remote_host": "10.0.0.1"}
-        )
+        result = manager_module._peer_id_from_params({"remote_host": "10.0.0.1"})
         assert result is None
 
     def test_empty_dict(self):
-        result = P2PSecondaryTierManager._remote_id_from_params({})
+        result = manager_module._peer_id_from_params({})
         assert result is None
 
 
