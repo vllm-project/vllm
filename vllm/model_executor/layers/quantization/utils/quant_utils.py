@@ -438,6 +438,11 @@ def get_and_maybe_dequant_weights(
         weight_scales = get_attribute_fallback(
             layer, ["weight_scale", "weight_scale_inv"]
         )
+        # Block kernels may repack weight scale during process_weights_after_loading
+        # The XPU oneDNN kernel transposes the block scale to [K/block_k, N/block_n]
+        # `scaled_dequantize` expects the checkpoint [N/block_n, K/block_k] layout
+        if getattr(layer, "weight_scale_transposed", False):
+            weight_scales = weight_scales.t()
         dequant_weights = scaled_dequantize(
             weight,
             weight_scales,
