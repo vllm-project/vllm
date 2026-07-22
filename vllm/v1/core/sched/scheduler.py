@@ -271,7 +271,7 @@ class Scheduler(SchedulerInterface):
             log_stats=self.log_stats,
             enable_kv_cache_events=self.enable_kv_cache_events,
             dcp_world_size=self.dcp_world_size,
-            pcp_world_size=self.pcp_world_size,
+            pcp_world_size=1,
             scheduler_block_size=self.block_size,
             hash_block_size=hash_block_size,
             metrics_collector=self.kv_metrics_collector,
@@ -706,57 +706,64 @@ class Scheduler(SchedulerInterface):
                 num_external_computed_tokens = 0
                 load_kv_async = False
                 connector_prefix_cache_queries, connector_prefix_cache_hits = 0, 0
+                did_prefix_cache_lookup = False
 
                 # Get already-cached tokens.
                 if request.num_computed_tokens == 0:
+                    did_prefix_cache_lookup = True
                     new_computed_blocks = None
                     fa_hit_diverged = False
+                    # Get locally-cached tokens.
                     if (
                         self.connector is not None
                         and self.has_mamba_layers
                         and isinstance(
-                            self.kv_cache_manager.coordinator,
-                            HybridKVCacheCoordinator,
+                            self.kv_cache_manager.coordinator, HybridKVCacheCoordinator
                         )
                     ):
-                        # NOTE(ZhanqiuHu): report the FA hit as the local prefix
-                        # so the connector only transfers what is missing
-                        # (external = total - local); the Mamba state is
-                        # transferred unconditionally by nixl's _apply_prefix_caching.
-                        coordinator = self.kv_cache_manager.coordinator
-                        computed, per_group_hits = (
-                            coordinator.find_longest_cache_hit_per_group(
-                                request.block_hashes, request.num_tokens - 1
-                            )
-                        )
-                        fa_group_id = coordinator.full_attention_group_id
-                        if fa_group_id is not None and all(
-                            hit <= per_group_hits[fa_group_id] for hit in per_group_hits
-                        ):
-                            new_computed_blocks = (
-                                self.kv_cache_manager.create_kv_cache_blocks(computed)
-                            )
-                            num_new_local_computed_tokens = per_group_hits[fa_group_id]
-                            # Per-group lookups don't detect shared prefixes.
-                            request.shared_prefix_boundary = 0
-                            # FA survived deeper than a lagging group (e.g. an
-                            # evicted Mamba state). Its deep hit only has a valid
-                            # state at that boundary if the connector supplies it,
-                            # so reconcile below once the external length is known.
-                            fa_hit_diverged = (
-                                min(per_group_hits) < num_new_local_computed_tokens
-                            )
-                            if not fa_hit_diverged and self.kv_cache_manager.log_stats:
-                                stats = self.kv_cache_manager.prefix_cache_stats
-                                assert stats is not None
-                                stats.record(
-                                    num_tokens=request.num_tokens,
-                                    num_hits=num_new_local_computed_tokens,
-                                    preempted=request.num_preemptions > 0,
+                        # The per-group lookup does not detect an uncached shared
+                        # prefix, so there is no junction to pin in this path.
+                        request.shared_prefix_boundary = 0
+                        kv_cache_manager = self.kv_cache_manager
+                        if not kv_cache_manager.prefix_cache_lookup_enabled(request):
+                            # Mirror the get_computed_blocks() early-out: the
+                            # request must recompute its prompt.
+                            new_computed_blocks = kv_cache_manager.empty_kv_cache_blocks
+                            num_new_local_computed_tokens = 0
+                        else:
+                            # NOTE(ZhanqiuHu): report the FA hit as the local
+                            # prefix so the connector only transfers what is
+                            # missing (external = total - local); the Mamba state
+                            # is transferred unconditionally by nixl's
+                            # _apply_prefix_caching.
+                            coordinator = kv_cache_manager.coordinator
+                            computed, per_group_hits = (
+                                coordinator.find_longest_cache_hit_per_group(
+                                    request.block_hashes, request.num_tokens - 1
                                 )
-                        # else: a group hit deeper than FA means its FA blocks
-                        # were evicted - the reconciled lookup below converges on a
-                        # boundary consistent across all groups.
+                            )
+                            fa_group_id = coordinator.full_attention_group_id
+                            if fa_group_id is not None and all(
+                                hit <= per_group_hits[fa_group_id]
+                                for hit in per_group_hits
+                            ):
+                                new_computed_blocks = (
+                                    kv_cache_manager.create_kv_cache_blocks(computed)
+                                )
+                                num_new_local_computed_tokens = per_group_hits[
+                                    fa_group_id
+                                ]
+                                # FA survived deeper than a lagging group (e.g. an
+                                # evicted Mamba state). Its deep hit only has a
+                                # valid state at that boundary if the connector
+                                # supplies it, so reconcile below once the external
+                                # length is known.
+                                fa_hit_diverged = (
+                                    min(per_group_hits) < num_new_local_computed_tokens
+                                )
+                            # else: a group hit deeper than FA means its FA blocks
+                            # were evicted - the reconciled lookup below converges
+                            # on a boundary consistent across all groups.
                     if new_computed_blocks is None:
                         (
                             new_computed_blocks,
@@ -783,28 +790,17 @@ class Scheduler(SchedulerInterface):
 
                         num_external_computed_tokens = ext_tokens
 
-                        if fa_hit_diverged:
-                            if num_external_computed_tokens == 0:
-                                # No external tokens back the deep FA hit, so the
-                                # resume boundary would have no valid Mamba state.
-                                # Reconcile to the convergent boundary every group
-                                # agrees on (records prefix-cache stats itself).
-                                (
-                                    new_computed_blocks,
-                                    num_new_local_computed_tokens,
-                                    request.shared_prefix_boundary,
-                                ) = self.kv_cache_manager.get_computed_blocks(request)
-                            elif self.kv_cache_manager.log_stats:
-                                # Connector supplies the Mamba state up to
-                                # local + ext; keep the FA hit and record the
-                                # deferred prefix-cache stats.
-                                stats = self.kv_cache_manager.prefix_cache_stats
-                                assert stats is not None
-                                stats.record(
-                                    num_tokens=request.num_tokens,
-                                    num_hits=num_new_local_computed_tokens,
-                                    preempted=request.num_preemptions > 0,
-                                )
+                        if fa_hit_diverged and num_external_computed_tokens == 0:
+                            # No external tokens back the deep FA hit, so the
+                            # resume boundary would have no valid Mamba state.
+                            # Reconcile to the convergent boundary every group
+                            # agrees on. The prefix-cache stat recorded at
+                            # admission uses the reconciled local hit count.
+                            (
+                                new_computed_blocks,
+                                num_new_local_computed_tokens,
+                                request.shared_prefix_boundary,
+                            ) = self.kv_cache_manager.get_computed_blocks(request)
 
                         connector_prefix_cache_queries = (
                             request.num_tokens - num_new_local_computed_tokens
@@ -830,7 +826,7 @@ class Scheduler(SchedulerInterface):
                         continue
 
                     # Track first scheduled prefill, not post-preemption repeat prefills
-                    if request.prefill_stats is not None:
+                    if request.prefill_stats and request.num_preemptions <= 0:
                         assert num_computed_tokens <= request.num_prompt_tokens
                         request.prefill_stats.set(
                             num_prompt_tokens=request.num_prompt_tokens,
@@ -998,6 +994,12 @@ class Scheduler(SchedulerInterface):
                             num_hits=connector_prefix_cache_hits,
                             preempted=request.num_preemptions > 0,
                         )
+
+                # Record at admission so unscheduled lookups are not counted.
+                if did_prefix_cache_lookup:
+                    self.kv_cache_manager.record_prefix_cache_stats(
+                        request, num_new_local_computed_tokens
+                    )
 
                 request = request_queue.pop_request()
                 if load_kv_async:
@@ -1739,6 +1741,7 @@ class Scheduler(SchedulerInterface):
             pooler_output = pooler_outputs[req_index] if pooler_outputs else None
             kv_transfer_params = None
             ec_transfer_params = None
+            prefill_stats = None
             status_before_stop = request.status
             num_output_tokens_before = len(request._output_token_ids)
 
@@ -1818,6 +1821,16 @@ class Scheduler(SchedulerInterface):
                         # Normal decode / re-prefill: token(s) at the END.
                         routed_experts = routing_data[end - len(new_token_ids) : end]
 
+            should_emit_output = bool(
+                new_token_ids or pooler_output is not None or stopped
+            )
+            if should_emit_output:
+                prefill_stats = request.take_prefill_stats()
+                if prefill_stats is not None:
+                    prefill_stats.finalize(
+                        self.kv_cache_manager.estimate_cached_tokens(request)
+                    )
+
             finish_reason = None
             if stopped:
                 # Capture finish_reason BEFORE _handle_stopped_request, which may
@@ -1845,13 +1858,7 @@ class Scheduler(SchedulerInterface):
 
             # Get prompt logprobs for this request.
             prompt_logprobs_tensors = prompt_logprobs_dict.get(req_id)
-            if (
-                new_token_ids
-                or pooler_output is not None
-                or kv_transfer_params
-                or ec_transfer_params
-                or stopped
-            ):
+            if should_emit_output:
                 # Add EngineCoreOutput for this Request.
                 outputs[request.client_index].append(
                     EngineCoreOutput(
@@ -1863,7 +1870,7 @@ class Scheduler(SchedulerInterface):
                         pooling_output=pooler_output,
                         stop_reason=request.stop_reason,
                         events=request.take_events(),
-                        prefill_stats=request.take_prefill_stats(),
+                        prefill_stats=prefill_stats,
                         kv_transfer_params=kv_transfer_params,
                         ec_transfer_params=ec_transfer_params,
                         trace_headers=request.trace_headers,

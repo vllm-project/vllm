@@ -108,6 +108,7 @@ if current_platform.is_rocm():
 elif current_platform.is_cuda():
     from vllm.third_party.pynvml import (
         nvmlDeviceGetHandleByIndex,
+        nvmlDeviceGetHandleByUUID,
         nvmlDeviceGetMemoryInfo,
         nvmlInit,
         nvmlShutdown,
@@ -1521,6 +1522,18 @@ def get_physical_device_indices(devices: list[int]):
     return [index_mapping[i] for i in devices if i in index_mapping]
 
 
+def get_nvml_device_handle(device: int):
+    visible_devices = os.environ.get("NVIDIA_VISIBLE_DEVICES")
+    if visible_devices is not None:
+        identifiers = visible_devices.split(",")
+        if device < len(identifiers):
+            identifier = identifiers[device]
+            if identifier.startswith(("GPU-", "MIG-")):
+                return nvmlDeviceGetHandleByUUID(identifier)
+
+    return nvmlDeviceGetHandleByIndex(device)
+
+
 @_nvml()
 def record_gpu_memory_usage_stats(
     *,
@@ -1534,7 +1547,7 @@ def record_gpu_memory_usage_stats(
             gb_used = mem_info["vram_used"] / 2**10
             gb_total = mem_info["vram_total"] / 2**10
         else:
-            dev_handle = nvmlDeviceGetHandleByIndex(device)
+            dev_handle = get_nvml_device_handle(device)
             mem_info = nvmlDeviceGetMemoryInfo(dev_handle)
             gb_used = mem_info.used / 2**30
             gb_total = mem_info.total / 2**30
