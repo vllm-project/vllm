@@ -274,6 +274,7 @@ class ModelArchConfigConvertorBase:
             "kimi_linear",
             "longcat_flash",
             "longcat_flash_ngram",
+            "longcat_next",
             "pangu_ultra_moe",
             "pangu_ultra_moe_mtp",
             "bailing_hybrid",
