@@ -95,6 +95,8 @@ class QuarkOCP_MX(QuarkScheme):
             self.input_dtype != "mxfp4" or self.weight_dtype != "mxfp4"
         )
 
+        # TODO: Move emulation code path as a kernel, and always
+        # use init_mxfp4_linear_kernel.
         if not self.emulate:
             self.ocp_mx_linear = init_mxfp4_linear_kernel()
 
