@@ -369,6 +369,53 @@ def output_value(graph: fx.Graph) -> object | None:
     return output.args[0]
 
 
+def upstream_linear(node: object, module: nn.Module) -> fx.Node | None:
+    """Nearest linear producing `node`, walking back through splits/reshapes.
+
+    Never walks through a leaf call (e.g. an attention interface): its inputs
+    are what attention consumes, not what produced the value."""
+    stack = [node]
+    seen: set[fx.Node] = set()
+    while stack:
+        current = stack.pop()
+        if not isinstance(current, fx.Node) or current in seen:
+            continue
+        seen.add(current)
+        if is_linear(current, module):
+            return current
+        if current.op in ("call_function", "call_method") and not is_leaf_call(current):
+            stack.extend(current.args)
+    return None
+
+
+def downstream_linear(node: fx.Node, module: nn.Module) -> fx.Node | None:
+    """Nearest linear consuming `node`'s output, walking through casts/scalings.
+
+    Never walks through a leaf call (e.g. an attention interface): what crosses
+    it is consumed by the attention computation, not projected."""
+    queue = list(node.users)
+    seen: set[fx.Node] = set()
+    while queue:
+        current = queue.pop(0)
+        if current in seen:
+            continue
+        seen.add(current)
+        if is_linear(current, module):
+            return current
+        if current.op in ("call_function", "call_method") and not is_leaf_call(current):
+            queue.extend(current.users)
+    return None
+
+
+def returned_linear(graph: fx.Graph, module: nn.Module) -> str | None:
+    """Name of the Linear producing the graph's (first) output value."""
+    value = output_value(graph)
+    if isinstance(value, (tuple, list)) and value:
+        value = value[0]
+    linear = upstream_linear(value, module)
+    return None if linear is None else str(linear.target)
+
+
 def is_linear(node: fx.Node, module: nn.Module) -> bool:
     """Is node `nn.Linear.__call__()`."""
     return node.op == "call_module" and isinstance(

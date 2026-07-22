@@ -10,24 +10,31 @@ from typing import TYPE_CHECKING, ClassVar
 
 from torch import fx, nn
 
+from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import MergedColumnParallelLinear
 from vllm.model_executor.models.transformers.fusers.base import StackedFuser
 from vllm.model_executor.models.transformers.fusers.rms_norm import RMSNormFuser
 from vllm.model_executor.models.transformers.fx_utils import (
     compile_forward,
-    is_leaf_call,
+    downstream_linear,
     is_linear,
-    output_value,
     recover_forward,
     replace_expr,
+    returned_linear,
     single_self_call,
     trace,
+    upstream_linear,
 )
-from vllm.model_executor.models.transformers.utils import replace_linear_class
+from vllm.model_executor.models.transformers.utils import (
+    log_replacement,
+    replace_linear_class,
+)
 from vllm.model_executor.models.utils import ShardId, maybe_prefix
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
+
+logger = init_logger(__name__)
 
 # Temporaries the fused down-projection binds in the rewritten forward.
 _Q_A_TEMP = "__q_a_fused"
@@ -43,39 +50,6 @@ def _consumes_placeholder(node: fx.Node) -> bool:
     )
 
 
-def _upstream_linear(node: object, module: nn.Module) -> fx.Node | None:
-    """Nearest linear producing `node`, walking back through splits/reshapes."""
-    stack = [node]
-    seen: set[fx.Node] = set()
-    while stack:
-        current = stack.pop()
-        if not isinstance(current, fx.Node) or current in seen:
-            continue
-        seen.add(current)
-        if is_linear(current, module):
-            return current
-        if current.op in ("call_function", "call_method"):
-            stack.extend(current.args)
-    return None
-
-
-def _downstream_linear(node: fx.Node, module: nn.Module) -> fx.Node | None:
-    """Nearest linear consuming `node`'s output, walking through casts/scalings."""
-    queue = list(node.users)
-    seen: set[fx.Node] = set()
-    while queue:
-        current = queue.pop(0)
-        if current in seen:
-            continue
-        seen.add(current)
-        if is_linear(current, module):
-            return current
-        # Skip leaf calls created by _as_leaf_call (e.g. attention interfaces).
-        if current.op in ("call_function", "call_method") and not is_leaf_call(current):
-            queue.extend(current.users)
-    return None
-
-
 def _norm_size(norm: nn.Module) -> int:
     weight = getattr(norm, "weight", None)
     return weight.numel() if weight is not None else -1
@@ -85,15 +59,6 @@ def _is_rms_norm(module: nn.Module) -> bool:
     """Whether `module` computes an RMSNorm, verified by `RMSNormFuser`'s matcher."""
     graph = trace(module)
     return graph is not None and RMSNormFuser.match(graph, module) is not None
-
-
-def _returned_linear(graph: fx.Graph, module: nn.Module) -> str | None:
-    """Name of the Linear producing the graph's (first) output value."""
-    value = output_value(graph)
-    if isinstance(value, (tuple, list)) and value:
-        value = value[0]
-    linear = _upstream_linear(value, module)
-    return None if linear is None else str(linear.target)
 
 
 def _top_level_index(funcdef: ast.FunctionDef, node: ast.AST) -> int:
@@ -199,7 +164,7 @@ class MLAFuser(StackedFuser):
         for node in graph.nodes:
             if node.op != "call_module" or is_linear(node, module) or not node.args:
                 continue
-            source = _upstream_linear(node.args[0], module)
+            source = upstream_linear(node.args[0], module)
             if source is None or not _consumes_placeholder(source):
                 continue
             if not _is_rms_norm(module.get_submodule(node.target)):
@@ -226,7 +191,7 @@ class MLAFuser(StackedFuser):
         if q_a_chains:
             # Find `q_b_proj(q_a_layernorm(q_a_proj(placeholder)))`.
             q_a_proj, q_a_layernorm = q_a_chains[0]
-            q_b_proj = _downstream_linear(q_a_layernorm, module)
+            q_b_proj = downstream_linear(q_a_layernorm, module)
             if q_b_proj is None:
                 return None
             claimed_linears |= {q_a_proj.target, q_b_proj.target}
@@ -243,13 +208,13 @@ class MLAFuser(StackedFuser):
             claimed_linears.add(q_proj_name)
 
         # Find `kv_b_proj(kv_a_layernorm(...))`.
-        kv_b_proj = _downstream_linear(kv_a_layernorm, module)
+        kv_b_proj = downstream_linear(kv_a_layernorm, module)
         if kv_b_proj is None or kv_b_proj.target in claimed_linears:
             return None
         claimed_linears.add(kv_b_proj.target)
 
         # Find `o_proj` if it is returned by the forward graph.
-        o_proj_name = _returned_linear(graph, module)
+        o_proj_name = returned_linear(graph, module)
         if o_proj_name in claimed_linears:
             o_proj_name = None
 
@@ -321,6 +286,7 @@ class MLAFuser(StackedFuser):
                 linear, style, quant_config, prefix=maybe_prefix(prefix, name)
             )
             setattr(module, name, replacement)
+            log_replacement(maybe_prefix(prefix, name), linear, replacement)
 
         if self.has_q_lora:
             q_a = module.get_submodule(self.q_a_proj_name)
@@ -333,6 +299,15 @@ class MLAFuser(StackedFuser):
                 prefix=maybe_prefix(prefix, self.merged_name),
                 return_bias=False,
                 disable_tp=True,
+            )
+            logger.debug(
+                "%s: %s, %s: %s -> %s: %s",
+                self.q_a_proj_name,
+                q_a,
+                self.kv_a_proj_name,
+                kv_a,
+                self.merged_name,
+                merged,
             )
             setattr(module, self.merged_name, merged)
             # The rewritten forward calls the merged projection instead.

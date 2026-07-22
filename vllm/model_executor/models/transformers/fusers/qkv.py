@@ -17,6 +17,7 @@ from vllm.model_executor.models.transformers.fx_utils import (
     is_linear,
     recover_forward,
     replace_expr,
+    returned_linear,
     single_self_call,
 )
 from vllm.model_executor.models.transformers.utils import (
@@ -83,15 +84,16 @@ class QKVFuser(StackedFuser):
             return None
         q, k, v = qkv_nodes
         names = dict(q_name=q.target, k_name=k.target, v_name=v.target)
-        attn_width = module.get_submodule(q.target).out_features
-        candidates = [
-            name
-            for name, child in module.named_children()
-            if isinstance(child, nn.Linear)
-            and name not in names.values()
-            and child.in_features == attn_width
-        ]
-        names["o_name"] = candidates[0] if len(candidates) == 1 else None
+        # `o_proj` produces the module's output. Require it to consume the full
+        # attention width, so a misidentified linear is never sharded rowwise.
+        o_name = returned_linear(graph, module)
+        if o_name in names.values() or (
+            o_name is not None
+            and module.get_submodule(o_name).in_features
+            != module.get_submodule(q.target).out_features
+        ):
+            o_name = None
+        names["o_name"] = o_name
         return cls(source_cls=type(module).__name__, **names)
 
     def update_forward(self, module: nn.Module) -> None:
