@@ -15,6 +15,25 @@ if TYPE_CHECKING:
 
 
 class BaseLayerWithLoRA(nn.Module):
+    def __getattr__(self, name: str):
+        try:
+            return super().__getattr__(name)
+        except AttributeError:
+            # Make base-layer tensors reachable through the wrapper so
+            # that the flattened names produced by named_parameters() /
+            # named_buffers() (see named_modules below) also resolve via
+            # get_parameter() / get_buffer(). Restricted to the base
+            # layer's registered tensors; everything else keeps normal
+            # attribute-error semantics.
+            base = self._modules.get("base_layer")
+            if base is not None:
+                tensor = base._parameters.get(name)
+                if tensor is None:
+                    tensor = base._buffers.get(name)
+                if tensor is not None:
+                    return tensor
+            raise
+
     def named_modules(
         self,
         memo: set[nn.Module] | None = None,
@@ -31,6 +50,13 @@ class BaseLayerWithLoRA(nn.Module):
         This override flattens ``base_layer`` out of the hierarchy so
         that :meth:`named_parameters` and :meth:`named_buffers` return
         the original names, making weight loading work transparently.
+
+        Note: this yields both the wrapper and its base layer under the
+        same prefix, which deviates from standard module-tree semantics.
+        ``state_dict()`` is unaffected (it walks ``_modules`` directly),
+        and the ``__getattr__`` above keeps the invariant that every
+        name this produces resolves via ``get_parameter()`` /
+        ``get_buffer()``.
         """
         if memo is None:
             memo = set()

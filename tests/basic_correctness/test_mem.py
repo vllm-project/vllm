@@ -210,7 +210,7 @@ def test_deep_sleep():
 
 
 @create_new_process_for_each_test()
-def test_deep_sleep_lora():
+def test_deep_sleep_lora(monkeypatch):
     """Level-2 sleep/wake/reload with enable_lora=True.
 
     LoRA wrapping moves parameters under base_layer, which breaks
@@ -219,6 +219,9 @@ def test_deep_sleep_lora():
     plain attributes not restored by the reload machinery — they must
     be explicitly re-zeroed after wake.
     """
+    # Needed for apply_model to reach the engine-core process below.
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+
     model = "hmellor/tiny-random-LlamaForCausalLM"
     llm = LLM(
         model,
@@ -227,6 +230,17 @@ def test_deep_sleep_lora():
         max_lora_rank=8,
         enforce_eager=True,
     )
+
+    # Every flattened name produced by named_parameters() with LoRA
+    # wrappers in the tree must stay resolvable via get_parameter().
+    def _names_resolve(model) -> bool:
+        return all(
+            model.get_parameter(name) is not None
+            for name, _ in model.named_parameters()
+        )
+
+    assert all(llm.apply_model(_names_resolve))
+
     prompt = "How are you?"
     sampling_params = SamplingParams(temperature=0, max_tokens=10)
     output = llm.generate(prompt, sampling_params)
