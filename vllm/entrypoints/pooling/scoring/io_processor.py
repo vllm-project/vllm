@@ -10,8 +10,9 @@ from vllm import PoolingParams, PoolingRequestOutput, TokensPrompt
 from vllm.renderers import TokenizeParams
 from vllm.renderers.hf import safe_apply_chat_template
 from vllm.renderers.inputs.preprocess import (
+    extract_target_prompt,
     parse_model_prompt,
-    prompt_to_seq, extract_target_prompt,
+    prompt_to_seq,
 )
 from vllm.tasks import PoolingTask
 from vllm.utils.mistral import is_mistral_tokenizer
