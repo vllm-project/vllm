@@ -1732,9 +1732,15 @@ class Gemma4ForConditionalGeneration(
         vision_cfg = self.vision_tower.config
         pool_ratio = getattr(vision_cfg, "pooling_kernel_size", 2) ** 2
 
-        # The physical 3D slot size is strictly decoupled from the 1D
-        # global token_budget.
-        per_item_output = _SUPPORTED_SOFT_TOKENS[-1]
+        # Retrieve the model's actual configured maximum tokens:
+        configured_max_tokens = getattr(
+            self.config.vision_config,
+            "num_soft_tokens",
+            _SUPPORTED_SOFT_TOKENS[2],
+        )
+        # Dynamically compute the slot capacity per item bounded by both the
+        # current graph budget and the user's maximum config:
+        per_item_output = min(token_budget, configured_max_tokens)
         # Satisfy k^2 * per_item_output = per_item_patches
         per_item_patches = per_item_output * pool_ratio
 
@@ -1814,7 +1820,9 @@ class Gemma4ForConditionalGeneration(
         total_tokens = sum(per_item_out_tokens)
 
         device = pixel_values.device
-        per_item_output = _SUPPORTED_SOFT_TOKENS[-1]
+        vision_cfg = self.vision_tower.config
+        pool_ratio = getattr(vision_cfg, "pooling_kernel_size", 2) ** 2
+        per_item_output = pixel_values.shape[1] // pool_ratio
 
         # ONLY allocate an array of exact size `total_tokens`.
         # DO NOT pad it. The upstream Graph Manager handles the padding securely.
@@ -1891,9 +1899,8 @@ class Gemma4ForConditionalGeneration(
         )
         hidden_states = encoder_outputs.last_hidden_state
 
-        # The physical 3D slot size is strictly decoupled from the 1D
-        # global token_budget.
-        per_item_output = _SUPPORTED_SOFT_TOKENS[-1]
+        pool_ratio = getattr(vt.config, "pooling_kernel_size", 2) ** 2
+        per_item_output = pixel_values.shape[1] // pool_ratio
 
         pooled_states, _ = vt.pooler(
             hidden_states=hidden_states,
