@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections.abc import Iterable
 from typing import Any
 
 from openai.types.chat import (
@@ -21,13 +22,15 @@ from openai.types.responses.response_reasoning_item import ResponseReasoningItem
 from openai.types.responses.tool import Tool
 
 from vllm import envs
-from vllm.entrypoints.constants import MCP_PREFIX
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionMessageParam
 from vllm.entrypoints.openai.responses.protocol import ResponseInputOutputItem
+from vllm.logger import init_logger
 from vllm.tool_parsers.utils import (
     flat_namespace_tool_name,
     iter_response_function_tool_dicts,
 )
+
+logger = init_logger(__name__)
 
 
 def should_continue_final_message(
@@ -129,29 +132,47 @@ def _tool_call_wire_name(item: ResponseFunctionToolCall) -> str:
     return item.name
 
 
-def _maybe_combine_reasoning_and_tool_call(
-    item: ResponseInputOutputItem, messages: list[ChatCompletionMessageParam]
-) -> ChatCompletionMessageParam | None:
-    """Many models treat MCP calls and reasoning as a single message.
-    This function checks if the last message is a reasoning message and
-    the current message is a tool call"""
-    if not (
-        isinstance(item, ResponseFunctionToolCall)
-        and item.id
-        and item.id.startswith(MCP_PREFIX)
-    ):
-        return None
-    if len(messages) == 0:
-        return None
-    last_message = messages[-1]
-    if not (
-        last_message.get("role") == "assistant"
-        and last_message.get("reasoning") is not None
-    ):
-        return None
+def construct_chat_messages_with_tool_call(
+    input_messages: list[ResponseInputOutputItem],
+) -> list[ChatCompletionMessageParam]:
+    """Build chat messages from response items.
 
-    last_message["tool_calls"] = [
-        ChatCompletionMessageToolCallParam(
+    A single assistant turn is emitted by the Responses API as several ordered
+    items (a reasoning item, an optional output message, one or more function
+    calls). They carry no shared turn id, so they are grouped by position: a
+    reasoning / message / function_call item is merged into the immediately
+    preceding assistant message (filling its empty ``reasoning`` / ``content``
+    slot, or appending to its ``tool_calls``). A non-assistant item (a tool
+    result or a user message) ends the run, so the next assistant item starts a
+    fresh message. This reconstructs the single ``think + content + tool_call``
+    assistant turn the models were trained on, instead of leaving each item as
+    its own bare assistant message.
+    """
+    messages: list[ChatCompletionMessageParam] = []
+    for item in input_messages:
+        message = _construct_message_from_response_item(
+            item, prev_msg=messages[-1] if messages else None
+        )
+        if message is not None:
+            messages.append(message)
+
+    return messages
+
+
+def _construct_message_from_response_item(
+    item: ResponseInputOutputItem,
+    prev_msg: ChatCompletionMessageParam | None = None,
+) -> ChatCompletionMessageParam | None:
+    """Returns a new message or None. If ``None``, ``prev_msg`` was updated in
+    place (the item was merged into the preceding assistant message). If
+    ``prev_msg`` is not an assistant message, a new message is always returned.
+    """
+    prev_assistant_msg = (
+        prev_msg if prev_msg and prev_msg.get("role") == "assistant" else None
+    )
+
+    if isinstance(item, ResponseFunctionToolCall):
+        tool_call = ChatCompletionMessageToolCallParam(
             id=item.call_id,
             function=FunctionCallTool(
                 name=_tool_call_wire_name(item),
@@ -159,63 +180,58 @@ def _maybe_combine_reasoning_and_tool_call(
             ),
             type="function",
         )
-    ]
-    return last_message
-
-
-def construct_chat_messages_with_tool_call(
-    input_messages: list[ResponseInputOutputItem],
-) -> list[ChatCompletionMessageParam]:
-    """This function wraps _construct_single_message_from_response_item
-    Because some chatMessages come from multiple response items
-    for example a reasoning item and a MCP tool call are two response items
-    but are one chat message
-    """
-    messages: list[ChatCompletionMessageParam] = []
-    for item in input_messages:
-        maybe_combined_message = _maybe_combine_reasoning_and_tool_call(item, messages)
-        if maybe_combined_message is not None:
-            messages[-1] = maybe_combined_message
-        else:
-            messages.append(_construct_single_message_from_response_item(item))
-
-    return messages
-
-
-def _construct_single_message_from_response_item(
-    item: ResponseInputOutputItem,
-) -> ChatCompletionMessageParam:
-    if isinstance(item, ResponseFunctionToolCall):
-        # Append the function call as a tool call.
+        if prev_assistant_msg:
+            tool_calls = prev_assistant_msg.get("tool_calls")
+            if tool_calls is None:
+                prev_assistant_msg["tool_calls"] = [tool_call]
+                return None
+            if isinstance(tool_calls, list):
+                tool_calls.append(tool_call)
+                return None
+            if isinstance(tool_calls, Iterable) and not isinstance(
+                tool_calls, (dict, str)
+            ):
+                tool_calls = list(tool_calls)
+                tool_calls.append(tool_call)
+                prev_assistant_msg["tool_calls"] = tool_calls
+                return None
+            logger.warning(
+                "Previous assistant message has unknown tool_calls format. "
+                "Tool call merging is skipped and a new assistant message is "
+                "created. Item %s",
+                item.id,
+            )
         return ChatCompletionAssistantMessageParam(
             role="assistant",
-            tool_calls=[
-                ChatCompletionMessageToolCallParam(
-                    id=item.call_id,
-                    function=FunctionCallTool(
-                        name=_tool_call_wire_name(item),
-                        arguments=item.arguments,
-                    ),
-                    type="function",
-                )
-            ],
+            tool_calls=[tool_call],
         )
     elif isinstance(item, ResponseReasoningItem):
         reasoning_content = ""
         if item.encrypted_content:
             raise ValueError("Encrypted content is not supported.")
-        if len(item.summary) == 1:
-            reasoning_content = item.summary[0].text
-        elif item.content and len(item.content) == 1:
+        if item.content and len(item.content) >= 1:
             reasoning_content = item.content[0].text
+        elif len(item.summary) >= 1:
+            reasoning_content = item.summary[0].text
+        if prev_assistant_msg:
+            previous_reasoning = prev_assistant_msg.get("reasoning")
+            if previous_reasoning is None:
+                prev_assistant_msg["reasoning"] = reasoning_content
+                return None
         return {
             "role": "assistant",
             "reasoning": reasoning_content,
         }
     elif isinstance(item, ResponseOutputMessage):
+        output_text = item.content[0].text
+        if prev_assistant_msg:
+            previous_content = prev_assistant_msg.get("content")
+            if previous_content is None:
+                prev_assistant_msg["content"] = output_text
+                return None
         return {
             "role": "assistant",
-            "content": item.content[0].text,
+            "content": output_text,
         }
     elif isinstance(item, ResponseFunctionToolCallOutputItem):
         return ChatCompletionToolMessageParam(
@@ -230,7 +246,7 @@ def _construct_single_message_from_response_item(
             content=item.get("output"),
             tool_call_id=item.get("call_id"),
         )
-    return item  # type: ignore
+    return item  # type: ignore[arg-type]
 
 
 def extract_tool_types(tools: list[Tool]) -> set[str]:
