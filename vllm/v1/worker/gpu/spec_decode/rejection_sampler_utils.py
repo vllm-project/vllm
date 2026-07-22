@@ -861,6 +861,223 @@ def _insert_resampled_kernel(
     )
 
 
+@triton.jit
+def _rejection_from_target_probs_kernel(
+    # [num_reqs, num_speculative_steps + 1]
+    sampled_ptr,
+    sampled_stride,
+    # [num_reqs]
+    rejected_steps_ptr,
+    # [num_logits, V]
+    target_probs_ptr,
+    target_probs_stride,
+    # [num_logits]
+    draft_sampled_ptr,
+    # [num_reqs + 1]
+    cu_num_logits_ptr,
+    # [num_reqs]
+    idx_mapping_ptr,
+    # [max_num_reqs]
+    seed_ptr,
+    # [num_logits]
+    pos_ptr,
+    # [num_speculative_steps]
+    synthetic_conditional_rates_ptr,
+    SYNTHETIC_MODE: tl.constexpr,
+):
+    req_idx = tl.program_id(0)
+    req_state_idx = tl.load(idx_mapping_ptr + req_idx).to(tl.int64)
+    start_idx = tl.load(cu_num_logits_ptr + req_idx).to(tl.int64)
+    end_idx = tl.load(cu_num_logits_ptr + req_idx + 1)
+    num_draft_tokens = end_idx - start_idx - 1
+    seed = tl.load(seed_ptr + req_state_idx)
+
+    accepted_length = tl.zeros((), tl.int64)
+    accepted = True
+    for i in range(num_draft_tokens):
+        logit_idx = start_idx + i
+        draft_token = tl.load(draft_sampled_ptr + logit_idx + 1).to(tl.int64)
+        pos = tl.load(pos_ptr + logit_idx)
+        u = tl_rand32(seed, pos, includes_zero=False)
+        is_valid_draft = draft_token >= 0
+        draft_token = tl.maximum(draft_token, 0)
+        if SYNTHETIC_MODE:
+            rate = tl.load(synthetic_conditional_rates_ptr + i)
+            accepted &= u < rate
+        else:
+            target_prob = tl.load(
+                target_probs_ptr + logit_idx * target_probs_stride + draft_token
+            ).to(tl.float32)
+            accepted &= target_prob > u
+        accepted &= is_valid_draft
+        tl.store(sampled_ptr + req_idx * sampled_stride + i, draft_token)
+        accepted_length += accepted
+    tl.store(rejected_steps_ptr + req_idx, accepted_length)
+
+
+@triton.jit
+def _resample_from_target_probs_kernel(
+    # [num_reqs, num_blocks]
+    resampled_local_argmax_ptr,
+    resampled_local_argmax_stride,
+    # [num_reqs, num_blocks]
+    resampled_local_max_ptr,
+    resampled_local_max_stride,
+    # [num_logits, V]
+    target_probs_ptr,
+    target_probs_stride,
+    # [num_reqs]
+    rejected_step_ptr,
+    # [num_reqs + 1]
+    cu_num_logits_ptr,
+    # [num_logits]
+    expanded_idx_mapping_ptr,
+    # [num_logits]
+    draft_sampled_ptr,
+    # [max_num_reqs]
+    temp_ptr,
+    # [max_num_reqs]
+    seed_ptr,
+    # [num_logits]
+    pos_ptr,
+    vocab_size,
+    BLOCK_SIZE: tl.constexpr,
+    USE_FP64: tl.constexpr,
+):
+    req_idx = tl.program_id(0)
+    resample_idx = tl.load(rejected_step_ptr + req_idx)
+    start_idx = tl.load(cu_num_logits_ptr + req_idx).to(tl.int64)
+    end_idx = tl.load(cu_num_logits_ptr + req_idx + 1)
+    resample_token_idx = start_idx + resample_idx
+
+    block_idx = tl.program_id(1)
+    block = block_idx * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    mask = block < vocab_size
+    target_probs = tl.load(
+        target_probs_ptr + resample_token_idx * target_probs_stride + block,
+        mask=mask,
+        other=0.0,
+    ).to(tl.float32)
+    residual_logits = tl.log(target_probs)
+    is_bonus = resample_token_idx == end_idx - 1
+    if not is_bonus:
+        rejected_draft_token = tl.load(draft_sampled_ptr + resample_token_idx + 1)
+        residual_logits = tl.where(
+            block != rejected_draft_token,
+            residual_logits,
+            float("-inf"),
+        )
+
+    value, idx = gumbel_block_argmax(
+        residual_logits,
+        block,
+        mask,
+        resample_token_idx,
+        expanded_idx_mapping_ptr,
+        temp_ptr,
+        seed_ptr,
+        pos_ptr,
+        None,
+        0,
+        None,
+        vocab_size,
+        APPLY_TEMPERATURE=False,
+        USE_FP64=USE_FP64,
+    )
+    token_id = block_idx * BLOCK_SIZE + idx
+    tl.store(
+        resampled_local_argmax_ptr
+        + req_idx * resampled_local_argmax_stride
+        + block_idx,
+        token_id,
+    )
+    tl.store(
+        resampled_local_max_ptr + req_idx * resampled_local_max_stride + block_idx,
+        value,
+    )
+
+
+def _rejection_sample_from_target_probs(
+    target_probs: torch.Tensor,
+    draft_sampled: torch.Tensor,
+    cu_num_logits: torch.Tensor,
+    pos: torch.Tensor,
+    idx_mapping: torch.Tensor,
+    expanded_idx_mapping: torch.Tensor,
+    temperature: torch.Tensor,
+    seed: torch.Tensor,
+    num_speculative_steps: int,
+    synthetic_conditional_rates: torch.Tensor | None,
+    use_fp64: bool,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    num_reqs = cu_num_logits.shape[0] - 1
+    _, vocab_size = target_probs.shape
+    sampled = draft_sampled.new_empty(
+        num_reqs, num_speculative_steps + 1, dtype=torch.int64
+    )
+    num_sampled = sampled.new_empty(num_reqs, dtype=torch.int32)
+    _rejection_from_target_probs_kernel[(num_reqs,)](
+        sampled,
+        sampled.stride(0),
+        num_sampled,
+        target_probs,
+        target_probs.stride(0),
+        draft_sampled,
+        cu_num_logits,
+        idx_mapping,
+        seed,
+        pos,
+        synthetic_conditional_rates,
+        SYNTHETIC_MODE=synthetic_conditional_rates is not None,
+        num_warps=1,
+    )
+
+    block_size = 1024
+    resample_num_blocks = triton.cdiv(vocab_size, block_size)
+    padded_resample_num_blocks = triton.next_power_of_2(resample_num_blocks)
+    resampled_local_argmax = target_probs.new_empty(
+        num_reqs, resample_num_blocks, dtype=torch.int64
+    )
+    resampled_local_max = target_probs.new_empty(
+        num_reqs,
+        resample_num_blocks,
+        dtype=torch.float64 if use_fp64 else torch.float32,
+    )
+    _resample_from_target_probs_kernel[(num_reqs, resample_num_blocks)](
+        resampled_local_argmax,
+        resampled_local_argmax.stride(0),
+        resampled_local_max,
+        resampled_local_max.stride(0),
+        target_probs,
+        target_probs.stride(0),
+        num_sampled,
+        cu_num_logits,
+        expanded_idx_mapping,
+        draft_sampled,
+        temperature,
+        seed,
+        pos,
+        vocab_size,
+        BLOCK_SIZE=block_size,
+        USE_FP64=use_fp64,
+    )
+    _insert_resampled_kernel[(num_reqs,)](
+        sampled,
+        sampled.stride(0),
+        num_sampled,
+        resampled_local_argmax,
+        resampled_local_argmax.stride(0),
+        resampled_local_max,
+        resampled_local_max.stride(0),
+        resample_num_blocks,
+        cu_num_logits,
+        expanded_idx_mapping,
+        temperature,
+        PADDED_RESAMPLE_NUM_BLOCKS=padded_resample_num_blocks,
+    )
+    return sampled, num_sampled
+
+
 def rejection_sample(
     # [num_logits, V]
     target_logits: torch.Tensor,
@@ -887,7 +1104,28 @@ def rejection_sample(
     synthetic_conditional_rates: torch.Tensor | None = None,
     use_fp64: bool = False,
     use_block_verification: bool = False,
+    target_probs: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    if target_probs is not None:
+        assert target_probs.dtype == torch.float32
+        assert target_probs.is_contiguous()
+        assert target_probs.shape == target_logits.shape
+        assert draft_logits is None
+        assert not use_block_verification
+        return _rejection_sample_from_target_probs(
+            target_probs,
+            draft_sampled,
+            cu_num_logits,
+            pos,
+            idx_mapping,
+            expanded_idx_mapping,
+            temperature,
+            seed,
+            num_speculative_steps,
+            synthetic_conditional_rates,
+            use_fp64,
+        )
+
     num_reqs = cu_num_logits.shape[0] - 1
     num_logits, vocab_size = target_logits.shape
     draft_logits_stride_0 = 0
