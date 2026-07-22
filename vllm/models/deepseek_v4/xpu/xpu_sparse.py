@@ -44,6 +44,17 @@ class DeepseekV4XPUAttention(DeepseekV4Attention):
     backend_cls = DeepseekV4XPUSparseBackend
     use_flashmla_fp8_layout = True
 
+    def __init__(self, *args, **kwargs) -> None:
+        # torch.cuda.Event() raises RuntimeError on XPU ("dummy base class").
+        # The Base and DeepseekV4Indexer both create cuda Events in __init__, so
+        # we temporarily redirect torch.cuda.Event → torch.xpu.Event.
+        _orig_event = torch.cuda.Event
+        torch.cuda.Event = torch.xpu.Event  # type: ignore[misc]
+        try:
+            super().__init__(*args, **kwargs)
+        finally:
+            torch.cuda.Event = _orig_event  # type: ignore[misc]
+
     def _fused_qnorm_rope_kv_insert(self, q, kv, positions, attn_metadata):
         from typing import cast
 
@@ -78,19 +89,37 @@ class DeepseekV4XPUAttention(DeepseekV4Attention):
         return num_heads
 
     def _o_proj(self, o: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
-        # XPU uses BF16 reference wo_a path (same as ROCm).
-        from vllm.models.deepseek_v4.amd.rocm import rocm_inv_rope_einsum
+        from vllm.models.deepseek_v4.common.ops.fused_inv_rope_fp8_quant import (
+            fused_inv_rope_fp8_quant,
+        )
 
-        z = rocm_inv_rope_einsum(
-            self.rotary_emb,
+        o_fp8, o_scale = fused_inv_rope_fp8_quant(
             o,
             positions,
-            self.rope_head_dim,
-            self.n_local_groups,
-            self.o_lora_rank,
-            self.wo_a,
+            self.rotary_emb.cos_sin_cache,
+            n_groups=self.n_local_groups,
+            heads_per_group=self.n_local_heads // self.n_local_groups,
+            nope_dim=self.nope_head_dim,
+            rope_dim=self.rope_head_dim,
+            tma_aligned_scales=False,
         )
-        return self.wo_b(z.flatten(1))
+
+        # Precomputed contiguous [G, K, N] weight and [G, K/bs, N/bs] scale.
+        wo_a_weight = self.wo_a.bmm_weight
+        wo_a_scale = self.wo_a.bmm_scale
+
+        # TODO: optimize fused_inv_rope_fp8_quant for xpu bmm to
+        # eliminate o_scale transpose + contiguous
+        z = torch.ops.vllm.xpu_fp8_bmm(
+            o_fp8.transpose(0, 1),
+            wo_a_weight,
+            torch.bfloat16,
+            o_scale.transpose(0, 1).contiguous(),
+            wo_a_scale,
+            None,
+        )
+
+        return self.wo_b(z.transpose(0, 1).flatten(1))
 
     def forward_mqa(
         self,

@@ -100,12 +100,13 @@ class MambaHybridModelState(DefaultModelState):
 
     def add_request(self, req_index: int, new_req_data: NewRequestData) -> None:
         super().add_request(req_index, new_req_data)
+        # Must reset the speculative acceptance count in this idx which could be stale.
+        self.num_accepted_tokens_gpu[req_index] = 1
         if self._align_mode:
             # Seed the running state block from the resumed/prefilled position.
             self._mamba_state_idx_gpu[req_index] = (
                 new_req_data.num_computed_tokens - 1
             ) // self.cache_config.block_size
-            self.num_accepted_tokens_gpu[req_index] = 1
 
     def _get_mamba_group_info(
         self, kv_cache_config: KVCacheConfig
@@ -255,11 +256,16 @@ class MambaHybridModelState(DefaultModelState):
             # GDN uses >= 0 to select spec-decode rows, so non-decode rows
             # need the -1 sentinel rather than a raw zero draft count.
             num_decode_draft_tokens_np = np.full(num_reqs, -1, dtype=np.int32)
-            if input_batch.num_draft_tokens_per_req is not None:
-                has_draft_tokens = input_batch.num_draft_tokens_per_req > 0
-                spec_decode_mask = has_draft_tokens & ~input_batch.is_prefilling_np
+            num_draft_tokens_per_req = input_batch.num_draft_tokens_per_req
+            if num_draft_tokens_per_req is not None:
+                # A row is a spec-decode row only when its whole prompt is already
+                # computed, i.e. exactly one non-draft (decode) token is scheduled.
+                is_decode = (
+                    input_batch.num_scheduled_tokens == num_draft_tokens_per_req + 1
+                )
+                spec_decode_mask = (num_draft_tokens_per_req > 0) & is_decode
                 num_decode_draft_tokens_np[: input_batch.num_reqs] = np.where(
-                    spec_decode_mask, input_batch.num_draft_tokens_per_req, -1
+                    spec_decode_mask, num_draft_tokens_per_req, -1
                 )
             num_decode_draft_tokens_cpu = torch.from_numpy(num_decode_draft_tokens_np)
 
