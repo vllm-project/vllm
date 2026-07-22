@@ -13,8 +13,10 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.attention.mla_attention import (
     MLACommonBaseImpl,
     MLACommonPrefillMetadata,
+    align_mla_chunked_context_workspace_size,
     build_mla_chunked_context_metadata,
     get_mla_dims,
+    maybe_get_dcp_kv_gather,
 )
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer
@@ -86,6 +88,12 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
             dtype=self.model_config.dtype,
             device=device,
         )
+        self.dcp_kv_gather = maybe_get_dcp_kv_gather(
+            self.chunked_prefill_workspace,
+            self.chunked_prefill_workspace_size,
+            self.dcp_world_size,
+            max(parallel_config.num_ubatches, 1),
+        )
         layer_prefill_backend = vllm_config.compilation_config.static_forward_context[
             layer_names[0]
         ].prefill_backend
@@ -108,9 +116,9 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
             64 * 1024,
             scheduler_config.max_num_seqs * topk_tokens,
         )
-        return max(
+        return align_mla_chunked_context_workspace_size(
+            vllm_config,
             workspace_size,
-            scheduler_config.max_num_seqs * cache_config.block_size,
         )
 
     def _build_req_id_per_token(
@@ -160,6 +168,7 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
             dcp_world_size=self.dcp_world_size,
             dcp_local_block_size=self.dcp_local_block_size,
             dcp_virtual_block_size=self.dcp_virtual_block_size,
+            dcp_kv_gather=self.dcp_kv_gather,
         )
 
     def build(
