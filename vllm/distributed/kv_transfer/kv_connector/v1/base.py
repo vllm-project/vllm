@@ -255,6 +255,14 @@ class KVConnectorBase_V1(ABC):
 
         Args:
             kv_caches: dictionary of layer names, kv cache
+
+        Note:
+            The views' shapes/strides/numel are the authoritative source of
+            the KV cache geometry; do not derive block sizes or extents from
+            `untyped_storage().nbytes()`. With the extensible KV cache, the
+            underlying storage spans the reserved virtual-address capacity,
+            of which only each view's per-segment block prefix is physically
+            committed (and safe to access or register).
         """
         return
 
