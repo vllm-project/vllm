@@ -29,6 +29,7 @@ from vllm.inputs import (
 from vllm.logger import init_logger
 from vllm.multimodal import MULTIMODAL_REGISTRY as mm_registry
 from vllm.multimodal.cache import BaseMultiModalProcessorCache
+from vllm.multimodal.gpu_ipc_memory import maybe_init_mm_gpu_ipc_pool
 from vllm.multimodal.parse import (
     MultiModalDataItems,
     MultiModalUUIDItems,
@@ -111,6 +112,16 @@ class BaseRenderer(ABC, Generic[_T]):
             safe_load_prompt_embeds, executor=self._executor
         )
         if mm_registry.supports_multimodal_inputs(config.model_config):
+            # Install the process-global GPU memory pool used to gate
+            # frontend GPU-side multimodal decoding (no-op when the budget
+            # is 0). Lives in the API-server process only.
+            mm_config = config.model_config.multimodal_config
+            if mm_config is not None:
+                maybe_init_mm_gpu_ipc_pool(
+                    mm_config.mm_ipc_gpu_memory_gb,
+                    config.parallel_config._api_process_count,
+                )
+
             mm_processor_cache = mm_registry.processor_cache_from_config(config)
 
             with set_default_torch_num_threads():
@@ -724,12 +735,12 @@ class BaseRenderer(ABC, Generic[_T]):
         *,
         skip_mm_cache: bool = False,
     ) -> "MultiModalInput":
-        mm_req_id = f"renderer{self.api_process_rank}-mm-{self._mm_req_counter.inc(1)}"
-
         if skip_mm_cache and self._readonly_mm_processor is not None:
             mm_processor = self._readonly_mm_processor
         else:
             mm_processor = self.get_mm_processor()
+
+        mm_req_id = f"renderer{self.api_process_rank}-mm-{self._mm_req_counter.inc(1)}"
 
         mm_data_items = mm_processor.info.parse_mm_data(mm_data)
         mm_uuid_items = parse_mm_uuids(mm_uuids)

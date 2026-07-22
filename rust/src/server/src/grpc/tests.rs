@@ -1,29 +1,49 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use std::future::Future;
+use std::io;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
+use std::time::Duration;
 
 use futures::StreamExt as _;
+use hyper_util::rt::TokioIo;
+use openssl::ssl::{SslConnector, SslFiletype, SslMethod};
 use serial_test::serial;
-use tonic::transport::Server as TonicServer;
+use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+use tokio::net::TcpStream;
+use tokio_openssl::SslStream;
+use tonic::transport::{Channel, Endpoint, Server as TonicServer, Uri};
+use tonic_health::pb::HealthCheckRequest;
+use tonic_health::pb::health_check_response::ServingStatus as HealthServingStatus;
+use tonic_health::pb::health_client::HealthClient;
+use tonic_health::server::health_reporter;
+use tower::service_fn;
 use vllm_chat::{
     ChatBackend, ChatLlm, ChatRenderer, ChatRequest, ChatTextBackend, DefaultChatOutputProcessor,
     DynChatOutputProcessor, DynChatRenderer, NewChatOutputProcessorOptions, RenderedPrompt,
 };
-use vllm_engine_core_client::protocol::{
-    EngineCoreFinishReason, EngineCoreOutput, EngineCoreOutputs, EngineCoreRequest,
+use vllm_engine_core_client::protocol::output::{
+    EngineCoreFinishReason, EngineCoreOutput, EngineCoreOutputs, RequestBatchOutputs,
 };
+use vllm_engine_core_client::protocol::request::EngineCoreRequest;
 use vllm_engine_core_client::test_utils::{IpcNamespace, spawn_mock_engine_task};
 use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig, EngineId};
 use vllm_llm::Llm;
-use vllm_text::tokenizer::{DynTokenizer, Tokenizer};
+use vllm_text::tokenizer::DynTokenizer;
 use vllm_text::{Prompt, TextBackend};
+use vllm_tokenizer::test_utils::TestTokenizer;
 use zeromq::prelude::{SocketRecv, SocketSend};
 use zeromq::{DealerSocket, PushSocket, ZmqMessage};
 
 use super::pb::generate_client::GenerateClient;
 use super::{GenerateServer, GenerateServiceImpl, pb};
+use crate::listener::{Listener, MaybeTlsListener};
 use crate::state::AppState;
+use crate::tls;
+use crate::tls_tests::{TestCerts, server_tls};
 
 // ========================================================================================
 // Helpers (mirrors the patterns in routes/tests.rs)
@@ -91,6 +111,7 @@ fn request_output(
         stop_reason: None,
         events: None,
         kv_transfer_params: None,
+        ec_transfer_params: None,
         trace_headers: None,
         prefill_stats: None,
         routed_experts: None,
@@ -102,19 +123,14 @@ fn engine_outputs_for_request(
     request_id: &str,
     output_specs: Vec<(Vec<u32>, Option<EngineCoreFinishReason>)>,
 ) -> EngineCoreOutputs {
-    EngineCoreOutputs {
-        engine_index: 0,
+    RequestBatchOutputs {
         outputs: output_specs
             .into_iter()
             .map(|(token_ids, finish_reason)| request_output(request_id, token_ids, finish_reason))
             .collect(),
-        scheduler_stats: None,
-        timestamp: 0.0,
-        utility_output: None,
-        finished_requests: None,
-        wave_complete: None,
-        start_wave: None,
+        ..Default::default()
     }
+    .into()
 }
 
 fn default_stream_output_specs() -> Vec<(Vec<u32>, Option<EngineCoreFinishReason>)> {
@@ -144,37 +160,9 @@ fn test_llm(client: EngineCoreClient) -> Llm {
 #[derive(Clone, Debug)]
 struct FakeTextBackend;
 
-#[derive(Debug)]
-struct FakeTokenizer;
-
-impl Tokenizer for FakeTokenizer {
-    fn encode(
-        &self,
-        text: &str,
-        _add_special_tokens: bool,
-    ) -> vllm_text::tokenizer::Result<Vec<u32>> {
-        Ok(text.bytes().map(u32::from).collect())
-    }
-
-    fn decode(
-        &self,
-        token_ids: &[u32],
-        _skip_special_tokens: bool,
-    ) -> vllm_text::tokenizer::Result<String> {
-        Ok(
-            String::from_utf8_lossy(&token_ids.iter().map(|id| *id as u8).collect::<Vec<_>>())
-                .into_owned(),
-        )
-    }
-
-    fn token_to_id(&self, token: &str) -> Option<u32> {
-        token.bytes().next().map(u32::from)
-    }
-}
-
 impl TextBackend for FakeTextBackend {
     fn tokenizer(&self) -> DynTokenizer {
-        Arc::new(FakeTokenizer)
+        Arc::new(TestTokenizer::new())
     }
 
     fn model_id(&self) -> &str {
@@ -211,15 +199,14 @@ impl ChatRenderer for FakeTextBackend {
     }
 }
 
-/// Spin up a gRPC server backed by a mock engine that serves a single request
-/// with the given output specs. Returns the client, the gRPC server task, and
-/// the mock engine task.
-async fn grpc_test_server(
+/// Build the gRPC service + mock engine that serves a single request with the
+/// given output specs. Shared by the plaintext and TLS server fixtures.
+async fn setup_grpc_service(
     engine_id: impl Into<EngineId>,
     output_specs: Vec<(Vec<u32>, Option<EngineCoreFinishReason>)>,
 ) -> (
-    GenerateClient<tonic::transport::Channel>,
-    tokio::task::JoinHandle<()>,
+    GenerateServer<GenerateServiceImpl>,
+    tokio::sync::watch::Receiver<bool>,
     MockEngineTask,
 ) {
     let ipc = IpcNamespace::new().expect("create ipc namespace");
@@ -253,33 +240,228 @@ async fn grpc_test_server(
     )
     .await
     .expect("connect client");
+    let engine_health = client.subscribe_health();
 
     let chat = ChatLlm::from_shared_backend(
         test_llm(client),
         Arc::new(FakeTextBackend) as Arc<dyn ChatTextBackend>,
     );
     let state = Arc::new(AppState::new(vec!["test-model".to_string()], chat));
-    let svc = GenerateServer::new(GenerateServiceImpl::new(state));
+    (
+        GenerateServer::new(GenerateServiceImpl::new(state)),
+        engine_health,
+        engine_task,
+    )
+}
 
-    // Bind to an OS-assigned port.
+/// Spin up a plaintext gRPC server backed by a mock engine. Returns the client,
+/// the gRPC server task, and the mock engine task.
+async fn grpc_test_server(
+    engine_id: impl Into<EngineId>,
+    output_specs: Vec<(Vec<u32>, Option<EngineCoreFinishReason>)>,
+) -> (
+    GenerateClient<tonic::transport::Channel>,
+    tokio::task::JoinHandle<()>,
+    MockEngineTask,
+) {
+    let (svc, engine_health, engine_task) = setup_grpc_service(engine_id, output_specs).await;
+    let (channel, server_task) = start_grpc_test_server(
+        svc,
+        engine_health,
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await;
+    (GenerateClient::new(channel), server_task, engine_task)
+}
+
+async fn start_grpc_test_server(
+    generate_service: GenerateServer<GenerateServiceImpl>,
+    engine_health: tokio::sync::watch::Receiver<bool>,
+    shutdown: tokio_util::sync::CancellationToken,
+) -> (Channel, tokio::task::JoinHandle<()>) {
+    let (health_reporter, health_service) = health_reporter();
+    health_reporter.set_serving::<GenerateServer<GenerateServiceImpl>>().await;
+
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind grpc listener");
     let addr = listener.local_addr().expect("local addr");
 
     let server_task = tokio::spawn(async move {
-        let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
+        let incoming = MaybeTlsListener::plain(Listener::Tcp(listener));
+        let server = TonicServer::builder()
+            .add_service(health_service)
+            .add_service(generate_service)
+            .serve_with_incoming_shutdown(incoming, shutdown.clone().cancelled_owned());
+        let health_monitor =
+            super::monitor_health(health_reporter, engine_health, shutdown.clone());
+        let server = async move {
+            let result = server.await;
+            shutdown.cancel();
+            result
+        };
+        let (server_result, ()) = tokio::join!(server, health_monitor);
+        server_result.expect("grpc server");
+    });
+
+    let channel = Endpoint::from_shared(format!("http://{addr}"))
+        .expect("grpc endpoint")
+        .connect()
+        .await
+        .expect("connect grpc channel");
+
+    (channel, server_task)
+}
+
+/// Spin up a TLS gRPC server (server cert from `certs`, `cert_reqs` mTLS mode).
+/// Returns the address, the server task, and the mock engine task.
+async fn grpc_tls_test_server(
+    engine_id: impl Into<EngineId>,
+    output_specs: Vec<(Vec<u32>, Option<EngineCoreFinishReason>)>,
+    certs: &TestCerts,
+    cert_reqs: i32,
+) -> (String, tokio::task::JoinHandle<()>, MockEngineTask) {
+    let (svc, _engine_health, engine_task) = setup_grpc_service(engine_id, output_specs).await;
+    let context = tls::build_grpc_server_config(&server_tls(certs, cert_reqs))
+        .expect("build grpc tls config");
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind grpc listener");
+    let addr = listener.local_addr().expect("local addr").to_string();
+
+    let server_task = tokio::spawn(async move {
+        let incoming = MaybeTlsListener::tls(Listener::Tcp(listener), context);
         TonicServer::builder()
+            .add_service(svc)
+            .serve_with_incoming(incoming)
+            .await
+            .expect("grpc tls server");
+    });
+
+    (addr, server_task, engine_task)
+}
+
+/// Build a tonic `Generate` client over a tokio-openssl connector, optionally
+/// with a client identity for mTLS. Hand-rolled because tonic 0.14 ships no
+/// OpenSSL transport.
+async fn grpc_tls_client(
+    certs: &TestCerts,
+    addr: &str,
+    identity: Option<&str>,
+) -> Result<GenerateClient<Channel>, tonic::transport::Error> {
+    let ca = certs.path("ca.pem");
+    let identity = identity.map(|name| {
+        (
+            certs.path(&format!("{name}.pem")),
+            certs.path(&format!("{name}.key")),
+        )
+    });
+    let target = addr.to_string();
+
+    let connector = service_fn(move |_: Uri| {
+        let ca = ca.clone();
+        let identity = identity.clone();
+        let target = target.clone();
+        async move {
+            let tcp = TcpStream::connect(&target).await?;
+            let mut builder =
+                SslConnector::builder(SslMethod::tls_client()).map_err(io::Error::other)?;
+            builder.set_ca_file(&ca).map_err(io::Error::other)?;
+            if let Some((cert, key)) = &identity {
+                builder.set_certificate_chain_file(cert).map_err(io::Error::other)?;
+                builder.set_private_key_file(key, SslFiletype::PEM).map_err(io::Error::other)?;
+            }
+            let mut config = builder.build().configure().map_err(io::Error::other)?;
+            config.set_verify_hostname(false);
+            config.set_alpn_protos(b"\x02h2").map_err(io::Error::other)?;
+            let ssl = config.into_ssl("127.0.0.1").map_err(io::Error::other)?;
+            let mut stream = SslStream::new(ssl, tcp).map_err(io::Error::other)?;
+            Pin::new(&mut stream).connect().await.map_err(io::Error::other)?;
+            Ok::<_, io::Error>(TokioIo::new(stream))
+        }
+    });
+
+    let channel = Endpoint::from_shared(format!("https://{addr}"))
+        .expect("grpc endpoint")
+        .connect_with_connector(connector)
+        .await?;
+    Ok(GenerateClient::new(channel))
+}
+
+/// Complete a raw TLS handshake against the gRPC port (offering ALPN `h2`) for
+/// the ALPN-negotiation assertion.
+async fn grpc_tls_handshake(
+    certs: &TestCerts,
+    addr: &str,
+) -> io::Result<Pin<Box<SslStream<TcpStream>>>> {
+    let tcp = TcpStream::connect(addr).await?;
+    let mut builder = SslConnector::builder(SslMethod::tls_client()).map_err(io::Error::other)?;
+    builder.set_ca_file(certs.path("ca.pem")).map_err(io::Error::other)?;
+    let mut config = builder.build().configure().map_err(io::Error::other)?;
+    config.set_verify_hostname(false);
+    config.set_alpn_protos(b"\x02h2").map_err(io::Error::other)?;
+    let ssl = config.into_ssl("127.0.0.1").map_err(io::Error::other)?;
+    let mut stream = Box::pin(SslStream::new(ssl, tcp).map_err(io::Error::other)?);
+    stream.as_mut().connect().await.map_err(io::Error::other)?;
+    Ok(stream)
+}
+
+/// Spin up a plaintext gRPC server, optionally with HTTP/2 keepalive set to
+/// `keepalive` for both the PING interval and the unanswered-PING timeout.
+async fn grpc_server_with_keepalive(
+    engine_id: impl Into<EngineId>,
+    keepalive: Option<Duration>,
+) -> (String, tokio::task::JoinHandle<()>, MockEngineTask) {
+    let (svc, _engine_health, engine_task) =
+        setup_grpc_service(engine_id, default_stream_output_specs()).await;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind grpc listener");
+    let addr = listener.local_addr().expect("local addr").to_string();
+
+    let mut builder = TonicServer::builder();
+    if let Some(interval) = keepalive {
+        builder = builder
+            .http2_keepalive_interval(Some(interval))
+            .http2_keepalive_timeout(Some(interval));
+    }
+
+    let server_task = tokio::spawn(async move {
+        let incoming = MaybeTlsListener::plain(Listener::Tcp(listener));
+        builder
             .add_service(svc)
             .serve_with_incoming(incoming)
             .await
             .expect("grpc server");
     });
 
-    // Connect the client.
-    let grpc_client = GenerateClient::connect(format!("http://{addr}"))
-        .await
-        .expect("connect grpc client");
+    (addr, server_task, engine_task)
+}
 
-    (grpc_client, server_task, engine_task)
+/// Establish an HTTP/2 connection (preface + SETTINGS exchange) then go silent,
+/// ACKing the server's SETTINGS but never its keepalive PINGs. Returns whether
+/// the SERVER closes the connection within `wait`. A minimal hand-rolled h2 peer
+/// because a real client auto-ACKs PINGs and so can never be kept-alive-evicted.
+async fn h2_unresponsive_peer_closed_within(addr: &str, wait: Duration) -> bool {
+    let mut tcp = TcpStream::connect(addr).await.expect("connect");
+    tcp.write_all(b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n").await.expect("preface");
+    tcp.write_all(&[0, 0, 0, 0x4, 0, 0, 0, 0, 0]).await.expect("client settings");
+
+    let closed = tokio::time::timeout(wait, async {
+        let mut header = [0u8; 9];
+        while tcp.read_exact(&mut header).await.is_ok() {
+            let len = u32::from_be_bytes([0, header[0], header[1], header[2]]) as usize;
+            let frame_type = header[3];
+            let flags = header[4];
+            let mut payload = vec![0u8; len];
+            if tcp.read_exact(&mut payload).await.is_err() {
+                return;
+            }
+            // ACK the server's SETTINGS so the only thing left unanswered is PINGs.
+            if frame_type == 0x4 && flags & 0x1 == 0 {
+                let _ = tcp.write_all(&[0, 0, 0, 0x4, 0x1, 0, 0, 0, 0]).await;
+            }
+        }
+    })
+    .await;
+
+    closed.is_ok()
 }
 
 // ========================================================================================
@@ -719,4 +901,300 @@ async fn unary_generate_output_text_defaults_to_true() {
 
     engine_task.await.expect("mock engine task");
     server_task.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn grpc_generate_succeeds_over_tls() {
+    let certs = TestCerts::generate();
+    let (addr, server_task, engine_task) = grpc_tls_test_server(
+        b"engine-grpc-tls-unary",
+        default_stream_output_specs(),
+        &certs,
+        0,
+    )
+    .await;
+
+    let mut client = grpc_tls_client(&certs, &addr, None).await.expect("tls client");
+    let response = client
+        .generate(pb::GenerateRequest {
+            request_id: "test-tls-unary".to_string(),
+            model: "test-model".to_string(),
+            prompt: Some(pb::generate_request::Prompt::Text("hello".to_string())),
+            stopping: Some(pb::StoppingCriteria {
+                max_new_tokens: 10,
+                ..Default::default()
+            }),
+            response: Some(pb::ResponseOptions {
+                output_text: Some(true),
+                ..Default::default()
+            }),
+            ..Default::default()
+        })
+        .await
+        .expect("unary generate over tls")
+        .into_inner();
+
+    assert_eq!(response.outputs.expect("outputs present").text, "hi");
+
+    engine_task.await.expect("mock engine task");
+    server_task.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn grpc_tls_negotiates_h2_alpn() {
+    let certs = TestCerts::generate();
+    let (addr, server_task, _engine_task) = grpc_tls_test_server(
+        b"engine-grpc-tls-alpn",
+        default_stream_output_specs(),
+        &certs,
+        0,
+    )
+    .await;
+
+    let stream = grpc_tls_handshake(&certs, &addr).await.expect("handshake");
+    assert_eq!(
+        stream.ssl().selected_alpn_protocol(),
+        Some(&b"h2"[..]),
+        "server must negotiate h2 ALPN"
+    );
+
+    server_task.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn grpc_mtls_required_rejects_client_without_certificate() {
+    let certs = TestCerts::generate();
+    let (addr, server_task, _engine_task) = grpc_tls_test_server(
+        b"engine-grpc-tls-mtls-reject",
+        default_stream_output_specs(),
+        &certs,
+        2,
+    )
+    .await;
+
+    // With TLS 1.3 the missing-client-cert rejection surfaces on first use, not
+    // at the handshake, so drive an RPC and assert the call fails.
+    let outcome = match grpc_tls_client(&certs, &addr, None).await {
+        Err(_) => Err(()),
+        Ok(mut client) => client
+            .generate(pb::GenerateRequest {
+                request_id: "test-tls-mtls-reject".to_string(),
+                model: "test-model".to_string(),
+                prompt: Some(pb::generate_request::Prompt::Text("hello".to_string())),
+                stopping: Some(pb::StoppingCriteria {
+                    max_new_tokens: 10,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            })
+            .await
+            .map(|_| ())
+            .map_err(|_| ()),
+    };
+    assert!(
+        outcome.is_err(),
+        "mTLS-required gRPC must reject a client without a certificate"
+    );
+
+    server_task.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn grpc_mtls_required_accepts_valid_client_certificate() {
+    let certs = TestCerts::generate();
+    let (addr, server_task, engine_task) = grpc_tls_test_server(
+        b"engine-grpc-tls-mtls-accept",
+        default_stream_output_specs(),
+        &certs,
+        2,
+    )
+    .await;
+
+    let mut client = grpc_tls_client(&certs, &addr, Some("client")).await.expect("mtls client");
+    let response = client
+        .generate(pb::GenerateRequest {
+            request_id: "test-tls-mtls".to_string(),
+            model: "test-model".to_string(),
+            prompt: Some(pb::generate_request::Prompt::Text("hello".to_string())),
+            stopping: Some(pb::StoppingCriteria {
+                max_new_tokens: 10,
+                ..Default::default()
+            }),
+            response: Some(pb::ResponseOptions {
+                output_text: Some(true),
+                ..Default::default()
+            }),
+            ..Default::default()
+        })
+        .await
+        .expect("mtls generate over tls")
+        .into_inner();
+
+    assert_eq!(response.outputs.expect("outputs present").text, "hi");
+
+    engine_task.await.expect("mock engine task");
+    server_task.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn grpc_keepalive_closes_unresponsive_connection() {
+    let (addr, server_task, _engine_task) =
+        grpc_server_with_keepalive(b"engine-grpc-keepalive", Some(Duration::from_millis(150)))
+            .await;
+
+    let closed = h2_unresponsive_peer_closed_within(&addr, Duration::from_secs(5)).await;
+    assert!(
+        closed,
+        "keepalive must close a peer that stops answering PINGs"
+    );
+
+    server_task.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn grpc_without_keepalive_keeps_unresponsive_connection_open() {
+    // Without keepalive the same unresponsive peer is NOT
+    // closed, proving the close above is attributable to keepalive.
+    let (addr, server_task, _engine_task) =
+        grpc_server_with_keepalive(b"engine-grpc-no-keepalive", None).await;
+
+    let closed = h2_unresponsive_peer_closed_within(&addr, Duration::from_secs(1)).await;
+    assert!(
+        !closed,
+        "without keepalive an idle h2 connection must stay open"
+    );
+
+    server_task.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn grpc_health_transitions_to_not_serving_when_engine_becomes_unhealthy() {
+    let (generate_service, _connected_engine_health, _engine_task) =
+        setup_grpc_service(b"engine-grpc-health-failure", default_stream_output_specs()).await;
+    let (engine_health_tx, engine_health) = tokio::sync::watch::channel(true);
+    let (channel, server_task) = start_grpc_test_server(
+        generate_service,
+        engine_health,
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await;
+    let mut health_client = HealthClient::new(channel);
+
+    let mut health_streams = Vec::new();
+    for service in ["vllm.Generate", ""] {
+        let service_label = if service.is_empty() {
+            "overall"
+        } else {
+            service
+        };
+        let mut stream = health_client
+            .watch(HealthCheckRequest {
+                service: service.to_string(),
+            })
+            .await
+            .unwrap_or_else(|error| {
+                panic!("failed to start health watch for {service_label}: {error}")
+            })
+            .into_inner();
+        let initial = stream
+            .message()
+            .await
+            .unwrap_or_else(|error| {
+                panic!("failed to read initial health status for {service_label}: {error}")
+            })
+            .unwrap_or_else(|| {
+                panic!("health watch for {service_label} ended before its initial status")
+            });
+        assert_eq!(
+            initial.status,
+            HealthServingStatus::Serving as i32,
+            "unexpected initial health status for {service_label}"
+        );
+        health_streams.push((service_label, stream));
+    }
+
+    engine_health_tx.send(false).expect("publish unhealthy engine state");
+
+    for (service_label, mut stream) in health_streams {
+        let update = tokio::time::timeout(Duration::from_secs(2), stream.message())
+            .await
+            .unwrap_or_else(|_| panic!("timed out waiting for health update for {service_label}"))
+            .unwrap_or_else(|error| {
+                panic!("failed to read health update for {service_label}: {error}")
+            })
+            .unwrap_or_else(|| panic!("health watch for {service_label} ended before its update"));
+        assert_eq!(
+            update.status,
+            HealthServingStatus::NotServing as i32,
+            "unexpected health status for {service_label}"
+        );
+    }
+
+    server_task.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn grpc_health_watch_closes_on_graceful_shutdown() {
+    let (generate_service, engine_health, _engine_task) = setup_grpc_service(
+        b"engine-grpc-health-shutdown",
+        default_stream_output_specs(),
+    )
+    .await;
+    let shutdown = tokio_util::sync::CancellationToken::new();
+    let (channel, server_task) =
+        start_grpc_test_server(generate_service, engine_health, shutdown.clone()).await;
+    let mut health_client = HealthClient::new(channel);
+    let mut stream = health_client
+        .watch(HealthCheckRequest {
+            service: "vllm.Generate".to_string(),
+        })
+        .await
+        .expect("start health watch for vllm.Generate")
+        .into_inner();
+
+    let initial = stream
+        .message()
+        .await
+        .expect("read initial health status for vllm.Generate")
+        .expect("health watch ended before its initial status");
+    assert_eq!(
+        initial.status,
+        HealthServingStatus::Serving as i32,
+        "unexpected initial health status for vllm.Generate"
+    );
+
+    shutdown.cancel();
+
+    let update = tokio::time::timeout(Duration::from_secs(2), stream.message())
+        .await
+        .expect("timed out waiting for shutdown health update for vllm.Generate")
+        .expect("failed to read shutdown health update for vllm.Generate")
+        .expect("health watch ended before its shutdown update");
+    assert_eq!(
+        update.status,
+        HealthServingStatus::NotServing as i32,
+        "unexpected shutdown health status for vllm.Generate"
+    );
+
+    let stream_end = tokio::time::timeout(Duration::from_secs(2), stream.message())
+        .await
+        .expect("timed out waiting for vllm.Generate health watch to close")
+        .expect("failed while closing vllm.Generate health watch");
+    assert!(
+        stream_end.is_none(),
+        "vllm.Generate health watch remained open"
+    );
+
+    tokio::time::timeout(Duration::from_secs(2), server_task)
+        .await
+        .expect("timed out waiting for gRPC server shutdown")
+        .expect("gRPC server task failed");
 }

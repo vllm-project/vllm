@@ -30,10 +30,17 @@ It supports page size >= 1.
 """
 
 import logging
+from dataclasses import dataclass
+from typing import Any
 
 import torch
 from packaging import version
 
+from vllm.model_executor.warmup.jit_warmup import VllmJitKernel
+from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    TritonPointerInputVariant,
+    TritonWarmupTensor,
+)
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
@@ -133,7 +140,7 @@ def _fwd_kernel_stage1(
                 + offs_n // PAGE_SIZE,
                 mask=offs_n < split_kv_end,
                 other=0,
-            )
+            ).to(tl.int64)  # page_number * page stride overflows int32
             kv_in_page = offs_n % PAGE_SIZE
             offs_buf_k = (
                 (kv_page_number * stride_buf_kpbs + kv_in_page * stride_buf_kbs)[
@@ -375,7 +382,7 @@ def _fwd_grouped_kernel_stage1(
                 mask=offs_n < split_kv_end,
                 other=0,
                 cache_modifier=".ca",
-            )
+            ).to(tl.int64)  # page_number * page stride overflows int32
             kv_off_k = (
                 kv_page_number * stride_buf_kpbs + (offs_n % PAGE_SIZE) * stride_buf_kbs
             )
@@ -637,6 +644,161 @@ def _fwd_kernel_stage2(
         lse + cur_batch * stride_lse_bs + cur_head,
         lse_val,
     )
+
+
+class DecodeStage2Kernel(VllmJitKernel["DecodeStage2Kernel.CompileKey"]):
+    @dataclass(frozen=True)
+    class CompileKey:
+        mid_dtype: torch.dtype
+        output_dtype: torch.dtype
+        input_variant: TritonPointerInputVariant
+        stride_mid_ob: int
+        stride_mid_oh: int
+        stride_mid_os: int
+        stride_obs: int
+        stride_oh: int
+        stride_lse_bs: int
+        NUM_KV_SPLITS: int
+        BLOCK_DV: int
+        Lv: int
+        OUTPUT_FP16: int
+
+    kernel = _fwd_kernel_stage2
+
+    def dispatch(  # type: ignore[override]
+        self,
+        *,
+        mid_dtype: torch.dtype,
+        output_dtype: torch.dtype,
+        mid_aligned: bool,
+        output_aligned: bool,
+        lse_aligned: bool,
+        stride_mid_ob: int,
+        stride_mid_oh: int,
+        stride_mid_os: int,
+        stride_obs: int,
+        stride_oh: int,
+        stride_lse_bs: int,
+        num_kv_splits: int,
+        block_dv: int,
+        lv: int,
+    ) -> CompileKey:
+        input_variant = TritonPointerInputVariant.from_alignment(
+            mid=mid_aligned,
+            output=output_aligned,
+            lse=lse_aligned,
+        )
+        return self.CompileKey(
+            mid_dtype=mid_dtype,
+            output_dtype=output_dtype,
+            input_variant=input_variant,
+            stride_mid_ob=stride_mid_ob,
+            stride_mid_oh=stride_mid_oh,
+            stride_mid_os=stride_mid_os,
+            stride_obs=stride_obs,
+            stride_oh=stride_oh,
+            stride_lse_bs=stride_lse_bs,
+            NUM_KV_SPLITS=num_kv_splits,
+            BLOCK_DV=block_dv,
+            Lv=lv,
+            OUTPUT_FP16=1 if output_dtype == torch.float16 else 0,
+        )
+
+    def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
+        if not str(vllm_config.cache_config.cache_dtype).startswith("turboquant_"):
+            return []
+        model_config = vllm_config.model_config
+        parallel_config = vllm_config.parallel_config
+        num_heads = model_config.get_num_attention_heads(parallel_config)
+        head_dim = model_config.get_head_size()
+        num_splits = vllm_config.attention_config.tq_max_kv_splits_for_cuda_graph
+        return self._trace_dispatch(self.dispatch)(
+            mid_dtype=torch.float32,
+            output_dtype=model_config.dtype,
+            mid_aligned=True,
+            output_aligned=True,
+            lse_aligned=True,
+            stride_mid_ob=num_heads * num_splits * (head_dim + 1),
+            stride_mid_oh=num_splits * (head_dim + 1),
+            stride_mid_os=head_dim + 1,
+            stride_obs=num_heads * head_dim,
+            stride_oh=head_dim,
+            stride_lse_bs=num_heads,
+            num_kv_splits=num_splits,
+            block_dv=triton.next_power_of_2(head_dim),
+            lv=head_dim,
+        )
+
+    def compile(self, compile_key: CompileKey) -> None:
+        variant = compile_key.input_variant
+        self.kernel.warmup(
+            variant.pointer("mid", compile_key.mid_dtype),
+            variant.pointer("output", compile_key.output_dtype),
+            variant.pointer("lse", torch.float32),
+            TritonWarmupTensor(torch.int32),
+            compile_key.stride_mid_ob,
+            compile_key.stride_mid_oh,
+            compile_key.stride_mid_os,
+            compile_key.stride_obs,
+            compile_key.stride_oh,
+            compile_key.stride_lse_bs,
+            NUM_KV_SPLITS=compile_key.NUM_KV_SPLITS,
+            BLOCK_DV=compile_key.BLOCK_DV,
+            Lv=compile_key.Lv,
+            OUTPUT_FP16=compile_key.OUTPUT_FP16,
+            num_warps=4,
+            num_stages=2,
+            grid=(1, 1),
+        )
+
+    def __call__(
+        self,
+        mid_o: torch.Tensor,
+        output: torch.Tensor,
+        lse: torch.Tensor,
+        seq_lens: torch.Tensor,
+        *,
+        num_kv_splits: int,
+        block_dv: int,
+        lv: int,
+    ) -> None:
+        key = self.dispatch(
+            mid_dtype=mid_o.dtype,
+            output_dtype=output.dtype,
+            mid_aligned=mid_o.data_ptr() % 16 == 0,
+            output_aligned=output.data_ptr() % 16 == 0,
+            lse_aligned=lse.data_ptr() % 16 == 0,
+            stride_mid_ob=mid_o.stride(0),
+            stride_mid_oh=mid_o.stride(1),
+            stride_mid_os=mid_o.stride(2),
+            stride_obs=output.stride(0),
+            stride_oh=output.stride(1),
+            stride_lse_bs=lse.stride(0),
+            num_kv_splits=num_kv_splits,
+            block_dv=block_dv,
+            lv=lv,
+        )
+        self.kernel[(mid_o.size(0), mid_o.size(1))](
+            mid_o,
+            output,
+            lse,
+            seq_lens,
+            key.stride_mid_ob,
+            key.stride_mid_oh,
+            key.stride_mid_os,
+            key.stride_obs,
+            key.stride_oh,
+            key.stride_lse_bs,
+            NUM_KV_SPLITS=key.NUM_KV_SPLITS,
+            BLOCK_DV=key.BLOCK_DV,
+            Lv=key.Lv,
+            OUTPUT_FP16=key.OUTPUT_FP16,
+            num_warps=4,
+            num_stages=2,
+        )
+
+
+_DECODE_STAGE2_KERNEL = DecodeStage2Kernel()
 
 
 def _decode_softmax_reducev_fwd(

@@ -67,6 +67,12 @@ SecondaryTierFactory.register_tier(
 )
 
 SecondaryTierFactory.register_tier(
+    "p2p",
+    "vllm.v1.kv_offload.tiering.p2p.manager",
+    "P2PSecondaryTierManager",
+)
+
+SecondaryTierFactory.register_tier(
     "obj",
     "vllm.v1.kv_offload.tiering.obj.manager",
     "ObjectStoreSecondaryTierManager",

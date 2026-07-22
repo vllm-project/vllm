@@ -11,6 +11,7 @@ from tests.kernels.quant_utils import (
     native_per_token_group_quant_fp8,
     native_w8a8_block_matmul,
 )
+from tests.kernels.utils import fp8_ulp_distance
 from vllm.config import VllmConfig
 from vllm.model_executor.kernels.linear.scaled_mm.cutlass import cutlass_scaled_mm
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
@@ -93,7 +94,24 @@ def test_per_token_group_quant_fp8(
         tma_aligned_scales=tma_aligned_scales,
     )
 
-    assert torch.allclose(out.to(torch.float32), ref_out.to(torch.float32), rtol=0.15)
+    if current_platform.is_rocm():
+        # On gfx950 the Triton and PyTorch FP8 kernels can round in opposite
+        # directions when an element lands at the midpoint between two adjacent
+        # e4m3fn values (1-ULP tie-breaking). Verify: (1) no element is more
+        # than 1 FP8 ULP away, and (2) fewer than 0.05% of elements have any
+        # mismatch. Observed worst case across all parameter combos: 0.049%,
+        # max ULP = 1.
+        ulp = fp8_ulp_distance(out, ref_out)
+        assert (ulp <= 1).all(), (
+            f"FP8 mismatch > 1 ULP: {int((ulp > 1).sum())} elements"
+        )
+        assert float((ulp > 0).float().mean()) < 5e-4, (
+            f"Too many 1-ULP mismatches: {int((ulp > 0).sum())}/{ulp.numel()}"
+        )
+    else:
+        assert torch.allclose(
+            out.to(torch.float32), ref_out.to(torch.float32), rtol=0.15
+        )
     assert torch.allclose(scale, ref_scale)
 
     if column_major_scales:
