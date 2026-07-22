@@ -103,8 +103,7 @@ def _dump_engine_execution_context(
     scheduler_stats: SchedulerStats | None,
 ):
     logger.error(
-        "Dumping input data for V1 LLM engine (v%s, reason=%s) "
-        "with config: %s, ",
+        "Dumping input data for V1 LLM engine (v%s, reason=%s) with config: %s, ",
         VLLM_VERSION,
         reason,
         config,

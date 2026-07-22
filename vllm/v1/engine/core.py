@@ -615,9 +615,7 @@ class EngineCore:
             ):
                 model_output = future.result()
             if model_output is None:
-                with self.dump_on_slow_execution(
-                    scheduler_output, SAMPLE_TOKENS_STAGE
-                ):
+                with self.dump_on_slow_execution(scheduler_output, SAMPLE_TOKENS_STAGE):
                     model_output = self.model_executor.sample_tokens(grammar_output)
 
         # Before processing the model output, process any aborts that happened
