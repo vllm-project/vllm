@@ -1684,6 +1684,52 @@ def test_lookup_full_hit_reuses_existing_boundary():
     assert worker.store.batch_is_exist.call_count == 1
 
 
+def test_lookup_full_hit_with_eagle_pops_once_not_twice():
+    """Eagle already leaves the last block for the drafter, so a
+    full-prompt re-derivation must never fire for eagle-governed hits:
+    firing would anchor the search one block lower and pop a second
+    block, regressing the hit by an extra producer boundary."""
+    worker = _make_bare_worker(block_size=16)
+    worker.coord = mooncake_store_worker.MooncakeStoreCoordinator(
+        worker._kv_cache_groups,
+        scheduler_block_size=16,
+        hash_block_size=16,
+        use_eagle=True,
+    )
+    worker.store.batch_is_exist.return_value = [1, 1, 1, 1]
+
+    # 64-token exact-multiple prompt, all 4 blocks stored: one eagle pop
+    # gives 48; a spurious re-derivation (anchored at 48) would pop again
+    # and return 32.
+    assert worker.lookup(64, [b"h0", b"h1", b"h2", b"h3"]) == 48
+    assert worker.store.batch_is_exist.call_count == 1
+
+
+def test_lookup_full_hit_swa_degrades_when_no_stored_boundary_is_usable():
+    """The motivating livelock: the producer of a 64-token prompt stored
+    only its SWA tail window (blocks 2-3). The old arithmetic clamp turned
+    the full hit into 48, whose SWA window needs the never-written block 1,
+    so every load failed and the recompute re-entered the same lookup. The
+    re-derivation must report that no stored boundary below the request end
+    is usable."""
+    from vllm.v1.kv_cache_interface import KVCacheGroupSpec, SlidingWindowSpec
+
+    worker = _make_bare_worker(block_size=16)
+    swa = SlidingWindowSpec(
+        block_size=16, num_kv_heads=8, head_size=64, dtype=None, sliding_window=32
+    )
+    worker._kv_cache_groups = [KVCacheGroupSpec(["layer0"], swa)]
+    worker.coord = mooncake_store_worker.MooncakeStoreCoordinator(
+        worker._kv_cache_groups,
+        scheduler_block_size=worker.hash_block_size,
+        hash_block_size=worker.hash_block_size,
+    )
+    worker.store.batch_is_exist.return_value = [0, 0, 1, 1]
+
+    assert worker.lookup(64, [b"h0", b"h1", b"h2", b"h3"]) == 0
+    assert worker.store.batch_is_exist.call_count == 1
+
+
 def test_lookup_swa_single_group_returns_full_when_tail_window_present():
     """Single-SWA, sliding_window=32 (= 2 blocks): producer stored only the
     tail. Coordinator-driven lookup returns full prefix even though the
