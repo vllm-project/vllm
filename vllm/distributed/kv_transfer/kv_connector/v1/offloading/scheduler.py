@@ -348,7 +348,10 @@ class RequestOffloadState:
         is_decoding = num_offloadable_tokens > self.req.num_prompt_tokens
         if group_config.is_eagle_group and is_decoding:
             num_chunks = max(0, num_chunks - 1)
-        return num_chunks
+        num_allocated_chunks = (
+            len(group_state.block_ids) // self.config.blocks_per_chunk
+        )
+        return min(num_chunks, num_allocated_chunks)
 
     def advance_stored_idx(self, num_offloadable_tokens: int) -> None:
         # max(): at the prefill->decode transition of a chunk-aligned prompt,
@@ -927,7 +930,6 @@ class OffloadingConnectorScheduler:
             if preempted:
                 for group_state in req_status.group_states:
                     group_state.block_ids.clear()
-                    group_state.offload_keys.clear()
             else:
                 req_status.update_offload_keys()
 
@@ -979,15 +981,18 @@ class OffloadingConnectorScheduler:
                 continue
             req = req_status.req
 
-            if req.status == RequestStatus.FINISHED_ABORTED:
-                # For aborted requests, only store chunks with actual KV data
-                # (num_computed_tokens), not the entire prompt (num_tokens).
-                num_tokens_after_batch = req.num_computed_tokens
-            elif req.is_finished():
-                # For other finished requests (EOS, etc.), use num_tokens to
-                # handle the case where num_computed_tokens hasn't been updated
-                # yet due to scheduling delay.
+            if req.status in (
+                RequestStatus.FINISHED_STOPPED,
+                RequestStatus.FINISHED_LENGTH_CAPPED,
+                RequestStatus.FINISHED_REPETITION,
+            ):
+                # Normal termination: use num_tokens to handle scheduling
+                # delay with async scheduling.
                 num_tokens_after_batch = req.num_tokens
+            elif req.is_finished():
+                # Abnormal termination (abort/error): store all computed KV data.
+                # num_computed_tokens represents actual computed tokens.
+                num_tokens_after_batch = req.num_computed_tokens
             else:
                 num_scheduled_tokens = scheduler_output.num_scheduled_tokens[req_id]
                 num_tokens_after_batch = req.num_computed_tokens + num_scheduled_tokens
@@ -1342,10 +1347,7 @@ class OffloadingConnectorScheduler:
 
         # Update offload keys with final block hash so _build_store_jobs can
         # create store jobs for the last block(s) on the next schedule step.
-        # Only update if the request was actually scheduled (has GPU blocks),
-        # otherwise we'd populate offload_keys without corresponding block_ids.
-        if any(gs.block_ids for gs in req_status.group_states):
-            req_status.update_offload_keys()
+        req_status.update_offload_keys()
 
         # Keep req_status alive: _build_store_jobs will process finished_req_ids
         # on the next step and handle cleanup after creating store jobs.
