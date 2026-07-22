@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any, ClassVar
 import numpy as np
 
 from vllm.v1.kv_offload.base import (
+    Locality,
     LookupResult,
     Medium,
     OffloadingEvent,
@@ -128,6 +129,7 @@ class SecondaryTierManager(ABC):
         self._offloading_spec = offloading_spec
         self._primary_kv_view: memoryview = primary_kv_view
         self.tier_type = tier_type
+        self.locality: Locality | None = None
 
     @abstractmethod
     def lookup(self, key: OffloadKey, req_context: ReqContext) -> LookupResult:
