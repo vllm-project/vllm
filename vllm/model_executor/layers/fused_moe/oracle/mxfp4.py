@@ -1574,6 +1574,21 @@ def convert_weight_to_mxfp4_moe_kernel_format(
             w13_bias,
             w2_bias,
         )
+    elif mxfp4_backend in (
+        Mxfp4MoeBackend.AITER_MXFP4_MXFP4,
+        Mxfp4MoeBackend.AITER_MXFP4_FP8,
+    ):
+        return convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
+            mxfp4_backend=mxfp4_backend,
+            layer=layer,
+            w13_weight=w13_weight,
+            w2_weight=w2_weight,
+            w13_weight_scale=w13_weight_scale,
+            w2_weight_scale=w2_weight_scale,
+            w13_bias=w13_bias,
+            w2_bias=w2_bias,
+            _cache_permute_indices=_cache_permute_indices,
+        )
     else:
         raise ValueError(
             f"Unsupported mxfp4_backend for Mxfp4MoEMethod: {mxfp4_backend}. "
