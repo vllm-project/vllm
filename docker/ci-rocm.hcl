@@ -59,7 +59,7 @@ variable "PYTORCH_ROCM_ARCH" {
 }
 
 # Pre-built CI base image (Tier 1). Per-PR builds pull this instead of
-# rebuilding RIXL/DeepEP/torchcodec from scratch. The ci_base stage in
+# rebuilding NIXL/DeepEP/torchcodec from scratch. The ci_base stage in
 # Dockerfile.rocm inherits from base, so CI_BASE_IMAGE only affects the test
 # stage and is irrelevant when building --target ci_base itself.
 variable "CI_BASE_IMAGE" {
@@ -75,7 +75,7 @@ variable "CI_MAX_JOBS" {
 # Upstream dependency commit pins -- extracted from Dockerfile.rocm by
 # ci-bake-rocm.sh at build time. Empty defaults are safe: the cache
 # functions produce no entries when the variable is empty.
-variable "RIXL_BRANCH" {
+variable "NIXL_BRANCH" {
   default = ""
 }
 
@@ -91,7 +91,7 @@ variable "DEEPEP_BRANCH" {
   default = ""
 }
 
-variable "RIXL_CACHE_KEY" {
+variable "NIXL_CACHE_KEY" {
   default = ""
 }
 
@@ -236,7 +236,7 @@ function "get_cache_to_rocm_rust" {
   ])
 }
 
-# Cache functions for upstream dependency stages (RIXL/UCX, ROCShmem, DeepEP).
+# Cache functions for upstream dependency stages (NIXL/UCX, ROCShmem, DeepEP).
 # These stages are pinned to specific upstream commit hashes, so cache keys use
 # those hashes rather than the Buildkite commit. This means the cache persists
 # across all vLLM commits as long as the upstream dependency pins don't change.
@@ -244,16 +244,16 @@ function "get_cache_to_rocm_rust" {
 function "get_cache_from_rocm_deps" {
   params = []
   result = compact([
-    RIXL_CACHE_KEY != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:rixl-rocm-${RIXL_CACHE_KEY}" : (RIXL_BRANCH != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:rixl-rocm-${RIXL_BRANCH}-ucx-${UCX_BRANCH}" : ""),
+    NIXL_CACHE_KEY != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:nixl-rocm-${NIXL_CACHE_KEY}" : (NIXL_BRANCH != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:nixl-rocm-${NIXL_BRANCH}-ucx-${UCX_BRANCH}" : ""),
     ROCSHMEM_CACHE_KEY != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:rocshmem-rocm-${ROCSHMEM_CACHE_KEY}" : (ROCSHMEM_BRANCH != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:rocshmem-rocm-${ROCSHMEM_BRANCH}" : ""),
     DEEPEP_CACHE_KEY != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:deepep-rocm-${DEEPEP_CACHE_KEY}" : (DEEPEP_BRANCH != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:deepep-rocm-${DEEPEP_BRANCH}-rocshmem-${ROCSHMEM_BRANCH}" : ""),
   ])
 }
 
-function "get_cache_to_rocm_rixl" {
+function "get_cache_to_rocm_nixl" {
   params = []
   result = compact([
-    RIXL_CACHE_KEY != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:rixl-rocm-${RIXL_CACHE_KEY},mode=min" : (RIXL_BRANCH != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:rixl-rocm-${RIXL_BRANCH}-ucx-${UCX_BRANCH},mode=min" : ""),
+    NIXL_CACHE_KEY != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:nixl-rocm-${NIXL_CACHE_KEY},mode=min" : (NIXL_BRANCH != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:nixl-rocm-${NIXL_BRANCH}-ucx-${UCX_BRANCH},mode=min" : ""),
   ])
 }
 
@@ -372,11 +372,11 @@ variable "CI_BASE_IMAGE_TAG_STABLE" {
 # in the registry cache keyed by its upstream commit hash. When ci_base rebuilds
 # (e.g., requirements change), these stages are cache hits if their upstream
 # pins haven't changed -- saving ~35min of compilation.
-target "rixl-rocm-ci" {
+target "nixl-rocm-ci" {
   inherits   = ["_common-rocm", "_ci-rocm"]
-  target     = "build_rixl"
+  target     = "build_nixl"
   cache-from = get_cache_from_rocm_deps()
-  cache-to   = get_cache_to_rocm_rixl()
+  cache-to   = get_cache_to_rocm_nixl()
   output     = ["type=cacheonly"]
 }
 
@@ -396,7 +396,7 @@ target "deepep-rocm-ci" {
   output     = ["type=cacheonly"]
 }
 
-# Builds only the ci_base stage (RIXL, DeepEP, torchcodec, etc.)
+# Builds only the ci_base stage (NIXL, DeepEP, torchcodec, etc.)
 # Invoked by the ensure-ci-base step when the content hash of ci_base-affecting
 # files drifts from the remote image label. Per-PR builds then pull the result
 # as CI_BASE_IMAGE instead of rebuilding those slow layers on every commit.
@@ -412,7 +412,7 @@ target "ci-base-rocm-ci" {
       CI_BASE_IMAGE_TAG_CONTENT_EXTRA != "" ? "type=registry,ref=${CI_BASE_IMAGE_TAG_CONTENT_EXTRA}" : "",
       CI_BASE_IMAGE_TAG_STABLE != "" ? "type=registry,ref=${CI_BASE_IMAGE_TAG_STABLE}" : "",
     ]),
-    # Import upstream dependency caches so RIXL/ROCShmem/DeepEP stages
+    # Import upstream dependency caches so NIXL/ROCShmem/DeepEP stages
     # are cache hits even when ci_base itself needs rebuilding.
     get_cache_from_rocm_deps(),
   )
@@ -424,5 +424,5 @@ target "ci-base-rocm-ci" {
 # Group for ci_base builds -- exports dependency stage caches alongside the
 # ci_base image so future rebuilds can reuse them independently.
 group "ci-base-rocm-ci-with-deps" {
-  targets = ["rixl-rocm-ci", "rocshmem-rocm-ci", "deepep-rocm-ci", "ci-base-rocm-ci"]
+  targets = ["nixl-rocm-ci", "rocshmem-rocm-ci", "deepep-rocm-ci", "ci-base-rocm-ci"]
 }

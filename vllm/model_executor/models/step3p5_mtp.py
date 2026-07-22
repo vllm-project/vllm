@@ -15,6 +15,9 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
+from vllm.model_executor.model_loader.mtp_validation import (
+    is_mtp_completeness_check_enabled,
+)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.sequence import IntermediateTensors
 
@@ -283,7 +286,7 @@ class Step3p5MTP(nn.Module):
             and getattr(param, "requires_grad", False) is False
         }
         params_need_to_load -= optional_params
-        if params_need_to_load != loaded_params:
+        if params_need_to_load != loaded_params and is_mtp_completeness_check_enabled():
             missing_params = list(params_need_to_load - loaded_params)
             param_name_example = missing_params[0]
             raise RuntimeError(
