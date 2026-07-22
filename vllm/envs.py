@@ -121,6 +121,7 @@ if TYPE_CHECKING:
     VLLM_ALLOW_RUNTIME_LORA_UPDATING: bool = False
     VLLM_SKIP_P2P_CHECK: bool = False
     VLLM_DISABLED_KERNELS: list[str] = []
+    VLLM_HW_AGNOSTIC_LAYERS: list[str] = []
     VLLM_ENABLE_FLA_PACKED_RECURRENT_DECODE: bool = True
     VLLM_DISABLE_PYNCCL: bool = False
     VLLM_USE_OINK_OPS: bool = False
@@ -1160,6 +1161,15 @@ environment_variables: dict[str, Callable[[], Any]] = {
         []
         if "VLLM_DISABLED_KERNELS" not in os.environ
         else os.environ["VLLM_DISABLED_KERNELS"].split(",")
+    ),
+    # Selects which layers the Transformers modeling backend routes to the
+    # hw-agnostic implementations instead of vLLM's. Same +name/-name/all/none
+    # grammar as CompilationConfig.custom_ops, e.g. "+rms_norm,-silu_and_mul".
+    # Empty (the default) means all layers use vLLM's implementation.
+    "VLLM_HW_AGNOSTIC_LAYERS": lambda: (
+        []
+        if "VLLM_HW_AGNOSTIC_LAYERS" not in os.environ
+        else os.environ["VLLM_HW_AGNOSTIC_LAYERS"].split(",")
     ),
     "VLLM_ENABLE_FLA_PACKED_RECURRENT_DECODE": lambda: bool(
         int(os.getenv("VLLM_ENABLE_FLA_PACKED_RECURRENT_DECODE", "1"))
