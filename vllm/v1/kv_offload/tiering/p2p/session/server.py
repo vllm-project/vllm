@@ -256,6 +256,9 @@ class ServerRole:
         # ``parent.on_request_finished`` in ``serve_external_requests``.
         self._finished_lookup_ctxs: list[ReqContext] = []
         self._lookup_id_counter: int = 0
+        # kv_request_ids with a parked abort awaiting drain — work-list so
+        # drain_pending_aborts doesn't scan every request each poll tick.
+        self._parked_aborts: set[str] = set()
 
     # ------------------------------------------------------------------
     # State helpers
@@ -385,6 +388,7 @@ class ServerRole:
         st = self._get_or_create_request(kv_request_id)
         if st.abort_started_at is None:
             st.abort_started_at = time.monotonic()
+            self._parked_aborts.add(kv_request_id)
         self._drain_abort(kv_request_id)
 
     def on_lookup(
@@ -807,12 +811,7 @@ class ServerRole:
 
     def drain_pending_aborts(self) -> None:
         """Re-attempt every parked abort once per poll tick."""
-        ids = [
-            kv_request_id
-            for kv_request_id, st in self._requests.items()
-            if st.abort_started_at is not None
-        ]
-        for kv_request_id in ids:
+        for kv_request_id in list(self._parked_aborts):
             self._drain_abort(kv_request_id)
 
     def close(self) -> tuple[list[int], list[ReqContext]]:
@@ -840,6 +839,7 @@ class ServerRole:
         failed_serves.extend(self._finished_lookup_ctxs)
         self._requests.clear()
         self._serve_pending.clear()
+        self._parked_aborts.clear()
         self._finished_lookup_ctxs.clear()
         return failed_stores, failed_serves
 
@@ -982,6 +982,7 @@ class ServerRole:
     def _finalize_abort(self, kv_request_id: str) -> None:
         st = self._requests[kv_request_id]
         st.abort_started_at = None
+        self._parked_aborts.discard(kv_request_id)
         self._send(
             {
                 TYPE_KEY: AbortAckMsg.TYPE,
