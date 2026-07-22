@@ -711,10 +711,10 @@ class Scheduler(SchedulerInterface):
                 if request.num_computed_tokens == 0:
                     did_prefix_cache_lookup = True
                     hit_diverged = False
-                    # Get locally-cached tokens. A KV connector transfers the
-                    # missing suffix, which needs a hybrid-aware lookup that can
-                    # diverge across groups (see get_computed_blocks_for_connector).
+                    # Get locally-cached tokens.
                     if self.connector is not None:
+                        # A KV connector transfers the missing suffix, which needs a
+                        # hybrid-aware lookup that can diverge across groups.
                         (
                             new_computed_blocks,
                             num_new_local_computed_tokens,
