@@ -152,7 +152,7 @@ def _fp8_paged_mqa_logits_kernel(
     tl.store(
         logits_ptr + token_id * stride_l_t + k_offset * stride_l_n,
         out,
-        mask=mask_n,
+        mask=mask_n & (k_offset < context_len),
     )
 
 
