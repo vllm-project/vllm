@@ -4,8 +4,10 @@
 import pytest
 
 from vllm.entrypoints.openai.engine.protocol import StreamOptions
+from vllm.entrypoints.openai.models.serving import LoRAModulePath
 from vllm.entrypoints.serve.utils.api_utils import (
     get_max_tokens,
+    process_lora_modules,
     sanitize_message,
     should_include_usage,
 )
@@ -164,3 +166,25 @@ class TestSanitizeMessageFilePaths:
         result = sanitize_message(msg)
         assert "0x" not in result
         assert "/usr/local/" not in result
+
+
+def test_process_lora_modules_deduplicates_default_mm_lora_paths():
+    shared_path = "/models/phi4/speech-lora"
+    args_lora_modules = [LoRAModulePath(name="speech", path=shared_path)]
+    default_mm_loras = {"audio": shared_path}
+
+    lora_modules = process_lora_modules(args_lora_modules, default_mm_loras)
+
+    assert lora_modules == args_lora_modules
+
+
+def test_process_lora_modules_keeps_distinct_default_mm_lora_paths():
+    args_lora_modules = [LoRAModulePath(name="speech", path="/models/phi4/speech-lora")]
+    default_mm_loras = {"image": "/models/phi4/vision-lora"}
+
+    lora_modules = process_lora_modules(args_lora_modules, default_mm_loras)
+
+    assert lora_modules == [
+        LoRAModulePath(name="speech", path="/models/phi4/speech-lora"),
+        LoRAModulePath(name="image", path="/models/phi4/vision-lora"),
+    ]

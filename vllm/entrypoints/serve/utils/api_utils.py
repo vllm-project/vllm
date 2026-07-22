@@ -305,7 +305,12 @@ def process_lora_modules(
         if args_lora_modules is None:
             lora_modules = default_mm_lora_paths
         else:
-            lora_modules += default_mm_lora_paths
+            existing_paths = {module.path for module in args_lora_modules}
+            lora_modules = list(args_lora_modules)
+            for module in default_mm_lora_paths:
+                if module.path not in existing_paths:
+                    lora_modules.append(module)
+                    existing_paths.add(module.path)
     return lora_modules
 
 

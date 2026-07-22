@@ -10,6 +10,7 @@ from huggingface_hub import snapshot_download
 
 from tests.conftest import AudioTestAssets
 from tests.utils import RemoteOpenAIServer
+from vllm.platforms import current_platform
 
 # NOTE - the tests in this module are currently analogous to test_chat, but are
 # separated to avoid OOM killing due to module-scoped servers, since we
@@ -33,8 +34,6 @@ def multimodal_server():
         "--enforce-eager",
         # lora config below
         "--enable-lora",
-        "--lora-modules",
-        f"speech={AUDIO_LORA_PATH}",
         "--max-lora-rank",
         "320",
         "--max-num-seqs",
@@ -44,10 +43,16 @@ def multimodal_server():
         "0.8",
         "--default-mm-loras",
         f'{{"audio": "{AUDIO_LORA_PATH}"}}',
+        # Audio-only test: skip image warmup to reduce server startup time.
+        "--limit-mm-per-prompt",
+        '{"image": 0}',
     ]
 
+    # ROCm CI needs extra startup margin for Phi-4 multimodal + LoRA loading.
+    max_wait_seconds = 900 if current_platform.is_rocm() else 480
+
     with RemoteOpenAIServer(
-        MULTIMODAL_MODEL_NAME, args, max_wait_seconds=480
+        MULTIMODAL_MODEL_NAME, args, max_wait_seconds=max_wait_seconds
     ) as remote_server:
         yield remote_server
 
@@ -62,7 +67,7 @@ async def multi_modal_client(multimodal_server):
 @pytest.mark.parametrize(
     # base model with default lora should give the same response as lora model
     "model_name",
-    [MULTIMODAL_MODEL_NAME, "speech"],
+    [MULTIMODAL_MODEL_NAME, "audio"],
 )
 async def test_default_mm_lora_chat_completions(
     model_name: str,

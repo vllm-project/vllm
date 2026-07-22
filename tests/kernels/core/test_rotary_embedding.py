@@ -7,8 +7,15 @@ Tests for miscellaneous utilities
 import pytest
 import torch
 
-from tests.kernels.utils import opcheck
+from tests.kernels.utils import (
+    ALL_OPCHECK_TEST_UTILS,
+    DEFAULT_OPCHECK_TEST_UTILS,
+    opcheck,
+)
 from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
+from vllm.platforms import current_platform
+
+pytestmark = pytest.mark.skip_global_cleanup
 
 
 def rotary_embedding_opcheck(
@@ -19,11 +26,18 @@ def rotary_embedding_opcheck(
 ):
     cos_sin_cache = rot.cos_sin_cache.to(query.device, dtype=query.dtype)
 
+    test_utils = (
+        DEFAULT_OPCHECK_TEST_UTILS
+        if current_platform.is_rocm()
+        else ALL_OPCHECK_TEST_UTILS
+    )
+
     # ops.rotary_embedding() is a in-place operation
     # that updates the query and key tensors.
     opcheck(
         torch.ops._C.rotary_embedding,
         (positions, query, key, rot.head_size, cos_sin_cache, rot.is_neox_style),
+        test_utils=test_utils,
     )
 
 
