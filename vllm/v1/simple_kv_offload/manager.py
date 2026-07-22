@@ -117,12 +117,13 @@ class SimpleCPUOffloadScheduler:
             "lazy" if lazy_offload else "eager",
         )
 
-        # TODO (yifan): maybe need to enable kv_cache_events and metrics_collector here.
+        spec_config = vllm_config.speculative_config
+        use_eagle = spec_config is not None and spec_config.use_eagle()
         self.cpu_coordinator: KVCacheCoordinator = get_kv_cache_coordinator(
             kv_cache_config=self.cpu_kv_cache_config,
             max_model_len=vllm_config.model_config.max_model_len,
             max_in_flight_tokens=vllm_config.max_in_flight_tokens,
-            use_eagle=False,
+            use_eagle=use_eagle,
             enable_caching=True,
             enable_kv_cache_events=self.enable_kv_cache_events,
             dcp_world_size=dcp_world_size,
@@ -131,7 +132,6 @@ class SimpleCPUOffloadScheduler:
             hash_block_size=self.hash_block_size,
         )
         self.cpu_block_pool: BlockPool = self.cpu_coordinator.block_pool
-
         # GPU block pool reference - bound after scheduler builds kv_cache_manager
         self._gpu_block_pool: BlockPool | None = None
 
