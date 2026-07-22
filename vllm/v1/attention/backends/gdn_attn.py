@@ -194,12 +194,13 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         # Cached decode kernel: persistent per-decode-row write position and
         # flush flag. write_pos is derived per request each step so recycled
         # paged blocks need no zero-init.
-        self.use_cached_kernel: bool = vllm_config.cache_config.use_replayssm
-        self.max_cache_len: int = vllm_config.cache_config.replayssm_buffer_len
-        if (
-            self.use_cached_kernel
-            and vllm_config.mamba_config.enable_stochastic_rounding
-        ):
+        self.use_replayssm: bool = vllm_config.cache_config.use_replayssm
+        self.replayssm_buffer_len: int | None = (
+            vllm_config.cache_config.replayssm_buffer_len
+            if self.use_replayssm
+            else None
+        )
+        if self.use_replayssm and vllm_config.mamba_config.enable_stochastic_rounding:
             # The GDN cached decode kernel does not implement stochastic
             # rounding yet (planned in the CuteDSL follow-up).
             raise ValueError(
@@ -207,7 +208,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                 "is not supported for GDN models yet; use fp32 SSM state or drop "
                 "stochastic rounding."
             )
-        if self.use_cached_kernel:
+        if self.use_replayssm:
             self.decode_write_pos_d: torch.Tensor = torch.empty(
                 (self.decode_cudagraph_max_bs,),
                 dtype=torch.int32,
@@ -521,12 +522,12 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         )
 
         # Cached decode kernel: write_pos = decode steps since the ring's last
-        # full-state write, mod max_cache_len. decode_base re-anchors after
+        # full-state write, mod replayssm_buffer_len. decode_base re-anchors after
         # preemption; in align mode it also re-anchors at each block start so the
         # ring restarts empty per block. is_flush is a kernel input, not derived.
         write_pos_d = None
         is_flush_d = None
-        if self.use_cached_kernel and spec_sequence_masks is None and num_decodes > 0:
+        if self.use_replayssm and spec_sequence_masks is None and num_decodes > 0:
             decode_base_cpu = m.replayssm_decode_base_cpu
             num_computed_tokens_cpu = m._num_computed_tokens_cpu
             if decode_base_cpu is None or num_computed_tokens_cpu is None:
@@ -558,8 +559,11 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                 decode_steps_cpu,
                 torch.zeros_like(decode_steps_cpu),
             )
-            write_pos_cpu = torch.remainder(decode_steps_cpu, self.max_cache_len)
-            is_flush_cpu = (write_pos_cpu == self.max_cache_len - 1) | leftover_prompt
+            assert self.replayssm_buffer_len is not None
+            write_pos_cpu = torch.remainder(decode_steps_cpu, self.replayssm_buffer_len)
+            is_flush_cpu = (
+                write_pos_cpu == self.replayssm_buffer_len - 1
+            ) | leftover_prompt
             if align_mode:
                 # Force a flush on the step completing a block so the boundary
                 # state is materialized for prefix caching.
@@ -642,7 +646,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             non_spec_query_start_loc = self.non_spec_query_start_loc[: batch_size + 1]
             non_spec_query_start_loc[num_decodes + 1 :].fill_(non_spec_num_query_tokens)
 
-            if self.use_cached_kernel:
+            if self.use_replayssm:
                 assert write_pos_d is not None and is_flush_d is not None
                 self.decode_write_pos_d[:num_decodes].copy_(
                     write_pos_d, non_blocking=True
