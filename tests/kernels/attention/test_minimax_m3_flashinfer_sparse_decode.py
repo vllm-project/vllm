@@ -27,10 +27,9 @@ SM_SCALE = HEAD_DIM**-0.5
 
 
 def _build_decode_inputs(
-    seq_lens_list: tuple[int, ...], kv_layout: str, decode_query_len: int = 1
+    seq_lens_list: tuple[int, ...], kv_layout: str
 ) -> tuple[torch.Tensor, ...]:
     batch = len(seq_lens_list)
-    num_query_tokens = batch * decode_query_len
     pages_per_req = [
         (seq_len + PAGE_SIZE - 1) // PAGE_SIZE for seq_len in seq_lens_list
     ]
@@ -54,30 +53,27 @@ def _build_decode_inputs(
     seq_lens.copy_(torch.tensor(seq_lens_list, device="cuda", dtype=torch.int32))
 
     topk_storage = torch.full(
-        (num_query_tokens, NUM_KV_HEADS, TOPK),
+        (batch, NUM_KV_HEADS, TOPK),
         -1,
         device="cuda",
         dtype=torch.int32,
     )
     topk = topk_storage.transpose(0, 1)
-    for request, request_seq_len in enumerate(seq_lens_list):
-        for local_q in range(decode_query_len):
-            seq_len = request_seq_len - decode_query_len + local_q + 1
-            if seq_len <= 0:
-                continue
-            tail_page = (seq_len - 1) // PAGE_SIZE
-            older_pages = torch.randperm(tail_page, device="cuda", dtype=torch.int32)[
-                : TOPK - 1
-            ]
-            selected = torch.cat(
-                (
-                    older_pages,
-                    torch.tensor([tail_page], device="cuda", dtype=torch.int32),
-                )
+    for request, request_pages in enumerate(pages_per_req):
+        if request_pages == 0:
+            continue
+        tail_page = request_pages - 1
+        older_pages = torch.randperm(tail_page, device="cuda", dtype=torch.int32)[
+            : TOPK - 1
+        ]
+        selected = torch.cat(
+            (
+                older_pages,
+                torch.tensor([tail_page], device="cuda", dtype=torch.int32),
             )
-            selected = selected[torch.randperm(selected.numel(), device="cuda")]
-            token = request * decode_query_len + local_q
-            topk[:, token, : selected.numel()] = selected
+        )
+        selected = selected[torch.randperm(selected.numel(), device="cuda")]
+        topk[:, request, : selected.numel()] = selected
 
     physical_shape = (
         (num_pages, NUM_KV_HEADS, PAGE_SIZE, 2 * HEAD_DIM)
@@ -91,9 +87,7 @@ def _build_decode_inputs(
     )
     kv_cache = physical_kv if kv_layout == "HND" else physical_kv.permute(0, 2, 1, 3)
     query = torch.randn(
-        (num_query_tokens, NUM_Q_HEADS, HEAD_DIM),
-        device="cuda",
-        dtype=torch.bfloat16,
+        (batch, NUM_Q_HEADS, HEAD_DIM), device="cuda", dtype=torch.bfloat16
     )
     return query, kv_cache, topk, block_table, seq_lens
 
@@ -105,9 +99,8 @@ def _launch_metadata_adapter(
     *,
     num_physical_pages: int,
     k_scale: torch.Tensor,
-    decode_query_len: int = 1,
 ) -> tuple[torch.Tensor, ...]:
-    batch = topk.shape[1]
+    batch = seq_lens.shape[0]
     physical_pages = torch.empty(
         (NUM_KV_HEADS, batch, TOPK), device="cuda", dtype=torch.int32
     )
@@ -128,7 +121,6 @@ def _launch_metadata_adapter(
         metadata_status,
         bmm1_scale_log2,
         batch,
-        decode_query_len,
         block_table.shape[1],
         num_physical_pages,
         topk.stride(0),
@@ -210,32 +202,6 @@ def test_metadata_adapter_honors_strides_deduplicates_and_handles_padding():
         bmm1_scale_log2,
         k_scale * SM_SCALE * torch.log2(torch.tensor(torch.e, device="cuda")),
     )
-
-
-def test_metadata_adapter_maps_speculative_tokens_to_requests():
-    decode_query_len = 4
-    _, kv_cache, topk, block_table, seq_lens = _build_decode_inputs(
-        (130, 257, 0), "HND", decode_query_len
-    )
-    k_scale = torch.tensor([0.75], device="cuda", dtype=torch.float32)
-
-    _, sparse_lens, metadata_ok, status, _ = _launch_metadata_adapter(
-        topk,
-        block_table,
-        seq_lens,
-        num_physical_pages=kv_cache.shape[0],
-        k_scale=k_scale,
-        decode_query_len=decode_query_len,
-    )
-
-    expected_lens = torch.tensor(
-        [[127, 128, 129, 130, 254, 255, 256, 257, 0, 0, 0, 0]] * NUM_KV_HEADS,
-        device="cuda",
-        dtype=torch.int32,
-    )
-    assert torch.equal(sparse_lens, expected_lens)
-    assert torch.equal(metadata_ok, torch.ones_like(metadata_ok))
-    assert status.item() == 1
 
 
 def test_buffer_pool_uses_geometric_capacity_and_retains_graph_allocations():
@@ -331,13 +297,11 @@ def test_unavailable_api_falls_back_before_allocating(monkeypatch: pytest.Monkey
     assert runner._buffer_pools_by_device == {}
 
 
-@pytest.mark.parametrize("decode_query_len", [1, 4])
 def test_adapter_passes_padding_scales_and_reuses_buffers(
-    decode_query_len: int,
     monkeypatch: pytest.MonkeyPatch,
 ):
     query, kv_cache, topk, block_table, seq_lens = _build_decode_inputs(
-        (257, 130, 0), "NHD", decode_query_len
+        (257, 130, 0), "NHD"
     )
     output = torch.empty_like(query)
     k_scale = torch.tensor([0.75], device="cuda", dtype=torch.float32)
@@ -356,7 +320,6 @@ def test_adapter_passes_padding_scales_and_reuses_buffers(
             }
         )
         assert kwargs["enable_block_sparse_attention"]
-        assert kwargs["q_len_per_req"] == 1
         kwargs["out"].copy_(kwargs["query"])
 
     def counter_size(batch: int, num_heads: int, sm_count: int) -> int:
@@ -387,7 +350,7 @@ def test_adapter_passes_padding_scales_and_reuses_buffers(
             scale=SM_SCALE,
             block_size=PAGE_SIZE,
             topk_blocks=TOPK,
-            decode_query_len=decode_query_len,
+            decode_query_len=1,
             k_scale=k_scale,
             v_scale=v_scale,
         )
@@ -402,19 +365,13 @@ def test_adapter_passes_padding_scales_and_reuses_buffers(
     )
     assert calls[0]["physical_ptr"] == calls[1]["physical_ptr"]
     assert calls[0]["counter_ptr"] == calls[1]["counter_ptr"]
-    expected_capacity = 1 << (query.shape[0] - 1).bit_length()
-    assert pool.current is not None and pool.current.capacity == expected_capacity
+    assert pool.current is not None and pool.current.capacity == 4
     assert pool.retired == []
     torch.testing.assert_close(output, query)
 
 
-@pytest.mark.parametrize("decode_query_len", [1, 4])
-def test_adapter_is_cudagraph_replayable(
-    decode_query_len: int, monkeypatch: pytest.MonkeyPatch
-):
-    query, kv_cache, topk, block_table, seq_lens = _build_decode_inputs(
-        (257,), "HND", decode_query_len
-    )
+def test_adapter_is_cudagraph_replayable(monkeypatch: pytest.MonkeyPatch):
+    query, kv_cache, topk, block_table, seq_lens = _build_decode_inputs((257,), "HND")
     output = torch.empty_like(query)
 
     def run(**kwargs) -> None:
@@ -448,7 +405,7 @@ def test_adapter_is_cudagraph_replayable(
             scale=SM_SCALE,
             block_size=PAGE_SIZE,
             topk_blocks=TOPK,
-            decode_query_len=decode_query_len,
+            decode_query_len=1,
         )
     torch.accelerator.synchronize()
 
@@ -465,7 +422,7 @@ def test_adapter_is_cudagraph_replayable(
             scale=SM_SCALE,
             block_size=PAGE_SIZE,
             topk_blocks=TOPK,
-            decode_query_len=decode_query_len,
+            decode_query_len=1,
         )
 
     query.fill_(0.25)
@@ -493,25 +450,19 @@ def _require_real_flashinfer_sparse_decode() -> None:
 
 
 @pytest.mark.parametrize(
-    ("kv_layout", "batch", "seq_len", "decode_query_len"),
-    [
-        ("NHD", 32, 1000, 1),
-        ("HND", 1, 8191, 1),
-        ("NHD", 4, 257, 4),
-        ("HND", 2, 130, 2),
-    ],
+    ("kv_layout", "batch", "seq_len"),
+    [("NHD", 32, 1000), ("HND", 1, 8191)],
 )
 def test_real_flashinfer_sparse_decode_matches_triton_and_reuses_buffers(
     kv_layout: str,
     batch: int,
     seq_len: int,
-    decode_query_len: int,
     monkeypatch: pytest.MonkeyPatch,
 ):
     _require_real_flashinfer_sparse_decode()
     torch.manual_seed(0)
     query, kv_cache, topk, block_table, seq_lens = _build_decode_inputs(
-        (seq_len,) * batch, kv_layout, decode_query_len
+        (seq_len,) * batch, kv_layout
     )
     # The Triton oracle's page-table kernel assumes contiguous inner metadata.
     block_table = block_table.contiguous()
@@ -529,7 +480,7 @@ def test_real_flashinfer_sparse_decode_matches_triton_and_reuses_buffers(
         NUM_KV_HEADS,
         SM_SCALE,
         expected,
-        decode_query_len,
+        1,
         k_scale=k_scale,
         v_scale=v_scale,
     )
@@ -552,7 +503,7 @@ def test_real_flashinfer_sparse_decode_matches_triton_and_reuses_buffers(
             scale=SM_SCALE,
             block_size=PAGE_SIZE,
             topk_blocks=TOPK,
-            decode_query_len=decode_query_len,
+            decode_query_len=1,
             k_scale=k_scale,
             v_scale=v_scale,
         )
@@ -562,6 +513,5 @@ def test_real_flashinfer_sparse_decode_matches_triton_and_reuses_buffers(
     assert len(runner._buffer_pools_by_device) == 1
     pool = next(iter(runner._buffer_pools_by_device.values()))
     assert pool.current is not None
-    expected_capacity = 1 << (query.shape[0] - 1).bit_length()
-    assert pool.current.capacity == expected_capacity
+    assert pool.current.capacity == 1 << (batch - 1).bit_length()
     assert pool.retired == []

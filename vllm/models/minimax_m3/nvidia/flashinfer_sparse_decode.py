@@ -39,7 +39,7 @@ _api: _Api | None = None
 _api_checked = False
 
 
-@triton.jit(do_not_specialize=["batch_size", "decode_query_len", "max_logical_pages"])
+@triton.jit(do_not_specialize=["batch_size", "max_logical_pages"])
 def _prepare_sparse_metadata_kernel(
     topk_ptr,
     block_table_ptr,
@@ -51,7 +51,6 @@ def _prepare_sparse_metadata_kernel(
     metadata_status_ptr,
     bmm1_scale_log2_ptr,
     batch_size,
-    decode_query_len,
     max_logical_pages,
     num_physical_pages,
     stride_topk_h,
@@ -72,18 +71,15 @@ def _prepare_sparse_metadata_kernel(
 ):
     pid = tl.program_id(0)
     kv_head = pid // batch_size
-    token = pid - kv_head * batch_size
-    request = token // decode_query_len
-    local_q = token - request * decode_query_len
+    request = pid - kv_head * batch_size
     offsets = tl.arange(0, TOPK_SIZE)
     logical = tl.load(
         topk_ptr
         + kv_head * stride_topk_h
-        + token * stride_topk_b
+        + request * stride_topk_b
         + offsets * stride_topk_k
     ).to(tl.int32)
-    request_seq_len = tl.load(seq_lens_ptr + request * stride_seq_b).to(tl.int32)
-    seq_len = request_seq_len - decode_query_len + local_q + 1
+    seq_len = tl.load(seq_lens_ptr + request * stride_seq_b).to(tl.int32)
     valid_pages = (seq_len + PAGE_SIZE_VALUE - 1) // PAGE_SIZE_VALUE
     tail_page = valid_pages - 1
     valid = (logical >= 0) & (logical < valid_pages) & (logical < max_logical_pages)
@@ -104,7 +100,7 @@ def _prepare_sparse_metadata_kernel(
         tl.store(
             physical_pages_ptr
             + kv_head * stride_out_h
-            + token * stride_out_b
+            + request * stride_out_b
             + output_slot * stride_out_k,
             physical,
         )
@@ -114,7 +110,7 @@ def _prepare_sparse_metadata_kernel(
         count += has_value.to(tl.int32)
         remaining = tl.where(remaining == selected, sentinel, remaining)
 
-    is_padding = request_seq_len <= 0
+    is_padding = seq_len <= 0
     has_tail = tl.sum((valid & (logical == tail_page)).to(tl.int32), axis=0) > 0
     metadata_ok = is_padding | (
         has_tail & physical_ok & (count > 0) & (valid_pages <= max_logical_pages)
@@ -124,10 +120,10 @@ def _prepare_sparse_metadata_kernel(
     surviving_tokens = tl.where(is_padding, 0, surviving_tokens)
     surviving_tokens = tl.where(metadata_ok, surviving_tokens, 0)
     tl.store(
-        sparse_seq_lens_ptr + kv_head * stride_len_h + token * stride_len_b,
+        sparse_seq_lens_ptr + kv_head * stride_len_h + request * stride_len_b,
         surviving_tokens,
     )
-    tl.store(metadata_ok_ptr + kv_head * batch_size + token, metadata_ok)
+    tl.store(metadata_ok_ptr + kv_head * batch_size + request, metadata_ok)
     tl.atomic_and(metadata_status_ptr, metadata_ok.to(tl.int32))
 
     if HAS_KV_SCALE:
@@ -292,8 +288,8 @@ def _static_fallback_reason(
     k_scale: torch.Tensor | None,
     v_scale: torch.Tensor | None,
 ) -> str | None:
-    if decode_query_len <= 0:
-        return "decode query length is not positive"
+    if decode_query_len != 1:
+        return "decode query length is not one"
     if query.device.type != "cuda":
         return "query is not on CUDA"
     capability = torch.cuda.get_device_capability(query.device)
@@ -322,14 +318,13 @@ def _static_fallback_reason(
         or kv_cache.stride(-1) != 1
     ):
         return "KV cache shape or inner stride is unsupported"
-    batch = block_table.shape[0] if block_table.ndim == 2 else 0
-    num_query_tokens = query.shape[0]
+    batch = query.shape[0]
     if (
         output.shape != query.shape
         or output.dtype != query.dtype
-        or num_query_tokens != batch * decode_query_len
-        or topk.shape != (_NUM_KV_HEADS, num_query_tokens, _TOPK)
+        or topk.shape != (_NUM_KV_HEADS, batch, _TOPK)
         or block_table.ndim != 2
+        or block_table.shape[0] != batch
         or seq_lens.shape != (batch,)
         or topk.dtype != torch.int32
         or block_table.dtype != torch.int32
@@ -421,8 +416,6 @@ class FlashInferSparseDecodeRunner:
         if api is None:
             return False
 
-        # FlashInfer sees each verification token as an independent request so
-        # every token retains the sparse page set chosen by MiniMax's indexer.
         batch = query.shape[0]
         run, counter_size = api
         buffers = self._get_buffers(query.device, batch, counter_size)
@@ -443,7 +436,6 @@ class FlashInferSparseDecodeRunner:
             buffers.metadata_status,
             buffers.bmm1_scale_log2,
             batch,
-            decode_query_len,
             block_table.shape[1],
             kv_cache.shape[0],
             topk.stride(0),
