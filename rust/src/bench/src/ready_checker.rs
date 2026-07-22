@@ -23,7 +23,11 @@ pub async fn wait_for_endpoint(
     let backend = get_backend(backend)?;
     let deadline = Instant::now() + std::time::Duration::from_secs(timeout_seconds);
 
-    println!("Waiting for endpoint to become up in {timeout_seconds}s");
+    tracing::info!(
+        timeout_seconds,
+        retry_interval,
+        "waiting for endpoint readiness"
+    );
 
     let pb = ProgressBar::new(timeout_seconds);
     pb.set_style(
@@ -53,7 +57,9 @@ pub async fn wait_for_endpoint(
             Ok(output) => {
                 let err = output.error.clone();
                 let err_last_line = err.lines().last().unwrap_or(&err);
-                eprintln!("Endpoint is not ready. Error='{err_last_line}'");
+                pb.suspend(|| {
+                    tracing::warn!(error = err_last_line, "endpoint is not ready");
+                });
                 last_error = err;
             }
             Err(e) => {
