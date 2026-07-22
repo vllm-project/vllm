@@ -268,3 +268,123 @@ def test_pooling(hf_runner, vllm_runner, example_prompts, arch):
         name_0="hf",
         name_1="vllm",
     )
+
+
+def _run_create_attention_instances(per_layer_attributes, per_layer_config):
+    """Build attention instances from a mocked heterogeneous text config."""
+    from unittest.mock import MagicMock
+
+    import torch
+    from torch import nn
+
+    from vllm.config.vllm import set_current_vllm_config
+    from vllm.model_executor.models.transformers.base import Base
+
+    model_config = MagicMock()
+    model_config.get_num_attention_heads = MagicMock(return_value=8)
+    model_config.get_head_size = MagicMock(return_value=256)
+    model_config.get_num_kv_heads = MagicMock(return_value=4)
+    model_config.get_total_num_hidden_layers = MagicMock(return_value=2)
+    model_config.dtype = torch.float16
+    model_config.is_mm_prefix_lm = False
+
+    parallel_config = MagicMock()
+    parallel_config.tensor_parallel_size = 2
+    parallel_config.pipeline_parallel_size = 1
+    parallel_config.prefill_context_parallel_size = 1
+
+    vllm_config = MagicMock()
+    vllm_config.model_config = model_config
+    vllm_config.parallel_config = parallel_config
+    vllm_config.cache_config = MagicMock()
+    vllm_config.cache_config.cache_dtype = "auto"
+    vllm_config.cache_config.calculate_kv_scales = False
+    vllm_config.cache_config.kv_cache_dtype_skip_layers = None
+    vllm_config.cache_config.user_specified_block_size = False
+    vllm_config.cache_config.block_size = 16
+    vllm_config.cache_config.is_attention_free = False
+    vllm_config.cache_config.sliding_window = None
+    vllm_config.attention_config = MagicMock()
+    vllm_config.attention_config.backend = None
+    vllm_config.attention_config.backend_per_kind = {}
+    vllm_config.attention_config.use_non_causal = False
+    vllm_config.attention_config.flash_attn_version = 2
+    vllm_config.kv_transfer_config = None
+
+    class TestBase(Base):
+        def __init__(self):
+            nn.Module.__init__(self)
+            self.model = nn.Module()
+            self.model_config = model_config
+            self.parallel_config = parallel_config
+            self.config = MagicMock()
+            self.config.layer_types = ["sliding_attention", "full_attention"]
+            self.config.sliding_window = 4096
+            self.config.num_hidden_layers = 2
+            self.config.attn_logit_softcapping = None
+            self.config.per_layer_attributes = per_layer_attributes
+            self.config.per_layer_config = per_layer_config
+            self.text_config = self.config
+            self.pp_group = MagicMock()
+            self.pp_group.rank_in_group = 0
+            self.pp_group.world_size = 1
+            self.cache_config = vllm_config.cache_config
+            self.quant_config = None
+
+    with set_current_vllm_config(vllm_config):
+        return TestBase().create_attention_instances()
+
+
+def test_heterogeneous_attention():
+    """Heterogeneous configs (e.g. Gemma 4) declare per-layer `head_dim` and
+    `num_key_value_heads` through `per_layer_config`. Attention instances must
+    reflect the per-layer geometry or KV cache allocation and projection
+    shapes break at runtime."""
+    from types import SimpleNamespace
+
+    sliding_layer = SimpleNamespace(head_dim=256, num_key_value_heads=8)
+    full_layer = SimpleNamespace(head_dim=512, num_key_value_heads=1)
+
+    attention_instances = _run_create_attention_instances(
+        per_layer_attributes={"head_dim", "num_key_value_heads"},
+        per_layer_config=[sliding_layer, full_layer],
+    )
+
+    sliding_attn = attention_instances[0]
+    full_attn = attention_instances[1]
+
+    assert sliding_attn.num_heads == 8
+    assert sliding_attn.head_size == 256
+    # 8 total KV heads split across TP ranks
+    assert sliding_attn.num_kv_heads == 4
+    assert full_attn.num_heads == 8
+    assert full_attn.head_size == 512
+    # 1 KV head is replicated across TP ranks
+    assert full_attn.num_kv_heads == 1
+
+
+@pytest.mark.parametrize(
+    "per_layer_attributes",
+    [None, {"intermediate_size"}],
+    ids=["homogeneous", "non_geometry_attrs"],
+)
+def test_heterogeneous_attention_global_fallback(per_layer_attributes):
+    """Configs without per-layer geometry keep the global values: when
+    `per_layer_attributes` is `None` (homogeneous config) or declares no
+    geometry attributes, `per_layer_config` must not even be consulted."""
+    from unittest.mock import MagicMock
+
+    per_layer_config = MagicMock()
+    per_layer_config.__getitem__ = MagicMock(
+        side_effect=AssertionError("per_layer_config should not be consulted")
+    )
+
+    attention_instances = _run_create_attention_instances(
+        per_layer_attributes=per_layer_attributes,
+        per_layer_config=per_layer_config,
+    )
+
+    for attn in attention_instances.values():
+        assert attn.num_heads == 8
+        assert attn.head_size == 256
+        assert attn.num_kv_heads == 4

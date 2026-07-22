@@ -189,3 +189,29 @@ def test_draft_model_arch_config(
     _assert_model_config_methods(
         model_config, expected, check_head_size=check_head_size
     )
+
+
+def test_gemma4_head_size_heterogeneous_config():
+    """Gemma 4 declares dual head dimensions. `get_head_size` must return the
+    largest so attention backends allocate buffers large enough for every
+    layer — both for legacy configs (`global_head_dim`) and for heterogeneous
+    configs that declare `head_dim` per layer via `per_layer_config`."""
+    from transformers import PreTrainedConfig
+
+    from vllm.transformers_utils.model_arch_config_convertor import (
+        Gemma4ModelArchConfigConvertor,
+    )
+
+    legacy = PretrainedConfig(head_dim=256, global_head_dim=512)
+    assert Gemma4ModelArchConfigConvertor(legacy, legacy).get_head_size() == 512
+
+    pytest.importorskip(
+        "transformers.integrations.heterogeneity.configuration_utils",
+        reason="requires transformers with heterogeneous config support",
+    )
+    heterogeneous = PreTrainedConfig(
+        num_hidden_layers=2, num_attention_heads=8, head_dim=256
+    )
+    heterogeneous.per_layer_config = {1: {"head_dim": 512}}
+    convertor = Gemma4ModelArchConfigConvertor(heterogeneous, heterogeneous)
+    assert convertor.get_head_size() == 512
