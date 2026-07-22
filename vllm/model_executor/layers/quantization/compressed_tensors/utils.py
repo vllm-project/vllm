@@ -145,8 +145,8 @@ def find_matched_target(
 
     matched_target = (
         _find_first_match(layer_name, targets)
-        or _find_first_match(module.__class__.__name__, targets, True)
         or _match_fused_layer(layer_name, targets, fused_mapping)
+        or _find_first_match(module.__class__.__name__, targets, True)
     )
 
     return matched_target
