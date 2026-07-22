@@ -184,11 +184,11 @@ repos:
     entry: python tools/pre_commit/mypy.py "3.13"
     <<: *mypy_common
     stages: [manual] # Only run in CI
-#  - id: shellcheck
-#    name: Lint shell scripts
-#    entry: tools/pre_commit/shellcheck.sh
-#    language: script
-#    types: [shell]
+  - id: shellcheck
+    name: Lint shell scripts
+    entry: tools/pre_commit/shellcheck.sh
+    language: script
+    types: [shell]
   - id: png-lint
     name: Lint PNG exports from excalidraw
     entry: tools/pre_commit/png-lint.sh
