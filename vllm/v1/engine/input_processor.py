@@ -249,7 +249,7 @@ class InputProcessor:
         lora_request: LoRARequest | None = None,
         tokenization_kwargs: dict[str, Any] | None = None,
         trace_headers: Mapping[str, str] | None = None,
-        priority: int = 0,
+        priority: float = 0.0,
         data_parallel_rank: int | None = None,
         resumable: bool = False,
     ) -> EngineCoreRequest:
