@@ -24,6 +24,7 @@ from vllm.parser import Parser, ParserManager
 from vllm.renderers import BaseRenderer
 from vllm.tokenizers import TokenizerLike
 from vllm.utils import random_uuid
+from vllm.utils.async_utils import make_async
 
 logger = init_logger(__name__)
 
@@ -73,7 +74,23 @@ class OnlineDerenderer:
         self.supports_browsing = False
         self.supports_code_interpreter = False
 
+        # Detokenization, logprob resolution and parsing are CPU-bound;
+        # offload them in one hop to keep the event loop responsive.
+        self._derender_chat_async = make_async(
+            self._derender_chat, executor=renderer._executor
+        )
+        self._derender_completion_async = make_async(
+            self._derender_completion, executor=renderer._executor
+        )
+
     async def derender_chat(
+        self,
+        generate_response: GenerateResponse,
+        chat_request: ChatCompletionRequest | None = None,
+    ) -> list[ChatCompletionResponseChoice]:
+        return await self._derender_chat_async(generate_response, chat_request)
+
+    def _derender_chat(
         self,
         generate_response: GenerateResponse,
         chat_request: ChatCompletionRequest | None = None,
@@ -169,6 +186,13 @@ class OnlineDerenderer:
         return choices
 
     async def derender_completion(
+        self,
+        generate_responses: list[GenerateResponse],
+        prompt_tokens: list[int] | None = None,
+    ) -> tuple[list[CompletionResponseChoice], int, int]:
+        return await self._derender_completion_async(generate_responses, prompt_tokens)
+
+    def _derender_completion(
         self,
         generate_responses: list[GenerateResponse],
         prompt_tokens: list[int] | None = None,
