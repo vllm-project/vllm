@@ -1660,17 +1660,6 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
                 prefix=maybe_prefix(prefix, "audio_tower"),
             )
 
-        self.use_deepstack = hasattr(
-            thinker_config.vision_config, "deepstack_visual_indexes"
-        )
-        self.deepstack_num_level = (
-            len(thinker_config.vision_config.deepstack_visual_indexes)
-            if self.use_deepstack
-            else 0
-        )
-        self.visual_dim = thinker_config.vision_config.out_hidden_size
-        self.multiscale_dim = self.visual_dim * self.deepstack_num_level
-
         with self._mark_tower_model(vllm_config, {"image", "video"}):
             self.visual = Qwen3Omni_VisionTransformer(
                 vision_config=thinker_config.vision_config,
@@ -1679,7 +1668,18 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
                 prefix=maybe_prefix(prefix, "visual"),
             )
 
-        if self.use_deepstack and not isinstance(self.visual, StageMissingLayer):
+        self.use_deepstack = hasattr(
+            thinker_config.vision_config, "deepstack_visual_indexes"
+        ) and not isinstance(self.visual, StageMissingLayer)
+        self.deepstack_num_level = (
+            len(thinker_config.vision_config.deepstack_visual_indexes)
+            if self.use_deepstack
+            else 0
+        )
+        self.visual_dim = thinker_config.vision_config.out_hidden_size
+        self.multiscale_dim = self.visual_dim * self.deepstack_num_level
+
+        if self.use_deepstack:
             self.deepstack_input_embeds = [
                 torch.zeros(
                     vllm_config.scheduler_config.max_num_batched_tokens,
