@@ -28,6 +28,7 @@ from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.models import supports_multimodal
 from vllm.model_executor.models.deepseek_eagle3 import Eagle3DeepseekV2ForCausalLM
 from vllm.model_executor.models.interfaces import SupportsMultiModal
+from vllm.model_executor.models.laguna_dflash import DFlashLagunaForCausalLM
 from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
 from vllm.model_executor.models.qwen3_dflash import DFlashQwen3ForCausalLM
 from vllm.model_executor.models.qwen3_eagle3 import Eagle3Qwen3ForCausalLM
@@ -533,6 +534,7 @@ class SpecDecodeBaseProposer:
                     Eagle3DeepseekV2ForCausalLM,
                     DFlashQwen3ForCausalLM,
                     Eagle3Qwen3ForCausalLM,
+                    DFlashLagunaForCausalLM,
                 ),
             )
             target_hidden_states = self.model.combine_hidden_states(
@@ -1298,6 +1300,15 @@ class SpecDecodeBaseProposer:
             ),
         )
 
+        if spec_cfg.kv_cache_dtype is not None:
+            base = replace(
+                base,
+                cache_config=replace(
+                    base.cache_config,
+                    cache_dtype=spec_cfg.kv_cache_dtype,
+                ),
+            )
+
         return base
 
     def _get_model(self) -> nn.Module:
@@ -1465,6 +1476,30 @@ class SpecDecodeBaseProposer:
                     "Detected MTP model. "
                     "Sharing target model embedding weights with the draft model."
                 )
+
+            if share_embeddings and hasattr(self.model, "has_own_embed_tokens"):
+                # EAGLE drafts consume input embeddings at their own hidden
+                # size, so only share when the widths match. MTP drafts
+                # project target-width embeddings (e.g. Gemma4 MTP's
+                # pre_projection takes 2 * backbone_hidden_size), so the
+                # width check does not apply to them.
+                draft_embed = self.model.model.embed_tokens
+                # Guard with isinstance so non-Tensor weights (e.g. in tests)
+                # are not affected — mirrors the weight-equality check above.
+                if isinstance(target_embed_tokens.weight, torch.Tensor) and isinstance(
+                    draft_embed.weight, torch.Tensor
+                ):
+                    target_dim = target_embed_tokens.weight.shape[-1]
+                    draft_dim = draft_embed.weight.shape[-1]
+                    if target_dim != draft_dim:
+                        share_embeddings = False
+                        logger.info(
+                            "Target embedding dim (%d) differs from draft "
+                            "embedding dim (%d). Keeping separate embedding "
+                            "weights.",
+                            target_dim,
+                            draft_dim,
+                        )
 
             if share_embeddings:
                 if hasattr(self.model.model, "embed_tokens"):

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use std::fs;
 use std::path::Path;
 
@@ -100,6 +103,8 @@ pub(crate) enum FixtureContent {
 pub(crate) enum FixtureContentPart {
     Text { text: String },
     ImageUrl { image_url: String },
+    InputAudio { data: String },
+    AudioUrl { audio_url: String },
 }
 
 #[derive(Debug, Deserialize)]
@@ -223,6 +228,15 @@ fn to_chat_content(content: FixtureContent) -> ChatContent {
                     FixtureContentPart::ImageUrl { image_url } => {
                         ChatContentPart::image_url(image_url)
                     }
+                    FixtureContentPart::InputAudio { data } => ChatContentPart::InputAudio {
+                        data,
+                        format: None,
+                        uuid: None,
+                    },
+                    FixtureContentPart::AudioUrl { audio_url } => ChatContentPart::AudioUrl {
+                        audio_url,
+                        uuid: None,
+                    },
                 })
                 .collect(),
         ),

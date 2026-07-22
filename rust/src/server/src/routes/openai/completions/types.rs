@@ -1,8 +1,12 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use validator::Validate;
+use vllm_engine_core_client::protocol::sampling::RepetitionDetectionParams;
 use vllm_text::Prompt;
 
 use crate::routes::openai::utils::types::{
@@ -100,6 +104,9 @@ pub struct CompletionRequest {
     /// Repetition penalty for reducing repetitive text
     pub repetition_penalty: Option<f32>,
 
+    /// Parameters for detecting repetitive N-gram patterns in output tokens
+    pub repetition_detection: Option<RepetitionDetectionParams>,
+
     /// Length penalty for beam search
     pub length_penalty: Option<f32>,
 
@@ -170,6 +177,9 @@ pub struct CompletionRequest {
     /// KV transfer parameters for disaggregated serving
     pub kv_transfer_params: Option<HashMap<String, Value>>,
 
+    /// Encoder cache transfer parameters for disaggregated serving
+    pub ec_transfer_params: Option<HashMap<String, Value>>,
+
     /// Additional request parameters with string or numeric values for custom
     /// extensions
     pub vllm_xargs: Option<HashMap<String, Value>>,
@@ -192,7 +202,9 @@ impl Normalizable for CompletionRequest {
 }
 
 /// Mirrors the Python vLLM `CompletionResponse` class.
-#[serde_with::skip_serializing_none]
+///
+/// Do not skip serializing `None` fields here: non-streaming response types
+/// should serialize `None` as explicit `null`.
 #[derive(Debug, Clone, Serialize)]
 pub(super) struct CompletionResponse {
     pub id: String,
@@ -203,10 +215,10 @@ pub(super) struct CompletionResponse {
     pub usage: Option<Usage>,
     pub system_fingerprint: Option<String>,
     pub kv_transfer_params: Option<Value>,
+    pub ec_transfer_params: Option<Value>,
 }
 
 /// Mirrors the Python vLLM `CompletionResponseChoice` class.
-#[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Serialize)]
 pub(super) struct CompletionChoice {
     pub index: u32,
