@@ -90,7 +90,11 @@ def _update_min_larger_stats(data, above_mask, min_larger, num_min_larger, senti
     return min_larger, num_min_larger
 
 
-@triton.jit
+# BATCH_SIZE is only the grid-stride loop bound, so value specialization
+# (==1 / divisible-by-16) buys nothing but forces a recompile when the
+# running batch size changes class (e.g. warmup at max_num_seqs=16 vs a
+# real decode step at 15), causing a JIT latency spike mid-inference.
+@triton.jit(do_not_specialize=["BATCH_SIZE"])
 def _topk_topp_kernel(
     LOGITS,
     LOGITS_STRIDE_0,
