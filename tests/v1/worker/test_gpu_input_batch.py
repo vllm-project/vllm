@@ -519,7 +519,7 @@ def test_pooling_metadata_token_id_buffers(
         assert metadata.prompt_token_ids_cpu is None
 
 
-def test_pooling_metadata_cpu_token_ids_pad_without_per_request_loop():
+def test_pooling_metadata_cpu_token_ids_padding():
     from vllm.pooling_params import PoolingParams
 
     input_batch = InputBatch(
@@ -551,7 +551,8 @@ def test_pooling_metadata_cpu_token_ids_pad_without_per_request_loop():
         input_batch.add_request(request)
     input_batch.refresh_metadata()
 
-    prompt_token_ids = input_batch.get_pooling_metadata().prompt_token_ids_cpu
+    with torch.device("meta"):
+        prompt_token_ids = input_batch.get_pooling_metadata().prompt_token_ids_cpu
 
     assert prompt_token_ids is not None
     assert prompt_token_ids.tolist() == [
