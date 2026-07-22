@@ -213,9 +213,9 @@ def _peer_connect_msg(
 class FakeParent:
     """Configurable :class:`ParentManager` for server-role tests.
 
-    ``stored`` is the dict of ready blocks (hash → primary block_id).
+    ``stored`` is the dict of ready blocks (key → primary block_id).
     ``pending`` and ``retry`` script the first lookup() result for those
-    hashes; subsequent lookups behave normally (a hash that promised
+    keys; subsequent lookups behave normally (a key that promised
     HIT_PENDING / RETRY can later be promoted to HIT by adding it to
     ``stored`` and removing it from ``pending``/``retry``). ``calls``
     captures every parent invocation in order for assertions.
@@ -467,7 +467,7 @@ class TestClientFlows:
         lookup = conn._sent[-1]
         assert lookup[TYPE_KEY] == FetchMsg.TYPE
         assert lookup[FetchMsg.KV_REQUEST_ID] == "req-1"
-        assert lookup[FetchMsg.BLOCK_HASHES] == [b"k1", b"k2"]
+        assert lookup[FetchMsg.KEYS] == [b"k1", b"k2"]
         assert lookup[FetchMsg.BLOCK_INDEXES] == [0, 1]
 
     def test_transfer_done_success(self):
@@ -633,11 +633,11 @@ class TestLookupFlow:
         session, conn, _ = _make_session()
         _activate(session, conn)
 
-        # Aggregate two hashes for the same kv_request_id; both return None.
+        # Aggregate two keys for the same kv_request_id; both return None.
         assert session.register_lookup("req-1", b"hA") is None
         assert session.register_lookup("req-1", b"hB") is None
 
-        # Flush sends one LookupMsg with both hashes.
+        # Flush sends one LookupMsg with both keys.
         sent_before = len(conn._sent)
         session.flush_pending_lookups()
         new = conn._sent[sent_before:]
@@ -645,7 +645,7 @@ class TestLookupFlow:
         msg = new[0]
         assert msg[TYPE_KEY] == LookupMsg.TYPE
         assert msg[LookupMsg.KV_REQUEST_ID] == "req-1"
-        assert sorted(msg[LookupMsg.BLOCK_HASHES]) == [b"hA", b"hB"]
+        assert sorted(msg[LookupMsg.KEYS]) == [b"hA", b"hB"]
 
         # Idempotent re-flush sends nothing — the entries are now in-flight.
         sent_before = len(conn._sent)
@@ -660,7 +660,7 @@ class TestLookupFlow:
             {
                 TYPE_KEY: LookupRespMsg.TYPE,
                 LookupRespMsg.KV_REQUEST_ID: "req-1",
-                LookupRespMsg.BLOCK_HASHES: [b"hA", b"hB"],
+                LookupRespMsg.KEYS: [b"hA", b"hB"],
                 LookupRespMsg.HITS: [True, False],
             }
         )
@@ -670,7 +670,7 @@ class TestLookupFlow:
         assert session.register_lookup("req-1", b"hA") is True
         assert session.register_lookup("req-1", b"hB") is False
         # The entry is cached, not popped: repeat probes keep returning the
-        # same result and never re-queue the hash, so a flush sends nothing.
+        # same result and never re-queue the key, so a flush sends nothing.
         assert session.register_lookup("req-1", b"hA") is True
         assert session.register_lookup("req-1", b"hB") is False
         sent_before = len(conn._sent)
@@ -693,7 +693,7 @@ class TestLookupFlow:
             {
                 TYPE_KEY: LookupRespMsg.TYPE,
                 LookupRespMsg.KV_REQUEST_ID: "req-1",
-                LookupRespMsg.BLOCK_HASHES: [b"hA"],
+                LookupRespMsg.KEYS: [b"hA"],
                 LookupRespMsg.HITS: [True],
             }
         )
@@ -706,19 +706,19 @@ class TestLookupFlow:
         )
         assert b"hA" not in session._client._requests["req-1"].probes
 
-        # Re-scheduled probe of the same hash is treated as brand-new: it
+        # Re-scheduled probe of the same key is treated as brand-new: it
         # returns None and re-queues, so a flush emits a fresh LookupMsg.
         assert session.register_lookup("req-1", b"hA") is None
         sent_before = len(conn._sent)
         session.flush_pending_lookups()
         fresh = [m for m in conn._sent[sent_before:] if m[TYPE_KEY] == LookupMsg.TYPE]
         assert len(fresh) == 1
-        assert fresh[0][LookupMsg.BLOCK_HASHES] == [b"hA"]
+        assert fresh[0][LookupMsg.KEYS] == [b"hA"]
 
     def test_flush_uses_work_list_not_full_scan(self):
         """flush drains a work-list rather than scanning every live request.
 
-        A request with no newly-registered hashes is not revisited: after a
+        A request with no newly-registered keys is not revisited: after a
         flush the work-list is empty, an idle re-flush sends nothing, and a
         subsequent register re-arms exactly the one affected id — even while
         an unrelated request stays live in ``_requests``.
@@ -727,7 +727,7 @@ class TestLookupFlow:
         _activate(session, conn)
         client = session._client
 
-        # Two requests register hashes; both are queued for flush.
+        # Two requests register keys; both are queued for flush.
         session.register_lookup("req-A", b"hA")
         session.register_lookup("req-B", b"hB")
         assert client._flush_pending == {"req-A", "req-B"}
@@ -761,14 +761,14 @@ class TestLookupFlow:
         session.flush_pending_lookups()
         sent = [m for m in conn._sent[sent_before:] if m[TYPE_KEY] == LookupMsg.TYPE]
         assert len(sent) == 2
-        by_req = {m[LookupMsg.KV_REQUEST_ID]: m[LookupMsg.BLOCK_HASHES] for m in sent}
+        by_req = {m[LookupMsg.KV_REQUEST_ID]: m[LookupMsg.KEYS] for m in sent}
         assert sorted(by_req["req-A"]) == [b"h1", b"h3"]
         assert by_req["req-B"] == [b"h2"]
 
     def test_multiple_lookup_msgs_across_steps(self):
         """A request's block set may be discovered across scheduler steps:
-        each step that registers new hashes flushes its own LookupMsg for
-        the same kv_request_id, carrying only the newly-probed hashes."""
+        each step that registers new keys flushes its own LookupMsg for
+        the same kv_request_id, carrying only the newly-probed keys."""
         session, conn, _ = _make_session()
         _activate(session, conn)
 
@@ -780,11 +780,11 @@ class TestLookupFlow:
         first = [m for m in conn._sent[sent_before:] if m[TYPE_KEY] == LookupMsg.TYPE]
         assert len(first) == 1
         assert first[0][LookupMsg.KV_REQUEST_ID] == "req-1"
-        assert sorted(first[0][LookupMsg.BLOCK_HASHES]) == [b"hA", b"hB"]
+        assert sorted(first[0][LookupMsg.KEYS]) == [b"hA", b"hB"]
 
-        # Step 2: a new hash is discovered for the same request. The
-        # in-flight hashes from step 1 are not re-sent; a second LookupMsg
-        # goes out carrying only the newly-probed hash.
+        # Step 2: a new key is discovered for the same request. The
+        # in-flight keys from step 1 are not re-sent; a second LookupMsg
+        # goes out carrying only the newly-probed key.
         assert session.register_lookup("req-1", b"hA") is None  # in-flight no-op
         session.register_lookup("req-1", b"hC")
         sent_before = len(conn._sent)
@@ -792,10 +792,10 @@ class TestLookupFlow:
         second = [m for m in conn._sent[sent_before:] if m[TYPE_KEY] == LookupMsg.TYPE]
         assert len(second) == 1
         assert second[0][LookupMsg.KV_REQUEST_ID] == "req-1"
-        assert second[0][LookupMsg.BLOCK_HASHES] == [b"hC"]
+        assert second[0][LookupMsg.KEYS] == [b"hC"]
 
     def test_split_response_resolves_across_messages(self):
-        """Producer may answer one LookupMsg's hashes across multiple
+        """Producer may answer one LookupMsg's keys across multiple
         LookupRespMsgs — pairs are self-describing so each lands."""
         session, conn, _ = _make_session()
         _activate(session, conn)
@@ -804,12 +804,12 @@ class TestLookupFlow:
         session.register_lookup("req-1", b"hB")
         session.flush_pending_lookups()
 
-        # Two responses, each carrying one of the two hashes.
+        # Two responses, each carrying one of the two keys.
         conn.enqueue(
             {
                 TYPE_KEY: LookupRespMsg.TYPE,
                 LookupRespMsg.KV_REQUEST_ID: "req-1",
-                LookupRespMsg.BLOCK_HASHES: [b"hA"],
+                LookupRespMsg.KEYS: [b"hA"],
                 LookupRespMsg.HITS: [True],
             }
         )
@@ -817,7 +817,7 @@ class TestLookupFlow:
             {
                 TYPE_KEY: LookupRespMsg.TYPE,
                 LookupRespMsg.KV_REQUEST_ID: "req-1",
-                LookupRespMsg.BLOCK_HASHES: [b"hB"],
+                LookupRespMsg.KEYS: [b"hB"],
                 LookupRespMsg.HITS: [False],
             }
         )
@@ -856,7 +856,7 @@ class TestLookupFlow:
         fetches = [m for m in conn._sent[sent_before:] if m[TYPE_KEY] == FetchMsg.TYPE]
         assert len(fetches) == 1
         assert fetches[0][FetchMsg.KV_REQUEST_ID] == "req-1"
-        assert fetches[0][FetchMsg.BLOCK_HASHES] == []
+        assert fetches[0][FetchMsg.KEYS] == []
         assert fetches[0][FetchMsg.BLOCK_INDEXES] == []
 
     def test_finish_without_flushed_lookup_sends_no_fetch(self):
@@ -888,7 +888,7 @@ class TestLookupFlow:
             {
                 TYPE_KEY: LookupRespMsg.TYPE,
                 LookupRespMsg.KV_REQUEST_ID: "req-1",
-                LookupRespMsg.BLOCK_HASHES: [b"hA"],
+                LookupRespMsg.KEYS: [b"hA"],
                 LookupRespMsg.HITS: [True],
             }
         )
@@ -906,7 +906,7 @@ class TestLookupFlow:
     def test_server_lookup_deferred_until_serve_then_all_misses(self):
         """``poll()`` only enqueues an inbound LookupMsg — no response is
         sent until ``serve_external_requests``. With an all-miss parent
-        the aggregated LookupRespMsg carries the same hashes and
+        the aggregated LookupRespMsg carries the same keys and
         ``hits=[False, ...]``."""
         session, conn, _ = _make_session()
         _activate(session, conn)
@@ -916,7 +916,7 @@ class TestLookupFlow:
             {
                 TYPE_KEY: LookupMsg.TYPE,
                 LookupMsg.KV_REQUEST_ID: "req-1",
-                LookupMsg.BLOCK_HASHES: [b"hX", b"hY", b"hZ"],
+                LookupMsg.KEYS: [b"hX", b"hY", b"hZ"],
             }
         )
         session.poll()
@@ -935,7 +935,7 @@ class TestLookupFlow:
         assert len(resps) == 1
         resp = resps[0]
         assert resp[LookupRespMsg.KV_REQUEST_ID] == "req-1"
-        assert resp[LookupRespMsg.BLOCK_HASHES] == [b"hX", b"hY", b"hZ"]
+        assert resp[LookupRespMsg.KEYS] == [b"hX", b"hY", b"hZ"]
         assert resp[LookupRespMsg.HITS] == [False, False, False]
 
 
@@ -947,12 +947,12 @@ class TestLookupFlow:
 # ---------------------------------------------------------------------------
 
 
-def _send_lookup(conn: FakeConnection, kv_request_id: str, hashes: list[bytes]):
+def _send_lookup(conn: FakeConnection, kv_request_id: str, keys: list[bytes]):
     conn.enqueue(
         {
             TYPE_KEY: LookupMsg.TYPE,
             LookupMsg.KV_REQUEST_ID: kv_request_id,
-            LookupMsg.BLOCK_HASHES: list(hashes),
+            LookupMsg.KEYS: list(keys),
         }
     )
 
@@ -977,7 +977,7 @@ class TestServerLookupHandling:
 
         resps = _lookup_resps(conn, sent_before)
         assert len(resps) == 1
-        assert resps[0][LookupRespMsg.BLOCK_HASHES] == [b"hA", b"hB", b"hC"]
+        assert resps[0][LookupRespMsg.KEYS] == [b"hA", b"hB", b"hC"]
         assert resps[0][LookupRespMsg.HITS] == [True, True, True]
 
         kinds = [c[0] for c in cb.calls]
@@ -1013,9 +1013,9 @@ class TestServerLookupHandling:
 
     def test_mixed_hit_miss_pending_defers_response_until_aggregate(self):
         """HIT/MISS resolutions do not go out on first sight when any
-        hash is still HIT_PENDING / RETRY. The lookup parks until every
-        hash has settled (or the deadline fires), then one
-        LookupRespMsg carries all hashes in wire order."""
+        key is still HIT_PENDING / RETRY. The lookup parks until every
+        key has settled (or the deadline fires), then one
+        LookupRespMsg carries all keys in wire order."""
         cb = FakeParent(
             stored={b"hA": 1},
             pending={b"hB"},
@@ -1040,9 +1040,9 @@ class TestServerLookupHandling:
         assert len(_srv_lookups(session)) == 1
 
     def test_pending_resolves_then_aggregate_response_fires(self):
-        """A HIT_PENDING hash that becomes HIT on a later poll releases
+        """A HIT_PENDING key that becomes HIT on a later poll releases
         the deferred aggregate response: one LookupRespMsg carrying
-        both hashes in wire order, and one create_store_job call per
+        both keys in wire order, and one create_store_job call per
         HIT (the second HIT is pinned when it resolves, not when the
         response goes out)."""
         cb = FakeParent(stored={b"hA": 1}, pending={b"hB"})
@@ -1065,7 +1065,7 @@ class TestServerLookupHandling:
 
         resps = _lookup_resps(conn, sent_before)
         assert len(resps) == 1
-        assert resps[0][LookupRespMsg.BLOCK_HASHES] == [b"hA", b"hB"]
+        assert resps[0][LookupRespMsg.KEYS] == [b"hA", b"hB"]
         assert resps[0][LookupRespMsg.HITS] == [True, True]
 
         cs_calls = [c for c in cb.calls if c[0] == "create_store_job"]
@@ -1078,7 +1078,7 @@ class TestServerLookupHandling:
         assert b"hB" in _srv_outbound(session, "req-1").available
 
     def test_pending_timeout_replies_miss_no_store_job(self):
-        """A HIT_PENDING hash that stays pending past the batch
+        """A HIT_PENDING key that stays pending past the batch
         ``deadline`` is force-MISS and never pinned; the deferred
         aggregate response fires with hits=[False]."""
         cb = FakeParent(pending={b"hA"})
@@ -1100,7 +1100,7 @@ class TestServerLookupHandling:
 
         resps = _lookup_resps(conn, sent_before)
         assert len(resps) == 1
-        assert resps[0][LookupRespMsg.BLOCK_HASHES] == [b"hA"]
+        assert resps[0][LookupRespMsg.KEYS] == [b"hA"]
         assert resps[0][LookupRespMsg.HITS] == [False]
         assert all(c[0] != "create_store_job" for c in cb.calls)
         assert sum(1 for c in cb.calls if c[0] == "on_request_finished") == 1
@@ -1202,7 +1202,7 @@ class TestServerLookupHandling:
             {
                 TYPE_KEY: FetchMsg.TYPE,
                 FetchMsg.KV_REQUEST_ID: "req-1",
-                FetchMsg.BLOCK_HASHES: [],
+                FetchMsg.KEYS: [],
                 FetchMsg.BLOCK_INDEXES: [],
             }
         )
@@ -1241,7 +1241,7 @@ class TestServerLookupHandling:
             {
                 TYPE_KEY: FetchMsg.TYPE,
                 FetchMsg.KV_REQUEST_ID: "req-1",
-                FetchMsg.BLOCK_HASHES: [b"hA", b"hB"],
+                FetchMsg.KEYS: [b"hA", b"hB"],
                 FetchMsg.BLOCK_INDEXES: [20, 21],
             }
         )
@@ -1278,7 +1278,7 @@ class TestServerFlows:
             {
                 TYPE_KEY: FetchMsg.TYPE,
                 FetchMsg.KV_REQUEST_ID: "req-1",
-                FetchMsg.BLOCK_HASHES: [b"k1", b"k2"],
+                FetchMsg.KEYS: [b"k1", b"k2"],
                 FetchMsg.BLOCK_INDEXES: [10, 11],
             }
         )
@@ -1296,7 +1296,7 @@ class TestServerFlows:
             {
                 TYPE_KEY: FetchMsg.TYPE,
                 FetchMsg.KV_REQUEST_ID: "req-1",
-                FetchMsg.BLOCK_HASHES: [b"k1"],
+                FetchMsg.KEYS: [b"k1"],
                 FetchMsg.BLOCK_INDEXES: [5],
             }
         )
@@ -1314,7 +1314,7 @@ class TestServerFlows:
             {
                 TYPE_KEY: FetchMsg.TYPE,
                 FetchMsg.KV_REQUEST_ID: "req-1",
-                FetchMsg.BLOCK_HASHES: [b"k1"],
+                FetchMsg.KEYS: [b"k1"],
                 FetchMsg.BLOCK_INDEXES: [5],
             }
         )
@@ -1498,7 +1498,7 @@ class TestServerFlows:
             {
                 TYPE_KEY: FetchMsg.TYPE,
                 FetchMsg.KV_REQUEST_ID: "req-1",
-                FetchMsg.BLOCK_HASHES: [b"k1"],
+                FetchMsg.KEYS: [b"k1"],
                 FetchMsg.BLOCK_INDEXES: [5],
             }
         )
@@ -1530,7 +1530,7 @@ class TestServerFlows:
             {
                 TYPE_KEY: FetchMsg.TYPE,
                 FetchMsg.KV_REQUEST_ID: "req-1",
-                FetchMsg.BLOCK_HASHES: [b"k1"],
+                FetchMsg.KEYS: [b"k1"],
                 FetchMsg.BLOCK_INDEXES: [5],
             }
         )
@@ -1572,7 +1572,7 @@ class TestFinishRequestServerSide:
             {
                 TYPE_KEY: FetchMsg.TYPE,
                 FetchMsg.KV_REQUEST_ID: "req-1",
-                FetchMsg.BLOCK_HASHES: [b"k1"],
+                FetchMsg.KEYS: [b"k1"],
                 FetchMsg.BLOCK_INDEXES: [5],
             }
         )
@@ -1597,7 +1597,7 @@ class TestFinishRequestServerSide:
             {
                 TYPE_KEY: FetchMsg.TYPE,
                 FetchMsg.KV_REQUEST_ID: "req-1",
-                FetchMsg.BLOCK_HASHES: [b"k1", b"k2"],
+                FetchMsg.KEYS: [b"k1", b"k2"],
                 FetchMsg.BLOCK_INDEXES: [10, 11],
             }
         )
@@ -1632,7 +1632,7 @@ class TestFinishRequestServerSide:
             {
                 TYPE_KEY: FetchMsg.TYPE,
                 FetchMsg.KV_REQUEST_ID: "req-1",
-                FetchMsg.BLOCK_HASHES: [b"k1"],
+                FetchMsg.KEYS: [b"k1"],
                 FetchMsg.BLOCK_INDEXES: [10],
             }
         )
@@ -1666,7 +1666,7 @@ class TestFinishRequestServerSide:
             {
                 TYPE_KEY: FetchMsg.TYPE,
                 FetchMsg.KV_REQUEST_ID: "req-1",
-                FetchMsg.BLOCK_HASHES: [b"k1"],
+                FetchMsg.KEYS: [b"k1"],
                 FetchMsg.BLOCK_INDEXES: [10],
             }
         )
@@ -1687,7 +1687,7 @@ class TestFinishRequestServerSide:
             {
                 TYPE_KEY: FetchMsg.TYPE,
                 FetchMsg.KV_REQUEST_ID: "req-2",
-                FetchMsg.BLOCK_HASHES: [b"k1", b"k2"],
+                FetchMsg.KEYS: [b"k1", b"k2"],
                 FetchMsg.BLOCK_INDEXES: [10, 11],
             }
         )
@@ -1720,7 +1720,7 @@ class TestFinishRequestServerSide:
             {
                 TYPE_KEY: FetchMsg.TYPE,
                 FetchMsg.KV_REQUEST_ID: "req-1",
-                FetchMsg.BLOCK_HASHES: [b"demand"],
+                FetchMsg.KEYS: [b"demand"],
                 FetchMsg.BLOCK_INDEXES: [5],
             }
         )
@@ -1754,7 +1754,7 @@ class TestFinishRequestServerSide:
             {
                 TYPE_KEY: FetchMsg.TYPE,
                 FetchMsg.KV_REQUEST_ID: "req-1",
-                FetchMsg.BLOCK_HASHES: [b"k1"],
+                FetchMsg.KEYS: [b"k1"],
                 FetchMsg.BLOCK_INDEXES: [10],
             }
         )
@@ -1791,7 +1791,7 @@ class TestFinishRequestServerSide:
             {
                 TYPE_KEY: FetchMsg.TYPE,
                 FetchMsg.KV_REQUEST_ID: "req-1",
-                FetchMsg.BLOCK_HASHES: [b"k1"],
+                FetchMsg.KEYS: [b"k1"],
                 FetchMsg.BLOCK_INDEXES: [10],
             }
         )
@@ -1825,7 +1825,7 @@ class TestFinishRequestServerSide:
             {
                 TYPE_KEY: FetchMsg.TYPE,
                 FetchMsg.KV_REQUEST_ID: "req-1",
-                FetchMsg.BLOCK_HASHES: [b"k1", b"k2", b"k3"],
+                FetchMsg.KEYS: [b"k1", b"k2", b"k3"],
                 FetchMsg.BLOCK_INDEXES: [10, 11, 12],
             }
         )
@@ -1886,7 +1886,7 @@ class TestFinishRequestServerSide:
             {
                 TYPE_KEY: FetchMsg.TYPE,
                 FetchMsg.KV_REQUEST_ID: "req-1",
-                FetchMsg.BLOCK_HASHES: [b"k1", b"k2"],
+                FetchMsg.KEYS: [b"k1", b"k2"],
                 FetchMsg.BLOCK_INDEXES: [10, 11],
             }
         )
@@ -1952,7 +1952,7 @@ class TestBidirectional:
             {
                 TYPE_KEY: FetchMsg.TYPE,
                 FetchMsg.KV_REQUEST_ID: "req-srv",
-                FetchMsg.BLOCK_HASHES: [b"served"],
+                FetchMsg.KEYS: [b"served"],
                 FetchMsg.BLOCK_INDEXES: [7],
             }
         )
@@ -2115,7 +2115,7 @@ class TestDisconnect:
             {
                 TYPE_KEY: LookupRespMsg.TYPE,
                 LookupRespMsg.KV_REQUEST_ID: "req-hit",
-                LookupRespMsg.BLOCK_HASHES: [b"hA"],
+                LookupRespMsg.KEYS: [b"hA"],
                 LookupRespMsg.HITS: [True],
             }
         )
@@ -2169,7 +2169,7 @@ class TestAdversarial:
             {
                 TYPE_KEY: FetchMsg.TYPE,
                 FetchMsg.KV_REQUEST_ID: "req-bad",
-                FetchMsg.BLOCK_HASHES: [b"k1", b"k2"],
+                FetchMsg.KEYS: [b"k1", b"k2"],
                 FetchMsg.BLOCK_INDEXES: [1],
             }
         )
@@ -2217,7 +2217,7 @@ class TestDispatchErrorHandling:
             {
                 TYPE_KEY: FetchMsg.TYPE,
                 FetchMsg.KV_REQUEST_ID: "req-bad",
-                FetchMsg.BLOCK_HASHES: [b"k1", b"k2"],
+                FetchMsg.KEYS: [b"k1", b"k2"],
                 FetchMsg.BLOCK_INDEXES: [1],
             }
         )
@@ -2247,7 +2247,7 @@ class TestDispatchErrorHandling:
             {
                 TYPE_KEY: FetchMsg.TYPE,
                 FetchMsg.KV_REQUEST_ID: "req-1",
-                FetchMsg.BLOCK_HASHES: [b"k1"],
+                FetchMsg.KEYS: [b"k1"],
                 FetchMsg.BLOCK_INDEXES: [0],
             }
         )
@@ -2270,7 +2270,7 @@ class TestDispatchErrorHandling:
                 {
                     TYPE_KEY: FetchMsg.TYPE,
                     FetchMsg.KV_REQUEST_ID: "req-1",
-                    FetchMsg.BLOCK_HASHES: [b"k1"],
+                    FetchMsg.KEYS: [b"k1"],
                     FetchMsg.BLOCK_INDEXES: [0],
                 }
             )
@@ -2297,7 +2297,7 @@ class TestDispatchErrorHandling:
                 {
                     TYPE_KEY: FetchMsg.TYPE,
                     FetchMsg.KV_REQUEST_ID: "req-1",
-                    FetchMsg.BLOCK_HASHES: [b"k1"],
+                    FetchMsg.KEYS: [b"k1"],
                     FetchMsg.BLOCK_INDEXES: [0],
                 }
             )
@@ -2334,7 +2334,7 @@ class TestInflightPerReqInvariant:
         # Two requests, two blocks each, all dispatched in one batch.
         session.add_stored_blocks("req-A", [b"a1", b"a2"], [0, 1], job_id=10)
         session.add_stored_blocks("req-B", [b"b1", b"b2"], [2, 3], job_id=11)
-        for kv_id, hashes, indexes in (
+        for kv_id, keys, indexes in (
             ("req-A", [b"a1", b"a2"], [100, 101]),
             ("req-B", [b"b1", b"b2"], [102, 103]),
         ):
@@ -2342,7 +2342,7 @@ class TestInflightPerReqInvariant:
                 {
                     TYPE_KEY: FetchMsg.TYPE,
                     FetchMsg.KV_REQUEST_ID: kv_id,
-                    FetchMsg.BLOCK_HASHES: hashes,
+                    FetchMsg.KEYS: keys,
                     FetchMsg.BLOCK_INDEXES: indexes,
                 }
             )
@@ -2489,7 +2489,7 @@ class TestFetchMsgValidation:
         return {
             TYPE_KEY: FetchMsg.TYPE,
             FetchMsg.KV_REQUEST_ID: "req-1",
-            FetchMsg.BLOCK_HASHES: [b"k1", b"k2"],
+            FetchMsg.KEYS: [b"k1", b"k2"],
             FetchMsg.BLOCK_INDEXES: [0, 1],
         }
 

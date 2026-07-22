@@ -44,7 +44,7 @@ class ClientPhase(enum.Enum):
     FetchMsg has since closed the peer's lookup phase).
     """
 
-    REGISTERED = enum.auto()  # hashes in probes/unsent, nothing sent yet
+    REGISTERED = enum.auto()  # keys in probes/unsent, nothing sent yet
     PROBING = enum.auto()  # LookupMsg flushed, awaiting responses
     FETCH_SENT = enum.auto()  # FetchMsg sent (real or terminal empty)
 
@@ -127,7 +127,7 @@ class ClientRole:
         # lazily by request_blocks / register_lookup and dropped by
         # _maybe_prune once every field is idle.
         self._requests: dict[str, _ClientRequestState] = {}
-        # kv_request_ids with unsent lookup hashes for the next flush to
+        # kv_request_ids with unsent lookup keys for the next flush to
         # visit — the work-list that keeps flush_pending_lookups from
         # scanning every request each scheduler step. Mirrors the server's
         # _serve_pending. Populated by register_lookup, drained by
@@ -205,7 +205,7 @@ class ClientRole:
             {
                 TYPE_KEY: FetchMsg.TYPE,
                 FetchMsg.KV_REQUEST_ID: kv_request_id,
-                FetchMsg.BLOCK_HASHES: list(keys),
+                FetchMsg.KEYS: list(keys),
                 FetchMsg.BLOCK_INDEXES: [int(idx) for idx in block_ids],
             }
         )
@@ -264,7 +264,7 @@ class ClientRole:
                 {
                     TYPE_KEY: FetchMsg.TYPE,
                     FetchMsg.KV_REQUEST_ID: kv_request_id,
-                    FetchMsg.BLOCK_HASHES: [],
+                    FetchMsg.KEYS: [],
                     FetchMsg.BLOCK_INDEXES: [],
                 }
             )
@@ -336,8 +336,8 @@ class ClientRole:
     # Symmetric-P2P lookup (do_p2p_fetch=true)
     # ------------------------------------------------------------------
 
-    def register_lookup(self, kv_request_id: str, block_hash: bytes) -> bool | None:
-        """Register or resolve one (kv_request_id, block_hash) probe.
+    def register_lookup(self, kv_request_id: str, key: bytes) -> bool | None:
+        """Register or resolve one (kv_request_id, key) probe.
 
         Idempotent across scheduler steps:
         - First call: creates a pending entry, returns None.
@@ -349,24 +349,24 @@ class ClientRole:
         (``request_blocks`` pops it) or the request finishes
         (``finish`` clears all entries for the id). A request's
         block set can be re-probed across steps, so popping on read would
-        make a repeat probe of an already-resolved hash look brand-new and
+        make a repeat probe of an already-resolved key look brand-new and
         re-queue it, emitting a redundant LookupMsg for an answer we
         already hold. Keeping the entry until fetch makes repeat probes
         free; clearing it at fetch forces a fresh probe if the request is
         re-scheduled, since the block is unpinned once served.
         """
         st = self._get_or_create_request(kv_request_id)
-        key = OffloadKey(block_hash)
-        if key in st.probes:
-            return st.probes[key]
-        st.probes[key] = None
-        st.unsent.append(key)
+        okey = OffloadKey(key)
+        if okey in st.probes:
+            return st.probes[okey]
+        st.probes[okey] = None
+        st.unsent.append(okey)
         self._flush_pending.add(kv_request_id)
         logger.debug(
-            "P2P LOOKUP client %s: REGISTER kv_request_id=%s hash=%s (unsent=%d)",
+            "P2P LOOKUP client %s: REGISTER kv_request_id=%s key=%s (unsent=%d)",
             self._peer_id,
             kv_request_id,
-            block_hash.hex()[:16],
+            key.hex()[:16],
             len(st.unsent),
         )
         return None
@@ -378,8 +378,8 @@ class ClientRole:
         ``on_schedule_end()``. A request's block set may be discovered
         across several scheduler steps, so more than one LookupMsg can
         go out per kv_request_id — one per step that registered new
-        hashes. register_lookup() de-dups in-flight and already-resolved
-        (req_id, hash) pairs, so each LookupMsg carries only the hashes
+        keys. register_lookup() de-dups in-flight and already-resolved
+        (req_id, key) pairs, so each LookupMsg carries only the keys
         first probed in that step. The peer's lookup phase for the id is
         still closed by exactly one FetchMsg, which the client contract
         guarantees is sent after every lookup for the id has resolved
@@ -387,7 +387,7 @@ class ClientRole:
         the injected ``_send`` callback (queues until ConnectAckMsg if
         needed).
 
-        Only requests that registered new hashes since the last flush are
+        Only requests that registered new keys since the last flush are
         visited — the ``_flush_pending`` work-list avoids scanning every
         live request each scheduler step.
         """
@@ -403,7 +403,7 @@ class ClientRole:
             if st.phase is ClientPhase.REGISTERED:
                 st.phase = ClientPhase.PROBING
             logger.debug(
-                "P2P LOOKUP client %s: SEND LookupMsg kv_request_id=%s hashes=%d",
+                "P2P LOOKUP client %s: SEND LookupMsg kv_request_id=%s keys=%d",
                 self._peer_id,
                 req_id,
                 len(st.unsent),
@@ -412,7 +412,7 @@ class ClientRole:
                 {
                     TYPE_KEY: LookupMsg.TYPE,
                     LookupMsg.KV_REQUEST_ID: req_id,
-                    LookupMsg.BLOCK_HASHES: list(st.unsent),
+                    LookupMsg.KEYS: list(st.unsent),
                 }
             )
             st.unsent = []
@@ -421,7 +421,7 @@ class ClientRole:
     def on_lookup_resp(
         self,
         kv_request_id: str,
-        block_hashes: Sequence[bytes],
+        keys: Sequence[bytes],
         hits: Sequence[bool],
     ) -> None:
         """Apply per-pair hit/miss results from a peer.
@@ -433,17 +433,17 @@ class ClientRole:
         n_hit = sum(1 for hit in hits if hit)
         logger.debug(
             "P2P LOOKUP client %s: RECV LookupRespMsg kv_request_id=%s "
-            "hashes=%d hits=%d misses=%d",
+            "keys=%d hits=%d misses=%d",
             self._peer_id,
             kv_request_id,
-            len(block_hashes),
+            len(keys),
             n_hit,
             len(hits) - n_hit,
         )
         st = self._requests.get(kv_request_id)
         if st is None:
             return
-        for h, hit in zip(block_hashes, hits):
+        for h, hit in zip(keys, hits):
             key = OffloadKey(h)
             if key in st.probes:
                 st.probes[key] = hit

@@ -335,7 +335,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
 
         # Symmetric-P2P consumer (``remote_kv_source`` sub-dict): probe the
         # peer asynchronously. First call registers the (kv_request_id,
-        # block_hash) entry and returns RETRY; flush_pending_lookups()
+        # key) entry and returns RETRY; flush_pending_lookups()
         # in on_schedule_end batches the LookupMsg; a later step's
         # lookup() returns HIT/MISS once LookupRespMsg has arrived.
         # PD path (``remote_prefiller`` sub-dict only) keeps the eager HIT.

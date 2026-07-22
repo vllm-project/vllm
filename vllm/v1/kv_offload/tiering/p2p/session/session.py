@@ -221,14 +221,14 @@ class P2PSession:
         self._client.finish(kv_request_id)
         self._server.finish(kv_request_id)
 
-    def register_lookup(self, kv_request_id: str, block_hash: bytes) -> bool | None:
-        """Register or resolve one (kv_request_id, block_hash) probe.
+    def register_lookup(self, kv_request_id: str, key: bytes) -> bool | None:
+        """Register or resolve one (kv_request_id, key) probe.
 
         Called from the manager's lookup() for symmetric-P2P consumers
         (``remote_kv_source`` sub-dict in kv_transfer_params). See
         ``ClientRole.register_lookup`` for the state-machine contract.
         """
-        return self._client.register_lookup(kv_request_id, block_hash)
+        return self._client.register_lookup(kv_request_id, key)
 
     def flush_pending_lookups(self) -> None:
         """Flush any aggregated symmetric-P2P lookups for this peer.
@@ -369,9 +369,9 @@ class P2PSession:
         elif msg_type == FetchMsg.TYPE:
             FetchMsg.validate(msg)
             kv_request_id = msg[FetchMsg.KV_REQUEST_ID]
-            block_hashes = [
+            keys = [
                 OffloadKey(bh if isinstance(bh, bytes) else bytes(bh))
-                for bh in msg[FetchMsg.BLOCK_HASHES]
+                for bh in msg[FetchMsg.KEYS]
             ]
             block_indexes = msg[FetchMsg.BLOCK_INDEXES]
             # Run the server-role state machine inline as today —
@@ -380,7 +380,7 @@ class P2PSession:
             # the manager (after poll() returns) can replay any parked
             # submit_store batches; their add_stored_blocks calls hit
             # the demand recorded here and submit transfers immediately.
-            self._server.on_fetch(kv_request_id, block_hashes, block_indexes)
+            self._server.on_fetch(kv_request_id, keys, block_indexes)
             self._new_fetch_ids.append(kv_request_id)
         elif msg_type == AbortFetchMsg.TYPE:
             AbortFetchMsg.validate(msg)
@@ -397,20 +397,20 @@ class P2PSession:
         elif msg_type == LookupMsg.TYPE:
             LookupMsg.validate(msg)
             kv_request_id = msg[LookupMsg.KV_REQUEST_ID]
-            block_hashes = [
+            keys = [
                 OffloadKey(bh if isinstance(bh, bytes) else bytes(bh))
-                for bh in msg[LookupMsg.BLOCK_HASHES]
+                for bh in msg[LookupMsg.KEYS]
             ]
-            self._server.on_lookup(kv_request_id, block_hashes)
+            self._server.on_lookup(kv_request_id, keys)
         elif msg_type == LookupRespMsg.TYPE:
             LookupRespMsg.validate(msg)
             kv_request_id = msg[LookupRespMsg.KV_REQUEST_ID]
-            block_hashes = [
+            keys = [
                 OffloadKey(bh if isinstance(bh, bytes) else bytes(bh))
-                for bh in msg[LookupRespMsg.BLOCK_HASHES]
+                for bh in msg[LookupRespMsg.KEYS]
             ]
             hits = msg[LookupRespMsg.HITS]
-            self._client.on_lookup_resp(kv_request_id, block_hashes, hits)
+            self._client.on_lookup_resp(kv_request_id, keys, hits)
         elif msg_type == DisconnectMsg.TYPE:
             if self._conn is not None:
                 self._conn.mark_dead()

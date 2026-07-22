@@ -28,7 +28,7 @@ Block Transfer Flow (happy path)
    block keys + remote indexes where it wants the data written.
    In p2p mode FetchMsg is also the server-side "request finished"
    signal for the id: no further ``cb.create_store_job`` will fire
-   (parked LookupMsg batches are popped, so pending-hash resolution
+   (parked LookupMsg batches are popped, so pending-key resolution
    cannot promote a HIT after this point), all server-side lookup
    state for the id is released, and ``cb.finish_request`` fires on
    each dropped batch. The client emits exactly one FetchMsg per
@@ -184,35 +184,34 @@ class FetchMsg:
     signal for ``kv_request_id``: on receipt the server (a) fires no
     further ``cb.create_store_job`` for this id — parked LookupMsg
     batches are popped, so ``_resolve_pending_lookups`` cannot promote
-    a HIT_PENDING / RETRY hash into a fresh pin after this point — and
+    a HIT_PENDING / RETRY key into a fresh pin after this point — and
     (b) calls ``cb.finish_request(batch.ctx)`` on each dropped batch
     so the TieringManager can release per-batch bookkeeping. In the
-    all-miss case the client emits an empty FetchMsg (``BLOCK_HASHES``
+    all-miss case the client emits an empty FetchMsg (``KEYS``
     and ``BLOCK_INDEXES`` both empty) purely to fire this signal.
 
     Fields:
         KV_REQUEST_ID: Identifies this block transfer request.
-        BLOCK_HASHES: List of block keys (OffloadKey bytes). May be empty.
-        BLOCK_INDEXES: List of remote block indexes (same length as BLOCK_HASHES).
+        KEYS: List of block keys (OffloadKey bytes). May be empty.
+        BLOCK_INDEXES: List of remote block indexes (same length as KEYS).
     """
 
     TYPE = "fetch"
     KV_REQUEST_ID = "kv_request_id"
-    BLOCK_HASHES = "block_hashes"
+    KEYS = "keys"
     BLOCK_INDEXES = "block_indexes"
 
     @staticmethod
     def validate(msg: dict) -> None:
         """Raise ValueError if any field has an invalid type or value."""
         _require(msg, FetchMsg.KV_REQUEST_ID, str)
-        _require_list(msg, FetchMsg.BLOCK_HASHES)
+        _require_list(msg, FetchMsg.KEYS)
         _require_list(msg, FetchMsg.BLOCK_INDEXES)
-        hashes = msg[FetchMsg.BLOCK_HASHES]
+        keys = msg[FetchMsg.KEYS]
         indexes = msg[FetchMsg.BLOCK_INDEXES]
-        if len(hashes) != len(indexes):
+        if len(keys) != len(indexes):
             raise ValueError(
-                f"block_hashes/block_indexes length mismatch: "
-                f"{len(hashes)} vs {len(indexes)}"
+                f"keys/block_indexes length mismatch: {len(keys)} vs {len(indexes)}"
             )
         for idx in indexes:
             if not isinstance(idx, int) or idx < 0:
@@ -220,62 +219,60 @@ class FetchMsg:
 
 
 class LookupMsg:
-    """Client → Server: probe which block hashes the peer holds.
+    """Client → Server: probe which block keys the peer holds.
 
     Sent on the consumer side under symmetric P2P (do_p2p_fetch=true)
     after the consumer has aggregated per-block lookups across a
     scheduler step. The producer replies with one or more LookupRespMsg
-    covering the requested hashes.
+    covering the requested keys.
 
     Fields:
         KV_REQUEST_ID: Identifies this lookup transaction.
-        BLOCK_HASHES: List of block keys (OffloadKey bytes) to probe.
+        KEYS: List of block keys (OffloadKey bytes) to probe.
     """
 
     TYPE = "lookup"
     KV_REQUEST_ID = "kv_request_id"
-    BLOCK_HASHES = "block_hashes"
+    KEYS = "keys"
 
     @staticmethod
     def validate(msg: dict) -> None:
         """Raise ValueError if any field has an invalid type or value."""
         _require(msg, LookupMsg.KV_REQUEST_ID, str)
-        _require_list(msg, LookupMsg.BLOCK_HASHES)
+        _require_list(msg, LookupMsg.KEYS)
 
 
 class LookupRespMsg:
-    """Server → Client: per-hash hit/miss answer for a prior LookupMsg.
+    """Server → Client: per-key hit/miss answer for a prior LookupMsg.
 
-    Carries two parallel arrays of equal length so each (block_hash,
+    Carries two parallel arrays of equal length so each (key,
     hit) pair is self-describing. The producer is free to split or
     coalesce responses across multiple LookupMsgs for the same
     KV_REQUEST_ID — the consumer matches each pair back to its
-    pending entry by (KV_REQUEST_ID, block_hash).
+    pending entry by (KV_REQUEST_ID, key).
 
     Fields:
         KV_REQUEST_ID: The lookup transaction this responds to.
-        BLOCK_HASHES: List of block keys answered by this message.
+        KEYS: List of block keys answered by this message.
         HITS: Parallel list of bools — True if the producer holds the
             corresponding block, False otherwise.
     """
 
     TYPE = "lookup_resp"
     KV_REQUEST_ID = "kv_request_id"
-    BLOCK_HASHES = "block_hashes"
+    KEYS = "keys"
     HITS = "hits"
 
     @staticmethod
     def validate(msg: dict) -> None:
         """Raise ValueError if any field has an invalid type or value."""
         _require(msg, LookupRespMsg.KV_REQUEST_ID, str)
-        _require_list(msg, LookupRespMsg.BLOCK_HASHES)
+        _require_list(msg, LookupRespMsg.KEYS)
         _require_list(msg, LookupRespMsg.HITS)
-        hashes = msg[LookupRespMsg.BLOCK_HASHES]
+        keys = msg[LookupRespMsg.KEYS]
         hits = msg[LookupRespMsg.HITS]
-        if len(hashes) != len(hits):
-            raise ValueError(
-                f"block_hashes/hits length mismatch: {len(hashes)} vs {len(hits)}"
-            )
+        if len(keys) != len(hits):
+            raise ValueError(f"keys/hits length mismatch: {len(keys)} vs {len(hits)}")
         for hit in hits:
             if not isinstance(hit, bool):
                 raise ValueError(f"hits: invalid value {hit!r}")
