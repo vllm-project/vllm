@@ -4,9 +4,50 @@
 from unittest.mock import Mock
 
 import pytest
+import torch.nn as nn
 from transformers import PretrainedConfig
 
 from vllm.multimodal.processing import InputProcessingContext
+
+
+def test_vision_disabled_skips_deepstack_buffers(monkeypatch):
+    from vllm.model_executor.models import qwen3_omni_moe_thinker as qwen3_omni
+    from vllm.model_executor.models.utils import StageMissingLayer
+
+    thinker_config = Mock()
+    thinker_config.vision_config.deepstack_visual_indexes = [0]
+    thinker_config.vision_config.out_hidden_size = 4
+    thinker_config.text_config.hidden_size = 8
+
+    vllm_config = Mock()
+    vllm_config.model_config.hf_config.thinker_config = thinker_config
+    vllm_config.model_config.multimodal_config.mm_encoder_only = False
+    vllm_config.model_config.multimodal_config.get_limit_per_prompt.side_effect = (
+        lambda modality: int(modality == "audio")
+    )
+    vllm_config.scheduler_config.max_num_batched_tokens = 16
+    vllm_config.with_hf_config.return_value = vllm_config
+
+    language_model = nn.Identity()
+    language_model.make_empty_intermediate_tensors = Mock()
+    monkeypatch.setattr(
+        qwen3_omni, "Qwen3OmniMoeAudioEncoder", lambda *args, **kwargs: nn.Identity()
+    )
+    monkeypatch.setattr(
+        qwen3_omni, "Qwen3Omni_VisionTransformer", lambda *args, **kwargs: nn.Identity()
+    )
+    monkeypatch.setattr(
+        qwen3_omni,
+        "Qwen3MoeLLMForCausalLM",
+        lambda *args, **kwargs: language_model,
+    )
+
+    model = qwen3_omni.Qwen3OmniMoeThinkerForConditionalGeneration(
+        vllm_config=vllm_config
+    )
+
+    assert isinstance(model.visual, StageMissingLayer)
+    assert not hasattr(model, "deepstack_input_embeds")
 
 
 # Helper function to print input IDs with coalesced audio/video tokens.
