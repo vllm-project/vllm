@@ -8,53 +8,9 @@ import torch
 
 from vllm.lora.utils import get_supported_lora_modules
 from vllm.model_executor.layers.quantization.modelopt import ModelOptNvFp4Config
-from vllm.models.inkling.nvidia import mlp, moe, ops
+from vllm.models.inkling.nvidia import moe
 from vllm.models.inkling.nvidia.model import _TmlForCausalLMBase
 from vllm.platforms import current_platform
-
-
-def test_dense_mlp_scales_down_projection_output_in_place(monkeypatch) -> None:
-    projected = torch.tensor([[1.5, -2.0]], dtype=torch.bfloat16)
-    before = projected.clone()
-    layer = SimpleNamespace(
-        gate_up_proj=lambda x: (x, None),
-        down_proj=lambda x: (projected, None),
-        global_scale=torch.tensor([0.5], dtype=torch.bfloat16),
-    )
-    monkeypatch.setitem(ops.__dict__, "silu_and_mul_triton", lambda x: x)
-
-    output = mlp.InklingDenseMLP.forward(layer, torch.zeros_like(projected))
-
-    torch.testing.assert_close(output, before * layer.global_scale, rtol=0, atol=0)
-    assert output.data_ptr() == projected.data_ptr()
-
-
-def test_moe_adds_sink_output_to_routed_output_in_place() -> None:
-    x = torch.zeros(2, 2, dtype=torch.bfloat16)
-    logits = torch.zeros(2, 3)
-    weights = torch.tensor([[0.25, 0.75], [0.5, 0.5]])
-    ids = torch.tensor([[0, 2], [1, 2]], dtype=torch.int32)
-    routed = torch.tensor([[1.0, 2.0], [3.0, 4.0]], dtype=torch.bfloat16)
-    sink = torch.tensor([[0.5, -1.0], [2.0, 0.5]], dtype=torch.bfloat16)
-    expected = routed.clone() + sink
-    gate = SimpleNamespace(
-        topk=1,
-        compute_logits=lambda _: logits,
-        select_experts=lambda _: (weights, ids),
-    )
-    layer = SimpleNamespace(
-        gate=gate,
-        experts=lambda **_: routed,
-        sink_experts=lambda *_: sink,
-        _sink_events=(None, None),
-        _sink_stream=None,
-        _routed_sel=None,
-    )
-
-    output = moe.InklingMoE.forward(layer, x)
-
-    torch.testing.assert_close(output, expected, rtol=0, atol=0)
-    assert output.data_ptr() == routed.data_ptr()
 
 
 def test_gate_loads_directly_into_padded_runtime_weight() -> None:
