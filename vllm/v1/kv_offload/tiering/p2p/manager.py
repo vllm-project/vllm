@@ -655,8 +655,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
             # toward the dead peer so lookup() returns MISS (local prefill)
             # instead of RETRY forever — even if a fresh session to the same
             # peer is later opened by another request.
-            for kv_request_id in close_result.failed_probes:
-                self._failed_req_ids.add(kv_request_id)
+            self._failed_req_ids.update(close_result.failed_probes)
             # Release the TieringManager's per-request bookkeeping for the
             # dead session's synthetic lookups on the next serve_external_requests.
             self._failed_serve_ctxs.extend(close_result.failed_serves)
