@@ -112,6 +112,22 @@ def test_add_requests():
         assert len(scheduler.waiting) == i + 1
 
 
+def test_queue_informed_lru_scans_at_most_max_num_running_reqs():
+    scheduler = create_scheduler(max_num_seqs=2, enable_prefix_caching=True)
+    requests = create_requests(num_requests=3)
+    for request in requests:
+        scheduler.add_request(request)
+
+    peek = Mock(side_effect=({1}, {2}))
+    scheduler.kv_cache_manager.peek_computed_block_ids = peek
+
+    assert scheduler.kv_cache_manager._get_retained_block_ids() == {
+        1,
+        2,
+    }
+    assert [call.args[0] for call in peek.call_args_list] == requests[:2]
+
+
 def test_finish_request():
     scheduler = create_scheduler()
     requests = create_requests(num_requests=10)

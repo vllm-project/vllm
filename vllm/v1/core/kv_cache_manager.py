@@ -2,13 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import itertools
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from typing import Literal, overload
 
 from vllm.distributed.kv_events import BlockStored, KVCacheEvent
 from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv
+from vllm.v1.core.block_pool import RetainedBlockIds
 from vllm.v1.core.kv_cache_coordinator import get_kv_cache_coordinator
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import KVCacheBlock, KVCacheBlockCopy
@@ -127,6 +128,8 @@ class KVCacheManager:
         pcp_world_size: int = 1,
         metrics_collector: KVCacheMetricsCollector | None = None,
         watermark: float = 0.0,
+        waiting_requests: Iterable[Request] | None = None,
+        max_waiting_requests: int = 0,
     ) -> None:
         self.max_model_len = max_model_len
         # When unset, fall back to `max_model_len` so the recycling-aware cap
@@ -140,6 +143,9 @@ class KVCacheManager:
         self.use_eagle = use_eagle
         self.log_stats = log_stats
         self.metrics_collector = metrics_collector
+        assert max_waiting_requests >= 0
+        self.waiting_requests = waiting_requests
+        self.max_waiting_requests = max_waiting_requests
         # FIXME: make prefix cache stats conditional on log_stats. We still need
         # this comment because when the log stats is enabled there are still
         # potential configs we could expose in the future.
@@ -286,6 +292,31 @@ class KVCacheManager:
 
         blocks = self.create_kv_cache_blocks(computed_blocks)
         return blocks, num_new_computed_tokens, shared_prefix_boundary
+
+    def peek_computed_block_ids(self, request: Request) -> set[int]:
+        """Read locally cached prefix block IDs without recording a cache hit."""
+        if not self.enable_caching or request.skip_reading_prefix_cache:
+            return set()
+        computed_blocks, _, _ = self.coordinator.find_longest_cache_hit(
+            request.block_hashes, request.num_tokens - 1
+        )
+        return {
+            block.block_id
+            for group_blocks in computed_blocks
+            for block in group_blocks
+            if not block.is_null
+        }
+
+    def _get_retained_block_ids(self) -> set[int]:
+        if self.waiting_requests is None:
+            return set()
+
+        retained_block_ids: set[int] = set()
+        for request in itertools.islice(
+            self.waiting_requests, self.max_waiting_requests
+        ):
+            retained_block_ids.update(self.peek_computed_block_ids(request))
+        return retained_block_ids
 
     def allocate_slots(
         self,
@@ -472,6 +503,11 @@ class KVCacheManager:
             # Cannot allocate new blocks
             return None
 
+        retained_block_ids = (
+            RetainedBlockIds(self._get_retained_block_ids)
+            if self.waiting_requests is not None
+            else None
+        )
         if (
             new_computed_block_list is not self.empty_kv_cache_blocks.blocks
             or num_external_computed_tokens > 0
@@ -483,6 +519,7 @@ class KVCacheManager:
                 new_computed_blocks=new_computed_block_list,
                 num_local_computed_tokens=num_local_computed_tokens,
                 num_external_computed_tokens=num_external_computed_tokens,
+                retained_block_ids=retained_block_ids,
             )
 
         new_blocks = self.coordinator.allocate_new_blocks(
@@ -490,6 +527,7 @@ class KVCacheManager:
             num_tokens_need_slot,
             num_tokens_main_model,
             num_encoder_tokens,
+            retained_block_ids,
         )
 
         # P/D: delay caching blocks if we have to recv from

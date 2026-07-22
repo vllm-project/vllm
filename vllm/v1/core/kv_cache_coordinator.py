@@ -6,7 +6,7 @@ from typing import NamedTuple
 
 from vllm import envs
 from vllm.utils.math_utils import cdiv
-from vllm.v1.core.block_pool import BlockPool
+from vllm.v1.core.block_pool import BlockPool, RetainedBlockIds
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
@@ -195,6 +195,7 @@ class KVCacheCoordinator(ABC):
         new_computed_blocks: tuple[Sequence[KVCacheBlock], ...],
         num_local_computed_tokens: int,
         num_external_computed_tokens: int,
+        retained_block_ids: RetainedBlockIds | None = None,
     ) -> None:
         """
         Add the new computed blocks to the request. Optionally allocate new
@@ -206,6 +207,7 @@ class KVCacheCoordinator(ABC):
                 prefix cache.
             num_local_computed_tokens: The number of local computed tokens.
             num_external_computed_tokens: The number of external computed tokens.
+            retained_block_ids: Block IDs retained during this allocation.
         """
         # A running request is already tracked in num_cached_block and won't
         # have new prefix-cache hits, so this is a no-op for it.
@@ -233,6 +235,7 @@ class KVCacheCoordinator(ABC):
                     request_id,
                     num_local_computed_tokens,
                     num_external_computed_tokens,
+                    retained_block_ids,
                 )
 
     def allocate_new_blocks(
@@ -241,6 +244,7 @@ class KVCacheCoordinator(ABC):
         num_tokens: int,
         num_tokens_main_model: int,
         num_encoder_tokens: int = 0,
+        retained_block_ids: RetainedBlockIds | None = None,
     ) -> tuple[list[KVCacheBlock], ...]:
         """
         Allocate new blocks for the request to give it at least `num_tokens`
@@ -255,6 +259,7 @@ class KVCacheCoordinator(ABC):
                 with spec decode, it is num_tokens - num_lookahead_tokens.
             num_encoder_tokens: The number of encoder tokens for allocating
                 blocks for cross-attention.
+            retained_block_ids: Block IDs retained during this allocation.
 
         Returns:
             The new allocated blocks.
@@ -266,6 +271,7 @@ class KVCacheCoordinator(ABC):
                 if isinstance(manager, CrossAttentionManager)
                 else num_tokens,
                 num_tokens_main_model,
+                retained_block_ids,
             )
             for manager in self.single_type_managers
         )

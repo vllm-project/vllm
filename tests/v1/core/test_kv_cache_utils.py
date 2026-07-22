@@ -463,6 +463,20 @@ def test_free_kv_cache_block_queue_popleft_n():
         assert block.next_free_block is None
 
 
+def test_free_kv_cache_block_queue_popleft_n_with_retained_blocks():
+    blocks = [KVCacheBlock(block_id=i) for i in range(5)]
+    for block in blocks:
+        block.set_block_hash(
+            make_block_hash_with_group_id(BlockHash(bytes([block.block_id])), 0)
+        )
+    queue = FreeKVCacheBlockQueue(blocks)
+
+    selected = queue.popleft_n(3, {0, 2, 4})
+
+    assert [block.block_id for block in selected] == [1, 3, 0]
+    assert [block.block_id for block in queue.get_all_free_blocks()] == [2, 4]
+
+
 def test_free_kv_cache_block_queue_get_all_free_blocks():
     # Create a list of KVCacheBlock objects
     blocks = [KVCacheBlock(block_id=i) for i in range(5)]

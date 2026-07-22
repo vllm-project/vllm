@@ -270,11 +270,16 @@ class FreeKVCacheBlockQueue:
         self.num_free_blocks -= 1
         return first_block
 
-    def popleft_n(self, n: int) -> list[KVCacheBlock]:
-        """Pop the first n free blocks and reduce num_free_blocks by n.
+    def popleft_n(
+        self,
+        n: int,
+        retained_block_ids: set[int] | None = None,
+    ) -> list[KVCacheBlock]:
+        """Pop n free blocks, deferring retained cached blocks when possible.
 
         Args:
             n: The number of blocks to pop.
+            retained_block_ids: Cached blocks to retain while other blocks remain.
 
         Returns:
             A list of n free blocks.
@@ -282,6 +287,28 @@ class FreeKVCacheBlockQueue:
         if n == 0:
             return []
         assert self.num_free_blocks >= n
+
+        if retained_block_ids:
+            selected: list[KVCacheBlock] = []
+            retained: list[KVCacheBlock] = []
+            for block in self.iter_blocks_after(None):
+                if (
+                    block.block_hash is not None
+                    and block.block_id in retained_block_ids
+                ):
+                    retained.append(block)
+                else:
+                    selected.append(block)
+                    if len(selected) == n:
+                        break
+
+            if len(selected) < n:
+                selected.extend(retained[: n - len(selected)])
+
+            for block in selected:
+                self.remove(block)
+            return selected
+
         self.num_free_blocks -= n
 
         curr_block = self.fake_free_list_head.next_free_block
