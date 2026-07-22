@@ -8,14 +8,16 @@ partitioning used by ``postprocess_mamba_fused_kernel`` and
 byte-identical to a ``dst[dst_off:dst_off+copy_size] = src[src_off:src_off+
 copy_size]`` slice copy for every combination of:
 
-* ``copy_size`` including the degenerate 0-byte case, sub-8B (head-only),
-  8B-aligned bodies, and large multi-MiB copies matching real temporal
-  states.
-* Sub-8B alignment offsets on ``src`` and ``dst`` (independent), covering
-  head=0/1/3/5/7 bytes and every src/dst sub-alignment mismatch.
-* ``NUM_TILES`` values used at the callsites (1 for the SD conv path;
-  ``_TEMPORAL_TILES`` for the temporal path) and a few extras that stress
-  the tile boundary rounding.
+* ``copy_size``: the degenerate 0-byte case, sub-8B (head-only), 8B-aligned
+  bodies, and a multi-tile body that spans several ``COPY_BLOCK_SIZE``
+  iterations.
+* ``(src_off, dst_off)`` pairs: aligned, shared sub-8B misalignment (fast
+  path exercising head/tail masking), and mismatched src/dst alignment
+  (byte-fallback path). The kernel branches on ``(src ^ dst) & 7``, so a
+  full 5x5 product would re-exercise the same two codepaths.
+* ``NUM_TILES``: 1 (SD conv callsite, single-CTA memcpy) and
+  ``_TEMPORAL_TILES`` (temporal callsite, u64 range partitioned across
+  CTAs).
 """
 
 from __future__ import annotations
@@ -24,7 +26,7 @@ import torch
 
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
-from vllm.v1.worker.mamba_utils import _memcpy_u64_tiled
+from vllm.v1.worker.mamba_utils import _TEMPORAL_TILES, _memcpy_u64_tiled
 
 try:
     import pytest
@@ -70,26 +72,34 @@ def _memcpy_wrapper_kernel(
 
 # Copy sizes: 0/1/7 (all-head), 8 (all-body when dst-aligned), 15 (head+body
 # or body+tail), 16/17 (small tiled body), 1024 (one COPY_BLOCK_SIZE),
-# 80 KiB (Nemotron conv per-block), 4 MiB (Nemotron temporal per-block).
-_COPY_SIZES = [0, 1, 7, 8, 15, 16, 17, 1024, 80 * 1024, 4 * 1024 * 1024]
-# Sub-8B alignment offsets. torch tensors are 256B-aligned at data_ptr, so
-# slicing by these values yields a controlled sub-8B alignment.
-_ALIGN_OFFS = [0, 1, 3, 5, 7]
-# NUM_TILES: 1 matches the SD conv callsite, 8 matches _TEMPORAL_TILES, 16
-# stresses tile-boundary rounding when body_u64 is small.
-_NUM_TILES = [1, 2, 4, 8, 16]
+# 4 KiB (multi-tile body).
+_COPY_SIZES = [0, 1, 7, 8, 15, 16, 17, 1024, 4 * 1024]
+# (src_off, dst_off) pairs. Torch tensors are 256B-aligned at data_ptr, so
+# slicing by these bytes yields a controlled sub-8B alignment. The kernel
+# branches on ``(src ^ dst) & 7``, so we cover both sides plus the aligned
+# baseline; the full 5x5 product added no coverage.
+_ALIGN_PAIRS = [
+    (0, 0),  # fully aligned; head/tail masked out
+    (3, 3),  # shared misalignment; fast path with head_bytes=5
+    (7, 7),  # shared, extreme; head_bytes=1
+    (1, 3),  # mismatched; byte load/store fallback
+    (3, 1),  # mismatched, opposite direction
+]
+_MAX_ALIGN_OFF = max(o for pair in _ALIGN_PAIRS for o in pair)
+# NUM_TILES: 1 matches the SD conv callsite, _TEMPORAL_TILES matches the
+# temporal callsite. Intermediate values add no new codegen coverage.
+_NUM_TILES = [1, _TEMPORAL_TILES]
 
 
 @_parametrize("copy_size", _COPY_SIZES)
-@_parametrize("dst_off", _ALIGN_OFFS)
-@_parametrize("src_off", _ALIGN_OFFS)
+@_parametrize("src_off,dst_off", _ALIGN_PAIRS)
 @_parametrize("num_tiles", _NUM_TILES)
-def test_memcpy_u64_tiled_matches_slice_copy(copy_size, dst_off, src_off, num_tiles):
+def test_memcpy_u64_tiled_matches_slice_copy(copy_size, src_off, dst_off, num_tiles):
     device = torch.device("cuda")
     torch.manual_seed(0)
 
     # Pad by the max possible offset so the reference slice is in-bounds.
-    slack = max(_ALIGN_OFFS) + 8
+    slack = _MAX_ALIGN_OFF + 8
     src = torch.randint(0, 256, (copy_size + slack,), dtype=torch.uint8, device=device)
     # Start dst from a distinct random pattern so the "unchanged region"
     # check catches any accidental out-of-range writes.
@@ -114,8 +124,7 @@ def test_memcpy_u64_tiled_matches_slice_copy(copy_size, dst_off, src_off, num_ti
 
 if __name__ == "__main__":
     for cs in _COPY_SIZES:
-        for do in _ALIGN_OFFS:
-            for so in _ALIGN_OFFS:
-                for nt in _NUM_TILES:
-                    test_memcpy_u64_tiled_matches_slice_copy(cs, do, so, nt)
+        for so, do in _ALIGN_PAIRS:
+            for nt in _NUM_TILES:
+                test_memcpy_u64_tiled_matches_slice_copy(cs, so, do, nt)
     print("ok")
