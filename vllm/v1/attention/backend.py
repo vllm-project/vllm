@@ -152,6 +152,10 @@ class AttentionBackend(ABC):
         return (cls.__module__, cls.__qualname__)
 
     @classmethod
+    def get_backend_variants(cls) -> tuple[type["AttentionBackend"], ...]:
+        return (cls,)
+
+    @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
         return []
 
@@ -461,6 +465,9 @@ class CommonAttentionMetadata:
     (num_computed_tokens < num_prompt_tokens). Used by some backends to
     distinguish actual decodes from short extends."""
 
+    use_decode_backend: bool = False
+    """Whether a composed backend should use its pure-decode implementation."""
+
     seq_lens_cpu_upper_bound: torch.Tensor | None = None
     """(batch_size,) CPU upper bound on seq_lens. Precise for prefill rows
     and for all rows outside async spec decode; optimistic for async-spec
@@ -590,6 +597,7 @@ class CommonAttentionMetadata:
             dcp_local_seq_lens=maybe_slice_reqs(self.dcp_local_seq_lens),
             dcp_local_seq_lens_cpu=maybe_slice_reqs(self.dcp_local_seq_lens_cpu),
             is_prefilling=maybe_slice_reqs(self.is_prefilling),
+            use_decode_backend=self.use_decode_backend,
             rswa_prefix_lens=maybe_slice_reqs(self.rswa_prefix_lens),
         )
 
@@ -878,6 +886,11 @@ class AttentionImplBase(ABC, Generic[T]):
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):
         pass
+
+    def get_impl_for_metadata(
+        self, attn_metadata: AttentionMetadata
+    ) -> "AttentionImplBase":
+        return self
 
 
 class AttentionImpl(AttentionImplBase[T], Generic[T]):

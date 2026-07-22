@@ -2415,6 +2415,7 @@ class GPUModelRunner(
             slot_mapping=slot_mapping_gid_0,
             causal=True,
             is_prefilling=is_prefilling,
+            use_decode_backend=use_decode_backend,
             positions=self.positions[:num_tokens_padded],
             mm_req_doc_ranges=req_doc_ranges,
             rswa_prefix_lens=rswa_prefix_lens,
@@ -2457,9 +2458,7 @@ class GPUModelRunner(
             ubid: int | None = None,
         ) -> None:
             attn_group = self.attn_groups[kv_cache_gid][attn_gid]
-            builder = attn_group.get_metadata_builder(
-                ubid or 0, use_decode_backend=use_decode_backend
-            )
+            builder = attn_group.get_metadata_builder(ubid or 0)
             kv_cache_spec = kv_cache_groups[kv_cache_gid].kv_cache_spec
             if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
                 kv_cache_spec = kv_cache_spec.kv_cache_specs[attn_group.layer_names[0]]
@@ -4397,7 +4396,6 @@ class GPUModelRunner(
                 ubatch_slices=ubatch_slices_padded,
                 slot_mapping=slot_mappings,
                 skip_compiled=has_encoder_input,
-                use_decode_backend=use_decode_backend,
             ),
             record_function_or_nullcontext("gpu_model_runner: forward"),
             self.maybe_get_kv_connector_output(
@@ -6982,7 +6980,6 @@ class GPUModelRunner(
             """
 
             attn_backend: type[AttentionBackend]
-            decode_attn_backend: type[AttentionBackend]
             kv_cache_spec: KVCacheSpec
             num_heads_q: int
 
@@ -7002,17 +6999,12 @@ class GPUModelRunner(
             # layer.
             for layer_name in kv_cache_group_spec.layer_names:
                 attn_backend = layers[layer_name].get_attn_backend()
-                decode_attn_backend = layers[layer_name].get_decode_attn_backend()
 
                 if layer_name in self.kv_sharing_fast_prefill_eligible_layers:
                     attn_backend = create_fast_prefill_custom_backend(
                         "FastPrefill",
                         attn_backend,  # type: ignore[arg-type]
                     )
-                    decode_attn_backend = create_fast_prefill_custom_backend(
-                        "FastPrefill", decode_attn_backend
-                    )
-                alt_cls_name = decode_attn_backend.full_cls_name()
 
                 full_cls_name = attn_backend.full_cls_name()
                 layer_kv_cache_spec = kv_cache_group_spec.kv_cache_spec
@@ -7025,10 +7017,9 @@ class GPUModelRunner(
                 # fallback can never spuriously merge them with attention
                 # layers.
                 num_heads_q = getattr(layers[layer_name], "num_heads", 0)
-                key = (full_cls_name, layer_kv_cache_spec, num_heads_q, alt_cls_name)
+                key = (full_cls_name, layer_kv_cache_spec, num_heads_q)
                 attn_backends[key] = AttentionGroupKey(
                     attn_backend,
-                    decode_attn_backend,
                     layer_kv_cache_spec,
                     num_heads_q,
                 )
@@ -7038,10 +7029,7 @@ class GPUModelRunner(
                 {
                     backend
                     for group_key in attn_backends.values()
-                    for backend in (
-                        group_key.attn_backend,
-                        group_key.decode_attn_backend,
-                    )
+                    for backend in group_key.attn_backend.get_backend_variants()
                 },
             )
 
@@ -7053,7 +7041,6 @@ class GPUModelRunner(
             for key, layer_names in attn_backends_map.items():
                 attn_group = AttentionGroup(
                     backend=key.attn_backend,
-                    decode_backend=key.decode_attn_backend,
                     layer_names=layer_names,
                     kv_cache_spec=key.kv_cache_spec,
                     kv_cache_group_id=kv_cache_group_id,
@@ -7083,7 +7070,7 @@ class GPUModelRunner(
             self.attn_groups.append(create_attn_groups(attn_backend_map, i))
 
         self.has_distinct_decode_attn_backend = any(
-            group.decode_backend is not group.backend
+            len(group.backend.get_backend_variants()) > 1
             for group in self._attn_group_iterator()
         )
 
@@ -7189,17 +7176,10 @@ class GPUModelRunner(
         """
         min_none_high = lambda a, b: a if b is None else b if a is None else min(a, b)
 
-        reorder_batch_thresholds: list[int | None] = []
-        for group in self._attn_group_iterator():
-            reorder_batch_thresholds.append(
-                group.get_metadata_builder().reorder_batch_threshold
-            )
-            if group.decode_backend is not group.backend:
-                reorder_batch_thresholds.append(
-                    group.get_metadata_builder(
-                        use_decode_backend=True
-                    ).reorder_batch_threshold
-                )
+        reorder_batch_thresholds: list[int | None] = [
+            group.get_metadata_builder().reorder_batch_threshold
+            for group in self._attn_group_iterator()
+        ]
         # If there are no attention groups (attention-free model) or no backend
         # reports a threshold, leave reordering disabled.
         if len(reorder_batch_thresholds) == 0:

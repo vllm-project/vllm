@@ -449,7 +449,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.kv_cache_config, self.vllm_config, self.device
         )
         self.has_distinct_decode_attn_backend = any(
-            group.decode_backend is not group.backend
+            len(group.backend.get_backend_variants()) > 1
             for groups in self.attn_groups
             for group in groups
         )
@@ -1367,7 +1367,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 num_tokens=input_batch.num_tokens_after_padding,
                 has_lora=self.lora_config is not None,
                 num_active_loras=batch_desc.num_active_loras,
-                use_decode_backend=batch_desc.use_decode_backend,
             )
 
             with set_forward_context(
@@ -1380,7 +1379,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 slot_mapping=slot_mappings_by_layer,
                 skip_compiled=skip_compiled,
                 is_padding=input_batch.is_padding,
-                use_decode_backend=batch_desc.use_decode_backend,
             ):
                 self.kv_connector.pre_forward(scheduler_output)
                 if batch_desc.cg_mode == CUDAGraphMode.PIECEWISE:

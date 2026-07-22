@@ -8,17 +8,9 @@ from unittest.mock import patch
 import pytest
 import torch
 
-from vllm.config import (
-    CUDAGraphMode,
-    DeviceConfig,
-    VllmConfig,
-    set_current_vllm_config,
-)
+from vllm.config import DeviceConfig, VllmConfig, set_current_vllm_config
 from vllm.config.attention import AttentionConfig
-from vllm.model_executor.layers.attention.attention import (
-    Attention,
-    _select_attention_impl,
-)
+from vllm.model_executor.layers.attention.attention import Attention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -28,6 +20,7 @@ from vllm.v1.attention.backend import (
 )
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.attention.backends.utils import (
+    create_composite_attention_backend,
     get_kv_cache_layout,
     kv_layouts_compatible,
     set_kv_cache_layout,
@@ -156,7 +149,7 @@ class _Backend(AttentionBackend):
 
     @staticmethod
     def get_builder_cls():
-        raise NotImplementedError
+        return _Builder
 
     @staticmethod
     def get_supported_kernel_block_sizes():
@@ -260,7 +253,10 @@ def test_flexible_general_backend_adopts_decode_required_layout():
                 attn_backend=_FlexibleGeneralBackend,
             )
 
-        assert layer.get_decode_attn_backend() is _HNDDecodeBackend
+        assert layer.get_attn_backend().get_backend_variants() == (
+            _FlexibleGeneralBackend,
+            _HNDDecodeBackend,
+        )
         assert get_kv_cache_layout() == "HND"
     finally:
         set_kv_cache_layout(None)
@@ -287,6 +283,8 @@ def test_layout_compatibility_rejects_unsafe_pairings(decode_backend):
 
 
 class _Builder:
+    supports_update_block_table = False
+
     def __init__(self, kv_cache_spec, layer_names, vllm_config, device):
         self.reorder_batch_threshold = 1
 
@@ -295,10 +293,10 @@ class _Builder:
         return AttentionCGSupport.ALWAYS
 
     def build(self, common_prefix_len, common_attn_metadata, **kwargs):
-        return type(self).__name__
+        return SimpleNamespace(builder=type(self).__name__)
 
     def build_for_cudagraph_capture(self, common_attn_metadata):
-        return type(self).__name__
+        return SimpleNamespace(builder=type(self).__name__)
 
 
 class _GeneralBuilder(_Builder):
@@ -346,44 +344,40 @@ def _attention_spec(block_size=64):
     )
 
 
-def test_attention_group_selects_builder_for_routed_backend():
+def test_composite_backend_owns_both_builders():
+    backend = create_composite_attention_backend(_GeneralBackend, _DecodeBackend)
     group = AttentionGroup(
-        backend=_GeneralBackend,
-        decode_backend=_DecodeBackend,
+        backend=backend,
         layer_names=["layer"],
         kv_cache_spec=_attention_spec(),
         kv_cache_group_id=0,
     )
     group.create_metadata_builders(None, torch.device("cpu"))
 
-    assert isinstance(group.get_metadata_builder(), _GeneralBuilder)
-    assert isinstance(
-        group.get_metadata_builder(use_decode_backend=True), _DecodeBuilder
-    )
+    builder = group.get_metadata_builder()
+    assert isinstance(builder.general_builder, _GeneralBuilder)
+    assert isinstance(builder.decode_builder, _DecodeBuilder)
 
 
 def test_attention_group_accepts_same_backend_for_both_roles():
+    backend = create_composite_attention_backend(_GeneralBackend, _GeneralBackend)
     group = AttentionGroup(
-        backend=_GeneralBackend,
-        decode_backend=_GeneralBackend,
+        backend=backend,
         layer_names=["layer"],
         kv_cache_spec=_attention_spec(),
         kv_cache_group_id=0,
     )
     group.create_metadata_builders(None, torch.device("cpu"))
 
-    assert group.decode_backend is _GeneralBackend
-    assert (
-        group.get_metadata_builder(use_decode_backend=True)
-        is group.get_metadata_builder()
-    )
+    assert group.backend is _GeneralBackend
+    assert isinstance(group.get_metadata_builder(), _GeneralBuilder)
 
 
 def test_kernel_block_size_is_supported_by_both_routed_backends():
     spec = _attention_spec()
+    backend = create_composite_attention_backend(_GeneralBackend, _DecodeBackend)
     group = AttentionGroup(
-        backend=_GeneralBackend,
-        decode_backend=_DecodeBackend,
+        backend=backend,
         layer_names=["layer"],
         kv_cache_spec=spec,
         kv_cache_group_id=0,
@@ -399,9 +393,9 @@ def test_kernel_block_size_is_supported_by_both_routed_backends():
 
 def test_mrv2_builds_metadata_with_the_routed_backend():
     spec = _attention_spec()
+    backend = create_composite_attention_backend(_GeneralBackend, _DecodeBackend)
     group = AttentionGroup(
-        backend=_GeneralBackend,
-        decode_backend=_DecodeBackend,
+        backend=backend,
         layer_names=["layer"],
         kv_cache_spec=spec,
         kv_cache_group_id=0,
@@ -429,24 +423,25 @@ def test_mrv2_builds_metadata_with_the_routed_backend():
     general_metadata = build_attn_metadata(**common_args)
     decode_metadata = build_attn_metadata(**common_args, use_decode_backend=True)
 
-    assert general_metadata["layer"] == "_GeneralBuilder"
-    assert decode_metadata["layer"] == "_DecodeBuilder"
+    assert general_metadata["layer"].builder == "_GeneralBuilder"
+    assert not general_metadata["layer"]._use_decode_backend
+    assert decode_metadata["layer"].builder == "_DecodeBuilder"
+    assert decode_metadata["layer"]._use_decode_backend
 
 
 class _Layer(AttentionLayerBase):
     def get_attn_backend(self):
-        return _GeneralBackend
-
-    def get_decode_attn_backend(self):
-        return _DecodeBackend
+        return create_composite_attention_backend(_GeneralBackend, _DecodeBackend)
 
     def get_kv_cache_spec(self, vllm_config):
         return _attention_spec()
 
 
 class _UniformDecodeLayer(_Layer):
-    def get_decode_attn_backend(self):
-        return _UniformDecodeBackend
+    def get_attn_backend(self):
+        return create_composite_attention_backend(
+            _GeneralBackend, _UniformDecodeBackend
+        )
 
 
 def test_mrv2_groups_general_and_decode_backends_together():
@@ -463,8 +458,10 @@ def test_mrv2_groups_general_and_decode_backends_together():
         kv_cache_config, config, torch.device("cpu")
     )
 
-    assert groups[0][0].backend is _GeneralBackend
-    assert groups[0][0].decode_backend is _DecodeBackend
+    assert groups[0][0].backend.get_backend_variants() == (
+        _GeneralBackend,
+        _DecodeBackend,
+    )
     assert kernel_block_sizes == [32]
 
 
@@ -481,43 +478,22 @@ def test_decode_backend_limits_cudagraph_support():
     _, cg_support, _ = init_attn_backend(kv_cache_config, config, torch.device("cpu"))
 
     assert cg_support.min_cg_support == AttentionCGSupport.UNIFORM_BATCH
-    assert cg_support.min_cg_attn_backend == "_UniformDecodeBackend"
+    assert cg_support.min_cg_attn_backend.endswith("Composite")
 
 
-@pytest.mark.parametrize(
-    ("use_decode_backend", "expected"),
-    [(False, "general"), (True, "decode")],
-)
-def test_select_attention_impl(use_decode_backend, expected):
-    layer = SimpleNamespace(impl="general", decode_impl="decode")
-    context = SimpleNamespace(
-        use_decode_backend=use_decode_backend,
-        cudagraph_runtime_mode=CUDAGraphMode.NONE,
-    )
-    with patch(
-        "vllm.model_executor.layers.attention.attention.get_forward_context",
-        return_value=context,
-    ):
-        assert _select_attention_impl(layer) == expected
+@pytest.mark.parametrize("use_decode_backend", [False, True])
+def test_composite_impl_selects_from_metadata(use_decode_backend):
+    backend = create_composite_attention_backend(_GeneralBackend, _DecodeBackend)
+    impl = backend.get_impl_cls()(8, 128, 0.1)
+    metadata = SimpleNamespace(_use_decode_backend=use_decode_backend)
 
+    selected = impl.get_impl_for_metadata(metadata)
 
-def test_decode_backend_is_selected_in_full_cudagraph():
-    layer = SimpleNamespace(impl="general", decode_impl="decode")
-    context = SimpleNamespace(
-        use_decode_backend=True,
-        cudagraph_runtime_mode=CUDAGraphMode.FULL,
-    )
-    with patch(
-        "vllm.model_executor.layers.attention.attention.get_forward_context",
-        return_value=context,
-    ):
-        assert _select_attention_impl(layer) == "decode"
+    assert selected is (impl.decode_impl if use_decode_backend else impl.general_impl)
 
 
 def test_dcp_checks_decode_implementation():
-    general_impl = SimpleNamespace(need_to_return_lse_for_decode=False)
-    decode_impl = SimpleNamespace(need_to_return_lse_for_decode=True)
-    layer = SimpleNamespace(impl=general_impl, decode_impl=decode_impl)
+    layer = SimpleNamespace(impl=SimpleNamespace(need_to_return_lse_for_decode=True))
     config = SimpleNamespace(
         parallel_config=SimpleNamespace(
             prefill_context_parallel_size=1,

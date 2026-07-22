@@ -34,7 +34,6 @@ from vllm.utils.torch_utils import (
 )
 from vllm.v1.attention.backend import (
     AttentionBackend,
-    AttentionImpl,
     AttentionMetadata,
     AttentionType,
 )
@@ -486,8 +485,16 @@ class Attention(nn.Module, AttentionLayerBase):
                         f"matching KV layout."
                     )
 
+        if selected_decode_backend is not self.attn_backend:
+            from vllm.v1.attention.backends.utils import (
+                create_composite_attention_backend,
+            )
+
+            self.attn_backend = create_composite_attention_backend(
+                self.attn_backend, selected_decode_backend
+            )
+
         impl_cls = self.attn_backend.get_impl_cls()
-        decode_impl_cls = selected_decode_backend.get_impl_cls()
         self.impl = impl_cls(  # type: ignore[assignment]  # impl_cls always returns an AttentionImpl subclass
             num_heads,
             head_size,
@@ -501,24 +508,7 @@ class Attention(nn.Module, AttentionLayerBase):
             kv_sharing_target_layer_name,
             **extra_impl_args,
         )
-        if selected_decode_backend is self.attn_backend:
-            self.decode_impl = self.impl
-        else:
-            self.decode_impl = decode_impl_cls(  # type: ignore[assignment]
-                num_heads,
-                head_size,
-                scale,
-                num_kv_heads,
-                alibi_slopes,
-                sliding_window,
-                kv_cache_dtype,
-                logits_soft_cap,
-                attn_type,
-                kv_sharing_target_layer_name,
-                **extra_impl_args,
-            )
         self.backend = AttentionBackendEnum[self.attn_backend.get_name()]
-        self.decode_attn_backend = selected_decode_backend
         self.dtype = dtype
 
         # For cuda-alike (CUDA and ROCM) and cpu platforms, we control how
@@ -556,7 +546,6 @@ class Attention(nn.Module, AttentionLayerBase):
         self.query_quant = None
         if (
             self.impl.supports_quant_query_input
-            and self.decode_impl.supports_quant_query_input
             and (
                 self.kv_cache_dtype.startswith("fp8") or self.kv_cache_dtype == "nvfp4"
             )
@@ -691,8 +680,6 @@ class Attention(nn.Module, AttentionLayerBase):
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):
         self.impl.process_weights_after_loading(act_dtype)
-        if self.decode_impl is not self.impl:
-            self.decode_impl.process_weights_after_loading(act_dtype)
 
         # If we should not load quant weights, we initialize the scales to 1.0
         # as the default value. See [Note: Register q/k/v/prob scales in state dict]
@@ -707,9 +694,6 @@ class Attention(nn.Module, AttentionLayerBase):
 
     def get_attn_backend(self) -> type[AttentionBackend]:
         return self.attn_backend
-
-    def get_decode_attn_backend(self) -> type[AttentionBackend]:
-        return self.decode_attn_backend
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec | None:
         # Block size may get updated after model loading, refresh it
@@ -864,15 +848,6 @@ def get_attention_context(
     return attn_metadata, attn_layer, kv_cache, layer_slot_mapping
 
 
-def _select_attention_impl(
-    attn_layer: "Attention | MLAAttention",
-) -> AttentionImpl:
-    forward_context = get_forward_context()
-    if not forward_context.use_decode_backend:
-        return attn_layer.impl
-    return getattr(attn_layer, "decode_impl", attn_layer.impl)
-
-
 def unified_kv_cache_update(
     key: torch.Tensor,
     value: torch.Tensor,
@@ -883,9 +858,11 @@ def unified_kv_cache_update(
     the data dependency between them to ensure torch.compile preserves ordering.
     """
     layer_name = _resolve_layer_name(layer_name)
-    _, attn_layer, kv_cache, layer_slot_mapping = get_attention_context(layer_name)
+    attn_metadata, attn_layer, kv_cache, layer_slot_mapping = get_attention_context(
+        layer_name
+    )
     if layer_slot_mapping is not None:
-        impl = _select_attention_impl(attn_layer)
+        impl = attn_layer.impl.get_impl_for_metadata(attn_metadata)
         assert hasattr(impl, "do_kv_cache_update"), (
             f"{impl.__class__.__name__} does not support kv cache update"
         )
@@ -935,8 +912,7 @@ def unified_attention_with_output(
     layer_name = _resolve_layer_name(layer_name)
     attn_metadata, self, kv_cache, _ = get_attention_context(layer_name)
 
-    impl = _select_attention_impl(self)
-    impl.forward(
+    self.impl.forward(
         self,
         query,
         key,

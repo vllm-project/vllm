@@ -240,28 +240,24 @@ def test_register_kv_caches(backend):
         [
             AttentionGroup(
                 backend=backend_cls,
-                decode_backend=backend_cls,
                 layer_names=attn_layer_names,
                 kv_cache_spec=attn_spec,
                 kv_cache_group_id=0,
             ),
             AttentionGroup(
                 backend=DeepseekV32IndexerBackend,
-                decode_backend=DeepseekV32IndexerBackend,
                 layer_names=mla_layer_names,
                 kv_cache_spec=mla_spec,
                 kv_cache_group_id=1,
             ),
             AttentionGroup(
                 backend=DeepseekV32IndexerBackend,  # unused for mamba
-                decode_backend=DeepseekV32IndexerBackend,
                 layer_names=unaligned_mamba_layer_names,
                 kv_cache_spec=unaligned_mamba_spec,
                 kv_cache_group_id=2,
             ),
             AttentionGroup(
                 backend=DeepseekV32IndexerBackend,  # unused for mamba
-                decode_backend=DeepseekV32IndexerBackend,
                 layer_names=aligned_mamba_layer_names,
                 kv_cache_spec=aligned_mamba_spec,
                 kv_cache_group_id=3,
@@ -405,14 +401,12 @@ def test_register_kv_caches_uniform_type(backend):
         [
             AttentionGroup(
                 backend=backend_cls,
-                decode_backend=backend_cls,
                 layer_names=[layer_a],
                 kv_cache_spec=spec_a,
                 kv_cache_group_id=0,
             ),
             AttentionGroup(
                 backend=backend_cls,
-                decode_backend=backend_cls,
                 layer_names=[layer_b],
                 kv_cache_spec=spec_b,
                 kv_cache_group_id=0,

@@ -1755,7 +1755,6 @@ class SpecDecodeBaseProposer:
                     )
                     attn_group = AttentionGroup(
                         backend=attn_backend,
-                        decode_backend=attn_backend,
                         layer_names=[layer_name],
                         kv_cache_spec=layer_kv_cache_spec,
                         kv_cache_group_id=self.kv_cache_gid,

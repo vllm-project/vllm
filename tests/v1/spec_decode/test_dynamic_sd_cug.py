@@ -15,7 +15,6 @@ from vllm.config import (
     SchedulerConfig,
     VllmConfig,
 )
-from vllm.forward_context import BatchDescriptor
 from vllm.v1.worker.gpu import cudagraph_utils as gpu_cudagraph_utils
 
 pytestmark = pytest.mark.cpu_test
@@ -269,9 +268,6 @@ def test_cudagraph_dispatch_preserves_attention_backend_role(
         if desc.num_tokens == 2
     }
     assert piecewise_roles == {False, True}
-    assert BatchDescriptor(num_tokens=2) != BatchDescriptor(
-        num_tokens=2, use_decode_backend=True
-    )
 
 
 def test_basic_sd_does_not_capture_shorter_full_decode_shapes(monkeypatch):

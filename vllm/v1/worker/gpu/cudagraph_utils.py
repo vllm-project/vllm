@@ -536,7 +536,6 @@ class ModelCudaGraphManager(CudaGraphManager):
                     desc.cg_mode == CUDAGraphMode.PIECEWISE
                     and not self.use_breakable_cg
                 ),
-                use_decode_backend=desc.use_decode_backend,
             )
 
             # Capture with dummy rows marked as padding.
@@ -550,7 +549,6 @@ class ModelCudaGraphManager(CudaGraphManager):
                         num_tokens=num_tokens,
                         has_lora=has_lora,
                         num_active_loras=desc.num_active_loras,
-                        use_decode_backend=desc.use_decode_backend,
                     )
                 with set_forward_context(
                     attn_metadata,
@@ -561,7 +559,6 @@ class ModelCudaGraphManager(CudaGraphManager):
                     slot_mapping=slot_mappings,
                     batch_descriptor=batch_descriptor,
                     is_padding=input_buffers.is_padding[:num_tokens],
-                    use_decode_backend=desc.use_decode_backend,
                 ):
                     if cg_mode == CUDAGraphMode.PIECEWISE:
                         # PIECEWISE graph (compiled PW or breakable, chosen inside

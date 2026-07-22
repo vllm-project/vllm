@@ -212,6 +212,7 @@ class DraftModelSpeculator(BaseSpeculator):
         num_tokens_padded: int,
         num_query_per_req: int = 1,
         causal: bool | Mapping[int, bool] = True,
+        use_decode_backend: bool = False,
     ) -> dict[str, Any] | None:
         # Uniform query: query_start_loc[i] = min(i, num_reqs) * num_query_per_req.
         # Clamp keeps the series non-decreasing past num_reqs, which some
@@ -239,6 +240,7 @@ class DraftModelSpeculator(BaseSpeculator):
             slot_mappings=slot_mappings,
             kv_cache_config=self.kv_cache_config,
             causal=causal,
+            use_decode_backend=use_decode_backend,
         )
         return attn_metadata
 

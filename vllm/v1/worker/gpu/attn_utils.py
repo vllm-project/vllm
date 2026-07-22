@@ -103,17 +103,11 @@ def init_attn_backend(
         layer_type = cast(type[Any], AttentionLayerBase)
         attn_layers = get_layers_from_vllm_config(vllm_config, layer_type, layer_names)
 
-        group_map: dict[
-            tuple[tuple[str, str], tuple[str, str], KVCacheSpec, int],
-            AttentionGroup,
-        ] = {}
-        group_order: list[
-            tuple[tuple[str, str], tuple[str, str], KVCacheSpec, int]
-        ] = []
+        group_map: dict[tuple[tuple[str, str], KVCacheSpec, int], AttentionGroup] = {}
+        group_order: list[tuple[tuple[str, str], KVCacheSpec, int]] = []
 
         for layer_name in layer_names:
             attn_backend = attn_layers[layer_name].get_attn_backend()
-            decode_backend = attn_layers[layer_name].get_decode_attn_backend()
 
             layer_kv_cache_spec: KVCacheSpec = kv_cache_group_spec.kv_cache_spec
             if isinstance(layer_kv_cache_spec, UniformTypeKVCacheSpecs):
@@ -125,14 +119,12 @@ def init_attn_backend(
             num_heads_q = getattr(attn_layers[layer_name], "num_heads", 0)
             key = (
                 attn_backend.full_cls_name(),
-                decode_backend.full_cls_name(),
                 layer_kv_cache_spec,
                 num_heads_q,
             )
             if key not in group_map:
                 group_map[key] = AttentionGroup(
                     backend=attn_backend,
-                    decode_backend=decode_backend,
                     layer_names=[layer_name],
                     kv_cache_spec=layer_kv_cache_spec,
                     kv_cache_group_id=kv_cache_group_id,
@@ -163,8 +155,6 @@ def init_attn_backend(
                 num_metadata_builders=1,
             )
             builders = [group.get_metadata_builder(0)]
-            if group.decode_backend is not group.backend:
-                builders.append(group.get_metadata_builder(0, use_decode_backend=True))
             for builder in builders:
                 if attn_backend_workspace is None:
                     if hasattr(builder, "_get_workspace_buffer"):
@@ -174,8 +164,6 @@ def init_attn_backend(
             # The decode specialist is used by full decode graphs, so both
             # routed backends must support the resolved cudagraph mode.
             backend_names = [group.backend.__name__]
-            if group.decode_backend is not group.backend:
-                backend_names.append(group.decode_backend.__name__)
             for builder, backend_name in zip(builders, backend_names):
                 cg_support = builder.get_cudagraph_support(
                     vllm_config,
@@ -649,15 +637,14 @@ def build_attn_metadata(
             dcp_local_seq_lens=dcp_local_seq_lens,
             positions=positions,
             is_prefilling=group_is_prefilling,
+            use_decode_backend=use_decode_backend,
             mm_req_doc_ranges=mm_req_doc_ranges,
             rswa_prefix_lens=rswa_prefix_lens,
             **common_attn_metadata_extra_kwargs,
         )
 
         for attn_group in attn_groups[i]:
-            attn_metadata_builder = attn_group.get_metadata_builder(
-                0, use_decode_backend=use_decode_backend
-            )
+            attn_metadata_builder = attn_group.get_metadata_builder(0)
             if for_cudagraph_capture:
                 metadata = attn_metadata_builder.build_for_cudagraph_capture(
                     common_attn_metadata

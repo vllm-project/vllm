@@ -242,7 +242,6 @@ class KVBlockZeroer:
 @dataclass
 class AttentionGroup:
     backend: type[AttentionBackend]
-    decode_backend: type[AttentionBackend]
     layer_names: list[str]
     kv_cache_spec: KVCacheSpec
     kv_cache_group_id: int
@@ -252,13 +251,6 @@ class AttentionGroup:
     metadata_builders: list[AttentionMetadataBuilder] = field(
         default_factory=lambda: []
     )
-    decode_metadata_builders: list[AttentionMetadataBuilder] = field(
-        default_factory=lambda: []
-    )
-
-    def __post_init__(self) -> None:
-        if self.decode_backend.full_cls_name() == self.backend.full_cls_name():
-            self.decode_backend = self.backend
 
     def create_metadata_builders(
         self,
@@ -281,29 +273,10 @@ class AttentionGroup:
             )
             for _ in range(num_metadata_builders)
         ]
-        if self.decode_backend is self.backend:
-            self.decode_metadata_builders = self.metadata_builders
-            return
-        self.decode_metadata_builders = [
-            self.decode_backend.get_builder_cls()(
-                kv_cache_spec_builder,
-                self.layer_names,
-                vllm_config,
-                device,
-            )
-            for _ in range(num_metadata_builders)
-        ]
 
-    def get_metadata_builder(
-        self, ubatch_id: int = 0, use_decode_backend: bool = False
-    ) -> AttentionMetadataBuilder:
-        builders = (
-            self.decode_metadata_builders
-            if use_decode_backend
-            else self.metadata_builders
-        )
-        assert len(builders) > ubatch_id
-        return builders[ubatch_id]
+    def get_metadata_builder(self, ubatch_id: int = 0) -> AttentionMetadataBuilder:
+        assert len(self.metadata_builders) > ubatch_id
+        return self.metadata_builders[ubatch_id]
 
 
 def select_common_block_size(
@@ -407,7 +380,7 @@ def prepare_kernel_block_sizes(
             group_backends = [
                 backend
                 for group in attn_groups[kv_cache_gid]
-                for backend in (group.backend, group.decode_backend)
+                for backend in group.backend.get_backend_variants()
             ]
             selected_kernel_size = select_common_block_size(
                 kv_manager_block_size, group_backends

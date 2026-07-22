@@ -37,17 +37,16 @@ def check_attention_cp_compatibility(vllm_config: VllmConfig) -> None:
             layer_impl = getattr(layer, "impl", None)
             if layer_impl is None:
                 continue
-            decode_impl = getattr(layer, "decode_impl", None) or layer_impl
             if vllm_config.speculative_config is not None and interleave_size > 1:
-                assert decode_impl.supports_mtp_with_cp_non_trivial_interleave_size, (
+                assert layer_impl.supports_mtp_with_cp_non_trivial_interleave_size, (
                     "MTP with cp_kv_cache_interleave_size > 1 is not "
-                    f"supported in {decode_impl.__class__.__name__}."
+                    f"supported in {layer_impl.__class__.__name__}."
                 )
             if dcp_size > 1:
-                assert decode_impl.need_to_return_lse_for_decode, (
+                assert layer_impl.need_to_return_lse_for_decode, (
                     "Decode Context Parallelism (DCP) requires attention "
                     "implementations to return the softmax LSE during decode, "
-                    f"but {decode_impl.__class__.__name__} does not. "
+                    f"but {layer_impl.__class__.__name__} does not. "
                     "Try a different backend by setting "
                     "--attention-decode-backend or disable DCP."
                 )

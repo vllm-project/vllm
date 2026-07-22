@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import functools
+import math
 from collections.abc import Callable
 from dataclasses import dataclass, field, fields, make_dataclass
 from typing import (
@@ -8,6 +9,7 @@ from typing import (
     Any,
     Literal,
     Protocol,
+    cast,
     get_args,
 )
 
@@ -32,8 +34,10 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.v1.attention.backend import (
     AttentionBackend,
+    AttentionCGSupport,
     AttentionImpl,
     AttentionMetadata,
+    AttentionMetadataBuilder,
     CommonAttentionMetadata,
     subclass_attention_backend,
 )
@@ -44,6 +48,256 @@ _KV_CACHE_LAYOUT_OVERRIDE: KVCacheLayoutType | None = None
 
 PAD_SLOT_ID = -1
 NULL_BLOCK_ID = 0
+
+
+def _intersect_kernel_block_sizes(
+    first: type[AttentionBackend], second: type[AttentionBackend]
+):
+    from vllm.v1.attention.backend import MultipleOf
+
+    result: list[int | MultipleOf] = []
+    for lhs in first.get_supported_kernel_block_sizes():
+        for rhs in second.get_supported_kernel_block_sizes():
+            candidate: int | MultipleOf | None = None
+            if isinstance(lhs, MultipleOf) and isinstance(rhs, MultipleOf):
+                candidate = MultipleOf(math.lcm(lhs.base, rhs.base))
+            elif isinstance(lhs, MultipleOf) and isinstance(rhs, int):
+                candidate = rhs if rhs % lhs.base == 0 else None
+            elif isinstance(lhs, int) and isinstance(rhs, MultipleOf):
+                candidate = lhs if lhs % rhs.base == 0 else None
+            elif lhs == rhs:
+                candidate = lhs
+            if candidate is None:
+                continue
+            key = candidate.base if isinstance(candidate, MultipleOf) else candidate
+            if not any(
+                (item.base if isinstance(item, MultipleOf) else item) == key
+                and isinstance(item, MultipleOf) == isinstance(candidate, MultipleOf)
+                for item in result
+            ):
+                result.append(candidate)
+    return result
+
+
+@functools.cache
+def create_composite_attention_backend(
+    general_backend: type[AttentionBackend],
+    decode_backend: type[AttentionBackend],
+) -> type[AttentionBackend]:
+    """Compose general and pure-decode backends behind one backend contract."""
+    if general_backend.full_cls_name() == decode_backend.full_cls_name():
+        return general_backend
+
+    general_impl_cls = general_backend.get_impl_cls()
+    decode_impl_cls = decode_backend.get_impl_cls()
+    general_builder_cls = general_backend.get_builder_cls()
+    decode_builder_cls = decode_backend.get_builder_cls()
+
+    class CompositeAttentionImpl(AttentionImpl):
+        def __init__(self, *args, **kwargs) -> None:
+            self.general_impl = cast(AttentionImpl, general_impl_cls(*args, **kwargs))
+            self.decode_impl = cast(AttentionImpl, decode_impl_cls(*args, **kwargs))
+            for name in (
+                "num_heads",
+                "num_kv_heads",
+                "head_size",
+                "scale",
+                "kv_cache_dtype",
+            ):
+                if hasattr(self.general_impl, name):
+                    setattr(self, name, getattr(self.general_impl, name))
+            self.supports_quant_query_input = (
+                self.general_impl.supports_quant_query_input
+                and self.decode_impl.supports_quant_query_input
+            )
+            self.supports_pcp = self.general_impl.supports_pcp
+            self.supports_dcp = self.decode_impl.supports_dcp
+            self.can_return_lse_for_decode = self.decode_impl.can_return_lse_for_decode
+            self.lse_base_on_e = self.decode_impl.lse_base_on_e
+            self.need_to_return_lse_for_decode = (
+                self.decode_impl.need_to_return_lse_for_decode
+            )
+            self.supports_mtp_with_cp_non_trivial_interleave_size = (
+                self.decode_impl.supports_mtp_with_cp_non_trivial_interleave_size
+            )
+
+        def get_impl_for_metadata(self, attn_metadata):
+            if getattr(attn_metadata, "_use_decode_backend", False):
+                return self.decode_impl
+            return self.general_impl
+
+        def forward(
+            self,
+            layer,
+            query,
+            key,
+            value,
+            kv_cache,
+            attn_metadata,
+            output,
+            output_scale=None,
+            output_block_scale=None,
+        ):
+            impl = self.get_impl_for_metadata(attn_metadata)
+            return impl.forward(
+                layer,
+                query,
+                key,
+                value,
+                kv_cache,
+                attn_metadata,
+                output,
+                output_scale,
+                output_block_scale,
+            )
+
+        def process_weights_after_loading(self, act_dtype: torch.dtype):
+            self.general_impl.process_weights_after_loading(act_dtype)
+            self.decode_impl.process_weights_after_loading(act_dtype)
+
+        def fused_output_quant_supported(self, quant_key):
+            return self.general_impl.fused_output_quant_supported(
+                quant_key
+            ) and self.decode_impl.fused_output_quant_supported(quant_key)
+
+        def fused_qk_norm_rope_kvcache_supported(self):
+            return False
+
+        def fused_rope_kvcache_supported(self):
+            return False
+
+        def do_kv_cache_update(self, *args, **kwargs):
+            return self.general_impl.do_kv_cache_update(  # type: ignore[attr-defined]
+                *args, **kwargs
+            )
+
+    class CompositeAttentionMetadataBuilder(AttentionMetadataBuilder):
+        supports_update_block_table = (
+            general_builder_cls.supports_update_block_table
+            and decode_builder_cls.supports_update_block_table
+        )
+
+        def __init__(self, kv_cache_spec, layer_names, vllm_config, device):
+            super().__init__(kv_cache_spec, layer_names, vllm_config, device)
+            self.general_builder = general_builder_cls(
+                kv_cache_spec, layer_names, vllm_config, device
+            )
+            self.decode_builder = decode_builder_cls(
+                kv_cache_spec, layer_names, vllm_config, device
+            )
+            thresholds = (
+                self.general_builder.reorder_batch_threshold,
+                self.decode_builder.reorder_batch_threshold,
+            )
+            self.reorder_batch_threshold = min(
+                (value for value in thresholds if value is not None),
+                default=None,
+            )
+
+        @classmethod
+        def get_cudagraph_support(cls, vllm_config, kv_cache_spec):
+            general = general_builder_cls.get_cudagraph_support(
+                vllm_config, kv_cache_spec
+            )
+            decode = decode_builder_cls.get_cudagraph_support(
+                vllm_config, kv_cache_spec
+            )
+            return AttentionCGSupport(min(general.value, decode.value))
+
+        @staticmethod
+        def _tag(metadata, use_decode_backend: bool):
+            metadata._use_decode_backend = use_decode_backend
+            return metadata
+
+        def _builder(self, common_attn_metadata):
+            if common_attn_metadata.use_decode_backend:
+                return self.decode_builder
+            return self.general_builder
+
+        def build(self, common_prefix_len, common_attn_metadata, fast_build=False):
+            metadata = self._builder(common_attn_metadata).build(
+                common_prefix_len,
+                common_attn_metadata,
+                fast_build=fast_build,
+            )
+            return self._tag(metadata, common_attn_metadata.use_decode_backend)
+
+        def build_for_cudagraph_capture(self, common_attn_metadata):
+            metadata = self._builder(common_attn_metadata).build_for_cudagraph_capture(
+                common_attn_metadata
+            )
+            return self._tag(metadata, common_attn_metadata.use_decode_backend)
+
+        def build_for_drafting(self, common_attn_metadata, draft_index):
+            metadata = self._builder(common_attn_metadata).build_for_drafting(
+                common_attn_metadata, draft_index
+            )
+            return self._tag(metadata, common_attn_metadata.use_decode_backend)
+
+        def update_block_table(self, metadata, blk_table, slot_mapping):
+            use_decode_backend = getattr(metadata, "_use_decode_backend", False)
+            builder = (
+                self.decode_builder if use_decode_backend else self.general_builder
+            )
+            updated = builder.update_block_table(metadata, blk_table, slot_mapping)
+            return self._tag(updated, use_decode_backend)
+
+        def use_cascade_attention(self, *args, **kwargs):
+            return self.general_builder.use_cascade_attention(*args, **kwargs)
+
+        def _get_workspace_buffer(self):
+            for builder in (self.general_builder, self.decode_builder):
+                if hasattr(builder, "_get_workspace_buffer"):
+                    return builder._get_workspace_buffer()
+            return None
+
+        def set_workspace_buffer(self, workspace_buffer):
+            for builder in (self.general_builder, self.decode_builder):
+                if hasattr(builder, "set_workspace_buffer"):
+                    builder.set_workspace_buffer(workspace_buffer)
+
+    class CompositeAttentionBackend(
+        general_backend  # type: ignore[misc, valid-type]
+    ):
+        forward_includes_kv_cache_update = False
+
+        @staticmethod
+        def get_name() -> str:
+            return general_backend.get_name()
+
+        @staticmethod
+        def get_impl_cls():
+            return CompositeAttentionImpl
+
+        @staticmethod
+        def get_builder_cls():
+            return CompositeAttentionMetadataBuilder
+
+        @staticmethod
+        def get_supported_kernel_block_sizes():
+            return _intersect_kernel_block_sizes(general_backend, decode_backend)
+
+        @classmethod
+        def full_cls_name(cls):
+            return (
+                __name__,
+                f"Composite[{general_backend.__qualname__},{decode_backend.__qualname__}]",
+            )
+
+        @classmethod
+        def get_backend_variants(cls):
+            return general_backend, decode_backend
+
+    CompositeAttentionImpl.__name__ = (
+        f"{general_impl_cls.__name__}{decode_impl_cls.__name__}Composite"
+    )
+    CompositeAttentionMetadataBuilder.__name__ = (
+        f"{general_builder_cls.__name__}{decode_builder_cls.__name__}Composite"
+    )
+    CompositeAttentionBackend.__name__ = (
+        f"{general_backend.__name__}{decode_backend.__name__}Composite"
+    )
+    return CompositeAttentionBackend
 
 
 def compute_mm_prefix_range_tensor(
@@ -908,6 +1162,9 @@ def create_fast_prefill_custom_backend(
                         common_attn_metadata.logits_indices_padded
                     )
                     self.num_logits_indices = common_attn_metadata.num_logits_indices
+                    self._use_decode_backend = getattr(
+                        metadata, "_use_decode_backend", False
+                    )
 
             return KVSharingFastPrefillAttentionMetadata(metadata, common_attn_metadata)
 
