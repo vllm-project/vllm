@@ -20,7 +20,11 @@ import torch
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
     OffloadingConnectorStats,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.offloading.scheduler import (
+    _parse_tier_filter,
+)
 from vllm.v1.kv_offload.base import (
+    Locality,
     LookupResult,
     Medium,
     OffloadingCounterMetadata,
@@ -1050,6 +1054,78 @@ class TestTieringOffloadingWithoutSecondaryTiers:
         manager.complete_store(blocks, _CTX, success=True)
 
         assert count_hits(manager, blocks) == 3
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        (
+            [{"medium": "storage"}],
+            TierFilter(matchers=(TierMatcher(medium=Medium.STORAGE),)),
+        ),
+        (
+            [{"medium": "CPU"}],
+            TierFilter(matchers=(TierMatcher(medium=Medium.CPU),)),
+        ),
+        (
+            [{}],
+            TierFilter(matchers=(TierMatcher(),)),
+        ),
+        (
+            [{"medium": "storage", "locality": "local"}],
+            TierFilter(
+                matchers=(TierMatcher(medium=Medium.STORAGE, locality=Locality.LOCAL),)
+            ),
+        ),
+        (
+            [{"medium": "cpu"}, {"medium": "storage"}],
+            TierFilter(
+                matchers=(
+                    TierMatcher(medium=Medium.CPU),
+                    TierMatcher(medium=Medium.STORAGE),
+                )
+            ),
+        ),
+    ],
+    ids=[
+        "medium_storage",
+        "medium_cpu_uppercase",
+        "unconstrained",
+        "with_locality",
+        "multiple_matchers",
+    ],
+)
+def test_parse_tier_filter_valid(raw, expected):
+    assert _parse_tier_filter(raw) == expected
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "not a list",
+        [],
+        [{"medium": "unknown"}],
+        [{"locality": "nowhere"}],
+    ],
+    ids=["non_list", "empty_list", "invalid_medium", "invalid_locality"],
+)
+def test_parse_tier_filter_invalid_returns_all(raw):
+    assert _parse_tier_filter(raw) is TierFilter.ALL
+
+
+def test_parse_tier_filter_skips_bad_entries():
+    result = _parse_tier_filter(
+        [
+            {"medium": "storage"},
+            "not a dict",
+            {"medium": "bogus"},
+            {"medium": "cpu"},
+        ]
+    )
+    assert result.matchers == (
+        TierMatcher(medium=Medium.STORAGE),
+        TierMatcher(medium=Medium.CPU),
+    )
 
 
 if __name__ == "__main__":

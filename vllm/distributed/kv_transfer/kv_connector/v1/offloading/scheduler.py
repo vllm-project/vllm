@@ -39,6 +39,7 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.kv_offload.base import (
     GPULoadStoreSpec,
+    Locality,
     LookupResult,
     Medium,
     OffloadingManager,
@@ -58,6 +59,8 @@ from vllm.v1.request import Request
 logger = init_logger(__name__)
 
 KV_LOAD_TIERS_KEY = "kv_load_tiers"
+MATCHER_MEDIUM_KEY = "medium"
+MATCHER_LOCALITY_KEY = "locality"
 
 
 @dataclass(slots=True)
@@ -379,19 +382,54 @@ class RequestOffloadState:
             )
 
 
+def _parse_tier_filter(raw: Any) -> TierFilter:
+    """Parse raw kv_transfer_params tier matchers into a TierFilter."""
+    if not isinstance(raw, list):
+        logger.warning_once(
+            "_parse_tier_filter: expected list, got %s; ignoring",
+            type(raw).__name__,
+        )
+        return TierFilter.ALL
+    matchers: list[TierMatcher] = []
+    for entry in raw:
+        if not isinstance(entry, dict):
+            logger.warning_once("_parse_tier_filter: entry is not a dict; skipping")
+            continue
+        medium: Medium | None = None
+        locality: Locality | None = None
+        raw_medium = entry.get(MATCHER_MEDIUM_KEY)
+        if raw_medium is not None:
+            try:
+                medium = Medium(raw_medium.upper())
+            except (ValueError, AttributeError):
+                logger.warning_once(
+                    "_parse_tier_filter: unknown medium %r; skipping entry",
+                    raw_medium,
+                )
+                continue
+        raw_locality = entry.get(MATCHER_LOCALITY_KEY)
+        if raw_locality is not None:
+            try:
+                locality = Locality(raw_locality.upper())
+            except (ValueError, AttributeError):
+                logger.warning_once(
+                    "_parse_tier_filter: unknown locality %r; skipping entry",
+                    raw_locality,
+                )
+                continue
+        matchers.append(TierMatcher(medium=medium, locality=locality))
+    if not matchers:
+        return TierFilter.ALL
+    return TierFilter(matchers=tuple(matchers))
+
+
 def _create_req_context(req: Request) -> ReqContext:
     params = req.kv_transfer_params
     load_filter = TierFilter.ALL
     if params:
         raw = params.get(KV_LOAD_TIERS_KEY)
         if raw is not None:
-            matchers = tuple(
-                TierMatcher(
-                    medium=Medium(m["medium"].upper()) if "medium" in m else None,
-                )
-                for m in raw
-            )
-            load_filter = TierFilter(matchers=matchers)
+            load_filter = _parse_tier_filter(raw)
     return ReqContext(
         req_id=req.request_id,
         kv_transfer_params=params,
