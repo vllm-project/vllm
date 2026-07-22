@@ -269,6 +269,8 @@ class StreamingParserEngine:
                 SemanticEvent(EventType.REASONING_END, tool_index=self.tool_index)
             )
             self.state = ParserState.CONTENT
+        elif self.state == ParserState.MESSAGE_HEADER:
+            self.state = ParserState.CONTENT
 
         return events
 
@@ -302,18 +304,20 @@ class StreamingParserEngine:
         transition = self.config.transitions.get(key)
 
         if transition is None:
-            if (
-                self._has_drops
-                and terminal == DROP_TERMINAL
-                # Preserve drop tokens when skip_tool_parsing is active so
-                # the reasoning pass doesn't silently remove tokens that a
-                # later tool-call pass might need to see.
-                and not self.skip_tool_parsing
-            ):
+            if self._has_drops and terminal == DROP_TERMINAL:
                 return []
             return self._emit_for_state(value)
 
         if self.skip_tool_parsing and terminal in self._tool_terminals:
+            if self.state == ParserState.MESSAGE_HEADER:
+                self.state = ParserState.CONTENT
+                return [
+                    SemanticEvent(
+                        EventType.TEXT_CHUNK,
+                        value=value,
+                        tool_index=self.tool_index,
+                    )
+                ]
             if EventType.REASONING_END in transition.events:
                 self.state = ParserState.CONTENT
                 return [
