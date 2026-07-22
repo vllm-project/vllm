@@ -8,7 +8,7 @@
 #include <cstdint>
 #include <string>
 
-#include "../torch_utils.h"
+#include "../../torch_utils.h"
 
 namespace vllm::direct_dcp {
 
@@ -27,8 +27,7 @@ __device__ __forceinline__ T* get_peer_ptr(const int64_t* peer_ptrs,
   return reinterpret_cast<T*>(static_cast<uintptr_t>(peer_ptrs[peer]));
 }
 
-// NVLS multicast store: one issue replicates the 16-byte payload to every
-// rank's replica of the symmetric buffer (including the local one).
+// Replicate one 16-byte payload to every symmetric-buffer replica.
 __device__ __forceinline__ void multimem_store_16(uint4* mc_ptr, uint4 value) {
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
   asm volatile("multimem.st.relaxed.sys.global.v4.f32 [%0], {%1,%2,%3,%4};"
@@ -41,8 +40,7 @@ __device__ __forceinline__ void multimem_store_16(uint4* mc_ptr, uint4 value) {
 #endif
 }
 
-// Release-ordered multicast signal store: publishes prior system-scope writes
-// to every rank's replica of the signal word in a single issue.
+// Publish prior system-scope writes and signal every replica.
 __device__ __forceinline__ void multimem_store_release_system(uint32_t* mc_ptr,
                                                               uint32_t value) {
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900

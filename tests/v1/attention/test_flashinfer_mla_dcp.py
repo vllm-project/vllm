@@ -14,47 +14,17 @@ requires_flashinfer_mla = pytest.mark.skipif(
 )
 
 
-@requires_flashinfer_mla
-def test_flashinfer_mla_masks_empty_dcp_shards():
-    from vllm.v1.attention.backends.mla.flashinfer_mla import (
-        _flatten_and_mask_empty_kv_rows,
-    )
+def test_mla_dcp_gathered_query_reserves_backend_head_storage():
+    from vllm.v1.attention.ops.dcp_utils import reserve_query_head_storage
 
-    output = torch.ones(2, 2, 4, 8, dtype=torch.bfloat16)
-    output[0].fill_(float("nan"))
-    lse = torch.ones(4, 4, dtype=torch.float32)
-    seq_lens = torch.tensor([0, 1], dtype=torch.int32)
+    query = torch.randn(3, 24, 576, dtype=torch.bfloat16)
 
-    output, lse = _flatten_and_mask_empty_kv_rows(
-        output, lse, seq_lens, mask_empty_shards=True
-    )
+    padded = reserve_query_head_storage(query, 128)
 
-    torch.testing.assert_close(output[:2], torch.zeros_like(output[:2]))
-    torch.testing.assert_close(output[2:], torch.ones_like(output[2:]))
-    assert lse is not None
-    assert torch.isneginf(lse[:2]).all()
-    torch.testing.assert_close(lse[2:], torch.ones_like(lse[2:]))
-
-
-@requires_flashinfer_mla
-def test_flashinfer_mla_skips_masking_with_direct_a2a():
-    """Direct A2A only needs the output flattened."""
-    from vllm.v1.attention.backends.mla.flashinfer_mla import (
-        _flatten_and_mask_empty_kv_rows,
-    )
-
-    output = torch.ones(2, 2, 4, 8, dtype=torch.bfloat16)
-    lse = torch.ones(4, 4, dtype=torch.float32)
-    seq_lens = torch.tensor([0, 1], dtype=torch.int32)
-
-    output, lse = _flatten_and_mask_empty_kv_rows(
-        output, lse, seq_lens, mask_empty_shards=False
-    )
-
-    assert output.shape == (4, 4, 8)
-    torch.testing.assert_close(output, torch.ones_like(output))
-    assert lse is not None and lse.shape == (4, 4)
-    torch.testing.assert_close(lse, torch.ones_like(lse))
+    assert padded.shape == query.shape
+    assert padded.stride() == query.stride()
+    assert padded.untyped_storage().nbytes() >= 3 * 128 * 576 * 2
+    assert torch.equal(padded, query)
 
 
 @requires_flashinfer_mla
@@ -99,8 +69,8 @@ def test_flashinfer_mla_forward_uses_gathered_head_count(monkeypatch):
     )
     monkeypatch.setattr(flashinfer_mla, "_get_workspace_buffer", MagicMock())
     monkeypatch.setattr(flashinfer_mla, "trtllm_batch_decode_with_kv_cache_mla", kernel)
+    layer = MagicMock()
 
-    layer = MagicMock(dcp_combine_masks_empty_shards=False)
     output, lse = flashinfer_mla.FlashInferMLAImpl.forward_mqa(
         impl, query, kv_cache, attn_metadata, layer
     )

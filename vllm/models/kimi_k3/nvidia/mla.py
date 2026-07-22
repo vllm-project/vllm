@@ -28,17 +28,19 @@ Out of scope (extension points, not wired here): prefill context parallelism
 (PCP), sparse/indexer MLA, and the ROCm/aiter fp8/fp4 BMM fast paths.
 """
 
-import functools
 import math
-from collections.abc import Callable
 from typing import TYPE_CHECKING, cast
 
 import torch
 from torch import nn
 
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
-from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
-from vllm.distributed import get_dcp_group, get_tensor_model_parallel_world_size
+from vllm.config import (
+    CacheConfig,
+    VllmConfig,
+    get_current_vllm_config,
+)
+from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention.attention import (
@@ -80,12 +82,7 @@ from vllm.v1.attention.backend import (
     MLAAttentionImpl,
 )
 from vllm.v1.attention.backends.mla.prefill import get_mla_prefill_backend
-from vllm.v1.attention.ops.common import cp_lse_ag_out_rs
-from vllm.v1.attention.ops.dcp_alltoall import dcp_a2a_lse_reduce
-from vllm.v1.attention.ops.dcp_direct_a2a import (
-    DirectDCPA2AWorkspace,
-    get_direct_dcp_a2a_workspace,
-)
+from vllm.v1.attention.ops.dcp_utils import MLADCPManager
 from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
 from vllm.v1.attention.selector import get_attn_backend
 from vllm.v1.kv_cache_interface import KVCacheSpec, MLAAttentionSpec, get_kv_quant_mode
@@ -105,18 +102,6 @@ _GATE_MULTI_STREAM_TOKEN_THRESHOLD = 512
 def _gate_sigmoid_mul(attn_out: torch.Tensor, gate: torch.Tensor) -> torch.Tensor:
     """Apply the sigmoid output gate to a precomputed ``g_proj`` projection."""
     return attn_out * gate.sigmoid()
-
-
-def _reserve_query_head_storage(
-    query: torch.Tensor, padded_num_heads: int
-) -> torch.Tensor:
-    """Reserve backing storage for fixed-head decode kernels."""
-    assert query.ndim == 3
-    assert query.shape[1] <= padded_num_heads
-    padded = query.new_empty((query.shape[0], padded_num_heads, query.shape[2]))
-    padded.resize_(query.shape)
-    padded.copy_(query)
-    return padded
 
 
 class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
@@ -330,7 +315,7 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
 
         vllm_config = get_current_vllm_config()
         parallel_config = vllm_config.parallel_config
-        assert parallel_config.prefill_context_parallel_size <= 1, (
+        assert parallel_config.prefill_context_parallel_size == 1, (
             "Kimi-K3 MultiHeadLatentAttention does not support prefill context "
             "parallelism."
         )
@@ -340,51 +325,26 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
             "context parallelism because gathered queries require gathered "
             "positions."
         )
-        self.dcp_combine: (
-            Callable[[torch.Tensor, torch.Tensor], torch.Tensor] | None
-        ) = None
-        # The direct A2A combine masks empty-KV-shard rows in-kernel and needs
-        # the decode seq_lens for that; the fallback combines rely on the
-        # attention backend masking those rows before the exchange.
-        self.dcp_combine_takes_seq_lens = False
-        self.dcp_direct_a2a_workspace: DirectDCPA2AWorkspace | None = None
-        self.dcp_combine_masks_empty_shards = False
+        self.dcp_manager: MLADCPManager | None = None
         if self.dcp_world_size > 1:
-            dcp_group = get_dcp_group()
-            dcp_a2a = parallel_config.dcp_comm_backend == "a2a"
-            if dcp_a2a:
-                self.dcp_direct_a2a_workspace = get_direct_dcp_a2a_workspace(
-                    dcp_group,
-                    next(self.kv_b_proj.parameters()).device,
-                    min(
-                        vllm_config.scheduler_config.max_num_batched_tokens,
-                        max(
-                            vllm_config.scheduler_config.max_num_seqs
-                            * (1 + vllm_config.num_speculative_tokens),
-                            vllm_config.compilation_config.max_cudagraph_capture_size
-                            or 0,
-                        ),
-                    ),
-                    self.num_local_heads,
-                    self.kv_lora_rank,
-                    dtype,
-                    max(parallel_config.num_ubatches, 1),
-                )
-            if self.dcp_direct_a2a_workspace is not None:
-                self.dcp_combine_masks_empty_shards = True
-                logger.info_once("Using direct symmetric-memory DCP A2A for MLA.")
-                self.dcp_combine = functools.partial(
-                    self.dcp_direct_a2a_workspace.lse_reduce,
-                    is_lse_base_on_e=self.impl.lse_base_on_e,
-                )
-                self.dcp_combine_takes_seq_lens = True
-            else:
-                dcp_combine_fn = dcp_a2a_lse_reduce if dcp_a2a else cp_lse_ag_out_rs
-                self.dcp_combine = functools.partial(
-                    dcp_combine_fn,
-                    cp_group=dcp_group,
-                    is_lse_base_on_e=self.impl.lse_base_on_e,
-                )
+            query_dtype = (
+                torch.float8_e4m3fn
+                if is_quantized_kv_cache(self.kv_cache_dtype)
+                and self.kv_cache_dtype != "fp8_ds_mla"
+                else dtype
+            )
+            self.dcp_manager = MLADCPManager(
+                vllm_config=vllm_config,
+                device=next(self.kv_b_proj.parameters()).device,
+                num_heads=self.num_local_heads,
+                query_head_dim=self.head_size,
+                output_head_dim=self.kv_lora_rank,
+                query_dtype=query_dtype,
+                output_dtype=dtype,
+                padded_num_heads=self.q_pad_num_heads,
+                is_lse_base_on_e=self.impl.lse_base_on_e,
+                use_pcp=False,
+            )
         self.prefill_backend = get_mla_prefill_backend(vllm_config)(
             num_heads=self.num_local_heads,
             scale=self.scale,
@@ -656,25 +616,24 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
                 slot_mapping[:num_mqa_tokens],
             )
             if self.dcp_world_size > 1:
-                mqa_q = get_dcp_group().all_gather(mqa_q, dim=1)
-                if self.q_pad_num_heads is not None:
-                    # CUTLASS MLA has a fixed 128-head problem shape. The
-                    # all-gather allocates only the gathered heads, so restore
-                    # the backing-storage reserve expected by the kernel.
-                    mqa_q = _reserve_query_head_storage(mqa_q, self.q_pad_num_heads)
+                assert self.dcp_manager is not None
+                assert self.dcp_manager.query_gather is not None
+                mqa_q = self.dcp_manager.query_gather(mqa_q)
             latent_out, lse = self.impl.forward_mqa(  # type: ignore[attr-defined]
                 mqa_q, self._attn_read_kv_cache(), attn_metadata, self
             )
             if self.dcp_world_size > 1:
                 assert lse is not None
-                assert self.dcp_combine is not None
-                if self.dcp_combine_takes_seq_lens:
-                    assert attn_metadata.decode is not None
-                    latent_out = self.dcp_combine(
-                        latent_out, lse, seq_lens=attn_metadata.decode.seq_lens
-                    )
-                else:
-                    latent_out = self.dcp_combine(latent_out, lse)
+                assert self.dcp_manager is not None
+                assert attn_metadata.decode is not None
+                latent_out = self.dcp_manager.combine(
+                    latent_out,
+                    lse,
+                    seq_lens=attn_metadata.decode.seq_lens,
+                    query_start_loc=attn_metadata.query_start_loc[
+                        : attn_metadata.num_decodes + 1
+                    ],
+                )
             self._v_up_proj(latent_out, out=attn_out[:num_mqa_tokens])
 
     def _decode_concat_cache(

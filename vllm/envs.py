@@ -190,6 +190,7 @@ if TYPE_CHECKING:
     VLLM_USE_DEEP_GEMM_TMA_ALIGNED_SCALES: bool = True
     VLLM_DCP_Q_REPLICATE: bool = False
     VLLM_USE_DIRECT_DCP_A2A: bool | None = None
+    VLLM_USE_DIRECT_DCP_Q_GATHER: bool | None = None
     VLLM_USE_DIRECT_DCP_KV_GATHER: bool | None = None
     VLLM_DEEP_GEMM_WARMUP: Literal[
         "skip",
@@ -2050,12 +2051,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_USE_SIMPLE_KV_OFFLOAD": lambda: bool(
         int(os.getenv("VLLM_USE_SIMPLE_KV_OFFLOAD", "0"))
     ),
-    # Direct symmetric-memory A2A for MLA DCP (--dcp-comm-backend a2a).
-    # Unset means auto: enabled on CUDA (fp16/bf16) when the DCP group is
-    # within a single node. "1" forces it on (e.g. multi-node NVLink
-    # domains), "0" disables it.
+    # Direct DCP ops default on when applicable; set to 1 to enforce or 0 to disable.
     "VLLM_USE_DIRECT_DCP_A2A": lambda: maybe_convert_bool(
         os.getenv("VLLM_USE_DIRECT_DCP_A2A")
+    ),
+    "VLLM_USE_DIRECT_DCP_Q_GATHER": lambda: maybe_convert_bool(
+        os.getenv("VLLM_USE_DIRECT_DCP_Q_GATHER")
     ),
     "VLLM_USE_DIRECT_DCP_KV_GATHER": lambda: maybe_convert_bool(
         os.getenv("VLLM_USE_DIRECT_DCP_KV_GATHER")
