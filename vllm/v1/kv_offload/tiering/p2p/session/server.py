@@ -917,9 +917,8 @@ class ServerRole:
         The same flag is used for both the peer's TransferDoneMsg and
         the StoreResult(s) emitted for any leftover pending job_ids.
         """
-        st = self._requests.get(kv_request_id)
-        if st is None or st.outbound is None:
-            return
+        st = self._requests[kv_request_id]
+        assert st.outbound is not None
         req = st.outbound
         st.outbound = None
         if success is None:
