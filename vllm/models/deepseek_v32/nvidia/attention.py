@@ -7,6 +7,7 @@ from transformers import DeepseekV2Config, DeepseekV3Config
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.distributed.parallel_state import get_pcp_group
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.attention import MLAAttention
 from vllm.model_executor.layers.layernorm import LayerNorm, RMSNorm
@@ -426,6 +427,22 @@ class DeepseekV32Attention(MLAAttention):
             mla_kv_cache = self.kv_cache
             mla_k_scale = self._k_scale
 
+        pcp_peer_mla_kv_cache = None
+        pcp_peer_indexer_k_cache = None
+        pcp_rank = 0
+        pcp_size = 1
+        if attn_metadata is not None:
+            pcp_peer_mla_kv_cache = getattr(self, "pcp_peer_kv_cache", None)
+            if pcp_peer_mla_kv_cache is not None:
+                pcp_group = get_pcp_group()
+                pcp_rank = pcp_group.rank_in_group
+                pcp_size = pcp_group.world_size
+                if self.indexer is not None:
+                    pcp_peer_indexer_k_cache = getattr(
+                        self.indexer.k_cache, "pcp_peer_kv_cache", None
+                    )
+                    assert pcp_peer_indexer_k_cache is not None
+
         q_c = fused_norm_rope(
             positions,
             q_c,
@@ -445,11 +462,17 @@ class DeepseekV32Attention(MLAAttention):
             slot_mapping=mla_slot,
             indexer_k_cache=indexer_k_cache,
             mla_kv_cache=mla_kv_cache,
+            pcp_peer_indexer_k_cache=pcp_peer_indexer_k_cache,
+            pcp_peer_mla_kv_cache=pcp_peer_mla_kv_cache,
+            pcp_rank=pcp_rank,
+            pcp_size=pcp_size,
             mla_kv_cache_dtype=self.kv_cache_dtype,
             mla_k_scale=mla_k_scale,
             has_indexer=has_indexer,
             index_rope_interleave=self._index_rope_interleave,
         )
+        if pcp_peer_mla_kv_cache is not None:
+            self.pcp_peer_cache_fence()
 
         q = self.q_b_proj(q_c)[0].view(-1, self.num_local_heads, self.qk_head_dim)
         q_nope, q_pe = q.split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
