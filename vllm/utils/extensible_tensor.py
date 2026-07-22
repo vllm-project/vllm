@@ -190,7 +190,7 @@ _PyCapsule_New.restype = ctypes.py_object
 _PyCapsule_New.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_void_p]
 
 
-def _uint8_tensor_from_ptr(ptr: int, num_bytes: int, device_index: int) -> torch.Tensor:
+def uint8_tensor_from_ptr(ptr: int, num_bytes: int, device_index: int) -> torch.Tensor:
     shape_arr = (ctypes.c_int64 * 1)(num_bytes)
 
     managed = _DLManagedTensor()
@@ -274,13 +274,13 @@ class ExtensibleTensor:
                 "tensor (a single committed prefix) is only valid for "
                 "num_segments=1; use full_view() and index segments explicitly."
             )
-        return _uint8_tensor_from_ptr(
+        return uint8_tensor_from_ptr(
             self._buffer.base_ptr, self._bytes_per_segment, self._device_index
         )
 
     def full_view(self) -> torch.Tensor:
         """Return a uint8 tensor view spanning the requested maximum size."""
-        return _uint8_tensor_from_ptr(
+        return uint8_tensor_from_ptr(
             self._buffer.base_ptr, self._max_num_bytes, self._device_index
         )
 
