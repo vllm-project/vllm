@@ -5535,9 +5535,15 @@ class GPUModelRunner(
                 "Reloading with `is_checkpoint_format=True` requires that "
                 "weights be in kernel format and already sharded",
             )
+            # Look up via named_parameters() rather than get_parameter():
+            # with LoRA enabled, named_parameters() returns flattened names
+            # (see BaseLayerWithLoRA.named_modules). remove_duplicate=False
+            # keeps tied-weight aliases (e.g. lm_head.weight for tied
+            # embeddings) resolvable, matching get_parameter() behavior.
+            params_dict = dict(model.named_parameters(remove_duplicate=False))
             loaded_weights = set()
             for name, loaded_weight in weights_iterator:
-                param = model.get_parameter(name)  # TODO: buffers?
+                param = params_dict[name]  # TODO: buffers?
                 param.copy_(loaded_weight)
                 loaded_weights.add(name)
 
