@@ -12,7 +12,7 @@ use serde_tuple::{Deserialize_tuple, Serialize_tuple};
 use super::utility::UtilityOutput;
 use crate::error::{Error, Result, ext_value_decode};
 use crate::protocol::logprobs::MaybeWireLogprobs;
-use crate::protocol::stats::{PrefillStats, SchedulerStats};
+use crate::protocol::stats::{PrefillStats, SchedulerStats, SpecDecodeRequestStats};
 use crate::protocol::{OpaqueValue, decode_msgpack};
 
 /// The stop reason associated with a finished output.
@@ -112,6 +112,8 @@ pub struct EngineCoreOutput {
     /// Number of NaNs seen in logits. Values above zero indicate corruption.
     #[serde(default)]
     pub num_nans_in_logits: u32,
+    #[serde(default)]
+    pub spec_decode_stats: Option<SpecDecodeRequestStats>,
 }
 
 impl EngineCoreOutput {
@@ -384,6 +386,7 @@ mod tests {
                 prefill_stats: None,
                 routed_experts: None,
                 num_nans_in_logits: 0,
+                spec_decode_stats: None,
             }],
             finished_requests: Some(BTreeSet::from(["req-1".to_string()])),
             ..Default::default()
@@ -437,6 +440,7 @@ mod tests {
                             prefill_stats: None,
                             routed_experts: None,
                             num_nans_in_logits: 0,
+                            spec_decode_stats: None,
                         },
                     ],
                     scheduler_stats: None,

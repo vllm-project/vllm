@@ -4,6 +4,7 @@
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
+use serde_tuple::{Deserialize_tuple, Serialize_tuple};
 
 use crate::protocol::OpaqueValue;
 
@@ -54,6 +55,12 @@ pub struct KvCacheEvictionEvent {
     pub idle_seconds: f64,
     /// Time gaps between consecutive accesses before eviction.
     pub reuse_gaps_seconds: Vec<f64>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize_tuple, Deserialize_tuple)]
+pub struct SpecDecodeRequestStats {
+    pub num_accepted_tokens: u64,
+    pub num_draft_tokens: u64,
 }
 
 /// Per-step iteration decoding stats from scheduler.
