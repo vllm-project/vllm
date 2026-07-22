@@ -317,8 +317,10 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "GraniteMoeSharedForCausalLM": _HfExamplesInfo(
         "ibm-research/moe-7b-1b-active-shared-experts"
     ),
+    # TODO(yannicks1): replace with the real HF model id and add
+    # min_transformers_version once GraniteSWA is published upstream
     "GraniteSWAForCausalLM": _HfExamplesInfo(
-        "huggingface-id",
+        "ibm-research/model_id_placeholder",
         is_available_online=False,
     ),
     "HrmTextForCausalLM": _HfExamplesInfo(

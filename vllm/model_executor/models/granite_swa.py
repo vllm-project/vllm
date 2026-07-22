@@ -116,7 +116,7 @@ class GraniteSWAAttention(nn.Module):
 
         # Learnable per-head attention sink, equivalent to an extra logit in the
         # softmax denominator (see gpt_oss). Sharded over heads across TP ranks.
-        self.sinks = nn.Parameter(torch.empty(self.num_heads))
+        self.sinks = nn.Parameter(torch.empty(self.num_heads), requires_grad=False)
         set_weight_attrs(self.sinks, {"weight_loader": self._sink_weight_loader})
 
         layer_idx = extract_layer_index(prefix)
