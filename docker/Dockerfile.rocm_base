@@ -83,12 +83,12 @@ ENV SCCACHE_S3_USE_SSL=${USE_SCCACHE:+on}
 ###
 ### TheROCK install
 ###
-ARG PIP_EXTRA_INDEX_URL=https://repo.amd.com/rocm/whl-multi-arch/
+ARG PIP_EXTRA_INDEX_URL=https://rocm.nightlies.amd.com/whl-multi-arch/
 ENV PIP_EXTRA_INDEX_URL=${PIP_EXTRA_INDEX_URL}
-ARG ROCM_SDK_VERSION
-ARG TORCH_VERSION=2.11.0
-ARG TORCHAUDIO_VERSION=2.11.0
-ARG TORCHVISION_VERSION=0.26.0
+ARG ROCM_SDK_VERSION=7.14.0a20260624
+ARG TORCH_VERSION=2.11.0+rocm7.14.0a20260625
+ARG TORCHAUDIO_VERSION=2.11.0+rocm7.14.0a20260625
+ARG TORCHVISION_VERSION=0.26.0+rocm7.14.0a20260625
 # DEVICE_EXTRAS: set to install device-specific packages (e.g. "device-all" or
 # "gfx90a;gfx942;gfx950"). When unset, only base torch wheels are installed.
 ARG DEVICE_EXTRAS
@@ -110,20 +110,18 @@ RUN uv pip install --index-url ${PIP_EXTRA_INDEX_URL} \
     && rocm-sdk init
 
 # Install PyTorch: try wheels first, build from source if not available.
+# For nightlies, version strings include a date suffix (e.g. +rocm7.14.0a20260522),
+# so we let uv resolve the best match rather than pinning an exact version.
 RUN set -e; \
     TORCH_INSTALLED=0; \
     if [ -n "${ROCM_SDK_VERSION}" ]; then \
-        if echo "${ROCM_SDK_VERSION}" | grep -q '\.dev0'; then \
-            ROCM_TORCH_SUFFIX="+devrocm$(echo ${ROCM_SDK_VERSION} | tr '+' '.')"; \
-        else \
-            ROCM_TORCH_SUFFIX="+rocm${ROCM_SDK_VERSION}"; \
-        fi; \
-        echo "Trying PyTorch wheels from TheRock index (suffix=${ROCM_TORCH_SUFFIX})..." \
+        echo "Trying PyTorch wheels from TheRock index..." \
         && if uv pip install --index-url ${PIP_EXTRA_INDEX_URL} \
-                "torch==${TORCH_VERSION}${ROCM_TORCH_SUFFIX}" \
-                "torchaudio==${TORCHAUDIO_VERSION}${ROCM_TORCH_SUFFIX}" \
-                "torchvision==${TORCHVISION_VERSION}${ROCM_TORCH_SUFFIX}" 2>/dev/null; then \
+                "torch==${TORCH_VERSION}" \
+                "torchaudio==${TORCHAUDIO_VERSION}" \
+                "torchvision==${TORCHVISION_VERSION}"; then \
             echo "PyTorch wheels installed successfully"; \
+            python3 -c "import torch; print(f'  torch={torch.__version__}, hip={torch.version.hip}')"; \
             if [ "${USE_CUSTOM_TRITON}" = "1" ] && python3 -c "import triton" 2>/dev/null; then \
                 echo "Removing TheRock triton (USE_CUSTOM_TRITON=1, will be replaced by from-source build)"; \
                 pip uninstall -y triton triton-kernels; \
