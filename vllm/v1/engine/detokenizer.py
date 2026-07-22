@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import sys
 from abc import ABC, abstractmethod
 
 import tokenizers
@@ -332,7 +333,7 @@ def check_stop_strings(
 
     best_stop_str: str | None = None
     best_stop_index = 0
-    best_end = 0
+    best_end = sys.maxsize
     for stop_str in stop:
         stop_string_len = len(stop_str)
         # Avoid searching already-searched text.
@@ -342,7 +343,7 @@ def check_stop_strings(
 
         # Prefer the stop string that completes earliest in the text.
         end = stop_index + stop_string_len
-        if best_stop_str is None or end < best_end:
+        if end < best_end:
             best_stop_str = stop_str
             best_stop_index = stop_index
             best_end = end
