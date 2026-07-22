@@ -203,8 +203,9 @@ class XPUFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
             "weight_scale_inv" if hasattr(layer, "weight_scale_inv") else "weight_scale"
         )
         scale = getattr(layer, scale_attr)
-        # Keep the canonical scale for dequantization and cache the oneDNN layout.
-        scale_t = scale.data.t().contiguous()
+        # Transpose scale from checkpoint layout [N/128, K/128] to
+        # oneDNN expected layout [K/128, N/128], while keeping the original.
+        scale_t = scale.t().contiguous()
         layer.xpu_weight_scale = scale_t
         self.xpu_weight_scale = layer.xpu_weight_scale
 
