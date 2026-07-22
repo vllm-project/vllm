@@ -39,12 +39,22 @@ def _skip_reason_if_unavailable(backend: str, dtype: torch.dtype) -> str | None:
         if not current_platform.is_xpu():
             return "not on XPU platform."
         return None
+    if backend == "quark":
+        try:
+            import quark.torch.kernel.mx  # noqa: F401
+        except ImportError:
+            return "amd-quark is not installed."
+        return None
     raise ValueError(f"Unknown backend {backend}")
 
 
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
-@pytest.mark.parametrize("backend", ["triton", "aiter", "flashinfer", "xpu"])
+@pytest.mark.parametrize("backend", ["triton", "aiter", "flashinfer", "xpu", "quark"])
 def test_mxfp4_quantization_correctness(backend: str, dtype: torch.dtype):
+    """
+    Tests that the different implementations of mxfp4_quantize
+    in mxfp4_utils.py all match.
+    """
     skip_reason = _skip_reason_if_unavailable(backend, dtype)
     if skip_reason is not None:
         pytest.skip(skip_reason)
@@ -88,10 +98,17 @@ def test_mxfp4_quantization_correctness(backend: str, dtype: torch.dtype):
         # )
 
         # x_fp4, x_scale = xpu_mxfp4_quantize(x)
+    elif backend == "quark":
+        from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
+            quant_dequant_mxfp4,
+        )
+
+        result = quant_dequant_mxfp4(x, scale_calculation_mode="even")
     else:
         raise ValueError(f"Unknown backend {backend}")
 
-    result = dq_mxfp4_torch(x_fp4, x_scale, x.dtype)
+    if backend != "quark":
+        result = dq_mxfp4_torch(x_fp4, x_scale, x.dtype)
     reference = qdq_mxfp4_torch(x, scale_calculation_mode="even")
 
     assert torch.equal(result, reference)
