@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
+import asyncio
 from abc import ABC, abstractmethod
 from collections.abc import AsyncGenerator, Mapping
 from concurrent.futures import Executor
@@ -87,16 +87,14 @@ class PoolingBaseServing(ABC, BaseServing):
     async def _preprocessing(
         self, io_processor: PoolingIOProcessor, ctx: PoolingServeContext
     ):
-        request_factory, num_requests = io_processor.get_request_factory_online(ctx)
+        requests = io_processor.get_request_factory_online(ctx)
 
-        if num_requests == 0:
+        if len(requests) == 0:
             raise ValueError("You must pass at least one prompt")
 
-        generators = [
-            io_processor.render_async(request) for request in request_factory()
-        ]
-
-        ctx.engine_inputs = [await inputs for inputs in generators]
+        ctx.engine_inputs = await asyncio.gather(
+            *[io_processor.render_async(request) for request in requests]
+        )
 
     @torch.inference_mode()
     def _postprocessing(
@@ -164,16 +162,10 @@ class PoolingBaseServing(ABC, BaseServing):
                 else ctx.prompt_request_ids[i]
             )
 
-            params = (
-                pooling_params[i]
-                if isinstance(pooling_params, list)
-                else pooling_params
-            )
-
             self._log_inputs(
                 prompt_request_id,
                 engine_input["prompts"],
-                params=params,
+                params=engine_input["params"],
                 lora_request=ctx.lora_request,
             )
 

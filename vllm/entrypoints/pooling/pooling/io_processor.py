@@ -11,13 +11,13 @@ from vllm.renderers.inputs.preprocess import parse_model_prompt, prompt_to_seq
 from ..base.io_processor import PoolingIOProcessor
 from ..typing import (
     ALLOfflineInputsContext,
+    AllRenderParam,
     EncodeCMPLRenderParams,
     OfflineEncodeInputsContext,
     OfflineOutputsContext,
     OfflinePluginInputsContext,
     PoolingServeContext,
     RequestFactory,
-    RequestGenerator,
 )
 from .protocol import IOProcessorRequest, IOProcessorResponse
 
@@ -53,7 +53,7 @@ class PluginWithIOProcessorPlugins(PoolingIOProcessor):
 
     def get_request_factory_online(
         self, ctx: PoolingServeContext
-    ) -> tuple[RequestFactory, int]:
+    ) -> Sequence[AllRenderParam]:
         assert isinstance(ctx.request, IOProcessorRequest)
 
         validated_prompt = self.io_processor.parse_data(ctx.request.data)
@@ -83,19 +83,19 @@ class PluginWithIOProcessorPlugins(PoolingIOProcessor):
         seq_lora_requests = self._lora_request_to_seq(ctx.lora_request, num_requests)
         seq_priority = self._priority_to_seq(ctx.priorities, num_requests)
 
-        def request_factory() -> RequestGenerator:
-            for i in range(num_requests):
-                yield EncodeCMPLRenderParams(
-                    prompts=parsed_prompts[i],
-                    tok_params=tok_params,
-                    prompt_extras=ctx.prompt_extras,
-                    skip_mm_cache=False,
-                    params=params_seq[i],
-                    lora_requests=seq_lora_requests[i],
-                    priorities=seq_priority[i],
-                )
-
-        return request_factory, num_requests
+        requests = [
+            EncodeCMPLRenderParams(
+                prompts=parsed_prompts[i],
+                tok_params=tok_params,
+                prompt_extras=ctx.prompt_extras,
+                skip_mm_cache=False,
+                params=params_seq[i],
+                lora_requests=seq_lora_requests[i],
+                priorities=seq_priority[i],
+            )
+            for i in range(num_requests)
+        ]
+        return requests
 
     def post_process_online(
         self,

@@ -21,6 +21,7 @@ from ..base.io_processor import PoolingIOProcessor
 from ..pooling.protocol import PoolingCompletionRequest
 from ..typing import (
     ALLOfflineInputsContext,
+    AllRenderParam,
     AnyPoolingRequest,
     EncodeChatRenderParams,
     EncodeCMPLRenderParams,
@@ -190,7 +191,7 @@ class BiEncoderIOProcessor(ScoringIOProcessor):
 
     def get_request_factory_online(
         self, ctx: PoolingServeContext
-    ) -> tuple[RequestFactory, int]:
+    ) -> Sequence[AllRenderParam]:
         request = ctx.request
         scoring_data = self.valid_inputs_online(request)
 
@@ -220,19 +221,19 @@ class BiEncoderIOProcessor(ScoringIOProcessor):
         seq_lora_requests = self._lora_request_to_seq(ctx.lora_request, num_requests)
         seq_priority = self._priority_to_seq(ctx.priorities, num_requests)
 
-        def request_factory() -> RequestGenerator:
-            for i in range(num_requests):
-                yield EncodeCMPLRenderParams(
-                    prompts=parsed_prompts[i],
-                    tok_params=tok_params,
-                    prompt_extras=ctx.prompt_extras,
-                    skip_mm_cache=False,
-                    params=params_seq[i],
-                    lora_requests=seq_lora_requests[i],
-                    priorities=seq_priority[i],
-                )
-
-        return request_factory, num_requests
+        requests = [
+            EncodeCMPLRenderParams(
+                prompts=parsed_prompts[i],
+                tok_params=tok_params,
+                prompt_extras=ctx.prompt_extras,
+                skip_mm_cache=False,
+                params=params_seq[i],
+                lora_requests=seq_lora_requests[i],
+                priorities=seq_priority[i],
+            )
+            for i in range(num_requests)
+        ]
+        return requests
 
     def post_process_online(
         self,
@@ -422,7 +423,7 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
 
     def get_request_factory_online(
         self, ctx: PoolingServeContext
-    ) -> tuple[RequestFactory, int]:
+    ) -> Sequence[AllRenderParam]:
         request = ctx.request
         scoring_data = self.valid_inputs_online(request)
         data_1 = scoring_data.data_1
@@ -440,23 +441,24 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
         seq_lora_requests = self._lora_request_to_seq(ctx.lora_request, num_requests)
         seq_priority = self._priority_to_seq(ctx.priorities, num_requests)
 
-        def request_factory() -> RequestGenerator:
-            for i in range(num_requests):
-                yield ScoringRenderParams(
-                    data_1=data_1[i],
-                    data_2=data_2[i],
-                    chat_template=self.chat_template,
-                    max_tokens_per_query=max_tokens_per_query,
-                    max_tokens_per_doc=max_tokens_per_doc,
-                    tok_params=tok_params,
-                    prompt_extras=ctx.prompt_extras,
-                    skip_mm_cache=False,
-                    params=ctx.pooling_params,
-                    lora_requests=seq_lora_requests[i],
-                    priorities=seq_priority[i],
-                )
+        requests = [
+            ScoringRenderParams(
+                data_1=data_1[i],
+                data_2=data_2[i],
+                chat_template=self.chat_template,
+                max_tokens_per_query=max_tokens_per_query,
+                max_tokens_per_doc=max_tokens_per_doc,
+                tok_params=tok_params,
+                prompt_extras=ctx.prompt_extras,
+                skip_mm_cache=False,
+                params=ctx.pooling_params,
+                lora_requests=seq_lora_requests[i],
+                priorities=seq_priority[i],
+            )
+            for i in range(num_requests)
+        ]
 
-        return request_factory, num_requests
+        return requests
 
     #######################################
     # offline APIs
@@ -539,8 +541,15 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
 
         if token_type_ids := engine_prompt.pop("token_type_ids", None):
             params = params.clone()
-            compressed = compress_token_type_ids(token_type_ids)
-            params.extra_kwargs = {"compressed_token_type_ids": compressed}
+            compressed = compress_token_type_ids(
+                _apply_post_tokenization_to_token_type_ids(
+                    self.tokenizer, tok_params, token_type_ids
+                )
+            )
+            params.extra_kwargs = {
+                **(params.extra_kwargs or {}),
+                "compressed_token_type_ids": compressed,
+            }
 
         engine_input = self.renderer.process_for_engine(engine_prompt, arrival_time)
 
@@ -756,7 +765,7 @@ class JinaRankingIOProcessor(LateInteractionIOProcessor, JinaRankingIOProcessorM
 
     def get_request_factory_online(
         self, ctx: PoolingServeContext
-    ) -> tuple[RequestFactory, int]:
+    ) -> Sequence[AllRenderParam]:
         request = ctx.request
         ctx.n_queries = 1
 
@@ -797,11 +806,9 @@ class JinaRankingIOProcessor(LateInteractionIOProcessor, JinaRankingIOProcessorM
             ]
 
         ctx.request = PoolingCompletionRequest(task="token_embed", input=prompts)
-        request_factory, num_requests = PoolingIOProcessor.get_request_factory_online(
-            self, ctx
-        )
+        requests = PoolingIOProcessor.get_request_factory_online(self, ctx)
         ctx.request = request
-        return request_factory, num_requests
+        return requests
 
     def get_request_factory_offline(
         self, ctx: ALLOfflineInputsContext

@@ -185,14 +185,15 @@ class ScoringRenderParams(RenderParams):
     max_tokens_per_doc: int
 
 
+AllRenderParam: TypeAlias = (
+    EncodeCMPLRenderParams | EncodeChatRenderParams | ScoringRenderParams
+)
+RequestGenerator: TypeAlias = Generator[AllRenderParam]
+RequestFactory: TypeAlias = Callable[[], RequestGenerator]
+
+
 class PoolingEngineInput(TypedDict):
     prompts: EngineInput
     params: PoolingParams
     lora_requests: LoRARequest | None
     priorities: int
-
-
-RequestGenerator: TypeAlias = Generator[
-    EncodeCMPLRenderParams | EncodeChatRenderParams | ScoringRenderParams
-]
-RequestFactory: TypeAlias = Callable[[], RequestGenerator]

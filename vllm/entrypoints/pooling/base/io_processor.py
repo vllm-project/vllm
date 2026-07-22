@@ -21,6 +21,7 @@ from vllm.utils.mistral import is_mistral_tokenizer
 
 from ..typing import (
     ALLOfflineInputsContext,
+    AllRenderParam,
     EncodeChatRenderParams,
     EncodeCMPLRenderParams,
     OfflineEncodeInputsContext,
@@ -77,7 +78,7 @@ class PoolingIOProcessor:
 
     def get_request_factory_online(
         self, ctx: PoolingServeContext
-    ) -> tuple[RequestFactory, int]:
+    ) -> Sequence[AllRenderParam]:
         request = ctx.request
         renderer = self.renderer
 
@@ -114,20 +115,21 @@ class PoolingIOProcessor:
             )
             seq_priority = self._priority_to_seq(ctx.priorities, num_requests)
 
-            def request_factory() -> RequestGenerator:
-                for i in range(num_requests):
-                    yield EncodeChatRenderParams(
-                        conversations=request.messages,
-                        chat_params=chat_params,
-                        tok_params=tok_params,
-                        prompt_extras=ctx.prompt_extras,
-                        skip_mm_cache=False,
-                        params=params_seq[i],
-                        lora_requests=seq_lora_requests[i],
-                        priorities=seq_priority[i],
-                    )
+            requests = [
+                EncodeChatRenderParams(
+                    conversations=request.messages,
+                    chat_params=chat_params,
+                    tok_params=tok_params,
+                    prompt_extras=ctx.prompt_extras,
+                    skip_mm_cache=False,
+                    params=params_seq[i],
+                    lora_requests=seq_lora_requests[i],
+                    priorities=seq_priority[i],
+                )
+                for i in range(num_requests)
+            ]
 
-            return request_factory, num_requests
+            return requests
 
         elif isinstance(request, PoolingCompletionLikeRequest):
             model_config = self.model_config
@@ -150,20 +152,20 @@ class PoolingIOProcessor:
             )
             seq_priority = self._priority_to_seq(ctx.priorities, num_requests)
 
-            def request_factory() -> RequestGenerator:
-                for i in range(num_requests):
-                    yield EncodeCMPLRenderParams(
-                        prompts=parsed_prompts[i],
-                        tok_params=tok_params,
-                        prompt_extras=ctx.prompt_extras,
-                        skip_mm_cache=False,
-                        params=params_seq[i],
-                        lora_requests=seq_lora_requests[i],
-                        priorities=seq_priority[i],
-                    )
+            requests = [
+                EncodeCMPLRenderParams(
+                    prompts=parsed_prompts[i],
+                    tok_params=tok_params,
+                    prompt_extras=ctx.prompt_extras,
+                    skip_mm_cache=False,
+                    params=params_seq[i],
+                    lora_requests=seq_lora_requests[i],
+                    priorities=seq_priority[i],
+                )
+                for i in range(num_requests)
+            ]
 
-            return request_factory, num_requests
-
+            return requests
         else:
             raise ValueError(f"Invalid {self.name} request type")
 

@@ -29,6 +29,7 @@ from ..base.io_processor import PoolingIOProcessor
 from ..scoring.io_processor import JinaRankingIOProcessorMixin
 from ..typing import (
     ALLOfflineInputsContext,
+    AllRenderParam,
     ChunkedEmbeddingMetadata,
     EncodeChatRenderParams,
     OfflineEncodeInputsContext,
@@ -37,7 +38,6 @@ from ..typing import (
     PoolingEngineInput,
     PoolingServeContext,
     RequestFactory,
-    RequestGenerator,
 )
 from .protocol import (
     CohereEmbedContent,
@@ -46,6 +46,7 @@ from .protocol import (
     EmbeddingBatchChatInputRequest,
     EmbeddingBatchChatRequest,
     EmbeddingChatInputRequest,
+    EmbeddingChatRequest,
     EmbeddingCompletionRequest,
 )
 
@@ -80,23 +81,23 @@ class EmbedIOProcessor(PoolingIOProcessor):
 
     def get_request_factory_online(
         self, ctx: PoolingServeContext
-    ) -> tuple[RequestFactory, int]:
+    ) -> Sequence[AllRenderParam]:
         if isinstance(ctx.request, CohereEmbedRequest):
-            request_factory, num_requests = self._get_request_factory_cohere_online(ctx)
+            requests = self._get_request_factory_cohere_online(ctx)
         elif isinstance(
             ctx.request,
             (
+                EmbeddingChatRequest,
+                EmbeddingBatchChatRequest,
                 EmbeddingChatInputRequest,
                 EmbeddingBatchChatInputRequest,
             ),
         ):
-            request_factory, num_requests = self._get_request_factory_chat_input_online(
-                ctx
-            )
+            requests = self._get_request_factory_chat_input_online(ctx)
         else:
-            request_factory, num_requests = super().get_request_factory_online(ctx)
+            requests = super().get_request_factory_online(ctx)
 
-        return request_factory, num_requests
+        return requests
 
     def post_process_online(
         self,
@@ -280,7 +281,7 @@ class EmbedIOProcessor(PoolingIOProcessor):
     def _get_request_factory_chat_input_online(
         self,
         ctx: PoolingServeContext,
-    ) -> tuple[RequestFactory, int]:
+    ) -> Sequence[AllRenderParam]:
         request = ctx.request
         renderer = self.renderer
 
@@ -319,20 +320,21 @@ class EmbedIOProcessor(PoolingIOProcessor):
         seq_lora_requests = self._lora_request_to_seq(ctx.lora_request, num_requests)
         seq_priority = self._priority_to_seq(ctx.priorities, num_requests)
 
-        def request_factory() -> RequestGenerator:
-            for i in range(num_requests):
-                yield EncodeChatRenderParams(
-                    conversations=all_messages[i],
-                    chat_params=chat_params,
-                    tok_params=tok_params,
-                    prompt_extras=ctx.prompt_extras,
-                    skip_mm_cache=False,
-                    params=params_seq[i],
-                    lora_requests=seq_lora_requests[i],
-                    priorities=seq_priority[i],
-                )
+        requests = [
+            EncodeChatRenderParams(
+                conversations=all_messages[i],
+                chat_params=chat_params,
+                tok_params=tok_params,
+                prompt_extras=ctx.prompt_extras,
+                skip_mm_cache=False,
+                params=params_seq[i],
+                lora_requests=seq_lora_requests[i],
+                priorities=seq_priority[i],
+            )
+            for i in range(num_requests)
+        ]
 
-        return request_factory, num_requests
+        return requests
 
     #################################################################
     # Cohere Request Preprocessing & Postprocessing
@@ -452,7 +454,7 @@ class EmbedIOProcessor(PoolingIOProcessor):
 
     def _get_request_factory_cohere_online(
         self, ctx: PoolingServeContext
-    ) -> tuple[RequestFactory, int]:
+    ) -> Sequence[AllRenderParam]:
         """Convert a ``CohereEmbedRequest`` into engine prompts.
 
         If a model has a chat template the task instruction are rendered
@@ -549,7 +551,7 @@ class EmbedIOProcessor(PoolingIOProcessor):
         texts: list[str],
         truncate_prompt_tokens: int | None,
         truncation_side: Literal["left", "right"] | None,
-    ) -> tuple[RequestFactory, int]:
+    ) -> Sequence[AllRenderParam]:
         request = ctx.request
         proxy = EmbeddingCompletionRequest(
             model=request.model,
@@ -560,9 +562,9 @@ class EmbedIOProcessor(PoolingIOProcessor):
             truncation_side=truncation_side,
         )
         ctx.request = proxy
-        request_factory, num_requests = super().get_request_factory_online(ctx)
+        requests = super().get_request_factory_online(ctx)
         ctx.request = request
-        return request_factory, num_requests
+        return requests
 
     def _batch_render_chat(
         self,
@@ -570,7 +572,7 @@ class EmbedIOProcessor(PoolingIOProcessor):
         all_messages: Sequence[list[ChatCompletionMessageParam]],
         truncate_prompt_tokens: int | None,
         truncation_side: Literal["left", "right"] | None,
-    ) -> tuple[RequestFactory, int]:
+    ) -> Sequence[AllRenderParam]:
         """Batch-render multiple conversations through the chat template."""
         request = ctx.request
         proxy = EmbeddingBatchChatRequest(
@@ -582,9 +584,9 @@ class EmbedIOProcessor(PoolingIOProcessor):
             truncation_side=truncation_side,
         )
         ctx.request = proxy
-        request_factory, num_requests = self._get_request_factory_chat_input_online(ctx)
+        requests = self._get_request_factory_chat_input_online(ctx)
         ctx.request = request
-        return request_factory, num_requests
+        return requests
 
     def _validate_input_type(self, input_type: str | None) -> None:
         """Raise if *input_type* is not supported by this model."""
@@ -637,7 +639,7 @@ class JinaRankingTokenEmbedIOProcessor(
 ):
     def get_request_factory_online(
         self, ctx: PoolingServeContext
-    ) -> tuple[RequestFactory, int]:
+    ) -> Sequence[AllRenderParam]:
         request = ctx.request
         if isinstance(request, PoolingCompletionLikeRequest):
             prompts = request.input
