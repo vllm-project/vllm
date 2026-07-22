@@ -145,7 +145,7 @@ class SchedulerInterface(ABC):
         self,
         request_ids: str | Iterable[str] | None,
         finished_status: "RequestStatus",
-    ) -> list[Request]:
+    ) -> "list[Request]":
         """Finish the requests in the scheduler's internal queue. If the request
         is not in the queue, this method will do nothing for that request.
 
