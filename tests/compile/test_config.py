@@ -470,6 +470,38 @@ def test_cudagraph_sizes_post_init(
 
 @pytest.mark.skipif(
     not current_platform.support_static_graph_mode(),
+    reason="Skip if static graph mode is not supported",
+)
+@pytest.mark.parametrize(
+    ("is_blackwell", "expected_max_size"), [(False, 512), (True, 1024)]
+)
+def test_blackwell_cudagraph_default(is_blackwell, expected_max_size):
+    vllm_config = VllmConfig()
+    vllm_config.model_config = MagicMock(enforce_eager=False)
+    vllm_config.scheduler_config = SchedulerConfig(
+        max_num_seqs=512,
+        max_num_batched_tokens=2048,
+        max_model_len=2048,
+        is_encoder_decoder=False,
+    )
+    vllm_config.compilation_config = CompilationConfig(
+        cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE,
+    )
+
+    with patch.object(
+        current_platform,
+        "is_device_capability_family",
+        return_value=is_blackwell,
+    ):
+        vllm_config._set_cudagraph_sizes()
+
+    assert (
+        vllm_config.compilation_config.max_cudagraph_capture_size == expected_max_size
+    )
+
+
+@pytest.mark.skipif(
+    not current_platform.support_static_graph_mode(),
     reason="Skip if not cudagraph mode supported",
 )
 @pytest.mark.parametrize(
