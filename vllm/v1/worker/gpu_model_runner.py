@@ -497,7 +497,7 @@ class GPUModelRunner(
         # Disabled during profiling and dummy runs.
         self.routed_experts_initialized = False
         # Only the scheduler-visible rank owns this writer.
-        self.routed_experts_writer = None
+        self.routed_experts_writer: RoutedExpertsWorkerWriter | None = None
         self.max_model_len = model_config.max_model_len
 
         # Always set to false after the first forward pass
@@ -7664,7 +7664,7 @@ class GPUModelRunner(
         # Only the scheduler-visible rank stages routing for the shared slot
         # buffer; other ranks only need the capturer (for the SP all_gather).
         parallel_config = self.parallel_config
-        self.routed_experts_writer: RoutedExpertsWorkerWriter | None = None
+        self.routed_experts_writer = None
         if parallel_config.rank != get_routed_experts_output_rank():
             return
 
