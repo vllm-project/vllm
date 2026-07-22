@@ -29,8 +29,8 @@ if(DEEPGEMM_SRC_DIR)
 else()
   # Keep in sync with tools/install_deepgemm.sh
   set(_DEEPGEMM_UPSTREAM_REPO "https://github.com/cleonard530/DeepGEMM.git")
-  # TORCH_LIBRARY migration (migrate_pybind_to_torch_library); see cleonard530/DeepGEMM#2
-  set(_DEEPGEMM_UPSTREAM_TAG "441c417c6cf7184593421273b7e6d79a0999a8f3")
+  # NOTE: This is currently targeting nv-dev branch due to sm120 support
+  set(_DEEPGEMM_UPSTREAM_TAG "2690e59ef82601b0cde7f2157cd43ea186b3a2e1")
 
   set(_deepgemm_fc_root "${FETCHCONTENT_BASE_DIR}")
   if(NOT _deepgemm_fc_root)
