@@ -257,6 +257,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
     kNvfp4Dynamic,
 )
+from vllm.model_executor.reload_arena import get_reload_arena
 from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer
@@ -1155,10 +1156,11 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                     x, self.W_V, self.W_V_scale, group_size=128, transpose_bm=True
                 )
         else:
+            arena = get_reload_arena(self)
             # Convert from (L, N, V) to (N, L, V)
-            replace_parameter(self, "W_UV", W_UV.transpose(0, 1), prefer_copy=True)
+            self.W_UV = arena.put("W_UV", W_UV.transpose(0, 1))
             # Convert from (L, N, P) to (N, P, L)
-            replace_parameter(self, "W_UK_T", W_UK.permute(1, 2, 0), prefer_copy=True)
+            self.W_UK_T = arena.put("W_UK_T", W_UK.permute(1, 2, 0))
             if self.dcp_q_replicate:
                 self.W_UK_T_dcp_qrep = get_dcp_group().all_gather(
                     self.W_UK_T.contiguous(), dim=0

@@ -25,6 +25,7 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     unpack_cols,
 )
 from vllm.model_executor.parameter import BasevLLMParameter, permute_param_layout_
+from vllm.model_executor.reload_arena import get_reload_arena
 from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
@@ -112,9 +113,8 @@ class MarlinLinearKernel(MPLinearKernel):
         else:
             padded_n, padded_k = marlin_padded_nk(size_n, size_k, c.group_size)
 
-        # Allocate marlin workspace, reusing existing storage on reload.
-        self.workspace = marlin_make_workspace_new(
-            device, existing=getattr(self, "workspace", None)
+        self.workspace = get_reload_arena(layer).put(
+            "marlin_workspace", marlin_make_workspace_new(device)
         )
 
         # Default names since marlin requires empty parameters for these,
@@ -177,8 +177,8 @@ class MarlinLinearKernel(MPLinearKernel):
                 getattr(layer, self.w_gidx_name)
             )
             self._transform_param(layer, self.w_gidx_name, lambda _: g_idx)
-            replace_parameter(
-                layer, "g_idx_sort_indices", g_idx_sort_indices, prefer_copy=True
+            layer.g_idx_sort_indices = get_reload_arena(layer).put(
+                "g_idx_sort_indices", g_idx_sort_indices
             )
         else:
             setattr(layer, self.w_gidx_name, marlin_make_empty_g_idx(device))

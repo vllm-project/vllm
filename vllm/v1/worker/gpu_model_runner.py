@@ -5685,6 +5685,13 @@ class GPUModelRunner(
                 Iterable[tuple[str, torch.Tensor]], weights_iterator
             )
 
+        from vllm.model_executor.reload_arena import (
+            snapshot_model_arenas,
+            verify_model_arenas,
+        )
+
+        arena_snaps = snapshot_model_arenas(model)
+
         # begin loading weights
         logger.info_once("Reloading weights inplace...")
         if is_checkpoint_format:
@@ -5704,6 +5711,19 @@ class GPUModelRunner(
                 param = _get_parameter_for_reload(model, name)  # TODO: buffers?
                 param.copy_(loaded_weight)
                 loaded_weights.add(name)
+
+        arena_problems = verify_model_arenas(model, arena_snaps)
+        if arena_problems:
+            gate = os.environ.get("VLLM_RELOAD_GATE", "strict")
+            msg = (
+                "Reload violated graph-visible storage identity on "
+                f"{len(arena_problems)} slot(s):\n  "
+                + "\n  ".join(arena_problems[:20])
+            )
+            if gate == "warn":
+                logger.warning(msg)
+            elif gate != "off":
+                raise RuntimeError(msg)
 
         self.reset_lora_state()
 
