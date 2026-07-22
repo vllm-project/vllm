@@ -8,7 +8,7 @@ steps:
   agent_tags:
     label: production
     gpu: 2+
-    mem: 16+
+    mem: 24+
   no_plugin: true
   working_dir: "."
   env:
@@ -87,7 +87,7 @@ steps:
       bash .buildkite/scripts/hardware_ci/run-intel-test.sh
       'export VLLM_USE_V2_MODEL_RUNNER=1 &&
       cd tests &&
-      TARGET_TEST_SUITE=L4 pytest -v -s basic_correctness/test_basic_correctness.py -m "distributed(num_gpus=2)" -k "not ray and not True"'
+      TARGET_TEST_SUITE=L4 pytest -v -s basic_correctness/test_basic_correctness.py -m "distributed\(num_gpus=2\)" -k "not ray and not True"'
 
 - label: Model Runner V2 Spec Decode
   timeout_in_minutes: 50

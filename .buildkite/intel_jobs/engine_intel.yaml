@@ -38,7 +38,7 @@ steps:
     - >-
       bash .buildkite/scripts/hardware_ci/run-intel-test.sh
       'cd tests &&
-      pytest -v -s engine test_sequence.py test_config.py test_logger.py test_vllm_port.py test_jit_monitor.py'
+      pytest -v -s engine/test_arg_utils.py test_sequence.py test_logger.py test_vllm_port.py test_jit_monitor.py'
 
 - label: Engine (1 GPU)
   timeout_in_minutes: 30
