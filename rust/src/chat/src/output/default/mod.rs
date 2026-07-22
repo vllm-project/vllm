@@ -74,7 +74,7 @@ impl DefaultChatOutputProcessor {
             Box::new(CombinedParser::new(reasoning_parser, tool_parser)) as Box<dyn UnifiedParser>
         };
 
-        apply_structural_tag_constraint(request, parser.structural_tag_model())?;
+        apply_structural_tag_constraint(request, parser.structural_tag_builder())?;
 
         if parser.preserve_special_tokens() {
             request.decode_options.skip_special_tokens = false;

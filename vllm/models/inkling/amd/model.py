@@ -46,7 +46,6 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.sequence import IntermediateTensors
 
 from ..configs import InklingMMConfig, InklingModelConfig
-from ..nvfp4 import InklingNvfp4Config
 from .attention import InklingAttention, compute_log_scaling_tau
 from .layernorm import InklingRMSNorm
 from .logits_processor import InklingLogitsProcessor
@@ -94,7 +93,6 @@ class InklingDecoderLayer(nn.Module):
         is_local: bool,
         quant_config: QuantizationConfig | None,
         prefix: str,
-        nvfp4_config: InklingNvfp4Config | None = None,
         force_dense_mlp: bool = False,
     ) -> None:
         super().__init__()
@@ -148,10 +146,8 @@ class InklingDecoderLayer(nn.Module):
             # experts are always bf16.
             self.mlp = InklingMoE(
                 config,
-                layer_id,
                 prefix=f"{prefix}.mlp",
                 quant_config=quant_config,
-                nvfp4_config=nvfp4_config,
             )
 
         # Short convolution on the attention-output and MLP-output residual
@@ -236,7 +232,6 @@ class InklingModel(nn.Module):
         config: InklingModelConfig,
         quant_config: QuantizationConfig | None,
         prefix: str,
-        nvfp4_config: InklingNvfp4Config | None = None,
     ) -> None:
         super().__init__()
         self.config = config
@@ -253,7 +248,7 @@ class InklingModel(nn.Module):
         def get_layer(prefix: str) -> InklingDecoderLayer:
             idx = _layer_id(prefix + ".") or int(prefix.split(".")[-1])
             return InklingDecoderLayer(
-                config, idx, idx in local_ids, quant_config, prefix, nvfp4_config
+                config, idx, idx in local_ids, quant_config, prefix
             )
 
         self.start_layer, self.end_layer, self.layers = make_layers(
@@ -387,8 +382,7 @@ class _TmlForCausalLMBase(nn.Module, SupportsPP, SupportsLoRA):
         self.config = text_config
         # ROCm checkpoints use Quark OCP MXFP4. The global Quark config is
         # passed into each routed MoE and its exclusion list keeps the rest of
-        # Inkling in bf16. ModelOpt NVFP4 parsing is NVIDIA-only.
-        self.nvfp4_config = None
+        # Inkling in bf16.
         # Read by the MRV2 runner to publish per-request short-conv metadata.
         # Short convolution is intrinsic to Inkling, so this is always set.
         self.uses_sconv = True
@@ -396,7 +390,6 @@ class _TmlForCausalLMBase(nn.Module, SupportsPP, SupportsLoRA):
             config=text_config,
             quant_config=quant_config,
             prefix=maybe_prefix(prefix, "model"),
-            nvfp4_config=self.nvfp4_config,
         )
         self.lm_head = ParallelLMHead(
             text_config.padded_vocab_size,

@@ -10,7 +10,7 @@ through vLLM's FusedMoE (which handles TP/EP); the sink experts run in
 activates every sink) and always bf16 (the checkpoint excludes every
 ``shared_experts`` from quantization).
 
-NVFP4 routed experts reuse vLLM's ModelOpt NVFP4 fused-MoE method; excluded
+MXFP4 routed experts reuse vLLM's Quark OCP MXFP4 fused-MoE method; excluded
 (bf16) layers fall back to the unquantized method. The checkpoint's fused
 stacked tensors (interleaved gate/up rows, ``.scale`` / ``.scale2`` /
 ``.input_amax`` aux tensors) are translated to the standard per-expert loads
@@ -44,20 +44,18 @@ from vllm.utils.multi_stream_utils import maybe_execute_in_parallel
 from vllm.utils.torch_utils import aux_stream
 
 from ..configs import InklingModelConfig
-from ..nvfp4 import FLOAT4_E2M1_MAX, FLOAT8_E4M3_MAX
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.fused_moe.routed_experts import (
         RoutedExperts,
     )
 
-    from ..nvfp4 import InklingNvfp4Config
-
 # ---------------------------------------------------------------------------
 # Gate / expert selection
 # ---------------------------------------------------------------------------
 
 _INKLING_LL_BF16_MAX_TOKENS = 64
+_MXFP4_INPUT_SCALE_DENOMINATOR = torch.finfo(torch.float8_e4m3fn).max * 6.0
 
 
 def _linear_with_fp32_out(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
@@ -415,11 +413,9 @@ class InklingMoE(nn.Module):
     def __init__(
         self,
         config: InklingModelConfig,
-        layer_id: int,
         *,
         prefix: str = "",
         quant_config: QuantizationConfig | None = None,
-        nvfp4_config: InklingNvfp4Config | None = None,
     ) -> None:
         super().__init__()
         # Overfit to the served checkpoint: sigmoid gate renormalized after
@@ -439,22 +435,6 @@ class InklingMoE(nn.Module):
             use_global_scale=config.use_global_scale,
             use_gate_bias=config.use_gate_bias,
         )
-
-        moe_quant_config = None
-        if nvfp4_config is not None and nvfp4_config.experts_quantized(layer_id):
-            from vllm.model_executor.layers.quantization.modelopt import (
-                ModelOptNvFp4Config,
-            )
-
-            # The Inkling checkpoint is ModelOpt NVFP4; exclusion is decided per
-            # layer right here, so no exclude list is needed.
-            moe_quant_config = ModelOptNvFp4Config(
-                quant_method="NVFP4",
-                is_checkpoint_nvfp4_serialized=True,
-                kv_cache_quant_algo=None,
-                exclude_modules=[],
-                group_size=nvfp4_config.group_size,
-            )
 
         # TRTLLM MoE kernels assume equal, contiguous per-rank expert slabs
         # (local_expert_offset = ep_rank * local_num_experts), so pad the
@@ -484,7 +464,7 @@ class InklingMoE(nn.Module):
             hidden_size=config.hidden_size,
             intermediate_size=config.intermediate_size,
             renormalize=False,
-            quant_config=moe_quant_config or routed_quant_config,
+            quant_config=routed_quant_config,
             prefix=f"{prefix}.experts",
             custom_routing_function=self._select_routed,
             router_logits_dtype=torch.float32,
@@ -496,12 +476,6 @@ class InklingMoE(nn.Module):
         self.experts.moe_config.skip_final_all_reduce = True
 
         self._routed_sel: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None
-        # The sinks are always bf16; fail loudly on a checkpoint that
-        # quantizes them instead of silently misloading.
-        assert nvfp4_config is None or not nvfp4_config.shared_experts_quantized(
-            layer_id
-        ), f"layer {layer_id}: NVFP4 shared experts are not supported"
-
         sink_experts_cls = (
             InklingSinkExpertsLinear
             if get_current_vllm_config().lora_config is not None
@@ -609,7 +583,7 @@ class InklingMoE(nn.Module):
                 f"bad {projection} input_amax: {amax}"
             )
             input_scale = getattr(experts, f"{projection}_input_scale")
-            input_scale.data.fill_(amax / (FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX))
+            input_scale.data.fill_(amax / _MXFP4_INPUT_SCALE_DENOMINATOR)
             return [f"experts.routed_experts.{projection}_input_scale"]
 
         # Quark's OCP MXFP4 converter stores block scales as a two-dimensional
