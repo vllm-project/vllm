@@ -52,6 +52,15 @@ def _infer_len(node: fx.Node, root: nn.Module | None) -> int | None:
     return None
 
 
+def is_leaf_call(node: object) -> bool:
+    """Is node a call recorded by `_as_leaf_call` (e.g. an attention interface)."""
+    return (
+        isinstance(node, fx.Node)
+        and node.op == "call_function"
+        and node.target in _LEAF_CALL_LENGTHS
+    )
+
+
 def _is_split(node: object) -> bool:
     return is_op(node, "split") or is_op(node, "chunk")
 
