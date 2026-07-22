@@ -953,11 +953,8 @@ class ServerRole:
             self._finalize_abort(kv_request_id)
             return
 
-        started_at = st.abort_started_at if st is not None else None
-        expired = (
-            started_at is not None
-            and time.monotonic() - started_at >= _CANCEL_DRAIN_TIMEOUT_S
-        )
+        assert st.abort_started_at is not None
+        expired = time.monotonic() - st.abort_started_at >= _CANCEL_DRAIN_TIMEOUT_S
         if expired:
             for tid in ids:
                 self._inflight_pop(tid)
