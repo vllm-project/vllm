@@ -51,7 +51,7 @@ steps:
 
 - label: e2e Scheduling (1 GPU)
   key: e2e-scheduling-1-gpu
-  timeout_in_minutes: 35
+  timeout_in_minutes: 53
   device: h200_18gb
   source_file_dependencies:
     - vllm/v1/

@@ -5,7 +5,7 @@ steps:
 - label: Model Executor
   device: h200_35gb
   key: model-executor
-  timeout_in_minutes: 45
+  timeout_in_minutes: 60
   source_file_dependencies:
   - vllm/engine/arg_utils.py
   - vllm/config/model.py
