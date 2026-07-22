@@ -49,8 +49,7 @@ class Medium(Enum):
     """Storage medium of an offloading tier."""
 
     CPU = "CPU"
-    FS = "FS"
-    OBJ = "OBJ"
+    STORAGE = "STORAGE"
 
 
 class Locality(Enum):

@@ -180,7 +180,7 @@ def test_take_events_forwards_locality_to_rich_store():
 
     events = list(
         tracker.take_events(
-            [_stored_event([key], locality=Locality.LOCAL, medium=Medium.FS)]
+            [_stored_event([key], locality=Locality.LOCAL, medium=Medium.STORAGE)]
         )
     )
 
@@ -198,7 +198,7 @@ def test_take_events_forwards_locality_to_placeholder_store():
 
     events = list(
         tracker.take_events(
-            [_stored_event([key], locality=Locality.REMOTE, medium=Medium.FS)]
+            [_stored_event([key], locality=Locality.REMOTE, medium=Medium.STORAGE)]
         )
     )
 
@@ -215,7 +215,7 @@ def test_take_events_forwards_locality_to_remove():
 
     events = list(
         tracker.take_events(
-            [_removed_event([key], locality=Locality.LOCAL, medium=Medium.FS)]
+            [_removed_event([key], locality=Locality.LOCAL, medium=Medium.STORAGE)]
         )
     )
 
@@ -443,12 +443,11 @@ def test_pending_cpu_removal_consumes_hit_backfill_until_next_hit():
     ]
 
 
-@pytest.mark.parametrize("medium", [Medium.FS, Medium.OBJ])
-def test_secondary_stored_event_does_not_mutate_cpu_metadata(medium: Medium):
+def test_secondary_stored_event_does_not_mutate_cpu_metadata():
     tracker, _, _, key = _lookup_chunk()
     expected_metadata = dict(tracker._pending_event_metadata)
 
-    stored = list(tracker.take_events([_stored_event([key], medium)]))
+    stored = list(tracker.take_events([_stored_event([key], Medium.STORAGE)]))
     assert stored[0].token_ids == [1, 2, 3, 4]
     assert tracker._pending_event_metadata == expected_metadata
 
