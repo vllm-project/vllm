@@ -240,7 +240,7 @@ def test_e2e_swa_plus_full_save_then_lookup_hits():
     worker.store = store
 
     # Both groups stored all 4 blocks -> full hit.
-    assert worker.lookup(token_len=64, block_hashes=hs) == 64
+    assert worker.lookup(num_tokens=65, block_hashes=hs) == 64
 
     # Evict SWA's first two blocks (outside its window of 32 tokens = 2 blocks).
     swa_keys_outside_window = [
@@ -253,7 +253,7 @@ def test_e2e_swa_plus_full_save_then_lookup_hits():
 
     # SWA window=32 -> only last 2 blocks must be present in SWA group.
     # Full has all 4. Coordinator should still return 64.
-    assert worker.lookup(token_len=64, block_hashes=hs) == 64
+    assert worker.lookup(num_tokens=65, block_hashes=hs) == 64
 
 
 def test_recv_skips_swa_blocks_before_window():

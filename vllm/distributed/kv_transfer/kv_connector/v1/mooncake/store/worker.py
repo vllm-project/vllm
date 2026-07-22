@@ -1454,11 +1454,14 @@ class MooncakeStoreWorker:
 
         return finished_sending
 
-    def lookup(self, token_len: int, block_hashes: Sequence[BlockHash]) -> int:
+    def lookup(self, num_tokens: int, block_hashes: Sequence[BlockHash]) -> int:
         """Check how many prefix tokens exist in the store.
 
-        Checks across all rank-specific key namespaces that may be loaded.
+        Checks across all rank-specific key namespaces that may be loaded. A
+        hit covering all ``num_tokens`` is re-derived below the request end so
+        the last token is recomputed for sampling.
         """
+        token_len = self.coord.align_lookup_length(num_tokens)
         if not block_hashes or token_len <= 0:
             return 0
 
@@ -1522,11 +1525,24 @@ class MooncakeStoreWorker:
             )
         }
 
+        cached_block_pool = ExternalCachedBlockPool(
+            self.hash_block_size,
+            exists_set,
+        )
         _masks, hit_length = self.coord.find_longest_cache_hit(
             block_hashes,
             token_len,
-            ExternalCachedBlockPool(self.hash_block_size, exists_set),
+            cached_block_pool,
         )
+        if hit_length >= num_tokens:
+            usable_length = self.coord.align_lookup_length(num_tokens - 1)
+            if usable_length <= 0:
+                return 0
+            _masks, hit_length = self.coord.find_longest_cache_hit(
+                block_hashes,
+                usable_length,
+                cached_block_pool,
+            )
         return hit_length
 
     def get_kv_events(self) -> list[BlockStored]:
@@ -1592,11 +1608,11 @@ class LookupKeyServer:
                 msg_type = bytes(all_frames[0])
 
                 if msg_type == LOOKUP_MSG:
-                    token_len = int.from_bytes(all_frames[1], byteorder="big")
+                    num_tokens = int.from_bytes(all_frames[1], byteorder="big")
                     hash_len = int.from_bytes(all_frames[2], byteorder="big")
                     blob = all_frames[3].buffer
                     block_hashes = BlobBlockHashes(blob, hash_len)
-                    result = self.store_worker.lookup(token_len, block_hashes)
+                    result = self.store_worker.lookup(num_tokens, block_hashes)
                     self.socket.send(result.to_bytes(4, "big"))
 
                 elif msg_type == RESET_MSG:
@@ -1659,11 +1675,11 @@ class LookupKeyClient:
         )
         self.futures: dict[str, Future[int]] = {}
 
-    def _lookup(self, token_len: int, block_hashes: list[BlockHash]) -> int:
+    def _lookup(self, num_tokens: int, block_hashes: list[BlockHash]) -> int:
         hash_len = len(block_hashes[0]) if block_hashes else 0
         all_frames = (
             LOOKUP_MSG,
-            token_len.to_bytes(4, byteorder="big"),
+            num_tokens.to_bytes(4, byteorder="big"),
             hash_len.to_bytes(2, byteorder="big"),
             b"".join(block_hashes),
         )
@@ -1674,7 +1690,7 @@ class LookupKeyClient:
     def lookup(
         self,
         req_id: str,
-        token_len: int,
+        num_tokens: int,
         block_hashes: list[BlockHash],
         non_block: bool = False,
     ) -> int | None:
@@ -1682,7 +1698,7 @@ class LookupKeyClient:
         so the caller retries on a later step."""
         future = self.futures.get(req_id)
         if future is None:
-            future = self.executor.submit(self._lookup, token_len, list(block_hashes))
+            future = self.executor.submit(self._lookup, num_tokens, list(block_hashes))
             self.futures[req_id] = future
         if non_block and not future.done():
             return None
