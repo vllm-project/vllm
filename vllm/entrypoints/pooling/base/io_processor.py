@@ -81,6 +81,7 @@ class PoolingIOProcessor:
     ) -> Sequence[AllRenderParam]:
         request = ctx.request
         renderer = self.renderer
+        requests: Sequence[AllRenderParam]
 
         if isinstance(request, PoolingChatLikeRequest):
             self._validate_chat_template(
