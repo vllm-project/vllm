@@ -69,7 +69,7 @@ class _ClientRequestState:
     One entry per kv_request_id we're driving. Lookup-phase fields are
     used only by symmetric P2P (``do_p2p_fetch``); PD-only loads leave
     ``probes``/``unsent`` empty and drive just ``phase`` and ``load``. An
-    entry is dropped once every field is idle — see ``ClientRole._maybe_gc``.
+    entry is dropped once every field is idle — see ``ClientRole._maybe_prune``.
     """
 
     # -- Lookup phase (symmetric P2P only; untouched for PD) --
@@ -110,7 +110,7 @@ class ClientRole:
         self._send = send
         # All per-kv_request_id state lives here. Entries are created
         # lazily by request_blocks / register_lookup and dropped by
-        # _maybe_gc once every field is idle.
+        # _maybe_prune once every field is idle.
         self._requests: dict[str, _ClientRequestState] = {}
         # kv_request_ids with unsent lookup hashes for the next flush to
         # visit — the work-list that keeps flush_pending_lookups from
@@ -138,7 +138,7 @@ class ClientRole:
             self._requests[kv_request_id] = st
         return st
 
-    def _maybe_gc(self, kv_request_id: str) -> None:
+    def _maybe_prune(self, kv_request_id: str) -> None:
         """Drop the entry once it holds no live load or lookup state.
 
         The sticky ``phase`` is only read by ``cancel_lookups``. A probe
@@ -217,7 +217,7 @@ class ClientRole:
             )
         st.load = None
         self._active_loads.discard(kv_request_id)
-        self._maybe_gc(kv_request_id)
+        self._maybe_prune(kv_request_id)
 
     def on_transfer_done(self, kv_request_id: str, success: bool) -> None:
         """Handle a TransferDoneMsg from the peer."""
@@ -232,7 +232,7 @@ class ClientRole:
             )
             st.load = None
             self._active_loads.discard(kv_request_id)
-            self._maybe_gc(kv_request_id)
+            self._maybe_prune(kv_request_id)
         else:
             # No matching in-flight load: either a duplicate
             # transfer_done from the peer (protocol violation) or a
@@ -267,7 +267,7 @@ class ClientRole:
             )
             st.load = None
             self._active_loads.discard(kv_request_id)
-            self._maybe_gc(kv_request_id)
+            self._maybe_prune(kv_request_id)
         else:
             # See on_transfer_done: same ambiguity (duplicate ack
             # vs. raced with local cancel/timeout that already popped).
@@ -429,7 +429,7 @@ class ClientRole:
         st.probes.clear()
         st.unsent.clear()
         self._flush_pending.discard(kv_request_id)
-        self._maybe_gc(kv_request_id)
+        self._maybe_prune(kv_request_id)
 
     def collect_results(self) -> list[LoadResult]:
         """Walk load timeouts and drain completed loads.
@@ -480,7 +480,7 @@ class ClientRole:
         for req_id in to_remove:
             self._requests[req_id].load = None
             self._active_loads.discard(req_id)
-            self._maybe_gc(req_id)
+            self._maybe_prune(req_id)
 
         results = self._completed_loads
         self._completed_loads = []
