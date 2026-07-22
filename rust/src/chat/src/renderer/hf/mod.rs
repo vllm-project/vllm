@@ -1310,6 +1310,26 @@ mod tests {
     }
 
     #[test]
+    fn qwen35_template_auto_detects_openai_multimodal_content() {
+        let mut request = image_request();
+        request.chat_options.generation_prompt_mode = GenerationPromptMode::NoGenerationPrompt;
+
+        let rendered = render_mm(
+            QWEN3_5_0_8B_TEMPLATE,
+            &request,
+            ChatTemplateContentFormatOption::Auto,
+        )
+        .unwrap();
+
+        expect![[r#"
+            Text(
+                "<|im_start|>user\na<|vision_start|><|image_pad|><|vision_end|>b<|im_end|>\n",
+            )
+        "#]]
+        .assert_debug_eq(&rendered.prompt);
+    }
+
+    #[test]
     fn qwen35_template_renders_closed_empty_reasoning_span_when_thinking_disabled() {
         let mut request = sample_request(vec![ChatMessage::text(ChatRole::User, "hello")]);
         request

@@ -13,6 +13,7 @@ from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
 import msgspec
+import numpy as np
 import pytest
 import ray
 import torch
@@ -203,13 +204,12 @@ class FakeNixlWrapper:
 def _make_fake_nixl_pkg():
     """Context manager that creates a temporary package making
        `from nixl._api import nixl_agent` resolve to our FakeNixlWrapper.
-       Also creates rixl package for ROCm compatibility.
+       Also creates the ROCm NIXL packages.
 
     Automatically cleans up the temporary directory when done.
     """
     with tempfile.TemporaryDirectory() as td:
-        # Create both nixl and rixl packages for cross-platform compatibility
-        for pkg_name in ["nixl", "rixl"]:
+        for pkg_name in ["nixl", "nixl_rocm"]:
             pkg_root = os.path.join(td, pkg_name, "_api")
             os.makedirs(pkg_root, exist_ok=True)
 
@@ -750,7 +750,10 @@ class TestNixlHandshake:
         worker.block_len_per_layer = [4096 * worker.block_size]
         worker.num_blocks = 1
         worker.dst_num_blocks[worker.engine_id] = worker.num_blocks
-        worker.src_blocks_data = [(0, worker.block_len_per_layer[0], worker.tp_rank)]
+        worker.src_blocks_data = np.array(
+            [(0, worker.block_len_per_layer[0], worker.tp_rank)],
+            dtype=np.uint64,
+        )
         worker.num_descs = len(worker.src_blocks_data)
 
         def check_handshake(remote_tp_size: int):
@@ -1124,8 +1127,8 @@ class TestNixlHandshake:
             == worker._mamba_ssm_size[1]
         )
 
-        assert worker._build_fa_remote(plan, meta, block_size_ratio=1) == [
-            (0x1000 + local_block_len, local_block_len, 0)
+        assert worker._build_fa_remote(plan, meta, block_size_ratio=1).tolist() == [
+            [0x1000 + local_block_len, local_block_len, 0]
         ]
 
     @patch(
@@ -1158,10 +1161,13 @@ class TestNixlHandshake:
             worker._region_is_mla = [False, True]
             worker.num_blocks = 1
             worker.dst_num_blocks[worker.engine_id] = worker.num_blocks
-            worker.src_blocks_data = [
-                (0, fa_len, worker.tp_rank),
-                (0, idx_len, worker.tp_rank),
-            ]
+            worker.src_blocks_data = np.array(
+                [
+                    (0, fa_len, worker.tp_rank),
+                    (0, idx_len, worker.tp_rank),
+                ],
+                dtype=np.uint64,
+            )
             worker.num_descs = len(worker.src_blocks_data)
 
             # D_TP=2, P_TP=1 -> tp_ratio=2. SPLIT region scales by tp_ratio;
@@ -3123,10 +3129,12 @@ def test_handshake_decode_errors(default_vllm_config, dist_init, error_scenario)
             )
 
 
+@patch(
+    "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
+    FakeNixlWrapper,
+)
 def test_kv_both_deprecation_warning(default_vllm_config, dist_init):
     """kv_role='kv_both' should emit a deprecation log warning."""
-    from unittest.mock import patch
-
     from vllm.logger import _print_warning_once
 
     _print_warning_once.cache_clear()
@@ -3149,10 +3157,12 @@ def test_kv_both_deprecation_warning(default_vllm_config, dist_init):
     assert "deprecated" in msg
 
 
+@patch(
+    "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
+    FakeNixlWrapper,
+)
 def test_explicit_kv_role_no_deprecation_warning(default_vllm_config, dist_init):
     """kv_role='kv_consumer' or 'kv_producer' should NOT emit a warning."""
-    from unittest.mock import patch
-
     for role in ("kv_consumer", "kv_producer"):
         vllm_config = create_vllm_config(kv_role=role)
         with patch(
