@@ -7,7 +7,7 @@ set -e
 # Default values
 # Keep DEEPGEMM_GIT_REF in sync with cmake/external_projects/deepgemm.cmake
 DEEPGEMM_GIT_REPO="https://github.com/cleonard530/DeepGEMM.git"
-DEEPGEMM_GIT_REF="441c417c6cf7184593421273b7e6d79a0999a8f3"
+DEEPGEMM_GIT_REF="2690e59ef82601b0cde7f2157cd43ea186b3a2e1"
 WHEEL_DIR=""
 
 # Parse command line arguments
