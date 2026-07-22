@@ -74,9 +74,11 @@ def _discover_parsers() -> list[_ParserInfo]:
         if cfg.name not in _BUILDERS:
             missing_builders.append(f"{obj.__name__} (config.name={cfg.name!r})")
             continue
-        if cfg.name == "inkling":
+        if cfg.name in ("inkling", "llama_json"):
             # Inkling opts out of token-id terminal matching and has typed
-            # structural blocks; its replay coverage lives in test_inkling.py.
+            # structural blocks; llama_json is a bare-JSON format with no
+            # TOOL_END terminal (calls close at finish()).  Replay coverage
+            # lives in test_inkling.py / test_llama_json.py.
             continue
         tool_end = cfg.token_id_terminals.get("TOOL_END")
         if not tool_end:

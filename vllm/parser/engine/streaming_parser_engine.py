@@ -440,11 +440,17 @@ class StreamingParserEngine:
 
         Streams argument characters incrementally while holding back
         closing braces/brackets that might change as more input arrives.
+        When ``tool_call_ends_on_args_balance`` closes the call mid-text,
+        the remainder is re-dispatched to the new state.
         """
         events: list[SemanticEvent] = []
-        for ch in text:
-            result = self._feed_args_char(ch)
-            events.extend(result)
+        for i, ch in enumerate(text):
+            events.extend(self._feed_args_char(ch))
+            if self.state != ParserState.TOOL_ARGS:
+                rest = text[i + 1 :]
+                if rest:
+                    events.extend(self._emit_for_state(rest))
+                break
         return events
 
     def _feed_args_char(self, ch: str) -> list[SemanticEvent]:
@@ -476,10 +482,25 @@ class StreamingParserEngine:
         if ch in ("}", "]"):
             if self._args_brace_depth > 0:
                 self._args_brace_depth -= 1
-            if self._args_brace_depth == 0:
-                return []
-            self._args_safe_end = len(self._args_buffer)
-            return self._flush_safe_args()
+                if self._args_brace_depth == 0:
+                    return []
+                self._args_safe_end = len(self._args_buffer)
+                return self._flush_safe_args()
+            # Depth already 0: with the opening brace consumed by the
+            # tool-start transition, this is the payload's own closing
+            # brace (any held inner closer is still in the buffer).
+            if ch == "}" and self.config.tool_call_ends_on_args_balance:
+                self._args_safe_end = len(self._args_buffer)
+                events = self._flush_safe_args()
+                events.append(
+                    SemanticEvent(
+                        EventType.TOOL_CALL_END,
+                        tool_index=self.tool_index,
+                    )
+                )
+                self.state = ParserState.CONTENT
+                return events
+            return []
 
         self._args_safe_end = len(self._args_buffer)
         return self._flush_safe_args()

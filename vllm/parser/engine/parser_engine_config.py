@@ -79,6 +79,11 @@ class ParserEngineConfig:
 
     tool_args_json: bool = True
 
+    # End the tool call when the JSON argument payload closes (a "}" at
+    # top level of the args tracker), for formats with no end marker.
+    # The engine returns to CONTENT state.  Requires ``tool_args_json``.
+    tool_call_ends_on_args_balance: bool = False
+
     arg_structural_chars: frozenset[str] | None = None
 
     # Special tokens exempt from auto-drop but not state-machine terminals.
