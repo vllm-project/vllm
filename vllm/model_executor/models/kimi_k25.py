@@ -34,6 +34,7 @@ from vllm.model_executor.models.kimi_k25_vit import (
     MoonViT3dPretrainedModel,
     vision_tower_forward,
 )
+from vllm.model_executor.models.vision import is_vit_use_data_parallel
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     MultiModalFieldConfig,
@@ -56,6 +57,10 @@ from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.kimi_k25 import KimiK25Config
 from vllm.transformers_utils.processor import cached_get_image_processor
 from vllm.transformers_utils.processors.kimi_k25 import KimiK25Processor
+from vllm.transformers_utils.processors.kimi_k25_vision_fused import (
+    KimiK25FusedVisionProcessor,
+)
+from vllm.utils.import_utils import is_numba_available
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .utils import (
@@ -108,10 +113,16 @@ class KimiK25ProcessingInfo(BaseProcessingInfo):
         self.hf_config = hf_config = self.get_hf_config()
 
         tokenizer = self.get_tokenizer()
+        processor_cls = KimiK25FusedVisionProcessor if is_numba_available() else None
+        logger.info_once(
+            "Using %s image preprocessing for Kimi-K2.5/K2.6 vision chunks.",
+            "fused CPU" if processor_cls is not None else "remote HF",
+        )
         image_processor = cached_get_image_processor(
             self.ctx.model_config.model,
             revision=self.ctx.model_config.revision,
             trust_remote_code=self.ctx.model_config.trust_remote_code,
+            processor_cls_overrides=processor_cls,
         )
 
         # Resolve token ID from the tokenizer because transformers v5
@@ -326,9 +337,8 @@ class KimiK25ForConditionalGeneration(
         self.config = config
         quant_config = vllm_config.quant_config
 
-        # Check for MoonViT config compatibility
-        self.use_data_parallel = (
-            model_config.multimodal_config.mm_encoder_tp_mode == "data"
+        self.use_data_parallel = is_vit_use_data_parallel(
+            config.vision_config.num_attention_heads
         )
         self.hidden_size = config.text_config.hidden_size
         self.device = current_platform.current_device()

@@ -10,10 +10,12 @@ from typing_extensions import override
 from vllm.config import VllmConfig
 from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
-from vllm.triton_utils import triton
 from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.spec_decode.llm_base_proposer import SpecDecodeBaseProposer
-from vllm.v1.spec_decode.utils import copy_and_expand_dflash_inputs_kernel
+from vllm.v1.spec_decode.utils import (
+    copy_and_expand_dflash_inputs_kernel,
+    next_power_of_2,
+)
 
 logger = init_logger(__name__)
 
@@ -68,7 +70,11 @@ class DFlashProposer(SpecDecodeBaseProposer):
         # For DFlash we use the input embeddings to embed the mask token
         self.parallel_drafting_hidden_state_tensor = None
 
-        self.dflash_causal = self.dflash_config.get("causal", False)
+        from vllm.model_executor.models.qwen3_dflash import dflash_has_any_non_causal
+
+        self.dflash_causal = not dflash_has_any_non_causal(
+            self.draft_model_config.hf_config
+        )
 
     @override
     def _create_draft_vllm_config(self) -> VllmConfig:
@@ -126,8 +132,8 @@ class DFlashProposer(SpecDecodeBaseProposer):
         # and token_indices_to_sample
         max_ctx_per_req = cad.max_query_len
         max_tokens_per_req = max_ctx_per_req + num_query_per_req
-        BLOCK_SIZE = min(256, triton.next_power_of_2(max_tokens_per_req))
-        num_blocks = triton.cdiv(max_tokens_per_req, BLOCK_SIZE)
+        BLOCK_SIZE = min(256, next_power_of_2(max_tokens_per_req))
+        num_blocks = (max_tokens_per_req + BLOCK_SIZE - 1) // BLOCK_SIZE
         grid = (batch_size, num_blocks)
 
         has_num_rejected = num_rejected_tokens_gpu is not None

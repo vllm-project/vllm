@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 //! Minimal chat facade above [`vllm_text`].
 //!
 //! This crate keeps the northbound boundary intentionally small:
@@ -29,8 +32,8 @@ pub use parser::reasoning::{
 pub use parser::tool::{ToolParser, ToolParserError, ToolParserFactory};
 pub use renderer::hf::ChatTemplateContentFormatOption;
 pub use renderer::{
-    ChatRenderer, DeepSeekV4ChatRenderer, DeepSeekV32ChatRenderer, DynChatRenderer, RenderedPrompt,
-    RendererSelection,
+    ChatRenderer, DeepSeekV4ChatRenderer, DeepSeekV32ChatRenderer, DynChatRenderer,
+    HarmonyChatRenderer, InklingChatRenderer, RenderedPrompt, RendererSelection,
 };
 pub use request::{
     ChatContent, ChatContentPart, ChatMessage, ChatOptions, ChatRequest, ChatRole, ChatTool,
@@ -50,7 +53,9 @@ mod request;
 mod stream;
 
 use vllm_engine_core_client::EngineCoreClient;
-use vllm_engine_core_client::protocol::ModelDtype;
+use vllm_engine_core_client::protocol::dtype::ModelDtype;
+use vllm_engine_core_client::protocol::multimodal::MmFeatures;
+use vllm_engine_core_client::protocol::request::ReasoningParserKwargs;
 use vllm_llm::Llm;
 use vllm_text::{Prompt, TextLlm, TextRequest};
 
@@ -84,6 +89,92 @@ pub fn validate_parser_overrides(
     Ok(())
 }
 
+/// Chat request preparation shared by inference and render-only frontends.
+pub struct ChatRequestProcessor {
+    backend: DynChatBackend,
+    /// Effective model dtype reported by the engine.
+    /// Absent for text-only frontends without an engine handshake.
+    model_dtype: Option<ModelDtype>,
+}
+
+impl ChatRequestProcessor {
+    /// Create a processor with multimodal support using the effective model
+    /// dtype reported by the engine.
+    fn new(backend: DynChatBackend, model_dtype: ModelDtype) -> Self {
+        Self {
+            backend,
+            model_dtype: Some(model_dtype),
+        }
+    }
+
+    /// Create a render-only processor that rejects multimodal requests.
+    pub fn render_only(backend: DynChatBackend) -> Self {
+        Self {
+            backend,
+            model_dtype: None,
+        }
+    }
+
+    async fn finalize_rendered_prompt(
+        &self,
+        request: &ChatRequest,
+        rendered: RenderedPrompt,
+    ) -> Result<(Prompt, Option<MmFeatures>)> {
+        match self.model_dtype {
+            Some(model_dtype) => {
+                multimodal::finalize_rendered_prompt(
+                    request,
+                    rendered,
+                    self.backend.multimodal_model_info(),
+                    model_dtype,
+                )
+                .await
+            }
+            None if !request.has_multimodal() => Ok((rendered.prompt, None)),
+            None => Err(Error::UnsupportedMultimodalRenderer),
+        }
+    }
+
+    /// Prepare one chat request without submitting it to an engine.
+    pub async fn prepare(
+        &self,
+        mut request: ChatRequest,
+        options: NewChatOutputProcessorOptions<'_>,
+    ) -> Result<(TextRequest, DynChatOutputProcessor)> {
+        request.validate()?;
+
+        // Stamp before rendering so render and tokenize count toward TTFT/e2e.
+        let arrival_time = vllm_llm::current_unix_timestamp_secs();
+        let output_processor = self.backend.new_chat_output_processor(&mut request, options)?;
+        let rendered = self.backend.chat_renderer().render(&request)?;
+        let reasoning_parser_kwargs =
+            request
+                .sampling_params
+                .structured_outputs
+                .is_some()
+                .then(|| ReasoningParserKwargs {
+                    chat_template_kwargs: rendered.effective_template_kwargs.clone(),
+                });
+        let (prompt, mm_features) = self.finalize_rendered_prompt(&request, rendered).await?;
+        let text_request = TextRequest {
+            request_id: request.request_id,
+            prompt,
+            mm_features,
+            sampling_params: request.sampling_params,
+            decode_options: request.decode_options,
+            intermediate: request.intermediate,
+            priority: request.priority,
+            cache_salt: request.cache_salt,
+            add_special_tokens: request.add_special_tokens,
+            data_parallel_rank: request.data_parallel_rank,
+            reasoning_parser_kwargs,
+            lora_request: request.lora_request,
+            arrival_time: Some(arrival_time),
+        };
+        Ok((text_request, output_processor))
+    }
+}
+
 /// Structured chat facade above [`TextLlm`].
 ///
 /// This layer stays above raw text semantics: it takes care of chat-template
@@ -91,9 +182,7 @@ pub fn validate_parser_overrides(
 /// request semantics such as tool calls.
 pub struct ChatLlm {
     text: TextLlm,
-    backend: DynChatBackend,
-    /// Effective model dtype reported by the engine.
-    model_dtype: ModelDtype,
+    processor: ChatRequestProcessor,
     /// Tool-call parser selection.
     tool_call_parser: ParserSelection,
     /// Reasoning parser selection.
@@ -108,8 +197,7 @@ impl ChatLlm {
 
         Self {
             text,
-            backend,
-            model_dtype,
+            processor: ChatRequestProcessor::new(backend, model_dtype),
             tool_call_parser: ParserSelection::Auto,
             reasoning_parser: ParserSelection::Auto,
         }
@@ -136,7 +224,7 @@ impl ChatLlm {
 
     /// Override the effective model dtype used for multimodal tensor encoding.
     pub fn with_model_dtype(mut self, model_dtype: ModelDtype) -> Self {
-        self.model_dtype = model_dtype;
+        self.processor.model_dtype = Some(model_dtype);
         self
     }
 
@@ -168,44 +256,23 @@ impl ChatLlm {
     }
 
     /// Render, tokenize, and submit one chat request.
-    pub async fn chat(&self, mut request: ChatRequest) -> Result<ChatEventStream> {
-        request.validate()?;
-
-        let output_processor = self.backend.new_chat_output_processor(
-            &mut request,
-            NewChatOutputProcessorOptions {
-                tool_call_parser: &self.tool_call_parser,
-                reasoning_parser: &self.reasoning_parser,
-            },
-        )?;
-        let rendered = self.backend.chat_renderer().render(&request)?;
-
-        let (prompt, mm_features) = multimodal::finalize_rendered_prompt(
-            &request,
-            rendered,
-            self.backend.multimodal_model_info(),
-            self.model_dtype,
-        )
-        .await?;
-
-        let text_request = TextRequest {
-            request_id: request.request_id.clone(),
-            prompt,
-            mm_features,
-            sampling_params: request.sampling_params,
-            decode_options: request.decode_options,
-            intermediate: request.intermediate,
-            priority: request.priority,
-            cache_salt: request.cache_salt,
-            add_special_tokens: request.add_special_tokens,
-            data_parallel_rank: request.data_parallel_rank,
-            lora_request: request.lora_request,
-        };
+    pub async fn chat(&self, request: ChatRequest) -> Result<ChatEventStream> {
+        let (text_request, output_processor) = self
+            .processor
+            .prepare(
+                request,
+                NewChatOutputProcessorOptions {
+                    tool_call_parser: &self.tool_call_parser,
+                    reasoning_parser: &self.reasoning_parser,
+                },
+            )
+            .await?;
+        let request_id = text_request.request_id.clone();
         let decoded_stream = self.text.generate(text_request).await?.map_err(Error::from).boxed();
 
         let structured_stream = output_processor.process(decoded_stream)?;
 
-        Ok(ChatEventStream::new(request.request_id, structured_stream))
+        Ok(ChatEventStream::new(request_id, structured_stream))
     }
 
     /// Render through the chat template and tokenize, without submitting to the engine.
@@ -216,14 +283,9 @@ impl ChatLlm {
     pub async fn tokenize_chat(&self, request: ChatRequest) -> Result<Vec<u32>> {
         request.validate()?;
 
-        let rendered = self.backend.chat_renderer().render(&request)?;
-        let (prompt, _mm_features) = multimodal::finalize_rendered_prompt(
-            &request,
-            rendered,
-            self.backend.multimodal_model_info(),
-            self.model_dtype,
-        )
-        .await?;
+        let rendered = self.processor.backend.chat_renderer().render(&request)?;
+        let (prompt, _mm_features) =
+            self.processor.finalize_rendered_prompt(&request, rendered).await?;
 
         let tokenizer = self.text.tokenizer();
         let token_ids = match prompt {
@@ -277,7 +339,7 @@ mod tests {
         )
         .unwrap_err();
 
-        expect_test::expect!["tool parser `definitely_missing_tool_parser` is not registered (choose from: deepseek_v3, deepseek_v31, deepseek_v32, deepseek_v4, gemma4, glm45, glm47, granite4, hermes, hy_v3, internlm, kimi_k2, llama3_json, llama4_json, minimax_m2, minimax_m3, mistral, phi4_mini_json, qwen3_coder, qwen3_xml)"].assert_eq(&error.to_report_string());
+        expect_test::expect!["tool parser `definitely_missing_tool_parser` is not registered (choose from: deepseek_v3, deepseek_v31, deepseek_v32, deepseek_v4, gemma4, glm45, glm47, granite4, hermes, hy_v3, inkling, internlm, kimi_k2, llama3_json, llama4_json, minimax_m2, minimax_m3, mistral, phi4_mini_json, qwen3_coder, qwen3_xml, seed_oss)"].assert_eq(&error.to_report_string());
     }
 
     #[test]
@@ -288,6 +350,6 @@ mod tests {
         )
         .unwrap_err();
 
-        expect_test::expect!["reasoning parser `definitely_missing_reasoning_parser` is not registered (choose from: cohere_cmd, deepseek_r1, deepseek_v3, deepseek_v4, gemma4, glm45, kimi, kimi_k2, minimax_m2, minimax_m3, nemotron_v3, qwen3, seed_oss, step3, step3p5)"].assert_eq(&error.to_report_string());
+        expect_test::expect!["reasoning parser `definitely_missing_reasoning_parser` is not registered (choose from: cohere_cmd, deepseek_r1, deepseek_v3, deepseek_v4, gemma4, glm45, inkling, kimi, kimi_k2, minimax_m2, minimax_m3, nemotron_v3, qwen3, seed_oss, step3, step3p5)"].assert_eq(&error.to_report_string());
     }
 }

@@ -10,8 +10,9 @@ import logging
 import time
 import uuid
 from collections.abc import AsyncGenerator
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
+import jinja2
 from fastapi import Request
 
 from vllm.engine.protocol import EngineClient
@@ -42,15 +43,53 @@ from vllm.entrypoints.openai.engine.protocol import (
     JsonSchemaResponseFormat,
     ResponseFormat,
     StreamOptions,
+    UsageInfo,
 )
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.serve.utils.api_utils import sanitize_message
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
-
-if TYPE_CHECKING:
-    from vllm.entrypoints.serve.render.serving import OpenAIServingRender
+from vllm.renderers.online_renderer import OnlineRenderer
 
 logger = logging.getLogger(__name__)
+
+
+def _build_anthropic_usage(
+    usage: UsageInfo | None,
+) -> AnthropicUsage:
+    """Build an AnthropicUsage from UsageInfo.
+
+    Anthropic defines ``total_input == input_tokens + cache_read +
+    cache_creation``.  vLLM's ``prompt_tokens`` is the total, so
+    ``input_tokens = prompt_tokens - cache_read - cache_creation``.
+
+    Cache fields are taken from ``UsageInfo.prompt_tokens_details``.
+    When cache info is absent (e.g. ``--enable-prompt-tokens-details``
+    off, or a streaming chunk that hasn't carried it yet), cache fields
+    are left **unset** so ``exclude_unset=True`` serialization omits them
+    entirely.
+
+    ``completion_tokens`` follows ``UsageInfo`` and may be ``None`` on
+    intermediate stream chunks; we coerce to ``0`` for the wire format.
+    """
+    kwargs = {}
+    if usage is None:
+        kwargs["input_tokens"] = 0
+        kwargs["output_tokens"] = 0
+    else:
+        kwargs["output_tokens"] = usage.completion_tokens or 0
+        input_tokens = usage.prompt_tokens
+
+        if (details := usage.prompt_tokens_details) is not None:
+            if (cache_read := details.cached_tokens) is not None:
+                input_tokens -= cache_read
+                kwargs["cache_read_input_tokens"] = cache_read
+
+            if (cache_creation := details.created_cache_tokens) is not None:
+                input_tokens -= cache_creation
+                kwargs["cache_creation_input_tokens"] = cache_creation
+
+        kwargs["input_tokens"] = max(0, input_tokens)
+    return AnthropicUsage(**kwargs)
 
 
 def wrap_data_with_event(data: str, event: str):
@@ -66,7 +105,7 @@ class AnthropicServingMessages(OpenAIServingChat):
         models: OpenAIServingModels,
         response_role: str,
         *,
-        openai_serving_render: "OpenAIServingRender",
+        online_renderer: "OnlineRenderer",
         request_logger: RequestLogger | None,
         chat_template: str | None,
         chat_template_content_format: ChatTemplateContentFormatOption,
@@ -82,7 +121,7 @@ class AnthropicServingMessages(OpenAIServingChat):
             engine_client=engine_client,
             models=models,
             response_role=response_role,
-            openai_serving_render=openai_serving_render,
+            online_renderer=online_renderer,
             request_logger=request_logger,
             chat_template=chat_template,
             chat_template_content_format=chat_template_content_format,
@@ -99,6 +138,36 @@ class AnthropicServingMessages(OpenAIServingChat):
             "length": "max_tokens",
             "tool_calls": "tool_use",
         }
+        self._merge_inline_system = self._detect_merge_inline_system(chat_template)
+
+    @staticmethod
+    def _detect_merge_inline_system(chat_template: str | None) -> bool:
+        """Auto-detect whether the chat template requires system-first ordering.
+
+        Renders a [system, user, system, user] conversation against the
+        template; if it raises (e.g. Qwen's ``loop.first`` guard), the
+        model needs inline system messages merged into the leading block.
+        """
+        if not chat_template:
+            return True
+        try:
+            env = jinja2.sandbox.ImmutableSandboxedEnvironment(
+                trim_blocks=True,
+                lstrip_blocks=True,
+                extensions=[jinja2.ext.loopcontrols],
+            )
+            env.from_string(chat_template).render(
+                messages=[
+                    {"role": "system", "content": "t"},
+                    {"role": "user", "content": "t"},
+                    {"role": "system", "content": "t"},
+                    {"role": "user", "content": "t"},
+                ],
+                add_generation_prompt=False,
+            )
+            return False
+        except jinja2.TemplateError:
+            return True
 
     @staticmethod
     def _convert_image_source_to_url(source: dict[str, Any]) -> str:
@@ -123,13 +192,24 @@ class AnthropicServingMessages(OpenAIServingChat):
 
     @classmethod
     def _convert_anthropic_to_openai_request(
-        cls, anthropic_request: AnthropicMessagesRequest | AnthropicCountTokensRequest
+        cls,
+        anthropic_request: AnthropicMessagesRequest | AnthropicCountTokensRequest,
+        *,
+        merge_inline_system: bool = False,
     ) -> ChatCompletionRequest:
         """Convert Anthropic message format to OpenAI format"""
         openai_messages: list[dict[str, Any]] = []
 
-        cls._convert_system_message(anthropic_request, openai_messages)
-        cls._convert_messages(anthropic_request.messages, openai_messages)
+        cls._convert_system_message(
+            anthropic_request,
+            openai_messages,
+            merge_inline_system=merge_inline_system,
+        )
+        cls._convert_messages(
+            anthropic_request.messages,
+            openai_messages,
+            merge_inline_system=merge_inline_system,
+        )
         req = cls._build_base_request(anthropic_request, openai_messages)
         cls._handle_streaming_options(req, anthropic_request)
         cls._handle_output_config(req, anthropic_request)
@@ -142,6 +222,8 @@ class AnthropicServingMessages(OpenAIServingChat):
         cls,
         anthropic_request: AnthropicMessagesRequest | AnthropicCountTokensRequest,
         openai_messages: list[dict[str, Any]],
+        *,
+        merge_inline_system: bool = False,
     ) -> None:
         """Convert Anthropic system message to OpenAI format"""
         system_parts: list[str] = []
@@ -159,29 +241,57 @@ class AnthropicServingMessages(OpenAIServingChat):
                             continue
                         system_parts.append(block.text)
 
-        # System messages embedded inside the messages array
-        for msg in anthropic_request.messages:
-            if msg.role != "system":
-                continue
-            if isinstance(msg.content, str):
-                system_parts.append(msg.content)
-            else:
-                for block in msg.content:
-                    if block.type == "text" and block.text:
-                        if block.text.startswith("x-anthropic-billing-header"):
-                            continue
-                        system_parts.append(block.text)
+        # When the template requires system-first ordering, extract inline
+        # system messages from the messages array and merge them into the
+        # top-level block so the template doesn't reject them.
+        if merge_inline_system:
+            for msg in anthropic_request.messages:
+                if msg.role != "system":
+                    continue
+                text = cls._extract_system_text(msg)
+                if text:
+                    system_parts.append(text)
 
         if system_parts:
             openai_messages.append({"role": "system", "content": "".join(system_parts)})
 
     @classmethod
+    def _extract_system_text(cls, msg) -> str | None:
+        """Extract text from a system message, stripping billing headers."""
+        if isinstance(msg.content, str):
+            text = msg.content
+            if text.startswith("x-anthropic-billing-header"):
+                return None
+            return text
+        parts: list[str] = []
+        for block in msg.content:
+            if block.type == "text" and block.text:
+                if block.text.startswith("x-anthropic-billing-header"):
+                    continue
+                parts.append(block.text)
+        return "".join(parts) if parts else None
+
+    @classmethod
     def _convert_messages(
-        cls, messages: list, openai_messages: list[dict[str, Any]]
+        cls,
+        messages: list,
+        openai_messages: list[dict[str, Any]],
+        *,
+        merge_inline_system: bool = False,
     ) -> None:
         """Convert Anthropic messages to OpenAI format"""
         for msg in messages:
+            # Handle system messages in-place: extract text, strip billing
+            # headers, and only emit if there is real content.  This avoids
+            # going through _convert_block / _convert_message_content which
+            # doesn't strip billing headers and may produce messages with
+            # no "content" key.
             if msg.role == "system":
+                if merge_inline_system:
+                    continue  # already merged into top-level by _convert_system_message
+                text = cls._extract_system_text(msg)
+                if text:
+                    openai_messages.append({"role": "system", "content": text})
                 continue
 
             openai_msg: dict[str, Any] = {"role": msg.role}  # type: ignore
@@ -377,6 +487,7 @@ class AnthropicServingMessages(OpenAIServingChat):
             top_p=anthropic_request.top_p,
             top_k=anthropic_request.top_k,
             kv_transfer_params=anthropic_request.kv_transfer_params,
+            ec_transfer_params=anthropic_request.ec_transfer_params,
             chat_template_kwargs=anthropic_request.chat_template_kwargs,
         )
 
@@ -486,7 +597,10 @@ class AnthropicServingMessages(OpenAIServingChat):
         """
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug("Received messages request %s", request.model_dump_json())
-        chat_req = self._convert_anthropic_to_openai_request(request)
+        chat_req = self._convert_anthropic_to_openai_request(
+            request,
+            merge_inline_system=self._merge_inline_system,
+        )
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug("Convert to OpenAI request %s", chat_req.model_dump_json())
         generator = await self.create_chat_completion(chat_req, raw_request)
@@ -507,11 +621,9 @@ class AnthropicServingMessages(OpenAIServingChat):
             id=generator.id,
             content=[],
             model=generator.model,
-            usage=AnthropicUsage(
-                input_tokens=generator.usage.prompt_tokens,
-                output_tokens=generator.usage.completion_tokens,
-            ),
+            usage=_build_anthropic_usage(generator.usage),
             kv_transfer_params=generator.kv_transfer_params,
+            ec_transfer_params=generator.ec_transfer_params,
         )
         choice = generator.choices[0]
         if choice.finish_reason == "stop":
@@ -546,6 +658,12 @@ class AnthropicServingMessages(OpenAIServingChat):
                 input=json.loads(tool_call.function.arguments),
             )
             content += [anthropic_tool_call]
+
+        # Anthropic's canonical shape for an empty completion is a single
+        # empty text block, not []. Some strict clients assume content[0]
+        # exists, so emit one here.
+        if not content:
+            content.append(AnthropicContentBlock(type="text", text=""))
 
         result.content = content
 
@@ -690,12 +808,7 @@ class AnthropicServingMessages(OpenAIServingChat):
                                     model=origin_chunk.model,
                                     stop_reason=None,
                                     stop_sequence=None,
-                                    usage=AnthropicUsage(
-                                        input_tokens=origin_chunk.usage.prompt_tokens
-                                        if origin_chunk.usage
-                                        else 0,
-                                        output_tokens=0,
-                                    ),
+                                    usage=_build_anthropic_usage(origin_chunk.usage),
                                 ),
                             )
                             first_item = False
@@ -713,14 +826,7 @@ class AnthropicServingMessages(OpenAIServingChat):
                             chunk = AnthropicStreamEvent(
                                 type="message_delta",
                                 delta=AnthropicDelta(stop_reason=stop_reason),
-                                usage=AnthropicUsage(
-                                    input_tokens=origin_chunk.usage.prompt_tokens
-                                    if origin_chunk.usage
-                                    else 0,
-                                    output_tokens=origin_chunk.usage.completion_tokens
-                                    if origin_chunk.usage
-                                    else 0,
-                                ),
+                                usage=_build_anthropic_usage(origin_chunk.usage),
                             )
                             data = chunk.model_dump_json(exclude_unset=True)
                             yield wrap_data_with_event(data, "message_delta")
@@ -894,7 +1000,10 @@ class AnthropicServingMessages(OpenAIServingChat):
         raw_request: Request | None = None,
     ) -> AnthropicCountTokensResponse | ErrorResponse:
         """Implements Anthropic's messages.count_tokens endpoint."""
-        chat_req = self._convert_anthropic_to_openai_request(request)
+        chat_req = self._convert_anthropic_to_openai_request(
+            request,
+            merge_inline_system=self._merge_inline_system,
+        )
         result = await self.render_chat_request(chat_req)
         if isinstance(result, ErrorResponse):
             return result
