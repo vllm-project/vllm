@@ -974,7 +974,6 @@ class DeepseekV4DecoderLayer(nn.Module):
         )
         x = self.ffn_norm(x)
         x = self.ffn(x, input_ids)
-
         return x, residual, post_mix, res_mix
 
 
@@ -1376,7 +1375,6 @@ class DeepseekV4ForCausalLM(nn.Module, SupportsPP, SupportsEagle3):
         loader = AutoWeightsLoader(self, skip_substrs=["mtp."])
         loaded_params = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
         self.model.finalize_mega_moe_weights()
-
         return loaded_params
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
