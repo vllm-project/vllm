@@ -83,7 +83,7 @@ ENV SCCACHE_S3_USE_SSL=${USE_SCCACHE:+on}
 ###
 ### TheROCK install
 ###
-ARG PIP_EXTRA_INDEX_URL=https://rocm.nightlies.amd.com/whl-multi-arch/
+ARG PIP_EXTRA_INDEX_URL=https://repo.amd.com/rocm/whl-multi-arch/
 ENV PIP_EXTRA_INDEX_URL=${PIP_EXTRA_INDEX_URL}
 ARG ROCM_SDK_VERSION
 ARG TORCH_VERSION=2.11.0
