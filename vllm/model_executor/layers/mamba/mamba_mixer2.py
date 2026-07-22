@@ -91,7 +91,7 @@ def _get_flashinfer_ssd(
             "FlashInfer SSDCombined is required for --mamba-prefill-backend flashinfer"
         ) from exc
 
-    with torch.cuda.device(device):
+    with torch.accelerator.device_index(device.index):
         return SSDCombined(
             chunk_size=chunk_size,
             nheads=nheads,
@@ -119,13 +119,14 @@ def _flashinfer_mamba2_prefill(
     A: torch.Tensor,
     B: torch.Tensor,
     C: torch.Tensor,
+    *,
+    chunk_size: int,
     D: torch.Tensor,
     dt_bias: torch.Tensor,
     initial_states: torch.Tensor | None,
     metadata: FlashInferSSDMetadata,
-    chunk_size: int,
-    state_dtype: torch.dtype,
     out: torch.Tensor,
+    state_dtype: torch.dtype,
 ) -> torch.Tensor:
     padding = metadata.seq_idx.shape[1] - x.shape[0]
     assert padding >= 0
@@ -147,7 +148,7 @@ def _flashinfer_mamba2_prefill(
         x.shape[2],
         B.shape[2],
         B.shape[1],
-        torch.cuda.current_stream(x.device).cuda_stream,
+        torch.accelerator.current_stream(x.device).stream_id,
     )
     result, final_states = ssd.run(
         _pad_tokens(x, padding).unsqueeze(0),
@@ -720,10 +721,11 @@ class MambaMixer2(MambaBase, PluggableLayer):
                 self.A,
                 B,
                 C,
-                self.D,
-                self.dt_bias,
-                None,
-                FlashInferSSDMetadata(
+                chunk_size=chunk_size,
+                D=self.D,
+                dt_bias=self.dt_bias,
+                initial_states=None,
+                metadata=FlashInferSSDMetadata(
                     seq_idx=torch.zeros(1, seqlen, device=device, dtype=torch.int32),
                     chunk_indices=torch.zeros(1, device=device, dtype=torch.int32),
                     chunk_offsets=torch.zeros(1, device=device, dtype=torch.int32),
@@ -731,17 +733,14 @@ class MambaMixer2(MambaBase, PluggableLayer):
                         [0, 1], device=device, dtype=torch.int32
                     ),
                 ),
-                chunk_size,
-                ssm_state_dtype,
-                out,
+                out=out,
+                state_dtype=ssm_state_dtype,
             )
             torch.accelerator.empty_cache()
             return
 
         cu_seqlens = torch.tensor([0, seqlen], device=device, dtype=torch.int32)
-        cu_chunk_seqlens = torch.tensor(
-            [0, seqlen], device=device, dtype=torch.int32
-        )
+        cu_chunk_seqlens = torch.tensor([0, seqlen], device=device, dtype=torch.int32)
         last_chunk_indices = torch.zeros(1, device=device, dtype=torch.int32)
         seq_idx = torch.zeros(1, device=device, dtype=torch.int32)
 
@@ -993,13 +992,13 @@ class MambaMixer2(MambaBase, PluggableLayer):
                     self.A,
                     B_p,
                     C_p,
-                    self.D,
-                    self.dt_bias,
-                    initial_states,
-                    flashinfer_metadata,
-                    chunk_size,
-                    ssm_state.dtype,
-                    ssm_out_p,
+                    chunk_size=chunk_size,
+                    D=self.D,
+                    dt_bias=self.dt_bias,
+                    initial_states=initial_states,
+                    metadata=flashinfer_metadata,
+                    out=ssm_out_p,
+                    state_dtype=ssm_state.dtype,
                 )
             else:
                 varlen_states = mamba_chunk_scan_combined_varlen(
