@@ -649,8 +649,7 @@ if has_flashinfer():
         B_scale: torch.Tensor,
         alpha: torch.Tensor,
     ) -> torch.Tensor:
-        # The prepared weight is (K // 16, N * 2) int32, so N is
-        # B.shape[1] // 2.
+        # Prepared weight is (K // 16, N * 2) int32.
         return torch.empty(A.shape[0], B.shape[1] // 2, dtype=A.dtype, device=A.device)
 
     @torch.library.custom_op(

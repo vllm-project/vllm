@@ -309,15 +309,10 @@ class FlashInferCudnnNvFp4LinearKernel(NvFp4LinearKernel):
 
 
 class FlashInferW4A16NvFp4LinearKernel(NvFp4LinearKernel):
-    """Weight-only NVFP4 GEMM (bf16 activations) via FlashInfer's mm_bf16_fp4.
+    """Weight-only NVFP4 GEMM via FlashInfer's mm_bf16_fp4: activations
+    stay in bf16 and the kernel dequantizes the FP4 weight."""
 
-    Unlike the other FlashInfer kernels in this file, activations are not
-    quantized: the kernel dequantizes the FP4 weight and runs the matrix
-    multiply in bf16.
-    """
-
-    # FlashInfer repacks the weight in 64-row tiles of N; K is padded to
-    # the same granularity to satisfy the kernel's K tiling.
+    # Weights are zero-padded to the repack and kernel tile granularity.
     N_ALIGN = 64
     K_ALIGN = 64
 
@@ -337,10 +332,8 @@ class FlashInferW4A16NvFp4LinearKernel(NvFp4LinearKernel):
 
     @classmethod
     def can_implement(cls, config: NvFp4LinearLayerConfig) -> tuple[bool, str | None]:
-        # mm_bf16_fp4 only accepts bfloat16 activations; fp16 models must
-        # fall back to Marlin. Without an active vLLM config the dtype is
-        # unknown here; process_weights_after_loading checks the layer's
-        # params_dtype as a backstop.
+        # mm_bf16_fp4 is bf16-only. Without an active vllm config the dtype
+        # is unknown here; process_weights_after_loading re-checks it.
         from vllm.config import get_current_vllm_config_or_none
 
         vllm_config = get_current_vllm_config_or_none()
@@ -368,10 +361,8 @@ class FlashInferW4A16NvFp4LinearKernel(NvFp4LinearKernel):
         n = weight.shape[0]
         k = weight.shape[1] * 2
 
-        # Zero-pad N and K to the repack tile sizes. The padded rows and
-        # columns have zero block scales, so they dequantize to zero;
-        # apply_weights pads the activation K to match and slices the
-        # extra output columns off.
+        # Padding carries zero block scales, so it dequantizes to zero;
+        # apply_weights pads the activation K to match.
         n_padded = round_up(n, self.N_ALIGN)
         k_padded = round_up(k, self.K_ALIGN)
         if n_padded != n or k_padded != k:

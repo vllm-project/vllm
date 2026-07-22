@@ -887,13 +887,10 @@ def _select_nvfp4_a16_kernel(
 ) -> type[NvFp4LinearKernel]:
     """Pick the kernel for weight-only (W4A16) NVFP4 layers.
 
-    W4A16 layers can never use the W4A4 priority list, because those
-    kernels quantize activations and a weight-only checkpoint has no input
-    scale. The choice is between Marlin and FlashInfer's bf16 x fp4 GEMM:
-    the FlashInfer kernel is the default on SM121 (DGX Spark), where it is
-    tuned, and opt-in via --linear-backend flashinfer_cutedsl elsewhere.
-    Explicit --linear-backend values that only contain W4A4 kernels are
-    rejected. The caller validates the returned kernel with is_supported().
+    Only Marlin and FlashInfer's bf16 x fp4 GEMM apply: the W4A4 kernels
+    quantize activations, and a W4A16 checkpoint has no input scale.
+    FlashInfer is the default on SM121, where it is tuned, and opt-in via
+    --linear-backend flashinfer_cutedsl elsewhere.
     """
     fi_kernel = FlashInferW4A16NvFp4LinearKernel
     marlin_kernel = MarlinNvFp4LinearKernel
@@ -950,9 +947,8 @@ def init_nvfp4_linear_kernel(use_a16: bool = False) -> NvFp4LinearKernel:
     force_kernel: type[NvFp4LinearKernel] | None = None
     linear_backend = _get_linear_backend()
     if use_a16:
-        # Weight-only layers must never reach the W4A4 kernels (including
-        # the batch-invariant CUTLASS path below): those quantize
-        # activations, and a W4A16 checkpoint has no input scale.
+        # W4A16 has no input scale, so it must bypass the W4A4 paths
+        # below, including the batch-invariant CUTLASS branch.
         force_kernel = _select_nvfp4_a16_kernel(linear_backend, config)
     elif envs.VLLM_BATCH_INVARIANT:
         bi_supported, reason = CutlassNvFp4LinearKernel.is_supported()
