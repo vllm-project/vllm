@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use super::{JsonToolCallConfig, JsonToolCallParser, JsonToolCallWhitespace};
 use crate::tool::{Result, Tool, ToolParser, ToolParserOutput};
 
@@ -240,7 +243,7 @@ mod tests {
             .unwrap_err();
 
         expect![[r#"
-            tool parser parsing failed: invalid Mistral
+            tool parser parsing failed: near "{\"arguments\":{},\"name\":\"get_weather\"}]": invalid Mistral
             expected `name`"#]]
         .assert_eq(&error.to_report_string());
     }

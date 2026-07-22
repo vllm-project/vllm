@@ -95,8 +95,23 @@ class ModelState(ABC):
     def apply_staged_writes(self) -> None:
         return None
 
+    def preprocess_state(
+        self,
+        input_batch: InputBatch,
+        block_tables: tuple[torch.Tensor, ...],
+        kv_cache_config: KVCacheConfig,
+        num_computed_tokens: torch.Tensor,
+    ) -> None:
+        """Hook run on real batches before the forward pass (after block tables
+        are gathered). Used by mamba "align" prefix caching to pre-copy state
+        across block boundaries. No-op by default."""
+        return None
+
     def postprocess_state(
-        self, idx_mapping: torch.Tensor, num_sampled: torch.Tensor
+        self,
+        idx_mapping: torch.Tensor,
+        num_sampled: torch.Tensor,
+        num_computed_tokens: torch.Tensor | None = None,
     ) -> None:
         return None
 

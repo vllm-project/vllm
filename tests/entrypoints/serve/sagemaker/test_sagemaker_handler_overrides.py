@@ -12,21 +12,44 @@ Tests real customer usage scenarios:
 - Priority: env vars > decorators > customer script files > framework
   defaults
 
-Note: These tests focus on validating server responses rather than directly calling
-get_ping_handler() and get_invoke_handler() to ensure full integration testing.
+The handler-override scenarios exercise the real vLLM SageMaker router and
+bootstrap path via an in-process FastAPI ``TestClient`` instead of launching a
+model server. These scenarios fully replace the ``/ping`` and ``/invocations``
+endpoints with customer handlers, so no inference engine is required to
+validate override behavior. Avoiding the model server also keeps the tests
+fast and deterministic rather than depending on the FastAPI version resolved
+into the test environment at runtime.
 """
 
 import os
-import tempfile
 
 import pytest
 import requests
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 
 from tests.utils import RemoteOpenAIServer
 
 from .conftest import (
     MODEL_NAME_SMOLLM,
 )
+
+
+def _build_sagemaker_test_client() -> TestClient:
+    """Build a TestClient over the real SageMaker router and bootstrap path.
+
+    ``attach_router`` is called with empty supported tasks because the override
+    tests replace the endpoints with customer handlers, so no framework
+    invocation handler (and therefore no engine) is exercised.
+    """
+    from vllm.entrypoints.serve.sagemaker.api_router import (
+        attach_router,
+        sagemaker_standards_bootstrap,
+    )
+
+    app = FastAPI()
+    attach_router(app, ())
+    return TestClient(sagemaker_standards_bootstrap(app))
 
 
 class TestHandlerOverrideIntegration:
@@ -89,8 +112,7 @@ class TestHandlerOverrideIntegration:
         except ImportError:
             pass
 
-    @pytest.mark.asyncio
-    async def test_customer_script_functions_auto_loaded(self):
+    def test_customer_script_functions_auto_loaded(self, monkeypatch, tmp_path):
         """Test customer scenario: script functions automatically override
         framework defaults."""
         try:
@@ -101,15 +123,15 @@ class TestHandlerOverrideIntegration:
             pytest.skip("model-hosting-container-standards not available")
 
         # Customer writes a script file with ping() and invoke() functions
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as f:
-            f.write(
-                """
+        script_path = tmp_path / "model.py"
+        script_path.write_text(
+            """
 from fastapi import Request
 
 async def custom_sagemaker_ping_handler():
     return {
         "status": "healthy",
-        "source": "customer_override", 
+        "source": "customer_override",
         "message": "Custom ping from customer script"
     }
 
@@ -119,62 +141,39 @@ async def custom_sagemaker_invocation_handler(request: Request):
         "source": "customer_override"
     }
 """
+        )
+
+        # Customer sets SageMaker environment variables to point to their script
+        monkeypatch.setenv(SageMakerEnvVars.SAGEMAKER_MODEL_PATH, str(tmp_path))
+        monkeypatch.setenv(SageMakerEnvVars.CUSTOM_SCRIPT_FILENAME, script_path.name)
+
+        with _build_sagemaker_test_client() as client:
+            # Customer tests their server and sees their overrides work
+            # automatically
+            ping_response = client.get("/ping")
+            assert ping_response.status_code == 200
+            ping_data = ping_response.json()
+
+            invoke_response = client.post(
+                "/invocations",
+                json={
+                    "model": MODEL_NAME_SMOLLM,
+                    "messages": [{"role": "user", "content": "Hello"}],
+                    "max_tokens": 5,
+                },
             )
-            script_path = f.name
+            assert invoke_response.status_code == 200
+            invoke_data = invoke_response.json()
 
-        try:
-            script_dir = os.path.dirname(script_path)
-            script_name = os.path.basename(script_path)
-
-            # Customer sets SageMaker environment variables to point to their script
-            env_vars = {
-                SageMakerEnvVars.SAGEMAKER_MODEL_PATH: script_dir,
-                SageMakerEnvVars.CUSTOM_SCRIPT_FILENAME: script_name,
-            }
-
-            args = [
-                "--dtype",
-                "bfloat16",
-                "--max-model-len",
-                "2048",
-                "--enforce-eager",
-                "--max-num-seqs",
-                "32",
+            # Customer sees their functions are used
+            assert ping_data["source"] == "customer_override"
+            assert ping_data["message"] == "Custom ping from customer script"
+            assert invoke_data["source"] == "customer_override"
+            assert invoke_data["predictions"] == [
+                "Custom response from customer script"
             ]
 
-            with RemoteOpenAIServer(
-                MODEL_NAME_SMOLLM, args, env_dict=env_vars
-            ) as server:
-                # Customer tests their server and sees their overrides work
-                # automatically
-                ping_response = requests.get(server.url_for("ping"))
-                assert ping_response.status_code == 200
-                ping_data = ping_response.json()
-
-                invoke_response = requests.post(
-                    server.url_for("invocations"),
-                    json={
-                        "model": MODEL_NAME_SMOLLM,
-                        "messages": [{"role": "user", "content": "Hello"}],
-                        "max_tokens": 5,
-                    },
-                )
-                assert invoke_response.status_code == 200
-                invoke_data = invoke_response.json()
-
-                # Customer sees their functions are used
-                assert ping_data["source"] == "customer_override"
-                assert ping_data["message"] == "Custom ping from customer script"
-                assert invoke_data["source"] == "customer_override"
-                assert invoke_data["predictions"] == [
-                    "Custom response from customer script"
-                ]
-
-        finally:
-            os.unlink(script_path)
-
-    @pytest.mark.asyncio
-    async def test_customer_decorator_usage(self):
+    def test_customer_decorator_usage(self, monkeypatch, tmp_path):
         """Test customer scenario: using @custom_ping_handler and
         @custom_invocation_handler decorators."""
         try:
@@ -185,9 +184,9 @@ async def custom_sagemaker_invocation_handler(request: Request):
             pytest.skip("model-hosting-container-standards not available")
 
         # Customer writes a script file with decorators
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as f:
-            f.write(
-                """
+        script_path = tmp_path / "model.py"
+        script_path.write_text(
+            """
 import model_hosting_container_standards.sagemaker as sagemaker_standards
 from fastapi import Request
 
@@ -198,62 +197,39 @@ async def my_ping():
         "source": "customer_decorator"
     }
 
-@sagemaker_standards.custom_invocation_handler  
+@sagemaker_standards.custom_invocation_handler
 async def my_invoke(request: Request):
     return {
-        "type": "invoke", 
+        "type": "invoke",
         "source": "customer_decorator"
     }
 """
+        )
+
+        monkeypatch.setenv(SageMakerEnvVars.SAGEMAKER_MODEL_PATH, str(tmp_path))
+        monkeypatch.setenv(SageMakerEnvVars.CUSTOM_SCRIPT_FILENAME, script_path.name)
+
+        with _build_sagemaker_test_client() as client:
+            ping_response = client.get("/ping")
+            assert ping_response.status_code == 200
+            ping_data = ping_response.json()
+
+            invoke_response = client.post(
+                "/invocations",
+                json={
+                    "model": MODEL_NAME_SMOLLM,
+                    "messages": [{"role": "user", "content": "Hello"}],
+                    "max_tokens": 5,
+                },
             )
-            script_path = f.name
+            assert invoke_response.status_code == 200
+            invoke_data = invoke_response.json()
 
-        try:
-            script_dir = os.path.dirname(script_path)
-            script_name = os.path.basename(script_path)
+            # Customer sees their handlers are used by the server
+            assert ping_data["source"] == "customer_decorator"
+            assert invoke_data["source"] == "customer_decorator"
 
-            env_vars = {
-                SageMakerEnvVars.SAGEMAKER_MODEL_PATH: script_dir,
-                SageMakerEnvVars.CUSTOM_SCRIPT_FILENAME: script_name,
-            }
-
-            args = [
-                "--dtype",
-                "bfloat16",
-                "--max-model-len",
-                "2048",
-                "--enforce-eager",
-                "--max-num-seqs",
-                "32",
-            ]
-
-            with RemoteOpenAIServer(
-                MODEL_NAME_SMOLLM, args, env_dict=env_vars
-            ) as server:
-                ping_response = requests.get(server.url_for("ping"))
-                assert ping_response.status_code == 200
-                ping_data = ping_response.json()
-
-                invoke_response = requests.post(
-                    server.url_for("invocations"),
-                    json={
-                        "model": MODEL_NAME_SMOLLM,
-                        "messages": [{"role": "user", "content": "Hello"}],
-                        "max_tokens": 5,
-                    },
-                )
-                assert invoke_response.status_code == 200
-                invoke_data = invoke_response.json()
-
-                # Customer sees their handlers are used by the server
-                assert ping_data["source"] == "customer_decorator"
-                assert invoke_data["source"] == "customer_decorator"
-
-        finally:
-            os.unlink(script_path)
-
-    @pytest.mark.asyncio
-    async def test_handler_priority_order(self):
+    def test_handler_priority_order(self, monkeypatch, tmp_path):
         """Test priority: @custom_ping_handler/@custom_invocation_handler
         decorators vs script functions."""
         try:
@@ -264,9 +240,9 @@ async def my_invoke(request: Request):
             pytest.skip("model-hosting-container-standards not available")
 
         # Customer writes a script with both decorator and regular functions
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as f:
-            f.write(
-                """
+        script_path = tmp_path / "model.py"
+        script_path.write_text(
+            """
 import model_hosting_container_standards.sagemaker as sagemaker_standards
 from fastapi import Request
 
@@ -275,7 +251,7 @@ from fastapi import Request
 async def decorated_ping():
     return {
         "status": "healthy",
-        "source": "ping_decorator_in_script", 
+        "source": "ping_decorator_in_script",
         "priority": "decorator"
     }
 
@@ -296,60 +272,37 @@ async def custom_sagemaker_invocation_handler(request: Request):
         "priority": "function"
     }
 """
+        )
+
+        monkeypatch.setenv(SageMakerEnvVars.SAGEMAKER_MODEL_PATH, str(tmp_path))
+        monkeypatch.setenv(SageMakerEnvVars.CUSTOM_SCRIPT_FILENAME, script_path.name)
+
+        with _build_sagemaker_test_client() as client:
+            ping_response = client.get("/ping")
+            assert ping_response.status_code == 200
+            ping_data = ping_response.json()
+
+            invoke_response = client.post(
+                "/invocations",
+                json={
+                    "model": MODEL_NAME_SMOLLM,
+                    "messages": [{"role": "user", "content": "Hello"}],
+                    "max_tokens": 5,
+                },
             )
-            script_path = f.name
+            assert invoke_response.status_code == 200
+            invoke_data = invoke_response.json()
 
-        try:
-            script_dir = os.path.dirname(script_path)
-            script_name = os.path.basename(script_path)
+            # @custom_ping_handler decorator has higher priority than
+            # script function
+            assert ping_data["source"] == "ping_decorator_in_script"
+            assert ping_data["priority"] == "decorator"
 
-            env_vars = {
-                SageMakerEnvVars.SAGEMAKER_MODEL_PATH: script_dir,
-                SageMakerEnvVars.CUSTOM_SCRIPT_FILENAME: script_name,
-            }
+            # Script function is used for invoke
+            assert invoke_data["source"] == "script_invoke_function"
+            assert invoke_data["priority"] == "function"
 
-            args = [
-                "--dtype",
-                "bfloat16",
-                "--max-model-len",
-                "2048",
-                "--enforce-eager",
-                "--max-num-seqs",
-                "32",
-            ]
-
-            with RemoteOpenAIServer(
-                MODEL_NAME_SMOLLM, args, env_dict=env_vars
-            ) as server:
-                ping_response = requests.get(server.url_for("ping"))
-                assert ping_response.status_code == 200
-                ping_data = ping_response.json()
-
-                invoke_response = requests.post(
-                    server.url_for("invocations"),
-                    json={
-                        "model": MODEL_NAME_SMOLLM,
-                        "messages": [{"role": "user", "content": "Hello"}],
-                        "max_tokens": 5,
-                    },
-                )
-                assert invoke_response.status_code == 200
-                invoke_data = invoke_response.json()
-
-                # @custom_ping_handler decorator has higher priority than
-                # script function
-                assert ping_data["source"] == "ping_decorator_in_script"
-                assert ping_data["priority"] == "decorator"
-
-                # Script function is used for invoke
-                assert invoke_data["source"] == "script_invoke_function"
-                assert invoke_data["priority"] == "function"
-
-        finally:
-            os.unlink(script_path)
-
-    @pytest.mark.asyncio
-    async def test_environment_variable_script_loading(self):
+    def test_environment_variable_script_loading(self, monkeypatch, tmp_path):
         """Test that environment variables correctly specify script location
         and loading."""
         try:
@@ -360,9 +313,9 @@ async def custom_sagemaker_invocation_handler(request: Request):
             pytest.skip("model-hosting-container-standards not available")
 
         # Customer writes a script in a specific directory
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as f:
-            f.write(
-                """
+        script_path = tmp_path / "model.py"
+        script_path.write_text(
+            """
 from fastapi import Request
 
 async def custom_sagemaker_ping_handler():
@@ -379,60 +332,43 @@ async def custom_sagemaker_invocation_handler(request: Request):
         "method": "environment_variable_loading"
     }
 """
+        )
+
+        # Test environment variable script loading
+        monkeypatch.setenv(SageMakerEnvVars.SAGEMAKER_MODEL_PATH, str(tmp_path))
+        monkeypatch.setenv(SageMakerEnvVars.CUSTOM_SCRIPT_FILENAME, script_path.name)
+
+        with _build_sagemaker_test_client() as client:
+            ping_response = client.get("/ping")
+            assert ping_response.status_code == 200
+            ping_data = ping_response.json()
+
+            invoke_response = client.post(
+                "/invocations",
+                json={
+                    "model": MODEL_NAME_SMOLLM,
+                    "messages": [{"role": "user", "content": "Hello"}],
+                    "max_tokens": 5,
+                },
             )
-            script_path = f.name
+            assert invoke_response.status_code == 200
+            invoke_data = invoke_response.json()
 
-        try:
-            script_dir = os.path.dirname(script_path)
-            script_name = os.path.basename(script_path)
-
-            # Test environment variable script loading
-            env_vars = {
-                SageMakerEnvVars.SAGEMAKER_MODEL_PATH: script_dir,
-                SageMakerEnvVars.CUSTOM_SCRIPT_FILENAME: script_name,
-            }
-
-            args = [
-                "--dtype",
-                "bfloat16",
-                "--max-model-len",
-                "2048",
-                "--enforce-eager",
-                "--max-num-seqs",
-                "32",
-            ]
-
-            with RemoteOpenAIServer(
-                MODEL_NAME_SMOLLM, args, env_dict=env_vars
-            ) as server:
-                ping_response = requests.get(server.url_for("ping"))
-                assert ping_response.status_code == 200
-                ping_data = ping_response.json()
-
-                invoke_response = requests.post(
-                    server.url_for("invocations"),
-                    json={
-                        "model": MODEL_NAME_SMOLLM,
-                        "messages": [{"role": "user", "content": "Hello"}],
-                        "max_tokens": 5,
-                    },
-                )
-                assert invoke_response.status_code == 200
-                invoke_data = invoke_response.json()
-
-                # Verify that the script was loaded via environment variables
-                assert ping_data["source"] == "env_loaded_script"
-                assert ping_data["method"] == "environment_variable_loading"
-                assert invoke_data["source"] == "env_loaded_script"
-                assert invoke_data["method"] == "environment_variable_loading"
-
-        finally:
-            os.unlink(script_path)
+            # Verify that the script was loaded via environment variables
+            assert ping_data["source"] == "env_loaded_script"
+            assert ping_data["method"] == "environment_variable_loading"
+            assert invoke_data["source"] == "env_loaded_script"
+            assert invoke_data["method"] == "environment_variable_loading"
 
     @pytest.mark.asyncio
     async def test_framework_default_handlers(self):
         """Test that framework default handlers work when no customer
-        overrides exist."""
+        overrides exist.
+
+        This scenario exercises the real inference path (default
+        ``/invocations``), so it keeps using a live model server rather than
+        the in-process TestClient.
+        """
         args = [
             "--dtype",
             "bfloat16",
@@ -478,8 +414,7 @@ async def custom_sagemaker_invocation_handler(request: Request):
             )
             assert invoke_response.status_code == 200
 
-    @pytest.mark.asyncio
-    async def test_handler_env_var_override(self):
+    def test_handler_env_var_override(self, monkeypatch, tmp_path):
         """Test CUSTOM_FASTAPI_PING_HANDLER and CUSTOM_FASTAPI_INVOCATION_HANDLER
         environment variable overrides."""
         try:
@@ -493,9 +428,9 @@ async def custom_sagemaker_invocation_handler(request: Request):
             pytest.skip("model-hosting-container-standards not available")
 
         # Create a script with both env var handlers and script functions
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as f:
-            f.write(
-                """
+        script_path = tmp_path / "model.py"
+        script_path.write_text(
+            """
 from fastapi import Request, Response
 import json
 
@@ -533,68 +468,47 @@ async def custom_sagemaker_invocation_handler(request: Request):
         "method": "script_function"
     }
 """
+        )
+
+        # Set environment variables to override both handlers
+        monkeypatch.setenv(SageMakerEnvVars.SAGEMAKER_MODEL_PATH, str(tmp_path))
+        monkeypatch.setenv(SageMakerEnvVars.CUSTOM_SCRIPT_FILENAME, script_path.name)
+        monkeypatch.setenv(
+            FastAPIEnvVars.CUSTOM_FASTAPI_PING_HANDLER,
+            f"{script_path.name}:env_var_ping_handler",
+        )
+        monkeypatch.setenv(
+            FastAPIEnvVars.CUSTOM_FASTAPI_INVOCATION_HANDLER,
+            f"{script_path.name}:env_var_invoke_handler",
+        )
+
+        with _build_sagemaker_test_client() as client:
+            # Test ping handler override
+            ping_response = client.get("/ping")
+            assert ping_response.status_code == 200
+            ping_data = ping_response.json()
+
+            # Environment variable should override script function
+            assert ping_data["method"] == "environment_variable"
+            assert ping_data["source"] == "env_var_ping"
+
+            # Test invocation handler override
+            invoke_response = client.post(
+                "/invocations",
+                json={
+                    "model": MODEL_NAME_SMOLLM,
+                    "messages": [{"role": "user", "content": "Hello"}],
+                    "max_tokens": 5,
+                },
             )
-            script_path = f.name
+            assert invoke_response.status_code == 200
+            invoke_data = invoke_response.json()
 
-        try:
-            script_dir = os.path.dirname(script_path)
-            script_name = os.path.basename(script_path)
+            # Environment variable should override script function
+            assert invoke_data["method"] == "environment_variable"
+            assert invoke_data["source"] == "env_var_invoke"
 
-            # Set environment variables to override both handlers
-            env_vars = {
-                SageMakerEnvVars.SAGEMAKER_MODEL_PATH: script_dir,
-                SageMakerEnvVars.CUSTOM_SCRIPT_FILENAME: script_name,
-                FastAPIEnvVars.CUSTOM_FASTAPI_PING_HANDLER: (
-                    f"{script_name}:env_var_ping_handler"
-                ),
-                FastAPIEnvVars.CUSTOM_FASTAPI_INVOCATION_HANDLER: (
-                    f"{script_name}:env_var_invoke_handler"
-                ),
-            }
-
-            args = [
-                "--dtype",
-                "bfloat16",
-                "--max-model-len",
-                "2048",
-                "--enforce-eager",
-                "--max-num-seqs",
-                "32",
-            ]
-
-            with RemoteOpenAIServer(
-                MODEL_NAME_SMOLLM, args, env_dict=env_vars
-            ) as server:
-                # Test ping handler override
-                ping_response = requests.get(server.url_for("ping"))
-                assert ping_response.status_code == 200
-                ping_data = ping_response.json()
-
-                # Environment variable should override script function
-                assert ping_data["method"] == "environment_variable"
-                assert ping_data["source"] == "env_var_ping"
-
-                # Test invocation handler override
-                invoke_response = requests.post(
-                    server.url_for("invocations"),
-                    json={
-                        "model": MODEL_NAME_SMOLLM,
-                        "messages": [{"role": "user", "content": "Hello"}],
-                        "max_tokens": 5,
-                    },
-                )
-                assert invoke_response.status_code == 200
-                invoke_data = invoke_response.json()
-
-                # Environment variable should override script function
-                assert invoke_data["method"] == "environment_variable"
-                assert invoke_data["source"] == "env_var_invoke"
-
-        finally:
-            os.unlink(script_path)
-
-    @pytest.mark.asyncio
-    async def test_env_var_priority_over_decorator_and_script(self):
+    def test_env_var_priority_over_decorator_and_script(self, monkeypatch, tmp_path):
         """Test that environment variables have highest priority over decorators
         and script functions for both ping and invocation handlers."""
         try:
@@ -608,9 +522,9 @@ async def custom_sagemaker_invocation_handler(request: Request):
             pytest.skip("model-hosting-container-standards not available")
 
         # Create a script with all three handler types for both ping and invocation
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as f:
-            f.write(
-                """
+        script_path = tmp_path / "model.py"
+        script_path.write_text(
+            """
 import model_hosting_container_standards.sagemaker as sagemaker_standards
 from fastapi import Request, Response
 import json
@@ -674,62 +588,42 @@ async def custom_sagemaker_invocation_handler(request: Request):
         "priority": "script_function"
     }
 """
+        )
+
+        # Set environment variables to specify highest priority handlers
+        monkeypatch.setenv(SageMakerEnvVars.SAGEMAKER_MODEL_PATH, str(tmp_path))
+        monkeypatch.setenv(SageMakerEnvVars.CUSTOM_SCRIPT_FILENAME, script_path.name)
+        monkeypatch.setenv(
+            FastAPIEnvVars.CUSTOM_FASTAPI_PING_HANDLER,
+            f"{script_path.name}:env_priority_ping",
+        )
+        monkeypatch.setenv(
+            FastAPIEnvVars.CUSTOM_FASTAPI_INVOCATION_HANDLER,
+            f"{script_path.name}:env_priority_invoke",
+        )
+
+        with _build_sagemaker_test_client() as client:
+            # Test ping handler priority
+            ping_response = client.get("/ping")
+            assert ping_response.status_code == 200
+            ping_data = ping_response.json()
+
+            # Environment variable has highest priority and should be used
+            assert ping_data["priority"] == "environment_variable"
+            assert ping_data["source"] == "env_var"
+
+            # Test invocation handler priority
+            invoke_response = client.post(
+                "/invocations",
+                json={
+                    "model": MODEL_NAME_SMOLLM,
+                    "messages": [{"role": "user", "content": "Hello"}],
+                    "max_tokens": 5,
+                },
             )
-            script_path = f.name
+            assert invoke_response.status_code == 200
+            invoke_data = invoke_response.json()
 
-        try:
-            script_dir = os.path.dirname(script_path)
-            script_name = os.path.basename(script_path)
-
-            # Set environment variables to specify highest priority handlers
-            env_vars = {
-                SageMakerEnvVars.SAGEMAKER_MODEL_PATH: script_dir,
-                SageMakerEnvVars.CUSTOM_SCRIPT_FILENAME: script_name,
-                FastAPIEnvVars.CUSTOM_FASTAPI_PING_HANDLER: (
-                    f"{script_name}:env_priority_ping"
-                ),
-                FastAPIEnvVars.CUSTOM_FASTAPI_INVOCATION_HANDLER: (
-                    f"{script_name}:env_priority_invoke"
-                ),
-            }
-
-            args = [
-                "--dtype",
-                "bfloat16",
-                "--max-model-len",
-                "2048",
-                "--enforce-eager",
-                "--max-num-seqs",
-                "32",
-            ]
-
-            with RemoteOpenAIServer(
-                MODEL_NAME_SMOLLM, args, env_dict=env_vars
-            ) as server:
-                # Test ping handler priority
-                ping_response = requests.get(server.url_for("ping"))
-                assert ping_response.status_code == 200
-                ping_data = ping_response.json()
-
-                # Environment variable has highest priority and should be used
-                assert ping_data["priority"] == "environment_variable"
-                assert ping_data["source"] == "env_var"
-
-                # Test invocation handler priority
-                invoke_response = requests.post(
-                    server.url_for("invocations"),
-                    json={
-                        "model": MODEL_NAME_SMOLLM,
-                        "messages": [{"role": "user", "content": "Hello"}],
-                        "max_tokens": 5,
-                    },
-                )
-                assert invoke_response.status_code == 200
-                invoke_data = invoke_response.json()
-
-                # Environment variable has highest priority and should be used
-                assert invoke_data["priority"] == "environment_variable"
-                assert invoke_data["source"] == "env_var"
-
-        finally:
-            os.unlink(script_path)
+            # Environment variable has highest priority and should be used
+            assert invoke_data["priority"] == "environment_variable"
+            assert invoke_data["source"] == "env_var"

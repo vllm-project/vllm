@@ -59,6 +59,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.protocol import
     RESP_OK,
 )
 from vllm.logger import init_logger
+from vllm.utils.math_utils import cdiv
 from vllm.utils.network_utils import get_ip, make_zmq_socket
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
@@ -1473,14 +1474,14 @@ class MooncakeStoreWorker:
             group_hashes = self.coord.block_hashes_for_spec(
                 block_hashes, self._kv_cache_groups[g_idx].kv_cache_spec
             )
-            for chunk_id, h in enumerate(group_hashes):
-                start_idx = chunk_id * spec_block_size
-                if start_idx >= token_len:
-                    break
-                if lookup_mask is not None and (
-                    chunk_id >= len(lookup_mask) or not lookup_mask[chunk_id]
-                ):
+            max_chunks = min(len(group_hashes), cdiv(token_len, spec_block_size))
+            mask_limit = (
+                max_chunks if lookup_mask is None else min(max_chunks, len(lookup_mask))
+            )
+            for chunk_id in range(mask_limit):
+                if lookup_mask is not None and not lookup_mask[chunk_id]:
                     continue
+                h = group_hashes[chunk_id]
                 hash_hex = h.hex()
                 for key_prefix in key_prefixes:
                     candidate_keys.append(
@@ -1522,7 +1523,9 @@ class MooncakeStoreWorker:
         }
 
         _masks, hit_length = self.coord.find_longest_cache_hit(
-            block_hashes, token_len, ExternalCachedBlockPool(exists_set)
+            block_hashes,
+            token_len,
+            ExternalCachedBlockPool(self.hash_block_size, exists_set),
         )
         return hit_length
 

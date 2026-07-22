@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use std::sync::Arc;
 
 use asynk_strim_attr::{TryYielder, try_stream};
@@ -5,7 +8,7 @@ use futures::{Stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use tracing::{Level, debug, trace};
 use vllm_engine_core_client::AbortCause;
-use vllm_engine_core_client::protocol::StopReason;
+use vllm_engine_core_client::protocol::output::StopReason;
 use vllm_llm::{FinishReason, GenerateOutput, TokenUsage};
 use vllm_tokenizer::{DynTokenizer, IncrementalDecoder};
 
@@ -44,6 +47,9 @@ pub struct Finished {
     pub finish_reason: FinishReason,
     /// Connector-specific KV transfer parameters for disaggregated serving.
     pub kv_transfer_params: Option<serde_json::Value>,
+    /// Connector-specific encoder cache transfer parameters for disaggregated
+    /// serving.
+    pub ec_transfer_params: Option<serde_json::Value>,
 }
 
 /// Internal decoded-text event emitted before higher-level assistant
@@ -151,6 +157,7 @@ pub async fn decoded_text_event_stream(
         let decoder = decoder.as_mut().unwrap();
 
         let kv_transfer_params = output.kv_transfer_params;
+        let ec_transfer_params = output.ec_transfer_params;
         let mut finish_reason = output.finish_reason;
         let mut stop_str_matched = false;
         let suppress_terminal_stop_token = finish_reason.as_ref().is_some_and(|r| r.is_stop())
@@ -275,6 +282,7 @@ pub async fn decoded_text_event_stream(
                     },
                     finish_reason: reason,
                     kv_transfer_params,
+                    ec_transfer_params,
                 }),
             })
             .await;
@@ -323,36 +331,10 @@ mod tests {
     use futures::{Stream, stream};
     use vllm_engine_core_client::AbortCause;
     use vllm_llm::GenerateOutput;
-    use vllm_tokenizer::Tokenizer;
+    use vllm_tokenizer::test_utils::TestTokenizer;
 
     use super::*;
     use crate::output::TextOutputStreamExt as _;
-
-    /// Backend that treats each token ID as a raw byte, producing lossy UTF-8.
-    struct ByteTokenizer;
-
-    impl Tokenizer for ByteTokenizer {
-        fn encode(
-            &self,
-            _text: &str,
-            _add_special_tokens: bool,
-        ) -> vllm_tokenizer::Result<Vec<u32>> {
-            unreachable!()
-        }
-
-        fn decode(
-            &self,
-            token_ids: &[u32],
-            _skip_special_tokens: bool,
-        ) -> vllm_tokenizer::Result<String> {
-            let bytes = token_ids.iter().map(|id| *id as u8).collect::<Vec<_>>();
-            Ok(String::from_utf8_lossy(&bytes).into_owned())
-        }
-
-        fn token_to_id(&self, _token: &str) -> Option<u32> {
-            unreachable!()
-        }
-    }
 
     /// Helper: run `decoded_text_event_stream` to completion and return the
     /// collected output.
@@ -366,7 +348,7 @@ mod tests {
             token_ids,
             Some(FinishReason::Length),
         ))]);
-        let tokenizer: DynTokenizer = Arc::new(ByteTokenizer);
+        let tokenizer: DynTokenizer = Arc::new(TestTokenizer::new());
         decoded_text_event_stream("test".into(), tokenizer, raw_stream, decode_options, false)
             .collect_output()
             .await
@@ -419,7 +401,7 @@ mod tests {
             ))),
             dropped_cause: Arc::clone(&dropped_cause),
         };
-        let tokenizer: DynTokenizer = Arc::new(ByteTokenizer);
+        let tokenizer: DynTokenizer = Arc::new(TestTokenizer::new());
 
         let output = decoded_text_event_stream(
             "test".into(),

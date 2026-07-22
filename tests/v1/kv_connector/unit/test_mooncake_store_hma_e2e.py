@@ -65,6 +65,7 @@ def _minimal_vllm_config(cache_block_size=16):
     cfg.cache_config.block_size = cache_block_size
     cfg.cache_config.num_gpu_blocks = 4
     cfg.cache_config.hash_block_size = None
+    cfg.cache_config.prefix_match_unit = None
     cfg.cache_config.enable_prefix_caching = True
     cfg.parallel_config.prefill_context_parallel_size = 1
     cfg.parallel_config.decode_context_parallel_size = 1
@@ -96,14 +97,16 @@ def _build_worker_with_dict_store(vllm_config, kv_cache_config, store):
     with (
         patch.dict(sys.modules, {"mooncake.store": fake_mooncake_store}),
         patch.object(mooncake_store_worker, "MooncakeStoreConfig") as MCfg,
+        patch.object(mooncake_store_worker, "LookupKeyServer"),
     ):
-        sc = MCfg.load_from_env.return_value
+        sc = MCfg.load_from_config.return_value
         sc.metadata_server = ""
         sc.global_segment_size = 1 << 20
         sc.local_buffer_size = 1 << 20
         sc.protocol = "tcp"
         sc.device_name = ""
         sc.master_server_address = ""
+        sc.mode = "embedded"
         sc.enable_offload = False
         with (
             patch(

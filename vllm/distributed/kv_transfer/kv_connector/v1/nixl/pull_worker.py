@@ -25,6 +25,10 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
+# Slack (seconds) subtracted from D's exported block-expiry deadline on the turn-2
+# readback, absorbing clock-offset error and read latency.
+_KV_BLOCKS_EXPIRY_SAFETY_MARGIN = 5.0
+
 
 class NixlPullConnectorWorker(NixlBaseConnectorWorker):
     """Pull-specific (READ) worker logic."""
@@ -44,7 +48,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         """
         for req_id, meta in metadata.reqs_to_recv.items():
             meta.local_physical_block_ids = self._logical_to_kernel_block_ids(
-                meta.local_block_ids
+                meta.local_block_ids, self._physical_blocks_per_logical_kv_block
             )
             assert meta.remote is not None
             # Remote block IDs are kept logical here; expanded in
@@ -98,17 +102,39 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         # requests sit in the D scheduler WAITING queue.
         self._send_heartbeats(metadata)
 
+    def _is_turn2_read_expired(self, meta: ReqMeta) -> bool:
+        """Whether D's cached blocks for this turn-2 readback have (nearly) expired."""
+        assert meta.remote is not None
+        blocks_expiry_time = meta.remote.blocks_expiry_time
+        # Deadline may be absent (router may not forward it) -> read as usual.
+        if blocks_expiry_time is None or not meta.local_physical_block_ids:
+            return False
+        clock_offset = self._engine_clock_offset[meta.remote.engine_id]
+        deadline = blocks_expiry_time - clock_offset
+        return time.perf_counter() + _KV_BLOCKS_EXPIRY_SAFETY_MARGIN >= deadline
+
     def _read_blocks_for_req(self, req_id: str, meta: ReqMeta):
         assert meta.remote is not None and self.transfer_topo is not None
         engine_id = meta.remote.engine_id
         # Update last activity from this remote. Mind that cleanup is done on main
         # thread (this one), so we don't race on this structure.
         self._engine_last_active[engine_id] = time.perf_counter()
+
+        if self._bidirectional_kv_xfer_enabled and self._is_turn2_read_expired(meta):
+            logger.warning(
+                "Declining expired remote read for %s from engine %s.",
+                req_id,
+                engine_id,
+            )
+            self.xfer_stats.record_kv_expired_req()
+            self._handle_failed_transfer(req_id, None)
+            return
+
         plan = self.tp_mappings[engine_id]
         remote_info = self.transfer_topo.get_engine_info(engine_id)
         tp_ratio = self.transfer_topo.tp_ratio(remote_info.remote_tp_size)
 
-        meta.remote.block_ids = self._logical_to_remote_kernel_block_ids(
+        meta.remote.block_ids = self._logical_to_kernel_block_ids(
             meta.remote.block_ids,
             remote_info.remote_physical_blocks_per_logical,
         )
@@ -183,7 +209,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
             notif_id = f"{meta.remote.request_id}:{self.world_size}".encode()
             remote_agents = self._remote_agents[meta.remote.engine_id]
             for rank_to_notify, agent in remote_agents.items():
-                if rank_to_notify != read_specs[0].remote_rank:
+                if rank_to_notify != (0, read_specs[0].remote_rank):
                     self.nixl_wrapper.send_notif(agent, notif_msg=notif_id)
 
     def _read_blocks(
@@ -250,7 +276,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         # just notify P worker that we have the blocks we need.
         if len(local_block_ids) == 0:
             # A full prefix cache hit is indicated with an empty list.
-            agent_name = self._remote_agents[dst_engine_id][remote_rank]
+            agent_name = self._remote_agents[dst_engine_id][(0, remote_rank)]
             try:
                 self.nixl_wrapper.send_notif(agent_name, notif_msg=notif_id)
             except Exception as e:

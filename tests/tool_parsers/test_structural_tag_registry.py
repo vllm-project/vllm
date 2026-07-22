@@ -16,9 +16,11 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
 from vllm.parser.abstract_parser import DelegatingParser
 from vllm.tool_parsers.abstract_tool_parser import ToolParser
 from vllm.tool_parsers.deepseekv3_tool_parser import DeepSeekV3ToolParser
-from vllm.tool_parsers.deepseekv4_tool_parser import DeepSeekV4ToolParser
+from vllm.tool_parsers.deepseekv4_engine_tool_parser import DeepSeekV4EngineToolParser
 from vllm.tool_parsers.deepseekv31_tool_parser import DeepSeekV31ToolParser
-from vllm.tool_parsers.deepseekv32_tool_parser import DeepSeekV32ToolParser
+from vllm.tool_parsers.deepseekv32_engine_tool_parser import (
+    DeepSeekV32EngineToolParser,
+)
 from vllm.tool_parsers.glm47_moe_tool_parser import Glm47MoeModelToolParser
 from vllm.tool_parsers.hermes_tool_parser import Hermes2ProToolParser
 from vllm.tool_parsers.kimi_k2_tool_parser import KimiK2ToolParser
@@ -102,45 +104,36 @@ def test_get_model_structural_tag_supports_vllm_hermes(
     )
 
     assert isinstance(tag, StructuralTag)
-    assert tag.model_dump() == {
-        "type": "structural_tag",
-        "format": {
-            "type": "tags_with_separator",
-            "tags": [
-                {
-                    "type": "tag",
-                    "begin": '<tool_call>\n{"name": "get_weather", "arguments": ',
-                    "content": {
-                        "type": "json_schema",
-                        "json_schema": {
-                            "type": "object",
-                            "properties": {"city": {"type": "string"}},
-                            "required": ["city"],
-                        },
-                        "style": "json",
-                    },
-                    "end": "}\n</tool_call>",
-                },
-                {
-                    "type": "tag",
-                    "begin": '<tool_call>{"name": "get_weather", "arguments": ',
-                    "content": {
-                        "type": "json_schema",
-                        "json_schema": {
-                            "type": "object",
-                            "properties": {"city": {"type": "string"}},
-                            "required": ["city"],
-                        },
-                        "style": "json",
-                    },
-                    "end": "}</tool_call>",
-                },
-            ],
-            "separator": "",
-            "at_least_one": True,
-            "stop_after_first": False,
-        },
+
+    # Assert the semantically meaningful structure rather than the full
+    # model_dump(), which gains version-specific keys across xgrammar releases
+    # (e.g. "any_order" was added to json_schema content in 0.2.3).
+    dump = tag.model_dump()
+    assert dump["type"] == "structural_tag"
+
+    fmt = dump["format"]
+    assert fmt["type"] == "tags_with_separator"
+    assert fmt["separator"] == ""
+    assert fmt["at_least_one"] is True
+    assert fmt["stop_after_first"] is False
+
+    expected_schema = {
+        "type": "object",
+        "properties": {"city": {"type": "string"}},
+        "required": ["city"],
     }
+    expected_tags = [
+        ('<tool_call>\n{"name": "get_weather", "arguments": ', "}\n</tool_call>"),
+        ('<tool_call>{"name": "get_weather", "arguments": ', "}</tool_call>"),
+    ]
+    assert len(fmt["tags"]) == len(expected_tags)
+    for tag_dump, (begin, end) in zip(fmt["tags"], expected_tags):
+        assert tag_dump["type"] == "tag"
+        assert tag_dump["begin"] == begin
+        assert tag_dump["end"] == end
+        content = tag_dump["content"]
+        assert content["type"] == "json_schema"
+        assert content["json_schema"] == expected_schema
 
 
 def test_hermes_required_tool_calls_use_empty_separator():
@@ -194,8 +187,8 @@ def test_get_model_structural_tag_supports_named_tool_choice(
     [
         (DeepSeekV3ToolParser, "deepseek_r1"),
         (DeepSeekV31ToolParser, "deepseek_v3_1"),
-        (DeepSeekV32ToolParser, "deepseek_v3_2"),
-        (DeepSeekV4ToolParser, "deepseek_v4"),
+        (DeepSeekV32EngineToolParser, "deepseek_v3_2"),
+        (DeepSeekV4EngineToolParser, "deepseek_v4"),
         (Glm47MoeModelToolParser, "glm_4_7"),
         (Hermes2ProToolParser, "hermes"),
         (KimiK2ToolParser, "kimi"),

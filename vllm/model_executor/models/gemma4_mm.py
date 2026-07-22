@@ -40,7 +40,10 @@ from vllm.inputs import MultiModalDataDict
 from vllm.logger import init_logger
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import ReplicatedLinear
-from vllm.model_executor.models.gemma4 import Gemma4ForCausalLM
+from vllm.model_executor.models.gemma4 import (
+    _GEMMA4_EXPERT_PARENT_MAPPER,
+    Gemma4ForCausalLM,
+)
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.models.transformers.utils import recursive_replace_linear
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -64,7 +67,6 @@ from vllm.multimodal.processing.processor import (
     PromptUpdate,
     PromptUpdateDetails,
 )
-from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
@@ -980,6 +982,13 @@ class Gemma4ForConditionalGeneration(
     SupportsLoRA,
     SupportsEagle3,
 ):
+    # Gemma4 clamps mm_prefix bidirectional ranges to the sliding window
+    # in-kernel (HF's (causal OR blockwise) AND sliding_window). The model
+    # runner reads this to keep image bidirectional ranges that exceed the
+    # window instead of dropping them (which would make image attention
+    # causal-only for images larger than the sliding window).
+    mm_prefix_clamp_sliding_window: bool = True
+
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -993,7 +1002,7 @@ class Gemma4ForConditionalGeneration(
     }
 
     # Maps checkpoint prefixes to vLLM module paths.
-    hf_to_vllm_mapper = WeightsMapper(
+    hf_to_vllm_mapper = _GEMMA4_EXPERT_PARENT_MAPPER | WeightsMapper(
         orig_to_new_prefix={
             # vision tower
             "model.vision_tower": "vision_tower",
@@ -1005,7 +1014,7 @@ class Gemma4ForConditionalGeneration(
             "model.language_model.": "language_model.model.",
             "lm_head.": "language_model.lm_head.",
             "model": "language_model.model",
-        }
+        },
     )
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -1275,7 +1284,7 @@ class Gemma4ForConditionalGeneration(
         # pass has already allocated activations we should account for.
         last_hidden_states_map: dict[int, torch.Tensor] = {}
         for patches, items in buckets.items():
-            free, total = current_platform.mem_get_info()
+            free, total = torch.accelerator.get_memory_info()
             max_batch_size = min(
                 len(items),
                 self._encoder_chunk(
@@ -1383,7 +1392,7 @@ class Gemma4ForConditionalGeneration(
             fc_list = list(frame_counts)
 
         total_frames = pixel_values.shape[0]
-        free, total = current_platform.mem_get_info()
+        free, total = torch.accelerator.get_memory_info()
         max_batch_size = min(
             total_frames,
             self._encoder_chunk(

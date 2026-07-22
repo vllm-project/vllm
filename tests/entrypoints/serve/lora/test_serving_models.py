@@ -14,7 +14,7 @@ from vllm.entrypoints.openai.engine.protocol import (
 )
 from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
-from vllm.entrypoints.pooling.base.serving import PoolingServingBase
+from vllm.entrypoints.pooling.base.serving import PoolingBaseServing
 from vllm.entrypoints.pooling.typing import PoolingServeContext
 from vllm.entrypoints.serve.lora.protocol import (
     LoadLoRAAdapterRequest,
@@ -136,7 +136,7 @@ async def test_unload_lora_adapter_not_found():
     assert response.error.code == HTTPStatus.NOT_FOUND
 
 
-class _ConcretePoolingServing(PoolingServingBase):
+class _ConcretePoolingServing(PoolingBaseServing):
     """Minimal concrete subclass used only in these unit tests."""
 
     request_id_prefix = "test"
@@ -178,7 +178,7 @@ def test_pooling_maybe_get_adapters_lora_name_sets_lora_request():
     serving = _make_pooling_serving(lora_name)
     ctx = _make_pooling_ctx(lora_name)
 
-    serving._maybe_get_adapters(ctx)
+    ctx.lora_request = serving._maybe_get_adapters(ctx.request)
 
     assert ctx.lora_request is not None
     assert ctx.lora_request.lora_name == lora_name
@@ -190,4 +190,4 @@ def test_pooling_maybe_get_adapters_unknown_model_raises():
     ctx = _make_pooling_ctx("unknown-model")
 
     with pytest.raises(VLLMNotFoundError):
-        serving._maybe_get_adapters(ctx)
+        serving._maybe_get_adapters(ctx.request)

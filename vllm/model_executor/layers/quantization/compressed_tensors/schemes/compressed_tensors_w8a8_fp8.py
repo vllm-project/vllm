@@ -181,6 +181,10 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
 
         # required by torch.compile to be torch.nn.Parameter
         layer.weight = Parameter(weight.data, requires_grad=False)
+        # Preserve the dim tags dropped by the transpose so layout-aware
+        # kernels (humming) see (K, N) instead of assuming (N, K).
+        layer.weight.input_dim = 0
+        layer.weight.output_dim = 1
         layer.weight_scale = Parameter(weight_scale.data, requires_grad=False)
         if input_scale is not None:
             layer.input_scale = Parameter(input_scale.data, requires_grad=False)

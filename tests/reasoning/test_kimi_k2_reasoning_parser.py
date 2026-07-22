@@ -7,7 +7,6 @@ import pytest
 
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.engine.protocol import DeltaMessage
-from vllm.reasoning.identity_reasoning_parser import IdentityReasoningParser
 from vllm.reasoning.kimi_k2_reasoning_parser import KimiK2ReasoningParser
 from vllm.tokenizers import get_tokenizer
 
@@ -33,20 +32,6 @@ def kimi_k2_tokenizer():
     return get_tokenizer(tokenizer_name=REASONING_MODEL_NAME, trust_remote_code=True)
 
 
-def test_parser_selection_thinking_enabled(kimi_k2_tokenizer):
-    parser = KimiK2ReasoningParser(
-        kimi_k2_tokenizer, chat_template_kwargs={"thinking": True}
-    )
-    assert parser._identity_parser is None
-
-
-def test_parser_selection_thinking_disabled(kimi_k2_tokenizer):
-    parser = KimiK2ReasoningParser(
-        kimi_k2_tokenizer, chat_template_kwargs={"thinking": False}
-    )
-    assert isinstance(parser._identity_parser, IdentityReasoningParser)
-
-
 def test_extract_reasoning_with_think_tags(kimi_k2_tokenizer):
     parser = KimiK2ReasoningParser(kimi_k2_tokenizer)
     request = ChatCompletionRequest(model="test-model", messages=[], temperature=1.0)
@@ -65,7 +50,7 @@ def test_extract_reasoning_empty_thinking(kimi_k2_tokenizer):
     reasoning, content = parser.extract_reasoning(
         "<think></think>final answer", request
     )
-    assert reasoning == ""
+    assert reasoning is None
     assert content == "final answer"
 
 
@@ -96,8 +81,8 @@ def test_streaming_reasoning_then_content(kimi_k2_tokenizer):
     """Token-by-token streaming: reasoning tokens then content after </think>."""
     parser = KimiK2ReasoningParser(kimi_k2_tokenizer)
 
-    think_id = parser._start_token_id
-    end_think_id = parser._end_token_id
+    think_id = parser._parser_engine._start_token_id
+    end_think_id = parser._parser_engine._end_token_id
     # Use a real token ID from the tokenizer for regular content
     regular_id = kimi_k2_tokenizer.encode("hello", add_special_tokens=False)[0]
 
@@ -154,8 +139,8 @@ def test_streaming_tool_section_ends_reasoning(kimi_k2_tokenizer):
     """<|tool_calls_section_begin|> in delta ends reasoning during streaming."""
     parser = KimiK2ReasoningParser(kimi_k2_tokenizer)
 
-    think_id = parser._start_token_id
-    tool_begin_id = parser._tool_section_start_token_id
+    think_id = parser._parser_engine._start_token_id
+    tool_begin_id = parser._parser_engine._tool_section_start_token_id
     regular_id = kimi_k2_tokenizer.encode("hello", add_special_tokens=False)[0]
 
     # Tool section token arrives — should transition from reasoning to content
@@ -169,50 +154,3 @@ def test_streaming_tool_section_ends_reasoning(kimi_k2_tokenizer):
     )
     assert isinstance(result, DeltaMessage)
     assert result.content == "<|tool_calls_section_begin|>"
-
-
-def test_streaming_end_token_id_buffered(mock_kimi_k2_tokenizer):
-    """When stop sequences buffer text, </think> ID arrives before its text.
-
-    The token ID is present in delta_token_ids but the actual string is not
-    yet in delta_text (still buffered). The parser must return None to wait
-    for the next delta, instead of calling find() which returns -1 and
-    silently corrupting the text split.
-    """
-    parser = KimiK2ReasoningParser(mock_kimi_k2_tokenizer)
-    think_id = parser._start_token_id
-    end_think_id = parser._end_token_id
-
-    # Simulate: </think> ID arrived but text not yet flushed.
-    # Two token IDs in delta to bypass the single-special-token guard.
-    result = parser.extract_reasoning_streaming(
-        previous_text="some reasoning",
-        current_text="some reasoning extra",
-        delta_text="extra",  # </think> text not yet flushed
-        previous_token_ids=[think_id],
-        current_token_ids=[think_id, end_think_id, 999],
-        delta_token_ids=[end_think_id, 999],
-    )
-    assert result is None
-
-
-def test_streaming_tool_section_id_buffered(mock_kimi_k2_tokenizer):
-    """When stop sequences buffer text, tool section start ID arrives before its text.
-
-    Same buffering scenario as above but for <|tool_calls_section_begin|>.
-    Without the guard, find() returns -1 and delta_text[:tool_index] silently
-    drops the last character of reasoning.
-    """
-    parser = KimiK2ReasoningParser(mock_kimi_k2_tokenizer)
-    think_id = parser._start_token_id
-    tool_begin_id = parser._tool_section_start_token_id
-
-    result = parser.extract_reasoning_streaming(
-        previous_text="some reasoning",
-        current_text="some reasoning extra",
-        delta_text="extra",  # tool section text not yet flushed
-        previous_token_ids=[think_id],
-        current_token_ids=[think_id, tool_begin_id, 999],
-        delta_token_ids=[tool_begin_id, 999],
-    )
-    assert result is None
