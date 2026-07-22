@@ -30,12 +30,37 @@ class MambaBackendEnum(Enum, metaclass=_MambaBackendEnumMeta):
     CPU = "cpu"
 
 
+class _MambaPrefillBackendEnumMeta(EnumMeta):
+    """Metaclass providing actionable Mamba prefill backend errors."""
+
+    def __getitem__(cls, name: str):
+        try:
+            return super().__getitem__(name)
+        except KeyError:
+            valid = ", ".join(cls.__members__.keys())
+            raise ValueError(
+                f"Unknown Mamba prefill backend: '{name}'. "
+                f"Valid options are: {valid}"
+            ) from None
+
+
+class MambaPrefillBackendEnum(Enum, metaclass=_MambaPrefillBackendEnumMeta):
+    """Enumeration of supported Mamba2 SSD prefill backends."""
+
+    TRITON = "triton"
+    FLASHINFER = "flashinfer"
+
+
 @config
 class MambaConfig:
     """Configuration for Mamba SSM backends."""
 
     backend: MambaBackendEnum = MambaBackendEnum.TRITON
     """Mamba SSU backend to use."""
+
+    prefill_backend: MambaPrefillBackendEnum = MambaPrefillBackendEnum.TRITON
+    """Mamba2 SSD prefill backend to use. This is independent of the SSU
+    backend used for decode."""
 
     enable_stochastic_rounding: bool = False
     """Enable stochastic rounding when writing SSM state to fp16 cache.
@@ -52,6 +77,14 @@ class MambaConfig:
         """Enable parsing of the `backend` enum type from string."""
         if isinstance(value, str):
             return MambaBackendEnum[value.upper()]
+        return value
+
+    @field_validator("prefill_backend", mode="before")
+    @classmethod
+    def validate_prefill_backend_before(cls, value: Any) -> Any:
+        """Enable parsing of the prefill backend enum from string."""
+        if isinstance(value, str):
+            return MambaPrefillBackendEnum[value.upper()]
         return value
 
     def __post_init__(self):
