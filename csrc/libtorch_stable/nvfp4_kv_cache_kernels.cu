@@ -70,18 +70,20 @@ __device__ __forceinline__ float round_to_nearest_e2m1(float x) {
   return copysignf(q, x);
 }
 
-__device__ __forceinline__ void nvfp4_candidate_scale(
-    float SFScaleVal, float vecMax, float denominator, uint8_t* fp8_sf,
-    float* outputScale) {
+__device__ __forceinline__ void nvfp4_candidate_scale(float SFScaleVal,
+                                                      float vecMax,
+                                                      float denominator,
+                                                      uint8_t* fp8_sf,
+                                                      float* outputScale) {
   float SFValue =
       SFScaleVal * (vecMax * reciprocal_approximate_ftz(denominator));
   __nv_fp8_e4m3 tmp = __nv_fp8_e4m3(SFValue);
   reinterpret_cast<__nv_fp8_e4m3&>(*fp8_sf) = tmp;
   SFValue = float(tmp);
-  *outputScale =
-      SFValue != 0.0f ? reciprocal_approximate_ftz(
-                            SFValue * reciprocal_approximate_ftz(SFScaleVal))
-                      : 0.0f;
+  *outputScale = SFValue != 0.0f
+                     ? reciprocal_approximate_ftz(
+                           SFValue * reciprocal_approximate_ftz(SFScaleVal))
+                     : 0.0f;
 }
 
 template <class Type, int CVT_FP4_NUM_THREADS_PER_SF>
@@ -314,14 +316,11 @@ __global__ void reshape_and_cache_nvfp4_kernel(
 // Receives key_cache/value_cache as kv_cache[:, 0] and kv_cache[:, 1].
 // Each KV side contains both data and scale:
 //   page = [K_data | K_scale | V_data | V_scale]
-void reshape_and_cache_nvfp4_dispatch(torch::stable::Tensor& key,
-                                      torch::stable::Tensor& value,
-                                      torch::stable::Tensor& key_cache,
-                                      torch::stable::Tensor& value_cache,
-                                      torch::stable::Tensor& slot_mapping,
-                                      torch::stable::Tensor& k_scale,
-                                      torch::stable::Tensor& v_scale,
-                                      const std::string& kv_cache_dtype) {
+void reshape_and_cache_nvfp4_dispatch(
+    torch::stable::Tensor& key, torch::stable::Tensor& value,
+    torch::stable::Tensor& key_cache, torch::stable::Tensor& value_cache,
+    torch::stable::Tensor& slot_mapping, torch::stable::Tensor& k_scale,
+    torch::stable::Tensor& v_scale, const std::string& kv_cache_quant_algo) {
   int num_tokens = slot_mapping.size(0);
   int num_heads = key.size(1);
   int head_size = key.size(2);
@@ -396,7 +395,7 @@ void reshape_and_cache_nvfp4_dispatch(torch::stable::Tensor& key,
 
   VLLM_STABLE_DISPATCH_HALF_TYPES(
       key.scalar_type(), "reshape_and_cache_nvfp4", [&] {
-        if (kv_cache_dtype == "nvfp4") {
+        if (kv_cache_quant_algo == "default") {
           vllm::reshape_and_cache_nvfp4_kernel<
               scalar_t, vllm::NVFP4KVScaleSearch::DEFAULT>
               <<<grid, block, 0, stream>>>(
@@ -410,7 +409,7 @@ void reshape_and_cache_nvfp4_dispatch(torch::stable::Tensor& key,
                   data_head_stride, data_block_offset_stride,
                   scale_block_stride, scale_head_stride,
                   scale_block_offset_stride);
-        } else if (kv_cache_dtype == "nvfp4_4over6") {
+        } else if (kv_cache_quant_algo == "four_over_six") {
           vllm::reshape_and_cache_nvfp4_kernel<
               scalar_t, vllm::NVFP4KVScaleSearch::FOUR_OVER_SIX>
               <<<grid, block, 0, stream>>>(
@@ -424,7 +423,7 @@ void reshape_and_cache_nvfp4_dispatch(torch::stable::Tensor& key,
                   data_head_stride, data_block_offset_stride,
                   scale_block_stride, scale_head_stride,
                   scale_block_offset_stride);
-        } else if (kv_cache_dtype == "nvfp4_4over6_k_only") {
+        } else if (kv_cache_quant_algo == "four_over_six_k_only") {
           vllm::reshape_and_cache_nvfp4_kernel<
               scalar_t, vllm::NVFP4KVScaleSearch::FOUR_OVER_SIX_K_ONLY>
               <<<grid, block, 0, stream>>>(
@@ -439,8 +438,9 @@ void reshape_and_cache_nvfp4_dispatch(torch::stable::Tensor& key,
                   scale_block_stride, scale_head_stride,
                   scale_block_offset_stride);
         } else {
-          STD_TORCH_CHECK(false, "Unsupported NVFP4 KV quantization mode: ",
-                          kv_cache_dtype);
+          STD_TORCH_CHECK(false,
+                          "Unsupported NVFP4 KV quantization algorithm: ",
+                          kv_cache_quant_algo);
         }
       });
 }

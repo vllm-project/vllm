@@ -2620,6 +2620,7 @@ def reshape_and_cache_flash(
     kv_cache_dtype: str,
     k_scale: torch.Tensor,
     v_scale: torch.Tensor,
+    kv_cache_quant_algo: str = "default",
 ) -> None:
     torch.ops._C_cache_ops.reshape_and_cache_flash(
         key,
@@ -2630,6 +2631,7 @@ def reshape_and_cache_flash(
         kv_cache_dtype,
         k_scale,
         v_scale,
+        kv_cache_quant_algo,
     )
 
 
