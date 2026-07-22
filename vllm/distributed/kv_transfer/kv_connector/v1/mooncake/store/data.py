@@ -207,11 +207,22 @@ class ChunkedTokenDatabase:
         length = len(self.block_len)
         for index, base_addr in enumerate(self.kv_caches_base_addr):
             addr = base_addr + block_id * self.block_len[index % length]
-            assert (end - start) % self.block_size == 0
+            # A partial tail still occupies one whole physical block slot.
             size = self.block_len[index % length] * cdiv(end - start, self.block_size)
             addr_list.append(addr)
             size_list.append(size)
         return addr_list, size_list, block_id
+
+    def prepare_value_for_block(self, block_id: int) -> tuple[list[int], list[int]]:
+        """Return addresses and sizes for one physical block slot."""
+        addr_list = []
+        size_list = []
+        length = len(self.block_len)
+        for index, base_addr in enumerate(self.kv_caches_base_addr):
+            addr = base_addr + block_id * self.block_len[index % length]
+            addr_list.append(addr)
+            size_list.append(self.block_len[index % length])
+        return addr_list, size_list
 
     def process_tokens(
         self,
@@ -281,6 +292,7 @@ class RequestTracker:
     allocated_block_ids: tuple[list[int], ...]
     num_saved_tokens: int = 0
     token_ids: list[int] | None = None
+    has_pending_offload: bool = False
     # Snapshot of the prefill range length at tracker creation time.
     # For a fresh request this is len(prompt). For a resumed-from-preemption
     # request it includes previously-generated tokens, which are re-prefilled.
@@ -291,6 +303,7 @@ class RequestTracker:
         self.allocated_block_ids = ()
         self.num_saved_tokens = 0
         self.token_ids = None
+        self.has_pending_offload = False
         self.prefill_end_tokens = 0
 
     def update(
@@ -327,6 +340,11 @@ class ReqMeta:
 
     token_ids: list[int] | None = None
     num_prompt_tokens: int | None = None
+    # Core-provided per-mamba-group
+    # (group_id, cow_block_id, boundary_tokens) for this request's partial tail.
+    # Present only on the producer's CoW step; drives the connector's offload
+    # (the FA group's block is derived from block_ids and boundary_tokens).
+    partial_tail_offloads: list[tuple[int, int, int]] | None = None
 
     @staticmethod
     def from_request_tracker(

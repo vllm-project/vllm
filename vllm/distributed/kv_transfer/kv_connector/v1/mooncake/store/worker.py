@@ -61,6 +61,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.protocol import
 from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv
 from vllm.utils.network_utils import get_ip, make_zmq_socket
+from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     maybe_convert_block_hash,
@@ -522,6 +523,163 @@ class KVCacheStoreSendingThread(KVTransferThread):
             self._skip_store_requests.clear()
         return True
 
+    def _maybe_offload_partial_tail(self, req_meta: ReqMeta) -> bool:
+        """Offload the request's sub-block partial tail (its last prompt hash
+        boundary) so a later request can hit the sub-block prefix.
+
+        Covers every block from the normal save's lcm floor to the boundary:
+        the normal save floors to ``lcm_block_size``, so a smaller-block
+        group's full blocks in that gap are never persisted elsewhere, and
+        the consumer's lookup needs every group at every probed boundary.
+        Full blocks are keyed by their block-end hash, the partial boundary
+        block by the boundary sub-hash; the mamba "align" boundary block is
+        the core-provided CoW block. All keys are deduped against the store.
+
+        Returns:
+            True when no put is needed or every put succeeds, False otherwise.
+        """
+        if not self.coord.enable_partial_hash_hits or not req_meta.block_hashes:
+            return True
+        partial_tail_offloads = req_meta.partial_tail_offloads
+        if not partial_tail_offloads:
+            return True
+        hash_block_size = self.coord.hash_block_size
+        boundaries = {boundary for _, _, boundary in partial_tail_offloads}
+        if len(boundaries) != 1:
+            raise ValueError(
+                "Partial-tail offloads for one request must share a boundary"
+            )
+        boundary = boundaries.pop()
+        if boundary == 0:
+            return True
+        if boundary // hash_block_size - 1 >= len(req_meta.block_hashes):
+            return True
+        mamba_offloads = {
+            group_id: block_id for group_id, block_id, _ in partial_tail_offloads
+        }
+
+        keys: list[str] = []
+        addrs: list[list[int]] = []
+        sizes: list[list[int]] = []
+        saved = self._saved_offset.get(req_meta.req_id, 0)
+        for g_idx, db in enumerate(self.token_databases):
+            group_blocks = req_meta.block_ids[g_idx]
+            # Distribute across ranks by the same rule as normal chunks.
+            put_step_rank = (self.tp_rank + g_idx) % self.put_step
+            # Always include the boundary block: its sub-hash key is written
+            # only here, even if normal saves already advanced past it.
+            last_block = cdiv(boundary, db.block_size) - 1
+            for block_idx in range(
+                min(saved // db.block_size, last_block), last_block + 1
+            ):
+                if block_idx % self.put_step != put_step_rank:
+                    continue
+                valid_end = min((block_idx + 1) * db.block_size, boundary)
+                key_hash = req_meta.block_hashes[valid_end // hash_block_size - 1]
+                if (
+                    g_idx in mamba_offloads
+                    and valid_end == boundary
+                    and boundary % db.block_size != 0
+                ):
+                    block_id = mamba_offloads[g_idx]
+                else:
+                    if block_idx >= len(group_blocks):
+                        continue
+                    block_id = group_blocks[block_idx]
+                if block_id == NULL_BLOCK_ID:
+                    logger.debug(
+                        "Skipping unavailable partial-tail source block "
+                        "(req=%s, group=%d, block=%d)",
+                        req_meta.req_id,
+                        g_idx,
+                        block_idx,
+                    )
+                    continue
+                addr, size = db.prepare_value_for_block(block_id)
+                keys.append(db.key_for(key_hash))
+                addrs.append(addr)
+                sizes.append(size)
+
+        if not keys:
+            return True
+        exists_start = time.perf_counter()
+        try:
+            exists = self.store.batch_is_exist(keys)
+        except Exception as e:
+            self._record_operation(
+                "save_exists",
+                exists_start,
+                len(keys),
+                status="error",
+                num_failed_keys=len(keys),
+            )
+            logger.error(
+                "Failed to check partial-tail keys for request %s: %s",
+                req_meta.req_id,
+                e,
+            )
+            return False
+        self._record_operation("save_exists", exists_start, len(keys))
+        missing = [i for i, e in enumerate(exists) if e != 1]
+        if not missing:
+            return True
+        keys = [keys[i] for i in missing]
+        addrs = [addrs[i] for i in missing]
+        sizes = [sizes[i] for i in missing]
+        if req_meta.current_event is not None:
+            # Fence the CoW block copy enqueued earlier this step.
+            req_meta.current_event.synchronize()
+        batch_bytes = _sum_batch_bytes(sizes)
+        put_start = time.perf_counter()
+        try:
+            res = self.store.batch_put_from_multi_buffers(
+                keys, addrs, sizes, self.replicate_config
+            )
+        except Exception as e:
+            self._record_operation(
+                "save_put",
+                put_start,
+                len(keys),
+                num_bytes=batch_bytes,
+                status="error",
+                num_failed_keys=len(keys),
+            )
+            logger.error(
+                "Failed to put partial-tail keys for request %s: %s",
+                req_meta.req_id,
+                e,
+            )
+            return False
+
+        failed = [i for i, value in enumerate(res) if value < 0]
+        self._record_operation(
+            "save_put",
+            put_start,
+            len(keys),
+            num_bytes=batch_bytes,
+            status="partial_failure" if failed else "ok",
+            num_failed_keys=len(failed),
+        )
+        if failed:
+            failed_codes = {res[i] for i in failed}
+            logger.warning(
+                "Partial-tail put failed for request %s: %d/%d keys failed (codes=%s)",
+                req_meta.req_id,
+                len(failed),
+                len(keys),
+                failed_codes,
+            )
+            if MOONCAKE_NO_AVAILABLE_HANDLE in failed_codes:
+                self._mark_request_skipped_for_pressure(req_meta.req_id)
+            return False
+
+        if self._clear_store_pressure():
+            logger.info(
+                "Mooncake CPU/disk offloading pressure cleared after a "
+                "successful partial-tail batch"
+            )
+        return True
+
     def _handle_request(self, req_meta: ReqMeta):
         # Cache hits are always a multiple of ``lcm_block_size`` tokens, which
         # is also ``store_mask``'s precondition.
@@ -539,15 +697,22 @@ class KVCacheStoreSendingThread(KVTransferThread):
         # so the scheduler can release the GPU blocks it pinned for this
         # request (via `delay_free_blocks`) even when the store path raises.
         try:
-            if token_len == 0:
-                return
-
             if self._should_skip_request(req_id):
                 logger.debug(
                     "Skipping Mooncake store for request %s while CPU/disk "
                     "offloading is under pressure",
                     req_id,
                 )
+                return
+
+            # Offload the sub-block partial tail (independent of the normal
+            # block-aligned save, which may be skipped this step).
+            if req_meta.partial_tail_offloads is not None and not (
+                self._maybe_offload_partial_tail(req_meta)
+            ):
+                return
+
+            if token_len == 0:
                 return
 
             # Resume from where this rank left off; only the new suffix is saved.
@@ -1353,7 +1518,7 @@ class MooncakeStoreWorker:
             self.recv_request_queue.put(request)
 
         assert self.load_async, "load_async must be True for better performance."
-        # Issue stores with CUDA event synchronization
+        # Issue stores with CUDA event synchronization.
         if self.kv_role in ["kv_producer", "kv_both"]:
             current_event = None
             for request in meta.requests:

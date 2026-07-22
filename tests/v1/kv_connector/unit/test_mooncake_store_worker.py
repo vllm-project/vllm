@@ -576,6 +576,88 @@ def test_store_sending_thread_retries_skipped_range_after_pressure():
     assert store.batch_put_from_multi_buffers.call_args.args[0] == keys
 
 
+def _make_partial_tail_send_thread(store):
+    coord = SimpleNamespace(
+        enable_partial_hash_hits=True,
+        hash_block_size=4,
+        lcm_block_size=16,
+    )
+    db = ChunkedTokenDatabase(
+        KeyMetadata("test-model", 0, 0, 0, 0),
+        block_size=4,
+        hash_block_size=4,
+    )
+    db.set_kv_caches_base_addr([0x1000])
+    db.set_block_len([256])
+    return _make_store_sending_thread(
+        store,
+        coord=coord,
+        token_databases=[db],
+    )
+
+
+def _make_partial_tail_req(block_ids: list[int]) -> ReqMeta:
+    return ReqMeta(
+        req_id="req-a",
+        token_len_chunk=0,
+        block_ids=(block_ids,),
+        block_hashes=[b"a0", b"a1", b"a2"],
+        can_save=True,
+        partial_tail_offloads=[(1, 7, 12)],
+    )
+
+
+def test_partial_tail_offload_skips_null_source_blocks():
+    store = MagicMock()
+    store.batch_is_exist.side_effect = lambda keys: [0] * len(keys)
+    store.batch_put_from_multi_buffers.return_value = [256, 256]
+    thread = _make_partial_tail_send_thread(store)
+
+    assert thread._maybe_offload_partial_tail(_make_partial_tail_req([0, 2, 3]))
+
+    keys, addrs, _sizes, _replicate_config = (
+        store.batch_put_from_multi_buffers.call_args.args
+    )
+    assert keys == [
+        "test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:0@6131",
+        "test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:0@6132",
+    ]
+    assert addrs == [[0x1000 + 2 * 256], [0x1000 + 3 * 256]]
+
+
+def test_partial_tail_offload_honors_active_pressure_gate():
+    store = MagicMock()
+    thread = _make_partial_tail_send_thread(store)
+    thread._store_pressure_active = True
+    thread._skip_store_requests.add("req-a")
+    thread.add_stored_request("req-a")
+
+    thread._handle_request(_make_partial_tail_req([1, 2, 3]))
+
+    store.batch_is_exist.assert_not_called()
+    store.batch_put_from_multi_buffers.assert_not_called()
+    assert thread.stored_requests["req-a"] == 0
+
+
+def test_partial_tail_put_failure_activates_pressure_gate():
+    store = MagicMock()
+    store.batch_is_exist.side_effect = lambda keys: [0] * len(keys)
+    store.batch_put_from_multi_buffers.return_value = [256, -200, 256]
+    thread = _make_partial_tail_send_thread(store)
+    thread.add_stored_request("req-a")
+
+    thread._handle_request(_make_partial_tail_req([1, 2, 3]))
+
+    assert thread._store_pressure_active is True
+    assert thread._skip_store_requests == {"req-a"}
+    assert thread._saved_offset.get("req-a", 0) == 0
+    assert thread.stored_requests["req-a"] == 0
+
+    thread.add_stored_request("req-a")
+    thread._handle_request(_make_partial_tail_req([1, 2, 3]))
+    assert store.batch_put_from_multi_buffers.call_count == 1
+
+
 def test_store_sending_thread_delta_start_rank_saves_second_local_chunk():
     store = MagicMock()
     store.batch_is_exist.side_effect = lambda keys: [0] * len(keys)
