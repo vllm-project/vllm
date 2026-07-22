@@ -395,10 +395,8 @@ class MLAAttention(nn.Module, AttentionLayerBase):
 
         if cache_config is not None:
             kv_cache_dtype: CacheDType = cache_config.cache_dtype
-            calculate_kv_scales = cache_config.calculate_kv_scales
         else:
             kv_cache_dtype = "auto"
-            calculate_kv_scales = False
         self.quant_config = quant_config
 
         if cache_config is not None and cache_config.kv_cache_dtype_skip_layers:
@@ -407,7 +405,6 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             layer_idx = extract_layer_index(prefix)
             if str(layer_idx) in cache_config.kv_cache_dtype_skip_layers:
                 kv_cache_dtype = "auto"
-                calculate_kv_scales = False
             logger.debug(
                 "Layer %s: kv_cache_dtype=%s",
                 prefix,
@@ -456,7 +453,6 @@ class MLAAttention(nn.Module, AttentionLayerBase):
 
         # Initialize KV cache quantization attributes
         self.kv_cache_dtype = kv_cache_dtype
-        self.calculate_kv_scales = calculate_kv_scales
         _init_kv_cache_quant(self, quant_config, prefix)
 
         if (
@@ -549,11 +545,6 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             and _vllm_config.parallel_config.dcp_comm_backend == "a2a"
         )
 
-        # Initialize q/k/v range constants.
-        self.q_range = torch.tensor(envs.Q_SCALE_CONSTANT, dtype=torch.float32)
-        self.k_range = torch.tensor(envs.K_SCALE_CONSTANT, dtype=torch.float32)
-        self.v_range = torch.tensor(envs.V_SCALE_CONSTANT, dtype=torch.float32)
-
         self.is_aiter_triton_fp8_bmm_enabled = rocm_aiter_ops.is_fp8bmm_enabled()
 
         # If kv_b_proj_weight is unquantized, quantize it to mxfp4 if supported
@@ -595,14 +586,6 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         output_shape: torch.Size | None = None,
         q_dcp_replicated: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        if self.calculate_kv_scales:
-            torch.ops.vllm.maybe_calc_kv_scales(
-                q,
-                kv_c_normed,
-                k_pe,
-                _encode_layer_name(self.layer_name),
-            )
-
         if self.use_direct_call:
             forward_context: ForwardContext = get_forward_context()
             attn_metadata_raw = forward_context.attn_metadata
@@ -1081,30 +1064,6 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         )
         if not should_load_quant_weights(quant_method):
             set_default_quant_scales(self, register_buffer=False)
-
-    def calc_kv_scales(
-        self, q: torch.Tensor, kv_c_normed: torch.Tensor, k_pe: torch.Tensor
-    ) -> None:
-        """Optional scale calculation for MLA inputs.
-
-        Mirrors Attention.calc_kv_scales. Not all MLA backends require this
-        """
-        # Use safe defaults if ranges are not present
-        q_range = getattr(self, "q_range", torch.tensor(1.0))
-        k_range = getattr(self, "k_range", torch.tensor(1.0))
-        v_range = getattr(self, "v_range", torch.tensor(1.0))
-
-        self._q_scale.copy_(torch.abs(q).max() / q_range)
-        # kv_c_normed is the compressed KV representation; use it for k/v
-        kv_abs_max = torch.abs(kv_c_normed).max()
-        self._k_scale.copy_(kv_abs_max / k_range)
-        self._v_scale.copy_(kv_abs_max / v_range)
-        self._q_scale_float = self._q_scale.item()
-        self._k_scale_float = self._k_scale.item()
-        self._v_scale_float = self._v_scale.item()
-        self._k_scale_cpu.fill_(self._k_scale_float)
-        self._v_scale_cpu.fill_(self._v_scale_float)
-        self.calculate_kv_scales = False
 
     def get_attn_backend(self) -> type[AttentionBackend]:
         return self.attn_backend

@@ -218,8 +218,7 @@ steps:
   - vllm/v1/
   - tests/compile
   commands:
-    # fp8 kv scales not supported on sm89, tested on Blackwell instead
-  - pytest -v -s compile/fullgraph/test_full_graph.py -k 'not test_fp8_kv_scale_compile'
+  - pytest -v -s compile/fullgraph/test_full_graph.py
 
 - label: Pytorch Nightly Dependency Override Check # 2min
   key: pytorch-nightly-dependency-override-check

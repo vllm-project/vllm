@@ -13,7 +13,6 @@ from vllm import LLM, SamplingParams
 from vllm.config import CompilationConfig, CompilationMode, CUDAGraphMode, PassConfig
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import is_torch_equal_or_newer
-from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from ...utils import create_new_process_for_each_test
 
@@ -180,37 +179,6 @@ def test_custom_compile_config(
 
     print(f"MODEL={model}")
     run_model(compilation_config, model, **model_kwargs)
-
-
-@pytest.mark.parametrize(
-    "compilation_mode",
-    [CompilationMode.NONE, CompilationMode.VLLM_COMPILE],
-)
-@pytest.mark.parametrize(
-    "model, backend",
-    [
-        ("Qwen/Qwen2-0.5B", None),  # Standard attention model
-        (
-            "deepseek-ai/DeepSeek-V2-Lite",
-            AttentionBackendEnum.FLASHINFER_MLA,
-        ),  # MLA (Multi-head Latent Attention) model
-    ],
-)
-def test_fp8_kv_scale_compile(
-    compilation_mode: int,
-    model: str,
-    backend: AttentionBackendEnum | None,
-):
-    model_kwargs = {
-        "quantization": "fp8",
-        "kv_cache_dtype": "fp8_e4m3",
-        "calculate_kv_scales": True,
-        "max_model_len": 512,
-    }
-    if backend:
-        model_kwargs["attention_config"] = {"backend": backend.name}
-
-    run_model(compilation_mode, model, **model_kwargs)
 
 
 def run_model(compile_config: int | CompilationConfig, model: str, **model_kwargs):

@@ -18,7 +18,6 @@ from vllm.model_executor.kernels.linear.scaled_mm import (
     MarlinFP8ScaledMMLinearKernel,
 )
 from vllm.model_executor.layers.attention.attention import (
-    Attention,
     set_default_quant_scales,
 )
 from vllm.model_executor.layers.fused_moe import FusedMoE
@@ -433,8 +432,7 @@ def test_fp8_reloading(
     method.process_weights_after_loading(layer)
 
 
-@pytest.mark.parametrize("source", ["checkpoint", "runtime_calc"])
-def test_kv_cache_scale_sync_to_host_copies(source):
+def test_kv_cache_scale_sync_to_host_copies():
     """Test device-to-host sync of the k/v quantization scales, for both the
     checkpoint-load and runtime-calc paths that produce them.
     """
@@ -442,23 +440,13 @@ def test_kv_cache_scale_sync_to_host_copies(source):
     set_default_quant_scales(layer, register_buffer=True)
     layer.kv_cache_dtype = "fp8"
 
-    if source == "checkpoint":
-        # Scales come from the checkpoint, so runtime calc is disabled.
-        layer.calculate_kv_scales = False
-        method = BaseKVCacheMethod(quant_config=None)
-        method.create_weights(layer)
-        # 0.3 stays != 1.0 even after the fp8_fnuz x2 rescale.
-        checkpoint_scale = torch.tensor(0.3, dtype=torch.float32)
-        layer.k_scale.weight_loader(layer.k_scale, checkpoint_scale)
-        layer.v_scale.weight_loader(layer.v_scale, checkpoint_scale)
-        method.process_weights_after_loading(layer)
-    else:
-        # First forward computes distinct, non-unity scales from live k/v.
-        layer.calculate_kv_scales = True
-        query = torch.full((4, 8), 10.0)
-        key = torch.full((4, 8), 60.0)
-        value = torch.full((4, 8), 50.0)
-        Attention.calc_kv_scales(layer, query, key, value)
+    method = BaseKVCacheMethod(quant_config=None)
+    method.create_weights(layer)
+    # 0.3 stays != 1.0 even after the fp8_fnuz x2 rescale.
+    checkpoint_scale = torch.tensor(0.3, dtype=torch.float32)
+    layer.k_scale.weight_loader(layer.k_scale, checkpoint_scale)
+    layer.v_scale.weight_loader(layer.v_scale, checkpoint_scale)
+    method.process_weights_after_loading(layer)
 
     assert layer._k_scale_float != 1.0
     assert layer._v_scale_float != 1.0

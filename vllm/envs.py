@@ -1318,12 +1318,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ROCM_QUICK_REDUCE_QUANTIZATION_MIN_SIZE_KB": lambda: maybe_convert_int(
         os.environ.get("VLLM_ROCM_QUICK_REDUCE_QUANTIZATION_MIN_SIZE_KB", None)
     ),
-    # Divisor for dynamic query scale factor calculation for FP8 KV Cache
-    "Q_SCALE_CONSTANT": lambda: int(os.getenv("Q_SCALE_CONSTANT", "200")),
-    # Divisor for dynamic key scale factor calculation for FP8 KV Cache
-    "K_SCALE_CONSTANT": lambda: int(os.getenv("K_SCALE_CONSTANT", "200")),
-    # Divisor for dynamic value scale factor calculation for FP8 KV Cache
-    "V_SCALE_CONSTANT": lambda: int(os.getenv("V_SCALE_CONSTANT", "100")),
     # If set, enable multiprocessing in LLM for the V1 code path.
     "VLLM_ENABLE_V1_MULTIPROCESSING": lambda: bool(
         int(os.getenv("VLLM_ENABLE_V1_MULTIPROCESSING", "1"))
