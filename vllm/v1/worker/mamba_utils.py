@@ -8,6 +8,7 @@ from typing import Any
 import torch
 
 from vllm.config import CacheConfig
+from vllm.logger import init_logger
 from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateCopyFunc,
     get_conv_copy_spec,
@@ -21,6 +22,8 @@ from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
 from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.gpu_input_batch import CachedRequestState
 from vllm.v1.worker.lora_model_runner_mixin import GPUInputBatch
+
+logger = init_logger(__name__)
 
 # 16 saturates HBM on H100/GB200 across the reqs=8..128 range in
 # microbenchmarks
@@ -786,23 +789,28 @@ class MambaSpecDecodeGPUContext:
                         self.state_inner_sizes[idx] = (
                             state[0].numel() if state.dim() > 1 else 1
                         )
-                        # Temporal copies are vectorized with uint64
-                        # loads/stores; base pointer and block stride must
-                        # be 8B-aligned (tail loop handles copy_size % 8).
+                        # Temporal copies vectorize with uint64 loads/stores.
+                        # The kernel's head/tail handles misalignment for
+                        # correctness, but unaligned base/stride costs in
+                        # throughput.
                         base_addr = state.data_ptr()
                         block_stride_bytes = block_stride_elems * state.element_size()
-                        assert base_addr % 8 == 0, (
-                            f"layer {layer_name}: state.data_ptr() = "
-                            f"{base_addr:#x} is not 8B-aligned; "
-                            f"_copy_mamba_state_block uint64 "
-                            f"vectorization requires it"
-                        )
-                        assert block_stride_bytes % 8 == 0, (
-                            f"layer {layer_name}: block stride = "
-                            f"{block_stride_bytes}B is not 8B-aligned; "
-                            f"_copy_mamba_state_block uint64 "
-                            f"vectorization requires it"
-                        )
+                        if base_addr % 8 != 0:
+                            logger.warning_once(
+                                "layer %s: state.data_ptr() = %#x is not "
+                                "8B-aligned; _memcpy_u64_tiled uint64 "
+                                "vectorization will pay misaligned load cost",
+                                layer_name,
+                                base_addr,
+                            )
+                        if block_stride_bytes % 8 != 0:
+                            logger.warning_once(
+                                "layer %s: block stride = %dB is not "
+                                "8B-aligned; _memcpy_u64_tiled uint64 "
+                                "vectorization will pay misaligned load cost",
+                                layer_name,
+                                block_stride_bytes,
+                            )
 
                     self.state_group_indices[idx] = group_local_idx
                     idx += 1
