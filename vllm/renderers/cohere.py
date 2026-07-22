@@ -314,17 +314,21 @@ def _content_blocks(content: Any) -> list[dict[str, Any]]:
 
 def _document_to_melody(doc: Any) -> dict[str, Any]:
     """Coerce a Cohere v2 document into melody's ``Document`` (dict) shape."""
-    if isinstance(doc, str):
-        return {"text": doc}
-    if isinstance(doc, dict):
-        # Cohere v2 wraps documents in {id, data: {...}} or pure dicts.
-        if "data" in doc and isinstance(doc["data"], dict):
-            payload = dict(doc["data"])
-            if "id" in doc and "id" not in payload:
-                payload["id"] = doc["id"]
+    match doc:
+        case str():
+            return {"text": doc}
+        # Cohere v2 wraps documents in {id, data: {...}}; the ``**rest``
+        # capture keeps the outer ``id`` (and any other outer keys) so we
+        # can lift them onto the payload without losing them.
+        case {"data": dict() as data, **rest}:
+            payload = dict(data)
+            if (outer_id := rest.get("id")) is not None and "id" not in payload:
+                payload["id"] = outer_id
             return payload
-        return dict(doc)
-    raise TypeError(f"Unsupported document type: {type(doc).__name__}")
+        case dict():
+            return dict(doc)
+        case _:
+            raise TypeError(f"Unsupported document type: {type(doc).__name__}")
 
 
 def _tool_to_melody(tool: Any) -> dict[str, Any]:

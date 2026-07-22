@@ -254,11 +254,13 @@ class CohereServingChatV2(OpenAIServingChat):
 
         generator = await self.create_chat_completion(chat_req, raw_request)
 
-        if isinstance(generator, ErrorResponse):
-            return generator
-        if isinstance(generator, ChatCompletionResponse):
-            return self._chat_completion_to_v2(generator, request)
-        return self._chat_completion_stream_to_v2(generator, request)
+        match generator:
+            case ErrorResponse():
+                return generator
+            case ChatCompletionResponse():
+                return self._chat_completion_to_v2(generator, request)
+            case _:
+                return self._chat_completion_stream_to_v2(generator, request)
 
     # ==================================================================
     # Request conversion: Cohere V2 -> ChatCompletionRequest
@@ -286,21 +288,22 @@ class CohereServingChatV2(OpenAIServingChat):
         openai_messages: list[dict[str, Any]],
     ) -> None:
         for msg in messages:
-            if isinstance(msg, SystemChatMessageV2):
-                openai_messages.append(
-                    {
-                        "role": "system",
-                        "content": cls._coerce_text_content(msg.content),
-                    }
-                )
-            elif isinstance(msg, UserChatMessageV2):
-                openai_messages.append(cls._convert_user_message(msg))
-            elif isinstance(msg, AssistantChatMessageV2):
-                openai_messages.append(cls._convert_assistant_message(msg))
-            elif isinstance(msg, ToolChatMessageV2):
-                openai_messages.append(cls._convert_tool_message(msg))
-            else:  # pragma: no cover - guarded by Pydantic discriminator
-                raise ValueError(f"Unsupported Cohere v2 message: {msg!r}")
+            match msg:
+                case SystemChatMessageV2():
+                    openai_messages.append(
+                        {
+                            "role": "system",
+                            "content": cls._coerce_text_content(msg.content),
+                        }
+                    )
+                case UserChatMessageV2():
+                    openai_messages.append(cls._convert_user_message(msg))
+                case AssistantChatMessageV2():
+                    openai_messages.append(cls._convert_assistant_message(msg))
+                case ToolChatMessageV2():
+                    openai_messages.append(cls._convert_tool_message(msg))
+                case _:  # pragma: no cover - guarded by Pydantic discriminator
+                    raise ValueError(f"Unsupported Cohere v2 message: {msg!r}")
 
     @staticmethod
     def _coerce_text_content(content: str | list[Any]) -> str:

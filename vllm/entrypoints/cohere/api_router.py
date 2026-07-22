@@ -18,9 +18,11 @@ body parameter into a query parameter and reject every request with
 422.
 """
 
-from fastapi import FastAPI, APIRouter, Depends, Request
-from fastapi.responses import JSONResponse, StreamingResponse
 from http import HTTPStatus
+
+from fastapi import APIRouter, Depends, FastAPI, Request
+from fastapi.responses import JSONResponse, StreamingResponse
+
 from vllm.entrypoints.openai.engine.protocol import ErrorResponse
 from vllm.entrypoints.serve.utils.api_utils import (
     load_aware_call,
@@ -122,13 +124,13 @@ if _SDK_AVAILABLE:
                 ).model_dump(exclude_none=True),
             )
 
-        if isinstance(result, ErrorResponse):
-            return _error_response(result, raw_request)
-
-        if isinstance(result, CohereChatV2Response):
-            return JSONResponse(content=result.model_dump(exclude_none=True))
-
-        return StreamingResponse(content=result, media_type="text/event-stream")
+        match result:
+            case ErrorResponse():
+                return _error_response(result, raw_request)
+            case CohereChatV2Response():
+                return JSONResponse(content=result.model_dump(exclude_none=True))
+            case _:
+                return StreamingResponse(content=result, media_type="text/event-stream")
 
 
 def attach_router(app: FastAPI) -> None:
