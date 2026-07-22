@@ -26,18 +26,21 @@ const RESET: &str = "\x1b[0m";
 const VLLM_TIME_FORMAT: &[time::format_description::FormatItem<'static>] =
     format_description!("[month]-[day] [hour]:[minute]:[second]");
 
-const PROCESS_LABEL: &str = "RustFrontend";
-
 /// Install the process-wide vLLM-style tracing subscriber for the CLI binary.
-pub(crate) fn init_tracing() {
+pub(crate) fn init_tracing(process_label: &str) {
     let filter = build_targets_filter(
         env::var("VLLM_LOGGING_LEVEL").ok().as_deref(),
         env::var("RUST_LOG").ok().as_deref(),
     );
-    let formatter = VllmEventFormatter::new();
+    let formatter = VllmEventFormatter::new(process_label);
 
     let _ = tracing_subscriber::registry()
-        .with(tracing_subscriber::fmt::layer().event_format(formatter).with_filter(filter))
+        .with(
+            tracing_subscriber::fmt::layer()
+                .event_format(formatter)
+                .with_writer(std::io::stderr)
+                .with_filter(filter),
+        )
         .try_init();
 }
 
@@ -94,9 +97,9 @@ struct VllmEventFormatter {
 }
 
 impl VllmEventFormatter {
-    fn new() -> Self {
+    fn new(process_label: &str) -> Self {
         Self {
-            prefix: format!("({} pid={})", PROCESS_LABEL, process::id()),
+            prefix: format!("({process_label} pid={})", process::id()),
             timer: VllmLocalTimer::default(),
         }
     }
@@ -290,6 +293,13 @@ fn map_python_log_level(level: &str) -> LevelFilter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn formatter_prefix_uses_process_label() {
+        let formatter = VllmEventFormatter::new("Bench");
+
+        assert_eq!(formatter.prefix, format!("(Bench pid={})", process::id()));
+    }
 
     #[test]
     fn rust_log_target_overrides_are_merged_with_vllm_default_level() {
