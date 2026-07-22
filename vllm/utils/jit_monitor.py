@@ -267,6 +267,26 @@ def _log_cutedsl_jit_compile(fn_name: str) -> None:
     )
 
 
+class _MonitoredCuteCompile:
+    """Logs JIT compilations; a plain function would break ``cute.compile[opts]``."""
+
+    def __init__(self, inner):
+        self._inner = inner
+
+    def __getitem__(self, options) -> "_MonitoredCuteCompile":
+        return _MonitoredCuteCompile(self._inner[options])
+
+    def __call__(self, *args, **kwargs):
+        kernel = args[0] if args else kwargs.get("function")
+        kernel_name = getattr(kernel, "__name__", None)
+        if kernel_name is None:
+            kernel_name = (
+                kernel.__class__.__name__ if kernel is not None else "<unknown>"
+            )
+        _log_cutedsl_jit_compile(kernel_name)
+        return self._inner(*args, **kwargs)
+
+
 def _setup_cutedsl_jit_hook() -> None:
     """Wrap ``cutlass.cute.compile`` to warn on compilation."""
     global _cutedsl_hook_installed
@@ -279,20 +299,7 @@ def _setup_cutedsl_jit_hook() -> None:
         logger.debug("CuTeDSL is not available; skipping CuTeDSL JIT monitor.")
         return
 
-    original_compile = cute.compile
-
-    @functools.wraps(original_compile)
-    def _compile_with_monitor(*args, **kwargs):
-        kernel = args[0] if args else kwargs.get("function")
-        kernel_name = getattr(kernel, "__name__", None)
-        if kernel_name is None:
-            kernel_name = (
-                kernel.__class__.__name__ if kernel is not None else "<unknown>"
-            )
-        _log_cutedsl_jit_compile(kernel_name)
-        return original_compile(*args, **kwargs)
-
-    cute.compile = _compile_with_monitor
+    cute.compile = _MonitoredCuteCompile(cute.compile)
     _cutedsl_hook_installed = True
 
 
