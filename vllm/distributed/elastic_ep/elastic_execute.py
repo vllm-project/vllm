@@ -651,6 +651,9 @@ class ElasticEPScalingExecutor:
     def prepare_new_worker(self) -> None:
         with set_current_vllm_config(self.worker.vllm_config):
             prepare_communication_buffer_for_model(self.worker.model_runner.get_model())
+
+    def warmup_local_kernels(self) -> None:
+        with set_current_vllm_config(self.worker.vllm_config):
             kernel_warmup(self.worker, process_local_only=True)
 
     def warm_and_capture(self) -> None:
