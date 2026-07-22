@@ -330,10 +330,7 @@ class SpeculativeConfig:
     @staticmethod
     def hf_config_override(hf_config: PretrainedConfig) -> PretrainedConfig:
         initial_architecture = hf_config.architectures[0]
-        use_sparse_mtp = hf_config.model_type in (
-            "deepseek_v32",
-            "glm_moe_dsa",
-        ) or hasattr(hf_config, "index_topk")
+        use_sparse_mtp = hf_config.model_type == "glm_moe_dsa"
         if hf_config.model_type in (
             "deepseek_v3",
             "deepseek_v32",
