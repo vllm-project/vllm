@@ -169,6 +169,30 @@ class WeightsMapper:
         (`qkv_proj`)."""
         return replace(self, orig_to_new_stacked={})
 
+    def with_mm_text_lora_fallback(self) -> "WeightsMapper":
+        """Append a shared bare ``model.`` → ``language_model.model.`` LoRA fallback.
+
+        Multimodal / CondGen wrappers that mount the LM under ``language_model``
+        usually remap ``model.language_model.`` → ``language_model.model.`` for base
+        checkpoints. After PEFT strips ``base_model.model.``, text-LoRA keys look
+        like ``model.layers...`` and match none of the specific rules, so the
+        adapter loads as a silent no-op.
+
+        Rather than adding that catch-all per model as each is discovered, detect
+        the wrapper pattern once here and append the rule **last** when missing.
+        Existing ``model.`` / ``model`` catch-alls (qwen2_vl, gemma4_mm) are left
+        untouched. Call this only on the LoRA loading path so base-weight maps
+        stay unchanged unless they already included the rule.
+        """
+        prefixes = dict(self.orig_to_new_prefix)
+        if "model." in prefixes or "model" in prefixes:
+            return self
+        lm_dst = prefixes.get("model.language_model.")
+        if not isinstance(lm_dst, str) or not lm_dst.startswith("language_model"):
+            return self
+        prefixes["model."] = "language_model.model."
+        return replace(self, orig_to_new_prefix=prefixes)
+
 
 class AutoWeightsLoader:
     """
