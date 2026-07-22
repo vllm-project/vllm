@@ -2391,6 +2391,17 @@ def topk_softmax(
     e_score_correction_bias: torch.Tensor | None = None,
     is_padding: torch.Tensor | None = None,
 ) -> None:
+    if current_platform.is_xpu():
+        # TODO: Remove after vllm-xpu-kernels supports is_padding.
+        torch.ops._moe_C.topk_softmax(
+            topk_weights,
+            topk_ids,
+            token_expert_indices,
+            gating_output,
+            renormalize,
+            e_score_correction_bias,
+        )
+        return
     torch.ops._moe_C.topk_softmax(
         topk_weights,
         topk_ids,
@@ -2412,6 +2423,18 @@ def topk_sigmoid(
     routed_scaling_factor: float = 1.0,
     is_padding: torch.Tensor | None = None,
 ) -> None:
+    if current_platform.is_xpu():
+        # TODO: Remove after vllm-xpu-kernels supports is_padding.
+        torch.ops._moe_C.topk_sigmoid(
+            topk_weights,
+            topk_ids,
+            token_expert_indices,
+            gating_output,
+            renormalize,
+            e_score_correction_bias,
+            routed_scaling_factor,
+        )
+        return
     torch.ops._moe_C.topk_sigmoid(
         topk_weights,
         topk_ids,
@@ -2449,8 +2472,7 @@ def topk_hash_softplus_sqrt(
             input_tokens,
             hash_indices_table,
         )
-
-    return
+        return
     torch.ops._moe_C.topk_softplus_sqrt(
         topk_weights,
         topk_indices,
