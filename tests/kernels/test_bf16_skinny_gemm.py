@@ -27,8 +27,7 @@ SHAPES = [
 MS = [0, 1, 2, 8, 16, 32]
 
 pytestmark = pytest.mark.skipif(
-    not current_platform.is_cuda()
-    or not current_platform.has_device_capability(90),
+    not current_platform.is_cuda() or not current_platform.has_device_capability(90),
     reason="bf16_skinny_gemm requires CUDA SM90+",
 )
 
