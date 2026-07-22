@@ -455,6 +455,7 @@ class Attention(nn.Module, AttentionLayerBase):
             compatible = kv_layouts_compatible(
                 self.attn_backend,
                 selected_decode_backend,
+                num_kv_heads=num_kv_heads,
                 head_size=head_size,
                 block_size=selector_block_size,
                 kv_cache_dtype=kv_cache_dtype,
@@ -500,9 +501,17 @@ class Attention(nn.Module, AttentionLayerBase):
                                 f"and {required_layout}."
                             )
                 set_kv_cache_layout(required_layout)
-            self.attn_backend = create_composite_attention_backend(
+            composite_backend = create_composite_attention_backend(
                 self.attn_backend, selected_decode_backend
             )
+            if composite_backend is not self.attn_backend:
+                logger.info_once(
+                    "Routing attention by batch phase: %s for "
+                    "prefill-containing batches, %s for pure-decode batches.",
+                    self.attn_backend.get_name(),
+                    selected_decode_backend.get_name(),
+                )
+            self.attn_backend = composite_backend
 
         impl_cls = self.attn_backend.get_impl_cls()
         self.impl = impl_cls(  # type: ignore[assignment]  # impl_cls always returns an AttentionImpl subclass

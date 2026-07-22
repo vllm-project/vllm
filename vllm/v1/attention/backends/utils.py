@@ -113,7 +113,14 @@ def create_composite_attention_backend(
     class CompositeAttentionImpl(AttentionImpl):
         def __init__(self, *args, **kwargs) -> None:
             self.general_impl = cast(AttentionImpl, general_impl_cls(*args, **kwargs))
-            self.decode_impl = cast(AttentionImpl, decode_impl_cls(*args, **kwargs))
+            try:
+                self.decode_impl = cast(AttentionImpl, decode_impl_cls(*args, **kwargs))
+            except TypeError as e:
+                raise ValueError(
+                    f"Decode attention backend {decode_backend.get_name()} "
+                    f"does not accept the attention arguments required by "
+                    f"the general backend {general_backend.get_name()}: {e}"
+                ) from e
             for name in (
                 "num_heads",
                 "num_kv_heads",
@@ -915,6 +922,7 @@ def kv_layouts_compatible(
     general_backend: type[AttentionBackend],
     decode_backend: type[AttentionBackend],
     *,
+    num_kv_heads: int,
     head_size: int,
     block_size: int | None,
     kv_cache_dtype: str | None,
@@ -956,7 +964,7 @@ def kv_layouts_compatible(
     ):
         return False
 
-    shape_args = (1024, block_size or 16, 8, head_size)
+    shape_args = (1024, block_size or 16, num_kv_heads, head_size)
     general_shape = general_backend.get_kv_cache_shape(
         *shape_args, cache_dtype_str=kv_cache_dtype or "auto"
     )

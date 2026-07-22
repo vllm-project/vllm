@@ -210,6 +210,7 @@ def _layouts_compatible(decode_backend, block_size=16):
     return kv_layouts_compatible(
         _Backend,
         decode_backend,
+        num_kv_heads=8,
         head_size=128,
         block_size=block_size,
         kv_cache_dtype=None,
@@ -297,6 +298,7 @@ def test_layout_compatibility_rejects_unsafe_pairings(decode_backend):
     assert not kv_layouts_compatible(
         general_backend,
         decode_backend,
+        num_kv_heads=8,
         head_size=128,
         block_size=16,
         kv_cache_dtype=None,
@@ -308,6 +310,7 @@ def test_identical_backend_is_layout_compatible():
     assert kv_layouts_compatible(
         _WritesInForwardBackend,
         _WritesInForwardBackend,
+        num_kv_heads=8,
         head_size=128,
         block_size=16,
         kv_cache_dtype=None,
@@ -319,6 +322,7 @@ def test_disjoint_kernel_block_sizes_are_incompatible():
     assert not kv_layouts_compatible(
         _Fixed16Backend,
         _Fixed64Backend,
+        num_kv_heads=8,
         head_size=128,
         block_size=None,
         kv_cache_dtype=None,
@@ -575,6 +579,23 @@ def test_composite_impl_defaults_untagged_metadata_to_general():
     impl = backend.get_impl_cls()(8, 128, 0.1)
 
     assert impl.get_impl_for_metadata(SimpleNamespace()) is impl.general_impl
+
+
+def test_composite_impl_reports_decode_argument_mismatch():
+    """A decode impl rejecting general-only impl args must fail clearly."""
+
+    class StrictDecodeImpl(_RoutingImpl):
+        def __init__(self, num_heads, head_size, scale):
+            super().__init__(num_heads, head_size, scale)
+
+    class StrictDecodeBackend(_DecodeBackend):
+        @staticmethod
+        def get_impl_cls():
+            return StrictDecodeImpl
+
+    backend = create_composite_attention_backend(_GeneralBackend, StrictDecodeBackend)
+    with pytest.raises(ValueError, match="does not accept"):
+        backend.get_impl_cls()(8, 128, 0.1, chunk_lookback=3)
 
 
 def test_composite_impl_exposes_backend_specific_variants():

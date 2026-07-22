@@ -325,7 +325,9 @@ python script.py --attention-backend FLASHINFER
 
 This forces the same backend for prefill and decode. Use
 `--attention-prefill-backend` or `--attention-decode-backend` to configure only
-one role and leave the other automatically selected.
+one role and leave the other automatically selected. For standard attention
+these route whole batches by phase; for MLA models they select the backends
+for the prefill and decode portions of each batch.
 
 Some of the available backend options include:
 

@@ -273,6 +273,10 @@ class CudaGraphManager:
                 num_reqs = None
                 if mixed_mode == CUDAGraphMode.FULL:
                     num_reqs = min(num_tokens, self.max_num_reqs)
+                # Mixed-mode graphs are captured per backend variant because
+                # KV-cache-update ops can be baked inside piecewise graphs
+                # (Inductor graph partition or rope/kvcache fusion), and the
+                # baked kernel comes from the variant's impl.
                 num_backend_variants = 1 + self.capture_attention_backend_variants
                 for attention_backend_variant in range(num_backend_variants):
                     desc = BatchExecutionDescriptor(

@@ -115,6 +115,7 @@ from vllm.utils.argparse_utils import (
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.network_utils import get_ip
 from vllm.utils.torch_utils import resolve_kv_cache_dtype_string
+from vllm.v1.attention.backends.mla.prefill.registry import MLAPrefillBackendEnum
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.sample.logits_processor import LogitsProcessor
 from vllm.version import __version__ as VLLM_VERSION
@@ -934,11 +935,26 @@ class EngineArgs:
             "options to configure prefill and decode independently."
         )
         attention_group.add_argument("--attention-backend", **attention_backend_kwargs)
-        attention_group.add_argument(
-            "--attention-prefill-backend", **attention_kwargs["backend"]
+        attention_prefill_kwargs = attention_kwargs["backend"].copy()
+        attention_prefill_kwargs["help"] = (
+            "Attention backend for the prefill role. Standard attention "
+            "routes whole batches: any batch containing prefill runs "
+            "entirely on this backend. MLA instead splits each batch and "
+            "runs its prefill portion on the MLA prefill backend selected "
+            "here (e.g. FLASH_ATTN, TRTLLM_RAGGED)."
         )
         attention_group.add_argument(
-            "--attention-decode-backend", **attention_kwargs["decode_backend"]
+            "--attention-prefill-backend", **attention_prefill_kwargs
+        )
+        attention_decode_kwargs = attention_kwargs["decode_backend"].copy()
+        attention_decode_kwargs["help"] = (
+            "Attention backend for the decode role. Standard attention "
+            "routes whole batches: pure-decode batches run entirely on this "
+            "backend. MLA instead splits each batch and runs its decode "
+            "portion on the MLA decode backend selected here (e.g. FLASHMLA)."
+        )
+        attention_group.add_argument(
+            "--attention-decode-backend", **attention_decode_kwargs
         )
 
         # Mamba arguments
@@ -2257,13 +2273,6 @@ class EngineArgs:
                 "attention_backend is mutually exclusive with "
                 "attention_prefill_backend and attention_decode_backend"
             )
-        if model_config.use_mla and (
-            self.attention_decode_backend is not None
-            or self.attention_config.decode_backend is not None
-        ):
-            raise ValueError(
-                "attention_decode_backend is only supported for non-MLA models"
-            )
 
         def apply_attention_override(
             arg_name: str,
@@ -2287,15 +2296,42 @@ class EngineArgs:
             apply_attention_override(
                 "attention_backend", self.attention_backend, "backend"
             )
-            apply_attention_override(
-                "attention_backend", self.attention_backend, "decode_backend"
-            )
+            # For MLA models, `backend` selects the MLA decode backend and
+            # prefill is delegated to the MLA prefill backend, so there is no
+            # decode_backend to set.
+            if not model_config.use_mla:
+                apply_attention_override(
+                    "attention_backend", self.attention_backend, "decode_backend"
+                )
         else:
-            apply_attention_override(
-                "attention_prefill_backend",
-                self.attention_prefill_backend,
-                "backend",
-            )
+            if model_config.use_mla:
+                # For MLA models the prefill role maps onto the separate MLA
+                # prefill backend; the decode role flows through
+                # decode_backend, which VllmConfig folds into `backend` (the
+                # MLA decode backend).
+                if self.attention_prefill_backend is not None:
+                    if attention_config.mla_prefill_backend is not None:
+                        raise ValueError(
+                            "attention_prefill_backend and "
+                            "attention_config.mla_prefill_backend are "
+                            "mutually exclusive"
+                        )
+                    prefill_backend = self.attention_prefill_backend
+                    prefill_backend_name = (
+                        prefill_backend
+                        if isinstance(prefill_backend, str)
+                        else prefill_backend.name
+                    )
+                    if prefill_backend_name.lower() != "auto":
+                        attention_config.mla_prefill_backend = MLAPrefillBackendEnum[
+                            prefill_backend_name.upper()
+                        ]
+            else:
+                apply_attention_override(
+                    "attention_prefill_backend",
+                    self.attention_prefill_backend,
+                    "backend",
+                )
             apply_attention_override(
                 "attention_decode_backend",
                 self.attention_decode_backend,

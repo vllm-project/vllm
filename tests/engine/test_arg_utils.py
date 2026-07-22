@@ -523,6 +523,51 @@ def test_attention_config():
 
 
 @pytest.mark.skip_global_cleanup
+def test_mla_attention_backend_role_arguments():
+    """On MLA models the role args map onto the MLA decode and prefill
+    backends instead of batch-level routing fields."""
+    from vllm.v1.attention.backends.mla.prefill.registry import (
+        MLAPrefillBackendEnum,
+    )
+    from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+    args = parser.parse_args(
+        [
+            "--model",
+            "deepseek-ai/DeepSeek-V2-Lite",
+            "--attention-prefill-backend",
+            "FLASH_ATTN",
+            "--attention-decode-backend",
+            "FLASHMLA",
+        ]
+    )
+    engine_args = EngineArgs.from_cli_args(args)
+    vllm_config = engine_args.create_engine_config()
+    attention_config = vllm_config.attention_config
+
+    assert attention_config.backend == AttentionBackendEnum.FLASHMLA
+    assert attention_config.mla_prefill_backend == MLAPrefillBackendEnum.FLASH_ATTN
+    assert attention_config.decode_backend is None
+
+    # The structured config field folds the same way
+    args = parser.parse_args(
+        [
+            "--model",
+            "deepseek-ai/DeepSeek-V2-Lite",
+            "--attention-config.decode_backend",
+            "FLASHMLA",
+        ]
+    )
+    engine_args = EngineArgs.from_cli_args(args)
+    vllm_config = engine_args.create_engine_config()
+    attention_config = vllm_config.attention_config
+
+    assert attention_config.backend == AttentionBackendEnum.FLASHMLA
+    assert attention_config.decode_backend is None
+
+
+@pytest.mark.skip_global_cleanup
 def test_speculative_attention_role_specific_backends():
     from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
