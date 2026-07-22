@@ -2257,6 +2257,13 @@ class EngineArgs:
                 "attention_backend is mutually exclusive with "
                 "attention_prefill_backend and attention_decode_backend"
             )
+        if model_config.use_mla and (
+            self.attention_decode_backend is not None
+            or self.attention_config.decode_backend is not None
+        ):
+            raise ValueError(
+                "attention_decode_backend is only supported for non-MLA models"
+            )
 
         def apply_attention_override(
             arg_name: str,

@@ -134,6 +134,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.scheduler_config = vllm_config.scheduler_config
         self.speculative_config = vllm_config.speculative_config
         self.observability_config = vllm_config.observability_config
+        self.has_distinct_decode_attn_backend = False
 
         self.device = device
         self.dtype = self.model_config.dtype
@@ -598,8 +599,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 skip_attn_for_dummy_run=skip_attn,
                 is_profile=is_profile,
                 attention_backend_variant=int(
-                    getattr(self, "has_distinct_decode_attn_backend", False)
-                    and uniform_decode
+                    self.has_distinct_decode_attn_backend and uniform_decode
                 ),
             )
         self.kv_connector.set_disabled(False)
@@ -1207,18 +1207,22 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         max_query_len = max(scheduler_output.num_scheduled_tokens.values())
         uniform_tok_count = get_uniform_token_count(num_reqs, num_toks, max_query_len)
         if attention_backend_variant is None:
-            req_indices = (
-                self.req_states.req_id_to_index[req_id]
-                for req_id in scheduler_output.num_scheduled_tokens
-            )
-            attention_backend_variant = int(
-                self.has_distinct_decode_attn_backend
-                and not any(
-                    self.req_states.num_computed_prefill_tokens[req_idx]
-                    < self.req_states.prefill_len.np[req_idx]
-                    for req_idx in req_indices
+            attention_backend_variant = 0
+            if self.has_distinct_decode_attn_backend:
+                req_indices = np.fromiter(
+                    map(
+                        self.req_states.req_id_to_index.get,
+                        scheduler_output.num_scheduled_tokens,
+                    ),
+                    dtype=np.int32,
+                    count=num_reqs,
                 )
-            )
+                attention_backend_variant = int(
+                    not np.any(
+                        self.req_states.num_computed_prefill_tokens[req_indices]
+                        < self.req_states.prefill_len.np[req_indices]
+                    )
+                )
         num_active_loras = 0
         if self.lora_config:
             req_ids = list(scheduler_output.num_scheduled_tokens.keys())

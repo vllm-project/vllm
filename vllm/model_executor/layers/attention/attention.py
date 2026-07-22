@@ -479,6 +479,27 @@ class Attention(nn.Module, AttentionLayerBase):
                         f"physical KV cache. Choose a decode backend with a "
                         f"matching KV layout."
                     )
+            required_layout = (
+                selected_decode_backend.get_required_kv_cache_layout()
+                or self.attn_backend.get_required_kv_cache_layout()
+            )
+            if required_layout is not None:
+                static_forward_context = (
+                    vllm_config.compilation_config.static_forward_context
+                )
+                for layer in static_forward_context.values():
+                    if not isinstance(layer, AttentionLayerBase):
+                        continue
+                    for backend in layer.get_attn_backend().get_backend_variants():
+                        existing_layout = backend.get_required_kv_cache_layout()
+                        if existing_layout not in (None, required_layout):
+                            set_kv_cache_layout(general_kv_layout)
+                            raise ValueError(
+                                "Attention backends across layers require "
+                                f"incompatible KV cache layouts: {existing_layout} "
+                                f"and {required_layout}."
+                            )
+                set_kv_cache_layout(required_layout)
             self.attn_backend = create_composite_attention_backend(
                 self.attn_backend, selected_decode_backend
             )

@@ -265,7 +265,10 @@ def create_composite_attention_backend(
             return updated
 
         def use_cascade_attention(self, *args, **kwargs):
-            return self.general_builder.use_cascade_attention(*args, **kwargs)
+            return all(
+                builder.use_cascade_attention(*args, **kwargs)
+                for builder in self.get_builder_variants()
+            )
 
         def get_builder_variants(self):
             return self.general_builder, self.decode_builder
@@ -904,6 +907,9 @@ def kv_layouts_compatible(
     kv_cache_dtype: str | None,
 ) -> bool:
     """Return whether two backends can safely share one physical KV cache."""
+    if general_backend is decode_backend:
+        return True
+
     if general_backend.is_mla() != decode_backend.is_mla():
         return False
 

@@ -200,6 +200,12 @@ class _HNDDecodeBackend(_HNDBackend):
         return "FLASHINFER"
 
 
+class _NHDDecodeBackend(_NHDBackend):
+    @staticmethod
+    def get_name() -> str:
+        return "FLASHINFER"
+
+
 def _layouts_compatible(decode_backend, block_size=16):
     return kv_layouts_compatible(
         _Backend,
@@ -244,6 +250,38 @@ def test_flexible_general_backend_adopts_decode_required_layout():
         set_kv_cache_layout(None)
 
 
+def test_layers_cannot_require_different_kv_layouts():
+    """One model cannot route layers through conflicting physical layouts."""
+    config = VllmConfig(device_config=DeviceConfig(device="cpu"))
+
+    set_kv_cache_layout("NHD")
+    try:
+        with (
+            set_current_vllm_config(config),
+            patch(
+                "vllm.model_executor.layers.attention.attention.get_attn_backend",
+                side_effect=[_HNDDecodeBackend, _NHDDecodeBackend],
+            ),
+        ):
+            Attention(
+                num_heads=8,
+                head_size=128,
+                scale=0.1,
+                prefix="layer.0",
+                attn_backend=_FlexibleGeneralBackend,
+            )
+            with pytest.raises(ValueError, match="across layers"):
+                Attention(
+                    num_heads=8,
+                    head_size=128,
+                    scale=0.1,
+                    prefix="layer.1",
+                    attn_backend=_FlexibleGeneralBackend,
+                )
+    finally:
+        set_kv_cache_layout(None)
+
+
 @pytest.mark.parametrize(
     "decode_backend",
     [
@@ -259,6 +297,17 @@ def test_layout_compatibility_rejects_unsafe_pairings(decode_backend):
     assert not kv_layouts_compatible(
         general_backend,
         decode_backend,
+        head_size=128,
+        block_size=16,
+        kv_cache_dtype=None,
+    )
+
+
+def test_identical_backend_is_layout_compatible():
+    """An identical backend does not need cross-backend safety checks."""
+    assert kv_layouts_compatible(
+        _WritesInForwardBackend,
+        _WritesInForwardBackend,
         head_size=128,
         block_size=16,
         kv_cache_dtype=None,
@@ -416,6 +465,17 @@ def test_mrv2_builds_metadata_with_the_routed_backend():
     assert general_metadata["layer"]._attention_backend_variant == 0
     assert decode_metadata["layer"].builder == "_DecodeBuilder"
     assert decode_metadata["layer"]._attention_backend_variant == 1
+
+
+def test_cascade_attention_requires_both_backends():
+    """The selected backend must support any cascade decision."""
+    group = _make_attention_group()
+    group.create_metadata_builders(None, torch.device("cpu"))
+    builder = group.get_metadata_builder()
+    builder.general_builder.use_cascade_attention = lambda *args, **kwargs: True
+    builder.decode_builder.use_cascade_attention = lambda *args, **kwargs: False
+
+    assert not builder.use_cascade_attention()
 
 
 def test_composite_backend_requires_is_prefilling():
