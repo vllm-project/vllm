@@ -122,11 +122,11 @@ class AttentionBackend(ABC):
     ) -> tuple[int, ...]:
         """
         Get the physical (memory layout) ordering of the kv cache dimensions.
-        e.g. if the KV cache shape is
-        [2, num_blocks, block_size, num_heads, head_size],
-        and get_kv_cache_stride_order returns (1, 3, 0, 2, 4) then the physical
+        Standard attention backends pack K and V into the content dim, giving
+        the logical shape [num_blocks, num_heads, block_size, 2 * head_size].
+        e.g. if get_kv_cache_stride_order returns (0, 2, 1, 3) then the physical
         ordering of dimensions is
-        [num_blocks, num_heads, 2, block_size, head_size].
+        [num_blocks, block_size, num_heads, 2 * head_size].
 
         If this function is unimplemented / raises NotImplementedError,
         the physical layout of the KV cache will match the logical shape.
@@ -135,9 +135,9 @@ class AttentionBackend(ABC):
             include_num_layers_dimension: if True, includes an additional
                 num_layers dimension, which is assumed to be prepended
                 to the logical KV cache shape.
-                With the above example, a return value (2, 4, 0, 1, 3, 5)
+                With the above example, a return value (1, 0, 3, 2, 4)
                 corresponds to
-                [num_blocks, num_heads, num_layers, 2, block_size, head_size].
+                [num_blocks, num_layers, block_size, num_heads, 2 * head_size].
 
                 If an additional dimension is NOT included in the returned
                 tuple, the physical layout will not include a layers dimension.
@@ -259,6 +259,10 @@ class AttentionBackend(ABC):
         return False
 
     @classmethod
+    def supports_sliding_window(cls) -> bool:
+        return False
+
+    @classmethod
     def supports_non_causal(cls) -> bool:
         """Check if backend supports non-causal (bidirectional) attention
         for decoder models.
@@ -276,6 +280,13 @@ class AttentionBackend(ABC):
     @classmethod
     def supports_kv_connector(cls) -> bool:
         return True
+
+    @classmethod
+    def supports_pcp(cls) -> bool:
+        try:
+            return cls.get_impl_cls().supports_pcp
+        except NotImplementedError:
+            return False
 
     @classmethod
     def supports_attn_type(cls, attn_type: str) -> bool:
@@ -319,9 +330,11 @@ class AttentionBackend(ABC):
         use_per_head_quant_scales: bool,
         device_capability: "DeviceCapability",
         attn_type: str,
+        has_sliding_window: bool = False,
         use_non_causal: bool = False,
         use_batch_invariant: bool = False,
         use_kv_connector: bool = False,
+        use_pcp: bool = False,
     ) -> list[str]:
         invalid_reasons = []
         if not cls.supports_head_size(head_size):
@@ -354,12 +367,16 @@ class AttentionBackend(ABC):
             invalid_reasons.append("compute capability not supported")
         if not cls.supports_attn_type(attn_type):
             invalid_reasons.append(f"attention type {attn_type} not supported")
+        if has_sliding_window and not cls.supports_sliding_window():
+            invalid_reasons.append("sliding window not supported")
         if use_non_causal and not cls.supports_non_causal():
             invalid_reasons.append("non-causal attention not supported")
         if use_batch_invariant and not cls.supports_batch_invariance():
             invalid_reasons.append("batch invariance not supported")
         if use_kv_connector and not cls.supports_kv_connector():
             invalid_reasons.append("KV connector not supported")
+        if use_pcp and not cls.supports_pcp():
+            invalid_reasons.append("PCP not supported")
         combination_reason = cls.supports_combination(
             head_size,
             dtype,
@@ -750,7 +767,9 @@ class AttentionMetadataBuilder(ABC, Generic[M]):
 class AttentionLayer(Protocol):
     _q_scale: torch.Tensor
     _k_scale: torch.Tensor
+    _k_scale_cpu: torch.Tensor
     _v_scale: torch.Tensor
+    _v_scale_cpu: torch.Tensor
     _q_scale_float: float
     _k_scale_float: float
     _v_scale_float: float
@@ -774,6 +793,10 @@ class AttentionImplBase(ABC, Generic[T]):
     method - subclasses define their own forward interfaces.
     """
 
+    # Whether this impl uses a sparse (top-k) attention path. Used by MLA to
+    # route between the dense-MHA prefill and sparse-MQA paths.
+    is_sparse: ClassVar[bool] = False
+
     # Required attributes that all impls should have
     num_heads: int
     head_size: int
@@ -796,6 +819,8 @@ class AttentionImplBase(ABC, Generic[T]):
 
     # Whether the attention impl supports Prefill Context Parallelism.
     supports_pcp: bool = False
+    # Whether the attention impl supports Decode Context Parallelism.
+    supports_dcp: bool = True
     # Whether the attention impl(or ops) supports MTP
     # when cp_kv_cache_interleave_size > 1
     supports_mtp_with_cp_non_trivial_interleave_size: bool = False
@@ -843,8 +868,8 @@ class AttentionImplBase(ABC, Generic[T]):
         except AssertionError:
             self.pcp_world_size = 1
             self.pcp_rank = 0
-        self.total_cp_world_size = self.pcp_world_size * self.dcp_world_size
-        self.total_cp_rank = self.pcp_rank * self.dcp_world_size + self.dcp_rank
+        self.total_cp_world_size = self.dcp_world_size
+        self.total_cp_rank = self.dcp_rank
 
         self.need_to_return_lse_for_decode = (
             self.dcp_world_size > 1 and self.can_return_lse_for_decode
@@ -910,6 +935,14 @@ class AttentionImpl(AttentionImplBase[T], Generic[T]):
         """
         return False
 
+    def fused_qk_norm_rope_kvcache_supported(self):
+        """
+        Does this attention implementation support fused QKNorm+RoPE+KVCache fusion.
+        This is used by the QkNormRopeKvCachePattern to only fuse the QKNorm ops
+        with the RoPE ops and the KV cache update for implementations that support it.
+        """
+        return False
+
     def fused_rope_kvcache_supported(self):
         """
         Does this attention implementation support RoPE+KVCache fusion.
@@ -917,6 +950,29 @@ class AttentionImpl(AttentionImplBase[T], Generic[T]):
         with the KV cache update for implementations that support it.
         """
         return False
+
+    def do_qk_norm_rope_kvcache_update(
+        self,
+        layer: AttentionLayer,
+        qkv: torch.Tensor,
+        q_out: torch.Tensor,
+        k_out: torch.Tensor,
+        positions: torch.Tensor,
+        q_weight: torch.Tensor,
+        k_weight: torch.Tensor,
+        rms_norm_eps: float,
+        cos_sin_cache: torch.Tensor,
+        is_neox: bool,
+        kv_cache: torch.Tensor,
+        layer_slot_mapping: torch.Tensor,
+    ):
+        """
+        If `fused_qk_norm_rope_kvcache_supported` returns True, this method
+        will be called by the fused custom op. Applies QK-norm + RoPE and
+        writes K/V to the KV cache. Results are written to the pre-allocated
+        q_out and k_out tensors; V is split from QKV at the graph level.
+        """
+        raise NotImplementedError
 
     def do_rope_and_kv_cache_update(
         self,
@@ -940,6 +996,8 @@ class AttentionImpl(AttentionImplBase[T], Generic[T]):
 
 class MLAAttentionImpl(AttentionImplBase[T], Generic[T]):
     """MLA attention implementation with forward_mqa and forward_mha methods."""
+
+    supports_pcp: bool = True
 
     @abstractmethod
     def __init__(
@@ -967,7 +1025,6 @@ class MLAAttentionImpl(AttentionImplBase[T], Generic[T]):
     ) -> None:
         raise NotImplementedError
 
-    @abstractmethod
     def forward_mha(
         self,
         q: torch.Tensor,
@@ -1005,86 +1062,6 @@ class MLAAttentionImpl(AttentionImplBase[T], Generic[T]):
             kFp8Dynamic128Sym,
             kFp8Dynamic64Sym,
         )
-
-    def do_kv_cache_update(
-        self,
-        kv_c_normed: torch.Tensor,
-        k_pe: torch.Tensor,
-        kv_cache: torch.Tensor,
-        slot_mapping: torch.Tensor,
-        kv_cache_dtype: str,
-        k_scale: torch.Tensor,
-    ) -> None:
-        if kv_cache.numel() == 0:
-            return
-        from vllm import _custom_ops as ops
-
-        ops.concat_and_cache_mla(
-            kv_c_normed,
-            k_pe.squeeze(1),
-            kv_cache,
-            slot_mapping.flatten(),
-            kv_cache_dtype=kv_cache_dtype,
-            scale=k_scale,
-        )
-
-
-class SparseMLAAttentionImpl(AttentionImplBase[T], Generic[T]):
-    """Sparse MLA attention implementation with only forward_mqa method.
-
-    Sparse MLA implementations only support decode (MQA-style) attention.
-    They do not support prefill (MHA-style) attention.
-    """
-
-    def fused_output_quant_supported(self, quant_key: "QuantKey"):
-        """
-        Does this attention implementation support fused output quantization.
-        Since MLA quantization is done manually in forward_impl (common code),
-        all MLA backends support it by default.
-        """
-        return quant_key in (
-            kFp8StaticTensorSym,
-            kNvfp4Dynamic,
-            kFp8Dynamic128Sym,
-            kFp8Dynamic64Sym,
-        )
-
-    @abstractmethod
-    def __init__(
-        self,
-        num_heads: int,
-        head_size: int,
-        scale: float,
-        num_kv_heads: int,
-        alibi_slopes: list[float] | None,
-        sliding_window: int | None,
-        kv_cache_dtype: str,
-        logits_soft_cap: float | None,
-        attn_type: str,
-        kv_sharing_target_layer_name: str | None,
-        # MLA Specific Arguments
-        q_lora_rank: int | None,
-        kv_lora_rank: int,
-        qk_nope_head_dim: int,
-        qk_rope_head_dim: int,
-        qk_head_dim: int,
-        v_head_dim: int,
-        kv_b_proj: "ColumnParallelLinear",
-        indexer: object | None = None,
-        q_pad_num_heads: int | None = None,
-    ) -> None:
-        raise NotImplementedError
-
-    @abstractmethod
-    def forward_mqa(
-        self,
-        q: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
-        kv_c_and_k_pe_cache: torch.Tensor,
-        attn_metadata: T,
-        layer: AttentionLayer,
-    ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        """MQA-style decode forward pass."""
-        raise NotImplementedError
 
     def do_kv_cache_update(
         self,
