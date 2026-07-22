@@ -460,6 +460,19 @@ steps:
   commands:
   - pytest -v -s tools/test_docker_build_metadata_args.py
 
+- label: HF Hub Request Monitor
+  timeout_in_minutes: 30
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
+  agent_pool: mi250_1
+  no_gpu: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - .buildkite/scripts/hardware_ci/run-amd-test.sh
+  - tests/tools/test_hf_hub_monitor.py
+  - tests/vllm_test_utils/vllm_test_utils/hf_hub.py
+  commands:
+  - pytest -v -s tools/test_hf_hub_monitor.py
+
 #########################################################################################################################################
 #                                                                                                                                       #
 #                                                         MI300 (gfx942) tests                                                          #
