@@ -25,6 +25,10 @@ dp_ep_configs=(
 hybrid_ssm_configs=(
   "VLLM_SSM_CONV_STATE_LAYOUT=DS GPU_MEMORY_UTILIZATION=0.8 MODEL_NAMES=ibm-granite/granite-4.0-h-tiny VLLM_SERVE_EXTRA_ARGS=--max-model-len,8192,--trust-remote-code"
   "VLLM_SSM_CONV_STATE_LAYOUT=DS PREFILLER_TP_SIZE=2 DECODER_TP_SIZE=2 GPU_MEMORY_UTILIZATION=0.8 MODEL_NAMES=ibm-granite/granite-4.0-h-tiny VLLM_SERVE_EXTRA_ARGS=--max-model-len,8192,--trust-remote-code"
+  # P_TP > D_TP heterogeneous TP for a hybrid attention+SSM (Mamba2) model.
+  # Exercises the multi-source-rank read/split path in the NIXL pull worker
+  # (see PR #49297).
+  "VLLM_SSM_CONV_STATE_LAYOUT=DS PREFILLER_TP_SIZE=2 DECODER_TP_SIZE=1 GPU_MEMORY_UTILIZATION=0.8 MODEL_NAMES=ibm-granite/granite-4.0-h-tiny VLLM_SERVE_EXTRA_ARGS=--max-model-len,8192,--trust-remote-code"
   # GDN (Qwen3.5)
   "VLLM_SSM_CONV_STATE_LAYOUT=DS GPU_MEMORY_UTILIZATION=0.8 MODEL_NAMES=Qwen/Qwen3.5-0.8B"
   "VLLM_SSM_CONV_STATE_LAYOUT=DS PREFILLER_TP_SIZE=1 DECODER_TP_SIZE=2 GPU_MEMORY_UTILIZATION=0.8 MODEL_NAMES=Qwen/Qwen3.5-0.8B"
