@@ -104,6 +104,21 @@ def _identity(t: torch.Tensor) -> SlotIdentity:
     )
 
 
+def _canonical_device(device) -> torch.device:
+    """Resolve an unindexed accelerator device to its concrete index.
+
+    Callers commonly pass the config-level ``"cuda"`` while the tensor a
+    slot holds reports ``cuda:0``; comparing them literally makes a
+    re-acquire after reload fail spuriously (observed live: the mismatch
+    aborted the first post-reload forward mid-capture).
+    """
+    device = torch.device(device)
+    if device.type == "cuda" and device.index is None and \
+            torch.cuda.is_available():
+        return torch.device("cuda", torch.cuda.current_device())
+    return device
+
+
 class ReloadArena:
     """Stable storage slots owned by one layer.
 
@@ -130,7 +145,7 @@ class ReloadArena:
                     device: torch.device) -> None:
         if (tuple(existing.shape) != tuple(shape)
                 or existing.dtype != dtype
-                or existing.device != torch.device(device)):
+                or existing.device != _canonical_device(device)):
             raise ValueError(
                 f"ReloadArena[{self._owner_name}] slot '{slot}' re-acquired "
                 f"with an incompatible spec: have "
@@ -156,7 +171,7 @@ class ReloadArena:
         never silently reallocates.
         """
         shape = tuple(shape)
-        device = torch.device(device)
+        device = _canonical_device(device)
         existing = self._slots.get(slot)
         if existing is not None:
             self._check_spec(slot, existing, shape, dtype, device)

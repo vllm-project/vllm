@@ -57,6 +57,18 @@ class TestGetOrAlloc:
         with pytest.raises(ValueError, match="incompatible spec"):
             arena.get_or_alloc("ws", (8, ), torch.int32, "cpu")
 
+    @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs cuda")
+    def test_unindexed_cuda_device_matches_indexed(self):
+        # observed live: config-level "cuda" vs slot tensor's "cuda:0"
+        # must not be treated as a respecification -- the mismatch aborted
+        # the first post-reload forward
+        arena = ReloadArena("layer")
+        a = arena.get_or_alloc("s", (4, ), torch.int32, "cuda")
+        b = arena.get_or_alloc("s", (4, ), torch.int32, "cuda:0")
+        c = arena.get_or_alloc("s", (4, ), torch.int32,
+                               torch.device("cuda"))
+        assert a.data_ptr() == b.data_ptr() == c.data_ptr()
+
 
 class TestPut:
 
