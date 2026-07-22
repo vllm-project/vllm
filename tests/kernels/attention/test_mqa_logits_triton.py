@@ -121,10 +121,17 @@ def _fp8_paged_mqa_logits_ref(
                 float("-inf"),
             )
             s = (torch.relu(s) * weight_slice[..., None]).sum(dim=0)
+            block_start = block_rk * block_size
+            block_end = min((block_rk + 1) * block_size, max_model_len)
+            block_width = block_end - block_start
             logits[
                 i * next_n : (i + 1) * next_n,
-                block_rk * block_size : (block_rk + 1) * block_size,
-            ] = torch.where(k_offsets[None, :] <= q_offsets[:, None], s, float("-inf"))
+                block_start:block_end,
+            ] = torch.where(
+                k_offsets[None, :block_width] <= q_offsets[:, None],
+                s[:, :block_width],
+                float("-inf"),
+            )
     return logits
 
 
@@ -242,6 +249,7 @@ def test_fp8_mqa_logits_triton_clean_logits_false_overwrites_masked():
         (1, 1, 512),
         (2, 1, 256),
         (1, 4, 512),  # speculative decoding with next_n=4
+        (2, 4, 130),  # active max length is not block-aligned
     ],
 )
 @pytest.mark.parametrize("num_heads", [16, 32])
@@ -289,7 +297,7 @@ def test_fp8_paged_mqa_logits_triton_matches_torch(
         device=device,
     )
 
-    max_model_len = max_blocks * block_size
+    max_model_len = context_len
 
     out_torch = _fp8_paged_mqa_logits_ref(
         q_fp8, kv_packed, weights, context_lens, block_tables, max_model_len
