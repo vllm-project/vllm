@@ -203,6 +203,7 @@ class KVCacheLayout(Enum):
     LBHNC = (0, 1, 2, 3, 4)  # [L, B, H, N, C] (identity)
     LBNHC = (0, 1, 3, 2, 4)  # [L, B, N, H, C]
     BLHNC = (1, 0, 2, 3, 4)  # [B, L, H, N, C]
+    BLNHC = (1, 0, 3, 2, 4)  # [B, L, N, H, C]
     BHLNC = (1, 2, 0, 3, 4)  # [B, H, L, N, C]
 
     @property

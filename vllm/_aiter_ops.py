@@ -2541,10 +2541,9 @@ class rocm_aiter_ops:
     ) -> None:
         """Run the fused QK-norm+RoPE+KV-cache op on already-split k/v caches.
 
-        Shared by the AITER FA and unified-attention impls. The caller splits
-        kv_cache, since the unbind dim depends on the layout (e.g. the unified
-        encoder-decoder path is K/V-first), and passes use_shuffle_layout
-        (unified reads NHD and must pass False).
+        Shared by the AITER FA and unified-attention impls. The caller converts
+        the standardized cache view to NHD and splits its packed K/V content,
+        then passes use_shuffle_layout (unified reads NHD and must pass False).
         """
         if kv_cache_dtype.startswith("fp8"):
             key_cache = key_cache.view(current_platform.fp8_dtype())

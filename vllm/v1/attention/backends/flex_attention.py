@@ -101,6 +101,12 @@ class FlexAttentionBackend(AttentionBackend):
         return "FLEX_ATTENTION"
 
     @classmethod
+    def get_required_kv_cache_layout(cls) -> str | None:
+        if current_platform.is_rocm():
+            return "LBNHC"
+        return "BLNHC"
+
+    @classmethod
     def supports_sliding_window(cls) -> bool:
         return True
 

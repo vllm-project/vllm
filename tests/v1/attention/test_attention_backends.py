@@ -42,7 +42,6 @@ BACKENDS_TO_TEST = [
     AttentionBackendEnum.FLASHINFER,
     AttentionBackendEnum.FLEX_ATTENTION,
     AttentionBackendEnum.TRITON_ATTN,
-    "FLEX_ATTENTION_SLOW",
 ]
 
 DEVICE_TYPE = current_platform.device_type
@@ -242,18 +241,14 @@ def run_attention_backend(
 ) -> torch.Tensor:
     """Run attention computation using the specified backend's AttentionImpl."""
 
-    # Handle special case for FLEX_ATTENTION_SLOW
-    actual_backend = backend
+    use_direct_block_mask = not current_platform.is_rocm() and is_torch_equal_or_newer(
+        "2.9.0.dev0"
+    )
 
-    use_direct_block_mask = is_torch_equal_or_newer("2.9.0.dev0")
-    if backend == "FLEX_ATTENTION_SLOW":
-        actual_backend = AttentionBackendEnum.FLEX_ATTENTION
-        use_direct_block_mask = False
-
-    builder_cls, impl_cls = try_get_attention_backend(actual_backend)
+    builder_cls, impl_cls = try_get_attention_backend(backend)
 
     # Mock flashinfer's get_per_layer_parameters if needed
-    if actual_backend == AttentionBackendEnum.FLASHINFER:
+    if backend == AttentionBackendEnum.FLASHINFER:
         import unittest.mock
 
         from vllm.v1.attention.backends.utils import PerLayerParameters
@@ -282,7 +277,7 @@ def run_attention_backend(
     else:
         # Build metadata
         builder = builder_cls(kv_cache_spec, layer_names, vllm_config, device)
-        if actual_backend == AttentionBackendEnum.FLEX_ATTENTION:
+        if backend == AttentionBackendEnum.FLEX_ATTENTION:
             builder.direct_build = use_direct_block_mask
         attn_metadata = builder.build(
             common_prefix_len=0,
@@ -319,7 +314,7 @@ def run_attention_backend(
     # Run forward pass
     # NOTE: The query, key, and value are already shaped correctly
     # in the calling test function.
-    if not try_backend_includes_kv_cache_update(actual_backend):
+    if not try_backend_includes_kv_cache_update(backend):
         impl.do_kv_cache_update(
             mock_layer, key, value, kv_cache, attn_metadata.slot_mapping
         )
@@ -333,7 +328,7 @@ def run_attention_backend(
 def _test_backend_correctness(
     batch_spec: BatchSpec,
     model: str,
-    backend_to_test: list[AttentionBackendEnum | str],
+    backend_to_test: list[AttentionBackendEnum],
     mask_mod,
     *,
     causal: bool = True,
@@ -494,7 +489,8 @@ def _test_backend_correctness(
     common_attn_metadata.causal = causal
 
     # 3. Simulate Paged KV Cache and a realistic slot_mapping
-    layout = resolve_kv_cache_layout()
+    attn_backends = tuple(backend.get_class() for backend in backend_to_test)
+    layout = resolve_kv_cache_layout(attn_backends)
     kv_cache = create_and_prepopulate_kv_cache(
         k_contexts=k_contexts,
         v_contexts=v_contexts,
@@ -514,18 +510,10 @@ def _test_backend_correctness(
     # Note: flex_attention has known Triton kernel compatibility issues
     # with test infrastructures
     for backend_name in backend_to_test:
-        # Resolve backend class for both enum and string names.
-        actual_backend = backend_name
-        if backend_name == "FLEX_ATTENTION_SLOW":
-            actual_backend = AttentionBackendEnum.FLEX_ATTENTION
-        if hasattr(actual_backend, "get_class"):
-            backend_cls = actual_backend.get_class()
-        else:
-            backend_cls = None
+        backend_cls = backend_name.get_class()
 
         if is_quantized_kv_cache(kv_cache_dtype) and (
-            backend_cls is None
-            or not backend_cls.supports_kv_cache_dtype(kv_cache_dtype)
+            not backend_cls.supports_kv_cache_dtype(kv_cache_dtype)
         ):
             continue
 
@@ -840,14 +828,12 @@ if current_platform.is_rocm():
     SLIDING_WINDOW_BACKENDS_TO_TEST = [
         AttentionBackendEnum.FLEX_ATTENTION,
         AttentionBackendEnum.TRITON_ATTN,
-        "FLEX_ATTENTION_SLOW",
     ]
 else:
     SLIDING_WINDOW_BACKENDS_TO_TEST = [
         AttentionBackendEnum.FLASH_ATTN,
         AttentionBackendEnum.FLEX_ATTENTION,
         AttentionBackendEnum.TRITON_ATTN,
-        "FLEX_ATTENTION_SLOW",
     ]
 
 
@@ -969,7 +955,6 @@ def test_sliding_window_encoder_backend_correctness(
 NON_CAUSAL_BACKENDS_TO_TEST = [
     AttentionBackendEnum.FLASH_ATTN,
     AttentionBackendEnum.FLEX_ATTENTION,
-    "FLEX_ATTENTION_SLOW",
 ]
 
 if current_platform.is_rocm():

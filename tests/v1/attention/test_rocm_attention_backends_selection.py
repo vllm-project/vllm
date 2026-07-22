@@ -54,7 +54,7 @@ def mock_on_mi3xx():
         (
             {},
             None,
-            AttentionBackendEnum.ROCM_ATTN.get_path(),
+            AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN.get_path(),
         ),
         # Test Case 2: Explicit TRITON_ATTN backend
         (
@@ -66,7 +66,7 @@ def mock_on_mi3xx():
         (
             {},
             "ROCM_ATTN",
-            AttentionBackendEnum.ROCM_ATTN.get_path(),
+            None,
         ),
         # Test Case 4: Explicit ROCM_AITER_FA backend
         (
@@ -84,7 +84,7 @@ def mock_on_mi3xx():
         (
             {"VLLM_ROCM_USE_AITER": "1"},
             None,
-            AttentionBackendEnum.ROCM_ATTN.get_path(),
+            AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN.get_path(),
         ),
         # Test Case 7: VLLM_ROCM_USE_AITER=1 + explicit TRITON_ATTN
         (
@@ -96,13 +96,13 @@ def mock_on_mi3xx():
         (
             {"VLLM_ROCM_USE_AITER": "1", "VLLM_ROCM_USE_AITER_MHA": "0"},
             None,
-            AttentionBackendEnum.ROCM_ATTN.get_path(),
+            AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN.get_path(),
         ),
         # Test Case 9: VLLM_ROCM_USE_AITER=1 + explicit ROCM_ATTN
         (
             {"VLLM_ROCM_USE_AITER": "1"},
             "ROCM_ATTN",
-            AttentionBackendEnum.ROCM_ATTN.get_path(),
+            None,
         ),
     ],
 )
@@ -145,6 +145,16 @@ def test_standard_attention_backend_selection(
         has_sink=False,
         use_sparse=False,
     )
+
+    if expected_backend_path is None:
+        with pytest.raises(
+            ValueError, match="does not support standardized packed KV caches"
+        ):
+            RocmPlatform.get_attn_backend_cls(
+                selected_backend=backend_enum,
+                attn_selector_config=attn_selector_config,
+            )
+        return
 
     backend_path = RocmPlatform.get_attn_backend_cls(
         selected_backend=backend_enum, attn_selector_config=attn_selector_config

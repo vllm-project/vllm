@@ -21,7 +21,7 @@ def test_get_kv_connector_cache_layout_without_kv_connector():
     with set_current_vllm_config(vllm_config):
         # Test with default settings
         layout = get_kv_connector_cache_layout()
-        assert layout == "LBNHC"
+        assert layout is None
 
 
 def test_get_kv_connector_cache_layout_with_lmcache_connector():
@@ -35,7 +35,7 @@ def test_get_kv_connector_cache_layout_with_lmcache_connector():
     with set_current_vllm_config(vllm_config):
         # Test with default settings
         layout = get_kv_connector_cache_layout()
-        assert layout == "LBNHC"
+        assert layout is None
 
 
 def test_get_kv_connector_cache_layout_with_nixl_connector():
