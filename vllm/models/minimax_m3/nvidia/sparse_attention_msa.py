@@ -78,7 +78,7 @@ class MiniMaxM3SparseMSAImpl(MiniMaxM3SparseImpl):
         k_scale = getattr(layer, "_k_scale", None) if self.use_fp8_kv else None
         v_scale = getattr(layer, "_v_scale", None) if self.use_fp8_kv else None
 
-        # Decode [:nd]: Triton by default, guarded FlashInfer for q-length one.
+        # Decode [:nd]: Triton by default, guarded FlashInfer when compatible.
         if main_md.num_decodes > 0:
             d = main_md.decode
             assert d is not None
