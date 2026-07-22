@@ -13,6 +13,15 @@
 
 #include <stdexcept>
 
+namespace {
+
+inline int getSMVersion() {
+  auto* props = get_device_prop();
+  return props->major * 10 + props->minor;
+}
+
+}  // namespace
+
 static constexpr int SKINNY_MAX_TOKENS = 32;
 
 // Supported (N, K) pairs (must match the instantiations in
@@ -107,6 +116,9 @@ void bf16_skinny_gemm(
   STD_TORCH_CHECK(output.dim() == 2 && mat_a.dim() == 2 && mat_b.dim() == 2);
   STD_TORCH_CHECK(output.is_cuda() && mat_a.is_cuda() && mat_b.is_cuda(),
                   "bf16_skinny_gemm: all tensors must be CUDA tensors");
+  STD_TORCH_CHECK(output.get_device_index() == mat_a.get_device_index() &&
+                      output.get_device_index() == mat_b.get_device_index(),
+                  "bf16_skinny_gemm: all tensors must be on the same device");
   STD_TORCH_CHECK(mat_a.is_contiguous() && mat_b.is_contiguous(),
                   "bf16_skinny_gemm: inputs must be contiguous");
   // Output may be a column-slice view of a wider padded buffer: unit column
@@ -125,15 +137,24 @@ void bf16_skinny_gemm(
   STD_TORCH_CHECK(bf16_skinny_gemm_supported(n, k),
                   "bf16_skinny_gemm: unsupported (N, K) pair");
   const int64_t out_stride = output.stride(0);
-  STD_TORCH_CHECK(num_tokens == 1 || out_stride >= n,
+  STD_TORCH_CHECK(num_tokens <= 1 || out_stride >= n,
                   "bf16_skinny_gemm: output rows overlap");
-  STD_TORCH_CHECK(num_tokens >= 1 && num_tokens <= SKINNY_MAX_TOKENS,
-                  "bf16_skinny_gemm: num_tokens must be in [1, 32]");
+  STD_TORCH_CHECK(num_tokens >= 0 && num_tokens <= SKINNY_MAX_TOKENS,
+                  "bf16_skinny_gemm: num_tokens must be in [0, 32]");
   STD_TORCH_CHECK(
       mat_a.scalar_type() == torch::headeronly::ScalarType::BFloat16 &&
           mat_b.scalar_type() == torch::headeronly::ScalarType::BFloat16 &&
           output.scalar_type() == torch::headeronly::ScalarType::BFloat16,
       "bf16_skinny_gemm: all tensors must be bfloat16");
+
+  // Empty batch (e.g. an empty rank at a DP/PP boundary): nothing to compute.
+  if (num_tokens == 0) {
+    return;
+  }
+
+  const torch::stable::accelerator::DeviceGuard device_guard(
+      mat_a.get_device_index());
+  STD_TORCH_CHECK(getSMVersion() >= 90, "bf16_skinny_gemm: requires SM90+");
 
   auto stream = get_current_cuda_stream(mat_a.get_device_index());
   dispatchBf16SkinnyGemm(
