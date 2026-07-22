@@ -25,7 +25,6 @@ from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.model_loader import DefaultModelLoader
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
@@ -59,7 +58,11 @@ from .utils import (
     init_vllm_registered_model,
     maybe_prefix,
 )
-from .whisper import WhisperEncoder, WhisperEncoderLayer
+from .whisper import (
+    WhisperEncoder,
+    WhisperEncoderLayer,
+    _create_fake_bias_for_k_proj,
+)
 
 _AUDIO_PLACEHOLDER_OVERRIDE = "<|audio|>"
 _MAX_ENCODER_BATCH_SIZE = 16
@@ -353,64 +356,25 @@ def _build_chunk_attn_metadata(
     }
 
 
+# Maps HF whisper encoder layer names to vLLM's fused qkv_proj and nested
+# mlp; `_create_fake_bias_for_k_proj` supplies the fused bias' k-slice
+# (HF whisper k_proj has no bias).
+_WHISPER_ENCODER_MAPPER = WeightsMapper(
+    orig_to_new_substr={".fc1.": ".mlp.fc1.", ".fc2.": ".mlp.fc2."},
+    orig_to_new_stacked={
+        ".self_attn.q_proj": (".self_attn.qkv_proj", "q"),
+        ".self_attn.k_proj": (".self_attn.qkv_proj", "k"),
+        ".self_attn.v_proj": (".self_attn.qkv_proj", "v"),
+    },
+)
+
+
 def _load_whisper_layer_weights(
     module: nn.Module, weights: Iterable[tuple[str, torch.Tensor]]
 ) -> set[str]:
-    """Weight loader for modules containing `WhisperEncoderLayer`s.
-
-    Handles fusing HF's separate q/k/v projections into `qkv_proj`,
-    zero-initializes the fused bias' k-slice (HF whisper k_proj has no bias)
-    and renames HF's flat `fc1`/`fc2` to the nested `mlp.fc1`/`mlp.fc2`.
-    Unknown names are skipped to tolerate unused checkpoint weights (e.g. the
-    whisper decoder when loading the tower from a full whisper checkpoint).
-    """
-    stacked_params_mapping = [
-        # (param_name, shard_name, shard_id)
-        (".self_attn.qkv_proj", ".self_attn.q_proj", "q"),
-        (".self_attn.qkv_proj", ".self_attn.k_proj", "k"),
-        (".self_attn.qkv_proj", ".self_attn.v_proj", "v"),
-    ]
-    params_mapping = [
-        # (param_name, weight_name)
-        (".mlp.fc1", ".fc1"),
-        (".mlp.fc2", ".fc2"),
-    ]
-    params_dict = dict(module.named_parameters())
-    loaded_params: set[str] = set()
-
-    def _with_k_proj_bias(
-        weights: Iterable[tuple[str, torch.Tensor]],
-    ) -> Iterable[tuple[str, torch.Tensor]]:
-        for name, weight in weights:
-            yield name, weight
-            if name.endswith(".self_attn.k_proj.weight"):
-                yield (
-                    name.replace(".weight", ".bias"),
-                    torch.zeros(weight.size(0), dtype=weight.dtype),
-                )
-
-    for name, loaded_weight in _with_k_proj_bias(weights):
-        for param_name, weight_name, shard_id in stacked_params_mapping:
-            if weight_name not in name:
-                continue
-            name = name.replace(weight_name, param_name)
-            if name in params_dict:
-                param = params_dict[name]
-                param.weight_loader(param, loaded_weight, shard_id)
-                loaded_params.add(name)
-            break
-        else:
-            for param_name, weight_name in params_mapping:
-                if weight_name in name:
-                    name = name.replace(weight_name, param_name)
-                    break
-            if name not in params_dict:
-                continue
-            param = params_dict[name]
-            weight_loader = getattr(param, "weight_loader", default_weight_loader)
-            weight_loader(param, loaded_weight)
-            loaded_params.add(name)
-    return loaded_params
+    weights = _create_fake_bias_for_k_proj(weights, ".self_attn.k_proj.weight")
+    loader = AutoWeightsLoader(module)
+    return loader.load_weights(weights, mapper=_WHISPER_ENCODER_MAPPER)
 
 
 class UltravoxFeedForwardProjector(nn.Module):
@@ -637,7 +601,13 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
     }
 
     hf_to_vllm_mapper = WeightsMapper(
-        orig_to_new_prefix={"audio_tower.model.encoder.": "audio_tower."}
+        orig_to_new_prefix={
+            "audio_tower.model.encoder.": "audio_tower.",
+            # A whisper checkpoint loaded via `audio_model_id` also carries
+            # decoder and LM-head weights the tower does not use.
+            "audio_tower.model.": None,
+            "audio_tower.proj_out.": None,
+        }
     )
 
     @classmethod
@@ -748,9 +718,10 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
         return num_chunks * self.config.audio_config.max_source_positions
 
     def get_num_mm_connector_tokens(self, num_encoder_tokens: int) -> int:
-        # The connector runs on the frame-stacked tower output:
-        # ceil(max_source_positions / stack_factor) tokens per chunk, before
-        # the output is trimmed to the valid placeholder count.
+        # The connector runs on the frame-stacked tower output. Stacking pads
+        # each chunk to a multiple of `stack_factor`, so this is
+        # ceil(max_source_positions / stack_factor) tokens per chunk (188 for
+        # whisper's 1500), not `num_encoder_tokens // stack_factor` (187).
         max_source_positions = self.config.audio_config.max_source_positions
         num_chunks = num_encoder_tokens // max_source_positions
         return num_chunks * self._get_max_tokens_per_chunk()
@@ -935,7 +906,7 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
         return self.language_model.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self, ignore_unexpected_prefixes=["audio_tower."])
+        loader = AutoWeightsLoader(self)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
