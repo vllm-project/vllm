@@ -70,6 +70,7 @@ run_tests_for_model() {
   --port $PREFILL_PORT \
   --enforce-eager \
   --gpu-memory-utilization 0.2 \
+  --max-model-len 8192 \
   --kv-transfer-config '$KV_CONFIG'"
 
   FULL_CMD="$BASE_CMD"
@@ -84,6 +85,7 @@ run_tests_for_model() {
   --port $DECODE_PORT \
   --enforce-eager \
   --gpu-memory-utilization 0.2 \
+  --max-model-len 8192 \
   --kv-transfer-config '$KV_CONFIG'"
 
   FULL_CMD="$BASE_CMD"
