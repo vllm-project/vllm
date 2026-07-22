@@ -40,6 +40,7 @@ impl RendererSelection {
 
     /// Resolve the renderer selection using the given model type string, if
     /// it's `Auto`.
+    #[must_use]
     pub fn resolve(self, model_type: &str) -> Self {
         match self {
             Self::Auto => match model_type {

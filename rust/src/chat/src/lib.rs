@@ -127,18 +127,21 @@ impl ChatLlm {
     }
 
     /// Set tool-call parser selection.
+    #[must_use]
     pub fn with_tool_call_parser(mut self, selection: ParserSelection) -> Self {
         self.tool_call_parser = selection;
         self
     }
 
     /// Set reasoning parser selection.
+    #[must_use]
     pub fn with_reasoning_parser(mut self, selection: ParserSelection) -> Self {
         self.reasoning_parser = selection;
         self
     }
 
     /// Override the effective model dtype used for multimodal tensor encoding.
+    #[must_use]
     pub fn with_model_dtype(mut self, model_dtype: ModelDtype) -> Self {
         self.model_dtype = model_dtype;
         self

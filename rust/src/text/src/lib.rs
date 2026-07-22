@@ -71,6 +71,7 @@ impl TextLlm {
     }
 
     /// Override the maximum accepted logprobs count.
+    #[must_use]
     pub fn with_max_logprobs(mut self, max_logprobs: Option<i32>) -> Self {
         if let Some(max_logprobs) = max_logprobs {
             self.max_logprobs = max_logprobs;

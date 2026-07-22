@@ -85,30 +85,35 @@ impl AppState {
     }
 
     /// Set HTTP/API-server behavior switches.
+    #[must_use]
     pub fn with_api_server_options(mut self, options: ApiServerOptions) -> Self {
         self.api_server_options = options;
         self
     }
 
     /// Set the CORS settings applied to every HTTP response.
+    #[must_use]
     pub fn with_cors(mut self, cors: CorsConfig) -> Self {
         self.cors = cors;
         self
     }
 
     /// Set the backend model path reported as `root` for base-model cards.
+    #[must_use]
     pub fn with_model_path(mut self, model_path: String) -> Self {
         self.model_path = Some(model_path);
         self
     }
 
     /// Set the profiler mode that enables `/start_profile` and `/stop_profile`.
+    #[must_use]
     pub fn with_profiler(mut self, profiler: Option<String>) -> Self {
         self.profiler = profiler;
         self
     }
 
     /// Attach the runtime server information snapshot used by `/server_info`.
+    #[must_use]
     pub(crate) fn with_server_info(mut self, server_info: ServerInfoSnapshot) -> Self {
         self.server_info = Some(server_info);
         self
@@ -123,6 +128,7 @@ impl AppState {
     }
 
     /// Configure API keys accepted by guarded HTTP routes.
+    #[must_use]
     pub fn with_api_keys(mut self, api_keys: Vec<String>) -> Self {
         self.api_key_hashes = api_keys
             .into_iter()

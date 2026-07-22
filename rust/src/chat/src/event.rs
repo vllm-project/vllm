@@ -60,6 +60,7 @@ impl AssistantContentBlock {
 
     /// Return a copy of this block with leading and trailing whitespace trimmed from all text
     /// fields and tool call arguments, or `None` if the resulting text would be empty.
+    #[must_use]
     pub fn trim(mut self) -> Option<Self> {
         match &mut self {
             Self::Text { text } | Self::Reasoning { text } => {
@@ -145,6 +146,7 @@ impl AssistantMessage {
 
     /// Return a copy of this message with leading and trailing whitespace trimmed from all text
     /// fields and tool call arguments, and with any blocks that are empty after trimming removed.
+    #[must_use]
     pub fn trim(mut self) -> Self {
         self.content = self.content.into_iter().filter_map(|block| block.trim()).collect();
         self

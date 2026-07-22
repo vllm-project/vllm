@@ -76,11 +76,13 @@ impl HfChatRenderer {
         })
     }
 
+    #[must_use]
     pub fn with_special_tokens(mut self, special_tokens: Option<HfSpecialTokens>) -> Self {
         self.special_tokens = special_tokens;
         self
     }
 
+    #[must_use]
     pub fn with_multimodal(mut self, multimodal: Option<MultimodalRenderInfo>) -> Self {
         self.multimodal = multimodal;
         self
