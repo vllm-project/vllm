@@ -35,7 +35,6 @@ from vllm.v1.core.encoder_cache_manager import (
     EncoderCacheManager,
     EncoderDecoderCacheManager,
 )
-from vllm.v1.core.kv_cache_coordinator import HybridKVCacheCoordinator
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import KVCacheBlock
@@ -711,60 +710,20 @@ class Scheduler(SchedulerInterface):
                 # Get already-cached tokens.
                 if request.num_computed_tokens == 0:
                     did_prefix_cache_lookup = True
-                    new_computed_blocks = None
-                    fa_hit_diverged = False
-                    # Get locally-cached tokens.
-                    if (
-                        self.connector is not None
-                        and self.has_mamba_layers
-                        and isinstance(
-                            self.kv_cache_manager.coordinator, HybridKVCacheCoordinator
+                    hit_diverged = False
+                    # Get locally-cached tokens. A KV connector transfers the
+                    # missing suffix, which needs a hybrid-aware lookup that can
+                    # diverge across groups (see get_computed_blocks_for_connector).
+                    if self.connector is not None:
+                        (
+                            new_computed_blocks,
+                            num_new_local_computed_tokens,
+                            request.shared_prefix_boundary,
+                            hit_diverged,
+                        ) = self.kv_cache_manager.get_computed_blocks_for_connector(
+                            request
                         )
-                    ):
-                        # The per-group lookup does not detect an uncached shared
-                        # prefix, so there is no junction to pin in this path.
-                        request.shared_prefix_boundary = 0
-                        kv_cache_manager = self.kv_cache_manager
-                        if not kv_cache_manager.prefix_cache_lookup_enabled(request):
-                            # Mirror the get_computed_blocks() early-out: the
-                            # request must recompute its prompt.
-                            new_computed_blocks = kv_cache_manager.empty_kv_cache_blocks
-                            num_new_local_computed_tokens = 0
-                        else:
-                            # NOTE(ZhanqiuHu): report the FA hit as the local
-                            # prefix so the connector only transfers what is
-                            # missing (external = total - local); the Mamba state
-                            # is transferred unconditionally by nixl's
-                            # _apply_prefix_caching.
-                            coordinator = kv_cache_manager.coordinator
-                            computed, per_group_hits = (
-                                coordinator.find_longest_cache_hit_per_group(
-                                    request.block_hashes, request.num_tokens - 1
-                                )
-                            )
-                            fa_group_id = coordinator.full_attention_group_id
-                            if fa_group_id is not None and all(
-                                hit <= per_group_hits[fa_group_id]
-                                for hit in per_group_hits
-                            ):
-                                new_computed_blocks = (
-                                    kv_cache_manager.create_kv_cache_blocks(computed)
-                                )
-                                num_new_local_computed_tokens = per_group_hits[
-                                    fa_group_id
-                                ]
-                                # FA survived deeper than a lagging group (e.g. an
-                                # evicted Mamba state). Its deep hit only has a
-                                # valid state at that boundary if the connector
-                                # supplies it, so reconcile below once the external
-                                # length is known.
-                                fa_hit_diverged = (
-                                    min(per_group_hits) < num_new_local_computed_tokens
-                                )
-                            # else: a group hit deeper than FA means its FA blocks
-                            # were evicted - the reconciled lookup below converges
-                            # on a boundary consistent across all groups.
-                    if new_computed_blocks is None:
+                    else:
                         (
                             new_computed_blocks,
                             num_new_local_computed_tokens,
@@ -790,12 +749,10 @@ class Scheduler(SchedulerInterface):
 
                         num_external_computed_tokens = ext_tokens
 
-                        if fa_hit_diverged and num_external_computed_tokens == 0:
-                            # No external tokens back the deep FA hit, so the
+                        if hit_diverged and num_external_computed_tokens == 0:
+                            # No external tokens back the deeper local hit, so its
                             # resume boundary would have no valid Mamba state.
-                            # Reconcile to the convergent boundary every group
-                            # agrees on. The prefix-cache stat recorded at
-                            # admission uses the reconciled local hit count.
+                            # Reconcile to the boundary every group agrees on.
                             (
                                 new_computed_blocks,
                                 num_new_local_computed_tokens,
