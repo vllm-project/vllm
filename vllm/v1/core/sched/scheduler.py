@@ -31,7 +31,6 @@ from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.multimodal.encoder_budget import MultiModalBudget
 from vllm.multimodal.utils import get_mm_features_in_window
-from vllm.utils.import_utils import resolve_obj_by_qualname
 from vllm.v1.core.encoder_cache_manager import (
     EncoderCacheManager,
     EncoderDecoderCacheManager,
@@ -228,19 +227,15 @@ class Scheduler(SchedulerInterface):
             mm_budget.encoder_compute_budget if mm_budget else 0
         )
         encoder_cache_size = mm_budget.encoder_cache_size if mm_budget else 0
-        manager_cls = self._get_encoder_cache_manager_cls()
-        if manager_cls is None:
+        manager_cls_obj = vllm_config.ec_manager_config.get_encoder_cache_manager_obj()
+        if manager_cls_obj is not None:
+            self.encoder_cache_manager = manager_cls_obj(cache_size=encoder_cache_size)
+        else:
             self.encoder_cache_manager = (
                 EncoderDecoderCacheManager(cache_size=encoder_cache_size)
                 if self.is_encoder_decoder
                 else EncoderCacheManager(cache_size=encoder_cache_size)
             )
-        else:
-            self.encoder_cache_manager = manager_cls(
-                cache_size=encoder_cache_size,
-                vllm_config=vllm_config,
-            )
-
         speculative_config = vllm_config.speculative_config
         self.use_eagle = False
         self.num_spec_tokens = vllm_config.num_speculative_tokens
@@ -358,15 +353,6 @@ class Scheduler(SchedulerInterface):
         # In-flight requests still prefilling (prefill chunks + in-progress
         # async KV loads). Their remaining-block reservation gates async loads.
         self._inflight_prefills: set[Request] = set()
-
-    def _get_encoder_cache_manager_cls(self):
-        ec_manager_config = self.vllm_config.ec_manager_config
-        if ec_manager_config is None:
-            return None
-        cls_path = ec_manager_config.encoder_cache_manager_cls
-        if cls_path is None:
-            return None
-        return resolve_obj_by_qualname(cls_path)
 
     def _mamba_block_aligned_split(
         self,

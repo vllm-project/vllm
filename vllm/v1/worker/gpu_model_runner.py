@@ -37,6 +37,7 @@ from vllm.config import (
     update_config,
 )
 from vllm.config.cache import CacheConfig
+from vllm.config.ec_manager_config import EncoderCacheManagerMetadata
 from vllm.config.model import PROCESSED_LOGPROBS_MODES
 from vllm.distributed.ec_transfer import get_ec_transfer, has_ec_transfer
 from vllm.distributed.eplb.eplb_state import EplbState
@@ -2978,10 +2979,11 @@ class GPUModelRunner(
         self,
         mm_hash: str,
         output: torch.Tensor,
-        scheduler_output: "SchedulerOutput",
+        ec_manager_metadata: "EncoderCacheManagerMetadata | None",
+        free_encoder_mm_hashes: list[str],
     ) -> None:
         """Store an encoder output for later multimodal embedding gather."""
-        del scheduler_output
+        del ec_manager_metadata, free_encoder_mm_hashes
         self.encoder_cache[mm_hash] = output
         self.maybe_save_ec_to_connector(self.encoder_cache, mm_hash)
 
@@ -3013,7 +3015,8 @@ class GPUModelRunner(
                 self._cache_encoder_output(
                     mm_hashes[i],
                     pe_tensor.to(self.device),
-                    scheduler_output,
+                    scheduler_output.ec_manager_metadata,
+                    scheduler_output.free_encoder_mm_hashes,
                 )
             # Filter out `prompt_embeds` items from mm_kwargs/mm_hashes/mm_lora_refs
             # since they don't require further encoder processing.
@@ -3191,13 +3194,19 @@ class GPUModelRunner(
 
         # Cache the encoder outputs by mm_hash
         for mm_hash, output in zip(mm_hashes, encoder_outputs):
-            self._cache_encoder_output(mm_hash, output, scheduler_output)
+            self._cache_encoder_output(
+                mm_hash,
+                output,
+                scheduler_output.ec_manager_metadata,
+                scheduler_output.free_encoder_mm_hashes,
+            )
             logger.debug("Finish execute for mm hash %s", mm_hash)
 
         return encoder_outputs
 
     def _get_encoder_output_from_cache(self, mm_hash: str) -> torch.Tensor | None:
-        """Return a cached encoder output for multimodal embedding gather."""
+        """Return a cached encoder output for multimodal
+        embedding gather."""
         return self.encoder_cache.get(mm_hash, None)
 
     def _gather_mm_embeddings(
