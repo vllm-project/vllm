@@ -5,6 +5,7 @@ import time
 from collections import deque
 from contextlib import contextmanager
 from types import SimpleNamespace
+from typing import Any
 
 import vllm.v1.engine.core as engine_core_module
 from vllm.logging_utils import dump_input
@@ -252,7 +253,7 @@ def test_engine_execution_timeout_dumper_dumps_when_timer_fires(monkeypatch):
 
 
 def test_dump_on_slow_execution_uses_env_timeout_and_scheduler_stats(monkeypatch):
-    calls = []
+    calls: list[Any] = []
     scheduler_stats = SchedulerStats(num_waiting_reqs=2)
 
     class FakeDumper:
