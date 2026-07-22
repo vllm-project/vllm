@@ -35,7 +35,7 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
 )
 from vllm.model_executor.kernels.linear.cute_dsl import ll_bf16
-from vllm.model_executor.layers.fused_moe import FusedMoE
+from vllm.model_executor.layers.fused_moe import FusedMoEFactory
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, tldevice, triton
@@ -440,7 +440,7 @@ class InklingMoE(nn.Module):
         # power-of-two EP sizes (n_routed is a power of two).
         num_experts = n_routed + (-n_routed) % _inkling_moe_ep_size()
 
-        self.experts = FusedMoE(
+        self.experts = FusedMoEFactory(
             num_experts=num_experts,
             top_k=config.num_experts_per_tok,
             hidden_size=config.hidden_size,
