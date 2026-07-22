@@ -100,7 +100,7 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
         self.wna16_backend, self.experts_cls = select_wna16_moe_backend(
             config=self.moe,
             weight_key=weight_key,
-            group_size=self.group_size,
+            quant_config=self.weight_quant,
             may_have_zp=not self.symmetric,
             may_have_bias=False,
             allow_tile_padding=not is_actorder,
