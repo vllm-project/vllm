@@ -47,9 +47,8 @@ BLOCK_SIZE = 16
 
 
 def _assert_close_to_reference(out: torch.Tensor, ref: torch.Tensor) -> None:
-    # Elementwise tolerances do not fit a bf16-output GEMM, whose rounding
-    # error grows with K, so compare relative L2 error and cosine
-    # similarity against the dequantized-weight reference.
+    # bf16-output rounding error grows with K, so compare relative L2 and
+    # cosine similarity instead of elementwise tolerances.
     out_f = out.float().flatten()
     ref_f = ref.float().flatten()
     rel_l2 = (torch.linalg.vector_norm(out_f - ref_f) / ref_f.norm()).item()
