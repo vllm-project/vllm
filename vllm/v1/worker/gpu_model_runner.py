@@ -2273,7 +2273,6 @@ class GPUModelRunner(
         num_scheduled_tokens: dict[str, int] | None = None,
         cascade_attn_prefix_lens: list[list[int]] | None = None,
         slot_mappings: dict[int, torch.Tensor] | None = None,
-        use_decode_backend: bool = False,
     ) -> tuple[PerLayerAttnMetadata, CommonAttentionMetadata | None]:
         """
         Returns:
@@ -2415,7 +2414,6 @@ class GPUModelRunner(
             slot_mapping=slot_mapping_gid_0,
             causal=True,
             is_prefilling=is_prefilling,
-            use_decode_backend=use_decode_backend,
             positions=self.positions[:num_tokens_padded],
             mm_req_doc_ranges=req_doc_ranges,
             rswa_prefix_lens=rswa_prefix_lens,
@@ -4322,14 +4320,6 @@ class GPUModelRunner(
                 ubatch_slices=ubatch_slices_padded,
             )
 
-            is_prefilling = (
-                self.input_batch.num_computed_tokens_cpu_tensor[:num_reqs]
-                < self.input_batch.num_prompt_tokens_cpu_tensor[:num_reqs]
-            )
-            use_decode_backend = self.has_distinct_decode_attn_backend and not bool(
-                is_prefilling.any()
-            )
-
             attn_metadata, spec_decode_common_attn_metadata = (
                 self._build_attention_metadata(
                     num_tokens=num_tokens_unpadded,
@@ -4343,7 +4333,6 @@ class GPUModelRunner(
                     num_scheduled_tokens=scheduler_output.num_scheduled_tokens,
                     cascade_attn_prefix_lens=cascade_attn_prefix_lens,
                     slot_mappings=slot_mappings_by_group,
-                    use_decode_backend=use_decode_backend,
                 )
             )
 

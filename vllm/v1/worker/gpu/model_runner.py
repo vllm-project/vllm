@@ -498,7 +498,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             cudagraph_mode,
             decode_query_len=self.decode_query_len,
             lora_capture_cases=self.lora_capture_cases,
-            capture_decode_backend=self.has_distinct_decode_attn_backend,
+            capture_attention_backend_variants=(self.has_distinct_decode_attn_backend),
         )
         check_attention_cp_compatibility(self.vllm_config)
         if isinstance(self.speculator, DraftModelSpeculator):
@@ -602,7 +602,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 dummy_run=True,
                 skip_attn_for_dummy_run=skip_attn,
                 is_profile=is_profile,
-                use_decode_backend=(
+                attention_backend_variant=int(
                     getattr(self, "has_distinct_decode_attn_backend", False)
                     and uniform_decode
                 ),
@@ -1174,7 +1174,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         dummy_run: bool = False,
         skip_attn_for_dummy_run: bool = False,
         is_profile: bool = False,
-        use_decode_backend: bool | None = None,
+        attention_backend_variant: int | None = None,
     ) -> ModelRunnerOutput | IntermediateTensors | None:
         if not dummy_run:
             # Update the request states.
@@ -1194,15 +1194,18 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         num_toks = scheduler_output.total_num_scheduled_tokens
         max_query_len = max(scheduler_output.num_scheduled_tokens.values())
         uniform_tok_count = get_uniform_token_count(num_reqs, num_toks, max_query_len)
-        if use_decode_backend is None:
+        if attention_backend_variant is None:
             req_indices = (
                 self.req_states.req_id_to_index[req_id]
                 for req_id in scheduler_output.num_scheduled_tokens
             )
-            use_decode_backend = self.has_distinct_decode_attn_backend and not any(
-                self.req_states.num_computed_prefill_tokens[req_idx]
-                < self.req_states.prefill_len.np[req_idx]
-                for req_idx in req_indices
+            attention_backend_variant = int(
+                self.has_distinct_decode_attn_backend
+                and not any(
+                    self.req_states.num_computed_prefill_tokens[req_idx]
+                    < self.req_states.prefill_len.np[req_idx]
+                    for req_idx in req_indices
+                )
             )
         num_active_loras = 0
         if self.lora_config:
@@ -1227,7 +1230,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.dp_rank,
             need_eager=is_profile or skip_compiled,
             num_active_loras=num_active_loras,
-            use_decode_backend=use_decode_backend,
+            attention_backend_variant=attention_backend_variant,
         )
 
         if batch_desc.num_tokens == 0:
@@ -1235,7 +1238,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             empty_output = self.kv_connector.no_forward(scheduler_output)
             return empty_output
 
-        assert batch_desc.use_decode_backend == use_decode_backend
+        assert batch_desc.attention_backend_variant == attention_backend_variant
 
         if not dummy_run:
             # Common case.
@@ -1293,7 +1296,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 slot_mappings,
                 self.attn_groups,
                 self.kv_cache_config,
-                use_decode_backend=use_decode_backend,
             )
 
         input_ids = input_batch.input_ids

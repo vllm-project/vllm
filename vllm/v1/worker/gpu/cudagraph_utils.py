@@ -54,7 +54,7 @@ class BatchExecutionDescriptor:
     num_reqs: int | None  # None means no request padding is needed (PIECEWISE graphs)
     uniform_token_count: int | None = None
     num_active_loras: int = 0
-    use_decode_backend: bool = False
+    attention_backend_variant: int = 0
 
 
 class CreateForwardFn(Protocol):
@@ -113,7 +113,7 @@ class CudaGraphManager:
         cudagraph_mode: CUDAGraphMode,
         decode_query_len: int,
         lora_capture_cases: list[int] | None = None,
-        capture_decode_backend: bool = False,
+        capture_attention_backend_variants: bool = False,
     ):
         self.vllm_config = vllm_config
         self.device = device
@@ -122,7 +122,7 @@ class CudaGraphManager:
         assert self.compilation_config is not None
         self.cudagraph_mode = cudagraph_mode
         self.decode_query_len = decode_query_len
-        self.capture_decode_backend = capture_decode_backend
+        self.capture_attention_backend_variants = capture_attention_backend_variants
 
         self.dp_size = vllm_config.parallel_config.data_parallel_size
         self.tp_size = vllm_config.parallel_config.tensor_parallel_size
@@ -139,7 +139,7 @@ class CudaGraphManager:
         self._graphs_captured = False
 
         self._candidates: dict[
-            tuple[int, int, bool], list[BatchExecutionDescriptor]
+            tuple[int, int, int], list[BatchExecutionDescriptor]
         ] = {}
         self._capture_descs: dict[CUDAGraphMode, list[BatchExecutionDescriptor]] = {}
 
@@ -192,7 +192,7 @@ class CudaGraphManager:
         max_cg_capture_size = self.compilation_config.max_cudagraph_capture_size
 
         descs_by_token_lora_role: dict[
-            tuple[int, int, bool], list[BatchExecutionDescriptor]
+            tuple[int, int, int], list[BatchExecutionDescriptor]
         ] = defaultdict(list)
         descs_by_mode: defaultdict[CUDAGraphMode, list[BatchExecutionDescriptor]] = (
             defaultdict(list)
@@ -247,7 +247,9 @@ class CudaGraphManager:
                         num_reqs=rounded_num_reqs,
                         uniform_token_count=decode_query_len,
                         num_active_loras=num_active_loras,
-                        use_decode_backend=self.capture_decode_backend,
+                        attention_backend_variant=int(
+                            self.capture_attention_backend_variants
+                        ),
                     )
 
                     # avoid duplicate graphs
@@ -257,7 +259,7 @@ class CudaGraphManager:
                             (
                                 rounded_num_tokens,
                                 num_active_loras,
-                                self.capture_decode_backend,
+                                int(self.capture_attention_backend_variants),
                             )
                         ].append(desc)
 
@@ -270,23 +272,23 @@ class CudaGraphManager:
                     mixed_mode == CUDAGraphMode.PIECEWISE and self.use_breakable_cg
                 ):
                     num_reqs = min(num_tokens, self.max_num_reqs)
-                backend_roles = [False]
+                backend_roles = [0]
                 if (
-                    self.capture_decode_backend
+                    self.capture_attention_backend_variants
                     and mixed_mode == CUDAGraphMode.PIECEWISE
                 ):
-                    backend_roles.append(True)
-                for use_decode_backend in backend_roles:
+                    backend_roles.append(1)
+                for attention_backend_variant in backend_roles:
                     desc = BatchExecutionDescriptor(
                         cg_mode=mixed_mode,
                         num_tokens=num_tokens,
                         num_reqs=num_reqs,
                         num_active_loras=num_active_loras,
-                        use_decode_backend=use_decode_backend,
+                        attention_backend_variant=attention_backend_variant,
                     )
                     descs_by_mode[mixed_mode].append(desc)
                     descs_by_token_lora_role[
-                        (num_tokens, num_active_loras, use_decode_backend)
+                        (num_tokens, num_active_loras, attention_backend_variant)
                     ].append(desc)
 
         if not descs_by_token_lora_role:
@@ -297,15 +299,15 @@ class CudaGraphManager:
         for token_cg_size in all_token_counts:
             for i in range(current_range_start, token_cg_size + 1):
                 for num_active_loras in self.lora_capture_cases:
-                    for use_decode_backend in (False, True):
+                    for attention_backend_variant in (0, 1):
                         staging_key = (
                             token_cg_size,
                             num_active_loras,
-                            use_decode_backend,
+                            attention_backend_variant,
                         )
                         if staging_key in descs_by_token_lora_role:
                             self._candidates[
-                                (i, num_active_loras, use_decode_backend)
+                                (i, num_active_loras, attention_backend_variant)
                             ] = descs_by_token_lora_role[staging_key]
             current_range_start = token_cg_size + 1
 
@@ -388,14 +390,14 @@ class CudaGraphManager:
         num_tokens: int,
         uniform_token_count: int | None,
         num_active_loras: int,
-        use_decode_backend: bool = False,
+        attention_backend_variant: int = 0,
         max_cudagraph_mode: CUDAGraphMode | None = None,
     ) -> BatchExecutionDescriptor:
         """Find matching cudagraph descriptor from priority-ordered candidates."""
 
         assert max_cudagraph_mode is None or max_cudagraph_mode.is_valid_runtime_mode()
         effective_loras = self._resolve_effective_loras(num_active_loras)
-        key = (num_tokens, effective_loras, use_decode_backend)
+        key = (num_tokens, effective_loras, attention_backend_variant)
         if self._graphs_captured and num_tokens > 0 and key in self._candidates:
             for desc in self._candidates[key]:
                 if max_cudagraph_mode is not None and (
@@ -419,7 +421,7 @@ class CudaGraphManager:
             num_tokens=num_tokens,
             num_reqs=num_reqs,
             num_active_loras=effective_loras,
-            use_decode_backend=use_decode_backend,
+            attention_backend_variant=attention_backend_variant,
         )
 
     def run_fullgraph(self, desc: BatchExecutionDescriptor):
@@ -461,7 +463,7 @@ class ModelCudaGraphManager(CudaGraphManager):
         cudagraph_mode: CUDAGraphMode,
         decode_query_len: int,
         lora_capture_cases: list[int] | None = None,
-        capture_decode_backend: bool = False,
+        capture_attention_backend_variants: bool = False,
     ):
         super().__init__(
             vllm_config,
@@ -469,7 +471,7 @@ class ModelCudaGraphManager(CudaGraphManager):
             cudagraph_mode,
             decode_query_len,
             lora_capture_cases=lora_capture_cases,
-            capture_decode_backend=capture_decode_backend,
+            capture_attention_backend_variants=capture_attention_backend_variants,
         )
         self.hidden_states: torch.Tensor | None = None
         self.aux_hidden_states: list[torch.Tensor] = []
@@ -628,9 +630,10 @@ def prepare_inputs_to_capture(
     attn_groups: list[list[AttentionGroup]],
     kv_cache_config: KVCacheConfig,
     skip_attn: bool = False,
-    use_decode_backend: bool = False,
+    attention_backend_variant: int = 0,
 ) -> AttentionState:
     input_batch = InputBatch.make_dummy(num_reqs, num_tokens, input_buffers)
+    input_batch.is_prefilling_np.fill(attention_backend_variant == 0)
     input_block_tables = block_tables.get_dummy_block_tables(num_reqs)
     slot_mappings = block_tables.get_dummy_slot_mappings(num_tokens)
     slot_mappings_by_layer = build_slot_mappings_by_layer(
@@ -659,6 +662,5 @@ def prepare_inputs_to_capture(
             attn_groups,
             kv_cache_config,
             for_capture=True,
-            use_decode_backend=use_decode_backend,
         )
     return AttentionState(attn_metadata, slot_mappings_by_layer)

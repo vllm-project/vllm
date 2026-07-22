@@ -465,9 +465,6 @@ class CommonAttentionMetadata:
     (num_computed_tokens < num_prompt_tokens). Used by some backends to
     distinguish actual decodes from short extends."""
 
-    use_decode_backend: bool = False
-    """Whether a composed backend should use its pure-decode implementation."""
-
     seq_lens_cpu_upper_bound: torch.Tensor | None = None
     """(batch_size,) CPU upper bound on seq_lens. Precise for prefill rows
     and for all rows outside async spec decode; optimistic for async-spec
@@ -597,7 +594,6 @@ class CommonAttentionMetadata:
             dcp_local_seq_lens=maybe_slice_reqs(self.dcp_local_seq_lens),
             dcp_local_seq_lens_cpu=maybe_slice_reqs(self.dcp_local_seq_lens_cpu),
             is_prefilling=maybe_slice_reqs(self.is_prefilling),
-            use_decode_backend=self.use_decode_backend,
             rswa_prefix_lens=maybe_slice_reqs(self.rswa_prefix_lens),
         )
 

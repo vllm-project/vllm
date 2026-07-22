@@ -162,7 +162,6 @@ class ModelState(ABC):
         attn_groups: list[list[AttentionGroup]],
         kv_cache_config: KVCacheConfig,
         for_capture: bool = False,
-        use_decode_backend: bool = False,
     ) -> dict[str, Any]:
         raise NotImplementedError
 

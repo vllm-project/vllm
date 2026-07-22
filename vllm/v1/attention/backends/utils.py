@@ -122,7 +122,7 @@ def create_composite_attention_backend(
             )
 
         def get_impl_for_metadata(self, attn_metadata):
-            if getattr(attn_metadata, "_use_decode_backend", False):
+            if getattr(attn_metadata, "_attention_backend_variant", 0):
                 return self.decode_impl
             return self.general_impl
 
@@ -205,42 +205,52 @@ def create_composite_attention_backend(
             return AttentionCGSupport(min(general.value, decode.value))
 
         @staticmethod
-        def _tag(metadata, use_decode_backend: bool):
-            metadata._use_decode_backend = use_decode_backend
+        def _tag(metadata, backend_variant: int):
+            metadata._attention_backend_variant = backend_variant
             return metadata
 
+        @staticmethod
+        def _select_backend_variant(common_attn_metadata):
+            is_prefilling = common_attn_metadata.is_prefilling
+            if is_prefilling is not None:
+                assert is_prefilling.device.type == "cpu"
+                return int(not bool(is_prefilling.any()))
+
+            query_start_loc = common_attn_metadata.query_start_loc_cpu
+            query_lens = query_start_loc[1:] - query_start_loc[:-1]
+            return int(
+                query_lens.numel() and torch.all(query_lens == query_lens[0]).item()
+            )
+
         def _builder(self, common_attn_metadata):
-            if common_attn_metadata.use_decode_backend:
-                return self.decode_builder
-            return self.general_builder
+            backend_variant = self._select_backend_variant(common_attn_metadata)
+            builder = self.decode_builder if backend_variant else self.general_builder
+            return builder, backend_variant
 
         def build(self, common_prefix_len, common_attn_metadata, fast_build=False):
-            metadata = self._builder(common_attn_metadata).build(
+            builder, backend_variant = self._builder(common_attn_metadata)
+            metadata = builder.build(
                 common_prefix_len,
                 common_attn_metadata,
                 fast_build=fast_build,
             )
-            return self._tag(metadata, common_attn_metadata.use_decode_backend)
+            return self._tag(metadata, backend_variant)
 
         def build_for_cudagraph_capture(self, common_attn_metadata):
-            metadata = self._builder(common_attn_metadata).build_for_cudagraph_capture(
-                common_attn_metadata
-            )
-            return self._tag(metadata, common_attn_metadata.use_decode_backend)
+            builder, backend_variant = self._builder(common_attn_metadata)
+            metadata = builder.build_for_cudagraph_capture(common_attn_metadata)
+            return self._tag(metadata, backend_variant)
 
         def build_for_drafting(self, common_attn_metadata, draft_index):
-            metadata = self._builder(common_attn_metadata).build_for_drafting(
-                common_attn_metadata, draft_index
-            )
-            return self._tag(metadata, common_attn_metadata.use_decode_backend)
+            builder, backend_variant = self._builder(common_attn_metadata)
+            metadata = builder.build_for_drafting(common_attn_metadata, draft_index)
+            return self._tag(metadata, backend_variant)
 
         def update_block_table(self, metadata, blk_table, slot_mapping):
-            use_decode_backend = getattr(metadata, "_use_decode_backend", False)
-            builder = (
-                self.decode_builder if use_decode_backend else self.general_builder
-            )
+            backend_variant = getattr(metadata, "_attention_backend_variant", 0)
+            builder = self.decode_builder if backend_variant else self.general_builder
             updated = builder.update_block_table(metadata, blk_table, slot_mapping)
-            return self._tag(updated, use_decode_backend)
+            return self._tag(updated, backend_variant)
 
         def use_cascade_attention(self, *args, **kwargs):
             return self.general_builder.use_cascade_attention(*args, **kwargs)
@@ -1162,8 +1172,8 @@ def create_fast_prefill_custom_backend(
                         common_attn_metadata.logits_indices_padded
                     )
                     self.num_logits_indices = common_attn_metadata.num_logits_indices
-                    self._use_decode_backend = getattr(
-                        metadata, "_use_decode_backend", False
+                    self._attention_backend_variant = getattr(
+                        metadata, "_attention_backend_variant", 0
                     )
 
             return KVSharingFastPrefillAttentionMetadata(metadata, common_attn_metadata)

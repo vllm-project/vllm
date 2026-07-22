@@ -226,7 +226,7 @@ def test_cudagraph_dispatch_preserves_attention_backend_role(
         device=torch.device("cpu"),
         cudagraph_mode=cudagraph_mode,
         decode_query_len=2,
-        capture_decode_backend=True,
+        capture_attention_backend_variants=True,
     )
     manager._graphs_captured = True
 
@@ -235,7 +235,7 @@ def test_cudagraph_dispatch_preserves_attention_backend_role(
         num_tokens=2,
         uniform_token_count=2,
         num_active_loras=0,
-        use_decode_backend=True,
+        attention_backend_variant=1,
     )
     general_desc = manager.dispatch(
         num_reqs=1,
@@ -245,9 +245,9 @@ def test_cudagraph_dispatch_preserves_attention_backend_role(
     )
 
     assert decode_desc.cg_mode == decode_mode
-    assert decode_desc.use_decode_backend
+    assert decode_desc.attention_backend_variant == 1
     assert general_desc.cg_mode == CUDAGraphMode.PIECEWISE
-    assert not general_desc.use_decode_backend
+    assert general_desc.attention_backend_variant == 0
     assert decode_desc != general_desc
 
     if decode_mode == CUDAGraphMode.FULL:
@@ -256,18 +256,18 @@ def test_cudagraph_dispatch_preserves_attention_backend_role(
             num_tokens=2,
             uniform_token_count=2,
             num_active_loras=0,
-            use_decode_backend=True,
+            attention_backend_variant=1,
             max_cudagraph_mode=CUDAGraphMode.PIECEWISE,
         )
         assert synced_decode_desc.cg_mode == CUDAGraphMode.PIECEWISE
-        assert synced_decode_desc.use_decode_backend
+        assert synced_decode_desc.attention_backend_variant == 1
 
     piecewise_roles = {
-        desc.use_decode_backend
+        desc.attention_backend_variant
         for desc in manager._capture_descs[CUDAGraphMode.PIECEWISE]
         if desc.num_tokens == 2
     }
-    assert piecewise_roles == {False, True}
+    assert piecewise_roles == {0, 1}
 
 
 def test_basic_sd_does_not_capture_shorter_full_decode_shapes(monkeypatch):

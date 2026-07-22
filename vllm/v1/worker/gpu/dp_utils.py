@@ -55,7 +55,7 @@ def sync_cudagraph_and_dp_padding(
             num_tokens=num_tokens,
             num_reqs=num_reqs,
             num_active_loras=desired_batch_desc.num_active_loras,
-            use_decode_backend=desired_batch_desc.use_decode_backend,
+            attention_backend_variant=(desired_batch_desc.attention_backend_variant),
         ), num_tokens_across_dp
 
     assert cudagraph_manager is not None, (
@@ -78,7 +78,7 @@ def sync_cudagraph_and_dp_padding(
         synced_num_tokens,
         synced_uniform_token_count,
         num_active_loras=num_active_loras,
-        use_decode_backend=desired_batch_desc.use_decode_backend,
+        attention_backend_variant=desired_batch_desc.attention_backend_variant,
         max_cudagraph_mode=synced_cg_mode,
     )
 
@@ -97,7 +97,7 @@ def dispatch_cg_and_sync_dp(
     dp_rank: int,
     need_eager: bool = False,
     num_active_loras: int = 0,
-    use_decode_backend: bool = False,
+    attention_backend_variant: int = 0,
 ) -> tuple[BatchExecutionDescriptor, torch.Tensor | None]:
     if need_eager:
         batch_desc = BatchExecutionDescriptor(
@@ -105,7 +105,7 @@ def dispatch_cg_and_sync_dp(
             num_tokens=num_tokens,
             num_reqs=num_reqs,
             num_active_loras=num_active_loras,
-            use_decode_backend=use_decode_backend,
+            attention_backend_variant=attention_backend_variant,
         )
     else:
         assert cudagraph_manager is not None, (
@@ -117,7 +117,7 @@ def dispatch_cg_and_sync_dp(
             num_tokens,
             uniform_token_count,
             num_active_loras=num_active_loras,
-            use_decode_backend=use_decode_backend,
+            attention_backend_variant=attention_backend_variant,
         )
 
     if dp_size == 1:

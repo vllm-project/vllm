@@ -71,7 +71,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             self.device,
             cudagraph_mode,
             self.num_speculative_steps + 1,
-            capture_decode_backend=self.has_distinct_decode_attn_backend,
+            capture_attention_backend_variants=(self.has_distinct_decode_attn_backend),
         )
 
         # PIECEWISE cudagraphs are not supported for draft decodes.
@@ -167,8 +167,9 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
         self.draft_max_seq_len = min(
             max_seq_len + self.num_speculative_steps, self.max_model_len
         )
-        use_decode_backend = self.has_distinct_decode_attn_backend and not bool(
-            input_batch.is_prefilling_np.any()
+        attention_backend_variant = int(
+            self.has_distinct_decode_attn_backend
+            and not bool(input_batch.is_prefilling_np.any())
         )
 
         # NOTE(woosuk): To avoid CPU-GPU synchronization without CPU knowing the
@@ -223,7 +224,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             dp_size=self.dp_size,
             dp_rank=self.dp_rank,
             need_eager=is_profile,
-            use_decode_backend=use_decode_backend,
+            attention_backend_variant=attention_backend_variant,
         )
 
         self._prepare_eplb_forward(input_batch.num_tokens)
@@ -411,7 +412,6 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
                     num_reqs=num_reqs,
                     num_reqs_padded=batch_desc.num_reqs or num_reqs,
                     num_tokens_padded=batch_desc.num_tokens,
-                    use_decode_backend=True,
                 )
 
             # Update the current draft step.

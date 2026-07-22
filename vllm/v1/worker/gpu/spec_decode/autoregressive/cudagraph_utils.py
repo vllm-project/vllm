@@ -69,7 +69,7 @@ class SpeculatorCudaGraphManager(CudaGraphManager):
                 slot_mappings,
                 num_tokens_across_dp,
                 cg_mode,
-                use_decode_backend=desc.use_decode_backend,
+                attention_backend_variant=desc.attention_backend_variant,
             )
 
         super().capture(create_forward_fn, progress_bar_desc)

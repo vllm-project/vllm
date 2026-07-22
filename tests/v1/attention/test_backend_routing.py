@@ -420,13 +420,17 @@ def test_mrv2_builds_metadata_with_the_routed_backend():
         kv_cache_config=config,
     )
 
-    general_metadata = build_attn_metadata(**common_args)
-    decode_metadata = build_attn_metadata(**common_args, use_decode_backend=True)
+    general_metadata = build_attn_metadata(
+        **common_args, is_prefilling=torch.tensor([True])
+    )
+    decode_metadata = build_attn_metadata(
+        **common_args, is_prefilling=torch.tensor([False])
+    )
 
     assert general_metadata["layer"].builder == "_GeneralBuilder"
-    assert not general_metadata["layer"]._use_decode_backend
+    assert general_metadata["layer"]._attention_backend_variant == 0
     assert decode_metadata["layer"].builder == "_DecodeBuilder"
-    assert decode_metadata["layer"]._use_decode_backend
+    assert decode_metadata["layer"]._attention_backend_variant == 1
 
 
 class _Layer(AttentionLayerBase):
@@ -481,15 +485,15 @@ def test_decode_backend_limits_cudagraph_support():
     assert cg_support.min_cg_attn_backend.endswith("Composite")
 
 
-@pytest.mark.parametrize("use_decode_backend", [False, True])
-def test_composite_impl_selects_from_metadata(use_decode_backend):
+@pytest.mark.parametrize("backend_variant", [0, 1])
+def test_composite_impl_selects_from_metadata(backend_variant):
     backend = create_composite_attention_backend(_GeneralBackend, _DecodeBackend)
     impl = backend.get_impl_cls()(8, 128, 0.1)
-    metadata = SimpleNamespace(_use_decode_backend=use_decode_backend)
+    metadata = SimpleNamespace(_attention_backend_variant=backend_variant)
 
     selected = impl.get_impl_for_metadata(metadata)
 
-    assert selected is (impl.decode_impl if use_decode_backend else impl.general_impl)
+    assert selected is (impl.decode_impl if backend_variant else impl.general_impl)
 
 
 def test_dcp_checks_decode_implementation():
