@@ -154,24 +154,30 @@ def init_attn_backend(
                 kernel_block_size=kernel_block_size,
                 num_metadata_builders=1,
             )
-            builders = [group.get_metadata_builder(0)]
-            for builder in builders:
-                if attn_backend_workspace is None:
-                    if hasattr(builder, "_get_workspace_buffer"):
-                        attn_backend_workspace = builder._get_workspace_buffer()
-                elif hasattr(builder, "set_workspace_buffer"):
-                    builder.set_workspace_buffer(attn_backend_workspace)
+            builder = group.get_metadata_builder(0)
+            builders = builder.get_builder_variants()
+            if attn_backend_workspace is None:
+                for variant_builder in builders:
+                    if hasattr(variant_builder, "_get_workspace_buffer"):
+                        attn_backend_workspace = variant_builder._get_workspace_buffer()
+                        if attn_backend_workspace is not None:
+                            break
+            if attn_backend_workspace is not None:
+                for variant_builder in builders:
+                    if hasattr(variant_builder, "set_workspace_buffer"):
+                        variant_builder.set_workspace_buffer(attn_backend_workspace)
             # The decode specialist is used by full decode graphs, so both
             # routed backends must support the resolved cudagraph mode.
-            backend_names = [group.backend.__name__]
-            for builder, backend_name in zip(builders, backend_names):
-                cg_support = builder.get_cudagraph_support(
+            backends = group.backend.get_backend_variants()
+            assert len(builders) == len(backends)
+            for variant_builder, backend in zip(builders, backends):
+                cg_support = variant_builder.get_cudagraph_support(
                     vllm_config,
                     cast(AttentionSpec, group.kv_cache_spec),
                 )
                 if cg_support.value < min_cg_support.value:
                     min_cg_support = cg_support
-                    min_cg_attn_backend = backend_name
+                    min_cg_attn_backend = backend.__name__
 
     attn_cg_support_info = AttentionCGSupportInfo(
         min_cg_support=min_cg_support, min_cg_attn_backend=min_cg_attn_backend

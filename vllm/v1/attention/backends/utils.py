@@ -9,6 +9,7 @@ from typing import (
     Any,
     Literal,
     Protocol,
+    TypeVar,
     cast,
     get_args,
 )
@@ -48,6 +49,17 @@ _KV_CACHE_LAYOUT_OVERRIDE: KVCacheLayoutType | None = None
 
 PAD_SLOT_ID = -1
 NULL_BLOCK_ID = 0
+
+ImplT = TypeVar("ImplT", bound=AttentionImpl)
+
+
+def find_attention_impl_variant(
+    impl: AttentionImpl, impl_cls: type[ImplT]
+) -> ImplT | None:
+    for variant in impl.get_impl_variants():
+        if isinstance(variant, impl_cls):
+            return cast(ImplT, variant)
+    return None
 
 
 def _intersect_kernel_block_sizes(
@@ -122,9 +134,12 @@ def create_composite_attention_backend(
             )
 
         def get_impl_for_metadata(self, attn_metadata):
-            if getattr(attn_metadata, "_attention_backend_variant", 0):
+            if attn_metadata._attention_backend_variant:
                 return self.decode_impl
             return self.general_impl
+
+        def get_impl_variants(self):
+            return self.general_impl, self.decode_impl
 
         def forward(
             self,
@@ -161,14 +176,13 @@ def create_composite_attention_backend(
             ) and self.decode_impl.fused_output_quant_supported(quant_key)
 
         def fused_qk_norm_rope_kvcache_supported(self):
-            return False
+            return self.general_impl.fused_qk_norm_rope_kvcache_supported() and (
+                self.decode_impl.fused_qk_norm_rope_kvcache_supported()
+            )
 
         def fused_rope_kvcache_supported(self):
-            return False
-
-        def do_kv_cache_update(self, *args, **kwargs):
-            return self.general_impl.do_kv_cache_update(  # type: ignore[attr-defined]
-                *args, **kwargs
+            return self.general_impl.fused_rope_kvcache_supported() and (
+                self.decode_impl.fused_rope_kvcache_supported()
             )
 
     class CompositeAttentionMetadataBuilder(AttentionMetadataBuilder):
@@ -212,15 +226,12 @@ def create_composite_attention_backend(
         @staticmethod
         def _select_backend_variant(common_attn_metadata):
             is_prefilling = common_attn_metadata.is_prefilling
-            if is_prefilling is not None:
-                assert is_prefilling.device.type == "cpu"
-                return int(not bool(is_prefilling.any()))
-
-            query_start_loc = common_attn_metadata.query_start_loc_cpu
-            query_lens = query_start_loc[1:] - query_start_loc[:-1]
-            return int(
-                query_lens.numel() and torch.all(query_lens == query_lens[0]).item()
+            assert is_prefilling is not None, (
+                "Composite attention backends require is_prefilling metadata"
             )
+            assert is_prefilling.device.type == "cpu"
+            assert is_prefilling.dtype == torch.bool
+            return int(not bool(is_prefilling.any()))
 
         def _builder(self, common_attn_metadata):
             backend_variant = self._select_backend_variant(common_attn_metadata)
@@ -258,13 +269,18 @@ def create_composite_attention_backend(
         def _get_workspace_buffer(self):
             for builder in (self.general_builder, self.decode_builder):
                 if hasattr(builder, "_get_workspace_buffer"):
-                    return builder._get_workspace_buffer()
+                    workspace_buffer = builder._get_workspace_buffer()
+                    if workspace_buffer is not None:
+                        return workspace_buffer
             return None
 
         def set_workspace_buffer(self, workspace_buffer):
             for builder in (self.general_builder, self.decode_builder):
                 if hasattr(builder, "set_workspace_buffer"):
                     builder.set_workspace_buffer(workspace_buffer)
+
+        def get_builder_variants(self):
+            return self.general_builder, self.decode_builder
 
     class CompositeAttentionBackend(
         general_backend  # type: ignore[misc, valid-type]
@@ -289,9 +305,12 @@ def create_composite_attention_backend(
 
         @classmethod
         def full_cls_name(cls):
+            general_module, general_name = general_backend.full_cls_name()
+            decode_module, decode_name = decode_backend.full_cls_name()
             return (
                 __name__,
-                f"Composite[{general_backend.__qualname__},{decode_backend.__qualname__}]",
+                f"Composite[{general_module}.{general_name},"
+                f"{decode_module}.{decode_name}]",
             )
 
         @classmethod
@@ -413,8 +432,8 @@ def get_per_layer_parameters(
     per_layer_params: dict[str, PerLayerParameters] = {}
 
     for key, layer in layers.items():
-        impl = layer.impl
-        assert isinstance(impl, cls_)
+        impl = find_attention_impl_variant(layer.impl, cls_)
+        assert impl is not None
 
         # Infer hyperparameters from the attention layer
         window_size = getattr(impl, "sliding_window", None)
@@ -666,6 +685,9 @@ def make_local_attention_virtual_batches(
     query_start_loc_cpu = torch.from_numpy(cu_seqlens_q_local)
     seq_lens_cpu = torch.from_numpy(seqlens_k_local)
     max_seq_len = int(seq_lens_cpu.max())
+    is_prefilling = common_attn_metadata.is_prefilling
+    if is_prefilling is not None:
+        is_prefilling = is_prefilling[torch.from_numpy(batch_indices).long()]
 
     return CommonAttentionMetadata(
         query_start_loc_cpu=query_start_loc_cpu,
@@ -681,6 +703,7 @@ def make_local_attention_virtual_batches(
         seq_lens_cpu_upper_bound=common_attn_metadata.seq_lens_cpu_upper_bound,
         _seq_lens_cpu=seq_lens_cpu,
         _num_computed_tokens_cpu=torch.from_numpy(num_computed_tokens_local),
+        is_prefilling=is_prefilling,
     ), make_block_table
 
 
@@ -749,6 +772,7 @@ def make_kv_sharing_fast_prefill_common_attn_metadata(
         seq_lens_cpu_upper_bound=common_attn_metadata.seq_lens_cpu_upper_bound,
         _seq_lens_cpu=common_attn_metadata._seq_lens_cpu,
         _num_computed_tokens_cpu=common_attn_metadata._num_computed_tokens_cpu,
+        is_prefilling=common_attn_metadata.is_prefilling,
     )
     return common_attn_metadata
 

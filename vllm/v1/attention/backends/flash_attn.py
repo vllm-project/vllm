@@ -28,7 +28,10 @@ from vllm.v1.attention.backends.fa_utils import (
     is_fa_version_supported,
     is_flash_attn_varlen_func_available,
 )
-from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
+from vllm.v1.attention.backends.utils import (
+    find_attention_impl_variant,
+    get_dcp_local_seq_lens,
+)
 from vllm.v1.attention.ops.common import cp_lse_ag_out_rs
 from vllm.v1.attention.ops.dcp_alltoall import dcp_a2a_lse_reduce
 from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
@@ -310,9 +313,10 @@ def _get_sliding_window_configs(
     sliding_window_configs: set[tuple[int, int] | None] = set()
     layers = get_layers_from_vllm_config(vllm_config, Attention)
     for layer in layers.values():
-        if not isinstance(layer.impl, FlashAttentionImpl):
+        impl = find_attention_impl_variant(layer.impl, FlashAttentionImpl)
+        if impl is None:
             continue
-        sliding_window_configs.add(layer.impl.sliding_window)
+        sliding_window_configs.add(impl.sliding_window)
     return sliding_window_configs
 
 

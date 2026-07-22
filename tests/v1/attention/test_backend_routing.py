@@ -21,6 +21,7 @@ from vllm.v1.attention.backend import (
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.attention.backends.utils import (
     create_composite_attention_backend,
+    find_attention_impl_variant,
     get_kv_cache_layout,
     kv_layouts_compatible,
     set_kv_cache_layout,
@@ -433,6 +434,38 @@ def test_mrv2_builds_metadata_with_the_routed_backend():
     assert decode_metadata["layer"]._attention_backend_variant == 1
 
 
+def test_composite_backend_requires_is_prefilling():
+    spec = _attention_spec()
+    backend = create_composite_attention_backend(_GeneralBackend, _DecodeBackend)
+    group = AttentionGroup(
+        backend=backend,
+        layer_names=["layer"],
+        kv_cache_spec=spec,
+        kv_cache_group_id=0,
+    )
+    group.create_metadata_builders(None, torch.device("cpu"))
+    config = KVCacheConfig(
+        num_blocks=1,
+        kv_cache_tensors=[],
+        kv_cache_groups=[KVCacheGroupSpec(["layer"], spec)],
+    )
+
+    with pytest.raises(AssertionError, match="require is_prefilling"):
+        build_attn_metadata(
+            attn_groups=[[group]],
+            num_reqs=1,
+            num_tokens=1,
+            query_start_loc_gpu=torch.tensor([0, 1], dtype=torch.int32),
+            query_start_loc_cpu=torch.tensor([0, 1], dtype=torch.int32),
+            max_query_len=1,
+            seq_lens=torch.tensor([1], dtype=torch.int32),
+            max_seq_len=1,
+            block_tables=[torch.zeros(1, 1, dtype=torch.int32)],
+            slot_mappings=torch.zeros(1, 1, dtype=torch.int64),
+            kv_cache_config=config,
+        )
+
+
 class _Layer(AttentionLayerBase):
     def get_attn_backend(self):
         return create_composite_attention_backend(_GeneralBackend, _DecodeBackend)
@@ -482,7 +515,7 @@ def test_decode_backend_limits_cudagraph_support():
     _, cg_support, _ = init_attn_backend(kv_cache_config, config, torch.device("cpu"))
 
     assert cg_support.min_cg_support == AttentionCGSupport.UNIFORM_BATCH
-    assert cg_support.min_cg_attn_backend.endswith("Composite")
+    assert cg_support.min_cg_attn_backend == "_UniformDecodeBackend"
 
 
 @pytest.mark.parametrize("backend_variant", [0, 1])
@@ -494,6 +527,30 @@ def test_composite_impl_selects_from_metadata(backend_variant):
     selected = impl.get_impl_for_metadata(metadata)
 
     assert selected is (impl.decode_impl if backend_variant else impl.general_impl)
+
+
+def test_composite_impl_exposes_backend_specific_variants():
+    class GeneralImpl(_RoutingImpl):
+        pass
+
+    class DecodeImpl(_RoutingImpl):
+        pass
+
+    class GeneralBackend(_GeneralBackend):
+        @staticmethod
+        def get_impl_cls():
+            return GeneralImpl
+
+    class DecodeBackend(_DecodeBackend):
+        @staticmethod
+        def get_impl_cls():
+            return DecodeImpl
+
+    backend = create_composite_attention_backend(GeneralBackend, DecodeBackend)
+    impl = backend.get_impl_cls()(8, 128, 0.1)
+
+    assert find_attention_impl_variant(impl, GeneralImpl) is impl.general_impl
+    assert find_attention_impl_variant(impl, DecodeImpl) is impl.decode_impl
 
 
 def test_dcp_checks_decode_implementation():

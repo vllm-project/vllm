@@ -6527,10 +6527,16 @@ class GPUModelRunner(
             # Clean up quantized KV cache scale views
             # (int8_per_token_head, fp8_per_token_head)
             if hasattr(layer, "impl"):
-                if hasattr(layer.impl, "_k_scale_cache"):
-                    layer.impl._k_scale_cache = None
-                if hasattr(layer.impl, "_v_scale_cache"):
-                    layer.impl._v_scale_cache = None
+                impls = (
+                    layer.impl.get_impl_variants()
+                    if hasattr(layer.impl, "get_impl_variants")
+                    else (layer.impl,)
+                )
+                for impl in impls:
+                    if hasattr(impl, "_k_scale_cache"):
+                        impl._k_scale_cache = None
+                    if hasattr(impl, "_v_scale_cache"):
+                        impl._v_scale_cache = None
 
         gc.collect()
         torch.accelerator.empty_cache()

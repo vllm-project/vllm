@@ -28,6 +28,7 @@ from vllm.v1.attention.backend import (
     MultipleOf,
 )
 from vllm.v1.attention.backends.utils import (
+    find_attention_impl_variant,
     split_decodes_prefills_and_extends,
 )
 from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
@@ -429,11 +430,12 @@ class AiterFlashAttentionMetadataBuilder(
         for name, layer in layers.items():
             if name not in layer_names:
                 continue
-            assert isinstance(layer.impl, AiterFlashAttentionImpl), (
+            impl = find_attention_impl_variant(layer.impl, AiterFlashAttentionImpl)
+            assert impl is not None, (
                 "Aiter Flash Attention Metadata Builder can only be used "
                 "with Aiter Flash Attention Impl."
             )
-            sliding_window_configs.add(layer.impl.sliding_window)
+            sliding_window_configs.add(impl.sliding_window)
 
         while len(sliding_window_configs) > 0:
             sliding_window_config = sliding_window_configs.pop()

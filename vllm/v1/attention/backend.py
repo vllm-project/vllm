@@ -461,7 +461,7 @@ class CommonAttentionMetadata:
     sparse metadata for DeepSeek V4 C128A layers."""
 
     is_prefilling: torch.Tensor | None = None
-    """(batch_size,) bool tensor: True if request is still in prefill phase
+    """(batch_size,) CPU bool tensor: True if request is still in prefill phase
     (num_computed_tokens < num_prompt_tokens). Used by some backends to
     distinguish actual decodes from short extends."""
 
@@ -642,6 +642,9 @@ class AttentionMetadataBuilder(ABC, Generic[M]):
         self.layer_names = layer_names
         self.vllm_config = vllm_config
         self.device = device
+
+    def get_builder_variants(self) -> tuple["AttentionMetadataBuilder", ...]:
+        return (self,)
 
     @classmethod
     def get_cudagraph_support(
@@ -887,6 +890,9 @@ class AttentionImplBase(ABC, Generic[T]):
         self, attn_metadata: AttentionMetadata
     ) -> "AttentionImplBase":
         return self
+
+    def get_impl_variants(self) -> tuple["AttentionImplBase", ...]:
+        return (self,)
 
 
 class AttentionImpl(AttentionImplBase[T], Generic[T]):

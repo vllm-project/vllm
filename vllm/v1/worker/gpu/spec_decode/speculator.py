@@ -239,6 +239,7 @@ class DraftModelSpeculator(BaseSpeculator):
             slot_mappings=slot_mappings,
             kv_cache_config=self.kv_cache_config,
             causal=causal,
+            is_prefilling=torch.zeros(num_reqs_padded, dtype=torch.bool),
         )
         return attn_metadata
 
