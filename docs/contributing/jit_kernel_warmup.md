@@ -5,46 +5,36 @@ CuTeDSL, TileLang, and backend-specific libraries. These kernels often
 specialize on static values such as tile sizes, head dimensions, dtypes,
 pointer alignment, or backend selector choices.
 
-JIT warmup should make those specializations available during engine startup,
-before the first real request.
+JIT warmup makes those specializations available during engine startup, before
+the first real request. The shared contract is designed around the kernel's
+**compile-key space**, not around representative non-key inputs. It also
+provides a compile-only warmup path, avoiding dummy runtime launches and real
+tensor allocation.
 
-The shared warmup contract is designed around the kernel's **compile-key space**,
-not around representative non-key inputs. It also provides a compile-only warmup
-API, avoiding dummy runtime launches and real tensor allocation. Dummy runs can
-be expensive and may have side effects; each DSL should expose fake tensor/spec
-descriptors suitable for compilation only.
-
-Use this contract when adding a new warmable JIT kernel or migrating an existing
-warmup path.
+Use this contract when adding a new warmable JIT kernel or migrating an
+existing warmup path.
 
 ## Design Goals
 
 A warmup implementation should:
 
-- keep the warmup definition close to the kernel that owns the specialization
-  logic;
-- warm actual compile keys rather than hoping representative runtime inputs,
-  such as token sizes, map to every needed specialization;
+- keep warmup logic close to the kernel that owns the specialization rules;
+- warm actual compile keys instead of hoping representative runtime inputs map
+  to every needed specialization;
 - avoid dummy runtime launches and real tensor allocation;
 - run under the standard `kernel_warmup()` path, including logging, ordering,
   feature gates, and exception handling;
 - keep model construction cheap and side-effect free;
-- make runtime execution and startup compilation easy to review separately.
-
-The `compile(compile_key)` method means "make this specialization available".
-Depending on the backend, that may compile from source, call a compile-only API,
-load an already-built artifact, or compile on cache miss.
+- keep runtime execution and startup compilation easy to review separately.
 
 ## Kernel Contract
 
-Each warmable kernel should expose a wrapper object near the kernel's
-normal runtime entry point. The wrapper owns the dispatch logic, warmup key
-generation, and compile-only operation.
+Each warmable kernel should expose a wrapper object near the kernel's normal
+runtime entry point. The backend-agnostic pieces are `CompileKey`,
+`dispatch(...)`, and `get_warmup_keys(...)`. Backend-specific details belong
+inside `kernel(...)`, `compile(...)`, and the runtime `__call__(...)` wrapper.
 
-The backend-agnostic pieces are `CompileKey`, `dispatch(...)`, and
-`get_warmup_keys(...)`. Backend-specific details belong inside `kernel(...)`,
-`compile(...)`, and the runtime `__call__(...)` wrapper. A high-level structure
-looks like this:
+Prefer this shape:
 
 ```python
 class MyKernel(VllmJitKernel["MyKernel.CompileKey"]):
@@ -73,13 +63,12 @@ class MyKernel(VllmJitKernel["MyKernel.CompileKey"]):
 MY_KERNEL = MyKernel()
 ```
 
-The module-level singleton should be used by warmup and by the
-runtime call path.
-This keeps dispatch behavior shared instead of duplicated.
+The module-level singleton should be used by warmup and by the runtime call
+path. This keeps dispatch behavior shared instead of duplicated.
 
 ### Shared Methods
 
-`VllmJitKernel` provides the shared mechanics for all warmable kernels:
+`VllmJitKernel` provides common mechanics for all warmable kernels:
 
 - `warmup(*args, **kwargs)` calls `get_warmup_keys(...)` and then
   `compile(compile_key)` for each returned key.
@@ -91,15 +80,13 @@ This keeps dispatch behavior shared instead of duplicated.
 
 ### Compile Key
 
-`CompileKey` is a frozen dataclass that identifies one compiled
-specialization. It must be hashable so warmup can deduplicate keys.
+`CompileKey` is a frozen dataclass that identifies one compiled specialization.
+It must be hashable so warmup can deduplicate keys.
 
-Include fields that the backend actually specializes on. Avoid fields that
-are only runtime values.
-
-When unsure, inspect the backend JIT cache key, specialization arguments, or use
-the JIT monitor in verbose mode (`--jit-monitor-verbose`) to get more hints
-about uncovered compile keys, for example:
+Include fields that the backend actually specializes on. Avoid fields that are
+only runtime values. When unsure, inspect the backend JIT cache key,
+specialization arguments, or the JIT monitor in verbose mode
+(`--jit-monitor-verbose`) to find uncovered compile keys:
 
 ```text
 Triton kernel JIT compilation during inference: _compute_slot_mapping_kernel (
@@ -107,16 +94,24 @@ constexprs={BLOCK_SIZE=1024, CP_KV_CACHE_INTERLEAVE_SIZE=1, PAD_ID=-1, TOTAL_CP_
 ...)
 ```
 
+### Compile Method
+
+`compile(compile_key)` means "make this specialization available". Depending on
+the backend, that may compile from source, call a compile-only API, load an
+already-built artifact, or compile on cache miss.
+
+`compile(...)` should not launch a real inference workload or allocate large
+real tensors. Each DSL should expose fake tensor/spec descriptors suitable for
+compilation only.
+
 ## AST-Traced Dispatch
 
-The warmup system uses Python AST to trace `dispatch(...)`.
+The warmup system uses Python AST to trace `dispatch(...)`. One call to
+`dispatch(...)` returns one `CompileKey`, but many input points may map to the
+same key. It should express the same specialization logic used by the runtime
+path.
 
 ### Dispatch Body
-
-`dispatch(...)` maps one concrete runtime-like input point to the `CompileKey`
-specialization that would be used for that point. Many input points may map to
-the same key, so this is not a one-to-one mapping over the input space. It
-should express the same specialization logic used by the runtime path.
 
 The traced function body may contain:
 
@@ -124,48 +119,19 @@ The traced function body may contain:
 - one `return self.CompileKey(...)` call.
 
 Local assignments let a kernel name intermediate specialization choices once
-and reuse them across fields. For example:
+and reuse them across fields:
 
 ```python
 def dispatch(
     self,
     *,
-    is_local: bool,
-    num_heads: int,
-    num_kv_heads: int,
-    head_dim: int,
-    rel_extent: int,
-    dtype: torch.dtype,
-    kv_dtype: torch.dtype,
-    block_size: int,
-    window_size: tuple[int, int],
-    max_kv_len: int,
-    query_len: int,
-    num_reqs: int,
+    num_tokens: int,
+    vectorized: bool,
 ) -> CompileKey:
-    max_seqlen_q = bucket_max_seqlen_q(query_len)
-    num_splits = inkling_fa4_num_splits(
-        is_local=is_local,
-        batch_size=num_reqs,
-        max_query_len=max_seqlen_q,
-        num_heads=num_heads,
-        num_kv_heads=num_kv_heads,
-        max_kv_len=max_kv_len,
-    )
+    block_size = next_power_of_2(num_tokens)
     return self.CompileKey(
-        is_local=is_local,
-        num_heads=num_heads,
-        num_kv_heads=num_kv_heads,
-        head_dim=head_dim,
-        rel_extent=rel_extent,
-        dtype=dtype,
-        kv_dtype=kv_dtype,
-        block_size=block_size,
-        window_size=window_size,
-        max_seqlen_q=max_seqlen_q,
-        num_splits=num_splits,
-        num_warps_bucket=(_num_warps_bucket(num_reqs) if num_splits > 1 else None),
-        large_num_reqs=num_reqs > 1024,
+        BLOCK_SIZE=block_size,
+        VECTOR_WIDTH=4 if vectorized and block_size >= 4 else 1,
     )
 ```
 
@@ -178,7 +144,7 @@ backend imports inside `dispatch(...)`. Put environment and model gating in
 The AST evaluator supports the following expression features inside local
 assignments and `CompileKey(...)` fields:
 
-| Feature | What it allows |
+| Feature | What It Allows |
 | --- | --- |
 | Names | Read dispatch inputs, local assignments, defaults, and module globals. |
 | Constants | Use literals such as integers, strings, booleans, and `None`. |
@@ -201,7 +167,7 @@ def dispatch(self, *, num_tokens: int, block_size: int) -> CompileKey:
 ```
 
 Helper calls cannot use `**kwargs`, and `CompileKey(...)` cannot be constructed
-from `**kwargs`. This keeps the traced fields explicit.
+from `**kwargs`. This keeps traced fields explicit.
 
 Unsupported constructs currently include loops, statement-level `if`,
 comprehensions, lambda expressions, mutation, subscripting, dict/set literals,
@@ -228,14 +194,15 @@ Default dispatch arguments are honored. If a field depends on a parameter with a
 default and `get_warmup_keys(...)` does not pass that parameter, the default is
 used when building the key.
 
-### Warmup Input Expansion
+## Warmup Input Expansion
 
 `get_warmup_keys(...)` returns the representative compile keys needed for a
 given vLLM configuration. Prefer deriving keys through `_trace_dispatch(...)`
-instead of manually reconstructing the compile key.
+instead of manually reconstructing the compile key. `_trace_dispatch(...)`
+expands only arguments used by `dispatch(...)`; unused warmup inputs are
+ignored.
 
-`_trace_dispatch(...)` expands only arguments used by `dispatch(...)`
-expressions. Unused warmup inputs are ignored.
+### Integer Ranges
 
 Use `WarmupIntRange` for integer ranges:
 
@@ -248,6 +215,8 @@ return self._trace_dispatch(self.dispatch)(
 `WarmupIntRange(start, stop, step)` follows Python `range(...)` semantics:
 `start` is inclusive, `stop` is exclusive, and `step` defaults to 1.
 
+### Independent Alternatives
+
 Use tuples or lists for independent alternatives. Multiple expanded inputs form
 a cartesian product:
 
@@ -258,6 +227,8 @@ return self._trace_dispatch(self.dispatch)(
     COMPRESS_RATIO=list(compress_ratios),
 )
 ```
+
+### Coupled Inputs
 
 Use `zip_inputs(...)` when values must vary together row-by-row:
 
@@ -281,6 +252,34 @@ coupling inside each group.
 Every row in a `zip_inputs(...)` group must use the same string keys. A
 `zip_inputs(...)` group cannot specify a field that is also specified as a
 keyword input to `_trace_dispatch(...)`.
+
+### Conditional Filtering
+
+Use `_when=...` to filter generated input points before they are passed to
+`dispatch(...)`. This is useful when independent ranges contain invalid
+combinations, but the validity rule belongs with the kernel warmup definition.
+
+```python
+def _is_valid_warmup_input(
+    self,
+    *,
+    query_len: int,
+    num_reqs: int,
+    max_num_batched_tokens: int,
+) -> bool:
+    return query_len + num_reqs - 1 <= max_num_batched_tokens
+
+
+return self._trace_dispatch(self.dispatch)(
+    query_len=WarmupIntRange(1, max_tokens + 1),
+    num_reqs=WarmupIntRange(1, max_reqs + 1),
+    max_num_batched_tokens=max_tokens,
+    _when=self._is_valid_warmup_input,
+)
+```
+
+The predicate is evaluated on the expanded warmup inputs. If it returns
+`False`, that input point is skipped and no `CompileKey` is produced for it.
 
 ### Key Deduplication
 
