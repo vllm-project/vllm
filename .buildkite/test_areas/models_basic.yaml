@@ -46,6 +46,19 @@ steps:
       depends_on:
       - image-build-amd
 
+- label: Inkling Unit Tests (B200)
+  key: inkling-unit-tests-b200
+  timeout_in_minutes: 40
+  device: b200-k8s
+  source_file_dependencies:
+  - vllm/models/inkling/
+  - vllm/cute_utils/
+  - cmake/external_projects/tml_fa4.cmake
+  - tests/models/inkling/
+  commands:
+    # FA4 kernel tests require SM100; the suite skips them elsewhere.
+    - pytest -v -s models/inkling
+
 - label: Basic Models Test (Other CPU) # 5min
   key: basic-models-test-other-cpu
   depends_on:
