@@ -651,9 +651,9 @@ class MiniCPMV4_6ProcessingInfo(MiniCPMVProcessingInfo):
 class MiniCPMV4_6ViTWindowAttentionSelfAttn(nn.Module):
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_stacked={
-            "q_proj": ("qkv_proj", "q"),
-            "k_proj": ("qkv_proj", "k"),
-            "v_proj": ("qkv_proj", "v"),
+            ".q_proj": (".qkv_proj", "q"),
+            ".k_proj": (".qkv_proj", "k"),
+            ".v_proj": (".qkv_proj", "v"),
         }
     )
 
