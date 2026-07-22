@@ -28,7 +28,9 @@ steps:
       'export VLLM_USE_V2_MODEL_RUNNER=1 &&
       cd tests &&
       pytest -v -s v1/engine/test_llm_engine.py -k "not test_engine_metrics" &&
+      pytest -v -s v1/e2e/general/test_context_length.py &&
       ENFORCE_EAGER=1 pytest -v -s v1/e2e/general/test_async_scheduling.py -k "not ngram" &&
+      pytest -v -s entrypoints/llm/test_struct_output_generate.py -k "xgrammar and not speculative_config6 and not speculative_config7 and not speculative_config8 and not speculative_config0" &&
       pytest -v -s v1/e2e/general/test_min_tokens.py'
 
 - label: Model Runner V2 Examples (Intel)
@@ -60,3 +62,55 @@ steps:
       python3 basic/offline_inference/generate.py --model facebook/opt-125m &&
       python3 generate/multimodal/vision_language_offline.py --seed 0 &&
       python3 features/automatic_prefix_caching/prefix_caching_offline.py'
+
+- label: Model Runner V2 Distributed (2 GPUs)
+  timeout_in_minutes: 50
+  device: intel_gpu
+  agent_tags:
+    label: production
+    gpu: 2+
+    mem: 16+
+  no_plugin: true
+  working_dir: "."
+  env:
+    REGISTRY: "public.ecr.aws/q9t5s3a7"
+    REPO: "vllm-ci-test-repo"
+    VLLM_TEST_DEVICE: "xpu"
+  source_file_dependencies:
+    - vllm/v1/worker/gpu/
+    - vllm/v1/worker/gpu_worker.py
+    - tests/basic_correctness/test_basic_correctness.py
+    - tests/v1/distributed/test_async_llm_dp.py
+    - tests/v1/distributed/test_eagle_dp.py
+  commands:
+    - >-
+      bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+      'export VLLM_USE_V2_MODEL_RUNNER=1 &&
+      cd tests &&
+      TARGET_TEST_SUITE=L4 pytest -v -s basic_correctness/test_basic_correctness.py -m "distributed(num_gpus=2)" -k "not ray and not True"'
+
+- label: Model Runner V2 Spec Decode
+  timeout_in_minutes: 50
+  device: intel_gpu
+  agent_tags:
+    label: production
+    gpu: 1+
+    mem: 24+
+  no_plugin: true
+  working_dir: "."
+  env:
+    REGISTRY: "public.ecr.aws/q9t5s3a7"
+    REPO: "vllm-ci-test-repo"
+    VLLM_TEST_DEVICE: "xpu"
+  source_file_dependencies:
+  - vllm/v1/worker/gpu/
+  - vllm/v1/worker/gpu_worker.py
+  - tests/v1/spec_decode/test_max_len.py
+  - tests/v1/spec_decode/test_rejection_sampler_utils.py
+  - tests/v1/e2e/spec_decode/test_spec_decode.py
+  commands:
+    - >-
+      bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+      'export VLLM_USE_V2_MODEL_RUNNER=1 &&
+      cd tests &&
+      pytest -v -s v1/spec_decode/test_synthetic_rejection_sampler_utils.py'

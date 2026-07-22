@@ -61,3 +61,41 @@ steps:
       bash .buildkite/scripts/hardware_ci/run-intel-test.sh
       'cd tests &&
       pytest -v -s v1/engine --ignore v1/engine/test_preprocess_error_handling.py'
+
+- label: V1 e2e (2 GPUs)
+  timeout_in_minutes: 30
+  device: intel_gpu
+  agent_tags:
+    label: production
+    gpu: 2+
+    mem: 16+
+  no_plugin: true
+  working_dir: "."
+  env:
+    REGISTRY: "public.ecr.aws/q9t5s3a7"
+    REPO: "vllm-ci-test-repo"
+    VLLM_TEST_DEVICE: "xpu"
+  source_file_dependencies:
+    - vllm/compilation/
+    - vllm/config/
+    - vllm/distributed/
+    - vllm/engine/
+    - vllm/envs.py
+    - vllm/forward_context.py
+    - vllm/inputs/
+    - vllm/logger.py
+    - vllm/logging_utils/
+    - vllm/model_executor/
+    - vllm/multimodal/
+    - vllm/platforms/
+    - vllm/sampling_params.py
+    - vllm/transformers_utils/
+    - vllm/triton_utils/
+    - vllm/utils/
+    - vllm/v1/
+    - tests/v1/e2e/spec_decode
+  commands:
+  - >-
+      bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+      'cd tests &&
+      pytest -v -s v1/e2e/spec_decode/test_spec_decode.py -k "tensor_parallelism"'

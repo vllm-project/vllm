@@ -1,9 +1,10 @@
-group: Kernels Intel
-depends_on: 
+group: Samplers Intel
+depends_on:
   - image-build-xpu
 steps:
-- label: vLLM IR Tests
-  timeout_in_minutes: 30
+- label: Samplers Test (FlashInfer)
+  key: samplers-test-flashinfer-intel
+  timeout_in_minutes: 40
   device: intel_gpu
   agent_tags:
     label: production
@@ -16,10 +17,13 @@ steps:
     REPO: "vllm-ci-test-repo"
     VLLM_TEST_DEVICE: "xpu"
   source_file_dependencies:
-    - vllm/ir
-    - vllm/kernels
+  - vllm/model_executor/layers
+  - vllm/sampling_metadata.py
+  - tests/samplers
+  - tests/conftest.py
+  - vllm/entrypoints/generate/beam_search
   commands:
     - >-
       bash .buildkite/scripts/hardware_ci/run-intel-test.sh
       'cd tests &&
-      pytest -v -s kernels/ir'
+      VLLM_USE_FLASHINFER_SAMPLER=1 pytest -v -s samplers'
