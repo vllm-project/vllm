@@ -685,7 +685,6 @@ class EngineArgs:
     model_impl: str = ModelConfig.model_impl
     override_attention_dtype: str | None = ModelConfig.override_attention_dtype
     attention_backend: AttentionBackendEnum | None = AttentionConfig.backend
-    attention_prefill_backend: AttentionBackendEnum | None = AttentionConfig.backend
     attention_decode_backend: AttentionBackendEnum | None = (
         AttentionConfig.decode_backend
     )
@@ -929,10 +928,9 @@ class EngineArgs:
             description=AttentionConfig.__doc__,
         )
         attention_group.add_argument(
-            "--attention-backend", **attention_kwargs["backend"]
-        )
-        attention_group.add_argument(
-            "--attention-prefill-backend", **attention_kwargs["backend"]
+            "--attention-backend",
+            "--attention-prefill-backend",
+            **attention_kwargs["backend"],
         )
         attention_group.add_argument(
             "--attention-decode-backend", **attention_kwargs["decode_backend"]
@@ -2246,29 +2244,15 @@ class EngineArgs:
 
         # Attention config overrides
         attention_config = copy.deepcopy(self.attention_config)
-        attention_backend = AttentionConfig.validate_backend_before(
-            self.attention_backend
-        )
-        attention_prefill_backend = AttentionConfig.validate_backend_before(
-            self.attention_prefill_backend
-        )
-        if (
-            attention_backend is not None
-            and attention_prefill_backend is not None
-            and attention_backend != attention_prefill_backend
-        ):
-            raise ValueError(
-                "attention_backend and attention_prefill_backend are aliases "
-                "and cannot specify different backends"
-            )
-        attention_backend = attention_backend or attention_prefill_backend
-        if attention_backend is not None:
+        if self.attention_backend is not None:
             if attention_config.backend is not None:
                 raise ValueError(
-                    "attention_backend/attention_prefill_backend and "
-                    "attention_config.backend are mutually exclusive"
+                    "attention_backend and attention_config.backend "
+                    "are mutually exclusive"
                 )
-            attention_config.backend = attention_backend
+            attention_config.backend = AttentionConfig.validate_backend_before(
+                self.attention_backend
+            )
         if self.attention_decode_backend is not None:
             attention_decode_backend = AttentionConfig.validate_backend_before(
                 self.attention_decode_backend

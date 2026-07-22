@@ -117,17 +117,10 @@ def init_attn_backend(
             # counts (e.g. a spec-decode draft head and its target) get separate
             # metadata builders.
             num_heads_q = getattr(attn_layers[layer_name], "num_heads", 0)
-            key = (
-                attn_backend.full_cls_name(),
-                layer_kv_cache_spec,
-                num_heads_q,
-            )
+            key = (attn_backend.full_cls_name(), layer_kv_cache_spec, num_heads_q)
             if key not in group_map:
                 group_map[key] = AttentionGroup(
-                    backend=attn_backend,
-                    layer_names=[layer_name],
-                    kv_cache_spec=layer_kv_cache_spec,
-                    kv_cache_group_id=kv_cache_group_id,
+                    attn_backend, [layer_name], layer_kv_cache_spec, kv_cache_group_id
                 )
                 group_order.append(key)
             else:
@@ -166,8 +159,6 @@ def init_attn_backend(
                 for variant_builder in builders:
                     if hasattr(variant_builder, "set_workspace_buffer"):
                         variant_builder.set_workspace_buffer(attn_backend_workspace)
-            # The decode specialist is used by full decode graphs, so both
-            # routed backends must support the resolved cudagraph mode.
             backends = group.backend.get_backend_variants()
             assert len(builders) == len(backends)
             for variant_builder, backend in zip(builders, backends):

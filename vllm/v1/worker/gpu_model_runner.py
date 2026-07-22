@@ -6526,12 +6526,7 @@ class GPUModelRunner(
             # Clean up quantized KV cache scale views
             # (int8_per_token_head, fp8_per_token_head)
             if hasattr(layer, "impl"):
-                impls = (
-                    layer.impl.get_impl_variants()
-                    if hasattr(layer.impl, "get_impl_variants")
-                    else (layer.impl,)
-                )
-                for impl in impls:
+                for impl in layer.impl.get_impl_variants():
                     if hasattr(impl, "_k_scale_cache"):
                         impl._k_scale_cache = None
                     if hasattr(impl, "_v_scale_cache"):
@@ -7013,9 +7008,7 @@ class GPUModelRunner(
                 num_heads_q = getattr(layers[layer_name], "num_heads", 0)
                 key = (full_cls_name, layer_kv_cache_spec, num_heads_q)
                 attn_backends[key] = AttentionGroupKey(
-                    attn_backend,
-                    layer_kv_cache_spec,
-                    num_heads_q,
+                    attn_backend, layer_kv_cache_spec, num_heads_q
                 )
                 attn_backend_layers[key].append(layer_name)
             return (
@@ -7034,10 +7027,10 @@ class GPUModelRunner(
             attn_groups: list[AttentionGroup] = []
             for key, layer_names in attn_backends_map.items():
                 attn_group = AttentionGroup(
-                    backend=key.attn_backend,
-                    layer_names=layer_names,
-                    kv_cache_spec=key.kv_cache_spec,
-                    kv_cache_group_id=kv_cache_group_id,
+                    key.attn_backend,
+                    layer_names,
+                    key.kv_cache_spec,
+                    kv_cache_group_id,
                 )
 
                 attn_groups.append(attn_group)

@@ -35,7 +35,6 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.v1.attention.backend import (
     AttentionBackend,
-    AttentionCGSupport,
     AttentionImpl,
     AttentionMetadata,
     AttentionMetadataBuilder,
@@ -68,6 +67,7 @@ def _intersect_kernel_block_sizes(
     from vllm.v1.attention.backend import MultipleOf
 
     result: list[int | MultipleOf] = []
+    seen: set[tuple[type, int]] = set()
     for lhs in first.get_supported_kernel_block_sizes():
         for rhs in second.get_supported_kernel_block_sizes():
             candidate: int | MultipleOf | None = None
@@ -81,13 +81,11 @@ def _intersect_kernel_block_sizes(
                 candidate = lhs
             if candidate is None:
                 continue
-            key = candidate.base if isinstance(candidate, MultipleOf) else candidate
-            if not any(
-                (item.base if isinstance(item, MultipleOf) else item) == key
-                and isinstance(item, MultipleOf) == isinstance(candidate, MultipleOf)
-                for item in result
-            ):
+            value = candidate.base if isinstance(candidate, MultipleOf) else candidate
+            key = (type(candidate), value)
+            if key not in seen:
                 result.append(candidate)
+                seen.add(key)
     return result
 
 
@@ -134,9 +132,11 @@ def create_composite_attention_backend(
             )
 
         def get_impl_for_metadata(self, attn_metadata):
-            if attn_metadata._attention_backend_variant:
-                return self.decode_impl
-            return self.general_impl
+            return (
+                self.decode_impl
+                if attn_metadata._attention_backend_variant
+                else self.general_impl
+            )
 
         def get_impl_variants(self):
             return self.general_impl, self.decode_impl
@@ -167,22 +167,24 @@ def create_composite_attention_backend(
             )
 
         def process_weights_after_loading(self, act_dtype: torch.dtype):
-            self.general_impl.process_weights_after_loading(act_dtype)
-            self.decode_impl.process_weights_after_loading(act_dtype)
+            for impl in self.get_impl_variants():
+                impl.process_weights_after_loading(act_dtype)
 
         def fused_output_quant_supported(self, quant_key):
-            return self.general_impl.fused_output_quant_supported(
-                quant_key
-            ) and self.decode_impl.fused_output_quant_supported(quant_key)
+            return all(
+                impl.fused_output_quant_supported(quant_key)
+                for impl in self.get_impl_variants()
+            )
 
         def fused_qk_norm_rope_kvcache_supported(self):
-            return self.general_impl.fused_qk_norm_rope_kvcache_supported() and (
-                self.decode_impl.fused_qk_norm_rope_kvcache_supported()
+            return all(
+                impl.fused_qk_norm_rope_kvcache_supported()
+                for impl in self.get_impl_variants()
             )
 
         def fused_rope_kvcache_supported(self):
-            return self.general_impl.fused_rope_kvcache_supported() and (
-                self.decode_impl.fused_rope_kvcache_supported()
+            return all(
+                impl.fused_rope_kvcache_supported() for impl in self.get_impl_variants()
             )
 
     class CompositeAttentionMetadataBuilder(AttentionMetadataBuilder):
@@ -208,21 +210,6 @@ def create_composite_attention_backend(
                 default=None,
             )
 
-        @classmethod
-        def get_cudagraph_support(cls, vllm_config, kv_cache_spec):
-            general = general_builder_cls.get_cudagraph_support(
-                vllm_config, kv_cache_spec
-            )
-            decode = decode_builder_cls.get_cudagraph_support(
-                vllm_config, kv_cache_spec
-            )
-            return AttentionCGSupport(min(general.value, decode.value))
-
-        @staticmethod
-        def _tag(metadata, backend_variant: int):
-            metadata._attention_backend_variant = backend_variant
-            return metadata
-
         @staticmethod
         def _select_backend_variant(common_attn_metadata):
             is_prefilling = common_attn_metadata.is_prefilling
@@ -238,46 +225,41 @@ def create_composite_attention_backend(
             builder = self.decode_builder if backend_variant else self.general_builder
             return builder, backend_variant
 
-        def build(self, common_prefix_len, common_attn_metadata, fast_build=False):
+        def _build(self, method, common_attn_metadata, **kwargs):
             builder, backend_variant = self._builder(common_attn_metadata)
-            metadata = builder.build(
-                common_prefix_len,
+            metadata = getattr(builder, method)(
+                common_attn_metadata=common_attn_metadata, **kwargs
+            )
+            metadata._attention_backend_variant = backend_variant
+            return metadata
+
+        def build(self, common_prefix_len, common_attn_metadata, fast_build=False):
+            return self._build(
+                "build",
                 common_attn_metadata,
+                common_prefix_len=common_prefix_len,
                 fast_build=fast_build,
             )
-            return self._tag(metadata, backend_variant)
 
         def build_for_cudagraph_capture(self, common_attn_metadata):
-            builder, backend_variant = self._builder(common_attn_metadata)
-            metadata = builder.build_for_cudagraph_capture(common_attn_metadata)
-            return self._tag(metadata, backend_variant)
+            return self._build("build_for_cudagraph_capture", common_attn_metadata)
 
         def build_for_drafting(self, common_attn_metadata, draft_index):
-            builder, backend_variant = self._builder(common_attn_metadata)
-            metadata = builder.build_for_drafting(common_attn_metadata, draft_index)
-            return self._tag(metadata, backend_variant)
+            return self._build(
+                "build_for_drafting",
+                common_attn_metadata,
+                draft_index=draft_index,
+            )
 
         def update_block_table(self, metadata, blk_table, slot_mapping):
-            backend_variant = getattr(metadata, "_attention_backend_variant", 0)
+            backend_variant = metadata._attention_backend_variant
             builder = self.decode_builder if backend_variant else self.general_builder
             updated = builder.update_block_table(metadata, blk_table, slot_mapping)
-            return self._tag(updated, backend_variant)
+            updated._attention_backend_variant = backend_variant
+            return updated
 
         def use_cascade_attention(self, *args, **kwargs):
             return self.general_builder.use_cascade_attention(*args, **kwargs)
-
-        def _get_workspace_buffer(self):
-            for builder in (self.general_builder, self.decode_builder):
-                if hasattr(builder, "_get_workspace_buffer"):
-                    workspace_buffer = builder._get_workspace_buffer()
-                    if workspace_buffer is not None:
-                        return workspace_buffer
-            return None
-
-        def set_workspace_buffer(self, workspace_buffer):
-            for builder in (self.general_builder, self.decode_builder):
-                if hasattr(builder, "set_workspace_buffer"):
-                    builder.set_workspace_buffer(workspace_buffer)
 
         def get_builder_variants(self):
             return self.general_builder, self.decode_builder
@@ -285,12 +267,6 @@ def create_composite_attention_backend(
     class CompositeAttentionBackend(
         general_backend  # type: ignore[misc, valid-type]
     ):
-        forward_includes_kv_cache_update = False
-
-        @staticmethod
-        def get_name() -> str:
-            return general_backend.get_name()
-
         @staticmethod
         def get_impl_cls():
             return CompositeAttentionImpl
@@ -305,27 +281,17 @@ def create_composite_attention_backend(
 
         @classmethod
         def full_cls_name(cls):
-            general_module, general_name = general_backend.full_cls_name()
-            decode_module, decode_name = decode_backend.full_cls_name()
             return (
                 __name__,
-                f"Composite[{general_module}.{general_name},"
-                f"{decode_module}.{decode_name}]",
+                f"Composite[{general_backend.__module__}."
+                f"{general_backend.__qualname__},{decode_backend.__module__}."
+                f"{decode_backend.__qualname__}]",
             )
 
         @classmethod
         def get_backend_variants(cls):
             return general_backend, decode_backend
 
-    CompositeAttentionImpl.__name__ = (
-        f"{general_impl_cls.__name__}{decode_impl_cls.__name__}Composite"
-    )
-    CompositeAttentionMetadataBuilder.__name__ = (
-        f"{general_builder_cls.__name__}{decode_builder_cls.__name__}Composite"
-    )
-    CompositeAttentionBackend.__name__ = (
-        f"{general_backend.__name__}{decode_backend.__name__}Composite"
-    )
     return CompositeAttentionBackend
 
 
@@ -931,29 +897,10 @@ def kv_layouts_compatible(
     block_size: int | None,
     kv_cache_dtype: str | None,
 ) -> bool:
-    """Whether two backends can share one physical KV cache.
-
-    Batch routing sends the whole batch to one backend per step, but both
-    backends read/write the same physical KV cache, so their layouts must match
-    exactly. Both must also externalize the KV-cache write (so the layer's
-    separate ``unified_kv_cache_update`` op drives the write for whichever
-    backend runs).
-
-    Args:
-        general_backend: The general backend that owns the KV layout.
-        decode_backend: The pure-decode backend that must match its layout.
-        head_size: Attention head size.
-        block_size: Configured cache block size, if fixed by the user.
-        kv_cache_dtype: KV cache data type.
-
-    Returns:
-        True if the two backends can share one KV cache.
-    """
-    # Never mix attention families (standard vs MLA).
+    """Return whether two backends can safely share one physical KV cache."""
     if general_backend.is_mla() != decode_backend.is_mla():
         return False
 
-    # Both must externalize the KV write (the layer writes KV once per step).
     if (
         general_backend.forward_includes_kv_cache_update
         or decode_backend.forward_includes_kv_cache_update
@@ -981,24 +928,12 @@ def kv_layouts_compatible(
     ):
         return False
 
-    cache_dtype = kv_cache_dtype or "auto"
-    probe_block_size = block_size or 16
-    probe_num_blocks = 1024
-    probe_num_kv_heads = 8
-
+    shape_args = (1024, block_size or 16, 8, head_size)
     general_shape = general_backend.get_kv_cache_shape(
-        probe_num_blocks,
-        probe_block_size,
-        probe_num_kv_heads,
-        head_size,
-        cache_dtype_str=cache_dtype,
+        *shape_args, cache_dtype_str=kv_cache_dtype or "auto"
     )
     decode_shape = decode_backend.get_kv_cache_shape(
-        probe_num_blocks,
-        probe_block_size,
-        probe_num_kv_heads,
-        head_size,
-        cache_dtype_str=cache_dtype,
+        *shape_args, cache_dtype_str=kv_cache_dtype or "auto"
     )
     if general_shape != decode_shape:
         return False

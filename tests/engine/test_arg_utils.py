@@ -501,21 +501,6 @@ def test_attention_config():
     with pytest.raises(ValueError, match="mutually exclusive"):
         engine_args.create_engine_config()
 
-    # aliases cannot specify different general backends
-    args = parser.parse_args(
-        [
-            "--model",
-            "facebook/opt-125m",
-            "--attention-backend",
-            "FLASH_ATTN",
-            "--attention-prefill-backend",
-            "TRITON_ATTN",
-        ]
-    )
-    engine_args = EngineArgs.from_cli_args(args)
-    with pytest.raises(ValueError, match="aliases"):
-        engine_args.create_engine_config()
-
 
 def test_prefix_cache_default():
     parser = EngineArgs.add_cli_args(FlexibleArgumentParser())

@@ -105,21 +105,9 @@ def test_draft_attention_backends_are_independent_from_target():
 
 
 class _RoutingImpl(AttentionImpl):
-    def __init__(
-        self,
-        num_heads,
-        head_size,
-        scale,
-        num_kv_heads=None,
-        alibi_slopes=None,
-        sliding_window=None,
-        kv_cache_dtype="auto",
-        logits_soft_cap=None,
-        attn_type="decoder",
-        kv_sharing_target_layer_name=None,
-    ):
+    def __init__(self, num_heads, head_size, scale, *args, **kwargs):
         self.scale = scale
-        self.kv_cache_dtype = kv_cache_dtype
+        self.kv_cache_dtype = "auto"
 
     def forward(self, *args, **kwargs):
         raise NotImplementedError
@@ -152,25 +140,19 @@ class _Backend(AttentionBackend):
 
     @staticmethod
     def get_kv_cache_stride_order(include_num_layers_dimension=False):
-        if include_num_layers_dimension:
-            return (1, 0, 2, 3, 4)
-        return (0, 1, 2, 3)
+        return (1, 0, 2, 3, 4) if include_num_layers_dimension else (0, 1, 2, 3)
 
 
 class _DifferentCrossLayerPackingBackend(_Backend):
     @staticmethod
     def get_kv_cache_stride_order(include_num_layers_dimension=False):
-        if include_num_layers_dimension:
-            return (1, 2, 0, 3, 4)
-        return (0, 1, 2, 3)
+        return (1, 2, 0, 3, 4) if include_num_layers_dimension else (0, 1, 2, 3)
 
 
 class _DifferentLayerLayoutBackend(_Backend):
     @staticmethod
     def get_kv_cache_stride_order(include_num_layers_dimension=False):
-        if include_num_layers_dimension:
-            return (1, 0, 3, 2, 4)
-        return (0, 2, 1, 3)
+        return (1, 0, 3, 2, 4) if include_num_layers_dimension else (0, 2, 1, 3)
 
 
 class _DifferentShapeBackend(_Backend):
@@ -277,7 +259,7 @@ def test_layout_compatibility_rejects_unsafe_pairings(decode_backend):
 class _Builder:
     supports_update_block_table = False
 
-    def __init__(self, kv_cache_spec, layer_names, vllm_config, device):
+    def __init__(self, *args):
         self.reorder_batch_threshold = 1
 
     @classmethod

@@ -347,7 +347,6 @@ class Attention(nn.Module, AttentionLayerBase):
         # During model initialization, the default dtype is set as the model
         # weight and activation dtype.
         dtype = torch.get_default_dtype()
-        routing_enabled = attn_type == AttentionType.DECODER
         if attn_backend is None:
             self.attn_backend = get_attn_backend(
                 head_size,
@@ -418,10 +417,10 @@ class Attention(nn.Module, AttentionLayerBase):
             if block_n is not None:
                 extra_impl_args.setdefault("block_n", block_n)
 
-        selected_decode_backend = self.attn_backend
         decode_backend = vllm_config.attention_config.decode_backend
-        if routing_enabled:
+        if attn_type == AttentionType.DECODER:
             from vllm.v1.attention.backends.utils import (
+                create_composite_attention_backend,
                 get_kv_cache_layout,
                 kv_layouts_compatible,
                 set_kv_cache_layout,
@@ -439,11 +438,7 @@ class Attention(nn.Module, AttentionLayerBase):
                 attn_type=attn_type,
                 has_sliding_window=sliding_window is not None,
                 use_non_causal_override=False,
-                backend_override=(
-                    decode_backend
-                    if isinstance(decode_backend, AttentionBackendEnum)
-                    else None
-                ),
+                backend_override=decode_backend,
                 use_global_backend=False,
             )
             selector_block_size = (
@@ -484,12 +479,6 @@ class Attention(nn.Module, AttentionLayerBase):
                         f"physical KV cache. Choose a decode backend with a "
                         f"matching KV layout."
                     )
-
-        if selected_decode_backend is not self.attn_backend:
-            from vllm.v1.attention.backends.utils import (
-                create_composite_attention_backend,
-            )
-
             self.attn_backend = create_composite_attention_backend(
                 self.attn_backend, selected_decode_backend
             )
