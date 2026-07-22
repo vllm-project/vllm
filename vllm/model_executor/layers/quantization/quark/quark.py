@@ -691,6 +691,8 @@ class QuarkConfig(QuantizationConfig):
     def get_cache_scale_mapper() -> "WeightsMapper":
         """Map Quark KV-cache scale names to vLLM names."""
         orig_to_new_suffix = {
+            ".weight_quantizer.scale": ".weight_scale",
+            ".input_quantizer.scale": ".input_scale",
             ".k_proj.output_scale": ".attn.k_scale",
             ".v_proj.output_scale": ".attn.v_scale",
             ".q_proj.output_scale": ".attn.q_scale",
