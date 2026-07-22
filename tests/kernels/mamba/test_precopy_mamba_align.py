@@ -31,7 +31,7 @@ import torch
 from vllm.model_executor.layers.mamba import mamba_utils as layer_mamba_utils
 from vllm.platforms import current_platform
 from vllm.v1.worker import mamba_utils as worker_mamba_utils
-from vllm.v1.worker.mamba_utils import precopy_mamba_align_fused_kernel
+from vllm.v1.worker.mamba_utils import _TEMPORAL_TILES, precopy_mamba_align_fused_kernel
 
 _parametrize: Callable[..., Callable[[Any], Any]]
 
@@ -150,7 +150,7 @@ def _reference(convs, ssms, bt, src_col, dst_col, bias, num_reqs, conv_dim_first
 @_parametrize("num_reqs", [1, 4, 16])
 @_parametrize("token_bias", [0, 1, 2])
 @_parametrize("has_idx_mapping", [True, False])
-@_parametrize("temporal_tiles", [1, 2, 4, 8, 16, 32])
+@_parametrize("temporal_tiles", [1, _TEMPORAL_TILES])
 @_cuda_required
 def test_precopy_matches_v1_copy_specs(
     num_reqs, token_bias, has_idx_mapping, conv_state_dim_first, temporal_tiles
@@ -419,7 +419,7 @@ if __name__ == "__main__":
         for tb in (0, 1, 2):
             for mapping in (True, False):
                 for dim_first in (False, True):
-                    for tt in (1, 2, 4, 8, 16, 32): 
+                    for tt in (1, _TEMPORAL_TILES):
                         test_precopy_matches_v1_copy_specs(nr, tb, mapping, dim_first, tt)
                         print(
                             f"OK num_reqs={nr} token_bias={tb} "
