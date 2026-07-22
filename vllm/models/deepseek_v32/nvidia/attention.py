@@ -378,6 +378,8 @@ class DeepseekV32Attention(MLAAttention):
         self, x: torch.Tensor, weight: torch.Tensor, skinny_max: int
     ) -> torch.Tensor:
         """x @ weight.T for decode M <= 16."""
+        if x.shape[0] == 0:
+            return torch.empty((0, weight.shape[0]), dtype=x.dtype, device=x.device)
         if x.shape[0] <= skinny_max:
             return ops.bf16_skinny_gemm(x, weight)
         out = torch.empty((x.shape[0], weight.shape[0]), dtype=x.dtype, device=x.device)

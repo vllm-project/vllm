@@ -6,7 +6,6 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from vllm.model_executor.layers.attention import MLAAttention
 from vllm.v1.attention.backends.mla.prefill import get_mla_prefill_backend
 
 if TYPE_CHECKING:
@@ -20,12 +19,6 @@ def fa4_cutedsl_warmup(worker: Worker) -> None:
 
     vllm_config = runner.vllm_config
     if not vllm_config.model_config.use_mla:
-        return
-
-    static_forward_context = vllm_config.compilation_config.static_forward_context
-    if not any(
-        type(layer) is MLAAttention for layer in static_forward_context.values()
-    ):
         return
 
     try:
