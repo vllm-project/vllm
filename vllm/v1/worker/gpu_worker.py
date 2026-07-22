@@ -194,6 +194,19 @@ class Worker(WorkerBase):
         return self._sleep_mode_backend
 
     def sleep(self, level: int = 1) -> None:
+        extensible_kv_buffers = getattr(
+            self.model_runner, "extensible_kv_buffers", None
+        )
+        if (
+            extensible_kv_buffers is not None
+            and self.vllm_config.kv_transfer_config is not None
+        ):
+            raise RuntimeError(
+                "Sleep mode with an extensible KV cache and a KV connector is "
+                "not supported: waking remaps physical pages and invalidates "
+                "the connector's memory registration."
+            )
+
         torch.accelerator.synchronize()
         free_bytes_before_sleep = torch.accelerator.get_memory_info()[0]
 
@@ -213,9 +226,6 @@ class Worker(WorkerBase):
 
         # The extensible KV cache lives outside the torch/CuMem allocators;
         # discard its physical memory directly (VA and views stay valid).
-        extensible_kv_buffers = getattr(
-            self.model_runner, "extensible_kv_buffers", None
-        )
         if extensible_kv_buffers is not None:
             extensible_kv_buffers.release_physical()
 

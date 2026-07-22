@@ -28,8 +28,10 @@ from vllm.v1.worker.gpu.attn_utils import (
     _allocate_extensible_kv_cache,
     _kv_cache_num_segments_by_layer,
     _reshape_kv_cache,
+    narrow_kv_caches_to_num_blocks,
 )
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
+from vllm.v1.worker.gpu_worker import Worker
 from vllm.v1.worker.utils import AttentionGroup
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
@@ -582,6 +584,26 @@ def test_v2_extensible_packed_layout() -> None:
         # middle blocks were zeroed on commit.
         assert torch.count_nonzero(cache1[1:]) == 0
         assert torch.count_nonzero(cache0[1 : NUM_BLOCKS - 1]) == 0
+
+        committed = NUM_BLOCKS // 2
+        narrowed = narrow_kv_caches_to_num_blocks(
+            kv_caches,
+            [g for groups in attn_groups for g in groups],
+            [BLOCK_SIZE],
+            "auto",
+            committed,
+            kv_cache_config,
+        )
+        narrowed0 = narrowed["packed.0"]
+        narrowed1 = narrowed["packed.1"]
+        assert narrowed0.untyped_storage().data_ptr() == buffer.base_ptr
+        assert (
+            narrowed0.untyped_storage().data_ptr()
+            == narrowed1.untyped_storage().data_ptr()
+        )
+        assert narrowed0.untyped_storage().nbytes() == committed * block_stride
+        assert narrowed0.stride() == cache0.stride()
+        assert narrowed1.stride() == cache1.stride()
     finally:
         buffers.free()
 
@@ -618,12 +640,20 @@ def test_v2_extensible_release_and_recommit() -> None:
         buffers.free()
 
 
+def test_v2_extensible_connector_sleep_fails_before_remapping() -> None:
+    """Connector registrations must not survive physical-page replacement."""
+    worker = object.__new__(Worker)
+    worker.model_runner = SimpleNamespace(extensible_kv_buffers=object())
+    worker.vllm_config = SimpleNamespace(kv_transfer_config=object())
+
+    with pytest.raises(RuntimeError, match="invalidates.*memory registration"):
+        worker.sleep()
+
+
 def test_v2_narrow_kv_caches_to_num_blocks() -> None:
     """Connector-registration views are trimmed to the committed block count
     along each layout's block dim, keeping base pointers and strides (so the
     K and V segment prefixes are addressed exactly)."""
-    from vllm.v1.worker.gpu.attn_utils import narrow_kv_caches_to_num_blocks
-
     spec = _full_attention_spec()
     kv_cache_config, attn_groups = _attention_config(spec, _SplitKVBackend)
     kv_caches, buffers = _v2_allocate(kv_cache_config, attn_groups, [BLOCK_SIZE])
@@ -636,6 +666,7 @@ def test_v2_narrow_kv_caches_to_num_blocks() -> None:
             [BLOCK_SIZE],
             "auto",
             committed,
+            kv_cache_config,
         )
         full = kv_caches["layer.0"]
         trimmed = narrowed["layer.0"]

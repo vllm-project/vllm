@@ -16,7 +16,11 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.multimodal.inputs import MultiModalFeatureSpec
-from vllm.utils.extensible_tensor import ExtensibleKVCacheBuffers, ExtensibleTensor
+from vllm.utils.extensible_tensor import (
+    ExtensibleKVCacheBuffers,
+    ExtensibleTensor,
+    uint8_tensor_from_ptr,
+)
 from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.attention.backend import (
     AttentionCGSupport,
@@ -272,6 +276,7 @@ def narrow_kv_caches_to_num_blocks(
     kernel_block_sizes: list[int],
     cache_dtype: str,
     num_blocks: int,
+    kv_cache_config: KVCacheConfig | None = None,
 ) -> dict[str, Any]:
     """Return views of the KV caches narrowed to the first `num_blocks` blocks.
 
@@ -318,7 +323,58 @@ def narrow_kv_caches_to_num_blocks(
                 narrowed[layer_name] = [
                     state.narrow(0, 0, num_blocks) for state in kv_cache
                 ]
+
+    if kv_cache_config is not None:
+        _bound_packed_kv_cache_storages(narrowed, kv_cache_config, num_blocks)
     return narrowed
+
+
+def _bound_packed_kv_cache_storages(
+    kv_caches: dict[str, Any],
+    kv_cache_config: KVCacheConfig,
+    num_blocks: int,
+) -> None:
+    """Rebase packed views onto storage ending at the committed block prefix."""
+    packed_by_storage: dict[int, tuple[int, list[str]]] = {}
+    for tensor_config in kv_cache_config.kv_cache_tensors:
+        if tensor_config.block_stride <= 0:
+            continue
+        committed_bytes = num_blocks * tensor_config.block_stride
+        for layer_name in tensor_config.shared_by:
+            cache = kv_caches.get(layer_name)
+            if not isinstance(cache, torch.Tensor):
+                continue
+            storage_ptr = cache.untyped_storage().data_ptr()
+            previous = packed_by_storage.get(storage_ptr)
+            if previous is None:
+                packed_by_storage[storage_ptr] = (committed_bytes, [layer_name])
+            else:
+                previous_bytes, layer_names = previous
+                if previous_bytes != committed_bytes:
+                    raise ValueError(
+                        "Packed KV cache views sharing storage disagree on the "
+                        f"committed size: {previous_bytes} != {committed_bytes}."
+                    )
+                layer_names.append(layer_name)
+
+    for storage_ptr, (committed_bytes, layer_names) in packed_by_storage.items():
+        first_cache = kv_caches[layer_names[0]]
+        assert isinstance(first_cache, torch.Tensor)
+        device_index = first_cache.device.index
+        assert device_index is not None
+        bounded_storage = uint8_tensor_from_ptr(
+            storage_ptr, committed_bytes, device_index
+        )
+        for layer_name in layer_names:
+            cache = kv_caches[layer_name]
+            assert isinstance(cache, torch.Tensor)
+            typed_storage = bounded_storage.view(cache.dtype)
+            kv_caches[layer_name] = torch.as_strided(
+                typed_storage,
+                size=cache.shape,
+                stride=cache.stride(),
+                storage_offset=cache.storage_offset(),
+            )
 
 
 def _allocate_extensible_kv_cache(
