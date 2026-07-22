@@ -107,6 +107,7 @@ steps:
   - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-mm-small.txt --tp-size=1
   mirror:
     amd:
+      dind: false
       device: mi300_1
       depends_on:
       - image-build-amd
@@ -118,6 +119,7 @@ steps:
       - vllm/model_executor/model_loader/
 
 - label: Multi-Modal Models (Extended Generation 1)
+  device: h200_35gb
   key: multi-modal-models-extended-generation-1
   optional: true
   source_file_dependencies:

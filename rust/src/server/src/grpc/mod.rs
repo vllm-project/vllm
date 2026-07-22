@@ -1,6 +1,10 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 //! gRPC Generate service backed by the shared [`vllm_text::TextLlm`] facade.
 
 mod convert;
+mod health;
 
 use std::pin::Pin;
 use std::sync::Arc;
@@ -21,7 +25,10 @@ pub mod pb {
     tonic::include_proto!("vllm");
 }
 
+pub(crate) use health::monitor_health;
 pub use pb::generate_server::GenerateServer;
+
+pub(crate) type GenerateGrpcService = GenerateServer<GenerateServiceImpl>;
 
 #[cfg(test)]
 mod tests;

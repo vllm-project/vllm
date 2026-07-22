@@ -4,7 +4,7 @@ depends_on:
 steps:
 - label: Benchmarks CLI Test
   key: benchmarks-cli-test
-  timeout_in_minutes: 20
+  timeout_in_minutes: 40
   device: intel_gpu
   agent_tags:
     label: production

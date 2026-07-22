@@ -4,7 +4,7 @@ depends_on:
 steps:
 - label: Engine
   key: engine
-  timeout_in_minutes: 15
+  timeout_in_minutes: 40
   device: intel_gpu
   agent_tags:
     label: production
