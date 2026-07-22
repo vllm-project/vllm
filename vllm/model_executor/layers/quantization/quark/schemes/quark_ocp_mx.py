@@ -9,7 +9,6 @@ from typing import Any
 import torch
 import torch.nn.functional as F
 
-from vllm._aiter_ops import is_aiter_found_and_supported
 from vllm.logger import init_logger
 from vllm.model_executor.kernels.linear import init_mxfp4_linear_kernel
 from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
@@ -97,13 +96,6 @@ class QuarkOCP_MX(QuarkScheme):
         )
 
         if not self.emulate:
-            if not is_aiter_found_and_supported():
-                # Currently need AITER kernels if not emulating
-                raise NotImplementedError(
-                    f"{self.__class__.__name__} requires AITER to be installed "
-                    "for non-emulation mode! Please refer to "
-                    "https://github.com/ROCm/aiter for installation details."
-                )
             self.ocp_mx_linear = init_mxfp4_linear_kernel()
 
         if not current_platform.supports_mx():

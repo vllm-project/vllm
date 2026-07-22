@@ -108,3 +108,23 @@ def test_init_mxfp4_linear_kernel_raises_when_no_kernel_matches(platform_mock):
 
     with pytest.raises(ValueError, match="Failed to find a kernel"):
         init_mxfp4_linear_kernel()
+
+
+@patch("vllm.model_executor.kernels.linear.mxfp4.aiter.is_aiter_found_and_supported")
+@patch("vllm.model_executor.kernels.linear.mxfp4.aiter.current_platform")
+@patch("vllm.model_executor.kernels.linear.current_platform")
+def test_init_mxfp4_linear_kernel_raises_on_rocm_without_aiter(
+    linear_platform_mock, aiter_platform_mock, is_aiter_found_and_supported_mock
+):
+    """On ROCm, the only registered MXFP4 linear kernel is AITER-based.
+    If AITER is not found/supported, no kernel should be selected."""
+    linear_platform_mock._enum = PlatformEnum.ROCM
+    aiter_platform_mock.supports_mx.return_value = True
+    is_aiter_found_and_supported_mock.return_value = False
+
+    with pytest.raises(
+        ValueError,
+        match="(?s)Failed to find a kernel.*"
+        "AITER not found or not supported on the current platform",
+    ):
+        init_mxfp4_linear_kernel()
