@@ -29,6 +29,7 @@ DTYPE = torch.bfloat16
         ("LBHNC", "HND"),
         ("LBNHC", "NHD"),
         ("BLHNC", "HND"),
+        ("BLNHC", "NHD"),
         ("BHLNC", "HND"),
     ],
 )

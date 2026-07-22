@@ -295,7 +295,9 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
         return rocm_aiter_ops.is_enabled()
 
     def fused_qk_norm_rope_kvcache_supported(self):
-        return rocm_aiter_ops.is_enabled()
+        # AITER requires K/V to be contiguous within each cache block, but
+        # standardized caches pack K/V in the content dimension.
+        return False
 
     def do_qk_norm_rope_kvcache_update(
         self,

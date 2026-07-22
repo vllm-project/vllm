@@ -227,7 +227,18 @@ if TYPE_CHECKING:
     VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: int = 300
     VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS: int = 5
     VLLM_KV_CACHE_LAYOUT: (
-        Literal["LBNHC", "LBHNC", "NHC", "HNC", "NHD", "HND", "BLHNC", "BHLNC"] | None
+        Literal[
+            "LBNHC",
+            "LBHNC",
+            "NHC",
+            "HNC",
+            "NHD",
+            "HND",
+            "BLHNC",
+            "BLNHC",
+            "BHLNC",
+        ]
+        | None
     ) = None
     VLLM_SSM_CONV_STATE_LAYOUT: Literal["SD", "DS"] | None = None
     VLLM_COMPUTE_NANS_IN_LOGITS: bool = False
@@ -1726,7 +1737,17 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_KV_CACHE_LAYOUT": env_with_choices(
         "VLLM_KV_CACHE_LAYOUT",
         None,
-        ["LBNHC", "LBHNC", "NHC", "HNC", "NHD", "HND", "BLHNC", "BHLNC"],
+        [
+            "LBNHC",
+            "LBHNC",
+            "NHC",
+            "HNC",
+            "NHD",
+            "HND",
+            "BLHNC",
+            "BLNHC",
+            "BHLNC",
+        ],
     ),
     # SSM conv state layout used for Mamba models.
     # - SD: (state_len, dim) — dim contiguous (default)
