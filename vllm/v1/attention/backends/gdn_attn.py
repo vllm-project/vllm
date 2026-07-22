@@ -175,6 +175,17 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         # paged blocks need no zero-init.
         self.use_cached_kernel: bool = vllm_config.cache_config.use_replayssm
         self.max_cache_len: int = vllm_config.cache_config.replayssm_buffer_len
+        if (
+            self.use_cached_kernel
+            and vllm_config.mamba_config.enable_stochastic_rounding
+        ):
+            # The GDN cached decode kernel does not implement stochastic
+            # rounding yet (planned in the CuteDSL follow-up).
+            raise ValueError(
+                "--use-replayssm with --enable-mamba-cache-stochastic-rounding "
+                "is not supported for GDN models yet; use fp32 SSM state or drop "
+                "stochastic rounding."
+            )
         if self.use_cached_kernel:
             self.decode_write_pos_d: torch.Tensor = torch.empty(
                 (self.decode_cudagraph_max_bs,),
