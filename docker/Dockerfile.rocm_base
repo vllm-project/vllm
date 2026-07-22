@@ -92,20 +92,41 @@ ARG TORCHVISION_VERSION=0.26.0
 # DEVICE_EXTRAS: set to install device-specific packages (e.g. "device-all" or
 # "gfx90a;gfx942;gfx950"). When unset, only base torch wheels are installed.
 ARG DEVICE_EXTRAS
-# BUILD_PYTORCH_FROM_SOURCE: set to 1 to build PyTorch from source instead of
-# pulling wheels from the TheRock pip index.
-ARG BUILD_PYTORCH_FROM_SOURCE=0
+# Source build fallback repos (used when wheels are not available).
 ARG PYTORCH_REPO="https://github.com/ROCm/pytorch.git"
 ARG PYTORCH_BRANCH="release/2.11"
+ARG PYTORCH_VISION_REPO="https://github.com/pytorch/vision.git"
+ARG PYTORCH_VISION_BRANCH="v0.24.1"
+ARG PYTORCH_AUDIO_REPO="https://github.com/pytorch/audio.git"
+ARG PYTORCH_AUDIO_BRANCH="v2.9.0"
 
 # Install ROCm SDK
 RUN uv pip install --index-url ${PIP_EXTRA_INDEX_URL} \
     "rocm[libraries,devel]${ROCM_SDK_VERSION:+==${ROCM_SDK_VERSION}}" \
     && rocm-sdk init
 
-# Install PyTorch: pull wheels from TheRock index (default) or build from source.
-RUN if [ "${BUILD_PYTORCH_FROM_SOURCE}" = "1" ]; then \
-        echo "Building PyTorch from source (PYTORCH_REPO=${PYTORCH_REPO} PYTORCH_BRANCH=${PYTORCH_BRANCH})" \
+# Install PyTorch: try wheels first, build from source if not available.
+RUN set -e; \
+    TORCH_INSTALLED=0; \
+    if [ -n "${ROCM_SDK_VERSION}" ]; then \
+        if echo "${ROCM_SDK_VERSION}" | grep -q '\.dev0'; then \
+            ROCM_TORCH_SUFFIX="+devrocm$(echo ${ROCM_SDK_VERSION} | tr '+' '.')"; \
+        else \
+            ROCM_TORCH_SUFFIX="+rocm${ROCM_SDK_VERSION}"; \
+        fi; \
+        echo "Trying PyTorch wheels from TheRock index (suffix=${ROCM_TORCH_SUFFIX})..." \
+        && if uv pip install --index-url ${PIP_EXTRA_INDEX_URL} \
+                "torch==${TORCH_VERSION}${ROCM_TORCH_SUFFIX}" \
+                "torchaudio==${TORCHAUDIO_VERSION}${ROCM_TORCH_SUFFIX}" \
+                "torchvision==${TORCHVISION_VERSION}${ROCM_TORCH_SUFFIX}" 2>/dev/null; then \
+            echo "PyTorch wheels installed successfully"; \
+            TORCH_INSTALLED=1; \
+        else \
+            echo "PyTorch wheels not found, will build from source"; \
+        fi; \
+    fi; \
+    if [ "${TORCH_INSTALLED}" = "0" ]; then \
+        echo "Building PyTorch from source (${PYTORCH_REPO} @ ${PYTORCH_BRANCH})" \
         && apt-get update && apt-get install -y pkg-config liblzma-dev \
         && git clone ${PYTORCH_REPO} /tmp/pytorch \
         && cd /tmp/pytorch && git checkout ${PYTORCH_BRANCH} \
@@ -114,22 +135,21 @@ RUN if [ "${BUILD_PYTORCH_FROM_SOURCE}" = "1" ]; then \
         && CMAKE_PREFIX_PATH=$(python3 -c 'import sys; print(sys.prefix)') \
            python3 setup.py bdist_wheel --dist-dir=dist \
         && uv pip install dist/*.whl \
-        && rm -rf /tmp/pytorch; \
-    elif [ -n "${ROCM_SDK_VERSION}" ]; then \
-        if echo "${ROCM_SDK_VERSION}" | grep -q '\.dev0'; then \
-            ROCM_TORCH_SUFFIX="+devrocm$(echo ${ROCM_SDK_VERSION} | tr '+' '.')"; \
-        else \
-            ROCM_TORCH_SUFFIX="+rocm${ROCM_SDK_VERSION}"; \
-        fi; \
-        echo "Installing PyTorch wheels from TheRock index (suffix=${ROCM_TORCH_SUFFIX})" \
-        && uv pip install --index-url ${PIP_EXTRA_INDEX_URL} \
-            "torch==${TORCH_VERSION}${ROCM_TORCH_SUFFIX}" \
-            "torchaudio==${TORCHAUDIO_VERSION}${ROCM_TORCH_SUFFIX}" \
-            "torchvision==${TORCHVISION_VERSION}${ROCM_TORCH_SUFFIX}"; \
-    else \
-        echo "Installing latest PyTorch wheels from TheRock index" \
-        && uv pip install --index-url ${PIP_EXTRA_INDEX_URL} \
-            torch torchaudio torchvision; \
+        && rm -rf /tmp/pytorch \
+        && echo "Building torchvision from source (${PYTORCH_VISION_REPO} @ ${PYTORCH_VISION_BRANCH})" \
+        && git clone ${PYTORCH_VISION_REPO} /tmp/vision \
+        && cd /tmp/vision && git checkout ${PYTORCH_VISION_BRANCH} \
+        && python3 setup.py bdist_wheel --dist-dir=dist \
+        && uv pip install dist/*.whl \
+        && rm -rf /tmp/vision \
+        && echo "Building torchaudio from source (${PYTORCH_AUDIO_REPO} @ ${PYTORCH_AUDIO_BRANCH})" \
+        && git clone ${PYTORCH_AUDIO_REPO} /tmp/audio \
+        && cd /tmp/audio && git checkout ${PYTORCH_AUDIO_BRANCH} \
+        && git submodule update --init --recursive \
+        && pip install -r requirements.txt \
+        && python3 setup.py bdist_wheel --dist-dir=dist \
+        && uv pip install dist/*.whl \
+        && rm -rf /tmp/audio; \
     fi
 
 # Install device-specific packages when DEVICE_EXTRAS is set.
@@ -207,7 +227,7 @@ RUN if [ "$USE_SCCACHE" = "1" ]; then \
     fi
 
 ###
-### Triton Build
+### Triton Build (always from source)
 ###
 FROM base AS build_triton
 ARG TRITON_BRANCH
