@@ -5,6 +5,10 @@ from typing import ClassVar
 
 import torch
 from flashinfer.decode import trtllm_batch_decode_with_kv_cache_mla
+from flashinfer.utils import (
+    get_device_sm_count,
+    get_trtllm_gen_multi_ctas_kv_counter_bytes,
+)
 
 from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
@@ -46,6 +50,24 @@ def _get_workspace_buffer(return_lse: bool) -> torch.Tensor:
         # the trtllm-gen path views it as uint8, so int8 is safe for all backends.
         _fi_workspace = torch.zeros(buffer_size, dtype=torch.int8, device="cuda")
     return _fi_workspace
+
+
+_fi_kv_counter: torch.Tensor | None = None
+_fi_sm_count: int | None = None
+
+
+def _get_kv_counter_buffer(
+    batch_size: int, num_qo_heads: int, device: torch.device
+) -> torch.Tensor:
+    global _fi_kv_counter, _fi_sm_count
+    if _fi_sm_count is None:
+        _fi_sm_count = get_device_sm_count(device)
+    kv_counter_bytes = get_trtllm_gen_multi_ctas_kv_counter_bytes(
+        batch_size, num_qo_heads, _fi_sm_count
+    )
+    if _fi_kv_counter is None or _fi_kv_counter.numel() < kv_counter_bytes:
+        _fi_kv_counter = torch.zeros(kv_counter_bytes, dtype=torch.uint8, device=device)
+    return _fi_kv_counter
 
 
 class FlashInferMLAMetadataBuilder(MLACommonMetadataBuilder[MLACommonMetadata]):
@@ -217,6 +239,7 @@ class FlashInferMLAImpl(MLACommonImpl[MLACommonMetadata]):
 
         return_lse = self.need_to_return_lse_for_decode
         workspace_buffer = _get_workspace_buffer(return_lse)
+        kv_counter_buffer = _get_kv_counter_buffer(q.size(0), q.size(2), q.device)
         kernel_out = trtllm_batch_decode_with_kv_cache_mla(
             query=q,
             kv_cache=kv_c_and_k_pe_cache.unsqueeze(1),
@@ -229,6 +252,7 @@ class FlashInferMLAImpl(MLACommonImpl[MLACommonMetadata]):
             max_seq_len=attn_metadata.max_seq_len,
             bmm1_scale=self.bmm1_scale,
             bmm2_scale=self.bmm2_scale,
+            multi_ctas_kv_counter_buffer=kv_counter_buffer,
             return_lse=return_lse,
         )
         if return_lse:
