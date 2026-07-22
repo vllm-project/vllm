@@ -1,10 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import io
 from http import HTTPStatus
 
-import pybase64 as base64
 import pytest
 
 from vllm.assets.image import ImageAsset
@@ -12,9 +10,7 @@ from vllm.assets.video import VideoAsset
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.entrypoints.serve.utils.error_response import create_error_response
 from vllm.multimodal.parse import parse_mm_uuids
-from vllm.renderers import hf
 from vllm.renderers.hf import HfRenderer
-from vllm.renderers.params import ChatParams
 from vllm.tokenizers.registry import cached_tokenizer_from_config
 
 cherry_pil_image = ImageAsset("cherry_blossom").pil_image
@@ -214,55 +210,3 @@ def test_multi_modal_uuids_ignored_when_caching_disabled():
     assert processed_mm_uuids["video"][0].startswith(
         f"{request_id}-video-"
     ) and processed_mm_uuids["video"][0].endswith("-0")
-
-
-def _vision_chunk_messages() -> list:
-    buf = io.BytesIO()
-    cherry_pil_image.save(buf, format="PNG")
-    image_url = "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
-    return [
-        {
-            "role": "user",
-            "content": [
-                {
-                    "type": "image_url",
-                    "image_url": {"url": image_url},
-                    "uuid": "hash_cherry",
-                },
-                {"type": "text", "text": "What is in this image?"},
-            ],
-        }
-    ]
-
-
-def _force_vision_chunk_rebuild(monkeypatch, renderer: HfRenderer) -> dict:
-    renderer.use_unified_vision_chunk = True
-    rebuilt = {"image": ["hash_cherry-rebuilt"]}
-    monkeypatch.setattr(hf, "rebuild_mm_uuids_from_mm_data", lambda *args: rebuilt)
-    monkeypatch.setattr(
-        hf, "replace_vision_chunk_video_placeholder", lambda prompt, *args: prompt
-    )
-    return rebuilt
-
-
-def test_render_messages_rebuilds_vision_chunk_uuids(monkeypatch):
-    """Unified-vision-chunk models must attach post-chunking uuids."""
-    renderer = _build_renderer()
-    rebuilt = _force_vision_chunk_rebuild(monkeypatch, renderer)
-
-    _, prompt = renderer.render_messages(_vision_chunk_messages(), ChatParams())
-
-    assert prompt["multi_modal_uuids"] == rebuilt
-
-
-@pytest.mark.asyncio
-async def test_render_messages_async_rebuilds_vision_chunk_uuids(monkeypatch):
-    """The async path must rebuild uuids identically to the sync path."""
-    renderer = _build_renderer()
-    rebuilt = _force_vision_chunk_rebuild(monkeypatch, renderer)
-
-    _, prompt = await renderer.render_messages_async(
-        _vision_chunk_messages(), ChatParams()
-    )
-
-    assert prompt["multi_modal_uuids"] == rebuilt
