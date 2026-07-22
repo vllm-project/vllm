@@ -73,6 +73,7 @@ def _fused_marlin_moe(
     num_tokens_post_padded: torch.Tensor,
     activation: MoEActivation = MoEActivation.SILU,
     activation_func: Callable[..., None] = apply_moe_activation,
+    topk_ids: torch.Tensor | None = None,
     input_global_scale1: torch.Tensor | None = None,
     input_global_scale2: torch.Tensor | None = None,
     global_scale1: torch.Tensor | None = None,
@@ -168,13 +169,12 @@ def _fused_marlin_moe(
         clamp_limit=clamp_limit,
         alpha=gemm1_alpha,
         beta=gemm1_beta,
+        topk_ids=topk_ids,
+        expert_map=expert_map,
     )
 
     if output is None:
         output = intermediate_cache3
-
-    if expert_map is not None:
-        output.zero_()
 
     a_scales2 = None
     if input_dtype == torch.int8:
@@ -235,7 +235,7 @@ def fused_marlin_moe(
     global_num_experts: int = -1,
     activation: MoEActivation = MoEActivation.SILU,
     activation_func: Callable[..., None] = apply_moe_activation,
-    moe_sum: Callable[[torch.Tensor, torch.Tensor], None] | None = None,
+    moe_sum: Callable[..., torch.Tensor | None] | None = None,
     expert_map: torch.Tensor | None = None,
     input_global_scale1: torch.Tensor | None = None,
     input_global_scale2: torch.Tensor | None = None,
@@ -346,6 +346,7 @@ def fused_marlin_moe(
         w1_scale=w1_scale,
         w2_scale=w2_scale,
         topk_weights=topk_weights,
+        topk_ids=topk_ids,
         num_topk=topk,
         quant_type=quant_type,
         apply_router_weight_on_input=apply_router_weight_on_input,
@@ -381,9 +382,12 @@ def fused_marlin_moe(
         output = torch.empty_like(hidden_states)
 
     if moe_sum is None:
+        if expert_map is not None:
+            ops.moe_sum(moe_output, output, topk_ids, expert_map)
+            return output
         return torch.sum(moe_output.view(-1, topk, K), dim=1, out=output)
     else:
-        return moe_sum(moe_output, output)
+        return moe_sum(moe_output, output, topk_ids, expert_map)
 
 
 def batched_fused_marlin_moe(
@@ -827,6 +831,8 @@ class MarlinExperts(LoRAExpertsMixin, MarlinExpertsBase):
             clamp_limit: float | None = None,
             alpha: float = 1.0,
             beta: float = 0.0,
+            topk_ids: torch.Tensor | None = None,
+            expert_map: torch.Tensor | None = None,
         ) -> None:
             # act_input  = intermediate_cache1 (M*topk, 2N for gated)
             # act_output = intermediate_cache2 (M*topk, N)
@@ -863,10 +869,17 @@ class MarlinExperts(LoRAExpertsMixin, MarlinExpertsBase):
                 clamp_limit=clamp_limit,
                 alpha=alpha,
                 beta=beta,
+                topk_ids=topk_ids,
+                expert_map=expert_map,
             )
             lora_state["cache2"] = act_output
 
-        def moe_sum_with_lora(moe_out: torch.Tensor, out: torch.Tensor) -> None:
+        def moe_sum_with_lora(
+            moe_out: torch.Tensor,
+            out: torch.Tensor,
+            topk_ids: torch.Tensor,
+            expert_map: torch.Tensor | None,
+        ) -> None:
             # moe_out shape: (M, topk, K)
             self.apply_w2_lora(
                 ctx,
@@ -882,7 +895,7 @@ class MarlinExperts(LoRAExpertsMixin, MarlinExpertsBase):
                 w2=w2,
                 top_k_num=top_k_num,
             )
-            self.moe_sum(moe_out, out)
+            self.moe_sum(moe_out, out, topk_ids, expert_map)
 
         return fused_marlin_moe(
             hidden_states=hidden_states,
@@ -921,8 +934,17 @@ class MarlinExperts(LoRAExpertsMixin, MarlinExpertsBase):
             gemm1_beta=self.gemm1_beta,
         )
 
-    def moe_sum(self, input: torch.Tensor, output: torch.Tensor) -> None:
-        ops.moe_sum(input, output)
+    def moe_sum(
+        self,
+        input: torch.Tensor,
+        output: torch.Tensor,
+        topk_ids: torch.Tensor,
+        expert_map: torch.Tensor | None,
+    ) -> None:
+        if expert_map is not None:
+            ops.moe_sum(input, output, topk_ids, expert_map)
+        else:
+            ops.moe_sum(input, output)
 
 
 class BatchedMarlinExperts(MarlinExpertsBase):
