@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING, Any, NamedTuple
 
 from vllm.distributed.kv_events import (
     MEDIUM_CPU,
+    MEDIUM_STORAGE,
     BlockRemoved,
     BlockStored,
     KVCacheEvent,
@@ -51,7 +52,7 @@ logger = init_logger(__name__)
 
 _MEDIUM_TO_EVENT_STR: dict[Medium, str] = {
     Medium.CPU: MEDIUM_CPU,
-    Medium.STORAGE: "STORAGE",
+    Medium.STORAGE: MEDIUM_STORAGE,
 }
 
 
