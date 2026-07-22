@@ -42,7 +42,10 @@ from vllm.distributed import (
 )
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
-from vllm.model_executor.layers.fused_moe import SharedFusedMoE
+from vllm.model_executor.layers.fused_moe import (
+    FusedMoE,
+    fused_moe_make_expert_params_mapping,
+)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -74,7 +77,9 @@ from vllm.transformers_utils.configs.AXK1 import AXK1Config
 
 from .interfaces import MixtureOfExperts, SupportsEagle, SupportsLoRA, SupportsPP
 from .utils import (
+    AutoWeightsLoader,
     PPMissingLayer,
+    get_spec_layer_idx_from_weight_name,
     is_pp_missing_parameter,
     make_empty_intermediate_tensors_factory,
     make_layers,
@@ -100,7 +105,7 @@ class AXK1MoE(nn.Module):
         self.tp_size = get_tensor_model_parallel_world_size()
         self.tp_rank = get_tensor_model_parallel_rank()
 
-        self.routed_scaling_factor = config.routed_scaling_factor
+        self.routed_scaling_factor = getattr(config, "routed_scaling_factor", 1.0)
 
         self.ep_group = get_ep_group().device_group
         self.ep_rank = get_ep_group().rank_in_group
@@ -163,14 +168,13 @@ class AXK1MoE(nn.Module):
                 prefix=f"{prefix}.shared_experts",
             )
 
-        self.experts = SharedFusedMoE(
+        self.experts = FusedMoE(
             shared_experts=self.shared_experts,
             gate=self.gate,
             num_experts=config.n_routed_experts,
             top_k=config.num_experts_per_tok,
             hidden_size=config.hidden_size,
             intermediate_size=config.moe_intermediate_size,
-            reduce_results=False,
             renormalize=config.norm_topk_prob,
             quant_config=quant_config,
             use_grouped_topk=True,
@@ -180,9 +184,8 @@ class AXK1MoE(nn.Module):
             scoring_func=config.scoring_func,
             # we do scaling outside, set factor to 1.0 to avoid double mul
             # aiter applies routed_scaling_factor internally
-            routed_scaling_factor=1.0
-            if not self.is_rocm_aiter_moe_enabled
-            else self.routed_scaling_factor,
+            routed_scaling_factor=self.routed_scaling_factor,
+            apply_routed_scale_to_output=not self.is_rocm_aiter_moe_enabled,
             e_score_correction_bias=self.gate.e_score_correction_bias,
             enable_eplb=self.enable_eplb,
             num_redundant_experts=self.n_redundant_experts,
@@ -204,43 +207,20 @@ class AXK1MoE(nn.Module):
             hidden_states = sequence_parallel_chunk(hidden_states)
 
         if self.experts.is_internal_router:
-            # In this case, the gate/router runs inside the FusedMoE class
-            fused_moe_out = self.experts(
+            final_hidden_states = self.experts(
                 hidden_states=hidden_states, router_logits=hidden_states
             )
         else:
-            # router_logits: (num_tokens, n_experts)
             router_logits, _ = self.gate(hidden_states)
-            fused_moe_out = self.experts(
+            final_hidden_states = self.experts(
                 hidden_states=hidden_states, router_logits=router_logits
             )
-
-        shared_output, final_hidden_states = fused_moe_out
-        if self.shared_experts is None:
-            assert shared_output is None
-
-        # Fix FP16 overflow
-        # See AXK1DecoderLayer for more details.
-        if hidden_states.dtype != torch.float16:
-            if not self.is_rocm_aiter_moe_enabled:
-                final_hidden_states *= self.routed_scaling_factor
-        elif self.shared_experts is not None:
-            assert shared_output is not None
-            shared_output *= 1.0 / self.routed_scaling_factor
-
-        if self.shared_experts is not None:
-            assert shared_output is not None
-            final_hidden_states += shared_output
 
         if self.is_sequence_parallel:
             final_hidden_states = tensor_model_parallel_all_gather(
                 final_hidden_states, 0
             )
             final_hidden_states = final_hidden_states[:num_tokens]
-        elif self.tp_size > 1:
-            final_hidden_states = self.experts.maybe_all_reduce_tensor_model_parallel(
-                final_hidden_states
-            )
 
         return final_hidden_states.view(num_tokens, hidden_dim)
 
@@ -670,7 +650,7 @@ class AXK1DecoderLayer(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         # Self Attention
         if residual is None:
-            residual = hidden_states.clone()
+            residual = hidden_states
             hidden_states = self.input_layernorm(hidden_states)
         else:
             hidden_states, residual = self.input_layernorm(hidden_states, residual)
@@ -749,6 +729,13 @@ class AXK1Model(nn.Module):
         self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
             ["hidden_states", "residual"], config.hidden_size
         )
+        self.use_mha = all(
+            dim == 0 for dim in (config.qk_nope_head_dim, config.qk_rope_head_dim)
+        )
+        self.fuse_qkv_a_proj = config.q_lora_rank is not None
+        self.num_redundant_experts = (
+            vllm_config.parallel_config.eplb_config.num_redundant_experts
+        )
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
@@ -798,158 +785,6 @@ class AXK1Model(nn.Module):
         hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states
 
-
-class AXK1MixtureOfExperts(MixtureOfExperts):
-    moe_mlp_layers: list[AXK1MoE]
-    """
-    List of MoE MLP layers in the model.
-    """
-
-    def extract_moe_parameters(self, example_moe: AXK1MoE | None):
-        if example_moe is None:
-            self.num_moe_layers = 0
-            self.num_expert_groups = 0
-            self.num_logical_experts = 0
-            self.num_physical_experts = 0
-            self.num_local_physical_experts = 0
-            self.num_routed_experts = 0
-            self.num_shared_experts = 0
-            self.num_redundant_experts = 0
-            logger.warning("AXK1: No AXK1MoE layer found in model.layers.")
-        else:
-            self.num_logical_experts = example_moe.n_logical_experts
-            self.num_physical_experts = example_moe.n_physical_experts
-            self.num_local_physical_experts = example_moe.n_local_physical_experts
-            self.num_routed_experts = example_moe.n_routed_experts
-            self.num_shared_experts = example_moe.n_shared_experts
-            self.num_redundant_experts = example_moe.n_redundant_experts
-
-    def update_physical_experts_metadata(
-        self,
-        num_physical_experts: int,
-        num_local_physical_experts: int,
-    ) -> None:
-        assert self.num_local_physical_experts == num_local_physical_experts
-        self.num_physical_experts = num_physical_experts
-        self.num_local_physical_experts = num_local_physical_experts
-        self.num_redundant_experts = num_physical_experts - self.num_logical_experts
-        for moe in self.moe_mlp_layers:
-            moe.n_local_physical_experts = num_local_physical_experts
-            moe.n_physical_experts = num_physical_experts
-            moe.n_redundant_experts = self.num_redundant_experts
-            moe.experts.update_expert_map()
-
-
-class AXK1ForCausalLM(
-    nn.Module, SupportsPP, AXK1MixtureOfExperts, SupportsLoRA, SupportsEagle
-):
-    packed_modules_mapping = {
-        "gate_up_proj": ["gate_proj", "up_proj"],
-    }
-    model_cls = AXK1Model
-
-    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
-        super().__init__()
-        config: AXK1Config = vllm_config.model_config.hf_config
-        quant_config = vllm_config.quant_config
-        self.config = config
-        self.quant_config = quant_config
-
-        qk_nope_head_dim = config.qk_nope_head_dim
-        qk_rope_head_dim = config.qk_rope_head_dim
-        self.use_mha = all(dim == 0 for dim in (qk_nope_head_dim, qk_rope_head_dim))
-
-        if self.use_mha:
-            self.packed_modules_mapping["qkv_proj"] = ["q_proj", "k_proj", "v_proj"]
-
-        # `packed_modules_mapping` needs to be modified before
-        # initializing AXK1Model, as it is passed inplace to
-        # quantization config init and may be used to select the
-        # quant_method for relevant layers during initialization.
-        self.fuse_qkv_a_proj = config.q_lora_rank is not None
-        if self.fuse_qkv_a_proj:
-            self.packed_modules_mapping["fused_qkv_a_proj"] = [
-                "q_a_proj",
-                "kv_a_proj_with_mqa",
-            ]
-
-        self.model = self.model_cls(
-            vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
-        )
-        if get_pp_group().is_last_rank:
-            self.lm_head = ParallelLMHead(
-                config.vocab_size,
-                config.hidden_size,
-                quant_config=quant_config,
-                prefix=maybe_prefix(prefix, "lm_head"),
-            )
-        else:
-            self.lm_head = PPMissingLayer()
-        self.logits_processor = LogitsProcessor(config.vocab_size)
-        self.make_empty_intermediate_tensors = (
-            self.model.make_empty_intermediate_tensors
-        )
-        # Set MoE hyperparameters
-        self.num_moe_layers = (
-            self.config.num_hidden_layers - self.config.first_k_dense_replace
-        )
-        self.set_moe_parameters()
-
-    def set_moe_parameters(self):
-        self.expert_weights = []
-
-        self.num_expert_groups = getattr(self.config, "n_group", 1)
-
-        self.moe_layers = []
-        self.moe_mlp_layers = []
-        example_moe = None
-        for layer in self.model.layers:
-            if isinstance(layer, PPMissingLayer):
-                continue
-
-            assert isinstance(layer, AXK1DecoderLayer)
-            if isinstance(layer.mlp, AXK1MoE):
-                # Pick last one layer since the first ones may be dense layers.
-                example_moe = layer.mlp
-                self.moe_mlp_layers.append(layer.mlp)
-                self.moe_layers.append(layer.mlp.experts)
-
-        self.extract_moe_parameters(example_moe)
-
-    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.model.embed_input_ids(input_ids)
-
-    def forward(
-        self,
-        input_ids: torch.Tensor | None,
-        positions: torch.Tensor,
-        intermediate_tensors: IntermediateTensors | None = None,
-        inputs_embeds: torch.Tensor | None = None,
-    ) -> torch.Tensor | IntermediateTensors:
-        hidden_states = self.model(
-            input_ids, positions, intermediate_tensors, inputs_embeds
-        )
-        return hidden_states
-
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor | None:
-        logits = self.logits_processor(self.lm_head, hidden_states)
-        return logits
-
-    def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
-        # Params for weights, fp8 weight scales, fp8 activation scales
-        # (param_name, weight_name, expert_id, shard_id)
-        return SharedFusedMoE.make_expert_params_mapping(
-            self,
-            ckpt_gate_proj_name="gate_proj",
-            ckpt_down_proj_name="down_proj",
-            ckpt_up_proj_name="up_proj",
-            num_experts=self.config.n_routed_experts,
-            num_redundant_experts=0,
-        )
-
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         rocm_aiter_moe_shared_expert_enabled = (
             rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
@@ -975,7 +810,7 @@ class AXK1ForCausalLM(
 
         # Params for weights, fp8 weight scales, fp8 activation scales
         # (param_name, weight_name, expert_id, shard_id)
-        expert_params_mapping = SharedFusedMoE.make_expert_params_mapping(
+        expert_params_mapping = fused_moe_make_expert_params_mapping(
             self,
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",
@@ -1157,12 +992,155 @@ class AXK1ForCausalLM(
         return loaded_params
 
 
-def get_spec_layer_idx_from_weight_name(
-    config: AXK1Config, weight_name: str
-) -> int | None:
-    if config.num_nextn_predict_layers and config.num_nextn_predict_layers > 0:
-        layer_idx = config.num_hidden_layers
-        for i in range(config.num_nextn_predict_layers):
-            if weight_name.startswith(f"model.layers.{layer_idx + i}."):
-                return layer_idx + i
-    return None
+class AXK1MixtureOfExperts(MixtureOfExperts):
+    moe_mlp_layers: list[AXK1MoE]
+    """
+    List of MoE MLP layers in the model.
+    """
+
+    def extract_moe_parameters(self, example_moe: AXK1MoE | None):
+        if example_moe is None:
+            self.num_moe_layers = 0
+            self.num_expert_groups = 0
+            self.num_logical_experts = 0
+            self.num_physical_experts = 0
+            self.num_local_physical_experts = 0
+            self.num_routed_experts = 0
+            self.num_shared_experts = 0
+            self.num_redundant_experts = 0
+            logger.warning("AXK1: No AXK1MoE layer found in model.layers.")
+        else:
+            self.num_logical_experts = example_moe.n_logical_experts
+            self.num_physical_experts = example_moe.n_physical_experts
+            self.num_local_physical_experts = example_moe.n_local_physical_experts
+            self.num_routed_experts = example_moe.n_routed_experts
+            self.num_shared_experts = example_moe.n_shared_experts
+            self.num_redundant_experts = example_moe.n_redundant_experts
+
+    def update_physical_experts_metadata(
+        self,
+        num_physical_experts: int,
+        num_local_physical_experts: int,
+    ) -> None:
+        assert self.num_local_physical_experts == num_local_physical_experts
+        self.num_physical_experts = num_physical_experts
+        self.num_local_physical_experts = num_local_physical_experts
+        self.num_redundant_experts = num_physical_experts - self.num_logical_experts
+        for moe in self.moe_mlp_layers:
+            moe.n_local_physical_experts = num_local_physical_experts
+            moe.n_physical_experts = num_physical_experts
+            moe.n_redundant_experts = self.num_redundant_experts
+            moe.experts.update_expert_map()
+
+
+class AXK1ForCausalLM(
+    nn.Module, SupportsPP, AXK1MixtureOfExperts, SupportsLoRA, SupportsEagle
+):
+    packed_modules_mapping = {
+        "gate_up_proj": ["gate_proj", "up_proj"],
+    }
+    model_cls = AXK1Model
+
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+        super().__init__()
+        config: AXK1Config = vllm_config.model_config.hf_config
+        quant_config = vllm_config.quant_config
+        self.config = config
+        self.quant_config = quant_config
+
+        qk_nope_head_dim = config.qk_nope_head_dim
+        qk_rope_head_dim = config.qk_rope_head_dim
+        self.use_mha = all(dim == 0 for dim in (qk_nope_head_dim, qk_rope_head_dim))
+
+        if self.use_mha:
+            self.packed_modules_mapping["qkv_proj"] = ["q_proj", "k_proj", "v_proj"]
+
+        # `packed_modules_mapping` needs to be modified before
+        # initializing AXK1Model, as it is passed inplace to
+        # quantization config init and may be used to select the
+        # quant_method for relevant layers during initialization.
+        self.fuse_qkv_a_proj = config.q_lora_rank is not None
+        if self.fuse_qkv_a_proj:
+            self.packed_modules_mapping["fused_qkv_a_proj"] = [
+                "q_a_proj",
+                "kv_a_proj_with_mqa",
+            ]
+
+        self.model = self.model_cls(
+            vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
+        )
+        if get_pp_group().is_last_rank:
+            self.lm_head = ParallelLMHead(
+                config.vocab_size,
+                config.hidden_size,
+                quant_config=quant_config,
+                prefix=maybe_prefix(prefix, "lm_head"),
+            )
+        else:
+            self.lm_head = PPMissingLayer()
+        self.logits_processor = LogitsProcessor(config.vocab_size)
+        self.make_empty_intermediate_tensors = (
+            self.model.make_empty_intermediate_tensors
+        )
+        # Set MoE hyperparameters
+        self.num_moe_layers = (
+            self.config.num_hidden_layers - self.config.first_k_dense_replace
+        )
+        self.set_moe_parameters()
+
+    def set_moe_parameters(self):
+        self.num_expert_groups = getattr(self.config, "n_group", 1)
+
+        self.moe_layers = []
+        self.moe_mlp_layers = []
+        example_moe = None
+        for layer in self.model.layers:
+            if isinstance(layer, PPMissingLayer):
+                continue
+
+            assert isinstance(layer, AXK1DecoderLayer)
+            if isinstance(layer.mlp, AXK1MoE):
+                # Pick last one layer since the first ones may be dense layers.
+                example_moe = layer.mlp
+                self.moe_mlp_layers.append(layer.mlp)
+                self.moe_layers.append(layer.mlp.experts)
+
+        self.extract_moe_parameters(example_moe)
+
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.model.embed_input_ids(input_ids)
+
+    def forward(
+        self,
+        input_ids: torch.Tensor | None,
+        positions: torch.Tensor,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
+    ) -> torch.Tensor | IntermediateTensors:
+        hidden_states = self.model(
+            input_ids, positions, intermediate_tensors, inputs_embeds
+        )
+        return hidden_states
+
+    def compute_logits(
+        self,
+        hidden_states: torch.Tensor,
+    ) -> torch.Tensor | None:
+        logits = self.logits_processor(self.lm_head, hidden_states)
+        return logits
+
+    def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
+        # Params for weights, fp8 weight scales, fp8 activation scales
+        # (param_name, weight_name, expert_id, shard_id)
+        return fused_moe_make_expert_params_mapping(
+            self,
+            ckpt_gate_proj_name="gate_proj",
+            ckpt_down_proj_name="down_proj",
+            ckpt_up_proj_name="up_proj",
+            num_experts=self.config.n_routed_experts,
+            num_redundant_experts=0,
+        )
+
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(weights)

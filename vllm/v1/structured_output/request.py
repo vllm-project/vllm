@@ -5,7 +5,7 @@ import functools
 import json
 from concurrent.futures import Future
 from concurrent.futures._base import TimeoutError
-from typing import cast
+from typing import TYPE_CHECKING, Any, cast
 
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.v1.structured_output.backend_types import (
@@ -14,12 +14,25 @@ from vllm.v1.structured_output.backend_types import (
     StructuredOutputOptions,
 )
 
+if TYPE_CHECKING:
+    from vllm.reasoning import ReasoningParser
+
 
 @dataclasses.dataclass
 class StructuredOutputRequest:
     params: StructuredOutputsParams
     _grammar: Future[StructuredOutputGrammar] | StructuredOutputGrammar | None = None
     reasoning_ended: bool | None = None
+    # Absolute index into the request's all_token_ids of the last reasoning
+    # token (the reasoning-end marker). Tokens at or before this index are
+    # reasoning content and must never be fed to the grammar. Only set when
+    # reasoning ends in a step whose tokens the scheduler advances immediately
+    # (structural tags + speculative decoding, see #42452).
+    reasoning_end_token_index: int | None = None
+    reasoning_parser_kwargs: dict[str, Any] | None = None
+    # Cached per request; do not share reasoning parsers across requests because
+    # their behavior can depend on reasoning_parser_kwargs.
+    reasoner: "ReasoningParser | None" = None
 
     @staticmethod
     def from_sampling_params(
@@ -33,14 +46,10 @@ class StructuredOutputRequest:
         return StructuredOutputRequest(params=params)
 
     def _check_grammar_completion(self) -> bool:
-        # NOTE: We have to lazy import to gate circular imports
-        from vllm.v1.request import RequestStatus
-
         if isinstance(self._grammar, Future):
             try:
                 # We will check whether the future is ready within 100 us
                 self._grammar = self._grammar.result(timeout=0.0001)
-                self.status = RequestStatus.WAITING
             except TimeoutError:
                 return False
         return True

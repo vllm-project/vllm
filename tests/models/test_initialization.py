@@ -14,7 +14,7 @@ from vllm.v1.core.kv_cache_utils import (
 )
 from vllm.v1.engine.core import EngineCore as V1EngineCore
 
-from ..utils import create_new_process_for_each_test
+from ..utils import create_new_process_for_each_test, requires_spawn_multiprocessing
 from .registry import (
     _TRANSFORMERS_BACKEND_MODELS,
     AUTO_EXAMPLE_MODELS,
@@ -98,16 +98,21 @@ def can_initialize(
         vllm_config.validate_block_size()
         return scheduler_kv_cache_config
 
-    if model_arch == "MiniMaxVL01ForConditionalGeneration":
-        pytest.skip(
-            "pickle error when loading `transformers.models.auto.CONFIG_MAPPING`"
-        )
-
     if model_arch == "MoonshotKimiaForCausalLM":
         pytest.skip(
             "Kimi-Audio requires SpeechToTextConfig "
             "which is not configured in test environment"
         )
+
+    if model_arch in ("PrithviGeoSpatialMAE", "Terratorch"):
+        import importlib.util
+
+        if importlib.util.find_spec("terratorch") is None:
+            pytest.skip(
+                "terratorch is not installed; "
+                "temporarily skipped while PyPI has `lightning` quarantined "
+                "(see #41376)"
+            )
 
     if model_arch in ["DeepseekV32ForCausalLM", "GlmMoeDsaForCausalLM"]:
         from vllm.platforms import current_platform
@@ -124,6 +129,12 @@ def can_initialize(
         patch.object(V1EngineCore, "_initialize_kv_caches", _initialize_kv_caches_v1),
         monkeypatch.context() as m,
     ):
+        if requires_spawn_multiprocessing():
+            # The EngineCore subprocess re-imports the class and does not
+            # inherit the KV-cache patch above, so it OOMs. Run in-process
+            # so the patch applies.
+            m.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+
         # FIXME: A hack to bypass FA3 assertion because our CI's L4 GPU
         # has cc==8.9 which hasn't supported FA3 yet. Remove this hack when
         # L4 supports FA3.

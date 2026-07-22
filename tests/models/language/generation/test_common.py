@@ -25,7 +25,6 @@ EMBED_SCALING_MODELS = {
 AITER_MODEL_LIST = [
     "meta-llama/Llama-3.2-1B-Instruct",
     "openbmb/MiniCPM3-4B",
-    "Qwen/Qwen-7B-Chat",
     "Qwen/Qwen2.5-0.5B-Instruct",
     "TitanML/tiny-mixtral",
     "Qwen/Qwen3-8B",
@@ -46,7 +45,7 @@ AITER_MODEL_LIST = [
         ),
         pytest.param(
             "openai-community/gpt2",  # gpt2
-            marks=[pytest.mark.core_model, pytest.mark.cpu_model],
+            marks=[pytest.mark.core_model],
         ),
         pytest.param("Milos/slovak-gpt-j-405M"),  # gptj
         pytest.param("bigcode/tiny_starcoder_py"),  # gpt_bigcode
@@ -83,9 +82,6 @@ AITER_MODEL_LIST = [
             marks=[pytest.mark.core_model, pytest.mark.slow_test],
         ),
         pytest.param(
-            "Qwen/Qwen-7B-Chat",  # qwen (text-only)
-        ),
-        pytest.param(
             "Qwen/Qwen2.5-0.5B-Instruct",  # qwen2
             marks=[
                 pytest.mark.core_model,
@@ -100,7 +96,7 @@ AITER_MODEL_LIST = [
         pytest.param("bigcode/starcoder2-3b"),  # starcoder2
         pytest.param(
             "TitanML/tiny-mixtral",  # mixtral
-            marks=[pytest.mark.core_model, pytest.mark.cpu_model],
+            marks=[pytest.mark.core_model],
         ),
         pytest.param("swiss-ai/Apertus-8B-Instruct-2509"),  # apertus
         pytest.param(
@@ -134,8 +130,12 @@ def test_models(
         monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
         if model == "TitanML/tiny-mixtral":
             # Untrained model: near-uniform logits make argmax sensitive to
-            # AITER's bfloat16 rounding error in plain rms_norm.
+            # AITER's bfloat16 rounding error. Route the plain rms_norm and the
+            # fused MoE (whose near-uniform router logits flip expert selection
+            # under ~1 ULP drift) through the native kernels for this model.
+            # See ROCm/aiter#3806 for the tracking issue and minimal repro.
             monkeypatch.setenv("VLLM_ROCM_USE_AITER_RMSNORM", "0")
+            monkeypatch.setenv("VLLM_ROCM_USE_AITER_MOE", "0")
     elif use_rocm_aiter and model not in AITER_MODEL_LIST:
         # Skip model that are not using AITER tests.
         # When more AITER kernels are added, this list will not be
@@ -143,7 +143,20 @@ def test_models(
         # in parts of the operators
         pytest.skip(f"Skipping '{model}' model test with AITER kernel.")
 
-    with hf_runner(model) as hf_model:
+    if model == "bigcode/starcoder2-3b":
+        # Replace example.txt's Test1 (an NL prompt) with a code prompt:
+        # starcoder2-3b is a code model, so NL prompts give near-uniform
+        # digit logits where HF<->vLLM bf16 drift can reorder top-K.
+        example_prompts = list(example_prompts)
+        example_prompts[1] = (
+            "def add(a, b):\n    return a + b\n\ndef sub(a, b):\n    return a - "
+        )
+
+    with hf_runner(
+        model,
+        revision=model_info.revision,
+        trust_remote_code=model_info.trust_remote_code,
+    ) as hf_model:
         hf_outputs = hf_model.generate_greedy_logprobs_limit(
             example_prompts, max_tokens, num_logprobs
         )
@@ -175,10 +188,21 @@ def test_models(
 
                 prompt_embeds.append(embed.squeeze(0))
 
+    vllm_kwargs = {}
+    if (
+        model == "bigscience/bloom-560m"
+        and current_platform.is_device_capability_family(90)
+    ):
+        # On SM90, the metadata builder otherwise selects FA3 AOT scheduling
+        # before Bloom's ALiBi layers fall back to FA2. Pinning FA2 keeps the
+        # builder and layer consistent and preserves the L4 test path.
+        vllm_kwargs["attention_config"] = {"flash_attn_version": 2}
+
     with vllm_runner(
         model,
         tokenizer_name=model_info.tokenizer or model,
         tokenizer_mode=model_info.tokenizer_mode,
+        revision=model_info.revision,
         trust_remote_code=model_info.trust_remote_code,
         # Remove the effects of batch variance on ROCm since batch invariance
         # is not yet supported.
@@ -186,6 +210,7 @@ def test_models(
         max_num_seqs=1 if current_platform.is_rocm() else 2,
         enable_prompt_embeds=use_prompt_embeds,
         compilation_config={"cudagraph_capture_sizes": [1, 2]},
+        **vllm_kwargs,
     ) as vllm_model:
         vllm_outputs = vllm_model.generate_greedy_logprobs(
             example_prompts, max_tokens, num_logprobs

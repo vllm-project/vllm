@@ -15,11 +15,14 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
+from vllm.model_executor.model_loader.mtp_validation import (
+    is_mtp_completeness_check_enabled,
+)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.sequence import IntermediateTensors
 
-from .step3p5 import Step3p5DecoderLayer, get_spec_layer_idx_from_weight_name
-from .utils import maybe_prefix
+from .step3p5 import Step3p5DecoderLayer
+from .utils import get_spec_layer_idx_from_weight_name, maybe_prefix
 
 logger = init_logger(__name__)
 
@@ -181,14 +184,17 @@ class Step3p5MTP(nn.Module):
             ("gate_up_proj", "gate_proj", 0),
             ("gate_up_proj", "up_proj", 1),
         ]
+        params_dict = dict(self.named_parameters())
+        base_layer = (
+            "base_layer." if any(".base_layer." in name for name in params_dict) else ""
+        )
 
         expert_params_mapping = [
-            (".moe.experts.w13_weight", ".moe.gate_proj.weight", "w1"),
-            (".moe.experts.w13_weight", ".moe.up_proj.weight", "w3"),
-            (".moe.experts.w2_weight", ".moe.down_proj.weight", "w2"),
+            (f".moe.experts.{base_layer}w13_weight", ".moe.gate_proj.weight", "w1"),
+            (f".moe.experts.{base_layer}w13_weight", ".moe.up_proj.weight", "w3"),
+            (f".moe.experts.{base_layer}w2_weight", ".moe.down_proj.weight", "w2"),
         ]
 
-        params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
@@ -280,7 +286,7 @@ class Step3p5MTP(nn.Module):
             and getattr(param, "requires_grad", False) is False
         }
         params_need_to_load -= optional_params
-        if params_need_to_load != loaded_params:
+        if params_need_to_load != loaded_params and is_mtp_completeness_check_enabled():
             missing_params = list(params_need_to_load - loaded_params)
             param_name_example = missing_params[0]
             raise RuntimeError(

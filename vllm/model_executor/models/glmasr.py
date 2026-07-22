@@ -4,7 +4,6 @@
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Annotated, Any, Literal, TypeAlias
 
-import numpy as np
 import torch
 import torch.nn as nn
 from transformers import BatchFeature
@@ -13,6 +12,7 @@ from transformers.models.whisper import WhisperFeatureExtractor
 
 from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
+from vllm.config.speech_to_text import SpeechToTextParams
 from vllm.distributed.parallel_state import get_tensor_model_parallel_world_size
 from vllm.inputs import ModalityData, MultiModalDataDict, PromptType, TokensPrompt
 from vllm.model_executor.layers.activation import get_act_fn
@@ -65,8 +65,13 @@ from .interfaces import (
     SupportsPP,
     SupportsTranscription,
 )
-from .utils import AutoWeightsLoader, init_vllm_registered_model, maybe_prefix
-from .whisper import ISO639_1_SUPPORTED_LANGS
+from .utils import (
+    AutoWeightsLoader,
+    WeightsMapper,
+    init_vllm_registered_model,
+    maybe_prefix,
+)
+from .whisper import ISO639_1_SUPPORTED_LANGS, _create_fake_bias_for_k_proj
 
 
 class GlmAsrEncoderRotaryEmbedding(nn.Module):
@@ -395,6 +400,14 @@ class GlmAsrEncoder(nn.Module):
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
     }
 
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_stacked={
+            ".q_proj": (".qkv_proj", "q"),
+            ".k_proj": (".qkv_proj", "k"),
+            ".v_proj": (".qkv_proj", "v"),
+        }
+    )
+
     def __init__(
         self,
         config,
@@ -496,42 +509,9 @@ class GlmAsrEncoder(nn.Module):
         return _GlmAsrEncoderOutput(last_hidden_state=hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        """Custom weight loading to handle q_proj/k_proj/v_proj -> qkv_proj mapping."""
-        from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-
-        stacked_params_mapping = [
-            # (param_name, shard_name, shard_id)
-            ("qkv_proj", "q_proj", "q"),
-            ("qkv_proj", "k_proj", "k"),
-            ("qkv_proj", "v_proj", "v"),
-        ]
-        params_dict = dict(self.named_parameters())
-        loaded_params: set[str] = set()
-
-        for name, loaded_weight in weights:
-            for param_name, weight_name, shard_id in stacked_params_mapping:
-                if weight_name not in name:
-                    continue
-                name = name.replace(weight_name, param_name)
-                # Skip loading extra bias for GPTQ models.
-                if name.endswith(".bias") and name not in params_dict:
-                    continue
-
-                param = params_dict[name]
-                weight_loader = param.weight_loader
-                weight_loader(param, loaded_weight, shard_id)
-                break
-            else:
-                # Default weight loading for non-stacked params
-                if name.endswith(".bias") and name not in params_dict:
-                    continue
-                if name not in params_dict:
-                    continue
-                param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                weight_loader(param, loaded_weight)
-            loaded_params.add(name)
-        return loaded_params
+        weights = _create_fake_bias_for_k_proj(weights, ".k_proj.weight")
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
 class GlmAsrFeatureInputs(TensorSchema):
@@ -1129,17 +1109,12 @@ class GlmAsrForConditionalGeneration(
         )
 
     @classmethod
-    def get_generation_prompt(
-        cls,
-        audio: np.ndarray,
-        model_config: ModelConfig,
-        stt_config: SpeechToTextConfig,
-        language: str | None,
-        task_type: Literal["transcribe", "translate"],
-        request_prompt: str,
-        to_language: str | None,
-    ) -> PromptType:
+    def get_generation_prompt(cls, stt_params: SpeechToTextParams) -> PromptType:
         """Get the generation prompt to be used for transcription requests."""
+        audio = stt_params.audio
+        model_config = stt_params.model_config
+        task_type = stt_params.task_type
+        to_language = stt_params.to_language
         tokenizer = cached_tokenizer_from_config(model_config)
         audio_token = cls._get_audio_token(model_config)
 

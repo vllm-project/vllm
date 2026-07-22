@@ -41,6 +41,7 @@ from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.kv_cache_interface import AttentionSpec, get_kv_quant_mode
 
+DEVICE_TYPE = current_platform.device_type
 FP8_DTYPE = current_platform.fp8_dtype()
 FP4_DTYPE = torch.uint8
 
@@ -110,7 +111,11 @@ class AttentionQuantPatternModel(torch.nn.Module):
         # Fetch the attention backend and kv cache shape and stride order
         attn_backend = self.attn.attn_backend
         kv_cache_shape = attn_backend.get_kv_cache_shape(
-            num_blocks, self.block_size, self.num_kv_heads, self.head_size
+            num_blocks,
+            self.block_size,
+            self.num_kv_heads,
+            self.head_size,
+            cache_dtype_str=self.attn.kv_cache_dtype,
         )
         try:
             kv_cache_stride_order = attn_backend.get_kv_cache_stride_order()
@@ -124,11 +129,10 @@ class AttentionQuantPatternModel(torch.nn.Module):
 
         # Create dummy KV cache
         raw_tensor = torch.zeros(
-            2 * num_blocks * self.block_size * self.num_kv_heads * self.head_size,
+            kv_cache_shape,
             dtype=self.attn.kv_cache_torch_dtype,
             device=self.device,
         )
-        raw_tensor = raw_tensor.view(kv_cache_shape)
         kv_cache = raw_tensor.permute(*inv_order)
 
         self.attn.kv_cache = kv_cache
@@ -300,7 +304,7 @@ def test_attention_quant_pattern(
 
     custom_ops_list = custom_ops.split(",") if custom_ops else []
 
-    device = torch.device("cuda:0")
+    device = torch.device(f"{DEVICE_TYPE}:0")
     torch.set_default_dtype(dtype)
     torch.manual_seed(42)
 

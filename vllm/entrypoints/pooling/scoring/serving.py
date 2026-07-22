@@ -6,15 +6,16 @@ from fastapi.responses import JSONResponse, Response
 from vllm import PoolingParams
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.openai.engine.protocol import UsageInfo
-from vllm.entrypoints.pooling.base.io_processor import PoolingIOProcessor
-from vllm.entrypoints.pooling.base.serving import PoolingServing
 from vllm.logger import init_logger
 from vllm.outputs import PoolingRequestOutput, ScoringRequestOutput
+from vllm.tasks import SCORE_TYPE_MAP, SupportedTask
 from vllm.v1.pool.late_interaction import (
     build_late_interaction_doc_params,
     build_late_interaction_query_params,
 )
 
+from ..base.io_processor import PoolingIOProcessor
+from ..base.serving import PoolingServing
 from .io_processor import ScoringIOProcessors, ScoringServeContext
 from .protocol import (
     RerankDocument,
@@ -38,10 +39,15 @@ class ServingScores(PoolingServing):
         self,
         engine_client: EngineClient,
         *args,
+        supported_tasks: tuple[SupportedTask, ...],
         enable_flash_late_interaction: bool = True,
         **kwargs,
     ):
-        self.io_processor_name: str = engine_client.model_config.score_type
+        pooling_task = engine_client.model_config.get_pooling_task(supported_tasks)
+        score_type = SCORE_TYPE_MAP.get(pooling_task, None)  # type: ignore[arg-type]
+        assert score_type is not None
+
+        self.io_processor_name: str = score_type
         self.enable_flash_late_interaction = (
             self.io_processor_name == "late-interaction"
             and enable_flash_late_interaction
@@ -90,7 +96,7 @@ class ServingScores(PoolingServing):
                 ctx.request.top_n if ctx.request.top_n > 0 else len(final_res_batch),
             )
         else:
-            raise NotImplementedError("")
+            raise ValueError(f"Invalid {self.request_id_prefix} request type")
 
     def _request_output_to_score_response(
         self,
@@ -184,7 +190,7 @@ class ServingScores(PoolingServing):
 
     async def flash_late_interaction(self, *args, **kwargs) -> Response:
         ctx = await self._init_ctx(self.io_processor, *args, **kwargs)
-        await self._preprocessing_async(self.io_processor, ctx)
+        await self._preprocessing(self.io_processor, ctx)
 
         # stage 1: encode queries and cache token embeddings on workers.
         await self._flash_late_interaction_encode_queries(ctx)
@@ -205,7 +211,6 @@ class ServingScores(PoolingServing):
         query_keys = [f"{ctx.request_id}-query-{i}" for i in range(n_queries)]
         query_uses = [n_docs if n_queries == 1 else 1] * n_queries
 
-        query_pooling_params_list = []
         for i in range(n_queries):
             pooling_params = ctx.pooling_params.clone()
             pooling_params.late_interaction_params = (
@@ -214,23 +219,21 @@ class ServingScores(PoolingServing):
                     query_uses=query_uses[i],
                 )
             )
-            query_pooling_params_list.append(pooling_params)
+            query_engine_inputs[i]["params"] = pooling_params
 
-        assert (
-            n_queries
-            == len(query_pooling_params_list)
-            == len(query_engine_inputs)
-            == len(query_keys)
-        )
+        assert n_queries == len(query_engine_inputs) == len(query_keys)
 
         query_ctx = ScoringServeContext(
             request=ctx.request,
             raw_request=ctx.raw_request,
             model_name=ctx.model_name,
             request_id=ctx.request_id,
-            pooling_params=query_pooling_params_list,
+            pooling_params=ctx.pooling_params,
             prompt_request_ids=query_keys,
             engine_inputs=query_engine_inputs,
+            lora_request=ctx.lora_request,
+            priorities=ctx.priorities,
+            prompt_extras=ctx.prompt_extras,
         )
 
         await self._prepare_generators(query_ctx)
@@ -249,30 +252,27 @@ class ServingScores(PoolingServing):
         query_keys = [f"{ctx.request_id}-query-{i}" for i in range(n_queries)]
         doc_keys = [f"{ctx.request_id}-doc-{i}" for i in range(n_docs)]
 
-        doc_pooling_params_list = []
         for i in range(n_docs):
             query_idx = 0 if n_queries == 1 else i
             pooling_params = ctx.pooling_params.clone()
             pooling_params.late_interaction_params = build_late_interaction_doc_params(
                 query_key=query_keys[query_idx]
             )
-            doc_pooling_params_list.append(pooling_params)
+            doc_engine_inputs[i]["params"] = pooling_params
 
-        assert (
-            n_docs
-            == len(doc_pooling_params_list)
-            == len(doc_engine_inputs)
-            == len(doc_keys)
-        )
+        assert n_docs == len(doc_engine_inputs) == len(doc_keys)
 
         doc_ctx = ScoringServeContext(
             request=ctx.request,
             raw_request=ctx.raw_request,
             model_name=ctx.model_name,
             request_id=ctx.request_id,
-            pooling_params=doc_pooling_params_list,
+            pooling_params=ctx.pooling_params,
             prompt_request_ids=doc_keys,
             engine_inputs=doc_engine_inputs,
+            lora_request=ctx.lora_request,
+            priorities=ctx.priorities,
+            prompt_extras=ctx.prompt_extras,
         )
 
         await self._prepare_generators(doc_ctx)

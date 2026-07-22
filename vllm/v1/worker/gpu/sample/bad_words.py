@@ -114,7 +114,7 @@ def _bad_words_kernel(
     input_ids_ptr,
     expanded_local_pos_ptr,
 ):
-    token_idx = tl.program_id(0)
+    token_idx = tl.program_id(0).to(tl.int64)
     bw_idx = tl.program_id(1)
 
     req_state_idx = tl.load(expanded_idx_mapping_ptr + token_idx)

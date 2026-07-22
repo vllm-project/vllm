@@ -7,6 +7,8 @@ import torch
 import torch.distributed as dist
 from torch.distributed import ProcessGroup
 
+from vllm.utils import is_moe_layer
+
 
 class Cache:
     def __init__(self):
@@ -60,6 +62,8 @@ class All2AllManagerBase:
                 in_the_same_node_as(tcp_store_group, source_rank=0)
             )
 
+        self.support_fault_tolerance = False
+
     def get_handle(self, kwargs):
         # get a handle for the all2all communication,
         # based on the kwargs.
@@ -98,6 +102,13 @@ class All2AllManagerBase:
         # Subclasses should either:
         # - implement handling for extra_tensors, or
         # - raise a clear error if extra_tensors is not supported.
+        raise NotImplementedError
+
+    def query_active_mask(self) -> torch.Tensor:
+        raise NotImplementedError
+
+    def query_fault(self) -> torch.Tensor:
+        """Returns has_fault scalar."""
         raise NotImplementedError
 
     def set_num_sms(self, num_sms: int):
@@ -164,11 +175,17 @@ class DeviceCommunicatorBase:
 
         config = get_current_vllm_config_or_none()
         if config is not None:
-            # as long as we use data parallel (coupled data parallel
-            # where all data parallel ranks execute forward together),
-            # we initialize the all2all manager used in expert parallel.
-            use_ep = config.parallel_config.data_parallel_size > 1
-            all2all_backend = config.parallel_config.all2all_backend
+            # initialize the all2all manager for DP or sequence-parallel EP.
+            parallel_config = config.parallel_config
+            use_ep = (
+                parallel_config.data_parallel_size > 1
+                or parallel_config.use_sequence_parallel_moe
+                or (
+                    parallel_config.enable_expert_parallel
+                    and parallel_config.prefill_context_parallel_size > 1
+                )
+            )
+            all2all_backend = parallel_config.all2all_backend
 
         self.is_ep_communicator = unique_name.split(":")[0] == "ep"
         self.use_all2all = self.is_ep_communicator and use_ep
@@ -317,16 +334,7 @@ class DeviceCommunicatorBase:
         if not self.is_ep_communicator:
             return
 
-        moe_modules = [
-            module
-            for module in model.modules()
-            # TODO(bnell): Should use isinstance but can't.  Maybe search for
-            # presence of quant_method.maybe_init_modular_kernel?
-            if (
-                module.__class__.__name__ == "FusedMoE"
-                or module.__class__.__name__ == "SharedFusedMoE"
-            )
-        ]
+        moe_modules = [module for module in model.modules() if is_moe_layer(module)]
         for module in moe_modules:
             module.maybe_init_modular_kernel()
 

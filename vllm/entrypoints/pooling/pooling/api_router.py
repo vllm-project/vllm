@@ -5,16 +5,23 @@ from http import HTTPStatus
 from fastapi import APIRouter, Depends, Request
 
 from vllm.entrypoints.openai.engine.protocol import ErrorResponse
-from vllm.entrypoints.openai.utils import validate_json_request
-from vllm.entrypoints.pooling.pooling.protocol import PoolingRequest
-from vllm.entrypoints.pooling.pooling.serving import ServingPooling
-from vllm.entrypoints.utils import load_aware_call, with_cancellation
+from vllm.entrypoints.serve.utils.api_utils import (
+    load_aware_call,
+    validate_json_request,
+    with_cancellation,
+)
+
+from .protocol import PoolingRequest
+from .serving import ServingPooling
 
 router = APIRouter()
 
 
-def pooling(request: Request) -> ServingPooling | None:
-    return request.app.state.serving_pooling
+def pooling(request: Request) -> ServingPooling:
+    handler = getattr(request.app.state, "serving_pooling", None)
+    if handler is None:
+        raise NotImplementedError("The model does not support Pooling API")
+    return handler
 
 
 @router.post(
@@ -29,7 +36,4 @@ def pooling(request: Request) -> ServingPooling | None:
 @load_aware_call
 async def create_pooling(request: PoolingRequest, raw_request: Request):
     handler = pooling(raw_request)
-    if handler is None:
-        raise NotImplementedError("The model does not support Pooling API")
-
     return await handler(request, raw_request)

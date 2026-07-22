@@ -1,17 +1,61 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from vllm.v1.engine import FinishReason
+from vllm.v1.core.sched.output import ScheduledEncoderInputStats, SchedulerOutput
+from vllm.v1.engine import EngineCoreOutputs, FinishReason
 from vllm.v1.metrics.stats import (
     IterationStats,
     PrefillStats,
     PromptTokenStats,
     RequestStateStats,
+    SchedulerIterationDetails,
+    SchedulerStats,
 )
+from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
+from vllm.v1.utils import compute_iteration_details
 
 
 def test_iteration_stats_repr():
     iteration_stats = IterationStats()
     assert repr(iteration_stats).startswith("IterationStats(")
+
+
+def test_scheduler_iteration_details_serialization():
+    iteration_details = SchedulerIterationDetails(
+        iteration_index=1,
+        num_ctx_requests=2,
+        num_ctx_tokens=3,
+        num_generation_requests=4,
+        num_generation_tokens=5,
+        elapsed_ms=6.7,
+        num_encoder_inputs=2,
+        num_encoder_output_tokens=392,
+    )
+    outputs = EngineCoreOutputs(
+        scheduler_stats=SchedulerStats(
+            kv_cache_usage=0.5,
+            iteration_details=iteration_details,
+        )
+    )
+
+    encoded = MsgpackEncoder().encode(outputs)
+    decoded = MsgpackDecoder(EngineCoreOutputs).decode(encoded)
+
+    assert decoded.scheduler_stats is not None
+    assert decoded.scheduler_stats.kv_cache_usage == 0.5
+    assert decoded.scheduler_stats.iteration_details == iteration_details
+
+
+def test_compute_iteration_details_includes_encoder_stats():
+    scheduler_output = SchedulerOutput.make_empty()
+    scheduler_output.scheduled_encoder_input_stats = ScheduledEncoderInputStats(
+        num_inputs=2,
+        output_tokens=392,
+    )
+
+    iteration_details = compute_iteration_details(scheduler_output)
+
+    assert iteration_details.num_encoder_inputs == 2
+    assert iteration_details.num_encoder_output_tokens == 392
 
 
 def test_prefill_kv_computed_with_cache():
@@ -26,6 +70,7 @@ def test_prefill_kv_computed_with_cache():
     # Case 1: With prefix cache (1200 tokens cached)
     iteration_stats.update_from_finished_request(
         finish_reason=FinishReason.STOP,
+        request_id="test-req-001",
         num_prompt_tokens=10000,
         max_tokens_param=100,
         req_stats=req_stats,
@@ -35,6 +80,7 @@ def test_prefill_kv_computed_with_cache():
     finished_req = iteration_stats.finished_requests[0]
     assert finished_req.num_prompt_tokens == 10000
     assert finished_req.num_cached_tokens == 1200
+    assert finished_req.request_id == "test-req-001"
 
     # Verify calculation: prefill KV = prompt tokens - cached tokens
     prefill_kv_computed = finished_req.num_prompt_tokens - max(
@@ -55,6 +101,7 @@ def test_prefill_kv_computed_no_cache():
     # Case 2: No prefix cache
     iteration_stats.update_from_finished_request(
         finish_reason=FinishReason.STOP,
+        request_id="test-req-002",
         num_prompt_tokens=2000,
         max_tokens_param=100,
         req_stats=req_stats,
@@ -64,6 +111,7 @@ def test_prefill_kv_computed_no_cache():
     finished_req = iteration_stats.finished_requests[0]
     assert finished_req.num_prompt_tokens == 2000
     assert finished_req.num_cached_tokens == 0
+    assert finished_req.request_id == "test-req-002"
 
     # Verify calculation: prefill KV = full prompt when no cache
     prefill_kv_computed = finished_req.num_prompt_tokens - max(
@@ -84,6 +132,7 @@ def test_prefill_kv_computed_edge_cases():
     # Case 3: Negative num_cached_tokens (shouldn't happen, but handle gracefully)
     iteration_stats.update_from_finished_request(
         finish_reason=FinishReason.STOP,
+        request_id="test-req-003",
         num_prompt_tokens=100,
         max_tokens_param=10,
         req_stats=req_stats,
@@ -96,11 +145,13 @@ def test_prefill_kv_computed_edge_cases():
         finished_req.num_cached_tokens, 0
     )
     assert prefill_kv_computed == 100  # Should treat negative as 0
+    assert finished_req.request_id == "test-req-003"
 
     # Case 4: All tokens cached (shouldn't happen in practice)
     iteration_stats2 = IterationStats()
     iteration_stats2.update_from_finished_request(
         finish_reason=FinishReason.STOP,
+        request_id="test-req-004",
         num_prompt_tokens=100,
         max_tokens_param=10,
         req_stats=req_stats,
@@ -112,6 +163,7 @@ def test_prefill_kv_computed_edge_cases():
         finished_req2.num_cached_tokens, 0
     )
     assert prefill_kv_computed2 == 0  # All cached, nothing computed
+    assert finished_req2.request_id == "test-req-004"
 
 
 def test_prompt_token_stats_all_computed():

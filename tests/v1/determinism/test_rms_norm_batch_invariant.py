@@ -9,16 +9,18 @@ with the standard CUDA-based implementation to ensure numerical accuracy.
 
 import pytest
 import torch
-from utils import skip_unsupported
+from utils import skip_if_not_cuda, skip_unsupported
 
-from vllm.model_executor.layers.batch_invariant import rms_norm as triton_rms_norm
+from vllm.model_executor.layers.batch_invariant import (
+    rms_norm_batch_invariant,
+)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.platforms import current_platform
 
 DEVICE_TYPE = current_platform.device_type
 
 
-@skip_unsupported
+@skip_if_not_cuda
 @pytest.mark.parametrize("batch_size", [1, 4, 16, 64])
 @pytest.mark.parametrize("hidden_size", [512, 2048, 4096, 8192])
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
@@ -51,7 +53,7 @@ def test_rms_norm_batch_invariant_vs_standard(
     standard_output = rms_norm_layer.forward_cuda(input_tensor)
 
     # Batch-invariant implementation (Triton)
-    triton_output = triton_rms_norm(input_tensor, weight, eps=eps)
+    triton_output = rms_norm_batch_invariant(input_tensor, weight, eps=eps)
 
     # Compare outputs
     # Use looser tolerance for bfloat16 due to its lower precision
@@ -71,7 +73,100 @@ def test_rms_norm_batch_invariant_vs_standard(
     )
 
 
-@skip_unsupported
+@skip_if_not_cuda
+@pytest.mark.parametrize("hidden_size", [512, 4096])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("eps", [1e-6])
+def test_fused_add_rms_norm_batch_invariant_residual_path(
+    hidden_size: int,
+    dtype: torch.dtype,
+    eps: float,
+):
+    """
+    Test the batch-invariant fused residual-add + RMSNorm helper directly.
+    """
+    device = torch.device(DEVICE_TYPE)
+
+    torch.manual_seed(42)
+    x_single = torch.randn(1, hidden_size, dtype=dtype, device=device)
+    residual_single = torch.randn(1, hidden_size, dtype=dtype, device=device)
+    weight = torch.randn(hidden_size, dtype=dtype, device=device)
+
+    x_batch = torch.cat(
+        [
+            x_single,
+            torch.randn(3, hidden_size, dtype=dtype, device=device),
+        ],
+        dim=0,
+    )
+    residual_batch = torch.cat(
+        [
+            residual_single,
+            torch.randn(3, hidden_size, dtype=dtype, device=device),
+        ],
+        dim=0,
+    )
+
+    def fused_add_rms_norm(x, residual, w, e) -> tuple[torch.Tensor, torch.Tensor]:
+        import vllm._custom_ops as ops
+
+        ops.fused_add_rms_norm(x, residual, w, e)
+        return x, residual
+
+    out_single, residual_out_single = fused_add_rms_norm(
+        x_single.clone(),
+        residual_single.clone(),
+        weight,
+        eps,
+    )
+    out_batch, residual_out_batch = fused_add_rms_norm(
+        x_batch.clone(),
+        residual_batch.clone(),
+        weight,
+        eps,
+    )
+
+    merged_single = x_single + residual_single
+    ref_out = rms_norm_batch_invariant(merged_single, weight, eps=eps)
+
+    torch.testing.assert_close(
+        residual_out_single,
+        merged_single,
+        rtol=0.0,
+        atol=0.0,
+        msg="Residual output should equal x + residual exactly",
+    )
+    torch.testing.assert_close(
+        residual_out_batch[:1],
+        merged_single,
+        rtol=0.0,
+        atol=0.0,
+        msg="Residual output should be batch invariant",
+    )
+    torch.testing.assert_close(
+        out_single,
+        out_batch[:1],
+        rtol=0.0,
+        atol=0.0,
+        msg="Fused add RMSNorm output should be batch invariant",
+    )
+
+    if dtype == torch.bfloat16:
+        rtol, atol = 1e-1, 1e-1
+    else:
+        rtol, atol = 1e-2, 1e-2
+
+    torch.testing.assert_close(
+        out_single,
+        ref_out,
+        rtol=rtol,
+        atol=atol,
+        msg="Fused add RMSNorm output should stay numerically close to the "
+        "batch-invariant RMSNorm reference",
+    )
+
+
+@skip_if_not_cuda
 @pytest.mark.parametrize("batch_size", [1, 16, 128])
 @pytest.mark.parametrize("seq_len", [1, 32, 512])
 @pytest.mark.parametrize("hidden_size", [2048, 4096])
@@ -100,7 +195,7 @@ def test_rms_norm_3d_input(
     standard_output = rms_norm_layer.forward_cuda(input_tensor)
 
     # Batch-invariant implementation
-    triton_output = triton_rms_norm(input_tensor, weight, eps=eps)
+    triton_output = rms_norm_batch_invariant(input_tensor, weight, eps=eps)
 
     # Use looser tolerance for bfloat16
     rtol, atol = 1e-1, 1e-1  # 10% tolerance for bfloat16
@@ -115,7 +210,7 @@ def test_rms_norm_3d_input(
     )
 
 
-@skip_unsupported
+@skip_if_not_cuda
 def test_rms_norm_numerical_stability(default_vllm_config):
     """
     Test RMS norm numerical stability with extreme values.
@@ -149,7 +244,7 @@ def test_rms_norm_numerical_stability(default_vllm_config):
         standard_output = rms_norm_layer.forward_cuda(input_tensor)
 
         # Batch-invariant implementation
-        triton_output = triton_rms_norm(input_tensor, weight, eps=eps)
+        triton_output = rms_norm_batch_invariant(input_tensor, weight, eps=eps)
 
         # Check for NaN or Inf
         assert not torch.isnan(standard_output).any(), (
@@ -196,7 +291,7 @@ def test_rms_norm_formula(default_vllm_config):
     expected_output = input_tensor * torch.rsqrt(variance + eps) * weight
 
     # Batch-invariant implementation
-    triton_output = triton_rms_norm(input_tensor, weight, eps=eps)
+    triton_output = rms_norm_batch_invariant(input_tensor, weight, eps=eps)
 
     # Compare against formula
     torch.testing.assert_close(
@@ -208,7 +303,7 @@ def test_rms_norm_formula(default_vllm_config):
     )
 
 
-@skip_unsupported
+@skip_if_not_cuda
 @pytest.mark.parametrize("hidden_size", [128, 1024, 4096, 16384])
 def test_rms_norm_different_hidden_sizes(default_vllm_config, hidden_size: int):
     """
@@ -232,7 +327,7 @@ def test_rms_norm_different_hidden_sizes(default_vllm_config, hidden_size: int):
     standard_output = rms_norm_layer.forward_cuda(input_tensor)
 
     # Batch-invariant implementation
-    triton_output = triton_rms_norm(input_tensor, weight, eps=eps)
+    triton_output = rms_norm_batch_invariant(input_tensor, weight, eps=eps)
 
     # Use looser tolerance for bfloat16
     rtol, atol = 1e-1, 1e-1  # 10% tolerance for bfloat16
@@ -267,7 +362,7 @@ def test_rms_norm_determinism(default_vllm_config):
     # Run multiple times
     outputs = []
     for _ in range(5):
-        output = triton_rms_norm(input_tensor.clone(), weight, eps=eps)
+        output = rms_norm_batch_invariant(input_tensor.clone(), weight, eps=eps)
         outputs.append(output)
 
     # All outputs should be identical
@@ -280,6 +375,35 @@ def test_rms_norm_determinism(default_vllm_config):
             atol=0.0,
             msg=f"RMS norm not deterministic: run {idx} differs from reference",
         )
+
+
+@skip_unsupported
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_rms_norm_batch_invariance(dtype):
+    """Same row gives identical rms_norm result regardless of batch neighbors.
+
+    This verifies that the output for a given row is independent of what other
+    rows are present in the batch — the core batch-invariance property.
+    """
+    device = torch.device(DEVICE_TYPE)
+    torch.manual_seed(42)
+    hidden_size = 2048
+    eps = 1e-6
+
+    weight = torch.randn(hidden_size, dtype=dtype, device=device)
+    row = torch.randn(1, hidden_size, dtype=dtype, device=device)
+
+    # Compute rms_norm on the single row alone
+    out_single = rms_norm_batch_invariant(row, weight, eps=eps)
+
+    # Embed the same row in a larger batch with random neighbors
+    batch = torch.randn(8, hidden_size, dtype=dtype, device=device)
+    batch[4] = row[0]
+    out_batch = rms_norm_batch_invariant(batch, weight, eps=eps)
+
+    assert torch.equal(out_single[0], out_batch[4]), (
+        "rms_norm output for a row differs when batch context changes"
+    )
 
 
 if __name__ == "__main__":
@@ -302,7 +426,7 @@ if __name__ == "__main__":
     standard_output = rms_norm_layer.forward_cuda(input_tensor)
 
     # Batch-invariant implementation
-    triton_output = triton_rms_norm(input_tensor, weight, eps=eps)
+    triton_output = rms_norm_batch_invariant(input_tensor, weight, eps=eps)
 
     # Compare
     max_diff = (triton_output - standard_output).abs().max().item()

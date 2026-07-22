@@ -11,18 +11,13 @@ from transformers.models.aria.processing_aria import AriaProcessor
 
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
-from vllm.distributed import get_tensor_model_parallel_rank
 from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.activation import get_act_fn
-from vllm.model_executor.layers.fused_moe import SharedFusedMoE
+from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.linear import ColumnParallelLinear, RowParallelLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
-from vllm.model_executor.model_loader.weight_utils import (
-    default_weight_loader,
-    maybe_remap_kv_scale_name,
-)
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     MultiModalFieldConfig,
@@ -48,7 +43,6 @@ from .llama import LlamaDecoderLayer, LlamaMLP, LlamaModel
 from .utils import (
     AutoWeightsLoader,
     WeightsMapper,
-    is_pp_missing_parameter,
     maybe_prefix,
 )
 
@@ -91,34 +85,18 @@ class AriaVisionTransformer(Idefics3VisionTransformer, SupportsQuant):
         # Identity layer
         self.post_layernorm = nn.Identity()
 
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        stacked_params_mapping = [
-            # (param_name, shard_name, shard_id)
-            ("qkv_proj", "q_proj", "q"),
-            ("qkv_proj", "k_proj", "k"),
-            ("qkv_proj", "v_proj", "v"),
-        ]
-        params_dict = dict(self.named_parameters())
-        loaded_params: set[str] = set()
-        for name, loaded_weight in weights:
-            # NOTE: post_layernorm is not used in Aria
-            if "post_layernorm" in name:
-                continue
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_stacked={
+            ".q_proj": (".qkv_proj", "q"),
+            ".k_proj": (".qkv_proj", "k"),
+            ".v_proj": (".qkv_proj", "v"),
+        }
+    )
 
-            for param_name, weight_name, shard_id in stacked_params_mapping:
-                if weight_name not in name:
-                    continue
-                name = name.replace(weight_name, param_name)
-                param = params_dict[name]
-                weight_loader = param.weight_loader
-                weight_loader(param, loaded_weight, shard_id)
-                break
-            else:
-                param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                weight_loader(param, loaded_weight)
-            loaded_params.add(name)
-        return loaded_params
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        # NOTE: post_layernorm is not used in Aria.
+        loader = AutoWeightsLoader(self, skip_substrs=["post_layernorm"])
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
 class AriaProjectorMLP(nn.Module):
@@ -214,38 +192,6 @@ class AriaProjector(nn.Module):
         return out
 
 
-class AriaFusedMoE(SharedFusedMoE):
-    def weight_loader(
-        self, param: nn.Parameter, loaded_weight: torch.Tensor, shard_id: str
-    ) -> None:
-        # Override the weight_loader to handle the expert weights in the Aria
-        # model, which are already packed with experts, and merge the gate and
-        # up weights for each expert.
-        # Note: Loading expert weights with quantization is not supported
-        tp_rank = get_tensor_model_parallel_rank()
-        if shard_id == "w13":
-            # the shape of loaded_weight is
-            # (num_experts, hidden_size, 2 * moe_intermediate_size)
-            if self.tp_size > 1:
-                up, gate = loaded_weight.chunk(2, dim=-1)
-                up_current_rank = up.chunk(self.tp_size, dim=-1)[tp_rank]
-                gate_current_rank = gate.chunk(self.tp_size, dim=-1)[tp_rank]
-                up_and_gate = torch.cat(
-                    [up_current_rank, gate_current_rank], dim=-1
-                ).transpose(1, 2)
-                param.data.copy_(up_and_gate)
-            else:
-                param.data.copy_(loaded_weight.transpose(1, 2))
-        elif shard_id == "w2":
-            # the shape of loaded_weight is
-            # (num_experts, moe_intermediate_size, hidden_size)
-            if self.tp_size > 1:
-                down_current_rank = loaded_weight.chunk(self.tp_size, dim=1)[tp_rank]
-                param.data.copy_(down_current_rank.transpose(1, 2))
-            else:
-                param.data.copy_(loaded_weight.transpose(1, 2))
-
-
 class AriaTextMoELayer(nn.Module):
     """
     Mixture of Experts (MoE) Layer for the AriaMoE model.
@@ -276,14 +222,13 @@ class AriaTextMoELayer(nn.Module):
             bias=config.mlp_bias,
         )
 
-        self.experts = AriaFusedMoE(
+        self.experts = FusedMoE(
             shared_experts=self.shared_experts,
             num_experts=config.moe_num_experts,
             top_k=config.moe_topk,
             hidden_size=config.hidden_size,
             intermediate_size=config.intermediate_size,
             quant_config=quant_config,
-            reduce_results=True,
             prefix=f"{prefix}.experts",
         )
 
@@ -301,12 +246,7 @@ class AriaTextMoELayer(nn.Module):
 
         router_output = torch.nn.functional.linear(hidden_states, self.router_weight)
 
-        sparse_expert_output = self.experts(hidden_states, router_output)
-
-        if self.shared_experts is not None:
-            return sparse_expert_output[0] + sparse_expert_output[1]
-        else:
-            return sparse_expert_output
+        return self.experts(hidden_states, router_output)
 
 
 class AriaTextDecoderLayer(LlamaDecoderLayer):
@@ -336,81 +276,22 @@ class AriaTextModel(LlamaModel, SupportsQuant):
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
         "gate_up_proj": ["gate_proj", "up_proj"],
-        "experts.w13_weight": ["experts.fc1.weight"],
-        "experts.w2_weight": ["experts.fc2.weight"],
     }
+
+    # Aria packs all experts into single (transposed) fc1/fc2 tensors, which is
+    # exactly the pre-fused checkpoint layout FusedMoE self-loads once fc1/fc2
+    # are renamed to the fused gate_up_proj/down_proj names.
+    hf_to_vllm_mapper = LlamaModel.hf_to_vllm_mapper | WeightsMapper(
+        orig_to_new_substr={
+            "experts.fc1": "experts.gate_up_proj",
+            "experts.fc2": "experts.down_proj",
+        }
+    )
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__(
             vllm_config=vllm_config, prefix=prefix, layer_type=AriaTextDecoderLayer
         )
-
-    # Adapted from LlamaModel.load_weights with the modification of adding
-    # the expert weights mapping to `stacked_params_mapping`
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        stacked_params_mapping = [
-            # (param_name, shard_name, shard_id)
-            (".qkv_proj", ".q_proj", "q"),
-            (".qkv_proj", ".k_proj", "k"),
-            (".qkv_proj", ".v_proj", "v"),
-            (".gate_up_proj", ".gate_proj", 0),
-            (".gate_up_proj", ".up_proj", 1),
-            ("experts.w13_weight", "experts.fc1.weight", "w13"),
-            ("experts.w2_weight", "experts.fc2.weight", "w2"),
-        ]
-        params_dict = dict(self.named_parameters())
-        loaded_params: set[str] = set()
-        for name, loaded_weight in weights:
-            if "rotary_emb.inv_freq" in name:
-                continue
-            if "rotary_emb.cos_cached" in name or "rotary_emb.sin_cached" in name:
-                # Models trained using ColossalAI may include these tensors in
-                # the checkpoint. Skip them.
-                continue
-            if self.quant_config is not None and (
-                scale_name := self.quant_config.get_cache_scale(name)
-            ):
-                # Loading kv cache quantization scales
-                param = params_dict[scale_name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                loaded_weight = (
-                    loaded_weight if loaded_weight.dim() == 0 else loaded_weight[0]
-                )
-                weight_loader(param, loaded_weight)
-                loaded_params.add(scale_name)
-                continue
-            for param_name, weight_name, shard_id in stacked_params_mapping:
-                if weight_name not in name:
-                    continue
-                name = name.replace(weight_name, param_name)
-                # Skip loading extra bias for GPTQ models.
-                if name.endswith(".bias") and name not in params_dict:
-                    continue
-
-                if is_pp_missing_parameter(name, self):
-                    continue
-
-                param = params_dict[name]
-                weight_loader = param.weight_loader
-                weight_loader(param, loaded_weight, shard_id)
-                break
-            else:
-                # Skip loading extra bias for GPTQ models.
-                if name.endswith(".bias") and name not in params_dict:
-                    continue
-                # Remapping the name of FP8 kv-scale.
-                name = maybe_remap_kv_scale_name(name, params_dict)
-                if name is None:
-                    continue
-
-                if is_pp_missing_parameter(name, self):
-                    continue
-
-                param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                weight_loader(param, loaded_weight)
-            loaded_params.add(name)
-        return loaded_params
 
 
 class AriaProcessingInfo(BaseProcessingInfo):
@@ -544,7 +425,7 @@ class AriaForConditionalGeneration(nn.Module, SupportsMultiModal):
             self.vision_tower = AriaVisionTransformer(
                 config.vision_config,
                 quant_config=quant_config,
-                prefix=f"{prefix}.vision_tower",
+                prefix=maybe_prefix(prefix, "vision_tower"),
             )
             self.multi_modal_projector = AriaProjector(
                 config, prefix=maybe_prefix(prefix, "multi_modal_projector")

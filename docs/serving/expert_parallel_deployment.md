@@ -151,8 +151,9 @@ Configure EPLB with the `--eplb-config` argument, which accepts a JSON string. T
 | `step_interval` | Frequency of rebalancing (every N engine steps) | 3000 |
 | `log_balancedness` | Log balancedness metrics (avg tokens per expert ÷ max tokens per expert) | `false` |
 | `num_redundant_experts` | Additional global experts per EP rank beyond equal distribution | `0` |
-| `use_async` | Use non-blocking EPLB for reduced latency overhead | `false` |
+| `use_async` | Use non-blocking EPLB for reduced latency overhead | `true` |
 | `policy` | The policy type for expert parallel load balancing | `"default"` |
+| `communicator` | Backend for expert weight transfers: `"torch_nccl"`, `"torch_gloo"`, `"pynccl"`, `"nixl"`,  or `null` (auto) | `null` |
 
 For example:
 
@@ -218,8 +219,6 @@ For multi-node deployment, add these EPLB flags to each node's command. We recom
 ### Benchmarking
 
 - Use simulator flags `VLLM_MOE_ROUTING_SIMULATION_STRATEGY=uniform_random` and `VLLM_RANDOMIZE_DP_DUMMY_INPUTS=1` so token routing is balanced across EP ranks.
-
-- Increasing `VLLM_MOE_DP_CHUNK_SIZE` may increase throughput by increasing the maximum batch size for inter-rank token transfers. This may cause DeepEP  to throw `assert self.nvshmem_qp_depth >= (num_max_dispatch_tokens_per_rank + 1) * 2`, which can be fixed by increasing environment variable `NVSHMEM_QP_DEPTH`.
 
 ## Disaggregated Serving (Prefill/Decode Split)
 
