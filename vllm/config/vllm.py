@@ -50,8 +50,8 @@ from .speculative import EagleModelTypes, NgramGPUTypes, SpeculativeConfig
 from .structured_outputs import StructuredOutputsConfig
 from .utils import (
     SupportsHash,
-    _RuntimeDefaultValue,
     config,
+    is_runtime_default,
     replace,
     validate_runtime_default_fields_recursive,
 )
@@ -788,11 +788,11 @@ class VllmConfig:
         """
         current = getattr(config_obj, key)
         # Apply the default when the field is unset (None) or still holds its
-        # RuntimeDefault sentinel (a _RuntimeDefaultValue produced by
-        # RuntimeDefault(factory)).
-        # Without the _RuntimeDefaultValue check, optimization-level defaults would
-        # never be applied to runtime default fields because their sentinel is not None.
-        if current is None or isinstance(current, _RuntimeDefaultValue):
+        # RuntimeDefault sentinel (produced by RuntimeDefault()).
+        # Without the is_runtime_default() check, optimization level defaults
+        # would never be applied to runtime default fields because their
+        # sentinel is not None.
+        if current is None or is_runtime_default(current):
             # Some config values are known before initialization and are
             # hard coded.
             # Other values depend on the user given configuration, so they are
@@ -1068,7 +1068,7 @@ class VllmConfig:
                 raise ValueError(
                     f"`{executor_backend}` does not support async scheduling yet."
                 )
-        elif self.scheduler_config.async_scheduling is None:
+        elif is_runtime_default(self.scheduler_config.async_scheduling):
             # Enable async scheduling unless there is an incompatible option.
             if (
                 self.model_config is not None
@@ -1123,7 +1123,7 @@ class VllmConfig:
             "enabled" if self.scheduler_config.async_scheduling else "disabled",
         )
 
-        if self.parallel_config.disable_nccl_for_dp_synchronization is None:
+        if is_runtime_default(self.parallel_config.disable_nccl_for_dp_synchronization):
             if self.scheduler_config.async_scheduling:
                 if self.parallel_config.data_parallel_size > 1 and (
                     self.model_config is None or self.model_config.is_moe
@@ -1219,7 +1219,7 @@ class VllmConfig:
             self.compilation_config.mode = CompilationMode.NONE
 
         if self.compilation_config.backend == "eager" or (
-            not isinstance(self.compilation_config.mode, _RuntimeDefaultValue)
+            not is_runtime_default(self.compilation_config.mode)
             and self.compilation_config.mode is not None
             and self.compilation_config.mode != CompilationMode.VLLM_COMPILE
         ):
@@ -1248,8 +1248,8 @@ class VllmConfig:
 
         current_platform.apply_config_platform_defaults(self)
 
-        if self.compilation_config.mode is None or isinstance(
-            self.compilation_config.mode, _RuntimeDefaultValue
+        if self.compilation_config.mode is None or is_runtime_default(
+            self.compilation_config.mode
         ):
             if self.optimization_level > OptimizationLevel.O0:
                 self.compilation_config.mode = CompilationMode.VLLM_COMPILE
@@ -1257,8 +1257,8 @@ class VllmConfig:
                 self.compilation_config.mode = CompilationMode.NONE
 
         # By default, enable torch wrapping only when using custom Inductor lowering
-        if self.compilation_config.ir_enable_torch_wrap is None or isinstance(
-            self.compilation_config.ir_enable_torch_wrap, _RuntimeDefaultValue
+        if self.compilation_config.ir_enable_torch_wrap is None or is_runtime_default(
+            self.compilation_config.ir_enable_torch_wrap
         ):
             self.compilation_config.ir_enable_torch_wrap = (
                 self.compilation_config.mode == CompilationMode.VLLM_COMPILE
@@ -1282,7 +1282,7 @@ class VllmConfig:
         default_config = OPTIMIZATION_LEVEL_TO_CONFIG[self.optimization_level]
         self._apply_optimization_level_defaults(default_config)
 
-        if self.kernel_config.enable_flashinfer_autotune is None:
+        if is_runtime_default(self.kernel_config.enable_flashinfer_autotune):
             raise ValueError(
                 "KernelConfig.enable_flashinfer_autotune must be set after applying "
                 "optimization level defaults."
@@ -1342,7 +1342,7 @@ class VllmConfig:
             # On torch >= 2.11 the hoisted OpaqueObject approach supersedes
             # fast_moe_cold_start, so force it off.
             self.compilation_config.fast_moe_cold_start = False
-        elif self.compilation_config.fast_moe_cold_start is None:
+        elif is_runtime_default(self.compilation_config.fast_moe_cold_start):
             # resolve default behavior: try to be as safe as possible
             # this config is unsafe if any spec decoding draft model has a MOE.
             # We'll conservatively turn it off if we see spec decoding.
@@ -1617,7 +1617,7 @@ class VllmConfig:
                 # local attention.
                 need_disable_hybrid_kv_cache_manager = True
 
-        if self.scheduler_config.disable_hybrid_kv_cache_manager is None:
+        if is_runtime_default(self.scheduler_config.disable_hybrid_kv_cache_manager):
             # Auto-disable HMA only when the connector config does not support it.
             if self.kv_transfer_config is not None:
                 from vllm.distributed.kv_transfer.kv_connector.factory import (
@@ -1652,7 +1652,7 @@ class VllmConfig:
                 " automatically."
             )
 
-        if self.scheduler_config.disable_hybrid_kv_cache_manager is None:
+        if is_runtime_default(self.scheduler_config.disable_hybrid_kv_cache_manager):
             # Default to enable HMA if not explicitly disabled by user or logic above.
             self.scheduler_config.disable_hybrid_kv_cache_manager = False
 
@@ -1818,8 +1818,8 @@ class VllmConfig:
             max_cudagraph_capture_size = (
                 self.compilation_config.max_cudagraph_capture_size
             )
-            if max_cudagraph_capture_size is None or isinstance(
-                max_cudagraph_capture_size, _RuntimeDefaultValue
+            if max_cudagraph_capture_size is None or is_runtime_default(
+                max_cudagraph_capture_size
             ):
                 decode_query_len = 1 + self.num_speculative_tokens
                 max_cudagraph_capture_size = min(

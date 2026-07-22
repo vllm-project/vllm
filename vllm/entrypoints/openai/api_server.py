@@ -374,10 +374,7 @@ async def init_app_state(
         )
         supported_tasks = _FALLBACK_SUPPORTED_TASKS
 
-    if args.served_model_name is not None:
-        served_model_names = args.served_model_name
-    else:
-        served_model_names = [args.model]
+    served_model_names = args.served_model_name or [args.model]
 
     if args.enable_log_requests:
         request_logger = RequestLogger(max_log_len=args.max_log_len)

@@ -95,7 +95,7 @@ from vllm.config.parallel import (
     ExpertPlacementStrategy,
 )
 from vllm.config.scheduler import SchedulerPolicy
-from vllm.config.utils import get_field
+from vllm.config.utils import get_field, is_runtime_default
 from vllm.config.vllm import OptimizationLevel, PerformanceMode
 from vllm.logger import init_logger, suppress_logging
 from vllm.platforms import CpuArchEnum, current_platform
@@ -496,7 +496,7 @@ class EngineArgs:
     ubatch_size: int = ParallelConfig.ubatch_size
     dbo_decode_token_threshold: int = ParallelConfig.dbo_decode_token_threshold
     dbo_prefill_token_threshold: int = ParallelConfig.dbo_prefill_token_threshold
-    disable_nccl_for_dp_synchronization: bool | None = (
+    disable_nccl_for_dp_synchronization: bool = (
         ParallelConfig.disable_nccl_for_dp_synchronization
     )
     eplb_config: EPLBConfig = get_field(ParallelConfig, "eplb_config")
@@ -615,7 +615,7 @@ class EngineArgs:
 
     watermark: float = SchedulerConfig.watermark
 
-    disable_hybrid_kv_cache_manager: bool | None = (
+    disable_hybrid_kv_cache_manager: bool = (
         SchedulerConfig.disable_hybrid_kv_cache_manager
     )
 
@@ -712,7 +712,7 @@ class EngineArgs:
     )
     """Custom logitproc types"""
 
-    async_scheduling: bool | None = SchedulerConfig.async_scheduling
+    async_scheduling: bool = SchedulerConfig.async_scheduling
 
     stream_interval: int = SchedulerConfig.stream_interval
 
@@ -780,7 +780,7 @@ class EngineArgs:
                         model_id,
                         self.model,
                     )
-            if self.tokenizer is not None and not is_cloud_storage(self.tokenizer):
+            if isinstance(self.tokenizer, str) and not is_cloud_storage(self.tokenizer):
                 tokenizer_id = self.tokenizer
                 self.tokenizer = get_model_path(self.tokenizer, self.tokenizer_revision)
                 if tokenizer_id is not self.tokenizer:
@@ -1316,6 +1316,10 @@ class EngineArgs:
 
         # LoRA related configs
         lora_kwargs = get_kwargs(LoRAConfig)
+        # max_cpu_loras' annotation is now non Optional (RuntimeDefault), so
+        # _compute_kwargs no longer wraps its type in optional_type. Restore
+        # the `--max-cpu-loras None`/`""` -> None CLI behaviour explicitly.
+        lora_kwargs["max_cpu_loras"]["type"] = optional_type(int)
         lora_group = parser.add_argument_group(
             title="LoRAConfig",
             description=LoRAConfig.__doc__,
@@ -1530,6 +1534,10 @@ class EngineArgs:
             "--speculative-config", "-sc", **vllm_kwargs["speculative_config"]
         )
         speculative_kwargs = get_kwargs(SpeculativeConfig)
+        # --spec-method and --spec-tokens are independent shorthands. Their
+        # "unset" value is None, not SpeculativeConfig's RuntimeDefault sentinel.
+        for key in ("method", "num_speculative_tokens"):
+            speculative_kwargs[key]["default"] = None
         vllm_group.add_argument("--spec-method", **speculative_kwargs["method"])
         vllm_group.add_argument("--spec-model", **speculative_kwargs["model"])
         vllm_group.add_argument(
@@ -1742,7 +1750,7 @@ class EngineArgs:
             ("--spec-model", "model", self.spec_model),
             ("--spec-tokens", "num_speculative_tokens", self.spec_tokens),
         ):
-            if value is None:
+            if value is None or is_runtime_default(value):
                 continue
             if self.speculative_config is None:
                 self.speculative_config = {}
@@ -2196,6 +2204,11 @@ class EngineArgs:
                 "non multimodal model"
             )
 
+        max_cpu_loras = (
+            self.max_cpu_loras
+            if self.max_cpu_loras and self.max_cpu_loras > 0
+            else None
+        )
         lora_config = (
             LoRAConfig(
                 max_lora_rank=self.max_lora_rank,
@@ -2208,9 +2221,7 @@ class EngineArgs:
                 specialize_active_lora=self.specialize_active_lora,
                 enable_mixed_moe_lora_format=self.enable_mixed_moe_lora_format,
                 enable_moe_shared_loras=self.enable_moe_shared_loras,
-                max_cpu_loras=self.max_cpu_loras
-                if self.max_cpu_loras and self.max_cpu_loras > 0
-                else None,
+                max_cpu_loras=max_cpu_loras,  # type: ignore[arg-type]
             )
             if self.enable_lora
             else None
@@ -2278,8 +2289,8 @@ class EngineArgs:
 
         # Kernel config overrides
         kernel_config = copy.deepcopy(self.kernel_config)
-        if self.enable_flashinfer_autotune is not None:
-            if kernel_config.enable_flashinfer_autotune is not None:
+        if isinstance(self.enable_flashinfer_autotune, bool):
+            if isinstance(kernel_config.enable_flashinfer_autotune, bool):
                 raise ValueError(
                     "enable_flashinfer_autotune and "
                     "kernel_config.enable_flashinfer_autotune "

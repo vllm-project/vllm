@@ -10,6 +10,7 @@ import pytest
 from pydantic import Field
 
 from vllm.config import AttentionConfig, CompilationConfig, ModelConfig, config
+from vllm.config.utils import is_runtime_default
 from vllm.engine.arg_utils import (
     EngineArgs,
     _expand_json_human_readable_numbers,
@@ -511,7 +512,7 @@ def test_human_readable_model_len():
     parser = EngineArgs.add_cli_args(FlexibleArgumentParser(exit_on_error=False))
 
     args = parser.parse_args([])
-    assert args.max_model_len is None
+    assert is_runtime_default(args.max_model_len)
 
     args = parser.parse_args(["--max-model-len", "1024"])
     assert args.max_model_len == 1024
@@ -597,6 +598,32 @@ def test_human_readable_other_args():
     assert args.max_num_batched_tokens == 2_000
     args = parser.parse_args(["--max-num-batched-tokens", "4K"])
     assert args.max_num_batched_tokens == 2**10 * 4
+
+
+def test_spec_decode_shorthand_flags_default_to_none():
+    # --spec-method and --spec-tokens must default to None. It is not
+    # SpeculativeConfig's RuntimeDefault sentinel because
+    # create_speculative_config() builds a SpeculativeConfig on every
+    # default startup (no speculative decoding requested).
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+    args = parser.parse_args([])
+    assert args.spec_method is None
+    assert args.spec_tokens is None
+
+    engine_args = EngineArgs.from_cli_args(args)
+    assert engine_args.create_speculative_config(None, None) is None  # type: ignore[arg-type]
+
+
+def test_served_model_name_accepts_multiple_names():
+    # ModelConfig.served_model_name must stay `str | list[str] | None` (not
+    # RuntimeDefault) since its argparse shape (nargs="+") is derived from
+    # that annotation.
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+    args = parser.parse_args(["--served-model-name", "a", "b"])
+    assert args.served_model_name == ["a", "b"]
+
+    args = parser.parse_args([])
+    assert args.served_model_name is None
 
 
 def test_numa_bind_args():

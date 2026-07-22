@@ -692,7 +692,7 @@ class CompilationConfig:
     local_cache_dir: str = field(default=None, init=False)  # type: ignore
     """local cache dir for each rank"""
 
-    fast_moe_cold_start: bool | None = None
+    fast_moe_cold_start: bool = RuntimeDefault()
     """Optimization for fast MOE cold start.
 
     This is a bit of a hack that assumes that:

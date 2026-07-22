@@ -1,13 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections.abc import Callable
 from dataclasses import field
-from typing import Any, ClassVar, Literal
+from typing import ClassVar, Literal
 
 from pydantic import Field, field_validator, model_validator
 
-from vllm.config.utils import config
+from vllm.config.utils import (
+    RuntimeDefault,
+    config,
+    is_runtime_default,
+    runtime_default_validator,
+)
 from vllm.logger import init_logger
 from vllm.utils.torch_utils import (
     is_quantized_kv_cache,
@@ -46,9 +50,10 @@ class CacheConfig:
 
     DEFAULT_BLOCK_SIZE: ClassVar[int] = 16
 
-    block_size: int = Field(default=None, gt=0)  # type: ignore[assignment]
-    """Size of a contiguous cache block in number of tokens.
-    Accepts None (meaning "use default"). After construction, always int."""
+    block_size: int = RuntimeDefault(gt=0)
+    """Size of a contiguous cache block in number of tokens. Resolved to a
+    platform specific default at runtime if left unset. After construction,
+    always int."""
     user_specified_block_size: bool = field(default=False, init=False)
     """Whether block_size was explicitly provided. Derived automatically."""
     user_specified_mamba_block_size: bool = field(default=False, init=False)
@@ -237,12 +242,7 @@ class CacheConfig:
     _block_size_resolved: bool = field(default=False, init=False)
     """Guard against pydantic re-running _apply_block_size_default."""
 
-    @field_validator("block_size", mode="wrap")
-    @classmethod
-    def _skip_none_validation(cls, value: Any, handler: Callable) -> Any:
-        if value is None:
-            return value
-        return handler(value)
+    _accept_unresolved_block_size = runtime_default_validator("block_size")
 
     @model_validator(mode="after")
     def _apply_block_size_default(self) -> "CacheConfig":
@@ -251,7 +251,7 @@ class CacheConfig:
         if self._block_size_resolved:
             return self
         self._block_size_resolved = True
-        if self.block_size is None:
+        if is_runtime_default(self.block_size):
             self.block_size = self.DEFAULT_BLOCK_SIZE
         else:
             self.user_specified_block_size = True

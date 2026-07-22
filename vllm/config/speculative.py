@@ -14,7 +14,7 @@ from vllm.config.cache import CacheDType
 from vllm.config.kernel import MoEBackend
 from vllm.config.model import HfOverrides, ModelConfig
 from vllm.config.parallel import ParallelConfig
-from vllm.config.utils import config
+from vllm.config.utils import RuntimeDefault, config, is_runtime_default
 from vllm.logger import init_logger
 from vllm.transformers_utils.config import get_hf_text_config
 from vllm.utils.hashing import safe_hash
@@ -85,13 +85,13 @@ class SpeculativeConfig:
     enforce_eager: bool | None = None
     """Override the default enforce_eager from model_config"""
     # General speculative decoding control
-    num_speculative_tokens: int = Field(default=None, gt=0)  # type: ignore[assignment]
+    num_speculative_tokens: int = RuntimeDefault(gt=0)
     """The number of speculative tokens, if provided. It will default to the
     number in the draft model config if present, otherwise, it is required."""
     model: str | None = None
     """The name of the draft model, eagle head, or additional weights, if
     provided."""
-    method: SpeculativeMethod | None = None
+    method: SpeculativeMethod = RuntimeDefault()
     """The name of the speculative method to use. If users provide and set the
     `model` param, the speculative method type will be detected automatically
     if possible, if `model` param is not provided, the method name must be
@@ -673,11 +673,11 @@ class SpeculativeConfig:
         # default.
 
         # infer method from user args
-        if self.method is None and SpeculativeConfig._is_custom_proposer_path(
-            self.model
-        ):
+        if is_runtime_default(
+            self.method
+        ) and SpeculativeConfig._is_custom_proposer_path(self.model):
             self.method = "custom_class"
-        elif self.method is None:
+        elif is_runtime_default(self.method):
             if self.model in ("ngram", "[ngram]"):
                 self.method = "ngram"
             else:
@@ -689,7 +689,7 @@ class SpeculativeConfig:
             )
             self.method = "mtp"
 
-        if self.model is None and self.num_speculative_tokens is not None:
+        if self.model is None and not is_runtime_default(self.num_speculative_tokens):
             if self.method == "mtp":
                 if self.target_model_config is None:
                     raise ValueError("target_model_config must be present for mtp")
@@ -963,7 +963,7 @@ class SpeculativeConfig:
                 if self.method in ("dflash", "dspark"):
                     self.parallel_drafting = True
 
-                if self.num_speculative_tokens is not None and hasattr(
+                if not is_runtime_default(self.num_speculative_tokens) and hasattr(
                     self.draft_model_config.hf_config, "num_lookahead_tokens"
                 ):
                     self.draft_model_config.hf_config.num_lookahead_tokens = (
@@ -974,7 +974,7 @@ class SpeculativeConfig:
                     self.draft_model_config.hf_config, "n_predict", None
                 )
                 if n_predict is not None:
-                    if self.num_speculative_tokens is None:
+                    if is_runtime_default(self.num_speculative_tokens):
                         # Default to max value defined in draft model config.
                         self.num_speculative_tokens = n_predict
                     elif (
@@ -987,7 +987,7 @@ class SpeculativeConfig:
                             f" must be divisible by {n_predict=}"
                         )
 
-                if self.num_speculative_tokens is None:
+                if is_runtime_default(self.num_speculative_tokens):
                     raise ValueError(
                         "A speculative model was provided, but "
                         "`num_speculative_tokens` was not provided"
@@ -1055,7 +1055,7 @@ class SpeculativeConfig:
                 "Arctic Inference is required for suffix decoding. "
                 "Install via `pip install arctic-inference==0.1.1`."
             )
-        if self.num_speculative_tokens is None:
+        if is_runtime_default(self.num_speculative_tokens):
             # Suffix decoding decides the actual number of speculative tokens
             # dynamically and treats num_speculative_tokens as a maximum limit.
             self.num_speculative_tokens = self.suffix_decoding_max_tree_depth
@@ -1221,7 +1221,7 @@ class SpeculativeConfig:
                 "speculative_config. Please pass 'draft_tensor_parallel_size' instead."
             )
 
-        if self.num_speculative_tokens is None:
+        if is_runtime_default(self.num_speculative_tokens):
             raise ValueError(
                 "num_speculative_tokens must be provided with "
                 "speculative model unless the draft model config contains an "

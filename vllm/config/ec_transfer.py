@@ -5,7 +5,12 @@ import uuid
 from dataclasses import field
 from typing import Any, Literal, get_args
 
-from vllm.config.utils import config
+from vllm.config.utils import (
+    RuntimeDefault,
+    config,
+    is_runtime_default,
+    runtime_default_validator,
+)
 
 ECProducer = Literal["ec_producer", "ec_both"]
 ECConsumer = Literal["ec_consumer", "ec_both"]
@@ -20,7 +25,7 @@ class ECTransferConfig:
     """The EC connector for vLLM to transmit EC caches between vLLM instances.
     """
 
-    engine_id: str | None = None
+    engine_id: str = RuntimeDefault()
     """The engine id for EC transfers."""
 
     ec_buffer_device: str | None = "cuda"
@@ -57,6 +62,8 @@ class ECTransferConfig:
     """The Python module path to dynamically load the EC connector from.
     Only supported in V1."""
 
+    _accept_unresolved_engine_id = runtime_default_validator("engine_id")
+
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,
@@ -76,7 +83,7 @@ class ECTransferConfig:
         return hash_str
 
     def __post_init__(self) -> None:
-        if self.engine_id is None:
+        if is_runtime_default(self.engine_id):
             self.engine_id = str(uuid.uuid4())
 
         if self.ec_role is not None and self.ec_role not in get_args(ECRole):

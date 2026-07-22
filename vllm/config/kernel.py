@@ -1,13 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import contextlib
-from collections.abc import Callable
 from dataclasses import asdict, fields
 from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import Field, field_validator
 
-from vllm.config.utils import config, get_hash_factors, hash_factors
+from vllm.config.utils import (
+    RuntimeDefault,
+    config,
+    get_hash_factors,
+    hash_factors,
+    skip_none_validator,
+)
 from vllm.logger import init_logger
 
 if TYPE_CHECKING:
@@ -172,7 +177,7 @@ class KernelConfig:
     Platform defaults appended automatically during VllmConfig.__post_init__.
     """
 
-    enable_flashinfer_autotune: bool = None  # type: ignore[assignment]
+    enable_flashinfer_autotune: bool = RuntimeDefault()
     """If True, run FlashInfer autotuning during kernel warmup."""
 
     # TODO(roberto): Remove after registered CuTeDSL warmups are migrated
@@ -264,18 +269,9 @@ class KernelConfig:
         factors["ir_op_priority"] = self.ir_op_priority.compute_hash()
         return hash_factors(factors)
 
-    @field_validator(
-        "enable_flashinfer_autotune",
-        "enable_cutedsl_warmup",
-        "enable_jit_warmup",
-        mode="wrap",
+    _skip_none_warmup_flags = skip_none_validator(
+        "enable_cutedsl_warmup", "enable_jit_warmup"
     )
-    @classmethod
-    def _skip_none_validation(cls, value: Any, handler: Callable) -> Any:
-        """Skip validation if the value is `None` when initialization is delayed."""
-        if value is None:
-            return value
-        return handler(value)
 
     def set_platform_defaults(self, vllm_config: "VllmConfig") -> None:
         """Set platform-specific defaults for the kernel config."""
