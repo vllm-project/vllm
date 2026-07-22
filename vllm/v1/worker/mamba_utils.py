@@ -66,18 +66,22 @@ def _memcpy_u64_tiled(
     # times.
     body_bytes = copy_size - head_bytes
     body_u64 = body_bytes // 8
-    per_tile_u64_raw = tl.cdiv(body_u64, NUM_TILES)
-    per_tile_u64 = tl.cdiv(per_tile_u64_raw, COPY_BLOCK_SIZE) * COPY_BLOCK_SIZE
-    tile_start = tile_idx.to(tl.int64) * per_tile_u64
-    tile_end = tl.minimum(tile_start + per_tile_u64, body_u64)
+    # Skip when there is no body work: the uint64* base would otherwise be
+    # constructed on a sub-8B-aligned address, which Triton lowers to an
+    # LDG/STG with a natural-alignment assumption and CUDA rejects.
+    if body_u64 > 0:
+        per_tile_u64_raw = tl.cdiv(body_u64, NUM_TILES)
+        per_tile_u64 = tl.cdiv(per_tile_u64_raw, COPY_BLOCK_SIZE) * COPY_BLOCK_SIZE
+        tile_start = tile_idx.to(tl.int64) * per_tile_u64
+        tile_end = tl.minimum(tile_start + per_tile_u64, body_u64)
 
-    src_body_u64 = (src_addr + head_bytes).to(tl.pointer_type(tl.uint64))
-    dst_body_u64 = (dst_addr + head_bytes).to(tl.pointer_type(tl.uint64))
-    offsets = tl.arange(0, COPY_BLOCK_SIZE)
-    for i in range(tile_start, tile_end, COPY_BLOCK_SIZE):
-        mask = (i + offsets) < tile_end
-        data = tl.load(src_body_u64 + i + offsets, mask=mask)
-        tl.store(dst_body_u64 + i + offsets, data, mask=mask)
+        src_body_u64 = (src_addr + head_bytes).to(tl.pointer_type(tl.uint64))
+        dst_body_u64 = (dst_addr + head_bytes).to(tl.pointer_type(tl.uint64))
+        offsets = tl.arange(0, COPY_BLOCK_SIZE)
+        for i in range(tile_start, tile_end, COPY_BLOCK_SIZE):
+            mask = (i + offsets) < tile_end
+            data = tl.load(src_body_u64 + i + offsets, mask=mask)
+            tl.store(dst_body_u64 + i + offsets, data, mask=mask)
 
     if tile_idx == 0:
         tail_start = head_bytes + body_u64 * 8
