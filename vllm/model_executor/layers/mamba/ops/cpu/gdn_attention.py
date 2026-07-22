@@ -102,7 +102,6 @@ def _cpu_gdn_attention_nonspec(
     query_start_loc = attn_metadata_i.non_spec_query_start_loc
     assert state_indices_tensor is not None
     assert query_start_loc is not None
-    state_indices_tensor = state_indices_tensor.contiguous()
 
     is_amx = torch.cpu._is_amx_tile_supported()
 
