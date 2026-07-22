@@ -634,6 +634,21 @@ class KVCacheStoreSendingThread(KVTransferThread):
             addrs: list[list[int]] = []
             sizes: list[list[int]] = []
             stored_events: list[BlockStored] = []
+            chunks_per_group: list[list[tuple[int, int]]] = [
+                [] for _ in self.token_databases
+            ]
+            for start, end, g_idx in zip(starts, ends, group_indices, strict=True):
+                chunks_per_group[g_idx].append((start, end))
+            for g_idx, chunks in enumerate(chunks_per_group):
+                if not chunks:
+                    continue
+                db = self.token_databases[g_idx]
+                group_addrs, group_sizes, _ = db.prepare_values(
+                    chunks, block_ids_per_group[g_idx]
+                )
+                addrs.extend(group_addrs)
+                sizes.extend(group_sizes)
+
             # parent_block_hash chains live within a group, not across.
             if self.enable_kv_event:
                 prev_key_per_group: dict[int, Any] = {}
@@ -645,10 +660,6 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 zip(starts, ends, group_indices, strict=True)
             ):
                 db = self.token_databases[g_idx]
-                addr, size, _ = db.prepare_value(s, e, block_ids_per_group[g_idx])
-                addrs.append(addr)
-                sizes.append(size)
-
                 if self.enable_kv_event:
                     token_ids = (
                         req_meta.token_ids[s:e]
@@ -814,9 +825,6 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                     continue
                 key_list.append(db.key_for(block_hash))
                 chunks.append((start, end))
-            # Vectorized: one prepare_values call per group instead of a
-            # Python loop per chunk (~35 ms GIL-held for a 289K-token
-            # request), which serialized the receive-thread pool.
             g_addrs, g_sizes, g_block_ids = db.prepare_values(
                 chunks, req_meta.block_ids[g_idx]
             )

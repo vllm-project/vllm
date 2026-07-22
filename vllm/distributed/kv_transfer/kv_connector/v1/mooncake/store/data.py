@@ -212,12 +212,7 @@ class ChunkedTokenDatabase:
         chunks: Sequence[tuple[int, int]],
         block_ids: list[int],
     ) -> tuple[list[list[int]], list[list[int]], list[int]]:
-        """Vectorized ``prepare_value`` over many ``(start, end)`` chunks.
-
-        A 289K-token request spans ~2.3K chunks x ~100 cache regions; the
-        per-chunk Python loop costs ~35 ms of GIL-held time on the load
-        path, which serializes the receive-thread pool. One numpy broadcast
-        computes the whole request at once (~5x cheaper).
+        """Compute memory addresses and sizes for multiple token ranges.
 
         Returns:
             (addr_lists, size_lists, chunk_block_ids), one entry per chunk.

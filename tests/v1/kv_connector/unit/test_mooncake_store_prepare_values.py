@@ -1,11 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Equivalence tests for ChunkedTokenDatabase.prepare_values.
-
-The vectorized batch path must return exactly what the historical
-per-chunk loop returned; the reference implementation is inlined here
-so the production code can keep a single implementation.
-"""
+"""Tests for ChunkedTokenDatabase.prepare_values."""
 
 import random
 
@@ -23,7 +18,7 @@ BLOCK_SIZE = 128
 def _reference_prepare_value(
     db: ChunkedTokenDatabase, start: int, end: int, block_ids: list[int]
 ) -> tuple[list[int], list[int], int]:
-    """The pre-vectorization per-chunk loop, kept verbatim as the oracle."""
+    """Compute a token range with the original scalar implementation."""
     addr_list = []
     size_list = []
     block_id = block_ids[start // db.block_size]
@@ -43,7 +38,7 @@ def _make_db(num_regions: int, num_block_lens: int) -> ChunkedTokenDatabase:
     db.set_kv_caches_base_addr(
         [0x7F00_0000_0000 + i * (1 << 30) for i in range(num_regions)]
     )
-    # block_len shorter than base addrs exercises the index % length cycling.
+    # Exercise repeated block lengths when there are more cache regions.
     db.set_block_len([30_208 + 512 * i for i in range(num_block_lens)])
     return db
 
@@ -54,7 +49,6 @@ def test_prepare_values_matches_reference(num_regions: int, num_block_lens: int)
     rng = random.Random(0)
     n_blocks = 300
     block_ids = [rng.randrange(0, 1 << 20) for _ in range(n_blocks)]
-    # Mix of single-block and multi-block chunks, non-contiguous starts.
     chunks = []
     b = 0
     while b < n_blocks - 4:
@@ -71,8 +65,7 @@ def test_prepare_values_matches_reference(num_regions: int, num_block_lens: int)
         assert addr == ref_addr
         assert size == ref_size
         assert bid == ref_bid
-        # tolist() must hand back Python ints, not numpy scalars — these
-        # values cross into the mooncake native binding.
+        # Native bindings require Python ints rather than numpy scalars.
         assert all(type(a) is int for a in addr)
         assert type(bid) is int
 
