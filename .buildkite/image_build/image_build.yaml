@@ -5,7 +5,7 @@ steps:
     depends_on: []
     timeout_in_minutes: 600
     commands:
-    - 'echo "Skipping CUDA image build for AMD MI325 shadow testing"'
+    - 'echo "Skipping CUDA image build for AMD MI355 shadow testing"'
     retry:
       automatic:
         - exit_status: -1  # Agent was lost
@@ -17,7 +17,7 @@ steps:
     key: image-build-cpu
     depends_on: []
     commands:
-    - 'echo "Skipping CPU image build for AMD MI325 shadow testing"'
+    - 'echo "Skipping CPU image build for AMD MI355 shadow testing"'
     env:
       DOCKER_BUILDKIT: "1"
     retry:
@@ -32,7 +32,7 @@ steps:
     depends_on: []
     key: image-build-hpu
     commands:
-    - 'echo "Skipping HPU image build for AMD MI325 shadow testing"'
+    - 'echo "Skipping HPU image build for AMD MI355 shadow testing"'
     env:
       DOCKER_BUILDKIT: "1"
     retry:
@@ -47,7 +47,7 @@ steps:
     depends_on: []
     optional: true
     commands:
-    - 'echo "Skipping CPU arm64 image build for AMD MI325 shadow testing"'
+    - 'echo "Skipping CPU arm64 image build for AMD MI355 shadow testing"'
     env:
       DOCKER_BUILDKIT: "1"
     retry:
@@ -65,7 +65,7 @@ steps:
       - ".buildkite/image_build/image_build_arm64.sh"
       - "docker/Dockerfile"
     commands:
-    - 'echo "Skipping arm64 image build for AMD MI325 shadow testing"'
+    - 'echo "Skipping arm64 image build for AMD MI355 shadow testing"'
     env:
       DOCKER_BUILDKIT: "1"
     retry:

@@ -39,7 +39,7 @@ steps:
   - DP_SIZE=2 pytest -v -s entrypoints/openai/test_multi_api_servers.py
   mirror:
     amd:
-      device: mi325_2
+      device: mi355_2
       depends_on:
       - image-build-amd
       source_file_dependencies:

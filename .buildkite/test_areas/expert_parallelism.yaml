@@ -16,7 +16,7 @@ steps:
   - pytest -v -s distributed/test_eplb_utils.py
   mirror:
     amd:
-      device: mi325_1
+      device: mi355_1
       depends_on:
       - image-build-amd
       source_file_dependencies:

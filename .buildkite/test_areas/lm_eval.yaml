@@ -14,7 +14,7 @@ steps:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-small.txt
   mirror:
     amd:
-      device: mi325_1
+      device: mi355_1
       timeout_in_minutes: 55
       depends_on:
       - image-build-amd
@@ -139,13 +139,13 @@ steps:
     - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-h200.txt
   mirror:
     amd:
-      device: mi325_8
+      device: mi355_8
       timeout_in_minutes: 60
       depends_on:
       - image-build-amd
       commands:
       - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-      - export PYTORCH_ROCM_ARCH=gfx942 # Limit Quark compilation to save time
+      - export PYTORCH_ROCM_ARCH=gfx950 # Limit Quark compilation to save time
       - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-mi3xx.txt
 
 - label: MoE Refactor Integration Test (H100 - TEMPORARY)
