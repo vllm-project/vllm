@@ -813,8 +813,8 @@ steps:
 
             # Download artifacts from current build
             echo "Downloading artifacts from current build"
-            # buildkite-agent artifact download "artifacts/rocm-base-wheels/*.whl" .
-            # buildkite-agent artifact download "artifacts/rocm-vllm-wheel/*.whl" .
+            buildkite-agent artifact download "artifacts/rocm-base-wheels/*.whl" .
+            buildkite-agent artifact download "artifacts/rocm-vllm-wheel/*.whl" .
 
             # # Run upload script
             bash .buildkite/scripts/upload-rocm-wheels.sh
