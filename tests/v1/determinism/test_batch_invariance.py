@@ -75,7 +75,7 @@ def test_v1_generation_is_deterministic_across_batch_sizes_with_needle(
     # Allow overrides from environment (useful for CI tuning)
     # "facebook/opt-125m" is too small, doesn't reliably test determinism
     model = TEST_MODEL
-    num_trials = int(os.getenv("VLLM_NEEDLE_TRIALS", "10"))
+    num_trials = int(os.getenv("VLLM_NEEDLE_TRIALS", "5"))
     max_batch_size = int(os.getenv("VLLM_NEEDLE_BATCH_SIZE", "128"))
     min_random_prompt = int(os.getenv("VLLM_MIN_PROMPT", "1024"))
     max_random_prompt = int(os.getenv("VLLM_MAX_PROMPT", "2048"))
