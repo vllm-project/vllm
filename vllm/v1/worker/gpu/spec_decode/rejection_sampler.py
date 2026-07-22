@@ -175,6 +175,7 @@ class RejectionSampler:
         max_num_logprobs: int,
     ) -> tuple[torch.Tensor, torch.Tensor, LogprobsTensors | None]:
         cu_num_logits_np = input_batch.cu_num_logits_np
+        use_processed_logits = self.sampler.logprobs_mode in PROCESSED_LOGPROBS_MODES
         sampled_chunks: list[torch.Tensor] = []
         num_sampled_chunks: list[torch.Tensor] = []
         logprobs_chunks: list[LogprobsTensors] = []
@@ -199,11 +200,7 @@ class RejectionSampler:
             chunk_logprobs = self._get_logprobs_tensors(
                 sampled,
                 num_sampled,
-                (
-                    processed_logits
-                    if self.sampler.logprobs_mode in PROCESSED_LOGPROBS_MODES
-                    else logits[lo:hi]
-                ),
+                (processed_logits if use_processed_logits else logits[lo:hi]),
                 chunk_cu_num_logits,
                 chunk_cu_num_logits_np,
                 max_num_logprobs,
@@ -224,24 +221,16 @@ class RejectionSampler:
         logprobs_tensors = None
         if logprobs_chunks:
             expanded_logits = logits.shape[0] != input_batch.num_reqs
-            logprobs_tensors = LogprobsTensors(
-                logprob_token_ids=torch.cat(
-                    [chunk.logprob_token_ids for chunk in logprobs_chunks]
-                ),
-                logprobs=torch.cat([chunk.logprobs for chunk in logprobs_chunks]),
-                selected_token_ranks=torch.cat(
-                    [chunk.selected_token_ranks for chunk in logprobs_chunks]
-                ),
+            logprobs_tensors = LogprobsTensors.cat(
+                logprobs_chunks,
                 cu_num_generated_tokens=(
                     cu_num_logits_np.tolist() if expanded_logits else None
                 ),
             )
 
-        return (
-            torch.cat(sampled_chunks),
-            torch.cat(num_sampled_chunks),
-            logprobs_tensors,
-        )
+        sampled = torch.cat(sampled_chunks)
+        num_sampled = torch.cat(num_sampled_chunks)
+        return sampled, num_sampled, logprobs_tensors
 
     def __call__(
         self,
