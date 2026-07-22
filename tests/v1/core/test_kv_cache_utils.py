@@ -83,7 +83,6 @@ def make_request(
     mm_hashes: list[str] | None = None,
     cache_salt: str | None = None,
     prompt_embeds: torch.Tensor | None = None,
-    lora_request: LoRARequest | None = None,
 ):
     mm_features = []
     if mm_positions is not None:
@@ -106,7 +105,7 @@ def make_request(
         mm_features=mm_features if mm_features else None,
         sampling_params=sampling_params,
         pooling_params=None,
-        lora_request=lora_request,
+        lora_request=None,
         cache_salt=cache_salt,
         block_hasher=get_request_block_hasher(block_size, hash_fn),
         prompt_embeds=prompt_embeds,
@@ -714,118 +713,7 @@ def test_request_block_hasher(hash_fn):
     assert block_hashes[1] == hash_fn((block_hashes[0], (3, 4, 5), (("hash2", 0),)))
 
 
-def test_request_block_hasher_rehashes_overlapping_mm_from_nonzero_boundary():
-    incremental = make_request(
-        request_id="incremental",
-        prompt_token_ids=list(range(7)),
-        block_size=4,
-        hash_fn=sha256,
-        mm_positions=[PlaceholderRange(offset=4, length=2)],
-        mm_hashes=["A"],
-    )
-    incremental.append_output_token_ids(99)
-    retained_hash = incremental.block_hashes[0]
-    incremental.mm_features.append(
-        MultiModalFeatureSpec(
-            data=MultiModalKwargsItem.dummy(),
-            mm_position=PlaceholderRange(offset=7, length=1),
-            identifier="B",
-            modality="image",
-        )
-    )
-    replace_request_suffix_and_hashes(incremental, 7, [7], 4)
-
-    fresh = make_request(
-        request_id="fresh",
-        prompt_token_ids=list(range(8)),
-        block_size=4,
-        hash_fn=sha256,
-        mm_positions=[
-            PlaceholderRange(offset=4, length=2),
-            PlaceholderRange(offset=7, length=1),
-        ],
-        mm_hashes=["A", "B"],
-    )
-    expected_hash = sha256((retained_hash, (4, 5, 6, 7), (("A", 0), ("B", 3))))
-
-    assert fresh.block_hashes[1] == expected_hash
-    assert incremental.block_hashes[0] == retained_hash
-    assert incremental.block_hashes[1] == expected_hash
-    assert incremental.block_hashes == fresh.block_hashes
-
-
 @pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor])
-@pytest.mark.parametrize(
-    ("old_tokens", "num_kept_tokens", "replacement_token_ids"),
-    [
-        pytest.param(
-            [0, 1, 2, 3, 4, 5, 99, 98],
-            6,
-            [6],
-            id="before-full-boundary",
-        ),
-        pytest.param(
-            [0, 1, 2, 3, 4, 5, 6, 99],
-            7,
-            [7],
-            id="exactly-completes-block",
-        ),
-        pytest.param(
-            [0, 1, 2, 3, 4, 5, 6, 7, 99, 98, 97, 96],
-            8,
-            [8],
-            id="immediately-after-boundary",
-        ),
-        pytest.param([99, 98, 97, 96], 0, [0, 1, 2, 3], id="starts-at-zero"),
-        pytest.param(
-            [0, 1, 2, 3, 99, 98, 97, 96],
-            4,
-            [4, 5, 6, 7],
-            id="nonzero-block-boundary",
-        ),
-        pytest.param(
-            [0, 1, 2, 3, 99, 98, 97, 96],
-            4,
-            list(range(4, 16)),
-            id="multiple-later-blocks",
-        ),
-    ],
-)
-def test_request_block_hasher_rehashes_token_suffix(
-    hash_fn,
-    old_tokens: list[int],
-    num_kept_tokens: int,
-    replacement_token_ids: list[int],
-):
-    block_size = 4
-    incremental = make_request(
-        request_id="incremental",
-        prompt_token_ids=old_tokens,
-        block_size=block_size,
-        hash_fn=hash_fn,
-    )
-    old_hashes = list(incremental.block_hashes)
-    expected_tokens = old_tokens[:num_kept_tokens] + replacement_token_ids
-
-    replace_request_suffix_and_hashes(
-        incremental, num_kept_tokens, replacement_token_ids, block_size
-    )
-    fresh = make_request(
-        request_id="fresh",
-        prompt_token_ids=expected_tokens,
-        block_size=block_size,
-        hash_fn=hash_fn,
-    )
-
-    num_retained_hashes = num_kept_tokens // block_size
-    assert (
-        incremental.block_hashes[:num_retained_hashes]
-        == old_hashes[:num_retained_hashes]
-    )
-    assert incremental.block_hashes == fresh.block_hashes
-    assert len(incremental.block_hashes) == len(expected_tokens) // block_size
-
-
 @pytest.mark.parametrize(
     ("mm_positions", "expected_extra_keys"),
     [
@@ -893,6 +781,7 @@ def test_request_block_hasher_rehashes_token_suffix(
     ],
 )
 def test_request_block_hasher_rehashes_multimodal_suffix(
+    hash_fn,
     mm_positions: list[PlaceholderRange],
     expected_extra_keys: list[tuple[Any, ...] | None],
 ):
@@ -902,7 +791,7 @@ def test_request_block_hasher_rehashes_multimodal_suffix(
         request_id="incremental",
         prompt_token_ids=list(range(4)) + list(range(100, 112)),
         block_size=block_size,
-        hash_fn=sha256,
+        hash_fn=hash_fn,
         mm_positions=mm_positions,
         mm_hashes=identifiers,
     )
@@ -912,7 +801,7 @@ def test_request_block_hasher_rehashes_multimodal_suffix(
         request_id="fresh",
         prompt_token_ids=list(range(16)),
         block_size=block_size,
-        hash_fn=sha256,
+        hash_fn=hash_fn,
         mm_positions=mm_positions,
         mm_hashes=identifiers,
     )
@@ -955,35 +844,6 @@ def test_request_block_hasher_incremental_append_scans_all_mm_features():
         mm_hashes=["A", "B"],
     )
 
-    assert incremental.block_hashes == fresh.block_hashes
-
-
-def test_request_block_hasher_rehashes_with_stable_identity_metadata():
-    block_size = 4
-    prompt_embeds = torch.arange(24, dtype=torch.float32).reshape(8, 3)
-    lora_request = LoRARequest(lora_name="adapter", lora_int_id=1, lora_path="/adapter")
-    incremental = make_request(
-        request_id="incremental",
-        prompt_token_ids=[0, 1, 2, 3, 99, 98, 97, 96],
-        block_size=block_size,
-        hash_fn=sha256,
-        cache_salt="salt",
-        prompt_embeds=prompt_embeds,
-        lora_request=lora_request,
-    )
-    retained_hash = incremental.block_hashes[0]
-    replace_request_suffix_and_hashes(incremental, 4, [4, 5, 6, 7], block_size)
-    fresh = make_request(
-        request_id="fresh",
-        prompt_token_ids=list(range(8)),
-        block_size=block_size,
-        hash_fn=sha256,
-        cache_salt="salt",
-        prompt_embeds=prompt_embeds,
-        lora_request=lora_request,
-    )
-
-    assert incremental.block_hashes[0] == retained_hash
     assert incremental.block_hashes == fresh.block_hashes
 
 

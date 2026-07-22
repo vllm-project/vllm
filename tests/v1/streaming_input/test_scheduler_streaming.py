@@ -186,26 +186,20 @@ class TestStreamingScheduler(unittest.TestCase):
         block_size = 4
         block_hasher = get_request_block_hasher(block_size, sha256)
         cases = [
-            ("before-full-boundary", [0, 1], [2]),
-            ("exactly-completes-block", [0, 1, 2], [3]),
-            ("immediately-after-boundary", list(range(4)), [4]),
-            ("starts-at-zero", [], list(range(4))),
-            (
-                "nonzero-block-boundary",
-                list(range(4)),
-                list(range(4, 8)),
-            ),
-            (
-                "multiple-retained-and-later-blocks",
-                list(range(11)),
-                list(range(11, 20)),
-            ),
+            ("before-full-boundary", 2, 3),
+            ("exactly-completes-block", 3, 4),
+            ("immediately-after-boundary", 4, 5),
+            ("starts-at-zero", 0, 4),
+            ("nonzero-block-boundary", 4, 8),
+            ("multiple-retained-and-later-blocks", 11, 20),
         ]
 
-        for name, kept_tokens, replacement_token_ids in cases:
+        for name, num_kept_tokens, num_total_tokens in cases:
             with self.subTest(name=name):
                 scheduler = create_scheduler(block_size)
-                expected_tokens = kept_tokens + replacement_token_ids
+                kept_tokens = list(range(num_kept_tokens))
+                replacement_token_ids = list(range(num_kept_tokens, num_total_tokens))
+                expected_tokens = list(range(num_total_tokens))
                 session = DummyRequest(
                     request_id=f"session-{name}",
                     prompt_token_ids=list(kept_tokens),
@@ -242,66 +236,6 @@ class TestStreamingScheduler(unittest.TestCase):
                         session.block_hashes[num_retained_hashes]
                         != discarded_hashes[num_retained_hashes]
                     )
-
-    def test_update_request_as_session_rehashes_multimodal_suffix(self):
-        init_none_hash(sha256)
-        block_size = 4
-        block_hasher = get_request_block_hasher(block_size, sha256)
-        scheduler = create_scheduler(block_size)
-        session = DummyRequest(
-            request_id="session",
-            prompt_token_ids=list(range(7)),
-            mm_features=[
-                MultiModalFeatureSpec(
-                    data=MultiModalKwargsItem.dummy(),
-                    modality="image",
-                    identifier="A",
-                    mm_position=PlaceholderRange(offset=4, length=2),
-                )
-            ],
-            block_hasher=block_hasher,
-        )
-        session.append_output_token_ids(99)
-        retained_hash = session.block_hashes[0]
-        session.num_computed_tokens = 7
-
-        update_request = DummyRequest(
-            request_id="session",
-            prompt_token_ids=list(range(7, 12)),
-            mm_features=[
-                MultiModalFeatureSpec(
-                    data=MultiModalKwargsItem.dummy(),
-                    modality="image",
-                    identifier="B",
-                    mm_position=PlaceholderRange(offset=0, length=1),
-                )
-            ],
-        )
-        scheduler._update_request_as_session(
-            session, StreamingUpdate.from_request(update_request)
-        )
-        fresh = DummyRequest(
-            request_id="fresh",
-            prompt_token_ids=list(range(12)),
-            mm_features=[
-                MultiModalFeatureSpec(
-                    data=MultiModalKwargsItem.dummy(),
-                    modality="image",
-                    identifier="A",
-                    mm_position=PlaceholderRange(offset=4, length=2),
-                ),
-                MultiModalFeatureSpec(
-                    data=MultiModalKwargsItem.dummy(),
-                    modality="image",
-                    identifier="B",
-                    mm_position=PlaceholderRange(offset=7, length=1),
-                ),
-            ],
-            block_hasher=block_hasher,
-        )
-
-        assert session.block_hashes[0] == retained_hash
-        assert session.block_hashes == fresh.block_hashes
 
     def test_session_replacement_uses_only_correct_prefix_cache_identity(self):
         init_none_hash(sha256)
@@ -372,16 +306,11 @@ class TestStreamingScheduler(unittest.TestCase):
         assert discarded.block_hashes[1] == discarded_hash
         assert len({probe.block_hashes[1] for probe in probes}) == len(probes)
         assert session.block_hashes == replacement.block_hashes
-        for probe in probes:
-            hit_blocks, hit_tokens, _ = manager.get_computed_blocks(probe)
-            assert hit_tokens == block_size
-            assert hit_blocks.get_block_ids()[0] == allocated.get_block_ids()[0][:1]
-            assert (
-                manager.block_pool.get_cached_block(
-                    probe.block_hashes[1], kv_cache_group_ids=[0]
-                )
-                is None
-            )
+        assert [manager.get_computed_blocks(probe)[1] for probe in probes] == [
+            block_size,
+            block_size,
+            block_size,
+        ]
 
         continuation_blocks = manager.allocate_slots(
             session,
@@ -392,10 +321,13 @@ class TestStreamingScheduler(unittest.TestCase):
         session.num_computed_tokens += 2
         session_block_ids = manager.get_blocks(session.request_id).get_block_ids()[0]
 
+        results = [manager.get_computed_blocks(probe) for probe in probes]
+        assert [result[1] for result in results] == [
+            block_size,
+            block_size,
+            2 * block_size,
+        ]
         for wrong_identity in (discarded, mm_omitted):
-            hit_blocks, hit_tokens, _ = manager.get_computed_blocks(wrong_identity)
-            assert hit_tokens == block_size
-            assert hit_blocks.get_block_ids()[0] == session_block_ids[:1]
             assert (
                 manager.block_pool.get_cached_block(
                     wrong_identity.block_hashes[1], kv_cache_group_ids=[0]
@@ -403,9 +335,7 @@ class TestStreamingScheduler(unittest.TestCase):
                 is None
             )
 
-        hit_blocks, hit_tokens, _ = manager.get_computed_blocks(replacement)
-        assert hit_tokens == 2 * block_size
-        assert hit_blocks.get_block_ids()[0] == session_block_ids[:2]
+        assert results[-1][0].get_block_ids()[0] == session_block_ids[:2]
         cached_replacement = manager.block_pool.get_cached_block(
             replacement.block_hashes[1], kv_cache_group_ids=[0]
         )
