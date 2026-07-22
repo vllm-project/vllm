@@ -2,9 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """MSA (SM100/Blackwell) block-sparse attend for MiniMax M3.
 
-Prefill attends with ``fmha_sm100`` (``build_k2q_csr`` + ``sparse_atten_func``);
-decode falls back to the Triton split-K kernel (no MSA decode yet). ``fmha_sm100``
-imports are function-local, so this module is import-safe on AMD/non-SM100.
+Prefill attends with ``fmha_sm100`` (``build_k2q_csr`` + ``sparse_atten_func``).
+Decode uses Triton split-K by default, with an explicitly enabled experimental
+FlashInfer TRTLLM-GEN path. ``fmha_sm100`` imports are function-local, so this
+module is import-safe on AMD/non-SM100.
 """
 
 import torch
@@ -18,11 +19,36 @@ from vllm.models.minimax_m3.common.sparse_attention import (
     MiniMaxM3SparseImpl,
     MiniMaxM3SparseMetadata,
 )
+from vllm.models.minimax_m3.nvidia.flashinfer_sparse_decode import (
+    FlashInferSparseDecodeRunner,
+)
 from vllm.v1.attention.backend import AttentionLayer
 
 
 class MiniMaxM3SparseMSAImpl(MiniMaxM3SparseImpl):
-    """MSA block-sparse attend (``fmha_sm100``); Triton split-K decode."""
+    """MSA prefill; Triton or guarded FlashInfer sparse decode."""
+
+    def __init__(
+        self,
+        num_heads: int,
+        head_size: int,
+        scale: float,
+        num_kv_heads: int | None = None,
+        kv_cache_dtype: str = "auto",
+        *,
+        topk_blocks: int,
+        sparse_block_size: int,
+    ) -> None:
+        super().__init__(
+            num_heads,
+            head_size,
+            scale,
+            num_kv_heads,
+            kv_cache_dtype,
+            topk_blocks=topk_blocks,
+            sparse_block_size=sparse_block_size,
+        )
+        self.flashinfer_sparse_decode = FlashInferSparseDecodeRunner()
 
     def forward(
         self,
@@ -52,23 +78,40 @@ class MiniMaxM3SparseMSAImpl(MiniMaxM3SparseImpl):
         k_scale = getattr(layer, "_k_scale", None) if self.use_fp8_kv else None
         v_scale = getattr(layer, "_v_scale", None) if self.use_fp8_kv else None
 
-        # Decode [:nd]: Triton split-K placeholder (no MSA decode yet).
+        # Decode [:nd]: Triton by default, guarded FlashInfer for q-length one.
         if main_md.num_decodes > 0:
             d = main_md.decode
             assert d is not None
-            minimax_m3_sparse_attn_decode(
+            decode_topk = topk[:nd].transpose(0, 1)
+            used_flashinfer = self.flashinfer_sparse_decode.try_decode(
                 q[:nd],
                 kv_cache,
-                topk[:nd].transpose(0, 1),
+                decode_topk,
                 d.block_table,
                 d.seq_lens,
-                self.num_kv_heads,
-                self.scale,
                 out[:nd],
-                d.decode_query_len,
+                num_kv_heads=self.num_kv_heads,
+                scale=self.scale,
+                block_size=self.block_size,
+                topk_blocks=self.topk_blocks,
+                decode_query_len=d.decode_query_len,
                 k_scale=k_scale,
                 v_scale=v_scale,
             )
+            if not used_flashinfer:
+                minimax_m3_sparse_attn_decode(
+                    q[:nd],
+                    kv_cache,
+                    decode_topk,
+                    d.block_table,
+                    d.seq_lens,
+                    self.num_kv_heads,
+                    self.scale,
+                    out[:nd],
+                    d.decode_query_len,
+                    k_scale=k_scale,
+                    v_scale=v_scale,
+                )
 
         # Prefill [nd:]: MSA sparse FMHA over the selected blocks.
         if main_md.num_prefills > 0:
