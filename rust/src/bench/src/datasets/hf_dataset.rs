@@ -8,6 +8,7 @@ use rand::seq::SliceRandom;
 use rand::{Rng, SeedableRng};
 
 use super::SampleRequest;
+use super::progress::RowDownloadReporter;
 use crate::error::{BenchError, Result};
 use crate::tokenizer::TokenizerKind;
 
@@ -50,18 +51,19 @@ enum ColumnFormat {
 
 /// Make a GET request with retry logic (3 retries with exponential backoff).
 /// Returns the parsed JSON response.
-fn get_with_retry(
-    client: &reqwest::blocking::Client,
+async fn get_with_retry(
+    client: &reqwest::Client,
     url: &str,
     label: &str,
 ) -> Result<serde_json::Value> {
     let max_retries = 3;
     for attempt in 0..=max_retries {
-        let resp = match client.get(url).send() {
+        let resp = match client.get(url).send().await {
             Ok(r) => r,
             Err(e) => {
                 if attempt < max_retries {
-                    std::thread::sleep(std::time::Duration::from_secs(2 * (attempt as u64 + 1)));
+                    tokio::time::sleep(std::time::Duration::from_secs(2 * (attempt as u64 + 1)))
+                        .await;
                     continue;
                 }
                 return Err(BenchError::Config(format!(
@@ -80,7 +82,7 @@ fn get_with_retry(
         }
 
         if status.is_server_error() && attempt < max_retries {
-            std::thread::sleep(std::time::Duration::from_secs(2 * (attempt as u64 + 1)));
+            tokio::time::sleep(std::time::Duration::from_secs(2 * (attempt as u64 + 1))).await;
             continue;
         }
 
@@ -92,6 +94,7 @@ fn get_with_retry(
 
         let data: serde_json::Value = resp
             .json()
+            .await
             .map_err(|e| BenchError::Config(format!("Failed to parse {label} response: {e}")))?;
         return Ok(data);
     }
@@ -105,7 +108,7 @@ fn get_with_retry(
 /// If both `subset` and `split` are provided, the `/info` call is skipped as an optimization.
 /// Paginated download fetches rows in pages of 100 until `num_rows_needed` are collected
 /// or the dataset is exhausted.
-pub fn download_hf_dataset(
+pub async fn download_hf_dataset(
     dataset: &str,
     subset: Option<&str>,
     split: Option<&str>,
@@ -115,7 +118,7 @@ pub fn download_hf_dataset(
         url::form_urlencoded::byte_serialize(dataset.as_bytes()).collect();
 
     let mut client_builder =
-        reqwest::blocking::Client::builder().timeout(std::time::Duration::from_secs(120));
+        reqwest::Client::builder().timeout(std::time::Duration::from_secs(120));
 
     // Add HF_TOKEN auth header if available
     if let Ok(token) = std::env::var("HF_TOKEN") {
@@ -138,7 +141,7 @@ pub fn download_hf_dataset(
         // Call /info to discover available configs and splits
         let info_url =
             format!("https://datasets-server.huggingface.co/info?dataset={encoded_dataset}");
-        let info = get_with_retry(&client, &info_url, "HF dataset /info")?;
+        let info = get_with_retry(&client, &info_url, "HF dataset /info").await?;
 
         let dataset_info =
             info.get("dataset_info").and_then(|d| d.as_object()).ok_or_else(|| {
@@ -201,7 +204,12 @@ pub fn download_hf_dataset(
         (resolved_config, resolved_split)
     };
 
-    println!("HF dataset: {dataset} (config={resolved_config}, split={resolved_split})");
+    tracing::info!(
+        dataset,
+        config = resolved_config,
+        split = resolved_split,
+        "resolved Hugging Face dataset"
+    );
 
     // Check cache
     let dir = cache_dir();
@@ -215,11 +223,16 @@ pub fn download_hf_dataset(
 
     if cache_path.exists() {
         let path_str = cache_path.to_string_lossy().to_string();
-        println!("HF dataset cached: {path_str}");
+        tracing::info!(dataset, path = %path_str, "using cached Hugging Face dataset");
         return Ok((path_str, resolved_config, resolved_split));
     }
 
-    println!("Downloading HF dataset '{dataset}' from datasets-server...");
+    tracing::info!(
+        dataset,
+        config = resolved_config,
+        split = resolved_split,
+        "downloading Hugging Face dataset"
+    );
 
     let encoded_config: String =
         url::form_urlencoded::byte_serialize(resolved_config.as_bytes()).collect();
@@ -229,6 +242,7 @@ pub fn download_hf_dataset(
     let mut all_rows: Vec<serde_json::Value> = Vec::new();
     let mut offset = 0usize;
     let page_size = 100usize;
+    let mut progress = RowDownloadReporter::new();
 
     loop {
         let url = format!(
@@ -240,7 +254,7 @@ pub fn download_hf_dataset(
              &length={page_size}"
         );
 
-        let data = get_with_retry(&client, &url, "HF dataset /rows")?;
+        let data = get_with_retry(&client, &url, "HF dataset /rows").await?;
 
         let rows = data["rows"]
             .as_array()
@@ -260,14 +274,14 @@ pub fn download_hf_dataset(
         offset += fetched;
 
         let total = data["num_rows_total"].as_u64().unwrap_or(0);
-        eprint!("\r  Fetched {offset}/{total} rows...");
+        progress.update(offset, total);
 
         // Stop if we have enough rows or reached end of dataset
         if all_rows.len() >= num_rows_needed || fetched < page_size {
             break;
         }
     }
-    eprintln!(); // newline after progress
+    progress.finish();
 
     if all_rows.is_empty() {
         return Err(BenchError::Config(format!(
@@ -280,7 +294,12 @@ pub fn download_hf_dataset(
     std::fs::write(&cache_path, &json_str)?;
 
     let path_str = cache_path.to_string_lossy().to_string();
-    println!("HF dataset: {} rows saved to {path_str}", all_rows.len());
+    tracing::info!(
+        dataset,
+        rows = all_rows.len(),
+        path = %path_str,
+        "saved Hugging Face dataset"
+    );
     Ok((path_str, resolved_config, resolved_split))
 }
 
@@ -483,21 +502,31 @@ pub fn load_hf_dataset(
     // Detect column format from first row
     let format = detect_column_format(&entries[0], text_column_override)?;
 
-    // Print detected format
     match &format {
-        ColumnFormat::Chat(col) => println!("HF dataset: detected chat column '{col}'"),
+        ColumnFormat::Chat(col) => {
+            tracing::info!(
+                format = "chat",
+                column = col,
+                "detected Hugging Face dataset format"
+            );
+        }
         ColumnFormat::Text {
             prompt_col,
             output_col,
         } => {
-            let out_msg = output_col.as_deref().unwrap_or("none");
-            println!("HF dataset: detected text column '{prompt_col}', output column: {out_msg}");
+            tracing::info!(
+                format = "text",
+                prompt_column = prompt_col,
+                output_column = output_col.as_deref().unwrap_or("none"),
+                "detected Hugging Face dataset format"
+            );
         }
         ColumnFormat::Combined { cols, output_col } => {
-            let out_msg = output_col.as_deref().unwrap_or("none");
-            println!(
-                "HF dataset: detected combined columns {:?}, output column: {out_msg}",
-                cols
+            tracing::info!(
+                format = "combined",
+                prompt_columns = ?cols,
+                output_column = output_col.as_deref().unwrap_or("none"),
+                "detected Hugging Face dataset format"
             );
         }
     }
@@ -608,9 +637,10 @@ pub fn load_hf_dataset(
                 if len == 0 { 128 } else { len }
             } else {
                 if !warned_no_output {
-                    eprintln!(
-                        "WARNING: No output column detected and --hf-output-len not set. \
-                         Using default output length of 128 tokens."
+                    tracing::warn!(
+                        path = dataset_path,
+                        default_output_tokens = 128,
+                        "no dataset output column or --hf-output-len; using default output length"
                     );
                     warned_no_output = true;
                 }
@@ -618,9 +648,10 @@ pub fn load_hf_dataset(
             }
         } else {
             if !warned_no_output {
-                eprintln!(
-                    "WARNING: No output column detected and --hf-output-len not set. \
-                     Using default output length of 128 tokens."
+                tracing::warn!(
+                    path = dataset_path,
+                    default_output_tokens = 128,
+                    "no dataset output column or --hf-output-len; using default output length"
                 );
                 warned_no_output = true;
             }
@@ -640,9 +671,11 @@ pub fn load_hf_dataset(
     // Oversample if needed
     if samples.len() < num_requests {
         if no_oversample {
-            println!(
-                "Skipping oversampling. Total samples: {} (requested: {num_requests})",
-                samples.len()
+            tracing::info!(
+                dataset = "hf",
+                samples = samples.len(),
+                requested = num_requests,
+                "skipping dataset oversampling"
             );
         } else if !samples.is_empty() {
             let original_len = samples.len();
@@ -652,9 +685,11 @@ pub fn load_hf_dataset(
                 req.request_id = Some(format!("{request_id_prefix}{}", original_len + i));
                 samples.push(req);
             }
-            println!(
-                "Oversampled HF dataset from {original_len} to {} total samples.",
-                samples.len()
+            tracing::info!(
+                dataset = "hf",
+                original_samples = original_len,
+                samples = samples.len(),
+                "oversampled dataset"
             );
         }
     }
@@ -1002,8 +1037,10 @@ mod tests {
 
     /// Build a gpt2 tokenizer using built-in tiktoken encoding (no network required).
     fn builtin_tokenizer() -> crate::tokenizer::TokenizerKind {
-        crate::tokenizer::load_tokenizer("gpt2", false, None)
-            .expect("gpt2 built-in tiktoken should always load without network")
+        crate::tokenizer::TokenizerKind::Tiktoken(
+            crate::tiktoken::load_builtin_tiktoken("gpt2")
+                .expect("gpt2 built-in tiktoken should always load without network"),
+        )
     }
 
     /// Write JSON data to a unique temp file and return the path string.

@@ -135,20 +135,28 @@ class BlockTables:
         self,
         idx_mapping: torch.Tensor,
         num_reqs_padded: int,
+        out: tuple[torch.Tensor, ...] | None = None,
+        out_ptrs: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, ...]:
+        if out is None:
+            out = tuple(self.input_block_tables)
+            out_ptrs = self.input_block_table_ptrs
+        else:
+            assert out_ptrs is not None
+            assert len(out) == self.num_kv_cache_groups
         num_reqs = idx_mapping.shape[0]
         # Launch kernel with num_reqs_padded to fuse zeroing of padded rows.
         _gather_block_tables_kernel[(self.num_kv_cache_groups, num_reqs_padded)](
             idx_mapping,
             self.block_table_ptrs,
-            self.input_block_table_ptrs,
+            out_ptrs,
             self.block_table_strides,
             self.num_blocks.gpu,
             self.num_blocks.gpu.stride(0),
             num_reqs,
             BLOCK_SIZE=1024,  # type: ignore
         )
-        return tuple(bt[:num_reqs_padded] for bt in self.input_block_tables)
+        return tuple(bt[:num_reqs_padded] for bt in out)
 
     def get_dummy_block_tables(self, num_reqs: int) -> tuple[torch.Tensor, ...]:
         # NOTE(woosuk): The output may be used for CUDA graph capture.
@@ -163,26 +171,28 @@ class BlockTables:
         query_start_loc: torch.Tensor,
         positions: torch.Tensor,
         num_tokens_padded: int,
+        out: torch.Tensor | None = None,
     ) -> torch.Tensor:
         num_reqs = idx_mapping.shape[0]
         num_groups = self.num_kv_cache_groups
+        slot_mappings = self.slot_mappings if out is None else out
         _compute_slot_mappings_kernel[(num_groups, num_reqs + 1)](
-            self.max_num_batched_tokens,
+            slot_mappings.shape[1],
             idx_mapping,
             query_start_loc,
             positions,
             self.block_table_ptrs,
             self.block_table_strides,
             self.block_sizes_tensor,
-            self.slot_mappings,
-            self.slot_mappings.stride(0),
+            slot_mappings,
+            slot_mappings.stride(0),
             self.cp_rank,
             CP_SIZE=self.cp_size,
             CP_INTERLEAVE=self.cp_interleave,
             PAD_ID=PAD_SLOT_ID,
             TRITON_BLOCK_SIZE=1024,  # type: ignore
         )
-        return self.slot_mappings[:, :num_tokens_padded]
+        return slot_mappings[:, :num_tokens_padded]
 
     def get_dummy_slot_mappings(self, num_tokens: int) -> torch.Tensor:
         # Fill the entire slot_mappings tensor, not just the first `num_tokens` entries.
