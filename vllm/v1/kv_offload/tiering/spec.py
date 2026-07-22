@@ -40,6 +40,7 @@ from vllm.logger import init_logger
 from vllm.v1.kv_offload.base import (
     CanonicalKVCaches,
     OffloadingCounterMetadata,
+    OffloadingGaugeMetadata,
     OffloadingHistogramMetadata,
     OffloadingManager,
     OffloadingMetricMetadata,
@@ -160,6 +161,38 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
             ),
         ):
             metrics[metric_name] = OffloadingCounterMetadata(
+                documentation=documentation,
+                labelnames=("tier",),
+            )
+        metrics[TieringOffloadingMetrics.PROMOTION_ALLOCATION_FAILURES] = (
+            OffloadingCounterMetadata(
+                documentation=(
+                    "Number of promotion attempts that failed because the "
+                    "primary tier could not allocate space."
+                ),
+            )
+        )
+        for metric_name, documentation in (
+            (
+                TieringOffloadingMetrics.PRIMARY_WRITE_USAGE_PERC,
+                "Current fraction of primary-tier space used by writes from "
+                "secondary tiers.",
+            ),
+            (
+                TieringOffloadingMetrics.PRIMARY_READ_USAGE_PERC,
+                "Current fraction of primary-tier space used by reads to "
+                "secondary tiers.",
+            ),
+            (
+                TieringOffloadingMetrics.ACTIVE_PROMOTION_JOBS,
+                "Number of active secondary-tier promotion jobs.",
+            ),
+            (
+                TieringOffloadingMetrics.ACTIVE_CASCADE_JOBS,
+                "Number of active secondary-tier cascade jobs.",
+            ),
+        ):
+            metrics[metric_name] = OffloadingGaugeMetadata(
                 documentation=documentation,
                 labelnames=("tier",),
             )

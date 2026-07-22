@@ -24,6 +24,7 @@ from vllm.v1.kv_offload.base import (
     LookupResult,
     OffloadingCounterMetadata,
     OffloadingEvent,
+    OffloadingGaugeMetadata,
     OffloadKey,
     OffloadPolicy,
     ReqContext,
@@ -146,6 +147,18 @@ def test_tiering_spec_collects_secondary_metric_definitions(monkeypatch):
     assert metrics[TieringOffloadingMetrics.PROMOTION_JOB_FAILURES].labelnames == (
         "tier",
     )
+    assert isinstance(
+        metrics[TieringOffloadingMetrics.PROMOTION_ALLOCATION_FAILURES],
+        OffloadingCounterMetadata,
+    )
+    for metric_name in (
+        TieringOffloadingMetrics.PRIMARY_WRITE_USAGE_PERC,
+        TieringOffloadingMetrics.PRIMARY_READ_USAGE_PERC,
+        TieringOffloadingMetrics.ACTIVE_PROMOTION_JOBS,
+        TieringOffloadingMetrics.ACTIVE_CASCADE_JOBS,
+    ):
+        assert isinstance(metrics[metric_name], OffloadingGaugeMetadata)
+        assert metrics[metric_name].labelnames == ("tier",)
 
 
 def test_tiering_manager_aggregates_secondary_stats():
@@ -294,6 +307,104 @@ def test_tiering_manager_records_finished_job_metrics():
     assert values[TieringOffloadingMetrics.READ_TIME][label] == 0.25
     assert values[TieringOffloadingMetrics.CASCADE_JOB_FAILURES][label] == 1
     assert values[TieringOffloadingMetrics.PROMOTION_JOB_FAILURES][label] == 1
+
+
+def test_tiering_manager_reports_active_job_and_primary_usage_gauges():
+    mock_region = _mock_mmap_region(6)
+    primary_tier = CPUPrimaryTierOffloadingManager(
+        num_blocks=6, mmap_region=mock_region
+    )
+    tier0 = MetricsSecondaryTierManager(
+        offloading_spec=_MOCK_OFFLOADING_SPEC,
+        primary_kv_view=mock_region.create_kv_memoryview(),
+        tier_type="fs",
+    )
+    tier1 = MetricsSecondaryTierManager(
+        offloading_spec=_MOCK_OFFLOADING_SPEC,
+        primary_kv_view=mock_region.create_kv_memoryview(),
+        tier_type="p2p",
+    )
+    manager = TieringOffloadingManager(
+        primary_tier=primary_tier,
+        secondary_tiers=[tier0, tier1],
+    )
+    manager.on_new_request(_CTX)
+    cascade_keys = to_keys([0, 1])
+    promotion_key = to_keys([2])[0]
+
+    prepared = manager.prepare_store(cascade_keys, _CTX)
+    assert prepared is not None
+    manager.complete_store(cascade_keys, _CTX, success=True)
+    tier0.lookup_result = LookupResult.HIT
+    assert manager.lookup(promotion_key, _CTX) is LookupResult.RETRY
+    manager.on_schedule_end(ScheduleEndContext(new_req_ids=(), preempted_req_ids=()))
+
+    stats = manager.get_stats()
+    assert stats is not None
+    values = stats.data["data"]
+    fs_label = ("0:fs",)
+    p2p_label = ("1:p2p",)
+    assert values[TieringOffloadingMetrics.PRIMARY_READ_USAGE_PERC][
+        fs_label
+    ] == pytest.approx(2 / 6)
+    assert values[TieringOffloadingMetrics.PRIMARY_READ_USAGE_PERC][
+        p2p_label
+    ] == pytest.approx(2 / 6)
+    assert values[TieringOffloadingMetrics.PRIMARY_WRITE_USAGE_PERC][
+        fs_label
+    ] == pytest.approx(1 / 6)
+    assert values[TieringOffloadingMetrics.PRIMARY_WRITE_USAGE_PERC][p2p_label] == 0
+    assert values[TieringOffloadingMetrics.ACTIVE_CASCADE_JOBS][fs_label] == 1
+    assert values[TieringOffloadingMetrics.ACTIVE_CASCADE_JOBS][p2p_label] == 1
+    assert values[TieringOffloadingMetrics.ACTIVE_PROMOTION_JOBS][fs_label] == 1
+    assert values[TieringOffloadingMetrics.ACTIVE_PROMOTION_JOBS][p2p_label] == 0
+
+    tier0.finished_jobs = [
+        JobResult(job_id=tier0.submitted_stores[0].job_id, success=True),
+        JobResult(job_id=tier0.submitted_loads[0].job_id, success=True),
+    ]
+    tier1.finished_jobs = [
+        JobResult(job_id=tier1.submitted_stores[0].job_id, success=True),
+    ]
+    manager._process_finished_jobs()
+
+    stats = manager.get_stats()
+    assert stats is not None
+    values = stats.data["data"]
+    assert values[TieringOffloadingMetrics.PRIMARY_READ_USAGE_PERC][fs_label] == 0
+    assert values[TieringOffloadingMetrics.PRIMARY_READ_USAGE_PERC][p2p_label] == 0
+    assert values[TieringOffloadingMetrics.PRIMARY_WRITE_USAGE_PERC][fs_label] == 0
+    assert values[TieringOffloadingMetrics.PRIMARY_WRITE_USAGE_PERC][p2p_label] == 0
+    assert values[TieringOffloadingMetrics.ACTIVE_CASCADE_JOBS][fs_label] == 0
+    assert values[TieringOffloadingMetrics.ACTIVE_CASCADE_JOBS][p2p_label] == 0
+    assert values[TieringOffloadingMetrics.ACTIVE_PROMOTION_JOBS][fs_label] == 0
+    assert values[TieringOffloadingMetrics.ACTIVE_PROMOTION_JOBS][p2p_label] == 0
+
+
+def test_tiering_manager_records_promotion_allocation_failures():
+    mock_region = _mock_mmap_region(1)
+    primary_tier = CPUPrimaryTierOffloadingManager(
+        num_blocks=1, mmap_region=mock_region
+    )
+    tier = MetricsSecondaryTierManager(
+        offloading_spec=_MOCK_OFFLOADING_SPEC,
+        primary_kv_view=mock_region.create_kv_memoryview(),
+        tier_type="fs",
+    )
+    tier.lookup_result = LookupResult.HIT
+    manager = TieringOffloadingManager(
+        primary_tier=primary_tier,
+        secondary_tiers=[tier],
+    )
+    manager.on_new_request(_CTX)
+    assert primary_tier.prepare_store(to_keys([0]), _CTX) is not None
+
+    assert manager.lookup(to_keys([1])[0], _CTX) is LookupResult.MISS
+
+    stats = manager.get_stats()
+    assert stats is not None
+    values = stats.data["data"]
+    assert values[TieringOffloadingMetrics.PROMOTION_ALLOCATION_FAILURES][()] == 1
 
 
 class TestExampleSecondaryTierManager:

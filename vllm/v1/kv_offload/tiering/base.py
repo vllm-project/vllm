@@ -44,6 +44,13 @@ class TieringOffloadingMetrics:
     CASCADE_JOB_FAILURES = "vllm:kv_offload_tiering_cascade_job_failures"
     BLOCK_QUERIES = "vllm:kv_offload_tiering_block_queries"
     BLOCK_HITS = "vllm:kv_offload_tiering_block_hits"
+    PRIMARY_WRITE_USAGE_PERC = "vllm:kv_offload_tiering_primary_write_usage_perc"
+    PRIMARY_READ_USAGE_PERC = "vllm:kv_offload_tiering_primary_read_usage_perc"
+    PROMOTION_ALLOCATION_FAILURES = (
+        "vllm:kv_offload_tiering_promotion_allocation_failures"
+    )
+    ACTIVE_PROMOTION_JOBS = "vllm:kv_offload_tiering_active_promotion_jobs"
+    ACTIVE_CASCADE_JOBS = "vllm:kv_offload_tiering_active_cascade_jobs"
 
 
 @dataclass
