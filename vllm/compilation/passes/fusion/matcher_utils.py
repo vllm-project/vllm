@@ -31,6 +31,7 @@ from vllm.platforms import current_platform
 
 ROTARY_OP = torch.ops._C.rotary_embedding.default
 FLASHINFER_ROTARY_OP = torch.ops.vllm.flashinfer_rotary_embedding.default
+MROPE_OP = torch.ops.vllm.mrope.default
 
 QUANT_OPS: dict[QuantKey, OpOverload] = {
     kFp8StaticTensorSym: torch.ops._C.static_scaled_fp8_quant.default,  # noqa: E501
@@ -160,6 +161,81 @@ class MatcherRotaryEmbedding(MatcherCustomOp):
             )
         )
         return result
+
+
+class MatcherMRotaryEmbedding(MatcherCustomOp):
+    """Matches the ``torch.ops.vllm.mrope`` custom op (multimodal RoPE).
+
+    mRoPE rotation is always neox-style; ``mrope_interleaved`` only controls the
+    T/H/W section frequency layout. Only the custom-op form is matched (the
+    fusion pass requires the rotary_embedding custom op to be enabled); the
+    native decomposition is not reproduced here.
+    """
+
+    def __init__(
+        self,
+        head_size: int,
+        num_heads: int,
+        num_kv_heads: int,
+        mrope_section: list[int],
+        mrope_interleaved: bool = False,
+        enabled: bool | None = None,
+    ) -> None:
+        if enabled is None:
+            enabled = RotaryEmbedding.enabled()
+
+        super().__init__(enabled)
+        self.head_size = head_size
+        self.num_heads = num_heads
+        self.num_kv_heads = num_kv_heads
+        self.q_size = self.num_heads * self.head_size
+        self.kv_size = self.num_kv_heads * self.head_size
+        self.rotary_dim = head_size
+        self.mrope_section = mrope_section
+        self.mrope_interleaved = mrope_interleaved
+
+    def inputs(self) -> list[torch.Tensor]:
+        positions = self.empty_int64(3, 5)  # [3, num_tokens]
+        query = self.empty(5, self.q_size)
+        key = self.empty(5, self.kv_size)
+        cos_sin_cache = self.empty(4096, self.rotary_dim)
+        return [positions, query, key, cos_sin_cache]
+
+    def forward_custom(
+        self,
+        positions: torch.Tensor,
+        query: torch.Tensor,
+        key: torch.Tensor | None,
+        cos_sin_cache: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        result = auto_functionalized(
+            MROPE_OP,
+            positions=positions,
+            query=query,
+            key=key,
+            cos_sin_cache=cos_sin_cache,
+            head_size=self.head_size,
+            rotary_dim=self.rotary_dim,
+            mrope_section_t=self.mrope_section[0],
+            mrope_section_h=self.mrope_section[1],
+            mrope_section_w=self.mrope_section[2],
+            mrope_interleaved=self.mrope_interleaved,
+        )
+        query_out = result[1]
+        key_out = result[2] if len(result) > 2 else None
+        return query_out, key_out
+
+    def forward_native(
+        self,
+        positions: torch.Tensor,
+        query: torch.Tensor,
+        key: torch.Tensor | None,
+        cos_sin_cache: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        raise NotImplementedError(
+            "MatcherMRotaryEmbedding only supports the custom-op form; the "
+            "mRoPE fusion pass requires the rotary_embedding custom op enabled."
+        )
 
 
 class MatcherRMSNormGated(MatcherCustomOp):

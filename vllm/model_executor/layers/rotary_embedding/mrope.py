@@ -6,6 +6,7 @@ import numpy as np
 import torch
 
 from vllm.triton_utils import tl, triton
+from vllm.utils.torch_utils import direct_register_custom_op
 
 from .base import RotaryEmbeddingBase
 from .yarn_scaling_rope import YaRNScalingRotaryEmbedding, yarn_get_mscale
@@ -198,6 +199,68 @@ def apply_interleaved_rope(x: torch.Tensor, mrope_section: list[int]) -> torch.T
     return x_t
 
 
+def _mrope_apply(
+    positions: torch.Tensor,
+    query: torch.Tensor,
+    key: torch.Tensor,
+    cos_sin_cache: torch.Tensor,
+    head_size: int,
+    rotary_dim: int,
+    mrope_section_t: int,
+    mrope_section_h: int,
+    mrope_section_w: int,
+    mrope_interleaved: bool,
+) -> None:
+    """In-place mRoPE application, registered as a custom op so the compile
+    fusion pass can match it as a single node (mirrors the standard
+    ``rotary_embedding`` custom op). Gathers the T/H/W cos/sin streams from
+    ``cos_sin_cache`` (indexed by ``positions`` [3, num_tokens]) and applies the
+    Triton mRoPE kernel to ``query``/``key`` in place.
+    """
+    cos_sin = cos_sin_cache[positions]  # [3, num_tokens, rotary_dim]
+    cos, sin = cos_sin.chunk(2, dim=-1)  # each [3, num_tokens, rotary_dim/2]
+    q, k = triton_mrope(
+        query,
+        key,
+        cos,
+        sin,
+        [mrope_section_t, mrope_section_h, mrope_section_w],
+        head_size,
+        rotary_dim,
+        mrope_interleaved,
+    )
+    # triton_mrope mutates its inputs in place when they are contiguous, but
+    # returns freshly-allocated tensors when it has to make them contiguous.
+    # Copy back in that case so the declared in-place mutation always holds.
+    if q.data_ptr() != query.data_ptr():
+        query.copy_(q.view_as(query))
+    if k.data_ptr() != key.data_ptr():
+        key.copy_(k.view_as(key))
+
+
+def _mrope_apply_fake(
+    positions: torch.Tensor,
+    query: torch.Tensor,
+    key: torch.Tensor,
+    cos_sin_cache: torch.Tensor,
+    head_size: int,
+    rotary_dim: int,
+    mrope_section_t: int,
+    mrope_section_h: int,
+    mrope_section_w: int,
+    mrope_interleaved: bool,
+) -> None:
+    return
+
+
+direct_register_custom_op(
+    op_name="mrope",
+    op_func=_mrope_apply,
+    mutates_args=["query", "key"],
+    fake_impl=_mrope_apply_fake,
+)
+
+
 class MRotaryEmbedding(RotaryEmbeddingBase):
     """Rotary Embedding with Multimodal Sections."""
 
@@ -333,26 +396,31 @@ class MRotaryEmbedding(RotaryEmbeddingBase):
 
         cos_sin_cache = self._match_cos_sin_cache_dtype(query)
         num_tokens = positions.shape[-1]
-        cos_sin = cos_sin_cache[positions]
-        cos, sin = cos_sin.chunk(2, dim=-1)
         query_shape = query.shape
         key_shape = key.shape
         if positions.ndim == 2:
             assert self.mrope_section
 
-            q, k = triton_mrope(
+            mrope_section = self.mrope_section
+            # In-place via the registered custom op so the compile fusion pass
+            # can match Q/K-norm + mRoPE as a single node.
+            torch.ops.vllm.mrope(
+                positions,
                 query,
                 key,
-                cos,
-                sin,
-                self.mrope_section,
+                cos_sin_cache,
                 self.head_size,
                 self.rotary_dim,
+                mrope_section[0],
+                mrope_section[1],
+                mrope_section[2],
                 self.mrope_interleaved,
             )
 
-            return q.reshape(query_shape), k.reshape(key_shape)
+            return query.reshape(query_shape), key.reshape(key_shape)
 
+        cos_sin = cos_sin_cache[positions]
+        cos, sin = cos_sin.chunk(2, dim=-1)
         query = query.view(num_tokens, -1, self.head_size)
         query_rot = query[..., : self.rotary_dim]
         query_pass = query[..., self.rotary_dim :]

@@ -18,12 +18,13 @@ from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
 
 from ..inductor_pass import enable_fake_mode
 from ..vllm_inductor_pass import VllmInductorPass, VllmPatternMatcherPass
-from .matcher_utils import MatcherRotaryEmbedding
+from .matcher_utils import MatcherMRotaryEmbedding, MatcherRotaryEmbedding
 from .rms_quant_fusion import empty_bf16, empty_fp32, empty_i64
 
 logger = init_logger(__name__)
 
 FUSED_QK_ROPE_OP = torch.ops._C.fused_qk_norm_rope.default
+FUSED_QK_MROPE_OP = torch.ops._C.fused_qk_norm_mrope.default
 
 # Head dimensions supported by csrc/fused_qknorm_rope_kernel.cu's
 # launchFusedQKNormRope and launchFusedQKNormRopeNTokenHeads dispatchers.
@@ -272,4 +273,223 @@ class QKNormRoPEFusionPass(VllmPatternMatcherPass):
     def uuid(self) -> str:
         return VllmInductorPass.hash_source(
             self, QkNormRopePattern, repr(self._attention_geometries)
+        )
+
+
+class QkNormMRopePattern:
+    """mRoPE analogue of QkNormRopePattern for Qwen3-VL-class models.
+
+    Matches Q/K RMSNorm followed by the multimodal-RoPE custom op
+    (torch.ops.vllm.mrope) and replaces the pair with the fused
+    fused_qk_norm_mrope op. mRoPE rotation is always neox-style, so the fused op
+    is invoked with is_neox=True. v1 supports the non-interleaved section layout
+    only (mrope_interleaved=False).
+    """
+
+    def __init__(
+        self,
+        head_dim: int,
+        num_heads: int,
+        num_kv_heads: int,
+        eps: float,
+        mrope_section: list[int],
+        mrope_interleaved: bool = False,
+    ) -> None:
+        self.num_heads = num_heads
+        self.num_kv_heads = num_kv_heads
+        self.head_dim = head_dim
+        self.q_size = self.num_heads * self.head_dim
+        self.kv_size = self.num_kv_heads * self.head_dim
+        self.eps = eps
+        self.mrope_section = mrope_section
+        self.mrope_interleaved = mrope_interleaved
+        self.rope_matcher = MatcherMRotaryEmbedding(
+            head_size=self.head_dim,
+            num_heads=self.num_heads,
+            num_kv_heads=self.num_kv_heads,
+            mrope_section=mrope_section,
+            mrope_interleaved=mrope_interleaved,
+        )
+
+    def get_inputs(self) -> list[torch.Tensor]:
+        T = 5
+        qkv = empty_bf16(T, self.q_size + 2 * self.kv_size)
+        positions = empty_i64(3, T)  # mRoPE positions [3, num_tokens]
+        q_weight = empty_bf16(1, self.head_dim)
+        k_weight = empty_bf16(1, self.head_dim)
+        cos_sin_cache = empty_bf16(4096, self.head_dim)
+        return [qkv, positions, q_weight, k_weight, cos_sin_cache]
+
+    def register(self, pm_pass: PatternMatcherPass) -> None:
+        def pattern(
+            qkv: torch.Tensor,
+            positions: torch.Tensor,
+            q_weight: torch.Tensor,
+            k_weight: torch.Tensor,
+            cos_sin_cache: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+            try:
+                q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+            except ValueError as e:
+                raise RuntimeError from e
+
+            q_by_head = q.view(
+                *q.shape[:-1], q.shape[-1] // self.head_dim, self.head_dim
+            )
+            q_normed_by_head = vllm.ir.ops.rms_norm(q_by_head, q_weight, self.eps)
+            q_flat = q_normed_by_head.view(q.shape)
+
+            k_by_head = k.view(
+                *k.shape[:-1], k.shape[-1] // self.head_dim, self.head_dim
+            )
+            k_normed_by_head = vllm.ir.ops.rms_norm(k_by_head, k_weight, self.eps)
+            k_flat = k_normed_by_head.view(k.shape)
+
+            q_rope, k_rope = self.rope_matcher(positions, q_flat, k_flat, cos_sin_cache)
+            return q_rope, k_rope, v
+
+        def replacement(
+            qkv: torch.Tensor,
+            positions: torch.Tensor,
+            q_weight: torch.Tensor,
+            k_weight: torch.Tensor,
+            cos_sin_cache: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+            result = auto_functionalized(
+                FUSED_QK_MROPE_OP,
+                qkv=qkv,
+                num_heads_q=self.num_heads,
+                num_heads_k=self.num_kv_heads,
+                num_heads_v=self.num_kv_heads,
+                head_dim=self.head_dim,
+                eps=self.eps,
+                q_weight=q_weight,
+                k_weight=k_weight,
+                cos_sin_cache=cos_sin_cache,
+                is_neox=True,
+                position_ids=positions,
+                mrope_section_t=self.mrope_section[0],
+                mrope_section_h=self.mrope_section[1],
+            )
+            result_qkv = result[1]
+            return result_qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)  # type: ignore[no-any-return]
+
+        pm.register_replacement(
+            pattern,
+            replacement,
+            self.get_inputs(),
+            QkNormRopePattern.wrap_trace_fn(
+                pm.fwd_only,
+                QkNormRopePattern.fx_view_to_reshape,
+            ),
+            pm_pass,
+        )
+
+
+def _discover_mrope_configs(
+    config: VllmConfig,
+) -> tuple[tuple[tuple[int, ...], bool], ...]:
+    """Extract (mrope_section, mrope_interleaved) from the model's text config.
+
+    Returns an empty tuple when the model does not use mRoPE, uses the
+    interleaved section layout (unsupported in v1), or the config cannot be
+    read — in which case the fusion pass disables itself and the unfused mRoPE
+    path is used.
+    """
+    try:
+        model_config = config.model_config
+        hf_text = getattr(model_config, "hf_text_config", None) or getattr(
+            model_config, "hf_config", None
+        )
+        if hf_text is None:
+            return ()
+        rope = getattr(hf_text, "rope_parameters", None) or getattr(
+            hf_text, "rope_scaling", None
+        )
+        if not rope or "mrope_section" not in rope:
+            return ()
+        if rope.get("mrope_interleaved", False):
+            return ()  # v1: non-interleaved section layout only
+        section = tuple(int(x) for x in rope["mrope_section"])
+        if len(section) != 3:
+            return ()
+        return ((section, False),)
+    except Exception:  # noqa: BLE001 - defensive: any failure disables the pass
+        return ()
+
+
+class QKNormMRoPEFusionPass(VllmPatternMatcherPass):
+    """Fuse Q/K RMSNorm + mRoPE into fused_qk_norm_mrope for Qwen3-VL-class
+    models when the custom op exists and the model uses (non-interleaved)
+    mRoPE."""
+
+    @enable_fake_mode
+    def __init__(self, config: VllmConfig) -> None:
+        super().__init__(config)
+        self.patterns: PatternMatcherPass = PatternMatcherPass(
+            pass_name="qk_norm_mrope_fusion_pass"
+        )
+        self._attention_geometries: tuple[tuple[int, int, int], ...] = ()
+
+        dtype = config.model_config.dtype
+        if dtype not in (torch.bfloat16, torch.float16):
+            logger.warning_once(
+                "QK Norm+mRoPE fusion not enabled: unsupported dtype %s", dtype
+            )
+            return
+
+        mrope_configs = _discover_mrope_configs(config)
+        if not mrope_configs:
+            return
+
+        attn_layers: dict[str, Attention] = get_layers_from_vllm_config(
+            config, Attention
+        )
+        if len(attn_layers) == 0:
+            return
+
+        for layer in attn_layers.values():
+            if layer.head_size not in SUPPORTED_FUSED_QK_NORM_ROPE_HEAD_DIMS:
+                logger.warning_once(
+                    "QK Norm+mRoPE fusion not enabled: layer head_size=%d not "
+                    "supported by fused_qk_norm_mrope kernel (supported: %s).",
+                    layer.head_size,
+                    SUPPORTED_FUSED_QK_NORM_ROPE_HEAD_DIMS,
+                )
+                return
+
+        self._attention_geometries = tuple(
+            sorted(
+                {
+                    (layer.head_size, layer.num_heads, layer.num_kv_heads)
+                    for layer in attn_layers.values()
+                }
+            )
+        )
+
+        for head_dim, num_heads, num_kv_heads in self._attention_geometries:
+            for section, interleaved in mrope_configs:
+                # mRoPE is full-rotary: sum(section) == rotary_dim/2 == head_dim/2.
+                if 2 * sum(section) != head_dim:
+                    continue
+                for epsilon in [1e-5, 1e-6]:
+                    QkNormMRopePattern(
+                        head_dim=head_dim,
+                        num_heads=num_heads,
+                        num_kv_heads=num_kv_heads,
+                        eps=epsilon,
+                        mrope_section=list(section),
+                        mrope_interleaved=interleaved,
+                    ).register(self.patterns)
+
+        self.dump_patterns(config, self.patterns)
+
+    @VllmInductorPass.time_and_log
+    def __call__(self, graph: fx.Graph) -> None:
+        self.matched_count = self.patterns.apply(graph)
+        logger.debug("Fused QK Norm+mRoPE on %s sites", self.matched_count)
+
+    def uuid(self) -> str:
+        return VllmInductorPass.hash_source(
+            self, QkNormMRopePattern, repr(self._attention_geometries)
         )
