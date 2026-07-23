@@ -23,10 +23,10 @@ MODEL_NAME = os.getenv("MODEL_NAME", "ibm-research/PowerMoE-3b")
 DP_SIZE = 2
 
 # Fault-detection timeout budget:
-# - CPU: Gloo DP allreduce timeout (10s) detects the dead peer.
+# - CPU: Gloo DP allreduce timeout (30s) detects the dead peer.
 # - nixl_ep: kernel masks the dead rank after Buffer's default timeout_ms=30000 (30s).
 # - Deadline (45s): slowest fallback (30s) + margin.
-CPU_DISTRIBUTED_TIMEOUT_S = 10
+CPU_DISTRIBUTED_TIMEOUT_S = 30
 FAULT_DETECTION_DEADLINE_S = 45
 
 
