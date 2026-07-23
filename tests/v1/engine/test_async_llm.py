@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
+import threading
 import time
 from contextlib import ExitStack
 from unittest.mock import MagicMock
@@ -144,6 +145,45 @@ async def test_load(
             )
 
         assert not engine.output_processor.has_unfinished_requests()
+
+
+@pytest.mark.parametrize(
+    "engine_args,prompt",
+    [(TEXT_ENGINE_ARGS, TEXT_PROMPT), (VISION_ENGINE_ARGS, VISION_PROMPT)],
+)
+@pytest.mark.asyncio
+async def test_raw_prompt_preprocessing_off_event_loop(
+    engine_args: AsyncEngineArgs,
+    prompt: PromptType,
+):
+    """Raw-prompt preprocessing (tokenization / multimodal processing)
+    must run on the renderer's thread pool, not the event loop thread."""
+    with ExitStack() as after:
+        with set_default_torch_num_threads(1):
+            engine = AsyncLLM.from_engine_args(engine_args)
+        after.callback(engine.shutdown)
+
+        loop_thread = threading.current_thread()
+        preprocess_threads: list[threading.Thread] = []
+
+        preprocessor = engine.input_processor.input_preprocessor
+        orig_preprocess = preprocessor.preprocess
+
+        def spy(*args, **kwargs):
+            preprocess_threads.append(threading.current_thread())
+            return orig_preprocess(*args, **kwargs)
+
+        preprocessor.preprocess = spy
+        after.callback(delattr, preprocessor, "preprocess")
+
+        sampling_params = SamplingParams(max_tokens=1)
+        async for _ in engine.generate(
+            request_id="request-0", prompt=prompt, sampling_params=sampling_params
+        ):
+            pass
+
+        assert preprocess_threads
+        assert all(t is not loop_thread for t in preprocess_threads)
 
 
 @pytest.mark.parametrize(
