@@ -130,6 +130,19 @@ def test_pr_and_manual_checkout_urls_use_https_without_publish_ssh_key():
     assert "https://github.com/vLLM-HUST/vllm-ascend-hust.git" in text
 
 
+def test_benchmark_checkout_retries_have_hard_network_timeouts():
+    text = workflow_text()
+    checkout_block = text[
+        text.index("      - name: Checkout target repo with retry") : text.index(
+            "      - name: Prepare Hugging Face cache directories"
+        )
+    ]
+
+    assert "GIT_CHECKOUT_RETRY_ATTEMPTS:-3" in checkout_block
+    assert "GIT_CHECKOUT_TIMEOUT_SECONDS:-90" in checkout_block
+    assert checkout_block.count('timeout --foreground "${timeout_seconds}s"') >= 6
+
+
 def test_benchmark_install_removes_conflicting_vllm_provider():
     text = workflow_text()
 
@@ -475,8 +488,10 @@ def test_target_checkout_uses_resilient_git_http_retry_settings():
         )
     ]
 
-    assert "GIT_CHECKOUT_RETRY_ATTEMPTS:-6" in checkout_step
+    assert "GIT_CHECKOUT_RETRY_ATTEMPTS:-3" in checkout_step
     assert "GIT_CHECKOUT_RETRY_DELAY_SECONDS:-30" in checkout_step
+    assert "GIT_CHECKOUT_TIMEOUT_SECONDS:-90" in checkout_step
+    assert 'timeout --foreground "${timeout_seconds}s"' in checkout_step
     assert "-c http.version=HTTP/1.1" in checkout_step
     assert "-c http.lowSpeedLimit=1024" in checkout_step
     assert "-c http.lowSpeedTime=30" in checkout_step
