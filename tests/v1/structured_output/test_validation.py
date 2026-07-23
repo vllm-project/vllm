@@ -5,9 +5,10 @@
 import pytest
 
 from vllm.config import StructuredOutputsConfig
+from vllm.exceptions import VLLMValidationError
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 
-pytestmark = pytest.mark.cpu_test
+pytestmark = [pytest.mark.cpu_test, pytest.mark.skip_global_cleanup]
 
 JSON_SCHEMA = {
     "type": "object",
@@ -17,6 +18,14 @@ JSON_SCHEMA = {
     },
     "required": ["invoice_id", "customer"],
     "additionalProperties": False,
+}
+
+GUIDANCE_JSON_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "count": {"type": "integer", "multipleOf": 2},
+    },
+    "required": ["count"],
 }
 
 
@@ -67,5 +76,28 @@ def test_degenerate_structured_outputs_rejected(structured_outputs, match):
         params._validate_structured_outputs(
             _StubModelConfig(is_diffusion=False),
             StructuredOutputsConfig(),
+            tokenizer=object(),
+        )
+
+
+def test_auto_rejects_mixed_structured_output_backends():
+    config = StructuredOutputsConfig(backend="auto")
+    xgrammar_params = SamplingParams(
+        structured_outputs=StructuredOutputsParams(json=JSON_SCHEMA)
+    )
+    guidance_params = SamplingParams(
+        structured_outputs=StructuredOutputsParams(json=GUIDANCE_JSON_SCHEMA)
+    )
+
+    xgrammar_params._validate_structured_outputs(
+        _StubModelConfig(is_diffusion=False),
+        config,
+        tokenizer=object(),
+    )
+
+    with pytest.raises(VLLMValidationError, match="only supports one backend"):
+        guidance_params._validate_structured_outputs(
+            _StubModelConfig(is_diffusion=False),
+            config,
             tokenizer=object(),
         )
