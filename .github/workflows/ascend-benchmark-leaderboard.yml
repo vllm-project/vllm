@@ -263,6 +263,7 @@ jobs:
       - ascend
       - 910b
       - docker
+      - ${{ github.event_name == 'workflow_dispatch' && (vars.VLLM_HUST_MANUAL_RUNNER_LABEL || 'npu-1') || 'ascend-benchmark' }}
     timeout-minutes: 60
     env:
       HOME: ${{ github.workspace }}/.ci-home

@@ -458,6 +458,16 @@ def test_workflow_dispatch_metadata_lengths_are_parsed_from_single_input():
     assert "inputs.output_length" not in text
 
 
+def test_workflow_dispatch_targets_manual_runner_pool():
+    text = workflow_text()
+
+    assert (
+        "${{ github.event_name == 'workflow_dispatch' && "
+        "(vars.VLLM_HUST_MANUAL_RUNNER_LABEL || 'npu-1') || "
+        "'ascend-benchmark' }}"
+    ) in text
+
+
 def test_l3_benchmark_publish_preflight_runs_before_benchmark():
     text = workflow_text()
 
