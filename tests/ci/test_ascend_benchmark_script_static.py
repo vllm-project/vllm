@@ -99,3 +99,20 @@ def test_e2e_inference_scripts_use_python_http_probe_with_server_log():
             "http_with_server_log"
             in text[text.index("completion_response=$(mktemp)") :]
         )
+
+
+def test_ascend_server_readiness_windows_allow_cold_start():
+    for script_name in (
+        "run_e2e_serve_smoke.sh",
+        "run_e2e_inference_regression.sh",
+    ):
+        text = script_text(script_name)
+
+        assert "SERVER_READY_MAX_ATTEMPTS=${SERVER_READY_MAX_ATTEMPTS:-300}" in text
+        assert 'seq 1 "$SERVER_READY_MAX_ATTEMPTS"' in text
+        assert '"$attempt" -eq "$SERVER_READY_MAX_ATTEMPTS"' in text
+
+    benchmark_text = script_text("run_ascend_benchmark_ci.sh")
+    assert (
+        "SAME_SPEC_READY_TIMEOUT_SECONDS=${SAME_SPEC_READY_TIMEOUT_SECONDS:-1200}"
+    ) in benchmark_text
