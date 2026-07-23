@@ -78,7 +78,7 @@ steps:
     'pip install --no-build-isolation git+https://github.com/state-spaces/mamba@v2.3.0 || true &&
     pip install --no-build-isolation git+https://github.com/Dao-AILab/causal-conv1d@v1.6.0 || true &&
     cd tests &&
-    pytest -v -s models/language/generation -m hybrid_model --deselect="tests/models/language/generation/test_hybrid.py::test_mamba_cache_cg_padding[SD-20-ai21labs/Jamba-tiny-dev]" --deselect="tests/models/language/generation/test_hybrid.py::test_mamba_cache_cg_padding[SD-20-state-spaces/mamba-130m-hf]" --deselect="tests/models/language/generation/test_hybrid.py::test_chunked_prefill_with_parallel_sampling[DS-10-ai21labs/Jamba-tiny-dev]" --deselect="tests/models/language/generation/test_hybrid.py::test_mamba_cache_cg_padding[DS-20-state-spaces/mamba-130m-hf]" --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB || true'
+    pytest -v -s models/language/generation -m hybrid_model --deselect="tests/models/language/generation/test_hybrid.py::test_mamba_cache_cg_padding[SD-20-ai21labs/Jamba-tiny-dev]" --deselect="tests/models/language/generation/test_hybrid.py::test_mamba_cache_cg_padding[SD-20-state-spaces/mamba-130m-hf]" --deselect="tests/models/language/generation/test_hybrid.py::test_chunked_prefill_with_parallel_sampling[DS-10-ai21labs/Jamba-tiny-dev]" --deselect="tests/models/language/generation/test_hybrid.py::test_mamba_cache_cg_padding[DS-20-state-spaces/mamba-130m-hf]" --deselect="tests/models/language/generation/test_hybrid.py::test_mamba_cache_cg_padding[DS-20-ai21labs/Jamba-tiny-dev]" --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB || true'
 - label: Language Models Test (Extended Generation)
   device: intel_gpu
   timeout_in_minutes: 65
