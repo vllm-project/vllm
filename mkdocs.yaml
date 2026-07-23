@@ -61,6 +61,7 @@ plugins:
         - docs/mkdocs/gen_files/generate_examples.py
         - docs/mkdocs/gen_files/generate_argparse.py
         - docs/mkdocs/gen_files/generate_metrics.py
+        - docs/mkdocs/gen_files/generate_attention_backends.py
   - autorefs
   - awesome-nav
   - glightbox
