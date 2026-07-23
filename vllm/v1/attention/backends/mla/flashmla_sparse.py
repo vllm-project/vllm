@@ -48,7 +48,6 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-
 # For FP8 sparse attention we have two implementations:
 # 1. Mixed batch mode: use the FP8 decode kernel for both prefill and decode this is
 #    done by treating all tokens as single batch.
@@ -210,9 +209,6 @@ class FlashMLASparseMetadata(AttentionMetadata):
                 req_start_idx: int
                 workspace_starts: torch.Tensor
                 chunk_tot_seqlen: int
-                # Per-request device seq_lens for this chunk; bounds the
-                # block-table columns the HiSparse host-context staging
-                # actually gathers.
                 seq_lens: torch.Tensor | None = None
 
             chunks: list[Chunk]
@@ -336,7 +332,6 @@ class FlashMLASparseMetadataBuilder(
         be the full batch or only decodes when prefills use dense MHA. This avoids
         the BF16 prefill kernel's head-padding overhead at high TP.
         """
-        # Use padded head count since that's what the kernel will see
         padded_heads = self.fp8_decode_padded_heads
 
         # The vendored get_mla_metadata ignores its arguments and returns an
@@ -360,7 +355,6 @@ class FlashMLASparseMetadataBuilder(
                 dummy_block_table=self.dummy_block_table[:1],
             )
 
-        # Metadata for all tokens as a single batch
         fp8_metadata = make_kernel_metadata(common_attn_metadata.num_actual_tokens)
         if self.use_hisparse and num_decode_tokens > 0 and num_prefill_tokens > 0:
             # Host-resident mixed batches row-split into a decode and a
@@ -622,9 +616,6 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
         topk_indices: torch.Tensor,
         attn_metadata: FlashMLASparseMetadata,
     ) -> torch.Tensor:
-        # Set by prepare_hisparse_for_batch on the same metadata this step
-        # (q is already sliced to num_actual_tokens; dummy runs never reach
-        # the forward paths).
         if self._hisparse_decode_batch:
             kv_c_and_k_pe_cache, topk_indices, topk_length = self._hisparse_swap_in(
                 kv_c_and_k_pe_cache,
@@ -647,11 +638,8 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
         if kv_c_and_k_pe_cache.device.type == "cpu":
             num_decode_tokens = attn_metadata.num_decode_tokens
             if num_decode_tokens > 0:
-                # Mixed batch on a host-resident pool: serve decode tokens
-                # from the hot buffer, exactly like the pure-decode branch.
-                # The newest rows went to the host pool this step
-                # (write_rows_to_host), so slot_mapping=None mixed mode
-                # resolves them as misses.
+                # Mixed-batch writes put newest rows in host memory, so they
+                # must resolve as misses during swap-in.
                 hot_cache, decode_topk, decode_topk_length = self._hisparse_swap_in(
                     kv_c_and_k_pe_cache,
                     topk_indices,
@@ -669,14 +657,10 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
                     return decode_out
                 q = q[num_decode_tokens:]
                 topk_indices = topk_indices[num_decode_tokens:]
-            # Host-resident pool + local prefill: stage the prefill rows'
-            # context on GPU.
             kv_c_and_k_pe_cache, block_table, req_id_per_token = (
                 self._hisparse_stage_prefill_rows(kv_c_and_k_pe_cache, attn_metadata)
             )
 
-        # Convert per-request indices to global slots (decode) or staged
-        # slots (local prefill).
         topk_indices, topk_length = triton_convert_req_index_to_global_index(
             req_id_per_token,
             block_table,
@@ -694,7 +678,6 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
         )
         if decode_out is None:
             return attn_out
-        # Stitch back in batch token order: decode tokens first, prefill after.
         return torch.cat([decode_out, attn_out], dim=0)
 
     def _forward_fp8_kv_separate_prefill_decode(
@@ -854,7 +837,6 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
         prefill kernel which has head padding overhead when num_heads is small.
         Used when use_mixed_batch is True.
         """
-        # Set by prepare_hisparse_for_batch on the same metadata this step.
         if self._hisparse_decode_batch:
             kv_c_and_k_pe_cache, topk_indices = self._hisparse_swap_in(
                 kv_c_and_k_pe_cache,
@@ -889,11 +871,8 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
         if kv_c_and_k_pe_cache.device.type == "cpu":
             num_decode_tokens = attn_metadata.num_decode_tokens
             if num_decode_tokens > 0:
-                # Mixed batch on a host-resident pool: serve decode tokens
-                # from the hot buffer, exactly like the pure-decode branch.
-                # The newest rows went to the host pool this step
-                # (write_rows_to_host), so slot_mapping=None mixed mode
-                # resolves them as misses.
+                # Mixed-batch writes put newest rows in host memory, so they
+                # must resolve as misses during swap-in.
                 decode_cache, decode_topk = self._hisparse_swap_in(
                     kv_c_and_k_pe_cache,
                     topk_indices,
@@ -919,14 +898,10 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
                     return decode_out
                 q = q[num_decode_tokens:]
                 topk_indices = topk_indices[num_decode_tokens:]
-            # Host-resident pool + local prefill: stage the prefill rows'
-            # context on GPU.
             kv_c_and_k_pe_cache, block_table, req_id_per_token = (
                 self._hisparse_stage_prefill_rows(kv_c_and_k_pe_cache, attn_metadata)
             )
 
-        # Convert per-request indices to global slots (decode) or staged
-        # slots (local prefill).
         topk_indices = triton_convert_req_index_to_global_index(
             req_id_per_token,
             block_table,
@@ -946,7 +921,6 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
         attn_out = _attn_out.squeeze(0)
         if decode_out is None:
             return attn_out
-        # Stitch back in batch token order: decode tokens first, prefill after.
         return torch.cat([decode_out, attn_out], dim=0)
 
     def _fp8_flash_mla_kernel(
