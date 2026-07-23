@@ -51,7 +51,16 @@ class Glm5NextTextConfig(PretrainedConfig):
         v_head_dim: int | None = 256,
         mla_nope: bool | None = True,
         num_nextn_predict_layers: int = 1,
-        linear_attn_config: dict | None = None,
+        # Per-layer layout (new schema): "linear_attention" | "deepseek_sparse_attention"
+        layer_types: list[str] | None = None,
+        # Per-layer MLP: "dense" | "sparse"
+        mlp_layer_types: list[str] | None = None,
+        # Linear-attention (KDA) head config (flattened from the old
+        # linear_attn_config dict).
+        linear_head_dim: int = 128,
+        linear_num_heads: int = 64,
+        linear_conv_kernel_dim: int = 4,
+        linear_lower_bound: float | None = -5.0,
         index_head_dim: int | None = None,
         index_topk: int | None = None,
         index_n_heads: int | None = None,
@@ -127,10 +136,25 @@ class Glm5NextTextConfig(PretrainedConfig):
         self.topk_group = topk_group
         self.num_nextn_predict_layers = num_nextn_predict_layers
 
-        if linear_attn_config is not None:
-            assert linear_attn_config["kda_layers"] is not None
-            assert linear_attn_config["full_attn_layers"] is not None
-        self.linear_attn_config = linear_attn_config
+        # Per-layer attention / MLP layout. Normalize mlp_layer_types from
+        # first_k_dense_replace when the new-schema field is absent so layer
+        # construction sees a consistent layout (mirrors cohere2_moe).
+        self.layer_types = layer_types
+        if mlp_layer_types is None:
+            n = self.num_hidden_layers
+            if first_k_dense_replace is not None:
+                mlp_layer_types = ["dense"] * first_k_dense_replace + [
+                    "sparse"
+                ] * (n - first_k_dense_replace)
+            else:
+                mlp_layer_types = ["sparse"] * n
+        self.mlp_layer_types = mlp_layer_types
+
+        # Linear-attention (KDA) head config.
+        self.linear_head_dim = linear_head_dim
+        self.linear_num_heads = linear_num_heads
+        self.linear_conv_kernel_dim = linear_conv_kernel_dim
+        self.linear_lower_bound = linear_lower_bound
 
         # dsa index config
         self.index_head_dim = index_head_dim
@@ -178,28 +202,28 @@ class Glm5NextTextConfig(PretrainedConfig):
 
     @property
     def is_linear_attn(self) -> bool:
-        return not (
-            self.linear_attn_config is None
-            or (
-                isinstance(self.linear_attn_config, dict)
-                and self.linear_attn_config["kda_layers"] is not None
-                and len(self.linear_attn_config["kda_layers"]) == 0
-            )
+        return self.layer_types is not None and any(
+            t == "linear_attention" for t in self.layer_types
         )
 
     def is_kda_layer(self, layer_idx: int):
         return (
-            self.linear_attn_config is not None
-            and layer_idx in self.linear_attn_config["kda_layers"]
+            self.layer_types is not None
+            and layer_idx < len(self.layer_types)
+            and self.layer_types[layer_idx] == "linear_attention"
         )
 
     @property
     def layers_block_type(self):
-        if not self.is_linear_attn:
+        # Map the schema's per-layer types onto the block strings vLLM's hybrid
+        # accounting (get_num_layers_by_block_type) recognizes: linear-attention
+        # layers stay "linear_attention"; every other attention variant collapses
+        # to "attention".
+        if self.layer_types is None:
             return ["attention"] * self.num_hidden_layers
         return [
-            "linear_attention" if self.is_kda_layer(i) else "attention"
-            for i in range(self.num_hidden_layers)
+            "linear_attention" if t == "linear_attention" else "attention"
+            for t in self.layer_types
         ]
 
 

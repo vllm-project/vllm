@@ -69,6 +69,8 @@ logger = init_logger(__name__)
 DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES = frozenset(
     {
         "DeepseekV2ForCausalLM",
+        "Glm5NextForCausalLM",
+        "Glm5NextForConditionalGeneration",
         "GraniteMoeForCausalLM",
         "InklingForCausalLM",
         "InklingForConditionalGeneration",
@@ -661,19 +663,18 @@ class VllmConfig:
             return False
 
         architectures = getattr(model_config, "architectures", [])
-        default_architectures = default_v2_model_runner_architectures()
-        is_default_v2_architecture = any(
-            arch in default_architectures for arch in architectures
+        explicitly_v2 = any(
+            arch in DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES for arch in architectures
         )
+        # Architectures explicitly opted into V2 (e.g. hybrid MoE models that V1
+        # can't run) bypass the hybrid / attention-free exclusions below.
+        if not explicitly_v2:
+            if getattr(model_config, "is_hybrid", False):
+                return False
 
-        if getattr(model_config, "is_hybrid", False) and (
-            not is_default_v2_architecture
-        ):
-            return False
-
-        if getattr(model_config, "is_attention_free", False):
-            return False
-        return is_default_v2_architecture or not model_config.is_moe
+            if getattr(model_config, "is_attention_free", False):
+                return False
+        return explicitly_v2 or not model_config.is_moe
 
     @property
     def needs_dp_coordinator(self) -> bool:

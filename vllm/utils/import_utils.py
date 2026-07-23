@@ -505,18 +505,17 @@ def has_triton_kernels() -> bool:
 @cache
 def has_tilelang() -> bool:
     """Whether the optional `tilelang` package is available."""
-    if not _has_module("tilelang"):
-        return False
-    # ROCm-only guard, imported lazily to avoid loading rocm on CUDA.
-    from vllm.platforms import current_platform
-
-    if current_platform.is_rocm():
-        from vllm.platforms.rocm import on_gfx1250
-
-        # TODO: Re-enable when tilelang supports gfx1250
-        if on_gfx1250():
-            return False
-    return True
+    # tilelang's libtilelang.so pulls in a libcudart_stub.so that, once loaded,
+    # maps at a lower address than the real libcudart and shadows it in
+    # flashinfer's find_loaded_library() scan -- breaking flashinfer allreduce
+    # (undefined symbol: cudaDeviceReset). Importing flashinfer.comm first caches
+    # the real cudart at its module load, so the later tilelang import can't
+    # poison it. Guarded: flashinfer may be absent in non-CUDA environments.
+    try:
+        import flashinfer.comm  # noqa: F401
+    except Exception:
+        pass
+    return _has_module("tilelang")
 
 
 def has_arctic_inference() -> bool:

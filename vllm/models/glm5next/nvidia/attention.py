@@ -515,16 +515,16 @@ class Glm5NextMLAAttention(nn.Module):
 class Glm5NextLinearAttention(KimiGatedDeltaNetAttention):
     """GLM5-Next KDA layer.
 
-    GLM5-Next KDA checkpoints ship ``linear_attn_config["safe_gate"]``: the 70B
-    sets it ``False`` (gate = ``-exp(A)*softplus(g+g_bias)``, the fused-kernel
-    default), but the 300B VLM sets it ``True`` and requires the bounded gate
-    ``y = lower_bound * sigmoid(exp(A)*(g+g_bias))`` (default ``lower_bound``
-    -5.0 when absent). Without the bounded gate the KDA forget factor is wrong,
-    which corrupts the linear-attention state and degrades generation as the
-    sequence grows. We read ``safe_gate``/``lower_bound`` off the config and
-    expose them as ``self.kda_safe_gate``/``self.kda_lower_bound``, consumed by
-    ``KimiGatedDeltaNetAttention._forward`` to select the gate branch in
-    ``fused_kda_gate`` / ``chunk_kda_with_fused_gate``. Other customizations:
+    The config exposes ``linear_lower_bound``: when set, the bounded gate
+    ``y = lower_bound * sigmoid(exp(A)*(g+g_bias))`` is used (default
+    ``lower_bound`` -5.0); otherwise the unbounded fused-kernel default
+    ``gate = -exp(A)*softplus(g+g_bias)`` is used. Without the bounded gate the
+    KDA forget factor is wrong, which corrupts the linear-attention state and
+    degrades generation as the sequence grows. We read ``linear_lower_bound``
+    off the config and expose it as ``self.kda_safe_gate``/
+    ``self.kda_lower_bound``, consumed by ``KimiGatedDeltaNetAttention._forward``
+    to select the gate branch in ``fused_kda_gate`` /
+    ``chunk_kda_with_fused_gate``. Other customizations:
 
     - KDA projections are kept BF16 even in FP8 checkpoints (no
       ``weight_scale_inv`` is stored for them), so the quant config is stripped
@@ -552,16 +552,23 @@ class Glm5NextLinearAttention(KimiGatedDeltaNetAttention):
         finally:
             vllm_config.quant_config = saved_quant
 
-        # KDA gate variant: read safe_gate/lower_bound (matching SGlang's
-        # `self.attn.lower_bound = linear_attn_config.get("lower_bound", -5.0)`
-        # gated on safe_gate). Consumed by KimiGatedDeltaNetAttention._forward.
-        linear_attn_config = getattr(config, "linear_attn_config", None) or {}
-        if linear_attn_config.get("safe_gate", True):
+        # KDA bounded-gate variant. The new schema flattens lower_bound to
+        # linear_lower_bound (safe_gate is dropped -- the bounded gate is always
+        # used when linear_lower_bound is set). Fall back to the legacy
+        # linear_attn_config dict for older checkpoints. Consumed by
+        # KimiGatedDeltaNetAttention._forward.
+        linear_lower_bound = getattr(config, "linear_lower_bound", None)
+        if linear_lower_bound is not None:
             self.kda_safe_gate = True
-            self.kda_lower_bound = linear_attn_config.get("lower_bound", -5.0)
+            self.kda_lower_bound = linear_lower_bound
         else:
-            self.kda_safe_gate = False
-            self.kda_lower_bound = -5.0
+            legacy = getattr(config, "linear_attn_config", None) or {}
+            if legacy.get("safe_gate", True):
+                self.kda_safe_gate = True
+                self.kda_lower_bound = legacy.get("lower_bound", -5.0)
+            else:
+                self.kda_safe_gate = False
+                self.kda_lower_bound = -5.0
 
         # checkpoint A_log is 1-D (num_heads,); upstream loader assumes 4-D.
         def a_log_weight_loader(param: torch.Tensor, loaded_weight: torch.Tensor):

@@ -331,7 +331,7 @@ class Glm5NextDecoderLayer(nn.Module):
         if (
             self.is_moe
             and self.num_experts is not None
-            and layer_idx >= config.first_k_dense_replace
+            and config.mlp_layer_types[layer_idx] == "sparse"
         ):
             self.mlp = Glm5NextMoE(
                 config=config,
@@ -827,9 +827,9 @@ class Glm5NextForCausalLM(
         )
         return MambaStateShapeCalculator.kda_state_shape(
             tp_size,
-            hf_config.linear_attn_config["num_heads"],
-            hf_config.linear_attn_config["head_dim"],
-            conv_kernel_size=hf_config.linear_attn_config["short_conv_kernel_size"],
+            hf_config.linear_num_heads,
+            hf_config.linear_head_dim,
+            conv_kernel_size=hf_config.linear_conv_kernel_dim,
             num_spec=num_spec,
         )
 
