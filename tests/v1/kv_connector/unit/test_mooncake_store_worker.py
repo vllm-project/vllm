@@ -655,6 +655,68 @@ def test_store_sending_thread_delta_saves_only_new_masked_chunks():
     assert masked_hashes == [b"a2".hex()]
 
 
+def test_store_sending_thread_prepares_missing_chunks_once_per_group():
+    store = MagicMock()
+    store.batch_is_exist.return_value = [0, 1, 0, 1, 0, 0]
+    store.batch_put_from_multi_buffers.return_value = [256, 256, 512, 512]
+    coord = SimpleNamespace(
+        lcm_block_size=16,
+        store_mask=lambda token_len, start_token, num_prompt_tokens=None: (
+            None,
+            None,
+        ),
+    )
+
+    db0 = ChunkedTokenDatabase(
+        KeyMetadata("test-model", 0, 0, 0, 0, group_id=0),
+        block_size=16,
+    )
+    db0.set_kv_caches_base_addr([0x1000])
+    db0.set_block_len([256])
+    db0.prepare_values = MagicMock(wraps=db0.prepare_values)
+    db0.prepare_value = MagicMock(side_effect=AssertionError("scalar path called"))
+
+    db1 = ChunkedTokenDatabase(
+        KeyMetadata("test-model", 0, 0, 0, 0, group_id=1),
+        block_size=16,
+    )
+    db1.set_kv_caches_base_addr([0x2000])
+    db1.set_block_len([512])
+    db1.prepare_values = MagicMock(wraps=db1.prepare_values)
+    db1.prepare_value = MagicMock(side_effect=AssertionError("scalar path called"))
+
+    thread = _make_store_sending_thread(
+        store,
+        coord=coord,
+        token_databases=[db0, db1],
+    )
+    thread.add_stored_request("req-a")
+    thread._handle_request(
+        ReqMeta(
+            req_id="req-a",
+            token_len_chunk=48,
+            block_ids=([0, 1, 2], [2, 1, 0]),
+            block_hashes=[b"a0", b"a1", b"a2"],
+            can_save=True,
+        )
+    )
+
+    db0.prepare_value.assert_not_called()
+    db1.prepare_value.assert_not_called()
+    db0.prepare_values.assert_called_once_with([(0, 16), (32, 48)], [0, 1, 2])
+    db1.prepare_values.assert_called_once_with([(16, 32), (32, 48)], [2, 1, 0])
+
+    keys, addrs, sizes, _ = store.batch_put_from_multi_buffers.call_args.args
+    assert [key.rsplit("@", 1)[-1] for key in keys] == [
+        "6130",
+        "6132",
+        "6131",
+        "6132",
+    ]
+    assert addrs == [[0x1000], [0x1200], [0x2200], [0x2000]]
+    assert sizes == [[256], [256], [512], [512]]
+
+
 def test_store_sending_thread_only_skips_on_no_available_handle():
     store = MagicMock()
     store.batch_is_exist.side_effect = lambda keys: [0] * len(keys)
