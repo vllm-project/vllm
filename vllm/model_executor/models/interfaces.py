@@ -620,6 +620,15 @@ def _supports_lora(model: type[object] | object) -> bool:
     return isinstance(model, SupportsLoRA)
 
 
+class _MakeEmptyIntermediateTensors(Protocol):
+    def __call__(
+        self,
+        batch_size: int,
+        dtype: torch.dtype,
+        device: torch.device,
+    ) -> "IntermediateTensors": ...
+
+
 @runtime_checkable
 class SupportsPP(Protocol):
     """The interface required for all models that support pipeline parallel."""
@@ -633,9 +642,7 @@ class SupportsPP(Protocol):
         MRO of your model class.
     """
 
-    make_empty_intermediate_tensors: Callable[
-        [int, torch.dtype, torch.device], "IntermediateTensors"
-    ]
+    make_empty_intermediate_tensors: _MakeEmptyIntermediateTensors
     """Called when PP rank > 0 for profiling purposes."""
 
     def forward(
@@ -661,9 +668,7 @@ class SupportsPP(Protocol):
 class _SupportsPPType(Protocol):
     supports_pp: Literal[True]
 
-    make_empty_intermediate_tensors: Callable[
-        [int, torch.dtype, torch.device], "IntermediateTensors"
-    ]
+    make_empty_intermediate_tensors: _MakeEmptyIntermediateTensors
 
     def forward(
         self,
