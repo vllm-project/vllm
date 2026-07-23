@@ -3,7 +3,9 @@
 import numpy as np
 import torch
 
+from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import SupportsMultiModal, supports_realtime
+from vllm.multimodal.encoder_budget import MultiModalBudget
 from vllm.multimodal.inputs import MultiModalKwargsItem
 from vllm.multimodal.utils import (
     get_mm_features_in_window,
@@ -12,6 +14,8 @@ from vllm.multimodal.utils import (
 )
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.utils import sanity_check_mm_encoder_outputs
+
+logger = init_logger(__name__)
 
 
 class EncoderRunner:
@@ -51,6 +55,45 @@ class EncoderRunner:
                 mm_kwargs.append((mm_feature.modality, mm_feature.data))
 
         return mm_hashes, mm_kwargs
+
+    @torch.inference_mode()
+    def profile_encoder_cache(
+        self,
+        dummy_mm_inputs: list[tuple[str, MultiModalKwargsItem]],
+        budget: MultiModalBudget,
+    ) -> None:
+        """Profile multimodal encoder and temporary encoder cache memory."""
+        if (encoder_budget := budget.get_encoder_budget()) <= 0:
+            return
+
+        if not budget.mm_max_toks_per_item:
+            logger.info(
+                "Skipping encoder profiling for embedding-only mode "
+                "(all modality limits=0 with enable_mm_embeds=True).",
+            )
+            return
+
+        assert dummy_mm_inputs, "Dummy inputs should be generated for encoder profiling"
+        dummy_modality = dummy_mm_inputs[0][0]
+        max_mm_items_per_batch = len(dummy_mm_inputs)
+
+        logger.info_once(
+            "Encoder cache will be initialized with a budget of %s tokens, "
+            "and profiled with %s %s items of the maximum feature size.",
+            encoder_budget,
+            max_mm_items_per_batch,
+            dummy_modality,
+        )
+
+        dummy_encoder_outputs = self.execute_mm_encoder(dummy_mm_inputs)
+
+        sanity_check_mm_encoder_outputs(
+            dummy_encoder_outputs,
+            expected_num_items=max_mm_items_per_batch,
+        )
+        self.encoder_cache.encoder_outputs.update(
+            (f"tmp_{i}", output) for i, output in enumerate(dummy_encoder_outputs)
+        )
 
     @torch.inference_mode()
     def execute_mm_encoder(
