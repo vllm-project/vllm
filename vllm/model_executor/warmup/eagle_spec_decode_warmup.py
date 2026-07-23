@@ -90,7 +90,7 @@ def _warmup_eagle_prepare_next_token_kernel(
 
     combos = list(itertools.product(*int_param_choices))
     total = len(BLOCK_SIZES) * len(combos)
-    logger.info(
+    logger.debug(
         "Warming up eagle_prepare_next_token_padded_kernel: "
         "%d BLOCK_SIZE × %d int combos = %d entries",
         len(BLOCK_SIZES),
@@ -147,7 +147,7 @@ def _warmup_eagle_prepare_inputs_kernel(device: str) -> None:
     from vllm.v1.spec_decode.utils import eagle_prepare_inputs_padded_kernel
 
     NUM_REQS_VALUES = [1, 50]
-    logger.info(
+    logger.debug(
         "Warming up eagle_prepare_inputs_padded_kernel: %d int combos",
         len(NUM_REQS_VALUES),
     )
@@ -251,7 +251,7 @@ def _warmup_eagle_step_slot_mapping_metadata_kernel(
     combos = list(itertools.product(*int_param_choices))
 
     total = len(n_blocks_candidates) * len(combos)
-    logger.info(
+    logger.debug(
         "Warming up eagle_step_slot_mapping_metadata_kernel: "
         "%d n_blocks_per_req × %d int combos = %d entries "
         "(cp_factors=%s, hybrid_factors=%s)",
