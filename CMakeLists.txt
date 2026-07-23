@@ -68,8 +68,8 @@ endif()
 # requirements.txt files and should be kept consistent.  The ROCm torch
 # versions are derived from docker/Dockerfile.rocm
 #
-set(TORCH_SUPPORTED_VERSION_CUDA "2.11.0")
-set(TORCH_SUPPORTED_VERSION_ROCM "2.11.0")
+set(TORCH_SUPPORTED_VERSION_CUDA "2.13.0")
+set(TORCH_SUPPORTED_VERSION_ROCM "2.13.0")
 # TORCH_NIGHTLY=1 builds run against unpinned nightly wheels, so the supported-
 # version check would always warn. Only treat it as a nightly build when the
 # value is exactly "1" (the bootstrap exports TORCH_NIGHTLY=0 by default, which
@@ -1364,6 +1364,7 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
   set(VLLM_ROCM_EXT_SRC
     "csrc/rocm/torch_bindings.cpp"
     "csrc/rocm/skinny_gemms.cu"
+    "csrc/rocm/skinny_gemms_int4.cu"
     "csrc/rocm/attention.cu")
 
   set(VLLM_ROCM_HAS_GFX1100 OFF)
@@ -1407,6 +1408,7 @@ if (VLLM_GPU_LANG STREQUAL "CUDA")
     include(cmake/external_projects/fmha_sm100.cmake)
     include(cmake/external_projects/flashmla.cmake)
     include(cmake/external_projects/qutlass.cmake)
+    include(cmake/external_projects/tml_fa4.cmake)
 
     # vllm-flash-attn should be last as it overwrites some CMake functions
     include(cmake/external_projects/vllm_flash_attn.cmake)

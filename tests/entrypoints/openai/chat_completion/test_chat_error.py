@@ -515,3 +515,15 @@ def test_structured_outputs_structural_tag_invalid(structural_tag):
             messages=[{"role": "user", "content": "hello"}],
             structured_outputs={"structural_tag": structural_tag},
         )
+
+
+@pytest.mark.parametrize("field_name", ["prompt_logprobs", "top_logprobs"])
+def test_non_numeric_logprobs_rejected(field_name):
+    """A non-numeric logprobs value must be a clean 400 validation error, not a
+    TypeError from the mode='before' comparison (which surfaces as HTTP 500)."""
+    with pytest.raises(ValidationError, match=f"`{field_name}` must be an integer"):
+        ChatCompletionRequest(
+            model=MODEL_NAME,
+            messages=[{"role": "user", "content": "hello"}],
+            **{field_name: "2"},
+        )
