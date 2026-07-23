@@ -1938,7 +1938,7 @@ steps:
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_1
-  parallelism: 4
+  parallelism: 5
   optional: true
   working_dir: "/vllm-workspace/"
   source_file_dependencies:
