@@ -9,6 +9,7 @@ import torch
 from torch.nn.parameter import UninitializedParameter
 
 import vllm.model_executor.model_loader.reload.meta as reload_meta
+from vllm.model_executor.layers.attention import MMEncoderAttention
 from vllm.model_executor.layers.linear import QKVParallelLinear
 from vllm.model_executor.model_loader.reload.layerwise import (
     finalize_layerwise_reload,
@@ -99,6 +100,17 @@ class _NonPersistentBufferLayer(torch.nn.Module):
         self.register_buffer("scale", torch.tensor(0.25), persistent=False)
 
 
+class _ReloadableMMEncoderAttention(MMEncoderAttention):
+    def __init__(self):
+        torch.nn.Module.__init__(self)
+        self.weight = torch.nn.Parameter(torch.ones(2, 2))
+        self.weight.weight_loader = default_weight_loader
+        self.post_load_called = False
+
+    def process_weights_after_loading(self, act_dtype: torch.dtype) -> None:
+        self.post_load_called = True
+
+
 def test_move_metatensors():
     tensor = torch.empty((1, 2, 3))
     meta_tensor = to_meta_tensor(tensor)
@@ -111,6 +123,23 @@ def test_move_metatensors():
     assert tensor.shape == meta_tensor.shape == materialized_tensor.shape
     assert tensor.__class__ == meta_tensor.__class__ == materialized_tensor.__class__
     assert tensor.__dict__ == meta_tensor.__dict__ == materialized_tensor.__dict__
+
+
+def test_mm_encoder_attention_reload_defers_post_load(default_vllm_config):
+    layer = _ReloadableMMEncoderAttention()
+    model = torch.nn.Sequential(layer)
+    loaded_weight = torch.full_like(layer.weight, 7.0)
+
+    record_metadata_for_reloading(model)
+    initialize_layerwise_reload(model)
+    layer.weight.weight_loader(layer.weight, loaded_weight)
+
+    assert not layer.post_load_called
+
+    finalize_layerwise_reload(model, default_vllm_config.model_config)
+
+    assert layer.post_load_called
+    assert torch.equal(layer.weight, loaded_weight)
 
 
 def test_reload_lifecycle():
