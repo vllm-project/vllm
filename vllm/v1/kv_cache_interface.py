@@ -932,6 +932,7 @@ class KVCacheTensor:
     shared_by: list[str]  # layer names that share the same KV cache tensor
     offset: int = 0  # byte offset of this layer within a contiguous block
     block_stride: int = 0  # total bytes per block in a packed layout (0 = not packed)
+    host_resident: bool = False  # allocate in host rather than device memory
 
 
 @dataclass

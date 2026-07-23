@@ -14,7 +14,6 @@ from typing import Any, NamedTuple, NewType, TypeAlias, cast, overload
 
 from vllm import envs
 from vllm.config import VllmConfig
-from vllm.config.attention import is_hisparse_host_layer
 from vllm.logger import init_logger
 from vllm.utils.hashing import sha256_cbor, xxhash_cbor
 from vllm.utils.math_utils import cdiv, round_up
@@ -1346,6 +1345,10 @@ def _hisparse_host_pool_bytes(vllm_config: VllmConfig) -> int | None:
     return int(config.host_pool_gib * 2**30)
 
 
+def _is_hisparse_host_layer(layer_name: str) -> bool:
+    return ".indexer" not in layer_name
+
+
 def _hisparse_gpu_host_usage_split(
     vllm_config: VllmConfig,
     kv_cache_groups: list[KVCacheGroupSpec],
@@ -1368,14 +1371,14 @@ def _hisparse_gpu_host_usage_split(
     host_bytes = sum(
         spec.max_memory_usage_bytes(vllm_config)
         for name, spec in per_layer_specs.items()
-        if is_hisparse_host_layer(name)
+        if _is_hisparse_host_layer(name)
     )
     if host_bytes == 0:
         return None
     gpu_bytes = sum(
         spec.max_memory_usage_bytes(vllm_config)
         for name, spec in per_layer_specs.items()
-        if not is_hisparse_host_layer(name)
+        if not _is_hisparse_host_layer(name)
     )
     return gpu_bytes, host_bytes
 
@@ -1418,12 +1421,12 @@ def get_kv_cache_config_from_groups(
             host_page = sum(
                 spec.page_size_bytes
                 for name, spec in specs.items()
-                if is_hisparse_host_layer(name)
+                if _is_hisparse_host_layer(name)
             )
             gpu_page = sum(
                 spec.page_size_bytes
                 for name, spec in specs.items()
-                if not is_hisparse_host_layer(name)
+                if not _is_hisparse_host_layer(name)
             )
             assert host_page > 0, "HiSparse host-resident mode requires MLA KV layers."
             num_blocks = hisparse_host_budget // host_page
@@ -1477,6 +1480,10 @@ def get_kv_cache_config_from_groups(
             KVCacheTensor(
                 size=per_layer_specs[layer_name].page_size_bytes * num_blocks,
                 shared_by=[layer_name],
+                host_resident=(
+                    hisparse_host_budget is not None
+                    and _is_hisparse_host_layer(layer_name)
+                ),
             )
             for layer_name in kv_cache_groups[0].layer_names
         ]

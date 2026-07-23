@@ -12,7 +12,6 @@ from vllm.config import (
     get_layers_from_vllm_config,
     set_current_vllm_config,
 )
-from vllm.config.attention import is_hisparse_host_layer
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
@@ -185,16 +184,14 @@ def _allocate_kv_cache(
         host_bytes = sum(
             tensor.size
             for tensor in kv_cache_config.kv_cache_tensors
-            if all(is_hisparse_host_layer(name) for name in tensor.shared_by)
+            if tensor.host_resident
         )
         check_hisparse_host_memory(vllm_config, host_bytes)
 
     kv_cache_raw_tensors: dict[str, torch.Tensor] = {}
     packed_backing: torch.Tensor | None = None
     for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
-        if use_hisparse and all(
-            is_hisparse_host_layer(name) for name in kv_cache_tensor.shared_by
-        ):
+        if kv_cache_tensor.host_resident:
             tensor = allocate_pinned_host_pool(kv_cache_tensor.size)
         elif kv_cache_tensor.block_stride > 0:
             # Allocate once; all packed tensors alias the same backing.
