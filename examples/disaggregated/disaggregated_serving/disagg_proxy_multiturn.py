@@ -35,11 +35,35 @@ Conversation isolation:
     the JSON body) to scope the KV cache across turns. Without it, the
     proxy cannot link turns and falls back to no-cache behavior.
 
+    ``conversation_id`` is a non-standard extension to the OpenAI Chat
+    Completions schema, consumed by this proxy and not forwarded to the
+    vLLM engine. Strict OpenAI-compatible frontends reject unknown
+    fields, so clients must opt in only when targeting this proxy.
+
 Usage:
     python disagg_proxy_multiturn.py \\
         --host 0.0.0.0 --port 8000 \\
         --prefiller-host 10.0.0.1 --prefiller-port 8100 \\
         --decoder-host 10.0.0.2 --decoder-port 8200
+
+Benchmarking:
+    Use ``benchmarks/multi_turn/benchmark_serving_multi_turn.py`` with
+    the ``--send-conversation-id`` flag to inject a per-conversation
+    ``conversation_id`` into every request so this proxy can key
+    cross-turn KV cache reuse. The flag is *off by default*: without
+    it the benchmark sends OpenAI-schema-compliant payloads and every
+    turn lands as a cache MISS in this proxy.
+
+    Example:
+        python benchmarks/multi_turn/benchmark_serving_multi_turn.py \\
+            --model <MODEL> --served-model-name <NAME> \\
+            --url http://<proxy_host>:8000 \\
+            --input-file generate_multi_turn.json \\
+            --num-clients 2 --max-active-conversations 6 \\
+            --send-conversation-id
+
+    See ``docs/features/nixl_connector_usage.md`` for the broader
+    bidirectional-KV-transfer setup these benchmarks exercise.
 
 Dependencies:
     pip install fastapi uvicorn httpx
@@ -373,7 +397,9 @@ async def _handle_request(api_path: str, request: Request):
         logger.warning(
             "[%s] No conversation_id provided — KV cache reuse disabled "
             "for this request. Add a 'conversation_id' field to enable "
-            "cross-turn KV sharing.",
+            "cross-turn KV sharing. When using "
+            "benchmarks/multi_turn/benchmark_serving_multi_turn.py, pass "
+            "--send-conversation-id (off by default).",
             request_id,
         )
 

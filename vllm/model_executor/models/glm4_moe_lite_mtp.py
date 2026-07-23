@@ -33,7 +33,7 @@ from transformers import PretrainedConfig
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.fused_moe import (
-    FusedMoE,
+    MoERunner,
     fused_moe_make_expert_params_mapping,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -54,10 +54,9 @@ from .glm4_moe_lite import (
     Glm4MixtureOfExperts,
     Glm4MoeLite,
     Glm4MoeLiteDecoderLayer,
-    get_spec_layer_idx_from_weight_name,
 )
 from .interfaces import SupportsPP
-from .utils import maybe_prefix
+from .utils import get_spec_layer_idx_from_weight_name, maybe_prefix
 
 
 class SharedHead(nn.Module):
@@ -209,13 +208,11 @@ class Glm4MoeLiteMTP(nn.Module, SupportsPP, Glm4MixtureOfExperts):
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
 
-        self.expert_weights = []
-
         # Set MoE hyperparameters
         self.num_moe_layers = self.config.num_nextn_predict_layers
         self.num_expert_groups = self.config.n_group
 
-        self.moe_layers: list[FusedMoE] = []
+        self.moe_layers: list[MoERunner] = []
         self.moe_mlp_layers: list[Glm4MoeLite] = []
         example_moe = None
         for layer in self.model.layers.values():

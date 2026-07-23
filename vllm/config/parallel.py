@@ -42,7 +42,9 @@ All2AllBackend = Literal[
     "pplx",
     "deepep_high_throughput",
     "deepep_low_latency",
-    "mori",
+    "deepep_v2",
+    "mori_high_throughput",
+    "mori_low_latency",
     "nixl_ep",
     "allgather_reducescatter",
     "flashinfer_all2allv",  # temporary alias for flashinfer_nvlink_two_sided
@@ -77,7 +79,7 @@ class EPLBConfig:
     """
     Interval for logging the balancedness.
     """
-    use_async: bool = False
+    use_async: bool = True
     """
     Whether to use non-blocking EPLB.
     """
@@ -90,15 +92,22 @@ class EPLBConfig:
     Backend for EPLB expert weight communication:
     - "torch_nccl": Use torch.distributed on the device process group
     - "torch_gloo": Use torch.distributed gloo with CPU staging
-    - "nixl": Use NIXL/ RIXL with staged send/recv buffers
+    - "nixl": Use NIXL with staged send/recv buffers
     - "pynccl": Use PyNccl send/recv
-    - None: Auto-select backend ("torch_gloo" for async, "torch_nccl" for sync)
+    - None: Auto-select backend (prefers "nixl", falls back to "torch_gloo")
     """
 
     @model_validator(mode="after")
     def _validate_eplb_config(self) -> Self:
         if self.use_async and self.policy != "default":
             raise ValueError("Async EPLB is only supported with the default policy.")
+        if self.use_async and self.communicator in ("torch_nccl", "pynccl"):
+            raise ValueError(
+                f"{self.communicator} communicator is incompatible with "
+                "async EPLB due to NCCL multi-stream conflicts. Use "
+                "'torch_gloo' or 'nixl' instead, or leave communicator "
+                "unset for automatic selection."
+            )
         if self.log_balancedness and self.log_balancedness_interval <= 0:
             raise ValueError("log_balancedness_interval must be greater than 0.")
         return self
@@ -108,22 +117,25 @@ class EPLBConfig:
 class ParallelConfig:
     """Configuration for the distributed execution."""
 
-    pipeline_parallel_size: int = 1
+    pipeline_parallel_size: int = Field(default=1, ge=1)
     """Number of pipeline parallel groups."""
-    tensor_parallel_size: int = 1
+    tensor_parallel_size: int = Field(default=1, ge=1)
     """Number of tensor parallel groups."""
-    prefill_context_parallel_size: int = 1
-    """Number of prefill context parallel groups."""
-    data_parallel_size: int = 1
+    prefill_context_parallel_size: int = Field(default=1, ge=1)
+    """Number of ranks that split prefill sequence computation. PCP expands
+    the process world size but does not increase the KV-cache shard count."""
+    data_parallel_size: int = Field(default=1, ge=1)
     """Number of data parallel groups. MoE layers will be sharded according to
-    the product of the tensor parallel size and data parallel size."""
-    data_parallel_size_local: int = 1
-    """Number of local data parallel groups."""
-    data_parallel_rank: int = 0
-    """Rank of the data parallel group."""
+    the product of the tensor, prefill-context, and data parallel sizes."""
+    data_parallel_size_local: int = Field(default=1, ge=0)
+    """Number of local data parallel groups. A value of 0 is a sentinel used by
+    the engine-args layer to signal that data parallelism was specified
+    externally (see `ParallelConfig.__post_init__`)."""
+    data_parallel_rank: int = Field(default=0, ge=0)
+    """Rank of the data parallel group. The runtime check at
+    ``__post_init__`` further bounds this by ``data_parallel_size``."""
     data_parallel_rank_local: int | None = None
-    """Local rank of the data parallel group,
-    set only in SPMD mode."""
+    """Local rank of the data parallel group, set only in SPMD mode."""
     data_parallel_master_ip: str = "127.0.0.1"
     """IP of the data parallel master."""
     data_parallel_rpc_port: int = 29550
@@ -177,12 +189,13 @@ class ParallelConfig:
     - "allgather_reducescatter": All2all based on allgather and reducescatter
     - "deepep_high_throughput": Use deepep high-throughput kernels
     - "deepep_low_latency": Use deepep low-latency kernels
-    - "mori": Use mori kernels
+    - "mori_high_throughput": MoRI EP with InterNodeV1 for multi-node
+    - "mori_low_latency": MoRI EP with InterNodeV1LL for multi-node
     - "nixl_ep": Use nixl-ep kernels
     - "flashinfer_nvlink_two_sided": Use flashinfer two-sided kernels for mnnvl
     - "flashinfer_nvlink_one_sided": Use flashinfer high-throughput a2a kernels"""
 
-    max_parallel_loading_workers: int | None = None
+    max_parallel_loading_workers: int | None = Field(default=None, ge=1)
     """Maximum number of parallel loading workers when loading model
     sequentially in multiple batches. To avoid RAM OOM when using tensor
     parallel and large models."""
@@ -195,15 +208,15 @@ class ParallelConfig:
 
     enable_dbo: bool = False
     """Enable dual batch overlap for the model executor."""
-    ubatch_size: int = 0
+    ubatch_size: int = Field(default=0, ge=0)
     """Number of ubatch size."""
 
-    dbo_decode_token_threshold: int = 32
+    dbo_decode_token_threshold: int = Field(default=32, ge=0)
     """The threshold for dual batch overlap for batches only containing decodes.
     If the number of tokens in the request is greater than this threshold,
     microbatching will be used. Otherwise, the request will be processed in a
     single batch."""
-    dbo_prefill_token_threshold: int = 512  # TODO(lucas): tune
+    dbo_prefill_token_threshold: int = Field(default=512, ge=0)  # TODO(lucas): tune
     """The threshold for dual batch overlap for batches that contain one or more
     prefills. If the number of tokens in the request is greater than this
     threshold, microbatching will be used. Otherwise, the request will be
@@ -258,14 +271,19 @@ class ParallelConfig:
     master_port: int = 29501
     """distributed master port for multi-node distributed 
     inference when distributed_executor_backend is mp."""
-    node_rank: int = 0
-    """distributed node rank for multi-node distributed 
+    node_rank: int = Field(default=0, ge=0)
+    """distributed node rank for multi-node distributed
     inference when distributed_executor_backend is mp."""
-    nnodes: int = 1
+    nnodes: int = Field(default=1, ge=1)
     """num of nodes for multi-node distributed
     inference when distributed_executor_backend is mp."""
     numa_bind: bool = False
-    """Enable NUMA binding for GPU worker subprocesses."""
+    """Enable NUMA binding for GPU worker subprocesses.
+
+    By default, workers are pinned to their GPU's NUMA-local CPUs and
+    memory; on PCT-capable Xeons they also auto-bind to the SKU's
+    PCT priority cores.
+    """
     numa_bind_nodes: list[int] | None = None
     """NUMA node to bind each GPU worker to.
 
@@ -285,12 +303,24 @@ class ParallelConfig:
     Each entry must use `numactl --physcpubind` CPU-list syntax, for example
     `"0-3"` or `"0,2,4-7"`.
     """
+    assigned_physical_gpu_ids: list[int] | None = None
+    """Mapping from vLLM-local logical GPU IDs to physical GPU IDs.
+
+    For example, ``[2, 3]`` means logical GPU 0 maps to physical GPU 2,
+    and logical GPU 1 maps to physical GPU 3. Physical IDs are used only
+    at platform/topology boundaries such as NVML, NIC affinity, P2P
+    checks, and final CUDA device selection when needed. When None,
+    logical IDs map to visible device IDs in order."""
 
     distributed_timeout_seconds: int | None = None
     """Timeout in seconds for distributed operations (e.g., init_process_group).
     If set, this value is passed to torch.distributed.init_process_group as the
     timeout parameter. If None, PyTorch's default timeout is used (600s for NCCL).
     Increase this for multi-node setups where model downloads may be slow."""
+
+    cpu_distributed_timeout_seconds: int | None = None
+    """Timeout (in seconds) for cpu communication groups. If None, PyTorch's
+    default timeout is used (1800s for gloo)."""
 
     world_size: int = Field(init=False)
     """world_size is TPxPP, it affects the number of workers we create."""
@@ -307,10 +337,10 @@ class ParallelConfig:
     """Port of the coordination TCPStore. Can be set by the API server; workers
     connect as clients to exchange self-picked group ports at runtime."""
 
-    decode_context_parallel_size: int = 1
-    """Number of decode context parallel groups, because the world size does
-    not change by dcp, it simply reuse the GPUs of TP group, and tp_size
-    needs to be divisible by dcp_size."""
+    decode_context_parallel_size: int = Field(default=1, ge=1)
+    """Number of ranks that shard the decode KV cache. DCP does not expand
+    the process world size. Without PCP, DCP reuses TP ranks. With PCP, DCP
+    either spans the PCP axis or the full TP x PCP block."""
 
     dcp_kv_cache_interleave_size: int = 1
     """
@@ -328,13 +358,11 @@ class ParallelConfig:
     """
 
     cp_kv_cache_interleave_size: int = 1
-    """Interleave size of kv_cache storage while using DCP or PCP.
-    For `total_cp_rank = pcp_rank * dcp_world_size + dcp_rank`,
-        and `total_cp_world_size = pcp_world_size * dcp_world_size`.
-    store interleave_size tokens on total_cp_rank i,
-    then store next interleave_size tokens on total_cp_rank i+1.
+    """Interleave size of kv_cache storage while using DCP.
+    Store interleave_size tokens on dcp_rank i, then store next
+    interleave_size tokens on dcp_rank i+1.
     Interleave_size=1: token-level alignment, where token `i` is stored on
-        total_cp_rank `i % total_cp_world_size`.
+        dcp_rank `i % dcp_world_size`.
     Interleave_size=block_size: block-level alignment, where tokens are
         first populated to the preceding ranks. Tokens are then stored
         in (rank i+1, block j) only after (rank i, block j) is fully occupied.
@@ -451,11 +479,19 @@ class ParallelConfig:
                 )
             if not self.enable_expert_parallel:
                 raise ValueError("enable_expert_parallel must be True to use EPLB.")
-            if self.tensor_parallel_size * self.data_parallel_size <= 1:
+            # The EP group spans the TP x PCP x DP ranks. EPLB therefore needs
+            # TP, PCP, or DP > 1.
+            if (
+                self.tensor_parallel_size
+                * self.prefill_context_parallel_size
+                * self.data_parallel_size
+                <= 1
+            ):
                 raise ValueError(
-                    "EPLB requires tensor_parallel_size or data_parallel_size "
-                    f"to be greater than 1, but got "
-                    f"TP={self.tensor_parallel_size},DP={self.data_parallel_size}."
+                    "EPLB requires tensor, prefill-context, or data parallelism, "
+                    f"but got TP={self.tensor_parallel_size}, "
+                    f"PCP={self.prefill_context_parallel_size}, "
+                    f"DP={self.data_parallel_size}."
                 )
         else:
             if self.eplb_config.num_redundant_experts != 0:
@@ -466,15 +502,21 @@ class ParallelConfig:
                     "num_redundant_experts."
                 )
 
-        # Note(hc): In the current implementation of decode context
-        # parallel(DCP), tp_size needs to be divisible by dcp_size,
-        # because the world size does not change by dcp, it simply
-        # reuses the GPUs of TP group, and split one TP group into
-        # tp_size//dcp_size DCP groups.
-        if self.tensor_parallel_size % self.decode_context_parallel_size != 0:
+        tp = self.tensor_parallel_size
+        pcp = self.prefill_context_parallel_size
+        dcp = self.decode_context_parallel_size
+        if pcp > 1 and self.data_parallel_size > 1:
+            raise ValueError("PCP does not support data parallelism yet.")
+        if pcp == 1:
+            # DCP reuses the TP ranks when PCP is disabled.
+            if tp % dcp != 0:
+                raise ValueError(f"tp_size={tp} must be divisible by dcp_size={dcp}.")
+        elif dcp not in (1, pcp, tp * pcp):
             raise ValueError(
-                f"tp_size={self.tensor_parallel_size} must be divisible by"
-                f"dcp_size={self.decode_context_parallel_size}."
+                "When PCP is enabled, DCP must be disabled, span the PCP "
+                "axis, or span the full TP x PCP axis. "
+                f"Got TP={tp}, PCP={pcp}, DCP={dcp}; valid DCP sizes are "
+                f"{sorted({1, pcp, tp * pcp})}."
             )
 
         if self.dcp_comm_backend == "a2a" and self.decode_context_parallel_size <= 1:
@@ -486,8 +528,7 @@ class ParallelConfig:
 
     @property
     def world_size_across_dp(self) -> int:
-        """world_size_across_dp is TPxPPxDP, it is the size of the world
-        including data parallelism."""
+        """Process world size across TP, PCP, PP, and DP."""
         return self.world_size * self.data_parallel_size
 
     @property
@@ -603,8 +644,8 @@ class ParallelConfig:
 
     # The all_reduce at the end of attention (during o_proj) means that
     # inputs are replicated across each rank of the tensor parallel group.
-    # If using expert-parallelism with DeepEP All2All ops, replicated
-    # tokens results in useless duplicate computation and communication.
+    # If using expert-parallelism, replicated tokens results in useless
+    # duplicate computation and communication.
     #
     # In this case, ensure the input to the experts is sequence parallel
     # to avoid the excess work.
@@ -617,7 +658,8 @@ class ParallelConfig:
                 "allgather_reducescatter",
                 "deepep_high_throughput",
                 "deepep_low_latency",
-                "mori",
+                "mori_high_throughput",
+                "mori_low_latency",
                 "nixl_ep",
             )
             and self.enable_expert_parallel
@@ -750,6 +792,7 @@ class ParallelConfig:
             "numa_bind",
             "numa_bind_nodes",
             "numa_bind_cpus",
+            "assigned_physical_gpu_ids",
         }
 
         from vllm.config.utils import get_hash_factors, hash_factors
@@ -783,6 +826,15 @@ class ParallelConfig:
                     "or data_parallel_hybrid_lb. Elastic EP relies on a single API "
                     "server and core client to coordinate scale up/down."
                 )
+            if self.eplb_config.use_async:
+                from vllm.distributed.nixl_utils import is_nixl_available
+
+                if not is_nixl_available():
+                    raise ValueError(
+                        "Elastic EP with async EPLB requires the NIXL "
+                        "package. Either install NIXL or set "
+                        "--eplb-config.use_async=false."
+                    )
 
         if self.data_parallel_size > 1 or self.data_parallel_size_local == 0:
             # Data parallel was specified in the engine args.
@@ -891,17 +943,21 @@ class ParallelConfig:
             )
 
         if self.enable_eplb and self.eplb_config.communicator is None:
-            if self.enable_elastic_ep:
-                # Elastic EP requires stateless mode
-                # (torch.distributed.batch_isend_irecv doesn't
-                # support stateless mode), so we use PyNCCL backend
+            # Prefer NIXL when available: zero-copy RDMA reads, compatible
+            # with both async EPLB and elastic EP (deferred remote setup).
+            # Fallbacks: pynccl for elastic EP (stateless groups need it),
+            # torch_gloo for static EP.  torch_nccl is avoided because NCCL
+            # is incompatible with async EPLB (multi-stream conflicts) and
+            # batched isend/irecv hangs under high load.
+            # See https://github.com/pytorch/pytorch/issues/174288
+            from vllm.distributed.nixl_utils import is_nixl_available
+
+            if is_nixl_available():
+                self.eplb_config.communicator = "nixl"
+            elif self.enable_elastic_ep:
                 self.eplb_config.communicator = "pynccl"
-            elif self.eplb_config.use_async:
-                # Torch Gloo is a backend that allows avoiding hangs
-                # due to NCCL multi-thread conflicts in async EPLB
-                self.eplb_config.communicator = "torch_gloo"
             else:
-                self.eplb_config.communicator = "torch_nccl"
+                self.eplb_config.communicator = "torch_gloo"
 
     @property
     def use_ray(self) -> bool:

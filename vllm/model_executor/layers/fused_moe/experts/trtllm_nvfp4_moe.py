@@ -16,7 +16,10 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
 )
-from vllm.model_executor.layers.fused_moe.utils import trtllm_moe_pack_topk_ids_weights
+from vllm.model_executor.layers.fused_moe.utils import (
+    fi_moe_largest_bucket,
+    trtllm_moe_pack_topk_ids_weights,
+)
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     activation_to_flashinfer_int,
 )
@@ -30,6 +33,10 @@ from vllm.utils.flashinfer import has_flashinfer_trtllm_fused_moe
 
 logger = init_logger(__name__)
 
+# Base scale for per-token NVFP4 activation quant; the kernel folds the
+# per-token global scale (from the activation amax) on top of it.
+_PER_TOKEN_BASE_GLOBAL_SCALE = 1.0 / (448.0 * 6.0)
+
 
 class TrtLlmNvFp4ExpertsBase:
     """
@@ -40,9 +47,13 @@ class TrtLlmNvFp4ExpertsBase:
         self,
         moe_config: FusedMoEConfig,
         quant_config: FusedMoEQuantConfig,
+        per_token_activation: bool = False,
     ):
         self.moe_config = moe_config
         self.quant_config = quant_config
+        # Quantize the input here (deferred from prepare) to capture a per-token
+        # global scale, instead of a static one.
+        self.per_token_activation = per_token_activation
 
         self.routing_method_type = self.moe_config.routing_method
         self.topk = moe_config.experts_per_token
@@ -66,6 +77,47 @@ class TrtLlmNvFp4ExpertsBase:
         else:
             self.g1_scale_c = self.quant_config.a2_gscale.clone()
 
+        # Fall back to moe_config.swiglu_* when quant_config doesn't carry them
+        # (ModelOpt NVFP4 checkpoints store these on moe_config, not quant_config).
+        device = torch.accelerator.current_device_index()
+
+        def _per_expert(val: float | None) -> torch.Tensor | None:
+            if val is None:
+                return None
+            return torch.full(
+                (self.local_num_experts,),
+                float(val),
+                dtype=torch.float32,
+                device=device,
+            )
+
+        clamp = quant_config.gemm1_clamp_limit
+        if clamp is None:
+            clamp = getattr(moe_config, "swiglu_limit", None)
+        alpha = quant_config.gemm1_alpha
+        if alpha is None:
+            alpha = getattr(moe_config, "swiglu_alpha", None)
+        beta = quant_config.gemm1_beta
+        if beta is None:
+            beta = getattr(moe_config, "swiglu_beta", None)
+
+        if moe_config.is_act_and_mul:
+            self.gemm1_clamp_limit = _per_expert(clamp)
+            self.gemm1_alpha = _per_expert(alpha)
+            self.gemm1_beta = _per_expert(beta)
+        else:
+            self.gemm1_clamp_limit = None
+            self.gemm1_alpha = None
+            self.gemm1_beta = None
+
+        logger.debug_once(
+            "activation=%s, gemm1_alpha=%s, gemm1_beta=%s, gemm1_clamp_limit=%s",
+            moe_config.activation,
+            alpha,
+            beta,
+            clamp,
+        )
+
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         layer.w13_weight_scale_2.data.mul_(layer.w13_input_scale)
         layer.w2_weight_scale_2.data.mul_(layer.w2_input_scale)
@@ -83,6 +135,39 @@ class TrtLlmNvFp4ExpertsBase:
             torch.nn.Parameter(g1_scale_c, requires_grad=False),
         )
         self.g1_scale_c = layer.g1_scale_c
+
+        # Pre-fold the per-expert g1_alphas (= output1_scale_gate_scalar)
+        # division so the TRTLLM kernel receives the raw-GEMM-space clamp
+        # directly. g1_alphas is set once here in process_weights_after_loading
+        # (via the in-place mul above) and never changes again, so this is a
+        # static, per-expert constant. Register on the layer so EPLB
+        # rearranges it alongside the other expert tensors.
+        if self.gemm1_clamp_limit is not None:
+            gemm1_clamp_limit = self.gemm1_clamp_limit / self.quant_config.g1_alphas
+            layer.register_parameter(
+                "gemm1_clamp_limit",
+                torch.nn.Parameter(gemm1_clamp_limit, requires_grad=False),
+            )
+            self.gemm1_clamp_limit = layer.gemm1_clamp_limit
+
+        # beta shifts the raw GEMM1 accumulator, so fold by g1_alphas like the
+        # clamp limit. alpha is applied to the dequantized gate, so it stays
+        # raw. Register both on the layer so EPLB rearranges them with the
+        # other per-expert tensors.
+        if self.gemm1_beta is not None:
+            gemm1_beta = self.gemm1_beta / self.quant_config.g1_alphas
+            layer.register_parameter(
+                "gemm1_beta",
+                torch.nn.Parameter(gemm1_beta, requires_grad=False),
+            )
+            self.gemm1_beta = layer.gemm1_beta
+
+        if self.gemm1_alpha is not None:
+            layer.register_parameter(
+                "gemm1_alpha",
+                torch.nn.Parameter(self.gemm1_alpha, requires_grad=False),
+            )
+            self.gemm1_alpha = layer.gemm1_alpha
 
     @staticmethod
     def _supports_current_device() -> bool:
@@ -112,11 +197,13 @@ class TrtLlmNvFp4ExpertsBase:
 
     @staticmethod
     def _supports_activation(activation: MoEActivation) -> bool:
-        """Supports only SiLU, RELU^2 non-gated and GELU activation."""
+        """Supports SiLU, RELU^2 non-gated, GELU, and clamped SwiGLU-OAI."""
         return activation in [
             MoEActivation.SILU,
             MoEActivation.RELU2_NO_MUL,
             MoEActivation.GELU,
+            MoEActivation.GELU_TANH,
+            MoEActivation.SWIGLUOAI_UNINTERLEAVE,
         ]
 
     @staticmethod
@@ -132,11 +219,48 @@ class TrtLlmNvFp4ExpertsBase:
     def activation_format() -> mk.FusedMoEActivationFormat:
         return mk.FusedMoEActivationFormat.Standard
 
-    def supports_chunking(self) -> bool:
-        return False
+    @property
+    def expects_unquantized_inputs(self) -> bool:
+        return self.per_token_activation
 
-    def supports_expert_map(self) -> bool:
-        return False
+    def _quantize_per_token_input(
+        self, hidden_states: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """NVFP4-quantize activations with a per-token global scale.
+
+        Returns ``(packed_fp4, block_scale, per_token_scale)``.
+        """
+        from flashinfer import SfLayout, nvfp4_quantize
+
+        hs_fp4, hs_block_scale, per_token_scale = nvfp4_quantize(
+            hidden_states,
+            _PER_TOKEN_BASE_GLOBAL_SCALE,
+            sfLayout=SfLayout.layout_linear,
+            per_token_activation=True,
+        )
+        return hs_fp4, hs_block_scale, per_token_scale
+
+    def _get_chunk_size(self) -> int:
+        MAX_GRID_Y = 65535
+        MAX_TILE_TOKENS_DIM = 128
+
+        def _calc_max_supported_tokens(top_k: int, num_experts: int) -> int:
+            """Calculates the max number of supported tokens, so the CUDA grid.Y limit
+            won't be reached.
+            Based on getMaxNumCtasInBatchDim function in flashinfer's TRTLLM MoE runner:
+            https://github.com/flashinfer-ai/flashinfer/blob/719ee23fd82cb220d51ad118ca60198718f6c9d1/include/flashinfer/trtllm/fused_moe/runner.h#L97
+            Which given numTokens, topK, numExperts, tileTokensDim calculates maxNumCtas
+            which is used as the CUDA grid.Y dimension, which we want to
+            be <= MAX_GRID_Y. Solving for numTokens gives the formula below.
+            """
+            return (
+                num_experts + (MAX_GRID_Y - num_experts + 1) * MAX_TILE_TOKENS_DIM - 1
+            ) // top_k
+
+        # Using 305k or more causes IMA error in the kernel, so limit to 300k.
+        return min(
+            300000, _calc_max_supported_tokens(self.topk, self.moe_config.num_experts)
+        )
 
 
 class TrtLlmNvFp4ExpertsModular(TrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsModular):
@@ -160,6 +284,15 @@ class TrtLlmNvFp4ExpertsModular(TrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsModula
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         activation: MoEActivation,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
+        if self.per_token_activation:
+            # Deferred input quant leaves K unpacked here, breaking the
+            # workspace assumptions below. Per-token NVFP4 is only supported on
+            # the monolithic (non-EP) path for now.
+            raise NotImplementedError(
+                "NVFP4 per-token activation is only supported on the monolithic "
+                "(non-EP) FlashInfer TRTLLM MoE path."
+            )
+
         # The workspaces for this implementation are managed by flashinfer.
         workspace1 = (0,)
         workspace2 = (0,)
@@ -173,6 +306,74 @@ class TrtLlmNvFp4ExpertsModular(TrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsModula
 
     def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
         return TopKWeightAndReduceNoOP()
+
+    def _invoke_kernel(
+        self,
+        output: torch.Tensor,
+        hidden_states: torch.Tensor,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        activation: MoEActivation,
+        global_num_experts: int,
+        a1q_scale: torch.Tensor,
+    ):
+        import flashinfer
+
+        assert self.quant_config.w1_scale is not None
+        assert self.quant_config.w2_scale is not None
+
+        # Per-token: input is unquantized, quantize it here. Otherwise it was
+        # already quantized in prepare() with the static global scale.
+        if self.per_token_activation:
+            hidden_states, block_scale, per_token_scale = (
+                self._quantize_per_token_input(hidden_states)
+            )
+        else:
+            block_scale, per_token_scale = a1q_scale, None
+
+        # Pack topk ids and weights into format expected by the kernel.
+        packed_tensor = trtllm_moe_pack_topk_ids_weights(topk_ids, topk_weights)
+        output1_scale_gate_scalar = self.quant_config.g1_alphas
+
+        # Invoke kernel.
+        flashinfer.fused_moe.trtllm_fp4_block_scale_routed_moe(
+            topk_ids=packed_tensor,
+            routing_bias=None,
+            hidden_states=hidden_states,
+            hidden_states_scale=block_scale.view(torch.float8_e4m3fn).reshape(
+                *hidden_states.shape[:-1], -1
+            ),
+            gemm1_weights=w1,
+            gemm1_weights_scale=self.quant_config.w1_scale.view(torch.float8_e4m3fn),
+            gemm1_bias=None,
+            gemm1_alpha=self.gemm1_alpha,
+            gemm1_beta=self.gemm1_beta,
+            gemm1_clamp_limit=self.gemm1_clamp_limit,
+            gemm2_weights=w2,
+            gemm2_weights_scale=self.quant_config.w2_scale.view(torch.float8_e4m3fn),
+            gemm2_bias=None,
+            output1_scale_scalar=self.g1_scale_c,
+            output1_scale_gate_scalar=output1_scale_gate_scalar,
+            output2_scale_scalar=self.quant_config.g2_alphas,
+            num_experts=global_num_experts,
+            top_k=self.topk,
+            n_group=0,
+            topk_group=0,
+            intermediate_size=self.intermediate_size_per_partition,
+            local_expert_offset=self.ep_rank * self.local_num_experts,
+            local_num_experts=self.local_num_experts,
+            routed_scaling_factor=None,
+            routing_method_type=1,  # not used
+            do_finalize=True,
+            activation_type=activation_to_flashinfer_int(activation),
+            per_token_scale=per_token_scale,
+            output=output,
+            tune_max_num_tokens=min(
+                fi_moe_largest_bucket(self.moe_config), self._get_chunk_size()
+            ),
+        )
 
     def apply(
         self,
@@ -192,49 +393,39 @@ class TrtLlmNvFp4ExpertsModular(TrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsModula
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
     ):
-        import flashinfer
-
         assert self._supports_activation(activation)
-        assert a1q_scale is not None
-        assert self.quant_config.w1_scale is not None
-        assert self.quant_config.w2_scale is not None
+        # Per-token defers input quant to _invoke_kernel, so a1q_scale is None.
+        assert a1q_scale is not None or self.per_token_activation
 
-        # Pack topk ids and weights into format expected by the kernel.
-        packed_tensor = trtllm_moe_pack_topk_ids_weights(topk_ids, topk_weights)
+        M = hidden_states.shape[0]
+        chunk_size = self._get_chunk_size()
 
-        # Invoke kernel.
-        flashinfer.fused_moe.trtllm_fp4_block_scale_routed_moe(
-            topk_ids=packed_tensor,
-            routing_bias=None,
-            hidden_states=hidden_states,
-            hidden_states_scale=a1q_scale.view(torch.float8_e4m3fn).reshape(
-                *hidden_states.shape[:-1], -1
-            ),
-            gemm1_weights=w1,
-            gemm1_weights_scale=self.quant_config.w1_scale.view(torch.float8_e4m3fn),
-            gemm1_bias=None,
-            gemm1_alpha=None,
-            gemm1_beta=None,
-            gemm1_clamp_limit=None,
-            gemm2_weights=w2,
-            gemm2_weights_scale=self.quant_config.w2_scale.view(torch.float8_e4m3fn),
-            gemm2_bias=None,
-            output1_scale_scalar=self.g1_scale_c,
-            output1_scale_gate_scalar=self.quant_config.g1_alphas,
-            output2_scale_scalar=self.quant_config.g2_alphas,
-            num_experts=global_num_experts,
-            top_k=self.topk,
-            n_group=0,
-            topk_group=0,
-            intermediate_size=self.intermediate_size_per_partition,
-            local_expert_offset=self.ep_rank * self.local_num_experts,
-            local_num_experts=self.local_num_experts,
-            routed_scaling_factor=None,
-            routing_method_type=1,  # not used
-            do_finalize=True,
-            activation_type=activation_to_flashinfer_int(activation),
-            output=output,
-        )
+        if chunk_size >= M:
+            self._invoke_kernel(
+                output,
+                hidden_states,
+                w1,
+                w2,
+                topk_weights,
+                topk_ids,
+                activation,
+                global_num_experts,
+                a1q_scale,
+            )
+        else:
+            for start in range(0, M, chunk_size):
+                end = min(start + chunk_size, M)
+                self._invoke_kernel(
+                    output[start:end],
+                    hidden_states[start:end],
+                    w1,
+                    w2,
+                    topk_weights[start:end],
+                    topk_ids[start:end],
+                    activation,
+                    global_num_experts,
+                    None if a1q_scale is None else a1q_scale[start:end],
+                )
 
 
 class TrtLlmNvFp4ExpertsMonolithic(
@@ -243,6 +434,9 @@ class TrtLlmNvFp4ExpertsMonolithic(
     """
     Monolithic version of the kernel (router + experts).
     """
+
+    def supports_routing_replay_capture(self) -> bool:
+        return True
 
     @staticmethod
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
@@ -265,9 +459,9 @@ class TrtLlmNvFp4ExpertsMonolithic(
             RoutingMethodType.RenormalizeNaive,
             RoutingMethodType.Llama4,
             RoutingMethodType.SigmoidRenorm,
+            RoutingMethodType.Sigmoid,
             RoutingMethodType.MiniMax2,
             RoutingMethodType.Simulated,
-            RoutingMethodType.SigmoidRenorm,
         ]
 
     @staticmethod
@@ -275,7 +469,7 @@ class TrtLlmNvFp4ExpertsMonolithic(
         router_logits_dtype: torch.dtype | None,
         routing_method: RoutingMethodType,
     ) -> bool:
-        return True
+        return router_logits_dtype in [torch.bfloat16, torch.float32]
 
     def apply(
         self,
@@ -297,7 +491,7 @@ class TrtLlmNvFp4ExpertsMonolithic(
         import flashinfer
 
         assert self._supports_activation(activation)
-        assert a1q_scale is not None
+        assert a1q_scale is not None or self.per_token_activation
         assert self.quant_config.w1_scale is not None
         assert self.quant_config.w2_scale is not None
         assert (
@@ -308,32 +502,41 @@ class TrtLlmNvFp4ExpertsMonolithic(
             and self.routing_method_type != RoutingMethodType.Llama4
         )
 
-        # Currently FI requires bfloat16 routing bias.
-        # https://github.com/flashinfer-ai/flashinfer/issues/2909
-        if e_score_correction_bias is not None:
-            e_score_correction_bias = e_score_correction_bias.to(torch.bfloat16)
+        # Per-token: input is unquantized, quantize it here (see modular apply).
+        if self.per_token_activation:
+            hidden_states, block_scale, per_token_scale = (
+                self._quantize_per_token_input(hidden_states)
+            )
+        else:
+            block_scale, per_token_scale = a1q_scale, None
 
+        output1_scale_gate_scalar = self.quant_config.g1_alphas
+
+        routing_replay_out = self._maybe_make_routing_replay_buffer(
+            num_tokens=hidden_states.shape[0],
+            device=hidden_states.device,
+        )
         # Invoke kernel.
         # NOTE: Activation padding and output
         # truncation are handled by the MoE runner's
-        return flashinfer.fused_moe.trtllm_fp4_block_scale_moe(
+        result = flashinfer.fused_moe.trtllm_fp4_block_scale_moe(
             routing_logits=router_logits,
             routing_bias=e_score_correction_bias,
             hidden_states=hidden_states,
-            hidden_states_scale=a1q_scale.view(torch.float8_e4m3fn).reshape(
+            hidden_states_scale=block_scale.view(torch.float8_e4m3fn).reshape(
                 *hidden_states.shape[:-1], -1
             ),
             gemm1_weights=w1,
             gemm1_weights_scale=self.quant_config.w1_scale.view(torch.float8_e4m3fn),
             gemm1_bias=None,
-            gemm1_alpha=None,
-            gemm1_beta=None,
-            gemm1_clamp_limit=None,
+            gemm1_alpha=self.gemm1_alpha,
+            gemm1_beta=self.gemm1_beta,
+            gemm1_clamp_limit=self.gemm1_clamp_limit,
             gemm2_weights=w2,
             gemm2_weights_scale=self.quant_config.w2_scale.view(torch.float8_e4m3fn),
             gemm2_bias=None,
             output1_scale_scalar=self.g1_scale_c,
-            output1_scale_gate_scalar=self.quant_config.g1_alphas,
+            output1_scale_gate_scalar=output1_scale_gate_scalar,
             output2_scale_scalar=self.quant_config.g2_alphas,
             num_experts=global_num_experts,
             top_k=self.topk,
@@ -346,4 +549,11 @@ class TrtLlmNvFp4ExpertsMonolithic(
             routing_method_type=self.routing_method_type,
             do_finalize=True,
             activation_type=activation_to_flashinfer_int(activation),
+            per_token_scale=per_token_scale,
+            tune_max_num_tokens=fi_moe_largest_bucket(self.moe_config),
+            routing_replay_out=routing_replay_out,
         )[0]
+        self._maybe_dispatch_routing_replay(
+            routing_replay_out, num_tokens=hidden_states.shape[0]
+        )
+        return result

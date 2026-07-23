@@ -110,7 +110,9 @@ class LoggingStatLogger(StatLoggerBase):
         self.connector_prefix_caching_metrics = CachingMetrics()
         self.mm_caching_metrics = CachingMetrics()
 
-        self.spec_decoding_logging = SpecDecodingLogging()
+        model_config = self.vllm_config.model_config
+        is_diffusion = model_config is not None and model_config.is_diffusion
+        self.spec_decoding_logging = SpecDecodingLogging(is_diffusion=is_diffusion)
         kv_transfer_config = self.vllm_config.kv_transfer_config
         self.kv_connector_logging = KVConnectorLogging(kv_transfer_config)
         self.cudagraph_logging = None
@@ -158,6 +160,42 @@ class LoggingStatLogger(StatLoggerBase):
     def log_prefix(self):
         return "Engine {:03d}: ".format(self.engine_index)
 
+    def _log_prefix_for_engine(self, engine_idx: int) -> str:
+        if self.engine_index == engine_idx:
+            return self.log_prefix
+        return "Engine {:03d}: ".format(engine_idx)
+
+    def _log_iteration_details(
+        self, scheduler_stats: SchedulerStats, engine_idx: int
+    ) -> None:
+        details = scheduler_stats.iteration_details
+        if details is None:
+            return
+
+        encoder_msg = ""
+        if details.num_encoder_inputs:
+            encoder_msg = (
+                f", encoder inputs: {details.num_encoder_inputs}, "
+                f"encoder output embeddings: {details.num_encoder_output_tokens}"
+            )
+
+        logger.info(
+            "%sIteration(%d): %d context requests, %d context tokens, "
+            "%d generation requests, %d generation tokens, "
+            "iteration elapsed time: %.2f ms%s, "
+            "GPU KV cache usage: %.1f%%%s",
+            self._log_prefix_for_engine(engine_idx),
+            details.iteration_index,
+            details.num_ctx_requests,
+            details.num_ctx_tokens,
+            details.num_generation_requests,
+            details.num_generation_tokens,
+            details.elapsed_ms,
+            " (dummy)" if details.is_dummy else "",
+            scheduler_stats.kv_cache_usage * 100,
+            encoder_msg,
+        )
+
     def record(
         self,
         scheduler_stats: SchedulerStats | None,
@@ -170,6 +208,7 @@ class LoggingStatLogger(StatLoggerBase):
             self._track_iteration_stats(iteration_stats)
 
         if scheduler_stats is not None:
+            self._log_iteration_details(scheduler_stats, engine_idx)
             self.prefix_caching_metrics.observe(scheduler_stats.prefix_cache_stats)
 
             if scheduler_stats.connector_prefix_cache_stats is not None:
@@ -436,7 +475,10 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         per_engine_labelvalues = self.per_engine_labelvalues
 
         self.spec_decoding_prom = self._spec_decoding_cls(
-            vllm_config.speculative_config, labelnames, per_engine_labelvalues
+            vllm_config.speculative_config,
+            labelnames,
+            per_engine_labelvalues,
+            is_diffusion=vllm_config.model_config.is_diffusion,
         )
         self.kv_connector_prom = self._kv_connector_cls(
             vllm_config, labelnames, per_engine_labelvalues
@@ -1161,7 +1203,8 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             iteration_stats.num_generation_tokens
         )
         self.histogram_iteration_tokens[engine_idx].observe(
-            iteration_stats.num_prompt_tokens + iteration_stats.num_generation_tokens
+            iteration_stats.prompt_token_stats.computed
+            + iteration_stats.num_generation_tokens
         )
 
         for max_gen_tokens in iteration_stats.max_num_generation_tokens_iter:

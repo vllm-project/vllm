@@ -12,6 +12,8 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
+    QuantKey,
+    kFp8StaticTensorSym,
 )
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import (
@@ -61,6 +63,11 @@ class FlashInferFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
             return False, "requires per tensor activation and weight scales."
 
         return True, None
+
+    def input_quant_key(self) -> QuantKey | None:
+        if self.config.activation_quant_key == kFp8StaticTensorSym:
+            return kFp8StaticTensorSym
+        return None
 
     def apply_scaled_mm(
         self,

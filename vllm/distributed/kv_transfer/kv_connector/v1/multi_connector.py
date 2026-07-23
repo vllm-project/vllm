@@ -19,7 +19,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorRole,
     KVConnectorWorkerMetadata,
     SupportsHMA,
-    supports_hma,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
     KVConnectorPromMetrics,
@@ -151,6 +150,22 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
                 return True
         return False
 
+    @classmethod
+    def all_children_support_hma(cls, kv_transfer_config: "KVTransferConfig") -> bool:
+        """Return True only if every configured child connector supports HMA."""
+        connectors_config = kv_transfer_config.kv_connector_extra_config.get(
+            "connectors", []
+        )
+        if not connectors_config:
+            return False
+        for conn_config in connectors_config:
+            child_config = KVTransferConfig(
+                **{"engine_id": kv_transfer_config.engine_id, **conn_config}
+            )
+            if not KVConnectorFactory.supports_hma_config(child_config):
+                return False
+        return True
+
     def __init__(
         self,
         vllm_config: "VllmConfig",
@@ -169,7 +184,10 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
             self._connectors.append(connector_cls(temp_config, role, kv_cache_config))
             self._ktc_kv_transfer_config.append(temp_config.kv_transfer_config)
 
-        self._all_support_hma = all(supports_hma(c) for c in self._connectors)
+        assert vllm_config.kv_transfer_config is not None
+        self._all_support_hma = MultiConnector.all_children_support_hma(
+            vllm_config.kv_transfer_config
+        )
         assert (
             vllm_config.scheduler_config.disable_hybrid_kv_cache_manager
             or self._all_support_hma
@@ -385,14 +403,13 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
         self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int
     ):
         chosen_connector = self._requests_to_connector.get(request.request_id, -1)
-        empty_blocks = blocks.new_empty()
         for i, c in enumerate(self._connectors):
             if i == chosen_connector:
                 # Forward call to the chosen connector (if any).
                 c.update_state_after_alloc(request, blocks, num_external_tokens)
             else:
-                # Call with empty blocks for other connectors.
-                c.update_state_after_alloc(request, empty_blocks, 0)
+                # Other connectors still receive the request's real blocks
+                c.update_state_after_alloc(request, blocks, 0)
 
     def on_new_request(self, request: "Request") -> None:
         for c in self._connectors:
@@ -453,6 +470,12 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
         for c in self._connectors:
             c.set_xfer_handshake_metadata(metadata)
 
+    def set_xfer_handshake_metadata_pp_aware(
+        self, metadata: dict[tuple[int, int], KVConnectorHandshakeMetadata]
+    ) -> None:
+        for c in self._connectors:
+            c.set_xfer_handshake_metadata_pp_aware(metadata)
+
     def _aggregate_request_finished(
         self,
         request: "Request",
@@ -468,12 +491,15 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
                 async_saves += 1
             if txfer_params is not None:
                 if kv_txfer_params is not None:
-                    # TODO we can probably change this to merge the dicts here,
-                    # checking for key clashes.
-                    raise RuntimeError(
-                        "Only one connector can produce KV transfer params"
-                    )
-                kv_txfer_params = txfer_params
+                    clashes = set(kv_txfer_params) & set(txfer_params)
+                    if clashes:
+                        raise RuntimeError(
+                            "Key clash in kv_transfer_params from multiple "
+                            f"connectors: {clashes}"
+                        )
+                    kv_txfer_params.update(txfer_params)
+                else:
+                    kv_txfer_params = txfer_params
         if async_saves > 1:
             self._extra_async_saves[request.request_id] = async_saves - 1
 
@@ -513,6 +539,9 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
     def take_events(self) -> Iterable["KVCacheEvent"]:
         for c in self._connectors:
             yield from c.take_events()
+
+    def has_pending_push_work(self) -> bool:
+        return any(c.has_pending_push_work() for c in self._connectors)
 
     @classmethod
     def get_required_kvcache_layout(cls, vllm_config: "VllmConfig") -> str | None:

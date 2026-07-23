@@ -25,24 +25,30 @@ Example configuration:
     "secondary_tiers": [
         {
             "type": "example",
-            # Tier-specific parameters (for ExampleSecondaryTier):
-            "max_blocks": 10000,
-            "simulate_async": False
+            "custom_param": 67
         }
     ]
 }
 """
 
-import torch
+from typing import Any
 
-from vllm.config import VllmConfig
+import torch
+from typing_extensions import override
+
 from vllm.logger import init_logger
-from vllm.v1.kv_cache_interface import KVCacheConfig
-from vllm.v1.kv_offload.base import CanonicalKVCaches, OffloadingManager
-from vllm.v1.kv_offload.cpu.gpu_worker import CpuGpuOffloadingHandlers
+from vllm.v1.kv_offload.base import (
+    CanonicalKVCaches,
+    OffloadingHistogramMetadata,
+    OffloadingManager,
+    OffloadingMetricMetadata,
+)
+from vllm.v1.kv_offload.config import OffloadingConfig
+from vllm.v1.kv_offload.cpu.gpu_worker import CPUOffloadingWorker
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 from vllm.v1.kv_offload.cpu.spec import CPUOffloadingSpec
-from vllm.v1.kv_offload.tiering.factory import create_secondary_tier
+from vllm.v1.kv_offload.tiering.base import TieringOffloadingMetrics
+from vllm.v1.kv_offload.tiering.factory import SecondaryTierFactory
 from vllm.v1.kv_offload.tiering.manager import (
     CPUPrimaryTierOffloadingManager,
     TieringOffloadingManager,
@@ -64,8 +70,70 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
     memory and must transfer data through the primary tier.
     """
 
-    def __init__(self, vllm_config: VllmConfig, kv_cache_config: KVCacheConfig):
-        super().__init__(vllm_config, kv_cache_config)
+    BLOCK_SIZE_ALIGNMENT = SharedOffloadRegion.BLOCK_SIZE_ALIGNMENT
+
+    @classmethod
+    @override
+    def build_metric_definitions(
+        cls, extra_config: dict[str, Any]
+    ) -> dict[str, OffloadingMetricMetadata]:
+        metrics = super().build_metric_definitions(extra_config)
+        metrics[TieringOffloadingMetrics.LOOKUP_SYNC_DELAY] = (
+            OffloadingHistogramMetadata(
+                documentation=(
+                    "Histogram of total blocking time spent querying secondary "
+                    "tiers for a request, accumulated from first lookup until "
+                    "the request is allocated or finishes, in seconds."
+                ),
+                buckets=(
+                    0.00001,
+                    0.00005,
+                    0.0001,
+                    0.0005,
+                    0.001,
+                    0.005,
+                    0.01,
+                    0.05,
+                    0.1,
+                    0.5,
+                    1,
+                ),
+            )
+        )
+        metrics[TieringOffloadingMetrics.LOOKUP_ASYNC_DELAY] = (
+            OffloadingHistogramMetadata(
+                documentation=(
+                    "Histogram of wall-clock time from a request's first deferred "
+                    "secondary-tier lookup until the request is allocated or "
+                    "finishes, in seconds."
+                ),
+                buckets=(
+                    0.0001,
+                    0.0005,
+                    0.001,
+                    0.005,
+                    0.01,
+                    0.05,
+                    0.1,
+                    0.5,
+                    1,
+                    5,
+                    10,
+                ),
+            )
+        )
+        secondary_tier_configs = extra_config.get("secondary_tiers", [])
+        if not isinstance(secondary_tier_configs, list):
+            raise ValueError("secondary_tiers must be a list of tier configurations")
+
+        for tier_config in secondary_tier_configs:
+            assert isinstance(tier_config, dict)
+            tier_cls = SecondaryTierFactory.get_tier_class(tier_config)
+            metrics.update(tier_cls.build_metric_definitions(tier_config))
+        return metrics
+
+    def __init__(self, config: OffloadingConfig):
+        super().__init__(config)
         # Redeclare for mypy: parent sets this but `--follow-imports skip` hides it
         self._manager: OffloadingManager | None = None
 
@@ -77,6 +145,12 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
         # Scheduler-side mmap (rank=None); kept for cleanup
         self._scheduler_mmap: SharedOffloadRegion | None = None
 
+        # engine_id is unique per DP replica (suffixed with _dp{rank} in both
+        # the Ray and multiprocessing paths), so it names a per-replica offload
+        # region.
+        self._engine_id = config.engine_id
+
+    @override
     def get_manager(self) -> OffloadingManager:
         """
         Get the TieringOffloadingManager.
@@ -89,32 +163,22 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
             TieringOffloadingManager instance
         """
         if not self._manager:
-            kv_events_config = self.vllm_config.kv_events_config
-            enable_events = (
-                kv_events_config is not None and kv_events_config.enable_kv_cache_events
-            )
-
             # Create scheduler-side SharedOffloadRegion (rank=None) so the
             # primary tier can eagerly create a memoryview over _base.
-            world_size = self.vllm_config.parallel_config.world_size
             scheduler_mmap = SharedOffloadRegion(
-                instance_id=self.vllm_config.instance_id,
-                total_size_bytes=self.cpu_page_size_per_worker
-                * world_size
-                * self.num_blocks,
+                engine_id=self._engine_id,
                 num_blocks=self.num_blocks,
                 rank=None,
-                num_workers=world_size,
+                kv_bytes_per_block=self.kv_bytes_per_chunk,
                 cpu_page_size=self.cpu_page_size_per_worker,
             )
             self._scheduler_mmap = scheduler_mmap
 
             # Create primary tier (CPU-based)
-            assert len(self.gpu_block_size) == 1
             primary_tier = CPUPrimaryTierOffloadingManager(
                 num_blocks=self.num_blocks,
                 cache_policy=self.eviction_policy,  # type: ignore[arg-type]
-                enable_events=enable_events,
+                enable_events=self.kv_events_config.enable_kv_cache_events,
                 mmap_region=scheduler_mmap,
             )
 
@@ -123,30 +187,29 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
             secondary_tiers = []
             for i, tier_config in enumerate(self.secondary_tier_configs):
                 try:
-                    tier = create_secondary_tier(
-                        tier_config, primary_kv_view, self.vllm_config
+                    tier = SecondaryTierFactory.create_secondary_tier(
+                        tier_config, primary_kv_view, self
                     )
                     secondary_tiers.append(tier)
                     logger.info(
                         "Created secondary tier #%d (%s)",
                         i,
-                        tier.get_tier_type(),
+                        tier.tier_type,
                     )
                 except Exception as e:
                     logger.error(
-                        "Failed to create secondary tier from config %s: %s",
-                        tier_config,
+                        "Failed to create secondary tier from config index %i: %s",
+                        i,
                         e,
                     )
                     raise
 
             # Create TieringOffloadingManager. GPU↔CPU transfers use the inherited
-            # get_handlers(); secondary tier transfers are handled by the
-            # secondary tier managers and need no additional handlers here.
+            # get_worker(). Secondary tier transfers are handled by the
+            # secondary tier managers and need no additional workers here.
             tiering_manager = TieringOffloadingManager(
                 primary_tier=primary_tier,
                 secondary_tiers=secondary_tiers,
-                enable_events=enable_events,
             )
             if int(self.extra_config.get("store_threshold", 0)) >= 2:
                 raise ValueError(
@@ -164,24 +227,22 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
 
         return self._manager
 
-    def _create_handlers(
-        self, kv_caches: CanonicalKVCaches
-    ) -> CpuGpuOffloadingHandlers:
-        world_size = self.vllm_config.parallel_config.world_size
-        rank = torch.accelerator.current_device_index()
+    @override
+    def create_worker(self, kv_caches: CanonicalKVCaches) -> CPUOffloadingWorker:
+        # Fold the global physical device index into the replica-local
+        # [0, world_size) slot range.
+        world_size = self.config.parallel.world_size
+        rank = torch.accelerator.current_device_index() % world_size
         worker_mmap = SharedOffloadRegion(
-            instance_id=self.vllm_config.instance_id,
-            total_size_bytes=self.cpu_page_size_per_worker
-            * world_size
-            * self.num_blocks,
+            engine_id=self._engine_id,
             num_blocks=self.num_blocks,
             rank=rank,
-            num_workers=world_size,
+            kv_bytes_per_block=self.kv_bytes_per_chunk,
             cpu_page_size=self.cpu_page_size_per_worker,
         )
-        return CpuGpuOffloadingHandlers(
+        return CPUOffloadingWorker(
             kv_caches=kv_caches,
-            block_size_factor=self.block_size_factor,
+            blocks_per_chunk=self.blocks_per_chunk,
             num_cpu_blocks=self.num_blocks,
             mmap_region=worker_mmap,
         )

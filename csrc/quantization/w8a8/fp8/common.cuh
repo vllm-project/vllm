@@ -5,6 +5,19 @@
 
 #include <cmath>
 
+// This header is shared between _C and _C_stable_libtorch targets.
+// torch_utils.h provides get_device_prop(). We need to pass USE_CUDA
+// to the .so to expose some of the shims used by torch_utils.h. For now
+// this is only done for _C_stable_libtorch and not for _C, so we use the
+// non stable at::cuda::getCurrentDeviceProperties for _C for now.
+#ifdef TORCH_TARGET_VERSION
+  #include "../../../libtorch_stable/torch_utils.h"
+#else
+  #ifdef USE_ROCM
+    #include <ATen/hip/HIPContext.h>
+  #endif
+#endif
+
 #ifndef USE_ROCM
   #include "nvidia/quant_utils.cuh"
 #else
@@ -18,7 +31,11 @@ static bool is_fp8_ocp() {
 #ifndef USE_ROCM
   return true;
 #else
-  auto dprops = at::cuda::getCurrentDeviceProperties();
+  #ifdef TORCH_TARGET_VERSION
+  auto* dprops = get_device_prop();
+  #else
+  auto* dprops = at::cuda::getCurrentDeviceProperties();
+  #endif
   std::string device_arch = dprops->gcnArchName;
   size_t substring = device_arch.find("gfx94");
   return substring == std::string::npos;
