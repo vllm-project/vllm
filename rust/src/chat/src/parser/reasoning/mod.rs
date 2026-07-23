@@ -27,6 +27,7 @@ pub mod names {
     pub const GLM45: &str = "glm45";
     pub const KIMI: &str = "kimi";
     pub const KIMI_K2: &str = "kimi_k2";
+    pub const MIMO: &str = "mimo";
     pub const MINIMAX_M2: &str = "minimax_m2";
     pub const MINIMAX_M3: &str = "minimax_m3";
     pub const NEMOTRON_V3: &str = "nemotron_v3";
@@ -68,6 +69,7 @@ impl ReasoningParserFactory {
             .register_parser::<Glm45ReasoningParser>(names::GLM45)
             .register_parser::<KimiReasoningParser>(names::KIMI)
             .register_parser::<KimiK2ReasoningParser>(names::KIMI_K2)
+            .register_parser::<Qwen3ReasoningParser>(names::MIMO)
             .register_parser::<MiniMaxM2ReasoningParser>(names::MINIMAX_M2)
             .register_parser::<MiniMaxM3ReasoningParser>(names::MINIMAX_M3)
             .register_parser::<NemotronV3ReasoningParser>(names::NEMOTRON_V3)
@@ -83,6 +85,7 @@ impl ReasoningParserFactory {
             .register_pattern("deepseek-v3", names::DEEPSEEK_V3)
             .register_pattern("gemma-4", names::GEMMA4)
             .register_pattern("gemma4", names::GEMMA4)
+            .register_pattern("mimo-v2", names::MIMO)
             .register_pattern("qwen", names::QWEN3)
             .register_pattern("glm-5", names::GLM45)
             .register_pattern("glm-4.7", names::GLM45)
