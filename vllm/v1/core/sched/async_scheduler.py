@@ -49,13 +49,26 @@ class AsyncScheduler(Scheduler):
                 request.next_decode_eligible_step = self.current_step + self.pp_size
 
     def _update_request_with_output(
-        self, request: Request, new_token_ids: list[int]
+        self,
+        request: Request,
+        new_token_ids: list[int],
+        num_scheduled_spec: int = 0,
     ) -> tuple[list[int], bool]:
         if request.async_tokens_to_discard > 0:
-            # The request was force-preempted in reset_prefix_cache; drop one
-            # stale in-flight async output frame per call until the counter
-            # is drained.
-            request.async_tokens_to_discard -= 1
+            # The request was force-preempted (KV pressure in _schedule or
+            # reset_prefix_cache); drop the stale in-flight async output
+            # frame(s). `async_tokens_to_discard` is sized in *placeholder
+            # tokens* — i.e. the same units as `num_output_placeholders` — so
+            # each returning frame decrements it by that frame's own
+            # placeholder contribution: `num_sampled_tokens_per_step +
+            # num_scheduled_spec` (mirrors the increment in
+            # `_update_after_schedule`). Decrementing by 1 per frame would
+            # overshoot for speculative decoding (see #41190 follow-up) and
+            # silently drop the next `num_spec` real decode frames on the
+            # resumed request.
+            frame_size = self.num_sampled_tokens_per_step + num_scheduled_spec
+            request.async_tokens_to_discard -= frame_size
+            assert request.async_tokens_to_discard >= 0
             return [], False
 
         status_before_update = request.status
