@@ -9,10 +9,13 @@ stays live Python. `fusion.py` builds the concrete fusion patterns on top.
 """
 
 import ast
+import contextlib
 import inspect
 import operator
 import textwrap
 from collections.abc import Callable
+from itertools import chain
+from unittest import mock
 
 import torch
 from torch import fx, nn
@@ -26,55 +29,13 @@ _LEAF_CALL_LENGTHS: dict[Callable, int] = {}
 """Callables traced as leaf calls (see `_as_leaf_call`), mapped to the number of
 values each returns."""
 
+_UNKNOWN = object()
+"""Sentinel meta value for proxies whose concrete value could not be inferred.
+Distinct from `None`, which is a valid concrete value (e.g. `attn_weights`)."""
 
-def _infer_len(node: fx.Node, root: nn.Module | None) -> int | None:
-    """Concrete length of a proxy's value, inferred from its node chain.
-
-    Lets tracing pass through the shape unpacks and `*`-splats (e.g.
-    `(*input_shape, -1, head_dim)`) that precede the patterns in HF attention.
-    """
-    # `x.shape` has the rank of `x`, when known.
-    if (
-        is_fn(node, getattr)
-        and node.args[1] == "shape"
-        and (rank := _rank(node.args[0], root)) is not None
-    ):
-        return rank
-    # Slices of known-length values.
-    if is_op(node, "getitem"):
-        src_len = _infer_len(node.args[0], root)
-        index = node.args[1]
-        if src_len is not None and isinstance(index, slice):
-            return len(range(*index.indices(src_len)))
-    # Nodes wrapped with `_as_leaf_call` declare their length explicitly.
-    if node.op == "call_function" and node.target in _LEAF_CALL_LENGTHS:
-        return _LEAF_CALL_LENGTHS[node.target]
-    # `topk` returns a `(values, indices)` pair.
-    if is_op(node, "topk"):
-        return 2
-    # A submodule call has the arity of the child's own traced output.
-    if node.op == "call_module" and root is not None:
-        try:
-            child = root.get_submodule(str(node.target))
-        except AttributeError:
-            return None
-        return _module_arity(child)
-    return None
-
-
-_MODULE_ARITY: dict[type, int | None] = {}
-
-
-def _module_arity(module: nn.Module) -> int | None:
-    """Number of values `module.forward` returns, read from its trace (cached)."""
-    cls = type(module)
-    if cls not in _MODULE_ARITY:
-        _MODULE_ARITY[cls] = None  # terminates recursive module structures
-        graph = trace(module)
-        value = output_value(graph) if graph is not None else None
-        if isinstance(value, (tuple, list)):
-            _MODULE_ARITY[cls] = len(value)
-    return _MODULE_ARITY[cls]
+_MODULE_CALL = nn.Module.__call__
+"""The unpatched `nn.Module.__call__`. During tracing fx patches it to record
+`call_module` nodes; meta execution must call modules for real."""
 
 
 def is_leaf_call(node: object) -> bool:
@@ -86,81 +47,50 @@ def is_leaf_call(node: object) -> bool:
     )
 
 
-def _is_split(node: object) -> bool:
-    return is_op(node, "split") or is_op(node, "chunk")
+def _reference_weight(module: nn.Module) -> torch.Tensor | None:
+    """A weight whose trailing dim is the module's hidden size.
 
-
-_RANK_PRESERVING_METHODS = frozenset({"transpose", "contiguous", "clone"})
-
-
-def _rank(node: object, root: nn.Module | None) -> int | None:
-    """The tensor rank of `node`'s value, derived from its producing node chain."""
-    node = peel(node)  # dtype casts preserve rank
-    if not isinstance(node, fx.Node):
-        return None
-    # vLLM always feeds the model [1, seq_len, hidden_size] hidden states
-    if node.op == "placeholder":
-        return 3 if node.target == "hidden_states" else None
-    # Linears map only the last dim and norms are elementwise: both preserve rank.
-    # Other children (embeddings, rope, ...) may not, so theirs is unknown.
-    if node.op == "call_module":
-        try:
-            child = root.get_submodule(str(node.target)) if root else None
-        except AttributeError:
-            child = None
-        weight = getattr(child, "weight", None)
-        preserves = isinstance(child, nn.Linear) or (
-            weight is not None and weight.ndim == 1
-        )
-        return _rank(node.args[0], root) if preserves and node.args else None
-    # `split`/`chunk` yield tuples whose elements keep the source tensor's rank
-    if _is_split(node) or (is_op(node, "getitem") and _is_split(node.args[0])):
-        return _rank(node.args[0], root)
-    if node.op == "call_method":
-        if node.target in ("view", "reshape", "expand"):
-            sizes = node.args[1:]
-            if len(sizes) == 1 and isinstance(sizes[0], (tuple, list)):
-                return len(sizes[0])
-            return len(sizes) or None
-        if node.target == "unsqueeze":
-            rank = _rank(node.args[0], root)
-            return None if rank is None else rank + 1
-        if node.target in _RANK_PRESERVING_METHODS:
-            return _rank(node.args[0], root)
-    if is_op(node, "cat"):
-        elements = node.args[0]
-        if isinstance(elements, (tuple, list)) and elements:
-            return _rank(elements[0], root)
+    Linears and 2-D gate weights are `[out, hidden]`; norm weights are
+    `[hidden]`. Used to fabricate a placeholder input of matching size/dtype."""
+    for child in module.modules():
+        if isinstance(child, nn.Linear):
+            return child.weight
+    for param in module.parameters():
+        if param.ndim in (1, 2):
+            return param
     return None
 
 
-class _SizedMixin:
-    """`len` support for proxies, inferred from the graph (see `_infer_len`)."""
+class _MetaProxy(fx.Proxy):
+    """Proxy carrying the meta-tensor value of the traced expression.
 
-    node: fx.Node
-    tracer: fx.Tracer
+    Shape questions (`len`, iteration, `.shape` unpacks) are answered by
+    executing each op on the meta values, so PyTorch's meta kernels are the
+    single source of shape inference — no per-op rules."""
+
+    meta: object = _UNKNOWN
 
     def __len__(self) -> int:
-        assert isinstance(self.tracer, _AllLeafTracer)
-        length = self.tracer.infer_len(self.node)
-        if length is None:
-            return super().__len__()  # type: ignore[misc]
-        return length
+        if self.meta is not _UNKNOWN:
+            return len(self.meta)
+        return super().__len__()  # type: ignore[misc]
 
-    def __getattr__(self, k: str) -> "_SizedAttribute":
-        return _SizedAttribute(self, k)
+    def __getattr__(self, k: str) -> "_MetaAttribute":
+        return _MetaAttribute(self, k)
 
 
-class _SizedProxy(_SizedMixin, fx.Proxy):
-    """Proxy whose `len` is inferred from the graph."""
-
-
-class _SizedAttribute(_SizedMixin, fx.proxy.Attribute):
-    """Attribute proxy (e.g. `x.shape`) whose `len` is inferred from the graph.
+class _MetaAttribute(_MetaProxy, fx.proxy.Attribute):
+    """Attribute proxy (e.g. `x.shape`) carrying its meta value.
 
     `Proxy.__getattr__` constructs `Attribute` directly, bypassing
-    `Tracer.proxy`, so sized `len` must be grafted on here too.
-    """
+    `Tracer.proxy`, so the meta value must be grafted on here too."""
+
+    def __init__(self, root: fx.Proxy, attr: str):
+        super().__init__(root, attr)
+        root_meta = getattr(root, "meta", _UNKNOWN)
+        if root_meta is not _UNKNOWN:
+            with contextlib.suppress(Exception):
+                self.meta = getattr(root_meta, attr)
 
 
 class _AllLeafTracer(fx.Tracer):
@@ -168,8 +98,9 @@ class _AllLeafTracer(fx.Tracer):
 
     Each child stays one `call_module` node, so matching sees the module's own
     forward structure (activations aren't decomposed into e.g. `sigmoid * x`).
-    `iter` traces through the leading shape unpacks (see `_infer_len`); anything
-    else untraceable ends the trace early and the partial graph is matched.
+    Every traced op is also executed on meta tensors (see `_MetaProxy`) so
+    shape unpacks and `*`-splats trace through; anything else untraceable ends
+    the trace early and the partial graph is matched.
     """
 
     varkw: str | None = None
@@ -179,10 +110,68 @@ class _AllLeafTracer(fx.Tracer):
         return True
 
     def proxy(self, node: fx.Node) -> fx.Proxy:
-        return _SizedProxy(node, self)
+        return _MetaProxy(node, self)
 
-    def infer_len(self, node: fx.Node) -> int | None:
-        return _infer_len(node, getattr(self, "root", None))
+    def create_proxy(self, kind, target, args, kwargs, *extra, **extra_kwargs):
+        proxy = super().create_proxy(kind, target, args, kwargs, *extra, **extra_kwargs)
+        if isinstance(proxy, _MetaProxy) and proxy.meta is _UNKNOWN:
+            # A failure stays _UNKNOWN; only fatal if a shape question is asked.
+            with contextlib.suppress(Exception):
+                proxy.meta = self._infer_meta(kind, target, args, kwargs)
+        return proxy
+
+    def _infer_meta(self, kind: str, target: object, args: tuple, kwargs: dict):
+        """Execute the op on meta tensors; PyTorch infers the output value."""
+        if kind == "placeholder":
+            # vLLM always feeds the model [1, seq_len, hidden_size] hidden states.
+            weight = _reference_weight(self.root)
+            if str(target) == "hidden_states" and weight is not None:
+                return torch.empty(
+                    1, 8, weight.shape[-1], dtype=weight.dtype, device="meta"
+                )
+            return _UNKNOWN
+        # Leaf calls don't execute; fabricate a value of the declared length.
+        if kind == "call_function" and target in _LEAF_CALL_LENGTHS:
+            return (_UNKNOWN,) * _LEAF_CALL_LENGTHS[target]
+        if kind == "get_attr":
+            value = operator.attrgetter(str(target))(self.root)
+            if isinstance(value, torch.Tensor):
+                value = torch.empty_like(value, device="meta")
+            return value
+        unknown = False
+
+        def meta_of(arg: object) -> object:
+            nonlocal unknown
+            if isinstance(arg, fx.Proxy):
+                meta = getattr(arg, "meta", _UNKNOWN)
+                unknown = unknown or meta is _UNKNOWN
+                return meta
+            return arg
+
+        meta_args = fx.node.map_aggregate(args, meta_of)
+        meta_kwargs = fx.node.map_aggregate(kwargs, meta_of)
+        if unknown:
+            return _UNKNOWN
+        if kind == "call_function":
+            return target(*meta_args, **meta_kwargs)
+        if kind == "call_method":
+            receiver, *rest = meta_args
+            return getattr(receiver, str(target))(*rest, **meta_kwargs)
+        if kind == "call_module":
+            # Run the child's forward with all its state on "meta", without
+            # mutating it (at match time params may be meta but buffers real).
+            # fx patches `nn.Module.__call__` while tracing; restore the real
+            # one so this execution is not itself recorded.
+            child = self.root.get_submodule(str(target))
+            state = {
+                name: torch.empty_like(tensor, device="meta")
+                for name, tensor in chain(
+                    child.named_parameters(), child.named_buffers()
+                )
+            }
+            with mock.patch.object(nn.Module, "__call__", _MODULE_CALL):
+                return torch.func.functional_call(child, state, meta_args, meta_kwargs)
+        return _UNKNOWN
 
     def _is_varkw(self, node: object) -> bool:
         return (
@@ -200,10 +189,10 @@ class _AllLeafTracer(fx.Tracer):
             and self._is_varkw(node.args[0])
         ):
             return iter(())
-        length = self.infer_len(node)
-        if length is None:
+        meta = getattr(obj, "meta", _UNKNOWN)
+        if meta is _UNKNOWN:
             return super().iter(obj)
-        return iter([obj[i] for i in range(length)])
+        return iter([obj[i] for i in range(len(meta))])
 
 
 def _as_leaf_call(fn: Callable, length: int | None = None) -> Callable:
@@ -231,8 +220,6 @@ def _leaf_attention_interfaces():
 
     `vllm_attention_function` needs runtime context so it is untraceable.
     Every interface returns `(attn_output, attn_weights)`."""
-    from unittest import mock
-
     from transformers.modeling_utils import AttentionInterface
 
     original = AttentionInterface.get_interface
