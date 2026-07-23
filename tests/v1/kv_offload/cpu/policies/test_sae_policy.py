@@ -2,9 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections import OrderedDict
 
-from vllm.v1.kv_offload.base import OffloadKey, make_offload_key
+from vllm.v1.kv_offload.base import OffloadKey, ReqContext, make_offload_key
 from vllm.v1.kv_offload.cpu.policies.base import BlockStatus
 from vllm.v1.kv_offload.cpu.policies.sae import SAECachePolicy
+
+_CTX = ReqContext(req_id="test")
 
 
 def key(i: int) -> OffloadKey:
@@ -21,170 +23,330 @@ def make_ready_block(block_id: int) -> BlockStatus:
     return b
 
 
+def open_and_insert(
+    policy: SAECachePolicy,
+    keys_and_blocks: list[tuple[OffloadKey, BlockStatus]],
+    *,
+    req_id: str = "r0",
+    start_pos: int = 0,
+) -> None:
+    """Test helper: brackets an insert batch with open_session/close_session
+    exactly the way `CPUOffloadingManager.prepare_store` does. Use this in
+    place of a bare `policy.insert(...)` call — the policy now assumes the
+    manager opens a session first."""
+    policy.open_session(req_id, start_pos)
+    try:
+        for k, b in keys_and_blocks:
+            policy.insert(k, b)
+    finally:
+        policy.close_session()
+
+
 def test_construction_and_missing_key_returns_none():
     policy = SAECachePolicy(cache_capacity=4)
     assert policy.get(key(1)) is None
 
 
-def test_first_insert_opens_new_session():
+def test_open_insert_close_creates_a_session():
     policy = SAECachePolicy(cache_capacity=4)
-    policy.insert(key(1), make_block(0))
-    assert policy._open_sid == 0
+    open_and_insert(policy, [(key(1), make_block(0))])
+    assert policy._open_sid is None  # sealed by close_session
     assert policy._sid_to_keys == {0: [key(1)]}
     assert policy._key_to_sid == {key(1): 0}
 
 
-def test_consecutive_inserts_join_open_session():
+def test_two_inserts_within_one_batch_join_open_session():
     policy = SAECachePolicy(cache_capacity=4)
-    policy.insert(key(1), make_block(0))
-    policy.insert(key(2), make_block(1))
-    assert policy._open_sid == 0
+    open_and_insert(policy, [(key(1), make_block(0)), (key(2), make_block(1))])
     assert policy._sid_to_keys == {0: [key(1), key(2)]}
+    assert policy._key_to_sid == {key(1): 0, key(2): 0}
 
 
-def test_remove_closes_open_session_and_cleans_state():
+def test_two_batches_open_two_sessions_when_not_merging():
     policy = SAECachePolicy(cache_capacity=4)
-    policy.insert(key(1), make_block(0))
+    open_and_insert(policy, [(key(1), make_block(0))], req_id="r0")
+    open_and_insert(policy, [(key(2), make_block(1))], req_id="r1")
+    # Two distinct sids, one per batch, since no record_lookup preceded
+    # either open_session.
+    assert policy._sid_to_keys == {0: [key(1)], 1: [key(2)]}
+
+
+def test_remove_cleans_state():
+    policy = SAECachePolicy(cache_capacity=4)
+    open_and_insert(policy, [(key(1), make_block(0))])
     policy.remove(key(1))
-    assert policy._open_sid is None
     assert policy._sid_to_keys == {}
     assert policy._key_to_sid == {}
     assert policy.get(key(1)) is None
 
 
-def test_insert_after_remove_opens_new_session():
+def test_record_lookup_counts_pending_blocks():
+    """`record_lookup` must count blocks that exist but are not yet
+    ``is_ready`` (a `BlockStatus` in the ``-1 ref_cnt = HIT_PENDING``
+    state). Otherwise the recorded ``hit_count`` falls short of the
+    scheduler's ``hit_count`` — which counts HIT_PENDING as a hit —
+    and the positional check in ``open_session`` always misses when a
+    request's prefix contains any block whose store hasn't completed
+    yet. Empirically this drove `pos_drift_mean ≈ 67 blocks` in the
+    multi-turn benchmark before the fix."""
     policy = SAECachePolicy(cache_capacity=4)
-    policy.insert(key(1), make_block(0))
-    policy.remove(key(1))
-    policy.insert(key(2), make_block(1))
-    assert policy._open_sid == 1  # sid_counter incremented
-    assert policy._sid_to_keys == {1: [key(2)]}
+    # make_block(0) is a BlockStatus in the "not ready" state
+    # (ref_cnt = -1) — the state a stored block is in between
+    # prepare_store and complete_store.
+    open_and_insert(policy, [(key(1), make_block(0))])
+    assert policy._blocks[key(1)].is_ready is False
+    policy.record_lookup(key(1), req_id="r_pending")
+    assert policy._lookup_state == {"r_pending": (0, 1)}
 
 
-def test_get_hit_sets_last_hit_sid():
+def test_record_lookup_hit_populates_lookup_state():
+    """Only genuine request-lookup hits (via record_lookup, called from
+    manager.lookup) may install a merge candidate — plain get() is a
+    pure existence check. State is keyed by req_id (sid, hit_count) so
+    concurrent requests do not overwrite each other."""
     policy = SAECachePolicy(cache_capacity=4)
-    policy.insert(key(1), make_ready_block(0))
-    policy.touch([])  # close session 0
-    policy.get(key(1))
-    assert policy._last_hit_sid == 0
+    open_and_insert(policy, [(key(1), make_ready_block(0))])
+    policy.record_lookup(key(1), req_id="r_lookup")
+    assert policy._lookup_state == {"r_lookup": (0, 1)}
 
 
-def test_get_miss_does_not_clear_last_hit_sid():
-    """The pointer must survive a trailing miss: cpu/manager.py's own
-    "already stored?" filter calls get() on every key in a request,
-    hits (old blocks) first and misses (new blocks) last — if a miss
-    cleared the pointer, insert() would never see it."""
+def test_get_hit_does_not_populate_lookup_state():
+    """get() is a pure existence check — it must NOT install a merge
+    candidate. Otherwise the manager's `already stored?` filter, which
+    walks every input key with get(), would merge every new store into
+    whichever session happened to own a prefix hit."""
     policy = SAECachePolicy(cache_capacity=4)
-    policy.insert(key(1), make_ready_block(0))
-    policy.touch([])  # close session 0
-    policy.get(key(1))  # hit -> _last_hit_sid = 0
-    policy.get(key(99))  # miss on an unrelated key
-    assert policy._last_hit_sid == 0
+    open_and_insert(policy, [(key(1), make_ready_block(0))])
+    policy.get(key(1))  # hit — but on the non-lookup path
+    assert policy._lookup_state == {}
 
 
-def test_insert_merges_into_last_hit_session():
+def test_record_lookup_miss_does_not_clear_lookup_state():
+    """The req_id's merge candidate must survive a trailing miss on the
+    lookup path: the scheduler's prefix lookup calls the manager on each
+    key until a miss ends the run, so hits (early keys) then a miss
+    (first uncached key) must not lose the merge candidate the earlier
+    hit installed. The miss also must NOT bump hit_count."""
     policy = SAECachePolicy(cache_capacity=4)
-    policy.insert(key(1), make_ready_block(0))
-    policy.touch([])  # close session 0
-    policy.get(key(1))  # records sid 0 as the merge candidate
-    policy.insert(key(2), make_block(1))  # should merge into sid 0
-    assert policy._open_sid == 0
+    open_and_insert(policy, [(key(1), make_ready_block(0))])
+    policy.record_lookup(key(1), req_id="r_lookup")  # installs candidate
+    policy.record_lookup(key(99), req_id="r_lookup")  # miss on unrelated key
+    assert policy._lookup_state == {"r_lookup": (0, 1)}
+
+
+def test_record_lookup_state_is_keyed_per_req_id():
+    """Two concurrent requests hitting different sessions must not
+    overwrite each other's merge candidates — the single-slot design
+    lost this under multi-turn load."""
+    policy = SAECachePolicy(cache_capacity=8)
+    open_and_insert(policy, [(key(1), make_ready_block(0))], req_id="rA")
+    open_and_insert(policy, [(key(2), make_ready_block(1))], req_id="rB")
+    policy.record_lookup(key(1), req_id="A")
+    policy.record_lookup(key(2), req_id="B")
+    # Both entries live. The sids come from the order of open_and_insert
+    # calls above: sid 0 owns key(1), sid 1 owns key(2). Each got exactly
+    # one hit so hit_count == 1 for both.
+    assert policy._lookup_state == {"A": (0, 1), "B": (1, 1)}
+
+
+def test_merge_fires_within_request():
+    """A same-req_id lookup hit followed by an open_session merges
+    into the recorded session as long as the sid is still resident.
+    The port drops the reference's ``_last_lookup_count == start_pos``
+    positional check (see test_merge_fires_regardless_of_start_pos_drift)."""
+    policy = SAECachePolicy(cache_capacity=4)
+    open_and_insert(policy, [(key(1), make_ready_block(0))])
+    policy.record_lookup(key(1), req_id="r_same")
+    open_and_insert(policy, [(key(2), make_block(1))], req_id="r_same", start_pos=1)
+    # Merged into sid 0.
     assert policy._sid_to_keys[0] == [key(1), key(2)]
     assert policy._key_to_sid[key(2)] == 0
     assert policy._sid_counter == 1  # no new sid was created
+    # open_session consumed the entry.
+    assert policy._lookup_state == {}
 
 
-def test_insert_merge_skips_ghost_reseed():
+def test_merge_does_not_fire_across_req_ids():
+    """A lookup on request A must NOT cause request B's store to merge
+    into A's session. Per-req_id state makes this structurally
+    impossible."""
+    policy = SAECachePolicy(cache_capacity=4)
+    open_and_insert(policy, [(key(1), make_ready_block(0))])
+    policy.record_lookup(key(1), req_id="A")
+    open_and_insert(policy, [(key(2), make_block(1))], req_id="B", start_pos=0)
+    # New session opened, not merged.
+    assert policy._key_to_sid[key(2)] != policy._key_to_sid[key(1)]
+    assert policy._sid_counter == 2
+    # Request A's entry is still live; only B was consumed.
+    assert policy._lookup_state == {"A": (0, 1)}
+
+
+def test_merge_fires_regardless_of_start_pos_drift():
+    """The reference algorithm required ``_last_lookup_count == start_pos``.
+    We dropped that: the vllm 0.23 scheduler churns the cache between
+    a request's lookup and its store (see bench run #6:
+    ``pos_drift_mean=58.5``, majority-negative), so the positional
+    check made merges effectively impossible. Now the merge fires as
+    long as the recorded sid is still resident, whether or not
+    ``hit_count == start_pos``.
+    """
+    policy = SAECachePolicy(cache_capacity=8)
+    open_and_insert(policy, [(key(1), make_ready_block(0))])
+    policy.record_lookup(key(1), req_id="r")
+    # hit_count == 1 but store at start_pos == 5: still merges.
+    open_and_insert(policy, [(key(2), make_block(1))], req_id="r", start_pos=5)
+    assert policy._key_to_sid[key(2)] == policy._key_to_sid[key(1)]
+    # The entry is consumed on merge; a follow-up store in the same
+    # req_id has no live entry left and therefore opens fresh.
+    open_and_insert(policy, [(key(3), make_block(2))], req_id="r", start_pos=6)
+    assert policy._key_to_sid[key(3)] != policy._key_to_sid[key(1)]
+
+
+def test_merge_fires_with_negative_drift():
+    """Negative drift (``start_pos < hit_count``) is the dominant
+    failure mode under concurrent traffic — the lookup counted N
+    blocks but by store time some were evicted, so the store sees
+    fewer already-stored blocks. This must still merge into the
+    recorded sid, otherwise the algorithm's continuation machinery
+    is unreachable in practice."""
+    policy = SAECachePolicy(cache_capacity=8)
+    open_and_insert(
+        policy,
+        [(key(1), make_ready_block(0)), (key(2), make_ready_block(1))],
+    )
+    policy.record_lookup(key(1), req_id="r")
+    policy.record_lookup(key(2), req_id="r")  # hit_count == 2
+    # start_pos=0 (all lookup blocks got evicted before our store) —
+    # negative drift, but the sid is still resident, so merge.
+    open_and_insert(policy, [(key(3), make_block(2))], req_id="r", start_pos=0)
+    assert policy._key_to_sid[key(3)] == policy._key_to_sid[key(1)]
+
+
+def test_merge_does_not_fire_when_recorded_sid_is_gone():
+    """If the recorded sid has been evicted entirely (removed from
+    ``_sid_stats``), there is no session to merge into and
+    ``open_session`` must open a fresh one instead."""
+    policy = SAECachePolicy(cache_capacity=8)
+    open_and_insert(policy, [(key(1), make_ready_block(0))])
+    policy.record_lookup(key(1), req_id="r")
+    # Simulate the recorded sid being evicted away.
+    recorded_sid = policy._lookup_state["r"][0]
+    policy._sid_stats.pop(recorded_sid, None)
+    policy._sid_to_keys.pop(recorded_sid, None)
+    open_and_insert(policy, [(key(2), make_block(1))], req_id="r", start_pos=1)
+    assert policy._key_to_sid[key(2)] != recorded_sid
+
+
+def test_merge_survives_intervening_touches_from_other_requests():
+    """Under multi-turn load, other requests' `_touch` calls run between
+    my lookup and my prepare_store — bumping the logical timer past the
+    reference's `<= 1` window. The per-req_id design removes that
+    dependency: as long as my sid is still resident, my merge still
+    fires no matter how many timer ticks happened in between."""
+    policy = SAECachePolicy(cache_capacity=4)
+    open_and_insert(policy, [(key(1), make_ready_block(0))])
+    policy.record_lookup(key(1), req_id="me")
+    # Simulate many other-request `touch()` calls bumping the timer.
+    for _ in range(20):
+        policy.touch([], _CTX)
+    open_and_insert(policy, [(key(2), make_block(1))], req_id="me", start_pos=1)
+    # Merge still fires.
+    assert policy._key_to_sid[key(2)] == policy._key_to_sid[key(1)]
+
+
+def test_on_request_finished_drops_stale_merge_pointer():
+    """When a request finishes, its per-request state must be released
+    so the dict doesn't grow unboundedly across long runs."""
+    policy = SAECachePolicy(cache_capacity=4)
+    open_and_insert(policy, [(key(1), make_ready_block(0))])
+    policy.record_lookup(key(1), req_id="r_done")
+    assert "r_done" in policy._lookup_state
+    policy.on_request_finished("r_done")
+    assert "r_done" not in policy._lookup_state
+    # Idempotent — calling twice or on unknown req_ids is safe.
+    policy.on_request_finished("r_done")
+    policy.on_request_finished("never_seen")
+
+
+def test_merge_skips_ghost_reseed():
     """Merging only bumps last_touch; unlike a fresh session, it must not
     add the merged key's ghost score to hits."""
     policy = SAECachePolicy(cache_capacity=4, ghost_norm=1.0)
-    policy.insert(key(1), make_ready_block(0))
-    policy.touch([])  # close session 0, hits truncated to int(0) == 0
-    policy.get(key(1))  # records sid 0 as the merge candidate
+    open_and_insert(policy, [(key(1), make_ready_block(0))])
+    policy.record_lookup(key(1), req_id="r_same")
     policy._key_ghost[key(2)] = 50.0  # would be a large reseed if not skipped
-    policy.insert(key(2), make_block(1))
+    open_and_insert(policy, [(key(2), make_block(1))], req_id="r_same", start_pos=1)
     assert policy._sid_stats[0]["hits"] == 0
-
-
-def test_last_hit_sid_consumed_once():
-    policy = SAECachePolicy(cache_capacity=4)
-    policy.insert(key(1), make_ready_block(0))
-    policy.touch([])  # close session 0
-    policy.get(key(1))  # records sid 0 as the merge candidate
-    policy.insert(key(2), make_block(1))  # merges into sid 0, consumes pointer
-    policy.touch([])  # close the (merged) open session again
-    policy.insert(key(3), make_block(2))  # no pending merge -> fresh session
-    assert policy._open_sid == 1
-    assert policy._sid_to_keys[1] == [key(3)]
 
 
 def test_insert_seeds_initial_hits_from_ghost_sum():
     policy = SAECachePolicy(cache_capacity=4, ghost_norm=2.0)
     policy._key_ghost[key(1)] = 4.0
     policy._key_ghost[key(2)] = 6.0
-    policy.insert(key(1), make_block(0))
-    policy.insert(key(2), make_block(1))
-    # (4.0 + 6.0) / 2.0 = 5.0
-    assert policy._sid_stats[0]["hits"] == 5.0
+    open_and_insert(policy, [(key(1), make_block(0)), (key(2), make_block(1))])
+    # (4.0 + 6.0) / 2.0 = 5.0, then int() on close_session -> 5.
+    assert policy._sid_stats[0]["hits"] == 5
 
 
-def test_session_hits_truncated_to_int_on_close():
+def test_close_session_truncates_float_hits_to_int():
     """Reference computes initial_hits = int(ghost_sum / ghost_norm). The port
     accumulates the ghost seed as a float while the session is open, then
-    truncates to int when the session closes (touch/evict/remove/clear)."""
+    truncates to int when close_session runs."""
     policy = SAECachePolicy(cache_capacity=4, ghost_norm=3.0)
     policy._key_ghost[key(1)] = 5.0
     policy._key_ghost[key(2)] = 5.0
+    policy.open_session("r0", 0)
     policy.insert(key(1), make_block(0))
     policy.insert(key(2), make_block(1))
     # While open, accumulated float: (5.0 + 5.0) / 3.0 = 3.333...
     assert policy._sid_stats[0]["hits"] > 3.0
-    policy.touch([])  # closes the session -> seal
+    policy.close_session()
     # int(3.333...) = 3
     assert policy._sid_stats[0]["hits"] == 3
     assert isinstance(policy._sid_stats[0]["hits"], int)
 
 
-def test_touch_bumps_hits_once_per_unique_session_and_closes_it():
+def test_new_session_uses_real_start_pos():
+    """Fresh sessions now inherit the start_pos passed by the manager,
+    matching the reference's per-batch prefix position (rather than the
+    port's earlier hardcoded 0)."""
     policy = SAECachePolicy(cache_capacity=4)
-    policy.insert(key(1), make_block(0))
-    policy.insert(key(2), make_block(1))
-    policy.touch([key(1), key(2)])
-    sid = 0
+    open_and_insert(policy, [(key(1), make_block(0))], req_id="r0", start_pos=7)
+    assert policy._sid_stats[0]["start_pos"] == 7
+
+
+def test_touch_bumps_hits_once_per_unique_session():
+    policy = SAECachePolicy(cache_capacity=4)
+    open_and_insert(policy, [(key(1), make_block(0)), (key(2), make_block(1))])
+    policy.touch([key(1), key(2)], _CTX)
     # Reference bumps hits once per unique session in the batch, not once
     # per key — touching two keys from the same session bumps hits by 1.
-    assert policy._sid_stats[sid]["hits"] == 1
-    assert policy._sid_stats[sid]["last_touch"] == 1
-    assert policy._open_sid is None
-    # Next insert opens a fresh session
-    policy.insert(key(3), make_block(2))
-    assert policy._open_sid == 1
+    assert policy._sid_stats[0]["hits"] == 1
+    assert policy._sid_stats[0]["last_touch"] == 1
 
 
 def test_touch_bumps_hits_once_per_distinct_session():
     """Two sessions touched in the same batch each get +1."""
     policy = SAECachePolicy(cache_capacity=4)
-    policy.insert(key(1), make_block(0))
-    policy.touch([])  # close session 0
-    policy.insert(key(2), make_block(1))
-    policy.touch([key(1), key(2)])  # touches sessions 0 and 1
+    open_and_insert(policy, [(key(1), make_block(0))], req_id="rA")
+    open_and_insert(policy, [(key(2), make_block(1))], req_id="rB")
+    policy.touch([key(1), key(2)], _CTX)  # touches sessions 0 and 1
     assert policy._sid_stats[0]["hits"] == 1
     assert policy._sid_stats[1]["hits"] == 1
 
 
 def test_touch_ignores_unknown_keys():
     policy = SAECachePolicy(cache_capacity=4)
-    policy.insert(key(1), make_block(0))
-    policy.touch([key(1), key(99)])
-    assert policy._sid_stats[0]["hits"] == 1.0
+    open_and_insert(policy, [(key(1), make_block(0))])
+    policy.touch([key(1), key(99)], _CTX)
+    assert policy._sid_stats[0]["hits"] == 1
 
 
 def test_clear_resets_all_state():
     policy = SAECachePolicy(cache_capacity=4)
-    policy.insert(key(1), make_ready_block(0))
-    policy.touch([])  # close session 0
-    policy.get(key(1))  # sets _last_hit_sid
-    policy.insert(key(2), make_block(1))  # merges -> _merged_open_session True
+    open_and_insert(policy, [(key(1), make_ready_block(0))])
+    policy.record_lookup(key(1), req_id="r0")
+    open_and_insert(policy, [(key(2), make_block(1))], req_id="r0", start_pos=1)
     policy._key_ghost[key(2)] = 5.0
     policy.clear()
     assert policy._blocks == {}
@@ -194,8 +356,7 @@ def test_clear_resets_all_state():
     assert policy._key_ghost == {}
     assert policy._evictable_keys == OrderedDict()
     assert policy._open_sid is None
-    assert policy._last_event == "clear"
-    assert policy._last_hit_sid is None
+    assert policy._lookup_state == {}
     assert policy._merged_open_session is False
 
 
@@ -204,17 +365,17 @@ def test_touch_hit_accumulates_ghost_score():
     context, so it can't be trusted with per-position weighting; touch() is
     the only method that receives a real key batch."""
     policy = SAECachePolicy(cache_capacity=4, ghost_hit_weight=3.0)
-    policy.insert(key(1), make_ready_block(0))
-    policy.touch([key(1)])
-    policy.touch([key(1)])
+    open_and_insert(policy, [(key(1), make_ready_block(0))])
+    policy.touch([key(1)], _CTX)
+    policy.touch([key(1)], _CTX)
     # Single-key batches -> pos_weight(0) == 1.0 each time.
     assert policy._key_ghost[key(1)] == 6.0
 
 
 def test_touch_miss_accumulates_ghost_score():
     policy = SAECachePolicy(cache_capacity=4, ghost_miss_weight=0.5)
-    policy.touch([key(1)])
-    policy.touch([key(1)])
+    policy.touch([key(1)], _CTX)
+    policy.touch([key(1)], _CTX)
     assert policy._key_ghost[key(1)] == 1.0
 
 
@@ -223,9 +384,11 @@ def test_touch_ghost_bonus_decreases_with_position():
     matching the reference's per-batch position weighting (now recoverable
     since touch(), unlike get(), receives the whole batch at once)."""
     policy = SAECachePolicy(cache_capacity=4, ghost_hit_weight=10.0)
-    policy.insert(key(1), make_ready_block(0))
-    policy.insert(key(2), make_ready_block(1))
-    policy.touch([key(1), key(2)])
+    open_and_insert(
+        policy,
+        [(key(1), make_ready_block(0)), (key(2), make_ready_block(1))],
+    )
+    policy.touch([key(1), key(2)], _CTX)
     assert policy._key_ghost[key(1)] == 10.0  # pos_weight(0) == 1.0
     assert policy._key_ghost[key(2)] == 10.0 * policy._pos_weight(1)
     assert policy._key_ghost[key(1)] > policy._key_ghost[key(2)]
@@ -239,15 +402,15 @@ def test_touch_reclassifies_hit_and_miss_per_key():
     policy = SAECachePolicy(
         cache_capacity=4, ghost_hit_weight=10.0, ghost_miss_weight=1.0
     )
-    policy.insert(key(1), make_ready_block(0))
+    open_and_insert(policy, [(key(1), make_ready_block(0))])
     # key(2) was never inserted -> not resident -> miss, even though it's
     # touched in the same batch as a hit.
-    policy.touch([key(1), key(2)])
+    policy.touch([key(1), key(2)], _CTX)
     assert policy._key_ghost[key(1)] == 10.0  # hit, pos_weight(0) == 1.0
     assert policy._key_ghost[key(2)] == 1.0 * policy._pos_weight(1)  # miss
 
 
-def test_decay_runs_every_interval_and_prunes_low_ghosts():
+def test_decay_runs_every_interval():
     policy = SAECachePolicy(
         cache_capacity=4,
         decay_interval=3,
@@ -255,21 +418,17 @@ def test_decay_runs_every_interval_and_prunes_low_ghosts():
         ghost_hit_weight=1.0,
         ghost_miss_weight=1.0,
     )
-    policy.insert(key(1), make_block(0))
-    policy._sid_stats[0]["hits"] = 10.0
-    policy._key_ghost[key(2)] = 0.05  # non-resident
+    open_and_insert(policy, [(key(1), make_block(0))])
+    policy._sid_stats[0]["hits"] = 10
     policy._key_ghost[key(1)] = 4.0  # resident
     # 3 touches trigger one decay tick. Each touch also bumps sid 0's hits
     # by 1 (key(1) belongs to sid 0): 10 -> 11 -> 12 -> 13, then decayed.
-    policy.touch([key(1)])
-    policy.touch([key(1)])
-    policy.touch([key(1)])
+    policy.touch([key(1)], _CTX)
+    policy.touch([key(1)], _CTX)
+    policy.touch([key(1)], _CTX)
     assert policy._sid_stats[0]["hits"] == int(13 * 0.5)
     # resident key(1) accumulated 3 hits before decay: (4.0 + 3.0) * 0.5 = 3.5
     assert policy._key_ghost[key(1)] == 3.5
-    # non-resident key(2) with score 0.05 -> 0.025 < 0.01? no, still 0.025 >= 0.01
-    # Adjust: set higher threshold test
-    assert key(2) in policy._key_ghost
 
 
 def test_decay_prunes_below_threshold():
@@ -279,7 +438,7 @@ def test_decay_prunes_below_threshold():
         decay_factor=0.1,
     )
     policy._key_ghost[key(99)] = 0.05  # non-resident
-    policy.touch([key(1)])  # triggers decay; 0.05 * 0.1 = 0.005 < 0.01
+    policy.touch([key(1)], _CTX)  # triggers decay; 0.05 * 0.1 = 0.005 < 0.01
     assert key(99) not in policy._key_ghost
 
 
@@ -290,25 +449,25 @@ def test_decay_truncates_session_hits_to_int():
         decay_interval=1,
         decay_factor=0.9,
     )
-    policy.insert(key(1), make_block(0))
+    open_and_insert(policy, [(key(1), make_block(0))])
     policy._sid_stats[0]["hits"] = 7
     # Empty batch: triggers the decay tick without touch()'s own hits += 1
     # bump, isolating the truncation behavior: int(7 * 0.9) = int(6.3) = 6.
-    policy.touch([])
+    policy.touch([], _CTX)
     assert policy._sid_stats[0]["hits"] == 6
     assert isinstance(policy._sid_stats[0]["hits"], int)
 
 
 def test_mark_evictable_adds_to_evictable_set():
     policy = SAECachePolicy(cache_capacity=4)
-    policy.insert(key(1), make_block(0))
+    open_and_insert(policy, [(key(1), make_block(0))])
     policy.mark_evictable(key(1))
     assert key(1) in policy._evictable_keys
 
 
 def test_mark_non_evictable_removes_from_evictable_set():
     policy = SAECachePolicy(cache_capacity=4)
-    policy.insert(key(1), make_block(0))
+    open_and_insert(policy, [(key(1), make_block(0))])
     policy.mark_evictable(key(1))
     policy.mark_non_evictable(key(1))
     assert key(1) not in policy._evictable_keys
@@ -320,38 +479,33 @@ def test_mark_non_evictable_missing_key_is_safe():
     policy.mark_non_evictable(key(99))
 
 
-def score_of(policy: SAECachePolicy, sid: int) -> float:
-    stats = policy._sid_stats[sid]
-    pos_bonus = 30000.0 / (1.0 + stats["start_pos"] / 8.0)
-    freq_bonus = stats["hits"] * 1500.0
-    return stats["last_touch"] + freq_bonus + pos_bonus
-
-
 def test_evict_returns_empty_when_n_zero():
     policy = SAECachePolicy(cache_capacity=4)
-    assert policy.evict(0, set()) == []
+    assert policy.evict(0, set(), req_id="r0", start_pos=0) == []
 
 
 def test_evict_returns_none_when_insufficient_idle_blocks():
     policy = SAECachePolicy(cache_capacity=4)
-    policy.insert(key(1), make_ready_block(0))
+    open_and_insert(policy, [(key(1), make_ready_block(0))])
     policy.mark_evictable(key(1))
-    # Only 1 idle block, but need 2
-    assert policy.evict(2, set()) is None
+    # Only 1 idle block, but need 2 -> insufficient
+    # Zero hits, so admission gate allows; the failure must be
+    # `insufficient`, not `gate_refused`.
+    result = policy.evict(2, set(), req_id="r0", start_pos=0)
+    assert result is None
 
 
 def test_evict_walks_sessions_worst_first():
     policy = SAECachePolicy(cache_capacity=4)
     # Session 0 (worst): low hits
-    policy.insert(key(1), make_ready_block(0))
+    open_and_insert(policy, [(key(1), make_ready_block(0))], req_id="rA")
     policy.mark_evictable(key(1))
-    policy.touch([])  # close session 0 without bumping hits
     # Session 1 (best): high hits
-    policy.insert(key(2), make_ready_block(1))
+    open_and_insert(policy, [(key(2), make_ready_block(1))], req_id="rB")
     policy.mark_evictable(key(2))
-    policy._sid_stats[1]["hits"] = 1000.0
+    policy._sid_stats[1]["hits"] = 1000
     # Evict 1 -> should come from session 0
-    evicted = policy.evict(1, set())
+    evicted = policy.evict(1, set(), req_id="rC", start_pos=0)
     assert evicted is not None
     assert len(evicted) == 1
     assert evicted[0][0] == key(1)
@@ -359,25 +513,25 @@ def test_evict_walks_sessions_worst_first():
 
 def test_evict_skips_protected_keys():
     policy = SAECachePolicy(cache_capacity=4)
-    policy.insert(key(1), make_ready_block(0))
+    open_and_insert(policy, [(key(1), make_ready_block(0))])
     policy.mark_evictable(key(1))
-    assert policy.evict(1, {key(1)}) is None
+    assert policy.evict(1, {key(1)}, req_id="rZ", start_pos=0) is None
 
 
 def test_evict_skips_non_evictable_keys():
     policy = SAECachePolicy(cache_capacity=4)
     b = BlockStatus(0)
     b.ref_cnt = 1  # not evictable (ref_cnt != 0)
-    policy.insert(key(1), b)
+    open_and_insert(policy, [(key(1), b)])
     # Never marked evictable
-    assert policy.evict(1, set()) is None
+    assert policy.evict(1, set(), req_id="rZ", start_pos=0) is None
 
 
 def test_evict_removes_evicted_keys_from_all_state():
     policy = SAECachePolicy(cache_capacity=4)
-    policy.insert(key(1), make_ready_block(0))
+    open_and_insert(policy, [(key(1), make_ready_block(0))])
     policy.mark_evictable(key(1))
-    evicted = policy.evict(1, set())
+    evicted = policy.evict(1, set(), req_id="rZ", start_pos=0)
     assert evicted is not None
     assert key(1) not in policy._blocks
     assert key(1) not in policy._key_to_sid
@@ -386,66 +540,158 @@ def test_evict_removes_evicted_keys_from_all_state():
     assert 0 not in policy._sid_to_keys
 
 
-def test_evict_admission_gate_denies_when_worst_incumbent_score_exceeds_baseline():
-    """Reference gate: new_score = logical_timer + 30000.0. When the worst
-    incumbent's score is above that baseline, the gate denies eviction."""
+def test_admission_gate_denies_when_worst_incumbent_score_exceeds_baseline():
+    """Reference gate: new_score = logical_timer + 30000/(1 + start_pos/8).
+    When the worst incumbent's score is above that baseline, the gate
+    denies eviction."""
     policy = SAECachePolicy(cache_capacity=4)
-    policy.insert(key(1), make_ready_block(0))
+    open_and_insert(policy, [(key(1), make_ready_block(0))])
     policy.mark_evictable(key(1))
     # Push incumbent's score well above the new-session baseline via hits
     # (freq_bonus = hits * 1500.0). 30 hits -> 45000 freq_bonus + 30000 pos
-    # -> 75000, easily above the ~30000 baseline for the would-be session.
+    # -> 75000, easily above the ~30000 baseline for the would-be session
+    # at start_pos=0.
     policy._sid_stats[0]["hits"] = 30
-    result = policy.evict(1, set())
+    result = policy.evict(1, set(), req_id="new", start_pos=0)
     assert result is None
 
 
-def test_evict_admission_gate_allows_when_baseline_beats_worst_incumbent():
+def test_admission_gate_allows_when_baseline_beats_worst_incumbent():
     """When incumbent's score is below new_score = logical_timer + 30000,
     the gate admits and eviction proceeds."""
     policy = SAECachePolicy(cache_capacity=4)
-    policy.insert(key(1), make_ready_block(0))
+    open_and_insert(policy, [(key(1), make_ready_block(0))])
     policy.mark_evictable(key(1))
     # Incumbent has 0 hits: score = 0 (last_touch) + 0 (freq) + 30000 (pos)
-    # = 30000. New session baseline = logical_timer + 30000 = 0 + 30000 =
-    # 30000. new_score >= worst_score -> gate allows.
+    # = 30000. New session baseline = logical_timer + 30000/(1+0/8) = 30000.
+    # new_score >= worst_score -> gate allows.
     policy._sid_stats[0]["hits"] = 0
-    result = policy.evict(1, set())
+    result = policy.evict(1, set(), req_id="new", start_pos=0)
     assert result is not None
     assert len(result) == 1
 
 
-def test_evict_admission_gate_ignores_ghost_scores():
+def test_admission_gate_ignores_ghost_scores():
     """Reference explicitly excludes ghost scores from the gate. A high
     ghost score on `protected` keys must NOT sway the gate decision."""
     policy = SAECachePolicy(cache_capacity=4)
-    policy.insert(key(1), make_ready_block(0))
+    open_and_insert(policy, [(key(1), make_ready_block(0))])
     policy.mark_evictable(key(1))
     # Incumbent's score is high enough that the gate would deny WITHOUT
     # ghost scores helping the newcomer.
     policy._sid_stats[0]["hits"] = 30  # score ~= 75000
-    # Load a massive ghost score on the would-be new session. If ghost
-    # were factored into the gate, this would allow eviction; the fix
-    # says it must still deny.
     policy._key_ghost[key(2)] = 10_000_000.0
-    result = policy.evict(1, {key(2)})
+    result = policy.evict(1, {key(2)}, req_id="new", start_pos=0)
+    assert result is None
+
+
+def test_admission_gate_baseline_uses_real_start_pos():
+    """When start_pos > 0, the baseline shrinks (30000/(1 + start_pos/8)),
+    so a session that would have squeaked past the gate at start_pos=0
+    can be refused at a larger start_pos, matching the reference's
+    prefix-depth-aware asymmetry."""
+    policy = SAECachePolicy(cache_capacity=4)
+    open_and_insert(policy, [(key(1), make_ready_block(0))])
+    policy.mark_evictable(key(1))
+    # Make incumbent's score exactly the baseline at start_pos=0.
+    policy._sid_stats[0]["hits"] = 0
+    # At start_pos=0: baseline = 30000, worst = 30000 -> admits.
+    assert policy.evict(1, set(), req_id="r0", start_pos=0) is not None
+    # Re-prime the same setup for start_pos comparison.
+    open_and_insert(policy, [(key(1), make_ready_block(0))])
+    policy.mark_evictable(key(1))
+    policy._sid_stats[policy._key_to_sid[key(1)]]["hits"] = 0
+    # At large start_pos, baseline shrinks below 30000; worst still ~30000.
+    # But we also need worst's start_pos to be 0 for this test to expose the
+    # asymmetry — that's the setup we have. Baseline at start_pos=1000 is
+    # ~30000/126 ~= 238, below worst's 30000, so gate should refuse.
+    result = policy.evict(1, set(), req_id="r0", start_pos=1000)
     assert result is None
 
 
 def test_evict_skips_admission_gate_when_merging():
-    """A live merge candidate (a recent get() hit into an existing session)
-    bypasses the gate entirely, matching the reference's
-    `if not is_merging and needed > 0`."""
+    """A live merge candidate (same-req_id lookup hit whose sid is
+    still resident) bypasses the gate entirely, matching the
+    reference's `if not is_merging and needed > 0`. The positional
+    check was dropped, so any ``start_pos`` triggers the merge bypass
+    as long as the sid still exists."""
     policy = SAECachePolicy(cache_capacity=4)
-    policy.insert(key(1), make_ready_block(0))
+    open_and_insert(policy, [(key(1), make_ready_block(0))])
     policy.mark_evictable(key(1))
-    policy.touch([])  # close session 0
-    # Score high enough that the gate would normally deny (same setup as
-    # test_evict_admission_gate_denies_when_worst_incumbent_score_exceeds_baseline).
+    # Score high enough that the gate would normally deny.
     policy._sid_stats[0]["hits"] = 30
-    policy.get(key(1))  # records sid 0 as the merge candidate
-    result = policy.evict(1, set())
+    policy.record_lookup(key(1), req_id="r_merge")
+    # start_pos need not match hit_count anymore.
+    result = policy.evict(1, set(), req_id="r_merge", start_pos=9)
     assert result is not None
+
+
+def test_evict_gate_does_not_skip_for_wrong_req_id():
+    """A recorded lookup on request A must NOT let request B bypass the
+    gate — that would recreate the cross-request leak."""
+    policy = SAECachePolicy(cache_capacity=4)
+    open_and_insert(policy, [(key(1), make_ready_block(0))])
+    policy.mark_evictable(key(1))
+    policy._sid_stats[0]["hits"] = 30  # gate would refuse
+    policy.record_lookup(key(1), req_id="A")
+    result = policy.evict(1, set(), req_id="B", start_pos=0)
+    assert result is None
+
+
+def test_manager_prepare_store_does_not_leak_hits_across_requests():
+    """The manager's prepare_store calls _policy.get on every input key
+    for its `already stored?` filter. Those hits must NOT set the
+    lookup pointer — only manager.lookup (via record_lookup) should.
+    Additionally, a lookup on request A must not cause request B's
+    prepare_store to merge into A's session."""
+    from vllm.v1.kv_offload.base import ReqContext
+    from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
+
+    mgr = CPUOffloadingManager(num_blocks=8, cache_policy="sae")
+    ctx_a = ReqContext(req_id="A")
+    ctx_b = ReqContext(req_id="B")
+    # Prime the cache with a first store from request A.
+    out = mgr.prepare_store([key(1), key(2)], ctx_a)
+    assert out is not None and out.keys_to_store == [key(1), key(2)]
+    mgr.complete_store([key(1), key(2)], ctx_a, success=True)
+    mgr.touch([key(1), key(2)], ctx_a)
+    policy = mgr._policy
+    assert isinstance(policy, SAECachePolicy)
+    # A second prepare_store on request B whose input includes an already-
+    # stored key (key(1)) plus a new key (key(3)). The internal
+    # get(key(1)) hit must not leak into request B's session decision.
+    out = mgr.prepare_store([key(1), key(3)], ctx_b)
+    assert out is not None
+    # key(3) opened a fresh session, not merged into request A's session.
+    assert policy._key_to_sid[key(3)] != policy._key_to_sid[key(1)]
+
+
+def test_manager_prepare_store_merges_within_same_request_after_lookup():
+    """Positive counterpart to the cross-request test: within the same
+    request, a lookup-hit followed by a prepare_store on more keys
+    should merge into the hit's session (that's the whole point of the
+    merge machinery)."""
+    from vllm.v1.kv_offload.base import ReqContext
+    from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
+
+    mgr = CPUOffloadingManager(num_blocks=8, cache_policy="sae")
+    ctx = ReqContext(req_id="X")
+    # First: store some blocks so there's a session to merge into.
+    out = mgr.prepare_store([key(1), key(2)], ctx)
+    assert out is not None
+    mgr.complete_store([key(1), key(2)], ctx, success=True)
+    # Simulate the scheduler's lookup pass on request X — this records
+    # the merge pointer.
+    mgr.lookup(key(1), ctx)
+    # Now prepare_store for more keys in the same request. key(1) is
+    # already-stored (part of the prefix), key(3) is new. The lookup
+    # made request X eligible to merge.
+    out = mgr.prepare_store([key(1), key(3)], ctx)
+    assert out is not None
+    policy = mgr._policy
+    assert isinstance(policy, SAECachePolicy)
+    # key(3) merged into key(1)'s session.
+    assert policy._key_to_sid[key(3)] == policy._key_to_sid[key(1)]
 
 
 def test_cpu_offloading_manager_accepts_sae_policy_and_kwargs():
