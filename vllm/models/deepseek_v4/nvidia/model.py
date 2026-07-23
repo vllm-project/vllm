@@ -813,6 +813,7 @@ def _use_sequence_parallel(vllm_config: VllmConfig) -> bool:
         and parallel_config.enable_expert_parallel
         and parallel_config.tensor_parallel_size > 1
         and (use_mega_moe or parallel_config.data_parallel_size > 1)
+    )
 
 
 def _validate_dsv4_index_cache_platform(skip_topk: bool) -> None:
