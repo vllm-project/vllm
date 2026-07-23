@@ -141,7 +141,9 @@ def _init_dp_environment(world_size, rank, port, dp_size, dp_port):
         ensure_model_parallel_initialized(1, 1)
 
 
-def _make_forward_context(rank, world_size, num_tokens_per_rank):
+def _make_forward_context(
+    rank, world_size, num_tokens_per_rank, num_tokens_across_dp=None
+):
     """Create a forward context with mock DP metadata for AgRs tests.
 
     Returns a context manager suitable for ``with`` statements.
@@ -166,13 +168,13 @@ def _make_forward_context(rank, world_size, num_tokens_per_rank):
         is_moe_model=True,
         data_parallel_rank=rank,
     )
+    if num_tokens_across_dp is None:
+        num_tokens_across_dp = [num_tokens_per_rank] * world_size
     return set_forward_context(
         _AttnMeta(),
         vllm_config,
         num_tokens=num_tokens_per_rank,
-        num_tokens_across_dp=torch.tensor(
-            [num_tokens_per_rank] * world_size, dtype=torch.int
-        ),
+        num_tokens_across_dp=torch.tensor(num_tokens_across_dp, dtype=torch.int),
     )
 
 
@@ -567,7 +569,17 @@ def _args_dispatch_combine_worker(rank, world_size):
                 .contiguous()
             )
 
-            combined = manager.combine(expert_out, is_sequence_parallel=True)
+            combine_output = torch.empty(
+                (tokens_per_rank, hidden_size),
+                device=device,
+                dtype=expert_out.dtype,
+            )
+            combined = manager.combine_into_output(
+                expert_out,
+                combine_output,
+                is_sequence_parallel=True,
+            )
+            assert combined.data_ptr() == combine_output.data_ptr()
             assert combined.shape == (tokens_per_rank, hidden_size)
 
             for i in range(tokens_per_rank):
@@ -578,6 +590,26 @@ def _args_dispatch_combine_worker(rank, world_size):
                 )
 
             torch.distributed.barrier()
+
+    uneven_sizes = [tokens_per_rank + r for r in range(world_size)]
+    with _make_forward_context(
+        rank,
+        world_size,
+        uneven_sizes[rank],
+        num_tokens_across_dp=uneven_sizes,
+    ):
+        dp_metadata = get_forward_context().dp_metadata
+        assert dp_metadata is not None
+        with dp_metadata.sp_local_sizes(sequence_parallel_size=1):
+            assert (
+                manager.allocate_combine_input(
+                    (sum(uneven_sizes), hidden_size),
+                    torch.float32,
+                    device,
+                    is_sequence_parallel=True,
+                )
+                is None
+            )
 
 
 @requires_multi_gpu

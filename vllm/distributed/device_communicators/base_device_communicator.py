@@ -120,6 +120,24 @@ class All2AllManagerBase:
     def combine(self, hidden_states: torch.Tensor, is_sequence_parallel: bool = False):
         raise NotImplementedError
 
+    def allocate_combine_input(
+        self,
+        shape: tuple[int, ...],
+        dtype: torch.dtype,
+        device: torch.device,
+        is_sequence_parallel: bool = False,
+    ) -> torch.Tensor | None:
+        return None
+
+    def combine_into_output(
+        self,
+        hidden_states: torch.Tensor,
+        output: torch.Tensor,
+        is_sequence_parallel: bool = False,
+    ) -> torch.Tensor:
+        output.copy_(self.combine(hidden_states, is_sequence_parallel))
+        return output
+
     def destroy(self):
         pass
 
@@ -267,6 +285,25 @@ class DeviceCommunicatorBase:
     ) -> torch.Tensor:
         raise NotImplementedError
 
+    def reduce_scatterv_into_output(
+        self,
+        input_: torch.Tensor,
+        output: torch.Tensor,
+        dim: int = -1,
+        sizes: list[int] | None = None,
+    ) -> torch.Tensor:
+        output.copy_(self.reduce_scatterv(input_, dim, sizes))
+        return output
+
+    def get_symmetric_memory_buffer(
+        self,
+        role: str,
+        shape: tuple[int, ...],
+        dtype: torch.dtype,
+        device: torch.device,
+    ) -> torch.Tensor | None:
+        return None
+
     def gather(
         self, input_: torch.Tensor, dst: int = 0, dim: int = -1
     ) -> torch.Tensor | None:
@@ -383,6 +420,24 @@ class DeviceCommunicatorBase:
         This is a no-op in the base class.
         """
         return hidden_states
+
+    def allocate_combine_input(
+        self,
+        shape: tuple[int, ...],
+        dtype: torch.dtype,
+        device: torch.device,
+        is_sequence_parallel: bool = False,
+    ) -> torch.Tensor | None:
+        return None
+
+    def combine_into_output(
+        self,
+        hidden_states: torch.Tensor,
+        output: torch.Tensor,
+        is_sequence_parallel: bool = False,
+    ) -> torch.Tensor:
+        output.copy_(self.combine(hidden_states, is_sequence_parallel))
+        return output
 
     def batch_isend_irecv(self, p2p_ops: list):
         raise NotImplementedError
