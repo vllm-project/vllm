@@ -8,7 +8,7 @@ import threading
 import time
 from collections import defaultdict
 from collections.abc import Callable, Iterable, Iterator, Sequence
-from contextlib import contextmanager
+from contextlib import AbstractContextManager, contextmanager, nullcontext
 from copy import copy, deepcopy
 from dataclasses import dataclass, replace
 from functools import reduce
@@ -37,6 +37,7 @@ from vllm.config import (
     update_config,
 )
 from vllm.config.cache import CacheConfig
+from vllm.config.model import PROCESSED_LOGPROBS_MODES
 from vllm.distributed.ec_transfer import get_ec_transfer, has_ec_transfer
 from vllm.distributed.eplb.eplb_state import EplbState
 from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group
@@ -126,7 +127,6 @@ from vllm.utils.torch_utils import (
     PIN_MEMORY,
     async_tensor_h2d,
     current_stream,
-    get_dtype_size,
     is_quantized_kv_cache,
     kv_cache_dtype_str_to_dtype,
 )
@@ -1135,13 +1135,11 @@ class GPUModelRunner(
         """
         self._kv_block_zeroer = KVBlockZeroer(
             self.device,
-            pin_memory=PIN_MEMORY,
             attn_groups_iter=self._kv_cache_spec_attn_group_iterator(),
             kernel_block_sizes=self._kernel_block_sizes,
             cache_dtype=self.cache_config.cache_dtype,
             runner_only_attn_layers=self.runner_only_attn_layers,
             static_forward_context=self.compilation_config.static_forward_context,
-            max_concurrency=self.vllm_config.max_concurrent_batches,
         )
 
     def _zero_block_ids(self, block_ids: list[int]) -> None:
@@ -5635,10 +5633,15 @@ class GPUModelRunner(
             # to gather the logprob for.
             tgt_token_ids = prompt_token_ids[start_tok : start_tok + num_logits]
 
-            # Compute prompt logprobs.
-            logprobs = self.sampler.compute_logprobs(logits)
+            # Compute prompt scores respecting logprobs_mode.
+            # NOTE: prompt tokens skip sampling processors, so
+            # processed_* and raw_* yield the same scores here.
+            if self.model_config.logprobs_mode in ("raw_logits", "processed_logits"):
+                scores = logits.to(torch.float32)
+            else:
+                scores = self.sampler.compute_logprobs(logits)
             token_ids, logprobs, ranks, _ = self.sampler.gather_logprobs(
-                logprobs, num_prompt_logprobs, tgt_token_ids
+                scores, num_prompt_logprobs, tgt_token_ids
             )
 
             # Transfer GPU->CPU async.
@@ -6213,10 +6216,7 @@ class GPUModelRunner(
             # memory during profile_run.
             # No .clone() of logits: warmup output is discarded, so any in-place
             # mutation by forward_native does not affect correctness.
-            if self.sampler.logprobs_mode not in (
-                "processed_logits",
-                "processed_logprobs",
-            ):
+            if self.sampler.logprobs_mode not in PROCESSED_LOGPROBS_MODES:
                 self.sampler(
                     logits=logits,
                     sampling_metadata=replace(
@@ -6756,6 +6756,44 @@ class GPUModelRunner(
         # Capture the large shapes first so that the smaller shapes
         # can reuse the memory pool allocated for the large shapes.
         set_cudagraph_capturing_enabled(True)
+
+        # Setup torch profiler for graph capture traces (conditional)
+        from vllm.distributed.parallel_state import get_world_group
+
+        local_rank = get_world_group().local_rank
+        enable_profiler = (
+            local_rank == 0
+        ) and self.vllm_config.profiler_config.capture_torch_profiler
+        if enable_profiler:
+            trace_dir = (
+                self.vllm_config.profiler_config.torch_profiler_dir + "/capture_traces"
+            )
+            profiler = torch.profiler.profile(
+                activities=[
+                    torch.profiler.ProfilerActivity.CPU,
+                    torch.profiler.ProfilerActivity.CUDA,
+                ],
+                record_shapes=True,
+                profile_memory=True,
+                with_stack=True,
+                on_trace_ready=torch.profiler.tensorboard_trace_handler(
+                    trace_dir,
+                    worker_name=f"graph_capture_rank_{local_rank}",
+                    use_gzip=True,
+                ),
+            )
+            logger.info_once(
+                "Rank %d: Torch profiler enabled for CUDA graph capture, "
+                "traces will be saved to: %s",
+                local_rank,
+                trace_dir,
+            )
+        else:
+            profiler = nullcontext()
+            logger.info_once(
+                "Rank %d: Torch profiler disabled for CUDA graph capture", local_rank
+            )
+
         with self._freeze_gc(), graph_capture(device=self.device):
             torch.accelerator.synchronize()
             torch.accelerator.empty_cache()
@@ -6768,6 +6806,7 @@ class GPUModelRunner(
                 self._capture_cudagraphs(
                     batch_descriptors=batch_descs,
                     cudagraph_runtime_mode=runtime_mode,
+                    profiler=profiler,
                 )
                 torch.accelerator.synchronize()
 
@@ -6811,7 +6850,10 @@ class GPUModelRunner(
         profile_seq_lens: int | None = None,
         allow_microbatching: bool = False,
         num_warmups: int | None = None,
+        profiler: AbstractContextManager[Any] | None = None,
     ):
+        if profiler is None:
+            profiler = nullcontext()
         if num_warmups is None:
             num_warmups = self.compilation_config.cudagraph_num_of_warmups
         force_attention = cudagraph_runtime_mode == CUDAGraphMode.FULL
@@ -6827,22 +6869,29 @@ class GPUModelRunner(
                 num_active_loras=desc.num_active_loras,
                 profile_seq_lens=profile_seq_lens,
             )
-        self._dummy_run(
-            desc.num_tokens,
-            cudagraph_runtime_mode=cudagraph_runtime_mode,
-            uniform_decode=desc.uniform,
-            allow_microbatching=allow_microbatching,
-            skip_eplb=True,
-            remove_lora=False,
-            num_active_loras=desc.num_active_loras,
-            is_graph_capturing=True,
-            profile_seq_lens=profile_seq_lens,
-        )
+        with (
+            profiler,
+            torch.profiler.record_function(
+                f"capture_{desc.num_tokens}_{cudagraph_runtime_mode.name}"
+            ),
+        ):
+            self._dummy_run(
+                desc.num_tokens,
+                cudagraph_runtime_mode=cudagraph_runtime_mode,
+                uniform_decode=desc.uniform,
+                allow_microbatching=allow_microbatching,
+                skip_eplb=True,
+                remove_lora=False,
+                num_active_loras=desc.num_active_loras,
+                is_graph_capturing=True,
+                profile_seq_lens=profile_seq_lens,
+            )
 
     def _capture_cudagraphs(
         self,
         batch_descriptors: list[BatchDescriptor],
         cudagraph_runtime_mode: CUDAGraphMode,
+        profiler: AbstractContextManager[Any] | None = None,
     ):
         assert (
             cudagraph_runtime_mode != CUDAGraphMode.NONE
@@ -6885,6 +6934,7 @@ class GPUModelRunner(
                 batch_desc,
                 cudagraph_runtime_mode=cudagraph_runtime_mode,
                 allow_microbatching=allow_microbatching,
+                profiler=profiler,
             )
             torch.accelerator.synchronize()
         self.maybe_remove_all_loras(self.lora_config)
@@ -7326,27 +7376,15 @@ class GPUModelRunner(
                 elif isinstance(kv_cache_spec, MambaSpec):
                     has_mamba = True
                     raw_tensor = kv_cache_raw_tensors[layer_name]
-                    state_tensors = []
-                    storage_offset_bytes = 0
-                    for shape, dtype in zip(kv_cache_spec.shapes, kv_cache_spec.dtypes):
-                        dtype_size = get_dtype_size(dtype)
-                        num_element_per_page = (
-                            kv_cache_spec.page_size_bytes // dtype_size
-                        )
-                        target_shape = (num_blocks, *shape)
-                        stride = torch.empty(target_shape).stride()
-                        target_stride = (num_element_per_page, *stride[1:])
-                        assert storage_offset_bytes % dtype_size == 0
-                        tensor = torch.as_strided(
-                            raw_tensor.view(dtype),
-                            size=target_shape,
-                            stride=target_stride,
-                            storage_offset=storage_offset_bytes // dtype_size,
-                        )
-                        state_tensors.append(tensor)
-                        storage_offset_bytes += stride[0] * dtype_size
-
-                    kv_caches[layer_name] = state_tensors
+                    page_size_bytes = kv_cache_spec.page_size_bytes
+                    # Hold a single contiguous [num_blocks, 1, 1, page_size_bytes]
+                    # int8 page view per layer; the layer's bind_kv_cache unpacks
+                    # each block's bytes into its conv/ssm state views. Keeping
+                    # one tensor per layer lets the KV connector register it
+                    # without special-casing Mamba.
+                    kv_caches[layer_name] = raw_tensor[
+                        : num_blocks * page_size_bytes
+                    ].view(num_blocks, 1, 1, page_size_bytes)
                 else:
                     raise NotImplementedError
 
@@ -7621,17 +7659,37 @@ class GPUModelRunner(
 
     def _bind_routed_experts_capturer(self, capturer: RoutedExpertsCapturer) -> None:
         from vllm.model_executor.layers.fused_moe.layer import MoERunner
+        from vllm.model_executor.layers.fused_moe.modular_kernel import (
+            FusedMoEExpertsMonolithic,
+        )
         from vllm.model_executor.layers.fused_moe.router.base_router import (
             BaseRouter,
         )
 
         for module in self.model.modules():
-            if isinstance(module, MoERunner) and isinstance(module.router, BaseRouter):
-                layer_id = module.layer_id
+            if not isinstance(module, MoERunner):
+                continue
+            layer_id = module.layer_id
 
-                def _capture_fn(topk_ids, _layer_id=layer_id, _capturer=capturer):
-                    _capturer.capture(_layer_id, topk_ids)
+            def _capture_fn(topk_ids, _layer_id=layer_id, _capturer=capturer):
+                _capturer.capture(_layer_id, topk_ids)
 
+            quant_method = module._quant_method
+            moe_kernel = getattr(quant_method, "moe_kernel", None)
+            impl = getattr(moe_kernel, "impl", None)
+            fused_experts = getattr(impl, "fused_experts", None)
+            if quant_method.is_monolithic:
+                if not (
+                    isinstance(fused_experts, FusedMoEExpertsMonolithic)
+                    and fused_experts.supports_routing_replay_capture()
+                ):
+                    raise ValueError(
+                        "--enable-return-routed-experts is not supported with "
+                        f"monolithic MoE kernel {type(fused_experts).__name__}; "
+                        "routed expert IDs would be silently all-zero."
+                    )
+                fused_experts.set_capture_fn(_capture_fn)
+            elif isinstance(module.router, BaseRouter):
                 module.router.set_capture_fn(_capture_fn)
 
     def may_add_encoder_only_layers_to_kv_cache_config(self) -> None:
