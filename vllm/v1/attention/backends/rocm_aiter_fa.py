@@ -1449,7 +1449,13 @@ class AiterFlashAttentionImpl(AttentionImpl):
         )
 
     def fused_qk_norm_rope_kvcache_supported(self):
-        return rocm_aiter_ops.is_enabled()
+        # Only support fusion when the shuffle KV cache layout is not used;
+        # shuffle uses a different cache update path that the shared contiguous
+        # copy-back cannot reproduce, so fall back to the non-fused path.
+        return (
+            rocm_aiter_ops.is_enabled()
+            and not rocm_aiter_ops.is_shuffle_kv_cache_enabled()
+        )
 
     def do_qk_norm_rope_kvcache_update(
         self,
