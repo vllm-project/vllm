@@ -214,7 +214,7 @@ def test_e2e_swa_plus_full_save_then_lookup_hits():
         block_size=worker.block_size,
         coord=worker.coord,
         tp_rank=worker.tp_rank,
-        group_put_steps=worker._group_tp_replication_factors(),
+        group_put_steps=worker._group_tp_replication_factors,
         kv_role=worker.kv_role,
         ready_event=ready,
         enable_kv_event=False,

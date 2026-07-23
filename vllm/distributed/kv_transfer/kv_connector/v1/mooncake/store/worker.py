@@ -21,6 +21,7 @@ from collections import defaultdict
 from collections.abc import Callable, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
+from math import gcd
 from typing import Any, Literal, TypeVar
 
 import regex as re
@@ -43,7 +44,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_utils import
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.coordinator import (  # noqa: E501
     ExternalCachedBlockPool,
     MooncakeStoreCoordinator,
-    _unwrap_spec,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (  # noqa: E501
     BlobBlockHashes,
@@ -70,9 +70,11 @@ from vllm.v1.core.kv_cache_utils import (
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
+    KVCacheSpec,
     MambaSpec,
     MLAAttentionSpec,
     SlidingWindowMLASpec,
+    UniformTypeKVCacheSpecs,
 )
 
 from .metrics import MooncakeStoreConnectorStats
@@ -455,7 +457,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
         token_databases: list[ChunkedTokenDatabase],
         block_size: int,
         tp_rank: int,
-        group_put_steps: list[int],
+        group_put_steps: Sequence[int],
         kv_role: str,
         ready_event: threading.Event,
         enable_kv_event: bool = False,
@@ -471,9 +473,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
             name="KVCacheStoreSendingThread",
             record_operation=record_operation,
         )
-        # Per-group PUT stride: the ranks holding byte-identical bytes for a
-        # group stripe its blocks across themselves. TP-sharded groups (Mamba
-        # state) have stride 1 — every rank writes its own shard.
+        # Only ranks with identical group bytes may stripe PUTs (e.g., MLA).
         self.group_put_steps = group_put_steps
         self.coord = coord
         self.kv_role = kv_role
@@ -1133,13 +1133,15 @@ class MooncakeStoreWorker:
                 )
             ),
         )
-        factors = self._group_tp_replication_factors()
+        self._group_tp_replication_factors: tuple[int, ...] = (
+            self._compute_group_tp_replication_factors()
+        )
         self.token_dbs: list[ChunkedTokenDatabase] = [
             ChunkedTokenDatabase(
                 dataclasses.replace(
                     metadata,
                     group_id=g_idx,
-                    tp_rank=self.tp_rank // factors[g_idx],
+                    tp_rank=self.tp_rank // self._group_tp_replication_factors[g_idx],
                 ),
                 g.kv_cache_spec.block_size,
                 hash_block_size=self.hash_block_size,
@@ -1148,42 +1150,36 @@ class MooncakeStoreWorker:
         ]
         self._init_lookup_key_prefixes()
 
-    def _group_tp_replication_factors(self) -> list[int]:
-        """Per-group count of TP ranks holding byte-identical cache bytes.
+    def _spec_tp_replication_factor(self, spec: KVCacheSpec) -> int:
+        if self.dcp_size > 1:
+            return 1
+        if isinstance(spec, UniformTypeKVCacheSpecs):
+            inner_factors = tuple(
+                self._spec_tp_replication_factor(inner_spec)
+                for inner_spec in spec.kv_cache_specs.values()
+            )
+            return gcd(*inner_factors) if inner_factors else 1
+        if isinstance(spec, MambaSpec):
+            return 1
+        if isinstance(spec, (MLAAttentionSpec, SlidingWindowMLASpec)):
+            return self.tp_size
+        return max(1, self.tp_size // self.num_kv_head)
 
-        The ranks in a replication set share one key namespace (their shard
-        id, ``tp_rank // factor``) and stripe PUTs across themselves; lookup
-        probes one namespace per distinct shard. MLA latent KV is replicated
-        on every rank; GQA replicates each KV head across
-        ``tp_size // num_kv_head`` ranks; Mamba/linear-attention state is
-        head/dim-sharded, so nothing is replicated. DCP splits the TP group
-        along the sequence dim, so nothing is replicated there either (and
-        striping across `@dcpN` namespaces would leave keys unwritten).
+    def _compute_group_tp_replication_factors(self) -> tuple[int, ...]:
+        """Return the number of byte-identical TP replicas per cache group.
+
+        DCP and Mamba use 1; MLA uses ``tp_size``; GQA uses
+        ``tp_size // num_kv_head``. Packed groups use the GCD of inner factors.
         """
-        factors: list[int] = []
-        for group in self._kv_cache_groups:
-            spec = _unwrap_spec(group.kv_cache_spec)
-            if isinstance(spec, MambaSpec) or self.dcp_size > 1:
-                factors.append(1)
-            elif isinstance(spec, (MLAAttentionSpec, SlidingWindowMLASpec)):
-                factors.append(self.tp_size)
-            else:
-                factors.append(max(1, self.tp_size // self.num_kv_head))
-        return factors
+        return tuple(
+            self._spec_tp_replication_factor(group.kv_cache_spec)
+            for group in self._kv_cache_groups
+        )
 
     def _init_lookup_key_prefixes(self) -> None:
-        """Prepare per-group key prefixes across parallel rank namespaces.
-
-        A boundary is usable only when every namespace the load path will
-        read has the key: one (tp, pcp, dcp, pp) namespace per distinct TP
-        shard of each group.
-        """
-        factors = self._group_tp_replication_factors()
-
         def rank_namespaces(factor: int) -> tuple[tuple[int, int, int, int], ...]:
             if self.dcp_size > 1:
-                # DCP reuses the TP workers and splits each TP group into
-                # contiguous DCP groups, so dcp_rank == tp_rank % dcp_size.
+                # DCP is a TP subdivision: dcp_rank == tp_rank % dcp_size.
                 return tuple(
                     (tp_rank, pcp_rank, tp_rank % self.dcp_size, pp_rank)
                     for pcp_rank in range(self.pcp_size)
@@ -1207,7 +1203,7 @@ class MooncakeStoreWorker:
                     pp_rank=pp_rank,
                 )
                 for tp_rank, pcp_rank, dcp_rank, pp_rank in rank_namespaces(
-                    factors[g_idx]
+                    self._group_tp_replication_factors[g_idx]
                 )
             )
             for g_idx, db in enumerate(self.token_dbs)
@@ -1304,7 +1300,7 @@ class MooncakeStoreWorker:
                 self.token_dbs,
                 self.block_size,
                 self.tp_rank,
-                self._group_tp_replication_factors(),
+                self._group_tp_replication_factors,
                 self.kv_role,
                 ready_event_sending,
                 self.enable_kv_events,
