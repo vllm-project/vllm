@@ -592,18 +592,15 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
         suffix_kv_lens = None
         prefix_scheduler_metadata = None
 
-        if (
-            self.dcp_shares_pcp_ranks
-            and self.dcp_world_size > 1
-            and envs.VLLM_PCP_DCP_SHARDED_KV_CACHE
-        ):
-            # MRv2 PCP+DCP with a SHARDED cache (VLLM_PCP_DCP_SHARDED_KV_CACHE).
-            # DualChunkSwap has already partitioned the batch per rank; DCP only
-            # shards the cache. Both decode and prefill use the context+query+merge
-            # path (_forward_dcp_mrv2_decode): the context attention reads each
-            # rank's local shard of the causal prefix (the full prefix is in the
-            # sharded cache -- do_kv_cache_update all-gathered+wrote it before
-            # forward) and LSE-combines; the query attention reads this rank's own
+        if self.dcp_shares_pcp_ranks and self.dcp_world_size > 1:
+            # MRv2 PCP+DCP (dcp_shares_pcp_ranks): the cache is DCP-sharded
+            # (1/dcp KV per rank). DualChunkSwap has already partitioned the
+            # batch per rank; DCP only shards the cache. Both decode and prefill
+            # use the context+query+merge path (_forward_dcp_mrv2_decode): the
+            # context attention reads each rank's local shard of the causal
+            # prefix (the full prefix is in the sharded cache --
+            # do_kv_cache_update all-gathered+wrote it before forward) and
+            # LSE-combines; the query attention reads this rank's own
             # new K/V. context_kv_lens = seq_lens - query_lens is the absolute
             # position of the chunk start (= the prior prefix length), correct for
             # both decode (query_len=1) and prefill. scheduler_metadata is unused.
@@ -637,11 +634,8 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
                 num_decode_tokens = num_actual_tokens
         elif self.dcp_world_size > 1 and not self.dcp_shares_pcp_ranks:
             # Pure-DCP path (DCP reuses the TP ranks; no PCP). The MRv2 PCP+DCP
-            # case (dcp_shares_pcp_ranks) keeps a REPLICATED cache
-            # (model_runner.pcp_dcp_replicated_cache) and runs the normal FA
-            # path, so it must skip this DCP block entirely -- otherwise
-            # split_dcp_context_queries sets a DCP-split num_decode_tokens that
-            # corrupts do_kv_cache_update's PCP gather and garbles the cache.
+            # case (dcp_shares_pcp_ranks) is handled by the block above and runs
+            # the sharded _forward_dcp_mrv2 path, so it never reaches here.
             query_lens = query_start_loc[1:] - query_start_loc[:-1]
             context_kv_lens = seq_lens - query_lens
             local_context_kv_lens = get_dcp_local_seq_lens(
@@ -1066,10 +1060,10 @@ class FlashAttentionImpl(AttentionImpl):
                     v_descale=v_descale,
                 )
                 return output
-            elif self.dcp_shares_pcp_ranks and envs.VLLM_PCP_DCP_SHARDED_KV_CACHE:
-                # MRv2 PCP+DCP with a SHARDED cache (VLLM_PCP_DCP_SHARDED_KV_CACHE):
-                # decode KV is sharded 1/dcp for the memory win. Decode attends
-                # its local shard + LSE-combine; prefill all-gathers the full KV.
+            elif self.dcp_shares_pcp_ranks:
+                # MRv2 PCP+DCP (dcp_shares_pcp_ranks): the cache is DCP-sharded
+                # (1/dcp KV per rank) for the memory win. Decode attends its
+                # local shard + LSE-combine; prefill all-gathers the full KV.
                 self._forward_dcp_mrv2(
                     query[:num_actual_tokens],
                     key[:num_actual_tokens],
@@ -1084,13 +1078,8 @@ class FlashAttentionImpl(AttentionImpl):
                 )
                 return output
             else:
-                # dcp_world_size <= 1, or dcp_shares_pcp_ranks (MRv2 PCP+DCP).
-                # With the REPLICATED cache (model_runner.pcp_dcp_replicated_cache)
-                # the PCP+DCP case is equivalent to pure PCP, so the normal FA
-                # path is correct for both decode and prefill. The sharded-cache
-                # path (DCP decode-KV memory win: decode LSE-combine + prefill KV
-                # all-gather) lives in _forward_dcp_mrv2 and is reserved for a
-                # future opt-in (Phase 2b).
+                # dcp_world_size <= 1 (no DCP): pure PCP or unparallelized --
+                # the normal FA path is correct for both decode and prefill.
                 window = (
                     attn_metadata.sliding_window
                     if attn_metadata.sliding_window is not None

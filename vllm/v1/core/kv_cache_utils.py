@@ -644,23 +644,14 @@ def resolve_kv_cache_block_sizes(
     """
     cache_config = vllm_config.cache_config
     dcp = vllm_config.parallel_config.decode_context_parallel_size
-    pcp = vllm_config.parallel_config.prefill_context_parallel_size
-    # MRv2 PCP+DCP (dcp == pcp > 1): replicated cache (default) so the
-    # scheduler/hash block size is NOT inflated by dcp; with
-    # VLLM_PCP_DCP_SHARDED_KV_CACHE the cache shards and keeps the inflation.
-    cache_dcp = (
-        1
-        if (dcp > 1 and dcp == pcp and not envs.VLLM_PCP_DCP_SHARDED_KV_CACHE)
-        else dcp
-    )
     groups = kv_cache_config.kv_cache_groups
 
     if len(groups) <= 1:
-        bs = cache_config.block_size * cache_dcp
+        bs = cache_config.block_size * dcp
         return bs, bs
 
     group_block_sizes = [
-        g.kv_cache_spec.block_size * cache_dcp
+        g.kv_cache_spec.block_size * dcp
         if isinstance(g.kv_cache_spec, AttentionSpec)
         else g.kv_cache_spec.block_size
         for g in groups

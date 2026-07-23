@@ -177,20 +177,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.dcp_rank = get_dcp_group().rank_in_group if self.use_dcp else 0
         self.cp_interleave = self.parallel_config.cp_kv_cache_interleave_size
 
-        # MRv2 PCP+DCP (dcp reuses the pcp ranks, i.e. dcp == pcp > 1): the KV
-        # cache is kept REPLICATED -- equivalent to pure PCP -- so the prefill
-        # PCP all-gather write and the FA reads share one non-sharded layout.
-        # This is correct but makes the dcp dimension cache-redundant (no
-        # decode-KV memory win); the sharded-cache path is Phase 2b.
-        self.pcp_size = self.parallel_config.prefill_context_parallel_size
-        self.pcp_dcp_replicated_cache = (
-            self.use_dcp
-            and self.pcp_size == self.dcp_size
-            and not envs.VLLM_PCP_DCP_SHARDED_KV_CACHE
-        )
-        self.cache_dcp_size = 1 if self.pcp_dcp_replicated_cache else self.dcp_size
-        self.cache_dcp_rank = 0 if self.pcp_dcp_replicated_cache else self.dcp_rank
-
         # Multimodal
         self.mm_registry = MULTIMODAL_REGISTRY
         self.supports_mm_inputs = self.mm_registry.supports_multimodal_inputs(
@@ -445,7 +431,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # As a result, one block on the current rank covers `block_size * cp_size`
             # tokens in the full, global (unsharded) sequence.
             max_num_blocks = cdiv(
-                block_table_max_model_len, spec.block_size * self.cache_dcp_size
+                block_table_max_model_len, spec.block_size * self.dcp_size
             )
             # Align to a multiple of (128 / block_size) as required by some attention
             # backends such as TRTLLM (#39324)
@@ -469,8 +455,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             max_num_blocks_per_group=max_num_blocks_per_group,
             device=self.device,
             kernel_block_sizes=self.kernel_block_sizes,
-            cp_size=self.cache_dcp_size,
-            cp_rank=self.cache_dcp_rank,
+            cp_size=self.dcp_size,
+            cp_rank=self.dcp_rank,
             cp_interleave=self.cp_interleave,
         )
         self.pcp_manager = pcp.maybe_build_pcp_manager(

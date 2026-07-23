@@ -6,7 +6,6 @@ from collections import defaultdict
 from collections.abc import Sequence
 from typing import ClassVar
 
-from vllm import envs
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_utils import (
@@ -76,17 +75,8 @@ class SingleTypeKVCacheManager(ABC):
         self.block_size = kv_cache_spec.block_size
         self.dcp_world_size = dcp_world_size
         self.pcp_world_size = pcp_world_size
-        # MRv2 PCP+DCP (dcp == pcp > 1): replicated cache (default) so do not
-        # inflate; with VLLM_PCP_DCP_SHARDED_KV_CACHE the cache is sharded and
-        # keeps the inflation. Pure-DCP (dcp != pcp) always shards.
-        replicated = (
-            dcp_world_size > 1
-            and dcp_world_size == pcp_world_size
-            and not envs.VLLM_PCP_DCP_SHARDED_KV_CACHE
-        )
-        cache_dcp = 1 if replicated else dcp_world_size
-        if cache_dcp > 1:
-            self.block_size *= cache_dcp
+        if dcp_world_size > 1:
+            self.block_size *= dcp_world_size
         self.kv_cache_spec = kv_cache_spec
         self.block_pool = block_pool
         self.enable_caching = enable_caching

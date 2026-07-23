@@ -470,19 +470,8 @@ class UnitaryKVCacheCoordinator(KVCacheCoordinator):
         self.block_size = self.kv_cache_spec.block_size
         self.dcp_world_size = dcp_world_size
         self.pcp_world_size = pcp_world_size
-        # MRv2 PCP+DCP (dcp == pcp > 1): replicated (default) -> no inflation;
-        # with VLLM_PCP_DCP_SHARDED_KV_CACHE the cache shards -> keep inflation.
-        cache_dcp = (
-            1
-            if (
-                dcp_world_size > 1
-                and dcp_world_size == pcp_world_size
-                and not envs.VLLM_PCP_DCP_SHARDED_KV_CACHE
-            )
-            else dcp_world_size
-        )
-        if cache_dcp > 1:
-            self.block_size *= cache_dcp
+        if dcp_world_size > 1:
+            self.block_size *= dcp_world_size
         # For models using only Mamba, block_size is set to max_model_len when
         # prefix caching is disabled, and hash_block_size validation is skipped.
         assert not enable_caching or (hash_block_size == self.block_size), (
