@@ -126,7 +126,7 @@ class CPTestSettings:
                 )
 
 
-if current_platform.is_rocm():
+if current_platform.is_rocm() or current_platform.is_xpu():
     CP_TEXT_GENERATION_MODELS = {
         "deepseek-ai/DeepSeek-V2-Lite-Chat": [
             CPTestSettings.detailed(dcp_multipliers=[1]),
@@ -297,12 +297,14 @@ def test_cp_generation(
     num_gpus_available,
 ):
     if (
-        model_id == "deepseek-ai/DeepSeek-V2-Lite-Chat"
+        current_platform.is_cuda()
+        and model_id == "deepseek-ai/DeepSeek-V2-Lite-Chat"
         and torch.cuda.get_device_capability() < (9, 0)
     ):
         pytest.skip(reason="MLA+DCP requires compute capability of 9.0 or higher")
     if (
-        model_id == "Qwen/Qwen2.5-1.5B-Instruct"
+        current_platform.is_cuda()
+        and model_id == "Qwen/Qwen2.5-1.5B-Instruct"
         and torch.cuda.get_device_capability() != (9, 0)
     ):
         pytest.skip(reason="GQA+DCP currently requires compute capability of 9.0")
