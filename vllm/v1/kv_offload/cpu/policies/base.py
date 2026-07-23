@@ -68,7 +68,11 @@ class CachePolicy(ABC):
 
     @abstractmethod
     def evict(
-        self, n: int, protected: set[OffloadKey]
+        self,
+        n: int,
+        protected: set[OffloadKey],
+        req_id: str,
+        start_pos: int,
     ) -> list[tuple[OffloadKey, BlockStatus]] | None:
         """
         Evict exactly n blocks, skipping any in protected.
@@ -76,6 +80,12 @@ class CachePolicy(ABC):
         Returns a list of (key, block) for the evicted blocks,
         or None if n evictions cannot be satisfied. The operation is atomic:
         if None is returned, no state changes are made.
+
+        ``req_id`` and ``start_pos`` describe the store batch that triggered
+        this eviction: the request making the store, and the prefix
+        position at which the not-yet-stored keys begin within its offload
+        keys. Ignored by LRU/ARC; SAE uses them to compute its admission
+        gate baseline and detect intra-request session continuation.
 
         For ARC: ghost list cleanup (trimming to cache_capacity) is performed
         at the end of a successful eviction.
@@ -95,4 +105,40 @@ class CachePolicy(ABC):
 
     def mark_non_evictable(self, key: OffloadKey) -> None:
         """Called when a block's ref_cnt transitions from 0."""
+        return
+
+    def record_lookup(self, key: OffloadKey, req_id: str) -> None:
+        """Signal that this key was inspected as part of a genuine
+        request-driven lookup (i.e. the scheduler asking whether it can
+        skip recomputation), not as part of an internal existence check
+        (e.g. prepare_store's "already stored?" filter, prepare_load's
+        ref-count bumps).
+
+        ``req_id`` identifies the request making the lookup so policies
+        can bound merge windows per-request (rather than per-scheduler-flow).
+
+        Default is a no-op. SAE overrides this to feed its session-merge
+        pointer, so only scheduler lookups can bias session continuation —
+        matching the reference algorithm's separation of `lookup` vs.
+        `prepare_store` at the manager level."""
+        return
+
+    def on_request_finished(self, req_id: str) -> None:
+        """Called by the manager when a request has finished, so policies
+        that hold per-req_id state (SAE's merge pointer) can drop it.
+        Default is a no-op."""
+        return
+
+    def open_session(self, req_id: str, start_pos: int) -> None:
+        """Called by the manager immediately before the ``insert`` loop of
+        a prepare_store batch. Policies that group inserts into sessions
+        (SAE) decide here whether this batch continues an existing session
+        (merges) or opens a new one. ``req_id`` and ``start_pos`` are the
+        same values passed to the preceding ``evict``. Default is a no-op."""
+        return
+
+    def close_session(self) -> None:
+        """Called by the manager immediately after the ``insert`` loop of
+        a prepare_store batch. SAE seals its open session here (truncating
+        float-accumulated ``hits`` to int). Default is a no-op."""
         return
