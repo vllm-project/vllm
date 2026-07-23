@@ -10,6 +10,8 @@ from collections.abc import Callable
 from contextlib import contextmanager
 from typing import TYPE_CHECKING
 
+import regex as re
+
 import vllm.utils.cpu_resource_utils as cr_utils
 from vllm import envs
 from vllm.logger import init_logger
@@ -20,6 +22,32 @@ if TYPE_CHECKING:
     from vllm.config import VllmConfig
 
 logger = init_logger(__name__)
+
+
+def parse_omp_places(omp_places_str):
+    """Parse an OMP_PLACES string with explicit place lists.
+
+    Handles the ``{cpu_list},{cpu_list},...`` format where each ``cpu_list``
+    is a comma-separated list of CPU IDs or ranges (e.g. ``{0,1,2,3}`` or
+    ``{0-3}``).  Abstract place names (``cores``, ``threads``, ``sockets``)
+    are not supported and will return ``None``.
+
+    Returns a list of sorted int lists, one per place, or ``None`` if the
+    string cannot be parsed as explicit place lists.
+    """
+    omp_places_str = omp_places_str.strip()
+    if re.match(r"^(threads|cores|sockets|ll_caches|numa_domains)", omp_places_str):
+        return None
+    groups = re.findall(r"\{([^}]+)\}", omp_places_str)
+    if not groups:
+        return None
+    places = []
+    for group in groups:
+        try:
+            places.append(cr_utils.parse_id_list(group))
+        except (ValueError, IndexError):
+            return None
+    return places
 
 
 class OMPProcessManager:
@@ -169,8 +197,38 @@ class OMPProcessManager:
             # parse CPU list strings like "5,2-4" to [5, 2, 3, 4]
             self.cpu_lists = [cr_utils.parse_id_list(s) for s in omp_cpuids_list]
         else:
-            # skip
-            self.cpu_lists = []
+            # nobind mode: check if user set OMP_PLACES with explicit
+            # place lists.  If so, parse them so configure_omp_envs can
+            # distribute them across workers (one place per worker).
+            user_omp_places = os.environ.get("OMP_PLACES", None)
+            if user_omp_places is not None:
+                parsed = parse_omp_places(user_omp_places)
+                if parsed is not None:
+                    total_cpus = os.cpu_count() or 1
+                    all_cpus: set[int] = set()
+                    for p in parsed:
+                        all_cpus.update(p)
+                    invalid = {c for c in all_cpus if c >= total_cpus}
+                    if invalid:
+                        logger.warning(
+                            "nobind mode: OMP_PLACES references "
+                            "CPU(s) %s but this machine only has "
+                            "%d logical CPU(s) (0-%d). These CPUs "
+                            "will be ignored by the OMP runtime.",
+                            sorted(invalid),
+                            total_cpus,
+                            total_cpus - 1,
+                        )
+                    self.cpu_lists = parsed
+                    self.skip_setup = False
+                    logger.info(
+                        "nobind mode: parsed OMP_PLACES into %d per-worker places: %s",
+                        len(self.cpu_lists),
+                        user_omp_places,
+                    )
+
+            if self.skip_setup:
+                self.cpu_lists = []
 
         msg = (
             "OpenMP thread binding info: \n"
