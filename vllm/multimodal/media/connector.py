@@ -593,6 +593,20 @@ class MediaConnector:
 
         return image_embedding_io.load_base64("", data)
 
+    async def fetch_image_embedding_async(
+        self,
+        data: str,
+    ) -> torch.Tensor:
+        """
+        Asynchronously load image embedding from a URL.
+        """
+        image_embedding_io = ImageEmbeddingMediaIO()
+        loop = asyncio.get_running_loop()
+
+        return await loop.run_in_executor(
+            global_thread_pool, image_embedding_io.load_base64, "", data
+        )
+
     def fetch_audio_embedding(
         self,
         data: str,
@@ -603,3 +617,17 @@ class MediaConnector:
         audio_embedding_io = AudioEmbeddingMediaIO()
 
         return audio_embedding_io.load_base64("", data)
+
+    async def fetch_audio_embedding_async(
+        self,
+        data: str,
+    ) -> torch.Tensor:
+        """
+        Asynchronously load audio embedding from a URL.
+        """
+        audio_embedding_io = AudioEmbeddingMediaIO()
+        loop = asyncio.get_running_loop()
+
+        return await loop.run_in_executor(
+            global_thread_pool, audio_embedding_io.load_base64, "", data
+        )
