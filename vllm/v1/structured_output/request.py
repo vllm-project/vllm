@@ -31,6 +31,10 @@ class StructuredOutputRequest:
     # reasoning ends in a step whose tokens the scheduler advances immediately
     # (structural tags + speculative decoding, see #42452).
     reasoning_end_token_index: int | None = None
+    # Absolute index into all_token_ids where grammar content began while an
+    # adaptive reasoning prefix was still ambiguous. Once direct content is
+    # confirmed, all tokens from this index must be replayed into the grammar.
+    deferred_grammar_start_index: int | None = None
     reasoning_parser_kwargs: dict[str, Any] | None = None
     # Cached per request; do not share reasoning parsers across requests because
     # their behavior can depend on reasoning_parser_kwargs.

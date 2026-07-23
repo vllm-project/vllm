@@ -40,7 +40,8 @@ class MiniMaxM3ReasoningParser(BaseThinkingReasoningParser):
         self._start_token_ids = self._encode_marker(self.start_token)
         self._end_token_ids = self._encode_marker(self.end_token)
         chat_kwargs = kwargs.get("chat_template_kwargs", {}) or {}
-        self._initial_in_reasoning = chat_kwargs.get("thinking_mode") == "enabled"
+        self._thinking_mode = chat_kwargs.get("thinking_mode", "adaptive")
+        self._initial_in_reasoning = self._thinking_mode == "enabled"
         self._reasoning_ended_streaming = False
         self._reasoning_active_streaming = self._initial_in_reasoning
         self._pending_marker_streaming = False
@@ -200,23 +201,25 @@ class MiniMaxM3ReasoningParser(BaseThinkingReasoningParser):
         if self._reasoning_ended_streaming:
             return True
 
-        if self._reasoning_active_streaming or self._pending_marker_streaming:
-            return False
-
         delta_ids = tuple(delta_ids)
         if self._contains_token_sequence(delta_ids, self._end_token_ids):
             return True
         if self._contains_token_sequence(input_ids, self._end_token_ids):
             return True
+        text = self._decode_text(input_ids)
+        if self.end_token in text:
+            return True
+        if self._reasoning_active_streaming or self._pending_marker_streaming:
+            return False
         if self._initial_in_reasoning:
             return False
         if self._ends_with_token_sequence_prefix(input_ids, self._start_token_ids):
             return False
         if self._ends_with_token_sequence_prefix(input_ids, self._end_token_ids):
             return False
-        if not self._contains_token_sequence(input_ids, self._start_token_ids):
-            return bool(input_ids)
-        return False
+        if self.start_token.startswith(text) or self.end_token.startswith(text):
+            return False
+        return not text.startswith(self.start_token)
 
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:
         if (
@@ -232,7 +235,16 @@ class MiniMaxM3ReasoningParser(BaseThinkingReasoningParser):
         if end_index >= 0:
             return input_ids[end_index + len(self._end_token_ids) :]
 
-        has_start = self._contains_token_sequence(input_ids, self._start_token_ids)
+        text = self._decode_text(input_ids)
+        text_end_index = text.rfind(self.end_token)
+        if text_end_index >= 0:
+            content = text[text_end_index + len(self.end_token) :] or None
+            return self._content_suffix_token_ids(text, input_ids, content)
+
+        has_start = (
+            self._contains_token_sequence(input_ids, self._start_token_ids)
+            or self.start_token in text
+        )
         if self._initial_in_reasoning and not has_start:
             return []
 
@@ -318,3 +330,12 @@ class MiniMaxM3ReasoningParser(BaseThinkingReasoningParser):
         if start_index < 0:
             return True
         return end_index > start_index
+
+    def is_reasoning_end_from_prompt(
+        self, prompt_token_ids: Sequence[int]
+    ) -> bool | None:
+        if self._thinking_mode == "disabled":
+            return True
+        if self._thinking_mode == "enabled":
+            return False
+        return None

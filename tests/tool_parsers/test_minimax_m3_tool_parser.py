@@ -2,15 +2,19 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import json
+from collections.abc import Sequence
 from typing import Any
 
 import pytest
 
 from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionRequest,
     ChatCompletionToolsParam,
     FunctionDefinition,
 )
 from vllm.entrypoints.openai.engine.protocol import DeltaMessage
+from vllm.parser.abstract_parser import DelegatingParser
+from vllm.reasoning.minimax_m3_reasoning_parser import MiniMaxM3ReasoningParser
 from vllm.tool_parsers import ToolParserManager
 from vllm.tool_parsers.minimax_m3_tool_parser import MinimaxM3ToolParser
 
@@ -33,6 +37,37 @@ class FakeTokenizer:
 
     def get_vocab(self) -> dict[str, int]:
         return self.vocab
+
+
+class CombinedTokenizer(FakeTokenizer):
+    """Tokenizer used to exercise the combined reasoning/tool parser."""
+
+    def __init__(self):
+        super().__init__()
+        self.vocab = {"<mm:think>": 1, "</mm:think>": 2}
+        self._id_to_token = {token_id: token for token, token_id in self.vocab.items()}
+
+    def encode(self, text: str, add_special_tokens: bool = False) -> list[int]:
+        if text in self.vocab:
+            return [self.vocab[text]]
+        token_ids = []
+        for char in text:
+            if char not in self.vocab:
+                token_id = len(self.vocab) + 1
+                self.vocab[char] = token_id
+                self._id_to_token[token_id] = char
+            token_ids.append(self.vocab[char])
+        return token_ids
+
+    def decode(
+        self, token_ids: Sequence[int], skip_special_tokens: bool = False
+    ) -> str:
+        return "".join(self._id_to_token[token_id] for token_id in token_ids)
+
+
+class CombinedMiniMaxM3Parser(DelegatingParser):
+    reasoning_parser_cls = MiniMaxM3ReasoningParser
+    tool_parser_cls = MinimaxM3ToolParser
 
 
 def sample_tools() -> list[ChatCompletionToolsParam]:
@@ -263,3 +298,53 @@ def test_streaming_nested_tool_call(parser):
     )
     assert json.loads(parser.prev_tool_call_arr[0]["arguments"])["items"][1]["qty"] == 5
     assert results[-1].content is None
+
+
+def test_combined_streaming_parser_keeps_reasoning_tags_out_of_tool_calls():
+    tokenizer = CombinedTokenizer()
+    tools = sample_tools()
+    parser = CombinedMiniMaxM3Parser(
+        tokenizer,
+        tools=tools,
+        chat_template_kwargs={"thinking_mode": "adaptive"},
+    )
+    request = ChatCompletionRequest(
+        messages=[],
+        model="test-model",
+        tools=tools,
+        tool_choice="auto",
+        include_reasoning=True,
+    )
+    prompt_token_ids = tokenizer.encode(
+        "Instructions contain <mm:think></mm:think> examples.\nai\n"
+    )
+    tool_call = build_order_call()
+    chunks = [
+        "<mm:think>",
+        "plan",
+        "</mm:think>",
+        tool_call[:17],
+        tool_call[17:120],
+        tool_call[120:],
+        "",
+    ]
+    results = []
+
+    for index, chunk in enumerate(chunks):
+        token_ids = [EOS_ID] if not chunk else tokenizer.encode(chunk)
+        delta = parser.parse_delta(
+            chunk,
+            token_ids,
+            request,
+            prompt_token_ids,
+            finished=index == len(chunks) - 1,
+        )
+        if delta is not None:
+            results.append(delta)
+
+    assert "".join(result.reasoning or "" for result in results) == "plan"
+    assert _collect_content(results) == ""
+    tool_calls = _collect_tool_calls(results)
+    assert len(tool_calls) == 1
+    assert tool_calls[0]["name"] == "create_order"
+    assert json.loads(tool_calls[0]["arguments"])["user_id"] == 42

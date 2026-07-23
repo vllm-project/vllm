@@ -87,6 +87,18 @@ class ReasoningParser:
             True if the reasoning content ends in the input_ids.
         """
 
+    def is_reasoning_end_from_prompt(
+        self, prompt_token_ids: Sequence[int]
+    ) -> bool | None:
+        """Check whether reasoning has ended at the generation boundary.
+
+        Parsers whose prompts contain instructional or historical reasoning
+        markers can override this without changing generated-output parsing.
+        ``None`` means generated output must disambiguate whether the response
+        starts with reasoning or direct content.
+        """
+        return self.is_reasoning_end(prompt_token_ids)
+
     def is_reasoning_end_streaming(
         self, input_ids: Sequence[int], delta_ids: Iterable[int]
     ) -> bool:

@@ -274,6 +274,10 @@ class _MarkerReasoner:
     def is_reasoning_end_streaming(self, input_ids, delta_ids):
         return self.marker in list(delta_ids)
 
+    def extract_content_ids(self, input_ids):
+        marker_index = len(input_ids) - 1 - input_ids[::-1].index(self.marker)
+        return input_ids[marker_index + 1 :]
+
 
 def _setup_boundary_request(backend: str):
     """Request with a structural-tag key and reasoning not yet ended."""
