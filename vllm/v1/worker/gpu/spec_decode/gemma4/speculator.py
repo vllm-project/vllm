@@ -76,7 +76,7 @@ class Gemma4Speculator(AutoRegressiveSpeculator):
         model: nn.Module,
         target_attn_layer_names: set[str],
     ) -> None:
-        """Wire draft layers to share KV with the target model.
+        """Wire draft layers to share KV and KV scales with the target model.
 
         Each draft decoder layer is mapped to the last non-KV-shared
         target layer of the same attention type (sliding or full).
@@ -127,6 +127,20 @@ class Gemma4Speculator(AutoRegressiveSpeculator):
             target_idx = candidates[-1]
             target_layer_name = f"{target_prefix}.{target_idx}.self_attn.attn"
             attn.kv_sharing_target_layer_name = target_layer_name
+
+            # KV-cache sharing aliases the cache tensor during allocation, but
+            # the quantization scales live on the Attention modules themselves.
+            # The BF16 draft model has no quantization config, so its K/V scales
+            # otherwise remain at the default 1.0 while it reads the target's
+            # calibrated FP8 cache.
+            target_attn = self.vllm_config.compilation_config.static_forward_context[
+                target_layer_name
+            ]
+            attn._k_scale.copy_(target_attn._k_scale)
+            attn._v_scale.copy_(target_attn._v_scale)
+            attn._k_scale_float = target_attn._k_scale_float
+            attn._v_scale_float = target_attn._v_scale_float
+
             logger.info(
                 "Gemma4 MTP: draft layer %d (%s) -> %s",
                 draft_idx,
