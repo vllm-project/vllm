@@ -9,12 +9,14 @@ import torch
 from torch.nn.parameter import UninitializedParameter
 
 import vllm.model_executor.model_loader.reload.meta as reload_meta
+from vllm.config import ModelConfig
 from vllm.model_executor.layers.attention import MMEncoderAttention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.linear import QKVParallelLinear
 from vllm.model_executor.model_loader.reload.layerwise import (
     finalize_layerwise_reload,
     initialize_layerwise_reload,
+    initialize_online_processing,
     record_metadata_for_reloading,
 )
 from vllm.model_executor.model_loader.reload.meta import (
@@ -102,6 +104,8 @@ class _NonPersistentBufferLayer(torch.nn.Module):
 
 
 class _ReloadableMMEncoderAttention(MMEncoderAttention):
+    """Minimal stand-in to test reload lifecycle without encoder initialization."""
+
     def __init__(self):
         torch.nn.Module.__init__(self)
         self.weight = torch.nn.Parameter(torch.ones(2, 2))
@@ -151,6 +155,7 @@ def test_move_metatensors():
     [_ReloadableMMEncoderAttention, _ReloadableAttentionLayer],
 )
 def test_attention_reload_defers_post_load(default_vllm_config, layer_cls):
+    default_vllm_config.model_config = ModelConfig()
     layer = layer_cls()
     model = torch.nn.Sequential(layer)
     loaded_weight = torch.full_like(layer.weight, 7.0)
@@ -160,6 +165,25 @@ def test_attention_reload_defers_post_load(default_vllm_config, layer_cls):
     layer.weight.weight_loader(layer.weight, loaded_weight)
 
     assert not layer.post_load_called
+
+    finalize_layerwise_reload(model, default_vllm_config.model_config)
+
+    assert layer.post_load_called
+    assert torch.equal(layer.weight, loaded_weight)
+
+
+@pytest.mark.parametrize(
+    "layer_cls",
+    [_ReloadableMMEncoderAttention, _ReloadableAttentionLayer],
+)
+def test_attention_first_load_processes_weights(default_vllm_config, layer_cls):
+    default_vllm_config.model_config = ModelConfig()
+    layer = layer_cls()
+    model = torch.nn.Sequential(layer)
+    loaded_weight = torch.full_like(layer.weight, 7.0)
+
+    initialize_online_processing(layer)
+    layer.weight.weight_loader(layer.weight, loaded_weight)
 
     finalize_layerwise_reload(model, default_vllm_config.model_config)
 
