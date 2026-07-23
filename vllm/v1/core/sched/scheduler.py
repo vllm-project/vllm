@@ -61,7 +61,7 @@ from vllm.v1.outputs import DraftTokenIds, KVConnectorOutput, ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus, StreamingUpdate
 from vllm.v1.spec_decode.dynamic.utils import build_dynamic_sd_schedule_lookup
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
-from vllm.v1.structured_output import StructuredOutputManager
+from vllm.v1.structured_output import StructuredOutputGrammar, StructuredOutputManager
 from vllm.v1.utils import record_function_or_nullcontext
 
 logger = init_logger(__name__)
@@ -201,6 +201,10 @@ class Scheduler(SchedulerInterface):
         # KV Connector: requests in process of async KV loading or recving
         self.finished_recving_kv_req_ids: set[str] = set()
         self.failed_recving_kv_req_ids: set[str] = set()
+
+        # Grammar compilation failures to finish as per-request errors in
+        # update_from_output.
+        self.grammar_compile_error_reqs: set[str] = set()
 
         # Encoder-related.
         # Calculate encoder cache size if applicable
@@ -1729,7 +1733,7 @@ class Scheduler(SchedulerInterface):
                 struct_output_request = request.structured_output_request
                 assert struct_output_request is not None
                 grammar = struct_output_request.grammar
-                assert grammar is not None
+                assert isinstance(grammar, StructuredOutputGrammar)
                 # new_token_ids can be a mixed block of reasoning content, then
                 # the reasoning end marker, then the start of the grammar content.
                 # Trim the reasoning content so the grammar only sees grammar content.
@@ -1859,10 +1863,16 @@ class Scheduler(SchedulerInterface):
             # This is a rare case and unlikely to impact performance.
             self.waiting.remove_requests(stopped_preempted_reqs)
 
+        error_req_ids = set(self.grammar_compile_error_reqs)
+        self.grammar_compile_error_reqs.clear()
         if failed_kv_load_req_ids and not self.recompute_kv_load_failures:
-            requests = [self.requests[req_id] for req_id in failed_kv_load_req_ids]
-            self.finish_requests(failed_kv_load_req_ids, RequestStatus.FINISHED_ERROR)
-            for request in requests:
+            error_req_ids.update(failed_kv_load_req_ids)
+
+        if error_req_ids:
+            error_reqs = self.finish_requests(
+                error_req_ids, RequestStatus.FINISHED_ERROR
+            )
+            for request in error_reqs:
                 outputs[request.client_index].append(
                     EngineCoreOutput(
                         request_id=request.request_id,
@@ -2092,8 +2102,7 @@ class Scheduler(SchedulerInterface):
             # Filter out spec tokens which do not adhere to the grammar.
             if self.structured_output_manager.should_advance(request):
                 metadata = request.structured_output_request
-                assert metadata is not None and metadata.grammar is not None
-                spec_token_ids = metadata.grammar.validate_tokens(spec_token_ids)
+                spec_token_ids = metadata.grammar.validate_tokens(spec_token_ids)  # type: ignore[union-attr]
             # Pad to original number of spec tokens.
             num_invalid_tokens = orig_num_spec_tokens - len(spec_token_ids)
             if num_invalid_tokens:
@@ -2134,7 +2143,7 @@ class Scheduler(SchedulerInterface):
 
     def finish_requests(
         self, request_ids: str | Iterable[str] | None, finished_status: RequestStatus
-    ) -> list[tuple[str, int]]:
+    ) -> list[Request]:
         """Handles the finish signal from outside the scheduler.
 
         For example, the API server can abort a request when the client
@@ -2143,8 +2152,8 @@ class Scheduler(SchedulerInterface):
         If request_ids is None, all requests will be finished.
 
         Returns:
-            Tuple of (req_id, client_index) for requests that were aborted. Will not
-            include any that were already finished.
+            List of requests that were aborted. Will not include any that were
+            already finished.
         """
         assert RequestStatus.is_finished(finished_status)
         if isinstance(request_ids, str):
@@ -2193,7 +2202,7 @@ class Scheduler(SchedulerInterface):
             request.status = finished_status
             self._free_request(request, delay_free_blocks=delay_free_blocks)
 
-        return [(r.request_id, r.client_index) for r in valid_requests]
+        return valid_requests
 
     def _free_request(
         self, request: Request, delay_free_blocks: bool = False
@@ -2593,7 +2602,10 @@ class Scheduler(SchedulerInterface):
 
         if request.status == RequestStatus.WAITING_FOR_STRUCTURED_OUTPUT_GRAMMAR:
             structured_output_req = request.structured_output_request
-            if not (structured_output_req and structured_output_req.grammar):
+            if not structured_output_req or structured_output_req.grammar is None:
+                return False
+            if isinstance(structured_output_req.grammar, Exception):
+                self.grammar_compile_error_reqs.add(request.request_id)
                 return False
             request.status = RequestStatus.WAITING
             return True
