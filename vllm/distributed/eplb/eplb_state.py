@@ -836,7 +836,11 @@ class EplbState:
                     logical_loads = global_expert_load_window.float()
                     ep_size = ep_group.size()
 
-                    def rank_load_imbalance(mapping: torch.Tensor) -> float:
+                    def rank_load_imbalance(
+                        mapping: torch.Tensor,
+                        logical_loads: torch.Tensor = logical_loads,
+                        ep_size: int = ep_size,
+                    ) -> float:
                         mapping = mapping.to(
                             device=logical_loads.device,
                             dtype=torch.long,
