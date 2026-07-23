@@ -13,90 +13,6 @@ from vllm.envs import (
     environment_variables,
 )
 
-# Frozen snapshot of the pre-refactor compile_factors() ignore-set (75
-# entries). The declarative json_schema_extra markers must reproduce this
-# exactly, minus VLLM_CPU_MOE_PREPACK (a dead entry with no backing field).
-# Retired in the follow-up task once the literal is gone.
-LEGACY_IGNORED_FACTORS = frozenset(
-    {
-        "MAX_JOBS",
-        "VLLM_RPC_BASE_PATH",
-        "VLLM_USE_MODELSCOPE",
-        "VLLM_RINGBUFFER_WARNING_INTERVAL",
-        "VLLM_DEBUG_DUMP_PATH",
-        "VLLM_PORT",
-        "VLLM_CACHE_ROOT",
-        "VLLM_XLA_CACHE_PATH",
-        "VLLM_CONFIG_ROOT",
-        "VLLM_ENABLE_STARTUP_PLAN",
-        "LD_LIBRARY_PATH",
-        "VLLM_SERVER_DEV_MODE",
-        "VLLM_USE_RUST_FRONTEND",
-        "VLLM_RUST_FRONTEND_PATH",
-        "VLLM_USE_PRECOMPILED_RUST",
-        "VLLM_USE_FASTOKENS",
-        "VLLM_DP_MASTER_IP",
-        "VLLM_DP_MASTER_PORT",
-        "VLLM_NIXL_SIDE_CHANNEL_HOST",
-        "VLLM_RANDOMIZE_DP_DUMMY_INPUTS",
-        "VLLM_MODEL_REDIRECT_PATH",
-        "VLLM_HOST_IP",
-        "VLLM_FORCE_AOT_LOAD",
-        "S3_ACCESS_KEY_ID",
-        "S3_SECRET_ACCESS_KEY",
-        "S3_ENDPOINT_URL",
-        "VLLM_USAGE_STATS_SERVER",
-        "VLLM_NO_USAGE_STATS",
-        "VLLM_DO_NOT_TRACK",
-        "VLLM_LOGGING_LEVEL",
-        "VLLM_LOGGING_PREFIX",
-        "VLLM_LOGGING_STREAM",
-        "VLLM_LOGGING_CONFIG_PATH",
-        "VLLM_LOGGING_COLOR",
-        "VLLM_LOG_STATS_INTERVAL",
-        "VLLM_DEBUG_LOG_API_SERVER_RESPONSE",
-        "VLLM_TUNED_CONFIG_FOLDER",
-        "VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR",
-        "VLLM_FLASHINFER_AUTOTUNE_SKIP_OPS",
-        "VLLM_ENGINE_ITERATION_TIMEOUT_S",
-        "VLLM_HTTP_TIMEOUT_KEEP_ALIVE",
-        "VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS",
-        "VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS",
-        "VLLM_KEEP_ALIVE_ON_ENGINE_DEATH",
-        "VLLM_IMAGE_FETCH_TIMEOUT",
-        "VLLM_VIDEO_FETCH_TIMEOUT",
-        "VLLM_AUDIO_FETCH_TIMEOUT",
-        "VLLM_MEDIA_CACHE",
-        "VLLM_MEDIA_CACHE_MAX_SIZE_MB",
-        "VLLM_MEDIA_CACHE_TTL_HOURS",
-        "VLLM_MEDIA_FETCH_MAX_RETRIES",
-        "VLLM_MEDIA_URL_ALLOW_REDIRECTS",
-        "VLLM_MEDIA_LOADING_THREAD_COUNT",
-        "VLLM_MAX_AUDIO_CLIP_FILESIZE_MB",
-        "VLLM_MAX_AUDIO_DECODE_DURATION_S",
-        "VLLM_MAX_AUDIO_PREPROCESS_WORKERS",
-        "VLLM_MAX_IMAGE_PIXELS",
-        "VLLM_VIDEO_LOADER_BACKEND",
-        "VLLM_MEDIA_CONNECTOR",
-        "VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME",
-        "VLLM_ASSETS_CACHE",
-        "VLLM_ASSETS_CACHE_MODEL_CLEAN",
-        "VLLM_WORKER_MULTIPROC_METHOD",
-        "VLLM_ENABLE_V1_MULTIPROCESSING",
-        "VLLM_V1_OUTPUT_PROC_CHUNK_SIZE",
-        "VLLM_CPU_KVCACHE_SPACE",
-        "VLLM_CPU_MOE_PREPACK",
-        "VLLM_ZENTORCH_WEIGHT_PREPACK",
-        "VLLM_TEST_FORCE_LOAD_FORMAT",
-        "VLLM_ENABLE_CUDA_COMPATIBILITY",
-        "VLLM_CUDA_COMPATIBILITY_PATH",
-        "VLLM_SKIP_MODEL_NAME_VALIDATION",
-        "LOCAL_RANK",
-        "CUDA_VISIBLE_DEVICES",
-        "NO_COLOR",
-    }
-)
-
 
 def test_getattr_without_cache(monkeypatch: pytest.MonkeyPatch):
     assert envs.VLLM_HOST_IP == ""
@@ -278,8 +194,13 @@ class TestVllmMaxNSequences:
             SamplingParams(n=129)
 
 
-def test_non_compile_factors_matches_legacy_set():
-    """The declarative markers reproduce the old literal exactly, minus the
-    one dead entry (VLLM_CPU_MOE_PREPACK has no backing field)."""
-    expected = LEGACY_IGNORED_FACTORS - {"VLLM_CPU_MOE_PREPACK"}
-    assert expected == envs._NON_COMPILE_FACTORS
+def test_compile_factors_respects_declarative_flag():
+    """compile_factors() honors the per-field compile_factor marker."""
+    factors = envs.compile_factors()
+    # Marked compile_factor=False -> excluded.
+    assert "VLLM_PORT" not in factors
+    assert "VLLM_CONFIG_ROOT" not in factors
+    # Unmarked -> included (safe default).
+    assert "VLLM_USE_DEEP_GEMM" in factors
+    # Dead entry has no field and is gone.
+    assert "VLLM_CPU_MOE_PREPACK" not in factors
