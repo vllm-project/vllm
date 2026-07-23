@@ -808,6 +808,9 @@ class CoreEngineActorManager:
                 else:
                     bundles = [{device_str: 1.0}] * world_size + [{"CPU": 1.0}]
 
+                # STRICT_PACK is intentionally hardcoded here (not
+                # controlled by VLLM_RAY_PG_STRATEGY): dynamic DP rank
+                # addition must place new bundles on a specific node.
                 pg = ray.util.placement_group(
                     name=f"dp_rank_{rank}",
                     strategy="STRICT_PACK",
