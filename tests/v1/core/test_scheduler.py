@@ -26,7 +26,11 @@ from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.utils.hashing import sha256
 from vllm.v1.core.encoder_cache_manager import EncoderCacheManager
 from vllm.v1.core.kv_cache_coordinator import HybridKVCacheCoordinator
-from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
+from vllm.v1.core.kv_cache_utils import (
+    get_group_id,
+    get_request_block_hasher,
+    init_none_hash,
+)
 from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
@@ -36,6 +40,8 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
     MambaSpec,
+    MLAAttentionSpec,
+    SlidingWindowMLASpec,
 )
 from vllm.v1.outputs import DraftTokenIds, KVConnectorOutput, ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
@@ -5469,12 +5475,15 @@ def test_async_load_reservation_prevents_wedge_e2e():
     assert b.request_id not in req_to_blocks
 
 
-def _create_hybrid_mamba_connector_scheduler(
+def _create_hybrid_connector_scheduler(
     matched_tokens: int,
     block_size: int = 16,
     num_blocks: int = 100,
+    *,
+    hash_block_size: int | None = None,
+    kv_cache_groups: list[KVCacheGroupSpec] | None = None,
 ) -> Scheduler:
-    """FA + Mamba ("all" cache mode) scheduler with a MockKVConnector."""
+    """Hybrid scheduler with a MockKVConnector."""
     model_config = ModelConfig(
         model="facebook/opt-125m",
         trust_remote_code=True,
@@ -5507,10 +5516,8 @@ def _create_hybrid_mamba_connector_scheduler(
         ),
     )
     vllm_config.cache_config.num_gpu_blocks = num_blocks
-    kv_cache_config = KVCacheConfig(
-        num_blocks=num_blocks,
-        kv_cache_tensors=[],
-        kv_cache_groups=[
+    if kv_cache_groups is None:
+        kv_cache_groups = [
             KVCacheGroupSpec(
                 ["fa"],
                 FullAttentionSpec(
@@ -5529,7 +5536,11 @@ def _create_hybrid_mamba_connector_scheduler(
                     mamba_cache_mode="all",
                 ),
             ),
-        ],
+        ]
+    kv_cache_config = KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=[],
+        kv_cache_groups=kv_cache_groups,
     )
     register_all_kvcache_specs(vllm_config)
     return Scheduler(
@@ -5537,7 +5548,7 @@ def _create_hybrid_mamba_connector_scheduler(
         kv_cache_config=kv_cache_config,
         structured_output_manager=StructuredOutputManager(vllm_config),
         block_size=block_size,
-        hash_block_size=block_size,
+        hash_block_size=hash_block_size or block_size,
         log_stats=True,
     )
 
@@ -5563,7 +5574,7 @@ def test_hybrid_per_group_hit_divergence_with_connector(
     every group is consistent at.
     """
     block_size = 16
-    scheduler = _create_hybrid_mamba_connector_scheduler(matched_tokens)
+    scheduler = _create_hybrid_connector_scheduler(matched_tokens)
     manager = scheduler.kv_cache_manager
     assert isinstance(manager.coordinator, HybridKVCacheCoordinator)
 
@@ -5619,7 +5630,7 @@ def test_hybrid_per_group_hit_divergence_fa_deeper_no_external():
     convergent boundary that every group agrees on (block 0's surviving state).
     """
     block_size = 16
-    scheduler = _create_hybrid_mamba_connector_scheduler(matched_tokens=0)
+    scheduler = _create_hybrid_connector_scheduler(matched_tokens=0)
     manager = scheduler.kv_cache_manager
     assert isinstance(manager.coordinator, HybridKVCacheCoordinator)
 
@@ -5661,3 +5672,229 @@ def test_hybrid_per_group_hit_divergence_fa_deeper_no_external():
     num_scheduled = output.num_scheduled_tokens[replay.request_id]
     # Must resume at the convergent boundary (block 0), not the deep FA hit.
     assert replay.num_tokens - num_scheduled == block_size
+
+
+def _dsv4_like_kv_cache_groups() -> list[KVCacheGroupSpec]:
+    return [
+        KVCacheGroupSpec(
+            ["dense_mla"],
+            MLAAttentionSpec(
+                block_size=256,
+                num_kv_heads=1,
+                head_size=1,
+                dtype=torch.uint8,
+                compress_ratio=4,
+                model_version="deepseek_v4",
+            ),
+        ),
+        KVCacheGroupSpec(
+            ["swa_tail"],
+            SlidingWindowMLASpec(
+                block_size=64,
+                num_kv_heads=1,
+                head_size=1,
+                dtype=torch.uint8,
+                sliding_window=128,
+                model_version="deepseek_v4",
+            ),
+        ),
+        KVCacheGroupSpec(
+            ["c4_state"],
+            SlidingWindowMLASpec(
+                block_size=4,
+                num_kv_heads=1,
+                head_size=1,
+                dtype=torch.uint8,
+                sliding_window=8,
+            ),
+        ),
+        KVCacheGroupSpec(
+            ["c128_state"],
+            SlidingWindowMLASpec(
+                block_size=8,
+                num_kv_heads=1,
+                head_size=1,
+                dtype=torch.uint8,
+                sliding_window=128,
+            ),
+        ),
+    ]
+
+
+def _seed_hybrid_prefix_and_evict_groups(
+    scheduler: Scheduler, group_ids: set[int]
+) -> None:
+    [fill] = create_requests(
+        num_requests=1,
+        num_tokens=1024,
+        max_tokens=1,
+        same_prompt=True,
+        block_size=4,
+        req_ids=["fill"],
+    )
+    manager = scheduler.kv_cache_manager
+    computed_blocks, num_computed, _ = manager.get_computed_blocks(fill)
+    assert num_computed == 0
+    assert (
+        manager.allocate_slots(
+            fill,
+            fill.num_tokens,
+            num_new_computed_tokens=0,
+            new_computed_blocks=computed_blocks,
+        )
+        is not None
+    )
+    manager.free(fill)
+
+    if not group_ids:
+        return
+
+    block_ids = {
+        block.block_id
+        for block in manager.block_pool.blocks
+        if block.block_hash is not None and get_group_id(block.block_hash) in group_ids
+    }
+    assert block_ids
+    manager.evict_blocks(block_ids)
+
+
+@pytest.mark.parametrize(
+    "kv_cache_groups,evicted_group_ids,num_tokens,expected_target_counts",
+    [
+        pytest.param(
+            _dsv4_like_kv_cache_groups(),
+            {1, 2, 3},
+            1280,
+            [1, 2, 2, 16],
+            id="dsv4-missing-tail",
+        ),
+        pytest.param(
+            _dsv4_like_kv_cache_groups(),
+            set(),
+            1100,
+            [1, 2, 2, 10],
+            id="dsv4-retained-tail",
+        ),
+        pytest.param(None, {1}, 1280, [1, 1], id="mamba-like"),
+    ],
+)
+def test_remote_prefill_hybrid_uses_dense_local_hit(
+    kv_cache_groups: list[KVCacheGroupSpec] | None,
+    evicted_group_ids: set[int],
+    num_tokens: int,
+    expected_target_counts: list[int],
+):
+    scheduler = _create_hybrid_connector_scheduler(
+        matched_tokens=0,
+        block_size=256,
+        hash_block_size=4,
+        num_blocks=800,
+        kv_cache_groups=kv_cache_groups,
+    )
+    _seed_hybrid_prefix_and_evict_groups(scheduler, evicted_group_ids)
+
+    queried_local_hits: list[int] = []
+    allocated_targets: list[list[list[int]]] = []
+
+    def get_external_hit(request: Request, num_computed_tokens: int):
+        queried_local_hits.append(num_computed_tokens)
+        return request.num_tokens - num_computed_tokens, True
+
+    def record_targets(_request: Request, blocks, _num_external_tokens: int):
+        allocated_targets.append(blocks.get_unhashed_block_ids_all_groups())
+
+    assert scheduler.connector is not None
+    scheduler.connector.get_num_new_matched_tokens = get_external_hit
+    scheduler.connector.update_state_after_alloc = record_targets
+
+    [replay] = create_requests(
+        num_requests=1,
+        num_tokens=num_tokens,
+        max_tokens=1,
+        same_prompt=True,
+        block_size=4,
+        req_ids=["replay"],
+    )
+    replay.kv_transfer_params = {"do_remote_prefill": True}
+    scheduler.add_request(replay)
+    output = scheduler.schedule()
+
+    assert queried_local_hits == [1024]
+    assert [len(group) for group in allocated_targets[0]] == expected_target_counts
+    assert output.scheduled_new_reqs == []
+    assert replay.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+
+
+def test_remote_prefill_hybrid_falls_back_without_external_hit():
+    scheduler = _create_hybrid_connector_scheduler(
+        matched_tokens=0,
+        block_size=256,
+        hash_block_size=4,
+        num_blocks=800,
+        kv_cache_groups=_dsv4_like_kv_cache_groups(),
+    )
+    _seed_hybrid_prefix_and_evict_groups(scheduler, {1, 2, 3})
+
+    queried_local_hits: list[int] = []
+
+    def miss(_request: Request, num_computed_tokens: int):
+        queried_local_hits.append(num_computed_tokens)
+        return 0, False
+
+    assert scheduler.connector is not None
+    scheduler.connector.get_num_new_matched_tokens = miss
+
+    [replay] = create_requests(
+        num_requests=1,
+        num_tokens=1280,
+        max_tokens=1,
+        same_prompt=True,
+        block_size=4,
+        req_ids=["replay"],
+    )
+    replay.kv_transfer_params = {"do_remote_prefill": True}
+    scheduler.add_request(replay)
+    output = scheduler.schedule()
+
+    assert queried_local_hits == [1024]
+    assert output.num_scheduled_tokens[replay.request_id] == 1280
+    assert output.scheduled_new_reqs[0].num_computed_tokens == 0
+
+
+def test_hybrid_connector_without_remote_prefill_keeps_convergent_hit():
+    scheduler = _create_hybrid_connector_scheduler(
+        matched_tokens=0,
+        block_size=256,
+        hash_block_size=4,
+        num_blocks=800,
+        kv_cache_groups=_dsv4_like_kv_cache_groups(),
+    )
+    _seed_hybrid_prefix_and_evict_groups(scheduler, {1, 2, 3})
+
+    queried_local_hits: list[int] = []
+    allocated_targets: list[list[list[int]]] = []
+
+    def get_external_hit(_request: Request, num_computed_tokens: int):
+        queried_local_hits.append(num_computed_tokens)
+        return 1024, True
+
+    def record_targets(_request: Request, blocks, _num_external_tokens: int):
+        allocated_targets.append(blocks.get_unhashed_block_ids_all_groups())
+
+    assert scheduler.connector is not None
+    scheduler.connector.get_num_new_matched_tokens = get_external_hit
+    scheduler.connector.update_state_after_alloc = record_targets
+
+    [replay] = create_requests(
+        num_requests=1,
+        num_tokens=1280,
+        max_tokens=1,
+        same_prompt=True,
+        block_size=4,
+        req_ids=["replay"],
+    )
+    scheduler.add_request(replay)
+    scheduler.schedule()
+
+    assert queried_local_hits == [0]
+    assert [len(group) for group in allocated_targets[0]] == [4, 2, 2, 16]
