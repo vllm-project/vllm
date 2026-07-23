@@ -1167,10 +1167,13 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
         uuid: str | None,
     ):
         if isinstance(image_embeds, dict):
-            embeds = {
-                k: await self._connector.fetch_image_embedding_async(v)
-                for k, v in image_embeds.items()
-            }
+            tensors = await asyncio.gather(
+                *(
+                    self._connector.fetch_image_embedding_async(v)
+                    for v in image_embeds.values()
+                )
+            )
+            embeds = dict(zip(image_embeds, tensors))
         elif isinstance(image_embeds, str):
             embeds = await self._connector.fetch_image_embedding_async(image_embeds)
         else:
@@ -1200,10 +1203,13 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
         uuid: str | None,
     ):
         if isinstance(audio_embeds, dict):
-            embeds = {
-                k: await self._connector.fetch_audio_embedding_async(v)
-                for k, v in audio_embeds.items()
-            }
+            tensors = await asyncio.gather(
+                *(
+                    self._connector.fetch_audio_embedding_async(v)
+                    for v in audio_embeds.values()
+                )
+            )
+            embeds = dict(zip(audio_embeds, tensors))
         elif isinstance(audio_embeds, str):
             embeds = await self._connector.fetch_audio_embedding_async(audio_embeds)
         else:
