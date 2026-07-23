@@ -5516,7 +5516,6 @@ dependencies = [
  "asynk-strim-attr",
  "bytes",
  "clap",
- "easy-ext",
  "expect-test",
  "futures",
  "half",
@@ -5546,6 +5545,7 @@ dependencies = [
  "tracing-subscriber",
  "trait-set",
  "uuid",
+ "vllm-chat-types",
  "vllm-engine-core-client",
  "vllm-llm",
  "vllm-parser",
@@ -5553,6 +5553,16 @@ dependencies = [
  "vllm-tokenizer",
  "xgrammar-structural-tag",
  "zeromq",
+]
+
+[[package]]
+name = "vllm-chat-types"
+version = "0.1.0"
+dependencies = [
+ "easy-ext",
+ "serde",
+ "serde_json",
+ "serde_with",
 ]
 
 [[package]]
@@ -5695,11 +5705,11 @@ dependencies = [
  "expect-test",
  "futures",
  "openai-protocol",
- "serde",
  "serde_json",
  "thiserror 2.0.18",
  "thiserror-ext",
  "tool-parser",
+ "vllm-chat-types",
  "vllm-tokenizer",
  "winnow",
  "xgrammar-structural-tag",

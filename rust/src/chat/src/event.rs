@@ -1,155 +1,17 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-use std::ops::Deref;
 use std::sync::Arc;
 
-use serde::{Deserialize, Serialize};
 use vllm_llm::TokenUsage;
 use vllm_text::{DecodedLogprobs, DecodedPromptLogprobs};
 
 use crate::FinishReason;
 
-/// One finalized assistant tool call.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AssistantToolCall {
-    pub id: String,
-    pub name: String,
-    pub arguments: String,
-}
-
-/// Semantic kind of one assistant output block.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum AssistantBlockKind {
-    /// Visible final-answer text.
-    Text,
-    /// Extracted reasoning content.
-    Reasoning,
-    /// One finalized tool call.
-    ToolCall,
-}
-
-/// One structured assistant output block.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum AssistantContentBlock {
-    /// Visible final-answer text.
-    Text { text: String },
-    /// Extracted reasoning content.
-    Reasoning { text: String },
-    /// One finalized tool call.
-    ToolCall(AssistantToolCall),
-}
-
-impl AssistantContentBlock {
-    /// Return the semantic kind of this block.
-    pub fn kind(&self) -> AssistantBlockKind {
-        match self {
-            Self::Text { .. } => AssistantBlockKind::Text,
-            Self::Reasoning { .. } => AssistantBlockKind::Reasoning,
-            Self::ToolCall(..) => AssistantBlockKind::ToolCall,
-        }
-    }
-
-    /// Return this block as one finalized tool call, if applicable.
-    pub fn as_tool_call(&self) -> Option<&AssistantToolCall> {
-        match self {
-            Self::ToolCall(call) => Some(call),
-            _ => None,
-        }
-    }
-
-    /// Return a copy of this block with leading and trailing whitespace trimmed from all text
-    /// fields and tool call arguments, or `None` if the resulting text would be empty.
-    pub fn trim(mut self) -> Option<Self> {
-        match &mut self {
-            Self::Text { text } | Self::Reasoning { text } => {
-                let trimmed_text = text.trim();
-                if trimmed_text.is_empty() {
-                    return None;
-                } else {
-                    *text = trimmed_text.to_string();
-                }
-            }
-            Self::ToolCall(call) => {
-                call.arguments = call.arguments.trim().to_string();
-            }
-        }
-        Some(self)
-    }
-}
-
-#[easy_ext::ext(AssistantMessageExt)]
-impl [AssistantContentBlock] {
-    /// Concatenate all visible final-answer text blocks.
-    pub fn text(&self) -> String {
-        self.iter()
-            .filter_map(|block| match block {
-                AssistantContentBlock::Text { text } => Some(text.as_str()),
-                _ => None,
-            })
-            .collect()
-    }
-
-    /// Concatenate all extracted reasoning blocks, if any.
-    pub fn reasoning(&self) -> Option<String> {
-        Some(
-            self.iter()
-                .filter_map(|block| match block {
-                    AssistantContentBlock::Reasoning { text } => Some(text.as_str()),
-                    _ => None,
-                })
-                .collect(),
-        )
-        .filter(|s: &String| !s.is_empty())
-    }
-
-    /// Return whether this assistant message contains any non-empty reasoning
-    /// text blocks.
-    pub fn has_reasoning(&self) -> bool {
-        self.iter().any(|block| match block {
-            AssistantContentBlock::Reasoning { text } => !text.is_empty(),
-            _ => false,
-        })
-    }
-
-    /// Return finalized assistant tool calls in encounter order.
-    pub fn tool_calls(&self) -> impl Iterator<Item = &AssistantToolCall> {
-        self.iter().filter_map(AssistantContentBlock::as_tool_call)
-    }
-
-    /// Return whether this assistant message contains any tool-call blocks.
-    pub fn has_tool_calls(&self) -> bool {
-        self.iter().any(|block| matches!(block, AssistantContentBlock::ToolCall(_)))
-    }
-}
-
-/// Final structured assistant message assembled from the event stream.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AssistantMessage {
-    pub content: Vec<AssistantContentBlock>,
-}
-
-impl Deref for AssistantMessage {
-    type Target = [AssistantContentBlock];
-
-    fn deref(&self) -> &Self::Target {
-        &self.content
-    }
-}
-
-impl AssistantMessage {
-    /// Push one new block to the end of the message content.
-    pub(crate) fn push_block(&mut self, block: AssistantContentBlock) {
-        self.content.push(block);
-    }
-
-    /// Return a copy of this message with leading and trailing whitespace trimmed from all text
-    /// fields and tool call arguments, and with any blocks that are empty after trimming removed.
-    pub fn trim(mut self) -> Self {
-        self.content = self.content.into_iter().filter_map(|block| block.trim()).collect();
-        self
-    }
-}
+pub use vllm_chat_types::{
+    AssistantBlockKind, AssistantContentBlock, AssistantMessage, AssistantMessageExt,
+    AssistantToolCall,
+};
 
 /// Streamed chat event emitted by [`crate::ChatEventStream`].
 #[derive(Debug, Clone, PartialEq)]
@@ -164,44 +26,65 @@ pub enum ChatEvent {
     },
     /// A new assistant output block has started.
     BlockStart {
+        /// Stable block index within the assistant message.
         index: usize,
+        /// Semantic kind of the opened block.
         kind: AssistantBlockKind,
     },
     /// A newly observed delta for one open assistant output block.
     BlockDelta {
+        /// Stable block index within the assistant message.
         index: usize,
+        /// Semantic kind of the open block.
         kind: AssistantBlockKind,
+        /// Newly emitted text.
         delta: String,
     },
-    /// Per-decoded-update sample metadata: logprobs and/or output token IDs.
+    /// Per-decoded-update sample metadata.
     LogprobsDelta {
+        /// Decoded output logprobs, when requested.
         logprobs: Option<DecodedLogprobs>,
+        /// Output token IDs emitted by this update.
         token_ids: Vec<u32>,
     },
     /// One assistant output block has ended.
     BlockEnd {
+        /// Stable block index within the assistant message.
         index: usize,
+        /// Finalized block.
         block: AssistantContentBlock,
     },
     /// One tool call has started.
     ToolCallStart {
+        /// Stable tool-call index within the assistant message.
         index: usize,
+        /// Stable tool-call identifier.
         id: String,
+        /// Function name selected by the assistant.
         name: String,
     },
-    /// One incremental tool-call arguments delta for the currently open tool
-    /// call.
-    ToolCallArgumentsDelta { index: usize, delta: String },
+    /// One incremental tool-call arguments delta.
+    ToolCallArgumentsDelta {
+        /// Stable tool-call index within the assistant message.
+        index: usize,
+        /// Newly emitted arguments text.
+        delta: String,
+    },
     /// One tool call has ended.
     ToolCallEnd {
+        /// Stable tool-call index within the assistant message.
         index: usize,
+        /// Finalized tool call.
         call: AssistantToolCall,
     },
     /// Terminal event carrying the final assembled assistant message and finish
     /// metadata.
     Done {
+        /// Final structured assistant message.
         message: AssistantMessage,
+        /// Final token usage.
         usage: TokenUsage,
+        /// Reason generation stopped.
         finish_reason: FinishReason,
         /// Connector-specific KV transfer parameters for disaggregated serving.
         kv_transfer_params: Option<serde_json::Value>,

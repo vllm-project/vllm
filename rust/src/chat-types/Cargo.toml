@@ -1,0 +1,14 @@
+[package]
+name = "vllm-chat-types"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+easy-ext.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_with.workspace = true
+
+[lints]
+workspace = true

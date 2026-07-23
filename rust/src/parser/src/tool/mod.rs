@@ -34,20 +34,10 @@ pub use minimax_m2::MinimaxM2ToolParser;
 pub use minimax_m3::MinimaxM3ToolParser;
 pub use qwen_coder::Qwen3CoderToolParser;
 pub use seed_oss::SeedOssToolParser;
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
+pub use vllm_chat_types::Tool;
 pub use xgrammar_structural_tag::builders::StructuralTagBuilder;
 
 use crate::utils;
-
-/// One function-style tool made available to the model.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Tool {
-    pub name: String,
-    pub description: Option<String>,
-    pub parameters: Value,
-    pub strict: Option<bool>,
-}
 
 /// One tool-call update emitted while parsing assistant text.
 #[derive(Debug, Clone, PartialEq, Eq)]
