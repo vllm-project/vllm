@@ -443,7 +443,6 @@ steps:
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
   agent_pool: mi250_1
-  no_gpu: true
   optional: true
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:

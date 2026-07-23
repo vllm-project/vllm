@@ -294,7 +294,6 @@ steps:
   mirror:
     amd:
       device: mi250_1
-      no_gpu: true
       timeout_in_minutes: 55
       depends_on:
       - image-build-amd
