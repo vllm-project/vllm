@@ -3,7 +3,7 @@
 
 import itertools
 from abc import abstractmethod
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from typing import Any
 
 import torch
@@ -217,6 +217,14 @@ class UnquantizedLinearMethod(LinearMethodBase):
             from vllm.model_executor.layers.utils import dispatch_cpu_unquantized_gemm
 
             dispatch_cpu_unquantized_gemm(layer, remove_weight=True)
+
+    def get_runtime_weight_reload_mapping(
+        self,
+        layer: torch.nn.Module,
+        checkpoint_params: Mapping[str, Parameter],
+        runtime_params: Mapping[str, Parameter],
+    ) -> Mapping[str, Parameter] | None:
+        return runtime_params
 
     def apply(
         self,
