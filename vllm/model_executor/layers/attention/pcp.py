@@ -110,6 +110,46 @@ def maybe_gather_indexer_k(
     return cache_k, cache_slot_mapping
 
 
+def gather_prefill_qkv_global(
+    pcp_prefill_gather: tuple[torch.Tensor, torch.Tensor, torch.Tensor, int],
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """All-gather this rank's DualChunkSwap chunk Q/K/V across PCP and reorder
+    to global position order (real tokens only).
+
+    ``pcp_prefill_gather`` is the (restore_idx, gather_idx, global_cu_seqlens,
+    padded_n) tuple from ``PCPManager.prefill_gather_indices()``.
+    """
+    restore_idx, _, _, padded_n = pcp_prefill_gather
+    pcp_group = get_pcp_group()
+
+    def _pad(t: torch.Tensor) -> torch.Tensor:
+        if t.shape[0] < padded_n:
+            pad = t.new_zeros((padded_n - t.shape[0],) + tuple(t.shape[1:]))
+            return torch.cat([t, pad], dim=0)
+        return t
+
+    q_g = pcp_group.all_gather(_pad(query), dim=0)[restore_idx]
+    k_g = pcp_group.all_gather(_pad(key), dim=0)[restore_idx]
+    v_g = pcp_group.all_gather(_pad(value), dim=0)[restore_idx]
+    return q_g, k_g, v_g
+
+
+def slice_prefill_output_local(
+    pcp_prefill_gather: tuple[torch.Tensor, torch.Tensor, torch.Tensor, int],
+    out_g: torch.Tensor,
+    num_actual: int,
+) -> torch.Tensor:
+    """Slice a global-order output tensor back to this PCP rank's local chunk."""
+    _, gather_idx, _, padded_n = pcp_prefill_gather
+    pcp_rank = get_pcp_group().rank_in_group
+    out_gathered = out_g[gather_idx]
+    local = out_gathered[pcp_rank * padded_n : (pcp_rank + 1) * padded_n]
+    return local[:num_actual]
+
+
 def finalize_mla_pcp_decode(
     output: torch.Tensor,
     num_heads: int,

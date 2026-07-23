@@ -7,8 +7,9 @@ import torch
 
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.distributed.parallel_state import get_dcp_group, get_pcp_group
+from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
-from vllm.v1.attention.backends.utils import PAD_SLOT_ID
+from vllm.v1.attention.backends.utils import PAD_SLOT_ID, get_dcp_local_seq_lens
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
 from vllm.v1.worker.gpu.cp_utils import prepare_dcp_local_seq_lens
@@ -69,7 +70,43 @@ class PCPManager:
         self._hidden_restore_idx: torch.Tensor | None = None
         self._padded_gather_idx: torch.Tensor | None = None
         self._gathered_kv_write_mask: torch.Tensor | None = None
+        # GLOBAL batch composition (rank-invariant: every PCP rank sees the same
+        # global batch, so these are identical across ranks). Used for
+        # rank-consistent mixed-batch detection in the sharded attention path --
+        # per-rank is_prefilling can differ (DualChunkSwap leaves some ranks with
+        # zero prefill chunks), which would desync NCCL collectives.
+        self._global_has_prefill: bool = False
+        self._global_has_decode: bool = False
         self._pad_slot_id = torch.tensor(PAD_SLOT_ID, dtype=torch.int64, device=device)
+
+        # Global-context attention metadata for the sharded PCP+DCP prefill path
+        # (extend/prefix-caching support). Built once per step in
+        # build_global_context_metadata(); consumed by _forward_dcp_mrv2 to run
+        # context attention on the replicated gathered q_g against this rank's
+        # DCP shard of the cached prefix.
+        self._global_ctx_block_tables: tuple[torch.Tensor, ...] | None = (
+            tuple(
+                table.new_zeros((max_num_reqs, table.shape[1]))
+                for table in block_tables.input_block_tables
+            )
+            if block_tables is not None and max_num_reqs is not None
+            else None
+        )
+        self._global_ctx_block_table_ptrs: torch.Tensor | None = (
+            torch.tensor(
+                [t.data_ptr() for t in self._global_ctx_block_tables],
+                dtype=torch.uint64,
+                device=device,
+            )
+            if self._global_ctx_block_tables is not None
+            else None
+        )
+        self._global_ctx_kv_lens: torch.Tensor | None = (
+            torch.zeros(max_num_reqs, dtype=torch.int32, device=device)
+            if max_num_reqs is not None
+            else None
+        )
+        self._global_num_reqs: int = 0
 
         max_num_local_reqs = 2 * max_num_reqs if max_num_reqs is not None else None
         self._input_buffers = (
@@ -332,6 +369,9 @@ class PCPManager:
         num_scheduled_tokens = global_batch.num_scheduled_tokens
         num_computed_tokens = global_batch.num_computed_tokens_np
         is_prefilling = global_batch.is_prefilling_np
+        # Rank-invariant global composition (see __init__ comment).
+        self._global_has_prefill = bool(is_prefilling.any())
+        self._global_has_decode = bool((~is_prefilling).any())
 
         segments_by_rank, per_rank_num_tokens = self._build_batch_layout(
             num_scheduled_tokens,
@@ -611,6 +651,122 @@ class PCPManager:
             return hidden_states
         gathered = get_pcp_group().all_gather(hidden_states, dim=0)
         return gathered[self._hidden_restore_idx]
+
+    def global_batch_flags(self) -> tuple[bool, bool]:
+        """Return (has_prefill, has_decode) for the global (pre-partition) batch.
+
+        Rank-invariant across PCP ranks (identical global batch). Used for
+        rank-consistent mixed-batch detection in the sharded attention path.
+        """
+        return self._global_has_prefill, self._global_has_decode
+
+    def populate_forward_context(self) -> None:
+        """Stash all PCP metadata the attention forward / kv-cache update need.
+
+        Centralized here so the model runner stays a single call. Populates:
+          - ``pcp_prefill_gather``: gather/restore indices for the sharded
+            prefill-KV all-gather attention (None when no prefill ran).
+          - ``pcp_global_flags``: rank-invariant (has_prefill, has_decode) for
+            consistent mixed-batch routing.
+          - ``pcp_global_ctx``: global block table + per-rank DCP shard context
+            lengths for extend (prefix-caching) support in the prefill path.
+        """
+        kwargs = get_forward_context().additional_kwargs
+        prefill_gather = self.prefill_gather_indices()
+        if prefill_gather is not None:
+            kwargs["pcp_prefill_gather"] = prefill_gather
+        kwargs["pcp_global_flags"] = self.global_batch_flags()
+        global_ctx = self.build_global_context_metadata()
+        if global_ctx is not None:
+            kwargs["pcp_global_ctx"] = global_ctx
+
+    def build_global_context_metadata(
+        self,
+    ) -> tuple[torch.Tensor, torch.Tensor, int, bool] | None:
+        """Build per-global-request context-attention metadata for the extend
+        (prefix-caching) case in the sharded PCP+DCP prefill path.
+
+        Returns (global_block_table, global_dcp_context_kv_lens,
+        max_global_dcp_context_kv_len, has_extend) for the CURRENT step, aligned
+        with the pre-partition global batch (so the gathered, replicated q_g can
+        attend this rank's DCP shard of each request's cached prefix). Returns
+        None when no prefill was partitioned this step.
+
+        ``global_dcp_context_kv_lens`` is this rank's shard count of the prefix
+        (rank-specific), indexed by global request -- the LSE-combine then
+        merges the shards for the shared (replicated) q_g. ``has_extend`` is
+        rank-invariant (True iff some global request has a cached prefix) so the
+        prefill path can skip the context collective for pure first-prefills.
+        """
+        gb = self._global_batch
+        if (
+            gb is None
+            or self._global_ctx_block_tables is None
+            or self._global_ctx_kv_lens is None
+            or self._block_tables is None
+        ):
+            return None
+        block_tables = self._block_tables
+        global_ctx_kv_lens = self._global_ctx_kv_lens
+        num_reqs = gb.num_reqs
+        self._global_num_reqs = num_reqs
+        # Per-global-request FULL prefix length, then this rank's shard count.
+        qsl = gb.query_start_loc
+        query_lens = qsl[1 : num_reqs + 1] - qsl[:num_reqs]
+        context_kv_lens = gb.seq_lens[:num_reqs] - query_lens
+        has_extend = num_reqs > 0 and bool(context_kv_lens.max().item() > 0)
+        dcp_ctx_kv_lens = get_dcp_local_seq_lens(
+            context_kv_lens,
+            self.dcp_world_size,
+            self.dcp_rank,
+            self.cp_interleave,
+        )
+        global_ctx_kv_lens[:num_reqs] = dcp_ctx_kv_lens
+        # Gather this rank's block-table rows for the global requests.
+        global_bt = block_tables.gather_block_tables(
+            gb.idx_mapping,
+            num_reqs,
+            out=self._global_ctx_block_tables,
+            out_ptrs=self._global_ctx_block_table_ptrs,
+        )
+        num_partitions = self.dcp_world_size * self.cp_interleave
+        max_ctx_kv = (
+            ((int(context_kv_lens.max().item()) + num_partitions - 1) // num_partitions)
+            * self.cp_interleave
+            if num_reqs > 0
+            else 0
+        )
+        return global_bt[0], global_ctx_kv_lens[:num_reqs], max_ctx_kv, has_extend
+
+    def prefill_gather_indices(
+        self,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, int] | None:
+        """Indices for the SHARDED-cache prefill KV-gather attention.
+
+        Returns (restore_idx, gather_idx, global_cu_seqlens, padded_num_tokens)
+        for the current prefill step, or None for decode / when PCP did not
+        partition a prefill. ``restore_idx`` maps a global-position index to its
+        slot in the PCP all-gathered tensor (``global = gathered[restore_idx]``);
+        ``gather_idx`` is the inverse (``gathered = global[gather_idx]``);
+        ``global_cu_seqlens`` is the pre-partition (global) batch's per-request
+        cumulative query lengths.
+        """
+        if self._hidden_restore_idx is None or self._global_batch is None:
+            return None
+        if self._padded_gather_idx is None:
+            return None
+        global_cu_seqlens = self._global_batch.query_start_loc
+        if not isinstance(global_cu_seqlens, torch.Tensor):
+            return None
+        # _padded_gather_idx has length padded_num_tokens * pcp_world_size for
+        # the current step (set in _build_batch_layout).
+        padded_num_tokens = self._padded_gather_idx.shape[0] // self.pcp_world_size
+        return (
+            self._hidden_restore_idx,
+            self._padded_gather_idx,
+            global_cu_seqlens,
+            padded_num_tokens,
+        )
 
     def restore_for_sampling(
         self,
