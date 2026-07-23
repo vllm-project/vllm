@@ -278,6 +278,9 @@ class OffloadingConnectorWorker:
             for job_id in kv_connector_metadata.jobs_to_flush:
                 entry = kv_connector_metadata.store_jobs.pop(job_id, None)
                 if entry is not None:
+                    if not self._is_store_writer:
+                        self._connector_worker_meta.mark_completed(job_id)
+                        continue
                     assert isinstance(entry.src_spec, GPULoadStoreSpec)
                     self._unsubmitted_store_jobs.append(
                         (job_id, entry.src_spec, entry.dst_spec)

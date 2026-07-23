@@ -244,6 +244,26 @@ def test_prepare_store_kv_non_replicated_rank_gt_zero_queues_store():
     assert worker._unsubmitted_store_jobs == []
 
 
+def test_handle_preemptions_non_writer_acks_flushed_store():
+    worker, _ = _make_worker(
+        KVCacheConfig(num_blocks=0, kv_cache_tensors=[], kv_cache_groups=[]),
+        replicated_layout=True,
+        rank=1,
+    )
+    metadata = _store_metadata(10)
+    metadata.jobs_to_flush = {10}
+
+    worker.handle_preemptions(metadata)
+
+    assert worker.worker is not None
+    worker.worker.submit_store.assert_not_called()
+    worker.worker.wait.assert_called_once_with({10})
+    assert metadata.store_jobs == {}
+    meta = worker.build_connector_worker_meta()
+    assert meta is not None
+    assert meta.completed_jobs == {10: 1}
+
+
 def test_start_kv_transfers_non_writer_still_submits_load():
     worker, _ = _make_worker(
         KVCacheConfig(num_blocks=0, kv_cache_tensors=[], kv_cache_groups=[]),
