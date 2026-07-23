@@ -5,7 +5,10 @@ import numpy as np
 import pytest
 import torch
 
-from vllm.distributed.eplb.eplb_state import compute_logical_maps
+from vllm.distributed.eplb.eplb_state import (
+    compute_logical_maps,
+    load_initial_expert_map,
+)
 from vllm.distributed.eplb.policy.default import DefaultEplbPolicy
 
 
@@ -496,3 +499,71 @@ def test_preserve_intragpu_slots(
         num_ranks,
         slots_per_gpu,
     )
+
+
+def test_load_initial_expert_map_shared_across_layers(tmp_path):
+    path = tmp_path / "expert-map.json"
+    path.write_text("[2, 0, 1, 2]")
+
+    result = load_initial_expert_map(
+        str(path),
+        num_moe_layers=2,
+        num_physical_experts=4,
+        num_logical_experts=3,
+    )
+
+    torch.testing.assert_close(
+        result,
+        torch.tensor(
+            [
+                [2, 0, 1, 2],
+                [2, 0, 1, 2],
+            ]
+        ),
+    )
+
+
+def test_load_initial_expert_map_per_layer(tmp_path):
+    path = tmp_path / "expert-map.json"
+    path.write_text("[[0, 1, 2, 0], [2, 1, 0, 2]]")
+
+    result = load_initial_expert_map(
+        str(path),
+        num_moe_layers=2,
+        num_physical_experts=4,
+        num_logical_experts=3,
+    )
+
+    torch.testing.assert_close(
+        result,
+        torch.tensor(
+            [
+                [0, 1, 2, 0],
+                [2, 1, 0, 2],
+            ]
+        ),
+    )
+
+
+@pytest.mark.parametrize(
+    "contents, match",
+    [
+        ("[]", "non-empty"),
+        ("[0, 1, 2]", "4 physical slots"),
+        ("[0, 1, 2, 3]", "out-of-range"),
+        ("[0, 0, 1, 1]", "does not place"),
+        ("[[0, 1, 2, 0], [0, 1, 2, 0], [0, 1, 2, 0]]", "either one shared"),
+        ("[0, true, 2, 0]", "non-integer"),
+    ],
+)
+def test_load_initial_expert_map_rejects_invalid_layout(tmp_path, contents, match):
+    path = tmp_path / "expert-map.json"
+    path.write_text(contents)
+
+    with pytest.raises(ValueError, match=match):
+        load_initial_expert_map(
+            str(path),
+            num_moe_layers=2,
+            num_physical_experts=4,
+            num_logical_experts=3,
+        )
