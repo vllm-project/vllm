@@ -381,8 +381,8 @@ jobs:
                 | sort -t i -k2 -n | paste -sd ',' || true)"
             fi
             if [[ -n "$detected_devices" ]]; then
-              echo "Auto-detected NPU devices: $detected_devices"
-              echo "ASCEND_VISIBLE_DEVICES=$detected_devices" >> "$GITHUB_ENV"
+              echo "Auto-detected candidate NPU devices: $detected_devices"
+              echo "ASCEND_CI_DETECTED_DEVICES=$detected_devices" >> "$GITHUB_ENV"
             else
               echo "[WARN] No NPU devices detected." >&2
             fi

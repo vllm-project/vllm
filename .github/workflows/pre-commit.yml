@@ -47,6 +47,9 @@ jobs:
     needs: pre-run-check
     if: always() && (needs.pre-run-check.result == 'success' || needs.pre-run-check.result == 'skipped')
     runs-on: ubuntu-latest
+    env:
+      PRE_COMMIT_FROM_REF: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+      PRE_COMMIT_TO_REF: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
     steps:
     - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       with:
@@ -62,8 +65,4 @@ jobs:
     - run: echo "::add-matcher::.github/workflows/matchers/mypy.json"
     - uses: pre-commit/action@2c7b3805fd2a0fd8c1884dcaebf91fc102a13ecd # v3.0.1
       with:
-        extra_args: >-
-          --from-ref ${{ github.event_name == 'pull_request' &&
-            github.event.pull_request.base.sha || github.event.before }}
-          --to-ref ${{ github.event_name == 'pull_request' &&
-            github.event.pull_request.head.sha || github.sha }}
+        extra_args: --from-ref ${{ env.PRE_COMMIT_FROM_REF }} --to-ref ${{ env.PRE_COMMIT_TO_REF }}

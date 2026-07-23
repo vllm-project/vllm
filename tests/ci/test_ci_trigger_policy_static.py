@@ -52,6 +52,21 @@ def test_pre_commit_uses_available_github_hosted_runner():
     assert "--to-ref" in text
     assert "--all-files" not in text
     assert "--hook-stage manual" not in text
+    assert "PRE_COMMIT_FROM_REF:" in text
+    assert "PRE_COMMIT_TO_REF:" in text
+
+
+def test_benchmark_detection_does_not_disable_idle_device_selection():
+    workflow_path = REPO_ROOT / ".github/workflows/ascend-benchmark-leaderboard.yml"
+    text = workflow_path.read_text(encoding="utf-8")
+    detection_step = text[
+        text.index("      - name: Detect runner user and Ascend devices") : text.index(
+            "      - name: Pre-clean stale checkout state"
+        )
+    ]
+
+    assert "ASCEND_CI_DETECTED_DEVICES=" in detection_step
+    assert 'echo "ASCEND_VISIBLE_DEVICES=' not in detection_step
 
 
 def test_actionlint_knows_ascend_runner_labels():
