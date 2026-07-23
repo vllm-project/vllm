@@ -27,7 +27,6 @@ from vllm.model_executor.layers.fused_moe.config import (
     ocp_mx_moe_quant_config,
 )
 from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
-    Fp8MoeBackend,
     convert_to_fp8_moe_kernel_format,
     make_fp8_moe_kernel,
     make_fp8_moe_quant_config,
@@ -432,10 +431,6 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
         replace_parameter(layer, "w2_weight", w2)
         replace_parameter(layer, "w13_weight_scale", w13_scale)
         replace_parameter(layer, "w2_weight_scale", w2_scale)
-
-        if self.fp8_backend == Fp8MoeBackend.AITER:
-            layer.w13_weight.is_shuffled = True
-            layer.w2_weight.is_shuffled = True
 
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
         assert self.moe_quant_config is not None
@@ -1213,6 +1208,7 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
             )
         )
 
+        # TODO: Cleanup this backend-specific logic. This should not be here.
         # Handle weight/scale assignment based on backend type
         if self.mxfp4_backend in TRITON_BACKENDS or self.mxfp4_backend in (
             Mxfp4MoeBackend.AITER_MXFP4_FP8,
@@ -1233,10 +1229,6 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
         if w13_bias is not None and w2_bias is not None:
             replace_parameter(layer, "w13_bias", w13_bias)
             replace_parameter(layer, "w2_bias", w2_bias)
-
-        if self.mxfp4_backend == Mxfp4MoeBackend.AITER_MXFP4_MXFP4:
-            layer.w13_weight.is_shuffled = True
-            layer.w2_weight.is_shuffled = True
 
         torch.accelerator.empty_cache()
 

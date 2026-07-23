@@ -508,4 +508,5 @@ def mxfp4_quantize(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         return quark_quantize_weight_to_mxfp4(x)
 
     quant_tensor, scale, _ = downcast_to_mxfp(x, axis=-1)
+
     return quant_tensor, scale

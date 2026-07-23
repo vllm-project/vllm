@@ -17,6 +17,7 @@ if TYPE_CHECKING:
 
 from vllm.model_executor.kernels.linear import init_mxfp4_linear_kernel
 from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
+    TRITON_BACKENDS,
     Mxfp4MoeBackend,
     convert_weight_to_mxfp4_moe_kernel_format,
     make_mxfp4_moe_kernel,
@@ -198,13 +199,28 @@ class Mxfp4OnlineMoEMethod(OnlineMoEMethodBase):
             )
         )
 
-        replace_parameter(layer, "w13_weight", w13)
-        replace_parameter(layer, "w2_weight", w2)
-        replace_parameter(layer, f"w13_{self.weight_scale_name}", w13_scale)
-        replace_parameter(layer, f"w2_{self.weight_scale_name}", w2_scale)
-        if w13_bias is not None:
+        # Handle weight/scale assignment based on backend type
+        # Copied from `quark_moe.py`.
+        # TODO: This should not be here, replace_parameter should handle
+        # triton_kernels.tensor.Tensor.
+        if self.mxfp4_backend in TRITON_BACKENDS or self.mxfp4_backend in (
+            Mxfp4MoeBackend.AITER_MXFP4_FP8,
+        ):
+            # Triton-based backends: w13/w2 are triton_kernels.tensor.Tensor
+            # Store on layer for apply(), scales are PrecisionConfig
+            layer.w13_weight = w13
+            layer.w2_weight = w2
+            self.w13_precision_config = w13_scale
+            self.w2_precision_config = w2_scale
+        else:
+            # Standard backends: replace parameters
+            replace_parameter(layer, "w13_weight", w13)
+            replace_parameter(layer, "w2_weight", w2)
+            replace_parameter(layer, "w13_weight_scale", w13_scale)
+            replace_parameter(layer, "w2_weight_scale", w2_scale)
+
+        if w13_bias is not None and w2_bias is not None:
             replace_parameter(layer, "w13_bias", w13_bias)
-        if w2_bias is not None:
             replace_parameter(layer, "w2_bias", w2_bias)
 
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
