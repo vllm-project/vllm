@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from typing import Any
 
+import numpy as np
 import torch
 
 from vllm.config import VllmConfig
@@ -11,6 +12,7 @@ from vllm.logger import init_logger
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.triton_utils import tl, triton
 from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
+from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
 from vllm.v1.worker.gpu.cudagraph_utils import (
     BatchExecutionDescriptor,
     get_uniform_token_count,
@@ -205,14 +207,24 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             input_batch.num_tokens,
             max_query_len,
         )
-        prefill_batch_desc, num_tokens_across_dp = dispatch_cg_and_sync_dp(
-            self.prefill_cudagraph_manager,
-            num_reqs,
-            num_tokens,
-            uniform_token_count,
-            dp_size=self.dp_size,
-            dp_rank=self.dp_rank,
-            need_eager=is_profile,
+        # Requests whose drafts can never be scheduled (and have no lookahead
+        # KV slots allocated). The prefill forward pass below still runs for
+        # them to keep the drafter KV cache in sync. Skipping is done only when
+        # no DP rank requires draft tokens this step.
+        no_draft_mask = input_batch.no_draft_mask_np
+        want_skip_drafts = bool(no_draft_mask is not None and no_draft_mask.all())
+
+        prefill_batch_desc, num_tokens_across_dp, skip_all_drafts = (
+            dispatch_cg_and_sync_dp(
+                self.prefill_cudagraph_manager,
+                num_reqs,
+                num_tokens,
+                uniform_token_count,
+                dp_size=self.dp_size,
+                dp_rank=self.dp_rank,
+                need_eager=is_profile,
+                want_skip_drafts=want_skip_drafts,
+            )
         )
 
         self._prepare_eplb_forward(input_batch.num_tokens)
@@ -233,7 +245,13 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
                 num_tokens_across_dp=num_tokens_across_dp,
                 cudagraph_runtime_mode=prefill_batch_desc.cg_mode,
                 mm_inputs=mm_inputs,
+                skip_sample=skip_all_drafts,
             )
+
+        if skip_all_drafts:
+            # No draft tokens are needed; skip the draft decode steps
+            # entirely. The returned (stale) tokens are never scheduled.
+            return self.draft_tokens[:num_reqs]
 
         if self.num_speculative_steps == 1:
             # Early exit.
@@ -252,7 +270,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
 
         # Each request produces exactly 1 token per draft generation step,
         # enabling FULL graph replay.
-        decode_batch_desc, num_tokens_across_dp = dispatch_cg_and_sync_dp(
+        decode_batch_desc, num_tokens_across_dp, _ = dispatch_cg_and_sync_dp(
             self.decode_cudagraph_manager,
             num_reqs,
             num_reqs,
@@ -262,6 +280,13 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             need_eager=is_profile,
         )
 
+        # Mask draft KV writes for requests without lookahead slots.
+        skip_rows = None
+        if no_draft_mask is not None and no_draft_mask.any():
+            skip_rows = async_copy_to_gpu(
+                no_draft_mask.astype(np.int8), device=self.device
+            )
+
         # Generate the remaining num_speculative_steps - 1 draft tokens.
         self._multi_step_decode(
             num_reqs,
@@ -269,6 +294,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             decode_batch_desc,
             num_tokens_across_dp,
             input_batch.seq_lens_cpu_upper_bound,
+            skip_rows=skip_rows,
         )
 
         return self.draft_tokens[:num_reqs]
@@ -341,6 +367,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
         num_tokens_across_dp: torch.Tensor | None,
         cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
+        skip_sample: bool = False,
     ) -> None:
         last_token_indices = self.last_token_indices[:num_reqs]
         positions = self.input_buffers.positions[last_token_indices]
@@ -354,6 +381,10 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             cudagraph_runtime_mode=cudagraph_runtime_mode,
             mm_inputs=mm_inputs,
         )
+        if skip_sample:
+            # KV-sync-only pass: no drafts from this batch can be consumed,
+            # and the draft decode steps are skipped by the caller.
+            return
         sample_hidden_states = last_hidden_states[last_token_indices]
 
         self.draft_tokens[:num_reqs, 0] = self.sample_draft(
@@ -378,6 +409,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
         batch_desc: BatchExecutionDescriptor,
         num_tokens_across_dp: torch.Tensor | None,
         seq_lens_cpu_upper_bound: torch.Tensor,
+        skip_rows: torch.Tensor | None = None,
     ) -> None:
         positions = self.input_buffers.positions[:num_reqs]
         query_start_loc = self.input_buffers.query_start_loc[: num_reqs + 1]
@@ -394,6 +426,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
                     query_start_loc,
                     positions,
                     batch_desc.num_tokens,
+                    skip_rows=skip_rows,
                 )
                 slot_mappings_by_layer = build_slot_mappings_by_layer(
                     slot_mappings, self.kv_cache_config

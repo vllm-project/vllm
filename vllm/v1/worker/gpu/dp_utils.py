@@ -22,40 +22,44 @@ def sync_cudagraph_and_dp_padding(
     dp_size: int,
     dp_rank: int,
     num_active_loras: int = 0,
-) -> tuple[BatchExecutionDescriptor, torch.Tensor | None]:
+    want_skip_drafts: bool = False,
+) -> tuple[BatchExecutionDescriptor, torch.Tensor | None, bool]:
     """
-    Coordinates the batch descriptor and DP padding across all ranks.
+    Coordinates the batch descriptor, DP padding and draft-skipping across all ranks.
 
-    Returns (synced_batch_desc, num_tokens_across_dp).
+    Returns (synced_batch_desc, num_tokens_across_dp, skip_drafts).
     """
     assert dp_size > 1, "DP size must be greater than 1"
     group = get_dp_group().cpu_group
-    tensor = torch.zeros(3, dp_size, dtype=torch.int32, device="cpu")
+    tensor = torch.zeros(4, dp_size, dtype=torch.int32, device="cpu")
     tensor[0][dp_rank] = num_tokens
     tensor[1][dp_rank] = desired_batch_desc.cg_mode.value
     tensor[2][dp_rank] = uniform_token_count or 0  # (0 means None)
+    tensor[3][dp_rank] = int(want_skip_drafts)
     dist.all_reduce(tensor, group=group)
 
     num_tokens_across_dp = tensor[0]
     cg_mode_across_dp = tensor[1]
     uniform_token_counts_across_dp = tensor[2]
+    skip_drafts = bool(int(tensor[3].min().item()) == 1)
 
     if torch.all(num_tokens_across_dp == 0).item():
         synced_desc = BatchExecutionDescriptor(
             cg_mode=CUDAGraphMode.NONE, num_tokens=0, num_reqs=0
         )
-        return synced_desc, None
+        return synced_desc, None, skip_drafts
 
     synced_cg_mode = CUDAGraphMode(int(cg_mode_across_dp.min().item()))
 
     # If any rank wants to run eager, all ranks run eager
     if synced_cg_mode == CUDAGraphMode.NONE:
-        return BatchExecutionDescriptor(
+        batch_execution_descriptor = BatchExecutionDescriptor(
             cg_mode=CUDAGraphMode.NONE,
             num_tokens=num_tokens,
             num_reqs=num_reqs,
             num_active_loras=desired_batch_desc.num_active_loras,
-        ), num_tokens_across_dp
+        )
+        return batch_execution_descriptor, num_tokens_across_dp, skip_drafts
 
     assert cudagraph_manager is not None, (
         "cudagraph_manager should only be None during profile run, "
@@ -82,7 +86,7 @@ def sync_cudagraph_and_dp_padding(
     # Update num_tokens_across_dp to reflect padded size.
     num_tokens_across_dp[:] = synced_desc.num_tokens
 
-    return synced_desc, num_tokens_across_dp
+    return synced_desc, num_tokens_across_dp, skip_drafts
 
 
 def dispatch_cg_and_sync_dp(
@@ -94,7 +98,8 @@ def dispatch_cg_and_sync_dp(
     dp_rank: int,
     need_eager: bool = False,
     num_active_loras: int = 0,
-) -> tuple[BatchExecutionDescriptor, torch.Tensor | None]:
+    want_skip_drafts: bool = False,
+) -> tuple[BatchExecutionDescriptor, torch.Tensor | None, bool]:
     if need_eager:
         batch_desc = BatchExecutionDescriptor(
             cg_mode=CUDAGraphMode.NONE,
@@ -115,7 +120,7 @@ def dispatch_cg_and_sync_dp(
         )
 
     if dp_size == 1:
-        return batch_desc, None
+        return batch_desc, None, want_skip_drafts
 
     return sync_cudagraph_and_dp_padding(
         cudagraph_manager,
@@ -126,4 +131,5 @@ def dispatch_cg_and_sync_dp(
         dp_size,
         dp_rank,
         num_active_loras=num_active_loras,
+        want_skip_drafts=want_skip_drafts,
     )

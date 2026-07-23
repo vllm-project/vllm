@@ -171,6 +171,7 @@ class BlockTables:
         query_start_loc: torch.Tensor,
         positions: torch.Tensor,
         num_tokens_padded: int,
+        skip_rows: torch.Tensor | None = None,
         out: torch.Tensor | None = None,
     ) -> torch.Tensor:
         num_reqs = idx_mapping.shape[0]
@@ -187,6 +188,7 @@ class BlockTables:
             slot_mappings,
             slot_mappings.stride(0),
             self.cp_rank,
+            skip_rows,
             CP_SIZE=self.cp_size,
             CP_INTERLEAVE=self.cp_interleave,
             PAD_ID=PAD_SLOT_ID,
@@ -258,6 +260,7 @@ def _compute_slot_mappings_kernel(
     slot_mappings_ptr,  # [num_kv_cache_groups, max_num_tokens]
     slot_mappings_stride,
     cp_rank,
+    skip_rows_ptr,  # [num_reqs], may be None
     CP_SIZE: tl.constexpr,
     CP_INTERLEAVE: tl.constexpr,
     PAD_ID: tl.constexpr,
@@ -286,6 +289,15 @@ def _compute_slot_mappings_kernel(
     req_state_idx = tl.load(idx_mapping + batch_idx)
     start_idx = tl.load(query_start_loc + batch_idx)
     end_idx = tl.load(query_start_loc + batch_idx + 1)
+
+    if skip_rows_ptr is not None and tl.load(skip_rows_ptr + batch_idx) != 0:
+        # KV writes are masked for this request (e.g. drafter steps
+        # beyond the allocated slots).
+        for i in range(start_idx, end_idx, TRITON_BLOCK_SIZE):
+            offset = i + tl.arange(0, TRITON_BLOCK_SIZE)
+            tl.store(slot_mapping_ptr + offset, PAD_ID, mask=offset < end_idx)
+        return
+
     for i in range(start_idx, end_idx, TRITON_BLOCK_SIZE):
         offset = i + tl.arange(0, TRITON_BLOCK_SIZE)
         positions = tl.load(pos + offset, mask=offset < end_idx, other=0)

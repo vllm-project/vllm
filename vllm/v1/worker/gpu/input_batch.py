@@ -80,6 +80,10 @@ class InputBatch:
     # [num_reqs] only populated when pipeline parallelism is enabled.
     max_seq_len_np: np.ndarray | None
 
+    # [num_reqs] bool mask of requests whose drafts can never be scheduled;
+    # the drafter may skip proposing for them. None when no such requests.
+    no_draft_mask_np: np.ndarray | None
+
     # [num_tokens_after_padding]
     input_ids: torch.Tensor
     # [num_tokens_after_padding]
@@ -171,6 +175,7 @@ class InputBatch:
             num_computed_prefill_tokens_np=np.zeros(num_reqs, dtype=np.int32),
             is_prefilling_np=np.zeros(num_reqs, dtype=np.bool_),
             max_seq_len_np=None,
+            no_draft_mask_np=None,
             input_ids=input_ids,
             positions=positions,
             is_padding=is_padding,

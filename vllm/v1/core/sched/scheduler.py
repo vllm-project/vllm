@@ -237,6 +237,8 @@ class Scheduler(SchedulerInterface):
         self.use_eagle = False
         self.num_spec_tokens = vllm_config.num_speculative_tokens
         self.num_lookahead_tokens = 0
+        self.report_unusable_drafts = False
+        self.can_skip_lookahead = False
         self.dynamic_sd_lookup: list[int] | None = None
         if speculative_config is not None:
             if speculative_config.num_speculative_tokens_per_batch_size:
@@ -260,6 +262,21 @@ class Scheduler(SchedulerInterface):
                 # anchor itself is the first prediction position (no separate bonus
                 # query), so it needs exactly num_spec_tokens lookahead slots.
                 self.num_lookahead_tokens = self.num_spec_tokens
+            # Requests whose drafts can never be consumed (non-final prefill
+            # chunks, guaranteed-final decode steps) are reported via
+            # no_draft_req_ids so the V2 drafter can skip proposing for them.
+            self.report_unusable_drafts = (
+                self.num_lookahead_tokens > 0 and vllm_config.use_v2_model_runner
+            )
+            # Their lookahead slots can additionally be skipped when the
+            # speculator masks the corresponding drafter KV writes.
+            # DFlash/DSpark write query KV into the lookahead slots
+            # unconditionally, so they only get the compute skip.
+            self.can_skip_lookahead = (
+                self.report_unusable_drafts
+                and not speculative_config.use_dflash()
+                and not speculative_config.use_dspark()
+            )
 
         # Create the KV cache manager.
         if hash_block_size is None:
@@ -350,6 +367,28 @@ class Scheduler(SchedulerInterface):
         # In-flight requests still prefilling (prefill chunks + in-progress
         # async KV loads). Their remaining-block reservation gates async loads.
         self._inflight_prefills: set[Request] = set()
+
+    def _drafts_unusable(
+        self, request: Request, num_computed_tokens: int, num_new_tokens: int
+    ) -> bool:
+        """Whether drafts proposed at the end of this step can never be
+        scheduled, so no lookahead KV slots are needed for the drafter."""
+        if not self.report_unusable_drafts:
+            return False
+        if num_computed_tokens + num_new_tokens < request.num_tokens:
+            # Non-final prefill chunk: no token is sampled, nothing is drafted.
+            return True
+        # Minimum token count once in-flight steps resolve, even if all drafts are
+        # rejected (same arithmetic as the max_tokens skip-check in schedule()).
+        num_output_placeholders = request.num_output_placeholders
+        if num_output_placeholders > 0:
+            guaranteed_num_tokens = num_computed_tokens + 2 - num_output_placeholders
+        else:
+            guaranteed_num_tokens = request.num_tokens
+        # This step samples at least one more token, so the request is guaranteed
+        # to reach max_tokens and finish.
+        num_prompt_tokens = request.num_prompt_tokens
+        return guaranteed_num_tokens + 1 >= num_prompt_tokens + request.max_tokens
 
     def _mamba_block_aligned_split(
         self,
@@ -451,6 +490,8 @@ class Scheduler(SchedulerInterface):
         encoder_compute_budget = self.max_num_encoder_input_tokens
         # Spec decode-related.
         scheduled_spec_decode_tokens: dict[str, list[int]] = {}
+        # Requests scheduled without lookahead slots (drafts unusable).
+        no_draft_req_ids: set[str] = set()
         # Whether the running batch contains any prefill requests.
         prefill_scheduled = False
 
@@ -559,11 +600,14 @@ class Scheduler(SchedulerInterface):
 
             # Schedule newly needed KV blocks for the request.
             with record_function_or_nullcontext("schedule: allocate_slots"):
+                drafts_unusable = self._drafts_unusable(
+                    request, request.num_computed_tokens, num_new_tokens
+                )
+                skip_lookahead = drafts_unusable and self.can_skip_lookahead
                 while True:
+                    num_lookahead = 0 if skip_lookahead else self.num_lookahead_tokens
                     new_blocks = self.kv_cache_manager.allocate_slots(
-                        request,
-                        num_new_tokens,
-                        num_lookahead_tokens=self.num_lookahead_tokens,
+                        request, num_new_tokens, num_lookahead_tokens=num_lookahead
                     )
 
                     if new_blocks is not None:
@@ -584,6 +628,7 @@ class Scheduler(SchedulerInterface):
                             token_budget += num_scheduled_tokens.pop(preempted_req_id)
                             req_to_new_blocks.pop(preempted_req_id)
                             scheduled_spec_decode_tokens.pop(preempted_req_id, None)
+                            no_draft_req_ids.discard(preempted_req_id)
                             preempted_encoder_inputs = scheduled_encoder_inputs.pop(
                                 preempted_req_id, None
                             )
@@ -617,6 +662,8 @@ class Scheduler(SchedulerInterface):
             num_scheduled_tokens[request_id] = num_new_tokens
             token_budget -= num_new_tokens
             req_index += 1
+            if drafts_unusable:
+                no_draft_req_ids.add(request_id)
 
             # Speculative decode related.
             if request.spec_token_ids:
@@ -885,13 +932,16 @@ class Scheduler(SchedulerInterface):
                     if num_new_tokens == 0:
                         break
 
-                # During async KV load, no forward pass is run yet.
-                # Allocate speculative lookahead slots later to avoid
-                # mismatching local and remote block counts.
-                limit_lookahead_tokens = load_kv_async and self.num_lookahead_tokens > 0
-                effective_lookahead_tokens = (
-                    0 if limit_lookahead_tokens else self.num_lookahead_tokens
+                drafts_unusable = not load_kv_async and self._drafts_unusable(
+                    request, num_computed_tokens, num_new_tokens
                 )
+                effective_lookahead_tokens = self.num_lookahead_tokens
+                if effective_lookahead_tokens:  # noqa: SIM102
+                    # During async KV load, no forward pass is run yet.
+                    # Allocate speculative lookahead slots later to avoid
+                    # mismatching local and remote block counts.
+                    if load_kv_async or (drafts_unusable and self.can_skip_lookahead):
+                        effective_lookahead_tokens = 0
 
                 # Determine if we need to allocate cross-attention blocks.
                 num_encoder_tokens = 0
@@ -1016,6 +1066,8 @@ class Scheduler(SchedulerInterface):
                 token_budget -= num_new_tokens
                 request.status = RequestStatus.RUNNING
                 request.num_computed_tokens = num_computed_tokens
+                if drafts_unusable:
+                    no_draft_req_ids.add(request_id)
                 if pad_spec_decode:
                     scheduled_spec_decode_tokens[request_id] = [
                         -1
@@ -1151,6 +1203,7 @@ class Scheduler(SchedulerInterface):
             new_block_ids_to_zero=self._get_new_block_ids_to_zero(),
             kv_cache_block_copies=pending_kv_cache_block_copies,
             num_spec_tokens_to_schedule=num_spec_tokens_to_schedule,
+            no_draft_req_ids=no_draft_req_ids or None,
         )
 
         # NOTE(Kuntai): this function is designed for multiple purposes:

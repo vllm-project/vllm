@@ -420,8 +420,12 @@ class DFlashSpeculator(DraftModelSpeculator):
             context_slots,
         )
 
+        # Requests whose drafts can never be scheduled next step.
+        no_draft_mask = input_batch.no_draft_mask_np
+        want_skip_drafts = bool(no_draft_mask is not None and no_draft_mask.all())
+
         # Every DFlash step has exactly num_query_per_req tokens, so we can use FULL CGs
-        batch_desc, num_tokens_across_dp = dispatch_cg_and_sync_dp(
+        batch_desc, num_tokens_across_dp, skip_drafts = dispatch_cg_and_sync_dp(
             self.query_cudagraph_manager,
             num_reqs,
             num_query_tokens,
@@ -429,7 +433,14 @@ class DFlashSpeculator(DraftModelSpeculator):
             dp_size=self.dp_size,
             dp_rank=self.dp_rank,
             need_eager=is_profile,
+            want_skip_drafts=want_skip_drafts,
         )
+
+        if skip_drafts:
+            # No rank needs draft tokens this step; the context KV written
+            # above keeps the drafter in sync, so skip the query forward and
+            # draft sampling on every rank.
+            return self.draft_tokens[:num_reqs]
 
         num_reqs_padded = batch_desc.num_reqs or num_reqs
         num_tokens_padded = batch_desc.num_tokens
