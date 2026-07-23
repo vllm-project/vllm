@@ -1598,12 +1598,14 @@ class NixlBaseConnectorWorker:
         ### (Optional) Register local agent memory regions. MLA is not split.
         if (
             tp_ratio < 0
-            and not self.use_mla
+            and (not self.use_mla or len(plan.all_source_ranks) > 1)
             and tp_ratio not in self.src_xfer_handles_by_tp_ratio
         ):
             # Remote tp_size > local tp_size: read from multiple remote ranks.
-            # Logically "split" own regions into |tp_ratio| chunks. Mind that
-            # we only do this once per remote tp_size (replica-friendly).
+            # Logically "split" own regions into per-source chunks. Hybrid
+            # MLA+SSM also needs this path: MLA is replicated and read once,
+            # while the SSM state is sharded across every remote TP rank.
+            # We only do this once per remote tp_size (replica-friendly).
             self.src_xfer_handles_by_tp_ratio[tp_ratio] = []
 
             for handle_data in self._build_local_splits_from_plan(
