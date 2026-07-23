@@ -1705,7 +1705,7 @@ def test_hisparse_mixed_batch_bf16_row_split(
         device,
         arange_block_indices=True,
     )
-    common_attn_metadata.request_state_indices = torch.arange(
+    common_attn_metadata.batch_to_request_state = torch.arange(
         batch_spec.batch_size, dtype=torch.int32, device=device
     )
 

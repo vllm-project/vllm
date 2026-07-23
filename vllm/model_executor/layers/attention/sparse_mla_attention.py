@@ -68,7 +68,7 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
             dtype=torch.int32,
             device=device,
         )
-        self.request_state_indices = (
+        self.batch_to_request_state = (
             torch.empty(
                 vllm_config.scheduler_config.max_num_seqs,
                 dtype=torch.int32,
@@ -244,13 +244,13 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
             prefill=prefill,
             cp_kv_cache_interleave_size=self.cp_kv_cache_interleave_size,
         )
-        if self.request_state_indices is not None:
-            indices = common_attn_metadata.request_state_indices
-            if indices is None or indices.numel() > self.request_state_indices.numel():
+        if self.batch_to_request_state is not None:
+            indices = common_attn_metadata.batch_to_request_state
+            if indices is None or indices.numel() > self.batch_to_request_state.numel():
                 raise ValueError("Invalid V2 request-state indices for HiSparse.")
-            self.request_state_indices.fill_(-1)
-            self.request_state_indices[: indices.numel()].copy_(indices)
-            metadata.request_state_indices = self.request_state_indices  # type: ignore[attr-defined]
+            self.batch_to_request_state.fill_(-1)
+            self.batch_to_request_state[: indices.numel()].copy_(indices)
+            metadata.batch_to_request_state = self.batch_to_request_state  # type: ignore[attr-defined]
         return metadata
 
     @staticmethod
@@ -377,7 +377,7 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], Generic[T]):
             self._hisparse_decode_batch = False
             return
         if self.hisparse_coordinator is not None:
-            indices = getattr(attn_metadata, "request_state_indices", None)
+            indices = getattr(attn_metadata, "batch_to_request_state", None)
             if indices is None:
                 raise ValueError("HiSparse requires V2 request-state indices.")
             self.hisparse_coordinator.set_request_state_indices(indices)
