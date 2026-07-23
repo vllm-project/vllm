@@ -81,8 +81,8 @@ To build the `vllm-rs` in isolation:
 connecting to a Python inference engine:
 
 ```bash
-cargo run --manifest-path rust/Cargo.toml -p vllm-cmd --release -- \
-  render Qwen/Qwen2.5-0.5B-Instruct --max-model-len 32768
+vllm-rs render Qwen/Qwen2.5-0.5B-Instruct \
+  --max-model-len 32768
 ```
 
 It exposes `/v1/chat/completions/render` and `/v1/completions/render`. Only
@@ -105,24 +105,6 @@ curl http://127.0.0.1:8000/v1/chat/completions/render \
     "messages": [{"role": "user", "content": "Hello"}],
     "max_completion_tokens": 16
   }'
-```
-
-Build the minimal container from the repository root:
-
-```bash
-docker build -f docker/Dockerfile.render-rust -t vllm-render-rust .
-docker run --rm -p 8000:8000 vllm-render-rust \
-  Qwen/Qwen2.5-0.5B-Instruct --max-model-len 32768
-```
-
-For an offline container, mount an existing Hugging Face cache and set
-`HF_HUB_OFFLINE=1`:
-
-```bash
-docker run --rm -p 8000:8000 \
-  -e HF_HUB_OFFLINE=1 \
-  -v /path/to/huggingface:/tmp/huggingface:ro \
-  vllm-render-rust Qwen/Qwen2.5-0.5B-Instruct --max-model-len 32768
 ```
 
 ### Example Request
