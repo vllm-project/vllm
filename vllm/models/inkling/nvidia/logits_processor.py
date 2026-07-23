@@ -1,6 +1,22 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Inkling logits processor with muP output scaling."""
+"""Inkling logits processor (muP + LoRA aware).
+
+Inkling divides the final logits by a muP width multiplier
+(``logits_mup_width_multiplier``). This applies it two ways, depending on
+whether an lm_head LoRA is attached:
+
+* No LoRA: fold ``1/mup`` into the lm_head GEMM alpha (fp32 epilogue) -- no
+  separate elementwise kernel, no extra rounding, no weight mutation.
+* LoRA attached: the LoRA manager wraps this layer in
+  ``LogitsProcessorWithLoRA``, whose ``forward`` calls
+  ``type(base_layer).forward(self=wrapper)`` -- so this ``forward`` runs with
+  ``self`` bound to the wrapper. We detect that via ``base_layer`` and take the
+  LoRA path: run the wrapper's ``_get_logits`` (base logits + the lm_head LoRA
+  delta), then divide the full logits by the multiplier so the delta is scaled
+  too. muP thus composes with the LoRA delta, with the dispatch as the only
+  model-side branching.
+"""
 
 from __future__ import annotations
 
@@ -43,6 +59,46 @@ class InklingLogitsProcessor(LogitsProcessor):
         self._logits_zero: torch.Tensor | None = None
 
     def forward(
+        self,
+        lm_head: VocabParallelEmbedding,
+        hidden_states: torch.Tensor,
+        embedding_bias: torch.Tensor | None = None,
+    ) -> torch.Tensor | None:
+        # ``base_layer`` exists only on the LogitsProcessorWithLoRA wrapper,
+        # which calls this forward with ``self`` bound to the wrapper. The
+        # wrapper is not an ``InklingLogitsProcessor`` instance, so dispatch
+        # ``_lora_forward`` explicitly through the base_layer's class (it
+        # provides ``_get_logits``/``logits_as_input``; only ``_lora_forward``
+        # lives on this class).
+        if hasattr(self, "base_layer"):
+            return type(self.base_layer)._lora_forward(
+                self, lm_head, hidden_states, embedding_bias
+            )
+        return self._base_forward(lm_head, hidden_states, embedding_bias)
+
+    def _lora_forward(
+        self,
+        lm_head: VocabParallelEmbedding,
+        hidden_states: torch.Tensor,
+        embedding_bias: torch.Tensor | None = None,
+    ) -> torch.Tensor | None:
+        # ``self`` is the LogitsProcessorWithLoRA wrapper here: ``_get_logits``
+        # returns the base logits plus the lm_head LoRA delta. Apply the muP
+        # divisor on the full logits so the LoRA delta is scaled too.
+        mup_multiplier = self.base_layer.logits_mup_width_multiplier
+        mup = 1.0 / mup_multiplier if mup_multiplier else None
+        if self.logits_as_input:
+            logits = hidden_states
+        else:
+            logits = self._get_logits(hidden_states, lm_head, embedding_bias)
+        # TODO: fuse this multiplication
+        if logits is not None and mup:
+            assert self.base_layer.soft_cap is None
+            assert self.base_layer.scale == 1.0
+            logits = logits * mup
+        return logits
+
+    def _base_forward(
         self,
         lm_head: VocabParallelEmbedding,
         hidden_states: torch.Tensor,
