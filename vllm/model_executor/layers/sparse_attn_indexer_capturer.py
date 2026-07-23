@@ -52,6 +52,8 @@ def _get_num_indexer_layers(hf_config) -> int:
     if not hasattr(hf_config, "index_topk"):
         return 0
     num_hidden_layers = hf_config.num_hidden_layers
+    if not isinstance(num_hidden_layers, int):
+        return 0
     freq = getattr(hf_config, "index_topk_freq", 1)
     pattern = getattr(hf_config, "index_topk_pattern", None)
     skip_offset = getattr(hf_config, "index_skip_topk_offset", 2)
