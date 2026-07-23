@@ -104,22 +104,25 @@ def collect_tool_schema(tool_schema: list[CohereNormalizedTool]) -> str:
     tool_dictionary: dict[str, str] = {}
     for tool in tool_schema:
         tool_name = tool["name"]
-        tool_parameters = json.dumps(tool["parameters"])
-        json_schema = f"""{{
-                        "type": "object",
-                        "properties": {{
-                            "tool_call_id": {{
-                                "type": "string",
-                                "pattern": "^[0-9]+$"
-                            }},
-                            "tool_name": {{
-                                "type": "string",
-                                "const": "{tool_name}"
-                            }},
-                            "parameters": {tool_parameters}
-                            }}
-                            }}"""
-        tool_grammar = str(xgr.Grammar.from_json_schema(json_schema))
+        # Copy so hoisting below does not mutate the request's tool definition.
+        tool_parameters = dict(tool["parameters"])
+        json_schema: dict[str, Any] = {
+            "type": "object",
+            "properties": {
+                "tool_call_id": {"type": "string", "pattern": "^[0-9]+$"},
+                "tool_name": {"type": "string", "const": tool_name},
+                "parameters": tool_parameters,
+            },
+        }
+        # Hoist definition blocks to the envelope root so root-anchored $ref
+        # pointers ("#/$defs/X", "#/definitions/X") still resolve after the
+        # tool schema is nested under "properties.parameters". Same pattern as
+        # _get_tool_schema_defs in vllm/tool_parsers/utils.py; no cross-tool
+        # merging needed here since each tool gets its own grammar.
+        for defs_key in ["$defs", "definitions"]:
+            if defs_key in tool_parameters:
+                json_schema[defs_key] = tool_parameters.pop(defs_key)
+        tool_grammar = str(xgr.Grammar.from_json_schema(json.dumps(json_schema)))
         for match in re.findall(r"\b(\w+)\s*::=", tool_grammar):
             tool_grammar = re.sub(
                 rf"\b{re.escape(match)}\b", tool_name + match, tool_grammar
