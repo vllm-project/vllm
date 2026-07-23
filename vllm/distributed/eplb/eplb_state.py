@@ -577,7 +577,7 @@ class EplbState:
                     initial_map,
                     model.expert_weights,
                     expert_buffer,
-                    get_eplb_group().device_group,
+                    get_ep_group().device_group,
                     communicator,
                 )
                 _commit_eplb_maps(
