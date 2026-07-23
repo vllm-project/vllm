@@ -39,6 +39,14 @@ def test_npu_pr_workflows_gate_on_current_labels_not_label_event():
         assert "github.event.label.name" not in text
 
 
+def test_npu_pr_workflows_target_dedicated_npu_two():
+    for workflow_path in NPU_WORKFLOWS:
+        text = workflow_path.read_text(encoding="utf-8")
+
+        assert "github.event_name == 'pull_request'" in text
+        assert "'npu-2'" in text
+
+
 def test_pre_commit_uses_available_github_hosted_runner():
     workflow_path = REPO_ROOT / ".github/workflows/pre-commit.yml"
     workflow = load_workflow(workflow_path)
@@ -56,7 +64,7 @@ def test_pre_commit_uses_available_github_hosted_runner():
     assert "PRE_COMMIT_TO_REF:" in text
 
 
-def test_benchmark_detection_does_not_disable_idle_device_selection():
+def test_benchmark_detection_uses_logical_zero_for_isolated_runner():
     workflow_path = REPO_ROOT / ".github/workflows/ascend-benchmark-leaderboard.yml"
     text = workflow_path.read_text(encoding="utf-8")
     detection_step = text[
@@ -66,7 +74,9 @@ def test_benchmark_detection_does_not_disable_idle_device_selection():
     ]
 
     assert "ASCEND_CI_DETECTED_DEVICES=" in detection_step
-    assert 'echo "ASCEND_VISIBLE_DEVICES=' not in detection_step
+    assert 'echo "ASCEND_VISIBLE_DEVICES=0"' in detection_step
+    assert 'echo "ASCEND_RT_VISIBLE_DEVICES=0"' in detection_step
+    assert '"${#runner_devnodes[@]}" -eq 1' in detection_step
 
 
 def test_actionlint_knows_ascend_runner_labels():
@@ -74,4 +84,4 @@ def test_actionlint_knows_ascend_runner_labels():
     config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
     labels = set(config["self-hosted-runner"]["labels"])
 
-    assert {"ascend", "910b", "docker"} <= labels
+    assert {"ascend", "910b", "docker", "npu-2"} <= labels

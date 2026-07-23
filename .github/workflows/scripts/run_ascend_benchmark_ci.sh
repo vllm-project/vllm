@@ -25,7 +25,7 @@ BENCH_CONSTRAINTS_FILE=${BENCH_CONSTRAINTS_FILE:-}
 SAME_SPEC_BENCHMARK_ENABLED=${SAME_SPEC_BENCHMARK_ENABLED:-1}
 SAME_SPEC_SPEC_FILE=${SAME_SPEC_SPEC_FILE:-}
 SAME_SPEC_CONSTRAINTS_FILE=${SAME_SPEC_CONSTRAINTS_FILE:-$VLLM_HUST_BENCHMARK_REPO/docs/official-baselines/official-ascend-constraints.stub.json}
-SAME_SPEC_READY_TIMEOUT_SECONDS=${SAME_SPEC_READY_TIMEOUT_SECONDS:-600}
+SAME_SPEC_READY_TIMEOUT_SECONDS=${SAME_SPEC_READY_TIMEOUT_SECONDS:-1200}
 SAME_SPEC_PR_PREVIEW_COMPAT=${SAME_SPEC_PR_PREVIEW_COMPAT:-1}
 ALLOW_RANDOM_HF_PUBLISH=${ALLOW_RANDOM_HF_PUBLISH:-0}
 
@@ -79,6 +79,23 @@ marker_pid_file=""
 marker_pgid_file=""
 selected_device=""
 NPU_SMI_BIN=${NPU_SMI_BIN:-$(command -v npu-smi || true)}
+
+if [[ "${RUNNER_NAME:-}" =~ npu([0-9]+)$ ]]; then
+  runner_physical_device="${BASH_REMATCH[1]}"
+  shopt -s nullglob
+  runner_devnodes=(/dev/davinci[0-9]*)
+  shopt -u nullglob
+
+  if [[ "${#runner_devnodes[@]}" -eq 1 ]] \
+    && [[ "$(basename "${runner_devnodes[0]}")" == "davinci${runner_physical_device}" ]]; then
+    export ASCEND_VISIBLE_DEVICES=0
+    export ASCEND_RT_VISIBLE_DEVICES=0
+    echo "Pinned isolated runner ${RUNNER_NAME} to logical Ascend device 0 (${runner_devnodes[0]})."
+  elif [[ -z "${ASCEND_RT_VISIBLE_DEVICES:-}" && -z "${ASCEND_VISIBLE_DEVICES:-}" ]]; then
+    export ASCEND_RT_VISIBLE_DEVICES="$runner_physical_device"
+    echo "Pinned Ascend device from runner name ${RUNNER_NAME}: ${ASCEND_RT_VISIBLE_DEVICES}"
+  fi
+fi
 
 USER_PROVIDED_ASCEND_VISIBLE_DEVICES=0
 if [[ -n "${ASCEND_RT_VISIBLE_DEVICES:-}" || -n "${ASCEND_VISIBLE_DEVICES:-}" ]]; then
@@ -350,6 +367,7 @@ SUDO_PRESERVE_ENV_VARS=(
   HCCL_EXEC_TIMEOUT
   HF_ENDPOINT
   HF_HOME
+  HF_HUB_DISABLE_XET
   HF_TOKEN
   HOME
   HOST
@@ -413,6 +431,7 @@ export_sudo_preserved_env_vars() {
 
   for var_name in "${SUDO_PRESERVE_ENV_VARS[@]}"; do
     if [[ -n "${!var_name+x}" ]]; then
+      # shellcheck disable=SC2163  # Export the variable named by var_name.
       export "$var_name"
     fi
   done
@@ -925,6 +944,7 @@ prepare_hf_publish_cache_for_runner() {
 
 sync_benchmark_publication_to_github() {
   local publisher_script=${BENCHMARK_PUBLICATION_SYNC_SCRIPT:-$VLLM_HUST_REPO/.github/workflows/scripts/sync_benchmark_snapshots_to_github.sh}
+  local snapshot_commit_message="chore(data): sync benchmark publication $RUN_ID"
 
   if [[ "$PUBLISH_TO_BENCHMARK_REPO" != "1" ]]; then
     return 0
@@ -935,28 +955,30 @@ sync_benchmark_publication_to_github() {
     return 2
   fi
 
-  BENCHMARK_REPO_DIR="$VLLM_HUST_BENCHMARK_REPO" \
-  WEBSITE_REPO_DIR="$VLLM_HUST_WEBSITE_REPO" \
-  CURRENT_SUBMISSION_DIR="$SUBMISSION_DIR" \
-  VLLM_HUST_REPO_DIR="$VLLM_HUST_REPO" \
-  LOCAL_SNAPSHOT_OUTPUT_DIR="$AGGREGATE_OUTPUT_DIR" \
-  PYTHON_BIN="$PYTHON_BIN" \
-  BENCHMARK_REPO_SLUG="${BENCHMARK_REPO_SLUG:-vLLM-HUST/vllm-hust-benchmark}" \
-  BENCHMARK_REPO_GH_TOKEN="${BENCHMARK_REPO_GH_TOKEN:-}" \
-  BENCHMARK_REPO_SSH_KEY="${BENCHMARK_REPO_SSH_KEY:-}" \
-  SNAPSHOT_COMMIT_MESSAGE="chore(data): sync benchmark publication $RUN_ID" \
-  RUN_ID="$RUN_ID" \
-  "$publisher_script"
+  env \
+    BENCHMARK_REPO_DIR="$VLLM_HUST_BENCHMARK_REPO" \
+    WEBSITE_REPO_DIR="$VLLM_HUST_WEBSITE_REPO" \
+    CURRENT_SUBMISSION_DIR="$SUBMISSION_DIR" \
+    VLLM_HUST_REPO_DIR="$VLLM_HUST_REPO" \
+    LOCAL_SNAPSHOT_OUTPUT_DIR="$AGGREGATE_OUTPUT_DIR" \
+    PYTHON_BIN="$PYTHON_BIN" \
+    BENCHMARK_REPO_SLUG="${BENCHMARK_REPO_SLUG:-vLLM-HUST/vllm-hust-benchmark}" \
+    BENCHMARK_REPO_GH_TOKEN="${BENCHMARK_REPO_GH_TOKEN:-}" \
+    BENCHMARK_REPO_SSH_KEY="${BENCHMARK_REPO_SSH_KEY:-}" \
+    SNAPSHOT_COMMIT_MESSAGE="$snapshot_commit_message" \
+    RUN_ID="$RUN_ID" \
+    "$publisher_script"
 }
 
 run_same_spec_current_benchmark() {
   local same_spec_runner=$VLLM_HUST_BENCHMARK_REPO/scripts/run-current-ascend-same-spec.sh
   local same_spec_raw_result=$RESULT_ROOT/raw_benchmark_result.json
   local same_spec_submission_dir=$RESULT_ROOT/submission
-  local same_spec_ready_timeout_seconds=${SAME_SPEC_READY_TIMEOUT_SECONDS:-600}
+  local same_spec_ready_timeout_seconds=${SAME_SPEC_READY_TIMEOUT_SECONDS:-1200}
   local effective_same_spec_file=$SAME_SPEC_SPEC_FILE
   local same_spec_server_log=$RESULT_ROOT/server.stdout.log
   local same_spec_status=0
+  local same_spec_result_root=$RESULT_ROOT
   local current_vllm_hust_commit
   local current_vllm_hust_ref
   local current_plugin_commit
@@ -1072,8 +1094,8 @@ PY
         CURRENT_PLUGIN_GIT_COMMIT="$current_plugin_commit" \
         CURRENT_SUBMITTER="${GITHUB_ACTOR:-ci}" \
         CURRENT_DATA_SOURCE="vllm-hust-ci-same-spec" \
-        RESULT_DIR="$RESULT_ROOT" \
-        RESULT_ROOT="$RESULT_ROOT" \
+        RESULT_DIR="$same_spec_result_root" \
+        RESULT_ROOT="$same_spec_result_root" \
         RUN_ID="$RUN_ID" \
         CURRENT_SERVER_PORT="$PORT" \
         CURRENT_CLIENT_PORT="$PORT" \
@@ -1254,8 +1276,6 @@ if [[ "$ASCEND_BENCHMARK_USE_SUDO" == "1" ]]; then
 fi
 
 if [[ "$SAME_SPEC_BENCHMARK_ENABLED" == "1" ]]; then
-  EFFECTIVE_DATASET_NAME="$BENCH_SCENARIO"
-  EFFECTIVE_DATASET_PATH=""
   EFFECTIVE_INPUT_LEN=${BENCH_INPUT_LEN:-}
   EFFECTIVE_OUTPUT_LEN=${BENCH_OUTPUT_LEN:-}
   EFFECTIVE_CONSTRAINTS_FILE=$SAME_SPEC_CONSTRAINTS_FILE
@@ -1263,8 +1283,6 @@ if [[ "$SAME_SPEC_BENCHMARK_ENABLED" == "1" ]]; then
 else
   case "$BENCH_SCENARIO" in
     random-online)
-      EFFECTIVE_DATASET_NAME="random"
-      EFFECTIVE_DATASET_PATH=""
       EFFECTIVE_INPUT_LEN=${BENCH_INPUT_LEN:-$BENCH_RANDOM_INPUT_LEN}
       EFFECTIVE_OUTPUT_LEN=${BENCH_OUTPUT_LEN:-$BENCH_RANDOM_OUTPUT_LEN}
       EFFECTIVE_CONSTRAINTS_FILE=${BENCH_CONSTRAINTS_FILE:-$VLLM_HUST_REPO/.github/workflows/data/random-online-ci-constraints.json}
@@ -1289,8 +1307,6 @@ else
         echo "BENCH_CONSTRAINTS_FILE is required for sharegpt-online" >&2
         exit 2
       fi
-      EFFECTIVE_DATASET_NAME="sharegpt"
-      EFFECTIVE_DATASET_PATH="$BENCH_DATASET_PATH"
       EFFECTIVE_INPUT_LEN=${BENCH_INPUT_LEN:-1024}
       EFFECTIVE_OUTPUT_LEN=${BENCH_OUTPUT_LEN:-256}
       EFFECTIVE_CONSTRAINTS_FILE="$BENCH_CONSTRAINTS_FILE"

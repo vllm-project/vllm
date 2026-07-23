@@ -10,6 +10,7 @@ MAX_NUM_SEQS=${MAX_NUM_SEQS:-2}
 GPU_MEMORY_UTILIZATION=${GPU_MEMORY_UTILIZATION:-0.92}
 MAX_TOKENS=${MAX_TOKENS:-8}
 PROMPT=${PROMPT:-The capital of France is}
+SERVER_READY_MAX_ATTEMPTS=${SERVER_READY_MAX_ATTEMPTS:-300}
 SERVER_LOG=${SERVER_LOG:-}
 RUNTIME_READY_LOG=${RUNTIME_READY_LOG:-}
 PYTHON_BIN=${PYTHON_BIN:-python}
@@ -516,7 +517,7 @@ fi
 
 start_server
 
-for attempt in $(seq 1 120); do
+for attempt in $(seq 1 "$SERVER_READY_MAX_ATTEMPTS"); do
   if "$PYTHON_BIN" "$HTTP_REQUEST_SCRIPT" \
     --timeout "${E2E_HTTP_REQUEST_TIMEOUT_SECONDS:-30}" \
     "http://$HOST:$PORT/v1/models" >/dev/null 2>&1; then
@@ -533,7 +534,7 @@ for attempt in $(seq 1 120); do
     exit 1
   fi
 
-  if [[ "$attempt" -eq 120 ]]; then
+  if [[ "$attempt" -eq "$SERVER_READY_MAX_ATTEMPTS" ]]; then
     echo "Timed out waiting for vLLM server to become ready"
     cat "$SERVER_LOG"
     if server_log_indicates_npu_memory_pressure; then

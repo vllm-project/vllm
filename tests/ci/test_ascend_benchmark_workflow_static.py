@@ -116,16 +116,37 @@ def test_benchmark_repo_default_ref_is_main():
     ) in text
 
 
-def test_pr_checkout_urls_use_https_without_publish_ssh_key():
+def test_pr_and_manual_checkout_urls_use_https_without_publish_ssh_key():
     text = workflow_text()
 
     assert "format('https://github.com/{0}.git', github.repository)" in text
     assert "format('git@github.com:{0}.git', github.repository)" in text
-    assert (
-        "github.event_name == 'pull_request' || github.event_name == 'issue_comment'"
-    ) in text
+    read_only_events = (
+        "github.event_name == 'pull_request' || github.event_name == "
+        "'issue_comment' || github.event_name == 'workflow_dispatch'"
+    )
+    assert text.count(read_only_events) >= 5
     assert "https://github.com/vLLM-HUST/vllm-hust-benchmark.git" in text
     assert "https://github.com/vLLM-HUST/vllm-ascend-hust.git" in text
+
+
+def test_benchmark_checkout_retries_have_hard_network_timeouts():
+    text = workflow_text()
+    checkout_block = text[
+        text.index("      - name: Checkout target repo with retry") : text.index(
+            "      - name: Prepare Hugging Face cache directories"
+        )
+    ]
+
+    assert "GIT_CHECKOUT_RETRY_ATTEMPTS:-3" in checkout_block
+    assert "GIT_CHECKOUT_TIMEOUT_SECONDS:-90" in checkout_block
+    assert checkout_block.count('timeout --foreground "${timeout_seconds}s"') >= 6
+
+
+def test_benchmark_disables_hugging_face_xet_downloads():
+    text = workflow_text()
+
+    assert 'HF_HUB_DISABLE_XET: "1"' in text
 
 
 def test_benchmark_install_removes_conflicting_vllm_provider():
@@ -179,8 +200,8 @@ def test_main_benchmark_defaults_match_ascend_main_config():
     assert "PERFGATE_SPEC_FILE: ${{ vars.VLLM_HUST_PERFGATE_SPEC_FILE || '' }}" in text
     assert "VLLM_HUST_PERFGATE_HARDWARE_CHIP_MODEL" in text
     assert (
-        "HARDWARE_CHIP_MODEL: ${{ vars.VLLM_HUST_PERFGATE_HARDWARE_CHIP_MODEL || '910B2' }}"
-        in text
+        "HARDWARE_CHIP_MODEL: ${{ "
+        "vars.VLLM_HUST_PERFGATE_HARDWARE_CHIP_MODEL || '910B2' }}" in text
     )
     assert "Resolve perfgate spec for Ascend runner" in text
     assert "Resolve main same-spec file" in text
@@ -254,15 +275,18 @@ def test_benchmark_runner_supports_registry_same_spec_scenarios():
 
     assert 'if [[ "$SAME_SPEC_BENCHMARK_ENABLED" == "1" ]]; then' in script
     same_spec_block = script[
-        script.index('if [[ "$SAME_SPEC_BENCHMARK_ENABLED" == "1" ]]; then') :
-        script.index('else', script.index('if [[ "$SAME_SPEC_BENCHMARK_ENABLED" == "1" ]]; then'))
+        script.index(
+            'if [[ "$SAME_SPEC_BENCHMARK_ENABLED" == "1" ]]; then'
+        ) : script.index(
+            "else", script.index('if [[ "$SAME_SPEC_BENCHMARK_ENABLED" == "1" ]]; then')
+        )
     ]
     assert "EFFECTIVE_CONSTRAINTS_FILE=$SAME_SPEC_CONSTRAINTS_FILE" in same_spec_block
     assert "bench_args=()" in same_spec_block
-    assert 'Unsupported BENCH_SCENARIO without same-spec mode' in script
+    assert "Unsupported BENCH_SCENARIO without same-spec mode" in script
     assert (
-        'if [[ "$BENCH_SCENARIO" == "random-online" && "$SAME_SPEC_BENCHMARK_ENABLED" == "1" ]]; then'
-        not in script
+        'if [[ "$BENCH_SCENARIO" == "random-online" && '
+        '"$SAME_SPEC_BENCHMARK_ENABLED" == "1" ]]; then' not in script
     )
 
 
@@ -440,6 +464,24 @@ def test_workflow_dispatch_metadata_lengths_are_parsed_from_single_input():
     assert "inputs.output_length" not in text
 
 
+def test_pr_and_comment_runs_target_dedicated_npu_two():
+    text = workflow_text()
+
+    assert (
+        "(github.event_name == 'pull_request' || "
+        "github.event_name == 'issue_comment') && 'npu-2'"
+    ) in text
+
+
+def test_workflow_dispatch_targets_manual_runner_pool():
+    text = workflow_text()
+
+    assert (
+        "github.event_name == 'workflow_dispatch' && "
+        "(vars.VLLM_HUST_MANUAL_RUNNER_LABEL || 'npu-1')"
+    ) in text
+
+
 def test_l3_benchmark_publish_preflight_runs_before_benchmark():
     text = workflow_text()
 
@@ -470,8 +512,10 @@ def test_target_checkout_uses_resilient_git_http_retry_settings():
         )
     ]
 
-    assert "GIT_CHECKOUT_RETRY_ATTEMPTS:-6" in checkout_step
+    assert "GIT_CHECKOUT_RETRY_ATTEMPTS:-3" in checkout_step
     assert "GIT_CHECKOUT_RETRY_DELAY_SECONDS:-30" in checkout_step
+    assert "GIT_CHECKOUT_TIMEOUT_SECONDS:-90" in checkout_step
+    assert 'timeout --foreground "${timeout_seconds}s"' in checkout_step
     assert "-c http.version=HTTP/1.1" in checkout_step
     assert "-c http.lowSpeedLimit=1024" in checkout_step
     assert "-c http.lowSpeedTime=30" in checkout_step
