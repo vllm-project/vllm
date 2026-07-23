@@ -746,18 +746,6 @@ class QuarkConfig(QuantizationConfig):
 
         return scheme
 
-    def _get_int4_weight_mapper(self) -> "WeightsMapper":
-        if not self._is_packed_int4_export(self.quant_config):
-            return WeightsMapper()
-
-        suffix_map: dict[str, str | None] = {
-            ".qscales": ".weight_scale",
-            ".qqzeros": ".weight_zero_point",
-        }
-        return WeightsMapper(
-            orig_to_new_suffix=suffix_map,
-        )
-
     def get_cache_scale_mapper(self) -> "WeightsMapper":
         """Map Quark KV-cache scale names to vLLM names."""
         orig_to_new_suffix = {
@@ -768,7 +756,12 @@ class QuarkConfig(QuantizationConfig):
         }
         cache_scale_mapper = WeightsMapper(orig_to_new_suffix=orig_to_new_suffix)
         if self._is_packed_int4_export(self.quant_config):
-            cache_scale_mapper |= self._get_int4_weight_mapper()
+            cache_scale_mapper |= WeightsMapper(
+                orig_to_new_suffix={
+                    ".qscales": ".weight_scale",
+                    ".qqzeros": ".weight_zero_point",
+                },
+            )
         return cache_scale_mapper | QuantizationConfig.get_cache_scale_mapper()
 
 

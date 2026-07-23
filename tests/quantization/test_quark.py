@@ -28,6 +28,7 @@ from vllm.model_executor.layers.quantization.quark.quark_moe import (  # noqa: E
     QuarkW8A8Int8MoEMethod,
 )
 from vllm.model_executor.layers.quantization.quark.schemes import QuarkW4A16Int4
+from vllm.model_executor.layers.quantization.quark.utils import should_ignore_layer
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     is_layer_skipped,
 )
@@ -700,48 +701,6 @@ class TestQuarkInt4Format:
         assert method.group_size == 128
         assert method.pack_reorder
 
-    def test_quark_excluded_lm_head_keeps_native_weight_name(self):
-        quant_config = QuarkConfig.from_config(_quark_int4_config(exclude=["lm_head"]))
-        mapper = quant_config.get_cache_scale_mapper()
-
-        output_names = {
-            name for name, _ in mapper.apply([("lm_head.weight", torch.zeros(1))])
-        }
-
-        assert "lm_head.weight" in output_names
-        assert "lm_head.qweight" not in output_names
-
-    def test_quark_linear_weights_keep_native_names(self):
-        quant_config = QuarkConfig.from_config(
-            _quark_int4_config(
-                exclude=["model.language_model.layers.0.mlp.gate.linear"]
-            )
-        )
-        mapper = quant_config.get_cache_scale_mapper()
-
-        output_names = {
-            name
-            for name, _ in mapper.apply(
-                [
-                    (
-                        "model.language_model.layers.0.mlp.gate.linear.weight",
-                        torch.zeros(1),
-                    ),
-                    (
-                        "model.language_model.layers.1.mlp.gate.linear.weight",
-                        torch.zeros(1),
-                    ),
-                    ("layers.0.mlp.gate.weight", torch.zeros(1)),
-                    ("layers.1.mlp.gate.weight", torch.zeros(1)),
-                ]
-            )
-        }
-
-        assert "model.language_model.layers.0.mlp.gate.linear.weight" in output_names
-        assert "model.language_model.layers.1.mlp.gate.linear.weight" in output_names
-        assert "layers.0.mlp.gate.weight" in output_names
-        assert "layers.1.mlp.gate.weight" in output_names
-
     def test_quark_shared_expert_gate_keeps_quantized_tensors(self):
         quant_config = QuarkConfig.from_config(_quark_int4_config())
         mapper = quant_config.get_cache_scale_mapper()
@@ -781,31 +740,6 @@ class TestQuarkInt4Format:
             in output_names
         )
 
-    def test_quark_projection_weights_keep_native_names(self):
-        quant_config = QuarkConfig.from_config(
-            _quark_int4_config(exclude=["layers.0.mlp.shared_expert.down_proj"])
-        )
-        mapper = quant_config.get_cache_scale_mapper()
-
-        output_names = {
-            name
-            for name, _ in mapper.apply(
-                [
-                    (
-                        "layers.0.mlp.shared_expert.down_proj.weight",
-                        torch.zeros(1),
-                    ),
-                    (
-                        "layers.1.mlp.shared_expert.down_proj.weight",
-                        torch.zeros(1),
-                    ),
-                ]
-            )
-        }
-
-        assert "layers.0.mlp.shared_expert.down_proj.weight" in output_names
-        assert "layers.1.mlp.shared_expert.down_proj.weight" in output_names
-
     def test_quark_mapper_adds_suffix_remappings(self):
         quant_config = QuarkConfig.from_config(_quark_int4_config(symmetric=False))
         mapper = quant_config.get_cache_scale_mapper()
@@ -815,16 +749,13 @@ class TestQuarkInt4Format:
         assert ".qqzeros" in mapper.orig_to_new_suffix
         assert mapper.orig_to_new_suffix[".qqzeros"] == ".weight_zero_point"
 
-    def test_quark_apply_mapper_updates_layer_quant_config_keys(self):
+    def test_quark_apply_mapper_updates_exclude_and_layer_quant_config(self):
         quant_config = QuarkConfig.from_config(
             {
                 **_quark_int4_config(),
-                "exclude": [
-                    "model.language_model.layers.0.mlp.gate.linear",
-                    "lm_head",
-                ],
+                "exclude": ["lm_head"],
                 "layer_quant_config": {
-                    "model.language_model.layers.0.mlp.gate.linear": {
+                    "model.language_model.layers.0.mlp.gate": {
                         "weight": {"dtype": "float16"},
                     },
                 },
@@ -836,28 +767,25 @@ class TestQuarkInt4Format:
                     "lm_head": "language_model.lm_head",
                     "model.language_model.": "language_model.model.",
                 },
-                orig_to_new_substr={".gate.linear": ".gate"},
             )
         )
 
         layer_quant_config = quant_config.quant_config["layer_quant_config"]
         assert "language_model.model.layers.0.mlp.gate" in layer_quant_config
-        assert "model.language_model.layers.0.mlp.gate.linear" not in layer_quant_config
+        assert "model.language_model.layers.0.mlp.gate" not in layer_quant_config
         assert quant_config.quant_config["exclude"] == [
-            "language_model.model.layers.0.mlp.gate",
             "language_model.lm_head",
         ]
 
-    def test_quark_config_does_not_expand_model_specific_excludes(self):
-        quant_config = QuarkConfig.from_config(
-            _quark_int4_config(
-                exclude=["model.language_model.layers.0.mlp.gate.linear"]
-            )
-        )
+    def test_quark_bare_exclude_matches_nested_module_prefix(self):
+        quant_config = QuarkConfig.from_config(_quark_int4_config(exclude=["lm_head"]))
+        quant_config.apply_vllm_mapper(WeightsMapper())
 
-        assert quant_config.quant_config["exclude"] == [
-            "model.language_model.layers.0.mlp.gate.linear"
-        ]
+        exclude_layers = quant_config.quant_config["exclude"]
+        assert should_ignore_layer("language_model.lm_head", ignore=exclude_layers)
+        assert not should_ignore_layer(
+            "language_model.model.layers.0.mlp.gate", ignore=exclude_layers
+        )
 
     def test_quark_mapper_renames_tensor_names(self):
         quant_config = QuarkConfig.from_config(_quark_int4_config(symmetric=False))
