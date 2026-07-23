@@ -4,11 +4,13 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from vllm.config import get_current_vllm_config
-from vllm.model_executor.layers.fused_moe import FusedMoE
-from vllm.model_executor.layers.fused_moe.layer import UnquantizedFusedMoEMethod
+from vllm.model_executor.layers.fused_moe import (
+    RoutedExperts,
+    UnquantizedFusedMoEMethod,
+)
 from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.model_executor.layers.quantization.fp8 import Fp8Config
 from vllm.model_executor.layers.quantization.mxfp4 import Mxfp4MoEMethod
@@ -115,13 +117,29 @@ class DeepseekV4FP8Config(Fp8Config):
     def get_name(cls) -> QuantizationMethods:
         return "deepseek_v4_fp8"
 
+    @staticmethod
+    def _is_quark_mxfp4_ocp(hf_quant_cfg: dict) -> bool:
+        """True for AMD-Quark exports whose global scheme is MXFP4."""
+        weight = (hf_quant_cfg.get("global_quant_config") or {}).get("weight") or {}
+        return (
+            weight.get("dtype") == "fp4"
+            and weight.get("qscheme") == "per_group"
+            and weight.get("group_size") == 32
+        )
+
     @classmethod
     def override_quantization_method(
         cls, hf_quant_cfg, user_quant, hf_config=None
     ) -> QuantizationMethods | None:
         if not (
             isinstance(hf_quant_cfg, dict)
-            and hf_quant_cfg.get("quant_method") in ("fp8", "deepseek_v4_fp8")
+            and (
+                hf_quant_cfg.get("quant_method") in ("fp8", "deepseek_v4_fp8")
+                or (
+                    hf_quant_cfg.get("quant_method") == "quark"
+                    and cls._is_quark_mxfp4_ocp(hf_quant_cfg)
+                )
+            )
         ):
             return None
         model_type = getattr(hf_config, "model_type", None)
@@ -129,8 +147,27 @@ class DeepseekV4FP8Config(Fp8Config):
             return "deepseek_v4_fp8"
         return None
 
+    @classmethod
+    def from_config(cls, config: dict) -> DeepseekV4FP8Config:
+        # Reroute AMD-Quark fused shared expert MXFP4 checkpoints onto the fp8
+        # path: the runtime layout matches the DeepSeek-native fp8 checkpoint,
+        # so translate the schema into format Fp8Config.from_config expects.
+        if config.get("quant_method") == "quark":
+            quark_exclude = config.get("exclude") or []
+            config = {
+                "quant_method": "fp8",
+                "activation_scheme": "dynamic",
+                "fmt": "e4m3",
+                "scale_fmt": "ue8m0",
+                "weight_block_size": [128, 128],
+                "ignored_layers": [
+                    name for name in quark_exclude if isinstance(name, str)
+                ],
+            }
+        return cast("DeepseekV4FP8Config", super().from_config(config))
+
     def get_quant_method(self, layer, prefix):
-        if isinstance(layer, FusedMoE):
+        if isinstance(layer, RoutedExperts):
             if is_layer_skipped(
                 prefix=prefix,
                 ignored_layers=self.ignored_layers,
@@ -153,6 +190,6 @@ class DeepseekV4FP8Config(Fp8Config):
         return super().get_quant_method(layer, prefix)
 
     def is_mxfp4_quant(self, prefix, layer):
-        if not isinstance(layer, FusedMoE) or self.expert_dtype != "fp4":
+        if not isinstance(layer, RoutedExperts) or self.expert_dtype != "fp4":
             return False
         return self.moe_quant_algo != "NVFP4"

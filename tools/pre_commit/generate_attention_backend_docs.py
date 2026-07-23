@@ -30,6 +30,7 @@ REPO_ROOT = Path(__file__).parent.parent.parent
 RELEVANT_PATTERNS = [
     "vllm/v1/attention/backends/*.py",
     "vllm/v1/attention/backends/**/*.py",
+    "vllm/models/minimax_m3/common/sparse_attention.py",
     "vllm/model_executor/layers/attention/mla_attention.py",
     "vllm/platforms/cuda.py",
     "tools/pre_commit/generate_attention_backend_docs.py",
@@ -260,6 +261,25 @@ def _find_cc_in_function(tree: ast.AST, func_name: str) -> str | None:
     return None
 
 
+def _find_exact_cc_in_function(tree: ast.AST, func_name: str) -> str | None:
+    """Find a compute capability from is_device_capability() calls in a function."""
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.FunctionDef) or node.name != func_name:
+            continue
+        for n in ast.walk(node):
+            if (
+                isinstance(n, ast.Call)
+                and isinstance(n.func, ast.Attribute)
+                and n.func.attr == "is_device_capability"
+                and n.args
+                and isinstance(n.args[0], ast.Constant)
+                and isinstance(n.args[0].value, int)
+            ):
+                capability = n.args[0].value
+                return f"{capability // 10}.{capability % 10}"
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Registry and file resolution
 # ---------------------------------------------------------------------------
@@ -383,6 +403,162 @@ def parse_mla_prefill_priorities() -> dict[str, list[str]]:
     return priorities
 
 
+def parse_mla_dimensions_call(node: ast.AST) -> str | None:
+    """Parse an MLADimensions(...) call into a compact display string."""
+    if not isinstance(node, ast.Call):
+        return None
+
+    func = node.func
+    if not isinstance(func, ast.Name) or func.id != "MLADimensions":
+        return None
+
+    dimensions: dict[str, int] = {}
+    for keyword in node.keywords:
+        if (
+            keyword.arg is not None
+            and isinstance(keyword.value, ast.Constant)
+            and isinstance(keyword.value.value, int)
+        ):
+            dimensions[keyword.arg] = keyword.value.value
+
+    qk_nope_head_dim = dimensions.get("qk_nope_head_dim")
+    qk_rope_head_dim = dimensions.get("qk_rope_head_dim")
+    v_head_dim = dimensions.get("v_head_dim")
+    if qk_nope_head_dim is None or qk_rope_head_dim is None or v_head_dim is None:
+        return None
+
+    return (
+        f"(qk_nope_head_dim={qk_nope_head_dim}, "
+        f"qk_rope_head_dim={qk_rope_head_dim}, v_head_dim={v_head_dim})"
+    )
+
+
+def parse_supported_mla_dimensions(node: ast.AST | None) -> list[str]:
+    """Parse a supported_mla_dimensions class variable."""
+    if not isinstance(node, ast.List):
+        return []
+
+    supported_dimensions = []
+    for element in node.elts:
+        dimensions = parse_mla_dimensions_call(element)
+        if dimensions is not None:
+            supported_dimensions.append(dimensions)
+    return supported_dimensions
+
+
+def _parse_mla_dimension_reference(
+    node: ast.AST,
+    named_dimensions: dict[str, str],
+) -> str | None:
+    if isinstance(node, ast.Name):
+        return named_dimensions.get(node.id)
+    return parse_mla_dimensions_call(node)
+
+
+def _parse_mla_dimensions_return(
+    statements: list[ast.stmt],
+    named_dimensions: dict[str, str],
+) -> list[str]:
+    for statement in statements:
+        if not isinstance(statement, ast.Return):
+            continue
+        value = statement.value
+        if not (
+            isinstance(value, ast.Compare)
+            and isinstance(value.left, ast.Name)
+            and value.left.id == "mla_dimensions"
+            and len(value.ops) == 1
+            and len(value.comparators) == 1
+        ):
+            continue
+
+        comparator = value.comparators[0]
+        if isinstance(value.ops[0], ast.Eq):
+            dimension = _parse_mla_dimension_reference(
+                comparator,
+                named_dimensions,
+            )
+            return [dimension] if dimension is not None else []
+        if isinstance(value.ops[0], ast.In) and isinstance(
+            comparator, ast.List | ast.Tuple | ast.Set
+        ):
+            dimensions = [
+                _parse_mla_dimension_reference(element, named_dimensions)
+                for element in comparator.elts
+            ]
+            return [dimension for dimension in dimensions if dimension is not None]
+    return []
+
+
+def _parse_fa_version_condition(node: ast.AST) -> int | None:
+    if not (
+        isinstance(node, ast.Compare)
+        and len(node.ops) == 1
+        and isinstance(node.ops[0], ast.Eq)
+        and len(node.comparators) == 1
+        and isinstance(node.comparators[0], ast.Constant)
+        and isinstance(node.comparators[0].value, int)
+    ):
+        return None
+
+    left = node.left
+    is_fa_version = isinstance(left, ast.Name) and left.id == "fa_version"
+    is_get_fa_version = (
+        isinstance(left, ast.Call)
+        and isinstance(left.func, ast.Name)
+        and left.func.id == "get_flash_attn_version"
+    )
+    if is_fa_version or is_get_fa_version:
+        return node.comparators[0].value
+    return None
+
+
+def parse_supports_mla_dimensions(
+    method: ast.FunctionDef | None,
+) -> tuple[list[str], dict[int | None, list[str]]]:
+    """Parse dimensions and FA-version branches from a support method."""
+    if method is None:
+        return [], {}
+
+    named_dimensions: dict[str, str] = {}
+    for statement in method.body:
+        if not (
+            isinstance(statement, ast.Assign)
+            and len(statement.targets) == 1
+            and isinstance(statement.targets[0], ast.Name)
+        ):
+            continue
+        dimension = parse_mla_dimensions_call(statement.value)
+        if dimension is not None:
+            named_dimensions[statement.targets[0].id] = dimension
+
+    support_by_version: dict[int | None, list[str]] = {}
+    for statement in method.body:
+        if isinstance(statement, ast.Return):
+            dimensions = _parse_mla_dimensions_return([statement], named_dimensions)
+            if dimensions:
+                support_by_version[None] = dimensions
+        elif isinstance(statement, ast.If):
+            fa_version = _parse_fa_version_condition(statement.test)
+            if fa_version is None:
+                continue
+            dimensions = _parse_mla_dimensions_return(statement.body, named_dimensions)
+            if dimensions:
+                support_by_version[fa_version] = dimensions
+            default_dimensions = _parse_mla_dimensions_return(
+                statement.orelse, named_dimensions
+            )
+            if default_dimensions:
+                support_by_version[None] = default_dimensions
+
+    supported_dimensions: list[str] = []
+    for dimensions in support_by_version.values():
+        for dimension in dimensions:
+            if dimension not in supported_dimensions:
+                supported_dimensions.append(dimension)
+    return supported_dimensions, support_by_version
+
+
 def parse_mla_prefill_backend_file(class_path: str) -> dict[str, Any] | None:
     """Parse a single MLA prefill backend file to extract its properties.
 
@@ -408,20 +584,21 @@ def parse_mla_prefill_backend_file(class_path: str) -> dict[str, Any] | None:
 
     info: dict[str, Any] = {
         "compute_capability": "Any",
-        "requires_r1_dims": False,
+        "supported_mla_dimensions": [],
+        "mla_dimension_support_by_fa_version": {},
         "dtypes": "fp16, bf16",  # Default from base class
     }
 
     # Parse class variables
     for item in class_node.body:
-        if isinstance(item, ast.Assign):
-            for target in item.targets:
-                if (
-                    isinstance(target, ast.Name)
-                    and target.id == "requires_r1_mla_dimensions"
-                    and isinstance(item.value, ast.Constant)
-                ):
-                    info["requires_r1_dims"] = item.value.value
+        if (
+            isinstance(item, ast.AnnAssign)
+            and isinstance(item.target, ast.Name)
+            and item.target.id == "supported_mla_dimensions"
+        ):
+            info["supported_mla_dimensions"] = parse_supported_mla_dimensions(
+                item.value
+            )
 
         # Parse supported_dtypes class variable
         if (
@@ -437,6 +614,13 @@ def parse_mla_prefill_backend_file(class_path: str) -> dict[str, Any] | None:
                     dtypes.append(dtype_map.get(elt.attr, elt.attr))
             if dtypes:
                 info["dtypes"] = ", ".join(dtypes)
+
+    dimensions, support_by_version = parse_supports_mla_dimensions(
+        find_method(class_node, "supports_mla_dimensions")
+    )
+    if dimensions:
+        info["supported_mla_dimensions"] = dimensions
+        info["mla_dimension_support_by_fa_version"] = support_by_version
 
     # Parse get_name static method
     get_name_method = find_method(class_node, "get_name")
@@ -514,8 +698,27 @@ def parse_mla_prefill_backends() -> list[dict[str, Any]]:
             marker = "‡"
 
         notes = ""
-        if backend_info.get("requires_r1_dims"):
-            notes = "DeepSeek R1 dims only"
+        supported_mla_dimensions = backend_info.get("supported_mla_dimensions", [])
+        if supported_mla_dimensions:
+            notes = " or ".join(supported_mla_dimensions) + " only"
+            support_by_version = backend_info.get(
+                "mla_dimension_support_by_fa_version", {}
+            )
+            if any(version is not None for version in support_by_version):
+                default_dimensions = support_by_version.get(None, [])
+                dimension_notes = []
+                for dimension in supported_mla_dimensions:
+                    versions = [
+                        f"FA{version}"
+                        for version in (2, 3, 4)
+                        if dimension
+                        in support_by_version.get(version, default_dimensions)
+                    ]
+                    version_limit = "" if len(versions) == 3 else " only"
+                    dimension_notes.append(
+                        f"{dimension} ({'/'.join(versions)}{version_limit})"
+                    )
+                notes = " or ".join(dimension_notes)
         elif backend_name == "FLASH_ATTN":
             notes = "FA4 on SM100+, FA3 on SM90, FA2 otherwise"
 
@@ -645,7 +848,9 @@ def parse_compute_capability(node: ast.ClassDef) -> str:
         major_list.sort()
         if len(major_list) == 1:
             return f"{major_list[0]}.x"
-        return f"{major_list[0]}.x-{major_list[-1]}.x"
+        if major_list == list(range(major_list[0], major_list[-1] + 1)):
+            return f"{major_list[0]}.x-{major_list[-1]}.x"
+        return ", ".join(f"{major}.x" for major in major_list)
 
     if min_cap:
         if max_cap:
@@ -878,7 +1083,8 @@ def parse_flash_attn_features() -> dict[str, dict[str, Any]]:
         return {}
 
     # Analyze the functions to determine FA3/FA4-specific features
-    fa3_supports_fp8 = True
+    fa3_supports_fp8 = False
+    fa4_supports_fp8 = False
     fa3_supports_sinks = False
     fa4_supports_sinks = False
     fa3_compute_cap: str | None = None
@@ -887,6 +1093,44 @@ def parse_flash_attn_features() -> dict[str, dict[str, Any]]:
     for node in ast.walk(tree):
         if not isinstance(node, ast.FunctionDef):
             continue
+
+        # Check flash_attn_supports_kv_cache_dtype for fp8 support per FA version.
+        # Accept both equality checks and membership checks such as `in (3, 4)`.
+        if node.name == "flash_attn_supports_kv_cache_dtype":
+            for n in ast.walk(node):
+                if not (
+                    isinstance(n, ast.Compare)
+                    and len(n.ops) == 1
+                    and len(n.comparators) == 1
+                ):
+                    continue
+                is_version_compare = (
+                    isinstance(n.left, ast.Name) and n.left.id == "fa_version"
+                ) or (
+                    isinstance(n.left, ast.Call)
+                    and isinstance(n.left.func, ast.Name)
+                    and n.left.func.id == "get_flash_attn_version"
+                )
+                if not is_version_compare:
+                    continue
+
+                versions: list[Any] = []
+                comparator = n.comparators[0]
+                if isinstance(n.ops[0], ast.Eq) and isinstance(
+                    comparator, ast.Constant
+                ):
+                    versions = [comparator.value]
+                elif isinstance(n.ops[0], ast.In) and isinstance(
+                    comparator, (ast.Tuple, ast.List, ast.Set)
+                ):
+                    versions = [
+                        elt.value
+                        for elt in comparator.elts
+                        if isinstance(elt, ast.Constant)
+                    ]
+
+                fa3_supports_fp8 |= 3 in versions
+                fa4_supports_fp8 |= 4 in versions
 
         # Check flash_attn_supports_sinks - looks for `fa_version == 3/4`
         # or `get_flash_attn_version() == 3/4` (also accepts `in (3, 4)`)
@@ -994,17 +1238,18 @@ def parse_flash_attn_features() -> dict[str, dict[str, Any]]:
         },
         "fa4": {
             "compute_capability": fa4_compute_cap,
-            "supports_fp8": False,
+            "supports_fp8": fa4_supports_fp8,
             "supports_sink": fa4_supports_sinks,
         },
     }
 
 
 def parse_flashinfer_trtllm_features() -> dict[str, dict[str, Any]]:
-    """Parse flashinfer.py to detect TRTLLM-specific features.
+    """Parse flashinfer.py to detect FlashInfer TRTLLM API variants.
 
-    FLASHINFER uses TRTLLM attention on SM100 (Blackwell), which has different
-    capabilities (e.g., sink support) than native FlashInfer on earlier GPUs.
+    FLASHINFER uses XQA on SM90 and trtllm-gen on SM100 through FlashInfer's
+    TRTLLM decode API. These variants have different capabilities than native
+    FlashInfer.
     """
     if not FLASHINFER_UTILS_FILE.exists():
         return {}
@@ -1014,9 +1259,10 @@ def parse_flashinfer_trtllm_features() -> dict[str, dict[str, Any]]:
     except Exception:
         return {}
 
-    trtllm_compute_cap = _find_cc_in_function(tree, "supports_trtllm_attention")
+    xqa_compute_cap = _find_exact_cc_in_function(tree, "supports_trtllm_attention")
+    trtllm_gen_compute_cap = _find_cc_in_function(tree, "supports_trtllm_attention")
 
-    if not trtllm_compute_cap:
+    if not xqa_compute_cap and not trtllm_gen_compute_cap:
         return {}
 
     # KV cache dtypes that only work with a dedicated kernel (e.g. nvfp4
@@ -1026,12 +1272,17 @@ def parse_flashinfer_trtllm_features() -> dict[str, dict[str, Any]]:
 
     return {
         "native": {
-            # Native FlashInfer: everything except SM100
+            # Native FlashInfer path.
             "supports_sink": False,
         },
-        "trtllm": {
-            # TRTLLM pathway on Blackwell
-            "compute_capability": trtllm_compute_cap,
+        "xqa": {
+            # XQA decode path on Hopper.
+            "compute_capability": xqa_compute_cap,
+            "supports_sink": False,
+        },
+        "trtllm_gen": {
+            # trtllm-gen pathway on Blackwell.
+            "compute_capability": trtllm_gen_compute_cap,
             "supports_sink": True,
         },
         "exclude_kv_dtypes": kernel_only_kv_dtypes,
@@ -1039,8 +1290,24 @@ def parse_flashinfer_trtllm_features() -> dict[str, dict[str, Any]]:
 
 
 # ---------------------------------------------------------------------------
-# Backend variant expansion (FA2/FA3/FA4, FlashInfer native/TRTLLM)
+# Backend variant expansion (FA2/FA3/FA4, FlashInfer native/XQA/trtllm-gen)
 # ---------------------------------------------------------------------------
+
+
+def _apply_fp8_support(kv_cache_dtypes: str, supports_fp8: bool) -> str:
+    """Add or remove fp8 dtypes from a comma-separated kv_cache_dtypes string.
+
+    The base FLASH_ATTN backend lists fp8 dtypes in ``supported_kv_cache_dtypes``,
+    but actual support varies by FA version (e.g. FA2 has no fp8 support), so each
+    variant's row is normalized to match its own capability.
+    """
+    fp8_dtypes = {"fp8", "fp8_e4m3", "fp8_e5m2"}
+    dtypes = kv_cache_dtypes.split(", ")
+    base_dtypes = [dtype for dtype in dtypes if dtype not in fp8_dtypes]
+    if supports_fp8:
+        advertised_fp8_dtypes = [dtype for dtype in dtypes if dtype in fp8_dtypes]
+        return ", ".join(base_dtypes + advertised_fp8_dtypes)
+    return ", ".join(base_dtypes)
 
 
 def _expand_flash_attn_variants(
@@ -1063,6 +1330,9 @@ def _expand_flash_attn_variants(
         fa2["_sort_key"] = "FLASH_ATTN"
         fa2["_sort_order"] = 0
         fa2["supports_sink"] = fa_features["fa2"]["supports_sink"]
+        fa2["kv_cache_dtypes"] = _apply_fp8_support(
+            backend["kv_cache_dtypes"], fa_features["fa2"]["supports_fp8"]
+        )
 
         # Create FA3 entry (uses parsed compute_capability from fa_utils)
         fa3 = backend.copy()
@@ -1072,11 +1342,9 @@ def _expand_flash_attn_variants(
         if fa_features["fa3"]["compute_capability"]:
             fa3["compute_capability"] = fa_features["fa3"]["compute_capability"]
         fa3["supports_sink"] = fa_features["fa3"]["supports_sink"]
-        if fa_features["fa3"]["supports_fp8"]:
-            base_dtypes = backend["kv_cache_dtypes"].split(", ")
-            fp8_dtypes = ["fp8", "fp8_e4m3", "fp8_e5m2"]
-            new_dtypes = [d for d in fp8_dtypes if d not in base_dtypes]
-            fa3["kv_cache_dtypes"] = ", ".join(base_dtypes + new_dtypes)
+        fa3["kv_cache_dtypes"] = _apply_fp8_support(
+            backend["kv_cache_dtypes"], fa_features["fa3"]["supports_fp8"]
+        )
 
         expanded.append(fa2)
         expanded.append(fa3)
@@ -1090,6 +1358,9 @@ def _expand_flash_attn_variants(
             if fa_features["fa4"].get("compute_capability"):
                 fa4["compute_capability"] = fa_features["fa4"]["compute_capability"]
             fa4["supports_sink"] = fa_features["fa4"]["supports_sink"]
+            fa4["kv_cache_dtypes"] = _apply_fp8_support(
+                backend["kv_cache_dtypes"], fa_features["fa4"]["supports_fp8"]
+            )
             expanded.append(fa4)
 
     return expanded
@@ -1099,7 +1370,7 @@ def _expand_flashinfer_variants(
     all_backends: list[dict[str, Any]],
     fi_features: dict[str, dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """Expand FLASHINFER into native and TRTLLM variants."""
+    """Expand FLASHINFER into native, XQA, and trtllm-gen variants."""
     expanded = []
     for backend in all_backends:
         if backend["name"] != "FLASHINFER":
@@ -1110,9 +1381,8 @@ def _expand_flashinfer_variants(
         orig_cap = backend["compute_capability"]
         parts = orig_cap.replace(".x", "").split("-")
         min_cc = parts[0] if parts else "7"
-        trtllm_cc = fi_features["trtllm"]["compute_capability"]
 
-        # Create native entry (pre-Blackwell GPUs)
+        # Create native entry.
         native = backend.copy()
         native["version"] = "Native†"
         native["_sort_key"] = "FLASHINFER"
@@ -1129,16 +1399,36 @@ def _expand_flashinfer_variants(
                 if d not in exclude
             )
 
-        # Create TRTLLM entry
-        trtllm = backend.copy()
-        trtllm["version"] = "TRTLLM†"
-        trtllm["_sort_key"] = "FLASHINFER"
-        trtllm["_sort_order"] = 1
-        trtllm["compute_capability"] = trtllm_cc
-        trtllm["supports_sink"] = fi_features["trtllm"]["supports_sink"]
+        # Create XQA entry.
+        xqa = backend.copy()
+        xqa["version"] = "XQA†"
+        xqa["_sort_key"] = "FLASHINFER"
+        xqa["_sort_order"] = 1
+        xqa["compute_capability"] = fi_features["xqa"]["compute_capability"]
+        xqa["supports_sink"] = fi_features["xqa"]["supports_sink"]
+        xqa["supports_non_causal"] = False
+        if exclude:
+            xqa["kv_cache_dtypes"] = ", ".join(
+                d
+                for d in (d.strip() for d in xqa["kv_cache_dtypes"].split(","))
+                if d not in exclude
+            )
+
+        # Create trtllm-gen entry.
+        trtllm_gen = backend.copy()
+        trtllm_gen["version"] = "trtllm-gen†"
+        trtllm_gen["_sort_key"] = "FLASHINFER"
+        trtllm_gen["_sort_order"] = 2
+        trtllm_gen["compute_capability"] = fi_features["trtllm_gen"][
+            "compute_capability"
+        ]
+        trtllm_gen["supports_sink"] = fi_features["trtllm_gen"]["supports_sink"]
 
         expanded.append(native)
-        expanded.append(trtllm)
+        if fi_features["xqa"]["compute_capability"]:
+            expanded.append(xqa)
+        if fi_features["trtllm_gen"]["compute_capability"]:
+            expanded.append(trtllm_gen)
     return expanded
 
 
@@ -1249,7 +1539,9 @@ def _get_backends_from_return(stmts: list) -> list[str]:
 
 
 def _is_sm100_check(test: ast.expr) -> bool:
-    """Check if test is `something.major == 10`."""
+    """Check if test is `something.major == 10`, possibly inside an `and`."""
+    if isinstance(test, ast.BoolOp) and isinstance(test.op, ast.And):
+        return any(_is_sm100_check(value) for value in test.values)
     return (
         isinstance(test, ast.Compare)
         and isinstance(test.left, ast.Attribute)
@@ -1562,7 +1854,9 @@ def generate_legend() -> str:
 
 
 def generate_mla_section(
-    prefill_backends: list[dict[str, Any]], decode_backends: list[dict[str, Any]]
+    prefill_backends: list[dict[str, Any]],
+    decode_backends: list[dict[str, Any]],
+    v4_decode_backends: list[dict[str, Any]] | None = None,
 ) -> str:
     """Generate the complete MLA section with prefill and decode tables."""
     lines = [
@@ -1611,6 +1905,41 @@ def generate_mla_section(
     columns = _build_columns(is_mla=True, has_versions=False)
     lines.extend(_render_table(columns, decode_backends))
 
+    if v4_decode_backends:
+        lines.extend(
+            [
+                "",
+                "### DeepSeek V4 Decode Backends",
+                "",
+                "DeepSeek V4 sparse MLA uses its own decode backends, selected via",
+                "`--attention-backend=<BACKEND>` (e.g., `FLASHMLA_SPARSE_DSV4`,",
+                "`FLASHINFER_MLA_SPARSE_DSV4`). They share the V4 sparse-index",
+                "pipeline (compressor + SWA + indexer, 256-token blocks, head 512);",
+                "default on NVIDIA is `FLASHINFER_MLA_SPARSE_DSV4` on SM12x and",
+                "`FLASHMLA_SPARSE_DSV4` on other supported CUDA architectures.",
+                "",
+            ]
+        )
+        lines.extend(_render_table(columns, v4_decode_backends))
+
+    lines.append("")
+    return "\n".join(lines)
+
+
+def generate_minimax_section(backends: list[dict[str, Any]]) -> str:
+    """Generate the MiniMax M3 sparse attention section."""
+    lines = [
+        "## MiniMax M3 Sparse Attention Backends",
+        "",
+        'Block-sparse GQA backend used by MiniMax M3 sparse ("lightning indexer")',
+        "layers. It is wired in directly by the model and is not part of the",
+        "automatic priority lists above. A lightning indexer scores KV blocks, the",
+        "top-k blocks (plus fixed init/local blocks) are selected, and attention",
+        "attends only to those blocks; index keys live in a separate side cache.",
+        "",
+    ]
+    columns = _build_columns(is_mla=False, has_versions=False)
+    lines.extend(_render_table(columns, backends))
     lines.append("")
     return "\n".join(lines)
 
@@ -1651,9 +1980,24 @@ def generate_docs() -> str:
     if fi_features:
         all_backends = _expand_flashinfer_variants(all_backends, fi_features)
 
-    # Split into MLA and non-MLA
-    mla_backends = [b for b in all_backends if b["is_mla"]]
-    non_mla_backends = [b for b in all_backends if not b["is_mla"]]
+    # DeepSeek V4 (*_DSV4) decode backends and MiniMax M3 sparse backends each
+    # get their own subsection rather than mixing into the main MLA / standard
+    # tables (the ROCm V4 backend isn't flagged is_mla by the AST heuristic, so
+    # filter purely on the name).
+    def _is_v4(b: dict[str, Any]) -> bool:
+        return b["name"].endswith("_DSV4")
+
+    def _is_minimax(b: dict[str, Any]) -> bool:
+        return not b["is_mla"] and not _is_v4(b) and b["name"].startswith("MINIMAX")
+
+    v4_decode_backends = [b for b in all_backends if _is_v4(b)]
+    minimax_backends = [b for b in all_backends if _is_minimax(b)]
+    mla_backends = [b for b in all_backends if b["is_mla"] and not _is_v4(b)]
+    non_mla_backends = [
+        b
+        for b in all_backends
+        if not b["is_mla"] and not _is_v4(b) and not _is_minimax(b)
+    ]
 
     # Generate documentation
     script_path = "tools/pre_commit/generate_attention_backend_docs.py"
@@ -1689,8 +2033,10 @@ def generate_docs() -> str:
     footnotes = []
     if fi_features:
         footnotes.append(
-            "> **†** FlashInfer uses TRTLLM attention on Blackwell (SM100), which "
-            "supports sinks. Disable via `--attention-config.use_trtllm_attention=0`."
+            "> **†** FlashInfer Native is the regular FlashInfer path. XQA is the "
+            "SM90 decode path exposed through FlashInfer's TRTLLM decode API. "
+            "trtllm-gen is used on SM100 and supports sinks. Disable XQA/trtllm-gen "
+            "via `--attention-config.use_trtllm_attention=0`."
         )
     if fa_features:
         footnotes.append(
@@ -1702,8 +2048,14 @@ def generate_docs() -> str:
     if footnotes:
         doc_lines.append("\n>\n".join(footnotes) + "\n")
 
+    # Add MiniMax M3 sparse section (separate category after standard GQA)
+    if minimax_backends:
+        doc_lines.append(generate_minimax_section(minimax_backends))
+
     # Add MLA section with prefill and decode backends
-    doc_lines.append(generate_mla_section(mla_prefill_backends, mla_backends))
+    doc_lines.append(
+        generate_mla_section(mla_prefill_backends, mla_backends, v4_decode_backends)
+    )
 
     return "\n".join(doc_lines)
 

@@ -687,7 +687,7 @@ def serialize_vllm_model(
         serializer = TensorSerializer(
             stream,
             encryption=encryption_params,
-            **tensorizer_config.serialization_kwargs,
+            **(tensorizer_config.serialization_kwargs or {}),
         )
         serializer.write_module(model)
         serializer.close()

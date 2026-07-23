@@ -72,19 +72,12 @@ _TEXT_GENERATION_MODELS = {
     # [Decoder-only]
     "AfmoeForCausalLM": ("afmoe", "AfmoeForCausalLM"),
     "ApertusForCausalLM": ("apertus", "ApertusForCausalLM"),
-    "AquilaModel": ("llama", "LlamaForCausalLM"),
-    "AquilaForCausalLM": ("llama", "LlamaForCausalLM"),  # AquilaChat2
     "ArceeForCausalLM": ("arcee", "ArceeForCausalLM"),
     "ArcticForCausalLM": ("arctic", "ArcticForCausalLM"),
     "AXK1ForCausalLM": ("AXK1", "AXK1ForCausalLM"),
-    # baichuan-7b, upper case 'C' in the class name
-    "BaiChuanForCausalLM": ("baichuan", "BaiChuanForCausalLM"),
-    # baichuan-13b, lower case 'c' in the class name
-    "BaichuanForCausalLM": ("baichuan", "BaichuanForCausalLM"),
     "BailingMoeForCausalLM": ("bailing_moe", "BailingMoeForCausalLM"),
     "BailingMoeV2ForCausalLM": ("bailing_moe", "BailingMoeV2ForCausalLM"),
     "BailingMoeV2_5ForCausalLM": ("bailing_moe_linear", "BailingMoeV25ForCausalLM"),
-    "BambaForCausalLM": ("bamba", "BambaForCausalLM"),
     "BloomForCausalLM": ("bloom", "BloomForCausalLM"),
     "ChatGLMModel": ("chatglm", "ChatGLMForCausalLM"),
     "ChatGLMForConditionalGeneration": ("chatglm", "ChatGLMForCausalLM"),
@@ -99,7 +92,6 @@ _TEXT_GENERATION_MODELS = {
     "DeepseekV3ForCausalLM": ("deepseek_v2", "DeepseekV3ForCausalLM"),
     "DeepseekV32ForCausalLM": ("deepseek_v2", "DeepseekV3ForCausalLM"),
     "DeepseekV4ForCausalLM": ("vllm.models.deepseek_v4", "DeepseekV4ForCausalLM"),
-    "Dots1ForCausalLM": ("dots1", "Dots1ForCausalLM"),
     "Ernie4_5ForCausalLM": ("ernie45", "Ernie4_5ForCausalLM"),
     "Ernie4_5_MoeForCausalLM": ("ernie45_moe", "Ernie4_5_MoeForCausalLM"),
     "ExaoneForCausalLM": ("exaone", "ExaoneForCausalLM"),
@@ -124,7 +116,6 @@ _TEXT_GENERATION_MODELS = {
     "GlmMoeDsaForCausalLM": ("deepseek_v2", "GlmMoeDsaForCausalLM"),
     "GptOssForCausalLM": ("gpt_oss", "GptOssForCausalLM"),
     "GPT2LMHeadModel": ("gpt2", "GPT2LMHeadModel"),
-    "GPTBigCodeForCausalLM": ("gpt_bigcode", "GPTBigCodeForCausalLM"),
     "GPTJForCausalLM": ("gpt_j", "GPTJForCausalLM"),
     "GPTNeoXForCausalLM": ("gpt_neox", "GPTNeoXForCausalLM"),
     "GraniteForCausalLM": ("granite", "GraniteForCausalLM"),
@@ -132,17 +123,14 @@ _TEXT_GENERATION_MODELS = {
     "GraniteMoeHybridForCausalLM": ("granitemoehybrid", "GraniteMoeHybridForCausalLM"),
     "GraniteMoeSharedForCausalLM": ("granitemoeshared", "GraniteMoeSharedForCausalLM"),
     "GritLM": ("gritlm", "GritLM"),
-    "Grok1ModelForCausalLM": ("grok1", "GrokForCausalLM"),
-    "Grok1ForCausalLM": ("grok1", "GrokForCausalLM"),
+    "HrmTextForCausalLM": ("hrm_text", "HrmTextForCausalLM"),
     "HunYuanMoEV1ForCausalLM": ("hunyuan_v1", "HunYuanMoEV1ForCausalLM"),
     "HunYuanDenseV1ForCausalLM": ("hunyuan_v1", "HunYuanDenseV1ForCausalLM"),
     "HYV3ForCausalLM": ("hy_v3", "HYV3ForCausalLM"),
     "HCXVisionForCausalLM": ("hyperclovax_vision", "HCXVisionForCausalLM"),
     "HCXVisionV2ForCausalLM": ("hyperclovax_vision_v2", "HCXVisionV2ForCausalLM"),
     "HyperCLOVAXForCausalLM": ("hyperclovax", "HyperCLOVAXForCausalLM"),
-    "InternLMForCausalLM": ("llama", "LlamaForCausalLM"),
     "InternLM2ForCausalLM": ("internlm2", "InternLM2ForCausalLM"),
-    "InternLM2VEForCausalLM": ("internlm2_ve", "InternLM2VEForCausalLM"),
     "InternLM3ForCausalLM": ("llama", "LlamaForCausalLM"),
     "IQuestCoderForCausalLM": ("llama", "LlamaForCausalLM"),
     "IQuestLoopCoderForCausalLM": ("iquest_loopcoder", "IQuestLoopCoderForCausalLM"),
@@ -157,14 +145,25 @@ _TEXT_GENERATION_MODELS = {
     # For decapoda-research/llama-*
     "LLaMAForCausalLM": ("llama", "LlamaForCausalLM"),
     "LongcatFlashForCausalLM": ("longcat_flash", "LongcatFlashForCausalLM"),
+    "LongcatFlashNgramForCausalLM": (
+        "longcat_flash_ngram",
+        "LongcatFlashNgramForCausalLM",
+    ),
     "MambaForCausalLM": ("mamba", "MambaForCausalLM"),
     "Mamba2ForCausalLM": ("mamba2", "Mamba2ForCausalLM"),
+    "MellumForCausalLM": ("mellum", "MellumForCausalLM"),
     "MiniCPMForCausalLM": ("minicpm", "MiniCPMForCausalLM"),
     "MiniCPM3ForCausalLM": ("minicpm3", "MiniCPM3ForCausalLM"),
-    "MiniMaxForCausalLM": ("minimax_text_01", "MiniMaxText01ForCausalLM"),
-    "MiniMaxText01ForCausalLM": ("minimax_text_01", "MiniMaxText01ForCausalLM"),
-    "MiniMaxM1ForCausalLM": ("minimax_text_01", "MiniMaxText01ForCausalLM"),
     "MiniMaxM2ForCausalLM": ("minimax_m2", "MiniMaxM2ForCausalLM"),
+    "MiniMaxM3SparseForCausalLM": (
+        "vllm.models.minimax_m3",
+        "MiniMaxM3SparseForCausalLM",
+    ),
+    "InklingForCausalLM": ("vllm.models.inkling", "InklingForCausalLM"),
+    "InklingForConditionalGeneration": (
+        "vllm.models.inkling",
+        "InklingForConditionalGeneration",
+    ),
     "Ministral3ForCausalLM": ("mistral", "MistralForCausalLM"),
     "MistralForCausalLM": ("mistral", "MistralForCausalLM"),
     "MistralLarge3ForCausalLM": ("mistral_large_3", "MistralLarge3ForCausalLM"),
@@ -178,9 +177,7 @@ _TEXT_GENERATION_MODELS = {
     "NemotronForCausalLM": ("nemotron", "NemotronForCausalLM"),
     "NemotronHForCausalLM": ("nemotron_h", "NemotronHForCausalLM"),
     "NemotronHPuzzleForCausalLM": ("nemotron_h", "NemotronHForCausalLM"),
-    "OlmoForCausalLM": ("olmo", "OlmoForCausalLM"),
-    "Olmo2ForCausalLM": ("olmo2", "Olmo2ForCausalLM"),
-    "Olmo3ForCausalLM": ("olmo2", "Olmo2ForCausalLM"),
+    "Olmo3ForCausalLM": ("olmo3", "Olmo3ForCausalLM"),
     "OlmoHybridForCausalLM": ("olmo_hybrid", "OlmoHybridForCausalLM"),
     "OlmoeForCausalLM": ("olmoe", "OlmoeForCausalLM"),
     "OPTForCausalLM": ("opt", "OPTForCausalLM"),
@@ -190,13 +187,11 @@ _TEXT_GENERATION_MODELS = {
     "PanguProMoEV2ForCausalLM": ("openpangu", "PanguProMoEV2ForCausalLM"),
     "PanguUltraMoEForCausalLM": ("openpangu", "PanguUltraMoEForCausalLM"),
     "Param2MoEForCausalLM": ("param2moe", "Param2MoEForCausalLM"),
-    "PersimmonForCausalLM": ("persimmon", "PersimmonForCausalLM"),
     "PhiForCausalLM": ("phi", "PhiForCausalLM"),
     "Phi3ForCausalLM": ("phi3", "Phi3ForCausalLM"),
     "PhiMoEForCausalLM": ("phimoe", "PhiMoEForCausalLM"),
     "Plamo2ForCausalLM": ("plamo2", "Plamo2ForCausalLM"),
     "Plamo3ForCausalLM": ("plamo3", "Plamo3ForCausalLM"),
-    "QWenLMHeadModel": ("qwen", "QWenLMHeadModel"),
     "Qwen2ForCausalLM": ("qwen2", "Qwen2ForCausalLM"),
     "Qwen2MoeForCausalLM": ("qwen2_moe", "Qwen2MoeForCausalLM"),
     "Qwen3ForCausalLM": ("qwen3", "Qwen3ForCausalLM"),
@@ -210,21 +205,18 @@ _TEXT_GENERATION_MODELS = {
     "Step3p5ForCausalLM": ("step3p5", "Step3p5ForCausalLM"),
     "StableLMEpochForCausalLM": ("stablelm", "StablelmForCausalLM"),
     "StableLmForCausalLM": ("stablelm", "StablelmForCausalLM"),
-    "Starcoder2ForCausalLM": ("starcoder2", "Starcoder2ForCausalLM"),
     "SolarForCausalLM": ("solar", "SolarForCausalLM"),
-    "TeleChatForCausalLM": ("telechat2", "TeleChat2ForCausalLM"),
     "TeleChat2ForCausalLM": ("telechat2", "TeleChat2ForCausalLM"),
     "TeleChat3ForCausalLM": ("llama", "LlamaForCausalLM"),
     "TeleFLMForCausalLM": ("teleflm", "TeleFLMForCausalLM"),
-    "XverseForCausalLM": ("llama", "LlamaForCausalLM"),
     "Zamba2ForCausalLM": ("zamba2", "Zamba2ForCausalLM"),
 }
 
 _EMBEDDING_MODELS = {
     # [Text-only]
     "BertModel": ("bert", "BertEmbeddingModel"),
+    "BertForMaskedLM": ("bert", "BertForMaskedLM"),
     "BertSpladeSparseEmbeddingModel": ("bert", "BertSpladeSparseEmbeddingModel"),
-    "ErnieModel": ("ernie", "ErnieEmbeddingModel"),
     "BgeM3EmbeddingModel": ("roberta", "BgeM3EmbeddingModel"),
     "DeciLMForCausalLM": ("nemotron_nas", "DeciLMForCausalLM"),
     "Gemma2Model": ("gemma2", "Gemma2ForCausalLM"),
@@ -250,7 +242,6 @@ _EMBEDDING_MODELS = {
     "Qwen2ForCausalLM": ("qwen2", "Qwen2ForCausalLM"),
     "RobertaForMaskedLM": ("roberta", "RobertaEmbeddingModel"),
     "RobertaModel": ("roberta", "RobertaEmbeddingModel"),
-    "TeleChatForCausalLM": ("telechat2", "TeleChat2ForCausalLM"),
     "TeleChat2ForCausalLM": ("telechat2", "TeleChat2ForCausalLM"),
     "VoyageQwen3BidirectionalEmbedModel": (
         "voyage",
@@ -299,21 +290,28 @@ _REWARD_MODELS = {
 
 _TOKEN_CLASSIFICATION_MODELS = {
     "BertForTokenClassification": ("bert", "BertForTokenClassification"),
-    "ErnieForTokenClassification": ("ernie", "ErnieForTokenClassification"),
     "ModernBertForTokenClassification": (
         "modernbert",
         "ModernBertForTokenClassification",
     ),
+    "OpenAIPrivacyFilterForTokenClassification": (
+        "openai_privacy_filter",
+        "OpenAIPrivacyFilterForTokenClassification",
+    ),
     "Qwen3ASRForcedAlignerForTokenClassification": (
         "qwen3_asr_forced_aligner",
         "Qwen3ASRForcedAlignerForTokenClassification",
+    ),
+    "RobertaForTokenClassification": ("roberta", "RobertaForTokenClassification"),
+    "XLMRobertaForTokenClassification": (
+        "roberta",
+        "RobertaForTokenClassification",
     ),
 }
 
 _SEQUENCE_CLASSIFICATION_MODELS = {
     "BertForSequenceClassification": ("bert", "BertForSequenceClassification"),
     "GPT2ForSequenceClassification": ("gpt2", "GPT2ForSequenceClassification"),
-    "ErnieForSequenceClassification": ("ernie", "ErnieForSequenceClassification"),
     "GteNewForSequenceClassification": (
         "bert_with_rope",
         "GteNewForSequenceClassification",
@@ -347,14 +345,6 @@ _MULTIMODAL_MODELS = {
         "audioflamingo3",
         "AudioFlamingo3ForConditionalGeneration",
     ),
-    "MusicFlamingoForConditionalGeneration": (
-        "musicflamingo",
-        "MusicFlamingoForConditionalGeneration",
-    ),
-    "AyaVisionForConditionalGeneration": (
-        "aya_vision",
-        "AyaVisionForConditionalGeneration",
-    ),
     "BagelForConditionalGeneration": ("bagel", "BagelForConditionalGeneration"),
     "BeeForConditionalGeneration": ("bee", "BeeForConditionalGeneration"),
     "Blip2ForConditionalGeneration": ("blip2", "Blip2ForConditionalGeneration"),
@@ -369,9 +359,14 @@ _MULTIMODAL_MODELS = {
         "Cohere2VisionForConditionalGeneration",
     ),
     "Cosmos3ForConditionalGeneration": ("cosmos3", "Cosmos3ForConditionalGeneration"),
+    "Cosmos3EdgeForConditionalGeneration": (
+        "cosmos3_edge",
+        "Cosmos3EdgeForConditionalGeneration",
+    ),
     "DeepseekVLV2ForCausalLM": ("deepseek_vl2", "DeepseekVLV2ForCausalLM"),
     "DeepseekOCRForCausalLM": ("deepseek_ocr", "DeepseekOCRForCausalLM"),
     "DeepseekOCR2ForCausalLM": ("deepseek_ocr2", "DeepseekOCR2ForCausalLM"),
+    "UnlimitedOCRForCausalLM": ("unlimited_ocr", "UnlimitedOCRForCausalLM"),
     "DotsOCRForCausalLM": ("dots_ocr", "DotsOCRForCausalLM"),
     "Eagle2_5_VLForConditionalGeneration": (
         "eagle2_5_vl",
@@ -398,13 +393,20 @@ _MULTIMODAL_MODELS = {
         "funaudiochat",
         "FunAudioChatForConditionalGeneration",
     ),
-    "FuyuForCausalLM": ("fuyu", "FuyuForCausalLM"),
     "Gemma3ForConditionalGeneration": ("gemma3_mm", "Gemma3ForConditionalGeneration"),
     "Gemma3nForConditionalGeneration": (
         "gemma3n_mm",
         "Gemma3nForConditionalGeneration",
     ),
+    "DiffusionGemmaForBlockDiffusion": (
+        "diffusion_gemma",
+        "DiffusionGemmaForConditionalGeneration",
+    ),
     "Gemma4ForConditionalGeneration": ("gemma4_mm", "Gemma4ForConditionalGeneration"),
+    "Gemma4UnifiedForConditionalGeneration": (
+        "gemma4_unified",
+        "Gemma4UnifiedForConditionalGeneration",
+    ),
     "GlmAsrForConditionalGeneration": ("glmasr", "GlmAsrForConditionalGeneration"),
     "GLM4VForCausalLM": ("glm4v", "GLM4VForCausalLM"),
     "Glm4vForConditionalGeneration": ("glm4_1v", "Glm4vForConditionalGeneration"),
@@ -413,6 +415,10 @@ _MULTIMODAL_MODELS = {
     "GraniteSpeechForConditionalGeneration": (
         "granite_speech",
         "GraniteSpeechForConditionalGeneration",
+    ),
+    "GraniteSpeechPlusForConditionalGeneration": (
+        "granite_speech_plus",
+        "GraniteSpeechPlusForConditionalGeneration",
     ),
     "Granite4VisionForConditionalGeneration": (
         "granite4_vision",
@@ -454,6 +460,10 @@ _MULTIMODAL_MODELS = {
     "KimiVLForConditionalGeneration": ("kimi_vl", "KimiVLForConditionalGeneration"),
     "KimiK25ForConditionalGeneration": ("kimi_k25", "KimiK25ForConditionalGeneration"),
     "MoonshotKimiaForCausalLM": ("kimi_audio", "KimiAudioForConditionalGeneration"),
+    "MossTranscribeDiarizeForConditionalGeneration": (
+        "moss_transcribe_diarize",
+        "MossTranscribeDiarizeForConditionalGeneration",
+    ),
     "LightOnOCRForConditionalGeneration": (
         "lightonocr",
         "LightOnOCRForConditionalGeneration",
@@ -474,12 +484,15 @@ _MULTIMODAL_MODELS = {
         "llava_onevision",
         "LlavaOnevisionForConditionalGeneration",
     ),
-    "MantisForConditionalGeneration": ("llava", "MantisForConditionalGeneration"),
+    "LlavaOnevision2ForConditionalGeneration": (
+        "llava_onevision2",
+        "LlavaOnevision2ForConditionalGeneration",
+    ),
     "MiDashengLMModel": ("midashenglm", "MiDashengLMModel"),
     "MiMoV2OmniForCausalLM": ("mimo_v2_omni", "MiMoV2OmniForCausalLM"),
-    "MiniMaxVL01ForConditionalGeneration": (
-        "minimax_vl_01",
-        "MiniMaxVL01ForConditionalGeneration",
+    "MiniMaxM3SparseForConditionalGeneration": (
+        "vllm.models.minimax_m3",
+        "MiniMaxM3SparseForConditionalGeneration",
     ),
     "MiniCPMO": ("minicpmo", "MiniCPMO"),
     "MiniCPMV": ("minicpmv", "MiniCPMV"),
@@ -494,6 +507,7 @@ _MULTIMODAL_MODELS = {
     "MolmoForCausalLM": ("molmo", "MolmoForCausalLM"),
     "Molmo2ForConditionalGeneration": ("molmo2", "Molmo2ForConditionalGeneration"),
     "Moondream3ForCausalLM": ("moondream3", "Moondream3ForCausalLM"),
+    "MossAudioModel": ("moss_audio", "MossAudioModel"),
     "HfMoondream": ("moondream3", "Moondream3ForCausalLM"),
     "NemotronH_Nano_VL_V2": ("nano_nemotron_vl", "NemotronH_Nano_VL_V2"),
     "NemotronH_Nano_Omni_Reasoning_V3": ("nano_nemotron_vl", "NemotronH_Nano_VL_V2"),
@@ -525,7 +539,6 @@ _MULTIMODAL_MODELS = {
         "qianfan_ocr",
         "QianfanOCRForConditionalGeneration",
     ),
-    "QwenVLForConditionalGeneration": ("qwen_vl", "QwenVLForConditionalGeneration"),
     "Qwen2VLForConditionalGeneration": ("qwen2_vl", "Qwen2VLForConditionalGeneration"),
     "Qwen2_5_VLForConditionalGeneration": (
         "qwen2_5_vl",
@@ -568,11 +581,6 @@ _MULTIMODAL_MODELS = {
     "StepVLForConditionalGeneration": ("step_vl", "StepVLForConditionalGeneration"),
     "Step3VLForConditionalGeneration": ("step3_vl", "Step3VLForConditionalGeneration"),
     "Step3p7ForConditionalGeneration": ("step3p7", "Step3p7ForConditionalGeneration"),
-    "TarsierForConditionalGeneration": ("tarsier", "TarsierForConditionalGeneration"),
-    "Tarsier2ForConditionalGeneration": (
-        "qwen2_vl",
-        "Tarsier2ForConditionalGeneration",
-    ),
     "UltravoxModel": ("ultravox", "UltravoxModel"),
     "VoxtralForConditionalGeneration": ("voxtral", "VoxtralForConditionalGeneration"),
     "VoxtralRealtimeGeneration": ("voxtral_realtime", "VoxtralRealtimeGeneration"),
@@ -598,6 +606,10 @@ _SPECULATIVE_DECODING_MODELS = {
     "EagleLlama4ForCausalLM": ("llama4_eagle", "EagleLlama4ForCausalLM"),
     "EagleMiniCPMForCausalLM": ("minicpm_eagle", "EagleMiniCPMForCausalLM"),
     "DFlashDraftModel": ("qwen3_dflash", "DFlashQwen3ForCausalLM"),
+    "DSparkDraftModel": ("vllm.models.deepseek_v4", "DSparkDeepseekV4ForCausalLM"),
+    "Qwen3DSparkModel": ("qwen3_dspark", "Qwen3DSparkForCausalLM"),
+    "DFlashLagunaForCausalLM": ("laguna_dflash", "DFlashLagunaForCausalLM"),
+    "Gemma4DSparkModel": ("gemma4_dspark", "Gemma4DSparkForCausalLM"),
     "PEagleDraftModel": ("llama_eagle3", "Eagle3LlamaForCausalLM"),
     "PeagleLlamaForCausalLM": ("llama_eagle3", "Eagle3LlamaForCausalLM"),
     "Eagle3LlamaForCausalLM": ("llama_eagle3", "Eagle3LlamaForCausalLM"),
@@ -605,6 +617,8 @@ _SPECULATIVE_DECODING_MODELS = {
     "LlamaForCausalLMEagle3": ("llama_eagle3", "Eagle3LlamaForCausalLM"),
     "Eagle3Qwen2_5vlForCausalLM": ("llama_eagle3", "Eagle3LlamaForCausalLM"),
     "Eagle3Qwen3vlForCausalLM": ("llama_eagle3", "Eagle3LlamaForCausalLM"),
+    "Eagle3Qwen3ForCausalLM": ("qwen3_eagle3", "Eagle3Qwen3ForCausalLM"),
+    "PeagleQwen3ForCausalLM": ("qwen3_eagle3", "Eagle3Qwen3ForCausalLM"),
     "EagleMistralForCausalLM": ("mistral_eagle", "EagleMistralForCausalLM"),
     "EagleMistralLarge3ForCausalLM": (
         "mistral_large_3_eagle",
@@ -615,6 +629,9 @@ _SPECULATIVE_DECODING_MODELS = {
     "EagleDeepSeekMTPModel": ("deepseek_eagle", "EagleDeepseekV3ForCausalLM"),
     "DeepSeekMTPModel": ("deepseek_mtp", "DeepSeekMTP"),
     "DeepSeekV4MTPModel": ("vllm.models.deepseek_v4", "DeepSeekV4MTP"),
+    "MiniMaxM3MTP": ("vllm.models.minimax_m3", "MiniMaxM3MTP"),
+    "BailingMoeV25MTPModel": ("bailing_moe_mtp", "BailingMoeV25MTPModel"),
+    "InklingMTPModel": ("vllm.models.inkling", "InklingMTP"),
     "Gemma4MTPModel": ("gemma4_mtp", "Gemma4MTP"),
     "ErnieMTPModel": ("ernie_mtp", "ErnieMTP"),
     "ExaoneMoeMTP": ("exaone_moe_mtp", "ExaoneMoeMTP"),
@@ -638,7 +655,11 @@ _SPECULATIVE_DECODING_MODELS = {
 
 _TRANSFORMERS_SUPPORTED_MODELS = {
     # Text generation models
+    "GPTBigCodeForCausalLM": ("transformers", "TransformersForCausalLM"),
+    "OlmoForCausalLM": ("transformers", "TransformersForCausalLM"),
+    "Olmo2ForCausalLM": ("transformers", "TransformersForCausalLM"),
     "SmolLM3ForCausalLM": ("transformers", "TransformersForCausalLM"),
+    "Starcoder2ForCausalLM": ("transformers", "TransformersForCausalLM"),
     # Multimodal models
     "Emu3ForConditionalGeneration": (
         "transformers",
@@ -706,10 +727,38 @@ _PREVIOUSLY_SUPPORTED_MODELS = {
     "Phi4FlashForCausalLM": "0.10.2",
     "Phi4MultimodalForCausalLM": "0.12.0",
     "JAISLMHeadModel": "0.22.0",
+    "ErnieModel": "0.23.0",
+    "ErnieForSequenceClassification": "0.23.0",
+    "ErnieForTokenClassification": "0.23.0",
+    "InternLM2VEForCausalLM": "0.23.0",
+    "QWenLMHeadModel": "0.23.0",
+    "QwenVLForConditionalGeneration": "0.23.0",
+    "InternLMForCausalLM": "0.23.0",
     # encoder-decoder models except whisper
     # have been removed for V0 deprecation.
     "DonutForConditionalGeneration": "0.10.2",
     "MllamaForConditionalGeneration": "0.10.2",
+    "XverseForCausalLM": "0.23.0",
+    "Dots1ForCausalLM": "0.23.0",
+    "BambaForCausalLM": "0.23.0",
+    "MiniMaxForCausalLM": "0.23.0",
+    "MiniMaxText01ForCausalLM": "0.23.0",
+    "MiniMaxM1ForCausalLM": "0.23.0",
+    "MiniMaxVL01ForConditionalGeneration": "0.23.0",
+    "BaiChuanForCausalLM": "0.23.0",
+    "BaichuanForCausalLM": "0.23.0",
+    "AquilaModel": "0.24.0",
+    "AquilaForCausalLM": "0.24.0",
+    "Grok1ModelForCausalLM": "0.24.0",
+    "Grok1ForCausalLM": "0.24.0",
+    "TarsierForConditionalGeneration": "0.24.0",
+    "Tarsier2ForConditionalGeneration": "0.23.0",  # last version with Transformers v4
+    "MantisForConditionalGeneration": "0.24.0",
+    "MusicFlamingoForConditionalGeneration": "0.24.0",
+    "AyaVisionForConditionalGeneration": "0.24.0",
+    "TeleChatForCausalLM": "0.25.0",
+    "PersimmonForCausalLM": "0.25.0",
+    "FuyuForCausalLM": "0.25.0",
 }
 
 _OOT_SUPPORTED_MODELS = {
@@ -823,6 +872,25 @@ class _LazyRegisteredModel(_BaseRegisteredModel):
         cls_name = f"{self.module_name}-{self.class_name}".replace(".", "-")
         return f"{cls_name}.json"
 
+    @staticmethod
+    def _get_modelinfo_module_hash(model_path: Path) -> str:
+        if model_path.name == "__init__.py":
+            # Package entry points often re-export classes implemented in
+            # submodules, so include the package contents in the cache key.
+            module_paths = sorted(model_path.parent.rglob("*.py"))
+            root_path = model_path.parent
+        else:
+            module_paths = [model_path]
+            root_path = model_path.parent
+
+        hasher = safe_hash(b"", usedforsecurity=False)
+        for path in module_paths:
+            hasher.update(path.relative_to(root_path).as_posix().encode("utf-8"))
+            hasher.update(b"\0")
+            hasher.update(path.read_bytes())
+            hasher.update(b"\0")
+        return hasher.hexdigest()
+
     def _load_modelinfo_from_cache(self, module_hash: str) -> _ModelInfo | None:
         try:
             try:
@@ -889,8 +957,7 @@ class _LazyRegisteredModel(_BaseRegisteredModel):
         module_hash = None
 
         if model_path is not None and model_path.exists():
-            with open(model_path, "rb") as f:
-                module_hash = safe_hash(f.read(), usedforsecurity=False).hexdigest()
+            module_hash = self._get_modelinfo_module_hash(model_path)
 
             mi = self._load_modelinfo_from_cache(module_hash)
             if mi is not None:

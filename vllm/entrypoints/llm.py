@@ -40,7 +40,7 @@ from vllm.entrypoints.chat_utils import (
 )
 from vllm.entrypoints.generate.beam_search.offline import BeamSearchOfflineMixin
 from vllm.entrypoints.pooling.offline import PoolingOfflineMixin
-from vllm.entrypoints.utils import log_non_default_args
+from vllm.entrypoints.serve.utils.api_utils import log_non_default_args
 from vllm.inputs import PromptType
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -221,17 +221,6 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
     ) -> None:
         """LLM constructor."""
 
-        if "swap_space" in kwargs:
-            kwargs.pop("swap_space")
-            import warnings
-
-            warnings.warn(
-                "The 'swap_space' parameter is deprecated and ignored. "
-                "It will be removed in a future version.",
-                DeprecationWarning,
-                stacklevel=2,
-            )
-
         if "disable_log_stats" not in kwargs:
             kwargs["disable_log_stats"] = True
 
@@ -367,7 +356,7 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
         # path; the synchronous `LLM` entrypoint runs multimodal
         # preprocessing serially. Warn so the setting is not a silent
         # no-op. See vllm-project/vllm#42901.
-        if self.model_config.renderer_num_workers > 1:
+        if self.model_config.renderer_num_workers > 1 and self.runner_type != "pooling":
             logger.warning_once(
                 "`renderer_num_workers=%d` was set, but the offline `LLM` "
                 "entrypoint uses the synchronous renderer path and runs "
@@ -556,7 +545,8 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
         and returns their outputs. Use after enqueue() to get results.
 
         Args:
-            output_type: The expected output type, defaults to RequestOutput.
+            output_type: The expected output type(s). If not provided, accepts
+                both RequestOutput and PoolingRequestOutput.
             use_tqdm: If True, shows a tqdm progress bar.
 
         Returns:
@@ -872,19 +862,13 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
             "init_weight_transfer_engine", kwargs={"init_info": init_info_dict}
         )
 
-    def start_weight_update(self, is_checkpoint_format: bool = True) -> None:
-        """
-        Start a new weight update.
+    def start_weight_update(self) -> None:
+        """Start a new weight update."""
+        self.llm_engine.collective_rpc("start_weight_update")
 
-        Args:
-            is_checkpoint_format: Whether incoming weights are in checkpoint
-                format (need layerwise processing) or kernel format (direct
-                copy).
-        """
-        self.llm_engine.collective_rpc(
-            "start_weight_update",
-            kwargs={"is_checkpoint_format": is_checkpoint_format},
-        )
+    def start_draft_weight_update(self) -> None:
+        """Start a new weight update targeting the speculative draft model."""
+        self.llm_engine.collective_rpc("start_draft_weight_update")
 
     def update_weights(self, request: WeightTransferUpdateRequest | dict) -> None:
         """
@@ -902,9 +886,7 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
         )
 
     def finish_weight_update(self) -> None:
-        """
-        Finish the current weight update.
-        """
+        """Finish the current weight update."""
         self.llm_engine.collective_rpc("finish_weight_update")
 
     def __repr__(self) -> str:

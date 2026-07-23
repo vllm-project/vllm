@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import ast
 import json
 from collections.abc import Sequence
 from typing import Any
@@ -28,7 +27,7 @@ from vllm.tool_parsers.abstract_tool_parser import (
     Tool,
     ToolParser,
 )
-from vllm.tool_parsers.utils import partial_tag_overlap
+from vllm.tool_parsers.utils import partial_tag_overlap, safe_literal_eval
 from vllm.utils import random_uuid
 
 logger = init_logger(__name__)
@@ -116,7 +115,7 @@ def _parse_arguments(json_value: str) -> tuple[Any, bool]:
         try:
             parsed_value = json.loads(json_value)
         except json.JSONDecodeError:
-            parsed_value = ast.literal_eval(json_value)
+            parsed_value = safe_literal_eval(json_value)
         return parsed_value, True
     except Exception:
         return json_value, False
@@ -361,7 +360,7 @@ def _parse_function_block(
                 if not key:
                     has_invalid_param = True
                     break
-                val_text = (param.text or "").strip()
+                val_text = param.text or ""
                 if not _add_argument(
                     func_name or "",
                     key,
@@ -393,7 +392,8 @@ def _parse_function_block(
                 val_text = pm.group(2) or ""
                 if val_text.startswith("<![CDATA[") and val_text.endswith("]]>"):
                     val_text = val_text[len("<![CDATA[") : -len("]]>")]
-                val_text = val_text.strip()
+                else:
+                    val_text = val_text.strip()
                 if not _add_argument(
                     func_name or "",
                     key,
@@ -446,7 +446,8 @@ def _parse_partial_params(
         val_text = pm.group(2) or ""
         if val_text.startswith("<![CDATA[") and val_text.endswith("]]>"):
             val_text = val_text[len("<![CDATA[") : -len("]]>")]
-        val_text = val_text.strip()
+        else:
+            val_text = val_text.strip()
         _add_argument(
             func_name,
             key,

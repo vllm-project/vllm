@@ -1,6 +1,10 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 //! gRPC Generate service backed by the shared [`vllm_text::TextLlm`] facade.
 
 mod convert;
+mod health;
 
 use std::pin::Pin;
 use std::sync::Arc;
@@ -21,7 +25,12 @@ pub mod pb {
     tonic::include_proto!("vllm");
 }
 
+pub(crate) use health::monitor_health;
+pub use pb::control_server::ControlServer;
 pub use pb::generate_server::GenerateServer;
+
+pub(crate) type ControlGrpcService = ControlServer<ControlServiceImpl>;
+pub(crate) type GenerateGrpcService = GenerateServer<GenerateServiceImpl>;
 
 #[cfg(test)]
 mod tests;
@@ -34,6 +43,36 @@ pub struct GenerateServiceImpl {
 impl GenerateServiceImpl {
     pub fn new(state: Arc<AppState>) -> Self {
         Self { state }
+    }
+}
+
+/// gRPC control service backed by the shared application state.
+pub struct ControlServiceImpl {
+    state: Arc<AppState>,
+}
+
+impl ControlServiceImpl {
+    pub fn new(state: Arc<AppState>) -> Self {
+        Self { state }
+    }
+}
+
+#[tonic::async_trait]
+impl pb::control_server::Control for ControlServiceImpl {
+    async fn abort(
+        &self,
+        request: Request<pb::AbortRequest>,
+    ) -> Result<Response<pb::AbortResponse>, Status> {
+        let request_ids = request.into_inner().request_ids;
+        if request_ids.is_empty() {
+            return Ok(Response::new(pb::AbortResponse {}));
+        }
+        self.state
+            .chat
+            .abort(&request_ids)
+            .await
+            .map_err(|error| Status::internal(error.to_report_string()))?;
+        Ok(Response::new(pb::AbortResponse {}))
     }
 }
 
@@ -56,12 +95,9 @@ impl pb::generate_server::Generate for GenerateServiceImpl {
         info!(%request_id, "grpc generate (unary)");
 
         let stream = self.state.chat.text().generate(text_request).await;
-        let stream = stream.map_err(|e| Status::internal(e.to_report_string()))?;
+        let stream = stream.map_err(text_error_to_status)?;
 
-        let collected = stream
-            .collect_output()
-            .await
-            .map_err(|e| Status::internal(e.to_report_string()))?;
+        let collected = stream.collect_output().await.map_err(text_error_to_status)?;
 
         // Build the single aggregated response.
         let prompt_info = convert::to_prompt_info(
@@ -71,10 +107,10 @@ impl pb::generate_server::Generate for GenerateServiceImpl {
         );
 
         let finish_info = vllm_text::Finished {
-            prompt_token_count: collected.prompt_token_ids.len(),
-            output_token_count: collected.token_ids.len(),
+            usage: collected.usage,
             finish_reason: collected.finish_reason,
             kv_transfer_params: collected.kv_transfer_params,
+            ec_transfer_params: collected.ec_transfer_params,
         };
 
         let outputs = convert::to_sequence_output(
@@ -105,7 +141,7 @@ impl pb::generate_server::Generate for GenerateServiceImpl {
         info!(%request_id, "grpc generate (stream)");
 
         let stream = self.state.chat.text().generate(text_request).await;
-        let stream = stream.map_err(|e| Status::internal(e.to_report_string()))?;
+        let stream = stream.map_err(text_error_to_status)?;
 
         let (tx, rx) = mpsc::channel(32);
 
@@ -113,7 +149,7 @@ impl pb::generate_server::Generate for GenerateServiceImpl {
             futures::pin_mut!(stream);
             while let Some(event) = stream.next().await {
                 let response = match event {
-                    Err(e) => Err(Status::internal(e.to_report_string())),
+                    Err(e) => Err(text_error_to_status(e)),
                     Ok(DecodedTextEvent::Start {
                         prompt_token_ids,
                         prompt_logprobs,
@@ -154,5 +190,14 @@ impl pb::generate_server::Generate for GenerateServiceImpl {
 
         let response_stream = ReceiverStream::new(rx);
         Ok(Response::new(Box::pin(response_stream)))
+    }
+}
+
+fn text_error_to_status(error: vllm_text::Error) -> Status {
+    let message = error.to_report_string();
+    if error.is_request_validation_error() {
+        Status::invalid_argument(message)
+    } else {
+        Status::internal(message)
     }
 }

@@ -2,11 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from fnmatch import fnmatch
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import torch
 from torch.nn.parameter import Parameter
 
+import vllm.envs as envs
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.config import get_current_vllm_config
 from vllm.logger import init_logger
@@ -27,6 +28,7 @@ from vllm.model_executor.layers.fused_moe import (
     SharedExperts,
 )
 from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
+    Fp8MoeBackend,
     convert_to_fp8_moe_kernel_format,
     make_fp8_moe_kernel,
     make_fp8_moe_quant_config,
@@ -41,6 +43,9 @@ from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
     make_nvfp4_moe_kernel,
     make_nvfp4_moe_quant_config,
     select_nvfp4_moe_backend,
+)
+from vllm.model_executor.layers.fusion.quant_activation import (
+    expose_input_quant_key,
 )
 from vllm.model_executor.layers.linear import (
     LinearBase,
@@ -58,6 +63,7 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
 )
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     process_fp8_input_tensor_strategy_moe,
+    process_fp8_weight_channel_strategy,
     process_fp8_weight_tensor_strategy_moe,
 )
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
@@ -468,6 +474,7 @@ class ModelOptFp8LinearMethod(LinearMethodBase):
         layer.logical_widths = output_partition_sizes
         layer.input_size_per_partition = input_size_per_partition
         layer.output_size_per_partition = output_size_per_partition
+        layer.orig_dtype = params_dtype
         weight_dtype = (
             torch.float8_e4m3fn
             if self.quant_config.is_checkpoint_fp8_serialized
@@ -598,8 +605,11 @@ class ModelOptFp8PcPtLinearMethod(LinearMethodBase):
         )
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        layer.weight = Parameter(layer.weight.t(), requires_grad=False)
-        layer.weight_scale = Parameter(layer.weight_scale.data, requires_grad=False)
+        weight, weight_scale, _ = process_fp8_weight_channel_strategy(
+            layer.weight, layer.weight_scale.data
+        )
+        layer.weight = Parameter(weight.t(), requires_grad=False)
+        layer.weight_scale = Parameter(weight_scale, requires_grad=False)
         self.fp8_linear.process_weights_after_loading(layer)
 
     def apply(
@@ -899,6 +909,7 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
             fp8_backend=self.fp8_backend,
             experts_cls=self.experts_cls,
             routing_tables=layer._expert_routing_tables(),
+            layer=layer,
         )
 
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:
@@ -945,6 +956,7 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
             a1_scale=a1_scale,
             a2_scale=a2_scale,
             swiglu_limit=getattr(layer, "swiglu_limit", None),
+            layer=layer,
         )
 
     def apply_monolithic(
@@ -1189,6 +1201,8 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
         )
 
         layer.register_parameter("weight_scale", weight_scale)
+
+        expose_input_quant_key(layer, self.kernel)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         if (
@@ -1594,7 +1608,9 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             moe_quant_config=self.moe_quant_config,
             moe_config=self.moe,
             experts_cls=self.experts_cls,
+            backend=self.nvfp4_backend,
             routing_tables=layer._expert_routing_tables(),
+            layer=layer,
         )
         self.moe_kernel.fused_experts.process_weights_after_loading(layer)
 
@@ -1608,6 +1624,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             a13_scale=layer.w13_input_scale,
             a2_scale=layer.w2_input_scale,
             swiglu_limit=getattr(layer, "swiglu_limit", None),
+            layer=layer,
         )
 
     @property
@@ -1715,6 +1732,22 @@ class ModelOptMxFp8Config(ModelOptQuantConfigBase):
         return None
 
     @classmethod
+    def from_config(cls, config: dict[str, Any]) -> "ModelOptMxFp8Config":
+        # MiniMax-style checkpoints tag `quant_method: "mxfp8"` + `ignored_layers`
+        # (same on-disk format as ModelOpt MXFP8); normalize to the ModelOpt
+        # schema and reuse the shared parser.
+        if "quantization" not in config and not config.get("quant_algo"):
+            config = {
+                "quant_method": "modelopt",
+                "quantization": {
+                    "quant_algo": "MXFP8",
+                    "kv_cache_quant_algo": config.get("kv_cache_quant_algo"),
+                    "exclude_modules": config.get("ignored_layers", []) or [],
+                },
+            }
+        return cast("ModelOptMxFp8Config", super().from_config(config))
+
+    @classmethod
     def _from_config(
         cls,
         *,
@@ -1817,6 +1850,12 @@ class ModelOptMxFp8LinearMethod(LinearMethodBase):
         layer.register_parameter("weight_scale", weight_scale)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        # Idempotent: the emulation kernel may dequant the weight to BF16 at load
+        # time (>=2-byte). If already converted, there is nothing left to do --
+        # avoid re-running the MXFP8-only validation/conversion below.
+        if layer.weight.element_size() >= 2:
+            return
+
         # Validate weight tensor
         if layer.weight.ndim != 2:
             raise ValueError(
@@ -2059,6 +2098,44 @@ class ModelOptMxFp8FusedMoE(FusedMoEMethodBase):
             torch.stack(w2_scale_shuffled).contiguous(),
         )
 
+    def _dequant_mxfp8_weights_to_bf16(self, layer: RoutedExperts) -> None:
+        """One-time MXFP8->BF16 weight dequant for the emulation path.
+
+        On devices without a native MXFP8 MoE kernel (e.g. gfx942 / MI300),
+        ``Mxfp8EmulationTritonExperts`` otherwise dequantizes every expert
+        weight to BF16 on *every* forward step -- the dominant cost (conc1
+        ~1.3 tok/s). Doing the dequant once here and replacing the MXFP8
+        parameters with BF16 makes the MoE run exactly like a plain BF16
+        checkpoint (full precision, no per-step dequant); SwiGLU-OAI is still
+        applied by the experts' ``activation()`` override. The MXFP8 weights
+        are freed by ``replace_parameter`` (BF16 is 2x their size; the small
+        E8M0 scale tensors are left in place, unused).
+        """
+        from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
+            dequant_mxfp8_to_bf16,
+        )
+
+        target_dtype = getattr(layer, "orig_dtype", torch.bfloat16)
+        num_experts = layer.w13_weight.shape[0]
+
+        # dequant_mxfp8_to_bf16 handles arbitrary leading dims (*x.shape[:-1]),
+        # so dequant the whole [E, N, K] weight in one vectorized call.
+        w13_bf16 = dequant_mxfp8_to_bf16(layer.w13_weight, layer.w13_weight_scale).to(
+            target_dtype
+        )
+        w2_bf16 = dequant_mxfp8_to_bf16(layer.w2_weight, layer.w2_weight_scale).to(
+            target_dtype
+        )
+
+        replace_parameter(layer, "w13_weight", w13_bf16)
+        replace_parameter(layer, "w2_weight", w2_bf16)
+
+        logger.info_once(
+            "MXFP8->BF16 load-time dequant complete (%d experts/layer); MoE "
+            "now runs in BF16 with no per-step dequant.",
+            num_experts,
+        )
+
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:
         # TODO(bnell): why is this required only for mxfp8?
         if getattr(layer, "_already_called_process_weights_after_loading", False):
@@ -2094,7 +2171,19 @@ class ModelOptMxFp8FusedMoE(FusedMoEMethodBase):
             fp8_backend=self.mxfp8_backend,
             experts_cls=self.experts_cls,
             routing_tables=layer._expert_routing_tables(),
+            layer=layer,
         )
+
+        # No native MXFP8 MoE kernel on this device (e.g. gfx942): the emulation
+        # experts would dequant MXFP8->BF16 every forward step. Convert the
+        # weights to BF16 once, here, so the MoE runs like a BF16 checkpoint.
+        # Opt out (VLLM_MXFP8_EMULATION_DEQUANT_AT_LOAD=0) to keep the 1-byte
+        # MXFP8 weights and dequant per-step (~half the memory, much slower).
+        if (
+            self.mxfp8_backend == Fp8MoeBackend.EMULATION
+            and envs.VLLM_MXFP8_EMULATION_DEQUANT_AT_LOAD
+        ):
+            self._dequant_mxfp8_weights_to_bf16(layer)
 
     def maybe_make_prepare_finalize(
         self,
@@ -2125,6 +2214,10 @@ class ModelOptMxFp8FusedMoE(FusedMoEMethodBase):
             a1_scale=None,
             a2_scale=None,
             block_shape=self.weight_block_size,
+            swiglu_limit=getattr(layer, "swiglu_limit", None),
+            gemm1_alpha=getattr(layer, "swiglu_alpha", None),
+            gemm1_beta=getattr(layer, "swiglu_beta", None),
+            layer=layer,
         )
 
     def apply_monolithic(
@@ -2201,6 +2294,7 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
         fp8_config: ModelOptFp8Config,
         nvfp4_config: ModelOptNvFp4Config,
         w4a16_nvfp4_config: ModelOptNvFp4Config,
+        mxfp8_config: ModelOptMxFp8Config,
     ) -> None:
         super().__init__(exclude_modules)
         self.kv_cache_quant_method = kv_cache_quant_method
@@ -2208,6 +2302,7 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
         self.fp8_config = fp8_config
         self.nvfp4_config = nvfp4_config
         self.w4a16_nvfp4_config = w4a16_nvfp4_config
+        self.mxfp8_config = mxfp8_config
 
     def get_name(self) -> QuantizationMethods:
         return "modelopt_mixed"
@@ -2217,7 +2312,14 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
 
     @classmethod
     def get_min_capability(cls) -> int:
-        return 89
+        # Turing and up (SM75+): NVFP4 routed experts run via Marlin W4A16
+        # (SM75+), FP8 weight-only dense via MarlinFP8 (cc>=7.5), and FP8 MoE,
+        # if present, via Marlin (TritonExperts gates its FP8 schemes behind
+        # supports_fp8(), cc>=89). None of these paths require native FP8 tensor
+        # cores, so SM75 is sufficient. Validated end-to-end on a Tesla T4
+        # (SM75) and A100 (SM80). Pairs with the FlashInfer attention SM80
+        # lower bound so SM75 auto-selects a supported attention backend.
+        return 75
 
     @classmethod
     def override_quantization_method(
@@ -2291,6 +2393,12 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
             group_size=group_size,
         )
 
+        mxfp8_config = ModelOptMxFp8Config(
+            is_checkpoint_mxfp8_serialized=True,
+            kv_cache_quant_algo=kv_cache_quant_method,
+            exclude_modules=[],
+        )
+
         return cls(
             kv_cache_quant_method=kv_cache_quant_method,
             exclude_modules=exclude_modules,
@@ -2298,6 +2406,7 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
             fp8_config=fp8_config,
             nvfp4_config=nvfp4_config,
             w4a16_nvfp4_config=w4a16_nvfp4_config,
+            mxfp8_config=mxfp8_config,
         )
 
     def _resolve_quant_algo(self, prefix: str) -> str | None:
@@ -2352,6 +2461,30 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
                 if key.startswith(parent_dot):
                     return info["quant_algo"].upper()
 
+        # 4. Parent-prefix fallback for fused projections whose config lists
+        # shard names instead of vLLM's packed module name.
+        fused_projection_shards = {
+            "qkv_proj": ("q_proj", "k_proj", "v_proj"),
+            "gate_up_proj": ("gate_proj", "up_proj"),
+        }
+        shard_names = fused_projection_shards.get(proj_name)
+        if shard_names is not None:
+            for candidate in self._quantized_layer_prefix_candidates(prefix):
+                parent_dot = candidate.rsplit(".", 1)[0] + "."
+                shard_algos: set[str] = set()
+                for shard_name in shard_names:
+                    shard_prefix = f"{parent_dot}{shard_name}"
+                    if shard_prefix in self.quantized_layers:
+                        algo = self.quantized_layers[shard_prefix]["quant_algo"].upper()
+                        shard_algos.add(algo)
+                if len(shard_algos) == 1:
+                    return shard_algos.pop()
+                if len(shard_algos) > 1:
+                    raise ValueError(
+                        f"Mixed quant_algo within fused layer {prefix}: "
+                        f"{shard_algos}. All shards must use the same quantization."
+                    )
+
         return None
 
     @staticmethod
@@ -2397,6 +2530,8 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
                 return ModelOptNvFp4LinearMethod(self.nvfp4_config)
             if quant_algo == "W4A16_NVFP4":
                 return ModelOptNvFp4W4A16LinearMethod(self.w4a16_nvfp4_config)
+            if quant_algo == "MXFP8":
+                return ModelOptMxFp8LinearMethod(self.mxfp8_config)
             # Layer not in quantized_layers — leave unquantized
             return UnquantizedLinearMethod()
 
@@ -2414,6 +2549,11 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
             if quant_algo == "W4A16_NVFP4":
                 return ModelOptNvFp4FusedMoE(
                     quant_config=self.w4a16_nvfp4_config,
+                    moe_config=layer.moe_config,
+                )
+            if quant_algo == "MXFP8":
+                return ModelOptMxFp8FusedMoE(
+                    quant_config=self.mxfp8_config,
                     moe_config=layer.moe_config,
                 )
             return None
