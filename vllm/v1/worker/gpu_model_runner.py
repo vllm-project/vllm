@@ -5240,6 +5240,24 @@ class GPUModelRunner(
             new_config = update_config(config, config_overrides)
             setattr(self, config_name, new_config)
 
+    def _allocate_sampler_workspace(self) -> None:
+        # Clear a workspace left by a previous load before applying the current
+        # rank/runner policy.
+        self.sampler.sampler_workspace = None
+        if (
+            self.model_config.runner_type != "generate"
+            or not get_pp_group().is_last_rank
+        ):
+            return
+
+        # Sampler receives one bonus/next-token logits row per live request;
+        # speculative target rows are handled separately by RejectionSampler.
+        self.sampler.sampler_workspace = torch.empty(
+            (self.max_num_reqs, self.model_config.get_vocab_size()),
+            dtype=torch.float32,
+            device=self.device,
+        )
+
     @instrument(span_name="Loading (GPU)")
     def load_model(self, load_dummy_weights: bool = False) -> None:
         """
@@ -5329,6 +5347,10 @@ class GPUModelRunner(
                         self.model_config,
                     )
                     eplb_models += 1
+
+                # Keep this persistent allocation in model memory accounting so
+                # it is deducted before KV-cache sizing.
+                self._allocate_sampler_workspace()
 
                 time_after_load = time.perf_counter()
             self.model_memory_usage = m.consumed_memory

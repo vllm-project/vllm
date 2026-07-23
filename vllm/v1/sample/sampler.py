@@ -68,6 +68,39 @@ class Sampler(nn.Module):
         self.pin_memory = PIN_MEMORY
         self.logprobs_mode = logprobs_mode
         self.use_fp64_gumbel = use_fp64_gumbel
+        self.sampler_workspace: torch.Tensor | None = None
+
+    def _convert_logits_to_float32(self, logits: torch.Tensor) -> torch.Tensor:
+        """Convert logits to float32, reusing a profiled workspace if possible."""
+        if logits.dtype == torch.float32:
+            return logits
+
+        workspace = self.sampler_workspace
+        if (
+            workspace is not None
+            and workspace.ndim == 2
+            and workspace.dtype == torch.float32
+            and workspace.device == logits.device
+            and workspace.shape[0] >= logits.shape[0]
+            and workspace.shape[1] == logits.shape[1]
+        ):
+            logits_fp32 = workspace[: logits.shape[0]]
+            logits_fp32.copy_(logits)
+            return logits_fp32
+
+        return logits.to(torch.float32)
+
+    def _clone_if_workspace_alias(self, tensor: torch.Tensor) -> torch.Tensor:
+        """Keep reusable workspace storage out of asynchronous outputs."""
+        workspace = self.sampler_workspace
+        if (
+            workspace is not None
+            and workspace.device == tensor.device
+            and workspace.untyped_storage().data_ptr()
+            == tensor.untyped_storage().data_ptr()
+        ):
+            return tensor.clone()
+        return tensor
 
     def forward(
         self,
@@ -92,8 +125,10 @@ class Sampler(nn.Module):
                 else:
                     raw_logprobs = logits.to(torch.float32)
 
-        # Use float32 for the logits.
-        logits = logits.to(torch.float32)
+        # Use float32 for the logits. The model runner preallocates this
+        # workspace during memory profiling so the common sampler cast is
+        # accounted for in KV-cache sizing.
+        logits = self._convert_logits_to_float32(logits)
 
         logits = self.apply_logits_processors(
             logits, sampling_metadata, predict_bonus_token
@@ -120,6 +155,12 @@ class Sampler(nn.Module):
         if num_logprobs is None:
             logprobs_tensors = logprob_token_ids_tensors
         elif num_logprobs == -1:
+            assert raw_logprobs is not None
+            # processed_logits may be a view of sampler_workspace. The model
+            # runner can start reusing that workspace while an asynchronous
+            # D2H copy still reads this output, so detach it from reusable
+            # storage before returning it.
+            raw_logprobs = self._clone_if_workspace_alias(raw_logprobs)
             # Return the full unsorted and unranked logprobs.
             logprobs_tensors = LogprobsTensors(
                 torch.empty(0), raw_logprobs, torch.empty(0)
