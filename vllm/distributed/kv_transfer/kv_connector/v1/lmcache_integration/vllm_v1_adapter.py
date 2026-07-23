@@ -919,7 +919,13 @@ class LMCacheConnectorV1Impl:
 
         # Wait for the layer to be loaded
         for layerwise_retriever in self.layerwise_retrievers:
-            ret_token_mask = next(layerwise_retriever)
+            try:
+                ret_token_mask = next(layerwise_retriever)
+            except StopIteration:
+                ret_token_mask = None
+            except KeyError as e:
+                logger.warning("LMCache KeyError during wait_for_layer_load: %s", e)
+                ret_token_mask = None
 
             if self.current_layer == self.num_layers - 1:
                 assert ret_token_mask is not None
@@ -1025,7 +1031,12 @@ class LMCacheConnectorV1Impl:
                     is_first = False
 
         for layerwise_storer in self.layerwise_storers:
-            next(layerwise_storer)
+            try:
+                next(layerwise_storer)
+            except StopIteration:
+                pass
+            except KeyError as e:
+                logger.warning("LMCache KeyError during save_kv_layer: %s", e)
 
         self.current_layer += 1
 
@@ -1046,7 +1057,12 @@ class LMCacheConnectorV1Impl:
 
         if self.use_layerwise:
             for layerwise_storer in self.layerwise_storers:
-                next(layerwise_storer)
+                try:
+                    next(layerwise_storer)
+                except StopIteration:
+                    pass
+                except KeyError as e:
+                    logger.warning("LMCache KeyError during wait_for_save: %s", e)
             return
 
         assert len(self.kv_caches) > 0
