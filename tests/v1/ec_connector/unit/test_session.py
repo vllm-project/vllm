@@ -12,10 +12,14 @@ from vllm.distributed.ec_transfer.ec_connector.cpu.protocol import (
     XferReq,
     XferStatus,
 )
+from vllm.distributed.ec_transfer.ec_connector.cpu.scheduler.embedding_cache import (
+    EmbeddingCache,
+)
 from vllm.distributed.ec_transfer.ec_connector.cpu.session import (
     _CONSUMER_QUARANTINE_TIMEOUT_S,
     ConsumerSession,
     ConsumerXfer,
+    ProducerSession,
     ProducerXfer,
     XferState,
 )
@@ -80,6 +84,119 @@ def test_producer_xfer_not_expired_before_deadline():
 def test_producer_xfer_expired_after_deadline():
     x = ProducerXfer("h1", [0, 1], deadline=time.monotonic() - 1)
     assert x.is_expired()
+
+
+# ── ProducerSession ───────────────────────────────────────────────────────────
+
+
+def _xfer_req(mm_hash: str = "h1", session_id: str = "sess-1") -> XferReq:
+    return XferReq(
+        mm_hash=mm_hash, compatibility_hash="hash-abc", session_id=session_id
+    )
+
+
+def _make_producer_session(cache: EmbeddingCache | None = None) -> ProducerSession:
+    data = _make_data()
+    data.get_agent_metadata.return_value = b"meta"
+    data.get_mem_descriptor.return_value = b"desc"
+    return ProducerSession(
+        transport=MagicMock(),
+        data=data,
+        cache=cache or EmbeddingCache(num_blocks=8),
+        compat_hash="hash-abc",
+    )
+
+
+def test_producer_session_grant_pins_ready_entry_and_returns_blocks():
+    cache = EmbeddingCache(num_blocks=8)
+    cache.alloc("h1", 2)
+    cache.mark_ready("h1")
+    s = _make_producer_session(cache)
+
+    ack = s._grant_or_nack(_xfer_req(mm_hash="h1"))
+
+    assert ack.status == XferStatus.OK
+    entry = cache.get("h1")
+    assert not entry.evictable  # pinned by the grant
+    assert list(ack.src_block_indices) == list(entry.block_ids)
+
+
+def test_producer_session_grant_nacks_missing_entry():
+    s = _make_producer_session()
+    ack = s._grant_or_nack(_xfer_req(mm_hash="nope"))
+    assert ack.status == XferStatus.NACK_MISSING
+
+
+def test_producer_session_grant_nacks_not_ready_entry():
+    cache = EmbeddingCache(num_blocks=8)
+    cache.alloc("h1", 2)  # not ready
+    s = _make_producer_session(cache)
+    ack = s._grant_or_nack(_xfer_req(mm_hash="h1"))
+    assert ack.status == XferStatus.NACK_MISSING
+
+
+def test_producer_session_grant_nacks_version_mismatch():
+    cache = EmbeddingCache(num_blocks=8)
+    cache.alloc("h1", 2)
+    cache.mark_ready("h1")
+    s = _make_producer_session(cache)
+    req = XferReq(
+        mm_hash="h1",
+        compatibility_hash="hash-abc",
+        session_id="sess-1",
+        connector_version=-1,
+    )
+
+    ack = s._grant_or_nack(req)
+
+    assert ack.status == XferStatus.NACK_VERSION
+    entry = cache.get("h1")
+    assert entry.evictable  # nothing was pinned
+
+
+def test_producer_session_grant_nacks_compat_hash_mismatch():
+    cache = EmbeddingCache(num_blocks=8)
+    cache.alloc("h1", 2)
+    cache.mark_ready("h1")
+    s = _make_producer_session(cache)
+    req = XferReq(mm_hash="h1", compatibility_hash="wrong-hash", session_id="sess-1")
+
+    ack = s._grant_or_nack(req)
+
+    assert ack.status == XferStatus.NACK_INCOMPAT
+    entry = cache.get("h1")
+    assert entry.evictable  # nothing was pinned
+
+
+def test_producer_session_notif_unpins_via_cache():
+    cache = EmbeddingCache(num_blocks=8)
+    cache.alloc("h1", 2)
+    cache.mark_ready("h1")
+    s = _make_producer_session(cache)
+    s._grant_or_nack(_xfer_req(mm_hash="h1", session_id="sess-1"))
+    entry = cache.get("h1")
+    assert not entry.evictable  # pinned
+
+    s._data.get_new_notifs.return_value = {"agent": [b"sess-1:h1"]}
+    s._drain_notifs()
+
+    assert entry.evictable  # unpinned via cache
+    assert s._active_xfers == {}
+
+
+def test_producer_session_sweep_timeouts_unpins_via_cache():
+    cache = EmbeddingCache(num_blocks=8)
+    cache.alloc("h1", 2)
+    cache.mark_ready("h1")
+    s = _make_producer_session(cache)
+    s._grant_or_nack(_xfer_req(mm_hash="h1", session_id="sess-1"))
+    key = next(iter(s._active_xfers))
+    s._active_xfers[key].deadline = time.monotonic() - 1
+
+    s._sweep_timeouts()
+
+    assert cache.get("h1").evictable
+    assert s._active_xfers == {}
 
 
 # ── ConsumerXfer.handle_ack ───────────────────────────────────────────────────

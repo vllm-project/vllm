@@ -29,7 +29,7 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import msgspec
 
@@ -47,13 +47,11 @@ from vllm.distributed.ec_transfer.ec_connector.cpu.protocol import (
     XferReq,
     XferStatus,
 )
+from vllm.distributed.ec_transfer.ec_connector.cpu.scheduler.embedding_cache import (
+    EmbeddingCache,
+)
 from vllm.distributed.ec_transfer.ec_connector.cpu.utils import PeerAddr
 from vllm.logger import init_logger
-
-if TYPE_CHECKING:
-    from vllm.distributed.ec_transfer.ec_connector.cpu.ec_shared_region import (
-        ECSharedRegion,
-    )
 
 logger = init_logger(__name__)
 
@@ -232,18 +230,12 @@ class ProducerSession:
         self,
         transport: ZmqServerTransport,
         data: DataTransport,
-        region: "ECSharedRegion",
-        local_encodings: dict[str, None],
-        blocks: dict[str, list[int]],
-        lock: threading.Lock,
+        cache: EmbeddingCache,
         compat_hash: str,
     ) -> None:
         self._transport = transport
         self._data = data
-        self._region = region
-        self._local_encodings = local_encodings
-        self._blocks = blocks
-        self._lock = lock
+        self._cache = cache  # EmbeddingCache — single block owner
         self._compat_hash = compat_hash
 
         # Router-thread-only state.
@@ -267,7 +259,7 @@ class ProducerSession:
         if self._thread is not None:
             self._thread.join(timeout=5)
         for xfer in self._active_xfers.values():
-            self._region.unpin(xfer.block_indices)  # release any still-held pins
+            self._cache.unpin(xfer.mm_hash)  # release any still-held pins
         self._active_xfers.clear()
         self._transport.close()
 
@@ -302,14 +294,13 @@ class ProducerSession:
         if req.compatibility_hash != self._compat_hash:
             logger.warning("EC: incompatible compat hash for mm_hash=%s", req.mm_hash)
             return XferAck(mm_hash=req.mm_hash, status=XferStatus.NACK_INCOMPAT)
-        with self._lock:
-            if req.mm_hash not in self._local_encodings:
-                logger.warning(
-                    "EC: mm_hash=%s not in local cache; NACKing", req.mm_hash
-                )
-                return XferAck(mm_hash=req.mm_hash, status=XferStatus.NACK_MISSING)
-            block_indices = self._blocks[req.mm_hash]
-            self._region.pin(block_indices)
+        grant = self._cache.pin_if_ready(req.mm_hash)
+        if grant is None:
+            logger.warning(
+                "EC: mm_hash=%s not ready in local cache; NACKing", req.mm_hash
+            )
+            return XferAck(mm_hash=req.mm_hash, status=XferStatus.NACK_MISSING)
+        block_indices = list(grant)
         key = f"{req.session_id}:{req.mm_hash}"
         self._active_xfers[key] = ProducerXfer(
             mm_hash=req.mm_hash,
@@ -337,14 +328,14 @@ class ProducerSession:
                 key = msg.decode("utf-8")  # "{session_id}:{mm_hash}"
                 xfer = self._active_xfers.pop(key, None)
                 if xfer is not None:
-                    self._region.unpin(xfer.block_indices)
+                    self._cache.unpin(xfer.mm_hash)
                     logger.debug("EC: READ done key=%s", key)
 
     def _sweep_timeouts(self) -> None:
         for key, xfer in list(self._active_xfers.items()):
             if xfer.is_expired():
                 logger.warning("EC: grant key=%s expired; releasing pin", key)
-                self._region.unpin(xfer.block_indices)
+                self._cache.unpin(xfer.mm_hash)
                 del self._active_xfers[key]
 
 

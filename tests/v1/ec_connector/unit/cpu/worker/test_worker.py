@@ -59,7 +59,7 @@ _requires_accelerator = pytest.mark.skipif(
 # The memory-lifetime tests hold a copy back with `torch.cuda._sleep`, which the
 # CUDA-like platforms provide but XPU does not.
 _requires_cuda_alike = pytest.mark.skipif(
-    not current_platform.is_cuda_alike(),
+    not current_platform.is_zcuda_alike(),
     reason="stalling the compute stream requires a CUDA-like platform",
 )
 

@@ -11,7 +11,7 @@ import pytest
 import torch
 
 from vllm.distributed.ec_transfer.ec_connector.cpu.common import (
-    setup_ec_region,
+    create_ec_shared_region,
 )
 from vllm.distributed.ec_transfer.ec_connector.cpu.ec_shared_region import (
     ECSharedRegion,
@@ -65,19 +65,22 @@ def test_mem_descriptor_rejects_malformed_payload(bad_value):
         deserialize_mem_descriptor(bad_payload)
 
 
-# ── setup_ec_region ──────────────────────────────────────────────────────────
+# ── create_ec_shared_region ──────────────────────────────────────────────────
 
 
 def _make_vllm_config(
     *,
-    engine_id: str | None = None,
+    instance_id: str | None = None,
+    dp_rank: int = 0,
     dtype: torch.dtype = torch.float16,
     hidden_dim: int = 32,
-    extra_config: dict | None = None,
+    ec_cpu_bytes: object = 100000 * 32 * 2,
     ec_transfer_config_present: bool = True,
 ) -> MagicMock:
-    """Build a mock `VllmConfig` shaped enough for `setup_ec_region`."""
+    """Build a mock `VllmConfig` shaped enough for `create_ec_shared_region`."""
     cfg = MagicMock()
+    cfg.instance_id = instance_id if instance_id is not None else str(uuid.uuid4())
+    cfg.parallel_config.data_parallel_rank = dp_rank
     cfg.model_config.dtype = dtype
     # No vision config → _get_encoder_cache_hidden_dim falls back to
     # get_inputs_embeds_size() rather than the deepstack branch.
@@ -86,10 +89,7 @@ def _make_vllm_config(
 
     if ec_transfer_config_present:
         ec_cfg = MagicMock()
-        ec_cfg.engine_id = engine_id if engine_id is not None else str(uuid.uuid4())
-        ec_cfg.get_from_extra_config.side_effect = lambda key, default: (
-            (extra_config or {}).get(key, default)
-        )
+        ec_cfg.ec_connector_extra_config = {"ec_cpu_bytes": ec_cpu_bytes}
         cfg.ec_transfer_config = ec_cfg
     else:
         cfg.ec_transfer_config = None
@@ -108,23 +108,13 @@ def cleanup_regions():
             contextlib.suppress(Exception)
 
 
-def test_setup_ec_region_returns_layout_with_correct_shape(cleanup_regions):
-    cfg = _make_vllm_config(dtype=torch.float16, hidden_dim=32)
-    layout = setup_ec_region(cfg)
-    cleanup_regions.append(layout.region)
+def test_create_ec_shared_region_returns_region_with_correct_shape(cleanup_regions):
+    cfg = _make_vllm_config(dtype=torch.float16, hidden_dim=32, ec_cpu_bytes=64 * 64)
+    region = create_ec_shared_region(cfg)
+    cleanup_regions.append(region)
 
-    assert layout.dtype == torch.float16
-    assert layout.hidden_dim == 32
-    assert layout.element_size == 2  # float16 is 2 bytes
-    assert layout.block_size_bytes == 32 * 2
-    assert layout.num_blocks == 100000  # default
-
-
-def test_setup_ec_region_extra_config_overrides_num_blocks(cleanup_regions):
-    cfg = _make_vllm_config(extra_config={"num_ec_blocks": 64})
-    layout = setup_ec_region(cfg)
-    cleanup_regions.append(layout.region)
-    assert layout.num_blocks == 64
+    assert region.block_size_bytes == 32 * 2  # hidden_dim * float16 element_size
+    assert region.num_blocks == (64 * 64) // (32 * 2)
 
 
 @pytest.mark.parametrize(
@@ -134,39 +124,45 @@ def test_setup_ec_region_extra_config_overrides_num_blocks(cleanup_regions):
         (torch.float32, 128, 4),
     ],
 )
-def test_setup_ec_region_block_size_uses_dtype(
+def test_create_ec_shared_region_block_size_uses_dtype(
     dtype, hidden_dim, expected_element_size, cleanup_regions
 ):
     """block_size_bytes = hidden_dim * dtype.element_size()."""
-    cfg = _make_vllm_config(dtype=dtype, hidden_dim=hidden_dim)
-    layout = setup_ec_region(cfg)
-    cleanup_regions.append(layout.region)
-    assert layout.element_size == expected_element_size
-    assert layout.block_size_bytes == hidden_dim * expected_element_size
+    block_size_bytes = hidden_dim * expected_element_size
+    cfg = _make_vllm_config(
+        dtype=dtype, hidden_dim=hidden_dim, ec_cpu_bytes=block_size_bytes * 4
+    )
+    region = create_ec_shared_region(cfg)
+    cleanup_regions.append(region)
+    assert region.block_size_bytes == block_size_bytes
 
 
-def test_setup_ec_region_uses_engine_id_for_mmap_path(cleanup_regions):
-    engine_id = f"unit-{uuid.uuid4()}"
-    cfg = _make_vllm_config(engine_id=engine_id)
-    layout = setup_ec_region(cfg)
-    cleanup_regions.append(layout.region)
-    assert engine_id in layout.region.mmap_path
+def test_create_ec_shared_region_uses_instance_id_dp_rank_for_mmap_path(
+    cleanup_regions,
+):
+    instance_id = f"unit-{uuid.uuid4()}"
+    cfg = _make_vllm_config(instance_id=instance_id, dp_rank=3)
+    region = create_ec_shared_region(cfg)
+    cleanup_regions.append(region)
+    assert f"{instance_id}_dp3" in region._mmap_path
 
 
-@pytest.mark.parametrize("missing", ["ec_config", "engine_id"])
-def test_setup_ec_region_asserts_on_missing_config(missing):
-    if missing == "ec_config":
-        cfg = _make_vllm_config(ec_transfer_config_present=False)
-    else:
-        cfg = _make_vllm_config()
-        cfg.ec_transfer_config.engine_id = None
+def test_create_ec_shared_region_asserts_on_missing_ec_config():
+    cfg = _make_vllm_config(ec_transfer_config_present=False)
     with pytest.raises(AssertionError):
-        setup_ec_region(cfg)
+        create_ec_shared_region(cfg)
 
 
-def test_setup_ec_region_extra_config_value_coerced_to_int(cleanup_regions):
-    """`int(ec_config.get_from_extra_config(...))` — string values must coerce."""
-    cfg = _make_vllm_config(extra_config={"num_ec_blocks": "32"})
-    layout = setup_ec_region(cfg)
-    cleanup_regions.append(layout.region)
-    assert layout.num_blocks == 32
+@pytest.mark.parametrize("missing_bytes", [None, 0])
+def test_create_ec_shared_region_raises_when_ec_cpu_bytes_missing(missing_bytes):
+    cfg = _make_vllm_config(ec_cpu_bytes=missing_bytes)
+    with pytest.raises(ValueError, match="ec_cpu_bytes"):
+        create_ec_shared_region(cfg)
+
+
+def test_create_ec_shared_region_ec_cpu_bytes_coerced_to_int(cleanup_regions):
+    """`int(ec_config.ec_connector_extra_config[...])` — strings must coerce."""
+    cfg = _make_vllm_config(dtype=torch.float16, hidden_dim=32, ec_cpu_bytes="128")
+    region = create_ec_shared_region(cfg)
+    cleanup_regions.append(region)
+    assert region.num_blocks == 128 // (32 * 2)
