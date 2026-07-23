@@ -88,6 +88,10 @@ def test_rocm_aiter_sampler_defers_import_when_generators_force_native(
         def is_enabled():
             return True
 
+        @staticmethod
+        def is_sampler_enabled():
+            return True
+
     real_import = __import__
 
     def guard_aiter_sampling_import(name, *args, **kwargs):
