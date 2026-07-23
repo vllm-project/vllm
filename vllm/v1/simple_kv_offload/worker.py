@@ -11,6 +11,7 @@ from vllm.logger import init_logger
 from vllm.utils.torch_utils import PIN_MEMORY
 from vllm.v1.simple_kv_offload.copy_backend import DmaCopyBackend
 from vllm.v1.simple_kv_offload.cuda_mem_ops import pin_tensor
+from vllm.v1.simple_kv_offload.disk_backend import DiskBackend
 from vllm.v1.simple_kv_offload.metadata import (
     SimpleCPUOffloadMetadata,
     SimpleCPUOffloadWorkerMetadata,
@@ -30,10 +31,17 @@ class SimpleCPUOffloadWorker:
         vllm_config: VllmConfig,
         kv_cache_config: "KVCacheConfig | None",
         cpu_capacity_bytes: int,
+        disk_path: str | None = None,
+        disk_capacity_bytes: int = 0,
+        disk_buffer_slots: int = 2,
     ):
         self.vllm_config = vllm_config
         self.kv_cache_config = kv_cache_config
         self.cpu_capacity_bytes = cpu_capacity_bytes
+        self.disk_path = disk_path
+        self.disk_capacity_bytes = disk_capacity_bytes
+        self.disk_buffer_slots = disk_buffer_slots
+        self.disk_mode = disk_path is not None
 
         self.gpu_kv_caches: dict[str, torch.Tensor] | None = None
         self.cpu_kv_caches: dict[str, torch.Tensor] | None = None
@@ -44,7 +52,7 @@ class SimpleCPUOffloadWorker:
         self.load_stream: torch.cuda.Stream | None = None
         self.store_stream: torch.cuda.Stream | None = None
 
-        self._backend = DmaCopyBackend()
+        self._backend: DmaCopyBackend | DiskBackend | None = None
 
         # Ordered (event_idx, Event). Events pre-allocated on main thread.
         self._load_events: list[tuple[int, torch.Event]] = []
@@ -145,9 +153,55 @@ class SimpleCPUOffloadWorker:
 
         self.num_cpu_blocks = max(1, self.cpu_capacity_bytes // total_bytes_per_block)
 
+        # Use lowest priority so KV cache I/O yields to compute streams.
+        low_pri, _ = torch.cuda.Stream.priority_range()
+        self.load_stream = torch.cuda.Stream(priority=low_pri)
+        self.store_stream = torch.cuda.Stream(priority=low_pri)
+
+        self.gpu_kv_caches = unique_gpu_caches
+
+        if self.disk_mode:
+            self._init_disk_mode(unique_gpu_caches, total_bytes_per_block)
+        else:
+            self._init_cpu_mode(unique_gpu_caches, total_bytes_per_block)
+
+    def _init_disk_mode(
+        self,
+        unique_gpu_caches: dict[str, torch.Tensor],
+        total_bytes_per_block: int,
+    ) -> None:
+        num_disk_slots = max(1, self.disk_capacity_bytes // total_bytes_per_block)
+        self.num_cpu_blocks = num_disk_slots
+
         logger.info(
-            "SimpleCPUOffloadWorker: %d unique GPU KV tensors, "
-            "allocating %d CPU blocks (%.2f GB)",
+            "SimpleCPUOffloadWorker [DISK]: %d tensors, %d disk slots (%.2f GB)",
+            len(unique_gpu_caches),
+            num_disk_slots,
+            (num_disk_slots * total_bytes_per_block) / (1024**3),
+        )
+
+        assert self.disk_path is not None
+        local_rank = self.device.index or 0
+        rank_path = f"{self.disk_path}.rank_{local_rank}"
+        self._backend = DiskBackend()
+        self._backend.init(
+            unique_gpu_caches,
+            self.device,
+            self.load_stream,
+            self.store_stream,
+            rank_path,
+            num_disk_slots,
+            total_bytes_per_block,
+            self.disk_buffer_slots,
+        )
+
+    def _init_cpu_mode(
+        self,
+        unique_gpu_caches: dict[str, torch.Tensor],
+        total_bytes_per_block: int,
+    ) -> None:
+        logger.info(
+            "SimpleCPUOffloadWorker [CPU]: %d tensors, %d CPU blocks (%.2f GB)",
             len(unique_gpu_caches),
             self.num_cpu_blocks,
             (self.num_cpu_blocks * total_bytes_per_block) / (1024**3),
@@ -159,7 +213,6 @@ class SimpleCPUOffloadWorker:
                 "Pinned memory not available. CPU offload performance may be degraded."
             )
 
-        self.gpu_kv_caches = unique_gpu_caches
         self.cpu_kv_caches = {}
         for name, gpu_tensor in unique_gpu_caches.items():
             cpu_shape = (self.num_cpu_blocks,) + gpu_tensor.shape[1:]
@@ -171,12 +224,7 @@ class SimpleCPUOffloadWorker:
                 pin_tensor(tensor)
             self.cpu_kv_caches[name] = tensor
 
-        # Use lowest priority so KV cache I/O yields to compute streams.
-        low_pri, _ = torch.cuda.Stream.priority_range()
-        self.load_stream = torch.cuda.Stream(priority=low_pri)
-        self.store_stream = torch.cuda.Stream(priority=low_pri)
-
-        # Initialize copy backend with caches and streams.
+        self._backend = DmaCopyBackend()
         self._backend.init(
             self.gpu_kv_caches,
             self.cpu_kv_caches,
