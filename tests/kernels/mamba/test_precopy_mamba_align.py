@@ -21,7 +21,9 @@ The kernel must also no-op when ``src_col < 0`` (fresh request) or
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from types import SimpleNamespace
+from typing import Any
 
 import numpy as np
 import torch
@@ -30,6 +32,8 @@ from vllm.model_executor.layers.mamba import mamba_utils as layer_mamba_utils
 from vllm.platforms import current_platform
 from vllm.v1.worker import mamba_utils as worker_mamba_utils
 from vllm.v1.worker.mamba_utils import precopy_mamba_align_fused_kernel
+
+_parametrize: Callable[..., Callable[[Any], Any]]
 
 try:
     import pytest
@@ -40,16 +44,17 @@ try:
     )
     _parametrize = pytest.mark.parametrize
 except ModuleNotFoundError:  # allow running directly as ``python <thisfile>``
-    pytest = None  # type: ignore[assignment]
 
     def _cuda_required(fn):
         return fn
 
-    def _parametrize(_name, _values):
+    def _no_parametrize(_name, _values):
         def _deco(fn):
             return fn
 
         return _deco
+
+    _parametrize = _no_parametrize
 
 
 NUM_LAYERS = 3
