@@ -15,7 +15,6 @@ from vllm.models.inkling.amd.ops.rel_attention_decode import (
     decode_split_count,
     use_split_kv_decode,
 )
-from vllm.platforms import current_platform
 
 HEAD_DIM = 128
 DTYPE = torch.bfloat16
@@ -142,7 +141,6 @@ def test_gfx950_gluon_dispatch_is_strict(monkeypatch: pytest.MonkeyPatch):
     )
 
 
-@pytest.mark.skipif(not current_platform.is_rocm(), reason="requires ROCm")
 @pytest.mark.parametrize(
     ("page_size", "window_left", "max_kv_len"),
     [
@@ -229,7 +227,6 @@ def test_ragged_multi_page_relative_attention(
     torch.testing.assert_close(actual.float(), expected.float(), atol=3e-2, rtol=3e-2)
 
 
-@pytest.mark.skipif(not current_platform.is_rocm(), reason="requires ROCm")
 @pytest.mark.parametrize(
     ("page_size", "kv_lens", "num_kv_heads", "rel_extent", "window_left"),
     [
@@ -314,7 +311,6 @@ def test_split_kv_decode_matches_reference(
     torch.testing.assert_close(actual.float(), expected.float(), atol=3e-2, rtol=3e-2)
 
 
-@pytest.mark.skipif(not current_platform.is_rocm(), reason="requires ROCm")
 @pytest.mark.parametrize(
     (
         "q_len",

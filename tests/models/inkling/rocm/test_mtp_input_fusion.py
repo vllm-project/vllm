@@ -14,11 +14,6 @@ from typing import cast
 import pytest
 import torch
 
-from vllm.platforms import current_platform
-
-if not current_platform.is_rocm():
-    pytest.skip("requires ROCm", allow_module_level=True)
-
 from vllm.models.inkling.amd.ops.norm import (
     embed_dual_rmsnorm_cat,
     embed_rmsnorm,
