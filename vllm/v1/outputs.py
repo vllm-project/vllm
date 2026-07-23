@@ -50,6 +50,35 @@ class LogprobsLists(NamedTuple):
         )
 
 
+class SamplingMaskLists(NamedTuple):
+    # [num_generated_tokens, vocab_size]
+    token_ids: np.ndarray
+    # [num_generated_tokens]
+    counts: np.ndarray
+    # [num_reqs + 1]
+    cu_num_generated_tokens: list[int] | None = None
+
+    def slice_request(self, req_idx: int, num_positions: int) -> "SamplingMaskLists":
+        if self.cu_num_generated_tokens is None:
+            start_idx = req_idx
+            req_end_idx = req_idx + 1
+        else:
+            start_idx = self.cu_num_generated_tokens[req_idx]
+            req_end_idx = self.cu_num_generated_tokens[req_idx + 1]
+        end_idx = start_idx + num_positions
+        if end_idx > req_end_idx:
+            raise RuntimeError(
+                "sampling mask has fewer rows than the generated tokens: "
+                f"request index {req_idx}, requested {num_positions}, "
+                f"available {req_end_idx - start_idx}"
+            )
+        return SamplingMaskLists(
+            self.token_ids[start_idx:end_idx],
+            self.counts[start_idx:end_idx],
+            None,
+        )
+
+
 class LogprobsTensors(NamedTuple):
     # [num_reqs x num_generated_tokens, max_num_logprobs + 1]
     logprob_token_ids: torch.Tensor
@@ -306,6 +335,9 @@ class ModelRunnerOutput:
     # its slot buffer via ``slot_buffer[slot_mapping] = routing_data``.
     # ``None`` when ``enable_return_routed_experts`` is off.
     routed_experts: RoutedExpertsLists | None = None
+
+    # ``None`` when ``enable_return_sampling_mask`` is off.
+    sampling_masks: SamplingMaskLists | None = None
 
     @staticmethod
     def with_kv_conn_output_only(

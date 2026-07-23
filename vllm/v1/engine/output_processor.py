@@ -17,6 +17,7 @@ from vllm.outputs import (
     PoolingOutput,
     PoolingRequestOutput,
     RequestOutput,
+    SamplingMask,
 )
 from vllm.sampling_params import RequestOutputKind
 from vllm.tokenizers import TokenizerLike
@@ -37,6 +38,7 @@ from vllm.v1.metrics.stats import (
     RequestStateStats,
     SchedulerStats,
 )
+from vllm.v1.outputs import SamplingMaskLists
 
 # shared empty CPU tensor used as a placeholder pooling output
 EMPTY_CPU_TENSOR = torch.empty(0, device="cpu")
@@ -178,6 +180,8 @@ class RequestState:
 
         # Routed experts accumulation (prompt + sample chunks)
         self.routed_experts_chunks: list[np.ndarray] = []
+        self.sampling_mask_token_ids: list[int] = []
+        self.sampling_mask_offsets: list[int] = [0]
 
         # Stream Interval
         self.stream_interval = stream_interval
@@ -336,6 +340,40 @@ class RequestState:
             ec_transfer_params,
         )
 
+    def update_sampling_mask(
+        self,
+        new_token_ids: list[int],
+        sampling_mask: SamplingMaskLists | None,
+    ) -> None:
+        if sampling_mask is None:
+            if new_token_ids and len(self.sampling_mask_offsets) > 1:
+                raise RuntimeError(
+                    f"missing sampling mask for request {self.request_id}"
+                )
+            return
+        if len(sampling_mask.counts) != len(new_token_ids):
+            raise RuntimeError(
+                f"sampling mask row count does not match tokens for request "
+                f"{self.request_id}: {len(sampling_mask.counts)} rows for "
+                f"{len(new_token_ids)} tokens"
+            )
+        for sampled_token, row, raw_count in zip(
+            new_token_ids, sampling_mask.token_ids, sampling_mask.counts
+        ):
+            count = int(raw_count)
+            if count <= 0 or count > len(row):
+                raise RuntimeError(
+                    f"invalid sampling mask count {count} for request {self.request_id}"
+                )
+            kept_ids = [int(token_id) for token_id in row[:count]]
+            if sampled_token not in kept_ids:
+                raise RuntimeError(
+                    f"sampled token {sampled_token} is absent from the sampling "
+                    f"mask for request {self.request_id}"
+                )
+            self.sampling_mask_token_ids.extend(kept_ids)
+            self.sampling_mask_offsets.append(len(self.sampling_mask_token_ids))
+
     def _new_request_output(
         self,
         external_req_id: str,
@@ -403,6 +441,8 @@ class RequestState:
         if delta and logprobs:
             logprobs = logprobs[-len(token_ids) :]
 
+        sampling_mask = self._get_sampling_mask(token_ids, delta)
+
         # Concatenate routed experts on finish
         routed_experts = None
         if finished and self.routed_experts_chunks:
@@ -413,10 +453,32 @@ class RequestState:
             text=text,
             token_ids=token_ids,
             routed_experts=routed_experts,
+            sampling_mask=sampling_mask,
             logprobs=logprobs,
             cumulative_logprob=self.logprobs_processor.cumulative_logprob,
             finish_reason=str(finish_reason) if finished else None,
             stop_reason=stop_reason if finished else None,
+        )
+
+    def _get_sampling_mask(
+        self, token_ids: list[int], delta: bool
+    ) -> SamplingMask | None:
+        if len(self.sampling_mask_offsets) == 1:
+            return None
+        num_rows = len(self.sampling_mask_offsets) - 1
+        if num_rows != self.detokenizer.num_output_tokens():
+            raise RuntimeError(
+                f"sampling mask is misaligned for request {self.request_id}: "
+                f"{num_rows} rows for {self.detokenizer.num_output_tokens()} tokens"
+            )
+        start_row = num_rows - len(token_ids) if delta else 0
+        flat_start = self.sampling_mask_offsets[start_row]
+        offsets = [
+            offset - flat_start for offset in self.sampling_mask_offsets[start_row:]
+        ]
+        return SamplingMask(
+            token_ids=self.sampling_mask_token_ids[flat_start:],
+            offsets=offsets,
         )
 
     def _new_pooling_output(self, pooling_output: torch.Tensor) -> PoolingOutput:
@@ -649,6 +711,9 @@ class OutputProcessor:
             if pooling_output is None:
                 assert req_state.detokenizer is not None
                 assert req_state.logprobs_processor is not None
+                req_state.update_sampling_mask(
+                    new_token_ids, engine_core_output.new_sampling_mask
+                )
                 # 2) Detokenize the token ids into text and perform stop checks.
                 stop_string = req_state.detokenizer.update(
                     new_token_ids, finish_reason == FinishReason.STOP
