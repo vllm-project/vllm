@@ -76,6 +76,14 @@ class MockLoadStoreSpec(LoadStoreSpec):
     def __repr__(self) -> str:
         return repr(self.offload_keys)
 
+    @classmethod
+    def concat(cls, specs: "Iterable[LoadStoreSpec]") -> "MockLoadStoreSpec":
+        offload_keys: list[OffloadKey] = []
+        for spec in specs:
+            assert isinstance(spec, MockLoadStoreSpec)
+            offload_keys.extend(spec.offload_keys)
+        return cls(offload_keys)
+
 
 class MockOffloadingWorker(OffloadingWorker):
     def __init__(self):

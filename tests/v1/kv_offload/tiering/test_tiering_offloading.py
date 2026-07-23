@@ -26,11 +26,13 @@ from vllm.v1.kv_offload.base import (
     OffloadingEvent,
     OffloadKey,
     OffloadPolicy,
+    PrepareStoreOutput,
     ReqContext,
     RequestOffloadingContext,
     ScheduleEndContext,
     make_offload_key,
 )
+from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec
 from vllm.v1.kv_offload.tiering.base import (
     JobMetadata,
     JobResult,
@@ -59,6 +61,34 @@ def _mock_mmap_region(num_blocks: int, row_bytes: int = 16):
 
 def to_keys(int_ids: Iterable[int]) -> list[OffloadKey]:
     return [make_offload_key(str(i).encode(), 0) for i in int_ids]
+
+
+def prepare_store_all(manager, blocks, ctx: ReqContext = _CTX):
+    """Admit blocks one at a time via the single-key prepare_store API and
+    aggregate the per-key outputs into a batch-like PrepareStoreOutput, in
+    admission order.
+
+    Mirrors how the scheduler aggregates accepted single-key stores into one
+    transfer job. Returns None if the first key hits an allocation failure; a
+    failure after some keys are accepted keeps the accepted prefix.
+    """
+    keys_to_store: list[OffloadKey] = []
+    block_ids: list[int] = []
+    evicted_keys: list[OffloadKey] = []
+    for block in blocks:
+        out = manager.prepare_store(block, ctx)
+        if out is None:
+            if not keys_to_store and not evicted_keys:
+                return None
+            break
+        keys_to_store.extend(out.keys_to_store)
+        block_ids.extend(int(b) for b in out.store_spec.block_ids)
+        evicted_keys.extend(out.evicted_keys)
+    return PrepareStoreOutput(
+        keys_to_store=keys_to_store,
+        store_spec=CPULoadStoreSpec(block_ids),
+        evicted_keys=evicted_keys,
+    )
 
 
 def count_hits(manager, keys: list[OffloadKey]) -> int | None:
@@ -268,7 +298,7 @@ class TestTieringOffloadingManager:
 
         # Prepare store
         self._start_request()
-        result = self.manager.prepare_store(blocks, _CTX)
+        result = prepare_store_all(self.manager, blocks, _CTX)
         assert result is not None
         assert len(result.keys_to_store) == 3
 
@@ -291,7 +321,7 @@ class TestTieringOffloadingManager:
 
         # Store to primary
         self._start_request()
-        result = self.manager.prepare_store(blocks, _CTX)
+        result = prepare_store_all(self.manager, blocks, _CTX)
         assert result is not None
 
         # Complete store (triggers cascade via submit_store on each tier)
@@ -313,13 +343,61 @@ class TestTieringOffloadingManager:
             self.secondary_tier2.lookup(b, _CTX) is LookupResult.HIT for b in blocks
         )
 
+    def test_single_key_admission_balances_pending_primary_stores(self, manager_setup):
+        """PR1 invariant (count balance): each accepted single-key prepare_store
+        increments pending_primary_stores by one; the single aggregated
+        complete_store decrements by len(keys), returning the counter to zero."""
+        blocks = to_keys(range(3))
+        self._start_request()
+
+        outputs = [self.manager.prepare_store(b, _CTX) for b in blocks]
+        accepted = [k for out in outputs for k in out.keys_to_store]
+        assert len(accepted) == 3
+
+        state = self.manager._req_state[_CTX.req_id]
+        assert state.pending_primary_stores == 3
+
+        # One aggregated completion for all accepted keys balances the counter.
+        self.manager.complete_store(accepted, _CTX, success=True)
+        assert state.pending_primary_stores == 0
+
+        # A repeat store of resident keys is a skip: the counter does not move.
+        repeat = [self.manager.prepare_store(b, _CTX) for b in blocks]
+        assert all(out.keys_to_store == [] for out in repeat)
+        assert state.pending_primary_stores == 0
+
+    def test_single_key_admission_triggers_single_cascade(self, manager_setup):
+        """PR1 invariant (one cascade): N single-key prepares aggregate into one
+        complete_store, which cascades exactly once per secondary tier with one
+        submit_store carrying all accepted keys."""
+        blocks = to_keys(range(3))
+        self.secondary_tier1.submit_store = MagicMock(
+            wraps=self.secondary_tier1.submit_store
+        )
+        self.secondary_tier2.submit_store = MagicMock(
+            wraps=self.secondary_tier2.submit_store
+        )
+
+        self._start_request()
+        outputs = [self.manager.prepare_store(b, _CTX) for b in blocks]
+        accepted = [k for out in outputs for k in out.keys_to_store]
+
+        self.manager.complete_store(accepted, _CTX, success=True)
+
+        self.secondary_tier1.submit_store.assert_called_once()
+        self.secondary_tier2.submit_store.assert_called_once()
+        cascade_job = self.secondary_tier1.submit_store.call_args.args[0]
+        assert set(cascade_job.keys) == set(accepted)
+        assert self.secondary_tier1.get_num_blocks() == 3
+        assert self.secondary_tier2.get_num_blocks() == 3
+
     def test_ref_cnt_protection_during_cascade(self, manager_setup):
         """Test that ref_cnt protects blocks during cascade."""
         blocks = to_keys(range(3))
 
         # Store to primary
         self._start_request()
-        result = self.manager.prepare_store(blocks, _CTX)
+        result = prepare_store_all(self.manager, blocks, _CTX)
         assert result is not None
         self.manager.complete_store(blocks, _CTX, success=True)
 
@@ -365,7 +443,7 @@ class TestTieringOffloadingManager:
 
         # Store blocks
         self._start_request()
-        self.manager.prepare_store(blocks, _CTX)
+        prepare_store_all(self.manager, blocks, _CTX)
         self.manager.complete_store(blocks, _CTX, success=True)
 
         # Lookup should find all blocks in primary
@@ -483,7 +561,7 @@ class TestTieringOffloadingManager:
 
         # Store first 3 blocks to primary
         self._start_request()
-        self.manager.prepare_store(blocks[:3], _CTX)
+        prepare_store_all(self.manager, blocks[:3], _CTX)
         self.manager.complete_store(blocks[:3], _CTX, success=True)
 
         # Lookup all 5 blocks should return 3 (first 3 found)
@@ -495,7 +573,7 @@ class TestTieringOffloadingManager:
         # First, fill the primary tier
         blocks = to_keys(range(5))
         self._start_request()
-        result = self.manager.prepare_store(blocks, _CTX)
+        result = prepare_store_all(self.manager, blocks, _CTX)
         assert result is not None
         assert len(result.keys_to_store) == 5
         self.manager.complete_store(blocks, _CTX, success=True)
@@ -505,7 +583,7 @@ class TestTieringOffloadingManager:
 
         # Now try to store 2 more blocks (should trigger eviction)
         more_blocks = to_keys(range(5, 7))
-        result = self.manager.prepare_store(more_blocks, _CTX)
+        result = prepare_store_all(self.manager, more_blocks, _CTX)
 
         # Should evict 2 blocks from primary tier
         assert result is not None
@@ -518,7 +596,7 @@ class TestTieringOffloadingManager:
 
         # Store blocks
         self._start_request()
-        self.manager.prepare_store(blocks, _CTX)
+        prepare_store_all(self.manager, blocks, _CTX)
         self.manager.complete_store(blocks, _CTX, success=True)
         self._simulate_on_schedule_end()
         # for secondary tiers to drain jobs, so primary tier's blocks are evictable.
@@ -551,7 +629,7 @@ class TestTieringOffloadingManager:
 
         # Prepare store
         self._start_request()
-        result = self.manager.prepare_store(blocks, _CTX)
+        result = prepare_store_all(self.manager, blocks, _CTX)
         assert result is not None
 
         # Complete store with failure — cascade must not happen
@@ -643,7 +721,7 @@ class TestTieringOffloadingManager:
         ctx = ReqContext(req_id="req_ctx", kv_transfer_params={"key": "value"})
 
         self._start_request(ctx)
-        self.manager.prepare_store(blocks, ctx)
+        prepare_store_all(self.manager, blocks, ctx)
         self.manager.complete_store(blocks, ctx, success=True)
 
         assert self.secondary_tier1.submit_store.call_count == 1
@@ -689,7 +767,7 @@ class TestTieringOffloadingManager:
         )
 
         self._start_request(ctx)
-        self.manager.prepare_store(blocks, ctx)
+        prepare_store_all(self.manager, blocks, ctx)
         self.manager.on_request_finished(ctx)
 
         assert calls == [("primary_finish", ctx.req_id)]
@@ -725,7 +803,7 @@ class TestTieringOffloadingManager:
         )
 
         self._start_request(ctx)
-        self.manager.prepare_store(blocks, ctx)
+        prepare_store_all(self.manager, blocks, ctx)
         self.manager.on_request_finished(ctx)
 
         self.secondary_tier1.on_request_finished.assert_not_called()
@@ -770,7 +848,7 @@ class TestTieringOffloadingManager:
         )
 
         self._start_request(ctx)
-        self.manager.prepare_store(blocks, ctx)
+        prepare_store_all(self.manager, blocks, ctx)
         self.manager.on_request_finished(ctx)
 
         self.secondary_tier1.on_request_finished.assert_not_called()
@@ -798,8 +876,11 @@ class TestTieringOffloadingManager:
         )
 
         self._start_request(ctx)
-        self.manager.prepare_store(initial_blocks, ctx)
-        assert self.manager._req_state[ctx.req_id].pending_primary_stores == 1
+        prepare_store_all(self.manager, initial_blocks, ctx)
+        # Per-key counting: one pending primary store per accepted key.
+        assert self.manager._req_state[ctx.req_id].pending_primary_stores == len(
+            initial_blocks
+        )
 
         self.manager.reset_cache()
 
@@ -808,7 +889,7 @@ class TestTieringOffloadingManager:
         self.secondary_tier1.on_request_finished.assert_not_called()
         self.secondary_tier2.on_request_finished.assert_not_called()
 
-        self.manager.prepare_store(resumed_blocks, ctx)
+        prepare_store_all(self.manager, resumed_blocks, ctx)
         self.manager.complete_store(resumed_blocks, ctx, success=True)
         self.manager.on_request_finished(ctx)
 
@@ -850,7 +931,7 @@ class TestTieringOffloadingManager:
         # Store some blocks to primary first
         existing_blocks = to_keys(range(3))
         self._start_request()
-        result = self.manager.prepare_store(existing_blocks, _CTX)
+        result = prepare_store_all(self.manager, existing_blocks, _CTX)
         assert result is not None
         self.manager.complete_store(existing_blocks, _CTX, success=True)
         # Drain cascade completions
@@ -875,15 +956,18 @@ class TestTieringOffloadingManager:
         # Call prepare_store with existing + new blocks
         new_blocks = to_keys(range(3, 5))
         all_blocks = existing_blocks + new_blocks
-        result = self.manager.prepare_store(all_blocks, ctx)
+        result = prepare_store_all(self.manager, all_blocks, ctx)
         assert result is not None
         assert set(result.keys_to_store) == set(new_blocks)
 
-        # Only tier1 (request-level) should get existing blocks cascaded now.
-        # New blocks are cascaded to ALL tiers later via complete_store().
-        self.secondary_tier1.submit_store.assert_called_once()
-        job_metadata = self.secondary_tier1.submit_store.call_args.args[0]
-        assert set(job_metadata.keys) == set(existing_blocks)
+        # Only tier1 (request-level) gets existing blocks cascaded now, one
+        # submit_store per already-resident key (single-key admission). New
+        # blocks are cascaded to ALL tiers later via complete_store().
+        assert self.secondary_tier1.submit_store.call_count == len(existing_blocks)
+        cascaded_keys: set[OffloadKey] = set()
+        for submit_call in self.secondary_tier1.submit_store.call_args_list:
+            cascaded_keys.update(submit_call.args[0].keys)
+        assert cascaded_keys == set(existing_blocks)
 
         # tier2 (block-level) does not get existing blocks here.
         self.secondary_tier2.submit_store.assert_not_called()
@@ -897,7 +981,7 @@ class TestTieringOffloadingManager:
         # queued completions); reset_cache's drain loop will pick them up.
         blocks = to_keys(range(3))
         self._start_request()
-        self.manager.prepare_store(blocks, _CTX)
+        prepare_store_all(self.manager, blocks, _CTX)
         self.manager.complete_store(blocks, _CTX, success=True)
         assert self.manager._transfer_jobs
 
@@ -963,7 +1047,7 @@ class TestTieringOffloadingManager:
         # Drive a cascade so a job lands in _transfer_jobs.
         blocks = to_keys(range(3))
         self._start_request()
-        self.manager.prepare_store(blocks, _CTX)
+        prepare_store_all(self.manager, blocks, _CTX)
         self.manager.complete_store(blocks, _CTX, success=True)
         assert self.manager._transfer_jobs
 
@@ -992,7 +1076,7 @@ class TestTieringOffloadingWithoutSecondaryTiers:
 
         # Should work like a regular OffloadingManager
         manager.on_new_request(_CTX)
-        result = manager.prepare_store(blocks, _CTX)
+        result = prepare_store_all(manager, blocks, _CTX)
         assert result is not None
         manager.complete_store(blocks, _CTX, success=True)
 

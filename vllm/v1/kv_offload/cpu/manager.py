@@ -117,7 +117,12 @@ class CPUOffloadingManager(OffloadingManager):
         return RequestOffloadingContext()
 
     @override
-    def lookup(self, key: OffloadKey, req_context: ReqContext) -> LookupResult:
+    def lookup(
+        self,
+        key: OffloadKey,
+        req_context: ReqContext,
+        chunk_idx: int | None = None,
+    ) -> LookupResult:
         if self.counts is not None:
             if key in self.counts:
                 self.counts.move_to_end(key)
@@ -172,38 +177,42 @@ class CPUOffloadingManager(OffloadingManager):
     @override
     def prepare_store(
         self,
-        keys: Collection[OffloadKey],
+        key: OffloadKey,
         req_context: ReqContext,
+        chunk_idx: int | None = None,
     ) -> PrepareStoreOutput | None:
-        if self.counts is not None:
-            num_keys = len(keys)
-            keys = [k for k in keys if self.counts.get(k, 0) >= self.store_threshold]
-            self.stores_skipped_in_current_batch += num_keys - len(keys)
-        # filter out blocks that are already stored
-        keys_to_store = [k for k in keys if self._policy.get(k) is None]
-
-        if not keys_to_store:
+        # Skip keys below the reuse threshold.
+        if self.counts is not None and self.counts.get(key, 0) < self.store_threshold:
+            self.stores_skipped_in_current_batch += 1
+            return PrepareStoreOutput(
+                keys_to_store=[],
+                store_spec=self._get_load_store_spec([], []),
+                evicted_keys=[],
+            )
+        # Skip keys that are already stored.
+        if self._policy.get(key) is not None:
             return PrepareStoreOutput(
                 keys_to_store=[],
                 store_spec=self._get_load_store_spec([], []),
                 evicted_keys=[],
             )
 
-        self.allocation_sizes_in_current_batch.append(len(keys_to_store))
-        num_blocks_to_evict = len(keys_to_store) - self._get_num_free_blocks()
+        self.allocation_sizes_in_current_batch.append(1)
+        num_blocks_to_evict = 1 - self._get_num_free_blocks()
 
         to_evict: list[OffloadKey] = []
         if num_blocks_to_evict > 0:
             if num_blocks_to_evict > self._num_evictable_cache_blocks:
                 # Eviction will fail.
                 return None
-            # There is a still a chance for eviction failure as some of the
-            # idle blocks might be in the protected list.
+            # There is still a chance for eviction failure as some of the idle
+            # blocks might be in the protected list.
 
-            # Blocks from the original input are excluded from eviction candidates:
-            # a block that was already stored must remain in the cache after this call.
-            protected = set(keys)
-            evicted = self._policy.evict(num_blocks_to_evict, protected)
+            # The key being stored is excluded from eviction candidates. Keys
+            # already accepted earlier in the same store transaction are
+            # write-pending (ref_cnt -1) and therefore never eviction
+            # candidates, so they need no explicit protection here.
+            evicted = self._policy.evict(num_blocks_to_evict, {key})
             if evicted is None:
                 return None
 
@@ -211,9 +220,9 @@ class CPUOffloadingManager(OffloadingManager):
             self._num_evictable_cache_blocks -= len(evicted)
             assert self._num_evictable_cache_blocks >= 0
 
-            for key, block in evicted:
+            for evicted_key, block in evicted:
                 self._free_block(block)
-                to_evict.append(key)
+                to_evict.append(evicted_key)
 
         if to_evict and self.events is not None:
             self.events.append(
@@ -224,20 +233,19 @@ class CPUOffloadingManager(OffloadingManager):
                 )
             )
 
-        blocks = self._allocate_blocks(keys_to_store)
-        assert len(blocks) == len(keys_to_store), (
+        blocks = self._allocate_blocks([key])
+        assert len(blocks) == 1, (
             "Block pool did not allocate the expected number of blocks"
         )
 
-        for key, block in zip(keys_to_store, blocks):
-            self._policy.insert(key, block)
-        self._num_write_pending_blocks += len(keys_to_store)
+        self._policy.insert(key, blocks[0])
+        self._num_write_pending_blocks += 1
 
-        # build store specs for allocated blocks
-        store_spec = self._get_load_store_spec(keys_to_store, blocks)
+        # build store spec for the allocated block
+        store_spec = self._get_load_store_spec([key], blocks)
 
         return PrepareStoreOutput(
-            keys_to_store=keys_to_store,
+            keys_to_store=[key],
             store_spec=store_spec,
             evicted_keys=to_evict,
         )
