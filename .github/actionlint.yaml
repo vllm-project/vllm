@@ -6,5 +6,6 @@ self-hosted-runner:
     - ascend
     - 910b
     - docker
+    - npu-2
     # Not yet in actionlint's known-label set.
     - macos-26
