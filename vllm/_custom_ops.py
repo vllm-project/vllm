@@ -2396,6 +2396,17 @@ if hasattr(torch.ops, "_C") and hasattr(torch.ops._C, "fp32_router_gemm"):
         return
 
 
+if hasattr(torch.ops, "_C") and hasattr(torch.ops._C, "bf16_skinny_gemm"):
+
+    @register_fake("_C::bf16_skinny_gemm")
+    def bf16_skinny_gemm_fake(
+        output: torch.Tensor,
+        mat_a: torch.Tensor,
+        mat_b: torch.Tensor,
+    ) -> None:
+        return
+
+
 def topk_softmax(
     topk_weights: torch.Tensor,
     topk_ids: torch.Tensor,
