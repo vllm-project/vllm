@@ -327,14 +327,14 @@ def test_recv_skips_swa_blocks_before_window():
 
 def test_chunked_token_database_hash_block_size_smaller_than_block_size():
     """DSv4-style: hash_block_size=4, group block_size=16 — process_tokens
-    keys each 16-token chunk by its last fine hash, keeping the Mooncake key
-    at one digest instead of concatenating all 4 fine hashes."""
+    keys each chunk by its ending fine hash, including a partial tail."""
     md = KeyMetadata("m", 0, 0, 0, 0, group_id=3)
     db = ChunkedTokenDatabase(md, block_size=16, hash_block_size=4)
     db.set_kv_caches_base_addr([0])
     db.set_block_len([512])
-    # 8 fine-grained hashes (32 tokens at hash_block_size=4) → 2 group chunks.
     fine_hashes = [BlockHash(bytes([i + 1]) * 4) for i in range(8)]
+
+    # 8 fine-grained hashes (32 tokens at hash_block_size=4) → 2 group chunks.
     out = list(db.process_tokens(token_len=32, block_hashes=fine_hashes))
     assert len(out) == 2
     assert out[0][0] == 0 and out[0][1] == 16
@@ -343,6 +343,17 @@ def test_chunked_token_database_hash_block_size_smaller_than_block_size():
     # prior three.
     assert out[0][2].hex() == fine_hashes[3].hex()
     assert out[1][2].hex() == fine_hashes[7].hex()
+
+    # Sub-block hit: emit the partial chunk under its ending fine hash.
+    out = list(db.process_tokens(token_len=12, block_hashes=fine_hashes[:3]))
+    assert [(s, e) for s, e, _ in out] == [(0, 12)]
+    assert out[0][2].hex() == fine_hashes[2].hex()
+
+    # Cross-block hit: emit both the full chunk and its partial tail.
+    out = list(db.process_tokens(token_len=28, block_hashes=fine_hashes[:7]))
+    assert [(s, e) for s, e, _ in out] == [(0, 16), (16, 28)]
+    assert out[0][2].hex() == fine_hashes[3].hex()
+    assert out[1][2].hex() == fine_hashes[6].hex()
 
 
 def test_sub_block_partial_tail_offload_reads_cow_block():

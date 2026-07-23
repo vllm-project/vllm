@@ -242,7 +242,8 @@ class ChunkedTokenDatabase:
         rank regardless of where the processed suffix begins.
 
         Args:
-            token_len: Total number of tokens.
+            token_len: Total number of tokens. Must be hash-block aligned and
+                covered by ``block_hashes`` when hashes are present.
             block_hashes: Block hashes computed at ``hash_block_size`` granularity.
                 When ``block_size > hash_block_size`` each group's ``block_size`` chunk
                 is keyed by its last sub-hash via ``chunk_hashes_for_block_size``.
@@ -255,11 +256,10 @@ class ChunkedTokenDatabase:
         assert put_step > 0
         if not block_hashes:
             return
-        chunk_hashes: Sequence[BlockHash] = chunk_hashes_for_block_size(
-            block_hashes, self.hash_block_size, self.block_size
-        )
+        assert token_len % self.hash_block_size == 0
+        assert token_len // self.hash_block_size <= len(block_hashes)
         start_chunk = max(0, cdiv(mask_num, self.block_size))
-        max_chunks = min(len(chunk_hashes), cdiv(token_len, self.block_size))
+        max_chunks = cdiv(token_len, self.block_size)
         if chunk_mask is not None:
             max_chunks = min(max_chunks, start_chunk + len(chunk_mask))
         for chunk_id in range(start_chunk, max_chunks):
@@ -267,9 +267,9 @@ class ChunkedTokenDatabase:
                 continue
             if chunk_id % put_step != put_step_rank:
                 continue
-            h = chunk_hashes[chunk_id]
             start_idx = chunk_id * self.block_size
             end_idx = min(start_idx + self.block_size, token_len)
+            h = block_hashes[end_idx // self.hash_block_size - 1]
             yield start_idx, end_idx, h
 
 
