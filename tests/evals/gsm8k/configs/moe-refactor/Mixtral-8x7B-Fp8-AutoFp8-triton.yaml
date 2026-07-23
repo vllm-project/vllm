@@ -1,0 +1,5 @@
+model_name: "amd/Mixtral-8x7B-Instruct-v0.1-FP8-KV"
+accuracy_threshold: 0.62
+num_questions: 1319
+num_fewshot: 5
+server_args: "--enforce-eager --max-model-len 8192 --tensor-parallel-size 2"

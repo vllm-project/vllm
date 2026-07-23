@@ -1,0 +1,227 @@
+group: Disaggregated
+depends_on: 
+  - image-build
+steps:
+- label: Distributed NixlConnector PD accuracy (4 GPUs)
+  key: distributed-nixlconnector-pd-accuracy-4-gpus
+  timeout_in_minutes: 55
+  working_dir: "/vllm-workspace/tests"
+  num_devices: 4
+  source_file_dependencies:
+    - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
+    - tests/v1/kv_connector/nixl_integration/
+  commands:
+    - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
+    - bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
+  mirror:
+    amd:
+      dind: false
+      device: mi300_4
+      timeout_in_minutes: 85
+      depends_on:
+        - image-build-amd
+      source_file_dependencies:
+        - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
+        - tests/v1/kv_connector/nixl_integration/
+        - vllm/platforms/rocm.py
+      commands:
+        - uv pip install --system -r /vllm-workspace/requirements/kv_connectors_rocm.txt
+        - ATTENTION_BACKEND=TRITON_ATTN bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
+
+- label: Distributed FlashInfer NixlConnector PD accuracy (4 GPUs)
+  key: distributed-flashinfer-nixlconnector-pd-accuracy-4-gpus
+  timeout_in_minutes: 55
+  working_dir: "/vllm-workspace/tests"
+  num_devices: 4
+  source_file_dependencies:
+    - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
+    - tests/v1/kv_connector/nixl_integration/
+  commands:
+    - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
+    - FLASHINFER=1 bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
+
+- label: Push NixlConnector PP prefill PD accuracy (4 GPUs)
+  key: push-nixlconnector-pp-prefill-pd-accuracy-4-gpus
+  timeout_in_minutes: 30
+  working_dir: "/vllm-workspace/tests"
+  num_devices: 4
+  source_file_dependencies:
+    - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
+    - tests/v1/kv_connector/nixl_integration/
+    - tests/v1/kv_connector/nixl_push_integration/
+  commands:
+    - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
+    - bash v1/kv_connector/nixl_push_integration/config_sweep_accuracy_test.sh
+
+- label: DP EP Distributed NixlConnector PD accuracy tests (4 GPUs)
+  key: dp-ep-distributed-nixlconnector-pd-accuracy-tests-4-gpus
+  timeout_in_minutes: 30
+  working_dir: "/vllm-workspace/tests"
+  num_devices: 4
+  source_file_dependencies:
+    - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
+    - tests/v1/kv_connector/nixl_integration/
+  commands:
+    - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
+    - DP_EP=1 bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
+  mirror:
+    amd:
+      dind: false
+      device: mi300_4
+      timeout_in_minutes: 60
+      depends_on:
+        - image-build-amd
+      source_file_dependencies:
+        - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
+        - tests/v1/kv_connector/nixl_integration/
+        - vllm/platforms/rocm.py
+      commands:
+        - uv pip install --system -r /vllm-workspace/requirements/kv_connectors_rocm.txt
+        - DP_EP=1 ATTENTION_BACKEND=TRITON_ATTN bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
+
+- label: CrossLayer KV layout Distributed NixlConnector PD accuracy tests (4 GPUs)
+  key: crosslayer-kv-layout-distributed-nixlconnector-pd-accuracy-tests-4-gpus
+  timeout_in_minutes: 55
+  working_dir: "/vllm-workspace/tests"
+  num_devices: 4
+  source_file_dependencies:
+    - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
+    - tests/v1/kv_connector/nixl_integration/
+  commands:
+    - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
+    - CROSS_LAYERS_BLOCKS=True bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
+  mirror:
+    amd:
+      dind: false
+      device: mi300_4
+      timeout_in_minutes: 85
+      depends_on:
+        - image-build-amd
+      source_file_dependencies:
+        - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
+        - tests/v1/kv_connector/nixl_integration/
+        - vllm/platforms/rocm.py
+      commands:
+        - uv pip install --system -r /vllm-workspace/requirements/kv_connectors_rocm.txt
+        - CROSS_LAYERS_BLOCKS=True ATTENTION_BACKEND=TRITON_ATTN bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
+
+- label: Hybrid SSM NixlConnector PD accuracy tests (4 GPUs)
+  key: hybrid-ssm-nixlconnector-pd-accuracy-tests-4-gpus
+  timeout_in_minutes: 60
+  working_dir: "/vllm-workspace/tests"
+  num_devices: 4
+  source_file_dependencies:
+    - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
+    - tests/v1/kv_connector/nixl_integration/
+  commands:
+    - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
+    - HYBRID_SSM=1 bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
+  mirror:
+    amd:
+      dind: false
+      device: mi300_4
+      timeout_in_minutes: 80
+      depends_on:
+        - image-build-amd
+      source_file_dependencies:
+        - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
+        - tests/v1/kv_connector/nixl_integration/
+        - vllm/platforms/rocm.py
+      commands:
+        - uv pip install --system -r /vllm-workspace/requirements/kv_connectors_rocm.txt
+        - HYBRID_SSM=1 ATTENTION_BACKEND=TRITON_ATTN bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
+
+- label: Hybrid SSM NixlConnector PD prefix cache test (2 GPUs)
+  key: hybrid-ssm-nixlconnector-pd-prefix-cache-2-gpus
+  timeout_in_minutes: 25
+  working_dir: "/vllm-workspace/tests"
+  num_devices: 2
+  source_file_dependencies:
+    - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
+    - vllm/v1/core/sched/
+    - vllm/v1/core/kv_cache_coordinator.py
+    - tests/v1/kv_connector/nixl_integration/
+  commands:
+    - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
+    - bash v1/kv_connector/nixl_integration/run_mamba_prefix_cache_test.sh
+
+- label: MultiConnector (Nixl+Offloading) PD accuracy (2 GPUs)
+  key: multiconnector-nixl-offloading-pd-accuracy-2-gpus
+  timeout_in_minutes: 40
+  working_dir: "/vllm-workspace/tests"
+  num_devices: 2
+  source_file_dependencies:
+    - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
+    - vllm/distributed/kv_transfer/kv_connector/v1/multi_connector.py
+    - vllm/distributed/kv_transfer/kv_connector/v1/offloading_connector.py
+    - vllm/distributed/kv_transfer/kv_connector/v1/offloading/
+    - tests/v1/kv_connector/nixl_integration/
+  commands:
+    - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
+    - bash v1/kv_connector/nixl_integration/run_multi_connector_accuracy_test.sh
+
+- label: NixlConnector PD + Spec Decode acceptance (2 GPUs)
+  key: nixlconnector-pd-spec-decode-acceptance-2-gpus
+  timeout_in_minutes: 45
+  device: a100
+  working_dir: "/vllm-workspace/tests"
+  num_devices: 2
+  source_file_dependencies:
+    - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
+    - vllm/v1/worker/kv_connector_model_runner_mixin.py
+    - tests/v1/kv_connector/nixl_integration/
+  commands:
+    - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
+    - bash v1/kv_connector/nixl_integration/config_sweep_spec_decode_test.sh
+  mirror:
+    amd:
+      dind: false
+      device: mi300_2
+      timeout_in_minutes: 70
+      depends_on:
+        - image-build-amd
+      source_file_dependencies:
+        - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
+        - vllm/v1/worker/kv_connector_model_runner_mixin.py
+        - tests/v1/kv_connector/nixl_integration/
+        - vllm/platforms/rocm.py
+      commands:
+        - uv pip install --system -r /vllm-workspace/requirements/kv_connectors_rocm.txt
+        - KV_CACHE_MEMORY_BYTES=8G ATTENTION_BACKEND=TRITON_ATTN bash v1/kv_connector/nixl_integration/config_sweep_spec_decode_test.sh
+
+- label: MultiConnector (Nixl+Offloading) PD edge cases (2 GPUs)
+  key: multiconnector-nixl-offloading-pd-edge-cases-2-gpus
+  timeout_in_minutes: 25
+  working_dir: "/vllm-workspace/tests"
+  num_devices: 2
+  source_file_dependencies:
+    - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
+    - vllm/distributed/kv_transfer/kv_connector/v1/multi_connector.py
+    - vllm/distributed/kv_transfer/kv_connector/v1/offloading_connector.py
+    - vllm/distributed/kv_transfer/kv_connector/v1/offloading/
+    - tests/v1/kv_connector/nixl_integration/
+  commands:
+    - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
+    - bash v1/kv_connector/nixl_integration/run_multi_connector_edge_case_test.sh
+
+# P TP 4 - D DPEP 4 test case for DSv4-Flash
+- label: DSv4-Flash Disaggregated DP EP
+  key: dsv4-flash-disaggregated
+  timeout_in_minutes: 60
+  device: h200
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  num_devices: 8
+  env:
+    ENABLE_HMA_FLAG: "1"
+    DP_EP: "1"
+    GPU_MEMORY_UTILIZATION: "0.85"
+    PREFILLER_TP_SIZE: "4"
+    DECODER_TP_SIZE: "4"
+    PREFILL_BLOCK_SIZE: "256"
+    DECODE_BLOCK_SIZE: "256"
+    MODEL_NAMES: "deepseek-ai/DeepSeek-V4-Flash"
+    VLLM_SERVE_EXTRA_ARGS: "--trust-remote-code,--kv-cache-dtype,fp8"
+  commands:
+    - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
+    - bash v1/kv_connector/nixl_integration/run_accuracy_test.sh
