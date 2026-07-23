@@ -143,7 +143,7 @@ def test_hunyuan_a13b_tool_parser_extract(
             ],
             [make_tool_call("get_weather", {"city": "Boston"})],
         ),
-        pytest.param(
+        (
             [
                 '<tool_calls>[{"name": "complex_tool",',
                 ' "arguments": ',
@@ -156,9 +156,6 @@ def test_hunyuan_a13b_tool_parser_extract(
                     "complex_tool", {"level1": {"level2": {"level3": {"value": 123}}}}
                 )
             ],
-            marks=pytest.mark.xfail(
-                reason="stream parsing not support nested json yet."
-            ),
         ),
     ],
 )
