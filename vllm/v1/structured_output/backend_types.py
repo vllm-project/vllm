@@ -105,7 +105,10 @@ class StructuredOutputBackend(ABC):
 
     @abstractmethod
     def compile_grammar(
-        self, request_type: StructuredOutputOptions, grammar_spec: str
+        self,
+        request_type: StructuredOutputOptions,
+        grammar_spec: str,
+        so_params=None,
     ) -> StructuredOutputGrammar:
         """
         Compiles a grammar specification into a structured output grammar.
@@ -114,6 +117,9 @@ class StructuredOutputBackend(ABC):
             request_type (StructuredOutputOptions): The type of structured
                 output request.
             grammar_spec (str): The grammar specification to compile.
+            so_params (StructuredOutputsParams | None): the request-level
+                structured output params, so per-request options (e.g.
+                disable_any_whitespace) can be honored by the backend.
 
         Returns:
             StructuredOutputGrammar: The compiled structured output grammar.
