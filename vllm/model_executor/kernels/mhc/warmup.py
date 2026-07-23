@@ -130,12 +130,6 @@ def _compile_and_cache(jit_impl, *args, **kwargs) -> None:
     kernel = jit_impl.compile(*args, **kwargs)
     key, _ = jit_impl.func.parse_args(*args, **kwargs)
     jit_impl._kernel_cache[key] = kernel
-    kernel_name = getattr(getattr(jit_impl, "func", jit_impl), "__name__", "?")
-    logger.info(
-        "_compile_and_cache: kernel=%s key=%s",
-        kernel_name,
-        key,
-    )
 
 
 def _compile_mhc_post(hidden_size: int, hc_mult: int) -> None:
@@ -259,13 +253,6 @@ class MhcPreKernel(VllmJitKernel["MhcPreKernel.CompileKey"]):
         hc_mult3 = hc_mult * 2 + hc_mult * hc_mult
         num_tokens = 1  # dynamic dim; smallest valid value
         c = self._constants
-
-        logger.info(
-            "MhcPreKernel.compile: is_broadcast=%s n_splits=%d use_norm=%s",
-            compile_key.is_broadcast,
-            n_splits,
-            compile_key.use_norm_weight,
-        )
 
         gemm_out_mul = _fake(torch.float32, n_splits, num_tokens, hc_mult3)
         gemm_out_sqrsum = _fake(torch.float32, n_splits, num_tokens)
@@ -449,15 +436,6 @@ class MhcFusedPostPreKernel(VllmJitKernel["MhcFusedPostPreKernel.CompileKey"]):
         hc_mult3 = hc_mult * 2 + hc_mult * hc_mult
         num_tokens = 1  # dynamic dim; smallest valid value
         c = self._constants
-
-        logger.info(
-            "MhcFusedPostPreKernel.compile: use_small_fma=%s n_splits=%d "
-            "tile_n=%d use_norm=%s",
-            compile_key.use_small_fma,
-            n_splits,
-            tile_n,
-            compile_key.use_norm_weight,
-        )
 
         if compile_key.use_small_fma:
             comb_mix = _fake(torch.float32, num_tokens, hc_mult, hc_mult)
