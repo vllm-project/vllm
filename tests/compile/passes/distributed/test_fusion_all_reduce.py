@@ -333,9 +333,7 @@ class TestAiterAllReduceRMSNormGroupQuantFP8Model(torch.nn.Module):
     def ops_in_model_before(self):
         return [
             torch.ops.vllm.all_reduce.default,
-            (
-                torch.ops.vllm.rocm_aiter_group_fp8_quant.default
-            ),
+            torch.ops.vllm.rocm_aiter_group_fp8_quant.default,
         ]
 
     def ops_in_model_after(self):
@@ -768,9 +766,7 @@ def rocm_aiter_group_quant_fusion_pass_on_test_model(
         )
 
         token_num = batch_size * seq_len
-        model = test_model_cls(
-            hidden_size, token_num, dtype=dtype
-        )
+        model = test_model_cls(hidden_size, token_num, dtype=dtype)
 
         hidden_states = torch.randn((token_num, hidden_size), requires_grad=False)
 
