@@ -562,12 +562,27 @@ def _args_dispatch_combine_worker(rank, world_size):
             # -- combine (reduce-scatter) --
             # Each token i has value i in all columns; after reduce-scatter
             # each rank gets its slice, summed across ranks.
-            expert_out = (
+            expert_values = (
                 torch.arange(total_tokens, device=device, dtype=torch.float32)
                 .unsqueeze(1)
                 .expand(total_tokens, hidden_size)
                 .contiguous()
             )
+            expert_out = manager.allocate_combine_input(
+                expert_values.shape,
+                expert_values.dtype,
+                expert_values.device,
+                is_sequence_parallel=True,
+            )
+            if expert_out is None:
+                expert_out = expert_values
+            else:
+                from vllm.distributed.device_communicators.pynccl_allocator import (
+                    is_symmetric_memory_tensor,
+                )
+
+                assert is_symmetric_memory_tensor(expert_out)
+                expert_out.copy_(expert_values)
 
             combine_output = torch.empty(
                 (tokens_per_rank, hidden_size),
