@@ -287,9 +287,9 @@ def _cuda_index_for(device: torch.types.Device) -> int:
     """Resolve a CUDA device index for reconstructing a CUDA-IPC proxy."""
     if device is not None and str(device) != "cpu":
         dev = torch.device(device)
-        if dev.type == "cuda":
-            return dev.index if dev.index is not None else torch.cuda.current_device()
-    return torch.cuda.current_device()
+        if dev.type == "cuda" and dev.index is not None:
+            return dev.index
+    return torch.accelerator.current_device_index()
 
 
 def _reconstruct_cuda_ipc_proxies(tensors: Any, device: torch.types.Device) -> Any:
@@ -298,9 +298,9 @@ def _reconstruct_cuda_ipc_proxies(tensors: Any, device: torch.types.Device) -> A
     A no-op unless the ``cuda_ipc`` multimodal transport produced proxies;
     imported lazily to avoid a circular import.
     """
-    from vllm.multimodal import cuda_ipc
+    from vllm.multimodal import gpu_ipc_memory
 
-    if cuda_ipc.is_cuda_ipc_proxy(tensors):
+    if gpu_ipc_memory.is_cuda_ipc_proxy(tensors):
         return tensors.reconstruct(_cuda_index_for(device))
     if isinstance(tensors, (list, tuple)):
         rebuilt = [_reconstruct_cuda_ipc_proxies(t, device) for t in tensors]
@@ -310,12 +310,12 @@ def _reconstruct_cuda_ipc_proxies(tensors: Any, device: torch.types.Device) -> A
 
 def _batch_has_cuda_ipc_proxy(batch: Any) -> bool:
     """Whether any leaf in ``batch`` is a deferred CUDA-IPC proxy."""
-    from vllm.multimodal import cuda_ipc
+    from vllm.multimodal import gpu_ipc_memory
 
     stack = [batch]
     while stack:
         cur = stack.pop()
-        if cuda_ipc.is_cuda_ipc_proxy(cur):
+        if gpu_ipc_memory.is_cuda_ipc_proxy(cur):
             return True
         if isinstance(cur, (list, tuple)):
             stack.extend(cur)

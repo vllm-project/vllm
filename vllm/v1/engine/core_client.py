@@ -597,7 +597,7 @@ class MPClient(EngineCoreClient):
                 if mm_tensor_ipc == "torch_shm" and tensor_queue is not None:
                     oob_consumer = TensorIpcSender(tensor_queue)
                 elif mm_tensor_ipc == "cuda_ipc":
-                    from vllm.multimodal.cuda_ipc import CudaIpcTensorSender
+                    from vllm.multimodal.gpu_ipc_memory import CudaIpcTensorSender
                     from vllm.utils.mem_constants import GiB_bytes
 
                     oob_consumer = CudaIpcTensorSender(

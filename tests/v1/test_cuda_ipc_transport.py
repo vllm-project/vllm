@@ -18,7 +18,7 @@ import pytest
 import torch
 import torch.multiprocessing as torch_mp
 
-from vllm.multimodal.cuda_ipc import (
+from vllm.multimodal.gpu_ipc_memory import (
     CudaIpcPoolProxy,
     CudaIpcTensorSender,
     cuda_ipc_provider,
@@ -65,7 +65,7 @@ def test_encode_returns_plain_metadata_no_pickle():
 
 def _reconstruct_in_child(proxy: CudaIpcPoolProxy, device_index: int, out: mp.Queue):
     try:
-        torch.cuda.set_device(device_index)
+        torch.accelerator.set_device_index(device_index)
         t = proxy.reconstruct(device_index)
         out.put(("ok", t.cpu(), int(t.get_device())))
     except Exception as e:  # noqa: BLE001
@@ -108,7 +108,7 @@ def test_roundtrip_same_device(device_index: int):
 
 
 @pytest.mark.skipif(
-    torch.cuda.device_count() < 2, reason="cross-device P2P needs >=2 GPUs"
+    torch.accelerator.device_count() < 2, reason="cross-device P2P needs >=2 GPUs"
 )
 def test_roundtrip_cross_device_p2p():
     """A worker on a different GPU reads the pool over P2P (rank!=0 path)."""
@@ -134,10 +134,12 @@ def test_tp_size_over_max_falls_back():
 
     The recycling cells are indexed per consumer device; a wider world would
     alias cells, so ``_SenderPool`` refuses to start and the encoder falls back
-    to the regular host-copy transport instead of silently mis-recycling.
+    to the regular host-copy transport instead of recycling slices too early.
     """
-    from vllm.multimodal import cuda_ipc
+    from vllm.multimodal import gpu_ipc_memory
 
-    sender = CudaIpcTensorSender(pool_bytes=64 << 20, tp_size=cuda_ipc._MAX_TP + 1)
+    sender = CudaIpcTensorSender(
+        pool_bytes=64 << 20, tp_size=gpu_ipc_memory._MAX_TP + 1
+    )
     sender.new_message()
     assert sender(torch.zeros(4, device="cuda:0")) is None
