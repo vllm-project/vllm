@@ -79,6 +79,7 @@ class BaseIncrementalDetokenizer(IncrementalDetokenizer, ABC):
         else:
             self.stop = params.stop
         self.min_tokens = params.min_tokens
+        self.min_characters = params.min_characters
         self.include_stop_str_in_output = params.include_stop_str_in_output
 
         # Number of chars to hold back when stop strings are to be excluded
@@ -120,6 +121,7 @@ class BaseIncrementalDetokenizer(IncrementalDetokenizer, ABC):
             # Support min_tokens, see https://github.com/vllm-project/vllm/pull/22014
             if self.min_tokens and self.num_output_tokens() <= self.min_tokens:
                 stop_check_offset = len(self.output_text)
+            stop_check_offset = max(stop_check_offset, self.min_characters)
 
         if skipped_stop_token_id is not None:
             # Cleanup after skipping detokenization.
@@ -127,7 +129,11 @@ class BaseIncrementalDetokenizer(IncrementalDetokenizer, ABC):
 
         # 2) Evaluate stop strings.
         stop_string = None
-        if self.stop and self.num_output_tokens() > self.min_tokens:
+        if (
+            self.stop
+            and self.num_output_tokens() > self.min_tokens
+            and len(self.output_text) > self.min_characters
+        ):
             stop = check_stop_strings(
                 output_text=self.output_text,
                 new_char_count=len(self.output_text) - stop_check_offset,
