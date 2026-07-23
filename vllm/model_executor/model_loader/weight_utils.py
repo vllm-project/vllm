@@ -156,10 +156,7 @@ def _shuffle_files(files: list[str], shuffle: bool) -> None:
     """Shuffle *files* in place with a rank-dependent seed when *shuffle* is set."""
     if not shuffle:
         return
-    if torch.distributed.is_initialized():
-        rank = torch.distributed.get_rank()
-    else:
-        rank = 0
+    rank = get_world_group().rank
     random.Random(42 + rank).shuffle(files)
     logger.info(
         "Shuffled %d safetensors files with seed %d (rank=%d)",
