@@ -28,6 +28,9 @@ from vllm.model_executor.warmup.flashinfer_sparse_mla_warmup import (
     deepseek_v4_sparse_mla_attention_warmup,
     flashinfer_sparse_mla_decode_autotune_warmup,
 )
+from vllm.model_executor.warmup.mhc_cutedsl_warmup import (
+    mhc_cutedsl_warmup,
+)
 from vllm.model_executor.warmup.qwen_triton_warmup import qwen_triton_warmup
 from vllm.model_executor.warmup.sparse_mla_triton_warmup import (
     sparse_mla_triton_warmup,
@@ -52,10 +55,6 @@ _LL_BF16_WARMUP_MODEL_SHAPES: tuple[tuple[int, int], ...] = (
     (14400, 256),  # DSV4-Flash
 )
 _LL_BF16_WARMUP_M_RANGE = range(1, 17)
-_HC_PRENORM_GEMM_WARMUP_K_VALUES: tuple[int, ...] = (
-    16384,  # DSV4-Flash
-    28672,  # DSV4-Pro
-)
 
 
 def _warmup_ll_bf16_router_gemm() -> None:
@@ -74,19 +73,6 @@ def _warmup_ll_bf16_router_gemm() -> None:
         shapes=_LL_BF16_WARMUP_MODEL_SHAPES,
         m_values=_LL_BF16_WARMUP_M_RANGE,
     )
-
-
-def _warmup_hc_prenorm_gemm(max_num_batched_tokens: int) -> None:
-    from vllm.utils.import_utils import has_cutedsl
-
-    if not has_cutedsl():
-        return
-
-    from vllm.model_executor.kernels.mhc.cutedsl import warmup_hc_prenorm_gemm
-
-    logger.info("Warming up CuTeDSL mHC prenorm GEMM kernels.")
-    for k in _HC_PRENORM_GEMM_WARMUP_K_VALUES:
-        warmup_hc_prenorm_gemm(k, max_num_batched_tokens)
 
 
 def kernel_warmup(worker: "Worker"):
@@ -141,8 +127,6 @@ def kernel_warmup(worker: "Worker"):
 
     if current_platform.has_device_capability(90):
         _warmup_ll_bf16_router_gemm()
-    if current_platform.is_device_capability(100):
-        _warmup_hc_prenorm_gemm(worker.scheduler_config.max_num_batched_tokens)
 
     # FlashInfer attention warmup
     # Only warmup if the model has FlashInfer attention groups
@@ -183,6 +167,7 @@ def kernel_warmup(worker: "Worker"):
         cutedsl_warmup()
 
     if worker.vllm_config.kernel_config.enable_jit_warmup:
+        mhc_cutedsl_warmup(worker)
         fa4_cutedsl_warmup(worker)
         sparse_mla_triton_warmup(worker)
 

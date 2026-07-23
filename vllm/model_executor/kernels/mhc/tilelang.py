@@ -27,7 +27,7 @@ def _can_use_cutedsl_hc_prenorm_gemm(
 ) -> bool:
     if not (
         current_platform.is_cuda()
-        and current_platform.is_device_capability(100)
+        and current_platform.is_device_capability_family(100)
         and has_cutedsl()
     ):
         return False

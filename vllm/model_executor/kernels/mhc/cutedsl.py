@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from functools import cache
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
 
 import cutlass
 import cutlass.cute as cute
@@ -14,6 +15,14 @@ from cuda.bindings import driver as cuda
 from cutlass.cute.nvgpu import cpasync, tcgen05, warp
 from cutlass.cute.runtime import make_fake_compact_tensor, make_fake_stream
 from cutlass.pipeline import pipeline_init_arrive, pipeline_init_wait
+
+from vllm.model_executor.warmup.jit_warmup import VllmJitKernel
+
+if TYPE_CHECKING:
+    from vllm.config import VllmConfig
+
+
+SUPPORTED_HC_PRENORM_GEMM_K_VALUES = frozenset((5120, 7168, 7680, 16384, 28672))
 
 
 class HCPrenormGemm:
@@ -568,62 +577,114 @@ class HCPrenormGemm:
             acc_pipeline.producer_tail(acc_producer)
 
 
-@cache
-def _compile(k, num_splits):
-    m = cute.sym_int()
-    a = make_fake_compact_tensor(
-        cutlass.BFloat16,
-        (m, k),
-        stride_order=(1, 0),
-        assumed_align=16,
-    )
-    b = make_fake_compact_tensor(
-        cutlass.TFloat32,
-        (24, k),
-        stride_order=(1, 0),
-        assumed_align=16,
-    )
-    if num_splits == 1:
-        d = make_fake_compact_tensor(
-            cutlass.Float32,
-            (m, 24),
+class HCPrenormGemmKernel(VllmJitKernel["HCPrenormGemmKernel.CompileKey"]):
+    """CuTeDSL mHC prenorm GEMM runtime and warmup wrapper."""
+
+    @dataclass(frozen=True)
+    class CompileKey:
+        k: int
+        num_splits: int
+
+    def __init__(self) -> None:
+        self.compiled_kernels: dict[HCPrenormGemmKernel.CompileKey, Any] = {}
+        super().__init__()
+
+    def dispatch(  # type: ignore[override]
+        self,
+        *,
+        k: int,
+        num_splits: int,
+    ) -> CompileKey:
+        return self.CompileKey(k=k, num_splits=num_splits)
+
+    def get_warmup_keys(self, vllm_config: "VllmConfig") -> list[CompileKey]:
+        from vllm.model_executor.kernels.mhc.tilelang_kernels import (
+            compute_num_split,
+        )
+        from vllm.utils.math_utils import cdiv
+
+        hf_config = vllm_config.model_config.hf_config
+        hc_mult = getattr(hf_config, "hc_mult", None)
+        hidden_size = getattr(hf_config, "hidden_size", None)
+        if hc_mult != 4 or not isinstance(hidden_size, int):
+            return []
+
+        k = hc_mult * hidden_size
+        max_num_batched_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+        if k not in SUPPORTED_HC_PRENORM_GEMM_K_VALUES or max_num_batched_tokens <= 0:
+            return []
+
+        grid_sizes = range(1, cdiv(max_num_batched_tokens, 64) + 1)
+        num_splits = tuple(
+            dict.fromkeys(compute_num_split(64, k, grid) for grid in grid_sizes)
+        )
+        return self._trace_dispatch(self.dispatch)(k=k, num_splits=num_splits)
+
+    def compile(self, compile_key: CompileKey) -> None:
+        if compile_key in self.compiled_kernels:
+            return
+
+        k = compile_key.k
+        num_splits = compile_key.num_splits
+        m = cute.sym_int()
+        a = make_fake_compact_tensor(
+            cutlass.BFloat16,
+            (m, k),
             stride_order=(1, 0),
             assumed_align=16,
         )
-        sqr_sum = make_fake_compact_tensor(cutlass.Float32, (m,), assumed_align=16)
-    else:
-        d = make_fake_compact_tensor(
-            cutlass.Float32,
-            (num_splits, m, 24),
-            stride_order=(2, 1, 0),
-            assumed_align=16,
-        )
-        sqr_sum = make_fake_compact_tensor(
-            cutlass.Float32,
-            (num_splits, m),
+        b = make_fake_compact_tensor(
+            cutlass.TFloat32,
+            (24, k),
             stride_order=(1, 0),
             assumed_align=16,
         )
-    stream = make_fake_stream(use_tvm_ffi_env_stream=True)
-    return cute.compile(
-        HCPrenormGemm(k, num_splits),
-        a,
-        b,
-        d,
-        sqr_sum,
-        stream,
-        options="--enable-tvm-ffi",
-    )
+        if num_splits == 1:
+            d = make_fake_compact_tensor(
+                cutlass.Float32,
+                (m, 24),
+                stride_order=(1, 0),
+                assumed_align=16,
+            )
+            sqr_sum = make_fake_compact_tensor(cutlass.Float32, (m,), assumed_align=16)
+        else:
+            d = make_fake_compact_tensor(
+                cutlass.Float32,
+                (num_splits, m, 24),
+                stride_order=(2, 1, 0),
+                assumed_align=16,
+            )
+            sqr_sum = make_fake_compact_tensor(
+                cutlass.Float32,
+                (num_splits, m),
+                stride_order=(1, 0),
+                assumed_align=16,
+            )
+        stream = make_fake_stream(use_tvm_ffi_env_stream=True)
+        self.compiled_kernels[compile_key] = cute.compile(
+            HCPrenormGemm(k, num_splits),
+            a,
+            b,
+            d,
+            sqr_sum,
+            stream,
+            options="--enable-tvm-ffi",
+        )
+
+    def __call__(
+        self,
+        a: torch.Tensor,
+        b: torch.Tensor,
+        d: torch.Tensor,
+        sqr_sum: torch.Tensor,
+        num_splits: int,
+    ) -> None:
+        compile_key = self.dispatch(k=a.shape[1], num_splits=num_splits)
+        self.compile(compile_key)
+        self.compiled_kernels[compile_key](a, b, d, sqr_sum)
 
 
-def warmup_hc_prenorm_gemm(k: int, max_num_batched_tokens: int) -> None:
-    from vllm.model_executor.kernels.mhc.tilelang_kernels import compute_num_split
-    from vllm.utils.math_utils import cdiv
-
-    grid_sizes = range(1, cdiv(max_num_batched_tokens, 64) + 1)
-    num_splits = dict.fromkeys(compute_num_split(64, k, grid) for grid in grid_sizes)
-    for num_split in num_splits:
-        _compile(k, num_split)
+HC_PRENORM_GEMM_KERNEL = HCPrenormGemmKernel()
 
 
 def can_use_hc_prenorm_gemm(a, b, num_splits):
@@ -632,7 +693,7 @@ def can_use_hc_prenorm_gemm(a, b, num_splits):
         and b.ndim == 2
         and b.shape[0] == 24
         and a.shape[1] == b.shape[1]
-        and a.shape[1] in (5120, 7168, 7680, 16384, 28672)
+        and a.shape[1] in SUPPORTED_HC_PRENORM_GEMM_K_VALUES
         and 0 < num_splits <= a.shape[1] // (64 * 4)
     )
 
@@ -651,7 +712,7 @@ def hc_prenorm_gemm(a, b, d, sqr_sum, num_splits):
     )
     assert can_use_hc_prenorm_gemm(a, b, num_splits)
 
-    _compile(a.shape[1], num_splits)(a, b, d, sqr_sum)
+    HC_PRENORM_GEMM_KERNEL(a, b, d, sqr_sum, num_splits)
 
 
 def run_hc_prenorm_gemm(a, b, out, sqr_sum, num_splits):
