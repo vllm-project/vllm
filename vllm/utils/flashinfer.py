@@ -439,11 +439,13 @@ def use_trtllm_attention(
     if force_use_trtllm is not None and not force_use_trtllm:
         return False
 
-    # Decode context parallel is not supported
+    # TRTLLM prefill attends only the DCP-local KV shard and has no
+    # cross-rank LSE combine, so it cannot be used with DCP; fall back to
+    # FlashInfer's DCP prefill path. TRTLLM decode under DCP is selected
+    # separately (all-gathered query heads + LSE combine in forward).
     if dcp_world_size > 1:
         logger.warning_once(
-            "Trtllm does not support returning LSE and as a result "
-            "does not support DCP, reverting to FlashInfer"
+            "TRTLLM prefill does not support DCP, reverting to FlashInfer"
         )
         return False
 
@@ -616,14 +618,16 @@ if has_flashinfer():
     )
     def flashinfer_mxfp4_quantize(
         a: torch.Tensor,
+        backend: str,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         from flashinfer import mxfp4_quantize as _mxfp4_quantize
 
-        return _mxfp4_quantize(a)
+        return _mxfp4_quantize(a, backend=backend)
 
     @torch.library.register_fake("vllm::flashinfer_mxfp4_quantize")
     def flashinfer_mxfp4_quantize_fake(
         a: torch.Tensor,
+        backend: str,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         m, k = a.shape
         sf_vec_size = 32
