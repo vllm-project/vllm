@@ -274,6 +274,7 @@ def _run_qk_norm_rope_kvcache_fusion_test(
         compilation_config=CompilationConfig(
             mode=CompilationMode.VLLM_COMPILE,
             custom_ops=[custom_op],
+            splitting_ops=[],
             pass_config=PassConfig(
                 fuse_qk_norm_rope_kvcache=True,
                 eliminate_noops=True,
@@ -421,8 +422,8 @@ _FUSION_CONFIGS = [
 @pytest.mark.parametrize(
     "kv_stride_order",
     [
-        pytest.param((0, 1, 2, 3, 4), id="block_first"),
-        pytest.param((1, 0, 2, 3, 4), id="kv_first"),
+        pytest.param((0, 1, 2, 3), id="block_first"),
+        pytest.param((1, 0, 2, 3), id="head_first"),
     ],
 )
 @pytest.mark.parametrize("enable_aiter_triton_rope", [True, False])
