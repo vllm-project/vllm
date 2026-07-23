@@ -61,6 +61,8 @@ class InklingModelConfig(PretrainedConfig):
         logits_mup_width_multiplier: float | None = None,
         final_logit_softcapping: float | None = None,
         tie_word_embeddings: bool = False,
+        num_nextn_predict_layers: int = 0,
+        chain_hidden_post_norm: bool = False,
         **kwargs: Any,
     ) -> None:
         if head_dim is None:
@@ -135,6 +137,10 @@ class InklingModelConfig(PretrainedConfig):
         self.unpadded_vocab_size = self.vocab_size
         self.logits_mup_width_multiplier = logits_mup_width_multiplier
         self.final_logit_softcapping = final_logit_softcapping
+        # MTP (multi-token prediction) draft head: number of depth layers in the
+        # checkpoint (0 if absent); chain_norm applied after each depth.
+        self.num_nextn_predict_layers = num_nextn_predict_layers
+        self.chain_hidden_post_norm = chain_hidden_post_norm
 
         super().__init__(tie_word_embeddings=tie_word_embeddings, **kwargs)
 
