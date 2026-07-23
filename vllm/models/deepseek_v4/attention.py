@@ -150,9 +150,7 @@ def compute_dsv4_index_cache_skip_flags(
             skip_flags[layer_id] = pattern[c4_rank] == "S"
     else:
         if index_topk_freq <= 0:
-            raise ValueError(
-                f"index_topk_freq must be positive, got {index_topk_freq}"
-            )
+            raise ValueError(f"index_topk_freq must be positive, got {index_topk_freq}")
         if index_skip_topk_offset < 1:
             raise ValueError(
                 "index_skip_topk_offset must be at least 1, got "
@@ -811,10 +809,8 @@ class DeepseekV4Indexer(nn.Module):
         self.q_lora_rank = q_lora_rank  # 1536
         self.compress_ratio = compress_ratio
         self.use_fp4_kv = self.vllm_config.attention_config.use_fp4_indexer_cache
-        # When skip_top=True this indexer exists only to produce the C4I
-        # KVCacheSpec (via self.k_cache); its GEMM weights and kernel are
-        # never invoked, so they are allocated on the meta device and the
-        # indexer_op handle is skipped.
+        # Skipped indexers still register their KV cache specs, but keep unused
+        # weights on the meta device.
         self.skip_topk = skip_topk
         logger.info_once(
             "Using %s indexer cache for Lightning Indexer.",
@@ -822,13 +818,12 @@ class DeepseekV4Indexer(nn.Module):
         )
 
         # no tensor parallel, just replicated
-        gemm_ctx = torch.device("meta") if self.skip_topk else nullcontext()
-        with gemm_ctx:
+        with torch.device("meta") if self.skip_topk else nullcontext():
             self.wq_b = ReplicatedLinear(
                 self.q_lora_rank,
                 self.head_dim * self.n_head,
                 bias=False,
-                quant_config=quant_config,
+                quant_config=None if self.skip_topk else quant_config,
                 prefix=f"{prefix}.wq_b",
             )
             self.weights_proj = ReplicatedLinear(
@@ -871,22 +866,7 @@ class DeepseekV4Indexer(nn.Module):
             cache_config=cache_config,
             compress_ratio=self.compress_ratio,
         )
-        if self.skip_topk:
-            # Compressor's KV projection is never used on skip layers; build it
-            # on meta to avoid allocating indexer-side GEMM weights
-            with torch.devcie('meta'):
-                self.compressor = DeepseekCompressor(
-                    vllm_config=vllm_config,
-                    compress_ratio=self.compress_ratio,
-                    hidden_size=hidden_size,
-                    head_dim=self.head_dim,
-                    rotate=True,
-                    prefix=f"{prefix}.compressor",
-                    k_cache_prefix=self.k_cache.prefix,
-                    use_fp4_cache=self.use_fp4_kv,
-                )
-            self.indexer_op = None
-        else:
+        with torch.device("meta") if self.skip_topk else nullcontext():
             self.compressor = DeepseekCompressor(
                 vllm_config=vllm_config,
                 compress_ratio=self.compress_ratio,
@@ -898,6 +878,8 @@ class DeepseekV4Indexer(nn.Module):
                 use_fp4_cache=self.use_fp4_kv,
             )
 
+        self.indexer_op: SparseAttnIndexer | None = None
+        if not self.skip_topk:
             self.indexer_op = SparseAttnIndexer(
                 self.k_cache,
                 self.quant_block_size,
@@ -913,11 +895,7 @@ class DeepseekV4Indexer(nn.Module):
 
         # None on ROCm — maybe_execute_in_parallel falls back to sequential.
         self.aux_stream = None if self.skip_topk else aux_stream
-        # ln_events must keep 4 entries (fan-out + 3 aux done) regardless of
-        # skip_topk: execute_in_parallel always slices [0] and [1:4].
         self.ln_events: list[torch.cuda.Event] = [
-            torch.cuda.Event(),
-            torch.cuda.Event(),
             torch.cuda.Event(),
             torch.cuda.Event(),
         ]
@@ -979,4 +957,5 @@ class DeepseekV4Indexer(nn.Module):
             self.ln_events[1],
             self.aux_stream,
         )
+        assert self.indexer_op is not None
         return self.indexer_op(hidden_states, q_quant, k, weights)

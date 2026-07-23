@@ -12,6 +12,7 @@ import vllm.models.deepseek_v4.attention as dsv4_attn_mod
 import vllm.models.deepseek_v4.nvidia.model as dsv4_nvidia_model
 from vllm.models.deepseek_v4.attention import (
     DeepseekV4Attention,
+    DeepseekV4Indexer,
     compute_dsv4_index_cache_skip_flags,
 )
 
@@ -158,7 +159,63 @@ class _TestDeepseekV4Attention(DeepseekV4Attention):
         return o
 
 
-def _make_attention(skip_topk: bool) -> _TestDeepseekV4Attention:
+def test_skip_topk_attention_still_constructs_indexer(monkeypatch):
+    class FakeLayer:
+        def __init__(self, *_args, **kwargs):
+            self.skip_topk = kwargs.get("skip_topk")
+
+    monkeypatch.setattr(
+        dsv4_attn_mod,
+        "get_tensor_model_parallel_world_size",
+        lambda: 1,
+    )
+    for layer_cls in (
+        "MergedColumnParallelLinear",
+        "ColumnParallelLinear",
+        "RowParallelLinear",
+        "RMSNorm",
+        "DeepseekV4Indexer",
+        "DeepseekV4SWACache",
+        "DeepseekCompressor",
+    ):
+        monkeypatch.setattr(dsv4_attn_mod, layer_cls, FakeLayer)
+    monkeypatch.setattr(dsv4_attn_mod, "build_deepseek_v4_rope", FakeLayer)
+    monkeypatch.setattr(torch.cuda, "Event", Mock)
+
+    config = SimpleNamespace(
+        hidden_size=256,
+        num_attention_heads=4,
+        q_lora_rank=64,
+        o_lora_rank=64,
+        head_dim=128,
+        qk_rope_head_dim=64,
+        o_groups=1,
+        sliding_window=128,
+        num_hidden_layers=2,
+        compress_ratios=[128, 4],
+        rms_norm_eps=1e-6,
+        max_position_embeddings=1024,
+    )
+    vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(hf_config=config, max_model_len=1024),
+        quant_config=None,
+        cache_config=SimpleNamespace(cache_dtype="fp8"),
+        scheduler_config=SimpleNamespace(max_num_batched_tokens=1024),
+        compilation_config=SimpleNamespace(static_forward_context={}),
+    )
+
+    attn = _TestDeepseekV4Attention(
+        vllm_config,
+        prefix="model.layers.1.attn",
+        topk_indices_buffer=torch.empty(8, dtype=torch.int32),
+        skip_topk=True,
+    )
+
+    assert attn.indexer is not None
+    assert attn.indexer.skip_topk
+
+
+def _make_attention(skip_topk: bool) -> tuple[_TestDeepseekV4Attention, Mock]:
     attn = object.__new__(_TestDeepseekV4Attention)
     attn.indexer = Mock(name="indexer")
     attn.skip_topk = skip_topk
@@ -169,10 +226,11 @@ def _make_attention(skip_topk: bool) -> _TestDeepseekV4Attention:
     attn.head_dim = 2
     attn.wq_b = Mock(return_value=torch.zeros(1, 2))
     attn._fused_qnorm_rope_kv_insert = Mock(side_effect=lambda q, *_args: q)
-    attn.forward_mqa = Mock()
+    forward_mqa = Mock()
+    object.__setattr__(attn, "forward_mqa", forward_mqa)
     attn.indexer_rotary_emb = object()
     attn.rotary_emb = object()
-    return attn
+    return attn, forward_mqa
 
 
 @pytest.fixture()
@@ -198,7 +256,7 @@ def _patch_attention_helpers(monkeypatch):
 
 
 def test_skip_topk_bypasses_indexer_but_keeps_main_compressor(_patch_attention_helpers):
-    attn = _make_attention(skip_topk=True)
+    attn, forward_mqa = _make_attention(skip_topk=True)
 
     attn.attention_impl(
         torch.zeros(1, 4),
@@ -213,11 +271,11 @@ def test_skip_topk_bypasses_indexer_but_keeps_main_compressor(_patch_attention_h
 
     attn.indexer.assert_not_called()
     attn.compressor.assert_called_once()
-    attn.forward_mqa.assert_called_once()
+    forward_mqa.assert_called_once()
 
 
 def test_full_topk_path_calls_indexer_and_compressor(_patch_attention_helpers):
-    attn = _make_attention(skip_topk=False)
+    attn, forward_mqa = _make_attention(skip_topk=False)
 
     attn.attention_impl(
         torch.zeros(1, 4),
@@ -232,7 +290,65 @@ def test_full_topk_path_calls_indexer_and_compressor(_patch_attention_helpers):
 
     attn.indexer.assert_called_once()
     attn.compressor.assert_called_once()
-    attn.forward_mqa.assert_called_once()
+    forward_mqa.assert_called_once()
+
+
+def test_skip_topk_indexer_keeps_cache_with_meta_weights(monkeypatch):
+    init_devices = []
+    quant_configs = []
+
+    class FakeLinear:
+        def __init__(self, *_args, quant_config=None, **_kwargs):
+            init_devices.append(torch.empty(0).device.type)
+            quant_configs.append(quant_config)
+
+    class FakeIndexerCache:
+        def __init__(self, *_args, prefix, **_kwargs):
+            self.prefix = prefix
+
+    class FakeCompressor:
+        def __init__(self, *_args, **_kwargs):
+            init_devices.append(torch.empty(0).device.type)
+
+    monkeypatch.setattr(dsv4_attn_mod, "ReplicatedLinear", FakeLinear)
+    monkeypatch.setattr(dsv4_attn_mod, "DeepseekV4IndexerCache", FakeIndexerCache)
+    monkeypatch.setattr(dsv4_attn_mod, "DeepseekCompressor", FakeCompressor)
+    monkeypatch.setattr(
+        dsv4_attn_mod,
+        "get_max_prefill_buffer_size",
+        lambda _vllm_config: 1024,
+    )
+    monkeypatch.setattr(torch.cuda, "Event", Mock)
+
+    vllm_config = SimpleNamespace(
+        attention_config=SimpleNamespace(use_fp4_indexer_cache=False),
+        model_config=SimpleNamespace(max_model_len=1024),
+    )
+    config = SimpleNamespace(
+        index_topk=8,
+        index_n_heads=4,
+        index_head_dim=128,
+        qk_rope_head_dim=64,
+    )
+
+    indexer = DeepseekV4Indexer(
+        vllm_config,
+        config=config,
+        hidden_size=256,
+        q_lora_rank=64,
+        quant_config=object(),
+        cache_config=object(),
+        topk_indices_buffer=torch.empty(8, dtype=torch.int32),
+        compress_ratio=4,
+        prefix="model.layers.1.attn.indexer",
+        skip_topk=True,
+    )
+
+    assert indexer.k_cache.prefix.endswith(".k_cache")
+    assert indexer.indexer_op is None
+    assert indexer.aux_stream is None
+    assert init_devices == ["meta", "meta", "meta"]
+    assert quant_configs == [None, None]
 
 
 def test_index_cache_platform_guard_ignores_no_skipped_layers(monkeypatch):
