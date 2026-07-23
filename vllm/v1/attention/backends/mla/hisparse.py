@@ -7,7 +7,7 @@ HiSparse keeps the full-size MLA KV off the GPU and serves decode from a small
 per-request device hot buffer; that is what frees GPU memory for higher decode
 concurrency.
 
-- Full-size KV residency. The V2 runner allocates MLA KV layers in pinned host
+- Full-size KV residency. The V2 KV allocator places MLA layers in pinned host
   memory; only the GPU indexer pool and the
   per-request hot buffers stay on device. Decode-step writes land in the
   reserved hot slot and are scattered back to the host pool by a CUDA kernel
@@ -28,6 +28,7 @@ concurrency.
 from __future__ import annotations
 
 import time
+from contextlib import suppress
 from dataclasses import dataclass
 
 import numpy as np
@@ -114,29 +115,6 @@ class HiSparseConfig:
         )
 
 
-# V2 assigns every live request a stable RequestState row. The model runner
-# publishes the current batch-row -> state-row mapping here before each
-# forward. Kernels use -1 entries to skip CUDA-graph padding rows.
-_REQUEST_STATE_INDICES: dict[tuple[str, int], torch.Tensor] = {}
-
-
-def _device_key(device: torch.device) -> str:
-    if device.index is None and device.type != "cpu":
-        return f"{device.type}:{torch.accelerator.current_device_index()}"
-    return str(device)
-
-
-def get_request_state_indices_tensor(
-    device: torch.device, max_num_reqs: int
-) -> torch.Tensor:
-    key = (_device_key(device), max_num_reqs)
-    tensor = _REQUEST_STATE_INDICES.get(key)
-    if tensor is None:
-        tensor = torch.arange(max_num_reqs, dtype=torch.int32, device=device)
-        _REQUEST_STATE_INDICES[key] = tensor
-    return tensor
-
-
 # Plan-producing coordinators register here for telemetry; index-sharing
 # "shared" layers deregister via join_group (their leader's counter, with
 # stats_row_bytes summed over the group, covers them).
@@ -144,6 +122,8 @@ _STATS: list[HiSparseCoordinator] = []
 _STATS_INTERVAL = 2000
 _stats_calls = 0
 _stats_last = (0, 0, 0)
+_CURRENT_GROUP_LEADER: HiSparseCoordinator | None = None
+_PREFILL_REMAP: tuple | None = None
 
 
 def _maybe_log_hisparse_stats() -> None:
@@ -177,21 +157,6 @@ def _maybe_log_hisparse_stats() -> None:
         d_bytes / 2**30,
         d_misses,
     )
-
-
-def set_request_state_indices(indices: torch.Tensor) -> None:
-    """Publish V2 batch-row -> stable request-state-row indices."""
-    for (device, _), tensor in _REQUEST_STATE_INDICES.items():
-        if _device_key(indices.device) != device:
-            continue
-        if indices.numel() > tensor.numel():
-            raise ValueError(
-                "HiSparse request-state mapping exceeds max_num_seqs: "
-                f"{indices.numel()} > {tensor.numel()}."
-            )
-        tensor.fill_(-1)
-        tensor[: indices.numel()].copy_(indices)
-    _maybe_log_hisparse_stats()
 
 
 # Persistent pinned staging for per-step invalidated-slot uploads. One shared buffer is
@@ -273,7 +238,8 @@ def _covers_registered_host_range(ptr: int, nbytes: int) -> bool:
 
 def release_pinned_state() -> bool:
     """Synchronize, unregister host KV pools, and drop global state."""
-    global _PINNED_STAGING, _PINNED_STAGING_EVENT
+    global _CURRENT_GROUP_LEADER, _PINNED_STAGING, _PINNED_STAGING_EVENT
+    global _PREFILL_REMAP
     released = bool(_PINNED_HOST_POOLS or _PINNED_STAGING is not None)
     if _PINNED_HOST_POOLS:
         try:
@@ -320,9 +286,12 @@ def release_pinned_state() -> bool:
                 coordinator._host_cache = None
                 released = True
     _STATS.clear()
-    _REQUEST_STATE_INDICES.clear()
     _GROUP_PLANS.clear()
     _COPY_STREAMS.clear()
+    _CURRENT_GROUP_LEADER = None
+    _PREFILL_REMAP = None
+    with suppress(RuntimeError):
+        torch._C._host_emptyCache()
     return released
 
 
@@ -349,8 +318,8 @@ def _pinned_to_device(values: list[int], device: torch.device) -> torch.Tensor:
 def invalidate_blocks(block_ids: list[int], block_size: int) -> None:
     """Drop cached HiSparse state for the given blocks in every layer.
 
-    Called by the V2 integration when blocks are (re)assigned to newly scheduled
-    or preemption-resumed requests, before any forward step can select them.
+    Called from the KV connector lifecycle when blocks are (re)assigned to newly
+    scheduled or preemption-resumed requests, before a forward can select them.
     This makes block recycling safe for any writer (local prefill, connector
     RDMA into host memory) without per-connector reporting hooks.
     """
@@ -366,6 +335,19 @@ def invalidate_blocks(block_ids: list[int], block_size: int) -> None:
             )
             slots = (blocks[:, None] * block_size + offsets[None, :]).flatten()
         coordinator.invalidate_slots(slots)
+
+
+def hisparse_prefill_staging_remap(
+    block_table: torch.Tensor, block_size: int
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Renumber a block table against its unique referenced blocks."""
+    unique_ids, inverse = torch.unique(block_table.clamp(min=0), return_inverse=True)
+    new_bt = inverse.to(torch.int32)
+    row_ids = (
+        unique_ids.to(torch.int32).unsqueeze(1) * block_size
+        + torch.arange(block_size, dtype=torch.int32, device=block_table.device)
+    ).view(1, -1)
+    return new_bt, row_ids
 
 
 def _has_hisparse_ops() -> bool:
@@ -447,7 +429,7 @@ class HiSparseCoordinator:
     The pinned host-resident KV pool is the only full-size store; misses are
     always served from it. Hot-buffer hits are keyed by global KV slot id, so
     correctness relies on one invariant: a recycled slot's stale state is
-    dropped before reuse — the V2 runner invalidates all blocks
+    dropped before reuse — the KV connector invalidates all blocks
     (re)assigned to incoming requests (covering connector RDMA loads of any
     kind) before any step can select them.
     """
@@ -472,9 +454,8 @@ class HiSparseCoordinator:
         self.row_width = row_width
         self.kv_dtype = kv_dtype
         self.device = torch.device(device)
-        # One reserved slot for the newest token; the FlashMLA FP8 sparse
-        # kernel needs a paged layout and the actual block size is only known
-        # at swap-in time, hence the alignment padding.
+        # One reserved slot for the newest token. Sparse MLA kernels consume a
+        # paged layout, and the page size is only known at swap-in time.
         self.region_stride = round_up(config.device_buffer_size + 1, HOT_REGION_ALIGN)
 
         row_bytes = row_width * kv_dtype.itemsize
@@ -505,11 +486,8 @@ class HiSparseCoordinator:
         self.lru_slots: torch.Tensor | None = lru_init.repeat(
             max_num_reqs, 1
         ).contiguous()
-        self.request_state_indices = get_request_state_indices_tensor(
-            self.device, max_num_reqs
-        )
-        self.request_state_indices.copy_(
-            torch.arange(max_num_reqs, dtype=torch.int32, device=self.device)
+        self.request_state_indices = torch.arange(
+            max_num_reqs, dtype=torch.int32, device=self.device
         )
 
         # In-kernel hit/miss counters (telemetry). stats_row_bytes converts
@@ -541,6 +519,21 @@ class HiSparseCoordinator:
         # cross-stream wait raises "dependency created on uncaptured work in
         # another stream" and aborts capture. The per-step backup is only the
         # batch's newest rows, so there is no overlap worth reclaiming.
+
+    def set_request_state_indices(self, indices: torch.Tensor) -> None:
+        if indices.numel() > self.max_num_reqs:
+            raise ValueError(
+                "HiSparse request-state mapping exceeds max_num_seqs: "
+                f"{indices.numel()} > {self.max_num_reqs}."
+            )
+        self.request_state_indices = indices
+
+    def join_indexer_group(self, has_indexer: bool) -> None:
+        global _CURRENT_GROUP_LEADER
+        if has_indexer:
+            _CURRENT_GROUP_LEADER = self
+        elif _CURRENT_GROUP_LEADER is not None:
+            self.join_group(_CURRENT_GROUP_LEADER)
 
     def join_group(self, leader: HiSparseCoordinator) -> None:
         """Attach to an index-sharing group as a "shared" layer.
@@ -593,6 +586,51 @@ class HiSparseCoordinator:
             raise ValueError("HiSparse host-resident KV pool must be pinned memory.")
 
         self._host_cache = flat
+
+    def stage_prefill_cache(
+        self,
+        kv_cache: torch.Tensor,
+        block_table: torch.Tensor,
+        seq_lens: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Gather referenced host context blocks into a compact GPU cache."""
+        global _PREFILL_REMAP
+        device = block_table.device
+        block_size = kv_cache.shape[1]
+        row_width = kv_cache.shape[-1]
+        key = (block_table.data_ptr(), block_table.shape, block_table._version)
+        cached = _PREFILL_REMAP
+        if cached is not None and cached[0] == key:
+            _, new_bt, row_ids, dst_rows, miss_mask = cached
+        else:
+            used = (seq_lens.to(torch.int64) + block_size - 1) // block_size
+            bounded = torch.where(
+                torch.arange(block_table.shape[1], device=device)[None, :]
+                < used[:, None],
+                block_table,
+                0,
+            )
+            new_bt, row_ids = hisparse_prefill_staging_remap(bounded, block_size)
+            dst_rows = torch.arange(
+                row_ids.shape[1], dtype=torch.int32, device=device
+            ).view(1, -1)
+            miss_mask = torch.ones_like(row_ids)
+            _PREFILL_REMAP = (key, new_bt, row_ids, dst_rows, miss_mask)
+
+        staged = torch.empty(
+            (row_ids.shape[1] // block_size, block_size, row_width),
+            dtype=kv_cache.dtype,
+            device=device,
+        )
+        torch.ops._C_cache_ops.hisparse_gather_plan(
+            kv_cache.view(-1, row_width),
+            staged.view(-1, row_width),
+            row_ids,
+            dst_rows,
+            miss_mask,
+            None,
+        )
+        return staged, new_bt
         self.reset_hot_state()
 
     def reset_hot_state(self) -> None:
@@ -691,7 +729,7 @@ class HiSparseCoordinator:
             global_slots,
         )
         # Recycled-slot hygiene is handled at block-assignment time: the
-        # V2 integration invalidates every block (re)assigned to any request
+        # The KV connector invalidates every block (re)assigned to any request
         # (new, resumed, or growing) before the step that first writes it,
         # so no per-step in-graph invalidation is needed here.
 
@@ -710,7 +748,7 @@ class HiSparseCoordinator:
         resume, recompute after a failed KV load): quantize the rows on GPU,
         then scatter them to their global host slots via the backup kernel.
         Recycled-slot hygiene is handled at block-assignment time by the
-        V2 integration, so no hot-copy invalidation is needed here.
+        KV connector lifecycle, so no hot-copy invalidation is needed here.
         """
         from vllm import _custom_ops as ops
 

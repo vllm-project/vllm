@@ -223,14 +223,23 @@ class FlashAttnMLASparseImpl(SparseMLACommonImpl[FlashAttnMLASparseMetadata]):
 
         assert self.topk_indices_buffer is not None
         topk_indices = self.topk_indices_buffer[:num_actual_toks]
-        topk_indices, valid_counts = triton_convert_req_index_to_global_index(
-            attn_metadata.req_id_per_token[:num_actual_toks],
-            attn_metadata.block_table,
+        hisparse_cache = self._hisparse_decode_cache(
+            kv_c_and_k_pe_cache,
             topk_indices,
-            BLOCK_SIZE=attn_metadata.block_size,
-            NUM_TOPK_TOKENS=topk_indices.shape[1],
+            attn_metadata,
             return_valid_counts=True,
         )
+        if hisparse_cache is not None:
+            kv_c_and_k_pe_cache, topk_indices, valid_counts = hisparse_cache
+        else:
+            topk_indices, valid_counts = triton_convert_req_index_to_global_index(
+                attn_metadata.req_id_per_token[:num_actual_toks],
+                attn_metadata.block_table,
+                topk_indices,
+                BLOCK_SIZE=attn_metadata.block_size,
+                NUM_TOPK_TOKENS=topk_indices.shape[1],
+                return_valid_counts=True,
+            )
 
         cu_seqlens_q = torch.arange(
             0, num_actual_toks + 1, dtype=torch.int32, device=q_rope.device

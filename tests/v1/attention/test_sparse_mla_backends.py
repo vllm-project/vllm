@@ -51,7 +51,6 @@ from vllm.v1.attention.backends.mla.hisparse import (
     _has_hisparse_ops,
     create_hisparse_coordinator,
     is_hisparse_decode_batch,
-    set_request_state_indices,
 )
 from vllm.v1.attention.backends.mla.indexer import split_indexer_prefill_chunks
 from vllm.v1.attention.backends.utils import (
@@ -441,7 +440,6 @@ def test_sparse_backend_decode_correctness(
         device,
         arange_block_indices=True,
     )
-
     kv_cache = create_and_prepopulate_kv_cache(
         kv_c_contexts=kv_c_contexts,
         k_pe_contexts=k_pe_contexts,
@@ -1479,7 +1477,9 @@ def test_hisparse_swap_in_semantics():
     buf = coordinator.config.device_buffer_size
     stride = coordinator.region_stride
     # V2 batch row 0 belongs to stable RequestState row 1.
-    set_request_state_indices(torch.tensor([1], dtype=torch.int32, device=device))
+    coordinator.set_request_state_indices(
+        torch.tensor([1], dtype=torch.int32, device=device)
+    )
 
     # One request at row 0 with 3 blocks; sequence length 9 so position 8
     # (global slot block_table[0,2]*4 + 0 = 16) is the newest token.
@@ -1942,7 +1942,7 @@ def test_hisparse_mixed_batch_bf16_row_split(
     if not ok:
         pytest.skip(reason)
 
-    from vllm.v1.attention.backends.mla import flashmla_sparse as _fms
+    from vllm.v1.attention.backends.mla import hisparse as _hisparse
 
     device = torch.device(DEVICE_TYPE)
     dtype = torch.bfloat16
@@ -2007,6 +2007,9 @@ def test_hisparse_mixed_batch_bf16_row_split(
         vllm_config.cache_config.block_size,
         device,
         arange_block_indices=True,
+    )
+    common_attn_metadata.request_state_indices = torch.arange(
+        batch_spec.batch_size, dtype=torch.int32, device=device
     )
 
     # Prepopulate every position of every sequence so the forward needs no
@@ -2109,7 +2112,7 @@ def test_hisparse_mixed_batch_bf16_row_split(
     # Host-resident pool with identical contents.
     kv_pool = kv_cache.cpu().pin_memory()
 
-    _fms._HISPARSE_PREFILL_REMAP = None
+    _hisparse._PREFILL_REMAP = None
     staging_calls = []
     original_stage = impl._hisparse_host_prefill_cache
 
@@ -2142,7 +2145,7 @@ def test_hisparse_mixed_batch_bf16_row_split(
 
 def test_hisparse_prefill_staging_remap():
     """Compacted staging references the same host rows as direct indexing."""
-    from vllm.v1.attention.backends.mla.flashmla_sparse import (
+    from vllm.v1.attention.backends.mla.hisparse import (
         hisparse_prefill_staging_remap,
     )
 

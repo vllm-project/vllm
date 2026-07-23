@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from vllm.distributed.kv_transfer.kv_connector.v1.example_connector import (  # noqa: E501
@@ -13,10 +14,29 @@ from vllm.distributed.kv_transfer.kv_transfer_state import (
 )
 from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.worker.gpu.kv_connector import KVConnector
 from vllm.v1.worker.kv_connector_model_runner_mixin import KVConnectorModelRunnerMixin
 
 # Importing utils registers TestExampleConnector with the factory
 from .utils import create_vllm_config
+
+
+def test_hisparse_connector_invalidates_new_blocks_before_forward():
+    connector = KVConnector(hisparse_block_size=64)
+    scheduler_output = SimpleNamespace(
+        scheduled_new_reqs=[SimpleNamespace(block_ids=([2, 3],))],
+        scheduled_cached_reqs=SimpleNamespace(new_block_ids=[([4],), None]),
+    )
+
+    with (
+        patch(
+            "vllm.v1.attention.backends.mla.hisparse.invalidate_blocks"
+        ) as invalidate,
+        patch("vllm.v1.attention.backends.mla.hisparse._maybe_log_hisparse_stats"),
+    ):
+        connector.pre_forward(scheduler_output)
+
+    invalidate.assert_called_once_with([2, 3, 4], 64)
 
 
 def _make_empty_scheduler_output():

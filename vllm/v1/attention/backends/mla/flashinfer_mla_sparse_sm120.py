@@ -6,11 +6,10 @@ from typing import TYPE_CHECKING, cast
 
 import torch
 
-from vllm.v1.attention.backend import (
-    AttentionLayer,
-    AttentionType,
-    MLAAttentionImpl,
+from vllm.model_executor.layers.attention.sparse_mla_attention import (
+    SparseMLACommonImpl,
 )
+from vllm.v1.attention.backend import AttentionLayer, AttentionType
 from vllm.v1.attention.backends.mla.flashinfer_mla_sparse import (
     FlashInferMLASparseMetadata,
     _get_workspace_buffer,
@@ -29,7 +28,7 @@ def _kv_scale_format_for_model(model_type: str | None) -> str:
     return "pow2_fp32"
 
 
-class FlashInferMLASparseSM120Impl(MLAAttentionImpl[FlashInferMLASparseMetadata]):
+class FlashInferMLASparseSM120Impl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
     """SM120 FlashInfer sparse-MLA implementation."""
 
     is_sparse = True
@@ -59,20 +58,28 @@ class FlashInferMLASparseSM120Impl(MLAAttentionImpl[FlashInferMLASparseMetadata]
                 "FLASHINFER_MLA_SPARSE_SM120 only supports decoder self-attention"
             )
 
-        self.num_heads = num_heads
-        self.head_size = head_size
-        self.scale = float(scale)
-        self.num_kv_heads = num_kv_heads
-        self.kv_cache_dtype = kv_cache_dtype
-        if self.kv_cache_dtype != "fp8_ds_mla":
+        if kv_cache_dtype != "fp8_ds_mla":
             raise NotImplementedError(
                 "FLASHINFER_MLA_SPARSE_SM120 requires the packed fp8_ds_mla "
                 f"KV cache layout; got kv_cache_dtype={kv_cache_dtype!r}."
             )
 
-        self.kv_lora_rank: int = mla_args["kv_lora_rank"]
-        self.qk_nope_head_dim: int = mla_args["qk_nope_head_dim"]
-        self.qk_rope_head_dim: int = mla_args["qk_rope_head_dim"]
+        topk_indices_buffer = mla_args.pop("topk_indices_buffer", None)
+        super().__init__(
+            num_heads,
+            head_size,
+            scale,
+            num_kv_heads,
+            alibi_slopes,
+            sliding_window,
+            kv_cache_dtype,
+            logits_soft_cap,
+            attn_type,
+            kv_sharing_target_layer_name,
+            indexer=indexer,
+            topk_indices_buffer=topk_indices_buffer,
+            **mla_args,
+        )
         from vllm.config import get_current_vllm_config
 
         vllm_config = get_current_vllm_config()
@@ -83,13 +90,6 @@ class FlashInferMLASparseSM120Impl(MLAAttentionImpl[FlashInferMLASparseMetadata]
             )
         self.kv_scale_format = _kv_scale_format_for_model(model_type)
 
-        # Skip-topk layers are built with indexer=None and get the shared
-        # buffer via mla_args instead (cf. FLASHMLA_SPARSE).
-        self.topk_indices_buffer: torch.Tensor | None = (
-            indexer.topk_indices_buffer
-            if indexer is not None
-            else mla_args.get("topk_indices_buffer")
-        )
         from vllm.utils.flashinfer import has_flashinfer_sparse_mla_sm120
 
         if not has_flashinfer_sparse_mla_sm120():
@@ -117,16 +117,22 @@ class FlashInferMLASparseSM120Impl(MLAAttentionImpl[FlashInferMLASparseMetadata]
         assert self.topk_indices_buffer is not None
         topk_indices = self.topk_indices_buffer[:num_actual_toks]
 
-        topk_indices_physical = cast(
-            torch.Tensor,
-            triton_convert_req_index_to_global_index(
-                attn_metadata.req_id_per_token[:num_actual_toks],
-                attn_metadata.block_table,
-                topk_indices,
-                BLOCK_SIZE=attn_metadata.block_size,
-                NUM_TOPK_TOKENS=topk_indices.shape[1],
-            ),
+        hisparse_cache = self._hisparse_decode_cache(
+            kv_c_and_k_pe_cache, topk_indices, attn_metadata
         )
+        if hisparse_cache is not None:
+            kv_c_and_k_pe_cache, topk_indices_physical = hisparse_cache
+        else:
+            topk_indices_physical = cast(
+                torch.Tensor,
+                triton_convert_req_index_to_global_index(
+                    attn_metadata.req_id_per_token[:num_actual_toks],
+                    attn_metadata.block_table,
+                    topk_indices,
+                    BLOCK_SIZE=attn_metadata.block_size,
+                    NUM_TOPK_TOKENS=topk_indices.shape[1],
+                ),
+            )
 
         output = q.new_empty(
             (num_actual_toks, self.num_heads, self.kv_lora_rank),

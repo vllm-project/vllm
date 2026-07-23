@@ -24,13 +24,34 @@ from vllm.v1.outputs import (
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
+    from vllm.v1.kv_cache_interface import KVCacheConfig
 
 
 class KVConnector:
     """KVConnector interface used by GPUModelRunner."""
 
+    def __init__(self, hisparse_block_size: int | None = None) -> None:
+        self.hisparse_block_size = hisparse_block_size
+
     def pre_forward(self, scheduler_output: "SchedulerOutput") -> None:
-        pass
+        if self.hisparse_block_size is None:
+            return
+        block_ids = [
+            block_id
+            for request in scheduler_output.scheduled_new_reqs
+            for block_id in request.block_ids[0]
+        ]
+        for new_block_ids in scheduler_output.scheduled_cached_reqs.new_block_ids:
+            if new_block_ids is not None:
+                block_ids.extend(new_block_ids[0])
+
+        from vllm.v1.attention.backends.mla.hisparse import (
+            _maybe_log_hisparse_stats,
+            invalidate_blocks,
+        )
+
+        _maybe_log_hisparse_stats()
+        invalidate_blocks(block_ids, self.hisparse_block_size)
 
     def post_forward(
         self, finished_req_ids: set[str], wait_for_save: bool = True
@@ -38,16 +59,28 @@ class KVConnector:
         return None
 
     def no_forward(self, scheduler_output: "SchedulerOutput") -> ModelRunnerOutput:
+        self.pre_forward(scheduler_output)
         return EMPTY_MODEL_RUNNER_OUTPUT
 
     def set_disabled(self, disabled: bool) -> None:
         pass
 
+    def shutdown(self) -> None:
+        if self.hisparse_block_size is None:
+            return
+        from vllm.v1.attention.backends.mla.hisparse import release_pinned_state
+
+        release_pinned_state()
+
 
 class ActiveKVConnector(KVConnector):
     def __init__(
-        self, vllm_config: VllmConfig, kv_caches_dict: dict[str, torch.Tensor]
+        self,
+        vllm_config: VllmConfig,
+        kv_caches_dict: dict[str, torch.Tensor],
+        hisparse_block_size: int | None = None,
     ):
+        super().__init__(hisparse_block_size)
         self.vllm_config = vllm_config
         self.kv_connector = get_kv_transfer_group()
         # Register kv caches with KV Connector if applicable.
@@ -59,6 +92,7 @@ class ActiveKVConnector(KVConnector):
         self._disabled = False
 
     def pre_forward(self, scheduler_output: "SchedulerOutput") -> None:
+        super().pre_forward(scheduler_output)
         if self._disabled:
             return
 
@@ -114,10 +148,17 @@ NO_OP_KV_CONNECTOR = KVConnector()
 
 
 def get_kv_connector(
-    vllm_config: VllmConfig, kv_caches_dict: dict[str, torch.Tensor]
+    vllm_config: VllmConfig,
+    kv_caches_dict: dict[str, torch.Tensor],
+    kv_cache_config: "KVCacheConfig",
 ) -> KVConnector:
-    if not has_kv_transfer_group():
-        # No-op connector.
-        return NO_OP_KV_CONNECTOR
-
-    return ActiveKVConnector(vllm_config, kv_caches_dict)
+    hisparse_block_size = (
+        kv_cache_config.kv_cache_groups[0].kv_cache_spec.block_size
+        if vllm_config.attention_config.hisparse_config is not None
+        else None
+    )
+    if has_kv_transfer_group():
+        return ActiveKVConnector(vllm_config, kv_caches_dict, hisparse_block_size)
+    if hisparse_block_size is not None:
+        return KVConnector(hisparse_block_size)
+    return NO_OP_KV_CONNECTOR

@@ -17,10 +17,7 @@ from vllm.model_executor.layers.attention.sparse_mla_attention import (
 from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
 from vllm.utils.platform_utils import num_compute_units
-from vllm.utils.torch_utils import (
-    is_quantized_kv_cache,
-    kv_cache_dtype_str_to_dtype,
-)
+from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -28,12 +25,6 @@ from vllm.v1.attention.backend import (
     AttentionMetadata,
     CommonAttentionMetadata,
     MultipleOf,
-)
-from vllm.v1.attention.backends.mla.hisparse import (
-    FP8_DS_MLA_ROW_BYTES,
-    HiSparseCoordinator,
-    create_hisparse_coordinator,
-    is_hisparse_decode_batch,
 )
 from vllm.v1.attention.backends.mla.sparse_utils import (
     triton_convert_req_index_to_global_index,
@@ -56,40 +47,6 @@ if TYPE_CHECKING:
     from vllm.model_executor.models.deepseek_v2 import Indexer
 
 logger = init_logger(__name__)
-
-# Overlap group wiring: the coordinator of the most-recently-constructed
-# "full" layer, so the shared layers that follow can attach to it. Per-process
-# (one model per vLLM process); reset implicitly as each full layer is built.
-_HISPARSE_CURRENT_LEADER = None
-
-# Layer-invariant local-prefill staging remap shared by every layer in the
-# forward: single slot keyed by (data_ptr, shape, _version) of the block
-# table, so layers 2..N of a step hit and any in-place table mutation (which
-# bumps _version) invalidates. Local prefill never runs under graph capture,
-# so table contents always change through version-bumping host-side writes.
-_HISPARSE_PREFILL_REMAP: tuple | None = None
-
-
-def hisparse_prefill_staging_remap(
-    block_table: torch.Tensor, block_size: int
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Compact a block table onto its unique referenced blocks.
-
-    Returns ``(new_bt, row_ids)``: ``new_bt`` renumbers the table against a
-    staged copy holding only the unique blocks, and ``row_ids`` is the
-    ``[1, n_unique * block_size]`` int32 host-pool row ids to stage, in
-    staged order. Callers bound the table to each row's used blocks first;
-    out-of-range entries map to block 0, which consumers never read past
-    ``seq_len`` (``clamp(min=0)`` covers synthetic tables with ``-1``
-    padding).
-    """
-    unique_ids, inverse = torch.unique(block_table.clamp(min=0), return_inverse=True)
-    new_bt = inverse.to(torch.int32)
-    row_ids = (
-        unique_ids.to(torch.int32).unsqueeze(1) * block_size
-        + torch.arange(block_size, dtype=torch.int32, device=block_table.device)
-    ).view(1, -1)
-    return new_bt, row_ids
 
 
 # For FP8 sparse attention we have two implementations:
@@ -625,42 +582,6 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
             **mla_args,
         )
         self.softmax_scale = scale
-        self.hisparse_coordinator: HiSparseCoordinator | None = None
-        attention_config = get_current_vllm_config().attention_config
-        if attention_config.hisparse_config is not None:
-            if kv_cache_dtype == "fp8_ds_mla":
-                hisparse_row_width = FP8_DS_MLA_ROW_BYTES
-                hisparse_kv_dtype = torch.uint8
-            else:
-                hisparse_row_width = head_size
-                hisparse_kv_dtype = kv_cache_dtype_str_to_dtype(
-                    kv_cache_dtype, get_current_vllm_config().model_config
-                )
-            model_top_k = (
-                indexer.topk_tokens
-                if indexer is not None
-                else get_current_vllm_config().model_config.hf_config.index_topk
-            )
-            coordinator = create_hisparse_coordinator(
-                get_current_vllm_config(),
-                model_top_k,
-                row_width=hisparse_row_width,
-                kv_dtype=hisparse_kv_dtype,
-            )
-            assert coordinator is not None
-            self.hisparse_coordinator = coordinator
-            # Index sharing (GLM-5.2): a layer with an indexer is a "full"
-            # layer and leads a group; the indexer-less "shared" layers that
-            # follow (until the next full layer) replay its plan. For models
-            # without index sharing every layer has an indexer, so all groups
-            # stay empty and no plan is produced.
-            global _HISPARSE_CURRENT_LEADER
-            if indexer is not None:
-                _HISPARSE_CURRENT_LEADER = coordinator
-            elif _HISPARSE_CURRENT_LEADER is not None:
-                coordinator.join_group(_HISPARSE_CURRENT_LEADER)
-        self._hisparse_decode_batch = False
-        self._hisparse_dummy_batch = False
         # Prefill BF16 kernel requires 64 on Hopper, 128 on Blackwell
         self.prefill_padding = (
             128 if current_platform.is_device_capability_family(100) else 64
@@ -693,199 +614,6 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
             (self.q_concat_buffer,) = current_workspace_manager().get_simultaneous(
                 (q_concat_shape, torch.bfloat16),
             )
-
-    def prepare_hisparse_for_batch(
-        self,
-        attn_metadata: FlashMLASparseMetadata | None,
-    ) -> None:
-        # Dummy runs (memory profiling, warmup) carry no attention metadata
-        # but still execute the KV-cache-update op with an all -1 slot
-        # mapping; do_kv_cache_update must no-op for them.
-        self._hisparse_dummy_batch = attn_metadata is None
-        if attn_metadata is None:
-            self._hisparse_decode_batch = False
-            return
-        self._hisparse_decode_batch = (
-            self.hisparse_coordinator is not None
-            and is_hisparse_decode_batch(
-                max_query_len=attn_metadata.max_query_len,
-                num_reqs=attn_metadata.num_reqs,
-                num_actual_tokens=attn_metadata.num_actual_tokens,
-            )
-        )
-
-    def _hisparse_swap_in(
-        self,
-        kv_c_and_k_pe_cache: torch.Tensor,
-        topk_indices: torch.Tensor,
-        attn_metadata: FlashMLASparseMetadata,
-        num_decode_tokens: int | None = None,
-        return_valid_counts: bool = False,
-    ):
-        assert self.hisparse_coordinator is not None
-        pure_decode = num_decode_tokens is None
-        n = topk_indices.shape[0] if num_decode_tokens is None else num_decode_tokens
-        # The swap-in kernel maps token row i to hot region / dgi row i, so
-        # decode rows must be 1:1 with requests. Holds today because HiSparse
-        # rejects speculative decoding at config init; guard the mixed path
-        # against a future relaxation silently corrupting hot-buffer state.
-        assert pure_decode or num_decode_tokens == attn_metadata.num_decodes, (
-            f"HiSparse mixed batch requires 1 token per decode request, got "
-            f"{num_decode_tokens} tokens for {attn_metadata.num_decodes} "
-            f"decode requests."
-        )
-        # Index-sharing "shared" layer: replay the leader's plan (produced by
-        # its swap_in earlier this pass) instead of re-resolving the LRU.
-        if self.hisparse_coordinator.leader is not None:
-            return self.hisparse_coordinator.apply_plan(
-                kv_cache=kv_c_and_k_pe_cache,
-                block_size=attn_metadata.block_size,
-                num_tokens=n,
-                return_valid_counts=return_valid_counts,
-            )
-        return self.hisparse_coordinator.swap_in(
-            kv_cache=kv_c_and_k_pe_cache,
-            req_id_per_token=attn_metadata.req_id_per_token[:n],
-            block_table=attn_metadata.block_table,
-            topk_indices=topk_indices[:n],
-            block_size=attn_metadata.block_size,
-            slot_mapping=attn_metadata.slot_mapping if pure_decode else None,
-            return_valid_counts=return_valid_counts,
-            produce_plan=bool(self.hisparse_coordinator.group_shared),
-        )
-
-    def _hisparse_host_prefill_cache(
-        self,
-        kv_c_and_k_pe_cache: torch.Tensor,
-        block_table: torch.Tensor,
-        seq_lens: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Stage the referenced context blocks from the host pool onto GPU.
-
-        Local prefill on a host-resident instance: sparse prefill attention
-        needs the context on GPU, so gather the unique blocks each row
-        actually uses (per ``seq_lens``; tail columns hold stale ids from
-        previous row occupants) host->GPU and renumber the table against the
-        staged copy. The backup kernel is stream-ordered, so freshly written
-        host rows are visible. The gather reads the pinned pool directly on
-        the GPU (hisparse_gather_plan) instead of CPU-indexing the whole
-        padded table, and the index remap — identical for every layer — is
-        cached per (block table identity, mutation version).
-        """
-        global _HISPARSE_PREFILL_REMAP
-        device = block_table.device
-        block_size = kv_c_and_k_pe_cache.shape[1]
-        row_width = kv_c_and_k_pe_cache.shape[-1]
-        key = (block_table.data_ptr(), block_table.shape, block_table._version)
-        cached = _HISPARSE_PREFILL_REMAP
-        if cached is not None and cached[0] == key:
-            _, new_bt, row_ids, dst_rows, miss_mask = cached
-        else:
-            used = (seq_lens.to(torch.int64) + block_size - 1) // block_size
-            bounded = torch.where(
-                torch.arange(block_table.shape[1], device=device)[None, :]
-                < used[:, None],
-                block_table,
-                0,
-            )
-            new_bt, row_ids = hisparse_prefill_staging_remap(bounded, block_size)
-            dst_rows = torch.arange(
-                row_ids.shape[1], dtype=torch.int32, device=device
-            ).view(1, -1)
-            miss_mask = torch.ones_like(row_ids)
-            _HISPARSE_PREFILL_REMAP = (key, new_bt, row_ids, dst_rows, miss_mask)
-
-        staged = torch.empty(
-            (row_ids.shape[1] // block_size, block_size, row_width),
-            dtype=kv_c_and_k_pe_cache.dtype,
-            device=device,
-        )
-        staged_2d = staged.view(-1, row_width)
-        torch.ops._C_cache_ops.hisparse_gather_plan(
-            kv_c_and_k_pe_cache.view(-1, row_width),
-            staged_2d,
-            row_ids,
-            dst_rows,
-            miss_mask,
-            None,
-        )
-        return staged, new_bt
-
-    def _hisparse_stage_prefill_rows(
-        self,
-        kv_c_and_k_pe_cache: torch.Tensor,
-        attn_metadata: FlashMLASparseMetadata,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Stage only the prefill rows' context from the host pool.
-
-        Decode requests occupy block-table rows [0, num_decodes) and the
-        first num_decode_tokens tokens; they are served from the hot buffer
-        (``_hisparse_swap_in``), never staged — staging them would gather
-        each decode row's whole context host->GPU on every layer.
-
-        Returns ``(staged_cache, staged_block_table, prefill_req_ids)`` for
-        the prefill segment; ``prefill_req_ids`` are rebased onto the sliced
-        table (row i is request num_decodes + i).
-        """
-        num_decodes = attn_metadata.num_decodes
-        num_decode_tokens = attn_metadata.num_decode_tokens
-        assert attn_metadata.seq_lens is not None
-        staged_cache, staged_bt = self._hisparse_host_prefill_cache(
-            kv_c_and_k_pe_cache,
-            attn_metadata.block_table[num_decodes:],
-            attn_metadata.seq_lens[num_decodes:],
-        )
-        prefill_req_ids = attn_metadata.req_id_per_token[num_decode_tokens:]
-        if num_decodes > 0:
-            prefill_req_ids = prefill_req_ids - num_decodes
-        return staged_cache, staged_bt, prefill_req_ids
-
-    def do_kv_cache_update(
-        self,
-        kv_c_normed: torch.Tensor,
-        k_pe: torch.Tensor,
-        kv_cache: torch.Tensor,
-        slot_mapping: torch.Tensor,
-        kv_cache_dtype: str,
-        k_scale: torch.Tensor,
-    ) -> None:
-        if self.hisparse_coordinator is None:
-            return super().do_kv_cache_update(
-                kv_c_normed,
-                k_pe,
-                kv_cache,
-                slot_mapping,
-                kv_cache_dtype,
-                k_scale,
-            )
-
-        if self._hisparse_dummy_batch:
-            # Dummy run: nothing to write (slot mapping is all -1).
-            return
-
-        if not self._hisparse_decode_batch:
-            # Local prefill on this instance (router shortcut for short
-            # suffixes, preemption resume, recompute after a failed KV
-            # load): write the rows straight to the host pool. Slower than
-            # PD prefill; correct either way.
-            self.hisparse_coordinator.write_rows_to_host(
-                kv_c_normed,
-                k_pe,
-                kv_cache,
-                slot_mapping,
-                kv_cache_dtype,
-                k_scale,
-            )
-            return
-
-        self.hisparse_coordinator.write_newest_rows(
-            kv_c_normed,
-            k_pe,
-            kv_cache,
-            slot_mapping,
-            kv_cache_dtype,
-            k_scale,
-        )
 
     def _forward_bf16_kv(
         self,

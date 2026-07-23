@@ -3,11 +3,12 @@
 """Shared forward_mha implementation and metadata builder for sparse MLA backends."""
 
 from shutil import which
-from typing import TYPE_CHECKING, ClassVar, Generic, TypeVar
+from typing import TYPE_CHECKING, Any, ClassVar, Generic, TypeVar
 
 import numpy as np
 import torch
 
+from vllm.config import get_current_vllm_config
 from vllm.distributed import get_dcp_group
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention.mla_attention import (
@@ -18,10 +19,19 @@ from vllm.model_executor.layers.attention.mla_attention import (
 )
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer
-from vllm.utils.torch_utils import np_to_pinned_tensor
+from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype, np_to_pinned_tensor
 from vllm.v1.attention.backend import (
     AttentionMetadata,
     AttentionMetadataBuilder,
+)
+from vllm.v1.attention.backends.mla.hisparse import (
+    FP8_DS_MLA_ROW_BYTES,
+    HiSparseCoordinator,
+    create_hisparse_coordinator,
+    is_hisparse_decode_batch,
+)
+from vllm.v1.attention.backends.mla.sparse_utils import (
+    triton_convert_req_index_to_global_index,
 )
 from vllm.v1.attention.backends.utils import split_decodes_and_prefills
 
@@ -57,6 +67,15 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
             (vllm_config.scheduler_config.max_num_batched_tokens,),
             dtype=torch.int32,
             device=device,
+        )
+        self.request_state_indices = (
+            torch.empty(
+                vllm_config.scheduler_config.max_num_seqs,
+                dtype=torch.int32,
+                device=device,
+            )
+            if vllm_config.attention_config.hisparse_config is not None
+            else None
         )
         parallel_config = vllm_config.parallel_config
         self.use_pcp = parallel_config.prefill_context_parallel_size > 1
@@ -206,7 +225,7 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
             )
             self._prefill_backend.prepare_metadata(prefill)
 
-        return self.metadata_cls(  # type: ignore[call-arg]
+        metadata = self.metadata_cls(  # type: ignore[call-arg]
             num_reqs=common_attn_metadata.num_reqs,
             max_query_len=common_attn_metadata.max_query_len,
             max_seq_len=common_attn_metadata.max_seq_len,
@@ -225,6 +244,14 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
             prefill=prefill,
             cp_kv_cache_interleave_size=self.cp_kv_cache_interleave_size,
         )
+        if self.request_state_indices is not None:
+            indices = common_attn_metadata.request_state_indices
+            if indices is None or indices.numel() > self.request_state_indices.numel():
+                raise ValueError("Invalid V2 request-state indices for HiSparse.")
+            self.request_state_indices.fill_(-1)
+            self.request_state_indices[: indices.numel()].copy_(indices)
+            metadata.request_state_indices = self.request_state_indices  # type: ignore[attr-defined]
+        return metadata
 
     @staticmethod
     def _build_prefill_fields(
@@ -309,10 +336,236 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], Generic[T]):
             else topk_indices_buffer
         )
 
+        self.hisparse_coordinator: HiSparseCoordinator | None = None
+        vllm_config = get_current_vllm_config()
+        if vllm_config.attention_config.hisparse_config is not None:
+            if kv_cache_dtype == "fp8_ds_mla":
+                row_width = FP8_DS_MLA_ROW_BYTES
+                kv_dtype = torch.uint8
+            else:
+                row_width = head_size
+                kv_dtype = kv_cache_dtype_str_to_dtype(
+                    kv_cache_dtype, vllm_config.model_config
+                )
+            model_top_k = (
+                indexer.topk_tokens  # type: ignore[attr-defined]
+                if indexer is not None
+                else vllm_config.model_config.hf_config.index_topk
+            )
+            self.hisparse_coordinator = create_hisparse_coordinator(
+                vllm_config,
+                model_top_k,
+                row_width=row_width,
+                kv_dtype=kv_dtype,
+            )
+            assert self.hisparse_coordinator is not None
+            self.hisparse_coordinator.join_indexer_group(indexer is not None)
+        self._hisparse_decode_batch = False
+        self._hisparse_dummy_batch = False
+
         self._use_flashinfer_concat_mla_k = (
             has_flashinfer()
             and which("ninja") is not None
             and (self.num_heads == 128)
             and (self.qk_nope_head_dim == 128)
             and (self.qk_rope_head_dim == 64)
+        )
+
+    def prepare_hisparse_for_batch(self, attn_metadata: Any | None) -> None:
+        self._hisparse_dummy_batch = attn_metadata is None
+        if attn_metadata is None:
+            self._hisparse_decode_batch = False
+            return
+        if self.hisparse_coordinator is not None:
+            indices = getattr(attn_metadata, "request_state_indices", None)
+            if indices is None:
+                raise ValueError("HiSparse requires V2 request-state indices.")
+            self.hisparse_coordinator.set_request_state_indices(indices)
+        self._hisparse_decode_batch = (
+            self.hisparse_coordinator is not None
+            and is_hisparse_decode_batch(
+                max_query_len=attn_metadata.max_query_len,
+                num_reqs=attn_metadata.num_reqs,
+                num_actual_tokens=attn_metadata.num_actual_tokens,
+            )
+        )
+
+    def _hisparse_swap_in(
+        self,
+        kv_cache: torch.Tensor,
+        topk_indices: torch.Tensor,
+        attn_metadata: Any,
+        num_decode_tokens: int | None = None,
+        return_valid_counts: bool = False,
+    ):
+        assert self.hisparse_coordinator is not None
+        pure_decode = num_decode_tokens is None
+        n = topk_indices.shape[0] if pure_decode else num_decode_tokens
+        assert n is not None
+        assert pure_decode or n == attn_metadata.num_decodes, (
+            "HiSparse requires one token per mixed-batch decode request."
+        )
+        if self.hisparse_coordinator.leader is not None:
+            return self.hisparse_coordinator.apply_plan(
+                kv_cache=kv_cache,
+                block_size=attn_metadata.block_size,
+                num_tokens=n,
+                return_valid_counts=return_valid_counts,
+            )
+        return self.hisparse_coordinator.swap_in(
+            kv_cache=kv_cache,
+            req_id_per_token=attn_metadata.req_id_per_token[:n],
+            block_table=attn_metadata.block_table,
+            topk_indices=topk_indices[:n],
+            block_size=attn_metadata.block_size,
+            slot_mapping=attn_metadata.slot_mapping if pure_decode else None,
+            return_valid_counts=return_valid_counts,
+            produce_plan=bool(self.hisparse_coordinator.group_shared),
+        )
+
+    def _hisparse_decode_cache(
+        self,
+        kv_cache: torch.Tensor,
+        topk_indices: torch.Tensor,
+        attn_metadata: Any,
+        *,
+        return_valid_counts: bool = False,
+    ):
+        if self.hisparse_coordinator is None:
+            return None
+        if attn_metadata.num_decode_tokens == 0:
+            kv_cache, block_table, req_ids = self._hisparse_stage_prefill_rows(
+                kv_cache, attn_metadata
+            )
+            converted = triton_convert_req_index_to_global_index(
+                req_ids,
+                block_table,
+                topk_indices,
+                BLOCK_SIZE=attn_metadata.block_size,
+                NUM_TOPK_TOKENS=topk_indices.shape[1],
+                return_valid_counts=return_valid_counts,
+            )
+            if return_valid_counts:
+                indices, valid_counts = converted
+                return kv_cache, indices, valid_counts
+            return kv_cache, converted
+        if not self._hisparse_decode_batch and (
+            topk_indices.shape[0] != attn_metadata.num_decode_tokens
+        ):
+            raise NotImplementedError(
+                "HiSparse MQA prefill is not implemented by this sparse MLA backend."
+            )
+        return self._hisparse_swap_in(
+            kv_cache,
+            topk_indices,
+            attn_metadata,
+            num_decode_tokens=(
+                None if self._hisparse_decode_batch else len(topk_indices)
+            ),
+            return_valid_counts=return_valid_counts,
+        )
+
+    def _hisparse_stage_prefill_rows(
+        self, kv_cache: torch.Tensor, attn_metadata: Any
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        assert self.hisparse_coordinator is not None
+        num_decodes = attn_metadata.num_decodes
+        num_decode_tokens = attn_metadata.num_decode_tokens
+        assert attn_metadata.seq_lens is not None
+        staged_cache, staged_bt = self.hisparse_coordinator.stage_prefill_cache(
+            kv_cache,
+            attn_metadata.block_table[num_decodes:],
+            attn_metadata.seq_lens[num_decodes:],
+        )
+        prefill_req_ids = attn_metadata.req_id_per_token[num_decode_tokens:]
+        if num_decodes > 0:
+            prefill_req_ids = prefill_req_ids - num_decodes
+        return staged_cache, staged_bt, prefill_req_ids
+
+    def _hisparse_host_prefill_cache(
+        self,
+        kv_cache: torch.Tensor,
+        block_table: torch.Tensor,
+        seq_lens: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        assert self.hisparse_coordinator is not None
+        return self.hisparse_coordinator.stage_prefill_cache(
+            kv_cache, block_table, seq_lens
+        )
+
+    def do_kv_cache_update(
+        self,
+        kv_c_normed: torch.Tensor,
+        k_pe: torch.Tensor,
+        kv_cache: torch.Tensor,
+        slot_mapping: torch.Tensor,
+        kv_cache_dtype: str,
+        k_scale: torch.Tensor,
+    ) -> None:
+        coordinator = self.hisparse_coordinator
+        if coordinator is None:
+            return super().do_kv_cache_update(
+                kv_c_normed,
+                k_pe,
+                kv_cache,
+                slot_mapping,
+                kv_cache_dtype,
+                k_scale,
+            )
+        if self._hisparse_dummy_batch:
+            return
+        if self._hisparse_decode_batch:
+            coordinator.write_newest_rows(
+                kv_c_normed,
+                k_pe,
+                kv_cache,
+                slot_mapping,
+                kv_cache_dtype,
+                k_scale,
+            )
+        else:
+            coordinator.write_rows_to_host(
+                kv_c_normed,
+                k_pe,
+                kv_cache,
+                slot_mapping,
+                kv_cache_dtype,
+                k_scale,
+            )
+
+    def forward_mha(
+        self,
+        q: torch.Tensor,
+        kv_c_normed: torch.Tensor,
+        k_pe: torch.Tensor,
+        kv_cache: torch.Tensor,
+        attn_metadata: Any,
+        k_scale: torch.Tensor,
+        output: torch.Tensor,
+        output_scale: torch.Tensor | None = None,
+    ) -> None:
+        prefill = attn_metadata.prefill
+        if (
+            self.hisparse_coordinator is not None
+            and kv_cache.device.type == "cpu"
+            and prefill is not None
+            and prefill.chunked_context is not None
+        ):
+            assert attn_metadata.seq_lens is not None
+            kv_cache, prefill.block_table = (
+                self.hisparse_coordinator.stage_prefill_cache(
+                    kv_cache,
+                    prefill.block_table,
+                    attn_metadata.seq_lens[attn_metadata.num_decodes :],
+                )
+            )
+        super().forward_mha(
+            q,
+            kv_c_normed,
+            k_pe,
+            kv_cache,
+            attn_metadata,
+            k_scale,
+            output,
+            output_scale,
         )
