@@ -501,10 +501,12 @@ def test_spec_aware_nonspec_materializes_state_indices(
     )
 
     recorded_indices = None
+    forwarded_is_vnni = None
 
-    def causal_conv1d_fwd_cpu(**kwargs):
-        nonlocal recorded_indices
+    def causal_conv1d_fn_cpu(**kwargs):
+        nonlocal recorded_indices, forwarded_is_vnni
         recorded_indices = kwargs["cache_indices"]
+        forwarded_is_vnni = kwargs["is_vnni"]
         return kwargs["x"]
 
     def fused_gdn_gating_cpu(**kwargs):
@@ -516,9 +518,7 @@ def test_spec_aware_nonspec_materializes_state_indices(
 
     monkeypatch.setattr(torch.cpu, "_is_amx_tile_supported", lambda: True)
     monkeypatch.setattr(gdn_attention, "is_conv_state_dim_first", lambda: False)
-    monkeypatch.setattr(
-        gdn_attention.ops, "causal_conv1d_fwd_cpu", causal_conv1d_fwd_cpu
-    )
+    monkeypatch.setattr(gdn_attention, "causal_conv1d_fn_cpu", causal_conv1d_fn_cpu)
     monkeypatch.setattr(gdn_attention.ops, "fused_gdn_gating_cpu", fused_gdn_gating_cpu)
     monkeypatch.setattr(
         gdn_attention.ops,
@@ -551,6 +551,7 @@ def test_spec_aware_nonspec_materializes_state_indices(
 
     assert recorded_indices is not None
     assert recorded_indices.is_contiguous()
+    assert forwarded_is_vnni is True
     torch.testing.assert_close(
         recorded_indices, torch.tensor([0, 4], dtype=torch.int32)
     )
@@ -572,17 +573,21 @@ def test_spec_forward_prepares_native_conv_metadata(
     )
     forwarded_indices = None
     forwarded_counts = None
+    forwarded_x = None
+    forwarded_is_vnni = None
 
     def causal_conv1d_update_cpu(**kwargs):
-        nonlocal forwarded_counts, forwarded_indices
+        nonlocal forwarded_counts, forwarded_indices, forwarded_is_vnni, forwarded_x
         forwarded_indices = kwargs["conv_state_indices"]
         forwarded_counts = kwargs["num_accepted_tokens"]
+        forwarded_x = kwargs["x"]
+        forwarded_is_vnni = kwargs["is_vnni"]
         return kwargs["x"]
 
     monkeypatch.setattr(torch.cpu, "_is_amx_tile_supported", lambda: True)
     monkeypatch.setattr(gdn_attention, "is_conv_state_dim_first", lambda: False)
     monkeypatch.setattr(
-        gdn_attention.ops, "causal_conv1d_update_cpu", causal_conv1d_update_cpu
+        gdn_attention, "causal_conv1d_update_cpu", causal_conv1d_update_cpu
     )
     monkeypatch.setattr(
         gdn_attention.ops,
@@ -618,6 +623,119 @@ def test_spec_forward_prepares_native_conv_metadata(
         assert actual.is_contiguous()
         assert actual.dtype == torch.int32
         torch.testing.assert_close(actual, reference)
+    assert forwarded_x is not None
+    assert forwarded_x.shape == (2, 4, 1)
+    assert forwarded_is_vnni is True
+
+
+@pytest.mark.parametrize("is_vnni", [True, False])
+@torch.inference_mode()
+def test_causal_conv1d_update_cpu_dispatches_native(
+    monkeypatch: pytest.MonkeyPatch,
+    is_vnni: bool,
+) -> None:
+    import vllm.model_executor.layers.mamba.ops.cpu.causal_conv1d as causal_conv
+
+    dim = 32
+    x = torch.zeros(2, 4, dim, dtype=torch.bfloat16)
+    conv_state = torch.zeros(2, dim, 6, dtype=torch.bfloat16)
+    weight = torch.zeros(dim, CONV_KERNEL, dtype=torch.bfloat16)
+    indices = torch.tensor([0, 1], dtype=torch.int32)
+    accepted = torch.tensor([1, 4], dtype=torch.int32)
+    expected = torch.ones_like(x)
+    forwarded = {}
+
+    def native_update(**kwargs):
+        forwarded.update(kwargs)
+        return expected
+
+    monkeypatch.setattr(causal_conv.ops, "causal_conv1d_update_cpu", native_update)
+    actual = causal_conv.causal_conv1d_update_cpu(
+        x=x,
+        conv_state=conv_state,
+        weight=weight,
+        activation="silu",
+        conv_state_indices=indices,
+        num_accepted_tokens=accepted,
+        is_vnni=is_vnni,
+    )
+
+    assert actual is expected
+    assert forwarded["x"] is x
+    assert forwarded["conv_states"] is conv_state
+    assert forwarded["weight"] is weight
+    assert forwarded["conv_state_indices"] is indices
+    assert forwarded["num_accepted_tokens"] is accepted
+    assert forwarded["is_vnni"] is is_vnni
+    assert forwarded["silu_activation"] is True
+
+
+@torch.inference_mode()
+def test_causal_conv1d_fn_cpu_dispatches_native(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import vllm.model_executor.layers.mamba.ops.cpu.causal_conv1d as causal_conv
+
+    x = torch.zeros(32, 4, dtype=torch.bfloat16)
+    weight = torch.zeros(32, CONV_KERNEL, dtype=torch.bfloat16)
+    conv_states = torch.zeros(2, 32, CONV_KERNEL - 1, dtype=torch.bfloat16)
+    query_start_loc = torch.tensor([0, 2, 4], dtype=torch.int32)
+    cache_indices = torch.tensor([1, 0], dtype=torch.int32)
+    has_initial_state = torch.tensor([True, False])
+    expected = torch.ones_like(x)
+    forwarded = {}
+
+    def native_fwd(**kwargs):
+        forwarded.update(kwargs)
+        return expected
+
+    monkeypatch.setattr(causal_conv.ops, "causal_conv1d_fwd_cpu", native_fwd)
+    actual = causal_conv.causal_conv1d_fn_cpu(
+        x=x,
+        weight=weight,
+        bias=None,
+        conv_states=conv_states,
+        query_start_loc=query_start_loc,
+        cache_indices=cache_indices,
+        has_initial_state=has_initial_state,
+        activation="silu",
+        is_vnni=True,
+    )
+
+    assert actual is expected
+    assert forwarded["x"] is x
+    assert forwarded["weight"] is weight
+    assert forwarded["conv_states"] is conv_states
+    assert forwarded["query_start_loc"] is query_start_loc
+    assert forwarded["cache_indices"] is cache_indices
+    assert forwarded["has_initial_state"] is has_initial_state
+    assert forwarded["silu_activation"] is True
+    assert forwarded["is_vnni"] is True
+
+
+@torch.inference_mode()
+def test_causal_conv1d_update_cpu_rejects_accepted_tokens_on_vector_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import vllm.model_executor.layers.mamba.ops.cpu.causal_conv1d as causal_conv
+
+    vector_fallback_called = False
+
+    def vector_update(*args):
+        nonlocal vector_fallback_called
+        vector_fallback_called = True
+        return args[0]
+
+    monkeypatch.setattr(causal_conv.ops, "causal_conv1d_update_cpu_vec", vector_update)
+    with pytest.raises(ValueError, match="num_accepted_tokens requires native"):
+        causal_conv.causal_conv1d_update_cpu(
+            x=torch.zeros(1, 32),
+            conv_state=torch.zeros(1, 32, CONV_KERNEL - 1),
+            weight=torch.zeros(32, CONV_KERNEL),
+            num_accepted_tokens=torch.tensor([1], dtype=torch.int32),
+        )
+
+    assert not vector_fallback_called
 
 
 @pytest.mark.parametrize("total_tokens, split", TWO_CALL_SPLITS)
