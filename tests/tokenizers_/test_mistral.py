@@ -1249,6 +1249,8 @@ class TestMistralTokenizer:
 
         expected_strings = (
             '[{"type": "function", "function": {"name": "get_weather", "description": "Gets the current weather in a city.", "parameters": {"type": "object", "properties": {"city": {"type": "string", "description": "The city name"}}, "required": ["city"]}}}] I am an AI\n\nHello world ![TOOL_CALLS][{"name": "get_weather", "arguments": {"city": "Paris"}, "id": "123456789"}] {"content": {"temperature": 20, "unit": "celsius"}, "call_id": "123456789"}',  # noqa: E501
+            # v11+ tool-call decode emits the explicit [ARGS] separator between
+            # the function name and its JSON arguments (get_weather[ARGS]{...}).
             'I am an AI[{"type": "function", "function": {"name": "get_weather", "description": "Gets the current weather in a city.", "parameters": {"type": "object", "properties": {"city": {"type": "string", "description": "The city name"}}, "required": ["city"]}}}]Hello world ![TOOL_CALLS]get_weather[ARGS]{"city": "Paris"}{"temperature": 20, "unit": "celsius"}',  # noqa: E501
         )
 
@@ -2240,7 +2242,13 @@ class TestMistralTokenizer:
 
 
 def test_convert_ids_to_tokens_pre_args_tekken():
-    """convert_ids_to_tokens does not raise on pre-[ARGS] Tekken tokenizers."""
+    """convert_ids_to_tokens must not raise on pre-[ARGS] Tekken tokenizers.
+
+    Tekken tokenizers before v11 (e.g. Ministral-8B-Instruct-2410) have no
+    [ARGS] special token. This guards the is_special([ARGS]) gate in
+    MistralTokenizer.convert_ids_to_tokens, which must skip [ARGS] rather than
+    call get_special_token(args) unconditionally (which raises on Tekken).
+    """
     tokenizer = MistralTokenizer.from_pretrained("mistralai/Ministral-8B-Instruct-2410")
     assert tokenizer.is_tekken
     assert not tokenizer.tokenizer.is_special(SpecialTokens.args)
