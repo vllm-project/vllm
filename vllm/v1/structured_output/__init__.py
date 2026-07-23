@@ -7,6 +7,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from typing import TYPE_CHECKING
 
 from vllm.config import VllmConfig
+from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParserManager
 from vllm.tokenizers import cached_tokenizer_from_config
 from vllm.utils.import_utils import LazyLoader
@@ -26,6 +27,8 @@ if TYPE_CHECKING:
     from vllm.v1.request import Request
 else:
     torch = LazyLoader("torch", globals(), "torch")
+
+logger = init_logger(__name__)
 
 
 class StructuredOutputManager:
