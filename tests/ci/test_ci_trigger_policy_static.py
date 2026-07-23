@@ -56,7 +56,7 @@ def test_pre_commit_uses_available_github_hosted_runner():
     assert "PRE_COMMIT_TO_REF:" in text
 
 
-def test_benchmark_detection_does_not_disable_idle_device_selection():
+def test_benchmark_detection_uses_logical_zero_for_isolated_runner():
     workflow_path = REPO_ROOT / ".github/workflows/ascend-benchmark-leaderboard.yml"
     text = workflow_path.read_text(encoding="utf-8")
     detection_step = text[
