@@ -15,11 +15,11 @@ Plugins (e.g. BidKV) are installed separately and auto-registered via::
 
 from __future__ import annotations
 
-from typing import Any, Protocol, Sequence, runtime_checkable
+from collections.abc import Sequence
+from typing import Any, Protocol, runtime_checkable
 
 from vllm.v1.core.sched.request_queue import SchedulingPolicy
 from vllm.v1.request import Request
-
 
 # ---------------------------------------------------------------------------
 # Protocol

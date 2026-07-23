@@ -42,10 +42,6 @@ from vllm.v1.core.encoder_cache_manager import (
 from vllm.v1.core.kv_cache_coordinator import HybridKVCacheCoordinator
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
-from vllm.v1.core.sched.victim_selector import (
-    get_victim_selector,
-    infer_kv_utilization_from_scheduler,
-)
 from vllm.v1.core.kv_cache_utils import KVCacheBlock
 from vllm.v1.core.sched.interface import PauseState, SchedulerInterface
 from vllm.v1.core.sched.output import (
@@ -60,6 +56,10 @@ from vllm.v1.core.sched.request_queue import (
     create_request_queue,
 )
 from vllm.v1.core.sched.utils import check_stop, remove_all
+from vllm.v1.core.sched.victim_selector import (
+    get_victim_selector,
+    infer_kv_utilization_from_scheduler,
+)
 from vllm.v1.engine import EngineCoreEventType, EngineCoreOutput, EngineCoreOutputs
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.perf import ModelMetrics, PerfStats
@@ -1191,9 +1191,7 @@ class Scheduler(SchedulerInterface):
             self._update_after_schedule(scheduler_output)
 
         if preempted_reqs:
-            self.victim_selector.emit_observability_log(
-                logger, self.__class__.__name__
-            )
+            self.victim_selector.emit_observability_log(logger, self.__class__.__name__)
 
         return scheduler_output
 
