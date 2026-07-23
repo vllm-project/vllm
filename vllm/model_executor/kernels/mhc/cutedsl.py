@@ -689,7 +689,11 @@ HC_PRENORM_GEMM_KERNEL = HCPrenormGemmKernel()
 
 def can_use_hc_prenorm_gemm(a, b, num_splits):
     return (
-        a.ndim == 2
+        a.dtype == torch.bfloat16
+        and b.dtype == torch.float32
+        and a.is_contiguous()
+        and b.is_contiguous()
+        and a.ndim == 2
         and b.ndim == 2
         and b.shape[0] == 24
         and a.shape[1] == b.shape[1]
@@ -700,17 +704,8 @@ def can_use_hc_prenorm_gemm(a, b, num_splits):
 
 def hc_prenorm_gemm(a, b, d, sqr_sum, num_splits):
     num_splits = num_splits or 1
-    assert (
-        a.dtype == torch.bfloat16
-        and b.dtype == d.dtype == sqr_sum.dtype == torch.float32
-    )
-    assert (
-        a.is_contiguous()
-        and b.is_contiguous()
-        and d.is_contiguous()
-        and sqr_sum.is_contiguous()
-    )
-    assert can_use_hc_prenorm_gemm(a, b, num_splits)
+    assert d.dtype == sqr_sum.dtype == torch.float32
+    assert d.is_contiguous() and sqr_sum.is_contiguous()
 
     HC_PRENORM_GEMM_KERNEL(a, b, d, sqr_sum, num_splits)
 
