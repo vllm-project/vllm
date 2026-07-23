@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Custom Sparse Attention Indexer layers."""
 
-from typing import Callable
+from collections.abc import Callable
 
 import torch
 
@@ -16,9 +16,7 @@ from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.attention.pcp import maybe_gather_indexer_k
-from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    get_fp8_min_max,
-)
+from vllm.model_executor.layers.quantization.utils.quant_utils import get_fp8_min_max
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.deep_gemm import (
@@ -33,9 +31,7 @@ from vllm.utils.torch_utils import (
     _resolve_layer_name,
     direct_register_custom_op,
 )
-from vllm.v1.attention.backends.mla.indexer import (
-    DeepseekV32IndexerMetadata,
-)
+from vllm.v1.attention.backends.mla.indexer import DeepseekV32IndexerMetadata
 from vllm.v1.attention.ops.common import pack_seq_triton, unpack_seq_triton
 from vllm.v1.worker.workspace import current_workspace_manager
 
