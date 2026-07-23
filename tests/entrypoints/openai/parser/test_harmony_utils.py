@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import pytest
-from openai.types.responses import FunctionTool
+from openai.types.responses import FunctionTool, NamespaceTool
 from openai_harmony import DeveloperContent, Message, Role
 
 from tests.entrypoints.openai.utils import verify_harmony_messages
@@ -11,6 +11,7 @@ from vllm.entrypoints.openai.parser.harmony_utils import (
     auto_drop_analysis_messages,
     create_tool_definition,
     extract_function_from_recipient,
+    get_developer_message,
     get_system_message,
     has_custom_tools,
     is_function_recipient,
@@ -72,6 +73,44 @@ class TestCreateToolDefinition:
         assert tool_definition.name == "report_status"
         assert tool_definition.description == ""
         assert tool_definition.parameters == _TOOL_PARAMETERS
+
+
+class TestGetDeveloperMessage:
+    def test_namespace_tool_expanded_to_flattened_function_tools(self):
+        namespace_tool = NamespaceTool(
+            type="namespace",
+            name="mcp__computer_use",
+            description="Computer control tools.",
+            tools=[
+                {
+                    "type": "function",
+                    "name": "get_app_state",
+                    "description": "Get the current state of a desktop application.",
+                    "parameters": _TOOL_PARAMETERS,
+                }
+            ],
+        )
+        function_tool = FunctionTool(
+            type="function",
+            name="report_status",
+            description="Report status.",
+            parameters=_TOOL_PARAMETERS,
+        )
+
+        dev_msg = get_developer_message(tools=[namespace_tool, function_tool])
+
+        verify_harmony_messages(
+            [dev_msg],
+            [
+                {
+                    "role": "developer",
+                    "tool_definitions": [
+                        "mcp__computer_use__get_app_state",
+                        "report_status",
+                    ],
+                }
+            ],
+        )
 
 
 class TestIsFunctionRecipient:
