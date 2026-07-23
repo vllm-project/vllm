@@ -574,14 +574,15 @@ class KVCacheStoreSendingThread(KVTransferThread):
         for g_idx, db in enumerate(self.token_databases):
             group_blocks = req_meta.block_ids[g_idx]
             # Distribute across ranks by the same rule as normal chunks.
-            put_step_rank = (self.tp_rank + g_idx) % self.put_step
+            put_step = self.group_put_steps[g_idx]
+            put_step_rank = (self.tp_rank + g_idx) % put_step
             # Always include the boundary block: its sub-hash key is written
             # only here, even if normal saves already advanced past it.
             last_block = cdiv(boundary, db.block_size) - 1
             for block_idx in range(
                 min(saved // db.block_size, last_block), last_block + 1
             ):
-                if block_idx % self.put_step != put_step_rank:
+                if block_idx % put_step != put_step_rank:
                     continue
                 valid_end = min((block_idx + 1) * db.block_size, boundary)
                 key_hash = req_meta.block_hashes[valid_end // hash_block_size - 1]
