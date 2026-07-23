@@ -57,6 +57,11 @@ if TYPE_CHECKING:
     from _typeshed import SizedBuffer
 
 VLLM_RINGBUFFER_WARNING_INTERVAL = envs.VLLM_RINGBUFFER_WARNING_INTERVAL
+# Cap on how long an idle reader parks before re-reading the authoritative SHM
+# written-flag. Bounds lost-notify recovery latency to ~5s while the periodic
+# wakeup stays negligible (one flag check per reader every 5s).
+SHM_READER_RECHECK_INTERVAL_MS = 5000
+
 
 from_bytes_big = functools.partial(int.from_bytes, byteorder="big")
 
@@ -631,25 +636,22 @@ class MessageQueue:
             self.n_warning = 1
             self.timeout = timeout
 
-        def timeout_ms(self) -> int | None:
-            """Returns a timeout that is:
+        def timeout_ms(self) -> int:
+            """Returns a timeout, capped at the recheck interval, that is:
             - min(time to deadline, time to next warning) if we're logging warnings
             - time to deadline, if we're not logging warnings
-            - None if the timeout is None and we're not logging warnings
+            - recheck interval if the timeout is None and we're not logging warnings
             - raise TimeoutError if we are past the deadline
             """
-            warning_wait_time = self.warning_wait_time_ms
+            wait_ms = SHM_READER_RECHECK_INTERVAL_MS
+            if self.warning_wait_time_ms is not None:
+                wait_ms = min(wait_ms, self.warning_wait_time_ms)
             if self.timeout is None:
-                return warning_wait_time
-
+                return wait_ms
             time_left_ms = int((self.deadline - time.monotonic()) * 1000)
             if time_left_ms <= 0:
                 raise TimeoutError
-
-            if warning_wait_time and warning_wait_time < time_left_ms:
-                return warning_wait_time
-
-            return time_left_ms
+            return min(wait_ms, time_left_ms)
 
         def should_warn(self) -> bool:
             """Returns true if it's time to log a warning for a timeout that is not
@@ -710,18 +712,18 @@ class MessageQueue:
                 # found a block that is not read by this reader
                 # let caller read from the buffer
                 with self.buffer.get_data(self.current_idx) as buf:
-                    yield buf
-
-                # caller has read from the buffer
-                # set the read flag
-                metadata_buffer[self.local_reader_rank + 1] = 1
-                # Memory fence ensures the read flag is visible to the writer.
-                # Without this, writer may not see our read completion and
-                # could wait indefinitely for all readers to finish.
-                memory_fence()
-                self.current_idx = (self.current_idx + 1) % self.buffer.max_chunks
-
-                self._spin_condition.record_read()
+                    try:
+                        yield buf
+                    finally:
+                        # caller has read from the buffer; set the read flag.
+                        metadata_buffer[self.local_reader_rank + 1] = 1
+                        # Memory fence ensures the read flag is visible to the writer.
+                        # Without this, writer may not see our read completion and
+                        # could wait indefinitely for all readers to finish.
+                        memory_fence()
+                        next_idx = self.current_idx + 1
+                        self.current_idx = next_idx % self.buffer.max_chunks
+                        self._spin_condition.record_read()
                 break
 
     def enqueue(self, obj, timeout: float | None = None):

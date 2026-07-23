@@ -3,6 +3,7 @@ depends_on:
   - image-build
 steps:
 - label: Entrypoints Unit Tests
+  device: h200_35gb
   key: entrypoints-unit-tests
   timeout_in_minutes: 25
   working_dir: "/vllm-workspace/tests"
@@ -15,6 +16,7 @@ steps:
   - pytest -v -s entrypoints/weight_transfer
 
 - label: Entrypoints Integration (LLM)
+  device: h200_35gb
   key: entrypoints-integration-llm
   timeout_in_minutes: 60
   working_dir: "/vllm-workspace/tests"
@@ -37,7 +39,7 @@ steps:
 - label: Entrypoints Integration (API Server)
   key: entrypoints-integration-api-server
   device: h200_35gb
-  timeout_in_minutes: 50
+  timeout_in_minutes: 75
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/
@@ -55,8 +57,9 @@ steps:
       - image-build-amd
 
 - label: Entrypoints Integration (API Server OpenAI - Part 1)
+  device: h200_35gb
   key: entrypoints-integration-api-server-openai-part-1
-  timeout_in_minutes: 45
+  timeout_in_minutes: 68
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/
@@ -73,8 +76,9 @@ steps:
       - image-build-amd
 
 - label: Entrypoints Integration (API Server OpenAI - Part 2)
+  device: h200_35gb
   key: entrypoints-integration-api-server-openai-part-2
-  timeout_in_minutes: 45
+  timeout_in_minutes: 83
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/
@@ -92,6 +96,7 @@ steps:
       - image-build-amd
 
 - label: Entrypoints Integration (API Server Generate)
+  device: h200_35gb
   key: entrypoints-integration-api-server-generate
   timeout_in_minutes: 50
   working_dir: "/vllm-workspace/tests"
@@ -114,6 +119,7 @@ steps:
       - image-build-amd
 
 - label: Entrypoints Integration (Responses API)
+  device: h200_35gb
   key: entrypoints-integration-responses-api
   timeout_in_minutes: 50
   working_dir: "/vllm-workspace/tests"
@@ -148,8 +154,9 @@ steps:
   - pytest -v -s entrypoints/multimodal
 
 - label: Entrypoints Integration (Pooling)
+  device: h200_35gb
   key: entrypoints-integration-pooling
-  timeout_in_minutes: 50
+  timeout_in_minutes: 75
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/
