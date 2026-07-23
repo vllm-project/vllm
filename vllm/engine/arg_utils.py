@@ -528,8 +528,6 @@ class EngineArgs:
     simulate_forward: bool = CacheConfig.simulate_forward
     max_num_batched_tokens: int | None = None
     max_num_scheduled_tokens: int | None = None
-    max_num_partial_prefills: int = SchedulerConfig.max_num_partial_prefills
-    max_long_partial_prefills: int = SchedulerConfig.max_long_partial_prefills
     long_prefill_token_threshold: int = SchedulerConfig.long_prefill_token_threshold
     max_num_seqs: int | None = None
     max_logprobs: int = ModelConfig.max_logprobs
@@ -1445,13 +1443,6 @@ class EngineArgs:
             },
         )
         scheduler_group.add_argument(
-            "--max-num-partial-prefills", **scheduler_kwargs["max_num_partial_prefills"]
-        )
-        scheduler_group.add_argument(
-            "--max-long-partial-prefills",
-            **scheduler_kwargs["max_long_partial_prefills"],
-        )
-        scheduler_group.add_argument(
             "--long-prefill-token-threshold",
             **scheduler_kwargs["long_prefill_token_threshold"],
         )
@@ -2207,8 +2198,6 @@ class EngineArgs:
             is_encoder_decoder=model_config.is_encoder_decoder,
             policy=self.scheduling_policy,
             scheduler_cls=self.scheduler_cls,
-            max_num_partial_prefills=self.max_num_partial_prefills,
-            max_long_partial_prefills=self.max_long_partial_prefills,
             long_prefill_token_threshold=self.long_prefill_token_threshold,
             scheduler_reserve_full_isl=self.scheduler_reserve_full_isl,
             watermark=self.watermark,
@@ -2458,14 +2447,6 @@ class EngineArgs:
                 _raise_unsupported_error(
                     feature_name="simulated forward for non-generation runners"
                 )
-
-        # No Concurrent Partial Prefills so far.
-        if (
-            self.max_num_partial_prefills != SchedulerConfig.max_num_partial_prefills
-            or self.max_long_partial_prefills
-            != SchedulerConfig.max_long_partial_prefills
-        ):
-            _raise_unsupported_error(feature_name="Concurrent Partial Prefill")
 
         if self.pipeline_parallel_size > 1:
             supports_pp = getattr(
