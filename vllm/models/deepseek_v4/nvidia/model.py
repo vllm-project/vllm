@@ -71,6 +71,11 @@ from vllm.models.deepseek_v4.nvidia.flashinfer_sparse import (
     DeepseekV4FlashInferSM120Attention,
 )
 from vllm.models.deepseek_v4.nvidia.flashmla import DeepseekV4FlashMLAAttention
+from vllm.models.deepseek_v4.nvidia.fi_utils import (
+    is_fi_moe_ep_backend,
+    is_mega_moe_backend,
+    make_fi_mega_moe_experts_cls,
+)
 from vllm.models.deepseek_v4.nvidia.ops.prepare_megamoe import prepare_megamoe_inputs
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
@@ -509,6 +514,9 @@ class DeepseekV4MegaMoEExperts(nn.Module):
 DeepseekV4MegaMoEExperts.weight_loader.supports_moe_loading = True  # type: ignore[attr-defined]
 
 
+DeepseekV4MegaMoEExpertsFI = make_fi_mega_moe_experts_cls(DeepseekV4MegaMoEExperts)
+
+
 class DeepseekV4MoE(nn.Module):
     def __init__(
         self,
@@ -521,9 +529,9 @@ class DeepseekV4MoE(nn.Module):
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
         self.prefix = prefix
-        self.use_mega_moe = (
-            vllm_config.kernel_config.moe_backend == "deep_gemm_mega_moe"
-        )
+        moe_backend = vllm_config.kernel_config.moe_backend
+        self.use_mega_moe = is_mega_moe_backend(moe_backend)
+        self.use_fi_mega_moe = is_fi_moe_ep_backend(moe_backend)
         if self.use_mega_moe and not vllm_config.parallel_config.enable_expert_parallel:
             raise NotImplementedError(
                 "DeepSeek V4 MegaMoE currently requires expert parallel. "
@@ -632,8 +640,15 @@ class DeepseekV4MoE(nn.Module):
         self.experts_start_idx = self.physical_expert_start
         self.experts_end_idx = self.physical_expert_end
 
-        self.experts = DeepseekV4MegaMoEExperts(
-            vllm_config,
+        activation_clamp = (
+            float(self.swiglu_limit) if self.swiglu_limit is not None else None
+        )
+        experts_cls = (
+            DeepseekV4MegaMoEExpertsFI
+            if self.use_fi_mega_moe
+            else DeepseekV4MegaMoEExperts
+        )
+        expert_kwargs: dict[str, typing.Any] = dict(
             num_experts=self.n_physical_experts,
             num_local_experts=self.n_local_physical_experts,
             experts_start_idx=self.physical_expert_start,
@@ -643,6 +658,9 @@ class DeepseekV4MoE(nn.Module):
             intermediate_size=config.moe_intermediate_size,
             prefix=f"{prefix}.experts",
         )
+        if self.use_fi_mega_moe:
+            expert_kwargs["activation_clamp"] = activation_clamp
+        self.experts = experts_cls(vllm_config, **expert_kwargs)
 
     def _init_fused_moe_experts(
         self,
@@ -966,8 +984,8 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         self.config = config
         self.quant_config = quant_config
         self.parallel_config = vllm_config.parallel_config
-        self.use_mega_moe = (
-            vllm_config.kernel_config.moe_backend == "deep_gemm_mega_moe"
+        self.use_mega_moe = is_mega_moe_backend(
+            vllm_config.kernel_config.moe_backend
         )
         if self.use_mega_moe and not vllm_config.parallel_config.enable_expert_parallel:
             raise NotImplementedError(
