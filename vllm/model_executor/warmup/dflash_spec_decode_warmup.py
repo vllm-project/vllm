@@ -5,19 +5,29 @@
 ``_prepare_dflash_inputs_kernel`` (shared by the DFlash and DSpark
 speculators) is JIT-compiled by Triton.  Its cache key is driven by three
 ``tl.constexpr`` values (``BLOCK_SIZE``, ``SAMPLE_FROM_ANCHOR``,
-``PAD_SLOT_ID``) plus the grid dimensions ``(num_reqs, num_blocks)``, which
-Triton specializes when a program-count axis is 1.
+``PAD_SLOT_ID``) plus:
+
+* Grid ``(num_reqs, num_blocks)`` — ``tl.num_programs`` is specialized
+  when an axis is 1.
+* Pointer divisibility (16B alignment) — runtime tensors come from
+  PyTorch's caching allocator (always 16B-aligned), so they all trigger
+  the ``'D'`` specialization.
+* Integer scalar divisibility — Triton marks a scalar ``'D'`` when its
+  value is a multiple of 16, and ``''`` otherwise.  **This is the critical
+  part**: warmup must use the *exact* runtime values of ``block_table_stride``,
+  ``max_num_reqs``, ``max_num_tokens``, ``max_model_len``, etc. so the
+  divisibility tags match.
 
 ``BLOCK_SIZE`` is computed at runtime as
 ``min(256, next_power_of_2(max_tokens_per_req))`` and therefore varies with
 batch composition (small for pure decode, 256 for prefill chunks), so every
-reachable power of two needs its own cubin.  Without warmup the first
-request in each shape pays a JIT latency spike.
+reachable power of two needs its own cubin.
 
 This module enumerates the relevant ``BLOCK_SIZE`` values crossed with the
-single-request / multi-request grid specializations and invokes the kernel
-once each so Triton compiles and caches every specialization ahead of live
-inference.  It is a no-op when DFlash/DSpark spec decoding is not configured.
+single-request / multi-request grid specializations, reading all
+deployment-fixed scalar values from the live speculator so the warmup
+matches the runtime specialization exactly (including divisibility tags).
+It is a no-op when DFlash/DSpark spec decoding is not configured.
 """
 
 from __future__ import annotations
@@ -34,15 +44,10 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 # Powers of two reachable by ``min(256, next_power_of_2(max_tokens_per_req))``.
-# ``max_tokens_per_req = max_target_query_len + num_query_per_req`` ranges from
-# a handful of tokens (decode) up to the max prefill chunk, so every value
-# from 1 to 256 can occur.
 _DFLASH_BLOCK_SIZES: tuple[int, ...] = (1, 2, 4, 8, 16, 32, 64, 128, 256)
 
 # Grid specializations.  Triton specializes ``tl.num_programs`` when an axis
-# is 1, so cover the four "which axes are 1" combinations.  Single-request
-# decode is ``(1, 1)``; prefill of one long request is ``(1, many)``; a batch
-# of small decodes is ``(many, 1)``; a mixed batch is ``(many, many)``.
+# is 1, so cover the four "which axes are 1" combinations.
 _DFLASH_GRID_COMBOS: tuple[tuple[int, int], ...] = (
     (1, 1),
     (1, 8),
@@ -50,11 +55,23 @@ _DFLASH_GRID_COMBOS: tuple[tuple[int, int], ...] = (
     (50, 8),
 )
 
-# Max sizes for the dummy buffers.  These only need to be large enough to keep
-# the kernel in bounds; their exact non-1 values do not affect the cache key
-# (Triton only specializes integer scalars that are exactly 1).
-_DFLASH_WARMUP_MAX_REQS = 50
-_DFLASH_WARMUP_MAX_TOKENS = 512
+
+def _alloc(
+    size: int,
+    dtype: torch.dtype = torch.int32,
+    device: str = "cuda:0",
+    fill_value: int = 0,
+) -> torch.Tensor:
+    """Allocate a 16B-aligned tensor for warmup.
+
+    PyTorch's caching allocator returns 512B-aligned blocks, so any
+    ``torch.empty(size)`` tensor has ``data_ptr() % 16 == 0``, which triggers
+    Triton's ``'D'`` (divisible) pointer specialization — matching runtime
+    tensors that also come from the caching allocator.
+    """
+    t = torch.empty(size, dtype=dtype, device=device)
+    t.fill_(fill_value)
+    return t
 
 
 def _warmup_prepare_dflash_inputs_kernel(
@@ -64,16 +81,17 @@ def _warmup_prepare_dflash_inputs_kernel(
     sample_from_anchor: bool,
     parallel_drafting_token_id: int,
     block_size: int,
+    block_table_stride: int,
+    max_num_reqs: int,
+    max_num_tokens: int,
+    max_model_len: int,
 ) -> None:
     """Exhaustively invoke ``_prepare_dflash_inputs_kernel``.
 
-    The integer scalar arguments (``block_size``, ``block_table_stride``,
-    ``num_query_per_req``, ``num_speculative_steps``,
-    ``parallel_drafting_token_id``, ``max_num_reqs``, ``max_num_tokens``,
-    ``max_model_len``) are constant per deployment, so they are passed with
-    their configured values and need no enumeration (Triton only specializes
-    integer scalars whose value is exactly 1, which is covered implicitly when
-    the configured value happens to be 1).
+    All integer scalar arguments are passed with their **exact runtime
+    values** read from the live speculator, so Triton's divisibility
+    specialization (``%16==0`` → ``'D'``, else ``''``) matches runtime
+    exactly.
 
     Total cache entries generated:
         len(_DFLASH_BLOCK_SIZES) * len(_DFLASH_GRID_COMBOS)
@@ -83,20 +101,14 @@ def _warmup_prepare_dflash_inputs_kernel(
         _prepare_dflash_inputs_kernel,
     )
 
-    max_num_reqs = _DFLASH_WARMUP_MAX_REQS
-    max_num_tokens = _DFLASH_WARMUP_MAX_TOKENS
     max_sampled = max_num_reqs * max(num_speculative_steps, 1)
-    # block_table_stride is constant per deployment; pick any non-1 value so it
-    # matches the non-1 specialization used at runtime.  A small stride keeps
-    # the dummy block table compact while staying >= any block index touched.
-    block_table_stride = max(block_size, 2)
-    num_reqs_cap = _DFLASH_WARMUP_MAX_REQS
 
     logger.info(
         "Warming up _prepare_dflash_inputs_kernel: "
         "%d BLOCK_SIZE x %d grid combos = %d entries "
         "(num_speculative_steps=%d, num_query_per_req=%d, "
-        "sample_from_anchor=%s, block_size=%d)",
+        "sample_from_anchor=%s, block_size=%d, block_table_stride=%d, "
+        "max_num_reqs=%d, max_num_tokens=%d, max_model_len=%d)",
         len(_DFLASH_BLOCK_SIZES),
         len(_DFLASH_GRID_COMBOS),
         len(_DFLASH_BLOCK_SIZES) * len(_DFLASH_GRID_COMBOS),
@@ -104,72 +116,67 @@ def _warmup_prepare_dflash_inputs_kernel(
         num_query_per_req,
         sample_from_anchor,
         block_size,
+        block_table_stride,
+        max_num_reqs,
+        max_num_tokens,
+        max_model_len,
     )
 
     for bs in _DFLASH_BLOCK_SIZES:
         for num_reqs, num_blocks in _DFLASH_GRID_COMBOS:
             try:
-                # Per-request inputs (indexed by req_idx in [0, num_reqs)).
-                # Give each request exactly one context token so the kernel's
-                # ``last_valid_pos = target_positions[valid_ctx_end - 1]``
-                # load stays in bounds (avoids the negative index that an empty
-                # context would produce).
                 n = num_reqs if num_reqs > 0 else 1
-                target_query_start_loc = torch.arange(
-                    n + 1, dtype=torch.int32, device=device
+                # Per-request inputs.
+                target_query_start_loc = _alloc(n + 1, dtype=torch.int32, device=device)
+                target_query_start_loc.copy_(
+                    torch.arange(n + 1, dtype=torch.int32, device=device)
                 )
-                target_positions = torch.zeros(
-                    max(n, num_reqs_cap), dtype=torch.int64, device=device
+                target_positions = _alloc(
+                    max(n, max_num_reqs), dtype=torch.int64, device=device
                 )
-                idx_mapping = torch.arange(
-                    max(n, num_reqs_cap), dtype=torch.int32, device=device
+                idx_mapping = _alloc(
+                    max(n, max_num_reqs), dtype=torch.int32, device=device
                 )
-                last_sampled = torch.zeros(
-                    num_reqs_cap, dtype=torch.int64, device=device
+                idx_mapping.copy_(
+                    torch.arange(max(n, max_num_reqs), dtype=torch.int32, device=device)
                 )
-                next_prefill_tokens = torch.zeros(
-                    num_reqs_cap, dtype=torch.int32, device=device
-                )
-                num_sampled = torch.ones(n, dtype=torch.int32, device=device)
-                num_rejected = torch.zeros(n, dtype=torch.int32, device=device)
-                block_table = torch.zeros(
-                    num_reqs_cap,
-                    block_table_stride,
-                    dtype=torch.int32,
-                    device=device,
-                )
-
-                # Outputs (sized for the padding loops, which run when
-                # req_idx == num_reqs - 1 and write up to max_num_reqs /
-                # max_num_tokens / max_sampled).
-                out_input_ids = torch.zeros(
-                    max_num_tokens, dtype=torch.int32, device=device
-                )
-                out_query_positions = torch.zeros(
-                    max_num_tokens, dtype=torch.int64, device=device
-                )
-                out_query_start_loc = torch.zeros(
-                    max_num_reqs + 1, dtype=torch.int32, device=device
-                )
-                out_seq_lens = torch.zeros(
+                last_sampled = _alloc(max_num_reqs, dtype=torch.int64, device=device)
+                next_prefill_tokens = _alloc(
                     max_num_reqs, dtype=torch.int32, device=device
                 )
-                out_query_slot_mapping = torch.zeros(
+                num_sampled = _alloc(n, dtype=torch.int32, device=device, fill_value=1)
+                num_rejected = _alloc(n, dtype=torch.int32, device=device)
+                block_table = _alloc(
+                    max_num_reqs * block_table_stride,
+                    dtype=torch.int32,
+                    device=device,
+                ).view(max_num_reqs, block_table_stride)
+
+                # Outputs — sized for the padding loops, which run when
+                # req_idx == num_reqs - 1 and write up to max_num_reqs /
+                # max_num_tokens / max_sampled.
+                out_input_ids = _alloc(max_num_tokens, dtype=torch.int32, device=device)
+                out_query_positions = _alloc(
                     max_num_tokens, dtype=torch.int64, device=device
                 )
-                out_context_positions = torch.zeros(
+                out_query_start_loc = _alloc(
+                    max_num_reqs + 1, dtype=torch.int32, device=device
+                )
+                out_seq_lens = _alloc(max_num_reqs, dtype=torch.int32, device=device)
+                out_query_slot_mapping = _alloc(
                     max_num_tokens, dtype=torch.int64, device=device
                 )
-                out_context_slot_mapping = torch.zeros(
+                out_context_positions = _alloc(
                     max_num_tokens, dtype=torch.int64, device=device
                 )
-                out_sample_indices = torch.zeros(
+                out_context_slot_mapping = _alloc(
+                    max_num_tokens, dtype=torch.int64, device=device
+                )
+                out_sample_indices = _alloc(
                     max_sampled, dtype=torch.int64, device=device
                 )
-                out_sample_pos = torch.zeros(
-                    max_sampled, dtype=torch.int64, device=device
-                )
-                out_sample_idx_mapping = torch.zeros(
+                out_sample_pos = _alloc(max_sampled, dtype=torch.int64, device=device)
+                out_sample_idx_mapping = _alloc(
                     max_sampled, dtype=torch.int32, device=device
                 )
 
@@ -199,7 +206,7 @@ def _warmup_prepare_dflash_inputs_kernel(
                     num_speculative_steps,
                     max_num_reqs,
                     max_num_tokens,
-                    max_model_len=max_num_tokens,
+                    max_model_len=max_model_len,
                     SAMPLE_FROM_ANCHOR=sample_from_anchor,
                     PAD_SLOT_ID=PAD_SLOT_ID,
                     BLOCK_SIZE=bs,
@@ -220,10 +227,9 @@ def _warmup_prepare_dflash_inputs_kernel(
 def dflash_kernel_warmup(speculator: DFlashSpeculator) -> None:
     """Warm up DFlash/DSpark spec-decode Triton kernels.
 
-    Args:
-        speculator: The configured ``DFlashSpeculator`` (or ``DSpark``
-            subclass).  All kernel parameters are read from it so the warmup
-            matches the runtime specialization exactly.
+    Reads all deployment-fixed scalar values from the live speculator so
+    the warmup matches the runtime specialization exactly, including
+    Triton's integer divisibility tags (``%16==0`` → ``'D'``).
     """
     device = speculator.device
     if device.type != "cuda":
@@ -236,13 +242,28 @@ def dflash_kernel_warmup(speculator: DFlashSpeculator) -> None:
         )
         return
 
+    # Read the actual block_table stride from the live block tables.
+    input_block_tables = getattr(speculator.block_tables, "input_block_tables", None)
+    if not input_block_tables:
+        logger.warning(
+            "Skipping DFlash spec-decode warmup: input_block_tables not initialized."
+        )
+        return
+    block_table_stride = int(input_block_tables[0].stride(0))
+
     device_str = str(device)
     logger.info(
         "Warming up DFlash spec-decode kernels on %s "
-        "(num_speculative_steps=%d, sample_from_anchor=%s)",
+        "(num_speculative_steps=%d, sample_from_anchor=%s, "
+        "block_table_stride=%d, max_num_reqs=%d, max_num_tokens=%d, "
+        "max_model_len=%d)",
         device_str,
         speculator.num_speculative_steps,
         speculator.sample_from_anchor,
+        block_table_stride,
+        speculator.max_num_reqs,
+        speculator.max_num_tokens,
+        speculator.max_model_len,
     )
 
     _warmup_prepare_dflash_inputs_kernel(
@@ -252,6 +273,10 @@ def dflash_kernel_warmup(speculator: DFlashSpeculator) -> None:
         sample_from_anchor=speculator.sample_from_anchor,
         parallel_drafting_token_id=speculator.parallel_drafting_token_id,
         block_size=kernel_block_sizes[0],
+        block_table_stride=block_table_stride,
+        max_num_reqs=speculator.max_num_reqs,
+        max_num_tokens=speculator.max_num_tokens,
+        max_model_len=speculator.max_model_len,
     )
 
     logger.info("DFlash spec-decode kernel warmup finished.")
