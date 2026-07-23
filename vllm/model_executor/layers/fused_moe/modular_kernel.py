@@ -1182,9 +1182,7 @@ class FusedMoEKernelModularImpl:
         # externally aliased. The workspace manager profiles and locks a
         # process-wide high-water mark; later graph shapes may need this
         # storage for workspace13.
-        max_shape_size = max(
-            1, prod(workspace13_shape), prod(fused_out_shape)
-        )
+        max_shape_size = max(1, prod(workspace13_shape), prod(fused_out_shape))
         common_workspace, workspace2 = current_workspace_manager().get_simultaneous(
             ((max_shape_size,), workspace_dtype),
             (workspace2_shape, workspace_dtype),

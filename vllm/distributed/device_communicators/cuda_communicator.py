@@ -460,8 +460,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
         direct_output_supported = (
             output is None
             or is_symmetric_memory_tensor(output)
-            or pynccl_comm.nccl_version
-            >= NCCL_DIRECT_SYMM_RS_OUTPUT_MIN_VERSION
+            or pynccl_comm.nccl_version >= NCCL_DIRECT_SYMM_RS_OUTPUT_MIN_VERSION
         )
         use_symm_mem = (
             uniform_sizes
@@ -566,8 +565,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
         if (
             pynccl_comm is None
             or pynccl_comm.world_size == 1
-            or pynccl_comm.nccl_version
-            < NCCL_DIRECT_SYMM_RS_OUTPUT_MIN_VERSION
+            or pynccl_comm.nccl_version < NCCL_DIRECT_SYMM_RS_OUTPUT_MIN_VERSION
             or not should_nccl_symm_mem_ag_rs()
         ):
             return None
