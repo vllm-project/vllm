@@ -21,7 +21,6 @@ from collections import defaultdict
 from collections.abc import Callable, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
-from math import gcd
 from typing import Any, Literal, TypeVar
 
 import regex as re
@@ -1153,15 +1152,19 @@ class MooncakeStoreWorker:
     def _spec_tp_replication_factor(self, spec: KVCacheSpec) -> int:
         if self.dcp_size > 1:
             return 1
-        if isinstance(spec, UniformTypeKVCacheSpecs):
-            inner_factors = tuple(
-                self._spec_tp_replication_factor(inner_spec)
-                for inner_spec in spec.kv_cache_specs.values()
-            )
-            return gcd(*inner_factors) if inner_factors else 1
-        if isinstance(spec, MambaSpec):
+        inner_specs = (
+            tuple(spec.kv_cache_specs.values())
+            if isinstance(spec, UniformTypeKVCacheSpecs)
+            else (spec,)
+        )
+        # Any rank-specific state makes the whole packed value rank-specific.
+        if any(isinstance(inner, MambaSpec) for inner in inner_specs):
             return 1
-        if isinstance(spec, (MLAAttentionSpec, SlidingWindowMLASpec)):
+        # A pure MLA packed value is replicated on every TP rank.
+        if all(
+            isinstance(inner, (MLAAttentionSpec, SlidingWindowMLASpec))
+            for inner in inner_specs
+        ):
             return self.tp_size
         return max(1, self.tp_size // self.num_kv_head)
 
@@ -1169,7 +1172,7 @@ class MooncakeStoreWorker:
         """Return the number of byte-identical TP replicas per cache group.
 
         DCP and Mamba use 1; MLA uses ``tp_size``; GQA uses
-        ``tp_size // num_kv_head``. Packed groups use the GCD of inner factors.
+        ``tp_size // num_kv_head``.
         """
         return tuple(
             self._spec_tp_replication_factor(group.kv_cache_spec)
