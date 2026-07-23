@@ -40,7 +40,7 @@ try:
     )
     _parametrize = pytest.mark.parametrize
 except ModuleNotFoundError:  # allow running directly as ``python <thisfile>``
-    pytest = None
+    pytest = None  # type: ignore[assignment]
 
     def _cuda_required(fn):
         return fn

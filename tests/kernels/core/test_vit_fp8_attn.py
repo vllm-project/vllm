@@ -45,7 +45,7 @@ def _fp8_attention():
 
     mm_config = MultiModalConfig(mm_encoder_attn_dtype="fp8")
     vllm_config = VllmConfig()
-    vllm_config.model_config = SimpleNamespace(multimodal_config=mm_config)
+    vllm_config.model_config = SimpleNamespace(multimodal_config=mm_config)  # type: ignore[assignment]
 
     # MMEncoderAttention reads torch.get_default_dtype() during init
     # to determine the output dtype. In real model loading this is bf16.
