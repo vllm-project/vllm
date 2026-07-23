@@ -51,12 +51,7 @@ from vllm.distributed.weight_transfer import (
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.warmup.kernel_warmup import kernel_warmup
-from vllm.multimodal.video import (
-    PYNVVIDEOCODEC_CUDA_CONTEXT_BYTES,
-    PYNVVIDEOCODEC_DECODER_GPU_MEMORY_BYTES,
-    PYNVVIDEOCODEC_MAX_RETAINED_DECODERS,
-    VIDEO_LOADER_REGISTRY,
-)
+from vllm.multimodal.gpu_ipc_memory import reserve_mm_ipc_gpu_memory
 from vllm.platforms import current_platform
 from vllm.profiler.wrapper import CudaProfilerWrapper, TorchProfilerWrapper
 from vllm.sequence import IntermediateTensors
@@ -75,6 +70,10 @@ from vllm.v1.outputs import (
     ModelRunnerOutput,
 )
 from vllm.v1.utils import compute_iteration_details, report_usage_stats
+from vllm.v1.worker.startup_plan import (
+    maybe_apply_startup_plan,
+    maybe_save_startup_plan,
+)
 from vllm.v1.worker.utils import is_residual_scattered_for_sp
 from vllm.v1.worker.worker_base import CompilationTimes, WorkerBase
 from vllm.v1.worker.workspace import init_workspace_manager
@@ -150,6 +149,7 @@ class Worker(WorkerBase):
 
         # Buffers saved before sleep
         self._sleep_saved_buffers: dict[str, torch.Tensor] = {}
+        self._sleep_rebuild_draft_metadata_buffers = False
 
         # Weight transfer engine is created in `load_model` once the model
         # is available, since the engine needs a reference to the model.
@@ -194,6 +194,11 @@ class Worker(WorkerBase):
             self._sleep_saved_buffers = {
                 name: buffer.cpu().clone() for name, buffer in model.named_buffers()
             }
+            draft = self.get_draft_model()
+            inner = getattr(draft, "model", None) if draft is not None else None
+            self._sleep_rebuild_draft_metadata_buffers = inner is not None and hasattr(
+                inner, "_build_fused_kv_buffers"
+            )
 
         self._get_sleep_mode_backend().suspend(level)
 
@@ -224,6 +229,14 @@ class Worker(WorkerBase):
                 if name in self._sleep_saved_buffers:
                     buffer.data.copy_(self._sleep_saved_buffers[name].data)
             self._sleep_saved_buffers = {}
+
+        if self._sleep_rebuild_draft_metadata_buffers:
+            draft = self.get_draft_model()
+            if draft is not None:
+                inner = getattr(draft, "model", None)
+                if inner is not None and hasattr(inner, "_build_fused_kv_buffers"):
+                    inner._build_fused_kv_buffers()
+            self._sleep_rebuild_draft_metadata_buffers = False
 
         if tags is None or "kv_cache" in tags:
             self.model_runner.post_kv_cache_wake_up()
@@ -374,7 +387,7 @@ class Worker(WorkerBase):
                 "worker requested memory: %sGiB", format_gib(self.requested_memory)
             )
         else:
-            raise RuntimeError(f"Not support device type: {self.device_config.device}")
+            raise RuntimeError(f"Unsupported device type: {self.device_config.device}")
 
         # Initialize workspace manager
         num_ubatches = 2 if self.vllm_config.parallel_config.enable_dbo else 1
@@ -424,7 +437,8 @@ class Worker(WorkerBase):
         self.model_runner.update_config(overrides)
 
     def reload_weights(self, *args, **kwargs) -> None:
-        self.model_runner.reload_weights(*args, **kwargs)
+        with set_current_vllm_config(self.vllm_config):
+            self.model_runner.reload_weights(*args, **kwargs)
 
     @torch.inference_mode()
     def determine_available_memory(self) -> int:
@@ -439,6 +453,8 @@ class Worker(WorkerBase):
             You may limit the usage of GPU memory
             by adjusting the `gpu_memory_utilization` parameter.
         """
+        maybe_apply_startup_plan(self)
+
         if kv_cache_memory_bytes := self.cache_config.kv_cache_memory_bytes:
             # still need a profile run which compiles the model for
             # max_num_batched_tokens
@@ -457,7 +473,11 @@ class Worker(WorkerBase):
                 "correspondingly."
             )
             logger.info(msg)
-            return self._reserve_mm_ipc_gpu_memory(kv_cache_memory_bytes)
+            return reserve_mm_ipc_gpu_memory(
+                kv_cache_memory_bytes,
+                self.model_config.multimodal_config,
+                getattr(self.parallel_config, "_api_process_count", 1),
+            )
 
         # Execute a forward pass with dummy inputs to profile the memory usage
         # of the model.
@@ -467,41 +487,30 @@ class Worker(WorkerBase):
         ) as profile_result:
             self.model_runner.profile_run()
 
-            profile_torch_peak = torch.accelerator.memory_stats(self.device).get(
-                "allocated_bytes.all.peak", 0
-            )
+        # Profile CUDA graph memory if graphs will be captured.
+        # ROCm is included: #44825 moved the profiler to
+        # torch.accelerator.get_memory_info (reliable on ROCm, as used by
+        # the AMD-CI mem tests), and graph_pool_handle resolves to the same
+        # torch.cuda handle the live capture path already uses on ROCm.
+        # XPU stays excluded (see #39977).
+        cudagraph_memory_estimate = 0
+        if (
+            current_platform.is_cuda_alike()
+            and self.vllm_config.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
+        ):
+            cudagraph_memory_estimate = self.model_runner.profile_cudagraph_memory()
 
-            # Profile CUDA graph memory if graphs will be captured.
-            # Skip on ROCm/HIP/XPU as graph pool handles and get_memory_info
-            # behave differently and can produce incorrect/negative estimates.
-            cudagraph_memory_estimate = 0
-            if (
-                current_platform.is_cuda()
-                and self.vllm_config.compilation_config.cudagraph_mode
-                != CUDAGraphMode.NONE
-            ):
-                cudagraph_memory_estimate = self.model_runner.profile_cudagraph_memory()
-
-        # Use the pre-cudagraph torch peak to avoid double-counting.
-        profile_result.torch_peak_increase = (
-            profile_torch_peak - profile_result.before_profile.torch_peak
-        )
-        profile_result.non_kv_cache_memory = (
-            profile_result.non_torch_increase
-            + profile_result.torch_peak_increase
-            + profile_result.weights_memory
-        )
-
-        # On ROCm, cudagraph_memory_estimate is always 0 so this is a no-op.
-        # On CUDA, respect the opt-in flag as originally designed.
+        # Respect the opt-in flag as originally designed.
         cudagraph_memory_estimate_applied = (
             cudagraph_memory_estimate
             if envs.VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS
             else 0
         )
 
-        self.non_torch_memory = profile_result.non_torch_increase
-        self.peak_activation_memory = profile_result.torch_peak_increase
+        self.total_consumed = profile_result.total_consumed
+        self.peak_activation_memory = (
+            profile_result.transient_peak_headroom + cudagraph_memory_estimate_applied
+        )
         self.cudagraph_memory_estimate = cudagraph_memory_estimate
 
         free_gpu_memory = profile_result.after_profile.free_memory
@@ -579,81 +588,11 @@ class Worker(WorkerBase):
                     suggested_util,
                 )
 
-        return self._reserve_mm_ipc_gpu_memory(
-            int(self.available_kv_cache_memory_bytes)
+        return reserve_mm_ipc_gpu_memory(
+            int(self.available_kv_cache_memory_bytes),
+            self.model_config.multimodal_config,
+            getattr(self.parallel_config, "_api_process_count", 1),
         )
-
-    @staticmethod
-    def _uses_gpu_video_backend(mm_config) -> bool:
-        video_kwargs = mm_config.media_io_kwargs.get("video", {})
-        video_loader_backend = (
-            video_kwargs.get("video_backend") or envs.VLLM_VIDEO_LOADER_BACKEND
-        )
-        codec_backend = video_kwargs.get("backend")
-        return VIDEO_LOADER_REGISTRY.backend_requires_gpu(video_loader_backend) or (
-            codec_backend is not None
-            and VIDEO_LOADER_REGISTRY.backend_requires_gpu(codec_backend)
-        )
-
-    def _reserve_mm_ipc_gpu_memory(self, available_kv_cache_memory_bytes: int) -> int:
-        """Carve frontend multimodal GPU memory out of the KV cache.
-
-        The frontend (API-server) process allocates GPU memory for hardware
-        multimodal decoding. Raw decoded frames are bounded by
-        ``mm_ipc_gpu_memory_gb`` and acquired by the frontend semaphore. Some
-        decoders also keep persistent surfaces around; reserve a fixed upper
-        bound for those when the corresponding backend is configured.
-        """
-        mm_config = self.model_config.multimodal_config
-        if mm_config is None:
-            return available_kv_cache_memory_bytes
-
-        raw_frame_reserved_bytes = int(mm_config.mm_ipc_gpu_memory_gb * GiB_bytes)
-        # Each api_server_count process runs its OWN decoder surfaces + NVDEC/CUVID
-        # CUDA context on the GPU, outside this (worker) memory pool. Reserve that
-        # per-server footprint x api_server_count so gpu_memory_utilization bounds
-        # TOTAL GPU usage across all API-server processes. Without the multiply,
-        # HW decode overshoots the budget by ~(api_server_count-1) x per-server and
-        # OOMs at high gmu, while SW decode (no per-server GPU allocation) does not.
-        num_api_servers = max(1, getattr(self.parallel_config, "_api_process_count", 1))
-        per_server_decoder_bytes = (
-            PYNVVIDEOCODEC_DECODER_GPU_MEMORY_BYTES
-            * PYNVVIDEOCODEC_MAX_RETAINED_DECODERS
-            + PYNVVIDEOCODEC_CUDA_CONTEXT_BYTES
-        )
-        decoder_reserved_bytes = (
-            num_api_servers * per_server_decoder_bytes
-            if self._uses_gpu_video_backend(mm_config)
-            else 0
-        )
-        reserved_bytes = raw_frame_reserved_bytes + decoder_reserved_bytes
-        if reserved_bytes <= 0:
-            return available_kv_cache_memory_bytes
-
-        remaining = available_kv_cache_memory_bytes - reserved_bytes
-        if remaining <= 0:
-            raise ValueError(
-                f"frontend multimodal GPU decoding reserves "
-                f"{format_gib(reserved_bytes)} GiB "
-                f"({format_gib(raw_frame_reserved_bytes)} GiB raw-frame budget, "
-                f"{format_gib(decoder_reserved_bytes)} GiB decoder cache budget), "
-                f"but only {format_gib(available_kv_cache_memory_bytes)} GiB is "
-                "available for the KV cache. Reduce mm_ipc_gpu_memory_gb, use a "
-                "different video backend, or increase gpu_memory_utilization."
-            )
-        logger.info_once(
-            "Reserving %s GiB of GPU memory for frontend multimodal decoding "
-            "(%s GiB raw-frame semaphore budget, %s GiB decoder+CUDA-context "
-            "across %d API server(s) @ %s GiB/server); "
-            "KV cache memory reduced to %s GiB.",
-            format_gib(reserved_bytes),
-            format_gib(raw_frame_reserved_bytes),
-            format_gib(decoder_reserved_bytes),
-            num_api_servers,
-            format_gib(per_server_decoder_bytes),
-            format_gib(remaining),
-        )
-        return remaining
 
     def get_kv_connector_handshake_metadata(
         self,
@@ -794,9 +733,8 @@ class Worker(WorkerBase):
             redundancy_buffer_memory = 150 * (1 << 20)
 
             non_kv_cache_memory = (
-                self.model_runner.model_memory_usage
+                self.total_consumed
                 + self.peak_activation_memory
-                + self.non_torch_memory
                 + cuda_graph_memory_bytes
             )
             kv_cache_memory_bytes_to_gpu_limit = (
@@ -817,10 +755,10 @@ class Worker(WorkerBase):
                 f"Desired GPU memory utilization is "
                 f"({self.cache_config.gpu_memory_utilization}, "
                 f"{format_gib(self.requested_memory)} GiB). "
-                f"Actual usage is {format_gib(self.model_runner.model_memory_usage)} "
-                f"GiB for weight, {format_gib(self.peak_activation_memory)} GiB "
-                f"for peak activation, {format_gib(self.non_torch_memory)} GiB "
-                f"for non-torch memory, and {format_gib(cuda_graph_memory_bytes)} "
+                f"Actual usage is {format_gib(self.total_consumed)} "
+                f"GiB for consumed memory (weights + non-torch), "
+                f"{format_gib(self.peak_activation_memory)} GiB "
+                f"for peak activation, and {format_gib(cuda_graph_memory_bytes)} "
                 f"GiB for CUDAGraph memory. Replace gpu_memory_utilization "
                 f"config with `--kv-cache-memory="
                 f"{kv_cache_memory_bytes_to_requested_limit}` "
@@ -832,7 +770,9 @@ class Worker(WorkerBase):
                 f"{format_gib(self.available_kv_cache_memory_bytes)} GiB."
             )
 
-            logger.debug(msg)
+            logger.info(msg)
+
+            maybe_save_startup_plan(self, kv_cache_memory_bytes_to_requested_limit)
 
         if self.use_v2_model_runner:
             # V2: Run full execute_model + sample_tokens to JIT compile triton kernels.
@@ -905,6 +845,29 @@ class Worker(WorkerBase):
     def get_model(self) -> nn.Module:
         return self.model_runner.get_model()
 
+    def get_draft_model(self) -> nn.Module | None:
+        return self.model_runner.get_draft_model()
+
+    def _set_draft_weight_update_target(self) -> None:
+        assert self.weight_transfer_engine is not None
+
+        draft_model = self.get_draft_model()
+        if draft_model is None:
+            raise RuntimeError(
+                "Draft model weight update requested, but no draft model is configured."
+            )
+
+        speculative_config = self.speculative_config
+        if speculative_config is None or speculative_config.draft_model_config is None:
+            raise RuntimeError(
+                "Draft model weight update requested, but no draft model "
+                "config is configured."
+            )
+
+        self.weight_transfer_engine.set_weight_update_target(
+            draft_model, speculative_config.draft_model_config
+        )
+
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
         return self.model_runner.get_supported_tasks()
 
@@ -928,19 +891,104 @@ class Worker(WorkerBase):
 
         iteration_details = compute_iteration_details(scheduler_output)
 
-        annotation = "".join(
-            [
-                "execute_context_",
-                str(iteration_details.num_ctx_requests),
-                "(",
-                str(iteration_details.num_ctx_tokens),
-                ")_generation_",
-                str(iteration_details.num_generation_requests),
-                "(",
-                str(iteration_details.num_generation_tokens),
-                ")",
-            ]
-        )
+        if self.vllm_config.profiler_config.detailed_trace_annotation:
+            # Compute roofline-model metrics per request, split by phase
+            # (context vs generation). These help estimate compute and
+            # memory intensity from the trace.
+            #
+            # Per-request quantities:
+            #   query_len = number of scheduled (new) tokens for this request
+            #   seq_len   = total sequence length (computed + scheduled tokens)
+            #
+            # Aggregated across requests in each phase
+            # (ctx_=context, gen_=generation):
+            #   seq_len_sum = sum of seq_len   (total KV length)
+            #   qq_compute  = sum of query_len*query_len
+            #                 (proxy for QK^T compute cost)
+            #   qk_compute  = sum of query_len*seq_len
+            #                 (proxy for QK^T compute cost for decode and
+            #                  chunked prefill)
+            #   total_scheduled_tokens = scheduled tokens across all requests
+            ctx_seq_len_sum = 0
+            ctx_qq_compute = 0
+            ctx_qk_compute = 0
+            gen_seq_len_sum = 0
+            gen_qq_compute = 0
+            gen_qk_compute = 0
+            total_scheduled_tokens = 0
+
+            # Build a map of req_id -> num_computed_tokens for all requests
+            new_req_ids = {
+                new_req.req_id for new_req in scheduler_output.scheduled_new_reqs
+            }
+            num_computed_tokens_ids = {
+                new_req.req_id: new_req.num_computed_tokens
+                for new_req in scheduler_output.scheduled_new_reqs
+            }
+            for req_id, num_computed_tokens in zip(
+                scheduler_output.scheduled_cached_reqs.req_ids,
+                scheduler_output.scheduled_cached_reqs.num_computed_tokens,
+            ):
+                num_computed_tokens_ids[req_id] = num_computed_tokens
+
+            # Accumulate per-phase metrics
+            for req_id, num_tokens in scheduler_output.num_scheduled_tokens.items():
+                query_len = num_tokens
+                total_scheduled_tokens += query_len
+                seq_len = num_computed_tokens_ids.get(req_id, 0) + query_len
+                if (
+                    scheduler_output.scheduled_cached_reqs.is_context_phase(req_id)
+                    or req_id in new_req_ids
+                ):
+                    ctx_seq_len_sum += seq_len
+                    ctx_qq_compute += query_len * query_len
+                    ctx_qk_compute += query_len * seq_len
+                else:
+                    gen_seq_len_sum += seq_len
+                    gen_qq_compute += query_len * query_len
+                    gen_qk_compute += query_len * seq_len
+            annotation = "".join(
+                [
+                    "execute_",
+                    str(total_scheduled_tokens),
+                    "_context_",
+                    str(iteration_details.num_ctx_requests),
+                    "(sq",
+                    str(iteration_details.num_ctx_tokens),
+                    "sk",
+                    str(ctx_seq_len_sum),
+                    "sqsq",
+                    str(ctx_qq_compute),
+                    "sqsk",
+                    str(ctx_qk_compute),
+                    ")_generation_",
+                    str(iteration_details.num_generation_requests),
+                    "(sq",
+                    str(iteration_details.num_generation_tokens),
+                    "sk",
+                    str(gen_seq_len_sum),
+                    "sqsq",
+                    str(gen_qq_compute),
+                    "sqsk",
+                    str(gen_qk_compute),
+                    ")",
+                ]
+            )
+        else:
+            annotation = "".join(
+                [
+                    "execute_context_",
+                    str(iteration_details.num_ctx_requests),
+                    "(",
+                    str(iteration_details.num_ctx_tokens),
+                    ")",
+                    "_generation_",
+                    str(iteration_details.num_generation_requests),
+                    "(",
+                    str(iteration_details.num_generation_tokens),
+                    ")",
+                ]
+            )
         return self.profiler.annotate_context_manager(annotation)
 
     @torch.inference_mode()
@@ -1169,8 +1217,26 @@ class Worker(WorkerBase):
         the configured weight transfer engine. The worker only tracks that a
         session is active.
         """
+        with set_current_vllm_config(self.vllm_config):
+            self._start_weight_update()
+
+    def start_draft_weight_update(self) -> None:
+        """
+        Like start_weight_update, but retargets the engine at the speculative
+        draft model for this session.
+        """
+        with set_current_vllm_config(self.vllm_config):
+            self._start_weight_update(is_draft=True)
+
+    def _start_weight_update(self, is_draft: bool = False) -> None:
         self._check_weight_transfer_engine()
         assert self.weight_transfer_engine is not None
+
+        if is_draft and not self.weight_transfer_engine.supports_draft_weight_update:
+            raise RuntimeError(
+                f"{type(self.weight_transfer_engine).__name__} does not support "
+                "draft model weight updates."
+            )
 
         if self._weight_update_active:
             raise RuntimeError(
@@ -1178,7 +1244,13 @@ class Worker(WorkerBase):
                 "active. Call finish_weight_update first."
             )
 
-        self.weight_transfer_engine.start_weight_update()
+        try:
+            if is_draft:
+                self._set_draft_weight_update_target()
+            self.weight_transfer_engine.start_weight_update()
+        except BaseException:
+            self.weight_transfer_engine.reset_weight_update_target()
+            raise
         self._weight_update_active = True
 
     def update_weights(self, update_info: dict) -> None:
@@ -1187,6 +1259,8 @@ class Worker(WorkerBase):
 
         start_weight_update must be called before update_weights and
         finish_weight_update must be called after all chunks have been sent.
+        Every chunk loads into whichever model the session's start_weight_update
+        / start_draft_weight_update call selected.
 
         Args:
             update_info: Dictionary containing backend-specific update info
@@ -1199,11 +1273,13 @@ class Worker(WorkerBase):
                 "start_weight_update must be called before update_weights."
             )
 
-        try:
-            self.weight_transfer_engine.update_weights(update_info)
-        except BaseException:
-            self._weight_update_active = False
-            raise
+        with set_current_vllm_config(self.vllm_config):
+            try:
+                self.weight_transfer_engine.update_weights(update_info)
+            except BaseException:
+                self._weight_update_active = False
+                self.weight_transfer_engine.reset_weight_update_target()
+                raise
 
     def finish_weight_update(self) -> None:
         """Finish the current weight update session."""
@@ -1215,8 +1291,10 @@ class Worker(WorkerBase):
                 "finish_weight_update called without a matching start_weight_update."
             )
 
-        self.weight_transfer_engine.finish_weight_update()
-        self._weight_update_active = False
+        with set_current_vllm_config(self.vllm_config):
+            self.weight_transfer_engine.finish_weight_update()
+            self.weight_transfer_engine.reset_weight_update_target()
+            self._weight_update_active = False
 
     def shutdown(self) -> None:
         gc.unfreeze()

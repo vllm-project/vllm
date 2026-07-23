@@ -141,6 +141,26 @@ class BuildSettings(BaseSettings):
             "in order to force the use of precompiled binaries."
         ),
     )
+    build_commit: str = Field(
+        default="unknown",
+        description=(
+            "Build provenance metadata embedded in official vllm-openai "
+            "images. Set via Docker ENV at image build time; informational "
+            "only."
+        ),
+    )
+    build_pipeline: str = Field(
+        default="local",
+        description="Build pipeline that produced the image. Informational only.",
+    )
+    build_url: str = Field(
+        default="",
+        description="URL of the build that produced the image. Informational only.",
+    )
+    image_tag: str = Field(
+        default="",
+        description="Tag of the official image. Informational only.",
+    )
     cmake_build_type: Literal["Debug", "Release", "RelWithDebInfo"] | None = Field(
         default=None,
         alias="CMAKE_BUILD_TYPE",
@@ -234,6 +254,19 @@ class PathSettings(BaseSettings):
             "can hold all. Each component first checks this folder, then the "
             "configs shipped with vLLM (if any). If no JSON matches, it uses "
             "a hard-coded heuristic."
+        ),
+    )
+    enable_startup_plan: bool = Field(
+        default=False,
+        description=(
+            "Opt-in persistence of the startup plan. When enabled, each "
+            "worker saves the memory-profiling result (the suggested "
+            "--kv-cache-memory value and the free-memory baseline) under "
+            "VLLM_CACHE_ROOT/startup_plan/, keyed by a hardware+config "
+            "fingerprint, and later boots auto-apply it -- skipping memory "
+            "profiling -- when the fingerprint matches and current free "
+            "memory >= the recorded baseline. See "
+            "vllm/v1/worker/startup_plan.py."
         ),
     )
     model_redirect_path: str | None = Field(
@@ -405,6 +438,14 @@ class ServerSettings(BaseSettings):
             "output sequences per request). Limits resource consumption to "
             "prevent denial-of-service via excessively large fan-out. "
             "Default: 16384."
+        ),
+    )
+    max_completion_prompts: int = Field(
+        default=1024,
+        description=(
+            "Maximum number of prompts allowed in a single /v1/completions "
+            "request when the prompt field is a list. Prevents unbounded "
+            "fan-out of engine requests from a single API call. Default: 1024."
         ),
     )
     engine_iteration_timeout_s: int = Field(
@@ -1393,10 +1434,6 @@ class RocmSettings(BaseSettings):
             "Default on."
         ),
     )
-    rocm_use_aiter_paged_attn: bool = Field(
-        default=False,
-        description="Whether to use aiter paged attention. By default is disabled.",
-    )
     rocm_use_aiter_linear: bool = Field(
         default=True,
         description=(
@@ -1557,21 +1594,6 @@ class TpuXpuSettings(BaseSettings):
         default=False,
         description="Enable SPMD mode for TPU backend.",
     )
-    tpu_bucket_padding_gap: int = Field(
-        default=0,
-        description=(
-            "Gap between padding buckets for the forward pass. So we have 8, "
-            "we will run forward pass with [16, 24, 32, ...]."
-        ),
-    )
-    tpu_most_model_len: int | None = Field(
-        default=None,
-        description=(
-            "The 'most' model length to optimize for on TPU. If set, the TPU "
-            "backend pre-compiles graphs targeted at this length and falls "
-            "back gracefully for sequences that exceed it."
-        ),
-    )
     tpu_using_pathways: bool = Field(
         default_factory=_tpu_pathways_default,
         validation_alias=_TPU_PATHWAYS_SENTINEL,
@@ -1617,6 +1639,15 @@ class FlashInferSettings(BaseSettings):
             "Override the directory for the FlashInfer autotune config cache."
         ),
     )
+    flashinfer_autotune_skip_ops: Annotated[list[str] | None, NoDecode] = Field(
+        default=None,
+        description=(
+            "Comma-separated FlashInfer op names to exclude from autotuning, "
+            "using the heuristic fallback tactic instead. Unset: skip "
+            '"fp4_gemm" when the CuTe-DSL NVFP4 linear kernel is selected. '
+            "Empty: skip nothing."
+        ),
+    )
     flashinfer_allreduce_backend: Literal["auto", "trtllm", "mnnvl"] = Field(
         default="auto",
         description="Flashinfer fused allreduce backend.",
@@ -1624,16 +1655,6 @@ class FlashInferSettings(BaseSettings):
     flashinfer_workspace_buffer_size: int = Field(
         default=394 * 1024 * 1024,
         description="Control the workspace buffer size for the FlashInfer backend.",
-    )
-    flashinfer_allreduce_fusion_thresholds_mb: Annotated[dict, NoDecode] = Field(
-        default_factory=dict,
-        description=(
-            "Specifies the thresholds of the communicated tensor sizes "
-            "under which vllm should use flashinfer fused allreduce. The "
-            "variable should be a JSON with the following format: "
-            "{ <world size>: <max size in mb> }. Unspecified world sizes "
-            "will fall back to { 2: 64, 4: 1, <everything else>: 0.5 }."
-        ),
     )
     blockscale_fp8_gemm_flashinfer: bool = Field(
         default=True,
@@ -1661,13 +1682,15 @@ class FlashInferSettings(BaseSettings):
         ),
     )
 
-    @field_validator("flashinfer_allreduce_fusion_thresholds_mb", mode="before")
+    @field_validator("flashinfer_autotune_skip_ops", mode="before")
     @classmethod
-    def _parse_json_thresholds(cls, v: Any) -> Any:
-        if v is None or v == "":
-            return {}
+    def _parse_flashinfer_skip_ops(cls, v: Any) -> Any:
+        if v is None:
+            return None
+        if isinstance(v, list):
+            return v
         if isinstance(v, str):
-            return json.loads(v)
+            return [s.strip() for s in v.split(",") if s.strip()]
         return v
 
 
@@ -1730,6 +1753,12 @@ class QuantSettings(BaseSettings):
         default=True,
         description="Whether to create TMA-aligned scale tensor when DeepGEMM is used.",
     )
+    dcp_q_replicate: bool = Field(
+        default=False,
+        description=(
+            "Opt-in MLA DCP query replication: skip the decode query all-gather."
+        ),
+    )
     deep_gemm_warmup: Literal["skip", "full", "relax"] = Field(
         default="relax",
         description=(
@@ -1750,12 +1779,12 @@ class QuantSettings(BaseSettings):
         description="Whether to use fused grouped_topk used for MoE expert selection.",
     )
     moe_skip_padding: bool = Field(
-        default=False,
+        default=True,
         description=(
             "Skip cudagraph/DP padding tokens in the MoE path by forcing "
             "their expert ids to -1 so the dispatch and experts drop them. "
             "Requires a MoE kernel that treats topk_id == -1 as a skip "
-            "sentinel; off by default because not all kernels support it yet."
+            "sentinel."
         ),
     )
     deepep_buffer_size_mb: int = Field(
@@ -1882,12 +1911,12 @@ class QuantSettings(BaseSettings):
         default=False,
         description="If set, vLLM will disable the MLA attention optimizations.",
     )
-    triton_attn_use_td: bool | None = Field(
+    triton_use_td: bool | None = Field(
         default=None,
         description=(
             "Use tensor descriptors for Q/K/V loads and output stores in the "
             "Triton unified-attention kernel. Enables HW 2D block reads on "
-            "Intel Xe2/Xe3; the non-TD branch is dead-code-eliminated at "
+            "Intel XPU; the non-TD branch is dead-code-eliminated at "
             "Triton compile time so other platforms see no overhead. "
             "Tri-state override: unset (default) lets the `triton_attn` "
             "backend auto-select per platform (currently auto-enabled on "
@@ -1998,9 +2027,9 @@ class QuantSettings(BaseSettings):
             return bool(int(v))
         return v
 
-    @field_validator("triton_attn_use_td", mode="before")
+    @field_validator("triton_use_td", mode="before")
     @classmethod
-    def _parse_triton_attn_use_td(cls, v: Any) -> Any:
+    def _parse_triton_use_td(cls, v: Any) -> Any:
         if v is None or isinstance(v, bool):
             return v
         if isinstance(v, str):
@@ -2018,6 +2047,33 @@ class ConnectorSettings(BaseSettings):
     nixl_side_channel_port: int = Field(
         default=5600,
         description="Port used for NIXL handshake between remote agents.",
+    )
+    p2p_side_channel_host: str = Field(
+        default="localhost",
+        description=(
+            "Address the P2P KV-offload control socket binds to. Defaults to "
+            "``localhost`` (loopback only); must be set to the node IP for "
+            "cross-host P2P so remote peers can reach the socket."
+        ),
+    )
+    p2p_side_channel_port: int = Field(
+        default=5710,
+        description="Port the P2P KV-offload control socket binds to.",
+    )
+    ec_side_channel_host: str = Field(
+        default="localhost",
+        description=(
+            "IP address used for the EC connector's ZMQ side channel "
+            "(producer ROUTER bind, consumer DEALER dial)."
+        ),
+    )
+    ec_side_channel_port: int = Field(
+        default=5601,
+        description=(
+            "Port for the EC connector's ZMQ side channel; advertised to "
+            "peers via `ec_transfer_params.peer_port` on the producer's "
+            "response."
+        ),
     )
     nixl_ep_max_num_ranks: int = Field(
         default=32,
@@ -2195,12 +2251,6 @@ class UsageSettings(BaseSettings):
     usage_source: str = Field(
         default="production",
         description="Label identifying the deployment context reported in usage stats.",
-    )
-    ci_use_s3: bool = Field(
-        default=False,
-        description=(
-            "Whether to use S3 path for model loading in CI via RunAI Streamer."
-        ),
     )
     test_force_fp8_marlin: bool = Field(
         default=False,
@@ -2598,6 +2648,13 @@ def compile_factors() -> dict[str, object]:
         "VLLM_DEBUG_DUMP_PATH",
         "VLLM_PORT",
         "VLLM_CACHE_ROOT",
+        # Location-only derived paths: where a cache/config dir lives cannot
+        # affect compiled artifacts, and hashing them means relocating HOME
+        # or the XDG roots silently invalidates every compile cache.
+        "VLLM_XLA_CACHE_PATH",
+        "VLLM_CONFIG_ROOT",
+        # Runtime memory-plan persistence; does not affect compiled graphs.
+        "VLLM_ENABLE_STARTUP_PLAN",
         "LD_LIBRARY_PATH",
         "VLLM_SERVER_DEV_MODE",
         "VLLM_USE_RUST_FRONTEND",
@@ -2608,7 +2665,6 @@ def compile_factors() -> dict[str, object]:
         "VLLM_DP_MASTER_PORT",
         "VLLM_NIXL_SIDE_CHANNEL_HOST",
         "VLLM_RANDOMIZE_DP_DUMMY_INPUTS",
-        "VLLM_CI_USE_S3",
         "VLLM_MODEL_REDIRECT_PATH",
         "VLLM_HOST_IP",
         "VLLM_FORCE_AOT_LOAD",
@@ -2627,6 +2683,8 @@ def compile_factors() -> dict[str, object]:
         "VLLM_DEBUG_LOG_API_SERVER_RESPONSE",
         "VLLM_TUNED_CONFIG_FOLDER",
         "VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR",
+        # Heuristic-fallback op selection; does not affect compiled graphs.
+        "VLLM_FLASHINFER_AUTOTUNE_SKIP_OPS",
         "VLLM_ENGINE_ITERATION_TIMEOUT_S",
         "VLLM_HTTP_TIMEOUT_KEEP_ALIVE",
         "VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS",
