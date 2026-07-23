@@ -691,69 +691,6 @@ async fn test_app_with_dev_mode(dev_mode_enabled: bool) -> axum::Router {
     )
 }
 
-#[tokio::test]
-async fn render_chat_returns_generate_request_with_header_request_id() {
-    let mut app = test_render_app();
-    let response = app
-        .call(
-            Request::builder()
-                .method("POST")
-                .uri("/v1/chat/completions/render")
-                .header("content-type", "application/json")
-                .header("X-Request-Id", "header-req")
-                .body(Body::from(
-                    json!({
-                        "request_id": "body-req",
-                        "model": "render-model",
-                        "messages": [{"role": "user", "content": "hello"}],
-                        "max_completion_tokens": 8
-                    })
-                    .to_string(),
-                ))
-                .expect("build request"),
-        )
-        .await
-        .expect("call app");
-
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
-    let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
-
-    assert_eq!(json["request_id"], "chatcmpl-header-req");
-    assert!(!json["prompt_token_ids"].as_array().unwrap().is_empty());
-}
-
-#[tokio::test]
-async fn render_completion_returns_generate_request_with_body_request_id() {
-    let mut app = test_render_app();
-    let response = app
-        .call(
-            Request::builder()
-                .method("POST")
-                .uri("/v1/completions/render")
-                .header("content-type", "application/json")
-                .body(Body::from(
-                    json!({
-                        "request_id": "body-req",
-                        "model": "render-model",
-                        "prompt": "hello",
-                        "max_tokens": 8
-                    })
-                    .to_string(),
-                ))
-                .expect("build request"),
-        )
-        .await
-        .expect("call app");
-
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
-    let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
-
-    assert_eq!(json[0]["request_id"], "cmpl-body-req");
-    assert!(!json[0]["prompt_token_ids"].as_array().unwrap().is_empty());
-}
-
 /// Build a dev-mode router backed by a mock engine using a custom ready
 /// response, returning the router and the engine task handle so the engine
 /// stays alive for the duration of the test.
@@ -1097,6 +1034,69 @@ fn metric_delta(
 ) -> f64 {
     metric_value(rendered_after, metric, labels).unwrap_or(0.0)
         - metric_value(rendered_before, metric, labels).unwrap_or(0.0)
+}
+
+#[tokio::test]
+async fn render_chat_returns_generate_request_with_header_request_id() {
+    let mut app = test_render_app();
+    let response = app
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions/render")
+                .header("content-type", "application/json")
+                .header("X-Request-Id", "header-req")
+                .body(Body::from(
+                    json!({
+                        "request_id": "body-req",
+                        "model": "render-model",
+                        "messages": [{"role": "user", "content": "hello"}],
+                        "max_completion_tokens": 8
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
+
+    assert_eq!(json["request_id"], "chatcmpl-header-req");
+    assert!(!json["prompt_token_ids"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn render_completion_returns_generate_request_with_body_request_id() {
+    let mut app = test_render_app();
+    let response = app
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/completions/render")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "request_id": "body-req",
+                        "model": "render-model",
+                        "prompt": "hello",
+                        "max_tokens": 8
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
+
+    assert_eq!(json[0]["request_id"], "cmpl-body-req");
+    assert!(!json[0]["prompt_token_ids"].as_array().unwrap().is_empty());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
