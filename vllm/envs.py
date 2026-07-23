@@ -296,6 +296,7 @@ if TYPE_CHECKING:
     VLLM_GPU_NIC_PCIE_MAPPING: str = ""
     VLLM_NIC_SELECTION_VARS: str = ""
     VLLM_PREFIX_CACHE_RETENTION_INTERVAL: int | None = None
+    VLLM_LORA_REQUEST_ASYNC_LOADING_CUDA: bool = False
 
 
 def get_default_cache_root():
@@ -2003,6 +2004,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Enable simple KV offload.
     "VLLM_USE_SIMPLE_KV_OFFLOAD": lambda: bool(
         int(os.getenv("VLLM_USE_SIMPLE_KV_OFFLOAD", "0"))
+    ),
+    # enable LORA per Request Async Loading for GPU Accelerators
+    "VLLM_LORA_REQUEST_ASYNC_LOADING_CUDA": lambda: bool(
+        int(os.getenv("VLLM_LORA_REQUEST_ASYNC_LOADING_CUDA", "0"))
     ),
     # Whether to enable dual cuda streams for LoRA computation
     # (used by both BaseLinearLayerWithLoRA and FusedMoEWithLoRA to

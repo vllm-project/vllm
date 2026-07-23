@@ -50,7 +50,11 @@ def reformat(text: str) -> str:
     return text
 
 
-def generate_and_test(llm: vllm.LLM, lora_path: str, lora_id: int) -> None:
+def generate_and_test(
+    llm: vllm.LLM,
+    lora_path: str,
+    lora_id: list[int | None] | int | None,
+) -> None:
     prompts = [
         PROMPT_TEMPLATE.format(
             context="Give the average number of working horses on farms with more than 5000 total horses."  # noqa: E501
@@ -63,11 +67,15 @@ def generate_and_test(llm: vllm.LLM, lora_path: str, lora_id: int) -> None:
         ),
     ]
     sampling_params = vllm.SamplingParams(temperature=0, max_tokens=64)
-    outputs = llm.generate(
-        prompts,
-        sampling_params,
-        lora_request=LoRARequest(str(lora_id), lora_id, lora_path) if lora_id else None,
-    )
+    if isinstance(lora_id, int):
+        lora_request = LoRARequest(str(lora_id), lora_id, lora_path)
+    elif isinstance(lora_id, list):
+        lora_request = [
+            LoRARequest(str(i), i, lora_path) if i is not None else None
+            for i in lora_id
+        ]
+
+    outputs = llm.generate(prompts, sampling_params, lora_request=lora_request)
     # Print the outputs.
     generated_texts: list[str] = []
     for output in outputs:
@@ -101,29 +109,39 @@ def generate_and_test(llm: vllm.LLM, lora_path: str, lora_id: int) -> None:
     ],
 )
 @pytest.mark.parametrize("specialize_active_lora", [True, False])
+@pytest.mark.parametrize("async_loading", [True, False])
 def test_gpt_oss_lora(
+    monkeypatch: pytest.MonkeyPatch,
     gptoss20b_lora_files,
     mxfp4_use_marlin,
     specialize_active_lora,
+    async_loading,
 ):
-    llm = vllm.LLM(
-        MODEL_PATH,
-        max_model_len=1024,
-        enable_lora=True,
-        max_loras=4,
-        max_lora_rank=8,
-        max_num_seqs=2,
-        max_num_batched_tokens=2048,
-        specialize_active_lora=specialize_active_lora,
-        moe_backend="marlin" if mxfp4_use_marlin else "auto",
-        linear_backend="marlin" if mxfp4_use_marlin else "auto",
-        compilation_config=vllm.config.CompilationConfig(  # Avoid OOM
-            cudagraph_specialize_lora=False,
-        ),
-    )
+    with monkeypatch.context() as m:
+        if async_loading:
+            m.setenv("VLLM_LORA_REQUEST_ASYNC_LOADING_CUDA", "1")
 
-    generate_and_test(llm, gptoss20b_lora_files, lora_id=1)
-    generate_and_test(llm, gptoss20b_lora_files, lora_id=2)
+        llm = vllm.LLM(
+            MODEL_PATH,
+            max_model_len=1024,
+            enable_lora=True,
+            max_loras=1 if async_loading else 4,
+            max_cpu_loras=4,
+            max_lora_rank=8,
+            max_num_seqs=2,
+            max_num_batched_tokens=2048,
+            specialize_active_lora=specialize_active_lora,
+            moe_backend="marlin" if mxfp4_use_marlin else "auto",
+            linear_backend="marlin" if mxfp4_use_marlin else "auto",
+            compilation_config=vllm.config.CompilationConfig(  # Avoid OOM
+                cudagraph_specialize_lora=False,
+            ),
+        )
+
+        generate_and_test(llm, gptoss20b_lora_files, lora_id=1)
+        generate_and_test(llm, gptoss20b_lora_files, lora_id=2)
+        if async_loading:
+            generate_and_test(llm, gptoss20b_lora_files, lora_id=1)
 
 
 @multi_gpu_test(num_gpus=2)
@@ -140,28 +158,83 @@ def test_gpt_oss_lora(
         ),
     ],
 )
+@pytest.mark.parametrize("async_loading", [True, False])
 def test_gpt_oss_lora_tp2(
+    monkeypatch: pytest.MonkeyPatch,
     gptoss20b_lora_files,
     fully_sharded_loras,
     mxfp4_use_marlin,
+    async_loading,
 ):
-    llm = vllm.LLM(
-        MODEL_PATH,
-        max_model_len=1024,
-        enable_lora=True,
-        max_loras=2,
-        max_num_seqs=2,
-        max_num_batched_tokens=2048,
-        tensor_parallel_size=2,
-        gpu_memory_utilization=0.8,
-        fully_sharded_loras=fully_sharded_loras,
-        enable_expert_parallel=not fully_sharded_loras,
-        moe_backend="marlin" if mxfp4_use_marlin else "auto",
-        linear_backend="marlin" if mxfp4_use_marlin else "auto",
-        compilation_config=vllm.config.CompilationConfig(
-            cudagraph_specialize_lora=False,
-        ),
-    )
+    with monkeypatch.context() as m:
+        if async_loading:
+            m.setenv("VLLM_LORA_REQUEST_ASYNC_LOADING_CUDA", "1")
 
-    generate_and_test(llm, gptoss20b_lora_files, lora_id=1)
-    generate_and_test(llm, gptoss20b_lora_files, lora_id=2)
+        llm = vllm.LLM(
+            MODEL_PATH,
+            max_model_len=1024,
+            enable_lora=True,
+            max_loras=1 if async_loading else 2,
+            max_cpu_loras=4 if async_loading else None,
+            max_num_seqs=2,
+            max_num_batched_tokens=2048,
+            tensor_parallel_size=2,
+            gpu_memory_utilization=0.8,
+            fully_sharded_loras=fully_sharded_loras,
+            enable_expert_parallel=not fully_sharded_loras,
+            moe_backend="marlin" if mxfp4_use_marlin else "auto",
+            linear_backend="marlin" if mxfp4_use_marlin else "auto",
+            compilation_config=vllm.config.CompilationConfig(  # Avoid OOM
+                cudagraph_specialize_lora=False,
+            ),
+        )
+
+        generate_and_test(llm, gptoss20b_lora_files, lora_id=1)
+        generate_and_test(llm, gptoss20b_lora_files, lora_id=2)
+        if async_loading:
+            generate_and_test(llm, gptoss20b_lora_files, lora_id=1)
+
+
+@multi_gpu_test(num_gpus=2)
+@pytest.mark.parametrize(
+    "mxfp4_use_marlin",
+    [
+        False,
+        pytest.param(
+            True,
+            marks=pytest.mark.skipif(
+                current_platform.is_rocm(), reason="marlin not supported"
+            ),
+        ),
+    ],
+)
+@pytest.mark.parametrize("async_loading", [True, False])
+def test_gpt_oss_batch_lora(
+    monkeypatch: pytest.MonkeyPatch,
+    gptoss20b_lora_files,
+    mxfp4_use_marlin,
+    async_loading,
+):
+    with monkeypatch.context() as m:
+        if async_loading:
+            m.setenv("VLLM_LORA_REQUEST_ASYNC_LOADING_CUDA", "1")
+
+        llm = vllm.LLM(
+            MODEL_PATH,
+            max_model_len=1024,
+            enable_lora=True,
+            max_loras=3,
+            max_cpu_loras=8,
+            max_num_seqs=2,
+            max_num_batched_tokens=2048,
+            tensor_parallel_size=2,
+            gpu_memory_utilization=0.8,
+            moe_backend="marlin" if mxfp4_use_marlin else "auto",
+            linear_backend="marlin" if mxfp4_use_marlin else "auto",
+            compilation_config=vllm.config.CompilationConfig(  # Avoid OOM
+                cudagraph_specialize_lora=False,
+            ),
+        )
+
+        generate_and_test(llm, gptoss20b_lora_files, lora_id=[1, 2, 3])
+        generate_and_test(llm, gptoss20b_lora_files, lora_id=[4, 5, 6])
