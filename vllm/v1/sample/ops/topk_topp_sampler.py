@@ -7,7 +7,7 @@ import torch.nn as nn
 
 from vllm import envs
 from vllm._aiter_ops import rocm_aiter_ops
-from vllm.config.model import LogprobsMode
+from vllm.config.model import PROCESSED_LOGPROBS_MODES, LogprobsMode
 from vllm.logger import init_logger
 from vllm.platforms import CpuArchEnum, current_platform
 from vllm.triton_utils import HAS_TRITON
@@ -87,7 +87,7 @@ class TopKTopPSampler(nn.Module):
             # FlashInfer doesn't expose post-top-k/top-p logits/logprobs,
             # so it can't be used when the configured mode requires them.
             can_use_flashinfer = (
-                logprobs_mode not in ("processed_logits", "processed_logprobs")
+                logprobs_mode not in PROCESSED_LOGPROBS_MODES
                 and flashinfer_sampler_supported()
             )
             self.forward = (
@@ -108,7 +108,7 @@ class TopKTopPSampler(nn.Module):
             else:
                 self.forward = self.forward_native
         elif (
-            logprobs_mode not in ("processed_logits", "processed_logprobs")
+            logprobs_mode not in PROCESSED_LOGPROBS_MODES
             and rocm_aiter_ops.is_enabled()
         ):
             self.aiter_ops = None
@@ -165,7 +165,7 @@ class TopKTopPSampler(nn.Module):
             return self.forward_native(logits, generators, k, p)
         if self.use_fp64_gumbel:
             return self.forward_native(logits, generators, k, p)
-        assert self.logprobs_mode not in ("processed_logits", "processed_logprobs"), (
+        assert self.logprobs_mode not in PROCESSED_LOGPROBS_MODES, (
             "FlashInfer does not support returning logits/logprobs"
         )
         # flashinfer sampling functions expect contiguous logits.
@@ -236,10 +236,9 @@ class TopKTopPSampler(nn.Module):
             return self.forward_native(logits, generators, k, p)
         if self.use_fp64_gumbel:
             return self.forward_native(logits, generators, k, p)
-        assert self.logprobs_mode not in (
-            "processed_logits",
-            "processed_logprobs",
-        ), "aiter sampler does not support returning logits/logprobs."
+        assert self.logprobs_mode not in PROCESSED_LOGPROBS_MODES, (
+            "aiter sampler does not support returning logits/logprobs."
+        )
         if self.aiter_ops is None and not self._init_aiter_ops():
             return self.forward_native(logits, generators, k, p)
         return self.aiter_sample(logits, k, p, generators), None
@@ -300,10 +299,7 @@ class TopKTopPSampler(nn.Module):
             logits.shape[0], dtype=torch.int64, device=logits.device
         )
         logits_to_return = None
-        if (
-            self.logprobs_mode == "processed_logits"
-            or self.logprobs_mode == "processed_logprobs"
-        ):
+        if self.logprobs_mode in PROCESSED_LOGPROBS_MODES:
             logits_to_return = torch.empty_like(logits)
 
         assert len(generators) != logits.shape[0], (
