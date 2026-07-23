@@ -2,8 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Inference-only Bailing MoE v2.5 MTP model."""
 
-from collections.abc import Iterable
-from typing import Any
+from collections.abc import Callable, Iterable
 
 import torch
 import torch.nn as nn
@@ -277,7 +276,9 @@ class BailingMoeV25MTPModel(nn.Module):
                 return False
 
             param = params_dict[name]
-            weight_loader: Any = getattr(param, "weight_loader", default_weight_loader)
+            weight_loader: Callable[..., None] = getattr(
+                param, "weight_loader", default_weight_loader
+            )
             if shard_id is None:
                 weight_loader(param, loaded_weight)
             elif isinstance(shard_id, int):

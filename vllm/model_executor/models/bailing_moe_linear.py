@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import copy
-from collections.abc import Iterable
-from typing import Any
+from collections.abc import Callable, Iterable
 
 import torch
 import torch.nn as nn
@@ -618,7 +617,9 @@ class BailingMoeV25Model(nn.Module):
                 return False
 
             param = params_dict[name]
-            weight_loader: Any = getattr(param, "weight_loader", default_weight_loader)
+            weight_loader: Callable[..., None] = getattr(
+                param, "weight_loader", default_weight_loader
+            )
 
             if shard_id is None:
                 weight_loader(param, tensor)
