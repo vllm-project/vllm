@@ -17,7 +17,7 @@ PyNvVideoCodec==2.0.4
 flashinfer-python==0.6.15.post1
 flashinfer-cubin==0.6.15.post1
 apache-tvm-ffi==0.1.10
-tilelang==0.1.9
+tilelang==0.1.10
 nvidia-cudnn-frontend>=1.19.1
 # Required for LLM_NVTX_SCOPES_FOR_PROFILING=1
 nvtx==0.2.15
