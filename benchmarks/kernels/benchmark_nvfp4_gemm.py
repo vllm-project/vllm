@@ -24,6 +24,8 @@ PROVIDER_CFGS = {
     "torch-bf16": dict(enabled=True),
     "nvfp4": dict(no_a_quant=False, enabled=True),
     "nvfp4-noquant": dict(no_a_quant=True, enabled=True),
+    "triton-nvfp4": dict(triton=True, no_a_quant=False, enabled=True),
+    "triton-nvfp4-noquant": dict(triton=True, no_a_quant=True, enabled=True),
     "fbgemm-nvfp4": dict(fbgemm=True, no_a_quant=False, enabled=True),
     "fbgemm-nvfp4-noquant": dict(fbgemm=True, no_a_quant=True, enabled=True),
 }
@@ -47,6 +49,14 @@ if _needs_fbgemm:
             if cfg.get("fbgemm"):
                 cfg["enabled"] = False
 
+try:
+    from triton_nvfp4_gemm import triton_scaled_fp4_mm
+except ImportError:
+    # Disable Triton providers if kernel is not available
+    for cfg in PROVIDER_CFGS.values():
+        if cfg.get("triton"):
+            cfg["enabled"] = False
+
 _enabled = [k for k, v in PROVIDER_CFGS.items() if v["enabled"]]
 
 
@@ -59,6 +69,40 @@ def _quant_weight_nvfp4(b: torch.Tensor, device: str, cfg):
     else:
         b_fp4, scale_b_fp4 = ops.scaled_fp4_quant(b, b_global_scale)
     return b_fp4, scale_b_fp4, b_global_scale
+
+
+def _quant_nvfp4_linear_scales(
+    x: torch.Tensor, device: str
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Quantize to NVFP4 with linear (non-swizzled) block scales for Triton."""
+    x_amax = torch.abs(x).max().to(torch.float32)
+    global_scale = FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX / (x_amax + 1e-12)
+    fp4, scale = ops.scaled_fp4_quant(x, global_scale, is_sf_swizzled_layout=False)
+    return fp4, scale, global_scale
+
+
+def build_triton_nvfp4_runner(cfg, a, b, dtype, device):
+    """Build a runner for the Triton NVFP4 GEMM kernel."""
+    b_fp4, scale_b, b_global_scale = _quant_nvfp4_linear_scales(b, device)
+    a_amax = torch.abs(a).max().to(torch.float32)
+    a_global_scale = FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX / (a_amax + 1e-12)
+    alpha = 1.0 / (a_global_scale * b_global_scale)
+
+    if cfg["no_a_quant"]:
+        a_fp4, scale_a, _ = _quant_nvfp4_linear_scales(a, device)
+
+        def run():
+            return triton_scaled_fp4_mm(a_fp4, b_fp4, scale_a, scale_b, alpha, dtype)
+
+        return run
+
+    def run():
+        a_fp4, scale_a = ops.scaled_fp4_quant(
+            a, a_global_scale, is_sf_swizzled_layout=False
+        )
+        return triton_scaled_fp4_mm(a_fp4, b_fp4, scale_a, scale_b, alpha, dtype)
+
+    return run
 
 
 def build_nvfp4_runner(cfg, a, b, dtype, device):
@@ -151,7 +195,10 @@ def benchmark(batch_size, provider, N, K):
         )
     else:
         cfg = PROVIDER_CFGS[provider]
-        run_quant = build_nvfp4_runner(cfg, a, b, dtype, device)
+        if cfg.get("triton"):
+            run_quant = build_triton_nvfp4_runner(cfg, a, b, dtype, device)
+        else:
+            run_quant = build_nvfp4_runner(cfg, a, b, dtype, device)
         ms, min_ms, max_ms = triton.testing.do_bench_cudagraph(
             lambda: run_quant(), quantiles=quantiles
         )
