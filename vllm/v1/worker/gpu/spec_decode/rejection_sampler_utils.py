@@ -46,8 +46,8 @@ def _compute_global_logsumexp(
 
 @triton.jit
 def _compute_global_residual_mass(
-    local_residual_mass_ptr,
-    local_residual_mass_stride,
+    local_min_sums_ptr,
+    local_min_sums_stride,
     prefix_joint_ratio,
     target_logits_ptr,
     target_logits_stride,
@@ -62,18 +62,19 @@ def _compute_global_residual_mass(
     HAS_DRAFT_LOGITS: tl.constexpr,
 ):
     if HAS_DRAFT_LOGITS:
+        # Per-vocab-block partials of the min-sum, accumulated by
+        # _compute_local_min_sums_kernel.
         blocks = tl.arange(0, PADDED_VOCAB_NUM_BLOCKS)
         mask = blocks < vocab_num_blocks
         partials = tl.load(
-            local_residual_mass_ptr + logit_idx * local_residual_mass_stride + blocks,
+            local_min_sums_ptr + logit_idx * local_min_sums_stride + blocks,
             mask=mask,
             other=0.0,
         )
-        return tl.sum(partials, axis=0)
+        min_sum = tl.sum(partials, axis=0)
     else:
-        # One-hot draft. M_s is a point mass at this draft token
-        # so the residual mass reduces to the closed form:
-        #   p * (1 - M_b(draft_token)).
+        # One-hot draft. M_s is a point mass at this draft token, so the
+        # min-sum reduces to the closed form p * M_b(draft_token).
         draft_token = tl.load(draft_sampled_ptr + logit_idx + 1).to(tl.int64)
         target_lse = _compute_global_logsumexp(
             target_local_max_ptr,
@@ -87,8 +88,9 @@ def _compute_global_residual_mass(
         target_logit = tl.load(
             target_logits_ptr + logit_idx * target_logits_stride + draft_token,
         ).to(tl.float32)
-        m_b = tl.exp(target_logit - target_lse)
-        return prefix_joint_ratio * (1.0 - m_b)
+        min_sum = prefix_joint_ratio * tl.exp(target_logit - target_lse)
+    # Clamped at zero against floating-point rounding.
+    return tl.maximum(prefix_joint_ratio - min_sum, 0.0)
 
 
 @triton.jit
@@ -296,6 +298,10 @@ def _compute_local_logits_stats_kernel(
 def _compute_cumulative_log_p_kernel(
     # [num_logits]
     cumulative_log_p_ptr,
+    # [num_logits]
+    target_lse_ptr,
+    # [num_logits]
+    draft_lse_ptr,
     # [num_logits, V]
     target_logits_ptr,
     target_logits_stride,
@@ -340,59 +346,59 @@ def _compute_cumulative_log_p_kernel(
     for step in range(num_draft_tokens):
         logit_idx = start_idx + step
         draft_token = tl.load(draft_sampled_ptr + logit_idx + 1).to(tl.int64)
-        target_logprob, draft_logprob, _, _ = _compute_global_logprobs_and_logsumexp(
-            draft_token,
-            True,  # mask
-            logit_idx,
-            req_state_idx,
-            step,
-            target_logits_ptr,
-            target_logits_stride,
-            target_local_max_ptr,
-            target_local_max_stride,
-            target_local_sumexp_ptr,
-            target_local_sumexp_stride,
-            draft_logits_ptr,
-            draft_logits_stride_0,
-            draft_logits_stride_1,
-            draft_local_max_ptr,
-            draft_local_max_stride,
-            draft_local_sumexp_ptr,
-            draft_local_sumexp_stride,
-            vocab_num_blocks,
-            PADDED_VOCAB_NUM_BLOCKS,
-            HAS_DRAFT_LOGITS,
+        target_logprob, draft_logprob, target_lse, draft_lse = (
+            _compute_global_logprobs_and_logsumexp(
+                draft_token,
+                True,  # mask
+                logit_idx,
+                req_state_idx,
+                step,
+                target_logits_ptr,
+                target_logits_stride,
+                target_local_max_ptr,
+                target_local_max_stride,
+                target_local_sumexp_ptr,
+                target_local_sumexp_stride,
+                draft_logits_ptr,
+                draft_logits_stride_0,
+                draft_logits_stride_1,
+                draft_local_max_ptr,
+                draft_local_max_stride,
+                draft_local_sumexp_ptr,
+                draft_local_sumexp_stride,
+                vocab_num_blocks,
+                PADDED_VOCAB_NUM_BLOCKS,
+                HAS_DRAFT_LOGITS,
+            )
         )
+        if HAS_DRAFT_LOGITS:
+            # Cache the logsumexps, reused by
+            # _compute_local_residual_mass_kernel instead of re-reducing
+            # the per-block stats.
+            tl.store(target_lse_ptr + logit_idx, target_lse)
+            tl.store(draft_lse_ptr + logit_idx, draft_lse)
         log_p = tl.minimum(log_p + (target_logprob - draft_logprob), 0.0)
         tl.store(cumulative_log_p_ptr + logit_idx, log_p)
 
 
 @triton.jit
-def _compute_local_residual_mass_kernel(
+def _compute_local_min_sums_kernel(
     # [num_logits, num_blocks]
-    local_residual_mass_ptr,
-    local_residual_mass_stride,
+    local_min_sum_ptr,
+    local_min_sum_stride,
     # [num_logits]
     cumulative_log_p_ptr,
     # [num_logits, V]
     target_logits_ptr,
     target_logits_stride,
-    # [num_logits, num_blocks]
-    target_local_max_ptr,
-    target_local_max_stride,
-    # [num_logits, num_blocks]
-    target_local_sumexp_ptr,
-    target_local_sumexp_stride,
+    # [num_logits]
+    target_lse_ptr,
     # [max_num_reqs, num_speculative_steps, V]
     draft_logits_ptr,
     draft_logits_stride_0,
     draft_logits_stride_1,
-    # [num_logits, num_blocks]
-    draft_local_max_ptr,
-    draft_local_max_stride,
-    # [num_logits, num_blocks]
-    draft_local_sumexp_ptr,
-    draft_local_sumexp_stride,
+    # [num_logits]
+    draft_lse_ptr,
     # [num_logits]
     expanded_idx_mapping_ptr,
     # [num_logits]
@@ -401,9 +407,7 @@ def _compute_local_residual_mass_kernel(
     temp_ptr,
     vocab_size,
     num_speculative_steps,
-    vocab_num_blocks,
     BLOCK_SIZE: tl.constexpr,
-    PADDED_VOCAB_NUM_BLOCKS: tl.constexpr,
 ):
     logit_idx = tl.program_id(0).to(tl.int64)
     draft_step_idx = tl.load(expanded_local_pos_ptr + logit_idx)
@@ -421,38 +425,36 @@ def _compute_local_residual_mass_kernel(
     block_idx = tl.program_id(1)
     block_offsets = block_idx * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
     mask = block_offsets < vocab_size
-    target_log_probs, draft_log_probs, _, _ = _compute_global_logprobs_and_logsumexp(
-        block_offsets,
-        mask,
-        logit_idx,
-        req_state_idx,
-        draft_step_idx,
-        target_logits_ptr,
-        target_logits_stride,
-        target_local_max_ptr,
-        target_local_max_stride,
-        target_local_sumexp_ptr,
-        target_local_sumexp_stride,
-        draft_logits_ptr,
-        draft_logits_stride_0,
-        draft_logits_stride_1,
-        draft_local_max_ptr,
-        draft_local_max_stride,
-        draft_local_sumexp_ptr,
-        draft_local_sumexp_stride,
-        vocab_num_blocks,
-        PADDED_VOCAB_NUM_BLOCKS,
-        True,  # HAS_DRAFT_LOGITS
-    )
+    target_logits = tl.load(
+        target_logits_ptr + logit_idx * target_logits_stride + block_offsets,
+        mask=mask,
+        other=float("-inf"),
+    ).to(tl.float32)
+    draft_logits = tl.load(
+        draft_logits_ptr
+        + req_state_idx * draft_logits_stride_0
+        + draft_step_idx * draft_logits_stride_1
+        + block_offsets,
+        mask=mask,
+        other=float("-inf"),
+    ).to(tl.float32)
 
-    # Compute the residual mass: max(p_i * M_b(x|x_{<i}) - M_s(x|x_{<i}), 0)
-    p = tl.exp(tl.load(cumulative_log_p_ptr + logit_idx - 1).to(tl.float32))
-    m_b = tl.exp(target_log_probs)
-    m_s = tl.exp(draft_log_probs)
-    partial = tl.sum(tl.maximum(p * m_b - m_s, 0.0), axis=0)
+    # The residual mass, sum(max(p_i * M_b(x|x_{<i}) - M_s(x|x_{<i}), 0)),
+    # can be rewritten as:
+    #   p_i - sum(min(p_i * M_b, M_s))
+    # Below, we compute the min-sum, sum(min(p_i * M_b, M_s)), which can be
+    # rewritten in terms of logits and log-sum-exponentials as:
+    #   sum(exp(min(l_b - (LSE_b - log_p_i), l_s - LSE_s)))
+    log_p = tl.load(cumulative_log_p_ptr + logit_idx - 1).to(tl.float32)
+    target_offset = tl.load(target_lse_ptr + logit_idx) - log_p
+    draft_lse = tl.load(draft_lse_ptr + logit_idx)
+    partial_min_sum = tl.sum(
+        tl.exp(tl.minimum(target_logits - target_offset, draft_logits - draft_lse)),
+        axis=0,
+    )
     tl.store(
-        local_residual_mass_ptr + logit_idx * local_residual_mass_stride + block_idx,
-        partial,
+        local_min_sum_ptr + logit_idx * local_min_sum_stride + block_idx,
+        partial_min_sum,
     )
 
 
@@ -506,8 +508,8 @@ def _rejection_kernel(
     # [num_logits]
     cumulative_log_p_ptr,
     # [num_logits, num_blocks]
-    local_residual_mass_ptr,
-    local_residual_mass_stride,
+    local_min_sums_ptr,
+    local_min_sums_stride,
     vocab_num_blocks,
     PADDED_VOCAB_NUM_BLOCKS: tl.constexpr,
     HAS_DRAFT_LOGITS: tl.constexpr,
@@ -539,8 +541,8 @@ def _rejection_kernel(
             )
             if i < num_draft_tokens - 1:
                 residual_mass = _compute_global_residual_mass(
-                    local_residual_mass_ptr,
-                    local_residual_mass_stride,
+                    local_min_sums_ptr,
+                    local_min_sums_stride,
                     prefix_joint_ratio,
                     target_logits_ptr,
                     target_logits_stride,
@@ -902,7 +904,11 @@ def rejection_sample(
     # Compute the per-vocab-block logits stats, such as target argmax
     # (for greedy requests), and target max + softmax exponential
     # (for non-greedy requests).
-    VOCAB_BLOCK_SIZE = 8192
+    # NOTE: With draft logits, the stats and min-sums kernels stream two
+    # [num_logits, vocab_size] tensors and run faster with smaller blocks.
+    # Without draft logits (one-hot drafts), only the target logits are read
+    # and thus larger blocks are preferred.
+    VOCAB_BLOCK_SIZE = 4096 if has_draft_logits else 8192
     vocab_num_blocks = triton.cdiv(vocab_size, VOCAB_BLOCK_SIZE)
     padded_vocab_num_blocks = triton.next_power_of_2(vocab_num_blocks)
     target_local_argmax = target_logits.new_empty(
@@ -956,8 +962,18 @@ def rejection_sample(
         # cumulative_log_p[start + i] = log(p_{i+1}), the cumulative ratio after
         # the (i+1)-th draft token.
         cumulative_log_p = target_logits.new_empty(num_logits, dtype=torch.float32)
+        if has_draft_logits:
+            # Cache the global logsumexps to reuse during
+            # _compute_local_min_sums_kernel.
+            target_lse = target_logits.new_empty(num_logits, dtype=torch.float32)
+            draft_lse = target_logits.new_empty(num_logits, dtype=torch.float32)
+        else:
+            target_lse = None
+            draft_lse = None
         _compute_cumulative_log_p_kernel[(num_reqs,)](
             cumulative_log_p,
+            target_lse,
+            draft_lse,
             target_logits,
             target_logits.stride(0),
             target_local_max,
@@ -981,45 +997,37 @@ def rejection_sample(
             num_warps=1,
         )
 
-        # Compute the per-vocab-block partials of the residual mass, later reduced
-        # to the total by _compute_global_residual_mass. Only launched for full
-        # draft logits distributions. One-hot drafts used a closed-form residual
-        # mass instead.
+        # Compute the per-vocab-block partials of the min-sums, which are later
+        # reduced into the residual mass by _compute_global_residual_mass. Only
+        # launched for full draft logits distributions. One-hot drafts used a
+        # closed-form residual mass instead.
         if has_draft_logits:
-            local_residual_mass = target_logits.new_empty(
+            local_min_sums = target_logits.new_empty(
                 num_logits, vocab_num_blocks, dtype=torch.float32
             )
-            _compute_local_residual_mass_kernel[(num_logits, vocab_num_blocks)](
-                local_residual_mass,
-                local_residual_mass.stride(0),
+            _compute_local_min_sums_kernel[(num_logits, vocab_num_blocks)](
+                local_min_sums,
+                local_min_sums.stride(0),
                 cumulative_log_p,
                 target_logits,
                 target_logits.stride(0),
-                target_local_max,
-                target_local_max.stride(0),
-                target_local_sumexp,
-                target_local_sumexp.stride(0),
+                target_lse,
                 draft_logits,
                 draft_logits_stride_0,
                 draft_logits_stride_1,
-                draft_local_max,
-                draft_local_max.stride(0),
-                draft_local_sumexp,
-                draft_local_sumexp.stride(0),
+                draft_lse,
                 expanded_idx_mapping,
                 expanded_local_pos,
                 temperature,
                 vocab_size,
                 num_speculative_steps,
-                vocab_num_blocks,
                 BLOCK_SIZE=VOCAB_BLOCK_SIZE,
-                PADDED_VOCAB_NUM_BLOCKS=padded_vocab_num_blocks,
             )
         else:
-            local_residual_mass = None
+            local_min_sums = None
     else:
         cumulative_log_p = None
-        local_residual_mass = None
+        local_min_sums = None
 
     # Sample up until the first rejected/bonus token, and store
     # the step.
@@ -1058,8 +1066,8 @@ def rejection_sample(
         pos,
         synthetic_conditional_rates,
         cumulative_log_p,
-        local_residual_mass,
-        local_residual_mass.stride(0) if local_residual_mass is not None else 0,
+        local_min_sums,
+        local_min_sums.stride(0) if local_min_sums is not None else 0,
         vocab_num_blocks,
         PADDED_VOCAB_NUM_BLOCKS=padded_vocab_num_blocks,
         HAS_DRAFT_LOGITS=has_draft_logits,
