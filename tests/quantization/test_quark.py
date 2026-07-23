@@ -28,7 +28,10 @@ from vllm.model_executor.layers.quantization.quark.quark_moe import (  # noqa: E
     QuarkW8A8Int8MoEMethod,
 )
 from vllm.model_executor.layers.quantization.quark.schemes import QuarkW4A16Int4
-from vllm.model_executor.layers.quantization.quark.utils import should_ignore_layer
+from vllm.model_executor.layers.quantization.quark.utils import (
+    canonicalize_quark_packed_int4,
+    should_ignore_layer,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     is_layer_skipped,
 )
@@ -841,8 +844,16 @@ def test_quark_int4_canonicalizes_pack_for_kernel_layout(pack_method, symmetric)
     scheme = QuarkW4A16Int4(
         group_size=group_size, pack_method=pack_method, is_symmetric=symmetric
     )
-    canonical_weight = scheme._canonicalize_packed_weight(qweight)
-    canonical_zero = scheme._canonicalize_packed_weight(qzeros)
+    canonical_weight = canonicalize_quark_packed_int4(
+        qweight,
+        pack_reorder=pack_reorder,
+        is_symmetric=symmetric,
+    )
+    canonical_zero = canonicalize_quark_packed_int4(
+        qzeros,
+        pack_reorder=pack_reorder,
+        is_symmetric=symmetric,
+    )
     actual = _dequantize_awq_unsigned_torch(
         canonical_weight, scales, canonical_zero, group_size
     )
