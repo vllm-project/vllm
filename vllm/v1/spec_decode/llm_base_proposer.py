@@ -411,7 +411,10 @@ class SpecDecodeBaseProposer:
     def initialize_cudagraph_keys(self, cudagraph_mode: CUDAGraphMode) -> None:
         """Initialize cudagraph dispatcher keys for the drafter.
 
-        Only supports PIECEWISE cudagraphs (via mixed_mode).
+        Only supports PIECEWISE cudagraphs (via mixed_mode). This also keeps
+        composite (routed) draft attention backends safe: piecewise graphs
+        never bake attention kernels, so the impl is selected per batch from
+        the built metadata.
         This should be called after adjust_cudagraph_sizes_for_spec_decode.
         """
         if (
@@ -1153,6 +1156,7 @@ class SpecDecodeBaseProposer:
             slot_mapping=common_attn_metadata.slot_mapping[:total_num_tokens],
             causal=True,
             dcp_local_seq_lens=common_attn_metadata.dcp_local_seq_lens,
+            is_prefilling=common_attn_metadata.is_prefilling,
         )
 
         return (
@@ -1264,6 +1268,7 @@ class SpecDecodeBaseProposer:
             slot_mapping=common_attn_metadata.slot_mapping[token_indices],
             causal=True,
             dcp_local_seq_lens=common_attn_metadata.dcp_local_seq_lens,
+            is_prefilling=common_attn_metadata.is_prefilling,
         )
 
         return spec_common_attn_metadata, token_indices
@@ -1296,7 +1301,8 @@ class SpecDecodeBaseProposer:
             base,
             attention_config=replace(
                 base.attention_config,
-                backend=spec_cfg.attention_backend,
+                backend=spec_cfg.resolved_attention_backend,
+                decode_backend=spec_cfg.resolved_attention_decode_backend,
             ),
         )
 

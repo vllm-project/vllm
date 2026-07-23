@@ -35,6 +35,7 @@ from vllm.config.vllm import (
 )
 from vllm.platforms import current_platform
 from vllm.v1.attention.backend import AttentionCGSupport
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 DEVICE_TYPE = current_platform.device_type
 
@@ -1590,6 +1591,37 @@ def test_draft_sample_method_gumbel_is_rejected():
             num_speculative_tokens=1,
             draft_sample_method="gumbel",
         )
+
+
+@pytest.mark.parametrize(
+    ("backend_kwargs", "expected"),
+    [
+        (
+            {"attention_backend": "FLASH_ATTN"},
+            (AttentionBackendEnum.FLASH_ATTN, AttentionBackendEnum.FLASH_ATTN),
+        ),
+        (
+            {"attention_prefill_backend": "FLASH_ATTN"},
+            (AttentionBackendEnum.FLASH_ATTN, None),
+        ),
+        (
+            {"attention_decode_backend": "FLASHINFER"},
+            (None, AttentionBackendEnum.FLASHINFER),
+        ),
+    ],
+)
+@pytest.mark.skip_global_cleanup
+def test_speculative_attention_backend_roles(backend_kwargs, expected):
+    config = SpeculativeConfig(
+        method="ngram",
+        num_speculative_tokens=1,
+        **backend_kwargs,
+    )
+
+    assert (
+        config.resolved_attention_backend,
+        config.resolved_attention_decode_backend,
+    ) == expected
 
 
 def test_ir_op_priority_default():

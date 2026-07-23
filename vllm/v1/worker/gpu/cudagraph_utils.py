@@ -55,6 +55,7 @@ class BatchExecutionDescriptor:
     num_reqs: int | None  # None means no request padding is needed (PIECEWISE graphs)
     uniform_token_count: int | None = None
     num_active_loras: int = 0
+    attention_backend_variant: int = 0
 
 
 class CreateForwardFn(Protocol):
@@ -113,6 +114,7 @@ class CudaGraphManager:
         cudagraph_mode: CUDAGraphMode,
         decode_query_len: int,
         lora_capture_cases: list[int] | None = None,
+        capture_attention_backend_variants: bool = False,
     ):
         self.vllm_config = vllm_config
         self.device = device
@@ -121,6 +123,7 @@ class CudaGraphManager:
         assert self.compilation_config is not None
         self.cudagraph_mode = cudagraph_mode
         self.decode_query_len = decode_query_len
+        self.capture_attention_backend_variants = capture_attention_backend_variants
 
         self.dp_size = vllm_config.parallel_config.data_parallel_size
         self.tp_size = vllm_config.parallel_config.tensor_parallel_size
@@ -136,7 +139,9 @@ class CudaGraphManager:
 
         self._graphs_captured = False
 
-        self._candidates: dict[tuple[int, int], list[BatchExecutionDescriptor]] = {}
+        self._candidates: dict[
+            tuple[int, int, int], list[BatchExecutionDescriptor]
+        ] = {}
         self._capture_descs: dict[CUDAGraphMode, list[BatchExecutionDescriptor]] = {}
 
         # Breakable CUDA graph (PW CUDA graph without torch.compile)
@@ -187,9 +192,9 @@ class CudaGraphManager:
         separate_decode_routine = self.cudagraph_mode.separate_routine()
         max_cg_capture_size = self.compilation_config.max_cudagraph_capture_size
 
-        descs_by_token_lora: dict[tuple[int, int], list[BatchExecutionDescriptor]] = (
-            defaultdict(list)
-        )
+        descs_by_token_lora_role: dict[
+            tuple[int, int, int], list[BatchExecutionDescriptor]
+        ] = defaultdict(list)
         descs_by_mode: defaultdict[CUDAGraphMode, list[BatchExecutionDescriptor]] = (
             defaultdict(list)
         )
@@ -243,13 +248,20 @@ class CudaGraphManager:
                         num_reqs=rounded_num_reqs,
                         uniform_token_count=decode_query_len,
                         num_active_loras=num_active_loras,
+                        attention_backend_variant=int(
+                            self.capture_attention_backend_variants
+                        ),
                     )
 
                     # avoid duplicate graphs
                     if desc not in descs_by_mode[decode_mode]:
                         descs_by_mode[decode_mode].append(desc)
-                        descs_by_token_lora[
-                            (rounded_num_tokens, num_active_loras)
+                        descs_by_token_lora_role[
+                            (
+                                rounded_num_tokens,
+                                num_active_loras,
+                                int(self.capture_attention_backend_variants),
+                            )
                         ].append(desc)
 
             if mixed_mode:
@@ -261,28 +273,42 @@ class CudaGraphManager:
                 num_reqs = None
                 if mixed_mode == CUDAGraphMode.FULL:
                     num_reqs = min(num_tokens, self.max_num_reqs)
-                desc = BatchExecutionDescriptor(
-                    cg_mode=mixed_mode,
-                    num_tokens=num_tokens,
-                    num_reqs=num_reqs,
-                    num_active_loras=num_active_loras,
-                )
-                descs_by_mode[mixed_mode].append(desc)
-                descs_by_token_lora[(num_tokens, num_active_loras)].append(desc)
+                # Mixed-mode graphs are captured per backend variant because
+                # KV-cache-update ops can be baked inside piecewise graphs
+                # (Inductor graph partition or rope/kvcache fusion), and the
+                # baked kernel comes from the variant's impl.
+                num_backend_variants = 1 + self.capture_attention_backend_variants
+                for attention_backend_variant in range(num_backend_variants):
+                    desc = BatchExecutionDescriptor(
+                        cg_mode=mixed_mode,
+                        num_tokens=num_tokens,
+                        num_reqs=num_reqs,
+                        num_active_loras=num_active_loras,
+                        attention_backend_variant=attention_backend_variant,
+                    )
+                    descs_by_mode[mixed_mode].append(desc)
+                    descs_by_token_lora_role[
+                        (num_tokens, num_active_loras, attention_backend_variant)
+                    ].append(desc)
 
-        if not descs_by_token_lora:
+        if not descs_by_token_lora_role:
             return
 
-        all_token_counts = sorted({k[0] for k in descs_by_token_lora})
+        all_token_counts = sorted({k[0] for k in descs_by_token_lora_role})
         current_range_start = 0
         for token_cg_size in all_token_counts:
             for i in range(current_range_start, token_cg_size + 1):
                 for num_active_loras in self.lora_capture_cases:
-                    staging_key = (token_cg_size, num_active_loras)
-                    if staging_key in descs_by_token_lora:
-                        self._candidates[(i, num_active_loras)] = descs_by_token_lora[
-                            staging_key
-                        ]
+                    for attention_backend_variant in (0, 1):
+                        staging_key = (
+                            token_cg_size,
+                            num_active_loras,
+                            attention_backend_variant,
+                        )
+                        if staging_key in descs_by_token_lora_role:
+                            self._candidates[
+                                (i, num_active_loras, attention_backend_variant)
+                            ] = descs_by_token_lora_role[staging_key]
             current_range_start = token_cg_size + 1
 
         for mode, descs in descs_by_mode.items():
@@ -368,13 +394,24 @@ class CudaGraphManager:
         num_tokens: int,
         uniform_token_count: int | None,
         num_active_loras: int,
+        attention_backend_variant: int = 0,
+        max_cudagraph_mode: CUDAGraphMode | None = None,
     ) -> BatchExecutionDescriptor:
         """Find matching cudagraph descriptor from priority-ordered candidates."""
 
+        assert max_cudagraph_mode is None or max_cudagraph_mode.is_valid_runtime_mode()
         effective_loras = self._resolve_effective_loras(num_active_loras)
-        key = (num_tokens, effective_loras)
+        key = (num_tokens, effective_loras, attention_backend_variant)
         if self._graphs_captured and num_tokens > 0 and key in self._candidates:
             for desc in self._candidates[key]:
+                if max_cudagraph_mode is not None and (
+                    max_cudagraph_mode == CUDAGraphMode.NONE
+                    or (
+                        desc.cg_mode == CUDAGraphMode.FULL
+                        and max_cudagraph_mode == CUDAGraphMode.PIECEWISE
+                    )
+                ):
+                    continue
                 if _is_compatible(
                     desc,
                     num_reqs,
@@ -388,6 +425,7 @@ class CudaGraphManager:
             num_tokens=num_tokens,
             num_reqs=num_reqs,
             num_active_loras=effective_loras,
+            attention_backend_variant=attention_backend_variant,
         )
 
     def run_fullgraph(self, desc: BatchExecutionDescriptor):
@@ -429,6 +467,7 @@ class ModelCudaGraphManager(CudaGraphManager):
         cudagraph_mode: CUDAGraphMode,
         decode_query_len: int,
         lora_capture_cases: list[int] | None = None,
+        capture_attention_backend_variants: bool = False,
     ):
         super().__init__(
             vllm_config,
@@ -436,6 +475,7 @@ class ModelCudaGraphManager(CudaGraphManager):
             cudagraph_mode,
             decode_query_len,
             lora_capture_cases=lora_capture_cases,
+            capture_attention_backend_variants=capture_attention_backend_variants,
         )
         self.hidden_states: torch.Tensor | None = None
         self.aux_hidden_states: list[torch.Tensor] = []
@@ -499,6 +539,7 @@ class ModelCudaGraphManager(CudaGraphManager):
                 attn_groups,
                 kv_cache_config,
                 full_cudagraph=desc.cg_mode == CUDAGraphMode.FULL,
+                attention_backend_variant=desc.attention_backend_variant,
             )
 
             # Capture with dummy rows marked as padding.
@@ -590,8 +631,10 @@ def prepare_inputs_to_capture(
     attn_groups: list[list[AttentionGroup]],
     kv_cache_config: KVCacheConfig,
     full_cudagraph: bool,
+    attention_backend_variant: int = 0,
 ) -> AttentionState:
     input_batch = InputBatch.make_dummy(num_reqs, num_tokens, input_buffers)
+    input_batch.is_prefilling_np.fill(attention_backend_variant == 0)
     input_block_tables = block_tables.get_dummy_block_tables(num_reqs)
     slot_mappings = block_tables.get_dummy_slot_mappings(num_tokens)
     slot_mappings_by_layer = build_slot_mappings_by_layer(

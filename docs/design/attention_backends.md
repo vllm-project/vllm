@@ -23,6 +23,20 @@ There are two ways to specify the backend from the command line:
 vllm serve <model> --attention-backend FLASH_ATTN
 ```
 
+This legacy option forces the same backend for both prefill and decode. Use
+`--attention-prefill-backend` or `--attention-decode-backend` to configure one
+role while leaving the other automatically selected.
+
+For standard attention, routing is batch-level: each batch runs entirely on
+one backend — pure-decode batches on the decode backend, batches containing
+any prefill on the prefill backend.
+
+MLA models instead split every batch into prefill and decode portions that
+run on separate kernels: `--attention-prefill-backend` selects the MLA
+prefill backend (e.g. `FLASH_ATTN` or `TRTLLM_RAGGED`) for the prefill
+portion, and `--attention-decode-backend` selects the MLA decode backend
+(e.g. `FLASHMLA`) for the decode portion.
+
 **Option 2: Using `--attention-config.backend` / `-ac.backend` (structured config)**
 
 ```bash
@@ -35,8 +49,14 @@ vllm serve <model> --attention-config '{"backend": "FLASH_ATTN"}'
 vllm serve <model> -ac '{"backend": "FLASH_ATTN"}'
 ```
 
-> **Note:** `--attention-backend` and `--attention-config.backend` are mutually
-> exclusive. Use one or the other, not both.
+`backend` configures prefill-containing and mixed batches; `decode_backend`
+configures pure-decode batches; whole batches are routed to one or the other.
+On MLA models — which split each batch rather than routing it whole —
+`decode_backend` is folded into `backend`, which selects the MLA decode
+backend; `mla_prefill_backend` selects the MLA prefill backend.
+
+> **Note:** `--attention-backend` is mutually exclusive with the role-specific
+> options and their corresponding structured config fields.
 
 ### Python API
 

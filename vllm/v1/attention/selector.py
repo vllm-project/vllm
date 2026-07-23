@@ -12,6 +12,7 @@ from vllm.logger import init_logger
 from vllm.utils.import_utils import resolve_obj_by_qualname
 from vllm.v1.attention.backend import AttentionBackend, AttentionType
 from vllm.v1.attention.backends.registry import (
+    AttentionBackendEnum,
     MambaAttentionBackendEnum,
 )
 
@@ -110,6 +111,9 @@ def get_attn_backend(
     attn_type: str | None = None,
     num_heads: int | None = None,
     has_sliding_window: bool = False,
+    backend_override: AttentionBackendEnum | None = None,
+    use_global_backend: bool = True,
+    use_non_causal_override: bool | None = None,
 ) -> type[AttentionBackend]:
     """Selects which attention backend to use and lazily imports it."""
 
@@ -149,7 +153,11 @@ def get_attn_backend(
         use_per_head_quant_scales=use_per_head_quant_scales,
         attn_type=attn_type,
         has_sliding_window=has_sliding_window,
-        use_non_causal=vllm_config.attention_config.use_non_causal,
+        use_non_causal=(
+            use_non_causal_override
+            if use_non_causal_override is not None
+            else vllm_config.attention_config.use_non_causal
+        ),
         use_batch_invariant=envs.VLLM_BATCH_INVARIANT,
         use_kv_connector=use_kv_connector,
         use_pcp=vllm_config.parallel_config.prefill_context_parallel_size > 1,
@@ -158,8 +166,16 @@ def get_attn_backend(
     # A per-KV-group override (keyed by KVCacheSpecKind) takes precedence over
     # the global backend; kinds not present in the map fall back to it.
     attention_config = vllm_config.attention_config
-    backend = attention_config.backend
-    if attention_config.backend_per_kind:
+    backend = (
+        (backend_override or attention_config.backend)
+        if use_global_backend
+        else backend_override
+    )
+    if (
+        use_global_backend
+        and backend_override is None
+        and attention_config.backend_per_kind
+    ):
         kind = get_attn_spec_kind(
             use_mla=use_mla,
             has_sliding_window=has_sliding_window,

@@ -417,6 +417,102 @@ class Attention(nn.Module, AttentionLayerBase):
             if block_n is not None:
                 extra_impl_args.setdefault("block_n", block_n)
 
+        decode_backend = vllm_config.attention_config.decode_backend
+        if attn_type == AttentionType.DECODER:
+            from vllm.v1.attention.backends.utils import (
+                create_composite_attention_backend,
+                get_kv_cache_layout,
+                kv_layouts_compatible,
+                set_kv_cache_layout,
+            )
+
+            general_kv_layout = get_kv_cache_layout()
+            selected_decode_backend = get_attn_backend(
+                head_size,
+                dtype,
+                kv_cache_dtype,
+                use_mla=False,
+                has_sink=self.has_sink,
+                use_mm_prefix=False,
+                use_per_head_quant_scales=use_per_head_quant_scales,
+                attn_type=attn_type,
+                has_sliding_window=sliding_window is not None,
+                use_non_causal_override=False,
+                backend_override=decode_backend,
+                use_global_backend=False,
+            )
+            selector_block_size = (
+                cache_config.block_size
+                if cache_config is not None and cache_config.user_specified_block_size
+                else None
+            )
+            required_layout = (
+                selected_decode_backend.get_required_kv_cache_layout()
+                or self.attn_backend.get_required_kv_cache_layout()
+            )
+            if required_layout is not None:
+                set_kv_cache_layout(required_layout)
+            compatible = kv_layouts_compatible(
+                self.attn_backend,
+                selected_decode_backend,
+                num_kv_heads=num_kv_heads,
+                head_size=head_size,
+                block_size=selector_block_size,
+                kv_cache_dtype=kv_cache_dtype,
+            )
+            if not compatible:
+                set_kv_cache_layout(general_kv_layout)
+                if decode_backend is None:
+                    logger.info_once(
+                        "Automatically selected decode backend %s is not "
+                        "KV-cache-layout compatible with general backend %s; "
+                        "using the general backend for decode.",
+                        selected_decode_backend.get_name(),
+                        self.attn_backend.get_name(),
+                    )
+                    selected_decode_backend = self.attn_backend
+                else:
+                    raise ValueError(
+                        f"Decode attention backend "
+                        f"{selected_decode_backend.get_name()} is not "
+                        f"KV-cache-layout compatible with the general backend "
+                        f"{self.attn_backend.get_name()}; they cannot share one "
+                        f"physical KV cache. Choose a decode backend with a "
+                        f"matching KV layout."
+                    )
+            required_layout = (
+                selected_decode_backend.get_required_kv_cache_layout()
+                or self.attn_backend.get_required_kv_cache_layout()
+            )
+            if required_layout is not None:
+                static_forward_context = (
+                    vllm_config.compilation_config.static_forward_context
+                )
+                for layer in static_forward_context.values():
+                    if not isinstance(layer, AttentionLayerBase):
+                        continue
+                    for backend in layer.get_attn_backend().get_backend_variants():
+                        existing_layout = backend.get_required_kv_cache_layout()
+                        if existing_layout not in (None, required_layout):
+                            set_kv_cache_layout(general_kv_layout)
+                            raise ValueError(
+                                "Attention backends across layers require "
+                                f"incompatible KV cache layouts: {existing_layout} "
+                                f"and {required_layout}."
+                            )
+                set_kv_cache_layout(required_layout)
+            composite_backend = create_composite_attention_backend(
+                self.attn_backend, selected_decode_backend
+            )
+            if composite_backend is not self.attn_backend:
+                logger.info_once(
+                    "Routing attention by batch phase: %s for "
+                    "prefill-containing batches, %s for pure-decode batches.",
+                    self.attn_backend.get_name(),
+                    selected_decode_backend.get_name(),
+                )
+            self.attn_backend = composite_backend
+
         impl_cls = self.attn_backend.get_impl_cls()
         self.impl = impl_cls(  # type: ignore[assignment]  # impl_cls always returns an AttentionImpl subclass
             num_heads,
@@ -781,12 +877,15 @@ def unified_kv_cache_update(
     the data dependency between them to ensure torch.compile preserves ordering.
     """
     layer_name = _resolve_layer_name(layer_name)
-    _, attn_layer, kv_cache, layer_slot_mapping = get_attention_context(layer_name)
+    attn_metadata, attn_layer, kv_cache, layer_slot_mapping = get_attention_context(
+        layer_name
+    )
     if layer_slot_mapping is not None:
-        assert hasattr(attn_layer.impl, "do_kv_cache_update"), (
-            f"{attn_layer.impl.__class__.__name__} does not support kv cache update"
+        impl = attn_layer.impl.get_impl_for_metadata(attn_metadata)
+        assert hasattr(impl, "do_kv_cache_update"), (
+            f"{impl.__class__.__name__} does not support kv cache update"
         )
-        attn_layer.impl.do_kv_cache_update(  # type: ignore[attr-defined]
+        impl.do_kv_cache_update(  # type: ignore[attr-defined]
             attn_layer,
             key,
             value,

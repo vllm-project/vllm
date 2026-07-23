@@ -196,6 +196,87 @@ def test_dynamic_sd_non_uniform_batch_falls_back_to_piecewise(monkeypatch):
     assert desc.num_active_loras == 0
 
 
+@pytest.mark.parametrize(
+    ("cudagraph_mode", "decode_mode", "general_mode"),
+    [
+        (
+            CUDAGraphMode.PIECEWISE,
+            CUDAGraphMode.PIECEWISE,
+            CUDAGraphMode.PIECEWISE,
+        ),
+        (
+            CUDAGraphMode.FULL_AND_PIECEWISE,
+            CUDAGraphMode.FULL,
+            CUDAGraphMode.PIECEWISE,
+        ),
+        (CUDAGraphMode.FULL, CUDAGraphMode.FULL, CUDAGraphMode.FULL),
+    ],
+)
+@pytest.mark.skip_global_cleanup
+def test_cudagraph_dispatch_preserves_attention_backend_variant(
+    monkeypatch, cudagraph_mode, decode_mode, general_mode
+):
+    """Graph lookup must not collapse captures for distinct backend variants."""
+    monkeypatch.setattr(
+        gpu_cudagraph_utils,
+        "get_pp_group",
+        lambda: SimpleNamespace(is_first_rank=True, is_last_rank=True),
+    )
+    monkeypatch.setattr(
+        gpu_cudagraph_utils.current_platform, "get_global_graph_pool", lambda: None
+    )
+    vllm_config = _create_vllm_config_for_dsd(
+        max_num_seqs=2,
+        max_spec_tokens=1,
+        cudagraph_mode=cudagraph_mode.name,
+        use_dynamic_sd=False,
+    )
+    manager = gpu_cudagraph_utils.CudaGraphManager(
+        vllm_config=vllm_config,
+        device=torch.device("cpu"),
+        cudagraph_mode=cudagraph_mode,
+        decode_query_len=2,
+        capture_attention_backend_variants=True,
+    )
+    manager._graphs_captured = True
+
+    decode_desc = manager.dispatch(
+        num_reqs=1,
+        num_tokens=2,
+        uniform_token_count=2,
+        num_active_loras=0,
+        attention_backend_variant=1,
+    )
+    general_desc = manager.dispatch(
+        num_reqs=1,
+        num_tokens=2,
+        uniform_token_count=2,
+        num_active_loras=0,
+    )
+
+    assert decode_desc.cg_mode == decode_mode
+    assert decode_desc.attention_backend_variant == 1
+    assert general_desc.cg_mode == general_mode
+    assert general_desc.attention_backend_variant == 0
+
+    if decode_mode == CUDAGraphMode.FULL:
+        synced_decode_desc = manager.dispatch(
+            num_reqs=1,
+            num_tokens=2,
+            uniform_token_count=2,
+            num_active_loras=0,
+            attention_backend_variant=1,
+            max_cudagraph_mode=CUDAGraphMode.PIECEWISE,
+        )
+        expected_mode = (
+            CUDAGraphMode.PIECEWISE
+            if cudagraph_mode == CUDAGraphMode.FULL_AND_PIECEWISE
+            else CUDAGraphMode.NONE
+        )
+        assert synced_decode_desc.cg_mode == expected_mode
+        assert synced_decode_desc.attention_backend_variant == 1
+
+
 def test_basic_sd_does_not_capture_shorter_full_decode_shapes(monkeypatch):
     """Without DSD, only the max decode query length should get FULL graphs.
 

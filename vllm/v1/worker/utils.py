@@ -335,7 +335,11 @@ def prepare_kernel_block_sizes(
         if isinstance(kv_cache_spec, AttentionSpec):
             # This is an attention backend that supports virtual block splitting.
             kv_manager_block_size = kv_cache_group.kv_cache_spec.block_size
-            group_backends = [g.backend for g in attn_groups[kv_cache_gid]]
+            group_backends = [
+                backend
+                for group in attn_groups[kv_cache_gid]
+                for backend in group.backend.get_backend_variants()
+            ]
             selected_kernel_size = select_common_block_size(
                 kv_manager_block_size, group_backends
             )

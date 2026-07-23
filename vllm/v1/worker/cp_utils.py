@@ -48,7 +48,7 @@ def check_attention_cp_compatibility(vllm_config: VllmConfig) -> None:
                     "implementations to return the softmax LSE during decode, "
                     f"but {layer_impl.__class__.__name__} does not. "
                     "Try a different backend by setting "
-                    "--attention-backend or disable DCP."
+                    "--attention-decode-backend or disable DCP."
                 )
 
 

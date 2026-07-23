@@ -154,13 +154,28 @@ class Gemma4Proposer(SpecDecodeBaseProposer):
         KV-shared cache. Override to carry the target's backend through.
         """
         base = super()._create_draft_vllm_config()
-        target_backend = self.vllm_config.attention_config.backend
-        if target_backend is not None:
+        target_attention_config = self.vllm_config.attention_config
+        speculative_config = self.speculative_config
+        if (
+            target_attention_config.backend is not None
+            and speculative_config.resolved_attention_backend is None
+        ):
             base = replace(
                 base,
                 attention_config=replace(
                     base.attention_config,
-                    backend=target_backend,
+                    backend=target_attention_config.backend,
+                ),
+            )
+        if (
+            target_attention_config.decode_backend is not None
+            and speculative_config.resolved_attention_decode_backend is None
+        ):
+            base = replace(
+                base,
+                attention_config=replace(
+                    base.attention_config,
+                    decode_backend=target_attention_config.decode_backend,
                 ),
             )
         return base

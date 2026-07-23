@@ -130,6 +130,7 @@ class EncoderDecoderModelState(ModelState):
             max_seq_len = self.max_model_len
         else:
             max_seq_len = int(seq_lens_cpu_upper_bound[:num_reqs].max().item())
+        is_prefilling = torch.from_numpy(input_batch.is_prefilling_np)
         attn_metadata = build_attn_metadata(
             attn_groups=attn_groups,
             num_reqs=num_reqs,
@@ -144,6 +145,7 @@ class EncoderDecoderModelState(ModelState):
             kv_cache_config=kv_cache_config,
             seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
             dcp_local_seq_lens=input_batch.dcp_local_seq_lens,
+            is_prefilling=is_prefilling,
             model_specific_attn_metadata=enc_dec_attn_metadata,
             for_cudagraph_capture=for_capture,
             rswa_prefix_lens=input_batch.prompt_lens,

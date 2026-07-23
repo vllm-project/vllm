@@ -148,20 +148,31 @@ def init_attn_backend(
                 num_metadata_builders=1,
             )
             builder = group.get_metadata_builder(0)
+            builders = builder.get_builder_variants()
+            workspace_provider = None
             if attn_backend_workspace is None:
-                if hasattr(builder, "_get_workspace_buffer"):
-                    attn_backend_workspace = builder._get_workspace_buffer()
-            else:
-                if hasattr(builder, "set_workspace_buffer"):
-                    builder.set_workspace_buffer(attn_backend_workspace)
-            # Check cudagraph support for the attention backend
-            cg_support = builder.get_cudagraph_support(
-                vllm_config,
-                cast(AttentionSpec, group.kv_cache_spec),
-            )
-            if cg_support.value < min_cg_support.value:
-                min_cg_support = cg_support
-                min_cg_attn_backend = group.backend.__name__
+                for variant_builder in builders:
+                    if hasattr(variant_builder, "_get_workspace_buffer"):
+                        attn_backend_workspace = variant_builder._get_workspace_buffer()
+                        if attn_backend_workspace is not None:
+                            workspace_provider = variant_builder
+                            break
+            if attn_backend_workspace is not None:
+                for variant_builder in builders:
+                    if variant_builder is not workspace_provider and hasattr(
+                        variant_builder, "set_workspace_buffer"
+                    ):
+                        variant_builder.set_workspace_buffer(attn_backend_workspace)
+            backends = group.backend.get_backend_variants()
+            assert len(builders) == len(backends)
+            for variant_builder, backend in zip(builders, backends):
+                cg_support = variant_builder.get_cudagraph_support(
+                    vllm_config,
+                    cast(AttentionSpec, group.kv_cache_spec),
+                )
+                if cg_support.value < min_cg_support.value:
+                    min_cg_support = cg_support
+                    min_cg_attn_backend = backend.__name__
 
     attn_cg_support_info = AttentionCGSupportInfo(
         min_cg_support=min_cg_support, min_cg_attn_backend=min_cg_attn_backend

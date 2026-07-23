@@ -1502,6 +1502,13 @@ def test_is_uniform_decode() -> None:
         num_tokens=16,
         num_reqs=15,
     )
+    assert not GPUModelRunner._is_uniform_decode(
+        max_num_scheduled_tokens=1,
+        uniform_decode_query_len=1,
+        num_tokens=16,
+        num_reqs=16,
+        has_prefill=True,
+    )
     # Spec decoding
     assert GPUModelRunner._is_uniform_decode(
         max_num_scheduled_tokens=5,
