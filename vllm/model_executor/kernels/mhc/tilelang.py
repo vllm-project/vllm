@@ -127,12 +127,14 @@ def mhc_pre_tilelang(
         layer_input: shape (..., hidden_size), dtype torch.bfloat16
     """
     from vllm.model_executor.kernels.mhc.tilelang_kernels import (
-        compute_num_split,
+        compute_mhc_dispatch,
         mhc_pre_big_fuse_tilelang,
         mhc_pre_big_fuse_with_norm_tilelang,
     )
-    from vllm.utils.deep_gemm import tf32_hc_prenorm_gemm
-    from vllm.utils.math_utils import cdiv
+    from vllm.utils.deep_gemm import (
+        is_deep_gemm_supported,
+        tf32_hc_prenorm_gemm,
+    )
 
     assert residual.dtype == torch.bfloat16
     assert fn.dtype == torch.float32
@@ -162,16 +164,9 @@ def mhc_pre_tilelang(
     residual_flat = residual.view(-1, hc_mult, hidden_size)
     num_tokens = residual_flat.shape[0]
 
-    from vllm.utils.deep_gemm import is_deep_gemm_supported
-
     use_deep_gemm = is_deep_gemm_supported()
-    if use_deep_gemm:
-        # these numbers are from deepgemm kernel impl
-        block_k = 64
-        block_m = 64
-        n_splits = compute_num_split(block_k, hc_hidden_size, cdiv(num_tokens, block_m))
-    else:
-        n_splits = 1
+    _dispatch = compute_mhc_dispatch(num_tokens, hidden_size, hc_mult, use_deep_gemm)
+    n_splits = _dispatch.n_splits
 
     post_mix = torch.empty(
         num_tokens, hc_mult, dtype=torch.float32, device=residual.device
@@ -317,10 +312,9 @@ def mhc_pre_broadcast_tilelang(
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """First-layer mHC pre for a residual broadcast from ``(T, H)``."""
     from vllm.model_executor.kernels.mhc.tilelang_kernels import (
-        compute_num_split,
+        compute_mhc_dispatch,
         mhc_pre_big_fuse_broadcast_with_norm_tilelang,
     )
-    from vllm.utils.math_utils import cdiv
 
     assert norm_weight is not None, "broadcast mHC pre currently requires fused RMSNorm"
     assert residual.dtype == torch.bfloat16
@@ -348,7 +342,10 @@ def mhc_pre_broadcast_tilelang(
     residual_flat = residual
     num_tokens = residual.shape[0]
 
-    n_splits = compute_num_split(64, hidden_size, cdiv(num_tokens, 64))
+    _dispatch = compute_mhc_dispatch(
+        num_tokens, hidden_size, hc_mult, use_deep_gemm=True, is_broadcast=True
+    )
+    n_splits = _dispatch.n_splits
 
     residual_out = torch.empty(
         num_tokens, hc_mult, hidden_size, dtype=torch.bfloat16, device=residual.device
@@ -463,13 +460,12 @@ def mhc_fused_post_pre_tilelang(
     """
 
     from vllm.model_executor.kernels.mhc.tilelang_kernels import (
-        compute_num_split,
+        compute_mhc_dispatch,
         mhc_fused_tilelang,
         mhc_post_tilelang,
         mhc_pre_big_fuse_tilelang,
         mhc_pre_big_fuse_with_norm_tilelang,
     )
-    from vllm.utils.math_utils import cdiv
 
     assert residual.dtype == torch.bfloat16
     assert x.dtype == torch.bfloat16
@@ -515,21 +511,12 @@ def mhc_fused_post_pre_tilelang(
     from vllm.utils.deep_gemm import is_deep_gemm_supported
 
     use_deep_gemm = is_deep_gemm_supported()
-    use_small_fma = num_tokens <= 16
-    if use_small_fma:
-        # TODO(gnovack): investigate autotuning these heuristics
-        tile_n = 2 if num_tokens < 8 else 3
-        n_splits = 8 if (num_tokens < 8 and hidden_size <= 4096) else 4
-    else:
-        if use_deep_gemm:
-            # these number are from deepgemm kernel impl
-            block_k = 64
-            block_m = 64
-            n_splits = compute_num_split(
-                block_k, hc_hidden_size, cdiv(num_tokens, block_m)
-            )
-        else:
-            n_splits = 1
+    _dispatch = compute_mhc_dispatch(
+        num_tokens, hidden_size, hc_mult, use_deep_gemm, is_fused=True
+    )
+    use_small_fma = _dispatch.use_small_fma
+    tile_n = _dispatch.tile_n
+    n_splits = _dispatch.n_splits
 
     gemm_out_mul = torch.empty(
         n_splits,

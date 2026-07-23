@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import math
+from dataclasses import dataclass
 from functools import cache
 from typing import TYPE_CHECKING, Any
 
@@ -38,6 +39,82 @@ def compute_num_split(block_k: int, k: int | None, grid_size: int) -> int:
         split_k = min(split_k, num_block_k // 4)
     split_k = max(split_k, 1)
     return split_k
+
+
+@dataclass(frozen=True)
+class MhcDispatchParams:
+    """Derived dispatch parameters for mHC TileLang kernels.
+
+    Computed by :func:`compute_mhc_dispatch` from upper-level inputs
+    (``num_tokens``, ``hidden_size``, ``hc_mult``, ``use_deep_gemm``).
+    Both the runtime op (``tilelang.py``) and the warmup wrapper
+    (``warmup.py``) call the same function so there is exactly one copy
+    of the dispatch heuristic.
+    """
+
+    n_splits: int
+    tile_n: int  # only meaningful for the fused (small_fma) path
+    use_small_fma: bool  # only the fused path has a small_fma branch
+
+
+def compute_mhc_dispatch(
+    num_tokens: int,
+    hidden_size: int,
+    hc_mult: int,
+    use_deep_gemm: bool,
+    *,
+    is_broadcast: bool = False,
+    is_fused: bool = False,
+) -> MhcDispatchParams:
+    """Compute ``n_splits`` / ``tile_n`` / ``use_small_fma`` from upper-level
+    dispatch inputs.
+
+    This is the single source of truth for the mHC TileLang dispatch
+    heuristic.  Both the runtime ops in ``tilelang.py`` and the warmup
+    wrappers in ``warmup.py`` call this function, ensuring they always
+    agree on the derived parameters.
+
+    Args:
+        num_tokens: number of tokens in the batch (dynamic dim).
+        hidden_size: model hidden size.
+        hc_mult: mHC multiplier (``hc_hidden_size = hc_mult * hidden_size``).
+        use_deep_gemm: whether DeepGEMM is available (runtime checks once;
+            warmup threads the same value in).
+        is_broadcast: first-layer 2D residual path.  Uses ``hidden_size``
+            (not ``hc_hidden_size``) for ``n_splits`` and skips the
+            ``use_deep_gemm`` gate, matching ``mhc_pre_broadcast_tilelang``.
+        is_fused: ``mhc_fused_post_pre_tilelang`` path.  Has an extra
+            ``use_small_fma`` branch for ``num_tokens <= 16`` with its own
+            ``tile_n`` and ``n_splits`` heuristics.
+    """
+    hc_hidden_size = hc_mult * hidden_size
+
+    if is_fused:
+        use_small_fma = num_tokens <= 16
+        if use_small_fma:
+            tile_n = 2 if num_tokens < 8 else 3
+            n_splits = 8 if (num_tokens < 8 and hidden_size <= 4096) else 4
+        else:
+            tile_n = 1
+            if use_deep_gemm:
+                n_splits = compute_num_split(64, hc_hidden_size, cdiv(num_tokens, 64))
+            else:
+                n_splits = 1
+    elif is_broadcast:
+        use_small_fma = False
+        tile_n = 1
+        n_splits = compute_num_split(64, hidden_size, cdiv(num_tokens, 64))
+    else:
+        use_small_fma = False
+        tile_n = 1
+        if use_deep_gemm:
+            n_splits = compute_num_split(64, hc_hidden_size, cdiv(num_tokens, 64))
+        else:
+            n_splits = 1
+
+    return MhcDispatchParams(
+        n_splits=n_splits, tile_n=tile_n, use_small_fma=use_small_fma
+    )
 
 
 pass_configs: dict[tilelang.PassConfigKey, Any] = {

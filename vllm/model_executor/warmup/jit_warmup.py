@@ -9,10 +9,13 @@ import inspect
 import itertools
 import operator
 import textwrap
+import time
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any, Generic, TypeVar
+
+from vllm.logger import init_logger
 
 __all__ = [
     "VllmJitKernel",
@@ -24,6 +27,8 @@ __all__ = [
 
 
 CompileKeyT = TypeVar("CompileKeyT")
+
+logger = init_logger(__name__)
 
 
 @dataclass(frozen=True)
@@ -470,5 +475,27 @@ class VllmJitKernel(Generic[CompileKeyT], ABC):
 
     def warmup(self, *args: Any, **kwargs: Any) -> None:
         """Compile this kernel's warmup keys."""
-        for compile_key in self.get_warmup_keys(*args, **kwargs):
+        keys = self.get_warmup_keys(*args, **kwargs)
+        total = len(keys)
+        name = type(self).__name__
+        if total == 0:
+            logger.info("Warming up %s: 0 keys, skip", name)
+            return
+        logger.info("Warming up %s: %d keys", name, total)
+        t0 = time.monotonic()
+        for i, compile_key in enumerate(keys, 1):
             self.compile(compile_key)
+            elapsed = time.monotonic() - t0
+            rate = i / max(elapsed, 1e-9)
+            eta = (total - i) / max(rate, 1e-9)
+            logger.info(
+                "Warming up %s: progress %d/%d (%.1f%%), %.1fs elapsed, "
+                "ETA %.1fs (%.1f/s)",
+                name,
+                i,
+                total,
+                100.0 * i / total,
+                elapsed,
+                eta,
+                rate,
+            )
