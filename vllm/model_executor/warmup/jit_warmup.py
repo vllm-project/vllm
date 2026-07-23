@@ -15,6 +15,9 @@ from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any, Generic, TypeVar
 
+from tqdm import tqdm
+
+from vllm.distributed.parallel_state import is_global_first_rank
 from vllm.logger import init_logger
 
 __all__ = [
@@ -483,19 +486,19 @@ class VllmJitKernel(Generic[CompileKeyT], ABC):
             return
         logger.info("Warming up %s: %d keys", name, total)
         t0 = time.monotonic()
-        for i, compile_key in enumerate(keys, 1):
+        # Progress bar on rank 0 only; other ranks compile silently to avoid
+        # duplicated output across TP/PP workers (mirrors deep_gemm_warmup).
+        iterator = tqdm(
+            keys,
+            desc=f"Warming up {name}",
+            total=total,
+            disable=not is_global_first_rank(),
+        )
+        for compile_key in iterator:
             self.compile(compile_key)
-            elapsed = time.monotonic() - t0
-            rate = i / max(elapsed, 1e-9)
-            eta = (total - i) / max(rate, 1e-9)
-            logger.info(
-                "Warming up %s: progress %d/%d (%.1f%%), %.1fs elapsed, "
-                "ETA %.1fs (%.1f/s)",
-                name,
-                i,
-                total,
-                100.0 * i / total,
-                elapsed,
-                eta,
-                rate,
-            )
+        logger.info(
+            "Warming up %s: %d keys finished in %.2fs",
+            name,
+            total,
+            time.monotonic() - t0,
+        )
