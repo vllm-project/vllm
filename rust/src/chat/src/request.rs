@@ -474,6 +474,12 @@ pub struct ChatRequest {
     /// output. If `true`, callers may receive zero or more incremental
     /// content events before the final terminal one.
     pub intermediate: bool,
+    /// Number of tokens to keep:
+    /// - `None` means no truncation.
+    /// - `< 0` (e.g. -1) maps to `max_model_len - max_tokens`.
+    pub truncate_prompt_tokens: Option<i64>,
+    /// Which side to truncate from when `truncate_prompt_tokens` is active.
+    pub truncation_side: Option<String>,
     /// Request scheduling priority (lower means earlier handling; default 0).
     pub priority: i32,
     /// Documents for RAG (retrieval-augmented generation), passed to the chat
@@ -504,6 +510,8 @@ impl ChatRequest {
             parallel_tool_calls: true,
             decode_options: TextDecodeOptions::default(),
             intermediate: true,
+            truncate_prompt_tokens: None,
+            truncation_side: None,
             priority: 0,
             documents: None,
             cache_salt: None,
