@@ -43,9 +43,15 @@ def test_pre_commit_uses_available_github_hosted_runner():
     workflow_path = REPO_ROOT / ".github/workflows/pre-commit.yml"
     workflow = load_workflow(workflow_path)
     pre_commit = workflow["jobs"]["pre-commit"]
+    text = workflow_path.read_text(encoding="utf-8")
 
     assert pre_commit["if"] != "false"
     assert pre_commit["runs-on"] == "ubuntu-latest"
+    assert "fetch-depth: 0" in text
+    assert "--from-ref" in text
+    assert "--to-ref" in text
+    assert "--all-files" not in text
+    assert "--hook-stage manual" not in text
 
 
 def test_actionlint_knows_ascend_runner_labels():
