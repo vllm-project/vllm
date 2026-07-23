@@ -968,7 +968,9 @@ class MultiModalContentParser(BaseMultiModalContentParser):
         `tensor.shape[0]` placeholder tokens after tokenization.
         """
         if not self.model_config.enable_prompt_embeds:
-            raise ValueError(_ENABLE_PROMPT_EMBEDS_ERROR)
+            raise VLLMValidationError(
+                _ENABLE_PROMPT_EMBEDS_ERROR, parameter="prompt_embeds"
+            )
 
         tensor = safe_load_prompt_embeds(self.model_config, data.encode())
         self._tracker.add("prompt_embeds", (tensor, None))
@@ -987,8 +989,9 @@ class MultiModalContentParser(BaseMultiModalContentParser):
     ) -> None:
         mm_config = self.model_config.get_multimodal_config()
         if not mm_config.enable_mm_embeds:
-            raise ValueError(
-                "You must set `--enable-mm-embeds` to input `image_embeds`"
+            raise VLLMValidationError(
+                "You must set `--enable-mm-embeds` to input `image_embeds`",
+                parameter="image_embeds",
             )
 
         if isinstance(image_embeds, dict):
@@ -1014,8 +1017,9 @@ class MultiModalContentParser(BaseMultiModalContentParser):
     ) -> None:
         mm_config = self.model_config.get_multimodal_config()
         if not mm_config.enable_mm_embeds:
-            raise ValueError(
-                "You must set `--enable-mm-embeds` to input `audio_embeds`"
+            raise VLLMValidationError(
+                "You must set `--enable-mm-embeds` to input `audio_embeds`",
+                parameter="audio_embeds",
             )
 
         if isinstance(audio_embeds, dict):
@@ -1117,7 +1121,9 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
         thread-pool executor via `safe_load_prompt_embeds_async`.
         """
         if not self.model_config.enable_prompt_embeds:
-            raise ValueError(_ENABLE_PROMPT_EMBEDS_ERROR)
+            raise VLLMValidationError(
+                _ENABLE_PROMPT_EMBEDS_ERROR, parameter="prompt_embeds"
+            )
 
         self._tracker.add(
             "prompt_embeds", partial(self._load_prompt_embeds_async, data.encode())
@@ -1151,8 +1157,9 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
     ) -> None:
         mm_config = self.model_config.get_multimodal_config()
         if not mm_config.enable_mm_embeds:
-            raise ValueError(
-                "You must set `--enable-mm-embeds` to input `image_embeds`"
+            raise VLLMValidationError(
+                "You must set `--enable-mm-embeds` to input `image_embeds`",
+                parameter="image_embeds",
             )
 
         if isinstance(image_embeds, dict):
@@ -1178,8 +1185,9 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
     ) -> None:
         mm_config = self.model_config.get_multimodal_config()
         if not mm_config.enable_mm_embeds:
-            raise ValueError(
-                "You must set `--enable-mm-embeds` to input `audio_embeds`"
+            raise VLLMValidationError(
+                "You must set `--enable-mm-embeds` to input `audio_embeds`",
+                parameter="audio_embeds",
             )
 
         if isinstance(audio_embeds, dict):
@@ -1592,10 +1600,14 @@ def _parse_chat_message_content_mm_part(
             tool_reference = tool_reference_params.get("name", None)
             return "tool_reference", tool_reference
         # Raise an error if no 'type' or direct URL is found.
-        raise ValueError("Missing 'type' field in multimodal part.")
+        raise VLLMValidationError(
+            "Missing 'type' field in multimodal part.", parameter="type"
+        )
 
     if not isinstance(part_type, str):
-        raise ValueError("Invalid 'type' field in multimodal part.")
+        raise VLLMValidationError(
+            "Invalid 'type' field in multimodal part.", parameter="type"
+        )
     return part_type, "unknown part_type content"
 
 
@@ -1732,7 +1744,9 @@ def _parse_chat_message_content_part(
         modality = "audio"
     elif part_type == "prompt_embeds":
         if not content:
-            raise ValueError(_PROMPT_EMBEDS_MISSING_DATA_ERROR)
+            raise VLLMValidationError(
+                _PROMPT_EMBEDS_MISSING_DATA_ERROR, parameter="prompt_embeds"
+            )
         mm_parser.parse_prompt_embeds(cast(str, content))
         modality = "prompt_embeds"
     elif part_type == "audio_url":
