@@ -474,6 +474,7 @@ class _StubLookupClient:
     def __init__(self, hit_tokens: int) -> None:
         self._hit_tokens = hit_tokens
         self.num_tokens: list[int] = []
+        self.discarded_request_ids: list[str] = []
 
     def lookup(
         self,
@@ -484,6 +485,9 @@ class _StubLookupClient:
     ) -> int:
         self.num_tokens.append(num_tokens)
         return self._hit_tokens
+
+    def discard(self, req_id: str) -> None:
+        self.discarded_request_ids.append(req_id)
 
 
 def test_full_external_hit_keeps_kvpool_cached_tokens_block_aligned():
@@ -514,11 +518,8 @@ def test_full_external_hit_keeps_kvpool_cached_tokens_block_aligned():
     assert load_spec.kvpool_cached_tokens % 16 == 0
 
 
-def test_full_external_hit_with_full_local_hit_skips_load():
-    # When local prefix cache already covers the block-aligned external hit,
-    # there is nothing for the connector to load. The pre-fix behavior would
-    # have scheduled a 15-token load that the recv thread couldn't translate
-    # into any block-aligned key.
+def test_full_local_hit_skips_external_lookup():
+    # The maximum usable external hit for 48 tokens is 32.
     scheduler = _make_bare_scheduler()
     scheduler.load_async = True
     scheduler.client = _StubLookupClient(hit_tokens=32)
@@ -535,4 +536,6 @@ def test_full_external_hit_with_full_local_hit_skips_load():
 
     assert need_to_allocate == 0
     assert load_async is False
+    assert scheduler.client.num_tokens == []
+    assert scheduler.client.discarded_request_ids == ["req-0"]
     assert "req-0" not in scheduler.load_specs
