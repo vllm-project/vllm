@@ -9,6 +9,7 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from typing import cast
 
+import numpy as np
 import torch
 
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
@@ -196,22 +197,46 @@ class ChunkedTokenDatabase:
     def prepare_value(
         self, start: int, end: int, block_ids: list[int]
     ) -> tuple[list[int], list[int], int]:
-        """Compute memory addresses and sizes for a token range.
+        """Compute memory addresses and sizes for a single token range.
 
         Returns:
             (addr_list, size_list, block_id)
         """
-        addr_list = []
-        size_list = []
-        block_id = block_ids[start // self.block_size]
+        addr_lists, size_lists, chunk_block_ids = self.prepare_values(
+            ((start, end),), block_ids
+        )
+        return addr_lists[0], size_lists[0], chunk_block_ids[0]
+
+    def prepare_values(
+        self,
+        chunks: Sequence[tuple[int, int]],
+        block_ids: list[int],
+    ) -> tuple[list[list[int]], list[list[int]], list[int]]:
+        """Compute memory addresses and sizes for multiple token ranges.
+
+        Returns:
+            (addr_lists, size_lists, chunk_block_ids), one entry per chunk.
+        """
+        if not chunks:
+            return [], [], []
+        base = np.asarray(self.kv_caches_base_addr, dtype=np.int64)
         length = len(self.block_len)
-        for index, base_addr in enumerate(self.kv_caches_base_addr):
-            addr = base_addr + block_id * self.block_len[index % length]
-            assert (end - start) % self.block_size == 0
-            size = self.block_len[index % length] * cdiv(end - start, self.block_size)
-            addr_list.append(addr)
-            size_list.append(size)
-        return addr_list, size_list, block_id
+        blen = np.asarray(
+            [self.block_len[i % length] for i in range(base.shape[0])],
+            dtype=np.int64,
+        )
+        n = len(chunks)
+        starts = np.fromiter((c[0] for c in chunks), dtype=np.int64, count=n)
+        spans = np.fromiter((c[1] for c in chunks), dtype=np.int64, count=n) - starts
+        assert not (spans % self.block_size).any()
+        bids = np.fromiter(
+            (block_ids[i] for i in (starts // self.block_size).tolist()),
+            dtype=np.int64,
+            count=n,
+        )
+        addrs = base[None, :] + bids[:, None] * blen[None, :]
+        sizes = blen[None, :] * (spans // self.block_size)[:, None]
+        return addrs.tolist(), sizes.tolist(), bids.tolist()
 
     def process_tokens(
         self,
