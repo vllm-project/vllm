@@ -130,6 +130,18 @@ jobs:
                   },
                 ],
               },
+              quantization: {
+                keywords: [
+                  {
+                    term: "quantization",
+                    searchIn: "both"
+                  },
+                  {
+                    term: "quantized",
+                    searchIn: "both"
+                  },
+                ],
+              },
               "intel-gpu": {
                 // Keyword search - matches whole words only (with word boundaries)
                 keywords: [
