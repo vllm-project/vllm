@@ -405,11 +405,14 @@ initialize_native_environment() {
   : "${VLLM_CACHE_ROOT:=${native_root}/cache/vllm}"
   : "${XDG_CACHE_HOME:=${native_root}/cache/xdg}"
   : "${HF_HOME:=/home/buildkite-agent/huggingface}"
+  # datasets uses POSIX locks that are unsupported by the shared HF NFS cache.
+  # Keep processed datasets job-local while retaining the persistent Hub cache.
+  HF_DATASETS_CACHE="${native_root}/cache/huggingface/datasets"
   : "${HF_HUB_DOWNLOAD_TIMEOUT:=300}"
   : "${HF_HUB_ETAG_TIMEOUT:=60}"
   export TMPDIR VLLM_RPC_BASE_PATH
   export TORCHINDUCTOR_CACHE_DIR TRITON_CACHE_DIR VLLM_CACHE_ROOT XDG_CACHE_HOME
-  export HF_HOME HF_HUB_DOWNLOAD_TIMEOUT HF_HUB_ETAG_TIMEOUT
+  export HF_HOME HF_DATASETS_CACHE HF_HUB_DOWNLOAD_TIMEOUT HF_HUB_ETAG_TIMEOUT
   export PYTORCH_ROCM_ARCH=""
 
   mkdir -p "${TMPDIR}" \
@@ -417,7 +420,8 @@ initialize_native_environment() {
     "${TRITON_CACHE_DIR}" \
     "${VLLM_CACHE_ROOT}" \
     "${XDG_CACHE_HOME}" \
-    "${HF_HOME}" || return 1
+    "${HF_HOME}" \
+    "${HF_DATASETS_CACHE}" || return 1
 
   if [[ "${VLLM_CI_REQUIRE_PERSISTENT_HF_CACHE:-0}" == "1" ]]; then
     if ! command -v findmnt >/dev/null 2>&1; then
