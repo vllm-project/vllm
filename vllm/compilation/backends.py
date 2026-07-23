@@ -542,7 +542,24 @@ def _decompose_size_nodes(graph: fx.GraphModule) -> None:
                     else:
                         new_args.append(arg)
                 user.args = tuple(new_args)
-        graph.graph.erase_node(node)
+                # Also replace in kwargs (e.g. size= passed as keyword)
+                new_kwargs = {}
+                for k, v in user.kwargs.items():
+                    if v is node:
+                        if len(dims) == 1:
+                            new_kwargs[k] = dims[0]
+                        else:
+                            new_kwargs[k] = tuple(dims)
+                    else:
+                        new_kwargs[k] = v
+                user.kwargs = new_kwargs
+        # Only erase if all users have been replaced
+        if len(node.users) == 0:
+            graph.graph.erase_node(node)
+        else:
+            # Some users still reference this node (e.g. mutated outputs).
+            # Leave the size node in place; it will be handled downstream.
+            pass
 
 
 def split_graph(
@@ -1001,7 +1018,7 @@ class VllmBackend:
             },
             payload_fn=lambda: json.dumps(
                 {
-                    "model": self.vllm_config.model_config.model,
+                    "model": getattr(self.vllm_config.model_config, "model", "unknown"),
                     "prefix": self.prefix,
                     "mode": str(cc.mode),
                     "backend": cc.backend,
@@ -1277,7 +1294,7 @@ class VllmBackend:
             original_split_gm if envs.VLLM_USE_MEGA_AOT_ARTIFACT else self.graph
         )
 
-        execution_code, submod_names = generate_execution_code(self.split_gm)
+        execution_code, submod_names, consts = generate_execution_code(self.split_gm)
         # Use getattr to get correct callables: __dict__ has PiecewiseBackend
         # instances (from PiecewiseCompileInterpreter), _modules has originals.
         # getattr checks __dict__ first, then falls back to _modules.
@@ -1286,7 +1303,7 @@ class VllmBackend:
             for name, _ in self.split_gm.named_children()
         }
         runtime_callable = compile_execution_fn(
-            execution_code, submod_callables, submod_names
+            execution_code, submod_callables, submod_names, consts
         )
 
         if (
@@ -1302,6 +1319,7 @@ class VllmBackend:
                 vllm_backend=self,
                 execution_code=execution_code,
                 submod_names=submod_names,
+                consts=consts,
             )
 
         # index of tensors that have symbolic shapes (batch size)
@@ -1335,4 +1353,5 @@ class VllmBackend:
             sym_tensor_indices=sym_tensor_indices,
             execution_code=execution_code,
             submod_names=submod_names,
+            consts=consts,
         )

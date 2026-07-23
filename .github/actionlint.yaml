@@ -1,6 +1,11 @@
+# Custom self-hosted runner labels (e.g. the autoscaling vllm-runners pool) so
+# actionlint doesn't flag them as unknown in `runs-on`.
 self-hosted-runner:
   labels:
-    - linux-aarch64-a2b3-0
+    - vllm-runners
+    - ascend
+    - 910b
     - docker
-    - ascend-benchmark
-    - ascend-regression
+    - npu-2
+    # Not yet in actionlint's known-label set.
+    - macos-26

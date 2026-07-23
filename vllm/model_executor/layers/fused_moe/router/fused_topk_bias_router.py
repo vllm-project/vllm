@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import functools
-from collections.abc import Callable
 
 import torch
 import torch.nn.functional as F
@@ -57,6 +56,52 @@ def vllm_topk_sigmoid(
     return topk_weights, topk_indices
 
 
+def _topk_softplus_sqrt_torch(
+    topk_weights: torch.Tensor,
+    topk_indices: torch.Tensor,
+    token_expert_indices: torch.Tensor,
+    gating_output: torch.Tensor,
+    renormalize: bool = False,
+    e_score_correction_bias: torch.Tensor | None = None,
+    input_tokens: torch.Tensor | None = None,
+    hash_indices_table: torch.Tensor | None = None,
+    routed_scaling_factor: float = 1.0,
+) -> tuple[torch.Tensor, ...]:
+    """Pure PyTorch fallback for topk_softplus_sqrt (XPU/CPU)."""
+    # scores = sqrt(softplus(gating_output))
+    scores = torch.sqrt(F.softplus(gating_output.float()))
+
+    # Bias is used for expert SELECTION only, not for weight computation.
+    # Using biased scores as weights flattens the distribution when the bias
+    # is near-uniform (e.g., DSv4-Flash where all biases ≈ 8.08).
+    if e_score_correction_bias is not None:
+        scores_for_choice = scores + e_score_correction_bias.float()
+    else:
+        scores_for_choice = scores
+
+    topk = topk_weights.shape[-1]
+
+    if hash_indices_table is not None and input_tokens is not None:
+        # Hash MoE: expert indices predetermined by lookup table
+        # hash_indices_table: [vocab_size, topk] mapping token_id -> expert_ids
+        expert_ids = hash_indices_table[input_tokens.long()]  # [M, topk]
+        topk_indices.copy_(expert_ids)
+        # Gather weights from unbiased scores
+        weights = scores.gather(1, expert_ids.long())
+    else:
+        # Standard topk selection using biased scores
+        _, indices = torch.topk(scores_for_choice, k=topk, dim=-1)
+        topk_indices.copy_(indices)
+        # Gather weights from unbiased scores
+        weights = scores.gather(1, indices)
+
+    if renormalize:
+        weights = weights / (weights.sum(dim=-1, keepdim=True).clamp(min=1e-20))
+
+    topk_weights.copy_(weights * routed_scaling_factor)
+    return topk_weights, topk_indices
+
+
 def vllm_topk_softplus_sqrt(
     topk_weights: torch.Tensor,
     topk_indices: torch.Tensor,
@@ -68,6 +113,21 @@ def vllm_topk_softplus_sqrt(
     hash_indices_table: torch.Tensor | None = None,
     routed_scaling_factor: float = 1.0,
 ) -> tuple[torch.Tensor, ...]:
+    from vllm.platforms import current_platform
+
+    if current_platform.is_xpu():
+        return _topk_softplus_sqrt_torch(
+            topk_weights,
+            topk_indices,
+            token_expert_indices,
+            gating_output,
+            renormalize,
+            e_score_correction_bias,
+            input_tokens,
+            hash_indices_table,
+            routed_scaling_factor,
+        )
+
     ops.topk_hash_softplus_sqrt(
         topk_weights,
         topk_indices,
@@ -108,6 +168,14 @@ def fused_topk_bias(
     hash_indices_table: torch.Tensor | None = None,
     routed_scaling_factor: float = 1.0,
 ):
+    # The topk kernel dispatches dtype based on topk_ids (set by
+    # indices_type) and assumes input_tokens/hash_indices_table match.
+    if indices_type is not None:
+        if input_tokens is not None and input_tokens.dtype != indices_type:
+            input_tokens = input_tokens.to(dtype=indices_type)
+        if hash_indices_table is not None and hash_indices_table.dtype != indices_type:
+            hash_indices_table = hash_indices_table.to(dtype=indices_type)
+
     if not rocm_aiter_ops.is_fused_moe_enabled():
         assert hidden_states.size(0) == gating_output.size(0), (
             "Number of tokens mismatch"
@@ -194,13 +262,37 @@ def fused_topk_bias(
                 topk_weights *= routed_scaling_factor
             return topk_weights, topk_ids
 
+    if scoring_func == "sqrtsoftplus":
+        M = hidden_states.size(0)
+        topk_weights = torch.empty(
+            M, topk, dtype=torch.float32, device=hidden_states.device
+        )
+        topk_ids = torch.empty(
+            M,
+            topk,
+            dtype=torch.int32 if indices_type is None else indices_type,
+            device=hidden_states.device,
+        )
+        token_expert_indices = torch.empty(
+            M, topk, dtype=torch.int32, device=hidden_states.device
+        )
+        return vllm_topk_softplus_sqrt(
+            topk_weights,
+            topk_ids,
+            token_expert_indices,
+            gating_output,
+            renormalize,
+            e_score_correction_bias,
+            input_tokens,
+            hash_indices_table,
+            routed_scaling_factor,
+        )
+
     n_routed_experts = gating_output.shape[-1]
     if scoring_func == "softmax":
         scores = gating_output.softmax(dim=-1)
     elif scoring_func == "sigmoid":
         scores = gating_output.sigmoid()
-    elif scoring_func == "sqrtsoftplus":
-        scores = F.softplus(gating_output).sqrt()
     else:
         raise ValueError(f"Unsupported scoring function: {scoring_func}")
     if e_score_correction_bias is not None:
@@ -235,22 +327,20 @@ class FusedTopKBiasRouter(BaseRouter):
         self,
         top_k: int,
         global_num_experts: int,
-        eplb_state: EplbLayerState,
         e_score_correction_bias: torch.Tensor | None = None,
         renormalize: bool = True,
         routed_scaling_factor: float = 1.0,
-        enable_eplb: bool = False,
-        indices_type_getter: Callable[[], torch.dtype | None] | None = None,
+        eplb_state: EplbLayerState | None = None,
         *,
         scoring_func: str = "sigmoid",
         hash_indices_table: torch.Tensor | None = None,
+        num_fused_shared_experts: int = 0,
+        shared_expert_weight: float = 1.0,
     ):
         super().__init__(
             top_k=top_k,
             global_num_experts=global_num_experts,
             eplb_state=eplb_state,
-            enable_eplb=enable_eplb,
-            indices_type_getter=indices_type_getter,
         )
         self.e_score_correction_bias = e_score_correction_bias
         self.renormalize = renormalize
@@ -258,6 +348,11 @@ class FusedTopKBiasRouter(BaseRouter):
         self.routed_scaling_factor = routed_scaling_factor
         self.scoring_func = scoring_func
         self._hash_indices_table = hash_indices_table
+        # Fused shared experts: append constant slots (ids immediately after
+        # the routed experts, [global, global+n)) routed to by every token at
+        # ``shared_expert_weight``, AFTER the routed top-k is renormalized.
+        self.num_fused_shared_experts = num_fused_shared_experts
+        self.shared_expert_weight = shared_expert_weight
 
     @property
     def routing_method_type(self) -> RoutingMethodType:
@@ -267,6 +362,7 @@ class FusedTopKBiasRouter(BaseRouter):
             renormalize=self.renormalize,
             num_expert_group=None,
             has_e_score_bias=True,
+            routed_scaling_factor=self.routed_scaling_factor,
         )
 
     def _compute_routing(
@@ -292,5 +388,24 @@ class FusedTopKBiasRouter(BaseRouter):
             hash_indices_table=self._hash_indices_table,
             routed_scaling_factor=self.routed_scaling_factor,
         )
+
+        if self.num_fused_shared_experts > 0:
+            m = topk_ids.shape[0]
+            n = self.num_fused_shared_experts
+            # global_num_experts counts only the routed experts; the fused
+            # shared experts occupy the slots immediately after them, i.e. ids
+            # [global_num_experts, global_num_experts + n).
+            base = self.global_num_experts
+            shared_ids = torch.arange(
+                base, base + n, dtype=topk_ids.dtype, device=topk_ids.device
+            ).expand(m, n)
+            shared_w = torch.full(
+                (m, n),
+                self.shared_expert_weight,
+                dtype=topk_weights.dtype,
+                device=topk_weights.device,
+            )
+            topk_ids = torch.cat([topk_ids, shared_ids], dim=-1)
+            topk_weights = torch.cat([topk_weights, shared_w], dim=-1)
 
         return topk_weights, topk_ids

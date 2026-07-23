@@ -4,15 +4,17 @@
 import os
 from typing import TYPE_CHECKING
 
-import huggingface_hub
 import regex as re
 from huggingface_hub.utils import HfHubHTTPError, HFValidationError
 from torch import nn
 from transformers import PretrainedConfig
 
-from vllm import envs
 from vllm.config.lora import LoRAConfig
 from vllm.logger import init_logger
+from vllm.transformers_utils.modelscope_utils import (
+    configure_modelscope_runtime,
+    should_use_modelscope,
+)
 
 # being imported for _all_lora_classes below
 from vllm.lora.layers import (
@@ -34,9 +36,10 @@ from vllm.lora.layers import (
     RowParallelLinearWithShardedLoRA,
     VocabParallelEmbeddingWithLoRA,
 )
-from vllm.model_executor.layers.fused_moe import FusedMoE
+from vllm.model_executor.layers.fused_moe import MoERunner
 from vllm.model_executor.layers.linear import LinearBase
 from vllm.model_executor.utils import get_moe_expert_mapping, get_packed_modules_mapping
+from vllm.transformers_utils.repo_utils import hf_api
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -96,8 +99,8 @@ _all_lora_classes: tuple[type[BaseLayerWithLoRA], ...] = (
 
 
 def is_moe_model(model: nn.Module) -> bool:
-    """Checks if the model contains FusedMoE layers and warns the user."""
-    if any(isinstance(module, FusedMoE) for module in model.modules()):
+    """Checks if the model contains MoERunner layers and warns the user."""
+    if any(isinstance(module, MoERunner) for module in model.modules()):
         logger.info_once("MoE model detected. Using fused MoE LoRA implementation.")
         return True
     return False
@@ -173,11 +176,18 @@ def parse_fine_tuned_lora_name(
     # mapping correctly.
     if name.startswith("base_model.model."):
         name = name.replace("base_model.model.", "")
-        name = weights_mapper._map_name(name) if weights_mapper else name
-        # recover the prefix `base_model.model.`
-        name = "base_model.model." + name
+        if weights_mapper:
+            mapped_name = weights_mapper._map_name(name)
+            if mapped_name is None:
+                raise ValueError("Mapped LoRA weight name cannot be None.")
+            # recover the prefix `base_model.model.`
+            name = "base_model.model." + mapped_name
     else:
-        name = weights_mapper._map_name(name) if weights_mapper else name
+        if weights_mapper:
+            mapped_name = weights_mapper._map_name(name)
+            if mapped_name is None:
+                raise ValueError("Mapped LoRA weight name cannot be None.")
+            name = mapped_name
 
     # In some situations, we may not start with `base_model.model.`.
     # If we don't (e.g., ibm-granite/granite-speech-3.3-8b),
@@ -185,7 +195,11 @@ def parse_fine_tuned_lora_name(
     start_index = 2 if name.startswith("base_model.model.") else 0
 
     parts = name.split(".")
-    if parts[-1] == "weight" and (parts[-2] == "lora_A" or parts[-2] == "lora_B"):
+    if (
+        parts[-1] == "weight"
+        and len(parts) >= 2
+        and (parts[-2] == "lora_A" or parts[-2] == "lora_B")
+    ):
         new_name = ".".join(parts[start_index:-2])
         return new_name, parts[-2] == "lora_A"
 
@@ -223,7 +237,7 @@ def get_supported_lora_modules(model: nn.Module) -> list[str]:
         if isinstance(module, (LinearBase,)):
             supported_lora_modules.add(name.split(".")[-1])
 
-        if isinstance(module, (FusedMoE,)):
+        if isinstance(module, (MoERunner,)):
             supported_lora_modules.add(name.split(".")[-1])
 
     return list(supported_lora_modules)
@@ -330,7 +344,8 @@ def get_adapter_absolute_path(lora_path: str) -> str:
         return os.path.abspath(lora_path)
 
     # If the path does not exist locally.
-    if envs.VLLM_USE_MODELSCOPE:
+    if should_use_modelscope():
+        configure_modelscope_runtime()
         # If using ModelScope, we assume the path is a ModelScope repo.
         from modelscope.hub.snapshot_download import InvalidParameter, snapshot_download
         from requests import HTTPError
@@ -340,7 +355,9 @@ def get_adapter_absolute_path(lora_path: str) -> str:
         error_log = "Error downloading the ModelScope model"
     else:
         # Otherwise, we assume the path is a Hugging Face Hub repo.
-        download_fn = lambda: huggingface_hub.snapshot_download(repo_id=lora_path)
+        download_fn = lambda: hf_api().snapshot_download(
+            repo_id=lora_path,
+        )
         download_exceptions = (HfHubHTTPError, HFValidationError)
         error_log = "Error downloading the HuggingFace model"
 
@@ -355,31 +372,30 @@ def get_adapter_absolute_path(lora_path: str) -> str:
     return local_snapshot_path
 
 
-def process_packed_modules_mapping(model: nn.Module) -> dict[str, list[str]]:
+def process_packed_modules_mapping(
+    model: nn.Module, force_2d_moe: bool = False
+) -> dict[str, list[str]]:
     if is_moe_model(model):
-        if moe_packed_mapping := get_moe_expert_mapping(model):
-            # This method generates and returns a dictionary mapping packed module
-            # names to lists of their corresponding submodule names. It includes
-            # both static mappings and dynamic mappings for expert layers, where
-            # the expert indices are expanded based on the configured number
-            # of routed experts.
-            packed_modules_mapping = get_packed_modules_mapping(model)
-            if not model.is_3d_moe_weight:
-                # 3D MoE LoRA does not need `packed_modules_mapping`
-                # Filter out malformed entries: non-gated MoE has empty
-                # ckpt_up_proj_name which results in weight_name containing ".."
-                # (e.g., "experts.0.." instead of "experts.0.layer_name.")
-                packed_modules_mapping["experts"] = [
-                    weight_name.rstrip(".")
-                    for _, weight_name, _, _ in moe_packed_mapping
-                    if ".." not in weight_name
-                ]
+        # This method generates and returns a dictionary mapping packed module
+        # names to lists of their corresponding submodule names. It includes
+        # both static mappings and dynamic mappings for expert layers, where
+        # the expert indices are expanded based on the configured number
+        # of routed experts.
+        packed_modules_mapping = get_packed_modules_mapping(model)
+        # The 2D mapping is needed when the model itself is 2D, or when
+        # the engine forces the universal 2D wrapper via
+        # enable_mixed_moe_lora_format (so 3D models can also load 2D
+        # adapters through FusedMoEWithLoRA).
+        if (not model.is_3d_moe_weight) or force_2d_moe:
+            # Filter out malformed entries: non-gated MoE has empty
+            # ckpt_up_proj_name which results in weight_name containing ".."
+            # (e.g., "experts.0.." instead of "experts.0.layer_name.")
+            packed_modules_mapping["experts"] = [
+                weight_name.rstrip(".")
+                for _, weight_name, _, _ in get_moe_expert_mapping(model)
+                if ".." not in weight_name
+            ]
 
-            return packed_modules_mapping
-        else:
-            raise AttributeError(
-                "To support LoRA for MoE model, "
-                "'get_expert_mapping' must be implemented"
-            )
+        return packed_modules_mapping
     else:
         return get_packed_modules_mapping(model)

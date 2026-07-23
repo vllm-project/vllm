@@ -5,11 +5,6 @@ set -xe
 KV_BUFFER_DEVICE="cuda"  # Default to cuda
 ATTENTION_BACKEND=""  # Default to empty (use vllm default)
 CROSS_LAYERS_BLOCKS="False"
-ENABLE_HMA_VAR=""  # Default to empty (HMA disabled by default for kv connector)
-# Check for ENABLE_HMA_FLAG environment variable
-if [[ -n "${ENABLE_HMA_FLAG:-}" ]]; then
-  ENABLE_HMA_VAR="--no-disable-hybrid-kv-cache-manager"
-fi
 
 while [[ $# -gt 0 ]]; do
   case $1 in
@@ -37,9 +32,6 @@ echo "Running accuracy tests with kv_buffer_device=$KV_BUFFER_DEVICE"
 if [[ -n "$ATTENTION_BACKEND" ]]; then
   echo "Using attention backend: $ATTENTION_BACKEND"
 fi
-if [[ -n "$ENABLE_HMA_VAR" ]]; then
-  echo "HMA (Hybrid KV Cache Manager) enabled"
-fi
 if [[ -n "$VLLM_SERVE_EXTRA_ARGS" ]]; then
   echo "vLLM serve extra args: $VLLM_SERVE_EXTRA_ARGS"
 fi
@@ -57,11 +49,13 @@ else
   KV_EXTRA_CONFIG=''
 fi
 
-# Build the kv-transfer-config once
+# Build the kv-transfer-config for P and D
 if [[ "$KV_BUFFER_DEVICE" == "cuda" ]]; then
-  KV_CONFIG='{"kv_connector":"NixlConnector","kv_role":"kv_both"'${KV_CONFIG_HETERO_LAYOUT}${KV_EXTRA_CONFIG}'}'
+  KV_CONFIG_P='{"kv_connector":"NixlConnector","kv_role":"kv_producer"'${KV_CONFIG_HETERO_LAYOUT}${KV_EXTRA_CONFIG}'}'
+  KV_CONFIG_D='{"kv_connector":"NixlConnector","kv_role":"kv_consumer"'${KV_CONFIG_HETERO_LAYOUT}${KV_EXTRA_CONFIG}'}'
 else
-  KV_CONFIG="{\"kv_connector\":\"NixlConnector\",\"kv_role\":\"kv_both\",\"kv_buffer_device\":\"$KV_BUFFER_DEVICE\""${KV_CONFIG_HETERO_LAYOUT}${KV_EXTRA_CONFIG}"}"
+  KV_CONFIG_P="{\"kv_connector\":\"NixlConnector\",\"kv_role\":\"kv_producer\",\"kv_buffer_device\":\"$KV_BUFFER_DEVICE\""${KV_CONFIG_HETERO_LAYOUT}${KV_EXTRA_CONFIG}"}"
+  KV_CONFIG_D="{\"kv_connector\":\"NixlConnector\",\"kv_role\":\"kv_consumer\",\"kv_buffer_device\":\"$KV_BUFFER_DEVICE\""${KV_CONFIG_HETERO_LAYOUT}${KV_EXTRA_CONFIG}"}"
 fi
 
 # Models to run
@@ -167,7 +161,7 @@ run_tests_for_model() {
     --block-size ${PREFILL_BLOCK_SIZE} \
     --gpu-memory-utilization $GPU_MEMORY_UTILIZATION \
     --tensor-parallel-size $PREFILLER_TP_SIZE \
-    --kv-transfer-config '$KV_CONFIG'"
+    --kv-transfer-config '$KV_CONFIG_P'"
     if [[ -n "$VLLM_SERVE_EXTRA_ARGS" ]]; then
       IFS=',' read -r -a extra_args <<< "$VLLM_SERVE_EXTRA_ARGS"
       for arg in "${extra_args[@]}"; do
@@ -180,10 +174,6 @@ run_tests_for_model() {
       BASE_CMD="${BASE_CMD} --attention-backend=$ATTENTION_BACKEND"
     fi
 
-    # Add HMA flag if specified
-    if [[ -n "$ENABLE_HMA_VAR" ]]; then
-      BASE_CMD="${BASE_CMD} $ENABLE_HMA_VAR"
-    fi
     
     FULL_CMD="$BASE_CMD"
     eval "$FULL_CMD &"
@@ -219,7 +209,7 @@ run_tests_for_model() {
     --enforce-eager \
     --block-size ${DECODE_BLOCK_SIZE} \
     --gpu-memory-utilization $GPU_MEMORY_UTILIZATION \
-    --kv-transfer-config '$KV_CONFIG'"
+    --kv-transfer-config '$KV_CONFIG_D'"
     if [[ -n "$VLLM_SERVE_EXTRA_ARGS" ]]; then
       IFS=',' read -r -a extra_args <<< "$VLLM_SERVE_EXTRA_ARGS"
       for arg in "${extra_args[@]}"; do
@@ -232,10 +222,6 @@ run_tests_for_model() {
       BASE_CMD="${BASE_CMD} --attention-backend=$ATTENTION_BACKEND"
     fi
 
-    # Add HMA flag if specified
-    if [[ -n "$ENABLE_HMA_VAR" ]]; then
-      BASE_CMD="${BASE_CMD} $ENABLE_HMA_VAR"
-    fi
 
   # DP-EP attention mode
   if [[ -z "$DP_EP" ]]; then

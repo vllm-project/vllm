@@ -26,7 +26,6 @@ from vllm.v1.metrics.stats import (
     MultiModalCacheStats,
     PromptTokenStats,
     SchedulerStats,
-    StructuredOutputCacheStats,
 )
 from vllm.v1.metrics.utils import create_metric_per_engine
 from vllm.v1.spec_decode.metrics import SpecDecodingLogging, SpecDecodingProm
@@ -112,7 +111,9 @@ class LoggingStatLogger(StatLoggerBase):
         self.mm_caching_metrics = CachingMetrics()
         self.structured_output_caching_metrics = CachingMetrics()
 
-        self.spec_decoding_logging = SpecDecodingLogging()
+        model_config = self.vllm_config.model_config
+        is_diffusion = model_config is not None and model_config.is_diffusion
+        self.spec_decoding_logging = SpecDecodingLogging(is_diffusion=is_diffusion)
         kv_transfer_config = self.vllm_config.kv_transfer_config
         self.kv_connector_logging = KVConnectorLogging(kv_transfer_config)
         self.cudagraph_logging = None
@@ -446,7 +447,10 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         per_engine_labelvalues = self.per_engine_labelvalues
 
         self.spec_decoding_prom = self._spec_decoding_cls(
-            vllm_config.speculative_config, labelnames, per_engine_labelvalues
+            vllm_config.speculative_config,
+            labelnames,
+            per_engine_labelvalues,
+            is_diffusion=vllm_config.model_config.is_diffusion,
         )
         self.kv_connector_prom = self._kv_connector_cls(
             vllm_config, labelnames, per_engine_labelvalues
@@ -536,6 +540,18 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             gauge_kv_cache_usage, per_engine_labelvalues
         )
 
+        gauge_available_kv_cache_memory = self._gauge_cls(
+            name="vllm:available_kv_cache_memory_bytes",
+            documentation=(
+                "Available device memory budget for KV cache allocation in bytes."
+            ),
+            multiprocess_mode="mostrecent",
+            labelnames=labelnames,
+        )
+        self.gauge_available_kv_cache_memory = create_metric_per_engine(
+            gauge_available_kv_cache_memory, per_engine_labelvalues
+        )
+
         if envs.VLLM_COMPUTE_NANS_IN_LOGITS:
             counter_corrupted_requests = self._counter_cls(
                 name="vllm:corrupted_requests",
@@ -567,6 +583,42 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         )
         self.counter_prefix_cache_hits = create_metric_per_engine(
             counter_prefix_cache_hits, per_engine_labelvalues
+        )
+
+        counter_prefix_cache_block_queries = self._counter_cls(
+            name="vllm:prefix_cache_block_queries",
+            documentation=(
+                "Prefix cache block lookups, in terms of full prompt blocks "
+                "whose hashes were queried."
+            ),
+            labelnames=labelnames,
+        )
+        self.counter_prefix_cache_block_queries = create_metric_per_engine(
+            counter_prefix_cache_block_queries, per_engine_labelvalues
+        )
+
+        counter_prefix_cache_block_hits = self._counter_cls(
+            name="vllm:prefix_cache_block_hits",
+            documentation=(
+                "Prefix cache block hits, in terms of full prompt blocks "
+                "reused from cache."
+            ),
+            labelnames=labelnames,
+        )
+        self.counter_prefix_cache_block_hits = create_metric_per_engine(
+            counter_prefix_cache_block_hits, per_engine_labelvalues
+        )
+
+        counter_prefix_cache_blocks_cached = self._counter_cls(
+            name="vllm:prefix_cache_blocks_cached",
+            documentation=(
+                "Prefix cache block insertions, in terms of newly cached full "
+                "prompt blocks."
+            ),
+            labelnames=labelnames,
+        )
+        self.counter_prefix_cache_blocks_cached = create_metric_per_engine(
+            counter_prefix_cache_blocks_cached, per_engine_labelvalues
         )
 
         #
@@ -1113,12 +1165,25 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
                 scheduler_stats.num_skipped_waiting_reqs
             )
             self.gauge_kv_cache_usage[engine_idx].set(scheduler_stats.kv_cache_usage)
+            if scheduler_stats.available_kv_cache_memory_bytes is not None:
+                self.gauge_available_kv_cache_memory[engine_idx].set(
+                    scheduler_stats.available_kv_cache_memory_bytes
+                )
 
             self.counter_prefix_cache_queries[engine_idx].inc(
                 scheduler_stats.prefix_cache_stats.queries
             )
             self.counter_prefix_cache_hits[engine_idx].inc(
                 scheduler_stats.prefix_cache_stats.hits
+            )
+            self.counter_prefix_cache_block_queries[engine_idx].inc(
+                scheduler_stats.prefix_cache_stats.block_queries
+            )
+            self.counter_prefix_cache_block_hits[engine_idx].inc(
+                scheduler_stats.prefix_cache_stats.block_hits
+            )
+            self.counter_prefix_cache_blocks_cached[engine_idx].inc(
+                scheduler_stats.prefix_cache_stats.blocks_cached
             )
 
             if scheduler_stats.connector_prefix_cache_stats is not None:
@@ -1203,7 +1268,8 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             iteration_stats.num_generation_tokens
         )
         self.histogram_iteration_tokens[engine_idx].observe(
-            iteration_stats.num_prompt_tokens + iteration_stats.num_generation_tokens
+            iteration_stats.prompt_token_stats.computed
+            + iteration_stats.num_generation_tokens
         )
 
         for max_gen_tokens in iteration_stats.max_num_generation_tokens_iter:

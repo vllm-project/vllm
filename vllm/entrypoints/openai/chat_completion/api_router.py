@@ -15,12 +15,12 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
 )
 from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
 from vllm.entrypoints.openai.engine.protocol import ErrorResponse
-from vllm.entrypoints.openai.orca_metrics import metrics_header
-from vllm.entrypoints.openai.utils import validate_json_request
-from vllm.entrypoints.utils import (
+from vllm.entrypoints.serve.utils.api_utils import (
     load_aware_call,
+    validate_json_request,
     with_cancellation,
 )
+from vllm.entrypoints.serve.utils.orca_metrics import metrics_header
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -64,14 +64,26 @@ async def create_chat_completion(request: ChatCompletionRequest, raw_request: Re
         return JSONResponse(
             content=generator.model_dump(), status_code=generator.error.code
         )
-
     elif isinstance(generator, ChatCompletionResponse):
+        response_headers = {
+            **dict(metrics_header(metrics_header_format) or {}),
+            **handler.build_routing_headers(request.model),
+        }
         return JSONResponse(
             content=generator.model_dump(),
-            headers=metrics_header(metrics_header_format),
+            headers=response_headers,
         )
 
-    return StreamingResponse(content=generator, media_type="text/event-stream")
+    response_headers = {
+        **dict(metrics_header(metrics_header_format) or {}),
+        **handler.build_routing_headers(request.model),
+    }
+
+    return StreamingResponse(
+        content=generator,
+        media_type="text/event-stream",
+        headers=response_headers,
+    )
 
 
 @router.post(

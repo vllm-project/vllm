@@ -9,6 +9,9 @@ from vllm.triton_utils import tl, triton
 from vllm.v1.outputs import LogprobsTensors
 from vllm.v1.worker.gpu.buffer_utils import StagedWriteTensor, UvaBackedTensor
 
+# Upper bound on the topk kernel's per-iteration gather width.
+_MAX_TOPK_BLOCK = 1024
+
 
 @triton.jit
 def _topk_log_softmax_kernel(
@@ -19,9 +22,9 @@ def _topk_log_softmax_kernel(
     topk,
     vocab_size,
     BLOCK_SIZE: tl.constexpr,
-    PADDED_TOPK: tl.constexpr,
+    TOPK_BLOCK_SIZE: tl.constexpr,
 ):
-    req_idx = tl.program_id(0)
+    req_idx = tl.program_id(0).to(tl.int64)
     row_ptr = logits_ptr + req_idx * logits_stride
 
     max_val = float("-inf")
@@ -42,14 +45,16 @@ def _topk_log_softmax_kernel(
         se += tl.sum(e)
     lse = tl.log(se)
 
-    k_offset = tl.arange(0, PADDED_TOPK)
-    k_mask = k_offset < topk
-    topk_ids = tl.load(topk_ids_ptr + req_idx * topk + k_offset, mask=k_mask, other=0)
-
-    logits = tl.load(row_ptr + topk_ids, mask=k_mask)
-    logits = logits.to(tl.float32)
-    o = logits - max_val - lse
-    tl.store(output_ptr + req_idx * topk + k_offset, o, mask=k_mask)
+    for j in range(0, topk, TOPK_BLOCK_SIZE):
+        k_offset = j + tl.arange(0, TOPK_BLOCK_SIZE)
+        k_mask = k_offset < topk
+        topk_ids = tl.load(
+            topk_ids_ptr + req_idx * topk + k_offset, mask=k_mask, other=0
+        )
+        logits = tl.load(row_ptr + topk_ids, mask=k_mask)
+        logits = logits.to(tl.float32)
+        o = logits - max_val - lse
+        tl.store(output_ptr + req_idx * topk + k_offset, o, mask=k_mask)
 
 
 @triton.jit
@@ -61,7 +66,7 @@ def _ranks_kernel(
     vocab_size,
     BLOCK_SIZE: tl.constexpr,
 ):
-    req_idx = tl.program_id(0)
+    req_idx = tl.program_id(0).to(tl.int64)
     row_ptr = logits_ptr + req_idx * logits_stride
 
     token_id = tl.load(token_ids_ptr + req_idx)
@@ -85,6 +90,9 @@ def compute_token_logprobs(
     token_ids = token_ids.to(torch.int64)
     num_logprobs = token_ids.shape[1]
     logprobs = logits.new_empty((batch_size, num_logprobs), dtype=torch.float32)
+    # Cap the kernel's per-iteration width so very large num_logprobs requests
+    # stream the gather in bounded-size chunks, avoiding excessive mem use.
+    topk_block_size = min(triton.next_power_of_2(num_logprobs), _MAX_TOPK_BLOCK)
     _topk_log_softmax_kernel[(batch_size,)](
         logprobs,
         logits,
@@ -93,7 +101,7 @@ def compute_token_logprobs(
         num_logprobs,
         vocab_size,
         BLOCK_SIZE=1024,  # type: ignore
-        PADDED_TOPK=triton.next_power_of_2(num_logprobs),
+        TOPK_BLOCK_SIZE=topk_block_size,
     )
     return logprobs
 
@@ -124,9 +132,13 @@ def compute_topk_logprobs(
         # tokens where applicable.
         assert logprob_token_ids_state is not None
         assert expanded_idx_mapping is not None
-        topk_indices = None
+
         if num_logprobs > 0:
-            topk_indices = torch.topk(logits, num_logprobs, dim=-1).indices
+            topk_token_ids = torch.topk(logits, num_logprobs, dim=-1).indices
+            topk_token_ids = topk_token_ids.to(torch.int32)
+        else:
+            # This tensor just used as an int32 pointer, data not accessed.
+            topk_token_ids = logprob_token_ids_state.token_ids.gpu
 
         num_cols = max(num_logprobs, max_per_req_token_ids)
         logprob_token_ids = sampled_token_ids.new_zeros((batch_size, 1 + num_cols))
@@ -137,8 +149,8 @@ def compute_topk_logprobs(
             valid_mask,
             valid_mask.stride(0),
             sampled_token_ids,
-            topk_indices if topk_indices is not None else logprob_token_ids,
-            topk_indices.stride(0) if topk_indices is not None else 0,
+            topk_token_ids,
+            topk_token_ids.stride(0),
             expanded_idx_mapping,
             logprob_token_ids_state.num_token_ids.gpu,
             logprob_token_ids_state.token_ids.gpu,
@@ -202,14 +214,12 @@ def _fill_logprob_token_ids_kernel(
         # Override topk with per-request custom tokens.
         src = per_req_token_ids_ptr + req_state_idx * per_req_token_ids_stride
         valid = col < num_custom
-        # per_req_token_ids is int32; output is int64.
-        tokens = tl.load(src + col, mask=valid, other=0).to(tl.int64)
     else:
         # Fill with topk indices (no-op when NUM_TOPK == 0).
         src = topk_indices_ptr + batch_idx * topk_indices_stride
         valid = col < NUM_TOPK
-        tokens = tl.load(src + col, mask=valid, other=0)
 
+    tokens = tl.load(src + col, mask=valid, other=0).to(tl.int64)
     tl.store(tid_base + col, tokens, mask=valid)
     tl.store(mask_base + col, tl.full([PADDED_COLS], 1, tl.int1), mask=valid)
 

@@ -7,15 +7,14 @@ import torch.nn as nn
 
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
-from vllm.tasks import GenerationTask
 from vllm.v1.core.sched.output import NewRequestData
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.attn_utils import build_attn_metadata
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
-from vllm.v1.worker.gpu.mm.encoder_runner import EncoderRunner
 from vllm.v1.worker.gpu.mm.rope import get_rope_state
 from vllm.v1.worker.gpu.model_states.interface import ModelState
+from vllm.v1.worker.gpu.model_states.mm_pruning import maybe_create_mm_pruner
 from vllm.v1.worker.gpu.states import RequestState
 from vllm.v1.worker.utils import AttentionGroup
 
@@ -28,30 +27,7 @@ class DefaultModelState(ModelState):
         encoder_cache: EncoderCache | None,
         device: torch.device,
     ):
-        self.vllm_config = vllm_config
-        self.model_config = vllm_config.model_config
-        self.scheduler_config = vllm_config.scheduler_config
-        self.model = model
-        self.device = device
-
-        self.supports_mm_inputs = encoder_cache is not None
-        self.max_model_len = self.model_config.max_model_len
-        self.max_num_reqs = self.scheduler_config.max_num_seqs
-        self.max_num_tokens = self.scheduler_config.max_num_batched_tokens
-        self.inputs_embeds_size = self.model_config.get_inputs_embeds_size()
-        self.dtype = self.model_config.dtype
-
-        if self.supports_mm_inputs:
-            assert encoder_cache is not None
-            self.encoder_cache = encoder_cache
-            self.encoder_runner = EncoderRunner(
-                model=self.model,
-                max_num_tokens=self.max_num_tokens,
-                hidden_size=self.inputs_embeds_size,
-                encoder_cache=encoder_cache,
-                dtype=self.dtype,
-                device=self.device,
-            )
+        super().__init__(vllm_config, model, encoder_cache, device)
 
         self.rope_state = get_rope_state(
             self.model_config,
@@ -62,27 +38,10 @@ class DefaultModelState(ModelState):
             device=self.device,
         )
 
-    def get_supported_generation_tasks(self) -> tuple[GenerationTask, ...]:
-        from vllm.model_executor.models.interfaces import (
-            supports_realtime,
-            supports_transcription,
+        # Pruner is used for multimodal embedding pruning (EVS).
+        self.mm_pruner = maybe_create_mm_pruner(
+            self.model_config, model, self.rope_state, encoder_cache
         )
-        from vllm.model_executor.models.interfaces_base import is_text_generation_model
-
-        supported_tasks = list[GenerationTask]()
-
-        if is_text_generation_model(self.model):
-            supported_tasks.append("generate")
-
-        if supports_transcription(self.model):
-            if self.model.supports_transcription_only:
-                return ("transcription",)
-            supported_tasks.append("transcription")
-
-        if supports_realtime(self.model):
-            supported_tasks.append("realtime")
-
-        return tuple(supported_tasks)
 
     def add_request(self, req_index: int, new_req_data: NewRequestData) -> None:
         if self.rope_state is not None:
@@ -97,6 +56,10 @@ class DefaultModelState(ModelState):
     def apply_staged_writes(self) -> None:
         if self.rope_state is not None:
             self.rope_state.apply_staged_writes()
+
+    def dummy_inputs_embeds(self, num_tokens: int) -> torch.Tensor:
+        """Pre-allocated inputs_embeds buffer for dummy runs (contents unused)."""
+        return self.encoder_runner.inputs_embeds[:num_tokens]
 
     def get_mm_embeddings(
         self,
@@ -113,14 +76,13 @@ class DefaultModelState(ModelState):
             # Cache the encoder outputs by mm_hash
             self.encoder_cache.encoder_outputs.update(zip(mm_hashes, encoder_outputs))
 
-        mm_embeds, is_mm_embed = self.encoder_runner.gather_mm_embeddings(
-            input_batch.req_ids,
-            input_batch.num_tokens,
-            input_batch.num_scheduled_tokens,
-            input_batch.query_start_loc_np,
-            req_states.prefill_len.np[input_batch.idx_mapping_np],
-            req_states.num_computed_prefill_tokens[input_batch.idx_mapping_np],
-        )
+        mm_embeds, is_mm_embed = super().gather_mm_embeddings(input_batch)
+        if self.mm_pruner is not None and mm_embeds:
+            # EVS: recompute mrope positions for pruned media.
+            mm_embeds = self.mm_pruner.recompute(mm_embeds, input_batch, req_states)
+            # We must flush the staged rope updates for prepare_inputs() to pick up.
+            self.apply_staged_writes()
+
         # Use unpadded input_ids to match is_mm_embed size (num_tokens).
         # input_batch.input_ids may be padded for CUDA graphs.
         input_ids_unpadded = input_batch.input_ids[: input_batch.num_tokens]
@@ -128,6 +90,17 @@ class DefaultModelState(ModelState):
             input_ids_unpadded, mm_embeds, is_mm_embed
         )
         return inputs_embeds[: input_batch.num_tokens_after_padding]
+
+    def gather_mm_embeddings(
+        self, input_batch: InputBatch, draft_lookahead: int = 0
+    ) -> tuple[list[torch.Tensor], torch.Tensor]:
+        mm_embeds, is_mm_embed = super().gather_mm_embeddings(
+            input_batch, draft_lookahead
+        )
+        if self.mm_pruner is not None:
+            # EVS: strip the appended mrope-position channels.
+            mm_embeds = self.mm_pruner.strip(mm_embeds)
+        return mm_embeds, is_mm_embed
 
     def prepare_inputs(
         self, input_batch: InputBatch, req_states: RequestState
@@ -178,7 +151,7 @@ class DefaultModelState(ModelState):
             # Capture with worst-case max_seq_len so the graph is valid at any replay.
             max_seq_len = self.max_model_len
         else:
-            max_seq_len = int(seq_lens_cpu_upper_bound[:num_reqs].max().item())
+            max_seq_len = seq_lens_cpu_upper_bound[:num_reqs].max().item()
         attn_metadata = build_attn_metadata(
             attn_groups=attn_groups,
             num_reqs=num_reqs,
@@ -194,5 +167,7 @@ class DefaultModelState(ModelState):
             seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
             dcp_local_seq_lens=input_batch.dcp_local_seq_lens,
             positions=input_batch.positions,
+            for_cudagraph_capture=for_capture,
+            rswa_prefix_lens=input_batch.prompt_lens,
         )
         return attn_metadata

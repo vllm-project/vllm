@@ -62,9 +62,7 @@ def dist_init():
 
     temp_file = tempfile.mkstemp()[1]
 
-    backend = "nccl"
-    if current_platform.is_cpu() or current_platform.is_tpu():
-        backend = "gloo"
+    backend = "gloo" if current_platform.is_tpu() else current_platform.dist_backend
 
     with ensure_current_vllm_config():
         init_distributed_environment(
@@ -83,9 +81,7 @@ def dist_init():
 def dist_init_torch_only():
     if torch.distributed.is_initialized():
         return
-    backend = "nccl"
-    if current_platform.is_cpu():
-        backend = "gloo"
+    backend = current_platform.dist_backend
 
     temp_file = tempfile.mkstemp()[1]
     torch.distributed.init_process_group(
@@ -319,6 +315,16 @@ def qwen35_text_lora_files():
 @pytest.fixture(scope="session")
 def qwen35_vl_lora_files():
     return snapshot_download(repo_id="jeeejeee/qwen35-4b-all-linear-pokemon-lora")
+
+
+@pytest.fixture(scope="session")
+def qwen36_moe_2d_lora_files():
+    return snapshot_download(repo_id="jeeejeee/qwen36-35ba3b-2d-weights-poken-lora")
+
+
+@pytest.fixture(scope="session")
+def qwen36_moe_3d_lora_files():
+    return snapshot_download(repo_id="jeeejeee/qwen36-35ba3b-moe-all-linear-poken-lora")
 
 
 @pytest.fixture

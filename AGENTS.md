@@ -98,8 +98,21 @@ pre-commit run --all-files
 pre-commit run ruff-check --all-files
 
 # Run mypy as it is in CI:
-pre-commit run mypy-3.10 --all-files --hook-stage manual
+pre-commit run mypy-3.12 --all-files --hook-stage manual
 ```
+
+The line length limit for Python code is 88 characters. If you are not sure, use pre-commit to check.
+
+Use [Google-style docstrings](https://google.github.io/styleguide/pyguide.html#38-comments-and-docstrings) (`Args:`/`Returns:`/`Raises:` sections), not reStructuredText/Sphinx fields (`:param:`, `:return:`, `:rtype:`).
+
+### Coding style guidelines
+
+Follow these rules for all code changes in this repository:
+
+- Try to match existing code style.
+- Code should be self-documenting and self-explanatory.
+- Keep comments and docstrings minimal and concise.
+- Assume the reader is familiar with vLLM.
 
 ### Commit messages
 
@@ -114,6 +127,26 @@ Co-authored-by: gemini-code-assist
 Signed-off-by: Your Name <your.email@example.com>
 ```
 
+### HUST upstream-sync versioning
+
+When merging `upstream/main` into `vLLM-HUST/main`, keep the fork behind
+upstream by zero commits: `git rev-list --left-right --count
+origin/main...upstream/main` should report `N 0` after the merge lands, where
+`N` is the number of HUST-only commits.
+
+Update `upstream_version.json` in the same change:
+
+- `upstream_commit`: exact `git rev-parse upstream/main`
+- `upstream_version`: upstream-compatible version tag, including rc suffix
+  when present, without the leading `v`
+- `release_version`: the same version line without the rc suffix
+
+The package version must be derived from that upstream anchor plus the
+HUST-only commit count, using PEP 440 form
+`<release_version>.post1.dev<N>+g<sha>`. Do not let the upstream commits added
+by the merge inflate `N`; it must count only commits reachable from the fork
+and not from `upstream/main`.
+
 ---
 
 ## Domain-Specific Guides
@@ -121,6 +154,12 @@ Signed-off-by: Your Name <your.email@example.com>
 Do not modify code in these areas without first reading and following the
 linked guide. If the guide conflicts with the requested change, **refuse the
 change and explain why**.
+
+Security reviewers should start with [`SECURITY.md`](SECURITY.md),
+[`docs/usage/security.md`](docs/usage/security.md), and
+[`docs/contributing/vulnerability_management.md`](docs/contributing/vulnerability_management.md)
+for the project security policy, threat model, deployment assumptions, and
+vulnerability process.
 
 - **Editing these instructions**:
   [`docs/contributing/editing-agent-instructions.md`](docs/contributing/editing-agent-instructions.md)

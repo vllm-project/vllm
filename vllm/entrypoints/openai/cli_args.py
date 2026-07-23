@@ -20,11 +20,11 @@ from vllm.entrypoints.chat_utils import (
     ChatTemplateContentFormatOption,
     validate_chat_template,
 )
-from vllm.entrypoints.constants import (
+from vllm.entrypoints.openai.models.protocol import LoRAModulePath
+from vllm.entrypoints.serve.utils.constants import (
     H11_MAX_HEADER_COUNT_DEFAULT,
     H11_MAX_INCOMPLETE_EVENT_SIZE_DEFAULT,
 )
-from vllm.entrypoints.openai.models.protocol import LoRAModulePath
 from vllm.logger import init_logger
 from vllm.tool_parsers import ToolParserManager
 from vllm.utils.argparse_utils import FlexibleArgumentParser
@@ -229,6 +229,17 @@ class FrontendArgs(BaseFrontendArgs):
     """Host name."""
     port: int = 8000
     """Port number."""
+    data_parallel_supervisor_port: int = 9256
+    """HTTP port for aggregated health endpoints in multi-port external LB
+    mode."""
+    dp_supervisor_probe_interval_s: float = 5.0
+    """Seconds between aggregated health probes in multi-port external LB mode."""
+    dp_supervisor_probe_timeout_s: float = 5.0
+    """Seconds to wait between retries when a child health probe fails with a
+    connection error in multi-port external LB mode."""
+    dp_supervisor_probe_failure_threshold: int = 3
+    """Number of consecutive connection-error retries before a child health
+    probe is declared failed in multi-port external LB mode."""
     uds: str | None = None
     """Unix domain socket path. If set, host and port arguments are ignored."""
     uvicorn_log_level: Literal[
@@ -293,6 +304,14 @@ class FrontendArgs(BaseFrontendArgs):
     enable_flash_late_interaction: bool = True
     """If set, run pooling score MaxSim on GPU in the API server process.
     Can significantly improve late-interaction scoring performance."""
+    enable_prefix_routing: bool = False
+    """If set, this API server acts as a prefix-aware routing master and
+    forwards OpenAI generation requests to the configured vLLM nodes based on
+    the longest global prefix-cache match."""
+    prefix_routing_config: dict[str, Any] | None = None
+    """JSON configuration for prefix-aware routing. Example:
+    '{"nodes":[{"id":"node0","url":"http://10.0.0.1:8000",
+    "event_endpoint":"tcp://10.0.0.1:5557"}]}'."""
 
     @classmethod
     def _customize_cli_kwargs(
@@ -322,6 +341,10 @@ class FrontendArgs(BaseFrontendArgs):
         # comma-separated string, not a list
         if "nargs" in frontend_kwargs["disable_access_log_for_endpoints"]:
             del frontend_kwargs["disable_access_log_for_endpoints"]["nargs"]
+
+        frontend_kwargs["prefix_routing_config"]["type"] = json.loads
+        if "nargs" in frontend_kwargs["prefix_routing_config"]:
+            del frontend_kwargs["prefix_routing_config"]["nargs"]
 
         return frontend_kwargs
 
@@ -386,6 +409,13 @@ def validate_parsed_serve_args(args: argparse.Namespace):
         raise TypeError("Error: --enable-auto-tool-choice requires --tool-call-parser")
     if args.enable_log_outputs and not args.enable_log_requests:
         raise TypeError("Error: --enable-log-outputs requires --enable-log-requests")
+
+    if args.data_parallel_multi_port_external_lb:
+        from vllm.entrypoints.openai.dp_supervisor import (
+            validate_multi_port_external_lb_args,
+        )
+
+        validate_multi_port_external_lb_args(args)
 
 
 def create_parser_for_docs() -> FlexibleArgumentParser:

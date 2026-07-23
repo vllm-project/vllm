@@ -28,7 +28,6 @@ from vllm.tokenizers import get_tokenizer
 from vllm.v1.structured_output.backend_types import StructuredOutputOptions
 from vllm.v1.structured_output.backend_xgrammar import XgrammarBackend
 
-
 DEFAULT_GRAMMAR = """
 root ::= select_statement
 select_statement ::= "SELECT " column " FROM " table " WHERE " condition
@@ -210,7 +209,8 @@ def main() -> None:
     print(f"Speedup      : {speedup:8.2f}x")
     print(
         "Hot cache    : "
-        f"hits={hot_stats.hits} total={hot_stats.total} hit_ratio={hot_stats.hit_ratio:.4f}"
+        f"hits={hot_stats.hits} total={hot_stats.total} "
+        f"hit_ratio={hot_stats.hit_ratio:.4f}"
     )
 
     backend.destroy()

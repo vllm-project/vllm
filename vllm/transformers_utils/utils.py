@@ -11,6 +11,11 @@ from typing import Any
 
 import vllm.envs as envs
 from vllm.logger import init_logger
+from vllm.transformers_utils.modelscope_utils import (
+    configure_modelscope_runtime,
+    should_use_modelscope,
+    warn_modelscope_fallback,
+)
 
 logger = init_logger(__name__)
 
@@ -44,6 +49,7 @@ def modelscope_list_repo_files(
     token: str | bool | None = None,
 ) -> list[str]:
     """List files in a modelscope repo."""
+    configure_modelscope_runtime()
     from modelscope.hub.api import HubApi
 
     api = HubApi()
@@ -84,8 +90,11 @@ def maybe_model_redirect(model: str) -> str:
     """
     Use model_redirect to redirect the model name to a local folder.
 
-    :param model: hf model name
-    :return: maybe redirect to a local folder
+    Args:
+        model: hf model name
+
+    Returns:
+        maybe redirect to a local folder
     """
 
     model_redirect_path = envs.VLLM_MODEL_REDIRECT_PATH
@@ -116,8 +125,11 @@ def parse_safetensors_file_metadata(path: str | PathLike) -> dict[str, Any]:
 def convert_model_repo_to_path(model_repo: str) -> str:
     """When VLLM_USE_MODELSCOPE is True convert a model
     repository string to a Path str."""
-    if not envs.VLLM_USE_MODELSCOPE or Path(model_repo).exists():
+    if not should_use_modelscope() or Path(model_repo).exists():
+        if envs.VLLM_USE_MODELSCOPE and not should_use_modelscope():
+            warn_modelscope_fallback("vllm.transformers_utils.utils")
         return model_repo
+    configure_modelscope_runtime()
     from modelscope.utils.file_utils import get_model_cache_root
 
     return os.path.join(get_model_cache_root(), model_repo)

@@ -4,9 +4,6 @@
 import pytest
 
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
-from vllm.sampling_params import StructuredOutputsParams
-
-pytestmark = pytest.mark.skip_global_cleanup
 
 
 def test_chat_completion_request_with_no_tools():
@@ -66,88 +63,121 @@ def test_chat_completion_request_with_tool_choice_but_no_tools(tool_choice):
         )
 
 
-def test_chat_completion_request_materializes_tool_call_generators():
-    def tool_call_iter():
-        yield {
-            "id": "call_1",
-            "type": "function",
-            "function": {
-                "name": "get_weather",
-                "arguments": '{"city": "Paris"}',
-            },
-        }
-
+def test_reasoning_content_normalized_to_reasoning():
     request = ChatCompletionRequest.model_validate(
         {
             "messages": [
+                {"role": "user", "content": "What is 2+2?"},
                 {
                     "role": "assistant",
-                    "content": None,
-                    "tool_calls": tool_call_iter(),
-                }
+                    "content": "4",
+                    "reasoning_content": "2+2 equals 4",
+                },
+                {"role": "user", "content": "Are you sure?"},
             ],
             "model": "facebook/opt-125m",
         }
     )
-
-    tool_calls = request.messages[0]["tool_calls"]
-    assert isinstance(tool_calls, list)
-    assert len(tool_calls) == 1
-    assert tool_calls[0]["function"]["name"] == "get_weather"
+    assistant_msg = request.messages[1]
+    assert assistant_msg.get("reasoning") == "2+2 equals 4"
+    assert "reasoning_content" not in assistant_msg
 
 
-def test_chat_completion_request_caches_tool_dicts():
+def test_reasoning_takes_precedence_over_reasoning_content():
     request = ChatCompletionRequest.model_validate(
         {
-            "messages": [{"role": "user", "content": "Hello"}],
-            "model": "facebook/opt-125m",
-            "tools": [
+            "messages": [
+                {"role": "user", "content": "What is 2+2?"},
                 {
-                    "type": "function",
-                    "function": {
-                        "name": "get_weather",
-                        "description": "Get weather",
-                        "parameters": {
-                            "type": "object",
-                            "properties": {
-                                "city": {"type": "string"},
-                            },
-                            "required": ["city"],
-                        },
-                    },
-                }
+                    "role": "assistant",
+                    "content": "4",
+                    "reasoning": "from reasoning field",
+                    "reasoning_content": "from reasoning_content field",
+                },
             ],
+            "model": "facebook/opt-125m",
         }
     )
-
-    tool_dicts = request.get_tool_dicts()
-    assert tool_dicts is not None
-    assert request.get_tool_dicts() is tool_dicts
-    assert tool_dicts[0]["function"]["name"] == "get_weather"
+    assistant_msg = request.messages[1]
+    assert assistant_msg.get("reasoning") == "from reasoning field"
+    assert "reasoning_content" not in assistant_msg
 
 
-def test_chat_completion_request_reuses_resolved_structured_outputs():
+def test_no_reasoning_fields_unchanged():
+    request = ChatCompletionRequest.model_validate(
+        {
+            "messages": [
+                {"role": "user", "content": "Hello"},
+                {"role": "assistant", "content": "Hi"},
+            ],
+            "model": "facebook/opt-125m",
+        }
+    )
+    assistant_msg = request.messages[1]
+    assert assistant_msg.get("reasoning") is None
+    assert "reasoning_content" not in assistant_msg
+
+
+SAMPLE_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "get_weather",
+        "description": "Get the weather",
+        "parameters": {
+            "type": "object",
+            "properties": {"location": {"type": "string"}},
+        },
+    },
+}
+
+
+def test_structured_outputs_with_named_tool_choice_rejected():
+    """structured_outputs cannot be combined with a named tool_choice."""
+    with pytest.raises(
+        ValueError,
+        match="structured outputs or tools, not both",
+    ):
+        ChatCompletionRequest.model_validate(
+            {
+                "messages": [{"role": "user", "content": "Hello"}],
+                "model": "facebook/opt-125m",
+                "tools": [SAMPLE_TOOL],
+                "tool_choice": {
+                    "type": "function",
+                    "function": {"name": "get_weather"},
+                },
+                "structured_outputs": {"json": {"type": "object"}},
+            }
+        )
+
+
+def test_structured_outputs_with_auto_tool_choice_allowed():
+    """structured_outputs with tool_choice 'auto' should be allowed."""
     request = ChatCompletionRequest.model_validate(
         {
             "messages": [{"role": "user", "content": "Hello"}],
             "model": "facebook/opt-125m",
-            "response_format": {"type": "json_object"},
+            "tools": [SAMPLE_TOOL],
+            "tool_choice": "auto",
+            "structured_outputs": {"json": {"type": "object"}},
         }
     )
+    assert request.tool_choice == "auto"
 
-    first_sampling_params = request.to_sampling_params(
-        max_tokens=10,
-        default_sampling_params={},
-    )
-    first_structured_outputs = request.structured_outputs
 
-    assert isinstance(first_structured_outputs, StructuredOutputsParams)
-    assert first_sampling_params.structured_outputs is first_structured_outputs
-
-    second_sampling_params = request.to_sampling_params(
-        max_tokens=10,
-        default_sampling_params={},
-    )
-
-    assert request.structured_outputs is first_structured_outputs
-    assert second_sampling_params.structured_outputs is first_structured_outputs
+def test_multiple_structured_outputs_rejected():
+    """Only one kind of structured output constraint is allowed."""
+    with pytest.raises(
+        ValueError,
+        match="You can only use one kind of constraints",
+    ):
+        ChatCompletionRequest.model_validate(
+            {
+                "messages": [{"role": "user", "content": "Hello"}],
+                "model": "facebook/opt-125m",
+                "structured_outputs": {
+                    "json": {"type": "object"},
+                    "regex": ".*",
+                },
+            }
+        )

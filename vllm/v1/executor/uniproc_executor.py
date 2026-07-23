@@ -2,8 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import os
 from collections.abc import Callable
-from concurrent.futures import Future, ThreadPoolExecutor
-from functools import cached_property
+from concurrent.futures import Future
 from multiprocessing import Lock
 from typing import Any
 
@@ -16,11 +15,31 @@ from vllm.platforms import current_platform
 from vllm.utils.network_utils import get_distributed_init_method, get_ip, get_open_port
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.executor.abstract import Executor
+from vllm.v1.executor.vllm_net_devices import set_worker_net_device
 from vllm.v1.outputs import AsyncModelRunnerOutput, DraftTokenIds, ModelRunnerOutput
 from vllm.v1.serial_utils import run_method
 from vllm.v1.worker.worker_base import WorkerWrapperBase
 
 logger = init_logger(__name__)
+
+
+class AsyncOutputFuture(Future):
+    def __init__(self, async_output: AsyncModelRunnerOutput, single_value: bool):
+        self.async_output = async_output
+        self.single_value = single_value
+        super().__init__()
+
+    def result(self, timeout=None):
+        if timeout is not None:
+            raise RuntimeError("timeout not implemented")
+
+        if not super().done():
+            try:
+                output = self.async_output.get_output()
+                self.set_result(output if self.single_value else [output])
+            except Exception as e:
+                self.set_exception(e)
+        return super().result()
 
 
 class UniProcExecutor(Executor):
@@ -37,11 +56,8 @@ class UniProcExecutor(Executor):
             shared_worker_lock=Lock(),
         )
 
-        self.async_output_thread: ThreadPoolExecutor | None = None
-        if self.max_concurrent_batches > 1:
-            self.async_output_thread = ThreadPoolExecutor(
-                max_workers=1, thread_name_prefix="WorkerAsyncOutput"
-            )
+        # Set net device env vars for the worker if VLLM_GPU_NIC_PCIE_MAPPING is set
+        set_worker_net_device(local_rank, self.vllm_config)
 
         self.driver_worker.init_worker(all_kwargs=[kwargs])
         self.driver_worker.init_device()
@@ -60,10 +76,6 @@ class UniProcExecutor(Executor):
         local_rank = int(device_info[1]) if len(device_info) > 1 else 0
         return distributed_init_method, 0, local_rank
 
-    @cached_property
-    def max_concurrent_batches(self) -> int:
-        return 2 if self.scheduler_config.async_scheduling else 1
-
     def collective_rpc(  # type: ignore[override]
         self,
         method: str | Callable,
@@ -78,20 +90,14 @@ class UniProcExecutor(Executor):
 
         if not non_block:
             result = run_method(self.driver_worker, method, args, kwargs)
+            if isinstance(result, AsyncModelRunnerOutput):
+                result = result.get_output()
             return result if single_value else [result]
 
         try:
             result = run_method(self.driver_worker, method, args, kwargs)
             if isinstance(result, AsyncModelRunnerOutput):
-                if (async_thread := self.async_output_thread) is not None:
-                    if single_value:
-                        return async_thread.submit(result.get_output)
-
-                    def get_output_list() -> list[Any]:
-                        return [result.get_output()]
-
-                    return async_thread.submit(get_output_list)
-                result = result.get_output()
+                return AsyncOutputFuture(result, single_value)
             future = Future[Any]()
             future.set_result(result if single_value else [result])
         except Exception as e:

@@ -7,6 +7,7 @@ import torch
 from tests.v1.attention.test_attention_backends import BATCH_SPECS
 from tests.v1.attention.utils import BatchSpec, create_common_attn_metadata
 from vllm.v1.attention.backends.utils import (
+    _split_decode_prefill_boundary,
     make_kv_sharing_fast_prefill_common_attn_metadata,
     split_decodes_and_prefills,
     split_decodes_prefills_and_extends,
@@ -162,6 +163,8 @@ def apply_split_decodes_and_prefills(
     decode_threshold: int,
     require_uniform: bool,
     padded_num_tokens: int | None = None,
+    treat_short_extends_as_decodes: bool = True,
+    is_prefilling: list[bool] | None = None,
 ):
     """Helper function to apply split_decodes_and_prefills and return
     the results."""
@@ -175,11 +178,14 @@ def apply_split_decodes_and_prefills(
 
     if padded_num_tokens is not None:
         common_metadata.num_actual_tokens = padded_num_tokens
+    if is_prefilling is not None:
+        common_metadata.is_prefilling = torch.tensor(is_prefilling, dtype=torch.bool)
 
     return split_decodes_and_prefills(
         common_metadata,
         decode_threshold=decode_threshold,
         require_uniform=require_uniform,
+        treat_short_extends_as_decodes=treat_short_extends_as_decodes,
     )
 
 
@@ -315,6 +321,55 @@ def test_split_decodes_and_prefills_uniform_padded_batch_all_same():
     assert num_prefill_tokens == 0
 
 
+def test_split_decodes_and_prefills_short_extends_as_prefills():
+    query_lens = [1, 2, 5]
+    num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
+        apply_split_decodes_and_prefills(
+            query_lens,
+            4,
+            False,
+            treat_short_extends_as_decodes=False,
+            is_prefilling=[False, True, True],
+        )
+    )
+    assert num_decodes == 1
+    assert num_prefills == 2
+    assert num_decode_tokens == 1
+    assert num_prefill_tokens == 7
+
+
+def test_split_decode_prefill_boundary_int64_boundary_tensors():
+    query_lens = [2, 1, 5, 6]
+    query_lens_tensor = torch.tensor(query_lens, dtype=torch.int64)
+    query_start_loc = torch.zeros(len(query_lens) + 1, dtype=torch.int64)
+    query_start_loc[1:] = query_lens_tensor.cumsum(dim=0)
+
+    assert _split_decode_prefill_boundary(
+        query_start_loc,
+        num_reqs=len(query_lens),
+        num_tokens=sum(query_lens),
+        max_query_len=max(query_lens),
+        decode_threshold=4,
+    ) == (2, 2, 3, 11)
+
+
+def test_split_decode_prefill_boundary_uniform_short_extends_stay_decodes():
+    query_lens = [2, 2, 0]
+    query_start_loc = torch.zeros(len(query_lens) + 1, dtype=torch.int32)
+    query_start_loc[1:] = torch.tensor(query_lens, dtype=torch.int32).cumsum(0)
+
+    assert _split_decode_prefill_boundary(
+        query_start_loc,
+        num_reqs=len(query_lens),
+        num_tokens=6,
+        max_query_len=max(query_lens),
+        decode_threshold=3,
+        require_uniform=True,
+        treat_short_extends_as_decodes=False,
+        is_prefilling=torch.tensor([True, True, False]),
+    ) == (3, 0, 6, 0)
+
+
 def test_make_kv_sharing_fast_prefill_common_attn_metadata():
     common_metadata = create_common_attn_metadata(
         BatchSpec(seq_lens=[41, 31, 40], query_lens=[15, 5, 8]),
@@ -357,6 +412,24 @@ def test_split_decodes_prefills_and_extends_mixed_batch():
     assert num_decode_tokens == 3
     assert num_extend_tokens == 4
     assert num_prefill_tokens == 11
+
+
+@pytest.mark.parametrize(
+    "query_lens,seq_lens,decode_threshold,expected",
+    [
+        ([1, 2], [10, 20], 3, (2, 0, 0, 3, 0, 0)),
+        ([1, 4, 5], [10, 20, 30], 3, (1, 2, 0, 1, 9, 0)),
+        ([1, 4, 5], [10, 4, 5], 3, (1, 0, 2, 1, 0, 9)),
+        ([4, 5], [4, 5], 3, (0, 0, 2, 0, 0, 9)),
+    ],
+)
+def test_split_decodes_prefills_and_extends_boundary_cases(
+    query_lens, seq_lens, decode_threshold, expected
+):
+    assert (
+        apply_split_decodes_prefills_and_extends(query_lens, seq_lens, decode_threshold)
+        == expected
+    )
 
 
 @pytest.mark.parametrize(
@@ -442,3 +515,68 @@ def test_prefill_split_across_ubatches(
         # Map to original request index
         orig_idx = split_req_idx + j
         assert int(second_meta.seq_lens[j]) == seq_lens[orig_idx]
+
+
+def test_build_attention_metadata_zeros_stale_is_prefilling():
+    """_build_attention_metadata zeroes is_prefilling for padded rows."""
+    from unittest.mock import MagicMock, patch
+
+    from vllm.v1.attention.backend import CommonAttentionMetadata
+    from vllm.v1.worker.gpu_model_runner import GPUModelRunner
+
+    num_reqs = 3
+    num_reqs_padded = 5
+
+    # Real rows [0-2] have known computed/prompt values; padded rows [3-4]
+    # carry stale data from a prior prefill (num_computed < num_prompt → True).
+    num_computed = torch.tensor([50, 100, 200, 10, 20], dtype=torch.int32)
+    num_prompt = torch.tensor([50, 200, 200, 100, 200], dtype=torch.int32)
+
+    runner = MagicMock()
+    runner.kv_cache_config.kv_cache_groups = [
+        MagicMock()
+    ]  # non-empty: skip early return
+    runner.attn_groups = [[]]  # empty inner list: inner loop never runs
+    runner.input_batch.num_computed_tokens_cpu_tensor = num_computed
+    runner.input_batch.num_prompt_tokens_cpu_tensor = num_prompt
+    runner.optimistic_seq_lens_cpu = torch.tensor([100, 200, 300, 0, 0])
+    runner.query_start_loc.gpu = torch.zeros(num_reqs_padded + 1, dtype=torch.int32)
+    runner.query_start_loc.cpu = torch.zeros(num_reqs_padded + 1, dtype=torch.int32)
+    runner.seq_lens = torch.zeros(num_reqs_padded, dtype=torch.int32)
+    runner.positions = torch.zeros(num_reqs_padded, dtype=torch.int64)
+    runner.routed_experts_initialized = False
+    runner.use_async_spec_decode = False
+    runner.dcp_world_size = 1
+    runner.speculative_config = None
+    runner.is_mm_prefix_lm = False
+    runner._get_encoder_seq_lens.return_value = (None, None)
+
+    # Intercept CommonAttentionMetadata construction to capture is_prefilling.
+    # With speculative_config=None the constructor is called exactly once (for
+    # cm_base), so captured reflects what the fix produced before storage.
+    captured_is_prefilling = None
+    original_init = CommonAttentionMetadata.__init__
+
+    def capturing_init(self, *args, **kwargs):
+        nonlocal captured_is_prefilling
+        if "is_prefilling" in kwargs:
+            captured_is_prefilling = kwargs["is_prefilling"]
+        original_init(self, *args, **kwargs)
+
+    with patch.object(CommonAttentionMetadata, "__init__", capturing_init):
+        GPUModelRunner._build_attention_metadata(
+            runner,
+            num_tokens=num_reqs,
+            num_reqs=num_reqs,
+            max_query_len=1,
+            num_tokens_padded=num_reqs_padded,
+            num_reqs_padded=num_reqs_padded,
+            slot_mappings={0: torch.zeros(num_reqs_padded, dtype=torch.int64)},
+        )
+
+    assert captured_is_prefilling is not None
+    assert not captured_is_prefilling[0]  # decode  (50 >= 50)
+    assert captured_is_prefilling[1]  # prefill (100 < 200)
+    assert not captured_is_prefilling[2]  # decode  (200 >= 200)
+    assert not captured_is_prefilling[3]  # stale data (10 < 100) zeroed
+    assert not captured_is_prefilling[4]  # stale data (20 < 200) zeroed

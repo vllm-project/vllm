@@ -217,7 +217,9 @@ class Resampler2_5(BaseResampler):
         for i in range(bs):
             tgt_h, tgt_w = tgt_sizes[i].tolist()
             pos_embed.append(
-                self.pos_embed[:tgt_h, :tgt_w, :].reshape((tgt_h * tgt_w, -1)).to(dtype)
+                self.pos_embed[:tgt_h, :tgt_w, :]
+                .reshape((tgt_h * tgt_w, -1))
+                .to(device=device, dtype=dtype)
             )  # patches * D
             key_padding_mask[i, patch_len[i] :] = True
         pos_embed = torch.nn.utils.rnn.pad_sequence(
@@ -378,7 +380,9 @@ class Resampler4_5(Resampler2_5):
                     )  # D
 
             pos_embed_2d.append(
-                self.pos_embed[:tgt_h, :tgt_w, :].reshape((tgt_h * tgt_w, -1)).to(dtype)
+                self.pos_embed[:tgt_h, :tgt_w, :]
+                .reshape((tgt_h * tgt_w, -1))
+                .to(device=device, dtype=dtype)
             )  # patches * D
             key_padding_mask[i, patch_len[i] :] = True
 
@@ -543,11 +547,20 @@ class MiniCPMVProcessingInfo(BaseProcessingInfo):
     def get_hf_processor(self, **kwargs: object):
         hf_processor = self.ctx.get_hf_processor(**kwargs)
 
+        from vllm.transformers_utils.processors.minicpmv import MiniCPMVProcessor
+
+        vendored_processor = MiniCPMVProcessor(
+            image_processor=hf_processor.image_processor,
+            tokenizer=hf_processor.tokenizer,
+        )
+        hf_processor = vendored_processor
+
         # NumPy arrays are considered as Iterable but not Sequence in
         # https://github.com/huggingface/transformers/blob/main/src/transformers/image_transforms.py#L428
         image_processor = hf_processor.image_processor  # type: ignore
-        for attr in ("mean", "std"):
-            val = getattr(image_processor, attr)
+        # transformers v5+ renamed `mean`/`std` -> `image_mean`/`image_std`
+        for attr in ("mean", "std", "image_mean", "image_std"):
+            val = getattr(image_processor, attr, None)
             if isinstance(val, np.ndarray):
                 setattr(image_processor, attr, val.tolist())
 
@@ -623,6 +636,7 @@ class MiniCPMVProcessingInfo(BaseProcessingInfo):
             image_size,
             max_slice_nums=max_slice_nums,
         )
+
         if grid is None:
             ncols = nrows = 0
         else:
@@ -839,7 +853,7 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
         out_keys: set[str],
     ) -> dict[str, NestedTensors]:
         # This processor supports zipping prompt and mm_data together
-        if self.info.get_model_version() in {(2, 6), (4, 0), (4, 5)}:
+        if self.info.get_model_version() in {(2, 6), (4, 0), (4, 5), (4, 6)}:
             inputs = super()._call_hf_processor(
                 prompt=prompts,  # type: ignore
                 mm_data=mm_data,
@@ -971,10 +985,15 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
             if version == (2, 0) or version == (2, 5):
                 im_start = image_processor.im_start_token
                 im_end = image_processor.im_end_token
-            else:
+            elif hasattr(image_processor, "im_id_start"):
                 im_start = image_processor.im_id_start
                 im_end = image_processor.im_id_end
+            else:
+                # transformers v5.7+ keeps im_id tokens on the tokenizer.
+                im_start = getattr(tokenizer, "image_id_start_token", "<image_id>")
+                im_end = getattr(tokenizer, "image_id_end_token", "</image_id>")
 
+            embed_text = getattr(tokenizer, "image_token", "<unk>")
             new_update = new_update.with_content(
                 PromptUpdateDetails.select_text(
                     text.replace(
@@ -982,7 +1001,7 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
                         f"{im_start}{new_item_idx}{im_end}",
                         1,
                     ),
-                    "<unk>",
+                    embed_text,
                 )
             )
 

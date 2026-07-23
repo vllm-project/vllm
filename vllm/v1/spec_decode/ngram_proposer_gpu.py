@@ -18,6 +18,7 @@ from vllm.config import (
     VllmConfig,
 )
 from vllm.forward_context import set_forward_context
+from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.utils import record_function_or_nullcontext
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
@@ -313,6 +314,7 @@ class NgramProposerGPU:
 
     def propose(
         self,
+        num_speculative_tokens: int,
         num_tokens_no_spec: torch.Tensor,  # [batch_size]
         token_ids_gpu: torch.Tensor,  # [batch_size, max_len]
         valid_sampled_token_ids_gpu: torch.Tensor,  # [batch_size, num_spec_tokens + 1]
@@ -325,6 +327,7 @@ class NgramProposerGPU:
         updated lengths, then run the kernel.
 
         Args:
+            num_speculative_tokens: Number of speculative tokens to propose.
             num_tokens_no_spec: Number of tokens per sequence (read-only)
             token_ids_gpu: Token IDs tensor (modified in-place with new tokens)
             valid_sampled_token_ids_gpu: Newly sampled tokens to scatter
@@ -335,6 +338,7 @@ class NgramProposerGPU:
             num_valid_draft_tokens: Count of leading valid draft tokens
                 per request [batch_size]
         """
+        assert num_speculative_tokens == self.k
         assert token_ids_gpu.device == self.device
         assert num_tokens_no_spec.device == self.device
 
@@ -464,7 +468,7 @@ class NgramProposerGPU:
 
 
 def update_scheduler_for_invalid_drafts(
-    num_valid_draft_tokens_event: torch.cuda.Event,
+    num_valid_draft_tokens_event: torch.Event,
     num_valid_draft_tokens_cpu: torch.Tensor,
     scheduler_output: "SchedulerOutput",
     req_id_to_index: dict[str, int],
@@ -541,7 +545,7 @@ def update_ngram_gpu_tensors_incremental(
             num_tokens = input_batch.num_tokens_no_spec[idx]
             if num_tokens > 0:
                 token_ids_gpu_tensor[idx, :num_tokens].copy_(
-                    input_batch.token_ids_cpu_tensor[idx, :num_tokens],
+                    input_batch.token_ids_cpu_tensor[idx, :num_tokens].pin_memory(),
                     non_blocking=True,
                 )
 
@@ -569,8 +573,8 @@ def update_ngram_gpu_tensors_incremental(
             reorder_dst.append(curr_idx)
 
     if reorder_src:
-        src_tensor = torch.tensor(reorder_src, dtype=torch.long, device=device)
-        dst_tensor = torch.tensor(reorder_dst, dtype=torch.long, device=device)
+        src_tensor = async_tensor_h2d(reorder_src, dtype=torch.long, device=device)
+        dst_tensor = async_tensor_h2d(reorder_dst, dtype=torch.long, device=device)
 
         temp_token_ids = token_ids_gpu_tensor[src_tensor].clone()
         temp_num_tokens = num_tokens_no_spec_gpu[src_tensor].clone()
@@ -587,7 +591,7 @@ def update_ngram_gpu_tensors_incremental(
         num_tokens = input_batch.num_tokens_no_spec[new_req_idx]
         if num_tokens > 0:
             token_ids_gpu_tensor[new_req_idx, :num_tokens].copy_(
-                input_batch.token_ids_cpu_tensor[new_req_idx, :num_tokens],
+                input_batch.token_ids_cpu_tensor[new_req_idx, :num_tokens].pin_memory(),
                 non_blocking=True,
             )
 
@@ -639,7 +643,7 @@ def _sync_num_tokens(
 def copy_num_valid_draft_tokens(
     num_valid_draft_tokens_cpu: torch.Tensor,
     num_valid_draft_tokens_copy_stream: torch.cuda.Stream,
-    num_valid_draft_tokens_event: torch.cuda.Event,
+    num_valid_draft_tokens_event: torch.Event,
     num_valid_draft_tokens: torch.Tensor | None,
     batch_size: int,
 ) -> None:

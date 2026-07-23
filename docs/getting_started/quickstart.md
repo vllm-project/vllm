@@ -3,12 +3,15 @@
 This guide will help you quickly get started with vLLM to perform:
 
 - [Offline batched inference](#offline-batched-inference)
-- [Online serving using OpenAI-compatible server](#openai-compatible-server)
+- [Online serving](#online-serving)
 
 ## Prerequisites
 
 - OS: Linux
 - Python: 3.10 -- 3.13
+
+!!! note
+    vLLM also works on macOS with [vLLM-Metal](https://github.com/vllm-project/vllm-metal) for Apple Silicon GPU acceleration. See the [GPU installation guide](installation/gpu.md) and select the "Apple Silicon" tab.
 
 ## Installation
 
@@ -72,6 +75,27 @@ This guide will help you quickly get started with vLLM to perform:
 
     !!! note
         For more detailed instructions, including Docker, installing from source, and troubleshooting, please refer to the [vLLM on TPU documentation](https://docs.vllm.ai/projects/tpu/en/latest/).
+
+=== "Ascend NPU"
+
+    If you are using Ascend NPUs, you can run vLLM through [vLLM Ascend](https://github.com/vllm-project/vllm-ascend), a community-maintained hardware plugin.
+
+    Follow the installation instructions in the [vLLM Ascend quick start](https://docs.vllm.ai/projects/ascend/en/latest/quick_start.html).
+
+    !!! note
+        Ascend setup depends on your NPU hardware and CANN version. For supported versions, Docker images, and troubleshooting, please refer to the [vLLM Ascend documentation](https://docs.vllm.ai/projects/ascend/en/latest/).
+
+=== "Apple Silicon (Mac)"
+
+    If you are using Apple Silicon Macs, you can use vLLM-Metal for GPU-accelerated inference via Apple's Metal framework.
+
+    Follow the installation instructions in the [vLLM-Metal documentation](https://github.com/vllm-project/vllm-metal#installation).
+
+    !!! note
+        vLLM-Metal uses MLX instead of PyTorch as the compute backend and requires MLX-optimized models from the [mlx-community](https://huggingface.co/mlx-community) on Hugging Face.
+
+    !!! tip
+        For more detailed instructions, please refer to the [GPU installation guide](installation/gpu.md) and select the "Apple Silicon" tab.
 
 !!! note
     For more detail and non-CUDA platforms, please refer to the [installation guide](installation/README.md) for specific instructions on how to install vLLM.
@@ -167,7 +191,7 @@ for output in outputs:
             print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
         ```
 
-## OpenAI-Compatible Server
+## Online Serving
 
 vLLM can be deployed as a server that implements the OpenAI API protocol. This allows vLLM to be used as a drop-in replacement for applications using OpenAI API.
 By default, it starts the server at `http://localhost:8000`. You can specify the address with `--host` and `--port` arguments. The server currently hosts one model at a time and implements endpoints such as [list models](https://platform.openai.com/docs/api-reference/models/list), [create chat completion](https://platform.openai.com/docs/api-reference/chat/completions/create), and [create completion](https://platform.openai.com/docs/api-reference/completions/create) endpoints.
@@ -180,7 +204,7 @@ vllm serve Qwen/Qwen2.5-1.5B-Instruct
 
 !!! note
     By default, the server uses a predefined chat template stored in the tokenizer.
-    You can learn about overriding it [here](../serving/openai_compatible_server.md#chat-template).
+    You can learn about overriding it [here](../serving/online_serving/README.md#chat-template).
 !!! important
     By default, the server applies `generation_config.json` from the huggingface model repository if it exists. This means the default values of certain sampling parameters can be overridden by those recommended by the model creator.
 

@@ -13,12 +13,12 @@ from vllm.entrypoints.openai.completion.protocol import (
 )
 from vllm.entrypoints.openai.completion.serving import OpenAIServingCompletion
 from vllm.entrypoints.openai.engine.protocol import ErrorResponse
-from vllm.entrypoints.openai.orca_metrics import metrics_header
-from vllm.entrypoints.openai.utils import validate_json_request
-from vllm.entrypoints.utils import (
+from vllm.entrypoints.serve.utils.api_utils import (
     load_aware_call,
+    validate_json_request,
     with_cancellation,
 )
+from vllm.entrypoints.serve.utils.orca_metrics import metrics_header
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -58,12 +58,25 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
             content=generator.model_dump(), status_code=generator.error.code
         )
     elif isinstance(generator, CompletionResponse):
+        response_headers = {
+            **dict(metrics_header(metrics_header_format) or {}),
+            **handler.build_routing_headers(request.model),
+        }
         return JSONResponse(
             content=generator.model_dump(),
-            headers=metrics_header(metrics_header_format),
+            headers=response_headers,
         )
 
-    return StreamingResponse(content=generator, media_type="text/event-stream")
+    response_headers = {
+        **dict(metrics_header(metrics_header_format) or {}),
+        **handler.build_routing_headers(request.model),
+    }
+
+    return StreamingResponse(
+        content=generator,
+        media_type="text/event-stream",
+        headers=response_headers,
+    )
 
 
 def attach_router(app: FastAPI):
