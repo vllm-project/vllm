@@ -14,6 +14,7 @@ from unittest.mock import patch
 import pytest
 import torch
 
+import vllm.envs
 from vllm import LLM
 from vllm.config import WeightTransferConfig
 from vllm.distributed.weight_transfer.base import (
@@ -135,6 +136,9 @@ def test_init_weight_transfer_engine_calls_engine():
     os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
     # Enable insecure serialization to allow pickling functions for collective_rpc
     os.environ["VLLM_ALLOW_INSECURE_SERIALIZATION"] = "1"
+    # Clear envs cache so the env var change above takes effect
+    # (the cache may have been populated before fork)
+    vllm.envs.disable_envs_cache()
 
     with patch(
         "vllm.v1.worker.gpu_worker.WeightTransferEngineFactory.create_engine",
@@ -184,6 +188,8 @@ def test_update_weights_calls_engine():
     os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
     # Enable insecure serialization to allow pickling functions for collective_rpc
     os.environ["VLLM_ALLOW_INSECURE_SERIALIZATION"] = "1"
+    # Clear envs cache so the env var change above takes effect
+    vllm.envs.disable_envs_cache()
 
     with patch(
         "vllm.v1.worker.gpu_worker.WeightTransferEngineFactory.create_engine",
@@ -246,6 +252,8 @@ def test_full_weight_transfer_flow():
     os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
     # Enable insecure serialization to allow pickling functions for collective_rpc
     os.environ["VLLM_ALLOW_INSECURE_SERIALIZATION"] = "1"
+    # Clear envs cache so the env var change above takes effect
+    vllm.envs.disable_envs_cache()
 
     with patch(
         "vllm.v1.worker.gpu_worker.WeightTransferEngineFactory.create_engine",
