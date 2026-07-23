@@ -7,6 +7,9 @@ OUTPUT_DIR=${PERFGATE_BASELINE_OUTPUT_DIR:-${RUNNER_TEMP:-/tmp}/perfgate-baselin
 ALLOW_BASELINE_FALLBACK=${PERFGATE_ALLOW_BASELINE_FALLBACK:-0}
 MODE=${PERFGATE_MODE:-report}
 GITHUB_ENV=${GITHUB_ENV:-/dev/null}
+GIT_NETWORK_ATTEMPTS=${GIT_NETWORK_ATTEMPTS:-3}
+GIT_NETWORK_TIMEOUT_SECONDS=${GIT_NETWORK_TIMEOUT_SECONDS:-90}
+GIT_NETWORK_RETRY_DELAY_SECONDS=${GIT_NETWORK_RETRY_DELAY_SECONDS:-10}
 
 write_env() {
   local name=$1
@@ -33,6 +36,33 @@ baseline_unavailable() {
   exit 2
 }
 
+run_git_network() {
+  local attempt=1
+
+  while [[ "$attempt" -le "$GIT_NETWORK_ATTEMPTS" ]]; do
+    if command -v timeout >/dev/null 2>&1; then
+      if timeout --foreground "${GIT_NETWORK_TIMEOUT_SECONDS}s" \
+        git -c http.version=HTTP/1.1 \
+        -c http.lowSpeedLimit=1024 \
+        -c http.lowSpeedTime=30 "$@"; then
+        return 0
+      fi
+    elif git -c http.version=HTTP/1.1 \
+      -c http.lowSpeedLimit=1024 \
+      -c http.lowSpeedTime=30 "$@"; then
+      return 0
+    fi
+
+    if [[ "$attempt" -lt "$GIT_NETWORK_ATTEMPTS" ]]; then
+      echo "Git network command failed ($attempt/$GIT_NETWORK_ATTEMPTS); retrying in ${GIT_NETWORK_RETRY_DELAY_SECONDS}s." >&2
+      sleep "$GIT_NETWORK_RETRY_DELAY_SECONDS"
+    fi
+    attempt=$((attempt + 1))
+  done
+
+  return 1
+}
+
 if [[ -z "$COMMIT" ]]; then
   echo "Usage: $0 <commit-sha> or set FORK_POINT/GITHUB_SHA" >&2
   exit 2
@@ -40,11 +70,14 @@ fi
 
 mkdir -p "$OUTPUT_DIR"
 rm -rf "$OUTPUT_DIR/branch"
-if ! git ls-remote --exit-code --heads origin "$BASELINE_BRANCH" >/dev/null 2>&1; then
+if ! run_git_network ls-remote --exit-code --heads origin "$BASELINE_BRANCH" >/dev/null 2>&1; then
   baseline_unavailable "Perfgate baseline branch not found: $BASELINE_BRANCH"
 fi
 
-git clone --depth 1 --branch "$BASELINE_BRANCH" "$(git remote get-url origin)" "$OUTPUT_DIR/branch"
+if ! run_git_network clone --depth 1 --branch "$BASELINE_BRANCH" \
+  "$(git remote get-url origin)" "$OUTPUT_DIR/branch"; then
+  baseline_unavailable "Unable to clone perfgate baseline branch: $BASELINE_BRANCH"
+fi
 
 baseline_file="$OUTPUT_DIR/branch/baselines/$COMMIT/run_leaderboard.json"
 baseline_commit="$COMMIT"

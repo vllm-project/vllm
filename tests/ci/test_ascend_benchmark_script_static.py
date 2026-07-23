@@ -116,3 +116,13 @@ def test_ascend_server_readiness_windows_allow_cold_start():
     assert (
         "SAME_SPEC_READY_TIMEOUT_SECONDS=${SAME_SPEC_READY_TIMEOUT_SECONDS:-1200}"
     ) in benchmark_text
+
+
+def test_perfgate_baseline_fetch_bounds_git_network_waits():
+    text = script_text("perfgate_fetch_baseline.sh")
+
+    assert "GIT_NETWORK_ATTEMPTS=${GIT_NETWORK_ATTEMPTS:-3}" in text
+    assert "GIT_NETWORK_TIMEOUT_SECONDS=${GIT_NETWORK_TIMEOUT_SECONDS:-90}" in text
+    assert 'timeout --foreground "${GIT_NETWORK_TIMEOUT_SECONDS}s"' in text
+    assert "run_git_network ls-remote" in text
+    assert "run_git_network clone" in text
