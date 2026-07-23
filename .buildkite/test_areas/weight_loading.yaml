@@ -16,7 +16,7 @@ steps:
   mirror:
     amd:
       dind: false
-      device: mi300_2
+      device: mi355_2
       depends_on:
       - image-build-amd
       commands:

@@ -28,7 +28,8 @@ steps:
   - pytest -v -s engine test_sequence.py test_config.py test_logger.py test_vllm_port.py test_jit_monitor.py
   mirror:
     amd:
-      device: mi325_1
+      dind: false
+      device: mi355_1
       timeout_in_minutes: 50
       depends_on:
       - image-build-amd
@@ -44,7 +45,8 @@ steps:
     - pytest -v -s v1/engine --ignore v1/engine/test_preprocess_error_handling.py
   mirror:
     amd:
-      device: mi325_1
+      dind: false
+      device: mi355_1
       timeout_in_minutes: 55
       depends_on:
       - image-build-amd
@@ -60,7 +62,8 @@ steps:
     - pytest -v -s v1/e2e/general/test_async_scheduling.py
   mirror:
     amd:
-      device: mi325_1
+      dind: false
+      device: mi355_1
       timeout_in_minutes: 70
       depends_on:
       - image-build-amd
@@ -76,7 +79,8 @@ steps:
     - pytest -v -s v1/e2e/general --ignore v1/e2e/general/test_async_scheduling.py
   mirror:
     amd:
-      device: mi325_1
+      dind: false
+      device: mi355_1
       timeout_in_minutes: 60
       depends_on:
       - image-build-amd
@@ -115,7 +119,7 @@ steps:
   mirror:
     amd:
       dind: false
-      device: mi300_2
+      device: mi355_2
       depends_on:
       - image-build-amd
 
