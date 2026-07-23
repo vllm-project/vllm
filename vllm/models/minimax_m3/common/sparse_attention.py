@@ -387,7 +387,11 @@ class MiniMaxM3SparseTritonImpl(MiniMaxM3SparseImpl):
         topk_buffer = layer.topk_indices_buffer  # type: ignore[attr-defined]
         assert topk_buffer is not None
 
-        topk = topk_buffer[:num_tokens].transpose(0, 1)
+        topk = (
+            topk_buffer
+            if current_platform.is_rocm()
+            else topk_buffer[:num_tokens].transpose(0, 1)
+        )
         assert topk is not None
         hd = self.head_size
         q = query[:num_tokens].view(-1, self.num_heads, hd)

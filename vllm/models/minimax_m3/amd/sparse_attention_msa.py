@@ -37,11 +37,8 @@ class MiniMaxM3SparseAiterPAImpl(MiniMaxM3SparseImpl):
 
         nd = main_md.num_decode_tokens
         num_tokens = main_md.num_actual_tokens
-        topk_buffer = layer.topk_indices_buffer  # type: ignore[attr-defined]
-        assert topk_buffer is not None
-        topk = topk_buffer[:num_tokens].transpose(0, 1)
+        topk = layer.topk_indices_buffer  # type: ignore[attr-defined]
         assert topk is not None
-
         if self.num_kv_heads != 1:
             raise NotImplementedError(
                 "MiniMax-M3 AITER sparse PA currently requires per-rank "

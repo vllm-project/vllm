@@ -424,7 +424,9 @@ class MiniMaxM3IndexerTritonImpl(MiniMaxM3IndexerImpl):
         # (decode at [:, :nd], prefill at [:, nd:]) and return views into it; the
         # kernels' out= writes out[:, :total_q]. None -> allocate fresh.
         buf = self.topk_indices_buffer
-        buf_htk = buf.transpose(0, 1) if buf is not None else None
+        buf_htk = (
+            buf if buf is None or current_platform.is_rocm() else buf.transpose(0, 1)
+        )
         decode_topk: torch.Tensor | None = None
         prefill_topk: torch.Tensor | None = None
         if index_md.num_decodes > 0:

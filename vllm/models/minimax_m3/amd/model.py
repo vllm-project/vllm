@@ -1083,8 +1083,8 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
             tp_size = get_tensor_model_parallel_world_size()
             num_index_heads = max(1, sparse_cfg["sparse_num_index_heads"] // tp_size)
             self.topk_indices_buffer = torch.empty(
-                vllm_config.scheduler_config.max_num_batched_tokens,
                 num_index_heads,
+                vllm_config.scheduler_config.max_num_batched_tokens,
                 sparse_cfg["sparse_topk_blocks"],
                 dtype=torch.int32,
             )
