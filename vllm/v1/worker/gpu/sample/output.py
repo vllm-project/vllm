@@ -8,9 +8,16 @@ from vllm.v1.outputs import LogprobsTensors
 
 
 @dataclass
+class SamplingMaskTensors:
+    token_ids: torch.Tensor
+    counts: torch.Tensor
+
+
+@dataclass
 class SamplerOutput:
     sampled_token_ids: torch.Tensor
     logprobs_tensors: LogprobsTensors | None
     num_nans: torch.Tensor | None
     num_sampled: torch.Tensor | None
     num_rejected: torch.Tensor | None = None
+    sampling_mask_tensors: SamplingMaskTensors | None = None
