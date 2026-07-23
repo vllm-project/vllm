@@ -287,6 +287,8 @@ def test_abort_request_when_structured_output_fsm_cannot_advance():
     scheduler.vllm_config = Mock()
     scheduler.vllm_config.model_config.enable_return_routed_experts = False
     scheduler.enable_return_routed_experts = False
+    scheduler.vllm_config.model_config.enable_return_indexer_topk = False
+    scheduler.enable_return_indexer_topk = False
     scheduler.recompute_kv_load_failures = False
     scheduler.defer_block_free = False
     scheduler.make_stats = Mock(return_value=None)
