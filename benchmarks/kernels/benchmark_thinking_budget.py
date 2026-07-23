@@ -87,9 +87,7 @@ def create_case(
     idx_mapping = torch.tensor(req_indices, dtype=torch.int32, device=device)
     logits = torch.zeros((batch_size, VOCAB_SIZE), device=device)
     idx_mapping_np = idx_mapping.cpu().numpy()
-    input_ids = torch.full(
-        (batch_size,), TOKEN_ID, dtype=torch.int32, device=device
-    )
+    input_ids = torch.full((batch_size,), TOKEN_ID, dtype=torch.int32, device=device)
     local_pos = torch.zeros(batch_size, dtype=torch.int32, device=device)
 
     def run() -> None:
@@ -109,9 +107,7 @@ def create_case(
         for req_num, req_idx in enumerate(req_indices)
         if budget_type != "mixed" or req_num % 2 == 0
     ]
-    assert torch.all(
-        state.cached_scan_pos[active_req_indices] == history_len
-    ).item()
+    assert torch.all(state.cached_scan_pos[active_req_indices] == history_len).item()
     if budget_type == "forced":
         assert torch.all(logits[:, END_TOKEN_ID] == 1.0e9).item()
     return BenchmarkCase(req_states, state, run)
@@ -282,19 +278,13 @@ def main() -> None:
     device = torch.device(args.device)
     results: dict[str, dict[int, tuple[float, float, float]]] = {}
     for mode in args.modes:
-        mode_batch_sizes = (
-            batch_sizes if mode.startswith("batched-") else [1]
-        )
+        mode_batch_sizes = batch_sizes if mode.startswith("batched-") else [1]
         if mode == "batched-mixed":
             mode_batch_sizes = [size for size in mode_batch_sizes if size >= 2]
             if not mode_batch_sizes:
                 parser.error("batched-mixed requires a batch size of at least 2")
         for batch_size in mode_batch_sizes:
-            label = (
-                f"{mode}-b{batch_size}"
-                if mode.startswith("batched-")
-                else mode
-            )
+            label = f"{mode}-b{batch_size}" if mode.startswith("batched-") else mode
             mode_results: dict[int, tuple[float, float, float]] = {}
             for history_len in history_lengths:
                 if mode == "cached":
@@ -337,9 +327,7 @@ def main() -> None:
                         batch_size=batch_size,
                         budget_type=budget_type,
                     )
-                    result = benchmark_cached(
-                        case, args.warmup_ms, args.rep_ms
-                    )
+                    result = benchmark_cached(case, args.warmup_ms, args.rep_ms)
                 mode_results[history_len] = result
             results[label] = mode_results
 
