@@ -1,5 +1,4 @@
-# SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 """
 NixlTransport: Data-plane transport for RDMA-based KV block transfers via NIXL.
 """
@@ -209,13 +208,17 @@ class NixlTransport(DataTransport):
                 continue
             try:
                 state = self._agent.check_xfer_state(entry.handle)
-            except Exception as exc:
+            except Exception:
                 logger.warning(
-                    "NixlTransport %s: check_xfer_state failed for transfer_id=%d: %s",
+                    "NixlTransport %s: check_xfer_state failed for "
+                    "transfer_id=%d, marking as failed",
                     self._agent_name,
                     transfer_id,
-                    exc,
+                    exc_info=True,
                 )
+                if failed_ids is None:
+                    failed_ids = []
+                failed_ids.append(transfer_id)
                 continue
             if state == "DONE":
                 if done_ids is None:
