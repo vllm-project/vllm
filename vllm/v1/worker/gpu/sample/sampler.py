@@ -6,6 +6,7 @@ import torch
 
 import vllm.envs as envs
 from vllm.config.model import LogprobsMode
+from vllm.config.reasoning import ReasoningConfig
 from vllm.sampling_params import SamplingParams
 from vllm.v1.sample.ops.topk_topp_sampler import (
     apply_top_k_top_p,
@@ -24,6 +25,7 @@ from vllm.v1.worker.gpu.sample.logprob import (
 from vllm.v1.worker.gpu.sample.output import SamplerOutput
 from vllm.v1.worker.gpu.sample.penalties import PenaltiesState
 from vllm.v1.worker.gpu.sample.states import NO_LOGPROBS, SamplingStates
+from vllm.v1.worker.gpu.sample.thinking_budget import ThinkingBudgetState
 from vllm.v1.worker.gpu.states import RequestState
 
 
@@ -37,6 +39,7 @@ class Sampler:
         logprobs_mode: LogprobsMode = "raw_logprobs",
         num_speculative_tokens: int = 1,
         use_fp64_gumbel: bool = False,
+        reasoning_config: ReasoningConfig | None = None,
     ):
         self.logprobs_mode = logprobs_mode
         self.compute_nans = envs.VLLM_COMPUTE_NANS_IN_LOGITS  # False by default.
@@ -48,6 +51,7 @@ class Sampler:
         self.logit_bias_state = LogitBiasState(max_num_reqs, device)
         self.bad_words_state = BadWordsState(req_states)
         self.logprob_token_ids_state = LogprobTokenIdsState(max_num_reqs, device)
+        self.thinking_budget_state = ThinkingBudgetState(req_states, reasoning_config)
         self.num_speculative_tokens = num_speculative_tokens
         self.use_flashinfer = flashinfer_sampler_supported()
 
@@ -59,6 +63,7 @@ class Sampler:
         self.logit_bias_state.add_request(req_idx, prompt_len, sampling_params)
         self.bad_words_state.add_request(req_idx, sampling_params)
         self.logprob_token_ids_state.add_request(req_idx, sampling_params)
+        self.thinking_budget_state.add_request(req_idx, sampling_params)
 
     def apply_staged_writes(self) -> None:
         self.sampling_states.apply_staged_writes()
@@ -66,6 +71,7 @@ class Sampler:
         self.logit_bias_state.apply_staged_writes()
         self.bad_words_state.apply_staged_writes()
         self.logprob_token_ids_state.apply_staged_writes()
+        self.thinking_budget_state.apply_staged_writes()
 
     def __call__(
         self,
@@ -73,6 +79,7 @@ class Sampler:
         input_batch: InputBatch,
     ) -> SamplerOutput:
         expanded_idx_mapping = input_batch.expanded_idx_mapping
+        idx_mapping = input_batch.idx_mapping
         idx_mapping_np = input_batch.idx_mapping_np
         cu_num_logits_np = input_batch.cu_num_logits_np
         expanded_local_pos = input_batch.expanded_local_pos
@@ -92,6 +99,7 @@ class Sampler:
         sampled, processed_logits = self.sample(
             logits,
             expanded_idx_mapping,
+            idx_mapping,
             idx_mapping_np,
             pos,
             input_ids,
@@ -146,6 +154,7 @@ class Sampler:
         self,
         logits: torch.Tensor,
         expanded_idx_mapping: torch.Tensor,
+        idx_mapping: torch.Tensor,
         idx_mapping_np: np.ndarray,
         pos: torch.Tensor,
         input_ids: torch.Tensor,
@@ -178,6 +187,18 @@ class Sampler:
             expanded_local_pos,
         )
 
+        # Force the reasoning end marker once a per-request thinking budget
+        # has been reached. This happens before temperature/top-k/top-p so the
+        # forced marker remains deterministic for both greedy and random paths.
+        self.thinking_budget_state.apply(
+            logits,
+            expanded_idx_mapping,
+            idx_mapping,
+            idx_mapping_np,
+            input_ids,
+            expanded_local_pos,
+        )
+
         # Apply temperature in place.
         self.sampling_states.apply_temperature(
             logits, expanded_idx_mapping, idx_mapping_np
@@ -198,6 +219,7 @@ class Sampler:
         self,
         logits: torch.Tensor,
         expanded_idx_mapping: torch.Tensor,
+        idx_mapping: torch.Tensor,
         idx_mapping_np: np.ndarray,
         pos: torch.Tensor,
         input_ids: torch.Tensor,
@@ -207,6 +229,7 @@ class Sampler:
         processed_logits = self.apply_sampling_params(
             logits,
             expanded_idx_mapping,
+            idx_mapping,
             idx_mapping_np,
             pos,
             input_ids,
