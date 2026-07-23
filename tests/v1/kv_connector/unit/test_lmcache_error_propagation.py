@@ -10,6 +10,9 @@ import zmq
 
 # Mock the lmcache package before vllm imports it.
 # vllm_v1_adapter pulls in many lmcache submodules; mock them all.
+# Original sys.modules entries are saved so a session-scoped fixture can
+# restore them after this test module finishes, avoiding pollution of
+# other tests in the same session.
 _lmcache_modules = [
     "lmcache",
     "lmcache.config",
@@ -36,6 +39,7 @@ _lmcache_modules = [
     "lmcache.v1.multiprocess.mq",
     "lmcache.v1.multiprocess.protocol",
 ]
+_saved_lmcache_modules = {m: sys.modules.get(m) for m in _lmcache_modules}
 for _mod in _lmcache_modules:
     sys.modules[_mod] = MagicMock()
 
@@ -43,6 +47,18 @@ for _mod in _lmcache_modules:
 sys.modules["lmcache.utils"]._lmcache_nvtx_annotate = lambda f: f
 sys.modules["lmcache.utils"].init_logger = MagicMock(return_value=MagicMock())
 sys.modules["lmcache.logging"].init_logger = MagicMock(return_value=MagicMock())
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _restore_lmcache_modules():
+    """Restore original lmcache sys.modules entries after all tests finish."""
+    yield
+    for mod, original in _saved_lmcache_modules.items():
+        if original is None:
+            sys.modules.pop(mod, None)
+        else:
+            sys.modules[mod] = original
+
 
 from vllm.distributed.kv_transfer.kv_connector.v1.lmcache_integration.multi_process_adapter import (  # noqa: E402, E501
     LMCacheMPWorkerAdapter,
