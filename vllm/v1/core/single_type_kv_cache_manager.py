@@ -115,6 +115,9 @@ class SingleTypeKVCacheManager(ABC):
         # managers (full attention, mamba "align"); harmlessly empty elsewhere.
         self._partial_hit_reqs: dict[str, tuple[int, KVCacheBlock]] = {}
         self._pending_cow_copies: list[tuple[KVCacheBlock, KVCacheBlock]] = []
+        self._decode_checkpoint_blocks: dict[
+            str, tuple[int, dict[int, BlockHashWithGroupId]]
+        ] = {}
 
     @classmethod
     def _get_num_evictable_blocks(cls, blocks: Sequence[KVCacheBlock]):
@@ -424,12 +427,26 @@ class SingleTypeKVCacheManager(ABC):
         if num_cached_blocks >= num_full_blocks:
             return
 
-        # Token boundaries whose reachable tail must be retained under sparse
-        # retention: the replay boundary (``num_prompt - 1``, capped by
-        # ``get_computed_blocks``) and any detected shared-prefix junction.
-        reachable_boundaries = [request.num_prompt_tokens - 1]
+        persistent_boundaries = [
+            request.num_prompt_tokens - 1,
+            *request.cache_checkpoint_boundaries,
+        ]
         if request.shared_prefix_boundary:
-            reachable_boundaries.append(request.shared_prefix_boundary)
+            persistent_boundaries.append(request.shared_prefix_boundary)
+
+        decode_boundary = 0
+        if retention_interval == 0 and request.cache_checkpoint_decode_end:
+            decode_boundary = (
+                min(num_tokens, request.num_tokens)
+                // self.scheduler_block_size
+                * self.scheduler_block_size
+            )
+            if decode_boundary < request.num_prompt_tokens:
+                decode_boundary = 0
+
+        reachable_boundaries = persistent_boundaries.copy()
+        if decode_boundary:
+            reachable_boundaries.append(decode_boundary)
 
         block_mask = self.reachable_block_mask(
             start_block=num_cached_blocks,
@@ -451,6 +468,80 @@ class SingleTypeKVCacheManager(ABC):
         )
 
         self.num_cached_block[request.request_id] = num_full_blocks
+        if decode_boundary:
+            self._update_decode_checkpoint(
+                request, decode_boundary, persistent_boundaries
+            )
+
+    def _update_decode_checkpoint(
+        self,
+        request: Request,
+        boundary: int,
+        persistent_boundaries: Sequence[int],
+    ) -> None:
+        blocks = self.req_to_blocks[request.request_id]
+        decode_mask = self.reachable_block_mask(
+            start_block=0,
+            end_block=len(blocks),
+            alignment_tokens=self.scheduler_block_size,
+            kv_cache_spec=self.kv_cache_spec,
+            use_eagle=self.use_eagle,
+            retention_interval=0,
+            reachable_boundaries=(boundary,),
+        )
+        if decode_mask is None:
+            return
+
+        current_blocks: dict[int, BlockHashWithGroupId] = {}
+        for block, keep in zip(blocks, decode_mask):
+            if keep and not block.is_null and block.block_hash is not None:
+                current_blocks[block.block_id] = block.block_hash
+        if not current_blocks:
+            return
+
+        previous = self._decode_checkpoint_blocks.get(request.request_id)
+        if previous is not None:
+            previous_boundary, previous_blocks = previous
+            if boundary <= previous_boundary:
+                return
+
+            persistent_mask = self.reachable_block_mask(
+                start_block=0,
+                end_block=len(blocks),
+                alignment_tokens=self.scheduler_block_size,
+                kv_cache_spec=self.kv_cache_spec,
+                use_eagle=self.use_eagle,
+                retention_interval=0,
+                reachable_boundaries=persistent_boundaries,
+            )
+            assert persistent_mask is not None
+            persistent_block_ids = {
+                block.block_id
+                for block, keep in zip(blocks, persistent_mask)
+                if keep and not block.is_null
+            }
+            current_block_ids = current_blocks.keys()
+            request_block_ids = {
+                block.block_id for block in blocks if not block.is_null
+            }
+            # Withdraw the old admission only while the physical block is
+            # still private to this request. Once released or shared, leave it
+            # to the normal LRU policy instead of invalidating another replay.
+            blocks_to_evict = {
+                block_id
+                for block_id, expected_hash in previous_blocks.items()
+                if block_id not in persistent_block_ids
+                and block_id not in current_block_ids
+                and block_id in request_block_ids
+                and self.block_pool.blocks[block_id].block_hash == expected_hash
+                and self.block_pool.blocks[block_id].ref_cnt == 1
+            }
+            self.block_pool.evict_blocks(blocks_to_evict)
+
+        self._decode_checkpoint_blocks[request.request_id] = (
+            boundary,
+            current_blocks,
+        )
 
     @classmethod
     def reachable_block_mask(
@@ -490,6 +581,7 @@ class SingleTypeKVCacheManager(ABC):
         req_blocks = self.req_to_blocks.pop(request_id, [])
         self.num_cached_block.pop(request_id, None)
         self._partial_hit_reqs.pop(request_id, None)
+        self._decode_checkpoint_blocks.pop(request_id, None)
         return req_blocks
 
     def free(self, request_id: str) -> None:
@@ -1016,9 +1108,10 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
                     mask[i - start_block] = True
 
         # (2) Reachable-boundary tails: the replay boundary (``num_prompt - 1``,
-        # capped by ``get_computed_blocks``) and any shared-prefix junction. Both
-        # land before segments would cover them under sparse retention, so keep
-        # the ``need``-block tail ending on each boundary explicitly.
+        # capped by ``get_computed_blocks``), explicit checkpoints, and any
+        # shared-prefix junction. These may land before segments would cover
+        # them under sparse retention, so keep the ``need``-block tail ending
+        # on each boundary explicitly.
         if retention_interval is not None:
             for boundary_tokens in reachable_boundaries:
                 aligned = boundary_tokens // alignment_tokens * alignment_tokens
@@ -1342,9 +1435,10 @@ class MambaManager(SingleTypeKVCacheManager):
           ``0``    -> keep only the ``reachable_boundaries`` states
           ``> 0``  -> keep one state per ``retention_interval``-sized segment
 
-        ``reachable_boundaries`` are proven reuse points (the replay boundary and
-        any cross-request shared-prefix junction, Marconi-style APC); their
-        boundary state is always kept so sparse retention does not defeat reuse.
+        ``reachable_boundaries`` are proven reuse points (the replay boundary,
+        explicit checkpoints, and any cross-request shared-prefix junction,
+        Marconi-style APC); their boundary state is always kept so sparse
+        retention does not defeat reuse.
         """
         if retention_interval is None or alignment_tokens is None:
             # Dense caching (default) or no alignment constraint imposed.
@@ -1370,9 +1464,9 @@ class MambaManager(SingleTypeKVCacheManager):
                 mask[i] = True
 
         # (2) Reachable-boundary states: the replay boundary (``num_prompt - 1``,
-        # capped by ``get_computed_blocks``) and any shared-prefix junction, both
-        # of which segments would otherwise skip under sparse retention. A Mamba
-        # hit needs exactly the single state block ending on the boundary.
+        # capped by ``get_computed_blocks``), explicit checkpoints, and any
+        # shared-prefix junction. A Mamba hit needs exactly the single state
+        # block ending on the boundary.
         for boundary_tokens in reachable_boundaries:
             aligned = boundary_tokens // alignment_tokens * alignment_tokens
             boundary_block = aligned // block_size - 1

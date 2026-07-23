@@ -4161,6 +4161,81 @@ def test_mamba_shared_prefix_survives_zero_retention(monkeypatch):
     assert cached_mamba_blocks(96) == {5, 14}
 
 
+def test_mamba_explicit_checkpoints_survive_zero_retention(monkeypatch):
+    monkeypatch.setenv("VLLM_PREFIX_CACHE_RETENTION_INTERVAL", "0")
+    block_size = 16
+    manager = make_kv_cache_manager(
+        _make_hybrid_kv_cache_config(block_size, 100, ["full", "mamba"]),
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=block_size,
+    )
+    token_ids = [i for i in range(16) for _ in range(block_size)]
+    req = make_request("r", token_ids, block_size, sha256)
+    req.cache_checkpoint_boundaries = (96, 160)
+
+    computed_blocks, num_computed, _ = manager.get_computed_blocks(req)
+    assert (
+        manager.allocate_slots(req, len(token_ids), num_computed, computed_blocks)
+        is not None
+    )
+    cached = {
+        i
+        for i in range(16)
+        if manager.block_pool.get_cached_block(
+            req.block_hashes[i], kv_cache_group_ids=[1]
+        )
+        is not None
+    }
+
+    assert cached == {5, 9, 14}
+
+
+def test_mamba_decode_checkpoint_rolls_forward(monkeypatch):
+    monkeypatch.setenv("VLLM_PREFIX_CACHE_RETENTION_INTERVAL", "0")
+    block_size = 16
+    manager = make_kv_cache_manager(
+        _make_hybrid_kv_cache_config(block_size, 100, ["full", "mamba_align"]),
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=block_size,
+    )
+    prompt_token_ids = [i for i in range(4) for _ in range(block_size)]
+    req = make_request("r", prompt_token_ids, block_size, sha256)
+    req.cache_checkpoint_boundaries = (32,)
+    req.cache_checkpoint_decode_end = True
+
+    computed_blocks, num_computed, _ = manager.get_computed_blocks(req)
+    assert (
+        manager.allocate_slots(req, 2 * block_size, num_computed, computed_blocks)
+        is not None
+    )
+    req.num_computed_tokens = 2 * block_size
+    assert manager.allocate_slots(req, block_size) is not None
+    req.num_computed_tokens += block_size
+    assert manager.allocate_slots(req, block_size) is not None
+
+    req.num_computed_tokens = len(prompt_token_ids)
+    req.append_output_token_ids([10] * block_size)
+    assert manager.allocate_slots(req, block_size) is not None
+
+    req.num_computed_tokens += block_size
+    req.append_output_token_ids([11] * block_size)
+    assert manager.allocate_slots(req, block_size) is not None
+
+    cached = {
+        i
+        for i in range(len(req.block_hashes))
+        if manager.block_pool.get_cached_block(
+            req.block_hashes[i], kv_cache_group_ids=[1]
+        )
+        is not None
+    }
+
+    # Stable boundary, replay boundary, and only the latest decode boundary.
+    assert cached == {1, 2, 5}
+
+
 def test_mamba_shared_prefix_reuse_under_zero_retention(monkeypatch):
     """Full cross-request Marconi flow: a partial shared prefix cached by the
     detecting request must stay reusable by a later request under

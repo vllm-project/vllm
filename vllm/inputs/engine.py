@@ -42,6 +42,12 @@ class TokensInput(_InputOptions):
     """Char-level (start, end) offsets per token, propagated from the
     renderer's TokensPrompt when offsets were computed."""
 
+    cache_checkpoint_boundaries: NotRequired[list[int]]
+    """Trusted frontend-provided token prefix lengths to retain."""
+
+    cache_checkpoint_decode_end: NotRequired[bool]
+    """Retain the latest materializable committed decode prefix."""
+
     assistant_tokens_mask: NotRequired[list[int] | None]
     """Per-token 0/1 mask marking assistant-generated tokens.
     Populated when ``return_assistant_tokens_mask=True`` is set on the
@@ -53,6 +59,8 @@ def tokens_input(
     *,
     prompt: str | None = None,
     cache_salt: str | None = None,
+    cache_checkpoint_boundaries: list[int] | None = None,
+    cache_checkpoint_decode_end: bool = False,
 ) -> TokensInput:
     """
     Construct [`TokensInput`][vllm.inputs.engine.TokensInput]
@@ -64,6 +72,10 @@ def tokens_input(
         inputs["prompt"] = prompt
     if cache_salt is not None:
         inputs["cache_salt"] = cache_salt
+    if cache_checkpoint_boundaries:
+        inputs["cache_checkpoint_boundaries"] = list(cache_checkpoint_boundaries)
+    if cache_checkpoint_decode_end:
+        inputs["cache_checkpoint_decode_end"] = True
 
     return inputs
 

@@ -179,6 +179,13 @@ class ServingTokens(GenerateBaseServing):
                 skip_mm_cache=True,
             )
 
+        if request.cache_checkpoint_boundaries and engine_input["type"] == "token":
+            engine_input["cache_checkpoint_boundaries"] = (
+                request.cache_checkpoint_boundaries
+            )
+        if request.cache_checkpoint_decode_end and engine_input["type"] == "token":
+            engine_input["cache_checkpoint_decode_end"] = True
+
         # Schedule the request and get the result generator.
         result_generator: AsyncGenerator[RequestOutput, None] | None = None
 

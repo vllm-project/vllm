@@ -136,6 +136,12 @@ class EngineCoreRequest(
     # KV-transfer request is rejected on the D node before engine admission.
     abort_immediately: bool = False
 
+    # Token prefix lengths where an align-mode recurrent state should be
+    # materialized and retained in the GPU prefix cache.
+    # Keep new defaulted fields at the end of this array-like wire struct.
+    cache_checkpoint_boundaries: tuple[int, ...] = ()
+    cache_checkpoint_decode_end: bool = False
+
     @property
     def params(self) -> SamplingParams | PoolingParams:
         """Return the processed params (sampling or pooling)."""

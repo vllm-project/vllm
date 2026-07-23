@@ -17,6 +17,7 @@ from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
     GenerateResponse,
 )
 from vllm.entrypoints.scale_out.token_in_token_out.serving import ServingTokens
+from vllm.inputs import tokens_input
 from vllm.logprobs import Logprob
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.renderers import renderer_from_config
@@ -201,6 +202,37 @@ async def test_serve_tokens_skips_mm_cache_for_remote_engine_execution():
         serving.online_renderer.preprocess_completion.call_args.kwargs["skip_mm_cache"]
         is True
     )
+
+
+@pytest.mark.asyncio
+async def test_serve_tokens_forwards_gpu_cache_checkpoint_boundaries():
+    engine = _mock_engine()
+
+    async def mock_generate(*args, **kwargs):
+        yield _make_request_output(
+            "req-1", token_ids=[10], finish_reason="stop", finished=True
+        )
+
+    engine.generate = MagicMock(side_effect=mock_generate)
+    serving = _build_serving_tokens(engine)
+    serving.online_renderer.preprocess_completion = AsyncMock(
+        return_value=[tokens_input([1, 2, 3])]
+    )
+    request = GenerateRequest(
+        token_ids=[1, 2, 3],
+        cache_checkpoint_boundaries=[2],
+        cache_checkpoint_decode_end=True,
+        sampling_params=SamplingParams(max_tokens=1),
+        model=MODEL_NAME,
+        stream=False,
+    )
+
+    response = await serving.serve_tokens(request)
+
+    assert isinstance(response, GenerateResponse)
+    engine_input = engine.generate.call_args.args[0]
+    assert engine_input["cache_checkpoint_boundaries"] == [2]
+    assert engine_input["cache_checkpoint_decode_end"] is True
 
 
 @pytest.mark.asyncio

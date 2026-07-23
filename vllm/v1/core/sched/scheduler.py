@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import itertools
 import time
+from bisect import bisect_left
 from collections import defaultdict, deque
 from collections.abc import Iterable
 from dataclasses import replace
@@ -360,7 +361,8 @@ class Scheduler(SchedulerInterface):
         In "align" cache mode the SSM state is only materialized at chunk
         ends, so chunk ends are steered onto cacheable positions: block
         boundaries by default, plus mandatory early stops (the prompt's
-        partial-tail hash boundary, a detected shared-prefix junction).
+        partial-tail hash boundary, explicit cache checkpoints, and a detected
+        shared-prefix junction).
         """
         start = (
             request.num_computed_tokens
@@ -393,6 +395,14 @@ class Scheduler(SchedulerInterface):
             if self.mamba_partial_cache_hit
             else 0
         )
+        cache_checkpoint_stop = 0
+        if boundaries := request.cache_checkpoint_boundaries:
+            # Skip checkpoints that floor to an already crossed block.
+            checkpoint_idx = bisect_left(boundaries, next_block_boundary)
+            if checkpoint_idx < len(boundaries):
+                candidate = boundaries[checkpoint_idx] // block_size * block_size
+                if candidate <= last_cache_position:
+                    cache_checkpoint_stop = candidate
         stops = (
             # Resumed mid-block (fine-grained partial hash hit): re-align to
             # the block grid before running on, so the crossed boundary's
@@ -413,6 +423,7 @@ class Scheduler(SchedulerInterface):
             start + (request.shared_prefix_boundary - start) // block_size * block_size
             if start < request.shared_prefix_boundary < end
             else 0,
+            cache_checkpoint_stop,
         )
         # Stop at the earliest mandatory position strictly inside the chunk.
         end = min((s for s in stops if start < s < end), default=end)
@@ -1812,6 +1823,18 @@ class Scheduler(SchedulerInterface):
                 finish_reason = request.get_finished_reason()
                 finished = self._handle_stopped_request(request)
                 if finished:
+                    if request.cache_checkpoint_decode_end:
+                        num_committed_tokens = min(
+                            max(
+                                0,
+                                request.num_computed_tokens
+                                - request.num_output_placeholders,
+                            ),
+                            request.num_tokens,
+                        )
+                        self.kv_cache_manager.cache_blocks(
+                            request, num_committed_tokens
+                        )
                     kv_transfer_params, ec_transfer_params = self._free_request(request)
 
                 if status_before_stop == RequestStatus.RUNNING:
