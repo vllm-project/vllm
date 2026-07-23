@@ -4,6 +4,7 @@ import copy
 import hashlib
 import importlib
 from collections.abc import Callable
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -62,6 +63,30 @@ from vllm.v1.metrics.stats import CachingMetrics, PrefixCacheStats
 from vllm.v1.request import Request
 
 pytestmark = pytest.mark.cpu_test
+
+
+def test_hisparse_memory_usage_splits_host_mla_from_gpu_indexer():
+    class FixedMemorySpec:
+        def __init__(self, size: int):
+            self.size = size
+
+        def max_memory_usage_bytes(self, _vllm_config):
+            return self.size
+
+    specs = {
+        "model.layers.0.self_attn": FixedMemorySpec(300),
+        "model.layers.0.self_attn.indexer": FixedMemorySpec(50),
+    }
+    group = KVCacheGroupSpec(
+        layer_names=list(specs),
+        kv_cache_spec=UniformTypeKVCacheSpecs(
+            block_size=16,
+            kv_cache_specs=specs,  # type: ignore[arg-type]
+        ),
+    )
+    config = SimpleNamespace(attention_config=SimpleNamespace(hisparse_config=object()))
+
+    assert kv_cache_utils._hisparse_gpu_host_usage_split(config, [group]) == (50, 300)
 
 
 @pytest.fixture(autouse=True)
