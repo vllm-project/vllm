@@ -1830,13 +1830,13 @@ class EngineCoreProc(EngineCore):
     ) -> None:
         self._send_finish_outputs_to_client(req_ids, client_index, FinishReason.ERROR)
 
-    def _send_abort_outputs(self, aborted_reqs: list[tuple[str, int]]) -> None:
+    def _send_abort_outputs(self, aborted_reqs: list[Request]) -> None:
         # TODO(nick) this will be moved inside the scheduler
         if aborted_reqs:
             # Map client_index to list of request_ids that belong to that client.
             by_client = defaultdict[int, set[str]](set)
-            for req_id, client_index in aborted_reqs:
-                by_client[client_index].add(req_id)
+            for request in aborted_reqs:
+                by_client[request.client_index].add(request.request_id)
             for client_index, req_ids in by_client.items():
                 self._send_abort_outputs_to_client(list(req_ids), client_index)
 
