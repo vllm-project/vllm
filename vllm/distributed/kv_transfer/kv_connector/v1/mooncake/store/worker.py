@@ -1647,21 +1647,32 @@ class MooncakeStoreWorker:
         # candidate_meta stores the (group, hash_bytes) for key slice.
         candidate_keys: list[str] = []
         candidate_meta: list[tuple[int, bytes]] = []
-        lookup_masks = self.coord.lookup_mask(token_len)
+        fine_grained = self.coord.enable_partial_hash_hits
+        lookup_masks = None if fine_grained else self.coord.lookup_mask(token_len)
         for g_idx, db in enumerate(self.token_dbs):
             spec_block_size = db.block_size
-            lookup_mask = lookup_masks[g_idx]
             key_prefixes = self._lookup_key_prefixes[g_idx]
-            group_hashes = self.coord.block_hashes_for_spec(
-                block_hashes, self._kv_cache_groups[g_idx].kv_cache_spec
-            )
-            max_chunks = min(len(group_hashes), cdiv(token_len, spec_block_size))
-            mask_limit = (
-                max_chunks if lookup_mask is None else min(max_chunks, len(lookup_mask))
-            )
-            for chunk_id in range(mask_limit):
-                if lookup_mask is not None and not lookup_mask[chunk_id]:
-                    continue
+            if fine_grained:
+                max_units = min(len(block_hashes), token_len // self.hash_block_size)
+                unit_ids: range | list[int] = range(max_units)
+                group_hashes: Sequence[BlockHash] = block_hashes
+            else:
+                lookup_mask = lookup_masks[g_idx]  # type: ignore[index]
+                group_hashes = self.coord.block_hashes_for_spec(
+                    block_hashes, self._kv_cache_groups[g_idx].kv_cache_spec
+                )
+                max_chunks = min(len(group_hashes), cdiv(token_len, spec_block_size))
+                mask_limit = (
+                    max_chunks
+                    if lookup_mask is None
+                    else min(max_chunks, len(lookup_mask))
+                )
+                unit_ids = [
+                    chunk_id
+                    for chunk_id in range(mask_limit)
+                    if lookup_mask is None or lookup_mask[chunk_id]
+                ]
+            for chunk_id in unit_ids:
                 h = group_hashes[chunk_id]
                 hash_hex = h.hex()
                 for key_prefix in key_prefixes:

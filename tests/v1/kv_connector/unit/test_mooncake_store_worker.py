@@ -1819,6 +1819,46 @@ def test_lookup_partial_prefix_returns_first_hit_length():
     assert worker.lookup(48, [b"a0", b"a1", b"a2"]) == 32
 
 
+def test_lookup_partial_tail_uses_hash_alignment():
+    """A stored sub-block tail can serve a request extending past it."""
+    from vllm.v1.kv_cache_interface import (
+        FullAttentionSpec,
+        KVCacheGroupSpec,
+        MambaSpec,
+    )
+
+    worker = _make_bare_worker(block_size=16)
+    full = FullAttentionSpec(block_size=16, num_kv_heads=8, head_size=64, dtype=None)
+    mamba = MambaSpec(
+        block_size=16,
+        shapes=((1, 1),),
+        dtypes=(torch.float32,),
+        mamba_cache_mode="align",
+    )
+    worker._kv_cache_groups = [
+        KVCacheGroupSpec(["full"], full),
+        KVCacheGroupSpec(["mamba"], mamba),
+    ]
+    worker.hash_block_size = 4
+    worker.token_dbs = [
+        ChunkedTokenDatabase(
+            KeyMetadata("test-model", 0, 0, 0, 0, group_id=group_id),
+            block_size=16,
+            hash_block_size=4,
+        )
+        for group_id in range(2)
+    ]
+    worker.coord = mooncake_store_worker.MooncakeStoreCoordinator(
+        worker._kv_cache_groups,
+        scheduler_block_size=16,
+        hash_block_size=4,
+    )
+    worker._init_lookup_key_prefixes()
+    worker.store.batch_is_exist.return_value = [0, 0, 1, 0, 0, 1]
+
+    assert worker.lookup(13, [b"h0", b"h1", b"h2"]) == 12
+
+
 def test_lookup_full_hit_reuses_existing_boundary():
     """A full hit is re-derived below the request end without another RPC."""
     worker = _make_bare_worker(block_size=16)
