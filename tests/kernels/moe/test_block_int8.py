@@ -16,7 +16,7 @@ from vllm.platforms import current_platform
 
 if not torch.cuda.is_available() or current_platform.get_device_capability() is None:
     pytest.skip("Requires CUDA GPU", allow_module_level=True)
-    
+
 if current_platform.get_device_capability() < (7, 0):
     pytest.skip("INT8 Triton requires CUDA 7.0 or higher", allow_module_level=True)
 
