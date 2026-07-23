@@ -226,6 +226,14 @@ class MoEPrepareAndFinalizeNaiveDPEPModular(mk.FusedMoEPrepareAndFinalizeModular
             fused_expert_output.dtype,
             fused_expert_output.device,
         )
+        if (
+            isinstance(weight_and_reduce_impl, TopKWeightAndReduceNoOP)
+            and combine_input is not None
+        ):
+            assert combine_input is fused_expert_output, (
+                "The NoOP expert output must remain aliased to the registered "
+                "combine input."
+            )
         out = weight_and_reduce_impl.apply(
             output=combine_input,
             fused_expert_output=fused_expert_output,

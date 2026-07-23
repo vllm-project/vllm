@@ -203,6 +203,11 @@ class FusedMoEPrepareAndFinalize(ABC):
         device: torch.device,
         weight_and_reduce_impl: TopKWeightAndReduce,
     ) -> torch.Tensor | None:
+        """Optionally provide the exact output buffer for the expert kernel.
+
+        Implementations returning a tensor must preserve its identity through
+        finalize; replacing it may silently reintroduce a write-back copy.
+        """
         return None
 
     @property
@@ -1120,7 +1125,6 @@ class FusedMoEKernelModularImpl:
         local_num_experts: int,
         expert_tokens_meta: ExpertTokensMetadata | None,
         activation: MoEActivation,
-        fused_out_alias: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Allocate temporary and output buffers for the fused experts op.
@@ -1135,7 +1139,7 @@ class FusedMoEKernelModularImpl:
         workspace_dtype = self.fused_experts.workspace_dtype(out_dtype)
 
         # Get intermediate workspace shapes based off the chunked M size.
-        workspace13_shape, workspace2_shape, _ = self.fused_experts.workspace_shapes(
+        chunk_workspace_shapes = self.fused_experts.workspace_shapes(
             M_chunk,
             N,
             K,
@@ -1145,17 +1149,30 @@ class FusedMoEKernelModularImpl:
             expert_tokens_meta,
             activation,
         )
+        workspace13_shape, workspace2_shape, chunk_fused_out_shape = (
+            chunk_workspace_shapes
+        )
 
         # Get final output shape based on the full M size.
-        _, _, fused_out_shape = self.fused_experts.workspace_shapes(
-            M_full,
-            N,
-            K,
-            top_k,
-            global_num_experts,
-            local_num_experts,
-            expert_tokens_meta,
-            activation,
+        if M_chunk == M_full:
+            fused_out_shape = chunk_fused_out_shape
+        else:
+            _, _, fused_out_shape = self.fused_experts.workspace_shapes(
+                M_full,
+                N,
+                K,
+                top_k,
+                global_num_experts,
+                local_num_experts,
+                expert_tokens_meta,
+                activation,
+            )
+
+        fused_out_alias = self.prepare_finalize.allocate_fused_expert_output(
+            fused_out_shape,
+            workspace_dtype,
+            device,
+            self.fused_experts.finalize_weight_and_reduce_impl(),
         )
 
         # We can reuse the memory between cache1 and cache3 because by the
@@ -1316,23 +1333,6 @@ class FusedMoEKernelModularImpl:
         if M_full == 0:
             return torch.empty_like(a1q, dtype=in_dtype)
 
-        _, _, fused_out_shape = self.fused_experts.workspace_shapes(
-            M_full,
-            N,
-            K,
-            top_k,
-            global_num_experts,
-            local_num_experts,
-            expert_tokens_meta,
-            activation,
-        )
-        fused_out_dtype = self.fused_experts.workspace_dtype(in_dtype)
-        fused_out_alias = self.prepare_finalize.allocate_fused_expert_output(
-            fused_out_shape,
-            fused_out_dtype,
-            a1q.device,
-            self.fused_experts.finalize_weight_and_reduce_impl(),
-        )
         workspace13, workspace2, fused_out = self._allocate_buffers(
             in_dtype,
             a1q.device,
@@ -1345,14 +1345,11 @@ class FusedMoEKernelModularImpl:
             local_num_experts,
             expert_tokens_meta,
             activation,
-            fused_out_alias,
         )
 
-        # If caller's output buffer already matches fused_out shape/dtype, alias
-        # to skip the redundant copy in TopKWeightAndReduceNoOP.apply downstream.
-        # This eliminates ~94% of __amd_rocclr_copyBuffer events (Copy 2 of the
-        # double-copy MoE write-back path).
-        if fused_out_alias is None and current_platform.is_rocm():
+        # ROCm may alias the caller output when prepare/finalize did not already
+        # provide a more specialized expert-output allocation.
+        if current_platform.is_rocm():
             from vllm._aiter_ops import rocm_aiter_ops
 
             if (

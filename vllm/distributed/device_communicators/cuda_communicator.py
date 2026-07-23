@@ -26,6 +26,10 @@ from .base_device_communicator import DeviceCommunicatorBase
 
 logger = init_logger(__name__)
 
+# Since NCCL 2.29.2, ncclSymkPickKernel accepts registered input with
+# non-registered output for ReduceScatter (ncclSymSendRegRecvNonreg).
+NCCL_DIRECT_SYMM_RS_OUTPUT_MIN_VERSION = 22902
+
 
 class CudaCommunicator(DeviceCommunicatorBase):
     def __init__(
@@ -391,7 +395,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
         chunk_size = input_tensor.shape[0] // world_size
         output_shape = (chunk_size,) + input_tensor.shape[1:]
 
-        if should_nccl_symm_mem_ag_rs() and is_symmetric_memory_tensor(input_tensor):
+        if should_nccl_symm_mem_ag_rs():
             output = self._reduce_scatter_symm_mem(input_tensor)
         else:
             output = torch.empty(
@@ -456,7 +460,8 @@ class CudaCommunicator(DeviceCommunicatorBase):
         direct_output_supported = (
             output is None
             or is_symmetric_memory_tensor(output)
-            or pynccl_comm.nccl_version >= 23004
+            or pynccl_comm.nccl_version
+            >= NCCL_DIRECT_SYMM_RS_OUTPUT_MIN_VERSION
         )
         use_symm_mem = (
             uniform_sizes
@@ -494,10 +499,11 @@ class CudaCommunicator(DeviceCommunicatorBase):
         call (~0.5 ms/RS+AG pair, dwarfing the NVLS transfer itself). Instead we
         allocate once per ``(role, shape, dtype)``, register once, and reuse.
 
-        Safe for serial (eager) sequence parallelism: each collective's result
-        is consumed on the same stream before the next same-role collective
-        reuses the buffer. Distinct payload roles get distinct buffers so one
-        result cannot clobber another still-live result.
+        Safe across serial MoE layers and eager sequence parallelism: the
+        producer and collective are ordered on the same stream before the next
+        same-role operation reuses the buffer. DBO microbatches use distinct
+        roles. Any future cross-layer communication overlap must also use
+        distinct roles.
         """
         from vllm.distributed.device_communicators.pynccl_allocator import (
             nccl_symm_mem_context,
@@ -521,22 +527,32 @@ class CudaCommunicator(DeviceCommunicatorBase):
     ) -> torch.Tensor:
         """ReduceScatter using NCCL symmetric memory (NVLS).
 
-        Only called for uniform-size reduce_scatter with an already-registered
-        input (variable sizes are guarded out by the caller to avoid asymmetric
-        ncclCommWindowRegister). The output may be ordinary memory.
+        The MoE reduce_scatterv path calls this only with an already-registered
+        input, so that path never stages. Plain reduce_scatter retains its
+        existing opt-in behavior and stages ordinary input into registered
+        scratch. The output may be ordinary memory.
         """
         pynccl_comm = self.pynccl_comm
         assert pynccl_comm is not None
-        assert is_symmetric_memory_tensor(input_tensor)
-
         chunk = input_tensor.shape[0] // self.world_size
         output_shape = (chunk,) + tuple(input_tensor.shape[1:])
+
+        if is_symmetric_memory_tensor(input_tensor):
+            symm_input = input_tensor
+        else:
+            symm_input = self._get_symm_scratch(
+                "rs_in",
+                tuple(input_tensor.shape),
+                input_tensor.dtype,
+                input_tensor.device,
+            )
+            symm_input.copy_(input_tensor)
 
         if output is None:
             output = self._get_symm_scratch(
                 "rs_out", output_shape, input_tensor.dtype, input_tensor.device
             )
-        pynccl_comm.reduce_scatter(output, input_tensor)
+        pynccl_comm.reduce_scatter(output, symm_input)
         return output
 
     def get_symmetric_memory_buffer(
@@ -550,7 +566,8 @@ class CudaCommunicator(DeviceCommunicatorBase):
         if (
             pynccl_comm is None
             or pynccl_comm.world_size == 1
-            or pynccl_comm.nccl_version < 23004
+            or pynccl_comm.nccl_version
+            < NCCL_DIRECT_SYMM_RS_OUTPUT_MIN_VERSION
             or not should_nccl_symm_mem_ag_rs()
         ):
             return None

@@ -12,7 +12,10 @@ import torch.multiprocessing as mp
 import vllm.envs as envs
 from tests.utils import ensure_current_vllm_config
 from vllm.distributed import cleanup_dist_env_and_memory
-from vllm.distributed.device_communicators.cuda_communicator import CudaCommunicator
+from vllm.distributed.device_communicators.cuda_communicator import (
+    NCCL_DIRECT_SYMM_RS_OUTPUT_MIN_VERSION,
+    CudaCommunicator,
+)
 from vllm.distributed.device_communicators.pynccl import register_nccl_symmetric_ops
 from vllm.distributed.device_communicators.pynccl_allocator import (
     get_nccl_mem_pool,
@@ -207,11 +210,25 @@ def nccl_symm_mem_reduce_scatter_worker(local_rank: int, world_size: int):
         torch.testing.assert_close(
             ordinary_output, ordinary_expected, atol=2.5, rtol=0.1
         )
+        assert is_symmetric_memory_tensor(ordinary_output)
 
         pynccl_comm = cuda_communicator.pynccl_comm
         assert pynccl_comm is not None
-        if pynccl_comm.nccl_version < 23004:
+        if pynccl_comm.nccl_version < NCCL_DIRECT_SYMM_RS_OUTPUT_MIN_VERSION:
             return
+
+        from vllm.v1.worker import ubatching
+
+        m.setattr(ubatching, "dbo_current_ubatch_id", lambda: 0)
+        ubatch0 = cuda_communicator.get_symmetric_memory_buffer(
+            "test_dbo_combine", (128,), dtype, device
+        )
+        m.setattr(ubatching, "dbo_current_ubatch_id", lambda: 1)
+        ubatch1 = cuda_communicator.get_symmetric_memory_buffer(
+            "test_dbo_combine", (128,), dtype, device
+        )
+        assert ubatch0 is not None and ubatch1 is not None
+        assert ubatch0.data_ptr() != ubatch1.data_ptr()
 
         with nccl_symm_mem_context(pynccl_comm):
             input_tensor = torch.empty(test_size_elements, dtype=dtype, device=device)
