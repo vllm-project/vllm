@@ -127,6 +127,7 @@ class NemotronHMoE(nn.Module):
     def __init__(
         self,
         config: NemotronHConfig,
+        model_config: ModelConfig | None,
         quant_config: QuantizationConfig | None = None,
         parallel_config: ParallelConfig | None = None,
         prefix: str = "",
@@ -225,7 +226,13 @@ class NemotronHMoE(nn.Module):
             routed_input_transform=self.fc1_latent_proj,
             routed_output_transform=self.fc2_latent_proj,
             routed_scaling_factor=self.routed_scaling_factor,
-            apply_routed_scale_to_output=True,
+            # BF16 can fold the scale into routing weights before the latent
+            # projection. FP16 retains the overflow-protected output path.
+            apply_routed_scale_to_output=(
+                not self.use_latent_moe
+                or model_config is None
+                or model_config.dtype != torch.bfloat16
+            ),
             router_logits_dtype=self.gate.out_dtype,
         )
 
@@ -328,6 +335,7 @@ class NemotronHMoEDecoderLayer(nn.Module):
 
         self.mixer = NemotronHMoE(
             layer_config,
+            model_config=model_config,
             quant_config=quant_config,
             parallel_config=parallel_config,
             prefix=f"{prefix}.mixer",
