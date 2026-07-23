@@ -10,7 +10,7 @@ plugins via the ``vllm.victim_selector`` entry-point group.
 Plugins (e.g. BidKV) are installed separately and auto-registered via::
 
     [project.entry-points."vllm.victim_selector"]
-    bidkv = "vllm_ascend_bidkv:BidkvVictimSelector"
+    bidkv = "bidkv.adapters.vllm_hust.selector:BidkvVictimSelector"
 """
 
 from __future__ import annotations
