@@ -263,6 +263,15 @@ void fused_deepseek_v4_kv_rope_insert(
     torch::stable::Tensor const& cos_sin_cache, int64_t cache_block_size,
     std::optional<torch::stable::Tensor> fp8_scale, bool kv_mxfp8);
 
+void fused_qk_norm_mrope(torch::stable::Tensor& qkv, int64_t num_heads_q,
+                         int64_t num_heads_k, int64_t num_heads_v,
+                         int64_t head_dim, double eps,
+                         torch::stable::Tensor& q_weight,
+                         torch::stable::Tensor& k_weight,
+                         torch::stable::Tensor& cos_sin_cache, bool is_neox,
+                         torch::stable::Tensor& position_ids,
+                         int64_t mrope_section_t, int64_t mrope_section_h);
+
 torch::stable::Tensor fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert(
     torch::stable::Tensor const& q_in, torch::stable::Tensor const& kv,
     torch::stable::Tensor& k_cache, torch::stable::Tensor const& slot_mapping,

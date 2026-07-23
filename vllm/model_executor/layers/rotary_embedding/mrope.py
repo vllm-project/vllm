@@ -446,27 +446,29 @@ class MRotaryEmbedding(RotaryEmbeddingBase):
 
         cos_sin_cache = self._match_cos_sin_cache_dtype(query)
         num_tokens = positions.shape[-1]
-        cos_sin = cos_sin_cache[positions]
-        cos, sin = cos_sin.chunk(2, dim=-1)
         query_shape = query.shape
         key_shape = key.shape
         if positions.ndim == 2:
             assert self.mrope_section
 
-            q, k = triton_mrope(
+            torch.ops.vllm.mrope(
+                positions,
                 query,
                 key,
-                cos,
-                sin,
-                self.mrope_section,
+                cos_sin_cache,
                 self.head_size,
                 self.rotary_dim,
+                self.mrope_section[0],
+                self.mrope_section[1],
+                self.mrope_section[2],
                 self.mrope_interleaved,
                 self.is_neox_style,
             )
 
-            return q.reshape(query_shape), k.reshape(key_shape)
+            return query.reshape(query_shape), key.reshape(key_shape)
 
+        cos_sin = cos_sin_cache[positions]
+        cos, sin = cos_sin.chunk(2, dim=-1)
         query = query.view(num_tokens, -1, self.head_size)
         query_rot = query[..., : self.rotary_dim]
         query_pass = query[..., self.rotary_dim :]
