@@ -163,7 +163,7 @@ class CustomQwen2Decoder(PluggableLayer):
                 # the batch. Cache one batch-invariant [1, 1, S, S] mask per S
                 # and broadcast it, keeping the cache to a couple of tiny
                 # entries regardless of batch size.
-                key = (sequence_length, dtype, str(device))
+                key = sequence_length
                 cache = getattr(self, "_mask_cache", None)
                 if cache is None:
                     cache = self._mask_cache = {}
