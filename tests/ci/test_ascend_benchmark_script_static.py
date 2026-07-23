@@ -118,6 +118,13 @@ def test_ascend_server_readiness_windows_allow_cold_start():
     ) in benchmark_text
 
 
+def test_benchmark_pins_named_runner_to_its_npu():
+    text = script_text("run_ascend_benchmark_ci.sh")
+
+    assert '"${RUNNER_NAME:-}" =~ npu([0-9]+)$' in text
+    assert 'export ASCEND_RT_VISIBLE_DEVICES="${BASH_REMATCH[1]}"' in text
+
+
 def test_perfgate_baseline_fetch_bounds_git_network_waits():
     text = script_text("perfgate_fetch_baseline.sh")
 
