@@ -20,7 +20,6 @@ instead of embedding feature-specific logic directly.
 import functools
 import gc
 import time
-from contextlib import AbstractContextManager, nullcontext
 from copy import deepcopy
 from typing import Any, NamedTuple
 
@@ -57,7 +56,6 @@ from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
 from vllm.v1.outputs import (
     DraftTokenIds,
-    ECConnectorOutput,
     ModelRunnerOutput,
     make_empty_encoder_model_runner_output,
 )
@@ -1329,7 +1327,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             assert self.encoder_cache is not None
             # Run MM encoder (if needed) and get multimodal embeddings.
             # Only first PP rank prepares multimodal embeddings.
-            ec_connector_output: ECConnectorOutput | None = None
+            ec_connector_output = None
             if dummy_run:
                 # Obtain mm embeddings of correct shape for compiled model.
                 inputs_embeds = self.model_state.dummy_inputs_embeds(
@@ -1347,37 +1345,22 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                         scheduled_encoder_inputs=scheduled_encoder_inputs,
                     )
 
-                encoder_outputs = self.encoder_cache.encoder_outputs
-                ec_context: AbstractContextManager[ECConnectorOutput | None] = (
-                    nullcontext()
-                )
                 mm_hashes_to_save: list[str] = []
-                if (
-                    not self.is_encoder_decoder
-                    and scheduler_output.ec_connector_metadata is not None
-                ):
-                    ec_context = self.ec_connector.maybe_get_ec_connector_output(
-                        scheduler_output,
-                        encoder_cache=encoder_outputs,
-                    )
-                    if self.is_ec_producer_only:
-                        mm_hashes_to_save, _ = (
-                            self.model_state.encoder_runner.prepare_mm_inputs(
-                                scheduled_encoder_inputs
-                            )
+                if self.is_ec_producer_only:
+                    mm_hashes_to_save, _ = (
+                        self.model_state.encoder_runner.prepare_mm_inputs(
+                            scheduled_encoder_inputs
                         )
-
-                with ec_context as ec_connector_output:
+                    )
+                with self.ec_connector.maybe_get_ec_connector_output(
+                    scheduler_output,
+                    encoder_cache=self.encoder_cache.encoder_outputs,
+                    enabled=not self.is_encoder_decoder,
+                    mm_hashes_to_save=mm_hashes_to_save,
+                ) as ec_connector_output:
                     inputs_embeds = self.model_state.get_mm_embeddings(
-                        scheduled_encoder_inputs,
-                        input_batch,
-                        self.req_states,
+                        scheduled_encoder_inputs, input_batch, self.req_states
                     )
-                    for mm_hash in mm_hashes_to_save:
-                        self.ec_connector.maybe_save_ec_to_connector(
-                            encoder_outputs,
-                            mm_hash,
-                        )
 
             if self.is_encoder_only:
                 output = make_empty_encoder_model_runner_output(scheduler_output)

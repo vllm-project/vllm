@@ -38,14 +38,21 @@ class ECConnectorModelRunnerMixin:
     def maybe_get_ec_connector_output(
         scheduler_output: "SchedulerOutput",
         encoder_cache: dict[str, torch.Tensor],
+        enabled: bool = True,
+        mm_hashes_to_save: list[str] | None = None,
         **kwargs,
     ) -> AbstractContextManager[ECConnectorOutput | None]:
-        return (
-            ECConnectorModelRunnerMixin._get_ec_connector_output(
-                scheduler_output, encoder_cache, **kwargs
-            )
-            if has_ec_transfer()
-            else nullcontext()
+        if (
+            not enabled
+            or scheduler_output.ec_connector_metadata is None
+            or not has_ec_transfer()
+        ):
+            return nullcontext()
+        return ECConnectorModelRunnerMixin._get_ec_connector_output(
+            scheduler_output,
+            encoder_cache,
+            mm_hashes_to_save=mm_hashes_to_save,
+            **kwargs,
         )
 
     # This context manager must be used within an active forward context.
@@ -55,6 +62,7 @@ class ECConnectorModelRunnerMixin:
     def _get_ec_connector_output(
         scheduler_output: "SchedulerOutput",
         encoder_cache: dict[str, torch.Tensor],
+        mm_hashes_to_save: list[str] | None = None,
         **kwargs,
     ) -> Generator[ECConnectorOutput, None, None]:
         output = ECConnectorOutput()
@@ -70,6 +78,8 @@ class ECConnectorModelRunnerMixin:
 
         try:
             yield output
+            for mm_hash in mm_hashes_to_save or ():
+                ec_connector.save_caches(encoder_cache=encoder_cache, mm_hash=mm_hash)
         finally:
             output.finished_sending, output.finished_recving = (
                 ec_connector.get_finished(scheduler_output.finished_req_ids)
