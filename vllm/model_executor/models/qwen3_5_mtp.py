@@ -103,6 +103,16 @@ class Qwen3_5MultiTokenPredictor(nn.Module):
             prefix=f"{prefix}.fc",
         )
 
+        # GPTQ: quantized checkpoints may exclude MTP from quantization via
+        # quantization_config.dynamic with "-:pattern" entries. When detected,
+        # disable quantization for MTP layers so they use unquantized params.
+        original_quant = vllm_config.quant_config
+        if quant_config and quant_config.get_name() not in ("modelopt_fp4",):
+            hf_qc = getattr(model_config.hf_config, "quantization_config", None)
+            if isinstance(hf_qc, dict):
+                dynamic = hf_qc.get("dynamic", {})
+                if any(k.startswith("-:") and "mtp" in k for k in dynamic):
+                    vllm_config.quant_config = None
         self.layers = torch.nn.ModuleList(
             Qwen3_5DecoderLayer(
                 vllm_config,
@@ -111,11 +121,10 @@ class Qwen3_5MultiTokenPredictor(nn.Module):
             )
             for idx in range(self.num_mtp_layers)
         )
-
+        vllm_config.quant_config = original_quant
         self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
             ["hidden_states", "residual"], config.hidden_size
         )
-
         self.norm = Qwen3_5RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.pre_fc_norm_hidden = Qwen3_5RMSNorm(
             config.hidden_size, eps=config.rms_norm_eps
@@ -170,6 +179,7 @@ class Qwen3_5MultiTokenPredictor(nn.Module):
                 positions.shape[-1],
                 self.config.hidden_size,
             )
+
         hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states
 

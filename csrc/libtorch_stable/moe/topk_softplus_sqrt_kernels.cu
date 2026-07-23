@@ -80,22 +80,27 @@ __launch_bounds__(128) __global__
                                   OutIndType* indices, int num_rows,
                                   int num_experts, float routed_scaling_factor,
                                   const HashIndType* input_ids,
-                                  const HashIndType* tid2eid) {
+                                  const HashIndType* tid2eid,
+                                  const bool* is_padding) {
   const int warp = (blockIdx.x * blockDim.x + threadIdx.x) / 32;
   const int lane = threadIdx.x % 32;
   if (warp >= num_rows) return;
   const int64_t token_id = load_index_as_int64(input_ids, warp);
+  const bool is_pad_row = is_padding != nullptr && is_padding[warp];
 
   #if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
   cudaGridDependencySynchronize();
   #endif
   int expert = 0;
   float weight = 0.f;
-  if (lane < 6) {
+  if (lane < 6 && !is_pad_row) {
     // only load and calculate for 6 experts
     expert = static_cast<int>(tid2eid[token_id * 6 + lane]);
     const float x = input[warp * num_experts + expert];
     weight = sqrtf(fmaxf(x, 0.f) + __logf(1.f + __expf(-fabsf(x))));
+    if (isnan(weight)) {
+      weight = 0.f;
+    }
   }
   float weight_sum = weight;
   #pragma unroll
@@ -111,7 +116,8 @@ __launch_bounds__(128) __global__
     const int offset = warp * 6 + lane;
     output[offset] =
         weight * routed_scaling_factor / (weight_sum > 0.f ? weight_sum : 1.f);
-    indices[offset] = static_cast<OutIndType>(expert);
+    indices[offset] = !is_pad_row ? static_cast<OutIndType>(expert)
+                                  : static_cast<OutIndType>(-1);
   }
 }
 
@@ -120,7 +126,8 @@ void launchDsv4HashTopk(const float* input, float* output, OutIndType* indices,
                         int num_rows, int num_experts,
                         double routed_scaling_factor,
                         const HashIndType* input_ids,
-                        const HashIndType* tid2eid, cudaStream_t stream) {
+                        const HashIndType* tid2eid, cudaStream_t stream,
+                        const bool* is_padding) {
   if (num_rows == 0) return;
   auto* kernel = &dsv4HashTopkSoftplusSqrt<OutIndType, HashIndType>;
   cudaLaunchConfig_t config = {};
@@ -134,7 +141,7 @@ void launchDsv4HashTopk(const float* input, float* output, OutIndType* indices,
   config.numAttrs = 1;
   const float scale = static_cast<float>(routed_scaling_factor);
   cudaLaunchKernelEx(&config, kernel, input, output, indices, num_rows,
-                     num_experts, scale, input_ids, tid2eid);
+                     num_experts, scale, input_ids, tid2eid, is_padding);
 }
 #endif
 
@@ -166,7 +173,8 @@ __launch_bounds__(WARPS_PER_CTA* WARP_SIZE_PARAM) __global__
         const int num_rows, IndType* indices, int* source_rows, const int k,
         const int start_expert, const int end_expert, const bool renormalize,
         double routed_scaling_factor, const float* correction_bias,
-        const HashIndType* input_ids, const HashIndType* tid2eid) {
+        const HashIndType* input_ids, const HashIndType* tid2eid,
+        const bool* is_padding) {
   static_assert(std::is_same_v<InputType, float> ||
                     std::is_same_v<InputType, __nv_bfloat16> ||
                     std::is_same_v<InputType, __half>,
@@ -231,6 +239,7 @@ __launch_bounds__(WARPS_PER_CTA* WARP_SIZE_PARAM) __global__
     return;
   }
   const bool row_is_active = finished ? !finished[thread_row] : true;
+  const bool is_pad_row = is_padding != nullptr && is_padding[thread_row];
 
   // We finally start setting up the read pointers for each thread. First, each
   // thread jumps to the start of the row it will read.
@@ -249,9 +258,12 @@ __launch_bounds__(WARPS_PER_CTA* WARP_SIZE_PARAM) __global__
   cudaGridDependencySynchronize();
 #endif
 
-  // NOTE(zhuhaoran): dispatch different input types loading, BF16/FP16 convert
-  // to float
-  if constexpr (std::is_same_v<InputType, float>) {
+  if (is_pad_row) {
+#pragma unroll
+    for (int ii = 0; ii < VPT; ++ii) {
+      row_chunk[ii] = 0.f;
+    }
+  } else if constexpr (std::is_same_v<InputType, float>) {
     using VecType = AlignedArray<float, ELTS_PER_LDG>;
     VecType* row_chunk_vec_ptr = reinterpret_cast<VecType*>(&row_chunk);
     const VecType* vec_thread_read_ptr =
@@ -315,12 +327,22 @@ __launch_bounds__(WARPS_PER_CTA* WARP_SIZE_PARAM) __global__
   if constexpr (USE_HASH) {
     const int64_t token_id = load_index_as_int64(input_ids, thread_row);
     const int64_t token_expert_offset = token_id * static_cast<int64_t>(k);
+    if (!is_pad_row) {
 #pragma unroll
-    for (int ii = 0; ii < VPT; ++ii) {
-      float val = row_chunk[ii];
-      float val_b = val * beta;
-      val = (val_b > threshold) ? val : (__logf(1.0f + __expf(val_b))) / beta;
-      row_chunk[ii] = sqrtf(val);
+      for (int ii = 0; ii < VPT; ++ii) {
+        float val = row_chunk[ii];
+        float val_b = val * beta;
+        val = (val_b > threshold) ? val : (__logf(1.0f + __expf(val_b))) / beta;
+        val = sqrtf(val);
+
+        // Dummy/padding tokens can result in NaN values, so
+        // clamp them to 0.0. Note: this clamp could likely be removed if
+        // 'is_padding' is made mandatory
+        if (isnan(val)) {
+          val = 0.f;
+        }
+        row_chunk[ii] = val;
+      }
     }
     float selected_sum = 0.f;
 #pragma unroll
@@ -335,7 +357,8 @@ __launch_bounds__(WARPS_PER_CTA* WARP_SIZE_PARAM) __global__
                                group_id * THREADS_PER_ROW * ELTS_PER_LDG +
                                local_id;
         if (expert == expert_idx) {
-          indices[idx] = static_cast<IndType>(expert);
+          indices[idx] = !is_pad_row ? static_cast<IndType>(expert)
+                                     : static_cast<IndType>(-1);
           selected_sum += row_chunk[ii];
           break;
         }
@@ -379,23 +402,31 @@ __launch_bounds__(WARPS_PER_CTA* WARP_SIZE_PARAM) __global__
 #endif
     return;
   } else {
+    if (!is_pad_row) {
 #pragma unroll
-    for (int ii = 0; ii < VPT; ++ii) {
-      float val = row_chunk[ii];
-      float val_b = val * beta;
-      // Compute softplus: log(1 + exp(val)) with numerical stability
-      // When val > threshold, softplus(x) ≈ x to avoid exp overflow
-      val = (val_b > threshold) ? val : (__logf(1.0f + __expf(val_b))) / beta;
-      val = sqrtf(val);
-      if (correction_bias) {
-        const int group_id = ii / ELTS_PER_LDG;
-        const int local_id = ii % ELTS_PER_LDG;
-        const int expert_idx = first_elt_read_by_thread +
-                               group_id * THREADS_PER_ROW * ELTS_PER_LDG +
-                               local_id;
-        val = val + correction_bias[expert_idx];
+      for (int ii = 0; ii < VPT; ++ii) {
+        float val = row_chunk[ii];
+        float val_b = val * beta;
+        // Compute softplus: log(1 + exp(val)) with numerical stability
+        // When val > threshold, softplus(x) ≈ x to avoid exp overflow
+        val = (val_b > threshold) ? val : (__logf(1.0f + __expf(val_b))) / beta;
+        val = sqrtf(val);
+        // Dummy/padding tokens can result in NaN values, so
+        // clamp them to 0.0. Note: this clamp could likely be removed if
+        // 'is_padding' is made mandatory
+        if (isnan(val)) {
+          val = 0.f;
+        }
+        if (correction_bias) {
+          const int group_id = ii / ELTS_PER_LDG;
+          const int local_id = ii % ELTS_PER_LDG;
+          const int expert_idx = first_elt_read_by_thread +
+                                 group_id * THREADS_PER_ROW * ELTS_PER_LDG +
+                                 local_id;
+          val = val + correction_bias[expert_idx];
+        }
+        row_chunk[ii] = val;
       }
-      row_chunk[ii] = val;
     }
 
     // Original TopK path: find top-k experts by score
@@ -450,18 +481,19 @@ __launch_bounds__(WARPS_PER_CTA* WARP_SIZE_PARAM) __global__
         // Add a guard to ignore experts not included by this node
         const bool node_uses_expert =
             expert >= start_expert && expert < end_expert;
-        const bool should_process_row = row_is_active && node_uses_expert;
+        const bool should_process_row =
+            row_is_active && node_uses_expert && !is_pad_row;
 
         // The lead thread from each sub-group will write out the final results
         // to global memory. (This will be a single) thread per row of the
         // input/output matrices.
         const int idx = k * thread_row + k_idx;
-        if (correction_bias != nullptr) {
+        if (correction_bias != nullptr && should_process_row) {
           max_val -= correction_bias[expert];
         }
         output[idx] = max_val;
         indices[idx] =
-            should_process_row ? (expert - start_expert) : NUM_EXPERTS;
+            !is_pad_row ? expert - start_expert : static_cast<IndType>(-1);
         source_rows[idx] = k_idx * num_rows + thread_row;
         if (renormalize) {
           selected_sum += max_val;
@@ -544,7 +576,7 @@ void topkGatingSoftplusSqrtLauncherHelper(
     const int start_expert, const int end_expert, const bool renormalize,
     double routed_scaling_factor, const float* correction_bias,
     const bool use_hash, const HashIndType* input_ids,
-    const HashIndType* tid2eid, cudaStream_t stream) {
+    const HashIndType* tid2eid, cudaStream_t stream, const bool* is_padding) {
   static constexpr int BYTES_PER_LDG =
       MIN(MAX_BYTES_PER_LDG, sizeof(InputType) * EXPERTS);
   using Constants =
@@ -573,12 +605,12 @@ void topkGatingSoftplusSqrtLauncherHelper(
     cudaLaunchKernelEx(&config, kernel, input, finished, output, num_rows,
                        indices, source_row, k, start_expert, end_expert,
                        renormalize, routed_scaling_factor, correction_bias,
-                       input_ids, tid2eid);
+                       input_ids, tid2eid, is_padding);
 #else
     kernel<<<num_blocks, block_dim, 0, stream>>>(
         input, finished, output, num_rows, indices, source_row, k, start_expert,
         end_expert, renormalize, routed_scaling_factor, correction_bias,
-        input_ids, tid2eid);
+        input_ids, tid2eid, is_padding);
 #endif
   })
 }
@@ -592,7 +624,7 @@ void topkGatingSoftplusSqrtLauncherHelper(
         gating_output, nullptr, topk_weights, topk_indices,                    \
         token_expert_indices, num_tokens, topk, 0, num_experts, renormalize,   \
         routed_scaling_factor, correction_bias, use_hash, input_ids, tid2eid,  \
-        stream);
+        stream, is_padding);
 #else
   #define LAUNCH_SOFTPLUS_SQRT(NUM_EXPERTS, WARPS_PER_TB, MAX_BYTES)           \
     if (WARP_SIZE == 64) {                                                     \
@@ -601,14 +633,14 @@ void topkGatingSoftplusSqrtLauncherHelper(
           gating_output, nullptr, topk_weights, topk_indices,                  \
           token_expert_indices, num_tokens, topk, 0, num_experts, renormalize, \
           routed_scaling_factor, correction_bias, use_hash, input_ids,         \
-          tid2eid, stream);                                                    \
+          tid2eid, stream, is_padding);                                        \
     } else if (WARP_SIZE == 32) {                                              \
       topkGatingSoftplusSqrtLauncherHelper<NUM_EXPERTS, WARPS_PER_TB, 32,      \
                                            MAX_BYTES>(                         \
           gating_output, nullptr, topk_weights, topk_indices,                  \
           token_expert_indices, num_tokens, topk, 0, num_experts, renormalize, \
           routed_scaling_factor, correction_bias, use_hash, input_ids,         \
-          tid2eid, stream);                                                    \
+          tid2eid, stream, is_padding);                                        \
     } else {                                                                   \
       assert(false &&                                                          \
              "Unsupported warp size. Only 32 and 64 are supported for ROCm");  \
@@ -622,14 +654,14 @@ void topkGatingSoftplusSqrtKernelLauncher(
     const int topk, const bool renormalize, double routed_scaling_factor,
     const float* correction_bias, const bool use_hash,
     const HashIndType* input_ids, const HashIndType* tid2eid,
-    cudaStream_t stream) {
+    cudaStream_t stream, const bool* is_padding) {
 #ifndef USE_ROCM
   if constexpr (std::is_same_v<InputType, float>) {
     if (use_hash && topk == 6 && renormalize &&
         (num_experts == 256 || num_experts == 384)) {
       launchDsv4HashTopk<IndType, HashIndType>(
           gating_output, topk_weights, topk_indices, num_tokens, num_experts,
-          routed_scaling_factor, input_ids, tid2eid, stream);
+          routed_scaling_factor, input_ids, tid2eid, stream, is_padding);
       return;
     }
   }
@@ -728,7 +760,8 @@ void dispatch_topk_softplus_sqrt_launch(
     int num_experts, int topk, bool renormalize, double routed_scaling_factor,
     const std::optional<torch::stable::Tensor>& correction_bias,
     const std::optional<torch::stable::Tensor>& input_ids,
-    const std::optional<torch::stable::Tensor>& tid2eid, cudaStream_t stream) {
+    const std::optional<torch::stable::Tensor>& tid2eid, cudaStream_t stream,
+    const std::optional<torch::stable::Tensor>& is_padding) {
   const float* bias_ptr = nullptr;
   if (correction_bias.has_value()) {
     bias_ptr = correction_bias.value().const_data_ptr<float>();
@@ -737,6 +770,22 @@ void dispatch_topk_softplus_sqrt_launch(
   auto launch = [&](auto* topk_indices_ptr) {
     using OutIndType =
         typename std::remove_pointer<decltype(topk_indices_ptr)>::type;
+
+    const bool* is_padding_ptr = nullptr;
+    if (is_padding.has_value()) {
+      const torch::stable::Tensor& is_padding_tensor = is_padding.value();
+      STD_TORCH_CHECK(is_padding_tensor.scalar_type() ==
+                          torch::headeronly::ScalarType::Bool,
+                      "is_padding tensor must be bool");
+      STD_TORCH_CHECK(is_padding_tensor.dim() == 1,
+                      "is_padding tensor must be 1D");
+      STD_TORCH_CHECK(is_padding_tensor.size(0) == num_tokens,
+                      "is_padding size mismatch, expected: ", num_tokens);
+      STD_TORCH_CHECK(is_padding_tensor.is_contiguous(),
+                      "is_padding tensor must be contiguous");
+      is_padding_ptr = is_padding_tensor.const_data_ptr<bool>();
+    }
+
     if (tid2eid.has_value()) {
       STD_TORCH_CHECK(input_ids.has_value(),
                       "input_ids is required for hash MoE");
@@ -751,7 +800,7 @@ void dispatch_topk_softplus_sqrt_launch(
             topk_indices_ptr, token_expert_indices.mutable_data_ptr<int>(),
             num_tokens, num_experts, topk, renormalize, routed_scaling_factor,
             bias_ptr, true, input_ids.value().const_data_ptr<int64_t>(),
-            tid2eid.value().const_data_ptr<int64_t>(), stream);
+            tid2eid.value().const_data_ptr<int64_t>(), stream, is_padding_ptr);
       } else {
         STD_TORCH_CHECK(tid2eid.value().scalar_type() ==
                         torch::headeronly::ScalarType::Int);
@@ -761,7 +810,7 @@ void dispatch_topk_softplus_sqrt_launch(
             topk_indices_ptr, token_expert_indices.mutable_data_ptr<int>(),
             num_tokens, num_experts, topk, renormalize, routed_scaling_factor,
             bias_ptr, true, input_ids.value().const_data_ptr<int>(),
-            tid2eid.value().const_data_ptr<int>(), stream);
+            tid2eid.value().const_data_ptr<int>(), stream, is_padding_ptr);
       }
     } else {
       vllm::moe::topkGatingSoftplusSqrtKernelLauncher<OutIndType, ComputeType>(
@@ -769,7 +818,7 @@ void dispatch_topk_softplus_sqrt_launch(
           topk_indices_ptr, token_expert_indices.mutable_data_ptr<int>(),
           num_tokens, num_experts, topk, renormalize, routed_scaling_factor,
           bias_ptr, false, static_cast<const OutIndType*>(nullptr),
-          static_cast<const OutIndType*>(nullptr), stream);
+          static_cast<const OutIndType*>(nullptr), stream, is_padding_ptr);
     }
   };
 
@@ -793,7 +842,8 @@ void topk_softplus_sqrt(
     bool renormalize, double routed_scaling_factor,
     const std::optional<torch::stable::Tensor>& correction_bias,
     const std::optional<torch::stable::Tensor>& input_ids,
-    const std::optional<torch::stable::Tensor>& tid2eid) {
+    const std::optional<torch::stable::Tensor>& tid2eid,
+    const std::optional<torch::stable::Tensor>& is_padding) {
   const int num_experts = gating_output.size(-1);
   const auto num_tokens = gating_output.numel() / num_experts;
   const int topk = topk_weights.size(-1);
@@ -806,21 +856,22 @@ void topk_softplus_sqrt(
     dispatch_topk_softplus_sqrt_launch<float>(
         gating_output.const_data_ptr<float>(), topk_weights, topk_indices,
         token_expert_indices, num_tokens, num_experts, topk, renormalize,
-        routed_scaling_factor, correction_bias, input_ids, tid2eid, stream);
+        routed_scaling_factor, correction_bias, input_ids, tid2eid, stream,
+        is_padding);
   } else if (gating_output.scalar_type() ==
              torch::headeronly::ScalarType::Half) {
     dispatch_topk_softplus_sqrt_launch<__half>(
         reinterpret_cast<const __half*>(gating_output.const_data_ptr()),
         topk_weights, topk_indices, token_expert_indices, num_tokens,
         num_experts, topk, renormalize, routed_scaling_factor, correction_bias,
-        input_ids, tid2eid, stream);
+        input_ids, tid2eid, stream, is_padding);
   } else if (gating_output.scalar_type() ==
              torch::headeronly::ScalarType::BFloat16) {
     dispatch_topk_softplus_sqrt_launch<__nv_bfloat16>(
         reinterpret_cast<const __nv_bfloat16*>(gating_output.const_data_ptr()),
         topk_weights, topk_indices, token_expert_indices, num_tokens,
         num_experts, topk, renormalize, routed_scaling_factor, correction_bias,
-        input_ids, tid2eid, stream);
+        input_ids, tid2eid, stream, is_padding);
   } else {
     STD_TORCH_CHECK(false, "Unsupported gating_output data type: ",
                     gating_output.scalar_type());
