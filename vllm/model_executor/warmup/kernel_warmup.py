@@ -17,6 +17,9 @@ from vllm.model_executor.warmup.deep_gemm_warmup import deep_gemm_warmup
 from vllm.model_executor.warmup.deepseek_v4_mhc_warmup import (
     deepseek_v4_mhc_warmup,
 )
+from vllm.model_executor.warmup.dflash_spec_decode_warmup import (
+    dflash_kernel_warmup,
+)
 from vllm.model_executor.warmup.eagle_spec_decode_warmup import (
     eagle_eagle_kernel_warmup,
 )
@@ -89,6 +92,21 @@ def kernel_warmup(worker: "Worker"):
         )
     except Exception:
         logger.warning("Skipping Eagle spec-decode warmup.", exc_info=True)
+
+    # DFlash/DSpark spec-decode Triton kernels.  ``_prepare_dflash_inputs_kernel``
+    # specializes on ``BLOCK_SIZE`` / ``SAMPLE_FROM_ANCHOR`` constexprs and the
+    # single-request grid, so enumerate them to pre-compile every cubin.  No-op
+    # when DFlash/DSpark is not configured.
+    spec_config = worker.vllm_config.speculative_config
+    if spec_config is not None and (
+        spec_config.use_dflash() or spec_config.use_dspark()
+    ):
+        speculator = getattr(worker.model_runner, "speculator", None)
+        if speculator is not None:
+            try:
+                dflash_kernel_warmup(speculator)
+            except Exception:
+                logger.warning("Skipping DFlash spec-decode warmup.", exc_info=True)
 
     # Run next so input-prep kernels JIT against pristine runner state.
     sparse_mla_triton_warmup_if_needed(worker)
