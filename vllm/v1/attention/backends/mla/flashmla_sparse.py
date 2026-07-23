@@ -112,8 +112,9 @@ class FlashMLASparseBackend(AttentionBackend):
 
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
-        # DeepSeek V3.2 layout: 512 NoPE + 64 RoPE = 576.
-        return [576]
+        # 576 = 512 NoPE + 64 RoPE (with-rope layout); 512 = 512 NoPE only
+        # (no-rope layout, qk_rope_head_dim == 0). Both share D_V = 512.
+        return [512, 576]
 
     @classmethod
     def is_mla(cls) -> bool:
@@ -824,11 +825,17 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
             q = q_padded
 
         topk_indices = topk_indices.view(num_tokens, 1, -1)
+        # When qk_rope_head_dim == 0 the no-rope kernel (d_qk == d_v == 512)
+        # scores only the NoPE part, so the softmax scale must be over d_v
+        # (kv_lora_rank) rather than the with-rope head size. Mirrors the
+        # only_qv scale used by the FA-based sparse MLA path.
+        sm_scale = (self.kv_lora_rank ** -0.5
+                    if self.qk_rope_head_dim == 0 else self.softmax_scale)
         output = flash_mla_sparse_fwd(
             q,
             kv_c_and_k_pe_cache,
             topk_indices,
-            self.softmax_scale,
+            sm_scale,
             topk_length=topk_length,
         )[0]
 
@@ -849,7 +856,12 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
         if isinstance(q, tuple):
             ql_nope, q_pe = q
             q = self.q_concat_buffer[: ql_nope.shape[0]]
-            ops.concat_mla_q(ql_nope, q_pe, q)
+            if self.qk_rope_head_dim == 0:
+                # No RoPE component (d_qk == kv_lora_rank): q is the NoPE part
+                # alone. concat_mla_q requires rope_dim == 64, so copy directly.
+                q.copy_(ql_nope)
+            else:
+                ops.concat_mla_q(ql_nope, q_pe, q)
 
         num_actual_toks = q.shape[0]
 

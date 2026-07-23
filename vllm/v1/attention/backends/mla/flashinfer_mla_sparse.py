@@ -437,6 +437,15 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
         block_tables = topk_indices_physical.unsqueeze(1)
         seq_lens_arg = seq_lens
 
+        # page_table width = topk buffer width, which kpool widens past
+        # index_topk (topk_tokens) and rounds up to a multiple of 128. The
+        # kernel treats sparse_mla_top_k as the page-table *capacity* and bounds
+        # the active per-query length by ``seq_lens`` (the compacted valid
+        # count), so the -1 padding slots past seq_lens are never attended to.
+        # Use the actual buffer width instead of the fixed topk_tokens, which
+        # mismatches the page_table when index_kpool > 1.
+        sparse_topk_capacity = topk_indices_physical.shape[1]
+
         kernel_out = trtllm_batch_decode_with_kv_cache_mla(
             query=query,
             kv_cache=kv_c_and_k_pe_cache.unsqueeze(1),
@@ -446,10 +455,10 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
             qk_rope_head_dim=self.qk_rope_head_dim,
             block_tables=block_tables,
             seq_lens=seq_lens_arg,
-            max_seq_len=attn_metadata.topk_tokens,
+            max_seq_len=sparse_topk_capacity,
             bmm1_scale=self.bmm1_scale,
             bmm2_scale=self.bmm2_scale,
-            sparse_mla_top_k=attn_metadata.topk_tokens,
+            sparse_mla_top_k=sparse_topk_capacity,
             return_lse=self.need_to_return_lse_for_decode,
         )
         if self.need_to_return_lse_for_decode:
