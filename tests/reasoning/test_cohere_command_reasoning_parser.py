@@ -24,11 +24,13 @@ from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.reasoning.cohere_command_reasoning_parser import (
     CohereCommand3ReasoningParser,
     CohereCommand4ReasoningParser,
+    CohereNormalizedTool,
     _has_effective_tools,
     _melody_citations_to_vllm,
     _melody_sources_to_vllm,
     _response_format_type,
     _schema_dict_from_structured_outputs,
+    collect_tool_schema,
     convert_schema_to_structural_tags,
 )
 from vllm.sampling_params import StructuredOutputsParams
@@ -299,6 +301,52 @@ GET_WEATHER_TOOL = {
             "properties": {"city": {"type": "string"}},
         },
     },
+}
+# Shape agentic frameworks (e.g. pydantic-ai) emit for a nested model
+# argument (get_weather(location: Location)).
+NESTED_DEFS_PARAMETERS = {
+    "$defs": {
+        "Location": {
+            "type": "object",
+            "properties": {
+                "city": {"type": "string"},
+                "country": {"type": "string"},
+            },
+            "required": ["city"],
+        }
+    },
+    "type": "object",
+    "properties": {"location": {"$ref": "#/$defs/Location"}},
+    "required": ["location"],
+}
+NESTED_DEFS_TOOL = {
+    "type": "function",
+    "function": {"name": "get_weather", "parameters": NESTED_DEFS_PARAMETERS},
+}
+# Recursion can never be inlined away, so it must survive as a root-level $def.
+RECURSIVE_DEFS_PARAMETERS = {
+    "$defs": {
+        "Finding": {
+            "type": "object",
+            "properties": {
+                "note": {"type": "string"},
+                "related": {"type": "array", "items": {"$ref": "#/$defs/Finding"}},
+            },
+        }
+    },
+    "type": "object",
+    "properties": {"finding": {"$ref": "#/$defs/Finding"}},
+}
+# Same nested-model schema in draft-07 style ("definitions" instead of "$defs").
+DRAFT07_DEFINITIONS_PARAMETERS = {
+    "definitions": {
+        "Location": {
+            "type": "object",
+            "properties": {"city": {"type": "string"}},
+        }
+    },
+    "type": "object",
+    "properties": {"location": {"$ref": "#/definitions/Location"}},
 }
 VALID_STRUCTURAL_TAG = {
     "type": "structural_tag",
@@ -690,3 +738,34 @@ class TestMelodySourceResolution:
         assert out is not None
         assert out[0].type == "THINKING_CONTENT"
         assert out[0].sources[0].id == "d0"
+
+
+class TestCollectToolSchemaDefs:
+    def test_nested_defs_tool_adjust_request(self, parser) -> None:
+        o = parser.adjust_request(
+            _make_chat_request(tools=[NESTED_DEFS_TOOL], tool_choice="auto"),
+        )
+        assert "grammar" in _content_types(o.structured_outputs.structural_tag)
+
+    def test_recursive_defs(self) -> None:
+        grammar = collect_tool_schema(
+            [CohereNormalizedTool(name="report", parameters=RECURSIVE_DEFS_PARAMETERS)]
+        )
+        assert "root ::=" in grammar
+
+    def test_draft07_definitions(self) -> None:
+        grammar = collect_tool_schema(
+            [
+                CohereNormalizedTool(
+                    name="get_weather", parameters=DRAFT07_DEFINITIONS_PARAMETERS
+                )
+            ]
+        )
+        assert "root ::=" in grammar
+
+    def test_input_parameters_not_mutated(self) -> None:
+        params = json.loads(json.dumps(NESTED_DEFS_PARAMETERS))
+        collect_tool_schema(
+            [CohereNormalizedTool(name="get_weather", parameters=params)]
+        )
+        assert params == NESTED_DEFS_PARAMETERS
