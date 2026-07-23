@@ -78,26 +78,33 @@ def kernel_warmup(worker: "Worker"):
     # every cache entry.  No-op when Eagle is not configured.
     spec_config = worker.vllm_config.speculative_config
     num_spec_tokens = getattr(spec_config, "num_speculative_tokens", None)
-    drafter = getattr(worker.model_runner, "drafter", None)
-    eagle_block_size = getattr(drafter, "block_size", None)
-    if eagle_block_size is None or eagle_block_size <= 0:
-        eagle_block_size = worker.vllm_config.cache_config.block_size
-    try:
-        eagle_eagle_kernel_warmup(
-            device=getattr(worker.model_runner, "device", torch.device("cuda")),
-            num_speculative_tokens=num_spec_tokens,
-            vllm_config=worker.vllm_config,
-            block_size=eagle_block_size,
-            max_model_len=worker.vllm_config.model_config.max_model_len,
-        )
-    except Exception:
-        logger.warning("Skipping Eagle spec-decode warmup.", exc_info=True)
+    # DFlash/DSpark use _prepare_dflash_inputs_kernel, not Eagle kernels.
+    # Skip eagle warmup to avoid wasting time compiling unused cubins.
+    is_eagle_method = (
+        spec_config is not None
+        and not spec_config.use_dflash()
+        and not spec_config.use_dspark()
+    )
+    if is_eagle_method:
+        drafter = getattr(worker.model_runner, "drafter", None)
+        eagle_block_size = getattr(drafter, "block_size", None)
+        if eagle_block_size is None or eagle_block_size <= 0:
+            eagle_block_size = worker.vllm_config.cache_config.block_size
+        try:
+            eagle_eagle_kernel_warmup(
+                device=getattr(worker.model_runner, "device", torch.device("cuda")),
+                num_speculative_tokens=num_spec_tokens,
+                vllm_config=worker.vllm_config,
+                block_size=eagle_block_size,
+                max_model_len=worker.vllm_config.model_config.max_model_len,
+            )
+        except Exception:
+            logger.warning("Skipping Eagle spec-decode warmup.", exc_info=True)
 
     # DFlash/DSpark spec-decode Triton kernels.  ``_prepare_dflash_inputs_kernel``
     # specializes on ``BLOCK_SIZE`` / ``SAMPLE_FROM_ANCHOR`` constexprs and the
     # single-request grid, so enumerate them to pre-compile every cubin.  No-op
     # when DFlash/DSpark is not configured.
-    spec_config = worker.vllm_config.speculative_config
     if spec_config is not None and (
         spec_config.use_dflash() or spec_config.use_dspark()
     ):
