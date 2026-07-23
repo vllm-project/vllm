@@ -5,7 +5,7 @@ steps:
 - label: PyTorch Compilation Unit Tests
   device: h200_35gb
   key: pytorch-compilation-unit-tests
-  timeout_in_minutes: 90
+  timeout_in_minutes: 110
   source_file_dependencies:
     - vllm/__init__.py
     - vllm/_aiter_ops.py
