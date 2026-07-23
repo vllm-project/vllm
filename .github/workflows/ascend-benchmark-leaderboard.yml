@@ -2,7 +2,7 @@ name: Ascend Benchmark Leaderboard
 
 on:
   pull_request:
-    types: [labeled]
+    types: [labeled, synchronize, reopened]
   issue_comment:
     types: [created]
   schedule:
@@ -247,7 +247,10 @@ jobs:
         (
           github.event_name == 'pull_request' &&
           github.event.pull_request.head.repo.full_name == github.repository &&
-          (github.event.label.name == 'ready' || github.event.label.name == 'verified')
+          (
+            contains(github.event.pull_request.labels.*.name, 'ready') ||
+            contains(github.event.pull_request.labels.*.name, 'verified')
+          )
         ) ||
         (github.event_name == 'issue_comment' && needs.issue-comment-command.outputs.should_run == '1')
       )
@@ -378,8 +381,8 @@ jobs:
                 | sort -t i -k2 -n | paste -sd ',' || true)"
             fi
             if [[ -n "$detected_devices" ]]; then
-              echo "Auto-detected NPU devices: $detected_devices"
-              echo "ASCEND_VISIBLE_DEVICES=$detected_devices" >> "$GITHUB_ENV"
+              echo "Auto-detected candidate NPU devices: $detected_devices"
+              echo "ASCEND_CI_DETECTED_DEVICES=$detected_devices" >> "$GITHUB_ENV"
             else
               echo "[WARN] No NPU devices detected." >&2
             fi

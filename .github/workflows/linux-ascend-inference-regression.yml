@@ -1,6 +1,8 @@
 name: Linux Ascend Inference Regression
 
 on:
+  pull_request:
+    types: [labeled, synchronize, reopened]
   workflow_dispatch:
 
 concurrency:
