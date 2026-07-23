@@ -954,7 +954,7 @@ def get_mixture_of_experts_model(model: object) -> MixtureOfExperts | None:
             return (
                 mm_language_model if is_mixture_of_experts(mm_language_model) else None
             )
-        except (NotImplementedError, AttributeError):
+        except NotImplementedError:
             logger.info_once("Cannot fetch language_model from MultiModal model")
             return None
 
