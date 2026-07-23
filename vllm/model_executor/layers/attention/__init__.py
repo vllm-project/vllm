@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import torch
+
 from vllm.model_executor.layers.attention.attention import Attention
 from vllm.model_executor.layers.attention.chunked_local_attention import (
     ChunkedLocalAttention,
@@ -18,8 +20,15 @@ from vllm.model_executor.layers.attention.rswa_attention import RSWAAttention
 from vllm.model_executor.layers.attention.static_sink_attention import (
     StaticSinkAttention,
 )
+from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 
-POST_LOAD_ATTENTION_TYPES = (Attention, MLAAttention, MMEncoderAttention)
+
+def is_deferred_attention_layer(layer: torch.nn.Module) -> bool:
+    """Whether an attention-like layer requires deferred post-load processing."""
+    return isinstance(layer, (AttentionLayerBase, MMEncoderAttention)) and callable(
+        getattr(layer, "process_weights_after_loading", None)
+    )
+
 
 __all__ = [
     "Attention",
@@ -28,8 +37,8 @@ __all__ = [
     "EncoderOnlyAttention",
     "MLAAttention",
     "MMEncoderAttention",
-    "POST_LOAD_ATTENTION_TYPES",
     "PrefillPrefixLMAttention",
     "RSWAAttention",
     "StaticSinkAttention",
+    "is_deferred_attention_layer",
 ]

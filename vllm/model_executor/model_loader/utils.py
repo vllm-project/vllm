@@ -15,7 +15,7 @@ from typing_extensions import assert_never
 import vllm.envs as envs
 from vllm.config import ModelConfig, VllmConfig, set_current_vllm_config
 from vllm.logger import init_logger
-from vllm.model_executor.layers.attention import POST_LOAD_ATTENTION_TYPES
+from vllm.model_executor.layers.attention import is_deferred_attention_layer
 from vllm.model_executor.layers.hpc import HpcModule
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
@@ -121,9 +121,7 @@ def process_weights_after_loading(
     # Initialize post-load attention weights for Attention, MLA, and MM encoder.
     # NOTE: Happens after other modules so we can easily decompress weights.
     for _, module in model.named_modules():
-        if isinstance(module, POST_LOAD_ATTENTION_TYPES) and hasattr(
-            module, "process_weights_after_loading"
-        ):
+        if is_deferred_attention_layer(module):
             # TODO(lucas): see if there is a way to unify the signatures
             # of process_weights_after_loading
             with device_loading_context(module, target_device):
