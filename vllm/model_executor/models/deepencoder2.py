@@ -158,36 +158,39 @@ class CustomQwen2Decoder(PluggableLayer):
                 batch_size,
                 token_type_ids,
             ):
-                min_dtype = torch.finfo(dtype).min
+                # The mask depends only on sequence_length: token_type_ids is
+                # the fixed pattern [0]*n_query + [1]*n_query, identical across
+                # the batch. Cache one batch-invariant [1, 1, S, S] mask per S
+                # and broadcast it, keeping the cache to a couple of tiny
+                # entries regardless of batch size.
+                key = (sequence_length, dtype, str(device))
+                cache = getattr(self, "_mask_cache", None)
+                if cache is None:
+                    cache = self._mask_cache = {}
 
-                masks = []
-                for b in range(batch_size):
-                    mask = torch.full(
-                        (sequence_length, sequence_length),
-                        fill_value=min_dtype,
-                        dtype=dtype,
-                        device=device,
+                base = cache.get(key)
+                if base is None:
+                    min_dtype = torch.finfo(dtype).min
+                    type_ids = token_type_ids[0].to(device)
+                    img = type_ids == 0
+                    txt = ~img
+                    causal = torch.tril(
+                        torch.ones(
+                            sequence_length,
+                            sequence_length,
+                            dtype=torch.bool,
+                            device=device,
+                        )
                     )
+                    allow = img[None, :] | (txt[:, None] & txt[None, :] & causal)
+                    base = torch.where(
+                        allow,
+                        torch.zeros((), dtype=dtype, device=device),
+                        torch.full((), min_dtype, dtype=dtype, device=device),
+                    )[None, None]
+                    cache[key] = base
 
-                    type_ids = token_type_ids[b]
-
-                    image_positions = (type_ids == 0).nonzero(as_tuple=True)[0]
-                    text_positions = (type_ids == 1).nonzero(as_tuple=True)[0]
-
-                    # non-casual
-                    if len(image_positions) > 0:
-                        mask[image_positions[:, None], image_positions] = 0.0
-
-                    # causal
-                    for i, text_pos in enumerate(text_positions):
-                        if len(image_positions) > 0:
-                            mask[text_pos, image_positions] = 0.0
-                        mask[text_pos, text_positions[: i + 1]] = 0.0
-
-                    masks.append(mask)
-
-                mask = torch.stack(masks, dim=0).unsqueeze(1)
-                return mask
+                return base.expand(batch_size, -1, -1, -1)
 
         return CustomQwen2ModelInner(config)
 
@@ -287,3 +290,4 @@ def build_qwen2_decoder_as_encoder(
     )
 
     return decoder_as_encoder
+
