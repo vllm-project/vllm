@@ -212,6 +212,14 @@ def nccl_symm_mem_reduce_scatter_worker(local_rank: int, world_size: int):
         )
         assert is_symmetric_memory_tensor(ordinary_output)
 
+        ordinary_v_output = cuda_communicator.reduce_scatterv(
+            ordinary_input, dim=0, sizes=None
+        )
+        torch.testing.assert_close(
+            ordinary_v_output, ordinary_expected, atol=2.5, rtol=0.1
+        )
+        assert is_symmetric_memory_tensor(ordinary_v_output)
+
         pynccl_comm = cuda_communicator.pynccl_comm
         assert pynccl_comm is not None
         if pynccl_comm.nccl_version < NCCL_DIRECT_SYMM_RS_OUTPUT_MIN_VERSION:

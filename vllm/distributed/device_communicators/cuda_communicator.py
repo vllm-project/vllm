@@ -465,7 +465,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
         use_symm_mem = (
             uniform_sizes
             and direct_output_supported
-            and is_symmetric_memory_tensor(input_tensor)
+            and (sizes is None or is_symmetric_memory_tensor(input_tensor))
             and should_nccl_symm_mem_ag_rs()
         )
         if use_symm_mem:
@@ -526,9 +526,10 @@ class CudaCommunicator(DeviceCommunicatorBase):
     ) -> torch.Tensor:
         """ReduceScatter using NCCL symmetric memory (NVLS).
 
-        The MoE reduce_scatterv path calls this only with an already-registered
-        input, so that path never stages. Plain reduce_scatter retains its
-        existing opt-in behavior and stages ordinary input into registered
+        The MoE reduce_scatterv path passes explicit uniform sizes and calls
+        this only with an already-registered input, so that path never stages.
+        Plain reduce_scatter and reduce_scatterv without explicit sizes retain
+        their existing opt-in behavior and stage ordinary input into registered
         scratch. The output may be ordinary memory.
         """
         pynccl_comm = self.pynccl_comm
