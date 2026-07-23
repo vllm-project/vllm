@@ -170,12 +170,7 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
     ) -> T:
         req_id_per_token = self._build_req_id_per_token(common_attn_metadata)
 
-        (
-            num_decodes,
-            num_prefills,
-            num_decode_tokens,
-            num_prefill_tokens,
-        ) = split_decodes_and_prefills(
+        num_decodes, num_prefills, num_decode_tokens, _ = split_decodes_and_prefills(
             common_attn_metadata,
             decode_threshold=self.reorder_batch_threshold or 1,
             treat_short_extends_as_decodes=not self.use_pcp,
@@ -209,8 +204,7 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
                 output_dtype=self.model_config.dtype,
                 prefill_backend=self._prefill_backend,
                 use_dense_mha=(
-                    num_prefill_tokens > 0
-                    and prefill_max_seq_len <= self.topk_tokens
+                    prefill_max_seq_len <= self.topk_tokens
                     and not self.vllm_config.attention_config.sparse_mla_force_mqa
                 ),
             )
