@@ -13,11 +13,15 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.scheduler impor
 )
 
 
-def _make_bare_scheduler() -> MooncakeStoreScheduler:
+def _make_bare_scheduler(
+    *, hash_block_size: int = 16, enable_partial_hash_hits: bool = False
+) -> MooncakeStoreScheduler:
     scheduler = object.__new__(MooncakeStoreScheduler)
     scheduler.kv_role = "kv_both"
     scheduler.lookup_async = False
     scheduler._block_size = 16
+    scheduler._hash_block_size = hash_block_size
+    scheduler.enable_partial_hash_hits = enable_partial_hash_hits
     scheduler.load_specs = {}
     scheduler._unfinished_request_ids = {"req-0"}
     scheduler._unfinished_requests = {}
@@ -136,6 +140,7 @@ def test_preemption_resets_tracker_before_request_finished():
         block_hashes=[b"h0", b"h1"],
         prefill_end_tokens=48,
     )
+    scheduler._request_trackers["req-0"].has_pending_offload = True
 
     scheduler.build_connector_meta(_make_preemption_scheduler_output())
 
@@ -144,6 +149,7 @@ def test_preemption_resets_tracker_before_request_finished():
     assert tracker.allocated_block_ids == ()
     assert tracker.num_saved_tokens == 0
     assert tracker.token_ids is None
+    assert tracker.has_pending_offload is False
     assert tracker.prefill_end_tokens == 0
     request = SimpleNamespace(request_id="req-0")
     assert scheduler.request_finished(request, ([0, 1],)) == (False, None)
@@ -537,3 +543,227 @@ def test_full_external_hit_with_full_local_hit_skips_load():
     assert need_to_allocate == 0
     assert load_async is False
     assert "req-0" not in scheduler.load_specs
+
+
+def test_partial_hash_hit_block_aligned_local_loads_partial_tail():
+    # Fine-grained on (hash=4, block=16): a block-aligned local hit can pull a
+    # sub-block remote hit (24 = a hash boundary inside block 1). Loads [16, 24).
+    scheduler = _make_bare_scheduler(hash_block_size=4, enable_partial_hash_hits=True)
+    scheduler.load_async = True
+    scheduler.client = _StubLookupClient(hit_tokens=24)
+
+    request = SimpleNamespace(
+        request_id="req-0",
+        num_tokens=32,
+        block_hashes=[b"h0", b"h1", b"h2", b"h3", b"h4", b"h5", b"h6", b"h7"],
+    )
+
+    need_to_allocate, load_async = scheduler.get_num_new_matched_tokens(
+        request, num_computed_tokens=16
+    )
+
+    assert need_to_allocate == 8
+    assert load_async is True
+    load_spec = scheduler.load_specs["req-0"]
+    assert load_spec.vllm_cached_tokens == 16
+    assert load_spec.kvpool_cached_tokens == 24
+
+
+def test_partial_hash_hit_no_remote_gain_skips_load():
+    # Core always presents a block-aligned local hit (it floors a sub-block
+    # tail before calling the connector). When the remote hit does not exceed
+    # that block-aligned local hit, nothing is loaded.
+    scheduler = _make_bare_scheduler(hash_block_size=4, enable_partial_hash_hits=True)
+    scheduler.load_async = True
+    scheduler.client = _StubLookupClient(hit_tokens=16)
+
+    request = SimpleNamespace(
+        request_id="req-0",
+        num_tokens=32,
+        block_hashes=[b"h0", b"h1", b"h2", b"h3", b"h4", b"h5", b"h6", b"h7"],
+    )
+
+    need_to_allocate, load_async = scheduler.get_num_new_matched_tokens(
+        request, num_computed_tokens=16
+    )
+
+    assert need_to_allocate == 0
+    assert load_async is False
+    assert "req-0" not in scheduler.load_specs
+
+
+def test_sub_block_prompt_looks_up_with_fine_grained():
+    # A prompt smaller than one block (12 < block 16). With fine-grained partial
+    # hits the sub-block prefix is worth looking up (floor is the hash unit 4,
+    # not a full block), so a remote partial hit is loaded. Pre-change the
+    # block-size floor returned (0, False) for such prompts.
+    scheduler = _make_bare_scheduler(hash_block_size=4, enable_partial_hash_hits=True)
+    scheduler.load_async = True
+    scheduler.client = _StubLookupClient(hit_tokens=8)
+
+    request = SimpleNamespace(
+        request_id="req-0",
+        num_tokens=12,
+        block_hashes=[b"h0", b"h1", b"h2"],
+    )
+
+    need_to_allocate, load_async = scheduler.get_num_new_matched_tokens(
+        request, num_computed_tokens=0
+    )
+
+    assert need_to_allocate == 8
+    assert load_async is True
+    assert scheduler.load_specs["req-0"].kvpool_cached_tokens == 8
+
+
+def test_sub_block_prompt_not_looked_up_without_fine_grained():
+    # Without fine-grained partial hits, sub-block prompts still skip the lookup
+    # (there is no full block, and no sub-block key granularity).
+    scheduler = _make_bare_scheduler()
+    scheduler.client = _StubLookupClient(hit_tokens=8)
+
+    request = SimpleNamespace(
+        request_id="req-0",
+        num_tokens=12,
+        block_hashes=[b"h0", b"h1", b"h2"],
+    )
+
+    need_to_allocate, load_async = scheduler.get_num_new_matched_tokens(
+        request, num_computed_tokens=0
+    )
+
+    assert need_to_allocate == 0
+    assert load_async is False
+    assert "req-0" not in scheduler.load_specs
+
+
+def test_pending_partial_tail_emits_offload_only_reqmeta():
+    # A sub-block prompt never produces a block-aligned save, so the partial-
+    # tail offload arriving this step is emitted as an offload-only ReqMeta
+    # (can_save=True so it takes the normal enqueue path, token_len_chunk=0 so
+    # the worker skips the normal save). Pending-offload state delays the free
+    # without advancing the normal-save watermark before the put succeeds.
+    scheduler = _make_bare_scheduler(hash_block_size=4, enable_partial_hash_hits=True)
+    request = SimpleNamespace(
+        all_token_ids=list(range(12)),
+        block_hashes=[b"h0", b"h1", b"h2"],
+        num_output_placeholders=0,
+        num_prompt_tokens=12,
+    )
+    scheduler._unfinished_requests["req-0"] = (request, ([0],))
+    scheduler._request_trackers["req-0"] = RequestTracker(
+        req_id="req-0",
+        token_len=12,
+        allocated_block_ids=([0],),
+        num_saved_tokens=0,
+        token_ids=list(range(12)),
+        prefill_end_tokens=12,
+    )
+
+    out = SimpleNamespace(
+        finished_req_ids=set(),
+        preempted_req_ids=set(),
+        scheduled_new_reqs=[],
+        scheduled_cached_reqs=SimpleNamespace(
+            req_ids=[],
+            new_block_ids=[],
+            num_computed_tokens=[],
+            resumed_req_ids=set(),
+        ),
+        num_scheduled_tokens={},
+        scheduled_spec_decode_tokens={},
+        partial_tail_offloads={"req-0": [(1, 7, 12)]},
+    )
+
+    meta = scheduler.build_connector_meta(out)
+
+    assert len(meta.requests) == 1
+    req_meta = meta.requests[0]
+    assert req_meta.req_id == "req-0"
+    assert req_meta.can_save is True
+    assert req_meta.token_len_chunk == 0
+    assert req_meta.partial_tail_offloads == [(1, 7, 12)]
+    assert req_meta.num_prompt_tokens == 12
+    assert req_meta.block_ids == ([0],)
+    tracker = scheduler._request_trackers["req-0"]
+    assert tracker.num_saved_tokens == 0
+    assert tracker.has_pending_offload is True
+    request = SimpleNamespace(request_id="req-0")
+    assert scheduler.request_finished(request, ([0],)) == (True, None)
+
+
+def test_resumed_partial_tail_uses_handoff_boundary():
+    scheduler = _make_bare_scheduler(hash_block_size=4, enable_partial_hash_hits=True)
+    request = SimpleNamespace(
+        all_token_ids=list(range(20)),
+        block_hashes=[b"h0", b"h1", b"h2", b"h3", b"h4"],
+        num_output_placeholders=0,
+        num_prompt_tokens=12,
+    )
+    scheduler._unfinished_requests["req-0"] = (request, ([0, 1],))
+    scheduler._request_trackers["req-0"] = RequestTracker(
+        req_id="req-0",
+        token_len=20,
+        allocated_block_ids=([0, 1],),
+        num_saved_tokens=0,
+        token_ids=list(range(20)),
+        # Resumption replays prompt + previously generated tokens.
+        prefill_end_tokens=20,
+    )
+
+    out = SimpleNamespace(
+        finished_req_ids=set(),
+        preempted_req_ids=set(),
+        scheduled_new_reqs=[],
+        scheduled_cached_reqs=SimpleNamespace(
+            req_ids=[],
+            new_block_ids=[],
+            num_computed_tokens=[],
+            resumed_req_ids=set(),
+        ),
+        num_scheduled_tokens={},
+        scheduled_spec_decode_tokens={},
+        partial_tail_offloads={"req-0": [(1, 7, 12)]},
+    )
+
+    meta = scheduler.build_connector_meta(out)
+
+    assert len(meta.requests) == 1
+    assert meta.requests[0].partial_tail_offloads == [(1, 7, 12)]
+    # Ordinary metadata retains the full resumed prefill range.
+    assert meta.requests[0].num_prompt_tokens == 20
+    tracker = scheduler._request_trackers["req-0"]
+    assert tracker.num_saved_tokens == 0
+    assert tracker.has_pending_offload is True
+
+
+def test_resumed_partial_tail_attached_to_save_keeps_handoff_boundary():
+    scheduler = _make_bare_scheduler(hash_block_size=4, enable_partial_hash_hits=True)
+    request = SimpleNamespace(
+        all_token_ids=list(range(48)),
+        block_hashes=[b"h0", b"h1", b"h2"],
+        num_output_placeholders=0,
+        num_prompt_tokens=36,
+    )
+    scheduler._unfinished_requests["req-0"] = (request, ([0, 1],))
+    scheduler._request_trackers["req-0"] = RequestTracker(
+        req_id="req-0",
+        token_len=44,
+        allocated_block_ids=([0, 1],),
+        num_saved_tokens=32,
+        token_ids=list(range(44)),
+        prefill_end_tokens=48,
+    )
+    out = _make_scheduler_output(scheduled_spec_tokens=None)
+    out.partial_tail_offloads = {"req-0": [(0, 7, 36)]}
+
+    meta = scheduler.build_connector_meta(out)
+
+    assert len(meta.requests) == 1
+    assert meta.requests[0].can_save is True
+    assert meta.requests[0].partial_tail_offloads == [(0, 7, 36)]
+    assert meta.requests[0].num_prompt_tokens == 48
+    # Ordinary saving still covers the full resumed prefill range.
+    tracker = scheduler._request_trackers["req-0"]
+    assert tracker.num_saved_tokens == 48
+    assert tracker.has_pending_offload is True

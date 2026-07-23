@@ -32,6 +32,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheTensor,
+    MambaSpec,
     SlidingWindowSpec,
 )
 
@@ -342,3 +343,232 @@ def test_chunked_token_database_hash_block_size_smaller_than_block_size():
     # prior three.
     assert out[0][2].hex() == fine_hashes[3].hex()
     assert out[1][2].hex() == fine_hashes[7].hex()
+
+
+def test_sub_block_partial_tail_offload_reads_cow_block():
+    """Sub-block prompt (the 900/128/1536 shape, scaled to 12/4/16): the
+    partial tail is offloaded for both groups under the boundary sub-hash. The
+    full-attention block is read from the request block table; the mamba block
+    is the core-provided CoW target, not block_ids."""
+    full = FullAttentionSpec(block_size=16, num_kv_heads=8, head_size=64, dtype=None)
+    mamba = MambaSpec(
+        block_size=16,
+        shapes=((1, 1),),
+        dtypes=(torch.float32,),
+        mamba_cache_mode="align",
+    )
+    groups = [
+        KVCacheGroupSpec(["L0"], full),
+        KVCacheGroupSpec(["L1"], mamba),
+    ]
+    coord = MooncakeStoreCoordinator(groups, scheduler_block_size=16, hash_block_size=4)
+    assert coord.enable_partial_hash_hits
+
+    class _RecordingStore(_DictStore):
+        def __init__(self):
+            super().__init__()
+            self.puts: dict[str, list[int]] = {}
+
+        def batch_put_from_multi_buffers(self, keys, addrs, sizes, *a, **k):
+            for key, addr in zip(keys, addrs):
+                self.puts[key] = addr
+            return super().batch_put_from_multi_buffers(keys, addrs, sizes, *a, **k)
+
+    store = _RecordingStore()
+    token_dbs = []
+    for g_idx in range(2):
+        db = ChunkedTokenDatabase(
+            KeyMetadata("m", 0, 0, 0, 0, group_id=g_idx),
+            block_size=16,
+            hash_block_size=4,
+        )
+        db.set_kv_caches_base_addr([g_idx * 10_000])
+        db.set_block_len([512])
+        token_dbs.append(db)
+
+    send = KVCacheStoreSendingThread(
+        store=store,
+        coord=coord,
+        token_databases=token_dbs,
+        block_size=16,
+        tp_rank=0,
+        put_step=1,
+        kv_role="kv_both",
+        ready_event=threading.Event(),
+        replicate_config=MagicMock(),
+    )
+
+    # The surrounding metadata may describe a longer resumed replay, but the
+    # handoff identifies the exact state boundary to persist.
+    hs = [BlockHash(bytes([i + 1]) * 4) for i in range(5)]
+    mamba_cow_block = 7
+    req = ReqMeta(
+        req_id="r0",
+        token_len_chunk=0,
+        block_ids=([1], [2]),
+        block_hashes=hs,
+        can_save=True,
+        num_prompt_tokens=20,
+        partial_tail_offloads=[(1, mamba_cow_block, 12)],
+    )
+
+    send._maybe_offload_partial_tail(req)
+
+    # boundary = 12 // 4 * 4 = 12 -> keyed by hs[12 // 4 - 1] = hs[2].
+    partial_hash = hs[2]
+    fa_key = token_dbs[0].key_for(partial_hash)
+    mamba_key = token_dbs[1].key_for(partial_hash)
+    assert set(store.puts) == {fa_key, mamba_key}
+    # FA reads block_ids[0][0] = block 1: addr = base(0) + 1 * 512.
+    assert store.puts[fa_key] == [512]
+    # Mamba reads the CoW block 7, not block_ids[1][0]=2.
+    assert store.puts[mamba_key] == [10_000 + mamba_cow_block * 512]
+
+
+def test_offload_syncs_event_before_put():
+    """An offload-carrying meta synchronizes its CoW-fence event before the
+    store put reads the blocks, then completes in one pass and drains the
+    completion counter."""
+    full = FullAttentionSpec(block_size=16, num_kv_heads=8, head_size=64, dtype=None)
+    mamba = MambaSpec(
+        block_size=16,
+        shapes=((1, 1),),
+        dtypes=(torch.float32,),
+        mamba_cache_mode="align",
+    )
+    groups = [
+        KVCacheGroupSpec(["L0"], full),
+        KVCacheGroupSpec(["L1"], mamba),
+    ]
+    coord = MooncakeStoreCoordinator(groups, scheduler_block_size=16, hash_block_size=4)
+    event = MagicMock()
+
+    class _FencedStore(_DictStore):
+        def batch_put_from_multi_buffers(self, keys, addrs, sizes, *a, **k):
+            assert event.synchronize.called, "put must run after the event sync"
+            return super().batch_put_from_multi_buffers(keys, addrs, sizes, *a, **k)
+
+    store = _FencedStore()
+    token_dbs = []
+    for g_idx in range(2):
+        db = ChunkedTokenDatabase(
+            KeyMetadata("m", 0, 0, 0, 0, group_id=g_idx),
+            block_size=16,
+            hash_block_size=4,
+        )
+        db.set_kv_caches_base_addr([g_idx * 10_000])
+        db.set_block_len([512])
+        token_dbs.append(db)
+
+    send = KVCacheStoreSendingThread(
+        store=store,
+        coord=coord,
+        token_databases=token_dbs,
+        block_size=16,
+        tp_rank=0,
+        put_step=1,
+        kv_role="kv_both",
+        ready_event=threading.Event(),
+        replicate_config=MagicMock(),
+    )
+
+    hs = [BlockHash(bytes([i + 1]) * 4) for i in range(3)]
+    req = ReqMeta(
+        req_id="r1",
+        token_len_chunk=0,
+        block_ids=([1], [2]),
+        block_hashes=hs,
+        can_save=True,
+        num_prompt_tokens=12,
+        partial_tail_offloads=[(1, 7, 12)],
+    )
+    req.current_event = event
+    send.add_stored_request("r1")
+
+    send.request_queue.put(req)
+    send._handle_request(send.request_queue.get())
+    assert send.request_queue.qsize() == 0
+    assert store._data
+    assert send.stored_requests["r1"] == 0
+    event.synchronize.assert_called_once()
+
+
+def test_sub_block_partial_tail_offload_covers_smaller_group_blocks():
+    """The K3-shaped 900/128/1536 scenario scaled to 12/4/16, with a
+    full-attention group whose block (4) is smaller than the lcm (16): the
+    offload must persist every FA block up to the boundary — the normal save
+    floors to the lcm, so those blocks are otherwise never written and the
+    consumer's per-group lookup would miss. The mamba boundary block still
+    reads the core-provided CoW target."""
+    full = FullAttentionSpec(block_size=4, num_kv_heads=8, head_size=64, dtype=None)
+    mamba = MambaSpec(
+        block_size=16,
+        shapes=((1, 1),),
+        dtypes=(torch.float32,),
+        mamba_cache_mode="align",
+    )
+    groups = [
+        KVCacheGroupSpec(["L0"], full),
+        KVCacheGroupSpec(["L1"], mamba),
+    ]
+    coord = MooncakeStoreCoordinator(groups, scheduler_block_size=16, hash_block_size=4)
+    assert coord.enable_partial_hash_hits
+
+    class _RecordingStore(_DictStore):
+        def __init__(self):
+            super().__init__()
+            self.puts: dict[str, list[int]] = {}
+
+        def batch_put_from_multi_buffers(self, keys, addrs, sizes, *a, **k):
+            for key, addr in zip(keys, addrs):
+                self.puts[key] = addr
+            return super().batch_put_from_multi_buffers(keys, addrs, sizes, *a, **k)
+
+    store = _RecordingStore()
+    token_dbs = []
+    for g_idx, block_size in enumerate([4, 16]):
+        db = ChunkedTokenDatabase(
+            KeyMetadata("m", 0, 0, 0, 0, group_id=g_idx),
+            block_size=block_size,
+            hash_block_size=4,
+        )
+        db.set_kv_caches_base_addr([g_idx * 10_000])
+        db.set_block_len([512])
+        token_dbs.append(db)
+
+    send = KVCacheStoreSendingThread(
+        store=store,
+        coord=coord,
+        token_databases=token_dbs,
+        block_size=16,
+        tp_rank=0,
+        put_step=1,
+        kv_role="kv_both",
+        ready_event=threading.Event(),
+        replicate_config=MagicMock(),
+    )
+
+    hs = [BlockHash(bytes([i + 1]) * 4) for i in range(3)]  # 3 hash units = 12 tok
+    mamba_cow_block = 7
+    req = ReqMeta(
+        req_id="r2",
+        token_len_chunk=0,
+        block_ids=([1, 2, 3], [4]),
+        block_hashes=hs,
+        can_save=True,
+        num_prompt_tokens=12,
+        partial_tail_offloads=[(1, mamba_cow_block, 12)],
+    )
+
+    send._maybe_offload_partial_tail(req)
+
+    # FA (block 4): full blocks ending at 4, 8 and 12, keyed by their normal
+    # block-end hashes; mamba (block 16): the partial boundary block under
+    # the boundary sub-hash, read from the CoW target.
+    expected = {
+        token_dbs[0].key_for(hs[0]): [1 * 512],
+        token_dbs[0].key_for(hs[1]): [2 * 512],
+        token_dbs[0].key_for(hs[2]): [3 * 512],
+        token_dbs[1].key_for(hs[2]): [10_000 + mamba_cow_block * 512],
+    }
+    assert store.puts == expected

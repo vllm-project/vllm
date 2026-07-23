@@ -115,6 +115,15 @@ class SingleTypeKVCacheManager(ABC):
         # managers (full attention, mamba "align"); harmlessly empty elsewhere.
         self._partial_hit_reqs: dict[str, tuple[int, KVCacheBlock]] = {}
         self._pending_cow_copies: list[tuple[KVCacheBlock, KVCacheBlock]] = []
+        # Partial-tail offload hand-off for external KV connectors: when a
+        # producer registers its last-prompt-boundary partial tail and the
+        # durable boundary block is not on the append-only request block table
+        # (mamba "align" CoW target), record the request, group, block, and
+        # exact token boundary so a connector can offload it under the right
+        # hash. Populated only by mamba "align".
+        self._pending_partial_tail_offloads: list[
+            tuple[str, int, KVCacheBlock, int]
+        ] = []
 
     @classmethod
     def _get_num_evictable_blocks(cls, blocks: Sequence[KVCacheBlock]):
@@ -377,6 +386,21 @@ class SingleTypeKVCacheManager(ABC):
         pending_copies = self._pending_cow_copies
         self._pending_cow_copies = []
         return pending_copies
+
+    def take_pending_partial_tail_offloads(
+        self,
+    ) -> list[tuple[str, int, KVCacheBlock, int]]:
+        """Drain producer partial-tail hand-offs.
+
+        Entries are ``(req_id, group_id, block, boundary_tokens)``.
+
+        Only mamba "align" populates this. The block lives off the request
+        block table, so the caller must pin it until the connector has read
+        it — nothing else keeps it alive once the CoW retention is released.
+        """
+        pending = self._pending_partial_tail_offloads
+        self._pending_partial_tail_offloads = []
+        return pending
 
     def _apply_cow(
         self,
@@ -693,7 +717,8 @@ class FullAttentionManager(SingleTypeKVCacheManager):
             alignment_tokens < block_size and block_size % alignment_tokens == 0
         )
         if fine_grained:
-            assert isinstance(block_hashes, list)
+            # list or lazy BlobBlockHashes view
+            assert isinstance(block_hashes, Sequence)
             full_block_hashes: BlockHashList = BlockHashListWithBlockSize(
                 block_hashes, alignment_tokens, block_size
             )
@@ -716,7 +741,8 @@ class FullAttentionManager(SingleTypeKVCacheManager):
         # Phase 2 (fine-grained only): extend into the first non-full block by
         # probing its interior hash boundaries high-to-low (longest hit first).
         if fine_grained:
-            assert isinstance(block_hashes, list)
+            # list or lazy BlobBlockHashes view
+            assert isinstance(block_hashes, Sequence)
             scale_factor = block_size // alignment_tokens
             first_partial_idx = len(computed_blocks[0]) * scale_factor
             max_partial_idx = min(
@@ -1244,6 +1270,11 @@ class MambaManager(SingleTypeKVCacheManager):
             self.last_state_block_idx: dict[str, int] = {}
             # The set of the requests that have been allocated blocks
             self._allocated_block_reqs: set[str] = set()
+            # Requests that registered their own last-prompt-boundary partial
+            # tail (producers). On the next step's CoW the boundary state moves
+            # into a private cow_block; we record that block for connector
+            # offload (see _pending_partial_tail_offloads).
+            self._producer_partial_tail_reqs: dict[str, int] = {}
 
     @classmethod
     def find_longest_cache_hit(
@@ -1277,7 +1308,8 @@ class MambaManager(SingleTypeKVCacheManager):
 
         block_size = kv_cache_spec.block_size
         if alignment_tokens < block_size and block_size % alignment_tokens == 0:
-            assert isinstance(block_hashes, list)
+            # list or lazy BlobBlockHashes view
+            assert isinstance(block_hashes, Sequence)
             hash_block_size = alignment_tokens
             scale_factor = block_size // hash_block_size
             max_num_partial_units = min(
@@ -1590,6 +1622,21 @@ class MambaManager(SingleTypeKVCacheManager):
                         self.block_pool.move_block_hashes(source_block, cow_block)
                         self._pending_cow_copies.append((source_block, cow_block))
                         source_block.ref_cnt += 1
+                        boundary_tokens = self._producer_partial_tail_reqs.pop(
+                            request_id, None
+                        )
+                        if boundary_tokens is not None:
+                            # This CoW preserved a producer's own boundary
+                            # state in cow_block; hand it to the connector for
+                            # partial-tail offload once the copy has run.
+                            self._pending_partial_tail_offloads.append(
+                                (
+                                    request_id,
+                                    self.kv_cache_group_id,
+                                    cow_block,
+                                    boundary_tokens,
+                                )
+                            )
                         if cow_block.block_hash is not None:
                             # The moved entry is only filled by this step's
                             # copy, so defer same-step hits on it.
@@ -1607,6 +1654,14 @@ class MambaManager(SingleTypeKVCacheManager):
         if self.mamba_cache_mode == "align":
             self._allocated_block_reqs.discard(request_id)
             self.last_state_block_idx.pop(request_id, None)
+            self._producer_partial_tail_reqs.pop(request_id, None)
+            # A hand-off whose request died in this same scheduling pass must
+            # not reach the connector: its unpin hook (free) has already run.
+            self._pending_partial_tail_offloads = [
+                entry
+                for entry in self._pending_partial_tail_offloads
+                if entry[0] != request_id
+            ]
         return super().pop_blocks_for_free(request_id)
 
     def get_num_skipped_tokens(self, num_computed_tokens: int) -> int:
@@ -1681,6 +1736,11 @@ class MambaManager(SingleTypeKVCacheManager):
         if partial_hash is not None:
             self._partial_hit_reqs[request.request_id] = (block_idx, source_block)
             self.num_cached_block[request.request_id] = block_idx
+            # Producer of this partial tail: the boundary state currently lives
+            # in ``source_block`` but the next step's forward overwrites it. The
+            # upcoming CoW copies it into a durable cow_block; record the req so
+            # allocate_new_blocks hands that block to the connector for offload.
+            self._producer_partial_tail_reqs[request.request_id] = num_tokens
         return partial_hash
 
 

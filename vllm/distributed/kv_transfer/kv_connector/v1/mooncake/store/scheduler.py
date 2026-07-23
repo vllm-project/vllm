@@ -11,6 +11,9 @@ from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorMetadata,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.coordinator import (  # noqa: E501
+    partial_hash_hits_enabled,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (  # noqa: E501
     LoadSpec,
     MooncakeStoreConnectorMetadata,
@@ -63,6 +66,9 @@ class MooncakeStoreScheduler:
         self._block_size, self._hash_block_size = resolve_kv_cache_block_sizes(
             kv_cache_config, vllm_config
         )
+        self.enable_partial_hash_hits = partial_hash_hits_enabled(
+            kv_cache_config.kv_cache_groups, self._hash_block_size
+        )
 
         # Per-request state
         self.load_specs: dict[str, LoadSpec] = {}  # to be loaded
@@ -80,9 +86,17 @@ class MooncakeStoreScheduler:
         Returns ``(None, False)`` when an async lookup is still in flight,
         signaling the scheduler to retry this request on a later step.
         """
-        # Look up against the full prefill range, not just the prompt.
-        token_len = request.num_tokens // self._block_size * self._block_size
-        if token_len < self._block_size:
+        # Fine-grained hits may land on a hash boundary inside a block; else
+        # hits stay block-aligned. The lookup range floors to that granularity.
+        align = (
+            self._hash_block_size if self.enable_partial_hash_hits else self._block_size
+        )
+        # Fine-grained partial hits make even a sub-block prefix worth looking
+        # up, so the floor is the align unit. The bound must cover the full
+        # prefill range: the lookup's eagle drop and retention masks anchor on
+        # the queried length; a shorter bound would discard an extra block.
+        token_len = request.num_tokens // align * align
+        if token_len < align:
             return 0, False
 
         num_external_hit_tokens = self.client.lookup(
@@ -348,6 +362,44 @@ class MooncakeStoreScheduler:
                 if req_meta is not None:
                     meta.add_request(req_meta)
 
+        # Flush partial-tail offloads in the step they arrive: the CoW copy is
+        # enqueued before the connector event records, so this step's event
+        # fences the cow block. Ride the request's save meta when present, else
+        # emit an offload-only ReqMeta (token_len_chunk=0 skips the normal
+        # save; can_save=True takes the normal enqueue path).
+        step_partial_tails = getattr(scheduler_output, "partial_tail_offloads", None)
+        if step_partial_tails and not force_skip_save:
+            pending = dict(step_partial_tails)
+            for req_meta in meta.requests:
+                if req_meta.can_save:
+                    groups = pending.pop(req_meta.req_id, None)
+                    if groups:
+                        req_meta.partial_tail_offloads = groups
+                        tracker = self._request_trackers.get(req_meta.req_id)
+                        if tracker is not None:
+                            tracker.has_pending_offload = True
+            for req_id, groups in pending.items():
+                tracker = self._request_trackers.get(req_id)
+                req_tuple = self._unfinished_requests.get(req_id)
+                if tracker is None or req_tuple is None:
+                    # Request finished/preempted within this step; its blocks
+                    # are going away, so the offload is conservatively dropped.
+                    logger.debug("Dropping partial-tail offload for request %s", req_id)
+                    continue
+                assert len({boundary for _, _, boundary in groups}) == 1
+                tracker.has_pending_offload = True
+                meta.add_request(
+                    ReqMeta(
+                        req_id=req_id,
+                        token_len_chunk=0,
+                        block_ids=tracker.allocated_block_ids,
+                        block_hashes=req_tuple[0].block_hashes,
+                        can_save=True,
+                        num_prompt_tokens=tracker.prefill_end_tokens,
+                        partial_tail_offloads=groups,
+                    )
+                )
+
         return meta
 
     def request_finished(
@@ -362,7 +414,9 @@ class MooncakeStoreScheduler:
         # Missing tracker can happen when the request is aborted before the
         # connector observes the normal finished lifecycle or is preempted
         # before finishing.
-        if tracker is None or tracker.num_saved_tokens <= 0:
+        if tracker is None or (
+            tracker.num_saved_tokens <= 0 and not tracker.has_pending_offload
+        ):
             return False, None
         total_blocks = sum(len(g) for g in block_ids)
         delay_free_blocks = total_blocks > 0

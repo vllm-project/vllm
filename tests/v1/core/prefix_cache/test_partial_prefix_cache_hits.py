@@ -223,6 +223,299 @@ def test_hybrid_mamba_partial_tail_owner_uses_cow_on_continue():
     assert moved[0].block_hash_num_tokens == 6
 
 
+def test_take_partial_tail_offloads_returns_cow_target():
+    """The connector offload hand-off exposes the mamba CoW *target* block Y
+    (the durable boundary state), not the overwritten source X, and only at
+    the CoW step."""
+    hash_block_size = 2
+    block_size = 2 * hash_block_size
+    kv_cache_config = KVCacheConfig(
+        num_blocks=24,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["full"],
+                FullAttentionSpec(
+                    block_size=hash_block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
+            ),
+            KVCacheGroupSpec(
+                ["mamba"],
+                MambaSpec(
+                    block_size=block_size,
+                    shapes=(1, 1),
+                    dtypes=(torch.float32,),
+                    mamba_cache_mode="align",
+                ),
+            ),
+        ],
+    )
+    manager = make_kv_cache_manager(
+        kv_cache_config=kv_cache_config,
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=hash_block_size,
+    )
+
+    req0 = make_request("0", [0, 0, 1, 1, 2, 2], hash_block_size, sha256)
+    computed_blocks, num_computed, _ = manager.get_computed_blocks(req0)
+    assert manager.allocate_slots(req0, 6, num_computed, computed_blocks) is not None
+
+    # Step A registered the partial tail but has not CoW'd yet: no offload.
+    assert manager.take_partial_tail_offloads() == {}
+
+    partial_mamba_hash = req0.block_hashes[6 // hash_block_size - 1]
+    source_block = manager.block_pool.get_cached_block(
+        partial_mamba_hash, kv_cache_group_ids=[1]
+    )
+    assert source_block is not None
+    source_block_id = source_block[0].block_id
+
+    # Step B: the producer continues, triggering the CoW X->Y.
+    req0.num_computed_tokens = 6
+    req0.append_output_token_ids([3])
+    assert manager.allocate_slots(req0, 1) is not None
+
+    offloads = manager.take_partial_tail_offloads()
+    assert list(offloads.keys()) == ["0"]
+    assert len(offloads["0"]) == 1
+    group_id, block_id, boundary_tokens = offloads["0"][0]
+    assert group_id == 1  # the mamba group
+    assert boundary_tokens == 6
+    copies, _ = manager.take_kv_cache_block_copies()
+    cow_copy = next(c for c in copies if c.src_block_id == source_block_id)
+    # The offload points at the durable CoW target Y, not the overwritten X.
+    assert block_id == cow_copy.dst_block_id
+    assert block_id != source_block_id
+    # Draining clears it.
+    assert manager.take_partial_tail_offloads() == {}
+
+    # The hand-off pinned Y (its CoW retention is released after this step,
+    # and Y is off the request block table); freeing the request unpins it.
+    cow_block = manager.block_pool.blocks[block_id]
+    pinned_ref = cow_block.ref_cnt
+    assert pinned_ref >= 1
+    manager.free(req0)
+    assert cow_block.ref_cnt == pinned_ref - 1
+
+
+def test_partial_tail_pin_survives_released_cow_retention():
+    """If the CoW retention is released before the hand-off is drained
+    (immediate-free mode), the drain must rescue the cow block from the free
+    queue: a raw ref increment would leave a ref>0 block allocatable, and the
+    next allocation would pop it and assert."""
+    hash_block_size = 2
+    block_size = 2 * hash_block_size
+    kv_cache_config = KVCacheConfig(
+        num_blocks=24,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["full"],
+                FullAttentionSpec(
+                    block_size=hash_block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
+            ),
+            KVCacheGroupSpec(
+                ["mamba"],
+                MambaSpec(
+                    block_size=block_size,
+                    shapes=(1, 1),
+                    dtypes=(torch.float32,),
+                    mamba_cache_mode="align",
+                ),
+            ),
+        ],
+    )
+    manager = make_kv_cache_manager(
+        kv_cache_config=kv_cache_config,
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=hash_block_size,
+    )
+    req0 = make_request("0", [0, 0, 1, 1, 2, 2], hash_block_size, sha256)
+    computed_blocks, num_computed, _ = manager.get_computed_blocks(req0)
+    assert manager.allocate_slots(req0, 6, num_computed, computed_blocks) is not None
+    req0.num_computed_tokens = 6
+    req0.append_output_token_ids([3])
+    assert manager.allocate_slots(req0, 1) is not None
+
+    # Retention released before the drain (defer_block_free=False ordering).
+    _copies, retained = manager.take_kv_cache_block_copies()
+    manager.block_pool.free_blocks(retained)
+
+    offloads = manager.take_partial_tail_offloads()
+    ((_group_id, block_id, boundary_tokens),) = offloads["0"]
+    assert boundary_tokens == 6
+    cow_block = manager.block_pool.blocks[block_id]
+    assert cow_block.ref_cnt == 1
+
+    # The pinned block is out of the free queue: draining every free block
+    # neither trips the allocator's ref_cnt assert nor hands it out.
+    new_blocks = manager.block_pool.get_new_blocks(
+        manager.block_pool.get_num_free_blocks()
+    )
+    assert block_id not in {b.block_id for b in new_blocks}
+
+
+def test_partial_tail_offload_dropped_when_request_freed_before_drain():
+    """A hand-off recorded in the same scheduling pass as the request's death
+    must not be drained: its release hook has already run, so draining would
+    leak a pinned block."""
+    hash_block_size = 2
+    block_size = 2 * hash_block_size
+    kv_cache_config = KVCacheConfig(
+        num_blocks=24,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["full"],
+                FullAttentionSpec(
+                    block_size=hash_block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
+            ),
+            KVCacheGroupSpec(
+                ["mamba"],
+                MambaSpec(
+                    block_size=block_size,
+                    shapes=(1, 1),
+                    dtypes=(torch.float32,),
+                    mamba_cache_mode="align",
+                ),
+            ),
+        ],
+    )
+    manager = make_kv_cache_manager(
+        kv_cache_config=kv_cache_config,
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=hash_block_size,
+    )
+    req0 = make_request("0", [0, 0, 1, 1, 2, 2], hash_block_size, sha256)
+    computed_blocks, num_computed, _ = manager.get_computed_blocks(req0)
+    assert manager.allocate_slots(req0, 6, num_computed, computed_blocks) is not None
+    req0.num_computed_tokens = 6
+    req0.append_output_token_ids([3])
+    assert manager.allocate_slots(req0, 1) is not None
+
+    # The request dies (preempt/abort) before the scheduler drains.
+    manager.block_pool.free_blocks(manager.pop_blocks_for_free(req0))
+    assert manager.take_partial_tail_offloads() == {}
+
+
+def test_take_partial_tail_offloads_empty_without_partial_tail():
+    """A prompt ending on a block boundary registers no partial tail, so there
+    is nothing to offload."""
+    hash_block_size = 2
+    block_size = 2 * hash_block_size
+    kv_cache_config = KVCacheConfig(
+        num_blocks=24,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["full"],
+                FullAttentionSpec(
+                    block_size=hash_block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
+            ),
+            KVCacheGroupSpec(
+                ["mamba"],
+                MambaSpec(
+                    block_size=block_size,
+                    shapes=(1, 1),
+                    dtypes=(torch.float32,),
+                    mamba_cache_mode="align",
+                ),
+            ),
+        ],
+    )
+    manager = make_kv_cache_manager(
+        kv_cache_config=kv_cache_config,
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=hash_block_size,
+    )
+
+    # 4-token prompt ends exactly on the mamba block boundary (block_size=4).
+    req0 = make_request("0", [0, 0, 1, 1], hash_block_size, sha256)
+    computed_blocks, num_computed, _ = manager.get_computed_blocks(req0)
+    assert manager.allocate_slots(req0, 4, num_computed, computed_blocks) is not None
+    assert manager.take_partial_tail_offloads() == {}
+
+    req0.num_computed_tokens = 4
+    req0.append_output_token_ids([2])
+    assert manager.allocate_slots(req0, 1) is not None
+    assert manager.take_partial_tail_offloads() == {}
+
+
+def test_truncate_computed_blocks_preserves_sparse_prefix_positions():
+    """truncate_computed_blocks slices each group by its own block size,
+    keeps null placeholders in the retained prefix, and leaves the original
+    lookup result untouched (pure view, no refcount changes)."""
+    hash_block_size = 2
+    kv_cache_config = KVCacheConfig(
+        num_blocks=24,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["full"],
+                FullAttentionSpec(
+                    block_size=hash_block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
+            ),
+            KVCacheGroupSpec(
+                ["mamba"],
+                MambaSpec(
+                    block_size=2 * hash_block_size,
+                    shapes=(1, 1),
+                    dtypes=(torch.float32,),
+                    mamba_cache_mode="align",
+                ),
+            ),
+        ],
+    )
+    manager = make_kv_cache_manager(
+        kv_cache_config=kv_cache_config,
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=hash_block_size,
+    )
+    producer = make_request("producer", [0, 0, 1, 1, 2, 2], hash_block_size, sha256)
+    blocks, num_computed, _ = manager.get_computed_blocks(producer)
+    assert manager.allocate_slots(producer, 6, num_computed, blocks) is not None
+    manager.free(producer)
+    manager.new_step_starts()
+
+    consumer = make_request(
+        "consumer", [0, 0, 1, 1, 2, 2, 3, 3], hash_block_size, sha256
+    )
+    blocks, num_computed, _ = manager.get_computed_blocks(consumer)
+    assert num_computed == 6
+    assert [len(group) for group in blocks.blocks] == [3, 2]
+    assert blocks.blocks[1][0].is_null
+
+    truncated = manager.truncate_computed_blocks(blocks, 4)
+
+    assert [len(group) for group in truncated.blocks] == [2, 1]
+    assert truncated.blocks[1][0].is_null
+    assert [len(group) for group in blocks.blocks] == [3, 2]
+
+
 def test_hybrid_mamba_partial_tail_owner_continue_preserves_later_hit():
     hash_block_size = 2
     block_size = 2 * hash_block_size

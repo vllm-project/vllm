@@ -255,6 +255,12 @@ class SchedulerOutput:
     # CoW copies to apply after zeroing new blocks and before forward.
     kv_cache_block_copies: list[KVCacheBlockCopy] | None = None
 
+    # Producer partial-tail offload hand-off for external KV connectors:
+    # {request_id: [(group_id, block_id, boundary_tokens), ...]} pointing at
+    # the durable boundary block of a producer's last-prompt-boundary partial
+    # tail (mamba "align" CoW target). None unless partial hash hits are active.
+    partial_tail_offloads: dict[str, list[tuple[int, int, int]]] | None = None
+
     # Dynamic speculative decoding: optimal K chosen by scheduler.
     # Number of spec tokens to schedule for the next step.
     num_spec_tokens_to_schedule: int = 0

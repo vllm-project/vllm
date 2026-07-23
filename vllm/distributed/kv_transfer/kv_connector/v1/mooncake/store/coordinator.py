@@ -21,6 +21,7 @@ from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheGroupSpec,
     KVCacheSpec,
+    MambaSpec,
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
@@ -83,6 +84,9 @@ class MooncakeStoreCoordinator:
         self.kv_cache_groups = kv_cache_groups
         self.hash_block_size = hash_block_size
         self.lcm_block_size = scheduler_block_size
+        self.enable_partial_hash_hits = partial_hash_hits_enabled(
+            kv_cache_groups, hash_block_size
+        )
         self.use_eagle = use_eagle
         # Mirror vLLM core's KVCacheCoordinator.retention_interval.
         self.retention_interval = retention_interval
@@ -365,3 +369,18 @@ def _unwrap_spec(spec: KVCacheSpec) -> KVCacheSpec:
     if isinstance(spec, UniformTypeKVCacheSpecs):
         return next(iter(spec.kv_cache_specs.values()))
     return spec
+
+
+def partial_hash_hits_enabled(
+    kv_cache_groups: list[KVCacheGroupSpec], hash_block_size: int
+) -> bool:
+    """Mirror of core's ``HybridKVCacheCoordinator.enable_partial_hash_hits``
+    (its dcp == 1 clause holds: the connector rejects hybrid + DCP/PCP > 1).
+    Single copy on purpose — scheduler and coordinator must not disagree.
+    """
+    return any(
+        isinstance(spec := _unwrap_spec(g.kv_cache_spec), MambaSpec)
+        and spec.mamba_cache_mode == "align"
+        and spec.block_size > hash_block_size
+        for g in kv_cache_groups
+    )
