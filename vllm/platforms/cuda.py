@@ -290,7 +290,8 @@ class CudaPlatformBase(Platform):
             # kernel with limited pinned memory support for CUDA.
             version = _get_wsl_kernel_version()
             if version is None or version < (4, 19, 121):
-                logger.warning_once(
+                # warning_once() causes a circular import on WSL, see #48397.
+                logger.warning(
                     "Using 'pin_memory=False' as WSL is detected and the "
                     "WSL2 kernel version is below 4.19.121. This may slow "
                     "down performance. Please run `wsl --update`."

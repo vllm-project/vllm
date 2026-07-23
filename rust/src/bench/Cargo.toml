@@ -20,16 +20,19 @@ mimalloc.workspace = true
 rand.workspace = true
 rand_distr.workspace = true
 rayon.workspace = true
-reqwest = { workspace = true, features = ["json", "stream", "blocking", "http2"] }
+reqwest = { workspace = true, features = ["json", "stream", "http2"] }
 rlimit.workspace = true
 rustc-hash.workspace = true
 serde = { workspace = true, features = ["rc"] }
 serde_json = { workspace = true, features = ["raw_value"] }
 thiserror.workspace = true
+thiserror-ext.workspace = true
 tiktoken-rs.workspace = true
 tokenizers.workspace = true
 tokio.workspace = true
 tokio-stream.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
 url.workspace = true
 uuid.workspace = true
 
