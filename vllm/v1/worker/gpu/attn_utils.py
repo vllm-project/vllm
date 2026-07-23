@@ -170,12 +170,34 @@ def init_attn_backend(
 
 
 def _allocate_kv_cache(
-    kv_cache_config: KVCacheConfig, shared_layers: dict[str, str], device: torch.device
+    kv_cache_config: KVCacheConfig,
+    shared_layers: dict[str, str],
+    device: torch.device,
+    vllm_config: VllmConfig,
 ):
+    use_hisparse = vllm_config.attention_config.hisparse_config is not None
+    if use_hisparse:
+        from vllm.v1.attention.backends.mla.hisparse import (
+            allocate_pinned_host_pool,
+            check_hisparse_host_memory,
+            is_hisparse_host_layer,
+        )
+
+        host_bytes = sum(
+            tensor.size
+            for tensor in kv_cache_config.kv_cache_tensors
+            if all(is_hisparse_host_layer(name) for name in tensor.shared_by)
+        )
+        check_hisparse_host_memory(vllm_config, host_bytes)
+
     kv_cache_raw_tensors: dict[str, torch.Tensor] = {}
     packed_backing: torch.Tensor | None = None
     for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
-        if kv_cache_tensor.block_stride > 0:
+        if use_hisparse and all(
+            is_hisparse_host_layer(name) for name in kv_cache_tensor.shared_by
+        ):
+            tensor = allocate_pinned_host_pool(kv_cache_tensor.size)
+        elif kv_cache_tensor.block_stride > 0:
             # Allocate once; all packed tensors alias the same backing.
             if packed_backing is None:
                 packed_backing = torch.zeros(
@@ -453,7 +475,7 @@ def init_kv_cache(
 ) -> dict[str, Any]:
     shared_kv_cache_layers = get_shared_kv_cache_layers(vllm_config)
     kv_cache_raw_tensors = _allocate_kv_cache(
-        kv_cache_config, shared_kv_cache_layers, device
+        kv_cache_config, shared_kv_cache_layers, device, vllm_config
     )
     flattened_attn_groups = list(group for groups in attn_groups for group in groups)
     kv_caches = _reshape_kv_cache(

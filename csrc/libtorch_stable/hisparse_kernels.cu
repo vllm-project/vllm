@@ -111,7 +111,7 @@ __global__ void hisparse_swap_in_kernel(
     int32_t* __restrict__ device_global_indices,  // [max_rows, hot_size]
     int16_t* __restrict__ lru_slots,              // [max_rows, hot_size]
     unsigned long long* __restrict__ stats,       // [2] hits,misses or nullptr
-    const int32_t* __restrict__ num_real_reqs,    // [1] or nullptr
+    const int32_t* __restrict__ request_state_indices,  // [num_rows] or nullptr
     const int64_t host_rows, const int64_t row_bytes, const int32_t top_k,
     const int32_t hot_size, const int32_t hash_size,
     const int64_t region_stride) {
@@ -119,11 +119,12 @@ __global__ void hisparse_swap_in_kernel(
   const int num_buffer_chunks = (hot_size + kWarpSize - 1) / kWarpSize;
   const int num_token_chunks = (top_k + kWarpSize - 1) / kWarpSize;
 
-  const int row = blockIdx.x;
-  // CUDA-graph padding: rows past the real batch carry stale top-k/state and
-  // must not be processed. Read from device memory so graph replays see the
-  // per-step value.
-  if (num_real_reqs != nullptr && row >= num_real_reqs[0]) {
+  const int batch_row = blockIdx.x;
+  const int state_row = request_state_indices != nullptr
+                            ? request_state_indices[batch_row]
+                            : batch_row;
+  // V2 publishes -1 for CUDA-graph padding rows.
+  if (state_row < 0) {
     return;
   }
   const int tid = threadIdx.x;
@@ -131,18 +132,19 @@ __global__ void hisparse_swap_in_kernel(
   const int lane_id = tid % kWarpSize;
   const unsigned int lanes_before = ((unsigned int)1 << lane_id) - 1;
 
-  const int64_t hot_base = static_cast<int64_t>(row) * region_stride;
+  const int64_t hot_base = static_cast<int64_t>(state_row) * region_stride;
   const int32_t newest_id =
-      (newest_global != nullptr) ? newest_global[row] : -1;
+      (newest_global != nullptr) ? newest_global[batch_row] : -1;
 
-  const int32_t* row_topk = global_indices + static_cast<int64_t>(row) * top_k;
-  int32_t* row_out = hot_indices + static_cast<int64_t>(row) * top_k;
+  const int32_t* row_topk =
+      global_indices + static_cast<int64_t>(batch_row) * top_k;
+  int32_t* row_out = hot_indices + static_cast<int64_t>(batch_row) * top_k;
   int32_t* row_miss = (miss_mask != nullptr)
-                          ? miss_mask + static_cast<int64_t>(row) * top_k
+                          ? miss_mask + static_cast<int64_t>(batch_row) * top_k
                           : nullptr;
   int32_t* row_dgi =
-      device_global_indices + static_cast<int64_t>(row) * hot_size;
-  int16_t* row_lru = lru_slots + static_cast<int64_t>(row) * hot_size;
+      device_global_indices + static_cast<int64_t>(state_row) * hot_size;
+  int16_t* row_lru = lru_slots + static_cast<int64_t>(state_row) * hot_size;
 
   extern __shared__ char smem_raw[];
   int32_t* s_topk = reinterpret_cast<int32_t*>(smem_raw);
@@ -399,7 +401,7 @@ __global__ void hisparse_gather_plan_kernel(
     const int32_t* __restrict__ global_indices,  // [num_rows, top_k]
     const int32_t* __restrict__ hot_indices,  // [num_rows, top_k] abs hot rows
     const int32_t* __restrict__ miss_mask,    // [num_rows, top_k]
-    const int32_t* __restrict__ num_real_reqs,  // [1] or nullptr
+    const int32_t* __restrict__ request_state_indices,  // [num_rows] or nullptr
     const int64_t host_rows, const int64_t hot_rows, const int64_t row_bytes,
     const int32_t top_k) {
   const int NUM_WARPS = blockDim.x / kWarpSize;
@@ -408,7 +410,7 @@ __global__ void hisparse_gather_plan_kernel(
   // batches) still fill the device with outstanding host reads instead of
   // starving on one block per row.
   const int row = blockIdx.x;
-  if (num_real_reqs != nullptr && row >= num_real_reqs[0]) {
+  if (request_state_indices != nullptr && request_state_indices[row] < 0) {
     return;
   }
   const int warp_id = threadIdx.x / kWarpSize;
@@ -479,7 +481,7 @@ void hisparse_swap_in(
     torch::stable::Tensor& hot_indices,
     torch::stable::Tensor& device_global_indices,
     torch::stable::Tensor& lru_slots,
-    std::optional<torch::stable::Tensor> const& num_real_reqs,
+    std::optional<torch::stable::Tensor> const& request_state_indices,
     int64_t region_stride,
     std::optional<torch::stable::Tensor> const& miss_mask,
     std::optional<torch::stable::Tensor> const& stats) {
@@ -544,15 +546,15 @@ void hisparse_swap_in(
     newest_ptr = newest.const_data_ptr<int32_t>();
   }
 
-  const int32_t* num_real_ptr = nullptr;
-  if (num_real_reqs.has_value()) {
-    auto const& num_real = num_real_reqs.value();
+  const int32_t* request_state_ptr = nullptr;
+  if (request_state_indices.has_value()) {
+    auto const& state_indices = request_state_indices.value();
     STD_TORCH_CHECK(
-        num_real.is_cuda() &&
-            num_real.scalar_type() == torch::headeronly::ScalarType::Int &&
-            num_real.numel() >= 1,
-        "num_real_reqs must be int32 on CUDA");
-    num_real_ptr = num_real.const_data_ptr<int32_t>();
+        state_indices.is_cuda() &&
+            state_indices.scalar_type() == torch::headeronly::ScalarType::Int &&
+            state_indices.numel() >= num_rows,
+        "request_state_indices must be int32 on CUDA with one entry per row");
+    request_state_ptr = state_indices.const_data_ptr<int32_t>();
   }
 
   // Optional plan output: 1 at columns resolved as a miss (loaded from the
@@ -608,8 +610,8 @@ void hisparse_swap_in(
       global_indices.const_data_ptr<int32_t>(), newest_ptr,
       hot_indices.mutable_data_ptr<int32_t>(), miss_mask_ptr,
       device_global_indices.mutable_data_ptr<int32_t>(),
-      lru_slots.mutable_data_ptr<int16_t>(), stats_ptr, num_real_ptr, host_rows,
-      row_bytes, top_k, hot_size, hash_size, region_stride);
+      lru_slots.mutable_data_ptr<int16_t>(), stats_ptr, request_state_ptr,
+      host_rows, row_bytes, top_k, hot_size, hash_size, region_stride);
 }
 
 void hisparse_gather_plan(
@@ -617,7 +619,7 @@ void hisparse_gather_plan(
     torch::stable::Tensor const& global_indices,
     torch::stable::Tensor const& hot_indices,
     torch::stable::Tensor const& miss_mask,
-    std::optional<torch::stable::Tensor> const& num_real_reqs) {
+    std::optional<torch::stable::Tensor> const& request_state_indices) {
   STD_TORCH_CHECK(host_cache.device().is_cpu(),
                   "host_cache must be CPU memory");
   STD_TORCH_CHECK(hot_cache.is_cuda(), "hot_cache must be on CUDA");
@@ -648,15 +650,15 @@ void hisparse_gather_plan(
   const auto num_rows = static_cast<int32_t>(global_indices.size(0));
   const auto top_k = static_cast<int32_t>(global_indices.size(1));
 
-  const int32_t* num_real_ptr = nullptr;
-  if (num_real_reqs.has_value()) {
-    auto const& num_real = num_real_reqs.value();
+  const int32_t* request_state_ptr = nullptr;
+  if (request_state_indices.has_value()) {
+    auto const& state_indices = request_state_indices.value();
     STD_TORCH_CHECK(
-        num_real.is_cuda() &&
-            num_real.scalar_type() == torch::headeronly::ScalarType::Int &&
-            num_real.numel() >= 1,
-        "num_real_reqs must be int32 on CUDA");
-    num_real_ptr = num_real.const_data_ptr<int32_t>();
+        state_indices.is_cuda() &&
+            state_indices.scalar_type() == torch::headeronly::ScalarType::Int &&
+            state_indices.numel() >= num_rows,
+        "request_state_indices must be int32 on CUDA with one entry per row");
+    request_state_ptr = state_indices.const_data_ptr<int32_t>();
   }
 
   if (num_rows == 0 || top_k == 0) {
@@ -685,8 +687,8 @@ void hisparse_gather_plan(
       static_cast<char*>(hot_cache_2d.mutable_data_ptr()),
       global_indices.const_data_ptr<int32_t>(),
       hot_indices.const_data_ptr<int32_t>(),
-      miss_mask.const_data_ptr<int32_t>(), num_real_ptr, host_rows, hot_rows,
-      row_bytes, top_k);
+      miss_mask.const_data_ptr<int32_t>(), request_state_ptr, host_rows,
+      hot_rows, row_bytes, top_k);
 }
 
 void hisparse_backup(torch::stable::Tensor const& src_cache,

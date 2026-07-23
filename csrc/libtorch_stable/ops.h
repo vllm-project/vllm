@@ -495,7 +495,7 @@ void hisparse_swap_in(
     torch::stable::Tensor& hot_indices,
     torch::stable::Tensor& device_global_indices,
     torch::stable::Tensor& lru_slots,
-    std::optional<torch::stable::Tensor> const& num_real_reqs,
+    std::optional<torch::stable::Tensor> const& request_state_indices,
     int64_t region_stride,
     std::optional<torch::stable::Tensor> const& miss_mask,
     std::optional<torch::stable::Tensor> const& stats);
@@ -505,7 +505,7 @@ void hisparse_gather_plan(
     torch::stable::Tensor const& global_indices,
     torch::stable::Tensor const& hot_indices,
     torch::stable::Tensor const& miss_mask,
-    std::optional<torch::stable::Tensor> const& num_real_reqs);
+    std::optional<torch::stable::Tensor> const& request_state_indices);
 
 void hisparse_backup(torch::stable::Tensor const& src_cache,
                      torch::stable::Tensor const& src_indices,

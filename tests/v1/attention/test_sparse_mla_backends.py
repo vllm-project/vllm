@@ -51,6 +51,7 @@ from vllm.v1.attention.backends.mla.hisparse import (
     _has_hisparse_ops,
     create_hisparse_coordinator,
     is_hisparse_decode_batch,
+    set_request_state_indices,
 )
 from vllm.v1.attention.backends.mla.indexer import split_indexer_prefill_chunks
 from vllm.v1.attention.backends.utils import (
@@ -1460,20 +1461,6 @@ def _hisparse_state(coordinator: HiSparseCoordinator):
 
 
 @requires_hisparse_ops
-def test_hisparse_reset_hot_rows():
-    coordinator = _make_hisparse_coordinator(max_num_reqs=3)
-    coordinator.device_global_indices.fill_(7)
-    coordinator.lru_slots.fill_(2)
-
-    coordinator.reset_hot_rows(torch.tensor([1], device=coordinator.device))
-
-    assert torch.all(coordinator.device_global_indices[0] == 7)
-    assert torch.all(coordinator.device_global_indices[1] == -1)
-    assert torch.all(coordinator.device_global_indices[2] == 7)
-    torch.testing.assert_close(coordinator.lru_slots[1], coordinator._lru_init)
-
-
-@requires_hisparse_ops
 def test_hisparse_swap_in_semantics():
     """Hit/miss/LRU/newest semantics of the swap-in kernel."""
     device = torch.device(DEVICE_TYPE)
@@ -1491,6 +1478,8 @@ def test_hisparse_swap_in_semantics():
     coordinator = _make_hisparse_coordinator()
     buf = coordinator.config.device_buffer_size
     stride = coordinator.region_stride
+    # V2 batch row 0 belongs to stable RequestState row 1.
+    set_request_state_indices(torch.tensor([1], dtype=torch.int32, device=device))
 
     # One request at row 0 with 3 blocks; sequence length 9 so position 8
     # (global slot block_table[0,2]*4 + 0 = 16) is the newest token.
@@ -1501,7 +1490,7 @@ def test_hisparse_swap_in_semantics():
 
     # Place the newest row into the reserved hot slot (as write_newest_rows
     # would).
-    newest_hot_slot = 0 * stride + buf
+    newest_hot_slot = stride + buf
     coordinator.hot_cache[newest_hot_slot] = flat_pool[newest_global].to(device)
 
     def swap(positions: list[int]) -> torch.Tensor:
@@ -1526,13 +1515,15 @@ def test_hisparse_swap_in_semantics():
     hot_cpu = hot.cpu().tolist()[0]
     assert hot_cpu[3] == -1, "padded -1 position must stay invalid"
     assert hot_cpu[2] == newest_hot_slot, "newest position must map to its slot"
-    assert all(0 <= h < buf for h in hot_cpu[:2]), "misses fill LRU slots"
+    assert all(stride <= h < stride + buf for h in hot_cpu[:2]), (
+        "misses fill the stable request state's LRU slots"
+    )
     flat_hot = coordinator.hot_cache
     torch.testing.assert_close(flat_hot[hot_cpu[0]].cpu(), flat_pool[8])
     torch.testing.assert_close(flat_hot[hot_cpu[1]].cpu(), flat_pool[1])
 
     dgi, lru = _hisparse_state(coordinator)
-    assert set(dgi[0].tolist()) == {8, 1, -1}
+    assert set(dgi[1].tolist()) == {8, 1, -1}
 
     # Step 2: same positions again -> hits, no state change.
     hot2 = swap([0, 5, 8])
@@ -1545,7 +1536,7 @@ def test_hisparse_swap_in_semantics():
     # least-recently-used slots; hits 8/1 must survive.
     hot3 = swap([1, 2, 0, 5])
     dgi3, _ = _hisparse_state(coordinator)
-    assert set(dgi3[0].tolist()) == {8, 1, 9, 10}
+    assert set(dgi3[1].tolist()) == {8, 1, 9, 10}
     hot3_cpu = hot3.cpu().tolist()[0]
     torch.testing.assert_close(flat_hot[hot3_cpu[0]].cpu(), flat_pool[9])
     torch.testing.assert_close(flat_hot[hot3_cpu[1]].cpu(), flat_pool[10])
@@ -1558,7 +1549,7 @@ def test_hisparse_swap_in_semantics():
     flat_pool[8] += 1000.0
     coordinator.invalidate_slots(torch.tensor([8], device=device))
     dgi4, _ = _hisparse_state(coordinator)
-    assert 8 not in dgi4[0].tolist()
+    assert 8 not in dgi4[1].tolist()
     hot4 = swap([0])
     torch.testing.assert_close(flat_hot[hot4.cpu().tolist()[0][0]].cpu(), flat_pool[8])
 

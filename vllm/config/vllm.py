@@ -548,6 +548,17 @@ class VllmConfig:
 
     @property
     def use_v2_model_runner(self) -> bool:
+        if (
+            self.attention_config is not None
+            and self.attention_config.hisparse_config is not None
+        ):
+            if envs.VLLM_USE_V2_MODEL_RUNNER is False:
+                raise ValueError(
+                    "HiSparse requires Model Runner V2; remove "
+                    "VLLM_USE_V2_MODEL_RUNNER=0."
+                )
+            return True
+
         use_v2_model_runner = envs.VLLM_USE_V2_MODEL_RUNNER
         if use_v2_model_runner is not None:
             return use_v2_model_runner
@@ -1292,12 +1303,6 @@ class VllmConfig:
                     "Every prefill gathers KV from host memory, which is "
                     "slower than a normal GPU prefill; PD decode-only "
                     "instances avoid this cost."
-                )
-            if self.parallel_config.use_ubatching:
-                raise ValueError(
-                    "HiSparse does not support DBO/ubatching: micro-batches "
-                    "would index the same hot-buffer rows concurrently and "
-                    "corrupt the LRU state."
                 )
             if self.speculative_config is not None:
                 raise ValueError("HiSparse does not support speculative decoding.")

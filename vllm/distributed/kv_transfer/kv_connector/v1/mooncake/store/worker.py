@@ -1260,11 +1260,17 @@ class MooncakeStoreWorker:
         for value in kv_caches.values():
             cache = _repr_tensor(value)
             cache_storage = cache.untyped_storage()
-            base_addr = cache_storage.data_ptr()
+            if cache.device.type == "cpu":
+                # HiSparse uses an aligned view into a larger pageable
+                # allocation. Only the view range is cudaHostRegister'ed.
+                base_addr = cache.data_ptr()
+                region_len = cache.nbytes
+            else:
+                base_addr = cache_storage.data_ptr()
+                region_len = cache_storage.nbytes()
             if base_addr in seen_ptrs:
                 continue
             seen_ptrs.add(base_addr)
-            region_len = cache_storage.nbytes()
             mem_kind = "host" if cache.device.type == "cpu" else "device"
 
             ret = self.store.register_buffer(base_addr, region_len)

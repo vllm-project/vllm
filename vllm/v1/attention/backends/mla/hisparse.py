@@ -7,9 +7,8 @@ HiSparse keeps the full-size MLA KV off the GPU and serves decode from a small
 per-request device hot buffer; that is what frees GPU memory for higher decode
 concurrency.
 
-- Full-size KV residency. The MLA KV layers are allocated in pinned host
-  memory (see ``_is_hisparse_host_layer`` and ``_allocate_kv_cache_tensors``
-  in the cache utils / model runner); only the GPU indexer pool and the
+- Full-size KV residency. The V2 runner allocates MLA KV layers in pinned host
+  memory; only the GPU indexer pool and the
   per-request hot buffers stay on device. Decode-step writes land in the
   reserved hot slot and are scattered back to the host pool by a CUDA kernel
   writing straight into pinned memory, so the backup is stream-ordered with
@@ -28,6 +27,7 @@ concurrency.
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 
 import numpy as np
@@ -114,23 +114,26 @@ class HiSparseConfig:
         )
 
 
-# One per device, shared by all per-layer coordinators: number of real
-# (non-CUDA-graph-padding) requests in the current batch. Updated by the
-# model runner outside captured regions; read by the swap-in kernel from
-# device memory so graph replays observe the per-step value.
-_NUM_REAL_REQS: dict[torch.device, torch.Tensor] = {}
+# V2 assigns every live request a stable RequestState row. The model runner
+# publishes the current batch-row -> state-row mapping here before each
+# forward. Kernels use -1 entries to skip CUDA-graph padding rows.
+_REQUEST_STATE_INDICES: dict[tuple[str, int], torch.Tensor] = {}
 
 
-def get_num_real_reqs_tensor(device: torch.device) -> torch.Tensor:
-    tensor = _NUM_REAL_REQS.get(device)
+def _device_key(device: torch.device) -> str:
+    if device.index is None and device.type != "cpu":
+        return f"{device.type}:{torch.accelerator.current_device_index()}"
+    return str(device)
+
+
+def get_request_state_indices_tensor(
+    device: torch.device, max_num_reqs: int
+) -> torch.Tensor:
+    key = (_device_key(device), max_num_reqs)
+    tensor = _REQUEST_STATE_INDICES.get(key)
     if tensor is None:
-        # Default to "all rows are real" so standalone use (tests, eager
-        # deployments without the runner hook) processes every row; the model
-        # runner overwrites this each step when driving CUDA graphs.
-        tensor = torch.full(
-            (1,), torch.iinfo(torch.int32).max, dtype=torch.int32, device=device
-        )
-        _NUM_REAL_REQS[device] = tensor
+        tensor = torch.arange(max_num_reqs, dtype=torch.int32, device=device)
+        _REQUEST_STATE_INDICES[key] = tensor
     return tensor
 
 
@@ -176,47 +179,83 @@ def _maybe_log_hisparse_stats() -> None:
     )
 
 
-def set_num_real_reqs(num_reqs: int) -> None:
-    """Called by the model runner before each (real or dummy) forward."""
-    for tensor in _NUM_REAL_REQS.values():
-        tensor.fill_(num_reqs)
+def set_request_state_indices(indices: torch.Tensor) -> None:
+    """Publish V2 batch-row -> stable request-state-row indices."""
+    for (device, _), tensor in _REQUEST_STATE_INDICES.items():
+        if _device_key(indices.device) != device:
+            continue
+        if indices.numel() > tensor.numel():
+            raise ValueError(
+                "HiSparse request-state mapping exceeds max_num_seqs: "
+                f"{indices.numel()} > {tensor.numel()}."
+            )
+        tensor.fill_(-1)
+        tensor[: indices.numel()].copy_(indices)
     _maybe_log_hisparse_stats()
 
 
-def _leader_coordinators(
-    static_forward_context: dict,
-) -> list[HiSparseCoordinator]:
-    """Coordinators owning live hot-buffer state (dgi/lru).
-
-    Index-sharing "shared" layers replay their leader's plan and never write
-    dgi/lru, so per-block/per-row state maintenance skips them.
-    """
-    return [
-        coordinator
-        for layer in static_forward_context.values()
-        if (
-            coordinator := getattr(
-                getattr(layer, "impl", None), "hisparse_coordinator", None
-            )
-        )
-        is not None
-        and coordinator.leader is None
-    ]
-
-
-# Persistent pinned staging for the per-step H2D index uploads below
-# (invalidated slots, reset rows). One shared buffer is
+# Persistent pinned staging for per-step invalidated-slot uploads. One shared buffer is
 # safe: these uploads run eagerly at batch preparation, never under
 # CUDA-graph capture, and the event guards against overwriting bytes a
 # previous upload's async copy is still reading.
 _PINNED_STAGING: torch.Tensor | None = None
 _PINNED_STAGING_EVENT: torch.Event | None = None
 
-# Host ranges the model runner pinned via cudaHostRegister for the
+# Host ranges the V2 allocator pinned via cudaHostRegister for the
 # host-resident pool. torch's Tensor.is_pinned() only recognizes memory from
 # its own caching host allocator, so bind_source_cache consults this registry
 # for the fail-loud "pool must be pinned" check.
 _REGISTERED_HOST_RANGES: list[tuple[int, int]] = []
+_PINNED_HOST_POOLS: list[torch.Tensor] = []
+
+
+def is_hisparse_host_layer(layer_name: str) -> bool:
+    """Whether a DSA KV tensor is host-resident under HiSparse."""
+    return ".indexer" not in layer_name
+
+
+def check_hisparse_host_memory(vllm_config: VllmConfig, rank_bytes: int) -> None:
+    """Fail fast when this rank's pinned host pool cannot fit in RAM."""
+    import psutil
+
+    mem = psutil.virtual_memory()
+    if rank_bytes > mem.available * 0.95:
+        raise ValueError(
+            f"HiSparse pinned host pool needs ~{rank_bytes / 2**30:.0f} GiB "
+            f"but only {mem.available / 2**30:.0f} GiB of RAM is available. "
+            "Lower hisparse_config.host_pool_gib or leave headroom for co-tenants."
+        )
+    parallel = vllm_config.parallel_config
+    ranks_on_node = (
+        parallel.tensor_parallel_size
+        * parallel.pipeline_parallel_size
+        * max(parallel.data_parallel_size_local, 1)
+    )
+    need = rank_bytes * ranks_on_node
+    if need > mem.total * 0.95 and parallel.rank == 0:
+        logger.warning(
+            "HiSparse pinned host pools may need ~%.0f GiB on this node "
+            "(%d ranks x %.0f GiB) but it has %.0f GiB total.",
+            need / 2**30,
+            ranks_on_node,
+            rank_bytes / 2**30,
+            mem.total / 2**30,
+        )
+
+
+def allocate_pinned_host_pool(size: int) -> torch.Tensor:
+    """Allocate and deterministically register an exact-size host KV region."""
+    from vllm.v1.simple_kv_offload.cuda_mem_ops import pin_tensor
+
+    page = 4096
+    padded_size = round_up(size, page)
+    backing = torch.empty(padded_size + page, dtype=torch.int8, device="cpu")
+    aligned_offset = (-backing.data_ptr()) % page
+    registered = backing[aligned_offset : aligned_offset + padded_size]
+    pin_tensor(registered)
+    note_registered_host_range(registered.data_ptr(), registered.nbytes)
+    _PINNED_HOST_POOLS.append(registered)
+    return registered[:size]
 
 
 def note_registered_host_range(ptr: int, nbytes: int) -> None:
@@ -233,18 +272,46 @@ def _covers_registered_host_range(ptr: int, nbytes: int) -> bool:
 
 
 def release_pinned_state() -> bool:
-    """Drop every module/coordinator reference to pinned host memory.
-
-    Graceful teardown (drain-then-free): the runner unpins the host pool
-    itself (cudaHostUnregister); this drops the module-level pinned staging
-    buffer and every coordinator's pool reference so the caller can return
-    the allocator-owned staging blocks to the OS. Shared (index-sharing)
-    coordinators are removed from _STATS by join_group, so they are reached
-    through their leader's group_shared list. Returns whether any pinned
-    reference was held.
-    """
+    """Synchronize, unregister host KV pools, and drop global state."""
     global _PINNED_STAGING, _PINNED_STAGING_EVENT
-    released = _PINNED_STAGING is not None
+    released = bool(_PINNED_HOST_POOLS or _PINNED_STAGING is not None)
+    if _PINNED_HOST_POOLS:
+        try:
+            torch.accelerator.synchronize()
+        except RuntimeError as e:
+            logger.warning(
+                "HiSparse: CUDA context unusable at teardown (%s); leaving "
+                "%d host-pool tensors pinned for kernel exit reclaim.",
+                e,
+                len(_PINNED_HOST_POOLS),
+            )
+            return released
+
+        cudart = torch.cuda.cudart()
+        release_start = time.perf_counter()
+        freed_bytes = 0
+        while _PINNED_HOST_POOLS:
+            tensor = _PINNED_HOST_POOLS[-1]
+            err = cudart.cudaHostUnregister(tensor.data_ptr())
+            if err.value != 0:
+                logger.warning(
+                    "HiSparse: cudaHostUnregister failed (code=%d); leaving "
+                    "%d host-pool tensors pinned for kernel exit reclaim.",
+                    err.value,
+                    len(_PINNED_HOST_POOLS),
+                )
+                cudart.cudaGetLastError()
+                break
+            freed_bytes += tensor.nbytes
+            discard_registered_host_range(tensor.data_ptr())
+            _PINNED_HOST_POOLS.pop()
+        if freed_bytes:
+            logger.info(
+                "HiSparse: unpinned %.1f GiB of host pool in %.1fs.",
+                freed_bytes / 2**30,
+                time.perf_counter() - release_start,
+            )
+
     _PINNED_STAGING = None
     _PINNED_STAGING_EVENT = None
     for leader in _STATS:
@@ -253,6 +320,9 @@ def release_pinned_state() -> bool:
                 coordinator._host_cache = None
                 released = True
     _STATS.clear()
+    _REQUEST_STATE_INDICES.clear()
+    _GROUP_PLANS.clear()
+    _COPY_STREAMS.clear()
     return released
 
 
@@ -276,12 +346,10 @@ def _pinned_to_device(values: list[int], device: torch.device) -> torch.Tensor:
     return out
 
 
-def invalidate_blocks(
-    static_forward_context: dict, block_ids: list[int], block_size: int
-) -> None:
+def invalidate_blocks(block_ids: list[int], block_size: int) -> None:
     """Drop cached HiSparse state for the given blocks in every layer.
 
-    Called by the model runner when blocks are (re)assigned to newly scheduled
+    Called by the V2 integration when blocks are (re)assigned to newly scheduled
     or preemption-resumed requests, before any forward step can select them.
     This makes block recycling safe for any writer (local prefill, connector
     RDMA into host memory) without per-connector reporting hooks.
@@ -289,7 +357,7 @@ def invalidate_blocks(
     if not block_ids:
         return
     slots: torch.Tensor | None = None
-    for coordinator in _leader_coordinators(static_forward_context):
+    for coordinator in _STATS:
         if slots is None:
             # Built once on device and shared by every leader.
             blocks = _pinned_to_device(block_ids, coordinator.device)
@@ -298,17 +366,6 @@ def invalidate_blocks(
             )
             slots = (blocks[:, None] * block_size + offsets[None, :]).flatten()
         coordinator.invalidate_slots(slots)
-
-
-def reset_rows(static_forward_context: dict, row_ids: list[int]) -> None:
-    """Drop per-row HiSparse hot-buffer state in every layer."""
-    if not row_ids:
-        return
-    rows: torch.Tensor | None = None
-    for coordinator in _leader_coordinators(static_forward_context):
-        if rows is None:
-            rows = _pinned_to_device(row_ids, coordinator.device)
-        coordinator.reset_hot_rows(rows)
 
 
 def _has_hisparse_ops() -> bool:
@@ -390,7 +447,7 @@ class HiSparseCoordinator:
     The pinned host-resident KV pool is the only full-size store; misses are
     always served from it. Hot-buffer hits are keyed by global KV slot id, so
     correctness relies on one invariant: a recycled slot's stale state is
-    dropped before reuse — the model runner invalidates all blocks
+    dropped before reuse — the V2 runner invalidates all blocks
     (re)assigned to incoming requests (covering connector RDMA loads of any
     kind) before any step can select them.
     """
@@ -448,13 +505,12 @@ class HiSparseCoordinator:
         self.lru_slots: torch.Tensor | None = lru_init.repeat(
             max_num_reqs, 1
         ).contiguous()
-        self._newest_hot_slots = (
-            torch.arange(max_num_reqs, dtype=torch.int64, device=self.device)
-            * self.region_stride
-            + config.device_buffer_size
+        self.request_state_indices = get_request_state_indices_tensor(
+            self.device, max_num_reqs
         )
-
-        self.num_real_reqs = get_num_real_reqs_tensor(self.device)
+        self.request_state_indices.copy_(
+            torch.arange(max_num_reqs, dtype=torch.int32, device=self.device)
+        )
 
         # In-kernel hit/miss counters (telemetry). stats_row_bytes converts
         # misses to gathered bytes; plan-once wiring adds each shared
@@ -529,7 +585,7 @@ class HiSparseCoordinator:
         # The pool is pinned via cudaHostRegister (exact-size, deterministic
         # unpin at shutdown); torch's is_pinned() only recognizes its own
         # caching-host-allocator memory, so also accept ranges the model
-        # runner explicitly registered.
+        # allocator explicitly registered.
         if not (
             kv_cache.is_pinned()
             or _covers_registered_host_range(kv_cache.data_ptr(), kv_cache.nbytes)
@@ -547,13 +603,6 @@ class HiSparseCoordinator:
         assert self.lru_slots is not None and self._lru_init is not None
         self.device_global_indices.fill_(-1)
         self.lru_slots.copy_(self._lru_init.expand_as(self.lru_slots))
-
-    def reset_hot_rows(self, rows: torch.Tensor) -> None:
-        """Drop hot-buffer bookkeeping for newly assigned batch rows."""
-        assert self.device_global_indices is not None
-        assert self.lru_slots is not None and self._lru_init is not None
-        self.device_global_indices[rows] = -1
-        self.lru_slots[rows] = self._lru_init
 
     def _invalidate_hot_copies(self, slots: torch.Tensor) -> None:
         assert self.device_global_indices is not None
@@ -617,7 +666,13 @@ class HiSparseCoordinator:
         # mismatch trips the backup kernel's shape check and kills the rank
         # (and with it the whole DP fleet).
         num_tokens = min(kv_c_normed.shape[0], slot_mapping.numel(), self.max_num_reqs)
-        newest_slots = self._newest_hot_slots[:num_tokens]
+        state_rows = self.request_state_indices[:num_tokens]
+        newest_slots = torch.where(
+            state_rows >= 0,
+            state_rows.to(torch.int64) * self.region_stride
+            + self.config.device_buffer_size,
+            -1,
+        )
         global_slots = slot_mapping[:num_tokens].to(torch.int64)
 
         # -1-padded slots (CUDA-graph padding) are skipped by the backup
@@ -636,7 +691,7 @@ class HiSparseCoordinator:
             global_slots,
         )
         # Recycled-slot hygiene is handled at block-assignment time: the
-        # model runner invalidates every block (re)assigned to any request
+        # V2 integration invalidates every block (re)assigned to any request
         # (new, resumed, or growing) before the step that first writes it,
         # so no per-step in-graph invalidation is needed here.
 
@@ -655,7 +710,7 @@ class HiSparseCoordinator:
         resume, recompute after a failed KV load): quantize the rows on GPU,
         then scatter them to their global host slots via the backup kernel.
         Recycled-slot hygiene is handled at block-assignment time by the
-        model runner, so no hot-copy invalidation is needed here.
+        V2 integration, so no hot-copy invalidation is needed here.
         """
         from vllm import _custom_ops as ops
 
@@ -779,7 +834,7 @@ class HiSparseCoordinator:
             hot_indices = torch.full_like(global_indices, -1)
             miss_mask = None
 
-        # Padded rows are skipped by the kernel (num_real_reqs) and must
+        # Padded rows are skipped by the kernel (request_state_indices) and must
         # come out as -1 so the attention kernel masks them.
         torch.ops._C_cache_ops.hisparse_swap_in(
             self._host_cache,
@@ -789,7 +844,7 @@ class HiSparseCoordinator:
             hot_indices,
             self.device_global_indices,
             self.lru_slots,
-            self.num_real_reqs,
+            self.request_state_indices,
             self.region_stride,
             miss_mask,
             self._swap_stats,
@@ -825,7 +880,7 @@ class HiSparseCoordinator:
             self._plan.global_indices[:num_tokens],
             self._plan.hot_indices[:num_tokens],
             self._plan.miss_mask[:num_tokens],
-            self.num_real_reqs,
+            self.request_state_indices,
         )
 
     def _prefetch_group(self, num_tokens: int) -> None:

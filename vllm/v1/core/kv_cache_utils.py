@@ -1337,11 +1337,6 @@ def _get_kv_cache_config_packed(
     return num_blocks, kv_cache_tensors
 
 
-def _is_hisparse_host_layer(layer_name: str) -> bool:
-    """Whether a layer's KV tensor moves to pinned host memory."""
-    return ".indexer" not in layer_name
-
-
 def _hisparse_host_pool_bytes(vllm_config: VllmConfig) -> int | None:
     """Per-rank pinned host budget for HiSparse host-resident KV.
 
@@ -1379,18 +1374,20 @@ def _hisparse_gpu_host_usage_split(
         and isinstance(kv_cache_groups[0].kv_cache_spec, UniformTypeKVCacheSpecs)
     ):
         return None
+    from vllm.v1.attention.backends.mla.hisparse import is_hisparse_host_layer
+
     per_layer_specs = kv_cache_groups[0].kv_cache_spec.kv_cache_specs
     host_bytes = sum(
         spec.max_memory_usage_bytes(vllm_config)
         for name, spec in per_layer_specs.items()
-        if _is_hisparse_host_layer(name)
+        if is_hisparse_host_layer(name)
     )
     if host_bytes == 0:
         return None
     gpu_bytes = sum(
         spec.max_memory_usage_bytes(vllm_config)
         for name, spec in per_layer_specs.items()
-        if not _is_hisparse_host_layer(name)
+        if not is_hisparse_host_layer(name)
     )
     return gpu_bytes, host_bytes
 
@@ -1429,16 +1426,20 @@ def get_kv_cache_config_from_groups(
         # layer based on its hidden size.
         hisparse_host_budget = _hisparse_host_pool_bytes(vllm_config)
         if hisparse_host_budget is not None:
+            from vllm.v1.attention.backends.mla.hisparse import (
+                is_hisparse_host_layer,
+            )
+
             specs = kv_cache_groups[0].kv_cache_spec.kv_cache_specs
             host_page = sum(
                 spec.page_size_bytes
                 for name, spec in specs.items()
-                if _is_hisparse_host_layer(name)
+                if is_hisparse_host_layer(name)
             )
             gpu_page = sum(
                 spec.page_size_bytes
                 for name, spec in specs.items()
-                if not _is_hisparse_host_layer(name)
+                if not is_hisparse_host_layer(name)
             )
             assert host_page > 0, "HiSparse host-resident mode requires MLA KV layers."
             num_blocks = hisparse_host_budget // host_page

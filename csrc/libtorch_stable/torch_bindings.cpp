@@ -821,7 +821,7 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C_cache_ops, ops) {
       "                 Tensor! hot_indices,"
       "                 Tensor! device_global_indices,"
       "                 Tensor! lru_slots,"
-      "                 Tensor? num_real_reqs,"
+      "                 Tensor? request_state_indices,"
       "                 int region_stride,"
       "                 Tensor(a!)? miss_mask=None,"
       "                 Tensor(b!)? stats=None) -> ()");
@@ -832,7 +832,7 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C_cache_ops, ops) {
       "                     Tensor global_indices,"
       "                     Tensor hot_indices,"
       "                     Tensor miss_mask,"
-      "                     Tensor? num_real_reqs) -> ()");
+      "                     Tensor? request_state_indices) -> ()");
 
   ops.def(
       "hisparse_backup(Tensor src_cache,"
