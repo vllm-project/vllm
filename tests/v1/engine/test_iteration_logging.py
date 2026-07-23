@@ -135,6 +135,11 @@ class FakeStageEngine:
         return
 
 
+def clear_engine_execution_timeout_dump_throttle():
+    with dump_input._engine_execution_timeout_dump_lock:
+        dump_input._engine_execution_timeout_dump_last_s.clear()
+
+
 def test_capture_iteration_details_disabled_without_log_stats():
     engine = make_fake_engine(log_stats=False)
 
@@ -250,6 +255,58 @@ def test_engine_execution_timeout_dumper_dumps_when_timer_fires(monkeypatch):
     assert dumps[0][2] is scheduler_stats
     assert dumps[0][3] == 2.0
     assert dumps[0][4] == engine_core_module.EXECUTE_MODEL_WAIT_STAGE
+
+
+def test_engine_execution_timeout_dump_is_throttled_by_stage(monkeypatch):
+    contexts: list[tuple[Any, ...]] = []
+    tracebacks: list[dict[str, Any]] = []
+    times = iter([100.0, 101.0, 102.0, 401.0])
+
+    def record_context(*args: Any) -> None:
+        contexts.append(args)
+
+    def record_traceback(*args: Any, **kwargs: Any) -> None:
+        tracebacks.append(kwargs)
+
+    clear_engine_execution_timeout_dump_throttle()
+    monkeypatch.setattr(dump_input.time, "monotonic", lambda: next(times))
+    monkeypatch.setattr(dump_input, "_dump_engine_execution_context", record_context)
+    monkeypatch.setattr(dump_input.faulthandler, "dump_traceback", record_traceback)
+
+    dump_input.dump_engine_execution_timeout(
+        config=SimpleNamespace(),
+        scheduler_output=SimpleNamespace(),
+        scheduler_stats=SchedulerStats(),
+        timeout_s=1.0,
+        stage=engine_core_module.EXECUTE_MODEL_WAIT_STAGE,
+    )
+    dump_input.dump_engine_execution_timeout(
+        config=SimpleNamespace(),
+        scheduler_output=SimpleNamespace(),
+        scheduler_stats=SchedulerStats(),
+        timeout_s=1.0,
+        stage=engine_core_module.SAMPLE_TOKENS_WAIT_STAGE,
+    )
+    dump_input.dump_engine_execution_timeout(
+        config=SimpleNamespace(),
+        scheduler_output=SimpleNamespace(),
+        scheduler_stats=SchedulerStats(),
+        timeout_s=1.0,
+        stage=engine_core_module.EXECUTE_MODEL_WAIT_STAGE,
+    )
+    dump_input.dump_engine_execution_timeout(
+        config=SimpleNamespace(),
+        scheduler_output=SimpleNamespace(),
+        scheduler_stats=SchedulerStats(),
+        timeout_s=1.0,
+        stage=engine_core_module.EXECUTE_MODEL_WAIT_STAGE,
+    )
+
+    assert len(contexts) == 3
+    assert len(tracebacks) == 3
+    assert all(context[0] == "timeout" for context in contexts)
+
+    clear_engine_execution_timeout_dump_throttle()
 
 
 def test_dump_on_slow_execution_uses_env_timeout_and_scheduler_stats(monkeypatch):

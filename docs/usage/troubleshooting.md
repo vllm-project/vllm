@@ -36,7 +36,10 @@ If other strategies don't solve the problem, it's likely that the vLLM instance 
 
 - `export VLLM_LOGGING_LEVEL=DEBUG` to turn on more logging.
 - `export VLLM_LOG_STATS_INTERVAL=1.` to get log statistics more frequently for tracking running queue, waiting queue and cache hit states.
-- `export VLLM_ENGINE_ITERATION_TIMEOUT_S=60` to dump scheduler state and Python stack traces when a V1 engine execution stage exceeds the timeout. Set it to `0` to disable this diagnostic.
+- `export VLLM_ENGINE_ITERATION_TIMEOUT_S=60` to dump scheduler state and
+  Python stack traces when a V1 engine execution stage exceeds the timeout.
+  Repeated dumps for the same stage are throttled. Set it to `0` to disable
+  this diagnostic.
 - `export CUDA_LAUNCH_BLOCKING=1` to identify which CUDA kernel is causing the problem.
 - `export NCCL_DEBUG=TRACE` to turn on more logging for NCCL.
 - `export VLLM_TRACE_FUNCTION=1` to record all function calls for inspection in the log files to tell which function crashes or hangs. (WARNING: This flag will slow down the token generation by **over 100x**. Do not use unless absolutely needed.)

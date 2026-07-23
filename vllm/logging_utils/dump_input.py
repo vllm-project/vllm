@@ -8,6 +8,7 @@ import json
 import os
 import sys
 import threading
+import time
 from types import TracebackType
 
 import torch
@@ -20,6 +21,10 @@ from vllm.v1.metrics.stats import SchedulerStats
 from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
+
+ENGINE_EXECUTION_TIMEOUT_DUMP_THROTTLE_S = 300.0
+_engine_execution_timeout_dump_lock = threading.Lock()
+_engine_execution_timeout_dump_last_s: dict[str, float] = {}
 
 
 def prepare_object_to_dump(obj) -> str:
@@ -79,14 +84,19 @@ def dump_engine_execution_timeout(
     timeout_s: float,
     stage: str,
 ):
+    if not _mark_engine_execution_timeout_dump(stage):
+        return
+
     with contextlib.suppress(Exception):
         logger.error(
             "V1 LLM engine stage '%s' has not completed after %.2f seconds "
             "(pid=%d). Dumping scheduler state and Python stack traces. "
+            "Further dumps for this stage are throttled for %.0f seconds. "
             "Set VLLM_ENGINE_ITERATION_TIMEOUT_S=0 to disable this diagnostic.",
             stage,
             timeout_s,
             os.getpid(),
+            ENGINE_EXECUTION_TIMEOUT_DUMP_THROTTLE_S,
         )
         _dump_engine_execution_context(
             "timeout", config, scheduler_output, scheduler_stats
@@ -94,6 +104,19 @@ def dump_engine_execution_timeout(
 
     with contextlib.suppress(Exception):
         faulthandler.dump_traceback(file=sys.stderr, all_threads=True)
+
+
+def _mark_engine_execution_timeout_dump(stage: str) -> bool:
+    now_s = time.monotonic()
+    with _engine_execution_timeout_dump_lock:
+        last_dump_s = _engine_execution_timeout_dump_last_s.get(stage)
+        if (
+            last_dump_s is not None
+            and now_s - last_dump_s < ENGINE_EXECUTION_TIMEOUT_DUMP_THROTTLE_S
+        ):
+            return False
+        _engine_execution_timeout_dump_last_s[stage] = now_s
+        return True
 
 
 def _dump_engine_execution_context(
