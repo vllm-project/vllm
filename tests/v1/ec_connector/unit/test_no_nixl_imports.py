@@ -12,8 +12,14 @@ _CPU_DIR = (
     / "vllm/distributed/ec_transfer/ec_connector/cpu"
 )
 # Modules on the gate-off path — must have no top-level nixl/zmq/msgspec import.
-_GATE_OFF_MODULES = ("scheduler.py", "connector.py", "worker.py", "common.py")
+# `scheduler` and `worker` are packages; check their `__init__.py`.
+_GATE_OFF_MODULES = ("scheduler", "connector.py", "worker", "common.py")
 _FORBIDDEN = ("nixl", "zmq", "msgspec")
+
+
+def _resolve(cpu_dir: pathlib.Path, name: str) -> pathlib.Path:
+    path = cpu_dir / name
+    return path / "__init__.py" if path.is_dir() else path
 
 
 def _toplevel_imports(path: pathlib.Path) -> set[str]:
@@ -30,7 +36,7 @@ def _toplevel_imports(path: pathlib.Path) -> set[str]:
 def test_gate_off_modules_have_no_toplevel_nixl_imports():
     offenders = []
     for name in _GATE_OFF_MODULES:
-        path = _CPU_DIR / name
+        path = _resolve(_CPU_DIR, name)
         for mod in _toplevel_imports(path):
             low = mod.lower()
             if any(f in low for f in _FORBIDDEN):
