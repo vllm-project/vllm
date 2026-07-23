@@ -6,30 +6,44 @@ import math
 
 import torch
 
-from vllm import _custom_ops as ops, envs
+from vllm.logger import init_logger
+from vllm.model_executor.kernels.linear import (
+    MPLinearKernel,
+    MPLinearLayerConfig,
+    choose_mp_linear_kernel,
+)
+from vllm.model_executor.layers.quantization.auto_awq import (
+    _convert_awq_to_standard_format,
+)
 from vllm.model_executor.layers.quantization.quark.schemes.quark_scheme import (
     QuarkScheme,
+)
+from vllm.model_executor.layers.quantization.quark.utils import (
+    canonicalize_quark_packed_int4,
 )
 from vllm.model_executor.parameter import (
     GroupQuantScaleParameter,
     PackedvLLMParameter,
 )
+from vllm.scalar_type import scalar_types
+
+logger = init_logger(__name__)
 
 
 class QuarkW4A16Int4(QuarkScheme):
-    """Quark packed INT4 weight-only linear scheme.
+    """Quark packed INT4 weight-only linear scheme via MPLinearKernel."""
 
-    Quark export pack order is canonicalized to the layout used by ``awq_*`` ops.
-    This is a kernel layout detail only; checkpoints still load via ``quark``.
-    """
-
-    _AWQ_PACK_ORDER = (0, 4, 1, 5, 2, 6, 3, 7)
+    _kernel_backends_being_used: set[str] = set()
 
     def __init__(self, group_size: int, pack_method: str, is_symmetric: bool):
         self.group_size = group_size
         self.pack_factor = 8
         self.pack_reorder = pack_method == "reorder"
         self.is_symmetric = is_symmetric
+        self.quant_type = (
+            scalar_types.uint4b8 if is_symmetric else scalar_types.uint4
+        )
+        self.kernel: MPLinearKernel | None = None
 
     @classmethod
     def get_min_capability(cls) -> int:
@@ -44,6 +58,8 @@ class QuarkW4A16Int4(QuarkScheme):
         weight_loader: Callable,
         **kwargs,
     ):
+        input_size = kwargs["input_size"]
+        output_size = kwargs["output_size"]
         group_size = (
             self.group_size if self.group_size != -1 else input_size_per_partition
         )
@@ -60,17 +76,34 @@ class QuarkW4A16Int4(QuarkScheme):
         layer.output_size_per_partition = output_size_per_partition
         layer.packed_output_size_per_partition = packed_output_size_per_partition
 
+        mp_linear_kernel_config = MPLinearLayerConfig(
+            full_weight_shape=(input_size, output_size),
+            partition_weight_shape=(
+                input_size_per_partition,
+                output_size_per_partition,
+            ),
+            weight_type=self.quant_type,
+            act_type=params_dtype,
+            group_size=group_size,
+            zero_points=not self.is_symmetric,
+            has_g_idx=False,
+        )
+        kernel_type = choose_mp_linear_kernel(mp_linear_kernel_config)
+        if kernel_type.__name__ not in self._kernel_backends_being_used:
+            logger.info("Using %s for QuarkW4A16Int4", kernel_type.__name__)
+            self._kernel_backends_being_used.add(kernel_type.__name__)
+
         def weight_scale_loader(
             param: torch.nn.Parameter,
             loaded_weight: torch.Tensor,
             *args,
-            **kwargs,
+            **loader_kwargs,
         ) -> None:
             if loaded_weight.shape[1] < param.data.shape[1]:
                 padded_weight = loaded_weight.new_zeros(param.data.shape)
                 padded_weight[:, : loaded_weight.shape[1]] = loaded_weight
                 loaded_weight = padded_weight
-            weight_loader(param, loaded_weight, *args, **kwargs)
+            weight_loader(param, loaded_weight, *args, **loader_kwargs)
 
         weight = PackedvLLMParameter(
             data=torch.empty(
@@ -112,48 +145,36 @@ class QuarkW4A16Int4(QuarkScheme):
         layer.register_parameter("weight_zero_point", weight_zero_point)
         layer.register_parameter("weight_scale", weight_scale)
 
-    def _pack_order(self, device: torch.device) -> torch.Tensor:
-        if self.pack_reorder:
-            return torch.tensor(
-                self._AWQ_PACK_ORDER,
-                device=device,
-                dtype=torch.int32,
-            )
-        return torch.arange(self.pack_factor, device=device, dtype=torch.int32)
-
-    def _awq_pack_order(self, device: torch.device) -> torch.Tensor:
-        return torch.tensor(
-            self._AWQ_PACK_ORDER,
-            device=device,
-            dtype=torch.int32,
+        self.kernel = kernel_type(
+            mp_linear_kernel_config,
+            w_q_param_name="weight",
+            w_s_param_name="weight_scale",
+            w_zp_param_name="weight_zero_point",
         )
-
-    def _canonicalize_packed_weight(self, packed_weight: torch.Tensor) -> torch.Tensor:
-        source_shifts = self._pack_order(packed_weight.device) * 4
-        target_shifts = self._awq_pack_order(packed_weight.device) * 4
-
-        values = (packed_weight.to(torch.int32)[..., None] >> source_shifts) & 0xF
-        if self.is_symmetric:
-            values = values ^ 0x8
-        packed = (values.to(torch.int64) << target_shifts.to(torch.int64)).sum(dim=-1)
-        return packed.to(torch.int32)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        layer.weight.data = self._canonicalize_packed_weight(layer.weight.data)
-        layer.weight_zero_point.data = self._canonicalize_packed_weight(
-            layer.weight_zero_point.data
+        layer.weight.data = canonicalize_quark_packed_int4(
+            layer.weight.data,
+            pack_reorder=self.pack_reorder,
+            is_symmetric=self.is_symmetric,
+            pack_factor=self.pack_factor,
         )
-        layer.weight = torch.nn.Parameter(layer.weight.data, requires_grad=False)
-        layer.weight_zero_point = torch.nn.Parameter(
-            layer.weight_zero_point.data, requires_grad=False
-        )
-        layer.weight_scale = torch.nn.Parameter(
-            layer.weight_scale.data, requires_grad=False
+        layer.weight_zero_point.data = canonicalize_quark_packed_int4(
+            layer.weight_zero_point.data,
+            pack_reorder=self.pack_reorder,
+            is_symmetric=self.is_symmetric,
+            pack_factor=self.pack_factor,
         )
         output_size = layer.output_size_per_partition
         packed_output_size = layer.packed_output_size_per_partition * self.pack_factor
         if output_size < packed_output_size:
             layer.weight_scale.data[:, output_size:].zero_()
+
+        _convert_awq_to_standard_format(
+            layer, "weight", "weight_zero_point", self.quant_type.size_bits
+        )
+        assert self.kernel is not None
+        self.kernel.process_weights_after_loading(layer)
 
     def apply_weights(
         self,
@@ -161,49 +182,5 @@ class QuarkW4A16Int4(QuarkScheme):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ):
-        qweight = layer.weight
-        scales = layer.weight_scale
-        qzeros = layer.weight_zero_point
-        output_size = layer.output_size_per_partition
-        reshaped_x = x.reshape(-1, x.shape[-1])
-
-        is_output_padded = output_size < qweight.shape[-1] * self.pack_factor
-        if is_output_padded:
-            shifts = self._awq_pack_order(qweight.device) * 4
-
-            weight = (qweight.to(torch.int32)[..., None] >> shifts) & 0xF
-            weight = weight.reshape(qweight.shape[0], -1)[:, :output_size]
-
-            zeros = (qzeros.to(torch.int32)[..., None] >> shifts) & 0xF
-            zeros = zeros.reshape(qzeros.shape[0], -1)[:, :output_size]
-            group_size = qweight.shape[0] // scales.shape[0]
-            zeros = zeros.repeat_interleave(group_size, dim=0)
-
-            scale = scales[:, :output_size].repeat_interleave(group_size, dim=0)
-            weight = (weight - zeros).to(scale.dtype) * scale
-            out = torch.matmul(reshaped_x, weight)
-        elif (
-            x.dtype == torch.bfloat16
-            or x.shape[:-1].numel() >= 256
-            or envs.VLLM_BATCH_INVARIANT
-        ):
-            out = ops.awq_dequantize(
-                qweight,
-                scales,
-                qzeros,
-                0,
-                0,
-                0,
-            )
-            out = torch.matmul(reshaped_x, out)
-        else:
-            out = ops.awq_gemm(
-                reshaped_x,
-                qweight,
-                scales,
-                qzeros,
-                self.pack_factor,
-            )
-        if bias is not None:
-            out[:, :output_size].add_(bias)
-        return out.reshape(x.shape[:-1] + (out.shape[-1],))[..., :output_size]
+        assert self.kernel is not None
+        return self.kernel.apply_weights(layer, x, bias)
