@@ -18,16 +18,17 @@ The GPU memory fraction can be tuned via ``VLLM_TEST_GPU_MEMORY_UTILIZATION``
 (defaults to 0.5).
 """
 
-import base64
 import io
 import os
 
 import numpy as np
+import pybase64 as base64
 import pytest
 
-from ...utils import RemoteOpenAIServer
 from vllm.platforms import current_platform
 from vllm.utils.import_utils import has_deep_gemm
+
+from ...utils import RemoteOpenAIServer
 
 # DeepSeek-V3.2 carries a SparseAttnIndexer in every backbone layer when
 # ``index_topk`` is set. Shrink the model so it fits in CI:

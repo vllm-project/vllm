@@ -50,10 +50,7 @@ from vllm.distributed.parallel_state import (
     is_global_first_rank,
     prepare_communication_buffer_for_model,
 )
-from vllm.forward_context import (
-    BatchDescriptor,
-    set_forward_context,
-)
+from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
 from vllm.lora.layers import LoRAMapping, LoRAMappingType
 from vllm.model_executor.layers.attention import Attention, MLAAttention
@@ -62,10 +59,6 @@ from vllm.model_executor.layers.fused_moe.all2all_utils import get_ep_all2all_ma
 from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
     RoutedExpertsCapturer,
 )
-from vllm.model_executor.layers.sparse_attn_indexer import SparseAttnIndexer
-from vllm.model_executor.layers.sparse_attn_indexer_capturer import (
-    IndexerTopkCapturer,
-)
 from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
     initialize_mamba_ssu_backend,
 )
@@ -73,6 +66,8 @@ from vllm.model_executor.layers.rotary_embedding import (
     MRotaryEmbedding,
     XDRotaryEmbedding,
 )
+from vllm.model_executor.layers.sparse_attn_indexer import SparseAttnIndexer
+from vllm.model_executor.layers.sparse_attn_indexer_capturer import IndexerTopkCapturer
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.model_executor.model_loader.reload import (
     finalize_layerwise_reload,
@@ -97,11 +92,7 @@ from vllm.model_executor.models.interfaces_base import (
     is_pooling_model,
     is_text_generation_model,
 )
-from vllm.model_executor.offloader import (
-    create_offloader,
-    get_offloader,
-    set_offloader,
-)
+from vllm.model_executor.offloader import create_offloader, get_offloader, set_offloader
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.encoder_budget import MultiModalBudget
 from vllm.multimodal.inputs import (
@@ -142,9 +133,7 @@ from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
 )
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
-from vllm.v1.attention.backends.linear_attn import (
-    BailingLinearAttentionMetadataBuilder,
-)
+from vllm.v1.attention.backends.linear_attn import BailingLinearAttentionMetadataBuilder
 from vllm.v1.attention.backends.mamba2_attn import Mamba2AttentionMetadataBuilder
 from vllm.v1.attention.backends.utils import (
     NULL_BLOCK_ID,
@@ -176,6 +165,8 @@ from vllm.v1.outputs import (
     AsyncModelRunnerOutput,
     DraftTokenIds,
     ECConnectorOutput,
+    IndexerTopkLists,
+    IndexerTopkTensors,
     KVConnectorOutput,
     LogprobsLists,
     LogprobsTensors,
@@ -183,8 +174,6 @@ from vllm.v1.outputs import (
     PoolerOutput,
     RoutedExpertsLists,
     RoutedExpertsTensors,
-    IndexerTopkLists,
-    IndexerTopkTensors,
     SamplerOutput,
     make_empty_encoder_model_runner_output,
 )
@@ -6603,9 +6592,7 @@ class GPUModelRunner(
             SupportsEncoderCudaGraph,
             supports_encoder_cudagraph,
         )
-        from vllm.v1.worker.encoder_cudagraph import (
-            EncoderCudaGraphManager,
-        )
+        from vllm.v1.worker.encoder_cudagraph import EncoderCudaGraphManager
 
         raw_model = self.get_model()
         if not supports_encoder_cudagraph(raw_model):
@@ -7720,9 +7707,7 @@ class GPUModelRunner(
         from vllm.model_executor.layers.fused_moe.modular_kernel import (
             FusedMoEExpertsMonolithic,
         )
-        from vllm.model_executor.layers.fused_moe.router.base_router import (
-            BaseRouter,
-        )
+        from vllm.model_executor.layers.fused_moe.router.base_router import BaseRouter
 
         for module in self.model.modules():
             if not isinstance(module, MoERunner):
