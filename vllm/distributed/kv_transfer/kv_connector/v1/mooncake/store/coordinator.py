@@ -93,6 +93,9 @@ class MooncakeStoreCoordinator:
             self.eagle_group_ids = set(range(len(kv_cache_groups)))
         self._verify_and_split_kv_cache_groups()
 
+    def align_lookup_length(self, length: int) -> int:
+        return length // self.lcm_block_size * self.lcm_block_size
+
     def _verify_and_split_kv_cache_groups(self) -> None:
         """Mirrors KVCacheCoordinator.verify_and_split_kv_cache_groups but
         dispatches via spec_manager_map (we don't allocate managers).
