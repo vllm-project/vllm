@@ -4,6 +4,7 @@ import copy
 import hashlib
 import importlib
 from collections.abc import Callable
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -31,6 +32,7 @@ from vllm.v1.core.kv_cache_utils import (
     generate_scheduler_kv_cache_config,
     get_kv_cache_capacity,
     get_kv_cache_configs,
+    get_kv_cache_groups,
     get_max_concurrency_for_kv_cache_config,
     get_request_block_hasher,
     group_and_unify_kv_cache_specs,
@@ -2094,10 +2096,10 @@ def test_mixed_precision_kv_cache_with_uniform_type_specs():
     assert scheduler_config.needs_kv_cache_zeroing
 
 
-def new_mla_spec(cache_dtype_str=None):
+def new_mla_spec(cache_dtype_str=None, block_size=16):
     # head_size = kv_lora_rank(512) + qk_rope_head_dim(64) = 576
     return MLAAttentionSpec(
-        block_size=16,
+        block_size=block_size,
         num_kv_heads=1,
         head_size=576,
         dtype=torch.float32,
@@ -2145,6 +2147,66 @@ def test_group_and_unify_kv_cache_specs_mixed_page_size_groups():
     assert len(grouped) == 2
     layer_names = {name for g in grouped for name in g.kv_cache_specs}
     assert layer_names == {"mla.0", "mla.1", "swa.0"}
+
+
+def new_indexer_mla_spec(block_size=16):
+    # Sparse-attention indexer k_cache: an MLAAttentionSpec with a much smaller
+    # page size than the main MLA attention (uint8, small head), so their pages
+    # cannot be unified.
+    return MLAAttentionSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=132,
+        dtype=torch.uint8,
+    )
+
+
+def _grouping_config():
+    return SimpleNamespace(
+        scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=False),
+        speculative_config=None,
+    )
+
+
+def test_mla_draft_prefers_standard_layout_when_pages_can_be_unified():
+    specs = {
+        "target.0.attn": new_mla_spec(),
+        "draft.0": new_sliding_window_spec(num_kv_heads=1, head_size=288),
+    }
+    assert len({spec.page_size_bytes for spec in specs.values()}) == 1
+
+    groups = get_kv_cache_groups(_grouping_config(), specs)
+
+    assert len(groups) == 2
+    assert all(
+        not isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs) for group in groups
+    )
+
+
+def test_mla_with_incompatible_swa_uses_one_full_allocation_group(caplog):
+    # Sparse MLA pages cannot be padded safely. Keeping the draft's attention
+    # compute sliding-window while promoting only its allocation semantics lets
+    # every layer share the target's block table and remain contiguous.
+    draft = new_sliding_window_spec(block_size=16)
+    specs = {
+        "target.0.attn": new_mla_spec(block_size=64),
+        "target.0.indexer": new_indexer_mla_spec(block_size=64),
+        "draft.0": draft,
+    }
+
+    groups = get_kv_cache_groups(_grouping_config(), specs)
+    assert len(groups) == 1
+    assert set(groups[0].layer_names) == set(specs)
+    group_spec = groups[0].kv_cache_spec
+    assert isinstance(group_spec, UniformTypeKVCacheSpecs)
+    assert group_spec.block_size == 64
+    promoted_draft = group_spec.kv_cache_specs["draft.0"]
+    assert isinstance(promoted_draft, FullAttentionSpec)
+    assert not isinstance(promoted_draft, SlidingWindowSpec)
+    assert promoted_draft.block_size == 64
+    assert promoted_draft.sliding_window == draft.sliding_window
+    assert specs["draft.0"] is draft
+    assert "attention compute is unchanged" in caplog.text
 
 
 def test_get_kv_cache_spec_kind_prefers_specific_attention_subclasses():
@@ -2646,19 +2708,22 @@ def test_page_size_padded_wins():
 
 def test_unify_hybrid_kv_cache_specs():
     # 1. has_full_attention and has_sliding_window
-    before_spec_1 = new_kv_cache_spec()
+    before_spec_1 = new_kv_cache_spec(block_size=64)
     before_spec_2 = new_sliding_window_spec(
-        page_size_padded=32 * 1024, sliding_window=1024
+        block_size=16, page_size_padded=32 * 1024, sliding_window=1024
     )
     kv_cache_spec = {
         "layer_1": before_spec_1,
         "layer_2": before_spec_2,
     }
     kv_cache_utils.unify_hybrid_kv_cache_specs(kv_cache_spec)
-    expected_spec_1 = new_kv_cache_spec()
-    expected_spec_2 = new_kv_cache_spec(page_size_padded=32 * 1024, sliding_window=1024)
+    expected_spec_1 = new_kv_cache_spec(block_size=64)
+    expected_spec_2 = new_kv_cache_spec(
+        block_size=64, page_size_padded=64 * 1024, sliding_window=1024
+    )
     assert kv_cache_spec["layer_1"] == expected_spec_1
     assert kv_cache_spec["layer_2"] == expected_spec_2
+    assert kv_cache_spec["layer_2"].page_size_bytes == 64 * 1024
 
     # 2. has_full_attention and has_chunked_local_attention
     before_spec_1 = new_kv_cache_spec()
