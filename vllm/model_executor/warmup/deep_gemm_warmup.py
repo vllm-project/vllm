@@ -133,6 +133,18 @@ def _extract_data_from_fused_moe_module(
     return w13, w13_s, w2, w2_s, num_topk
 
 
+def _is_deep_gemm_backed_kernel(fp8_linear: object) -> bool:
+    """
+    Return True if the selected linear kernel dispatches to DeepGEMM, either
+    directly or as the fallback branch of a dynamic wrapper.
+    """
+    if isinstance(fp8_linear, DeepGemmFp8BlockScaledMMKernel):
+        return True
+    return isinstance(
+        getattr(fp8_linear, "fallback", None), DeepGemmFp8BlockScaledMMKernel
+    )
+
+
 def _fp8_linear_may_use_deep_gemm(module: torch.nn.Module) -> bool:
     """
     Return True if the input module/layer could be processed with DeepGEMM.
@@ -147,10 +159,8 @@ def _fp8_linear_may_use_deep_gemm(module: torch.nn.Module) -> bool:
     ):
         return False
 
-    if not isinstance(
-        getattr(module.quant_method, "fp8_linear", None),
-        DeepGemmFp8BlockScaledMMKernel,
-    ):
+    fp8_linear = getattr(module.quant_method, "fp8_linear", None)
+    if not _is_deep_gemm_backed_kernel(fp8_linear):
         return False
 
     block_size = get_mk_alignment_for_contiguous_layout()[0]
