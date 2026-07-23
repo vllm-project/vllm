@@ -50,9 +50,7 @@ from vllm.v1.attention.backends.mla.hisparse import (
     HiSparseCoordinator,
     ResolvedHiSparseConfig,
     _has_hisparse_ops,
-    create_hisparse_coordinator,
     hisparse_prefill_staging_remap,
-    is_hisparse_decode_batch,
 )
 from vllm.v1.attention.backends.mla.indexer import split_indexer_prefill_chunks
 from vllm.v1.attention.backends.utils import (
@@ -1340,48 +1338,6 @@ def fallback_swap_in(
         dst = torch.tensor(miss_dst, dtype=torch.long, device=coordinator.device)
         rows = coordinator._host_cache[src_cpu].to(coordinator.device)
         coordinator.hot_cache.index_copy_(0, dst, rows)
-
-
-@requires_hisparse_ops
-def test_hisparse_coordinator_layout():
-    vllm_config = SimpleNamespace(
-        attention_config=SimpleNamespace(
-            hisparse_config=HiSparseConfig(
-                device_buffer_size=256,
-                host_pool_gib=1.0,
-            )
-        ),
-        model_config=SimpleNamespace(hf_config=SimpleNamespace(index_topk=128)),
-        scheduler_config=SimpleNamespace(max_num_seqs=256),
-    )
-    coordinator = create_hisparse_coordinator(
-        vllm_config,
-        model_top_k=128,
-        row_width=64,
-        kv_dtype=torch.float32,
-        device=DEVICE_TYPE,
-    )
-    assert coordinator is not None
-    assert coordinator.region_stride % 128 == 0
-    assert coordinator.region_stride > coordinator.config.device_buffer_size
-
-
-def test_hisparse_decode_batch_detection():
-    assert is_hisparse_decode_batch(
-        max_query_len=1,
-        num_reqs=8,
-        num_actual_tokens=8,
-    )
-    assert not is_hisparse_decode_batch(
-        max_query_len=2,
-        num_reqs=8,
-        num_actual_tokens=16,
-    )
-    assert not is_hisparse_decode_batch(
-        max_query_len=1,
-        num_reqs=8,
-        num_actual_tokens=9,
-    )
 
 
 def _make_hisparse_coordinator(

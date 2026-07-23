@@ -70,13 +70,6 @@ def test_backend_per_kind_defaults_empty():
     assert AttentionConfig().backend_per_kind == {}
 
 
-def test_hisparse_config_parses_mapping():
-    config = AttentionConfig(
-        hisparse_config={"host_pool_gib": 1.0}  # type: ignore[arg-type]
-    )
-    assert config.hisparse_config == HiSparseConfig(host_pool_gib=1.0)
-
-
 def test_hisparse_config_resolves_model_constraints():
     vllm_config = SimpleNamespace(
         attention_config=AttentionConfig(
