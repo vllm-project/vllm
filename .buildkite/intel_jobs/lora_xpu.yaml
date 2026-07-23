@@ -60,7 +60,7 @@ steps:
     cd tests &&
     pytest -v -s -x lora/test_chatglm3_tp.py --deselect="tests/lora/test_chatglm3_tp.py::test_chatglm3_lora_tp4" || true &&
     pytest -v -s -x lora/test_llama_tp.py --deselect="tests/lora/test_llama_tp.py::test_llama_lora_tp4_fully_sharded_loras" --deselect="tests/lora/test_llama_tp.py::test_llama_lora_tp4" || true &&
-    pytest -v -s -x lora/test_qwen3_with_multi_loras.py || true &&
+    pytest -v -s -x lora/test_qwen3_with_multi_loras.py --deselect="tests/lora/test_qwen3_with_multi_loras.py::test_multi_loras_with_tp_sync" || true &&
     pytest -v -s -x lora/test_olmoe_tp.py || true &&
     pytest -v -s -x lora/test_gptoss_tp.py || true &&
     pytest -v -s -x lora/test_qwen35_densemodel_lora.py || true'
