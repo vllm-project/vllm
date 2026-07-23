@@ -64,3 +64,37 @@ class LoRAAdapterNotFoundError(VLLMNotFoundError):
 
     def __str__(self):
         return self.message
+
+
+class VLLMUnprocessableEntityError(ValueError):
+    """vLLM-specific error for unprocessable entity requests.
+
+    This exception is raised when the request content is invalid or cannot be
+    processed, such as when an image URL points to a non-existent or inaccessible
+    resource (404, 403, DNS failure, etc.).
+
+    Args:
+        message: The error message describing the unprocessable entity.
+        parameter: Optional parameter name that failed validation.
+        value: Optional value that was rejected during validation.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        parameter: str | None = None,
+        value: Any = None,
+    ) -> None:
+        super().__init__(message)
+        self.parameter = parameter
+        self.value = value
+
+    def __str__(self):
+        base = super().__str__()
+        extras = []
+        if self.parameter is not None:
+            extras.append(f"parameter={self.parameter}")
+        if self.value is not None:
+            extras.append(f"value={self.value}")
+        return f"{base} ({', '.join(extras)})" if extras else base

@@ -1,5 +1,8 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use super::{JsonToolCallConfig, JsonToolCallParser, JsonToolCallWhitespace};
-use crate::tool::{Result, StructuralTagModel, Tool, ToolParser, ToolParserOutput};
+use crate::tool::{Result, StructuralTagBuilder, Tool, ToolParser, ToolParserOutput};
 
 const QWEN_XML_CONFIG: JsonToolCallConfig = JsonToolCallConfig {
     parser_name: "Qwen XML",
@@ -47,8 +50,8 @@ impl ToolParser for Qwen3XmlToolParser {
         Ok(Box::new(Self::new(tools)))
     }
 
-    fn structural_tag_model(&self) -> Option<StructuralTagModel> {
-        Some(StructuralTagModel::Qwen3)
+    fn structural_tag_builder(&self) -> Option<&dyn StructuralTagBuilder> {
+        Some(xgrammar_structural_tag::Model::Qwen3.builder())
     }
 
     fn parse_into(&mut self, chunk: &str, output: &mut ToolParserOutput) -> Result<()> {
@@ -280,7 +283,7 @@ mod tests {
             .unwrap_err();
 
         expect![[r#"
-            tool parser parsing failed: invalid Qwen XML
+            tool parser parsing failed: near "{\"arguments\":{},\"name\":\"get_weather\"}\n</tool_call>": invalid Qwen XML
             expected `name`"#]]
         .assert_eq(&error.to_report_string());
     }
