@@ -164,24 +164,33 @@ class StructuredOutputManager:
             else:
                 raise ValueError(f"Unsupported structured output backend: {backend}")
 
+        grammar: Future[StructuredOutputGrammar] | StructuredOutputGrammar
         if self._use_async_grammar_compilation:
             grammar = self.executor.submit(self._create_grammar, request)
         else:
-            grammar = self._create_grammar(request)  # type: ignore[assignment]
-        request.structured_output_request.grammar = grammar  # type: ignore[assignment]
+            try:
+                grammar = self._create_grammar(request)
+            except Exception as e:
+                grammar = Future()
+                grammar.set_exception(e)
+        request.structured_output_request.grammar = grammar
 
     def _create_grammar(self, request: "Request") -> StructuredOutputGrammar:
-        key = request.structured_output_request.structured_output_key  # type: ignore[union-attr]
-
+        struct_request = request.structured_output_request
+        assert struct_request is not None
         # Note that the request was validated in the engine core client,
-        # so at this point we know it is a supported type of request.
-        #
-        # TODO: we still need to handle xgrammar compilation failures,
-        # though it should be unlikely as we test that up front as well.
-        request_type, grammar_spec = key
-
-        assert self.backend is not None
-        return self.backend.compile_grammar(request_type, grammar_spec)
+        # so at this point we know it is a supported type of request. Grammar
+        # compilation may still fail; the Future carries that error to the
+        # scheduler so it can fail only this request.
+        try:
+            request_type, grammar_spec = struct_request.structured_output_key
+            assert self.backend is not None
+            return self.backend.compile_grammar(request_type, grammar_spec)
+        except Exception:
+            logger.exception(
+                "Failed to compile grammar for request %s", request.request_id
+            )
+            raise
 
     def _fill_bitmasks(
         self, batch: Iterable[tuple[StructuredOutputGrammar, int, bool]]
@@ -244,8 +253,9 @@ class StructuredOutputManager:
                 structured_output_request = request.structured_output_request
                 if TYPE_CHECKING:
                     assert structured_output_request is not None
-                    assert structured_output_request.grammar is not None
                 grammar = structured_output_request.grammar
+                if TYPE_CHECKING:
+                    assert isinstance(grammar, StructuredOutputGrammar)
 
                 apply_bitmask = self.should_fill_bitmask(request)
                 batch.append((grammar, cumulative_index, apply_bitmask))
@@ -268,8 +278,9 @@ class StructuredOutputManager:
 
                 if TYPE_CHECKING:
                     assert structured_output_request is not None
-                    assert structured_output_request.grammar is not None
                 grammar = structured_output_request.grammar
+                if TYPE_CHECKING:
+                    assert isinstance(grammar, StructuredOutputGrammar)
                 apply_bitmask = self.should_fill_bitmask(request)
 
                 reasoner = self._get_reasoner(request)
