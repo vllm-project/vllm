@@ -10,9 +10,7 @@ import vllm._custom_ops as ops
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.model_executor.layers.mamba.mamba_utils import is_conv_state_dim_first
 from vllm.model_executor.layers.mamba.ops.cpu.causal_conv1d import (
-    causal_conv1d_fn_cpu as causal_conv1d_torch,
-)
-from vllm.model_executor.layers.mamba.ops.cpu.causal_conv1d import (
+    causal_conv1d_fn_cpu,
     causal_conv1d_update_cpu,
     causal_conv1d_update_torch,
 )
@@ -139,12 +137,12 @@ def _cpu_gdn_attention_nonspec(
         decode_a = a[:num_decode_tokens]
         decode_state_indices = state_indices_tensor[:num_decodes]
         if is_amx:
-            decode_mixed_qkv = ops.causal_conv1d_update_cpu(
+            decode_mixed_qkv = causal_conv1d_update_cpu(
                 x=decode_mixed_qkv,
-                conv_states=conv_state,
+                conv_state=conv_state,
                 weight=layer.conv1d.weight,
                 bias=layer.conv1d.bias,
-                silu_activation=(layer.activation == "silu"),
+                activation=layer.activation,
                 conv_state_indices=decode_state_indices,
                 is_vnni=True,
             )
@@ -207,29 +205,17 @@ def _cpu_gdn_attention_nonspec(
             num_decodes : num_decodes + num_prefills
         ]
 
-        if is_amx:
-            prefill_mixed_qkv = ops.causal_conv1d_fwd_cpu(
-                x=prefill_mixed_qkv.transpose(0, 1),
-                weight=layer.conv1d.weight,
-                bias=layer.conv1d.bias,
-                conv_states=conv_state,
-                query_start_loc=prefill_query_start_loc,
-                cache_indices=prefill_state_indices,
-                has_initial_state=prefill_has_initial_state,
-                silu_activation=layer.activation == "silu",
-                is_vnni=True,
-            ).transpose(0, 1)
-        else:
-            prefill_mixed_qkv = causal_conv1d_torch(
-                x=prefill_mixed_qkv.transpose(0, 1),
-                weight=conv_weights,
-                bias=layer.conv1d.bias,
-                conv_states=conv_state,
-                query_start_loc=prefill_query_start_loc,
-                cache_indices=prefill_state_indices,
-                has_initial_state=prefill_has_initial_state,
-                activation=layer.activation,
-            ).transpose(0, 1)
+        prefill_mixed_qkv = causal_conv1d_fn_cpu(
+            x=prefill_mixed_qkv.transpose(0, 1),
+            weight=layer.conv1d.weight if is_amx else conv_weights,
+            bias=layer.conv1d.bias,
+            conv_states=conv_state,
+            query_start_loc=prefill_query_start_loc,
+            cache_indices=prefill_state_indices,
+            has_initial_state=prefill_has_initial_state,
+            activation=layer.activation,
+            is_vnni=True if is_amx else None,
+        ).transpose(0, 1)
 
         query, key, value = layer.rearrange_mixed_qkv(prefill_mixed_qkv)
         g, beta = ops.fused_gdn_gating_cpu(
@@ -420,12 +406,12 @@ def _spec_forward(
     )
     if can_use_native_conv:
         q_i = int(seq_lens[0].item())
-        conv_out = ops.causal_conv1d_update_cpu(
+        conv_out = causal_conv1d_update_cpu(
             x=mixed_qkv_spec.view(num_spec_decodes, q_i, dim),
-            conv_states=conv_buf,
+            conv_state=conv_buf,
             weight=layer.conv1d.weight,
             bias=bias,
-            silu_activation=silu,
+            activation=layer.activation,
             conv_state_indices=spec_state_indices[:num_spec_decodes, 0]
             .to("cpu", torch.int32)
             .contiguous(),
@@ -522,12 +508,12 @@ def _spec_aware_nonspec(
         decode_a = a[:num_decode_tokens]
         decode_state_indices = state_indices_tensor[:num_decodes]
         if is_amx:
-            decode_mixed_qkv = ops.causal_conv1d_update_cpu(
+            decode_mixed_qkv = causal_conv1d_update_cpu(
                 x=decode_mixed_qkv,
-                conv_states=conv_buf,
+                conv_state=conv_buf,
                 weight=layer.conv1d.weight,
                 bias=layer.conv1d.bias,
-                silu_activation=layer.activation == "silu",
+                activation=layer.activation,
                 conv_state_indices=decode_state_indices,
                 is_vnni=True,
             )
@@ -588,29 +574,17 @@ def _spec_aware_nonspec(
         prefill_has_initial_state = has_initial_state[
             num_decodes : num_decodes + num_prefills
         ]
-        if is_amx:
-            prefill_mixed_qkv = ops.causal_conv1d_fwd_cpu(
-                x=prefill_mixed_qkv.transpose(0, 1),
-                weight=layer.conv1d.weight,
-                bias=layer.conv1d.bias,
-                conv_states=conv_buf,
-                query_start_loc=prefill_query_start_loc,
-                cache_indices=prefill_state_indices,
-                has_initial_state=prefill_has_initial_state,
-                silu_activation=layer.activation == "silu",
-                is_vnni=True,
-            ).transpose(0, 1)
-        else:
-            prefill_mixed_qkv = causal_conv1d_torch(
-                x=prefill_mixed_qkv.transpose(0, 1),
-                weight=conv_weights,
-                bias=layer.conv1d.bias,
-                conv_states=conv_buf,
-                query_start_loc=prefill_query_start_loc,
-                cache_indices=prefill_state_indices,
-                has_initial_state=prefill_has_initial_state,
-                activation=layer.activation,
-            ).transpose(0, 1)
+        prefill_mixed_qkv = causal_conv1d_fn_cpu(
+            x=prefill_mixed_qkv.transpose(0, 1),
+            weight=layer.conv1d.weight if is_amx else conv_weights,
+            bias=layer.conv1d.bias,
+            conv_states=conv_buf,
+            query_start_loc=prefill_query_start_loc,
+            cache_indices=prefill_state_indices,
+            has_initial_state=prefill_has_initial_state,
+            activation=layer.activation,
+            is_vnni=True if is_amx else None,
+        ).transpose(0, 1)
 
         query, key, value = layer.rearrange_mixed_qkv(prefill_mixed_qkv)
         g, beta = ops.fused_gdn_gating_cpu(
@@ -661,30 +635,17 @@ def _spec_aware_nonspec_subset(
     if is_amx and is_conv_state_dim_first():
         raise RuntimeError("AMX GDN attention requires `SD` conv_state layout.")
 
-    if is_amx:
-        conv_out = ops.causal_conv1d_fwd_cpu(
-            x=mixed_qkv.transpose(0, 1),
-            weight=layer.conv1d.weight,
-            bias=layer.conv1d.bias,
-            conv_states=conv_buf,
-            query_start_loc=prefill_qsl,
-            cache_indices=prefill_state_indices,
-            has_initial_state=has_initial_state,
-            silu_activation=layer.activation == "silu",
-            is_vnni=True,
-        ).transpose(0, 1)
-    else:
-        conv_weights = _unpacked_conv_weight(layer)
-        conv_out = causal_conv1d_torch(
-            x=mixed_qkv.transpose(0, 1),
-            weight=conv_weights,
-            bias=layer.conv1d.bias,
-            conv_states=conv_buf,
-            query_start_loc=prefill_qsl,
-            cache_indices=prefill_state_indices,
-            has_initial_state=has_initial_state,
-            activation=layer.activation,
-        ).transpose(0, 1)
+    conv_out = causal_conv1d_fn_cpu(
+        x=mixed_qkv.transpose(0, 1),
+        weight=layer.conv1d.weight if is_amx else _unpacked_conv_weight(layer),
+        bias=layer.conv1d.bias,
+        conv_states=conv_buf,
+        query_start_loc=prefill_qsl,
+        cache_indices=prefill_state_indices,
+        has_initial_state=has_initial_state,
+        activation=layer.activation,
+        is_vnni=True if is_amx else None,
+    ).transpose(0, 1)
 
     query, key, value = layer.rearrange_mixed_qkv(conv_out)
     g, beta = ops.fused_gdn_gating_cpu(

@@ -6,7 +6,7 @@ from __future__ import annotations
 import torch
 import torch.nn.functional as F
 
-from vllm._custom_ops import causal_conv1d_update_cpu_vec
+import vllm._custom_ops as ops
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID, PAD_SLOT_ID
 
 
@@ -20,6 +20,7 @@ def causal_conv1d_fn_cpu(
     has_initial_state: torch.Tensor | None = None,
     activation: str | None = "silu",
     pad_slot_id: int = PAD_SLOT_ID,
+    is_vnni: bool | None = None,
     **kwargs,
 ) -> torch.Tensor:
     """CPU implementation for causal_conv1d_fwd."""
@@ -27,6 +28,19 @@ def causal_conv1d_fn_cpu(
         activation = "silu"
     elif isinstance(activation, bool):
         activation = None
+
+    if is_vnni is not None:
+        return ops.causal_conv1d_fwd_cpu(
+            x=x,
+            weight=weight,
+            bias=bias,
+            conv_states=conv_states,
+            query_start_loc=query_start_loc,
+            cache_indices=cache_indices,
+            has_initial_state=has_initial_state,
+            silu_activation=activation in ("silu", "swish"),
+            is_vnni=is_vnni,
+        )
 
     original_x_dtype = x.dtype
     x = x.to(conv_states.dtype)
@@ -93,18 +107,38 @@ def causal_conv1d_update_cpu(
     conv_state_indices: torch.Tensor | None = None,
     query_start_loc: torch.Tensor | None = None,
     pad_slot_id: int | None = None,
+    num_accepted_tokens: torch.Tensor | None = None,
+    is_vnni: bool | None = None,
     **kwargs,
 ) -> torch.Tensor:
     """CPU implementation for causal_conv1d_update."""
     if isinstance(activation, bool):
         activation = "silu" if activation else None
 
+    if is_vnni is not None:
+        return ops.causal_conv1d_update_cpu(
+            x=x,
+            conv_states=conv_state,
+            weight=weight,
+            bias=bias,
+            silu_activation=activation in ("silu", "swish"),
+            conv_state_indices=conv_state_indices,
+            is_vnni=is_vnni,
+            num_accepted_tokens=num_accepted_tokens,
+        )
+
+    if num_accepted_tokens is not None:
+        raise ValueError(
+            "num_accepted_tokens requires native causal_conv1d_update_cpu "
+            "(is_vnni must not be None)."
+        )
+
     if pad_slot_id is None:
         pad_slot_id = kwargs.get("null_block_id", NULL_BLOCK_ID)
         if pad_slot_id is None:
             pad_slot_id = NULL_BLOCK_ID
 
-    return causal_conv1d_update_cpu_vec(
+    return ops.causal_conv1d_update_cpu_vec(
         x,
         conv_state,
         weight,
