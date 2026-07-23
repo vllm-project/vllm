@@ -6,8 +6,7 @@ ARG FA_REPO="https://github.com/Dao-AILab/flash-attention.git"
 ARG AITER_BRANCH="v0.1.16.post5"
 ARG AITER_REPO="https://github.com/ROCm/aiter.git"
 
-# Sccache configuration (only used in release pipeline)
-ARG USE_SCCACHE
+# Sccache configuration - LOCAL DISK MODE
 ARG SCCACHE_DOWNLOAD_URL
 
 FROM ${BASE_IMAGE} AS base
@@ -50,35 +49,27 @@ RUN CMAKE_REAL=$(python3 -c "import cmake, os; print(os.path.join(os.path.dirnam
     && ln -sf "$CMAKE_REAL" /opt/python/bin/cmake
 RUN apt-get update && apt-get install -y libjpeg-dev libsox-dev libsox-fmt-all sox && rm -rf /var/lib/apt/lists/*
 
-# Install sccache if USE_SCCACHE is enabled (for release builds)
-ARG USE_SCCACHE
+# Install sccache - always enabled for local disk caching
 ARG SCCACHE_DOWNLOAD_URL
-RUN if [ "$USE_SCCACHE" = "1" ]; then \
-        echo "Installing sccache..." \
-        && SCCACHE_ARCH="x86_64" \
-        && SCCACHE_VERSION="v0.14.0" \
-        && SCCACHE_DL_URL="${SCCACHE_DOWNLOAD_URL:-https://github.com/mozilla/sccache/releases/download/${SCCACHE_VERSION}/sccache-${SCCACHE_VERSION}-${SCCACHE_ARCH}-unknown-linux-musl.tar.gz}" \
-        && curl -L -o /tmp/sccache.tar.gz ${SCCACHE_DL_URL} \
-        && tar -xzf /tmp/sccache.tar.gz -C /tmp \
-        && mv /tmp/sccache-${SCCACHE_VERSION}-${SCCACHE_ARCH}-unknown-linux-musl/sccache /usr/bin/sccache \
-        && chmod +x /usr/bin/sccache \
-        && rm -rf /tmp/sccache.tar.gz /tmp/sccache-${SCCACHE_VERSION}-${SCCACHE_ARCH}-unknown-linux-musl \
-        && sccache --version; \
-    fi
+RUN echo "Installing sccache for local disk caching..." \
+    && SCCACHE_ARCH="x86_64" \
+    && SCCACHE_VERSION="v0.14.0" \
+    && SCCACHE_DL_URL="${SCCACHE_DOWNLOAD_URL:-https://github.com/mozilla/sccache/releases/download/${SCCACHE_VERSION}/sccache-${SCCACHE_VERSION}-${SCCACHE_ARCH}-unknown-linux-musl.tar.gz}" \
+    && curl -L -o /tmp/sccache.tar.gz ${SCCACHE_DL_URL} \
+    && tar -xzf /tmp/sccache.tar.gz -C /tmp \
+    && mv /tmp/sccache-${SCCACHE_VERSION}-${SCCACHE_ARCH}-unknown-linux-musl/sccache /usr/bin/sccache \
+    && chmod +x /usr/bin/sccache \
+    && rm -rf /tmp/sccache.tar.gz /tmp/sccache-${SCCACHE_VERSION}-${SCCACHE_ARCH}-unknown-linux-musl \
+    && sccache --version
 
 # NOTE: sccache wrappers are created AFTER TheRock ROCm install (below)
 # because clang++ path depends on rocm-sdk init
 
-# Set non-secret sccache environment variables only when USE_SCCACHE=1
-ARG USE_SCCACHE
-ARG SCCACHE_S3_KEY_PREFIX
-ENV SCCACHE_BUCKET=${USE_SCCACHE:+${SCCACHE_BUCKET_NAME}}
-ENV SCCACHE_REGION=${USE_SCCACHE:+${SCCACHE_REGION_NAME}}
-ENV SCCACHE_S3_NO_CREDENTIALS=${USE_SCCACHE:+${SCCACHE_S3_NO_CREDENTIALS}}
-ENV SCCACHE_IDLE_TIMEOUT=${USE_SCCACHE:+0}
-ENV SCCACHE_ENDPOINT=${USE_SCCACHE:+${SCCACHE_ENDPOINT}}
-ENV SCCACHE_S3_KEY_PREFIX=${USE_SCCACHE:+${SCCACHE_S3_KEY_PREFIX}}
-ENV SCCACHE_S3_USE_SSL=${USE_SCCACHE:+on}
+# Configure sccache for LOCAL DISK mode
+# Cache will be mounted at build time via --mount=type=cache
+ENV SCCACHE_DIR=/sccache
+ENV SCCACHE_IDLE_TIMEOUT=0
+ENV SCCACHE_CACHE_SIZE="50G"
 
 ###
 ### TheROCK install
@@ -203,9 +194,7 @@ ENV PYTHONPATH=$SITE_PACKAGES/_rocm_sdk_core/share/amd_smi:$PYTHONPATH
 
 # Setup sccache wrappers for HIP compilation via HIP_CLANG_PATH
 # Must run AFTER rocm-sdk init so clang++ is installed
-ARG USE_SCCACHE
-RUN if [ "$USE_SCCACHE" = "1" ]; then \
-        echo "Setting up sccache wrappers for HIP compilation..." \
+RUN echo "Setting up sccache wrappers for HIP compilation..." \
         && mkdir -p /opt/sccache-wrappers \
         && REAL_CLANGXX="" \
         && for p in \
@@ -235,8 +224,7 @@ RUN if [ "$USE_SCCACHE" = "1" ]; then \
              "${REAL_CLANG}" "${REAL_CLANG}" > /opt/sccache-wrappers/clang \
         && chmod +x /opt/sccache-wrappers/clang \
         && echo "sccache wrappers created (with fallback):" \
-        && cat /opt/sccache-wrappers/clang++; \
-    fi
+        && cat /opt/sccache-wrappers/clang++
 
 ###
 ### Triton Build (from source when USE_CUSTOM_TRITON=1)
@@ -270,19 +258,14 @@ RUN if [ "${USE_CUSTOM_TRITON}" = "1" ] && [ -d triton/python/triton_kernels ]; 
 FROM base AS build_fa
 ARG FA_BRANCH
 ARG FA_REPO
-ARG USE_SCCACHE
 RUN git clone ${FA_REPO}
-RUN --mount=type=secret,id=sccache_aws_access_key \
-    --mount=type=secret,id=sccache_aws_secret_key \
+RUN --mount=type=cache,target=/sccache \
     cd flash-attention \
     && git checkout ${FA_BRANCH} \
     && git submodule update --init \
-    && if [ "$USE_SCCACHE" = "1" ] && [ -f /run/secrets/sccache_aws_access_key ]; then \
-           export AWS_ACCESS_KEY_ID="$(cat /run/secrets/sccache_aws_access_key)" \
-           && export AWS_SECRET_ACCESS_KEY="$(cat /run/secrets/sccache_aws_secret_key)" \
-           && export HIP_CLANG_PATH=/opt/sccache-wrappers \
-           && sccache --show-stats; \
-       fi \
+    && export HIP_CLANG_PATH=/opt/sccache-wrappers \
+    && echo "sccache stats before build:" \
+    && sccache --show-stats \
     && FILTERED_ARCHS=$(echo ${PYTORCH_ROCM_ARCH} | sed -e 's/;*gfx1[0-9]\{3\}//g' -e 's/^gfx1[0-9]\{3\};*//g') \
     && if [ -z "$FILTERED_ARCHS" ] || [ "$FILTERED_ARCHS" = ";" ]; then \
            echo "RDNA-only build: building flash-attention without GPU_ARCHS (Triton backend)" \
@@ -291,7 +274,8 @@ RUN --mount=type=secret,id=sccache_aws_access_key \
            echo "CDNA build: building flash-attention with GPU_ARCHS=$FILTERED_ARCHS" \
            && GPU_ARCHS=$FILTERED_ARCHS python3 setup.py bdist_wheel --dist-dir=dist; \
        fi \
-    && if [ "$USE_SCCACHE" = "1" ]; then sccache --show-stats; fi
+    && echo "sccache stats after build:" \
+    && sccache --show-stats
 RUN mkdir -p /app/install && cp /app/flash-attention/dist/*.whl /app/install
 
 
@@ -301,9 +285,7 @@ RUN mkdir -p /app/install && cp /app/flash-attention/dist/*.whl /app/install
 FROM base AS build_aiter
 ARG AITER_BRANCH
 ARG AITER_REPO
-ARG USE_SCCACHE
-RUN --mount=type=secret,id=sccache_aws_access_key \
-    --mount=type=secret,id=sccache_aws_secret_key \
+RUN --mount=type=cache,target=/sccache \
     mkdir -p /app/install && \
     if [ -z "${AITER_ROCM_ARCH}" ] || echo "${AITER_ROCM_ARCH}" | grep -qvE "gfx9"; then \
         echo "Skipping aiter build for RDNA target (AITER_ROCM_ARCH=${AITER_ROCM_ARCH})"; \
@@ -314,14 +296,12 @@ RUN --mount=type=secret,id=sccache_aws_access_key \
         && git submodule update --init --recursive \
         && uv pip install -r requirements.txt \
         && uv pip install pyyaml \
-        && if [ "$USE_SCCACHE" = "1" ] && [ -f /run/secrets/sccache_aws_access_key ]; then \
-               export AWS_ACCESS_KEY_ID="$(cat /run/secrets/sccache_aws_access_key)" \
-               && export AWS_SECRET_ACCESS_KEY="$(cat /run/secrets/sccache_aws_secret_key)" \
-               && export HIP_CLANG_PATH=/opt/sccache-wrappers \
-               && sccache --show-stats; \
-           fi \
-        && PREBUILD_KERNELS=${PREBUILD_KERNELS} GPU_ARCHS=${AITER_ROCM_ARCH} python3 setup.py bdist_wheel --dist-dir=dist \
-        && if [ "$USE_SCCACHE" = "1" ]; then sccache --show-stats; fi \
+        && export HIP_CLANG_PATH=/opt/sccache-wrappers \
+        && echo "sccache stats before build:" \
+        && sccache --show-stats \
+        && AITER_USE_SYSTEM_TRITON=1 PREBUILD_KERNELS=${PREBUILD_KERNELS} GPU_ARCHS=${AITER_ROCM_ARCH} python3 setup.py bdist_wheel --dist-dir=dist \
+        && echo "sccache stats after build:" \
+        && sccache --show-stats \
         && ls /app/aiter/dist/*.whl \
         && cp /app/aiter/dist/*.whl /app/install/; \
     fi

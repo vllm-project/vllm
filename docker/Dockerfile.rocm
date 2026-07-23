@@ -230,7 +230,7 @@ COPY --from=rust-input /rust-input/vllm/requirements/build/rust.txt requirements
 ENV SCCACHE_SERVER_PORT=4227
 
 RUN --mount=type=cache,id=vllm-rocm-uv,target=/root/.cache/uv \
-    uv pip install -r requirements/build/rust.txt
+    uv pip install --system -r requirements/build/rust.txt
 
 COPY --from=rust-input /rust-input/vllm/rust rust
 COPY --from=rust-input /rust-input/vllm/rust-toolchain.toml rust-toolchain.toml
@@ -265,8 +265,17 @@ WORKDIR ${COMMON_WORKDIR}/vllm
 
 COPY requirements/rocm.txt requirements/rocm.txt
 COPY requirements/common.txt requirements/common.txt
+# Freeze torch/triton from base image so uv doesn't replace ROCm torch with CUDA from PyPI.
 RUN --mount=type=cache,id=vllm-rocm-uv,target=/root/.cache/uv \
-    uv pip install -r requirements/rocm.txt
+    TORCH_VER=$(python3 -c "import torch; print(torch.__version__)") \
+    && TRITON_VER=$(python3 -c "import triton; print(triton.__version__)" 2>/dev/null || echo "") \
+    && CONSTRAINT_FILE=$(mktemp) \
+    && echo "torch==${TORCH_VER}" > "${CONSTRAINT_FILE}" \
+    && [ -n "${TRITON_VER}" ] && echo "triton==${TRITON_VER}" >> "${CONSTRAINT_FILE}" \
+    && echo "Freezing: $(cat ${CONSTRAINT_FILE})" \
+    && uv pip install --system --prerelease=allow --constraint "${CONSTRAINT_FILE}" -r requirements/rocm.txt \
+    && rm -f "${CONSTRAINT_FILE}" \
+    && python3 -c "import torch; assert torch.version.hip is not None, 'ERROR: CUDA torch installed instead of ROCm'"
 
 # pyproject.toml is bind-mounted so it is not persisted in the csrc-build image,
 # but it still participates in the BuildKit cache key for this RUN step.
@@ -310,7 +319,7 @@ COPY --from=rust-build ${COMMON_WORKDIR}/vllm/vllm/_rust_*.so ${COMMON_WORKDIR}/
 
 RUN --mount=type=cache,id=vllm-rocm-uv,target=/root/.cache/uv \
     cd vllm \
-    && uv pip install -r requirements/rocm.txt \
+    && uv pip install --system -r requirements/rocm.txt \
     && export VLLM_USE_PRECOMPILED=1 \
     && export VLLM_PRECOMPILED_WHEEL_LOCATION="$(ls /precompiled-wheels/*.whl)" \
     && export VLLM_DOCKER_BUILD_CONTEXT=1 \
@@ -378,7 +387,7 @@ RUN apt-get -y update && apt-get -y install autoconf libtool pkg-config \
     && rm -rf /var/lib/apt/lists/*
 
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install meson auditwheel patchelf tomlkit
+    uv pip install --system meson auditwheel patchelf tomlkit
 
 RUN --mount=type=cache,target=/root/.cache/ccache \
     cd /usr/local/src && \
@@ -561,7 +570,7 @@ RUN if [ "$GIT_REPO_CHECK" != "0" ]; then \
 RUN --mount=type=bind,source=.git,target=vllm/.git \
     --mount=type=cache,target=/root/.cache/uv \
     cd vllm \
-    && uv pip install setuptools_scm regex \
+    && uv pip install --system setuptools_scm regex \
     && VLLM_VERSION=$(python3 -c "import setuptools_scm; print(setuptools_scm.get_version())") \
     && echo "Detected vLLM version: ${VLLM_VERSION}" \
     && echo "${VLLM_VERSION}" > /tmp/vllm_version.txt
@@ -600,7 +609,7 @@ RUN echo "Pinning vLLM dependencies to custom wheel versions..." \
 RUN --mount=type=cache,target=/root/.cache/uv \
     cd vllm \
     && echo "Building vLLM with custom wheels from /install" \
-    && uv pip install --find-links /install -r requirements/rocm.txt
+    && uv pip install --system --find-links /install -r requirements/rocm.txt
 
 # Build wheel using pre-extracted version to avoid dirty state from modified requirements/rocm.txt
 # (setup.py auto-detects ccache/sccache in PATH)
@@ -664,7 +673,7 @@ fi
 # Install RIXL + DeepEP wheels.
 RUN --mount=type=bind,from=build_rixl,src=/app/install,target=/rixl_install \
     --mount=type=bind,from=build_deepep,src=/app/deep_install,target=/deep_install \
-    uv pip install /rixl_install/*.whl /deep_install/*.whl
+    uv pip install --system /rixl_install/*.whl /deep_install/*.whl
 
 # RDMA userspace libraries plus FFmpeg dev libs needed by torchcodec.
 RUN apt-get update -q -y && apt-get install -q -y --no-install-recommends \
@@ -690,7 +699,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # Pre-install shared ROCm runtime dependencies.
 COPY requirements/common.txt requirements/rocm.txt /tmp/ci-base-requirements/
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install -r /tmp/ci-base-requirements/rocm.txt \
+    uv pip install --system -r /tmp/ci-base-requirements/rocm.txt \
     && rm -rf /tmp/ci-base-requirements
 
 # Enable fast and less brittle model downloads in tests.
@@ -704,7 +713,7 @@ ENV PYTORCH_NVML_BASED_CUDA_CHECK=1
 COPY requirements/test/rocm.txt /tmp/rocm-test-reqs.txt
 # Set UV_SKIP_WHEEL_FILENAME_CHECK=1 for pre-release bitsandbytes.
 RUN --mount=type=cache,target=/root/.cache/uv \
-    UV_SKIP_WHEEL_FILENAME_CHECK=1 uv pip install -r /tmp/rocm-test-reqs.txt
+    UV_SKIP_WHEEL_FILENAME_CHECK=1 uv pip install --system -r /tmp/rocm-test-reqs.txt
 
 # Rebuild fastsafetensors from source so its C++ extension is compiled with
 # USE_ROCM and can detect libamdhip64.so at runtime.
@@ -731,7 +740,7 @@ ENV KINETO_CONFIG="${COMMON_WORKDIR}/libkineto.conf"
 # Install vllm_test_utils in ci_base for ci_base + wheel parity.
 COPY tests/vllm_test_utils /tmp/vllm_test_utils
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install /tmp/vllm_test_utils \
+    uv pip install --system /tmp/vllm_test_utils \
     && rm -rf /tmp/vllm_test_utils
 
 # -----------------------
@@ -743,7 +752,7 @@ ARG COMMON_WORKDIR
 RUN --mount=type=bind,from=export_vllm,src=/,target=/install \
     --mount=type=cache,target=/root/.cache/uv \
     cd /install \
-    && uv pip install --no-deps *.whl
+    && uv pip install --system --no-deps *.whl
 
 # Store the vLLM wheel in the image for python-only install tests.
 COPY --from=export_vllm /*.whl /opt/vllm-wheels/
@@ -784,20 +793,20 @@ RUN case "$(which python3)" in \
         *) ;; esac
 
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --upgrade huggingface-hub[cli]
+    uv pip install --system --upgrade huggingface-hub[cli]
 
 # Install vLLM using uv (inherited from base stage)
 # Note: No -U flag to avoid upgrading PyTorch ROCm to CUDA version
 RUN --mount=type=bind,from=export_vllm,src=/,target=/install \
     --mount=type=cache,target=/root/.cache/uv \
     cd /install \
-    && uv pip install -r requirements/rocm.txt \
+    && uv pip install --system -r requirements/rocm.txt \
     && pip uninstall -y vllm \
-    && uv pip install *.whl
+    && uv pip install --system *.whl
 
 # Install RIXL wheel
 RUN --mount=type=bind,from=build_rixl,src=/app/install,target=/rixl_install \
-    uv pip install /rixl_install/*.whl
+    uv pip install --system /rixl_install/*.whl
 
 ARG COMMON_WORKDIR
 ARG BASE_IMAGE
