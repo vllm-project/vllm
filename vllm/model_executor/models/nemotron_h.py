@@ -127,7 +127,7 @@ class NemotronHMoE(nn.Module):
     def __init__(
         self,
         config: NemotronHConfig,
-        model_config: ModelConfig | None,
+        model_config: ModelConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         parallel_config: ParallelConfig | None = None,
         prefix: str = "",
@@ -226,8 +226,8 @@ class NemotronHMoE(nn.Module):
             routed_input_transform=self.fc1_latent_proj,
             routed_output_transform=self.fc2_latent_proj,
             routed_scaling_factor=self.routed_scaling_factor,
-            # BF16 can fold the scale into routing weights before the latent
-            # projection. FP16 retains the overflow-protected output path.
+            # BF16 latent MoE can fold the factor into routing weights and
+            # avoid a post-MoE scale. FP16 retains the overflow-protected path.
             apply_routed_scale_to_output=(
                 not self.use_latent_moe
                 or model_config is None
