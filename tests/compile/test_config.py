@@ -651,7 +651,7 @@ def test_compile_sizes_padding_validation():
     # etc.
     # So compile_sizes=[3] should fail because 3 would be padded to 4
 
-    with pytest.raises(ValueError, match="would be padded to"):
+    with pytest.raises(ValueError, match="would be padded to") as excinfo:
         config = CompilationConfig(
             cudagraph_capture_sizes=[1, 2, 4, 8],
             max_cudagraph_capture_size=8,
@@ -661,6 +661,14 @@ def test_compile_sizes_padding_validation():
         config.post_init_cudagraph_sizes()
         dispatcher = CudagraphDispatcher(_create_vllm_config_for_validation(config))
         dispatcher.initialize_cudagraph_keys(CUDAGraphMode.FULL)
+    # The message should state the padded value and list the actual valid
+    # compile sizes (the fixed points of the padding map) rather than only
+    # pointing at cudagraph_capture_sizes.
+    msg = str(excinfo.value)
+    assert "padded to 4" in msg
+    assert "Valid compile_sizes are: [1, 2, 4, 8]" in msg
+    # Without spec decode, no spec-decode padding hint should appear.
+    assert "Speculative decoding" not in msg
 
     with pytest.raises(ValueError, match="would be padded to"):
         config = CompilationConfig(
@@ -672,6 +680,27 @@ def test_compile_sizes_padding_validation():
         config.post_init_cudagraph_sizes()
         dispatcher = CudagraphDispatcher(_create_vllm_config_for_validation(config))
         dispatcher.initialize_cudagraph_keys(CUDAGraphMode.FULL)
+
+    # Under speculative decoding, capture sizes are rounded up to a multiple of
+    # (num_speculative_tokens + 1), so the valid compile_sizes differ from the
+    # originally configured powers of two. The message should list the actual
+    # valid values and explain the spec-decode padding.
+    with pytest.raises(ValueError, match="would be padded to") as excinfo:
+        config = CompilationConfig(
+            cudagraph_capture_sizes=[3, 6, 12, 24],
+            max_cudagraph_capture_size=24,
+            compile_sizes=[1],  # would be padded to 3
+            cudagraph_mode=CUDAGraphMode.FULL,
+        )
+        config.post_init_cudagraph_sizes()
+        vllm_config = _create_vllm_config_for_validation(config)
+        vllm_config.speculative_config = MagicMock()
+        dispatcher = CudagraphDispatcher(vllm_config)
+        dispatcher.initialize_cudagraph_keys(CUDAGraphMode.FULL)
+    msg = str(excinfo.value)
+    assert "padded to 3" in msg
+    assert "Valid compile_sizes are: [3, 6, 12, 24]" in msg
+    assert "Speculative decoding is enabled" in msg
 
     config = CompilationConfig(
         cudagraph_capture_sizes=[1, 2, 4, 8],
