@@ -4,9 +4,11 @@
 use std::collections::BTreeSet;
 
 pub(crate) mod logprobs;
+pub(crate) mod sampling;
 pub(crate) mod token_ids;
 
 use logprobs::validate_logprobs;
+use sampling::validate_resolved_sampling_params;
 use token_ids::{validate_prompt_token_ids, validate_vocab_range};
 use vllm_engine_core_client::protocol::sampling::{
     EngineCoreSamplingParams, RepetitionDetectionParams,
@@ -17,7 +19,6 @@ use vllm_tokenizer::Tokenizer;
 use crate::backend::{SamplingHints, SamplingLimits};
 use crate::error::{Error, Result};
 use crate::request::{SamplingParams, TextRequest};
-use crate::sampling::validate_resolved_sampling_params;
 
 /// One text request after it has been lowered into the raw generate boundary.
 #[derive(Debug)]
@@ -148,14 +149,6 @@ pub fn lower_sampling_params(
     let thinking_token_budget = normalize_thinking_token_budget(thinking_token_budget)?;
     let frequency_penalty = frequency_penalty.unwrap_or(0.0);
     let presence_penalty = presence_penalty.unwrap_or(0.0);
-    validate_resolved_sampling_params(
-        temperature,
-        top_p,
-        min_p,
-        frequency_penalty,
-        presence_penalty,
-        repetition_penalty,
-    )?;
 
     let mut stop_token_ids = stop_token_ids.unwrap_or_default();
     let mut all_stop_token_ids = BTreeSet::from_iter(stop_token_ids.iter().copied());
@@ -195,6 +188,7 @@ pub fn lower_sampling_params(
         skip_reading_prefix_cache,
         extra_args: vllm_xargs,
     };
+    validate_resolved_sampling_params(&params)?;
     validate_vocab_range(&params, &sampling_limits)?;
     Ok(params)
 }

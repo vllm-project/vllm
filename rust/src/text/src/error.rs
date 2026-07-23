@@ -6,8 +6,8 @@ use vllm_engine_core_client::Error as EngineCoreError;
 use vllm_llm::Error as LlmError;
 
 pub use crate::lower::logprobs::LogprobsError;
+pub use crate::lower::sampling::SamplingParamsError;
 pub use crate::lower::token_ids::TokenIdsError;
-pub use crate::sampling::SamplingParamsError;
 
 #[derive(Debug, Error)]
 pub enum Error {

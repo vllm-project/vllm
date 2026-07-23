@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 use thiserror::Error;
+use vllm_engine_core_client::protocol::sampling::EngineCoreSamplingParams;
 
 #[derive(Debug, Error, PartialEq)]
 pub enum SamplingParamsError {
@@ -56,19 +57,14 @@ fn validate_repetition_penalty(value: f32) -> Result<(), SamplingParamsError> {
 }
 
 pub(crate) fn validate_resolved_sampling_params(
-    temperature: f32,
-    top_p: f32,
-    min_p: f32,
-    frequency_penalty: f32,
-    presence_penalty: f32,
-    repetition_penalty: f32,
+    params: &EngineCoreSamplingParams,
 ) -> Result<(), SamplingParamsError> {
-    validate_temperature(temperature)?;
-    validate_top_p(top_p)?;
-    validate_min_p(min_p)?;
-    validate_frequency_penalty(frequency_penalty)?;
-    validate_presence_penalty(presence_penalty)?;
-    validate_repetition_penalty(repetition_penalty)
+    validate_temperature(params.temperature)?;
+    validate_top_p(params.top_p)?;
+    validate_min_p(params.min_p)?;
+    validate_frequency_penalty(params.frequency_penalty)?;
+    validate_presence_penalty(params.presence_penalty)?;
+    validate_repetition_penalty(params.repetition_penalty)
 }
 
 fn validate_finite(parameter: &'static str, value: f32) -> Result<(), SamplingParamsError> {
