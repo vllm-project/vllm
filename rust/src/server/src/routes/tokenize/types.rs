@@ -116,6 +116,8 @@ impl TokenizeChatRequest {
             tool_context,
             decode_options: TextDecodeOptions::default(),
             intermediate: false,
+            truncate_prompt_tokens: None,
+            truncation_side: None,
             priority: 0,
             documents: None,
             cache_salt: None,
