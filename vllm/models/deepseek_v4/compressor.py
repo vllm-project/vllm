@@ -7,13 +7,14 @@ from typing import Any, ClassVar, cast
 import torch
 from torch import nn
 
-from vllm.config import VllmConfig, get_current_vllm_config
+from vllm.config import CUDAGraphMode, VllmConfig, get_current_vllm_config
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import MergedColumnParallelLinear
 from vllm.models.deepseek_v4.common.ops.fused_compress_quant_cache import (
     compress_norm_rope_store_triton,
+    compress_norm_rope_store_two_stage_triton,
 )
 from vllm.models.deepseek_v4.common.ops.fused_indexer_q import MXFP4_BLOCK_SIZE
 from vllm.models.deepseek_v4.common.ops.save_partial_states import (
@@ -27,11 +28,31 @@ from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
     MultipleOf,
 )
+from vllm.v1.attention.backends.utils import split_decodes_and_prefills
 from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
     MLAAttentionSpec,
     SlidingWindowMLASpec,
 )
+
+
+def _prefer_two_stage_compressor() -> bool:
+    # Platforms that favor the triton variant of two-stage compressor split.
+    # Currently only tested on ROCm
+    return current_platform.is_rocm()
+
+
+def _get_c128_boundary(metadata: CommonAttentionMetadata) -> bool | None:
+    starts = metadata._num_computed_tokens_cpu
+    if starts is None:
+        return None
+
+    starts_list = starts.tolist()
+    query_start_loc = metadata.query_start_loc_cpu.tolist()
+    return any(
+        start % 128 + query_start_loc[i + 1] - query_start_loc[i] >= 128
+        for i, start in enumerate(starts_list)
+    )
 
 
 class CompressorBackend(AttentionBackend):
@@ -81,6 +102,8 @@ class CompressorMetadata:
     block_size: int
 
     token_to_req_indices: torch.Tensor | None = None  # [num_tokens]
+    num_decode_tokens: int | None = None
+    c128_boundary: bool | None = None
 
 
 class CompressorMetadataBuilder(AttentionMetadataBuilder):
@@ -107,11 +130,22 @@ class CompressorMetadataBuilder(AttentionMetadataBuilder):
         token_to_req_indices = common_attn_metadata.token_to_req_indices(
             self.token_to_req_indices
         )
+        num_decode_tokens = None
+        if _prefer_two_stage_compressor():
+            _, _, num_decode_tokens, _ = split_decodes_and_prefills(
+                common_attn_metadata, decode_threshold=1
+            )
         return CompressorMetadata(
             block_table=common_attn_metadata.block_table_tensor.clamp_(min=0),
             slot_mapping=common_attn_metadata.slot_mapping,
             block_size=self.block_size,
             token_to_req_indices=token_to_req_indices,
+            num_decode_tokens=num_decode_tokens,
+            c128_boundary=(
+                _get_c128_boundary(common_attn_metadata)
+                if self.block_size == 8
+                else None
+            ),
         )
 
 
@@ -213,6 +247,25 @@ class DeepseekCompressor(nn.Module):
         self.overlap = compress_ratio == 4
         self.coff = 1 + self.overlap
 
+        # The head=512 cr>=128 no-overlap deep gather uses the two-stage
+        # compressor, which needs an fp32 scratch [max_batched, 512] for
+        # the intermediate compressed_kv.
+        # Currently only tested on ROCm
+        self._use_two_stage_fused_compressor = (
+            _prefer_two_stage_compressor() and head_dim == 512 and not self.overlap
+        )
+        self.max_num_batched_tokens = (
+            vllm_config.scheduler_config.max_num_batched_tokens
+        )
+        self._compress_scratch: torch.Tensor | None = None
+        if self._use_two_stage_fused_compressor:
+            self._compress_scratch = torch.empty(
+                self.max_num_batched_tokens,
+                self.head_dim,
+                dtype=torch.float32,
+                device=self.device,
+            )
+
         state_dtype = torch.float32
         self.ape = nn.Parameter(
             torch.empty(
@@ -283,7 +336,8 @@ class DeepseekCompressor(nn.Module):
         )
 
         # Get the metadata and handle dummy profiling run.
-        attn_metadata = get_forward_context().attn_metadata
+        forward_context = get_forward_context()
+        attn_metadata = forward_context.attn_metadata
         if not isinstance(attn_metadata, dict):
             return
 
@@ -325,6 +379,16 @@ class DeepseekCompressor(nn.Module):
             pdl_kwargs=pdl_kwargs,
         )
 
+        # full graph cannot branch on per-step CPU metadata after capture
+        if (
+            current_platform.is_cuda()
+            and self.head_dim == 512
+            and self.compress_ratio == 128
+            and forward_context.cudagraph_runtime_mode != CUDAGraphMode.FULL
+            and state_metadata.c128_boundary is False
+        ):
+            return
+
         # Fused: compress → RMSNorm → RoPE → FP8 quant → KV cache write.
         # RoPE requirements (kernel applies forward GPT-J style rotation):
         # - is_neox_style=False (interleaved pairs, NOT split-half)
@@ -364,6 +428,15 @@ class DeepseekCompressor(nn.Module):
                 store_full_fp8=store_full_fp8,
                 fp8_scale=fp8_scale,
             )
+        elif self._use_two_stage_fused_compressor:
+            # head=512 cr>=128 (no overlap): two-pass split compressor on the
+            # prefill suffix, single-pass on the decode prefix.
+            assert state_metadata.num_decode_tokens is not None
+            compress_norm_rope_store_fn = compress_norm_rope_store_two_stage_triton
+            extra_kwargs = {
+                "num_decode_tokens": state_metadata.num_decode_tokens,
+                "compress_scratch": self._compress_scratch,
+            }
         else:
             # Indexer path (head_dim == 128) or non-CUDA GPUs (AMD, XPU, etc.).
             compress_norm_rope_store_fn = compress_norm_rope_store_triton
