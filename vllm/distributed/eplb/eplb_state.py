@@ -46,6 +46,7 @@ from vllm.distributed.stateless_coordinator import StatelessGroupCoordinator
 from vllm.distributed.utils import StatelessProcessGroup
 from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import MixtureOfExperts
+from vllm.platforms import current_platform
 
 from .async_worker import start_async_worker
 from .eplb_communicator import EplbCommunicator, create_eplb_communicator
@@ -826,52 +827,59 @@ class EplbState:
                 )
 
                 # Skip lateral rearranges that don't materially improve balance.
+                # Gated to ROCm: the redundant-rearrange accuracy collapse this
+                # guards against was only observed on ROCm; other platforms keep
+                # the unconditional rearrange behavior.
                 skip_rearrange = False
                 if (
-                    not is_profile
+                    current_platform.is_rocm()
+                    and not is_profile
                     and rank_mapping is None
                     and bool((eplb_model_state.physical_to_logical_map >= 0).all())
                 ):
-                    _gl = global_expert_load_window
-                    _ep = ep_group.size()
+                    logical_loads = global_expert_load_window.float()
+                    ep_size = ep_group.size()
 
-                    def _rank_imbalance(
-                        _p2l: torch.Tensor, _gl: torch.Tensor, _ep: int
-                    ) -> float:
-                        _p2l = _p2l.to(_gl.device)
-                        _pl = torch.gather(_gl, 1, _p2l.clamp(min=0).long())
-                        _pl = _pl * (_p2l >= 0)
-                        _P = _p2l.shape[1]
-                        _per_rank = (
-                            _pl.reshape(_pl.shape[0], _ep, _P // _ep)
-                            .sum(dim=(0, 2))
-                            .float()
+                    def rank_load_imbalance(mapping: torch.Tensor) -> float:
+                        mapping = mapping.to(
+                            device=logical_loads.device,
+                            dtype=torch.long,
                         )
-                        _mean = _per_rank.mean()
-                        if _mean <= 0:
+                        replica_counts = torch.zeros_like(logical_loads)
+                        replica_counts.scatter_add_(
+                            dim=1,
+                            index=mapping,
+                            src=torch.ones_like(mapping, dtype=logical_loads.dtype),
+                        )
+                        loads_per_replica = torch.gather(
+                            logical_loads / replica_counts.clamp_min(1),
+                            dim=1,
+                            index=mapping,
+                        )
+                        loads_per_rank = loads_per_replica.reshape(
+                            logical_loads.shape[0], ep_size, -1
+                        ).sum(dim=(0, 2))
+                        mean_load = loads_per_rank.mean()
+                        if mean_load == 0:
                             return 1.0
-                        return (_per_rank.max() / _mean).item()
+                        return (loads_per_rank.max() / mean_load).item()
 
-                    _old_imb = _rank_imbalance(
-                        eplb_model_state.physical_to_logical_map, _gl, _ep
+                    current_imbalance = rank_load_imbalance(
+                        eplb_model_state.physical_to_logical_map
                     )
-                    _new_imb = _rank_imbalance(new_physical_to_logical_map, _gl, _ep)
-                    local_skip = (
-                        _old_imb <= 1e-6 or (_old_imb - _new_imb) / _old_imb < 0.05
+                    proposed_imbalance = rank_load_imbalance(
+                        new_physical_to_logical_map
                     )
-                    _vote = torch.tensor(
-                        [1 if local_skip else 0],
-                        device=_gl.device,
-                        dtype=torch.int32,
-                    )
-                    all_reduce(_vote, group=ep_group)
-                    skip_rearrange = int(_vote.item()) == _ep
+                    relative_improvement = (
+                        current_imbalance - proposed_imbalance
+                    ) / current_imbalance
+                    skip_rearrange = relative_improvement < 0.05
                     if skip_rearrange and is_main_rank:
                         logger.info(
                             "[EPLB] Skip rearrange: imbalance %.4f -> "
                             "%.4f (no material gain)",
-                            _old_imb,
-                            _new_imb,
+                            current_imbalance,
+                            proposed_imbalance,
                         )
 
                 if not skip_rearrange:
