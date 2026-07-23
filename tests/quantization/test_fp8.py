@@ -33,6 +33,7 @@ from vllm.model_executor.layers.quantization.online.fp8 import (
     Fp8PerTensorOnlineLinearMethod,
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
 
 DEVICE_TYPE = current_platform.device_type
@@ -431,6 +432,33 @@ def test_fp8_reloading(
         weight_loader(param, torch.zeros(shape))  # cannot use empty
 
     method.process_weights_after_loading(layer)
+
+
+def test_replace_parameter_preserves_custom_attribute():
+    """`replace_parameter` must carry over attributes attached to the
+    replacement tensor (e.g. the `is_shuffled` flag set by AITER weight
+    preprocessing in `Fp8MoEMethod.process_weights_after_loading`).
+    """
+    layer = torch.nn.Module()
+    layer.register_parameter(
+        "weight", torch.nn.Parameter(torch.zeros(4, 4), requires_grad=False)
+    )
+
+    new_data = torch.ones(4, 4).t()
+    new_data.is_shuffled = True
+
+    # Sanity check on the assumption above: tensor internals are not
+    # reachable through `__dict__`, only user-set custom attributes are.
+    assert new_data.__dict__.keys() == {"is_shuffled"}
+
+    replace_parameter(layer, "weight", new_data)
+
+    assert isinstance(layer.weight, torch.nn.Parameter)
+    assert layer.weight.is_shuffled is True
+    assert torch.equal(layer.weight.data, new_data)
+    assert layer.weight.device == new_data.device
+    assert layer.weight.stride() == new_data.stride()
+    assert layer.weight.data_ptr() == new_data.data_ptr()
 
 
 @pytest.mark.parametrize("source", ["checkpoint", "runtime_calc"])
