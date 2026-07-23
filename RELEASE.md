@@ -63,7 +63,7 @@ Familiarize yourself with the benchmark configurations:
 Navigate to the [vllm-benchmark workflow](https://github.com/pytorch/pytorch-integration-testing/actions/workflows/vllm-benchmark.yml) and configure:
 
 * **vLLM branch**: Set to the release branch (e.g., `releases/v0.9.2`)
-* **vLLM commit**: Set to the RC commit hash
+* **vLLM commit**: Set to the RC commit hash .
 
 **Step 4: Review Results**
 Once the workflow completes, benchmark results will be available on the [vLLM benchmark dashboard](https://hud.pytorch.org/benchmark/llms?repoName=vllm-project%2Fvllm) under the corresponding branch and commit.
