@@ -51,16 +51,10 @@ _NUM_BLOCKS = 8
 # The worker copies encoder outputs between the CPU mmap region and the
 # current accelerator (CUDA/XPU/...); run the byte-level tests on whatever
 # accelerator is present, and skip entirely on CPU-only hosts.
-_DEVICE = current_platform.device_type
-_device_module = getattr(torch, _DEVICE, None)
-_has_accelerator = (
-    not current_platform.is_cpu()
-    and _device_module is not None
-    and getattr(_device_module, "is_available", lambda: False)()
-)
+DEVICE_TYPE = current_platform.device_type
 
 _requires_accelerator = pytest.mark.skipif(
-    not _has_accelerator,
+    not (current_platform.is_cuda() or current_platform.is_xpu()),
     reason="exercises real accelerator stream/event coordination in ECCPUWorker",
 )
 
@@ -170,7 +164,7 @@ def test_save_caches_writes_to_assigned_blocks(make_worker, n_elements, n_blocks
     sentinel = 0x5A
     worker._region.blocks.fill_(sentinel)
 
-    src = torch.arange(n_elements, dtype=_DTYPE, device=_DEVICE)
+    src = torch.arange(n_elements, dtype=_DTYPE, device=DEVICE_TYPE)
     expected_bytes = src.cpu().reshape(-1).view(torch.uint8)
     total_bytes = n_elements * _DTYPE.itemsize
 
@@ -247,8 +241,8 @@ def test_save_caches_batches_multiple_hashes(make_worker):
     sentinel = 0x5A
     worker._region.blocks.fill_(sentinel)
 
-    src_a = torch.arange(_HIDDEN_DIM, dtype=_DTYPE, device=_DEVICE)
-    src_b = torch.arange(_HIDDEN_DIM, 2 * _HIDDEN_DIM, dtype=_DTYPE, device=_DEVICE)
+    src_a = torch.arange(_HIDDEN_DIM, dtype=_DTYPE, device=DEVICE_TYPE)
+    src_b = torch.arange(_HIDDEN_DIM, 2 * _HIDDEN_DIM, dtype=_DTYPE, device=DEVICE_TYPE)
 
     cache = {"a": src_a, "b": src_b}
     worker.save_caches(cache, "a", _meta(saves={"a": [1], "b": [3]}))
@@ -288,7 +282,7 @@ def test_start_load_caches_copies_with_correct_shape_dtype_and_bytes(make_worker
     worker.start_load_caches(encoder_cache, _meta(loads={"h": block_ids}))
 
     out = encoder_cache["h"]
-    assert out.device.type == _DEVICE, (
+    assert out.device.type == DEVICE_TYPE, (
         "consumer worker must place the tensor on the accelerator"
     )
     assert out.shape == (n_blocks, _HIDDEN_DIM)
@@ -303,7 +297,7 @@ def test_start_load_caches_preserves_existing_encoder_cache_entry(make_worker):
     worker = make_worker()
     worker._region.blocks[0].fill_(0x42)
 
-    sentinel = torch.full((_HIDDEN_DIM,), 7.0, dtype=_DTYPE, device=_DEVICE)
+    sentinel = torch.full((_HIDDEN_DIM,), 7.0, dtype=_DTYPE, device=DEVICE_TYPE)
     encoder_cache = {"h": sentinel}
     worker.start_load_caches(encoder_cache, _meta(loads={"h": [0]}))
 
@@ -335,7 +329,7 @@ def test_start_load_caches_skips_cached_and_loads_new_in_same_step(make_worker):
     for i, idx in enumerate(new_block_ids):
         worker._region.blocks[idx].copy_(src_int8[i])
 
-    cached_tensor = torch.full((1, _HIDDEN_DIM), 99.0, dtype=_DTYPE, device=_DEVICE)
+    cached_tensor = torch.full((1, _HIDDEN_DIM), 99.0, dtype=_DTYPE, device=DEVICE_TYPE)
     encoder_cache: dict[str, torch.Tensor] = {"cached_h": cached_tensor}
     worker.start_load_caches(
         encoder_cache,
@@ -372,7 +366,7 @@ def test_start_load_caches_works_on_all_ranks(make_worker, tp_rank, pcp_rank):
     worker.start_load_caches(encoder_cache, _meta(loads={"h": block_ids}))
 
     out = encoder_cache["h"]
-    assert out.device.type == _DEVICE
+    assert out.device.type == DEVICE_TYPE
     assert torch.equal(out.cpu(), src_orig)
 
 
@@ -386,9 +380,9 @@ def test_save_then_load_round_trips_bytes(make_worker):
     n_blocks = 3
     block_ids = [5, 1, 6]
 
-    src = torch.arange(n_blocks * _HIDDEN_DIM, dtype=_DTYPE, device=_DEVICE).reshape(
-        n_blocks, _HIDDEN_DIM
-    )
+    src = torch.arange(
+        n_blocks * _HIDDEN_DIM, dtype=_DTYPE, device=DEVICE_TYPE
+    ).reshape(n_blocks, _HIDDEN_DIM)
     worker.save_caches({"h": src}, "h", _meta(saves={"h": block_ids}))
     worker.flush_saves()
 
@@ -409,7 +403,7 @@ def test_buffer_pool_is_reused_across_save_steps(make_worker):
     """After flush_saves, descriptor buffers are returned to the pool and
     reused on the next flush — no reallocation."""
     worker = make_worker()
-    src = torch.arange(_HIDDEN_DIM, dtype=_DTYPE, device=_DEVICE)
+    src = torch.arange(_HIDDEN_DIM, dtype=_DTYPE, device=DEVICE_TYPE)
 
     worker.save_caches({"h": src}, "h", _meta(saves={"h": [0]}))
     worker.flush_saves()
@@ -565,9 +559,9 @@ def test_e2e_scheduler_worker_save_then_load(make_worker, monkeypatch):
 
     # -- Step 1: scheduler allocates, worker saves --
     n_blocks = 3
-    src = torch.arange(n_blocks * _HIDDEN_DIM, dtype=_DTYPE, device=_DEVICE).reshape(
-        n_blocks, _HIDDEN_DIM
-    )
+    src = torch.arange(
+        n_blocks * _HIDDEN_DIM, dtype=_DTYPE, device=DEVICE_TYPE
+    ).reshape(n_blocks, _HIDDEN_DIM)
 
     class _Pos:
         offset = 0
@@ -604,7 +598,7 @@ def test_e2e_scheduler_worker_save_then_load(make_worker, monkeypatch):
     worker.start_load_caches(load_cache, meta_load)
 
     out = load_cache["img_001"]
-    assert out.device.type == _DEVICE
+    assert out.device.type == DEVICE_TYPE
     assert out.shape == src.shape
     assert out.dtype == src.dtype
     assert torch.equal(out.cpu(), src.cpu())
