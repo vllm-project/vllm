@@ -210,6 +210,8 @@ class DraftModelSpeculator(BaseSpeculator):
         num_reqs: int,
         num_reqs_padded: int,
         num_tokens_padded: int,
+        seq_lens_cpu_upper_bound: torch.Tensor,
+        step: int,
         num_query_per_req: int = 1,
         causal: bool | Mapping[int, bool] = True,
     ) -> dict[str, Any] | None:
@@ -224,6 +226,15 @@ class DraftModelSpeculator(BaseSpeculator):
             x[:num_reqs_padded] for x in self.block_tables.input_block_tables
         ]
         slot_mappings = self.block_tables.slot_mappings[:, :num_tokens_padded]
+        draft_seq_lens_cpu_upper_bound = torch.zeros(
+            num_reqs_padded, dtype=torch.int32, device="cpu"
+        )
+        torch.add(
+            seq_lens_cpu_upper_bound[:num_reqs],
+            step,
+            out=draft_seq_lens_cpu_upper_bound[:num_reqs],
+        )
+        draft_seq_lens_cpu_upper_bound[:num_reqs].clamp_(max=self.max_model_len)
         attn_metadata = build_attn_metadata(
             attn_groups=self.attn_groups,
             num_reqs=num_reqs_padded,
@@ -239,6 +250,7 @@ class DraftModelSpeculator(BaseSpeculator):
             slot_mappings=slot_mappings,
             kv_cache_config=self.kv_cache_config,
             causal=causal,
+            seq_lens_cpu_upper_bound=draft_seq_lens_cpu_upper_bound,
         )
         return attn_metadata
 
