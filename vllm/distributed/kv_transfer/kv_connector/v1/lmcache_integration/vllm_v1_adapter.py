@@ -405,18 +405,57 @@ def need_gpu_interm_buffer(lmcache_config: LMCacheEngineConfig):
 def _calculate_mtp_layers(vllm_config, model_config):
     num_mtp_layers = 0
     if vllm_config is not None and vllm_config.speculative_config is not None:
-        logger.info(
-            "vllm_config.speculative_config: %s", vllm_config.speculative_config
-        )
-        # TODO(baoloongmao): Support other MTP methods
-        if vllm_config.speculative_config.method == "deepseek_mtp":
-            num_mtp_layers = getattr(
-                model_config.hf_config, "num_nextn_predict_layers", 0
-            )
+        spec_config = vllm_config.speculative_config
+        logger.info("vllm_config.speculative_config: %s", spec_config)
+        method = spec_config.method
 
-        elif vllm_config.speculative_config.use_eagle():
+        # MTP-style speculative decoding (deepseek_mtp, qwen3_5_mtp, iquest_mtp,
+        # glm4_moe_mtp, ...). vLLM normalizes all `*_mtp` methods to "mtp" (see
+        # SpeculativeConfig.__post_init__), so we must NOT use
+        # `draft_model_config.get_num_layers()`: for an MTP draft the draft config
+        # reuses the *base* model's `num_hidden_layers` and over-counts the extra
+        # KV layers by a huge margin (e.g. 88 instead of 2). LMCache then allocates
+        # a KV shape that cannot hold the real number of registered KV caches ->
+        # "could not broadcast (N,) into (M,)" at save time.
+        #
+        # The number of extra attention layers an MTP head adds (each owns one KV
+        # cache) is exposed under a family-specific config attribute; read it
+        # directly. Attribute names, in priority order:
+        #   num_mtp_layers            - IquestMoeV13
+        #   num_nextn_predict_layers  - deepseek_mtp, qwen3_next, glm*, ernie, ...
+        #   mtp_num_hidden_layers     - qwen3_5
+        mtp_layer_attrs = (
+            "num_mtp_layers",
+            "num_nextn_predict_layers",
+            "mtp_num_hidden_layers",
+        )
+        if method in ("deepseek_mtp", "mtp"):
+            hf_config = model_config.hf_config
+            num_mtp_layers = next(
+                (
+                    value
+                    for attr in mtp_layer_attrs
+                    if (value := getattr(hf_config, attr, None))
+                ),
+                None,
+            )
+            if num_mtp_layers:
+                logger.info(
+                    "MTP detected %d extra KV layer(s) from hf_config", num_mtp_layers
+                )
+            else:
+                num_mtp_layers = (
+                    getattr(spec_config, "num_speculative_tokens", None) or 1
+                )
+                logger.info(
+                    "MTP detected but no layer-count attr in hf_config; "
+                    "falling back to %d",
+                    num_mtp_layers,
+                )
+
+        elif spec_config.use_eagle():
             try:
-                draft_model_config = vllm_config.speculative_config.draft_model_config
+                draft_model_config = spec_config.draft_model_config
                 num_mtp_layers = draft_model_config.get_num_layers(
                     vllm_config.parallel_config
                 )
