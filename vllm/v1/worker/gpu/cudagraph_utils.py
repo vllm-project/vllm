@@ -522,7 +522,8 @@ class ModelCudaGraphManager(CudaGraphManager):
                     batch_descriptor=batch_descriptor,
                     is_padding=input_buffers.is_padding[:num_tokens],
                     skip_attention=(
-                        cg_mode == CUDAGraphMode.PIECEWISE and not self.use_breakable_cg
+                        desc.cg_mode == CUDAGraphMode.PIECEWISE
+                        and not self.use_breakable_cg
                     ),
                 ):
                     if cg_mode == CUDAGraphMode.PIECEWISE:

@@ -67,7 +67,8 @@ class SpeculatorCudaGraphManager(CudaGraphManager):
                 num_tokens_across_dp,
                 cg_mode,
                 skip_attention=(
-                    cg_mode == CUDAGraphMode.PIECEWISE and not self.use_breakable_cg
+                    desc.cg_mode == CUDAGraphMode.PIECEWISE
+                    and not self.use_breakable_cg
                 ),
             )
 
