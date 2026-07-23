@@ -238,7 +238,6 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
             experts_cls=self.experts_cls,
             backend=self.nvfp4_backend,
             routing_tables=layer._expert_routing_tables(),
-            layer=layer,
         )
         self.moe_kernel.fused_experts.process_weights_after_loading(layer)
 

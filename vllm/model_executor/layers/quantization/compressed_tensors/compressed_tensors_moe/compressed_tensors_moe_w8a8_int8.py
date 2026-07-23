@@ -160,7 +160,6 @@ class CompressedTensorsW8A8Int8MoEMethod(CompressedTensorsMoEMethod):
             moe_config=self.moe,
             experts_cls=self.experts_cls,
             routing_tables=layer._expert_routing_tables(),
-            layer=layer,
         )
 
     def maybe_make_prepare_finalize(

@@ -327,7 +327,6 @@ def make_wna16_moe_kernel(
     moe_config: FusedMoEConfig,
     experts_cls: type[mk.FusedMoEExperts],
     backend: WNA16MoEBackend = WNA16MoEBackend.MARLIN,
-    layer: torch.nn.Module | None = None,
     is_k_full: bool = False,
     w13_g_idx: torch.Tensor | None = None,
     w2_g_idx: torch.Tensor | None = None,
@@ -379,10 +378,7 @@ def make_wna16_moe_kernel(
     logger.info_once("Using %s", experts_cls.__name__, scope="local")
 
     extra_args: dict[str, Any] = {}
-    if backend == WNA16MoEBackend.HUMMING:
-        assert layer is not None
-        extra_args = {"layer": layer}
-    elif issubclass(experts_cls, MarlinExpertsBase):
+    if issubclass(experts_cls, MarlinExpertsBase):
         extra_args = {
             "w13_g_idx": w13_g_idx,
             "w2_g_idx": w2_g_idx,

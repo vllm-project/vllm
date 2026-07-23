@@ -5,10 +5,13 @@ import torch
 
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.humming_utils import (
+    apply_humming_linear,
     convert_linear_layer_to_humming_standard,
-    prepare_humming_layer,
+    get_humming_linear_compute_config,
+    prepare_humming_linear_layer_config,
 )
 from vllm.platforms import current_platform
+from vllm.utils.import_utils import has_humming
 
 from .ScaledMMLinearKernel import (
     FP8ScaledMMLinearKernel,
@@ -29,6 +32,9 @@ class HummingFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
     ) -> tuple[bool, str | None]:
         if not current_platform.is_cuda():
             return False, "Humming only supported on CUDA"
+
+        if not has_humming():
+            return False, "Humming is not installed"
 
         if not current_platform.has_device_capability(75):
             return False, "Humming only supported on SM75+"
@@ -76,7 +82,9 @@ class HummingFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
                 name_map["weight_scale"] = "weight_scale_inv"
 
         convert_linear_layer_to_humming_standard(layer=layer, name_map=name_map)
-        prepare_humming_layer(layer, quant_config)
+        self.layer_config = prepare_humming_linear_layer_config(layer, quant_config)
+        self.compute_config = get_humming_linear_compute_config()
+        self.locks = torch.zeros(1024, dtype=torch.int32, device=layer.weight.device)
 
     def apply_weights(
         self,
@@ -84,15 +92,13 @@ class HummingFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        from vllm.utils.humming import HummingMethod
-
-        flatten_inputs = x.view(-1, x.size(-1))
-        output = HummingMethod.forward_layer(
-            layer=layer,
-            inputs=flatten_inputs,
-            compute_config=layer.compute_config,
+        return apply_humming_linear(
+            layer,
+            x,
+            layer_config=self.layer_config,
+            compute_config=self.compute_config,
+            locks=self.locks,
         )
-        return output.view(*x.shape[:-1], output.size(-1))
 
     def apply_scaled_mm(
         self,
@@ -105,7 +111,9 @@ class HummingFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         bias: torch.Tensor | None,
         output_shape: list,
     ) -> torch.Tensor:
-        pass
+        raise NotImplementedError(
+            "HummingFP8ScaledMMLinearKernel uses apply_weights directly"
+        )
 
 
 class HummingInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
@@ -117,6 +125,9 @@ class HummingInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
     ) -> tuple[bool, str | None]:
         if not current_platform.is_cuda():
             return False, "Humming only supported on CUDA"
+
+        if not has_humming():
+            return False, "Humming is not installed"
 
         if not current_platform.has_device_capability(75):
             return False, "Humming only supported on SM75+"
@@ -137,7 +148,9 @@ class HummingInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
         weight.data = weight.data + 128
 
         convert_linear_layer_to_humming_standard(layer=layer, name_map=name_map)
-        prepare_humming_layer(layer, quant_config)
+        self.layer_config = prepare_humming_linear_layer_config(layer, quant_config)
+        self.compute_config = get_humming_linear_compute_config()
+        self.locks = torch.zeros(1024, dtype=torch.int32, device=layer.weight.device)
 
     def apply_weights(
         self,
@@ -145,12 +158,10 @@ class HummingInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        from vllm.utils.humming import HummingMethod
-
-        flatten_inputs = x.view(-1, x.size(-1))
-        output = HummingMethod.forward_layer(
-            layer=layer,
-            inputs=flatten_inputs,
-            compute_config=layer.compute_config,
+        return apply_humming_linear(
+            layer,
+            x,
+            layer_config=self.layer_config,
+            compute_config=self.compute_config,
+            locks=self.locks,
         )
-        return output.view(*x.shape[:-1], output.size(-1))

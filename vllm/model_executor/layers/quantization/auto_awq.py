@@ -746,7 +746,6 @@ class AutoAWQMoEMethod(FusedMoEMethodBase):
             moe_config=self.moe,
             experts_cls=self.experts_cls,
             backend=self.wna16_moe_backend,
-            layer=layer,
             is_k_full=self.is_k_full,
             w13_g_idx=getattr(layer, "w13_g_idx", None),
             w2_g_idx=getattr(layer, "w2_g_idx", None),
@@ -761,7 +760,12 @@ class AutoAWQMoEMethod(FusedMoEMethodBase):
                 get_humming_moe_quant_config,
             )
 
-            return get_humming_moe_quant_config(layer)
+            return get_humming_moe_quant_config(
+                layer,
+                gemm1_alpha=getattr(layer, "swiglu_alpha", None),
+                gemm1_beta=getattr(layer, "swiglu_beta", None),
+                gemm1_clamp_limit=getattr(layer, "swiglu_limit", None),
+            )
         return make_wna16_moe_quant_config(
             w1_scale=layer.w13_scales,
             w2_scale=layer.w2_scales,

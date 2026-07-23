@@ -477,7 +477,12 @@ def make_nvfp4_moe_quant_config(
         )
 
         assert isinstance(layer, RoutedExperts)
-        return get_humming_moe_quant_config(layer)
+        return get_humming_moe_quant_config(
+            layer,
+            gemm1_alpha=getattr(layer, "swiglu_alpha", None),
+            gemm1_beta=getattr(layer, "swiglu_beta", None),
+            gemm1_clamp_limit=swiglu_limit,
+        )
     elif backend == NvFp4MoeBackend.MARLIN:
         return nvfp4_w4a16_moe_quant_config(
             g1_alphas=w13_scale_2,
@@ -528,7 +533,6 @@ def make_nvfp4_moe_kernel(
     experts_cls: type[mk.FusedMoEExperts],
     backend: NvFp4MoeBackend,
     routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
-    layer: torch.nn.Module | None = None,
     per_token_activation: bool = False,
 ) -> mk.FusedMoEKernel:
     # Create Prepare/Finalize.
@@ -544,9 +548,6 @@ def make_nvfp4_moe_kernel(
     logger.info_once("Using %s", prepare_finalize.__class__.__name__)
 
     extra_kwargs = {}
-    if backend == NvFp4MoeBackend.HUMMING:
-        assert layer is not None
-        extra_kwargs = {"layer": layer}
     if backend == NvFp4MoeBackend.FLASHINFER_TRTLLM and per_token_activation:
         extra_kwargs["per_token_activation"] = True
 

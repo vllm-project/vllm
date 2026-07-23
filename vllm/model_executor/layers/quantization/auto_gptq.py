@@ -769,7 +769,6 @@ class AutoGPTQMoEMethod(FusedMoEMethodBase):
             moe_config=self.moe,
             experts_cls=self.experts_cls,
             backend=self.wna16_moe_backend,
-            layer=layer,
             is_k_full=self.is_k_full,
             w13_g_idx=getattr(layer, "w13_g_idx", None),
             w2_g_idx=getattr(layer, "w2_g_idx", None),
@@ -784,7 +783,12 @@ class AutoGPTQMoEMethod(FusedMoEMethodBase):
                 get_humming_moe_quant_config,
             )
 
-            return get_humming_moe_quant_config(layer)
+            return get_humming_moe_quant_config(
+                layer,
+                gemm1_alpha=getattr(layer, "swiglu_alpha", None),
+                gemm1_beta=getattr(layer, "swiglu_beta", None),
+                gemm1_clamp_limit=getattr(layer, "swiglu_limit", None),
+            )
 
         from vllm.model_executor.layers.fused_moe.config import (
             gptq_marlin_moe_quant_config,
