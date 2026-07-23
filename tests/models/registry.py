@@ -958,6 +958,10 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         hf_overrides={"num_experts": 0},
         min_transformers_version="5.13",
     ),
+    "HyperCLOVAXOmniForCausalLM": _HfExamplesInfo(
+        "naver-hyperclovax/HyperCLOVAX-SEED-Omni-8B",
+        trust_remote_code=True,
+    ),
     "Idefics3ForConditionalGeneration": _HfExamplesInfo(
         "HuggingFaceM4/Idefics3-8B-Llama3",
         extras={"tiny": "HuggingFaceTB/SmolVLM-256M-Instruct"},
