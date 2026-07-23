@@ -1533,20 +1533,31 @@ def test_needs_dp_coordination(
 
 
 def test_renderer_num_workers_with_mm_cache():
-    """Disallow renderer_num_workers > 1 when mm processor cache is enabled,
-    since neither cache type is thread-safe."""
+    """Disallow renderer_num_workers > 1 with the mm processor cache only for
+    pooling models, whose preprocessing runs on the renderer workers."""
     mm_model = "Qwen/Qwen2-VL-2B-Instruct"
 
-    # Should raise: multi-worker + cache enabled (default cache_gb=4)
+    # Should raise: pooling + multi-worker + cache enabled (default cache_gb=4)
     with pytest.raises(ValueError, match="renderer-num-workers"):
-        ModelConfig(mm_model, renderer_num_workers=4)
+        ModelConfig(mm_model, runner="pooling", renderer_num_workers=4)
 
-    # Should raise: multi-worker + explicit cache size
+    # Should raise: pooling + multi-worker + explicit cache size
     with pytest.raises(ValueError, match="renderer-num-workers"):
-        ModelConfig(mm_model, renderer_num_workers=2, mm_processor_cache_gb=1.0)
+        ModelConfig(
+            mm_model,
+            runner="pooling",
+            renderer_num_workers=2,
+            mm_processor_cache_gb=1.0,
+        )
 
-    # Should pass: multi-worker + cache disabled
-    config = ModelConfig(mm_model, renderer_num_workers=4, mm_processor_cache_gb=0)
+    # Should pass: pooling + multi-worker + cache disabled
+    config = ModelConfig(
+        mm_model, runner="pooling", renderer_num_workers=4, mm_processor_cache_gb=0
+    )
+    assert config.renderer_num_workers == 4
+
+    # Should pass: generate models preprocess on the dedicated mm executor
+    config = ModelConfig(mm_model, renderer_num_workers=4)
     assert config.renderer_num_workers == 4
 
     # Should pass: single worker + cache enabled (default)
