@@ -155,8 +155,10 @@ When `--api-key` is configured, the following `/v1` endpoints require Bearer tok
 - `/v1/chat/completions` - Chat completions
 - `/v1/chat/completions/batch` - Batch chat completions
 - `/v1/chat/completions/render` - Render chat completion requests
+- `/v1/chat/completions/derender` - Derender chat completion requests
 - `/v1/completions` - Text completions
 - `/v1/completions/render` - Render completion requests
+- `/v1/completions/derender` - Derender completion requests
 - `/v1/embeddings` - Generate embeddings
 - `/v1/audio/transcriptions` - Audio transcription
 - `/v1/audio/translations` - Audio translation
@@ -191,6 +193,7 @@ The following endpoints **do not require authentication** even when `--api-key` 
 - `/pause` - Pause generation (causes denial of service)
 - `/resume` - Resume generation
 - `/is_paused` - Check if generation is paused
+- `/abort_requests` - Abort in-flight requests (causes loss of in-flight work)
 - `/scale_elastic_ep` - Trigger scaling operations
 - `/is_scaling_elastic_ep` - Check if scaling is in progress
 - `/init_weight_transfer_engine` - Initialize weight transfer engine for RLHF
