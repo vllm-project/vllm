@@ -127,10 +127,11 @@ class NemotronHMoE(nn.Module):
     def __init__(
         self,
         config: NemotronHConfig,
-        model_config: ModelConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         parallel_config: ParallelConfig | None = None,
         prefix: str = "",
+        *,
+        model_config: ModelConfig | None = None,
     ):
         super().__init__()
         self.tp_size = get_tensor_model_parallel_world_size()
