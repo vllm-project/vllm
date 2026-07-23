@@ -33,9 +33,9 @@ try:
     )
     _parametrize = pytest.mark.parametrize
 except ModuleNotFoundError:  # allow running directly as ``python <thisfile>``
-    pytest = None
+    pytest = None  # type: ignore[assignment]
 
-    def _parametrize(_name, _values):
+    def _parametrize(_name, _values):  # type: ignore[misc]
         def _deco(fn):
             return fn
 

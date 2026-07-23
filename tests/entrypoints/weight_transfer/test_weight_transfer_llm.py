@@ -319,4 +319,5 @@ def test_weight_transfer_config_backend():
     )
 
     config = llm.llm_engine.vllm_config.weight_transfer_config
+    assert config is not None
     assert config.backend == "nccl"
