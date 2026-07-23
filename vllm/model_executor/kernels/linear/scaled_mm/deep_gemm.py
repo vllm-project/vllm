@@ -39,7 +39,10 @@ class DeepGemmFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
             static=False,
             group_shape=act_scale_descriptor.group_shape,
             use_ue8m0=self.use_deep_gemm_e8m0,
-            tma_aligned_scales=envs.VLLM_USE_DEEP_GEMM_TMA_ALIGNED_SCALES,
+            tma_aligned_scales=(
+                envs.VLLM_USE_DEEP_GEMM_TMA_ALIGNED_SCALES
+                and not envs.VLLM_BATCH_INVARIANT
+            ),
             column_major_scales=True,
         )
 
