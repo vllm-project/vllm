@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import sys
 from abc import ABC, abstractmethod
 
 import tokenizers
@@ -320,10 +321,19 @@ def check_stop_strings(
     Where stop_string is the matched stop string and offset is the
     length to which output_text should be truncated, or -1 for no
     truncation.
+
+    When several stop strings match within the newly generated text (for
+    example when speculative decoding appends multiple tokens in a single
+    step), the stop string that completes earliest in the text is selected,
+    so the result matches appending one token at a time. Ties are broken by
+    stop-list order.
     """
     if not new_char_count or not stop:
         return None
 
+    best_stop_str: str | None = None
+    best_stop_index = 0
+    best_end = sys.maxsize
     for stop_str in stop:
         stop_string_len = len(stop_str)
         # Avoid searching already-searched text.
@@ -331,14 +341,22 @@ def check_stop_strings(
         if stop_index == -1:
             continue
 
-        if include_in_output:
-            # Truncate to end of stop string.
-            stop_index += stop_string_len
-            if stop_index >= len(output_text):
-                # No truncation required.
-                return stop_str, -1
+        # Prefer the stop string that completes earliest in the text.
+        end = stop_index + stop_string_len
+        if end < best_end:
+            best_stop_str = stop_str
+            best_stop_index = stop_index
+            best_end = end
 
-        # Truncate the output text to either the beginning
-        # or end of the stop string.
-        return stop_str, stop_index
-    return None
+    if best_stop_str is None:
+        return None
+
+    if include_in_output:
+        # Truncate to end of stop string.
+        if best_end >= len(output_text):
+            # No truncation required.
+            return best_stop_str, -1
+        return best_stop_str, best_end
+
+    # Truncate the output text to the beginning of the stop string.
+    return best_stop_str, best_stop_index
