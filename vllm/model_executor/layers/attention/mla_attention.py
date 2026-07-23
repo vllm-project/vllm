@@ -336,6 +336,13 @@ def _canonicalize_sparse_mla_kv_cache_dtype(
     return kv_cache_dtype
 
 
+def _prepare_hisparse_for_batch(impl, attn_metadata) -> None:
+    """Let a HiSparse-capable impl classify the batch before the KV update."""
+    prepare = getattr(impl, "prepare_hisparse_for_batch", None)
+    if prepare is not None:
+        prepare(attn_metadata)
+
+
 class MLAAttention(nn.Module, AttentionLayerBase):
     """Multi-Head Latent Attention layer.
 
@@ -583,6 +590,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             assert isinstance(slot_mapping, dict), (
                 f"Expected slot_mapping to be a dict, got {type(slot_mapping)}. "
             )
+            _prepare_hisparse_for_batch(self.impl, attn_metadata)
             self.impl.do_kv_cache_update(  # type: ignore[attr-defined]
                 kv_c_normed,
                 k_pe,
@@ -1046,8 +1054,11 @@ def unified_mla_kv_cache_update(
     the data dependency between them to ensure torch.compile preserves ordering.
     """
     layer_name = _resolve_layer_name(layer_name)
-    _, attn_layer, kv_cache, layer_slot_mapping = get_attention_context(layer_name)
+    attn_metadata, attn_layer, kv_cache, layer_slot_mapping = get_attention_context(
+        layer_name
+    )
     if layer_slot_mapping is not None:
+        _prepare_hisparse_for_batch(attn_layer.impl, attn_metadata)
         attn_layer.impl.do_kv_cache_update(  # type: ignore[attr-defined]
             kv_c_normed,
             k_pe,
