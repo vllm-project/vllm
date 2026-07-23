@@ -200,6 +200,18 @@ class Qwen3_5MultiTokenPredictor(nn.Module):
     }
 )
 class Qwen3_5MTP(LocalArgmaxMixin, nn.Module, SupportsMultiModal):
+    # Expose the weight mapper on the top-level (registered) draft class so that
+    # ``configure_quant_config`` applies it to the quantization config's
+    # per-layer name lists (e.g. INC/AutoRound ``block_name_to_quantize``),
+    # exactly as it does for the target model. Without this, ``getattr(
+    # model_class, "hf_to_vllm_mapper", None)`` returns ``None`` for the draft
+    # (the mapper lives only on the inner ``Qwen3_5MultiTokenPredictor``), the
+    # checkpoint's HF-format block names are never mapped to vLLM runtime names,
+    # and every MTP layer silently resolves to an Unquantized method even when
+    # the checkpoint ships quantized MTP tensors. See
+    # ``configure_quant_config`` in vllm/model_executor/model_loader/utils.py.
+    hf_to_vllm_mapper = Qwen3_5MultiTokenPredictor.hf_to_vllm_mapper
+
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
