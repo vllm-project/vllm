@@ -1,0 +1,26 @@
+group: Hardware - INTEL GPU Build 
+steps:
+  - label: "INTEL-GPU: :docker: build image"
+    key: image-build-amd
+    depends_on: []
+    device: intel_gpu
+    no_plugin: true
+    commands:
+    - >
+      docker build
+      --build-arg max_jobs=16
+      --build-arg VLLM_BRANCH=$BUILDKITE_COMMIT
+      --tag "intel-gpu/vllm-ci:${BUILDKITE_COMMIT}"
+      -f docker/Dockerfile.xpu
+      --no-cache
+    - docker push "intel-gpu/vllm-ci:${BUILDKITE_COMMIT}"
+    env:
+      DOCKER_BUILDKIT: "1"
+    retry:
+      automatic:
+        - exit_status: -1  # Agent was lost
+          limit: 1
+        - exit_status: -10  # Agent was lost
+          limit: 1
+        - exit_status: 1  # Machine occasionally fail
+          limit: 1

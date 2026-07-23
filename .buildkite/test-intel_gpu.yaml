@@ -1,0 +1,31 @@
+steps:
+##### fast check tests  #####
+
+- label: Pytorch Nightly Dependency Override Check # 2min
+  # if this test fails, it means the nightly torch version is not compatible with some
+  # of the dependencies. Please check the error message and add the package to whitelist
+  # in /vllm/tools/pre_commit/generate_nightly_torch_test.py
+  mirror_hardwares: [inteltest]
+  agent_pool: intel-xpu
+  grade: Blocking
+  soft_fail: true
+  source_file_dependencies:
+  - requirements/nightly_torch_test.txt
+  commands:
+  - bash standalone_tests/pytorch_nightly_dependency.sh
+
+- label: Async Engine, Inputs, Utils, Worker Test # 10min
+  timeout_in_minutes: 15
+  mirror_hardwares: [inteltest]
+  agent_pool: intel-xpu
+  grade: Blocking
+  source_file_dependencies:
+  - vllm/
+  - tests/detokenizer
+  - tests/multimodal
+  - tests/utils_
+  - .buildkite/
+  commands:
+  - pytest -v -s detokenizer
+  - pytest -v -s -m 'not cpu_test' multimodal
+  - pytest -v -s utils_
