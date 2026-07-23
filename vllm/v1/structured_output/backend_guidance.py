@@ -106,8 +106,16 @@ class GuidanceBackend(StructuredOutputBackend):
             )
 
     def compile_grammar(
-        self, request_type: StructuredOutputOptions, grammar_spec: str
+        self,
+        request_type: StructuredOutputOptions,
+        grammar_spec: str,
+        whitespace_pattern: str | None = None,
     ) -> StructuredOutputGrammar:
+        if whitespace_pattern is not None:
+            logger.warning_once(
+                "whitespace_pattern is only honored by the outlines structured "
+                "outputs backend; it is ignored by the guidance backend."
+            )
         self.serialized_grammar = serialize_guidance_grammar(
             request_type,
             grammar_spec,
@@ -296,7 +304,7 @@ def validate_guidance_grammar(
     # if structured output is not enabled, there is nothing to validate
     if sampling_params.structured_outputs is None:
         return
-    tp, grm = get_structured_output_key(sampling_params.structured_outputs)
+    tp, grm, _ = get_structured_output_key(sampling_params.structured_outputs)
     guidance_grm = serialize_guidance_grammar(tp, grm)
     err = llguidance.LLMatcher.validate_grammar(guidance_grm, tokenizer)
     if err:

@@ -227,6 +227,7 @@ class TestReasoningStructuredOutput:
         structured_req.structured_output_key = (
             StructuredOutputOptions.STRUCTURAL_TAG,
             "{}",
+            None,
         )
         reasoner = MockReasoner(tokenizer=Mock())
         reasoner.is_reasoning_end_streaming.return_value = True

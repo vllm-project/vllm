@@ -76,8 +76,16 @@ class XgrammarBackend(StructuredOutputBackend):
             )
 
     def compile_grammar(
-        self, request_type: StructuredOutputOptions, grammar_spec: str
+        self,
+        request_type: StructuredOutputOptions,
+        grammar_spec: str,
+        whitespace_pattern: str | None = None,
     ) -> StructuredOutputGrammar:
+        if whitespace_pattern is not None:
+            logger.warning_once(
+                "whitespace_pattern is only honored by the outlines structured "
+                "outputs backend; it is ignored by the xgrammar backend."
+            )
         if request_type == StructuredOutputOptions.JSON:
             ctx = self.compiler.compile_json_schema(
                 grammar_spec, any_whitespace=not self.disable_any_whitespace
