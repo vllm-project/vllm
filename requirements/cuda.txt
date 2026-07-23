@@ -14,8 +14,8 @@ PyNvVideoCodec==2.0.4
 # flashinfer-cubin is not on PyPI since 0.6.14; setup.py excludes it from
 # install_requires so the published wheel does not carry an unresolvable pin
 --extra-index-url https://flashinfer.ai/whl/
-flashinfer-python==0.6.14
-flashinfer-cubin==0.6.14
+flashinfer-python==0.6.15.post1
+flashinfer-cubin==0.6.15.post1
 apache-tvm-ffi==0.1.10
 tilelang==0.1.9
 nvidia-cudnn-frontend>=1.19.1
