@@ -479,6 +479,7 @@ class CudaIpcPoolProxy:
         # Copy out so we own the memory; the pool slice can then be recycled.
         # For a different device this is a P2P (device-to-device) copy.
         out = view.clone()
+        torch.accelerator.current_stream(dev).synchronize()
         try:
             _signal_consumed(self.flags_shm, self.slot, dev)
         except Exception as e:  # noqa: BLE001
