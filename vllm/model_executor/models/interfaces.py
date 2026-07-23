@@ -998,7 +998,7 @@ class SupportsQuant:
     """The interface required for all models that support quantization."""
 
     hf_to_vllm_mapper: ClassVar["WeightsMapper | None"] = None
-    packed_modules_mapping: ClassVar[dict[str, list[str]]] = {}
+    packed_modules_mapping: ClassVar[dict[str, list[str]]]
     quant_config: QuantizationConfig | None = None
 
     def __new__(cls, *args, **kwargs) -> Self:
@@ -1033,7 +1033,8 @@ class SupportsQuant:
         if (hf_to_vllm_mapper := self.hf_to_vllm_mapper) is not None:
             unstacked_mapper = hf_to_vllm_mapper.get_unstacked_mapper()
             self.quant_config.apply_vllm_mapper(unstacked_mapper)
-        self.quant_config.packed_modules_mapping.update(self.packed_modules_mapping)
+        if packed_modules_mapping := getattr(self, "packed_modules_mapping", None):
+            self.quant_config.packed_modules_mapping.update(packed_modules_mapping)
 
 
 @runtime_checkable
