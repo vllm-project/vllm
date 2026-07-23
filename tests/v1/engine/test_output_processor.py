@@ -19,14 +19,20 @@ from vllm.lora.request import LoRARequest
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.tokenizers import TokenizerLike
+from vllm.tracing import SpanAttributes
 from vllm.v1.engine import (
     EngineCoreEvent,
     EngineCoreEventType,
+    EngineCoreOutput,
     EngineCoreOutputs,
     EngineCoreRequest,
     FinishReason,
 )
-from vllm.v1.engine.output_processor import OutputProcessor, RequestOutputCollector
+from vllm.v1.engine.output_processor import (
+    OutputProcessor,
+    RequestOutputCollector,
+    RequestState,
+)
 from vllm.v1.metrics.stats import IterationStats, SchedulerStats
 
 
@@ -971,6 +977,45 @@ def test_iteration_stats(dummy_test_vectors):
 
     assert iteration_stats.num_prompt_tokens == 0
     assert iteration_stats.num_generation_tokens == num_active
+
+
+def test_tracing_includes_zero_temperature(monkeypatch: pytest.MonkeyPatch):
+    output_processor = OutputProcessor(None, log_stats=True)
+    request_state = RequestState(
+        request_id="request",
+        external_req_id="external-request",
+        parent_req=None,
+        request_index=0,
+        lora_request=None,
+        output_kind=RequestOutputKind.FINAL_ONLY,
+        prompt=None,
+        prompt_token_ids=[1],
+        prompt_embeds=None,
+        logprobs_processor=None,
+        detokenizer=None,
+        max_tokens_param=None,
+        temperature=0.0,
+        arrival_time=1.0,
+        queue=None,
+        log_stats=True,
+        stream_interval=1,
+    )
+    assert request_state.stats is not None
+    iteration_stats = IterationStats()
+    iteration_stats.iteration_timestamp = 5.0
+    attributes = {}
+    monkeypatch.setattr(
+        "vllm.v1.engine.output_processor.instrument_manual",
+        lambda **kwargs: attributes.update(kwargs["attributes"]),
+    )
+
+    output_processor.do_tracing(
+        EngineCoreOutput(request_id="request", new_token_ids=[]),
+        request_state,
+        iteration_stats,
+    )
+
+    assert attributes[SpanAttributes.GEN_AI_REQUEST_TEMPERATURE] == 0.0
 
 
 @pytest.mark.parametrize("log_stats", [True, False])
