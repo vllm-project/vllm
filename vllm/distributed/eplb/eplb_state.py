@@ -826,10 +826,6 @@ class EplbState:
                     eplb_model_state.physical_to_logical_map.cpu(),
                 )
 
-                # Skip lateral rearranges that don't materially improve balance.
-                # Gated to ROCm: the redundant-rearrange accuracy collapse this
-                # guards against was only observed on ROCm; other platforms keep
-                # the unconditional rearrange behavior.
                 skip_rearrange = False
                 if (
                     current_platform.is_rocm()
