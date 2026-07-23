@@ -29,7 +29,7 @@ message ParallelismInfo {
   uint32 pipeline_parallel_size = 2;
   uint32 data_parallel_size = 3;
   uint32 data_parallel_rank = 4;
-  uint32 decode_context_parallel_size = 6;
+  uint32 decode_context_parallel_size = 5;
 }
 
 message GetModelInfoRequest {}
