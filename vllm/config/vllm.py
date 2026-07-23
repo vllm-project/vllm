@@ -1330,17 +1330,6 @@ class VllmConfig:
                     self.kv_transfer_config.kv_connector,
                 )
 
-            from vllm.v1.attention.backends.mla.hisparse import (
-                _has_hisparse_ops,
-            )
-
-            if not _has_hisparse_ops():
-                raise RuntimeError(
-                    "HiSparse requires the compiled CUDA ops "
-                    "(_C_cache_ops.hisparse_*), which are missing from this "
-                    "build. Rebuild vLLM from source with CUDA."
-                )
-
         if (
             self.compilation_config.cudagraph_mode.requires_piecewise_compilation()
             and self.compilation_config.mode != CompilationMode.VLLM_COMPILE

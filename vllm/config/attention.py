@@ -13,6 +13,11 @@ from vllm.v1.attention.backends.registry import AttentionBackendEnum
 IndexerKVDType = Literal["bf16", "fp8", "mxfp4", "nvfp4"]
 
 
+def is_hisparse_host_layer(layer_name: str) -> bool:
+    """Whether a DSA KV tensor is host-resident under HiSparse."""
+    return ".indexer" not in layer_name
+
+
 @config
 class HiSparseConfig:
     """Configuration for HiSparse sparse-MLA decode."""

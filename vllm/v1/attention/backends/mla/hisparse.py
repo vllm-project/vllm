@@ -32,8 +32,10 @@ from contextlib import suppress
 from dataclasses import dataclass
 
 import numpy as np
+import psutil
 import torch
 
+from vllm import _custom_ops as ops
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
@@ -42,6 +44,7 @@ from vllm.v1.attention.backends.mla.sparse_utils import (
     triton_convert_req_index_to_global_index,
 )
 from vllm.v1.metrics.stats import HiSparseStats
+from vllm.v1.simple_kv_offload.cuda_mem_ops import pin_tensor
 
 logger = init_logger(__name__)
 
@@ -147,15 +150,8 @@ _REGISTERED_HOST_RANGES: list[tuple[int, int]] = []
 _PINNED_HOST_POOLS: list[torch.Tensor] = []
 
 
-def is_hisparse_host_layer(layer_name: str) -> bool:
-    """Whether a DSA KV tensor is host-resident under HiSparse."""
-    return ".indexer" not in layer_name
-
-
 def check_hisparse_host_memory(vllm_config: VllmConfig, rank_bytes: int) -> None:
     """Fail fast when this rank's pinned host pool cannot fit in RAM."""
-    import psutil
-
     mem = psutil.virtual_memory()
     if rank_bytes > mem.available * 0.95:
         raise ValueError(
@@ -167,8 +163,6 @@ def check_hisparse_host_memory(vllm_config: VllmConfig, rank_bytes: int) -> None
 
 def allocate_pinned_host_pool(size: int) -> torch.Tensor:
     """Allocate and deterministically register an exact-size host KV region."""
-    from vllm.v1.simple_kv_offload.cuda_mem_ops import pin_tensor
-
     page = 4096
     padded_size = round_up(size, page)
     backing = torch.empty(padded_size + page, dtype=torch.int8, device="cpu")
@@ -310,13 +304,6 @@ def hisparse_prefill_staging_remap(
 
 
 def _has_hisparse_ops() -> bool:
-    try:
-        try:
-            import vllm._C_stable_libtorch  # noqa: F401
-        except ImportError:
-            import vllm._C  # noqa: F401
-    except ImportError:
-        return False
     if not hasattr(torch.ops, "_C_cache_ops"):
         return False
     return (
@@ -621,8 +608,6 @@ class HiSparseCoordinator:
         roundtrip), then scatters it into the host pool at its global KV slot
         (so later steps can miss-load it).
         """
-        from vllm import _custom_ops as ops
-
         if kv_cache.numel() == 0:
             return
         self.bind_source_cache(kv_cache)
@@ -679,8 +664,6 @@ class HiSparseCoordinator:
         Recycled-slot hygiene is handled at block-assignment time by the
         KV connector lifecycle, so no hot-copy invalidation is needed here.
         """
-        from vllm import _custom_ops as ops
-
         if kv_cache.numel() == 0:
             return
         self.bind_source_cache(kv_cache)

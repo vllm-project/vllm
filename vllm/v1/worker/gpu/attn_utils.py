@@ -12,6 +12,7 @@ from vllm.config import (
     get_layers_from_vllm_config,
     set_current_vllm_config,
 )
+from vllm.config.attention import is_hisparse_host_layer
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
@@ -20,6 +21,10 @@ from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.attention.backend import (
     AttentionCGSupport,
     CommonAttentionMetadata,
+)
+from vllm.v1.attention.backends.mla.hisparse import (
+    allocate_pinned_host_pool,
+    check_hisparse_host_memory,
 )
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
@@ -177,12 +182,6 @@ def _allocate_kv_cache(
 ):
     use_hisparse = vllm_config.attention_config.hisparse_config is not None
     if use_hisparse:
-        from vllm.v1.attention.backends.mla.hisparse import (
-            allocate_pinned_host_pool,
-            check_hisparse_host_memory,
-            is_hisparse_host_layer,
-        )
-
         host_bytes = sum(
             tensor.size
             for tensor in kv_cache_config.kv_cache_tensors

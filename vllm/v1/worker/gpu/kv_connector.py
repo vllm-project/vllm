@@ -16,6 +16,11 @@ from vllm.forward_context import (
     is_forward_context_available,
     set_forward_context,
 )
+from vllm.v1.attention.backends.mla.hisparse import (
+    invalidate_blocks,
+    release_pinned_state,
+    take_hisparse_stats,
+)
 from vllm.v1.outputs import (
     EMPTY_MODEL_RUNNER_OUTPUT,
     KVConnectorOutput,
@@ -45,8 +50,6 @@ class KVConnector:
             if new_block_ids is not None:
                 block_ids.extend(new_block_ids[0])
 
-        from vllm.v1.attention.backends.mla.hisparse import invalidate_blocks
-
         invalidate_blocks(block_ids, self.hisparse_block_size)
 
     def post_forward(
@@ -54,8 +57,6 @@ class KVConnector:
     ) -> KVConnectorOutput | None:
         if self.hisparse_block_size is None:
             return None
-        from vllm.v1.attention.backends.mla.hisparse import take_hisparse_stats
-
         stats = take_hisparse_stats()
         return KVConnectorOutput(hisparse_stats=stats) if stats is not None else None
 
@@ -69,8 +70,6 @@ class KVConnector:
     def shutdown(self) -> None:
         if self.hisparse_block_size is None:
             return
-        from vllm.v1.attention.backends.mla.hisparse import release_pinned_state
-
         release_pinned_state()
 
 

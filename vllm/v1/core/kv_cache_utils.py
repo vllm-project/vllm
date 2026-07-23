@@ -14,6 +14,7 @@ from typing import Any, NamedTuple, NewType, TypeAlias, cast, overload
 
 from vllm import envs
 from vllm.config import VllmConfig
+from vllm.config.attention import is_hisparse_host_layer
 from vllm.logger import init_logger
 from vllm.utils.hashing import sha256_cbor, xxhash_cbor
 from vllm.utils.math_utils import cdiv, round_up
@@ -1363,8 +1364,6 @@ def _hisparse_gpu_host_usage_split(
         and isinstance(kv_cache_groups[0].kv_cache_spec, UniformTypeKVCacheSpecs)
     ):
         return None
-    from vllm.v1.attention.backends.mla.hisparse import is_hisparse_host_layer
-
     per_layer_specs = kv_cache_groups[0].kv_cache_spec.kv_cache_specs
     host_bytes = sum(
         spec.max_memory_usage_bytes(vllm_config)
@@ -1415,10 +1414,6 @@ def get_kv_cache_config_from_groups(
         # layer based on its hidden size.
         hisparse_host_budget = _hisparse_host_pool_bytes(vllm_config)
         if hisparse_host_budget is not None:
-            from vllm.v1.attention.backends.mla.hisparse import (
-                is_hisparse_host_layer,
-            )
-
             specs = kv_cache_groups[0].kv_cache_spec.kv_cache_specs
             host_page = sum(
                 spec.page_size_bytes

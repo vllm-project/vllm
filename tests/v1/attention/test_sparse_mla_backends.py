@@ -35,6 +35,7 @@ if not current_platform.is_cuda():
     )
 
 from vllm.utils.math_utils import cdiv
+from vllm.v1.attention.backends.mla import hisparse
 from vllm.v1.attention.backends.mla.flashinfer_mla_sparse import (
     FlashInferMLASparseTRTLLMBackend,
 )
@@ -50,6 +51,7 @@ from vllm.v1.attention.backends.mla.hisparse import (
     ResolvedHiSparseConfig,
     _has_hisparse_ops,
     create_hisparse_coordinator,
+    hisparse_prefill_staging_remap,
     is_hisparse_decode_batch,
 )
 from vllm.v1.attention.backends.mla.indexer import split_indexer_prefill_chunks
@@ -58,6 +60,7 @@ from vllm.v1.attention.backends.utils import (
     split_prefill_chunks,
 )
 from vllm.v1.attention.ops import flashmla
+from vllm.v1.metrics.stats import HiSparseStats
 
 SPARSE_BACKEND_BATCH_SPECS = {
     name: BATCH_SPECS[name]
@@ -1383,9 +1386,6 @@ def test_hisparse_decode_batch_detection():
 
 
 def test_hisparse_stats_report_periodic_deltas(monkeypatch: pytest.MonkeyPatch):
-    from vllm.v1.attention.backends.mla import hisparse
-    from vllm.v1.metrics.stats import HiSparseStats
-
     coordinator = SimpleNamespace(
         _swap_stats=torch.tensor([7, 3], dtype=torch.uint64), stats_row_bytes=16
     )
@@ -1525,8 +1525,6 @@ def test_hisparse_kernel_matches_fallback():
 @requires_hisparse_ops
 def test_hisparse_apply_plan_matches_independent():
     """Plan replay must match independent LRU resolution and gathering."""
-    from vllm.v1.attention.backends.mla import hisparse as _hs
-
     device = torch.device(DEVICE_TYPE)
     torch.manual_seed(0)
     block_size = 64
@@ -1558,7 +1556,7 @@ def test_hisparse_apply_plan_matches_independent():
     seq_len = blocks_per_req * block_size
     slot_mapping = block_table[:, -1].to(torch.int64) * block_size + (block_size - 1)
 
-    _hs._GROUP_PLANS.clear()
+    hisparse._GROUP_PLANS.clear()
     producer, shared, indep = make(), make(), make()
     for _ in range(8):
         topk = torch.stack(
@@ -1704,8 +1702,6 @@ def test_hisparse_mixed_batch_bf16_row_split(
     ok, reason = flashmla.is_flashmla_sparse_supported()
     if not ok:
         pytest.skip(reason)
-
-    from vllm.v1.attention.backends.mla import hisparse as _hisparse
 
     device = torch.device(DEVICE_TYPE)
     dtype = torch.bfloat16
@@ -1875,7 +1871,7 @@ def test_hisparse_mixed_batch_bf16_row_split(
     # Host-resident pool with identical contents.
     kv_pool = kv_cache.cpu().pin_memory()
 
-    _hisparse._PREFILL_REMAP = None
+    hisparse._PREFILL_REMAP = None
     staging_calls = []
     original_stage = impl._hisparse_host_prefill_cache
 
@@ -1908,10 +1904,6 @@ def test_hisparse_mixed_batch_bf16_row_split(
 
 def test_hisparse_prefill_staging_remap():
     """Compacted staging references the same host rows as direct indexing."""
-    from vllm.v1.attention.backends.mla.hisparse import (
-        hisparse_prefill_staging_remap,
-    )
-
     block_size = 4
     block_table = torch.tensor(
         [[5, 2, -1, -1], [2, 7, 3, -1], [9, -1, -1, -1]], dtype=torch.int32
