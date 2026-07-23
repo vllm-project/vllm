@@ -995,14 +995,6 @@ def convert_to_humming_moe_kernel_format(
                 "shape_k": intermediate_size,
             },
         }
-        if not is_gated:
-            logger.info_once(
-                "Humming non-gated MoE shape support engaged: W13=(%d,%d), W2=(%d,%d)",
-                intermediate_size,
-                layer.moe_config.hidden_dim,
-                layer.moe_config.hidden_dim,
-                intermediate_size,
-            )
 
     layer.weight_schemas = {}
     layer.input_schemas = {}
