@@ -101,7 +101,7 @@ def create_case(
         )
 
     run()
-    torch.cuda.synchronize(device)
+    torch.accelerator.synchronize(device)
     active_req_indices = [
         req_idx
         for req_num, req_idx in enumerate(req_indices)
@@ -131,8 +131,8 @@ def summarize(timings_ms: list[float]) -> tuple[float, float, float]:
 
 
 def time_cuda_call(run: Callable[[], None]) -> float:
-    start = torch.cuda.Event(enable_timing=True)
-    end = torch.cuda.Event(enable_timing=True)
+    start = torch.Event(enable_timing=True)
+    end = torch.Event(enable_timing=True)
     start.record()
     run()
     end.record()
@@ -154,7 +154,7 @@ def benchmark_incremental_decode(
         total_len += 1
         case.req_states.total_len.stage_write_elem(0, total_len)
         case.req_states.apply_staged_writes()
-        torch.cuda.synchronize(device)
+        torch.accelerator.synchronize(device)
 
         elapsed_ms = time_cuda_call(case.run)
         if step >= warmup_steps:
@@ -177,7 +177,7 @@ def benchmark_cold_scan(
         case.state.cached_last_start.fill_(-1)
         case.state.cached_last_end.fill_(-1)
         case.state.cached_scan_pos.zero_()
-        torch.cuda.synchronize(device)
+        torch.accelerator.synchronize(device)
 
         elapsed_ms = time_cuda_call(case.run)
         if step >= warmup_steps:
