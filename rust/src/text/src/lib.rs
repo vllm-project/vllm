@@ -31,7 +31,6 @@ mod error;
 mod lower;
 pub mod output;
 mod request;
-mod sampling;
 pub use vllm_tokenizer as tokenizer;
 
 trait_set! {
