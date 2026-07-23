@@ -134,7 +134,19 @@ def _accuracy_test(llm: LLM) -> None:
     )
 
 
+def _flash_attn_available() -> bool:
+    try:
+        import vllm.vllm_flash_attn  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
+@pytest.mark.skipif(
+    not _flash_attn_available(),
+    reason="requires compiled CUDA flash-attention extensions",
+)
 def test_ec_cpu_offloading() -> None:
     """Tests ECCPUConnector accuracy and latency with a VLM model."""
     ec_transfer_config = ECTransferConfig(

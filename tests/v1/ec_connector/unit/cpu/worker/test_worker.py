@@ -52,6 +52,14 @@ _requires_cuda = pytest.mark.skipif(
     reason="exercises real CUDA stream/event coordination in ECCPUWorker",
 )
 
+_requires_swap_blocks_batch = pytest.mark.skipif(
+    not hasattr(torch.ops._C_cache_ops, "swap_blocks_batch"),
+    reason=(
+        "installed vllm C++ extension predates the swap_blocks_batch op "
+        "flush_saves/start_load_caches use; rebuild the extension to run this"
+    ),
+)
+
 
 def _make_region() -> ECSharedRegion:
     """Fresh region backed by a real per-test mmap file."""
@@ -137,6 +145,7 @@ def make_worker():
 
 
 @_requires_cuda
+@_requires_swap_blocks_batch
 @pytest.mark.parametrize(
     "n_elements,n_blocks",
     [
@@ -229,6 +238,7 @@ def test_save_caches_raises_when_allocated_blocks_too_small(make_worker):
 
 
 @_requires_cuda
+@_requires_swap_blocks_batch
 def test_save_caches_batches_multiple_hashes(make_worker):
     """Multiple save_caches calls are batched into a single flush."""
     worker = make_worker()
@@ -259,6 +269,7 @@ def test_save_caches_batches_multiple_hashes(make_worker):
 
 
 @_requires_cuda
+@_requires_swap_blocks_batch
 def test_start_load_caches_copies_with_correct_shape_dtype_and_bytes(make_worker):
     """Single batched load across all hashes with correct byte→dtype→shape."""
     worker = make_worker()
@@ -309,6 +320,7 @@ def test_start_load_caches_noop_when_loads_is_empty(make_worker):
 
 
 @_requires_cuda
+@_requires_swap_blocks_batch
 def test_start_load_caches_skips_cached_and_loads_new_in_same_step(make_worker):
     """Cached entries are preserved while new ones are loaded."""
     worker = make_worker()
@@ -337,6 +349,7 @@ def test_start_load_caches_skips_cached_and_loads_new_in_same_step(make_worker):
 
 
 @_requires_cuda
+@_requires_swap_blocks_batch
 @pytest.mark.parametrize(
     "tp_rank,pcp_rank",
     [(0, 0), (1, 0), (0, 1), (1, 1)],
@@ -366,6 +379,7 @@ def test_start_load_caches_works_on_all_ranks(make_worker, tp_rank, pcp_rank):
 
 
 @_requires_cuda
+@_requires_swap_blocks_batch
 def test_save_then_load_round_trips_bytes(make_worker):
     """Full producer→mmap→consumer byte path in one shot."""
     worker = make_worker()
@@ -391,6 +405,7 @@ def test_save_then_load_round_trips_bytes(make_worker):
 
 
 @_requires_cuda
+@_requires_swap_blocks_batch
 def test_buffer_pool_is_reused_across_save_steps(make_worker):
     """After flush_saves, descriptor buffers are returned to the pool and
     reused on the next flush — no reallocation."""
@@ -412,6 +427,7 @@ def test_buffer_pool_is_reused_across_save_steps(make_worker):
 
 
 @_requires_cuda
+@_requires_swap_blocks_batch
 def test_buffer_pool_is_reused_across_load_steps(make_worker):
     """After start_load_caches, descriptor buffers are returned to the pool
     and reused on the next call."""
@@ -519,6 +535,7 @@ def test_shutdown_calls_region_cleanup_and_swallows_errors(caplog_vllm):
 
 
 @_requires_cuda
+@_requires_swap_blocks_batch
 def test_e2e_scheduler_worker_save_then_load(make_worker, monkeypatch):
     """Full pipeline: scheduler allocates blocks, worker saves GPU tensor to
     mmap via flush_saves, scheduler marks ready after step delay, worker

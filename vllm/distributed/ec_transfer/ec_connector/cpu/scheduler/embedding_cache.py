@@ -110,6 +110,23 @@ class EmbeddingCache:
                 self._evictable_block_count -= len(entry.block_ids)
             entry.pin()
 
+    def pin_if_ready(self, key: str) -> tuple[int, ...] | None:
+        """Atomically pin *key* if present and ready; return its block ids.
+
+        Returns None if the key is absent or not yet ready. Used by the
+        producer read-serving path to grant a remote read without racing a
+        concurrent eviction on the scheduler thread.
+        """
+        with self._lock:
+            entry = self._entries.get(key)
+            if entry is None or not entry.ready:
+                return None
+            if entry.evictable:
+                del self._entries_free_list[key]
+                self._evictable_block_count -= len(entry.block_ids)
+            entry.pin()
+            return entry.block_ids
+
     def unpin(self, key: str) -> None:
         """Unpin an entry. Asserts currently pinned."""
         with self._lock:

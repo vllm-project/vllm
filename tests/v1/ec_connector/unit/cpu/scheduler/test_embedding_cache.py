@@ -331,3 +331,26 @@ def test_discard_rejects_absent_key():
     cache = EmbeddingCache(num_blocks=4)
     with pytest.raises(KeyError):
         cache.discard("nope")
+
+
+# ── pin_if_ready ─────────────────────────────────────────────────────────────
+
+
+def test_pin_if_ready_pins_and_returns_blocks():
+    cache = EmbeddingCache(num_blocks=4)
+    cache.alloc("h", 2)
+    cache.mark_ready("h")
+    blocks = cache.pin_if_ready("h")
+    assert blocks is not None and len(blocks) == 2
+    assert cache.alloc("h2", 4) is None  # pinned ⇒ not evictable
+
+
+def test_pin_if_ready_none_when_absent():
+    cache = EmbeddingCache(num_blocks=4)
+    assert cache.pin_if_ready("nope") is None
+
+
+def test_pin_if_ready_none_when_not_ready():
+    cache = EmbeddingCache(num_blocks=4)
+    cache.alloc("h", 1)  # not-ready
+    assert cache.pin_if_ready("h") is None
