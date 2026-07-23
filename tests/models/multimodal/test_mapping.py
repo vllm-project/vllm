@@ -170,6 +170,7 @@ def test_cosmos3_edge_checkpoint_weights_mapper():
                 "layers.0.self_attn.to_add_out.weight",
                 "layers.0.self_attn.norm_added_q.weight",
                 "layers.0.self_attn.norm_added_k.weight",
+                "layers.0.self_attn.k_norm_und_for_gen.weight",
                 "layers.0.self_attn.q_proj_moe_gen.weight",
                 "layers.0.mlp_moe_gen.up_proj.weight",
                 "norm_moe_gen.weight",
