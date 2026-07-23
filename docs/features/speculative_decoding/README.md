@@ -183,6 +183,33 @@ vllm serve <target-model> \
   are populated by vLLM and are not intended to be set by users.
 - `use_heterogeneous_vocab` currently supports greedy draft sampling only. Probabilistic acceptance (temperature > 0 draft sampling) is not yet supported and will be added in a future release.
 
+## Performance: attention backend and CUDA graphs
+
+The attention backend affects how much of the decode step can be captured in a
+CUDA graph while speculative decoding is active, which in turn affects
+single-stream decode throughput.
+
+Spec-decode "decode" steps verify `1 + num_speculative_tokens` query positions
+per request. Keeping these verify batches inside a **full** decode CUDA graph
+(mode `FULL_AND_PIECEWISE`) avoids per-step kernel-launch overhead. A backend
+can only do this if it reports at least `AttentionCGSupport.UNIFORM_BATCH`:
+
+- **FlashAttention** (`--attention-backend FLASH_ATTN`) reports `UNIFORM_BATCH`
+  (FA2) or `ALWAYS` (FA3), so it keeps FULL decode graphs under spec-decode.
+- **FlashInfer** reaches `UNIFORM_BATCH` only on its trtllm-gen path (causal
+  attention with a supported head/kv config). On its native decode path — and
+  on platforms where trtllm-gen is unavailable — it reports
+  `UNIFORM_SINGLE_TOKEN_DECODE`, so vLLM automatically downgrades
+  `cudagraph_mode` to `PIECEWISE` and logs a warning. The verify batches then
+  run piecewise, which adds launch overhead and can measurably reduce
+  single-stream decode throughput on bandwidth-bound hardware.
+
+If you enable speculative decoding and see a log line such as
+`CUDAGraphMode.FULL_AND_PIECEWISE is not supported with spec-decode for
+attention backend ...; setting cudagraph_mode=PIECEWISE`, and your model and
+platform support it, try `--attention-backend FLASH_ATTN` to keep FULL decode
+graphs.
+
 ## Lossless guarantees of Speculative Decoding
 
 In vLLM, speculative decoding aims to enhance inference efficiency while maintaining accuracy. This section addresses the lossless guarantees of

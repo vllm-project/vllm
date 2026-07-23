@@ -1440,6 +1440,23 @@ class CompilationConfig:
             else:
                 msg += "; setting cudagraph_mode=NONE"
                 cudagraph_mode = CUDAGraphMode.NONE
+            # Make the performance cost and the actionable alternative explicit:
+            # running spec-decode verify batches under piecewise (or no)
+            # cudagraphs instead of a full decode graph adds per-step
+            # kernel-launch overhead and can measurably reduce single-stream
+            # decode throughput (double-digit percent has been observed on
+            # bandwidth-bound hardware). A backend that reports at least
+            # AttentionCGSupport.UNIFORM_BATCH (e.g. FlashAttention via
+            # --attention-backend FLASH_ATTN) keeps FULL decode graphs under
+            # spec-decode where the model/platform supports it.
+            msg += (
+                ". This runs spec-decode verify batches without a full decode "
+                "cudagraph, adding per-step launch overhead that can measurably "
+                "lower single-stream decode throughput. If your model/platform "
+                "supports it, a backend reporting UNIFORM_BATCH or higher (e.g. "
+                "--attention-backend FLASH_ATTN) keeps FULL decode graphs under "
+                "spec-decode."
+            )
             logger.warning(msg)
 
         # double check that we can support full cudagraph if they are requested
