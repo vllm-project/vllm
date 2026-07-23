@@ -898,6 +898,102 @@ def _run_mamba_prefix_cache_mrv1(
     cleanup_dist_env_and_memory()
 
 
+def _run_mamba_eagle_block_reuse(
+    monkeypatch: pytest.MonkeyPatch, async_scheduling: bool
+):
+    """Recreate the #43559 failure conditions: a request finishing right after a
+    block boundary it crossed with every draft rejected, then a second request
+    whose cache hit lands on that final (eagle) block.
+
+    Request A ends a few tokens past the 2nd aligned boundary; with
+    num_accepted_tokens=1 every boundary crossing happens with rejected drafts
+    in flight, and A finishes before any later step could repair its cached
+    snapshot. Request B shares the prefix: pre-fix MambaManager returns the
+    boundary block as part of the hit (B resumes on the possibly-poisoned
+    snapshot), post-fix the hit stops one block earlier and B recomputes it.
+
+    Assertions, all deterministic:
+      1. B's num_cached_tokens == BLOCK_SIZE (the eagle block was dropped).
+      2. A's cached snapshot at the boundary matches the no-spec reference.
+      3. B's state at its next boundary matches the reference -- corruption
+         resumed from the reused block would surface here (the user-visible
+         failure, at state level).
+    """
+    global async_scheduling_mode
+    async_scheduling_mode = async_scheduling
+    run_ref_mamba_state_in_subprocess()
+    apply_patch(monkeypatch)
+    full_prompt = datasets.load_dataset("heheda/a_long_article")["train"][0]["text"]
+
+    engine = LLM(
+        model=MODEL,
+        load_format="dummy",
+        enable_prefix_caching=True,
+        block_size=BLOCK_SIZE,
+        mamba_cache_mode="align",
+        speculative_config={
+            "method": "qwen3_next_mtp",
+            "num_speculative_tokens": num_speculative_tokens,
+        },
+        max_num_batched_tokens=3072,
+        hf_overrides={"num_hidden_layers": NUM_HIDDEN_LAYERS},
+        async_scheduling=async_scheduling,
+        seed=42,
+    )
+    global prompt_token_ids
+    prompt_token_ids = engine.get_tokenizer().encode(full_prompt)
+    global num_accepted_tokens
+    num_accepted_tokens = 1
+    global cur_step_action_idx, step_actions
+    cur_step_action_idx = 0
+    step_actions = []
+
+    boundary = BLOCK_SIZE * 2
+    # A decodes across BOTH boundaries (align mode only snapshots state at
+    # decode/chunk crossings, and B needs a fallback state block once the
+    # eagle block is dropped), rejecting 3 drafts every step, and finishes
+    # a few tokens past the second boundary -- no later step can repair the
+    # cached snapshot.
+    engine.generate(
+        [TokensPrompt(prompt_token_ids=prompt_token_ids[: BLOCK_SIZE - 2])],
+        SamplingParams(temperature=0.0, max_tokens=BLOCK_SIZE + 10),
+    )
+    a_boundary_state = mamba_kv_cache_dict.get(boundary)
+    assert a_boundary_state is not None, "A never cached the boundary block"
+    mamba_kv_cache_dict.clear()
+
+    # B: prefix through the boundary, prompt ending shy of the next one so a
+    # few decode steps cross it and its state gets captured for comparison.
+    next_boundary = BLOCK_SIZE * 3
+    (out_b,) = engine.generate(
+        [TokensPrompt(prompt_token_ids=prompt_token_ids[: next_boundary - 10])],
+        SamplingParams(temperature=0.0, max_tokens=15),
+    )
+    assert out_b.num_cached_tokens == BLOCK_SIZE, (
+        f"cache hit must drop the eagle block: expected {BLOCK_SIZE} cached "
+        f"tokens, got {out_b.num_cached_tokens}"
+    )
+
+    mamba_state_ref = torch.load("mamba_kv_cache_dict_ref.pth")
+    check_mamba_state_equal(mamba_state_ref, {boundary: a_boundary_state}, [boundary])
+    check_mamba_state_equal(mamba_state_ref, mamba_kv_cache_dict, [next_boundary])
+
+    mamba_kv_cache_dict.clear()
+    del engine
+    torch.accelerator.empty_cache()
+    cleanup_dist_env_and_memory()
+
+
+@create_new_process_for_each_test()
+def test_mamba_eagle_block_reuse_mrv1(monkeypatch: pytest.MonkeyPatch):
+    _run_mamba_eagle_block_reuse(monkeypatch, async_scheduling=False)
+
+
+@create_new_process_for_each_test()
+def test_mamba_eagle_block_reuse_mrv1_async(monkeypatch: pytest.MonkeyPatch):
+    _run_mamba_eagle_block_reuse(monkeypatch, async_scheduling=True)
+
+
 @create_new_process_for_each_test()
 def test_mamba_prefix_cache_mrv1(monkeypatch: pytest.MonkeyPatch):
     _run_mamba_prefix_cache_mrv1(monkeypatch, async_scheduling=False)
