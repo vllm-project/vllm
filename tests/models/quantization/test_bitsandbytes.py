@@ -323,7 +323,7 @@ def test_bitsandbytes_passes_revision_by_name():
             return_value=["/folder/model.safetensors"],
         ),
     ):
-        bnb.BitsAndBytesModelLoader._prepare_weights(fake_self, "org/model", "myrev")
+        bnb.BitsAndBytesModelLoader._prepare_weights(fake_self, "org/model", "myrev")  # type: ignore[arg-type]
 
     mock_idx.assert_called_once()
     assert mock_idx.call_args.kwargs.get("revision") == "myrev"

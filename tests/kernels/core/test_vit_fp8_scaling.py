@@ -44,7 +44,7 @@ def _build_attention(mm_config):
         return
 
     vllm_config = VllmConfig()
-    vllm_config.model_config = SimpleNamespace(multimodal_config=mm_config)
+    vllm_config.model_config = SimpleNamespace(multimodal_config=mm_config)  # type: ignore[assignment]
 
     with (
         set_current_vllm_config(vllm_config),
@@ -182,7 +182,7 @@ def test_static_scales_missing_layer(tmp_path) -> None:
         mm_encoder_fp8_scale_path=str(scale_file),
     )
     vllm_config = VllmConfig()
-    vllm_config.model_config = SimpleNamespace(multimodal_config=mm_config)
+    vllm_config.model_config = SimpleNamespace(multimodal_config=mm_config)  # type: ignore[assignment]
 
     from vllm.model_executor.layers.attention.mm_encoder_attention import (
         MMEncoderAttention,

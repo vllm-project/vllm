@@ -9,13 +9,13 @@ from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 
 def test_mm_encoder_attn_backend_str_conversion():
-    config = MultiModalConfig(mm_encoder_attn_backend="FLASH_ATTN")
+    config = MultiModalConfig(mm_encoder_attn_backend="FLASH_ATTN")  # type: ignore[arg-type]
     assert config.mm_encoder_attn_backend == AttentionBackendEnum.FLASH_ATTN
 
 
 def test_mm_encoder_attn_backend_invalid():
     with pytest.raises(ValueError):
-        MultiModalConfig(mm_encoder_attn_backend="not_a_backend")
+        MultiModalConfig(mm_encoder_attn_backend="not_a_backend")  # type: ignore[arg-type]
 
 
 def test_mm_encoder_attn_backend_hash_updates():
