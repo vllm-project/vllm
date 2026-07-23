@@ -2,11 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import math
 from collections import defaultdict
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from itertools import product as iprod
 from typing import Any
 
+import numpy as np
 import torch
 
 from vllm.config import CacheConfig, VllmConfig
@@ -18,11 +19,13 @@ from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import largest_power_of_2_divisor
 from vllm.utils.mem_utils import MemorySnapshot, format_gib
+from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionMetadataBuilder,
     MultipleOf,
 )
+from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     EncoderOnlyAttentionSpec,
@@ -88,7 +91,6 @@ class KVBlockZeroer:
     def __init__(
         self,
         device: torch.device,
-        pin_memory: bool,
         attn_groups_iter: Iterable["AttentionGroup"],
         kernel_block_sizes: list[int],
         cache_dtype: str,
@@ -108,11 +110,7 @@ class KVBlockZeroer:
         Only AttentionSpec layers are processed; Mamba layers are skipped.
         """
         self.device = device
-        self.pin_memory = pin_memory
         self._meta: tuple[torch.Tensor, int, int, int] | None = None
-        self._id_cap: int = 0
-        self._ids_pinned: torch.Tensor | None = None
-        self._ids_gpu: torch.Tensor | None = None
 
         if runner_only_attn_layers is None:
             runner_only_attn_layers = set()
@@ -174,13 +172,6 @@ class KVBlockZeroer:
             return
 
         blk_size = min(largest_power_of_2_divisor(page_size_el), 1024)
-        self._id_cap = 8192
-        self._ids_pinned = torch.empty(
-            self._id_cap,
-            dtype=torch.int64,
-            pin_memory=self.pin_memory,
-        )
-        self._ids_gpu = torch.empty(self._id_cap, dtype=torch.int64, device=self.device)
         self._meta = (
             torch.tensor(seg_addrs, dtype=torch.uint64, device=self.device),
             page_size_el,
@@ -194,20 +185,7 @@ class KVBlockZeroer:
             return
         seg_addrs, page_size_el, blk_size, n_segs = self._meta
         n_blocks = len(block_ids)
-        if n_blocks > self._id_cap:
-            self._id_cap = n_blocks * 2
-            self._ids_pinned = torch.empty(
-                self._id_cap,
-                dtype=torch.int64,
-                pin_memory=self.pin_memory,
-            )
-            self._ids_gpu = torch.empty(
-                self._id_cap, dtype=torch.int64, device=self.device
-            )
-        assert self._ids_pinned is not None and self._ids_gpu is not None
-        self._ids_pinned[:n_blocks].numpy()[:] = block_ids
-        idx = self._ids_gpu[:n_blocks]
-        idx.copy_(self._ids_pinned[:n_blocks], non_blocking=True)
+        idx = async_tensor_h2d(block_ids, device=self.device, dtype=torch.int64)
         grid = (n_blocks * n_segs * (page_size_el // blk_size),)
         _zero_kv_blocks_kernel[grid](
             seg_addrs,
@@ -513,9 +491,51 @@ def bind_kv_cache(
         for layer_name in layer_names:
             runner_kv_caches.append(kv_caches[layer_name])
 
-    # Bind kv_caches to forward context
+    # Bind kv_caches to forward context. Each layer's bind_kv_cache unpacks
+    # its raw allocation into the per-layer view(s) it needs (e.g. Mamba
+    # splits conv/ssm), so the kv_caches dict can hold a single tensor per
+    # layer for the KV connector to register.
     for layer_name, kv_cache in kv_caches.items():
-        forward_context[layer_name].kv_cache = kv_cache
+        forward_context[layer_name].bind_kv_cache(kv_cache)
+
+
+def copy_kv_cache_blocks_inplace(
+    kv_caches: Iterable[torch.Tensor | list[torch.Tensor]],
+    num_blocks: int,
+    kv_cache_block_copies: Sequence[KVCacheBlockCopy],
+) -> None:
+    if not kv_cache_block_copies:
+        return
+
+    storage_tensors: list[torch.Tensor] = []
+    seen_storage: set[int] = set()
+    for entry in kv_caches:
+        # Mamba layers hold a list of state tensors; attention layers a single
+        # tensor. Both alias the shared block-major backing storage.
+        tensors = entry if isinstance(entry, (list, tuple)) else (entry,)
+        for tensor in tensors:
+            ptr = tensor.untyped_storage().data_ptr()
+            if ptr in seen_storage:
+                continue
+            seen_storage.add(ptr)
+            storage_tensors.append(tensor)
+
+    if not storage_tensors:
+        return
+    device = storage_tensors[0].device
+    indices_np = np.array(kv_cache_block_copies, dtype=np.int64)
+    indices = async_tensor_h2d(indices_np, device=device)
+    src_indices, dst_indices = indices.unbind(dim=1)
+
+    for tensor in storage_tensors:
+        assert tensor.device == device
+        blocks = torch.empty(0, dtype=torch.uint8, device=device)
+        blocks.set_(tensor.untyped_storage())
+        # Block-major backing storage: block i owns the contiguous byte range
+        # [i * page_size, (i + 1) * page_size).
+        assert blocks.numel() % num_blocks == 0
+        blocks = blocks.view(num_blocks, -1)
+        blocks[dst_indices] = blocks[src_indices]
 
 
 def is_residual_scattered_for_sp(

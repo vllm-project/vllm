@@ -168,36 +168,41 @@ class NCCLWeightTransferEngine(
                 "Call init_transfer_engine() first."
             )
 
-        if update_info.packed:
-            # Build iterator of (name, (shape, dtype)) from update_info
-            def state_dict_info_iterator():
+        from vllm.model_executor.model_loader.mtp_validation import (
+            disable_mtp_completeness_check,
+        )
+
+        with disable_mtp_completeness_check():
+            if update_info.packed:
+                # Build iterator of (name, (shape, dtype)) from update_info
+                def state_dict_info_iterator():
+                    for name, dtype_name, shape in zip(
+                        update_info.names, update_info.dtype_names, update_info.shapes
+                    ):
+                        dtype = getattr(torch, dtype_name)
+                        yield (name, (shape, dtype))
+
+                packed_nccl_broadcast_consumer(
+                    iterator=state_dict_info_iterator(),
+                    group=self.model_update_group,
+                    src=0,
+                    post_unpack_func=self.model.load_weights,
+                    buffer_size_bytes=update_info.packed_buffer_size_bytes,
+                    num_buffers=update_info.packed_num_buffers,
+                    device=self.device,
+                )
+            else:
+                # Use simple one-by-one broadcasting
                 for name, dtype_name, shape in zip(
                     update_info.names, update_info.dtype_names, update_info.shapes
                 ):
                     dtype = getattr(torch, dtype_name)
-                    yield (name, (shape, dtype))
-
-            packed_nccl_broadcast_consumer(
-                iterator=state_dict_info_iterator(),
-                group=self.model_update_group,
-                src=0,
-                post_unpack_func=self.model.load_weights,
-                buffer_size_bytes=update_info.packed_buffer_size_bytes,
-                num_buffers=update_info.packed_num_buffers,
-                device=self.device,
-            )
-        else:
-            # Use simple one-by-one broadcasting
-            for name, dtype_name, shape in zip(
-                update_info.names, update_info.dtype_names, update_info.shapes
-            ):
-                dtype = getattr(torch, dtype_name)
-                weight = torch.empty(shape, dtype=dtype, device=self.device)
-                self.model_update_group.broadcast(
-                    weight, src=0, stream=torch.cuda.current_stream()
-                )
-                self.model.load_weights([(name, weight)])
-                del weight
+                    weight = torch.empty(shape, dtype=dtype, device=self.device)
+                    self.model_update_group.broadcast(
+                        weight, src=0, stream=torch.cuda.current_stream()
+                    )
+                    self.model.load_weights([(name, weight)])
+                    del weight
 
     def shutdown(self) -> None:
         if self.model_update_group is not None:
