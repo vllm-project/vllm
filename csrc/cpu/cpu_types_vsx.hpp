@@ -287,7 +287,7 @@ struct FP32Vec4 : public Vec<FP32Vec4> {
 
   explicit FP32Vec4(__vector float data) : reg(data) {}
 
-  explicit FP32Vec4(const FP32Vec4& data) : reg(data.reg) {}
+  FP32Vec4(const FP32Vec4& data) : reg(data.reg) {}
 };
 
 struct FP32Vec8 : public Vec<FP32Vec8> {
@@ -316,7 +316,7 @@ struct FP32Vec8 : public Vec<FP32Vec8> {
 
   explicit FP32Vec8(f32x4x2_t data) : reg(data) {}
 
-  explicit FP32Vec8(const FP32Vec8& data) {
+  FP32Vec8(const FP32Vec8& data) {
     reg.val[0] = data.reg.val[0];
     reg.val[1] = data.reg.val[1];
   }
@@ -593,7 +593,7 @@ struct FP32Vec16 : public Vec<FP32Vec16> {
   explicit FP32Vec16(bool, const float* ptr) : FP32Vec16(ptr) {}
   explicit FP32Vec16(f32x4x4_t data) : reg(data) {}
 
-  explicit FP32Vec16(const FP32Vec16& data) {
+  FP32Vec16(const FP32Vec16& data) {
     reg.val[0] = data.reg.val[0];
     reg.val[1] = data.reg.val[1];
     reg.val[2] = data.reg.val[2];
