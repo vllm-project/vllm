@@ -104,6 +104,7 @@ class BuildSettings(BaseSettings):
     max_jobs: str | None = Field(
         default=None,
         alias="MAX_JOBS",
+        json_schema_extra={"compile_factor": False},
         description=(
             "Maximum number of compilation jobs to run in parallel. "
             "By default this is the number of CPUs."
@@ -126,6 +127,7 @@ class BuildSettings(BaseSettings):
     )
     use_precompiled_rust: bool = Field(
         default=False,
+        json_schema_extra={"compile_factor": False},
         description=(
             "If set, vllm will use the precompiled Rust frontend binary (vllm-rs)."
         ),
@@ -207,6 +209,7 @@ class PathSettings(BaseSettings):
         default_factory=lambda: os.path.expanduser(
             os.path.join(_xdg_config_home(), "vllm")
         ),
+        json_schema_extra={"compile_factor": False},
         description=(
             "Root directory for vLLM configuration files. Defaults to "
             "`~/.config/vllm` unless `XDG_CONFIG_HOME` is set. Note that this not "
@@ -219,6 +222,7 @@ class PathSettings(BaseSettings):
         default_factory=lambda: os.path.expanduser(
             os.path.join(_xdg_cache_home(), "vllm")
         ),
+        json_schema_extra={"compile_factor": False},
         description=(
             "Root directory for vLLM cache files. Defaults to `~/.cache/vllm` "
             "unless `XDG_CACHE_HOME` is set."
@@ -228,12 +232,14 @@ class PathSettings(BaseSettings):
         default_factory=lambda: os.path.expanduser(
             os.path.join(_xdg_cache_home(), "vllm", "assets")
         ),
+        json_schema_extra={"compile_factor": False},
         description="Path to the cache for storing downloaded assets.",
     )
     xla_cache_path: str = Field(
         default_factory=lambda: os.path.expanduser(
             os.path.join(_xdg_cache_home(), "vllm", "xla_cache")
         ),
+        json_schema_extra={"compile_factor": False},
         description=(
             "Path to the XLA persistent cache directory. Only used for XLA "
             "devices such as TPUs."
@@ -241,6 +247,7 @@ class PathSettings(BaseSettings):
     )
     rpc_base_path: str = Field(
         default_factory=tempfile.gettempdir,
+        json_schema_extra={"compile_factor": False},
         description=(
             "Path used for IPC when the frontend api server is running in "
             "multi-processing mode to communicate with the backend engine process."
@@ -248,6 +255,7 @@ class PathSettings(BaseSettings):
     )
     tuned_config_folder: str | None = Field(
         default=None,
+        json_schema_extra={"compile_factor": False},
         description=(
             "User override folder for tuned Triton-kernel configs. Shared by "
             "MoE, Mamba SSU, and LoRA. Filenames are distinct so one folder "
@@ -258,6 +266,7 @@ class PathSettings(BaseSettings):
     )
     enable_startup_plan: bool = Field(
         default=False,
+        json_schema_extra={"compile_factor": False},
         description=(
             "Opt-in persistence of the startup plan. When enabled, each "
             "worker saves the memory-profiling result (the suggested "
@@ -271,6 +280,7 @@ class PathSettings(BaseSettings):
     )
     model_redirect_path: str | None = Field(
         default=None,
+        json_schema_extra={"compile_factor": False},
         description=(
             "Use model_redirect to redirect the model name to a local folder. "
             "`model_redirect` can be a json file mapping the model between "
@@ -319,6 +329,7 @@ class PathSettings(BaseSettings):
     ld_library_path: str | None = Field(
         default=None,
         alias="LD_LIBRARY_PATH",
+        json_schema_extra={"compile_factor": False},
         description=(
             "When `VLLM_NCCL_SO_PATH` is not set, vllm will try to find the "
             "NCCL library file in the locations specified by `LD_LIBRARY_PATH`."
@@ -334,6 +345,7 @@ class PathSettings(BaseSettings):
     )
     cuda_compatibility_path: str | None = Field(
         default=None,
+        json_schema_extra={"compile_factor": False},
         description=(
             "Path to the CUDA compatibility libraries when CUDA compatibility "
             "is enabled."
@@ -341,6 +353,7 @@ class PathSettings(BaseSettings):
     )
     enable_cuda_compatibility: bool = Field(
         default=False,
+        json_schema_extra={"compile_factor": False},
         description=(
             "Enable CUDA compatibility mode for datacenter GPUs with older "
             "driver versions than the CUDA toolkit major version of vLLM."
@@ -348,6 +361,7 @@ class PathSettings(BaseSettings):
     )
     logging_config_path: str | None = Field(
         default=None,
+        json_schema_extra={"compile_factor": False},
         description=(
             "Path to a JSON file with custom logging configuration. Used when "
             "VLLM_CONFIGURE_LOGGING is enabled."
@@ -355,6 +369,7 @@ class PathSettings(BaseSettings):
     )
     debug_dump_path: str | None = Field(
         default=None,
+        json_schema_extra={"compile_factor": False},
         description=(
             "Dump fx graphs to the given directory. It will override "
             "CompilationConfig.debug_dump_path if set."
@@ -401,6 +416,7 @@ class ServerSettings(BaseSettings):
 
     host_ip: str = Field(
         default="",
+        json_schema_extra={"compile_factor": False},
         description=(
             "Used in distributed environment to determine the IP address of the "
             "current node, when the node has multiple network interfaces. If you "
@@ -410,6 +426,7 @@ class ServerSettings(BaseSettings):
     )
     port: int | None = Field(
         default=None,
+        json_schema_extra={"compile_factor": False},
         description=(
             "Used in distributed environment to manually set the communication "
             "port. Note: if VLLM_PORT is set, and some code asks for multiple "
@@ -423,10 +440,12 @@ class ServerSettings(BaseSettings):
     )
     debug_log_api_server_response: bool = Field(
         default=False,
+        json_schema_extra={"compile_factor": False},
         description="Whether to log responses from API Server for debugging.",
     )
     http_timeout_keep_alive: int = Field(
         default=5,
+        json_schema_extra={"compile_factor": False},
         description=(
             "Timeout in seconds for keeping HTTP connections alive in API server."
         ),
@@ -450,6 +469,7 @@ class ServerSettings(BaseSettings):
     )
     engine_iteration_timeout_s: int = Field(
         default=60,
+        json_schema_extra={"compile_factor": False},
         description="Timeout for each iteration in the engine.",
     )
     engine_ready_timeout_s: int = Field(
@@ -461,6 +481,7 @@ class ServerSettings(BaseSettings):
     )
     execute_model_timeout_seconds: int = Field(
         default=300,
+        json_schema_extra={"compile_factor": False},
         description=(
             "Timeout in seconds for execute_model RPC calls in multiprocessing "
             "executor (only applies when TP > 1)."
@@ -468,10 +489,12 @@ class ServerSettings(BaseSettings):
     )
     worker_shutdown_timeout_seconds: int = Field(
         default=5,
+        json_schema_extra={"compile_factor": False},
         description="Timeout in seconds for engine and worker process shutdown.",
     )
     keep_alive_on_engine_death: bool = Field(
         default=False,
+        json_schema_extra={"compile_factor": False},
         description=(
             "If set, the OpenAI API server will stay alive even after the "
             "underlying AsyncLLMEngine errors and stops serving requests."
@@ -479,6 +502,7 @@ class ServerSettings(BaseSettings):
     )
     server_dev_mode: bool = Field(
         default=False,
+        json_schema_extra={"compile_factor": False},
         description=(
             "If set, vllm will run in development mode, which will enable some "
             "additional endpoints for developing and debugging, e.g. "
@@ -487,6 +511,7 @@ class ServerSettings(BaseSettings):
     )
     use_rust_frontend: bool = Field(
         default=False,
+        json_schema_extra={"compile_factor": False},
         description=(
             "If set, use the Rust frontend binary instead of the Python API "
             "server process(es)."
@@ -494,6 +519,7 @@ class ServerSettings(BaseSettings):
     )
     rust_frontend_path: str | None = Field(
         default=None,
+        json_schema_extra={"compile_factor": False},
         description=(
             "Path to the Rust frontend binary. Defaults to None unless "
             "VLLM_USE_RUST_FRONTEND=1, in which case the value is resolved "
@@ -562,6 +588,7 @@ class ServerSettings(BaseSettings):
     )
     skip_model_name_validation: bool = Field(
         default=False,
+        json_schema_extra={"compile_factor": False},
         description=(
             "Skip model name validation in OpenAI API requests. When set to 1, "
             "any model name will be accepted in the 'model' field of API "
@@ -706,20 +733,24 @@ class LoggingSettings(BaseSettings):
     )
     logging_level: str = Field(
         default="INFO",
+        json_schema_extra={"compile_factor": False},
         description="Used for configuring the default logging level.",
     )
     logging_prefix: str = Field(
         default="",
+        json_schema_extra={"compile_factor": False},
         description=(
             "If set, VLLM_LOGGING_PREFIX will be prepended to all log messages."
         ),
     )
     logging_stream: str = Field(
         default="ext://sys.stdout",
+        json_schema_extra={"compile_factor": False},
         description="Used for configuring the default logging stream.",
     )
     logging_color: str = Field(
         default="auto",
+        json_schema_extra={"compile_factor": False},
         description=(
             'Controls colored logging output. Options: "auto" (default, colors '
             'when terminal), "1" (always use colors), "0" (never use colors).'
@@ -728,10 +759,12 @@ class LoggingSettings(BaseSettings):
     no_color: bool = Field(
         default=False,
         alias="NO_COLOR",
+        json_schema_extra={"compile_factor": False},
         description="Standard unix flag for disabling ANSI color codes.",
     )
     log_stats_interval: float = Field(
         default=10.0,
+        json_schema_extra={"compile_factor": False},
         description=(
             "If set, vllm will log stats at this interval in seconds. "
             "If not set, vllm will log stats every 10 seconds."
@@ -754,6 +787,7 @@ class LoggingSettings(BaseSettings):
     )
     ringbuffer_warning_interval: int = Field(
         default=60,
+        json_schema_extra={"compile_factor": False},
         description=(
             "Interval in seconds to log a warning message when the ring buffer is full."
         ),
@@ -822,14 +856,17 @@ class DistributedSettings(BaseSettings):
     )
     dp_master_ip: str = Field(
         default="127.0.0.1",
+        json_schema_extra={"compile_factor": False},
         description="IP address of the master node in the data parallel setting.",
     )
     dp_master_port: int = Field(
         default=0,
+        json_schema_extra={"compile_factor": False},
         description="Port of the master node in the data parallel setting.",
     )
     randomize_dp_dummy_inputs: bool = Field(
         default=False,
+        json_schema_extra={"compile_factor": False},
         description="Randomize inputs during dummy runs when using Data Parallel.",
     )
     ray_dp_pack_strategy: Literal["strict", "fill", "span"] = Field(
@@ -935,17 +972,20 @@ class DistributedSettings(BaseSettings):
     )
     worker_multiproc_method: Literal["spawn", "fork"] = Field(
         default="fork",
+        json_schema_extra={"compile_factor": False},
         description=(
             "Use dedicated multiprocess context for workers. Both spawn and fork work."
         ),
     )
     enable_v1_multiprocessing: bool = Field(
         default=True,
+        json_schema_extra={"compile_factor": False},
         description="If set, enable multiprocessing in LLM for the V1 code path.",
     )
     local_rank: int = Field(
         default=0,
         alias="LOCAL_RANK",
+        json_schema_extra={"compile_factor": False},
         description=(
             "Local rank of the process in the distributed setting, used to "
             "determine the GPU device id."
@@ -954,6 +994,7 @@ class DistributedSettings(BaseSettings):
     cuda_visible_devices: str | None = Field(
         default=None,
         alias="CUDA_VISIBLE_DEVICES",
+        json_schema_extra={"compile_factor": False},
         description="Used to control the visible devices in the distributed setting.",
     )
     disable_pynccl: bool = Field(
@@ -1039,6 +1080,7 @@ class CompilationSettings(BaseSettings):
     )
     force_aot_load: bool = Field(
         default=False,
+        json_schema_extra={"compile_factor": False},
         description=(
             "Force vllm to always load AOT compiled models from disk. Failure "
             "to load will result in a hard error when this is enabled. Will "
@@ -1177,6 +1219,7 @@ class MediaSettings(BaseSettings):
 
     image_fetch_timeout: int = Field(
         default=5,
+        json_schema_extra={"compile_factor": False},
         description=(
             "Timeout for fetching images when serving multimodal models. "
             "Default is 5 seconds."
@@ -1184,6 +1227,7 @@ class MediaSettings(BaseSettings):
     )
     video_fetch_timeout: int = Field(
         default=30,
+        json_schema_extra={"compile_factor": False},
         description=(
             "Timeout for fetching videos when serving multimodal models. "
             "Default is 30 seconds."
@@ -1191,6 +1235,7 @@ class MediaSettings(BaseSettings):
     )
     audio_fetch_timeout: int = Field(
         default=10,
+        json_schema_extra={"compile_factor": False},
         description=(
             "Timeout for fetching audio when serving multimodal models. "
             "Default is 10 seconds."
@@ -1198,6 +1243,7 @@ class MediaSettings(BaseSettings):
     )
     media_cache: str = Field(
         default="",
+        json_schema_extra={"compile_factor": False},
         description=(
             "Directory for caching media downloads (images, video, audio "
             "fetched from URLs during inference). Empty string disables "
@@ -1206,6 +1252,7 @@ class MediaSettings(BaseSettings):
     )
     media_cache_max_size_mb: int = Field(
         default=5120,
+        json_schema_extra={"compile_factor": False},
         description=(
             "Maximum cache size in MB. When exceeded, least-recently-used "
             "entries are evicted. Default is 5120 (5 GB)."
@@ -1213,6 +1260,7 @@ class MediaSettings(BaseSettings):
     )
     media_cache_ttl_hours: float = Field(
         default=24,
+        json_schema_extra={"compile_factor": False},
         description=(
             "Time-to-live in hours for cached media files. Entries older "
             "than this are evicted regardless of cache size. Default is "
@@ -1221,6 +1269,7 @@ class MediaSettings(BaseSettings):
     )
     media_fetch_max_retries: int = Field(
         default=3,
+        json_schema_extra={"compile_factor": False},
         description=(
             "Maximum number of retries for fetching media (images, audio, "
             "video) from URLs. Each retry quadruples the timeout. "
@@ -1229,6 +1278,7 @@ class MediaSettings(BaseSettings):
     )
     media_url_allow_redirects: bool = Field(
         default=True,
+        json_schema_extra={"compile_factor": False},
         description=(
             "Whether to allow HTTP redirects when fetching from media URLs. Defaults "
             "to True."
@@ -1236,6 +1286,7 @@ class MediaSettings(BaseSettings):
     )
     media_loading_thread_count: int = Field(
         default=8,
+        json_schema_extra={"compile_factor": False},
         description=(
             "Max number of workers for the thread pool handling media bytes "
             "loading. Set to 1 to disable parallel processing. Default is 8."
@@ -1243,6 +1294,7 @@ class MediaSettings(BaseSettings):
     )
     max_audio_clip_filesize_mb: int = Field(
         default=25,
+        json_schema_extra={"compile_factor": False},
         description=(
             "Maximum filesize in MB for a single audio file when processing "
             "speech-to-text requests. Files larger than this will be "
@@ -1251,6 +1303,7 @@ class MediaSettings(BaseSettings):
     )
     max_audio_decode_duration_s: int = Field(
         default=600,
+        json_schema_extra={"compile_factor": False},
         description=(
             "Maximum decoded audio duration in seconds. Compressed audio "
             "files (e.g. OPUS at very low bitrate) can expand into gigabytes "
@@ -1260,6 +1313,7 @@ class MediaSettings(BaseSettings):
     )
     max_audio_preprocess_workers: int = Field(
         default_factory=lambda: max(1, min(os.cpu_count() or 1, 2)),
+        json_schema_extra={"compile_factor": False},
         description=(
             "Maximum number of worker threads used for STT preprocessing. "
             "The default intentionally caps at 2 because that performed best "
@@ -1268,6 +1322,7 @@ class MediaSettings(BaseSettings):
     )
     max_image_pixels: int = Field(
         default=178_956_970,
+        json_schema_extra={"compile_factor": False},
         description=(
             "Maximum decoded image size in pixels. Small compressed images "
             "can expand into gigabytes of raster memory. This limit is "
@@ -1278,6 +1333,7 @@ class MediaSettings(BaseSettings):
     )
     video_loader_backend: str = Field(
         default="opencv",
+        json_schema_extra={"compile_factor": False},
         description=(
             "Backend for Video IO -- selects the frame-sampling algorithm. "
             '"opencv": uniform sampling. '
@@ -1291,6 +1347,7 @@ class MediaSettings(BaseSettings):
     )
     media_connector: str = Field(
         default="http",
+        json_schema_extra={"compile_factor": False},
         description=(
             "Media connector implementation. "
             '"http": Default connector that supports fetching media via '
@@ -1314,6 +1371,7 @@ class MediaSettings(BaseSettings):
     )
     object_storage_shm_buffer_name: str | None = Field(
         default=None,
+        json_schema_extra={"compile_factor": False},
         description=(
             "Name of the POSIX shared-memory segment used for multimodal "
             "object storage. When unset, vLLM auto-generates a UUID-suffixed "
@@ -1322,6 +1380,7 @@ class MediaSettings(BaseSettings):
     )
     assets_cache_model_clean: bool = Field(
         default=False,
+        json_schema_extra={"compile_factor": False},
         description=(
             "If the env var is set, we will clean model file in this path "
             "$VLLM_ASSETS_CACHE/model_streamer/$model_name."
@@ -1353,6 +1412,7 @@ class CpuSettings(BaseSettings):
 
     cpu_kvcache_space: int | None = Field(
         default=None,
+        json_schema_extra={"compile_factor": False},
         description=(
             "(CPU backend only) CPU key-value cache space. Default is None "
             "and will be set as 4 GB."
@@ -1391,6 +1451,7 @@ class CpuSettings(BaseSettings):
     )
     zentorch_weight_prepack: bool = Field(
         default=True,
+        json_schema_extra={"compile_factor": False},
         description=(
             "(Zen CPU backend) Eagerly prepack weights into ZenDNN blocked "
             "layout at model load time. Eliminates per-inference layout "
@@ -1635,12 +1696,14 @@ class FlashInferSettings(BaseSettings):
     )
     flashinfer_autotune_cache_dir: str | None = Field(
         default=None,
+        json_schema_extra={"compile_factor": False},
         description=(
             "Override the directory for the FlashInfer autotune config cache."
         ),
     )
     flashinfer_autotune_skip_ops: Annotated[list[str] | None, NoDecode] = Field(
         default=None,
+        json_schema_extra={"compile_factor": False},
         description=(
             "Comma-separated FlashInfer op names to exclude from autotuning, "
             "using the heuristic fallback tactic instead. Unset: skip "
@@ -2042,6 +2105,7 @@ class ConnectorSettings(BaseSettings):
 
     nixl_side_channel_host: str = Field(
         default="localhost",
+        json_schema_extra={"compile_factor": False},
         description="IP address used for NIXL handshake between remote agents.",
     )
     nixl_side_channel_port: int = Field(
@@ -2200,6 +2264,7 @@ class ConnectorSettings(BaseSettings):
     )
     v1_output_proc_chunk_size: int = Field(
         default=128,
+        json_schema_extra={"compile_factor": False},
         description=(
             "Controls the maximum number of requests to handle in a single "
             "asyncio task when processing per-token outputs in the V1 "
@@ -2232,10 +2297,12 @@ class UsageSettings(BaseSettings):
 
     usage_stats_server: str = Field(
         default="https://stats.vllm.ai",
+        json_schema_extra={"compile_factor": False},
         description="URL of the server used for usage stats collection.",
     )
     no_usage_stats: bool = Field(
         default=False,
+        json_schema_extra={"compile_factor": False},
         description=(
             "If set, disable sending usage statistics to the vLLM usage stats server."
         ),
@@ -2243,6 +2310,7 @@ class UsageSettings(BaseSettings):
     do_not_track: bool = Field(
         default=False,
         validation_alias=AliasChoices("VLLM_DO_NOT_TRACK", "DO_NOT_TRACK"),
+        json_schema_extra={"compile_factor": False},
         description=(
             "Disable usage stats reporting. Also accepts the legacy "
             "DO_NOT_TRACK environment variable."
@@ -2261,6 +2329,7 @@ class UsageSettings(BaseSettings):
     )
     test_force_load_format: str = Field(
         default="dummy",
+        json_schema_extra={"compile_factor": False},
         description=(
             "Test-only: forces the model loader to use the given load "
             'format (e.g. "dummy") regardless of the format detected from '
@@ -2269,6 +2338,7 @@ class UsageSettings(BaseSettings):
     )
     use_modelscope: bool = Field(
         default=False,
+        json_schema_extra={"compile_factor": False},
         description=(
             "If true, will load models from ModelScope instead of Hugging "
             "Face Hub. Note that the value is true or false, not numbers."
@@ -2276,6 +2346,7 @@ class UsageSettings(BaseSettings):
     )
     use_fastokens: bool = Field(
         default=False,
+        json_schema_extra={"compile_factor": False},
         description=(
             "If true, replace the Rust BPE backend that powers HF fast "
             "tokenizers with the `fastokens` "
@@ -2288,16 +2359,19 @@ class UsageSettings(BaseSettings):
     s3_access_key_id: str | None = Field(
         default=None,
         alias="S3_ACCESS_KEY_ID",
+        json_schema_extra={"compile_factor": False},
         description="S3 access key id, used for tensorizer to load model from S3.",
     )
     s3_secret_access_key: str | None = Field(
         default=None,
         alias="S3_SECRET_ACCESS_KEY",
+        json_schema_extra={"compile_factor": False},
         description="S3 secret access key, used for tensorizer to load model from S3.",
     )
     s3_endpoint_url: str | None = Field(
         default=None,
         alias="S3_ENDPOINT_URL",
+        json_schema_extra={"compile_factor": False},
         description="S3 endpoint URL, used for tensorizer to load model from S3.",
     )
     plugins: Annotated[list[str] | None, NoDecode] = Field(
@@ -2481,6 +2555,30 @@ def _build_registry() -> dict[str, tuple[str, str]]:
 _VAR_TO_PATH: dict[str, tuple[str, str]] = _build_registry()
 
 
+def _non_compile_factors() -> set[str]:
+    """Env vars explicitly marked ``compile_factor=False`` on their field.
+
+    Derived from the pydantic fields so it cannot drift from the field
+    definitions. Absence of the marker means the var IS a compile factor
+    (safe default: a missing marker over-hashes, never under-hashes).
+    """
+    out: set[str] = set()
+    for sub_field in Settings.model_fields.values():
+        annotation = sub_field.annotation
+        if not (isinstance(annotation, type) and issubclass(annotation, BaseSettings)):
+            continue
+        sub_cls: type[BaseSettings] = annotation
+        prefix = sub_cls.model_config.get("env_prefix", "") or ""
+        for field_name, info in sub_cls.model_fields.items():
+            extra = info.json_schema_extra
+            if isinstance(extra, dict) and extra.get("compile_factor") is False:
+                out.add(resolve_env_name(info, field_name, prefix))
+    return out
+
+
+_NON_COMPILE_FACTORS: set[str] = _non_compile_factors()
+
+
 def _build_sub_classes() -> dict[str, type[BaseSettings]]:
     out: dict[str, type[BaseSettings]] = {}
     for sub_attr, sub_field in Settings.model_fields.items():
@@ -2637,91 +2735,11 @@ def get_vllm_port() -> int | None:
 def compile_factors() -> dict[str, object]:
     """Return env vars used for torch.compile cache keys.
 
-    Start with every known vLLM env var; drop entries in ``ignored_factors``;
+    Start with every known vLLM env var; drop those marked
+    ``compile_factor=False`` on their field (see ``_non_compile_factors``);
     hash everything else. This keeps the cache key aligned across workers."""
 
-    ignored_factors: set[str] = {
-        "MAX_JOBS",
-        "VLLM_RPC_BASE_PATH",
-        "VLLM_USE_MODELSCOPE",
-        "VLLM_RINGBUFFER_WARNING_INTERVAL",
-        "VLLM_DEBUG_DUMP_PATH",
-        "VLLM_PORT",
-        "VLLM_CACHE_ROOT",
-        # Location-only derived paths: where a cache/config dir lives cannot
-        # affect compiled artifacts, and hashing them means relocating HOME
-        # or the XDG roots silently invalidates every compile cache.
-        "VLLM_XLA_CACHE_PATH",
-        "VLLM_CONFIG_ROOT",
-        # Runtime memory-plan persistence; does not affect compiled graphs.
-        "VLLM_ENABLE_STARTUP_PLAN",
-        "LD_LIBRARY_PATH",
-        "VLLM_SERVER_DEV_MODE",
-        "VLLM_USE_RUST_FRONTEND",
-        "VLLM_RUST_FRONTEND_PATH",
-        "VLLM_USE_PRECOMPILED_RUST",
-        "VLLM_USE_FASTOKENS",
-        "VLLM_DP_MASTER_IP",
-        "VLLM_DP_MASTER_PORT",
-        "VLLM_NIXL_SIDE_CHANNEL_HOST",
-        "VLLM_RANDOMIZE_DP_DUMMY_INPUTS",
-        "VLLM_MODEL_REDIRECT_PATH",
-        "VLLM_HOST_IP",
-        "VLLM_FORCE_AOT_LOAD",
-        "S3_ACCESS_KEY_ID",
-        "S3_SECRET_ACCESS_KEY",
-        "S3_ENDPOINT_URL",
-        "VLLM_USAGE_STATS_SERVER",
-        "VLLM_NO_USAGE_STATS",
-        "VLLM_DO_NOT_TRACK",
-        "VLLM_LOGGING_LEVEL",
-        "VLLM_LOGGING_PREFIX",
-        "VLLM_LOGGING_STREAM",
-        "VLLM_LOGGING_CONFIG_PATH",
-        "VLLM_LOGGING_COLOR",
-        "VLLM_LOG_STATS_INTERVAL",
-        "VLLM_DEBUG_LOG_API_SERVER_RESPONSE",
-        "VLLM_TUNED_CONFIG_FOLDER",
-        "VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR",
-        # Heuristic-fallback op selection; does not affect compiled graphs.
-        "VLLM_FLASHINFER_AUTOTUNE_SKIP_OPS",
-        "VLLM_ENGINE_ITERATION_TIMEOUT_S",
-        "VLLM_HTTP_TIMEOUT_KEEP_ALIVE",
-        "VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS",
-        "VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS",
-        "VLLM_KEEP_ALIVE_ON_ENGINE_DEATH",
-        "VLLM_IMAGE_FETCH_TIMEOUT",
-        "VLLM_VIDEO_FETCH_TIMEOUT",
-        "VLLM_AUDIO_FETCH_TIMEOUT",
-        "VLLM_MEDIA_CACHE",
-        "VLLM_MEDIA_CACHE_MAX_SIZE_MB",
-        "VLLM_MEDIA_CACHE_TTL_HOURS",
-        "VLLM_MEDIA_FETCH_MAX_RETRIES",
-        "VLLM_MEDIA_URL_ALLOW_REDIRECTS",
-        "VLLM_MEDIA_LOADING_THREAD_COUNT",
-        "VLLM_MAX_AUDIO_CLIP_FILESIZE_MB",
-        "VLLM_MAX_AUDIO_DECODE_DURATION_S",
-        "VLLM_MAX_AUDIO_PREPROCESS_WORKERS",
-        "VLLM_MAX_IMAGE_PIXELS",
-        "VLLM_VIDEO_LOADER_BACKEND",
-        "VLLM_MEDIA_CONNECTOR",
-        "VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME",
-        "VLLM_ASSETS_CACHE",
-        "VLLM_ASSETS_CACHE_MODEL_CLEAN",
-        "VLLM_WORKER_MULTIPROC_METHOD",
-        "VLLM_ENABLE_V1_MULTIPROCESSING",
-        "VLLM_V1_OUTPUT_PROC_CHUNK_SIZE",
-        "VLLM_CPU_KVCACHE_SPACE",
-        "VLLM_CPU_MOE_PREPACK",
-        "VLLM_ZENTORCH_WEIGHT_PREPACK",
-        "VLLM_TEST_FORCE_LOAD_FORMAT",
-        "VLLM_ENABLE_CUDA_COMPATIBILITY",
-        "VLLM_CUDA_COMPATIBILITY_PATH",
-        "VLLM_SKIP_MODEL_NAME_VALIDATION",
-        "LOCAL_RANK",
-        "CUDA_VISIBLE_DEVICES",
-        "NO_COLOR",
-    }
+    ignored_factors = _NON_COMPILE_FACTORS
 
     from vllm.config.utils import normalize_value
 
