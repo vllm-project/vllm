@@ -18,6 +18,7 @@ from vllm.model_executor.kernels.mhc.warmup import (
     HC_HEAD_FUSED_KERNEL,
     MHC_FUSED_POST_PRE_KERNEL,
     MHC_PRE_KERNEL,
+    MhcKernelConstants,
 )
 from vllm.tracing import instrument
 
@@ -56,6 +57,31 @@ def _find_deepseek_v4_model(model: torch.nn.Module) -> torch.nn.Module | None:
     return None
 
 
+def _build_kernel_constants(layer: torch.nn.Module) -> MhcKernelConstants:
+    """Read all model-level constants that appear in the TileLang cache_key.
+
+    These values do not vary with num_tokens, so they are read once from the
+    layer and threaded into every compile() call.  This ensures the warmup
+    cache_key matches the runtime cache_key exactly, regardless of the
+    model's configuration.
+
+    Sources (DeepseekV4DecoderLayer):
+        hc_post_alpha        — hardcoded 2.0 in all DSv4 variants
+        hc_sinkhorn_iters     — from config.hc_sinkhorn_iters
+        rms_norm_eps          — from config.rms_norm_eps
+        hc_eps                — from config.hc_eps
+        attn_norm.variance_epsilon — == rms_norm_eps (RMSNorm init)
+    """
+    return MhcKernelConstants(
+        hc_post_mult_value=float(getattr(layer, "hc_post_alpha", 2.0)),
+        sinkhorn_repeat=int(getattr(layer, "hc_sinkhorn_iters", 20)),
+        rms_eps=float(getattr(layer, "rms_norm_eps", 1e-6)),
+        hc_pre_eps=float(getattr(layer, "hc_eps", 1e-6)),
+        hc_sinkhorn_eps=float(getattr(layer, "hc_eps", 1e-6)),
+        norm_eps=float(layer.attn_norm.variance_epsilon),
+    )
+
+
 @instrument(span_name="mHC warmup")
 def deepseek_v4_mhc_warmup(
     model: torch.nn.Module,
@@ -86,18 +112,30 @@ def deepseek_v4_mhc_warmup(
     # NVIDIA fuses RMSNorm into the TileLang kernels (norm_weight path);
     # AMD/XPU apply RMSNorm separately (norm_weight=None path).
     use_norm_weight = not hasattr(layer, "mhc_pre")
+    # Broadcast (2D-residual first-layer) path exists only when the model
+    # has hc_attn_fn_broadcast — NVIDIA sets it in _configure_fused_norm,
+    # AMD/XPU do not.  This is independent of use_norm_weight: it reflects
+    # whether the runtime code has a broadcast branch, not whether norm
+    # is fused.
+    has_broadcast = getattr(layer, "hc_attn_fn_broadcast", None) is not None
+    is_broadcast_values = [False, True] if has_broadcast else [False]
+
+    constants = _build_kernel_constants(layer)
 
     MHC_PRE_KERNEL.warmup(
         vllm_config,
         hidden_size=hidden_size,
         hc_mult=hc_mult,
         use_norm_weight=use_norm_weight,
+        is_broadcast_values=is_broadcast_values,
+        constants=constants,
     )
     MHC_FUSED_POST_PRE_KERNEL.warmup(
         vllm_config,
         hidden_size=hidden_size,
         hc_mult=hc_mult,
         use_norm_weight=use_norm_weight,
+        constants=constants,
     )
 
     if _find_deepseek_v4_model(model) is not None:
@@ -106,6 +144,7 @@ def deepseek_v4_mhc_warmup(
             hidden_size=hidden_size,
             hc_mult=hc_mult,
             use_norm_weight=use_norm_weight,
+            constants=constants,
         )
 
     torch.accelerator.synchronize()
