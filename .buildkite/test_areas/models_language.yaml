@@ -69,7 +69,8 @@ steps:
   parallelism: 2
   mirror:
     amd:
-      device: mi325_1
+      dind: false
+      device: mi300_1
       timeout_in_minutes: 70
       depends_on:
       - image-build-amd
@@ -130,7 +131,8 @@ steps:
     - pytest -v -s models/language/pooling -m 'not core_model'
   mirror:
     amd:
-      device: mi325_1
+      dind: false
+      device: mi300_1
       timeout_in_minutes: 120
       depends_on:
       - image-build-amd
