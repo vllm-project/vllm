@@ -649,6 +649,8 @@ pydantic-extra-types==2.11.1
     #   mistral-common
 pydantic-settings==2.14.2
     # via
+    #   -c requirements/common.txt
+    #   -r requirements/test/../common.txt
     #   fastapi
     #   mcp
 pyelftools==0.32
