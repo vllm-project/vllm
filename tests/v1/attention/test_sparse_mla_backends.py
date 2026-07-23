@@ -20,7 +20,12 @@ from tests.v1.attention.utils import (
     create_vllm_config,
 )
 from vllm import _custom_ops as ops
-from vllm.config import KVTransferConfig, set_current_vllm_config
+from vllm.config import (
+    AttentionConfig,
+    HiSparseConfig,
+    KVTransferConfig,
+    set_current_vllm_config,
+)
 from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.platforms import current_platform
 
@@ -46,8 +51,8 @@ from vllm.v1.attention.backends.mla.flashmla_sparse import (
     triton_convert_req_index_to_global_index,
 )
 from vllm.v1.attention.backends.mla.hisparse import (
-    HiSparseConfig,
     HiSparseCoordinator,
+    ResolvedHiSparseConfig,
     _has_hisparse_ops,
     create_hisparse_coordinator,
     is_hisparse_decode_batch,
@@ -1343,10 +1348,10 @@ def fallback_swap_in(
 def _make_hisparse_vllm_config(index_topk: int = 128):
     return SimpleNamespace(
         attention_config=SimpleNamespace(
-            hisparse_config={
-                "device_buffer_size": 256,
-                "host_pool_gib": 1.0,
-            },
+            hisparse_config=HiSparseConfig(
+                device_buffer_size=256,
+                host_pool_gib=1.0,
+            ),
         ),
         kv_transfer_config=KVTransferConfig(
             kv_connector="P2pNcclConnector",
@@ -1368,37 +1373,53 @@ def _make_hisparse_vllm_config(index_topk: int = 128):
 def test_hisparse_config_validation():
     vllm_config = _make_hisparse_vllm_config()
 
-    cfg = HiSparseConfig.from_vllm_config(vllm_config, model_top_k=128)
-    assert cfg == HiSparseConfig(
+    cfg = ResolvedHiSparseConfig.from_vllm_config(vllm_config, model_top_k=128)
+    assert cfg == ResolvedHiSparseConfig(
         top_k=128,
         device_buffer_size=256,
         host_pool_gib=1.0,
     )
 
+    vllm_config.attention_config.hisparse_config = HiSparseConfig(host_pool_gib=1.0)
+    cfg = ResolvedHiSparseConfig.from_vllm_config(vllm_config, model_top_k=128)
+    assert cfg is not None and cfg.device_buffer_size == 256
+
     # No hisparse_config means disabled.
     vllm_config.attention_config.hisparse_config = None
-    assert HiSparseConfig.from_vllm_config(vllm_config, model_top_k=128) is None
+    assert ResolvedHiSparseConfig.from_vllm_config(vllm_config, model_top_k=128) is None
 
-    # host_pool_gib is required.
-    vllm_config.attention_config.hisparse_config = {"device_buffer_size": 256}
+    # AttentionConfig parses mappings and validates user-facing fields.
+    attention_config = AttentionConfig(
+        hisparse_config={  # type: ignore[arg-type]
+            "device_buffer_size": 256,
+            "host_pool_gib": 1.0,
+        }
+    )
+    assert attention_config.hisparse_config == HiSparseConfig(
+        device_buffer_size=256,
+        host_pool_gib=1.0,
+    )
+
     with pytest.raises(ValueError, match="host_pool_gib"):
-        HiSparseConfig.from_vllm_config(vllm_config, model_top_k=128)
+        AttentionConfig(
+            hisparse_config={"device_buffer_size": 256}  # type: ignore[arg-type]
+        )
 
-    # Unknown keys are rejected.
-    vllm_config.attention_config.hisparse_config = {
-        "host_pool_gib": 1.0,
-        "unknown_key": 256,
-    }
-    with pytest.raises(ValueError, match="Unknown hisparse_config keys"):
-        HiSparseConfig.from_vllm_config(vllm_config, model_top_k=128)
+    with pytest.raises(ValueError, match="unknown_key"):
+        AttentionConfig(
+            hisparse_config={  # type: ignore[arg-type]
+                "host_pool_gib": 1.0,
+                "unknown_key": 256,
+            }
+        )
 
     # The coordinator itself is connector-agnostic; the decode-only
     # (kv_consumer) deployment contract is enforced by
     # VllmConfig.__post_init__, not here.
-    vllm_config.attention_config.hisparse_config = {
-        "device_buffer_size": 256,
-        "host_pool_gib": 1.0,
-    }
+    vllm_config.attention_config.hisparse_config = HiSparseConfig(
+        device_buffer_size=256,
+        host_pool_gib=1.0,
+    )
     vllm_config.kv_transfer_config = None
     coordinator = create_hisparse_coordinator(
         vllm_config,
@@ -1439,7 +1460,7 @@ def _make_hisparse_coordinator(
     row_width: int = 8,
 ) -> HiSparseCoordinator:
     return HiSparseCoordinator(
-        config=HiSparseConfig(
+        config=ResolvedHiSparseConfig(
             top_k=top_k,
             device_buffer_size=device_buffer_size,
             host_pool_gib=1.0,
@@ -1974,10 +1995,10 @@ def test_hisparse_mixed_batch_bf16_row_split(
             "attn_module_list_cfg": [{"topk_tokens": topk_tokens}],
         },
     )
-    vllm_config.attention_config.hisparse_config = {
-        "device_buffer_size": 2 * topk_tokens,
-        "host_pool_gib": 1.0,
-    }
+    vllm_config.attention_config.hisparse_config = HiSparseConfig(
+        device_buffer_size=2 * topk_tokens,
+        host_pool_gib=1.0,
+    )
     model_config = vllm_config.model_config
     model_config.hf_text_config = SimpleNamespace(
         q_lora_rank=None,

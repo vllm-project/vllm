@@ -1338,18 +1338,12 @@ def _get_kv_cache_config_packed(
 
 
 def _hisparse_host_pool_bytes(vllm_config: VllmConfig) -> int | None:
-    """Per-rank pinned host budget for HiSparse host-resident KV.
-
-    ``host_pool_gib`` is parsed and validated by
-    ``HiSparseConfig.from_vllm_config`` -- the single source of truth shared
-    with the per-layer coordinator -- so sizing here cannot drift from the
-    decode path.
-    """
-    from vllm.v1.attention.backends.mla.hisparse import HiSparseConfig
+    """Return the HiSparse per-rank pinned host budget."""
+    from vllm.v1.attention.backends.mla.hisparse import ResolvedHiSparseConfig
 
     if vllm_config.attention_config.hisparse_config is None:
         return None
-    config = HiSparseConfig.from_vllm_config(
+    config = ResolvedHiSparseConfig.from_vllm_config(
         vllm_config, vllm_config.model_config.hf_config.index_topk
     )
     assert config is not None

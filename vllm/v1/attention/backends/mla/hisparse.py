@@ -66,7 +66,7 @@ def is_hisparse_decode_batch(
 
 
 @dataclass(frozen=True)
-class HiSparseConfig:
+class ResolvedHiSparseConfig:
     top_k: int
     device_buffer_size: int
     host_pool_gib: float
@@ -76,28 +76,16 @@ class HiSparseConfig:
         cls,
         vllm_config: VllmConfig,
         model_top_k: int,
-    ) -> HiSparseConfig | None:
-        raw_config = vllm_config.attention_config.hisparse_config
-        if raw_config is None:
+    ) -> ResolvedHiSparseConfig | None:
+        config = vllm_config.attention_config.hisparse_config
+        if config is None:
             return None
-
-        known_keys = {"device_buffer_size", "host_pool_gib"}
-        unknown_keys = set(raw_config) - known_keys
-        if unknown_keys:
-            raise ValueError(
-                f"Unknown hisparse_config keys: {sorted(unknown_keys)}. "
-                f"Known keys: {sorted(known_keys)}."
-            )
 
         # Default 2x top_k: at exactly top_k the LRU has zero slack and
         # boundary entries thrash between steps.
-        device_buffer_size = int(raw_config.get("device_buffer_size", 2 * model_top_k))
-        if raw_config.get("host_pool_gib") is None:
-            raise ValueError(
-                "HiSparse requires hisparse_config.host_pool_gib: size it as "
-                "(usable node RAM - co-tenants) / ranks-per-node."
-            )
-        host_pool_gib = float(raw_config["host_pool_gib"])
+        device_buffer_size = config.device_buffer_size
+        if device_buffer_size is None:
+            device_buffer_size = 2 * model_top_k
 
         if device_buffer_size < model_top_k:
             raise ValueError(
@@ -105,13 +93,10 @@ class HiSparseConfig:
                 f"index_topk. Got device_buffer_size={device_buffer_size}, "
                 f"index_topk={model_top_k}."
             )
-        if host_pool_gib <= 0:
-            raise ValueError("HiSparse host_pool_gib must be positive.")
-
         return cls(
             top_k=model_top_k,
             device_buffer_size=device_buffer_size,
-            host_pool_gib=host_pool_gib,
+            host_pool_gib=config.host_pool_gib,
         )
 
 
@@ -436,7 +421,7 @@ class HiSparseCoordinator:
 
     def __init__(
         self,
-        config: HiSparseConfig,
+        config: ResolvedHiSparseConfig,
         max_num_reqs: int,
         row_width: int,
         kv_dtype: torch.dtype,
@@ -995,7 +980,7 @@ def create_hisparse_coordinator(
     kv_dtype: torch.dtype,
     device: torch.device | str | None = None,
 ) -> HiSparseCoordinator | None:
-    config = HiSparseConfig.from_vllm_config(vllm_config, model_top_k)
+    config = ResolvedHiSparseConfig.from_vllm_config(vllm_config, model_top_k)
     if config is None:
         return None
 
