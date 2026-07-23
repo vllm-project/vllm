@@ -3648,6 +3648,48 @@ def test_can_fit_full_sequence_full_attention_still_gates_oversized():
     assert manager.allocate_slots(req, block_size, full_sequence_must_fit=True) is None
 
 
+@pytest.mark.parametrize(
+    "schedule_full_sequence,expected_admission_flags",
+    [(True, [False]), (False, [True, False])],
+)
+def test_full_sequence_admission_skips_only_redundant_coordinator_pass(
+    monkeypatch, schedule_full_sequence, expected_admission_flags
+):
+    block_size = 16
+    prompt_len = 8 * block_size
+    manager = make_kv_cache_manager(
+        make_kv_cache_config(block_size, num_blocks=64),
+        max_model_len=1024,
+        enable_caching=True,
+        hash_block_size=block_size,
+    )
+    req = make_request("test", list(range(prompt_len)), block_size, sha256)
+
+    admission_flags = []
+    get_num_blocks_to_allocate = manager.coordinator.get_num_blocks_to_allocate
+
+    def track_admission_pass(*args, **kwargs):
+        admission_flags.append(kwargs.get("apply_admission_cap", False))
+        return get_num_blocks_to_allocate(*args, **kwargs)
+
+    monkeypatch.setattr(
+        manager.coordinator,
+        "get_num_blocks_to_allocate",
+        track_admission_pass,
+    )
+    num_new_tokens = prompt_len if schedule_full_sequence else block_size
+
+    assert (
+        manager.allocate_slots(
+            req,
+            num_new_tokens,
+            full_sequence_must_fit=True,
+        )
+        is not None
+    )
+    assert admission_flags == expected_admission_flags
+
+
 def test_cache_hit_local_and_external():
     # Regression test for #33775: when a request hits the local prefix cache
     # in one KV cache group and needs external (connector) blocks in another,
