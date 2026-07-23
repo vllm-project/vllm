@@ -233,9 +233,6 @@ class RoutedExperts(PluggableLayer):
         # Update local attributes from ExpertMapManager
         self.local_num_experts = self.expert_map_manager.local_num_experts
         self.expert_placement_strategy = self.expert_map_manager.placement_strategy
-        # Per-rank EP topology metadata, not checkpoint state: keep out of
-        # state_dict() so ROCm dummy-weight init and batch_transfer_weights()
-        # don't zero/clobber it on new elastic-EP ranks.
         self.register_buffer(
             "_expert_map", self.expert_map_manager.expert_map, persistent=False
         )
