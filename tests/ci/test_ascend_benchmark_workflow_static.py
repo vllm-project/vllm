@@ -143,6 +143,12 @@ def test_benchmark_checkout_retries_have_hard_network_timeouts():
     assert checkout_block.count('timeout --foreground "${timeout_seconds}s"') >= 6
 
 
+def test_benchmark_disables_hugging_face_xet_downloads():
+    text = workflow_text()
+
+    assert 'HF_HUB_DISABLE_XET: "1"' in text
+
+
 def test_benchmark_install_removes_conflicting_vllm_provider():
     text = workflow_text()
 

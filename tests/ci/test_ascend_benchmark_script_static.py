@@ -128,6 +128,17 @@ def test_benchmark_pins_named_runner_to_its_npu():
     assert 'export ASCEND_RT_VISIBLE_DEVICES="$runner_physical_device"' in text
 
 
+def test_benchmark_preserves_hugging_face_xet_setting_for_root_helper():
+    text = script_text("run_ascend_benchmark_ci.sh")
+
+    preserve_block = text[
+        text.index("SUDO_PRESERVE_ENV_VARS=(") : text.index(
+            "build_sudo_env_preserve_list()"
+        )
+    ]
+    assert "HF_HUB_DISABLE_XET" in preserve_block
+
+
 def test_perfgate_baseline_fetch_bounds_git_network_waits():
     text = script_text("perfgate_fetch_baseline.sh")
 
