@@ -525,6 +525,8 @@ def test_extract_tool_calls_pre_v11_regex_fallback_fails(
         "content_before_tool_args",
         "complex",
         "wrong_json",
+        "trailing_text_after_json",
+        "trailing_text_after_args_json",
     ],
     argnames=["model_output", "expected_tool_calls", "expected_content"],
     argvalues=[
@@ -653,6 +655,33 @@ def test_extract_tool_calls_pre_v11_regex_fallback_fails(
                 )
             ],
             "hi{hi",
+        ),
+        (
+            # gh#48975: trailing text after the JSON object must not leak into
+            # arguments (v11+ name{args} format has no terminator).
+            """[TOOL_CALLS]get_current_weather{"city": "San Francisco"}Estimating the weather...""",  # noqa: E501
+            [
+                ToolCall(
+                    function=FunctionCall(
+                        name="get_current_weather",
+                        arguments=json.dumps({"city": "San Francisco"}),
+                    )
+                )
+            ],
+            None,
+        ),
+        (
+            # gh#48975 with the explicit [ARGS] separator.
+            """[TOOL_CALLS]get_current_weather[ARGS]{"city": "San Francisco"}Estimating the weather...""",  # noqa: E501
+            [
+                ToolCall(
+                    function=FunctionCall(
+                        name="get_current_weather",
+                        arguments=json.dumps({"city": "San Francisco"}),
+                    )
+                )
+            ],
+            None,
         ),
     ],
 )

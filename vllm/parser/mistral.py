@@ -855,4 +855,18 @@ class MistralParser(ParserEngine):
             )
 
     def _extract_args_json(self, raw_args: str, func_name: str) -> str:
-        return raw_args.strip() or "{}"
+        """Return the first complete JSON value in ``raw_args``.
+
+        v11+ tool calls are emitted as ``name{args}`` with no terminator, so a
+        model may append ordinary text after the closing brace. Parse the first
+        JSON value with ``raw_decode`` and drop any trailing output, mirroring
+        the pre-v11 path (fixes gh#48975).
+        """
+        stripped = raw_args.strip()
+        if not stripped:
+            return "{}"
+        try:
+            _, end = json.JSONDecoder().raw_decode(stripped)
+        except json.JSONDecodeError:
+            return stripped
+        return stripped[:end]
