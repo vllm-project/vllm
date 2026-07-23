@@ -830,11 +830,10 @@ def test_stop_via_update_from_output():
 
 
 def test_check_stop_min_tokens():
-    """Test that requests don't stop when min_tokens requirement isn't met."""
+    """Test that sampled stop tokens still finish under min_tokens."""
     from vllm.v1.core.sched.utils import check_stop
 
-    # Test case 1: num_output_tokens < min_tokens
-    # Should return False (don't stop)
+    # Test case 1: regular tokens below min_tokens should keep running.
     sampling_params = SamplingParams(
         ignore_eos=False,
         max_tokens=20,
@@ -847,30 +846,41 @@ def test_check_stop_min_tokens():
         sampling_params=sampling_params,
         pooling_params=None,
     )
-    # Simulate having generated 3 output tokens (less than min_tokens=5)
-    request.append_output_token_ids([10, 11, EOS_TOKEN_ID])  # EOS token present
+    request.append_output_token_ids([10, 11, 12])
 
     result = check_stop(request, max_model_len=100)
     assert result is False, "Should not stop when num_output_tokens<min_tokens"
 
-    # Test case 2: num_output_tokens >= min_tokens
-    # Should follow normal stopping logic (stop on EOS)
-    request.append_output_token_ids(
-        [
-            10,
-            11,
-            12,
-            13,
-            14,
-            EOS_TOKEN_ID,
-        ]
-    )  # 6 tokens > min_tokens
+    # Test case 2: if EOS is sampled, it should stop even below min_tokens.
+    request_eos = Request(
+        request_id="eos",
+        prompt_token_ids=[0, 1, 2],
+        sampling_params=sampling_params,
+        pooling_params=None,
+    )
+    request_eos.append_output_token_ids([10, 11, EOS_TOKEN_ID])
+    result = check_stop(request_eos, max_model_len=100)
+    assert result is True, "Sampled EOS should stop even below min_tokens"
+    assert request_eos.status == RequestStatus.FINISHED_STOPPED
 
-    result = check_stop(request, max_model_len=100)
-    assert result is True, "Should stop on EOS when min_tokens met"
-    assert request.status == RequestStatus.FINISHED_STOPPED
+    # Test case 3: ignore_eos should still prevent EOS-based stopping.
+    sampling_params_ignore_eos = SamplingParams(
+        ignore_eos=True,
+        max_tokens=20,
+        min_tokens=5,
+    )
+    sampling_params_ignore_eos.update_from_generation_config({}, EOS_TOKEN_ID)
+    request_ignore_eos = Request(
+        request_id="ignore-eos",
+        prompt_token_ids=[0, 1, 2],
+        sampling_params=sampling_params_ignore_eos,
+        pooling_params=None,
+    )
+    request_ignore_eos.append_output_token_ids([EOS_TOKEN_ID])
+    result = check_stop(request_ignore_eos, max_model_len=100)
+    assert result is False, "ignore_eos should still suppress EOS stopping"
 
-    # Test case 3: min_tokens = 0, should follow normal stopping logic
+    # Test case 4: min_tokens = 0 should follow normal stopping logic.
     sampling_params_no_min = SamplingParams(
         ignore_eos=False,
         max_tokens=20,
@@ -889,7 +899,7 @@ def test_check_stop_min_tokens():
     assert result is True, "Should stop on EOS when min_tokens=0"
     assert request_no_min.status == RequestStatus.FINISHED_STOPPED
 
-    # Test case 4: min_tokens > 0 with stop token (not EOS)
+    # Test case 5: if a stop token is sampled, it should stop immediately.
     sampling_params_stop = SamplingParams(
         ignore_eos=False,
         max_tokens=20,
@@ -903,18 +913,9 @@ def test_check_stop_min_tokens():
         sampling_params=sampling_params_stop,
         pooling_params=None,
     )
-    # Only 3 output tokens, less than min_tokens=5, but has stop token
     request_stop.append_output_token_ids([10, 11, 42])
     result = check_stop(request_stop, max_model_len=100)
-    assert result is False, "Should not stop when num_output_tokens<min_tokens"
-
-    # Test case 5: min_tokens met, should stop on stop token
-    request_stop.append_output_token_ids(
-        [10, 11, 12, 13, 14, 42]
-    )  # 6 tokens >= min_tokens=5
-
-    result = check_stop(request_stop, max_model_len=100)
-    assert result is True, "Should stop on stop token when min_tokens met"
+    assert result is True, "Sampled stop tokens should stop even below min_tokens"
     assert request_stop.status == RequestStatus.FINISHED_STOPPED
     assert request_stop.stop_reason == 42
 
