@@ -975,11 +975,18 @@ class KVCacheConfig:
     @property
     def has_mixed_precision_kv_cache(self) -> bool:
         """Whether attention groups store their KV cache at more than one precision."""
-        kv_cache_precisions = {
-            (group.kv_cache_spec.dtype, group.kv_cache_spec.kv_quant_mode)
-            for group in self.kv_cache_groups
-            if isinstance(group.kv_cache_spec, AttentionSpec)
-        }
+        kv_cache_precisions: set[tuple[torch.dtype, KVQuantMode]] = set()
+        for group in self.kv_cache_groups:
+            specs = (
+                group.kv_cache_spec.kv_cache_specs.values()
+                if isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs)
+                else (group.kv_cache_spec,)
+            )
+            kv_cache_precisions.update(
+                (spec.dtype, spec.kv_quant_mode)
+                for spec in specs
+                if isinstance(spec, AttentionSpec)
+            )
         return len(kv_cache_precisions) > 1
 
     @property

@@ -2263,6 +2263,35 @@ def test_get_kv_cache_spec_sliding_window_unwraps_uniform_type_specs():
     assert get_kv_cache_spec_sliding_window(mixed_window_spec) is None
 
 
+def test_mixed_precision_zeroing_unwraps_uniform_type_specs():
+    fp16_spec = new_kv_cache_spec(dtype=torch.float16)
+    fp8_spec = new_kv_cache_spec(dtype=torch.float8_e4m3fn)
+    worker_config = KVCacheConfig(
+        num_blocks=1,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["model_layer"],
+                UniformTypeKVCacheSpecs(
+                    block_size=fp16_spec.block_size,
+                    kv_cache_specs={"model_layer": fp16_spec},
+                ),
+            ),
+            KVCacheGroupSpec(
+                ["draft_layer"],
+                UniformTypeKVCacheSpecs(
+                    block_size=fp8_spec.block_size,
+                    kv_cache_specs={"draft_layer": fp8_spec},
+                ),
+            ),
+        ],
+    )
+    scheduler_config = generate_scheduler_kv_cache_config([worker_config])
+
+    assert worker_config.needs_kv_cache_zeroing
+    assert scheduler_config.needs_kv_cache_zeroing
+
+
 def test_merge_mla_spec():
     kv_cache_specs = [
         new_mla_spec(),

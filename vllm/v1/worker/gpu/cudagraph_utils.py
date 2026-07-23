@@ -27,7 +27,6 @@ from vllm.logger import init_logger
 from vllm.model_executor.offloader.base import get_offloader
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
-from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.math_utils import round_up
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
@@ -117,7 +116,6 @@ class CudaGraphManager:
         decode_query_len: int,
         lora_capture_cases: list[int] | None = None,
         adaptive_verification: bool = False,
-        time_graphs: bool = False,
     ):
         self.vllm_config = vllm_config
         self.device = device
@@ -127,8 +125,6 @@ class CudaGraphManager:
         self.cudagraph_mode = cudagraph_mode
         self.decode_query_len = decode_query_len
         self.adaptive_verification = adaptive_verification
-        self.time_graphs = time_graphs
-        self.graph_timings: dict[BatchExecutionDescriptor, float] = {}
 
         self.dp_size = vllm_config.parallel_config.data_parallel_size
         self.tp_size = vllm_config.parallel_config.tensor_parallel_size
@@ -236,7 +232,10 @@ class CudaGraphManager:
             if separate_decode_routine and decode_mode:
                 for decode_query_len in decode_query_lens:
                     rounded_num_tokens = round_up(num_tokens, decode_query_len)
-                    rounded_num_reqs = rounded_num_tokens // decode_query_len
+                    if self.adaptive_verification:
+                        rounded_num_reqs = min(rounded_num_tokens, self.max_num_reqs)
+                    else:
+                        rounded_num_reqs = rounded_num_tokens // decode_query_len
 
                     if (
                         rounded_num_tokens > max_decode_tokens
@@ -260,12 +259,19 @@ class CudaGraphManager:
                         num_active_loras=num_active_loras,
                     )
 
-                    # Avoid duplicate graphs.
+                    # Avoid duplicate captures while retaining each source capture
+                    # size as a dispatch key. Adaptive verification can pad a small
+                    # batch into the same larger FULL graph descriptor.
                     if desc not in descs_by_mode[decode_mode]:
                         descs_by_mode[decode_mode].append(desc)
-                        descs_by_token_lora[
-                            (rounded_num_tokens, num_active_loras)
-                        ].append(desc)
+                    candidate_size = (
+                        num_tokens if self.adaptive_verification else rounded_num_tokens
+                    )
+                    candidate_descs = descs_by_token_lora[
+                        (candidate_size, num_active_loras)
+                    ]
+                    if desc not in candidate_descs:
+                        candidate_descs.append(desc)
 
             if mixed_mode:
                 # for PIECEWISE graphs there is no limit on requests when replaying
@@ -312,7 +318,6 @@ class CudaGraphManager:
         self,
         create_forward_fn: CreateForwardFn,
         progress_bar_desc: str = "Capturing CUDA graphs",
-        prepare_timing: Callable[[BatchExecutionDescriptor], None] | None = None,
     ) -> None:
         """Capture CUDA graphs.
 
@@ -322,7 +327,6 @@ class CudaGraphManager:
                 it is invoked once with warmup=True and again with warmup=False
                 because attention backends may mutate or lazily initialize
                 metadata during warmup.
-            prepare_timing: Optional input preparation before timed replays.
         """
         with graph_capture(device=self.device):
             # Capture in order: PIECEWISE first, then FULL. PIECEWISE has larger
@@ -374,19 +378,6 @@ class CudaGraphManager:
                         self.graphs[desc] = graph
                         compilation_counter.num_cudagraph_captured += 1
         # Collective graph addresses are registered when graph_capture exits.
-        if self.time_graphs:
-            start = torch.Event(enable_timing=True)
-            end = torch.Event(enable_timing=True)
-            for desc, graph in self.graphs.items():
-                create_forward_fn(desc, warmup=False)
-                if prepare_timing is not None:
-                    prepare_timing(desc)
-                start.record()
-                graph.replay()
-                end.record()
-                with gpu_sync_allowed():
-                    end.synchronize()
-                self.graph_timings[desc] = start.elapsed_time(end)
         self._graphs_captured = True
 
     def dispatch(
@@ -459,7 +450,6 @@ class ModelCudaGraphManager(CudaGraphManager):
         decode_query_len: int,
         lora_capture_cases: list[int] | None = None,
         adaptive_verification: bool = False,
-        time_graphs: bool = False,
     ):
         super().__init__(
             vllm_config,
@@ -468,7 +458,6 @@ class ModelCudaGraphManager(CudaGraphManager):
             decode_query_len,
             lora_capture_cases=lora_capture_cases,
             adaptive_verification=adaptive_verification,
-            time_graphs=time_graphs,
         )
         self.hidden_states: torch.Tensor | None = None
         self.aux_hidden_states: list[torch.Tensor] = []
@@ -535,6 +524,7 @@ class ModelCudaGraphManager(CudaGraphManager):
                     desc.cg_mode == CUDAGraphMode.PIECEWISE
                     and not self.use_breakable_cg
                 ),
+                max_query_len=desc.max_query_len,
             )
 
             # Capture with dummy rows marked as padding.
@@ -600,11 +590,7 @@ class ModelCudaGraphManager(CudaGraphManager):
 
             return forward_fn
 
-        super().capture(
-            create_forward_fn,
-            progress_bar_desc,
-            lambda desc: input_buffers.is_padding[: desc.num_tokens].zero_(),
-        )
+        super().capture(create_forward_fn, progress_bar_desc)
 
     def run_fullgraph(
         self, desc: BatchExecutionDescriptor
@@ -631,8 +617,14 @@ def prepare_inputs_to_capture(
     attn_groups: list[list[AttentionGroup]],
     kv_cache_config: KVCacheConfig,
     skip_attn: bool = False,
+    max_query_len: int | None = None,
 ) -> AttentionState:
-    input_batch = InputBatch.make_dummy(num_reqs, num_tokens, input_buffers)
+    input_batch = InputBatch.make_dummy(
+        num_reqs,
+        num_tokens,
+        input_buffers,
+        max_query_len=max_query_len,
+    )
     input_block_tables = block_tables.get_dummy_block_tables(num_reqs)
     slot_mappings = block_tables.get_dummy_slot_mappings(num_tokens)
     slot_mappings_by_layer = build_slot_mappings_by_layer(

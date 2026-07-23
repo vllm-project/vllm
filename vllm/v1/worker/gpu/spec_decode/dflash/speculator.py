@@ -30,7 +30,6 @@ logger = init_logger(__name__)
 
 class DFlashSpeculator(DraftModelSpeculator):
     _speculator_name = "DFlash"  # For logging, so we can share methods with subclasses
-    time_graphs = False
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         super().__init__(vllm_config, device)
@@ -131,7 +130,6 @@ class DFlashSpeculator(DraftModelSpeculator):
             self.device,
             cudagraph_mode,
             decode_query_len=self.num_query_per_req,
-            time_graphs=self.time_graphs,
         )
 
     def capture(self) -> None:

@@ -130,3 +130,38 @@ def test_block_tables_apply_staged_writes_single_group():
         block_tables.block_tables[0].gpu[0, :2],
         torch.tensor([1, 2], dtype=torch.int32, device=device),
     )
+
+
+def test_populate_dummy_block_tables_spreads_requests_across_kv_blocks():
+    block_tables = BlockTables(
+        block_sizes=[16, 32],
+        max_num_reqs=4,
+        max_num_batched_tokens=16,
+        max_num_blocks_per_group=[3, 3],
+        device=torch.device("cuda"),
+        kernel_block_sizes=[16, 16],
+    )
+
+    block_tables.populate_dummy_block_tables(num_kv_blocks=10)
+
+    assert torch.equal(
+        block_tables.input_block_tables[0],
+        torch.tensor(
+            [[1, 5, 9], [2, 6, 1], [3, 7, 2], [4, 8, 3]],
+            dtype=torch.int32,
+            device="cuda",
+        ),
+    )
+    assert torch.equal(
+        block_tables.input_block_tables[1],
+        torch.tensor(
+            [
+                [2, 6, 10, 14, 18, 4],
+                [3, 7, 11, 15, 19, 5],
+                [4, 8, 12, 16, 2, 6],
+                [5, 9, 13, 17, 3, 7],
+            ],
+            dtype=torch.int32,
+            device="cuda",
+        ),
+    )

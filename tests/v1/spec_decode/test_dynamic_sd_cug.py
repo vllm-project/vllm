@@ -196,6 +196,80 @@ def test_dynamic_sd_non_uniform_batch_falls_back_to_piecewise(monkeypatch):
     assert desc.num_active_loras == 0
 
 
+def test_adaptive_verification_captures_non_uniform_full_graph(monkeypatch):
+    monkeypatch.setattr(
+        gpu_cudagraph_utils,
+        "get_pp_group",
+        lambda: SimpleNamespace(is_first_rank=True, is_last_rank=True),
+    )
+
+    max_spec_tokens = 7
+    vllm_config = _create_vllm_config_for_dsd(
+        max_num_seqs=64,
+        max_spec_tokens=max_spec_tokens,
+        use_dynamic_sd=False,
+    )
+    manager = gpu_cudagraph_utils.CudaGraphManager(
+        vllm_config=vllm_config,
+        device=torch.device("cpu"),
+        cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE,
+        decode_query_len=max_spec_tokens + 1,
+        adaptive_verification=True,
+    )
+    manager._graphs_captured = True
+
+    desc = manager.dispatch(
+        num_reqs=16,
+        num_tokens=80,
+        uniform_token_count=None,
+        num_active_loras=0,
+        max_query_len=8,
+    )
+
+    assert desc.cg_mode == CUDAGraphMode.FULL
+    assert desc.num_tokens == 80
+    assert desc.num_reqs == 64
+    assert desc.max_query_len == 8
+
+    for num_tokens in range(1, 8):
+        desc = manager.dispatch(
+            num_reqs=num_tokens,
+            num_tokens=num_tokens,
+            uniform_token_count=None,
+            num_active_loras=0,
+            max_query_len=1,
+        )
+
+        assert desc.cg_mode == CUDAGraphMode.FULL
+        assert desc.num_tokens == 8
+        assert desc.num_reqs == 8
+        assert desc.max_query_len == 8
+
+    desc = manager.dispatch(
+        num_reqs=1,
+        num_tokens=8,
+        uniform_token_count=None,
+        num_active_loras=0,
+        max_query_len=8,
+    )
+
+    assert desc.cg_mode == CUDAGraphMode.FULL
+    assert desc.num_reqs == 8
+
+    desc = manager.dispatch(
+        num_reqs=8,
+        num_tokens=8,
+        uniform_token_count=None,
+        num_active_loras=0,
+        max_query_len=1,
+    )
+
+    assert desc.cg_mode == CUDAGraphMode.FULL
+    assert desc.num_tokens == 8
+    assert desc.num_reqs == 8
+    assert desc.max_query_len == 8
+
+
 def test_basic_sd_does_not_capture_shorter_full_decode_shapes(monkeypatch):
     """Without DSD, only the max decode query length should get FULL graphs.
 

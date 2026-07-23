@@ -165,6 +165,24 @@ class BlockTables:
         # rather than allocating a new tensor.
         return tuple(block_table[:num_reqs] for block_table in self.input_block_tables)
 
+    def populate_dummy_block_tables(self, num_kv_blocks: int) -> None:
+        """Populate dummy tables with valid block IDs spread across requests."""
+        for block_table, blocks_per_kv_block in zip(
+            self.input_block_tables, self.blocks_per_kv_block
+        ):
+            first_block = blocks_per_kv_block
+            num_kernel_blocks = num_kv_blocks * blocks_per_kv_block
+            num_usable_blocks = num_kernel_blocks - first_block
+            if num_usable_blocks <= 0:
+                block_table.zero_()
+                continue
+
+            block_ids = torch.arange(
+                block_table.numel(), dtype=torch.int32, device=self.device
+            ).view(block_table.shape[1], block_table.shape[0])
+            block_ids.remainder_(num_usable_blocks).add_(first_block)
+            block_table.copy_(block_ids.T)
+
     def compute_slot_mappings(
         self,
         idx_mapping: torch.Tensor,

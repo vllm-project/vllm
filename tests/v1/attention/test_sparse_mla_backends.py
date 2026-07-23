@@ -46,6 +46,7 @@ from vllm.v1.attention.backends.mla.flashmla_sparse import (
     triton_convert_req_index_to_global_index,
 )
 from vllm.v1.attention.backends.mla.indexer import split_indexer_prefill_chunks
+from vllm.v1.attention.backends.mla.sparse_swa import DeepseekSparseSWAMetadata
 from vllm.v1.attention.backends.utils import (
     split_decodes_and_prefills,
     split_prefill_chunks,
@@ -71,6 +72,24 @@ SPARSE_BACKEND_BATCH_SPECS["large_q_pure_prefill"] = BatchSpec(
 )
 
 DEVICE_TYPE = current_platform.device_type
+
+
+def test_prefill_chunk_plan_excludes_cudagraph_request_padding():
+    metadata = DeepseekSparseSWAMetadata(
+        block_table=torch.empty(0),
+        slot_mapping=torch.empty(0),
+        block_size=16,
+        num_prefills=3,
+        prefill_seq_lens_cpu=torch.tensor([20, 0, 0]),
+        prefill_query_lens_cpu=torch.tensor([10, 0, 0]),
+        prefill_window_size=5,
+        prefill_max_model_len=20,
+        prefill_max_num_batched_tokens=10,
+    )
+
+    assert metadata.get_prefill_chunk_plan(compress_ratio=4, prefill_chunk_size=1) == [
+        (0, 1, 5, 19)
+    ]
 
 
 def _float_to_e8m0_truncate(f: float) -> float:

@@ -1,9 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 
+from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheTensor
 from vllm.v1.worker.utils import KVBlockZeroer
 
 
@@ -42,3 +45,49 @@ def test_block_ids_are_not_overwritten_while_copy_is_in_flight():
     assert torch.all(storage[1] == 0)
     assert torch.all(storage[2] == 0)
     assert torch.all(storage[3] == 1)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_packed_cache_zeroes_each_physical_block_once():
+    device = torch.device("cuda")
+    num_blocks = 3
+    block_stride = 16
+    backing = torch.ones((num_blocks, block_stride), dtype=torch.uint8, device=device)
+    contexts = {
+        "layer_0": SimpleNamespace(kv_cache=backing[:, :8]),
+        "layer_1": SimpleNamespace(kv_cache=backing[:, 8:]),
+    }
+    kv_cache_config = KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=backing.numel(),
+                shared_by=["layer_0"],
+                offset=0,
+                block_stride=block_stride,
+            ),
+            KVCacheTensor(
+                size=backing.numel(),
+                shared_by=["layer_1"],
+                offset=8,
+                block_stride=block_stride,
+            ),
+        ],
+        kv_cache_groups=[],
+    )
+    zeroer = KVBlockZeroer(
+        device,
+        pin_memory=True,
+        attn_groups_iter=iter(()),
+        kernel_block_sizes=[],
+        cache_dtype="auto",
+        static_forward_context=contexts,
+        kv_cache_config=kv_cache_config,
+    )
+
+    zeroer.zero_block_ids([1])
+    torch.accelerator.synchronize()
+
+    assert torch.all(backing[0] == 1)
+    assert torch.all(backing[1] == 0)
+    assert torch.all(backing[2] == 1)

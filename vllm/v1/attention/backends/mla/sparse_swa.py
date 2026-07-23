@@ -220,6 +220,12 @@ class DeepseekSparseSWAMetadata:
 
         assert self.prefill_seq_lens_cpu is not None
         assert self.prefill_query_lens_cpu is not None
+        num_prefills = self.num_prefills
+        while (
+            num_prefills > 0
+            and self.prefill_query_lens_cpu[num_prefills - 1].item() == 0
+        ):
+            num_prefills -= 1
 
         # query_len <= max_num_batched_tokens and
         # gather_len = query_len + min(prefix_len, window_size - 1), so the
@@ -251,12 +257,12 @@ class DeepseekSparseSWAMetadata:
 
         chunk_plan: list[tuple[int, int, int, int]] = []
         chunk_start = 0
-        while chunk_start < self.num_prefills:
+        while chunk_start < num_prefills:
             chunk_max_compressed = int(compressed_lens_cpu[chunk_start].item())
             chunk_max_gather = int(gather_lens_cpu[chunk_start].item())
             chunk_end = chunk_start + 1
 
-            while chunk_end < self.num_prefills:
+            while chunk_end < num_prefills:
                 candidate_max_compressed = max(
                     chunk_max_compressed,
                     int(compressed_lens_cpu[chunk_end].item()),

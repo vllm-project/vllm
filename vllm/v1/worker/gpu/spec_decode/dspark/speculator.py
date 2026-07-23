@@ -79,7 +79,6 @@ class DSparkSpeculator(DFlashSpeculator):
         self.use_confidence_based_verification = (
             self.speculative_config.use_confidence_based_verification
         )
-        self.time_graphs = self.use_confidence_based_verification
 
     def load_draft_model(
         self,

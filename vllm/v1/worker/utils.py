@@ -96,6 +96,7 @@ class KVBlockZeroer:
         kernel_block_sizes: list[int],
         cache_dtype: str,
         static_forward_context: dict[str, Any],
+        kv_cache_config: KVCacheConfig | None = None,
         runner_only_attn_layers: set[str] | None = None,
         max_concurrency: int = 1,
     ) -> None:
@@ -128,54 +129,77 @@ class KVBlockZeroer:
         seg_addrs: list[int] = []
         page_size_el: int | None = None
 
-        for group in attn_groups_iter:
-            spec = group.kv_cache_spec
-            if not isinstance(spec, FullAttentionSpec):
-                continue
-            if group.kv_cache_group_id >= len(kernel_block_sizes):
-                continue
-            kernel_bs = kernel_block_sizes[group.kv_cache_group_id]
-            ratio = spec.block_size // kernel_bs
-            block_dim = group.backend.get_kv_cache_block_dim(
-                kernel_bs,
-                spec.num_kv_heads,
-                spec.head_size,
-                cache_dtype_str=cache_dtype,
-            )
-
-            for layer_name in group.layer_names:
-                if layer_name in runner_only_attn_layers:
+        packed_tensors = (
+            [t for t in kv_cache_config.kv_cache_tensors if t.block_stride > 0]
+            if kv_cache_config is not None
+            else []
+        )
+        if packed_tensors:
+            block_strides = {t.block_stride for t in packed_tensors}
+            assert len(block_strides) == 1
+            block_stride = block_strides.pop()
+            assert block_stride % 4 == 0
+            page_size_el = block_stride // 4
+            for tensor in packed_tensors:
+                for layer_name in tensor.shared_by:
+                    context = static_forward_context.get(layer_name)
+                    kv = context.kv_cache if context is not None else None
+                    if not isinstance(kv, torch.Tensor):
+                        continue
+                    storage_ptr = kv.untyped_storage().data_ptr()
+                    if storage_ptr not in seen_ptrs:
+                        seen_ptrs.add(storage_ptr)
+                        seg_addrs.append(storage_ptr)
+                    break
+        else:
+            for group in attn_groups_iter:
+                spec = group.kv_cache_spec
+                if not isinstance(spec, FullAttentionSpec):
                     continue
-                kv = static_forward_context[layer_name].kv_cache
-                if not isinstance(kv, torch.Tensor):
+                if group.kv_cache_group_id >= len(kernel_block_sizes):
                     continue
-                dp = kv.data_ptr()
-                if dp in seen_ptrs:
-                    continue
-                seen_ptrs.add(dp)
+                kernel_bs = kernel_block_sizes[group.kv_cache_group_id]
+                ratio = spec.block_size // kernel_bs
+                block_dim = group.backend.get_kv_cache_block_dim(
+                    kernel_bs,
+                    spec.num_kv_heads,
+                    spec.head_size,
+                    cache_dtype_str=cache_dtype,
+                )
 
-                el = kv.element_size()
-                cur_bytes = kv.stride(block_dim) * el
-                assert cur_bytes % 4 == 0
-                kernel_block_el = cur_bytes // 4
-                cur_page_el = kernel_block_el * ratio
-                if page_size_el is None:
-                    page_size_el = cur_page_el
-                else:
-                    assert page_size_el == cur_page_el, (
-                        f"Non-uniform page sizes: {page_size_el} vs {cur_page_el}"
-                    )
+                for layer_name in group.layer_names:
+                    if layer_name in runner_only_attn_layers:
+                        continue
+                    kv = static_forward_context[layer_name].kv_cache
+                    if not isinstance(kv, torch.Tensor):
+                        continue
+                    dp = kv.data_ptr()
+                    if dp in seen_ptrs:
+                        continue
+                    seen_ptrs.add(dp)
 
-                block_stride_bytes = cur_bytes
-                outer_dims = [
-                    d
-                    for d in range(block_dim)
-                    if kv.stride(d) * el > block_stride_bytes
-                ]
-                outer_strides = [kv.stride(d) * el for d in outer_dims]
-                for outer in iprod(*(range(kv.shape[d]) for d in outer_dims)):
-                    off_bytes = sum(i * s for i, s in zip(outer, outer_strides))
-                    seg_addrs.append(dp + off_bytes)
+                    el = kv.element_size()
+                    cur_bytes = kv.stride(block_dim) * el
+                    assert cur_bytes % 4 == 0
+                    kernel_block_el = cur_bytes // 4
+                    cur_page_el = kernel_block_el * ratio
+                    if page_size_el is None:
+                        page_size_el = cur_page_el
+                    else:
+                        assert page_size_el == cur_page_el, (
+                            f"Non-uniform page sizes: {page_size_el} vs {cur_page_el}"
+                        )
+
+                    block_stride_bytes = cur_bytes
+                    outer_dims = [
+                        d
+                        for d in range(block_dim)
+                        if kv.stride(d) * el > block_stride_bytes
+                    ]
+                    outer_strides = [kv.stride(d) * el for d in outer_dims]
+                    for outer in iprod(*(range(kv.shape[d]) for d in outer_dims)):
+                        off_bytes = sum(i * s for i, s in zip(outer, outer_strides))
+                        seg_addrs.append(dp + off_bytes)
 
         if not seg_addrs or page_size_el is None:
             self._meta = None

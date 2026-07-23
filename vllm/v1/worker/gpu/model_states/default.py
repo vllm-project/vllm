@@ -155,7 +155,9 @@ class DefaultModelState(ModelState):
             input_batch.query_start_loc_np[: num_reqs + 1]
         )
         query_start_loc_gpu = input_batch.query_start_loc[: num_reqs + 1]
-        max_query_len = input_batch.num_scheduled_tokens.max().item()
+        max_query_len = input_batch.max_query_len
+        if max_query_len is None:
+            max_query_len = input_batch.num_scheduled_tokens.max().item()
         seq_lens_cpu_upper_bound = input_batch.seq_lens_cpu_upper_bound
         if for_capture:
             # Capture with worst-case max_seq_len so the graph is valid at any replay.

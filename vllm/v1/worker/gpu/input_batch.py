@@ -99,74 +99,144 @@ class InputBatch:
     # [num_reqs] per-request prompt length, only populated for R-SWA.
     prompt_lens: torch.Tensor | None
 
+    # Capture-time upper bound when the dummy query lengths are smaller.
+    max_query_len: int | None = None
+
     @classmethod
     def make_dummy(
         cls,
         num_reqs: int,
         num_tokens: int,
         input_buffers: InputBuffers,
+        max_query_len: int | None = None,
+        num_reqs_after_padding: int | None = None,
+        num_tokens_after_padding: int | None = None,
+        num_draft_tokens_per_req: np.ndarray | None = None,
+        num_bonus_tokens: int = 1,
+        mark_all_padding: bool = True,
+        num_computed_tokens: int = 0,
     ) -> "InputBatch":
         assert 0 < num_reqs <= num_tokens
+        assert num_computed_tokens >= 0
         device = input_buffers.device
+        num_reqs_after_padding = num_reqs_after_padding or num_reqs
+        num_tokens_after_padding = num_tokens_after_padding or num_tokens
+        assert num_reqs <= num_reqs_after_padding
+        assert num_tokens <= num_tokens_after_padding
 
         req_ids = [f"req_{i}_{random_uuid()}" for i in range(num_reqs)]
         idx_mapping_np = np.arange(num_reqs, dtype=np.int32)
         idx_mapping = torch.arange(num_reqs, dtype=torch.int32, device=device)
-        expanded_idx_mapping = idx_mapping
-        expanded_local_pos = torch.zeros(num_reqs, dtype=torch.int32, device=device)
-
         num_scheduled_tokens = np.full(num_reqs, num_tokens // num_reqs, dtype=np.int32)
         num_scheduled_tokens[-1] += num_tokens % num_reqs
         assert int(num_scheduled_tokens.sum()) == num_tokens
 
-        # seq_len equals to query_len
+        # Build query offsets before adding the cached context to seq_lens.
         input_buffers.seq_lens[:num_reqs] = num_tokens // num_reqs
         input_buffers.seq_lens[num_reqs - 1] += num_tokens % num_reqs
-        # Pad for full CUDA graph mode.
-        input_buffers.seq_lens[num_reqs:] = 0
-        seq_lens = input_buffers.seq_lens[:num_reqs]
 
-        query_start_loc_np = np.empty(num_reqs + 1, dtype=np.int32)
+        query_start_loc_np = np.empty(num_reqs_after_padding + 1, dtype=np.int32)
         query_start_loc_np[0] = 0
-        np.cumsum(num_scheduled_tokens, out=query_start_loc_np[1:])
+        np.cumsum(num_scheduled_tokens, out=query_start_loc_np[1 : num_reqs + 1])
+        query_start_loc_np[num_reqs + 1 :] = num_tokens
         input_buffers.query_start_loc[:1] = 0
         torch.cumsum(
-            seq_lens, dim=0, out=input_buffers.query_start_loc[1 : num_reqs + 1]
+            input_buffers.seq_lens[:num_reqs],
+            dim=0,
+            out=input_buffers.query_start_loc[1 : num_reqs + 1],
         )
+        input_buffers.seq_lens[:num_reqs] += num_computed_tokens
+        # Pad for full CUDA graph mode.
+        input_buffers.seq_lens[num_reqs:] = 0
+        seq_lens = input_buffers.seq_lens[:num_reqs_after_padding]
         # Pad for full CUDA graph mode.
         input_buffers.query_start_loc[num_reqs + 1 :] = num_tokens
-        query_start_loc = input_buffers.query_start_loc[: num_reqs + 1]
+        query_start_loc = input_buffers.query_start_loc[: num_reqs_after_padding + 1]
 
-        input_ids = input_buffers.input_ids[:num_tokens].zero_()
-        positions = input_buffers.positions[:num_tokens].zero_()
+        input_ids = input_buffers.input_ids[:num_tokens_after_padding].zero_()
+        positions = input_buffers.positions[:num_tokens_after_padding].zero_()
+        if num_computed_tokens:
+            for start, end in zip(
+                query_start_loc_np[:num_reqs],
+                query_start_loc_np[1 : num_reqs + 1],
+                strict=True,
+            ):
+                positions[start:end] = torch.arange(
+                    num_computed_tokens,
+                    num_computed_tokens + end - start,
+                    dtype=positions.dtype,
+                    device=device,
+                )
 
-        input_buffers.is_padding[:num_tokens].fill_(True)
-        is_padding = input_buffers.is_padding[:num_tokens]
+        input_buffers.is_padding[:num_tokens].fill_(mark_all_padding)
+        input_buffers.is_padding[num_tokens:num_tokens_after_padding].fill_(True)
+        is_padding = input_buffers.is_padding[:num_tokens_after_padding]
 
-        logits_indices = query_start_loc[1:] - 1
-        cu_num_logits = torch.arange(num_reqs + 1, device=device, dtype=torch.int32)
-        cu_num_logits_np = np.arange(num_reqs + 1, dtype=np.int32)
-        # Dummy: seq_len == query_len (fresh-prefill shape).
-        seq_lens_cpu_upper_bound = torch.from_numpy(num_scheduled_tokens.copy())
+        if num_draft_tokens_per_req is None:
+            total_num_draft_tokens = 0
+            expanded_idx_mapping = idx_mapping
+            expanded_local_pos = torch.zeros(num_reqs, dtype=torch.int32, device=device)
+            logits_indices = query_start_loc[1 : num_reqs + 1] - 1
+            cu_num_logits_np = np.arange(num_reqs + 1, dtype=np.int32)
+        else:
+            assert num_draft_tokens_per_req.shape == (num_reqs,)
+            assert np.all(num_draft_tokens_per_req >= 0)
+            num_logits = num_draft_tokens_per_req + num_bonus_tokens
+            assert np.all(num_logits <= num_scheduled_tokens)
+            total_num_draft_tokens = int(num_draft_tokens_per_req.sum())
+            cu_num_logits_np = np.empty(num_reqs + 1, dtype=np.int32)
+            cu_num_logits_np[0] = 0
+            np.cumsum(num_logits, out=cu_num_logits_np[1:])
+            logits_indices_np = np.concatenate(
+                [
+                    np.arange(end - count, end, dtype=np.int64)
+                    for end, count in zip(
+                        query_start_loc_np[1 : num_reqs + 1],
+                        num_logits,
+                        strict=True,
+                    )
+                ]
+            )
+            logits_indices = torch.as_tensor(logits_indices_np, device=device)
+            expanded_idx_mapping = torch.repeat_interleave(
+                idx_mapping,
+                torch.as_tensor(num_logits, dtype=torch.int64, device=device),
+            )
+            expanded_local_pos = torch.cat(
+                [
+                    torch.arange(count, dtype=torch.int32, device=device)
+                    for count in num_logits
+                ]
+            )
+        cu_num_logits = torch.as_tensor(
+            cu_num_logits_np, dtype=torch.int32, device=device
+        )
+        seq_lens_cpu_upper_bound_np = np.zeros(num_reqs_after_padding, dtype=np.int32)
+        seq_lens_cpu_upper_bound_np[:num_reqs] = (
+            num_computed_tokens + num_scheduled_tokens
+        )
+        seq_lens_cpu_upper_bound = torch.from_numpy(seq_lens_cpu_upper_bound_np)
         return cls(
             req_ids=req_ids,
             num_reqs=num_reqs,
-            num_reqs_after_padding=num_reqs,
+            num_reqs_after_padding=num_reqs_after_padding,
             idx_mapping=idx_mapping,
             idx_mapping_np=idx_mapping_np,
             expanded_idx_mapping=expanded_idx_mapping,
             expanded_local_pos=expanded_local_pos,
             num_scheduled_tokens=num_scheduled_tokens,
             num_tokens=num_tokens,
-            num_tokens_after_padding=num_tokens,
-            num_draft_tokens=0,
-            num_draft_tokens_per_req=None,
+            num_tokens_after_padding=num_tokens_after_padding,
+            num_draft_tokens=total_num_draft_tokens,
+            num_draft_tokens_per_req=num_draft_tokens_per_req,
             query_start_loc=query_start_loc,
             query_start_loc_np=query_start_loc_np,
             seq_lens=seq_lens,
             seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
             dcp_local_seq_lens=None,
-            num_computed_tokens_np=np.zeros(num_reqs, dtype=np.int32),
+            num_computed_tokens_np=np.full(
+                num_reqs, num_computed_tokens, dtype=np.int32
+            ),
             prefill_len_np=np.zeros(num_reqs, dtype=np.int32),
             num_computed_prefill_tokens_np=np.zeros(num_reqs, dtype=np.int32),
             is_prefilling_np=np.zeros(num_reqs, dtype=np.bool_),
@@ -179,6 +249,7 @@ class InputBatch:
             cu_num_logits_np=cu_num_logits_np,
             has_structured_output_reqs=False,
             prompt_lens=None,
+            max_query_len=max_query_len,
         )
 
 
