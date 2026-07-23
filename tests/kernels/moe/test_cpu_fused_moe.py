@@ -10,7 +10,10 @@ from vllm._custom_ops import (
     cpu_prepack_moe_weight,
 )
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
-from vllm.model_executor.layers.fused_moe.cpu_fused_moe import _CPU_MOE_ACT_FN
+from vllm.model_executor.layers.fused_moe.cpu_fused_moe import (
+    _CPU_MOE_ACT_FN,
+    CPUFusedMOE,
+)
 from vllm.platforms import CpuArchEnum, current_platform
 from vllm.utils.torch_utils import set_random_seed
 
@@ -176,3 +179,132 @@ def test_cpu_fused_moe(
         torch.testing.assert_close(output, ref_output, atol=atol, rtol=rtol),
         f"{torch.max(torch.abs(output - ref_output))}",
     )
+
+
+# moe_intermediate_size not a multiple of 32, e.g. what tensor-parallel
+# sharding of moe_intermediate_size=704 at tp=4 produces (704 // 4 == 176).
+UNALIGNED_INTERMEDIATE_DIM = 176
+
+
+class _StubMoELayer(torch.nn.Module):
+    """Minimal stand-in for the real MoE layer module, exposing just what
+    CPUFusedMOE reads/replaces (w13_weight, w2_weight, activation, and
+    optionally w13_bias/w2_bias)."""
+
+    def __init__(
+        self,
+        w13_weight: torch.Tensor,
+        w2_weight: torch.Tensor,
+        activation: MoEActivation,
+        w13_bias: torch.Tensor | None = None,
+        w2_bias: torch.Tensor | None = None,
+    ):
+        super().__init__()
+        self.w13_weight = torch.nn.Parameter(w13_weight, requires_grad=False)
+        self.w2_weight = torch.nn.Parameter(w2_weight, requires_grad=False)
+        self.activation = activation
+        if w13_bias is not None:
+            self.w13_bias = torch.nn.Parameter(w13_bias, requires_grad=False)
+        if w2_bias is not None:
+            self.w2_bias = torch.nn.Parameter(w2_bias, requires_grad=False)
+
+
+@pytest.mark.parametrize("expert_num", EXPERT_NUM)
+@pytest.mark.parametrize("hidden_size", HIDDEN_DIM)
+@pytest.mark.parametrize("use_bias", USE_BIAS)
+@pytest.mark.parametrize("dtype", DTYPE)
+@pytest.mark.parametrize(
+    "act",
+    [MoEActivation.SILU, MoEActivation.GELU, MoEActivation.GELU_TANH],
+)
+def test_cpu_fused_moe_unaligned_intermediate_size(
+    default_vllm_config,
+    expert_num: int,
+    hidden_size: int,
+    use_bias: bool,
+    dtype: torch.dtype,
+    act: MoEActivation,
+):
+    """An unaligned per-partition moe_intermediate_size must still hit the
+    grouped-gemm fast path via automatic zero-padding, with numerically
+    correct output, instead of silently falling back to the much slower
+    per-expert torch loop."""
+    if current_platform.get_cpu_architecture() == CpuArchEnum.ARM:
+        pytest.skip("padding is only applied on the x86 AMX/vector kernels")
+
+    set_random_seed(0)
+    batch_size = 64
+    intermediate_size = UNALIGNED_INTERMEDIATE_DIM
+    topk_num = max(expert_num // 2, 1)
+    up_dim = 2 * intermediate_size
+
+    input = torch.randn((batch_size, hidden_size), dtype=dtype) / (
+        0.5 * hidden_size**0.5
+    )
+    w13 = torch.randn((expert_num, up_dim, hidden_size), dtype=dtype) / (
+        0.5 * hidden_size**0.5
+    )
+    w2 = torch.randn((expert_num, hidden_size, intermediate_size), dtype=dtype) / (
+        0.5 * intermediate_size**0.5
+    )
+    router_logits = torch.randn((batch_size, expert_num), dtype=dtype)
+    w13_bias = None
+    w2_bias = None
+    if use_bias:
+        w13_bias = torch.randn((expert_num, up_dim), dtype=dtype) / (0.5 * up_dim**0.5)
+        w2_bias = torch.randn((expert_num, hidden_size), dtype=dtype) / (
+            0.5 * hidden_size**0.5
+        )
+    score = torch.softmax(router_logits, dim=-1, dtype=torch.float32)
+    topk_weight, topk_ids = torch.topk(score, topk_num)
+    topk_ids = topk_ids.to(torch.int32)
+
+    ref_output = ref_fused_moe(
+        input, w13, w2, w13_bias, w2_bias, topk_weight, topk_ids, act
+    )
+
+    layer = _StubMoELayer(
+        w13.clone(),
+        w2.clone(),
+        act,
+        w13_bias.clone() if w13_bias is not None else None,
+        w2_bias.clone() if w2_bias is not None else None,
+    )
+
+    cpu_moe = CPUFusedMOE(layer)
+    assert cpu_moe.forward_method == cpu_moe.forward_grouped_gemm, (
+        "expected the padded intermediate size to hit the grouped-gemm fast path"
+    )
+
+    output = cpu_moe.forward_method(
+        layer, input, topk_weight, topk_ids, act, expert_num, False
+    )
+
+    atol, rtol = get_default_atol(output), get_default_rtol(output)
+    torch.testing.assert_close(output, ref_output, atol=atol, rtol=rtol)
+
+
+def test_cpu_fused_moe_unaligned_intermediate_size_swigluoai(default_vllm_config):
+    """swigluoai's interleaved gate/up layout isn't padded automatically. On
+    AMX-capable CPUs this must raise rather than silently falling back to
+    the (correct but much slower) per-expert torch loop; elsewhere it should
+    fall back exactly as before."""
+    set_random_seed(0)
+    expert_num = 8
+    hidden_size = 128
+    intermediate_size = UNALIGNED_INTERMEDIATE_DIM
+    dtype = torch.bfloat16
+    up_dim = 2 * intermediate_size
+
+    layer = _StubMoELayer(
+        torch.randn((expert_num, up_dim, hidden_size), dtype=dtype),
+        torch.randn((expert_num, hidden_size, intermediate_size), dtype=dtype),
+        MoEActivation.SWIGLUOAI,
+    )
+
+    if torch.cpu._is_amx_tile_supported():
+        with pytest.raises(RuntimeError):
+            CPUFusedMOE(layer)
+    else:
+        cpu_moe = CPUFusedMOE(layer)
+        assert cpu_moe.forward_method == cpu_moe.forward_torch
