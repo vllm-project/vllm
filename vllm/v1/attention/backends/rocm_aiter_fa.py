@@ -1476,9 +1476,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
         # expects K/V in flash layout (B, N, H, hs) with block_size at dim 1
         # (see block_size=key_cache.shape[1] in _aiter_ops), so transpose
         # then split the content dim, matching do_rope_and_kv_cache_update.
-        key_cache, value_cache = kv_cache.transpose(1, 2).split(
-            self.head_size, dim=-1
-        )
+        key_cache, value_cache = kv_cache.transpose(1, 2).split(self.head_size, dim=-1)
         rocm_aiter_ops.do_qk_norm_rope_kvcache_update(
             qkv=qkv,
             q_weight=q_weight,
