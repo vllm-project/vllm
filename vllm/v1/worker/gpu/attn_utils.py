@@ -218,7 +218,7 @@ def _reshape_attention_kv_cache(
         kv_cache = (
             kv_raw_tensor.view(-1, block_stride)[:, offset : offset + page_bytes]
             .view(dtype)
-            .view(kv_cache_shape)
+            .view(permuted_kv_cache_shape)
         )
     elif kv_cache_spec.page_size_padded is not None:
         # Use a strided view to skip the padding between physical pages.
@@ -238,7 +238,7 @@ def _reshape_attention_kv_cache(
         page_stride = kv_cache_spec.page_size_bytes // dtype_size
 
         num_blocks_dim = inv_order[0]
-        strides = list(torch.empty(permuted_kv_cache_shape).stride())
+        strides = list(torch.empty(permuted_kv_cache_shape, device="meta").stride())
         strides[num_blocks_dim] = page_stride
 
         kv_cache = torch.as_strided(
@@ -262,7 +262,7 @@ def _reshape_kv_cache(
     kv_cache_config: "KVCacheConfig | None" = None,
 ) -> dict[str, Any]:
     kv_caches: dict[str, Any] = {}
-    has_attn, has_mamba = False, False
+    has_attn = False
 
     layer_packing: dict[str, tuple[int, int]] = {}
     if kv_cache_config is not None:
@@ -340,38 +340,21 @@ def _reshape_kv_cache(
                 )
 
             elif isinstance(kv_cache_spec, MambaSpec):
-                has_mamba = True
-                state_tensors = []
-                storage_offset_bytes = 0
-                for shape, dtype in zip(kv_cache_spec.shapes, kv_cache_spec.dtypes):
-                    dtype_size = get_dtype_size(dtype)
-                    num_element_per_page = kv_cache_spec.page_size_bytes // dtype_size
-                    target_shape = (num_blocks, *shape)
-                    stride = torch.empty(target_shape).stride()
-                    target_stride = (num_element_per_page, *stride[1:])
-                    assert storage_offset_bytes % dtype_size == 0
-                    tensor = torch.as_strided(
-                        kv_raw_tensor.view(dtype),
-                        size=target_shape,
-                        stride=target_stride,
-                        storage_offset=storage_offset_bytes // dtype_size,
-                    )
-                    state_tensors.append(tensor)
-                    storage_offset_bytes += stride[0] * dtype_size
-                kv_caches[layer_name] = state_tensors
+                page_size_bytes = kv_cache_spec.page_size_bytes
+                # Hold a single contiguous [num_blocks, 1, 1, page_size_bytes]
+                # int8 page view per layer; the layer's bind_kv_cache unpacks
+                # each block's bytes into its conv/ssm state views. Keeping
+                # one tensor per layer lets the KV connector register it
+                # without special-casing Mamba.
+                kv_caches[layer_name] = kv_raw_tensor[
+                    : num_blocks * page_size_bytes
+                ].view(num_blocks, 1, 1, page_size_bytes)
             else:
                 raise NotImplementedError(
                     f"Unsupported KV cache spec type: {type(kv_cache_spec)}"
                 )
 
-    if has_attn and has_mamba:
-        _update_hybrid_attention_layout(
-            attn_groups=attn_groups,
-            kv_caches=kv_caches,
-            kernel_block_sizes=kernel_block_sizes,
-            cache_dtype=cache_dtype,
-        )
-    elif has_attn and kv_cache_config is not None:
+    if has_attn and kv_cache_config is not None:
         _align_mixed_attention_kv_cache_views(
             attn_groups=attn_groups,
             kv_caches=kv_caches,
@@ -458,65 +441,6 @@ def _restride_blocks_first_kv_cache_to_kv_first_storage(
     )
 
 
-def _update_hybrid_attention_layout(
-    attn_groups: Iterable[AttentionGroup],
-    kv_caches: dict[str, Any],
-    kernel_block_sizes: list[int],
-    cache_dtype: str,
-) -> None:
-    for group in attn_groups:
-        if group.kv_cache_group_id >= len(kernel_block_sizes):
-            continue
-
-        kv_cache_spec = group.kv_cache_spec
-        if not isinstance(kv_cache_spec, AttentionSpec):
-            continue
-        # Mirror the per-layer dtype selection used when building the shape
-        # above. The block-dim index is dtype-independent for current backends
-        # (quantization only changes the last dim), so this is a no-op today,
-        # but it keeps both call sites consistent for skip layers.
-        layer_cache_dtype = (
-            "auto"
-            if kv_cache_spec.kv_quant_mode == KVQuantMode.NONE
-            and not isinstance(kv_cache_spec, TQFullAttentionSpec)
-            else cache_dtype
-        )
-        block_dim = group.backend.get_kv_cache_block_dim(
-            kernel_block_sizes[group.kv_cache_group_id],
-            kv_cache_spec.num_kv_heads,
-            kv_cache_spec.head_size,
-            cache_dtype_str=layer_cache_dtype,
-        )
-        # if the first dim of the kvcache's layout is already num_blocks, continue
-        if block_dim == 0:
-            continue
-
-        assert block_dim == 1, (
-            "Expected the dim `num_blocks` at the second dim when updating"
-            " the kvcache's layout of full attention layer"
-        )
-
-        for layer_name in group.layer_names:
-            if layer_name not in kv_caches:
-                # Shared layer — will be aliased to its target after this pass.
-                continue
-
-            kv_cache = kv_caches[layer_name]
-            if kv_cache.shape[0] == 2:
-                assert kv_cache.shape[1] != 2, (
-                    f"Cannot determine layout for tensor of shape {kv_cache.shape}"
-                )
-                hidden_size = kv_cache.shape[2:].numel()
-                kv_cache.as_strided_(
-                    size=kv_cache.shape,
-                    stride=(
-                        hidden_size,
-                        2 * hidden_size,
-                        *kv_cache.stride()[2:],
-                    ),
-                )
-
-
 def init_kv_cache(
     runner_kv_caches: list[torch.Tensor | list[torch.Tensor]],
     forward_context: dict[str, Any],
@@ -540,7 +464,15 @@ def init_kv_cache(
         shared_kv_cache_layers=shared_kv_cache_layers,
         kv_cache_config=kv_cache_config,
     )
-    bind_kv_cache(kv_caches, forward_context, runner_kv_caches)
+    # Dual-attention models (e.g. LongCat-Flash) put two Attention modules per
+    # decoder layer, so a layer name carries two integers (layer + module index).
+    num_attn_module = (
+        2
+        if vllm_config.model_config.hf_config.model_type
+        in ("longcat_flash", "longcat_flash_ngram")
+        else 1
+    )
+    bind_kv_cache(kv_caches, forward_context, runner_kv_caches, num_attn_module)
     return kv_caches
 
 
@@ -570,10 +502,11 @@ def build_attn_metadata(
     seq_lens_cpu_upper_bound: torch.Tensor | None = None,
     dcp_local_seq_lens: torch.Tensor | None = None,
     positions: torch.Tensor | None = None,
+    is_prefilling: torch.Tensor | None = None,
     mm_req_doc_ranges: dict[int, list[tuple[int, int]]] | None = None,
     model_specific_attn_metadata: ModelSpecificAttnMetadata | None = None,
     for_cudagraph_capture: bool = False,
-    causal: bool | Mapping[int, bool] = True,
+    causal: bool | torch.Tensor | Mapping[int, bool] = True,
     rswa_prefix_lens: torch.Tensor | None = None,
 ) -> dict[str, Any]:
     seq_lens = seq_lens[:num_reqs]
@@ -588,12 +521,19 @@ def build_attn_metadata(
         block_table = block_tables[i]
         slot_mapping = slot_mappings[i]
         # Per-group causal for hybrid drafters (mixed SWA/full attention).
-        group_causal = causal if isinstance(causal, bool) else causal.get(i, True)
+        group_causal = (
+            causal if isinstance(causal, (bool, torch.Tensor)) else causal.get(i, True)
+        )
 
         common_attn_metadata_extra_kwargs = (
             model_specific_attn_metadata.get_extra_common_attn_kwargs(i, num_reqs)
             if model_specific_attn_metadata is not None
             else {}
+        )
+        # Model-specific metadata (e.g. Mamba hybrid) may supply its own
+        # padding-aware is_prefilling, which takes precedence over the default.
+        group_is_prefilling = common_attn_metadata_extra_kwargs.pop(
+            "is_prefilling", is_prefilling
         )
         common_attn_metadata = CommonAttentionMetadata(
             query_start_loc=query_start_loc_gpu,
@@ -609,6 +549,7 @@ def build_attn_metadata(
             causal=group_causal,
             dcp_local_seq_lens=dcp_local_seq_lens,
             positions=positions,
+            is_prefilling=group_is_prefilling,
             mm_req_doc_ranges=mm_req_doc_ranges,
             rswa_prefix_lens=rswa_prefix_lens,
             **common_attn_metadata_extra_kwargs,

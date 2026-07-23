@@ -14,15 +14,13 @@ from vllm.triton_utils import tl, triton
 from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
 from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
 from vllm.v1.worker.gpu.cudagraph_utils import (
-    AttentionStatePair,
     BatchExecutionDescriptor,
     get_uniform_token_count,
 )
 from vllm.v1.worker.gpu.dp_utils import dispatch_cg_and_sync_dp
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.spec_decode.autoregressive.cudagraph_utils import (
-    DecodeSpeculatorCudaGraphManager,
-    PrefillSpeculatorCudaGraphManager,
+    SpeculatorCudaGraphManager,
 )
 from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
 
@@ -49,8 +47,8 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
                 self.max_num_tokens, self.hidden_size, dtype=self.dtype, device=device
             )
 
-        self.prefill_cudagraph_manager: PrefillSpeculatorCudaGraphManager | None = None
-        self.decode_cudagraph_manager: DecodeSpeculatorCudaGraphManager | None = None
+        self.prefill_cudagraph_manager: SpeculatorCudaGraphManager | None = None
+        self.decode_cudagraph_manager: SpeculatorCudaGraphManager | None = None
 
     @property
     def advance_draft_positions(self) -> bool:
@@ -64,7 +62,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
 
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
         # Initialize cudagraph manager for draft prefill (draft position 0).
-        self.prefill_cudagraph_manager = PrefillSpeculatorCudaGraphManager(
+        self.prefill_cudagraph_manager = SpeculatorCudaGraphManager(
             self.vllm_config,
             self.device,
             cudagraph_mode,
@@ -78,17 +76,14 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             cudagraph_mode = CUDAGraphMode.NONE
 
         # Initialize cudagraph manager for draft decodes (draft positions > 0).
-        self.decode_cudagraph_manager = DecodeSpeculatorCudaGraphManager(
+        self.decode_cudagraph_manager = SpeculatorCudaGraphManager(
             self.vllm_config,
             self.device,
             cudagraph_mode,
             decode_query_len=1,
         )
 
-    def capture(
-        self,
-        attn_states: dict[BatchExecutionDescriptor, AttentionStatePair],
-    ) -> None:
+    def capture(self) -> None:
         logger.info("Capturing model for speculator...")
         # Reset indices to zeros to prevent stale values from prior
         # dummy runs to cause out-of-bounds indexing during capture.
@@ -99,12 +94,19 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
         # For FULL graphs, the entire routine is recorded as one graph.
         # For PIECEWISE, only the model's compiled regions are captured
         # and the rest (compute_logits, gumbel_sample) runs eagerly.
+        # Draft prefill reuses the target model's attention metadata at
+        # runtime, so capture builds its dummy metadata through the target
+        # model runner's builders and buffers.
         assert self.prefill_cudagraph_manager is not None
         if self.prefill_cudagraph_manager.use_breakable_cg:
             self.prefill_cudagraph_manager.init_breakable_cg_runner(self.model)
         self.prefill_cudagraph_manager.capture(
             self._prefill,
-            attn_states,
+            self.model_state,
+            self.target_input_buffers,
+            self.block_tables,
+            self.target_attn_groups,
+            self.kv_cache_config,
             progress_bar_desc="Capturing prefill CUDA graphs",
         )
 
@@ -291,6 +293,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             dummy_run and skip_attn_for_dummy_run,
             decode_batch_desc,
             num_tokens_across_dp,
+            input_batch.seq_lens_cpu_upper_bound,
             skip_rows=skip_rows,
         )
 
@@ -405,6 +408,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
         skip_attn: bool,
         batch_desc: BatchExecutionDescriptor,
         num_tokens_across_dp: torch.Tensor | None,
+        seq_lens_cpu_upper_bound: torch.Tensor,
         skip_rows: torch.Tensor | None = None,
     ) -> None:
         positions = self.input_buffers.positions[:num_reqs]
@@ -431,6 +435,8 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
                     num_reqs=num_reqs,
                     num_reqs_padded=batch_desc.num_reqs or num_reqs,
                     num_tokens_padded=batch_desc.num_tokens,
+                    seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
+                    step=step,
                 )
 
             # Update the current draft step.

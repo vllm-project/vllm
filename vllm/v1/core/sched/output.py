@@ -16,10 +16,12 @@ if TYPE_CHECKING:
     from vllm.multimodal.inputs import MultiModalFeatureSpec
     from vllm.pooling_params import PoolingParams
     from vllm.sampling_params import SamplingParams
+    from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
     from vllm.v1.request import Request
 else:
     ECConnectorMetadata = object
     KVConnectorMetadata = object
+    KVCacheBlockCopy = object
     LoRARequest = object
     MultiModalFeatureSpec = object
     PoolingParams = object
@@ -178,6 +180,14 @@ class CachedRequestData:
 
 
 @dataclass
+class ScheduledEncoderInputStats:
+    """Stats for encoder inputs scheduled in one iteration."""
+
+    num_inputs: int = 0
+    output_tokens: int = 0
+
+
+@dataclass
 class SchedulerOutput:
     # list of the requests that are scheduled for the first time.
     # We cache the request's data in each worker process, so that we don't
@@ -214,6 +224,8 @@ class SchedulerOutput:
     # freed from the encoder cache.
     free_encoder_mm_hashes: list[str]
 
+    scheduled_encoder_input_stats: ScheduledEncoderInputStats | None = None
+
     # Request IDs that are preempted in this step.
     # Only used for v2 model runner.
     preempted_req_ids: set[str] | None = None
@@ -239,6 +251,9 @@ class SchedulerOutput:
     # The worker zeros the corresponding GPU memory before the blocks are used,
     # preventing stale NaN/data from corrupting attention or SSM computation.
     new_block_ids_to_zero: list[int] | None = None
+
+    # CoW copies to apply after zeroing new blocks and before forward.
+    kv_cache_block_copies: list[KVCacheBlockCopy] | None = None
 
     # Dynamic speculative decoding: optimal K chosen by scheduler.
     # Number of spec tokens to schedule for the next step.

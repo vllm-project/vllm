@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Inference-only Qwen3-Next/Qwen3.5 model."""
 
-import functools
 from typing import Literal
 
 import torch
@@ -21,16 +20,6 @@ from vllm.distributed import (
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp, PluggableLayer
-from vllm.model_executor.layers.fla.ops import (
-    chunk_gated_delta_rule as fla_chunk_gated_delta_rule,
-)
-from vllm.model_executor.layers.fla.ops import (
-    fused_post_conv_prep,
-    fused_recurrent_gated_delta_rule_packed_decode,
-    fused_sigmoid_gating_delta_rule_update,
-)
-from vllm.model_executor.layers.fla.ops.chunk import l2norm_fwd
-from vllm.model_executor.layers.fla.ops.utils import FLA_CHUNK_SIZE
 from vllm.model_executor.layers.layernorm import RMSNormGated
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -56,6 +45,16 @@ from vllm.model_executor.model_loader.weight_utils import (
 )
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
+from vllm.third_party.flash_linear_attention.ops import (
+    chunk_gated_delta_rule as fla_chunk_gated_delta_rule,
+)
+from vllm.third_party.flash_linear_attention.ops import (
+    fused_post_conv_prep,
+    fused_recurrent_gated_delta_rule_packed_decode,
+    fused_sigmoid_gating_delta_rule_update,
+)
+from vllm.third_party.flash_linear_attention.ops.chunk import l2norm_fwd
+from vllm.third_party.flash_linear_attention.ops.utils import FLA_CHUNK_SIZE
 from vllm.transformers_utils.configs.qwen3_next import Qwen3NextConfig
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import (
@@ -83,70 +82,6 @@ if GDN_AITER_TRITON_AVAILABLE:
 logger = init_logger(__name__)
 
 
-# TODO(arpera): remove ``_is_libs_cu13_install_intact`` and its caller in
-# ``_resolve_gdn_prefill_backend`` once the upstream packaging bug is
-# fixed and the broken wheels are yanked / superseded on PyPI:
-#   https://github.com/NVIDIA/cutlass/issues/3170
-#   https://github.com/NVIDIA/cutlass/issues/3259
-@functools.cache
-def _is_libs_cu13_install_intact() -> bool:
-    """Return True if every file installed by ``nvidia-cutlass-dsl-libs-cu13``
-    matches the SHA-256 declared in its wheel ``RECORD``.
-
-    ``nvidia-cutlass-dsl-libs-base`` and ``nvidia-cutlass-dsl-libs-cu13``
-    both ship into the shared ``nvidia_cutlass_dsl/`` namespace and
-    write many of the same on-disk paths (the runtime ``.so``, the MLIR
-    Python bindings, cuTe-DSL Python sources, ...) with different
-    content. Whichever wheel extracts last wins; with a parallel
-    installer (e.g. ``uv``) the order is racy and the resulting venv
-    can end up with a mix of files from both variants. The
-    ``-libs-base`` variant fails MLIR legalization when JIT-compiling
-    the FlashInfer Blackwell GDN prefill kernel, and any other
-    cuTe-DSL-based kernel can break too if on-disk files diverge from
-    what ``-libs-cu13``'s wheel expects. Tracked upstream at:
-
-      * https://github.com/NVIDIA/cutlass/issues/3170
-      * https://github.com/NVIDIA/cutlass/issues/3259
-
-    This helper re-hashes every file the ``-libs-cu13`` wheel claims to
-    own and compares against its declared SHA-256. Returns False on any
-    error (uninstalled, missing RECORD, missing file, hash mismatch).
-    Result is cached per-process.
-    """
-    import hashlib
-    import importlib.metadata
-
-    import pybase64 as base64
-
-    try:
-        dist = importlib.metadata.distribution("nvidia-cutlass-dsl-libs-cu13")
-    except importlib.metadata.PackageNotFoundError:
-        return False
-
-    files = dist.files
-    if not files:
-        return False
-
-    for pkg_path in files:
-        file_hash = pkg_path.hash
-        # Skip RECORD rows without a hash (RECORD itself, generated
-        # ``.pyc`` files, ...) and any non-SHA-256 hash modes.
-        if file_hash is None or not file_hash.value:
-            continue
-        if file_hash.mode != "sha256":
-            continue
-        try:
-            with open(pkg_path.locate(), "rb") as f:
-                digest = hashlib.sha256(f.read()).digest()
-        except OSError:
-            return False
-        actual = base64.urlsafe_b64encode(digest).decode().rstrip("=")
-        if actual != file_hash.value:
-            return False
-
-    return True
-
-
 def _resolve_gdn_prefill_backend(
     vllm_config: VllmConfig,
 ) -> tuple[str, Literal["triton", "flashinfer", "cutedsl"]]:
@@ -157,9 +92,7 @@ def _resolve_gdn_prefill_backend(
     * ``platform == cuda``;
     * one of the following:
       - Hopper (SM90) — no further constraints;
-      - Blackwell (SM10.x) with ``head_k_dim == 128``, ``cuda_runtime >= 13``,
-        and an intact ``nvidia-cutlass-dsl-libs-cu13`` install on disk
-        (see :func:`_is_libs_cu13_install_intact`).
+      - Blackwell (SM10.x) with ``head_k_dim == 128``, ``cuda_runtime >= 13``.
 
     In-tree CuteDSL GDN prefill kernel is chosen when:
     * "cutedsl" is requested; (opt-in only)
@@ -190,19 +123,8 @@ def _resolve_gdn_prefill_backend(
         and head_k_dim == 128
         and current_platform.get_cuda_runtime_major() >= 13
     ):
-        supports_flashinfer = _is_libs_cu13_install_intact()
+        supports_flashinfer = True
         supports_cutedsl = True
-        if not supports_flashinfer:
-            logger.warning_once(
-                "FlashInfer Blackwell GDN requires an intact nvidia-cutlass-dsl"
-                "-libs-cu13 install, but some on-disk files do not match the "
-                "SHA-256 declared in its RECORD (install-order race in "
-                "nvidia-cutlass-dsl packaging -- see "
-                "https://github.com/NVIDIA/cutlass/issues/3170 and "
-                "https://github.com/NVIDIA/cutlass/issues/3259). Falling back "
-                "to Triton/FLA. Repair with: pip install --force-reinstall "
-                "--no-deps nvidia-cutlass-dsl-libs-cu13"
-            )
 
     if backend in ["flashinfer", "auto"] and supports_flashinfer:
         return backend, "flashinfer"
@@ -437,6 +359,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         vllm_config: VllmConfig,
         prefix: str = "",
         gqa_interleaved_layout=False,
+        reduce_results: bool = True,
     ) -> None:
         super().__init__(config, vllm_config, prefix)
 
@@ -547,6 +470,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             self.hidden_size,
             bias=False,
             input_is_parallel=True,
+            reduce_results=reduce_results,
             quant_config=self.quant_config,
             prefix=f"{prefix}.out_proj",
         )
@@ -844,17 +768,14 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        output: torch.Tensor,
-    ):
-        self._forward_method(hidden_states, output)
+    ) -> torch.Tensor:
+        return self._forward_method(hidden_states)
 
     def _output_projection(
         self,
         core_attn_out: torch.Tensor,
         z: torch.Tensor,
-        output: torch.Tensor,
-        num_tokens: int,
-    ):
+    ) -> torch.Tensor:
         """Part 3: RMSNormGated + output linear projection.
 
         The RMSNormGated + quant sequence is eligible for fusion
@@ -866,13 +787,13 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         core_attn_out = self.norm(core_attn_out, z)
         core_attn_out = core_attn_out.reshape(z_shape_og)
         core_attn_out = core_attn_out.flatten(-2)  # ... h d -> ... (h d)
-        output[:num_tokens], _ = self.out_proj(core_attn_out)
+        output, _ = self.out_proj(core_attn_out)
+        return output
 
     def forward_hip(
         self,
         hidden_states: torch.Tensor,
-        output: torch.Tensor,
-    ):
+    ) -> torch.Tensor:
         """ROCm forward using AITER Triton fused projection+attention when
         available, otherwise falling back to the generic CUDA path."""
         if GDN_AITER_TRITON_AVAILABLE:
@@ -901,15 +822,14 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 use_aiter=True,
             )
 
-            self._output_projection(core_attn_out, z, output, num_tokens)
+            return self._output_projection(core_attn_out, z)
         else:
-            self.forward_cuda(hidden_states, output)
+            return self.forward_cuda(hidden_states)
 
     def forward_cuda(
         self,
         hidden_states: torch.Tensor,
-        output: torch.Tensor,
-    ):
+    ) -> torch.Tensor:
         """
         Forward pass with three parts:
         1. Input projection
@@ -964,13 +884,12 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         # ============================================================
         # Part 3: Output Projection
         # ============================================================
-        self._output_projection(core_attn_out, z, output, num_tokens)
+        return self._output_projection(core_attn_out, z)
 
     def forward_xpu(
         self,
         hidden_states: torch.Tensor,
-        output: torch.Tensor,
-    ):
+    ) -> torch.Tensor:
         """
         Forward pass with three parts:
         1. Input projection
@@ -1013,13 +932,13 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         core_attn_out = self.norm(core_attn_out, z)
         core_attn_out = core_attn_out.reshape(z_shape_og)
         core_attn_out = core_attn_out.flatten(-2)  # ... h d -> ... (h d)
-        output[:num_tokens], _ = self.out_proj(core_attn_out)
+        out, _ = self.out_proj(core_attn_out)
+        return out
 
     def forward_cpu(
         self,
         hidden_states: torch.Tensor,
-        output: torch.Tensor,
-    ):
+    ) -> torch.Tensor:
         assert not hasattr(self, "in_proj_qkv"), "lora isn't supported on CPU."
 
         mixed_qkvz, _ = self.in_proj_qkvz(hidden_states)
@@ -1063,7 +982,8 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         core_attn_out = self.norm(core_attn_out, z)
         core_attn_out = core_attn_out.reshape(z_shape_og)
         core_attn_out = core_attn_out.flatten(-2)  # ... h d -> ... (h d)
-        output[:num_tokens], _ = self.out_proj(core_attn_out)
+        out, _ = self.out_proj(core_attn_out)
+        return out
 
     def _warmup_prefill_kernels(self, qkv_or_qkvz: torch.Tensor, v_dim: int) -> None:
         """Warm up GDN prefill kernels during V1 profiling.

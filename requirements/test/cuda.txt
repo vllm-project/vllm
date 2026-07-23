@@ -43,7 +43,7 @@ anyio==4.14.1
     #   sse-starlette
     #   starlette
     #   watchfiles
-apache-tvm-ffi==0.1.9
+apache-tvm-ffi==0.1.10
     # via
     #   -c requirements/cuda.txt
     #   xgrammar
@@ -159,7 +159,7 @@ cuda-bindings==13.0.3
     # via torch
 cuda-pathfinder==1.3.3
     # via cuda-bindings
-cuda-toolkit==13.0.2
+cuda-toolkit==13.0.3.0
     # via torch
 cupy-cuda12x==13.6.0
     # via ray
@@ -194,10 +194,6 @@ dill==0.3.8
     #   evaluate
     #   lm-eval
     #   multiprocess
-diskcache==5.6.3
-    # via
-    #   -c requirements/common.txt
-    #   -r requirements/test/../common.txt
 distlib==0.3.9
     # via virtualenv
 distro==1.9.0
@@ -402,7 +398,7 @@ inflect==5.6.2
     # via datamodel-code-generator
 iniconfig==2.0.0
     # via pytest
-instanttensor==0.1.5
+instanttensor==0.1.9
     # via -r requirements/test/cuda.in
 interegular==0.3.3
     # via lm-format-enforcer
@@ -603,7 +599,7 @@ numpy==2.2.6
     #   tritonclient
     #   vocos
     #   xgrammar
-nvidia-cublas==13.1.0.3
+nvidia-cublas==13.1.1.3
     # via
     #   cuda-toolkit
     #   nvidia-cudnn-cu13
@@ -611,10 +607,12 @@ nvidia-cublas==13.1.0.3
 nvidia-cuda-cupti==13.0.85
     # via cuda-toolkit
 nvidia-cuda-nvrtc==13.0.88
-    # via cuda-toolkit
+    # via
+    #   cuda-toolkit
+    #   nvidia-cublas
 nvidia-cuda-runtime==13.0.96
     # via cuda-toolkit
-nvidia-cudnn-cu13==9.19.0.56
+nvidia-cudnn-cu13==9.20.0.48
     # via torch
 nvidia-cufft==12.0.0.61
     # via cuda-toolkit
@@ -628,9 +626,9 @@ nvidia-cusparse==12.6.3.3
     # via
     #   cuda-toolkit
     #   nvidia-cusolver
-nvidia-cusparselt-cu13==0.8.0
+nvidia-cusparselt-cu13==0.8.1
     # via torch
-nvidia-nccl-cu13==2.28.9
+nvidia-nccl-cu13==2.29.7
     # via torch
 nvidia-nvjitlink==13.0.88
     # via
@@ -1053,7 +1051,7 @@ s3transfer==0.10.3
     # via boto3
 sacrebleu==2.4.3
     # via lm-eval
-safetensors==0.7.0
+safetensors==0.8.0
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
@@ -1206,7 +1204,7 @@ tokenizers==0.22.2
     #   -r requirements/test/../common.txt
     #   -r requirements/test/cuda.in
     #   transformers
-torch==2.11.0+cu130
+torch==2.13.0+cu130
     # via
     #   -c requirements/cuda.txt
     #   -r requirements/test/cuda.in
@@ -1237,7 +1235,7 @@ torchcodec==0.14.0+cu130
     # via
     #   -c requirements/cuda.txt
     #   -r requirements/test/cuda.in
-torchvision==0.26.0+cu130
+torchvision==0.28.0+cu130
     # via
     #   -c requirements/cuda.txt
     #   -r requirements/test/cuda.in
@@ -1261,7 +1259,7 @@ tqdm==4.67.3
     #   segmentation-models-pytorch
     #   sentence-transformers
     #   transformers
-transformers==5.10.4
+transformers==5.13.1
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
@@ -1274,7 +1272,7 @@ transformers==5.10.4
     #   xgrammar
 transformers-stream-generator==0.0.5
     # via -r requirements/test/cuda.in
-triton==3.6.0
+triton==3.7.1
     # via
     #   torch
     #   xgrammar
