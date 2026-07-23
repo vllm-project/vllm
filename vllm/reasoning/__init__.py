@@ -109,8 +109,8 @@ _REASONING_PARSERS_TO_REGISTER = {
         "NemotronV3ParserReasoningAdapter",
     ),
     "olmo3": (
-        "olmo3_reasoning_parser",
-        "Olmo3ReasoningParser",
+        "olmo3_engine_reasoning_parser",
+        "Olmo3ParserReasoningAdapter",
     ),
     "qwen3": (
         "qwen3_engine_reasoning_parser",

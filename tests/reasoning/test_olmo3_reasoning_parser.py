@@ -161,3 +161,49 @@ def test_reasoning(
 
     assert reasoning == param_dict["reasoning"]
     assert content == param_dict["content"]
+
+
+# Deltas where the closing </think> arrives together with the content that
+# follows it (as happens with a stream interval > 1 or chunked prefill).
+# Regression for content being silently dropped in that case.
+BOUNDARY_DELTA_CASES = [
+    pytest.param(
+        [f"{START_REASONING}a reasoning section{END_REASONING}the rest"],
+        "a reasoning section",
+        "the rest",
+        id="whole_output_in_one_delta",
+    ),
+    pytest.param(
+        [START_REASONING, f"a reasoning section{END_REASONING}the rest"],
+        "a reasoning section",
+        "the rest",
+        id="end_think_and_content_in_final_delta",
+    ),
+]
+
+
+@pytest.mark.parametrize("deltas, exp_reasoning, exp_content", BOUNDARY_DELTA_CASES)
+def test_reasoning_streaming_content_after_end_think_in_same_delta(
+    deltas: list[str],
+    exp_reasoning: str,
+    exp_content: str,
+):
+    """A single delta may carry </think> and the content after it. The content
+    must not be dropped (mirrors DeepSeek-R1, which returns the reasoning and
+    the content together for a boundary-spanning delta)."""
+    parser_cls = ReasoningParserManager.get_reasoning_parser(parser_name)
+    parser: ReasoningParser = parser_cls(tokenizer)
+
+    reasoning: str | None = None
+    content: str | None = None
+    for delta in deltas:
+        msg = parser.extract_reasoning_streaming("", "", delta, [], [], [])
+        if msg is None:
+            continue
+        if msg.reasoning is not None:
+            reasoning = (reasoning or "") + msg.reasoning
+        if msg.content is not None:
+            content = (content or "") + msg.content
+
+    assert reasoning == exp_reasoning
+    assert content == exp_content

@@ -15,6 +15,7 @@ from vllm.parser.glm47_moe import Glm47MoeParser
 from vllm.parser.kimi_k2 import KimiK2Parser
 from vllm.parser.minimax_m2 import MinimaxM2Parser
 from vllm.parser.nemotron_v3 import NemotronV3Parser
+from vllm.parser.olmo3 import Olmo3Parser
 from vllm.parser.qwen3 import Qwen3Parser
 from vllm.parser.seed_oss import SeedOssParser
 
@@ -42,6 +43,11 @@ from vllm.parser.seed_oss import SeedOssParser
     NemotronV3ParserReasoningAdapter,
     NemotronV3ParserToolAdapter,
 ) = make_adapters(NemotronV3Parser)
+
+(
+    Olmo3ParserReasoningAdapter,
+    Olmo3ParserToolAdapter,
+) = make_adapters(Olmo3Parser)
 
 (
     Qwen3ParserReasoningAdapter,
