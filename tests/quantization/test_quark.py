@@ -664,6 +664,28 @@ class TestQuarkInt4Format:
         assert isinstance(scheme, QuarkW4A16Int4)
         assert not scheme.is_symmetric
 
+    @pytest.mark.parametrize("missing_field", ["group_size", "symmetric"])
+    def test_quark_int4_scheme_requires_weight_config_fields(self, missing_field):
+        weight_config = {
+            "dtype": "int4",
+            "group_size": 128,
+            "symmetric": True,
+        }
+        weight_config.pop(missing_field)
+        quant_config = QuarkConfig.from_config(
+            {
+                "quant_method": "quark",
+                "export": {"pack_method": "reorder", "kv_cache_group": []},
+                "global_quant_config": {"weight": weight_config},
+                "exclude": [],
+            }
+        )
+
+        with pytest.raises(ValueError, match=missing_field):
+            quant_config._get_scheme_from_config(
+                quant_config.quant_config["global_quant_config"]
+            )
+
     def test_quark_int4_moe_uses_native_moe_method(self):
         quant_config = QuarkConfig.from_config(_quark_int4_config())
         moe_config = type("MoeConfig", (), {})()

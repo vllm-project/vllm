@@ -50,6 +50,9 @@ from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
     make_nvfp4_moe_quant_config,
     select_nvfp4_moe_backend,
 )
+from vllm.model_executor.layers.quantization.quark.utils import (
+    parse_w4a16_int4_weight_config,
+)
 from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import (
     OCP_MX_BLOCK_SIZE,
     OCP_MX_Scheme,
@@ -143,10 +146,11 @@ class QuarkW4A16Int4MoEMethod(QuarkMoEMethod):
     ):
         super().__init__(moe)
         self.weight_quant = weight_config
-        self.group_size = weight_config.get("group_size", 128)
+        self.group_size, self.is_symmetric = parse_w4a16_int4_weight_config(
+            weight_config
+        )
         self.bit8_pack_factor = 2
         self.pack_reorder = pack_method == "reorder"
-        self.is_symmetric = weight_config.get("symmetric", True)
 
     def create_weights(
         self,

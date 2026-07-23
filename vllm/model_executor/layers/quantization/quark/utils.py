@@ -107,6 +107,33 @@ def _is_equal_or_regex_match(
     return False
 
 
+def parse_w4a16_int4_weight_config(
+    weight_config: Mapping[str, Any],
+) -> tuple[int, bool]:
+    """Parse required W4A16 INT4/UINT4 weight fields from Quark config."""
+    if "group_size" not in weight_config:
+        raise ValueError(
+            "Quark W4A16 INT4/UINT4 configs must specify weight.group_size"
+        )
+    if "symmetric" not in weight_config:
+        raise ValueError(
+            "Quark W4A16 INT4/UINT4 configs must specify weight.symmetric"
+        )
+
+    group_size = weight_config["group_size"]
+    is_symmetric = weight_config["symmetric"]
+    if not isinstance(group_size, int) or group_size <= 0:
+        raise ValueError(
+            f"Quark W4A16 weight.group_size must be a positive int, got {group_size!r}"
+        )
+    if not isinstance(is_symmetric, bool):
+        raise ValueError(
+            "Quark W4A16 weight.symmetric must be a bool, "
+            f"got {is_symmetric!r}"
+        )
+    return group_size, is_symmetric
+
+
 # utility for tensor dims > 2 cases
 def quark_quantize_weight_to_mxfp4(w: torch.Tensor):
     assert w.dtype == torch.bfloat16, (

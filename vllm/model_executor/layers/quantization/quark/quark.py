@@ -35,6 +35,7 @@ from vllm.model_executor.layers.quantization.quark.schemes import (
 )
 from vllm.model_executor.layers.quantization.quark.utils import (
     deep_compare,
+    parse_w4a16_int4_weight_config,
     should_ignore_layer,
 )
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
@@ -698,10 +699,11 @@ class QuarkConfig(QuantizationConfig):
                 input_symmetric=input_config.get("symmetric"),
             )
         elif self._is_w4a16_int4(weight_config, input_config):
+            group_size, is_symmetric = parse_w4a16_int4_weight_config(weight_config)
             return QuarkW4A16Int4(
-                group_size=weight_config.get("group_size", 128),
+                group_size=group_size,
                 pack_method=self.pack_method,
-                is_symmetric=weight_config.get("symmetric", True),
+                is_symmetric=is_symmetric,
             )
         elif self._is_w4a8_mxfp4_fp8(weight_config, input_config):
             is_w4a8_supported = self._check_scheme_supported(
