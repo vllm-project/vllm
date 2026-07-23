@@ -189,13 +189,14 @@ if TYPE_CHECKING:
     VLLM_MOE_USE_DEEP_GEMM: bool = True
     VLLM_USE_DEEP_GEMM_E8M0: bool = True
     VLLM_USE_DEEP_GEMM_TMA_ALIGNED_SCALES: bool = True
+    VLLM_DCP_Q_REPLICATE: bool = False
     VLLM_DEEP_GEMM_WARMUP: Literal[
         "skip",
         "full",
         "relax",
     ] = "relax"
     VLLM_USE_FUSED_MOE_GROUPED_TOPK: bool = True
-    VLLM_MOE_SKIP_PADDING: bool = False
+    VLLM_MOE_SKIP_PADDING: bool = True
     VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER: bool = True
     VLLM_USE_FLASHINFER_MOE_INT4: bool = False
     VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR: str | None = None
@@ -1515,6 +1516,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_USE_DEEP_GEMM_TMA_ALIGNED_SCALES": lambda: bool(
         int(os.getenv("VLLM_USE_DEEP_GEMM_TMA_ALIGNED_SCALES", "1"))
     ),
+    # Opt-in MLA DCP query replication: skip the decode query all-gather.
+    "VLLM_DCP_Q_REPLICATE": lambda: bool(int(os.getenv("VLLM_DCP_Q_REPLICATE", "0"))),
     # DeepGemm JITs the kernels on-demand. The warmup attempts to make DeepGemm
     # JIT all the required kernels before model execution so there is no
     # JIT'ing in the hot-path. However, this warmup increases the engine
@@ -1541,9 +1544,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # Skip cudagraph/DP padding tokens in the MoE path by forcing their expert
     # ids to -1 so the dispatch and experts drop them. Requires a MoE kernel that
-    # treats topk_id == -1 as a skip sentinel; off by default because not all
-    # kernels support it yet.
-    "VLLM_MOE_SKIP_PADDING": lambda: bool(int(os.getenv("VLLM_MOE_SKIP_PADDING", "0"))),
+    # treats topk_id == -1 as a skip sentinel
+    "VLLM_MOE_SKIP_PADDING": lambda: bool(int(os.getenv("VLLM_MOE_SKIP_PADDING", "1"))),
     # Allow use of FlashInfer FP8 block-scale GEMM for linear layers.
     # This uses TensorRT-LLM kernels and requires SM90+ (Hopper).
     "VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER": lambda: bool(
@@ -2143,6 +2145,13 @@ def compile_factors() -> dict[str, object]:
         "VLLM_SNAPSHOT",
         "VLLM_SNAPSHOT_ROOT",
         "VLLM_SNAPSHOT_RESTORED",
+        # Location-only derived paths: where a cache/config directory lives
+        # cannot affect compiled artifacts, and hashing them means relocating
+        # HOME or the XDG roots silently invalidates every compile cache
+        # (VLLM_CACHE_ROOT above and VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR below
+        # are already ignored for the same reason).
+        "VLLM_XLA_CACHE_PATH",
+        "VLLM_CONFIG_ROOT",
         "LD_LIBRARY_PATH",
         "VLLM_SERVER_DEV_MODE",
         "VLLM_DP_MASTER_IP",
