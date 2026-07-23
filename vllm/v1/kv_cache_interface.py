@@ -257,6 +257,10 @@ class FullAttentionSpec(AttentionSpec):
 
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
         max_model_len = vllm_config.model_config.max_model_len
+        # Respect sliding window: layers converted from SlidingWindowSpec
+        # only need sliding_window tokens, not the full context length.
+        if self.sliding_window is not None:
+            max_model_len = min(self.sliding_window, max_model_len)
         dcp_world_size = vllm_config.parallel_config.decode_context_parallel_size
         if dcp_world_size > 1:
             max_model_len = cdiv(max_model_len, dcp_world_size)
