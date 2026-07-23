@@ -328,10 +328,19 @@ class Glm5NextDecoderLayer(nn.Module):
                 skip_rope=getattr(config, "mla_nope", False),
             )
 
+        # MTP layers sit past the base model's hidden layers (layer_idx >=
+        # num_hidden_layers), so they're outside mlp_layer_types; default them
+        # to the last base layer's MLP type (sparse/MoE for these checkpoints).
+        mlp_layer_types = config.mlp_layer_types
+        mlp_type = (
+            mlp_layer_types[layer_idx]
+            if layer_idx < len(mlp_layer_types)
+            else (mlp_layer_types[-1] if mlp_layer_types else "sparse")
+        )
         if (
             self.is_moe
             and self.num_experts is not None
-            and config.mlp_layer_types[layer_idx] == "sparse"
+            and mlp_type == "sparse"
         ):
             self.mlp = Glm5NextMoE(
                 config=config,

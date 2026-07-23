@@ -293,6 +293,12 @@ class Glm5NextMTP(nn.Module, DeepseekV2MixtureOfExperts):
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue
+            # Multimodal (Glm5NextForConditionalGeneration) checkpoints prefix
+            # the text-tower weights with "model.language_model."; the MTP head
+            # is built as a text-only model (model.layers.*), so strip the
+            # prefix to match.
+            if name.startswith("model.language_model."):
+                name = name.replace("model.language_model.", "model.", 1)
             spec_layer = get_spec_layer_idx_from_weight_name(self.config, name)
             if spec_layer is None:
                 continue

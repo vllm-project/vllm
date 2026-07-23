@@ -98,6 +98,14 @@ class DraftModelSpeculator(BaseSpeculator):
         hc_mult = getattr(self.draft_model_config.hf_config, "hc_mult", 1)
         if getattr(self.draft_model_config.hf_config, "mhc", None) is False:
             hc_mult = 1
+        # GLM5-Next's MTP drafts from the regular hidden state + token embed
+        # (eh_proj: hidden*2 -> hidden), not the HC-multiplexed pre-hc_head
+        # residual, so never widen for it regardless of mhc. Covers the target
+        # (glm5_next) and MTP draft (glm5_next_mtp) config model_types.
+        if getattr(self.draft_model_config.hf_config, "model_type", "").startswith(
+            "glm5_next"
+        ):
+            hc_mult = 1
         self.hidden_size = self.hidden_size * hc_mult
         self.vocab_size = self.draft_model_config.get_vocab_size()
         self.dtype = vllm_config.model_config.dtype
