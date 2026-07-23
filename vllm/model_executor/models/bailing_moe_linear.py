@@ -794,7 +794,7 @@ class BailingMoeV25ForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsPP):
     def get_mamba_state_shape_from_config(
         cls,
         vllm_config: VllmConfig,
-    ) -> tuple[tuple[int, ...], ...]:
+    ) -> tuple[tuple[int, int, int]]:
         """Calculate shape for linear attention cache."""
         config = vllm_config.model_config.hf_config
         tp_size = vllm_config.parallel_config.tensor_parallel_size

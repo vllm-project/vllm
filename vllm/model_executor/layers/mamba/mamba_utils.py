@@ -132,7 +132,7 @@ class MambaStateShapeCalculator:
         num_heads: int,
         tp_size: int,
         head_dim: int,
-    ) -> tuple[tuple[int, int, int], ...]:
+    ) -> tuple[tuple[int, int, int]]:
         state_shape = (num_heads // tp_size, head_dim, head_dim)
         return (state_shape,)
 

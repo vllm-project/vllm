@@ -69,6 +69,13 @@ The output embeddings must be one of the following formats:
 - A single 3D tensor, with the batch dimension grouping the 2D tensors.
 """
 
+MambaStateShapes: TypeAlias = (
+    tuple[tuple[int, int]]
+    | tuple[tuple[int, int, int]]
+    | tuple[tuple[int, int], tuple[int, int]]
+    | tuple[tuple[int, int], tuple[int, int, int]]
+)
+
 
 class StreamingTranscriptionPostProcessor:
     """Stateful streaming post-processor for transcription deltas."""
@@ -807,7 +814,7 @@ class IsHybrid(Protocol):
     def get_mamba_state_shape_from_config(
         cls,
         vllm_config: "VllmConfig",
-    ) -> tuple[tuple[int, ...], ...]:
+    ) -> MambaStateShapes:
         """Calculate shapes for Mamba's convolutional and state caches.
 
         Args:
