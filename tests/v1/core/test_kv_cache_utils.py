@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import copy
 import hashlib
 import importlib
 from collections.abc import Callable
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -30,6 +32,7 @@ from vllm.v1.core.kv_cache_utils import (
     generate_scheduler_kv_cache_config,
     get_kv_cache_capacity,
     get_kv_cache_configs,
+    get_kv_cache_groups,
     get_max_concurrency_for_kv_cache_config,
     get_request_block_hasher,
     group_and_unify_kv_cache_specs,
@@ -1477,6 +1480,128 @@ def test_get_max_concurrency_for_kv_cache_config():
     assert num_tokens == max_concurrency_hybrid_model * max_model_len
     assert max_concurrency == max_concurrency_hybrid_model
 
+    # Unequal group sizes in the standard layout: each group's pages cost
+    # whole pool blocks, so a request needs 1024 + 129 = 1153 blocks — the
+    # same as the equal-hybrid case above, regardless of the second group
+    # holding only 2 layers.
+    kv_cache_config_unequal_groups = KVCacheConfig(
+        num_blocks=1153 * 3,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec([f"layer_{i}" for i in range(32)], full_attention_spec),
+            KVCacheGroupSpec(["layer_32", "layer_33"], sliding_window_spec),
+        ],
+    )
+    assert (
+        get_max_concurrency_for_kv_cache_config(
+            vllm_config, kv_cache_config_unequal_groups
+        )
+        == 3
+    )
+
+    # UniformTypeKVCacheSpecs group (worker config shape): the aggregated
+    # spec's memory/page ratio equals a single layer's page count, so the
+    # group needs 1024 blocks and the request 1153 in total. The previous
+    # formula normalized both groups' memory by the first group's page size,
+    # reporting 3459/1057 = 3.27 here instead of 3 — and a different value
+    # again for the scheduler-config shape below.
+    uniform_full_spec = UniformTypeKVCacheSpecs(
+        block_size=full_attention_spec.block_size,
+        kv_cache_specs={f"layer_{i}": full_attention_spec for i in range(4)},
+    )
+    kv_cache_config_uniform_group = KVCacheConfig(
+        num_blocks=1153 * 3,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec([f"layer_{i}" for i in range(4)], uniform_full_spec),
+            KVCacheGroupSpec(["layer_4", "layer_5"], sliding_window_spec),
+        ],
+    )
+    assert (
+        get_max_concurrency_for_kv_cache_config(
+            vllm_config, kv_cache_config_uniform_group
+        )
+        == 3
+    )
+
+    # Scheduler-config shape: generate_scheduler_kv_cache_config replaces the
+    # uniform-type group's spec with a representative per-layer spec.
+    # Capacity must not change between the two shapes (the engine computes
+    # on the scheduler config, the worker loop on the worker config).
+    kv_cache_config_scheduler_shape = generate_scheduler_kv_cache_config(
+        [copy.deepcopy(kv_cache_config_uniform_group)]
+    )
+    assert get_max_concurrency_for_kv_cache_config(
+        vllm_config, kv_cache_config_scheduler_shape
+    ) == get_max_concurrency_for_kv_cache_config(
+        vllm_config, kv_cache_config_uniform_group
+    )
+
+
+def test_get_max_concurrency_packed_kv_cache_config():
+    from vllm.v1.core.kv_cache_utils import (
+        _get_kv_cache_config_packed,
+        _use_packed_kv_cache_config,
+    )
+
+    model_config = ModelConfig(
+        "Qwen/Qwen1.5-7B",
+        runner="generate",
+        dtype="float16",
+        max_model_len=16384,
+    )
+    scheduler_config = SchedulerConfig(
+        max_num_batched_tokens=1024,
+        enable_chunked_prefill=True,
+        max_model_len=model_config.max_model_len,
+        is_encoder_decoder=model_config.is_encoder_decoder,
+        async_scheduling=False,
+    )
+    vllm_config = VllmConfig(
+        model_config=model_config,
+        scheduler_config=scheduler_config,
+    )
+
+    # All-UniformTypeKVCacheSpecs groups select the packed layout.
+    mla_specs = {f"layer_{i}": new_mla_spec() for i in range(4)}
+    swa_specs = {
+        f"layer_{i}": SlidingWindowMLASpec(
+            block_size=16,
+            num_kv_heads=1,
+            head_size=576,
+            dtype=torch.float32,
+            sliding_window=128,
+        )
+        for i in range(4, 6)
+    }
+    kv_cache_groups = [
+        KVCacheGroupSpec(
+            list(mla_specs),
+            UniformTypeKVCacheSpecs(block_size=16, kv_cache_specs=mla_specs),
+        ),
+        KVCacheGroupSpec(
+            list(swa_specs),
+            UniformTypeKVCacheSpecs(block_size=16, kv_cache_specs=swa_specs),
+        ),
+    ]
+    assert _use_packed_kv_cache_config(vllm_config, kv_cache_groups)
+    num_blocks, kv_cache_tensors = _get_kv_cache_config_packed(
+        vllm_config, kv_cache_groups, 2 * GiB_bytes
+    )
+    assert num_blocks > 0
+    kv_cache_config_packed = KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=kv_cache_tensors,
+        kv_cache_groups=kv_cache_groups,
+    )
+    # Per-request blocks: the MLA group needs cdiv(16384, 16) = 1024 pages;
+    # the SWA group cdiv(min(128 - 1 + 1024, 16384), 16) + 1 = 73. The
+    # previous formula normalized by the first group's page size and gave
+    # 1061 blocks per request instead of 1097.
+    assert get_max_concurrency_for_kv_cache_config(
+        vllm_config, kv_cache_config_packed
+    ) == num_blocks / (1024 + 73)
+
 
 def test_allocate_with_lookahead():
     """Verify that lookahead tokens correctly affect block allocation"""
@@ -1944,10 +2069,10 @@ def test_generate_scheduler_kv_cache_config():
     )
 
 
-def new_mla_spec(cache_dtype_str=None):
+def new_mla_spec(cache_dtype_str=None, block_size=16):
     # head_size = kv_lora_rank(512) + qk_rope_head_dim(64) = 576
     return MLAAttentionSpec(
-        block_size=16,
+        block_size=block_size,
         num_kv_heads=1,
         head_size=576,
         dtype=torch.float32,
@@ -1995,6 +2120,66 @@ def test_group_and_unify_kv_cache_specs_mixed_page_size_groups():
     assert len(grouped) == 2
     layer_names = {name for g in grouped for name in g.kv_cache_specs}
     assert layer_names == {"mla.0", "mla.1", "swa.0"}
+
+
+def new_indexer_mla_spec(block_size=16):
+    # Sparse-attention indexer k_cache: an MLAAttentionSpec with a much smaller
+    # page size than the main MLA attention (uint8, small head), so their pages
+    # cannot be unified.
+    return MLAAttentionSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=132,
+        dtype=torch.uint8,
+    )
+
+
+def _grouping_config():
+    return SimpleNamespace(
+        scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=False),
+        speculative_config=None,
+    )
+
+
+def test_mla_draft_prefers_standard_layout_when_pages_can_be_unified():
+    specs = {
+        "target.0.attn": new_mla_spec(),
+        "draft.0": new_sliding_window_spec(num_kv_heads=1, head_size=288),
+    }
+    assert len({spec.page_size_bytes for spec in specs.values()}) == 1
+
+    groups = get_kv_cache_groups(_grouping_config(), specs)
+
+    assert len(groups) == 2
+    assert all(
+        not isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs) for group in groups
+    )
+
+
+def test_mla_with_incompatible_swa_uses_one_full_allocation_group(caplog):
+    # Sparse MLA pages cannot be padded safely. Keeping the draft's attention
+    # compute sliding-window while promoting only its allocation semantics lets
+    # every layer share the target's block table and remain contiguous.
+    draft = new_sliding_window_spec(block_size=16)
+    specs = {
+        "target.0.attn": new_mla_spec(block_size=64),
+        "target.0.indexer": new_indexer_mla_spec(block_size=64),
+        "draft.0": draft,
+    }
+
+    groups = get_kv_cache_groups(_grouping_config(), specs)
+    assert len(groups) == 1
+    assert set(groups[0].layer_names) == set(specs)
+    group_spec = groups[0].kv_cache_spec
+    assert isinstance(group_spec, UniformTypeKVCacheSpecs)
+    assert group_spec.block_size == 64
+    promoted_draft = group_spec.kv_cache_specs["draft.0"]
+    assert isinstance(promoted_draft, FullAttentionSpec)
+    assert not isinstance(promoted_draft, SlidingWindowSpec)
+    assert promoted_draft.block_size == 64
+    assert promoted_draft.sliding_window == draft.sliding_window
+    assert specs["draft.0"] is draft
+    assert "attention compute is unchanged" in caplog.text
 
 
 def test_get_kv_cache_spec_kind_prefers_specific_attention_subclasses():
@@ -2496,19 +2681,22 @@ def test_page_size_padded_wins():
 
 def test_unify_hybrid_kv_cache_specs():
     # 1. has_full_attention and has_sliding_window
-    before_spec_1 = new_kv_cache_spec()
+    before_spec_1 = new_kv_cache_spec(block_size=64)
     before_spec_2 = new_sliding_window_spec(
-        page_size_padded=32 * 1024, sliding_window=1024
+        block_size=16, page_size_padded=32 * 1024, sliding_window=1024
     )
     kv_cache_spec = {
         "layer_1": before_spec_1,
         "layer_2": before_spec_2,
     }
     kv_cache_utils.unify_hybrid_kv_cache_specs(kv_cache_spec)
-    expected_spec_1 = new_kv_cache_spec()
-    expected_spec_2 = new_kv_cache_spec(page_size_padded=32 * 1024, sliding_window=1024)
+    expected_spec_1 = new_kv_cache_spec(block_size=64)
+    expected_spec_2 = new_kv_cache_spec(
+        block_size=64, page_size_padded=64 * 1024, sliding_window=1024
+    )
     assert kv_cache_spec["layer_1"] == expected_spec_1
     assert kv_cache_spec["layer_2"] == expected_spec_2
+    assert kv_cache_spec["layer_2"].page_size_bytes == 64 * 1024
 
     # 2. has_full_attention and has_chunked_local_attention
     before_spec_1 = new_kv_cache_spec()
