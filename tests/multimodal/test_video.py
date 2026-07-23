@@ -304,6 +304,13 @@ def test_pynvvideocodec_decoder_slot_retains_simple_decoder():
 # ============================================================================
 
 
+def test_cosmos3_edge_uses_qwen3_vl_video_backend():
+    backend = get_video_loader_backend_for_processor("Cosmos3EdgeVideoProcessor")
+
+    assert backend == "qwen3_vl"
+    assert isinstance(VIDEO_LOADER_REGISTRY.load(backend), Qwen3VLVideoBackend)
+
+
 @pytest.mark.parametrize(
     "model_repo, expected_loader_cls, hf_sample_kwargs",
     [
