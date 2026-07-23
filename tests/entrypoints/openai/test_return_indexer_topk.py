@@ -105,7 +105,7 @@ async def test_indexer_topk_completions(server):
             temperature=0,
             extra_body={
                 "return_token_ids": True,
-                # Request indexer topk for the full prompt + generated tokens.
+                # Request indexer topk for the full prompt + generated tokens
                 "indexer_topk_prompt_start": 0,
             },
         )
