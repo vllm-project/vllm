@@ -29,11 +29,13 @@ def decode_pyav(
     with av.open(BytesIO(data)) as container:
         stream = container.streams.video[0]
         check_frame_pixel_limit(stream.width, stream.height)
-        source = loader_cls._prepare_source(loader_cls.get_metadata(container))
+        source = loader_cls._prepare_source(
+            PyAVVideoBackendMixin.get_metadata(container)
+        )
         frame_idx = loader_cls.compute_frames_index_to_sample(
             source=source, target=target, **sampling_kwargs
         )
-        frames, valid = loader_cls.decode_frames(
+        frames, valid = PyAVVideoBackendMixin.decode_frames(
             container, frame_idx, source.original_fps, source.duration
         )
     return frames, source, frame_idx, valid

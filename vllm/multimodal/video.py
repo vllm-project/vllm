@@ -11,20 +11,11 @@ import torch
 from vllm.logger import init_logger
 from vllm.multimodal.video_decoders import (
     PYNVVIDEOCODEC_VIDEO_BACKEND,
-    DeepStreamVideoBackendMixin,
-    OpenCVVideoBackendMixin,
-    PyAVVideoBackendMixin,
-    PyNvVideoCodecVideoBackendMixin,
-    TorchCodecVideoBackendMixin,
     VideoDecoderBackend,
     VideoSourceMetadata,
     VideoTargetMetadata,
-    check_frame_pixel_limit,
     decode_video,
     resolve_video_backend_kwargs,
-)
-from vllm.multimodal.video_decoders import (
-    PyNvVideoCodecDecoderSlot as PyNvVideoCodecDecoderSlot,
 )
 from vllm.utils.import_utils import PlaceholderModule
 from vllm.utils.registry import ExtensionManager
@@ -141,6 +132,11 @@ class VideoLoader:
         raise NotImplementedError
 
     @classmethod
+    def _prepare_source(cls, source: VideoSourceMetadata) -> VideoSourceMetadata:
+        """Sampling-algorithm-specific metadata adjustment hook."""
+        return source
+
+    @classmethod
     @abstractmethod
     def load_bytes(
         cls,
@@ -171,14 +167,7 @@ VIDEO_LOADER_REGISTRY = VideoLoaderRegistry()
 
 
 @VIDEO_LOADER_REGISTRY.register("opencv")
-class VideoBackend(
-    VideoLoader,
-    OpenCVVideoBackendMixin,
-    PyAVVideoBackendMixin,
-    TorchCodecVideoBackendMixin,
-    PyNvVideoCodecVideoBackendMixin,
-    DeepStreamVideoBackendMixin,
-):
+class VideoBackend(VideoLoader):
     """Uniform-sampling video backend.
 
     Samples ``num_frames`` uniformly across the video (or one frame every
@@ -786,7 +775,7 @@ class GLMGAVideoBackend(VideoBackend):
     "molmo2",
     video_processor="Molmo2VideoProcessor",
 )
-class Molmo2VideoBackend(VideoLoader, OpenCVVideoBackendMixin):
+class Molmo2VideoBackend(VideoLoader):
     @classmethod
     def get_candidate_target_fps(
         cls,
@@ -1019,30 +1008,21 @@ class Molmo2VideoBackend(VideoLoader, OpenCVVideoBackendMixin):
         frame_recovery: bool = False,
         **kwargs,
     ) -> tuple[npt.NDArray, dict[str, Any]]:
-        cap = cls.open_video_capture(data)
-        check_frame_pixel_limit(
-            int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)),
-            int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)),
-        )
-
-        source = OpenCVVideoBackendMixin.get_video_metadata(cap)
         target = VideoTargetMetadata(
             num_frames=num_frames,
             fps=sampling_fps,
-            max_duration=source.duration,
+            max_duration=-1,
         )
-
-        frame_idx = cls.compute_frames_index_to_sample(
-            source=source,
-            target=target,
-            frame_sample_mode=frame_sample_mode,
-            max_fps=max_fps,
-        )
-
-        frames, valid_frame_indices = cls.read_frames(
-            cap,
-            frame_idx,
-            total_frames_num=source.total_frames_num,
+        frames, source, _, valid_frame_indices = decode_video(
+            "opencv",
+            cls,
+            data,
+            target,
+            {
+                "frame_sample_mode": frame_sample_mode,
+                "max_fps": max_fps,
+            },
+            {},
             frame_recovery=frame_recovery,
         )
 
@@ -1108,7 +1088,7 @@ class NemotronVLVideoBackend(VideoBackend):
 
 
 @VIDEO_LOADER_REGISTRY.register("openpangu")
-class OpenCVDynamicOpenPanguVideoBackend(VideoLoader, OpenCVVideoBackendMixin):
+class OpenCVDynamicOpenPanguVideoBackend(VideoLoader):
     @classmethod
     def compute_frames_index_to_sample(
         cls,
@@ -1174,14 +1154,6 @@ class OpenCVDynamicOpenPanguVideoBackend(VideoLoader, OpenCVVideoBackendMixin):
         Returns:
             Tuple of (frames_array, metadata_dict)
         """
-        cap = cls.open_video_capture(data)
-        check_frame_pixel_limit(
-            int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)),
-            int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)),
-        )
-
-        source = OpenCVVideoBackendMixin.get_video_metadata(cap)
-
         # recompute source metadata with adjusted duration to ensure correct
         # sampling indices computation
         target = VideoTargetMetadata(
@@ -1190,15 +1162,13 @@ class OpenCVDynamicOpenPanguVideoBackend(VideoLoader, OpenCVVideoBackendMixin):
             max_duration=max_duration,
         )
 
-        frame_indices_list = cls.compute_frames_index_to_sample(
-            source=source,
-            target=target,
-        )
-
-        frames, valid_frame_indices = cls.read_frames(
-            cap,
-            frame_indices_list,
-            total_frames_num=source.total_frames_num,
+        frames, source, _, valid_frame_indices = decode_video(
+            "opencv",
+            cls,
+            data,
+            target,
+            {},
+            {},
             frame_recovery=frame_recovery,
         )
 

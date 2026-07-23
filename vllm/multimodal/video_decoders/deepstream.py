@@ -31,7 +31,7 @@ def decode_deepstream(
     frame_idx = loader_cls.compute_frames_index_to_sample(
         source=source, target=target, **sampling_kwargs
     )
-    frames, valid = loader_cls.decode_indices(
+    frames, valid = DeepStreamVideoBackendMixin.decode_indices(
         data,
         frame_idx,
         source,

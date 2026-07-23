@@ -4,9 +4,8 @@
 import os
 import tempfile
 import threading
-from abc import abstractmethod
 from contextlib import contextmanager, suppress
-from typing import ClassVar, Literal, NamedTuple
+from typing import ClassVar, NamedTuple
 
 import numpy as np
 import numpy.typing as npt
@@ -14,7 +13,11 @@ import numpy.typing as npt
 from vllm.logger import init_logger
 from vllm.utils.mem_constants import MiB_bytes
 
-from .base import VideoSourceMetadata, VideoTargetMetadata, check_frame_pixel_limit
+from .base import (
+    VideoSourceMetadata,
+    VideoTargetMetadata,
+    check_frame_pixel_limit,
+)
 
 logger = init_logger(__name__)
 
@@ -25,7 +28,8 @@ def decode_pynvvideocodec(
     target: VideoTargetMetadata,
     sampling_kwargs: dict,
 ) -> tuple[npt.NDArray, VideoSourceMetadata, list[int], list[int]]:
-    return loader_cls.decode_frames_pynvvideocodec(
+    return PyNvVideoCodecVideoBackendMixin.decode_frames_pynvvideocodec(
+        loader_cls,
         data,
         target,
         **sampling_kwargs,
@@ -40,7 +44,6 @@ class PyNvVideoCodecSourceMetadata(NamedTuple):
     height: int
 
 
-PYNVVIDEOCODEC_VIDEO_BACKEND: Literal["pynvvideocodec"] = "pynvvideocodec"
 # Fixed upper bound reserved for persistent PyNvVideoCodec decoder surfaces.
 PYNVVIDEOCODEC_DECODER_GPU_MEMORY_BYTES = 128 * MiB_bytes
 PYNVVIDEOCODEC_DECODER_CACHE_SIZE = 2
@@ -99,21 +102,6 @@ class PyNvVideoCodecVideoBackendMixin:
     _active_decoder_slots: ClassVar[int] = 0
     _decoder_slot_cond: ClassVar[threading.Condition] = threading.Condition()
     _DEVICE_INDEX: ClassVar[int] = 0
-
-    @classmethod
-    @abstractmethod
-    def compute_frames_index_to_sample(
-        cls,
-        source: VideoSourceMetadata,
-        target: VideoTargetMetadata,
-        **kwargs,
-    ) -> list[int]:
-        raise NotImplementedError
-
-    @classmethod
-    @abstractmethod
-    def _prepare_source(cls, source: VideoSourceMetadata) -> VideoSourceMetadata:
-        raise NotImplementedError
 
     @classmethod
     def _create_decoder_slot(cls) -> PyNvVideoCodecDecoderSlot:
@@ -262,6 +250,7 @@ class PyNvVideoCodecVideoBackendMixin:
     @classmethod
     def decode_frames_pynvvideocodec(
         cls,
+        loader_cls,
         data: bytes,
         target: VideoTargetMetadata,
         **kwargs,
@@ -277,8 +266,8 @@ class PyNvVideoCodecVideoBackendMixin:
 
             gpu_source = cls._read_source_metadata(temp_path, nvc)
             check_frame_pixel_limit(gpu_source.width, gpu_source.height)
-            source = cls._prepare_source(gpu_source.source)
-            frame_idx = cls.compute_frames_index_to_sample(
+            source = loader_cls._prepare_source(gpu_source.source)
+            frame_idx = loader_cls.compute_frames_index_to_sample(
                 source=source, target=target, **kwargs
             )
             raw_frame_bytes = len(frame_idx) * gpu_source.height * gpu_source.width * 3

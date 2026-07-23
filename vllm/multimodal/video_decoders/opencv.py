@@ -33,16 +33,16 @@ def decode_opencv(
     *,
     frame_recovery: bool = False,
 ) -> tuple[npt.NDArray, VideoSourceMetadata, list[int], list[int]]:
-    cap = loader_cls.open_video_capture(data)
+    cap = OpenCVVideoBackendMixin.open_video_capture(data)
     check_frame_pixel_limit(
         int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)),
         int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)),
     )
-    source = loader_cls._prepare_source(loader_cls.get_video_metadata(cap))
+    source = loader_cls._prepare_source(OpenCVVideoBackendMixin.get_video_metadata(cap))
     frame_idx = loader_cls.compute_frames_index_to_sample(
         source=source, target=target, **sampling_kwargs
     )
-    frames, valid = loader_cls.read_frames(
+    frames, valid = OpenCVVideoBackendMixin.read_frames(
         cap,
         frame_idx,
         total_frames_num=source.total_frames_num,

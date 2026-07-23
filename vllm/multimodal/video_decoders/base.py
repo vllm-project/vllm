@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import NamedTuple
+from typing import Literal, NamedTuple
 
 from vllm import envs
+
+PYNVVIDEOCODEC_VIDEO_BACKEND: Literal["pynvvideocodec"] = "pynvvideocodec"
 
 
 class VideoTargetMetadata(NamedTuple):
