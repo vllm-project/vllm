@@ -82,12 +82,6 @@ def torch_w8a8_block_int8_moe(a, w1, w2, w1_s, w2_s, score, topk, block_shape):
     ).sum(dim=1)
 
 
-@pytest.fixture(autouse=True, scope="module")
-def setup_cuda():
-    """Sets the default CUDA device for all tests in this module."""
-    torch.set_default_device("cuda")
-
-
 @pytest.mark.parametrize(("M", "N", "K"), MNK_FACTORS)
 @pytest.mark.parametrize("E", E)
 @pytest.mark.parametrize("topk", TOP_KS)
@@ -99,9 +93,10 @@ def test_w8a8_block_int8_fused_moe(M, N, K, E, topk, block_size, dtype, seed):
     """Tests the fused_moe kernel with W8A8 INT8 block quantization against a
     native torch reference."""
     torch.manual_seed(seed)
+    device = "cuda"
 
-    a = torch.randn((M, K), dtype=dtype) / 10
-    score = torch.randn((M, E), dtype=dtype)
+    a = torch.randn((M, K), dtype=dtype, device=device) / 10
+    score = torch.randn((M, E), dtype=dtype, device=device)
     topk_weights, topk_ids, _ = fused_topk(a, score.float(), topk, False)
 
     w1, w2, quant_config = make_test_quant_config(

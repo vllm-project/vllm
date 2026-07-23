@@ -102,12 +102,6 @@ def torch_w8a8_per_column_moe(a, w1, w2, w1_s, w2_s, score, topk):
     ).sum(dim=1)
 
 
-@pytest.fixture(autouse=True, scope="module")
-def setup_cuda():
-    """Sets the default CUDA device for all tests in this module."""
-    torch.set_default_device("cuda")
-
-
 DTYPES = [torch.half, torch.bfloat16]
 M = [1, 33]
 N = [128, 1024]
@@ -124,6 +118,7 @@ SEEDS = [0]
 @torch.inference_mode()
 def test_w8a8_fp8_fused_moe(M, N, K, E, topk, dtype, seed):
     torch.manual_seed(seed)
+    device = "cuda"
     # Initialize int8 quantization parameters
     factor_for_scale = 1e-2
     finfo = torch.finfo(torch.float8_e4m3fn)
@@ -132,19 +127,19 @@ def test_w8a8_fp8_fused_moe(M, N, K, E, topk, dtype, seed):
 
     # Input tensor
     # M * K
-    a = torch.randn((M, K), dtype=dtype) / 10
+    a = torch.randn((M, K), dtype=dtype, device=device) / 10
 
     # Generate int8 weights
-    w1_fp32 = (torch.rand((E, 2 * N, K), dtype=torch.float32) - 0.5) * 2
+    w1_fp32 = (torch.rand((E, 2 * N, K), dtype=torch.float32, device=device) - 0.5) * 2
     w1 = (w1_fp32 * fp8_max).clamp(min=fp8_min, max=fp8_max).to(torch.float8_e4m3fn)
 
-    w2_fp32 = (torch.rand((E, K, N), dtype=torch.float32) - 0.5) * 2
+    w2_fp32 = (torch.rand((E, K, N), dtype=torch.float32, device=device) - 0.5) * 2
     w2 = (w2_fp32 * fp8_max).clamp(min=fp8_min, max=fp8_max).to(torch.float8_e4m3fn)
 
     # Generate scale for each column (per-column quantization)
     w1_s = torch.rand(E, 2 * N, device=w1_fp32.device) * factor_for_scale
     w2_s = torch.rand(E, K, device=w2_fp32.device) * factor_for_scale
-    score = torch.randn((M, E), dtype=dtype)
+    score = torch.randn((M, E), dtype=dtype, device=device)
 
     with set_current_vllm_config(vllm_config):
         ref_out = torch_w8a8_per_column_moe(a, w1, w2, w1_s, w2_s, score, topk)
