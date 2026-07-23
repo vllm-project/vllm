@@ -70,8 +70,6 @@ class UrlSchemesPreprocessor(Preprocessor):
             """
             title = match.group("title")
             path = match.group("path")
-            # Resolve against the page's logical location under docs/ rather than
-            # abs_src_path, which points at a temp dir for generated pages.
             path = ((DOC_DIR / page.file.src_uri).parent / path).resolve()
             fragment = match.group("fragment") or ""
 
