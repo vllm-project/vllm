@@ -28,6 +28,7 @@ from vllm.config.utils import getattr_iter
 from vllm.inputs import MultiModalDataDict, MultiModalInput, mm_input
 from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import SupportsMRoPE, SupportsMultiModal
+from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MultiModalKwargsItems
 from vllm.multimodal.inputs import (
     MultiModalFeatureSpec,
@@ -536,6 +537,17 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
             model = getattr_iter(self.model, ("language_model", "text_model"), None)
 
         return LanguageModel(self)
+
+    def get_mm_mapping(self) -> MultiModelKeys:
+        """
+        Get the module prefix in multimodal models
+        """
+        for name in ("language_model", "text_model"):
+            if getattr(self.model, name, None) is not None:
+                return MultiModelKeys.from_string_field(language_model=f"model.{name}")
+        raise ValueError(
+            "Could not locate the language model submodule for LoRA support"
+        )
 
     def _split_embeddings(
         self, embeddings: torch.Tensor, split_sizes: list[int]

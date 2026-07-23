@@ -8,6 +8,7 @@ from transformers import AutoModelForSeq2SeqLM
 
 from vllm.assets.audio import AudioAsset
 from vllm.envs import disable_envs_cache
+from vllm.lora.request import LoRARequest
 from vllm.multimodal.audio import AudioResampler
 
 from ....conftest import HfRunner, VllmRunner
@@ -16,13 +17,16 @@ from ...utils import check_logprobs_close
 AUDIO_ASSET = AudioAsset("mary_had_lamb")
 
 AUDIO_MODEL_SETTINGS: dict[str, dict[str, Any]] = {
-    # NOTE: granite-4.0 has its audio LoRA already merged into the weights; the
-    # Transformers backend does not load granite-3.3-2b's separate PEFT adapter.
-    "ibm-granite/granite-4.0-1b-speech": {
+    "ibm-granite/granite-speech-3.3-2b": {
         "prompt": (
-            "USER: <|audio|>can you transcribe the speech into a written format?\n"
-            " ASSISTANT:"
+            "<|start_of_role|>system<|end_of_role|>"
+            "You are a helpful AI assistant<|end_of_text|>\n"
+            "<|start_of_role|>user<|end_of_role|>"
+            "<|audio|>can you transcribe the speech into a written format?"
+            "<|end_of_text|>\n"
+            "<|start_of_role|>assistant<|end_of_role|>"
         ),
+        "audio_lora_path": "ibm-granite/granite-speech-3.3-2b",
     },
     "nvidia/audio-flamingo-3-hf": {
         "prompt": (
@@ -84,6 +88,7 @@ def test_transformers_audio_generation(
     monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
 
     settings = AUDIO_MODEL_SETTINGS[model_id]
+    audio_lora_path = settings.get("audio_lora_path")
 
     audio, orig_sr = AUDIO_ASSET.audio_and_sample_rate
     target_sr = settings.get("sampling_rate", orig_sr)
@@ -98,10 +103,19 @@ def test_transformers_audio_generation(
         max_model_len=2048,
         enforce_eager=True,
         limit_mm_per_prompt={"audio": 1},
+        enable_lora=audio_lora_path is not None,
+        max_lora_rank=64,
         **settings.get("vllm_runner_kwargs", {}),
     ) as vllm_model:
+        lora_request = (
+            LoRARequest("audio", 1, audio_lora_path) if audio_lora_path else None
+        )
         vllm_outputs = vllm_model.generate_greedy_logprobs(
-            [settings["prompt"]], 128, num_logprobs=10, audios=[audio]
+            [settings["prompt"]],
+            128,
+            num_logprobs=10,
+            audios=[audio],
+            lora_request=lora_request,
         )
 
     with hf_runner(
