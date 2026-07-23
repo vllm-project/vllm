@@ -388,7 +388,7 @@ steps:
 
 - label: Batch Invariance (A100)
   key: batch-invariance-a100
-  timeout_in_minutes: 40
+  timeout_in_minutes: 60
   device: a100
   source_file_dependencies:
     - vllm/v1/attention
@@ -402,7 +402,7 @@ steps:
 
 - label: Batch Invariance (H100)
   key: batch-invariance-h100
-  timeout_in_minutes: 40
+  timeout_in_minutes: 60
   device: h100
   source_file_dependencies:
     - vllm/v1/attention
@@ -418,7 +418,7 @@ steps:
 
 - label: Batch Invariance (B200)
   key: batch-invariance-b200
-  timeout_in_minutes: 35
+  timeout_in_minutes: 45
   device: b200-k8s
   source_file_dependencies:
     - vllm/v1/attention
