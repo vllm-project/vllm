@@ -2483,8 +2483,9 @@ def grouped_topk(
     topk: int,
     renormalize: bool,
     routed_scaling_factor: float,
-    bias: torch.Tensor,
+    bias: torch.Tensor | None,
     scoring_func: int = 0,
+    group_scoring_func: int = 0,
 ):
     """
     Perform grouped top-k routing for mixture of experts.
@@ -2496,8 +2497,10 @@ def grouped_topk(
         topk: Number of experts to select per token
         renormalize: Whether to renormalize the output weights
         routed_scaling_factor: Scaling factor for routing weights
-        bias: Bias tensor (e_score_correction_bias). Always fused in kernel.
+        bias: Optional correction bias for expert selection
         scoring_func: 0=none (no activation), 1=sigmoid
+        group_scoring_func: Group reduction: 0=sum of top two scores, 1=max
+            score
     """
     if not current_platform.is_cuda():
         raise NotImplementedError(
@@ -2512,7 +2515,28 @@ def grouped_topk(
         routed_scaling_factor,
         bias,
         scoring_func,
+        group_scoring_func,
     )
+
+
+if hasattr(torch.ops, "_moe_C") and hasattr(torch.ops._moe_C, "grouped_topk"):
+
+    @register_fake("_moe_C::grouped_topk")
+    def grouped_topk_fake(
+        scores: torch.Tensor,
+        n_group: int,
+        topk_group: int,
+        topk: int,
+        renormalize: bool,
+        routed_scaling_factor: float,
+        bias: torch.Tensor | None,
+        scoring_func: int,
+        group_scoring_func: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        num_tokens = scores.shape[0]
+        topk_values = scores.new_empty((num_tokens, topk), dtype=torch.float32)
+        topk_indices = scores.new_empty((num_tokens, topk), dtype=torch.int32)
+        return topk_values, topk_indices
 
 
 def moe_wna16_marlin_gemm(

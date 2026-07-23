@@ -375,6 +375,9 @@ class DeepseekV2MoE(nn.Module):
             topk_group=getattr(config, "topk_group", 1),
             prefix=f"{prefix}.experts",
             scoring_func=getattr(config, "scoring_func", "softmax"),
+            group_scoring_func=(
+                "top2" if getattr(config, "topk_method", None) == "noaux_tc" else "max"
+            ),
             routed_scaling_factor=self.routed_scaling_factor,
             apply_routed_scale_to_output=apply_routed_scale_to_output,
             e_score_correction_bias=self.gate.e_score_correction_bias,

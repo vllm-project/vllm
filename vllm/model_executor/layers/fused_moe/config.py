@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass
 from enum import IntEnum
-from typing import Union
+from typing import Literal, Union
 
 import torch
 
@@ -21,6 +21,8 @@ from vllm.utils.import_utils import has_triton_kernels
 from vllm.utils.math_utils import cdiv
 
 logger = init_logger(__name__)
+
+GroupScoringFunc = Literal["max", "top2"]
 
 if has_triton_kernels():
     try:

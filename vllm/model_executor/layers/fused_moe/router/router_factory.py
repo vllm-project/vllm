@@ -8,6 +8,7 @@ import vllm.envs as envs
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.distributed.eplb.eplb_state import EplbLayerState
 from vllm.model_executor.layers.fused_moe.config import (
+    GroupScoringFunc,
     RoutingMethodType,
 )
 from vllm.model_executor.layers.fused_moe.router.aiter_shared_routed_fused_moe_router import (  # noqa: E501
@@ -59,6 +60,7 @@ def create_fused_moe_router(
     zero_expert_type: str | None = None,
     num_logical_experts: int | None = None,
     hash_indices_table: torch.Tensor | None = None,
+    group_scoring_func: GroupScoringFunc | None = None,
 ) -> FusedMoERouter:
     """
     Factory function to create the appropriate FusedMoERouter subclass based on
@@ -84,6 +86,8 @@ def create_fused_moe_router(
         num_expert_group: Number of expert groups (for grouped routing)
         topk_group: Top-k within each group (for grouped routing)
         scoring_func: Scoring function to use ("softmax" or "sigmoid")
+        group_scoring_func: Group-score reduction ("max" or "top2"). The
+            default preserves existing behavior based on correction bias.
         num_fused_shared_experts: Number of fused shared experts (for ROCm AITER)
 
     Grouped topk and fused topk bias arguments:
@@ -153,6 +157,7 @@ def create_fused_moe_router(
             scoring_func=scoring_func,
             routed_scaling_factor=routed_scaling_factor,
             e_score_correction_bias=e_score_correction_bias,
+            group_scoring_func=group_scoring_func,
             num_fused_shared_experts=num_fused_shared_experts,
         )
         if (
