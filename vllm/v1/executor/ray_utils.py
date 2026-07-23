@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Union
 import numpy as np
 
 import vllm.platforms
+from vllm import envs
 from vllm.config import ParallelConfig
 from vllm.distributed import get_pp_group
 from vllm.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
@@ -26,7 +27,6 @@ if TYPE_CHECKING:
     from vllm.v1.outputs import ModelRunnerOutput
 
 logger = init_logger(__name__)
-PG_WAIT_TIMEOUT = 1800
 
 # Env vars that are worker-specific and must NOT be copied from the
 # driver to Ray workers — they are set per-worker after GPU discovery.
@@ -446,19 +446,20 @@ def _wait_until_pg_ready(current_placement_group: "PlacementGroup"):
     """Wait until a placement group is ready.
 
     It prints the informative log messages if the placement group is
-    not created within time.
+    not created within the timeout configured by VLLM_RAY_PG_TIMEOUT_S.
+    This env var controls both PG creation and PG removal deadlines
+    (PG lifecycle timeout).
 
     """
-    # Wait until PG is ready - this will block until all
-    # requested resources are available, and will time out
-    # if they cannot be provisioned.
     placement_group_specs = current_placement_group.bundle_specs
 
-    s = time.time()
+    pg_timeout = envs.VLLM_RAY_PG_TIMEOUT_S
+    start_time = time.monotonic()
+    deadline = start_time + pg_timeout
     pg_ready_ref = current_placement_group.ready()
     wait_interval = 10
-    while time.time() - s < PG_WAIT_TIMEOUT:
-        ready, _ = ray.wait([pg_ready_ref], timeout=wait_interval)
+    while (remaining := deadline - time.monotonic()) > 0:
+        ready, _ = ray.wait([pg_ready_ref], timeout=min(wait_interval, remaining))
         if len(ready) > 0:
             break
 
@@ -471,26 +472,20 @@ def _wait_until_pg_ready(current_placement_group: "PlacementGroup"):
             " and make sure the IP addresses used by ray cluster"
             " are the same as VLLM_HOST_IP environment variable"
             " specified in each node if you are running on a multi-node.",
-            int(time.time() - s),
+            int(time.monotonic() - start_time),
             placement_group_specs,
         )
 
     try:
         ray.get(pg_ready_ref, timeout=0)
     except ray.exceptions.GetTimeoutError:
-        # Provide more helpful error message when GPU count is exceeded
         total_gpu_required = sum(spec.get("GPU", 0) for spec in placement_group_specs)
-        # If more than one GPU is required for the placement group, provide a
-        # more specific error message.
-        # We use >1 here because multi-GPU (tensor parallel) jobs are more
-        # likely to fail due to insufficient cluster resources, and users may
-        # need to adjust tensor_parallel_size to fit available GPUs.
         if total_gpu_required > 1:
             raise ValueError(
                 f"Cannot provide a placement group requiring "
                 f"{total_gpu_required} GPUs "
                 f"(placement_group_specs={placement_group_specs}) within "
-                f"{PG_WAIT_TIMEOUT} seconds.\n"
+                f"{pg_timeout} seconds.\n"
                 f"Tensor parallel size may exceed available GPUs in your "
                 f"cluster. Check resources with `ray status` and "
                 f"`ray list nodes`.\n"
@@ -501,17 +496,19 @@ def _wait_until_pg_ready(current_placement_group: "PlacementGroup"):
             raise ValueError(
                 "Cannot provide a placement group of "
                 f"{placement_group_specs=} within "
-                f"{PG_WAIT_TIMEOUT} seconds. See "
+                f"{pg_timeout} seconds. See "
                 "`ray status` and `ray list nodes` to make sure the cluster "
                 "has enough resources."
             ) from None
 
 
 def _wait_until_pg_removed(current_placement_group: "PlacementGroup"):
+    pg_timeout = envs.VLLM_RAY_PG_TIMEOUT_S
     ray.util.remove_placement_group(current_placement_group)
-    s = time.time()
+    start_time = time.monotonic()
+    deadline = start_time + pg_timeout
     wait_interval = 10
-    while time.time() - s < PG_WAIT_TIMEOUT:
+    while deadline - time.monotonic() > 0:
         pg = ray.util.get_current_placement_group()
         if pg is None:
             break
@@ -520,9 +517,15 @@ def _wait_until_pg_removed(current_placement_group: "PlacementGroup"):
         wait_interval *= 2
         logger.info(
             "Waiting for removing a placement group of specs for %d seconds.",
-            int(time.time() - s),
+            int(time.monotonic() - start_time),
         )
-        time.sleep(wait_interval)
+        time.sleep(min(wait_interval, max(0, deadline - time.monotonic())))
+    else:
+        logger.warning(
+            "Timed out after %d seconds waiting for placement group "
+            "removal. The placement group may still exist.",
+            pg_timeout,
+        )
 
 
 def initialize_ray_cluster(
