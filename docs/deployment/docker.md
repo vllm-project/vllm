@@ -66,6 +66,28 @@ securityContext:
 Runtime UIDs outside group 0 are not part of the documented support matrix
 because they may be unable to write to `/home/vllm` or `/opt/uv/cache`.
 
+## Fast restarts (imports snapshot)
+
+The `vllm/vllm-openai` image snapshots the server's Python import state with
+CRIU and restores it on later starts instead of re-paying the import cost.
+This is enabled by default when the container is run with
+`--cap-add=CHECKPOINT_RESTORE --cap-add=SYS_PTRACE`; without those
+capabilities every start is a normal cold start and there is nothing to
+configure or disable.
+
+The first privileged start primes the snapshot at normal speed (~546MB under
+`VLLM_SNAPSHOT_ROOT`, default `/root/.cache/vllm/snapshots`); later starts
+restore the import state instead. Restores survive same-container restarts
+automatically; a recreated container (a fresh `docker run`) only restores if
+`VLLM_SNAPSHOT_ROOT` points at a persistent volume, for example
+`-v vllm-snapshots:/root/.cache/vllm/snapshots`. A fresh container without a
+volume simply cold-starts and re-primes.
+
+Fleets pinned to one image can bake the snapshot instead by running
+`vllm snapshot create` during their own image build, on a builder matching
+the runtime kernel and CPU (compatibility, not same-host identity). Set
+`VLLM_SNAPSHOT=0` to opt out.
+
 ## Build image from source
 
 --8<-- "docs/getting_started/installation/gpu.md:build-image-from-source"

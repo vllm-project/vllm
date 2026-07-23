@@ -1065,13 +1065,32 @@ ENTRYPOINT ["./sagemaker-entrypoint.sh"]
 
 FROM vllm-openai-base AS vllm-openai
 
+# CRIU for the default-on imports-snapshot entrypoint (see
+# docker/entrypoints/vllm-snapshot-entrypoint.sh). Jammy's archive criu is
+# 3.16.x, below the >=3.17 floor `vllm snapshot` enforces at runtime, so
+# install from the CRIU team's PPA and fail the build if the floor is not met.
+RUN for i in 1 2 3; do \
+        add-apt-repository -y ppa:criu/ppa && break || \
+        { echo "Attempt $i failed, retrying in 5s..."; sleep 5; }; \
+    done \
+    && apt-get update -y \
+    && apt-get install -y --no-install-recommends criu \
+    && rm -rf /var/lib/apt/lists/* \
+    && CRIU_VERSION=$(criu --version | awk '/^Version:/ {print $2}') \
+    && { dpkg --compare-versions "$CRIU_VERSION" ge 3.17 \
+         || { echo "criu >= 3.17 required, got: ${CRIU_VERSION:-none}"; exit 1; }; }
+
+COPY docker/entrypoints/vllm-snapshot-entrypoint.sh \
+    /usr/local/bin/vllm-snapshot-entrypoint.sh
+RUN chmod 0755 /usr/local/bin/vllm-snapshot-entrypoint.sh
+
 # To run the image as non-root, either build the `vllm-openai-nonroot` target
 # below, or in a derived Dockerfile uncomment the following line and ensure
 # any additional layers chgrp-0 / chmod-g+rwX paths they write to. The `vllm`
 # user (UID 2000, GID 0) is already created in the `vllm-base` stage.
 # See docs/deployment/docker.md.
 # USER vllm
-ENTRYPOINT ["vllm", "serve"]
+ENTRYPOINT ["/usr/local/bin/vllm-snapshot-entrypoint.sh"]
 #################### OPENAI API SERVER ####################
 
 #################### OPENAI API SERVER (NON-ROOT, OPT-IN) ####################

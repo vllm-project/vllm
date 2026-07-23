@@ -1149,7 +1149,14 @@ def create_snapshot(force: bool = False, dry_run: bool = False) -> None:
         return
     lock = _acquire_lock(root, key)
     try:
-        _prepare_directory(directory, force)
+        replace = force
+        if not replace and (directory / "MANIFEST.json").exists():
+            if _existing_snapshot_valid() is not None:
+                raise RuntimeError(
+                    f"snapshot already exists, pass --force: {directory}"
+                )
+            replace = True  # stale exact-key manifest: re-prime without --force
+        _prepare_directory(directory, replace)
         _run_create(key, directory, create_env, key_obj)
     finally:
         lock.release()
@@ -1220,6 +1227,33 @@ def _validate_layer2(
     }
     allowlist = set(manifest.get("env", {}).get("allowlist", ENV_ALLOWLIST))
     return environment_miss(recorded, live_env, allowlist)
+
+
+def _existing_snapshot_valid() -> Path | None:
+    """Path of a layer2-valid snapshot for the live creation key, else None.
+
+    Shared by the pre-import early-exit and create's replace decision so both
+    sides agree on what "already exists" means: an exact-key manifest that
+    layer-2 validation would still restore. A stale manifest returns None and
+    is re-primed in place.
+    """
+    env = creation_env(_entry_env())
+    key = key_from(lookup_key(env))  # SnapshotKeyError propagates to callers
+    directory = _snapshot_root() / key
+    if not (directory / "MANIFEST.json").is_file():
+        return None
+    try:
+        manifest = read_manifest(directory)
+        miss = _validate_layer2(manifest, directory, env)
+    except (OSError, ValueError) as error:
+        logger.info("snapshot create: unreadable manifest treated as stale (%s)", error)
+        return None
+    if miss:
+        logger.info(
+            "snapshot create: stale snapshot at %s (%s); re-priming", directory, miss
+        )
+        return None
+    return directory
 
 
 def _restore_argv(
@@ -1493,6 +1527,20 @@ def maybe_restore_serve() -> None:
         return  # gate closed: no work at all on any other path
     _capture_entry_state()  # before the eager imports mutate env/sys.path
     if command == "snapshot":
+        # Bare `vllm snapshot create` ONLY (the wrapper's exact invocation):
+        # any extra token (--force, --dry-run, --help, a typo like --froce)
+        # must reach argparse on the slow path, never be masked by a fast exit.
+        if sys.argv[1:] == ["snapshot", "create"]:
+            directory = None
+            with contextlib.suppress(Exception):  # any doubt -> slow path decides
+                directory = _existing_snapshot_valid()
+            if directory is not None:
+                logger.info(
+                    "snapshot already exists (pass --force to replace) key=%s dir=%s",
+                    directory.name,
+                    directory,
+                )
+                raise SystemExit(3)
         return  # capture only; create keys off it
     if os.environ.get("VLLM_SNAPSHOT_RESTORED"):
         return  # already inside a restored process; no recursive restore
