@@ -5,6 +5,7 @@ from collections.abc import Sequence
 from typing import NamedTuple
 
 from vllm import envs
+from vllm.distributed.prefix_scheduler import PrefixCacheSnapshot
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import (
@@ -361,6 +362,21 @@ class KVCacheCoordinator(ABC):
         return tuple(
             manager.req_to_blocks.get(request_id) or []
             for manager in self.single_type_managers
+        )
+
+    def get_prefix_cache_local(
+        self, node_id: str, data_parallel_rank: int | None = None
+    ) -> PrefixCacheSnapshot:
+        """Export the node-local prefix-cache state for global routing."""
+        return PrefixCacheSnapshot(
+            node_id=node_id,
+            data_parallel_rank=data_parallel_rank,
+            hash_block_size=self.block_pool.hash_block_size,
+            group_block_sizes={
+                group_id: manager.block_size
+                for group_id, manager in enumerate(self.single_type_managers)
+            },
+            group_hashes=self.block_pool.get_cached_block_hashes_by_group(),
         )
 
     @abstractmethod

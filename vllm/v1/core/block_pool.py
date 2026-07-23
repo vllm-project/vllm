@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Iterator, Sequence
 from typing import Any
 
 from vllm.distributed.kv_events import (
@@ -136,6 +136,9 @@ class BlockHashToBlockMap:
 
     def __len__(self) -> int:
         return len(self._cache)
+
+    def __iter__(self) -> Iterator[BlockHashWithGroupId]:
+        return iter(self._cache)
 
     def _unexpected_blocks_type(self, blocks: Any) -> None:
         raise AssertionError(f"Invalid KV cache block type {type(blocks)}")
@@ -640,7 +643,7 @@ class BlockPool:
         if prepend:
             self.free_block_queue.prependleft_n(blocks_without_hash + blocks_with_hash)
         else:
-            # Blocks without hash always get evicted first - prepend them last to the tail
+            # Blocks without a hash are evicted first, so prepend them last.
             self.free_block_queue.prepend_n(blocks_without_hash)
             self.free_block_queue.append_n(blocks_with_hash)
 
@@ -719,6 +722,18 @@ class BlockPool:
         if not total_gpu_blocks:
             return 0
         return 1.0 - (self.get_num_free_blocks() / total_gpu_blocks)
+
+    def get_cached_block_hashes_by_group(self) -> dict[int, set[ExternalBlockHash]]:
+        """Return cached prefix block hashes grouped by KV-cache group ID."""
+        group_hashes: dict[int, set[ExternalBlockHash]] = {}
+        for block_hash_with_group_id in self.cached_block_hash_to_block:
+            # group_id identifies the KV-cache group for the cached block.
+            group_id = get_group_id(block_hash_with_group_id)
+            block_hash = maybe_convert_block_hash(
+                get_block_hash(block_hash_with_group_id)
+            )
+            group_hashes.setdefault(group_id, set()).add(block_hash)
+        return group_hashes
 
     def take_events(self) -> list[KVCacheEvent]:
         """Atomically takes all events and clears the queue.
