@@ -120,7 +120,11 @@ class DeepseekV4FP8Config(Fp8Config):
     @staticmethod
     def _is_quark_mxfp4_ocp(hf_quant_cfg: dict) -> bool:
         """True for AMD-Quark exports whose global scheme is MXFP4."""
-        weight = (hf_quant_cfg.get("global_quant_config") or {}).get("weight") or {}
+        weight = (hf_quant_cfg.get("global_quant_config") or {}).get("weight")
+        # A non-dict weight (e.g. a list of multiple specs) means not an OCP
+        # MXFP4 scheme (e.g. NVFP4 with 2-level scale).
+        if not isinstance(weight, dict):
+            return False
         return (
             weight.get("dtype") == "fp4"
             and weight.get("qscheme") == "per_group"
