@@ -192,6 +192,93 @@ def _gdn_attention_core_xpu_fake(
     return
 
 
+def _kda_attention_core_xpu_impl(
+    core_attn_out: torch.Tensor,
+    q_proj_states: torch.Tensor,
+    k_proj_states: torch.Tensor,
+    v_proj_states: torch.Tensor,
+    raw_gate: torch.Tensor,
+    beta: torch.Tensor,
+    layer_name: str,
+) -> None:
+    """Custom op wrapping the XPU SYCL KDA kernel for torch.compile."""
+    from vllm.forward_context import get_forward_context
+    from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
+
+    forward_context = get_forward_context()
+    self = forward_context.no_compile_layers[layer_name]
+    attn_metadata_raw = forward_context.attn_metadata
+    if attn_metadata_raw is None:
+        return
+
+    assert isinstance(attn_metadata_raw, dict)
+    attn_metadata = attn_metadata_raw[self.prefix]
+    assert isinstance(attn_metadata, GDNAttentionMetadata)
+
+    non_spec_state_indices = attn_metadata.non_spec_state_indices_tensor
+    if non_spec_state_indices is not None:
+        non_spec_state_indices = non_spec_state_indices.contiguous()
+    spec_state_indices = attn_metadata.spec_state_indices_tensor
+    if spec_state_indices is not None:
+        spec_state_indices = spec_state_indices.contiguous()
+    non_spec_token_indx = attn_metadata.non_spec_token_indx
+    if non_spec_token_indx is not None:
+        non_spec_token_indx = non_spec_token_indx.to(torch.int32)
+    spec_token_indx = attn_metadata.spec_token_indx
+    if spec_token_indx is not None:
+        spec_token_indx = spec_token_indx.to(torch.int32)
+
+    q_conv_weight = self.q_conv1d.weight.view(
+        self.q_conv1d.weight.size(0), self.q_conv1d.weight.size(2)
+    )
+    k_conv_weight = self.k_conv1d.weight.view(
+        self.k_conv1d.weight.size(0), self.k_conv1d.weight.size(2)
+    )
+    v_conv_weight = self.v_conv1d.weight.view(
+        self.v_conv1d.weight.size(0), self.v_conv1d.weight.size(2)
+    )
+
+    torch.ops._xpu_C.kda_attention(
+        core_attn_out,
+        q_proj_states,
+        k_proj_states,
+        v_proj_states,
+        raw_gate,
+        beta,
+        self.kv_cache[0],
+        self.kv_cache[1],
+        q_conv_weight,
+        k_conv_weight,
+        v_conv_weight,
+        self.A_log,
+        self.dt_bias,
+        attn_metadata.num_prefills,
+        attn_metadata.num_decodes,
+        attn_metadata.num_spec_decodes,
+        attn_metadata.has_initial_state,
+        attn_metadata.non_spec_query_start_loc,
+        non_spec_token_indx,
+        non_spec_state_indices,
+        attn_metadata.spec_query_start_loc,
+        spec_token_indx,
+        spec_state_indices,
+        attn_metadata.num_accepted_tokens,
+        attn_metadata.num_actual_tokens,
+    )
+
+
+def _kda_attention_core_xpu_fake(
+    core_attn_out: torch.Tensor,
+    q_proj_states: torch.Tensor,
+    k_proj_states: torch.Tensor,
+    v_proj_states: torch.Tensor,
+    raw_gate: torch.Tensor,
+    beta: torch.Tensor,
+    layer_name: str,
+) -> None:
+    return
+
+
 def _xpu_ops_deepseek_scaling_rope_impl(
     positions: torch.Tensor,
     query: torch.Tensor,
@@ -1242,6 +1329,13 @@ class xpu_ops:
                 op_func=_gdn_attention_core_xpu_impl,
                 mutates_args=["core_attn_out", "z"],
                 fake_impl=_gdn_attention_core_xpu_fake,
+            )
+
+            direct_register_custom_op(
+                op_name="kda_attention_core_xpu",
+                op_func=_kda_attention_core_xpu_impl,
+                mutates_args=["core_attn_out"],
+                fake_impl=_kda_attention_core_xpu_fake,
             )
 
             direct_register_custom_op(
