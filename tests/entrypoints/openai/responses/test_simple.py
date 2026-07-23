@@ -3,7 +3,7 @@
 
 import pytest
 import pytest_asyncio
-from openai import OpenAI
+from openai import BadRequestError, OpenAI
 
 from tests.utils import RemoteOpenAIServer
 
@@ -294,3 +294,42 @@ async def test_streaming_types(
         events.append(event)
 
     validate_streaming_event_stack(events, pairs_of_event_types)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+async def test_truncation_auto(client: OpenAI, model_name: str):
+    """Oversized input with truncation=auto should succeed, not 400."""
+    # Build input that exceeds max_model_len (5000 tokens).
+    # Each repeated message is ~10 tokens, so 600 messages is well over.
+    filler = "This is filler text to consume tokens. "
+    oversized_input = [{"role": "user", "content": filler} for _ in range(600)]
+
+    response = await client.responses.create(
+        model=model_name,
+        input=oversized_input,
+        truncation="auto",
+        max_output_tokens=16,
+    )
+    assert response is not None
+    assert response.status in ("completed", "incomplete")
+    assert response.usage is not None
+    assert response.usage.input_tokens > 0
+    # Input should have been truncated to fit within the context window
+    assert response.usage.input_tokens < 5000
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+async def test_truncation_disabled_rejects_oversized(client: OpenAI, model_name: str):
+    """Oversized input with truncation=disabled should return 400."""
+    filler = "This is filler text to consume tokens. "
+    oversized_input = [{"role": "user", "content": filler} for _ in range(600)]
+
+    with pytest.raises(BadRequestError):
+        await client.responses.create(
+            model=model_name,
+            input=oversized_input,
+            truncation="disabled",
+            max_output_tokens=16,
+        )
