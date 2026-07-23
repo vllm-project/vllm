@@ -330,6 +330,69 @@ def test_fused_norm_rope_no_indexer(num_tokens: int):
     assert (topk == 7).all(), "topk buffer should be untouched on shared layer"
 
 
+@pytest.mark.parametrize("index_interleave", [True, False])
+def test_fused_norm_rope_materializes_collective_cache_inputs(
+    index_interleave: bool,
+):
+    """The PCP fallback prepares BF16 inputs without doing local cache writes."""
+    torch.manual_seed(11)
+    dev = "cuda"
+    num_tokens = 5
+    max_pos = 32
+    pos = torch.arange(num_tokens, device=dev, dtype=torch.int64)
+
+    q_c = torch.randn(num_tokens, Q_LORA, device=dev, dtype=torch.bfloat16)
+    kv_c = torch.randn(num_tokens, KV_LORA, device=dev, dtype=torch.bfloat16)
+    k_pe = torch.randn(num_tokens, ROPE_DIM, device=dev, dtype=torch.bfloat16)
+    index_k = torch.randn(num_tokens, INDEX_HEAD_DIM, device=dev, dtype=torch.bfloat16)
+    q_input = q_c.clone()
+    kv_input = kv_c.clone()
+    kpe_input = k_pe.clone()
+    index_input = index_k.clone()
+    qw = torch.randn(Q_LORA, device=dev, dtype=torch.bfloat16)
+    kvw = torch.randn(KV_LORA, device=dev, dtype=torch.bfloat16)
+    index_w = torch.randn(INDEX_HEAD_DIM, device=dev, dtype=torch.float32)
+    index_b = torch.randn(INDEX_HEAD_DIM, device=dev, dtype=torch.float32)
+    cos_sin = make_cos_sin(max_pos, ROPE_DIM, dev)
+    topk = torch.full((num_tokens, 16), 7, device=dev, dtype=torch.int32)
+
+    q_out = K.fused_norm_rope(
+        pos,
+        q_c,
+        qw,
+        EPS,
+        kv_c,
+        kvw,
+        EPS,
+        k_pe,
+        cos_sin,
+        index_k,
+        index_w,
+        index_b,
+        EPS,
+        cos_sin,
+        topk,
+        slot_mapping=None,
+        indexer_k_cache=None,
+        mla_kv_cache=None,
+        has_indexer=True,
+        index_rope_interleave=index_interleave,
+        materialize_cache_inputs=True,
+    )
+
+    assert_bf16(q_out, rms_norm(q_input, qw), "materialized q_c rmsnorm")
+    assert_bf16(kv_c, rms_norm(kv_input, kvw), "materialized kv_c rmsnorm")
+    assert_bf16(
+        k_pe,
+        rope(kpe_input.float(), pos, cos_sin, interleave=True),
+        "materialized MLA k_pe",
+    )
+    index_ref = layer_norm(index_input, index_w, index_b)
+    index_ref = rope(index_ref, pos, cos_sin, interleave=index_interleave)
+    assert_bf16(index_k, index_ref, "materialized indexer k")
+    assert (topk == -1).all(), "topk buffer not cleared on indexer layer"
+
+
 @pytest.mark.parametrize("mla_dtype", ["fp8", "fp8_ds_mla"])
 def test_fused_norm_rope_direct_pcp_fanout_uses_local_rank_slots(mla_dtype: str):
     """Direct PCP stores update every peer cache without gathering inputs."""
