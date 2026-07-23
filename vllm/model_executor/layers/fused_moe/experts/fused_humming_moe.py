@@ -292,6 +292,7 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
         return (
             meta1.num_experts,
             num_tokens,
+            # Logical intermediate width for both gated and non-gated activations
             self.layer.intermediate_size_per_partition,
             meta1.shape_k,
             top_k,
