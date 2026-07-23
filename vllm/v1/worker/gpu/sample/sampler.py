@@ -7,6 +7,7 @@ import torch
 import vllm.envs as envs
 from vllm.config.model import PROCESSED_LOGPROBS_MODES, LogprobsMode
 from vllm.config.reasoning import ReasoningConfig
+from vllm.logger import init_logger
 from vllm.sampling_params import SamplingParams
 from vllm.v1.sample.ops.topk_topp_sampler import (
     apply_top_k_top_p,
@@ -27,6 +28,8 @@ from vllm.v1.worker.gpu.sample.penalties import PenaltiesState
 from vllm.v1.worker.gpu.sample.states import NO_LOGPROBS, SamplingStates
 from vllm.v1.worker.gpu.sample.thinking_budget import ThinkingBudgetState
 from vllm.v1.worker.gpu.states import RequestState
+
+logger = init_logger(__name__)
 
 
 class Sampler:
@@ -271,16 +274,37 @@ class Sampler:
 
         # Sample the next token.
         if use_flashinfer:
-            sampled = flashinfer_sample(processed_logits, top_k, top_p).to(torch.int64)
-        else:
-            processed_logits = apply_top_k_top_p(processed_logits, top_k, top_p)
-            sampled = gumbel_sample(
-                processed_logits,
-                expanded_idx_mapping,
-                self.sampling_states.temperature.gpu,
-                self.sampling_states.seeds.gpu,
-                pos,
-                apply_temperature=False,
-                use_fp64=self.use_fp64_gumbel,
-            )
+            try:
+                sampled = flashinfer_sample(processed_logits, top_k, top_p).to(
+                    torch.int64
+                )
+                return sampled, processed_logits
+            except Exception as e:
+                # FlashInfer may JIT-compile its sampling kernels on first
+                # use. If that fails, permanently degrade to the native
+                # sampler instead of taking down the engine. See #49497.
+                if envs.is_set("VLLM_USE_FLASHINFER_SAMPLER"):
+                    raise RuntimeError(
+                        "FlashInfer top-p/top-k sampling was explicitly "
+                        "enabled via VLLM_USE_FLASHINFER_SAMPLER=1, but its "
+                        f"sampling kernel failed to build or load: {e}"
+                    ) from e
+                logger.warning_once(
+                    "FlashInfer top-p/top-k sampling kernel failed to build "
+                    "or load (%s). Falling back to the PyTorch-native "
+                    "sampler. Set VLLM_USE_FLASHINFER_SAMPLER=0 to silence "
+                    "this warning.",
+                    e,
+                )
+                self.use_flashinfer = False
+        processed_logits = apply_top_k_top_p(processed_logits, top_k, top_p)
+        sampled = gumbel_sample(
+            processed_logits,
+            expanded_idx_mapping,
+            self.sampling_states.temperature.gpu,
+            self.sampling_states.seeds.gpu,
+            pos,
+            apply_temperature=False,
+            use_fp64=self.use_fp64_gumbel,
+        )
         return sampled, processed_logits

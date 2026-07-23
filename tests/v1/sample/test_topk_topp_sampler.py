@@ -114,6 +114,63 @@ def test_rocm_aiter_sampler_defers_import_when_generators_force_native(
     assert logits_to_return is None
 
 
+def test_forward_cuda_falls_back_to_native_on_flashinfer_build_failure(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """FlashInfer sampling kernels are JIT-built on first use. If that build
+    fails at call time (e.g. no usable CUDA toolkit), forward_cuda should warn
+    once, permanently switch to the native sampler, and still return valid
+    token ids rather than crashing the engine. Regression for #49497.
+    """
+    from vllm.v1.sample.ops import topk_topp_sampler
+
+    def _raise_build_error(*args, **kwargs):
+        raise RuntimeError(
+            "Could not find nvcc and default cuda_home='/usr/local/cuda' doesn't exist"
+        )
+
+    monkeypatch.setattr(topk_topp_sampler, "flashinfer_sample", _raise_build_error)
+    # User did not explicitly force the sampler on -> degrade gracefully.
+    monkeypatch.setattr(topk_topp_sampler.envs, "is_set", lambda name: False)
+
+    sampler = topk_topp_sampler.TopKTopPSampler()
+
+    logits = torch.randn(4, 16)
+    k = torch.full((4,), 2, dtype=torch.int32)
+
+    token_ids, logits_to_return = sampler.forward_cuda(logits, {}, k, None)
+
+    assert token_ids.shape == (4,)
+    assert torch.all(token_ids >= 0) and torch.all(token_ids < 16)
+    assert logits_to_return is None
+    # Fast path is permanently disabled so later calls skip the failing build.
+    assert sampler.forward == sampler.forward_native
+
+
+def test_forward_cuda_raises_when_flashinfer_explicitly_forced(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """When the user sets VLLM_USE_FLASHINFER_SAMPLER=1 but the kernel fails to
+    build, forward_cuda should raise a clear RuntimeError naming the env var
+    instead of silently falling back or surfacing the raw build error (#49497).
+    """
+    from vllm.v1.sample.ops import topk_topp_sampler
+
+    def _raise_build_error(*args, **kwargs):
+        raise RuntimeError("Could not find nvcc")
+
+    monkeypatch.setattr(topk_topp_sampler, "flashinfer_sample", _raise_build_error)
+    monkeypatch.setattr(topk_topp_sampler.envs, "is_set", lambda name: True)
+
+    sampler = topk_topp_sampler.TopKTopPSampler()
+
+    logits = torch.randn(4, 16)
+    k = torch.full((4,), 2, dtype=torch.int32)
+
+    with pytest.raises(RuntimeError, match="VLLM_USE_FLASHINFER_SAMPLER=1"):
+        sampler.forward_cuda(logits, {}, k, None)
+
+
 def test_random_sample_uses_fp64_exponential_race_when_requested():
     torch.set_default_device(DEVICE_TYPE)
     probs = torch.tensor(

@@ -179,7 +179,27 @@ class TopKTopPSampler(nn.Module):
         # flashinfer sampling functions expect contiguous logits.
         # In flex_attn/triton_attn fp32 inference, logits can be non-contiguous
         # because of slicing operation in logits_processor.
-        return flashinfer_sample(logits.contiguous(), k, p, generators), None
+        try:
+            return flashinfer_sample(logits.contiguous(), k, p, generators), None
+        except Exception as e:
+            # FlashInfer may JIT-compile its sampling kernels on first use.
+            # If that fails (e.g. no usable CUDA toolkit, or the ninja build
+            # errors out), degrade to the PyTorch-native sampler instead of
+            # taking down the engine. See #49497.
+            if envs.is_set("VLLM_USE_FLASHINFER_SAMPLER"):
+                raise RuntimeError(
+                    "FlashInfer top-p/top-k sampling was explicitly enabled "
+                    "via VLLM_USE_FLASHINFER_SAMPLER=1, but its sampling "
+                    f"kernel failed to build or load: {e}"
+                ) from e
+            logger.warning_once(
+                "FlashInfer top-p/top-k sampling kernel failed to build or "
+                "load (%s). Falling back to the PyTorch-native sampler. Set "
+                "VLLM_USE_FLASHINFER_SAMPLER=0 to silence this warning.",
+                e,
+            )
+            self.forward = self.forward_native
+            return self.forward_native(logits, generators, k, p)
 
     def forward_cpu(
         self,
