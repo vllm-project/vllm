@@ -187,6 +187,9 @@ def get_open_ports_list(count: int = 5) -> list[int]:
     return list(ports_set)
 
 
+_used_ports: set[int] = set()
+
+
 def _get_open_port(
     start_port: int | None = None,
     max_attempts: int | None = None,
@@ -199,10 +202,12 @@ def _get_open_port(
             try:
                 with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
                     s.bind(("", port))
-                    return port
+                    if port not in _used_ports:
+                        _used_ports.add(port)
+                        return port
             except OSError:
-                port += 1  # Increment port number if already in use
-                logger.info("Port %d is already in use, trying port %d", port - 1, port)
+                pass
+            port += 1
             attempts += 1
             if max_attempts is not None and attempts >= max_attempts:
                 raise RuntimeError(
@@ -211,14 +216,22 @@ def _get_open_port(
                 )
     # try ipv4
     try:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.bind(("", 0))
-            return s.getsockname()[1]
+        while True:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.bind(("", 0))
+                port = s.getsockname()[1]
+                if port not in _used_ports:
+                    _used_ports.add(port)
+                    return port
     except OSError:
         # try ipv6
-        with socket.socket(socket.AF_INET6, socket.SOCK_STREAM) as s:
-            s.bind(("", 0))
-            return s.getsockname()[1]
+        while True:
+            with socket.socket(socket.AF_INET6, socket.SOCK_STREAM) as s:
+                s.bind(("", 0))
+                port = s.getsockname()[1]
+                if port not in _used_ports:
+                    _used_ports.add(port)
+                    return port
 
 
 def find_process_using_port(port: int) -> psutil.Process | None:
