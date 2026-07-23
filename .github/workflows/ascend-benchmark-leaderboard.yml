@@ -366,6 +366,22 @@ jobs:
             echo "ASCEND_BENCHMARK_USE_SUDO=0" >> "$GITHUB_ENV"
           fi
 
+          # A dedicated runner container may expose one physical node such as
+          # /dev/davinci2. CANN renumbers that isolated device to logical 0
+          # inside the container, so preserving the physical suffix would hide
+          # the only available NPU from torch_npu.
+          mapfile -t runner_devnodes < <(
+            find /dev -maxdepth 1 -name 'davinci[0-9]*' -printf '%f\n' 2>/dev/null \
+              | sort -t i -k2 -n
+          )
+          if [[ "${RUNNER_NAME:-}" =~ npu([0-9]+)$ ]] \
+            && [[ "${#runner_devnodes[@]}" -eq 1 ]] \
+            && [[ "${runner_devnodes[0]}" == "davinci${BASH_REMATCH[1]}" ]]; then
+            echo "Dedicated ${RUNNER_NAME} container exposes ${runner_devnodes[0]}; using logical NPU 0."
+            echo "ASCEND_VISIBLE_DEVICES=0" >> "$GITHUB_ENV"
+            echo "ASCEND_RT_VISIBLE_DEVICES=0" >> "$GITHUB_ENV"
+          fi
+
           # Auto-detect NPU devices when no visibility env is set.
           # This is needed for root runners (where the root helper is
           # skipped) and any other case where the caller did not pre-set

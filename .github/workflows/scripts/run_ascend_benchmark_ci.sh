@@ -80,9 +80,21 @@ marker_pgid_file=""
 selected_device=""
 NPU_SMI_BIN=${NPU_SMI_BIN:-$(command -v npu-smi || true)}
 
-if [[ -z "${ASCEND_RT_VISIBLE_DEVICES:-}" && -z "${ASCEND_VISIBLE_DEVICES:-}" && "${RUNNER_NAME:-}" =~ npu([0-9]+)$ ]]; then
-  export ASCEND_RT_VISIBLE_DEVICES="${BASH_REMATCH[1]}"
-  echo "Pinned Ascend device from runner name ${RUNNER_NAME}: ${ASCEND_RT_VISIBLE_DEVICES}"
+if [[ "${RUNNER_NAME:-}" =~ npu([0-9]+)$ ]]; then
+  runner_physical_device="${BASH_REMATCH[1]}"
+  shopt -s nullglob
+  runner_devnodes=(/dev/davinci[0-9]*)
+  shopt -u nullglob
+
+  if [[ "${#runner_devnodes[@]}" -eq 1 ]] \
+    && [[ "$(basename "${runner_devnodes[0]}")" == "davinci${runner_physical_device}" ]]; then
+    export ASCEND_VISIBLE_DEVICES=0
+    export ASCEND_RT_VISIBLE_DEVICES=0
+    echo "Pinned isolated runner ${RUNNER_NAME} to logical Ascend device 0 (${runner_devnodes[0]})."
+  elif [[ -z "${ASCEND_RT_VISIBLE_DEVICES:-}" && -z "${ASCEND_VISIBLE_DEVICES:-}" ]]; then
+    export ASCEND_RT_VISIBLE_DEVICES="$runner_physical_device"
+    echo "Pinned Ascend device from runner name ${RUNNER_NAME}: ${ASCEND_RT_VISIBLE_DEVICES}"
+  fi
 fi
 
 USER_PROVIDED_ASCEND_VISIBLE_DEVICES=0

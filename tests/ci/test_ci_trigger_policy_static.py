@@ -66,7 +66,9 @@ def test_benchmark_detection_does_not_disable_idle_device_selection():
     ]
 
     assert "ASCEND_CI_DETECTED_DEVICES=" in detection_step
-    assert 'echo "ASCEND_VISIBLE_DEVICES=' not in detection_step
+    assert 'echo "ASCEND_VISIBLE_DEVICES=0"' in detection_step
+    assert 'echo "ASCEND_RT_VISIBLE_DEVICES=0"' in detection_step
+    assert '"${#runner_devnodes[@]}" -eq 1' in detection_step
 
 
 def test_actionlint_knows_ascend_runner_labels():
