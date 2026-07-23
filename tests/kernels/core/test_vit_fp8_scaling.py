@@ -4,8 +4,7 @@
 
 import contextlib
 import json
-from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
@@ -38,7 +37,7 @@ def _build_attention(mm_config):
     invokes ``process_weights_after_loading`` to simulate the model loader's
     auto-scan. Yields ``None`` if FlashInfer cuDNN is not available.
     """
-    from vllm.config import VllmConfig, set_current_vllm_config
+    from vllm.config import ModelConfig, VllmConfig, set_current_vllm_config
     from vllm.model_executor.layers.attention.mm_encoder_attention import (
         MMEncoderAttention,
     )
@@ -49,7 +48,7 @@ def _build_attention(mm_config):
         return
 
     vllm_config = VllmConfig()
-    vllm_config.model_config = SimpleNamespace(multimodal_config=mm_config)  # type: ignore[assignment]
+    vllm_config.model_config = MagicMock(spec=ModelConfig, multimodal_config=mm_config)
 
     with (
         set_current_vllm_config(vllm_config),
@@ -171,7 +170,7 @@ def test_static_scales_loaded(_make_static_attention) -> None:
 
 def test_static_scales_missing_layer(tmp_path) -> None:
     """Verify error when requested layer is not in the scale file."""
-    from vllm.config import VllmConfig, set_current_vllm_config
+    from vllm.config import ModelConfig, VllmConfig, set_current_vllm_config
     from vllm.config.multimodal import MultiModalConfig
     from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
@@ -187,7 +186,7 @@ def test_static_scales_missing_layer(tmp_path) -> None:
         mm_encoder_fp8_scale_path=str(scale_file),
     )
     vllm_config = VllmConfig()
-    vllm_config.model_config = SimpleNamespace(multimodal_config=mm_config)  # type: ignore[assignment]
+    vllm_config.model_config = MagicMock(spec=ModelConfig, multimodal_config=mm_config)
 
     from vllm.model_executor.layers.attention.mm_encoder_attention import (
         MMEncoderAttention,
