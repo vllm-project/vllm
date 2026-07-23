@@ -107,11 +107,19 @@ class ECCPUWorker:
         dst_base = self._region.blocks.data_ptr()
         idx = self._save_count
 
+        # Write through numpy views: some accelerators (e.g. XPU USM) hand
+        # out pointers with the top bit set, which torch's per-element
+        # tensor assignment rejects for unsigned dtypes ("Overflow when
+        # unpacking long long"); numpy has no such restriction.
+        src_ptrs_np = src_ptrs.numpy()
+        dst_ptrs_np = dst_ptrs.numpy()
+        sizes_np = sizes.numpy()
+
         for i, block_idx in enumerate(block_ids):
             start = i * block_size
-            src_ptrs[idx] = src_base + start
-            dst_ptrs[idx] = dst_base + block_idx * block_size
-            sizes[idx] = min(block_size, total_bytes - start)
+            src_ptrs_np[idx] = src_base + start
+            dst_ptrs_np[idx] = dst_base + block_idx * block_size
+            sizes_np[idx] = min(block_size, total_bytes - start)
             idx += 1
 
         self._save_count = idx
@@ -170,11 +178,17 @@ class ECCPUWorker:
             sizes = bufs.sizes[:total_blocks]
             sizes[:] = block_size
 
+            # See save_caches: numpy views avoid the uint64 overflow that
+            # torch's per-element tensor assignment raises for pointers
+            # with the top bit set (e.g. XPU USM allocations).
+            src_ptrs_np = src_ptrs.numpy()
+            dst_ptrs_np = dst_ptrs.numpy()
+
             op_idx = 0
             for block_ids in load_items.values():
                 for block_idx in block_ids:
-                    src_ptrs[op_idx] = src_base + block_idx * block_size
-                    dst_ptrs[op_idx] = dst_buf_base + op_idx * block_size
+                    src_ptrs_np[op_idx] = src_base + block_idx * block_size
+                    dst_ptrs_np[op_idx] = dst_buf_base + op_idx * block_size
                     op_idx += 1
 
             swap_blocks_batch(src_ptrs, dst_ptrs, sizes, is_src_access_order_any=True)
