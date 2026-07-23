@@ -170,11 +170,11 @@ class FlashMLASparseMetadata(AttentionMetadata):
         scheduler_metadata: FlashMLASchedMeta
         dummy_block_table: torch.Tensor
         cache_lens: torch.Tensor
-        # Host-resident (HiSparse) mixed batches run decode and prefill
-        # tokens as separate kernel calls; a FlashMLASchedMeta binds to its
-        # first call's shapes, so each sub-call needs its own metadata.
-        decode_split: "FlashMLASparseMetadata.FP8KernelMetadata | None" = None
-        prefill_split: "FlashMLASparseMetadata.FP8KernelMetadata | None" = None
+
+    @dataclass
+    class FP8SplitKernelMetadata:
+        decode: "FlashMLASparseMetadata.FP8KernelMetadata"
+        prefill: "FlashMLASparseMetadata.FP8KernelMetadata"
 
     @dataclass
     class FP8SeparatePrefillDecode:
@@ -221,7 +221,9 @@ class FlashMLASparseMetadata(AttentionMetadata):
         decode: Decode | None = None
         prefill: Prefill | None = None
 
-    fp8_extra_metadata: FP8SeparatePrefillDecode | FP8KernelMetadata | None = None
+    fp8_extra_metadata: (
+        FP8SeparatePrefillDecode | FP8KernelMetadata | FP8SplitKernelMetadata | None
+    ) = None
     fp8_use_mixed_batch: bool = False
 
 
@@ -322,48 +324,33 @@ class FlashMLASparseMetadataBuilder(
 
     def _build_fp8_mixed_decode_prefill(
         self,
-        common_attn_metadata: CommonAttentionMetadata,
         num_decode_tokens: int,
         num_prefill_tokens: int,
-    ) -> "FlashMLASparseMetadata.FP8KernelMetadata":
+    ) -> (
+        FlashMLASparseMetadata.FP8KernelMetadata
+        | FlashMLASparseMetadata.FP8SplitKernelMetadata
+    ):
         """Build FP8 metadata treating MQA tokens as one batch.
 
         The scheduler initializes lazily from the runtime query shape, which may
         be the full batch or only decodes when prefills use dense MHA. This avoids
         the BF16 prefill kernel's head-padding overhead at high TP.
         """
-        padded_heads = self.fp8_decode_padded_heads
 
-        # The vendored get_mla_metadata ignores its arguments and returns an
-        # empty FlashMLASchedMeta that lazily binds (b, s_q) on its first
-        # kernel call; num_tokens documents which sub-call shape each fresh
-        # sched-meta will bind to.
-        def make_kernel_metadata(
-            num_tokens: int,
-        ) -> FlashMLASparseMetadata.FP8KernelMetadata:
-            scheduler_metadata, _ = get_mla_metadata(
-                cache_seqlens=self.topk_tokens_tensor[:1],  # Single batch
-                num_q_tokens_per_head_k=num_tokens * padded_heads,
-                topk=self.topk_tokens,
-                num_heads_q=padded_heads,
-                num_heads_k=1,
-                is_fp8_kvcache=True,
-            )
+        def make_kernel_metadata() -> FlashMLASparseMetadata.FP8KernelMetadata:
+            scheduler_metadata, _ = get_mla_metadata()
             return FlashMLASparseMetadata.FP8KernelMetadata(
                 scheduler_metadata=scheduler_metadata,
                 cache_lens=self.max_model_len_tensor[:1],
                 dummy_block_table=self.dummy_block_table[:1],
             )
 
-        fp8_metadata = make_kernel_metadata(common_attn_metadata.num_actual_tokens)
         if self.use_hisparse and num_decode_tokens > 0 and num_prefill_tokens > 0:
-            # Host-resident mixed batches row-split into a decode and a
-            # prefill kernel call of different token counts; each needs its
-            # own FlashMLASchedMeta (shape-bound after first use).
-            fp8_metadata.decode_split = make_kernel_metadata(num_decode_tokens)
-            fp8_metadata.prefill_split = make_kernel_metadata(num_prefill_tokens)
-
-        return fp8_metadata
+            return FlashMLASparseMetadata.FP8SplitKernelMetadata(
+                decode=make_kernel_metadata(),
+                prefill=make_kernel_metadata(),
+            )
+        return make_kernel_metadata()
 
     def _build_fp8_separate_prefill_decode(
         self,
@@ -524,7 +511,6 @@ class FlashMLASparseMetadataBuilder(
         if self.use_fp8_kv_cache:
             if fp8_use_mixed_batch:
                 metadata.fp8_extra_metadata = self._build_fp8_mixed_decode_prefill(
-                    common_attn_metadata,
                     metadata.num_decode_tokens,
                     metadata.num_actual_tokens - metadata.num_decode_tokens,
                 )
@@ -848,18 +834,22 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
                 attn_metadata.fp8_extra_metadata,
                 FlashMLASparseMetadata.FP8KernelMetadata,
             )
-            fp8_metadata = attn_metadata.fp8_extra_metadata
+            decode_only_metadata = attn_metadata.fp8_extra_metadata
             _attn_out, _ = self._fp8_flash_mla_kernel(
                 q=q.unsqueeze(0),
                 kv_c_and_k_pe_cache=kv_c_and_k_pe_cache,
                 topk_indices=topk_indices.unsqueeze(0),
-                kernel_metadata=fp8_metadata,
+                kernel_metadata=decode_only_metadata,
             )
             return _attn_out.squeeze(0)
 
         assert attn_metadata.fp8_extra_metadata is not None
         assert isinstance(
-            attn_metadata.fp8_extra_metadata, FlashMLASparseMetadata.FP8KernelMetadata
+            attn_metadata.fp8_extra_metadata,
+            (
+                FlashMLASparseMetadata.FP8KernelMetadata,
+                FlashMLASparseMetadata.FP8SplitKernelMetadata,
+            ),
         )
         fp8_metadata = attn_metadata.fp8_extra_metadata
 
@@ -879,14 +869,19 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
                     attn_metadata,
                     num_decode_tokens=num_decode_tokens,
                 )
-                decode_metadata = fp8_metadata
                 if num_decode_tokens < attn_metadata.num_actual_tokens:
-                    assert (
-                        fp8_metadata.decode_split is not None
-                        and fp8_metadata.prefill_split is not None
-                    ), "host-resident mixed batch requires split FP8 metadata"
-                    decode_metadata = fp8_metadata.decode_split
-                    fp8_metadata = fp8_metadata.prefill_split
+                    assert isinstance(
+                        fp8_metadata,
+                        FlashMLASparseMetadata.FP8SplitKernelMetadata,
+                    )
+                    decode_metadata = fp8_metadata.decode
+                    fp8_metadata = fp8_metadata.prefill
+                else:
+                    assert isinstance(
+                        fp8_metadata,
+                        FlashMLASparseMetadata.FP8KernelMetadata,
+                    )
+                    decode_metadata = fp8_metadata
                 _decode_out, _ = self._fp8_flash_mla_kernel(
                     q=q[:num_decode_tokens].unsqueeze(0),
                     kv_c_and_k_pe_cache=decode_cache,
@@ -902,6 +897,7 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
                 self._hisparse_stage_prefill_rows(kv_c_and_k_pe_cache, attn_metadata)
             )
 
+        assert isinstance(fp8_metadata, FlashMLASparseMetadata.FP8KernelMetadata)
         topk_indices = triton_convert_req_index_to_global_index(
             req_id_per_token,
             block_table,
