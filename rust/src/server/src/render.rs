@@ -70,7 +70,10 @@ pub async fn serve_render(config: RenderConfig, shutdown: CancellationToken) -> 
     if config.max_logprobs.is_some_and(|value| value < -1) {
         bail!("max_logprobs must be non-negative or -1");
     }
-    let state = build_state(&config).await?;
+    let state = tokio::select! {
+        result = build_state(&config) => result?,
+        _ = shutdown.cancelled() => return Ok(()),
+    };
     let listener_mode = HttpListenerMode::BindTcp {
         host: config.host.clone(),
         port: config.port,
