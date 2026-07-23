@@ -183,7 +183,8 @@ class TestRetrieveFutureErrorHandling:
 
         assert finished_retrieves is not None
         assert "req-2" in finished_retrieves
-        assert adapter._load_error_block_ids == {5, 6, 7}
+        assert adapter.get_block_ids_with_load_errors() == {5, 6, 7}
+        assert adapter.get_block_ids_with_load_errors() == set()
 
     def test_retrieve_exception_cleans_up_future(self, adapter: LMCacheMPWorkerAdapter):
         mock_future = MagicMock()
@@ -212,7 +213,13 @@ class TestRetrieveFutureErrorHandling:
         assert "req-3" in finished_retrieves
         # All tracked blocks are conservatively reported, regardless of
         # which chunk failed (RetrieveResult is per-chunk, block_ids per-block)
-        assert adapter._load_error_block_ids == {10, 20, 30, 40}
+        assert adapter.get_block_ids_with_load_errors() == {
+            10,
+            20,
+            30,
+            40,
+        }
+        assert adapter.get_block_ids_with_load_errors() == set()
 
     def test_retrieve_all_success_does_not_report_errors(
         self, adapter: LMCacheMPWorkerAdapter
@@ -227,7 +234,7 @@ class TestRetrieveFutureErrorHandling:
 
         assert finished_retrieves is not None
         assert "req-4" in finished_retrieves
-        assert adapter._load_error_block_ids == set()
+        assert adapter.get_block_ids_with_load_errors() == set()
 
     def test_retrieve_all_success_cleans_up_block_id_tracking(
         self, adapter: LMCacheMPWorkerAdapter
@@ -303,12 +310,15 @@ class TestMultipleRequests:
 
         adapter.get_finished(set())
 
+        error_ids = adapter.get_block_ids_with_load_errors()
         # The successful request should not contribute to errors
-        assert 1 not in adapter._load_error_block_ids
-        assert 2 not in adapter._load_error_block_ids
+        assert 1 not in error_ids
+        assert 2 not in error_ids
         # The failed request should
-        assert 3 in adapter._load_error_block_ids
-        assert 4 in adapter._load_error_block_ids
+        assert 3 in error_ids
+        assert 4 in error_ids
+        # Drain-reset
+        assert adapter.get_block_ids_with_load_errors() == set()
 
     def test_batched_retrieve_merges_other_requests_into_finished(
         self, adapter: LMCacheMPWorkerAdapter

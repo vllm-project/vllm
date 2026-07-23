@@ -668,7 +668,13 @@ class LMCacheMPWorkerAdapter:
                 )
                 finished_retrieves.add(request_id)
                 finished_retrieves.update(other_reqs)
-                block_ids = self._retrieve_block_ids.get(request_id, [])
+                block_ids = self._retrieve_block_ids.get(request_id)
+                if block_ids is None:
+                    logger.warning(
+                        "Missing block-id tracking for retrieve request_id=%s",
+                        request_id,
+                    )
+                    block_ids = []
                 self._load_error_block_ids.update(block_ids)
                 continue
 
@@ -683,7 +689,13 @@ class LMCacheMPWorkerAdapter:
                 )
                 # RetrieveResult is per-chunk while block_ids is per-block,
                 # so we conservatively add all tracked blocks to the error set.
-                block_ids = self._retrieve_block_ids.get(request_id, [])
+                block_ids = self._retrieve_block_ids.get(request_id)
+                if block_ids is None:
+                    logger.warning(
+                        "Missing block-id tracking for retrieve request_id=%s",
+                        request_id,
+                    )
+                    block_ids = []
                 self._load_error_block_ids.update(block_ids)
 
         # Remove the finished requests from the tracking dicts
@@ -719,7 +731,7 @@ class LMCacheMPWorkerAdapter:
 
         Returns:
             Set of block IDs that encountered load errors since the last
-            call.  Empty set if all retrieves succeeded.
+            call. Empty set if all retrieves succeeded.
         """
         result = self._load_error_block_ids
         self._load_error_block_ids = set()
