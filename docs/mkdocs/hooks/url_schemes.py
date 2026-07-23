@@ -61,7 +61,7 @@ class UrlSchemesPreprocessor(Preprocessor):
 
     def run(self, lines):
         page = self.ext.page
-        if page is None or getattr(page.file, "abs_src_path", None) is None:
+        if page is None:
             return lines
 
         def replace_relative_link(match: re.Match) -> str:
@@ -70,7 +70,9 @@ class UrlSchemesPreprocessor(Preprocessor):
             """
             title = match.group("title")
             path = match.group("path")
-            path = (Path(page.file.abs_src_path).parent / path).resolve()
+            # Resolve against the page's logical location under docs/ rather than
+            # abs_src_path, which points at a temp dir for generated pages.
+            path = ((DOC_DIR / page.file.src_uri).parent / path).resolve()
             fragment = match.group("fragment") or ""
 
             # Check if the path exists and is outside the docs dir

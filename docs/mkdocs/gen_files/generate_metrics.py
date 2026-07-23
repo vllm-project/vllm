@@ -2,27 +2,33 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import ast
 import logging
+import sys
 from pathlib import Path
-from typing import Literal
+
+sys.path.insert(0, str(Path(__file__).parent))
+
+from generated_content import append_to_page  # noqa: E402
 
 logger = logging.getLogger("mkdocs")
 
 ROOT_DIR = Path(__file__).parent.parent.parent.parent
-DOCS_DIR = ROOT_DIR / "docs"
-GENERATED_METRICS_DIR = DOCS_DIR / "generated" / "metrics"
 
 # Files to scan for metric definitions - each will generate a separate table
 METRIC_SOURCE_FILES = [
-    {"path": "vllm/v1/metrics/loggers.py", "output": "general.inc.md"},
+    {"path": "vllm/v1/metrics/loggers.py", "title": "General Metrics"},
     {
         "path": "vllm/v1/spec_decode/metrics.py",
-        "output": "spec_decode.inc.md",
+        "title": "Speculative Decoding Metrics",
     },
     {
         "path": "vllm/distributed/kv_transfer/kv_connector/v1/nixl/stats.py",
-        "output": "nixl_connector.inc.md",
+        "title": "NIXL KV Connector Metrics",
     },
-    {"path": "vllm/v1/metrics/perf.py", "output": "perf.inc.md"},
+    {
+        "path": "vllm/v1/metrics/perf.py",
+        "title": "Model Flops Utilization (MFU) Performance Metrics",
+        "preamble": "These metrics are available via `--enable-mfu-metrics`:",
+    },
 ]
 
 
@@ -110,41 +116,30 @@ def generate_markdown_table(metrics: list[dict[str, str]]) -> str:
     return "\n".join(lines) + "\n"
 
 
-def on_startup(command: Literal["build", "gh-deploy", "serve"], dirty: bool):
-    """Generate metrics documentation tables from source files."""
-    logger.info("Generating metrics documentation")
+logger.info("Generating metrics documentation")
 
-    # Create generated directory if it doesn't exist
-    GENERATED_METRICS_DIR.mkdir(parents=True, exist_ok=True)
+content = ""
+total_metrics = 0
+for source_config in METRIC_SOURCE_FILES:
+    source_path = source_config["path"]
 
-    total_metrics = 0
-    for source_config in METRIC_SOURCE_FILES:
-        source_path = source_config["path"]
-        output_file = source_config["output"]
+    filepath = ROOT_DIR / source_path
+    if not filepath.exists():
+        raise FileNotFoundError(f"Metrics source file not found: {filepath}")
 
-        filepath = ROOT_DIR / source_path
-        if not filepath.exists():
-            raise FileNotFoundError(f"Metrics source file not found: {filepath}")
+    logger.debug("Extracting metrics from: %s", source_path)
+    metrics = extract_metrics_from_file(filepath)
+    logger.debug("Found %d metrics in %s", len(metrics), source_path)
 
-        logger.debug("Extracting metrics from: %s", source_path)
-        metrics = extract_metrics_from_file(filepath)
-        logger.debug("Found %d metrics in %s", len(metrics), source_path)
+    content += f"## {source_config['title']}\n\n"
+    if preamble := source_config.get("preamble"):
+        content += f"{preamble}\n\n"
+    content += f"{generate_markdown_table(metrics)}\n"
+    total_metrics += len(metrics)
 
-        # Generate and write the markdown table for this source
-        table_content = generate_markdown_table(metrics)
-        output_path = GENERATED_METRICS_DIR / output_file
-        with open(output_path, "w", encoding="utf-8") as f:
-            f.write(table_content)
-
-        total_metrics += len(metrics)
-        logger.info(
-            "Generated metrics table: %s (%d metrics)",
-            output_path.relative_to(ROOT_DIR),
-            len(metrics),
-        )
-
-    logger.info(
-        "Total metrics generated: %d across %d files",
-        total_metrics,
-        len(METRIC_SOURCE_FILES),
-    )
+append_to_page("usage/metrics.md", content)
+logger.info(
+    "Total metrics generated: %d across %d files",
+    total_metrics,
+    len(METRIC_SOURCE_FILES),
+)

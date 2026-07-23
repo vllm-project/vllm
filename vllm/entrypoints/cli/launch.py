@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import argparse
+import inspect
 import signal
 
 import uvloop
@@ -36,9 +37,12 @@ class LaunchSubcommandBase(CLISubcommand):
     def add_cli_args(cls, parser: FlexibleArgumentParser) -> None:
         """Add the CLI arguments to the parser.
 
-        By default, adds the standard vLLM serving arguments.
+        By default, uses the subcommand's docstring as the description and adds
+        the standard vLLM serving arguments.
         Subclasses can override to add component-specific arguments.
         """
+        if cls.__doc__:
+            parser.description = inspect.cleandoc(cls.__doc__)
         make_arg_parser(parser)
 
     @staticmethod
@@ -47,7 +51,13 @@ class LaunchSubcommandBase(CLISubcommand):
 
 
 class RenderSubcommand(LaunchSubcommandBase):
-    """The `render` subcommand for `vllm launch`."""
+    """`vllm launch render` starts a GPU-less rendering server for preprocessing
+    and postprocessing only.
+
+    ```bash
+    vllm launch render meta-llama/Llama-3.2-1B-Instruct --port 8100
+    ```
+    """
 
     name = "render"
     help = "Launch a GPU-less rendering server (preprocessing and postprocessing only)."
@@ -93,7 +103,6 @@ class LaunchSubcommand(CLISubcommand):
             cmd_subparser = launch_subparsers.add_parser(
                 cmd_cls.name,
                 help=cmd_cls.help,
-                description=cmd_cls.help,
                 usage=f"vllm {self.name} {cmd_cls.name} [options]",
             )
             cmd_subparser.set_defaults(launch_command=cmd_cls.cmd)

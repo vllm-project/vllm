@@ -10,17 +10,20 @@ from argparse import SUPPRESS, Action, HelpFormatter
 from collections.abc import Callable, Iterable
 from importlib.machinery import ModuleSpec
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, patch
 
+import mkdocs_gen_files
 from pydantic_core import core_schema
 
 logger = logging.getLogger("mkdocs")
 
 ROOT_DIR = Path(__file__).parent.parent.parent.parent
-ARGPARSE_DOC_DIR = ROOT_DIR / "docs/generated/argparse"
 
 sys.path.insert(0, str(ROOT_DIR))
+sys.path.insert(0, str(Path(__file__).parent))
+
+from generated_content import append_to_page  # noqa: E402
 
 
 def mock_if_no_torch(mock_module: str, mock: MagicMock):
@@ -241,49 +244,63 @@ def create_parser(add_cli_args, **kwargs) -> FlexibleArgumentParser:
     return _parser or parser
 
 
-def on_startup(command: Literal["build", "gh-deploy", "serve"], dirty: bool):
-    logger.info("Generating argparse documentation")
-    logger.debug("Root directory: %s", ROOT_DIR.resolve())
-    logger.debug("Output directory: %s", ARGPARSE_DOC_DIR.resolve())
-
-    # Create the ARGPARSE_DOC_DIR if it doesn't exist
-    if not ARGPARSE_DOC_DIR.exists():
-        ARGPARSE_DOC_DIR.mkdir(parents=True)
-
-    # Create parsers to document
-    parsers = {
-        # Engine args
-        "engine_args": create_parser(EngineArgs.add_cli_args),
-        "async_engine_args": create_parser(
-            AsyncEngineArgs.add_cli_args, async_args_only=True
-        ),
-        # CLI
-        "serve": create_parser(openai_cli_args.make_arg_parser),
-        "chat": create_parser(ChatCommand.add_cli_args),
-        "complete": create_parser(CompleteCommand.add_cli_args),
-        "launch_render": create_parser(RenderSubcommand.add_cli_args),
-        "run-batch": create_parser(openai_run_batch.make_arg_parser),
-        # Benchmark CLI
-        "bench_latency": create_parser(bench_latency.add_cli_args),
-        "bench_mm_processor": create_parser(bench_mm_processor.add_cli_args),
-        "bench_serve": create_parser(bench_serve.add_cli_args),
-        "bench_sweep_plot": create_parser(bench_sweep_plot.add_cli_args),
-        "bench_sweep_plot_pareto": create_parser(bench_sweep_plot_pareto.add_cli_args),
-        "bench_sweep_serve": create_parser(bench_sweep_serve.add_cli_args),
-        "bench_sweep_serve_workload": create_parser(
-            bench_sweep_serve_workload.add_cli_args
-        ),
-        "bench_throughput": create_parser(bench_throughput.add_cli_args),
-    }
-
-    # Generate documentation for each parser
-    for stem, parser in parsers.items():
-        doc_path = ARGPARSE_DOC_DIR / f"{stem}.inc.md"
-        # Specify encoding for building on Windows
-        with open(doc_path, "w", encoding="utf-8") as f:
-            f.write(super(type(parser), parser).format_help())
-        logger.info("Argparse generated: %s", doc_path.relative_to(ROOT_DIR))
+def format_help(parser: FlexibleArgumentParser) -> str:
+    """Format a parser's help as markdown using `MarkdownFormatter`."""
+    return super(type(parser), parser).format_help()
 
 
-if __name__ == "__main__":
-    on_startup("build", False)
+logger.info("Generating argparse documentation")
+logger.debug("Root directory: %s", ROOT_DIR.resolve())
+
+# Argument sections appended to handwritten pages
+engine_args = create_parser(EngineArgs.add_cli_args)
+async_engine_args = create_parser(AsyncEngineArgs.add_cli_args, async_args_only=True)
+append_to_page(
+    "configuration/engine_args.md",
+    f"## `EngineArgs`\n\n{format_help(engine_args)}"
+    f"## `AsyncEngineArgs`\n\n{format_help(async_engine_args)}",
+)
+append_to_page(
+    "cli/bench/mm_processor.md",
+    f"## Arguments\n\n{format_help(create_parser(bench_mm_processor.add_cli_args))}",
+)
+
+# CLI reference pages generated entirely from their parser: page -> (parser, JSON tip)
+pages = {
+    "cli/serve.md": (create_parser(openai_cli_args.make_arg_parser), True),
+    "cli/chat.md": (create_parser(ChatCommand.add_cli_args), False),
+    "cli/complete.md": (create_parser(CompleteCommand.add_cli_args), False),
+    "cli/run-batch.md": (create_parser(openai_run_batch.make_arg_parser), True),
+    "cli/launch/render.md": (create_parser(RenderSubcommand.add_cli_args), True),
+    "cli/bench/latency.md": (create_parser(bench_latency.add_cli_args), True),
+    "cli/bench/serve.md": (create_parser(bench_serve.add_cli_args), True),
+    "cli/bench/throughput.md": (create_parser(bench_throughput.add_cli_args), True),
+    "cli/bench/sweep/plot.md": (create_parser(bench_sweep_plot.add_cli_args), True),
+    "cli/bench/sweep/plot_pareto.md": (
+        create_parser(bench_sweep_plot_pareto.add_cli_args),
+        True,
+    ),
+    "cli/bench/sweep/serve.md": (create_parser(bench_sweep_serve.add_cli_args), True),
+    "cli/bench/sweep/serve_workload.md": (
+        create_parser(bench_sweep_serve_workload.add_cli_args),
+        True,
+    ),
+}
+
+JSON_TIP = '## JSON CLI Arguments\n\n--8<-- "docs/cli/json_tip.inc.md"\n\n'
+
+for doc_path, (parser, json_tip) in pages.items():
+    title = "vllm " + Path(doc_path).relative_to("cli").with_suffix("").as_posix()
+    content = f"# {title.replace('/', ' ')}\n\n"
+    if parser.description:
+        content += f"## Overview\n\n{parser.description}\n\n"
+        # Rendered above instead of at the top of the Arguments section
+        parser.description = None
+    if json_tip:
+        content += JSON_TIP
+    content += f"## Arguments\n\n{format_help(parser)}"
+    with mkdocs_gen_files.open(doc_path, "w") as f:
+        f.write(content)
+    logger.debug("CLI reference generated: %s", doc_path)
+
+logger.info("Total argparse docs generated: %d", len(pages) + 2)
