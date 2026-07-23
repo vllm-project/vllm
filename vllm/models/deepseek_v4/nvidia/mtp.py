@@ -52,6 +52,7 @@ from vllm.sequence import IntermediateTensors
 
 from .model import (
     DeepseekV4DecoderLayer,
+    DeepseekV4Model,
     make_deepseek_v4_expert_params_mapping,
 )
 
@@ -265,6 +266,10 @@ class DeepSeekV4MTP(nn.Module):
         super().__init__()
         self.config = vllm_config.model_config.hf_config
         self.quant_config = vllm_config.quant_config
+        self.pad_shared_expert = (
+            getattr(self.quant_config, "weight_block_size", None) is not None
+            and not vllm_config.parallel_config.use_sequence_parallel_moe
+        )
         self.model = DeepSeekV4MultiTokenPredictor(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
@@ -387,6 +392,12 @@ class DeepSeekV4MTP(nn.Module):
                     else ".weight_scale_inv"
                 )
                 name = name.removesuffix(".scale") + suffix
+            if ".shared_experts.w2" in name:
+                name = name.replace(".shared_experts.w2", ".shared_experts.down_proj")
+            if self.pad_shared_expert and ".shared_experts." in name:
+                loaded_weight = DeepseekV4Model._pad_shared_expert_weight(
+                    self.quant_config, name, loaded_weight
+                )
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 # Skip non-stacked layers and experts (experts handled below).
                 if ".experts." in name:
@@ -442,10 +453,6 @@ class DeepSeekV4MTP(nn.Module):
                     loaded_params.add(name)
                     continue
                 else:
-                    if ".shared_experts.w2" in name:
-                        name = name.replace(
-                            ".shared_experts.w2", ".shared_experts.down_proj"
-                        )
                     if name.endswith(".ffn.gate.bias"):
                         # ``e_score_correction_bias`` lives on the gate
                         # under a different attribute name.

@@ -334,6 +334,21 @@ class DeepSeekV4MTP(nn.Module):
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
 
+        def _resolve_scale_name(name: str) -> str:
+            # Quark checkpoints name FP8 block scales ``.weight_scale``,
+            # but block-FP8 layers register them as ``.weight_scale_inv``
+            # while MXFP4 experts register ``.weight_scale``. Auto-detect:
+            # rename to ``_inv`` only when that variant exists and the plain
+            # one does not.
+            if name.endswith(".weight_scale") and name not in params_dict:
+                inv = name.removesuffix(".weight_scale") + ".weight_scale_inv"
+                if inv in params_dict:
+                    return inv
+            # Otherwise leave the name unchanged: either it already matches a
+            # param, or it is genuinely unknown and should surface the normal
+            # KeyError downstream rather than be silently rewritten.
+            return name
+
         # TP for attention
         tp_size = get_tensor_model_parallel_world_size()
         tp_rank = get_tensor_model_parallel_rank()
@@ -393,6 +408,7 @@ class DeepSeekV4MTP(nn.Module):
                 if weight_name not in name:
                     continue
                 name = name.replace(weight_name, param_name)
+                name = _resolve_scale_name(name)
 
                 param = params_dict[name]
                 weight_loader = param.weight_loader
@@ -447,6 +463,7 @@ class DeepSeekV4MTP(nn.Module):
                         )
                     if name.endswith(".ffn.gate.bias"):
                         name = name.replace(".bias", ".e_score_correction_bias")
+                    name = _resolve_scale_name(name)
                     param = params_dict[name]
                     weight_loader = getattr(
                         param, "weight_loader", default_weight_loader
