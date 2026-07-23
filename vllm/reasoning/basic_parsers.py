@@ -129,7 +129,13 @@ class BaseThinkingReasoningParser(ReasoningParser):
                 )
             elif self.end_token_id in previous_token_ids:
                 # start token in previous, end token in previous,
-                # reasoning content continues
+                # reasoning content continues, but delta might still
+                # contain the end token text (token-split across chunks)
+                # or additional content after the end token.
+                if self.end_token_id in delta_token_ids:
+                    end_index = delta_text.find(self.end_token)
+                    content = delta_text[end_index + len(self.end_token) :]
+                    return DeltaMessage(content=content if content else None)
                 return DeltaMessage(content=delta_text)
             else:
                 # start token in previous, no end token in previous or delta,
