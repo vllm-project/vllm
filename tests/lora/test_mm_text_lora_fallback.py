@@ -108,3 +108,30 @@ def test_qwen3_vl_shaped_bug_gets_fallback():
         "language_model.model.layers.0.self_attn.q_proj.weight"
     )
     assert _map(out, BASE_VISUAL_PROBE) == "visual.blocks.0.attn.qkv.weight"
+def test_fallback_destination_follows_lm_dst():
+    """Catch-all must reuse the existing language_model destination."""
+    mapper = WeightsMapper(
+        orig_to_new_prefix={
+            "model.visual.": "visual.",
+            "lm_head.": "language_model.lm_head.",
+            "model.language_model.": "language_model.transformer.",
+        }
+    )
+    out = mapper.with_mm_text_lora_fallback()
+    assert out is not mapper
+    assert out.orig_to_new_prefix["model."] == "language_model.transformer."
+    assert _map(out, TEXT_LORA_PROBE) == (
+        "language_model.transformer.layers.0.self_attn.q_proj"
+    )
+
+
+def test_language_model_without_dot_suffix_is_noop():
+    """Require language_model. prefix destination, not bare language_model*."""
+    mapper = WeightsMapper(
+        orig_to_new_prefix={
+            "model.language_model.": "language_modeling.",
+        }
+    )
+    out = mapper.with_mm_text_lora_fallback()
+    assert out is mapper
+    assert "model." not in out.orig_to_new_prefix
