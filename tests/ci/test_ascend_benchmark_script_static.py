@@ -123,8 +123,8 @@ def test_benchmark_pins_named_runner_to_its_npu():
 
     assert '"${RUNNER_NAME:-}" =~ npu([0-9]+)$' in text
     assert 'runner_physical_device="${BASH_REMATCH[1]}"' in text
-    assert 'runner_devnodes=(/dev/davinci[0-9]*)' in text
-    assert 'export ASCEND_RT_VISIBLE_DEVICES=0' in text
+    assert "runner_devnodes=(/dev/davinci[0-9]*)" in text
+    assert "export ASCEND_RT_VISIBLE_DEVICES=0" in text
     assert 'export ASCEND_RT_VISIBLE_DEVICES="$runner_physical_device"' in text
 
 
