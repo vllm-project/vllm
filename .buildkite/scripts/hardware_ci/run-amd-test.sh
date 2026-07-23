@@ -56,6 +56,15 @@ fi
 export BUILDKIT_PROGRESS TERM FORCE_COLOR CLICOLOR_FORCE PY_COLORS PYTEST_ADDOPTS PYTEST_TIMEOUT ROCM_DOCKER_TTY
 export PYTHONFAULTHANDLER
 
+# The AMD pipeline template sets this for eligible pilot jobs. Capture it
+# before clear_ci_orchestration_env removes CI-only controls from test processes.
+hf_offline_retry_enabled="${VLLM_CI_HF_OFFLINE_RETRY:-0}"
+if [[ "${hf_offline_retry_enabled}" != "0" && "${hf_offline_retry_enabled}" != "1" ]]; then
+  echo "VLLM_CI_HF_OFFLINE_RETRY must be 0 or 1" >&2
+  exit 2
+fi
+hf_retry_command_file=""
+
 # Export Python path for commands that run directly on the host. Containerized
 # tests set this to /vllm-workspace below so spawned Python processes do not
 # depend on their current working directory.
@@ -73,6 +82,7 @@ report_docker_usage() {
 clear_ci_orchestration_env() {
   unset -v \
     VLLM_TEST_GROUP_NAME \
+    VLLM_CI_HF_OFFLINE_RETRY \
     VLLM_CI_REQUIRE_PERSISTENT_HF_CACHE \
     VLLM_CI_ARTIFACT_STEP \
     VLLM_TEST_CACHE \
@@ -90,6 +100,29 @@ clear_ci_orchestration_env() {
     VLLM_CI_USE_ARTIFACTS \
     VLLM_CI_RESULTS_ROOT \
     VLLM_ALLOW_DEPRECATED_BEAM_SEARCH
+}
+
+prepare_hf_retry_command_file() {
+  local command_text=$1
+
+  if ! hf_retry_command_file=$(mktemp "${TMPDIR:-/tmp}/vllm-hf-offline-command.XXXXXX"); then
+    echo "Failed to create the Hugging Face retry command file" >&2
+    return 1
+  fi
+  if ! printf '%s\n' "${command_text}" >"${hf_retry_command_file}"; then
+    echo "Failed to write the Hugging Face retry command file" >&2
+    rm -f -- "${hf_retry_command_file}"
+    hf_retry_command_file=""
+    return 1
+  fi
+}
+
+# shellcheck disable=SC2329  # Called by cleanup functions registered as traps.
+cleanup_hf_retry_command_file() {
+  if [[ -n "${hf_retry_command_file}" ]]; then
+    rm -f -- "${hf_retry_command_file}"
+    hf_retry_command_file=""
+  fi
 }
 
 cleanup_network() {
@@ -649,6 +682,7 @@ if is_native_runtime; then
   artifact_work_dir=""
 
   cleanup_native_workspace() {
+    cleanup_hf_retry_command_file
     if [[ -n "${artifact_work_dir}" ]]; then
       rm -rf "${artifact_work_dir}"
     fi
@@ -691,7 +725,13 @@ if is_native_runtime; then
   run_native_preflight || exit 1
   # Keep AMD CI orchestration variables out of vLLM's runtime environment.
   clear_ci_orchestration_env
-  /bin/bash -o pipefail -c "${commands}"
+  if [[ "${hf_offline_retry_enabled}" == "1" ]]; then
+    prepare_hf_retry_command_file "${commands}" || exit 1
+    bash "${VLLM_CI_WORKSPACE:-/vllm-workspace}/.buildkite/scripts/hf-offline-retry.sh" \
+      "${hf_retry_command_file}"
+  else
+    /bin/bash -o pipefail -c "${commands}"
+  fi
   handle_pytest_exit "$?"
 fi
 
@@ -709,6 +749,7 @@ artifact_work_dir=""
 container_name="rocm_${BUILDKITE_COMMIT}_$(tr -dc A-Za-z0-9 < /dev/urandom | head -c 10; echo)"
 
 remove_docker_container() {
+  cleanup_hf_retry_command_file
   if docker container inspect "${container_name}" >/dev/null 2>&1; then
     docker rm -f "${container_name}" || true
   fi
@@ -850,6 +891,10 @@ fi
 # --- Route: multi-node vs single-node ---
 clear_ci_orchestration_env
 if is_multi_node "$commands"; then
+  if [[ "${hf_offline_retry_enabled}" == "1" ]]; then
+    echo "Hugging Face offline retry is not enabled for AMD multi-node jobs yet" >&2
+    exit 2
+  fi
   echo "--- Multi-node job detected"
   export DCKR_VER=$(docker --version | sed 's/Docker version \(.*\), build .*/\1/')
 
@@ -894,6 +939,16 @@ if is_multi_node "$commands"; then
   fi
 else
   echo "--- Single-node job"
+  hf_retry_container_args=()
+  container_test_command="${commands}"
+  if [[ "${hf_offline_retry_enabled}" == "1" ]]; then
+    prepare_hf_retry_command_file "${commands}" || exit 1
+    hf_retry_container_path="/tmp/vllm-hf-offline-command.sh"
+    hf_retry_container_args=(
+      -v "${hf_retry_command_file}:${hf_retry_container_path}:ro"
+    )
+    container_test_command="bash /vllm-workspace/.buildkite/scripts/hf-offline-retry.sh ${hf_retry_container_path}"
+  fi
   echo "Render devices: $BUILDKITE_AGENT_META_DATA_RENDER_DEVICES"
   docker_run_terminal_args=(-i)
   if [[ "${ROCM_DOCKER_TTY}" == "1" ]]; then
@@ -950,9 +1005,10 @@ else
     -e "XDG_CACHE_HOME=${CONTAINER_CACHE_ROOT}/xdg" \
     -e "PYTORCH_ROCM_ARCH=" \
     "${standalone_merge_base_env[@]}" \
+    "${hf_retry_container_args[@]}" \
     --name "${container_name}" \
     "${image_name}" \
-    /bin/bash -c "${CONTAINER_PREFLIGHT} && ${commands}"
+    /bin/bash -c "${CONTAINER_PREFLIGHT} && ${container_test_command}"
 
   exit_code=$?
   handle_pytest_exit "$exit_code"
