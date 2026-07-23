@@ -104,11 +104,12 @@ def _warmup_prepare_dflash_inputs_kernel(
     max_sampled = max_num_reqs * max(num_speculative_steps, 1)
 
     logger.info(
-        "Warming up _prepare_dflash_inputs_kernel: "
+        "Warming up _prepare_dflash_inputs_kernel on %s: "
         "%d BLOCK_SIZE x %d grid combos = %d entries "
         "(num_speculative_steps=%d, num_query_per_req=%d, "
         "sample_from_anchor=%s, block_size=%d, block_table_stride=%d, "
         "max_num_reqs=%d, max_num_tokens=%d, max_model_len=%d)",
+        device,
         len(_DFLASH_BLOCK_SIZES),
         len(_DFLASH_GRID_COMBOS),
         len(_DFLASH_BLOCK_SIZES) * len(_DFLASH_GRID_COMBOS),
@@ -252,19 +253,6 @@ def dflash_kernel_warmup(speculator: DFlashSpeculator) -> None:
     block_table_stride = int(input_block_tables[0].stride(0))
 
     device_str = str(device)
-    logger.info(
-        "Warming up DFlash spec-decode kernels on %s "
-        "(num_speculative_steps=%d, sample_from_anchor=%s, "
-        "block_table_stride=%d, max_num_reqs=%d, max_num_tokens=%d, "
-        "max_model_len=%d)",
-        device_str,
-        speculator.num_speculative_steps,
-        speculator.sample_from_anchor,
-        block_table_stride,
-        speculator.max_num_reqs,
-        speculator.max_num_tokens,
-        speculator.max_model_len,
-    )
 
     _warmup_prepare_dflash_inputs_kernel(
         device=device_str,
