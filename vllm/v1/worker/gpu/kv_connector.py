@@ -52,7 +52,12 @@ class KVConnector:
     def post_forward(
         self, finished_req_ids: set[str], wait_for_save: bool = True
     ) -> KVConnectorOutput | None:
-        return None
+        if self.hisparse_block_size is None:
+            return None
+        from vllm.v1.attention.backends.mla.hisparse import take_hisparse_stats
+
+        stats = take_hisparse_stats()
+        return KVConnectorOutput(hisparse_stats=stats) if stats is not None else None
 
     def no_forward(self, scheduler_output: "SchedulerOutput") -> ModelRunnerOutput:
         self.pre_forward(scheduler_output)
@@ -108,9 +113,11 @@ class ActiveKVConnector(KVConnector):
         self, finished_req_ids: set[str], wait_for_save: bool = True
     ) -> KVConnectorOutput | None:
         if self._disabled:
-            return None
+            return super().post_forward(finished_req_ids, wait_for_save)
 
-        output = KVConnectorOutput()
+        output = super().post_forward(finished_req_ids, wait_for_save)
+        if output is None:
+            output = KVConnectorOutput()
         if wait_for_save:
             self.kv_connector.wait_for_save()
         output.finished_sending, output.finished_recving = (

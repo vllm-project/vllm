@@ -90,6 +90,7 @@ class KVOutputAggregator:
         finished_sending = set[str]()
         finished_recving = set[str]()
         aggregated_kv_connector_stats = None
+        aggregated_hisparse_stats = None
         aggregated_kv_connector_worker_meta = None
         combined_kv_cache_events = None
         invalid_block_ids = set[int]()
@@ -130,6 +131,11 @@ class KVOutputAggregator:
                     kv_connector_stats
                 )
 
+            if aggregated_hisparse_stats is None:
+                aggregated_hisparse_stats = kv_output.hisparse_stats
+            elif hisparse_stats := kv_output.hisparse_stats:
+                aggregated_hisparse_stats.aggregate(hisparse_stats)
+
             # Aggregate kv_connector_worker_meta from all workers.
             if aggregated_kv_connector_worker_meta is None:
                 # Use the first worker's kv_connector_worker_meta as accumulator.
@@ -164,6 +170,7 @@ class KVOutputAggregator:
             finished_sending=finished_sending or None,
             finished_recving=finished_recving or None,
             kv_connector_stats=aggregated_kv_connector_stats or None,
+            hisparse_stats=aggregated_hisparse_stats,
             kv_cache_events=combined_kv_cache_events or None,
             kv_connector_worker_meta=aggregated_kv_connector_worker_meta or None,
             invalid_block_ids=invalid_block_ids,

@@ -1382,6 +1382,26 @@ def test_hisparse_decode_batch_detection():
     )
 
 
+def test_hisparse_stats_report_periodic_deltas(monkeypatch: pytest.MonkeyPatch):
+    from vllm.v1.attention.backends.mla import hisparse
+    from vllm.v1.metrics.stats import HiSparseStats
+
+    coordinator = SimpleNamespace(
+        _swap_stats=torch.tensor([7, 3], dtype=torch.uint64), stats_row_bytes=16
+    )
+    monkeypatch.setattr(hisparse, "_COORDINATORS", [coordinator])
+    monkeypatch.setattr(hisparse, "_METRICS_INTERVAL", 2)
+    monkeypatch.setattr(hisparse, "_metrics_calls", 0)
+    monkeypatch.setattr(hisparse, "_metrics_last", HiSparseStats())
+
+    assert hisparse.take_hisparse_stats() is None
+    assert hisparse.take_hisparse_stats() == HiSparseStats(7, 3, 48)
+
+    coordinator._swap_stats = torch.tensor([12, 4], dtype=torch.uint64)
+    assert hisparse.take_hisparse_stats() is None
+    assert hisparse.take_hisparse_stats() == HiSparseStats(5, 1, 16)
+
+
 def _make_hisparse_coordinator(
     *,
     top_k: int = 4,

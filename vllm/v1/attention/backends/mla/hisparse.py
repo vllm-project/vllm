@@ -41,6 +41,7 @@ from vllm.utils.math_utils import round_up
 from vllm.v1.attention.backends.mla.sparse_utils import (
     triton_convert_req_index_to_global_index,
 )
+from vllm.v1.metrics.stats import HiSparseStats
 
 logger = init_logger(__name__)
 
@@ -97,8 +98,38 @@ class ResolvedHiSparseConfig:
 
 
 _COORDINATORS: list[HiSparseCoordinator] = []
+_METRICS_INTERVAL = 2000
+_metrics_calls = 0
+_metrics_last = HiSparseStats()
 _CURRENT_GROUP_LEADER: HiSparseCoordinator | None = None
 _PREFILL_REMAP: tuple | None = None
+
+
+def take_hisparse_stats() -> HiSparseStats | None:
+    """Return counter deltas periodically, avoiding per-step synchronization."""
+    global _metrics_calls, _metrics_last
+    _metrics_calls += 1
+    if not _COORDINATORS or _metrics_calls % _METRICS_INTERVAL != 0:
+        return None
+
+    current = HiSparseStats()
+    for coordinator in _COORDINATORS:
+        hits, misses = coordinator._swap_stats.cpu().tolist()
+        current.cache_hits += hits
+        current.cache_misses += misses
+        current.host_to_device_bytes += misses * coordinator.stats_row_bytes
+
+    delta = HiSparseStats(
+        cache_hits=current.cache_hits - _metrics_last.cache_hits,
+        cache_misses=current.cache_misses - _metrics_last.cache_misses,
+        host_to_device_bytes=(
+            current.host_to_device_bytes - _metrics_last.host_to_device_bytes
+        ),
+    )
+    _metrics_last = current
+    if delta.cache_hits == 0 and delta.cache_misses == 0:
+        return None
+    return delta
 
 
 # Persistent pinned staging for per-step invalidated-slot uploads. One shared buffer is
@@ -165,7 +196,7 @@ def _covers_registered_host_range(ptr: int, nbytes: int) -> bool:
 def release_pinned_state() -> bool:
     """Synchronize, unregister host KV pools, and drop global state."""
     global _CURRENT_GROUP_LEADER, _PINNED_STAGING, _PINNED_STAGING_EVENT
-    global _PREFILL_REMAP
+    global _PREFILL_REMAP, _metrics_calls, _metrics_last
     released = bool(_PINNED_HOST_POOLS or _PINNED_STAGING is not None)
     if _PINNED_HOST_POOLS:
         try:
@@ -212,6 +243,8 @@ def release_pinned_state() -> bool:
                 coordinator._host_cache = None
                 released = True
     _COORDINATORS.clear()
+    _metrics_calls = 0
+    _metrics_last = HiSparseStats()
     _GROUP_PLANS.clear()
     _COPY_STREAMS.clear()
     _CURRENT_GROUP_LEADER = None
@@ -407,6 +440,8 @@ class HiSparseCoordinator:
             max_num_reqs, dtype=torch.int32, device=self.device
         )
 
+        self._swap_stats = torch.zeros(2, dtype=torch.uint64, device=self.device)
+        self.stats_row_bytes = row_bytes
         _COORDINATORS.append(self)
 
         self._plan = _get_group_plan(self.device, max_num_reqs, config.top_k)
@@ -440,6 +475,7 @@ class HiSparseCoordinator:
     def join_group(self, leader: HiSparseCoordinator) -> None:
         self.leader = leader
         leader.group_shared.append(self)
+        leader.stats_row_bytes += self.stats_row_bytes
         _COORDINATORS.remove(self)
         self.device_global_indices = None
         self.lru_slots = None
@@ -768,6 +804,7 @@ class HiSparseCoordinator:
             self.request_state_indices,
             self.region_stride,
             miss_mask,
+            self._swap_stats,
         )
 
         if produce_plan:
