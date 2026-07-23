@@ -401,9 +401,6 @@ class KVTransferThread(threading.Thread):
                 req_id = getattr(request_data, "req_id", "<unknown>")
                 logger.exception("Error in %s (req=%s)", self.name, req_id)
             finally:
-                # task_done accounting lives here, not in the handlers: a
-                # handler exception must not leak unfinished_tasks, which
-                # the close() drain and the RESET queue join rely on.
                 self.request_queue.task_done()
 
     def _handle_request(self, req_meta: Any):
@@ -537,10 +534,6 @@ class KVCacheStoreSendingThread(KVTransferThread):
         if req_id not in self.stored_requests:
             return
 
-        # Decrement the in-flight counter in `finally` so the scheduler can
-        # release the GPU blocks it pinned for this request (via
-        # `delay_free_blocks`) even when the store path raises. (task_done
-        # accounting lives in the run() loop.)
         try:
             if token_len == 0:
                 return
@@ -997,11 +990,8 @@ class MooncakeStoreWorker:
             "load_async", True
         )
         self.cache_config = vllm_config.cache_config
-        # HiSparse keeps MLA KV in pinned host memory while the indexer KV
-        # stays on the GPU, so registration spans host and device segments.
-        attention_config = getattr(vllm_config, "attention_config", None)
         self._hisparse_enabled = (
-            getattr(attention_config, "hisparse_config", None) is not None
+            vllm_config.attention_config.hisparse_config is not None
         )
         self.block_size, self.hash_block_size = resolve_kv_cache_block_sizes(
             kv_cache_config, vllm_config
@@ -1222,10 +1212,7 @@ class MooncakeStoreWorker:
         if self._hisparse_enabled:
             raise ValueError(
                 "HiSparse host-resident KV is incompatible with "
-                "enable_cross_layers_blocks: MLA layers live in pinned host "
-                "memory while indexer layers stay on the GPU, so they cannot "
-                "share one packed cross-layer tensor. Disable "
-                "enable_cross_layers_blocks for HiSparse deployments."
+                "enable_cross_layers_blocks. Disable it for HiSparse."
             )
         self.register_kv_caches({"__cross_layer__": kv_cache})
 
@@ -1252,17 +1239,12 @@ class MooncakeStoreWorker:
         seen_ptrs: set[int] = set()
         addrs: list[int] = []
         block_lens: list[int] = []
-        # Per-segment memory kind, parallel to addrs. CPU (pinned) tensors
-        # register as host segments and GPU tensors as device segments; for
-        # HiSparse this is mixed (host MLA + device indexer).
         mem_kinds: list[str] = []
 
         for value in kv_caches.values():
             cache = _repr_tensor(value)
             cache_storage = cache.untyped_storage()
             if cache.device.type == "cpu":
-                # HiSparse uses an aligned view into a larger pageable
-                # allocation. Only the view range is cudaHostRegister'ed.
                 base_addr = cache.data_ptr()
                 region_len = cache.nbytes
             else:
@@ -1275,10 +1257,6 @@ class MooncakeStoreWorker:
 
             ret = self.store.register_buffer(base_addr, region_len)
             if ret != 0:
-                # Fail loud: continuing would advertise an unregistered
-                # segment to the store, and every later batch_put_from /
-                # batch_get_into on it fails or corrupts (for HiSparse this
-                # is the whole multi-hundred-GiB pinned MLA pool).
                 raise RuntimeError(
                     f"Mooncake register_buffer failed for addr {base_addr:#x} "
                     f"len {region_len} ({mem_kind}): {ret}"
@@ -1607,10 +1585,6 @@ class MooncakeStoreWorker:
         if store is None:
             return
         self.store = None
-        # Bounded drain of the send/recv worker queues: closing the store
-        # frees the TransferEngine under a thread that may be mid
-        # batch_put_from/batch_get_into on the registered (pinned) buffers.
-        # The daemon threads themselves stay parked on queue.get().
         deadline = time.monotonic() + 5.0
         for thread in (self.kv_send_thread, *self.kv_recv_threads):
             if thread is None:

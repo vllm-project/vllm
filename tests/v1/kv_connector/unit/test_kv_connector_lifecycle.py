@@ -28,12 +28,9 @@ def test_hisparse_connector_invalidates_new_blocks_before_forward():
         scheduled_cached_reqs=SimpleNamespace(new_block_ids=[([4],), None]),
     )
 
-    with (
-        patch(
-            "vllm.v1.attention.backends.mla.hisparse.invalidate_blocks"
-        ) as invalidate,
-        patch("vllm.v1.attention.backends.mla.hisparse._maybe_log_hisparse_stats"),
-    ):
+    with patch(
+        "vllm.v1.attention.backends.mla.hisparse.invalidate_blocks"
+    ) as invalidate:
         connector.pre_forward(scheduler_output)
 
     invalidate.assert_called_once_with([2, 3, 4], 64)

@@ -1339,14 +1339,9 @@ def _get_kv_cache_config_packed(
 
 def _hisparse_host_pool_bytes(vllm_config: VllmConfig) -> int | None:
     """Return the HiSparse per-rank pinned host budget."""
-    from vllm.v1.attention.backends.mla.hisparse import ResolvedHiSparseConfig
-
-    if vllm_config.attention_config.hisparse_config is None:
+    config = vllm_config.attention_config.hisparse_config
+    if config is None:
         return None
-    config = ResolvedHiSparseConfig.from_vllm_config(
-        vllm_config, vllm_config.model_config.hf_config.index_topk
-    )
-    assert config is not None
     return int(config.host_pool_gib * 2**30)
 
 

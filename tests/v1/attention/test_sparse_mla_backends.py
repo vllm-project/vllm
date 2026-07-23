@@ -1547,7 +1547,7 @@ def test_hisparse_apply_plan_matches_independent():
                 for _ in range(num_reqs)
             ]
         )
-        topk[:, -1] = -1  # padding column
+        topk[:, -1] = -1
         kw = dict(
             kv_cache=kv_pool,
             req_id_per_token=req_ids,
@@ -1555,17 +1555,14 @@ def test_hisparse_apply_plan_matches_independent():
             block_size=block_size,
             slot_mapping=slot_mapping,
         )
-        # full layer produces the plan; independent layer resolves alone.
         _, idx_full = producer.swap_in(
             topk_indices=topk.clone(), produce_plan=True, **kw
         )
         _, idx_indep = indep.swap_in(topk_indices=topk.clone(), **kw)
-        # shared layer replays the plan (no LRU resolution of its own).
         _, idx_shared = shared.apply_plan(
             kv_cache=kv_pool, block_size=block_size, num_tokens=num_reqs
         )
         torch.accelerator.synchronize()
-        # Same plan, and the replayed hot buffer == the independent one.
         torch.testing.assert_close(idx_shared, idx_full, rtol=0, atol=0)
         torch.testing.assert_close(idx_indep, idx_full, rtol=0, atol=0)
         torch.testing.assert_close(shared.hot_cache, indep.hot_cache)

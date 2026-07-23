@@ -51,10 +51,6 @@ FP8_DS_MLA_ROW_BYTES = 656
 # viewed with any kernel page size up to 128.
 HOT_REGION_ALIGN = 128
 
-# Warn when the estimated hot-buffer footprint exceeds this fraction of total
-# GPU memory (model load will likely OOM).
-HOT_BUFFER_GPU_WARN_FRACTION = 0.5
-
 
 def is_hisparse_decode_batch(
     *,
@@ -100,48 +96,9 @@ class ResolvedHiSparseConfig:
         )
 
 
-# Plan-producing coordinators register here for telemetry; index-sharing
-# "shared" layers deregister via join_group (their leader's counter, with
-# stats_row_bytes summed over the group, covers them).
-_STATS: list[HiSparseCoordinator] = []
-_STATS_INTERVAL = 2000
-_stats_calls = 0
-_stats_last = (0, 0, 0)
+_COORDINATORS: list[HiSparseCoordinator] = []
 _CURRENT_GROUP_LEADER: HiSparseCoordinator | None = None
 _PREFILL_REMAP: tuple | None = None
-
-
-def _maybe_log_hisparse_stats() -> None:
-    """Log aggregate hot-buffer hit rate + PCIe gather volume periodically.
-
-    Counters accumulate in-kernel (graph-safe); this host-side read costs a
-    few tiny D2H copies every _STATS_INTERVAL steps.
-    """
-    global _stats_calls, _stats_last
-    _stats_calls += 1
-    if not _STATS or _stats_calls % _STATS_INTERVAL != 0:
-        return
-    hits = misses = gather_bytes = 0
-    for c in _STATS:
-        h, m = c._swap_stats.cpu().tolist()
-        hits += h
-        misses += m
-        gather_bytes += m * c.stats_row_bytes
-    d_hits = hits - _stats_last[0]
-    d_misses = misses - _stats_last[1]
-    d_bytes = gather_bytes - _stats_last[2]
-    _stats_last = (hits, misses, gather_bytes)
-    total = d_hits + d_misses
-    if total == 0:
-        return
-    logger.info(
-        "HiSparse (last %d steps): hit rate %.1f%%, %.2f GiB gathered "
-        "host->device (%d misses).",
-        _STATS_INTERVAL,
-        100.0 * d_hits / total,
-        d_bytes / 2**30,
-        d_misses,
-    )
 
 
 # Persistent pinned staging for per-step invalidated-slot uploads. One shared buffer is
@@ -174,22 +131,6 @@ def check_hisparse_host_memory(vllm_config: VllmConfig, rank_bytes: int) -> None
             f"HiSparse pinned host pool needs ~{rank_bytes / 2**30:.0f} GiB "
             f"but only {mem.available / 2**30:.0f} GiB of RAM is available. "
             "Lower hisparse_config.host_pool_gib or leave headroom for co-tenants."
-        )
-    parallel = vllm_config.parallel_config
-    ranks_on_node = (
-        parallel.tensor_parallel_size
-        * parallel.pipeline_parallel_size
-        * max(parallel.data_parallel_size_local, 1)
-    )
-    need = rank_bytes * ranks_on_node
-    if need > mem.total * 0.95 and parallel.rank == 0:
-        logger.warning(
-            "HiSparse pinned host pools may need ~%.0f GiB on this node "
-            "(%d ranks x %.0f GiB) but it has %.0f GiB total.",
-            need / 2**30,
-            ranks_on_node,
-            rank_bytes / 2**30,
-            mem.total / 2**30,
         )
 
 
@@ -265,12 +206,12 @@ def release_pinned_state() -> bool:
 
     _PINNED_STAGING = None
     _PINNED_STAGING_EVENT = None
-    for leader in _STATS:
+    for leader in _COORDINATORS:
         for coordinator in (leader, *leader.group_shared):
             if coordinator._host_cache is not None:
                 coordinator._host_cache = None
                 released = True
-    _STATS.clear()
+    _COORDINATORS.clear()
     _GROUP_PLANS.clear()
     _COPY_STREAMS.clear()
     _CURRENT_GROUP_LEADER = None
@@ -311,7 +252,7 @@ def invalidate_blocks(block_ids: list[int], block_size: int) -> None:
     if not block_ids:
         return
     slots: torch.Tensor | None = None
-    for coordinator in _STATS:
+    for coordinator in _COORDINATORS:
         if slots is None:
             # Built once on device and shared by every leader.
             blocks = _pinned_to_device(block_ids, coordinator.device)
@@ -375,9 +316,6 @@ class _GroupPlan:
         self.miss_mask = torch.zeros(
             (max_rows, top_k), dtype=torch.int32, device=device
         )
-        # Populated only when the producer resolves with return_valid_counts
-        # (the bf16 path); shared layers reuse it (identical top-k -> identical
-        # counts). None until first produced.
         self.valid_counts: torch.Tensor | None = None
 
 
@@ -397,15 +335,12 @@ _COPY_STREAMS: dict[str, torch.Stream] = {}
 
 
 def _get_copy_stream(device: torch.device) -> torch.Stream:
-    """One dedicated copy stream per device, shared across a group's coordinators
-    for overlapped prefetch. Capturing a fork/join around work on it into a
-    FULL_DECODE_ONLY graph is supported."""
     key = str(device)
-    s = _COPY_STREAMS.get(key)
-    if s is None:
-        s = torch.Stream(device=device)
-        _COPY_STREAMS[key] = s
-    return s
+    stream = _COPY_STREAMS.get(key)
+    if stream is None:
+        stream = torch.Stream(device=device)
+        _COPY_STREAMS[key] = stream
+    return stream
 
 
 class HiSparseCoordinator:
@@ -455,9 +390,6 @@ class HiSparseCoordinator:
         self.hot_cache = torch.zeros(
             (hot_rows, row_width), dtype=kv_dtype, device=self.device
         )
-        # Per-request LRU state; released in join_group for index-sharing
-        # "shared" layers, which replay their leader's plan and never resolve
-        # the LRU themselves.
         self.device_global_indices: torch.Tensor | None = torch.full(
             (max_num_reqs, config.device_buffer_size),
             -1,
@@ -475,24 +407,9 @@ class HiSparseCoordinator:
             max_num_reqs, dtype=torch.int32, device=self.device
         )
 
-        # In-kernel hit/miss counters (telemetry). stats_row_bytes converts
-        # misses to gathered bytes; plan-once wiring adds each shared
-        # layer's row bytes to its leader (the shared layers re-gather the
-        # leader's misses), so the leader's counter covers the whole group.
-        self._swap_stats = torch.zeros(2, dtype=torch.uint64, device=self.device)
-        self.stats_row_bytes = row_bytes
-        _STATS.append(self)
+        _COORDINATORS.append(self)
 
-        # Group-shared plan buffers for index-sharing plan-once (see _GroupPlan).
         self._plan = _get_group_plan(self.device, max_num_reqs, config.top_k)
-
-        # Overlapped prefetch: a "full" layer issues its group's "shared"
-        # gathers early on a copy stream, overlapping the PCIe transfer with
-        # intervening compute (measured +24% / +41% end-to-end decode
-        # throughput at c=32 / c=96 on GLM-5.2-FP8 vs inline gathers).
-        # group_shared/leader are wired via join_group; _prefetch_event is
-        # recorded on the copy stream by the leader and awaited in the shared
-        # layer's apply_plan.
         self.group_shared: list[HiSparseCoordinator] = []
         self.leader: HiSparseCoordinator | None = None
         self._prefetch_event: torch.Event | None = None
@@ -521,16 +438,9 @@ class HiSparseCoordinator:
             self.join_group(_CURRENT_GROUP_LEADER)
 
     def join_group(self, leader: HiSparseCoordinator) -> None:
-        """Attach to an index-sharing group as a "shared" layer.
-
-        Shared layers replay the leader's plan: they never resolve the LRU
-        (their per-request state is released) and never produce stats (their
-        re-gathered bytes are covered by the leader's miss counter).
-        """
         self.leader = leader
         leader.group_shared.append(self)
-        leader.stats_row_bytes += self.stats_row_bytes
-        _STATS.remove(self)
+        _COORDINATORS.remove(self)
         self.device_global_indices = None
         self.lru_slots = None
         self._lru_init = None
@@ -616,12 +526,10 @@ class HiSparseCoordinator:
             None,
         )
         return staged, new_bt
-        self.reset_hot_state()
 
     def reset_hot_state(self) -> None:
         """Drop all hot-buffer bookkeeping (hits become misses)."""
         if self.device_global_indices is None:
-            # Shared layer: the leader owns the group's LRU state.
             return
         assert self.lru_slots is not None and self._lru_init is not None
         self.device_global_indices.fill_(-1)
@@ -798,11 +706,6 @@ class HiSparseCoordinator:
         Returns ``(hot_cache_paged, hot_indices)`` (plus ``valid_counts`` when
         requested). ``hot_cache_paged`` has the same paged layout as a regular
         MLA KV cache; ``hot_indices`` are global token ids within it.
-
-        When ``produce_plan`` (an index-sharing "full" layer), the resolved plan
-        (global ids, hot slots, miss mask) is also written to the group-shared
-        buffers so the group's "shared" layers can replay it via ``apply_plan``
-        without re-resolving the LRU.
         """
         num_tokens = topk_indices.shape[0]
         top_k = topk_indices.shape[1]
@@ -843,15 +746,10 @@ class HiSparseCoordinator:
             else None
         )
 
-        # For a plan producer, resolve into the group-shared buffers so the
-        # group's shared layers can replay the identical plan.
         if produce_plan:
             self._plan.global_indices[:num_tokens].copy_(global_indices)
             hot_indices = self._plan.hot_indices[:num_tokens]
             miss_mask = self._plan.miss_mask[:num_tokens]
-            # The kernel skips CUDA-graph padding rows, so their entries in
-            # the persistent plan buffer would otherwise keep stale values;
-            # refill so padded rows come out -1 (masked by attention).
             hot_indices.fill_(-1)
         else:
             hot_indices = torch.full_like(global_indices, -1)
@@ -870,19 +768,10 @@ class HiSparseCoordinator:
             self.request_state_indices,
             self.region_stride,
             miss_mask,
-            self._swap_stats,
         )
 
         if produce_plan:
-            # Shared layers reuse the group's counts (identical top-k).
             self._plan.valid_counts = valid_counts
-            # Overlapped prefetch: issue the group's shared gathers early on
-            # the copy stream so their PCIe transfer overlaps intervening
-            # compute. Pure decode only (slot_mapping present): with
-            # slot_mapping=None the newest tokens are in the miss set, served
-            # from host rows the shared layers' own backups have not written
-            # yet when the copy stream forks. apply_plan then gathers inline
-            # on the compute stream, which IS ordered after each backup.
             if self.group_shared:
                 if slot_mapping is not None:
                     self._prefetch_group(num_tokens)
@@ -895,8 +784,6 @@ class HiSparseCoordinator:
         return self.hot_cache_paged(block_size), hot_indices, valid_counts
 
     def _gather_plan_into(self, num_tokens: int) -> None:
-        """Gather THIS coord's misses per the group-shared plan into its own
-        hot cache, from the host pool, on the current stream."""
         torch.ops._C_cache_ops.hisparse_gather_plan(
             self._host_cache,
             self.hot_cache,
@@ -907,16 +794,10 @@ class HiSparseCoordinator:
         )
 
     def _prefetch_group(self, num_tokens: int) -> None:
-        """Leader-side: fork the copy stream from the compute stream (plan is
-        ready) and issue each shared layer's gather on it, recording a per-shared
-        event the shared layer's apply_plan awaits. Fork here + wait_event there
-        is captured into the decode graph."""
         compute = torch.accelerator.current_stream(self.device)
-        self._copy_stream.wait_stream(compute)  # fork
+        self._copy_stream.wait_stream(compute)
         with self._copy_stream:
             for shared in self.group_shared:
-                # Need the host pool bound to serve misses. Until then, the
-                # shared layer gathers inline in apply_plan.
                 if shared._host_cache is None:
                     shared._prefetch_event = None
                     continue
@@ -924,8 +805,6 @@ class HiSparseCoordinator:
                 if shared._prefetch_event is None:
                     shared._prefetch_event = torch.Event()
                 shared._prefetch_event.record(self._copy_stream)
-
-    # ---------------------------------------------------------- plan replay
 
     def apply_plan(
         self,
@@ -938,36 +817,21 @@ class HiSparseCoordinator:
         tuple[torch.Tensor, torch.Tensor]
         | tuple[torch.Tensor, torch.Tensor, torch.Tensor]
     ):
-        """Replay the group's plan for an index-sharing "shared" layer.
-
-        A "full" layer resolved the plan via ``swap_in(produce_plan=True)``;
-        this gathers only THIS layer's own missed rows into the identical
-        planned hot slots, with no LRU resolution. Fixed shape -> capture-safe.
-        """
-        n = num_tokens
-        hot_indices = self._plan.hot_indices[:n]
+        hot_indices = self._plan.hot_indices[:num_tokens]
         if self._prefetch_event is not None:
-            # Leader already gathered this layer's misses on the copy stream;
-            # just join so attention sees them, then consume the event so the
-            # next step re-prefetches (or falls back if it can't).
             torch.accelerator.current_stream(self.device).wait_event(
                 self._prefetch_event
             )
             self._prefetch_event = None
         else:
-            # Not prefetched (mixed batch, or host pool not yet bound): gather
-            # this layer's misses inline, same path the leader's prefetch uses.
             self.bind_source_cache(kv_cache)
-            self._gather_plan_into(n)
+            self._gather_plan_into(num_tokens)
         if return_valid_counts:
-            assert self._plan.valid_counts is not None, (
-                "apply_plan(return_valid_counts=True) requires the group's full "
-                "layer to have produced the plan with counts (bf16 path)."
-            )
+            assert self._plan.valid_counts is not None
             return (
                 self.hot_cache_paged(block_size),
                 hot_indices,
-                self._plan.valid_counts[:n],
+                self._plan.valid_counts[:num_tokens],
             )
         return self.hot_cache_paged(block_size), hot_indices
 
@@ -984,16 +848,6 @@ def create_hisparse_coordinator(
     if config is None:
         return None
 
-    # HiSparse targets PD decode instances, where KV arrives via a consumer
-    # connector (NIXL) into the host pool. Local prefill (preemption resume,
-    # recompute after a failed KV load) is supported but stages context
-    # host->GPU, so it is slower than a normal GPU prefill.
-    hf_config = vllm_config.model_config.hf_config
-    if not hasattr(hf_config, "index_topk"):
-        raise ValueError("HiSparse is only supported for DSA models with index_topk.")
-    if hasattr(hf_config, "compress_ratios") and len(hf_config.compress_ratios) > 0:
-        raise ValueError("This HiSparse path targets GLM-5/DSA, not DeepSeek V4.")
-
     max_num_reqs = vllm_config.scheduler_config.max_num_seqs
     if device is None:
         device = torch.device(
@@ -1008,21 +862,6 @@ def create_hisparse_coordinator(
         device=device,
     )
     hot_bytes = coordinator.hot_cache.numel() * kv_dtype.itemsize
-    # Hot buffers are allocated eagerly per layer and scale with
-    # max_num_seqs; a too-large product otherwise surfaces as an unrelated
-    # CUDA OOM at model load (DeepEP buffers, weights, ...).
-    num_layers = vllm_config.model_config.get_num_layers(vllm_config.parallel_config)
-    total_gpu = current_platform.get_device_total_memory(coordinator.device.index or 0)
-    if num_layers * hot_bytes > HOT_BUFFER_GPU_WARN_FRACTION * total_gpu:
-        logger.warning_once(
-            "HiSparse hot buffers need %.1f GiB of GPU memory (%d layers x "
-            "max_num_seqs=%d x device_buffer_size=%d). This usually OOMs at "
-            "model load; lower max_num_seqs on decode instances.",
-            num_layers * hot_bytes / 2**30,
-            num_layers,
-            max_num_reqs,
-            config.device_buffer_size,
-        )
     logger.info_once(
         "Enabled experimental HiSparse sparse MLA hot buffer: top_k=%d, "
         "device_buffer_size=%d (region_stride=%d), host_pool_gib=%s, "

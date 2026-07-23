@@ -45,12 +45,8 @@ class KVConnector:
             if new_block_ids is not None:
                 block_ids.extend(new_block_ids[0])
 
-        from vllm.v1.attention.backends.mla.hisparse import (
-            _maybe_log_hisparse_stats,
-            invalidate_blocks,
-        )
+        from vllm.v1.attention.backends.mla.hisparse import invalidate_blocks
 
-        _maybe_log_hisparse_stats()
         invalidate_blocks(block_ids, self.hisparse_block_size)
 
     def post_forward(

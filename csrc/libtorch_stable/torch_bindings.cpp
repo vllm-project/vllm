@@ -823,8 +823,7 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C_cache_ops, ops) {
       "                 Tensor! lru_slots,"
       "                 Tensor? request_state_indices,"
       "                 int region_stride,"
-      "                 Tensor(a!)? miss_mask=None,"
-      "                 Tensor(b!)? stats=None) -> ()");
+      "                 Tensor(a!)? miss_mask=None) -> ()");
 
   ops.def(
       "hisparse_gather_plan(Tensor host_cache,"

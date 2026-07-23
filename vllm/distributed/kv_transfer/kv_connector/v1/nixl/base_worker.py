@@ -474,25 +474,11 @@ class NixlBaseConnectorWorker:
         # Uses Queue for thread-safe cross-thread coordination with the
         # background handshake thread, matching the _ready_requests pattern.
         self._failed_recv_reqs: queue.Queue[ReqId] = queue.Queue()
-        # Deferred "done reading" notifications for reads split across
-        # multiple xfers (mixed DRAM/VRAM): NIXL can attach a notif_msg to
-        # only one xfer, so the P-side notification is sent explicitly once
-        # every xfer of the request completes (see _pop_done_transfers).
         self._pending_recv_notifs: dict[ReqId, list[tuple[str, bytes]]] = {}
-        # Requests with a failed xfer whose sibling xfers are still in
-        # flight. A posted NIXL transfer cannot be aborted (on the UCX
-        # backend release_xfer_handle silently skips the cancel and the RDMA
-        # READ keeps writing into local memory after the call), so the
-        # failure report — and with it the scheduler's block invalidation
-        # and reuse — is deferred until _pop_done_transfers reaps the
-        # request's last handle. Reporting earlier lets the surviving READ
-        # DMA into blocks the scheduler has already reallocated.
+        # A posted READ cannot be aborted, so failure remains pending until
+        # every sibling transfer is terminal and its blocks are safe to reuse.
         self._failed_recv_pending: set[ReqId] = set()
-        # Requests reported failed and not yet drained by get_finished;
-        # guards exactly-once reporting.
         self._failed_recv_reported: set[ReqId] = set()
-        # Guards the failed-recv transitions against _recving_transfers
-        # state; shared with the background handshake thread.
         self._failed_recv_lock = threading.Lock()
 
         # Handshake metadata of this worker for NIXL transfers.
@@ -1255,20 +1241,14 @@ class NixlBaseConnectorWorker:
             assert not self.transfer_topo.virtually_split_kv_in_blocks, (
                 "Mixed-device KV registration does not support blocks-first KV layouts."
             )
-            for mem_type in sorted(set(region_mem_types)):
-                typed = [
-                    cache
-                    for cache, cache_mem_type in zip(caches_data, region_mem_types)
-                    if cache_mem_type == mem_type
-                ]
-                descs = self.nixl_wrapper.get_reg_descs(typed, mem_type)
-                self.nixl_wrapper.register_memory(descs, backends=self.nixl_backends)
-                self._registered_descs.append(descs)
-        else:
-            descs = self.nixl_wrapper.get_reg_descs(caches_data, self.nixl_memory_type)
-            logger.debug("Registering descs: %s", caches_data)
+        for mem_type in sorted(set(region_mem_types)):
+            typed = [
+                cache
+                for cache, cache_mem_type in zip(caches_data, region_mem_types)
+                if cache_mem_type == mem_type
+            ]
+            descs = self.nixl_wrapper.get_reg_descs(typed, mem_type)
             self.nixl_wrapper.register_memory(descs, backends=self.nixl_backends)
-            logger.debug("Done registering descs")
             self._registered_descs.append(descs)
 
         self.device_kv_caches = kv_caches
@@ -1531,11 +1511,7 @@ class NixlBaseConnectorWorker:
             self._desc_is_dram_by_block_size[block_size] = desc_is_dram
             self._desc_pos_by_block_size[block_size] = desc_pos
 
-            # _build_fa_local stamps every descriptor with self.device_id (the
-            # local GPU index). Host (DRAM) MLA regions are registered under CPU
-            # device_id 0, so their xfer descriptors must also use 0 — otherwise
-            # prep_xfer_dlist("DRAM", ...) raises NIXL_ERR_NOT_FOUND on every TP
-            # rank whose GPU index != 0 (i.e. all ranks but rank 0).
+            # DRAM descriptors are registered under CPU device 0.
             blocks_data = [
                 (addr, length, 0) if is_dram else (addr, length, dev)
                 for (addr, length, dev), is_dram in zip(
@@ -2068,21 +2044,14 @@ class NixlBaseConnectorWorker:
 
         block_ids_for_blocksize_post_process = defaultdict(list)
         block_ids_for_heterogeneous_attn_post_process = list[list[int]]()
-        late_duplicates: list[str] = []
-        for req_id in done_recving:
+        for req_id in tuple(done_recving):
             # clean up metadata for completed requests
             meta = self._recving_metadata.pop(req_id, None)
             if meta is None:
-                # Late duplicate of an already-reaped request: posted RDMA
-                # handles cannot be aborted, so a handle of a request whose
-                # failure was already reported can still reach its terminal
-                # state in a later poll cycle. Nothing is left to
-                # post-process, and the request must not be reported finished
-                # a second time.
                 logger.debug(
                     "Skipping late duplicate completion for request %s", req_id
                 )
-                late_duplicates.append(req_id)
+                done_recving.discard(req_id)
                 continue
 
             # Skip KV sync and post-processing for failed requests
@@ -2144,8 +2113,6 @@ class NixlBaseConnectorWorker:
             del self._reqs_to_send[req_id]
             done_sending.add(req_id)
 
-        for req_id in late_duplicates:
-            done_recving.discard(req_id)
         return done_sending, done_recving
 
     def _sync_device_after_mamba_recv(
@@ -2221,11 +2188,7 @@ class NixlBaseConnectorWorker:
                             req_id=req_id,
                             xfer_state=xfer_state,
                         )
-                        # ERR is terminal: UCX stops hardware placement
-                        # before completing a request with error, so the
-                        # handle can be released — unlike PROC handles,
-                        # which cannot be aborted and must be polled until
-                        # terminal.
+                        # ERR is terminal; PROC handles remain in_progress.
                         self.nixl_wrapper.release_xfer_handle(handle)
                         self.xfer_stats.record_failed_transfer()
                         with self._failed_recv_lock:
@@ -2237,8 +2200,6 @@ class NixlBaseConnectorWorker:
                         req_id=req_id,
                         error=e,
                     )
-                    # The handle leaks: releasing an unpollable handle can
-                    # itself throw, and there is nothing left to poll.
                     self.xfer_stats.record_failed_transfer()
                     with self._failed_recv_lock:
                         self._failed_recv_pending.add(req_id)
@@ -2251,21 +2212,14 @@ class NixlBaseConnectorWorker:
                 failed = req_id in self._failed_recv_pending
                 self._failed_recv_pending.discard(req_id)
             if failed:
-                # Every xfer of this failed request is now terminal: no DMA
-                # can land after the scheduler frees its blocks.
                 self._report_failed_recv(req_id)
                 continue
-            # Only report request as completed when all transfers are done.
             done_req_ids.add(req_id)
             self._send_pending_recv_notifs(req_id)
         return done_req_ids
 
     def _send_pending_recv_notifs(self, req_id: str) -> None:
-        """Send deferred "done reading" notifications for a completed read.
-
-        Used for reads split across multiple xfers (mixed DRAM/VRAM), where
-        the notification cannot ride on a single xfer's notif_msg.
-        """
+        """Send notifications deferred by split DRAM/VRAM reads."""
         for agent_name, notif_id in self._pending_recv_notifs.pop(req_id, []):
             try:
                 self.nixl_wrapper.send_notif(agent_name, notif_msg=notif_id)
@@ -2281,19 +2235,7 @@ class NixlBaseConnectorWorker:
                 self.xfer_stats.record_failed_notification()
 
     def _handle_failed_transfer(self, req_id: str, handle: int | None):
-        """Handle a transfer that failed before (or while) being posted.
-
-        ``handle`` may only be a handle that never started: a POSTED transfer
-        cannot be aborted (on the UCX backend release_xfer_handle silently
-        skips the cancel and the RDMA READ keeps writing into local memory),
-        so in-flight handles are instead polled to a terminal state by
-        _pop_done_transfers. When sibling xfers of this request are still in
-        flight, the failure report is deferred until the last one is reaped.
-
-        Args:
-            req_id: The request ID.
-            handle: A never-started transfer handle to release, if any.
-        """
+        """Defer failure reporting while sibling transfers remain in flight."""
         if handle is not None:
             self.nixl_wrapper.release_xfer_handle(handle)
         self.xfer_stats.record_failed_transfer()
@@ -2305,11 +2247,7 @@ class NixlBaseConnectorWorker:
         self._report_failed_recv(req_id)
 
     def _report_failed_recv(self, req_id: str) -> None:
-        """Report a failed recv exactly once, marking its blocks invalid.
-
-        Must only be called once none of the request's xfers remains in
-        flight: the scheduler frees and reuses the blocks in response.
-        """
+        """Report a failed recv exactly once and invalidate its blocks."""
         with self._failed_recv_lock:
             if req_id in self._failed_recv_reported:
                 return
@@ -2319,8 +2257,6 @@ class NixlBaseConnectorWorker:
         if (meta := self._recving_metadata.get(req_id)) and not self._is_hma_required:
             self._invalid_block_ids.put(set(meta.local_block_ids[0]))
         self._failed_recv_reqs.put(req_id)
-        # Never notify P for a failed read; its blocks are freed on lease
-        # expiry (the request is recovered on the D side).
         self._pending_recv_notifs.pop(req_id, None)
 
     def _send_heartbeats(self, metadata: NixlConnectorMetadata) -> None:

@@ -386,13 +386,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         notif_agent: str,
         notif_id: bytes,
     ) -> None:
-        """Split a READ into DRAM and VRAM local descriptor lists.
-
-        NIXL delivers a notif_msg on completion of a single xfer, so the
-        P-side "done reading" notification cannot ride on either half of the
-        split. It is deferred instead: recorded here and sent by
-        _pop_done_transfers once every xfer of this request completes.
-        """
+        """Split a READ across DRAM and VRAM descriptor lists."""
         desc_is_dram = self._desc_is_dram_by_block_size[local_block_size_key]
         desc_pos = self._desc_pos_by_block_size[local_block_size_key]
         dram_handle = self._dram_src_handles_by_block_size[local_block_size_key]
@@ -401,8 +395,6 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         remote_ids = np.asarray(remote_block_descs_ids)
         is_dram = desc_is_dram[local_ids]
 
-        # Create every prepped xfer before starting any, so a setup failure
-        # leaves nothing in flight and can release all handles cleanly.
         handles = []
         try:
             for type_mask, local_handle in (
@@ -430,11 +422,6 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
             try:
                 self.nixl_wrapper.transfer(handle)
             except Exception:
-                # Handles not yet started can be released; already-started
-                # ones cannot be aborted, so they stay in _recving_transfers
-                # and _pop_done_transfers polls them to a terminal state.
-                # The request is reported failed exactly once, only after
-                # its last handle is terminal (see _handle_failed_transfer).
                 for unstarted in handles[i:]:
                     self.nixl_wrapper.release_xfer_handle(unstarted)
                 raise

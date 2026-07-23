@@ -108,9 +108,8 @@ __global__ void hisparse_swap_in_kernel(
     const int32_t* __restrict__ newest_global,   // [num_rows] or nullptr
     int32_t* __restrict__ hot_indices,           // [num_rows, top_k]
     int32_t* __restrict__ miss_mask,             // [num_rows, top_k] or nullptr
-    int32_t* __restrict__ device_global_indices,  // [max_rows, hot_size]
-    int16_t* __restrict__ lru_slots,              // [max_rows, hot_size]
-    unsigned long long* __restrict__ stats,       // [2] hits,misses or nullptr
+    int32_t* __restrict__ device_global_indices,        // [max_rows, hot_size]
+    int16_t* __restrict__ lru_slots,                    // [max_rows, hot_size]
     const int32_t* __restrict__ request_state_indices,  // [num_rows] or nullptr
     const int64_t host_rows, const int64_t row_bytes, const int32_t top_k,
     const int32_t hot_size, const int32_t hash_size,
@@ -342,12 +341,6 @@ __global__ void hisparse_swap_in_kernel(
   const int total_hits = s_counters[0];
   const int total_misses = top_k - total_hits - s_counters[1];
 
-  // Aggregate hit/miss counters (hit rate + PCIe gather volume telemetry).
-  if (stats != nullptr && threadIdx.x == 0) {
-    atomicAdd(&stats[0], static_cast<unsigned long long>(total_hits));
-    atomicAdd(&stats[1], static_cast<unsigned long long>(total_misses));
-  }
-
   // Phase 4: write back the LRU order: stale evictables at the front,
   // freshly loaded misses next, hits at the MRU back.
   const int total_evictable = hot_size - total_hits;
@@ -483,8 +476,7 @@ void hisparse_swap_in(
     torch::stable::Tensor& lru_slots,
     std::optional<torch::stable::Tensor> const& request_state_indices,
     int64_t region_stride,
-    std::optional<torch::stable::Tensor> const& miss_mask,
-    std::optional<torch::stable::Tensor> const& stats) {
+    std::optional<torch::stable::Tensor> const& miss_mask) {
   STD_TORCH_CHECK(host_cache.device().is_cpu(),
                   "host_cache must be CPU memory");
   STD_TORCH_CHECK(hot_cache.is_cuda(), "hot_cache must be on CUDA");
@@ -574,17 +566,6 @@ void hisparse_swap_in(
     miss_mask_ptr = mm.mutable_data_ptr<int32_t>();
   }
 
-  unsigned long long* stats_ptr = nullptr;
-  if (stats.has_value()) {
-    auto const& st = stats.value();
-    STD_TORCH_CHECK(
-        st.is_cuda() &&
-            st.scalar_type() == torch::headeronly::ScalarType::UInt64 &&
-            st.numel() >= 2,
-        "stats must be a uint64 CUDA tensor with >= 2 elements");
-    stats_ptr = static_cast<unsigned long long*>(st.mutable_data_ptr());
-  }
-
   if (num_rows == 0 || top_k == 0) {
     return;
   }
@@ -610,8 +591,8 @@ void hisparse_swap_in(
       global_indices.const_data_ptr<int32_t>(), newest_ptr,
       hot_indices.mutable_data_ptr<int32_t>(), miss_mask_ptr,
       device_global_indices.mutable_data_ptr<int32_t>(),
-      lru_slots.mutable_data_ptr<int16_t>(), stats_ptr, request_state_ptr,
-      host_rows, row_bytes, top_k, hot_size, hash_size, region_stride);
+      lru_slots.mutable_data_ptr<int16_t>(), request_state_ptr, host_rows,
+      row_bytes, top_k, hot_size, hash_size, region_stride);
 }
 
 void hisparse_gather_plan(
