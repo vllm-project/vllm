@@ -35,6 +35,11 @@ pub enum Error {
     MinTokensExceedsMaxTokens { min_tokens: u32, max_tokens: u32 },
     #[error("`thinking_token_budget` must be a non-negative integer or -1 for unlimited.")]
     InvalidThinkingTokenBudget,
+    #[error(
+        "`truncate_prompt_tokens` would split a multimodal placeholder in request \
+         `{request_id}`; truncate to a boundary that keeps whole media items"
+    )]
+    PartialMultimodalTruncation { request_id: String },
     #[error("invalid repetition detection params: {message}")]
     InvalidRepetitionDetection { message: String },
     #[error("text request stream `{request_id}` closed before terminal output")]
@@ -59,6 +64,7 @@ impl Error {
             | Self::SamplingParams(_)
             | Self::MinTokensExceedsMaxTokens { .. }
             | Self::InvalidThinkingTokenBudget
+            | Self::PartialMultimodalTruncation { .. }
             | Self::InvalidRepetitionDetection { .. }
             // An empty tokenized prompt detected later, at request prepare
             // time, surfaces through the transparent Llm wrapper.
