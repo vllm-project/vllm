@@ -49,6 +49,38 @@ Now supports 9 types of connectors:
   --kv-transfer-config '{"kv_connector":"FlexKVConnectorV1","kv_role":"kv_both"}'
   ```
 
+## Reusing prefill token ids on decode (experimental)
+
+!!! note
+    This applies to disaggregated prefill and decode serving on the chat path. It is experimental and subject to change.
+
+In disaggregated serving, the prefill and decode stages both render the chat prompt from `messages` and tokenize it. For long prompts, tokenizing a second time on the decode stage adds latency on the critical path. Because the prefill stage has already produced the token ids, the decode stage can reuse them and skip its own templating and tokenization.
+
+The decode stage still returns chat-shaped output. Only templating and tokenization are skipped, so detokenization, tool and reasoning parsing, streaming, and structured output constraints work exactly as they do for a normal chat request.
+
+The token ids are passed to the decode stage through `kv_transfer_params`, the same dict the router already writes on the decode request to coordinate the transfer:
+
+1. Send the prefill request with `return_token_ids` enabled, and read `prompt_token_ids` from the response.
+2. Set `kv_transfer_params["prompt_token_ids"]` to those ids on the decode request.
+
+```python
+prefill = client.chat.completions.create(
+    model=model,
+    messages=messages,
+    extra_body={"return_token_ids": True, "kv_transfer_params": {"do_remote_decode": True}},
+)
+ids = prefill.prompt_token_ids
+
+decode = client.chat.completions.create(
+    model=model,
+    messages=messages,
+    stream=True,
+    extra_body={"kv_transfer_params": {"do_remote_prefill": True, "prompt_token_ids": ids}},
+)
+```
+
+The renderer removes `prompt_token_ids` from `kv_transfer_params` once it reads them, so the ids are not forwarded into the engine's sampling parameters. When the key is absent, the decode request is rendered from `messages` as usual, so this path is opt-in.
+
 ## Development
 
 We implement disaggregated prefilling by running 2 vLLM instances. One for prefill (we call it prefill instance) and one for decode (we call it decode instance), and then use a connector to transfer the prefill KV caches and results from prefill instance to decode instance.
