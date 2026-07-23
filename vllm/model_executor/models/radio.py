@@ -777,7 +777,9 @@ class RadioModel(nn.Module):
                 if len(parts) >= 4:
                     layer_idx = parts[2]
                     suffix = ".".join(parts[3:])
-                    # Skip layer-scale entries that vLLM doesn't use
+                    # Skip layer-scale entries — they are not in HF checkpoints
+                    # and are reinitialized to their correct default values
+                    # in NemotronH_Nano_VL_V2.load_weights after weight transfer.
                     if suffix in {"ls1", "ls2"} or suffix.startswith(("ls1.", "ls2.")):
                         continue
                     vllm_key = f"model.encoder.layers.{layer_idx}.{suffix}"
