@@ -81,6 +81,7 @@ steps:
   - pytest -s entrypoints/openai/correctness/test_lmeval.py::test_lm_eval_accuracy_v1_engine
 
 - label: Rust Frontend Tool Use
+  device: h200_35gb
   timeout_in_minutes: 25
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
