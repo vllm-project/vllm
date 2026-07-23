@@ -85,17 +85,6 @@ def kernel_warmup(worker: "Worker"):
         )
     qwen_triton_warmup(worker.model_runner, worker.vllm_config.model_config)
 
-    # DSv4 mHC TileLang kernels (hc_pre/hc_post/hc_head_op) run every decoder
-    # layer per token; warm them across token sizes first so the first real
-    # request doesn't pay JIT cost. No-op for non-DSv4 models (gated inside).
-    deepseek_v4_mhc_warmup(
-        worker.get_model(),
-        max_tokens=worker.scheduler_config.max_num_batched_tokens,
-        cudagraph_capture_sizes=(
-            worker.vllm_config.compilation_config.cudagraph_capture_sizes or []
-        ),
-    )
-
     # Run next so input-prep kernels JIT against pristine runner state.
     flashinfer_sparse_mla_decode_autotune_warmup(worker)
     deepseek_v4_sparse_mla_attention_warmup(worker)
@@ -166,6 +155,15 @@ def kernel_warmup(worker: "Worker"):
     if worker.vllm_config.kernel_config.enable_jit_warmup:
         fa4_cutedsl_warmup(worker)
         sparse_mla_triton_warmup(worker)
+        # DSv4 mHC TileLang kernels (mhc_pre/mhc_post/mhc_fused_post_pre/
+        # hc_head) run every decoder layer per token; warm every reachable
+        # compile key at startup so the first real request doesn't pay JIT
+        # cost. No-op for non-DSv4 models (gated inside). Migrated to the
+        # VllmJitKernel contract per RFC #47456 / PR #47451.
+        deepseek_v4_mhc_warmup(
+            worker.get_model(),
+            vllm_config=worker.vllm_config,
+        )
 
 
 def _flashinfer_autotune_skip_ops(runner: "GPUModelRunner") -> set[str] | None:
