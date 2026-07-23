@@ -54,6 +54,7 @@ if [[ "${VLLM_RUST_COVERAGE:-0}" == "1" ]]; then
     # Build scripts and proc macros can run during compilation. Their profiles
     # are unrelated to runtime coverage and would otherwise pollute the tree.
     export LLVM_PROFILE_FILE=/dev/null
+    export VLLM_RUST_COVERAGE_OBJECTS="$COVERAGE_TOOLS_DIR/objects"
 fi
 
 python3 "$REPO_ROOT/tools/build_rust.py" "$PROFILE_ARG"

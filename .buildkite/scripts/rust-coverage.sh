@@ -19,26 +19,25 @@ rust_coverage_start() {
     RUST_COVERAGE_DIR="/tmp/vllm-rust-coverage/${BUILDKITE_JOB_ID:-local}"
     export RUST_COVERAGE_FLAG RUST_COVERAGE_DIR
     mkdir -p "$RUST_COVERAGE_DIR"
-    LLVM_PROFILE_FILE="$RUST_COVERAGE_DIR/vllm-rust-%4m.profraw"
+    LLVM_PROFILE_FILE="$RUST_COVERAGE_DIR/rust-%4m.profraw"
     export LLVM_PROFILE_FILE
     trap rust_coverage_finalize 0
 }
 
 rust_coverage_objects() {
-    python3 - <<'PY'
+    rust_cov_objects_manifest="$(dirname "$(command -v llvm-cov)")/../objects"
+    python3 - "$rust_cov_objects_manifest" <<'PY'
 from pathlib import Path
 import sys
 
-for entry in sys.path:
-    package_dir = Path(entry or ".").resolve() / "vllm"
-    binary = package_dir / "vllm-rs"
-    parsers = sorted(package_dir.glob("_rust_tool_parser*.so"))
-    if binary.is_file() and len(parsers) == 1:
-        print(binary)
-        print(parsers[0])
-        break
-else:
-    raise RuntimeError("installed vLLM Rust coverage objects were not found")
+for relative in Path(sys.argv[1]).read_text().splitlines():
+    for entry in sys.path:
+        path = Path(entry or ".").resolve() / relative
+        if path.is_file():
+            print(path)
+            break
+    else:
+        raise RuntimeError(f"installed Rust coverage object was not found: {relative}")
 PY
 }
 
@@ -46,45 +45,26 @@ rust_coverage_collect() {
     rust_cov_collect_flag=${1:?coverage flag is required}
     rust_cov_collect_lcov="$RUST_COVERAGE_DIR/$rust_cov_collect_flag.lcov"
 
-    command -v llvm-profdata >/dev/null || return 1
-    command -v llvm-cov >/dev/null || return 1
-
-    set --
-    for rust_cov_collect_profile in "$RUST_COVERAGE_DIR"/*.profraw; do
-        if [ -s "$rust_cov_collect_profile" ]; then
-            set -- "$@" "$rust_cov_collect_profile"
-        fi
-    done
-    if [ "$#" -eq 0 ]; then
-        echo "Rust coverage profile is empty" >&2
-        return 1
-    fi
-
     rust_cov_collect_objects=$(rust_coverage_objects) || return 1
-    rust_cov_collect_object_count=$(
-        printf '%s\n' "$rust_cov_collect_objects" \
-            | awk 'NF { count++ } END { print count + 0 }'
-    )
-    rust_cov_collect_vllm_rs=$(
-        printf '%s\n' "$rust_cov_collect_objects" | sed -n '1p'
-    )
-    rust_cov_collect_parser=$(
-        printf '%s\n' "$rust_cov_collect_objects" | sed -n '2p'
-    )
-    if [ "$rust_cov_collect_object_count" -ne 2 ] \
-        || [ ! -f "$rust_cov_collect_vllm_rs" ] \
-        || [ ! -f "$rust_cov_collect_parser" ]; then
-        echo "Rust coverage objects were not found" >&2
-        return 1
-    fi
+    rust_cov_collect_primary=
+    set --
+    while IFS= read -r rust_cov_collect_object; do
+        if [ -z "$rust_cov_collect_primary" ]; then
+            rust_cov_collect_primary=$rust_cov_collect_object
+        else
+            set -- "$@" "--object=$rust_cov_collect_object"
+        fi
+    done <<EOF
+$rust_cov_collect_objects
+EOF
 
     llvm-profdata merge \
         -sparse \
-        "$@" \
+        "$RUST_COVERAGE_DIR"/*.profraw \
         -o "$RUST_COVERAGE_DIR/merged.profdata" || return 1
     llvm-cov export \
-        "$rust_cov_collect_vllm_rs" \
-        --object="$rust_cov_collect_parser" \
+        "$rust_cov_collect_primary" \
+        "$@" \
         --format=lcov \
         --instr-profile="$RUST_COVERAGE_DIR/merged.profdata" \
         --ignore-filename-regex='/\.cargo/(registry|git)/|/rustc/|/target/' \
@@ -107,19 +87,10 @@ rust_coverage_upload() {
         || return 1
     curl -fsSL \
         "https://github.com/codecov/codecov-cli/releases/download/${RUST_CODECOV_VERSION}/codecovcli_linux" \
-        -o "$rust_cov_upload_codecov_dir/codecov" || {
-            rm -rf "$rust_cov_upload_codecov_dir"
-            return 1
-        }
+        -o "$rust_cov_upload_codecov_dir/codecov" || return 1
     echo "$RUST_CODECOV_SHA256  $rust_cov_upload_codecov_dir/codecov" \
-        | sha256sum -c - || {
-            rm -rf "$rust_cov_upload_codecov_dir"
-            return 1
-        }
-    chmod +x "$rust_cov_upload_codecov_dir/codecov" || {
-        rm -rf "$rust_cov_upload_codecov_dir"
-        return 1
-    }
+        | sha256sum -c - || return 1
+    chmod +x "$rust_cov_upload_codecov_dir/codecov" || return 1
 
     rust_cov_upload_slug="vllm-project/vllm"
     if [ -n "${BUILDKITE_PULL_REQUEST:-}" ] \
