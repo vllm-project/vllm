@@ -1086,6 +1086,10 @@ class TestTieringOffloadingWithoutSecondaryTiers:
                 )
             ),
         ),
+        (
+            [],
+            TierFilter(matchers=()),
+        ),
     ],
     ids=[
         "medium_storage",
@@ -1093,6 +1097,7 @@ class TestTieringOffloadingWithoutSecondaryTiers:
         "unconstrained",
         "with_locality",
         "multiple_matchers",
+        "empty_list_deny_all",
     ],
 )
 def test_parse_tier_filter_valid(raw, expected):
@@ -1103,11 +1108,10 @@ def test_parse_tier_filter_valid(raw, expected):
     "raw",
     [
         "not a list",
-        [],
         [{"medium": "unknown"}],
         [{"locality": "nowhere"}],
     ],
-    ids=["non_list", "empty_list", "invalid_medium", "invalid_locality"],
+    ids=["non_list", "invalid_medium", "invalid_locality"],
 )
 def test_parse_tier_filter_invalid_returns_all(raw):
     assert _parse_tier_filter(raw) is TierFilter.ALL

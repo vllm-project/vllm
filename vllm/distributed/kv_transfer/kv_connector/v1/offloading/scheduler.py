@@ -419,6 +419,9 @@ def _parse_tier_filter(raw: Any) -> TierFilter:
                 continue
         matchers.append(TierMatcher(medium=medium, locality=locality))
     if not matchers:
+        if not raw:  # input was [] — user explicitly wants nothing
+            return TierFilter(matchers=())
+        # all entries were invalid — fall back to ALL
         return TierFilter.ALL
     return TierFilter(matchers=tuple(matchers))
 
