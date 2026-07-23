@@ -140,6 +140,8 @@ class BlockTables:
         out: tuple[torch.Tensor, ...] | None = None,
         out_ptrs: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, ...]:
+        if self.num_kv_cache_groups == 0:
+            return ()
         if out is None:
             out = tuple(self.input_block_tables)
             out_ptrs = self.input_block_table_ptrs
@@ -175,6 +177,8 @@ class BlockTables:
         num_tokens_padded: int,
         out: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        if self.num_kv_cache_groups == 0:
+            return (self.slot_mappings if out is None else out)[:, :num_tokens_padded]
         num_reqs = idx_mapping.shape[0]
         num_groups = self.num_kv_cache_groups
         slot_mappings = self.slot_mappings if out is None else out

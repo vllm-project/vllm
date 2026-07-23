@@ -39,7 +39,7 @@ class ECConnectorModelRunnerMixin:
         scheduler_output: "SchedulerOutput",
         encoder_cache: dict[str, torch.Tensor],
         enabled: bool = True,
-        mm_hashes_to_save: list[str] | None = None,
+        save_new_caches: bool = False,
         **kwargs,
     ) -> AbstractContextManager[ECConnectorOutput | None]:
         if (
@@ -51,7 +51,7 @@ class ECConnectorModelRunnerMixin:
         return ECConnectorModelRunnerMixin._get_ec_connector_output(
             scheduler_output,
             encoder_cache,
-            mm_hashes_to_save=mm_hashes_to_save,
+            save_new_caches=save_new_caches,
             **kwargs,
         )
 
@@ -62,7 +62,7 @@ class ECConnectorModelRunnerMixin:
     def _get_ec_connector_output(
         scheduler_output: "SchedulerOutput",
         encoder_cache: dict[str, torch.Tensor],
-        mm_hashes_to_save: list[str] | None = None,
+        save_new_caches: bool = False,
         **kwargs,
     ) -> Generator[ECConnectorOutput, None, None]:
         output = ECConnectorOutput()
@@ -76,10 +76,14 @@ class ECConnectorModelRunnerMixin:
         if ec_connector.is_consumer:
             ec_connector.start_load_caches(encoder_cache, **kwargs)
 
+        cached_hashes = set(encoder_cache) if save_new_caches else None
         try:
             yield output
-            for mm_hash in mm_hashes_to_save or ():
-                ec_connector.save_caches(encoder_cache=encoder_cache, mm_hash=mm_hash)
+            if cached_hashes is not None:
+                for mm_hash in encoder_cache.keys() - cached_hashes:
+                    ec_connector.save_caches(
+                        encoder_cache=encoder_cache, mm_hash=mm_hash
+                    )
         finally:
             output.finished_sending, output.finished_recving = (
                 ec_connector.get_finished(scheduler_output.finished_req_ids)
