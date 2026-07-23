@@ -20,8 +20,9 @@ from vllm.model_executor.model_loader.weight_utils import (
     download_weights_from_hf,
     runai_safetensors_weights_iterator,
 )
+from vllm.transformers_utils.gcs_utils import glob as gcs_glob
 from vllm.transformers_utils.s3_utils import glob as s3_glob
-from vllm.transformers_utils.utils import is_s3
+from vllm.transformers_utils.utils import is_gcs, is_s3
 
 logger = init_logger(__name__)
 
@@ -92,7 +93,9 @@ class ShardedStateLoader(BaseModelLoader):
         return result
 
     def _prepare_weights(self, model_name_or_path: str, revision: str | None):
-        if is_s3(model_name_or_path) or os.path.isdir(model_name_or_path):
+        if is_s3(model_name_or_path) or is_gcs(model_name_or_path) or os.path.isdir(
+            model_name_or_path
+        ):
             return model_name_or_path
         else:
             allow_patterns = ["*.safetensors"]
@@ -125,6 +128,11 @@ class ShardedStateLoader(BaseModelLoader):
         if is_s3(local_model_path):
             file_pattern = f"*{self.pattern.format(rank=rank, part='*')}"
             filepaths = s3_glob(path=local_model_path, allow_pattern=[file_pattern])
+        elif is_gcs(local_model_path):
+            file_pattern = f"*{self.pattern.format(rank=rank, part='*')}"
+            filepaths = gcs_glob(
+                path=local_model_path, allow_pattern=[file_pattern]
+            )
         else:
             filepaths = glob.glob(pattern)
         if not filepaths:
