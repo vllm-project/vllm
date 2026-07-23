@@ -7,9 +7,6 @@ import torch
 import vllm.envs as envs
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.distributed.eplb.eplb_state import EplbLayerState
-from vllm.model_executor.layers.fused_moe.config import (
-    RoutingMethodType,
-)
 from vllm.model_executor.layers.fused_moe.router.aiter_shared_routed_fused_moe_router import (  # noqa: E501
     AiterSharedRoutedFusedMoERouter,
 )
@@ -143,30 +140,24 @@ def create_fused_moe_router(
                 "num_expert_group and topk_group must be provided when "
                 "use_grouped_topk is True"
             )
-        grouped_topk_router = GroupedTopKRouter(
-            top_k=top_k,
-            global_num_experts=global_num_experts,
-            eplb_state=eplb_state,
-            num_expert_group=num_expert_group,
-            topk_group=topk_group,
-            renormalize=renormalize,
-            scoring_func=scoring_func,
-            routed_scaling_factor=routed_scaling_factor,
-            e_score_correction_bias=e_score_correction_bias,
-            num_fused_shared_experts=num_fused_shared_experts,
-        )
         if (
-            grouped_topk_router.routing_method_type != RoutingMethodType.Unspecified
-            or num_expert_group > 1
-            or topk_group > 1
+            num_expert_group != 1
+            or topk_group != 1
+            or e_score_correction_bias is not None
+            or routed_scaling_factor != 1.0
         ):
-            return grouped_topk_router
-
-        # If routing_method for GroupedTopKRouter is Unspecified and there is only
-        # one group, fallback to standard top-k routing
-        use_grouped_topk = False
-        num_expert_group = None
-        topk_group = None
+            return GroupedTopKRouter(
+                top_k=top_k,
+                global_num_experts=global_num_experts,
+                eplb_state=eplb_state,
+                num_expert_group=num_expert_group,
+                topk_group=topk_group,
+                renormalize=renormalize,
+                scoring_func=scoring_func,
+                routed_scaling_factor=routed_scaling_factor,
+                e_score_correction_bias=e_score_correction_bias,
+                num_fused_shared_experts=num_fused_shared_experts,
+            )
 
     if custom_routing_function is not None:
         return CustomRoutingRouter(
