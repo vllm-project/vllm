@@ -2,18 +2,21 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Unit tests for LMCacheMPWorkerAdapter error propagation."""
 
+from __future__ import annotations
+
+import contextlib
 import sys
+from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, patch
 
 import pytest
 import zmq
 
-# Mock the lmcache package before vllm imports it.
-# vllm_v1_adapter pulls in many lmcache submodules; mock them all.
-# Original sys.modules entries are saved so a session-scoped fixture can
-# restore them after this test module finishes, avoiding pollution of
-# other tests in the same session.
-_lmcache_modules = [
+# Modules to mock so that the in-tree fallback adapter can be imported
+# without the external lmcache package installed. The mock is installed
+# and torn down inside the _lmcache_mock fixture — no side effects at
+# module level.
+_LMCACHE_MODULES = [
     "lmcache",
     "lmcache.config",
     "lmcache.logging",
@@ -39,48 +42,145 @@ _lmcache_modules = [
     "lmcache.v1.multiprocess.mq",
     "lmcache.v1.multiprocess.protocol",
 ]
-_saved_lmcache_modules = {m: sys.modules.get(m) for m in _lmcache_modules}
-for _mod in _lmcache_modules:
-    sys.modules[_mod] = MagicMock()
 
-# _lmcache_nvtx_annotate is a no-op passthrough decorator
-sys.modules["lmcache.utils"]._lmcache_nvtx_annotate = lambda f: f
-sys.modules["lmcache.utils"].init_logger = MagicMock(return_value=MagicMock())
-sys.modules["lmcache.logging"].init_logger = MagicMock(return_value=MagicMock())
+# Purely for type-checking — the real import happens inside _lmcache_mock.
+if TYPE_CHECKING:
+    from vllm.distributed.kv_transfer.kv_connector.v1.lmcache_integration.multi_process_adapter import (  # noqa: E501
+        LMCacheMPWorkerAdapter,
+        LoadStoreOp,  # noqa: F401
+        ParallelStrategy,  # noqa: F401
+    )
+
+# Populated by _lmcache_mock fixture — used by TestSubmitRetrievePath tests
+# that construct LoadStoreOp instances at runtime.
+_load_store_op = None
 
 
-@pytest.fixture(scope="session", autouse=True)
-def _restore_lmcache_modules():
-    """Restore original lmcache sys.modules entries after all tests finish."""
-    yield
-    for mod, original in _saved_lmcache_modules.items():
-        if original is None:
-            sys.modules.pop(mod, None)
+@pytest.fixture(scope="module")
+def _lmcache_mock():
+    """Install lmcache mocks, import adapter classes, and tear down cleanly.
+
+    Replaces every lmcache.* entry in sys.modules with a MagicMock so
+    the in-tree fallback adapter can be imported without the external
+    lmcache package. The mock + import are scoped inside this fixture;
+    other test modules are never exposed to the mocked state.
+
+    Teardown restores the original sys.modules entries AND removes the
+    cached adapter module so that later tests re-import fresh.
+    """
+    # -- setup: save original state -----------------------------------
+    global _load_store_op
+    _sentinel = object()
+
+    saved_lmcache = {m: sys.modules.get(m) for m in _LMCACHE_MODULES}
+    _adapter_module_keys = [
+        "vllm.distributed.kv_transfer.kv_connector.v1.lmcache_integration",
+        "vllm.distributed.kv_transfer.kv_connector.v1.lmcache_integration.multi_process_adapter",
+    ]
+    # Map: child module key → (parent module key, attribute name on parent)
+    _li_key = _adapter_module_keys[0]  # ...v1.lmcache_integration
+    _mp_key = _adapter_module_keys[1]  # ...multi_process_adapter
+    _parent_attr_map = {
+        _li_key: (
+            "vllm.distributed.kv_transfer.kv_connector.v1",
+            "lmcache_integration",
+        ),
+        _mp_key: (_li_key, "multi_process_adapter"),
+    }
+
+    # Save pre-existing adapter modules
+    saved_adapter_modules = {k: sys.modules.get(k) for k in _adapter_module_keys}
+
+    # Save parent package attribute state.  Three cases:
+    #   (pkg, attr, value, False)  — parent existed, restore value after
+    #   (pkg, attr, _sentinel, False) — parent existed, attr absent, delete after
+    #   (parent_key, attr, None, True) — parent absent, delete new attr after
+    saved_parent_attrs = []
+    for child_key in _adapter_module_keys:
+        parent_key, attr_name = _parent_attr_map[child_key]
+        parent_pkg = sys.modules.get(parent_key)
+        if parent_pkg is not None:
+            old = getattr(parent_pkg, attr_name, _sentinel)
+            saved_parent_attrs.append((parent_pkg, attr_name, old, False))
         else:
-            sys.modules[mod] = original
+            saved_parent_attrs.append((parent_key, attr_name, None, True))
 
+    # Install lmcache mocks
+    for mod in _LMCACHE_MODULES:
+        sys.modules[mod] = MagicMock()
+    sys.modules["lmcache.utils"]._lmcache_nvtx_annotate = lambda f: f
+    sys.modules["lmcache.utils"].init_logger = MagicMock(return_value=MagicMock())
+    sys.modules["lmcache.logging"].init_logger = MagicMock(return_value=MagicMock())
 
-from vllm.distributed.kv_transfer.kv_connector.v1.lmcache_integration.multi_process_adapter import (  # noqa: E402, E501
-    LMCacheMPWorkerAdapter,
-    LoadStoreOp,
-    ParallelStrategy,
-)
+    # Evict cached adapter modules from sys.modules so the import below
+    # creates fresh copies inside the mocked lmcache environment.
+    for key in _adapter_module_keys:
+        sys.modules.pop(key, None)
+
+    # Import adapter classes inside the mocked environment.
+    # try/finally guarantees cleanup even if the import fails, so that
+    # lmcache MagicMock entries do not leak into other test modules.
+    try:
+        from vllm.distributed.kv_transfer.kv_connector.v1.lmcache_integration.multi_process_adapter import (  # noqa: E501
+            LMCacheMPWorkerAdapter,
+            LoadStoreOp,
+            ParallelStrategy,
+        )
+
+        _load_store_op = LoadStoreOp
+        yield LMCacheMPWorkerAdapter, LoadStoreOp, ParallelStrategy
+    finally:
+        # -- teardown: restore to pre-fixture state -------------------
+        _load_store_op = None
+
+        # 1. Restore lmcache sys.modules
+        for mod, original in saved_lmcache.items():
+            if original is None:
+                sys.modules.pop(mod, None)
+            else:
+                sys.modules[mod] = original
+
+        # 2. Restore adapter sys.modules
+        for key, original in saved_adapter_modules.items():
+            if original is None:
+                sys.modules.pop(key, None)
+            else:
+                sys.modules[key] = original
+
+        # 3. Restore parent package attributes
+        for pkg_or_key, attr_name, saved_value, was_absent in saved_parent_attrs:
+            if was_absent:
+                # Parent didn't exist before fixture — our import may have
+                # created it and set the attribute.  Delete it if present.
+                parent = sys.modules.get(pkg_or_key)
+                if parent is not None:
+                    with contextlib.suppress(AttributeError):
+                        delattr(parent, attr_name)
+            elif saved_value is _sentinel:
+                with contextlib.suppress(AttributeError):
+                    delattr(pkg_or_key, attr_name)
+            else:
+                setattr(pkg_or_key, attr_name, saved_value)
 
 
 @pytest.fixture
-def adapter():
-    """Create an LMCacheMPWorkerAdapter with mocked external dependencies.
+def adapter(_lmcache_mock):
+    """Create a fresh LMCacheMPWorkerAdapter with mocked dependencies.
 
-    Patches the lmcache server interaction so get_lmcache_chunk_size returns a
-    valid value without requiring a real LMCache process.
+    Patches the lmcache server interaction so get_lmcache_chunk_size
+    returns a valid value without requiring a real LMCache process.
     """
+    LMCacheMPWorkerAdapter, _, ParallelStrategy = _lmcache_mock
+
     with (
         patch(
-            "vllm.distributed.kv_transfer.kv_connector.v1.lmcache_integration.multi_process_adapter.get_lmcache_chunk_size",
+            "vllm.distributed.kv_transfer.kv_connector.v1.lmcache_integration"
+            ".multi_process_adapter.get_lmcache_chunk_size",
             return_value=256,
         ),
         patch(
-            "vllm.distributed.kv_transfer.kv_connector.v1.lmcache_integration.multi_process_adapter.MessageQueueClient",
+            "vllm.distributed.kv_transfer.kv_connector.v1.lmcache_integration"
+            ".multi_process_adapter.MessageQueueClient",
         ),
     ):
         strategy = ParallelStrategy(
@@ -368,7 +468,7 @@ class TestSubmitRetrievePath:
         """Calling submit_retrieve_request must populate _retrieve_block_ids."""
         mock_future, _ = self._make_mock_future()
         mock_event = MagicMock()
-        op = LoadStoreOp(block_ids=[7, 8, 9], token_ids=[1, 2, 3])
+        op = _load_store_op(block_ids=[7, 8, 9], token_ids=[1, 2, 3])
 
         with patch(
             "vllm.distributed.kv_transfer.kv_connector.v1.lmcache_integration"
@@ -389,7 +489,7 @@ class TestSubmitRetrievePath:
             side_effect=RuntimeError("retrieve failed")
         )
         mock_event = MagicMock()
-        op = LoadStoreOp(block_ids=[50, 60], token_ids=[1, 2])
+        op = _load_store_op(block_ids=[50, 60], token_ids=[1, 2])
 
         with patch(
             "vllm.distributed.kv_transfer.kv_connector.v1.lmcache_integration"
@@ -413,7 +513,9 @@ class TestSubmitRetrievePath:
         mock_event = MagicMock()
         # 6 blocks → token mode: 1 key → result len 1, not 6
         # We use token mode so len(result) != len(block_ids) is guaranteed
-        op = LoadStoreOp(block_ids=[11, 12, 13, 14, 15, 16], token_ids=list(range(32)))
+        op = _load_store_op(
+            block_ids=[11, 12, 13, 14, 15, 16], token_ids=list(range(32))
+        )
 
         with patch(
             "vllm.distributed.kv_transfer.kv_connector.v1.lmcache_integration"
@@ -443,8 +545,8 @@ class TestSubmitRetrievePath:
         mock_future, _ = self._make_mock_future()
         mock_event = MagicMock()
         ops = [
-            LoadStoreOp(block_ids=[1, 2], token_ids=[10, 20]),
-            LoadStoreOp(block_ids=[3, 4], token_ids=[30, 40]),
+            _load_store_op(block_ids=[1, 2], token_ids=[10, 20]),
+            _load_store_op(block_ids=[3, 4], token_ids=[30, 40]),
         ]
         request_ids = ["req-head", "req-tail-1"]
 
@@ -469,9 +571,9 @@ class TestSubmitRetrievePath:
         )
         mock_event = MagicMock()
         ops = [
-            LoadStoreOp(block_ids=[10, 20], token_ids=[1, 2]),
-            LoadStoreOp(block_ids=[30, 40], token_ids=[3, 4]),
-            LoadStoreOp(block_ids=[50, 60], token_ids=[5, 6]),
+            _load_store_op(block_ids=[10, 20], token_ids=[1, 2]),
+            _load_store_op(block_ids=[30, 40], token_ids=[3, 4]),
+            _load_store_op(block_ids=[50, 60], token_ids=[5, 6]),
         ]
         request_ids = ["req-head", "req-2", "req-3"]
 
