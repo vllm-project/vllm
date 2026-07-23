@@ -898,7 +898,6 @@ class AsyncLLM(EngineClient):
             self.logger_manager.log()
 
     async def check_health(self) -> None:
-        logger.debug("Called check_health.")
         if self.errored:
             raise self.dead_error
 
