@@ -377,6 +377,15 @@ class LMCacheMPWorkerAdapter:
         # have corresponding store requests submitted to LMCache before
         self.previously_finished: set[str] = set()
 
+        # Block IDs for in-flight retrieve requests, keyed by request_id.
+        # Used to map RetrieveResult (list[bool]) back to the specific
+        # block IDs that failed so they can be reported to the engine for
+        # recomputation.
+        self._retrieve_block_ids: dict[str, list[int]] = {}
+        # Block IDs whose retrieve has failed since the last call to
+        # get_block_ids_with_load_errors(). Drained on each call.
+        self._load_error_block_ids: set[int] = set()
+
         self.model_name = model_name
         self.parallel_strategy = parallel_strategy
 
@@ -495,6 +504,7 @@ class LMCacheMPWorkerAdapter:
             [keys, self.instance_id, op.block_ids, event.ipc_handle()],
         ).to_cuda_future()
         self.retrieve_futures[request_id] = (future, [])
+        self._retrieve_block_ids[request_id] = list(op.block_ids)
 
     @_lmcache_nvtx_annotate
     def batched_submit_store_requests(
@@ -593,6 +603,7 @@ class LMCacheMPWorkerAdapter:
             ],
         ).to_cuda_future()
         self.retrieve_futures[request_ids[0]] = (future, list(request_ids[1:]))
+        self._retrieve_block_ids[request_ids[0]] = list(block_ids)
 
     @_lmcache_nvtx_annotate
     def get_finished(
@@ -624,15 +635,23 @@ class LMCacheMPWorkerAdapter:
             if not s_future.query():
                 continue
 
-            s_result = s_future.result()
+            try:
+                s_result = s_future.result()
+            except Exception:
+                logger.exception(
+                    "Exception when collecting store result for request_id=%s",
+                    request_id,
+                )
+                finished_stores.add(request_id)
+                finished_stores.update(other_reqs)
+                continue
+
             finished_stores.add(request_id)
             finished_stores.update(other_reqs)
 
             if not s_result:
-                # TODO: add error handling here
                 logger.error(
-                    "Something went wrong when processing the "
-                    "store request for request_id=%s",
+                    "Store request failed for request_id=%s",
                     request_id,
                 )
 
@@ -640,24 +659,39 @@ class LMCacheMPWorkerAdapter:
             if not r_future.query():
                 continue
 
-            r_result = r_future.result()
+            try:
+                r_result = r_future.result()
+            except Exception:
+                logger.exception(
+                    "Exception when collecting retrieve result for request_id=%s",
+                    request_id,
+                )
+                finished_retrieves.add(request_id)
+                finished_retrieves.update(other_reqs)
+                block_ids = self._retrieve_block_ids.get(request_id, [])
+                self._load_error_block_ids.update(block_ids)
+                continue
+
             finished_retrieves.add(request_id)
             finished_retrieves.update(other_reqs)
 
             if not all(r_result):
-                # TODO: add error handing here
                 logger.error(
-                    "Something went wrong when processing the "
-                    "retrieve request for request_id=%s, result=%s",
+                    "Retrieve request partially failed for request_id=%s, result=%s",
                     request_id,
                     r_result,
                 )
+                # RetrieveResult is per-chunk while block_ids is per-block,
+                # so we conservatively add all tracked blocks to the error set.
+                block_ids = self._retrieve_block_ids.get(request_id, [])
+                self._load_error_block_ids.update(block_ids)
 
         # Remove the finished requests from the tracking dicts
         for request_id in finished_stores:
             self.store_futures.pop(request_id, None)
         for request_id in finished_retrieves:
             self.retrieve_futures.pop(request_id, None)
+            self._retrieve_block_ids.pop(request_id, None)
 
         # Update the internal states
         self.finished_stores.update(finished_stores)
@@ -673,6 +707,23 @@ class LMCacheMPWorkerAdapter:
         ret_stores.update(self._update_and_get_finished_store())
 
         return ret_stores, finished_retrieves
+
+    def get_block_ids_with_load_errors(self) -> set[int]:
+        """Drain and return block IDs whose retrieve has failed.
+
+        Called once per forward pass by the kv_connector layer. The
+        returned block IDs are marked as needing recomputation by the
+        engine. A failed *store* does not contribute here — the data is
+        still resident in GPU memory and the next forward pass can retry
+        the store transparently.
+
+        Returns:
+            Set of block IDs that encountered load errors since the last
+            call.  Empty set if all retrieves succeeded.
+        """
+        result = self._load_error_block_ids
+        self._load_error_block_ids = set()
+        return result
 
     def num_blocks_per_chunk(self) -> int:
         """
@@ -691,6 +742,8 @@ class LMCacheMPWorkerAdapter:
         ).result()
 
         self.mq_client.close()
+        self._retrieve_block_ids.clear()
+        self._load_error_block_ids.clear()
 
     # Helper functions
     def _update_and_get_finished_store(
