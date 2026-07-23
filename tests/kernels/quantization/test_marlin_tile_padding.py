@@ -446,6 +446,40 @@ def test_awq_zp_marlin_padded_round_trip(shape):
     torch.testing.assert_close(output, ref, rtol=2e-2, atol=2e-2)
 
 
+@pytest.mark.parametrize(
+    "n,k",
+    [
+        (130, 256),  # n not tile-aligned
+        (2880, 2880),  # gpt-oss pre-roundup shape (vllm#38022)
+        (256, 200),  # k not tile-aligned
+    ],
+)
+def test_mxfp4_moe_marlin_rejects_unaligned(n, k):
+    """The MXFP4 Marlin repack is only correct on tile-aligned shapes.
+
+    maybe_roundup_sizes() guarantees that for the MARLIN backends, but an
+    unaligned repack reads out of bounds and the resulting illegal memory
+    access is asynchronous, so it surfaces far from here. Fail loudly instead.
+    """
+    from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
+        prepare_moe_mxfp4_layer_for_marlin,
+    )
+
+    e = 2
+    layer = torch.nn.Module()
+    layer.params_dtype = torch.bfloat16
+
+    w13 = torch.zeros(e, 2 * n, k // 2, dtype=torch.uint8)
+    w2 = torch.zeros(e, k, n // 2, dtype=torch.uint8)
+    w13_scale = torch.zeros(e, 2 * n, k // 32, dtype=torch.uint8)
+    w2_scale = torch.zeros(e, k, n // 32, dtype=torch.uint8)
+
+    with pytest.raises(ValueError, match="divisible"):
+        prepare_moe_mxfp4_layer_for_marlin(
+            layer, w13, w2, w13_scale, w2_scale, None, None
+        )
+
+
 class _FakeLinear:
     def __init__(self, size_n, size_k, input_size=None):
         self.output_size_per_partition = size_n
