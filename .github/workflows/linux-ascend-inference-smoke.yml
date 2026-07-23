@@ -30,6 +30,7 @@ jobs:
       - ascend
       - 910b
       - docker
+      - ${{ github.event_name == 'pull_request' && 'npu-2' || 'ascend-benchmark' }}
     timeout-minutes: 30
     env:
       DEFAULT_SYSTEM_ASCEND_ROOT_HELPER: /usr/local/bin/run_ascend_benchmark_root_helper.sh

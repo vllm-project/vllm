@@ -263,11 +263,13 @@ jobs:
       - ascend
       - 910b
       - docker
+      - ${{ (github.event_name == 'pull_request' || github.event_name == 'issue_comment') && 'npu-2' || (github.event_name == 'workflow_dispatch' && (vars.VLLM_HUST_MANUAL_RUNNER_LABEL || 'npu-1') || 'ascend-benchmark') }}
     timeout-minutes: 60
     env:
       HOME: ${{ github.workspace }}/.ci-home
       DEFAULT_SYSTEM_ASCEND_BENCHMARK_ROOT_HELPER: /usr/local/bin/run_ascend_benchmark_root_helper.sh
       HF_HUB_DISABLE_TELEMETRY: "1"
+      HF_HUB_DISABLE_XET: "1"
       HF_ENDPOINT: ${{ vars.HF_ENDPOINT || 'https://hf-mirror.com' }}
       HF_HOME: ${{ github.workspace }}/../.hf-cache
       HUGGINGFACE_HUB_CACHE: ${{ github.workspace }}/../.hf-cache/hub
@@ -311,17 +313,17 @@ jobs:
       WEBSITE_LEADERBOARD_URL: ${{ vars.VLLM_HUST_LEADERBOARD_URL || '' }}
       PUBLISH_TO_BENCHMARK_REPO: ${{ ((github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.VLLM_HUST_PUBLISH_BENCHMARK_ON_MAIN == '1') || (github.event_name == 'schedule' && vars.VLLM_HUST_SCHEDULE_PUBLISH_BENCHMARK != '0') || (github.event_name == 'workflow_dispatch' && inputs.publish_to_benchmark_repo)) && '1' || '0' }}
       PUBLISH_TO_HF: ${{ (github.event_name == 'workflow_dispatch' && inputs.publish_to_hf && secrets.HF_TOKEN != '') && '1' || '0' }}
-      TARGET_REPO_URL: ${{ (github.event_name == 'pull_request' || github.event_name == 'issue_comment') && format('https://github.com/{0}.git', github.repository) || format('git@github.com:{0}.git', github.repository) }}
+      TARGET_REPO_URL: ${{ (github.event_name == 'pull_request' || github.event_name == 'issue_comment' || github.event_name == 'workflow_dispatch') && format('https://github.com/{0}.git', github.repository) || format('git@github.com:{0}.git', github.repository) }}
       TARGET_REPO_SHA: ${{ github.event_name == 'issue_comment' && needs.issue-comment-command.outputs.pr_head_sha || github.sha }}
-      BENCHMARK_REPO_URL: ${{ (github.event_name == 'pull_request' || github.event_name == 'issue_comment') && 'https://github.com/vLLM-HUST/vllm-hust-benchmark.git' || 'git@github.com:vLLM-HUST/vllm-hust-benchmark.git' }}
+      BENCHMARK_REPO_URL: ${{ (github.event_name == 'pull_request' || github.event_name == 'issue_comment' || github.event_name == 'workflow_dispatch') && 'https://github.com/vLLM-HUST/vllm-hust-benchmark.git' || 'git@github.com:vLLM-HUST/vllm-hust-benchmark.git' }}
       BENCHMARK_REPO_SLUG: vLLM-HUST/vllm-hust-benchmark
       BENCHMARK_REPO_GH_TOKEN: ${{ (github.event_name != 'pull_request' && github.event_name != 'issue_comment') && secrets.VLLM_HUST_BENCHMARK_GH_TOKEN || '' }}
       BENCHMARK_REPO_SSH_KEY: ${{ (github.event_name != 'pull_request' && github.event_name != 'issue_comment') && secrets.VLLM_ASCEND_HUST_BENCHMARK_SSH_KEY || '' }}
       BENCHMARK_REPO_REF: ${{ (github.event_name == 'pull_request' || github.event_name == 'issue_comment' || github.event_name == 'workflow_dispatch') && (vars.VLLM_HUST_BENCHMARK_REPO_REF || 'main') || 'main' }}
-      WEBSITE_REPO_URL: ${{ (github.event_name == 'pull_request' || github.event_name == 'issue_comment') && 'https://github.com/vLLM-HUST/vllm-hust-website.git' || 'git@github.com:vLLM-HUST/vllm-hust-website.git' }}
-      VLLM_ASCEND_HUST_REPO_URL: ${{ (github.event_name == 'pull_request' || github.event_name == 'issue_comment') && 'https://github.com/vLLM-HUST/vllm-ascend-hust.git' || 'git@github.com:vLLM-HUST/vllm-ascend-hust.git' }}
+      WEBSITE_REPO_URL: ${{ (github.event_name == 'pull_request' || github.event_name == 'issue_comment' || github.event_name == 'workflow_dispatch') && 'https://github.com/vLLM-HUST/vllm-hust-website.git' || 'git@github.com:vLLM-HUST/vllm-hust-website.git' }}
+      VLLM_ASCEND_HUST_REPO_URL: ${{ (github.event_name == 'pull_request' || github.event_name == 'issue_comment' || github.event_name == 'workflow_dispatch') && 'https://github.com/vLLM-HUST/vllm-ascend-hust.git' || 'git@github.com:vLLM-HUST/vllm-ascend-hust.git' }}
       ISSUE_COMMENT_PR_NUMBER: ${{ github.event_name == 'issue_comment' && needs.issue-comment-command.outputs.pr_number || '' }}
-      HUST_ASCEND_MANAGER_REPO_URL: ${{ (github.event_name == 'pull_request' || github.event_name == 'issue_comment') && 'https://github.com/vLLM-HUST/ascend-runtime-manager.git' || 'git@github.com:vLLM-HUST/ascend-runtime-manager.git' }}
+      HUST_ASCEND_MANAGER_REPO_URL: ${{ (github.event_name == 'pull_request' || github.event_name == 'issue_comment' || github.event_name == 'workflow_dispatch') && 'https://github.com/vLLM-HUST/ascend-runtime-manager.git' || 'git@github.com:vLLM-HUST/ascend-runtime-manager.git' }}
       HUST_ASCEND_MANAGER_REPO: ${{ github.workspace }}/ascend-runtime-manager
       # Disable precompiled CUDA wheel fetch from wheels.vllm.ai.
       # The Ascend benchmark uses the vllm-ascend-hust plugin, not CUDA
@@ -363,6 +365,22 @@ jobs:
           if [[ "$(id -u)" == "0" ]]; then
             echo "Runner is running as root; sudo helper is not required."
             echo "ASCEND_BENCHMARK_USE_SUDO=0" >> "$GITHUB_ENV"
+          fi
+
+          # A dedicated runner container may expose one physical node such as
+          # /dev/davinci2. CANN renumbers that isolated device to logical 0
+          # inside the container, so preserving the physical suffix would hide
+          # the only available NPU from torch_npu.
+          mapfile -t runner_devnodes < <(
+            find /dev -maxdepth 1 -name 'davinci[0-9]*' -printf '%f\n' 2>/dev/null \
+              | sort -t i -k2 -n
+          )
+          if [[ "${RUNNER_NAME:-}" =~ npu([0-9]+)$ ]] \
+            && [[ "${#runner_devnodes[@]}" -eq 1 ]] \
+            && [[ "${runner_devnodes[0]}" == "davinci${BASH_REMATCH[1]}" ]]; then
+            echo "Dedicated ${RUNNER_NAME} container exposes ${runner_devnodes[0]}; using logical NPU 0."
+            echo "ASCEND_VISIBLE_DEVICES=0" >> "$GITHUB_ENV"
+            echo "ASCEND_RT_VISIBLE_DEVICES=0" >> "$GITHUB_ENV"
           fi
 
           # Auto-detect NPU devices when no visibility env is set.
@@ -491,8 +509,9 @@ jobs:
             local repo_url=$1
             local target_dir=$2
             local target_sha=$3
-            local attempts=${GIT_CHECKOUT_RETRY_ATTEMPTS:-6}
+            local attempts=${GIT_CHECKOUT_RETRY_ATTEMPTS:-3}
             local delay_seconds=${GIT_CHECKOUT_RETRY_DELAY_SECONDS:-30}
+            local timeout_seconds=${GIT_CHECKOUT_TIMEOUT_SECONDS:-90}
             local try=1
             local parent_dir
             local temp_dir
@@ -503,13 +522,13 @@ jobs:
             mkdir -p "$parent_dir"
             rm -rf "$temp_dir"
             while [[ "$try" -le "$attempts" ]]; do
-              if git \
+              if timeout --foreground "${timeout_seconds}s" git \
                 -c http.version=HTTP/1.1 \
                 -c http.lowSpeedLimit=1024 \
                 -c http.lowSpeedTime=30 \
                 clone --depth 1 "$repo_url" "$temp_dir"; then
                 if ! git -C "$temp_dir" rev-parse --verify --quiet "$target_sha^{commit}" >/dev/null; then
-                  git -C "$temp_dir" \
+                  timeout --foreground "${timeout_seconds}s" git -C "$temp_dir" \
                     -c http.version=HTTP/1.1 \
                     -c http.lowSpeedLimit=1024 \
                     -c http.lowSpeedTime=30 \
@@ -585,6 +604,7 @@ jobs:
             local target_ref=${3:-}
             local attempts=6
             local delay_seconds=20
+            local timeout_seconds=${GIT_CHECKOUT_TIMEOUT_SECONDS:-90}
             local try=1
             local parent_dir
             local temp_dir
@@ -597,11 +617,13 @@ jobs:
             rm -rf "$target_dir" "$temp_dir"
             while [[ "$try" -le "$attempts" ]]; do
               echo "Clone attempt ${try}/${attempts}: $repo_url"
-              if git clone --depth 1 "$repo_url" "$temp_dir"; then
+              if timeout --foreground "${timeout_seconds}s" \
+                git clone --depth 1 "$repo_url" "$temp_dir"; then
                 if [[ -n "$target_ref" ]]; then
                   checkout_ref="$target_ref"
                   if ! git -C "$temp_dir" rev-parse --verify --quiet "$target_ref^{commit}" >/dev/null; then
-                    git -C "$temp_dir" fetch --depth 1 origin "$target_ref"
+                    timeout --foreground "${timeout_seconds}s" \
+                      git -C "$temp_dir" fetch --depth 1 origin "$target_ref"
                     checkout_ref=FETCH_HEAD
                   fi
                   git -C "$temp_dir" checkout --force "$checkout_ref"
@@ -661,11 +683,13 @@ jobs:
             local target_dir=$2
             local attempts=4
             local delay_seconds=15
+            local timeout_seconds=${GIT_CHECKOUT_TIMEOUT_SECONDS:-90}
             local try=1
 
             rm -rf "$target_dir"
             while [[ "$try" -le "$attempts" ]]; do
-              if git clone --depth 1 "$repo_url" "$target_dir"; then
+              if timeout --foreground "${timeout_seconds}s" \
+                git clone --depth 1 "$repo_url" "$target_dir"; then
                 return 0
               fi
               echo "Clone failed ($try/$attempts): $repo_url" >&2
@@ -688,11 +712,13 @@ jobs:
             local target_dir=$2
             local attempts=4
             local delay_seconds=15
+            local timeout_seconds=${GIT_CHECKOUT_TIMEOUT_SECONDS:-90}
             local try=1
 
             rm -rf "$target_dir"
             while [[ "$try" -le "$attempts" ]]; do
-              if git clone --depth 1 "$repo_url" "$target_dir"; then
+              if timeout --foreground "${timeout_seconds}s" \
+                git clone --depth 1 "$repo_url" "$target_dir"; then
                 return 0
               fi
               echo "Clone failed ($try/$attempts): $repo_url" >&2
@@ -785,11 +811,13 @@ jobs:
             local target_dir=$2
             local attempts=4
             local delay_seconds=15
+            local timeout_seconds=${GIT_CHECKOUT_TIMEOUT_SECONDS:-90}
             local try=1
 
             rm -rf "$target_dir"
             while [[ "$try" -le "$attempts" ]]; do
-              if git clone --depth 1 "$repo_url" "$target_dir"; then
+              if timeout --foreground "${timeout_seconds}s" \
+                git clone --depth 1 "$repo_url" "$target_dir"; then
                 return 0
               fi
               echo "Clone failed ($try/$attempts): $repo_url" >&2
