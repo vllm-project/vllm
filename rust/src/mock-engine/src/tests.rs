@@ -32,6 +32,7 @@ fn client_config(handshake_address: String, engine_count: usize) -> EngineCoreCl
             ready_timeout: Duration::from_secs(5),
             local_input_address: None,
             local_output_address: None,
+            session_path: None,
         },
         coordinator_mode: None,
         model_name: "mock-model".to_string(),

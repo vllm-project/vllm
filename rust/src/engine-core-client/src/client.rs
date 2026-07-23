@@ -1,13 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
 use futures::future::{join_all, try_join_all};
 use itertools::Itertools;
 use serde::Serialize;
+use thiserror_ext::AsReport as _;
 use tokio::sync::mpsc;
+use tokio::time::{Instant, sleep, timeout_at};
 use tokio_util::task::AbortOnDropHandle;
 use tracing::{debug, info, trace};
 
@@ -20,7 +23,10 @@ use crate::protocol::lora::LoraRequest;
 use crate::protocol::request::{EngineCoreRequest, EngineCoreRequestType};
 use crate::protocol::utility::{EngineCoreUtilityRequest, PauseMode};
 use crate::runtime::{BackgroundShutdownRuntime, build_zmq_runtime};
+use crate::session;
 use crate::transport::{self, ConnectedEngine};
+
+const REATTACH_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub(crate) mod imp;
 mod state;
@@ -49,6 +55,8 @@ pub enum TransportMode {
         local_input_address: Option<String>,
         /// Optional explicit bind address for the output PULL socket.
         local_output_address: Option<String>,
+        /// Optional development session file written after startup completes.
+        session_path: Option<PathBuf>,
     },
 
     /// The Python supervisor has already chosen the frontend transport
@@ -68,6 +76,12 @@ pub enum TransportMode {
         engine_count: usize,
         /// Maximum time to wait for all expected engines to register.
         ready_timeout: Duration,
+    },
+
+    /// Restore a previously handshaken frontend transport from a development session file.
+    Reattach {
+        /// Path written by a handshake-owned frontend from the same running engine.
+        path: PathBuf,
     },
 }
 
@@ -108,6 +122,7 @@ impl EngineCoreClientConfig {
                 ready_timeout: Duration::from_secs(30),
                 local_input_address: None,
                 local_output_address: None,
+                session_path: None,
             },
             coordinator_mode: None,
             model_name: String::new(),
@@ -224,6 +239,7 @@ impl EngineCoreClient {
     /// handshake. In bootstrapped mode it binds the provided frontend
     /// sockets and waits for the expected engine registration frames.
     pub async fn connect(config: EngineCoreClientConfig) -> Result<Self> {
+        let mut reattach = None;
         let connected = match &config.transport_mode {
             TransportMode::HandshakeOwner {
                 handshake_address,
@@ -232,6 +248,7 @@ impl EngineCoreClient {
                 ready_timeout,
                 local_input_address,
                 local_output_address,
+                session_path,
             } => {
                 let enable_inproc_coordinator = match config.coordinator_mode {
                     None => false,
@@ -241,7 +258,7 @@ impl EngineCoreClient {
                     }
                 };
 
-                transport::connect_handshake(
+                let connected = transport::connect_handshake(
                     handshake_address,
                     *engine_count,
                     advertised_host,
@@ -250,7 +267,12 @@ impl EngineCoreClient {
                     enable_inproc_coordinator,
                     *ready_timeout,
                 )
-                .await?
+                .await?;
+                if let Some(path) = session_path {
+                    session::write(path, &connected)?;
+                    info!(path = %path.display(), "wrote engine reattach session");
+                }
+                connected
             }
 
             TransportMode::Bootstrapped {
@@ -273,9 +295,58 @@ impl EngineCoreClient {
                 )
                 .await?
             }
+            TransportMode::Reattach { path } => {
+                if config.coordinator_mode.is_some() {
+                    return Err(Error::EngineSession {
+                        path: path.clone(),
+                        message: "reattach sessions do not support a coordinator".to_string(),
+                    });
+                }
+                let (input_address, output_address, engines) = session::read(path)?;
+                let connected =
+                    transport::connect_reattach(&input_address, &output_address, engines).await?;
+                reattach = Some(path.clone());
+                connected
+            }
         };
 
-        Self::from_connected(config, connected).await
+        let client = Self::from_connected(config, connected).await?;
+        if let Some(path) = reattach {
+            client.wait_for_reattach(path).await?;
+        }
+        Ok(client)
+    }
+
+    async fn wait_for_reattach(&self, path: PathBuf) -> Result<()> {
+        let deadline = Instant::now() + REATTACH_TIMEOUT;
+        let mut last_error = "engine did not reconnect".to_string();
+
+        loop {
+            match timeout_at(deadline, self.is_sleeping()).await {
+                Ok(Ok(_)) => {
+                    info!(path = %path.display(), "reattached engine session");
+                    return Ok(());
+                }
+                Ok(Err(error)) => last_error = error.to_report_string(),
+                Err(_) => {
+                    return Err(Error::ReattachTimeout {
+                        path,
+                        timeout: REATTACH_TIMEOUT,
+                        message: last_error,
+                    });
+                }
+            }
+
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(Error::ReattachTimeout {
+                    path,
+                    timeout: REATTACH_TIMEOUT,
+                    message: last_error,
+                });
+            }
+            sleep(remaining.min(Duration::from_millis(50))).await;
+        }
     }
 
     /// Create a new client instance from the connected transport state after

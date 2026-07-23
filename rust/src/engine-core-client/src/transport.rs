@@ -367,6 +367,30 @@ pub async fn connect_bootstrapped(
     })
 }
 
+/// Bind a saved frontend transport without waiting for startup registration frames.
+pub async fn connect_reattach(
+    input_address: &str,
+    output_address: &str,
+    engines: Vec<ConnectedEngine>,
+) -> Result<ConnectedTransport> {
+    let mut input_socket = RouterSocket::new();
+    let input_address = input_socket.bind(input_address).await?.to_string();
+
+    let mut output_socket = PullSocket::new();
+    let output_address = output_socket.bind(output_address).await?.to_string();
+
+    let (input_send, _) = input_socket.split();
+
+    Ok(ConnectedTransport {
+        input_address,
+        output_address,
+        engines,
+        coordinator: None,
+        input_send,
+        output_socket,
+    })
+}
+
 /// Bind new input and output sockets.
 async fn bind_local_sockets(
     local_host: &str,

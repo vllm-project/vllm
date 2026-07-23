@@ -8,6 +8,7 @@ mod metrics;
 pub mod mock_engine;
 pub mod protocol;
 pub mod runtime;
+mod session;
 #[cfg(any(test, feature = "test-util"))]
 pub mod test_utils;
 mod transport;
