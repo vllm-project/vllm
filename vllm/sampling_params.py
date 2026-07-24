@@ -26,6 +26,7 @@ logger = init_logger(__name__)
 
 _SAMPLING_EPS = 1e-5
 _MAX_TEMP = 1e-2
+_STRUCTURED_OUTPUT_BACKEND_ATTR = "_vllm_structured_output_backend"
 
 MAX_LOGPROB_TOKEN_IDS = 128
 """Upper bound on `SamplingParams.logprob_token_ids` list length. Must match
@@ -1063,6 +1064,25 @@ class SamplingParams(
         # Run post-init validation. This is also important to ensure subsequent
         # roundtrip serialization/deserialization won't fail.
         self.structured_outputs.__post_init__()
+
+        request_backend = self.structured_outputs._backend
+        assert request_backend is not None
+        initialized_backend = getattr(
+            structured_outputs_config, _STRUCTURED_OUTPUT_BACKEND_ATTR, None
+        )
+        if initialized_backend is not None and request_backend != initialized_backend:
+            raise VLLMValidationError(
+                "Structured output processing only supports one backend per engine. "
+                f"The engine is already using '{initialized_backend}', but this "
+                f"request resolved to '{request_backend}'. Configure "
+                "`structured_outputs_config.backend` explicitly or use schemas "
+                "supported by the initialized backend."
+            )
+        setattr(
+            structured_outputs_config,
+            _STRUCTURED_OUTPUT_BACKEND_ATTR,
+            request_backend,
+        )
 
     def __repr__(self) -> str:
         return (
