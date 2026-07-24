@@ -2443,11 +2443,15 @@ steps:
   - vllm/_aiter_ops.py
   - vllm/envs.py
   - vllm/platforms/rocm.py
+  - vllm/model_executor/layers/fused_moe/oracle/unquantized.py
+  - vllm/model_executor/layers/fused_moe/unquantized_fused_moe_method.py
   - tests/rocm/aiter/
+  - tests/rocm/test_moe_weight_replay.py
   - vllm/v1/attention/backends/mla/rocm_aiter_mla.py
   - vllm/v1/attention/selector.py
   commands:
   - pytest -v -s rocm/aiter/
+  - pytest -v -s rocm/test_moe_weight_replay.py
 
 #---------------------------------------------------------  mi300 · samplers  ----------------------------------------------------------#
 
