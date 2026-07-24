@@ -209,7 +209,11 @@ from vllm.v1.spec_decode.step3p5 import Step3p5MTPProposer
 from vllm.v1.spec_decode.suffix_decoding import SuffixDecodingProposer
 from vllm.v1.spec_decode.utils import update_num_computed_tokens_for_batch_change
 from vllm.v1.structured_output.utils import apply_grammar_bitmask
-from vllm.v1.utils import CpuGpuBuffer, record_function_or_nullcontext
+from vllm.v1.utils import (
+    CpuGpuBuffer,
+    compute_iteration_details,
+    record_function_or_nullcontext,
+)
 from vllm.v1.worker import mamba_utils
 from vllm.v1.worker.block_table import SlotMappingMode
 from vllm.v1.worker.cp_utils import (
@@ -3914,6 +3918,26 @@ class GPUModelRunner(
             else force_uniform_decode
         )
 
+    @staticmethod
+    def _compute_force_uniform_decode(
+        scheduler_output: "SchedulerOutput",
+        is_hybrid: bool,
+    ) -> bool | None:
+        """
+        Compute `force_uniform_decode` for the current iteration.
+
+        For hybrid models, a batch that still contains any context (prefill)
+        request must not be classified as a uniform decode batch, otherwise the
+        prefill tokens would be misclassified as decode tokens. Non-hybrid models
+        defer to the default heuristic.
+        """
+        if not is_hybrid:
+            return None
+        iteration_details = compute_iteration_details(scheduler_output)
+        if iteration_details.num_ctx_requests > 0:
+            return False
+        return None
+
     def _determine_batch_execution_and_padding(
         self,
         num_tokens: int,
@@ -4247,6 +4271,10 @@ class GPUModelRunner(
                     scheduler_output.num_common_prefix_blocks,
                 )
 
+            force_uniform_decode = self._compute_force_uniform_decode(
+                scheduler_output, self.model_config.is_hybrid
+            )
+
             (
                 cudagraph_mode,
                 batch_desc,
@@ -4260,6 +4288,7 @@ class GPUModelRunner(
                 max_num_scheduled_tokens=max_num_scheduled_tokens,
                 use_cascade_attn=cascade_attn_prefix_lens is not None,
                 num_encoder_reqs=len(scheduler_output.scheduled_encoder_inputs),
+                force_uniform_decode=force_uniform_decode,
             )
 
             logger.debug(
