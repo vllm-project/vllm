@@ -115,11 +115,31 @@ else
     fi
 fi
 
+# If the host has InfiniBand / RoCE verbs devices, expose them to the
+# container so NCCL can use the IB transport for inter-node collectives.
+# Without these flags, /dev/infiniband is not visible inside the container
+# and NCCL silently falls back to TCP over the Ethernet interface that
+# --network host provides, even when NCCL_IB_HCA / NCCL_IB_DISABLE are set in
+# the container env. The fallback is bandwidth-similar but ~10-20x higher
+# per-message latency and runs the full TCP/IP stack on the host CPU.
+# On hosts without /dev/infiniband, this block is a no-op.
+RDMA_DOCKER_FLAGS=()
+if [ -d /dev/infiniband ] && [ -n "$(ls -A /dev/infiniband 2>/dev/null)" ]; then
+    RDMA_DOCKER_FLAGS+=(
+        --device /dev/infiniband:/dev/infiniband
+        --cap-add IPC_LOCK
+        --ulimit memlock=-1
+        --ulimit stack=67108864
+    )
+fi
+
 # Launch the container with the assembled parameters.
 # --network host: Allows Ray nodes to communicate directly via host networking
 # --shm-size 10.24g: Increases shared memory
 # --gpus all: Gives container access to all GPUs on the host
 # -v HF_HOME: Mounts HuggingFace cache to avoid re-downloading models
+# RDMA_DOCKER_FLAGS: Passes IB/RoCE verbs devices into the container when the
+#   host has them, so NCCL can use IB transport instead of falling back to TCP.
 docker run \
     --entrypoint /bin/bash \
     --network host \
@@ -127,5 +147,6 @@ docker run \
     --shm-size 10.24g \
     --gpus all \
     -v "${PATH_TO_HF_HOME}:/root/.cache/huggingface" \
+    "${RDMA_DOCKER_FLAGS[@]}" \
     "${ADDITIONAL_ARGS[@]}" \
     "${DOCKER_IMAGE}" -c "${RAY_START_CMD}"
