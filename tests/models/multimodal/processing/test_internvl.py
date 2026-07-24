@@ -3,8 +3,12 @@
 """Tests for InternVL's multimodal preprocessing kwargs."""
 
 from collections.abc import Mapping
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
+import torch
+import torch.nn as nn
 from PIL import Image
 from transformers import PretrainedConfig
 
@@ -79,6 +83,73 @@ def _run_check(
 
     assert img_tok_count == 256 * total_expected_num_patches
     assert pixel_shape[0] == total_expected_num_patches
+
+
+def test_internvl_internlm2_backbone_disables_torch_compile():
+    from vllm.model_executor.models.internvl import InternVLChatModel
+
+    class DummyLanguageInner(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.make_empty_intermediate_tensors = object()
+
+        def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+            return torch.empty(input_ids.shape[0], 1)
+
+    class DummyLanguageModel(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.model = DummyLanguageInner()
+            self.make_empty_intermediate_tensors = object()
+
+    config = SimpleNamespace(
+        architectures=["InternVLChatModel"],
+        model_type="internvl_chat",
+        force_image_size=14,
+        vision_config=SimpleNamespace(
+            image_size=14,
+            patch_size=14,
+            hidden_size=1,
+            num_hidden_layers=1,
+        ),
+        downsample_ratio=1.0,
+        ps_version="v2",
+        select_layer=-1,
+        text_config=SimpleNamespace(
+            architectures=["InternLM2ForCausalLM"],
+            model_type="internlm2",
+            hidden_size=1,
+        ),
+        get_text_config=lambda: config.text_config,
+    )
+    mm_config = SimpleNamespace(
+        mm_encoder_tp_mode="weights",
+        mm_encoder_only=False,
+        get_limit_per_prompt=lambda modality: 1,
+    )
+    vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(
+            hf_config=config,
+            multimodal_config=mm_config,
+        ),
+        quant_config=None,
+    )
+
+    with (
+        patch.object(
+            InternVLChatModel,
+            "_init_vision_model",
+            return_value=nn.Identity(),
+        ),
+        patch.object(InternVLChatModel, "_init_mlp1", return_value=nn.Identity()),
+        patch(
+            "vllm.model_executor.models.internvl.init_vllm_registered_model",
+            return_value=DummyLanguageModel(),
+        ),
+    ):
+        model = InternVLChatModel(vllm_config=vllm_config)
+
+    assert model.language_model.model.do_not_compile is True
 
 
 @pytest.mark.parametrize("model_id", ["OpenGVLab/InternVL2-2B"])
