@@ -6,7 +6,6 @@ import torch
 from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     xpu_mxfp8_quantize as quant_mxfp8,
 )
-from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
 
 from .Mxfp8LinearKernel import Mxfp8LinearKernel, Mxfp8LinearLayerConfig
@@ -28,10 +27,30 @@ class XPUMxFp8LinearKernel(Mxfp8LinearKernel):
         return True, None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        # Transpose scale from checkpoint [N, K//32] to oneDNN [K//32, N]
+        # at load time, while keeping the original.
         weight_scale = layer.weight_scale.view(torch.float8_e8m0fnu)
-        weight_scale = weight_scale.t().contiguous()
-        replace_parameter(layer, "weight", layer.weight.t())
-        replace_parameter(layer, "weight_scale", weight_scale.data)
+        scale_t = weight_scale.t().contiguous()
+        layer.xpu_weight_scale = scale_t
+        self.xpu_weight_scale = layer.xpu_weight_scale
+
+        # For BMM layers (e.g. wo_a), precompute 3D scale and weight:
+        if getattr(layer, "is_bmm", False):
+            batch = layer.bmm_batch_size
+            k_blocks = scale_t.shape[0]  # K//32
+            n_per_batch_blocks = scale_t.shape[1] // batch
+            layer.bmm_scale = (
+                scale_t.reshape(k_blocks, batch, n_per_batch_blocks)
+                .permute(1, 0, 2)
+                .contiguous()
+            )  # [G, K//32, N_per_group]
+            # Precompute contiguous [G, K, N] weight for fp8_bmm.
+            w = layer.weight.data
+            N_total, K = w.shape
+            N_per_group = N_total // batch
+            layer.bmm_weight = (
+                w.reshape(batch, N_per_group, K).permute(0, 2, 1).contiguous()
+            )  # [G, K, N]
 
     def apply_weights(
         self,
@@ -41,11 +60,13 @@ class XPUMxFp8LinearKernel(Mxfp8LinearKernel):
     ) -> torch.Tensor:
         out_dtype = x.dtype
         x_fp8, x_scale = quant_mxfp8(x)
+        # Weight is [N, K]. Use .t() to create a [K, N] view.
+        # Scale is already [K//32, N] from process_weights_after_loading.
         return torch.ops._xpu_C.fp8_gemm(
             x_fp8,
-            layer.weight,
+            layer.weight.t(),
             out_dtype,
             x_scale,
-            layer.weight_scale,
+            self.xpu_weight_scale,
             bias,
         )
