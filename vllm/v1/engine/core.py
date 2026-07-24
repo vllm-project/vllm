@@ -78,7 +78,12 @@ from vllm.v1.engine.utils import (
     get_physical_gpu_ids_for_local_dp_rank,
 )
 from vllm.v1.executor import Executor
-from vllm.v1.kv_cache_interface import KVCacheConfig, get_kv_cache_spec_kind
+from vllm.v1.kv_cache_interface import (
+    KVCacheConfig,
+    KVCacheSpec,
+    UniformTypeKVCacheSpecs,
+    get_kv_cache_spec_kind,
+)
 from vllm.v1.metrics.stats import SchedulerIterationDetails, SchedulerStats
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
@@ -93,6 +98,37 @@ logger = init_logger(__name__)
 HANDSHAKE_TIMEOUT_MINS = 5
 
 _R = TypeVar("_R")  # Return type for collective_rpc
+
+
+def _dtype_str(dtype: Any) -> str | None:
+    return None if dtype is None else str(dtype).removeprefix("torch.")
+
+
+def _serialize_kv_cache_spec(spec: KVCacheSpec) -> dict[str, Any]:
+    """Return msgspec serializable fields describing KVCacheSpec."""
+    shapes = getattr(spec, "shapes", None)
+    dtypes = getattr(spec, "dtypes", None)
+    mamba_type = getattr(spec, "mamba_type", None)
+    return {
+        "kind": get_kv_cache_spec_kind(spec).value,
+        "block_size": spec.block_size,
+        "sliding_window": getattr(spec, "sliding_window", None),
+        "attention_chunk_size": getattr(spec, "attention_chunk_size", None),
+        "num_kv_heads": getattr(spec, "num_kv_heads", None),
+        "head_size": getattr(spec, "head_size", None),
+        "head_size_v": getattr(spec, "head_size_v", None),
+        "dtype": _dtype_str(getattr(spec, "dtype", None)),
+        "page_size_bytes": spec.page_size_bytes,
+        # MLA specific
+        "cache_dtype_str": getattr(spec, "cache_dtype_str", None),
+        # Sink attention specific
+        "sink_len": getattr(spec, "sink_len", None),
+        # Mamba specific
+        "shapes": None if shapes is None else [list(shape) for shape in shapes],
+        "dtypes": None if dtypes is None else [_dtype_str(d) for d in dtypes],
+        "mamba_type": None if mamba_type is None else mamba_type.name.lower(),
+        "mamba_cache_mode": getattr(spec, "mamba_cache_mode", None),
+    }
 
 
 class EngineCore:
@@ -409,23 +445,32 @@ class EngineCore:
             supported_pooling_tasks,
         )
 
-    def get_kv_cache_group_metadata(self) -> list[dict[str, int | str | None]]:
+    def get_kv_cache_group_metadata(self) -> list[dict[str, Any]]:
         """Return msgspec-serializable metadata for scheduler KV cache groups."""
         kv_cache_config = getattr(self.scheduler, "kv_cache_config", None)
         if kv_cache_config is None:
             return []
 
-        metadata: list[dict[str, int | str | None]] = []
-        for group_idx, group in enumerate(kv_cache_config.kv_cache_groups):
+        metadata: list[dict[str, Any]] = []
+        for group_id, group in enumerate(kv_cache_config.kv_cache_groups):
             spec = group.kv_cache_spec
-            metadata.append(
-                {
-                    "group_idx": group_idx,
-                    "kind": get_kv_cache_spec_kind(spec).value,
-                    "block_size": spec.block_size,
-                    "sliding_window": getattr(spec, "sliding_window", None),
-                }
-            )
+            entry: dict[str, Any] = {
+                "group_id": group_id,
+                "layer_count": len(group.layer_names),
+                "layer_names": list(group.layer_names),
+                **_serialize_kv_cache_spec(spec),
+            }
+            if isinstance(spec, UniformTypeKVCacheSpecs):
+                entry["layer_specs"] = [
+                    {
+                        "layer_names": [layer_name],
+                        **_serialize_kv_cache_spec(sub_spec),
+                    }
+                    for layer_name, sub_spec in spec.kv_cache_specs.items()
+                ]
+            else:
+                entry["layer_specs"] = None
+            metadata.append(entry)
         return metadata
 
     def add_request(self, request: Request, request_wave: int = 0):
