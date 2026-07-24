@@ -956,6 +956,22 @@ class SpecDecodeBaseProposer:
                 arange=self.arange,
                 new_slot_mapping=new_slot_mapping,
             )
+            update_group_slot_mappings = getattr(
+                self,
+                "_update_per_group_slot_mappings_for_expanded_inputs",
+                None,
+            )
+            if update_group_slot_mappings is not None:
+                group_slot_mapping = update_group_slot_mappings(
+                    cad=cad,
+                    new_positions=self.positions[:total_num_output_tokens],
+                    is_rejected_token_mask=self.is_rejected_token_mask[
+                        :total_num_output_tokens
+                    ],
+                    num_new_tokens=self.net_num_new_slots_per_request,
+                )
+                if group_slot_mapping is not None:
+                    new_cad.slot_mapping = group_slot_mapping
 
             return total_num_output_tokens, token_indices_to_sample, new_cad
 

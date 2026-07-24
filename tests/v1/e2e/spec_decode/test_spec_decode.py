@@ -1330,6 +1330,51 @@ def some_high_acceptance_metrics() -> dict:
     }
 
 
+@single_gpu_only
+@large_gpu_mark(min_gb=20)
+def test_self_spec_acceptance_length_gemma3(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Regression test for self-spec acceptance on multi-group KV models."""
+    with monkeypatch.context() as m:
+        # Batch invariance stabilizes acceptance metrics for this setup.
+        m.setenv("VLLM_BATCH_INVARIANT", "1")
+
+        spec_llm = LLM(
+            model="google/gemma-3-270m-it",
+            speculative_config={
+                "model": "google/gemma-3-270m-it",
+                "method": "draft_model",
+                "num_speculative_tokens": 3,
+                "max_model_len": 2048,
+            },
+            max_num_seqs=100,
+            max_model_len=2048,
+            gpu_memory_utilization=0.5,
+            disable_log_stats=False,
+            attention_config={"backend": "FLASH_ATTN"},
+        )
+
+        test_prompts = get_messages(dataset="test_prompts", n=100)
+        spec_llm.chat(test_prompts, greedy_sampling())
+        metrics = spec_llm.get_metrics()
+
+        acceptance_rate = compute_acceptance_rate(metrics)
+        acceptance_len = compute_acceptance_len(metrics)
+        print(
+            "self-spec gemma3 acceptance: "
+            f"rate={acceptance_rate:.3f}, len={acceptance_len:.3f}"
+        )
+
+        # PR #33318 baseline: acceptance_len ~= 4.0, acceptance_rate ~= 1.0.
+        assert acceptance_len >= 3.95
+        assert acceptance_rate >= 0.98
+
+        del spec_llm
+        torch.accelerator.empty_cache()
+        cleanup_dist_env_and_memory()
+
+
 def compute_acceptance_rate(
     metrics: list[Metric], prev_metrics: list[Metric] | None = None
 ) -> float:
