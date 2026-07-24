@@ -609,6 +609,16 @@ def triton_kernel_moe_forward(
             # expert_map already applied; pass None downstream.
             effective_expert_map = None
             effective_global_num_experts = local_num_experts
+        elif not isinstance(topk_result, tuple):
+            # v3.6+ topk returns a SparseMatrix whose construction already
+            # computed the bitmatrix and its metadata; reuse it instead of
+            # re-packing the bitmatrix and recomputing the metadata in
+            # make_routing_data.
+            routing_data, gather_idx, scatter_idx = routing_data_from_sparse_topk(
+                topk_result, gating_output.shape[-1]
+            )
+            effective_expert_map = expert_map
+            effective_global_num_experts = global_num_experts
         else:
             topk_ids = topk_ids_raw.to(torch.long)
             routing_data, gather_idx, scatter_idx = make_routing_data(
@@ -795,18 +805,36 @@ def make_routing_data(
         )
 
     sparse_logits = SparseMatrix(indx=topk_ids, vals=topk_weights, mask=bitmatrix)
-    dispatch_indx = sparse_logits.mask_metadata.row_sorted_indx
-    combine_indx = sparse_logits.mask_metadata.col_sorted_indx
+    return routing_data_from_sparse_topk(sparse_logits, num_local_experts)
+
+
+def routing_data_from_sparse_topk(
+    sparse_topk,  # SparseMatrix
+    n_expts_tot: int,
+) -> tuple["RoutingData", "GatherIndx", "ScatterIndx"]:
+    """Build routing structures from the ``SparseMatrix`` returned by
+    ``triton_kernels.topk``, reusing its precomputed bitmatrix metadata.
+
+    ``make_routing_data`` re-packs a bitmatrix from the topk ids and
+    constructs a second ``SparseMatrix``, recomputing metadata the topk
+    call already produced; when the topk ids are used as-is (no expert-map
+    remapping) that work is redundant.
+    """
+    dispatch_indx = sparse_topk.mask_metadata.row_sorted_indx
+    combine_indx = sparse_topk.mask_metadata.col_sorted_indx
     ragged_batch_metadata = make_ragged_tensor_metadata(
-        sparse_logits.mask_metadata.col_sum,
+        sparse_topk.mask_metadata.col_sum,
         dispatch_indx.shape[0],
     )
-    gate_scal = sparse_logits.vals.flatten()[combine_indx]
+    n_expts_act = sparse_topk.indx.shape[1]
+    # Unlike make_routing_data, no bfloat16 cast: gate_scal inherits the
+    # gating dtype, which is bfloat16 for all callers of this path.
+    gate_scal = sparse_topk.vals.flatten()[combine_indx]
     routing_data = RoutingData(
         gate_scal,
         ragged_batch_metadata.block_sizes,
-        num_local_experts,
-        num_topk,
+        n_expts_tot,
+        n_expts_act,
         ragged_batch_metadata,
     )
     gather_indx = GatherIndx(combine_indx, dispatch_indx)
