@@ -537,9 +537,9 @@ def make_output(
 def run_square_bench(args):
     dim_sizes = list(range(args.dim_start, args.dim_end + 1, args.dim_increment))
     MKNs = list(zip(dim_sizes, dim_sizes, dim_sizes))
-    data = run(args.dtype, args.sweep_schedules, MKNs)
+    data = run(args, MKNs)
 
-    make_output(data, MKNs, f"square_bench-{args.dtype}")
+    make_output(data, MKNs, f"square_bench-{terse_type_name(args.act_type)}")
 
 
 def run_range_bench(args):
@@ -553,9 +553,9 @@ def run_range_bench(args):
     Ns = list(range(n_start, n_end + 1, n_increment))
     MKNs = list(product(Ms, Ks, Ns))
 
-    data = run(args.dtype, args.sweep_schedules, MKNs)
+    data = run(args, MKNs)
 
-    make_output(data, MKNs, f"range_bench-{args.dtype}")
+    make_output(data, MKNs, f"range_bench-{terse_type_name(args.act_type)}")
 
 
 def run_model_bench(args):
@@ -631,13 +631,13 @@ if __name__ == "__main__":
 Benchmark Machete GEMM.
 
     To run square GEMMs:
-        python3 ./benchmarks/kernels/benchmark_machete.py --dtype float16 square_bench --dim-start 128 --dim-end 512 --dim-increment 64
+        python3 ./benchmarks/kernels/benchmark_machete.py --act-type float16 square_bench --dim-start 128 --dim-end 512 --dim-increment 64
     
-    To run constant N and K and sweep M:
-        python3 ./benchmarks/kernels/benchmark_machete.py --dtype float16 range_bench --dim-start 128 --dim-end 512 --dim-increment 64 --n-constant 16384 --k-constant 16384
+    To sweep M, K, and N over explicit ranges:
+        python3 ./benchmarks/kernels/benchmark_machete.py --act-type float16 range_bench --dim-start 128,128,128 --dim-end 512,512,512 --dim-increment 64,64,64
     
     To run dimensions from a model:
-        python3 ./benchmarks/kernels/benchmark_machete.py --dtype float16 model_bench --models meta-llama/Llama-2-7b-hf --batch-sizes 16 --tp-sizes 1
+        python3 ./benchmarks/kernels/benchmark_machete.py --act-type float16 model_bench --models meta-llama/Llama-2-7b-hf --batch-sizes 16 --tp-sizes 1
     
     Output:
         - a .pkl file, that is a list of raw torch.benchmark.utils.Measurements for the pytorch and cutlass implementations for the various GEMMs.
