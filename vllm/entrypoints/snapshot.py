@@ -24,7 +24,6 @@ import importlib.metadata
 import json
 import os
 import platform
-import re
 import shlex
 import shutil
 import signal
@@ -38,6 +37,8 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+import regex as re
 
 from vllm.logger import init_logger
 
@@ -1649,7 +1650,7 @@ def maybe_restore_serve() -> None:
     _capture_entry_state()  # before the eager imports mutate env/sys.path
     if command == "snapshot":
         # Bare `vllm snapshot create` ONLY (the wrapper's exact invocation):
-        # any extra token (--force, --dry-run, --help, a typo like --froce)
+        # any extra token (--force, --dry-run, --help, a mistyped flag)
         # must reach argparse on the slow path, never be masked by a fast exit.
         if sys.argv[1:] == ["snapshot", "create"]:
             directory = None

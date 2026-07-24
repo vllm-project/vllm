@@ -345,6 +345,7 @@ def test_lookup_key_keys_dpkg_dists_by_deb_revision(monkeypatch):
         class Result:
             returncode = 0
             stderr = ""
+            stdout = ""
 
         result = Result()
         if argv[0] == "criu":
