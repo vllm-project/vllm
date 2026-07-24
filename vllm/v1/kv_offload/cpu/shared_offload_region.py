@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import contextlib
 import mmap
 import os
 import time
@@ -10,6 +11,34 @@ from vllm.logger import init_logger
 from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
+
+
+def _check_available_space(path: str, required_bytes: int, fd: int) -> None:
+    """Raise a clear error if the filesystem backing *path* cannot hold the region.
+
+    The offload region is created on a tmpfs (``/dev/shm``) whose capacity is
+    bounded by available RAM. ``ftruncate`` only reserves the size sparsely, so
+    an oversized request is not rejected here; it instead surfaces much later as
+    an opaque ``OSError: [Errno 14] Bad address`` when
+    ``madvise(MADV_POPULATE_WRITE)`` tries to fault in pages. Checking up front
+    lets us tell the user exactly what went wrong and how to fix it.
+    """
+    try:
+        stat = os.fstatvfs(fd)
+    except (OSError, AttributeError):
+        # statvfs may be unavailable (e.g. on some platforms); skip the check
+        # rather than block a configuration that might otherwise work.
+        return
+    available_bytes = stat.f_bavail * stat.f_frsize
+    if required_bytes > available_bytes:
+        raise RuntimeError(
+            f"Not enough space to create the CPU offload region at {path}: "
+            f"need {required_bytes / 1e9:.2f} GB but only "
+            f"{available_bytes / 1e9:.2f} GB is available on the backing "
+            f"filesystem (typically the /dev/shm tmpfs). Reduce the CPU "
+            f"offloading size (for example via the kv_offloading_size / "
+            f"cpu_bytes_to_use setting) or increase the size of /dev/shm."
+        )
 
 
 def _wait_for_file_size(fd: int, expected_size: int, timeout: float = 30.0) -> None:
@@ -66,6 +95,20 @@ class SharedOffloadRegion:
             self.fd: int | None = os.open(
                 self.mmap_path, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600
             )
+            # Fail early with a clear message if the backing filesystem
+            # (typically the /dev/shm tmpfs) cannot hold the region. Without
+            # this check the shortfall only surfaces later as an opaque
+            # "OSError: [Errno 14] Bad address" from madvise(MADV_POPULATE_WRITE).
+            try:
+                _check_available_space(self.mmap_path, self.total_size_bytes, self.fd)
+            except RuntimeError:
+                # Remove the just-created empty file so other workers do not
+                # block waiting for it to reach the expected size.
+                os.close(self.fd)
+                self.fd = None
+                with contextlib.suppress(OSError):
+                    os.unlink(self.mmap_path)
+                raise
             os.ftruncate(self.fd, self.total_size_bytes)
             self._creator = True
             logger.info(
