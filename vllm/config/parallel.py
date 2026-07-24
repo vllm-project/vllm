@@ -4,7 +4,7 @@
 import os
 import socket
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any, Literal, overload
+from typing import TYPE_CHECKING, Any, Literal, cast, get_args, overload
 
 import regex as re
 import torch
@@ -36,7 +36,9 @@ DistributedExecutorBackend = Literal["ray", "mp", "uni", "external_launcher"]
 DataParallelBackend = Literal["ray", "mp"]
 EPLBPolicyOption = Literal["default"]
 DCPCommBackend = Literal["ag_rs", "a2a"]
-EPLBCommunicatorBackend = Literal["torch_nccl", "torch_gloo", "nixl", "pynccl"]
+EPLBCommunicatorBackend = Literal[
+    "torch_nccl", "torch_gloo", "nixl", "pynccl", "platform"
+]
 All2AllBackend = Literal[
     "naive",
     "pplx",
@@ -94,20 +96,14 @@ class EPLBConfig:
     - "torch_gloo": Use torch.distributed gloo with CPU staging
     - "nixl": Use NIXL with staged send/recv buffers
     - "pynccl": Use PyNccl send/recv
-    - None: Auto-select backend (prefers "nixl", falls back to "torch_gloo")
+    - "platform": Let the current EPLB Platform Backend create the communicator
+    - None: Let the current EPLB Platform Backend select the default
     """
 
     @model_validator(mode="after")
     def _validate_eplb_config(self) -> Self:
         if self.use_async and self.policy != "default":
             raise ValueError("Async EPLB is only supported with the default policy.")
-        if self.use_async and self.communicator in ("torch_nccl", "pynccl"):
-            raise ValueError(
-                f"{self.communicator} communicator is incompatible with "
-                "async EPLB due to NCCL multi-stream conflicts. Use "
-                "'torch_gloo' or 'nixl' instead, or leave communicator "
-                "unset for automatic selection."
-            )
         if self.log_balancedness and self.log_balancedness_interval <= 0:
             raise ValueError("log_balancedness_interval must be greater than 0.")
         return self
@@ -472,11 +468,6 @@ class ParallelConfig:
             )
 
         if self.enable_eplb:
-            if not current_platform.is_cuda_alike():
-                raise ValueError(
-                    "Expert parallelism load balancing is only supported on "
-                    "CUDA devices or ROCm devices now."
-                )
             if not self.enable_expert_parallel:
                 raise ValueError("enable_expert_parallel must be True to use EPLB.")
             # The EP group spans the TP x PCP x DP ranks. EPLB therefore needs
@@ -826,16 +817,6 @@ class ParallelConfig:
                     "or data_parallel_hybrid_lb. Elastic EP relies on a single API "
                     "server and core client to coordinate scale up/down."
                 )
-            if self.eplb_config.use_async:
-                from vllm.distributed.nixl_utils import is_nixl_available
-
-                if not is_nixl_available():
-                    raise ValueError(
-                        "Elastic EP with async EPLB requires the NIXL "
-                        "package. Either install NIXL or set "
-                        "--eplb-config.use_async=false."
-                    )
-
         if self.data_parallel_size > 1 or self.data_parallel_size_local == 0:
             # Data parallel was specified in the engine args.
             if self.distributed_executor_backend == "external_launcher":
@@ -942,22 +923,28 @@ class ParallelConfig:
                 "backend is mp, uni or external_launcher."
             )
 
-        if self.enable_eplb and self.eplb_config.communicator is None:
-            # Prefer NIXL when available: zero-copy RDMA reads, compatible
-            # with both async EPLB and elastic EP (deferred remote setup).
-            # Fallbacks: pynccl for elastic EP (stateless groups need it),
-            # torch_gloo for static EP.  torch_nccl is avoided because NCCL
-            # is incompatible with async EPLB (multi-stream conflicts) and
-            # batched isend/irecv hangs under high load.
-            # See https://github.com/pytorch/pytorch/issues/174288
-            from vllm.distributed.nixl_utils import is_nixl_available
+        if self.enable_eplb:
+            from vllm.distributed.eplb.platform_backend import (
+                resolve_eplb_platform_backend_cls,
+            )
 
-            if is_nixl_available():
-                self.eplb_config.communicator = "nixl"
-            elif self.enable_elastic_ep:
-                self.eplb_config.communicator = "pynccl"
-            else:
-                self.eplb_config.communicator = "torch_gloo"
+            backend_cls = resolve_eplb_platform_backend_cls()
+            if backend_cls is None:
+                raise ValueError(
+                    f"Platform {current_platform.device_name!r} does not provide "
+                    "an EPLB Platform Backend."
+                )
+            if self.eplb_config.communicator is None:
+                resolved_communicator = backend_cls.resolve_communicator(self)
+                if resolved_communicator not in get_args(EPLBCommunicatorBackend):
+                    raise ValueError(
+                        f"EPLB Platform Backend returned unknown communicator "
+                        f"{resolved_communicator!r}."
+                    )
+                self.eplb_config.communicator = cast(
+                    EPLBCommunicatorBackend, resolved_communicator
+                )
+            backend_cls.validate_config(self)
 
     @property
     def use_ray(self) -> bool:
