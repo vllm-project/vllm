@@ -20,6 +20,7 @@ from vllm.entrypoints.openai.cli_args import (
 )
 from vllm.entrypoints.serve.utils.api_utils import VLLM_SUBCMD_PARSER_EPILOG
 from vllm.logger import init_logger
+from vllm.renderers.paged_shm.server import maybe_start_paged_shm_server
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 logger = init_logger(__name__)
@@ -135,10 +136,16 @@ async def run_launch_fastapi(args: argparse.Namespace) -> None:
     envs.VLLM_CPU_KVCACHE_SPACE = 0
 
     vllm_config = VllmConfig(model_config=model_config)
+
+    paged_shm_server = maybe_start_paged_shm_server(model_config.multimodal_config)
+
     shutdown_task = await build_and_serve_renderer(
         vllm_config, listen_address, sock, args
     )
+
     try:
         await shutdown_task
     finally:
         sock.close()
+        if paged_shm_server is not None:
+            paged_shm_server.close()

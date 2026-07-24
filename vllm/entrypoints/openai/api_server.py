@@ -60,6 +60,7 @@ from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParserManager
 from vllm.renderers.online_derenderer import OnlineDerenderer
 from vllm.renderers.online_renderer import OnlineRenderer
+from vllm.renderers.paged_shm.server import maybe_start_paged_shm_server
 from vllm.tasks import POOLING_TASKS, SupportedTask
 from vllm.tool_parsers import ToolParserManager
 from vllm.tracing import instrument
@@ -269,6 +270,10 @@ def build_app(
 
         register_pooling_api_routers(app, supported_tasks, model_config)
 
+    from vllm.entrypoints.scale_out.factories import register_paged_shm_server_routers
+
+    register_paged_shm_server_routers(app, model_config)
+
     # Endpoint plugins are attached last so their routes are registered after all core
     # routers. This runs even for the CPU only render server. A plugin eligible for
     # the `render` task still gets its routes registered. It receives
@@ -472,6 +477,10 @@ async def init_app_state(
 
         init_pooling_state(engine_client, state, args, request_logger, supported_tasks)
 
+    from vllm.entrypoints.scale_out.factories import init_paged_shm_server_state
+
+    init_paged_shm_server_state(state, vllm_config.model_config)
+
     await _init_endpoint_plugins_state(engine_client, state, args)
 
     state.enable_server_load_tracking = args.enable_server_load_tracking
@@ -556,6 +565,10 @@ async def init_render_app_state(
     from vllm.entrypoints.scale_out.factories import init_render_state
 
     init_render_state(state, request_logger)
+
+    from vllm.entrypoints.scale_out.factories import init_paged_shm_server_state
+
+    init_paged_shm_server_state(state, vllm_config.model_config)
 
     state.vllm_config = vllm_config
     # Disable stats logging — there is no engine to poll.
@@ -716,7 +729,7 @@ async def build_and_serve_renderer(
     if log_config is not None:
         uvicorn_kwargs["log_config"] = log_config
 
-    app = build_app(args, ("render",))
+    app = build_app(args, ("render",), vllm_config.model_config)
     await init_render_app_state(vllm_config, app.state, args)
 
     logger.info("Starting vLLM server on %s", listen_address)
@@ -774,14 +787,21 @@ async def run_server_worker(
         args,
         client_config=client_config,
     ) as engine_client:
+        paged_shm_server = maybe_start_paged_shm_server(
+            engine_client.model_config.multimodal_config
+        )
+
         shutdown_task = await build_and_serve(
             engine_client, listen_address, sock, args, **uvicorn_kwargs
         )
     # NB: Await server shutdown only after the backend context is exited
+
     try:
         await shutdown_task
     finally:
         sock.close()
+        if paged_shm_server is not None:
+            paged_shm_server.close()
 
 
 if __name__ == "__main__":

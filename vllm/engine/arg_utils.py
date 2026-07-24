@@ -588,6 +588,8 @@ class EngineArgs:
     video_pruning_rate: float | None = MultiModalConfig.video_pruning_rate
     mm_tensor_ipc: MMTensorIPC = MultiModalConfig.mm_tensor_ipc
     mm_ipc_gpu_memory_gb: float = MultiModalConfig.mm_ipc_gpu_memory_gb
+    paged_shm_size: int = MultiModalConfig.paged_shm_size
+    paged_shm_block_size: int = MultiModalConfig.paged_shm_block_size
     # LoRA fields
     enable_lora: bool = False
     max_loras: int = LoRAConfig.max_loras
@@ -1319,6 +1321,14 @@ class EngineArgs:
             "--mm-ipc-gpu-memory-gb",
             **multimodal_kwargs["mm_ipc_gpu_memory_gb"],
         )
+        multimodal_group.add_argument(
+            "--paged-shm-size",
+            **multimodal_kwargs["paged_shm_size"],
+        )
+        multimodal_group.add_argument(
+            "--paged-shm-block-size",
+            **multimodal_kwargs["paged_shm_block_size"],
+        )
 
         # LoRA related configs
         lora_kwargs = get_kwargs(LoRAConfig)
@@ -1677,6 +1687,8 @@ class EngineArgs:
             mm_processor_cache_gb=self.mm_processor_cache_gb,
             mm_processor_cache_type=self.mm_processor_cache_type,
             mm_shm_cache_max_object_size_mb=self.mm_shm_cache_max_object_size_mb,
+            paged_shm_size=self.paged_shm_size,
+            paged_shm_block_size=self.paged_shm_block_size,
             mm_encoder_only=self.mm_encoder_only,
             mm_encoder_tp_mode=self.mm_encoder_tp_mode,
             mm_encoder_attn_backend=self.mm_encoder_attn_backend,
