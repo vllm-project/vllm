@@ -49,9 +49,9 @@ from transformers.models.qwen3_vl.video_processing_qwen3_vl import (
 from transformers.video_utils import VideoMetadata
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import VllmConfig
+from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.config.multimodal import BaseDummyOptions, VideoDummyOptions
-from vllm.distributed import get_pp_group, parallel_state
+from vllm.distributed import get_pp_group, get_sp_group, parallel_state
 from vllm.inputs import MultiModalDataDict
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import _ACTIVATION_REGISTRY
@@ -450,16 +450,25 @@ class Qwen3_VisionBlock(nn.Module):
         rotary_pos_emb_sin: torch.Tensor,
         max_seqlen: torch.Tensor,  # Only used for Flash Attention
         sequence_lengths: torch.Tensor,  # Only used for FlashInfer CuDNN backend
+        sp_enabled: bool = False,
+        sp_group: torch.distributed.ProcessGroup | None = None,
     ) -> torch.Tensor:
-        x = x + self.attn(
-            self.norm1(x),
+        x_normed = self.norm1(x)
+        if sp_enabled:
+            x_normed = sp_group.all_gather(x_normed, dim=0)
+        x_attn = self.attn(
+            x_normed,
             cu_seqlens=cu_seqlens,
             rotary_pos_emb_cos=rotary_pos_emb_cos,
             rotary_pos_emb_sin=rotary_pos_emb_sin,
             max_seqlen=max_seqlen,
             sequence_lengths=sequence_lengths,
+            sp_enabled=sp_enabled,
         )
 
+        if sp_enabled:
+            x_attn = sp_group.reduce_scatter(x_attn, dim=0)
+        x = x + x_attn
         x = x + self.mlp(self.norm2(x))
         return x
 
@@ -553,6 +562,28 @@ class Qwen3_VisionTransformer(nn.Module):
             if use_data_parallel
             else parallel_state.get_tensor_model_parallel_world_size()
         )
+
+        # Sequence parallel is only applied to the vision encoder, and only 
+        # when enabled in config and the input sequence length is large enough. 
+        # This is because for short sequences, the communication overhead of 
+        # sequence parallelism may outweigh its benefits, especially when the 
+        # number of patches (sequence length) is smaller than the number of 
+        # sequence parallel partitions.
+        self.sp_group = None
+        self.sp_size = None
+        self.sp_rank = None
+        self.sp_min_token_num = 500
+
+        config = get_current_vllm_config()
+        multimodal_config = config.model_config.multimodal_config
+        if multimodal_config.enable_mm_encoder_sp:
+            self.sp_group = get_sp_group()
+            self.sp_size = self.sp_group.world_size
+            self.sp_rank = (
+                1
+                if use_data_parallel
+                else self.sp_group.rank_in_group
+            )
 
         # NOTE: This is used for creating empty tensor for all_gather for
         # DP ViT. Here out_hidden_size is enlarged due to deepstack
@@ -818,6 +849,17 @@ class Qwen3_VisionTransformer(nn.Module):
         hidden_states = hidden_states + pos_embeds
         hidden_states = hidden_states.unsqueeze(1)
 
+        sp_enabled = False
+        seq_len = hidden_states.size(0)
+        if self.sp_group is not None and self.sp_size > 1:
+            sp_enabled = (
+                seq_len >= self.sp_min_token_num
+                and seq_len % self.sp_size == 0
+            )
+        if sp_enabled:
+            seq_chunk = hidden_states.shape[0] // self.sp_size
+            hidden_states = hidden_states[self.sp_rank * seq_chunk : (self.sp_rank + 1) * seq_chunk]
+
         deepstack_feature_lists = []
         for layer_num, blk in enumerate(self.blocks):
             hidden_states = blk(
@@ -827,13 +869,23 @@ class Qwen3_VisionTransformer(nn.Module):
                 rotary_pos_emb_sin=encoder_metadata["rotary_pos_emb_sin"],
                 max_seqlen=encoder_metadata["max_seqlen"],
                 sequence_lengths=encoder_metadata.get("sequence_lengths"),
+                sp_enabled=sp_enabled,
+                sp_group=self.sp_group,
             )
             if layer_num in self.deepstack_visual_indexes:
                 deepstack_merger_idx = self.deepstack_visual_indexes.index(layer_num)
+                deepstack_input = (
+                    self.sp_group.all_gather(hidden_states, dim=0)
+                    if sp_enabled
+                    else hidden_states
+                )
                 deepstack_feature = self.deepstack_merger_list[deepstack_merger_idx](
-                    hidden_states
+                    deepstack_input
                 )
                 deepstack_feature_lists.append(deepstack_feature)
+        if sp_enabled:
+            hidden_states = self.sp_group.all_gather(hidden_states, dim=0)
+
         hidden_states = self.merger(hidden_states)
         hidden_states = torch.cat(
             [hidden_states] + deepstack_feature_lists, dim=1
