@@ -32,6 +32,7 @@ from .cache import CacheConfig
 from .compilation import CompilationConfig, CompilationMode, CUDAGraphMode
 from .device import DeviceConfig
 from .diffusion import DiffusionConfig
+from .ec_manager_config import EncoderCacheManagerConfig
 from .ec_transfer import ECTransferConfig
 from .kernel import KernelConfig
 from .kv_events import KVEventsConfig
@@ -367,6 +368,10 @@ class VllmConfig:
     """The configurations for event publishing."""
     ec_transfer_config: ECTransferConfig | None = None
     """The configurations for distributed EC cache transfer."""
+    ec_manager_config: EncoderCacheManagerConfig = Field(
+        default_factory=EncoderCacheManagerConfig
+    )
+    """The configurations for custom encoder cache manager."""
     reasoning_config: ReasoningConfig | None = None
     """The configurations for reasoning model."""
     # some opaque config, only used to provide additional information
