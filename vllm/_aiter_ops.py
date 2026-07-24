@@ -1600,6 +1600,24 @@ class rocm_aiter_ops:
         return cls._AITER_ENABLED
 
     @classmethod
+    def is_rdna_aiter_enabled(cls) -> bool:
+        """AITER on RDNA4 (gfx12): library present, arch is rdna4, and the user
+        enabled aiter. Only aiter's Triton kernels exist on gfx12 (no CK build),
+        so this deliberately stays off the gfx9/CK `@if_aiter_supported` umbrella
+        and gates only the Triton paths rdna4 uses. The gfx12 analog of
+        `is_enabled()`."""
+        if not current_platform.is_rocm() or not IS_AITER_FOUND:
+            return False
+        from vllm.platforms.rocm import on_rdna4
+
+        return on_rdna4() and cls._AITER_ENABLED
+
+    @classmethod
+    def is_rdna_linear_enabled(cls) -> bool:
+        """RDNA4 (gfx12) analog of is_linear_enabled() (aiter Triton blockscale)."""
+        return cls.is_rdna_aiter_enabled() and cls._LINEAR_ENABLED
+
+    @classmethod
     @if_aiter_supported
     def is_linear_enabled(cls) -> bool:
         return cls._AITER_ENABLED and cls._LINEAR_ENABLED
@@ -1749,17 +1767,8 @@ class rocm_aiter_ops:
             aiter_ar_comm if isinstance(aiter_ar_comm, AiterCustomAllreduce) else None
         )
 
-    @classmethod
-    @if_aiter_supported
-    def are_gdn_triton_kernels_available(cls) -> bool:
-        """Check if AITER Triton kernels for GDN attention are importable.
-
-        These are optional Triton kernels (conv1d fast-path, gated delta net)
-        used by GatedDeltaNetAttention's decode fast-path.  They may be absent
-        in older aiter builds.
-        """
-        if not cls._AITER_ENABLED:
-            return False
+    @staticmethod
+    def _gdn_triton_kernels_importable() -> bool:
         try:
             import aiter.ops.triton.causal_conv1d_update_single_token  # noqa: F401
             import aiter.ops.triton.gated_delta_net  # noqa: F401
@@ -1770,6 +1779,22 @@ class rocm_aiter_ops:
             return True
         except (ImportError, ModuleNotFoundError):
             return False
+
+    @classmethod
+    @if_aiter_supported
+    def are_gdn_triton_kernels_available(cls) -> bool:
+        """Check if AITER Triton kernels for GDN attention are importable.
+
+        These are optional Triton kernels (conv1d fast-path, gated delta net)
+        used by GatedDeltaNetAttention's decode fast-path.  They may be absent
+        in older aiter builds.
+        """
+        return cls._AITER_ENABLED and cls._gdn_triton_kernels_importable()
+
+    @classmethod
+    def is_rdna_gdn_triton_kernels_available(cls) -> bool:
+        """RDNA4 (gfx12) analog of are_gdn_triton_kernels_available()."""
+        return cls.is_rdna_aiter_enabled() and cls._gdn_triton_kernels_importable()
 
     @classmethod
     @if_aiter_supported
@@ -2626,19 +2651,45 @@ class rocm_aiter_ops:
 
     @staticmethod
     def is_triton_gemm_w8a8_tuned(n: int, k: int) -> bool:
-        return (n, k) in [
+        if not current_platform.is_rocm():
+            return False
+        from vllm.platforms.rocm import on_gfx950, on_rdna4
+
+        gfx950_tuned = {
+            (512, 7168),
             (1024, 8192),
             (2112, 7168),
             (3072, 1536),
-            (32768, 8192),
             (4096, 7168),
             (4608, 7168),
-            (512, 7168),
-            (7168, 2048),
             (7168, 256),
+            (7168, 2048),
+            (7168, 16384),
+            (7168, 18432),
             (8192, 1024),
             (8192, 32768),
-        ]
+            (16384, 1536),
+            (24576, 1536),
+            (32768, 512),
+            (32768, 8192),
+            (36864, 7168),
+        }
+        rdna4_tuned = gfx950_tuned | {
+            (2048, 2048),
+            (2624, 6144),
+            (3072, 6144),
+            (3584, 512),
+            (4096, 512),
+            (6144, 1536),
+            (6144, 2048),
+            (7168, 2304),
+            (8192, 8192),
+        }
+        if on_rdna4():
+            return (n, k) in rdna4_tuned
+        if on_gfx950():
+            return (n, k) in gfx950_tuned
+        return False
 
     @staticmethod
     def is_triton_gemm_afp4wfp4_presh_ws_tuned(n: int, k: int) -> bool:
