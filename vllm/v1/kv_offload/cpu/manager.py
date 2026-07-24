@@ -119,7 +119,7 @@ class CPUOffloadingManager(OffloadingManager):
     def on_request_finished(self, req_context: ReqContext) -> None:
         # Drop any per-request state the policy is holding (SAE's
         # session-merge pointer). No-op for LRU/ARC.
-        self._policy.on_request_finished(req_context.req_id)
+        self._policy.on_request_finished(req_context)
 
     @override
     def lookup(self, key: OffloadKey, req_context: ReqContext) -> LookupResult:
@@ -136,7 +136,7 @@ class CPUOffloadingManager(OffloadingManager):
         # lookup, distinct from the internal existence checks in
         # prepare_load / prepare_store / complete_load / complete_store.
         # SAE uses this to gate its session-merge pointer.
-        self._policy.record_lookup(key, req_context.req_id)
+        self._policy.record_lookup(key, req_context)
         if block is None:
             result = LookupResult.MISS
         elif not block.is_ready:
@@ -198,14 +198,12 @@ class CPUOffloadingManager(OffloadingManager):
             num_keys = len(keys)
             keys = [k for k in keys if self.counts.get(k, 0) >= self.store_threshold]
             self.stores_skipped_in_current_batch += num_keys - len(keys)
-        # filter out blocks that are already stored; the number of blocks
-        # dropped by the filter is the number of already-resident prefix
-        # blocks preceding the first not-yet-stored key. Matches the
-        # reference SAE's `start_pos = bh_list.index(to_store[0])`.
+        # Filter out blocks that are already stored.
+        # The count dropped by the filter (``num_blocks_in_cache``) is the number of
+        # already stored blocks
         keys_list = list(keys)
         keys_to_store = [k for k in keys_list if self._policy.get(k) is None]
-        start_pos = len(keys_list) - len(keys_to_store)
-        req_id = req_context.req_id
+        num_blocks_in_cache = len(keys_list) - len(keys_to_store)
 
         if not keys_to_store:
             return PrepareStoreOutput(
@@ -229,7 +227,7 @@ class CPUOffloadingManager(OffloadingManager):
             # a block that was already stored must remain in the cache after this call.
             protected = set(keys_list)
             evicted = self._policy.evict(
-                num_blocks_to_evict, protected, req_id, start_pos
+                num_blocks_to_evict, protected, req_context, num_blocks_in_cache
             )
             if evicted is None:
                 return None
@@ -257,11 +255,8 @@ class CPUOffloadingManager(OffloadingManager):
             "Block pool did not allocate the expected number of blocks"
         )
 
-        # Bracket the insert loop so SAE can decide session merging once
-        # per batch (using the same req_id/start_pos passed to evict) and
-        # seal the session's float `hits` back to int on close. LRU/ARC
-        # get no-op defaults.
-        self._policy.open_session(req_id, start_pos)
+        # Enable grouping inserts into sessions
+        self._policy.open_session(req_context, num_blocks_in_cache)
         try:
             for key, block in zip(keys_to_store, blocks):
                 self._policy.insert(key, block)

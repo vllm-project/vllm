@@ -113,8 +113,8 @@ class ARCCachePolicy(CachePolicy):
         self,
         n: int,
         protected: set[OffloadKey],
-        req_id: str,
-        start_pos: int,
+        req_context: ReqContext,
+        num_blocks_in_cache: int,
     ) -> list[tuple[OffloadKey, BlockStatus]] | None:
         if n == 0:
             return []
