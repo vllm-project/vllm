@@ -1931,7 +1931,17 @@ def _postprocess_messages(messages: list[ConversationMessage]) -> None:
                 # if arguments is None or empty string, set to {}
                 if content := function.get("arguments"):
                     if not isinstance(content, (dict, list)):
-                        parsed = json.loads(content)
+                        try:
+                            parsed = json.loads(content)
+                        except json.JSONDecodeError:
+                            # Client replayed a tool call whose `arguments` string isn't valid
+                            # JSON (e.g. an unescaped docstring). Don't 400 the whole request --
+                            # keep the original text so rendering can proceed.
+                            logger.warning(
+                                "Tool call arguments were not valid JSON; passing the "
+                                "original string through instead of failing the request."
+                            )
+                            parsed = content
                         function["arguments"] = parsed if parsed is not None else {}
                 else:
                     function["arguments"] = {}
