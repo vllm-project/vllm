@@ -90,6 +90,10 @@ ModelDType = Literal["auto", "half", "float16", "bfloat16", "float", "float32"]
 LogprobsMode = Literal[
     "raw_logits", "raw_logprobs", "processed_logits", "processed_logprobs"
 ]
+PROCESSED_LOGPROBS_MODES: tuple[LogprobsMode, ...] = (
+    "processed_logits",
+    "processed_logprobs",
+)
 HfOverrides = dict[str, Any] | Callable[[PretrainedConfig], PretrainedConfig]
 ModelImpl = Literal["auto", "vllm", "transformers", "terratorch"]
 LayerBlockType = Literal["attention", "linear_attention", "mamba"]
@@ -1691,6 +1695,10 @@ class ModelConfig:
     @property
     def supports_mamba_prefix_caching(self) -> bool:
         return self._model_info.supports_mamba_prefix_caching
+
+    @property
+    def supports_replayssm(self) -> bool:
+        return self._model_info.supports_replayssm
 
     @property
     def use_mla(self) -> bool:

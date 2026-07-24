@@ -9,6 +9,7 @@ import torch
 
 from vllm.v1.core.kv_cache_utils import (
     _get_kv_cache_config_packed,
+    _get_kv_cache_groups_uniform_groups,
     get_kv_cache_config_from_groups,
 )
 from vllm.v1.kv_cache_interface import (
@@ -16,6 +17,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheGroupSpec,
     KVCacheTensor,
     MLAAttentionSpec,
+    SlidingWindowMLASpec,
     SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
 )
@@ -109,7 +111,132 @@ def _page_sizes_by_layer(
     return page_sizes
 
 
+def _packing_by_layer(
+    tensors: list[KVCacheTensor],
+) -> dict[str, tuple[int, int]]:
+    return {
+        layer_name: (tensor.offset, tensor.block_stride)
+        for tensor in tensors
+        for layer_name in tensor.shared_by
+    }
+
+
+def _make_views(
+    groups: list[KVCacheGroupSpec],
+    num_blocks: int,
+    tensors: list[KVCacheTensor],
+) -> dict[str, torch.Tensor]:
+    page_sizes = _page_sizes_by_layer(groups)
+    packing = _packing_by_layer(tensors)
+    backing = torch.zeros(tensors[0].size, dtype=torch.uint8)
+    return {
+        layer_name: torch.as_strided(
+            backing,
+            size=(num_blocks, page_size),
+            stride=(packing[layer_name][1], 1),
+            storage_offset=packing[layer_name][0],
+        )
+        for layer_name, page_size in page_sizes.items()
+    }
+
+
+def _make_page_group(prefix: str, page_sizes: list[int]) -> KVCacheGroupSpec:
+    specs = {
+        f"{prefix}.{i}": MagicMock(page_size_bytes=page_size)
+        for i, page_size in enumerate(page_sizes)
+    }
+    return KVCacheGroupSpec(
+        layer_names=list(specs),
+        kv_cache_spec=UniformTypeKVCacheSpecs(block_size=256, kv_cache_specs=specs),
+    )
+
+
 class TestInterleavedPacking:
+    def test_compact_cache_overlays_fp32_state_group(self):
+        full_specs = {}
+        state_specs = {}
+        for i in range(2):
+            full_specs[f"mla.{i}"] = MLAAttentionSpec(
+                block_size=256,
+                num_kv_heads=1,
+                head_size=512,
+                dtype=torch.uint8,
+                page_size_padded=32768,
+                indexes_kv_by_block_stride=True,
+                compress_ratio=4,
+            )
+            full_specs[f"indexer.{i}"] = MLAAttentionSpec(
+                block_size=256,
+                num_kv_heads=1,
+                head_size=68,
+                dtype=torch.uint8,
+                page_size_padded=4608,
+                compress_ratio=4,
+            )
+            state_specs[f"mla_state.{i}"] = SlidingWindowMLASpec(
+                block_size=4,
+                num_kv_heads=1,
+                head_size=2048,
+                dtype=torch.float32,
+                sliding_window=8,
+                indexes_kv_by_block_stride=True,
+            )
+            state_specs[f"indexer_state.{i}"] = SlidingWindowMLASpec(
+                block_size=4,
+                num_kv_heads=1,
+                head_size=512,
+                dtype=torch.float32,
+                sliding_window=8,
+                indexes_kv_by_block_stride=True,
+            )
+
+        grouped_specs = [
+            UniformTypeKVCacheSpecs(block_size=256, kv_cache_specs=full_specs),
+            UniformTypeKVCacheSpecs(block_size=4, kv_cache_specs=state_specs),
+        ]
+        groups = _get_kv_cache_groups_uniform_groups(grouped_specs)
+
+        assert len(groups) == 2
+        assert {full_specs[f"indexer.{i}"].page_size_bytes for i in range(2)} == {4608}
+        assert {full_specs[f"indexer.{i}"].real_page_size_bytes for i in range(2)} == {
+            4352
+        }
+        assert {
+            state_specs[f"indexer_state.{i}"].page_size_bytes for i in range(2)
+        } == {8192}
+
+        full_group_bytes = 2 * (32768 + 4608)
+        state_group_bytes = 2 * (32768 + 8192)
+        bytes_per_block = max(full_group_bytes, state_group_bytes)
+        num_blocks, tensors = _get_kv_cache_config_packed(
+            _mock_vllm_config(), groups, bytes_per_block * 32
+        )
+        assert num_blocks == 32
+        assert {tensor.block_stride for tensor in tensors} == {bytes_per_block}
+
+        packing = _packing_by_layer(tensors)
+        assert packing["mla.0"][0] == packing["mla_state.0"][0] == 0
+        assert packing["indexer.0"][0] == 32768
+        assert packing["indexer_state.0"][0] == 32768
+
+    def test_deepseek_v4_pro_stride(self):
+        groups = [
+            _make_page_group("full", [32768, 4608] * 30 + [1024] * 31),
+            _make_page_group("c4_state", [32768, 8192] * 30),
+            _make_page_group("c128_state", [32768] * 31),
+            _make_page_group("swa.0", [32768] * 31),
+            _make_page_group("swa.1", [32768] * 30),
+        ]
+        expected_stride = 1_228_800
+
+        num_blocks, tensors = _get_kv_cache_config_packed(
+            _mock_vllm_config(), groups, expected_stride * 32
+        )
+
+        assert num_blocks == 32
+        assert {tensor.block_stride for tensor in tensors} == {expected_stride}
+        assert {tensor.size for tensor in tensors} == {expected_stride * 32}
+
     def test_all_tensors_have_block_stride(self):
         _, tensors = _run()
         for t in tensors:
@@ -122,9 +249,30 @@ class TestInterleavedPacking:
         assert sizes.pop() > 0
 
     def test_offsets_within_one_block(self):
-        _, tensors = _run()
-        for t in tensors:
-            assert t.offset < t.block_stride
+        groups = _make_groups(n_c4=3, n_c128=2, n_swa=5)
+        _, tensors = _get_kv_cache_config_packed(
+            _mock_vllm_config(), groups, 100 * 1024 * 1024
+        )
+        page_sizes = _page_sizes_by_layer(groups)
+        packing = _packing_by_layer(tensors)
+        for layer_name, page_size in page_sizes.items():
+            offset, block_stride = packing[layer_name]
+            assert offset + page_size <= block_stride
+
+    def test_layouts_are_disjoint_within_each_group(self):
+        groups = _make_groups(n_c4=3, n_c128=2, n_swa=5)
+        _, tensors = _get_kv_cache_config_packed(
+            _mock_vllm_config(), groups, 100 * 1024 * 1024
+        )
+        page_sizes = _page_sizes_by_layer(groups)
+        packing = _packing_by_layer(tensors)
+
+        for group in groups:
+            ranges = sorted(
+                (packing[name][0], packing[name][0] + page_sizes[name])
+                for name in group.layer_names
+            )
+            assert all(left[1] <= right[0] for left, right in zip(ranges, ranges[1:]))
 
     def test_all_layers_accounted_for(self):
         n_c4, n_c128, n_swa = 5, 4, 7
@@ -135,29 +283,29 @@ class TestInterleavedPacking:
         expected = n_c4 * 2 + n_c128 + n_swa
         assert len(all_names) == expected
 
-    def test_strided_views_are_independent(self):
+    def test_group_owned_blocks_do_not_alias(self):
         groups = _make_groups(n_c4=3, n_c128=2, n_swa=5)
-        page_sizes = _page_sizes_by_layer(groups)
         num_blocks, tensors = _get_kv_cache_config_packed(
             _mock_vllm_config(), groups, 100 * 1024 * 1024
         )
-        backing = torch.zeros(tensors[0].size, dtype=torch.uint8)
-        views = []
-        for t in tensors:
-            page_size = page_sizes[t.shared_by[0]]
-            v = torch.as_strided(
-                backing,
-                size=(num_blocks, page_size),
-                stride=(t.block_stride, 1),
-                storage_offset=t.offset,
-            )
-            views.append(v)
+        views = _make_views(groups, num_blocks, tensors)
 
-        for i, v in enumerate(views):
-            v.fill_(i + 1)
+        expected = {}
+        value = 1
+        for block_id, group in enumerate(groups):
+            for layer_name in group.layer_names:
+                views[layer_name][block_id].fill_(value)
+                expected[layer_name] = (block_id, value)
+                value += 1
 
-        for i, v in enumerate(views):
-            assert (v == i + 1).all(), f"View {i} was corrupted"
+        for layer_name, (block_id, value) in expected.items():
+            assert (views[layer_name][block_id] == value).all()
+
+        # Once the first group releases its block, another group may reuse it.
+        for layer_name in groups[1].layer_names:
+            views[layer_name][0].fill_(255)
+        for layer_name in groups[1].layer_names:
+            assert (views[layer_name][0] == 255).all()
 
     def test_hma_attention_groups_keep_default_backing(self):
         full = _make_full_spec()
