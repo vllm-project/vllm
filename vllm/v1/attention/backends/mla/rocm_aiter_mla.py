@@ -86,6 +86,22 @@ class AiterMLABackend(MLACommonBackend):
     def get_builder_cls() -> type["AiterMLAMetadataBuilder"]:
         return AiterMLAMetadataBuilder
 
+    @classmethod
+    def supports_num_heads(cls, num_heads: int | None) -> str | None:
+        if num_heads is None:
+            return None
+
+        valid_heads = num_heads in (4, 8) or (
+            num_heads % 16 == 0 and 16 <= num_heads <= 128
+        )
+        if valid_heads:
+            return None
+
+        return (
+            "num_heads not supported; ROCm AITER MLA supports 4, 8, "
+            "or multiples of 16 in [16, 128]"
+        )
+
 
 @dataclass
 class AiterMLADecodeMetadata(MLACommonDecodeMetadata):
