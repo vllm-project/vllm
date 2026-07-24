@@ -19,6 +19,7 @@ pull_request_rules:
   description: Comment on PR when pre-commit check fails
   conditions:
     - check-failure=pre-commit
+    - -check-cancelled=pre-commit
     - -closed
     - -draft
     - or:
