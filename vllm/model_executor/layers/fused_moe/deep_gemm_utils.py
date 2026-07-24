@@ -5,14 +5,23 @@ Taken from https://github.com/ModelTC/LightLLM/blob/8ed97c74c18f11505b048b1ba00b
 and updated to fit vllm needs and terminology.
 """
 
+from dataclasses import dataclass
+from typing import Any
+
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.utils import count_expert_num_tokens
+from vllm.model_executor.warmup.jit_warmup import (
+    VllmJitKernel,
+    zip_inputs,
+)
+from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    TritonWarmupTensor,
+)
 from vllm.triton_utils import tl, triton
 from vllm.utils.deep_gemm import get_mk_alignment_for_contiguous_layout
 from vllm.utils.math_utils import round_up
-
 
 def expert_num_tokens_round_up_and_sum(
     expert_num_tokens: torch.Tensor, alignment: int
@@ -269,6 +278,412 @@ def _fwd_kernel_ep_scatter_2(
                     )
 
 
+class DeepGemmEPScatterKernel(
+    VllmJitKernel["DeepGemmEPScatterKernel.CompileKey"]
+):
+    @dataclass(frozen=True)
+    class CompileKey:
+        num_experts: int
+        topk_num: int
+        HAS_EXPERT_MAP: bool
+        HIDDEN_SIZE: int
+        HIDDEN_SIZE_PAD: int
+        SCALE_HIDDEN_SIZE: int
+        SCALE_HIDDEN_SIZE_PAD: int
+        PACK_UE8M0: bool
+        SCALE_PACKED_SIZE: int
+        SCALE_PACKED_SIZE_PAD: int
+        BLOCK_E: int
+        BLOCK_EXPERT_NUM: int
+        ALIGN_M: int
+
+    @staticmethod
+    def kernel(stage: str) -> Any:
+        if stage == "start":
+            return _fwd_kernel_ep_scatter_1
+        if stage == "copy":
+            return _fwd_kernel_ep_scatter_2
+        raise ValueError(f"Unknown DeepGEMM EP scatter kernel stage: {stage}")
+
+    def dispatch(  # type: ignore[override]
+        self,
+        *,
+        hidden_size: int,
+        num_experts: int,
+        topk_num: int,
+        has_expert_map: bool,
+        align_m: int,
+        block_size: int,
+        pack_ue8m0: bool,
+    ) -> CompileKey:
+        scale_hidden_size = hidden_size // block_size
+        scale_packed_size = (scale_hidden_size + 3) // 4 if pack_ue8m0 else 1
+        return self.CompileKey(
+            num_experts=num_experts,
+            topk_num=topk_num,
+            HAS_EXPERT_MAP=has_expert_map,
+            HIDDEN_SIZE=hidden_size,
+            HIDDEN_SIZE_PAD=triton.next_power_of_2(hidden_size),
+            SCALE_HIDDEN_SIZE=scale_hidden_size,
+            SCALE_HIDDEN_SIZE_PAD=triton.next_power_of_2(scale_hidden_size),
+            PACK_UE8M0=pack_ue8m0,
+            SCALE_PACKED_SIZE=scale_packed_size,
+            SCALE_PACKED_SIZE_PAD=triton.next_power_of_2(scale_packed_size),
+            BLOCK_E=128,
+            BLOCK_EXPERT_NUM=triton.next_power_of_2(num_experts),
+            ALIGN_M=align_m,
+        )
+
+    def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
+        kernel_config = getattr(vllm_config, "kernel_config", None)
+        if getattr(kernel_config, "moe_backend", None) != "deep_gemm_mega_moe":
+            return []
+
+        model_config = getattr(vllm_config, "model_config", None)
+        hf_config = getattr(model_config, "hf_config", None)
+        if getattr(hf_config, "model_type", None) != "deepseek_v4":
+            return []
+
+        hidden_size = int(getattr(hf_config, "hidden_size", 0) or 0)
+        topk_num = int(getattr(hf_config, "num_experts_per_tok", 0) or 0)
+        num_experts = int(getattr(hf_config, "n_routed_experts", 0) or 0)
+        parallel_config = getattr(vllm_config, "parallel_config", None)
+        eplb_config = getattr(parallel_config, "eplb_config", None)
+        num_experts += int(getattr(eplb_config, "num_redundant_experts", 0) or 0)
+        if num_experts > 0:
+            try:
+                from vllm.distributed.parallel_state import get_ep_group
+
+                world_size = get_ep_group().world_size
+            except Exception:
+                world_size = int(
+                    getattr(parallel_config, "data_parallel_size", 1) or 1
+                )
+            num_experts //= world_size if world_size >= 1 else 1
+        if hidden_size <= 0 or topk_num <= 0 or num_experts <= 0:
+            return []
+
+        align_m, block_k = get_mk_alignment_for_contiguous_layout()
+        return self._trace_dispatch(self.dispatch)(
+            zip_inputs(
+                dict(block_size=block_k, pack_ue8m0=False),
+                dict(block_size=32, pack_ue8m0=True),
+            ),
+            hidden_size=hidden_size,
+            num_experts=num_experts,
+            topk_num=topk_num,
+            has_expert_map=(False, True),
+            align_m=align_m,
+        )
+
+    def compile(self, compile_key: CompileKey) -> None:
+        scatter_start_warmup = getattr(self.kernel("start"), "warmup", None)
+        scatter_copy_warmup = getattr(self.kernel("copy"), "warmup", None)
+        assert scatter_start_warmup is not None
+        assert scatter_copy_warmup is not None
+
+        int32_ptr = TritonWarmupTensor(torch.int32)
+        fp8_ptr = TritonWarmupTensor(torch.float8_e4m3fn)
+        scale_ptr = TritonWarmupTensor(
+            torch.int32 if compile_key.PACK_UE8M0 else torch.float32
+        )
+        expert_map = int32_ptr if compile_key.HAS_EXPERT_MAP else None
+
+        scatter_start_warmup(
+            int32_ptr,
+            int32_ptr,
+            int32_ptr,
+            num_experts=compile_key.num_experts,
+            BLOCK_E=compile_key.BLOCK_E,
+            BLOCK_EXPERT_NUM=compile_key.BLOCK_EXPERT_NUM,
+            ALIGN_M=compile_key.ALIGN_M,
+            grid=(compile_key.num_experts,),
+            num_warps=8,
+        )
+        scatter_copy_warmup(
+            1,
+            int32_ptr,
+            fp8_ptr,
+            1,
+            1,
+            scale_ptr,
+            1,
+            1,
+            int32_ptr,
+            1,
+            1,
+            fp8_ptr,
+            1,
+            1,
+            scale_ptr,
+            1,
+            1,
+            int32_ptr,
+            1,
+            1,
+            topk_num=compile_key.topk_num,
+            expert_map=expert_map,
+            HAS_EXPERT_MAP=compile_key.HAS_EXPERT_MAP,
+            HIDDEN_SIZE=compile_key.HIDDEN_SIZE,
+            HIDDEN_SIZE_PAD=compile_key.HIDDEN_SIZE_PAD,
+            SCALE_HIDDEN_SIZE=compile_key.SCALE_HIDDEN_SIZE,
+            SCALE_HIDDEN_SIZE_PAD=compile_key.SCALE_HIDDEN_SIZE_PAD,
+            PACK_UE8M0=compile_key.PACK_UE8M0,
+            SCALE_PACKED_SIZE=compile_key.SCALE_PACKED_SIZE,
+            SCALE_PACKED_SIZE_PAD=compile_key.SCALE_PACKED_SIZE_PAD,
+            grid=(1,),
+            num_warps=8,
+        )
+
+    def __call__(
+        self,
+        recv_x: torch.Tensor,
+        recv_x_scale: torch.Tensor,
+        recv_topk: torch.Tensor,
+        num_recv_tokens_per_expert: torch.Tensor,
+        expert_map: torch.Tensor | None,
+        expert_start_loc: torch.Tensor,
+        output_tensor: torch.Tensor,
+        output_tensor_scale: torch.Tensor,
+        m_indices: torch.Tensor,
+        output_index: torch.Tensor,
+        align_m: int,
+        block_size: int,
+        pack_ue8m0: bool,
+    ) -> None:
+        block_e = 128
+        num_warps = 8
+        num_experts = num_recv_tokens_per_expert.shape[0]
+        hidden_size = recv_x.shape[1]
+        grid = num_experts
+
+        scale_hidden_size = hidden_size // block_size
+        scale_packed_size = (scale_hidden_size + 3) // 4 if pack_ue8m0 else 1
+
+        self.kernel("start")[(grid,)](
+            num_recv_tokens_per_expert,
+            expert_start_loc,
+            m_indices,
+            num_experts=num_experts,
+            num_warps=num_warps,
+            BLOCK_E=block_e,
+            BLOCK_EXPERT_NUM=triton.next_power_of_2(num_experts),
+            ALIGN_M=align_m,
+        )
+
+        grid = min(recv_topk.shape[0], 1024 * 8)
+        self.kernel("copy")[(grid,)](
+            recv_topk.shape[0],
+            expert_start_loc,
+            recv_x,
+            recv_x.stride(0),
+            recv_x.stride(1),
+            recv_x_scale,
+            recv_x_scale.stride(0),
+            recv_x_scale.stride(1),
+            recv_topk,
+            recv_topk.stride(0),
+            recv_topk.stride(1),
+            output_tensor,
+            output_tensor.stride(0),
+            output_tensor.stride(1),
+            output_tensor_scale,
+            output_tensor_scale.stride(0),
+            output_tensor_scale.stride(1),
+            output_index,
+            output_index.stride(0),
+            output_index.stride(1),
+            topk_num=recv_topk.shape[1],
+            expert_map=expert_map,
+            HAS_EXPERT_MAP=expert_map is not None,
+            num_warps=num_warps,
+            HIDDEN_SIZE=hidden_size,
+            HIDDEN_SIZE_PAD=triton.next_power_of_2(hidden_size),
+            SCALE_HIDDEN_SIZE=scale_hidden_size,
+            SCALE_HIDDEN_SIZE_PAD=triton.next_power_of_2(scale_hidden_size),
+            PACK_UE8M0=pack_ue8m0,
+            SCALE_PACKED_SIZE=scale_packed_size,
+            SCALE_PACKED_SIZE_PAD=triton.next_power_of_2(scale_packed_size),
+        )
+
+
+class DeepGemmEPGatherKernel(
+    VllmJitKernel["DeepGemmEPGatherKernel.CompileKey"]
+):
+    @dataclass(frozen=True)
+    class CompileKey:
+        dtype: torch.dtype
+        topk_num: int
+        HAS_EXPERT_MAP: bool
+        BLOCK_D: int
+    @staticmethod
+    @triton.jit
+    def kernel(
+        total_token_num,
+        input_tensor,
+        input_tensor_stride0,
+        input_tensor_stride1,
+        recv_topk_ids,
+        recv_topk_ids_stride0,
+        recv_topk_ids_stride1,
+        recv_topk_weight,
+        recv_topk_weight_stride0,
+        recv_topk_weight_stride1,
+        input_index,
+        input_index_stride0,
+        input_index_stride1,
+        output_tensor,
+        output_tensor_stride0,
+        output_tensor_stride1,
+        topk_num: tl.constexpr,
+        expert_map,
+        HAS_EXPERT_MAP: tl.constexpr,
+        BLOCK_D: tl.constexpr,
+    ):
+        cur_block = tl.program_id(0)
+        start_cur_token = tl.program_id(1)
+        grid_num = tl.num_programs(1)
+
+        for cur_token in range(start_cur_token, total_token_num, grid_num):
+            off_d = tl.arange(0, BLOCK_D)
+            accumulator = tl.zeros([BLOCK_D], dtype=tl.float32)
+            for topk_index in range(0, topk_num):
+                expert_id = tl.load(
+                    recv_topk_ids + cur_token * recv_topk_ids_stride0 + topk_index
+                )
+
+                if HAS_EXPERT_MAP:
+                    expert_id = apply_expert_map(expert_id, expert_map)
+
+                if expert_id >= 0:
+                    source_token_index = tl.load(
+                        input_index + cur_token * input_index_stride0 + topk_index
+                    )
+                    acc_weight = tl.load(
+                        recv_topk_weight + cur_token * recv_topk_weight_stride0 + topk_index
+                    )
+                    tmp = tl.load(
+                        input_tensor
+                        + source_token_index * input_tensor_stride0
+                        + cur_block * BLOCK_D
+                        + off_d
+                    )
+                    accumulator += tmp.to(tl.float32) * acc_weight
+
+            tl.store(
+                output_tensor
+                + cur_token * output_tensor_stride0
+                + cur_block * BLOCK_D
+                + off_d,
+                accumulator.to(output_tensor.dtype.element_ty),
+            )
+
+    def dispatch(  # type: ignore[override]
+        self,
+        *,
+        dtype: torch.dtype,
+        hidden_size: int,
+        topk_num: int,
+        has_expert_map: bool,
+    ) -> CompileKey:
+        return self.CompileKey(
+            dtype=dtype,
+            topk_num=topk_num,
+            HAS_EXPERT_MAP=has_expert_map,
+            BLOCK_D=min(hidden_size, 1024),
+        )
+
+    def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
+        kernel_config = getattr(vllm_config, "kernel_config", None)
+        if getattr(kernel_config, "moe_backend", None) != "deep_gemm_mega_moe":
+            return []
+
+        model_config = getattr(vllm_config, "model_config", None)
+        hf_config = getattr(model_config, "hf_config", None)
+        hidden_size = int(getattr(hf_config, "hidden_size", 0) or 0)
+        topk_num = int(getattr(hf_config, "num_experts_per_tok", 0) or 0)
+        dtype = getattr(model_config, "dtype", torch.bfloat16)
+        if hidden_size <= 0 or topk_num <= 0:
+            return []
+
+        return self._trace_dispatch(self.dispatch)(
+            dtype=dtype,
+            hidden_size=hidden_size,
+            topk_num=topk_num,
+            has_expert_map=(False, True),
+        )
+
+    def compile(self, compile_key: CompileKey) -> None:
+        warmup = getattr(self.kernel, "warmup", None)
+        assert warmup is not None
+
+        value_ptr = TritonWarmupTensor(compile_key.dtype)
+        int32_ptr = TritonWarmupTensor(torch.int32)
+        warmup(
+            1,
+            value_ptr,
+            1,
+            1,
+            int32_ptr,
+            1,
+            1,
+            TritonWarmupTensor(torch.float32),
+            1,
+            1,
+            int32_ptr,
+            1,
+            1,
+            value_ptr,
+            1,
+            1,
+            topk_num=compile_key.topk_num,
+            expert_map=(int32_ptr if compile_key.HAS_EXPERT_MAP else None),
+            HAS_EXPERT_MAP=compile_key.HAS_EXPERT_MAP,
+            BLOCK_D=compile_key.BLOCK_D,
+            grid=(1, 1),
+            num_warps=2,
+        )
+
+    def __call__(
+        self,
+        input_tensor: torch.Tensor,
+        recv_topk_ids: torch.Tensor,
+        recv_topk_weight: torch.Tensor,
+        input_index: torch.Tensor,
+        expert_map: torch.Tensor | None,
+        output_tensor: torch.Tensor,
+    ) -> None:
+        num_warps = 2
+        num_tokens = output_tensor.shape[0]
+        hidden_size = input_tensor.shape[1]
+        block_d = min(hidden_size, 1024)
+        assert hidden_size % block_d == 0
+        grid = (triton.cdiv(hidden_size, block_d), min(num_tokens, 1024))
+
+        self.kernel[grid](
+            num_tokens,
+            input_tensor,
+            input_tensor.stride(0),
+            input_tensor.stride(1),
+            recv_topk_ids,
+            recv_topk_ids.stride(0),
+            recv_topk_ids.stride(1),
+            recv_topk_weight,
+            recv_topk_weight.stride(0),
+            recv_topk_weight.stride(1),
+            input_index,
+            input_index.stride(0),
+            input_index.stride(1),
+            output_tensor,
+            output_tensor.stride(0),
+            output_tensor.stride(1),
+            topk_num=recv_topk_ids.shape[1],
+            expert_map=expert_map,
+            HAS_EXPERT_MAP=expert_map is not None,
+            num_warps=num_warps,
+            BLOCK_D=block_d,
+        )
+
 @torch.no_grad()
 def ep_scatter(
     recv_x: torch.Tensor,
@@ -285,131 +700,30 @@ def ep_scatter(
     block_size: int = 128,
     pack_ue8m0: bool = False,
 ):
-    # BLOCK_E is the m_indices fill-loop tile (masked), independent of align_m.
-    BLOCK_E = 128
-    BLOCK_D = block_size  # block size of activation-scale quantization
-    num_warps = 8
+    block_d = block_size  # block size of activation-scale quantization
     num_experts = num_recv_tokens_per_expert.shape[0]
-    hidden_size = recv_x.shape[1]
-    # grid = (triton.cdiv(hidden_size, BLOCK_D), num_experts)
-    grid = num_experts
 
     assert m_indices.shape[0] % align_m == 0
     assert expert_start_loc.shape[0] == num_experts
 
-    # pack_ue8m0: scatter packs 4 UE8M0 bytes per int32; else copies scales as-is.
-    scale_hidden_size = hidden_size // BLOCK_D
-    scale_packed_size = (scale_hidden_size + 3) // 4 if pack_ue8m0 else 1
-
-    _fwd_kernel_ep_scatter_1[(grid,)](
-        num_recv_tokens_per_expert,
-        expert_start_loc,
-        m_indices,
-        num_experts=num_experts,
-        num_warps=num_warps,
-        BLOCK_E=BLOCK_E,
-        BLOCK_EXPERT_NUM=triton.next_power_of_2(num_experts),
-        ALIGN_M=align_m,
-    )
-
-    grid = min(recv_topk.shape[0], 1024 * 8)
-
-    _fwd_kernel_ep_scatter_2[(grid,)](
-        recv_topk.shape[0],
-        expert_start_loc,
+    _DEEPGEMM_EP_SCATTER_KERNEL(
         recv_x,
-        recv_x.stride(0),
-        recv_x.stride(1),
         recv_x_scale,
-        recv_x_scale.stride(0),
-        recv_x_scale.stride(1),
         recv_topk,
-        recv_topk.stride(0),
-        recv_topk.stride(1),
+        num_recv_tokens_per_expert,
+        expert_map,
+        expert_start_loc,
         output_tensor,
-        output_tensor.stride(0),
-        output_tensor.stride(1),
         output_tensor_scale,
-        output_tensor_scale.stride(0),
-        output_tensor_scale.stride(1),
+        m_indices,
         output_index,
-        output_index.stride(0),
-        output_index.stride(1),
-        topk_num=recv_topk.shape[1],
-        expert_map=expert_map,
-        HAS_EXPERT_MAP=expert_map is not None,
-        num_warps=num_warps,
-        HIDDEN_SIZE=hidden_size,
-        HIDDEN_SIZE_PAD=triton.next_power_of_2(hidden_size),
-        SCALE_HIDDEN_SIZE=scale_hidden_size,
-        SCALE_HIDDEN_SIZE_PAD=triton.next_power_of_2(scale_hidden_size),
-        PACK_UE8M0=pack_ue8m0,
-        SCALE_PACKED_SIZE=scale_packed_size,
-        SCALE_PACKED_SIZE_PAD=triton.next_power_of_2(scale_packed_size),
+        align_m,
+        block_d,
+        pack_ue8m0,
     )
     return
 
 
-@triton.jit
-def _fwd_kernel_ep_gather(
-    total_token_num,
-    input_tensor,
-    input_tensor_stride0,
-    input_tensor_stride1,
-    recv_topk_ids,
-    recv_topk_ids_stride0,
-    recv_topk_ids_stride1,
-    recv_topk_weight,
-    recv_topk_weight_stride0,
-    recv_topk_weight_stride1,
-    input_index,
-    input_index_stride0,
-    input_index_stride1,
-    output_tensor,
-    output_tensor_stride0,
-    output_tensor_stride1,
-    topk_num: tl.constexpr,
-    expert_map,
-    HAS_EXPERT_MAP: tl.constexpr,
-    BLOCK_D: tl.constexpr,
-):
-    cur_block = tl.program_id(0)
-    start_cur_token = tl.program_id(1)
-    grid_num = tl.num_programs(1)
-
-    for cur_token in range(start_cur_token, total_token_num, grid_num):
-        off_d = tl.arange(0, BLOCK_D)
-        accumulator = tl.zeros([BLOCK_D], dtype=tl.float32)
-        for topk_index in range(0, topk_num):
-            expert_id = tl.load(
-                recv_topk_ids + cur_token * recv_topk_ids_stride0 + topk_index
-            )
-
-            if HAS_EXPERT_MAP:
-                expert_id = apply_expert_map(expert_id, expert_map)
-
-            if expert_id >= 0:
-                source_token_index = tl.load(
-                    input_index + cur_token * input_index_stride0 + topk_index
-                )
-                acc_weight = tl.load(
-                    recv_topk_weight + cur_token * recv_topk_weight_stride0 + topk_index
-                )
-                tmp = tl.load(
-                    input_tensor
-                    + source_token_index * input_tensor_stride0
-                    + cur_block * BLOCK_D
-                    + off_d
-                )
-                accumulator += tmp.to(tl.float32) * acc_weight
-
-        tl.store(
-            output_tensor
-            + cur_token * output_tensor_stride0
-            + cur_block * BLOCK_D
-            + off_d,
-            accumulator.to(output_tensor.dtype.element_ty),
-        )
 
 
 @torch.no_grad()
@@ -421,35 +735,13 @@ def ep_gather(
     expert_map: torch.Tensor | None,
     output_tensor: torch.Tensor,
 ):
-    num_warps = 2
-    num_tokens = output_tensor.shape[0]
-    hidden_size = input_tensor.shape[1]
-    BLOCK_D = min(hidden_size, 1024)
-    assert hidden_size % BLOCK_D == 0
-    grid = (triton.cdiv(hidden_size, BLOCK_D), min(num_tokens, 1024))
-
-    _fwd_kernel_ep_gather[grid](
-        num_tokens,
+    _DEEPGEMM_EP_GATHER_KERNEL(
         input_tensor,
-        input_tensor.stride(0),
-        input_tensor.stride(1),
         recv_topk_ids,
-        recv_topk_ids.stride(0),
-        recv_topk_ids.stride(1),
         recv_topk_weight,
-        recv_topk_weight.stride(0),
-        recv_topk_weight.stride(1),
         input_index,
-        input_index.stride(0),
-        input_index.stride(1),
+        expert_map,
         output_tensor,
-        output_tensor.stride(0),
-        output_tensor.stride(1),
-        topk_num=recv_topk_ids.shape[1],
-        expert_map=expert_map,
-        HAS_EXPERT_MAP=expert_map is not None,
-        num_warps=num_warps,
-        BLOCK_D=BLOCK_D,
     )
     return
 
@@ -563,3 +855,7 @@ def deepgemm_unpermute_and_reduce(
         expert_map=expert_map,
         output_tensor=output,
     )
+
+
+_DEEPGEMM_EP_SCATTER_KERNEL = DeepGemmEPScatterKernel()
+_DEEPGEMM_EP_GATHER_KERNEL = DeepGemmEPGatherKernel()

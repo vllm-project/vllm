@@ -30,8 +30,6 @@ _GENERIC_SPARSE_MLA_BACKENDS = frozenset(
 )
 _INDEXER_PREFILL_CHUNK_METADATA_BACKENDS = frozenset({"DEEPSEEK_V32_INDEXER"})
 
-_INDEXER_PREFILL_CHUNK_METADATA_BACKENDS = frozenset({"DEEPSEEK_V32_INDEXER"})
-
 
 def _attention_backend_name(backend: object) -> str | None:
     get_name = getattr(backend, "get_name", None)
@@ -55,35 +53,6 @@ def _has_attention_backend(
     return False
 
 
-def _compile_sparse_swa_prefill_metadata_kernel(
-    vllm_config: "VllmConfig",
-) -> None:
-    from vllm.v1.attention.backends.mla.sparse_swa import (
-        _COMPUTE_PREFILL_METADATA_KERNEL,
-    )
-
-    _COMPUTE_PREFILL_METADATA_KERNEL.warmup(vllm_config)
-
-
-def _compile_prefill_chunk_metadata_kernel(
-    vllm_config: "VllmConfig",
-) -> None:
-    from vllm.v1.attention.backends.mla.indexer import (
-        _BUILD_PREFILL_CHUNK_METADATA_KERNEL,
-    )
-
-    _BUILD_PREFILL_CHUNK_METADATA_KERNEL.warmup(vllm_config)
-
-
-def _compile_combine_topk_swa_indices_kernel(
-    vllm_config: "VllmConfig",
-) -> None:
-    from vllm.models.deepseek_v4.common.ops.cache_utils import (
-        _COMBINE_TOPK_SWA_INDICES_KERNEL,
-    )
-
-    _COMBINE_TOPK_SWA_INDICES_KERNEL.warmup(vllm_config)
-
 
 def sparse_mla_triton_warmup(worker: "Worker") -> None:
     runner = worker.model_runner
@@ -95,17 +64,56 @@ def sparse_mla_triton_warmup(worker: "Worker") -> None:
     if max_tokens <= 0 or max_num_prefills <= 0:
         return
 
+    has_dsv4_backend = _has_attention_backend(
+        runner, _DEEPSEEK_V4_SPARSE_MLA_BACKENDS
+    )
+    has_generic_backend = _has_attention_backend(
+        runner, _GENERIC_SPARSE_MLA_BACKENDS
+    )
+    has_indexer_backend = _has_attention_backend(
+        runner, _INDEXER_PREFILL_CHUNK_METADATA_BACKENDS
+    )
+    if not (has_dsv4_backend or has_generic_backend or has_indexer_backend):
+        return
+
     vllm_config = runner.vllm_config
     try:
-        if _has_attention_backend(runner, _DEEPSEEK_V4_SPARSE_MLA_BACKENDS):
-            _compile_sparse_swa_prefill_metadata_kernel(vllm_config)
-            _compile_prefill_chunk_metadata_kernel(vllm_config)
-            _compile_combine_topk_swa_indices_kernel(vllm_config)
-        elif _has_attention_backend(runner, _GENERIC_SPARSE_MLA_BACKENDS):
-            _compile_sparse_swa_prefill_metadata_kernel(vllm_config)
-            _compile_prefill_chunk_metadata_kernel(vllm_config)
-        elif _has_attention_backend(runner, _INDEXER_PREFILL_CHUNK_METADATA_BACKENDS):
-            _compile_prefill_chunk_metadata_kernel(vllm_config)
+        from vllm.v1.attention.backends.mla.compressor_utils import (
+            _COMPRESSED_SLOT_MAPPING_KERNEL,
+        )
+        from vllm.v1.attention.backends.mla.indexer import (
+            _BUILD_PREFILL_CHUNK_METADATA_KERNEL,
+            _PREPARE_UNIFORM_DECODE_KERNEL,
+        )
+        from vllm.v1.attention.backends.mla.sparse_swa import (
+            _COMPUTE_DSPARK_NONCAUSAL_SWA_INDICES_KERNEL,
+            _COMPUTE_PREFILL_METADATA_KERNEL,
+            _COMPUTE_SWA_INDICES_AND_LENS_KERNEL,
+        )
+        from vllm.v1.attention.backends.mla.sparse_utils import (
+            _CONVERT_REQ_INDEX_TO_GLOBAL_INDEX_KERNEL,
+        )
+
+        _COMPRESSED_SLOT_MAPPING_KERNEL.warmup(vllm_config)
+        _CONVERT_REQ_INDEX_TO_GLOBAL_INDEX_KERNEL.warmup(vllm_config)
+        _PREPARE_UNIFORM_DECODE_KERNEL.warmup(vllm_config)
+        _BUILD_PREFILL_CHUNK_METADATA_KERNEL.warmup(vllm_config)
+
+        if has_dsv4_backend or has_generic_backend:
+            _COMPUTE_PREFILL_METADATA_KERNEL.warmup(vllm_config)
+
+        if has_dsv4_backend:
+            from vllm.models.deepseek_v4.common.ops.cache_utils import (
+                _COMBINE_TOPK_SWA_INDICES_KERNEL,
+            )
+            from vllm.models.deepseek_v4.sparse_mla import (
+                _BUILD_C128A_TOPK_METADATA_KERNEL,
+            )
+
+            _COMPUTE_SWA_INDICES_AND_LENS_KERNEL.warmup(vllm_config)
+            _COMPUTE_DSPARK_NONCAUSAL_SWA_INDICES_KERNEL.warmup(vllm_config)
+            _COMBINE_TOPK_SWA_INDICES_KERNEL.warmup(vllm_config)
+            _BUILD_C128A_TOPK_METADATA_KERNEL.warmup(vllm_config)
 
     except Exception:
         logger.warning("Skipping sparse MLA Triton warmup.", exc_info=True)

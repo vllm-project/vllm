@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from dataclasses import dataclass
 from functools import cache
+from typing import Any
 
 import cutlass
 import cutlass.cute as cute
@@ -15,6 +17,7 @@ from vllm.cute_utils import (
     cvt,
     recast_val,
 )
+from vllm.model_executor.warmup.jit_warmup import VllmJitKernel
 from vllm.vllm_flash_attn.cute import utils as cute_utils
 
 # MXFP4: 32 elements per block, packed 2 nibbles per byte, ue8m0 block scale.
@@ -43,12 +46,24 @@ def fused_indexer_q_rope_quant_mxfp4_cutedsl(
 
     # compile all variants at first invocation
     for coarsen in (1, 4):
-        IndexerQMxFp4Kernel.compile(head_dim, rope_dim, num_heads, rope_type, coarsen)
+        _INDEXER_Q_CUTEDSL_KERNEL(
+            use_fp4=True,
+            head_dim=head_dim,
+            rope_dim=rope_dim,
+            num_heads=num_heads,
+            cos_sin_dtype=rope_type,
+            coarsen=coarsen,
+        )
 
     # heuristic
     coarsen = 1 if num_tokens < 512 else 4
-    compiled = IndexerQMxFp4Kernel.compile(
-        head_dim, rope_dim, num_heads, rope_type, coarsen
+    compiled = _INDEXER_Q_CUTEDSL_KERNEL(
+        use_fp4=True,
+        head_dim=head_dim,
+        rope_dim=rope_dim,
+        num_heads=num_heads,
+        cos_sin_dtype=rope_type,
+        coarsen=coarsen,
     )
     scale = float(index_weights_softmax_scale * index_weights_head_scale)
     compiled(
@@ -78,11 +93,23 @@ def fused_indexer_q_rope_quant_fp8_cutedsl(
     rope_type = _TORCH_TO_CUTE[index_q_cos_sin_cache.dtype]
 
     for coarsen in (1, 4):
-        IndexerQFp8Kernel.compile(head_dim, rope_dim, num_heads, rope_type, coarsen)
+        _INDEXER_Q_CUTEDSL_KERNEL(
+            use_fp4=False,
+            head_dim=head_dim,
+            rope_dim=rope_dim,
+            num_heads=num_heads,
+            cos_sin_dtype=rope_type,
+            coarsen=coarsen,
+        )
 
     coarsen = 1 if num_tokens < 512 else 4
-    compiled = IndexerQFp8Kernel.compile(
-        head_dim, rope_dim, num_heads, rope_type, coarsen
+    compiled = _INDEXER_Q_CUTEDSL_KERNEL(
+        use_fp4=False,
+        head_dim=head_dim,
+        rope_dim=rope_dim,
+        num_heads=num_heads,
+        cos_sin_dtype=rope_type,
+        coarsen=coarsen,
     )
     scale = float(index_weights_softmax_scale * index_weights_head_scale)
     # The cute kernel treats the FP8 buffer as raw bytes (Uint8).
@@ -608,3 +635,119 @@ class IndexerQFp8Kernel(IndexerQRopeQuantKernel):
             stream,
             options="--enable-tvm-ffi",
         )
+
+
+class IndexerQCuteDSLKernel(
+    VllmJitKernel["IndexerQCuteDSLKernel.CompileKey"]
+):
+    @dataclass(frozen=True)
+    class CompileKey:
+        use_fp4: bool
+        head_dim: int
+        rope_dim: int
+        num_heads: int
+        cos_sin_dtype: type[cutlass.Numeric]
+        coarsen: int
+
+    def __init__(self) -> None:
+        self._compiled_cache: dict[IndexerQCuteDSLKernel.CompileKey, Any] = {}
+        super().__init__()
+
+    def dispatch(  # type: ignore[override]
+        self,
+        *,
+        use_fp4: bool,
+        head_dim: int,
+        rope_dim: int,
+        num_heads: int,
+        cos_sin_dtype: type[cutlass.Numeric],
+        coarsen: int,
+    ) -> CompileKey:
+        return self.CompileKey(
+            use_fp4=use_fp4,
+            head_dim=head_dim,
+            rope_dim=rope_dim,
+            num_heads=num_heads,
+            cos_sin_dtype=cos_sin_dtype,
+            coarsen=coarsen,
+        )
+
+    def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
+        model_config = getattr(vllm_config, "model_config", None)
+        hf_config = getattr(model_config, "hf_config", None)
+        if hf_config is None:
+            return []
+
+        attention_config = getattr(vllm_config, "attention_config", None)
+        use_fp4 = bool(getattr(attention_config, "use_fp4_indexer_cache", False))
+        num_heads = int(getattr(hf_config, "index_n_heads", 0) or 0)
+        head_dim = int(getattr(hf_config, "index_head_dim", 0) or 0)
+        rope_dim = int(getattr(hf_config, "qk_rope_head_dim", 0) or 0)
+        if num_heads <= 0 or head_dim <= 0 or rope_dim <= 0:
+            return []
+
+        return self._trace_dispatch(self.dispatch)(
+            use_fp4=use_fp4,
+            head_dim=head_dim,
+            rope_dim=rope_dim,
+            num_heads=num_heads,
+            cos_sin_dtype=Float32,
+            coarsen=(1, 4),
+        )
+
+    @staticmethod
+    def kernel(
+        *,
+        use_fp4: bool,
+        head_dim: int,
+        rope_dim: int,
+        num_heads: int,
+        cos_sin_dtype: type[cutlass.Numeric],
+        coarsen: int,
+    ) -> Any:
+        kernel_type = IndexerQMxFp4Kernel if use_fp4 else IndexerQFp8Kernel
+        return kernel_type(
+            head_dim,
+            rope_dim,
+            num_heads,
+            cos_sin_dtype,
+            coarsen,
+        )
+
+    def compile(self, compile_key: CompileKey) -> None:
+        if compile_key in self._compiled_cache:
+            return
+
+        kernel_type = IndexerQMxFp4Kernel if compile_key.use_fp4 else IndexerQFp8Kernel
+        self._compiled_cache[compile_key] = kernel_type.compile(
+            compile_key.head_dim,
+            compile_key.rope_dim,
+            compile_key.num_heads,
+            compile_key.cos_sin_dtype,
+            compile_key.coarsen,
+        )
+
+    def __call__(
+        self,
+        *,
+        use_fp4: bool,
+        head_dim: int,
+        rope_dim: int,
+        num_heads: int,
+        cos_sin_dtype: type[cutlass.Numeric],
+        coarsen: int,
+    ) -> Any:
+        compile_key = self.dispatch(
+            use_fp4=use_fp4,
+            head_dim=head_dim,
+            rope_dim=rope_dim,
+            num_heads=num_heads,
+            cos_sin_dtype=cos_sin_dtype,
+            coarsen=coarsen,
+        )
+        if compile_key not in self._compiled_cache:
+            self.compile(compile_key)
+        return self._compiled_cache[compile_key]
+
+
+_INDEXER_Q_CUTEDSL_KERNEL = IndexerQCuteDSLKernel()
