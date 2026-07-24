@@ -19,6 +19,8 @@ from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEPrepareAndFinalize,
 )
 from vllm.model_executor.layers.fused_moe.prepare_finalize import (
+    BatchedPrepareAndFinalize,
+    NaiveLowLatencyPrepareAndFinalize,
     make_moe_prepare_and_finalize_naive_dp_ep,
     make_moe_prepare_and_finalize_no_dp_ep,
 )
@@ -139,6 +141,16 @@ def maybe_make_prepare_finalize(
     if not moe.moe_parallel_config.use_all2all_kernels:
         if not allow_new_interface:
             return None
+
+        # Opt-in XPU batched path: reorganize tokens into E x T x K locally
+        # (no all-to-all) so BatchedTritonExperts (moe_mmk TD) can run.
+        if current_platform.is_xpu() and moe.moe_backend == "batched_triton":
+            return BatchedPrepareAndFinalize(
+                max_num_tokens=moe.max_num_tokens,
+                num_local_experts=moe.num_local_experts,
+                num_dispatchers=1,
+                rank=moe.moe_parallel_config.ep_rank,
+            )
 
         # For DP/TP case, fall back to naive P/F.
         if moe.moe_parallel_config.dp_size > 1:
@@ -314,6 +326,28 @@ def maybe_make_prepare_finalize(
             dispatch_dtype_bytes_per_elem=dispatch_dtype_bytes_per_elem,
             dispatch_scale_bytes_per_token=dispatch_scale_bytes_per_token,
         )
+
+    elif moe.use_naive_ll_kernels and allow_new_interface:
+        # Portable low-latency routed all-to-all: route each token only to the
+        # rank(s) owning its expert(s), into the per-rank batched buffer.
+        if current_platform.is_xpu() and not use_monolithic:
+            prepare_finalize = NaiveLowLatencyPrepareAndFinalize(
+                max_num_tokens=moe.max_num_tokens,
+                num_local_experts=moe.num_local_experts,
+                num_dispatchers=all2all_manager.world_size,
+                rank=moe.moe_parallel_config.ep_rank,
+                is_sequence_parallel=moe.moe_parallel_config.is_sequence_parallel,
+            )
+            logger.info_once(
+                "XPU MoE EP: using NaiveLowLatencyPrepareAndFinalize "
+                "(routed all_to_all_single into batched moe_mmk format)."
+            )
+        else:
+            prepare_finalize = make_moe_prepare_and_finalize_naive_dp_ep(
+                use_monolithic=use_monolithic,
+                is_sequence_parallel=moe.moe_parallel_config.is_sequence_parallel,
+                num_dispatchers=all2all_manager.world_size,
+            )
 
     elif moe.use_ag_rs_all2all_kernels and allow_new_interface:
         prepare_finalize = make_moe_prepare_and_finalize_naive_dp_ep(

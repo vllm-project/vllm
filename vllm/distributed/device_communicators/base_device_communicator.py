@@ -267,6 +267,38 @@ class DeviceCommunicatorBase:
     ) -> torch.Tensor:
         raise NotImplementedError
 
+    def all_to_all_single(
+        self,
+        input_: torch.Tensor,
+        output_split_sizes: list[int] | None = None,
+        input_split_sizes: list[int] | None = None,
+    ) -> torch.Tensor:
+        """Variable-sized all-to-all over dim 0 (routed dispatch/combine).
+
+        Portable wrapper over `torch.distributed.all_to_all_single`
+        `*_split_sizes` give the per-rank row counts to send/receive;
+        when `None` the input is split evenly across ranks (equal chunks).
+        """
+        if self.world_size == 1:
+            return input_
+        input_ = input_.contiguous()
+        if output_split_sizes is None:
+            output = torch.empty_like(input_)
+        else:
+            output = torch.empty(
+                (sum(output_split_sizes), *tuple(input_.shape[1:])),
+                dtype=input_.dtype,
+                device=input_.device,
+            )
+        torch.distributed.all_to_all_single(
+            output,
+            input_,
+            output_split_sizes=output_split_sizes,
+            input_split_sizes=input_split_sizes,
+            group=self.device_group,
+        )
+        return output
+
     def gather(
         self, input_: torch.Tensor, dst: int = 0, dim: int = -1
     ) -> torch.Tensor | None:
