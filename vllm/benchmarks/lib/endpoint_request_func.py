@@ -83,6 +83,7 @@ class RequestFuncInput:
     # uses this list directly and skips building messages from `prompt` and
     # `multi_modal_content`.
     chat_messages: list[dict[str, Any]] | None = None
+    system_prompt: str | None = None
 
 
 @dataclass
@@ -100,6 +101,7 @@ class RequestFuncOutput:
     error: str = ""
     start_time: float = 0.0
     input_audio_duration: float = 0.0  # in seconds
+    request_id: str = ""
 
 
 class RequestFunc(Protocol):
@@ -325,18 +327,23 @@ def _get_chat_messages(
     mm_position: Literal["first", "last"] = "last",
 ) -> list[dict[str, Any]]:
     prompt = request_func_input.prompt
-    if _is_chat_messages(prompt):
-        return prompt  # type: ignore[return-value]
+    messages = []
+    if request_func_input.system_prompt:
+        messages.append({"role": "system", "content": request_func_input.system_prompt})
 
-    return [
-        {
-            "role": "user",
-            "content": _get_chat_content(
-                request_func_input,
-                mm_position=mm_position,
-            ),
-        }
-    ]
+    if _is_chat_messages(prompt):
+        messages.extend(prompt)
+    else:
+        messages.append(
+            {
+                "role": "user",
+                "content": _get_chat_content(
+                    request_func_input,
+                    mm_position=mm_position,
+                ),
+            }
+        )
+    return messages
 
 
 async def async_request_openai_chat_completions(
@@ -371,6 +378,7 @@ async def async_request_openai_chat_completions(
 
     output = RequestFuncOutput()
     output.prompt_len = request_func_input.prompt_len
+    output.request_id = request_func_input.request_id or ""
 
     generated_text = ""
     ttft = 0.0
