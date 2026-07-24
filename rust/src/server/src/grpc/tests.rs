@@ -23,7 +23,8 @@ use tonic_health::server::health_reporter;
 use tower::service_fn;
 use vllm_chat::{
     ChatBackend, ChatLlm, ChatRenderer, ChatRequest, ChatTextBackend, DefaultChatOutputProcessor,
-    DynChatOutputProcessor, DynChatRenderer, NewChatOutputProcessorOptions, RenderedPrompt,
+    DynChatOutputProcessor, DynChatRenderer, NewChatOutputProcessorOptions, RenderRequest,
+    RenderedPrompt, RenderedPromptContent, RendererResult,
 };
 use vllm_engine_core_client::protocol::output::{
     EngineCoreFinishReason, EngineCoreOutput, EngineCoreOutputs, RequestBatchOutputs,
@@ -32,8 +33,8 @@ use vllm_engine_core_client::protocol::request::EngineCoreRequest;
 use vllm_engine_core_client::test_utils::{IpcNamespace, spawn_mock_engine_task};
 use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig, EngineId};
 use vllm_llm::Llm;
+use vllm_text::TextBackend;
 use vllm_text::tokenizer::DynTokenizer;
-use vllm_text::{Prompt, TextBackend};
 use vllm_tokenizer::test_utils::TestTokenizer;
 use zeromq::prelude::{SocketRecv, SocketSend};
 use zeromq::{DealerSocket, PushSocket, ZmqMessage};
@@ -188,9 +189,9 @@ impl ChatBackend for FakeTextBackend {
 }
 
 impl ChatRenderer for FakeTextBackend {
-    fn render(&self, _request: &ChatRequest) -> vllm_chat::Result<RenderedPrompt> {
+    fn render(&self, _request: &RenderRequest<'_>) -> RendererResult<RenderedPrompt> {
         Ok(RenderedPrompt {
-            prompt: Prompt::Text(String::new()),
+            content: RenderedPromptContent::Text(String::new()),
             effective_template_kwargs: Default::default(),
         })
     }

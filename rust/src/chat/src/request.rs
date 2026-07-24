@@ -3,6 +3,7 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use vllm_chat_renderer::RenderRequest;
 pub use vllm_chat_types::{
     ChatContent, ChatContentPart, ChatMessage, ChatOptions, ChatRole, ChatToolChoice,
     GenerationPromptMode, ImageDetail, ReasoningEffort, Tool as ChatTool,
@@ -60,6 +61,17 @@ pub struct ChatRequest {
 }
 
 impl ChatRequest {
+    /// Borrow the renderer-owned subset of this serving request.
+    pub fn as_render_request(&self) -> RenderRequest<'_> {
+        RenderRequest {
+            messages: &self.messages,
+            chat_options: &self.chat_options,
+            tools: &self.tools,
+            tool_choice: &self.tool_choice,
+            documents: self.documents.as_deref(),
+        }
+    }
+
     /// Return one minimal valid request fixture for tests.
     pub fn for_test() -> Self {
         Self {
@@ -83,66 +95,19 @@ impl ChatRequest {
 
     /// Validate basic request invariants before rendering.
     pub fn validate(&self) -> Result<()> {
-        if self.messages.is_empty() {
-            return Err(Error::EmptyMessages);
-        }
-        match (
-            self.chat_options.generation_prompt_mode,
-            self.messages.last().map(ChatMessage::role),
-        ) {
-            (GenerationPromptMode::ContinueFinalAssistant, Some(ChatRole::Assistant)) => {}
-            (GenerationPromptMode::ContinueFinalAssistant, _) => {
-                return Err(Error::ContinueFinalAssistantWithoutFinalAssistant);
-            }
-            (GenerationPromptMode::NoGenerationPrompt, _)
-            | (GenerationPromptMode::StartNewAssistant, _) => {}
-        }
-        Ok(())
+        self.as_render_request().validate().map_err(Error::from_renderer)
     }
 
     /// Return true if this request contains any multimodal content in its
     /// messages.
     pub fn has_multimodal(&self) -> bool {
-        self.messages.iter().any(ChatMessage::has_multimodal)
+        self.as_render_request().has_multimodal()
     }
 
     /// Return true if this request should enable tool parsing based on the tool
     /// choice and tool list.
     pub(crate) fn tool_parsing_enabled(&self) -> bool {
-        !matches!(self.tool_choice, ChatToolChoice::None) && !self.tools.is_empty()
-    }
-
-    /// Return the request-level thinking toggle when explicitly requested.
-    ///
-    /// We currently accept the two request kwargs `thinking` and
-    /// `enable_thinking`. Both must be booleans when present. If both are
-    /// present, they must have the same value. If neither key is provided,
-    /// return `None`.
-    pub(crate) fn enable_thinking(&self) -> Result<Option<bool>> {
-        let thinking = self.parse_template_bool("thinking")?;
-        let enable_thinking = self.parse_template_bool("enable_thinking")?;
-
-        match (thinking, enable_thinking) {
-            (None, None) => Ok(None),
-            (Some(thinking), Some(enable_thinking)) if thinking != enable_thinking => {
-                Err(Error::ChatTemplate(
-                    "template kwargs `thinking` and `enable_thinking` must match when both are set"
-                        .to_string(),
-                ))
-            }
-            (Some(thinking), _) => Ok(Some(thinking)),
-            (None, Some(enable_thinking)) => Ok(Some(enable_thinking)),
-        }
-    }
-
-    pub(crate) fn parse_template_bool(&self, key: &str) -> Result<Option<bool>> {
-        match self.chat_options.template_kwargs.get(key) {
-            None => Ok(None),
-            Some(Value::Bool(value)) => Ok(Some(*value)),
-            Some(other) => Err(Error::ChatTemplate(format!(
-                "template kwarg `{key}` must be a boolean, got {other}"
-            ))),
-        }
+        self.as_render_request().tool_parsing_enabled()
     }
 }
 
@@ -151,12 +116,11 @@ mod tests {
     use serde_json::json;
 
     use super::ChatRequest;
-    use crate::Error;
 
     #[test]
     fn enable_thinking_is_none_when_no_kwargs_are_present() {
         let request = ChatRequest::for_test();
-        assert_eq!(request.enable_thinking().unwrap(), None);
+        assert_eq!(request.as_render_request().enable_thinking().unwrap(), None);
     }
 
     #[test]
@@ -168,7 +132,10 @@ mod tests {
             .template_kwargs
             .insert("enable_thinking".to_string(), json!(true));
 
-        assert_eq!(request.enable_thinking().unwrap(), Some(true));
+        assert_eq!(
+            request.as_render_request().enable_thinking().unwrap(),
+            Some(true)
+        );
     }
 
     #[test]
@@ -180,8 +147,8 @@ mod tests {
             .insert("thinking".to_string(), json!("yes"));
 
         assert!(matches!(
-            request.enable_thinking(),
-            Err(Error::ChatTemplate(message))
+            request.as_render_request().enable_thinking(),
+            Err(vllm_chat_renderer::Error::ChatTemplate(message))
                 if message.contains("`thinking` must be a boolean")
         ));
     }
@@ -199,8 +166,8 @@ mod tests {
             .insert("enable_thinking".to_string(), json!(true));
 
         assert!(matches!(
-            request.enable_thinking(),
-            Err(Error::ChatTemplate(message))
+            request.as_render_request().enable_thinking(),
+            Err(vllm_chat_renderer::Error::ChatTemplate(message))
                 if message.contains("`thinking` and `enable_thinking` must match")
         ));
     }

@@ -1,27 +1,31 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+//! Hugging Face Jinja chat-template renderer.
+
 use std::collections::HashMap;
+use std::path::Path;
 
 use serde::Serialize;
 use serde_json::Value as JsonValue;
 use thiserror_ext::AsReport as _;
 use tracing::{info, trace, warn};
-use vllm_text::Prompt;
-use vllm_text::backend::hf::{
-    HfSpecialTokens, HfTokenizerConfig, ResolvedModelFiles, load_tokenizer_config,
-};
+use vllm_tokenizer::{HfSpecialTokens, HfTokenizerConfig, load_tokenizer_config};
 
 use self::format::{
     ChatTemplateContentFormat, ChatTemplateContentFormatOption as ContentFormatOption,
 };
-use self::template::{CompiledChatTemplate, TemplateContext};
+use self::template::{
+    CompiledChatTemplate, TemplateContext, load_chat_template, resolve_chat_template,
+};
 use self::value::{TemplateValue, to_template_value};
-use super::{ChatRenderer, RenderedPrompt, effective_template_kwargs};
+use super::{
+    ChatRenderer, RenderRequest, RenderedPrompt, RenderedPromptContent, effective_template_kwargs,
+};
 use crate::error::Result;
-use crate::request::{ChatContent, ChatContentPart, ChatMessage, ChatRequest};
 use crate::{
-    AssistantContentBlock, AssistantMessageExt, ChatTool, Error, LoadModelBackendsOptions,
+    AssistantContentBlock, AssistantMessageExt, ChatContent, ChatContentPart, ChatMessage, Error,
+    Tool,
 };
 
 mod error;
@@ -29,8 +33,6 @@ mod format;
 mod template;
 mod tojson;
 mod value;
-
-pub use template::{load_chat_template, resolve_chat_template};
 
 pub use self::format::ChatTemplateContentFormatOption;
 
@@ -40,9 +42,34 @@ pub use self::format::ChatTemplateContentFormatOption;
 /// content parts of that modality are rejected during rendering.
 #[derive(Debug, Clone, Default)]
 pub struct MultimodalRenderInfo {
+    /// Template-visible image placeholder token.
     pub image_token: Option<String>,
+    /// Template-visible video placeholder token.
     pub video_token: Option<String>,
+    /// Template-visible audio placeholder token.
     pub audio_token: Option<String>,
+}
+
+/// Resolved local files consumed while constructing an HF renderer.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct HfRendererFiles<'a> {
+    /// Resolved `tokenizer_config.json`, when available.
+    pub tokenizer_config: Option<&'a Path>,
+    /// Resolved dedicated chat-template file, when available.
+    pub chat_template: Option<&'a Path>,
+}
+
+/// Model-level options used to construct an HF renderer.
+#[derive(Debug, Clone, Default)]
+pub struct HfRendererConfig {
+    /// Optional inline or file-backed chat-template override.
+    pub chat_template: Option<String>,
+    /// Default template kwargs merged before request-level kwargs.
+    pub default_template_kwargs: HashMap<String, JsonValue>,
+    /// How `message.content` should be represented in the template.
+    pub content_format: ContentFormatOption,
+    /// Template-visible multimodal placeholder tokens.
+    pub multimodal: Option<MultimodalRenderInfo>,
 }
 
 /// Hugging Face chat-template renderer backed by the local Jinja chat-template
@@ -76,27 +103,25 @@ impl HfChatRenderer {
         })
     }
 
+    /// Attach named special tokens exposed to chat templates.
     pub fn with_special_tokens(mut self, special_tokens: Option<HfSpecialTokens>) -> Self {
         self.special_tokens = special_tokens;
         self
     }
 
+    /// Attach template-visible multimodal placeholder tokens.
     pub fn with_multimodal(mut self, multimodal: Option<MultimodalRenderInfo>) -> Self {
         self.multimodal = multimodal;
         self
     }
 
-    /// Create a renderer from the given model files and loading options.
-    pub fn load(
-        files: &ResolvedModelFiles,
-        options: LoadModelBackendsOptions,
-        multimodal: Option<MultimodalRenderInfo>,
-    ) -> Result<Self> {
+    /// Create a renderer from resolved local model files and renderer options.
+    pub fn load(files: HfRendererFiles<'_>, options: HfRendererConfig) -> Result<Self> {
         let HfTokenizerConfig {
             special_tokens,
             chat_template,
             ..
-        } = load_tokenizer_config(files.tokenizer_config_path.as_deref())?;
+        } = load_tokenizer_config(files.tokenizer_config)?;
         let mut template = chat_template;
         let special_tokens = (!special_tokens.is_empty()).then_some(special_tokens);
 
@@ -106,7 +131,7 @@ impl HfChatRenderer {
                     .map_err(|error| Error::ChatTemplate(error.to_report_string()))?,
             );
             info!("using configured chat template override");
-        } else if let Some(chat_template_path) = files.chat_template_path.as_deref() {
+        } else if let Some(chat_template_path) = files.chat_template {
             // If independent chat template file(s) exist and contain non-empty content,
             // they take priority over template entries in the tokenizer config
             let file_template = load_chat_template(chat_template_path)
@@ -128,11 +153,11 @@ impl HfChatRenderer {
 
         Ok(Self::new(
             template,
-            options.default_chat_template_kwargs,
-            options.chat_template_content_format,
+            options.default_template_kwargs,
+            options.content_format,
         )?
         .with_special_tokens(special_tokens)
-        .with_multimodal(multimodal))
+        .with_multimodal(options.multimodal))
     }
 
     /// Apply the chat template to one chat request, rendering the prompt string
@@ -141,7 +166,7 @@ impl HfChatRenderer {
     /// If the request carries a per-request `chat_template` override, a
     /// temporary template is compiled from that string and used instead of
     /// the model's default.
-    fn apply_chat_template(&self, request: &ChatRequest) -> Result<RenderedPrompt> {
+    fn apply_chat_template(&self, request: &RenderRequest<'_>) -> Result<RenderedPrompt> {
         let override_template = request
             .chat_options
             .chat_template
@@ -162,10 +187,10 @@ impl HfChatRenderer {
     fn apply_chat_template_inner(
         &self,
         effective_template: &CompiledChatTemplate,
-        request: &ChatRequest,
+        request: &RenderRequest<'_>,
     ) -> Result<RenderedPrompt> {
         let mut messages = to_template_messages(
-            &request.messages,
+            request.messages,
             effective_template.content_format(),
             self.multimodal.as_ref(),
         )?;
@@ -181,7 +206,7 @@ impl HfChatRenderer {
             None
         };
 
-        let tools = request.tool_parsing_enabled().then(|| to_template_tools(&request.tools));
+        let tools = request.tool_parsing_enabled().then(|| to_template_tools(request.tools));
         trace!(
             message_count = messages.len(),
             content_format = ?effective_template.content_format(),
@@ -198,7 +223,7 @@ impl HfChatRenderer {
                 add_generation_prompt: request.chat_options.add_generation_prompt(),
                 continue_final_message: request.chat_options.continue_final_message(),
                 tools: tools.as_deref(),
-                documents: request.documents.as_deref(),
+                documents: request.documents,
                 template_kwargs: Some(&effective_template_kwargs),
                 special_tokens: self.special_tokens.as_ref(),
             })
@@ -217,14 +242,14 @@ impl HfChatRenderer {
         );
 
         Ok(RenderedPrompt {
-            prompt: Prompt::Text(prompt),
+            content: RenderedPromptContent::Text(prompt),
             effective_template_kwargs,
         })
     }
 }
 
 impl ChatRenderer for HfChatRenderer {
-    fn render(&self, request: &ChatRequest) -> Result<RenderedPrompt> {
+    fn render(&self, request: &RenderRequest<'_>) -> Result<RenderedPrompt> {
         self.apply_chat_template(request)
     }
 }
@@ -556,7 +581,7 @@ fn truncate_prompt_at_continue_final_message_tag(
     Ok(rendered)
 }
 
-fn to_template_tools(tools: &[ChatTool]) -> Vec<TemplateTool> {
+fn to_template_tools(tools: &[Tool]) -> Vec<TemplateTool> {
     tools
         .iter()
         .map(|tool| TemplateTool {
@@ -577,42 +602,39 @@ mod tests {
 
     use expect_test::expect;
     use serde_json::Value;
-    use vllm_text::Prompt;
-    use vllm_text::backend::hf::{HfSpecialTokens, NamedSpecialToken};
+    use vllm_tokenizer::{HfSpecialTokens, NamedSpecialToken};
 
     use super::{ChatTemplateContentFormatOption, HfChatRenderer, MultimodalRenderInfo};
-    use crate::request::{
-        ChatContentPart, ChatMessage, ChatRequest, ChatRole, ChatTool, ChatToolChoice,
-        GenerationPromptMode, ReasoningEffort,
+    use crate::{
+        AssistantContentBlock, ChatContentPart, ChatMessage, ChatRenderer, ChatRole,
+        ChatToolChoice, Error, GenerationPromptMode, ReasoningEffort, RenderedPromptContent,
+        Result, TestRenderRequest, Tool,
     };
-    use crate::{AssistantContentBlock, ChatRenderer, Error, Result};
 
-    const QWEN3_0_6B_TEMPLATE: &str = include_str!("../../../tests/templates/qwen3.jinja");
-    const QWEN3_5_0_8B_TEMPLATE: &str = include_str!("../../../tests/templates/qwen35.jinja");
+    const QWEN3_0_6B_TEMPLATE: &str = include_str!("../../../chat/tests/templates/qwen3.jinja");
+    const QWEN3_5_0_8B_TEMPLATE: &str = include_str!("../../../chat/tests/templates/qwen35.jinja");
 
-    fn sample_request(messages: Vec<ChatMessage>) -> ChatRequest {
-        ChatRequest {
+    fn sample_request(messages: Vec<ChatMessage>) -> TestRenderRequest {
+        TestRenderRequest {
             messages,
-            request_id: "render-test".to_string(),
-            ..ChatRequest::for_test()
+            ..TestRenderRequest::for_test()
         }
     }
 
-    fn render(template: Option<&str>, request: &ChatRequest) -> Result<String> {
-        HfChatRenderer::new(
+    fn render(template: Option<&str>, request: &TestRenderRequest) -> Result<String> {
+        let rendered = HfChatRenderer::new(
             template.map(str::to_owned),
             HashMap::new(),
             ChatTemplateContentFormatOption::Auto,
         )?
-        .render(request)?
-        .prompt
-        .into_text()
-        .map_err(|_| unreachable!("HF renderer should return text prompt"))
+        .render(&request.as_request())?
+        .content;
+        Ok(rendered.into_text().expect("HF renderer should return text prompt"))
     }
 
     fn render_mm(
         template: &str,
-        request: &ChatRequest,
+        request: &TestRenderRequest,
         content_format: ChatTemplateContentFormatOption,
     ) -> Result<crate::RenderedPrompt> {
         HfChatRenderer::new(Some(template.to_string()), HashMap::new(), content_format)?
@@ -621,10 +643,10 @@ mod tests {
                 video_token: Some("<video>".to_string()),
                 audio_token: Some("<audio>".to_string()),
             }))
-            .render(request)
+            .render(&request.as_request())
     }
 
-    fn image_request() -> ChatRequest {
+    fn image_request() -> TestRenderRequest {
         sample_request(vec![ChatMessage::user(vec![
             ChatContentPart::text("a"),
             ChatContentPart::image_url("data:image/png;base64,test"),
@@ -632,7 +654,7 @@ mod tests {
         ])])
     }
 
-    fn video_request() -> ChatRequest {
+    fn video_request() -> TestRenderRequest {
         sample_request(vec![ChatMessage::user(vec![
             ChatContentPart::text("a"),
             ChatContentPart::video_url("https://example.com/demo.mp4"),
@@ -640,7 +662,7 @@ mod tests {
         ])])
     }
 
-    fn audio_request() -> ChatRequest {
+    fn audio_request() -> TestRenderRequest {
         sample_request(vec![ChatMessage::user(vec![
             ChatContentPart::text("a"),
             ChatContentPart::input_audio("dGVzdA==", Some("wav".to_string())),
@@ -658,7 +680,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(rendered.prompt, Prompt::Text("a<image>b".to_string()));
+        assert_eq!(
+            rendered.content,
+            RenderedPromptContent::Text("a<image>b".to_string())
+        );
     }
 
     #[test]
@@ -670,7 +695,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(rendered.prompt, Prompt::Text("a<video>b".to_string()));
+        assert_eq!(
+            rendered.content,
+            RenderedPromptContent::Text("a<video>b".to_string())
+        );
     }
 
     #[test]
@@ -683,8 +711,8 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            rendered.prompt,
-            Prompt::Text("a<audio><audio>b".to_string())
+            rendered.content,
+            RenderedPromptContent::Text("a<audio><audio>b".to_string())
         );
     }
 
@@ -697,7 +725,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(rendered.prompt, Prompt::Text("a<|image_pad|>b".to_string()));
+        assert_eq!(
+            rendered.content,
+            RenderedPromptContent::Text("a<|image_pad|>b".to_string())
+        );
     }
 
     #[test]
@@ -709,7 +740,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(rendered.prompt, Prompt::Text("a<|video_pad|>b".to_string()));
+        assert_eq!(
+            rendered.content,
+            RenderedPromptContent::Text("a<|video_pad|>b".to_string())
+        );
     }
 
     #[test]
@@ -722,8 +756,8 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            rendered.prompt,
-            Prompt::Text("a<|audio_pad|><|audio_pad|>b".to_string())
+            rendered.content,
+            RenderedPromptContent::Text("a<|audio_pad|><|audio_pad|>b".to_string())
         );
     }
 
@@ -740,7 +774,7 @@ mod tests {
             video_token: None,
             audio_token: None,
         }))
-        .render(&video_request())
+        .render(&video_request().as_request())
         .unwrap_err();
 
         assert!(matches!(
@@ -842,12 +876,12 @@ mod tests {
             ChatTemplateContentFormatOption::OpenAi,
         )
         .unwrap()
-        .prompt;
+        .content;
 
         // Anything rendered after the continued text (here the image
         // placeholder and the end marker) is truncated away, matching
         // transformers.
-        assert_eq!(rendered, Prompt::Text("Sure,".to_string()));
+        assert_eq!(rendered, RenderedPromptContent::Text("Sure,".to_string()));
     }
 
     #[test]
@@ -904,7 +938,7 @@ mod tests {
     fn chat_template_exposes_developer_tools() {
         let request = sample_request(vec![ChatMessage::developer(
             "policy",
-            Some(vec![ChatTool {
+            Some(vec![Tool {
                 name: "get_weather".to_string(),
                 description: Some("Get weather".to_string()),
                 parameters: serde_json::json!({
@@ -1005,10 +1039,13 @@ mod tests {
         )
         .unwrap()
         .with_special_tokens(Some(special_tokens))
-        .apply_chat_template(&request)
+        .apply_chat_template(&request.as_request())
         .unwrap();
 
-        assert_eq!(rendered.prompt, Prompt::Text("<bos>|true".to_string()));
+        assert_eq!(
+            rendered.content,
+            RenderedPromptContent::Text("<bos>|true".to_string())
+        );
     }
 
     #[test]
@@ -1046,11 +1083,14 @@ mod tests {
             ChatTemplateContentFormatOption::String,
         )
         .unwrap()
-        .render(&request)
+        .render(&request.as_request())
         .unwrap()
-        .prompt;
+        .content;
 
-        assert_eq!(rendered, Prompt::Text("hello world".to_string()));
+        assert_eq!(
+            rendered,
+            RenderedPromptContent::Text("hello world".to_string())
+        );
     }
 
     #[test]
@@ -1066,11 +1106,14 @@ mod tests {
             ChatTemplateContentFormatOption::OpenAi,
         )
         .unwrap()
-        .render(&request)
+        .render(&request.as_request())
         .unwrap()
-        .prompt;
+        .content;
 
-        assert_eq!(rendered, Prompt::Text("hello world".to_string()));
+        assert_eq!(
+            rendered,
+            RenderedPromptContent::Text("hello world".to_string())
+        );
     }
 
     #[test]
@@ -1091,9 +1134,9 @@ mod tests {
         )
         .unwrap();
 
-        let rendered = renderer.render(&request).unwrap().prompt;
+        let rendered = renderer.render(&request.as_request()).unwrap().content;
 
-        assert_eq!(rendered, Prompt::Text("true|x".to_string()));
+        assert_eq!(rendered, RenderedPromptContent::Text("true|x".to_string()));
     }
 
     #[test]
@@ -1115,9 +1158,12 @@ mod tests {
         )
         .unwrap();
 
-        let rendered = renderer.render(&request).unwrap();
+        let rendered = renderer.render(&request.as_request()).unwrap();
 
-        assert_eq!(rendered.prompt, Prompt::Text("max".to_string()));
+        assert_eq!(
+            rendered.content,
+            RenderedPromptContent::Text("max".to_string())
+        );
         assert_eq!(
             rendered.effective_template_kwargs.get("reasoning_effort"),
             Some(&Value::String("max".to_string()))
@@ -1144,9 +1190,12 @@ mod tests {
         )
         .unwrap();
 
-        let rendered = renderer.render(&request).unwrap();
+        let rendered = renderer.render(&request.as_request()).unwrap();
 
-        assert_eq!(rendered.prompt, Prompt::Text("none|true".to_string()));
+        assert_eq!(
+            rendered.content,
+            RenderedPromptContent::Text("none|true".to_string())
+        );
         assert_eq!(
             rendered.effective_template_kwargs.get("reasoning_effort"),
             Some(&Value::String("none".to_string()))
@@ -1222,7 +1271,7 @@ mod tests {
     #[test]
     fn chat_template_exposes_tools_to_templates_when_auto_enabled() {
         let mut request = sample_request(vec![ChatMessage::text(ChatRole::User, "hello")]);
-        request.tools = vec![ChatTool {
+        request.tools = vec![Tool {
             name: "get_weather".to_string(),
             description: Some("Get weather".to_string()),
             parameters: serde_json::json!({
@@ -1326,7 +1375,7 @@ mod tests {
                 "<|im_start|>user\na<|vision_start|><|image_pad|><|vision_end|>b<|im_end|>\n",
             )
         "#]]
-        .assert_debug_eq(&rendered.prompt);
+        .assert_debug_eq(&rendered.content);
     }
 
     #[test]

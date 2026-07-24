@@ -30,16 +30,17 @@ pub use parser::reasoning::{
     ReasoningDelta, ReasoningError, ReasoningParser, ReasoningParserFactory,
 };
 pub use parser::tool::{ToolParser, ToolParserError, ToolParserFactory};
-pub use renderer::hf::ChatTemplateContentFormatOption;
-pub use renderer::{
-    ChatRenderer, DeepSeekV4ChatRenderer, DeepSeekV32ChatRenderer, DynChatRenderer,
-    HarmonyChatRenderer, InklingChatRenderer, RenderedPrompt, RendererSelection,
-};
 pub use request::{
     ChatContent, ChatContentPart, ChatMessage, ChatOptions, ChatRequest, ChatRole, ChatTool,
     ChatToolChoice, GenerationPromptMode, ImageDetail, ReasoningEffort, SamplingParams,
 };
 pub use stream::{ChatEventStream, ChatEventStreamTrait, CollectedAssistantMessage};
+pub use vllm_chat_renderer::hf::ChatTemplateContentFormatOption;
+pub use vllm_chat_renderer::{
+    ChatRenderer, DeepSeekV4ChatRenderer, DeepSeekV32ChatRenderer, DynChatRenderer,
+    Error as RendererError, HarmonyChatRenderer, InklingChatRenderer, RenderRequest,
+    RenderedPrompt, RenderedPromptContent, RendererSelection, Result as RendererResult,
+};
 pub use vllm_llm::FinishReason;
 
 mod backend;
@@ -48,7 +49,6 @@ mod event;
 pub mod multimodal;
 mod output;
 mod parser;
-mod renderer;
 mod request;
 mod stream;
 
@@ -130,7 +130,9 @@ impl ChatRequestProcessor {
                 )
                 .await
             }
-            None if !request.has_multimodal() => Ok((rendered.prompt, None)),
+            None if !request.has_multimodal() => {
+                Ok((multimodal::to_text_prompt(rendered.content), None))
+            }
             None => Err(Error::UnsupportedMultimodalRenderer),
         }
     }
@@ -146,7 +148,12 @@ impl ChatRequestProcessor {
         // Stamp before rendering so render and tokenize count toward TTFT/e2e.
         let arrival_time = vllm_llm::current_unix_timestamp_secs();
         let output_processor = self.backend.new_chat_output_processor(&mut request, options)?;
-        let rendered = self.backend.chat_renderer().render(&request)?;
+        let render_request = request.as_render_request();
+        let rendered = self
+            .backend
+            .chat_renderer()
+            .render(&render_request)
+            .map_err(Error::from_renderer)?;
         let reasoning_parser_kwargs =
             request
                 .sampling_params
@@ -283,7 +290,13 @@ impl ChatLlm {
     pub async fn tokenize_chat(&self, request: ChatRequest) -> Result<Vec<u32>> {
         request.validate()?;
 
-        let rendered = self.processor.backend.chat_renderer().render(&request)?;
+        let render_request = request.as_render_request();
+        let rendered = self
+            .processor
+            .backend
+            .chat_renderer()
+            .render(&render_request)
+            .map_err(Error::from_renderer)?;
         let (prompt, _mm_features) =
             self.processor.finalize_rendered_prompt(&request, rendered).await?;
 

@@ -3,7 +3,7 @@
 
 //! Native Harmony chat renderer for `gpt_oss`.
 
-pub(crate) mod encoding;
+mod encoding;
 
 use openai_harmony::HarmonyEncoding;
 use openai_harmony::chat::{
@@ -12,14 +12,16 @@ use openai_harmony::chat::{
 };
 use thiserror_ext::AsReport as _;
 use time::macros::format_description;
-use vllm_text::Prompt;
 
-use self::encoding::harmony_encoding;
-use super::{ChatRenderer, RenderedPrompt, request_template_kwargs};
+pub use self::encoding::harmony_encoding;
+use super::{
+    ChatRenderer, RenderRequest, RenderedPrompt, RenderedPromptContent, request_template_kwargs,
+};
 use crate::error::{Error, Result};
-use crate::event::AssistantContentBlock;
-use crate::request::{ChatContent, ChatMessage, ChatRequest, ChatTool, GenerationPromptMode};
-use crate::{AssistantMessageExt as _, ReasoningEffort};
+use crate::{
+    AssistantContentBlock, AssistantMessageExt as _, ChatContent, ChatMessage,
+    GenerationPromptMode, ReasoningEffort, Tool,
+};
 
 const SYSTEM_START_DATE_ENV: &str = "VLLM_SYSTEM_START_DATE";
 const HARMONY_SYSTEM_INSTRUCTIONS_ENV: &str = "VLLM_GPT_OSS_HARMONY_SYSTEM_INSTRUCTIONS";
@@ -73,7 +75,7 @@ impl HarmonyChatRenderer {
     ///
     /// Harmony owns both prompt formatting and tokenization, so the Rust
     /// frontend bypasses the generic HF tokenizer path for GPT-OSS input.
-    fn render_token_ids(&self, request: &ChatRequest) -> Result<Vec<u32>> {
+    fn render_token_ids(&self, request: &RenderRequest<'_>) -> Result<Vec<u32>> {
         if request.has_multimodal() {
             return Err(Error::UnsupportedMultimodalContent("image_url"));
         }
@@ -111,11 +113,11 @@ impl HarmonyChatRenderer {
 }
 
 impl ChatRenderer for HarmonyChatRenderer {
-    /// Render a chat request as [`Prompt::TokenIds`] with template kwargs echoed
-    /// for downstream accounting/debugging.
-    fn render(&self, request: &ChatRequest) -> Result<RenderedPrompt> {
+    /// Render a chat request as token IDs with template kwargs echoed for
+    /// downstream accounting/debugging.
+    fn render(&self, request: &RenderRequest<'_>) -> Result<RenderedPrompt> {
         Ok(RenderedPrompt {
-            prompt: Prompt::TokenIds(self.render_token_ids(request)?),
+            content: RenderedPromptContent::TokenIds(self.render_token_ids(request)?),
             effective_template_kwargs: request_template_kwargs(request),
         })
     }
@@ -126,10 +128,10 @@ impl ChatRenderer for HarmonyChatRenderer {
 /// This adds the Harmony system/developer preamble, peels at most one leading
 /// system/developer instruction message, and then lowers the remaining chat
 /// history message-by-message.
-fn to_harmony_messages(request: &ChatRequest, options: &Options) -> Result<Vec<Message>> {
+fn to_harmony_messages(request: &RenderRequest<'_>, options: &Options) -> Result<Vec<Message>> {
     let (instructions, leading_developer_tools, remaining_messages) =
-        peel_leading_instructions(&request.messages)?;
-    let tool_call_names = tool_call_names(&request.messages);
+        peel_leading_instructions(request.messages)?;
+    let tool_call_names = tool_call_names(request.messages);
     let mut messages =
         build_harmony_preamble(request, instructions, leading_developer_tools, options)?;
 
@@ -147,7 +149,7 @@ fn to_harmony_messages(request: &ChatRequest, options: &Options) -> Result<Vec<M
 #[allow(clippy::type_complexity)]
 fn peel_leading_instructions(
     messages: &[ChatMessage],
-) -> Result<(Option<String>, Option<&[ChatTool]>, &[ChatMessage])> {
+) -> Result<(Option<String>, Option<&[Tool]>, &[ChatMessage])> {
     let Some(first) = messages.first() else {
         return Ok((None, None, messages));
     };
@@ -172,9 +174,9 @@ fn peel_leading_instructions(
 /// a developer message depending on `use_system_instructions`; request-level and
 /// leading developer tools are attached to the developer message.
 fn build_harmony_preamble(
-    request: &ChatRequest,
+    request: &RenderRequest<'_>,
     instructions: Option<String>,
-    leading_developer_tools: Option<&[ChatTool]>,
+    leading_developer_tools: Option<&[Tool]>,
     options: &Options,
 ) -> Result<Vec<Message>> {
     let mut messages = vec![Message::from_role_and_content(
@@ -211,12 +213,12 @@ fn build_harmony_preamble(
 
 /// Collect request-level and leading developer function tools for the preamble.
 fn preamble_tool_descriptions(
-    request: &ChatRequest,
-    leading_developer_tools: Option<&[ChatTool]>,
+    request: &RenderRequest<'_>,
+    leading_developer_tools: Option<&[Tool]>,
 ) -> Vec<ToolDescription> {
     let mut tools = Vec::new();
     if request.tool_parsing_enabled() {
-        tools.extend(to_tool_descriptions(&request.tools));
+        tools.extend(to_tool_descriptions(request.tools));
     }
     if let Some(leading_developer_tools) = leading_developer_tools {
         tools.extend(to_tool_descriptions(leading_developer_tools));
@@ -311,7 +313,7 @@ fn to_harmony_message(
 fn system_or_developer_message(
     role: &str,
     instructions: String,
-    tools: Option<&[ChatTool]>,
+    tools: Option<&[Tool]>,
     options: &Options,
 ) -> Result<Message> {
     if role == "system" && options.use_system_instructions {
@@ -325,7 +327,7 @@ fn system_or_developer_message(
 }
 
 /// Build a Harmony developer message with optional instructions and function tools.
-fn developer_message(instructions: Option<String>, tools: Option<&[ChatTool]>) -> Message {
+fn developer_message(instructions: Option<String>, tools: Option<&[Tool]>) -> Message {
     let mut content = DeveloperContent::new();
     if let Some(instructions) = instructions.filter(|text| !text.is_empty()) {
         content = content.with_instructions(instructions);
@@ -431,7 +433,7 @@ fn flatten_text(content: &ChatContent) -> Result<String> {
 }
 
 /// Convert vLLM function tool definitions to Harmony tool descriptions.
-fn to_tool_descriptions(tools: &[ChatTool]) -> Vec<ToolDescription> {
+fn to_tool_descriptions(tools: &[Tool]) -> Vec<ToolDescription> {
     tools
         .iter()
         .map(|tool| {

@@ -11,8 +11,10 @@ use serde_json::Value;
 use serde_json_fmt::JsonFormat;
 
 use crate::error::{Error, Result};
-use crate::request::{ChatContent, ChatMessage, ChatRequest, ChatRole, ChatTool};
-use crate::{AssistantContentBlock, AssistantMessageExt, AssistantToolCall};
+use crate::{
+    AssistantContentBlock, AssistantMessageExt, AssistantToolCall, ChatContent, ChatMessage,
+    ChatRole, RenderRequest, Tool,
+};
 
 const BOS_TOKEN: &str = "<｜begin▁of▁sentence｜>";
 const EOS_TOKEN: &str = "<｜end▁of▁sentence｜>";
@@ -39,7 +41,7 @@ struct RenderedToolSchema<'a> {
 }
 
 /// Render one chat request into the final prompt string.
-pub(super) fn render_request(request: &ChatRequest) -> Result<String> {
+pub(super) fn render_request(request: &RenderRequest<'_>) -> Result<String> {
     let thinking_mode = match request.enable_thinking()?.unwrap_or(false) {
         true => ThinkingMode::Thinking,
         false => ThinkingMode::Chat,
@@ -49,20 +51,19 @@ pub(super) fn render_request(request: &ChatRequest) -> Result<String> {
         Some(ChatRole::User | ChatRole::Developer)
     );
     let render_offset = isize::from(request.tool_parsing_enabled());
-    let last_user_render_index =
-        find_last_user_render_index(request.messages.as_slice(), render_offset);
-    let last_user_actual_index = find_last_user_actual_index(request.messages.as_slice());
+    let last_user_render_index = find_last_user_render_index(request.messages, render_offset);
+    let last_user_actual_index = find_last_user_actual_index(request.messages);
     let continue_final_message = request.chat_options.continue_final_message();
     let mut prompt = String::from(BOS_TOKEN);
 
     if request.tool_parsing_enabled() {
-        render_system_message(&mut prompt, None, &request.tools)?;
+        render_system_message(&mut prompt, None, request.tools)?;
     }
 
     for (message_index, message) in request.messages.iter().enumerate() {
         render_message(
             &mut prompt,
-            request.messages.as_slice(),
+            request.messages,
             message_index,
             message,
             render_offset,
@@ -168,7 +169,7 @@ fn find_last_user_actual_index(messages: &[ChatMessage]) -> usize {
 fn render_system_message(
     out: &mut String,
     content: Option<&ChatContent>,
-    tools: &[ChatTool],
+    tools: &[Tool],
 ) -> Result<()> {
     if let Some(content) = content {
         write_chat_content(out, content)?;
@@ -185,7 +186,7 @@ fn render_system_message(
 fn render_developer_message(
     out: &mut String,
     content: &ChatContent,
-    tools: &[ChatTool],
+    tools: &[Tool],
     opens_thinking: bool,
 ) -> Result<()> {
     if content.is_empty() {
@@ -452,7 +453,7 @@ fn encode_arguments_to_dsml(out: &mut String, tool_call: &AssistantToolCall) -> 
 }
 
 /// Render the full tool preamble shown to the model.
-fn render_tools(out: &mut String, tools: &[ChatTool]) -> Result<()> {
+fn render_tools(out: &mut String, tools: &[Tool]) -> Result<()> {
     out.push_str(
         r#"## Tools
 
@@ -500,7 +501,7 @@ Here are the functions available in JSONSchema format:
 
 /// Serialize one typed tool schema into the JSON shape embedded inside
 /// `<functions>`.
-fn render_tool_schema(out: &mut String, tool: &ChatTool) -> Result<()> {
+fn render_tool_schema(out: &mut String, tool: &Tool) -> Result<()> {
     out.push_str(&json_dumps(&RenderedToolSchema {
         name: &tool.name,
         description: tool.description.as_deref(),

@@ -21,8 +21,8 @@ use crate::output::{
     generate_tool_call_id,
 };
 use crate::parser::ParserSelection;
-use crate::renderer::harmony::encoding::harmony_encoding;
 use crate::request::ChatRequest;
+use vllm_chat_renderer::harmony::harmony_encoding;
 
 /// Request-scoped Harmony output processor used for `model_type == "gpt_oss"`.
 ///
@@ -73,7 +73,7 @@ impl HarmonyChatOutputProcessor {
     /// Build one request-scoped Harmony processor after backend policy checks.
     pub fn new(request: &ChatRequest) -> ChatResult<Self> {
         Ok(Self {
-            encoding: harmony_encoding()?,
+            encoding: harmony_encoding().map_err(Error::from_renderer)?,
             tool_calls_enabled: request.tool_parsing_enabled(),
             parallel_tool_calls: request.parallel_tool_calls,
         })

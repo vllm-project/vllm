@@ -15,6 +15,9 @@ use crate::hf::added_tokens::load_tokenizer_json_with_extra_tokens;
 use crate::{Result, Tokenizer};
 
 mod added_tokens;
+mod config;
+
+pub use config::{HfSpecialTokens, HfTokenizerConfig, NamedSpecialToken, load_tokenizer_config};
 
 enum Backend {
     Hf(Box<HfTokenizer>),

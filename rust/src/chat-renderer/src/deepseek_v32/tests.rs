@@ -9,36 +9,35 @@ use thiserror_ext::AsReport;
 
 use super::DeepSeekV32ChatRenderer;
 use crate::error::Error;
-use crate::event::{AssistantContentBlock, AssistantToolCall};
-use crate::renderer::test_utils::{FixtureRequestOptions, fixture_chat_request};
-use crate::request::{
-    ChatContentPart, ChatMessage, ChatRequest, ChatTool, ChatToolChoice, GenerationPromptMode,
+use crate::test_utils::{FixtureRequestOptions, fixture_chat_request};
+use crate::{AssistantContentBlock, AssistantToolCall};
+use crate::{
+    ChatContentPart, ChatMessage, ChatToolChoice, GenerationPromptMode, TestRenderRequest, Tool,
 };
 use crate::{ChatRenderer, ChatRole};
 
-fn render_request(request: &ChatRequest) -> String {
+fn render_request(request: &TestRenderRequest) -> String {
     DeepSeekV32ChatRenderer::new()
-        .render(request)
+        .render(&request.as_request())
         .unwrap()
-        .prompt
+        .content
         .into_text()
         .expect("deepseek renderer should return text prompt")
 }
 
-fn render_result(request: &ChatRequest) -> Result<String, Error> {
-    DeepSeekV32ChatRenderer::new().render(request).map(|rendered| {
+fn render_result(request: &TestRenderRequest) -> Result<String, Error> {
+    DeepSeekV32ChatRenderer::new().render(&request.as_request()).map(|rendered| {
         rendered
-            .prompt
+            .content
             .into_text()
             .expect("deepseek renderer should return text prompt")
     })
 }
 
-fn thinking_request(messages: Vec<ChatMessage>) -> ChatRequest {
-    let mut request = ChatRequest {
-        request_id: "deepseek-v32-small-test".to_string(),
+fn thinking_request(messages: Vec<ChatMessage>) -> TestRenderRequest {
+    let mut request = TestRenderRequest {
         messages,
-        ..ChatRequest::for_test()
+        ..TestRenderRequest::for_test()
     };
     if matches!(
         request.messages.last().map(ChatMessage::role),
@@ -53,7 +52,7 @@ fn thinking_request(messages: Vec<ChatMessage>) -> ChatRequest {
     request
 }
 
-fn fixture_request(input_name: &str) -> ChatRequest {
+fn fixture_request(input_name: &str) -> TestRenderRequest {
     fixture_chat_request(&fixture_path(input_name), deepseek_fixture_options())
 }
 
@@ -66,7 +65,7 @@ fn deepseek_fixture_options() -> FixtureRequestOptions {
 
 fn fixture_path(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("src/renderer/deepseek_v32")
+        .join("src/deepseek_v32")
         .join("fixtures")
         .join(name)
 }
@@ -103,13 +102,12 @@ fn renders_official_search_fixture_with_date() {
 
 #[test]
 fn request_level_tools_are_lowered_as_synthetic_leading_system_message() {
-    let mut request = ChatRequest {
-        request_id: "deepseek-v32-tools".to_string(),
+    let mut request = TestRenderRequest {
         messages: vec![
             ChatMessage::system("System prompt."),
             ChatMessage::text(ChatRole::User, "Hello"),
         ],
-        tools: vec![ChatTool {
+        tools: vec![Tool {
             name: "lookup".to_string(),
             description: Some("Look things up".to_string()),
             parameters: json!({
@@ -124,7 +122,7 @@ fn request_level_tools_are_lowered_as_synthetic_leading_system_message() {
             strict: None,
         }],
         tool_choice: ChatToolChoice::Auto,
-        ..ChatRequest::for_test()
+        ..TestRenderRequest::for_test()
     };
     request
         .chat_options
@@ -272,12 +270,12 @@ fn assistant_after_last_user_requires_reasoning_or_tool_calls() {
 
 #[test]
 fn continue_final_assistant_omits_final_eos() {
-    let mut request = ChatRequest {
+    let mut request = TestRenderRequest {
         messages: vec![
             ChatMessage::user("write"),
             ChatMessage::assistant_text("partial answer"),
         ],
-        ..ChatRequest::for_test()
+        ..TestRenderRequest::for_test()
     };
     request.chat_options.generation_prompt_mode = GenerationPromptMode::ContinueFinalAssistant;
 
@@ -289,14 +287,14 @@ fn continue_final_assistant_omits_final_eos() {
 
 #[test]
 fn render_rejects_multimodal_input() {
-    let request = ChatRequest {
+    let request = TestRenderRequest {
         messages: vec![ChatMessage::user(vec![ChatContentPart::image_url(
             "data:image/png;base64,test",
         )])],
-        ..ChatRequest::for_test()
+        ..TestRenderRequest::for_test()
     };
 
-    let error = DeepSeekV32ChatRenderer::new().render(&request).unwrap_err();
+    let error = DeepSeekV32ChatRenderer::new().render(&request.as_request()).unwrap_err();
 
     assert!(matches!(
         error,

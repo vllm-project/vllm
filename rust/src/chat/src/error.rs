@@ -80,6 +80,25 @@ pub enum Error {
 pub type Result<T> = std::result::Result<T, Error>;
 
 impl Error {
+    /// Map a renderer-owned error into the chat facade's public error shape.
+    pub(crate) fn from_renderer(error: vllm_chat_renderer::Error) -> Self {
+        match error {
+            vllm_chat_renderer::Error::EmptyMessages => Self::EmptyMessages,
+            vllm_chat_renderer::Error::ContinueFinalAssistantWithoutFinalAssistant => {
+                Self::ContinueFinalAssistantWithoutFinalAssistant
+            }
+            vllm_chat_renderer::Error::MissingChatTemplate => Self::MissingChatTemplate,
+            vllm_chat_renderer::Error::ChatTemplate(message) => Self::ChatTemplate(message),
+            vllm_chat_renderer::Error::UnsupportedMultimodalContent(content_type) => {
+                Self::UnsupportedMultimodalContent(content_type)
+            }
+            vllm_chat_renderer::Error::HarmonyEncoding { error } => {
+                Self::HarmonyOutputParsing { error }
+            }
+            vllm_chat_renderer::Error::Tokenizer(error) => Self::Tokenizer(error),
+        }
+    }
+
     /// Whether this error represents invalid user request parameters.
     pub fn is_request_validation_error(&self) -> bool {
         match self {

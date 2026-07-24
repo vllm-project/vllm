@@ -16,7 +16,10 @@ pub mod test_utils;
 mod tiktoken;
 
 pub use error::{Result, TokenizerError};
-pub use hf::HuggingFaceTokenizer;
+pub use hf::{
+    HfSpecialTokens, HfTokenizerConfig, HuggingFaceTokenizer, NamedSpecialToken,
+    load_tokenizer_config,
+};
 pub use incremental::IncrementalDecoder;
 pub use tekken::TekkenTokenizer;
 pub use tiktoken::TiktokenTokenizer;
