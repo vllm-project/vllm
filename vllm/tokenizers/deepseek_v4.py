@@ -55,6 +55,8 @@ def get_deepseek_v4_tokenizer(tokenizer: HfTokenizer) -> HfTokenizer:
                 thinking_mode=thinking_mode,
                 drop_thinking=kwargs.get("drop_thinking", True),
                 reasoning_effort=reasoning_effort,
+                add_generation_prompt=kwargs.get("add_generation_prompt", True),
+                continue_final_message=kwargs.get("continue_final_message", False),
             )
 
             prompt_str = encode_messages(messages, **encode_config)  # type: ignore
