@@ -85,7 +85,12 @@ from vllm.config.model import (
     RunnerOption,
     TokenizerMode,
 )
-from vllm.config.multimodal import MMCacheType, MMEncoderTPMode, MMTensorIPC
+from vllm.config.multimodal import (
+    MMCacheType,
+    MMEncoderTPMode,
+    MMHasherAlgorithm,
+    MMTensorIPC,
+)
 from vllm.config.observability import DetailedTraceModules
 from vllm.config.parallel import (
     All2AllBackend,
@@ -566,6 +571,7 @@ class EngineArgs:
     mm_processor_cache_type: MMCacheType | None = (
         MultiModalConfig.mm_processor_cache_type
     )
+    mm_hasher_algorithm: MMHasherAlgorithm = MultiModalConfig.mm_hasher_algorithm
     mm_shm_cache_max_object_size_mb: int = (
         MultiModalConfig.mm_shm_cache_max_object_size_mb
     )
@@ -1273,6 +1279,9 @@ class EngineArgs:
             "--mm-processor-cache-type", **multimodal_kwargs["mm_processor_cache_type"]
         )
         multimodal_group.add_argument(
+            "--mm-hasher-algorithm", **multimodal_kwargs["mm_hasher_algorithm"]
+        )
+        multimodal_group.add_argument(
             "--mm-shm-cache-max-object-size-mb",
             **multimodal_kwargs["mm_shm_cache_max_object_size_mb"],
         )
@@ -1693,6 +1702,7 @@ class EngineArgs:
             override_attention_dtype=self.override_attention_dtype,
             logits_processors=self.logits_processors,
             video_pruning_rate=self.video_pruning_rate,
+            mm_hasher_algorithm=self.mm_hasher_algorithm,
             mm_tensor_ipc=self.mm_tensor_ipc,
             mm_ipc_gpu_memory_gb=self.mm_ipc_gpu_memory_gb,
             io_processor_plugin=self.io_processor_plugin,

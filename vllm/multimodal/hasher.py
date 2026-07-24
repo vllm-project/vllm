@@ -11,7 +11,7 @@ import numpy as np
 import torch
 from PIL import Image
 
-import vllm.envs as envs
+from vllm.config.multimodal import MMHasherAlgorithm
 from vllm.logger import init_logger
 
 from .media import MediaWithBytes
@@ -20,7 +20,9 @@ logger = init_logger(__name__)
 
 
 @functools.lru_cache(maxsize=3)
-def _get_hasher_factory(algorithm: str) -> Callable[[], "hashlib._Hash"]:
+def _get_hasher_factory(
+    algorithm: MMHasherAlgorithm,
+) -> Callable[[], "hashlib._Hash"]:
     """
     Get the hasher factory based on the configured algorithm.
 
@@ -32,7 +34,6 @@ def _get_hasher_factory(algorithm: str) -> Callable[[], "hashlib._Hash"]:
 
     See: https://github.com/vllm-project/vllm/issues/18334
     """
-    algorithm = algorithm.lower()
 
     if algorithm == "blake3":
         from blake3 import blake3
@@ -43,7 +44,7 @@ def _get_hasher_factory(algorithm: str) -> Callable[[], "hashlib._Hash"]:
     elif algorithm == "sha512":
         return hashlib.sha512
     else:
-        # This should never happen due to env_with_choices validation
+        # This should never happen due to config validation
         raise ValueError(f"Unsupported hash algorithm: {algorithm}")
 
 
@@ -151,8 +152,13 @@ class MultiModalHasher:
             yield from cls.serialize_item(obj)
 
     @classmethod
-    def hash_kwargs(cls, **kwargs: object) -> str:
-        hasher_factory = _get_hasher_factory(envs.VLLM_MM_HASHER_ALGORITHM)
+    def hash_kwargs(
+        cls,
+        algorithm: MMHasherAlgorithm,
+        /,
+        **kwargs: object,
+    ) -> str:
+        hasher_factory = _get_hasher_factory(algorithm)
         hasher = hasher_factory()
 
         for k, v in sorted(kwargs.items(), key=lambda kv: kv[0]):
