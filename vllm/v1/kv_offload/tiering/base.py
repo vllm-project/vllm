@@ -39,6 +39,10 @@ class TieringOffloadingMetrics:
 
     LOOKUP_SYNC_DELAY = "vllm:kv_offload_tiering_lookup_sync_delay_seconds"
     LOOKUP_ASYNC_DELAY = "vllm:kv_offload_tiering_lookup_async_delay_seconds"
+    BACKPRESSURE_ACTIVE = "vllm:kv_offload_tiering_backpressure_active"
+    BACKPRESSURE_STORES_DROPPED = (
+        "vllm:kv_offload_tiering_backpressure_stores_dropped"
+    )
 
 
 @dataclass
@@ -50,6 +54,7 @@ class JobMetadata:
     block_ids: np.ndarray
     is_promotion: bool
     req_context: ReqContext
+    submit_time: float = 0.0
 
 
 @dataclass
