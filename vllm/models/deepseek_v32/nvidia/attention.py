@@ -4,6 +4,7 @@ import torch
 import torch.nn as nn
 from transformers import DeepseekV2Config, DeepseekV3Config
 
+import vllm._custom_ops as ops
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
@@ -21,17 +22,15 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8,
 )
 from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.model_executor.layers.sparse_attn_indexer import (
-    SparseAttnIndexer,
-    sparse_attn_indexer,
-)
+from vllm.model_executor.layers.sparse_attn_indexer import SparseAttnIndexer
 from vllm.model_executor.models.deepseek_v2 import (
     DeepSeekV2FusedQkvAProjLinear,
     DeepseekV32IndexerCache,
     yarn_get_mscale,
 )
 from vllm.model_executor.models.utils import extract_layer_index
-from vllm.utils.torch_utils import is_quantized_kv_cache
+from vllm.platforms import current_platform
+from vllm.utils.torch_utils import _encode_layer_name, is_quantized_kv_cache
 
 from .kernels import fused_norm_rope, fused_q
 
@@ -171,6 +170,11 @@ class DeepseekV32Attention(MLAAttention):
     ) -> None:
         quant_config = vllm_config.quant_config
         cache_config = vllm_config.cache_config
+        if cache_config is not None and cache_config.cache_dtype == "auto":
+            # This implementation requires an FP8 sparse cache. Start with the
+            # generic FP8 format; MLAAttention will canonicalize it for the
+            # selected sparse backend.
+            cache_config.cache_dtype = "fp8"
 
         hidden_size = config.hidden_size
         qk_nope_head_dim = config.qk_nope_head_dim
@@ -331,6 +335,37 @@ class DeepseekV32Attention(MLAAttention):
             rope_parameters=config.rope_parameters,
             is_neox_style=False,
         )
+        # Decode-M GEMM dispatch for the bf16 A/B projections, measured on
+        # B300 and B200 (graph replay + rotating weights vs fp64):
+        # bf16_skinny_gemm for M <= skinny_max, dsv3_fused_a_gemm up to
+        # M = 16, cuBLAS above. Blackwell-only: the boundaries and the
+        # fused_a tile choices are tied to the 148/152-SM single-wave
+        # geometry. DSv3.2 q_b has no skinny tier (K=1536 does not fit the
+        # GEMV's 128x8 K-step; fused_a still wins 1.6-1.8x there).
+        # Quantized linear methods may not register .weight until
+        # process_weights_after_loading (e.g. compressed-tensors NVFP4
+        # registers weight_packed at init) — probe with getattr.
+        # (N, K) -> skinny_max
+        qkv_a_dispatch = {(2624, 6144): 2, (2112, 7168): 2}
+        q_b_dispatch = {(2048, 2048): 2, (3072, 1536): 0}
+        ok = (
+            current_platform.is_device_capability_family(100)
+            and hasattr(torch.ops._C, "bf16_skinny_gemm")
+            and hasattr(torch.ops._C, "dsv3_fused_a_gemm")
+        )
+        qkv_a_weight = getattr(self.fused_qkv_a_proj, "weight", None)
+        q_b_weight = getattr(self.q_b_proj, "weight", None)
+        self._qkv_a_skinny_max = (
+            qkv_a_dispatch.get(tuple(qkv_a_weight.shape))
+            if ok and qkv_a_weight is not None and qkv_a_weight.dtype == torch.bfloat16
+            else None
+        )
+        self._q_b_skinny_max = (
+            q_b_dispatch.get(tuple(q_b_weight.shape))
+            if ok and q_b_weight is not None and q_b_weight.dtype == torch.bfloat16
+            else None
+        )
+
         # Lightning indexer uses its own RoPE; interleave maps to non-NeoX.
         self.indexer_rope_emb = get_rope(
             qk_rope_head_dim,
@@ -339,13 +374,32 @@ class DeepseekV32Attention(MLAAttention):
             is_neox_style=not getattr(config, "indexer_rope_interleave", False),
         )
 
+    def _decode_m_gemm(
+        self, x: torch.Tensor, weight: torch.Tensor, skinny_max: int
+    ) -> torch.Tensor:
+        """x @ weight.T for decode M <= 16."""
+        if x.shape[0] == 0:
+            return torch.empty((0, weight.shape[0]), dtype=x.dtype, device=x.device)
+        if x.shape[0] <= skinny_max:
+            return ops.bf16_skinny_gemm(x, weight)
+        out = torch.empty((x.shape[0], weight.shape[0]), dtype=x.dtype, device=x.device)
+        ops.dsv3_fused_a_gemm(out, x, weight.t())
+        return out
+
     def forward(  # type: ignore[override]
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
         # Captured: A-projections (+ indexer A-GEMM on indexer layers).
-        qkv_lora = self.fused_qkv_a_proj(hidden_states)[0]
+        if self._qkv_a_skinny_max is not None and hidden_states.shape[0] <= 16:
+            qkv_lora = self._decode_m_gemm(
+                hidden_states,
+                self.fused_qkv_a_proj.weight,
+                self._qkv_a_skinny_max,
+            )
+        else:
+            qkv_lora = self.fused_qkv_a_proj(hidden_states)[0]
         q_c, kv_c, k_pe = qkv_lora.split(
             [self.q_lora_rank, self.kv_lora_rank, self.qk_rope_head_dim], dim=-1
         )
@@ -398,7 +452,9 @@ class DeepseekV32Attention(MLAAttention):
         assert isinstance(slot_mapping, dict)
         mla_slot = slot_mapping.get(self.layer_name)
 
-        if self.indexer is not None:
+        # skip_topk (index_share_for_mtp_iteration reuse mode): don't run the
+        # indexer this step; keep the top-k already in the shared buffer.
+        if self.indexer is not None and not self.skip_topk:
             has_indexer = True
             indexer_k_norm_w = self.indexer.k_norm.weight
             indexer_k_norm_bias = self.indexer.k_norm.bias
@@ -451,12 +507,16 @@ class DeepseekV32Attention(MLAAttention):
             index_rope_interleave=self._index_rope_interleave,
         )
 
-        q = self.q_b_proj(q_c)[0].view(-1, self.num_local_heads, self.qk_head_dim)
+        if self._q_b_skinny_max is not None and q_c.shape[0] <= 16:
+            q = self._decode_m_gemm(q_c, self.q_b_proj.weight, self._q_b_skinny_max)
+        else:
+            q = self.q_b_proj(q_c)[0]
+        q = q.view(-1, self.num_local_heads, self.qk_head_dim)
         q_nope, q_pe = q.split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
         q_nope = q_nope.transpose(0, 1)
         ql_nope = torch.bmm(q_nope, self.W_UK_T).transpose(0, 1)
 
-        if self.indexer is not None:
+        if self.indexer is not None and not self.skip_topk:
             index_q = self.indexer.wq_b(q_c)[0]
             index_q = index_q.view(-1, self.indexer.n_head, self.indexer.head_dim)
         else:
@@ -478,10 +538,10 @@ class DeepseekV32Attention(MLAAttention):
             quantize_mqa=self._fp8_query,
         )
 
-        if self.indexer is not None:
-            sparse_attn_indexer(
+        if self.indexer is not None and not self.skip_topk:
+            torch.ops.vllm.sparse_attn_indexer(
                 q_c,
-                self.indexer.k_cache.prefix,
+                _encode_layer_name(self.indexer.k_cache.prefix),
                 self.indexer.k_cache.kv_cache,
                 index_q_fp8,
                 None,  # q_scale folded into weights on the fp8 path

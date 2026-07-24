@@ -11,6 +11,7 @@ from vllm.config.compilation import (
 )
 from vllm.config.device import DeviceConfig
 from vllm.config.diffusion import DiffusionConfig
+from vllm.config.ec_manager_config import EncoderCacheManagerConfig
 from vllm.config.ec_transfer import ECTransferConfig
 from vllm.config.kernel import KernelConfig
 from vllm.config.kv_events import KVEventsConfig
@@ -75,6 +76,8 @@ __all__ = [
     "DeviceConfig",
     # From vllm.config.diffusion
     "DiffusionConfig",
+    # From vllm.config.ec_manager_config
+    "EncoderCacheManagerConfig",
     # From vllm.config.ec_transfer
     "ECTransferConfig",
     # From vllm.config.kernel
