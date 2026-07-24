@@ -817,6 +817,23 @@ class BitsAndBytesModelLoader(BaseModelLoader):
                     "Following weights were not initialized from "
                     f"checkpoint: {weights_not_loaded}"
                 )
+
+        # Models can declare `get_bnb_quant_state_aliases() -> {alias: src}`
+        # when one checkpoint weight backs multiple module slots (e.g.,
+        # Gemma-4 k_eq_v full_attention layers, where v_proj is absent
+        # and V is loaded from k_proj). The model's load_weights copies
+        # the packed uint8 buffer into each slot; this hook also aliases
+        # the per-slot QuantState so all shards appear in the packed
+        # parameter's bnb_shard_offsets.
+        get_aliases = getattr(model, "get_bnb_quant_state_aliases", None)
+        if get_aliases is not None:
+            for alias_name, source_name in get_aliases().items():
+                if alias_name in quant_state_dict:
+                    continue
+                source_state = quant_state_dict.get(source_name)
+                if source_state is not None:
+                    quant_state_dict[alias_name] = source_state
+
         expert_quant_state_dict = self._fuse_moe_quant_states(model, quant_state_dict)
 
         stacked_quant_state_dict = self._stack_quantization_states(
