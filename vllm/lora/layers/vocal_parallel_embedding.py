@@ -79,7 +79,12 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
         index: int,
         lora_a: torch.Tensor | list[torch.Tensor],
         lora_b: torch.Tensor | list[torch.Tensor],
+        lora_magnitude_vector: (
+            torch.Tensor | list[torch.Tensor | None] | None
+        ) = None,
     ):
+        if lora_magnitude_vector is not None:
+            raise NotImplementedError("DoRA is not supported for embeddings.")
         assert isinstance(lora_a, torch.Tensor)
         assert isinstance(lora_b, torch.Tensor)
         self.reset_lora(index)
