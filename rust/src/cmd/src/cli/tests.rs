@@ -69,6 +69,7 @@ fn serve_args_forward_python_flags_with_separator() {
                         default_chat_template_kwargs: None,
                         chat_template_content_format: Auto,
                         enable_log_requests: false,
+                        max_log_len: None,
                         enable_prompt_tokens_details: false,
                         enable_request_id_headers: false,
                         disable_log_stats: false,
@@ -765,6 +766,7 @@ fn frontend_args_accept_json() {
                         default_chat_template_kwargs: None,
                         chat_template_content_format: Auto,
                         enable_log_requests: false,
+                        max_log_len: None,
                         enable_prompt_tokens_details: false,
                         enable_request_id_headers: false,
                         disable_log_stats: false,
@@ -1287,6 +1289,7 @@ fn serve_args_accept_handshake_aliases() {
                         default_chat_template_kwargs: None,
                         chat_template_content_format: Auto,
                         enable_log_requests: false,
+                        max_log_len: None,
                         enable_prompt_tokens_details: false,
                         enable_request_id_headers: false,
                         disable_log_stats: false,
@@ -1431,6 +1434,7 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
             max_logprobs: None,
             api_server_options: ApiServerOptions {
                 enable_log_requests: false,
+                max_log_len: None,
                 enable_prompt_tokens_details: false,
                 enable_request_id_headers: false,
             },
@@ -1515,6 +1519,7 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
             max_logprobs: None,
             api_server_options: ApiServerOptions {
                 enable_log_requests: false,
+                max_log_len: None,
                 enable_prompt_tokens_details: false,
                 enable_request_id_headers: false,
             },
@@ -1617,6 +1622,7 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
             max_logprobs: None,
             api_server_options: ApiServerOptions {
                 enable_log_requests: false,
+                max_log_len: None,
                 enable_prompt_tokens_details: false,
                 enable_request_id_headers: false,
             },

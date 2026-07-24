@@ -125,6 +125,7 @@ async fn collect_completion(
     created: u64,
     ApiServerOptions {
         enable_log_requests,
+        max_log_len,
         enable_prompt_tokens_details,
         ..
     }: ApiServerOptions,
@@ -193,6 +194,13 @@ async fn collect_completion(
             output_tokens = usage.completion_tokens.unwrap_or(0),
             %finish_reason,
             "completion finished"
+        );
+        debug!(
+            prompt_token_ids = %crate::config::format_prompt_token_ids_for_log(
+                &collected.prompt_token_ids,
+                max_log_len,
+            ),
+            "completion prompt token ids"
         );
     }
 
