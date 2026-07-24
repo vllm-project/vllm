@@ -106,6 +106,8 @@ class FatreluAndMul(CustomOp):
         return x1 * x2
 
     def forward_cuda(self, x: torch.Tensor) -> torch.Tensor:
+        if x.device.type != 'cuda':
+            return self.forward_native(x)
         d = x.shape[-1] // 2
         output_shape = x.shape[:-1] + (d,)
         out = torch.empty(output_shape, dtype=x.dtype, device=x.device)
