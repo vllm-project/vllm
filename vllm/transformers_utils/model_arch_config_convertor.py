@@ -261,7 +261,7 @@ class ModelArchConfigConvertorBase:
         if not hasattr(self.hf_text_config, "model_type"):
             return False
         elif self.hf_text_config.model_type in (
-            "AXK1",
+            "axk1",
             "deepseek_v2",
             "deepseek_v3",
             "deepseek_v32",
@@ -290,7 +290,7 @@ class ModelArchConfigConvertorBase:
             return (
                 self.hf_text_config.model.model_type
                 in (
-                    "AXK1",
+                    "axk1",
                     "deepseek_v2",
                     "deepseek_v3",
                     "deepseek_v32",
