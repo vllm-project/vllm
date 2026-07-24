@@ -5,7 +5,7 @@ import multiprocessing
 import socket
 import threading
 import time
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pytest
 import zmq
@@ -14,6 +14,7 @@ from vllm.utils.network_utils import make_zmq_socket, split_zmq_path
 from vllm.v1.utils import (
     APIServerProcessManager,
     get_engine_client_zmq_addr,
+    run_api_server_worker_proc,
     wait_for_completion_or_failure,
 )
 
@@ -84,6 +85,35 @@ def api_server_args():
         ],
         "stats_update_address": "tcp://127.0.0.1:7000",
     }
+
+
+@pytest.mark.skip_global_cleanup
+def test_api_server_worker_initializes_tracing():
+    client_config = {"client_index": 2}
+    server = object()
+    run_server_worker = Mock(return_value=server)
+
+    with (
+        patch(
+            "vllm.entrypoints.openai.api_server.run_server_worker",
+            new=run_server_worker,
+        ),
+        patch("vllm.tracing.maybe_init_worker_tracer") as init_worker_tracer,
+        patch("vllm.v1.utils.set_process_title") as set_process_title,
+        patch("vllm.v1.utils.decorate_logs") as decorate_logs,
+        patch("vllm.v1.utils.uvloop.run") as uvloop_run,
+    ):
+        run_api_server_worker_proc("localhost:8000", "socket", "args", client_config)
+
+    set_process_title.assert_called_once_with("APIServer", "2")
+    init_worker_tracer.assert_called_once_with(
+        "vllm.api_server", "api_server", "APIServer_2"
+    )
+    decorate_logs.assert_called_once_with()
+    run_server_worker.assert_called_once_with(
+        "localhost:8000", "socket", "args", client_config
+    )
+    uvloop_run.assert_called_once_with(server)
 
 
 @pytest.mark.parametrize("with_stats_update", [True, False])

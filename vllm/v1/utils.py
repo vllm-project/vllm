@@ -501,12 +501,16 @@ def run_api_server_worker_proc(
     """Entrypoint for individual API server worker processes."""
 
     from vllm.entrypoints.openai.api_server import run_server_worker
+    from vllm.tracing import maybe_init_worker_tracer
 
     client_config = client_config or {}
     server_index = client_config.get("client_index", 0)
 
     # Set process title and add process-specific prefix to stdout and stderr.
     set_process_title("APIServer", str(server_index))
+    maybe_init_worker_tracer(
+        "vllm.api_server", "api_server", f"APIServer_{server_index}"
+    )
     decorate_logs()
 
     uvloop.run(
