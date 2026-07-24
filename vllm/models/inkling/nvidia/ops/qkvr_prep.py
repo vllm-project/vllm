@@ -4,7 +4,6 @@
 import torch
 
 from vllm.triton_utils import tl, triton
-from vllm.utils.torch_utils import aux_stream
 
 LOW_BLOCK_M = 32
 LOW_BLOCK_N = 64
@@ -867,33 +866,33 @@ def fused_qkvr_prep(
         )
         return q_out, rel_out
 
-    kv_stream = aux_stream()
-    assert kv_stream is not None
-    current_stream = torch.cuda.current_stream()
-    kv_stream.wait_stream(current_stream)
-    with torch.cuda.stream(kv_stream):
-        _run_tiled_kv(
+    # Run the KV write on the main stream: the aux-stream fork races the
+    # attention read under un-serialized execution / CUDA graph capture
+    # (#49049, fault surfaces downstream and is easily misattributed).
+    # Write-before-read by program order; measured ~0 prefill cost (937 vs
+    # 943 t/s on 8xGB10 TP=8).
+    _run_tiled_kv(
             qkvr,
             k_weight,
             v_weight,
             k_norm_weight,
-            conv_cache,
-            key_cache,
-            value_cache,
-            positions,
-            seq_idx,
-            conv_slot_mapping,
-            conv_block_table,
-            query_start,
-            attention_slot_mapping,
-            eps=eps,
-            num_q_heads=num_q_heads,
-            num_kv_heads=num_kv_heads,
-            head_dim=head_dim,
-            off_k=off_k,
-            off_v=off_v,
-            conv_block_size=conv_block_size,
-        )
+        conv_cache,
+        key_cache,
+        value_cache,
+        positions,
+        seq_idx,
+        conv_slot_mapping,
+        conv_block_table,
+        query_start,
+        attention_slot_mapping,
+        eps=eps,
+        num_q_heads=num_q_heads,
+        num_kv_heads=num_kv_heads,
+        head_dim=head_dim,
+        off_k=off_k,
+        off_v=off_v,
+        conv_block_size=conv_block_size,
+    )
     _run_tiled_q(
         qkvr,
         q_norm_weight,
@@ -914,5 +913,4 @@ def fused_qkvr_prep(
         head_dim=head_dim,
         d_rel=d_rel,
     )
-    current_stream.wait_stream(kv_stream)
     return q_out, rel_out

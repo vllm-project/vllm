@@ -50,7 +50,16 @@ def _get_score_mod(rel_extent: int) -> Callable:
         rel_idx = rel_dist_0 if rel_dist_0 >= 0 else 0
         rel_idx = rel_idx if rel_idx < rel_extent else (rel_extent - 1)
 
-        rel_bias = rel_logits[global_q_idx[0], h_idx[0], rel_idx]
+        # Clamp the q-row symmetrically with the kv index above: score_mod
+        # evaluates on ALL tile coordinates before masking, and an out-of-range
+        # global_q_idx wraps the 64-bit gather address (deterministic illegal
+        # access on sm_121a warmup; see #49049). Bit-identical in-range.
+        n_rows = rel_logits.shape[0]
+        g_row_0 = global_q_idx[0]
+        g_row = g_row_0 if g_row_0 >= 0 else 0
+        g_row = g_row if g_row < n_rows else (n_rows - 1)
+
+        rel_bias = rel_logits[g_row, h_idx[0], rel_idx]
         rel_bias = Float32(rel_bias) if rel_dist_0 == rel_idx else Float32(0.0)
         return scores + rel_bias
 
@@ -69,6 +78,12 @@ def inkling_fa4_num_splits(
     """Return the split-KV cap for Inkling relative attention."""
     capability = current_platform.get_device_capability()
     if capability is not None and capability.major == 9:
+        return 1
+    # SM12x takes the vllm_flash_attn cute SM120 forward (the sheared-bias
+    # path is SM100/SM110-only), which supports neither split-KV nor paged
+    # KV in current vllm-flash-attn (ed4b7342: "SM120 forward only supports
+    # num_splits=1"). Cap at 1 to avoid an AssertionError in cutedsl_warmup.
+    if capability is not None and capability.major >= 12:
         return 1
     if is_local:
         return 1
