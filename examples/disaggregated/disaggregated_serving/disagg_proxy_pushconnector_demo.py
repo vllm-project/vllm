@@ -269,7 +269,10 @@ class PushProxy:
         generator = self.forward_request(
             f"http://{decode_instance}{path}", decode_request, headers
         )
-        return StreamingResponse(generator, media_type="application/json")
+        media_type = (
+            "text/event-stream" if request.get("stream") else "application/json"
+        )
+        return StreamingResponse(generator, media_type=media_type)
 
     async def create_completion(self, raw_request: Request):
         try:
