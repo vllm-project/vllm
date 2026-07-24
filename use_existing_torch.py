@@ -39,11 +39,9 @@ def main(argv):
         if "torch" in "".join(lines).lower():
             with open(file, "w") as f:
                 for line in lines:
-                    if (
-                        args.prefix
-                        and not line.lower().strip().startswith(TORCH_LIB_PREFIXES)
-                        or not args.prefix
-                        and "torch" not in line.lower()
+                    if not (
+                        (args.prefix and line.lower().strip().startswith(TORCH_LIB_PREFIXES))
+                        or (not args.prefix and "torch" in line.lower())
                     ):
                         f.write(line)
                     else:
