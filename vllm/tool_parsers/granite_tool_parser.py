@@ -55,18 +55,20 @@ class GraniteToolParser(ToolParser):
     def extract_tool_calls(
         self, model_output: str, request: ChatCompletionRequest
     ) -> ExtractedToolCallInformation:
-        stripped = (
-            model_output.strip()
-            .removeprefix(self.bot_token)
-            .removeprefix(self.bot_string)
-            .lstrip()
-        )
-        if not stripped or stripped[0] != "[":
+        idx = len(model_output)
+        marker = None
+        for tok in (self.bot_token, self.bot_string):
+            found = model_output.find(tok)
+            if found != -1 and found < idx:
+                idx, marker = found, tok
+        if marker is None:
             return ExtractedToolCallInformation(
                 tools_called=False, tool_calls=[], content=model_output
             )
         try:
-            raw_function_calls = json.loads(stripped)
+            raw_function_calls, _ = json.JSONDecoder().raw_decode(
+                model_output[idx + len(marker) :].lstrip()
+            )
             if not isinstance(raw_function_calls, list):
                 raise Exception(
                     f"Expected dict or list, got {type(raw_function_calls)}"
@@ -87,10 +89,11 @@ class GraniteToolParser(ToolParser):
                 for function_call in raw_function_calls
             ]
 
+            content = model_output[:idx]
             return ExtractedToolCallInformation(
                 tools_called=True,
                 tool_calls=tool_calls,
-                content=None,
+                content=content or None,
             )
 
         except Exception as e:
