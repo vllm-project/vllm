@@ -1007,7 +1007,12 @@ class VisionTransformer(nn.Module):
 
         # positional embeddings
         positions = position_meshgrid(patch_embeds_list).to(self.device)
-        freqs_cis = self.freqs_cis[positions[:, 0], positions[:, 1]]
+        # Index on the real view instead of the complex64 tensor directly,
+        # because some backends (e.g. Ascend NPU aclnnIndex) do not support
+        # advanced indexing on complex tensors.
+        freqs_cis_real = torch.view_as_real(self.freqs_cis)
+        freqs_cis = torch.view_as_complex(
+            freqs_cis_real[positions[:, 0], positions[:, 1]].contiguous())
 
         attention = self.transformer.layers[0].attention.attn
         cu_seqlens, max_seqlen, sequence_lengths = _make_packed_sequence_metadata(
