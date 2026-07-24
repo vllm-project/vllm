@@ -352,7 +352,7 @@ class MoERunner(MoERunnerInterface):
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """Apply transform for routed experts (e.g., latent projection).
 
-        This is called by FusedMoEFactory.forward_native. The original hidden_states
+        This is called by MoERunner.forward_native. The original hidden_states
         is saved separately so shared experts get [S, hidden_size] while
         routed experts get the transformed [S, moe_latent_size].
 
