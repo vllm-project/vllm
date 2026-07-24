@@ -259,3 +259,7 @@ class EngineClient(ABC):
     async def finish_weight_update(self) -> None:
         """Finish the current weight update."""
         raise NotImplementedError
+
+    async def get_weight_version(self) -> int:
+        """Return the latest committed target-policy weight generation."""
+        raise NotImplementedError

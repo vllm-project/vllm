@@ -1093,3 +1093,7 @@ class AsyncLLM(EngineClient):
     async def finish_weight_update(self) -> None:
         """Finish the current weight update."""
         await self.collective_rpc("finish_weight_update")
+
+    async def get_weight_version(self) -> int:
+        """Return the latest committed target-policy weight generation."""
+        return await self.engine_core.get_weight_version_async()

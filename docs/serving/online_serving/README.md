@@ -179,6 +179,7 @@ For further details on Weight Transfer, please refer to [this page](../../traini
 - `/start_weight_update` - Prepares the inference engine for a weight update.
 - `/update_weights` - Update model weights (can alter model behavior)
 - `/finish_weight_update` - Finalizes the weight update
+- `/weight_info` - Get the latest committed weight version
 - `/get_world_size` - Get distributed world size
 
 ### Collective RPC

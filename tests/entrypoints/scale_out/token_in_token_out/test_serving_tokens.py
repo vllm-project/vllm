@@ -82,6 +82,7 @@ def server(request):
     envs = os.environ.copy()
     # See: https://github.com/vllm-project/vllm/pull/33493#issuecomment-3888060787
     envs["VLLM_ROCM_USE_SKINNY_GEMM"] = "0"
+    envs["VLLM_SERVER_DEV_MODE"] = "1"
 
     with RemoteOpenAIServer(MODEL_NAME, args, env_dict=envs) as remote_server:
         yield remote_server
@@ -112,6 +113,17 @@ async def test_generate_endpoint(client):
     resp.raise_for_status()
     data = resp.json()
     assert "choices" in data
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(
+    os.getenv("VLLM_USE_RUST_FRONTEND", "0") == "1",
+    reason="The dev-mode /weight_info route is provided by the Python frontend",
+)
+async def test_weight_info(client):
+    resp = await client.get("/weight_info")
+    resp.raise_for_status()
+    assert resp.json() == {"weight_version": 0}
 
 
 @pytest.mark.asyncio
