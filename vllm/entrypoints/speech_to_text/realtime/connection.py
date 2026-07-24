@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
+import contextlib
 import json
 from collections.abc import AsyncGenerator
 from http import HTTPStatus
@@ -17,6 +18,7 @@ from vllm.entrypoints.openai.engine.protocol import ErrorResponse, UsageInfo
 from vllm.entrypoints.serve.utils.api_utils import sanitize_message
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
+from vllm.utils.mem_constants import MiB_bytes
 
 from .protocol import (
     ErrorEvent,
@@ -46,13 +48,16 @@ class RealtimeConnection:
         self.websocket = websocket
         self.connection_id = f"ws-{uuid4()}"
         self.serving = serving
-        self.audio_queue: asyncio.Queue[np.ndarray | None] = asyncio.Queue()
+        self.audio_queue: asyncio.Queue[np.ndarray | None] = asyncio.Queue(
+            maxsize=envs.VLLM_MAX_REALTIME_AUDIO_QUEUE_SIZE
+        )
         self.generation_task: asyncio.Task | None = None
 
         self._is_connected = False
         self._is_model_validated = False
 
         self._max_audio_filesize_mb = envs.VLLM_MAX_AUDIO_CLIP_FILESIZE_MB
+        self._accumulated_audio_bytes = 0
 
     async def handle_connection(self):
         """Main connection loop."""
@@ -123,17 +128,24 @@ class RealtimeConnection:
                     / 32768.0
                 )
 
-                if len(audio_array) / 1024**2 > self._max_audio_filesize_mb:
+                self._accumulated_audio_bytes += len(audio_bytes)
+                max_bytes = self._max_audio_filesize_mb * MiB_bytes
+                if self._accumulated_audio_bytes > max_bytes:
                     raise VLLMValidationError(
                         "Maximum file size exceeded",
                         parameter="audio_filesize_mb",
-                        value=len(audio_array) / 1024**2,
+                        value=self._accumulated_audio_bytes / MiB_bytes,
                     )
                 if len(audio_array) == 0:
                     raise VLLMValidationError("Can't process empty audio.")
 
-                # Put audio chunk in queue
-                self.audio_queue.put_nowait(audio_array)
+                try:
+                    self.audio_queue.put_nowait(audio_array)
+                except asyncio.QueueFull:
+                    # The chunk was not buffered, so don't count it toward
+                    # the cumulative byte limit.
+                    self._accumulated_audio_bytes -= len(audio_bytes)
+                    await self.send_error("Audio buffer full", "buffer_full")
 
             except Exception as e:
                 logger.error("Failed to decode audio: %s", e)
@@ -154,7 +166,7 @@ class RealtimeConnection:
             commit_event = InputAudioBufferCommit(**event)
             # final signals that the audio is finished
             if commit_event.final:
-                self.audio_queue.put_nowait(None)
+                self._enqueue_end_sentinel()
             else:
                 await self.start_generation()
         else:
@@ -257,13 +269,15 @@ class RealtimeConnection:
             # Send final completion event
             await self.send(TranscriptionDone(text=full_text, usage=usage))
 
-            # Clear queue for next utterance
-            while not self.audio_queue.empty():
-                self.audio_queue.get_nowait()
-
         except Exception as e:
             logger.exception("Error in generation: %s", e)
             await self.send_error(sanitize_message(str(e)), "processing_error")
+        finally:
+            # Clear the queue and reset the byte counter for the next
+            # utterance, even if generation errored or was cancelled.
+            while not self.audio_queue.empty():
+                self.audio_queue.get_nowait()
+            self._accumulated_audio_bytes = 0
 
     async def send(
         self, event: SessionCreated | TranscriptionDelta | TranscriptionDone
@@ -277,10 +291,26 @@ class RealtimeConnection:
         error_event = ErrorEvent(error=message, code=code)
         await self.websocket.send_text(error_event.model_dump_json())
 
+    def _enqueue_end_sentinel(self):
+        """Enqueue the end-of-stream sentinel without blocking.
+
+        The queue is bounded, so put_nowait can raise QueueFull. Drop one
+        buffered chunk to make room so the generator still receives the
+        sentinel and exits instead of hanging.
+        """
+        try:
+            self.audio_queue.put_nowait(None)
+        except asyncio.QueueFull:
+            # Drop one buffered chunk to make room for the sentinel.
+            with contextlib.suppress(asyncio.QueueEmpty):
+                self.audio_queue.get_nowait()
+            with contextlib.suppress(asyncio.QueueFull):
+                self.audio_queue.put_nowait(None)
+
     async def cleanup(self):
         """Cleanup resources."""
         # Signal audio stream to stop
-        self.audio_queue.put_nowait(None)
+        self._enqueue_end_sentinel()
 
         # Cancel generation task if running
         if self.generation_task and not self.generation_task.done():
