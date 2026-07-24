@@ -14,6 +14,21 @@ from vllm.kernels.helion_generated import dispatcher
 from vllm.kernels.helion_generated.manifests import MANIFESTS
 
 
+def test_generator_registry_covers_source_kernels():
+    pytest.importorskip("helion")
+    from scripts.generate_helion_kernels import KERNEL_REGISTRY
+
+    assert set(KERNEL_REGISTRY) == {
+        "dynamic_per_token_scaled_fp8_quant",
+        "fused_qk_norm_rope",
+        "per_token_group_fp8_quant",
+        "rms_norm_dynamic_per_token_quant",
+        "rms_norm_per_block_quant",
+        "silu_and_mul_per_block_quant",
+        "silu_mul_fp8",
+    }
+
+
 def test_exact_matching_and_token_bucketing():
     dispatcher._select_module.cache_clear()
     assert dispatcher._select_module("nvidia_h100", 2048, 128, 1).endswith("_t1")

@@ -8,8 +8,12 @@ from __future__ import annotations
 import argparse
 import ast
 import hashlib
+import importlib
 import importlib.metadata
+import inspect
 import json
+from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from pprint import pformat
 from typing import Any
@@ -19,13 +23,9 @@ import torch
 
 from vllm.kernels.helion.case_key import CaseKey
 from vllm.kernels.helion.config_manager import ConfigManager
-from vllm.kernels.helion.ops.per_token_group_fp8_quant import (
-    per_token_group_fp8_quant,
-)
 
 ROOT = Path(__file__).resolve().parents[1]
 OUTPUT_ROOT = ROOT / "vllm/kernels/helion_generated/kernels"
-KERNEL_NAME = "per_token_group_fp8_quant"
 PLATFORM_DEVICE_NAMES = {
     "nvidia_b200": "nvidia_b200",
     "nvidia_h100": "nvidia_h100",
@@ -33,6 +33,190 @@ PLATFORM_DEVICE_NAMES = {
     "nvidia_h100_nvl": "nvidia_h100",
     "nvidia_h100_pcie": "nvidia_h100",
     "nvidia_h100_sxm5": "nvidia_h100",
+}
+
+
+@dataclass(frozen=True)
+class KernelSpec:
+    name: str
+    case_fields: tuple[tuple[str, str], ...]
+    input_factory: Callable[[CaseKey], tuple[Any, ...]]
+
+
+def _fp8_empty(*shape: int) -> torch.Tensor:
+    return torch.empty(shape, device="cuda", dtype=torch.float8_e4m3fn)
+
+
+def _dynamic_quant_inputs(case: CaseKey) -> tuple[Any, ...]:
+    shape = (case["num_tokens"], case["hidden_size"])
+    input = torch.empty(shape, device="cuda", dtype=torch.bfloat16)
+    return (
+        _fp8_empty(*shape),
+        input,
+        torch.empty((shape[0], 1), device="cuda", dtype=torch.float32),
+        torch.ones((), device="cuda", dtype=torch.float32),
+    )
+
+
+def _fused_qk_norm_rope_inputs(case: CaseKey) -> tuple[Any, ...]:
+    num_tokens = case["num_tokens"]
+    q_heads = case["q_heads"]
+    kv_heads = case["kv_heads"]
+    head_dim = 128
+    total_dim = (q_heads + 2 * kv_heads) * head_dim
+    dtype = torch.bfloat16
+    return (
+        torch.empty((num_tokens, total_dim), device="cuda", dtype=dtype),
+        q_heads,
+        kv_heads,
+        kv_heads,
+        head_dim,
+        1e-6,
+        torch.empty(head_dim, device="cuda", dtype=dtype),
+        torch.empty(head_dim, device="cuda", dtype=dtype),
+        torch.empty((40960, head_dim), device="cuda", dtype=dtype),
+        True,
+        torch.arange(num_tokens, device="cuda", dtype=torch.int64),
+    )
+
+
+def _per_token_group_fp8_quant_inputs(case: CaseKey) -> tuple[Any, ...]:
+    num_tokens = case["num_tokens"]
+    hidden_size = case["hidden_size"]
+    group_size = case["group_size"]
+    shape = (num_tokens, hidden_size)
+    input = torch.empty(shape, device="cuda", dtype=torch.bfloat16)
+    return (
+        input,
+        _fp8_empty(*shape),
+        torch.empty(
+            (num_tokens, hidden_size // group_size),
+            device="cuda",
+            dtype=torch.float32,
+        ),
+        group_size,
+        1e-10,
+        -448.0,
+        448.0,
+        False,
+        False,
+        False,
+    )
+
+
+def _rms_norm_dynamic_quant_inputs(case: CaseKey) -> tuple[Any, ...]:
+    shape = (case["num_tokens"], case["hidden_size"])
+    input = torch.empty(shape, device="cuda", dtype=torch.bfloat16)
+    return (
+        _fp8_empty(*shape),
+        input,
+        torch.empty(shape[1], device="cuda", dtype=input.dtype),
+        torch.empty((shape[0], 1), device="cuda", dtype=torch.float32),
+        1e-6,
+        torch.ones((), device="cuda", dtype=torch.float32),
+        torch.empty_like(input),
+    )
+
+
+def _rms_norm_per_block_quant_inputs(case: CaseKey) -> tuple[Any, ...]:
+    num_tokens = case["num_tokens"]
+    hidden_size = case["hidden_size"]
+    group_size = case["group_size"]
+    shape = (num_tokens, hidden_size)
+    input = torch.empty(shape, device="cuda", dtype=torch.bfloat16)
+    return (
+        _fp8_empty(*shape),
+        input,
+        torch.empty(hidden_size, device="cuda", dtype=input.dtype),
+        torch.empty(
+            (num_tokens, hidden_size // group_size),
+            device="cuda",
+            dtype=torch.float32,
+        ),
+        1e-6,
+        torch.ones((), device="cuda", dtype=torch.float32),
+        torch.empty_like(input),
+        group_size,
+        False,
+    )
+
+
+def _silu_and_mul_per_block_quant_inputs(case: CaseKey) -> tuple[Any, ...]:
+    num_tokens = case["num_tokens"]
+    intermediate_size = case["intermediate_size"]
+    group_size = case["group_size"]
+    return (
+        _fp8_empty(num_tokens, intermediate_size),
+        torch.empty(
+            (num_tokens, 2 * intermediate_size),
+            device="cuda",
+            dtype=torch.bfloat16,
+        ),
+        torch.empty(
+            (num_tokens, intermediate_size // group_size),
+            device="cuda",
+            dtype=torch.float32,
+        ),
+        group_size,
+        torch.ones((), device="cuda", dtype=torch.float32),
+        False,
+    )
+
+
+def _silu_mul_fp8_inputs(case: CaseKey) -> tuple[Any, ...]:
+    return (
+        torch.empty(
+            (case["numtokens"], 2 * case["intermediate"]),
+            device="cuda",
+            dtype=torch.bfloat16,
+        ),
+        torch.ones(1, device="cuda", dtype=torch.float32),
+    )
+
+
+KERNEL_REGISTRY = {
+    spec.name: spec
+    for spec in (
+        KernelSpec(
+            "dynamic_per_token_scaled_fp8_quant",
+            (("hidden_size", "h"), ("num_tokens", "t")),
+            _dynamic_quant_inputs,
+        ),
+        KernelSpec(
+            "fused_qk_norm_rope",
+            (("q_heads", "qh"), ("kv_heads", "kvh"), ("num_tokens", "t")),
+            _fused_qk_norm_rope_inputs,
+        ),
+        KernelSpec(
+            "per_token_group_fp8_quant",
+            (("hidden_size", "h"), ("group_size", "g"), ("num_tokens", "t")),
+            _per_token_group_fp8_quant_inputs,
+        ),
+        KernelSpec(
+            "rms_norm_dynamic_per_token_quant",
+            (("hidden_size", "h"), ("num_tokens", "t")),
+            _rms_norm_dynamic_quant_inputs,
+        ),
+        KernelSpec(
+            "rms_norm_per_block_quant",
+            (("hidden_size", "h"), ("group_size", "g"), ("num_tokens", "t")),
+            _rms_norm_per_block_quant_inputs,
+        ),
+        KernelSpec(
+            "silu_and_mul_per_block_quant",
+            (
+                ("intermediate_size", "i"),
+                ("group_size", "g"),
+                ("num_tokens", "t"),
+            ),
+            _silu_and_mul_per_block_quant_inputs,
+        ),
+        KernelSpec(
+            "silu_mul_fp8",
+            (("intermediate", "i"), ("numtokens", "t")),
+            _silu_mul_fp8_inputs,
+        ),
+    )
 }
 
 _LAUNCHER = """def _get_num_sm(device: torch.device) -> int:
@@ -60,6 +244,24 @@ def _default_launcher(
     if ptx_options is not None:
         run_kwargs["ptx_options"] = ptx_options
     return triton_kernel.run(*args, **run_kwargs)
+"""
+
+_SOURCE_HELPERS = """def _get_fp8_dtype() -> torch.dtype:
+    return torch.float8_e4m3fn
+
+
+def _get_fp8_min_max() -> tuple[float, float]:
+    info = torch.finfo(_get_fp8_dtype())
+    return info.min, info.max
+
+
+def _get_int8_min_max() -> tuple[int, int]:
+    info = torch.iinfo(torch.int8)
+    return info.min, info.max
+
+
+def _get_int8_min_scaling_factor() -> float:
+    return torch.finfo(torch.float32).eps
 """
 
 
@@ -92,7 +294,13 @@ def _replace_binary_helper(code: str, helper: str, replacement: str) -> str:
     )
 
 
-def _postprocess(code: str, token_bucket: int) -> str:
+def _postprocess(
+    code: str,
+    spec: KernelSpec,
+    case: CaseKey,
+    expected_args: list[str],
+) -> str:
+    uses_source_helpers = "_source_module." in code
     code = (
         code.replace("from torch._inductor.runtime import triton_helpers\n", "")
         .replace(
@@ -104,16 +312,28 @@ def _postprocess(code: str, token_bucket: int) -> str:
         )
         .replace("import helion\n", "")
     )
+    code = re.sub(
+        rf"^import vllm\.kernels\.helion\.ops\.{spec.name} "
+        r"as _source_module\n",
+        "",
+        code,
+        flags=re.MULTILINE,
+    )
     code = code.replace("tl_math.", "tl.").replace("libdevice.", "tl.")
     code = code.replace("helion.runtime.get_num_sm", "_get_num_sm")
+    code = code.replace("_source_module.get_fp8_dtype", "_get_fp8_dtype")
+    code = code.replace("_source_module.get_fp8_min_max", "_get_fp8_min_max")
+    code = code.replace("_source_module.get_int8_min_max", "_get_int8_min_max")
+    code = code.replace(
+        "_source_module.get_int8_min_scaling_factor",
+        "_get_int8_min_scaling_factor",
+    )
     code = _replace_binary_helper(code, "triton_helpers.maximum", "tl.maximum")
     code = _replace_binary_helper(code, "triton_helpers.minimum", "tl.minimum")
-    code = code.replace(
-        "_helion_per_token_group_fp8_quant", "_triton_per_token_group_fp8_quant"
-    )
-    code = code.replace("def per_token_group_fp8_quant(", "def call(")
+    code = code.replace(f"_helion_{spec.name}", f"_triton_{spec.name}")
+    code = code.replace(f"def {spec.name}(", "def call(")
     code = re.sub(r"^\s*# src\[[^\n]*\n", "", code, flags=re.MULTILINE)
-    if token_bucket == 1:
+    if spec.name == "per_token_group_fp8_quant" and case["num_tokens"] == 1:
         code = re.sub(
             r"(\* )1(,\),)",
             r"\1num_tokens\2",
@@ -121,7 +341,10 @@ def _postprocess(code: str, token_bucket: int) -> str:
             count=1,
         )
     import_end = code.index("\n\n", code.index("import triton.language as tl"))
-    code = code[: import_end + 2] + _LAUNCHER + "\n" + code[import_end + 2 :]
+    support_code = _LAUNCHER
+    if uses_source_helpers:
+        support_code += "\n\n" + _SOURCE_HELPERS
+    code = code[: import_end + 2] + support_code + "\n" + code[import_end + 2 :]
     code = (
         "# SPDX-License-Identifier: Apache-2.0\n"
         "# SPDX-FileCopyrightText: Copyright contributors to the vLLM project\n"
@@ -130,11 +353,11 @@ def _postprocess(code: str, token_bucket: int) -> str:
         "# mypy: ignore-errors\n"
         "# fmt: off\n" + code
     )
-    _validate_artifact(code)
+    _validate_artifact(code, expected_args)
     return code.rstrip() + "\n"
 
 
-def _validate_artifact(code: str) -> None:
+def _validate_artifact(code: str, expected_args: list[str]) -> None:
     tree = ast.parse(code)
     allowed_roots = {"__future__", "torch", "triton"}
     for node in ast.walk(tree):
@@ -151,58 +374,45 @@ def _validate_artifact(code: str) -> None:
         for node in tree.body
         if isinstance(node, ast.FunctionDef) and node.name == "call"
     )
-    if [arg.arg for arg in call.args.args] != [
-        "input",
-        "output_q",
-        "output_s",
-        "group_size",
-        "eps",
-        "fp8_min",
-        "fp8_max",
-        "scale_ue8m0",
-        "dummy_is_scale_transposed",
-        "dummy_is_tma_aligned",
-    ]:
+    if [arg.arg for arg in call.args.args] != expected_args:
         raise ValueError("generated artifact has an unstable call(...) contract")
+    if "_source_module" in code:
+        raise ValueError("generated artifact retains a source-module dependency")
 
 
-def _module_name(case: CaseKey) -> str:
-    return (
-        f"per_token_group_fp8_quant_h{case['hidden_size']}"
-        f"_g{case['group_size']}_t{case['num_tokens']}"
-    )
+def _case_tuple(spec: KernelSpec, case: CaseKey) -> tuple[Any, ...]:
+    return tuple(case[field] for field, _ in spec.case_fields)
+
+
+def _module_name(spec: KernelSpec, case: CaseKey) -> str:
+    suffix = "_".join(f"{prefix}{case[field]}" for field, prefix in spec.case_fields)
+    return f"{spec.name}_{suffix}"
 
 
 def _manifest(
+    spec: KernelSpec,
     platform: str,
     cases: list[CaseKey],
     configs: dict[CaseKey, Any],
 ) -> str:
-    source_path = ROOT / "vllm/kernels/helion/ops/per_token_group_fp8_quant.py"
-    config_path = (
-        ROOT
-        / "vllm/kernels/helion/configs/per_token_group_fp8_quant"
-        / f"{platform}.json"
-    )
+    source_path = ROOT / f"vllm/kernels/helion/ops/{spec.name}.py"
+    config_path = ROOT / f"vllm/kernels/helion/configs/{spec.name}" / f"{platform}.json"
     kernels = {
-        (case["hidden_size"], case["group_size"], case["num_tokens"]): (
-            f"vllm.kernels.helion_generated.kernels.{KERNEL_NAME}."
-            f"{platform}.{_module_name(case)}"
+        _case_tuple(spec, case): (
+            f"vllm.kernels.helion_generated.kernels.{spec.name}."
+            f"{platform}.{_module_name(spec, case)}"
         )
         for case in cases
     }
     serialized_configs = {
-        (case["hidden_size"], case["group_size"], case["num_tokens"]): json.loads(
-            configs[case].to_json()
-        )
-        for case in cases
+        _case_tuple(spec, case): json.loads(configs[case].to_json()) for case in cases
     }
     provenance = {
         "config_path": str(config_path.relative_to(ROOT)),
         "config_sha256": _sha256(config_path),
         "generator": "scripts/generate_helion_kernels.py",
         "helion_version": importlib.metadata.version("helion"),
-        "kernel": KERNEL_NAME,
+        "kernel": spec.name,
         "platform": platform,
         "source_path": str(source_path.relative_to(ROOT)),
         "source_sha256": _sha256(source_path),
@@ -238,41 +448,58 @@ def _write_or_check(path: Path, content: str, check: bool, errors: list[str]) ->
     path.write_text(content)
 
 
-def generate(platform: str, check: bool) -> None:
-    _require_matching_hardware(platform)
-    configs = ConfigManager().get_platform_configs(KERNEL_NAME, platform)
-    inputs = per_token_group_fp8_quant.get_inputs()
-    cases = sorted(
-        (case for case in configs if case in inputs),
-        key=lambda case: (
-            case["hidden_size"],
-            case["group_size"],
-            case["num_tokens"],
-        ),
-    )
-    if len(cases) != len(configs) or len(cases) != len(inputs):
-        raise RuntimeError(
-            f"Config/input mismatch: {len(configs)} configs, {len(inputs)} inputs, "
-            f"{len(cases)} common cases"
-        )
+def _load_op(spec: KernelSpec) -> Any:
+    module = importlib.import_module(f"vllm.kernels.helion.ops.{spec.name}")
+    return getattr(module, spec.name)
 
-    kernel_dir = OUTPUT_ROOT / KERNEL_NAME
+
+def generate(kernel_name: str, platform: str, check: bool) -> None:
+    _require_matching_hardware(platform)
+    spec = KERNEL_REGISTRY[kernel_name]
+    op = _load_op(spec)
+    configs = ConfigManager().get_platform_configs(spec.name, platform)
+    if not configs:
+        raise RuntimeError(f"No {platform} configs found for {spec.name}")
+    inputs = op.get_inputs()
+    case_fields = {field for field, _ in spec.case_fields}
+    concrete_configs = {
+        case: config for case, config in configs.items() if not case.is_default()
+    }
+    invalid_cases = [
+        case for case in concrete_configs if set(case.keys()) != case_fields
+    ]
+    if invalid_cases:
+        raise RuntimeError(
+            f"Unexpected config keys for {spec.name}: "
+            f"{', '.join(map(str, invalid_cases))}"
+        )
+    cases = sorted(
+        concrete_configs,
+        key=lambda case: _case_tuple(spec, case),
+    )
+
+    kernel_dir = OUTPUT_ROOT / spec.name
     output_dir = kernel_dir / platform
     errors: list[str] = []
     expected = {"__init__.py", "manifest.py"}
-    configured = per_token_group_fp8_quant.get_configured_op()._decorated_kernel
+    configured_op = op.get_configured_op()
+    configured = configured_op._decorated_kernel
+    expected_args = list(inspect.signature(configured_op.raw_kernel_func).parameters)
     for case in cases:
-        filename = f"{_module_name(case)}.py"
+        filename = f"{_module_name(spec, case)}.py"
         expected.add(filename)
-        code = configured.bind(inputs[case]).to_code(configs[case])
-        content = _postprocess(code, case["num_tokens"])
+        args = inputs.get(case)
+        if args is None:
+            args = spec.input_factory(case)
+        code = configured.bind(args).to_code(concrete_configs[case])
+        content = _postprocess(code, spec, case, expected_args)
         _write_or_check(output_dir / filename, content, check, errors)
 
     _write_or_check(output_dir / "__init__.py", _init_file(), check, errors)
     _write_or_check(kernel_dir / "__init__.py", _init_file(), check, errors)
     _write_or_check(
         output_dir / "manifest.py",
-        _manifest(platform, cases, configs),
+        _manifest(spec, platform, cases, concrete_configs),
         check,
         errors,
     )
@@ -294,8 +521,8 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--kernel",
-        choices=[KERNEL_NAME],
-        default=KERNEL_NAME,
+        choices=sorted(KERNEL_REGISTRY),
+        default="per_token_group_fp8_quant",
     )
     parser.add_argument(
         "--platform",
@@ -312,7 +539,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    generate(args.platform, args.check)
+    generate(args.kernel, args.platform, args.check)
 
 
 if __name__ == "__main__":
