@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import functools
+import os
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Literal, TypeAlias
@@ -181,12 +182,18 @@ class MambaStateDtypeCalculator:
         model_dtype: ModelDType | torch.dtype,
         mamba_cache_dtype: MambaDType,
         mamba_ssm_cache_dtype: MambaDType,
+        vllm_config=None,
     ) -> tuple[torch.dtype, ...]:
         """GDN ReplaySSM state dtypes for the SPECULATIVE-decode kernel.
 
-        The ``ssm`` checkpoint is forced to ``float32``; the ``d``/``k`` ring
-        caches use fp16 for bf16 activations (same rule as the non-spec path).
-        Call only when use_replayssm_spec is on.
+        The ``ssm`` checkpoint is forced to ``float32`` unless an explicit
+        ``mamba_ssm_cache_dtype`` overrides it (``auto`` keeps the upstream
+        fp32 default). The ``d``/``k`` ring caches use fp16 for bf16
+        activations (same rule as the non-spec path) — except on the
+        flashinfer_ucache spec backend, whose rings must match the CuTeDSL
+        kernel's compiled IO dtype (bf16 default / fp16 with
+        GDN_UCACHE_IO_DTYPE=fp16); pass ``vllm_config`` so the backend can be
+        resolved. Call only when use_replayssm_spec is on.
         """
         conv_dtype, ssm_dtype = cls._mamba_state_dtype(
             model_dtype, mamba_cache_dtype, mamba_ssm_cache_dtype
@@ -195,11 +202,63 @@ class MambaStateDtypeCalculator:
         cache_dtype = (
             torch.float16 if activation_dtype == torch.bfloat16 else activation_dtype
         )
+        # Explicit --mamba-ssm-cache-dtype overrides the ckpt dtype; "auto"
+        # keeps the upstream force-fp32 default (_mamba_state_dtype would
+        # map "auto" to the model dtype, NOT fp32). On the flashinfer_ucache
+        # backend "auto" instead resolves to the kernel's state dtype
+        # (default fp16) below.
+        ckpt_dtype = torch.float32 if mamba_ssm_cache_dtype == "auto" else ssm_dtype
+        # Backend-aware ring default: the ucache kernel reads the u/k rings at
+        # its compiled IO dtype, so allocation must match it (the fp16-ring
+        # upstream rule only applies to the dtype-agnostic Triton kernel).
+        default_ring_dtype = cache_dtype
+        if vllm_config is not None:
+            try:
+                backend = resolve_gdn_spec_backend(vllm_config)
+            except Exception:
+                backend = "triton"
+            if backend == "flashinfer_ucache":
+                # ucache defaults: fp16 SSM-state checkpoint + fp16 u/k rings
+                # with bf16 input IO. The adapter setdefaults the kernel
+                # module's GDN_UCACHE_STATE/RING_DTYPE envs to the same
+                # values, so pool allocation and the compiled kernel dtypes
+                # agree with no flags. Set the envs to bf16 for bf16 mode.
+                _st_env = os.environ.get(
+                    "GDN_UCACHE_STATE_DTYPE", "fp16"
+                ).lower()
+                if mamba_ssm_cache_dtype == "auto":
+                    ckpt_dtype = (
+                        torch.bfloat16
+                        if _st_env in ("bf16", "bfloat16")
+                        else torch.float16
+                    )
+                _ring_env_kernel = os.environ.get(
+                    "GDN_UCACHE_RING_DTYPE", "fp16"
+                ).lower()
+                default_ring_dtype = (
+                    torch.bfloat16
+                    if _ring_env_kernel in ("bf16", "bfloat16")
+                    else torch.float16
+                )
+        # Ring-dtype override (default: see above):
+        #   VLLM_REPLAYSSM_RING_DTYPE=fp16 -> fp16 u/k rings (ucache whole-fp16
+        #     mode: pair with GDN_UCACHE_IO_DTYPE=fp16 so the cute kernel
+        #     compiles fp16 IO; the adapter casts activations at the call).
+        #   VLLM_REPLAYSSM_RING_DTYPE=bf16|fp32 -> bf16 / fp32 u/k rings.
+        _ring_env = os.environ.get("VLLM_REPLAYSSM_RING_DTYPE", "").lower()
+        if _ring_env in ("fp16", "float16", "half"):
+            ring_dtype = torch.float16
+        elif _ring_env in ("bf16", "bfloat16"):
+            ring_dtype = torch.bfloat16
+        elif _ring_env in ("fp32", "float32"):
+            ring_dtype = torch.float32
+        else:
+            ring_dtype = default_ring_dtype
         return (
             conv_dtype,
-            torch.float32,  # fp32 checkpoint
-            cache_dtype,  # d_cache
-            cache_dtype,  # k_cache
+            ckpt_dtype,
+            ring_dtype,  # d_cache
+            ring_dtype,  # k_cache
             torch.float32,  # g_cache
         )
 
@@ -467,6 +526,7 @@ class MambaStateShapeCalculator:
         conv_kernel_size: int,
         replayssm_buffer_len: int,
         num_spec: int = 0,
+        ring_slots: int | None = None,
     ) -> tuple[tuple[int, ...], ...]:
         """GDN ReplaySSM state shapes for the SPECULATIVE-decode kernel.
 
@@ -474,6 +534,11 @@ class MambaStateShapeCalculator:
         history window: a power-of-two buffer ``next_pow2(replayssm_buffer_len + 1 +
         num_spec)``. Call only when use_replayssm_spec is on. The block-keyed
         cursors live in the GDN metadata builder, not the page.
+
+        ``ring_slots`` overrides the physical ring depth for backends with a
+        fixed linear (non-circular) ring — e.g. the flashinfer_ucache kernel
+        uses exactly W_RING=16 slots (page[2] becomes its u_cache, page[3] its
+        k_cache, page[4] its g_cache; dtypes unchanged).
         """
         conv_state_shape, temporal_state_shape = cls.gated_delta_net_state_shape(
             tp_world_size,
@@ -484,7 +549,11 @@ class MambaStateShapeCalculator:
             conv_kernel_size,
             num_spec,
         )
-        cache_buf_len = 1 << (replayssm_buffer_len + num_spec).bit_length()
+        cache_buf_len = (
+            ring_slots
+            if ring_slots is not None
+            else 1 << (replayssm_buffer_len + num_spec).bit_length()
+        )
         local_v_heads = divide(num_v_heads, tp_world_size)
         local_k_heads = divide(num_k_heads, tp_world_size)
         d_cache_shape = (local_v_heads, cache_buf_len, head_v_dim)
@@ -620,3 +689,122 @@ class MambaStateCopyFuncCalculator:
     @classmethod
     def kda_state_copy_func(cls):
         return (get_conv_copy_spec, get_temporal_copy_spec)
+
+
+def _ucache_kernel_available() -> tuple[bool, str]:
+    """Init-time check that the ucache CuTeDSL kernel module is loadable.
+
+    Mirrors load_ucache_kernel_module's resolution order without importing
+    (and JIT-compiling) the module: an explicit VLLM_GDN_UCACHE_MODULE path
+    must exist, else flashinfer.gdn_kernels must provide the module.
+    """
+    path = os.environ.get("VLLM_GDN_UCACHE_MODULE")
+    if path:
+        return (
+            os.path.isfile(path),
+            f"VLLM_GDN_UCACHE_MODULE points to a missing file: {path!r}",
+        )
+    import importlib.util
+
+    try:
+        found = (
+            importlib.util.find_spec(
+                "flashinfer.gdn_kernels.gdn_decode_bf16_wy_ucache_flush"
+            )
+            is not None
+        )
+    except ModuleNotFoundError:
+        found = False
+    return (
+        found,
+        "ucache CuTeDSL kernel module not found: set VLLM_GDN_UCACHE_MODULE="
+        "/abs/path/to/gdn_decode_bf16_wy_ucache_flush.py or install a "
+        "FlashInfer build that provides "
+        "flashinfer.gdn_kernels.gdn_decode_bf16_wy_ucache_flush",
+    )
+
+
+def resolve_gdn_spec_backend(vllm_config) -> str:
+    """Resolve the GDN cached-SPEC decode backend.
+
+    Returns "triton" (default, PR #47576 gdn_replayssm_spec_decode) or
+    "flashinfer_ucache" (CuTeDSL gated_delta_rule_mtp_ucache_flush). Selected
+    via additional_config["gdn_spec_backend"]; constraint violations raise at
+    init (fail loudly rather than silently falling back to triton).
+    """
+    additional_config = vllm_config.additional_config
+    requested = (
+        str(additional_config.get("gdn_spec_backend", "triton")).strip().lower()
+        if isinstance(additional_config, dict)
+        else "triton"
+    )
+    if requested in ("triton", "auto", ""):
+        return "triton"
+    if requested != "flashinfer_ucache":
+        raise ValueError(f"unknown gdn_spec_backend={requested!r}")
+
+    from vllm.model_executor.layers.fla.ops.gdn_ucache_spec import UCACHE_W_RING
+    from vllm.platforms import current_platform
+
+    cache_config = vllm_config.cache_config
+    spec_config = vllm_config.speculative_config
+    hf_config = vllm_config.model_config.hf_text_config
+    max_spec_len = 1 + (
+        spec_config.num_speculative_tokens if spec_config is not None else 0
+    )
+    ssm_dtype = get_kv_cache_torch_dtype(
+        cache_config.mamba_ssm_cache_dtype, vllm_config.model_config.dtype
+    )
+    checks = [
+        (cache_config.use_replayssm_spec, "requires --use-replayssm-spec"),
+        (
+            not cache_config.use_replayssm,
+            "incompatible with non-spec --use-replayssm (its Triton-format "
+            "ring shares the same page tuple)",
+        ),
+        (
+            cache_config.replayssm_buffer_len == UCACHE_W_RING,
+            f"requires --replayssm-buffer-len {UCACHE_W_RING} (kernel W_RING)",
+        ),
+        (
+            max_spec_len in (4, 8),
+            f"verify window T={max_spec_len} unsupported (native T in {{4,8}})",
+        ),
+        (
+            getattr(hf_config, "linear_key_head_dim", None) == 128
+            and getattr(hf_config, "linear_value_head_dim", None) == 128,
+            "requires linear key/value head dims == 128",
+        ),
+        (
+            cache_config.mamba_ssm_cache_dtype == "auto"
+            or ssm_dtype in (torch.bfloat16, torch.float16),
+            "requires --mamba-ssm-cache-dtype auto (resolves to the kernel "
+            "state dtype, default fp16), bfloat16, or float16; an explicit "
+            "dtype must match the kernel module's GDN_UCACHE_STATE_DTYPE "
+            "(its wrapper asserts the pool dtype on first call)",
+        ),
+        _ucache_kernel_available(),
+        (
+            current_platform.is_cuda()
+            and current_platform.get_device_capability().major >= 9,
+            "requires SM90+",
+        ),
+    ]
+    for ok, msg in checks:
+        if not ok:
+            raise ValueError(f"gdn_spec_backend=flashinfer_ucache: {msg}")
+    return "flashinfer_ucache"
+
+
+def gdn_spec_ucache_strided(vllm_config) -> bool:
+    """Whether the ucache kernel uses the zero-copy strided q/k/v path.
+
+    Default True. Set additional_config["gdn_spec_ucache_strided"]=false for
+    enforce-eager debugging: the strided JIT cache key includes (B, pool), so
+    arbitrary eager batch sizes would compile per size; the non-strided path
+    is batch-dynamic (one cubin) at the cost of q/k/v .contiguous() copies.
+    """
+    additional_config = vllm_config.additional_config
+    if isinstance(additional_config, dict):
+        return bool(additional_config.get("gdn_spec_ucache_strided", True))
+    return True

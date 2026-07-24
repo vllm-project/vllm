@@ -753,7 +753,23 @@ class Qwen3_5ForConditionalGenerationConfig(VerifyAndUpdateConfig):
         hf_text_config = vllm_config.model_config.hf_text_config
         mamba_ssm_dtype = getattr(hf_text_config, "mamba_ssm_dtype", None)
         if cache_config.mamba_ssm_cache_dtype == "auto":
-            if mamba_ssm_dtype is not None:
+            # flashinfer_ucache GDN spec backend: 'auto' resolves to the
+            # CuTeDSL kernel's state dtype (fp16 unless
+            # GDN_UCACHE_STATE_DTYPE=bf16) rather than the HF-config value —
+            # the ucache kernel does not read an fp32 checkpoint.
+            import os
+
+            _ac = vllm_config.additional_config
+            if (
+                isinstance(_ac, dict)
+                and str(_ac.get("gdn_spec_backend", "")).strip().lower()
+                == "flashinfer_ucache"
+            ):
+                _st = os.environ.get("GDN_UCACHE_STATE_DTYPE", "fp16").lower()
+                cache_config.mamba_ssm_cache_dtype = (
+                    "bfloat16" if _st in ("bf16", "bfloat16") else "float16"
+                )
+            elif mamba_ssm_dtype is not None:
                 cache_config.mamba_ssm_cache_dtype = mamba_ssm_dtype
         elif (
             mamba_ssm_dtype is not None

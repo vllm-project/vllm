@@ -42,7 +42,9 @@ from vllm.model_executor.layers.mamba.gdn.base import GatedDeltaNetAttention
 from vllm.model_executor.layers.mamba.mamba_mixer2 import mamba_v2_sharded_weight_loader
 from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateShapeCalculator,
+    gdn_spec_ucache_strided,
     is_conv_state_dim_first,
+    resolve_gdn_spec_backend,
 )
 from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
     causal_conv1d_fn,
@@ -432,6 +434,10 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 self.conv_kernel_size,
                 self.cache_config.replayssm_buffer_len,
                 self.num_spec,
+                # ucache kernel: fixed 16-slot linear ring (u/k/g), no pow2.
+                ring_slots=16
+                if self.gdn_spec_backend == "flashinfer_ucache"
+                else None,
             )
         elif self.cache_config.use_replayssm:
             return MambaStateShapeCalculator.gated_delta_net_replayssm_state_shape(
@@ -590,6 +596,30 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         # path decodes through the circular cached kernel.
         self.use_cache_spec_kernel = self.cache_config.use_replayssm_spec
         self.max_spec_len = 1 + self.num_spec
+        # Cached-SPEC kernel backend: "triton" (gdn_replayssm_spec_decode) or
+        # "flashinfer_ucache" (CuTeDSL fused verify+flush; 16-slot u/k/g ring,
+        # bf16 checkpoint, hist_len cursors owned by the metadata builder).
+        vllm_config_for_backend = get_current_vllm_config()
+        self.gdn_spec_backend = (
+            resolve_gdn_spec_backend(vllm_config_for_backend)
+            if self.use_cache_spec_kernel
+            else "triton"
+        )
+        self.gdn_spec_ucache_strided = gdn_spec_ucache_strided(
+            vllm_config_for_backend
+        )
+        # Pad eager (mixed-batch ramp) calls to one fixed request-batch size:
+        # the strided-mode JIT key includes B, so unpadded ramps compile a
+        # fresh cubin per batch size seen (~60s each, measured).
+        self.gdn_spec_ucache_pad_b = (
+            vllm_config_for_backend.scheduler_config.max_num_seqs
+        )
+        if self.gdn_spec_backend != "triton":
+            logger.info_once(
+                "GDN cached-SPEC decode backend: %s (strided_qkv=%s)",
+                self.gdn_spec_backend,
+                self.gdn_spec_ucache_strided,
+            )
 
         compilation_config = get_current_vllm_config().compilation_config
         if prefix in compilation_config.static_forward_context:
@@ -1508,7 +1538,47 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         # 2. Recurrent attention
 
         # 2.1: Process the multi-query part
-        if spec_sequence_masks is not None and self.use_cache_spec_kernel:
+        if (
+            spec_sequence_masks is not None
+            and self.use_cache_spec_kernel
+            and self.gdn_spec_backend == "flashinfer_ucache"
+        ):
+            # CuTeDSL fused verify+flush kernel: single launch per layer-step,
+            # device-side per-row flush routing. Page tuple: [2]=u_cache,
+            # [3]=k_cache, [4]=g_cache (16-slot linear ring); bf16 checkpoint
+            # folded in-place on flush. hist_len cursors are committed eagerly
+            # by the metadata builder and read-only here.
+            from vllm.model_executor.layers.fla.ops.gdn_ucache_spec import (
+                gdn_ucache_spec_verify,
+            )
+
+            assert mixed_qkv_spec is not None
+            assert attn_metadata.spec_hist_len_d is not None
+            assert attn_metadata.spec_state_indices_col0_d is not None
+            n = attn_metadata.num_spec_decodes
+            core_attn_out_spec = gdn_ucache_spec_verify(
+                mixed_qkv_spec=mixed_qkv_spec,
+                a=a,
+                b=b,
+                A_log=self.A_log,
+                dt_bias=self.dt_bias,
+                ssm_state=ssm_state,
+                u_cache=self_kv_cache[2],
+                k_cache=self_kv_cache[3],
+                g_cache=self_kv_cache[4],
+                hist_len=attn_metadata.spec_hist_len_d[:n],
+                state_indices=attn_metadata.spec_state_indices_col0_d[:n],
+                num_spec_decodes=n,
+                max_spec_len=self.max_spec_len,
+                num_k_heads=self.num_k_heads // self.tp_size,
+                head_k_dim=self.head_k_dim,
+                head_v_dim=self.head_v_dim,
+                scale=self.head_k_dim**-0.5,
+                strided_qkv=self.gdn_spec_ucache_strided,
+                pad_to=self.gdn_spec_ucache_pad_b,
+            ).unsqueeze(0)
+            last_recurrent_state = None
+        elif spec_sequence_masks is not None and self.use_cache_spec_kernel:
             # Cached circular spec verify: reuse the post-conv packed
             # ``mixed_qkv_spec`` (q|k|v) + raw ``a``/``b`` (read per-request via
             # spec_query_start_loc, same as the baseline kernel). The d/k/g ring

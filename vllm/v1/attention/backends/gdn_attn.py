@@ -77,6 +77,12 @@ class GDNAttentionMetadata:
     spec_cache_base_d: torch.Tensor | None = None
     spec_is_flush_d: torch.Tensor | None = None
 
+    # flashinfer_ucache spec backend: request-keyed ring fill levels (gathered
+    # each build from the block-keyed master) + contiguous col-0 state indices
+    # for the CuTeDSL verify+flush kernel. None on the triton backend.
+    spec_hist_len_d: torch.Tensor | None = None  # shape: [batch,] int32
+    spec_state_indices_col0_d: torch.Tensor | None = None  # shape: [batch,] int32
+
     # Pre-computed FLA chunk metadata (avoids GPU->CPU sync in prepare_chunk_indices)
     chunk_indices: torch.Tensor | None = None
     chunk_offsets: torch.Tensor | None = None
@@ -201,6 +207,38 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         self.spec_write_pos: torch.Tensor | None = None
         self.spec_cache_base: torch.Tensor | None = None
         self.spec_is_flush: torch.Tensor | None = None
+
+        # flashinfer_ucache spec backend: one block-keyed hist_len master
+        # (lazy, sized num_gpu_blocks) committed eagerly per step, plus
+        # fixed-address request-keyed buffers the captured kernel reads.
+        from vllm.model_executor.layers.mamba.mamba_utils import (
+            resolve_gdn_spec_backend,
+        )
+
+        self.gdn_spec_backend = (
+            resolve_gdn_spec_backend(vllm_config)
+            if self.use_cache_spec_kernel
+            else "triton"
+        )
+        self.spec_hist_len: torch.Tensor | None = None
+        if self.gdn_spec_backend == "flashinfer_ucache":
+            from vllm.model_executor.layers.fla.ops.gdn_ucache_spec import (
+                UCACHE_PAD_ROW_ID,
+                ucache_flush_min,
+            )
+
+            self.ucache_flush_min = ucache_flush_min(self.max_spec_len)
+            self.ucache_pad_row_id = UCACHE_PAD_ROW_ID
+            max_reqs = max(
+                vllm_config.scheduler_config.max_num_seqs,
+                self.decode_cudagraph_max_bs,
+            )
+            self.spec_hist_len_gathered: torch.Tensor = torch.zeros(
+                (max_reqs,), dtype=torch.int32, device=device
+            )
+            self.spec_state_indices_col0: torch.Tensor = torch.full(
+                (max_reqs,), UCACHE_PAD_ROW_ID, dtype=torch.int32, device=device
+            )
 
     def build(  # type: ignore[override]
         self,
@@ -485,6 +523,8 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         spec_write_pos_d = None
         spec_cache_base_d = None
         spec_is_flush_d = None
+        spec_hist_len_d = None
+        spec_state_indices_col0_d = None
         if self.use_cached_kernel and spec_sequence_masks is None and num_decodes > 0:
             num_prompt_tokens_cpu = m.num_prompt_tokens_cpu
             num_computed_tokens_cpu = m._num_computed_tokens_cpu
@@ -527,45 +567,16 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         # the cursors are full (num_gpu_blocks,) fixed-address buffers read by
         # the captured verify kernel.
         if self.use_cache_spec_kernel and num_spec_decodes > 0:
-            from vllm.model_executor.layers.fla.ops.gdn_replayssm_spec_decode import (
-                commit_gdn_replayssm_spec,
-                reset_gdn_replayssm_spec_cursors,
-            )
-
             assert spec_state_indices_tensor is not None
             assert num_accepted_tokens is not None
             # non-None whenever num_spec_decodes > 0 (set together above)
             assert spec_sequence_masks_cpu is not None
-            if self.spec_write_pos is None:
-                n_blocks = self.vllm_config.cache_config.num_gpu_blocks
-                assert n_blocks is not None and n_blocks > 0, (
-                    "--use-replayssm-spec needs num_gpu_blocks at "
-                    "build time to size the block-keyed cursor buffers"
-                )
-                self.spec_write_pos = torch.zeros(
-                    n_blocks, dtype=torch.int32, device=self.cursor_device
-                )
-                self.spec_cache_base = torch.zeros(
-                    n_blocks, dtype=torch.int32, device=self.cursor_device
-                )
-                self.spec_is_flush = torch.zeros(
-                    n_blocks, dtype=torch.int8, device=self.cursor_device
-                )
             sbi = spec_state_indices_tensor[:, 0]
-            commit_gdn_replayssm_spec(
-                self.spec_write_pos,
-                self.spec_cache_base,
-                self.spec_is_flush,
-                num_accepted_tokens.to(torch.int32),
-                sbi,
-                max_cache_len=self.spec_flush_threshold,
-                max_spec_len=self.max_spec_len,
-                cache_buf_len=self.spec_cache_buf_len,
-            )
-            # prefill->decode reset for first-decode rows (cursors only; conv
-            # context lives in conv_state). A request's first spec verify has
-            # num_computed_tokens == num_prompt_tokens; that resets its (possibly
-            # recycled) block's cursors to write_pos=0.
+            # prefill->decode reset predicate for first-decode rows (cursors
+            # only; conv context lives in conv_state). A request's first spec
+            # verify has num_computed_tokens == num_prompt_tokens; that resets
+            # its (possibly recycled) block's cursors to write_pos=0.
+            first_decode_d = None
             num_prompt_tokens_cpu = m.num_prompt_tokens_cpu
             if num_prompt_tokens_cpu is not None:
                 num_prompt_d = num_prompt_tokens_cpu.to(
@@ -576,18 +587,86 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                     query_start_loc.device, non_blocking=True
                 )
                 first_decode_d = first_decode_full.index_select(0, spec_row_idx)
-                reset_gdn_replayssm_spec_cursors(
+
+            if self.gdn_spec_backend == "flashinfer_ucache":
+                from vllm.model_executor.layers.fla.ops.gdn_ucache_spec import (
+                    commit_gdn_ucache_hist,
+                )
+
+                if self.spec_hist_len is None:
+                    n_blocks = self.vllm_config.cache_config.num_gpu_blocks
+                    assert n_blocks is not None and n_blocks > 0, (
+                        "--use-replayssm-spec needs num_gpu_blocks at "
+                        "build time to size the block-keyed hist buffer"
+                    )
+                    self.spec_hist_len = torch.zeros(
+                        n_blocks, dtype=torch.int32, device=self.cursor_device
+                    )
+                # Commit-at-start with the previous step's acceptance; the
+                # flush-step ring restart is folded in (hist >= flush_min -> 0
+                # before adding accepted). Eager, outside any captured region.
+                commit_gdn_ucache_hist(
+                    self.spec_hist_len,
+                    num_accepted_tokens.to(torch.int32),
+                    sbi,
+                    first_decode_d,
+                    flush_min=self.ucache_flush_min,
+                )
+                # Gather block-keyed -> request-keyed fixed-address buffers
+                # (the captured kernel reads these; padded rows filled below).
+                torch.index_select(
+                    self.spec_hist_len,
+                    0,
+                    sbi.to(torch.int64),
+                    out=self.spec_hist_len_gathered[:num_spec_decodes],
+                )
+                self.spec_state_indices_col0[:num_spec_decodes].copy_(sbi)
+                spec_hist_len_d = self.spec_hist_len_gathered
+                spec_state_indices_col0_d = self.spec_state_indices_col0
+            else:
+                from vllm.model_executor.layers.fla.ops.gdn_replayssm_spec_decode import (
+                    commit_gdn_replayssm_spec,
+                    reset_gdn_replayssm_spec_cursors,
+                )
+
+                if self.spec_write_pos is None:
+                    n_blocks = self.vllm_config.cache_config.num_gpu_blocks
+                    assert n_blocks is not None and n_blocks > 0, (
+                        "--use-replayssm-spec needs num_gpu_blocks at "
+                        "build time to size the block-keyed cursor buffers"
+                    )
+                    self.spec_write_pos = torch.zeros(
+                        n_blocks, dtype=torch.int32, device=self.cursor_device
+                    )
+                    self.spec_cache_base = torch.zeros(
+                        n_blocks, dtype=torch.int32, device=self.cursor_device
+                    )
+                    self.spec_is_flush = torch.zeros(
+                        n_blocks, dtype=torch.int8, device=self.cursor_device
+                    )
+                commit_gdn_replayssm_spec(
                     self.spec_write_pos,
                     self.spec_cache_base,
                     self.spec_is_flush,
-                    first_decode_d,
+                    num_accepted_tokens.to(torch.int32),
                     sbi,
                     max_cache_len=self.spec_flush_threshold,
                     max_spec_len=self.max_spec_len,
+                    cache_buf_len=self.spec_cache_buf_len,
                 )
-            spec_write_pos_d = self.spec_write_pos
-            spec_cache_base_d = self.spec_cache_base
-            spec_is_flush_d = self.spec_is_flush
+                if first_decode_d is not None:
+                    reset_gdn_replayssm_spec_cursors(
+                        self.spec_write_pos,
+                        self.spec_cache_base,
+                        self.spec_is_flush,
+                        first_decode_d,
+                        sbi,
+                        max_cache_len=self.spec_flush_threshold,
+                        max_spec_len=self.max_spec_len,
+                    )
+                spec_write_pos_d = self.spec_write_pos
+                spec_cache_base_d = self.spec_cache_base
+                spec_is_flush_d = self.spec_is_flush
 
         # Prepare per-request tensors for cudagraph. m.num_actual_tokens is
         # token-padded for FULL graph replay, but the GDN state/query/accepted
@@ -639,6 +718,20 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             )
             num_accepted_tokens = self.num_accepted_tokens[:batch_size]
             num_accepted_tokens[num_spec_decodes:].fill_(1)
+
+            if self.gdn_spec_backend == "flashinfer_ucache":
+                # Padded rows: negative sentinel -> the kernel retires the
+                # whole CTA at entry (pad-skip), so under-bucket batches cost
+                # ~nothing instead of a full T-step verify per padded row.
+                # Requires kernel commit with _exit_cta_if_neg (455b0f6+);
+                # on older kernels use 0 (P=0 verify against null page 0).
+                # Fill to the END of the fixed buffers: rows beyond the live
+                # batch must read hist=0 / idx=-1 on graph replay. One eager
+                # fill over <=max_bs int32 per step — free.
+                self.spec_hist_len_gathered[num_spec_decodes:].fill_(0)
+                self.spec_state_indices_col0[num_spec_decodes:].fill_(
+                    self.ucache_pad_row_id
+                )
 
         if (
             self.use_full_cuda_graph
@@ -697,6 +790,8 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             spec_write_pos_d=spec_write_pos_d,
             spec_cache_base_d=spec_cache_base_d,
             spec_is_flush_d=spec_is_flush_d,
+            spec_hist_len_d=spec_hist_len_d,
+            spec_state_indices_col0_d=spec_state_indices_col0_d,
             nums_dict=nums_dict,
             batch_ptr=batch_ptr,
             token_chunk_offset_ptr=token_chunk_offset_ptr,

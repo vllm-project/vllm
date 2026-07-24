@@ -36,6 +36,7 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
         self.hidden_size = config.hidden_size
         self.activation = config.hidden_act
         self.layer_norm_epsilon = config.rms_norm_eps
+        self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
         self.cache_config = vllm_config.cache_config
         self.quant_config = vllm_config.quant_config
@@ -56,6 +57,7 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
                 self.model_config.dtype,
                 self.cache_config.mamba_cache_dtype,
                 self.cache_config.mamba_ssm_cache_dtype,
+                vllm_config=self.vllm_config,
             )
         elif self.cache_config.use_replayssm:
             return MambaStateDtypeCalculator.gated_delta_net_replayssm_state_dtype(
