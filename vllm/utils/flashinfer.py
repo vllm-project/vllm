@@ -79,6 +79,13 @@ def _missing_sparse_mla(*_: Any, **__: Any) -> NoReturn:
     )
 
 
+def _missing_xqa(*_: Any, **__: Any) -> NoReturn:
+    raise RuntimeError(
+        "FlashInfer XQA batch decode API is not available. Upgrade to a "
+        "FlashInfer build that includes xqa_batch_decode_with_kv_cache."
+    )
+
+
 def _get_submodule(module_name: str) -> Any | None:
     """Safely import a submodule and return it, or None if not available."""
     try:
@@ -158,6 +165,11 @@ flashinfer_trtllm_batch_decode_sparse_mla_dsv4 = _lazy_import_wrapper(
     "trtllm_batch_decode_sparse_mla_dsv4",
     fallback_fn=_missing_sparse_mla,
 )
+flashinfer_xqa_batch_decode_with_kv_cache = _lazy_import_wrapper(
+    "flashinfer.decode",
+    "xqa_batch_decode_with_kv_cache",
+    fallback_fn=_missing_xqa,
+)
 
 
 # Special case for autotune since it returns a context manager
@@ -230,6 +242,42 @@ def has_flashinfer_sparse_mla_sm120() -> bool:
         and callable(trtllm_batch_decode_with_kv_cache_mla)
         and callable(autotune)
     )
+
+
+@functools.cache
+def has_flashinfer_xqa_decode() -> bool:
+    """Return ``True`` if the dedicated XQA batch-decode API is available.
+
+    This gates XQA spec-decode, attention sinks, sliding window on decode, and
+    spec-decode CUDA graphs on SM90/SM12x. Falls back to the legacy XQA path
+    (via ``trtllm_batch_decode_with_kv_cache(backend="xqa")``) when absent.
+    """
+    if not has_flashinfer():
+        return False
+    try:
+        from flashinfer.decode import xqa_batch_decode_with_kv_cache
+    except ImportError:
+        return False
+    return callable(xqa_batch_decode_with_kv_cache)
+
+
+@functools.cache
+def has_flashinfer_xqa_ragged_q() -> bool:
+    """Return ``True`` if the XQA decode path supports ragged queries.
+
+    Ragged-Q (variable draft length per request via ``q_cu_seq_lens``) requires
+    the ``use_ragged_q`` knob on ``gen_xqa_module``. Gated separately so uniform
+    spec decode still works on builds without ragged-Q support.
+    """
+    if not has_flashinfer_xqa_decode():
+        return False
+    try:
+        import inspect
+
+        from flashinfer.jit.xqa import gen_xqa_module
+    except ImportError:
+        return False
+    return "use_ragged_q" in inspect.signature(gen_xqa_module).parameters
 
 
 @functools.cache
@@ -1041,6 +1089,9 @@ __all__ = [
     "trtllm_fp4_block_scale_moe",
     "flashinfer_trtllm_batch_decode_with_kv_cache_mla",
     "flashinfer_trtllm_batch_decode_sparse_mla_dsv4",
+    "flashinfer_xqa_batch_decode_with_kv_cache",
+    "has_flashinfer_xqa_decode",
+    "has_flashinfer_xqa_ragged_q",
     "autotune",
     "has_flashinfer_moe",
     "has_flashinfer_comm",
