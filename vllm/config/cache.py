@@ -145,6 +145,17 @@ class CacheConfig:
     - "align": only cache the mamba state of the last token of each scheduler step and
            when the token is at position i * block_size.
     """
+    replayssm_buffer_len: int = Field(default=16, gt=0)
+    """ReplaySSM history buffer length B: with use_replayssm, standard decode
+    caches recent SSM inputs in a size-B ring buffer and flushes the checkpoint
+    state to HBM every B steps. Default 16."""
+    use_replayssm: bool = False
+    """Use the ReplaySSM Mamba2 decode kernel: cache recent SSM inputs and skip
+    the per-step full-state store, writing the checkpoint back only on flush.
+    Requires mamba_cache_mode 'none' or 'align' (prefix caching) and the Triton
+    mamba backend; standard (non-speculative) decode only. In align mode flushes
+    are most efficient when mamba_block_size is a multiple of replayssm_buffer_len,
+    but this is not required."""
 
     # Will be set after profiling.
     num_gpu_blocks: int | None = field(default=None, init=False)

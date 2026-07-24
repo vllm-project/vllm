@@ -63,7 +63,6 @@ steps:
   - tests/models/language/generation
   commands:
     # Install fast path packages for testing against transformers
-    # Note: also needed to run plamo2 model in vLLM
     - uv pip install --system --no-build-isolation 'git+https://github.com/state-spaces/mamba@v2.3.0'
     - uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.6.0'
     # Shard the hybrid language model tests that are numerically stable on Hopper.
@@ -105,7 +104,6 @@ steps:
   - tests/models/language/generation
   commands:
     # Install fast path packages for testing against transformers
-    # Note: also needed to run plamo2 model in vLLM
     - uv pip install --system --no-build-isolation 'git+https://github.com/state-spaces/mamba@v2.3.0'
     - uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.6.0'
     - pytest -v -s models/language/generation -m '(not core_model) and (not hybrid_model)'
