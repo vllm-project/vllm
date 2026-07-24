@@ -660,10 +660,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             num_reqs, num_reqs, self.input_buffers
         )
 
-        # NOTE(woosuk): During the initial memory profiling, the sampler may skip
-        # top_k, top_p, and logprobs, using less GPU memory than what is possible
-        # during actual execution.
         assert self.sampler is not None
+        # Exercise the flashinfer top-k/top-p path so memory profiling accounts
+        # for its transient logits-sized buffers. Otherwise the KV cache budget
+        # is oversized and warmup_kernels (which forces this path) OOMs.
+        vocab_size = logits.shape[1]
+        ss = self.sampler.sampling_states
+        ss.temperature.np[:num_reqs] = 0.5
+        ss.top_k.np[:num_reqs] = vocab_size - 1
+        ss.top_p.np[:num_reqs] = 0.9
+        ss.apply_staged_writes()
         self.sampler(logits, dummy_input_batch)
 
     @torch.inference_mode()
