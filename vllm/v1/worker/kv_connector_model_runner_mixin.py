@@ -22,6 +22,9 @@ from vllm.v1.outputs import (
     KVConnectorOutput,
     ModelRunnerOutput,
 )
+from vllm.v1.worker.gpu.attn_utils import (
+    get_attention_kv_cache_shape_and_stride_order,
+)
 from vllm.v1.worker.utils import AttentionGroup
 
 if TYPE_CHECKING:
@@ -206,24 +209,17 @@ class KVConnectorModelRunnerMixin:
         kernel_num_blocks = num_blocks * num_blocks_per_kv_block
 
         attn_backend = attn_group.backend
-        kv_cache_shape = attn_backend.get_kv_cache_shape(
-            kernel_num_blocks,
-            kernel_block_size,
-            kv_cache_spec.num_kv_heads,
-            kv_cache_spec.head_size,
-            cache_dtype_str=cache_dtype,
-        )
-
-        # prepend a num_layers dimension into the shape
-        kv_cache_shape = (num_layers,) + kv_cache_shape
-
-        try:
-            kv_cache_stride_order = attn_backend.get_kv_cache_stride_order(
-                include_num_layers_dimension=True
+        kv_cache_shape, kv_cache_stride_order = (
+            get_attention_kv_cache_shape_and_stride_order(
+                attn_backend,
+                kv_cache_spec,
+                kernel_num_blocks,
+                kernel_block_size,
+                cache_dtype,
+                kv_cache_shape_prefix=(num_layers,),
+                include_num_layers_dimension=True,
             )
-            assert len(kv_cache_stride_order) == len(kv_cache_shape)
-        except (AttributeError, NotImplementedError):
-            kv_cache_stride_order = tuple(range(len(kv_cache_shape)))
+        )
 
         kv_cache_shape = tuple(kv_cache_shape[i] for i in kv_cache_stride_order)
 
