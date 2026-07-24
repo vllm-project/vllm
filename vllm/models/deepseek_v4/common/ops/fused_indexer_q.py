@@ -295,7 +295,7 @@ def fused_indexer_q_rope_quant(
     index_weights_softmax_scale: float,
     index_weights_head_scale: float,
     use_fp4: bool = False,
-    output_buffers: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
+    output_buffers: tuple[torch.Tensor, ...] | None = None,
 ) -> tuple[
     torch.Tensor | tuple[torch.Tensor, torch.Tensor],
     torch.Tensor,
@@ -336,8 +336,9 @@ def fused_indexer_q_rope_quant(
     if output_buffers is None:
         index_weights_out = torch.empty_like(index_weights, dtype=torch.float32)
     else:
-        assert use_fp4
-        index_q_packed, index_q_scale, index_weights_out = output_buffers
+        expected_num_buffers = 3 if use_fp4 else 2
+        assert len(output_buffers) == expected_num_buffers
+        index_weights_out = output_buffers[-1]
         assert index_weights_out.shape == index_weights.shape
 
     if use_fp4:
@@ -359,6 +360,8 @@ def fused_indexer_q_rope_quant(
                 dtype=torch.uint8,
                 device=index_q.device,
             )
+        else:
+            index_q_packed, index_q_scale, _ = output_buffers
         assert index_q_packed.shape == packed_shape
         assert index_q_scale.shape == scale_shape
         if has_cutedsl():
@@ -417,7 +420,11 @@ def fused_indexer_q_rope_quant(
     fp8_dtype = current_platform.fp8_dtype()
     use_fnuz = fp8_dtype == torch.float8_e4m3fnuz
     fp8_max = 224.0 if use_fnuz else 448.0
-    index_q_fp8 = torch.empty_like(index_q, dtype=fp8_dtype)
+    if output_buffers is None:
+        index_q_fp8 = torch.empty_like(index_q, dtype=fp8_dtype)
+    else:
+        index_q_fp8, _ = output_buffers
+        assert index_q_fp8.shape == index_q.shape
     if has_cutedsl():
         # lazily import, otherwise some tests fail due to CUDA driver init failure.
         from vllm.models.deepseek_v4.nvidia.ops.fused_indexer_q_cutedsl import (
