@@ -133,6 +133,27 @@ class EngineClient(ABC):
         """Raise if unhealthy"""
         ...
 
+    async def get_decode_liveness(self) -> tuple[int, float | None, float | None]:
+        """Return engine forward-progress liveness, used by /health/decode.
+
+        Returns ``(inflight_count, last_progress_age,
+        oldest_unprogressed_admission_age)``:
+
+        * ``inflight_count``: requests admitted but not yet finished.
+        * ``last_progress_age``: seconds since the engine last produced any
+          output, or ``None`` if it never has.
+        * ``oldest_unprogressed_admission_age``: seconds since the oldest
+          in-flight request that has received zero outputs was admitted, or
+          ``None`` if there is none.
+
+        Default implementation returns ``(0, None, None)`` — i.e. the engine
+        always reports as "idle" — which makes the endpoint always return
+        200 OK with status="idle" and is safe for engine implementations
+        that don't (yet) track forward-progress signals. Override in concrete
+        engines that have the data available.
+        """
+        return 0, None, None
+
     @abstractmethod
     async def start_profile(self) -> None:
         """Start profiling the engine"""
