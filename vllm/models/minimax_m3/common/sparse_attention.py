@@ -383,7 +383,6 @@ class MiniMaxM3SparseTritonImpl(MiniMaxM3SparseImpl):
 
         nd = main_md.num_decode_tokens
         num_tokens = main_md.num_actual_tokens
-        # Indexer top-k from the shared buffer: decode [:, :nd], prefill [:, nd:].
         topk = layer.topk_indices_buffer  # type: ignore[attr-defined]
         assert topk is not None
         hd = self.head_size
@@ -402,7 +401,7 @@ class MiniMaxM3SparseTritonImpl(MiniMaxM3SparseImpl):
             minimax_m3_sparse_attn_decode(
                 q[:nd],
                 kv_cache,
-                topk[:, :nd, :],
+                topk[:nd].transpose(0, 1),
                 d.block_table,
                 d.seq_lens,
                 self.num_kv_heads,
@@ -420,7 +419,7 @@ class MiniMaxM3SparseTritonImpl(MiniMaxM3SparseImpl):
             minimax_m3_sparse_attn(
                 q[nd:],
                 kv_cache,
-                topk[:, nd:num_tokens, :],
+                topk[nd:num_tokens].transpose(0, 1),
                 p.block_table,
                 p.cu_seqlens_q,
                 p.seq_lens,
