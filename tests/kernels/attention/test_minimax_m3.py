@@ -1519,6 +1519,7 @@ def test_reshape_and_cache_flash_write_persists(kv_layout: str):
         torch.testing.assert_close(kv_cache[blk, :, intra, :HEAD_DIM], key[t])
         torch.testing.assert_close(kv_cache[blk, :, intra, HEAD_DIM:], value[t])
 
+
 def test_minimax_m3_decode_index_regression_non_power_of_2():
     """Regression test for Issue #49158: Ensure Triton kernel does not fail
     and produces correct results when num_idx_heads is not a power of 2."""
@@ -1539,9 +1540,9 @@ def test_minimax_m3_decode_index_regression_non_power_of_2():
     max_blocks = (max_seq_len + BLOCK_SIZE - 1) // BLOCK_SIZE
     num_pages = active_batch * max_blocks
 
-    block_table = torch.randperm(
-        num_pages, device="cuda", dtype=torch.int32
-    ).reshape(active_batch, max_blocks)
+    block_table = torch.randperm(num_pages, device="cuda", dtype=torch.int32).reshape(
+        active_batch, max_blocks
+    )
 
     idx_q = torch.randn(
         active_batch * decode_query_len, num_idx_heads, head_dim, device="cuda"
