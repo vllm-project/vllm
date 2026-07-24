@@ -1821,6 +1821,41 @@ void shuffle_exllama_weight(uint32_t* q_weight, int* q_perm, int height,
   shuffle_kernel<<<gridDim, blockDim, 0, stream>>>(q_weight, height, width);
 }
 
+__global__ void check_g_idx_bounds_kernel(const int* __restrict__ g_idx,
+                                          const int n, const int upper_bound,
+                                          int* __restrict__ out_flag) {
+  int idx = blockIdx.x * blockDim.x + threadIdx.x;
+  if (idx < n) {
+    int val = g_idx[idx];
+    if (val < 0 || val >= upper_bound) {
+      atomicExch(out_flag, 1);
+    }
+  }
+}
+
+bool check_g_idx_in_bounds(const int* g_idx, int n, int upper_bound) {
+  int* d_flag = nullptr;
+  if (cudaMalloc(&d_flag, sizeof(int)) != cudaSuccess) return false;
+  if (cudaMemset(d_flag, 0, sizeof(int)) != cudaSuccess) {
+    cudaFree(d_flag);
+    return false;
+  }
+
+  const int threads = 256;
+  const int blocks = (n + threads - 1) / threads;
+  const cudaStream_t stream = get_current_cuda_stream();
+  check_g_idx_bounds_kernel<<<blocks, threads, 0, stream>>>(
+      g_idx, n, upper_bound, d_flag);
+
+  int h_flag = 0;
+  cudaError_t cpy_err = cudaMemcpyAsync(&h_flag, d_flag, sizeof(int),
+                                        cudaMemcpyDeviceToHost, stream);
+  cudaError_t sync_err = cudaStreamSynchronize(stream);
+  cudaFree(d_flag);
+  if (cpy_err != cudaSuccess || sync_err != cudaSuccess) return false;
+  return h_flag == 0;
+}
+
 }  // namespace gptq
 }  // namespace vllm
 
@@ -1832,6 +1867,33 @@ torch::stable::Tensor gptq_gemm(torch::stable::Tensor a,
                                 bool use_v2_format, int64_t bit) {
   const torch::stable::accelerator::DeviceGuard device_guard(
       a.get_device_index());
+
+  STD_TORCH_CHECK(bit == 2 || bit == 3 || bit == 4 || bit == 8,
+                  "gptq_gemm: bit must be 2, 3, 4, or 8, got ", bit);
+
+  int64_t groups = b_gptq_qzeros.size(0);
+  STD_TORCH_CHECK(groups > 0,
+                  "gptq_gemm: groups (b_gptq_qzeros.size(0)) must be > 0");
+
+  STD_TORCH_CHECK(b_gptq_scales.size(0) >= groups,
+                  "gptq_gemm: b_gptq_scales.size(0) (", b_gptq_scales.size(0),
+                  ") must be >= groups (", groups, ")");
+
+  bool has_g_idx = b_g_idx.device().type() != torch::stable::DeviceType::Meta &&
+                   b_g_idx.numel() > 0;
+  if (has_g_idx) {
+    int64_t size_k = a.size(1);
+    STD_TORCH_CHECK(b_g_idx.numel() >= size_k, "gptq_gemm: g_idx length (",
+                    b_g_idx.numel(), ") must be >= size_k (", size_k, ")");
+    int upper_bound =
+        use_exllama ? static_cast<int>(size_k) : static_cast<int>(groups);
+    STD_TORCH_CHECK(vllm::gptq::check_g_idx_in_bounds(
+                        (const int*)b_g_idx.data_ptr(),
+                        static_cast<int>(b_g_idx.numel()), upper_bound),
+                    "gptq_gemm: g_idx contains values outside [0, ",
+                    upper_bound, ")");
+  }
+
   auto c = torch::stable::new_zeros(a, {a.size(0), b_q_weight.size(1)});
   auto temp_dq =
       torch::stable::empty({b_q_weight.size(0) * 32 / bit, b_q_weight.size(1)},
@@ -1842,10 +1904,8 @@ torch::stable::Tensor gptq_gemm(torch::stable::Tensor a,
       (const uint32_t*)b_q_weight.data_ptr(),
       (const uint32_t*)b_gptq_qzeros.data_ptr(),
       (const half*)b_gptq_scales.data_ptr(),
-      b_g_idx.device().type() == torch::stable::DeviceType::Meta
-          ? NULL
-          : (const int*)b_g_idx.data_ptr(),
-      (half*)c.data_ptr(), (half*)temp_dq.data_ptr(),
+      has_g_idx ? (const int*)b_g_idx.data_ptr() : NULL, (half*)c.data_ptr(),
+      (half*)temp_dq.data_ptr(),
       c.size(0),              // m
       c.size(1),              // n
       a.size(1),              // k
@@ -1856,6 +1916,9 @@ torch::stable::Tensor gptq_gemm(torch::stable::Tensor a,
 
 void gptq_shuffle(torch::stable::Tensor q_weight, torch::stable::Tensor q_perm,
                   int64_t bit) {
+  STD_TORCH_CHECK(bit == 2 || bit == 3 || bit == 4 || bit == 8,
+                  "gptq_shuffle: bit must be 2, 3, 4, or 8, got ", bit);
+
   const torch::stable::accelerator::DeviceGuard device_guard(
       q_weight.get_device_index());
   vllm::gptq::shuffle_exllama_weight(
