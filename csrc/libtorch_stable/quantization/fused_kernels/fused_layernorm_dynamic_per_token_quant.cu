@@ -2,6 +2,7 @@
 #include "../../torch_utils.h"
 
 #include "../../dispatch_utils.h"
+#include "layernorm_single_read.cuh"
 #include "layernorm_utils.cuh"
 #include "quant_conversions.cuh"
 
@@ -130,6 +131,91 @@ __global__ void rms_norm_per_block_quant_kernel(
 
 }  // namespace vllm
 
+#ifndef USE_ROCM
+template <typename scalar_in_t>
+bool rms_norm_dynamic_per_token_quant_single_read(
+    torch::stable::Tensor& out,           // [..., hidden_size]
+    torch::stable::Tensor const& input,   // [..., hidden_size]
+    torch::stable::Tensor const& weight,  // [hidden_size]
+    torch::stable::Tensor& scales,        // [num_tokens]
+    double const var_epsilon,
+    std::optional<torch::stable::Tensor> const& scale_ub,
+    std::optional<torch::stable::Tensor> const& residual) {
+  if constexpr (sizeof(scalar_in_t) != 2) {
+    // fp32 activations: the row no longer fits the register budget.
+    return false;
+  } else {
+    using scalar_out_t = torch::headeronly::Float8_e4m3fn;
+    if (residual.has_value() ||
+        out.scalar_type() != torch::headeronly::ScalarType::Float8_e4m3fn) {
+      return false;
+    }
+
+    int32_t const hidden_size = input.size(-1);
+    constexpr int32_t row_unit =
+        vllm::kSingleReadThreads * vllm::kSingleReadVecWidth;
+    int32_t const vpt = hidden_size / row_unit;
+    if (hidden_size % row_unit != 0 || vpt < 1 ||
+        vpt > vllm::kSingleReadMaxVPT) {
+      return false;
+    }
+
+    int32_t const input_stride =
+        torch::stable::view(input, {-1, hidden_size}).stride(0);
+    scalar_in_t const* in_ptr = input.const_data_ptr<scalar_in_t>();
+    scalar_in_t const* w_ptr = weight.const_data_ptr<scalar_in_t>();
+    scalar_out_t* out_ptr = out.mutable_data_ptr<scalar_out_t>();
+    // The kernel issues 16B loads / 8B stores: rows and base pointers must
+    // be aligned accordingly (the general kernel only needs 8B / 4B).
+    if (input_stride % vllm::kSingleReadVecWidth != 0 ||
+        reinterpret_cast<uintptr_t>(in_ptr) % 16 != 0 ||
+        reinterpret_cast<uintptr_t>(w_ptr) % 16 != 0 ||
+        reinterpret_cast<uintptr_t>(out_ptr) % 8 != 0) {
+      return false;
+    }
+
+    auto num_tokens = input.numel() / hidden_size;
+    dim3 const grid(num_tokens);
+    dim3 const block(vllm::kSingleReadThreads);
+    const torch::stable::accelerator::DeviceGuard device_guard(
+        input.get_device_index());
+    const cudaStream_t stream = get_current_cuda_stream();
+
+    float* scales_ptr = scales.mutable_data_ptr<float>();
+    float const* ub_ptr =
+        scale_ub.has_value() ? scale_ub->const_data_ptr<float>() : nullptr;
+
+    switch (vpt) {
+      case 1:
+        vllm::rms_norm_dynamic_per_token_quant_single_read_kernel<
+            scalar_in_t, scalar_out_t, 1>
+            <<<grid, block, 0, stream>>>(out_ptr, scales_ptr, in_ptr, w_ptr,
+                                         ub_ptr, var_epsilon, input_stride);
+        break;
+      case 2:
+        vllm::rms_norm_dynamic_per_token_quant_single_read_kernel<
+            scalar_in_t, scalar_out_t, 2>
+            <<<grid, block, 0, stream>>>(out_ptr, scales_ptr, in_ptr, w_ptr,
+                                         ub_ptr, var_epsilon, input_stride);
+        break;
+      case 3:
+        vllm::rms_norm_dynamic_per_token_quant_single_read_kernel<
+            scalar_in_t, scalar_out_t, 3>
+            <<<grid, block, 0, stream>>>(out_ptr, scales_ptr, in_ptr, w_ptr,
+                                         ub_ptr, var_epsilon, input_stride);
+        break;
+      case 4:
+        vllm::rms_norm_dynamic_per_token_quant_single_read_kernel<
+            scalar_in_t, scalar_out_t, 4>
+            <<<grid, block, 0, stream>>>(out_ptr, scales_ptr, in_ptr, w_ptr,
+                                         ub_ptr, var_epsilon, input_stride);
+        break;
+    }
+    return true;
+  }
+}
+#endif  // !USE_ROCM
+
 // Residual add + RMS norm + dynamic per token
 template <typename scalar_in_t>
 void rms_norm_dynamic_per_token_quant_dispatch(
@@ -140,6 +226,13 @@ void rms_norm_dynamic_per_token_quant_dispatch(
     double const var_epsilon,  // Variance epsilon used in norm calculation
     std::optional<torch::stable::Tensor> const& scale_ub,
     std::optional<torch::stable::Tensor>& residual) {
+#ifndef USE_ROCM
+  if (rms_norm_dynamic_per_token_quant_single_read<scalar_in_t>(
+          out, input, weight, scales, var_epsilon, scale_ub, residual)) {
+    return;
+  }
+#endif
+
   int32_t hidden_size = input.size(-1);
   int32_t input_stride =
       torch::stable::view(input, {-1, hidden_size}).stride(0);
