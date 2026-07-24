@@ -145,8 +145,17 @@ def parse_type(return_type: Callable[[str], T]) -> Callable[[str], T]:
         try:
             return return_type(val)
         except ValueError as e:
+            if return_type is json.loads:
+                raise argparse.ArgumentTypeError(
+                    f"Value {val!r} is not valid JSON ({e}). "
+                    "Expected a JSON string, "
+                    'e.g. \'{"image": 4, "audio": 1}\'.'
+                ) from e
+            type_name = getattr(
+                return_type, "__qualname__", getattr(return_type, "__name__", None)
+            ) or repr(return_type)
             raise argparse.ArgumentTypeError(
-                f"Value {val} cannot be converted to {return_type}."
+                f"Value {val!r} cannot be parsed as {type_name}: {e}"
             ) from e
 
     return _parse_type
