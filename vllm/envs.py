@@ -77,6 +77,7 @@ if TYPE_CHECKING:
     VLLM_MEDIA_URL_ALLOW_REDIRECTS: bool = True
     VLLM_MEDIA_LOADING_THREAD_COUNT: int = 8
     VLLM_MAX_AUDIO_CLIP_FILESIZE_MB: int = 25
+    VLLM_VIDEO_DECODE_CACHE_SIZE: int = 0
     VLLM_MAX_AUDIO_DECODE_DURATION_S: int = 600
     VLLM_MAX_AUDIO_PREPROCESS_WORKERS: int = max(1, min(os.cpu_count() or 1, 2))
     VLLM_MAX_IMAGE_PIXELS: int = 178_956_970
@@ -974,6 +975,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_MAX_AUDIO_CLIP_FILESIZE_MB": lambda: int(
         os.getenv("VLLM_MAX_AUDIO_CLIP_FILESIZE_MB", "25")
     ),
+    # Maximum number of decoded video files retained by the in-process media
+    # IO cache. Set to 0 to disable.
+    "VLLM_VIDEO_DECODE_CACHE_SIZE": lambda: int(
+        os.getenv("VLLM_VIDEO_DECODE_CACHE_SIZE", "0")
     # Maximum decoded audio duration in seconds.  Compressed audio files
     # (e.g. OPUS at very low bitrate) can expand into gigabytes of float32
     # PCM.  This limit is enforced *during* decoding so the memory is never
@@ -2161,6 +2166,7 @@ def compile_factors() -> dict[str, object]:
         "VLLM_MEDIA_URL_ALLOW_REDIRECTS",
         "VLLM_MEDIA_LOADING_THREAD_COUNT",
         "VLLM_MAX_AUDIO_CLIP_FILESIZE_MB",
+        "VLLM_VIDEO_DECODE_CACHE_SIZE",
         "VLLM_MAX_AUDIO_DECODE_DURATION_S",
         "VLLM_MAX_AUDIO_PREPROCESS_WORKERS",
         "VLLM_MAX_IMAGE_PIXELS",
