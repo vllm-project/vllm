@@ -301,8 +301,9 @@ class SamplingParams(
     output_kind: RequestOutputKind = RequestOutputKind.CUMULATIVE
     stream_interval: int | None = None
     """Number of newly generated tokens to batch into each streamed
-    `RequestOutput`, overriding the engine-level `--stream-interval` for this
-    request. The first and final outputs are always emitted immediately."""
+    `RequestOutput`. Raises the interval above the engine-level
+    `--stream-interval`. Values below engine setting are clamped up to it.
+    The first and final outputs are always emitted immediately."""
     skip_clone: bool = False
     """Internal flag indicating that this SamplingParams instance is safe to
     reuse without cloning. When True, clone() will return self without

@@ -141,10 +141,14 @@ def test_incremental_detokenization(
     assert not output_processor.has_unfinished_requests()
 
 
-def test_per_request_stream_interval_overrides_engine_default(dummy_test_vectors):
-    """A per-request stream_interval wins over the engine-level default,
-    in both directions, without altering the generated text."""
+def test_request_stream_interval_raises_but_not_below_engine_default(
+    dummy_test_vectors,
+):
+    """A per-request stream_interval can raise the interval above the engine
+    default but not below it (values under the default clamp up), without
+    altering the generated text."""
     engine_stream_interval = 5
+    # Request 0 (below the default) clamps up to 5; request 1 raises it to 10.
     request_stream_intervals = [1, 10]
     output_processor = OutputProcessor(
         dummy_test_vectors.tokenizer,
@@ -201,7 +205,8 @@ def test_per_request_stream_interval_overrides_engine_default(dummy_test_vectors
             gen_strings[request_id] += request_output.outputs[0].text
             gen_tokens[request_id].extend(new_tokens)
             if not request_output.finished:
-                interval = request_stream_intervals[int(request_id.split("-")[1])]
+                requested = request_stream_intervals[int(request_id.split("-")[1])]
+                interval = max(requested, engine_stream_interval)
                 assert len(new_tokens) == interval, f"{len(new_tokens)=}, {interval=}"
 
     for idx in range(num_requests):
