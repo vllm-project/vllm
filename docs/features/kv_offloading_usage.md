@@ -5,6 +5,8 @@ This guide covers configuration of the [`OffloadingConnector`](disagg_prefill.md
 !!! note
     The `OffloadingConnector` currently supports CUDA, ROCm, and XPU only.
 
+vLLM also ships a second, CPU-only offloading connector, [`SimpleCPUOffloadConnector`](#simplecpuoffloadconnector-cpu-only-alternative), documented at the end of this guide.
+
 ## Overview
 
 Two specs are available, selected by the `spec_name` key in `kv_connector_extra_config`:
@@ -206,6 +208,39 @@ Example (OpenAI-compatible completions request):
   }
 }
 ```
+
+## SimpleCPUOffloadConnector (CPU-Only Alternative)
+
+`SimpleCPUOffloadConnector` is a separate, minimal CPU offloading connector. Instead of the pluggable spec/tier framework above, it drives a second instance of vLLM's core KV cache machinery (`KVCacheCoordinator` and `BlockPool`) for host memory, so prefix hashing and LRU eviction behave exactly like the GPU prefix cache. It supports the hybrid memory allocator (HMA) and requires prefix caching to be enabled (it disables itself with a warning otherwise). There are no secondary tiers.
+
+```bash
+vllm serve <model> \
+  --kv-transfer-config '{
+    "kv_connector": "SimpleCPUOffloadConnector",
+    "kv_role": "kv_both",
+    "kv_connector_extra_config": {
+      "cpu_bytes_to_use": 8589934592
+    }
+  }'
+```
+
+### `kv_connector_extra_config` Reference
+
+| Key | Required | Default | Notes |
+| --- | --- | --- | --- |
+| `cpu_bytes_to_use` | no | `8589934592` (8 GiB) | Total bytes of host memory for the CPU cache across all workers; divided by world size for the per-rank capacity. Same key name and semantics as `OffloadingConnector`. |
+| `cpu_bytes_to_use_per_rank` | no | `cpu_bytes_to_use / world_size` | Explicit per-rank capacity. Takes precedence; a warning is logged if it disagrees with the derived value. |
+| `lazy_offload` | no | `false` | `false` (eager): blocks are offloaded to CPU as requests store them. `true` (lazy): offloading is deferred; the scheduler scans the GPU free queue and offloads blocks only as they approach eviction, keeping a target number of blocks ready to free. |
+
+### Choosing Between the Two Connectors
+
+| | `OffloadingConnector` | `SimpleCPUOffloadConnector` |
+| --- | --- | --- |
+| Tiers | CPU, plus optional filesystem/object-store/P2P secondary tiers | CPU only |
+| Eviction | Configurable (`lru` or `arc`) | `BlockPool` LRU (same as the GPU prefix cache) |
+| Offload timing | Immediate as blocks complete (`offload_prompt_only` to restrict) | Eager per-request store, or lazy eviction-driven (`lazy_offload`) |
+| KV events | Opt-in self-describing events, per-tier events | Standard `BlockPool` events for the CPU cache, when KV cache events are enabled |
+| Configuration surface | Larger (specs, tiers, thresholds) | Three keys |
 
 ## Further Reading
 
