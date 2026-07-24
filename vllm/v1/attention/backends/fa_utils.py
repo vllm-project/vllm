@@ -134,6 +134,7 @@ def get_flash_attn_version(
     head_size: int | None = None,
     head_size_v: int | None = None,
     has_sinks: bool = False,
+    requires_local_attention: bool = False,
 ) -> int | None:
     if current_platform.is_xpu():
         return 2
@@ -227,6 +228,18 @@ def get_flash_attn_version(
             logger.warning_once(
                 "Cannot use FA version 4 with batch invariance, "
                 "defaulting to FA version 2.",
+            )
+            fa_version = 2
+
+        if (
+            fa_version == 4
+            and device_capability.major >= 10
+            and head_size == 256
+            and requires_local_attention
+        ):
+            logger.warning_once(
+                "FA4 on Blackwell does not support local attention with "
+                "head_size=256, defaulting to FA version 2."
             )
             fa_version = 2
 
