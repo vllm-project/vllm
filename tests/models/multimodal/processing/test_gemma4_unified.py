@@ -1,13 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import math
 from collections.abc import Mapping
 
+import numpy as np
 import pytest
 import torch
 from PIL import Image as PILImage
 
-from vllm.model_executor.models.gemma4_mm import Gemma4ImagePixelInputs
+from vllm.model_executor.models.gemma4_mm import (
+    Gemma4AudioInputs,
+    Gemma4ImagePixelInputs,
+    _pad_ragged_audio_features,
+)
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalFieldConfig
 
@@ -203,3 +209,103 @@ def test_limit_mm_per_prompt(
             mm_items=processor.info.parse_mm_data(mm_data),
             hf_processor_mm_kwargs={},
         )
+
+
+def test_audio_field_batching_repads_ragged_lengths():
+    """Audios with different frame counts arrive at the model as a plain
+    list (batched() does not re-pad); _pad_ragged_audio_features must
+    normalize them back to padded tensors."""
+    features = [torch.randn(3, 640), torch.randn(6, 640)]
+    masks = [torch.ones(3, dtype=torch.bool), torch.ones(6, dtype=torch.bool)]
+
+    field = MultiModalFieldConfig.batched("audio").field
+    reduced_features = field.reduce_data(
+        list(field.build_elems("audio", "input_features_padded", features))
+    )
+    reduced_masks = field.reduce_data(
+        list(field.build_elems("audio", "input_features_mask", masks))
+    )
+    assert isinstance(reduced_features, list)
+
+    padded_features, padded_masks = _pad_ragged_audio_features(
+        reduced_features, reduced_masks
+    )
+    assert padded_features.shape == torch.Size([2, 6, 640])
+    assert padded_masks.shape == torch.Size([2, 6])
+    assert padded_masks.sum(-1).tolist() == [3, 6]
+    assert torch.equal(padded_features[0, :3], features[0])
+    assert torch.equal(padded_features[1], features[1])
+
+    Gemma4AudioInputs(
+        input_features_padded=padded_features,
+        input_features_mask=padded_masks,
+    )
+
+
+@pytest.mark.parametrize(
+    "residue",
+    # residues 1..160 are exactly where the tower-based mel/conv formula
+    # undercounts ceil(L / 640) by one
+    [0, 1, 160, 161, 639],
+)
+@pytest.mark.parametrize("model_id", [GEMMA4_UNIFIED_MODEL_ID])
+def test_audio_repl_token_count_matches_hf_processor(model_id: str, residue: int):
+    """Unified audio placeholder count must equal the HF processor's
+    per-audio valid frame count, ceil(L / 640)."""
+    ctx = build_model_context(
+        model_id,
+        limit_mm_per_prompt={"audio": 1},
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    hf_processor = processor.info.get_hf_processor()
+
+    audio_len = 640 * 5 + residue
+    repl = processor.info.get_audio_repl(
+        audio_len=audio_len,
+        processor=hf_processor,
+    )
+    num_repl_tokens = repl.full.count(hf_processor.audio_token_id)
+
+    hf_features = hf_processor.feature_extractor(
+        [np.zeros(audio_len, dtype=np.float32)]
+    )
+    num_hf_tokens = int(hf_features["input_features_mask"][0].sum())
+
+    assert num_hf_tokens == math.ceil(audio_len / 640)
+    assert num_repl_tokens == num_hf_tokens
+
+
+@pytest.mark.parametrize("model_id", [GEMMA4_UNIFIED_MODEL_ID])
+def test_multi_audio_apply_different_lengths(model_id: str):
+    """Two audios of different lengths must produce self-contained
+    unpadded per-item features whose frame counts match the placeholders."""
+    ctx = build_model_context(
+        model_id,
+        limit_mm_per_prompt={"audio": 2},
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    hf_processor = processor.info.get_hf_processor()
+
+    sr = hf_processor.feature_extractor.sampling_rate
+    audios = [
+        (np.zeros(640 * 3, dtype=np.float32), sr),
+        (np.zeros(640 * 5 + 100, dtype=np.float32), sr),
+    ]
+    expected_frames = [3, 6]
+
+    prompt = hf_processor.audio_token * 2
+    processed_inputs = processor(
+        prompt,
+        mm_items=processor.info.parse_mm_data({"audio": audios}),
+        hf_processor_mm_kwargs={},
+    )
+
+    audio_placeholders = processed_inputs["mm_placeholders"]["audio"]
+    assert [p.get_num_embeds() for p in audio_placeholders] == expected_frames
+
+    mm_items = processed_inputs["mm_kwargs"]["audio"]
+    for item, num_frames in zip(mm_items, expected_frames, strict=True):
+        assert item["input_features_padded"].data.shape == torch.Size(
+            [num_frames, 640]
+        )
+        assert int(item["input_features_mask"].data.sum()) == num_frames
