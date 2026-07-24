@@ -182,8 +182,7 @@ class KVBlockZeroer:
         )
         self._meta = (
             torch.tensor(seg_addrs, dtype=torch.uint64, device=self.device),
-            torch.tensor(seg_page_sizes, dtype=torch.int64,
-                         device=self.device),
+            torch.tensor(seg_page_sizes, dtype=torch.int64, device=self.device),
             max_page_size_el // blk_size,
             blk_size,
             len(seg_addrs),
