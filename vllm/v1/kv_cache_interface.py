@@ -310,6 +310,65 @@ class TQFullAttentionSpec(FullAttentionSpec):
 
 
 @dataclass(frozen=True, kw_only=True)
+class ZoomKVOffloadSpec(FullAttentionSpec):
+    """FullAttentionSpec marker for ZoomKV K+V CPU offload.
+
+    Completed K+V blocks are mirrored to pinned CPU. Their GPU pages stay
+    warm while dense readers may need them and are zeroed only after entering
+    the sparse-decode retrieval zone. Cold pages are restored before dense
+    reads. Host K+V capacity is configured separately via
+    ``attention_config.zoomkv_cpu_bytes_per_rank``.
+    """
+
+    sink_size: int = 64
+    local_size: int = 256
+    update_interval: int = 16
+    alignment: int = 16
+    native_block_size: int = 16
+
+    def hot_tokens_per_request(self) -> int:
+        return self.sink_size + self.local_size + self.update_interval + self.alignment
+
+    @classmethod
+    def merge(cls, specs: list[Self]) -> Self:
+        assert all(isinstance(spec, ZoomKVOffloadSpec) for spec in specs)
+        assert all(
+            (
+                s.sink_size,
+                s.local_size,
+                s.update_interval,
+                s.alignment,
+                s.native_block_size,
+            )
+            == (
+                specs[0].sink_size,
+                specs[0].local_size,
+                specs[0].update_interval,
+                specs[0].alignment,
+                specs[0].native_block_size,
+            )
+            for s in specs
+        ), "All ZoomKV offload layers in a KV group must share ZoomKV knobs"
+        base = FullAttentionSpec.merge(specs)  # type: ignore[arg-type]
+        return cls(
+            block_size=base.block_size,
+            num_kv_heads=base.num_kv_heads,
+            head_size=base.head_size,
+            head_size_v=base.head_size_v,
+            dtype=base.dtype,
+            kv_quant_mode=base.kv_quant_mode,
+            page_size_padded=getattr(base, "page_size_padded", None),
+            sliding_window=base.sliding_window,
+            attention_chunk_size=base.attention_chunk_size,
+            sink_size=specs[0].sink_size,
+            local_size=specs[0].local_size,
+            update_interval=specs[0].update_interval,
+            alignment=specs[0].alignment,
+            native_block_size=specs[0].native_block_size,
+        )
+
+
+@dataclass(frozen=True, kw_only=True)
 class MLAAttentionSpec(FullAttentionSpec):
     # TODO(Lucas/Chen): less hacky way to do this
     cache_dtype_str: str | None = None

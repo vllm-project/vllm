@@ -335,6 +335,11 @@ class Attention(nn.Module, AttentionLayerBase):
             )
             cache_config.enable_prefix_caching = False
 
+        # ZoomKV K+V offload is prefix-caching-safe: offloaded (cold) blocks
+        # are restored to GPU before any dense read (see
+        # ZoomKVAttentionImpl._restore_cold_blocks_for_dense), and block
+        # reuse invalidates the CPU pool mapping via new_block_ids_to_zero.
+
         if extra_impl_args.get("chunk_lookback", -1) > -1:
             assert self.attn_backend.get_name() == "TRITON_ATTN", (
                 f"Chunked attention with lookback requires the Triton backend, "
@@ -618,6 +623,23 @@ class Attention(nn.Module, AttentionLayerBase):
                 head_size_v=self.head_size,
                 dtype=self.kv_cache_torch_dtype,
                 tq_slot_size=tq_config.slot_size_aligned,
+            )
+        elif self.attn_backend.get_name() == "ZOOMKV" and getattr(
+            vllm_config.attention_config, "zoomkv_enable_offload", False
+        ):
+            from vllm.v1.kv_cache_interface import ZoomKVOffloadSpec
+
+            attn_cfg = vllm_config.attention_config
+            return ZoomKVOffloadSpec(
+                block_size=block_size,
+                num_kv_heads=self.num_kv_heads,
+                head_size=self.head_size,
+                head_size_v=self.head_size_v,
+                dtype=self.kv_cache_torch_dtype,
+                kv_quant_mode=quant_mode,
+                sink_size=getattr(attn_cfg, "zoomkv_sink_size", 64),
+                local_size=getattr(attn_cfg, "zoomkv_local_size", 256),
+                native_block_size=getattr(attn_cfg, "zoomkv_quest_chunk", 16),
             )
         else:
             return FullAttentionSpec(

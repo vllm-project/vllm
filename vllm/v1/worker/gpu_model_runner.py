@@ -1088,6 +1088,20 @@ class GPUModelRunner(
         # stale NaN/data from corrupting attention or SSM computation.
         if scheduler_output.new_block_ids_to_zero:
             self._zero_block_ids(scheduler_output.new_block_ids_to_zero)
+            from vllm.v1.attention.ops.zoomkv.offload import get_cpu_key_pool
+            from vllm.v1.attention.ops.zoomkv.state import (
+                invalidate_block_summaries_for_blocks,
+            )
+
+            invalidate_block_summaries_for_blocks(
+                scheduler_output.new_block_ids_to_zero,
+                allocation_num_blocks=self.kv_cache_config.num_blocks,
+            )
+            pool = get_cpu_key_pool()
+            if pool is not None:
+                pool.free_gpu_blocks_all_layers(
+                    list(scheduler_output.new_block_ids_to_zero)
+                )
 
         # Free the cached encoder outputs.
         for mm_hash in scheduler_output.free_encoder_mm_hashes:
@@ -5901,7 +5915,18 @@ class GPUModelRunner(
         """Release GPU tensors (model weights, KV caches, workspace) so that
         memory is reclaimable when running in the same process."""
         from vllm.model_executor.layers.rotary_embedding import _ROPE_DICT
+        from vllm.v1.attention.ops.zoomkv.offload import (
+            get_cpu_key_pool,
+            set_cpu_key_pool,
+        )
+        from vllm.v1.attention.ops.zoomkv.state import clear_block_summaries
         from vllm.v1.worker.workspace import reset_workspace_manager
+
+        clear_block_summaries()
+        pool = get_cpu_key_pool()
+        if pool is not None:
+            pool.reset()
+            set_cpu_key_pool(None)
 
         # Calls torch.accelerator.synchronize()
         self._cleanup_profiling_kv_cache()
@@ -6842,6 +6867,7 @@ class GPUModelRunner(
         kv_caches = self.initialize_kv_cache_tensors(
             kv_cache_config, kernel_block_sizes
         )
+        self._maybe_init_zoomkv_cpu_key_pool(kv_caches)
 
         if (
             self.speculative_config
@@ -6862,6 +6888,65 @@ class GPUModelRunner(
             else:
                 kv_transfer_group.register_kv_caches(kv_caches)
             kv_transfer_group.set_host_xfer_buffer_ops(copy_kv_blocks)
+
+    def _maybe_init_zoomkv_cpu_key_pool(self, kv_caches) -> None:
+        """Create the pinned CPU KV pool when ZoomKV K+V offload is enabled."""
+        attn_cfg = self.vllm_config.attention_config
+        if not getattr(attn_cfg, "zoomkv_enable_offload", False):
+            return
+        if getattr(self, "_zoomkv_cpu_key_pool", None) is not None:
+            return
+        from vllm.v1.attention.ops.zoomkv.offload import (
+            ZoomKVCpuKeyPool,
+            set_cpu_key_pool,
+        )
+
+        zoomkv_layers = []
+        for name, cache in kv_caches.items():
+            if not hasattr(cache, "ndim"):
+                continue
+            if cache.ndim >= 4:
+                zoomkv_layers.append(name)
+        if not zoomkv_layers:
+            return
+        sample = kv_caches[zoomkv_layers[0]]
+        if sample.ndim == 5 and sample.shape[1] == 2:
+            block_size = int(sample.shape[2])
+            num_kv_heads = int(sample.shape[3])
+            head_dim = int(sample.shape[4])
+            dtype = sample.dtype
+        elif sample.ndim == 4:
+            # (num_blocks, num_kv_heads, block_size, 2 * head_size)
+            num_kv_heads = int(sample.shape[1])
+            block_size = int(sample.shape[2])
+            head_dim = int(sample.shape[3] // 2)
+            dtype = sample.dtype
+        else:
+            return
+        # Each slot stores both a Key and a Value page (K+V offload), so the
+        # per-slot cost is doubled; num_slots shrinks to keep the same budget.
+        bytes_per_slot = (
+            2 * 16 * num_kv_heads * head_dim * dtype.itemsize * len(zoomkv_layers)
+        )
+        cpu_bytes = int(getattr(attn_cfg, "zoomkv_cpu_bytes_per_rank", 8 * 1024**3))
+        num_slots = max(1, cpu_bytes // max(1, bytes_per_slot))
+        pool = ZoomKVCpuKeyPool(
+            num_slots=num_slots,
+            num_kv_heads=num_kv_heads,
+            head_dim=head_dim if head_dim in (128, 256) else 256,
+            block_size=16 if block_size == 16 else 16,
+            dtype=dtype if dtype in (torch.float16, torch.bfloat16) else torch.bfloat16,
+            device=sample.device,
+            layer_names=zoomkv_layers,
+            strict=bool(getattr(attn_cfg, "zoomkv_strict_kernels", False)),
+        )
+        set_cpu_key_pool(pool)
+        self._zoomkv_cpu_key_pool = pool
+        logger.info(
+            "ZoomKV K+V CPU pool ready: slots=%d layers=%d",
+            num_slots,
+            len(zoomkv_layers),
+        )
 
     def _get_attention_kv_cache_gid(self) -> int:
         """Find the KV cache group index for attention layers."""
