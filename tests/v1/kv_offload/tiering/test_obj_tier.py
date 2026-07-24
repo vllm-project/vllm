@@ -316,6 +316,29 @@ class TestMockObjTierBasic:
         assert len(results) == 1
         assert not results[0].success
 
+    def test_failed_load_invalidates_cached_verdict(self):
+        """Regression for the failed-load livelock (#49176) on the obj tier: a
+        cached HIT must not survive a failed load of the same key. The tier
+        self-invalidates its own stale verdict from get_finished_jobs() (drained
+        here) on the scheduler thread; otherwise the scheduler would re-issue
+        the same doomed promotion every step for the life of the request."""
+        ctx = ReqContext(req_id="obj-livelock")
+        self.tier.submit_store(make_job(1, [key(1)], [0]))
+        assert all(r.success for r in drain(self.tier))
+        # Cache a positive verdict: the object is present, so lookup is a HIT.
+        assert lookup_and_wait(self.tier, [key(1)], ctx=ctx) == [LookupResult.HIT]
+
+        # The backing object goes away and the promotion it triggered fails.
+        self.agent._stored_obj_keys.clear()
+        self.agent.check_xfer_state = lambda h: "ERR"
+        self.tier.submit_load(make_job(2, [key(1)], [0]))
+        results = drain(self.tier)
+        assert len(results) == 1 and not results[0].success
+
+        # After the failed promotion the SAME request's lookup must re-resolve
+        # to MISS instead of serving the stale HIT.
+        assert lookup_and_wait(self.tier, [key(1)], ctx=ctx) == [LookupResult.MISS]
+
     def test_pending_transfer_not_returned_until_done(self):
         # First poll returns PROC; second poll returns DONE.
         call_count = [0]

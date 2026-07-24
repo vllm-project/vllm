@@ -240,6 +240,42 @@ def test_store_then_load_roundtrip(fs_tier):
     ]
 
 
+def test_restore_heals_wrong_size_file(fs_tier):
+    """A wrong-size/corrupt on-disk file must self-heal on re-store. Size-aware
+    dedup falls through the skip-if-exists short-circuit and the atomic replace
+    overwrites the bad file. A bare existence check would poison the key
+    forever: size-validated lookup MISSes the bad file, but a re-store would
+    short-circuit and never overwrite it, leaving the key un-cacheable."""
+    tier, _ = fs_tier
+    tier.submit_store(make_job(1, [key(1)], [0]))
+    assert all(r.success for r in drain(tier))
+    path = tier.file_mapper.get_file_name(key(1))
+    good_size = os.path.getsize(path)
+    assert good_size == tier._block_size
+
+    # Externally corrupt/truncate the stored file to the wrong size.
+    with open(path, "wb") as f:
+        f.write(b"x" * 10)
+    assert os.path.getsize(path) == 10
+
+    # Size-validated lookup now misses the corrupt file.
+    miss_ctx = ReqContext(req_id="corrupt-miss")
+    assert lookup_and_wait(tier, [key(1)], ctx=miss_ctx) == [LookupResult.MISS]
+    # Release that request's cached negative verdict so a later lookup re-runs
+    # a fresh disk check (the lookup cache is per-key, independent of stores).
+    tier.on_request_finished(miss_ctx)
+
+    # Re-store the same key: the file must heal back to the correct size (the
+    # atomic replace overwrites it) instead of short-circuiting on existence.
+    tier.submit_store(make_job(3, [key(1)], [0]))
+    assert all(r.success for r in drain(tier))
+    assert os.path.getsize(path) == good_size
+
+    # ...and a fresh lookup is a HIT again (self-healed).
+    healed_ctx = ReqContext(req_id="healed")
+    assert lookup_and_wait(tier, [key(1)], ctx=healed_ctx) == [LookupResult.HIT]
+
+
 def test_invalid_path_raises_at_construction():
     """Construction must fail immediately when the config file cannot be written."""
     tensor = _page_aligned_zero_tensor(32, _BLOCK_ELEMENTS)
@@ -400,33 +436,40 @@ def test_wait_idle_blocks_until_tasks_complete():
 
 
 def test_batch_lookup_c_extension(tmp_path):
-    """Validates batch_lookup_C: empty, single, all-existing, all-missing,
-    mixed ordering, and input type validation."""
+    """Validates batch_lookup_C: it now returns st_size per path (-1 for
+    anything it cannot stat), so the caller can compare against the expected
+    block size. Covers empty, single, sized/empty/missing, mixed ordering,
+    and input type validation."""
     try:
         from vllm.fs_io_C import batch_lookup as batch_lookup_C
     except ImportError:
         pytest.skip("fs_io_C extension not built")
 
-    # Setup
-    all_exist = [str(tmp_path / f"e{i}.bin") for i in range(3)]
-    for p in all_exist:
-        open(p, "w").close()
-    all_missing = [str(tmp_path / f"m{i}.bin") for i in range(3)]
+    empty = str(tmp_path / "empty.bin")
+    open(empty, "w").close()
+    sized = str(tmp_path / "sized.bin")
+    with open(sized, "wb") as f:
+        f.write(b"\x00" * 4096)
+    missing = str(tmp_path / "missing.bin")
 
     # Empty list
     assert batch_lookup_C([]) == []
 
-    # Single existing / missing
-    assert batch_lookup_C([all_exist[0]]) == [True]
-    assert batch_lookup_C([all_missing[0]]) == [False]
+    # Sizes are reported exactly; a zero-byte file is 0, not -1.
+    assert batch_lookup_C([sized]) == [4096]
+    assert batch_lookup_C([empty]) == [0]
+    # Un-stat'able paths are -1 (never a valid block size -> a clean miss).
+    assert batch_lookup_C([missing]) == [-1]
 
-    # All existing / all missing
-    assert batch_lookup_C(all_exist) == [True, True, True]
-    assert batch_lookup_C(all_missing) == [False, False, False]
+    # Mixed — verifies index ordering is preserved.
+    assert batch_lookup_C([sized, missing, empty]) == [4096, -1, 0]
 
-    # Mixed — verifies index ordering is preserved
-    paths = [val for pair in zip(all_exist, all_missing) for val in pair]
-    assert batch_lookup_C(paths) == [True, False, True, False, True, False]
+    # size == expected is the exact predicate FsAsyncLookupManager applies.
+    assert [s == 4096 for s in batch_lookup_C([sized, empty, missing])] == [
+        True,
+        False,
+        False,
+    ]
 
     # Input validation: non-list argument
     with pytest.raises(TypeError):
@@ -442,24 +485,157 @@ def test_batch_lookup_c_extension(tmp_path):
     with pytest.raises(TypeError):
         batch_lookup_C([42])
     with pytest.raises(TypeError):
-        batch_lookup_C([all_exist[0], None])  # valid first, invalid mid-list
+        batch_lookup_C([sized, None])  # valid first, invalid mid-list
 
 
-@pytest.mark.parametrize("use_c_ext", [True, False])
-def test_batch_lookup_dispatch(fs_tier, monkeypatch, use_c_ext):
+def test_batch_lookup_prefers_c_ext_when_available(fs_tier, monkeypatch):
+    """FsAsyncLookupManager.batch_lookup routes through batch_lookup_C when the
+    extension is present, comparing each returned size against the block size
+    (independent of whether the extension is actually built in this env)."""
     import vllm.v1.kv_offload.tiering.fs.manager as mgr_mod
 
-    if use_c_ext and not mgr_mod._HAS_BATCH_LOOKUP_C:
-        pytest.skip("fs_io_C extension not built")
+    tier, _ = fs_tier
+    expected = tier._block_size
+    calls = {}
 
-    monkeypatch.setattr(mgr_mod, "_HAS_BATCH_LOOKUP_C", use_c_ext)
+    def fake_batch_lookup(paths):
+        calls["paths"] = list(paths)
+        # first path the right size (HIT), second truncated, third missing
+        return [expected, expected - 1, -1]
 
+    monkeypatch.setattr(mgr_mod, "_HAS_BATCH_LOOKUP_C", True)
+    monkeypatch.setattr(mgr_mod, "batch_lookup_C", fake_batch_lookup, raising=False)
+
+    results = list(tier._lookup_manager.batch_lookup([key(1), key(2), key(3)], _CTX))
+    assert results == [True, False, False]
+    assert len(calls["paths"]) == 3
+
+
+def test_batch_lookup_validates_size(fs_tier):
+    """Lookups validate file size, not bare existence: a truncated or
+    foreign-layout file is an up-front MISS instead of a HIT that fails
+    fatally at load time."""
     tier, _ = fs_tier
     tier.submit_store(make_job(1, [key(1)], [0]))
     assert all(r.success for r in drain(tier))
 
     results = lookup_and_wait(tier, [key(1), key(2)])
     assert results == [LookupResult.HIT, LookupResult.MISS]
+
+    # Truncate the stored file: still exists, wrong size -> MISS once the
+    # cached verdict is released and a fresh batch_lookup runs. (The cache
+    # is per-key: while any request holds the entry, even NEW requests are
+    # served the stale verdict - which is what the tier's self-invalidation
+    # on a failed load breaks; see test_failed_load_invalidates_cached_verdict.)
+    path = tier.file_mapper.get_file_name(key(1))
+    with open(path, "wb") as f:
+        f.write(b"x" * 10)
+    tier.on_request_finished(_CTX)  # release the cached entry
+    fresh = ReqContext(req_id="fresh-after-truncate")
+    assert lookup_and_wait(tier, [key(1)], ctx=fresh) == [LookupResult.MISS]
+
+
+def test_failed_load_invalidates_cached_verdict(fs_tier):
+    """Regression test for the failed-load livelock (#49176): a cached HIT
+    must not survive a failed load of the same key. The tier self-invalidates
+    its own stale verdict from get_finished_jobs() (drained here); previously
+    the cached verdict was served for the life of the requesting request while
+    the backing file was already gone, so the scheduler re-initiated the same
+    doomed promotion every step."""
+    tier, _ = fs_tier
+    tier.submit_store(make_job(1, [key(1)], [0]))
+    assert all(r.success for r in drain(tier))
+
+    ctx = ReqContext(req_id="livelock-req")
+    assert lookup_and_wait(tier, [key(1)], ctx=ctx) == [LookupResult.HIT]
+
+    # The file goes bad AFTER the verdict is cached, then the promotion the
+    # HIT triggered fails (short read). draining get_finished_jobs() surfaces
+    # the failure and the tier self-invalidates the stale verdict on the
+    # scheduler thread.
+    path = tier.file_mapper.get_file_name(key(1))
+    with open(path, "wb") as f:
+        f.write(b"x" * 10)
+    tier.submit_load(make_job(2, [key(1)], [0], is_promotion=True))
+    results = drain(tier)
+    assert len(results) == 1 and not results[0].success
+
+    # After the failed promotion the SAME request's lookup must re-resolve to
+    # MISS (size-validated) instead of serving the stale HIT.
+    assert lookup_and_wait(tier, [key(1)], ctx=ctx) == [LookupResult.MISS]
+
+
+def test_successful_load_keeps_cached_verdict(fs_tier):
+    """A successful promotion must NOT invalidate the cached HIT: the block is
+    still on disk and a subsequent lookup for the same request stays a HIT."""
+    tier, _ = fs_tier
+    tier.submit_store(make_job(1, [key(1)], [0]))
+    assert all(r.success for r in drain(tier))
+
+    ctx = ReqContext(req_id="ok-req")
+    assert lookup_and_wait(tier, [key(1)], ctx=ctx) == [LookupResult.HIT]
+
+    tier.submit_load(make_job(2, [key(1)], [0], is_promotion=True))
+    results = drain(tier)
+    assert len(results) == 1 and results[0].success
+
+    # Verdict intact; the block is still present.
+    assert lookup_and_wait(tier, [key(1)], ctx=ctx) == [LookupResult.HIT]
+
+
+def test_short_read_leaves_file_untouched(fs_tier):
+    """A short-read load failure must not modify or delete the file: with
+    size-validated lookup a truncated file already misses at lookup, so there
+    is nothing to quarantine. The file (and its wrong-size content) survives,
+    and the next lookup treats it as a clean MISS."""
+    tier, _ = fs_tier
+    tier.submit_store(make_job(1, [key(1)], [0]))
+    assert all(r.success for r in drain(tier))
+    path = tier.file_mapper.get_file_name(key(1))
+    with open(path, "wb") as f:
+        f.write(b"x" * 10)
+
+    tier.submit_load(make_job(2, [key(1)], [0], is_promotion=True))
+    results = drain(tier)
+    assert len(results) == 1 and not results[0].success
+
+    # The file is left exactly as it was — never quarantined or removed.
+    assert os.path.exists(path)
+    with open(path, "rb") as f:
+        assert f.read() == b"x" * 10
+    assert not os.path.exists(path + ".bad")
+
+    # A fresh request's size-validated lookup treats the wrong-size file as a
+    # miss.
+    fresh = ReqContext(req_id="fresh-after-short-read")
+    assert lookup_and_wait(tier, [key(1)], ctx=fresh) == [LookupResult.MISS]
+
+
+def test_transient_load_failure_leaves_file(fs_tier, monkeypatch):
+    """A transient host error (fd exhaustion) fails the job but must NOT
+    destroy the block file: the content was never proven wrong, and the
+    old delete-on-any-failure behavior turned hiccups into data loss."""
+    import errno as _errno
+
+    tier, _ = fs_tier
+    tier.submit_store(make_job(1, [key(1)], [0]))
+    assert all(r.success for r in drain(tier))
+    path = tier.file_mapper.get_file_name(key(1))
+    with open(path, "rb") as f:
+        original = f.read()
+
+    def _raise_emfile(*args, **kwargs):
+        raise OSError(_errno.EMFILE, "Too many open files")
+
+    monkeypatch.setattr("vllm.v1.kv_offload.tiering.fs.io.os.readv", _raise_emfile)
+    tier.submit_load(make_job(2, [key(1)], [0], is_promotion=True))
+    results = drain(tier)
+    assert len(results) == 1 and not results[0].success
+    monkeypatch.undo()
+
+    assert os.path.exists(path)
+    with open(path, "rb") as f:
+        assert f.read() == original
 
 
 # ---------------------------------------------------------------------------

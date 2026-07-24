@@ -38,17 +38,26 @@ def store_block(
     """
     Store callback: Writes to a temp file then atomically replaces the destination.
     """
-    # Check if block already exists to avoid redundant writes
-    if os.path.exists(dest_path):
-        return
+    # Write block atomically. Cast to a flat byte view so the slice uses byte
+    # indices; the raw memoryview may be multi-dimensional with itemsize > 1.
+    view_slice = buffer.cast("B")[offset : offset + block_size]
+
+    # Skip the write only if the existing file is already the correct size.
+    # A bare existence check would permanently poison a wrong-size/corrupt
+    # file: size-validated lookup MISSes it, but a re-store would short-circuit
+    # here and never overwrite it, leaving the key un-cacheable forever. When
+    # the size is wrong we fall through; the tmp-write + os.replace() below
+    # atomically heals the file. We never preemptively delete — healing is the
+    # atomic replace, keeping the "stop destroying files" property.
+    try:
+        if os.stat(dest_path).st_size == len(view_slice):
+            return
+    except OSError:
+        pass  # missing (or unstat'able) -> write it
 
     tmp_path = dest_path + _get_tmp_suffix()
     # Ensure parent directories exist
     _ensure_dirs(dest_path)
-
-    # Write block atomically. Cast to a flat byte view so the slice uses byte
-    # indices; the raw memoryview may be multi-dimensional with itemsize > 1.
-    view_slice = buffer.cast("B")[offset : offset + block_size]
     try:
         fd = os.open(
             tmp_path,
@@ -79,7 +88,15 @@ def load_block(
     block_size: int,
 ) -> None:
     """
-    Load callback: read one KV block from disk. Remove the file on failure.
+    Load callback: read one KV block from disk.
+
+    On ANY failure — short read, ENOENT, or a transient host error (EMFILE,
+    EINTR, EIO, ...) — the file is left untouched and the error propagates.
+    The block content is never proven wrong here in a way worth destroying
+    the file over: deleting on a transient error (the previous behavior)
+    turned host hiccups into permanent data loss. The failed job instead
+    causes the tier to self-invalidate its stale lookup verdict, and a later
+    size-validated lookup treats a truncated or missing file as a clean miss.
     """
     fd: int | None = None
     view_slice = view.cast("B")[offset : offset + block_size]
@@ -88,14 +105,6 @@ def load_block(
         bytes_read = os.readv(fd, [view_slice])
         if bytes_read < block_size:
             raise OSError(f"Short read: expected {block_size} bytes, read {bytes_read}")
-    except Exception:
-        try:
-            os.remove(source_path)
-        except OSError as cleanup_exc:
-            logger.warning(
-                "Failed to remove unreadable file %s: %s", source_path, cleanup_exc
-            )
-        raise
     finally:
         if fd is not None:
             os.close(fd)
