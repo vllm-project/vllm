@@ -25,11 +25,15 @@ llm = LLM("meta-llama/Llama-3.1-8B", quantization="mxfp8")
 # Activation format depends on the selected linear/MoE backend
 llm = LLM("meta-llama/Llama-3.1-8B", quantization="mxfp4")
 
-# MXFP4 weight, dynamic MXFP4 MoE activations (AITER backend, ROCm only)
-llm = LLM("meta-llama/Llama-3.1-8B", quantization="mxfp4", moe_backend="aiter")
+# MXFP4 weight; activation quantization depends on the `linear_backend` picked
+llm = LLM("meta-llama/Llama-3.1-8B", quantization="mxfp4")
 
-# MXFP4 weights, BF16 MoE activations (Marlin backend, Nvidia only)
-llm = LLM("meta-llama/Llama-3.1-8B", quantization="mxfp4", moe_backend="marlin")
+# MXFP4 MOE-only weight and activation quantization
+llm = LLM(
+    "Qwen/Qwen3.5-35B-A3B",
+    quantization="mxfp4",
+    quantization_config={"linear": {"activation": None, "weight": None}}
+)
 ```
 
 Or with the CLI:
@@ -40,13 +44,8 @@ vllm serve meta-llama/Llama-3.1-8B --quantization fp8_per_block
 vllm serve meta-llama/Llama-3.1-8B --quantization mxfp8
 vllm serve meta-llama/Llama-3.1-8B --quantization mxfp4
 
-# MXFP4 weights with BF16 MoE activations (Marlin backend, Nvidia only)
-vllm serve meta-llama/Llama-3.1-8B --quantization mxfp4 --moe-backend marlin
-
-# MXFP4 weights with dynamic MXFP4 MoE activations (AITER backend, ROCm only)
-vllm serve meta-llama/Llama-3.1-8B --quantization mxfp4 --moe-backend aiter \
-    --quantization-config.moe.activation mxfp4_dynamic
-```
+vllm serve Qwen/Qwen3.5-35B-A3B --quantization mxfp4 \
+    --quantization-config '{"linear":{"activation":null,"weight":null}}'
 
 ## Supported Schemes
 
@@ -55,7 +54,7 @@ vllm serve meta-llama/Llama-3.1-8B --quantization mxfp4 --moe-backend aiter \
 | `fp8_per_tensor` | fp8_e4m3 data, fp32 per-tensor scale | fp8_e4m3 data, fp32 per-tensor scale | On some GPUs (Ada, Hopper) linear activations use per-token scaling for better performance |
 | `fp8_per_block` | fp8_e4m3 data, fp32 per-128x128-block scale | fp8_e4m3 data, fp32 per-1x128-block scale | |
 | `mxfp8` | fp8_e4m3 data, e8m0 per-1x32-block scale | fp8_e4m3 data, e8m0 per-1x32-block scale | Requires SM 100+ (Blackwell or newer) for w8a8, other GPUs use a w8a16 fallback |
-| `mxfp4` | fp4_e2m1 data, e8m0 per-1x32-block scale ([OCP MX specs](https://www.opencompute.org/documents/ocp-microscaling-formats-mx-v1-0-spec-final-pdf)) | dynamic FP8/MXFP8/MXFP4 available on some backends, or BF16 | Linear and MoE weight kernel backend is auto-selected per platform (Marlin, FlashInfer, DeepGEMM, aiter on ROCm); use `--moe-backend`/`--linear-backend` to pin one and `quantization_config.moe.activation` to select a non-default activation format. Static-scale activation backends (e.g. MOE `AITER_MXFP4_FP8`) require checkpoint-calibrated scales and are not available online |
+| `mxfp4` | fp4_e2m1 data, e8m0 per-1x32-block scale ([OCP MX specs](https://www.opencompute.org/documents/ocp-microscaling-formats-mx-v1-0-spec-final-pdf)) | - linear: fp4_e2m1 data, e8m0 per-1x32-block scale in some backends, or BF16. <br> - MOE: fp4_e2m1 data, e8m0 per-1x32-block scale. | Linear MXFP4 backend is auto-selected per platform, not enforcing activation dtype. Some use BF16 activation. Use `--linear-backend` to pin one (e.g. `--linear-backend flashinfer`). |
 
 ## Advanced Configuration
 
