@@ -91,7 +91,7 @@ def _convert_req_index_to_global_index_kernel(
 
     # # If token == -1 OR block_id OOB, output 0; else base * BLOCK_SIZE + offset
     out_val = tl.where(
-        is_invalid_tok | (~valid_block), 0, base * BLOCK_SIZE + inblock_off
+        is_invalid_tok | (~valid_block), -1, base * BLOCK_SIZE + inblock_off
     )
     out_ptr_ij = out_ptr + seq_start + indice_id
     out_ptr_ij_mask = (seq_start + indice_id) < seq_end
