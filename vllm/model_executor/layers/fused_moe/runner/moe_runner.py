@@ -298,7 +298,9 @@ class MoERunner(MoERunnerInterface):
         return self.routed_experts.load_weights(weights)
 
     def _select_forward(self) -> Callable:
-        if current_platform.is_tpu() or current_platform.is_cpu():
+        # Use `device_name == "tpu"` so this applies to torchtpu (OOT
+        # plugin) as well as the in-tree TpuPlatform.
+        if current_platform.device_name == "tpu" or current_platform.is_cpu():
             # TODO: Once the OOM issue for the TPU backend is resolved, we
             # will switch to using the moe_forward custom op.
             # Note: CPU doesn't require wrapped _forward_impl.
