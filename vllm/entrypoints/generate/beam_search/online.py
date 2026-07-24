@@ -12,7 +12,11 @@ from vllm.engine.protocol import EngineClient
 from vllm.inputs import EngineInput
 from vllm.lora.request import LoRARequest
 from vllm.renderers import BaseRenderer
-from vllm.sampling_params import BeamSearchParams, SamplingParams
+from vllm.sampling_params import (
+    MAX_LOGPROB_TOKEN_IDS,
+    BeamSearchParams,
+    SamplingParams,
+)
 from vllm.utils import random_uuid
 from vllm.utils.async_utils import collect_from_async_generator
 
@@ -56,13 +60,30 @@ class BeamSearchOnlineMixin(ABC):
 
         tokenized_length = len(prompt_token_ids)
 
-        logprobs_num = 2 * beam_width
-        sampling_params = SamplingParams(
-            logprobs=logprobs_num,
-            max_tokens=1,
-            temperature=temperature,
-            detokenize=False,
+        allowed_token_ids = params.allowed_token_ids
+        allowed_token_ids_set = (
+            set(allowed_token_ids) if allowed_token_ids is not None else None
         )
+        logprobs_num = 2 * beam_width
+        if (
+            allowed_token_ids is not None
+            and len(allowed_token_ids) <= MAX_LOGPROB_TOKEN_IDS
+        ):
+            sampling_params = SamplingParams(
+                max_tokens=1,
+                temperature=temperature,
+                detokenize=False,
+                allowed_token_ids=allowed_token_ids,
+                logprob_token_ids=allowed_token_ids,
+            )
+        else:
+            sampling_params = SamplingParams(
+                logprobs=logprobs_num,
+                max_tokens=1,
+                temperature=temperature,
+                detokenize=False,
+                allowed_token_ids=allowed_token_ids,
+            )
         all_beams = [
             BeamSearchSequence(
                 orig_prompt=prompt,
@@ -127,6 +148,11 @@ class BeamSearchOnlineMixin(ABC):
                 if result.outputs[0].logprobs is not None:
                     logprobs = result.outputs[0].logprobs[0]
                     for token_id, logprob_obj in logprobs.items():
+                        if (
+                            allowed_token_ids_set is not None
+                            and token_id not in allowed_token_ids_set
+                        ):
+                            continue
                         candidate_logprob = (
                             current_beam.cum_logprob + logprob_obj.logprob
                         )
