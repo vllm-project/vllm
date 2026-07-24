@@ -174,6 +174,7 @@ class OpenAIServingChatBatch(OpenAIServingChat):
                 if raw_request is None
                 else await self._get_trace_headers(raw_request.headers)
             )
+            session_id = self._get_session_id(single_request, raw_request)
             generators.append(
                 self.engine_client.generate(
                     engine_prompt,
@@ -183,6 +184,7 @@ class OpenAIServingChatBatch(OpenAIServingChat):
                     trace_headers=trace_headers,
                     priority=request.priority,
                     data_parallel_rank=data_parallel_rank,
+                    session_id=session_id,
                     reasoning_ended=None,
                 )
             )
