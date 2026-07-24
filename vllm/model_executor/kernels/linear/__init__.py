@@ -370,6 +370,7 @@ _POSSIBLE_FP8_BLOCK_KERNELS: dict[
     PlatformEnum.CPU: [
         CPUFp8BlockScaledMMKernel,
     ],
+    # TODO(zufang): to add torch as linear backend
     PlatformEnum.XPU: [
         XPUFp8BlockScaledMMKernel,
         TritonFp8BlockScaledMMKernel,
