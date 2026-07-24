@@ -314,6 +314,10 @@ def _get_tool_schema_from_name_and_params(
     name: str, params: dict[str, Any] | None
 ) -> dict:
     params = params if params else {"type": "object", "properties": {}}
+    # $defs are hoisted to the top-level schema by _get_tool_schema_defs; drop
+    # them from this embedded copy so they are not duplicated per tool.
+    if "$defs" in params:
+        params = {k: v for k, v in params.items() if k != "$defs"}
     return {
         "properties": {
             "name": {"type": "string", "enum": [name]},
@@ -336,7 +340,7 @@ def _get_tool_schema_defs(
         _, params = _extract_tool_info(tool)
         if params is None:
             continue
-        defs = params.pop("$defs", {})
+        defs = params.get("$defs", {})
         for def_name, def_schema in defs.items():
             if def_name in all_defs and all_defs[def_name] != def_schema:
                 raise ValueError(
