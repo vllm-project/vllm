@@ -75,6 +75,33 @@ def test_backend_guidance_rollback_terminated():
     assert grammar.is_terminated()
 
 
+def test_backend_guidance_validate_tokens_ignores_ngram_padding():
+    # ngram_gpu pads unfilled speculative slots with -1. Those negative ids must
+    # not reach the Rust matcher (which raises OverflowError converting them to
+    # unsigned); validate_tokens should truncate at the first -1 and behave like
+    # the unpadded prefix. See https://github.com/vllm-project/vllm/issues/47025.
+    structured_outputs_config = StructuredOutputsConfig(backend="guidance")
+    vllm_config = VllmConfig(structured_outputs_config=structured_outputs_config)
+    tokenizer = AutoTokenizer.from_pretrained(TOKENIZER)
+    backend = GuidanceBackend(vllm_config, tokenizer=tokenizer, vocab_size=50257)
+    grammar = backend.compile_grammar(
+        StructuredOutputOptions.JSON, '{"type": "object"}'
+    )
+
+    valid = tokenizer.encode('{"a"')
+    assert len(valid) >= 1
+
+    # validate_tokens does not advance the parser, so the padded draft must
+    # match validating the unpadded prefix — and crucially must not raise.
+    expected = grammar.validate_tokens(valid)
+    padded = grammar.validate_tokens([*valid, -1, -1])
+    assert padded == expected
+    assert all(t >= 0 for t in padded)
+
+    # A draft that begins with padding yields nothing.
+    assert grammar.validate_tokens([-1, -1]) == []
+
+
 def test_grammar_bitmask_with_specdec():
     tokenizer = AutoTokenizer.from_pretrained(TOKENIZER)
     prompt = tokenizer.encode('{"a": "b"}')
