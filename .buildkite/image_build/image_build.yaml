@@ -81,6 +81,42 @@ steps:
         - exit_status: -10  # Agent was lost
           limit: 2
 
+  - label: ":docker: Build Zen CPU image"
+    key: image-build-zen-cpu
+    # Reuses the shared `-cpu` image as its base, so it must run after the CPU
+    # image build. Without this the zen build races ahead and falls back to
+    # building its own base from scratch.
+    depends_on:
+      - image-build-cpu
+    # Keep this list in sync with .buildkite/hardware_tests/zen.yaml so the zen
+    # image is built exactly when the zen test is scheduled -- the test pulls
+    # this image instead of compiling on the scarce zen5 hardware.
+    source_file_dependencies:
+      - docker/Dockerfile.cpu
+      - vllm/model_executor/layers/utils.py
+      - vllm/platforms/cpu.py
+      - vllm/platforms/__init__.py
+      - tests/model_executor/test_cpu_unquantized_gemm_dispatch.py
+      # - setup.py
+      # - docker/Dockerfile.zen
+      # - .buildkite/scripts/hardware_ci/run-zen-cpu-test.sh
+      # - requirements/cpu.txt
+      # - requirements/build/cpu.txt
+      # - csrc/cpu/
+      # - cmake/cpu_extension.cmake
+      # - CMakeLists.txt
+      # - vllm/platforms/zen_cpu.py
+    commands:
+    - .buildkite/image_build/image_build_zen_cpu.sh $REGISTRY $REPO $BUILDKITE_COMMIT
+    env:
+      DOCKER_BUILDKIT: "1"
+    retry:
+      automatic:
+        - exit_status: -1  # Agent was lost
+          limit: 2
+        - exit_status: -10  # Agent was lost
+          limit: 2
+
   - label: ":docker: Build HPU image"
     soft_fail: true
     depends_on: []
