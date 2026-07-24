@@ -50,7 +50,7 @@ class Step3p5AMultiTokenPredictorLayer(nn.Module):
         prefix: str,
     ) -> None:
         super().__init__()
-        config = vllm_config.model_config.hf_config
+        config = vllm_config.model_config.hf_config.get_text_config()
         quant_config = vllm_config.quant_config
         self.enorm = GemmaRMSNorm(config.hidden_size, config.rms_norm_eps)
         self.hnorm = GemmaRMSNorm(config.hidden_size, config.rms_norm_eps)
@@ -84,7 +84,7 @@ class Step3p5AMultiTokenPredictorLayer(nn.Module):
 class Step3p5AMultiTokenPredictor(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
-        config = vllm_config.model_config.hf_config
+        config = vllm_config.model_config.hf_config.get_text_config()
         self.embed_tokens = VocabParallelEmbedding(
             config.vocab_size,
             config.hidden_size,
@@ -145,10 +145,17 @@ class Step3p5AMultiTokenPredictor(nn.Module):
 class Step3p5MTP(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
-        self.config = vllm_config.model_config.hf_config
+        self.config = vllm_config.model_config.hf_config.get_text_config()
         self.vllm_config = vllm_config
+        # For VLM targets (Step-3.7 / Step3p7), the MTP drafter's modules live
+        # under ``language_model.model`` in the checkpoint. Prefix them the same
+        # way so the drafter's weight names and its entries in the (VLM-qualified)
+        # quantization exclusion list line up. Otherwise the drafter's excluded
+        # projections (e.g. the head-wise ``g_proj``) are wrongly FP8-block-quantized
+        # and fail to build on Model Runner V2.
         self.model = Step3p5AMultiTokenPredictor(
-            vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
+            vllm_config=vllm_config,
+            prefix=maybe_prefix(prefix, "language_model.model"),
         )
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:

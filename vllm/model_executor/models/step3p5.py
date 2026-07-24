@@ -304,7 +304,7 @@ class FusedMoEBlock(nn.Module):
 
         self.ep_size = get_ep_group().device_group.size()
         self.ep_rank = get_ep_group().device_group.rank()
-        config = vllm_config.model_config.hf_config
+        config = vllm_config.model_config.hf_config.get_text_config()
         quant_config = vllm_config.quant_config
         parallel_config = vllm_config.parallel_config
 
@@ -420,7 +420,7 @@ class Step3p5DecoderLayer(nn.Module):
         prefix: str = "",
     ) -> None:
         super().__init__()
-        config = vllm_config.model_config.hf_config
+        config = vllm_config.model_config.hf_config.get_text_config()
         self.hidden_size = config.hidden_size
         layer_idx = extract_layer_index(prefix)
         self.layer_idx = layer_idx
@@ -551,7 +551,7 @@ class Step3p5Model(nn.Module):
         super().__init__()
 
         self.vllm_config = vllm_config
-        config = vllm_config.model_config.hf_config
+        config = vllm_config.model_config.hf_config.get_text_config()
         self.vocab_size = config.vocab_size
         self.config = config
 
@@ -900,7 +900,7 @@ class Step3p5ForCausalLM(nn.Module, SupportsPP, MixtureOfExperts):
         prefix: str = "",
     ):
         super().__init__()
-        config = vllm_config.model_config.hf_config
+        config = vllm_config.model_config.hf_config.get_text_config()
         self.model = Step3p5Model(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
