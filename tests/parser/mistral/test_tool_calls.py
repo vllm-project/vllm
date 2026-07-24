@@ -1103,9 +1103,9 @@ def test_mistral_parser_drops_eos_from_output(mistral_tokenizer):
     """EOS token must never surface as content/reasoning; literal EOS string
     must be preserved when the EOS token id is absent.
 
+    The engine drops special tokens by id, so:
     Case A: the real EOS token id causes the text to be dropped.
-    Case B: the same EOS string with a non-EOS token id is preserved —
-    this is the point of the structural (id-gated) fix.
+    Case B: the same EOS string with a non-EOS token id is preserved.
     """
     if not isinstance(mistral_tokenizer, MistralTokenizer):
         pytest.skip("Requires MistralTokenizer")
@@ -2069,3 +2069,155 @@ def test_reasoning_active_no_think_block_no_leak(
         for tc_id, name, args in zip(tool_call_ids, function_names, function_args_strs)
     ]
     assert_tool_calls(actual_tool_calls, expected_tool_calls)
+
+
+# ---------------------------------------------------------------------------
+# Pre-v11 guided schema injection and bare-array extraction tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "tool_choice,expected_items_count",
+    [
+        ("required", 2),  # all tools
+        (
+            {"type": "function", "function": {"name": "get_weather"}},
+            1,
+        ),  # named: single tool
+    ],
+    ids=["required", "named"],
+)
+def test_adjust_request_pre_v11_guided_schema_injected(
+    mistral_pre_v11_tool_parser: MistralToolParser,
+    tool_choice: object,
+    expected_items_count: int,
+) -> None:
+    request = _make_request(tool_choice=tool_choice)
+    result = mistral_pre_v11_tool_parser.adjust_request(request)
+
+    assert result.structured_outputs is not None
+    schema = result.structured_outputs.json
+    if isinstance(schema, str):
+        schema = json.loads(schema)
+    assert schema["type"] == "array"
+    assert schema["minItems"] == 1
+    items = schema["items"]
+    assert "anyOf" in items
+    assert len(items["anyOf"]) == expected_items_count
+    for entry in items["anyOf"]:
+        props = entry["properties"]
+        assert "name" in props
+        assert "arguments" in props
+
+
+@pytest.mark.parametrize(
+    "tool_choice",
+    ["auto", "none"],
+    ids=["auto", "none"],
+)
+def test_adjust_request_pre_v11_no_injection_for_auto_none(
+    mistral_pre_v11_tool_parser: MistralToolParser,
+    tool_choice: str,
+) -> None:
+    request = _make_request(tool_choice=tool_choice)
+    result = mistral_pre_v11_tool_parser.adjust_request(request)
+
+    assert result.structured_outputs is None
+
+
+def test_legacy_extract_tool_calls_guided_bare_array_required(
+    mistral_pre_v11_tool_parser: MistralToolParser,
+) -> None:
+    model_output = '[{"name": "get_current_weather", "arguments": {"city": "Dallas"}}]'
+    request = _make_request(tool_choice="required")
+
+    result = mistral_pre_v11_tool_parser.extract_tool_calls(
+        model_output, request=request
+    )
+
+    assert result.tools_called
+    assert len(result.tool_calls) == 1
+    tc = result.tool_calls[0]
+    assert tc.function.name == "get_current_weather"
+    assert json.loads(tc.function.arguments) == {"city": "Dallas"}
+    assert isinstance(tc.id, str)
+    assert len(tc.id) == 9
+    assert result.content is None
+
+
+def test_legacy_extract_tool_calls_none_with_tools(
+    mistral_pre_v11_tool_parser: MistralToolParser,
+) -> None:
+    model_output = (
+        '[TOOL_CALLS] [{"name": "get_current_weather",'
+        ' "arguments": {"city": "Dallas"}}]'
+    )
+    request = _make_request(tool_choice="none")
+
+    result = mistral_pre_v11_tool_parser.extract_tool_calls(
+        model_output, request=request
+    )
+
+    assert not result.tools_called
+    assert result.tool_calls == []
+    assert result.content == model_output
+
+
+def test_guided_streaming_required_pre_v11(
+    mistral_pre_v11_tool_parser: MistralToolParser,
+    mistral_pre_v11_tokenizer,
+) -> None:
+    model_output = '[{"name": "get_current_weather", "arguments": {"city": "Dallas"}}]'
+    request = _make_request(tool_choice="required")
+    all_token_ids = mistral_pre_v11_tokenizer.encode(
+        model_output, add_special_tokens=False
+    )
+
+    function_name: str | None = None
+    function_args = ""
+    tool_call_id: str | None = None
+    previous_text = ""
+    previous_tokens = None
+    prefix_offset = 0
+    read_offset = 0
+
+    for i, token_id in enumerate(all_token_ids):
+        (new_tokens, delta_text, prefix_offset, read_offset) = detokenize_incrementally(
+            tokenizer=mistral_pre_v11_tokenizer,
+            all_input_ids=all_token_ids[: i + 1],
+            prev_tokens=previous_tokens,
+            prefix_offset=prefix_offset,
+            read_offset=read_offset,
+            skip_special_tokens=False,
+            spaces_between_special_tokens=True,
+        )
+        previous_tokens = (
+            (previous_tokens + new_tokens) if previous_tokens else new_tokens
+        )
+        current_text = previous_text + delta_text
+
+        delta_message = mistral_pre_v11_tool_parser.extract_tool_calls_streaming(
+            previous_text=previous_text,
+            current_text=current_text,
+            delta_text=delta_text,
+            previous_token_ids=all_token_ids[:i],
+            current_token_ids=all_token_ids[: i + 1],
+            delta_token_ids=[token_id],
+            request=request,
+        )
+        previous_text = current_text
+
+        if delta_message and delta_message.tool_calls:
+            for tc in delta_message.tool_calls:
+                if tc.id and not tool_call_id:
+                    tool_call_id = tc.id
+                if tc.function:
+                    if tc.function.name:
+                        function_name = tc.function.name
+                    if tc.function.arguments:
+                        function_args += tc.function.arguments
+
+    assert function_name == "get_current_weather"
+    assert tool_call_id is not None
+    assert len(tool_call_id) == 9
+    assert json.loads(function_args) == {"city": "Dallas"}

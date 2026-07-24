@@ -28,6 +28,9 @@ from mistral_common.protocol.instruct.tool_calls import (
 from mistral_common.tokens.tokenizers.base import SpecialTokens
 from pydantic import Field
 
+from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionNamedToolChoiceParam,
+)
 from vllm.entrypoints.openai.engine.protocol import (
     DeltaFunctionCall,
     DeltaMessage,
@@ -277,16 +280,6 @@ class MistralParser(ParserEngine):
 
         self._tool_calls_token_id: int | None = self.vocab.get(_TOOL_CALLS)
 
-        # EOS stripped in _feed by token id; keep text for the endswith check.
-        eos_id = getattr(tokenizer, "eos_token_id", None)
-        self._eos_id: int | None = eos_id
-        self._eos_text: str | None = None
-        if eos_id is not None:
-            try:
-                self._eos_text = tokenizer.decode([eos_id]) or None
-            except Exception:
-                self._eos_text = None
-
         # Tool calls use the legacy parser for all tokenizer versions;
         # reasoning is handled by the engine.
         self.bot_token: str = _TOOL_CALLS
@@ -312,19 +305,6 @@ class MistralParser(ParserEngine):
                 self.update_stream_state_pre_v11_tokenizer()
             )
         self.tool_call_regex = re.compile(r"\[{.*}\]", re.DOTALL)
-
-    def _feed(
-        self,
-        delta_text: str,
-        delta_token_ids: Sequence[int],
-    ) -> list[SemanticEvent]:
-        # EOS is a stop token, not output; strip it before the engine emits it.
-        if self._eos_id is not None and self._eos_id in delta_token_ids:
-            new_ids = [tid for tid in delta_token_ids if tid != self._eos_id]
-            if self._eos_text and delta_text.endswith(self._eos_text):
-                delta_text = delta_text[: -len(self._eos_text)]
-            return super()._feed(delta_text, new_ids)
-        return super()._feed(delta_text, delta_token_ids)
 
     def adjust_request(
         self, request: ChatCompletionRequest | ResponsesRequest
@@ -362,6 +342,28 @@ class MistralParser(ParserEngine):
                 # Keep special tokens so the [TOOL_CALLS] marker
                 # survives for tool detection.
                 request.skip_special_tokens = False
+            # Inject a guided JSON schema for pre-v11 required/named tool choice
+            # so the model emits a well-formed bare JSON array instead of rambling.
+            if (
+                is_mistral_tokenizer(self.model_tokenizer)
+                and not self.model_tokenizer.supports_grammar
+                and not isinstance(request, ResponsesRequest)
+                and request.tools
+                and request.structured_outputs is None
+                and (
+                    request.response_format is None
+                    or request.response_format.type == "text"
+                )
+            ):
+                req_tool_choice = request.tool_choice
+                if req_tool_choice == "required" or isinstance(
+                    req_tool_choice, ChatCompletionNamedToolChoiceParam
+                ):
+                    schema = self._build_guided_schema_pre_v11(request)
+                    if schema is not None:
+                        request.structured_outputs = StructuredOutputsParams(
+                            json=schema
+                        )
             return request
 
         json_schema: dict[str, Any] | None = None
@@ -441,6 +443,65 @@ class MistralParser(ParserEngine):
         request._grammar_from_parser = True
         return request
 
+    def _build_guided_schema_pre_v11(
+        self,
+        request: ChatCompletionRequest,
+    ) -> dict[str, Any] | None:
+        """Build a guided JSON schema for pre-v11 required/named tool choice.
+
+        The schema enforces the Mistral-native array format
+        ``[{"name": ..., "arguments": {...}}]`` so the model emits a parseable
+        bare JSON array instead of free-form text.
+
+        Args:
+            request: The chat completion request carrying `tools` and
+                `tool_choice`.
+
+        Returns:
+            A JSON Schema dict, or ``None`` if the named tool is not found.
+        """
+        tool_choice = request.tool_choice
+        tools = request.tools or []
+        extra: dict[str, Any] = {}
+
+        if tool_choice == "required":
+            applicable_tools = tools
+        else:
+            # Named tool choice — restrict to the single requested tool.
+            assert isinstance(tool_choice, ChatCompletionNamedToolChoiceParam)
+            chosen_name = tool_choice.function.name
+            applicable_tools = [t for t in tools if t.function.name == chosen_name]
+            if not applicable_tools:
+                logger.warning(
+                    "Named tool %r not found in tools list; "
+                    "skipping guided schema injection.",
+                    chosen_name,
+                )
+                return None
+            extra["maxItems"] = 1
+
+        any_of = [
+            {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "enum": [tool.function.name]},
+                    "arguments": tool.function.parameters or {"type": "object"},
+                },
+                "required": ["name", "arguments"],
+            }
+            for tool in applicable_tools
+        ]
+
+        return {
+            "type": "array",
+            "minItems": 1,
+            **extra,
+            "items": {
+                "type": "object",
+                "anyOf": any_of,
+            },
+        }
+
     def _ensure_tool_id(self, slot: ToolCallSlot, name: str) -> None:
         """Assign a Mistral-compatible 9-char alphanumeric id to `slot`."""
         if not slot.id:
@@ -462,24 +523,36 @@ class MistralParser(ParserEngine):
     ) -> ExtractedToolCallInformation:
         """Pre-v11 non-streaming extraction.
 
-        Handles the ``[TOOL_CALLS][{...}]`` JSON-array format.
+        Handles ``[TOOL_CALLS][{...}]`` and guided bare-array formats.
         """
-        if self.bot_token not in model_output:
+        # tool_choice="none" with tools: never produce tool calls.
+        if request.tool_choice == "none" and request.tools:
             return ExtractedToolCallInformation(
                 tools_called=False, tool_calls=[], content=model_output
             )
 
-        content_and_raw_tool_calls = model_output.split(self.bot_token)
-        content = content_and_raw_tool_calls[0]
-        raw_tool_calls = content_and_raw_tool_calls[1:]
-
-        # pre-v11: content[BOT] [{tool_call1},{tool_call2}]
-        if len(raw_tool_calls) != 1:
-            raise ValueError(
-                "Only one BOT token should have been outputted, "
-                f"but got {model_output}."
+        content: str | None = None
+        if self.bot_token in model_output:
+            content_and_raw_tool_calls = model_output.split(self.bot_token)
+            content = content_and_raw_tool_calls[0]
+            raw_tool_calls = content_and_raw_tool_calls[1:]
+            # pre-v11: content[BOT] [{tool_call1},{tool_call2}]
+            if len(raw_tool_calls) != 1:
+                raise ValueError(
+                    "Only one BOT token should have been outputted, "
+                    f"but got {model_output}."
+                )
+            stringified_tool_calls = raw_tool_calls[0].strip()
+        elif request.tool_choice == "required" or isinstance(
+            request.tool_choice, ChatCompletionNamedToolChoiceParam
+        ):
+            # Guided bare-array output (no [TOOL_CALLS] marker).
+            stringified_tool_calls = model_output.strip()
+        else:
+            return ExtractedToolCallInformation(
+                tools_called=False, tool_calls=[], content=model_output
             )
-        stringified_tool_calls = raw_tool_calls[0].strip()
+
         try:
             # Use raw_decode to parse the first valid JSON value,
             # ignoring trailing tokens the model may emit after
@@ -532,7 +605,7 @@ class MistralParser(ParserEngine):
         return ExtractedToolCallInformation(
             tools_called=True,
             tool_calls=mistral_tool_calls,
-            content=content if content.strip() else None,
+            content=content if content and content.strip() else None,
         )
 
     def extract_tool_calls_streaming(
@@ -555,9 +628,16 @@ class MistralParser(ParserEngine):
                 delta_token_ids,
                 request,
             )
-        # Pre-v11: latch on [TOOL_CALLS] then delegate to legacy state machine.
+        # Pre-v11: latch on [TOOL_CALLS] or on the first content of a guided
+        # required/named request (bare JSON array, no special token).
         if self.bot_token_id in delta_token_ids or self.bot_token in delta_text:
             self.tool_call_started = True
+        elif not self.tool_call_started and delta_text:
+            is_guided = request.tool_choice == "required" or isinstance(
+                request.tool_choice, ChatCompletionNamedToolChoiceParam
+            )
+            if is_guided:
+                self.tool_call_started = True
         if not self.tool_call_started:
             return DeltaMessage(content=delta_text)
         try:
