@@ -52,6 +52,9 @@ class TorchFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         # https://github.com/vllm-project/vllm/issues/32269
         vllm_config = get_current_vllm_config().compilation_config
         pad_output = vllm_config.mode < CompilationMode.VLLM_COMPILE
+        # Guard against zero division in downstream scaling (e.g., deepgemm_post_process_fp8_weight_block)
+        if pad_output and self.weight_scale is not None and self.weight_scale.numel() == 0:
+            return None
         return 17 if pad_output else None
 
 
