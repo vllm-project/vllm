@@ -408,6 +408,30 @@ def test_offloading_config_preserves_data_parallel_index():
     assert offloading_config.parallel.data_parallel_index == 2
 
 
+@pytest.mark.parametrize(
+    ("model_dtype", "expected_dtype"),
+    [(torch.float16, "float16"), (torch.bfloat16, "bfloat16")],
+)
+def test_offloading_config_resolves_auto_cache_dtype(
+    model_dtype: torch.dtype, expected_dtype: str
+):
+    config = _make_vllm_config()
+    config.model_config.dtype = model_dtype
+
+    offloading_config = build_offloading_config(config, _make_kv_cache_config())
+
+    assert offloading_config.model.dtype == expected_dtype
+
+
+def test_offloading_config_preserves_explicit_cache_dtype():
+    config = _make_vllm_config()
+    config.cache_config.cache_dtype = "fp8_e4m3"
+
+    offloading_config = build_offloading_config(config, _make_kv_cache_config())
+
+    assert offloading_config.model.dtype == "fp8_e4m3"
+
+
 def test_offloading_spec_resolves_heterogeneous_hybrid_block_sizes():
     config = _make_layout_vllm_config(cpu_bytes_to_use=65536)
     config.cache_config.block_size = 4
