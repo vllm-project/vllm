@@ -183,23 +183,30 @@ def test_merge_attn_states(
     input_dtype: torch.dtype,
     use_fp8: bool,
 ):
-    if not current_platform.is_cuda():
+    # On XPU, compare Triton kernel against PyTorch reference
+    # (XPU lacks the custom CUDA kernel)
+    is_xpu = current_platform.is_xpu()
+    if not current_platform.is_cuda() and not is_xpu:
         pytest.skip(
-            "Currently only support compare triton merge_attn_states "
-            "with custom cuda merge_attn_states kernel"
+            "Test requires CUDA (Triton vs CUDA kernel) or XPU (Triton vs PyTorch)"
         )
 
     NUM_TOKENS = num_tokens
     NUM_HEADS = num_query_heads
     HEAD_SIZE = head_size
 
+    # On XPU, FP8 KV-cache is not yet supported; skip those test cases.
+    if is_xpu and use_fp8:
+        pytest.skip("FP8 KV-cache not yet supported on XPU")
+
     # When use_fp8 is set, inputs stay as input_dtype (bf16/fp16/fp32)
     # and output becomes FP8.
     output_dtype = input_dtype
     output_scale = None
+    device = current_platform.device_type
     if use_fp8:
         output_dtype = current_platform.fp8_dtype()
-        output_scale = torch.tensor([0.05], dtype=torch.float32, device="cuda")
+        output_scale = torch.tensor([0.05], dtype=torch.float32, device=device)
 
     print(
         f"\nNUM_TOKENS:{NUM_TOKENS}, NUM_HEADS:{NUM_HEADS}, "
@@ -210,8 +217,8 @@ def test_merge_attn_states(
     )
 
     # prefix_lse and suffix_lse contain inf and normal values
-    prefix_lse = torch.randn(NUM_HEADS, NUM_TOKENS, dtype=torch.float32, device="cuda")
-    suffix_lse = torch.randn(NUM_HEADS, NUM_TOKENS, dtype=torch.float32, device="cuda")
+    prefix_lse = torch.randn(NUM_HEADS, NUM_TOKENS, dtype=torch.float32, device=device)
+    suffix_lse = torch.randn(NUM_HEADS, NUM_TOKENS, dtype=torch.float32, device=device)
 
     # Generate boolean masks
     mask_prefix = torch.rand(NUM_HEADS, NUM_TOKENS) < 0.1
@@ -227,16 +234,16 @@ def test_merge_attn_states(
     # Other input tensors (need to be initialized but
     # no actual calculation needed)
     output = torch.zeros(
-        (NUM_TOKENS, NUM_HEADS, HEAD_SIZE), dtype=output_dtype, device="cuda"
+        (NUM_TOKENS, NUM_HEADS, HEAD_SIZE), dtype=output_dtype, device=device
     )
     output_lse = torch.zeros(
-        (NUM_HEADS, NUM_TOKENS), dtype=torch.float32, device="cuda"
+        (NUM_HEADS, NUM_TOKENS), dtype=torch.float32, device=device
     )
     prefix_output = torch.randn(
-        (NUM_TOKENS, NUM_HEADS, HEAD_SIZE), dtype=input_dtype, device="cuda"
+        (NUM_TOKENS, NUM_HEADS, HEAD_SIZE), dtype=input_dtype, device=device
     )
     suffix_output = torch.randn(
-        (NUM_TOKENS, NUM_HEADS, HEAD_SIZE), dtype=input_dtype, device="cuda"
+        (NUM_TOKENS, NUM_HEADS, HEAD_SIZE), dtype=input_dtype, device=device
     )
 
     warmup_times = 2
@@ -321,50 +328,63 @@ def test_merge_attn_states(
 
     avg_time_triton_kernel = total_time_triton_kernel / repeat_times
 
-    # 2. Run the CUDA kernel
-    total_time_cuda_kernel = 0
-    output_cuda = output.clone()
-    output_lse_cuda = output_lse.clone()
+    # 2. Run the CUDA kernel (or skip on XPU)
+    if is_xpu:
+        # On XPU, the custom CUDA kernel is unavailable; compare Triton
+        # against PyTorch reference only.
+        output_cuda = output_torch
+        output_lse_cuda = output_lse_torch
+        avg_time_cuda_kernel = avg_time_torch_kernel
+    else:
+        total_time_cuda_kernel = 0
+        output_cuda = output.clone()
+        output_lse_cuda = output_lse.clone()
 
-    for _ in range(warmup_times):
-        merge_attn_states_cuda(
-            output_cuda,
-            prefix_output,
-            prefix_lse,
-            suffix_output,
-            suffix_lse,
-            output_lse_cuda,
-            prefill_tokens_with_context,
-            output_scale,
-        )
-    torch.accelerator.synchronize()
-
-    for _ in range(repeat_times):
-        start.record()
-        merge_attn_states_cuda(
-            output_cuda,
-            prefix_output,
-            prefix_lse,
-            suffix_output,
-            suffix_lse,
-            output_lse_cuda,
-            prefill_tokens_with_context,
-            output_scale,
-        )
-        end.record()
+        for _ in range(warmup_times):
+            merge_attn_states_cuda(
+                output_cuda,
+                prefix_output,
+                prefix_lse,
+                suffix_output,
+                suffix_lse,
+                output_lse_cuda,
+                prefill_tokens_with_context,
+                output_scale,
+            )
         torch.accelerator.synchronize()
-        total_time_cuda_kernel += start.elapsed_time(end)
 
-    avg_time_cuda_kernel = total_time_cuda_kernel / repeat_times
+        for _ in range(repeat_times):
+            start.record()
+            merge_attn_states_cuda(
+                output_cuda,
+                prefix_output,
+                prefix_lse,
+                suffix_output,
+                suffix_lse,
+                output_lse_cuda,
+                prefill_tokens_with_context,
+                output_scale,
+            )
+            end.record()
+            torch.accelerator.synchronize()
+            total_time_cuda_kernel += start.elapsed_time(end)
+
+        avg_time_cuda_kernel = total_time_cuda_kernel / repeat_times
 
     # 3. Performance compare
-    performance_improved = avg_time_triton_kernel / avg_time_cuda_kernel
-    print(f" Torch time: {avg_time_torch_kernel:.6f}ms")
-    print(f"Triton time: {avg_time_triton_kernel:.6f}ms")
-    print(
-        f"  CUDA time: {avg_time_cuda_kernel:.6f}ms, "
-        f"Performance: {performance_improved:.5f}x"
-    )
+    if is_xpu:
+        print(f" Torch time: {avg_time_torch_kernel:.6f}ms")
+        print(f"Triton time: {avg_time_triton_kernel:.6f}ms")
+        performance_improved = avg_time_torch_kernel / avg_time_triton_kernel
+        print(f"Performance (Triton vs Torch): {performance_improved:.5f}x")
+    else:
+        performance_improved = avg_time_triton_kernel / avg_time_cuda_kernel
+        print(f" Torch time: {avg_time_torch_kernel:.6f}ms")
+        print(f"Triton time: {avg_time_triton_kernel:.6f}ms")
+        print(
+            f"  CUDA time: {avg_time_cuda_kernel:.6f}ms, "
+            f"Performance: {performance_improved:.5f}x"
+        )
     print("-" * 100)
 
     # 4. Correctness compare
@@ -389,37 +409,59 @@ def test_merge_attn_states(
         max_diff = torch.max(torch.abs(a.float() - b.float()))
         return max_diff
 
-    # Use Triton output as reference because we want to replace
-    # the Triton kernel with custom CUDA kernel for merge attn
-    # states operation.
-    output_ref = output_ref_triton
-    output_lse_ref = output_lse_ref_triton
-    torch.testing.assert_close(
-        output_cuda.float() * scale,
-        output_ref.float() * scale,
-        atol=atol,
-        rtol=rtol,
-    )
+    # On CUDA: Use Triton output as reference because we want to replace
+    # the Triton kernel with custom CUDA kernel for merge attn states.
+    # On XPU: Use PyTorch reference as oracle (no CUDA kernel available).
+    if is_xpu:
+        output_ref = output_torch
+        output_lse_ref = output_lse_torch
+        # Compare Triton kernel against PyTorch reference
+        torch.testing.assert_close(
+            output_ref_triton.float() * scale,
+            output_ref.float() * scale,
+            atol=atol,
+            rtol=rtol,
+        )
+    else:
+        output_ref = output_ref_triton
+        output_lse_ref = output_lse_ref_triton
+        torch.testing.assert_close(
+            output_cuda.float() * scale,
+            output_ref.float() * scale,
+            atol=atol,
+            rtol=rtol,
+        )
     print(
         "Output all match, max abs diff (dequantized):"
         if use_fp8
         else "Output all match, max abs diff:"
     )
-    _diff = diff(output_ref.float() * scale, output_torch.float() * scale)
-    print(f"(Triton vs Torch) : {_diff}")
-    _diff = diff(output_torch.float() * scale, output_cuda.float() * scale)
-    print(f"  (CUDA vs Torch) : {_diff}")
-    _diff = diff(output_ref.float() * scale, output_cuda.float() * scale)
-    print(f"  (CUDA vs Triton): {_diff}")
+    if is_xpu:
+        _diff = diff(output_ref_triton.float() * scale, output_torch.float() * scale)
+        print(f"(Triton vs Torch): {_diff}")
+    else:
+        _diff = diff(output_ref.float() * scale, output_torch.float() * scale)
+        print(f"(Triton vs Torch) : {_diff}")
+        _diff = diff(output_torch.float() * scale, output_cuda.float() * scale)
+        print(f"  (CUDA vs Torch) : {_diff}")
+        _diff = diff(output_ref.float() * scale, output_cuda.float() * scale)
+        print(f"  (CUDA vs Triton): {_diff}")
     print("-" * 100)
 
-    torch.testing.assert_close(
-        output_lse_cuda.float(), output_lse_ref.float(), atol=atol, rtol=rtol
-    )
-    print("Output LSE all match, max abs diff:")
-    print(f"(Triton vs Torch) : {diff(output_lse_torch, output_lse_ref)}")
-    print(f"  (CUDA vs Torch) : {diff(output_lse_torch, output_lse_cuda)}")
-    print(f"  (CUDA vs Triton): {diff(output_lse_ref, output_lse_cuda)}")
+    if is_xpu:
+        torch.testing.assert_close(
+            output_lse_ref_triton.float(), output_lse_ref.float(), atol=atol, rtol=rtol
+        )
+        print("Output LSE all match, max abs diff:")
+        print(f"(Triton vs Torch): {diff(output_lse_torch, output_lse_ref_triton)}")
+    else:
+        torch.testing.assert_close(
+            output_lse_cuda.float(), output_lse_ref.float(), atol=atol, rtol=rtol
+        )
+        print("Output LSE all match, max abs diff:")
+        print(f"(Triton vs Torch) : {diff(output_lse_torch, output_lse_ref)}")
+        print(f"  (CUDA vs Torch) : {diff(output_lse_torch, output_lse_cuda)}")
+        print(f"  (CUDA vs Triton): {diff(output_lse_ref, output_lse_cuda)}")
     print("-" * 100)
 
     print(
