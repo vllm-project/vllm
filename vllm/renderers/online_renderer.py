@@ -387,6 +387,12 @@ class OnlineRenderer:
         # Exception: Mistral grammar-capable tokenizers always call
         # adjust_request — even for tool_choice="none" — so that the grammar
         # factory can prevent special-token leakage.
+        #
+        # Further exception (see `elif` below): if tool_choice is "none"
+        # only because this request didn't repeat `tools`/`tool_choice`,
+        # while `messages` shows the conversation already used tool
+        # calling, we still guard against special-token leakage without
+        # running the rest of adjust_request.
         if parser is not None:
             tokenizer = renderer.get_tokenizer()
             tool_parser = parser.tool_parser_cls
@@ -418,5 +424,39 @@ class OnlineRenderer:
                 ).adjust_request(
                     request=request,
                 )
+            elif tool_parser is not None and _conversation_used_tool_calls(request):
+                # `tool_choice` is "none" here, which normally means this
+                # request never touches tool calling and `adjust_request`
+                # (and its `skip_special_tokens = False`) is skipped on
+                # purpose. But an agent loop can drop `tools`/`tool_choice`
+                # on a later turn while `messages` still carries earlier
+                # tool_calls/tool results — the model keeps trying to emit
+                # its native tool-call framing from that context regardless
+                # of what the current request declared. For formats where
+                # that framing relies on tokens the tokenizer treats as
+                # "special" (DeepSeek, Kimi, Hermes, ...), leaving the
+                # default `skip_special_tokens=True` corrupts those tokens
+                # on decode instead of cleanly parsing or omitting them,
+                # and the raw garbled framing leaks into `content`. We
+                # don't run the full `adjust_request` (no `tools` here to
+                # derive a structured-output grammar from), just apply the
+                # same special-token protection it would have applied.
+                request.skip_special_tokens = False
 
         return conversation, [engine_input]
+
+
+def _conversation_used_tool_calls(request: Any) -> bool:
+    """True if `request.messages` shows this conversation already exercised
+    tool calling (a prior assistant `tool_calls` or a `tool`-role message),
+    even though the current request omits `tools`/`tool_choice`."""
+    messages = getattr(request, "messages", None)
+    if not messages:
+        return False
+    for message in messages:
+        role = message.get("role") if isinstance(message, dict) else None
+        if role == "tool":
+            return True
+        if role == "assistant" and message.get("tool_calls"):
+            return True
+    return False
