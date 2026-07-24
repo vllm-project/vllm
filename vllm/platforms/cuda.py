@@ -663,7 +663,22 @@ class CudaPlatformBase(Platform):
 
     @classmethod
     def support_deep_gemm(cls) -> bool:
-        """Currently, only Hopper and Blackwell GPUs are supported."""
+        """Check if DeepGEMM is supported on the current platform.
+
+        Discrete Hopper and Blackwell GPUs are supported. GH200 (SM 9.0
+        integrated GPU with UMA) is excluded because DeepGEMM JIT kernels
+        fail on this platform. See GH issue #49158.
+        """
+        # FIXME: This is a temporary workaround for a DeepGEMM bug: its JIT
+        # kernels trigger illegal memory accesses on GH200 (SM 9.0 integrated
+        # GPU / UMA). Remove this check once DeepGEMM upstream fixes GH200
+        # support. See vllm-project/vllm#49158.
+        if cls.is_device_capability(90) and cls.is_integrated_gpu():
+            logger.warning_once(
+                "DeepGEMM is disabled on GH200 (SM 9.0 UMA). "
+                "Falling back to alternative FP8 GEMM kernels."
+            )
+            return False
         return (
             cls.is_device_capability(90)
             or cls.is_device_capability_family(100)
