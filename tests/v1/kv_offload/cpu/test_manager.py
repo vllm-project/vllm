@@ -37,6 +37,7 @@ _EMPTY_REQ_CTX = make_req_context()
 def make_cpu_manager(
     num_blocks: int = 4,
     cache_policy: str = "lru",
+    cache_policy_module_path: str | None = None,
     enable_events: bool = False,
     store_threshold: int = 0,
     max_tracker_size: int = 64_000,
@@ -44,6 +45,7 @@ def make_cpu_manager(
     return CPUOffloadingManager(
         num_blocks=num_blocks,
         cache_policy=cache_policy,
+        cache_policy_module_path=cache_policy_module_path,
         enable_events=enable_events,
         store_threshold=store_threshold,
         max_tracker_size=max_tracker_size,
