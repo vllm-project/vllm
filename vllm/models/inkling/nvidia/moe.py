@@ -10,11 +10,10 @@ through vLLM's FusedMoE (which handles TP/EP); the sink experts run in
 activates every sink) and always bf16 (the checkpoint excludes every
 ``shared_experts`` from quantization).
 
-NVFP4 routed experts reuse vLLM's ModelOpt NVFP4 fused-MoE method; excluded
-(bf16) layers fall back to the unquantized method. The checkpoint's fused
-stacked tensors (interleaved gate/up rows, ``.scale`` / ``.scale2`` /
-``.input_amax`` aux tensors) are translated to the standard per-expert loads
-in :meth:`InklingMoE.load_expert_weight`.
+NVFP4 routed experts reuse vLLM's fused-MoE methods; excluded (bf16) layers
+fall back to the unquantized method. Checkpoint fused stacked tensors are
+translated to the standard per-expert loads in
+:meth:`InklingMoE.load_expert_weight`.
 """
 
 from __future__ import annotations
@@ -575,11 +574,21 @@ class InklingMoE(nn.Module):
         lids = [slots[g] for g in gids]
         tp_rank = experts.moe_config.moe_parallel_config.tp_rank
 
-        if key.endswith("_scale_2"):
+        if key.endswith(("_scale_2", "_global_scale")):
             # Per-expert scalars, vectorized over the local experts. The
-            # fused w13 param carries one slot per gate/up half.
-            vals = weight[gids].float().to(param.device)
-            param.data[lids] = vals[:, None] if param.data.ndim == 2 else vals
+            # fused w13 params carry one slot per gate/up half. A single
+            # checkpoint value is shared by both halves.
+            vals = weight[gids].float().reshape(len(gids), -1)
+            target_width = math.prod(param.shape[1:])
+            if vals.shape[1] == 1:
+                vals = vals.expand(-1, target_width)
+            elif vals.shape[1] != target_width:
+                raise ValueError(
+                    f"cannot load {tuple(weight.shape)} into {tuple(param.shape)}"
+                )
+            param.data[lids] = vals.reshape(len(gids), *param.shape[1:]).to(
+                param.device
+            )
         elif key.startswith("w13"):
             # Checkpoint w13 rows are interleaved [g0, u0, g1, u1, ...]; the
             # fused param layout is [w1(gate); w3(up)]. The TP-local rows form

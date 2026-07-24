@@ -14,8 +14,9 @@ steps:
     - pytest -v -s v1/e2e/spec_decode -k "eagle_correctness"
   mirror:
     amd:
-      device: mi325_1
-      timeout_in_minutes: 60
+      dind: false
+      device: mi300_1
+      timeout_in_minutes: 55
       depends_on:
       - image-build-amd
       source_file_dependencies:
@@ -53,8 +54,9 @@ steps:
     - pytest -v -s v1/e2e/spec_decode -k "speculators or mtp_correctness"
   mirror:
     amd:
-      device: mi325_1
-      timeout_in_minutes: 65
+      dind: false
+      device: mi300_1
+      timeout_in_minutes: 75
       depends_on:
       - image-build-amd
       source_file_dependencies:
@@ -92,10 +94,9 @@ steps:
     - pytest -v -s v1/e2e/spec_decode -k "ngram or suffix"
   mirror:
     amd:
-      device: mi325_1
-      timeout_in_minutes: 55
-      # TODO(akaratza): Test after Torch >= 2.12 bump
-      soft_fail: true
+      dind: false
+      device: mi300_1
+      timeout_in_minutes: 35
       depends_on:
       - image-build-amd
       source_file_dependencies:
@@ -119,7 +120,8 @@ steps:
     - pytest -v -s v1/e2e/spec_decode -k "draft_model or no_sync or batch_inference"
   mirror:
     amd:
-      device: mi325_1
+      dind: false
+      device: mi300_1
       timeout_in_minutes: 55
       depends_on:
       - image-build-amd
