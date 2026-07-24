@@ -5,6 +5,8 @@
 import functools
 import json
 import os
+from collections.abc import Iterable
+from dataclasses import dataclass
 from typing import Any
 
 import torch
@@ -28,6 +30,10 @@ from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
 from vllm.model_executor.layers.fused_moe.utils import (
     enable_swap_ab,
     moe_kernel_quantize_input,
+)
+from vllm.model_executor.warmup.jit_warmup import VllmJitKernel
+from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    TritonPointerInputVariant,
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
@@ -58,7 +64,7 @@ def write_zeros_to_output(
     tl.store(c_ptrs, accumulator, mask=c_mask)
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["EM", "num_valid_tokens"])
 def fused_moe_kernel_gptq_awq(
     # Pointers to matrices
     a_ptr,
@@ -584,6 +590,389 @@ def fused_moe_kernel(
     tl.store(c_ptrs, accumulator, mask=c_mask)
 
 
+@dataclass(frozen=True)
+class Wna16TritonWarmupConfig:
+    a_dtype: torch.dtype
+    b_dtype: torch.dtype
+    c_dtype: torch.dtype
+    b_scale_dtype: torch.dtype
+    b_zp_dtype: torch.dtype | None
+    topk_weights_dtype: torch.dtype | None
+    N: int
+    K: int
+    stride_am: int
+    stride_ak: int
+    stride_be: int
+    stride_bk: int
+    stride_bn: int
+    stride_cm: int
+    stride_cn: int
+    stride_bse: int
+    stride_bsk: int
+    stride_bsn: int
+    stride_bze: int
+    stride_bzk: int
+    stride_bzn: int
+    block_k_diviable: bool
+    group_size: int
+    BLOCK_SIZE_M: int
+    BLOCK_SIZE_N: int
+    BLOCK_SIZE_K: int
+    GROUP_SIZE_M: int
+    SPLIT_K: int
+    MUL_ROUTED_WEIGHT: bool
+    top_k: int
+    compute_type: tl.dtype
+    has_zp: bool
+    use_int4_w4a16: bool
+    use_int8_w8a16: bool
+    num_warps: int
+    num_stages: int
+
+
+class Wna16TritonKernel(VllmJitKernel["Wna16TritonKernel.CompileKey"]):
+    @dataclass(frozen=True)
+    class CompileKey:
+        a_dtype: torch.dtype
+        b_dtype: torch.dtype
+        c_dtype: torch.dtype
+        b_scale_dtype: torch.dtype
+        b_zp_dtype: torch.dtype | None
+        topk_weights_dtype: torch.dtype | None
+        input_variant: TritonPointerInputVariant
+        N: int
+        K: int
+        stride_am: int
+        stride_ak: int
+        stride_be: int
+        stride_bk: int
+        stride_bn: int
+        stride_cm: int
+        stride_cn: int
+        stride_bse: int
+        stride_bsk: int
+        stride_bsn: int
+        stride_bze: int
+        stride_bzk: int
+        stride_bzn: int
+        block_k_diviable: bool
+        group_size: int
+        BLOCK_SIZE_M: int
+        BLOCK_SIZE_N: int
+        BLOCK_SIZE_K: int
+        GROUP_SIZE_M: int
+        SPLIT_K: int
+        MUL_ROUTED_WEIGHT: bool
+        top_k: int
+        compute_type: tl.dtype
+        has_zp: bool
+        use_int4_w4a16: bool
+        use_int8_w8a16: bool
+        num_warps: int
+        num_stages: int
+
+    kernel = fused_moe_kernel_gptq_awq
+
+    def dispatch(  # type: ignore[override]
+        self,
+        *,
+        a_dtype: torch.dtype,
+        b_dtype: torch.dtype,
+        c_dtype: torch.dtype,
+        b_scale_dtype: torch.dtype,
+        b_zp_dtype: torch.dtype | None,
+        topk_weights_dtype: torch.dtype | None,
+        a_aligned: bool,
+        b_aligned: bool,
+        c_aligned: bool,
+        b_scale_aligned: bool,
+        b_zp_aligned: bool,
+        topk_weights_aligned: bool,
+        sorted_token_ids_aligned: bool,
+        expert_ids_aligned: bool,
+        num_tokens_post_padded_aligned: bool,
+        N: int,
+        K: int,
+        stride_am: int,
+        stride_ak: int,
+        stride_be: int,
+        stride_bk: int,
+        stride_bn: int,
+        stride_cm: int,
+        stride_cn: int,
+        stride_bse: int,
+        stride_bsk: int,
+        stride_bsn: int,
+        stride_bze: int,
+        stride_bzk: int,
+        stride_bzn: int,
+        block_k_diviable: bool,
+        group_size: int,
+        BLOCK_SIZE_M: int,
+        BLOCK_SIZE_N: int,
+        BLOCK_SIZE_K: int,
+        GROUP_SIZE_M: int,
+        SPLIT_K: int,
+        MUL_ROUTED_WEIGHT: bool,
+        top_k: int,
+        compute_type: tl.dtype,
+        has_zp: bool,
+        use_int4_w4a16: bool,
+        use_int8_w8a16: bool,
+        num_warps: int,
+        num_stages: int,
+    ) -> CompileKey:
+        input_variant = TritonPointerInputVariant.from_alignment(
+            a=a_aligned,
+            b=b_aligned,
+            c=c_aligned,
+            b_scale=b_scale_aligned,
+            b_zp=b_zp_aligned,
+            topk_weights=topk_weights_aligned,
+            sorted_token_ids=sorted_token_ids_aligned,
+            expert_ids=expert_ids_aligned,
+            num_tokens_post_padded=num_tokens_post_padded_aligned,
+        )
+        return self.CompileKey(
+            a_dtype=a_dtype,
+            b_dtype=b_dtype,
+            c_dtype=c_dtype,
+            b_scale_dtype=b_scale_dtype,
+            b_zp_dtype=b_zp_dtype,
+            topk_weights_dtype=topk_weights_dtype,
+            input_variant=input_variant,
+            N=N,
+            K=K,
+            stride_am=stride_am,
+            stride_ak=stride_ak,
+            stride_be=stride_be,
+            stride_bk=stride_bk,
+            stride_bn=stride_bn,
+            stride_cm=stride_cm,
+            stride_cn=stride_cn,
+            stride_bse=stride_bse,
+            stride_bsk=stride_bsk,
+            stride_bsn=stride_bsn,
+            stride_bze=stride_bze,
+            stride_bzk=stride_bzk,
+            stride_bzn=stride_bzn,
+            block_k_diviable=block_k_diviable,
+            group_size=group_size,
+            BLOCK_SIZE_M=BLOCK_SIZE_M,
+            BLOCK_SIZE_N=BLOCK_SIZE_N,
+            BLOCK_SIZE_K=BLOCK_SIZE_K,
+            GROUP_SIZE_M=GROUP_SIZE_M,
+            SPLIT_K=SPLIT_K,
+            MUL_ROUTED_WEIGHT=MUL_ROUTED_WEIGHT,
+            top_k=top_k,
+            compute_type=compute_type,
+            has_zp=has_zp,
+            use_int4_w4a16=use_int4_w4a16,
+            use_int8_w8a16=use_int8_w8a16,
+            num_warps=num_warps,
+            num_stages=num_stages,
+        )
+
+    def get_warmup_keys(
+        self, configs: Iterable[Wna16TritonWarmupConfig]
+    ) -> list[CompileKey]:
+        keys: list[Wna16TritonKernel.CompileKey] = []
+        for config in configs:
+            keys.extend(
+                self._trace_dispatch(self.dispatch)(
+                    **vars(config),
+                    a_aligned=True,
+                    b_aligned=True,
+                    c_aligned=True,
+                    b_scale_aligned=True,
+                    b_zp_aligned=True,
+                    topk_weights_aligned=True,
+                    sorted_token_ids_aligned=True,
+                    expert_ids_aligned=True,
+                    num_tokens_post_padded_aligned=True,
+                )
+            )
+        return list(dict.fromkeys(keys))
+
+    def compile(self, compile_key: CompileKey) -> None:
+        variant = compile_key.input_variant
+        self.kernel.warmup(
+            variant.pointer("a", compile_key.a_dtype),
+            variant.pointer("b", compile_key.b_dtype),
+            variant.pointer("c", compile_key.c_dtype),
+            variant.pointer("b_scale", compile_key.b_scale_dtype),
+            (
+                None
+                if compile_key.b_zp_dtype is None
+                else variant.pointer("b_zp", compile_key.b_zp_dtype)
+            ),
+            (
+                None
+                if compile_key.topk_weights_dtype is None
+                else variant.pointer("topk_weights", compile_key.topk_weights_dtype)
+            ),
+            variant.pointer("sorted_token_ids", torch.int32),
+            variant.pointer("expert_ids", torch.int32),
+            variant.pointer("num_tokens_post_padded", torch.int32),
+            compile_key.N,
+            compile_key.K,
+            1,
+            1,
+            compile_key.stride_am,
+            compile_key.stride_ak,
+            compile_key.stride_be,
+            compile_key.stride_bk,
+            compile_key.stride_bn,
+            compile_key.stride_cm,
+            compile_key.stride_cn,
+            compile_key.stride_bse,
+            compile_key.stride_bsk,
+            compile_key.stride_bsn,
+            compile_key.stride_bze,
+            compile_key.stride_bzk,
+            compile_key.stride_bzn,
+            block_k_diviable=compile_key.block_k_diviable,
+            group_size=compile_key.group_size,
+            BLOCK_SIZE_M=compile_key.BLOCK_SIZE_M,
+            BLOCK_SIZE_N=compile_key.BLOCK_SIZE_N,
+            BLOCK_SIZE_K=compile_key.BLOCK_SIZE_K,
+            GROUP_SIZE_M=compile_key.GROUP_SIZE_M,
+            SPLIT_K=compile_key.SPLIT_K,
+            MUL_ROUTED_WEIGHT=compile_key.MUL_ROUTED_WEIGHT,
+            top_k=compile_key.top_k,
+            compute_type=compile_key.compute_type,
+            has_zp=compile_key.has_zp,
+            use_int4_w4a16=compile_key.use_int4_w4a16,
+            use_int8_w8a16=compile_key.use_int8_w8a16,
+            num_warps=compile_key.num_warps,
+            num_stages=compile_key.num_stages,
+            grid=(1,),
+        )
+
+    def __call__(
+        self,
+        A: torch.Tensor,
+        B: torch.Tensor,
+        C: torch.Tensor,
+        B_scale: torch.Tensor,
+        B_zp: torch.Tensor | None,
+        topk_weights: torch.Tensor | None,
+        sorted_token_ids: torch.Tensor,
+        expert_ids: torch.Tensor,
+        num_tokens_post_padded: torch.Tensor,
+        *,
+        EM: int,
+        num_valid_tokens: int,
+        config: dict[str, int],
+        group_size: int,
+        mul_routed_weight: bool,
+        top_k: int,
+        compute_type: tl.dtype,
+        use_int4_w4a16: bool,
+        use_int8_w8a16: bool,
+    ) -> None:
+        key = self.dispatch(
+            a_dtype=A.dtype,
+            b_dtype=B.dtype,
+            c_dtype=C.dtype,
+            b_scale_dtype=B_scale.dtype,
+            b_zp_dtype=None if B_zp is None else B_zp.dtype,
+            topk_weights_dtype=(None if topk_weights is None else topk_weights.dtype),
+            a_aligned=A.data_ptr() % 16 == 0,
+            b_aligned=B.data_ptr() % 16 == 0,
+            c_aligned=C.data_ptr() % 16 == 0,
+            b_scale_aligned=B_scale.data_ptr() % 16 == 0,
+            b_zp_aligned=B_zp is None or B_zp.data_ptr() % 16 == 0,
+            topk_weights_aligned=(
+                topk_weights is None or topk_weights.data_ptr() % 16 == 0
+            ),
+            sorted_token_ids_aligned=sorted_token_ids.data_ptr() % 16 == 0,
+            expert_ids_aligned=expert_ids.data_ptr() % 16 == 0,
+            num_tokens_post_padded_aligned=(
+                num_tokens_post_padded.data_ptr() % 16 == 0
+            ),
+            N=B.size(1),
+            K=A.size(1),
+            stride_am=A.stride(0),
+            stride_ak=A.stride(1),
+            stride_be=B.stride(0),
+            stride_bk=B.stride(2),
+            stride_bn=B.stride(1),
+            stride_cm=C.stride(1),
+            stride_cn=C.stride(2),
+            stride_bse=B_scale.stride(0),
+            stride_bsk=B_scale.stride(2),
+            stride_bsn=B_scale.stride(1),
+            stride_bze=B_zp.stride(0) if B_zp is not None else 0,
+            stride_bzk=B_zp.stride(2) if B_zp is not None else 0,
+            stride_bzn=B_zp.stride(1) if B_zp is not None else 0,
+            block_k_diviable=A.size(1) % config["BLOCK_SIZE_K"] == 0,
+            group_size=group_size,
+            BLOCK_SIZE_M=config["BLOCK_SIZE_M"],
+            BLOCK_SIZE_N=config["BLOCK_SIZE_N"],
+            BLOCK_SIZE_K=config["BLOCK_SIZE_K"],
+            GROUP_SIZE_M=config["GROUP_SIZE_M"],
+            SPLIT_K=config["SPLIT_K"],
+            MUL_ROUTED_WEIGHT=mul_routed_weight,
+            top_k=top_k,
+            compute_type=compute_type,
+            has_zp=B_zp is not None,
+            use_int4_w4a16=use_int4_w4a16,
+            use_int8_w8a16=use_int8_w8a16,
+            num_warps=config.get("num_warps", 4),
+            num_stages=config.get("num_stages", 3),
+        )
+        grid = (
+            triton.cdiv(EM, key.BLOCK_SIZE_M) * triton.cdiv(key.N, key.BLOCK_SIZE_N),
+        )
+        self.kernel[grid](
+            A,
+            B,
+            C,
+            B_scale,
+            B_zp,
+            topk_weights,
+            sorted_token_ids,
+            expert_ids,
+            num_tokens_post_padded,
+            key.N,
+            key.K,
+            EM,
+            num_valid_tokens,
+            key.stride_am,
+            key.stride_ak,
+            key.stride_be,
+            key.stride_bk,
+            key.stride_bn,
+            key.stride_cm,
+            key.stride_cn,
+            key.stride_bse,
+            key.stride_bsk,
+            key.stride_bsn,
+            key.stride_bze,
+            key.stride_bzk,
+            key.stride_bzn,
+            block_k_diviable=key.block_k_diviable,
+            group_size=key.group_size,
+            BLOCK_SIZE_M=key.BLOCK_SIZE_M,
+            BLOCK_SIZE_N=key.BLOCK_SIZE_N,
+            BLOCK_SIZE_K=key.BLOCK_SIZE_K,
+            GROUP_SIZE_M=key.GROUP_SIZE_M,
+            SPLIT_K=key.SPLIT_K,
+            MUL_ROUTED_WEIGHT=key.MUL_ROUTED_WEIGHT,
+            top_k=key.top_k,
+            compute_type=key.compute_type,
+            has_zp=key.has_zp,
+            use_int4_w4a16=key.use_int4_w4a16,
+            use_int8_w8a16=key.use_int8_w8a16,
+            num_warps=key.num_warps,
+            num_stages=key.num_stages,
+        )
+
+
+_WNA16_TRITON_KERNEL = Wna16TritonKernel()
+
+
 # NOTE(zyongye): we can remove all the wna16 kernel
 # once we drop off sm75 support
 def invoke_fused_moe_wna16_cuda_kernel(
@@ -676,10 +1065,6 @@ def invoke_fused_moe_wna16_triton_kernel(
         # so num_valid_experts <= batch_size <= BLOCK_SIZE_M,
         # and we can skip some invalid blocks.
         EM = min(sorted_token_ids.size(0), A.size(0) * top_k * config["BLOCK_SIZE_M"])
-    grid = lambda META: (
-        triton.cdiv(EM, META["BLOCK_SIZE_M"])
-        * triton.cdiv(B.size(1), META["BLOCK_SIZE_N"]),
-    )
     config = config.copy()
     config.update(
         get_moe_wna16_block_config(
@@ -695,7 +1080,7 @@ def invoke_fused_moe_wna16_triton_kernel(
         )
     )
 
-    fused_moe_kernel_gptq_awq[grid](
+    _WNA16_TRITON_KERNEL(
         A,
         B,
         C,
@@ -705,32 +1090,15 @@ def invoke_fused_moe_wna16_triton_kernel(
         sorted_token_ids,
         expert_ids,
         num_tokens_post_padded,
-        B.size(1),
-        A.size(1),
-        EM,
-        num_tokens,
-        A.stride(0),
-        A.stride(1),
-        B.stride(0),
-        B.stride(2),
-        B.stride(1),
-        C.stride(1),
-        C.stride(2),
-        B_scale.stride(0),
-        B_scale.stride(2),
-        B_scale.stride(1),
-        B_zp.stride(0) if B_zp is not None else 0,
-        B_zp.stride(2) if B_zp is not None else 0,
-        B_zp.stride(1) if B_zp is not None else 0,
-        block_k_diviable=A.size(1) % config["BLOCK_SIZE_K"] == 0,
+        EM=EM,
+        num_valid_tokens=num_tokens,
+        config=config,
         group_size=block_shape[1],
-        MUL_ROUTED_WEIGHT=mul_routed_weight,
+        mul_routed_weight=mul_routed_weight,
         top_k=top_k,
         compute_type=compute_type,
-        has_zp=B_zp is not None,
         use_int4_w4a16=use_int4_w4a16,
         use_int8_w8a16=use_int8_w8a16,
-        **config,
     )
 
 
