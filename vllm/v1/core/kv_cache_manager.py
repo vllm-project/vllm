@@ -295,17 +295,18 @@ class KVCacheManager:
     ) -> tuple[KVCacheBlocks, int, int, bool]:
         """Local prefix-cache lookup for a request scheduled with a KV connector.
 
-        Hybrid (Mamba + full-attention) models can have per-group prefix hits
-        diverge under block pressure: the full-attention tail may be evicted
-        while a deeper Mamba state survives, or vice versa. Report the
-        full-attention hit as the local prefix - the connector transfers the
-        remaining suffix and the Mamba state is transferred unconditionally by
-        nixl's ``_apply_prefix_caching`` - and flag when that hit ran deeper
-        than a lagging group. Such a hit only has a valid Mamba state at its
-        boundary if the connector supplies it, so the caller must fall back to
-        ``get_computed_blocks`` to reconcile when no external tokens are found.
+        Hybrid models can have per-group prefix hits diverge under block
+        pressure: the full-attention tail may be evicted while a deeper hit in
+        another group survives, or vice versa. Hybrid layouts with full
+        attention use group 0 for it by default. For remote prefill, report the
+        full-attention hit as the local prefix - the connector supplies the
+        remaining suffix and any lagging group data - and flag when that hit
+        runs deeper than another group. Such a hit is valid at its boundary
+        only if the connector supplies the missing data, so the caller must
+        fall back to ``get_computed_blocks`` when no external tokens are found.
 
-        Non-hybrid models and already-convergent hits use ``get_computed_blocks``.
+        Other requests and already-convergent hits keep the existing
+        ``get_computed_blocks`` semantics.
 
         Returns:
             The ``get_computed_blocks`` triple (blocks, number of local computed
@@ -313,7 +314,8 @@ class KVCacheManager:
         """
         coordinator = self.coordinator
         if not (
-            self.kv_cache_config.has_mamba_layers
+            request.kv_transfer_params
+            and request.kv_transfer_params.get("do_remote_prefill")
             and isinstance(coordinator, HybridKVCacheCoordinator)
             and coordinator.full_attention_group_id is not None
         ):
