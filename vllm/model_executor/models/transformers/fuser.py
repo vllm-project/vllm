@@ -18,6 +18,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.models.transformers.fusers import (
     BaseFuser,
     GLUFuser,
+    MLAFuser,
     QKVFuser,
     RMSNormFuser,
     StackedFuser,
@@ -25,14 +26,19 @@ from vllm.model_executor.models.transformers.fusers import (
 from vllm.model_executor.models.transformers.fx_utils import trace
 
 if TYPE_CHECKING:
-    from vllm.config.model import ModelConfig
+    from vllm.config import VllmConfig
 
 logger = init_logger(__name__)
 
 
-@cached(cache={}, key=type)
+def key(module: nn.Module) -> tuple:
+    """Cache key for `get_fuser`. Considers module type and its immediate children."""
+    return (type(module), tuple(name for name, _ in module.named_children()))
+
+
+@cached(cache={}, key=key)
 def get_fuser(module: nn.Module) -> BaseFuser | None:
-    """The fuser for `type(module)` (cached per class), or `None` if no match."""
+    """The fuser for `module`'s class and shape (cached), or `None` if no match."""
     # Projection fusions need >=2 sibling linears; the RMSNorm fusion needs a
     # leaf module (raw tensor math, no submodules). Nothing else can match, and
     # tracing is skipped for it.
@@ -42,17 +48,20 @@ def get_fuser(module: nn.Module) -> BaseFuser | None:
         return None
     if (graph := trace(module)) is None:
         return None
-    for fuser_cls in (GLUFuser, QKVFuser, RMSNormFuser):
+    for fuser_cls in (MLAFuser, GLUFuser, QKVFuser, RMSNormFuser):
         if (fuser := fuser_cls.match(graph, module)) is not None:
             if isinstance(fuser, StackedFuser):
                 try:
                     fuser.update_forward(module)
                 except Exception as exc:
-                    # An unrecognised source just means we cannot fuse here.
                     logger.debug(
-                        "Could not rewrite %s for fusion: %s", type(module), exc
+                        "Attempted to fuse %s using %s but failed "
+                        "to update its forward method: %s",
+                        type(module),
+                        fuser_cls.__name__,
+                        exc,
                     )
-                    return None
+                    continue
             return fuser
     # A norm we could not match structurally is left unfused; flag likely misses.
     if module.__class__.__name__.endswith("RMSNorm"):
@@ -67,12 +76,12 @@ def get_fuser(module: nn.Module) -> BaseFuser | None:
 class Fusers(UserDict):
     """Mapping from module class to fuser, for all fusable classes in a model."""
 
-    def __init__(self, model: nn.Module, model_config: "ModelConfig"):
-        self.model_config = model_config
+    def __init__(self, model: nn.Module, vllm_config: "VllmConfig"):
+        self.vllm_config = vllm_config
         super().__init__({type(m): get_fuser(m) for m in model.modules()})
 
     def __getitem__(self, m: nn.Module) -> BaseFuser | None:
         fuser = self.data.get(type(m))
-        if fuser is not None and fuser.validate(m, self.model_config):
+        if fuser is not None and fuser.validate(m, self.vllm_config):
             return fuser
         return None

@@ -21,13 +21,13 @@ from vllm.model_executor.models.transformers.fx_utils import (
     find_node,
     forward_input_count,
     is_op,
+    output_value,
     peel,
     trace,
 )
 
 if TYPE_CHECKING:
-    from vllm.config.model import ModelConfig
-    from vllm.model_executor.layers.quantization import QuantizationConfig
+    from vllm.config import VllmConfig
 
 
 def _is_squared(node: object, x: fx.Node) -> bool:
@@ -71,10 +71,8 @@ def _is_one_plus(node: object) -> bool:
 
 def _has_trailing_compute(graph: fx.Graph, node: fx.Node) -> bool:
     """Does the forward compute anything after `node` before returning?"""
-    output = find_node(graph, lambda n: n.op == "output")
-    if output is None or not output.args:
-        return False
-    return peel(output.args[0]) is not node
+    value = output_value(graph)
+    return value is not None and peel(value) is not node
 
 
 class TPAwareNormMixin(nn.Module):
@@ -185,17 +183,17 @@ class RMSNormFuser(BaseFuser):
                 return eps
         return None
 
-    def validate(self, module: nn.Module, model_config: "ModelConfig") -> bool:
+    def validate(self, module: nn.Module, vllm_config: "VllmConfig") -> bool:
         return True
 
     def fuse(
         self,
         module: nn.Module,
         prefix: str,
-        model_config: "ModelConfig",
-        quant_config: "QuantizationConfig",
+        vllm_config: "VllmConfig",
     ) -> nn.Module:
         """Fuse the matched RMSNorm pattern into a vLLM fused RMSNorm CustomOp."""
+        model_config = vllm_config.model_config
         weight = getattr(module, "weight", None)
         hidden_size = (
             weight.size(0) if weight is not None else model_config.get_hidden_size()

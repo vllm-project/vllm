@@ -35,6 +35,12 @@ def get_num_fused(model) -> tuple[int, int]:
     return glu, qkv
 
 
+def count_mla_layers(model) -> int:
+    from vllm.model_executor.layers.attention import MLAAttention
+
+    return sum(isinstance(m, MLAAttention) for m in model.attention_instances.values())
+
+
 def check_implementation(
     runner_ref: type[HfRunner | VllmRunner],
     runner_test: type[VllmRunner],
@@ -129,6 +135,39 @@ def test_hybrid_attention(vllm_runner: type[VllmRunner]) -> None:
         model="hmellor/tiny-random-Gemma2ForCausalLM",
         kwargs_ref=kwargs_ref,
         kwargs_test=kwargs_test,
+    )
+
+
+def test_mla(vllm_runner: type[VllmRunner], example_prompts: list[str]) -> None:
+    """MLA models route through vLLM's MLA attention in the Transformers backend.
+
+    Checks every attention layer owns an `MLAAttention`, and
+    that logprobs match vLLM's native DeepSeek implementation.
+    """
+    model = get_model("DeepseekV2ForCausalLM")  # DeepSeek-V2-Lite, MLA + MoE
+    args = (example_prompts, 32, 5)
+    kwargs = {"max_model_len": 2048, "enforce_eager": True}
+
+    # `trust_remote_code=False` so the built-in Transformers `deepseek_v2`
+    # modeling (which supports the "vllm" attention interface) is used instead
+    # of the checkpoint's remote code.
+    with vllm_runner(
+        model, model_impl="transformers", trust_remote_code=False, **kwargs
+    ) as model_test:
+        model_config = model_test.llm.llm_engine.model_config
+        assert model_config.using_transformers_backend()
+        num_layers = model_config.hf_config.get_text_config().num_hidden_layers
+        assert model_test.apply_model(count_mla_layers) == [num_layers]
+        outputs_test = model_test.generate_greedy_logprobs(*args)
+
+    with vllm_runner(model, model_impl="auto") as model_ref:
+        outputs_ref = model_ref.generate_greedy_logprobs(*args)
+
+    check_logprobs_close(
+        outputs_0_lst=outputs_ref,
+        outputs_1_lst=outputs_test,
+        name_0="native",
+        name_1="transformers",
     )
 
 

@@ -368,12 +368,14 @@ def test_qkv_identifies_output_projection():
         assert get_fuser(PerHeadQKNormAttention()).o_name == "o_proj"
 
 
-def test_fuser_is_cached_per_class():
+def test_fuser_is_cached_per_class_and_structure():
+    """Cached on the class *and* its child names: one Transformers class can have
+    structurally different instances whose forward rewrites differ."""
     with torch.device("meta"):
         fuser_a = get_fuser(GLUMLP())
         fuser_b = get_fuser(GLUMLP())
     assert fuser_a is fuser_b
-    assert GLUMLP in get_fuser.cache
+    assert any(key[0] is GLUMLP for key in get_fuser.cache)
 
 
 @pytest.mark.parametrize("cls", [NotAnMLP, UntraceableMLP])
@@ -460,8 +462,7 @@ def test_unfusable_modules_are_not_fused(cls, default_vllm_config):
     fuser = get_fuser(module)
     # Either no pattern matches the class, or this instance fails validation
     # (`recursive_replace` gates fusion and its weight mappings on `validate`)
-    model_config = default_vllm_config.model_config
-    assert fuser is None or not fuser.validate(module, model_config)
+    assert fuser is None or not fuser.validate(module, default_vllm_config)
 
 
 def test_act_and_mul_derived_from_module(default_vllm_config):
