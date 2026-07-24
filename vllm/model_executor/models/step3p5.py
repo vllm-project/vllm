@@ -115,6 +115,7 @@ class Step3p5MLP(nn.Module):
         layer_idx = extract_layer_index(prefix)
         if (
             config.swiglu_limits_shared
+            and layer_idx < len(config.swiglu_limits_shared)
             and config.swiglu_limits_shared[layer_idx] is not None
             and config.swiglu_limits_shared[layer_idx] != 0
         ):
@@ -158,11 +159,22 @@ class Step3p5Attention(nn.Module):
         self.total_num_heads = num_heads
         tp_size = get_tensor_model_parallel_world_size()
         self.layer_idx = extract_layer_index(prefix)
+        # Multi-token-prediction / draft layers are constructed with a layer_idx of
+        # num_hidden_layers (one past the base decoder layers), so they fall outside the
+        # per-layer config lists. Bounds-check every per-layer lookup and treat such
+        # layers as standard, non-sliding attention layers.
         if layer_types:
-            enable_sliding_window = layer_types[self.layer_idx] == "sliding_attention"
+            enable_sliding_window = (
+                self.layer_idx < len(layer_types)
+                and layer_types[self.layer_idx] == "sliding_attention"
+            )
         else:
             enable_sliding_window = self.layer_idx % 2 == 0
-        if yarn_only_types and layer_types[self.layer_idx] not in yarn_only_types:
+        if (
+            yarn_only_types
+            and self.layer_idx < len(layer_types)
+            and layer_types[self.layer_idx] not in yarn_only_types
+        ):
             rope_scaling = None
 
         if sliding_window is not None and enable_sliding_window:
@@ -174,7 +186,7 @@ class Step3p5Attention(nn.Module):
             sliding_window = None
 
         if isinstance(rope_theta, list):
-            rope_theta = rope_theta[self.layer_idx]
+            rope_theta = rope_theta[min(self.layer_idx, len(rope_theta) - 1)]
 
         self.rank = get_tensor_model_parallel_rank()
         self.partial_rotary_factor = partial_rotary_factor
@@ -241,7 +253,7 @@ class Step3p5Attention(nn.Module):
             )
 
         self.use_rope = True
-        if use_rope_layers:
+        if use_rope_layers and self.layer_idx < len(use_rope_layers):
             self.use_rope = use_rope_layers[self.layer_idx]
 
         self.attn = Attention(
@@ -435,6 +447,7 @@ class Step3p5DecoderLayer(nn.Module):
             if (
                 getattr(config, "attention_other_setting", None)
                 and getattr(config, "layer_types", [])
+                and layer_idx < len(config.layer_types)
                 and config.layer_types[layer_idx]
                 == config.attention_other_setting["attention_type"]
             ):
@@ -470,7 +483,7 @@ class Step3p5DecoderLayer(nn.Module):
                 use_rope_layers=getattr(config, "use_rope_layers", []),
                 yarn_only_types=getattr(config, "yarn_only_types", []),
                 partial_rotary_factor=partial_rotary_factors[layer_idx]
-                if partial_rotary_factors
+                if partial_rotary_factors and layer_idx < len(partial_rotary_factors)
                 else 1.0,
                 prefix=f"{prefix}.self_attn",
             )
