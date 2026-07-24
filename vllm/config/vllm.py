@@ -2135,10 +2135,11 @@ class VllmConfig:
         model_config = self.model_config
         speculative_config = self.speculative_config
 
-        if self.parallel_config.prefill_context_parallel_size > 1 and not (
-            model_config is not None and model_config.use_mla
-        ):
-            unsupported.append("prefill context parallelism")
+        # PCP on MRv2 is opt-in per attention backend via
+        # AttentionImplBase.supports_pcp, enforced by
+        # check_attention_cp_compatibility (vllm/v1/worker/cp_utils.py). MLA and
+        # GQA (FlashAttention) both opt in, so do not block here -- if no
+        # attention impl supports PCP the cp_utils check raises a clear error.
         if self.compilation_config.mode == CompilationMode.STOCK_TORCH_COMPILE:
             unsupported.append("stock torch.compile")
 
