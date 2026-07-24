@@ -35,7 +35,7 @@ from vllm.model_executor.parameter import (  # noqa: E402
     GroupQuantScaleParameter,
     PackedvLLMParameter,
 )
-from vllm.platforms.rocm import on_gfx1100  # noqa: E402
+from vllm.platforms.rocm import on_gfx1100, on_gfx1151  # noqa: E402
 from vllm.scalar_type import scalar_types  # noqa: E402
 from vllm.utils.torch_utils import set_random_seed  # noqa: E402
 
@@ -46,13 +46,13 @@ PACK_FACTOR = 8  # 8 x 4-bit nibbles per int32
 
 # Skip everything in this module unless we are on the only architecture the
 # kernel is built/registered for.
-gfx1100_only = pytest.mark.skipif(
+rdna3_only = pytest.mark.skipif(
     not (
-        on_gfx1100()
+        (on_gfx1100() or on_gfx1151())
         and hasattr(torch.ops, "_rocm_C")
         and hasattr(torch.ops._rocm_C, "gptq_gemm_rdna3")
     ),
-    reason="requires gfx1100 with the _rocm_C.gptq_gemm_rdna3 op built in",
+    reason="requires gfx1100/gfx1151 with the _rocm_C.gptq_gemm_rdna3 op built in",
 )
 
 
@@ -227,7 +227,7 @@ MKNG_SHAPES = [
 ]
 
 
-@gfx1100_only
+@rdna3_only
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("has_zp", [False, True], ids=["no_zp", "with_zp"])
 @pytest.mark.parametrize(
@@ -256,7 +256,7 @@ def test_rdna3_w4a16_matches_reference(dtype, has_zp, M, K, N, G, dist_init):
     _assert_close(out, ref, dtype)
 
 
-@gfx1100_only
+@rdna3_only
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("M", [1, 32], ids=["decode", "prefill"])
 def test_rdna3_w4a16_bias(dtype, M, dist_init):
