@@ -343,7 +343,9 @@ class ResponsesRequest(OpenAIBaseModel):
         return TokenizeParams(
             max_total_tokens=model_config.max_model_len,
             max_output_tokens=self.max_output_tokens or 0,
-            truncate_prompt_tokens=-1 if self.truncation != "disabled" else None,
+            # an explicit null truncation means the default ("disabled"),
+            # so only enable truncation when "auto" is requested
+            truncate_prompt_tokens=-1 if self.truncation == "auto" else None,
             max_total_tokens_param="max_model_len",
             max_output_tokens_param="max_output_tokens",
         )
@@ -760,7 +762,10 @@ class ResponsesResponse(OpenAIBaseModel):
             tool_choice=request.tool_choice,
             tools=request.tools,
             top_p=sampling_params.top_p,
-            background=request.background,
+            # optional request fields accept an explicit null, but the
+            # corresponding response fields are non-optional; fall back to
+            # the documented defaults so response validation does not fail
+            background=request.background or False,
             max_output_tokens=sampling_params.max_tokens,
             max_tool_calls=request.max_tool_calls,
             previous_response_id=request.previous_response_id,
@@ -772,7 +777,7 @@ class ResponsesResponse(OpenAIBaseModel):
             status=status,
             text=request.text,
             top_logprobs=sampling_params.logprobs,
-            truncation=request.truncation,
+            truncation=request.truncation or "disabled",
             user=request.user,
             usage=usage,
             kv_transfer_params=kv_transfer_params,
