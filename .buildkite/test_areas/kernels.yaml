@@ -244,8 +244,11 @@ steps:
   - vllm/cute_utils/
   - vllm/model_executor/layers/mamba/ops/gdn_chunk_cutedsl/
   - vllm/model_executor/layers/fused_moe/router/bf16x3_router_gemm_cutedsl.py
+  - vllm/models/minimax_m3/nvidia/
+  - cmake/external_projects/fmha_sm100.cmake
   - tests/kernels/mamba/test_gdn_prefill_cutedsl.py
   - tests/kernels/test_bf16x3_router_gemm_cutedsl.py
+  - tests/kernels/attention/test_minimax_m3.py
   - tests/kernels/test_ll_bf16_gemm.py
   - tests/kernels/test_top_k_per_row.py
   commands:
@@ -277,6 +280,7 @@ steps:
     - pytest -v -s tests/kernels/moe/test_cutedsl_moe.py
     - pytest -v -s tests/kernels/mamba/test_gdn_prefill_cutedsl.py
     - pytest -v -s tests/kernels/test_bf16x3_router_gemm_cutedsl.py
+    - pytest -v -s tests/kernels/attention/test_minimax_m3.py
     - pytest -v -s tests/kernels/test_ll_bf16_gemm.py
     # e2e
     - pytest -v -s tests/models/quantization/test_nvfp4.py
