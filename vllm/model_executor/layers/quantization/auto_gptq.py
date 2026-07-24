@@ -490,8 +490,9 @@ class AutoGPTQMoEMethod(FusedMoEMethodBase):
             moe,
             weight_key,
             quant_config=self.quant_config,
-            may_have_zp=True,
+            may_have_zp=not self.quant_config.is_sym,
             may_have_bias=True,
+            allow_tile_padding=not self.quant_config.desc_act,
         )
 
     def create_weights(
@@ -804,16 +805,6 @@ class AutoGPTQMoEMethod(FusedMoEMethodBase):
             w2_zp=getattr(layer, "w2_qzeros", None) if use_zp else None,
             w1_bias=getattr(layer, "w13_bias", None),
             w2_bias=getattr(layer, "w2_bias", None),
-        )
-
-    def select_gemm_impl(
-        self,
-        prepare_finalize,
-        layer: RoutedExperts,
-    ):
-        raise ValueError(
-            f"{self.__class__.__name__} uses the new modular kernel "
-            "initialization logic. This function should not be called."
         )
 
     def apply(

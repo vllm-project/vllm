@@ -206,7 +206,6 @@ class RoutedExperts(PluggableLayer):
     def _needs_intermediate_size_param(self, quant_method: FusedMoEMethodBase) -> bool:
         return quant_method.__class__.__name__ in (
             "AutoGPTQMoEMethod",
-            "CompressedTensorsWNA16MarlinMoEMethod",
             "CompressedTensorsWNA16MoEMethod",
             "CompressedTensorsW4A16FlydslMoEMethod",
         )
@@ -627,7 +626,6 @@ class RoutedExperts(PluggableLayer):
         # TODO (mgoin): check self.quant_method.quant_config.quant_format
         # against known CompressionFormat enum values that have this quality
         if quant_method_name in (
-            "CompressedTensorsWNA16MarlinMoEMethod",
             "CompressedTensorsWNA16MoEMethod",
             "CompressedTensorsWNA16RDNA3MoEMethod",
             "CompressedTensorsW4A16FlydslMoEMethod",
