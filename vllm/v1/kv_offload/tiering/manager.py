@@ -266,11 +266,32 @@ class TieringOffloadingManager(OffloadingManager):
                 if job_metadata.is_promotion:
                     # secondary→primary transfer (promotion) completed.
                     # Make blocks available in primary tier.
-                    self.primary_tier.complete_write(
-                        job_metadata.keys,
-                        job_metadata.req_context,
-                        completed_job.success,
-                    )
+                    if completed_job.success:
+                        self.primary_tier.complete_write(
+                            job_metadata.keys,
+                            job_metadata.req_context,
+                            True,
+                        )
+                    else:
+                        successful_keys = completed_job.successful_keys
+                        failed_keys = set(job_metadata.keys)
+                        assert failed_keys.issuperset(successful_keys), (
+                            f"Finished job_id {job_id} from tier #{i}"
+                            f" ({tier.tier_type}) reported unknown successful keys"
+                        )
+                        failed_keys.difference_update(successful_keys)
+                        if successful_keys:
+                            self.primary_tier.complete_write(
+                                successful_keys,
+                                job_metadata.req_context,
+                                True,
+                            )
+                        if failed_keys:
+                            self.primary_tier.complete_write(
+                                failed_keys,
+                                job_metadata.req_context,
+                                False,
+                            )
                 else:
                     # primary→secondary transfer completed.
                     # Decrement ref_cnt on primary blocks.

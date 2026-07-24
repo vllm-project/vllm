@@ -54,10 +54,16 @@ class JobMetadata:
 
 @dataclass
 class JobResult:
-    """Result of an async transfer job (successful or failed)."""
+    """Result of an async transfer job.
+
+    For load jobs, ``successful_keys`` identifies completed keys when
+    ``success`` is False. An empty collection preserves the legacy
+    all-or-nothing failure behavior.
+    """
 
     job_id: JobId
     success: bool
+    successful_keys: Collection[OffloadKey] = ()
 
 
 class ParentManager(ABC):
