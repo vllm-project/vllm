@@ -865,6 +865,43 @@ class DeepseekV4DecoderLayer(nn.Module):
             requires_grad=False,
         )
 
+    def hc_pre(
+        self,
+        x: torch.Tensor,
+        hc_fn: torch.Tensor,
+        hc_scale: torch.Tensor,
+        hc_base: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Run standalone MHC pre (non-broadcast 3D path).
+
+        Used by kernel warmup and model-level forward.  Passes fused RMSNorm
+        weight so the TileLang JIT compiles the production kernel path.
+        """
+        post_mix, res_mix, layer_input = mhc_pre_tilelang(
+            residual=x,
+            fn=hc_fn,
+            hc_scale=hc_scale,
+            hc_base=hc_base,
+            rms_eps=self.rms_norm_eps,
+            hc_pre_eps=self.hc_eps,
+            hc_sinkhorn_eps=self.hc_eps,
+            hc_post_mult_value=self.hc_post_alpha,
+            sinkhorn_repeat=self.hc_sinkhorn_iters,
+            norm_weight=self.attn_norm.weight.data,
+            norm_eps=self.attn_norm.variance_epsilon,
+        )
+        return layer_input, post_mix, res_mix
+
+    def hc_post(
+        self,
+        x: torch.Tensor,
+        residual: torch.Tensor,
+        post: torch.Tensor,
+        comb: torch.Tensor,
+    ) -> torch.Tensor:
+        """Run standalone MHC post.  Used by kernel warmup."""
+        return mhc_post_tilelang(x, residual, post, comb)
+
     def forward(
         self,
         x: torch.Tensor,
