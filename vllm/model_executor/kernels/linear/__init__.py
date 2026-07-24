@@ -83,6 +83,9 @@ from vllm.model_executor.kernels.linear.mxfp4.humming import (
 from vllm.model_executor.kernels.linear.mxfp4.marlin import (
     MarlinMxFp4LinearKernel,
 )
+from vllm.model_executor.kernels.linear.mxfp4.rocm import (
+    Rdna3MxFp4LinearKernel,
+)
 from vllm.model_executor.kernels.linear.mxfp4.xpu import (
     XPUMxFp4LinearKernel,
 )
@@ -471,6 +474,9 @@ _POSSIBLE_MXFP4_KERNELS: dict[PlatformEnum, list[type[MxFp4LinearKernel]]] = {
     ],
     PlatformEnum.XPU: [
         XPUMxFp4LinearKernel,
+    ],
+    PlatformEnum.ROCM: [
+        Rdna3MxFp4LinearKernel,
     ],
 }
 
