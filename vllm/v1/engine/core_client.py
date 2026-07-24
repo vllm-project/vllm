@@ -57,7 +57,12 @@ from vllm.v1.engine.utils import (
 )
 from vllm.v1.executor import Executor
 from vllm.v1.pool.late_interaction import get_late_interaction_engine_index
-from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder, bytestr
+from vllm.v1.serial_utils import (
+    MsgpackDecoder,
+    MsgpackEncoder,
+    OOBTensorConsumer,
+    bytestr,
+)
 
 logger = init_logger(__name__)
 
@@ -582,15 +587,25 @@ class MPClient(EngineCoreClient):
                         coordinator.get_stats_publish_address()
                     )
 
-            # Serialization setup with tensor queues for multimodal tensor IPC.
-            tensor_ipc_sender: TensorIpcSender | None = None
+            # Serialization setup with an out-of-band consumer for multimodal
+            # tensor IPC (torch_shm queue, or the TP-aware CUDA-IPC pool).
+            oob_consumer: OOBTensorConsumer | None = None
             model_config = getattr(vllm_config, "model_config", None)
             if model_config is not None and model_config.multimodal_config is not None:
-                mm_tensor_ipc = model_config.multimodal_config.mm_tensor_ipc
+                mm_cfg = model_config.multimodal_config
+                mm_tensor_ipc = mm_cfg.mm_tensor_ipc
                 if mm_tensor_ipc == "torch_shm" and tensor_queue is not None:
-                    tensor_ipc_sender = TensorIpcSender(tensor_queue)
+                    oob_consumer = TensorIpcSender(tensor_queue)
+                elif mm_tensor_ipc == "cuda_ipc":
+                    from vllm.multimodal.gpu_ipc_memory import CudaIpcTensorSender
+                    from vllm.utils.mem_constants import GiB_bytes
 
-            self.encoder = MsgpackEncoder(oob_tensor_consumer=tensor_ipc_sender)
+                    oob_consumer = CudaIpcTensorSender(
+                        pool_bytes=int(mm_cfg.mm_ipc_gpu_memory_gb * GiB_bytes),
+                        tp_size=parallel_config.tensor_parallel_size,
+                    )
+
+            self.encoder = MsgpackEncoder(oob_tensor_consumer=oob_consumer)
             self.decoder = MsgpackDecoder(EngineCoreOutputs)
 
             dp_size = parallel_config.data_parallel_size

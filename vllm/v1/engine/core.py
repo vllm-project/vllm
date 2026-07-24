@@ -82,7 +82,7 @@ from vllm.v1.kv_cache_interface import KVCacheConfig, get_kv_cache_spec_kind
 from vllm.v1.metrics.stats import SchedulerIterationDetails, SchedulerStats
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
-from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
+from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder, OOBTensorProvider
 from vllm.v1.structured_output import StructuredOutputManager
 from vllm.v1.utils import compute_iteration_details
 from vllm.version import __version__ as VLLM_VERSION
@@ -1022,11 +1022,21 @@ class EngineCoreProc(EngineCore):
         self.engines_running = False
         self.shutdown_state = EngineShutdownState.RUNNING
 
-        # Receiver for tensor IPC
+        # Out-of-band provider for multimodal tensor IPC. torch_shm drains a
+        # queue; cuda_ipc returns a deferred proxy that each worker materializes.
         self.tensor_ipc_receiver: TensorIpcReceiver | None = None
+        self._oob_provider: OOBTensorProvider | None = None
         if tensor_queue is not None:
             self.tensor_ipc_receiver = TensorIpcReceiver(tensor_queue)
+            self._oob_provider = self.tensor_ipc_receiver
             logger.info("Using tensor IPC queue for multimodal tensor sharing")
+        else:
+            mm_config = getattr(vllm_config.model_config, "multimodal_config", None)
+            if mm_config is not None and mm_config.mm_tensor_ipc == "cuda_ipc":
+                from vllm.multimodal.gpu_ipc_memory import cuda_ipc_provider
+
+                self._oob_provider = cuda_ipc_provider
+                logger.info("Using CUDA-IPC pool for multimodal tensor sharing")
 
         with self._perform_handshakes(
             handshake_address,
@@ -1589,11 +1599,11 @@ class EngineCoreProc(EngineCore):
     ):
         """Input socket IO thread."""
 
-        # Msgpack serialization decoding with optional tensor IPC receiver.
+        # Msgpack serialization decoding with an optional out-of-band provider.
         add_request_decoder = MsgpackDecoder(
-            EngineCoreRequest, oob_tensor_provider=self.tensor_ipc_receiver
+            EngineCoreRequest, oob_tensor_provider=self._oob_provider
         )
-        generic_decoder = MsgpackDecoder(oob_tensor_provider=self.tensor_ipc_receiver)
+        generic_decoder = MsgpackDecoder(oob_tensor_provider=self._oob_provider)
 
         with ExitStack() as stack, zmq.Context() as ctx:
             input_sockets = [
