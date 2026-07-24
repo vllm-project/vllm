@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
 from unittest.mock import MagicMock
 
 import pytest
@@ -9,7 +10,9 @@ from tests.tool_parsers.common_tests import (
     ToolParserTestConfig,
     ToolParserTests,
 )
+from tests.tool_parsers.utils import run_tool_extraction_streaming
 from vllm.tokenizers import TokenizerLike
+from vllm.tool_parsers.internlm2_tool_parser import Internlm2ToolParser
 
 
 class TestInternLM2ToolParser(ToolParserTests):
@@ -120,3 +123,38 @@ class TestInternLM2ToolParser(ToolParserTests):
                 ),
             },
         )
+
+    def test_streaming_complete_tool_call_single_delta(self, tokenizer):
+        """A tool call arriving whole in one delta (e.g. async scheduling or
+        stream_interval > 1) must emit both the name and the arguments;
+        previously only the name was emitted and the arguments were lost."""
+        parser = Internlm2ToolParser(tokenizer)
+        model_output = (
+            '<|action_start|><|plugin|>{"name": "get_weather", '
+            '"parameters": {"city": "Tokyo"}}<|action_end|>'
+        )
+
+        reconstructor = run_tool_extraction_streaming(parser, [model_output])
+
+        assert len(reconstructor.tool_calls) == 1
+        call = reconstructor.tool_calls[0]
+        assert call.function.name == "get_weather"
+        assert json.loads(call.function.arguments) == {"city": "Tokyo"}
+
+    def test_streaming_content_then_complete_tool_call_single_delta(self, tokenizer):
+        """Content preceding a complete tool call in the same delta must not
+        cause the tool call to be dropped; previously the parser emitted the
+        content and returned, losing the tool call entirely."""
+        parser = Internlm2ToolParser(tokenizer)
+        model_output = (
+            'Sure, let me check.<|action_start|><|plugin|>{"name": "get_weather", '
+            '"parameters": {"city": "Tokyo"}}<|action_end|>'
+        )
+
+        reconstructor = run_tool_extraction_streaming(parser, [model_output])
+
+        assert reconstructor.other_content == "Sure, let me check."
+        assert len(reconstructor.tool_calls) == 1
+        call = reconstructor.tool_calls[0]
+        assert call.function.name == "get_weather"
+        assert json.loads(call.function.arguments) == {"city": "Tokyo"}

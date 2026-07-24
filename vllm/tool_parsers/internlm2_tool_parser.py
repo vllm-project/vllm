@@ -26,7 +26,7 @@ from vllm.tool_parsers.abstract_tool_parser import (
     Tool,
     ToolParser,
 )
-from vllm.tool_parsers.utils import extract_intermediate_diff
+from vllm.tool_parsers.utils import extract_intermediate_diff, is_complete_json
 
 logger = init_logger(__name__)
 
@@ -79,12 +79,19 @@ class Internlm2ToolParser(ToolParser):
         new_delta = current_text[last_pos:]
         text, action = new_delta.split("<|action_start|><|plugin|>")
 
-        if len(text) > 0:
-            self.position = self.position + len(text)
-            return DeltaMessage(content=text)
-
         action = action.strip()
         action = action.split("<|action_end|>".strip())[0]
+
+        content_prefix: str | None = None
+        if len(text) > 0:
+            self.position = self.position + len(text)
+            # if the tool call is not yet complete, emit the content now and
+            # keep parsing the tool call from later deltas; otherwise fall
+            # through, so that a tool call arriving whole in this same delta
+            # is not lost when no further deltas arrive
+            if not is_complete_json(action):
+                return DeltaMessage(content=text)
+            content_prefix = text
 
         # bit mask flags for partial JSON parsing. If the name hasn't been
         # sent yet, don't allow sending
@@ -109,20 +116,31 @@ class Internlm2ToolParser(ToolParser):
                 function_name = tool_call_arr.get("name")
                 if function_name:
                     self.current_tool_id = self.current_tool_id + 1
+                    delta_function_call = DeltaFunctionCall(name=function_name)
+                    streamed_args = ""
+                    cur_arguments = self.get_arguments(tool_call_arr)
+                    # if the whole tool call arrived in a single delta (e.g.
+                    # with async scheduling or stream_interval > 1), emit the
+                    # complete arguments together with the name, since no
+                    # further deltas may arrive
+                    if cur_arguments is not None and is_complete_json(action):
+                        streamed_args = json.dumps(cur_arguments, ensure_ascii=False)
+                        delta_function_call.arguments = streamed_args
                     delta = DeltaMessage(
+                        content=content_prefix,
                         tool_calls=[
                             DeltaToolCall(
                                 index=self.current_tool_id,
                                 type="function",
                                 id=make_tool_call_id(),
-                                function=DeltaFunctionCall(
-                                    name=function_name
-                                ).model_dump(exclude_none=True),
+                                function=delta_function_call.model_dump(
+                                    exclude_none=True
+                                ),
                             )
-                        ]
+                        ],
                     )
                     self.current_tool_name_sent = True
-                    self.streamed_args_for_tool.append("")
+                    self.streamed_args_for_tool.append(streamed_args)
                 else:
                     delta = None
             # now we know we're on the same tool call and we're streaming
