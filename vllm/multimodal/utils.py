@@ -51,7 +51,7 @@ def encode_audio_url(
 ) -> str:
     """Encode audio as a data URL."""
     audio_b64 = encode_audio_base64(audio, sampling_rate, format=format)
-    mimetype = mimetypes.types_map.get("." + format.lower(), "audio")
+    mimetype = mimetypes.types_map.get("." + format.lower(), f"audio/{format.lower()}")
     return f"data:{mimetype};base64,{audio_b64}"
 
 
@@ -84,7 +84,7 @@ def encode_image_url(
     Pass `image_mode=None` to keep the original image mode.
     """
     image_b64 = encode_image_base64(image, image_mode=image_mode, format=format)
-    mimetype = mimetypes.types_map.get("." + format.lower(), "image")
+    mimetype = mimetypes.types_map.get("." + format.lower(), f"image/{format.lower()}")
     return f"data:{mimetype};base64,{image_b64}"
 
 
@@ -108,7 +108,9 @@ def encode_video_url(
     if format.lower() == "jpeg":
         mimetype = "video/jpeg"
     else:
-        mimetype = mimetypes.types_map.get("." + format.lower(), "video")
+        mimetype = mimetypes.types_map.get(
+            "." + format.lower(), f"video/{format.lower()}"
+        )
 
     return f"data:{mimetype};base64,{video_b64}"
 
