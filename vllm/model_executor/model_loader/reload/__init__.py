@@ -22,6 +22,8 @@ __all__ = [
     "initialize_layerwise_reload",
     "finalize_layerwise_processing",
     "finalize_layerwise_reload",
+    "record_load_consumption",
+    "finalize_load_recording",
     "set_torchao_reload_attrs",
     "support_quantized_model_reload_from_hp_weights",
 ]
@@ -29,7 +31,9 @@ __all__ = [
 from .layerwise import (
     finalize_layerwise_processing,
     finalize_layerwise_reload,
+    finalize_load_recording,
     initialize_layerwise_reload,
+    record_load_consumption,
     record_metadata_for_reloading,
 )
 from .torchao_decorator import (

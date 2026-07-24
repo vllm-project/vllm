@@ -37,6 +37,9 @@ __all__ = [
     "initialize_layerwise_reload",
     "finalize_layerwise_processing",
     "finalize_layerwise_reload",
+    "record_load_consumption",
+    "finalize_load_recording",
+    "get_layer_completion_findings",
 ]
 
 
@@ -51,6 +54,101 @@ LAYERWISE_INFO: WeakKeyDictionary[torch.nn.Module, LayerReloadingInfo] = (
 
 # Global set used to track loading for logging purposes only
 LOADING_LAYERS: WeakSet[torch.nn.Module] = WeakSet()
+
+# Per-layer disagreements between the numel completion criterion and the
+# observed-key-set criterion, found during the current reload. Cleared at
+# reload start, read after finalize. Dual-run signal only -- numel stays
+# authoritative until the set criterion has a release of agreement.
+_LAYER_COMPLETION_FINDINGS: list[str] = []
+
+
+def get_layer_completion_findings() -> list[str]:
+    """Where the numel and observed-key-set completion criteria disagreed
+    during the last reload."""
+    return list(_LAYER_COMPLETION_FINDINGS)
+
+
+def record_load_consumption(model: torch.nn.Module) -> None:
+    """Observe the required key set from the first load.
+
+    Wrap every parameter/buffer weight_loader so it records its name into the
+    owning layer's ``required_keys`` when it fires. Install this BEFORE the
+    first ``load_weights``; call ``finalize_load_recording`` after.
+
+    The observed set is the ground truth of what a correct load consumes, with
+    no prediction from layer structure: a tensor that is never routed through a
+    loader (EP bookkeeping such as ``_expert_map``, a shared bias copy with no
+    checkpoint key) simply never fires, so it is absent from ``required_keys``.
+    That is what removes the need for a hand-maintained ``SKIP_TENSORS``
+    allowlist -- and it is exactly the "capturing how many weights are loaded
+    on first pass" that make_online_process_loader's own comment anticipated.
+
+    Note: parameters must exist when this is called. Quantization weights and
+    biases are created at model init (before the first load), so the common
+    case is covered; a parameter registered during load itself would be
+    missed (a known edge, shared with the reload path's late-registration
+    handling).
+    """
+    for layer in model.modules():
+        info = get_layerwise_info(layer)
+        if info.required_keys is None:
+            info.required_keys = set()
+        for name, tensor in get_layer_tensors(layer).items():
+            # Wrap the effective loader (falling back to default_weight_loader,
+            # same as the reload path), so params that rely on the default are
+            # observed too. A tensor the checkpoint never drives -- a
+            # bookkeeping buffer with no key -- simply never has its loader
+            # called, so it stays out of required_keys.
+            current = getattr(tensor, "weight_loader", None)
+            if current is not None and getattr(current, "_vllm_recording",
+                                               False):
+                continue
+            tensor.weight_loader = _make_recording_loader(
+                info, name, _get_weight_loader(tensor))
+
+
+def _make_recording_loader(info: LayerReloadingInfo, name: str,
+                           original: Callable) -> Callable:
+    @wraps(original, assigned=("__doc__", "__annotations__"))
+    def recording_loader(*args, **kwargs):
+        assert info.required_keys is not None
+        info.required_keys.add(name)
+        return original(*args, **kwargs)
+
+    # A distinct __name__ so _get_original_loader (which unwraps only
+    # "online_process_loader") does not strip it; finalize_load_recording
+    # removes it explicitly instead.
+    recording_loader.__name__ = "recording_loader"
+    recording_loader._vllm_recording = True  # type: ignore[attr-defined]
+    recording_loader._vllm_orig = original  # type: ignore[attr-defined]
+    return recording_loader
+
+
+def finalize_load_recording(model: torch.nn.Module) -> None:
+    """Remove the recording wrappers installed by record_load_consumption,
+    restoring the original loaders so the reload path is unaffected."""
+    for layer in model.modules():
+        for name, tensor in get_layer_tensors(layer).items():
+            loader = getattr(tensor, "weight_loader", None)
+            if loader is not None and getattr(loader, "_vllm_recording", False):
+                tensor.weight_loader = loader._vllm_orig
+
+
+def _check_set_completion(layer: torch.nn.Module,
+                          info: LayerReloadingInfo) -> None:
+    """Dual-run: at the moment the numel criterion fires completion, record
+    whether the observed-key-set criterion agrees. A disagreement where numel
+    says complete but keys are still missing is the #44814 shape (a dropped
+    parameter masked by an over-count). Numel stays authoritative; this only
+    records the discrepancy."""
+    if info.required_keys is None:
+        return  # no observed baseline (first-load recording did not run)
+    missing = info.required_keys - info.received_keys
+    if missing:
+        _LAYER_COMPLETION_FINDINGS.append(
+            f"{layer.__class__.__name__}: numel completion fired but "
+            f"{len(missing)} observed key(s) not yet received: "
+            f"{sorted(missing)[:8]}")
 
 
 def get_layerwise_info(layer: torch.nn.Module) -> LayerReloadingInfo:
@@ -99,6 +197,9 @@ def initialize_layerwise_reload(model: torch.nn.Module):
     # disable torchao reloading to avoid infinite recursion
     model._original_do_torchao_reload = getattr(model, "_do_torchao_reload", False)
     model._do_torchao_reload = False
+
+    if not any(get_layerwise_info(m).can_load() for m in model.modules()):
+        _LAYER_COMPLETION_FINDINGS.clear()
 
     for layer in model.modules():
         info = get_layerwise_info(layer)
@@ -185,6 +286,13 @@ def make_online_process_loader(layer: torch.nn.Module, param_name: str) -> Calla
         info.loaded_weights.append((param_name, bound_args))
         num_loaded, ret = get_numel_loaded(original_loader, bound_args)
         info.load_numel += num_loaded
+
+        # Observed-key-set accounting, dual-run alongside numel. A set dedups
+        # naturally, so a key loaded more than once (some qconfigs load
+        # weight_shape per qkv partition -- see "Excessive loading" above) is
+        # idempotent here rather than an error; strict duplicate rejection is
+        # a later, separate policy.
+        info.received_keys.add(param_name)
 
         logger.debug(
             "%s: %d / %d",
@@ -302,7 +410,6 @@ def _finalize_attention_layer(
         _place_kernel_tensors(layer, info)
     layer.process_weights_after_loading(model_config.dtype)
 
-
 def _reload_attention_scales(layer: torch.nn.Module, info: LayerReloadingInfo) -> None:
     """Load and process attention scale weights (k_scale, v_scale, etc.)
     during reload.
@@ -365,6 +472,12 @@ def _layerwise_process(layer: torch.nn.Module, info: LayerReloadingInfo):
     # this code is a no-op if not reloading (because kernel tensors is empty)
     if info.kernel_tensors is not None:
         _copy_and_restore_kernel_tensors(layer, info)
+
+    # Dual-run: does the observed key set agree the layer is complete? Runs
+    # here (covering online-completed AND delayed layers) because received_keys
+    # is still alive before reset(); required_keys survives reset, received
+    # does not, so this cannot be deferred to the finalize reset loop.
+    _check_set_completion(layer, info)
 
     info.reset()
     logger.debug("%s: Processed", layer.__class__.__name__)

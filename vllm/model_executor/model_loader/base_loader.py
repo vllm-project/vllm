@@ -9,7 +9,11 @@ import vllm.envs as envs
 from vllm.config import ModelConfig, VllmConfig
 from vllm.config.load import LoadConfig
 from vllm.logger import init_logger
-from vllm.model_executor.model_loader.reload import finalize_layerwise_processing
+from vllm.model_executor.model_loader.reload import (
+    finalize_layerwise_processing,
+    finalize_load_recording,
+    record_load_consumption,
+)
 from vllm.model_executor.model_loader.utils import (
     initialize_model,
     process_weights_after_loading,
@@ -61,7 +65,15 @@ class BaseModelLoader(ABC):
             log_model_inspection(model)
 
             logger.debug("Loading weights on %s ...", load_device)
-            self.load_weights(model, model_config)
+            # Observe the set of keys a correct load consumes, so a later
+            # reload can reconcile against ground truth rather than a
+            # structure-derived prediction (COMPLETION.md). Wrapping is
+            # removed immediately after, leaving the loaders as they were.
+            record_load_consumption(model)
+            try:
+                self.load_weights(model, model_config)
+            finally:
+                finalize_load_recording(model)
 
             # Log peak GPU memory after loading weights. This is needed
             # to have test coverage on peak memory for online quantization.
