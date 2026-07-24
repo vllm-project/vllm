@@ -160,7 +160,14 @@ def kernel_paged_attention_2d(
         # (e.g. the tail of the last partial block). They are score-masked
         # below, but 0 * NaN = NaN would still poison the output, so exclude
         # them from the K/V loads too.
-        kv_load_mask = abs_token_idx < seq_len
+        if j == num_blocks - 1:
+            kv_load_mask = abs_token_idx < seq_len
+            k_load_mask = dim_mask[:, None] & kv_load_mask[None, :]
+            v_load_mask = dim_mask[None, :] & kv_load_mask[:, None]
+        else:
+            k_load_mask = dim_mask[:, None]
+            v_load_mask = dim_mask[None, :]
+
         l_block_idx = abs_token_idx // PHYSICAL_BLOCK_SIZE
         # Vectorized loading of physical block IDs
         p_block_idx = tl.load(block_tables_ptr + block_table_offset + l_block_idx)
@@ -186,7 +193,7 @@ def kernel_paged_attention_2d(
         # K : (HEAD_SIZE, BLOCK_SIZE)
         K_load = tl.load(
             key_cache_ptr + k_offset,
-            mask=dim_mask[:, None] & kv_load_mask[None, :],
+            mask=k_load_mask,
             other=0.0,
             eviction_policy="evict_last",
         )
@@ -199,7 +206,7 @@ def kernel_paged_attention_2d(
         # V : (BLOCK_SIZE, HEAD_SIZE)
         V_load = tl.load(
             value_cache_ptr + v_offset,
-            mask=dim_mask[None, :] & kv_load_mask[:, None],
+            mask=v_load_mask,
             other=0.0,
             eviction_policy="evict_last",
         )
