@@ -115,10 +115,8 @@ class OnlineRenderer:
             _mt.validate_request_params(request)
 
         # Check if tool parsing is unavailable (common condition)
-        tool_parsing_unavailable = (
-            tool_parser is None
-            and not is_mistral_tokenizer(tokenizer)
-            and not self.use_harmony
+        tool_parsing_unavailable = tool_parser is None and not is_mistral_tokenizer(
+            tokenizer
         )
 
         # Validate tool_choice when tool parsing is required but unavailable
@@ -126,15 +124,21 @@ class OnlineRenderer:
             None,
             "none",
         ):
-            if request.tool_choice == "auto" and not self.enable_auto_tools:
+            if request.tool_choice == "auto":
                 # for hf tokenizers, "auto" tools requires
-                # --enable-auto-tool-choice and --tool-call-parser
-                return self.create_error_response(
-                    '"auto" tool choice requires '
-                    "--enable-auto-tool-choice and --tool-call-parser to be set"
-                )
-            elif request.tool_choice != "auto":
-                # "required" or named tool requires tool parser
+                # --enable-auto-tool-choice and --tool-call-parser. Harmony
+                # renders tool syntax natively, so "auto" stays best-effort
+                # and degrades to a plain completion.
+                if not self.enable_auto_tools and not self.use_harmony:
+                    return self.create_error_response(
+                        '"auto" tool choice requires '
+                        "--enable-auto-tool-choice and --tool-call-parser to be set"
+                    )
+            else:
+                # "required" or named tool requires tool parser. This holds for
+                # Harmony too: it only emits tool calls when a tool parser is
+                # loaded, and nothing constrains generation to the tool schema
+                # without one, so the guaranteed tool call cannot be honoured.
                 if isinstance(request.tool_choice, ChatCompletionNamedToolChoiceParam):
                     tool_choice_desc = f'function "{request.tool_choice.function.name}"'
                 else:
