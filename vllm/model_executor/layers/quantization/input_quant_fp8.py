@@ -4,6 +4,7 @@
 import torch
 import torch.nn.functional as F
 
+import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.model_executor.custom_op import CustomOp
@@ -104,6 +105,20 @@ class QuantFP8(CustomOp):
 
         if self.is_group_quant and not self.static:
             assert scale is None, "Dynamic group quantization does not use scale"
+
+            if (
+                envs.VLLM_USE_HELION_KERNELS
+                and x.is_contiguous()
+                and torch.cuda.is_current_stream_capturing()
+            ):
+                return fp8_utils.per_token_group_quant_fp8_helion(
+                    x,
+                    group_size=self.group_size,
+                    column_major_scales=self.column_major_scales,
+                    tma_aligned_scales=self.tma_aligned_scales,
+                    dtype=_FP8_DTYPE,
+                    use_ue8m0=self.use_ue8m0,
+                )
 
             return fp8_utils.per_token_group_quant_fp8(
                 x,

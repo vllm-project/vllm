@@ -693,6 +693,72 @@ def per_token_group_quant_fp8(
     return x_q, x_s
 
 
+def per_token_group_quant_fp8_helion(
+    x: torch.Tensor,
+    group_size: int,
+    eps: float = 1e-10,
+    dtype: torch.dtype | None = None,
+    column_major_scales: bool = False,
+    tma_aligned_scales: bool = False,
+    use_ue8m0: bool | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Helion variant of `per_token_group_quant_fp8`.
+
+    Output allocation matches `per_token_group_quant_fp8`; the scale layout
+    (row-major / column-major / TMA-aligned) is carried by `x_s`'s strides,
+    which the Helion kernel writes to by logical index. Intended to be used only
+    while a CUDA graph is capturing; the eager router that decides when to call
+    it lives in `input_quant_fp8.QuantFP8.forward_cuda`.
+    """
+    # Import triggers @register_kernel for torch.ops.vllm_helion.*; the caller
+    # only reaches here with VLLM_USE_HELION_KERNELS enabled.
+    import vllm.kernels.helion.ops.per_token_group_fp8_quant  # noqa: F401
+
+    if use_ue8m0 is None:
+        use_ue8m0 = is_deep_gemm_e8m0_used()
+    dtype = current_platform.fp8_dtype() if dtype is None else dtype
+    fp8_min, fp8_max = get_fp8_min_max()
+
+    x_q = torch.empty(x.shape, device=x.device, dtype=dtype)
+
+    if column_major_scales:
+        if tma_aligned_scales:
+            m = x.shape[-2]
+            sf_k = x.shape[-1] // group_size
+            tma_aligned_m = get_tma_aligned_size(m, 4)
+            shape = x.shape[:-2] + (m, sf_k)
+            stride = (
+                (1, tma_aligned_m)
+                if x.dim() == 2
+                else (tma_aligned_m * sf_k, 1, tma_aligned_m)
+            )
+            x_s = torch.empty_strided(
+                shape, stride, device=x.device, dtype=torch.float32
+            )
+        else:
+            shape = x.shape[:-2] + (x.shape[-1] // group_size, x.shape[-2])
+            x_s = torch.empty(shape, device=x.device, dtype=torch.float32).permute(
+                -1, -2
+            )
+    else:
+        shape = x.shape[:-1] + (x.shape[-1] // group_size,)
+        x_s = torch.empty(shape, device=x.device, dtype=torch.float32)
+
+    torch.ops.vllm_helion.per_token_group_fp8_quant(
+        x,
+        x_q,
+        x_s,
+        group_size,
+        eps,
+        fp8_min,
+        fp8_max,
+        use_ue8m0,
+        column_major_scales,
+        tma_aligned_scales,
+    )
+    return x_q, x_s
+
+
 def per_token_group_quant_fp8_packed_for_deepgemm(
     x: torch.Tensor,
     group_size: int,

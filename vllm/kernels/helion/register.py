@@ -51,8 +51,9 @@ from vllm.utils.torch_utils import direct_register_custom_op
 
 if not has_helion():
     raise ImportError(
-        "register module requires helion to be installed. "
-        "Install it with: pip install helion"
+        "Helion kernels require the 'helion' package. Install it with "
+        "'pip install helion', or disable Helion kernels by setting "
+        "VLLM_USE_HELION_KERNELS=0."
     )
 
 import helion

@@ -311,6 +311,17 @@ def _try_load_aot_compiled_fn(
             logger.info(
                 "Directly load AOT compilation from path %s", aot_compilation_path
             )
+        # A cache-hit skips the post-grad pass pipeline, so HelionFusionRoutingPass
+        # never runs to define the routed ops the loaded graph may reference.
+        # Register them here so the artifact resolves. Gated the same way as the
+        # pass (helion + cudagraphs enabled), since that's when the cached graph
+        # can contain routed ops. (On a cache miss the pass registers them.)
+        if envs.VLLM_USE_HELION_KERNELS and bool(
+            model.compilation_config.cudagraph_mode
+        ):
+            from vllm.kernels.helion.routing import register_compiled_routed_helion_ops
+
+            register_compiled_routed_helion_ops()
         return loaded_fn
     except Exception as e:
         if os.path.exists(aot_compilation_path):
