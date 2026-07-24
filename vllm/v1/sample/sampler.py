@@ -13,6 +13,7 @@ from vllm.v1.sample.ops.bad_words import apply_bad_words
 from vllm.v1.sample.ops.logprobs import batched_count_greater_than
 from vllm.v1.sample.ops.penalties import apply_all_penalties
 from vllm.v1.sample.ops.topk_topp_sampler import TopKTopPSampler
+from vllm.v1.sample.utils import build_logprob_token_ids_matrix
 
 _SAMPLING_EPS = 1e-5
 
@@ -173,35 +174,13 @@ class Sampler(nn.Module):
         if not logprob_token_ids:
             return None
 
-        batch_size = logprobs.shape[0]
-        device = logprobs.device
-
-        # Find max number of tokens across all requests
-        max_num_tokens = max(len(tids) for tids in logprob_token_ids.values())
-        pin = self.pin_memory
-
-        # Build the padded token_ids and valid_mask matrices on pinned CPU,
-        # then upload non-blocking.
-        token_ids_cpu = torch.zeros(
-            batch_size, max_num_tokens + 1, dtype=torch.int64, pin_memory=pin
+        token_ids_tensor, valid_mask = build_logprob_token_ids_matrix(
+            logprob_token_ids,
+            num_rows=logprobs.shape[0],
+            sampled=sampled,
+            device=logprobs.device,
+            pin_memory=self.pin_memory,
         )
-        # Create mask for valid positions (True = valid, False = padded)
-        valid_mask_cpu = torch.zeros(
-            batch_size, max_num_tokens + 1, dtype=torch.bool, pin_memory=pin
-        )
-        valid_mask_cpu[:, 0] = True  # Sampled token is always valid
-        for req_idx, token_ids in logprob_token_ids.items():
-            num_tokens = len(token_ids)
-            token_ids_cpu[req_idx, 1 : num_tokens + 1] = torch.as_tensor(
-                token_ids, dtype=torch.int64
-            )
-            valid_mask_cpu[req_idx, 1 : num_tokens + 1] = True
-
-        token_ids_tensor = token_ids_cpu.to(device, non_blocking=True)
-        valid_mask = valid_mask_cpu.to(device, non_blocking=True)
-        # Sampled token in column 0 — fill on-device from the sampled GPU
-        # tensor so we don't need to D2H + re-upload.
-        token_ids_tensor[:, 0] = sampled
 
         # Gather logprobs at the requested token ids.
         gathered_logprobs = logprobs.gather(-1, token_ids_tensor)
