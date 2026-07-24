@@ -104,11 +104,11 @@ vllm serve <path_to_exported_checkpoint> \
 
 ## Testing (local checkpoints)
 
-vLLM's ModelOpt unit tests are gated by local checkpoint paths and are skipped
-by default in CI. To run the tests locally:
+The `FP8_PER_CHANNEL_PER_TOKEN` and `FP8_PB_WO` checkpoint tests in
+`tests/quantization/test_modelopt.py` download small public checkpoints from
+the Hugging Face Hub on demand and are skipped automatically if the download
+fails; no environment variables need to be set. To run the tests locally:
 
 ```bash
-export VLLM_TEST_MODELOPT_FP8_PC_PT_MODEL_PATH=<path_to_fp8_pc_pt_checkpoint>
-export VLLM_TEST_MODELOPT_FP8_PB_WO_MODEL_PATH=<path_to_fp8_pb_wo_checkpoint>
 pytest -q tests/quantization/test_modelopt.py
 ```
