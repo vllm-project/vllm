@@ -55,6 +55,7 @@ from .interfaces import (
     supports_multimodal_encoder_tp_data,
     supports_multimodal_raw_input_only,
     supports_pp,
+    supports_replayssm,
     supports_transcription,
 )
 from .interfaces_base import (
@@ -190,7 +191,6 @@ _TEXT_GENERATION_MODELS = {
     "PhiForCausalLM": ("phi", "PhiForCausalLM"),
     "Phi3ForCausalLM": ("phi3", "Phi3ForCausalLM"),
     "PhiMoEForCausalLM": ("phimoe", "PhiMoEForCausalLM"),
-    "Plamo2ForCausalLM": ("plamo2", "Plamo2ForCausalLM"),
     "Plamo3ForCausalLM": ("plamo3", "Plamo3ForCausalLM"),
     "Qwen2ForCausalLM": ("qwen2", "Qwen2ForCausalLM"),
     "Qwen2MoeForCausalLM": ("qwen2_moe", "Qwen2MoeForCausalLM"),
@@ -760,6 +760,7 @@ _PREVIOUSLY_SUPPORTED_MODELS = {
     "TeleChatForCausalLM": "0.25.0",
     "PersimmonForCausalLM": "0.25.0",
     "FuyuForCausalLM": "0.25.0",
+    "Plamo2ForCausalLM": "0.26.0",
 }
 
 _OOT_SUPPORTED_MODELS = {
@@ -789,6 +790,7 @@ class _ModelInfo:
     is_hybrid: bool
     has_noops: bool
     supports_mamba_prefix_caching: bool
+    supports_replayssm: bool
     supports_transcription: bool
     supports_transcription_only: bool
 
@@ -815,6 +817,7 @@ class _ModelInfo:
             is_attention_free=is_attention_free(model),
             is_hybrid=is_hybrid(model),
             supports_mamba_prefix_caching=supports_mamba_prefix_caching(model),
+            supports_replayssm=supports_replayssm(model),
             supports_transcription=supports_transcription(model),
             supports_transcription_only=(
                 supports_transcription(model) and model.supports_transcription_only
