@@ -47,9 +47,8 @@ class RotaryEmbeddingBase(CustomOp):
         if not hasattr(self, "use_flashinfer"):
             self.use_flashinfer = False
 
-        self.use_aiter = self.enabled() and (
-            rocm_aiter_ops.is_triton_rotary_embed_enabled()
-            or rocm_aiter_ops.is_rdna_triton_rotary_embed_enabled()
+        self.use_aiter = (
+            self.enabled() and rocm_aiter_ops.is_triton_rotary_embed_enabled()
         )
         if self.use_aiter:
             self.rocm_aiter_triton_rotary_embedding = (
