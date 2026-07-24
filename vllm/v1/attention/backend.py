@@ -998,6 +998,9 @@ class MLAAttentionImpl(AttentionImplBase[T], Generic[T]):
     """MLA attention implementation with forward_mqa and forward_mha methods."""
 
     supports_pcp: bool = True
+    # Whether this impl provides a dense-MHA prefill path (``forward_mha``).
+    # Sparse impls with only the top-k MQA path set this to ``False``.
+    supports_dense_mha_prefill: bool = True
 
     @abstractmethod
     def __init__(
