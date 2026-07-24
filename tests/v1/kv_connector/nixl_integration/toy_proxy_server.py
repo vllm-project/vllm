@@ -248,7 +248,7 @@ async def _handle_completions(api: str, request: Request):
             ):
                 yield chunk
 
-        return StreamingResponse(generate_stream(), media_type="application/json")
+        return StreamingResponse(generate_stream(), media_type="text/event-stream")
 
     except Exception as e:
         import sys
