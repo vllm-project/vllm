@@ -127,3 +127,66 @@ def test_register_oot_linear_kernel(platform_mock):
     assert isinstance(kernel, OOTInt8ScaledMMLinearKernel), (
         "init_int8_linear_kernel should return an instance of the registered kernel"
     )
+
+
+@pytest.mark.parametrize(
+    "compute_capability,expected_supported",
+    [(90, False), (100, True), (103, True), (120, True), (121, True)],
+)
+def test_flashinfer_fp8_kernel_is_supported_per_arch(
+    compute_capability: int, expected_supported: bool
+):
+    """FlashInfer per-tensor FP8 kernel stays enabled on Blackwell,
+    including the sm_12x family — the cuDNN hot-path stall there is
+    handled by pinning the bmm_fp8 backend, not by gating the kernel
+    (see bmm_fp8_backend in vllm.utils.flashinfer)."""
+    from vllm.model_executor.kernels.linear import (
+        FlashInferFP8ScaledMMLinearKernel,
+    )
+
+    with (
+        patch(
+            "vllm.model_executor.kernels.linear.scaled_mm.flashinfer"
+            ".current_platform"
+        ) as platform_mock,
+        patch(
+            "vllm.model_executor.kernels.linear.scaled_mm.flashinfer"
+            ".has_flashinfer",
+            return_value=True,
+        ),
+    ):
+        platform_mock.is_cuda.return_value = True
+        supported, reason = FlashInferFP8ScaledMMLinearKernel.is_supported(
+            compute_capability
+        )
+    assert supported is expected_supported, reason
+
+
+@pytest.mark.parametrize(
+    "capability_family_120,expected_backend",
+    [(True, "cublas"), (False, "auto")],
+)
+def test_bmm_fp8_backend_pins_cublas_on_sm_12x(
+    capability_family_120: bool, expected_backend: str
+):
+    """On sm_12x, bmm_fp8 must not use backend="auto": with the cudnn
+    python module importable, FlashInfer's auto selection lazily builds
+    cuDNN GEMM graphs per novel (batch, seqlen) shape inside the serving
+    hot path (multi-second stalls) and can reject plans at execute time
+    (flashinfer-ai/flashinfer#3566)."""
+    from vllm.utils import flashinfer as fi_utils
+
+    def fake_family(capability: int) -> bool:
+        return capability_family_120 if capability == 120 else False
+
+    saved = fi_utils._BMM_FP8_BACKEND
+    fi_utils._BMM_FP8_BACKEND = None
+    try:
+        with patch.object(
+            fi_utils.current_platform,
+            "is_device_capability_family",
+            side_effect=fake_family,
+        ):
+            assert fi_utils.bmm_fp8_backend() == expected_backend
+    finally:
+        fi_utils._BMM_FP8_BACKEND = saved
