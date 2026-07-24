@@ -86,9 +86,11 @@ def test_fused_qk_norm_mrope_matches_reference(
     qkv_base = torch.randn(num_tokens, total_dim, dtype=dtype, device=device)
     qkv_fused = qkv_base.clone()
     # mRoPE positions: [3, num_tokens] (time/height/width), independent streams.
+    # Use a strided (non-contiguous) view like Qwen3-VL passes at runtime, to
+    # also exercise the kernel's internal contiguous() handling.
     positions = torch.randint(
-        0, 1000, (3, num_tokens), dtype=torch.long, device=device
-    )
+        0, 1000, (3, num_tokens * 2), dtype=torch.long, device=device
+    )[:, :num_tokens]
 
     q_norm = RMSNorm(head_dim, eps=eps).to(device=device, dtype=dtype)
     k_norm = RMSNorm(head_dim, eps=eps).to(device=device, dtype=dtype)

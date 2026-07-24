@@ -26,12 +26,12 @@
 // cos_sin_cache[position_ids[section(d), token], d] per half-dimension, with no
 // pre-gather of the cache.
 //
-// v1 scope: base (one warp per token-head) kernel only, non-interleaved mRoPE
-// section layout (mrope_interleaved == false, the Qwen3-VL default), head dims
-// 64/128/256, both neox and gpt-j (interleaved) rotation styles. The
-// cp.async NTokenHeads throughput variant present in the plain-RoPE kernel is a
-// planned follow-up; the compile-fusion pass only fires for the configurations
-// supported here.
+// v1 scope: base (one warp per token-head) kernel only, head dims 64/128/256,
+// both neox and gpt-j rotation styles, and both mRoPE section layouts --
+// contiguous [T..T H..H W..W] and interleaved [T H W ... T T] (the Qwen3-VL
+// default), selected by mrope_interleaved. The cp.async NTokenHeads throughput
+// variant present in the plain-RoPE kernel is a planned follow-up; the
+// compile-fusion pass only fires for the configurations supported here.
 
 #include <cmath>
 #include <cuda_runtime.h>
@@ -416,7 +416,10 @@ void fused_qk_norm_mrope(
 ) {
   // Input validation
   CHECK_INPUT(qkv);
-  CHECK_INPUT(position_ids);
+  // position_ids may be a non-contiguous view (Qwen3-VL slices [3, N] out of a
+  // larger positions tensor); require only CUDA here and materialize a
+  // contiguous copy below for the row-major kernel index.
+  CHECK_TH_CUDA(position_ids);
   CHECK_INPUT(q_weight);
   CHECK_INPUT(k_weight);
   CHECK_INPUT(cos_sin_cache);
@@ -463,6 +466,12 @@ void fused_qk_norm_mrope(
       qkv.get_device_index());
   auto stream = get_current_cuda_stream(qkv.get_device_index());
 
+  // Materialize a contiguous [3, num_tokens] copy so the kernel's row-major
+  // index (position_ids[section * num_tokens + tokenIdx]) is valid even when
+  // the caller passes a strided view (e.g. Qwen3-VL).
+  torch::stable::Tensor position_ids_contig =
+      torch::stable::contiguous(position_ids);
+
   VLLM_STABLE_DISPATCH_HALF_TYPES(
       qkv.scalar_type(), "fused_qk_norm_mrope_kernel", [&] {
         using qkv_scalar_t = scalar_t;
@@ -477,7 +486,7 @@ void fused_qk_norm_mrope(
                   static_cast<int>(cos_sin_cache.size(1)),
                   static_cast<float>(eps), q_weight.data_ptr(),
                   k_weight.data_ptr(), cos_sin_cache.data_ptr(), !is_neox,
-                  reinterpret_cast<int64_t const*>(position_ids.data_ptr()),
+                  reinterpret_cast<int64_t const*>(position_ids_contig.data_ptr()),
                   static_cast<int>(mrope_section_t),
                   static_cast<int>(mrope_section_h), mrope_interleaved, stream);
             });
