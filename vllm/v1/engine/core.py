@@ -29,7 +29,10 @@ from vllm.distributed import (
 )
 from vllm.envs import enable_envs_cache
 from vllm.logger import init_logger
-from vllm.logging_utils.dump_input import dump_engine_exception
+from vllm.logging_utils.dump_input import (
+    EngineExecutionTimeoutDumper,
+    dump_engine_exception,
+)
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.tasks import POOLING_TASKS, SupportedTask
@@ -93,6 +96,11 @@ logger = init_logger(__name__)
 HANDSHAKE_TIMEOUT_MINS = 5
 
 _R = TypeVar("_R")  # Return type for collective_rpc
+
+EXECUTE_MODEL_WAIT_STAGE = "execute_model_wait"
+SAMPLE_TOKENS_STAGE = "sample_tokens"
+SAMPLE_TOKENS_WAIT_STAGE = "sample_tokens_wait"
+BatchQueueEntry = tuple[Future[ModelRunnerOutput], SchedulerOutput, Future[Any], str]
 
 
 class EngineCore:
@@ -197,9 +205,7 @@ class EngineCore:
         # schedule and execute batches, and is required by pipeline parallelism
         # to eliminate pipeline bubbles.
         self.batch_queue_size = vllm_config.max_concurrent_batches
-        self.batch_queue: (
-            deque[tuple[Future[ModelRunnerOutput], SchedulerOutput, Future[Any]]] | None
-        ) = None
+        self.batch_queue: deque[BatchQueueEntry] | None = None
         if self.batch_queue_size > 1:
             logger.debug("Batch queue is enabled with size %d", self.batch_queue_size)
             self.batch_queue = deque(maxlen=self.batch_queue_size)
@@ -499,6 +505,19 @@ class EngineCore:
             raise err
 
     @contextmanager
+    def dump_on_slow_execution(
+        self, scheduler_output: SchedulerOutput, stage: str
+    ) -> Generator[None, None, None]:
+        with EngineExecutionTimeoutDumper(
+            config=self.vllm_config,
+            scheduler_output=scheduler_output,
+            scheduler_stats=self.scheduler.make_stats(),
+            timeout_s=envs.VLLM_ENGINE_ITERATION_TIMEOUT_S,
+            stage=stage,
+        ):
+            yield
+
+    @contextmanager
     def capture_iteration_details(
         self, scheduler_output: SchedulerOutput | None
     ) -> Generator[SchedulerIterationDetails | None, None, None]:
@@ -591,9 +610,13 @@ class EngineCore:
             self.capture_iteration_details(scheduler_output) as iteration_details,
             self.log_error_detail(scheduler_output),
         ):
-            model_output = future.result()
+            with self.dump_on_slow_execution(
+                scheduler_output, EXECUTE_MODEL_WAIT_STAGE
+            ):
+                model_output = future.result()
             if model_output is None:
-                model_output = self.model_executor.sample_tokens(grammar_output)
+                with self.dump_on_slow_execution(scheduler_output, SAMPLE_TOKENS_STAGE):
+                    model_output = self.model_executor.sample_tokens(grammar_output)
 
         # Before processing the model output, process any aborts that happened
         # during the model execution.
@@ -653,6 +676,7 @@ class EngineCore:
             if self.is_pooling_model or not model_executed:
                 # No sampling required (no requests scheduled).
                 future = cast(Future[ModelRunnerOutput], exec_future)
+                future_stage = EXECUTE_MODEL_WAIT_STAGE
             else:
                 if not scheduler_output.pending_structured_output_tokens:
                     # We aren't waiting for any tokens, get any grammar output
@@ -663,6 +687,7 @@ class EngineCore:
                     future = self.model_executor.sample_tokens(
                         grammar_output, non_block=True
                     )
+                    future_stage = SAMPLE_TOKENS_WAIT_STAGE
                 else:
                     # We need to defer sampling until we have processed the model output
                     # from the prior step.
@@ -670,7 +695,9 @@ class EngineCore:
 
             if not deferred_scheduler_output:
                 # Add this step's future to the queue.
-                batch_queue.appendleft((future, scheduler_output, exec_future))
+                batch_queue.appendleft(
+                    (future, scheduler_output, exec_future, future_stage)
+                )
                 if len(batch_queue) < self.batch_queue_size and (
                     model_executed or self.scheduler.has_requests()
                 ):
@@ -685,10 +712,11 @@ class EngineCore:
             return None, False
 
         # Block until the next result is available.
-        future, scheduler_output, exec_model_fut = batch_queue.pop()
+        future, scheduler_output, exec_model_fut, future_stage = batch_queue.pop()
         with (
             self.capture_iteration_details(scheduler_output) as iteration_details,
             self.log_error_detail(scheduler_output),
+            self.dump_on_slow_execution(scheduler_output, future_stage),
         ):
             model_output = future.result()
             if model_output is None:
@@ -726,7 +754,14 @@ class EngineCore:
                 deferred_scheduler_output
             )
             future = self.model_executor.sample_tokens(grammar_output, non_block=True)
-            batch_queue.appendleft((future, deferred_scheduler_output, exec_future))
+            batch_queue.appendleft(
+                (
+                    future,
+                    deferred_scheduler_output,
+                    exec_future,
+                    SAMPLE_TOKENS_WAIT_STAGE,
+                )
+            )
 
         return engine_core_outputs, model_executed
 
