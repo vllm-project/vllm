@@ -1445,7 +1445,7 @@ class ModelConfig:
         """
         Returns the mamba chunk size if it exists
         """
-        # used by e.g. Bamba, FalconH1, Granite, PLaMo2
+        # used by e.g. Bamba, FalconH1, Granite
         chunk_size = getattr(self.hf_text_config, "mamba_chunk_size", None)
         if chunk_size is None:
             # used by e.g. Mamba2, NemotronH, Zamba
@@ -2015,7 +2015,6 @@ _FLOAT16_NOT_SUPPORTED_MODELS = {
     "gemma2": "Numerical instability. Please use bfloat16 or float32 instead.",
     "gemma3": "Numerical instability. Please use bfloat16 or float32 instead.",
     "gemma3_text": "Numerical instability. Please use bfloat16 or float32 instead.",
-    "plamo2": "Numerical instability. Please use bfloat16 or float32 instead.",
     "glm4": "Numerical instability. Please use bfloat16 or float32 instead.",
 }
 
