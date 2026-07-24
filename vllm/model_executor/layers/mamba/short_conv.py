@@ -23,6 +23,11 @@ from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
     causal_conv1d_fn,
     causal_conv1d_update,
 )
+from vllm.model_executor.layers.mamba.ops.cpu.causal_conv1d import (
+    causal_conv1d_fn_cpu,
+    causal_conv1d_update_cpu,
+    resolve_cpu_conv_weights,
+)
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import direct_register_custom_op
@@ -95,17 +100,6 @@ class ShortConv(MambaBase, CustomOp):
         hidden_states: torch.Tensor,
         output: torch.Tensor,
     ):
-        # Reference torch causal conv1d; runs on all CPU platforms. AMX kernels
-        # for causal conv can be plugged in here later.
-        from vllm.model_executor.layers.mamba.ops.cpu.causal_conv1d import (
-            causal_conv1d_fn_cpu as causal_conv1d_torch,
-        )
-        from vllm.model_executor.layers.mamba.ops.cpu.causal_conv1d import (
-            causal_conv1d_update_cpu,
-            causal_conv1d_update_torch,
-        )
-        from vllm.platforms import CpuArchEnum, current_platform
-
         forward_context = get_forward_context()
         attn_metadata_raw = forward_context.attn_metadata
         attn_metadata: AttentionMetadata | None = None
@@ -117,10 +111,7 @@ class ShortConv(MambaBase, CustomOp):
         BCx, _ = self.in_proj(hidden_states)
         B, C, x = BCx.chunk(3, dim=-1)
 
-        # (dim, kernel_size) — same reshape as forward_cuda
-        conv_weights = self.conv.weight.view(
-            self.conv.weight.size(0), self.conv.weight.size(2)
-        )
+        conv_weight, native_weight = resolve_cpu_conv_weights(self.conv)
 
         if attn_metadata is None:
             # Profile run — output value doesn't matter
@@ -157,15 +148,16 @@ class ShortConv(MambaBase, CustomOp):
         if has_prefill:
             assert attn_metadata.state_indices_tensor_p is not None
             Bx_p = (B_p * x_p).transpose(0, 1)  # (dim, num_prefill_tokens)
-            out_p = causal_conv1d_torch(
+            out_p = causal_conv1d_fn_cpu(
                 Bx_p,
-                conv_weights,
+                conv_weight,
                 self.conv.bias,
                 conv_state,
                 attn_metadata.query_start_loc_p,
                 attn_metadata.state_indices_tensor_p.flatten(),
                 attn_metadata.has_initial_states_p,
                 activation=None,
+                native_weight=native_weight,
             ).transpose(0, 1)[:num_prefill_tokens]  # (num_prefill_tokens, dim)
             conv_output_list.append(C_p * out_p)
 
@@ -173,25 +165,15 @@ class ShortConv(MambaBase, CustomOp):
             assert attn_metadata.state_indices_tensor_d is not None
             state_indices_d = attn_metadata.state_indices_tensor_d.flatten()
             Bx_d = B_d * x_d  # (num_decodes, dim)
-            if current_platform.get_cpu_architecture() == CpuArchEnum.ARM:
-                conv_state_view = conv_state[state_indices_d].contiguous()
-                out_d = causal_conv1d_update_torch(
-                    Bx_d.unsqueeze(-1),
-                    conv_state_view,
-                    conv_weights,
-                    self.conv.bias,
-                    activation=None,
-                ).squeeze(-1)
-                conv_state[state_indices_d] = conv_state_view
-            else:
-                out_d = causal_conv1d_update_cpu(
-                    Bx_d,
-                    conv_state,
-                    conv_weights,
-                    self.conv.bias,
-                    activation=None,
-                    conv_state_indices=state_indices_d,
-                )
+            out_d = causal_conv1d_update_cpu(
+                Bx_d,
+                conv_state,
+                conv_weight,
+                self.conv.bias,
+                activation=None,
+                conv_state_indices=state_indices_d,
+                native_weight=native_weight,
+            )
             conv_output_list.insert(0, C_d * out_d)
 
         hidden_states_out = torch.vstack(conv_output_list)
