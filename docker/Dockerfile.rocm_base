@@ -73,16 +73,6 @@ RUN if [ "$USE_SCCACHE" = "1" ]; then \
         && sccache --version; \
     fi
 
-# NOTE: sccache wrappers are created AFTER TheRock ROCm install (below)
-# because clang++ path depends on rocm-sdk init
-
-# Set sccache environment variables only when USE_SCCACHE=1
-# This prevents S3 config from leaking into images when sccache is not used
-ARG USE_SCCACHE
-ENV SCCACHE_BUCKET=${USE_SCCACHE:+${SCCACHE_BUCKET_NAME}}
-ENV SCCACHE_REGION=${USE_SCCACHE:+${SCCACHE_REGION_NAME}}
-ENV SCCACHE_S3_NO_CREDENTIALS=${USE_SCCACHE:+${SCCACHE_S3_NO_CREDENTIALS}}
-ENV SCCACHE_IDLE_TIMEOUT=${USE_SCCACHE:+0}
 
 ###
 ### TheROCK install
@@ -193,6 +183,18 @@ RUN if [ "$USE_SCCACHE" = "1" ]; then \
         && echo "sccache wrappers created in /opt/sccache-wrappers"; \
     fi
 
+# NOTE: sccache wrappers are created AFTER TheRock ROCm install (below)
+# because clang++ path depends on rocm-sdk init
+
+# Set sccache environment variables only when USE_SCCACHE=1
+# This prevents S3 config from leaking into images when sccache is not used
+ARG USE_SCCACHE
+ENV SCCACHE_BUCKET=${USE_SCCACHE:+${SCCACHE_BUCKET_NAME}}
+ENV SCCACHE_REGION=${USE_SCCACHE:+${SCCACHE_REGION_NAME}}
+ENV SCCACHE_S3_NO_CREDENTIALS=${USE_SCCACHE:+${SCCACHE_S3_NO_CREDENTIALS}}
+ENV SCCACHE_IDLE_TIMEOUT=${USE_SCCACHE:+0}
+
+
 ###
 ### Triton Build
 ###
@@ -226,7 +228,7 @@ RUN mkdir -p /app/install && cp /app/flash-attention/dist/*.whl /app/install
 
 
 ###
-### AITER Build (CDNA only -- skipped for RDNA targets)
+### AITER Build
 ###
 FROM base AS build_aiter
 ARG AITER_BRANCH
@@ -252,7 +254,7 @@ RUN mkdir -p /app/install && cp /app/aiter/dist/*.whl /app/install
 ### Final Build
 ###
 
-# Wheel release stage -
+# Wheel release stage - 
 # only includes dependencies used by wheel release pipeline
 FROM base AS debs_wheel_release
 RUN mkdir /app/debs
