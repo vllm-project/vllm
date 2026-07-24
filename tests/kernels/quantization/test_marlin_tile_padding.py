@@ -186,6 +186,23 @@ def test_marlin_moe_pad_helpers_shapes():
     assert bias_shards[..., N:].abs().sum() == 0
 
 
+@pytest.mark.parametrize("num_shards", [1, 2])
+def test_moe_pad_shard_rows(num_shards):
+    """_moe_pad_shard_rows must pad each w13 shard independently: 2 gate/up
+    shards for gated MoE, a single up shard for non-gated MoE."""
+    from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
+        _moe_pad_shard_rows,
+    )
+
+    E, N, padded_N, K = 2, 96, 128, 16
+    w13 = torch.arange(E * num_shards * N * K).reshape(E, num_shards * N, K).float()
+    padded = _moe_pad_shard_rows(w13, N, padded_N, num_shards)
+    assert padded.shape == (E, num_shards * padded_N, K)
+    shards = padded.view(E, num_shards, padded_N, K)
+    assert torch.equal(shards[:, :, :N], w13.view(E, num_shards, N, K))
+    assert shards[:, :, N:].abs().sum() == 0
+
+
 def _gpu_marlin_unsupported() -> bool:
     return not (
         current_platform.is_cuda() and current_platform.has_device_capability(80)
@@ -702,14 +719,17 @@ def test_check_moe_marlin_supports_layer_padding():
     _gpu_marlin_unsupported() or not is_fp8_marlin_supported(),
     reason="FP8 Marlin is not supported on this GPU type.",
 )
+@pytest.mark.parametrize("gated", [True, False])
 @pytest.mark.parametrize("quant", ["channel", "tensor"])
 @pytest.mark.parametrize("shape", [(96, 256, 8), (160, 512, 4)])
-def test_fp8_marlin_moe_padded_round_trip(shape, quant):
+def test_fp8_marlin_moe_padded_round_trip(shape, quant, gated):
     """FP8 weight-only MoE: pad a tile-misaligned intermediate and check the
-    real prepare + fused_marlin_moe against the dequantized reference."""
+    real prepare + fused_marlin_moe against the dequantized reference. Covers
+    gated (w13 = gate/up shards) and non-gated (w13 = up only) layouts."""
     from tests.kernels.utils import torch_experts
     from vllm.config import VllmConfig, set_current_vllm_config
     from vllm.model_executor.layers.fused_moe import fused_topk
+    from vllm.model_executor.layers.fused_moe.activation import MoEActivation
     from vllm.model_executor.layers.fused_moe.experts.marlin_moe import (
         fused_marlin_moe,
     )
@@ -726,6 +746,8 @@ def test_fp8_marlin_moe_padded_round_trip(shape, quant):
     fp8 = torch.float8_e4m3fn
     dtype = torch.bfloat16
     device = torch.device("cuda")
+    w13_up_dim = 2 * n if gated else n
+    activation = MoEActivation.SILU if gated else MoEActivation.RELU2_NO_MUL
     padded_n = marlin_moe_padded_intermediate(n, -1)
     assert padded_n != n
 
@@ -737,8 +759,9 @@ def test_fp8_marlin_moe_padded_round_trip(shape, quant):
         s = s.reshape(1) if quant == "tensor" else s.squeeze(1)
         return wq, s, ref
 
-    a = torch.randn((m, k), device=device, dtype=dtype) / 10
-    w1 = torch.randn((e, 2 * n, k), device=device, dtype=dtype) / k**0.5
+    torch.manual_seed(0)
+    a = torch.randn((m, k), device=device, dtype=dtype)
+    w1 = torch.randn((e, w13_up_dim, k), device=device, dtype=dtype) / k**0.5
     w2 = torch.randn((e, k, n), device=device, dtype=dtype) / n**0.5
     w13_q, w13_s, w1_ref = zip(*(q(w1[i]) for i in range(e)))
     w2_q, w2_s, w2_ref = zip(*(q(w2[i]) for i in range(e)))
@@ -770,6 +793,7 @@ def test_fp8_marlin_moe_padded_round_trip(shape, quant):
         topk_ids,
         quant_type_id=scalar_types.float8_e4m3fn.id,
         global_num_experts=e,
+        activation=activation,
         is_k_full=True,
         workspace=layer.workspace,
     )
@@ -781,6 +805,7 @@ def test_fp8_marlin_moe_padded_round_trip(shape, quant):
             topk_weight=topk_weights,
             topk_ids=topk_ids,
             global_num_experts=e,
+            activation=activation,
         )
     torch.testing.assert_close(out, ref, atol=8e-2, rtol=0)
 
@@ -789,13 +814,16 @@ def test_fp8_marlin_moe_padded_round_trip(shape, quant):
     _gpu_marlin_unsupported() or not is_fp8_marlin_supported(),
     reason="FP8 Marlin is not supported on this GPU type.",
 )
+@pytest.mark.parametrize("gated", [True, False])
 @pytest.mark.parametrize("shape", [(96, 256, 8), (160, 512, 4)])
-def test_mxfp8_marlin_moe_padded_round_trip(shape):
+def test_mxfp8_marlin_moe_padded_round_trip(shape, gated):
     """MXFP8 weight-only MoE round-trip at a tile-misaligned intermediate, with
-    unit e8m0 scales so the reference is the exact fp8 dequant."""
+    unit e8m0 scales so the reference is the exact fp8 dequant. Covers gated
+    (w13 = gate/up shards) and non-gated (w13 = up only) layouts."""
     from tests.kernels.utils import torch_experts
     from vllm.config import VllmConfig, set_current_vllm_config
     from vllm.model_executor.layers.fused_moe import fused_topk
+    from vllm.model_executor.layers.fused_moe.activation import MoEActivation
     from vllm.model_executor.layers.fused_moe.experts.marlin_moe import (
         fused_marlin_moe,
     )
@@ -812,16 +840,19 @@ def test_mxfp8_marlin_moe_padded_round_trip(shape):
     fp8 = torch.float8_e4m3fn
     dtype = torch.bfloat16
     device = torch.device("cuda")
+    w13_up_dim = 2 * n if gated else n
+    activation = MoEActivation.SILU if gated else MoEActivation.RELU2_NO_MUL
     padded_n = marlin_moe_padded_intermediate(n, gs)
     assert padded_n != n
 
-    a = torch.randn((m, k), device=device, dtype=dtype) / 10
-    w13_weight = torch.randn((e, 2 * n, k), device=device, dtype=dtype) / k**0.5
+    torch.manual_seed(0)
+    a = torch.randn((m, k), device=device, dtype=dtype)
+    w13_weight = torch.randn((e, w13_up_dim, k), device=device, dtype=dtype) / k**0.5
     w2_weight = torch.randn((e, k, n), device=device, dtype=dtype) / n**0.5
     w13_weight = w13_weight.clamp(-448, 448).to(fp8)
     w2_weight = w2_weight.clamp(-448, 448).to(fp8)
     w13_scale = torch.full(
-        (e, 2 * n, k // gs), e8m0_one, dtype=torch.uint8, device=device
+        (e, w13_up_dim, k // gs), e8m0_one, dtype=torch.uint8, device=device
     )
     w2_scale = torch.full((e, k, n // gs), e8m0_one, dtype=torch.uint8, device=device)
 
@@ -848,6 +879,7 @@ def test_mxfp8_marlin_moe_padded_round_trip(shape):
         topk_ids,
         quant_type_id=scalar_types.float8_e4m3fn.id,
         global_num_experts=e,
+        activation=activation,
         is_k_full=True,
         workspace=layer.workspace,
     )
@@ -859,5 +891,6 @@ def test_mxfp8_marlin_moe_padded_round_trip(shape):
             topk_weight=topk_weights,
             topk_ids=topk_ids,
             global_num_experts=e,
+            activation=activation,
         )
     torch.testing.assert_close(out, ref, atol=8e-2, rtol=0)

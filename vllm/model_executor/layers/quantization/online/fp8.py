@@ -582,12 +582,14 @@ class Fp8PerBlockOnlineMoEMethod(_Fp8OnlineMoEBase):
         hidden_size = layer.moe_config.hidden_dim_unpadded
         intermediate_size = layer.moe_config.intermediate_size_per_partition_unpadded
 
-        w13_half_size = layer.w13_weight.shape[1] // 2
-        if w13_half_size > intermediate_size:
-            layer.w13_weight[:, intermediate_size:w13_half_size, :] = 0
-            layer.w13_weight[
-                :, w13_half_size + intermediate_size : 2 * w13_half_size, :
-            ] = 0
+        # w13 holds two gate/up shards for gated MoE, a single up shard for
+        # non-gated MoE (is_act_and_mul=False).
+        num_w13_shards = 2 if self.moe.is_act_and_mul else 1
+        w13_shard_size = layer.w13_weight.shape[1] // num_w13_shards
+        if w13_shard_size > intermediate_size:
+            for s in range(num_w13_shards):
+                start = s * w13_shard_size + intermediate_size
+                layer.w13_weight[:, start : (s + 1) * w13_shard_size, :] = 0
         if layer.w13_weight.shape[2] > hidden_size:
             layer.w13_weight[:, :, hidden_size:] = 0
 
@@ -597,12 +599,11 @@ class Fp8PerBlockOnlineMoEMethod(_Fp8OnlineMoEBase):
             layer.w2_weight[:, :, intermediate_size:] = 0
 
         if getattr(layer, "w13_bias", None) is not None:
-            w13_bias_half_size = layer.w13_bias.shape[1] // 2
-            if w13_bias_half_size > intermediate_size:
-                layer.w13_bias[:, intermediate_size:w13_bias_half_size] = 0
-                layer.w13_bias[
-                    :, w13_bias_half_size + intermediate_size : 2 * w13_bias_half_size
-                ] = 0
+            w13_bias_shard_size = layer.w13_bias.shape[1] // num_w13_shards
+            if w13_bias_shard_size > intermediate_size:
+                for s in range(num_w13_shards):
+                    start = s * w13_bias_shard_size + intermediate_size
+                    layer.w13_bias[:, start : (s + 1) * w13_bias_shard_size] = 0
 
         if (
             getattr(layer, "w2_bias", None) is not None
