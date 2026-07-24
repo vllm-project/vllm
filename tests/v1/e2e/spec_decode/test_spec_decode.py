@@ -1393,50 +1393,80 @@ def load_and_process_dataset(data_name: str):
     return dataset
 
 
-@pytest.fixture
-def dflash_config():
-    target_model = "Qwen/Qwen3-8B"
-    draft_model = "z-lab/Qwen3-8B-DFlash-b16"
-
-    return dict(
-        model=target_model,
-        trust_remote_code=True,
-        speculative_config={
-            "method": "dflash",
-            "model": draft_model,
-            "num_speculative_tokens": 16,
-            "max_model_len": 32768,
-        },
-        max_model_len=32768,
-        max_num_seqs=128,
-        gpu_memory_utilization=0.85,
-        enforce_eager=False,
-        disable_log_stats=False,
-    )
-
-
+@pytest.mark.parametrize(
+    ["spec_config", "expected_acceptance_lengths", "chat_template_kwargs"],
+    [
+        pytest.param(
+            dict(
+                model="Qwen/Qwen3-8B",
+                trust_remote_code=True,
+                speculative_config={
+                    "method": "dflash",
+                    "model": "z-lab/Qwen3-8B-DFlash-b16",
+                    "num_speculative_tokens": 16,
+                    "max_model_len": 32768,
+                },
+                max_model_len=32768,
+                max_num_seqs=128,
+                gpu_memory_utilization=0.85,
+                enforce_eager=False,
+                disable_log_stats=False,
+            ),
+            # All scores from Table 1 in https://arxiv.org/pdf/2602.06036
+            {
+                "mt-bench": 4.24,
+                "humaneval": 6.50,
+                # runs with a subset of prompts so extra wide tol here
+                "gsm8k": 6.54 * 0.975,
+            },
+            {"enable_thinking": False},
+            id="dflash",
+        ),
+        pytest.param(
+            dict(
+                model="google/gemma-4-E4B-it",
+                trust_remote_code=True,
+                speculative_config={
+                    "method": "mtp",
+                    "model": "google/gemma-4-E4B-it-assistant",
+                    "num_speculative_tokens": 2,
+                    "max_model_len": 32768,
+                },
+                max_model_len=32768,
+                # Skip multimodal profiling; this is a text-only eval.
+                limit_mm_per_prompt={"image": 0, "audio": 0},
+                disable_log_stats=False,
+            ),
+            {
+                "mt-bench": 2.28,
+                "humaneval": 2.68,
+                # runs with a subset of prompts so extra wide tol here
+                "gsm8k": 2.67 * 0.975,
+            },
+            {},
+            id="gemma4",
+        ),
+    ],
+)
 @pytest.mark.parametrize("use_mrv2", [False, True])
-def test_dflash_acceptance_rates(
-    monkeypatch: pytest.MonkeyPatch, use_mrv2: bool, dflash_config
+def test_acceptance_rates(
+    monkeypatch: pytest.MonkeyPatch,
+    spec_config: dict[str, Any],
+    expected_acceptance_lengths: dict[str, float],
+    chat_template_kwargs: dict[str, Any],
+    use_mrv2: bool,
 ):
     """
-    E2E test for DFlash (block diffusion) speculative decoding.
-    Runs acceptance rate validation on GSM8k, MT-Bench, and HumanEval
-    comparing against baseline results from the paper (Table 1).
-    See https://github.com/z-lab/dflash/blob/main/benchmark_sglang.py for methodology.
+    E2E acceptance-rate validation for speculative decoding.
+
+    Drives one or more datasets (keyed in ``expected_acceptance_lengths``)
+    through the spec decode engine and asserts the mean acceptance length
+    stays within tolerance of the reference figure for each dataset.
     """
     monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1" if use_mrv2 else "0")
-
-    spec_llm = LLM(**dflash_config)
+    spec_llm = LLM(**spec_config)
 
     max_prompts_per_dataset = 200  # mt-bench has 80, humaneval has 164, truncates gsm8k
-
-    # All scores from Table 1 in https://arxiv.org/pdf/2602.06036
-    expected_acceptance_lengths = {
-        "mt-bench": 4.24,
-        "humaneval": 6.50,
-        "gsm8k": 6.54 * 0.975,  # runs with a subset of prompts so extra wide tol here
-    }
 
     tokenizer = spec_llm.get_tokenizer()
     for dataset_name, expected_len in expected_acceptance_lengths.items():
@@ -1452,10 +1482,11 @@ def test_dflash_acceptance_rates(
                 [{"role": "user", "content": user_content}],
                 tokenize=False,
                 add_generation_prompt=True,
-                enable_thinking=False,
+                **chat_template_kwargs,
             )
 
-            # Temp=0, MaxTokens=2048 from the paper
+            # Greedy (temp=0) so acceptance length is deterministic and comparable
+            # across runs.
             spec_llm.generate(
                 [prompt_text],
                 SamplingParams(temperature=0, max_tokens=2048),
@@ -1467,17 +1498,17 @@ def test_dflash_acceptance_rates(
             acceptance_lengths.append(acceptance_len)
 
         mean_acceptance_length = sum(acceptance_lengths) / len(acceptance_lengths)
-        # Fairly tight tolerance of 95% against the paper's figures,
+        # Fairly tight tolerance of 95% against the reference figures,
         # watching for regressions. Can be relaxed if test is flaky but be sure to
         # check for genuine issues such as #40727.
         expected_len = expected_len * 0.95
         print(
-            f"DFlash acceptance_len for {dataset_name}: {mean_acceptance_length:.2f}"
+            f"acceptance_len for {dataset_name}: {mean_acceptance_length:.2f}"
             f" (expected at least {expected_len:.2f})"
         )
 
         assert mean_acceptance_length >= expected_len, (
-            f"DFlash acceptance_len for {dataset_name} is below expected threshold:"
+            f"acceptance_len for {dataset_name} is below expected threshold: "
             f"{mean_acceptance_length:.2f} < {expected_len:.2f}"
         )
 

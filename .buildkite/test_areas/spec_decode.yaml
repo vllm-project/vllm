@@ -188,3 +188,15 @@ steps:
     - tests/v1/e2e/spec_decode/test_mtp_parallel_load.py
   commands:
     - pytest -v -s v1/e2e/spec_decode/test_mtp_parallel_load.py
+
+- label: Spec Decode Acceptance Rates Nightly
+  key: spec-decode-acceptance-rates-nightly
+  timeout_in_minutes: 60
+  device: h200_35gb
+  optional: true
+  source_file_dependencies:
+    - vllm/v1/spec_decode/
+    - vllm/v1/worker/gpu/spec_decode/
+    - tests/v1/e2e/spec_decode/
+  commands:
+    - pytest -v -s v1/e2e/spec_decode/test_spec_decode.py -k "acceptance_rates"
