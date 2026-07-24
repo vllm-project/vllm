@@ -16,6 +16,47 @@ Depending on the use case, there are two possible strategies:
 
 Both approaches are under active development.
 
+### Experimental direct final-output restore
+
+Prefill context parallelism partitions the model rows across ranks, but sampling
+and prompt-logprob computation consume one globally ordered hidden-state tensor.
+The default path reconstructs that tensor with a PCP collective. On a
+peer-connected single node, an experimental path instead lets each rank store
+its canonical rows directly into a globally ordered output slab on every GPU.
+
+Enable it with:
+
+```bash
+VLLM_USE_V2_MODEL_RUNNER=1 \
+VLLM_PCP_HIDDEN_RESTORE_MODE=direct \
+vllm serve MODEL \
+  --prefill-context-parallel-size 4 \
+  --no-async-scheduling
+```
+
+The direct path currently requires:
+
+- CUDA GPUs on one host, with peer access and native peer atomics between every
+  PCP rank.
+- The V2 model runner.
+- Asynchronous scheduling, ubatching, and sleep mode disabled.
+- The existing model and parallel-layout restrictions of prefill context
+  parallelism.
+
+The implementation alternates between two output slabs. One system-scope
+publication fence per step makes current stores visible and retires the
+previous slab before it is reused. The persistent storage per GPU is
+approximately:
+
+```text
+2 * max_num_batched_tokens * hidden_size * hidden_state_element_size
+```
+
+CUDA VMM alignment can round this upward. The slabs are allocated before
+vLLM's memory-profile pass, so their exact footprint is excluded when the KV
+cache is sized. `collective` remains the default value of
+`VLLM_PCP_HIDDEN_RESTORE_MODE`.
+
 ## Decode Context Parallel
 
 Due to the auto-regressive nature of decoding, every decoding step needs to compute a small amount of query tokens w.r.t. a large number of key/value tokens stored in the paged KV cache. The core of decode context parallel is how to shard the KV cache across GPUs.

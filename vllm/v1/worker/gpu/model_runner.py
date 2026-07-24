@@ -210,6 +210,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Draft tokens propagation - for spec-dec + struct outputs.
         self.draft_tokens_handler = DraftTokensHandler(self.device)
 
+        self._pcp_hidden_state_restorer = pcp.maybe_create_pcp_hidden_state_restorer(
+            self.vllm_config,
+            self.device,
+            self.supports_mm_inputs,
+        )
         self.pcp_manager: pcp.PCPManager | None = None
 
         # Pooling models.
@@ -469,7 +474,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.supports_mm_inputs,
             self.req_states,
             self.block_tables,
+            self._pcp_hidden_state_restorer,
         )
+        self._pcp_hidden_state_restorer = None
         initialize_mamba_ssu_backend(
             self.vllm_config.mamba_config, self.kv_cache_config
         )
@@ -1608,6 +1615,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def shutdown(self) -> None:
         """Release GPU tensors (model weights, KV caches, workspace) so that
         memory is reclaimable when running in the same process."""
+        if self.pcp_manager is not None:
+            self.pcp_manager.close()
+            self.pcp_manager = None
+        elif self._pcp_hidden_state_restorer is not None:
+            self._pcp_hidden_state_restorer.close()
+            self._pcp_hidden_state_restorer = None
         torch.accelerator.synchronize()
         if hasattr(self, "kv_caches"):
             self.kv_caches.clear()
