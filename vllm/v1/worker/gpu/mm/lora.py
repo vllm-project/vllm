@@ -41,7 +41,13 @@ def set_active_mm_loras(
 
         # iterate through visual tokens
         for mm_input_id in encoder_input_ids:
-            pos_info = mm_features[mm_input_id].mm_position
+            mm_feature = mm_features[mm_input_id]
+            if mm_feature.data is None:
+                # Served from the encoder cache: EncoderRunner.prepare_mm_inputs
+                # skips it in the forward, so it must not contribute mapping
+                # rows, or every later item's rows shift onto the wrong LoRA.
+                continue
+            pos_info = mm_feature.mm_position
             num_tokens = model.get_num_mm_encoder_tokens(pos_info.get_num_embeds())
             prompt_lora_mapping.append(lora_id)
             token_lora_mapping.extend([lora_id] * num_tokens)
