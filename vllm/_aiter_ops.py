@@ -1618,6 +1618,11 @@ class rocm_aiter_ops:
         return cls.is_rdna_aiter_enabled() and cls._LINEAR_ENABLED
 
     @classmethod
+    def is_rdna_triton_rotary_embed_enabled(cls) -> bool:
+        """RDNA4 (gfx12) analog of is_triton_rotary_embed_enabled() (aiter Triton RoPE)."""
+        return cls.is_rdna_aiter_enabled() and cls._TRITON_ROTARY_EMBED
+
+    @classmethod
     @if_aiter_supported
     def is_linear_enabled(cls) -> bool:
         return cls._AITER_ENABLED and cls._LINEAR_ENABLED
@@ -1767,17 +1772,8 @@ class rocm_aiter_ops:
             aiter_ar_comm if isinstance(aiter_ar_comm, AiterCustomAllreduce) else None
         )
 
-    @classmethod
-    @if_aiter_supported
-    def are_gdn_triton_kernels_available(cls) -> bool:
-        """Check if AITER Triton kernels for GDN attention are importable.
-
-        These are optional Triton kernels (conv1d fast-path, gated delta net)
-        used by GatedDeltaNetAttention's decode fast-path.  They may be absent
-        in older aiter builds.
-        """
-        if not cls._AITER_ENABLED:
-            return False
+    @staticmethod
+    def _gdn_triton_kernels_importable() -> bool:
         try:
             import aiter.ops.triton.causal_conv1d_update_single_token  # noqa: F401
             import aiter.ops.triton.gated_delta_net  # noqa: F401
@@ -1788,6 +1784,22 @@ class rocm_aiter_ops:
             return True
         except (ImportError, ModuleNotFoundError):
             return False
+
+    @classmethod
+    @if_aiter_supported
+    def are_gdn_triton_kernels_available(cls) -> bool:
+        """Check if AITER Triton kernels for GDN attention are importable.
+
+        These are optional Triton kernels (conv1d fast-path, gated delta net)
+        used by GatedDeltaNetAttention's decode fast-path.  They may be absent
+        in older aiter builds.
+        """
+        return cls._AITER_ENABLED and cls._gdn_triton_kernels_importable()
+
+    @classmethod
+    def is_rdna_gdn_triton_kernels_available(cls) -> bool:
+        """RDNA4 (gfx12) analog of are_gdn_triton_kernels_available()."""
+        return cls.is_rdna_aiter_enabled() and cls._gdn_triton_kernels_importable()
 
     @classmethod
     @if_aiter_supported

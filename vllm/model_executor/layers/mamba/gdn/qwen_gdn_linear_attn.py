@@ -69,7 +69,10 @@ from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 # Availability is checked centrally via rocm_aiter_ops; the actual function
 # references are imported here so that they can be called without per-call
 # import overhead.
-GDN_AITER_TRITON_AVAILABLE = rocm_aiter_ops.are_gdn_triton_kernels_available()
+GDN_AITER_TRITON_AVAILABLE = (
+    rocm_aiter_ops.are_gdn_triton_kernels_available()
+    or rocm_aiter_ops.is_rdna_gdn_triton_kernels_available()
+)
 
 if GDN_AITER_TRITON_AVAILABLE:
     from aiter.ops.triton.causal_conv1d_update_single_token import (

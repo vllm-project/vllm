@@ -97,7 +97,10 @@ class MatcherRotaryEmbedding(MatcherCustomOp):
         if enabled is None:
             enabled = RotaryEmbedding.enabled()
         if match_rocm_aiter is None:
-            match_rocm_aiter = rocm_aiter_ops.is_triton_rotary_embed_enabled()
+            match_rocm_aiter = (
+                rocm_aiter_ops.is_triton_rotary_embed_enabled()
+                or rocm_aiter_ops.is_rdna_triton_rotary_embed_enabled()
+            )
 
         super().__init__(enabled)
         self.is_neox = is_neox
