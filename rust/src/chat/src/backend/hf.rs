@@ -19,7 +19,7 @@ use crate::backend::{
     ChatBackend, DynChatBackend, LoadModelBackendsOptions, LoadedModelBackends,
     NewChatOutputProcessorOptions,
 };
-use crate::error::{Error, Result};
+use crate::error::Result;
 use crate::multimodal::{MultimodalConfigFiles, MultimodalModelInfo};
 use crate::output::{
     DefaultChatOutputProcessor, HarmonyChatOutputProcessor, validate_harmony_parser_overrides,
@@ -66,29 +66,22 @@ impl HfChatBackend {
         let renderer = options.renderer.resolve(model_type);
         let chat_renderer: DynChatRenderer = match renderer {
             RendererSelection::Auto => unreachable!("renderer auto should be resolved above"),
-            RendererSelection::Hf => Arc::new(
-                HfChatRenderer::load(
-                    HfRendererFiles {
-                        tokenizer_config: files.tokenizer_config_path.as_deref(),
-                        chat_template: files.chat_template_path.as_deref(),
-                    },
-                    HfRendererConfig {
-                        chat_template: options.chat_template,
-                        default_template_kwargs: options.default_chat_template_kwargs,
-                        content_format: options.chat_template_content_format,
-                        multimodal: multimodal_render_info,
-                    },
-                )
-                .map_err(Error::from_renderer)?,
-            ),
+            RendererSelection::Hf => Arc::new(HfChatRenderer::load(
+                HfRendererFiles {
+                    tokenizer_config: files.tokenizer_config_path.as_deref(),
+                    chat_template: files.chat_template_path.as_deref(),
+                },
+                HfRendererConfig {
+                    chat_template: options.chat_template,
+                    default_template_kwargs: options.default_chat_template_kwargs,
+                    content_format: options.chat_template_content_format,
+                    multimodal: multimodal_render_info,
+                },
+            )?),
             RendererSelection::DeepSeekV32 => Arc::new(DeepSeekV32ChatRenderer::new()),
             RendererSelection::DeepSeekV4 => Arc::new(DeepSeekV4ChatRenderer::new()),
-            RendererSelection::Harmony => {
-                Arc::new(HarmonyChatRenderer::new().map_err(Error::from_renderer)?)
-            }
-            RendererSelection::Inkling => {
-                Arc::new(InklingChatRenderer::new(tokenizer.clone()).map_err(Error::from_renderer)?)
-            }
+            RendererSelection::Harmony => Arc::new(HarmonyChatRenderer::new()?),
+            RendererSelection::Inkling => Arc::new(InklingChatRenderer::new(tokenizer.clone())?),
         };
 
         info!(

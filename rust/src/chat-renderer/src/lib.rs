@@ -11,6 +11,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use enum_as_inner::EnumAsInner;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -41,31 +42,13 @@ pub use vllm_chat_types::{
 };
 
 /// Engine-independent prompt content produced by a chat renderer.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, EnumAsInner)]
 #[serde(untagged)]
 pub enum RenderedPromptContent {
     /// Untokenized prompt text.
     Text(String),
     /// Prompt token IDs produced by a format-specific renderer.
     TokenIds(Vec<u32>),
-}
-
-impl RenderedPromptContent {
-    /// Return the rendered text when this artifact contains text.
-    pub fn into_text(self) -> Option<String> {
-        match self {
-            Self::Text(text) => Some(text),
-            Self::TokenIds(_) => None,
-        }
-    }
-
-    /// Return the rendered token IDs when this artifact is pre-tokenized.
-    pub fn into_token_ids(self) -> Option<Vec<u32>> {
-        match self {
-            Self::Text(_) => None,
-            Self::TokenIds(token_ids) => Some(token_ids),
-        }
-    }
 }
 
 /// Rendered chat prompt plus effective template metadata.

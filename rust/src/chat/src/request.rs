@@ -12,7 +12,7 @@ use vllm_engine_core_client::protocol::lora::LoraRequest;
 pub use vllm_text::SamplingParams;
 use vllm_text::TextDecodeOptions;
 
-use crate::error::{Error, Result};
+use crate::error::Result;
 
 /// One chat request ready to be rendered into a prompt and lowered into a
 /// generate request.
@@ -95,7 +95,7 @@ impl ChatRequest {
 
     /// Validate basic request invariants before rendering.
     pub fn validate(&self) -> Result<()> {
-        self.as_render_request().validate().map_err(Error::from_renderer)
+        self.as_render_request().validate().map_err(Into::into)
     }
 
     /// Return true if this request contains any multimodal content in its

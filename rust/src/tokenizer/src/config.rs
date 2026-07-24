@@ -1,6 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+//! Hugging Face `tokenizer_config.json` artifact types.
+//!
+//! These types describe the repository file format independently of the
+//! tokenizer backend selected to consume the model artifacts.
+
 use std::fs;
 use std::path::Path;
 

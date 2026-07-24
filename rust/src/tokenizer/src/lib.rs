@@ -8,6 +8,7 @@ use crate::incremental::DecodeStream;
 mod byte_level_decode;
 #[macro_use]
 mod error;
+mod config;
 mod hf;
 mod incremental;
 mod tekken;
@@ -15,11 +16,9 @@ mod tekken;
 pub mod test_utils;
 mod tiktoken;
 
+pub use config::{HfSpecialTokens, HfTokenizerConfig, NamedSpecialToken, load_tokenizer_config};
 pub use error::{Result, TokenizerError};
-pub use hf::{
-    HfSpecialTokens, HfTokenizerConfig, HuggingFaceTokenizer, NamedSpecialToken,
-    load_tokenizer_config,
-};
+pub use hf::HuggingFaceTokenizer;
 pub use incremental::IncrementalDecoder;
 pub use tekken::TekkenTokenizer;
 pub use tiktoken::TiktokenTokenizer;

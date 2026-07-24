@@ -638,7 +638,7 @@ fn chat_request_rejects_conflicting_generation_modes() {
 
     assert!(matches!(
         error,
-        vllm_chat::Error::ContinueFinalAssistantWithoutFinalAssistant
+        vllm_chat::Error::Renderer(RendererError::ContinueFinalAssistantWithoutFinalAssistant)
     ));
 }
 

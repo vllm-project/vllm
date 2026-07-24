@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+enum-as-inner.workspace = true
 indexmap.workspace = true
 itertools.workspace = true
 minijinja.workspace = true

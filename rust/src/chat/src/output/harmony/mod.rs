@@ -73,7 +73,7 @@ impl HarmonyChatOutputProcessor {
     /// Build one request-scoped Harmony processor after backend policy checks.
     pub fn new(request: &ChatRequest) -> ChatResult<Self> {
         Ok(Self {
-            encoding: harmony_encoding().map_err(Error::from_renderer)?,
+            encoding: harmony_encoding()?,
             tool_calls_enabled: request.tool_parsing_enabled(),
             parallel_tool_calls: request.parallel_tool_calls,
         })

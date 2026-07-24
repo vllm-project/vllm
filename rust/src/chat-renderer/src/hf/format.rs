@@ -281,7 +281,7 @@ mod tests {
 
     fn vllm_examples_dir() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../chat/tests/templates/vllm_examples")
+            .join("tests/templates/vllm_examples")
             .canonicalize()
             .expect("vLLM example template directory should exist locally")
     }

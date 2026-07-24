@@ -9,18 +9,8 @@ type BoxedError = Box<dyn std::error::Error + Send + Sync>;
 #[derive(Debug, Error, Macro)]
 #[thiserror_ext(macro(path = "crate::error"))]
 pub enum Error {
-    #[error("chat request must contain at least one message")]
-    EmptyMessages,
-    #[error("cannot continue the final message when the last message is not from the assistant")]
-    ContinueFinalAssistantWithoutFinalAssistant,
-    #[error("chat template is required but none was configured")]
-    MissingChatTemplate,
-    #[error("chat template error: {0}")]
-    ChatTemplate(String),
     #[error("multimodal input is not supported by this chat renderer")]
     UnsupportedMultimodalRenderer,
-    #[error("unsupported multimodal content: {0}")]
-    UnsupportedMultimodalContent(&'static str),
     #[error("`{modality}` input is not supported by this model")]
     UnsupportedModality { modality: String },
     #[error("multimodal preprocessing error: {0}")]
@@ -74,38 +64,21 @@ pub enum Error {
     #[error(transparent)]
     Text(#[from] vllm_text::Error),
     #[error(transparent)]
+    Renderer(#[from] vllm_chat_renderer::Error),
+    #[error(transparent)]
     Tokenizer(#[from] vllm_tokenizer::TokenizerError),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
 
 impl Error {
-    /// Map a renderer-owned error into the chat facade's public error shape.
-    pub(crate) fn from_renderer(error: vllm_chat_renderer::Error) -> Self {
-        match error {
-            vllm_chat_renderer::Error::EmptyMessages => Self::EmptyMessages,
-            vllm_chat_renderer::Error::ContinueFinalAssistantWithoutFinalAssistant => {
-                Self::ContinueFinalAssistantWithoutFinalAssistant
-            }
-            vllm_chat_renderer::Error::MissingChatTemplate => Self::MissingChatTemplate,
-            vllm_chat_renderer::Error::ChatTemplate(message) => Self::ChatTemplate(message),
-            vllm_chat_renderer::Error::UnsupportedMultimodalContent(content_type) => {
-                Self::UnsupportedMultimodalContent(content_type)
-            }
-            vllm_chat_renderer::Error::HarmonyEncoding { error } => {
-                Self::HarmonyOutputParsing { error }
-            }
-            vllm_chat_renderer::Error::Tokenizer(error) => Self::Tokenizer(error),
-        }
-    }
-
     /// Whether this error represents invalid user request parameters.
     pub fn is_request_validation_error(&self) -> bool {
         match self {
             Self::PromptTooLong { .. } => true,
             Self::Text(error) => error.is_request_validation_error(),
-            Self::UnsupportedMultimodalRenderer
-            | Self::UnsupportedMultimodalContent(_)
+            Self::Renderer(vllm_chat_renderer::Error::UnsupportedMultimodalContent(_))
+            | Self::UnsupportedMultimodalRenderer
             | Self::UnsupportedModality { .. } => true,
 
             _ => false,
