@@ -553,8 +553,18 @@ class ParallelLMHead(VocabParallelEmbedding):
         set_weight_attrs(weight=self.bias, weight_attrs=weight_attrs)
 
     def tie_weights(self, embed_tokens: VocabParallelEmbedding):
-        """Tie the weights with word embeddings."""
-        return self.quant_method.tie_weights(self, embed_tokens)
+        """Tie the weights with word embeddings.
+
+        Dispatch on ``embed_tokens``' quant method (the source of the shared
+        weight), so a packed/quantized embedding can override ``tie_weights`` to
+        reuse itself as the head (e.g. compressed-tensors WNA16) instead of
+        aliasing a plain ``weight`` it does not expose.
+        """
+        # On a pipeline-parallel rank without the embedding, ``embed_tokens`` is
+        # a ``PPMissingLayer`` placeholder with no quant method; nothing to tie.
+        if not hasattr(embed_tokens, "quant_method"):
+            return embed_tokens
+        return embed_tokens.quant_method.tie_weights(self, embed_tokens)
 
     def forward(self, input_):
         del input_

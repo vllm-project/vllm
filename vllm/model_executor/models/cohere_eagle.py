@@ -79,6 +79,7 @@ class CohereEagleModel(nn.Module):
             self.config.vocab_size,
             self.config.hidden_size,
             prefix=maybe_prefix(prefix, "embed_tokens"),
+            quant_config=vllm_config.quant_config,
         )
 
         self.layers = nn.ModuleList(

@@ -758,6 +758,7 @@ class Plamo2Model(torch.nn.Module):
             self.vocab_size,
             config.hidden_size,
             prefix=f"{prefix}.embed_tokens",
+            quant_config=vllm_config.quant_config,
         )
         self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
             ["hidden_states", "residual"], config.hidden_size
