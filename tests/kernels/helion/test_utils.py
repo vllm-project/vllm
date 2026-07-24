@@ -15,6 +15,7 @@ from vllm.kernels.helion.utils import canonicalize_gpu_name
         ("NVIDIA H100 80GB HBM3", "nvidia_h100"),
         ("NVIDIA H100 PCIe", "nvidia_h100"),
         ("NVIDIA H100 SXM5", "nvidia_h100"),
+        ("NVIDIA GB200", "nvidia_b200"),
         ("NVIDIA GeForce RTX 4090", "nvidia_geforce_rtx_4090"),
         ("AMD Instinct MI300X", "amd_instinct_mi300x"),
         ("AMD Instinct MI250X / MI250", "amd_instinct_mi250x_mi250"),

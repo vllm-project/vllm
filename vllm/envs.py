@@ -182,6 +182,7 @@ if TYPE_CHECKING:
     VLLM_DEEPEPLL_NVFP4_DISPATCH: bool = False
     VLLM_V1_USE_OUTLINES_CACHE: bool = False
     VLLM_TPU_USING_PATHWAYS: bool = False
+    VLLM_USE_HELION_KERNELS: bool = True
     VLLM_USE_DEEP_GEMM: bool = True
     VLLM_MOE_USE_DEEP_GEMM: bool = True
     VLLM_USE_DEEP_GEMM_E8M0: bool = True
@@ -1476,6 +1477,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Whether using Pathways
     "VLLM_TPU_USING_PATHWAYS": lambda: bool(
         "proxy" in os.getenv("JAX_PLATFORMS", "").lower()
+    ),
+    # Use Helion kernels when the `helion` package is installed.
+    "VLLM_USE_HELION_KERNELS": lambda: bool(
+        int(os.getenv("VLLM_USE_HELION_KERNELS", "1"))
     ),
     # Allow use of DeepGemm kernels for fused moe ops.
     "VLLM_USE_DEEP_GEMM": lambda: bool(int(os.getenv("VLLM_USE_DEEP_GEMM", "1"))),
