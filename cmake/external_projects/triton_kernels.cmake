@@ -39,6 +39,22 @@ endif()
 
 message (STATUS "[triton_kernels] triton_kernels is available at ${TRITON_KERNELS_PYTHON_DIR}")
 
+# Patch _matmul_ogs.py to fix OOB reads on Hopper-swizzled MXFP4 scale values.
+# The unmasked tl.load can read 0xff from uninitialized memory past the valid
+# K dimension, which gets interpreted as NaN. Upstream fix from
+# triton-lang/triton commit 0add6826.
+set(_patch_script "${CMAKE_SOURCE_DIR}/tools/patch_triton_kernels_matmul_ogs.py")
+set(_matmul_ogs "${TRITON_KERNELS_PYTHON_DIR}/matmul_ogs_details/_matmul_ogs.py")
+execute_process(
+  COMMAND "${Python_EXECUTABLE}" "${_patch_script}" "${_matmul_ogs}"
+  OUTPUT_VARIABLE _patch_output
+  ERROR_VARIABLE _patch_error
+  RESULT_VARIABLE _patch_result)
+if(NOT _patch_result EQUAL 0)
+  message(FATAL_ERROR "[triton_kernels] Failed to patch _matmul_ogs.py: ${_patch_error}")
+endif()
+message(STATUS "[triton_kernels] ${_patch_output}")
+
 add_custom_target(triton_kernels)
 
 # Ensure the vllm/third_party directory exists before installation
