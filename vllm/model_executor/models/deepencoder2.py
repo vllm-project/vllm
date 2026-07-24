@@ -10,6 +10,8 @@
 # This source code is licensed under the license found in the
 # LICENSE file in the root directory of this source tree.
 
+from functools import lru_cache
+
 import torch
 import torch.nn as nn
 import transformers
@@ -90,8 +92,6 @@ class CustomQwen2Decoder(PluggableLayer):
                 return_dict=None,
                 cache_position=None,
             ):
-                # token_type_ids
-                self._current_token_type_ids = token_type_ids
                 causal_mask_mapping = {
                     "full_attention": self._update_causal_mask(
                         attention_mask,
@@ -131,15 +131,12 @@ class CustomQwen2Decoder(PluggableLayer):
                     input_tensor.shape[1],
                 )
 
-                token_type_ids = self._current_token_type_ids
-
                 # attention mask
                 causal_mask = self._create_custom_4d_mask(
                     sequence_length=sequence_length,
                     dtype=dtype,
                     device=device,
                     batch_size=batch_size,
-                    token_type_ids=token_type_ids,
                 )
 
                 #  padding mask
@@ -150,46 +147,42 @@ class CustomQwen2Decoder(PluggableLayer):
 
                 return causal_mask
 
+            @classmethod
+            @lru_cache(maxsize=8)
+            def compute_mask_base(cls, sequence_length, dtype, device):
+                # token_type_ids is the fixed pattern [0]*n_query + [1]*n_query,
+                # identical across the batch, so the mask depends only on
+                # sequence_length: img tokens (first half) attend to
+                # everything, txt tokens (second half) attend causally among
+                # themselves. lru_cache keeps one batch-invariant [1, 1, S, S]
+                # mask per (S, dtype, device).
+                min_dtype = torch.finfo(dtype).min
+                n_query = sequence_length // 2
+                img = torch.arange(sequence_length, device=device) < n_query
+                txt = ~img
+                causal = torch.tril(
+                    torch.ones(
+                        sequence_length,
+                        sequence_length,
+                        dtype=torch.bool,
+                        device=device,
+                    )
+                )
+                allow = img[None, :] | (txt[:, None] & txt[None, :] & causal)
+                return torch.where(
+                    allow,
+                    torch.zeros((), dtype=dtype, device=device),
+                    torch.full((), min_dtype, dtype=dtype, device=device),
+                )[None, None]
+
             def _create_custom_4d_mask(
                 self,
                 sequence_length,
                 dtype,
                 device,
                 batch_size,
-                token_type_ids,
             ):
-                # The mask depends only on sequence_length: token_type_ids is
-                # the fixed pattern [0]*n_query + [1]*n_query, identical across
-                # the batch. Cache one batch-invariant [1, 1, S, S] mask per S
-                # and broadcast it, keeping the cache to a couple of tiny
-                # entries regardless of batch size.
-                key = sequence_length
-                cache = getattr(self, "_mask_cache", None)
-                if cache is None:
-                    cache = self._mask_cache = {}
-
-                base = cache.get(key)
-                if base is None:
-                    min_dtype = torch.finfo(dtype).min
-                    type_ids = token_type_ids[0].to(device)
-                    img = type_ids == 0
-                    txt = ~img
-                    causal = torch.tril(
-                        torch.ones(
-                            sequence_length,
-                            sequence_length,
-                            dtype=torch.bool,
-                            device=device,
-                        )
-                    )
-                    allow = img[None, :] | (txt[:, None] & txt[None, :] & causal)
-                    base = torch.where(
-                        allow,
-                        torch.zeros((), dtype=dtype, device=device),
-                        torch.full((), min_dtype, dtype=dtype, device=device),
-                    )[None, None]
-                    cache[key] = base
-
+                base = self.compute_mask_base(sequence_length, dtype, device)
                 return base.expand(batch_size, -1, -1, -1)
 
         return CustomQwen2ModelInner(config)
