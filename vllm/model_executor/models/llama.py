@@ -39,6 +39,7 @@ from vllm.model_executor.layers.attention import (
     Attention,
     EncoderOnlyAttention,
 )
+from vllm.model_executor.layers.fusion.rms_norm_quant import rms_norm_input_quant
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
@@ -313,16 +314,25 @@ class LlamaDecoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         residual: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        # Self Attention
-        if residual is None:
-            residual = hidden_states
-            hidden_states = self.input_layernorm(hidden_states)
-        else:
-            hidden_states, residual = self.input_layernorm(hidden_states, residual)
+        # Self Attention. The norm is fused with the input quantization of
+        # qkv_proj when its kernel advertises a consumable key (RFC #43224).
+        # getattr(..., None): subclasses may swap self_attn/mlp for modules
+        # without these projections (e.g. Aria's MoE mlp) -> plain-norm path.
+        hidden_states, residual = rms_norm_input_quant(
+            self.input_layernorm,
+            hidden_states,
+            residual,
+            getattr(self.self_attn, "qkv_proj", None),
+        )
         hidden_states = self.self_attn(positions=positions, hidden_states=hidden_states)
 
         # Fully Connected
-        hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
+        hidden_states, residual = rms_norm_input_quant(
+            self.post_attention_layernorm,
+            hidden_states,
+            residual,
+            getattr(self.mlp, "gate_up_proj", None),
+        )
         hidden_states = self.mlp(hidden_states)
         return hidden_states, residual
 
