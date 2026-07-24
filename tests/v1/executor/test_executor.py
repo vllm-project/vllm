@@ -202,3 +202,87 @@ def test_custom_executor_async(distributed_executor_backend, tmp_path):
         assert os.path.exists(".marker")
     finally:
         os.chdir(cwd)
+
+
+class _RecordingExecutor(Executor):
+    """Minimal concrete Executor that records collective_rpc calls.
+
+    Constructed via __new__ to bypass __init__ (which needs a VllmConfig);
+    sleep/wake_up state is set directly. This keeps the test pure-CPU and
+    exercises the inherited Executor.wake_up tag-handling logic in isolation.
+    """
+
+    def _init_executor(self) -> None: ...
+
+    def collective_rpc(
+        self, method, timeout=None, args=(), kwargs=None, non_block=False
+    ):
+        self.rpc_calls.append((method, (kwargs or {}).get("tags")))
+        return []
+
+    def check_health(self) -> None: ...
+
+
+def _make_sleeping_executor() -> _RecordingExecutor:
+    executor = _RecordingExecutor.__new__(_RecordingExecutor)
+    executor.rpc_calls = []
+    # Mirror Executor.sleep() state: both tags asleep.
+    executor.sleeping_tags = {"weights", "kv_cache"}
+    executor.is_sleeping = True
+    return executor
+
+
+def test_wake_up_mixed_tags_wakes_still_sleeping_subset():
+    # Regression for the mixed-tag partial-wake silent no-op: when wake_up is
+    # called with one already-awake tag and one still-asleep tag, the asleep
+    # tag must still be woken (an RPC is issued for the sleeping subset),
+    # instead of early-returning and leaving it unmapped.
+    executor = _make_sleeping_executor()
+
+    # Wake only "weights" first -> "kv_cache" remains asleep.
+    executor.wake_up(tags=["weights"])
+    assert executor.sleeping_tags == {"kv_cache"}
+    assert executor.is_sleeping is True
+
+    executor.rpc_calls.clear()
+
+    # Mixed request: "weights" already awake, "kv_cache" still asleep.
+    executor.wake_up(tags=["weights", "kv_cache"])
+
+    # An RPC must be issued, and it must include the still-sleeping tag.
+    assert len(executor.rpc_calls) == 1, executor.rpc_calls
+    method, rpc_tags = executor.rpc_calls[0]
+    assert method == "wake_up"
+    assert "kv_cache" in (rpc_tags or [])
+    # The already-awake tag is filtered out of the RPC.
+    assert "weights" not in (rpc_tags or [])
+    # State fully reconciled: everything awake.
+    assert executor.sleeping_tags == set()
+    assert executor.is_sleeping is False
+
+
+def test_wake_up_all_already_awake_is_clean_no_op():
+    # When every requested tag is already awake, wake_up is a clean no-op:
+    # no RPC is issued and state is unchanged.
+    executor = _make_sleeping_executor()
+    executor.wake_up(tags=["weights"])
+    assert executor.sleeping_tags == {"kv_cache"}
+
+    executor.rpc_calls.clear()
+    executor.wake_up(tags=["weights"])  # already awake
+
+    assert executor.rpc_calls == []
+    assert executor.sleeping_tags == {"kv_cache"}
+    assert executor.is_sleeping is True
+
+
+def test_wake_up_no_tags_wakes_everything():
+    # tags=None wakes all sleeping tags and clears the sleeping state.
+    executor = _make_sleeping_executor()
+    executor.wake_up()
+    assert len(executor.rpc_calls) == 1
+    method, rpc_tags = executor.rpc_calls[0]
+    assert method == "wake_up"
+    assert rpc_tags is None
+    assert executor.sleeping_tags == set()
+    assert executor.is_sleeping is False
