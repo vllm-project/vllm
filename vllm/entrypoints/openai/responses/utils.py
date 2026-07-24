@@ -292,7 +292,12 @@ def _construct_message_from_response_item(
             "reasoning": reasoning,
         }
     elif isinstance(item, ResponseOutputMessage):
-        output_text = item.content[0].text
+        # content may be empty or hold a refusal part (which has no `.text`),
+        # so grab the first output_text part and fall back to an empty string.
+        output_text = next(
+            (part.text for part in item.content if part.type == "output_text"),
+            "",
+        )
         if prev_assistant_msg:
             previous_content = prev_assistant_msg.get("content")
             if previous_content is None:
