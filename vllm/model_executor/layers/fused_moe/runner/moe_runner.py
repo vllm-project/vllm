@@ -616,7 +616,7 @@ class MoERunner(MoERunnerInterface):
     ):
         # If router/gate provided, then apply it here.
         # (Note: This code runs only when "overlapped mode" is on to allow
-        #        parallel execution of shared experts with the FusedMoEFactory via
+        #        parallel execution of shared experts with the RoutedExperts via
         #        separate cuda stream)
         if self._shared_experts is not None:
             assert shared_experts_input is not None
