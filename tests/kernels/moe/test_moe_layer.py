@@ -1406,7 +1406,7 @@ def _run_one_config(
     - When is_sequence_parallel=True (EP + sequence splitting):
       * ep_size: Number of expert parallel ranks (equals dp_size * tp_size)
       * tp_size: Number of ranks to split sequence across (becomes sp_size in
-        FusedMoEFactory)
+        MoERunner)
       * Weights are chunked by ep_size (experts) but NOT by tp_size
       * Input sequences are chunked by tp_size (via sp_wrapper)
     """
