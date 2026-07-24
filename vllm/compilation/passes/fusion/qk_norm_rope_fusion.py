@@ -11,6 +11,7 @@ from torch._higher_order_ops.auto_functionalize import auto_functionalized
 from torch._inductor.pattern_matcher import PatternMatcherPass
 
 import vllm.ir.ops
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
@@ -18,7 +19,7 @@ from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
 
 from ..inductor_pass import enable_fake_mode
 from ..vllm_inductor_pass import VllmInductorPass, VllmPatternMatcherPass
-from .matcher_utils import MatcherRotaryEmbedding
+from .matcher_utils import MatcherRMSNorm, MatcherRotaryEmbedding
 from .rms_quant_fusion import empty_bf16, empty_fp32, empty_i64
 
 logger = init_logger(__name__)
@@ -63,6 +64,7 @@ class QkNormRopePattern:
         eps: float,
         is_neox: bool,
         rope_flashinfer: bool = False,
+        match_rocm_aiter_rope: bool = False,
     ) -> None:
         self.num_heads = num_heads
         self.num_kv_heads = num_kv_heads
@@ -70,6 +72,7 @@ class QkNormRopePattern:
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
         self.eps = eps
+        self.rmsnorm_matcher = MatcherRMSNorm(eps)
         self.is_neox = is_neox
         self.rope_flashinfer = rope_flashinfer
         self.rope_matcher = MatcherRotaryEmbedding(
@@ -78,6 +81,7 @@ class QkNormRopePattern:
             num_heads=self.num_heads,
             num_kv_heads=self.num_kv_heads,
             use_flashinfer=self.rope_flashinfer,
+            match_rocm_aiter=match_rocm_aiter_rope if match_rocm_aiter_rope else None,
         )
 
     def get_inputs(self) -> list[torch.Tensor]:
@@ -259,7 +263,7 @@ class QKNormRoPEFusionPass(VllmPatternMatcherPass):
                             num_kv_heads=num_kv_heads,
                             eps=epsilon,
                             is_neox=neox,
-                            rope_flashinfer=rope_flashinfer,
+                            match_rocm_aiter_rope=aiter_rope,
                         ).register(self.patterns)
 
         self.dump_patterns(config, self.patterns)

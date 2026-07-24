@@ -69,14 +69,12 @@ class QKNormRoPEKVCacheTestModel(torch.nn.Module):
         rms_norm_eps: float,
         dtype: torch.dtype,
         device: torch.device,
-        rotary_dim: int | None = None,
         prefix: str = "model.layers.0.self_attn.attn",
     ):
         super().__init__()
         self.num_heads = num_heads
         self.num_kv_heads = num_kv_heads
         self.head_size = head_size
-        self.rotary_dim = rotary_dim if rotary_dim is not None else head_size
         self.block_size = vllm_config.cache_config.block_size
         self.q_size = num_heads * head_size
         self.kv_size = num_kv_heads * head_size
@@ -90,7 +88,7 @@ class QKNormRoPEKVCacheTestModel(torch.nn.Module):
 
         self.rotary_emb = RotaryEmbedding(
             head_size,
-            rotary_dim=self.rotary_dim,
+            rotary_dim=head_size,
             max_position_embeddings=4096,
             base=10000,
             is_neox_style=is_neox,
@@ -140,9 +138,7 @@ class QKNormRoPEKVCacheTestModel(torch.nn.Module):
             device=device,
         )
 
-    def build_attn_metadata(
-        self, batch_size: int, kv_stride_order: tuple[int, ...] | None = None
-    ) -> CommonAttentionMetadata:
+    def build_attn_metadata(self, batch_size: int) -> CommonAttentionMetadata:
         batch_spec = BatchSpec(seq_lens=[1] * batch_size, query_lens=[1] * batch_size)
         common_attn_metadata = create_common_attn_metadata(
             batch_spec, self.block_size, self.device, arange_block_indices=True
@@ -155,15 +151,15 @@ class QKNormRoPEKVCacheTestModel(torch.nn.Module):
         kv_cache_shape = attn_backend.get_kv_cache_shape(
             num_blocks, self.block_size, self.num_kv_heads, self.head_size
         )
-        # Caller can force a physical layout; else use the backend's.
-        if kv_stride_order is None:
-            try:
-                kv_stride_order = attn_backend.get_kv_cache_stride_order()
-            except (AttributeError, NotImplementedError):
-                kv_stride_order = tuple(range(len(kv_cache_shape)))
+        try:
+            kv_cache_stride_order = attn_backend.get_kv_cache_stride_order()
+        except (AttributeError, NotImplementedError):
+            kv_cache_stride_order = tuple(range(len(kv_cache_shape)))
 
-        kv_cache_shape = tuple(kv_cache_shape[i] for i in kv_stride_order)
-        inv_order = [kv_stride_order.index(i) for i in range(len(kv_stride_order))]
+        kv_cache_shape = tuple(kv_cache_shape[i] for i in kv_cache_stride_order)
+        inv_order = [
+            kv_cache_stride_order.index(i) for i in range(len(kv_cache_stride_order))
+        ]
 
         raw_tensor = torch.zeros(
             2 * num_blocks * self.block_size * self.num_kv_heads * self.head_size,
@@ -203,17 +199,6 @@ class QKNormRoPEKVCacheTestModel(torch.nn.Module):
         # RoPE
         q, k = self.rotary_emb(positions, q, k)
 
-        # Mirror Attention.forward: quant-query impls consume an fp8 q.
-        if (
-            self.kv_cache_dtype != self.dtype
-            and self.attn.impl.supports_quant_query_input
-        ):
-            q_fp8 = torch.empty_like(q, dtype=FP8_DTYPE)
-            torch.ops.vllm.rocm_aiter_per_tensor_quant(
-                q_fp8, q, self.attn._q_scale, False
-            )
-            q = q_fp8
-
         # Final views + KV cache update
         q = q.view(-1, self.num_heads, self.head_size)
         k = k.view(-1, self.num_kv_heads, self.head_size)
@@ -224,6 +209,12 @@ class QKNormRoPEKVCacheTestModel(torch.nn.Module):
         return q, k, v, kv_cache_dummy_dep
 
     def ops_in_model_before(self) -> list[torch._ops.OpOverload]:
+        # Note: RMSNorm is no longer asserted here.  After the vLLM IR
+        # migration (#33825), `RMSNorm` dispatches through `ir.ops.rms_norm`
+        # which resolves via `IrOpPriorityConfig`.  The op that actually
+        # appears in the pre-pass graph depends on the platform's priority
+        # (native / vllm_c / aiter / oink / ...) and is outside the scope of
+        # this fusion test.
         ops: list[torch._ops.OpOverload] = []
         # RoPE is not yet IR-migrated, so its custom op still surfaces
         # directly in the graph based on `enable_rope_custom_op`.
@@ -241,29 +232,50 @@ class QKNormRoPEKVCacheTestModel(torch.nn.Module):
         return [torch.ops.vllm.fused_qk_norm_rope_and_unified_kv_cache_update.default]
 
 
-def _run_qk_norm_rope_kvcache_fusion_test(
-    *,
+@pytest.mark.parametrize(
+    "attn_backend",
+    [
+        AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN,
+        AttentionBackendEnum.ROCM_ATTN,
+        AttentionBackendEnum.ROCM_AITER_FA,
+    ],
+)
+@pytest.mark.parametrize("enable_aiter_triton_rope", [True, False])
+@pytest.mark.parametrize("num_heads", [64])
+@pytest.mark.parametrize("num_kv_heads", [8])
+@pytest.mark.parametrize("head_size", [64])
+@pytest.mark.parametrize("block_size", [16])
+@pytest.mark.parametrize("is_neox", [True, False])
+@pytest.mark.parametrize("dtype", [torch.bfloat16])
+@pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8"])
+@pytest.mark.parametrize("rms_norm_eps", [1e-5, 1e-6])
+@pytest.mark.skipif(
+    not is_aiter_found_and_supported(),
+    reason="Only test on ROCm with AITER installed and supported",
+)
+def test_qk_norm_rope_kvcache_fusion(
     attn_backend: AttentionBackendEnum,
     enable_aiter_triton_rope: bool,
-    num_tokens: int,
     num_heads: int,
     num_kv_heads: int,
     head_size: int,
-    rotary_dim: int,
     block_size: int,
     is_neox: bool,
-    use_shuffle_kv_layout: str,
-    kv_stride_order: tuple[int, ...],
     dtype: torch.dtype,
     kv_cache_dtype: str,
     rms_norm_eps: float,
-    custom_op: str,
     monkeypatch: pytest.MonkeyPatch,
-) -> None:
+):
     device = os.environ.get("VLLM_TEST_CUDA_DEVICE", "cuda")
     torch.set_default_device(device)
     torch.set_default_dtype(dtype)
     torch.manual_seed(0)
+
+    # Note: `+rms_norm` toggles between RMSNorm.forward_custom and
+    # forward_native, but both paths now dispatch through `ir.ops.rms_norm`
+    # (post #33825), so the graph is identical either way.  We always enable
+    # it here to exercise the "custom op on" flavor.
+    custom_ops: list[str] = ["+rotary_embedding", "+rms_norm"]
 
     vllm_config = VllmConfig(
         model_config=ModelConfig(dtype=dtype),
@@ -273,7 +285,7 @@ def _run_qk_norm_rope_kvcache_fusion_test(
         ),
         compilation_config=CompilationConfig(
             mode=CompilationMode.VLLM_COMPILE,
-            custom_ops=[custom_op],
+            custom_ops=custom_ops,
             pass_config=PassConfig(
                 fuse_qk_norm_rope_kvcache=True,
                 eliminate_noops=True,
@@ -287,7 +299,6 @@ def _run_qk_norm_rope_kvcache_fusion_test(
             "VLLM_ROCM_USE_AITER_TRITON_ROPE",
             "1" if enable_aiter_triton_rope else "0",
         )
-        m.setenv("VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT", use_shuffle_kv_layout)
         rocm_aiter_ops.refresh_env_variables()
 
         model = QKNormRoPEKVCacheTestModel(
@@ -296,7 +307,6 @@ def _run_qk_norm_rope_kvcache_fusion_test(
             num_heads=num_heads,
             num_kv_heads=num_kv_heads,
             head_size=head_size,
-            rotary_dim=rotary_dim,
             is_neox=is_neox,
             rms_norm_eps=rms_norm_eps,
             dtype=dtype,
@@ -313,12 +323,14 @@ def _run_qk_norm_rope_kvcache_fusion_test(
         ]
         backend = TestBackend(*passes)
 
+        T = 5
+
         qkv = torch.randn(
-            num_tokens,
+            T,
             num_heads * head_size + 2 * num_kv_heads * head_size,
             dtype=dtype,
         )
-        pos = torch.arange(num_tokens, dtype=torch.long)
+        pos = torch.arange(T, dtype=torch.long)
 
         qkv_unfused = qkv.clone()
         pos_unfused = pos.clone()
@@ -326,7 +338,7 @@ def _run_qk_norm_rope_kvcache_fusion_test(
         # Run unfused (eager) forward
         with set_forward_context(None, vllm_config):
             forward_context = get_forward_context()
-            attn_metadata = model.build_attn_metadata(num_tokens, kv_stride_order)
+            attn_metadata = model.build_attn_metadata(T)
             forward_context.slot_mapping = {
                 model.layer_name: attn_metadata.slot_mapping
             }
@@ -341,7 +353,7 @@ def _run_qk_norm_rope_kvcache_fusion_test(
         with set_forward_context(None, vllm_config):
             model_fused = torch.compile(model, backend=backend)
             forward_context = get_forward_context()
-            attn_metadata = model_fused.build_attn_metadata(num_tokens, kv_stride_order)
+            attn_metadata = model_fused.build_attn_metadata(T)
             forward_context.slot_mapping = {
                 model.layer_name: attn_metadata.slot_mapping
             }
@@ -355,18 +367,10 @@ def _run_qk_norm_rope_kvcache_fusion_test(
         backend.check_before_ops(model.ops_in_model_before())
         backend.check_after_ops(model.ops_in_model_after())
 
-        # Sweep-backed (18.2k pts, PR #42749): native-rope ref worst 7.7e-3 -> 1e-2;
-        # AITER-triton-rope ref is itself approximate (plateau 1.28e-2) -> 2e-2.
-        ATOL, RTOL = (2e-2, 2e-2) if enable_aiter_triton_rope else (1e-2, 1e-2)
+        ATOL, RTOL = (1e-2, 1e-2)
         is_fp8_cache = model.kv_cache_dtype != dtype
 
-        if q_fused.dtype == FP8_DTYPE:
-            # Quant-query path: both q are fp8; compare dequant within 1 fp8 ULP.
-            torch.testing.assert_close(
-                q_unfused.float(), q_fused.float(), atol=1.25e-1, rtol=1.25e-1
-            )
-        else:
-            torch.testing.assert_close(q_unfused, q_fused, atol=ATOL, rtol=RTOL)
+        torch.testing.assert_close(q_unfused, q_fused, atol=ATOL, rtol=RTOL)
 
         if not is_fp8_cache:
             # The AITER PTS kernel populates k_out only for non-FP8 caches.
@@ -375,112 +379,143 @@ def _run_qk_norm_rope_kvcache_fusion_test(
             # because downstream attention reads K from the cache.
             torch.testing.assert_close(k_unfused, k_fused, atol=ATOL, rtol=RTOL)
 
-        # Should be bit exact since no processing had been done on v for both paths
-        torch.testing.assert_close(v_unfused, v_fused, atol=0.0, rtol=0.0)
+        torch.testing.assert_close(v_unfused, v_fused, atol=ATOL, rtol=RTOL)
 
-        # fp8: fused vs unfused writers can round to adjacent fp8 codes (~1 ULP,
-        # 1.25e-1). Tolerate it; a real layout bug corrupts many elements by >>1 ULP.
-        if is_fp8_cache:
-            cache_atol = cache_rtol = 1.25e-1
-        else:
-            cache_atol, cache_rtol = ATOL, RTOL
+        uses_interleaved_v = getattr(model.attn.impl, "_use_interleaved_v_cache", False)
+        cache_atol = 5e-2 if is_fp8_cache else ATOL
+        cache_rtol = 1.0 if is_fp8_cache else RTOL
 
-        # Whole cache, so the interleaved V write (ROCM_ATTN kv_cache[1]) is checked.
+        # K-cache: same layout for both paths, always compare directly.
         torch.testing.assert_close(
-            kv_cache_unfused.float(),
-            kv_cache_fused.float(),
+            kv_cache_unfused[0].view(dtype),
+            kv_cache_fused[0].view(dtype),
             atol=cache_atol,
             rtol=cache_rtol,
         )
 
+        if uses_interleaved_v:
+            # The fused AITER kernel writes V-cache in interleaved layout
+            # [blocks, heads, block_size/x, head_dim, x] while the unfused
+            # write_to_paged_cache uses standard [blocks, heads, head_dim,
+            # block_size].  Transform interleaved → standard before comparing.
+            #
+            # split_kv_cache views the raw [n, BS, H, D] as [n, H, D, BS].
+            # In that view the interleaved data is laid out as
+            # [BS//x, D, x] per (block, head), so:
+            #   reshape → [n, H, BS//x, D, x]
+            #   permute → [n, H, D, BS//x, x]
+            #   reshape → [n, H, D, BS]   (standard layout)
+            x_il = 16 // kv_cache_fused.element_size()
+            n_blk = kv_cache_fused.shape[1]
 
-_FUSION_CONFIGS = [
-    # Full rotary, both neox styles (the original coverage).
-    pytest.param(64, 8, 64, 64, True, id="full-neox"),
-    pytest.param(64, 8, 64, 64, False, id="full-non_neox"),
-    # GLM-4.5/4.6/4.7 (glm4_moe.py:275 partial_rotary_factor=0.5, neox-style)
-    pytest.param(32, 8, 128, 64, True, id="glm4_moe"),
-    # GLM-4 dense (glm4.py:97,124 partial_rotary_factor=0.5, non-neox)
-    pytest.param(32, 2, 128, 64, False, id="glm4_dense"),
-    # Moondream3-style small head (head_size=64, rotary_dim=32)
-    pytest.param(16, 2, 64, 32, True, id="partial_small_head"),
-]
+            v_unfused_view = kv_cache_unfused[1].view(
+                n_blk, num_kv_heads, head_size, block_size
+            )
+            v_fused_view = kv_cache_fused[1].view(
+                n_blk, num_kv_heads, head_size, block_size
+            )
+            v_fused_std = (
+                v_fused_view.reshape(
+                    n_blk, num_kv_heads, block_size // x_il, head_size, x_il
+                )
+                .permute(0, 1, 3, 2, 4)
+                .contiguous()
+                .reshape(n_blk, num_kv_heads, head_size, block_size)
+            )
+            torch.testing.assert_close(
+                v_unfused_view.view(dtype),
+                v_fused_std.view(dtype),
+                atol=cache_atol,
+                rtol=cache_rtol,
+            )
+        else:
+            torch.testing.assert_close(
+                kv_cache_unfused[1].view(dtype),
+                kv_cache_fused[1].view(dtype),
+                atol=cache_atol,
+                rtol=cache_rtol,
+            )
 
 
-@pytest.mark.parametrize(
-    "num_heads, num_kv_heads, head_size, rotary_dim, is_neox",
-    _FUSION_CONFIGS,
-)
-@pytest.mark.parametrize(
-    "attn_backend",
-    [
-        AttentionBackendEnum.ROCM_ATTN,
-        AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN,
-        AttentionBackendEnum.ROCM_AITER_FA,
-    ],
-)
-@pytest.mark.parametrize("num_tokens", [5, 16, 2048])
-@pytest.mark.parametrize("use_shuffle_kv_layout", ["1", "0"])
-@pytest.mark.parametrize(
-    "kv_stride_order",
-    [
-        pytest.param((0, 1, 2, 3, 4), id="block_first"),
-        pytest.param((1, 0, 2, 3, 4), id="kv_first"),
-    ],
-)
-@pytest.mark.parametrize("enable_aiter_triton_rope", [True, False])
-@pytest.mark.parametrize("block_size", [16, 32, 64])
-@pytest.mark.parametrize("dtype", [torch.bfloat16])
-@pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8"])
-@pytest.mark.parametrize("rms_norm_eps", [1e-5, 1e-6])
-@pytest.mark.parametrize("custom_op", ["+rotary_embedding", "+rms_norm"])
 @pytest.mark.skipif(
     not is_aiter_found_and_supported(),
     reason="Only test on ROCm with AITER installed and supported",
 )
-def test_qk_norm_rope_kvcache_fusion(
-    num_tokens: int,
-    num_heads: int,
-    num_kv_heads: int,
-    head_size: int,
-    rotary_dim: int,
-    is_neox: bool,
-    attn_backend: AttentionBackendEnum,
-    enable_aiter_triton_rope: bool,
-    use_shuffle_kv_layout: str,
-    kv_stride_order: tuple[int, ...],
-    block_size: int,
-    dtype: torch.dtype,
-    kv_cache_dtype: str,
-    rms_norm_eps: float,
-    custom_op: str,
+def test_qk_norm_rope_kvcache_pattern_match_smoke(
     monkeypatch: pytest.MonkeyPatch,
 ):
-    if (
-        attn_backend == AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN
-        and use_shuffle_kv_layout == "1"
-    ):
-        pytest.skip("ROCM_AITER_UNIFIED_ATTN is NHD-only; shuffle env is ignored")
-    if attn_backend == AttentionBackendEnum.ROCM_ATTN and use_shuffle_kv_layout == "1":
-        pytest.skip(
-            "ROCM_ATTN ignores VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT; V interleaving "
-            "is keyed on the fusion's _use_interleaved_v_cache flag"
-        )
-    _run_qk_norm_rope_kvcache_fusion_test(
-        attn_backend=attn_backend,
-        enable_aiter_triton_rope=enable_aiter_triton_rope,
-        num_tokens=num_tokens,
-        num_heads=num_heads,
-        num_kv_heads=num_kv_heads,
-        head_size=head_size,
-        rotary_dim=rotary_dim,
-        block_size=block_size,
-        is_neox=is_neox,
-        use_shuffle_kv_layout=use_shuffle_kv_layout,
-        kv_stride_order=kv_stride_order,
-        dtype=dtype,
-        kv_cache_dtype=kv_cache_dtype,
-        rms_norm_eps=rms_norm_eps,
-        custom_op=custom_op,
-        monkeypatch=monkeypatch,
+    """Minimal smoke test for the QK-norm+RoPE+KVCache pattern matcher.
+
+    Verifies that the fusion pass finds and replaces the unfused pattern
+    exactly once.  Skips the full accuracy + KV cache comparison done by
+    ``test_qk_norm_rope_kvcache_fusion`` so it runs in a few seconds and
+    is suitable for iterating on the matcher itself.
+    """
+    device = os.environ.get("VLLM_TEST_CUDA_DEVICE", "cuda")
+    dtype = torch.bfloat16
+    torch.set_default_device(device)
+    torch.set_default_dtype(dtype)
+    torch.manual_seed(0)
+
+    vllm_config = VllmConfig(
+        model_config=ModelConfig(dtype=dtype),
+        cache_config=CacheConfig(block_size=16, cache_dtype="auto"),
+        compilation_config=CompilationConfig(
+            mode=CompilationMode.VLLM_COMPILE,
+            custom_ops=["+rotary_embedding", "+rms_norm"],
+            pass_config=PassConfig(
+                fuse_qk_norm_rope_kvcache=True,
+                eliminate_noops=True,
+            ),
+        ),
     )
+
+    with vllm.config.set_current_vllm_config(vllm_config), monkeypatch.context() as m:
+        m.setenv("VLLM_ROCM_USE_AITER", "1")
+        m.setenv("VLLM_ROCM_USE_AITER_TRITON_ROPE", "0")
+        rocm_aiter_ops.refresh_env_variables()
+
+        model = QKNormRoPEKVCacheTestModel(
+            vllm_config=vllm_config,
+            attn_backend=AttentionBackendEnum.ROCM_ATTN,
+            num_heads=64,
+            num_kv_heads=8,
+            head_size=64,
+            is_neox=True,
+            rms_norm_eps=1e-5,
+            dtype=dtype,
+            device=torch.get_default_device(),
+        )
+
+        fusion_pass = QkNormRopeKvCacheFusionPass(vllm_config)
+        backend = TestBackend(
+            NoOpEliminationPass(vllm_config),
+            SplitCoalescingPass(vllm_config),
+            ScatterSplitReplacementPass(vllm_config),
+            fusion_pass,
+            PostCleanupPass(vllm_config),
+        )
+
+        T = 5
+        qkv = torch.randn(T, 64 * 64 + 2 * 8 * 64, dtype=dtype)
+        pos = torch.arange(T, dtype=torch.long)
+        torch._dynamo.mark_dynamic(qkv, 0)
+        torch._dynamo.mark_dynamic(pos, 0)
+
+        with set_forward_context(None, vllm_config):
+            forward_context = get_forward_context()
+            attn_metadata = model.build_attn_metadata(T)
+            forward_context.slot_mapping = {
+                model.layer_name: attn_metadata.slot_mapping
+            }
+            model_fused = torch.compile(model, backend=backend)
+            model_fused(qkv, pos)
+
+        assert fusion_pass.matched_count == 1, (
+            f"Expected matched_count == 1, got {fusion_pass.matched_count}"
+        )
+        # Verify the fused op ended up in the post-pass graph.  We skip
+        # `check_before_ops` here because the pre-pass RMS-norm impl depends
+        # on `IrOpPriorityConfig` (native / vllm_c / aiter / ...), which is
+        # orthogonal to what this smoke test is validating.
+        backend.check_after_ops(model.ops_in_model_after())

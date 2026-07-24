@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Attention layer with AiterFlashAttention."""
 
+import math
 from dataclasses import dataclass
 from typing import ClassVar
 
@@ -824,6 +825,11 @@ class AiterFlashAttentionImpl(AttentionImpl):
 
         assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
+
+        self._cached_k_scale_val: float | None = None
+        self._cached_k_scale_cpu: torch.Tensor | None = None
+        self._cached_v_scale_val: float | None = None
+        self._cached_v_scale_cpu: torch.Tensor | None = None
 
         if attn_type != AttentionType.DECODER:
             raise NotImplementedError(

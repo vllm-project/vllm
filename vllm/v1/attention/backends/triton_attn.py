@@ -831,6 +831,7 @@ class TritonAttentionImpl(AttentionImpl):
             self.kv_cache_dtype,
             layer._k_scale,
             layer._v_scale,
+            0,  # interleaved_v_pack_factor: standard V layout
         )
 
     def fused_rope_kvcache_supported(self):

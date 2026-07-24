@@ -52,6 +52,9 @@ def reshape_and_cache_kernel_flash(
     block_size: tl.constexpr,
     x: tl.constexpr,
     USE_HEAD_MAJOR_LAYOUT: tl.constexpr,
+    # >0 writes V interleaved as [Block, Head, Slot//kx, Dim, kx] (head-major
+    # layout only); 0 keeps the standard [Block, Head, Dim, Slot] V layout.
+    INTERLEAVED_V_PACK_FACTOR: tl.constexpr,
     # FP8 flags
     FP8_KV_CACHE: tl.constexpr,
     # tune parameters
@@ -76,13 +79,25 @@ def reshape_and_cache_kernel_flash(
         # Decompose the tile index back into head and dim coordinates.
         cur_head = tile_pos // head_size
         cur_dim = tile_pos % head_size
-        # Value addressing (4D): [Block, Head, Dim, Slot]
-        tgt_idx_v = (
-            block_idx * block_stride
-            + cur_head * head_stride
-            + cur_dim * dim_stride_v
-            + block_offset * 1
-        )
+        # Value addressing: standard 4D [Block, Head, Dim, Slot], or the
+        # interleaved 5D [Block, Head, Slot//kx, Dim, kx] the fused AITER
+        # writer emits and the interleaved read path expects.
+        if INTERLEAVED_V_PACK_FACTOR > 0:
+            tgt_idx_v = (
+                block_idx * block_stride
+                + cur_head * head_stride
+                + (block_offset // INTERLEAVED_V_PACK_FACTOR)
+                * (head_size * INTERLEAVED_V_PACK_FACTOR)
+                + cur_dim * INTERLEAVED_V_PACK_FACTOR
+                + (block_offset % INTERLEAVED_V_PACK_FACTOR)
+            )
+        else:
+            tgt_idx_v = (
+                block_idx * block_stride
+                + cur_head * head_stride
+                + cur_dim * dim_stride_v
+                + block_offset * 1
+            )
         # Key addressing (5D): [Block, Head, Dim//8, Slot, 8]
         tgt_idx_k = (
             block_idx * block_stride
@@ -371,6 +386,7 @@ def triton_reshape_and_cache_flash(
     kv_cache_dtype: str,  # "auto", "fp8"
     k_scale: torch.Tensor,  # float32
     v_scale: torch.Tensor,  # float32
+    interleaved_v_pack_factor: int,  # >0: interleave V (head-major); 0: standard
 ):
     num_heads = key.shape[1]
     head_size = key.shape[2]
@@ -452,6 +468,7 @@ def triton_reshape_and_cache_flash(
         block_size=block_size,
         x=x,
         USE_HEAD_MAJOR_LAYOUT=use_head_major_layout,
+        INTERLEAVED_V_PACK_FACTOR=interleaved_v_pack_factor,
         FP8_KV_CACHE=FP8_KV_CACHE,
         # autotune parameters
         TILE_SIZE=TILE_SIZE,

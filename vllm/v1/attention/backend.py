@@ -943,6 +943,14 @@ class AttentionImpl(AttentionImplBase[T], Generic[T]):
         """
         return False
 
+    def set_interleaved_v_cache(self):
+        """
+        Opt this implementation into reading V-cache in the interleaved layout.
+        QkNormRopeKvCacheFusionPass calls this for every layer it fuses. Default
+        is a no-op; backends whose decode kernel reads an interleaved V-cache
+        when this fusion is active (e.g. ROCM_ATTN) override it.
+        """
+
     def fused_rope_kvcache_supported(self):
         """
         Does this attention implementation support RoPE+KVCache fusion.
