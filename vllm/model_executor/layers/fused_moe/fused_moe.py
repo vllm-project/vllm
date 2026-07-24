@@ -965,32 +965,21 @@ def compute_identity_kernel(
     scales_stride: int,
     BLOCK_SIZE: tl.constexpr,
 ) -> None:
-    pid = tl.program_id(0)
+    # 2-D grid: axis 0 = token row, axis 1 = a BLOCK_SIZE-wide column tile.
+    batch_id = tl.program_id(0)
+    dim_offset = tl.program_id(1) * BLOCK_SIZE
 
-    batch_id = pid // (hidden_dim // BLOCK_SIZE)
-    dim_offset = pid % (hidden_dim // BLOCK_SIZE) * BLOCK_SIZE
+    offs = dim_offset + tl.arange(0, BLOCK_SIZE)
+    mask = offs < hidden_dim
 
-    if batch_id >= num_tokens or dim_offset >= hidden_dim:
-        return
-
-    h = tl.load(
-        hidden_states_ptr
-        + batch_id * hidden_dim
-        + dim_offset
-        + tl.arange(0, BLOCK_SIZE),
-        mask=(dim_offset + tl.arange(0, BLOCK_SIZE)) < hidden_dim,
-    )
+    h = tl.load(hidden_states_ptr + batch_id * hidden_dim + offs, mask=mask)
 
     result = tl.zeros([BLOCK_SIZE], dtype=tl.float32)
     for i in range(top_k):
         scale = tl.load(expert_scales_ptr + batch_id * scales_stride + i)
         result += h * scale
 
-    tl.store(
-        output_ptr + batch_id * hidden_dim + dim_offset + tl.arange(0, BLOCK_SIZE),
-        result,
-        mask=(dim_offset + tl.arange(0, BLOCK_SIZE)) < hidden_dim,
-    )
+    tl.store(output_ptr + batch_id * hidden_dim + offs, result, mask=mask)
 
 
 def zero_experts_compute_triton(
@@ -1013,11 +1002,14 @@ def zero_experts_compute_triton(
     expert_indices[normal_expert_mask] = 0
     expert_scales[normal_expert_mask] = 0.0
 
-    output = torch.zeros_like(hidden_states).to(hidden_states.device)
+    # The kernel writes every element of the output (the 2-D grid covers the
+    # full hidden dimension via ceil-div), so there is no need to zero-init the
+    # buffer first -- empty_like avoids a redundant full-tensor HBM write.
+    output = torch.empty_like(hidden_states)
     hidden_dim = hidden_states.size(-1)
     num_tokens = hidden_states.size(0)
 
-    grid = lambda meta: (num_tokens * (hidden_dim // meta["BLOCK_SIZE"]),)
+    grid = lambda meta: (num_tokens, triton.cdiv(hidden_dim, meta["BLOCK_SIZE"]))
     compute_identity_kernel[grid](
         top_k,
         hidden_states,
