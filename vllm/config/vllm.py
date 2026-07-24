@@ -924,6 +924,17 @@ class VllmConfig:
             return
         if self.model_config is not None and (self.model_config.enable_cumem_allocator):
             return
+        # Copy-based connectors (CUDA kernels / cudaMemcpy at transfer time,
+        # no pinned/registered KV memory) dereference virtual addresses on
+        # every transfer, so VMM physical remaps are transparent to them. The
+        # operator can assert that property to skip the conservative check.
+        if self.kv_transfer_config.kv_connector_supports_expandable_segments:
+            logger.info_once(
+                "Allowing KV connector %s with expandable_segments:True "
+                "because kv_connector_supports_expandable_segments is set.",
+                self.kv_transfer_config.kv_connector,
+            )
+            return
 
         raise ValueError(
             f"KV connector {self.kv_transfer_config.kv_connector} is "
@@ -932,10 +943,13 @@ class VllmConfig:
             "allocator can remap KV cache virtual addresses to different "
             "physical pages, invalidating any pinned/registered KV memory "
             "(e.g. IB memory regions registered by NIXL or Mooncake). Either "
-            "unset expandable_segments:True or enable the cumem allocator "
+            "unset expandable_segments:True, enable the cumem allocator "
             "(sleep mode does this automatically and also "
             "routes KV allocations through CuMemAllocator's pool, where "
-            "expandable_segments is automatically disabled)."
+            "expandable_segments is automatically disabled), or — only if your "
+            "connector never pins/registers KV cache memory and is purely "
+            "copy-based — set "
+            "kv_transfer_config.kv_connector_supports_expandable_segments."
         )
 
     def __post_init__(self):
