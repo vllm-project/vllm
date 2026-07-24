@@ -119,7 +119,7 @@ from vllm.sampling_params import SamplingType
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import GenerationTask, PoolingTask, SupportedTask
 from vllm.tracing import instrument
-from vllm.utils import length_from_prompt_token_ids_or_embeds
+from vllm.utils import is_moe_layer, length_from_prompt_token_ids_or_embeds
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
 from vllm.utils.nvtx_pytorch_hooks import PytHooks
@@ -5283,6 +5283,12 @@ class GPUModelRunner(
             new_config = update_config(config, config_overrides)
             setattr(self, config_name, new_config)
 
+    def _reserve_moe_workspaces(self, model: nn.Module) -> None:
+        """Pre-size the shared MoE workspace to its worst case before lock."""
+        for module in model.modules():
+            if is_moe_layer(module) and hasattr(module, "maybe_reserve_moe_workspace"):
+                module.maybe_reserve_moe_workspace()
+
     @instrument(span_name="Loading (GPU)")
     def load_model(self, load_dummy_weights: bool = False) -> None:
         """
@@ -5393,10 +5399,12 @@ class GPUModelRunner(
         )
         if not load_dummy_weights:
             prepare_communication_buffer_for_model(self.model)
+            self._reserve_moe_workspaces(self.model)
             if (drafter := getattr(self, "drafter", None)) and (
                 drafter_model := getattr(drafter, "model", None)
             ):
                 prepare_communication_buffer_for_model(drafter_model)
+                self._reserve_moe_workspaces(drafter_model)
         mm_config = self.model_config.multimodal_config
         self.is_multimodal_pruning_enabled = (
             supports_multimodal_pruning(self.get_model())

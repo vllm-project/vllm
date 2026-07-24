@@ -883,6 +883,16 @@ class MoERunner(MoERunnerInterface):
                 )
             )
 
+    def maybe_reserve_moe_workspace(self) -> None:
+        """Pre-size the shared MoE workspace to its worst case before lock."""
+        kernel = self._quant_method.moe_kernel
+        if kernel is None:
+            return
+        w13_weight = getattr(self.routed_experts, "w13_weight", None)
+        if w13_weight is None or w13_weight.dim() != 3:
+            return
+        kernel.reserve_workspace(int(w13_weight.shape[1]), self.moe_config.hidden_dim)
+
     #
     # Properties
     #
