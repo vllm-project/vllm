@@ -49,6 +49,32 @@ pytestmark = pytest.mark.skipif(
 )
 
 
+def test_platform_capability_queries_are_constant_during_compile(monkeypatch):
+    monkeypatch.setattr(
+        K.current_platform, "has_device_capability", lambda capability: True
+    )
+    monkeypatch.setattr(K, "has_cutedsl", lambda: True)
+    monkeypatch.setattr(K.current_platform, "is_arch_support_pdl", lambda: True)
+
+    def capability_branches(x: torch.Tensor) -> torch.Tensor:
+        if K._can_use_fused_q_cutedsl() and K._is_arch_support_pdl():
+            return x + 1
+        return x - 1
+
+    compiled = torch.compile(capability_branches, backend="eager", fullgraph=True)
+    x = torch.zeros(1, device="cuda")
+    torch.testing.assert_close(compiled(x), torch.ones_like(x))
+
+
+def test_pdl_is_disabled_before_blackwell(monkeypatch):
+    monkeypatch.setattr(
+        K.current_platform, "has_device_capability", lambda capability: False
+    )
+    monkeypatch.setattr(K.current_platform, "is_arch_support_pdl", lambda: True)
+
+    assert not K._is_arch_support_pdl()
+
+
 # ── reference helpers ────────────────────────────────────────────────────────
 
 
@@ -290,6 +316,57 @@ def test_fused_norm_rope_no_indexer(num_tokens: int):
     )
     # Shared layers reuse the previous indexer's top-k: buffer must be untouched.
     assert (topk == 7).all(), "topk buffer should be untouched on shared layer"
+
+
+def test_fused_norm_rope_profile_without_cache_compiles():
+    """The cache-free profiling path must still compile and produce Q."""
+    torch.manual_seed(2)
+    dev = "cuda"
+    num_tokens = 4
+    pos = torch.arange(num_tokens, device=dev, dtype=torch.int64)
+    q_c = torch.randn(num_tokens, Q_LORA, device=dev, dtype=torch.bfloat16)
+    kv_c = torch.randn(num_tokens, KV_LORA, device=dev, dtype=torch.bfloat16)
+    k_pe = torch.randn(num_tokens, ROPE_DIM, device=dev, dtype=torch.bfloat16)
+    qw = torch.randn(Q_LORA, device=dev, dtype=torch.bfloat16)
+    kvw = torch.randn(KV_LORA, device=dev, dtype=torch.bfloat16)
+    index_k = torch.randn(num_tokens, INDEX_HEAD_DIM, device=dev, dtype=torch.bfloat16)
+    index_w = torch.randn(INDEX_HEAD_DIM, device=dev, dtype=torch.float32)
+    index_b = torch.randn(INDEX_HEAD_DIM, device=dev, dtype=torch.float32)
+    cos_sin = make_cos_sin(64, ROPE_DIM, dev)
+    topk = torch.empty(num_tokens, 2048, device=dev, dtype=torch.int32)
+
+    def profile_run(
+        q_c: torch.Tensor,
+        kv_c: torch.Tensor,
+        k_pe: torch.Tensor,
+        index_k: torch.Tensor,
+    ) -> torch.Tensor:
+        return K.fused_norm_rope(
+            pos,
+            q_c,
+            qw,
+            EPS,
+            kv_c,
+            kvw,
+            EPS,
+            k_pe,
+            cos_sin,
+            index_k,
+            index_w,
+            index_b,
+            EPS,
+            cos_sin,
+            topk,
+            slot_mapping=None,
+            indexer_k_cache=None,
+            mla_kv_cache=None,
+            has_indexer=True,
+            index_rope_interleave=False,
+        )
+
+    compiled = torch.compile(profile_run, fullgraph=True)
+    q_out = compiled(q_c, kv_c, k_pe, index_k)
+    assert_bf16(q_out, rms_norm(q_c, qw), "q_c rmsnorm (profiling)")
 
 
 @pytest.mark.parametrize("num_tokens", [1, 4, 17, 512])
