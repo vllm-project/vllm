@@ -168,12 +168,15 @@ def enable_rope_kvcache_fusion(cfg: "VllmConfig") -> bool:
 
 
 def enable_rope_kvcache_mla_fusion(cfg: "VllmConfig") -> bool:
-    """Enable if use_inductor_graph_partition is enabled."""
+    """Enable MLA RoPE + KV cache fusion when supported by the platform.
 
-    return (
-        cfg.compilation_config.use_inductor_graph_partition
-        or not cfg.compilation_config.splitting_ops_contain_kv_cache_update()
-    )
+    The MLA fusion pass replaces ``unified_mla_kv_cache_update`` with a fused
+    op, so it must be allowed to run before the cache-update op is split out of
+    the compiled graph.
+    """
+    from vllm.platforms import current_platform
+
+    return current_platform.is_cuda_alike()
 
 
 def enable_norm_pad_fusion(cfg: "VllmConfig") -> bool:
