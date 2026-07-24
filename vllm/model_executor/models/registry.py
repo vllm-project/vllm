@@ -71,6 +71,7 @@ logger = init_logger(__name__)
 _TEXT_GENERATION_MODELS = {
     # [Decoder-only]
     "AfmoeForCausalLM": ("afmoe", "AfmoeForCausalLM"),
+    "AnyModel": ("anymodel", "AnyModel"),
     "ApertusForCausalLM": ("apertus", "ApertusForCausalLM"),
     "ArceeForCausalLM": ("arcee", "ArceeForCausalLM"),
     "ArcticForCausalLM": ("arctic", "ArcticForCausalLM"),
