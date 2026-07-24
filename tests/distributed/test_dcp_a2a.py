@@ -319,6 +319,67 @@ class TestLSEWeightedCombine:
         assert _dcp_a2a_lse_pack_dim(torch.float32) == 1
 
 
+class _FakeGroupCoordinator:
+    device_group = None
+    cpu_group = None
+
+
+class TestDirectA2AGating:
+    """Test VLLM_USE_DIRECT_DCP_A2A gating (no GPU or process group needed)."""
+
+    def test_env_disabled_returns_none(self, monkeypatch):
+        from vllm.v1.attention.ops.dcp_direct_a2a import (
+            get_direct_dcp_a2a_workspace,
+        )
+
+        monkeypatch.setenv("VLLM_USE_DIRECT_DCP_A2A", "0")
+        get_direct_dcp_a2a_workspace.cache_clear()
+        workspace = get_direct_dcp_a2a_workspace(
+            _FakeGroupCoordinator(), torch.device("cpu"), 16, 2, 32, torch.bfloat16, 1
+        )
+        assert workspace is None
+
+    def test_forced_with_unsupported_dtype_raises(self, monkeypatch):
+        from vllm.v1.attention.ops.dcp_direct_a2a import (
+            get_direct_dcp_a2a_workspace,
+        )
+
+        monkeypatch.setenv("VLLM_USE_DIRECT_DCP_A2A", "1")
+        get_direct_dcp_a2a_workspace.cache_clear()
+        with pytest.raises(ValueError, match="does not support"):
+            get_direct_dcp_a2a_workspace(
+                _FakeGroupCoordinator(),
+                torch.device("cpu"),
+                16,
+                2,
+                32,
+                torch.float32,
+                1,
+            )
+
+    def test_zero_ubatches_raises(self):
+        """num_ubatches=0 (DBO disabled) must fail loudly, not allocate
+        zero-sized symmetric buffers whose rendezvous returns None."""
+        from vllm.v1.attention.ops.dcp_direct_a2a import DirectDCPA2AWorkspace
+
+        with pytest.raises(ValueError, match="ubatch"):
+            DirectDCPA2AWorkspace(
+                None, torch.device("cpu"), 16, 2, 32, torch.bfloat16, num_ubatches=0
+            )
+
+    def test_auto_with_unsupported_dtype_returns_none(self, monkeypatch):
+        from vllm.v1.attention.ops.dcp_direct_a2a import (
+            get_direct_dcp_a2a_workspace,
+        )
+
+        monkeypatch.delenv("VLLM_USE_DIRECT_DCP_A2A", raising=False)
+        get_direct_dcp_a2a_workspace.cache_clear()
+        workspace = get_direct_dcp_a2a_workspace(
+            _FakeGroupCoordinator(), torch.device("cpu"), 16, 2, 32, torch.float32, 1
+        )
+        assert workspace is None
+
+
 class TestPackedA2AKernels:
     @pytest.mark.skipif(
         torch.accelerator.device_count() < 1, reason="CUDA is required."
@@ -466,6 +527,145 @@ def _distributed_packed_a2a_worker(env: dict[str, str]) -> None:
         dist.destroy_process_group()
 
 
+def _distributed_direct_a2a_worker(env: dict[str, str]) -> None:
+    update_environment_variables(env)
+    local_rank = int(env["LOCAL_RANK"])
+    device = torch.device(f"cuda:{local_rank}")
+    torch.accelerator.set_device_index(local_rank)
+    dist.init_process_group(backend="nccl")
+    try:
+        from vllm.v1.attention.ops import dcp_direct_a2a
+        from vllm.v1.attention.ops.dcp_alltoall import _lse_weighted_combine
+
+        rank = dist.get_rank()
+        world_size = dist.get_world_size()
+        dtype = _dtype_from_name(env["TEST_DTYPE"])
+        is_lse_base_on_e = env["LSE_BASE_E"] == "1"
+        heads_per_rank, head_dim, max_num_tokens = 2, 32, 17
+        total_heads = world_size * heads_per_rank
+        active_ubatch = [0]
+        dcp_direct_a2a.dbo_current_ubatch_id = lambda: active_ubatch[0]
+        workspace = dcp_direct_a2a.DirectDCPA2AWorkspace(
+            dist.group.WORLD,
+            device,
+            max_num_tokens,
+            heads_per_rank,
+            head_dim,
+            dtype,
+            num_ubatches=2,
+        )
+
+        def check(num_tokens: int, iteration: int, padded: bool) -> None:
+            generator = torch.Generator(device=device)
+            generator.manual_seed(1234 + rank + iteration * world_size)
+            storage_heads = 128 if padded else total_heads
+            partial_output_storage = torch.randn(
+                num_tokens,
+                storage_heads,
+                head_dim,
+                device=device,
+                dtype=dtype,
+                generator=generator,
+            )
+            partial_lse_storage = torch.randn(
+                num_tokens,
+                storage_heads,
+                device=device,
+                dtype=torch.float32,
+                generator=generator,
+            )
+            partial_output = partial_output_storage[:, :total_heads, :]
+            partial_lse = partial_lse_storage[:, :total_heads]
+            if padded:
+                assert not partial_output.is_contiguous()
+                assert not partial_lse.is_contiguous()
+            active_ubatch[0] = iteration % 2
+            actual = workspace.lse_reduce(partial_output, partial_lse, is_lse_base_on_e)
+            torch.accelerator.synchronize()
+
+            reference_output = partial_output.contiguous()
+            reference_lse = partial_lse.contiguous()
+            gathered_output = [
+                torch.empty_like(reference_output) for _ in range(world_size)
+            ]
+            gathered_lse = [torch.empty_like(reference_lse) for _ in range(world_size)]
+            dist.all_gather(gathered_output, reference_output)
+            dist.all_gather(gathered_lse, reference_lse)
+            outputs = torch.stack(
+                [
+                    value[
+                        :,
+                        rank * heads_per_rank : (rank + 1) * heads_per_rank,
+                        :,
+                    ]
+                    for value in gathered_output
+                ]
+            ).float()
+            lses = torch.stack(
+                [
+                    value[:, rank * heads_per_rank : (rank + 1) * heads_per_rank]
+                    for value in gathered_lse
+                ]
+            )
+            expected = _lse_weighted_combine(
+                outputs, lses, is_lse_base_on_e=is_lse_base_on_e
+            )
+            _assert_packed_a2a_close(actual, expected, dtype)
+
+        cases = ((1, False), (17, False), (5, True), (17, True))
+        for iteration, (num_tokens, padded) in enumerate(cases):
+            check(num_tokens, iteration, padded)
+        generator = torch.Generator(device=device)
+        generator.manual_seed(4321 + rank)
+        partial_output_storage = torch.randn(
+            5,
+            128,
+            head_dim,
+            device=device,
+            dtype=dtype,
+            generator=generator,
+        )
+        partial_lse_storage = torch.randn(
+            5,
+            128,
+            device=device,
+            dtype=torch.float32,
+            generator=generator,
+        )
+        partial_output = partial_output_storage[:, :total_heads, :]
+        partial_lse = partial_lse_storage[:, :total_heads]
+        assert not partial_output.is_contiguous()
+        assert not partial_lse.is_contiguous()
+        torch.accelerator.synchronize()
+        active_ubatch[0] = 1
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            actual = workspace.lse_reduce(partial_output, partial_lse, is_lse_base_on_e)
+        for _ in range(3):
+            graph.replay()
+        torch.accelerator.synchronize()
+
+        reference_output = partial_output.contiguous()
+        reference_lse = partial_lse.contiguous()
+        gathered_output = [
+            torch.empty_like(reference_output) for _ in range(world_size)
+        ]
+        gathered_lse = [torch.empty_like(reference_lse) for _ in range(world_size)]
+        dist.all_gather(gathered_output, reference_output)
+        dist.all_gather(gathered_lse, reference_lse)
+        head_slice = slice(rank * heads_per_rank, (rank + 1) * heads_per_rank)
+        outputs = torch.stack(
+            [value[:, head_slice, :] for value in gathered_output]
+        ).float()
+        lses = torch.stack([value[:, head_slice] for value in gathered_lse])
+        expected = _lse_weighted_combine(
+            outputs, lses, is_lse_base_on_e=is_lse_base_on_e
+        )
+        _assert_packed_a2a_close(actual, expected, dtype)
+    finally:
+        dist.destroy_process_group()
+
+
 @pytest.mark.skipif(
     torch.accelerator.device_count() < 4, reason="Need at least 4 GPUs."
 )
@@ -494,6 +694,25 @@ def test_distributed_packed_a2a_with_workspace_matches_reference():
             "RETURN_LSE": "1",
             "LSE_BASE_E": "1",
             "USE_WORKSPACE": "1",
+        },
+    )
+
+
+@pytest.mark.skipif(
+    torch.accelerator.device_count() < 4, reason="Need at least 4 GPUs."
+)
+@pytest.mark.parametrize("world_size", [2, 4])
+@pytest.mark.parametrize("dtype_name", ["float16", "bfloat16"])
+@pytest.mark.parametrize("is_lse_base_on_e", [False, True])
+def test_distributed_direct_a2a_matches_reference(
+    world_size: int, dtype_name: str, is_lse_base_on_e: bool
+):
+    _distributed_run(
+        _distributed_direct_a2a_worker,
+        world_size=world_size,
+        extra_env={
+            "TEST_DTYPE": dtype_name,
+            "LSE_BASE_E": str(int(is_lse_base_on_e)),
         },
     )
 

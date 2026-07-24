@@ -189,6 +189,7 @@ return curr_o @ W_O
 
 import functools
 from abc import abstractmethod
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
 from typing import ClassVar, Generic, TypeVar, cast
@@ -206,7 +207,6 @@ from vllm.config import (
     ModelConfig,
     VllmConfig,
     get_current_vllm_config,
-    get_current_vllm_config_or_none,
 )
 from vllm.config.cache import CacheDType
 from vllm.distributed.parallel_state import (
@@ -276,6 +276,10 @@ from vllm.v1.attention.backends.utils import (
 )
 from vllm.v1.attention.ops.common import cp_lse_ag_out_ar, cp_lse_ag_out_rs
 from vllm.v1.attention.ops.dcp_alltoall import dcp_a2a_lse_reduce
+from vllm.v1.attention.ops.dcp_direct_a2a import (
+    DirectDCPA2AWorkspace,
+    get_direct_dcp_a2a_workspace,
+)
 from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
 from vllm.v1.attention.ops.triton_merge_attn_states import mask_empty_context
 from vllm.v1.attention.selector import get_attn_backend
@@ -543,12 +547,51 @@ class MLAAttention(nn.Module, AttentionLayerBase):
 
         self.use_sparse = use_sparse
 
-        _vllm_config = get_current_vllm_config_or_none()
-        self.dcp_a2a = (
-            _vllm_config is not None
-            and _vllm_config.parallel_config.decode_context_parallel_size > 1
-            and _vllm_config.parallel_config.dcp_comm_backend == "a2a"
-        )
+        self.dcp_combine: (
+            Callable[[torch.Tensor, torch.Tensor], torch.Tensor] | None
+        ) = None
+        self.dcp_direct_a2a_workspace: DirectDCPA2AWorkspace | None = None
+        if self.impl.dcp_world_size > 1:
+            dcp_a2a = parallel_config.dcp_comm_backend == "a2a"
+            if dcp_a2a:
+                self.dcp_direct_a2a_workspace = get_direct_dcp_a2a_workspace(
+                    get_dcp_group(),
+                    # kv_b_proj is already materialized on this layer's device.
+                    next(kv_b_proj.parameters()).device,
+                    min(
+                        vllm_config.scheduler_config.max_num_batched_tokens,
+                        max(
+                            vllm_config.scheduler_config.max_num_seqs
+                            * (1 + vllm_config.num_speculative_tokens),
+                            vllm_config.compilation_config.max_cudagraph_capture_size
+                            or 0,
+                        ),
+                    ),
+                    self.num_heads,
+                    self.kv_lora_rank,
+                    dtype,
+                    # One staging slot without DBO (num_ubatches is 0 then).
+                    max(parallel_config.num_ubatches, 1),
+                )
+            if self.dcp_direct_a2a_workspace is not None:
+                logger.info_once("Using direct symmetric-memory DCP A2A for MLA.")
+                self.dcp_combine = functools.partial(
+                    self.dcp_direct_a2a_workspace.lse_reduce,
+                    is_lse_base_on_e=self.impl.lse_base_on_e,
+                )
+            else:
+                dcp_combine_fn = (
+                    dcp_a2a_lse_reduce
+                    if dcp_a2a
+                    else cp_lse_ag_out_ar
+                    if self.use_pcp
+                    else cp_lse_ag_out_rs
+                )
+                self.dcp_combine = functools.partial(
+                    dcp_combine_fn,
+                    cp_group=get_dcp_group(),
+                    is_lse_base_on_e=self.impl.lse_base_on_e,
+                )
 
         # Initialize q/k/v range constants.
         self.q_range = torch.tensor(envs.Q_SCALE_CONSTANT, dtype=torch.float32)
@@ -730,9 +773,6 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 return quant_output.fill_(0)
             return output.fill_(0)
 
-        if self.impl.dcp_world_size == -1:
-            self.impl.dcp_world_size = get_dcp_group().world_size
-
         fp8_attention = is_quantized_kv_cache(self.kv_cache_dtype)
 
         num_actual_toks = attn_metadata.num_actual_tokens
@@ -894,27 +934,8 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             # correct dcp attn_out with lse.
             if self.impl.dcp_world_size > 1:
                 assert lse is not None
-                if self.dcp_a2a:
-                    attn_out = dcp_a2a_lse_reduce(
-                        attn_out,
-                        lse,
-                        get_dcp_group(),
-                        is_lse_base_on_e=self.impl.lse_base_on_e,
-                    )
-                elif self.use_pcp:
-                    attn_out = cp_lse_ag_out_ar(
-                        attn_out,
-                        lse,
-                        get_dcp_group(),
-                        is_lse_base_on_e=self.impl.lse_base_on_e,
-                    )
-                else:
-                    attn_out = cp_lse_ag_out_rs(
-                        attn_out,
-                        lse,
-                        get_dcp_group(),
-                        is_lse_base_on_e=self.impl.lse_base_on_e,
-                    )
+                assert self.dcp_combine is not None
+                attn_out = self.dcp_combine(attn_out, lse)
                 if self.use_pcp:
                     attn_out = finalize_mla_pcp_decode(attn_out, self.num_heads)
 
@@ -2481,7 +2502,6 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
         output_scale: torch.Tensor | None = None,
     ) -> None:
         assert attn_metadata.prefill is not None
-        assert self.dcp_world_size != -1
 
         prefill_metadata = attn_metadata.prefill
         assert prefill_metadata.prefill_backend is not None
@@ -2627,10 +2647,13 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
             and (self.qk_rope_head_dim == 64)
         )
 
-        self.dcp_world_size: int = -1
-
+        parallel_config = get_current_vllm_config().parallel_config
+        # The DCP group is always created with exactly
+        # decode_context_parallel_size ranks, so the world size is known
+        # statically without the group being initialized (e.g. in tests).
+        self.dcp_world_size: int = parallel_config.decode_context_parallel_size
         self.cp_kv_cache_interleave_size: int = (
-            get_current_vllm_config().parallel_config.cp_kv_cache_interleave_size
+            parallel_config.cp_kv_cache_interleave_size
         )
 
     @abstractmethod
