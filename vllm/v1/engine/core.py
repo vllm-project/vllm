@@ -89,7 +89,6 @@ from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
 
-
 HANDSHAKE_TIMEOUT_MINS = 5
 
 _R = TypeVar("_R")  # Return type for collective_rpc
@@ -1045,10 +1044,8 @@ class EngineCoreProc(EngineCore):
                 self.has_coordinator,
                 self.frontend_stats_publish_address,
             )
-            internal_dp_balancing = (
-                self.has_coordinator
-                and not vllm_config.parallel_config.data_parallel_external_lb
-            )
+            self.external_lb = vllm_config.parallel_config.data_parallel_external_lb
+            internal_dp_balancing = self.has_coordinator and not self.external_lb
             # Only publish request queue stats to coordinator for "internal"
             # and "hybrid" LB modes.
             self.publish_dp_lb_stats = internal_dp_balancing
@@ -1934,19 +1931,33 @@ class DPEngineCoreProc(EngineCoreProc):
 
     def add_request(self, request: Request, request_wave: int = 0):
         super().add_request(request, request_wave)
-        if self.has_coordinator and request_wave != self.current_wave:
-            if request_wave > self.current_wave:
-                self.current_wave = request_wave
-            elif (
-                not self.engines_running
-                and self.scheduler.pause_state == PauseState.UNPAUSED
-            ):
-                # Request received for an already-completed wave, notify
-                # front-end that we need to start the next one.
-                self.engines_running = True
-                self.output_queue.put_nowait(
-                    (-1, EngineCoreOutputs(start_wave=self.current_wave))
-                )
+        if not self.has_coordinator:
+            return
+        if request_wave > self.current_wave:
+            self.current_wave = request_wave
+        # Wake the DP group whenever engines are idle and the scheduler is
+        # unpaused, INCLUDING the wave's first request (request_wave ==
+        # current_wave). Gating on ``request_wave != current_wave`` deadlocks
+        # cold start: both default to 0, so no start_wave is broadcast and the
+        # receiving rank blocks forever on the EP all2all while peers skip
+        # execute_dummy_batch. The coordinator's FIRST_REQ wake proved
+        # insufficient for ROCm DP+EP disagg cold start, so re-broadcast here
+        # for every LB mode (external LB has no coordinator in the per-request
+        # path). Re-broadcasting is harmless in steady state.
+        if (
+            not self.engines_running
+            and self.scheduler.pause_state == PauseState.UNPAUSED
+        ):
+            logger.debug(
+                "DP wave wake: starting wave %d (engine %d, external_lb=%s).",
+                self.current_wave,
+                self.engine_index,
+                self.external_lb,
+            )
+            self.engines_running = True
+            self.output_queue.put_nowait(
+                (-1, EngineCoreOutputs(start_wave=self.current_wave))
+            )
 
     def resume_scheduler(self):
         if self.pending_pause or (self.engines_running and self.ignore_start_dp_wave):
