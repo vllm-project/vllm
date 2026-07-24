@@ -1,17 +1,49 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from types import SimpleNamespace
+
 import torch
 
+from vllm.models.inkling.configs import InklingMMConfig, InklingModelConfig
+from vllm.models.inkling.nvidia.ops import fa4_warmup
 from vllm.models.inkling.nvidia.ops.fa4_rel_attention import (
     bucket_max_seqlen_q,
     inkling_fa4_num_splits,
 )
 from vllm.models.inkling.nvidia.ops.fa4_warmup import (
-    InklingFA4WarmupConfig,
-    _iter_compile_units,
+    InklingFA4RelAttentionKernel,
     _num_warps_bucket,
 )
+
+
+def _vllm_config_from_reference_config(config: SimpleNamespace) -> SimpleNamespace:
+    return SimpleNamespace(
+        model_config=SimpleNamespace(
+            hf_config=InklingMMConfig(
+                text_config=InklingModelConfig(
+                    num_attention_heads=config.num_heads,
+                    num_key_value_heads=config.num_kv_heads,
+                    head_dim=config.head_dim,
+                    rel_extent=config.rel_extent,
+                    swa_num_attention_heads=config.num_heads,
+                    swa_num_key_value_heads=config.num_kv_heads,
+                    swa_head_dim=config.head_dim,
+                    sliding_window_size=config.rel_extent,
+                )
+            ),
+            max_model_len=config.max_kv_len,
+            dtype=config.dtype,
+        ),
+        cache_config=SimpleNamespace(
+            cache_dtype="auto",
+            block_size=config.block_size,
+        ),
+        scheduler_config=SimpleNamespace(
+            max_num_seqs=config.max_num_reqs,
+            max_num_batched_tokens=config.max_num_batched_tokens,
+        ),
+    )
 
 
 def test_bucket_max_seqlen_q():
@@ -28,8 +60,13 @@ def test_bucket_max_seqlen_q():
     ]
 
 
-def test_warmup_enumerates_every_runtime_compile_class():
-    config = InklingFA4WarmupConfig(
+def test_warmup_enumerates_every_runtime_compile_class(monkeypatch):
+    monkeypatch.setattr(
+        fa4_warmup,
+        "get_tensor_model_parallel_world_size",
+        lambda: 1,
+    )
+    config = SimpleNamespace(
         num_heads=16,
         num_kv_heads=2,
         head_dim=128,
@@ -43,7 +80,18 @@ def test_warmup_enumerates_every_runtime_compile_class():
         max_num_reqs=64,
         max_num_batched_tokens=192,
     )
-    warmed_keys = {unit.key[-1] for unit in _iter_compile_units(config)}
+    vllm_config = _vllm_config_from_reference_config(config)
+    kernel = InklingFA4RelAttentionKernel()
+    warmed_keys = {
+        (
+            key.max_seqlen_q,
+            key.num_splits,
+            key.num_warps_bucket,
+            key.large_num_reqs,
+        )
+        for key in kernel.get_warmup_keys(vllm_config)
+        if key.is_local == config.is_local
+    }
 
     for query_len in range(1, config.max_num_batched_tokens + 1):
         max_seqlen_q = bucket_max_seqlen_q(query_len)
