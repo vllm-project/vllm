@@ -171,6 +171,7 @@ if TYPE_CHECKING:
     VLLM_RANDOMIZE_DP_DUMMY_INPUTS: bool = False
     VLLM_RAY_DP_PACK_STRATEGY: Literal["strict", "fill", "span"] = "strict"
     VLLM_RAY_DP_PLACEMENT_NODE_IPS: str = ""
+    VLLM_RAY_PG_TIMEOUT_S: int = 1800
     VLLM_RAY_EXTRA_ENV_VAR_PREFIXES_TO_COPY: str = ""
     VLLM_RAY_EXTRA_ENV_VARS_TO_COPY: str = ""
     VLLM_MARLIN_USE_ATOMIC_ADD: bool = False
@@ -579,6 +580,27 @@ def _resolve_rust_frontend_path() -> str | None:
             "Build with setuptools-rust or set the path explicitly."
         )
     return raw
+
+
+def _validate_pg_timeout_s() -> int:
+    """Validate and return VLLM_RAY_PG_TIMEOUT_S as int.
+
+    This env var controls the timeout for PG lifecycle operations,
+    including both PG creation (waiting for resources) and PG removal.
+
+    Raises:
+        ValueError: If the value is not a valid integer or is <= 0.
+    """
+    raw = os.getenv("VLLM_RAY_PG_TIMEOUT_S", "1800")
+    try:
+        val = int(raw)
+    except ValueError as e:
+        raise ValueError(
+            f"Invalid value for VLLM_RAY_PG_TIMEOUT_S: expected integer, got {raw!r}"
+        ) from e
+    if val <= 0:
+        raise ValueError(f"VLLM_RAY_PG_TIMEOUT_S must be > 0, got {val}")
+    return val
 
 
 environment_variables: dict[str, Callable[[], Any]] = {
@@ -1425,6 +1447,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_RAY_EXTRA_ENV_VARS_TO_COPY": lambda: os.getenv(
         "VLLM_RAY_EXTRA_ENV_VARS_TO_COPY", ""
     ),
+    # Timeout in seconds for placement group creation and removal.
+    # Default 1800s (30 min). Users can reduce for faster failure
+    # detection or increase for large-cluster scheduling delays.
+    "VLLM_RAY_PG_TIMEOUT_S": _validate_pg_timeout_s,
     # Use model_redirect to redirect the model name to a local folder.
     # `model_redirect` can be a json file mapping the model between
     # repo_id and local folder:
