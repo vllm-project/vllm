@@ -22,9 +22,9 @@ from vllm.v1.kv_offload.base import (
     RequestOffloadingContext,
 )
 from vllm.v1.kv_offload.tiering.base import (
-    JobMetadata,
     JobResult,
     SecondaryTierManager,
+    TransferJob,
 )
 
 logger = logging.getLogger(__name__)
@@ -70,6 +70,8 @@ class ExampleSecondaryTierManager(SecondaryTierManager):
 
         # Completed jobs waiting to be retrieved by get_finished_jobs()
         self.completed_jobs: list[JobResult] = []
+        assert primary_kv_view.strides is not None
+        self._block_size = primary_kv_view.strides[0]
 
     @override
     def lookup(self, key: OffloadKey, req_context: ReqContext) -> LookupResult:
@@ -86,7 +88,7 @@ class ExampleSecondaryTierManager(SecondaryTierManager):
         return LookupResult.HIT if key in self.blocks else LookupResult.MISS
 
     @override
-    def submit_store(self, job_metadata: JobMetadata) -> None:
+    def submit_store(self, job_metadata: TransferJob) -> None:
         """
         Submit a job to store blocks from primary tier to this tier.
 
@@ -103,10 +105,16 @@ class ExampleSecondaryTierManager(SecondaryTierManager):
 
         for key in keys:
             self.blocks[key] = True
-        self.completed_jobs.append(JobResult(job_id=job_metadata.job_id, success=True))
+        self.completed_jobs.append(
+            JobResult(
+                job_id=job_metadata.job_id,
+                success=True,
+                transfer_time=0.0,
+            )
+        )
 
     @override
-    def submit_load(self, job_metadata: JobMetadata) -> None:
+    def submit_load(self, job_metadata: TransferJob) -> None:
         """
         Submit a job to load blocks from this tier to primary tier.
 
@@ -128,7 +136,13 @@ class ExampleSecondaryTierManager(SecondaryTierManager):
                 )
                 return
 
-        self.completed_jobs.append(JobResult(job_id=job_metadata.job_id, success=True))
+        self.completed_jobs.append(
+            JobResult(
+                job_id=job_metadata.job_id,
+                success=True,
+                transfer_time=0.0,
+            )
+        )
 
     @override
     def get_finished_jobs(self) -> Iterable[JobResult]:

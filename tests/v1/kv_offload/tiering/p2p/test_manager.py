@@ -16,7 +16,7 @@ import numpy as np
 import pytest
 
 from vllm.v1.kv_offload.base import LookupResult, ReqContext, ScheduleEndContext
-from vllm.v1.kv_offload.tiering.base import JobMetadata, JobResult
+from vllm.v1.kv_offload.tiering.base import JobResult, TransferJob
 from vllm.v1.kv_offload.tiering.p2p import manager as manager_module
 from vllm.v1.kv_offload.tiering.p2p.manager import (
     _UNBOUND_STORE_TIMEOUT_S,
@@ -64,12 +64,12 @@ def _job_metadata(
     keys: list[bytes] | None = None,
     block_ids: list[int] | None = None,
     kv_params: dict | None = None,
-) -> JobMetadata:
+) -> TransferJob:
     if keys is None:
         keys = [b"key1"]
     if block_ids is None:
         block_ids = list(range(len(keys)))
-    return JobMetadata(
+    return TransferJob(
         job_id=job_id,
         keys=keys,
         block_ids=np.array(block_ids),

@@ -36,10 +36,25 @@ class TieringOffloadingMetrics:
 
     LOOKUP_SYNC_DELAY = "vllm:kv_offload_tiering_lookup_sync_delay_seconds"
     LOOKUP_ASYNC_DELAY = "vllm:kv_offload_tiering_lookup_async_delay_seconds"
+    READ_BYTES = "vllm:kv_offload_tiering_read_bytes"
+    READ_TIME = "vllm:kv_offload_tiering_read_time"
+    WRITE_BYTES = "vllm:kv_offload_tiering_write_bytes"
+    WRITE_TIME = "vllm:kv_offload_tiering_write_time"
+    PROMOTION_JOB_FAILURES = "vllm:kv_offload_tiering_promotion_job_failures"
+    CASCADE_JOB_FAILURES = "vllm:kv_offload_tiering_cascade_job_failures"
+    BLOCK_QUERIES = "vllm:kv_offload_tiering_block_queries"
+    BLOCK_HITS = "vllm:kv_offload_tiering_block_hits"
+    PRIMARY_WRITE_USAGE_PERC = "vllm:kv_offload_tiering_primary_write_usage_perc"
+    PRIMARY_READ_USAGE_PERC = "vllm:kv_offload_tiering_primary_read_usage_perc"
+    PROMOTION_ALLOCATION_FAILURES = (
+        "vllm:kv_offload_tiering_promotion_allocation_failures"
+    )
+    ACTIVE_PROMOTION_JOBS = "vllm:kv_offload_tiering_active_promotion_jobs"
+    ACTIVE_CASCADE_JOBS = "vllm:kv_offload_tiering_active_cascade_jobs"
 
 
 @dataclass
-class JobMetadata:
+class TransferJob:
     """Metadata for an in-flight async transfer job."""
 
     job_id: JobId
@@ -55,6 +70,7 @@ class JobResult:
 
     job_id: JobId
     success: bool
+    transfer_time: float | None = None
 
 
 class ParentManager(ABC):
@@ -88,7 +104,7 @@ class ParentManager(ABC):
         self,
         keys: Collection[OffloadKey],
         req_context: ReqContext,
-    ) -> JobMetadata: ...
+    ) -> TransferJob: ...
 
     @abstractmethod
     def on_request_finished(self, req_context: ReqContext) -> None: ...
@@ -142,7 +158,7 @@ class SecondaryTierManager(ABC):
         pass
 
     @abstractmethod
-    def submit_store(self, job_metadata: JobMetadata) -> None:
+    def submit_store(self, job_metadata: TransferJob) -> None:
         """
         Submit an async job to store blocks from the primary tier to this
         secondary tier.
@@ -170,7 +186,7 @@ class SecondaryTierManager(ABC):
         pass
 
     @abstractmethod
-    def submit_load(self, job_metadata: JobMetadata) -> None:
+    def submit_load(self, job_metadata: TransferJob) -> None:
         """
         Submit an async job to load blocks from this secondary tier to the
         primary tier.

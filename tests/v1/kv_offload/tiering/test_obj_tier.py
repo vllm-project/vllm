@@ -33,7 +33,7 @@ from vllm.v1.kv_offload.config import (
     OffloadingModelConfig,
     OffloadingParallelConfig,
 )
-from vllm.v1.kv_offload.tiering.base import JobMetadata, JobResult
+from vllm.v1.kv_offload.tiering.base import JobResult, TransferJob
 from vllm.v1.kv_offload.tiering.obj.config import ObjStoreConfig
 from vllm.v1.kv_offload.tiering.obj.manager import ObjectStoreSecondaryTierManager
 
@@ -89,10 +89,10 @@ def make_job(
     job_id: int,
     keys: list[OffloadKey],
     block_ids: list[int] | None = None,
-) -> JobMetadata:
+) -> TransferJob:
     if block_ids is None:
         block_ids = list(range(len(keys)))
-    return JobMetadata(
+    return TransferJob(
         job_id=job_id,
         keys=keys,
         block_ids=np.array(block_ids, dtype=np.int64),
@@ -184,6 +184,9 @@ class MockNixlAgent:
 
     def release_dlist_handle(self, handle):
         pass
+
+    def get_xfer_telemetry(self, handle):
+        return SimpleNamespace(xferDuration=1000)
 
     def _query_memory(self, queries, mem_type, agent_name):
         return [object() if q[3] in self._stored_obj_keys else None for q in queries]
