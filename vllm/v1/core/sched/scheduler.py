@@ -2199,6 +2199,13 @@ class Scheduler(SchedulerInterface):
         assert request.is_finished()
 
         self._inflight_prefills.discard(request)
+        if self.enable_return_routed_experts:
+            # Drop the schedule-time block-ID snapshot. update_from_output only
+            # pops _re_block_ids on the token-emitting path; a request aborted or
+            # finished while in flight takes the `request is None or
+            # request.is_finished(): continue` branch before that pop, so clean
+            # it up here on the common finish/abort funnel to avoid a leak.
+            self._re_block_ids.pop(request.request_id, None)
         connector_delay_free_blocks, kv_xfer_params = self._connector_finished(request)
 
         # EC Connector: mirror the KV hook. The contract requires firing
