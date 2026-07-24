@@ -12,7 +12,6 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kMxfp8Dynamic,
     kMxfp8Static,
 )
-from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
 
@@ -64,19 +63,11 @@ def _mxfp8_backend_to_kernel_cls(
 
         return [AiterMxfp8Experts]
     if backend == Fp8MoeBackend.TRITON_MXFP8:
-        # Explicit ``--moe-backend triton``: the Triton mxfp8 path, i.e.
-        # dot_scaled on MX-capable HW (gfx950) and BF16 emulation otherwise.
-        if current_platform.supports_mx():
-            from vllm.model_executor.layers.fused_moe.experts.mxfp8_native_moe import (
-                Mxfp8NativeTritonExperts,
-            )
-
-            return [Mxfp8NativeTritonExperts]
-        from vllm.model_executor.layers.fused_moe.experts.mxfp8_emulation_moe import (
-            Mxfp8EmulationTritonExperts,
+        from vllm.model_executor.layers.fused_moe.experts.mxfp8_native_moe import (
+            Mxfp8NativeTritonExperts,
         )
 
-        return [Mxfp8EmulationTritonExperts]
+        return [Mxfp8NativeTritonExperts]
     if backend == Fp8MoeBackend.EMULATION:
         from vllm.model_executor.layers.fused_moe.experts.mxfp8_emulation_moe import (
             Mxfp8EmulationTritonExperts,
