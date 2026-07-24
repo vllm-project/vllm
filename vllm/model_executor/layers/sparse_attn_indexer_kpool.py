@@ -9,6 +9,7 @@ import torch
 import vllm.envs as envs
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
+from vllm.config import get_current_vllm_config_or_none
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
@@ -253,9 +254,32 @@ def sparse_attn_indexer_kpool(
             ((RADIX_TOPK_WORKSPACE_SIZE,), torch.uint8),
         )
 
-        # Dummy allocation to simulate for peak logits tensor memory during inference.
-        # FP8 elements so elements == bytes
-        max_logits_elems = envs.VLLM_SPARSE_INDEXER_MAX_LOGITS_MB * 1024 * 1024
+        # Sentinel allocation so the profiler's peak-memory measurement covers
+        # the runtime logits tensor. The decode-path fp8_fp4_paged_mqa_logits
+        # output is [B*next_n, max_model_len] float32 -- sized by max_model_len,
+        # NOT bounded by the prefill chunk cap. This profiling branch returns
+        # the fake before ever calling that kernel, so its output tensor is
+        # invisible unless we size this sentinel to the real worst-case decode
+        # batch; otherwise large max_model_len / max_num_batched_tokens OOMs at
+        # warmup (the old fixed VLLM_SPARSE_INDEXER_MAX_LOGITS_MB=512MiB was
+        # ~10x too small at max_model_len=1M / b8192).
+        cfg = get_current_vllm_config_or_none()
+        worst_decode_tokens = 0
+        if cfg is not None:
+            sched = cfg.scheduler_config
+            num_spec = (
+                cfg.speculative_config.num_speculative_tokens
+                if cfg.speculative_config is not None
+                else 0
+            )
+            worst_decode_tokens = min(
+                sched.max_num_seqs * (num_spec + 1),
+                sched.max_num_batched_tokens,
+            )
+        # float32 logits -> 4 bytes/element; uint8 sentinel so elems == bytes.
+        decode_logits_elems = worst_decode_tokens * max_model_len * 4
+        prefill_cap_elems = envs.VLLM_SPARSE_INDEXER_MAX_LOGITS_MB * 1024 * 1024
+        max_logits_elems = max(decode_logits_elems, prefill_cap_elems)
         _ = torch.empty(
             max_logits_elems, dtype=torch.uint8, device=hidden_states.device
         )
