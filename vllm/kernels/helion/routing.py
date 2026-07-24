@@ -22,6 +22,10 @@ _HELION_TO_NATIVE_OP: dict[str, str] = {
     "rms_norm_per_block_quant": "rms_norm_per_block_quant",
     "silu_and_mul_per_block_quant": "silu_and_mul_per_block_quant",
     "fused_qk_norm_rope": "fused_qk_norm_rope",
+    # Also emitted directly (not only by fusion) — a standalone activation quant
+    # that survives fusion is retargeted here; its eager call sites are routed
+    # separately in input_quant_fp8.QuantFP8.forward_cuda.
+    "per_token_group_fp8_quant": "per_token_group_fp8_quant",
 }
 
 
