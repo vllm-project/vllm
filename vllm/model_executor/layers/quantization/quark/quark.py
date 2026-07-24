@@ -33,6 +33,7 @@ from vllm.model_executor.layers.quantization.quark.schemes import (
     QuarkScheme,
     QuarkW4A8_MXFP4_FP8,
     QuarkW8A8Fp8,
+    QuarkW8A8Fp8PerBlock,
     QuarkW8A8Int8,
 )
 from vllm.model_executor.layers.quantization.quark.utils import (
@@ -66,6 +67,14 @@ class QuarkConfig(QuantizationConfig):
         if kv_cache_group is None:
             kv_cache_group = []
         self.quant_config = quant_config
+        # Copy the class-level default (which a subclass may override, e.g. the
+        # DeepSeek-V4 Quark config) so per-instance edits don't mutate the class.
+        # Read from the class rather than ``self`` because the base
+        # ``QuantizationConfig.__init__`` sets an empty instance-level
+        # ``packed_modules_mapping`` that would otherwise shadow the override.
+        self.packed_modules_mapping = dict(
+            getattr(type(self), "packed_modules_mapping", {})
+        )
         self.kv_cache_group = kv_cache_group
         self.kv_cache_config = kv_cache_config
         self.pack_method = pack_method
@@ -341,11 +350,30 @@ class QuarkConfig(QuantizationConfig):
             "per_tensor",
             "per_channel",
         ]
+        block_size = list(weight_quant.get("block_size") or [])
+        is_per_block_weight = (
+            weight_quant.get("qscheme") == "per_block"
+            and block_size == [128, 128]
+            and weight_quant.get("symmetric") is True
+        )
 
-        if not (is_fp8_dtype and is_static_weight and is_per_tensor_or_channel_weight):
+        if not is_fp8_dtype or not is_static_weight:
             return False
 
-        # Dynamic quantization is always supported if weights supported.
+        if is_per_block_weight:
+            if not input_quant.get("is_dynamic"):
+                return False
+            return (
+                input_quant.get("qscheme") == "per_group"
+                and input_quant.get("group_size") == block_size[1]
+                and input_quant.get("symmetric") is True
+            )
+
+        if not is_per_tensor_or_channel_weight:
+            return False
+
+        # Dynamic quantization is always supported if tensor/channel weights
+        # are supported.
         if input_quant.get("is_dynamic"):
             return True
 
@@ -640,6 +668,8 @@ class QuarkConfig(QuantizationConfig):
                 QuarkW8A8Fp8.get_min_capability(), error=False
             )
             if is_fp8_w8a8_supported:
+                if weight_config.get("qscheme") == "per_block":
+                    return QuarkW8A8Fp8PerBlock(weight_config, input_config)
                 return QuarkW8A8Fp8(weight_config, input_config)
         elif self._is_static_tensor_w8a8(weight_config, input_config):
             weight_qscheme = cast(str, weight_config.get("qscheme"))

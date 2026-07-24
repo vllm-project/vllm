@@ -18,8 +18,10 @@ import torch
 from packaging import version
 
 from vllm.model_executor.layers.quantization.quark.quark import (  # noqa: E501
+    QuarkConfig,
     QuarkLinearMethod,
     QuarkW8A8Fp8,
+    QuarkW8A8Fp8PerBlock,
     QuarkW8A8Int8,
 )
 from vllm.model_executor.layers.quantization.quark.quark_moe import (  # noqa: E501
@@ -71,6 +73,101 @@ except huggingface_hub.errors.RepositoryNotFoundError:
 def enable_pickle(monkeypatch):
     """`LLM.apply_model` requires pickling a function."""
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+
+
+def test_quark_config_has_no_model_specific_fused_mappings():
+    config = QuarkConfig({})
+
+    assert "gate_up_proj" not in config.packed_modules_mapping
+    assert "fused_wqa_wkv" not in config.packed_modules_mapping
+
+
+def test_quark_config_preserves_existing_packed_modules_mapping():
+    class CustomQuarkConfig(QuarkConfig):
+        packed_modules_mapping = {"custom_proj": ["a", "b"]}
+
+    config = CustomQuarkConfig({})
+
+    assert config.packed_modules_mapping["custom_proj"] == ["a", "b"]
+
+
+def test_quark_fp8_w8a8_detects_per_block_config():
+    config = QuarkConfig({})
+    weight_config = {
+        "dtype": "fp8_e4m3",
+        "qscheme": "per_block",
+        "is_dynamic": False,
+        "block_size": [128, 128],
+        "symmetric": True,
+    }
+    input_config = {
+        "dtype": "fp8_e4m3",
+        "qscheme": "per_group",
+        "is_dynamic": True,
+        "group_size": 128,
+        "symmetric": True,
+    }
+
+    assert config._is_fp8_w8a8(weight_config, input_config)
+
+
+def test_quark_fp8_w8a8_rejects_per_block_static_input():
+    config = QuarkConfig({})
+    weight_config = {
+        "dtype": "fp8_e4m3",
+        "qscheme": "per_block",
+        "is_dynamic": False,
+        "block_size": [128, 128],
+        "symmetric": True,
+    }
+    input_config = {
+        "dtype": "fp8_e4m3",
+        "qscheme": "per_group",
+        "is_dynamic": False,
+        "group_size": 128,
+        "symmetric": True,
+    }
+
+    assert not config._is_fp8_w8a8(weight_config, input_config)
+
+
+def test_quark_fp8_w8a8_rejects_per_block_group_size_mismatch():
+    config = QuarkConfig({})
+    weight_config = {
+        "dtype": "fp8_e4m3",
+        "qscheme": "per_block",
+        "is_dynamic": False,
+        "block_size": [128, 128],
+        "symmetric": True,
+    }
+    input_config = {
+        "dtype": "fp8_e4m3",
+        "qscheme": "per_group",
+        "is_dynamic": True,
+        "group_size": 64,
+        "symmetric": True,
+    }
+
+    assert not config._is_fp8_w8a8(weight_config, input_config)
+
+
+def test_quark_w8a8_fp8_per_block_requires_block_size():
+    weight_config = {
+        "dtype": "fp8_e4m3",
+        "qscheme": "per_block",
+        "is_dynamic": False,
+        "symmetric": True,
+    }
+    input_config = {
+        "dtype": "fp8_e4m3",
+        "qscheme": "per_group",
+        "is_dynamic": True,
+        "group_size": 128,
+        "symmetric": True,
+    }
+
+    with pytest.raises(ValueError, match="requires `block_size`"):
+        QuarkW8A8Fp8PerBlock(weight_config, input_config)
 
 
 @pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8"])

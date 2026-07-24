@@ -1,0 +1,15 @@
+model_name: "amd/DeepSeek-V4-Pro-NVFP4"
+accuracy_threshold: 0.92
+num_questions: 1319
+num_fewshot: 8
+startup_max_wait_seconds: 1200
+server_args: >-
+  --tensor-parallel-size 8
+  --max-model-len 4096
+  --trust-remote-code
+  --kv-cache-dtype fp8
+  --tokenizer-mode deepseek_v4
+  --compilation-config '{"mode": 3, "cudagraph_mode": "FULL_DECODE_ONLY"}'
+env:
+  VLLM_ROCM_USE_AITER: "1"
+  VLLM_ROCM_USE_AITER_MOE: "1"
