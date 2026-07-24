@@ -476,3 +476,43 @@ def test_load_mask_without_eagle_unchanged():
     assert hit == 64
     masks = coord.load_mask(hs, token_len=hit)
     assert masks[0] == [True, True, True, True]
+
+
+def test_eagle_flag_propagates_to_all_merged_swa_groups():
+    """Regression for MTP x PD external-store 0% prefix hit.
+
+    DSV4 splits SWA layers into several KV cache groups sharing one spec, and
+    only the group containing the MTP layer is annotated ``is_eagle_group``.
+    The lookup merges equal-spec groups, applies the eagle drop to the merged
+    group, and requires each chunk hash to exist in EVERY member group — so
+    the save-side masks must eagle-shift every member, not just the annotated
+    one. Without propagation the non-annotated groups never store the eagle
+    proof-run chunks and every external lookup returns 0.
+    """
+    swa = _swa(block_size=16, sliding_window=32)
+    groups = [
+        KVCacheGroupSpec(["L0"], _full(64)),
+        KVCacheGroupSpec(["L1"], swa),
+        KVCacheGroupSpec(["L2"], swa, is_eagle_group=True),
+    ]
+    coord = _make_coord(groups, hash_block_size=16, use_eagle=True)
+    assert coord.eagle_group_ids == {1, 2}
+
+    # Save side: both SWA groups must produce identical (eagle-shifted) masks.
+    masks = coord.store_mask(128, num_prompt_tokens=130)
+    assert masks[1] == masks[2]
+
+    # Round trip: everything store_mask kept is in the store; the eagle
+    # lookup must then serve a non-zero hit (it was 0 before the fix).
+    hs = _hashes(128 // 16)
+    exists = set()
+    for g_idx, g in enumerate(groups):
+        ghashes = chunk_hashes_for_block_size(hs, 16, g.kv_cache_spec.block_size)
+        mask = masks[g_idx]
+        for i in range(128 // g.kv_cache_spec.block_size):
+            if mask is None or mask[i]:
+                exists.add((g_idx, bytes(ghashes[i])))
+    _masks, hit = coord.find_longest_cache_hit(
+        hs, max_length=128, cached_block_pool=ExternalCachedBlockPool(16, exists)
+    )
+    assert hit == 64
