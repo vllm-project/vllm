@@ -367,6 +367,18 @@ def fused_indexer_q_rope_quant(
                 index_q_scale,
                 index_weights_out,
             )
+        elif current_platform.is_xpu():
+            torch.ops.vllm.xpu_deepseek_fused_indexer_q_rope_mxfp4(
+                index_q,
+                positions,
+                index_q_cos_sin_cache,
+                index_weights,
+                index_weights_softmax_scale,
+                index_weights_head_scale,
+                index_q_packed,
+                index_q_scale,
+                index_weights_out,
+            )
         else:
             _fused_indexer_q_rope_mxfp4_kernel[(num_tokens, num_index_q_heads)](
                 positions,
@@ -416,6 +428,17 @@ def fused_indexer_q_rope_quant(
         fused_indexer_q_rope_quant_fp8_cutedsl(
             positions,
             index_q,
+            index_q_cos_sin_cache,
+            index_weights,
+            index_weights_softmax_scale,
+            index_weights_head_scale,
+            index_q_fp8,
+            index_weights_out,
+        )
+    elif current_platform.is_xpu():
+        torch.ops.vllm.xpu_deepseek_fused_indexer_q_rope_fp8(
+            index_q,
+            positions,
             index_q_cos_sin_cache,
             index_weights,
             index_weights_softmax_scale,
