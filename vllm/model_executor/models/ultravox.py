@@ -4,27 +4,26 @@
 # Adapted from https://github.com/fixie-ai/ultravox/blob/ecd58c4041030bae2ad15aa6bcf04ab43199ea02/ultravox/model/ultravox_model.py
 """PyTorch Ultravox model."""
 
-import copy
+import math
 from collections.abc import Iterable, Mapping, Sequence
-from types import SimpleNamespace
 from typing import Annotated, Any, Literal, TypeAlias
 
+import numpy as np
 import torch
 from torch import nn
 from torch.nn import functional as F
 from transformers import BatchFeature, ProcessorMixin
-from transformers.modeling_utils import ModuleUtilsMixin
 from transformers.models.whisper import WhisperFeatureExtractor
-from transformers.models.whisper.modeling_whisper import (
-    WhisperEncoder,
-    WhisperEncoderLayer,
-)
 
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
+from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.activation import MulAndSilu, get_act_fn
+from vllm.model_executor.layers.attention import MMEncoderAttention
 from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.model_executor.layers.linear import ReplicatedLinear
+from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.model_loader import DefaultModelLoader
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -58,6 +57,11 @@ from .utils import (
     flatten_bn,
     init_vllm_registered_model,
     maybe_prefix,
+)
+from .whisper import (
+    WhisperEncoder,
+    WhisperEncoderLayer,
+    _create_fake_bias_for_k_proj,
 )
 
 _AUDIO_PLACEHOLDER_OVERRIDE = "<|audio|>"
@@ -304,14 +308,97 @@ class StackAudioFrames(nn.Module):
         return audio_embeds
 
 
+def _build_chunk_attn_metadata(
+    attn: MMEncoderAttention,
+    feature_lens: torch.Tensor,
+    seq_len: int,
+    hidden_size: int,
+    device: torch.device,
+) -> dict[str, torch.Tensor | None]:
+    """Segmented varlen attention metadata for a padded batch of audio chunks.
+
+    Each padded row contributes up to two sequences to `cu_seqlens`: its valid
+    frames and its padding tail. Attention therefore never crosses a
+    valid/padding boundary (equivalent to the key-padding mask the HF
+    implementation uses), while every row still flows through the
+    (potentially LoRA-wrapped) linears, keeping the per-chunk token counts
+    constant as required by `get_num_mm_encoder_tokens` /
+    `get_num_mm_connector_tokens`. Queries at padding positions produce
+    (garbage) outputs, which are trimmed by `audio_token_len` downstream.
+    """
+    batch_size = feature_lens.shape[0]
+    starts = np.arange(batch_size, dtype=np.int64) * seq_len
+    lens_np = feature_lens.cpu().numpy().astype(np.int64)
+    bounds = np.stack([starts + lens_np, starts + seq_len], axis=1).reshape(-1)
+    cu_seqlens_np = np.concatenate(([0], bounds))
+    # Fully-valid rows produce empty padding segments; drop the duplicates.
+    cu_seqlens_np = np.unique(cu_seqlens_np).astype(np.int32)
+
+    attn_backend = attn.attn_backend
+    sequence_lengths = MMEncoderAttention.maybe_compute_seq_lens(
+        attn_backend, cu_seqlens_np, device
+    )
+    max_seqlen = torch.tensor(
+        MMEncoderAttention.compute_max_seqlen(attn_backend, cu_seqlens_np),
+        dtype=torch.int32,
+    )
+    cu_seqlens = MMEncoderAttention.maybe_recompute_cu_seqlens(
+        attn_backend,
+        cu_seqlens_np,
+        hidden_size,
+        get_tensor_model_parallel_world_size(),
+        device,
+    )
+    return {
+        "cu_seqlens": cu_seqlens,
+        "max_seqlen": max_seqlen,
+        "sequence_lengths": sequence_lengths,
+    }
+
+
+# Maps HF whisper encoder layer names to vLLM's fused qkv_proj and nested
+# mlp; `_create_fake_bias_for_k_proj` supplies the fused bias' k-slice
+# (HF whisper k_proj has no bias).
+_WHISPER_ENCODER_MAPPER = WeightsMapper(
+    orig_to_new_substr={".fc1.": ".mlp.fc1.", ".fc2.": ".mlp.fc2."},
+    orig_to_new_stacked={
+        ".self_attn.q_proj": (".self_attn.qkv_proj", "q"),
+        ".self_attn.k_proj": (".self_attn.qkv_proj", "k"),
+        ".self_attn.v_proj": (".self_attn.qkv_proj", "v"),
+    },
+)
+
+
+def _load_whisper_layer_weights(
+    module: nn.Module, weights: Iterable[tuple[str, torch.Tensor]]
+) -> set[str]:
+    weights = _create_fake_bias_for_k_proj(weights, ".self_attn.k_proj.weight")
+    loader = AutoWeightsLoader(module)
+    return loader.load_weights(weights, mapper=_WHISPER_ENCODER_MAPPER)
+
+
 class UltravoxFeedForwardProjector(nn.Module):
-    def __init__(self, config: UltravoxConfig):
+    def __init__(
+        self,
+        config: UltravoxConfig,
+        *,
+        quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
+    ):
         super().__init__()
         self.hidden_dim = config.hidden_size
         self._pad_and_stack = StackAudioFrames(config.stack_factor)
         dim_in = config.audio_config.hidden_size * config.stack_factor
         self.ln_pre = RMSNorm(dim_in)
-        self.linear_1 = nn.Linear(dim_in, self.hidden_dim, bias=False)
+        # ReplicatedLinear (a vLLM-native linear) so the connector can be
+        # wrapped for LoRA; a plain nn.Linear is left unwrapped by from_layer.
+        self.linear_1 = ReplicatedLinear(
+            dim_in,
+            self.hidden_dim,
+            bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.linear_1",
+        )
         dim_mid = self.hidden_dim
 
         if config.projector_act == "swiglu":
@@ -321,7 +408,13 @@ class UltravoxFeedForwardProjector(nn.Module):
             self.act = get_act_fn(config.projector_act)
 
         dim_out = config.text_config.hidden_size
-        self.linear_2 = nn.Linear(dim_mid, dim_out, bias=False)
+        self.linear_2 = ReplicatedLinear(
+            dim_mid,
+            dim_out,
+            bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.linear_2",
+        )
 
         # Ultravox v0.4.1 and below use layer_norm after the second linear layer
         # while v0.5.0 and above uses layer_norm after the first linear layer.
@@ -337,42 +430,62 @@ class UltravoxFeedForwardProjector(nn.Module):
     ) -> torch.Tensor:
         audio_features = self._pad_and_stack(audio_features)
         audio_features = self.ln_pre(audio_features)
-        hidden_states = self.linear_1(audio_features)
+        hidden_states, _ = self.linear_1(audio_features)
         hidden_states = self.act(hidden_states)
         hidden_states = self.ln_mid(hidden_states)
-        hidden_states = self.linear_2(hidden_states)
+        hidden_states, _ = self.linear_2(hidden_states)
         hidden_states = self.ln_post(hidden_states)
         return hidden_states
 
 
-class UltravoxTransformerProjector(nn.Module, ModuleUtilsMixin):
-    def __init__(self, config: UltravoxConfig):
+class UltravoxTransformerProjector(nn.Module):
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        *,
+        prefix: str = "",
+    ):
         super().__init__()
-        self.config = SimpleNamespace(is_decoder=False)
+        config: UltravoxConfig = vllm_config.model_config.hf_config
+        quant_config = vllm_config.quant_config
+        audio_config = config.audio_config
 
         self._pad_and_stack = StackAudioFrames(config.stack_factor)
-        dim_in = config.audio_config.hidden_size * config.stack_factor
-
-        projector_audio_config = copy.deepcopy(config.audio_config)
+        dim_in = audio_config.hidden_size * config.stack_factor
 
         self.ln_pre = RMSNorm(dim_in)
-        self.linear_in = nn.Linear(dim_in, projector_audio_config.d_model)
+        self.linear_in = ReplicatedLinear(
+            dim_in,
+            audio_config.d_model,
+            bias=True,
+            quant_config=quant_config,
+            prefix=f"{prefix}.linear_in",
+        )
 
         self.embed_positions = nn.Embedding(
-            projector_audio_config.max_source_positions,
-            projector_audio_config.d_model,
+            audio_config.max_source_positions,
+            audio_config.d_model,
         )
 
+        audio_vllm_config = vllm_config.with_hf_config(audio_config)
         self.layers = nn.ModuleList(
             [
-                WhisperEncoderLayer(projector_audio_config)
-                for _ in range(config.num_projector_layers)
+                WhisperEncoderLayer(
+                    vllm_config=audio_vllm_config,
+                    prefix=f"{prefix}.layers.{idx}",
+                )
+                for idx in range(config.num_projector_layers)
             ]
         )
+        self._d_model = audio_config.d_model
 
-        self.ln_post = RMSNorm(projector_audio_config.d_model)
-        self.linear_out = nn.Linear(
-            projector_audio_config.d_model, config.text_config.hidden_size
+        self.ln_post = RMSNorm(audio_config.d_model)
+        self.linear_out = ReplicatedLinear(
+            audio_config.d_model,
+            config.text_config.hidden_size,
+            bias=True,
+            quant_config=quant_config,
+            prefix=f"{prefix}.linear_out",
         )
 
     def forward(
@@ -380,100 +493,65 @@ class UltravoxTransformerProjector(nn.Module, ModuleUtilsMixin):
     ) -> torch.Tensor:
         audio_features = self._pad_and_stack(audio_features)
 
-        max_len_stacked = audio_features.shape[1]
-        attention_mask = torch.arange(max_len_stacked, device=audio_features.device)[
-            None, :
-        ].lt(audio_token_len[:, None])
-        extended_attention_mask = self.get_extended_attention_mask(
-            attention_mask, attention_mask.shape, audio_features.dtype
-        )
-
         hidden_states = self.ln_pre(audio_features)
-        hidden_states = self.linear_in(hidden_states)
+        hidden_states, _ = self.linear_in(hidden_states)
 
         positions = self.embed_positions(
             torch.arange(hidden_states.size(1), device=hidden_states.device)
         )
         hidden_states = hidden_states + positions
 
+        batch_size, seq_len, d_model = hidden_states.shape
+        attn_metadata = _build_chunk_attn_metadata(
+            self.layers[0].self_attn.attn,
+            audio_token_len,
+            seq_len,
+            d_model,
+            hidden_states.device,
+        )
+        hidden_states = hidden_states.reshape(batch_size * seq_len, d_model)
         for layer in self.layers:
-            hidden_states = layer(
-                hidden_states,
-                attention_mask=extended_attention_mask,
-            )
-            # BC version that allows for the old tupled output
-            if isinstance(hidden_states, tuple):
-                hidden_states = hidden_states[0]
+            hidden_states = layer(hidden_states, **attn_metadata)
+        hidden_states = hidden_states.reshape(batch_size, seq_len, d_model)
 
         hidden_states = self.ln_post(hidden_states)
-        hidden_states = self.linear_out(hidden_states)
+        hidden_states, _ = self.linear_out(hidden_states)
         return hidden_states
 
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        return _load_whisper_layer_weights(self, weights)
 
-class ModifiedWhisperEncoder(WhisperEncoder):
+
+class UltravoxWhisperEncoder(WhisperEncoder):
+    """Ultravox's `ModifiedWhisperEncoder` on top of vLLM's `WhisperEncoder`.
+
+    Like the original (a modified HF whisper encoder,
+    see https://github.com/huggingface/transformers/issues/25744), it accepts
+    mel inputs shorter than 30s (positions are sliced to the input length) and
+    confines attention to each chunk's valid frames based on `audio_lens`
+    (via segmented `cu_seqlens` instead of a dense key-padding mask), so its
+    outputs match the HF implementation for valid positions. The linears are
+    vLLM-native so the tower can be wrapped for LoRA.
     """
-    Encoder portion of OpenAI's Whisper model.
-
-    This implementation is a slightly modified version of HF Transformers'
-    Whisper Encoder, with only a few fixes:
-    1. base_model_prefix updated to allow for doing `.from_pretrained`
-       directly on the encoder
-    2. allow less than 30 second of audio padding to be passed in:
-        - relaxed ValueError check for `input_features` length to be less
-           than or equal to `expected_seq_length` instead of strictly equal
-        - embed_pos is now sliced to match the length of `inputs_embeds`
-
-    Original: https://github.com/huggingface/transformers/blob/main/src/transformers/models/whisper/modeling_whisper.py
-    See commentary: https://github.com/huggingface/transformers/issues/25744
-    """
-
-    base_model_prefix = "model.encoder"
-
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.config.is_decoder = False
 
     @property
-    def max_context_length(self):
-        return (
-            self.config.max_source_positions
-            * self.conv1.stride[0]
-            * self.conv2.stride[0]
-        )
+    def dtype(self) -> torch.dtype:
+        return self.conv1.weight.dtype
 
-    def get_attention_mask_by_audio_len(
-        self, audio_lens: torch.Tensor | None, hidden_states: torch.Tensor
-    ):
-        """
-        Create attention mask based on audio lengths to mask out padding tokens
-        For each sample in batch:
-        - Convert raw audio length to feature length after convolutions
-        - Create bool mask: True for valid positions and False for padding
-        - Convert to attention mask format expected by transformer layers
-        (1.0 for positions to attend to, large negative for positions to ignore)
-        This masking ensures consistent behavior between training and inference
-        by preventing the model from attending to padding tokens in both cases
-        """
-        if audio_lens is None:
-            return None
+    @property
+    def max_context_length(self) -> int:
+        return self.max_source_positions * self.total_stride
 
-        audio_feature_len = self._get_feat_extract_output_lengths(audio_lens)
-        max_seq_len = hidden_states.shape[1]
-        attention_mask = torch.arange(max_seq_len, device=hidden_states.device)[
-            None, :
-        ].lt(audio_feature_len.view(-1, 1))
-        attention_mask = self.get_extended_attention_mask(
-            attention_mask,
-            None,
-            dtype=hidden_states.dtype,
-        )
-        return attention_mask
+    def _get_feat_extract_output_lengths(
+        self, input_lengths: torch.Tensor
+    ) -> torch.Tensor:
+        return (input_lengths - 1) // 2 + 1
 
     def forward(
         self,
         input_features: torch.Tensor,
-        audio_lens: torch.Tensor | None = None,
-    ):
+        audio_lens: torch.Tensor,
+    ) -> torch.Tensor:
         expected_seq_length = self.max_context_length
         if input_features.shape[-1] > expected_seq_length:
             raise ValueError(
@@ -489,24 +567,26 @@ class ModifiedWhisperEncoder(WhisperEncoder):
         inputs_embeds = inputs_embeds.permute(0, 2, 1)
         embed_pos = self.embed_positions.weight[: inputs_embeds.size(-2)]
 
-        hidden_states = inputs_embeds + embed_pos
-        hidden_states = nn.functional.dropout(
-            hidden_states, p=self.dropout, training=self.training
+        hidden_states = (inputs_embeds + embed_pos).to(inputs_embeds.dtype)
+
+        batch_size, seq_len, d_model = hidden_states.shape
+        attn_metadata = _build_chunk_attn_metadata(
+            self.layers[0].self_attn.attn,
+            self._get_feat_extract_output_lengths(audio_lens),
+            seq_len,
+            d_model,
+            hidden_states.device,
         )
-
-        attention_mask = self.get_attention_mask_by_audio_len(audio_lens, hidden_states)
-
+        hidden_states = hidden_states.reshape(batch_size * seq_len, d_model)
         for encoder_layer in self.layers:
-            hidden_states = encoder_layer(
-                hidden_states,
-                attention_mask,
-            )
-            # BC version that allows for the old tupled output
-            if isinstance(hidden_states, tuple):
-                hidden_states = hidden_states[0]
+            hidden_states = encoder_layer(hidden_states, **attn_metadata)
+        hidden_states = hidden_states.reshape(batch_size, seq_len, d_model)
 
         hidden_states = self.layer_norm(hidden_states)
         return hidden_states
+
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        return _load_whisper_layer_weights(self, weights)
 
 
 @MULTIMODAL_REGISTRY.register_processor(
@@ -521,7 +601,13 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
     }
 
     hf_to_vllm_mapper = WeightsMapper(
-        orig_to_new_prefix={"audio_tower.model.encoder.": "audio_tower."}
+        orig_to_new_prefix={
+            "audio_tower.model.encoder.": "audio_tower.",
+            # A whisper checkpoint loaded via `audio_model_id` also carries
+            # decoder and LM-head weights the tower does not use.
+            "audio_tower.model.": None,
+            "audio_tower.proj_out.": None,
+        }
     )
 
     @classmethod
@@ -535,9 +621,19 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
         super().__init__()
         config: UltravoxConfig = vllm_config.model_config.hf_config
         multimodal_config = vllm_config.model_config.multimodal_config
+        quant_config = vllm_config.quant_config
+        lora_config = vllm_config.lora_config
         self.config = config
         self.multi_modal_config = multimodal_config
         assert self.multi_modal_config
+
+        # LoRA on the tower/connector requires per-item token counts that are
+        # predictable from the placeholder count alone (see
+        # `get_num_mm_encoder_tokens`), so pad every audio chunk's mel input
+        # to the tower's full context instead of the batch's max length.
+        self.pad_audio_to_max_context = bool(
+            lora_config is not None and lora_config.enable_tower_connector_lora
+        )
 
         self.configure_mm_token_handling(
             self.config.vocab_size,
@@ -567,11 +663,21 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
             )
 
         with self._mark_tower_model(vllm_config, "audio"):
-            self.audio_tower = ModifiedWhisperEncoder(config.audio_config)
+            self.audio_tower = UltravoxWhisperEncoder(
+                vllm_config=vllm_config.with_hf_config(config.audio_config),
+                prefix=maybe_prefix(prefix, "audio_tower"),
+            )
             if config.num_projector_layers > 0:
-                self.multi_modal_projector = UltravoxTransformerProjector(config)
+                self.multi_modal_projector = UltravoxTransformerProjector(
+                    vllm_config,
+                    prefix=maybe_prefix(prefix, "multi_modal_projector"),
+                )
             else:
-                self.multi_modal_projector = UltravoxFeedForwardProjector(config)
+                self.multi_modal_projector = UltravoxFeedForwardProjector(
+                    config,
+                    quant_config=quant_config,
+                    prefix=maybe_prefix(prefix, "multi_modal_projector"),
+                )
 
         with self._mark_language_model(vllm_config):
             self.language_model = init_vllm_registered_model(
@@ -594,6 +700,32 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
             tower_model="audio_tower.",
         )
 
+    def _get_max_tokens_per_chunk(self) -> int:
+        # Audio is chunked at the tower's full context (30s -> 1500 encoder
+        # frames); the projector stacks `stack_factor` frames per LM token, so
+        # a full chunk yields ceil(max_source_positions / stack_factor) tokens
+        # and only an audio's last chunk can yield fewer.
+        return math.ceil(
+            self.config.audio_config.max_source_positions / self.config.stack_factor
+        )
+
+    def get_num_mm_encoder_tokens(self, num_audio_tokens: int) -> int:
+        # With `pad_audio_to_max_context` (enforced when tower/connector LoRA
+        # is enabled), the tower's LoRA-wrapped linears always run on
+        # `max_source_positions` conv-downsampled tokens per chunk, regardless
+        # of the valid frame count.
+        num_chunks = math.ceil(num_audio_tokens / self._get_max_tokens_per_chunk())
+        return num_chunks * self.config.audio_config.max_source_positions
+
+    def get_num_mm_connector_tokens(self, num_encoder_tokens: int) -> int:
+        # The connector runs on the frame-stacked tower output. Stacking pads
+        # each chunk to a multiple of `stack_factor`, so this is
+        # ceil(max_source_positions / stack_factor) tokens per chunk (188 for
+        # whisper's 1500), not `num_encoder_tokens // stack_factor` (187).
+        max_source_positions = self.config.audio_config.max_source_positions
+        num_chunks = num_encoder_tokens // max_source_positions
+        return num_chunks * self._get_max_tokens_per_chunk()
+
     def _audio_features_to_embeddings(
         self,
         input_features: torch.Tensor,
@@ -604,9 +736,19 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
         batch_size = audio_features.size(0)
         audio_embeddings = []
 
-        # Process audio features in batches to keep memory usage predictable
-        for start in range(0, batch_size, _MAX_ENCODER_BATCH_SIZE):
-            end = min(start + _MAX_ENCODER_BATCH_SIZE, batch_size)
+        # Process audio features in batches to keep memory usage predictable.
+        # With tower/connector LoRA, the punica kernels always map the first
+        # `x.size(0)` entries of the token-LoRA mapping (set once for the whole
+        # scheduled encoder batch) to the rows of each linear's input, so
+        # splitting the batch would apply the wrong LoRA ids to every chunk
+        # after the first sub-batch; process all chunks in a single pass.
+        encoder_batch_size = (
+            max(batch_size, 1)
+            if self.pad_audio_to_max_context
+            else _MAX_ENCODER_BATCH_SIZE
+        )
+        for start in range(0, batch_size, encoder_batch_size):
+            end = min(start + encoder_batch_size, batch_size)
             # Process through audio tower
             batch_features = self.audio_tower(
                 audio_features[start:end], audio_lens[start:end]
@@ -659,6 +801,17 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
         # Pad and concatenate audio features
         # [[B1, 80, M1], [B2, 80, M2]] -> [B1+B2, 80, max(M1, M2)]
         audio_features = pad_and_concat_to_dim3(audio_input["data"])
+
+        if self.pad_audio_to_max_context:
+            # Pad every chunk to the tower's full context so the number of
+            # tokens processed by the tower/connector per chunk is constant,
+            # keeping the LoRA token mappings computed by
+            # `get_num_mm_encoder_tokens`/`get_num_mm_connector_tokens` exact.
+            # Attention to the extra padding is masked via `audio_lens`.
+            # Over-long inputs are not trimmed here; the tower raises on them.
+            pad_len = self.audio_tower.max_context_length - audio_features.shape[-1]
+            if pad_len > 0:
+                audio_features = F.pad(audio_features, (0, pad_len))
 
         audio_lens = audio_input["lens"]
         audio_token_len = audio_input["token_len"]
@@ -753,7 +906,7 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
         return self.language_model.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self, ignore_unexpected_prefixes=["audio_tower."])
+        loader = AutoWeightsLoader(self)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
