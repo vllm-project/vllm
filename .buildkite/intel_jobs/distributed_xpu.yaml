@@ -3,10 +3,10 @@ depends_on:
   - image-build-xpu
 steps:
 - label: Distributed Comm Ops
-  timeout_in_minutes: 25
-  working_dir: .
-  num_devices: 2
   device: intel_gpu
+  timeout_in_minutes: 25
+  num_devices: 2
+  working_dir: .
   no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
@@ -32,10 +32,10 @@ steps:
     pytest -v -s distributed/test_shm_buffer.py || true &&
     pytest -v -s distributed/test_shm_storage.py || true'
 - label: Distributed DP Tests (2 GPUs)
-  timeout_in_minutes: 35
-  working_dir: .
-  num_devices: 2
   device: intel_gpu
+  timeout_in_minutes: 35
+  num_devices: 2
+  working_dir: .
   no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
@@ -69,10 +69,10 @@ steps:
     TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/distributed/test_external_lb_dp.py || true &&
     DP_SIZE=2 pytest -v -s entrypoints/openai/test_multi_api_servers.py || true'
 - label: Distributed Compile + RPC Tests (2 GPUs)
-  timeout_in_minutes: 65
-  working_dir: .
-  num_devices: 2
   device: intel_gpu
+  timeout_in_minutes: 65
+  num_devices: 2
+  working_dir: .
   no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
@@ -106,10 +106,10 @@ steps:
     pytest -v -s ./compile/fullgraph/test_basic_correctness.py || true &&
     pytest -v -s ./compile/test_wrapper.py || true'
 - label: Distributed Torchrun + Shutdown Tests (2 GPUs)
-  timeout_in_minutes: 30
-  working_dir: .
-  num_devices: 2
   device: intel_gpu
+  timeout_in_minutes: 30
+  num_devices: 2
+  working_dir: .
   no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
@@ -144,10 +144,10 @@ steps:
     CUDA_VISIBLE_DEVICES=0,1 pytest -v -s v1/shutdown || true &&
     pytest -v -s v1/worker/test_worker_memory_snapshot.py || true'
 - label: Distributed Torchrun + Examples (4 GPUs)
-  timeout_in_minutes: 30
-  working_dir: .
-  num_devices: 4
   device: intel_gpu
+  timeout_in_minutes: 30
+  num_devices: 4
+  working_dir: .
   no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
@@ -184,10 +184,10 @@ steps:
     DP_SIZE=4 ENABLE_EP=1 torchrun --nproc-per-node=4 tests/distributed/test_torchrun_example_moe.py || true &&
     TP_SIZE=2 DP_SIZE=2 ENABLE_EP=1 torchrun --nproc-per-node=4 tests/distributed/test_torchrun_example_moe.py || true'
 - label: Distributed DP Tests (4 GPUs)
-  timeout_in_minutes: 45
-  working_dir: .
-  num_devices: 4
   device: intel_gpu
+  timeout_in_minutes: 45
+  num_devices: 4
+  working_dir: .
   no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
@@ -223,10 +223,10 @@ steps:
     pytest -v -s v1/engine/test_engine_core_client.py::test_kv_cache_events_dp || true &&
     pytest -v -s distributed/test_utils.py --deselect="tests/distributed/test_utils.py::test_cuda_device_count_stateless" || true'
 - label: Distributed Compile + Comm (4 GPUs)
-  timeout_in_minutes: 70
-  working_dir: .
-  num_devices: 4
   device: intel_gpu
+  timeout_in_minutes: 70
+  num_devices: 4
+  working_dir: .
   no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
@@ -261,10 +261,10 @@ steps:
     pytest -v -s distributed/test_multiproc_executor.py::test_multiproc_executor_multi_node || true'
 - label: Distributed Tests (4xA100)
   device: intel_gpu
-  optional: true
   num_devices: 4
-  no_plugin: true
+  optional: true
   working_dir: .
+  no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
     REPO: vllm-ci-test-repo
@@ -288,11 +288,11 @@ steps:
     TARGET_TEST_SUITE=A100 pytest basic_correctness/ -v -s -m distributed(num_gpus=2) || true &&
     pytest -v -s -x lora/test_mixtral.py || true'
 - label: Distributed Tests (2xH100-2xMI300)
-  timeout_in_minutes: 30
   device: intel_gpu
+  timeout_in_minutes: 30
+  num_devices: 2
   optional: true
   working_dir: .
-  num_devices: 2
   no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
@@ -317,9 +317,9 @@ steps:
     pytest -v -s tests/distributed/test_packed_tensor.py || true'
 - label: Distributed Tests (2xB200)
   device: intel_gpu
+  num_devices: 2
   optional: true
   working_dir: .
-  num_devices: 2
   no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
@@ -341,10 +341,10 @@ steps:
     pytest -v -s tests/v1/distributed/test_dbo.py || true &&
     pytest -v -s tests/distributed/test_mnnvl_alltoall.py || true'
 - label: Pipeline + Context Parallelism (4 GPUs)
-  timeout_in_minutes: 55
-  working_dir: .
-  num_devices: 4
   device: intel_gpu
+  timeout_in_minutes: 55
+  num_devices: 4
+  working_dir: .
   no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
@@ -369,10 +369,10 @@ steps:
     pytest -v -s distributed/test_pp_cudagraph.py || true &&
     pytest -v -s distributed/test_pipeline_parallel.py || true'
 - label: RayExecutorV2 (4 GPUs)
-  timeout_in_minutes: 45
-  working_dir: .
-  num_devices: 4
   device: intel_gpu
+  timeout_in_minutes: 45
+  num_devices: 4
+  working_dir: .
   no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
