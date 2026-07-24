@@ -6,8 +6,11 @@ import math
 import torch
 
 from vllm.config import CompilationMode, get_current_vllm_config
+from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
+from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
 from vllm.platforms import current_platform
 
+from .BlockScaledMMLinearKernel import Fp8BlockScaledMMLinearKernel
 from .ScaledMMLinearKernel import (
     FP8ScaledMMLinearKernel,
     FP8ScaledMMLinearLayerConfig,
@@ -244,3 +247,92 @@ class ChannelWiseTorchFP8ScaledMMLinearKernel(TorchFP8ScaledMMLinearKernel):
         if bias is not None:
             output = output + bias
         return output.to(out_dtype).view(*output_shape)
+
+
+class BlockWiseTorchFP8ScaledMMLinearKernel(Fp8BlockScaledMMLinearKernel):
+    """FP8 block-scaled linear kernel using ``torch._scaled_mm``.
+
+    Implements the DeepSeek-style block-scaled path of ``torch._scaled_mm``
+    (v1), which dispatches on the shapes of the scale tensors. For
+    ``A = [M, K]`` and ``B = [K, N]`` (both fp8) the op's block path
+    requires, with float32 scales:
+      * 1x128 activation: ``scale_a = [M, ceil(K / 128)]``
+      * 128x128 weight:   ``scale_b = [ceil(K / 128), ceil(N / 128)]``
+
+    The op supports this path on CUDA (cuBLASLt) and XPU (oneDNN). The
+    logical scale shapes are identical across both; only the physical scale
+    layout differs: CUDA requires cuBLAS-specific strides (outer-dim-major
+    for 1x128), while XPU accepts either row- or column-major and normalizes
+    internally. We therefore request column-major activation scales on CUDA
+    (matching the op's requirement) and default row-major on XPU.
+    """
+
+    def __init__(self, config: FP8ScaledMMLinearLayerConfig) -> None:
+        super().__init__(config)
+        act_scale_descriptor = config.activation_quant_key.scale
+        # CUDA's block path requires outer-dim-major (column-major)
+        # activation scales; XPU accepts either. Weight scales are handled
+        # via a transpose in apply_block_scaled_mm.
+        self.quant_fp8 = QuantFP8(
+            static=act_scale_descriptor.static,
+            group_shape=act_scale_descriptor.group_shape,
+            num_token_padding=self.get_output_padding(),
+            use_ue8m0=False,
+            column_major_scales=current_platform.is_cuda_alike(),
+        )
+
+    @classmethod
+    def is_supported(
+        cls, compute_capability: int | None = None
+    ) -> tuple[bool, str | None]:
+        # torch._scaled_mm implements the fp8 128-block path on CUDA
+        # (cuBLASLt) and XPU (oneDNN).
+        if not (current_platform.is_cuda_alike() or current_platform.is_xpu()):
+            return False, "requires CUDA, ROCm or XPU."
+        return True, None
+
+    @classmethod
+    def can_implement(
+        cls, config: FP8ScaledMMLinearLayerConfig
+    ) -> tuple[bool, str | None]:
+        can_implement_base, reason = super().can_implement(config)
+        if not can_implement_base:
+            return can_implement_base, reason
+
+        # torch._scaled_mm's DeepSeek block path is the 1x128 activation /
+        # 128x128 weight pair with float32 scales.
+        act_group_shape = config.activation_quant_key.scale.group_shape
+        if act_group_shape != GroupShape(1, 128):
+            return (
+                False,
+                "requires 1x128 (per-token-group) activation quantization.",
+            )
+        weight_group_shape = config.weight_quant_key.scale.group_shape
+        if weight_group_shape != GroupShape(128, 128):
+            return (
+                False,
+                "requires 128x128 block weight quantization.",
+            )
+        return True, None
+
+    def apply_block_scaled_mm(
+        self,
+        A: torch.Tensor,
+        B: torch.Tensor,
+        As: torch.Tensor,
+        Bs: torch.Tensor,
+    ) -> torch.Tensor:
+        # B is [N, K] from the checkpoint; B.t() is the [K, N] operand.
+        # Bs is [ceil(N/128), ceil(K/128)] from the checkpoint; Bs.t() gives
+        # the [ceil(K/128), ceil(N/128)] scale the op expects for B.t().
+        output = torch._scaled_mm(
+            A,
+            B.t(),
+            scale_a=As,
+            scale_b=Bs.t(),
+            out_dtype=self.config.out_dtype,
+        )
+        if type(output) is tuple and len(output) == 2:
+            output = output[0]
+        return output
+
