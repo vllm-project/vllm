@@ -18,6 +18,7 @@ from vllm.transformers_utils.repo_utils import (
 )
 from vllm.utils.import_utils import resolve_obj_by_qualname
 
+from .hf import CachedHfTokenizer
 from .protocol import TokenizerLike
 
 if TYPE_CHECKING:
@@ -232,6 +233,12 @@ def get_tokenizer(
         tokenizer_cls_ = TokenizerRegistry.load_tokenizer_cls(tokenizer_mode)
     else:
         tokenizer_cls_ = tokenizer_cls
+
+    if config is not None and tokenizer_cls_ is CachedHfTokenizer:
+        # AutoTokenizer otherwise reloads config.json internally. Reuse the
+        # config that get_config just loaded successfully so a concurrent Hub
+        # cache refresh cannot invalidate the file between the two reads.
+        kwargs.setdefault("config", config)
 
     tokenizer = tokenizer_cls_.from_pretrained(tokenizer_name, *args, **kwargs)
     if model_type in _MODEL_TYPES_WITH_INCORRECT_TOKENIZER_CLASS:

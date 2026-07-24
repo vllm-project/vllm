@@ -90,6 +90,10 @@ ModelDType = Literal["auto", "half", "float16", "bfloat16", "float", "float32"]
 LogprobsMode = Literal[
     "raw_logits", "raw_logprobs", "processed_logits", "processed_logprobs"
 ]
+PROCESSED_LOGPROBS_MODES: tuple[LogprobsMode, ...] = (
+    "processed_logits",
+    "processed_logprobs",
+)
 HfOverrides = dict[str, Any] | Callable[[PretrainedConfig], PretrainedConfig]
 ModelImpl = Literal["auto", "vllm", "transformers", "terratorch"]
 LayerBlockType = Literal["attention", "linear_attention", "mamba"]
@@ -575,9 +579,9 @@ class ModelConfig:
             self.hf_text_config, "attention_chunk_size", None
         )
         self.encoder_config = self._get_encoder_config()
-        self.hf_image_processor_config = get_hf_image_processor_config(
-            self.model, hf_token=self.hf_token, revision=self.revision
-        )
+        # Image-processor metadata is only consumed by multimodal models.
+        # Probing it for text-only models causes avoidable Hub requests.
+        self.hf_image_processor_config: dict[str, Any] = {}
 
         architectures = self.architectures
         registry = self.registry
@@ -699,6 +703,9 @@ class ModelConfig:
 
         # Init multimodal config if needed
         if self._model_info.supports_multimodal:
+            self.hf_image_processor_config = get_hf_image_processor_config(
+                self.model, hf_token=self.hf_token, revision=self.revision
+            )
             if (
                 mm_encoder_tp_mode == "data"
                 and not self._model_info.supports_multimodal_encoder_tp_data
@@ -1691,6 +1698,10 @@ class ModelConfig:
     @property
     def supports_mamba_prefix_caching(self) -> bool:
         return self._model_info.supports_mamba_prefix_caching
+
+    @property
+    def supports_replayssm(self) -> bool:
+        return self._model_info.supports_replayssm
 
     @property
     def use_mla(self) -> bool:
