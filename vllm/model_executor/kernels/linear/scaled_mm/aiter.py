@@ -28,6 +28,34 @@ from .ScaledMMLinearKernel import (
 logger = init_logger(__name__)
 
 
+# Workaround for a non-determinism bug in `aiter.gemm_a8w8_blockscale_ck`
+# (and `aiter.gemm_a8w8_blockscale_cktile`) when the CK split-K reduction
+# runs with KBatch > 1. The reduction accumulates partial K products through
+# atomic floating-point adds, which is not associative; back-to-back calls
+# with bit-identical inputs can differ by up to 4 LSBs in bf16. On
+# DeepSeek-V3.2 (TP=4, MI355X) this drifts top-1 logits enough to cause
+# token loops at `--max-num-seqs >= 2`, dropping `lm_eval gsm8k` from
+# ~0.95 to ~0.12.
+#
+# The CSV-driven dispatcher inside AITER selects splitK >= 2 for several
+# DSV3.2 dense GEMM shapes (notably `o_proj` at M=1..16 and `q_a_proj` at
+# M=16..128) starting with the `aiter#3024` ("[Silo] Add configs missing
+# from bulk merge #3004", merged 2026-05-05) tuning re-roll, which
+# replaced previously deterministic splitK=0 entries with faster but
+# non-deterministic splitK={2,3} ones.
+#
+# Until the underlying CK reduction is made deterministic upstream, we
+# bypass the CSV dispatcher in `AiterFp8BlockScaledMMKernel` and call the
+# CK kernel directly with splitK=0. This also bypasses the CK-Tile path,
+# which uses the same atomic-FP-add reduction and is therefore also
+# affected; sending all traffic through CK at splitK=0 keeps the workaround
+# minimal and uniformly deterministic. Cost is ~10-60% on a handful of
+# small-M decode shapes that wanted splitK>0; correctness is restored
+# bit-exactly. The aiter `gemm_a8w8_blockscale_ck` kernel is hardcoded for
+# 128x128 weight blocks, so this kernel restricts itself to that shape via
+# `can_implement` and asserts it in `apply_block_scaled_mm`.
+
+
 class AiterInt8ScaledMMLinearKernel(CutlassInt8ScaledMMLinearKernel):
     @classmethod
     def is_supported(
@@ -396,6 +424,16 @@ class AiterFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
                 "Supports only dynamic per token group activation "
                 "quantization with group_shape=(1,128).",
             )
+
+        weight_group_shape = config.weight_quant_key.scale.group_shape
+        if weight_group_shape != GroupShape(128, 128):
+            return (
+                False,
+                "Supports only block-wise weight quantization with "
+                "group_shape=(128,128); the underlying "
+                "`aiter.gemm_a8w8_blockscale_ck` kernel is hardcoded for "
+                "128x128 weight blocks.",
+            )
         return True, None
 
     def apply_block_scaled_mm(
@@ -421,11 +459,25 @@ class AiterFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
                 Bs = Bs.to(torch.float32)
 
         out_dtype = self.config.out_dtype
-        if self.use_triton:
-            gemm_a8w8_blockscale_op = rocm_aiter_ops.triton_gemm_a8w8_blockscale
-        else:
-            gemm_a8w8_blockscale_op = rocm_aiter_ops.gemm_a8w8_blockscale
 
-        return gemm_a8w8_blockscale_op(
-            A, B, As, Bs, list(self.weight_group_shape), output_dtype=out_dtype
+        if self.use_triton:
+            return rocm_aiter_ops.triton_gemm_a8w8_blockscale(
+                A, B, As, Bs, list(self.weight_group_shape), output_dtype=out_dtype
+            )
+
+        # Bypass the CSV-driven splitK selection in
+        # `aiter.gemm_a8w8_blockscale` (which routes to either CK or
+        # CK-Tile, both of which are non-deterministic at splitK >= 2)
+        # and call the CK kernel directly with splitK=0. See module-level
+        # comment for rationale.
+        assert self.weight_group_shape == GroupShape(128, 128), (
+            "AiterFp8BlockScaledMMKernel requires weight group_shape="
+            "(128,128); `gemm_a8w8_blockscale_ck` is hardcoded for that "
+            "block size."
         )
+        import aiter
+
+        M = A.shape[0]
+        N = B.shape[0]
+        Y = torch.empty(M, N, dtype=out_dtype, device=A.device)
+        return aiter.gemm_a8w8_blockscale_ck(A, B, As, Bs, Y, splitK=0)
