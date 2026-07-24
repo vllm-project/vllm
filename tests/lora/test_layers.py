@@ -754,6 +754,98 @@ def test_linear_parallel(
 
 
 @torch.inference_mode()
+@pytest.mark.parametrize("device", DEVICES)
+def test_fully_sharded_shrink_and_expand_ignore_slice_mask(
+    default_vllm_config, dist_init, device
+) -> None:
+    """Fully-sharded (S-LoRA) shrink and expand must both get
+    slice_active_mask=None: the mask differs across TP ranks and the collective
+    couples them, so masking either drops LoRA output. Uses a packed 2-slice
+    layer with a partial adapter so _kernel_slice_mask is a real tensor
+    (n_slices==1 would leave it None and make the test vacuous)."""
+    if current_platform.is_cuda_alike() or current_platform.is_xpu():
+        torch.accelerator.set_device_index(device)
+    torch.set_default_device(device)
+
+    max_loras = 8
+    max_rank = 8
+    lora_config = LoRAConfig(
+        max_loras=max_loras,
+        max_lora_rank=max_rank,
+        fully_sharded_loras=True,
+        lora_dtype=torch.float16,
+    )
+    punica_wrapper = get_punica_wrapper(8192, 256, device, lora_config=lora_config)
+
+    linear = MergedColumnParallelLinear(
+        4096, [4096, 4096], bias=False, params_dtype=torch.float16, prefix="l"
+    )
+    linear.weight.data = torch.rand_like(linear.weight.data)
+    lora_linear = MergedColumnParallelLinearWithShardedLoRA(linear)
+    lora_linear.create_lora_weights(max_loras, lora_config)
+    lora_linear.set_mapping(punica_wrapper)
+    assert lora_linear.n_slices == 2
+
+    # Partial adapter: slice 0 non-zero, slice 1 all-zero. This yields a partial
+    # active pattern so _recompute_mask_can_skip resolves _kernel_slice_mask to
+    # a real (non-None) tensor — the case the fix must still pass None on.
+    in_dim = lora_linear.lora_a_stacked[0].shape[-1]
+    out_dim = lora_linear.lora_b_stacked[0].shape[2]
+    a0 = torch.rand(max_rank, in_dim, dtype=torch.float16, device=device)
+    b0 = torch.rand(out_dim, max_rank, dtype=torch.float16, device=device)
+    a1 = torch.zeros(max_rank, in_dim, dtype=torch.float16, device=device)
+    b1 = torch.zeros(out_dim, max_rank, dtype=torch.float16, device=device)
+    lora_linear.set_lora(0, lora_a=[a0, a1], lora_b=[b0, b1])
+    assert lora_linear._kernel_slice_mask is not None, (
+        "test setup failed to produce a partial (non-None) slice mask"
+    )
+
+    inputs, index_mapping, prompt_mapping = create_random_inputs(
+        active_lora_ids=[1],
+        num_inputs=8,
+        input_size=(1, 4096),
+        input_range=(0, 1),
+        input_type=torch.float16,
+        device=device,
+    )
+    # Adapter lives in slot 0; prompts reference lora id 1, so map id 1 -> slot 0.
+    punica_wrapper.update_metadata(
+        LoRAMapping(index_mapping, prompt_mapping, is_prefill=True),
+        [1] + [None] * (max_loras - 1),
+        max_loras,
+        512,
+    )
+
+    seen: dict[str, list] = {"shrink": [], "expand": []}
+    real_shrink = punica_wrapper.add_shrink
+    real_expand = punica_wrapper.add_expand
+
+    def spy_shrink(*args, **kwargs):
+        seen["shrink"].append(kwargs.get("slice_active_mask"))
+        return real_shrink(*args, **kwargs)
+
+    def spy_expand(*args, **kwargs):
+        seen["expand"].append(kwargs.get("slice_active_mask"))
+        return real_expand(*args, **kwargs)
+
+    with (
+        patch.object(punica_wrapper, "add_shrink", side_effect=spy_shrink),
+        patch.object(punica_wrapper, "add_expand", side_effect=spy_expand),
+    ):
+        lora_linear(torch.cat(inputs))
+
+    assert seen["shrink"] and seen["expand"], "shrink/expand were not called"
+    assert all(m is None for m in seen["shrink"]), (
+        "fully-sharded shrink must receive slice_active_mask=None; a per-rank "
+        "mask drops A contributions other ranks need after the collective"
+    )
+    assert all(m is None for m in seen["expand"]), (
+        "fully-sharded expand must receive slice_active_mask=None; a per-rank "
+        "mask drops LoRA output across TP ranks"
+    )
+
+
+@torch.inference_mode()
 @pytest.mark.parametrize("num_loras", [1, 2, 4])
 @pytest.mark.parametrize("repeats", [1, 2, 3])
 @pytest.mark.parametrize("fully_shard", [True, False])
