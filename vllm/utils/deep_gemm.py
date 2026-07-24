@@ -95,8 +95,13 @@ def is_deep_gemm_supported() -> bool:
     """Return `True` if DeepGEMM is supported on the current platform.
     Currently, only Hopper and Blackwell GPUs are supported.
     """
-    is_supported_arch = current_platform.support_deep_gemm()
-    return envs.VLLM_USE_DEEP_GEMM and has_deep_gemm() and is_supported_arch
+    if not envs.VLLM_USE_DEEP_GEMM:
+        return False
+    # Check platform support before probing the optional package, so
+    # unsupported platforms do not emit broken-install warnings.
+    if not current_platform.support_deep_gemm():
+        return False
+    return has_deep_gemm()
 
 
 @functools.cache

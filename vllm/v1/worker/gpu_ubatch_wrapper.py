@@ -23,8 +23,12 @@ from vllm.logger import init_logger
 from vllm.model_executor.offloader.base import get_offloader
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
-from vllm.utils.deep_gemm import set_num_sms as deep_gemm_set_num_sms
-from vllm.utils.import_utils import has_deep_gemm
+from vllm.utils.deep_gemm import (
+    is_deep_gemm_supported,
+)
+from vllm.utils.deep_gemm import (
+    set_num_sms as deep_gemm_set_num_sms,
+)
 from vllm.utils.platform_utils import num_compute_units
 from vllm.v1.worker.ubatching import UBatchContext, make_ubatch_contexts
 
@@ -185,7 +189,7 @@ class UBatchWrapper:
 
         # TODO(lucas): support other kernels besides DeepGEMM
         set_compute_sms = lambda sms: None
-        if has_deep_gemm() and comm_sms > 0:
+        if is_deep_gemm_supported() and comm_sms > 0:
             set_compute_sms = lambda sms: deep_gemm_set_num_sms(sms)
 
         return SMControlContextManager(
