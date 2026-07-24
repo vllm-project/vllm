@@ -5,14 +5,31 @@ from __future__ import annotations
 
 import json
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum, auto
 from typing import TYPE_CHECKING, NamedTuple
 
 from openai_harmony import HarmonyError, Message, Role
+from xgrammar import StructuralTag
+from xgrammar.openai_tool_call_schema import BuiltinToolParam, FunctionToolParam
+from xgrammar.structural_tag import (
+    AnyTextFormat,
+    ConstStringFormat,
+    Format,
+    GrammarFormat,
+    JSONSchemaFormat,
+    OptionalFormat,
+    OrFormat,
+    RegexFormat,
+    SequenceFormat,
+    TagFormat,
+    TriggeredTagsFormat,
+)
 
 from vllm.entrypoints.chat_utils import make_tool_call_id
-from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionRequest,
+)
 from vllm.entrypoints.openai.engine.protocol import (
     DeltaFunctionCall,
     DeltaMessage,
@@ -28,7 +45,13 @@ from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.logger import init_logger
 from vllm.parser.abstract_parser import DelegatingParser
 from vllm.reasoning.gptoss_reasoning_parser import GptOssReasoningParser
+from vllm.sampling_params import StructuredOutputsParams
 from vllm.tool_parsers.gptoss_tool_parser import GptOssToolParser
+from vllm.tool_parsers.structural_tag_registry import (
+    SimplifiedToolChoice,
+    get_function_parameters,
+    register_vllm_structural_tag,
+)
 
 if TYPE_CHECKING:
     from openai_harmony import Message, StreamableParser
@@ -346,6 +369,12 @@ class HarmonyParser(DelegatingParser):
             reasoning_token_count=reasoning_token_count,
         )
 
+    def adjust_request(
+        self, request: ChatCompletionRequest | ResponsesRequest
+    ) -> ChatCompletionRequest | ResponsesRequest:
+        request = _adjust_output_format(request)
+        return super().adjust_request(request)
+
     @staticmethod
     def _normalize_recipient(recipient: str | None) -> str | None:
         """Remove constrained formats misparsed into recipients by older Harmony."""
@@ -356,3 +385,201 @@ class HarmonyParser(DelegatingParser):
         if constrain_index == -1:
             return recipient
         return recipient[:constrain_index].rstrip() or None
+
+
+# Harmomy's stop tokens are <|end|>, <|call|>, <|return|>, <|endoftext|>
+# <|return|> is represented as "" since it's the default stop token, which xgrammar
+# disallows under constraints, leading to bad or infinite generation.
+# StreamableParser doesn't consider <|endoftext|> as a message end, so it's excluded
+_END_TAG = ["<|end|>", "<|call|>", ""]
+_FINAL_BEGIN = "<|channel|>final{constrain}<|message|>"
+_TOOL_CALL_CHANNELS = [
+    "<|channel|>commentary",
+    "<|channel|>analysis",
+    "<|channel|>final",
+]
+_FUNCTION_CALL_BEGINS = [
+    "to=functions.{name} {channel} json<|message|>",
+    "to=functions.{name} {channel} <|constrain|>json<|message|>",
+    "{channel} to=functions.{name} json<|message|>",
+    "{channel} to=functions.{name} <|constrain|>json<|message|>",
+]
+_JSON_CONTENT = JSONSchemaFormat(json_schema={"type": "object"})
+_ANY_CONTENT = AnyTextFormat()
+
+
+def _assemble_tag(
+    allow_analysis: bool, allow_commentary: bool, content: Format
+) -> StructuralTag:
+    tags = []
+    if allow_analysis:
+        analysis_tag = OptionalFormat(
+            content=SequenceFormat(
+                elements=[
+                    TagFormat(
+                        begin="<|channel|>analysis<|message|>",
+                        content=_ANY_CONTENT,
+                        end="<|end|>",
+                    ),
+                    ConstStringFormat(value="<|start|>assistant"),
+                ]
+            )
+        )
+        tags.append(analysis_tag)
+
+    if allow_commentary:
+        commentary_tag = OptionalFormat(
+            content=SequenceFormat(
+                elements=[
+                    TagFormat(
+                        begin="<|channel|>commentary<|message|>",
+                        content=_ANY_CONTENT,
+                        end="<|end|>",
+                    ),
+                    ConstStringFormat(value="<|start|>assistant"),
+                ]
+            )
+        )
+        tags.append(commentary_tag)
+
+    tags.append(content)
+
+    return StructuralTag(format=SequenceFormat(elements=tags))
+
+
+@register_vllm_structural_tag("harmony")
+def get_harmony_structural_tag(
+    tools: list[FunctionToolParam],
+    builtin_tools: list[BuiltinToolParam],
+    tool_choice: SimplifiedToolChoice,
+    reasoning: bool,
+) -> StructuralTag:
+    # reasoning always enabled for Harmony
+    del reasoning
+
+    if builtin_tools:
+        # Fallback for built-in tools
+        tags = [
+            TagFormat(
+                begin="to=",
+                content=AnyTextFormat(excludes=["<|start|>"]),
+                end=_END_TAG,
+            )
+        ]
+        tags.extend(
+            TagFormat(
+                begin=channel + " to=",
+                content=AnyTextFormat(excludes=["<|start|>", "<|channel|>"]),
+                end=_END_TAG,
+            )
+            for channel in _TOOL_CALL_CHANNELS
+        )
+    else:
+        tags = [
+            TagFormat(
+                begin=pattern.format(name=tool.function.name, channel=channel),
+                content=JSONSchemaFormat(
+                    json_schema=get_function_parameters(tool.function)
+                ),
+                end=_END_TAG,
+            )
+            for tool in tools
+            for pattern in _FUNCTION_CALL_BEGINS
+            for channel in _TOOL_CALL_CHANNELS
+        ]
+
+    if tool_choice == "auto":
+        tags.append(
+            TagFormat(
+                begin=_FINAL_BEGIN.format(constrain=" <|constrain|>json"),
+                content=_ANY_CONTENT,
+                end=_END_TAG,
+            )
+        )
+        tags.append(
+            TagFormat(
+                begin=_FINAL_BEGIN.format(constrain=""),
+                content=_ANY_CONTENT,
+                end=_END_TAG,
+            )
+        )
+
+    return _assemble_tag(
+        allow_analysis=True, allow_commentary=True, content=OrFormat(elements=tags)
+    )
+
+
+def _params_to_final_content(params: StructuredOutputsParams) -> Format | None:
+    """Map StructuredOutputsParams in a XGrammar Format."""
+    if params.json_object:
+        return _JSON_CONTENT
+    if params.json is not None:
+        schema = params.json
+        if isinstance(schema, str):
+            schema = json.loads(schema)
+        return JSONSchemaFormat(json_schema=schema)
+    if params.regex is not None:
+        return RegexFormat(pattern=params.regex)
+    if params.choice is not None:
+        return OrFormat(
+            elements=[ConstStringFormat(value=choice) for choice in params.choice]
+        )
+    if params.grammar is not None:
+        return GrammarFormat(grammar=params.grammar)
+    if params.structural_tag is not None:
+        s_tag = json.loads(params.structural_tag)
+        if "structures" in s_tag:
+            # LegacyStructuralTagResponseFormat
+            return TriggeredTagsFormat(
+                triggers=s_tag["triggers"],
+                tags=[
+                    TagFormat(
+                        begin=structure["begin"],
+                        content=JSONSchemaFormat(json_schema=structure["schema"]),
+                        end=structure["end"],
+                    )
+                    for structure in s_tag["structures"]
+                ],
+            )
+        # StructuralTagResponseFormat
+        return StructuralTag.model_validate(s_tag).format
+    return None
+
+
+def _adjust_output_format(
+    request: ChatCompletionRequest | ResponsesRequest,
+) -> ChatCompletionRequest | ResponsesRequest:
+    """Canonicalize request constraints into a reasoning-aware StructuralTag."""
+    params = request.extract_structured_outputs()
+    if params is None:
+        return request
+
+    final_content = _params_to_final_content(params)
+    if final_content is None:
+        return request
+
+    if isinstance(final_content, JSONSchemaFormat):
+        begin = _FINAL_BEGIN.format(constrain=" <|constrain|>json")
+    else:
+        begin = _FINAL_BEGIN.format(constrain="")
+
+    structural_tag = _assemble_tag(
+        allow_analysis=True,
+        allow_commentary=False,
+        content=TagFormat(begin=begin, content=final_content, end=_END_TAG),
+    )
+
+    request.structured_outputs = replace(
+        params,
+        json=None,
+        regex=None,
+        choice=None,
+        grammar=None,
+        json_object=None,
+        structural_tag=json.dumps(structural_tag.model_dump()),
+    )
+    if isinstance(request, ResponsesRequest):
+        request.text = None
+    else:
+        request.response_format = None
+    return request
