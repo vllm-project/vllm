@@ -292,7 +292,13 @@ def _construct_message_from_response_item(
             "reasoning": reasoning,
         }
     elif isinstance(item, ResponseOutputMessage):
-        output_text = item.content[0].text
+        # content may be empty, and each block is either a ResponseOutputText (``text``)
+        # or a ResponseOutputRefusal (``refusal``); indexing ``content[0].text`` blindly
+        # raises IndexError on empty content and AttributeError on a refusal block.
+        output_text = ""
+        if item.content:
+            first = item.content[0]
+            output_text = getattr(first, "text", None) or getattr(first, "refusal", "")
         if prev_assistant_msg:
             previous_content = prev_assistant_msg.get("content")
             if previous_content is None:
