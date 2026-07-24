@@ -274,6 +274,15 @@ class CacheConfig:
     @field_validator("cache_dtype", mode="after")
     @classmethod
     def _validate_cache_dtype(cls, cache_dtype: CacheDType) -> CacheDType:
+        from vllm.platforms import current_platform
+
+        supported = current_platform.get_supported_kv_cache_dtypes()
+        if cache_dtype != "auto" and cache_dtype not in supported:
+            raise ValueError(
+                f"kv-cache dtype '{cache_dtype}' is not supported on "
+                f"{current_platform.device_name}. Supported kv-cache dtypes: "
+                f"{supported}."
+            )
         if kv_cache_uses_per_token_head_scales(cache_dtype):
             logger.info(
                 "Using %s data type to store kv cache. It reduces the GPU "
