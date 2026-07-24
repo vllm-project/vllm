@@ -90,6 +90,7 @@ if TYPE_CHECKING:
     VLLM_TRITON_USE_TD: bool | None = None
     # Deprecated alias of VLLM_TRITON_USE_TD (removed in v0.25).
     VLLM_TRITON_ATTN_USE_TD: bool | None = None
+    VLLM_TRITON_ATTN_LONGCTX_3D_MULT: int = 4
     VLLM_GPU_SYNC_CHECK: Literal["warn", "error"] | None = None
     MAX_JOBS: str | None = None
     NVCC_THREADS: str | None = None
@@ -610,6 +611,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # ``0`` forces TD off.  Useful for A/B benchmarking the TD path.
     "VLLM_TRITON_USE_TD": lambda: {"1": True, "0": False}.get(
         os.getenv("VLLM_TRITON_USE_TD", "").strip()
+    ),
+    # Multiplier applied to the Triton attention 2D/3D split-KV launch-grid target
+    # for long-context deployments (max_model_len >= 8192). Biases decode toward
+    # the 3D flash-decoding path; set to 1 to disable the long-context bias.
+    "VLLM_TRITON_ATTN_LONGCTX_3D_MULT": lambda: int(
+        os.getenv("VLLM_TRITON_ATTN_LONGCTX_3D_MULT", "4")
     ),
     # If set, enable PyTorch's GPU<->CPU synchronization debug mode around
     # the worker's `execute_model` and `sample_tokens` calls. Valid values
