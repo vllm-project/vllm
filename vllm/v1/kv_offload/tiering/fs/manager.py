@@ -15,7 +15,6 @@ File naming:  <base_path>_r<rank>/<hhh>/<hh>_g<group_idx>/<hash_hex>.bin
               (hash-based subdirectories to limit directory fan-out)
 """
 
-import functools
 import json
 import os
 from collections.abc import Iterable
@@ -49,8 +48,7 @@ from vllm.v1.kv_offload.tiering.base import (
     ScheduleEndContext,
     SecondaryTierManager,
 )
-from vllm.v1.kv_offload.tiering.fs.io import load_block, store_block
-from vllm.v1.kv_offload.tiering.fs.thread_pool import DualQueueThreadPool
+from vllm.v1.kv_offload.tiering.fs.thread_pool import DualQueueThreadPool, Task
 
 if TYPE_CHECKING:
     from vllm.v1.kv_offload.base import OffloadingSpec
@@ -110,6 +108,7 @@ class FileSystemTierManager(SecondaryTierManager):
         root_dir: str,
         n_read_threads: int = 16,
         n_write_threads: int = 16,
+        rw_batch_size: int = 128,
         enable_kv_events: bool = False,
         locality: str | None = None,
     ):
@@ -122,6 +121,7 @@ class FileSystemTierManager(SecondaryTierManager):
             root_dir: Root directory for block files.
             n_read_threads: Number of read-priority I/O threads.
             n_write_threads: Number of write-priority I/O threads.
+            rw_batch_size: Number of reads/writes batched for each thread.
             enable_kv_events: Emit BlockStored KV events for blocks
                 successfully stored to this tier. Effective only when KV
                 cache events are enabled globally (kv_events_config).
@@ -171,6 +171,7 @@ class FileSystemTierManager(SecondaryTierManager):
         self._pool = DualQueueThreadPool(
             n_read_threads,
             n_write_threads,
+            rw_batch_size,
             thread_name_prefix="vllm_kv_py_fs",
         )
 
@@ -187,35 +188,32 @@ class FileSystemTierManager(SecondaryTierManager):
             return LookupResult.RETRY
         return LookupResult.HIT if result else LookupResult.MISS
 
+    def _tasks_from_jobmetadata(self, job_metadata: JobMetadata) -> Iterable[Task]:
+        for key, bid in zip(job_metadata.keys, job_metadata.block_ids):
+            yield Task(
+                path=self.file_mapper.get_file_name(key),
+                view=self._primary_kv_view,
+                offset=int(bid) * self._block_size,
+                block_size=self._block_size,
+            )
+
     @override
     def submit_store(self, job_metadata: JobMetadata) -> None:
         if self.events is not None:
             self._store_job_keys[job_metadata.job_id] = list(job_metadata.keys)
-        tasks = (
-            functools.partial(
-                store_block,
-                self.file_mapper.get_file_name(key),
-                self._primary_kv_view,
-                int(bid) * self._block_size,
-                self._block_size,
-            )
-            for key, bid in zip(job_metadata.keys, job_metadata.block_ids)
+        self._pool.enqueue_store(
+            job_metadata.job_id,
+            len(job_metadata.keys),
+            self._tasks_from_jobmetadata(job_metadata),
         )
-        self._pool.enqueue_store(job_metadata.job_id, len(job_metadata.keys), tasks)
 
     @override
     def submit_load(self, job_metadata: JobMetadata) -> None:
-        tasks = (
-            functools.partial(
-                load_block,
-                self.file_mapper.get_file_name(key),
-                self._primary_kv_view,
-                int(bid) * self._block_size,
-                self._block_size,
-            )
-            for key, bid in zip(job_metadata.keys, job_metadata.block_ids)
+        self._pool.enqueue_load(
+            job_metadata.job_id,
+            len(job_metadata.keys),
+            self._tasks_from_jobmetadata(job_metadata),
         )
-        self._pool.enqueue_load(job_metadata.job_id, len(job_metadata.keys), tasks)
 
     @override
     def get_finished_jobs(self) -> Iterable[JobResult]:
