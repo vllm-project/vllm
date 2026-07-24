@@ -37,8 +37,11 @@ import torch.types
 from torch import nn
 from torch.nn.init import trunc_normal_
 from transformers import BatchFeature, PretrainedConfig
-from transformers.dynamic_module_utils import get_class_from_dynamic_module
-from typing_extensions import TypeVar, assert_never
+from transformers.dynamic_module_utils import (
+    get_class_from_dynamic_module,
+    resolve_trust_remote_code,
+)
+from typing_extensions import TypeVar
 
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
@@ -76,17 +79,12 @@ from vllm.multimodal.processing.processor import (
     BaseMultiModalProcessor,
     BaseProcessingInfo,
     MultiModalPromptUpdates,
-    MultiModalPromptUpdatesApplyResult,
     PlaceholderFeaturesInfo,
     PromptReplacement,
     PromptUpdate,
     PromptUpdateDetails,
     ResolvedPromptUpdate,
-    UpdateMode,
-    _all_items_found,
-    _find_matches,
     _seq2text,
-    _seq2tokens,
 )
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
@@ -94,6 +92,7 @@ from vllm.transformers_utils.processor import (
     _merge_mm_kwargs,
     cached_get_image_processor,
 )
+from vllm.transformers_utils.utils import convert_model_repo_to_path
 from vllm.utils.collection_utils import flatten_2d_lists
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 from vllm.utils.torch_utils import set_default_torch_dtype
@@ -109,9 +108,6 @@ from .utils import AutoWeightsLoader, flatten_bn, maybe_prefix
 
 # For profile run
 _MAX_FRAMES_PER_VIDEO = 16
-
-# Same class name in every MiniCPM-V repo
-_MINICPMV_IMAGE_PROCESSOR_CLASS_REF = "image_processing_minicpmv.MiniCPMVImageProcessor"
 
 
 class MiniCPMVImagePixelInputs(TensorSchema):
@@ -559,11 +555,34 @@ class MiniCPMVProcessingInfo(BaseProcessingInfo):
     @cached_property
     def _image_processor_cls(self):
         model_config = self.ctx.model_config
+        model_path = convert_model_repo_to_path(model_config.model)
+
+        from transformers import ImageProcessingMixin
+
+        image_processor_config, _ = ImageProcessingMixin.get_image_processor_dict(
+            model_path,
+            revision=model_config.revision,
+            token=model_config.hf_token,
+        )
+
+        auto_map = image_processor_config.get("auto_map") or {}
+        class_ref = auto_map.get("AutoImageProcessor")
+        if not class_ref:
+            raise ValueError(
+                "Missing auto_map['AutoImageProcessor'] in image processor config "
+                f"for {model_config.model!r}"
+            )
+
+        resolve_trust_remote_code(
+            model_config.trust_remote_code,
+            model_config.model,
+            has_local_code=False,
+            has_remote_code=True,
+        )
         return get_class_from_dynamic_module(
-            _MINICPMV_IMAGE_PROCESSOR_CLASS_REF,
+            class_ref,
             model_config.model,
             revision=model_config.revision,
-            trust_remote_code=model_config.trust_remote_code,
         )
 
     def get_hf_config(self):
@@ -573,14 +592,6 @@ class MiniCPMVProcessingInfo(BaseProcessingInfo):
         model_config = self.ctx.model_config
         processor_cls = self._image_processor_cls
         merged_kwargs = _merge_mm_kwargs(model_config, processor_cls, **kwargs)
-
-        cache_key = tuple(sorted(merged_kwargs.items()))
-        cached_processors = getattr(self, "_minicpmv_hf_processor_cache", None)
-        if cached_processors is None:
-            cached_processors = {}
-            self._minicpmv_hf_processor_cache = cached_processors
-        if cache_key in cached_processors:
-            return cached_processors[cache_key]
 
         # AutoProcessor only for tokenizer; its image_processor is resolved by
         # class name and can pick the wrong checkpoint across MiniCPM-V versions.
@@ -611,7 +622,6 @@ class MiniCPMVProcessingInfo(BaseProcessingInfo):
             if isinstance(val, np.ndarray):
                 setattr(image_processor, attr, val.tolist())
 
-        cached_processors[cache_key] = hf_processor
         return hf_processor
 
     def get_image_processor(self, **kwargs: object):
@@ -918,7 +928,7 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
             all(update_idx is not None for update_idx in update_idxs)
             for update_idxs in match_result.values()
         ):
-            new_token_ids, match_result = self._apply_prompt_updates_by_text_locate(
+            new_token_ids, match_result = self._apply_text_matches_as_segmented_tokens(
                 _seq2text(tokenizer, token_ids, use_cache=False),
                 mm_prompt_updates,
             )
@@ -941,73 +951,6 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
         )
 
         return new_token_ids, placeholders
-
-    def _apply_prompt_updates_by_text_locate(
-        self,
-        text: str,
-        mm_prompt_updates: MultiModalPromptUpdates,
-    ) -> tuple[list[int], MultiModalPromptUpdatesApplyResult]:
-        tokenizer = self.info.get_tokenizer()
-
-        mm_item_counts = {m: len(items) for m, items in mm_prompt_updates.items()}
-
-        out_seqs = list[list[int]]()
-        out_result: MultiModalPromptUpdatesApplyResult = {
-            m: [None] * len(items) for m, items in mm_prompt_updates.items()
-        }
-
-        # Early exit if no items to find
-        mm_found_counts = {
-            m: sum(r is not None for r in res) for m, res in out_result.items()
-        }
-        if _all_items_found(mm_item_counts, mm_found_counts):
-            return _seq2tokens(tokenizer, text), out_result
-
-        prev_end_idx = 0
-        while True:
-            mode, matches_to_apply = _find_matches(
-                text,
-                mm_prompt_updates,
-                tokenizer,
-                prev_end_idx=prev_end_idx,
-                current_result=out_result,
-            )
-
-            if mode is None:
-                break  # No more matches to find
-
-            for (modality, item_idx), (match, update_idx) in matches_to_apply:
-                matched_update = mm_prompt_updates[modality][item_idx][update_idx]
-                matched_content = matched_update.content.full
-
-                if mode == UpdateMode.INSERT:
-                    end_idx_to_insert = match.end_idx
-                elif mode == UpdateMode.REPLACE:
-                    end_idx_to_insert = match.start_idx
-                else:
-                    assert_never(mode)
-
-                out_seqs.append(
-                    _seq2tokens(
-                        tokenizer, text[prev_end_idx:end_idx_to_insert], use_cache=False
-                    )
-                )
-                out_seqs.append(_seq2tokens(tokenizer, matched_content))
-                out_result[modality][item_idx] = update_idx
-
-                # Exclude overlapping matches
-                prev_end_idx = match.end_idx
-
-            # Early exit if all items found
-            mm_found_counts = {
-                m: sum(r is not None for r in res) for m, res in out_result.items()
-            }
-            if _all_items_found(mm_item_counts, mm_found_counts):
-                break
-
-        out_seqs.append(_seq2tokens(tokenizer, text[prev_end_idx:], use_cache=False))
-
-        return flatten_2d_lists(out_seqs), out_result
 
     def _base_call_hf_processor(
         self,

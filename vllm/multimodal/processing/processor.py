@@ -862,6 +862,29 @@ def apply_text_matches(
     return "".join(texts), result
 
 
+def apply_text_matches_as_segmented_tokens(
+    prompt: str,
+    mm_prompt_updates: "MultiModalPromptUpdates",
+    tokenizer: TokenizerLike | None,
+) -> tuple[list[int], "MultiModalPromptUpdatesApplyResult"]:
+    """
+    Apply the updates in `mm_prompt_updates` to `prompt`.
+
+    Matches are exclusive even when multiple modalities share
+    the same placeholder tokens. In that case, the modality that
+    appears earlier in `mm_prompt_updates` takes priority.
+
+    Each segment is encoded separately instead of being joined into one
+    string and encoded in a single pass. Joining first would let BPE merge
+    tokens across a segment boundary, silently change how a text
+    (non-special-token) placeholder is tokenized.
+    """
+    texts, result = _apply_matches(prompt, mm_prompt_updates, tokenizer)
+    token_id_seqs = [_seq2tokens(tokenizer, text, use_cache=False) for text in texts]
+
+    return flatten_2d_lists(token_id_seqs), result
+
+
 def _iter_placeholders(
     prompt: list[int],
     mm_prompt_updates: "MultiModalPromptUpdates",
@@ -1524,6 +1547,16 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
     ) -> tuple[str, MultiModalPromptUpdatesApplyResult]:
         tokenizer = self.info.get_tokenizer()
         return apply_text_matches(prompt, mm_prompt_updates, tokenizer)
+
+    def _apply_text_matches_as_segmented_tokens(
+        self,
+        prompt: str,
+        mm_prompt_updates: MultiModalPromptUpdates,
+    ) -> tuple[list[int], MultiModalPromptUpdatesApplyResult]:
+        tokenizer = self.info.get_tokenizer()
+        return apply_text_matches_as_segmented_tokens(
+            prompt, mm_prompt_updates, tokenizer
+        )
 
     def _apply_prompt_updates(
         self,
