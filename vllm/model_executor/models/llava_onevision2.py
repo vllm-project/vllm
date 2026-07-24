@@ -72,6 +72,7 @@ from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     WeightsMapper,
+    get_padded_num_video_frames,
     init_vllm_registered_model,
     maybe_prefix,
 )
@@ -1354,7 +1355,7 @@ class LlavaOnevision2ProcessingInfo(BaseProcessingInfo):
             preprocessed = ImageSize(width=rw, height=rh)
         else:
             preprocessed = ImageSize(width=image_width, height=image_height)
-        padded_frames = num_frames + num_frames % temporal_patch_size
+        padded_frames = get_padded_num_video_frames(num_frames, temporal_patch_size)
         grid_t = max(padded_frames // temporal_patch_size, 1)
         grid_h = preprocessed.height // patch_size
         grid_w = preprocessed.width // patch_size
