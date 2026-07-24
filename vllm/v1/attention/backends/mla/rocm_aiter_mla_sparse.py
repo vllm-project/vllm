@@ -227,7 +227,6 @@ def fetch_id_to_ragged_kernel(
     out_tensor_ptr,  # [max_num_seq * topk]
     in_tensor_ptr_stride,
     TOPK: tl.constexpr,
-    TOKEN_NUM: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
     seq_id = tl.program_id(0)
@@ -258,7 +257,7 @@ def fetch_id_to_ragged_triton(
         num_block_per_row,
     )
     fetch_id_to_ragged_kernel[grid](
-        in_tensor, cumsum, out_tensor, in_tensor.stride(0), topk, num_tokens, block_size
+        in_tensor, cumsum, out_tensor, in_tensor.stride(0), topk, block_size
     )
 
 
