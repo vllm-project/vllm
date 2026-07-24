@@ -160,3 +160,9 @@ def create_sort_beams_key_function(eos_token_id: int, length_penalty: float):
         )
 
     return sort_beams_key
+
+
+def get_generated_token_count(sequence: BeamSearchSequence) -> int:
+    prompt = sequence.orig_prompt
+    decoder_prompt = prompt if prompt["type"] != "enc_dec" else prompt["decoder_prompt"]
+    return len(sequence.tokens) - len(decoder_prompt["prompt_token_ids"])
