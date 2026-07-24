@@ -172,16 +172,31 @@ Audio must be sent as base64-encoded PCM16 audio at 16kHz sample rate, mono chan
 | ----- | ----------- |
 | `input_audio_buffer.append` | Send base64-encoded audio chunk: `{"type": "input_audio_buffer.append", "audio": "<base64>"}` |
 | `input_audio_buffer.commit` | Trigger transcription processing or end: `{"type": "input_audio_buffer.commit", "final": bool}` |
-| `session.update` | Configure session: `{"type": "session.update", "model": "model-name"}` |
+| `session.update` | Configure session: `{"type": "session.update", "model": "model-name", "language": "en", "prompt": "domain terms"}` |
+
+`session.update` requires `model`. The `language` and `prompt` fields are
+optional and are used by realtime transcription models that support them.
+`language` is an ISO-639-1 language code such as `"en"` or `"zh"`. `prompt` is
+optional text that guides transcription style, terminology, names, or domain
+vocabulary.
 
 ### Server → Client Events
 
 | Event | Description |
 | ----- | ----------- |
 | `session.created` | Connection established with session ID and timestamp |
-| `transcription.delta` | Incremental transcription text: `{"type": "transcription.delta", "delta": "text"}` |
-| `transcription.done` | Final transcription with usage stats |
+| `transcription.delta` | Incremental transcription text: `{"type": "transcription.delta", "delta": "text", "language": "en"}` |
+| `transcription.done` | Final transcription with usage stats: `{"type": "transcription.done", "text": "...", "usage": {...}, "language": "en"}` |
 | `error` | Error notification with message and optional code |
+
+The optional `language` field on `transcription.delta` / `transcription.done` is
+an ISO-639-1 code (e.g. `"en"`, `"zh"`) reporting the transcription language. In
+auto-detect mode it reflects the most recently detected segment language, so a
+mid-stream language switch is surfaced here; in forced mode it echoes the
+requested `language`. It is `null` when the model does not report a language.
+Models that emit internal segment scaffolding (e.g. Qwen3-ASR's
+`language <Name><asr_text>` preamble) have it stripped from `delta` and `text`,
+so the transcription stays clean in both auto and forced modes.
 
 #### Example Clients
 

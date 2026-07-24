@@ -42,6 +42,9 @@ if TYPE_CHECKING:
         VllmConfig,
     )
     from vllm.inputs import PromptType, TokensPrompt
+    from vllm.entrypoints.speech_to_text.realtime.protocol import (
+        RealtimeSessionConfig,
+    )
     from vllm.lora.model_manager import LoRAModelManager
     from vllm.model_executor.layers.fused_moe import MoERunner
     from vllm.model_executor.layers.mamba.mamba_utils import MambaStateCopyFunc
@@ -1062,7 +1065,21 @@ class SupportsRealtime(Protocol):
         audio_stream: AsyncGenerator[np.ndarray, None],
         input_stream: asyncio.Queue[list[int]],
         model_config: "ModelConfig",
+        session_config: "RealtimeSessionConfig | None" = None,
     ) -> AsyncGenerator["PromptType", None]: ...
+
+    @classmethod
+    def clean_realtime_text(cls, raw_text: str) -> tuple[str, str | None]:
+        """Clean accumulated realtime output and detect language.
+
+        Args:
+            raw_text: Full accumulated raw model text so far.
+
+        Returns:
+            Tuple of ``(clean_text, language_code)``. The default passthrough
+            returns the input unchanged with no detected language.
+        """
+        return raw_text, None
 
 
 @overload
