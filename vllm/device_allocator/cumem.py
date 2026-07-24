@@ -284,7 +284,9 @@ class CuMemAllocator:
         """
         Wake up the allocator from sleep mode.
         All data that is previously offloaded will be loaded back to GPU
-        memory, and the rest of the data will have empty memory.
+        memory, and the rest of the data will be zero-initialized so that
+        downstream kernels observe deterministic state rather than the
+        undefined contents of freshly remapped physical pages.
 
         Args:
             tags: The tags of the memory allocation that will be loaded
@@ -305,6 +307,33 @@ class CuMemAllocator:
                         cpu_ptr = cpu_backup_tensor.data_ptr()
                         libcudart.cudaMemcpy(ptr, cpu_ptr, size_in_bytes)
                         data.cpu_backup_tensor = None
+                else:
+                    # No CPU backup: this allocation was discarded at sleep
+                    # time (its tag was not in ``offload_tags``). The
+                    # ``create_and_map`` call above maps fresh physical pages
+                    # whose contents are *undefined* - the bytes that happen
+                    # to be in whatever physical frames the driver hands us.
+                    #
+                    # Without zeroing, downstream kernels (KV-cache reads,
+                    # attention scoring, AWQ dequant scratch) consume that
+                    # garbage and emit gibberish tokens, while the wake-up
+                    # API still returns 200 OK because the allocator
+                    # bookkeeping looks healthy. This was the observed
+                    # failure mode on Qwen3-4B AWQ INT4 (TP=1, PP=1):
+                    # ``suspend(level=1)`` offloads only "weights"; the
+                    # "kv_cache" tag is unmapped without backup; ``wake_up``
+                    # remaps it; ``post_kv_cache_wake_up`` is a no-op for
+                    # non-FP8 KV caches; first-token attention reads the
+                    # garbage and the model produces incoherent output.
+                    #
+                    # ``cudaMemset`` here makes wake-up deterministic
+                    # regardless of which tags were chosen at sleep time
+                    # and regardless of whether the model uses quantized KV.
+                    # Cost is one ``cudaMemset`` per discarded allocation
+                    # (bandwidth-bound, ~ms for a multi-GiB KV cache on
+                    # current Ada/Hopper hardware) - paid only on wake, not
+                    # on every step.
+                    libcudart.cudaMemset(ptr, 0, data.handle[1])
 
     @contextmanager
     def use_memory_pool(self, tag: str | None = None):
