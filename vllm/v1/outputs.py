@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from abc import ABC, abstractmethod
+from collections.abc import Sequence
 from copy import copy
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, NamedTuple, TypeAlias
@@ -88,6 +89,32 @@ class LogprobsTensors(NamedTuple):
             self.logprob_token_ids[mask],
             self.logprobs[mask],
             self.selected_token_ranks[mask],
+        )
+
+    @staticmethod
+    def cat(
+        tensors: Sequence["LogprobsTensors"],
+        cu_num_generated_tokens: list[int] | None = None,
+    ) -> "LogprobsTensors":
+        """Concatenate flattened logprob tensors."""
+        assert tensors
+        assert cu_num_generated_tokens is not None or all(
+            tensor.cu_num_generated_tokens is None for tensor in tensors
+        )
+        if len(tensors) == 1:
+            tensor = tensors[0]
+            if cu_num_generated_tokens is None:
+                return tensor
+            return tensor._replace(cu_num_generated_tokens=cu_num_generated_tokens)
+        return LogprobsTensors(
+            logprob_token_ids=torch.cat(
+                [tensor.logprob_token_ids for tensor in tensors]
+            ),
+            logprobs=torch.cat([tensor.logprobs for tensor in tensors]),
+            selected_token_ranks=torch.cat(
+                [tensor.selected_token_ranks for tensor in tensors]
+            ),
+            cu_num_generated_tokens=cu_num_generated_tokens,
         )
 
     @staticmethod
