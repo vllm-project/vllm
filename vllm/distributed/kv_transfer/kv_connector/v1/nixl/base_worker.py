@@ -794,6 +794,27 @@ class NixlBaseConnectorWorker:
         assert best_offset is not None
         return remote_worker_to_agent_name, best_offset
 
+    def _add_notif_only_remote_agent(
+        self, metadata: NixlAgentMetadata, remote_tp_size: int
+    ) -> str:
+        """Load a remote agent for notifs only on the push-mode decode side.
+
+        Skips descriptor setup but records engine info for block accounting.
+        """
+        assert self.transfer_topo is not None
+        self.transfer_topo.register_remote_engine(
+            metadata.engine_id,
+            EngineTransferInfo(
+                remote_tp_size=remote_tp_size,
+                remote_block_size=metadata.block_size,
+                remote_block_len=metadata.block_lens[0],
+                remote_physical_blocks_per_logical=(
+                    metadata.physical_blocks_per_logical_kv_block
+                ),
+            ),
+        )
+        return self.nixl_wrapper.add_remote_agent(metadata.agent_metadata)
+
     @staticmethod
     def _tp_dcp_to_pcp_rank(
         tp_rank: int,
