@@ -419,11 +419,15 @@ RUN --mount=type=cache,target=/root/.cache/ccache \
         >> /etc/ld.so.conf.d/nixl.conf && \
     ldconfig
 
-# Generate the ROCm NIXL wheel.
+# Generate the ROCm NIXL wheel. Upstream's generic wheel helper detects CUDA,
+# so configure the ROCm wheel variant directly through Meson.
+# Exclude libcore and libpull from auditwheel: transitive dependencies
+# that are not shipped in the wheel and vary across base images.
 RUN cd /opt/nixl && \
     ./contrib/tomlutil.py --wheel-name nixl-rocm pyproject.toml && \
     CC="ccache gcc" CXX="ccache g++" \
     uv build --wheel --no-build-isolation --out-dir /tmp/nixl_wheels \
+        --python ${PYTHON_VERSION} \
         -Csetup-args=-Ducx_path=${UCX_HOME} \
         -Csetup-args=-Dwheel_variant=rocm \
         -Csetup-args=-Dbuild_tests=false \
@@ -434,7 +438,7 @@ RUN cd /opt/nixl && \
         --exclude 'libcore*' \
         --exclude 'libpull*' \
         /tmp/nixl_wheels/nixl_rocm*.whl \
-        --plat manylinux_2_39_$(uname -m) \
+        --plat manylinux_2_34_$(uname -m) \
         --wheel-dir /tmp/nixl_wheels/repaired && \
     ./contrib/wheel_add_ucx_plugins.py \
         --ucx-plugins-dir ${UCX_HOME}/lib/ucx \
