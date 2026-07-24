@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 from transformers import PreTrainedTokenizerBase
 
 from vllm.reasoning import ReasoningParser
+from vllm.reasoning.basic_parsers import BaseThinkingReasoningParser
 from vllm.reasoning.deepseek_r1_reasoning_parser import DeepSeekR1ReasoningParser
 
 from .identity_reasoning_parser import IdentityReasoningParser
@@ -55,6 +56,25 @@ class DeepSeekV3ReasoningParser(ReasoningParser):
 
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:
         return self._parser.extract_content_ids(input_ids)
+
+    def count_reasoning_tokens(self, token_ids: Sequence[int]) -> int:
+        if not isinstance(self._parser, BaseThinkingReasoningParser):
+            return self._parser.count_reasoning_tokens(token_ids)
+
+        start_id = self._parser.start_token_id
+        end_id = self._parser.end_token_id
+
+        if start_id in token_ids:
+            return self._parser.count_reasoning_tokens(token_ids)
+
+        # Handle models that emit only the end token without a start token
+        # (e.g. GLM5 outputs reasoning content followed by </think>, with no
+        # <think> prefix). In that case every token before the first end token
+        # is treated as a reasoning token, consistent with extract_reasoning().
+        for index, token_id in enumerate(token_ids):
+            if token_id == end_id:
+                return index
+        return 0
 
     def extract_reasoning(
         self, model_output: str, request: "ChatCompletionRequest | ResponsesRequest"
