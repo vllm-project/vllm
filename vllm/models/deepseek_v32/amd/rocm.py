@@ -6,16 +6,49 @@ import torch
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.sparse_attn_indexer import SparseAttnIndexer
-from vllm.models.deepseek_v32.attention import DeepseekV32Attention
+from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
+from vllm.models.deepseek_v32.attention import DeepseekV32Attention, DeepseekV32Indexer
 from vllm.models.deepseek_v32.common.kernels import fused_norm_rope, fused_q
 from vllm.utils.torch_utils import is_quantized_kv_cache
+from vllm.v1.attention.backends.mla.indexer import DeepseekV32IndexerBackend
+from vllm.v1.attention.backends.mla.rocm_aiter_mla_sparse import (
+    ROCMAiterMLASparseBackend,
+)
+
+
+class DeepseekV32MLASparseBackend(ROCMAiterMLASparseBackend):
+    @staticmethod
+    def get_supported_kernel_block_sizes() -> list:
+        return [16, 32]
+
+
+class DeepseekV32ROCmIndexerBackend(DeepseekV32IndexerBackend):
+    @staticmethod
+    def get_supported_kernel_block_sizes() -> list:
+        return [16, 32]
+
+
+class DeepseekV32ROCmIndexerCache(DeepseekV32IndexerCache):
+    def get_attn_backend(self):
+        return DeepseekV32ROCmIndexerBackend
+
+
+class DeepseekV32ROCmIndexer(DeepseekV32Indexer):
+    indexer_cache_cls = DeepseekV32ROCmIndexerCache
 
 
 class DeepseekV32MLAAttention(DeepseekV32Attention):
     require_fp8_kv_cache: bool = False
+    indexer_cls = DeepseekV32ROCmIndexer
 
     def __init__(self, vllm_config, config, prefix, topk_indices_buffer=None):
-        super().__init__(vllm_config, config, prefix, topk_indices_buffer)
+        super().__init__(
+            vllm_config,
+            config,
+            prefix,
+            topk_indices_buffer,
+            attn_backend=DeepseekV32MLASparseBackend,
+        )
 
         self.indexer_op: SparseAttnIndexer | None = None
         if self.indexer is not None:
@@ -88,7 +121,7 @@ class DeepseekV32MLAAttention(DeepseekV32Attention):
         ).transpose(0, 1)  # (N, tokens, L)
         out_view = output[:num_actual].view(
             num_actual, self.num_local_heads, self.v_head_dim
-        )  # (tokens, N, V) — YQ for fp4/fp8 with transpose_bm=True
+        )
 
         if self.is_aiter_triton_fp4_bmm_enabled:
             from aiter.ops.triton.batched_gemm_a16wfp4 import batched_gemm_a16wfp4

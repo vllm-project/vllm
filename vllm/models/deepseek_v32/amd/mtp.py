@@ -92,7 +92,8 @@ class DeepseekV32MultiTokenPredictorLayer(nn.Module):
         )
         hidden_states = tensor_model_parallel_all_reduce(hidden_states)
         hidden_states = residual + hidden_states
-        return hidden_states, self.shared_head(hidden_states)
+        hidden_states = self.shared_head.norm(hidden_states)
+        return hidden_states, hidden_states
 
 
 class DeepseekV32MultiTokenPredictor(nn.Module):
@@ -154,9 +155,7 @@ class DeepseekV32MultiTokenPredictor(nn.Module):
     ) -> torch.Tensor:
         current_step_idx = spec_step_idx % self.num_mtp_layers
         mtp_layer = self.layers[str(self.mtp_start_layer_idx + current_step_idx)]
-        return self.logits_processor(
-            mtp_layer.shared_head.head, mtp_layer.shared_head(hidden_states)
-        )
+        return self.logits_processor(mtp_layer.shared_head.head, hidden_states)
 
 
 class DeepseekV32MTP(nn.Module, DeepseekV2MixtureOfExperts):

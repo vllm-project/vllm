@@ -29,11 +29,14 @@ from vllm.model_executor.models.deepseek_v2 import (
     yarn_get_mscale,
 )
 from vllm.model_executor.models.utils import extract_layer_index
+from vllm.models.deepseek_v32.common.kernels import fused_norm_rope, fused_q
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import _encode_layer_name, is_quantized_kv_cache
 
 
 class DeepseekV32Indexer(nn.Module):
+    indexer_cache_cls = DeepseekV32IndexerCache
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -76,7 +79,7 @@ class DeepseekV32Indexer(nn.Module):
         self.topk_indices_buffer = topk_indices_buffer
 
         assert cache_config is not None, "DeepSeek V3.2 indexer requires cache_config"
-        self.k_cache = DeepseekV32IndexerCache(
+        self.k_cache = type(self).indexer_cache_cls(
             head_dim=self.head_dim + self.head_dim // self.quant_block_size * 4,
             dtype=torch.uint8,
             prefix=f"{prefix}.k_cache",
@@ -152,6 +155,7 @@ class DeepseekV32Indexer(nn.Module):
 
 class DeepseekV32Attention(MLAAttention):
     indexer: "DeepseekV32Indexer | None"
+    indexer_cls: "type[DeepseekV32Indexer]" = DeepseekV32Indexer
 
     require_fp8_kv_cache: bool = True
 
@@ -161,6 +165,7 @@ class DeepseekV32Attention(MLAAttention):
         config: DeepseekV2Config | DeepseekV3Config,
         prefix: str,
         topk_indices_buffer: torch.Tensor | None = None,
+        attn_backend: "type | None" = None,
     ) -> None:
         quant_config = vllm_config.quant_config
         cache_config = vllm_config.cache_config
@@ -223,7 +228,7 @@ class DeepseekV32Attention(MLAAttention):
         )
         indexer = None
         if not skip_topk or is_mtp_layer:
-            indexer = DeepseekV32Indexer(
+            indexer = type(self).indexer_cls(
                 vllm_config,
                 config,
                 hidden_size,
@@ -249,6 +254,7 @@ class DeepseekV32Attention(MLAAttention):
             use_sparse=True,
             indexer=indexer,
             topk_indices_buffer=topk_indices_buffer,
+            attn_backend=attn_backend,
         )
 
         self.num_local_heads = num_local_heads

@@ -39,22 +39,10 @@ from vllm.model_executor.models.utils import (
     make_layers,
     sequence_parallel_chunk,
 )
-from vllm.sequence import IntermediateTensors
-from vllm.v1.attention.backends.mla.sparse_utils import register_phys_shadow
-
 from vllm.models.deepseek_v32.common.attention import DeepseekV32Attention
 from vllm.models.deepseek_v32.common.fused_ops import fused_allreduce_rms_norm
-
-def _all_gather_sp_states(
-    hidden_states: torch.Tensor,
-    residual: torch.Tensor,
-    num_tokens: int,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    # combine hidden_states and residual and all gather once
-    combined_states = torch.cat([hidden_states, residual], dim=-1)
-    combined_states = tensor_model_parallel_all_gather(combined_states, 0)[:num_tokens]
-    hidden_states, residual = combined_states.chunk(2, dim=-1)
-    return hidden_states, residual.contiguous()
+from vllm.sequence import IntermediateTensors
+from vllm.v1.attention.backends.mla.sparse_utils import register_phys_shadow
 
 
 def _all_gather_sp_states(
