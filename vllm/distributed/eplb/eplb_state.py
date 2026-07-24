@@ -26,10 +26,12 @@ MoE layer. If we have 32 EP ranks, then each GPU will hold 288 / 32 = 9 local
 physical experts.
 """
 
+import json
 import threading
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass
+from pathlib import Path
 
 import torch
 from torch.distributed import ProcessGroup, all_reduce
@@ -58,6 +60,76 @@ from .rebalance_execute import (
 )
 
 logger = init_logger(__name__)
+
+
+def load_initial_expert_map(
+    path: str,
+    *,
+    num_moe_layers: int,
+    num_physical_experts: int,
+    num_logical_experts: int,
+) -> torch.Tensor:
+    """Load and validate a physical-to-logical expert map from JSON."""
+    try:
+        raw_map = json.loads(Path(path).read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(
+            f"Failed to load initial EPLB expert map from {path}: {exc}"
+        ) from exc
+
+    if not isinstance(raw_map, list) or not raw_map:
+        raise ValueError("Initial EPLB expert map must be a non-empty JSON list.")
+
+    if all(isinstance(value, int) and not isinstance(value, bool) for value in raw_map):
+        layer_maps = [raw_map]
+    elif all(isinstance(layer, list) for layer in raw_map):
+        layer_maps = raw_map
+    else:
+        raise ValueError(
+            "Initial EPLB expert map must contain integers or lists of integers."
+        )
+
+    if len(layer_maps) not in (1, num_moe_layers):
+        raise ValueError(
+            "Initial EPLB expert map must define either one shared layer or "
+            f"{num_moe_layers} layers, got {len(layer_maps)}."
+        )
+
+    expected_experts = set(range(num_logical_experts))
+    for layer_idx, layer_map in enumerate(layer_maps):
+        if len(layer_map) != num_physical_experts:
+            raise ValueError(
+                f"Initial EPLB expert map layer {layer_idx} must contain "
+                f"{num_physical_experts} physical slots, got {len(layer_map)}."
+            )
+        if not all(
+            isinstance(expert_id, int) and not isinstance(expert_id, bool)
+            for expert_id in layer_map
+        ):
+            raise ValueError(
+                f"Initial EPLB expert map layer {layer_idx} contains a non-integer ID."
+            )
+        invalid_ids = sorted(
+            expert_id
+            for expert_id in set(layer_map)
+            if expert_id < 0 or expert_id >= num_logical_experts
+        )
+        if invalid_ids:
+            raise ValueError(
+                f"Initial EPLB expert map layer {layer_idx} contains out-of-range "
+                f"logical expert IDs: {invalid_ids}."
+            )
+        missing_ids = sorted(expected_experts.difference(layer_map))
+        if missing_ids:
+            raise ValueError(
+                f"Initial EPLB expert map layer {layer_idx} does not place logical "
+                f"experts: {missing_ids}."
+            )
+
+    result = torch.tensor(layer_maps, dtype=torch.long, device="cpu")
+    if len(layer_maps) == 1:
+        result = result.expand(num_moe_layers, -1).contiguous()
+    return result
 
 
 @dataclass
@@ -490,6 +562,29 @@ class EplbState:
         )
         self.model_states[model_config.compute_hash()] = model_state
         self.num_valid_physical_experts = model.num_physical_experts
+
+        initial_map_path = self.parallel_config.eplb_config.initial_expert_map_path
+        if initial_map_path is not None:
+            initial_map = load_initial_expert_map(
+                initial_map_path,
+                num_moe_layers=model.num_moe_layers,
+                num_physical_experts=model.num_physical_experts,
+                num_logical_experts=model.num_logical_experts,
+            ).to(self.device)
+            if not torch.equal(physical_to_logical_map, initial_map):
+                rearrange_expert_weights_inplace(
+                    physical_to_logical_map,
+                    initial_map,
+                    model.expert_weights,
+                    expert_buffer,
+                    get_ep_group().device_group,
+                    communicator,
+                )
+                _commit_eplb_maps(
+                    model_state,
+                    new_physical_to_logical_map=initial_map,
+                )
+            logger.info("Loaded initial EPLB expert map from %s.", initial_map_path)
 
     def prepare_forward(
         self,

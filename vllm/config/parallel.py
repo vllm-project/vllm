@@ -70,6 +70,14 @@ class EPLBConfig:
     num_redundant_experts: int = Field(default=0, ge=0)
     """Number of redundant experts to use for expert parallelism."""
 
+    initial_expert_map_path: str | None = None
+    """
+    Path to a JSON physical-to-logical expert map applied after model loading.
+    The file may contain one list shared by all MoE layers, or one list per
+    layer. Each list must contain exactly ``num_physical_experts`` logical
+    expert IDs and cover every logical expert at least once.
+    """
+
     log_balancedness: bool = False
     """
     Log the balancedness each step of expert parallelism.
