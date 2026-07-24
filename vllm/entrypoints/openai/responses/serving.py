@@ -102,6 +102,7 @@ from vllm.parser import Parser, ParserManager
 from vllm.renderers.online_renderer import OnlineRenderer
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.tokenizers import TokenizerLike
+from vllm.tool_parsers.utils import build_responses_tool_call_name_map
 from vllm.utils import random_uuid
 from vllm.utils.collection_utils import as_list
 
@@ -808,13 +809,21 @@ class OpenAIServingResponses(GenerateBaseServing):
             harmony_msgs = context.messages[context.num_init_messages :]
             if harmony_msgs:
                 fn_names = context.function_tool_names
+                name_map = build_responses_tool_call_name_map(request.tools)
                 for msg in harmony_msgs[:-1]:
-                    output.extend(harmony_to_response_output(msg, fn_names))
+                    output.extend(
+                        harmony_to_response_output(
+                            msg,
+                            fn_names,
+                            tool_call_name_map=name_map,
+                        )
+                    )
                 output.extend(
                     harmony_to_response_output(
                         harmony_msgs[-1],
                         fn_names,
                         incomplete=context.last_append_flush_status,
+                        tool_call_name_map=name_map,
                     )
                 )
 
@@ -1418,6 +1427,7 @@ class OpenAIServingResponses(GenerateBaseServing):
         ],
     ) -> AsyncGenerator[StreamingResponsesResponse, None]:
         state = StreamingState()
+        name_map = build_responses_tool_call_name_map(request.tools)
 
         async for ctx in result_generator:
             assert isinstance(ctx, HarmonyContext)
@@ -1428,14 +1438,20 @@ class OpenAIServingResponses(GenerateBaseServing):
             for segment in ctx.last_append_segments:
                 if segment.delta:
                     for event in emit_content_delta_events(
-                        segment, state, ctx.function_tool_names
+                        segment,
+                        state,
+                        ctx.function_tool_names,
+                        tool_call_name_map=name_map,
                     ):
                         yield _increment_sequence_number_and_return(event)
 
                 elif completed_message := segment.completed_message:
                     # TODO: Fix browser emitted as MCP calls
                     for event in emit_previous_item_done_events(
-                        completed_message, state, ctx.function_tool_names
+                        completed_message,
+                        state,
+                        ctx.function_tool_names,
+                        tool_call_name_map=name_map,
                     ):
                         yield _increment_sequence_number_and_return(event)
 

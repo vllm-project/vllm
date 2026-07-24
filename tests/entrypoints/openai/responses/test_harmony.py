@@ -1246,3 +1246,80 @@ async def test_system_prompt_structured_content(client: OpenAI, model_name: str)
     assert response is not None
     assert response.status == "completed"
     assert response.output_text is not None
+
+
+NAMESPACE_TOOL_SCHEMA = {
+    "type": "namespace",
+    "name": "codex",
+    "description": "Codex development tools.",
+    "tools": [
+        {
+            "type": "function",
+            "name": "shell",
+            "description": "Run a shell command and return stdout/stderr.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "cmd": {
+                        "type": "string",
+                        "description": "The shell command to execute.",
+                    }
+                },
+                "required": ["cmd"],
+                "additionalProperties": False,
+            },
+        }
+    ],
+}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+async def test_namespace_tool_calling(client: OpenAI, model_name: str):
+    """Namespace tools should be accepted and flattened for harmony models."""
+    tools = [NAMESPACE_TOOL_SCHEMA]
+
+    response = await retry_for_tool_call(
+        client,
+        model=model_name,
+        expected_tool_type="function_call",
+        input="Run 'echo hello' in the shell.",
+        tools=tools,
+        temperature=0.0,
+    )
+    assert response.status == "completed"
+    assert has_output_type(response, "function_call"), (
+        f"Expected function_call in output, got: "
+        f"{[getattr(o, 'type', None) for o in response.output]}"
+    )
+
+    tool_call = next(o for o in response.output if o.type == "function_call")
+    assert tool_call.name == "shell"
+    assert tool_call.namespace == "codex"
+    assert json.loads(tool_call.arguments).get("cmd") is not None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+async def test_namespace_tool_calling_streaming(client: OpenAI, model_name: str):
+    """Namespace tools in streaming mode should emit proper namespace fields."""
+    tools = [NAMESPACE_TOOL_SCHEMA]
+
+    response = await retry_streaming_for(
+        client,
+        model=model_name,
+        expected_event_type="response.output_item.done",
+        input="Run 'echo hello' in the shell.",
+        tools=tools,
+        temperature=0.0,
+    )
+    done_events = [
+        e
+        for e in response
+        if e.type == "response.output_item.done"
+        and getattr(e.item, "type", None) == "function_call"
+    ]
+    assert len(done_events) >= 1
+    tool_call = done_events[0].item
+    assert tool_call.name == "shell"
+    assert tool_call.namespace == "codex"
