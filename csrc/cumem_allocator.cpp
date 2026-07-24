@@ -166,8 +166,10 @@ void create_and_map(unsigned long long device, ssize_t size, CUdeviceptr d_mem,
   if (error_code != 0) {
     return;
   }
-  CUDA_CHECK(cuMemMap(d_mem, size, 0, *p_memHandle, 0));
-  if (error_code != 0) {
+  CUresult map_ret = cuMemMap(d_mem, size, 0, *p_memHandle, 0);
+  if (map_ret != CUDA_SUCCESS) {
+    CUDA_CHECK(map_ret);
+    cuMemRelease(*p_memHandle);
     return;
   }
 #else
@@ -210,6 +212,20 @@ void create_and_map(unsigned long long device, ssize_t size, CUdeviceptr d_mem,
 
   CUDA_CHECK(cuMemSetAccess(d_mem, size, &accessDesc, 1));
   if (error_code != 0) {
+#ifndef USE_ROCM
+    cuMemUnmap(d_mem, size);
+    cuMemRelease(*p_memHandle);
+#else
+    unsigned long long unmapped_size = 0;
+    for (auto i = 0; i < num_chunks; ++i) {
+      CUdeviceptr unmap_addr = d_mem + unmapped_size;
+      cuMemUnmap(unmap_addr, chunk_sizes[i]);
+      unmapped_size += chunk_sizes[i];
+    }
+    for (auto i = 0; i < num_chunks; ++i) {
+      cuMemRelease(*(p_memHandle[i]));
+    }
+#endif
     return;
   }
   // std::cout << "create_and_map: device=" << device << ", size=" << size << ",
@@ -360,6 +376,11 @@ void* my_malloc(ssize_t size, int device, CUstream stream) {
   CUmemGenericAllocationHandle* p_memHandle =
       (CUmemGenericAllocationHandle*)malloc(
           sizeof(CUmemGenericAllocationHandle));
+  if (p_memHandle == nullptr) {
+    std::cerr << "ERROR: malloc failed for p_memHandle.\n";
+    CUDA_CHECK(cuMemAddressFree(d_mem, alignedSize));
+    return nullptr;
+  }
 #else
   // Make sure chunk size is aligned with hardware granularity. The base
   // chunk size can be configured via environment variable
@@ -375,6 +396,13 @@ void* my_malloc(ssize_t size, int device, CUstream stream) {
           num_chunks * sizeof(CUmemGenericAllocationHandle*));
   unsigned long long* chunk_sizes =
       (unsigned long long*)malloc(num_chunks * sizeof(unsigned long long));
+  if (p_memHandle == nullptr || chunk_sizes == nullptr) {
+    std::cerr << "ERROR: malloc failed for allocation metadata.\n";
+    CUDA_CHECK(cuMemAddressFree(d_mem, alignedSize));
+    free(p_memHandle);
+    free(chunk_sizes);
+    return nullptr;
+  }
   for (auto i = 0; i < num_chunks; ++i) {
     p_memHandle[i] = (CUmemGenericAllocationHandle*)malloc(
         sizeof(CUmemGenericAllocationHandle));
@@ -385,6 +413,7 @@ void* my_malloc(ssize_t size, int device, CUstream stream) {
       }
       free(p_memHandle);
       free(chunk_sizes);
+      CUDA_CHECK(cuMemAddressFree(d_mem, alignedSize));
       return nullptr;
     }
     chunk_sizes[i] = (unsigned long long)my_min(
@@ -395,6 +424,39 @@ void* my_malloc(ssize_t size, int device, CUstream stream) {
 
   if (!g_python_malloc_callback) {
     std::cerr << "ERROR: g_python_malloc_callback not set.\n";
+#ifndef USE_ROCM
+    free(p_memHandle);
+#else
+    for (size_t i = 0; i < num_chunks; ++i) {
+      free(p_memHandle[i]);
+    }
+    free(p_memHandle);
+    free(chunk_sizes);
+#endif
+    CUDA_CHECK(cuMemAddressFree(d_mem, alignedSize));
+    return nullptr;
+  }
+
+  // do the final mapping
+#ifndef USE_ROCM
+  create_and_map(device, alignedSize, d_mem, p_memHandle);
+#else
+  create_and_map(device, alignedSize, d_mem, p_memHandle, chunk_sizes,
+                 num_chunks);
+#endif
+
+  if (error_code != 0) {
+    // free address and the handle
+    CUDA_CHECK(cuMemAddressFree(d_mem, alignedSize));
+#ifndef USE_ROCM
+    free(p_memHandle);
+#else
+    for (size_t i = 0; i < num_chunks; ++i) {
+      free(p_memHandle[i]);
+    }
+    free(p_memHandle);
+    free(chunk_sizes);
+#endif
     return nullptr;
   }
 
@@ -410,8 +472,26 @@ void* my_malloc(ssize_t size, int device, CUstream stream) {
       (unsigned long long)device, (unsigned long long)alignedSize,
       (unsigned long long)d_mem, p_memHandle, chunk_sizes, num_chunks);
 #endif
+  if (!arg_tuple) {
+    PyGILState_Release(gstate);
+#ifndef USE_ROCM
+    unmap_and_release(device, alignedSize, d_mem, p_memHandle);
+    free(p_memHandle);
+#else
+    unmap_and_release(device, alignedSize, d_mem, p_memHandle, chunk_sizes,
+                      num_chunks);
+    for (size_t i = 0; i < num_chunks; ++i) {
+      free(p_memHandle[i]);
+    }
+    free(p_memHandle);
+    free(chunk_sizes);
+#endif
+    CUDA_CHECK(cuMemAddressFree(d_mem, alignedSize));
+    return nullptr;
+  }
 
-  // Call g_python_malloc_callback
+  // Call g_python_malloc_callback after mapping succeeds so failed mappings
+  // do not leave stale Python-side allocation records.
   PyObject* py_result =
       PyObject_CallFunctionObjArgs(g_python_malloc_callback, arg_tuple, NULL);
   Py_DECREF(arg_tuple);
@@ -419,33 +499,27 @@ void* my_malloc(ssize_t size, int device, CUstream stream) {
   if (!py_result) {
     PyErr_Print();
     PyGILState_Release(gstate);
-    return nullptr;
-  }
-
-  PyGILState_Release(gstate);
-
-  // do the final mapping
 #ifndef USE_ROCM
-  create_and_map(device, alignedSize, d_mem, p_memHandle);
-#else
-  create_and_map(device, alignedSize, d_mem, p_memHandle, chunk_sizes,
-                 num_chunks);
-  free(chunk_sizes);
-#endif
-
-  if (error_code != 0) {
-    // free address and the handle
-    CUDA_CHECK(cuMemAddressFree(d_mem, alignedSize));
-#ifndef USE_ROCM
+    unmap_and_release(device, alignedSize, d_mem, p_memHandle);
     free(p_memHandle);
 #else
+    unmap_and_release(device, alignedSize, d_mem, p_memHandle, chunk_sizes,
+                      num_chunks);
     for (size_t i = 0; i < num_chunks; ++i) {
       free(p_memHandle[i]);
     }
     free(p_memHandle);
+    free(chunk_sizes);
 #endif
+    CUDA_CHECK(cuMemAddressFree(d_mem, alignedSize));
     return nullptr;
   }
+
+  Py_DECREF(py_result);
+  PyGILState_Release(gstate);
+#ifdef USE_ROCM
+  free(chunk_sizes);
+#endif
 
   return (void*)d_mem;
 }
