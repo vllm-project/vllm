@@ -17,6 +17,7 @@ if TYPE_CHECKING:
 import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.config import get_current_vllm_config
+from vllm.distributed import get_ep_group
 from vllm.model_executor.kernels.linear import init_fp8_linear_kernel
 from vllm.model_executor.kernels.linear.scaled_mm import (
     CutlassFP8ScaledMMLinearKernel,
@@ -369,6 +370,31 @@ class Fp8PtpcOnlineLinearMethod(_Fp8OnlineLinearBase):
 # ---------------------------------------------------------------------------
 
 
+def _quantize_moe_weight_per_tensor_fp8(
+    weight: torch.Tensor,
+    tp_group: torch.distributed.ProcessGroup | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    fp8_dtype = current_platform.fp8_dtype()
+    qweight = torch.empty_like(weight, dtype=fp8_dtype)
+    scale = torch.empty(weight.shape[0], device=weight.device, dtype=torch.float32)
+
+    if tp_group is None:
+        for expert in range(weight.shape[0]):
+            qweight[expert], scale[expert] = ops.scaled_fp8_quant(weight[expert])
+        return qweight, scale
+
+    amax = weight.abs().amax(dim=(1, 2)).to(torch.float32)
+    torch.distributed.all_reduce(
+        amax,
+        op=torch.distributed.ReduceOp.MAX,
+        group=tp_group,
+    )
+    scale.copy_(amax / torch.finfo(fp8_dtype).max)
+    for expert in range(weight.shape[0]):
+        qweight[expert], _ = ops.scaled_fp8_quant(weight[expert], scale=scale[expert])
+    return qweight, scale
+
+
 class _Fp8OnlineMoEBase(OnlineMoEMethodBase):
     """Shared base for online FP8 MoE methods. Loads fp16/bf16 checkpoint
     weights onto meta device and materializes them just-in-time."""
@@ -510,24 +536,14 @@ class Fp8PerTensorOnlineMoEMethod(_Fp8OnlineMoEBase):
         if getattr(layer, "_already_called_process_weights_after_loading", False):
             return
 
-        # If checkpoint is fp16, quantize in place.
-        fp8_dtype = current_platform.fp8_dtype()
-        w13 = torch.empty_like(layer.w13_weight, dtype=fp8_dtype)
-        w2 = torch.empty_like(layer.w2_weight, dtype=fp8_dtype)
-        w13_scale = torch.ones(
-            layer.num_experts, device=w13.device, dtype=torch.float32
-        )
-        w2_scale = torch.ones(layer.num_experts, device=w2.device, dtype=torch.float32)
         layer.w13_input_scale = None
         layer.w2_input_scale = None
 
-        for expert in range(layer.local_num_experts):
-            w13[expert, :, :], w13_scale[expert] = ops.scaled_fp8_quant(
-                layer.w13_weight[expert, :, :]
-            )
-            w2[expert, :, :], w2_scale[expert] = ops.scaled_fp8_quant(
-                layer.w2_weight[expert, :, :]
-            )
+        # The EP group spans the DP x PCP x TP ranks across which non-EP MoE
+        # weights are tensor-sharded. In EP mode, moe.tp_size is 1.
+        tp_group = get_ep_group().device_group if self.moe.tp_size > 1 else None
+        w13, w13_scale = _quantize_moe_weight_per_tensor_fp8(layer.w13_weight, tp_group)
+        w2, w2_scale = _quantize_moe_weight_per_tensor_fp8(layer.w2_weight, tp_group)
 
         # Shuffle weights to runtime format and setup kernel.
         self._setup_kernel(

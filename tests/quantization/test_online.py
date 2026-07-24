@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests online quantization."""
 
+from typing import cast
+
 import pytest
 import torch
 
@@ -15,9 +17,11 @@ from vllm.model_executor.layers.quantization.online.fp8 import (
     Fp8PerBlockOnlineMoEMethod,
     Fp8PerTensorOnlineLinearMethod,
     Fp8PerTensorOnlineMoEMethod,
+    _quantize_moe_weight_per_tensor_fp8,
 )
 from vllm.model_executor.layers.quantization.online.nvfp4 import (
     Nvfp4OnlineMoEMethod,
+    _quantize_moe_weight_to_nvfp4,
 )
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer_trtllm_fused_moe
@@ -179,6 +183,80 @@ def test_online_nvfp4_per_token_moe(vllm_runner, monkeypatch) -> None:
         llm.apply_model(check_model)
         outputs = llm.generate_greedy(["Hello my name is"], max_tokens=4)
         print(outputs[0][1])
+
+
+@pytest.mark.parametrize(
+    "quantization",
+    [
+        pytest.param(
+            "fp8_per_tensor",
+            marks=pytest.mark.skipif(
+                not is_quant_method_supported("fp8"),
+                reason="FP8 is not supported on this GPU type.",
+            ),
+        ),
+        pytest.param(
+            "nvfp4",
+            marks=pytest.mark.skipif(
+                not (
+                    current_platform.is_cuda()
+                    and current_platform.is_device_capability_family(100)
+                ),
+                reason="NVFP4 weight quantization needs a Blackwell (SM100) GPU.",
+            ),
+        ),
+    ],
+)
+@pytest.mark.parametrize("shard_dim", [1, 2])
+def test_online_moe_tp_weight_quant_matches_ep(
+    monkeypatch, quantization: str, shard_dim: int
+) -> None:
+    """TP shards use the same global scale and quantized values as a full expert."""
+    torch.manual_seed(0)
+    weight = torch.randn(2, 32, 32, device="cuda", dtype=torch.bfloat16)
+    weight[:, -1, -1] = torch.tensor([32.0, 64.0], device="cuda")
+
+    if quantization == "nvfp4":
+        ep_weight, ep_block_scale, ep_global_scale = _quantize_moe_weight_to_nvfp4(
+            weight
+        )
+    else:
+        ep_weight, ep_global_scale = _quantize_moe_weight_per_tensor_fp8(weight)
+    full_amax = weight.abs().amax(dim=(1, 2)).to(torch.float32)
+    tp_group = cast(torch.distributed.ProcessGroup, object())
+
+    def fake_all_reduce(tensor, op, group):
+        assert op == torch.distributed.ReduceOp.MAX
+        assert group is tp_group
+        tensor.copy_(full_amax)
+
+    monkeypatch.setattr(torch.distributed, "all_reduce", fake_all_reduce)
+
+    shard_size = weight.shape[shard_dim] // 2
+    shard = weight.narrow(shard_dim, 0, shard_size)
+    if quantization == "nvfp4":
+        tp_weight, tp_block_scale, tp_global_scale = _quantize_moe_weight_to_nvfp4(
+            shard, tp_group
+        )
+    else:
+        tp_weight, tp_global_scale = _quantize_moe_weight_per_tensor_fp8(
+            shard, tp_group
+        )
+
+    if shard_dim == 1:
+        expected_weight = ep_weight[:, :shard_size]
+        if quantization == "nvfp4":
+            expected_block_scale = ep_block_scale[:, :shard_size]
+    else:
+        packing = 2 if quantization == "nvfp4" else 1
+        expected_weight = ep_weight[:, :, : shard_size // packing]
+        if quantization == "nvfp4":
+            expected_block_scale = ep_block_scale[:, :, : shard_size // 16]
+
+    assert torch.equal(tp_weight, expected_weight)
+    if quantization == "nvfp4":
+        assert torch.equal(tp_block_scale, expected_block_scale)
+    assert torch.equal(tp_global_scale, ep_global_scale)
 
 
 @pytest.mark.skipif(
