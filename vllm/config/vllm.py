@@ -32,6 +32,7 @@ from .cache import CacheConfig
 from .compilation import CompilationConfig, CompilationMode, CUDAGraphMode
 from .device import DeviceConfig
 from .diffusion import DiffusionConfig
+from .ec_manager_config import EncoderCacheManagerConfig
 from .ec_transfer import ECTransferConfig
 from .kernel import KernelConfig
 from .kv_events import KVEventsConfig
@@ -187,10 +188,10 @@ def enable_norm_pad_fusion(cfg: "VllmConfig") -> bool:
 
 
 def enable_mla_dual_rms_norm_fusion(cfg: "VllmConfig") -> bool:
-    """Enable MLA dual RMS norm fusion when AITer has fused_qk_rmsnorm."""
-    from vllm._aiter_ops import check_aiter_fused_qk_rmsnorm, rocm_aiter_ops
+    """Enable MLA dual RMS norm fusion on ROCm with AITER."""
+    from vllm._aiter_ops import rocm_aiter_ops
 
-    return rocm_aiter_ops.is_enabled() and check_aiter_fused_qk_rmsnorm()
+    return rocm_aiter_ops.is_enabled()
 
 
 def enable_qk_norm_rope_kvcache(cfg: "VllmConfig") -> bool:
@@ -367,6 +368,10 @@ class VllmConfig:
     """The configurations for event publishing."""
     ec_transfer_config: ECTransferConfig | None = None
     """The configurations for distributed EC cache transfer."""
+    ec_manager_config: EncoderCacheManagerConfig = Field(
+        default_factory=EncoderCacheManagerConfig
+    )
+    """The configurations for custom encoder cache manager."""
     reasoning_config: ReasoningConfig | None = None
     """The configurations for reasoning model."""
     # some opaque config, only used to provide additional information
@@ -2130,9 +2135,10 @@ class VllmConfig:
         model_config = self.model_config
         speculative_config = self.speculative_config
 
-        if self.parallel_config.prefill_context_parallel_size > 1:
+        if self.parallel_config.prefill_context_parallel_size > 1 and not (
+            model_config is not None and model_config.use_mla
+        ):
             unsupported.append("prefill context parallelism")
-
         if self.compilation_config.mode == CompilationMode.STOCK_TORCH_COMPILE:
             unsupported.append("stock torch.compile")
 
