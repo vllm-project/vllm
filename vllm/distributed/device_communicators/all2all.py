@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import contextlib
 import threading
 from dataclasses import dataclass
 from typing import Any
@@ -13,6 +14,7 @@ from vllm.distributed.utils import StatelessProcessGroup
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.utils.flashinfer import (
+    has_flashinfer_moe_ep,
     has_flashinfer_nvlink_one_sided,
     has_flashinfer_nvlink_two_sided,
 )
@@ -1024,3 +1026,119 @@ class DeepEPV2All2AllManager(All2AllManagerBase):
             for _, handle in self.handle_cache._cache.items():
                 handle.destroy()
             self.handle_cache._cache.clear()
+
+
+class FlashInferEPAll2AllManagerBase(All2AllManagerBase):
+    """All2All based on FlashInfer's `moe_ep` API (NCCL-EP transport).
+
+    Unlike the raw `nccl.ep` integration, this drives NVIDIA's nccl4py EP kernels
+    through the packaged, versioned `flashinfer.moe_ep` wrapper (create_fleet /
+    Fleet.create_handle / Handle.dispatch|combine|complete). The manager owns a
+    lazily-created, config-cached `Fleet` (durable transport sizing); the
+    prepare/finalize objects create a fresh per-forward `Handle` from it.
+
+    Subclasses fix the EP algorithm (LL vs HT) and the transport
+    (`_transport`: "nccl_ep" or "nixl_ep").
+    """
+
+    _transport = "nccl_ep"
+
+    def __init__(self, cpu_group, tcp_store_group=None):
+        assert has_flashinfer_moe_ep(self._transport), (
+            f"flashinfer.moe_ep with a built {self._transport} backend is "
+            "required for the flashinfer_ep_* all2all backends. Install "
+            "flashinfer with BUILD_NCCL_EP=1 / BUILD_NIXL_EP=1 "
+            "(see docker/Dockerfile.flashinfer-ep-pytorch)."
+        )
+        super().__init__(cpu_group, tcp_store_group)
+        self.support_fault_tolerance = False
+        # Config-keyed Fleet cache (different layers may size differently).
+        self._fleets: dict[tuple, Any] = {}
+
+    def _algorithm(self):
+        raise NotImplementedError
+
+    def _make_fleet(self, args: dict[str, Any]):
+        from flashinfer.moe_ep import (
+            BootstrapConfig,
+            EpLayout,
+            FleetAlgoKnobAllocator,
+            FleetParams,
+            create_fleet,
+        )
+
+        # GAP 1: mirror the EP process group so FlashInfer shares vLLM's EP
+        # membership instead of bootstrapping an unrelated WORLD comm. get_ep_group
+        # is valid here (get_handle runs after EP-group construction).
+        ep_pg = get_ep_group().device_group
+        bootstrap = BootstrapConfig(
+            world_size=self.world_size,
+            rank=self.rank,
+            stream=0,
+            process_group=ep_pg,
+        )
+        params = FleetParams(
+            num_experts=args["num_global_experts"],
+            max_tokens_per_rank=args["max_num_tokens_per_dp_rank"],
+            token_hidden_size=args["token_hidden_size"],
+            dtype_bytes=args.get("dtype_bytes", 2),
+            algorithm=self._algorithm(),
+            # HT ignores layout (always FLAT); LL uses EXPERT_MAJOR (BatchedExperts).
+            layout=EpLayout.EXPERT_MAJOR,
+        )
+        # GAP 2: draw EP transport buffers from torch's caching allocator so they
+        # count against vLLM's memory budget rather than a hidden cudaMalloc arena.
+        # (nixl_ep does not consume this knob yet — its Buffer owns the RDMA
+        # arena; harmless to pass.)
+        knobs = [FleetAlgoKnobAllocator(torch_caching=True)]
+        return create_fleet(bootstrap, params, knobs, backend=self._transport)
+
+    def get_handle(self, kwargs):
+        """Return the (cached) FlashInfer `Fleet` for this MoE config.
+
+        `kwargs` is the `all_to_all_args` dict built in
+        `maybe_make_prepare_finalize` (num_global_experts /
+        max_num_tokens_per_dp_rank / token_hidden_size / ...).
+        """
+        key = tuple(sorted(kwargs.items()))
+        fleet = self._fleets.get(key)
+        if fleet is None:
+            logger.debug("Creating FlashInfer EP fleet with args %s", kwargs)
+            fleet = self._make_fleet(kwargs)
+            self._fleets[key] = fleet
+        return fleet
+
+    def destroy(self):
+        for fleet in self._fleets.values():
+            with contextlib.suppress(Exception):
+                fleet.destroy()
+        self._fleets.clear()
+
+
+class FlashInferEPLLAll2AllManager(FlashInferEPAll2AllManagerBase):
+    """FlashInfer moe_ep low-latency (EXPERT_MAJOR / BatchedExperts)."""
+
+    def _algorithm(self):
+        from flashinfer.moe_ep import EpAlgorithm
+
+        return EpAlgorithm.LOW_LATENCY
+
+
+class FlashInferEPHTAll2AllManager(FlashInferEPAll2AllManagerBase):
+    """FlashInfer moe_ep high-throughput (FLAT / Standard)."""
+
+    def _algorithm(self):
+        from flashinfer.moe_ep import EpAlgorithm
+
+        return EpAlgorithm.HIGH_THROUGHPUT
+
+
+class FlashInferEPNixlAll2AllManager(FlashInferEPLLAll2AllManager):
+    """FlashInfer moe_ep low-latency over the NIXL-EP (UCX/GDAKI) transport.
+
+    Same LL EXPERT_MAJOR / BatchedExperts contract as the NCCL-EP LL manager —
+    the prepare/finalize adapter is shared — only the `flashinfer.moe_ep`
+    transport differs. The fleet derives its rendezvous store from the EP
+    process group (no separate TCPStore needed)."""
+
+    _transport = "nixl_ep"

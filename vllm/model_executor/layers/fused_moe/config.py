@@ -1080,8 +1080,29 @@ class FusedMoEParallelConfig:
         )
 
     @property
+    def use_flashinfer_ep_ll_kernels(self):
+        # Both names drive the same LL (EXPERT_MAJOR / BatchedExperts) adapter;
+        # they differ only in the flashinfer.moe_ep transport (NCCL-EP vs
+        # NIXL-EP), selected by the all2all manager.
+        return self.use_all2all_kernels and self.all2all_backend in (
+            "flashinfer_ep_low_latency",
+            "flashinfer_ep_nixl",
+        )
+
+    @property
+    def use_flashinfer_ep_ht_kernels(self):
+        return (
+            self.use_all2all_kernels
+            and self.all2all_backend == "flashinfer_ep_high_throughput"
+        )
+
+    @property
     def use_batched_activation_format(self):
-        return self.use_deepep_ll_kernels or self.use_nixl_ep_kernels
+        return (
+            self.use_deepep_ll_kernels
+            or self.use_nixl_ep_kernels
+            or self.use_flashinfer_ep_ll_kernels
+        )
 
     @property
     def needs_round_robin_routing_tables(self):
@@ -1434,6 +1455,14 @@ class FusedMoEConfig:
     @property
     def use_fi_nvl_one_sided_kernels(self):
         return self.moe_parallel_config.use_fi_nvl_one_sided_kernels
+
+    @property
+    def use_flashinfer_ep_ll_kernels(self):
+        return self.moe_parallel_config.use_flashinfer_ep_ll_kernels
+
+    @property
+    def use_flashinfer_ep_ht_kernels(self):
+        return self.moe_parallel_config.use_flashinfer_ep_ht_kernels
 
     @property
     def use_ag_rs_all2all_kernels(self):

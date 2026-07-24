@@ -50,6 +50,9 @@ All2AllBackend = Literal[
     "flashinfer_all2allv",  # temporary alias for flashinfer_nvlink_two_sided
     "flashinfer_nvlink_two_sided",
     "flashinfer_nvlink_one_sided",
+    "flashinfer_ep_low_latency",  # flashinfer.moe_ep (NCCL-EP) low-latency
+    "flashinfer_ep_high_throughput",  # flashinfer.moe_ep (NCCL-EP) high-throughput
+    "flashinfer_ep_nixl",  # flashinfer.moe_ep (NIXL-EP) low-latency
 ]
 
 
@@ -193,7 +196,11 @@ class ParallelConfig:
     - "mori_low_latency": MoRI EP with InterNodeV1LL for multi-node
     - "nixl_ep": Use nixl-ep kernels
     - "flashinfer_nvlink_two_sided": Use flashinfer two-sided kernels for mnnvl
-    - "flashinfer_nvlink_one_sided": Use flashinfer high-throughput a2a kernels"""
+    - "flashinfer_nvlink_one_sided": Use flashinfer high-throughput a2a kernels
+    - "flashinfer_ep_low_latency": flashinfer.moe_ep low-latency (NCCL-EP)
+    - "flashinfer_ep_high_throughput": flashinfer.moe_ep high-throughput
+      (NCCL-EP)
+    - "flashinfer_ep_nixl": flashinfer.moe_ep low-latency (NIXL-EP)"""
 
     max_parallel_loading_workers: int | None = Field(default=None, ge=1)
     """Maximum number of parallel loading workers when loading model
@@ -669,11 +676,18 @@ class ParallelConfig:
 
     @property
     def use_batched_dp_moe(self) -> bool:
+        # Batched-activation-format (BatchedExperts) backends: the whole per-rank
+        # batch lands in a padded [local_experts, max_tokens*world, hidden] buffer,
+        # so the scheduler budget must stay small (256) — otherwise every fill/
+        # activation/GEMM pads to the full budget (e.g. 8192*8 rows) and the EP
+        # transport sizes its slot buffers to match.
         return (
             self.all2all_backend
             in (
                 "deepep_low_latency",
                 "nixl_ep",
+                "flashinfer_ep_low_latency",
+                "flashinfer_ep_nixl",
             )
             and self.enable_expert_parallel
             and self.data_parallel_size > 1

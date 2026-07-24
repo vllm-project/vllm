@@ -54,6 +54,15 @@ if current_platform.is_cuda_alike():
             NIXL_EP_QUANT_BLOCK_SHAPE,
             NixlEPPrepareAndFinalize,
         )
+    from vllm.utils.flashinfer import has_flashinfer_moe_ep
+
+    if has_flashinfer_moe_ep("nccl_ep") or has_flashinfer_moe_ep("nixl_ep"):
+        from .prepare_finalize.flashinfer_ep_ht import (
+            FlashInferEPHTPrepareAndFinalize,
+        )
+        from .prepare_finalize.flashinfer_ep_ll import (
+            FlashInferEPLLPrepareAndFinalize,
+        )
 
 
 def get_ep_all2all_manager(eep_stage: bool = False) -> Any:
@@ -356,6 +365,41 @@ def maybe_make_prepare_finalize(
             global_to_physical=global_to_physical,
             physical_to_global=physical_to_global,
             local_expert_global_ids=local_expert_global_ids,
+        )
+
+    elif moe.use_flashinfer_ep_ll_kernels:
+        # FlashInfer moe_ep low-latency (EXPERT_MAJOR / BatchedExperts).
+        all_to_all_args = dict(
+            max_num_tokens_per_dp_rank=moe.max_num_tokens,
+            token_hidden_size=moe.hidden_dim,
+            num_ep_ranks=all2all_manager.world_size,
+            num_global_experts=moe.num_experts,
+            num_local_experts=moe.num_experts // all2all_manager.world_size,
+        )
+        fleet = all2all_manager.get_handle(all_to_all_args)
+        prepare_finalize = FlashInferEPLLPrepareAndFinalize(
+            fleet,
+            max_tokens_per_rank=moe.max_num_tokens,
+            num_dispatchers=all2all_manager.world_size,
+            num_local_experts=moe.num_experts // all2all_manager.world_size,
+        )
+
+    elif moe.use_flashinfer_ep_ht_kernels:
+        # FlashInfer moe_ep high-throughput (FLAT / Standard).
+        all_to_all_args = dict(
+            max_num_tokens_per_dp_rank=moe.max_num_tokens,
+            token_hidden_size=moe.hidden_dim,
+            num_ep_ranks=all2all_manager.world_size,
+            num_global_experts=moe.num_experts,
+            num_local_experts=moe.num_experts // all2all_manager.world_size,
+        )
+        fleet = all2all_manager.get_handle(all_to_all_args)
+        prepare_finalize = FlashInferEPHTPrepareAndFinalize(
+            fleet,
+            max_tokens_per_rank=moe.max_num_tokens,
+            num_dispatchers=all2all_manager.world_size,
+            num_local_experts=moe.num_experts // all2all_manager.world_size,
+            hidden_size=moe.hidden_dim,
         )
 
     return prepare_finalize
