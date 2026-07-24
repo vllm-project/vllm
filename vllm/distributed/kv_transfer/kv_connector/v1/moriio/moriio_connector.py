@@ -553,16 +553,25 @@ class MoRIIOConnectorScheduler:
                         if num_external_tokens > 0:
                             # Get unhashed blocks to pull from remote.
                             local_block_ids = blocks.get_block_ids()[0]
-                            assert len(local_block_ids) <= len(remote_block_ids)
-                            if len(local_block_ids) != len(remote_block_ids):
-                                local_block_ids = remote_block_ids[
+                            if len(local_block_ids) > len(remote_block_ids):
+                                raise ValueError(
+                                    "MoRIIO READ decode allocated more local "
+                                    "blocks than prefill remote blocks: "
+                                    f"{len(local_block_ids)} > "
+                                    f"{len(remote_block_ids)}"
+                                )
+                            if len(local_block_ids) < len(remote_block_ids):
+                                remote_block_ids = remote_block_ids[
                                     -len(local_block_ids) :
                                 ]
+                                params["remote_block_ids"] = remote_block_ids
                         else:
-                            # If remote_blocks and num_external_tokens = 0, we have
-                            # a full prefix cache hit on the D worker. We need to call
-                            # send_notify in _read_blocks to free the memory on the P.
+                            # Full prefix cache hit on decode. No KV data needs
+                            # to be read, but prefill still needs a release
+                            # notification for the held remote blocks.
                             local_block_ids = []
+                            remote_block_ids = []
+                            params["remote_block_ids"] = remote_block_ids
 
                         self._reqs_need_recv[request.request_id] = (
                             request,
@@ -1978,6 +1987,29 @@ class MoRIIOConnectorWorker:
         remote_tp_size: int,
     ) -> None:
         if self.mode == MoRIIOMode.WRITE:
+            return
+
+        if len(local_block_ids) != len(remote_block_ids):
+            raise ValueError(
+                "MoRIIO READ requires matched local/remote block lists after "
+                "prefix-cache slicing: "
+                f"{len(local_block_ids)} != {len(remote_block_ids)}"
+            )
+
+        if not local_block_ids:
+            self.moriio_wrapper.send_notify(
+                transfer_id,
+                remote_host,
+                str(remote_notify_port + self._remote_tp_rank(remote_tp_size)),
+                message_type="release",
+                message_fields={"consumer_tp_size": self.world_size},
+            )
+            logger.info(
+                "MoRIIO READ full prefix hit: released prefill blocks without "
+                "remote read for request %s transfer %s",
+                request_id,
+                transfer_id,
+            )
             return
 
         dp0_engine_id = self.get_engine_name_with_dp(dst_engine_id, 0)
