@@ -53,6 +53,7 @@ from .utils import (
     WeightsMapper,
     init_vllm_registered_model,
     maybe_prefix,
+    register_suppress_token_ids,
 )
 
 # Re-export so tests/code targeting the unified variant can import from here
@@ -347,7 +348,13 @@ class Gemma4UnifiedForConditionalGeneration(Gemma4ForConditionalGeneration):
         self.set_eplb_state = self.language_model.set_eplb_state
 
         gen_cfg = vllm_config.model_config.try_get_generation_config()
-        self._suppress_token_ids = gen_cfg.get("suppress_tokens") if gen_cfg else None
+        suppress_token_ids = gen_cfg.get("suppress_tokens") if gen_cfg else None
+        register_suppress_token_ids(
+            self,
+            suppress_token_ids,
+            self.language_model.lm_head.weight,
+            text_config.vocab_size,
+        )
 
     # ------------------------------------------------------------------ #
     # Multimodal processing (encoder-free overrides)

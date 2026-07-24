@@ -115,7 +115,6 @@ class Gemma4Proposer(SpecDecodeBaseProposer):
     def _setup_centroids_cuda_graphs(self) -> None:
         """Capture CUDA graphs for centroids get_top_tokens at key sizes."""
         masked_emb = self.model.masked_embedding
-        lm_head_weight = self.model._get_full_lm_head_weight()
 
         for size in [1, 2, 4, 8, 16, 32, 64]:
             static_input = torch.zeros(
@@ -125,15 +124,12 @@ class Gemma4Proposer(SpecDecodeBaseProposer):
                 device=self.device,
             )
             for _ in range(3):
-                masked_emb.get_top_tokens(static_input, lm_head_weight)
+                self.model.get_top_tokens(static_input)
             torch.accelerator.synchronize()
 
             g = torch.cuda.CUDAGraph()
             with torch.cuda.graph(g):
-                static_output = masked_emb.get_top_tokens(
-                    static_input,
-                    lm_head_weight,
-                )
+                static_output = self.model.get_top_tokens(static_input)
             self._centroids_graphs[size] = g
             self._centroids_inputs[size] = static_input
             self._centroids_outputs[size] = static_output
