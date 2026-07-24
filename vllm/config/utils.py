@@ -200,6 +200,8 @@ def get_attr_docs(cls: type[Any]) -> dict[str, str]:
 
 @runtime_checkable
 class SupportsHash(Protocol):
+    def compile_factors(self) -> dict[str, object]: ...
+
     def compute_hash(self) -> str: ...
 
 
