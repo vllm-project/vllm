@@ -55,7 +55,6 @@ hooks:
 plugins:
   - meta
   - search
-  # For content generated at build time
   - gen-files:
       scripts:
         - docs/mkdocs/gen_files/generate_examples.py
