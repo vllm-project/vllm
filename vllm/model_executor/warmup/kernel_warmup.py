@@ -72,7 +72,7 @@ def _warmup_ll_bf16_router_gemm() -> None:
     )
 
 
-def kernel_warmup(worker: "Worker"):
+def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
     from vllm.model_executor.warmup.minimax_m3_msa_warmup import (
         minimax_m3_msa_warmup,
     )
@@ -97,6 +97,22 @@ def kernel_warmup(worker: "Worker"):
     )
 
     # Run next so input-prep kernels JIT against pristine runner state.
+    if worker.vllm_config.kernel_config.enable_jit_warmup:
+        fa4_cutedsl_warmup(worker)
+        sparse_mla_triton_warmup(worker)
+
+    if current_platform.has_device_capability(90):
+        _warmup_ll_bf16_router_gemm()
+
+    if worker.vllm_config.kernel_config.enable_cutedsl_warmup:
+        # TODO(roberto): Remove after registered CuTeDSL warmups are migrated
+        # to the shared JIT warmup infrastructure.
+        # https://github.com/vllm-project/vllm/pull/47451
+        cutedsl_warmup()
+
+    if process_local_only:
+        return
+
     flashinfer_sparse_mla_decode_autotune_warmup(worker)
     deepseek_v4_sparse_mla_attention_warmup(worker)
 
@@ -121,9 +137,6 @@ def kernel_warmup(worker: "Worker"):
         logger.info("Skipping FlashInfer autotune because it is disabled.")
     elif has_flashinfer() and current_platform.has_device_capability(90):
         flashinfer_autotune(worker.model_runner)
-
-    if current_platform.has_device_capability(90):
-        _warmup_ll_bf16_router_gemm()
 
     # FlashInfer attention warmup
     # Only warmup if the model has FlashInfer attention groups
@@ -156,16 +169,6 @@ def kernel_warmup(worker: "Worker"):
             force_attention=True,
             create_mixed_batch=True,
         )
-
-    if worker.vllm_config.kernel_config.enable_cutedsl_warmup:
-        # TODO(roberto): Remove after registered CuTeDSL warmups are migrated
-        # to the shared JIT warmup infrastructure.
-        # https://github.com/vllm-project/vllm/pull/47451
-        cutedsl_warmup()
-
-    if worker.vllm_config.kernel_config.enable_jit_warmup:
-        fa4_cutedsl_warmup(worker)
-        sparse_mla_triton_warmup(worker)
 
 
 def _flashinfer_autotune_skip_ops(runner: "GPUModelRunner") -> set[str] | None:

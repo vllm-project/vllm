@@ -371,6 +371,9 @@ class DPCoordinatorProc:
                     eng_index = outputs.engine_index
                     scheduler_stats = outputs.scheduler_stats
                     if scheduler_stats:
+                        # Elastic EP stats may arrive while the engine list changes.
+                        if eng_index >= len(self.engines):
+                            continue
                         # 1. Updated request load stats - update our local
                         # state with these.
                         stats = self.engines[eng_index].request_counts
