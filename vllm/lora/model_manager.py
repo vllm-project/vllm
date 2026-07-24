@@ -387,6 +387,8 @@ class LoRAModelManager:
         self._registered_adapters.clear()
         self.lora_index_to_id = [None] * self.lora_slots
         self._active_adapters.clear()
+        self._last_mapping = None
+        self._last_slot_layout = None
 
     def _create_lora_modules(self):
         def _parent_module(module_name: str) -> str:
