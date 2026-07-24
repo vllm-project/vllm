@@ -2422,7 +2422,14 @@ class FlashInferImpl(AttentionImpl):
                 q_len_per_req = attn_metadata.decode.q_len_per_req
                 q_cu_seq_lens = attn_metadata.decode.q_cu_seq_lens
 
-                if decode_with_trtllm_gen:
+                # The dedicated XQA API is only used when the FlashInfer build
+                # exposes it; otherwise XQA falls back to the shared TRTLLM decode
+                # call with backend="xqa" (single-token decode, as before this
+                # feature). Spec/ragged/sinks/mask are gated off in that case, so
+                # the fallback only ever handles q_len == 1 without a mask.
+                use_dedicated_xqa = decode_with_xqa and has_flashinfer_xqa_decode()
+
+                if not use_dedicated_xqa:
                     if output.dtype == FP4_DTYPE:
                         assert self.o_sf_scale is not None
                         out = FP4Tensor(
@@ -2454,6 +2461,13 @@ class FlashInferImpl(AttentionImpl):
                             device=decode_query.device,
                         )
 
+                    # Legacy XQA (backend="xqa") uses model-dtype Q with FP8 KV,
+                    # so its bmm1 scale omits q_scale unless Q is actually FP8.
+                    trtllm_bmm1_scale = (
+                        self.get_xqa_bmm1_scale(layer, attn_metadata.q_data_type_decode)
+                        if decode_with_xqa
+                        else self.bmm1_scale
+                    )
                     trtllm_batch_decode_with_kv_cache(
                         query=decode_query,
                         kv_cache=(
@@ -2463,7 +2477,7 @@ class FlashInferImpl(AttentionImpl):
                         block_tables=block_tables_decode,
                         seq_lens=seq_lens_decode,
                         max_seq_len=attn_metadata.decode.max_seq_len,
-                        bmm1_scale=self.bmm1_scale,
+                        bmm1_scale=trtllm_bmm1_scale,
                         bmm2_scale=self.bmm2_scale,
                         window_left=self.window_left,
                         sinks=self.sinks,
@@ -2513,7 +2527,7 @@ class FlashInferImpl(AttentionImpl):
                         workspace_buffer=workspace_buffer,
                         block_tables=block_tables_decode,
                         seq_lens=seq_lens_decode,
-                        max_seqlen=attn_metadata.decode.max_seq_len,
+                        max_seq_len=attn_metadata.decode.max_seq_len,
                         bmm1_scale=bmm1_scale,
                         bmm2_scale=self.bmm2_scale,
                         window_left=self.window_left,
