@@ -130,7 +130,7 @@ fn build_video_item(
         let keep_on_cpu = support.spec.keep_on_cpu_keys.contains(&key);
         let (value, field) = match support.spec.field_layout_for(&key) {
             Some(FieldLayout::Batched) => (
-                tensor.batched_value_at(0)?,
+                tensor.batched_wire_value_at(0)?,
                 MmField::Batched(MmBatchedField { keep_on_cpu }),
             ),
             Some(FieldLayout::Flat { .. }) => {
@@ -138,7 +138,7 @@ fn build_video_item(
                     .first_dim()
                     .ok_or_else(|| multimodal!("flat video input `{key}` is not a tensor"))?;
                 (
-                    tensor,
+                    (&tensor).try_into()?,
                     MmField::Flat(MmFlatField {
                         slices: vec![MmSlice::Slice(SliceSpec {
                             start: Some(0),
@@ -151,7 +151,7 @@ fn build_video_item(
                 )
             }
             None => (
-                tensor,
+                (&tensor).try_into()?,
                 MmField::Shared(MmSharedField {
                     batch_size: 1,
                     keep_on_cpu,
@@ -162,7 +162,7 @@ fn build_video_item(
         data.insert(
             key,
             MmFieldElem {
-                data: Some(value.try_into()?),
+                data: Some(value),
                 field,
             },
         );
