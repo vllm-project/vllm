@@ -31,7 +31,8 @@ QUANT_KEY_NAMES: dict[str, QuantKey] = {
     "fp8_per_block_static": kFp8Static128BlockSym,
     "fp8_per_block_dynamic": kFp8Dynamic128Sym,
     "mxfp8": kMxfp8Dynamic,
-    "mxfp4": kMxfp4Dynamic,
+    "mxfp4_static": kMxfp4Static,
+    "mxfp4_dynamic": kMxfp4Dynamic,
     "int8_per_channel_static": kInt8StaticChannelSym,
 }
 
