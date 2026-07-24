@@ -48,6 +48,9 @@ class MLAPrefillBackendEnum(Enum, metaclass=_MLAPrefillBackendEnumMeta):
         "vllm.v1.attention.backends.mla.prefill.tokenspeed_mla."
         "TokenspeedMLAPrefillBackend"
     )
+    AITER_ASM = (
+        "vllm.v1.attention.backends.mla.prefill.aiter_asm.AiterAsmPrefillBackend"
+    )
     ROCM_AITER_FA = (
         "vllm.v1.attention.backends.mla.prefill.aiter_flash_attn."
         "AiterFlashAttnPrefillBackend"
