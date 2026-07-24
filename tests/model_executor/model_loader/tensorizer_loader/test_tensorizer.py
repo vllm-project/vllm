@@ -20,6 +20,7 @@ from vllm.engine.arg_utils import EngineArgs
 from vllm.model_executor.model_loader.tensorizer import (
     TensorizerConfig,
     TensorSerializer,
+    _get_deserialization_kwargs,
     is_vllm_tensorized,
     open_stream,
     tensorize_vllm_model,
@@ -103,6 +104,28 @@ def write_keyfile(keyfile_path: str):
     pathlib.Path(keyfile_path).parent.mkdir(parents=True, exist_ok=True)
     with open(keyfile_path, "wb") as f:
         f.write(encryption_params.key)
+
+
+def test_deserialization_kwargs_include_dtype_for_unquantized_model():
+    config = TensorizerConfig(tensorizer_uri="vllm")
+    config.dtype = torch.float16
+    config.hf_config = type("HFConfig", (), {"quantization_config": None})()
+
+    kwargs = _get_deserialization_kwargs(config, config._construct_tensorizer_args())
+
+    assert kwargs["dtype"] is torch.float16
+
+
+def test_deserialization_kwargs_preserve_dtype_for_quantized_model():
+    config = TensorizerConfig(tensorizer_uri="vllm")
+    config.dtype = torch.float16
+    config.hf_config = type(
+        "HFConfig", (), {"quantization_config": {"quant_method": "awq"}}
+    )()
+
+    kwargs = _get_deserialization_kwargs(config, config._construct_tensorizer_args())
+
+    assert "dtype" not in kwargs
 
 
 @pytest.mark.skipif(not is_curl_installed(), reason="cURL is not installed")
