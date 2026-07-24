@@ -44,7 +44,10 @@ from vllm.distributed.eplb.rebalance_execute import rearrange_expert_weights_inp
 from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.fused_moe import FusedMoE, MoERunner, fused_experts
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
-from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
+from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEParallelConfig,
+    FusedMoEQuantConfig,
+)
 from vllm.model_executor.layers.fused_moe.router.router_factory import (
     create_fused_moe_router,
 )
@@ -93,6 +96,31 @@ PARALLEL_COMBOS = [
 
 # TODO: should this even be set manually?  let oracles handle this
 BACKENDS = ["allgather_reducescatter"]
+
+
+@pytest.mark.parametrize(
+    ("activation_format", "expected_batched"),
+    [("standard", False), ("batched", True)],
+)
+def test_nccl_ep_activation_format_selection(activation_format, expected_batched):
+    config = FusedMoEParallelConfig(
+        tp_size=1,
+        pcp_size=1,
+        dp_size=2,
+        ep_size=2,
+        tp_rank=0,
+        pcp_rank=0,
+        dp_rank=0,
+        ep_rank=0,
+        sp_size=1,
+        use_ep=True,
+        all2all_backend="nccl_ep",
+        nccl_ep_activation_format=activation_format,
+        enable_eplb=False,
+    )
+
+    assert config.use_batched_activation_format is expected_batched
+
 
 if has_mori():
     BACKENDS += ["mori_high_throughput", "mori_low_latency"]

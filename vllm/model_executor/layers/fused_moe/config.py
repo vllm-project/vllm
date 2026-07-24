@@ -1042,6 +1042,7 @@ class FusedMoEParallelConfig:
 
     use_ep: bool  # whether to use EP or not
     all2all_backend: str  # all2all backend for MoE communication
+    nccl_ep_activation_format: str
     enable_eplb: bool  # whether to enable expert load balancing
 
     @property
@@ -1081,11 +1082,23 @@ class FusedMoEParallelConfig:
 
     @property
     def use_batched_activation_format(self):
-        return self.use_deepep_ll_kernels or self.use_nixl_ep_kernels
+        return (
+            self.use_deepep_ll_kernels
+            or self.use_nixl_ep_kernels
+            or (
+                self.use_nccl_ep_kernels and self.nccl_ep_activation_format == "batched"
+            )
+        )
 
     @property
     def needs_round_robin_routing_tables(self):
-        return self.use_deepep_ll_kernels or self.use_nixl_ep_kernels
+        return (
+            self.use_deepep_ll_kernels
+            or self.use_nixl_ep_kernels
+            or (
+                self.use_nccl_ep_kernels and self.nccl_ep_activation_format == "batched"
+            )
+        )
 
     @property
     def use_ag_rs_all2all_kernels(self):
@@ -1108,6 +1121,10 @@ class FusedMoEParallelConfig:
     @property
     def use_deepep_v2_kernels(self):
         return self.use_all2all_kernels and self.all2all_backend == "deepep_v2"
+
+    @property
+    def use_nccl_ep_kernels(self):
+        return self.use_all2all_kernels and self.all2all_backend == "nccl_ep"
 
     @staticmethod
     def flatten_tp_across_dp_and_pcp(
@@ -1227,6 +1244,9 @@ class FusedMoEParallelConfig:
                 sp_size=sp_size_,
                 use_ep=False,
                 all2all_backend=vllm_parallel_config.all2all_backend,
+                nccl_ep_activation_format=(
+                    vllm_parallel_config.nccl_ep_activation_format
+                ),
                 enable_eplb=vllm_parallel_config.enable_eplb,
             )
         # DP + EP / TP + EP / DP + TP + EP
@@ -1247,6 +1267,7 @@ class FusedMoEParallelConfig:
             sp_size=sp_size_,
             use_ep=True,
             all2all_backend=vllm_parallel_config.all2all_backend,
+            nccl_ep_activation_format=vllm_parallel_config.nccl_ep_activation_format,
             enable_eplb=vllm_parallel_config.enable_eplb,
         )
 
@@ -1265,6 +1286,7 @@ class FusedMoEParallelConfig:
             sp_size=1,
             use_ep=False,
             all2all_backend="allgather_reducescatter",
+            nccl_ep_activation_format="standard",
             enable_eplb=False,
         )
 
@@ -1446,6 +1468,10 @@ class FusedMoEConfig:
     @property
     def use_deepep_v2_kernels(self):
         return self.moe_parallel_config.use_deepep_v2_kernels
+
+    @property
+    def use_nccl_ep_kernels(self):
+        return self.moe_parallel_config.use_nccl_ep_kernels
 
     @property
     def needs_round_robin_routing_tables(self):

@@ -93,6 +93,7 @@ from vllm.config.parallel import (
     DCPCommBackend,
     DistributedExecutorBackend,
     ExpertPlacementStrategy,
+    NcclEPActivationFormat,
 )
 from vllm.config.scheduler import SchedulerPolicy
 from vllm.config.utils import get_field
@@ -491,6 +492,9 @@ class EngineArgs:
     moe_backend: MoEBackend = KernelConfig.moe_backend
     linear_backend: LinearBackend = KernelConfig.linear_backend
     all2all_backend: All2AllBackend = ParallelConfig.all2all_backend
+    nccl_ep_activation_format: NcclEPActivationFormat = (
+        ParallelConfig.nccl_ep_activation_format
+    )
     enable_elastic_ep: bool = ParallelConfig.enable_elastic_ep
     enable_dbo: bool = ParallelConfig.enable_dbo
     ubatch_size: int = ParallelConfig.ubatch_size
@@ -1106,6 +1110,10 @@ class EngineArgs:
         )
         parallel_group.add_argument(
             "--all2all-backend", **parallel_kwargs["all2all_backend"]
+        )
+        parallel_group.add_argument(
+            "--nccl-ep-activation-format",
+            **parallel_kwargs["nccl_ep_activation_format"],
         )
         parallel_group.add_argument("--enable-dbo", **parallel_kwargs["enable_dbo"])
         parallel_group.add_argument(
@@ -2118,6 +2126,7 @@ class EngineArgs:
             enable_expert_parallel=self.enable_expert_parallel,
             enable_ep_weight_filter=self.enable_ep_weight_filter,
             all2all_backend=self.all2all_backend,
+            nccl_ep_activation_format=self.nccl_ep_activation_format,
             enable_elastic_ep=self.enable_elastic_ep,
             enable_dbo=self.enable_dbo,
             ubatch_size=self.ubatch_size,
