@@ -66,6 +66,19 @@ def _merge_overrides(base: dict | None, override: dict | None) -> dict | None:
     return {**(base or {}), **(override or {})}
 
 
+def _has_structured_output(extra_body: dict[str, Any] | None) -> bool:
+    if not extra_body:
+        return False
+    if "structured_outputs" in extra_body:
+        return True
+
+    response_format = extra_body.get("response_format")
+    return isinstance(response_format, dict) and response_format.get("type") in (
+        "json_object",
+        "json_schema",
+    )
+
+
 TERM_PLOTLIB_AVAILABLE = (importlib.util.find_spec("termplotlib") is not None) and (
     shutil.which("gnuplot") is not None
 )
@@ -2009,11 +2022,13 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
         args.spec_bench_output_len = args.output_len
         args.prefix_repetition_output_len = args.output_len
 
-    # when using random datasets, default to ignoring EOS
-    # so generation runs to the requested length
+    # When using random datasets, default to ignoring EOS so generation runs
+    # to the requested length. Structured-output requests must stop when their
+    # grammar completes; forcing them past EOS produces invalid trailing tokens.
     if (
         args.dataset_name in ("random", "random-mm")
         and args.backend in OPENAI_COMPATIBLE_BACKENDS
+        and not _has_structured_output(args.extra_body)
     ):
         args.ignore_eos = True
 
