@@ -34,17 +34,17 @@ def _get_hasher_factory(
 
     See: https://github.com/vllm-project/vllm/issues/18334
     """
-    algorithm_lower = algorithm.lower()
 
-    if algorithm_lower == "blake3":
+    if algorithm == "blake3":
         from blake3 import blake3
 
         return blake3
-    elif algorithm_lower == "sha256":
+    elif algorithm == "sha256":
         return hashlib.sha256
-    elif algorithm_lower == "sha512":
+    elif algorithm == "sha512":
         return hashlib.sha512
     else:
+        # This should never happen due to config validation
         raise ValueError(f"Unsupported hash algorithm: {algorithm}")
 
 

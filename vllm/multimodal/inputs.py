@@ -227,7 +227,9 @@ Uses a list instead of a tensor if the dimensions of each element do not match.
 
 
 def nested_tensors_equal(
-    a: NestedTensors, b: NestedTensors, check_dtype: bool = True
+    a: NestedTensors,
+    b: NestedTensors,
+    check_dtype: bool = True,
 ) -> bool:
     """
     Equality check between
