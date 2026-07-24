@@ -770,16 +770,9 @@ class ModelConfig:
         hf_config = self.hf_config
         hf_text_config = self.hf_text_config
         if layer_idx is not None:
-            # Heterogeneous configs (e.g. Gemma 4) vary attributes like
-            # head_dim across layers, so resolve the per-layer copy instead
-            # of the ambiguous global config (huggingface/transformers#47384).
-            # `per_layer_config` exists (and is indexable) on every config via
-            # the heterogeneity mixin regardless of whether the config is
-            # actually heterogeneous, so gate on `per_layer_attributes`
-            # instead — it is only non-empty when overrides are declared.
-            if getattr(hf_config, "per_layer_attributes", None):
+            if getattr(hf_config, "is_heterogeneous", False):
                 hf_config = hf_config.per_layer_config[layer_idx]
-            if getattr(hf_text_config, "per_layer_attributes", None):
+            if getattr(hf_text_config, "is_heterogeneous", False):
                 hf_text_config = hf_text_config.per_layer_config[layer_idx]
         convertor_cls = MODEL_ARCH_CONFIG_CONVERTORS.get(
             self.hf_config.model_type, ModelArchConfigConvertorBase
