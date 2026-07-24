@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 //! Tool parser registration and selection boundary for `vllm-chat`.
 
 use std::sync::{Arc, LazyLock};
@@ -7,7 +10,7 @@ pub use vllm_parser::tool::{
     Glm45MoeToolParser, Glm47MoeToolParser, Granite4ToolParser, HermesToolParser, HyV3ToolParser,
     Internlm2ToolParser, KimiK2ToolParser, Llama3JsonToolParser, MinimaxM2ToolParser,
     MinimaxM3ToolParser, MistralToolParser, Phi4MiniJsonToolParser, Qwen3CoderToolParser,
-    Qwen3XmlToolParser, ToolParser, ToolParserError,
+    Qwen3XmlToolParser, SeedOssToolParser, ToolParser, ToolParserError,
 };
 
 use crate::parser::ParserFactory;
@@ -22,6 +25,7 @@ pub mod names {
     pub const GLM45: &str = "glm45";
     pub const GLM47: &str = "glm47";
     pub const GEMMA4: &str = "gemma4";
+    pub const INKLING: &str = "inkling";
     pub const GRANITE4: &str = "granite4";
     pub const HERMES: &str = "hermes";
     pub const HY_V3: &str = "hy_v3";
@@ -37,6 +41,7 @@ pub mod names {
     pub const PHI4_MINI_JSON: &str = "phi4_mini_json";
     pub const QWEN3_CODER: &str = "qwen3_coder";
     pub const QWEN3_XML: &str = "qwen3_xml";
+    pub const SEED_OSS: &str = "seed_oss";
 }
 
 /// Constructor signature for one registered tool parser implementation.
@@ -67,6 +72,7 @@ impl ToolParserFactory {
             .register_parser::<Glm45MoeToolParser>(names::GLM45)
             .register_parser::<Glm47MoeToolParser>(names::GLM47)
             .register_unified_dummy(names::GEMMA4)
+            .register_unified_dummy(names::INKLING)
             .register_parser::<Granite4ToolParser>(names::GRANITE4)
             .register_parser::<HermesToolParser>(names::HERMES)
             .register_parser::<HyV3ToolParser>(names::HY_V3)
@@ -79,7 +85,8 @@ impl ToolParserFactory {
             .register_parser::<MistralToolParser>(names::MISTRAL)
             .register_parser::<Phi4MiniJsonToolParser>(names::PHI4_MINI_JSON)
             .register_parser::<Qwen3XmlToolParser>(names::QWEN3_XML)
-            .register_parser::<Qwen3CoderToolParser>(names::QWEN3_CODER);
+            .register_parser::<Qwen3CoderToolParser>(names::QWEN3_CODER)
+            .register_parser::<SeedOssToolParser>(names::SEED_OSS);
 
         factory
             .register_pattern("mistral-", names::MISTRAL)
@@ -117,7 +124,9 @@ impl ToolParserFactory {
             .register_pattern("minimax-m3", names::MINIMAX_M3)
             .register_pattern("mm-m3", names::MINIMAX_M3)
             .register_pattern("minimax", names::MINIMAX_M2)
-            .register_pattern("mm-m2", names::MINIMAX_M2);
+            .register_pattern("mm-m2", names::MINIMAX_M2)
+            .register_pattern("seed-oss", names::SEED_OSS)
+            .register_pattern("seedoss", names::SEED_OSS);
 
         factory
     }

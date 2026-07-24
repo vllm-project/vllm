@@ -23,6 +23,16 @@ def _convert_req_index_to_global_index_kernel(
     BLOCK_N: tl.constexpr,  # tile width along columns
     HAS_PREFILL: tl.constexpr,
     COUNT_VALID: tl.constexpr,  # whether to count valid indices
+    # When set, scatter valid slots to a contiguous prefix [0, valid_count) using
+    # valid_count_ptr as an atomic slot allocator (DCP filtering leaves interior
+    # -1 gaps; the trtllm-gen sparse kernel reads the first valid_count entries).
+    # Requires COUNT_VALID and an out buffer pre-filled with -1. Order within the
+    # prefix is unspecified (only the selected set matters).
+    COMPACT_TO_FRONT: tl.constexpr,
+    # DCP de-interleave: with DCP_SIZE == 1 these are an exact no-op
+    DCP_SIZE: tl.constexpr,
+    DCP_RANK: tl.constexpr,
+    DCP_INTERLEAVE: tl.constexpr,
     # strides (in elements)
     bt_stride0,
     bt_stride1,
@@ -52,15 +62,27 @@ def _convert_req_index_to_global_index_kernel(
     if HAS_PREFILL:
         prefill_req_id = tl.load(prefill_request_id_ptr + token_id)
         is_prefill = prefill_req_id >= 0
+
+    # DCP de-interleave the global token id into this rank's local slot.
+    # Tokens are interleaved in groups of DCP_INTERLEAVE across ranks. With
+    # DCP_SIZE == 1 (and any interleave) owning_rank == 0 == DCP_RANK (never
+    # remote) and local_idx == tok, so this reduces to the non-DCP path; with
+    # DCP_INTERLEAVE == 1 it reduces to plain round-robin (tok % / // DCP_SIZE).
+    owning_rank = (tok // DCP_INTERLEAVE) % DCP_SIZE
+    is_remote = owning_rank != DCP_RANK
+    local_idx = (
+        tok // (DCP_SIZE * DCP_INTERLEAVE)
+    ) * DCP_INTERLEAVE + tok % DCP_INTERLEAVE
+
     # Compute block id and in-block offset
-    block_id = tok // BLOCK_SIZE
-    inblock_off = tok % BLOCK_SIZE
+    block_id = local_idx // BLOCK_SIZE
+    inblock_off = local_idx % BLOCK_SIZE
 
     # Guard block_table access
     valid_block = (block_id < max_num_blocks_per_req) & (block_id >= 0)
     bt_ptr = block_table_ptr + req * bt_stride0 + block_id * bt_stride1
-    is_invalid_tok |= ~valid_block
-    base = tl.load(bt_ptr, mask=valid_block & ~is_prefill, other=0)
+    is_invalid_tok |= ~valid_block | is_remote
+    base = tl.load(bt_ptr, mask=valid_block & ~is_prefill & ~is_remote, other=0)
     out_val = base * BLOCK_SIZE + inblock_off
 
     # Override with prefill output if prefill is enabled
@@ -72,14 +94,27 @@ def _convert_req_index_to_global_index_kernel(
         out_val = tl.where(is_prefill, prefill_out, out_val)
     out_val = tl.where(is_invalid_tok, -1, out_val)
 
-    # Store results
-    out_ptr_ij = out_ptr + token_id * out_stride0 + indice_id * out_stride1
-    tl.store(out_ptr_ij, out_val)
+    if COMPACT_TO_FRONT:
+        # Scatter valid slots to a contiguous prefix. A per-tile exclusive prefix
+        # sum gives each valid lane a distinct local offset; one atomic add of the
+        # tile's valid count reserves a contiguous base across racing tiles. The
+        # out buffer is pre-filled with -1, so unwritten tail slots stay -1.
+        is_valid = (~is_invalid_tok).to(tl.int32)
+        local_offset = tl.cumsum(is_valid) - is_valid
+        tile_valid_count = tl.sum(is_valid)
+        base = tl.atomic_add(valid_count_ptr + token_id, tile_valid_count)
+        dest = base + local_offset
+        out_ptr_dest = out_ptr + token_id * out_stride0 + dest * out_stride1
+        tl.store(out_ptr_dest, out_val, mask=is_valid == 1)
+    else:
+        # Store results in place (input column == output column).
+        out_ptr_ij = out_ptr + token_id * out_stride0 + indice_id * out_stride1
+        tl.store(out_ptr_ij, out_val)
 
-    # Count valid indices in this tile and atomically add to row total
-    if COUNT_VALID:
-        tile_valid_count = tl.sum((~is_invalid_tok).to(tl.int32))
-        tl.atomic_add(valid_count_ptr + token_id, tile_valid_count)
+        # Count valid indices in this tile and atomically add to row total
+        if COUNT_VALID:
+            tile_valid_count = tl.sum((~is_invalid_tok).to(tl.int32))
+            tl.atomic_add(valid_count_ptr + token_id, tile_valid_count)
 
 
 def triton_convert_req_index_to_global_index(
@@ -93,6 +128,8 @@ def triton_convert_req_index_to_global_index(
     prefill_workspace_request_ids: torch.Tensor | None = None,
     prefill_workspace_starts: torch.Tensor | None = None,
     return_valid_counts: bool = False,
+    out: torch.Tensor | None = None,
+    valid_counts_out: torch.Tensor | None = None,
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
     """
     out[token_id, indice_id] =
@@ -119,6 +156,11 @@ def triton_convert_req_index_to_global_index(
     assert req_id.dtype == torch.int32
     assert block_table.dtype == torch.int32
     assert token_indices.dtype == torch.int32
+    assert req_id.shape[0] == token_indices.shape[0], (
+        f"req_id ({req_id.shape[0]}) and token_indices ({token_indices.shape[0]}) "
+        "must cover the same tokens; the grid is sized by req_id but the output "
+        "is allocated like token_indices, so a longer req_id writes out of bounds"
+    )
     assert token_indices.shape[1] == NUM_TOPK_TOKENS
     assert NUM_TOPK_TOKENS % BLOCK_N == 0, (
         f"NUM_TOPK_TOKENS ({NUM_TOPK_TOKENS}) must be divisible by BLOCK_N ({BLOCK_N})"
@@ -138,14 +180,20 @@ def triton_convert_req_index_to_global_index(
     req_id_c = req_id.contiguous()
     block_table_c = block_table.contiguous()
     token_indices_c = token_indices.contiguous()
-    out = torch.empty_like(token_indices_c)
+    # `out`/`valid_counts_out` allow writing into a stable pre-allocated buffer
+    # (used by the shared-physical-index cache to stay cudagraph-safe).
+    out = torch.empty_like(token_indices_c) if out is None else out
 
     # Allocate valid count buffer if needed (must be zero-initialized for atomics)
     valid_counts: torch.Tensor | None = None
     if return_valid_counts:
-        valid_counts = torch.zeros(
-            num_tokens, dtype=torch.int32, device=token_indices.device
-        )
+        if valid_counts_out is None:
+            valid_counts = torch.zeros(
+                num_tokens, dtype=torch.int32, device=token_indices.device
+            )
+        else:
+            valid_counts = valid_counts_out
+            valid_counts.zero_()
 
     # Strides in elements
     bt_stride0, bt_stride1 = block_table_c.stride()
@@ -176,6 +224,11 @@ def triton_convert_req_index_to_global_index(
         BLOCK_N,
         HAS_PREFILL_WORKSPACE,
         return_valid_counts,
+        False,  # COMPACT_TO_FRONT: keep input column == output column
+        # DCP disabled (no-op de-interleave)
+        1,
+        0,
+        1,
         # strides
         bt_stride0,
         bt_stride1,
@@ -189,3 +242,154 @@ def triton_convert_req_index_to_global_index(
         assert valid_counts is not None
         return out, valid_counts
     return out
+
+
+def triton_filter_and_convert_dcp_index(
+    req_id: torch.Tensor,
+    block_table: torch.Tensor,
+    token_indices: torch.Tensor,
+    dcp_size: int,
+    dcp_rank: int,
+    cp_kv_cache_interleave_size: int = 1,
+    BLOCK_SIZE: int = 64,
+    NUM_TOPK_TOKENS: int = 2048,
+    BLOCK_N: int = 128,
+    return_valid_counts: bool = False,
+    compact_valid_to_front: bool = True,
+) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+    """Filter global per-request indices to this DCP rank's local slots.
+
+    With ``compact_valid_to_front`` (default), the conversion kernel scatters
+    this rank's owned slots to a contiguous prefix ``[0, valid_count)`` and
+    leaves the rest ``-1``. DCP filtering marks non-owned slots ``-1`` and so
+    creates interior gaps; the trtllm-gen sparse kernel reads the first
+    ``valid_count`` entries of each row, so they must be a contiguous prefix.
+    Compaction is fused into the kernel (atomic slot allocator) rather than a
+    separate sort/gather pass. Prefix order is unspecified (only the set matters).
+    """
+    assert dcp_size >= 1
+    assert 0 <= dcp_rank < dcp_size
+    # Interleave groups must align to KV blocks (globally enforced by
+    # VllmConfig: block_size % cp_kv_cache_interleave_size == 0); assert the
+    # local invariant so local_idx // BLOCK_SIZE never straddles a group.
+    assert BLOCK_SIZE % cp_kv_cache_interleave_size == 0, (
+        f"BLOCK_SIZE ({BLOCK_SIZE}) must be divisible by "
+        f"cp_kv_cache_interleave_size ({cp_kv_cache_interleave_size})."
+    )
+    assert req_id.dtype == torch.int32
+    assert block_table.dtype == torch.int32
+    assert token_indices.dtype == torch.int32
+    assert token_indices.shape[1] == NUM_TOPK_TOKENS
+    assert NUM_TOPK_TOKENS % BLOCK_N == 0
+
+    if dcp_size == 1:
+        return triton_convert_req_index_to_global_index(
+            req_id,
+            block_table,
+            token_indices,
+            BLOCK_SIZE=BLOCK_SIZE,
+            NUM_TOPK_TOKENS=NUM_TOPK_TOKENS,
+            BLOCK_N=BLOCK_N,
+            return_valid_counts=return_valid_counts,
+        )
+
+    num_tokens = req_id.shape[0]
+    max_num_blocks_per_req = block_table.shape[1]
+    tiles_per_row = NUM_TOPK_TOKENS // BLOCK_N
+
+    req_id_c = req_id.contiguous()
+    block_table_c = block_table.contiguous()
+    token_indices_c = token_indices.contiguous()
+
+    # The compaction uses the valid-count buffer as an atomic slot allocator, so
+    # it requires counting. Pre-fill out with -1 so the unwritten tail stays -1.
+    count_valid = return_valid_counts or compact_valid_to_front
+    if compact_valid_to_front:
+        out = torch.full_like(token_indices_c, -1)
+    else:
+        out = torch.empty_like(token_indices_c)
+
+    valid_counts: torch.Tensor | None = None
+    if count_valid:
+        valid_counts = torch.zeros(
+            num_tokens, dtype=torch.int32, device=token_indices.device
+        )
+
+    bt_stride0, bt_stride1 = block_table_c.stride()
+    ti_stride0, ti_stride1 = token_indices_c.stride()
+    out_stride0, out_stride1 = out.stride()
+
+    _convert_req_index_to_global_index_kernel[(num_tokens, tiles_per_row)](
+        req_id_c,
+        block_table_c,
+        token_indices_c,
+        out,
+        valid_counts,
+        # No prefill workspace on the DCP decode path.
+        None,
+        None,
+        max_num_blocks_per_req,
+        BLOCK_SIZE,
+        BLOCK_N,
+        False,  # HAS_PREFILL
+        count_valid,
+        compact_valid_to_front,
+        dcp_size,
+        dcp_rank,
+        cp_kv_cache_interleave_size,
+        bt_stride0,
+        bt_stride1,
+        ti_stride0,
+        ti_stride1,
+        out_stride0,
+        out_stride1,
+    )
+
+    if return_valid_counts:
+        assert valid_counts is not None
+        return out, valid_counts
+    return out
+
+
+# --- Physical-index shadow (DSA index_topk_freq > 1) -------------------------
+# GLM-5.2 uses index_topk_freq=4: only ~1/4 of layers write a fresh top-k into
+# the single shared topk_indices_buffer; the rest reuse it. Since block_table
+# and req_id_per_token are constant within a decode step, the physical indices
+# (block_table lookup of the logical top-k) are identical across a freq-group.
+# Fresh layers convert once into a STABLE shadow of the logical buffer and
+# skip layers read it -- eliminating ~3/4 of the per-layer convert kernels.
+#
+# Invariant: shadow[j] == convert(logical[j]) row-wise. Whoever re-arranges
+# the logical buffer (e.g. the MTP draft compact between the multi-token
+# step-0 layout and the single-token steps-1+ layout) must apply the same
+# gather to the shadow.
+#
+# Shadows are registered ONLY at buffer creation time (model init, never
+# inside cudagraph capture) via register_phys_shadow; every other access is
+# the read-only phys_shadow lookup, so addresses are stable across graph
+# replays and no allocation can happen during capture.
+import weakref as _weakref  # noqa: E402
+
+_PHYS_SHADOWS: dict[int, tuple[torch.Tensor, torch.Tensor]] = {}
+
+
+def register_phys_shadow(topk_buf: torch.Tensor) -> None:
+    """Allocate the (physical-index, valid-count) shadow for a logical top-k
+    buffer. Call once where the buffer is created. The finalizer drops the
+    entry with the owning buffer, so a recycled id can never alias a stale
+    shadow."""
+    key = id(topk_buf)
+    if key not in _PHYS_SHADOWS:
+        _PHYS_SHADOWS[key] = (
+            torch.empty_like(topk_buf),
+            torch.empty(topk_buf.shape[0], dtype=torch.int32, device=topk_buf.device),
+        )
+        _weakref.finalize(topk_buf, _PHYS_SHADOWS.pop, key, None)
+
+
+def phys_shadow(
+    topk_buf: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor] | None:
+    """The registered shadow for this buffer, or None if it was never
+    registered. Never allocates; capture-safe."""
+    return _PHYS_SHADOWS.get(id(topk_buf))

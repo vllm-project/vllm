@@ -13,7 +13,8 @@ static inline cpu_attention::Fp8KVCacheDataType parse_fp8_kv_dtype(
 
 bool cpu_attn_has_isa(const std::string& isa) {
   if (isa == "rvv") {
-#if defined(__riscv) && defined(__riscv_v_min_vlen) && __riscv_v_min_vlen == 128
+#if defined(__riscv) && defined(__riscv_v_min_vlen) && \
+    (__riscv_v_min_vlen == 128 || __riscv_v_min_vlen == 256)
     return true;
 #else
     return false;

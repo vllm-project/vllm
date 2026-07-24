@@ -114,6 +114,7 @@ class RoutedExperts(PluggableLayer):
         self.e_score_correction_bias = e_score_correction_bias
         self.apply_router_weight_on_input = apply_router_weight_on_input
         # End random parameters
+        self._loaded_expert_biases: set[str] = set()
 
         self.quant_method = self._get_quant_method(
             self.layer_name,
@@ -691,6 +692,25 @@ class RoutedExperts(PluggableLayer):
 
         expert_data = param.data if full_load else param.data[expert_id]
 
+        if "bias" in weight_name:
+            self._loaded_expert_biases.add(weight_name.rsplit(".", 1)[-1])
+            if shard_id == "w2":
+                expert_data = self._narrow_expert_data_for_padding(
+                    expert_data,
+                    loaded_weight,
+                    hidden_dim=0,
+                )
+                expert_data.copy_(loaded_weight)
+            else:
+                self._load_w13(
+                    shard_id=shard_id,
+                    shard_dim=0,
+                    loaded_weight=loaded_weight,
+                    expert_data=expert_data,
+                    tp_rank=self.moe_config.tp_rank,
+                )
+            return True if return_success else None
+
         # Case input scale: input_scale loading is only supported for fp8
         if "input_scale" in weight_name:
             # this is needed for compressed-tensors only
@@ -886,17 +906,21 @@ class RoutedExperts(PluggableLayer):
                 param_name = weight_name.removeprefix(f"{self.layer_name}.")
                 param = getattr(self, param_name)
                 if is_fused:
+                    # w1 and w3 share one fused tensor; use a local copy so the
+                    # transpose below doesn't mutate loaded_weight across
+                    # iterations (else w3 is transposed twice and wrongly chunked)
+                    fused_weight = loaded_weight
                     if shard_id in {"w1", "w3"}:
-                        if loaded_weight.shape[-1] != unpadded_hidden:
+                        if fused_weight.shape[-1] != unpadded_hidden:
                             # [..., hidden, intermediate] -> [..., intermediate, hidden]
-                            loaded_weight = loaded_weight.transpose(-1, -2)
+                            fused_weight = fused_weight.transpose(-1, -2)
                         # Repurpose expert_id for deconcatenating w1 and w3
-                        experts_shard = loaded_weight.chunk(2, dim=1)[expert_id]
+                        experts_shard = fused_weight.chunk(2, dim=1)[expert_id]
                     else:
-                        if loaded_weight.shape[-2] != unpadded_hidden:
+                        if fused_weight.shape[-2] != unpadded_hidden:
                             # [..., intermediate, hidden] -> [..., hidden, intermediate]
-                            loaded_weight = loaded_weight.transpose(-1, -2)
-                        experts_shard = loaded_weight
+                            fused_weight = fused_weight.transpose(-1, -2)
+                        experts_shard = fused_weight
                     start = 0
                 else:
                     # loaded_weight is a single expert weight, so we add a dummy expert
@@ -907,7 +931,7 @@ class RoutedExperts(PluggableLayer):
                 # Unified loading logic for fused and non-fused experts
                 loaded_experts = experts_shard.unbind()
                 for expert_id, loaded_expert in enumerate(loaded_experts, start=start):
-                    success = self.weight_loader(
+                    success = param.weight_loader(
                         param=param,
                         loaded_weight=loaded_expert,
                         weight_name=weight_name,
