@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import importlib.metadata
 import importlib.util
+import inspect
 import logging
 import sys
 import textwrap
@@ -199,7 +200,7 @@ class MarkdownFormatter(HelpFormatter):
 
     def add_text(self, text: str):
         if text:
-            self._markdown_output.append(f"{text.strip()}\n\n")
+            self._markdown_output.append(f"{inspect.cleandoc(text)}\n\n")
 
     def add_usage(self, usage, actions, groups, prefix=None):
         pass
