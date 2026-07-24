@@ -70,10 +70,16 @@ because they may be unable to write to `/home/vllm` or `/opt/uv/cache`.
 
 The `vllm/vllm-openai` image snapshots the server's Python import state with
 CRIU and restores it on later starts instead of re-paying the import cost.
-This is enabled by default when the container is run with
-`--cap-add=CHECKPOINT_RESTORE --cap-add=SYS_PTRACE`; without those
-capabilities every start is a normal cold start and there is nothing to
-configure or disable.
+This is enabled by default when the container has the privileges CRIU needs:
+`docker run --privileged` is the verified way to grant them
+(`CAP_CHECKPOINT_RESTORE` and `CAP_SYS_PTRACE` for dump/restore, plus
+`CAP_SYS_ADMIN` because CRIU's kernel-feature probe mounts a tmpfs, which
+container seccomp/AppArmor policy also has to allow). Without those
+capabilities every start is a normal cold start with zero snapshot overhead.
+The capability check is necessary but not sufficient: a container that has
+the capabilities but still confines CRIU (default seccomp/AppArmor) pays one
+failed priming attempt on first start and then falls back to a normal cold
+start.
 
 The first privileged start primes the snapshot at normal speed (~546MB under
 `VLLM_SNAPSHOT_ROOT`, default `/root/.cache/vllm/snapshots`); later starts
