@@ -13,11 +13,11 @@ import io
 import time
 from statistics import mean, median
 
+import jiwer
 import pytest
 import soundfile
 import torch
 from datasets import Audio, load_dataset
-from evaluate import load
 from transformers.models.whisper.english_normalizer import EnglishTextNormalizer
 
 from vllm.benchmarks.datasets.datasets import ASRDataset
@@ -202,8 +202,7 @@ def run_evaluation(
     # Compute WER
     predictions = [res[2] for res in results]
     references = [res[3] for res in results]
-    wer = load("wer")
-    wer_score = 100 * wer.compute(references=references, predictions=predictions)
+    wer_score = 100 * jiwer.wer(reference=references, hypothesis=predictions)
     print("WER:", wer_score)
     return wer_score
 
@@ -302,8 +301,7 @@ def run_longform_evaluation(
 
     predictions = [res[2] for res in results]
     references = [res[3] for res in results]
-    wer = load("wer")
-    wer_score = 100 * wer.compute(references=references, predictions=predictions)
+    wer_score = 100 * jiwer.wer(reference=references, hypothesis=predictions)
     print("WER:", wer_score)
     return wer_score
 
