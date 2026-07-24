@@ -155,6 +155,7 @@ class Worker(WorkerBase):
         # is available, since the engine needs a reference to the model.
         self.weight_transfer_engine: WeightTransferEngine | None = None
         self._weight_update_active = False
+        self._weight_update_is_draft = False
 
         # Torch/CUDA profiler. Enabled and configured through profiler_config.
         # Profiler wrapper is created lazily in profile() when start is called,
@@ -1252,6 +1253,7 @@ class Worker(WorkerBase):
             self.weight_transfer_engine.reset_weight_update_target()
             raise
         self._weight_update_active = True
+        self._weight_update_is_draft = is_draft
 
     def update_weights(self, update_info: dict) -> None:
         """
@@ -1295,6 +1297,10 @@ class Worker(WorkerBase):
             self.weight_transfer_engine.finish_weight_update()
             self.weight_transfer_engine.reset_weight_update_target()
             self._weight_update_active = False
+
+        # Weight transfer bypasses GPUModelRunner.reload_weights().
+        if not self._weight_update_is_draft:
+            self.model_runner.reset_lora_state()
 
     def shutdown(self) -> None:
         gc.unfreeze()
