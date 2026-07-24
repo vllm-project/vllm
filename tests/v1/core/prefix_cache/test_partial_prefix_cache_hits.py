@@ -661,10 +661,12 @@ def test_free_cow_retained_blocks_defers_until_copy_step_processed():
     )
     free = Scheduler._free_cow_retained_blocks
 
-    # Copy step still in flight: deferred with its fence.
+    # Copy step still in flight: deferred with its fence. The blocks are
+    # wrapped as a single group in eviction order (the drain frees each group
+    # in its own call without reversing).
     free(mock, list(blocks), fence_seq=3)
     assert not freed
-    assert mock.deferred_frees == deque([(3, blocks[::-1])])
+    assert mock.deferred_frees == deque([(3, [blocks])])
 
     # Copy step processed: freed immediately.
     mock.processed_step_seq = 3

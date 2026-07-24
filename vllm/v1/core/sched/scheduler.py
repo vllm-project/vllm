@@ -321,9 +321,14 @@ class Scheduler(SchedulerInterface):
         # is called once per scheduled step in FIFO order, so these stay in sync.
         self.sched_step_seq = 0
         self.processed_step_seq = 0
-        # FIFO of (fence_seq, blocks): blocks become safe to free once
-        # processed_step_seq >= fence_seq.
-        self.deferred_frees: deque[tuple[int, list[KVCacheBlock]]] = deque()
+        # FIFO of (fence_seq, block_groups): the blocks become safe to free
+        # once processed_step_seq >= fence_seq. Each entry holds one or more
+        # groups; each group is already ordered so that its first block is
+        # evicted first, and each group is freed in its own free_blocks() call.
+        # Keeping groups separate preserves the per-group eviction order that
+        # the immediate-free path (KVCacheCoordinator.free) produces for
+        # multi-group (hybrid) KV cache configs.
+        self.deferred_frees: deque[tuple[int, list[list[KVCacheBlock]]]] = deque()
 
         self.perf_metrics: ModelMetrics | None = None
         if self.log_stats and vllm_config.observability_config.enable_mfu_metrics:
@@ -2249,9 +2254,16 @@ class Scheduler(SchedulerInterface):
         ):
             self.kv_cache_manager.free(request)
             return
-        blocks = self.kv_cache_manager.pop_blocks_for_free(request)
-        if blocks:
-            self.deferred_frees.append((self.sched_step_seq, blocks))
+        block_groups = self.kv_cache_manager.pop_block_groups_for_free(request)
+        # Reverse each group now so that its tail blocks are evicted first, and
+        # keep the groups separate so each is freed in its own free_blocks()
+        # call on drain. This matches the per-manager freeing done by the
+        # immediate-free path (KVCacheCoordinator.free); flattening the groups
+        # and reversing once would change the eviction order for multi-group
+        # (hybrid) KV cache configs.
+        ordered_groups = [group[::-1] for group in block_groups if group]
+        if ordered_groups:
+            self.deferred_frees.append((self.sched_step_seq, ordered_groups))
 
     def _free_cow_retained_blocks(
         self, blocks: list[KVCacheBlock], fence_seq: int
@@ -2262,7 +2274,11 @@ class Scheduler(SchedulerInterface):
         if not self.defer_block_free or fence_seq <= self.processed_step_seq:
             self.kv_cache_manager.block_pool.free_blocks(blocks)
             return
-        self.deferred_frees.append((fence_seq, blocks[::-1]))
+        # CoW-retained blocks are a single list already in eviction order
+        # (matching the immediate free_blocks(blocks) call above). Wrap them as
+        # one group so the drain path frees them in that same order, since the
+        # drain no longer reverses.
+        self.deferred_frees.append((fence_seq, [blocks]))
 
     def _drain_deferred_frees(self):
         """Return deferred blocks whose fence step has completed.
@@ -2275,9 +2291,12 @@ class Scheduler(SchedulerInterface):
             fence, _ = self.deferred_frees[0]
             if fence > self.processed_step_seq:
                 break
-            _, blocks = self.deferred_frees.popleft()
-            # Free in reverse order so that the tail blocks are evicted first.
-            self.kv_cache_manager.block_pool.free_blocks(reversed(blocks))
+            _, block_groups = self.deferred_frees.popleft()
+            # Free each group in its own call. Each group is already ordered so
+            # that its first block is evicted first (tail-first), preserving the
+            # per-group eviction order of the immediate-free path.
+            for group in block_groups:
+                self.kv_cache_manager.block_pool.free_blocks(group)
 
     def get_num_unfinished_requests(self) -> int:
         if self._pause_state == PauseState.PAUSED_ALL:
