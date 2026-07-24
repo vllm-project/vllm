@@ -20,6 +20,7 @@ from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEParallelConfig,
+    GroupScoringFunc,
 )
 from vllm.model_executor.layers.fused_moe.expert_map_manager import (
     ExpertMapManager,
@@ -143,6 +144,7 @@ def FusedMoE(
     runner_args: dict[str, Any] | None = None,
     routed_experts_cls: type[RoutedExperts] | None = None,
     routed_experts_args: dict[str, Any] | None = None,
+    group_scoring_func: GroupScoringFunc | None = None,
 ) -> MoERunner:
     """Factory function for creating MoE execution pipeline.
 
@@ -206,6 +208,7 @@ def FusedMoE(
         runner_args: Additional arguments for runner constructor
         routed_experts_cls: Custom RoutedExperts class (None = use default)
         routed_experts_args: Additional arguments for routed_experts constructor
+        group_scoring_func: Group-score reduction ("max" or "top2")
 
     Returns:
         MoERunner: Configured MoE execution pipeline ready for forward passes
@@ -288,6 +291,7 @@ def FusedMoE(
             use_grouped_topk=use_grouped_topk,
             num_expert_group=num_expert_group,
             topk_group=topk_group,
+            group_scoring_func=group_scoring_func,
             custom_routing_function=custom_routing_function,
             scoring_func=scoring_func,
             # When apply_routed_scale_to_output is True, we set the scaling factor

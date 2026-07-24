@@ -68,7 +68,8 @@ torch::stable::Tensor moe_wna16_gemm(
 std::tuple<torch::stable::Tensor, torch::stable::Tensor> grouped_topk(
     const torch::stable::Tensor& scores, int64_t n_group, int64_t topk_group,
     int64_t topk, bool renormalize, double routed_scaling_factor,
-    const torch::stable::Tensor& bias, int64_t scoring_func);
+    const std::optional<torch::stable::Tensor>& bias, int64_t scoring_func,
+    int64_t group_scoring_func);
 #endif
 
 bool moe_permute_unpermute_supported();

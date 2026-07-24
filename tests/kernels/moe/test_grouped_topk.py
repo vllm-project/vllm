@@ -15,6 +15,7 @@ from vllm.config import (
     get_cached_compilation_config,
     set_current_vllm_config,
 )
+from vllm.model_executor.layers.fused_moe.config import GroupScoringFunc
 from vllm.model_executor.layers.fused_moe.router.grouped_topk_router import (
     GroupedTopk,
     fused_grouped_topk,
@@ -77,6 +78,7 @@ def test_grouped_topk(
             topk_group=topk_group,
             scoring_func=scoring_func,
             routed_scaling_factor=routed_scaling_factor,
+            group_scoring_func="top2",
         )
         assert grouped_topk._forward_method.__name__ == "forward_cuda"
         baseline_topk_weights, baseline_topk_ids = grouped_topk(
@@ -95,9 +97,107 @@ def test_grouped_topk(
             scoring_func=scoring_func,
             routed_scaling_factor=routed_scaling_factor,
             e_score_correction_bias=e_score_correction_bias,
+            group_scoring_func="top2",
         )
 
         torch.testing.assert_close(
             baseline_topk_weights, test_topk_weights, atol=2e-2, rtol=0
         )
         torch.testing.assert_close(baseline_topk_ids, test_topk_ids, atol=0, rtol=0)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda(), reason="This test is skipped on non-CUDA platform."
+)
+@pytest.mark.parametrize("n_token", [1, 25])
+@pytest.mark.parametrize("n_hidden", [128])
+@pytest.mark.parametrize(
+    "n_expert,topk,num_expert_group,topk_group,scoring_func,bias_dtype",
+    [
+        (64, 8, 8, 4, "softmax", None),
+        (64, 8, 8, 4, "softmax", torch.float16),
+        (64, 8, 8, 4, "softmax", torch.bfloat16),
+        (64, 8, 8, 4, "softmax", torch.float32),
+        (256, 8, 16, 4, "softmax", None),
+        (256, 8, 16, 4, "softmax", torch.float16),
+        (256, 8, 16, 4, "softmax", torch.bfloat16),
+        (256, 8, 16, 4, "softmax", torch.float32),
+        (64, 8, 8, 4, "sigmoid", torch.float16),
+        (64, 8, 8, 4, "sigmoid", torch.bfloat16),
+        (64, 8, 8, 4, "sigmoid", torch.float32),
+        (384, 8, 8, 4, "softmax", torch.float16),
+        (384, 8, 8, 4, "softmax", torch.bfloat16),
+        (384, 8, 8, 4, "softmax", torch.float32),
+    ],
+)
+@pytest.mark.parametrize("input_dtype", [torch.bfloat16, torch.float32])
+@pytest.mark.parametrize("group_scoring_func", ["max", "top2"])
+def test_grouped_topk_bias_and_group_scoring_are_independent(
+    monkeypatch: pytest.MonkeyPatch,
+    n_token: int,
+    n_hidden: int,
+    n_expert: int,
+    topk: int,
+    num_expert_group: int,
+    topk_group: int,
+    bias_dtype: torch.dtype | None,
+    group_scoring_func: GroupScoringFunc,
+    scoring_func: str,
+    input_dtype: torch.dtype,
+):
+    """Supported bias dtypes and group reductions match native."""
+    vllm_config = VllmConfig(
+        compilation_config=CompilationConfig(custom_ops=["all", "+grouped_topk"])
+    )
+    get_cached_compilation_config.cache_clear()
+
+    set_random_seed(0)
+    e_score_correction_bias = (
+        torch.randn((n_expert,), dtype=bias_dtype, device="cuda")
+        if bias_dtype is not None
+        else None
+    )
+    hidden_states = torch.randn((n_token, n_hidden), dtype=input_dtype, device="cuda")
+    gating_output = torch.randn((n_token, n_expert), dtype=input_dtype, device="cuda")
+
+    with set_current_vllm_config(vllm_config), monkeypatch.context() as m:
+        m.setenv("VLLM_USE_FUSED_MOE_GROUPED_TOPK", "0")
+        m.setattr(envs, "VLLM_BATCH_INVARIANT", True)
+        grouped_topk_op = GroupedTopk(
+            topk=topk,
+            renormalize=True,
+            num_expert_group=num_expert_group,
+            topk_group=topk_group,
+            scoring_func=scoring_func,
+            routed_scaling_factor=1.0,
+            group_scoring_func=group_scoring_func,
+        )
+        ref_weights, ref_ids = grouped_topk_op(
+            hidden_states=hidden_states,
+            gating_output=gating_output,
+            e_score_correction_bias=e_score_correction_bias,
+        )
+
+    fused_weights, fused_ids = fused_grouped_topk(
+        hidden_states=hidden_states,
+        gating_output=gating_output,
+        topk=topk,
+        renormalize=True,
+        num_expert_group=num_expert_group,
+        topk_group=topk_group,
+        scoring_func=scoring_func,
+        routed_scaling_factor=1.0,
+        e_score_correction_bias=e_score_correction_bias,
+        group_scoring_func=group_scoring_func,
+    )
+
+    ref_order = ref_ids.argsort(dim=-1)
+    fused_order = fused_ids.argsort(dim=-1)
+    ref_ids = ref_ids.gather(1, ref_order)
+    fused_ids = fused_ids.gather(1, fused_order)
+    ref_weights = ref_weights.gather(1, ref_order)
+    fused_weights = fused_weights.gather(1, fused_order)
+
+    torch.testing.assert_close(ref_ids, fused_ids, atol=0, rtol=0)
+    atol = 2e-2 if input_dtype == torch.bfloat16 or scoring_func == "sigmoid" else 1e-5
+    torch.testing.assert_close(ref_weights, fused_weights, atol=atol, rtol=0)

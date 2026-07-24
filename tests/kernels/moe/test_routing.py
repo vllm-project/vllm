@@ -8,6 +8,10 @@ import torch
 
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.distributed.eplb.eplb_state import EplbLayerState
+from vllm.model_executor.layers.fused_moe.config import (
+    GroupScoringFunc,
+    RoutingMethodType,
+)
 from vllm.model_executor.layers.fused_moe.router.base_router import (
     eplb_map_to_physical_and_record,
 )
@@ -34,6 +38,36 @@ def _is_aiter_capable() -> bool:
 MK_S = [(32, 256), (64, 512)]
 TOP_KS = [2, 4, 6]
 NUM_EXPERTS = [8, 16, 64]
+
+
+@pytest.mark.parametrize(
+    "has_bias,group_scoring_func,scoring_func,expected_routing_method",
+    [
+        (True, "top2", "sigmoid", RoutingMethodType.DeepSeekV3),
+        (True, "max", "sigmoid", RoutingMethodType.Unspecified),
+        (False, "max", "softmax", RoutingMethodType.RenormalizeNaive),
+        (False, "top2", "softmax", RoutingMethodType.Unspecified),
+    ],
+)
+def test_grouped_topk_routing_method_respects_group_scoring_func(
+    has_bias: bool,
+    group_scoring_func: GroupScoringFunc,
+    scoring_func: str,
+    expected_routing_method: RoutingMethodType,
+) -> None:
+    bias = torch.empty(64) if has_bias else None
+    router = create_fused_moe_router(
+        top_k=8,
+        global_num_experts=64,
+        use_grouped_topk=True,
+        num_expert_group=8,
+        topk_group=4,
+        scoring_func=scoring_func,
+        e_score_correction_bias=bias,
+        group_scoring_func=group_scoring_func,
+    )
+
+    assert router.routing_method_type == expected_routing_method
 
 
 def setup_eplb_state(
