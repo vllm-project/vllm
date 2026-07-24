@@ -344,7 +344,7 @@ vLLM supports loading out-of-tree HTTP routes via the `vllm.endpoint_plugins` en
 
 ## gRPC Interface
 
-vLLM provides an optional gRPC Generate service on a separate TCP port, enabled via the `--grpc-port` flag. When not specified, no gRPC server is started. The gRPC listener binds to the same host address as the HTTP server.
+vLLM provides an optional gRPC Generate service, enabled by passing the `--grpc` flag to `vllm serve` (requires `pip install vllm[grpc]`). When enabled, the gRPC server is launched instead of the HTTP OpenAI-compatible server and listens on the address configured by `--host` and `--port`. When the flag is not passed, no gRPC server is started.
 
 **Warning:** The gRPC interface is **insecure by default** — it does not implement authentication, authorization, or encryption. It should be considered a private, internal interface intended for use only between co-located services within a trusted network. Do not expose the gRPC port to the public internet or untrusted clients. If you enable the gRPC interface, protect it via network-level access controls such as firewall rules, network segmentation, or deployment on an isolated private network.
 
@@ -358,7 +358,7 @@ An attacker who can reach the gRPC port can:
 
 ### Recommendations
 
-- Only enable `--grpc-port` when you have a specific need for gRPC-based inference
+- Only enable `--grpc` when you have a specific need for gRPC-based inference
 - Ensure the gRPC port is only accessible from trusted hosts or services
 - Use firewall rules to block external access to the gRPC port
 - Consider deploying the gRPC interface on a dedicated internal network interface
