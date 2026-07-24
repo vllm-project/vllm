@@ -110,32 +110,6 @@ def if_aiter_supported(func: Callable) -> Callable:
     return wrapper
 
 
-def arch_only(*arch_names: str) -> Callable[[Callable], Callable]:
-    """Decorator factory: only run the wrapped function if at least one
-    of the named arch predicates returns True; otherwise return False.
-
-    Names refer to zero-arg predicates in `vllm.platforms.rocm`
-    (e.g. `mi3xx`, `gfx950`, `rdna4` -> `on_mi3xx`, `on_gfx950`,
-    `on_rdna4`).
-    """
-    assert arch_names, "arch_only() requires at least one predicate"
-
-    def deco(func: Callable) -> Callable:
-        @functools.wraps(func)
-        def wrapper(*args, **kwargs):
-            if not current_platform.is_rocm():
-                return False
-            from vllm.platforms import rocm
-
-            if not any(getattr(rocm, f"on_{name}")() for name in arch_names):
-                return False
-            return func(*args, **kwargs)
-
-        return wrapper
-
-    return deco
-
-
 def _rocm_aiter_fused_moe_impl(
     hidden_states: torch.Tensor,
     w1: torch.Tensor,
@@ -1569,22 +1543,13 @@ class rocm_aiter_ops:
 
     Check Functions:
         All check functions (is_*_enabled) are decorated with @if_aiter_supported,
-        which verifies: (1) platform is ROCm, (2) device arch is gfx9 (mi3xx)
-        OR gfx120x (RDNA4), and (3) aiter library is installed. The check
-        function then also verifies the corresponding environment variable.
-
-        Gates that depend on arch-specific machinery (CK a8w8, MFMA-based
-        opus.hpp kernels, asm MLA/PA hsaco, fused_moe_1stage_dict, gfx950-only
-        instructions, ...) additionally stack @arch_only(<pred>, ...), which
-        short-circuits to False when no listed predicate matches the running
-        arch.
-
+        which verifies: (1) platform is ROCm, (2) device arch is gfx9, and
+        (3) aiter library is installed. The check function then also verifies
+        the corresponding environment variable is enabled.
         i.e.                                             ___
         is_enabled() == current_platform.is_rocm() and      |     checked by
-                        (current_platform.is_on_gfx9()      | @if_aiter_supported
-                        or is_on_rdna4())          and      |
+                        current_platform.is_on_gfx9() and   | @if_aiter_supported
                         IS_AITER_FOUND and   _______________|
-                        any(p() for p in preds)  ---> @arch_only(*preds)
                         cls._AITER_ENABLED   -----> Check by the logic in `is_enabled()`
 
     Example:
@@ -1735,20 +1700,35 @@ class rocm_aiter_ops:
         return cls._AITER_ENABLED
 
     @classmethod
+    def is_rdna_aiter_enabled(cls) -> bool:
+        """AITER on RDNA4 (gfx12): library present, arch is rdna4, and the user
+        enabled aiter. Only aiter's Triton kernels exist on gfx12 (no CK build),
+        so this deliberately stays off the gfx9/CK `@if_aiter_supported` umbrella
+        and gates only the Triton paths rdna4 uses. The gfx12 analog of
+        `is_enabled()`."""
+        if not current_platform.is_rocm() or not IS_AITER_FOUND:
+            return False
+        from vllm.platforms.rocm import on_rdna4
+
+        return on_rdna4() and cls._AITER_ENABLED
+
+    @classmethod
+    def is_rdna_linear_enabled(cls) -> bool:
+        """RDNA4 (gfx12) analog of is_linear_enabled() (aiter Triton blockscale)."""
+        return cls.is_rdna_aiter_enabled() and cls._LINEAR_ENABLED
+
+    @classmethod
     @if_aiter_supported
-    @arch_only("mi3xx")
     def is_linear_enabled(cls) -> bool:
         return cls._AITER_ENABLED and cls._LINEAR_ENABLED
 
     @classmethod
     @if_aiter_supported
-    @arch_only("mi3xx")
     def is_linear_fp8_enabled(cls) -> bool:
         return cls.is_linear_enabled()
 
     @classmethod
     @if_aiter_supported
-    @arch_only("mi3xx")
     def is_fused_moe_enabled(cls) -> bool:
         return cls._AITER_ENABLED and cls._FMOE_ENABLED
 
@@ -1805,13 +1785,11 @@ class rocm_aiter_ops:
 
     @classmethod
     @if_aiter_supported
-    @arch_only("mi3xx")
     def is_mla_enabled(cls) -> bool:
         return cls._AITER_ENABLED and cls._MLA_ENABLED
 
     @classmethod
     @if_aiter_supported
-    @arch_only("mi3xx")
     def is_mha_enabled(cls) -> bool:
         return cls._AITER_ENABLED and cls._MHA_ENABLED
 
@@ -1819,12 +1797,6 @@ class rocm_aiter_ops:
     @if_aiter_supported
     def is_custom_all_reduce_enabled(cls) -> bool:
         return cls._AITER_ENABLED and cls._CUSTOM_ALL_REDUCE_ENABLED
-
-    @classmethod
-    @if_aiter_supported
-    @arch_only("mi3xx")
-    def is_sampler_enabled(cls) -> bool:
-        return cls._AITER_ENABLED
 
     @classmethod
     @if_aiter_supported
@@ -1843,7 +1815,6 @@ class rocm_aiter_ops:
 
     @classmethod
     @if_aiter_supported
-    @arch_only("gfx950")
     def is_fp4bmm_enabled(cls) -> bool:
         from vllm.platforms.rocm import get_cdna_version
 
@@ -1863,9 +1834,10 @@ class rocm_aiter_ops:
 
     @classmethod
     @if_aiter_supported
-    @arch_only("gfx950")
     def is_asm_fp4_gemm_dynamic_quant_enabled(cls) -> bool:
-        return cls._AITER_ENABLED and cls._FP4_GEMM_DYNAMIC_QUANT_ASM
+        from vllm.platforms.rocm import on_gfx950
+
+        return cls._AITER_ENABLED and cls._FP4_GEMM_DYNAMIC_QUANT_ASM and on_gfx950()
 
     @classmethod
     @if_aiter_supported
@@ -1879,9 +1851,10 @@ class rocm_aiter_ops:
 
     @classmethod
     @if_aiter_supported
-    @arch_only("gfx950")
     def is_tgemm_enabled(cls) -> bool:
-        return cls.is_linear_enabled()
+        from vllm.platforms.rocm import on_gfx950
+
+        return cls.is_linear_enabled() and on_gfx950()
 
     @classmethod
     def get_aiter_allreduce(cls):
