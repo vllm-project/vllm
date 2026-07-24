@@ -637,7 +637,10 @@ class RocmAiterRMSNormQuantFusionPass(VllmPatternMatcherPass):
             # Fuse decomposed RMSNormGated + group fp8 quant.
             # The replacement op (fused_rms_gated_fp8_group_quant) requires
             # an aiter version that includes the GDN triton kernel renames.
-            if gated_norm_shapes and rocm_aiter_ops.are_gdn_triton_kernels_available():
+            if gated_norm_shapes and (
+                rocm_aiter_ops.are_gdn_triton_kernels_available()
+                or rocm_aiter_ops.is_rdna_gdn_triton_kernels_available()
+            ):
                 for num_heads, head_dim in gated_norm_shapes:
                     if head_dim != 128:
                         continue
