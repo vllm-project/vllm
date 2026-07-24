@@ -554,3 +554,92 @@ def test_flash_attn_accepts_handled_fp8_variants(
     # import order across earlier tests that patch vllm.platforms.current_platform.
     monkeypatch.setattr(fa_utils_mod.current_platform, "is_xpu", lambda: True)
     assert FlashAttentionBackend.supports_kv_cache_dtype(kv_cache_dtype)
+
+
+def test_flashinfer_rejects_sm90_sliding_window():
+    """FlashInferBackend must reject SM90 + sliding-window configurations.
+
+    Issue #48495: On SM90 (H100), FlashInfer with sliding-window attention
+    crashes at runtime. The backend selector must exclude FlashInfer in this
+    configuration so the drafter falls back to TRITON_ATTN.
+
+    See: https://github.com/flashinfer-ai/flashinfer/issues/3578
+    """
+    from vllm.platforms.interface import DeviceCapability
+    from vllm.v1.attention.backends.flashinfer import FlashInferBackend
+
+    # SM90 (H100) + sliding-window: must reject
+    reasons_sm90_sliding = FlashInferBackend.validate_configuration(
+        head_size=256,
+        dtype=torch.bfloat16,
+        kv_cache_dtype="auto",
+        block_size=16,
+        use_mla=False,
+        has_sink=False,
+        use_sparse=False,
+        use_mm_prefix=False,
+        use_per_head_quant_scales=False,
+        device_capability=DeviceCapability(9, 0),
+        attn_type="decoder",
+        has_sliding_window=True,
+    )
+    assert len(reasons_sm90_sliding) > 0
+    assert "sliding-window" in reasons_sm90_sliding[0].lower()
+    assert "sm90" in reasons_sm90_sliding[0].lower()
+
+    # SM90 without sliding-window: should NOT reject for sliding-window reason
+    reasons_sm90_no_sliding = FlashInferBackend.validate_configuration(
+        head_size=256,
+        dtype=torch.bfloat16,
+        kv_cache_dtype="auto",
+        block_size=16,
+        use_mla=False,
+        has_sink=False,
+        use_sparse=False,
+        use_mm_prefix=False,
+        use_per_head_quant_scales=False,
+        device_capability=DeviceCapability(9, 0),
+        attn_type="decoder",
+        has_sliding_window=False,
+    )
+    assert not any(
+        "sliding-window" in reason.lower() for reason in reasons_sm90_no_sliding
+    )
+
+    # SM80 (A100) + sliding-window: should NOT reject for sliding-window reason
+    reasons_sm80_sliding = FlashInferBackend.validate_configuration(
+        head_size=256,
+        dtype=torch.bfloat16,
+        kv_cache_dtype="auto",
+        block_size=16,
+        use_mla=False,
+        has_sink=False,
+        use_sparse=False,
+        use_mm_prefix=False,
+        use_per_head_quant_scales=False,
+        device_capability=DeviceCapability(8, 0),
+        attn_type="decoder",
+        has_sliding_window=True,
+    )
+    assert not any(
+        "sliding-window" in reason.lower() for reason in reasons_sm80_sliding
+    )
+
+    # SM100 (Blackwell) + sliding-window: should NOT reject for sliding-window reason
+    reasons_sm100_sliding = FlashInferBackend.validate_configuration(
+        head_size=256,
+        dtype=torch.bfloat16,
+        kv_cache_dtype="auto",
+        block_size=16,
+        use_mla=False,
+        has_sink=False,
+        use_sparse=False,
+        use_mm_prefix=False,
+        use_per_head_quant_scales=False,
+        device_capability=DeviceCapability(10, 0),
+        attn_type="decoder",
+        has_sliding_window=True,
+    )
+    assert not any(
+        "sliding-window" in reason.lower() for reason in reasons_sm100_sliding
+    )
