@@ -905,10 +905,6 @@ class CompilationConfig:
         return handler(value)
 
     def __post_init__(self) -> None:
-        count_none = self.custom_ops.count("none")
-        count_all = self.custom_ops.count("all")
-        assert count_none + count_all <= 1, "Can only specify 'none' or 'all'"
-
         # TODO(zou3519/luka): There are 2 issues with auto-functionalization V2:
         # 1. A bug in PyTorch, fixed in 2.7:
         #    https://github.com/pytorch/pytorch/issues/147924
@@ -1001,12 +997,27 @@ class CompilationConfig:
             )
 
         for op in self.custom_ops:
-            if op[0] not in {"+", "-"} and op not in {"all", "none"}:
+            if op not in {"all", "none"} and (len(op) < 2 or op[0] not in {"+", "-"}):
                 raise ValueError(
                     f"Invalid syntax '{op}' for custom op, "
                     "must be 'all', 'none', '+op' or '-op' "
                     "(where 'op' is the registered op name)"
                 )
+
+        base_modes = [op for op in self.custom_ops if op in {"all", "none"}]
+        if len(base_modes) > 1:
+            raise ValueError(
+                "custom_ops can contain only one base mode: 'all' or 'none'"
+            )
+
+        enabled_ops = {op[1:] for op in self.custom_ops if op.startswith("+")}
+        disabled_ops = {op[1:] for op in self.custom_ops if op.startswith("-")}
+        conflicting_ops = sorted(enabled_ops & disabled_ops)
+        if conflicting_ops:
+            raise ValueError(
+                "custom_ops cannot both enable and disable the same operation(s): "
+                f"{', '.join(conflicting_ops)}. Remove either the '+' or '-' directive"
+            )
 
         # Currently only eager and inductor backend are supported.
         # for piecewise compilation. Custom backends are not supported for
@@ -1344,10 +1355,16 @@ class CompilationConfig:
                 )
 
     def is_custom_op_enabled(self, op: str) -> bool:
-        if "all" in self.custom_ops:
+        count_all = self.custom_ops.count("all")
+        count_none = self.custom_ops.count("none")
+        if count_all + count_none != 1:
+            raise ValueError(
+                "custom_ops must contain exactly one base mode: 'all' or 'none'"
+            )
+
+        if count_all:
             return f"-{op}" not in self.custom_ops
 
-        assert "none" in self.custom_ops
         return f"+{op}" in self.custom_ops
 
     def resolve_cudagraph_mode_and_sizes(
