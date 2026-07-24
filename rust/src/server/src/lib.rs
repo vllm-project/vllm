@@ -27,8 +27,8 @@ use axum::Router;
 use axum::body::Body;
 use axum::http::Request;
 pub use config::{
-    ApiServerOptions, Config, CoordinatorMode, CorsConfig, DEFAULT_KEEP_ALIVE_TIMEOUT,
-    HttpListenerMode, TlsConfig,
+    AccessLogConfig, ApiServerOptions, Config, CoordinatorMode, CorsConfig,
+    DEFAULT_KEEP_ALIVE_TIMEOUT, HttpListenerMode, TlsConfig,
 };
 use hyper::body::Incoming;
 use hyper::server::conn::http1;
@@ -139,6 +139,7 @@ async fn build_state(config: &Config) -> Result<Arc<AppState>> {
             .with_server_info(ServerInfoSnapshot::from_config(config))
             .with_api_keys(config.api_keys.clone())
             .with_cors(config.cors.clone())
+            .with_access_log(config.access_log.clone())
             .with_profiler(config.profiler.clone()),
     ))
 }

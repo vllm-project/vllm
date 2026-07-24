@@ -27,8 +27,9 @@ use vllm_engine_core_client::TransportMode;
 use vllm_managed_engine::ManagedEngineConfig;
 use vllm_managed_engine::cli::{ManagedEngineArgs, repartition_managed_engine_args};
 use vllm_server::{
-    ApiServerOptions, ChatTemplateContentFormatOption, Config, CoordinatorMode, CorsConfig,
-    DEFAULT_KEEP_ALIVE_TIMEOUT, HttpListenerMode, ParserSelection, RendererSelection, TlsConfig,
+    AccessLogConfig, ApiServerOptions, ChatTemplateContentFormatOption, Config, CoordinatorMode,
+    CorsConfig, DEFAULT_KEEP_ALIVE_TIMEOUT, HttpListenerMode, ParserSelection, RendererSelection,
+    TlsConfig,
 };
 
 use crate::cli::unsupported::UnsupportedArgs;
@@ -226,6 +227,18 @@ pub struct SharedRuntimeArgs {
     #[serde(default)]
     pub enable_request_id_headers: bool,
 
+    /// Disable the HTTP access log (one INFO line per response). The access log
+    /// is enabled by default.
+    #[arg(long, default_missing_value = "true", num_args = 0..=1)]
+    #[serde(default)]
+    pub disable_uvicorn_access_log: bool,
+
+    /// Comma-separated request paths to exclude from the access log, e.g.
+    /// "/health,/metrics". Reduces log noise from high-frequency probes.
+    #[arg(long)]
+    #[serde(default)]
+    pub disable_access_log_for_endpoints: Option<String>,
+
     /// If provided, the server will require one of these keys to be presented
     /// in the Authorization header.
     #[educe(Debug(ignore))]
@@ -379,6 +392,7 @@ impl SharedRuntimeArgs {
         let shutdown_timeout = self.shutdown_timeout();
         let keep_alive_timeout = self.keep_alive_timeout();
         let api_server_options = self.api_server_options();
+        let access_log = self.access_log_config();
         let cors = self.cors_config();
         let tls = self.tls_config();
         let profiler = self.profiler();
@@ -407,6 +421,7 @@ impl SharedRuntimeArgs {
             chat_template_content_format: self.chat_template_content_format,
             max_logprobs: self.max_logprobs,
             api_server_options,
+            access_log,
             cors,
             tls,
             api_keys: self.api_key,
@@ -433,6 +448,7 @@ impl SharedRuntimeArgs {
         let shutdown_timeout = self.shutdown_timeout();
         let keep_alive_timeout = self.keep_alive_timeout();
         let api_server_options = self.api_server_options();
+        let access_log = self.access_log_config();
         let cors = self.cors_config();
         let tls = self.tls_config();
         let profiler = self.profiler();
@@ -459,6 +475,7 @@ impl SharedRuntimeArgs {
             chat_template_content_format: self.chat_template_content_format,
             max_logprobs: self.max_logprobs,
             api_server_options,
+            access_log,
             cors,
             tls,
             api_keys: self.api_key,
@@ -502,6 +519,13 @@ impl SharedRuntimeArgs {
             cert_reqs: self.ssl_cert_reqs,
             ciphers: self.ssl_ciphers.clone(),
         })
+    }
+
+    fn access_log_config(&self) -> AccessLogConfig {
+        AccessLogConfig::new(
+            !self.disable_uvicorn_access_log,
+            self.disable_access_log_for_endpoints.as_deref(),
+        )
     }
 }
 

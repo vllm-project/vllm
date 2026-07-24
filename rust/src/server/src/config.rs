@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::time::Duration;
 
@@ -51,6 +51,48 @@ pub struct ApiServerOptions {
     pub enable_prompt_tokens_details: bool,
     /// When `true`, set `X-Request-Id` on every HTTP response.
     pub enable_request_id_headers: bool,
+}
+
+/// HTTP access-log controls (`--disable-uvicorn-access-log`,
+/// `--disable-access-log-for-endpoints`). On by default; one INFO line per response.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct AccessLogConfig {
+    /// Emit an access-log line per HTTP response.
+    pub enabled: bool,
+    /// Paths suppressed from the access log, matched exactly against the
+    /// query-stripped request path.
+    pub excluded_endpoints: HashSet<String>,
+}
+
+impl Default for AccessLogConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            excluded_endpoints: HashSet::new(),
+        }
+    }
+}
+
+impl AccessLogConfig {
+    /// Parse `endpoints` (comma-separated; whitespace trimmed, empty entries dropped).
+    pub fn new(enabled: bool, endpoints: Option<&str>) -> Self {
+        let excluded_endpoints = endpoints
+            .into_iter()
+            .flat_map(|s| s.split(','))
+            .map(str::trim)
+            .filter(|p| !p.is_empty())
+            .map(str::to_owned)
+            .collect();
+        Self {
+            enabled,
+            excluded_endpoints,
+        }
+    }
+
+    /// Whether `path` is suppressed from the access log.
+    pub fn is_excluded(&self, path: &str) -> bool {
+        self.excluded_endpoints.contains(path)
+    }
 }
 
 /// CORS settings mirroring Python's `CORSMiddleware`; the default is permissive.
@@ -191,6 +233,8 @@ pub struct Config {
     pub max_logprobs: Option<i32>,
     /// HTTP/API-server behavior switches.
     pub api_server_options: ApiServerOptions,
+    /// HTTP access-log behavior (on by default; per-endpoint exclusions).
+    pub access_log: AccessLogConfig,
     /// CORS settings applied to every HTTP response.
     pub cors: CorsConfig,
     /// TLS settings. `None` serves plaintext HTTP; `Some` terminates TLS at the

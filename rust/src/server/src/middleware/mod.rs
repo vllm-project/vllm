@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+mod access_log;
 mod auth;
 mod cors;
 mod load;
@@ -8,6 +9,7 @@ mod metrics;
 mod offload;
 mod request_id;
 
+pub use access_log::access_log;
 pub use auth::authenticate_api_key;
 pub use cors::{cors_layer, strip_cors_on_no_origin};
 pub use load::track_server_load;
