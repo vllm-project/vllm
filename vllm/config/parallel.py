@@ -3,7 +3,6 @@
 
 import os
 import socket
-from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, Literal, overload
 
 import regex as re
@@ -13,7 +12,7 @@ from torch.distributed import ProcessGroup, ReduceOp, Store
 from typing_extensions import Self
 
 import vllm.envs as envs
-from vllm.config.utils import config
+from vllm.config.utils import RuntimeDefault, config, runtime_default_validator
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.network_utils import get_open_ports_list
@@ -222,8 +221,8 @@ class ParallelConfig:
     threshold, microbatching will be used. Otherwise, the request will be
     processed in a single batch."""
 
-    disable_nccl_for_dp_synchronization: bool | None = None
-    """Forces the dp synchronization logic in vllm/v1/worker/dp_utils.py 
+    disable_nccl_for_dp_synchronization: bool = RuntimeDefault()
+    """Forces the dp synchronization logic in vllm/v1/worker/dp_utils.py
     to use Gloo instead of NCCL for its all reduce.
 
     Defaults to True when async scheduling is enabled, False otherwise.
@@ -393,11 +392,9 @@ class ParallelConfig:
         should only be set by API server scale-out.
     """
 
-    @field_validator("disable_nccl_for_dp_synchronization", mode="wrap")
-    @classmethod
-    def _skip_none_validation(cls, value: Any, handler: Callable) -> Any:
-        """Skip validation if the value is `None` when initialisation is delayed."""
-        return None if value is None else handler(value)
+    _accept_unresolved_disable_nccl_for_dp_synchronization = runtime_default_validator(
+        "disable_nccl_for_dp_synchronization"
+    )
 
     @field_validator("numa_bind_nodes")
     @classmethod

@@ -5,7 +5,12 @@ import uuid
 from dataclasses import field
 from typing import Any, Literal, get_args
 
-from vllm.config.utils import config
+from vllm.config.utils import (
+    RuntimeDefault,
+    config,
+    is_runtime_default,
+    runtime_default_validator,
+)
 from vllm.utils.hashing import safe_hash
 
 KVProducer = Literal["kv_producer", "kv_both"]
@@ -27,7 +32,7 @@ class KVTransferConfig:
     """The KV connector for vLLM to transmit KV caches between vLLM instances.
     """
 
-    engine_id: str | None = None
+    engine_id: str = RuntimeDefault()
     """The engine id for KV transfers."""
 
     kv_buffer_device: str = field(default_factory=kv_buffer_device_default_factory)
@@ -71,6 +76,8 @@ class KVTransferConfig:
     'recompute': reschedule the request to recompute failed blocks
     'fail': immediately fail the request with an error finish reason (default)"""
 
+    _accept_unresolved_engine_id = runtime_default_validator("engine_id")
+
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,
@@ -90,7 +97,7 @@ class KVTransferConfig:
         return hash_str
 
     def __post_init__(self) -> None:
-        if self.engine_id is None:
+        if is_runtime_default(self.engine_id):
             self.engine_id = str(uuid.uuid4())
 
         if self.kv_role is not None and self.kv_role not in get_args(KVRole):

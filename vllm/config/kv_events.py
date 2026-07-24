@@ -4,7 +4,7 @@
 
 from typing import Literal
 
-from vllm.config.utils import config
+from vllm.config.utils import RuntimeDefault, config, is_runtime_default
 
 
 @config
@@ -16,7 +16,7 @@ class KVEventsConfig:
     Events can be published externally by zmq using the event publisher config.
     """
 
-    publisher: Literal["null", "zmq"] = None  # type: ignore[assignment]
+    publisher: Literal["null", "zmq"] = RuntimeDefault()
     """The publisher to use for publishing kv events. Can be "null", "zmq".
     """
 
@@ -48,5 +48,5 @@ class KVEventsConfig:
     """
 
     def __post_init__(self):
-        if self.publisher is None:
+        if is_runtime_default(self.publisher):
             self.publisher = "zmq" if self.enable_kv_cache_events else "null"

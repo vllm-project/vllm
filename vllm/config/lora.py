@@ -9,7 +9,12 @@ from pydantic import ConfigDict, Field, model_validator
 from typing_extensions import Self
 
 from vllm import envs
-from vllm.config.utils import config
+from vllm.config.utils import (
+    RuntimeDefault,
+    config,
+    is_runtime_default,
+    runtime_default_validator,
+)
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.hashing import safe_hash
@@ -41,7 +46,7 @@ class LoRAConfig:
     parallelism. Enabling this will use the fully sharded layers. At high
     sequence length, max rank or tensor parallel size, this is likely faster.
     """
-    max_cpu_loras: int | None = None
+    max_cpu_loras: int = RuntimeDefault()
     """Maximum number of LoRAs to store in CPU memory. Must be >= than
     `max_loras`."""
     lora_dtype: torch.dtype | LoRADType = "auto"
@@ -113,9 +118,11 @@ class LoRAConfig:
         hash_str = safe_hash(str(factors).encode(), usedforsecurity=False).hexdigest()
         return hash_str
 
+    _accept_unresolved_max_cpu_loras = runtime_default_validator("max_cpu_loras")
+
     @model_validator(mode="after")
     def _validate_lora_config(self) -> Self:
-        if self.max_cpu_loras is None:
+        if is_runtime_default(self.max_cpu_loras):
             self.max_cpu_loras = self.max_loras
         elif self.max_cpu_loras < self.max_loras:
             raise ValueError(

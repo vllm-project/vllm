@@ -23,7 +23,13 @@ from vllm.config.multimodal import (
 from vllm.config.pooler import POOLER_CONFIG_LOG_FIELDS, PoolerConfig
 from vllm.config.quantization import QuantizationConfigArgs
 from vllm.config.scheduler import RunnerType
-from vllm.config.utils import config, getattr_iter
+from vllm.config.utils import (
+    RuntimeDefault,
+    config,
+    getattr_iter,
+    is_runtime_default,
+    runtime_default_validator,
+)
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.tasks import PoolingTask, ScoreType, SupportedTask
@@ -128,7 +134,7 @@ class ModelConfig:
     """Convert the model using adapters defined in
     [vllm.model_executor.models.adapters][]. The most common use case is to
     adapt a text generation model to be used for pooling tasks."""
-    tokenizer: str = None  # type: ignore[assignment]
+    tokenizer: str = RuntimeDefault()
     """Name or path of the Hugging Face tokenizer to use. If unspecified, model
     name or path will be used."""
     tokenizer_mode: TokenizerMode | str = "auto"
@@ -191,7 +197,7 @@ class ModelConfig:
     """The specific revision to use for the tokenizer on the Hugging Face Hub.
     It can be a branch name, a tag name, or a commit id. If unspecified, will
     use the default version."""
-    max_model_len: int = Field(default=None, ge=-1)  # type: ignore[assignment]
+    max_model_len: int = RuntimeDefault(ge=-1)
     """Model context length (prompt and output). If unspecified, will be
     automatically derived from the model config.
 
@@ -513,7 +519,7 @@ class ModelConfig:
         )
         self.model = maybe_model_redirect(self.model)
         # The tokenizer is consistent with the model by default.
-        if self.tokenizer is None:
+        if is_runtime_default(self.tokenizer):
             self.tokenizer = self.model
         if self.tokenizer_revision is None:
             self.tokenizer_revision = self.revision
@@ -776,13 +782,7 @@ class ModelConfig:
         convertor = convertor_cls(self.hf_config, self.hf_text_config)
         return convertor.convert()
 
-    @field_validator("tokenizer", "max_model_len", mode="wrap")
-    @classmethod
-    def _skip_none_validation(cls, value: Any, handler: Callable) -> Any:
-        """Skip validation if the value is `None` when initialisation is delayed."""
-        if value is None:
-            return value
-        return handler(value)
+    _accept_unresolved = runtime_default_validator("tokenizer", "max_model_len")
 
     @field_validator("tokenizer_mode", mode="after")
     def _lowercase_tokenizer_mode(cls, tokenizer_mode: str) -> str:
@@ -1767,6 +1767,12 @@ class ModelConfig:
         return self.get_hidden_size()
 
     def get_and_verify_max_len(self, max_model_len: int):
+        # An unresolved RuntimeDefault() sentinel means "unset". This is the same as
+        # the `None` that `_get_and_verify_max_len` already knows how to
+        # handle.
+        resolved_max_model_len: int | None = (
+            None if is_runtime_default(max_model_len) else max_model_len
+        )
         # Consider max_model_len in tokenizer_config only when
         # pooling models use absolute position_embedding.
         tokenizer_config = None
@@ -1783,7 +1789,7 @@ class ModelConfig:
             hf_config=self.hf_text_config,
             model_arch_config=self.model_arch_config,
             tokenizer_config=tokenizer_config,
-            max_model_len=max_model_len,
+            max_model_len=resolved_max_model_len,
             disable_sliding_window=self.disable_sliding_window,
             sliding_window=self.get_sliding_window(),
             spec_target_max_model_len=self.spec_target_max_model_len,

@@ -145,6 +145,7 @@ bench_sweep_serve_workload = auto_mock(
 bench_throughput = auto_mock("vllm.benchmarks", "throughput")
 AsyncEngineArgs = auto_mock("vllm.engine.arg_utils", "AsyncEngineArgs")
 EngineArgs = auto_mock("vllm.engine.arg_utils", "EngineArgs")
+is_runtime_default = auto_mock("vllm.config.utils", "is_runtime_default")
 ChatCommand = auto_mock("vllm.entrypoints.cli.openai", "ChatCommand")
 CompleteCommand = auto_mock("vllm.entrypoints.cli.openai", "CompleteCommand")
 RenderSubcommand = auto_mock("vllm.entrypoints.cli.launch", "RenderSubcommand")
@@ -202,8 +203,13 @@ class MarkdownFormatter(HelpFormatter):
                 help_dd = ":" + textwrap.indent(action.help, "    ")[1:]
                 self._markdown_output.append(f"{help_dd}\n\n")
 
-            # None usually means the default is determined at runtime
-            if (default := action.default) != SUPPRESS and default is not None:
+            # None or an unresolved RuntimeDefault() sentinel means the
+            # default is determined at runtime
+            if (
+                (default := action.default) != SUPPRESS
+                and default is not None
+                and not is_runtime_default(default)
+            ):
                 # Make empty string defaults visible
                 if default == "":
                     default = '""'
