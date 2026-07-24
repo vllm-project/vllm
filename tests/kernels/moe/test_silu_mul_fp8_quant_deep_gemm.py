@@ -23,6 +23,7 @@ from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.torch_utils import set_random_seed
 
 fp8_dtype = current_platform.fp8_dtype()
+DEVICE = current_platform.device_type
 
 CASES = [
     (1, 1, 128, fp8_dtype),
@@ -144,7 +145,7 @@ def pack_scales(x: torch.Tensor, tokens_per_expert: torch.Tensor) -> torch.Tenso
 
     # Add i32_padding here so we can view it as a i32 tensor later on.
     i32_padding = round_up(G, 4) - G
-    ref_s_i8 = torch.empty((E, T, G + i32_padding), dtype=torch.uint8, device="cuda")
+    ref_s_i8 = torch.empty((E, T, G + i32_padding), dtype=torch.uint8, device=DEVICE)
     for e in range(E):
         nt = tokens_per_expert[e].item()
         ref_s_i8[e, :nt, :G] = x[e, :nt].view(torch.int32) >> 23
@@ -177,9 +178,9 @@ def ref_with_scale_fmt(
         DeepGemmQuantScaleFMT.FLOAT32_CEIL_UE8M0,
     ]
 
-    ref_q = torch.empty((E, T, H), dtype=fp8_dtype, device="cuda")
+    ref_q = torch.empty((E, T, H), dtype=fp8_dtype, device=DEVICE)
     ref_s_f32 = torch.empty(
-        (E, T, cdiv(H, group_size)), dtype=torch.float32, device="cuda"
+        (E, T, cdiv(H, group_size)), dtype=torch.float32, device=DEVICE
     )
 
     for e in range(E):
@@ -202,7 +203,7 @@ def token_random(E, T, H2, tokens_per_expert):
     Initialize each token in a random range so we test a range of
     scale values.
     """
-    y = torch.empty((E, T, H2), dtype=torch.bfloat16, device="cuda")
+    y = torch.empty((E, T, H2), dtype=torch.bfloat16, device=DEVICE)
     for e in range(E):
         for t in range(tokens_per_expert[e].item()):
             exp = random.choice(range(1, 20))
@@ -221,7 +222,7 @@ def test_silu_mul_fp8_quant_deep_gemm(E: int, T: int, H: int, fp8_type: torch.dt
         high=T,
         size=(E,),
         dtype=torch.int32,
-        device="cuda",
+        device=DEVICE,
     )
 
     # Input tensor of shape (E, T, 2*H)
@@ -288,12 +289,11 @@ def test_silu_mul_fp8_quant_deep_gemm(E: int, T: int, H: int, fp8_type: torch.dt
         for e in range(E):
             nt = tokens_per_expert[e].item()
 
-            if current_platform.is_rocm():
-                # On ROCm the Triton fallback kernel uses f32 math
-                # intrinsics (tl.exp) that may differ from PyTorch's
-                # torch.exp by 1 ULP.  At FP8 quantization
-                # boundaries this can flip one representable value.
-                # Allow 1 FP8 quantum of tolerance.
+            if current_platform.is_rocm() or current_platform.is_xpu():
+                # ROCm and XPU both run the Triton fallback kernel, whose f32
+                # math intrinsics (tl.exp) may differ from PyTorch's torch.exp
+                # by 1 ULP.  At FP8 quantization boundaries this can flip one
+                # representable value.  Allow 1 FP8 quantum of tolerance.
                 torch.testing.assert_close(
                     y_q[e, :nt].to(torch.float32),
                     ref_y_q[e, :nt].to(torch.float32),
