@@ -217,12 +217,14 @@ def test_creation_env_drops_secrets_keeps_policy_vars():
         "PATH": "/usr/bin",
         "SHLVL": "1",
         "_": "/usr/local/bin/vllm",
+        "HOSTNAME": "9f2c81d0e4a7",
     }
     values = creation_env(env)
     assert "HF_TOKEN" not in values
     assert values["HF_HUB_DISABLE_IMPLICIT_TOKEN"] == "1"
     assert "SHLVL" not in values
     assert "_" not in values
+    assert "HOSTNAME" not in values
 
 
 def test_environment_miss_ignores_secrets_not_policy_vars():

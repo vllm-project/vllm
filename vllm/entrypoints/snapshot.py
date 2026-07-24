@@ -75,6 +75,16 @@ CONTROL_ENV = frozenset(
 # child records SHLVL=1 while the exec'd serve sees SHLVL=0 and every restore
 # misses on a variable no import reads. `_` and OLDPWD move the same way.
 SHELL_LIFECYCLE_ENV = frozenset({"SHLVL", "_", "OLDPWD"})
+# Container identity, scrubbed from the key and compare but re-applied LIVE to
+# the restored process (payload passthrough below): docker assigns each
+# container a fresh HOSTNAME, so keying on it would make every recreated
+# container miss and re-prime, defeating volume reuse, the documented
+# persistence boundary. The import envelope never reads it (runtime hostname
+# comes from uname); software that reads it at runtime must see the current
+# container's value, hence live passthrough instead of the baked one.
+CONTAINER_IDENTITY_ENV = frozenset({"HOSTNAME"})
+# Applied to the restored process from the LIVE environment, never keyed.
+PASSTHROUGH_ENV = CONTROL_ENV | CONTAINER_IDENTITY_ENV
 # Explicit credential names only, NO suffix/pattern matching: policy vars
 # like HF_HUB_DISABLE_IMPLICIT_TOKEN end in _TOKEN but are import-affecting
 # (huggingface_hub freezes the value at import), so a pattern would silently
@@ -157,7 +167,7 @@ def sha256_json(value: Any) -> str:
 
 def canonical_env(env: dict[str, str] | None = None) -> dict[str, str]:
     source = dict(os.environ if env is None else env)
-    for name in CONTROL_ENV | SHELL_LIFECYCLE_ENV:
+    for name in CONTROL_ENV | SHELL_LIFECYCLE_ENV | CONTAINER_IDENTITY_ENV:
         source.pop(name, None)
     return dict(sorted(source.items()))
 
@@ -949,11 +959,11 @@ def _helper_resume(payload: dict[str, Any], manifest_path: Path) -> int:
         return 3
     os.environ.clear()
     os.environ.update(live)
+    passthrough = payload.get("passthrough_env") or {}
+    for name in sorted(PASSTHROUGH_ENV):
+        if name in passthrough:
+            os.environ[name] = str(passthrough[name])
     os.environ["VLLM_SNAPSHOT_RESTORED"] = "1"
-    control = payload.get("control_env") or {}
-    for name in ("VLLM_SNAPSHOT", "VLLM_SNAPSHOT_ROOT"):
-        if name in control:
-            os.environ[name] = str(control[name])
     cwd = payload.get("cwd")
     if isinstance(cwd, str):
         try:
@@ -1489,12 +1499,14 @@ def _run_criu_restore(
                 "argv": list(sys.argv),
                 "env": live_env,
                 "cwd": os.getcwd(),
-                # live_env is CONTROL_ENV-stripped by construction; carry the
-                # operator's values separately so the restored server's
-                # environ matches what a cold start would keep
-                "control_env": {
+                # live_env is canonical (control, shell-lifecycle and
+                # container-identity vars stripped); carry the operator's live
+                # values separately so the restored server's environ matches
+                # what a cold start would keep (HOSTNAME must be the CURRENT
+                # container's, never the baked one)
+                "passthrough_env": {
                     name: os.environ[name]
-                    for name in ("VLLM_SNAPSHOT", "VLLM_SNAPSHOT_ROOT")
+                    for name in sorted(PASSTHROUGH_ENV)
                     if name in os.environ
                 },
             },
