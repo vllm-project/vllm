@@ -23,6 +23,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
 )
+from vllm.platforms import current_platform
 
 from ..inductor_pass import enable_fake_mode
 from ..utility.noop_elimination import NoOpEliminationPass
@@ -70,7 +71,6 @@ def get_sequence_parallelism_threshold(
     Formula: min_token_num = (min_per_gpu_size_mb * tp_size * MiB) //
              (hidden_size * element_size)
     """
-    from vllm.platforms import current_platform
 
     if current_platform.is_xpu():
         min_hidden_size = 4096
@@ -139,6 +139,23 @@ class _SequenceParallelPatternHelper:
         )
 
     def _all_gather(self, x: torch.Tensor) -> torch.Tensor:
+        # XCCL collectives on XPU don't support torch.float8_e8m0fnu (the
+        # MXFP8 scale dtype produced by xpu_mxfp8_quantize). Reinterpret it
+        # as uint8 (same bit width, no data change) before the collective,
+        # then view back afterwards so callers still see the scale as
+        # float8_e8m0fnu. The fp8 activation output (float8_e4m3fn) doesn't
+        # need this - only the scale tensor uses the problematic dtype.
+        if current_platform.is_xpu():
+            orig_dtype = x.dtype
+            torch_float8_e8m0fnu = getattr(torch, "float8_e8m0fnu", None)
+            is_float8_e8m0fnu = orig_dtype == torch_float8_e8m0fnu
+            out = torch.ops.vllm.all_gather.default(
+                x.view(torch.uint8) if is_float8_e8m0fnu else x,
+                dim=0,
+                world_size=self.tp_size,
+                group_name=self.tp_group.unique_name,
+            )
+            return out.view(orig_dtype) if is_float8_e8m0fnu else out
         return torch.ops.vllm.all_gather.default(
             x, dim=0, world_size=self.tp_size, group_name=self.tp_group.unique_name
         )
@@ -495,6 +512,108 @@ class MiddleAllReduceRMSNormStaticNVFP4Pattern(_SequenceParallelPatternHelper):
         )
 
 
+class FirstAllReduceRMSNormXPUMxFP8Pattern(_SequenceParallelPatternHelper):
+    def get_inputs(self) -> list[torch.Tensor]:
+        # Input width must be >= 32 (MXFP8 block size) so the scale tensor
+        # [tokens, width//32] is non-degenerate during pattern tracing.
+        return [self.empty([8, 32]), self.empty([32])]
+
+    def register(self, pm_pass: PatternMatcherPass) -> None:
+        def pattern(
+            input: torch.Tensor,
+            weight: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+            all_reduce = self._all_reduce(input)
+            rms = vllm.ir.ops.rms_norm(all_reduce, weight, self.epsilon)
+            quant = torch.ops.vllm.xpu_mxfp8_quantize(rms)
+            # `rms` (a plain bf16/fp16 tensor) is returned first so torch's
+            # PatternMatcherPass anchors this MultiOutputPattern on the
+            # rms_norm node. If quant[0]/quant[1] (a getitem unpacking
+            # xpu_mxfp8_quantize's tuple output) were returned first instead,
+            # the anchor would fall on that getitem node. Any getitem whose
+            # producer's fake-tensor metadata contains torch.float8_e8m0fnu
+            # (the MXFP8 scale dtype) is unconditionally treated as
+            # "unsupported" by torch's fallback_node_due_to_unsupported_type
+            # check in PatternMatcherPass.apply() - because operator.getitem
+            # is a plain builtin, not an OpOverload, it is never in the
+            # narrow whitelist (aten.view.dtype/cat/clone/_scaled_mm) that
+            # bypasses this check. That would cause this pattern to be
+            # skipped entirely, before any match is even attempted.
+            return rms, all_reduce, quant[0], quant[1]
+
+        def replacement(
+            input: torch.Tensor,
+            weight: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+            reduce_scatter = self._reduce_scatter(input)
+            rms = vllm.ir.ops.rms_norm(reduce_scatter, weight, self.epsilon)
+            quant = torch.ops.vllm.xpu_mxfp8_quantize(rms)
+            return (
+                rms,
+                reduce_scatter,
+                self._all_gather(quant[0]),
+                self._all_gather(quant[1]),
+            )
+
+        pm.register_replacement(
+            pattern, replacement, self.get_inputs(), pm.fwd_only, pm_pass
+        )
+
+
+class MiddleAllReduceRMSNormXPUMxFP8Pattern(_SequenceParallelPatternHelper):
+    def get_inputs(self) -> list[torch.Tensor]:
+        mm_1 = torch.empty([8, 32])
+        residual = torch.empty([8, 32])
+        rms_norm_weights = torch.empty([32])
+        return [residual, mm_1, rms_norm_weights]
+
+    def register(self, pm_pass: PatternMatcherPass) -> None:
+        def pattern(
+            residual: torch.Tensor,
+            mm_1: torch.Tensor,
+            rms_norm_weights: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+            all_reduce = self._all_reduce(mm_1)
+            rms, residual_out = vllm.ir.ops.fused_add_rms_norm(
+                all_reduce, residual, rms_norm_weights, self.epsilon
+            )
+            quant = torch.ops.vllm.xpu_mxfp8_quantize(rms)
+            # Same reasoning as in FirstAllReduceRMSNormXPUMxFP8Pattern above:
+            # `rms`/`residual_out` must come first in the returned tuple so
+            # the pattern is anchored on the fused_add_rms_norm node (bf16/
+            # fp16 output) rather than on the getitem unpacking fp8/scale
+            # from xpu_mxfp8_quantize. Anchoring on that getitem would make
+            # torch's PatternMatcherPass skip the whole pattern via
+            # fallback_node_due_to_unsupported_type, since the scale output
+            # is torch.float8_e8m0fnu and getitem is never in the small
+            # OpOverload whitelist that bypasses that check.
+            return rms, residual_out, quant[0], quant[1]
+
+        def replacement(
+            residual: torch.Tensor,
+            mm_1: torch.Tensor,
+            rms_norm_weights: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+            # Keep this slice in sync with the non-quantized SP replacement:
+            # once the previous SP pattern fires, it becomes a no-op.
+            reduce_scatter = self._reduce_scatter(mm_1)
+            residual = residual[0 : reduce_scatter.size(0), ...]
+            rms, residual_out = vllm.ir.ops.fused_add_rms_norm(
+                reduce_scatter, residual, rms_norm_weights, self.epsilon
+            )
+            quant = torch.ops.vllm.xpu_mxfp8_quantize(rms)
+            return (
+                rms,
+                residual_out,
+                self._all_gather(quant[0]),
+                self._all_gather(quant[1]),
+            )
+
+        pm.register_replacement(
+            pattern, replacement, self.get_inputs(), pm.fwd_only, pm_pass
+        )
+
+
 class SequenceParallelismPass(VllmPatternMatcherPass):
     """
     This pass enables sequence parallelism for models.
@@ -575,6 +694,14 @@ class SequenceParallelismPass(VllmPatternMatcherPass):
                     epsilon, self.model_dtype, self.device
                 ).register(self.patterns)
                 MiddleAllReduceRMSNormStaticNVFP4Pattern(
+                    epsilon, self.model_dtype, self.device
+                ).register(self.patterns)
+
+            if hasattr(torch.ops.vllm, "xpu_mxfp8_quantize"):
+                FirstAllReduceRMSNormXPUMxFP8Pattern(
+                    epsilon, self.model_dtype, self.device
+                ).register(self.patterns)
+                MiddleAllReduceRMSNormXPUMxFP8Pattern(
                     epsilon, self.model_dtype, self.device
                 ).register(self.patterns)
 

@@ -50,6 +50,10 @@ from vllm.logger import init_logger
 from vllm.model_executor.kernels.linear import (
     _KernelT,
     init_fp8_linear_kernel,
+    init_mxfp8_linear_kernel,
+)
+from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
+    MXFP8_BLOCK_SIZE,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
@@ -2382,6 +2386,34 @@ class TestFP8Layer(torch.nn.Module):
 
     def is_quant_fp8_enabled(self) -> bool:
         return self.kernel.quant_fp8.enabled()
+
+    def forward(
+        self, y: torch.Tensor, bias: torch.Tensor | None = None
+    ) -> torch.Tensor:
+        return self.kernel.apply_weights(self, y, bias)
+
+
+class TestMXFP8Layer(torch.nn.Module):
+    def __init__(
+        self,
+        hidden_size: int,
+        block_size: int = MXFP8_BLOCK_SIZE,
+        scale_exp_range: tuple[int, int] = (118, 138),
+        device: torch.device | None = None,
+    ):
+        super().__init__()
+        self.weight = torch.rand([hidden_size, hidden_size], device=device).to(
+            dtype=FP8_DTYPE
+        )
+        self.weight_scale = torch.randint(
+            scale_exp_range[0],
+            scale_exp_range[1],
+            (hidden_size, hidden_size // block_size),
+            dtype=torch.uint8,
+            device=device,
+        )
+        self.kernel = init_mxfp8_linear_kernel()
+        self.kernel.process_weights_after_loading(self)
 
     def forward(
         self, y: torch.Tensor, bias: torch.Tensor | None = None
