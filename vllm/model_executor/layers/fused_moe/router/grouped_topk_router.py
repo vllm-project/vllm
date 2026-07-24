@@ -293,6 +293,39 @@ class GroupedTopKRouter(BaseRouter):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Compute routing using grouped top-k."""
 
+        use_rocm_aiter = None
+        if (
+            current_platform.is_rocm()
+            and self.num_expert_group == 1
+            and self.topk_group == 1
+            and not envs.VLLM_BATCH_INVARIANT
+        ):
+            use_rocm_aiter = rocm_aiter_ops.is_fused_moe_enabled()
+            if not use_rocm_aiter:
+                if self.e_score_correction_bias is not None:
+                    return fused_topk_bias(
+                        hidden_states=hidden_states,
+                        gating_output=router_logits,
+                        scoring_func=self.scoring_func,
+                        e_score_correction_bias=self.e_score_correction_bias.data,
+                        topk=self.top_k,
+                        renormalize=self.renormalize,
+                        indices_type=indices_type,
+                        routed_scaling_factor=self.routed_scaling_factor,
+                    )
+
+                topk_weights, topk_ids, _ = fused_topk(
+                    hidden_states=hidden_states,
+                    gating_output=router_logits,
+                    topk=self.top_k,
+                    renormalize=self.renormalize,
+                    indices_type=indices_type,
+                    scoring_func=self.scoring_func,
+                )
+                if self.routed_scaling_factor != 1.0:
+                    topk_weights *= self.routed_scaling_factor
+                return topk_weights, topk_ids
+
         def valid_grouping() -> bool:
             # Check if num_experts is greater than num_expert_group
             # and is divisible by num_expert_group
@@ -324,7 +357,9 @@ class GroupedTopKRouter(BaseRouter):
             return topk_weights, topk_ids
 
         # Select grouped_topk implementation
-        if rocm_aiter_ops.is_fused_moe_enabled():
+        if use_rocm_aiter is None:
+            use_rocm_aiter = rocm_aiter_ops.is_fused_moe_enabled()
+        if use_rocm_aiter:
             if not rocm_aiter_ops.is_fusion_moe_shared_experts_enabled():
                 assert self.num_fused_shared_experts == 0
             grouped_topk_impl = partial(

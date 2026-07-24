@@ -6,6 +6,7 @@ from unittest.mock import patch
 import pytest
 import torch
 
+import vllm.envs as envs
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.distributed.eplb.eplb_state import EplbLayerState
 from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
@@ -630,6 +631,143 @@ def test_grouped_topk(
             renormalize,
             routed_scaling_factor,
         )
+
+
+@pytest.mark.parametrize(
+    "scoring_func,has_bias,renormalize",
+    [
+        ("softmax", False, False),
+        ("sigmoid", False, True),
+        ("softmax", True, False),
+        ("sigmoid", True, True),
+    ],
+)
+def test_single_group_topk_delegates_to_standard_topk(
+    scoring_func: str,
+    has_bias: bool,
+    renormalize: bool,
+):
+    routed_scaling_factor = 1.5
+    e_score_correction_bias = torch.arange(8, dtype=torch.float32) if has_bias else None
+    router = GroupedTopKRouter(
+        top_k=2,
+        global_num_experts=8,
+        num_expert_group=1,
+        topk_group=1,
+        scoring_func=scoring_func,
+        renormalize=renormalize,
+        routed_scaling_factor=routed_scaling_factor,
+        e_score_correction_bias=e_score_correction_bias,
+    )
+    hidden_states = torch.zeros(2, 4)
+    router_logits = torch.zeros(2, 8)
+    delegated_weights = torch.ones(2, 2)
+    delegated_ids = torch.tensor([[0, 1], [2, 3]], dtype=torch.int64)
+    expected_weights = delegated_weights.clone()
+    if not has_bias:
+        expected_weights *= routed_scaling_factor
+
+    with (
+        patch.object(envs, "VLLM_BATCH_INVARIANT", False),
+        patch.object(current_platform, "is_rocm", return_value=True),
+        patch.object(rocm_aiter_ops, "is_fused_moe_enabled", return_value=False),
+        patch(
+            "vllm.model_executor.layers.fused_moe.router."
+            "grouped_topk_router.fused_topk_bias",
+            return_value=(delegated_weights, delegated_ids),
+        ) as fused_topk_bias_mock,
+        patch(
+            "vllm.model_executor.layers.fused_moe.router."
+            "grouped_topk_router.fused_topk",
+            return_value=(delegated_weights, delegated_ids, torch.empty(0)),
+        ) as fused_topk_mock,
+    ):
+        topk_weights, topk_ids = router.select_experts(
+            hidden_states,
+            router_logits,
+            topk_indices_dtype=torch.int64,
+        )
+
+    torch.testing.assert_close(topk_weights, expected_weights)
+    torch.testing.assert_close(topk_ids, delegated_ids)
+
+    delegate = fused_topk_bias_mock if has_bias else fused_topk_mock
+    other_delegate = fused_topk_mock if has_bias else fused_topk_bias_mock
+    delegate.assert_called_once()
+    other_delegate.assert_not_called()
+    call = delegate.call_args.kwargs
+    assert call["hidden_states"] is hidden_states
+    assert call["gating_output"] is router_logits
+    assert call["topk"] == 2
+    assert call["renormalize"] is renormalize
+    assert call["indices_type"] is torch.int64
+    assert call["scoring_func"] == scoring_func
+    if has_bias:
+        assert e_score_correction_bias is not None
+        assert (
+            call["e_score_correction_bias"].data_ptr()
+            == e_score_correction_bias.data_ptr()
+        )
+        assert call["routed_scaling_factor"] == routed_scaling_factor
+
+    if scoring_func == "sigmoid" and has_bias:
+        assert router.routing_method_type is RoutingMethodType.DeepSeekV3
+
+
+@pytest.mark.parametrize("fallback", ["batch_invariant", "aiter", "non_rocm"])
+def test_single_group_topk_preserves_grouped_fallbacks(fallback: str):
+    router = GroupedTopKRouter(
+        top_k=2,
+        global_num_experts=8,
+        num_expert_group=1,
+        topk_group=1,
+        scoring_func="sigmoid",
+        renormalize=True,
+        e_score_correction_bias=torch.zeros(8),
+    )
+    hidden_states = torch.zeros(2, 4)
+    router_logits = torch.zeros(2, 8)
+    expected = (torch.ones(2, 2), torch.zeros(2, 2, dtype=torch.int32))
+    use_aiter = fallback == "aiter"
+    is_rocm = fallback != "non_rocm"
+
+    with (
+        patch.object(envs, "VLLM_BATCH_INVARIANT", fallback == "batch_invariant"),
+        patch.object(current_platform, "is_rocm", return_value=is_rocm),
+        patch.object(rocm_aiter_ops, "is_fused_moe_enabled", return_value=use_aiter),
+        patch.object(
+            rocm_aiter_ops,
+            "is_fusion_moe_shared_experts_enabled",
+            return_value=False,
+        ),
+        patch(
+            "vllm.model_executor.layers.fused_moe.router."
+            "grouped_topk_router.grouped_topk",
+            return_value=expected,
+        ) as grouped_topk_mock,
+        patch(
+            "vllm.model_executor.layers.fused_moe.router."
+            "grouped_topk_router.rocm_aiter_grouped_topk",
+            return_value=expected,
+        ) as aiter_grouped_topk_mock,
+        patch(
+            "vllm.model_executor.layers.fused_moe.router."
+            "grouped_topk_router.fused_topk_bias"
+        ) as fused_topk_bias_mock,
+        patch(
+            "vllm.model_executor.layers.fused_moe.router.grouped_topk_router.fused_topk"
+        ) as fused_topk_mock,
+    ):
+        actual = router.select_experts(hidden_states, router_logits)
+
+    torch.testing.assert_close(actual[0], expected[0])
+    torch.testing.assert_close(actual[1], expected[1])
+    selected_backend = aiter_grouped_topk_mock if use_aiter else grouped_topk_mock
+    other_backend = grouped_topk_mock if use_aiter else aiter_grouped_topk_mock
+    selected_backend.assert_called_once()
+    other_backend.assert_not_called()
+    fused_topk_bias_mock.assert_not_called()
+    fused_topk_mock.assert_not_called()
 
 
 @pytest.mark.parametrize("m,k", MK_S)
