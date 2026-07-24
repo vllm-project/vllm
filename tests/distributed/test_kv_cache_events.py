@@ -6,7 +6,12 @@ from typing import Any
 import msgspec
 import pytest
 
-from vllm.distributed.kv_events import BlockRemoved, BlockStored
+from vllm.distributed.kv_events import (
+    AllBlocksCleared,
+    BlockRemoved,
+    BlockStored,
+    KVEventAggregator,
+)
 
 # Minimal ExternalBlockHash for testing (bytes are a valid ExternalBlockHash).
 _FAKE_HASH: bytes = b"\xab" * 32
@@ -183,3 +188,46 @@ def test_block_removed_locality_is_wire_compatible():
     new_payload = msgspec.msgpack.encode(_make_block_removed(locality="REMOTE"))
     assert msgspec.msgpack.decode(new_payload)["locality"] == "REMOTE"
     assert msgspec.msgpack.decode(new_payload, type=_LegacyBlockRemoved).medium == "GPU"
+
+
+def test_aggregator_intersects_worker_event_multiplicities():
+    event = _make_block_stored()
+    aggregator = KVEventAggregator(num_workers=2)
+
+    aggregator.add_events([event, event])
+    aggregator.add_events([event])
+
+    assert aggregator.get_common_events() == [event]
+    assert aggregator.get_all_events() == [event, event, event]
+
+
+def test_duplicate_events_cannot_substitute_for_a_worker_batch():
+    event = _make_block_stored()
+    aggregator = KVEventAggregator(num_workers=2)
+
+    aggregator.add_events([event, event])
+
+    assert aggregator.get_common_events() == []
+
+
+def test_aggregator_merge_preserves_worker_event_batches():
+    event = _make_block_stored()
+    first_worker = KVEventAggregator(num_workers=1)
+    second_worker = KVEventAggregator(num_workers=1)
+    first_worker.add_events([event, event])
+    second_worker.add_events([event])
+
+    first_worker.merge(second_worker)
+
+    assert first_worker.get_number_of_workers() == 2
+    assert first_worker.get_common_events() == [event]
+
+
+def test_all_blocks_cleared_can_be_aggregated():
+    event = AllBlocksCleared()
+    aggregator = KVEventAggregator(num_workers=2)
+
+    aggregator.add_events([event])
+    aggregator.add_events([event])
+
+    assert aggregator.get_common_events() == [event]

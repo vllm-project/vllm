@@ -70,6 +70,12 @@ class MooncakeStoreKVEvents(KVConnectorKVEvents):
     def increment_workers(self, count: int = 1) -> None:
         self._aggregator.increment_workers(count)
 
+    def merge(self, other: KVConnectorKVEvents) -> "MooncakeStoreKVEvents":
+        if not isinstance(other, MooncakeStoreKVEvents):
+            raise TypeError("Can only merge MooncakeStoreKVEvents.")
+        self._aggregator.merge(other._aggregator)
+        return self
+
     def get_all_events(self) -> list[KVCacheEvent]:
         return self._aggregator.get_all_events()
 
@@ -242,10 +248,7 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
         if self._kv_cache_events is None:
             self._kv_cache_events = kv_cache_events
         else:
-            self._kv_cache_events.add_events(kv_cache_events.get_all_events())
-            self._kv_cache_events.increment_workers(
-                kv_cache_events.get_number_of_workers()
-            )
+            self._kv_cache_events.merge(kv_cache_events)
 
     def take_events(self) -> Iterable[KVCacheEvent]:
         if self._kv_cache_events is not None:

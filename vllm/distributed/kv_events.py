@@ -114,7 +114,8 @@ class BlockRemoved(KVCacheEvent):
 
 
 class AllBlocksCleared(KVCacheEvent):
-    pass
+    def __hash__(self) -> int:
+        return hash(AllBlocksCleared)
 
 
 class KVEventBatch(EventBatch):
@@ -124,16 +125,22 @@ class KVEventBatch(EventBatch):
 class KVEventAggregator:
     """
     Aggregates KV events across multiple workers.
-    Tracks how many times each event appears and returns only those
-    that were emitted by all workers.
+    Treats each worker's events as a multiset and returns their intersection.
     """
 
-    __slots__ = ("_event_counter", "_num_workers")
+    __slots__ = (
+        "_common_event_counter",
+        "_event_counter",
+        "_num_event_batches",
+        "_num_workers",
+    )
 
     def __init__(self, num_workers: int) -> None:
         if num_workers <= 0:
             raise ValueError("num_workers must be greater than zero.")
+        self._common_event_counter: Counter[KVCacheEvent] = Counter()
         self._event_counter: Counter[KVCacheEvent] = Counter()
+        self._num_event_batches = 0
         self._num_workers: int = num_workers
 
     def add_events(self, events: list[KVCacheEvent]) -> None:
@@ -145,7 +152,13 @@ class KVEventAggregator:
         """
         if not isinstance(events, list):
             raise TypeError("events must be a list of KVCacheEvent.")
-        self._event_counter.update(events)
+        worker_event_counter = Counter(events)
+        self._event_counter.update(worker_event_counter)
+        if self._num_event_batches == 0:
+            self._common_event_counter = worker_event_counter.copy()
+        else:
+            self._common_event_counter &= worker_event_counter
+        self._num_event_batches += 1
 
     def get_common_events(self) -> list[KVCacheEvent]:
         """
@@ -154,11 +167,9 @@ class KVEventAggregator:
         Returns:
             List of events present in all workers.
         """
-        return [
-            event
-            for event, count in self._event_counter.items()
-            if count == self._num_workers
-        ]
+        if self._num_event_batches != self._num_workers:
+            return []
+        return list(self._common_event_counter.elements())
 
     def get_all_events(self) -> list[KVCacheEvent]:
         """
@@ -173,7 +184,29 @@ class KVEventAggregator:
         """
         Clear all tracked events.
         """
+        self._common_event_counter.clear()
         self._event_counter.clear()
+        self._num_event_batches = 0
+
+    def merge(self, other: "KVEventAggregator") -> None:
+        """
+        Merge worker event batches from another aggregator.
+
+        Args:
+            other: Aggregator whose workers and events should be merged.
+        """
+        other_common_events = other._common_event_counter.copy()
+        other_events = other._event_counter.copy()
+        other_num_event_batches = other._num_event_batches
+        other_num_workers = other._num_workers
+
+        if self._num_event_batches == 0:
+            self._common_event_counter = other_common_events
+        elif other_num_event_batches:
+            self._common_event_counter &= other_common_events
+        self._event_counter.update(other_events)
+        self._num_event_batches += other_num_event_batches
+        self._num_workers += other_num_workers
 
     def increment_workers(self, count: int = 1) -> None:
         """
@@ -204,7 +237,8 @@ class KVEventAggregator:
     def __repr__(self) -> str:
         return (
             f"<KVEventAggregator workers={self._num_workers}, "
-            f"events={len(self._event_counter)}>"
+            f"event_batches={self._num_event_batches}, "
+            f"events={sum(self._event_counter.values())}>"
         )
 
 
@@ -240,6 +274,7 @@ class KVConnectorKVEvents(ABC):
 
     def merge(self, other: "KVConnectorKVEvents") -> "KVConnectorKVEvents":
         self.add_events(other.get_all_events())
+        self.increment_workers(other.get_number_of_workers())
         return self
 
 
