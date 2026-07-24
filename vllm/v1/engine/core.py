@@ -1052,6 +1052,7 @@ class EngineCoreProc(EngineCore):
             # Only publish request queue stats to coordinator for "internal"
             # and "hybrid" LB modes.
             self.publish_dp_lb_stats = internal_dp_balancing
+            self.last_counts = (0, 0)
 
             self.addresses = addresses
             self.process_input_queue_block = True
@@ -1360,10 +1361,26 @@ class EngineCoreProc(EngineCore):
         while self._handle_shutdown():
             # 1) Poll the input queue until there is work to do.
             self._process_input_queue()
+            # Publish request counts before and after GPU step to ensure freshness.
+            self._maybe_publish_request_counts()
             # 2) Step the engine core and return the outputs.
             self._process_engine_step()
+            self._maybe_publish_request_counts()
 
         raise SystemExit
+
+    def _maybe_publish_request_counts(self):
+        if not self.publish_dp_lb_stats:
+            return
+
+        # Publish our request counts (if they've changed).
+        counts = self.scheduler.get_request_counts()
+        if counts != self.last_counts:
+            self.last_counts = counts
+            stats = SchedulerStats(
+                *counts, kv_cache_usage=self.scheduler.get_kv_cache_usage()
+            )
+            self.output_queue.put_nowait((-1, EngineCoreOutputs(scheduler_stats=stats)))
 
     def _process_input_queue(self):
         """Exits when an engine step needs to be performed."""
@@ -1866,7 +1883,6 @@ class DPEngineCoreProc(EngineCoreProc):
         # finished with DP peers every N steps.
         self.step_counter = 0
         self.current_wave = 0
-        self.last_counts = (0, 0)
 
         # Two-phase pause protocol state. When pending_pause is True, the
         # engine keeps stepping (dummy batches) while waiting for all DP
@@ -2003,12 +2019,16 @@ class DPEngineCoreProc(EngineCoreProc):
         if not self.publish_dp_lb_stats:
             return
 
-        # Publish our request counts (if they've changed).
+        # Publish our request counts (if they've changed), stamped with the
+        # lockstep-synchronized step counter and wave number.
         counts = self.scheduler.get_request_counts()
         if counts != self.last_counts:
             self.last_counts = counts
             stats = SchedulerStats(
-                *counts, step_counter=self.step_counter, current_wave=self.current_wave
+                *counts,
+                kv_cache_usage=self.scheduler.get_kv_cache_usage(),
+                step_counter=self.step_counter,
+                current_wave=self.current_wave,
             )
             self.output_queue.put_nowait((-1, EngineCoreOutputs(scheduler_stats=stats)))
 
