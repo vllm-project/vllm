@@ -978,17 +978,36 @@ def multi_thread_safetensors_weights_iterator(
     hf_weights_files: list[str],
     use_tqdm_on_load: bool,
     max_workers: int = 4,
+    safetensors_load_strategy: str | None = None,
+    *,
+    safetensors_prefetch_num_threads: int = DEFAULT_SAFETENSORS_PREFETCH_NUM_THREADS,
+    safetensors_prefetch_block_size: int = DEFAULT_SAFETENSORS_PREFETCH_BLOCK_SIZE,
 ) -> Generator[tuple[str, torch.Tensor], None, None]:
-    """Multi-Thread iterate over the weights in the model safetensor files."""
+    """Multi-Thread iterate over the weights in the model safetensor files.
+
+    When *safetensors_load_strategy* is ``"prefetch"``, checkpoint files are
+    pre-warmed into the OS page cache before the multi-thread loader starts,
+    which reduces storage-level I/O contention on network filesystems.
+    """
 
     def _load_file(st_file: str):
         result = load_file(st_file, device="cpu")
         return result
 
+    sorted_hf_weights_files = sorted(hf_weights_files, key=_natural_sort_key)
+    if safetensors_load_strategy == "prefetch":
+        _prefetch_all_checkpoints(
+            sorted_hf_weights_files,
+            num_prefetch_threads=safetensors_prefetch_num_threads,
+            block_size=safetensors_prefetch_block_size,
+        )
+
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
         # Note to use generator here so we do not store all the loaded files in memory
         # at the same time, which can cause OOM for large models.
-        futures = (executor.submit(_load_file, st_file) for st_file in hf_weights_files)
+        futures = (
+            executor.submit(_load_file, st_file) for st_file in sorted_hf_weights_files
+        )
         futures_iter = tqdm(
             concurrent.futures.as_completed(futures),
             total=len(hf_weights_files),

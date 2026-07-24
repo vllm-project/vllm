@@ -113,10 +113,11 @@ class DefaultModelLoader(BaseModelLoader):
             "enable_weights_track", None
         )
 
-        # The multi-thread loader ignores safetensors_load_strategy, so reject
-        # the combination instead of silently dropping the requested strategy.
+        # Multi-thread loader now supports safetensors_load_strategy via
+        # _prefetch_all_checkpoints when the strategy is "prefetch".
+        # Keep the validation only for unsupported strategies.
         if extra_config.get("enable_multithread_load") and (
-            load_config.safetensors_load_strategy not in (None, "lazy")
+            load_config.safetensors_load_strategy not in (None, "lazy", "prefetch")
         ):
             raise ValueError(
                 "enable_multithread_load does not support "
@@ -281,6 +282,15 @@ class DefaultModelLoader(BaseModelLoader):
                         self.load_config.use_tqdm_on_load,
                         max_workers=extra_config.get(
                             "num_threads", self.DEFAULT_NUM_THREADS
+                        ),
+                        safetensors_load_strategy=(
+                            self.load_config.safetensors_load_strategy
+                        ),
+                        safetensors_prefetch_num_threads=(
+                            self.load_config.safetensors_prefetch_num_threads
+                        ),
+                        safetensors_prefetch_block_size=(
+                            self.load_config.safetensors_prefetch_block_size
                         ),
                     )
                 else:
