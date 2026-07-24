@@ -38,6 +38,7 @@ from vllm.utils.import_utils import resolve_obj_by_qualname
 from vllm.utils.torch_utils import is_torch_equal_or_newer
 
 from .compiler_interface import (
+    AOTEagerAdaptor,
     CompilerInterface,
     EagerAdaptor,
     InductorAdaptor,
@@ -114,6 +115,9 @@ def make_compiler(compilation_config: CompilationConfig) -> CompilerInterface:
     elif compilation_config.backend == "eager":
         logger.debug("Using EagerAdaptor")
         return EagerAdaptor()
+    elif compilation_config.backend == "aot_eager":
+        logger.debug("Using AOTEagerAdaptor")
+        return AOTEagerAdaptor()
     else:
         logger.debug("Using custom backend: %s", compilation_config.backend)
         compiler = resolve_obj_by_qualname(current_platform.get_compile_backend())()
@@ -350,10 +354,17 @@ class CompilerManager:
                 ),
             ):
                 try:
+                    # Forward the piecewise subgraph index to the compiler
+                    # adaptor. Adaptors can use this to identify which
+                    # subgraph they're compiling (e.g. for record_function
+                    # labels). Copy first to avoid mutating the caller's
+                    # config across subgraph iterations.
+                    compiler_config = dict(additional_inductor_config)
+                    compiler_config["vllm_subgraph_index"] = graph_index
                     compiled_graph, handle = self.compiler.compile(
                         graph,
                         example_inputs,
-                        additional_inductor_config,
+                        compiler_config,
                         compile_range,
                         maybe_key,
                     )
