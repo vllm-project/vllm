@@ -217,21 +217,6 @@ __global__ void seed_prep_kernel(
     s_hist[b] = c;
   }
   __syncthreads();
-  // Coarse K-th estimate, then REBUILD the scale over just the useful
-  // range: [~K-th value (+1 coarse bucket slack) .. sample max + drift
-  // headroom]. The bottom of [min,max] is dead weight (the true global
-  // threshold can only be TIGHTER than the sample's), and without top
-  // headroom any score drifting above the sample max clamps into bucket 0
-  // where refresh can never resolve past it (measured @512K/Q8192: 25% of
-  // candidates above sample max, th floored at 0 for 43% of rows, 6.8xK
-  // emission). Fine scale concentrates all NB buckets where the threshold
-  // actually lives.
-  // NOTE (C3, rejected by measurement 2026-07-09): rebuilding a FINE scale
-  // over [K-th edge .. sample max + headroom] (fused into pass 3, no extra
-  // read) did NOT fix the 512K@Q8192 drift shape (headroom proportional to
-  // the narrow fine span is absolutely tiny — drift still clamps to bucket
-  // 0) and cost 3-12% at every healthy shape (finer th moves more often ->
-  // more gate fdiv reloads; extra smem atomic per value in pass 3).
   for (int b = tid; b < NB; b += BT)
     // Probe mode (emit_limit==0): scan-side refresh must start from zero
     // counts — write zeros here, saving the caller a separate memset.
