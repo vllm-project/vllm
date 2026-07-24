@@ -282,6 +282,7 @@ class DefaultModelLoader(BaseModelLoader):
                         max_workers=extra_config.get(
                             "num_threads", self.DEFAULT_NUM_THREADS
                         ),
+                        local_expert_ids=self.local_expert_ids,
                     )
                 else:
                     weights_iterator = safetensors_weights_iterator(

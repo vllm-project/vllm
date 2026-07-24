@@ -978,12 +978,28 @@ def multi_thread_safetensors_weights_iterator(
     hf_weights_files: list[str],
     use_tqdm_on_load: bool,
     max_workers: int = 4,
+    local_expert_ids: set[int] | None = None,
 ) -> Generator[tuple[str, torch.Tensor], None, None]:
-    """Multi-Thread iterate over the weights in the model safetensor files."""
+    """Multi-Thread iterate over the weights in the model safetensor files.
+
+    When *local_expert_ids* is provided, expert weights not belonging to this
+    rank are skipped **before** their bytes are read (mirroring
+    ``safetensors_weights_iterator``), so EP weight filtering composes with
+    multithreaded loading instead of being silently ignored.
+    """
 
     def _load_file(st_file: str):
-        result = load_file(st_file, device="cpu")
-        return result
+        if local_expert_ids is None:
+            return load_file(st_file, device="cpu")
+        # EP filtering: read only the tensors this rank needs. safetensors
+        # exposes tensor names via the file header before any tensor data is
+        # read, so skipping non-local experts here actually avoids the I/O.
+        with safe_open(st_file, framework="pt") as f:
+            return {
+                name: f.get_tensor(name)
+                for name in f.keys()  # noqa: SIM118
+                if not should_skip_weight(name, local_expert_ids)
+            }
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
         # Note to use generator here so we do not store all the loaded files in memory
