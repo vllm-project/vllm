@@ -1419,7 +1419,7 @@ def convert_to_wna16_moe_kernel_format(
 
     Args:
         backend: the selected ``WNA16MoEBackend``.
-        layer: the ``FusedMoEFactory`` layer whose parameters are being prepared.
+        layer: the ``MoERunner`` layer whose parameters are being prepared.
         quant_config: the ``QuantizationConfig`` for this layer.
         input_dtype: optional activation dtype, usually should be 16 bit.
     """
