@@ -639,10 +639,15 @@ class TestStoreDecodeRoundTrip:
     """End-to-end: store KV into TQ cache, decode, compare vs fp16 ref."""
 
     @pytest.mark.parametrize(
-        "preset",
-        ["turboquant_k8v4", "turboquant_4bit_nc"],
+        ("preset", "kv_group_size"),
+        [
+            ("turboquant_k8v4", 1),
+            ("turboquant_4bit_nc", 1),
+            ("turboquant_4bit_nc", 4),
+            ("turboquant_k3v4_nc", 4),
+        ],
     )
-    def test_single_token_roundtrip(self, preset):
+    def test_single_token_roundtrip(self, preset, kv_group_size):
         """Store 1 token, decode with query=key, check attention output.
 
         For a single token with query=key, attention output should equal
@@ -662,7 +667,7 @@ class TestStoreDecodeRoundTrip:
         cfg = TurboQuantConfig.from_cache_dtype(preset, head_dim=128)
         D = 128
         Hk = 4  # num_kv_heads
-        Hq = 4  # num_q_heads (no GQA for simplicity)
+        Hq = Hk * kv_group_size
         B = 1  # single token
         block_size = 16
         num_blocks = 1
@@ -709,10 +714,11 @@ class TestStoreDecodeRoundTrip:
             key_packed_size=cfg.key_packed_size,
             value_quant_bits=cfg.effective_value_quant_bits,
             key_fp8=cfg.key_fp8,
+            kv_group_size=kv_group_size,
         )
 
         # Decode: use key as query so attention = softmax([1]) * V = V
-        query = key.expand(B, Hq, D).contiguous().to(torch.float16)
+        query = key.repeat_interleave(kv_group_size, dim=1).contiguous()
         block_table = torch.tensor([[0]], device=device, dtype=torch.int32)
         seq_lens = torch.tensor([1], device=device, dtype=torch.int32)
 
@@ -736,7 +742,7 @@ class TestStoreDecodeRoundTrip:
         # With single KV, output should approximate the stored value.
         # Check per-head cosine similarity > threshold.
         out_fp32 = output.float()
-        val_fp32 = value.expand(B, Hq, D).float()
+        val_fp32 = value.repeat_interleave(kv_group_size, dim=1).float()
         for h in range(Hq):
             cos_sim = torch.nn.functional.cosine_similarity(
                 out_fp32[0, h].unsqueeze(0),
