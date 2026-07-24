@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from contextlib import contextmanager
+import enum
+from contextlib import contextmanager, suppress
 from typing import cast
 
 import torch
@@ -26,6 +27,13 @@ except Exception:
     custom_ar = False
 
 logger = init_logger(__name__)
+
+
+class _LifecycleState(enum.Enum):
+    ACTIVE = enum.auto()
+    DETACHED = enum.auto()
+    FAILED = enum.auto()
+    CLOSED = enum.auto()
 
 
 def _can_p2p(rank: int, world_size: int) -> bool:
@@ -71,6 +79,11 @@ class CustomAllreduce:
         """
         self._IS_CAPTURING = False
         self.disabled = True
+        # Attributes needed by close() when __init__ exits early or fails.
+        self._ptr = 0
+        self._lifecycle_state = _LifecycleState.ACTIVE
+        self._open_peer_ptrs: set[int] = set()
+        self._owned_ptrs: set[int] = set()
 
         if not custom_ar:
             # disable because of missing custom allreduce library
@@ -166,32 +179,46 @@ class CustomAllreduce:
             )
             return
 
-        self.disabled = False
-        # Buffers memory are owned by this Python class and passed to C++.
-        # Metadata composes of two parts: metadata for synchronization and a
-        # temporary buffer for storing intermediate allreduce results.
-        self.meta_ptrs = self.create_shared_buffer(
-            ops.meta_size() + max_size, group=group, uncached=True
-        )
-        # This is a pre-registered IPC buffer. In eager mode, input tensors
-        # are first copied into this buffer before allreduce is performed
-        self.buffer_ptrs = self.create_shared_buffer(max_size, group=group)
-        # This is a buffer for storing the tuples of pointers pointing to
-        # IPC buffers from all ranks. Each registered tuple has size of
-        # 8*world_size bytes where world_size is at most 8. Allocating 8MB
-        # is enough for 131072 such tuples. The largest model I've seen only
-        # needs less than 10000 of registered tuples.
-        self.rank_data = torch.empty(
-            8 * 1024 * 1024, dtype=torch.uint8, device=self.device
-        )
         self.max_size = max_size
         self.rank = rank
         self.world_size = world_size
         self.fully_connected = fully_connected
-        self._ptr = ops.init_custom_ar(
-            self.meta_ptrs, self.rank_data, rank, self.fully_connected
-        )
-        ops.register_buffer(self._ptr, self.buffer_ptrs)
+        try:
+            # Buffers memory are owned by this Python class and passed to C++.
+            # Metadata composes of two parts: metadata for synchronization
+            # and a temporary buffer for storing intermediate allreduce
+            # results.
+            self.meta_ptrs = self.create_shared_buffer(
+                ops.meta_size() + max_size, group=group, uncached=True
+            )
+            self._owned_ptrs.add(self.meta_ptrs[rank])
+            self._open_peer_ptrs.update(
+                ptr for i, ptr in enumerate(self.meta_ptrs) if i != rank
+            )
+            # This is a pre-registered IPC buffer. In eager mode, input
+            # tensors are first copied into this buffer before allreduce is
+            # performed
+            self.buffer_ptrs = self.create_shared_buffer(max_size, group=group)
+            self._owned_ptrs.add(self.buffer_ptrs[rank])
+            self._open_peer_ptrs.update(
+                ptr for i, ptr in enumerate(self.buffer_ptrs) if i != rank
+            )
+            # This is a buffer for storing the tuples of pointers pointing to
+            # IPC buffers from all ranks. The first RankData-sized slot holds
+            # the stable RankSignals pointer table; the remaining slots hold
+            # eager and captured-graph RankData records.
+            self.rank_data = torch.empty(
+                8 * 1024 * 1024, dtype=torch.uint8, device=self.device
+            )
+            self._ptr = ops.init_custom_ar(
+                self.meta_ptrs, self.rank_data, rank, self.fully_connected
+            )
+            ops.register_buffer(self._ptr, self.buffer_ptrs)
+        except Exception:
+            with suppress(Exception):
+                self.close()
+            raise
+        self.disabled = False
 
     @contextmanager
     def capture(self):
@@ -200,6 +227,7 @@ class CustomAllreduce:
         `register_graph_buffers` call at the end of the context.
         It records all the buffer addresses used in the CUDA graph.
         """
+        self._require_active()
         try:
             self._IS_CAPTURING = True
             yield
@@ -211,6 +239,13 @@ class CustomAllreduce:
     def register_graph_buffers(self):
         handle, offset = ops.get_graph_buffer_ipc_meta(self._ptr)
         logger.info("Registering %d cuda graph addresses", len(offset))
+        handles, offsets = self._exchange_int_lists(handle, offset)
+        ops.register_graph_buffers(self._ptr, handles, offsets)
+
+    def _exchange_int_lists(
+        self, handle: list[int], offset: list[int]
+    ) -> tuple[list[list[int]], list[list[int]]]:
+        """Exchange a pair of int lists with every rank in the group."""
         # We cannot directly use `dist.all_gather_object` here
         # because it is incompatible with `gloo` backend under inference mode.
         # see https://github.com/pytorch/pytorch/issues/126032 for details.
@@ -225,7 +260,13 @@ class CustomAllreduce:
         # Unpack list of tuples to tuple of lists.
         handles = cast(list[list[int]], [d[0] for d in all_data])
         offsets = cast(list[list[int]], [d[1] for d in all_data])
-        ops.register_graph_buffers(self._ptr, handles, offsets)
+        return handles, offsets
+
+    def _require_active(self) -> None:
+        if self._lifecycle_state == _LifecycleState.DETACHED:
+            raise RuntimeError("Custom allreduce peer mappings are detached.")
+        if self._lifecycle_state != _LifecycleState.ACTIVE:
+            raise RuntimeError("Custom allreduce lifecycle is not active.")
 
     def should_custom_ar(self, inp: torch.Tensor):
         if self.disabled:
@@ -251,6 +292,7 @@ class CustomAllreduce:
         IPC-registered. Otherwise, inp is first copied into a pre-registered
         buffer.
         """
+        self._require_active()
         if out is None:
             out = torch.empty_like(inp)
         if registered:
@@ -264,7 +306,10 @@ class CustomAllreduce:
     def custom_all_reduce(self, input: torch.Tensor) -> torch.Tensor | None:
         """The main allreduce API that provides support for cuda graph."""
         # When custom allreduce is disabled, this will be None.
-        if self.disabled or not self.should_custom_ar(input):
+        if self.disabled:
+            return None
+        self._require_active()
+        if not self.should_custom_ar(input):
             return None
         if self._IS_CAPTURING:
             if torch.cuda.is_current_stream_capturing():
@@ -279,16 +324,127 @@ class CustomAllreduce:
             # latency) compared to the performance gain of using custom kernels
             return self.all_reduce(input, registered=False)
 
-    def close(self):
-        if not self.disabled and self._ptr:
-            if ops is not None:
+    def prepare_for_suspend(self) -> None:
+        """Close every imported peer mapping ahead of GPU suspend.
+
+        Failure leaves the communicator in a terminal failed state.
+        Repeated successful calls are no-ops.
+        """
+        if self.disabled or self._lifecycle_state == _LifecycleState.DETACHED:
+            return
+        self._require_active()
+        self._lifecycle_state = _LifecycleState.FAILED
+        if not current_platform.is_cuda():
+            raise RuntimeError(
+                "Custom allreduce suspend/resume is only supported on CUDA."
+            )
+        torch.cuda.synchronize(self.device)
+        ops.custom_ar_prepare_for_suspend(self._ptr)
+        close_error: Exception | None = None
+        for peer_ptr in tuple(self._open_peer_ptrs):
+            try:
+                ops.close_mem_handle(peer_ptr)
+            except Exception as exc:
+                if close_error is None:
+                    close_error = exc
+            else:
+                self._open_peer_ptrs.remove(peer_ptr)
+        if close_error is not None:
+            raise close_error
+        self._lifecycle_state = _LifecycleState.DETACHED
+
+    def reinit_after_resume(self) -> None:
+        """Reopen peer mappings and rewrite device pointer tables after resume.
+
+        Failure leaves the communicator in a terminal failed state.
+        Repeated successful calls are no-ops.
+        """
+        if self.disabled or self._lifecycle_state == _LifecycleState.ACTIVE:
+            return
+        if self._lifecycle_state != _LifecycleState.DETACHED:
+            raise RuntimeError("Custom allreduce must be detached before reinit.")
+        self._lifecycle_state = _LifecycleState.FAILED
+        if not current_platform.is_cuda():
+            raise RuntimeError(
+                "Custom allreduce suspend/resume is only supported on CUDA."
+            )
+        torch.cuda.synchronize(self.device)
+        # Re-export and exchange the owner handles of the two shared buffers.
+        meta_handle = ops.get_mem_handle(self.meta_ptrs[self.rank]).tolist()
+        buffer_handle = ops.get_mem_handle(self.buffer_ptrs[self.rank]).tolist()
+        meta_handles, buffer_handles = self._exchange_int_lists(
+            meta_handle, buffer_handle
+        )
+        for ptrs, peer_handles in (
+            (self.meta_ptrs, meta_handles),
+            (self.buffer_ptrs, buffer_handles),
+        ):
+            for peer_rank in range(self.world_size):
+                if peer_rank == self.rank:
+                    continue
+                peer_ptr = ops.open_mem_handle(
+                    torch.tensor(peer_handles[peer_rank], dtype=torch.uint8)
+                )
+                self._open_peer_ptrs.add(peer_ptr)
+                ptrs[peer_rank] = peer_ptr
+        handle, offset = ops.get_graph_buffer_ipc_meta_for_reinit(self._ptr)
+        handles, offsets = self._exchange_int_lists(handle, offset)
+        ops.custom_ar_reinit_after_resume(
+            self._ptr, handles, offsets, self.meta_ptrs, self.buffer_ptrs
+        )
+        torch.cuda.synchronize(self.device)
+        self._lifecycle_state = _LifecycleState.ACTIVE
+
+    def close(self) -> None:
+        """Release all custom-allreduce resources, surfacing failures.
+
+        A successful close is terminal; repeated calls are no-ops.
+        """
+        if self._lifecycle_state == _LifecycleState.CLOSED or ops is None:
+            return
+        if self._ptr == 0 and not self._open_peer_ptrs and not self._owned_ptrs:
+            self.disabled = True
+            self._lifecycle_state = _LifecycleState.CLOSED
+            return
+        self._lifecycle_state = _LifecycleState.FAILED
+        first_error: Exception | None = None
+        native_closed = self._ptr == 0
+        if self._ptr:
+            try:
+                ops.custom_ar_close(self._ptr)
                 ops.dispose(self._ptr)
-            self._ptr = 0
-            self.free_shared_buffer(self.meta_ptrs, rank=self.rank)
-            self.free_shared_buffer(self.buffer_ptrs, rank=self.rank)
+                self._ptr = 0
+                native_closed = True
+            except Exception as exc:
+                first_error = exc
+        for peer_ptr in tuple(self._open_peer_ptrs):
+            try:
+                ops.close_mem_handle(peer_ptr)
+            except Exception as exc:
+                if first_error is None:
+                    first_error = exc
+            else:
+                self._open_peer_ptrs.remove(peer_ptr)
+        # Fail closed: keep owned buffers alive if the native close failed.
+        if native_closed:
+            for owner_ptr in tuple(self._owned_ptrs):
+                try:
+                    ops.free_shared_buffer(owner_ptr)
+                except Exception as exc:
+                    if first_error is None:
+                        first_error = exc
+                else:
+                    self._owned_ptrs.remove(owner_ptr)
+        if first_error is not None:
+            raise RuntimeError(
+                "Failed to close custom allreduce resources."
+            ) from first_error
+        self.disabled = True
+        self._lifecycle_state = _LifecycleState.CLOSED
 
     def __del__(self):
-        self.close()
+        with suppress(Exception):
+            self.close()
 
     @staticmethod
     def create_shared_buffer(
