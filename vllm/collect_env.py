@@ -17,7 +17,11 @@ from collections import namedtuple
 
 import regex as re
 
-from vllm.envs import environment_variables
+try:
+    from vllm.envs import environment_variables
+except ImportError:
+    environment_variables = {}
+
 
 try:
     import torch
@@ -301,7 +305,8 @@ def get_xpu_runtime_version():
 
 
 def get_pkg_version(run_lambda, pkg):
-    assert get_platform() == "linux"
+    if get_platform() != "linux":
+        return None
 
     if pkg == "vllm_xpu_kernels":
         rc, out, _ = run_lambda("pip show vllm-xpu-kernels")
@@ -417,7 +422,10 @@ def get_sycl_version(run_lambda):
 
 
 def get_vllm_version():
-    from vllm import __version__, __version_tuple__
+    try:
+        from vllm import __version__, __version_tuple__
+    except ImportError:
+        return "N/A"
 
     if __version__ == "dev":
         return "N/A (dev)"
@@ -655,23 +663,27 @@ def get_pip_packages(run_lambda, patterns=None):
 
             pip_spec = importlib.util.find_spec("pip")
             pip_available = pip_spec is not None
-        except ImportError:
+        except Exception:
             pip_available = False
 
-        if pip_available:
-            cmd = [sys.executable, "-mpip", "list", "--format=freeze"]
-        elif is_uv_venv():
-            print("uv is set")
-            cmd = ["uv", "pip", "list", "--format=freeze"]
-        else:
-            raise RuntimeError(
-                "Could not collect pip list output (pip or uv module not available)"
-            )
+        try:
+            if pip_available:
+                cmd = [sys.executable, "-mpip", "list", "--format=freeze"]
+            elif is_uv_venv():
+                cmd = ["uv", "pip", "list", "--format=freeze"]
+            else:
+                return None
 
-        out = run_and_read_all(run_lambda, cmd)
-        return "\n".join(
-            line for line in out.splitlines() if any(name in line for name in patterns)
-        )
+            out = run_and_read_all(run_lambda, cmd)
+            if out is None:
+                return None
+            return "\n".join(
+                line
+                for line in out.splitlines()
+                if any(name in line for name in patterns)
+            )
+        except Exception:
+            return None
 
     pip_version = "pip3" if sys.version[0] == "3" else "pip"
     out = run_with_pip()
