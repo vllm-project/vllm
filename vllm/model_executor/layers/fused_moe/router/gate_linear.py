@@ -14,6 +14,7 @@ from vllm.utils.torch_utils import direct_register_custom_op
 logger = init_logger(__name__)
 
 
+# --8<-- [start:gate_linear]
 @PluggableLayer.register("gate_linear")
 class GateLinear(ReplicatedLinear):
     """MoE gate linear layer with multi-tier GEMM dispatch:
@@ -31,6 +32,8 @@ class GateLinear(ReplicatedLinear):
     (e.g. when the required dtype depends on the expert quantization
     method which is only known later).
     """
+
+    # --8<-- [end:gate_linear]
 
     # Dimensions supported by the DSV3 specialized kernel.
     # Valid (hidden_size, num_experts) combinations:

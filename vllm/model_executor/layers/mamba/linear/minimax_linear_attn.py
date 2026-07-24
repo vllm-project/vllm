@@ -147,8 +147,14 @@ class MiniMaxText01LinearKernel:
         return rearrange(output.squeeze(0), "h n d -> n (h d)")
 
 
+# --8<-- [start:minimax_text_01_attention]
 @PluggableLayer.register("minimax_text_01_attention")
 class MiniMaxText01LinearAttention(LinearAttention):
+    """
+    MiniMax Text 01 Linear Attention layer
+    """
+
+    # --8<-- [end:minimax_text_01_attention]
     def __init__(
         self,
         config,

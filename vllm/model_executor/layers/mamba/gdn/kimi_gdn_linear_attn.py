@@ -81,8 +81,12 @@ direct_register_custom_op(
 )
 
 
+# --8<-- [start:kimi_gated_delta_net_attention]
 @PluggableLayer.register("kimi_gated_delta_net_attention")
 class KimiGatedDeltaNetAttention(GatedDeltaNetAttention):
+    """Kimi Gated Delta Net Attention layer."""
+
+    # --8<-- [end:kimi_gated_delta_net_attention]
     def get_state_dtype(
         self,
     ) -> tuple[torch.dtype, torch.dtype]:
