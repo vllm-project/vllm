@@ -80,6 +80,28 @@ def test_stop_token_ids(llm):
     assert output[0].outputs[0].token_ids[-1] == stop_token_id_0
 
 
+def test_stop_token_ids_out_of_vocab(llm):
+    """Out-of-range stop_token_ids must be rejected before reaching GPU."""
+
+    with pytest.raises(ValueError):
+        _ = llm.generate(
+            PROMPT,
+            SamplingParams(stop_token_ids=[999999999]),
+        )
+
+    with pytest.raises(ValueError):
+        _ = llm.generate(
+            PROMPT,
+            SamplingParams(stop_token_ids=[-1]),
+        )
+
+    with pytest.raises(ValueError):
+        _ = llm.generate(
+            PROMPT,
+            SamplingParams(stop_token_ids=[5, 999999999]),
+        )
+
+
 def test_detokenize_false(llm):
     """Check that detokenize=False option works."""
 
