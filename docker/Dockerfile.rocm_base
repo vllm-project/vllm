@@ -1,6 +1,6 @@
 ARG BASE_IMAGE=ubuntu:24.04
-ARG TRITON_BRANCH="0f380657"
-ARG TRITON_REPO="https://github.com/ROCm/triton.git"
+ARG TRITON_BRANCH="release/3.6.x"
+ARG TRITON_REPO="https://github.com/triton-lang/triton.git"
 ARG FA_BRANCH="0e60e394"
 ARG FA_REPO="https://github.com/Dao-AILab/flash-attention.git"
 ARG AITER_BRANCH="v0.1.16.post5"
@@ -17,7 +17,8 @@ ARG AITER_ROCM_ARCH="gfx942;gfx950"
 ENV AITER_ROCM_ARCH="${AITER_ROCM_ARCH}"
 # Prebuild AITER kernels at wheel-build time (CDNA only). 1=on, 0=off.
 ARG PREBUILD_KERNELS=0
-ARG PYTHON_VERSION=3.14.6
+ARG PYTHON_VERSION=3.14
+ENV PYTHON_VERSION=${PYTHON_VERSION}
 ARG MAX_JOBS=128
 ENV MAX_JOBS=${MAX_JOBS}
 
@@ -28,25 +29,23 @@ RUN mkdir -p /app
 WORKDIR /app
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Install base dependencies
+# Install Python and other dependencies
 RUN apt-get update -y \
-    && apt-get install -y software-properties-common build-essential git curl sudo vim less libopenmpi-dev libpci-dev pkg-config libdrm-dev
+    && apt-get install -y software-properties-common build-essential git curl sudo vim less libgfortran5 libopenmpi-dev libpci-dev liblzma-dev pkg-config libdrm-dev \
+    && for i in 1 2 3; do \
+        add-apt-repository -y ppa:deadsnakes/ppa && break || \
+        { echo "Attempt $i failed, retrying in 5s..."; sleep 5; }; \
+    done \
+    && apt-get update -y \
+    && apt-get install -y python${PYTHON_VERSION} python${PYTHON_VERSION}-dev python${PYTHON_VERSION}-venv \
+       python-is-python3 \
+    && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python${PYTHON_VERSION} 1 \
+    && update-alternatives --set python3 /usr/bin/python${PYTHON_VERSION} \
+    && ln -sf /usr/bin/python${PYTHON_VERSION}-config /usr/bin/python3-config \
+    && curl -sS https://bootstrap.pypa.io/get-pip.py | python${PYTHON_VERSION} \
+    && python3 --version && python3 -m pip --version
 
-# Install UV first (only needs curl, no Python dependency)
-RUN curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR="/usr/local/bin" sh
-
-# Install requested Python version via uv (standalone builds, no PPA dependency)
-RUN uv python install ${PYTHON_VERSION}
-RUN uv venv /opt/python --python ${PYTHON_VERSION} --seed
-ENV PATH=/opt/python/bin:$PATH
-ENV UV_PYTHON=/opt/python/bin/python
-ENV UV_HTTP_TIMEOUT=500
-ENV UV_INDEX_STRATEGY="unsafe-best-match"
-ENV UV_LINK_MODE=copy
-
-RUN uv pip install -U packaging 'cmake<4' ninja wheel 'setuptools<80' pybind11
-RUN CMAKE_REAL=$(python3 -c "import cmake, os; print(os.path.join(os.path.dirname(cmake.__file__), 'data', 'bin', 'cmake'))") \
-    && ln -sf "$CMAKE_REAL" /opt/python/bin/cmake
+RUN pip install -U packaging 'cmake<4' ninja wheel 'setuptools<80' pybind11
 RUN apt-get update && apt-get install -y libjpeg-dev libsox-dev libsox-fmt-all sox && rm -rf /var/lib/apt/lists/*
 
 # Install sccache - always enabled for local disk caching
@@ -74,12 +73,12 @@ ENV SCCACHE_CACHE_SIZE="50G"
 ###
 ### TheROCK install
 ###
-ARG PIP_EXTRA_INDEX_URL=https://rocm.nightlies.amd.com/whl-multi-arch/
+ARG PIP_EXTRA_INDEX_URL=https://repo.amd.com/rocm/whl-multi-arch/
 ENV PIP_EXTRA_INDEX_URL=${PIP_EXTRA_INDEX_URL}
-ARG ROCM_SDK_VERSION=7.15.0a20260721
-ARG TORCH_VERSION=2.12.0+rocm7.15.0a20260721
-ARG TORCHAUDIO_VERSION=2.11.0+rocm7.15.0a20260721
-ARG TORCHVISION_VERSION=0.27.0+rocm7.15.0a20260721
+ARG ROCM_SDK_VERSION=7.14.0
+ARG TORCH_VERSION=2.11.0+rocm7.14.0
+ARG TORCHAUDIO_VERSION=2.11.0+rocm7.14.0
+ARG TORCHVISION_VERSION=0.26.0+rocm7.14.0
 # DEVICE_EXTRAS: set to install device-specific packages (e.g. "device-all" or
 # "gfx90a;gfx942;gfx950"). When unset, only base torch wheels are installed.
 ARG DEVICE_EXTRAS
@@ -90,33 +89,23 @@ ARG PYTORCH_VISION_REPO="https://github.com/pytorch/vision.git"
 ARG PYTORCH_VISION_BRANCH="v0.24.1"
 ARG PYTORCH_AUDIO_REPO="https://github.com/pytorch/audio.git"
 ARG PYTORCH_AUDIO_BRANCH="v2.9.0"
-# USE_CUSTOM_TRITON: set to 1 (default) to build triton from source and remove
-# any triton that came bundled with the PyTorch wheel. Set to 0 to keep the
-# TheRock triton from the PyTorch wheel instead.
-ARG USE_CUSTOM_TRITON=0
 
-# Install ROCm SDK (--prerelease=allow needed for nightly versions like 7.14.0a20260624)
-RUN uv pip install --prerelease=allow --index-url ${PIP_EXTRA_INDEX_URL} \
+# Install ROCm SDK
+RUN pip install --index-url ${PIP_EXTRA_INDEX_URL} \
     "rocm[libraries,devel]${ROCM_SDK_VERSION:+==${ROCM_SDK_VERSION}}" \
     && rocm-sdk init
 
 # Install PyTorch: try wheels first, build from source if not available.
-# For nightlies, version strings include a date suffix (e.g. +rocm7.14.0a20260522),
-# so we let uv resolve the best match rather than pinning an exact version.
 RUN set -e; \
     TORCH_INSTALLED=0; \
     if [ -n "${ROCM_SDK_VERSION}" ]; then \
         echo "Trying PyTorch wheels from TheRock index..." \
-        && if uv pip install --prerelease=allow --index-url ${PIP_EXTRA_INDEX_URL} \
+        && if pip install --index-url ${PIP_EXTRA_INDEX_URL} \
                 "torch==${TORCH_VERSION}" \
                 "torchaudio==${TORCHAUDIO_VERSION}" \
                 "torchvision==${TORCHVISION_VERSION}"; then \
             echo "PyTorch wheels installed successfully"; \
             python3 -c "import torch; print(f'  torch={torch.__version__}, hip={torch.version.hip}')"; \
-            if [ "${USE_CUSTOM_TRITON}" = "1" ] && python3 -c "import triton" 2>/dev/null; then \
-                echo "Removing TheRock triton (USE_CUSTOM_TRITON=1, will be replaced by from-source build)"; \
-                pip uninstall -y triton triton-kernels; \
-            fi; \
             TORCH_INSTALLED=1; \
         else \
             echo "PyTorch wheels not found, will build from source"; \
@@ -131,13 +120,13 @@ RUN set -e; \
         && python3 tools/amd_build/build_amd.py \
         && CMAKE_PREFIX_PATH=$(python3 -c 'import sys; print(sys.prefix)') \
            python3 setup.py bdist_wheel --dist-dir=dist \
-        && uv pip install dist/*.whl \
+        && pip install dist/*.whl \
         && rm -rf /tmp/pytorch \
         && echo "Building torchvision from source (${PYTORCH_VISION_REPO} @ ${PYTORCH_VISION_BRANCH})" \
         && git clone ${PYTORCH_VISION_REPO} /tmp/vision \
         && cd /tmp/vision && git checkout ${PYTORCH_VISION_BRANCH} \
         && python3 setup.py bdist_wheel --dist-dir=dist \
-        && uv pip install dist/*.whl \
+        && pip install dist/*.whl \
         && rm -rf /tmp/vision \
         && echo "Building torchaudio from source (${PYTORCH_AUDIO_REPO} @ ${PYTORCH_AUDIO_BRANCH})" \
         && git clone ${PYTORCH_AUDIO_REPO} /tmp/audio \
@@ -145,43 +134,26 @@ RUN set -e; \
         && git submodule update --init --recursive \
         && pip install -r requirements.txt \
         && python3 setup.py bdist_wheel --dist-dir=dist \
-        && uv pip install dist/*.whl \
+        && pip install dist/*.whl \
         && rm -rf /tmp/audio; \
     fi
 
-# Install device-specific packages when DEVICE_EXTRAS is set.
+# Install device-specific packages for each arch in PYTORCH_ROCM_ARCH
 SHELL ["/bin/bash", "-c"]
-RUN if [ -n "${DEVICE_EXTRAS}" ] && [ -n "${ROCM_SDK_VERSION}" ]; then \
-        if echo "${ROCM_SDK_VERSION}" | grep -q '\.dev0'; then \
-            ROCM_TORCH_SUFFIX="+devrocm$(echo ${ROCM_SDK_VERSION} | tr '+' '.')"; \
-        else \
-            ROCM_TORCH_SUFFIX="+rocm${ROCM_SDK_VERSION}"; \
-        fi; \
-        TORCH_VER="${TORCH_VERSION}${ROCM_TORCH_SUFFIX}"; \
-        TORCHVISION_VER="${TORCHVISION_VERSION}${ROCM_TORCH_SUFFIX}"; \
-        IFS=';' read -ra ARCHES <<< "${DEVICE_EXTRAS}"; \
-        DEVICE_PKGS=""; \
+RUN if [ -n "${ROCM_SDK_VERSION}" ] && [ -n "${PYTORCH_ROCM_ARCH}" ]; then \
+        TORCH_VER=$(python3 -c "import torch; print(torch.__version__)"); \
+        IFS=';' read -ra ARCHES <<< "${PYTORCH_ROCM_ARCH}"; \
+        PKGS=""; \
         for arch in "${ARCHES[@]}"; do \
-            if [ "$arch" = "device-all" ]; then \
-                echo "Installing all device packages"; \
-            else \
-                DEVICE_PKGS="${DEVICE_PKGS} amd-torch-device-${arch}==${TORCH_VER}"; \
-                DEVICE_PKGS="${DEVICE_PKGS} amd-torchvision-device-${arch}==${TORCHVISION_VER}"; \
-                DEVICE_PKGS="${DEVICE_PKGS} rocm-sdk-device-${arch}==${ROCM_SDK_VERSION}"; \
-            fi; \
+            PKGS="${PKGS} amd-torch-device-${arch}==${TORCH_VER}"; \
+            PKGS="${PKGS} rocm-sdk-device-${arch}==${ROCM_SDK_VERSION}"; \
         done; \
-        if [ -n "${DEVICE_PKGS}" ]; then \
-            echo "Installing device packages: ${DEVICE_PKGS}" \
-            && uv pip install --prerelease=allow --index-url ${PIP_EXTRA_INDEX_URL} ${DEVICE_PKGS}; \
-        fi; \
+        echo "Installing device packages for arches: ${PYTORCH_ROCM_ARCH}"; \
+        pip install --index-url ${PIP_EXTRA_INDEX_URL} ${PKGS}; \
     fi
 SHELL ["/bin/sh", "-c"]
 
-RUN SITE_PACKAGES=$(python3 -c "import sysconfig; print(sysconfig.get_path('purelib'))") \
-    && echo "SITE_PACKAGES=${SITE_PACKAGES}" \
-    && echo "${SITE_PACKAGES}" > /tmp/site_packages_path \
-    && ln -sf "${SITE_PACKAGES}" /opt/python/site-packages
-ENV SITE_PACKAGES=/opt/python/site-packages
+ENV SITE_PACKAGES=/usr/local/lib/python${PYTHON_VERSION}/dist-packages
 ENV ROCM_PATH="$SITE_PACKAGES/_rocm_sdk_devel" \
     ROCM_HOME="$SITE_PACKAGES/_rocm_sdk_devel" \
     HIP_PATH="$SITE_PACKAGES/_rocm_sdk_devel" \
@@ -189,7 +161,7 @@ ENV ROCM_PATH="$SITE_PACKAGES/_rocm_sdk_devel" \
     HIP_DEVICE_LIB_PATH="$SITE_PACKAGES/_rocm_sdk_core/lib/llvm/amdgcn/bitcode"
 ENV LD_LIBRARY_PATH="$SITE_PACKAGES/_rocm_sdk_devel/lib:$SITE_PACKAGES/_rocm_sdk_devel/lib/rocm_sysdeps/lib:$SITE_PACKAGES/_rocm_sdk_core/lib:$SITE_PACKAGES/_rocm_sdk_core/lib/rocm_sysdeps/lib"
 ENV PATH="$SITE_PACKAGES/_rocm_sdk_devel/bin:$SITE_PACKAGES/_rocm_sdk_devel/lib/llvm/bin:$SITE_PACKAGES/_rocm_sdk_core/bin:${PATH}"
-RUN cd $SITE_PACKAGES/_rocm_sdk_core/share/amd_smi && uv pip install .
+RUN cd $SITE_PACKAGES/_rocm_sdk_core/share/amd_smi && pip install .
 ENV PYTHONPATH=$SITE_PACKAGES/_rocm_sdk_core/share/amd_smi:$PYTHONPATH
 
 # Setup sccache wrappers for HIP compilation via HIP_CLANG_PATH
@@ -227,29 +199,15 @@ RUN echo "Setting up sccache wrappers for HIP compilation..." \
         && cat /opt/sccache-wrappers/clang++
 
 ###
-### Triton Build (from source when USE_CUSTOM_TRITON=1)
+### Triton Build
 ###
 FROM base AS build_triton
 ARG TRITON_BRANCH
 ARG TRITON_REPO
-ARG USE_CUSTOM_TRITON
-RUN mkdir -p /app/install && \
-    if [ "${USE_CUSTOM_TRITON}" != "1" ]; then \
-        echo "USE_CUSTOM_TRITON=0: skipping triton source build (using TheRock triton)"; \
-    else \
-        git clone ${TRITON_REPO} \
-        && cd triton \
-        && git checkout ${TRITON_BRANCH} \
-        && git config --global user.email "you@example.com" && git config --global user.name "Your Name" \
-        && git cherry-pick 555d04f \
-        && if [ ! -f setup.py ]; then cd python; fi \
-        && python3 setup.py bdist_wheel --dist-dir=dist \
-        && cp dist/*.whl /app/install; \
-    fi
-RUN if [ "${USE_CUSTOM_TRITON}" = "1" ] && [ -d triton/python/triton_kernels ]; then \
-        pip install build && cd triton/python/triton_kernels \
-        && python3 -m build --wheel && cp dist/*.whl /app/install; \
-    fi
+RUN git clone ${TRITON_REPO}
+RUN cd triton && git checkout ${TRITON_BRANCH} && mkdir -p /app/install
+RUN if [ -d triton/python/triton_kernels ]; then pip install build && cd triton/python/triton_kernels \
+    && python3 -m build --wheel && cp dist/*.whl /app/install; fi
 
 
 ###
@@ -294,8 +252,8 @@ RUN --mount=type=cache,target=/sccache \
         && cd aiter \
         && git checkout ${AITER_BRANCH} \
         && git submodule update --init --recursive \
-        && uv pip install -r requirements.txt \
-        && uv pip install pyyaml \
+        && pip install -r requirements.txt \
+        && pip install pyyaml \
         && export HIP_CLANG_PATH=/opt/sccache-wrappers \
         && echo "sccache stats before build:" \
         && sccache --show-stats \
@@ -316,7 +274,7 @@ RUN --mount=type=cache,target=/sccache \
 FROM base AS debs_wheel_release
 RUN mkdir /app/debs
 RUN --mount=type=bind,from=build_triton,src=/app/install/,target=/install \
-    cp /install/*.whl /app/debs 2>/dev/null || echo "No triton wheels (USE_CUSTOM_TRITON=0)"
+    cp /install/*.whl /app/debs
 RUN --mount=type=bind,from=build_fa,src=/app/install/,target=/install \
     cp /install/*.whl /app/debs
 RUN --mount=type=bind,from=build_aiter,src=/app/install/,target=/install \
@@ -325,15 +283,16 @@ RUN --mount=type=bind,from=build_aiter,src=/app/install/,target=/install \
 FROM base AS debs
 RUN mkdir /app/debs
 RUN --mount=type=bind,from=build_triton,src=/app/install/,target=/install \
-    cp /install/*.whl /app/debs 2>/dev/null || echo "No triton wheels (USE_CUSTOM_TRITON=0)"
+    cp /install/*.whl /app/debs
 RUN --mount=type=bind,from=build_fa,src=/app/install/,target=/install \
     cp /install/*.whl /app/debs
 RUN --mount=type=bind,from=build_aiter,src=/app/install/,target=/install \
     cp /install/*.whl /app/debs 2>/dev/null || echo "No aiter wheels (RDNA build)"
 
 FROM base AS final
+# --no-deps: torch/triton already in base from TheRock; don't re-resolve from PyPI
 RUN --mount=type=bind,from=debs,src=/app/debs,target=/install \
-    uv pip install /install/*.whl
+    pip install --no-deps /install/*.whl
 
 ARG BASE_IMAGE
 ARG TRITON_BRANCH
