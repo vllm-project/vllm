@@ -484,10 +484,6 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "PhiMoEForCausalLM": _HfExamplesInfo(
         "microsoft/Phi-3.5-MoE-instruct", trust_remote_code=True
     ),
-    "Plamo2ForCausalLM": _HfExamplesInfo(
-        "pfnet/plamo-2-1b",
-        trust_remote_code=True,
-    ),
     "Plamo3ForCausalLM": _HfExamplesInfo(
         "pfnet/plamo-3-nict-2b-base",
         trust_remote_code=True,
@@ -1603,6 +1599,10 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         "luccafong/deepseek_mtp_main_random",
         speculative_model="luccafong/deepseek_mtp_draft_random",
         trust_remote_code=True,
+    ),
+    "DeepseekV32MTPModel": _HfExamplesInfo(
+        "deepseek-ai/DeepSeek-V3.2-Exp",
+        speculative_model="deepseek-ai/DeepSeek-V3.2-Exp",
     ),
     "DeepSeekV4MTPModel": _HfExamplesInfo(
         "deepseek-ai/DeepSeek-V4-Flash",
