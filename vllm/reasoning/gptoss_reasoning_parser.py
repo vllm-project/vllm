@@ -81,6 +81,12 @@ class GptOssReasoningParser(ReasoningParser):
         # previous messages in multi-turn conversations.
         self.eom_token_id = self.vocab["<|end|>"]
         self.reasoning_max_num_between_tokens = 20
+        # Streaming-gate state — see is_reasoning_end_streaming.
+        self._analysis_close_token_id = self.vocab["<|end|>"]
+        self._channel_token_id = self.vocab["<|channel|>"]
+        self._analysis_channel_name_token_ids = tuple(
+            self.model_tokenizer.encode("analysis", add_special_tokens=False)
+        )
 
     def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
         end_token_ids_prefix = self.reasoning_end_token_ids_prefix
@@ -111,24 +117,34 @@ class GptOssReasoningParser(ReasoningParser):
                         return True
         return False
 
+    # Gate fires on analysis-close <|end|> in delta (before the next
+    # channel-selection token), not on <|channel|>final<|message|> in
+    # input_ids. See PR description for the structural_tag byte-imitation
+    # case this fixes.
     def is_reasoning_end_streaming(
         self, input_ids: Sequence[int], delta_ids: Iterable[int]
     ) -> bool:
-        # The pattern window covers the end-of-reasoning marker itself.
-        # We add len(delta_ids) so that under speculative decoding (where
-        # a single step can accept many tokens) the entire accepted chunk
-        # is always inside the scan region.
+        """Return True iff this delta closes the current message's analysis
+        channel with ``<|end|>``. Used to activate the structured-output
+        matcher before the next channel-selection token.
+        """
         delta_ids = tuple(delta_ids)
-        pattern_len = (
-            len(self.reasoning_end_token_ids_prefix)
-            + self.reasoning_max_num_between_tokens
-            + len(self.reasoning_end_token_ids_suffix)
-        )
-        window = pattern_len + len(delta_ids)
+        if self._analysis_close_token_id not in delta_ids:
+            return False
+        return self._last_channel_was_analysis(input_ids)
+
+    def _last_channel_was_analysis(self, input_ids: Sequence[int]) -> bool:
+        """Walk back through ``input_ids`` to the most recent ``<|channel|>``
+        token; return True iff its name tokens are ``analysis``.
+        """
+        analysis_name = self._analysis_channel_name_token_ids
         n = len(input_ids)
-        if n <= window:
-            return self.is_reasoning_end(input_ids)
-        return self.is_reasoning_end(input_ids[n - window :])
+        for i in range(n - 1, -1, -1):
+            if input_ids[i] == self._channel_token_id:
+                start = i + 1
+                end = start + len(analysis_name)
+                return end <= n and tuple(input_ids[start:end]) == analysis_name
+        return False
 
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:
         raise NotImplementedError(

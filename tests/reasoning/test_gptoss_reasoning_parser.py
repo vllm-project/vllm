@@ -282,70 +282,41 @@ class TestGptOssStructuralTags:
             assert tag["begin"].startswith("<|channel|>")
 
 
-@pytest.mark.parametrize(
-    "output, is_reasoning_end",
-    [(t["output"], t["is_reasoning_end"]) for t in TEST_CASES],
-)
-def test_gptoss_is_reasoning_end_streaming(
-    output,
-    is_reasoning_end,
-    gpt_oss_tokenizer,
-):
-    """Streaming override must agree with is_reasoning_end for all cases."""
-    tokens = gpt_oss_tokenizer.tokenize(output)
-    parser: ReasoningParser = GptOssReasoningParser(gpt_oss_tokenizer)
-    output_ids = gpt_oss_tokenizer.convert_tokens_to_ids(tokens)
-    delta_ids = output_ids[-1:] if output_ids else []
-    actual = parser.is_reasoning_end_streaming(output_ids, delta_ids)
-    assert is_reasoning_end == actual
-
-
-@pytest.mark.parametrize(
-    "output, is_reasoning_end",
-    [(t["output"], t["is_reasoning_end"]) for t in TEST_CASES],
-)
-def test_gptoss_is_reasoning_end_streaming_long_prefix(
-    output,
-    is_reasoning_end,
-    gpt_oss_tokenizer,
-):
-    """Windowing must produce correct results even with a long prefix."""
-    tokens = gpt_oss_tokenizer.tokenize(output)
-    parser: ReasoningParser = GptOssReasoningParser(gpt_oss_tokenizer)
-    output_ids = gpt_oss_tokenizer.convert_tokens_to_ids(tokens)
-    # Prepend 10k dummy reasoning tokens to simulate a long generation
-    long_prefix = [1] * 10_000
-    padded_ids = long_prefix + list(output_ids)
-    delta_ids = output_ids[-1:] if output_ids else []
-    actual = parser.is_reasoning_end_streaming(padded_ids, delta_ids)
-    assert is_reasoning_end == actual
-
-
-@pytest.mark.parametrize(
-    "output, is_reasoning_end",
-    [(t["output"], t["is_reasoning_end"]) for t in TEST_CASES],
-)
-def test_gptoss_is_reasoning_end_streaming_large_delta(
-    output,
-    is_reasoning_end,
-    gpt_oss_tokenizer,
-):
-    """Simulate speculative decoding where the entire test sequence arrives
-    as a single large delta appended after a long prefix.  The window must
-    expand to cover delta_ids so the end pattern is never missed."""
-    tokens = gpt_oss_tokenizer.tokenize(output)
-    parser: ReasoningParser = GptOssReasoningParser(gpt_oss_tokenizer)
-    output_ids = gpt_oss_tokenizer.convert_tokens_to_ids(tokens)
-    long_prefix = [1] * 10_000
-    padded_ids = long_prefix + list(output_ids)
-    # delta_ids = the entire test sequence (as if accepted in one spec step)
-    delta_ids = list(output_ids)
-    actual = parser.is_reasoning_end_streaming(padded_ids, delta_ids)
-    assert is_reasoning_end == actual
-
-
 def test_gptoss_is_reasoning_end_streaming_signature(gpt_oss_tokenizer):
-    """Verify the method is callable with the expected signature."""
     parser = GptOssReasoningParser(gpt_oss_tokenizer)
-    result = parser.is_reasoning_end_streaming([], [])
-    assert result is False
+    assert parser.is_reasoning_end_streaming([], []) is False
+
+
+def test_streaming_fires_on_end_after_analysis(gpt_oss_tokenizer):
+    parser: ReasoningParser = GptOssReasoningParser(gpt_oss_tokenizer)
+    input_ids = gpt_oss_tokenizer.encode(
+        "<|start|>assistant<|channel|>analysis<|message|>thinking",
+        add_special_tokens=False,
+    )
+    delta_ids = [parser._analysis_close_token_id]
+    assert parser.is_reasoning_end_streaming(input_ids, delta_ids) is True
+
+
+def test_streaming_does_not_fire_on_tool_result_end(gpt_oss_tokenizer):
+    parser: ReasoningParser = GptOssReasoningParser(gpt_oss_tokenizer)
+    input_ids = gpt_oss_tokenizer.encode(
+        "<|start|>tool<|message|>result data",
+        add_special_tokens=False,
+    )
+    delta_ids = [parser._analysis_close_token_id]
+    assert parser.is_reasoning_end_streaming(input_ids, delta_ids) is False
+
+
+def test_input_side_check_unchanged_from_upstream(gpt_oss_tokenizer):
+    parser: ReasoningParser = GptOssReasoningParser(gpt_oss_tokenizer)
+    input_ids = gpt_oss_tokenizer.encode(
+        "<|start|>assistant<|channel|>final<|message|>partial response",
+        add_special_tokens=False,
+    )
+    assert parser.is_reasoning_end(input_ids) is True
+    multi_turn = gpt_oss_tokenizer.encode(
+        "<|start|>assistant<|channel|>final<|message|>done<|return|>"
+        "<|start|>user<|message|>hi<|end|><|start|>assistant",
+        add_special_tokens=False,
+    )
+    assert parser.is_reasoning_end(multi_turn) is False
