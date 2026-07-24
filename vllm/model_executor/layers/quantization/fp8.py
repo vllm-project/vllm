@@ -574,10 +574,15 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 )
 
         # WEIGHTS
+        w13_up_dim = (
+            2 * intermediate_size_per_partition
+            if self.moe.is_act_and_mul
+            else intermediate_size_per_partition
+        )
         w13_weight = torch.nn.Parameter(
             torch.empty(
                 num_experts,
-                2 * intermediate_size_per_partition,
+                w13_up_dim,
                 hidden_size,
                 dtype=params_dtype,
             ),
@@ -603,7 +608,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             w13_bias = torch.nn.Parameter(
                 torch.zeros(
                     num_experts,
-                    2 * intermediate_size_per_partition,
+                    w13_up_dim,
                     dtype=layer.orig_dtype,
                 ),
                 requires_grad=False,
@@ -626,7 +631,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             # For block quant, the scales are per block (typically 128x128).
             w13_scale_data = torch.ones(
                 num_experts,
-                2 * ((intermediate_size_per_partition + block_n - 1) // block_n),
+                (w13_up_dim + block_n - 1) // block_n,
                 (hidden_size + block_k - 1) // block_k,
                 dtype=torch.float32,
             )
@@ -854,6 +859,137 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             shared_experts=shared_experts,
             shared_experts_input=shared_experts_input,
         )
+
+
+# TODO(future PR): remove this class in favor of
+# online/fp8.py::Fp8PerTensorOnlineMoEMethod
+class Fp8OnlineMoEMethod(Fp8MoEMethod):
+    """MoE method for online FP8 quantization.
+    Supports loading quantized FP16/BF16 model checkpoints with dynamic
+    activation scaling. The weight scaling factor will be initialized after
+    the model weights are loaded.
+
+    Args:
+        quant_config: The quantization config.
+    """
+
+    uses_meta_device: bool = True
+
+    def __init__(self, quant_config: Fp8Config, layer: RoutedExperts):
+        super().__init__(quant_config, layer)
+        assert not quant_config.is_checkpoint_fp8_serialized
+        assert quant_config.activation_scheme == "dynamic"
+        assert quant_config.weight_block_size is None
+
+    def create_weights(
+        self,
+        layer: RoutedExperts,
+        num_experts: int,
+        hidden_size: int,
+        intermediate_size_per_partition: int,
+        params_dtype: torch.dtype,
+        **extra_weight_attrs,
+    ):
+        layer.num_experts = num_experts
+        layer.orig_dtype = params_dtype
+        layer.weight_block_size = None
+
+        # WEIGHTS
+        w13_up_dim = (
+            2 * intermediate_size_per_partition
+            if self.moe.is_act_and_mul
+            else intermediate_size_per_partition
+        )
+        w13_weight = torch.nn.Parameter(
+            torch.empty(
+                num_experts,
+                w13_up_dim,
+                hidden_size,
+                device="meta",
+                dtype=params_dtype,
+            ),
+            requires_grad=False,
+        )
+        layer.register_parameter("w13_weight", w13_weight)
+        set_weight_attrs(w13_weight, extra_weight_attrs)
+
+        w2_weight = torch.nn.Parameter(
+            torch.empty(
+                num_experts,
+                hidden_size,
+                intermediate_size_per_partition,
+                device="meta",  # materialized and processed during loading
+                dtype=params_dtype,
+            ),
+            requires_grad=False,
+        )
+        layer.register_parameter("w2_weight", w2_weight)
+        set_weight_attrs(w2_weight, extra_weight_attrs)
+
+        # BIASES (for models like GPT-OSS that have biased MoE)
+        if self.moe.has_bias:
+            w13_bias = torch.nn.Parameter(
+                torch.zeros(
+                    num_experts,
+                    w13_up_dim,
+                    device="meta",  # materialized and processed during loading
+                    dtype=layer.orig_dtype,
+                ),
+                requires_grad=False,
+            )
+            layer.register_parameter("w13_bias", w13_bias)
+            set_weight_attrs(w13_bias, extra_weight_attrs)
+
+            w2_bias = torch.nn.Parameter(
+                torch.zeros(
+                    num_experts,
+                    hidden_size,
+                    device="meta",  # materialized and processed during loading
+                    dtype=layer.orig_dtype,
+                ),
+                requires_grad=False,
+            )
+            layer.register_parameter("w2_bias", w2_bias)
+            set_weight_attrs(w2_bias, extra_weight_attrs)
+
+        initialize_online_processing(layer)
+
+    def process_weights_after_loading(self, layer: RoutedExperts) -> None:
+        # TODO(@ksayers): inplace fp8 quant kernel, initialize scales with ones
+        if getattr(layer, "_already_called_process_weights_after_loading", False):
+            return
+
+        fp8_dtype = current_platform.fp8_dtype()
+        w13 = torch.empty_like(layer.w13_weight, dtype=fp8_dtype)
+        w2 = torch.empty_like(layer.w2_weight, dtype=fp8_dtype)
+        w13_scale = torch.ones(
+            layer.num_experts, device=w13.device, dtype=torch.float32
+        )
+        w2_scale = torch.ones(layer.num_experts, device=w2.device, dtype=torch.float32)
+        layer.w13_input_scale = None
+        layer.w2_input_scale = None
+
+        for expert in range(layer.local_num_experts):
+            w13[expert, :, :], w13_scale[expert] = ops.scaled_fp8_quant(
+                layer.w13_weight[expert, :, :]
+            )
+            w2[expert, :, :], w2_scale[expert] = ops.scaled_fp8_quant(
+                layer.w2_weight[expert, :, :]
+            )
+
+        # Shuffle weights to runtime format and setup kernel.
+        self._setup_kernel(
+            layer,
+            w13,
+            w2,
+            w13_scale,
+            w2_scale,
+            w13_input_scale=layer.w13_input_scale,
+            w2_input_scale=layer.w2_input_scale,
+        )
+
+        # Prevent duplicate processing (e.g., during weight reload)
+        layer._already_called_process_weights_after_loading = True
 
 
 class Fp8KVCacheMethod(BaseKVCacheMethod):
