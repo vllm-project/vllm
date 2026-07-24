@@ -211,24 +211,17 @@ RUN if [ -d triton/python/triton_kernels ]; then pip install build && cd triton/
 FROM base AS build_fa
 ARG FA_BRANCH
 ARG FA_REPO
+ARG USE_SCCACHE
 RUN git clone ${FA_REPO}
-RUN --mount=type=cache,target=/sccache \
-    cd flash-attention \
+RUN cd flash-attention \
     && git checkout ${FA_BRANCH} \
     && git submodule update --init \
-    && export HIP_CLANG_PATH=/opt/sccache-wrappers \
-    && echo "sccache stats before build:" \
-    && sccache --show-stats \
-    && FILTERED_ARCHS=$(echo ${PYTORCH_ROCM_ARCH} | sed -e 's/;*gfx1[0-9]\{3\}//g' -e 's/^gfx1[0-9]\{3\};*//g') \
-    && if [ -z "$FILTERED_ARCHS" ] || [ "$FILTERED_ARCHS" = ";" ]; then \
-           echo "RDNA-only build: building flash-attention without GPU_ARCHS (Triton backend)" \
-           && python3 setup.py bdist_wheel --dist-dir=dist; \
-       else \
-           echo "CDNA build: building flash-attention with GPU_ARCHS=$FILTERED_ARCHS" \
-           && GPU_ARCHS=$FILTERED_ARCHS python3 setup.py bdist_wheel --dist-dir=dist; \
+    && if [ "$USE_SCCACHE" = "1" ]; then \
+           export HIP_CLANG_PATH=/opt/sccache-wrappers \
+           && sccache --show-stats; \
        fi \
-    && echo "sccache stats after build:" \
-    && sccache --show-stats
+    && GPU_ARCHS=$(echo ${PYTORCH_ROCM_ARCH} | sed -e 's/;gfx1[0-9]\{3\}//g') python3 setup.py bdist_wheel --dist-dir=dist \
+    && if [ "$USE_SCCACHE" = "1" ]; then sccache --show-stats; fi
 RUN mkdir -p /app/install && cp /app/flash-attention/dist/*.whl /app/install
 
 
@@ -238,6 +231,7 @@ RUN mkdir -p /app/install && cp /app/flash-attention/dist/*.whl /app/install
 FROM base AS build_aiter
 ARG AITER_BRANCH
 ARG AITER_REPO
+ARG USE_SCCACHE
 RUN --mount=type=cache,target=/sccache \
     mkdir -p /app/install && \
     if [ -z "${AITER_ROCM_ARCH}" ] || echo "${AITER_ROCM_ARCH}" | grep -qvE "gfx9"; then \
@@ -249,12 +243,12 @@ RUN --mount=type=cache,target=/sccache \
         && git submodule update --init --recursive \
         && pip install -r requirements.txt \
         && pip install pyyaml \
-        && export HIP_CLANG_PATH=/opt/sccache-wrappers \
-        && echo "sccache stats before build:" \
-        && sccache --show-stats \
+        && if [ "$USE_SCCACHE" = "1" ]; then \
+               export HIP_CLANG_PATH=/opt/sccache-wrappers \
+               && sccache --show-stats; \
+           fi \
         && AITER_USE_SYSTEM_TRITON=1 PREBUILD_KERNELS=${PREBUILD_KERNELS} GPU_ARCHS=${AITER_ROCM_ARCH} python3 setup.py bdist_wheel --dist-dir=dist \
-        && echo "sccache stats after build:" \
-        && sccache --show-stats \
+        && if [ "$USE_SCCACHE" = "1" ]; then sccache --show-stats; fi \
         && ls /app/aiter/dist/*.whl \
         && cp /app/aiter/dist/*.whl /app/install/; \
     fi
