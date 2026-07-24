@@ -51,7 +51,7 @@ class LogprobsLists(NamedTuple):
 
 
 class SamplingMaskLists(NamedTuple):
-    # [num_generated_tokens, vocab_size]
+    # [num_generated_tokens, max_kept_tokens]
     token_ids: np.ndarray
     # [num_generated_tokens]
     counts: np.ndarray
