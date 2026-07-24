@@ -2097,6 +2097,7 @@ def compress_norm_rope_store_cutedsl(
     store_full_kv: bool = False,
     store_full_fp8: bool = False,
     fp8_scale: torch.Tensor | None = None,
+    compress_scratch: torch.Tensor | None = None,
 ) -> None:
     if compress_ratio == 4:
         # For C4A, the single fused kernel is faster than the two-kernel version.
@@ -2129,11 +2130,15 @@ def compress_norm_rope_store_cutedsl(
         )
     else:
         # For C128, the two-kernel version is faster than the single fused kernel.
-        compressed_kv = torch.empty(
-            (num_actual, head_dim),
-            dtype=torch.float32,
-            device=state_cache.device,
-        )
+        if compress_scratch is None:
+            compressed_kv = torch.empty(
+                (num_actual, head_dim),
+                dtype=torch.float32,
+                device=state_cache.device,
+            )
+        else:
+            assert compress_scratch.shape == (num_actual, head_dim)
+            compressed_kv = compress_scratch
         split_kv_compress_norm_rope_insert_sparse_attn_cutedsl(
             state_cache,
             token_to_req_indices,
