@@ -492,6 +492,29 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "persistent_topk(Tensor logits, Tensor lengths, Tensor! output, "
       "Tensor workspace, int k, int max_seq_len) -> ()");
 
+#ifdef ENABLE_DSA_LITETOPK
+  // Fused DSA indexer top-k (SM100): fp8 MQA scoring + bucket gate + compact
+  // top-k, no [num_q, seq_len] logit materialization.
+  ops.def(
+      "dsa_litetopk_seed_prep(Tensor slog, int num_buckets, int topk, "
+      "int cand_cap, int emit_limit, float headroom, int probe_stride_tok, "
+      "int hist_stride, Tensor! origin, Tensor! inv_delta, Tensor! th_bucket, "
+      "Tensor! bcount, Tensor! cand_val, Tensor! cand_idx, Tensor! cand_cnt) "
+      "-> ()");
+  ops.def(
+      "dsa_litetopk_scan(Tensor q, Tensor kv, Tensor kv_scales, Tensor "
+      "weights, "
+      "Tensor cu_start, Tensor cu_end, Tensor! origin, Tensor! inv_delta, "
+      "Tensor! th_bucket, Tensor! cand_val, Tensor! cand_idx, Tensor! "
+      "cand_cnt, "
+      "Tensor! bcount, int num_buckets, int topk, int refresh_every, "
+      "int num_kv_splits_override, int probe_group, int probe_add_max) -> ()");
+  ops.def(
+      "dsa_litetopk_select(Tensor cand_val, Tensor cand_idx, Tensor cand_cnt, "
+      "Tensor origin, Tensor inv_delta, Tensor th_bucket, int num_buckets, "
+      "int topk, Tensor! out_val, Tensor! out_idx) -> ()");
+#endif
+
 #ifdef VLLM_ENABLE_COOPERATIVE_TOPK
   ops.def(
       "cooperative_topk(Tensor logits, Tensor lengths, Tensor! output, "
@@ -704,6 +727,11 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
   ops.impl("top_k_per_row_prefill", TORCH_BOX(&top_k_per_row_prefill));
   ops.impl("top_k_per_row_decode", TORCH_BOX(&top_k_per_row_decode));
   ops.impl("persistent_topk", TORCH_BOX(&persistent_topk));
+#ifdef ENABLE_DSA_LITETOPK
+  ops.impl("dsa_litetopk_seed_prep", TORCH_BOX(&dsa_litetopk_seed_prep));
+  ops.impl("dsa_litetopk_scan", TORCH_BOX(&dsa_litetopk_scan));
+  ops.impl("dsa_litetopk_select", TORCH_BOX(&dsa_litetopk_select));
+#endif
 #ifdef VLLM_ENABLE_COOPERATIVE_TOPK
   ops.impl("cooperative_topk", TORCH_BOX(&cooperative_topk));
 #endif

@@ -2971,6 +2971,114 @@ def top_k_per_row_prefill(
     )
 
 
+# Fused DSA indexer top-k (SM100). Three primitives; the Python helper in
+# vllm/model_executor/layers/dsa_litetopk.py orchestrates and allocates.
+def dsa_litetopk_seed_prep(
+    slog: torch.Tensor,
+    num_buckets: int,
+    topk: int,
+    cand_cap: int,
+    emit_limit: int,
+    headroom: float,
+    probe_stride_tok: int,
+    hist_stride: int,
+    origin: torch.Tensor,
+    inv_delta: torch.Tensor,
+    th_bucket: torch.Tensor,
+    bcount: torch.Tensor,
+    cand_val: torch.Tensor,
+    cand_idx: torch.Tensor,
+    cand_cnt: torch.Tensor,
+) -> None:
+    torch.ops._C.dsa_litetopk_seed_prep(
+        slog,
+        num_buckets,
+        topk,
+        cand_cap,
+        emit_limit,
+        headroom,
+        probe_stride_tok,
+        hist_stride,
+        origin,
+        inv_delta,
+        th_bucket,
+        bcount,
+        cand_val,
+        cand_idx,
+        cand_cnt,
+    )
+
+
+def dsa_litetopk_scan(
+    q: torch.Tensor,
+    kv: torch.Tensor,
+    kv_scales: torch.Tensor,
+    weights: torch.Tensor,
+    cu_start: torch.Tensor,
+    cu_end: torch.Tensor,
+    origin: torch.Tensor,
+    inv_delta: torch.Tensor,
+    th_bucket: torch.Tensor,
+    cand_val: torch.Tensor,
+    cand_idx: torch.Tensor,
+    cand_cnt: torch.Tensor,
+    bcount: torch.Tensor,
+    num_buckets: int,
+    topk: int,
+    refresh_every: int,
+    num_kv_splits_override: int,
+    probe_group: int,
+    probe_add_max: int,
+) -> None:
+    torch.ops._C.dsa_litetopk_scan(
+        q,
+        kv,
+        kv_scales,
+        weights,
+        cu_start,
+        cu_end,
+        origin,
+        inv_delta,
+        th_bucket,
+        cand_val,
+        cand_idx,
+        cand_cnt,
+        bcount,
+        num_buckets,
+        topk,
+        refresh_every,
+        num_kv_splits_override,
+        probe_group,
+        probe_add_max,
+    )
+
+
+def dsa_litetopk_select(
+    cand_val: torch.Tensor,
+    cand_idx: torch.Tensor,
+    cand_cnt: torch.Tensor,
+    origin: torch.Tensor,
+    inv_delta: torch.Tensor,
+    th_bucket: torch.Tensor,
+    num_buckets: int,
+    topk: int,
+    out_val: torch.Tensor,
+    out_idx: torch.Tensor,
+) -> None:
+    torch.ops._C.dsa_litetopk_select(
+        cand_val,
+        cand_idx,
+        cand_cnt,
+        origin,
+        inv_delta,
+        th_bucket,
+        num_buckets,
+        topk,
+        out_val,
+        out_idx,
+    )
+
+
 def top_k_per_row_decode(
     logits: torch.Tensor,
     next_n: int,

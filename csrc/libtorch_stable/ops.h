@@ -332,6 +332,38 @@ void top_k_per_row_decode(const torch::stable::Tensor& logits, int64_t next_n,
                           torch::stable::Tensor& indices, int64_t numRows,
                           int64_t stride0, int64_t stride1, int64_t topK);
 
+// Fused DSA indexer top-k (SM100). Three primitives; the Python helper in
+// vllm/model_executor/layers/dsa_litetopk.py orchestrates and allocates.
+void dsa_litetopk_seed_prep(
+    const torch::stable::Tensor& slog, int64_t num_buckets, int64_t topk,
+    int64_t cand_cap, int64_t emit_limit, double headroom,
+    int64_t probe_stride_tok, int64_t hist_stride,
+    torch::stable::Tensor& origin, torch::stable::Tensor& inv_delta,
+    torch::stable::Tensor& th_bucket, torch::stable::Tensor& bcount,
+    torch::stable::Tensor& cand_val, torch::stable::Tensor& cand_idx,
+    torch::stable::Tensor& cand_cnt);
+
+void dsa_litetopk_scan(
+    const torch::stable::Tensor& q, const torch::stable::Tensor& kv,
+    const torch::stable::Tensor& kv_scales,
+    const torch::stable::Tensor& weights, const torch::stable::Tensor& cu_start,
+    const torch::stable::Tensor& cu_end, torch::stable::Tensor& origin,
+    torch::stable::Tensor& inv_delta, torch::stable::Tensor& th_bucket,
+    torch::stable::Tensor& cand_val, torch::stable::Tensor& cand_idx,
+    torch::stable::Tensor& cand_cnt, torch::stable::Tensor& bcount,
+    int64_t num_buckets, int64_t topk, int64_t refresh_every,
+    int64_t num_kv_splits_override, int64_t probe_group, int64_t probe_add_max);
+
+void dsa_litetopk_select(const torch::stable::Tensor& cand_val,
+                         const torch::stable::Tensor& cand_idx,
+                         const torch::stable::Tensor& cand_cnt,
+                         const torch::stable::Tensor& origin,
+                         const torch::stable::Tensor& inv_delta,
+                         const torch::stable::Tensor& th_bucket,
+                         int64_t num_buckets, int64_t topk,
+                         torch::stable::Tensor& out_val,
+                         torch::stable::Tensor& out_idx);
+
 void persistent_topk(const torch::stable::Tensor& logits,
                      const torch::stable::Tensor& lengths,
                      torch::stable::Tensor& output,

@@ -863,6 +863,27 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
   endif()
 
   #
+  # Fused DSA indexer top-k (LiteTopK) for Blackwell SM100: tcgen05 UMMA fp8
+  # scoring + online bucket gate + compact top-k, never materializing the
+  # [num_q, seq_len] logit matrix. Self-contained (vendored DeepGEMM SM100
+  # headers under attention/dsa/vendor_deep_gemm/); needs CUDA 12.8+ and SM100a.
+  cuda_archs_loose_intersection(DSA_LITETOPK_ARCHS "10.0a;10.1a;10.3a" "${CUDA_ARCHS}")
+  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.8 AND DSA_LITETOPK_ARCHS)
+    set(DSA_LITETOPK_SRCS
+      "csrc/libtorch_stable/attention/dsa/dsa_litetopk.cu")
+    set_gencode_flags_for_srcs(
+      SRCS "${DSA_LITETOPK_SRCS}"
+      CUDA_ARCHS "${DSA_LITETOPK_ARCHS}")
+    set_source_files_properties(${DSA_LITETOPK_SRCS} PROPERTIES INCLUDE_DIRECTORIES
+      "${CMAKE_CURRENT_SOURCE_DIR}/csrc/libtorch_stable/attention/dsa/include;${CMAKE_CURRENT_SOURCE_DIR}/csrc/libtorch_stable/attention/dsa/vendor_deep_gemm")
+    list(APPEND VLLM_STABLE_EXT_SRC "${DSA_LITETOPK_SRCS}")
+    list(APPEND VLLM_GPU_FLAGS "-DENABLE_DSA_LITETOPK=1")
+    message(STATUS "Building dsa_litetopk for archs: ${DSA_LITETOPK_ARCHS}")
+  else()
+    message(STATUS "Not building dsa_litetopk (needs CUDA>=12.8 and an SM100a arch)")
+  endif()
+
+  #
   # For the cutlass_scaled_mm kernels we want to build the c2x (CUTLASS 2.x)
   # kernels for the remaining archs that are not already built for 3x.
   # (Build 8.9 for FP8)
