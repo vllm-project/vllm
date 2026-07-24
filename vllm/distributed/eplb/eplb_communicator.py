@@ -10,6 +10,7 @@ import uuid
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
 from datetime import timedelta
+from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
 import torch
@@ -32,7 +33,17 @@ from vllm.distributed.parallel_state import (
 from vllm.distributed.stateless_coordinator import StatelessGroupCoordinator
 from vllm.distributed.utils import is_weak_contiguous
 from vllm.logger import init_logger
-from vllm.platforms import current_platform
+
+from .weight_utils import (
+    EplbExpertWeight,
+    EplbLayerWeights,
+    get_eplb_weight_device,
+    is_eplb_weight_aggregated,
+    iter_eplb_weight_tensors,
+)
+
+if TYPE_CHECKING:
+    from .platform_backend import EplbPlatformBackend
 
 logger = init_logger(__name__)
 
@@ -87,8 +98,8 @@ class EplbCommunicator(ABC):
         communication buffers."""
         return True
 
-    def set_stream(self, cuda_stream: torch.cuda.Stream | None) -> None:
-        self._cuda_stream = cuda_stream
+    def set_stream(self, transfer_stream: Any | None) -> None:
+        self._cuda_stream = transfer_stream
 
     def _log_initialized(self) -> None:
         if is_local_first_rank():
@@ -357,7 +368,7 @@ class NixlEplbCommunicator(EplbCommunicator):
         uid = uuid.uuid4().hex[:8]
         return f"eplb-{self._rank}{pp_suffix}-{uid}"
 
-    def set_stream(self, cuda_stream: torch.cuda.Stream | None) -> None:
+    def set_stream(self, transfer_stream: Any | None) -> None:
         pass
 
     def add_send(
@@ -658,8 +669,9 @@ class PyNcclEplbCommunicator(EplbCommunicator):
 def create_eplb_communicator(
     group_coordinator: GroupCoordinator,
     backend: str,
-    expert_weights: Sequence[Sequence[torch.Tensor]],
-    expert_buffer: Sequence[torch.Tensor],
+    expert_weights: Sequence[EplbLayerWeights],
+    expert_buffer: Sequence[EplbExpertWeight],
+    platform_backend: "EplbPlatformBackend | None" = None,
 ) -> EplbCommunicator:
     """Create an EPLB communicator for the given backend.
 
@@ -667,8 +679,7 @@ def create_eplb_communicator(
         group_coordinator: Process-group coordinator that provides the
             device and CPU communication groups.
         backend: Communicator backend name (``"torch_nccl"``,
-            ``"torch_gloo"``, ``"pynccl"``, or ``"nixl"``).
-            Falls back to ``"torch_nccl"`` when *None*.
+            ``"torch_gloo"``, ``"pynccl"``, ``"nixl"``, or ``"platform"``).
             Stateless (elastic EP) groups support ``"torch_nccl"``,
             ``"pynccl"``, and ``"nixl"``; ``"torch_nccl"`` is silently
             promoted to ``"pynccl"``.  ``"nixl"`` uses deferred remote
@@ -682,8 +693,21 @@ def create_eplb_communicator(
         expert_buffer: Pre-allocated receive buffer tensors (one per
             weight tensor in a single layer).
     """
+    if backend == "platform":
+        if platform_backend is None:
+            raise ValueError(
+                "EPLB communicator 'platform' requires an EPLB Platform Backend."
+            )
+        return platform_backend.create_communicator(
+            group_coordinator,
+            expert_weights,
+            expert_buffer,
+        )
+
     first_layer = expert_weights[0] if expert_weights else []
-    tensor_device_type = first_layer[0].device.type if first_layer else "cpu"
+    tensor_device_type = (
+        get_eplb_weight_device(first_layer[0]).type if first_layer else "cpu"
+    )
     torch_group = (
         group_coordinator.cpu_group
         if tensor_device_type == "cpu"
@@ -696,10 +720,15 @@ def create_eplb_communicator(
                 "EPLB communicator 'pynccl' supports only cuda-like devices "
                 f"(got {tensor_device_type})."
             )
+        first_layer_tensors = [
+            tensor
+            for weight in first_layer
+            for tensor in iter_eplb_weight_tensors(weight)
+        ]
         unsupported_dtypes = sorted(
             {
                 tensor.dtype
-                for tensor in first_layer
+                for tensor in first_layer_tensors
                 if not ncclDataTypeEnum.supports_torch_dtype(tensor.dtype)
             },
             key=str,
@@ -749,16 +778,27 @@ def create_eplb_communicator(
             raise RuntimeError(
                 "EPLB communicator 'nixl' requested but NIXL is unavailable."
             )
-        if not (current_platform.is_cuda_alike() and tensor_device_type != "cpu"):
+        if tensor_device_type == "cpu":
             raise RuntimeError(
                 "EPLB communicator 'nixl' supports only cuda-like devices "
                 f"(got {tensor_device_type})."
             )
+        if any(
+            not is_eplb_weight_aggregated(weight)
+            for layer_weights in expert_weights
+            for weight in layer_weights
+        ) or any(not is_eplb_weight_aggregated(weight) for weight in expert_buffer):
+            raise ValueError(
+                "EPLB communicator 'nixl' requires aggregated Tensor weights; "
+                "per-expert Tensor Sequences require another communicator."
+            )
         try:
             return NixlEplbCommunicator(
                 cpu_group=group_coordinator.cpu_group,
-                all_expert_weights=expert_weights,
-                expert_buffer=expert_buffer,
+                all_expert_weights=cast(
+                    Sequence[Sequence[torch.Tensor]], expert_weights
+                ),
+                expert_buffer=cast(Sequence[torch.Tensor], expert_buffer),
                 defer_remote_setup=is_stateless,
             )
         except Exception as exc:

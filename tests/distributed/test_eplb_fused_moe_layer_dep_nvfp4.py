@@ -10,6 +10,9 @@ import torch
 
 from tests.kernels.moe.utils import make_test_quant_config
 from vllm.config import VllmConfig, set_current_vllm_config
+from vllm.distributed.eplb.cuda_platform_backend import (
+    eplb_map_to_physical_and_record,
+)
 from vllm.distributed.eplb.eplb_communicator import create_eplb_communicator
 from vllm.distributed.eplb.eplb_state import EplbLayerState
 from vllm.distributed.eplb.rebalance_execute import rearrange_expert_weights_inplace
@@ -225,6 +228,7 @@ def _test_eplb_fml(env, world_size: int, test_config: TestConfig):
                 logical_to_physical_map,
                 logical_replica_count,
             )
+            fml.router.eplb_state.map_and_record = eplb_map_to_physical_and_record
             fml.router.eplb_state.should_record_tensor = torch.ones(
                 (), dtype=torch.bool, device=device
             )

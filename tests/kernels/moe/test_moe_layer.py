@@ -39,6 +39,9 @@ from vllm.distributed import (
 from vllm.distributed.device_communicators.all_reduce_utils import (
     gpu_p2p_access_check,
 )
+from vllm.distributed.eplb.cuda_platform_backend import (
+    eplb_map_to_physical_and_record,
+)
 from vllm.distributed.eplb.eplb_communicator import create_eplb_communicator
 from vllm.distributed.eplb.rebalance_execute import rearrange_expert_weights_inplace
 from vllm.forward_context import set_forward_context
@@ -1349,6 +1352,7 @@ def _test_body_eplb(
             device=device,
         ),
     )
+    eplb_moe_layer.router.eplb_state.map_and_record = eplb_map_to_physical_and_record
 
     eplb_moe_layer.router.eplb_state.should_record_tensor = torch.ones(
         (), dtype=torch.bool, device=device

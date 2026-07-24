@@ -49,12 +49,24 @@ from vllm.model_executor.models.interfaces import MixtureOfExperts
 
 from .async_worker import start_async_worker
 from .eplb_communicator import EplbCommunicator, create_eplb_communicator
-from .eplb_utils import CpuGpuEvent
+from .eplb_utils import CrossThreadDeviceEvent
+from .platform_backend import (
+    EplbMapAndRecord,
+    EplbPlatformBackend,
+    get_eplb_platform_backend,
+)
 from .policy import EPLB_POLICIES, AbstractEplbPolicy, DefaultEplbPolicy
 from .rebalance_execute import (
     AsyncEplbLayerResult,
     move_from_buffer,
     rearrange_expert_weights_inplace,
+)
+from .weight_utils import (
+    EplbExpertWeight,
+    empty_eplb_weight_like,
+    get_eplb_expert_tensor,
+    is_eplb_weight_aggregated,
+    validate_eplb_weight,
 )
 
 logger = init_logger(__name__)
@@ -172,7 +184,7 @@ class EplbModelState:
     """
     model_name: str
     model: MixtureOfExperts
-    expert_buffer: list[torch.Tensor]
+    expert_buffer: list[EplbExpertWeight]
     """
     The buffer to store the expert weights during transfer.
     """
@@ -189,10 +201,6 @@ class EplbModelState:
     eplb_stats: EplbStats | None
     """
     EPLB stats for the model.
-    """
-    cuda_device_index: int | None
-    """
-    CUDA device index for the async EPLB worker thread.
     """
     communicator: EplbCommunicator
     """
@@ -224,6 +232,9 @@ class EplbState:
     def __init__(self, parallel_config: ParallelConfig, device: torch.device):
         self.parallel_config = parallel_config
         self.device = device
+        self.platform_backend: EplbPlatformBackend = get_eplb_platform_backend()
+        self.device_runtime = self.platform_backend.device_runtime
+        self.device_index = self.device_runtime.get_device_index(device)
         self.model_states: dict[str, EplbModelState] = {}
         self.policy: type[AbstractEplbPolicy] = DefaultEplbPolicy
         """
@@ -263,21 +274,21 @@ class EplbState:
         a single ``.fill_()`` updates all layers at once.  Allocated on the
         first call to :meth:`_propagate_shared_tensors`.
         """
-        self.is_async: bool = False
+        self.is_async = self.parallel_config.eplb_config.use_async
         """
         The flag indicates whether the EPLB is running in async mode.
         """
-        self.rearrange_event: CpuGpuEvent = CpuGpuEvent()
+        self.rearrange_event: CrossThreadDeviceEvent | None = None
+        if self.is_async:
+            self.rearrange_event = CrossThreadDeviceEvent(
+                lambda: self.device_runtime.create_event()
+            )
         """
         Event to signal when a new rearrangement is needed for the async thread.
         """
         self.async_worker: threading.Thread | None = None
         """
         Background thread handling async transfers.
-        """
-        self.cuda_device_index: int | None = None
-        """
-        CUDA device index for the async EPLB worker thread.
         """
         self.num_valid_physical_experts: int = 0
         """
@@ -287,10 +298,6 @@ class EplbState:
         newly started EP ranks may not have physical experts
         mapped yet.
         """
-        if self.device.type == "cuda":
-            self.cuda_device_index = self.device.index
-            if self.cuda_device_index is None and torch.cuda.is_available():
-                self.cuda_device_index = torch.accelerator.current_device_index()
 
     @staticmethod
     def build_initial_global_physical_to_logical_map(
@@ -357,7 +364,6 @@ class EplbState:
         Build the initial EPLB state.
         """
         self.validate_ep_configuration(model)
-        self.is_async = self.parallel_config.eplb_config.use_async
 
         physical_to_logical_map_list = (
             EplbState.build_initial_global_physical_to_logical_map(
@@ -461,7 +467,41 @@ class EplbState:
             logical_replica_count,
         )
         self._propagate_shared_tensors(model, num_unpadded_tokens_tensors)
-        expert_buffer = [torch.empty_like(w) for w in model.expert_weights[0]]
+        if not model.expert_weights or not model.expert_weights[0]:
+            raise ValueError("EPLB requires at least one expert weight.")
+        first_layer_weights = model.expert_weights[0]
+        for layer_idx, layer_weights in enumerate(model.expert_weights):
+            if len(layer_weights) != len(first_layer_weights):
+                raise ValueError(
+                    "Every EPLB layer must expose the same number of weight "
+                    f"groups: layer 0 has {len(first_layer_weights)}, layer "
+                    f"{layer_idx} has {len(layer_weights)}."
+                )
+            for weight_idx, weight in enumerate(layer_weights):
+                validate_eplb_weight(weight, model.num_local_physical_experts)
+                if is_eplb_weight_aggregated(weight) != is_eplb_weight_aggregated(
+                    first_layer_weights[weight_idx]
+                ):
+                    raise ValueError(
+                        "EPLB weight groups reused with one buffer must use "
+                        "the same container representation across layers."
+                    )
+                first_tensor = get_eplb_expert_tensor(
+                    first_layer_weights[weight_idx], 0
+                )
+                tensor = get_eplb_expert_tensor(weight, 0)
+                if (
+                    tensor.shape != first_tensor.shape
+                    or tensor.dtype != first_tensor.dtype
+                    or tensor.device != first_tensor.device
+                ):
+                    raise ValueError(
+                        "EPLB weight groups reused with one buffer must have "
+                        "matching shape, dtype, and device across layers."
+                    )
+        expert_buffer = [
+            empty_eplb_weight_like(weight) for weight in first_layer_weights
+        ]
 
         assert self.parallel_config.eplb_config.communicator is not None, (
             "EPLB communicator backend must be set by ParallelConfig"
@@ -471,6 +511,7 @@ class EplbState:
             backend=self.parallel_config.eplb_config.communicator,
             expert_weights=model.expert_weights,
             expert_buffer=expert_buffer,
+            platform_backend=self.platform_backend,
         )
 
         model_state = EplbModelState(
@@ -484,7 +525,6 @@ class EplbState:
             expert_buffer=expert_buffer,
             rebalanced=False,
             eplb_stats=None,
-            cuda_device_index=self.cuda_device_index,
             communicator=communicator,
             num_unpadded_tokens_tensors=num_unpadded_tokens_tensors,
         )
@@ -717,6 +757,7 @@ class EplbState:
             if ls is not None:
                 ls.should_record_tensor = self.should_record_tensor
                 ls.num_unpadded_tokens_tensors = num_unpadded_tokens_tensors
+                ls.map_and_record = self.platform_backend.map_and_record
 
     def rearrange(
         self,
@@ -742,8 +783,8 @@ class EplbState:
         is_main_rank = ep_rank == 0
         if is_main_rank:
             if not self.is_async or is_profile:
-                start_event = torch.cuda.Event(enable_timing=True)
-                end_event = torch.cuda.Event(enable_timing=True)
+                start_event = self.device_runtime.create_event(enable_timing=True)
+                end_event = self.device_runtime.create_event(enable_timing=True)
                 start_event.record()
             logger.info(
                 "Rearranging experts %s %s...",
@@ -835,6 +876,7 @@ class EplbState:
                     eplb_model_state.communicator,
                     is_profile,
                     rank_mapping,
+                    self.device_runtime,
                 )
 
                 if not is_profile:
@@ -868,6 +910,7 @@ class EplbState:
                 eplb_model_state.rebalanced = True
         # Signal async thread to start transferring layers
         if self.is_async and (not is_profile):
+            assert self.rearrange_event is not None
             self.rearrange_event.record()
         return None
 
@@ -1048,6 +1091,8 @@ class EplbLayerState:
     Reference to the parent :class:`EplbModelState`'s tensor list so the
     router can read the correct per-[u]batch unpadded token count.
     """
+    map_and_record: EplbMapAndRecord | None = None
+    """Platform callable used by the router's EPLB hot path."""
 
     def set_layer_state(
         self,

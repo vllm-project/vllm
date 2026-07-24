@@ -7,10 +7,10 @@ import pytest
 import torch
 
 from vllm._aiter_ops import rocm_aiter_ops
-from vllm.distributed.eplb.eplb_state import EplbLayerState
-from vllm.model_executor.layers.fused_moe.router.base_router import (
+from vllm.distributed.eplb.cuda_platform_backend import (
     eplb_map_to_physical_and_record,
 )
+from vllm.distributed.eplb.eplb_state import EplbLayerState
 from vllm.model_executor.layers.fused_moe.router.router_factory import (
     create_fused_moe_router,
 )
@@ -69,6 +69,7 @@ def setup_eplb_state(
         logical_replica_count=logical_replica_count,
         should_record_tensor=should_record_tensor,
         num_unpadded_tokens_tensors=num_unpadded_tokens_tensors,
+        map_and_record=eplb_map_to_physical_and_record,
     )
 
 
