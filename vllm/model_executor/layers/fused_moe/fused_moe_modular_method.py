@@ -112,7 +112,7 @@ class FusedMoEModularMethod(FusedMoEMethodBase, CustomOp):
             activation=layer.activation,
             global_num_experts=layer.global_num_experts,
             apply_router_weight_on_input=layer.apply_router_weight_on_input,
-            expert_map=layer.expert_map,
+            expert_map=layer.expert_map_for(self.moe_kernel.fused_experts),
             shared_experts=shared_experts,
             shared_experts_input=shared_experts_input,
         )

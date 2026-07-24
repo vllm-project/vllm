@@ -266,6 +266,12 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
     ) -> torch.Tensor:
         from vllm.model_executor.layers.fused_moe import fused_experts
 
+        # The Triton moe_wna16 `fused_experts` kernel expects the canonical
+        # global->local expert map (-1 for non-local). `layer.expert_map`
+        # returns the AITER 0/1 expert_mask when AITER fused MoE is enabled,
+        # which this kernel would misread as slot indices (collapsing every
+        # token onto slot 0/1) -> garbage under EP. Use the raw map (None when
+        # EP is off, which is also correct).
         return fused_experts(
             x,
             layer.w13_weight_packed,
@@ -275,7 +281,7 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
             activation=layer.activation,
             apply_router_weight_on_input=layer.apply_router_weight_on_input,
             global_num_experts=layer.global_num_experts,
-            expert_map=layer.expert_map,
+            expert_map=layer._expert_map,
             quant_config=self.moe_quant_config,
         )
 
