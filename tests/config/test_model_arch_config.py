@@ -221,10 +221,10 @@ def test_get_model_arch_config_layer_idx():
     """`get_model_arch_config(layer_idx=...)` must resolve per-layer values
     for heterogeneous configs, and must NOT crash for homogeneous ones.
 
-    `per_layer_config` exists (as `None`) on every config via the
-    heterogeneity mixin, even when no heterogeneity is declared, so gating
-    on `hasattr` instead of the value would subscript `None` for any
-    ordinary model as soon as a caller passes `layer_idx`.
+    `per_layer_config` is an indexable view on every config via the
+    heterogeneity mixin, whether or not heterogeneity is declared, so gating
+    on its presence rather than on `is_heterogeneous` would silently resolve
+    against it for any ordinary model as soon as a caller passes a layer.
     """
     from transformers import PretrainedConfig
 

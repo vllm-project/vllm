@@ -332,14 +332,11 @@ def _run_create_attention_instances(
             self.config.sliding_window = 4096
             self.config.num_hidden_layers = 2
             self.config.attn_logit_softcapping = None
-            # `per_layer_attributes` gates heterogeneous resolution in
-            # create_attention_instances; its content is otherwise
-            # irrelevant since per-layer values now come from
-            # model_config.get_head_size/get_num_kv_heads, not from reading
-            # per_layer_config directly.
-            self.config.per_layer_attributes = (
-                {"head_dim", "num_key_value_heads"} if is_heterogeneous else None
-            )
+            # `is_heterogeneous` gates per-layer resolution; which attributes
+            # actually vary is irrelevant here because the values come from
+            # model_config.get_head_size/get_num_kv_heads rather than from
+            # reading per_layer_config directly.
+            self.config.is_heterogeneous = is_heterogeneous
             self.text_config = self.config
             self.pp_group = MagicMock()
             self.pp_group.rank_in_group = 0
@@ -395,9 +392,9 @@ def test_heterogeneous_attention():
 
 
 def test_heterogeneous_attention_global_fallback():
-    """Homogeneous configs (`per_layer_config` is `None`) must not resolve
-    per layer: get_head_size/get_num_kv_heads must only ever be called with
-    the global (no layer_idx) signature."""
+    """Homogeneous configs must not resolve per layer: get_head_size and
+    get_num_kv_heads must only ever be called with the global (no layer_idx)
+    signature."""
     attention_instances, model_config = _run_create_attention_instances(
         is_heterogeneous=False
     )

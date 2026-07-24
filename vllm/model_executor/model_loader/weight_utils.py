@@ -260,12 +260,17 @@ def get_quant_config(
         and hf_quant_config.get("quant_method") == "compressed-tensors"
         and "config_groups" in hf_quant_config
     ):
-        if hf_text_config is not None:
-            n_heads = getattr(hf_text_config, "num_attention_heads", None)
-            n_kv_heads = getattr(hf_text_config, "num_key_value_heads", None)
+        head_config = (
+            hf_text_config if hf_text_config is not None else model_config.hf_config
+        )
+        n_heads = getattr(head_config, "num_attention_heads", None)
+        if getattr(head_config, "is_heterogeneous", False):
+            # KV heads may vary per layer, and reading them off the global
+            # config raises. The loader shards a single count, so use the
+            # largest, which is what the KV cache is allocated for.
+            n_kv_heads: int | None = model_config.get_total_num_kv_heads()
         else:
-            n_heads = getattr(model_config.hf_config, "num_attention_heads", None)
-            n_kv_heads = getattr(model_config.hf_config, "num_key_value_heads", None)
+            n_kv_heads = getattr(head_config, "num_key_value_heads", None)
 
         hf_quant_config["total_num_heads"] = n_heads
         hf_quant_config["total_num_kv_heads"] = (
