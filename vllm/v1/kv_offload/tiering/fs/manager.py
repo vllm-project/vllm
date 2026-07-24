@@ -49,7 +49,7 @@ from vllm.v1.kv_offload.tiering.base import (
     ScheduleEndContext,
     SecondaryTierManager,
 )
-from vllm.v1.kv_offload.tiering.fs.io import load_block, store_block
+from vllm.v1.kv_offload.tiering.fs.io import batch_load_block, batch_store_block
 from vllm.v1.kv_offload.tiering.fs.thread_pool import DualQueueThreadPool
 
 if TYPE_CHECKING:
@@ -191,31 +191,26 @@ class FileSystemTierManager(SecondaryTierManager):
     def submit_store(self, job_metadata: JobMetadata) -> None:
         if self.events is not None:
             self._store_job_keys[job_metadata.job_id] = list(job_metadata.keys)
-        tasks = (
-            functools.partial(
-                store_block,
-                self.file_mapper.get_file_name(key),
-                self._primary_kv_view,
-                int(bid) * self._block_size,
-                self._block_size,
-            )
-            for key, bid in zip(job_metadata.keys, job_metadata.block_ids)
+        task = functools.partial(
+            batch_store_block,
+            [self.file_mapper.get_file_name(key) for key in job_metadata.keys],
+            self._primary_kv_view,
+            [int(bid) * self._block_size for bid in job_metadata.block_ids],
+            self._block_size,
         )
-        self._pool.enqueue_store(job_metadata.job_id, len(job_metadata.keys), tasks)
+        self._pool.enqueue_store(job_metadata.job_id, 1, [task])
 
     @override
     def submit_load(self, job_metadata: JobMetadata) -> None:
-        tasks = (
-            functools.partial(
-                load_block,
-                self.file_mapper.get_file_name(key),
-                self._primary_kv_view,
-                int(bid) * self._block_size,
-                self._block_size,
-            )
-            for key, bid in zip(job_metadata.keys, job_metadata.block_ids)
+        task = functools.partial(
+            batch_load_block,
+            [self.file_mapper.get_file_name(key) for key in job_metadata.keys],
+            self._primary_kv_view,
+            [int(bid) * self._block_size for bid in job_metadata.block_ids],
+            self._block_size,
         )
-        self._pool.enqueue_load(job_metadata.job_id, len(job_metadata.keys), tasks)
+
+        self._pool.enqueue_load(job_metadata.job_id, 1, [task])
 
     @override
     def get_finished_jobs(self) -> Iterable[JobResult]:
