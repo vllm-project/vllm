@@ -48,6 +48,19 @@ def get_token_bin_counts_and_mask(
     return bin_counts, mask
 
 
+def get_token_presence_mask(
+    tokens: torch.Tensor,
+    vocab_size: int,
+    num_seqs: int,
+) -> torch.Tensor:
+    # vocab_size + 1 for padding.
+    mask = torch.zeros(
+        (num_seqs, vocab_size + 1), dtype=torch.bool, device=tokens.device
+    )
+    mask.scatter_(1, tokens, True)
+    return mask[:, :vocab_size].contiguous()
+
+
 def apply_penalties(
     logits: torch.Tensor,
     prompt_tokens_tensor: torch.Tensor,
@@ -70,9 +83,7 @@ def apply_penalties(
     repetition_penalties: The repetition penalties of shape (num_seqs, )
     """
     num_seqs, vocab_size = logits.shape
-    _, prompt_mask = get_token_bin_counts_and_mask(
-        prompt_tokens_tensor, vocab_size, num_seqs
-    )
+    prompt_mask = get_token_presence_mask(prompt_tokens_tensor, vocab_size, num_seqs)
     output_bin_counts, output_mask = get_token_bin_counts_and_mask(
         output_tokens_tensor, vocab_size, num_seqs
     )
