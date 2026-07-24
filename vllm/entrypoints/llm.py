@@ -372,6 +372,24 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
         # Cache for __repr__ to avoid repeated collective_rpc calls
         self._cached_repr: str | None = None
 
+    def shutdown(self) -> None:
+        """Release the engine's resources.
+
+        Offline usage that creates and destroys many ``LLM`` instances in one
+        process should call this (or use the ``LLM`` as a context manager) so
+        the multiprocess front-end ``gc.freeze()`` is undone deterministically.
+        See gh #48229.
+        """
+        llm_engine = getattr(self, "llm_engine", None)
+        if llm_engine is not None:
+            llm_engine.shutdown()
+
+    def __enter__(self) -> "LLM":
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        self.shutdown()
+
     @classmethod
     def from_engine_args(cls, engine_args: EngineArgs) -> "LLM":
         """Create an LLM instance from EngineArgs."""
