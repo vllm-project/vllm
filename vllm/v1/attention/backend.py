@@ -803,6 +803,10 @@ class AttentionImplBase(ABC, Generic[T]):
     # route between the dense-MHA prefill and sparse-MQA paths.
     is_sparse: ClassVar[bool] = False
 
+    # Whether this impl provides a dense-MHA prefill path (forward_mha). Sparse
+    # impls without one run the top-k MQA path for all requests.
+    supports_dense_mha_prefill: ClassVar[bool] = True
+
     # Required attributes that all impls should have
     num_heads: int
     head_size: int
