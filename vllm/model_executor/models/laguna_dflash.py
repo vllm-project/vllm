@@ -84,6 +84,7 @@ class DFlashLagunaModel(DFlashQwen3Model, EagleModelMixin):
             self.config.vocab_size,
             self.config.hidden_size,
             prefix=maybe_prefix(prefix, "embed_tokens"),
+            quant_config=vllm_config.quant_config,
         )
 
         self.mask_token_id = self.config.dflash_config.get("mask_token_id")

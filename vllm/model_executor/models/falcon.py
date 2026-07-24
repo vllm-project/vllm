@@ -380,6 +380,8 @@ class FalconModel(nn.Module):
         self.word_embeddings = VocabParallelEmbedding(
             config.vocab_size,
             self.embed_dim,
+            quant_config=quant_config,
+            prefix=f"{prefix}.word_embeddings",
         )
 
         # Transformer blocks

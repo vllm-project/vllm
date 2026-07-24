@@ -566,6 +566,8 @@ class NemotronHModel(nn.Module, EagleModelMixin):
         self.embed_tokens = VocabParallelEmbedding(
             self.vocab_size,
             config.hidden_size,
+            quant_config=quant_config,
+            prefix=f"{prefix}.embed_tokens",
         )
 
         self.has_moe = "E" in config.hybrid_override_pattern

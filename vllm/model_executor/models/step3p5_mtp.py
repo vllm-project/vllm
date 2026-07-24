@@ -88,6 +88,8 @@ class Step3p5AMultiTokenPredictor(nn.Module):
         self.embed_tokens = VocabParallelEmbedding(
             config.vocab_size,
             config.hidden_size,
+            quant_config=vllm_config.quant_config,
+            prefix=f"{prefix}.embed_tokens",
         )
         self.mtp_start_layer_idx = config.num_hidden_layers
         self.num_mtp_layers = config.num_nextn_predict_layers
