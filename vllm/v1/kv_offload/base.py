@@ -153,7 +153,12 @@ class OffloadingCounterMetadata(OffloadingMetricMetadata):
 
 @dataclass(frozen=True)
 class OffloadingGaugeMetadata(OffloadingMetricMetadata):
-    pass
+    # Prometheus multiprocess aggregation mode. Offloading gauges are
+    # point-in-time / static per (engine) and are reported identically by every
+    # API-server process, so collapse the per-pid fan-out to a single series
+    # (mirrors vllm:cache_config_info). With api_server_count > 1 the default
+    # "all" mode would otherwise emit one duplicate row per process per engine.
+    multiprocess_mode: str = "mostrecent"
 
 
 @dataclass(frozen=True)
@@ -341,6 +346,11 @@ class OffloadingManager(ABC):
 
     def get_stats(self) -> "OffloadingConnectorStats | None":
         """Return collected metrics since last call, or None if disabled."""
+        return None
+
+    def get_config_info(self) -> dict[str, dict[str, str]] | None:
+        """Static config to emit once at startup as Info-style gauges,
+        mapping ``metric_name -> {label: value}``. None when unavailable."""
         return None
 
     def shutdown(self) -> None:

@@ -406,6 +406,16 @@ class KVConnectorBase_V1(ABC):
         """
         return None
 
+    def get_config_info(self) -> dict[str, dict[str, str]] | None:
+        """
+        Static, per-connector configuration to emit once at engine startup as
+        Info-style gauges, mapping ``metric_name -> {label: value}``. Mirrors
+        ``vllm:cache_config_info`` so a connector's static config is observable
+        on ``/metrics`` before any request. Returns None when there is nothing
+        to expose.
+        """
+        return None
+
     def get_kv_connector_kv_cache_events(self) -> "KVConnectorKVEvents | None":
         """
         Get the KV connector kv cache events collected during the last interval.

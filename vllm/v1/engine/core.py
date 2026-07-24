@@ -1621,6 +1621,10 @@ class EngineCoreProc(EngineCore):
 
             # Register sockets with poller.
             poller = zmq.Poller()
+            connector = self.scheduler.get_kv_connector()
+            kv_connector_config_info = (
+                connector.get_config_info() if connector is not None else None
+            )
             ready_response = EngineCoreReadyResponse(
                 max_model_len=self.vllm_config.model_config.max_model_len,
                 num_gpu_blocks=self.vllm_config.cache_config.num_gpu_blocks or 0,
@@ -1636,6 +1640,7 @@ class EngineCoreProc(EngineCore):
                 kv_cache_max_concurrency=(
                     self.vllm_config.cache_config.kv_cache_max_concurrency
                 ),
+                kv_connector_config_info=kv_connector_config_info,
             )
             ready_payload = msgspec.msgpack.encode(ready_response)
             for input_socket in input_sockets:

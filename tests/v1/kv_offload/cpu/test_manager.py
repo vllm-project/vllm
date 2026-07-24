@@ -40,9 +40,11 @@ def make_cpu_manager(
     enable_events: bool = False,
     store_threshold: int = 0,
     max_tracker_size: int = 64_000,
+    config_info: dict[str, str] | None = None,
 ) -> CPUOffloadingManager:
     return CPUOffloadingManager(
         num_blocks=num_blocks,
+        config_info=config_info,
         cache_policy=cache_policy,
         enable_events=enable_events,
         store_threshold=store_threshold,
@@ -257,6 +259,33 @@ def test_cpu_manager_reports_cache_usage_gauge():
     # and usage drops.
     manager.complete_store(to_keys([3, 4]), _EMPTY_REQ_CTX)
     check_usage_stats(manager, 0.0)
+
+
+def test_cpu_manager_reports_config_info():
+    config_info = {
+        "num_blocks": "4",
+        "blocks_per_chunk": "8",
+        "kv_bytes_per_chunk": "1024",
+        "cpu_page_size_per_worker": "512",
+        "eviction_policy": "lru",
+    }
+    manager = make_cpu_manager(num_blocks=4, config_info=config_info)
+
+    # Exposed for one-shot startup emission via get_config_info(), keyed by
+    # metric name.
+    assert manager.get_config_info() == {
+        CPUOffloadingMetrics.CPU_CONFIG_INFO: config_info
+    }
+
+    # It is NOT put on the per-interval stats path: emitting a constant gauge
+    # every interval would re-serialize it over IPC for no reason; startup
+    # emission covers it instead (and the gauge persists).
+    stats = manager.get_stats()
+    assert stats is not None
+    assert CPUOffloadingMetrics.CPU_CONFIG_INFO not in stats._values
+
+    # A manager created without config info exposes nothing.
+    assert make_cpu_manager().get_config_info() is None
 
 
 def test_cpu_manager_reports_allocation_size_histogram():
