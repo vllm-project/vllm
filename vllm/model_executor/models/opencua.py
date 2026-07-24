@@ -84,12 +84,16 @@ class OpenCUAProcessor(Qwen2VLProcessor):
 
     def __init__(
         self,
-        vision_config: dict,
-        tokenizer: TokenizerLike,
+        image_processor=None,
+        tokenizer: TokenizerLike = None,
+        video_processor=None,
+        vision_config: dict | None = None,
         **kwargs,
     ):
-        image_processor = Qwen2VLImageProcessor(**vision_config)
-        video_processor = Qwen2VLVideoProcessor(**vision_config)
+        if image_processor is None:
+            image_processor = Qwen2VLImageProcessor(**vision_config)
+        if video_processor is None:
+            video_processor = Qwen2VLVideoProcessor(**vision_config)
         chat_template = kwargs.pop("chat_template", None)
 
         super().__init__(
