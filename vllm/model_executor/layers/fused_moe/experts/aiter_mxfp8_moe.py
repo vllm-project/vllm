@@ -118,11 +118,6 @@ class AiterMxfp8Experts(Mxfp8TritonExpertsBase):
 
         from vllm._aiter_ops import rocm_aiter_ops
 
-        # Re-tag the preshuffled weights: replace_parameter drops the
-        # is_shuffled flag, without which aiter picks a broken CK kernel.
-        w1.is_shuffled = True
-        w2.is_shuffled = True
-
         limit = self.quant_config.gemm1_clamp_limit
         swiglu_limit = 0.0 if limit is None else float(limit)
 
