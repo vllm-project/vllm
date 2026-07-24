@@ -32,6 +32,10 @@ class VideoMediaIO(MediaIO[tuple[npt.NDArray, dict[str, Any]]]):
         runtime_kwargs: dict[str, Any] | None,
     ) -> dict[str, Any]:
         if runtime_kwargs:
+            # Decoder GPU memory is reserved from the startup value.
+            runtime_kwargs = dict(runtime_kwargs)
+            runtime_kwargs.pop("hw_decoders", None)
+
             # Block request-level selection of GPU video backends that
             # were not configured (and VRAM-reserved) at startup.
             for key in ("video_backend", "backend"):
