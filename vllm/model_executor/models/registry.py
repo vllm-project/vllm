@@ -55,6 +55,7 @@ from .interfaces import (
     supports_multimodal_encoder_tp_data,
     supports_multimodal_raw_input_only,
     supports_pp,
+    supports_replayssm,
     supports_transcription,
 )
 from .interfaces_base import (
@@ -113,7 +114,7 @@ _TEXT_GENERATION_MODELS = {
     "Glm4ForCausalLM": ("glm4", "Glm4ForCausalLM"),
     "Glm4MoeForCausalLM": ("glm4_moe", "Glm4MoeForCausalLM"),
     "Glm4MoeLiteForCausalLM": ("glm4_moe_lite", "Glm4MoeLiteForCausalLM"),
-    "GlmMoeDsaForCausalLM": ("deepseek_v2", "GlmMoeDsaForCausalLM"),
+    "GlmMoeDsaForCausalLM": ("vllm.models.deepseek_v32", "GlmMoeDsaForCausalLM"),
     "GptOssForCausalLM": ("gpt_oss", "GptOssForCausalLM"),
     "GPT2LMHeadModel": ("gpt2", "GPT2LMHeadModel"),
     "GPTJForCausalLM": ("gpt_j", "GPTJForCausalLM"),
@@ -609,6 +610,7 @@ _SPECULATIVE_DECODING_MODELS = {
     "DSparkDraftModel": ("vllm.models.deepseek_v4", "DSparkDeepseekV4ForCausalLM"),
     "Qwen3DSparkModel": ("qwen3_dspark", "Qwen3DSparkForCausalLM"),
     "DFlashLagunaForCausalLM": ("laguna_dflash", "DFlashLagunaForCausalLM"),
+    "Gemma4DSparkModel": ("gemma4_dspark", "Gemma4DSparkForCausalLM"),
     "PEagleDraftModel": ("llama_eagle3", "Eagle3LlamaForCausalLM"),
     "PeagleLlamaForCausalLM": ("llama_eagle3", "Eagle3LlamaForCausalLM"),
     "Eagle3LlamaForCausalLM": ("llama_eagle3", "Eagle3LlamaForCausalLM"),
@@ -627,9 +629,11 @@ _SPECULATIVE_DECODING_MODELS = {
     "Eagle3DeepseekV3ForCausalLM": ("deepseek_eagle3", "Eagle3DeepseekV2ForCausalLM"),
     "EagleDeepSeekMTPModel": ("deepseek_eagle", "EagleDeepseekV3ForCausalLM"),
     "DeepSeekMTPModel": ("deepseek_mtp", "DeepSeekMTP"),
+    "DeepseekV32MTPModel": ("vllm.models.deepseek_v32", "DeepseekV32MTP"),
     "DeepSeekV4MTPModel": ("vllm.models.deepseek_v4", "DeepSeekV4MTP"),
     "MiniMaxM3MTP": ("vllm.models.minimax_m3", "MiniMaxM3MTP"),
     "BailingMoeV25MTPModel": ("bailing_moe_mtp", "BailingMoeV25MTPModel"),
+    "InklingMTPModel": ("vllm.models.inkling", "InklingMTP"),
     "Gemma4MTPModel": ("gemma4_mtp", "Gemma4MTP"),
     "ErnieMTPModel": ("ernie_mtp", "ErnieMTP"),
     "ExaoneMoeMTP": ("exaone_moe_mtp", "ExaoneMoeMTP"),
@@ -786,6 +790,7 @@ class _ModelInfo:
     is_hybrid: bool
     has_noops: bool
     supports_mamba_prefix_caching: bool
+    supports_replayssm: bool
     supports_transcription: bool
     supports_transcription_only: bool
 
@@ -812,6 +817,7 @@ class _ModelInfo:
             is_attention_free=is_attention_free(model),
             is_hybrid=is_hybrid(model),
             supports_mamba_prefix_caching=supports_mamba_prefix_caching(model),
+            supports_replayssm=supports_replayssm(model),
             supports_transcription=supports_transcription(model),
             supports_transcription_only=(
                 supports_transcription(model) and model.supports_transcription_only

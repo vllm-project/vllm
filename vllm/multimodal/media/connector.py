@@ -302,14 +302,18 @@ class MediaConnector:
         media_io: MediaIO[_M],
     ) -> _M:  # type: ignore[type-var]
         # Format per RFC 2397:
-        # data:[<mediatype>][;base64],<data>
-        data_spec, data = url[5:].split(",", 1)
-        media_type, data_type = data_spec.split(";", 1)
+        # data:[<mediatype>][;<param>=<value>]*[;base64],<data>
+        data_spec, sep, data = url[5:].partition(",")
+        if not sep:
+            msg = f"Invalid data URL {url[:32]!r}: missing ',' separator."
+            raise ValueError(msg)
 
-        if data_type != "base64":
+        media_type, sep, encoding = data_spec.rpartition(";")
+        if not sep or encoding != "base64":
             msg = "Only base64 data URLs are supported for now."
             raise NotImplementedError(msg)
 
+        media_type = media_type.partition(";")[0]
         return media_io.load_base64(media_type, data)
 
     def _load_file_url(
@@ -476,15 +480,17 @@ class MediaConnector:
         self,
         image_url: str,
         *,
-        image_mode: str = "RGB",
+        image_mode: str | None = "RGB",
     ) -> Image.Image:
         """
         Load a PIL image from an HTTP or base64 data URL.
 
-        By default, the image is converted into RGB format.
+        By default, the image is converted into RGB format. Set
+        `media_io_kwargs={"image": {"image_mode": None}}` to keep the
+        original image mode (e.g. preserving the alpha channel).
         """
         image_io = ImageMediaIO(
-            image_mode=image_mode, **self.media_io_kwargs.get("image", {})
+            **({"image_mode": image_mode} | self.media_io_kwargs.get("image", {}))
         )
 
         try:
@@ -501,15 +507,17 @@ class MediaConnector:
         self,
         image_url: str,
         *,
-        image_mode: str = "RGB",
+        image_mode: str | None = "RGB",
     ) -> Image.Image:
         """
         Asynchronously load a PIL image from an HTTP or base64 data URL.
 
-        By default, the image is converted into RGB format.
+        By default, the image is converted into RGB format. Set
+        `media_io_kwargs={"image": {"image_mode": None}}` to keep the
+        original image mode (e.g. preserving the alpha channel).
         """
         image_io = ImageMediaIO(
-            image_mode=image_mode, **self.media_io_kwargs.get("image", {})
+            **({"image_mode": image_mode} | self.media_io_kwargs.get("image", {}))
         )
 
         try:
@@ -526,14 +534,14 @@ class MediaConnector:
         self,
         video_url: str,
         *,
-        image_mode: str = "RGB",
+        image_mode: str | None = "RGB",
         video_processor: str | None = None,
     ) -> tuple[npt.NDArray, dict[str, Any]]:
         """
         Load video from an HTTP or base64 data URL.
         """
         image_io = ImageMediaIO(
-            image_mode=image_mode, **self.media_io_kwargs.get("image", {})
+            **({"image_mode": image_mode} | self.media_io_kwargs.get("image", {}))
         )
         video_io_kwargs = dict(self.media_io_kwargs.get("video", {}))
         if "video_backend" not in video_io_kwargs and (
@@ -552,16 +560,18 @@ class MediaConnector:
         self,
         video_url: str,
         *,
-        image_mode: str = "RGB",
+        image_mode: str | None = "RGB",
         video_processor: str | None = None,
     ) -> tuple[npt.NDArray, dict[str, Any]]:
         """
         Asynchronously load video from an HTTP or base64 data URL.
 
-        By default, the image is converted into RGB format.
+        By default, the image is converted into RGB format. Set
+        `media_io_kwargs={"image": {"image_mode": None}}` to keep the
+        original image mode (e.g. preserving the alpha channel).
         """
         image_io = ImageMediaIO(
-            image_mode=image_mode, **self.media_io_kwargs.get("image", {})
+            **({"image_mode": image_mode} | self.media_io_kwargs.get("image", {}))
         )
         video_io_kwargs = dict(self.media_io_kwargs.get("video", {}))
         if "video_backend" not in video_io_kwargs and (
@@ -587,6 +597,20 @@ class MediaConnector:
 
         return image_embedding_io.load_base64("", data)
 
+    async def fetch_image_embedding_async(
+        self,
+        data: str,
+    ) -> torch.Tensor:
+        """
+        Asynchronously load image embedding from a URL.
+        """
+        image_embedding_io = ImageEmbeddingMediaIO()
+        loop = asyncio.get_running_loop()
+
+        return await loop.run_in_executor(
+            global_thread_pool, image_embedding_io.load_base64, "", data
+        )
+
     def fetch_audio_embedding(
         self,
         data: str,
@@ -597,3 +621,17 @@ class MediaConnector:
         audio_embedding_io = AudioEmbeddingMediaIO()
 
         return audio_embedding_io.load_base64("", data)
+
+    async def fetch_audio_embedding_async(
+        self,
+        data: str,
+    ) -> torch.Tensor:
+        """
+        Asynchronously load audio embedding from a URL.
+        """
+        audio_embedding_io = AudioEmbeddingMediaIO()
+        loop = asyncio.get_running_loop()
+
+        return await loop.run_in_executor(
+            global_thread_pool, audio_embedding_io.load_base64, "", data
+        )
