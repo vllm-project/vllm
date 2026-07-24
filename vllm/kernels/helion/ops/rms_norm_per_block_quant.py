@@ -55,7 +55,6 @@ def generate_inputs() -> dict[CaseKey, tuple[Any, ...]]:
             device=input.device,
             dtype=scale_dtype,
         )
-        scale_ub = torch.mean(input).to(scale_dtype)
         residual = torch.randn_like(input)
         weight = torch.normal(
             mean=1.0,
@@ -65,6 +64,16 @@ def generate_inputs() -> dict[CaseKey, tuple[Any, ...]]:
             device=input.device,
         )
         epsilon = 1e-6
+        # scale_ub clamps the per-group amax of the RMS-normed, weighted output.
+        # Use a non-degenerate upper bound (midway between the mean and max of
+        # that magnitude) so clamping is partially active and the baseline
+        # comparison is meaningful. torch.mean(input) ~= 0 for the zero-mean
+        # input would collapse every scale to the floor and saturate the output.
+        # Mirrors the reference normalization in baseline() below.
+        x = input.to(torch.float32) + residual.to(torch.float32)
+        rms = torch.rsqrt(x.pow(2).mean(dim=-1, keepdim=True) + epsilon)
+        x_norm_abs = ((x * rms).to(input.dtype) * weight).abs().to(torch.float32)
+        scale_ub = (0.5 * (x_norm_abs.mean() + x_norm_abs.amax())).to(scale_dtype)
 
         config_key = CaseKey(
             {
@@ -169,16 +178,40 @@ def baseline(
     group_size: int,
     is_scale_transposed: bool,
 ) -> None:
-    torch.ops._C.rms_norm_per_block_quant(
-        result,
-        input,
-        weight,
-        scale,
-        epsilon,
-        scale_ub,
-        residual,
-        group_size,
-        is_scale_transposed,
+    num_tokens, hidden_size = input.shape
+    groups_per_row = hidden_size // group_size
+    quant_dtype = result.dtype
+    qtype_min: int | float
+    qtype_max: int | float
+
+    if quant_dtype == torch.int8:
+        qtype_min, qtype_max = get_int8_min_max()
+        min_scaling_factor = get_int8_min_scaling_factor()
+    else:
+        qtype_min, qtype_max = get_fp8_min_max()
+        min_scaling_factor = 1.0 / (qtype_max * 512.0)
+
+    x = input.to(torch.float32)
+    if residual is not None:
+        x = x + residual
+        residual.copy_(x.to(residual.dtype))
+
+    rms = torch.rsqrt(x.pow(2).mean(dim=-1, keepdim=True) + epsilon)
+    x_norm = (x * rms).to(input.dtype) * weight
+    x_grouped = x_norm.view(num_tokens, groups_per_row, group_size).to(torch.float32)
+
+    s = torch.amax(torch.abs(x_grouped), dim=-1).to(torch.float32)
+    if scale_ub is not None:
+        s = s.clamp(max=scale_ub)
+    s = (s * (1.0 / qtype_max)).clamp(min=min_scaling_factor)
+
+    y = x_grouped / s[:, :, None]
+    if quant_dtype == torch.int8:
+        y = y.round()
+
+    scale.copy_(s)
+    result.copy_(
+        y.clamp(qtype_min, qtype_max).view(num_tokens, hidden_size).to(result.dtype)
     )
 
 

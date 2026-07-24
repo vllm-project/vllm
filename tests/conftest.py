@@ -349,6 +349,20 @@ _T = TypeVar("_T", nn.Module, torch.Tensor, BatchEncoding, BatchFeature, dict)
 _R = TypeVar("_R")
 
 
+def _fix_v4_tied_weights_keys(model_cls: type) -> None:
+    """Convert a v4 list-format _tied_weights_keys to the transformers v5 dict form."""
+    tied = getattr(model_cls, "_tied_weights_keys", None)
+    if not isinstance(tied, list) or not tied:
+        return
+    result = {
+        k: "model.embed_tokens.weight"
+        for k in tied
+        if "lm_head" in k and k.endswith(".weight")
+    }
+    if result:
+        setattr(model_cls, "_tied_weights_keys", result)
+
+
 class HfRunner:
     def get_default_device(self):
         from vllm.platforms import current_platform
@@ -474,6 +488,22 @@ class HfRunner:
                 trust_remote_code=trust_remote_code,
             )
         else:
+            if trust_remote_code and hasattr(self.config, "auto_map"):
+                cls_ref = self.config.auto_map.get(auto_cls.__name__)
+                if cls_ref is not None:
+                    from vllm.transformers_utils.dynamic_module import (
+                        try_get_class_from_dynamic_module,
+                    )
+
+                    model_cls = try_get_class_from_dynamic_module(
+                        cls_ref,
+                        model_name,
+                        trust_remote_code=trust_remote_code,
+                        warn_on_fail=False,
+                    )
+                    if model_cls is not None:
+                        _fix_v4_tied_weights_keys(model_cls)
+
             model = cast(
                 nn.Module,
                 auto_cls.from_pretrained(
@@ -642,10 +672,12 @@ class HfRunner:
 
         outputs: list[tuple[list[list[int]], list[str]]] = []
         for inputs in all_inputs:
+            generate_kwargs = dict(kwargs)
+            generate_kwargs.setdefault("tokenizer", self.tokenizer)
             output_ids: torch.Tensor = self.model.generate(
                 **self.wrap_device(inputs),
                 use_cache=True,
-                **kwargs,
+                **generate_kwargs,
             )
             if self.processor is None:
                 raise RuntimeError(
@@ -724,6 +756,8 @@ class HfRunner:
 
         all_logprobs: list[list[torch.Tensor]] = []
         for inputs in all_inputs:
+            generate_kwargs = dict(kwargs)
+            generate_kwargs.setdefault("tokenizer", self.tokenizer)
             output: "GenerateOutput" = self.model.generate(
                 **self.wrap_device(inputs),
                 use_cache=True,
@@ -731,7 +765,7 @@ class HfRunner:
                 max_new_tokens=max_tokens,
                 output_hidden_states=True,
                 return_dict_in_generate=True,
-                **kwargs,
+                **generate_kwargs,
             )
             seq_logprobs = self._hidden_states_to_seq_logprobs(output.hidden_states)
             all_logprobs.append(seq_logprobs)
@@ -812,6 +846,8 @@ class HfRunner:
         all_output_strs: list[str] = []
 
         for inputs in all_inputs:
+            generate_kwargs = dict(kwargs)
+            generate_kwargs.setdefault("tokenizer", self.tokenizer)
             output: "GenerateOutput" = self.model.generate(
                 **self.wrap_device(inputs),
                 use_cache=use_cache,
@@ -819,7 +855,7 @@ class HfRunner:
                 max_new_tokens=max_tokens,
                 output_hidden_states=True,
                 return_dict_in_generate=True,
-                **kwargs,
+                **generate_kwargs,
             )
 
             # Encoder-decoder models return decoder_hidden_states instead of

@@ -83,11 +83,17 @@ _REGISTERED_MODEL_CLASS_OVERRIDES: set[tuple[str, str]] = set()
 RunnerOption = Literal["auto", RunnerType]
 ConvertType = Literal["none", "embed", "classify"]
 ConvertOption = Literal["auto", ConvertType]
-TokenizerMode = Literal["auto", "hf", "slow", "mistral", "deepseek_v32", "deepseek_v4"]
+TokenizerMode = Literal[
+    "auto", "hf", "slow", "mistral", "deepseek_v32", "deepseek_v4", "inkling"
+]
 ModelDType = Literal["auto", "half", "float16", "bfloat16", "float", "float32"]
 LogprobsMode = Literal[
     "raw_logits", "raw_logprobs", "processed_logits", "processed_logprobs"
 ]
+PROCESSED_LOGPROBS_MODES: tuple[LogprobsMode, ...] = (
+    "processed_logits",
+    "processed_logprobs",
+)
 HfOverrides = dict[str, Any] | Callable[[PretrainedConfig], PretrainedConfig]
 ModelImpl = Literal["auto", "vllm", "transformers", "terratorch"]
 LayerBlockType = Literal["attention", "linear_attention", "mamba"]
@@ -231,6 +237,8 @@ class ModelConfig:
     Raw means the values before applying any logit processors, like bad words.
     Processed means the values after applying all processors, including
     temperature and top_k/top_p.
+    Note: for prompt_logprobs, processed_* and raw_* yield identical results
+    because prompt tokens do not go through sampling processors.
     """
     use_fp64_gumbel: bool = False
     """Whether to use FP64 (instead of FP32) random noise for Gumbel-max and
@@ -628,6 +636,8 @@ class ModelConfig:
                 self.tokenizer_mode = "deepseek_v32"
             elif arch == "DeepseekV4ForCausalLM":
                 self.tokenizer_mode = "deepseek_v4"
+            elif arch in ("InklingForCausalLM", "InklingForConditionalGeneration"):
+                self.tokenizer_mode = "inkling"
 
             if self.tokenizer_mode != "auto":
                 logger.info(

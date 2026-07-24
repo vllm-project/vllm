@@ -42,6 +42,14 @@ EXPECTED_LORA_OUTPUT = [
 ]
 
 
+def reformat(text: str) -> str:
+    # Remove all spaces immediately before or after comma
+    text = ",".join(map(str.strip, text.split(",")))
+    # Remove duplicated blank spaces
+    text = " ".join(map(str.strip, text.split()))
+    return text
+
+
 def generate_and_test(llm: vllm.LLM, lora_path: str, lora_id: int) -> None:
     prompts = [
         PROMPT_TEMPLATE.format(
@@ -68,13 +76,18 @@ def generate_and_test(llm: vllm.LLM, lora_path: str, lora_id: int) -> None:
         generated_texts.append(generated_text)
         print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
     for i in range(len(EXPECTED_LORA_OUTPUT)):
-        generated = " ".join(generated_texts[i].split())
-        expected = " ".join(EXPECTED_LORA_OUTPUT[i].split())
-        assert generated.startswith(expected)
+        # The generated text may have different numbers of blank space,
+        # so reformat to compare.
+        compactGeneratedStr = reformat(generated_texts[i])
+        compactExpectedStr = reformat(EXPECTED_LORA_OUTPUT[i])
+        if not generated_texts[i].startswith(
+            EXPECTED_LORA_OUTPUT[i]
+        ) and not compactGeneratedStr.startswith(compactExpectedStr):
+            raise AssertionError(
+                f"Generated: {generated_texts[i]}, Expected: {EXPECTED_LORA_OUTPUT[i]}"
+            )
 
 
-# TODO: make the Mxfp4MoeBackend.TRITON spawn-safe.
-# For now just use TRITON_UNFUSED kernel
 @pytest.mark.parametrize(
     "mxfp4_use_marlin",
     [
@@ -82,7 +95,8 @@ def generate_and_test(llm: vllm.LLM, lora_path: str, lora_id: int) -> None:
         pytest.param(
             True,
             marks=pytest.mark.skipif(
-                current_platform.is_rocm(), reason="marlin not supported"
+                current_platform.is_rocm() or current_platform.is_xpu(),
+                reason="marlin not supported",
             ),
         ),
     ],
@@ -122,7 +136,8 @@ def test_gpt_oss_lora(
         pytest.param(
             True,
             marks=pytest.mark.skipif(
-                current_platform.is_rocm(), reason="marlin not supported"
+                current_platform.is_rocm() or current_platform.is_xpu(),
+                reason="marlin not supported",
             ),
         ),
     ],
