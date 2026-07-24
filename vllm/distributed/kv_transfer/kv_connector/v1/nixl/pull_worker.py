@@ -147,7 +147,9 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                         local_block_offset,
                     )
                 )
-                local_block_ids = self._logical_to_kernel_block_ids(local_logical_ids)
+                local_block_ids = self._logical_to_kernel_block_ids(
+                    local_logical_ids, self._physical_blocks_per_logical_kv_block
+                )
                 remote_block_ids = self._logical_to_remote_kernel_block_ids(
                     remote_logical_ids,
                     remote_info.remote_physical_blocks_per_logical,

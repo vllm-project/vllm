@@ -348,6 +348,8 @@ class NixlBaseConnectorWorker:
         self._remote_agents: dict[EngineId, dict[RemoteWorkerKey, str]] = defaultdict(
             dict
         )
+        # Map of engine_id -> clock offset.
+        self._engine_clock_offset: dict[EngineId, float] = {}
 
         # Metadata.
         self.engine_id: EngineId = engine_id
@@ -583,7 +585,7 @@ class NixlBaseConnectorWorker:
         expected_engine_id: str,
         remote_dcp_size: int = 1,
         remote_pcp_size: int = 1,
-    ) -> dict[RemoteWorkerKey, str]:
+    ) -> tuple[dict[RemoteWorkerKey, str], float]:
         """Do a NIXL handshake with a remote instance."""
 
         # the first time we connect to a remote agent.
@@ -617,22 +619,27 @@ class NixlBaseConnectorWorker:
         with zmq_ctx(zmq.REQ, path) as sock:
             for remote_worker_key in remote_worker_keys:
                 remote_tp_rank, remote_dcp_rank = remote_worker_key
-                remote_flat_idx = self._tp_dcp_to_flat_idx(
+                remote_pcp_rank = self._tp_dcp_to_pcp_rank(
                     remote_tp_rank,
                     remote_dcp_rank,
                     remote_pcp_size,
                     remote_dcp_size,
                 )
+                remote_pp_rank = 0
                 logger.debug(
-                    "Querying metadata on path: %s at remote flat_idx %s "
-                    "for worker key %s",
+                    "Querying metadata on path: %s at PP rank %s, PCP rank %s, "
+                    "TP rank %s for worker key %s",
                     path,
-                    remote_flat_idx,
+                    remote_pp_rank,
+                    remote_pcp_rank,
+                    remote_tp_rank,
                     remote_worker_key,
                 )
 
                 # Send query for the request.
-                msg = msgspec.msgpack.encode((GET_META_MSG, remote_flat_idx))
+                msg = msgspec.msgpack.encode(
+                    (GET_META_MSG, remote_pp_rank, remote_pcp_rank, remote_tp_rank)
+                )
                 # Set receive timeout to 5 seconds to avoid hanging on dead server
                 sock.setsockopt(zmq.RCVTIMEO, 5000)  # milliseconds
                 start_time = time.perf_counter()
@@ -707,16 +714,31 @@ class NixlBaseConnectorWorker:
                         f"Expected {expected_engine_id},"
                         f"received {metadata.engine_id}."
                     )
-                received_flat_idx = metadata.tp_rank * metadata.pcp_size
-                received_flat_idx += metadata.pcp_rank
-                if received_flat_idx != remote_flat_idx:
+                if (
+                    metadata.tp_rank != remote_tp_rank
+                    or metadata.pcp_rank != remote_pcp_rank
+                ):
                     raise RuntimeError(
-                        "Remote handshake metadata flat_idx mismatch. "
-                        f"Expected flat_idx={remote_flat_idx}, got "
-                        f"flat_idx={received_flat_idx} "
-                        f"(tp_rank={metadata.tp_rank}, "
-                        f"pcp_rank={metadata.pcp_rank}, "
-                        f"dcp_rank={metadata.dcp_rank})."
+                        "Remote handshake metadata rank mismatch. "
+                        f"Expected (pcp_rank, tp_rank)="
+                        f"({remote_pcp_rank}, {remote_tp_rank}), got "
+                        f"({metadata.pcp_rank}, {metadata.tp_rank})."
+                    )
+                inferred_dcp_rank = (
+                    metadata.tp_rank * metadata.pcp_size + metadata.pcp_rank
+                ) % metadata.dcp_size
+                if (
+                    inferred_dcp_rank != remote_dcp_rank
+                    or metadata.dcp_rank != inferred_dcp_rank
+                ):
+                    raise RuntimeError(
+                        "Remote handshake metadata DCP rank mismatch. "
+                        f"Expected dcp_rank={remote_dcp_rank}, inferred "
+                        f"dcp_rank={inferred_dcp_rank}, metadata "
+                        f"dcp_rank={metadata.dcp_rank} from "
+                        f"(pcp_rank={metadata.pcp_rank}, "
+                        f"tp_rank={metadata.tp_rank}, "
+                        f"dcp_size={metadata.dcp_size})."
                     )
                 if not self.transfer_topo.has_kv_cache_overlap(
                     metadata.tp_rank,
@@ -752,10 +774,11 @@ class NixlBaseConnectorWorker:
                 "Handshake completed but found no remote worker with overlapping "
                 "KV cache coverage."
             )
-        return remote_worker_to_agent_name
+        assert best_offset is not None
+        return remote_worker_to_agent_name, best_offset
 
     @staticmethod
-    def _tp_dcp_to_flat_idx(
+    def _tp_dcp_to_pcp_rank(
         tp_rank: int,
         dcp_rank: int,
         pcp_size: int,
@@ -766,16 +789,17 @@ class NixlBaseConnectorWorker:
 
         pcp_rank = (dcp_rank - tp_rank * pcp_size) % dcp_size
         if pcp_rank < pcp_size:
+            # dcp_rank is derived from the explicit PCP/TP metadata key.
+            inferred_dcp_rank = (tp_rank * pcp_size + pcp_rank) % dcp_size
+            assert inferred_dcp_rank == dcp_rank
             # A (tp_rank, dcp_rank) pair may map to multiple PCP ranks when
-            # pcp_size > dcp_size. The worker key does not preserve which PCP
-            # replica produced the DCP shard, so pick the smallest valid PCP
-            # rank for now.
+            # pcp_size > dcp_size. Pick the smallest valid PCP rank for now.
             # TODO: Choose among equivalent PCP ranks using load-balance
             # signals instead of always choosing the smallest rank.
-            return tp_rank * pcp_size + pcp_rank
+            return pcp_rank
 
         raise ValueError(
-            f"No valid flat_idx for tp_rank={tp_rank}, dcp_rank={dcp_rank}, "
+            f"No valid pcp_rank for tp_rank={tp_rank}, dcp_rank={dcp_rank}, "
             f"pcp_size={pcp_size}, dcp_size={dcp_size}"
         )
 
@@ -893,7 +917,7 @@ class NixlBaseConnectorWorker:
         tp_size: int,
         dcp_size: int = 1,
         pcp_size: int = 1,
-    ) -> Future[dict[RemoteWorkerKey, str]] | None:
+    ) -> Future[tuple[dict[RemoteWorkerKey, str], float]] | None:
         """
         Ensure a handshake is in-flight (or already done) for *engine_id*.
 
@@ -2307,6 +2331,39 @@ class NixlBaseConnectorWorker:
                     ).tolist()
                 )
         return physical_block_ids
+
+    def _logical_to_remote_kernel_block_ids(
+        self, block_ids: BlockIds, remote_physical_per_logical: int
+    ) -> BlockIds:
+        """Map logical block IDs to physical kernel block IDs on the remote.
+
+        Args:
+            block_ids: per-group lists of logical block IDs.
+            remote_physical_per_logical: remote engine's physical blocks
+                per logical block.
+
+        Returns:
+            Same structure with FA groups expanded (each logical block L
+            becomes kernel blocks [L*remote_physical_per_logical, ..
+            L*remote_physical_per_logical +
+            remote_physical_per_logical - 1]).
+            Mamba groups are passed through unchanged.
+        """
+        if remote_physical_per_logical == 1:
+            return block_ids
+        remote_arange = np.arange(remote_physical_per_logical).reshape(1, -1)
+        group_specs = self.kv_cache_config.kv_cache_groups
+        result = [
+            BlockTable.map_to_kernel_blocks(
+                np.array(group),
+                remote_physical_per_logical,
+                remote_arange,
+            ).tolist()
+            if not isinstance(group_specs[i].kv_cache_spec, MambaSpec)
+            else group
+            for i, group in enumerate(block_ids)
+        ]
+        return result
 
     def _apply_prefix_caching(
         self,

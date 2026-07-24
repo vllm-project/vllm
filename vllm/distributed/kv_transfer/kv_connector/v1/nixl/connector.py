@@ -208,11 +208,11 @@ class NixlBaseConnector(KVConnectorBase_V1, SupportsHMA):
         return self.connector_scheduler.request_finished(request, block_ids)
 
     def set_xfer_handshake_metadata_pp_aware(
-        self, metadata: dict[tuple[int, int], KVConnectorHandshakeMetadata]
+        self, metadata: dict[tuple[int, int, int], KVConnectorHandshakeMetadata]
     ) -> None:
         """
-        Set handshake metadata keyed by (pp_rank, tp_rank) so the side
-        channel can serve every PP stage's agent metadata.
+        Set handshake metadata keyed by (pp_rank, pcp_rank, tp_rank) so the
+        side channel can serve every PP/PCP/TP producer shard's agent metadata.
 
         Args:
             metadata (dict): the handshake metadata to set.
