@@ -30,8 +30,10 @@ from vllm.model_executor.models.deepseek_eagle3 import Eagle3DeepseekV2ForCausal
 from vllm.model_executor.models.interfaces import SupportsMultiModal
 from vllm.model_executor.models.laguna_dflash import DFlashLagunaForCausalLM
 from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
+from vllm.model_executor.models.llama_pard2 import Pard2LlamaForCausalLM
 from vllm.model_executor.models.qwen3_dflash import DFlashQwen3ForCausalLM
 from vllm.model_executor.models.qwen3_eagle3 import Eagle3Qwen3ForCausalLM
+from vllm.model_executor.models.qwen3_pard2 import Pard2Qwen3ForCausalLM
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import PIN_MEMORY, async_tensor_h2d
@@ -523,7 +525,7 @@ class SpecDecodeBaseProposer:
         self._last_draft_probs = None
         batch_size = common_attn_metadata.batch_size()
 
-        if self.method in ("eagle3", "dflash"):
+        if self.method in ("eagle3", "dflash", "pard2"):
             model = self.model
             if isinstance(model, BreakableCUDAGraphWrapper):
                 model = model.unwrap()
@@ -535,6 +537,8 @@ class SpecDecodeBaseProposer:
                     DFlashQwen3ForCausalLM,
                     Eagle3Qwen3ForCausalLM,
                     DFlashLagunaForCausalLM,
+                    Pard2LlamaForCausalLM,
+                    Pard2Qwen3ForCausalLM,
                 ),
             )
             target_hidden_states = self.model.combine_hidden_states(
@@ -923,16 +927,34 @@ class SpecDecodeBaseProposer:
                 BLOCK_SIZE_TOKENS=BLOCK_SIZE_TOKENS,
             )
             if self.pass_hidden_states_to_model:
-                assert self.parallel_drafting_hidden_state_tensor is not None
+                n = total_num_output_tokens
                 self.hidden_states[out_hidden_state_mapping] = target_hidden_states
                 # Use torch.where to avoid DtoH sync from boolean indexing
-                mask = self.is_masked_token_mask[:total_num_output_tokens]
-                torch.where(
-                    mask.unsqueeze(1),
-                    self.parallel_drafting_hidden_state_tensor,
-                    self.hidden_states[:total_num_output_tokens],
-                    out=self.hidden_states[:total_num_output_tokens],
-                )
+                mask = self.is_masked_token_mask[:n]
+                if self.method == "pard2":
+                    # PARD-2 repeat-last-feat: each masked parallel slot reuses the
+                    # most recent real token's projected hidden state (forward-fill
+                    # over the token axis). Safe across requests since each request's
+                    # first slot is always real.
+                    idx = torch.arange(n, device=self.device)
+                    last_real = torch.cummax(
+                        torch.where(mask, torch.zeros_like(idx), idx), dim=0
+                    ).values
+                    src = self.hidden_states[:n].index_select(0, last_real)
+                    torch.where(
+                        mask.unsqueeze(1),
+                        src,
+                        self.hidden_states[:n],
+                        out=self.hidden_states[:n],
+                    )
+                else:
+                    assert self.parallel_drafting_hidden_state_tensor is not None
+                    torch.where(
+                        mask.unsqueeze(1),
+                        self.parallel_drafting_hidden_state_tensor,
+                        self.hidden_states[:n],
+                        out=self.hidden_states[:n],
+                    )
 
             # 2.
             # Recompute the slot mapping based on the new positions and
@@ -1684,7 +1706,7 @@ class SpecDecodeBaseProposer:
         They might indicate this by setting "use_aux_hidden_state" to False
         inside the "eagle_config" dict of their hf_config.
         """
-        if self.method != "eagle3":
+        if self.method not in ("eagle3", "pard2"):
             return False
         # Assume that eagle3 heads use aux hidden states by default
         use_aux_hidden_state = True

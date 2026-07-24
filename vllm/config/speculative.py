@@ -60,6 +60,7 @@ MTPModelTypes = Literal[
 NgramGPUTypes = Literal["ngram_gpu"]
 DFlashModelTypes = Literal["dflash"]
 DSparkModelTypes = Literal["dspark"]
+Pard2ModelTypes = Literal["pard2"]
 EagleModelTypes = Literal[
     "eagle", "eagle3", "extract_hidden_states", MTPModelTypes, DFlashModelTypes
 ]
@@ -73,6 +74,7 @@ SpeculativeMethod = Literal[
     EagleModelTypes,
     NgramGPUTypes,
     DSparkModelTypes,
+    Pard2ModelTypes,
 ]
 RejectionSampleMethod = Literal["standard", "synthetic", "block"]
 DraftSampleMethod = Literal["greedy", "probabilistic"]
@@ -891,6 +893,13 @@ class SpeculativeConfig:
                     or "Gemma4DSparkModel" in self.draft_model_config.architectures
                 ):
                     self.method = "dspark"
+                elif getattr(
+                    self.draft_model_config.hf_config, "spd_type", None
+                ) == "pard2" or getattr(
+                    self.draft_model_config.hf_config, "pard2", False
+                ):
+                    # PARD-2 (amd/PARD2-*): parallel draft with target-hidden fusion.
+                    self.method = "pard2"
                 elif self.draft_model_config.hf_config.model_type == "medusa":
                     self.method = "medusa"
                 elif self.draft_model_config.hf_config.model_type == "mlp_speculator":
@@ -968,6 +977,21 @@ class SpeculativeConfig:
 
                 if self.method in ("dflash", "dspark"):
                     self.parallel_drafting = True
+
+                if self.method == "pard2":
+                    # Target-dependent fusion needs the target's hidden dim to match
+                    # what target_proj was trained on; if so wire it, else the target
+                    # isn't PARD-2's optimized one -> plain parallel draft (no fusion).
+                    if self._pard2_target_dim_matches():
+                        self._prepare_pard2_draft_config()
+                    else:
+                        logger.info(
+                            "PARD-2: target hidden dim does not match the draft's "
+                            "pard2_target_dim; running target-independent "
+                            "(plain parallel draft, no target-hidden fusion)."
+                        )
+                        self.method = "draft_model"
+                        self.parallel_drafting = True
 
                 if self.num_speculative_tokens is not None and hasattr(
                     self.draft_model_config.hf_config, "num_lookahead_tokens"
@@ -1171,6 +1195,55 @@ class SpeculativeConfig:
             )
         return speculative_draft_tensor_parallel_size
 
+    def _pard2_target_dim_matches(self) -> bool:
+        """TD fusion is possible only when target_hidden * len(pard2_target_layers)
+        equals the draft's trained pard2_target_dim (assume True if unspecified)."""
+        hf_config = self.draft_model_config.hf_config
+        expected = getattr(hf_config, "pard2_target_dim", None)
+        target_layers = getattr(hf_config, "pard2_target_layers", None)
+        if not expected or not target_layers:
+            return True
+        target_hidden = self.target_model_config.hf_text_config.hidden_size
+        return target_hidden * len(target_layers) == int(expected)
+
+    def _prepare_pard2_draft_config(self):
+        """Wire a PARD-2 parallel draft model.
+
+        Reuse EAGLE-3 aux-hidden-state capture to gather ``pard2_target_layers``
+        from the target, then route to the family model class (Llama/Qwen3) chosen
+        by ``model_type``. The fusion itself happens in the model's forward.
+        """
+        self.parallel_drafting = True
+        hf_config = self.draft_model_config.hf_config
+
+        target_layers = getattr(hf_config, "pard2_target_layers", None)
+        if not target_layers:
+            raise ValueError("PARD-2 draft config must specify `pard2_target_layers`.")
+        # pard2_target_layers are end-relative (negative) indices into the target's
+        # output_hidden_states (len num_layers+1; index 0 = embeddings). Resolve to
+        # positive via modulo so vLLM captures the same layers.
+        num_target_layers = self.target_model_config.hf_text_config.num_hidden_layers
+        resolved = [int(layer) % (num_target_layers + 1) for layer in target_layers]
+        hf_config.eagle_aux_hidden_state_layer_ids = resolved
+        hf_config.num_aux_hidden_states = len(resolved)
+        # combine_hidden_states projects concat(target layers) -> draft hidden.
+        hf_config.target_hidden_size = (
+            self.target_model_config.hf_text_config.hidden_size
+        )
+        model_type = getattr(hf_config, "model_type", "llama")
+        pard2_arch_by_model_type = {
+            "llama": "Pard2LlamaForCausalLM",
+            "qwen3": "Pard2Qwen3ForCausalLM",
+        }
+        arch = pard2_arch_by_model_type.get(model_type)
+        if arch is None:
+            raise ValueError(
+                f"PARD-2 draft model_type '{model_type}' is not supported. "
+                f"Supported: {sorted(pard2_arch_by_model_type)}."
+            )
+        hf_config.architectures = [arch]
+        self.update_arch_()
+
     def update_arch_(self):
         """
         EagleConfig and ExtractHiddenStatesConfig update architectures, so update all
@@ -1331,7 +1404,14 @@ class SpeculativeConfig:
         # NOTE: This method is usually a stand-in for "speculative decoding using
         # target model hidden states"
         # TODO(ben): Refactor this so the naming is clearer
-        return self.method in ("eagle", "eagle3", "mtp", "dflash", "dspark")
+        return self.method in (
+            "eagle",
+            "eagle3",
+            "mtp",
+            "dflash",
+            "dspark",
+            "pard2",
+        )
 
     def use_dflash(self) -> bool:
         return self.method == "dflash"
