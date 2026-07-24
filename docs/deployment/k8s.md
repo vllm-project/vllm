@@ -388,6 +388,76 @@ INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
 
       If the service is correctly deployed, you should receive a response from the vLLM model.
 
+## Deployment and Monitoring on GKE Autopilot
+
+Deploying vLLM on GKE Autopilot requires specific configurations due to Autopilot's managed security model and resource management. Autopilot disallows host-privileged DaemonSets (such as default `node-exporter` setups) and blocks access to the `kube-system` namespace.
+
+For a complete, runnable recipe including Google Cloud Storage (GCS) Fuse volume mounting, model quantization, and automated load testing scripts, see the [gke-vllm-serving repository](https://github.com/obaida7/gke-vllm-serving).
+
+### 1. Prometheus and Grafana Overrides for Autopilot
+
+To install the Prometheus Operator (`kube-prometheus-stack`) via Helm on GKE Autopilot without triggering admission controller violations, you must disable node-exporters and control-plane metrics scrapers using the following Helm configuration:
+
+```yaml
+# prometheus-values.yaml
+kubeControllerManager:
+  enabled: false
+kubeEtcd:
+  enabled: false
+kubeScheduler:
+  enabled: false
+kubeProxy:
+  enabled: false
+coreDns:
+  enabled: false
+kubeDns:
+  enabled: false
+nodeExporter:
+  enabled: false
+prometheus-node-exporter:
+  enabled: false
+```
+
+Install it using:
+
+```bash
+helm install prometheus prometheus-community/kube-prometheus-stack \
+    -n monitoring \
+    -f prometheus-values.yaml
+```
+
+### 2. Configure ServiceMonitor for vLLM Metrics
+
+vLLM exposes its Prometheus metrics on its main OpenAI API listener port (`8000`) under `/metrics`. Ensure your `ServiceMonitor` targets the `http` port name of the vLLM Service (not port 8090):
+
+```yaml
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: vllm-service-monitor
+  namespace: kserve-test
+  labels:
+    release: prometheus
+spec:
+  selector:
+    matchLabels:
+      app: qwen-vllm
+  endpoints:
+  - port: http
+    interval: 10s
+    path: /metrics
+```
+
+### 3. Deployment Strategy (Avoid GPU Quota Deadlocks)
+
+GKE Autopilot scales down compute resources when they are inactive. During rolling updates, requesting a new GPU node when the active namespace quota is limited can cause the update to hang. Setting the deployment strategy to `Recreate` resolves this by terminating the old pod before provisioning the new one:
+
+```yaml
+spec:
+  strategy:
+    type: Recreate
+```
+
 ## Serving with gRPC
 
 vLLM can serve models over gRPC instead of HTTP by passing the `--grpc` flag. This requires the optional gRPC dependencies:
