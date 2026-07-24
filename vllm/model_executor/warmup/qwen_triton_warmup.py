@@ -154,18 +154,20 @@ def _get_kv_block_zeroer(runner: object) -> object | None:
     return zeroer
 
 
-def _zero_kv_warmup_config(runner: object) -> _ZeroKvWarmupConfig | None:
+def _zero_kv_warmup_configs(runner: object) -> list[_ZeroKvWarmupConfig]:
     zeroer = _get_kv_block_zeroer(runner)
-    meta = getattr(zeroer, "_meta", None)
-    if meta is None:
-        return None
+    metas = getattr(zeroer, "_metas", None)
+    if not metas:
+        return []
 
-    _, page_size_el, block_size, n_segs = meta
-    return _ZeroKvWarmupConfig(
-        page_size_el=int(page_size_el),
-        block_size=int(block_size),
-        n_segs=int(n_segs),
-    )
+    return [
+        _ZeroKvWarmupConfig(
+            page_size_el=int(page_size_el),
+            block_size=int(block_size),
+            n_segs=int(n_segs),
+        )
+        for _, page_size_el, block_size, n_segs in metas
+    ]
 
 
 def _warm_zero_kv_blocks_with_runner_zeroer(runner: object) -> bool:
@@ -369,10 +371,11 @@ def qwen_triton_warmup(
     device = getattr(runner, "device", torch.device("cuda"))
     logger.info("Warming up Qwen Triton kernels for model_type=%s.", model_type)
 
-    zero_config = _zero_kv_warmup_config(runner)
+    zero_configs = _zero_kv_warmup_configs(runner)
     warmed_zeroer = _warm_zero_kv_blocks_with_runner_zeroer(runner)
-    if zero_config is not None:
-        _warm_zero_kv_blocks_kernel(device, zero_config)
+    if zero_configs:
+        for zero_config in zero_configs:
+            _warm_zero_kv_blocks_kernel(device, zero_config)
     elif not warmed_zeroer:
         logger.info("Skipping Qwen zero-kv warmup: no KVBlockZeroer metadata.")
 
