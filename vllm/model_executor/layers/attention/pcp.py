@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from typing import NamedTuple
+
 import torch
 
 from vllm.distributed.parallel_state import (
@@ -148,6 +150,62 @@ def slice_prefill_output_local(
     out_gathered = out_g[gather_idx]
     local = out_gathered[pcp_rank * padded_n : (pcp_rank + 1) * padded_n]
     return local[:num_actual]
+
+
+class DecodeSubset(NamedTuple):
+    """Decode-token subset of a mixed prefill+decode batch."""
+
+    token_mask: torch.Tensor
+    q: torch.Tensor
+    k: torch.Tensor
+    v: torch.Tensor
+    cu_seqlens: torch.Tensor
+    max_seqlen: int
+    ctx_kv_lens: torch.Tensor
+    block_table: torch.Tensor
+
+
+def build_mixed_decode_subset(
+    is_prefilling: torch.Tensor | None,
+    query_start_loc: torch.Tensor,
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    dcp_context_kv_lens: torch.Tensor,
+    block_table: torch.Tensor,
+) -> DecodeSubset | None:
+    """Extract the decode-token subset of a mixed prefill+decode batch.
+
+    DualChunkSwap gives ranks with no prefill chunks a 0-token dummy decode
+    segment mirroring global req 0; such segments are excluded (counting them
+    would desync the DCP LSE-combine). Returns None for a pure-prefill batch.
+    """
+    if is_prefilling is None:
+        return None
+    is_pre = is_prefilling.to(device=query_start_loc.device)
+    seg_lens = query_start_loc[1:] - query_start_loc[:-1]
+    decode_seg = (~is_pre.bool()) & (seg_lens > 0)
+    num_decode = int(decode_seg.sum().item())
+    if num_decode == 0:
+        return None
+    token_mask = torch.repeat_interleave(decode_seg, seg_lens)[: query.shape[0]]
+    dec_lens = seg_lens[decode_seg]
+    dec_cu = torch.zeros(
+        num_decode + 1,
+        dtype=query_start_loc.dtype,
+        device=query_start_loc.device,
+    )
+    torch.cumsum(dec_lens, dim=0, out=dec_cu[1:])
+    return DecodeSubset(
+        token_mask=token_mask,
+        q=query[token_mask].contiguous(),
+        k=key[token_mask].contiguous(),
+        v=value[token_mask].contiguous(),
+        cu_seqlens=dec_cu,
+        max_seqlen=int(dec_lens.max().item()),
+        ctx_kv_lens=dcp_context_kv_lens[decode_seg],
+        block_table=block_table[decode_seg],
+    )
 
 
 def finalize_mla_pcp_decode(

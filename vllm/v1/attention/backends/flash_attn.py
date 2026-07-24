@@ -11,6 +11,7 @@ import torch
 
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention.pcp import (
+    build_mixed_decode_subset,
     gather_prefill_qkv_global,
     slice_prefill_output_local,
 )
@@ -593,17 +594,10 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
         prefix_scheduler_metadata = None
 
         if self.dcp_shares_pcp_ranks and self.dcp_world_size > 1:
-            # MRv2 PCP+DCP (dcp_shares_pcp_ranks): the cache is DCP-sharded
-            # (1/dcp KV per rank). DualChunkSwap has already partitioned the
-            # batch per rank; DCP only shards the cache. Both decode and prefill
-            # use the context+query+merge path (_forward_dcp_mrv2_decode): the
-            # context attention reads each rank's local shard of the causal
-            # prefix (the full prefix is in the sharded cache --
-            # do_kv_cache_update all-gathered+wrote it before forward) and
-            # LSE-combines; the query attention reads this rank's own
-            # new K/V. context_kv_lens = seq_lens - query_lens is the absolute
-            # position of the chunk start (= the prior prefix length), correct for
-            # both decode (query_len=1) and prefill. scheduler_metadata is unused.
+            # MRv2 PCP+DCP: cache is DCP-sharded (1/dcp KV/rank). DualChunkSwap
+            # already partitioned the batch per rank; both decode and prefill use
+            # the context+query+merge path. context_kv_lens = seq_lens -
+            # query_lens is the chunk-start position (= prior prefix length).
             scheduler_metadata = None
             query_lens = query_start_loc[1:] - query_start_loc[:-1]
             context_kv_lens = seq_lens - query_lens
@@ -1248,13 +1242,9 @@ class FlashAttentionImpl(AttentionImpl):
             return
 
         if self.use_pcp:
-            # Under PCP each rank holds only its DualChunkSwap prefill chunks in
-            # the rank-local batch. All-gather the prefill K/V across PCP ranks
-            # (keeping decode writes local) so every rank's cache receives the
-            # full prefill KV (replicated when dcp=1; the DCP-local shard when
-            # pcp+dcp). maybe_gather_kv_cache_inputs gathers K/V separately ->
-            # contiguous (cache kernel head-stride contract), builds the gathered
-            # slot mapping, and handles the decode/prefill split + empty-prefill.
+            # All-gather the prefill K/V across PCP ranks (decode writes stay
+            # local) so every rank's cache gets the full prefill KV. K/V are
+            # gathered separately to stay contiguous (cache kernel head-stride).
             from vllm.model_executor.layers.attention.pcp import (
                 maybe_gather_kv_cache_inputs,
             )
@@ -1263,12 +1253,9 @@ class FlashAttentionImpl(AttentionImpl):
             num_decode_tokens = (
                 attn_metadata.num_decode_tokens if attn_metadata is not None else 0
             )
-            # Rank-invariant gather decision: the per-rank num_decode_tokens can
-            # differ under DualChunkSwap (some ranks get zero prefill chunks),
-            # which would desync the PCP all-gather. If the global batch has any
-            # prefill, every rank treats the whole batch as prefill (gather all);
-            # only a pure-decode batch skips the gather. Used by both the sharded
-            # and replicated PCP+DCP paths.
+            # Rank-invariant gather decision: per-rank num_decode_tokens can differ
+            # under DualChunkSwap and desync the all-gather, so if the global batch
+            # has any prefill every rank gathers the whole batch.
             gflags = get_forward_context().additional_kwargs.get("pcp_global_flags")
             if gflags is not None and gflags[0]:
                 num_decode_tokens = 0
@@ -1335,6 +1322,48 @@ class FlashAttentionImpl(AttentionImpl):
             v_descale=v_descale,
         )
 
+    def _sharded_context_attention(
+        self,
+        q: torch.Tensor,
+        key_cache: torch.Tensor,
+        value_cache: torch.Tensor,
+        cu_seqlens_q: torch.Tensor,
+        max_seqlen_q: int,
+        ctx_kv_lens: torch.Tensor,
+        max_ctx_kv: int,
+        block_table: torch.Tensor,
+        fa_kw: dict,
+        out: torch.Tensor | None = None,
+        num_splits: int | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Attend ``q`` to the sharded cached prefix, then LSE-combine across DCP.
+
+        Returns the combined output and corrected LSE ([B, H] layout). ``out``
+        and ``num_splits`` are passed through only when given.
+        """
+        kw = dict(
+            q=q,
+            k=key_cache,
+            v=value_cache,
+            cu_seqlens_q=cu_seqlens_q,
+            max_seqlen_q=max_seqlen_q,
+            seqused_k=ctx_kv_lens,
+            max_seqlen_k=max_ctx_kv,
+            causal=False,
+            block_table=block_table,
+            return_softmax_lse=True,
+            **fa_kw,
+        )
+        if out is not None:
+            kw["out"] = out
+        if num_splits is not None:
+            kw["num_splits"] = num_splits
+        ctx_out, ctx_lse = flash_attn_varlen_func(**kw)
+        ctx_out_cor, ctx_lse_cor = self.dcp_combine(
+            ctx_out, ctx_lse.transpose(0, 1), get_dcp_group(), return_lse=True
+        )
+        return ctx_out_cor, ctx_lse_cor.transpose(0, 1).contiguous()
+
     def _forward_dcp_mrv2(
         self,
         query: torch.Tensor,
@@ -1348,22 +1377,20 @@ class FlashAttentionImpl(AttentionImpl):
         k_descale: torch.Tensor | None = None,
         v_descale: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """MRv2 PCP+DCP GQA attention over a SHARDED cache.
+        """MRv2 PCP+DCP GQA attention over a sharded (1/dcp) KV cache.
 
-        Pure-decode batches use ``_forward_dcp_mrv2_decode`` (Q replicated,
-        attend the sharded prefix + LSE-combine). Prefill/extend/mixed batches
-        all-gather the DualChunkSwap-partitioned Q/K/V across PCP, run full
-        causal on the gathered tokens, optionally context-attend the cached
-        prefix (extend), and slice back; decode tokens in a mixed batch are then
-        overwritten via the decode path.
+        Pure-decode uses ``_forward_dcp_mrv2_decode`` (Q replicated, attend the
+        sharded prefix + LSE-combine). Prefill/extend/mixed all-gather the
+        DualChunkSwap-partitioned Q/K/V, run full causal, optionally
+        context-attend the cached prefix (extend), and slice back; decode tokens
+        in a mixed batch are then overwritten via the decode path.
         """
         assert self.vllm_flash_attn_version is not None, (
             "FlashAttention version not detected."
         )
         fc = get_forward_context()
-        # Rank-invariant (has_prefill, has_decode) from the global batch; per-rank
-        # num_decode_tokens is not safe to route on (DualChunkSwap can zero some
-        # ranks' prefill chunks and desync the collectives).
+        # Route on rank-invariant global flags, not per-rank num_decode_tokens:
+        # DualChunkSwap can zero some ranks' prefill chunks and desync collectives.
         global_has_prefill, global_has_decode = fc.additional_kwargs.get(
             "pcp_global_flags", (True, False)
         )
@@ -1391,14 +1418,12 @@ class FlashAttentionImpl(AttentionImpl):
             )
             return output
 
-        # Prefill/extend/mixed: DualChunkSwap partitions the prefill Q, so each
-        # rank all-gathers Q/K/V across PCP, runs full causal on the gathered
-        # tokens, and slices its chunk back out. Decode tokens in a mixed batch
-        # self-attend here (no cached context) and are overwritten below.
+        # Prefill/extend/mixed: gather the DualChunkSwap-partitioned Q/K/V across
+        # PCP, run full causal on the gathered tokens, slice back. Decode tokens
+        # in a mixed batch self-attend here (no cached context) and are fixed below.
         info = fc.additional_kwargs.get("pcp_prefill_gather")
         if info is None:
-            # Warmup / dummy run: no PCP partition -> no gather indices. Fall
-            # back to local causal attention (shape-correct is all warmup needs).
+            # Warmup/dummy: no PCP partition -> local causal (shape-correct only).
             flash_attn_varlen_func(
                 q=query,
                 k=key,
@@ -1433,47 +1458,30 @@ class FlashAttentionImpl(AttentionImpl):
             return_softmax_lse=True,
             **fa_kw,
         )
-        # EXTEND (prefix caching): q_g (replicated) also attends the cached
-        # prefix -- each rank its DCP shard, LSE-combined. Skipped for pure
-        # first-prefills (rank-invariant has_extend = gctx[3]).
+        # EXTEND (prefix caching): q_g also attends the cached prefix, sharded +
+        # LSE-combined. Skipped for pure first-prefills (rank-invariant has_extend).
         final_g = out_g
         gctx = fc.additional_kwargs.get("pcp_global_ctx")
         if gctx is not None and gctx[3] and key_cache is not None:
             g_block_table, g_ctx_kv_lens, g_max_ctx_kv, _ = gctx
-            ctx_out_g, ctx_lse_g = flash_attn_varlen_func(
-                q=q_g,
-                k=key_cache,
-                v=value_cache,
-                cu_seqlens_q=cu_seqlens,
-                max_seqlen_q=global_max_seqlen,
-                seqused_k=g_ctx_kv_lens,
-                max_seqlen_k=g_max_ctx_kv,
-                causal=False,
-                block_table=g_block_table,
-                return_softmax_lse=True,
-                **fa_kw,
+            ctx_out_cor, ctx_lse_cor = self._sharded_context_attention(
+                q_g,
+                key_cache,
+                value_cache,
+                cu_seqlens,
+                global_max_seqlen,
+                g_ctx_kv_lens,
+                g_max_ctx_kv,
+                g_block_table,
+                fa_kw,
             )
-            ctx_out_cor, ctx_lse_cor = self.dcp_combine(
-                ctx_out_g,
-                ctx_lse_g.transpose(0, 1),
-                get_dcp_group(),
-                return_lse=True,
-            )
-            ctx_lse_cor = ctx_lse_cor.transpose(0, 1).contiguous()
             final_g = torch.empty_like(out_g)
-            merge_attn_states(
-                final_g,
-                ctx_out_cor,
-                ctx_lse_cor,
-                out_g,
-                query_lse_g,
-            )
+            merge_attn_states(final_g, ctx_out_cor, ctx_lse_cor, out_g, query_lse_g)
         # global -> gathered (rank-order) -> this rank's local chunk.
         output[:num_actual] = slice_prefill_output_local(info, final_g, num_actual)
 
-        # MIXED batch: the prefill gather above gave decode tokens only
-        # self-attention (1-token segments, no cached context). Overwrite them
-        # with the correct decode computation. No-op for a pure-prefill batch.
+        # MIXED batch: the gather above self-attended decode tokens (no cached
+        # context); recompute them. No-op for a pure-prefill batch.
         if global_has_decode:
             self._overwrite_mixed_decode_tokens(
                 query=query,
@@ -1498,55 +1506,37 @@ class FlashAttentionImpl(AttentionImpl):
         attn_metadata: FlashAttentionMetadata,
         fa_kw: dict,
     ) -> None:
-        """Recompute decode-token outputs the prefill-gather path self-attended.
-
-        Decode tokens are replicated across PCP ranks; extract them, run the
-        decode path (sharded-context + LSE-combine) on the subset, and scatter
-        back. Zero-token segments (DualChunkSwap's dummy for empty ranks) are
-        excluded -- counting them would desync the DCP LSE-combine.
-        """
-        is_pre = attn_metadata.is_prefilling
-        if is_pre is None:
-            return
-        qsl = attn_metadata.query_start_loc
-        is_pre = is_pre.to(device=qsl.device)
-        seg_query_lens = qsl[1:] - qsl[:-1]
-        decode_seg_mask = (~is_pre.bool()) & (seg_query_lens > 0)
-        num_decode = int(decode_seg_mask.sum().item())
-        if num_decode == 0:
-            return
-
-        token_mask = torch.repeat_interleave(decode_seg_mask, seg_query_lens)
-        token_mask = token_mask[: query.shape[0]]
-        dec_q = query[token_mask].contiguous()
-        dec_k = key[token_mask].contiguous()
-        dec_v = value[token_mask].contiguous()
-
-        dec_query_lens = seg_query_lens[decode_seg_mask]
-        dec_cu_seqlens = torch.zeros(num_decode + 1, dtype=qsl.dtype, device=qsl.device)
-        torch.cumsum(dec_query_lens, dim=0, out=dec_cu_seqlens[1:])
-
+        """Recompute decode-token outputs the prefill-gather path self-attended."""
         ctx_kv_lens = attn_metadata.dcp_context_kv_lens
         assert ctx_kv_lens is not None
-        dec_ctx_kv_lens = ctx_kv_lens[decode_seg_mask]
-
-        dec_out = output[token_mask]
+        sub = build_mixed_decode_subset(
+            attn_metadata.is_prefilling,
+            attn_metadata.query_start_loc,
+            query,
+            key,
+            value,
+            ctx_kv_lens,
+            attn_metadata.block_table,
+        )
+        if sub is None:
+            return
+        dec_out = output[sub.token_mask]
         self._forward_dcp_mrv2_decode(
-            dec_q,
-            dec_k,
-            dec_v,
+            sub.q,
+            sub.k,
+            sub.v,
             key_cache,
             value_cache,
             dec_out,
             attn_metadata,
-            dec_cu_seqlens,
-            int(dec_query_lens.max().item()),
-            attn_metadata.block_table[decode_seg_mask],
+            sub.cu_seqlens,
+            sub.max_seqlen,
+            sub.block_table,
             fa_kw,
-            dcp_context_kv_lens=dec_ctx_kv_lens,
-            max_dcp_context_kv_len=int(dec_ctx_kv_lens.max().item()),
+            dcp_context_kv_lens=sub.ctx_kv_lens,
+            max_dcp_context_kv_len=int(sub.ctx_kv_lens.max().item()),
         )
-        output[token_mask] = dec_out
+        output[sub.token_mask] = dec_out
 
     def _forward_dcp_mrv2_decode(
         self,
@@ -1565,10 +1555,9 @@ class FlashAttentionImpl(AttentionImpl):
         max_dcp_context_kv_len: int | None = None,
     ) -> None:
         """Decode (or decode-subset) over a sharded cache: attend the local DCP
-        shard of the cached prefix + LSE-combine, merge with the per-token new
-        K/V attention. Every rank runs the combine (no rank-varying guard) so
-        NCCL stays synchronized. Context lens default to the metadata but can be
-        overridden for a decode-only subset of a mixed batch.
+        shard of the prefix + LSE-combine, merge with per-token new K/V. Every
+        rank runs the combine (no rank-varying guard). Context lens default to
+        the metadata but can be overridden for a mixed-batch decode subset.
         """
         if dcp_context_kv_lens is None:
             dcp_context_kv_lens = attn_metadata.dcp_context_kv_lens
@@ -1584,29 +1573,19 @@ class FlashAttentionImpl(AttentionImpl):
         )
         assert dcp_context_kv_lens is not None
         assert max_dcp_context_kv_len is not None
-        context_attn_out, context_lse = flash_attn_varlen_func(
-            q=query,
-            k=key_cache,
-            v=value_cache,
+        context_attn_out_cor, context_lse_cor = self._sharded_context_attention(
+            query,
+            key_cache,
+            value_cache,
+            cu_seqlens_q,
+            max_seqlen_q,
+            dcp_context_kv_lens,
+            max_dcp_context_kv_len,
+            block_table,
+            fa_kw,
             out=dcp_context_out_workspace[:n],
-            cu_seqlens_q=cu_seqlens_q,
-            max_seqlen_q=max_seqlen_q,
-            seqused_k=dcp_context_kv_lens,
-            max_seqlen_k=max_dcp_context_kv_len,
-            causal=False,
-            block_table=block_table,
-            return_softmax_lse=True,
             num_splits=attn_metadata.max_num_splits,
-            **fa_kw,
         )
-        # FA returns LSE as [H, B]; the DCP combine wants [B, H].
-        context_attn_out_cor, context_lse_cor = self.dcp_combine(
-            context_attn_out,
-            context_lse.transpose(0, 1),
-            get_dcp_group(),
-            return_lse=True,
-        )
-        context_lse_cor = context_lse_cor.transpose(0, 1).contiguous()
 
         query_attn_out, query_lse = flash_attn_varlen_func(
             q=query,
