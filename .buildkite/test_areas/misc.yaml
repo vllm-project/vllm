@@ -365,6 +365,8 @@ steps:
   - tests/test_pooling_params.py
   - tests/test_ray_env.py
   - tests/test_sampling_params.py
+  - tests/utils.py
+  - tests/test_large_gpu_mark.py
   - tests/multimodal
   - tests/renderers
   - tests/standalone_tests/lazy_imports.py
@@ -383,6 +385,7 @@ steps:
   - pytest -v -s test_pooling_params.py
   - pytest -v -s test_ray_env.py
   - pytest -v -s test_sampling_params.py
+  - pytest -v -s test_large_gpu_mark.py
   - pytest -v -s -m 'cpu_test' multimodal
   - pytest -v -s renderers
   - pytest -v -s reasoning
@@ -443,7 +446,7 @@ steps:
 - label: Acceptance Length Test (Large Models) # optional
   device: h200_35gb
   key: acceptance-length-test-large-models
-  timeout_in_minutes: 20
+  timeout_in_minutes: 90
   gpu: h100
   optional: true
   num_gpus: 1

@@ -1969,21 +1969,35 @@ def large_gpu_mark(min_gb: int) -> pytest.MarkDecorator:
     This can be leveraged via `@large_gpu_test` to skip tests in environments
     without enough resources, or called when filtering tests to run directly.
     """
-    try:
-        if current_platform.is_cpu():
-            memory_gb = 0
-        else:
+    memory_gb = 0.0
+    source = "none"
+    if not current_platform.is_cpu():
+        try:
             memory_gb = current_platform.get_device_total_memory() / GB_bytes
-    except Exception as e:
-        warnings.warn(
-            f"An error occurred when finding the available memory: {e}",
-            stacklevel=2,
-        )
-        memory_gb = 0
+            source = "platform"
+        except Exception as platform_exc:
+            # The platform's NVML query (nvmlDeviceGetMemoryInfo) raises
+            # "Insufficient Permissions" on a MIG instance, since it reads the
+            # parent device. Fall back to the CUDA runtime, which reports the
+            # MIG instance's own memory without needing NVML privileges.
+            try:
+                import torch
+
+                memory_gb = torch.cuda.get_device_properties(0).total_memory / GB_bytes
+                source = "torch"
+            except Exception as torch_exc:
+                warnings.warn(
+                    "An error occurred when finding the available memory: "
+                    f"platform={platform_exc!r}; torch={torch_exc!r}",
+                    stacklevel=2,
+                )
 
     return pytest.mark.skipif(
         memory_gb < min_gb,
-        reason=f"Need at least {min_gb}GB GPU memory to run the test.",
+        reason=(
+            f"Need at least {min_gb}GB GPU memory to run the test "
+            f"(detected {memory_gb:.1f}GB via {source})."
+        ),
     )
 
 
