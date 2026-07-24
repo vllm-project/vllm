@@ -231,6 +231,44 @@ def test_flashinfer_sampler():
     )
 
 
+@pytest.mark.skipif(
+    not FLASHINFER_TOPK_TOPP_SUPPORTED,
+    reason="Requires CUDA and flashinfer",
+)
+def test_flashinfer_sampler_fallback_when_jit_cannot_target_gpu(monkeypatch):
+    """FlashInfer swallows arch-detection errors (e.g. SM 12.x with a CUDA
+    toolkit older than 12.9), leaving an empty target-arch set that makes
+    every JIT spec fail with a misleading "requires sm75 or higher" error at
+    first use, killing the engine during startup profiling (issue #42393).
+    The sampler gate must detect this and fall back to native sampling, and
+    surface the real reason when the user explicitly opted in.
+    """
+    import flashinfer.jit.core
+    from flashinfer.compilation_context import CompilationContext
+
+    from vllm.v1.sample.ops.topk_topp_sampler import flashinfer_sampler_supported
+
+    def fake_check_cuda_arch():
+        raise RuntimeError("FlashInfer requires GPUs with sm75 or higher")
+
+    def fake_normalize_cuda_arch(major, minor):
+        raise RuntimeError("SM 12.x requires CUDA >= 12.9")
+
+    monkeypatch.setattr(flashinfer.jit.core, "check_cuda_arch", fake_check_cuda_arch)
+    monkeypatch.setattr(
+        CompilationContext,
+        "_normalize_cuda_arch",
+        staticmethod(fake_normalize_cuda_arch),
+    )
+
+    monkeypatch.delenv("VLLM_USE_FLASHINFER_SAMPLER", raising=False)
+    assert flashinfer_sampler_supported() is False
+
+    monkeypatch.setenv("VLLM_USE_FLASHINFER_SAMPLER", "1")
+    with pytest.raises(RuntimeError, match="SM 12.x requires CUDA >= 12.9"):
+        flashinfer_sampler_supported()
+
+
 # =============================================================================
 # Triton kernel tests
 # =============================================================================
