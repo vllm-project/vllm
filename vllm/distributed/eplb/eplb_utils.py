@@ -4,37 +4,35 @@
 
 import os
 import threading
-
-import torch
+from collections.abc import Callable
+from typing import Any
 
 from vllm.config import ParallelConfig
+from vllm.distributed.eplb.platform_backend import EplbDeviceEvent
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
 
-class CpuGpuEvent:
+class CrossThreadDeviceEvent:
     """
-    Combines a CUDA event with a CPU threading event to enforce record->wait
+    Combines a device event with a CPU threading event to enforce record->wait
     ordering across two threads.
 
     This class is designed for exactly two threads: one producer that calls
     record() and one consumer that calls wait(). Using it with more than two
     threads is not supported and will produce undefined behavior.
 
-    CUDA events alone are insufficient for cross-thread synchronization because
-    waiting on an unrecorded CUDA event is a no-op. The wait will return
-    immediately instead of blocking. This class adds a threading.Event so
-    that the waiting thread blocks on the CPU side until record() is called, at
-    which point the CUDA event is guaranteed to be in-flight and event.wait() will
-    correctly synchronize the GPU stream.
+    Device events alone may not block when waiting before the event is recorded.
+    The CPU event ensures record happens before wait across the two EPLB threads.
     """
 
-    def __init__(self):
-        self._event = torch.cuda.Event()
+    def __init__(self, event_factory: Callable[[], EplbDeviceEvent]):
+        self._event_factory = event_factory
+        self._event = event_factory()
         self._recorded = threading.Event()
 
-    def wait(self, stream: torch.cuda.Stream | None = None):
+    def wait(self, stream: Any | None = None) -> None:
         """
         Blocks the calling thread until record finishes. Used to guarantee that the
         record kernel is called before wait.
@@ -45,7 +43,7 @@ class CpuGpuEvent:
         self._event.wait(stream)
         self._recorded.clear()
 
-    def record(self, stream: torch.cuda.Stream | None = None):
+    def record(self, stream: Any | None = None) -> None:
         """
         Unblocks the waiting thread after calling event.record().
 
@@ -53,10 +51,11 @@ class CpuGpuEvent:
         """
         if self._recorded.is_set():
             raise RuntimeError(
-                "CpuGpuEvent.record() called before the previous event was "
+                "CrossThreadDeviceEvent.record() called before the previous "
+                "event was "
                 "consumed by wait()"
             )
-        self._event = torch.cuda.Event()
+        self._event = self._event_factory()
         self._event.record(stream)
         self._recorded.set()
 
