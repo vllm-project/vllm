@@ -38,6 +38,49 @@ class TestCoerceToSchemaType:
         def test_non_null_value_with_null_type(self):
             assert coerce_to_schema_type("hello", ["null", "string"]) == "hello"
 
+        # Regression for https://github.com/vllm-project/vllm/issues/38885:
+        # Qwen3.5's chat template renders Python ``None`` via the Jinja
+        # ``| string`` filter as the literal text ``"None"``. The parser
+        # must treat it as JSON null when the schema permits.
+        def test_python_repr_none_coerced_to_null(self):
+            assert coerce_to_schema_type("None", "null") is None
+
+        def test_python_repr_none_coerced_to_null_in_union(self):
+            assert coerce_to_schema_type("None", ["integer", "null"]) is None
+            assert coerce_to_schema_type("None", ["string", "null"]) is None
+            assert coerce_to_schema_type("None", ["null", "object"]) is None
+
+        def test_python_repr_none_preserved_when_schema_is_string(self):
+            # String-typed fields must not coerce "None" to JSON null.
+            assert coerce_to_schema_type("None", "string") == "None"
+            assert coerce_to_schema_type("None", ["string"]) == "None"
+
+        def test_lowercase_none_still_not_coerced(self):
+            # Guard against regressing test_none_string_never_converted:
+            # the English word "none" is a legitimate string value.
+            assert coerce_to_schema_type("none", "null") == "none"
+            assert coerce_to_schema_type("none", ["string", "null"]) == "none"
+
+        def test_python_repr_none_preserved_for_unions_without_null(self):
+            # Locks the contract that "None" only coerces to JSON null when
+            # the resolved schema actually permits null. Schemas whose
+            # resolved type set does not include "null" (typed strings,
+            # typed integers, typed booleans, or unions like integer|string)
+            # must keep the literal text "None" as the JSON string "None".
+            # This mirrors the Rust `schema_admits_null` gate added on PR
+            # #47643 after Codex review feedback — see also
+            # `python_repr_none_preserved_for_non_null_unions` in
+            # `rust/src/parser/src/tool/parameters.rs`.
+            assert coerce_to_schema_type("None", "integer") == "None"
+            assert coerce_to_schema_type("None", "number") == "None"
+            assert coerce_to_schema_type("None", "boolean") == "None"
+            assert coerce_to_schema_type("None", "string") == "None"
+            assert coerce_to_schema_type("None", ["string"]) == "None"
+            assert coerce_to_schema_type("None", ["integer", "string"]) == "None"
+            assert coerce_to_schema_type("None", ["string", "integer"]) == "None"
+            assert coerce_to_schema_type("None", ["boolean", "string"]) == "None"
+            assert coerce_to_schema_type("None", ["object", "string"]) == "None"
+
     class TestStringType:
         def test_string_type(self):
             assert coerce_to_schema_type("hello", "string") == "hello"

@@ -1175,3 +1175,108 @@ class TestNestedSchemaCoercion:
         assert questions[0]["question"] == "Pick a color"
         assert questions[0]["multiSelect"] is False
         assert questions[0]["answer"] is None
+
+
+class TestPythonReprNoneCoercion:
+    """Regression tests for
+    https://github.com/vllm-project/vllm/issues/38885.
+
+    Qwen3.5's chat template renders Python ``None`` via the Jinja
+    ``| string`` filter as the literal text ``"None"``.  When a tool
+    parameter schema permits ``null``, the parser must coerce that text
+    to JSON null so downstream ``json.loads(arguments)`` callers receive
+    a real null instead of the string ``"None"``.
+    """
+
+    @pytest.fixture
+    def tools(self):
+        from vllm.entrypoints.openai.chat_completion.protocol import (
+            ChatCompletionToolsParam,
+        )
+
+        return [
+            ChatCompletionToolsParam(
+                type="function",
+                function={
+                    "name": "update_record",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "id": {"type": "integer"},
+                            "label": {"type": "string"},
+                            "metadata": {
+                                "anyOf": [{"type": "object"}, {"type": "null"}],
+                            },
+                        },
+                    },
+                },
+            )
+        ]
+
+    @pytest.fixture
+    def parser_with_tools(self, mock_tokenizer, tools):
+        return ParserEngine(
+            mock_tokenizer,
+            tools=tools,
+            parser_engine_config=qwen3_config(thinking=False),
+        )
+
+    def test_python_repr_none_coerced_to_null(
+        self, parser_with_tools, mock_request
+    ):
+        """The model emits the literal text ``None`` for a nullable
+        field; the parser must turn it into JSON null."""
+        text = (
+            "<tool_call>\n"
+            "<function=update_record>\n"
+            "<parameter=id>42</parameter>\n"
+            "<parameter=label>test</parameter>\n"
+            "<parameter=metadata>None</parameter>\n"
+            "</function>\n"
+            "</tool_call>"
+        )
+        result = parser_with_tools.extract_tool_calls(text, mock_request)
+        assert result.tools_called
+        args = json.loads(result.tool_calls[0].function.arguments)
+        assert args["id"] == 42
+        assert args["label"] == "test"
+        assert args["metadata"] is None
+
+    def test_python_repr_none_preserved_for_string_field(
+        self, parser_with_tools, mock_request
+    ):
+        """``None`` is not coerced when the schema forbids null."""
+        text = (
+            "<tool_call>\n"
+            "<function=update_record>\n"
+            "<parameter=id>42</parameter>\n"
+            "<parameter=label>None</parameter>\n"
+            "<parameter=metadata>None</parameter>\n"
+            "</function>\n"
+            "</tool_call>"
+        )
+        result = parser_with_tools.extract_tool_calls(text, mock_request)
+        args = json.loads(result.tool_calls[0].function.arguments)
+        # label is string-typed -> stays "None"
+        assert args["label"] == "None"
+        # metadata is nullable -> coerced to JSON null
+        assert args["metadata"] is None
+
+    def test_streaming_python_repr_none_coerced_to_null(
+        self, parser_with_tools, mock_request
+    ):
+        chunks = [
+            "<tool_call>\n",
+            "<function=update_record>\n",
+            "<parameter=id>42</parameter>\n",
+            "<parameter=label>test</parameter>\n",
+            "<parameter=metadata>None</parameter>\n",
+            "</function>\n",
+            "</tool_call>",
+        ]
+        results = simulate_tool_streaming(parser_with_tools, mock_request, chunks)
+        args_str = collect_tool_arguments(results)
+        args = json.loads(args_str)
+        assert args["id"] == 42
+        assert args["label"] == "test"
+        assert args["metadata"] is None
