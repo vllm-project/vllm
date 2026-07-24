@@ -11,6 +11,8 @@ Weight format (per expert, same as dense RDNA3 W4A16):
   - Zero points ``[E, groups, N/8]`` packed int32 (synthesized)
 """
 
+import os
+
 import torch
 
 from vllm import _custom_ops as ops
@@ -54,15 +56,72 @@ def _synthesize_qzeros(
     return pack_quantized_values_into_int32(zeros, scalar_types.uint4b8, packed_dim=1)
 
 
+def _expert_cache_size() -> int:
+    """Cold-expert offload cache size (# experts kept resident per layer/rank).
+
+    0 (default) disables offloading -> all experts resident on GPU (unchanged).
+    """
+    try:
+        return int(os.environ.get("VLLM_MOE_EXPERT_CACHE_SIZE", "0"))
+    except ValueError:
+        return 0
+
+
 class CompressedTensorsWNA16RDNA3MoEMethod(CompressedTensorsWNA16MoEMethod):
     """W4A16 MoE using the fused RDNA3 HIP kernel (moe_gptq_gemm_rdna3).
 
     Weights are in RDNA3 format (shuffled int32 [E, K/8, N]),
     NOT Triton format (transposed uint8). apply() dispatches through
     the fused HIP kernel directly.
+
+    When ``VLLM_MOE_EXPERT_CACHE_SIZE > 0`` the experts are offloaded to pinned
+    CPU RAM and a fixed GPU cache of that many experts is streamed in per step
+    by the in-graph gather kernel (see expert_gather.ExpertOffloadCache).
     """
 
+    def create_weights(
+        self,
+        layer,
+        num_experts,
+        hidden_size,
+        intermediate_size_per_partition,
+        params_dtype,
+        **extra_weight_attrs,
+    ):
+        # Offload: allocate the (large) expert params on CPU pinned so the full
+        # E-expert set never has to fit in VRAM during load. torch.device('cpu')
+        # context makes the base create_weights' torch.empty land on CPU.
+        if _expert_cache_size() > 0:
+            with torch.device("cpu"):
+                super().create_weights(
+                    layer,
+                    num_experts,
+                    hidden_size,
+                    intermediate_size_per_partition,
+                    params_dtype,
+                    **extra_weight_attrs,
+                )
+            for name in (
+                "w13_weight_packed",
+                "w2_weight_packed",
+                "w13_weight_scale",
+                "w2_weight_scale",
+            ):
+                p = getattr(layer, name)
+                p.data = p.data.pin_memory()
+        else:
+            super().create_weights(
+                layer,
+                num_experts,
+                hidden_size,
+                intermediate_size_per_partition,
+                params_dtype,
+                **extra_weight_attrs,
+            )
+
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        if _expert_cache_size() > 0:
+            return self._process_weights_offload(layer)
         device = layer.w13_weight_packed.device
         num_experts = layer.w13_weight_packed.shape[0]
         empty_g_idx = torch.empty(0, dtype=torch.int32, device=device)
@@ -122,6 +181,96 @@ class CompressedTensorsWNA16RDNA3MoEMethod(CompressedTensorsWNA16MoEMethod):
             max_decode_tokens, hidden_size, dtype=act_dtype, device=device
         )
         layer.rdna3_empty_tw = torch.empty(0, device=device)
+        layer.expert_cache = None
+
+    def _process_weights_offload(self, layer: torch.nn.Module) -> None:
+        """Move experts to pinned CPU masters + build the GPU cache.
+
+        vLLM's ``device_loading_context`` has already moved this layer's params
+        onto the GPU before we run, so we shuffle the packed weights IN-PLACE on
+        the GPU (fast, no per-expert H2D), then move each prepared plane to a
+        CPU pinned master and FREE the GPU param (``p.data = empty``). Freeing is
+        essential: if we kept a reference to the GPU tensor, the 48 layers would
+        pile up on the GPU (the device_loading_context move-back can't reclaim a
+        referenced tensor). Zero-points are identical across experts -> a single
+        static [C, ...] GPU tensor, not gathered.
+        """
+        from vllm.model_executor.layers.fused_moe.expert_gather import (
+            ExpertOffloadCache,
+        )
+
+        device = torch.device(f"cuda:{torch.cuda.current_device()}")
+        E = layer.w13_weight_packed.shape[0]
+        C = min(_expert_cache_size(), E)
+        act_dtype = layer.w13_weight_scale.dtype
+        empty_g_idx = torch.empty(0, dtype=torch.int32, device=device)
+
+        gw13 = (layer.w13_weight_packed.shape[1] * 8) // self.group_size
+        w13_N = layer.w13_weight_packed.shape[2]
+        gw2 = (layer.w2_weight_packed.shape[1] * 8) // self.group_size
+        w2_N = layer.w2_weight_packed.shape[2]
+
+        # shuffle packed weights in-place on the GPU-resident params
+        for e in range(E):
+            ops.gptq_shuffle(layer.w13_weight_packed.data[e], empty_g_idx, 4)
+            ops.gptq_shuffle(layer.w2_weight_packed.data[e], empty_g_idx, 4)
+
+        # move each prepared plane to a CPU pinned master, then free the GPU param
+        cache = ExpertOffloadCache(E, C, max_sel=C, device=device)
+        for name in (
+            "w13_weight_packed",
+            "w2_weight_packed",
+            "w13_weight_scale",
+            "w2_weight_scale",
+        ):
+            p = getattr(layer, name)
+            src = p.data
+            if name.endswith("scale") and src.dtype != act_dtype:
+                src = src.to(act_dtype)
+            master = src.to("cpu").pin_memory()
+            p.data = torch.empty(0, device=device)  # free GPU (avoid pile-up)
+            shape = master.shape[1:]
+            cache.add_plane(
+                name,
+                master,
+                torch.empty(C, *shape, dtype=master.dtype, device=device),
+            )
+        cache.warm(list(range(C)))
+        layer.expert_cache = cache
+
+        # zero-points: identical for every expert -> one static [C, ...] tensor
+        qz13 = _synthesize_qzeros(gw13, w13_N, device)
+        qz2 = _synthesize_qzeros(gw2, w2_N, device)
+        layer.w13_qzeros = qz13.unsqueeze(0).expand(C, -1, -1).contiguous()
+        layer.w2_qzeros = qz2.unsqueeze(0).expand(C, -1, -1).contiguous()
+
+        # decode scratch buffers
+        intermediate = w13_N // 2
+        buf = 16 * 8
+        layer.rdna3_w1_buf = torch.zeros(buf, w13_N, dtype=act_dtype, device=device)
+        layer.rdna3_act_buf = torch.empty(
+            buf, intermediate, dtype=act_dtype, device=device
+        )
+        layer.rdna3_out_buf = torch.zeros(16, w2_N, dtype=act_dtype, device=device)
+        layer.rdna3_empty_tw = torch.empty(0, device=device)
+        # per-layer resident cache bytes (cache tensors already sized [C, ...])
+        per_layer = (
+            sum(
+                p["cache"].numel() * p["cache"].element_size()
+                for p in cache.planes.values()
+            )
+            + layer.w13_qzeros.numel() * 4
+            + layer.w2_qzeros.numel() * 4
+        )
+        logger.info_once(
+            "[expert-offload] cache C=%d / E=%d experts, "
+            "%.0f MB/layer (%.1f GB/rank over %d layers est.)",
+            C,
+            E,
+            per_layer / 1e6,
+            per_layer * 48 / 1e9,
+            48,
+        )
 
     def apply(
         self,
@@ -169,16 +318,54 @@ def _rdna3_fused_moe(
     """
     num_tokens = hidden_states.shape[0]
     top_k = topk_ids.shape[1]
+
+    # --- cold-expert offload: chunk tokens so a step's working set <= C, then
+    # gather the needed experts into cache slots and remap topk to slot space ---
+    ec = getattr(layer, "expert_cache", None)
+    if ec is not None:
+        max_tok = max(1, ec.C // top_k)
+        if num_tokens > max_tok:
+            outs = [
+                _rdna3_fused_moe(
+                    hidden_states[i : i + max_tok],
+                    topk_weights[i : i + max_tok],
+                    topk_ids[i : i + max_tok],
+                    layer,
+                    activation,
+                    apply_router_weight_on_input,
+                    global_num_experts,
+                    expert_map,
+                )
+                for i in range(0, num_tokens, max_tok)
+            ]
+            return torch.cat(outs, dim=0)
+        topk_ids = ec.ensure(topk_ids)  # -> slot space [0, C)
+        w13_packed = ec.cache_tensor("w13_weight_packed")
+        w2_packed = ec.cache_tensor("w2_weight_packed")
+        w13_scale = ec.cache_tensor("w13_weight_scale")
+        w2_scale = ec.cache_tensor("w2_weight_scale")
+        w13_qzeros = layer.w13_qzeros  # static [C, ...] (shared across experts)
+        w2_qzeros = layer.w2_qzeros
+        global_num_experts = ec.C
+        expert_map = None
+    else:
+        w13_packed = layer.w13_weight_packed
+        w2_packed = layer.w2_weight_packed
+        w13_scale = layer.w13_weight_scale
+        w2_scale = layer.w2_weight_scale
+        w13_qzeros = layer.w13_qzeros
+        w2_qzeros = layer.w2_qzeros
+
     total_tokens = num_tokens * top_k
-    N_gate_up = layer.w13_weight_packed.shape[2]
-    hidden_size = layer.w2_weight_packed.shape[2]
+    N_gate_up = w13_packed.shape[2]
+    hidden_size = w2_packed.shape[2]
     dtype = hidden_states.dtype
     device = hidden_states.device
 
     intermediate_size = N_gate_up // 2 if activation.is_gated else N_gate_up
 
     if global_num_experts <= 0:
-        global_num_experts = layer.w13_weight_packed.shape[0]
+        global_num_experts = w13_packed.shape[0]
 
     # BLOCK_SIZE_M=1 for decode (small M), 4 for prefill
     block_size_m = 1 if num_tokens <= 4 else 4
@@ -218,9 +405,9 @@ def _rdna3_fused_moe(
     ops.moe_gptq_gemm_rdna3(
         hidden_states,
         w1_out,
-        layer.w13_weight_packed,
-        layer.w13_weight_scale,
-        layer.w13_qzeros,
+        w13_packed,
+        w13_scale,
+        w13_qzeros,
         topk_w_float if apply_router_weight_on_input else empty_tw,
         sorted_token_ids,
         expert_ids,
@@ -246,9 +433,9 @@ def _rdna3_fused_moe(
     ops.moe_gptq_gemm_rdna3(
         act_out,
         out,
-        layer.w2_weight_packed,
-        layer.w2_weight_scale,
-        layer.w2_qzeros,
+        w2_packed,
+        w2_scale,
+        w2_qzeros,
         topk_w_float if not apply_router_weight_on_input else empty_tw,
         sorted_token_ids,
         expert_ids,
