@@ -583,6 +583,62 @@ class TestAudioPipelineE2E:
         # After resampling from 48kHz to 16kHz, length should be ~16000
         assert audio_output.shape[0] == 16000
 
+    @pytest.mark.parametrize("audio_resample_method", ["pyav", "scipy", "soxr"])
+    @pytest.mark.parametrize("target_channels", [1, 2, None])
+    def test_soundfile_format_resampling_e2e(
+        self,
+        audio_resample_method,
+        target_channels,
+    ):
+        """Full pipeline: soundfile stereo format + resample."""
+        from vllm.multimodal.parse import MultiModalDataParser
+
+        if audio_resample_method == "soxr":
+            pytest.importorskip("soxr")
+
+        # Simulate soundfile output: (time, channels) at a common recording rate.
+        n_samples = 48000
+        left = np.linspace(-1.0, 1.0, n_samples, dtype=np.float32)
+        right = np.linspace(1.0, -1.0, n_samples, dtype=np.float32)
+        stereo_soundfile = np.stack([left, right], axis=1)
+
+        parser = MultiModalDataParser(
+            target_sr=16000,
+            target_channels=target_channels,
+            audio_resample_method=audio_resample_method,
+        )
+
+        result = parser.parse_mm_data({"audio": (stereo_soundfile, 48000)})["audio"]
+        audio_output = result.get(0)
+
+        expected_shapes = {
+            1: (16000,),
+            2: (2, 16000),
+            None: (16000, 2),
+        }
+        assert audio_output.shape == expected_shapes[target_channels]
+        assert np.isfinite(audio_output).all()
+
+        if target_channels == 1:
+            np.testing.assert_array_almost_equal(
+                audio_output, np.zeros(16000), decimal=5
+            )
+        elif target_channels == 2:
+            assert audio_output[0, :4000].mean() < -0.25
+            assert audio_output[0, -4000:].mean() > 0.25
+            assert audio_output[1, :4000].mean() > 0.25
+            assert audio_output[1, -4000:].mean() < -0.25
+        else:
+            left_channel = audio_output[:, 0]
+            right_channel = audio_output[:, 1]
+            assert left_channel[:4000].mean() < -0.25
+            assert left_channel[-4000:].mean() > 0.25
+            assert right_channel[:4000].mean() > 0.25
+            assert right_channel[-4000:].mean() < -0.25
+            np.testing.assert_allclose(
+                left_channel, -right_channel, atol=1e-4, rtol=1e-4
+            )
+
     def test_very_short_audio_e2e(self):
         """Full pipeline: very short audio (< 1 frame) handled correctly."""
         from vllm.multimodal.parse import MultiModalDataParser
