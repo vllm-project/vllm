@@ -74,6 +74,39 @@ class Llama3JsonToolParser(ToolParser):
                 f"'{self.bot_token}' in the tokenizer."
             )
 
+    def _emit_initial_complete_tool_calls(
+        self, tool_call_arr: list[dict]
+    ) -> DeltaMessage | None:
+        delta_tool_calls: list[DeltaToolCall] = []
+        streamed_args_for_tool: list[str] = []
+
+        for index, tool_call in enumerate(tool_call_arr):
+            function_name = tool_call.get("name")
+            if not function_name or "arguments" not in tool_call:
+                return None
+            arguments = json.dumps(tool_call["arguments"], ensure_ascii=False)
+            delta_tool_calls.append(
+                DeltaToolCall(
+                    index=index,
+                    type="function",
+                    id=make_tool_call_id(),
+                    function=DeltaFunctionCall(
+                        name=function_name,
+                        arguments=arguments,
+                    ).model_dump(exclude_none=True),
+                )
+            )
+            streamed_args_for_tool.append(arguments)
+
+        if not delta_tool_calls:
+            return None
+
+        self.current_tool_id = len(tool_call_arr) - 1
+        self.current_tool_name_sent = True
+        self.prev_tool_call_arr = tool_call_arr
+        self.streamed_args_for_tool = streamed_args_for_tool
+        return DeltaMessage(tool_calls=delta_tool_calls)
+
     def extract_tool_calls(
         self, model_output: str, request: ChatCompletionRequest
     ) -> ExtractedToolCallInformation:
@@ -226,11 +259,17 @@ class Llama3JsonToolParser(ToolParser):
             if len(tool_call_arr) == 0:
                 return None
 
+            # case: the first delta already contains complete tool calls
+            #   (e.g. the whole message arrived in one delta); emit them all
+            #   now since no further deltas may arrive
+            if self.current_tool_id < 0 and all(is_complete):
+                initial_delta = self._emit_initial_complete_tool_calls(tool_call_arr)
+                if initial_delta is not None:
+                    return initial_delta
+
             # case: we are starting a new tool in the array
             #   -> array has > 0 length AND length has moved past cursor
-            elif (
-                len(tool_call_arr) > 0 and len(tool_call_arr) > self.current_tool_id + 1
-            ):
+            if len(tool_call_arr) > 0 and len(tool_call_arr) > self.current_tool_id + 1:
                 # if we're moving on to a new call, first make sure we
                 # haven't missed anything in the previous one that was
                 # auto-generated due to JSON completions, but wasn't
@@ -263,7 +302,10 @@ class Llama3JsonToolParser(ToolParser):
                 # re-set stuff pertaining to progress in the current tool
                 self.current_tool_id = len(tool_call_arr) - 1
                 self.current_tool_name_sent = False
-                self.streamed_args_for_tool.append("")
+                # multiple tools may have appeared in a single delta, so make
+                # sure a slot exists for every tool up to the current one
+                while len(self.streamed_args_for_tool) <= self.current_tool_id:
+                    self.streamed_args_for_tool.append("")
                 logger.debug("starting on new tool %d", self.current_tool_id)
                 return delta
 

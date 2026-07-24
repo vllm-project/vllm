@@ -7,6 +7,7 @@ from collections.abc import Generator
 
 import pytest
 
+from tests.tool_parsers.utils import run_tool_extraction_streaming
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.engine.protocol import (
     DeltaMessage,
@@ -357,3 +358,40 @@ def test_extract_tool_calls_streaming_incremental(
     assert len(actual_tool_calls) > 0
     # check tool call format
     assert_tool_calls(actual_tool_calls, expected_tool_calls)
+
+
+def test_extract_tool_calls_streaming_multiple_tools_single_delta(
+    ernie45_tool_parser,
+):
+    """Multiple complete tool calls in one delta must all be emitted.
+
+    This happens e.g. with async scheduling or stream_interval > 1, where
+    a single streamed delta can contain the entire tool call message.
+    Previously only the first tool call was emitted and the rest were left
+    stranded in the internal buffer.
+    """
+    model_output = (
+        "I will check the weather and the time.\n"
+        "<tool_call>\n"
+        '{"name": "get_current_temperature", "arguments": {"location": "Beijing"}}\n'
+        "</tool_call>\n"
+        "<tool_call>\n"
+        '{"name": "get_current_time", "arguments": {"timezone": "Asia/Shanghai"}}\n'
+        "</tool_call>\n"
+    )
+
+    reconstructor = run_tool_extraction_streaming(
+        ernie45_tool_parser, [model_output], assert_one_tool_per_delta=False
+    )
+
+    assert [call.function.name for call in reconstructor.tool_calls] == [
+        "get_current_temperature",
+        "get_current_time",
+    ]
+    assert json.loads(reconstructor.tool_calls[0].function.arguments) == {
+        "location": "Beijing"
+    }
+    assert json.loads(reconstructor.tool_calls[1].function.arguments) == {
+        "timezone": "Asia/Shanghai"
+    }
+    assert "I will check the weather and the time." in reconstructor.other_content

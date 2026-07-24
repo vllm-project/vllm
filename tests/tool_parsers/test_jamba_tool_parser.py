@@ -8,6 +8,7 @@ import partial_json_parser
 import pytest
 from partial_json_parser.core.options import Allow
 
+from tests.tool_parsers.utils import run_tool_extraction_streaming
 from vllm.entrypoints.openai.engine.protocol import DeltaMessage, FunctionCall, ToolCall
 from vllm.tokenizers import TokenizerLike, get_tokenizer
 from vllm.tokenizers.detokenizer_utils import detokenize_incrementally
@@ -306,3 +307,31 @@ def test_extract_tool_calls_streaming(
         )
     ]
     assert_tool_calls(actual_tool_calls, expected_tool_calls)
+
+
+def test_extract_tool_calls_streaming_single_delta(jamba_tool_parser):
+    """Tool calls arriving whole in the first delta must not be dropped.
+
+    This happens e.g. with async scheduling or stream_interval > 1, where
+    a single streamed delta can contain the entire tool call message.
+    """
+    model_output = """<tool_calls>[\n    {"name": "get_current_weather", "arguments": {"city": "Dallas", "state": "TX", "unit": "fahrenheit"}},\n    {"name": "get_current_weather", "arguments": {"city": "Orlando", "state": "FL", "unit": "fahrenheit"}}\n]</tool_calls>"""  # noqa: E501
+
+    reconstructor = run_tool_extraction_streaming(
+        jamba_tool_parser, [model_output], assert_one_tool_per_delta=False
+    )
+
+    assert [call.function.name for call in reconstructor.tool_calls] == [
+        "get_current_weather",
+        "get_current_weather",
+    ]
+    assert json.loads(reconstructor.tool_calls[0].function.arguments) == {
+        "city": "Dallas",
+        "state": "TX",
+        "unit": "fahrenheit",
+    }
+    assert json.loads(reconstructor.tool_calls[1].function.arguments) == {
+        "city": "Orlando",
+        "state": "FL",
+        "unit": "fahrenheit",
+    }
