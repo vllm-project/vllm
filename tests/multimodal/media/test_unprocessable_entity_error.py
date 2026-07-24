@@ -12,12 +12,14 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import aiohttp
 import pytest
+import requests
 
 from vllm.entrypoints.serve.utils.error_response import create_error_response
 from vllm.exceptions import VLLMUnprocessableEntityError
 from vllm.multimodal.media import MediaConnector
 
 
+@pytest.mark.skip_global_cleanup
 class TestVLLMUnprocessableEntityError:
     """Tests for VLLMUnprocessableEntityError exception."""
 
@@ -40,6 +42,7 @@ class TestVLLMUnprocessableEntityError:
         assert isinstance(exc, ValueError)
 
 
+@pytest.mark.skip_global_cleanup
 class TestMediaConnectorErrorHandling:
     """Tests for MediaConnector error handling."""
 
@@ -64,7 +67,7 @@ class TestMediaConnectorErrorHandling:
 
     @pytest.mark.asyncio
     async def test_fetch_image_async_dns_error(self):
-        """DNS errors are transient and should remain as-is for retry."""
+        """DNS errors indicate an unreachable URL and should return 422."""
         connector = MediaConnector()
 
         with patch.object(
@@ -75,12 +78,12 @@ class TestMediaConnectorErrorHandling:
                 os_error=MagicMock(),
             )
 
-            with pytest.raises(aiohttp.ClientConnectorDNSError) as exc_info:
+            with pytest.raises(VLLMUnprocessableEntityError) as exc_info:
                 await connector.fetch_image_async(
                     "https://nonexistent.example/image.jpg"
                 )
 
-            assert isinstance(exc_info.value, aiohttp.ClientConnectorDNSError)
+            assert exc_info.value.parameter == "image_url"
 
     @pytest.mark.asyncio
     async def test_fetch_image_async_500_preserved(self):
@@ -121,20 +124,23 @@ class TestMediaConnectorErrorHandling:
             assert exc_info.value.parameter == "image_url"
 
     def test_fetch_image_connection_error(self):
-        """Connection errors are transient and should remain as-is for retry."""
+        """Connection errors indicate an unreachable URL and should return 422."""
         connector = MediaConnector()
 
         with patch.object(
             connector.connection, "get_bytes", new_callable=MagicMock
         ) as mock_get:
-            mock_get.side_effect = aiohttp.ClientConnectionError("Connection refused")
+            mock_get.side_effect = requests.exceptions.ConnectionError(
+                "Connection refused"
+            )
 
-            with pytest.raises(aiohttp.ClientConnectionError) as exc_info:
+            with pytest.raises(VLLMUnprocessableEntityError) as exc_info:
                 connector.fetch_image("https://example.com/image.jpg")
 
-            assert isinstance(exc_info.value, aiohttp.ClientConnectionError)
+            assert exc_info.value.parameter == "image_url"
 
 
+@pytest.mark.skip_global_cleanup
 class TestErrorResponse:
     """Tests for error response creation."""
 
