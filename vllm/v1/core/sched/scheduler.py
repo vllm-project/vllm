@@ -572,6 +572,21 @@ class Scheduler(SchedulerInterface):
 
                     # The request cannot be scheduled.
                     # Preempt the lowest-priority request.
+                    # Zero-reclaim guard: if the policy-selected victim's KV
+                    # blocks cannot be returned to the pool this step (its free
+                    # is deferred for async-write correctness), preempting it
+                    # cannot satisfy this allocation. Stop the retry so the
+                    # trigger is scheduled once the deferred frees drain
+                    # (processed_step_seq advances past last_sched_seq).
+                    if not self._can_reclaim_request_blocks_now(
+                        self.running[-1]
+                        if self.policy != SchedulingPolicy.PRIORITY
+                        else max(
+                            self.running,
+                            key=lambda r: (r.priority, r.arrival_time),
+                        )
+                    ):
+                        break
                     if self.policy == SchedulingPolicy.PRIORITY:
                         preempted_req = max(
                             self.running,
@@ -2234,15 +2249,22 @@ class Scheduler(SchedulerInterface):
     def set_pause_state(self, pause_state: PauseState) -> None:
         self._pause_state = pause_state
 
+    def _can_reclaim_request_blocks_now(self, request: Request) -> bool:
+        """Whether the request's KV blocks can be returned to the block pool in
+        the current scheduler step. Mirrors the predicate _free_request_blocks
+        uses to choose between an immediate free and a deferred free, so the
+        preemption retry loop and the free path cannot drift apart.
+        """
+        return (
+            not self.defer_block_free
+            or request.last_sched_seq <= self.processed_step_seq
+        )
+
     def _free_request_blocks(self, request: Request):
         """Free the request's KV blocks, deferring the return to the block
         pool when an in-flight GPU step may still write them.
         """
-        if not self.defer_block_free or (
-            # Last scheduled step already processed: no in-flight write remains
-            # (always the case for a normal finish), so free now.
-            request.last_sched_seq <= self.processed_step_seq
-        ):
+        if self._can_reclaim_request_blocks_now(request):
             self.kv_cache_manager.free(request)
             return
         blocks = self.kv_cache_manager.pop_blocks_for_free(request)
