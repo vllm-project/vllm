@@ -21,6 +21,7 @@ from vllm.entrypoints.chat_utils import (
     parse_chat_messages,
     parse_chat_messages_async,
 )
+from vllm.exceptions import VLLMValidationError
 from vllm.inputs import MultiModalDataDict, MultiModalUUIDDict
 from vllm.multimodal.utils import (
     encode_audio_url,
@@ -1504,7 +1505,7 @@ def test_parse_chat_messages_rejects_too_many_images_in_one_message(
             "ignore",
             message="coroutine 'async_get_and_parse_image' was never awaited",
         )
-        with pytest.raises(ValueError, match="At most"):
+        with pytest.raises(VLLMValidationError, match="At most"):
             parse_chat_messages(
                 [
                     {
@@ -1540,7 +1541,7 @@ def test_parse_chat_messages_rejects_too_many_images_across_messages(
             "ignore",
             message="coroutine 'async_get_and_parse_image' was never awaited",
         )
-        with pytest.raises(ValueError, match="At most"):
+        with pytest.raises(VLLMValidationError, match="At most"):
             parse_chat_messages(
                 [
                     {

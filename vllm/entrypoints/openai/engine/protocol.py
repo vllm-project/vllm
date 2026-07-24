@@ -19,7 +19,7 @@ from pydantic import (
 
 from vllm.config.utils import replace
 from vllm.entrypoints.chat_utils import make_tool_call_id
-from vllm.exceptions import VLLMValidationError
+from vllm.exceptions import VLLMServerError, VLLMValidationError
 from vllm.logger import init_logger
 from vllm.sampling_params import StructuredOutputsParams
 from vllm.utils import random_uuid
@@ -404,7 +404,7 @@ class DeltaMessage(OpenAIBaseModel):
         return data
 
 
-class GenerationError(Exception):
+class GenerationError(VLLMServerError):
     """raised when finish_reason indicates internal server error (500)"""
 
     def __init__(self, message: str = "Internal server error"):
