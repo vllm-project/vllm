@@ -8,8 +8,15 @@
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 # ruff: noqa: E501
 
+from collections.abc import Iterable
+from dataclasses import dataclass
+
 import torch
 
+from vllm.model_executor.warmup.jit_warmup import VllmJitKernel
+from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    TritonPointerInputVariant,
+)
 from vllm.triton_utils import tl, triton
 
 from .op import exp
@@ -336,6 +343,281 @@ def fused_recurrent_gated_delta_rule_packed_decode_kernel(
     tl.store(p_ht, b_h.to(p_ht.dtype.element_ty), mask=mask_h)
 
 
+@dataclass(frozen=True)
+class PackedGdnDecodeWarmupConfig:
+    mixed_qkv_dtype: torch.dtype
+    a_dtype: torch.dtype
+    b_dtype: torch.dtype
+    A_log_dtype: torch.dtype
+    dt_bias_dtype: torch.dtype
+    output_dtype: torch.dtype
+    state_dtype: torch.dtype
+    scale: float
+    stride_mixed_qkv_tok: int
+    stride_a_tok: int
+    stride_b_tok: int
+    stride_init_state_token: int
+    stride_final_state_token: int
+    stride_indices_seq: int
+    H: int
+    HV: int
+    K: int
+    V: int
+    use_qk_l2norm_in_kernel: bool
+
+
+class PackedGdnDecodeKernel(VllmJitKernel["PackedGdnDecodeKernel.CompileKey"]):
+    @dataclass(frozen=True)
+    class CompileKey:
+        mixed_qkv_dtype: torch.dtype
+        a_dtype: torch.dtype
+        b_dtype: torch.dtype
+        A_log_dtype: torch.dtype
+        dt_bias_dtype: torch.dtype
+        output_dtype: torch.dtype
+        state_dtype: torch.dtype
+        input_variant: TritonPointerInputVariant
+        scale: float
+        stride_mixed_qkv_tok: int
+        stride_a_tok: int
+        stride_b_tok: int
+        stride_init_state_token: int
+        stride_final_state_token: int
+        stride_indices_seq: int
+        H: int
+        HV: int
+        K: int
+        V: int
+        BK: int
+        BV: int
+        SOFTPLUS_THRESHOLD: float
+        USE_QK_L2NORM_IN_KERNEL: bool
+
+    kernel = fused_recurrent_gated_delta_rule_packed_decode_kernel
+
+    def dispatch(  # type: ignore[override]
+        self,
+        *,
+        mixed_qkv_dtype: torch.dtype,
+        a_dtype: torch.dtype,
+        b_dtype: torch.dtype,
+        A_log_dtype: torch.dtype,
+        dt_bias_dtype: torch.dtype,
+        output_dtype: torch.dtype,
+        state_dtype: torch.dtype,
+        mixed_qkv_aligned: bool,
+        a_aligned: bool,
+        b_aligned: bool,
+        A_log_aligned: bool,
+        dt_bias_aligned: bool,
+        output_aligned: bool,
+        state_aligned: bool,
+        indices_aligned: bool,
+        scale: float,
+        stride_mixed_qkv_tok: int,
+        stride_a_tok: int,
+        stride_b_tok: int,
+        stride_init_state_token: int,
+        stride_final_state_token: int,
+        stride_indices_seq: int,
+        H: int,
+        HV: int,
+        K: int,
+        V: int,
+        BK: int,
+        BV: int,
+        use_qk_l2norm_in_kernel: bool,
+    ) -> CompileKey:
+        input_variant = TritonPointerInputVariant.from_alignment(
+            mixed_qkv=mixed_qkv_aligned,
+            a=a_aligned,
+            b=b_aligned,
+            A_log=A_log_aligned,
+            dt_bias=dt_bias_aligned,
+            output=output_aligned,
+            state=state_aligned,
+            indices=indices_aligned,
+        )
+        return self.CompileKey(
+            mixed_qkv_dtype=mixed_qkv_dtype,
+            a_dtype=a_dtype,
+            b_dtype=b_dtype,
+            A_log_dtype=A_log_dtype,
+            dt_bias_dtype=dt_bias_dtype,
+            output_dtype=output_dtype,
+            state_dtype=state_dtype,
+            input_variant=input_variant,
+            scale=scale,
+            stride_mixed_qkv_tok=stride_mixed_qkv_tok,
+            stride_a_tok=stride_a_tok,
+            stride_b_tok=stride_b_tok,
+            stride_init_state_token=stride_init_state_token,
+            stride_final_state_token=stride_final_state_token,
+            stride_indices_seq=stride_indices_seq,
+            H=H,
+            HV=HV,
+            K=K,
+            V=V,
+            BK=BK,
+            BV=BV,
+            SOFTPLUS_THRESHOLD=20.0,
+            USE_QK_L2NORM_IN_KERNEL=use_qk_l2norm_in_kernel,
+        )
+
+    def get_warmup_keys(
+        self, configs: Iterable[PackedGdnDecodeWarmupConfig]
+    ) -> list[CompileKey]:
+        keys: list[PackedGdnDecodeKernel.CompileKey] = []
+        for config in configs:
+            keys.extend(
+                self._trace_dispatch(self.dispatch)(
+                    mixed_qkv_dtype=config.mixed_qkv_dtype,
+                    a_dtype=config.a_dtype,
+                    b_dtype=config.b_dtype,
+                    A_log_dtype=config.A_log_dtype,
+                    dt_bias_dtype=config.dt_bias_dtype,
+                    output_dtype=config.output_dtype,
+                    state_dtype=config.state_dtype,
+                    mixed_qkv_aligned=True,
+                    a_aligned=True,
+                    b_aligned=True,
+                    A_log_aligned=True,
+                    dt_bias_aligned=True,
+                    output_aligned=True,
+                    state_aligned=True,
+                    indices_aligned=True,
+                    scale=config.scale,
+                    stride_mixed_qkv_tok=config.stride_mixed_qkv_tok,
+                    stride_a_tok=config.stride_a_tok,
+                    stride_b_tok=config.stride_b_tok,
+                    stride_init_state_token=config.stride_init_state_token,
+                    stride_final_state_token=config.stride_final_state_token,
+                    stride_indices_seq=config.stride_indices_seq,
+                    H=config.H,
+                    HV=config.HV,
+                    K=config.K,
+                    V=config.V,
+                    BK=triton.next_power_of_2(config.K),
+                    BV=min(triton.next_power_of_2(config.V), 32),
+                    use_qk_l2norm_in_kernel=config.use_qk_l2norm_in_kernel,
+                )
+            )
+        return list(dict.fromkeys(keys))
+
+    def compile(self, compile_key: CompileKey) -> None:
+        variant = compile_key.input_variant
+        self.kernel.warmup(
+            mixed_qkv=variant.pointer("mixed_qkv", compile_key.mixed_qkv_dtype),
+            a=variant.pointer("a", compile_key.a_dtype),
+            b=variant.pointer("b", compile_key.b_dtype),
+            A_log=variant.pointer("A_log", compile_key.A_log_dtype),
+            dt_bias=variant.pointer("dt_bias", compile_key.dt_bias_dtype),
+            o=variant.pointer("output", compile_key.output_dtype),
+            h0=variant.pointer("state", compile_key.state_dtype),
+            ht=variant.pointer("state", compile_key.state_dtype),
+            ssm_state_indices=variant.pointer("indices", torch.int32),
+            scale=compile_key.scale,
+            stride_mixed_qkv_tok=compile_key.stride_mixed_qkv_tok,
+            stride_a_tok=compile_key.stride_a_tok,
+            stride_b_tok=compile_key.stride_b_tok,
+            stride_init_state_token=compile_key.stride_init_state_token,
+            stride_final_state_token=compile_key.stride_final_state_token,
+            stride_indices_seq=compile_key.stride_indices_seq,
+            H=compile_key.H,
+            HV=compile_key.HV,
+            K=compile_key.K,
+            V=compile_key.V,
+            BK=compile_key.BK,
+            BV=compile_key.BV,
+            SOFTPLUS_THRESHOLD=compile_key.SOFTPLUS_THRESHOLD,
+            USE_QK_L2NORM_IN_KERNEL=compile_key.USE_QK_L2NORM_IN_KERNEL,
+            num_warps=1,
+            num_stages=3,
+            grid=(triton.cdiv(compile_key.V, compile_key.BV), compile_key.HV),
+        )
+
+    def __call__(
+        self,
+        mixed_qkv: torch.Tensor,
+        a: torch.Tensor,
+        b: torch.Tensor,
+        A_log: torch.Tensor,
+        dt_bias: torch.Tensor,
+        output: torch.Tensor,
+        state: torch.Tensor,
+        ssm_state_indices: torch.Tensor,
+        *,
+        scale: float,
+        H: int,
+        HV: int,
+        K: int,
+        V: int,
+        use_qk_l2norm_in_kernel: bool,
+    ) -> None:
+        key = self.dispatch(
+            mixed_qkv_dtype=mixed_qkv.dtype,
+            a_dtype=a.dtype,
+            b_dtype=b.dtype,
+            A_log_dtype=A_log.dtype,
+            dt_bias_dtype=dt_bias.dtype,
+            output_dtype=output.dtype,
+            state_dtype=state.dtype,
+            mixed_qkv_aligned=mixed_qkv.data_ptr() % 16 == 0,
+            a_aligned=a.data_ptr() % 16 == 0,
+            b_aligned=b.data_ptr() % 16 == 0,
+            A_log_aligned=A_log.data_ptr() % 16 == 0,
+            dt_bias_aligned=dt_bias.data_ptr() % 16 == 0,
+            output_aligned=output.data_ptr() % 16 == 0,
+            state_aligned=state.data_ptr() % 16 == 0,
+            indices_aligned=ssm_state_indices.data_ptr() % 16 == 0,
+            scale=scale,
+            stride_mixed_qkv_tok=mixed_qkv.stride(0),
+            stride_a_tok=a.stride(0),
+            stride_b_tok=b.stride(0),
+            stride_init_state_token=state.stride(0),
+            stride_final_state_token=state.stride(0),
+            stride_indices_seq=ssm_state_indices.stride(0),
+            H=H,
+            HV=HV,
+            K=K,
+            V=V,
+            BK=triton.next_power_of_2(K),
+            BV=min(triton.next_power_of_2(V), 32),
+            use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
+        )
+        self.kernel[(triton.cdiv(V, key.BV), mixed_qkv.size(0) * HV)](
+            mixed_qkv=mixed_qkv,
+            a=a,
+            b=b,
+            A_log=A_log,
+            dt_bias=dt_bias,
+            o=output,
+            h0=state,
+            ht=state,
+            ssm_state_indices=ssm_state_indices,
+            scale=key.scale,
+            stride_mixed_qkv_tok=key.stride_mixed_qkv_tok,
+            stride_a_tok=key.stride_a_tok,
+            stride_b_tok=key.stride_b_tok,
+            stride_init_state_token=key.stride_init_state_token,
+            stride_final_state_token=key.stride_final_state_token,
+            stride_indices_seq=key.stride_indices_seq,
+            H=key.H,
+            HV=key.HV,
+            K=key.K,
+            V=key.V,
+            BK=key.BK,
+            BV=key.BV,
+            SOFTPLUS_THRESHOLD=key.SOFTPLUS_THRESHOLD,
+            USE_QK_L2NORM_IN_KERNEL=key.USE_QK_L2NORM_IN_KERNEL,
+            num_warps=1,
+            num_stages=3,
+        )
+
+
+_PACKED_GDN_DECODE_KERNEL = PackedGdnDecodeKernel()
+
+
 def fused_recurrent_gated_delta_rule_packed_decode(
     mixed_qkv: torch.Tensor,
     a: torch.Tensor,
@@ -434,46 +716,21 @@ def fused_recurrent_gated_delta_rule_packed_decode(
         raise ValueError(
             f"Packed decode kernel only supports NK=1 (got K={K}, BK={BK})."
         )
-    BV = min(triton.next_power_of_2(V), 32)
-    num_stages = 3
-    num_warps = 1
-
-    stride_mixed_qkv_tok = mixed_qkv.stride(0)
-    stride_a_tok = a.stride(0)
-    stride_b_tok = b.stride(0)
-    stride_init_state_token = initial_state.stride(0)
-    stride_final_state_token = initial_state.stride(0)
-    stride_indices_seq = ssm_state_indices.stride(0)
-
-    NV = triton.cdiv(V, BV)
-    grid = (NV, B * HV)
-    fused_recurrent_gated_delta_rule_packed_decode_kernel[grid](
-        mixed_qkv=mixed_qkv,
-        a=a,
-        b=b,
-        A_log=A_log,
-        dt_bias=dt_bias,
-        o=out,
-        h0=initial_state,
-        ht=initial_state,
-        ssm_state_indices=ssm_state_indices,
+    _PACKED_GDN_DECODE_KERNEL(
+        mixed_qkv,
+        a,
+        b,
+        A_log,
+        dt_bias,
+        out,
+        initial_state,
+        ssm_state_indices,
         scale=scale,
-        stride_mixed_qkv_tok=stride_mixed_qkv_tok,
-        stride_a_tok=stride_a_tok,
-        stride_b_tok=stride_b_tok,
-        stride_init_state_token=stride_init_state_token,
-        stride_final_state_token=stride_final_state_token,
-        stride_indices_seq=stride_indices_seq,
         H=H,
         HV=HV,
         K=K,
         V=V,
-        BK=BK,
-        BV=BV,
-        SOFTPLUS_THRESHOLD=20.0,
-        USE_QK_L2NORM_IN_KERNEL=use_qk_l2norm_in_kernel,
-        num_warps=num_warps,
-        num_stages=num_stages,
+        use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
     )
     return out, initial_state
 
