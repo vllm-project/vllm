@@ -17,13 +17,10 @@ class MxFp4LinearLayerConfig:
     byte) and per-block weight scales (group size 32).
 
     Attributes:
-        weight_quant_key: Identifies the weight quantization format. This is
-            typically kMxfp4Static, but other OCP MX keys are accepted.
         activation_quant_key: Identifies the activation quantization format,
             or `None` when activations must not be quantized.
     """
 
-    weight_quant_key: QuantKey
     activation_quant_key: QuantKey | None = None
 
 

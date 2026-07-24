@@ -8,7 +8,12 @@ from typing import Any
 import torch
 
 from vllm.logger import init_logger
-from vllm.model_executor.kernels.linear import init_mxfp4_linear_kernel
+from vllm.model_executor.kernels.linear import (
+    MxFp4LinearKernel,
+    MxFp6LinearKernel,
+    init_mxfp4_linear_kernel,
+    init_mxfp6_linear_kernel,
+)
 from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import (
     OCP_MX_BLOCK_SIZE,
 )
@@ -47,6 +52,8 @@ _ACTIVATION_QUANT_KEY_MAP: dict[str, QuantKey] = {
 
 
 class QuarkOCP_MX(QuarkScheme):
+    ocp_mx_linear: MxFp6LinearKernel | MxFp4LinearKernel
+
     def __init__(
         self,
         weight_quant_spec: dict[str, Any],
@@ -204,10 +211,15 @@ class QuarkOCP_MX(QuarkScheme):
             )
             layer.register_parameter("weight_scale", weight_scale)
 
-        self.ocp_mx_linear = init_mxfp4_linear_kernel(
-            weight_quant_key=self.weight_quant_key,
-            activation_quant_key=self.activation_quant_key,
-        )
+        if self.weight_quant_key == kMxfp4Static:
+            self.ocp_mx_linear = init_mxfp4_linear_kernel(
+                activation_quant_key=self.activation_quant_key,
+            )
+        elif self.weight_quant_key in [kMxfp6E2M3Static, kMxfp6E3M2Static]:
+            self.ocp_mx_linear = init_mxfp6_linear_kernel(
+                weight_quant_key=self.weight_quant_key,
+                activation_quant_key=self.activation_quant_key,
+            )
 
     def apply_weights(
         self,

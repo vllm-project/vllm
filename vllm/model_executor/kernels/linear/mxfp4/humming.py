@@ -36,8 +36,6 @@ class HummingMxFp4LinearKernel(MxFp4LinearKernel):
 
     @classmethod
     def can_implement(cls, config: MxFp4LinearLayerConfig) -> tuple[bool, str | None]:
-        if config.weight_quant_key != kMxfp4Static:
-            return False, "only supports MXFP4 weights"
         if config.activation_quant_key not in (None, kMxfp4Dynamic, kMxfp4Static):
             return False, "only supports MXFP4 or unquantized activations"
         if config.activation_quant_key is not None:

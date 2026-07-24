@@ -11,7 +11,6 @@ from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kMxfp4Dynamic,
-    kMxfp4Static,
 )
 from vllm.model_executor.parameter import (
     GroupQuantScaleParameter,
@@ -40,7 +39,6 @@ class CompressedTensorsW4A4Mxfp4(CompressedTensorsScheme):
     def __init__(self):
         self.group_size = 32
         self.kernel = init_mxfp4_linear_kernel(
-            weight_quant_key=kMxfp4Static,
             activation_quant_key=kMxfp4Dynamic,
         )
 

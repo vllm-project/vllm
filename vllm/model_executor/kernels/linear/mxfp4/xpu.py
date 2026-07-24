@@ -8,7 +8,6 @@ from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kMxfp4Dynamic,
-    kMxfp4Static,
 )
 from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
@@ -29,8 +28,6 @@ class XPUMxFp4LinearKernel(MxFp4LinearKernel):
 
     @classmethod
     def can_implement(cls, config: MxFp4LinearLayerConfig) -> tuple[bool, str | None]:
-        if config.weight_quant_key != kMxfp4Static:
-            return False, "only supports MXFP4 weights"
         if config.activation_quant_key != kMxfp4Dynamic:
             return False, "only supports MXFP4 dynamic activation"
         return True, None
