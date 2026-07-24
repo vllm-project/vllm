@@ -57,6 +57,11 @@ class RenderSubcommand(LaunchSubcommandBase):
     ```bash
     vllm launch render meta-llama/Llama-3.2-1B-Instruct --port 8100
     ```
+
+    This command reuses the standard serving parser, so model, frontend,
+    networking, and related CLI options follow the same conventions as
+    <!-- Path is relative to the rendered page: docs/cli/launch.md -->
+    [`vllm serve`](../serve.md).
     """
 
     name = "render"
