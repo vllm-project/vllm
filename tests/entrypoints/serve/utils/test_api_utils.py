@@ -1,13 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import asyncio
+from types import SimpleNamespace
+
 import pytest
+from fastapi.responses import JSONResponse
 
 from vllm.entrypoints.openai.engine.protocol import StreamOptions
 from vllm.entrypoints.serve.utils.api_utils import (
     get_max_tokens,
+    load_aware_call,
     sanitize_message,
     should_include_usage,
+    with_cancellation,
 )
 
 
@@ -16,6 +22,59 @@ def test_sanitize_message():
         sanitize_message("<_io.BytesIO object at 0x7a95e299e750>")
         == "<_io.BytesIO object>"
     )
+
+
+def _make_load_tracking_request(disconnect_delay: float):
+    state = SimpleNamespace(
+        enable_server_load_tracking=True,
+        server_load_metrics=0,
+    )
+    app = SimpleNamespace(state=state)
+
+    async def receive():
+        await asyncio.sleep(disconnect_delay)
+        return {"type": "http.disconnect"}
+
+    return SimpleNamespace(app=app, receive=receive), state
+
+
+async def _run_background(response: JSONResponse | None) -> None:
+    if response is None or response.background is None:
+        return
+    await response.background()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("disconnect_delay", "handler_delay"),
+    [
+        (0.05, 0.0),  # handler completes first
+        (0.0, 0.05),  # disconnect wins
+        (0.0, 0.0),  # simultaneous completion (previously double-decremented)
+    ],
+    ids=["handler-first", "disconnect-first", "simultaneous"],
+)
+async def test_server_load_never_negative_on_disconnect(
+    disconnect_delay: float, handler_delay: float
+):
+    """with_cancellation + load_aware_call must not double-decrement load.
+
+    When the handler and disconnect tasks finish in the same wait(), the old
+    listen_for_disconnect path decremented load and the JSONResponse
+    background task decremented again, driving server_load_metrics to -1.
+    """
+    raw_request, state = _make_load_tracking_request(disconnect_delay)
+
+    @with_cancellation
+    @load_aware_call
+    async def handler(_self, raw_request):
+        await asyncio.sleep(handler_delay)
+        return JSONResponse({"ok": True})
+
+    response = await handler(None, raw_request)
+    await _run_background(response)
+
+    assert state.server_load_metrics == 0
 
 
 @pytest.mark.parametrize(
