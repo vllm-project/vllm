@@ -695,6 +695,8 @@ class EngineArgs:
     mamba_block_size: int | None = get_field(CacheConfig, "mamba_block_size")
     prefix_match_unit: int | None = get_field(CacheConfig, "prefix_match_unit")
     mamba_cache_mode: MambaCacheMode = CacheConfig.mamba_cache_mode
+    replayssm_buffer_len: int = CacheConfig.replayssm_buffer_len
+    use_replayssm: bool = CacheConfig.use_replayssm
 
     mamba_backend: MambaBackendEnum = MambaBackendEnum.TRITON
     enable_mamba_cache_stochastic_rounding: bool = (
@@ -1201,6 +1203,10 @@ class EngineArgs:
         cache_group.add_argument(
             "--mamba-cache-mode", **cache_kwargs["mamba_cache_mode"]
         )
+        cache_group.add_argument(
+            "--replayssm-buffer-len", **cache_kwargs["replayssm_buffer_len"]
+        )
+        cache_group.add_argument("--use-replayssm", **cache_kwargs["use_replayssm"])
         cache_group.add_argument(
             "--kv-offloading-size", **cache_kwargs["kv_offloading_size"]
         )
@@ -1910,6 +1916,8 @@ class EngineArgs:
             mamba_block_size=self.mamba_block_size,
             prefix_match_unit=self.prefix_match_unit,
             mamba_cache_mode=self.mamba_cache_mode,
+            replayssm_buffer_len=self.replayssm_buffer_len,
+            use_replayssm=self.use_replayssm,
             kv_offloading_size=self.kv_offloading_size,
             kv_offloading_backend=self.kv_offloading_backend,
         )
@@ -1955,12 +1963,21 @@ class EngineArgs:
         assert not headless or not self.data_parallel_hybrid_lb, (
             "data_parallel_hybrid_lb is not applicable in headless mode"
         )
-        assert not (self.data_parallel_hybrid_lb and self.data_parallel_external_lb), (
-            "data_parallel_hybrid_lb and data_parallel_external_lb cannot both be True."
-        )
-        assert self.data_parallel_backend == "mp" or self.nnodes == 1, (
-            "nnodes > 1 is only supported with data_parallel_backend=mp"
-        )
+        if self.data_parallel_hybrid_lb and self.data_parallel_external_lb:
+            raise ValueError(
+                "Invalid data-parallel launch options: "
+                "`--data-parallel-hybrid-lb` and "
+                "`--data-parallel-external-lb` cannot be enabled together. "
+                "Enable only one load-balancing mode."
+            )
+        if self.nnodes > 1 and self.data_parallel_backend != "mp":
+            raise ValueError(
+                "Invalid data-parallel launch options: "
+                f"`--nnodes {self.nnodes}` requires "
+                "`--data-parallel-backend mp`; got "
+                f"`--data-parallel-backend {self.data_parallel_backend}`. "
+                "Use the MP backend or set `--nnodes 1`."
+            )
         inferred_data_parallel_rank = 0
         if self.nnodes > 1:
             world_size = (
@@ -1971,13 +1988,22 @@ class EngineArgs:
             world_size_within_dp = (
                 self.pipeline_parallel_size * self.tensor_parallel_size
             )
+            if world_size % self.nnodes != 0:
+                raise ValueError(
+                    "Invalid data-parallel launch options: "
+                    f"`--nnodes {self.nnodes}` must evenly divide the total "
+                    f"world size ({world_size}). Adjust `--nnodes`, "
+                    "`--data-parallel-size`, `--pipeline-parallel-size`, or "
+                    "`--tensor-parallel-size`."
+                )
+            if not 0 <= self.node_rank < self.nnodes:
+                raise ValueError(
+                    "Invalid data-parallel launch options: `--node-rank` must "
+                    f"be between 0 and {self.nnodes - 1}; got "
+                    f"`--node-rank {self.node_rank}`. Set it to this node's "
+                    "zero-based index."
+                )
             local_world_size = world_size // self.nnodes
-            assert world_size % self.nnodes == 0, (
-                f"world_size={world_size} must be divisible by nnodes={self.nnodes}."
-            )
-            assert self.node_rank < self.nnodes, (
-                f"node_rank={self.node_rank} must be less than nnodes={self.nnodes}."
-            )
             inferred_data_parallel_rank = (
                 self.node_rank * local_world_size
             ) // world_size_within_dp
@@ -2008,14 +2034,21 @@ class EngineArgs:
             )
         # Local DP rank = 1, use pure-external LB.
         if data_parallel_external_lb:
-            assert self.data_parallel_rank is not None, (
-                "data_parallel_rank or node_rank must be specified if "
-                "data_parallel_external_lb is enable."
-            )
-            assert self.data_parallel_size_local in (1, None), (
-                "data_parallel_size_local must be 1 or None when data_parallel_rank "
-                "is set"
-            )
+            if self.data_parallel_rank is None:
+                raise ValueError(
+                    "Invalid data-parallel launch options: "
+                    "`--data-parallel-external-lb` requires a data-parallel "
+                    "rank. Set `--data-parallel-rank`, or set "
+                    "`--data-parallel-size` greater than 1 and use `--nnodes` "
+                    "with `--node-rank` so the rank can be inferred."
+                )
+            if self.data_parallel_size_local not in (1, None):
+                raise ValueError(
+                    "Invalid data-parallel launch options: an external "
+                    "data-parallel rank requires `--data-parallel-size-local "
+                    f"1`; got {self.data_parallel_size_local}. Set it to 1 or "
+                    "omit it."
+                )
             data_parallel_size_local = 1
             # Use full external lb if we have local_size of 1.
             self.data_parallel_hybrid_lb = False
@@ -2050,9 +2083,13 @@ class EngineArgs:
                     self.node_rank,
                 )
         else:
-            assert not self.data_parallel_hybrid_lb, (
-                "data_parallel_size_local must be set to use data_parallel_hybrid_lb."
-            )
+            if self.data_parallel_hybrid_lb:
+                raise ValueError(
+                    "Invalid data-parallel launch options: "
+                    "`--data-parallel-hybrid-lb` requires "
+                    "`--data-parallel-size-local`. Set it to the number of "
+                    "data-parallel ranks on this node."
+                )
 
             if self.data_parallel_backend == "ray" and (
                 envs.VLLM_RAY_DP_PACK_STRATEGY == "span"
