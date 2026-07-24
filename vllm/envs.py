@@ -55,6 +55,8 @@ if TYPE_CHECKING:
     VLLM_CPU_ATTN_SPLIT_KV: bool = True
     VLLM_ZENTORCH_WEIGHT_PREPACK: bool = True
     VLLM_CPU_INT4_W4A8: bool = True
+    VLLM_CPU_TURBOQUANT_BACKEND: str = ""
+    VLLM_TURBOQUANT_BOUNDARY_LAYERS: int = 2
     VLLM_XLA_CACHE_PATH: str = os.path.join(VLLM_CACHE_ROOT, "xla_cache")
     VLLM_XLA_CHECK_RECOMPILATION: bool = False
     VLLM_SPARSE_INDEXER_MAX_LOGITS_MB: int = 512
@@ -876,6 +878,20 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # (CPU backend only) whether to use SGLang INT4 W4A8 kernels for AWQ.
     "VLLM_CPU_INT4_W4A8": lambda: bool(int(os.getenv("VLLM_CPU_INT4_W4A8", "1"))),
+    # (CPU backend only, experiment) selects the TurboQuant KV-cache backend for
+    # ``turboquant_*`` cache dtypes on CPU. "triton" routes to the GPU Triton
+    # backend (compiled for CPU via triton-cpu); "" (default) leaves CPU backend
+    # selection unchanged (plain CPU_ATTN / native routing).
+    "VLLM_CPU_TURBOQUANT_BACKEND": lambda: os.getenv(
+        "VLLM_CPU_TURBOQUANT_BACKEND", ""
+    ).lower(),
+    # (experiment) number of first/last attention layers TurboQuant leaves
+    # UNcompressed (boundary protection). Default 2. Set 0 to compress ALL
+    # layers (confirmation / ablation only — hurts accuracy on aggressive
+    # presets).
+    "VLLM_TURBOQUANT_BOUNDARY_LAYERS": lambda: int(
+        os.getenv("VLLM_TURBOQUANT_BOUNDARY_LAYERS", "2")
+    ),
     # If the env var is set, Ray Compiled Graph uses the specified
     # channel type to communicate between workers belonging to
     # different pipeline-parallel stages.
