@@ -38,7 +38,12 @@ from vllm.v1.kv_cache_interface import (
     KVCacheGroupSpec,
     MambaSpec,
 )
-from vllm.v1.outputs import DraftTokenIds, KVConnectorOutput, ModelRunnerOutput
+from vllm.v1.outputs import (
+    DraftTokenIds,
+    ECConnectorOutput,
+    KVConnectorOutput,
+    ModelRunnerOutput,
+)
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.structured_output import StructuredOutputGrammar, StructuredOutputManager
 
@@ -4749,6 +4754,41 @@ def test_scheduler_kv_connector_stats():
             iter(engine_core_outputs.values())
         ).scheduler_stats.kv_connector_stats
         assert final_stats == expected_data
+
+
+def test_ec_connector_update_connector_output_called():
+    """Test that worker-side EC connector output is forwarded to the
+    EC connector's update_connector_output hook."""
+    scheduler = create_scheduler(
+        model="llava-hf/llava-1.5-7b-hf",
+        use_ec_connector=True,
+        ec_role="ec_consumer",
+    )
+    scheduler.ec_connector.update_connector_output = Mock()
+
+    scheduler_output = SchedulerOutput(
+        scheduled_new_reqs=[],
+        scheduled_cached_reqs=CachedRequestData.make_empty(),
+        num_scheduled_tokens={},
+        total_num_scheduled_tokens=0,
+        scheduled_encoder_inputs={},
+        scheduled_spec_decode_tokens={},
+        num_common_prefix_blocks=[],
+        finished_req_ids=set(),
+        free_encoder_mm_hashes=[],
+    )
+    ec_connector_output = ECConnectorOutput(finished_sending={"hash_test1"})
+    model_runner_output = ModelRunnerOutput(
+        req_ids=[],
+        req_id_to_index={},
+        ec_connector_output=ec_connector_output,
+    )
+
+    scheduler.update_from_output(scheduler_output, model_runner_output)
+
+    scheduler.ec_connector.update_connector_output.assert_called_once_with(
+        ec_connector_output
+    )
 
 
 # ==============================================================================
