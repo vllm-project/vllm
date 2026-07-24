@@ -29,6 +29,7 @@ from vllm.tracing import instrument
 from vllm.utils.deep_gemm import (
     fp8_gemm_nt,
     get_mk_alignment_for_contiguous_layout,
+    is_deep_gemm_supported,
     m_grouped_fp8_gemm_nt_contiguous,
     mk_alignment_scope,
 )
@@ -149,6 +150,8 @@ def _fp8_linear_may_use_deep_gemm(module: torch.nn.Module) -> bool:
     """
     Return True if the input module/layer could be processed with DeepGEMM.
     """
+    if not is_deep_gemm_supported():
+        return False
 
     if not (
         isinstance(module, LinearBase)
@@ -175,7 +178,7 @@ def _fp8_linear_may_use_deep_gemm(module: torch.nn.Module) -> bool:
 
 
 def _fused_moe_grouped_gemm_may_use_deep_gemm(module: torch.nn.Module) -> bool:
-    if not (envs.VLLM_USE_DEEP_GEMM and envs.VLLM_MOE_USE_DEEP_GEMM):
+    if not (is_deep_gemm_supported() and envs.VLLM_MOE_USE_DEEP_GEMM):
         return False
 
     if not isinstance(module, MoERunner):
