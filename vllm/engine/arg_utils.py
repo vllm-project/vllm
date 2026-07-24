@@ -685,8 +685,10 @@ class EngineArgs:
     )
     model_impl: str = ModelConfig.model_impl
     override_attention_dtype: str | None = ModelConfig.override_attention_dtype
-    attention_backend: AttentionBackendEnum | None = AttentionConfig.backend
-    attention_prefill_backend: AttentionBackendEnum | None = AttentionConfig.backend
+    attention_backend: AttentionBackendEnum | None = AttentionConfig.prefill_backend
+    attention_prefill_backend: AttentionBackendEnum | None = (
+        AttentionConfig.prefill_backend
+    )
     attention_decode_backend: AttentionBackendEnum | None = (
         AttentionConfig.decode_backend
     )
@@ -929,32 +931,14 @@ class EngineArgs:
             title="AttentionConfig",
             description=AttentionConfig.__doc__,
         )
-        attention_backend_kwargs = attention_kwargs["backend"].copy()
-        attention_backend_kwargs["help"] = (
-            "Attention backend for all batches. Use role-specific backend "
-            "options to configure prefill and decode independently."
-        )
-        attention_group.add_argument("--attention-backend", **attention_backend_kwargs)
-        attention_prefill_kwargs = attention_kwargs["backend"].copy()
-        attention_prefill_kwargs["help"] = (
-            "Attention backend for the prefill role. Standard attention "
-            "routes whole batches: any batch containing prefill runs "
-            "entirely on this backend. MLA instead splits each batch and "
-            "runs its prefill portion on the MLA prefill backend selected "
-            "here (e.g. FLASH_ATTN, TRTLLM_RAGGED)."
+        attention_group.add_argument(
+            "--attention-backend", **attention_kwargs["prefill_backend"]
         )
         attention_group.add_argument(
-            "--attention-prefill-backend", **attention_prefill_kwargs
-        )
-        attention_decode_kwargs = attention_kwargs["decode_backend"].copy()
-        attention_decode_kwargs["help"] = (
-            "Attention backend for the decode role. Standard attention "
-            "routes whole batches: pure-decode batches run entirely on this "
-            "backend. MLA instead splits each batch and runs its decode "
-            "portion on the MLA decode backend selected here (e.g. FLASHMLA)."
+            "--attention-prefill-backend", **attention_kwargs["prefill_backend"]
         )
         attention_group.add_argument(
-            "--attention-decode-backend", **attention_decode_kwargs
+            "--attention-decode-backend", **attention_kwargs["decode_backend"]
         )
 
         # Mamba arguments
@@ -2294,11 +2278,11 @@ class EngineArgs:
 
         if self.attention_backend is not None:
             apply_attention_override(
-                "attention_backend", self.attention_backend, "backend"
+                "attention_backend", self.attention_backend, "prefill_backend"
             )
-            # For MLA models, `backend` selects the MLA decode backend and
-            # prefill is delegated to the MLA prefill backend, so there is no
-            # decode_backend to set.
+            # For MLA models, `prefill_backend` selects the MLA decode backend
+            # and prefill is delegated to the MLA prefill backend, so there is
+            # no decode_backend to set.
             if not model_config.use_mla:
                 apply_attention_override(
                     "attention_backend", self.attention_backend, "decode_backend"
@@ -2307,8 +2291,8 @@ class EngineArgs:
             if model_config.use_mla:
                 # For MLA models the prefill role maps onto the separate MLA
                 # prefill backend; the decode role flows through
-                # decode_backend, which VllmConfig folds into `backend` (the
-                # MLA decode backend).
+                # decode_backend, which VllmConfig folds into
+                # `prefill_backend` (the MLA decode backend).
                 if self.attention_prefill_backend is not None:
                     if attention_config.mla_prefill_backend is not None:
                         raise ValueError(
@@ -2330,7 +2314,7 @@ class EngineArgs:
                 apply_attention_override(
                     "attention_prefill_backend",
                     self.attention_prefill_backend,
-                    "backend",
+                    "prefill_backend",
                 )
             apply_attention_override(
                 "attention_decode_backend",

@@ -368,8 +368,10 @@ def test_attention_config():
     args = parser.parse_args(["--attention-config.backend", "FLASH_ATTN"])
     assert args is not None
     engine_args = EngineArgs.from_cli_args(args)
-    assert engine_args.attention_config.backend is not None
-    assert engine_args.attention_config.backend.name == "FLASH_ATTN"
+    assert engine_args.attention_config.prefill_backend is not None
+    assert engine_args.attention_config.prefill_backend.name == "FLASH_ATTN"
+    assert engine_args.attention_config.decode_backend is not None
+    assert engine_args.attention_config.decode_backend.name == "FLASH_ATTN"
 
     # set backend via --attention-backend shorthand
     args = parser.parse_args(["--attention-backend", "FLASHINFER"])
@@ -381,7 +383,7 @@ def test_attention_config():
     # set all fields via dot notation
     args = parser.parse_args(
         [
-            "--attention-config.backend",
+            "--attention-config.prefill_backend",
             "FLASH_ATTN",
             "--attention-config.decode_backend",
             "FLASHINFER",
@@ -399,8 +401,8 @@ def test_attention_config():
     )
     assert args is not None
     engine_args = EngineArgs.from_cli_args(args)
-    assert engine_args.attention_config.backend is not None
-    assert engine_args.attention_config.backend.name == "FLASH_ATTN"
+    assert engine_args.attention_config.prefill_backend is not None
+    assert engine_args.attention_config.prefill_backend.name == "FLASH_ATTN"
     assert engine_args.attention_config.decode_backend is not None
     assert engine_args.attention_config.decode_backend.name == "FLASHINFER"
     assert engine_args.attention_config.flash_attn_version == 3
@@ -422,8 +424,10 @@ def test_attention_config():
     )
     assert args is not None
     engine_args = EngineArgs.from_cli_args(args)
-    assert engine_args.attention_config.backend is not None
-    assert engine_args.attention_config.backend.name == "FLASHINFER"
+    assert engine_args.attention_config.prefill_backend is not None
+    assert engine_args.attention_config.prefill_backend.name == "FLASHINFER"
+    assert engine_args.attention_config.decode_backend is not None
+    assert engine_args.attention_config.decode_backend.name == "FLASHINFER"
     assert engine_args.attention_config.flash_attn_version == 2
     assert engine_args.attention_config.use_prefill_decode_attention is False
     assert engine_args.attention_config.flash_attn_max_num_splits_for_cuda_graph == 8
@@ -442,12 +446,14 @@ def test_attention_config():
     assert args is not None
     engine_args = EngineArgs.from_cli_args(args)
     vllm_config = engine_args.create_engine_config()
-    assert vllm_config.attention_config.backend == AttentionBackendEnum.FLASH_ATTN
+    assert (
+        vllm_config.attention_config.prefill_backend == AttentionBackendEnum.FLASH_ATTN
+    )
     assert (
         vllm_config.attention_config.decode_backend == AttentionBackendEnum.FLASH_ATTN
     )
 
-    # test --attention-prefill-backend only sets the general backend
+    # test --attention-prefill-backend only sets the prefill backend
     args = parser.parse_args(
         [
             "--model",
@@ -458,7 +464,9 @@ def test_attention_config():
     )
     engine_args = EngineArgs.from_cli_args(args)
     vllm_config = engine_args.create_engine_config()
-    assert vllm_config.attention_config.backend == AttentionBackendEnum.TRITON_ATTN
+    assert (
+        vllm_config.attention_config.prefill_backend == AttentionBackendEnum.TRITON_ATTN
+    )
     assert vllm_config.attention_config.decode_backend is None
 
     # test --attention-decode-backend flows into VllmConfig.attention_config
@@ -475,7 +483,7 @@ def test_attention_config():
     assert (
         vllm_config.attention_config.decode_backend == AttentionBackendEnum.FLASHINFER
     )
-    assert vllm_config.attention_config.backend is None
+    assert vllm_config.attention_config.prefill_backend is None
 
     # test --attention-config.backend flows into VllmConfig.attention_config
     args = parser.parse_args(
@@ -489,7 +497,12 @@ def test_attention_config():
     assert args is not None
     engine_args = EngineArgs.from_cli_args(args)
     vllm_config = engine_args.create_engine_config()
-    assert vllm_config.attention_config.backend == AttentionBackendEnum.FLASHINFER
+    assert (
+        vllm_config.attention_config.prefill_backend == AttentionBackendEnum.FLASHINFER
+    )
+    assert (
+        vllm_config.attention_config.decode_backend == AttentionBackendEnum.FLASHINFER
+    )
 
     # test --attention-backend and --attention-config.backend are mutually exclusive
     args = parser.parse_args(
@@ -546,7 +559,7 @@ def test_mla_attention_backend_role_arguments():
     vllm_config = engine_args.create_engine_config()
     attention_config = vllm_config.attention_config
 
-    assert attention_config.backend == AttentionBackendEnum.FLASHMLA
+    assert attention_config.prefill_backend == AttentionBackendEnum.FLASHMLA
     assert attention_config.mla_prefill_backend == MLAPrefillBackendEnum.FLASH_ATTN
     assert attention_config.decode_backend is None
 
@@ -563,7 +576,7 @@ def test_mla_attention_backend_role_arguments():
     vllm_config = engine_args.create_engine_config()
     attention_config = vllm_config.attention_config
 
-    assert attention_config.backend == AttentionBackendEnum.FLASHMLA
+    assert attention_config.prefill_backend == AttentionBackendEnum.FLASHMLA
     assert attention_config.decode_backend is None
 
 

@@ -1684,7 +1684,7 @@ def generate_usage_section() -> str:
 
 There are two ways to specify the backend from the command line:
 
-**Option 1: Using `--attention-backend` (simple)**
+#### Option 1: Using `--attention-backend` (simple)
 
 ```bash
 vllm serve <model> --attention-backend FLASH_ATTN
@@ -1704,23 +1704,24 @@ prefill backend (e.g. `FLASH_ATTN` or `TRTLLM_RAGGED`) for the prefill
 portion, and `--attention-decode-backend` selects the MLA decode backend
 (e.g. `FLASHMLA`) for the decode portion.
 
-**Option 2: Using `--attention-config.backend` / `-ac.backend` (structured config)**
+#### Option 2: Using role-specific fields (structured config)
 
 ```bash
 # Dot notation
-vllm serve <model> --attention-config.backend FLASH_ATTN
-vllm serve <model> -ac.backend FLASH_ATTN
+vllm serve <model> --attention-config.prefill_backend FLASH_ATTN
+vllm serve <model> -ac.decode_backend FLASHINFER
 
 # JSON format
-vllm serve <model> --attention-config '{"backend": "FLASH_ATTN"}'
-vllm serve <model> -ac '{"backend": "FLASH_ATTN"}'
+vllm serve <model> --attention-config '{"prefill_backend": "FLASH_ATTN"}'
+vllm serve <model> -ac '{"decode_backend": "FLASHINFER"}'
 ```
 
-`backend` configures prefill-containing and mixed batches; `decode_backend`
-configures pure-decode batches; whole batches are routed to one or the other.
-On MLA models — which split each batch rather than routing it whole —
-`decode_backend` is folded into `backend`, which selects the MLA decode
-backend; `mla_prefill_backend` selects the MLA prefill backend.
+`prefill_backend` configures prefill-containing and mixed batches;
+`decode_backend` configures pure-decode batches; whole batches are routed to
+one or the other. The legacy `backend` alias sets both fields. On MLA models —
+which split each batch rather than routing it whole — `decode_backend` is
+folded into `prefill_backend`, which selects the MLA decode backend;
+`mla_prefill_backend` selects the MLA prefill backend.
 
 > **Note:** `--attention-backend` is mutually exclusive with the role-specific
 > options and their corresponding structured config fields.
@@ -1737,7 +1738,9 @@ from vllm.v1.attention.backends.registry import AttentionBackendEnum
 # Method 1: Using AttentionConfig with enum
 llm = LLM(
     model="Qwen/Qwen3-0.6B",
-    attention_config=AttentionConfig(backend=AttentionBackendEnum.FLASH_ATTN),
+    attention_config=AttentionConfig(
+        prefill_backend=AttentionBackendEnum.FLASH_ATTN,
+    ),
 )
 
 # Method 2: Using attention_backend parameter with string

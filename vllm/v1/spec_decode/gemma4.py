@@ -149,7 +149,7 @@ class Gemma4Proposer(SpecDecodeBaseProposer):
 
         Gemma4 forces TRITON_ATTN due to heterogeneous head dimensions
         (head_dim=256 sliding, global_head_dim=512 full). The base class
-        resets attention_config.backend to None for draft models, causing
+        resets attention_config.prefill_backend to None for draft models, causing
         sliding layers to fall back to FLASH_ATTN which cannot handle
         KV-shared cache. Override to carry the target's backend through.
         """
@@ -157,14 +157,14 @@ class Gemma4Proposer(SpecDecodeBaseProposer):
         target_attention_config = self.vllm_config.attention_config
         speculative_config = self.speculative_config
         if (
-            target_attention_config.backend is not None
+            target_attention_config.prefill_backend is not None
             and speculative_config.resolved_attention_backend is None
         ):
             base = replace(
                 base,
                 attention_config=replace(
                     base.attention_config,
-                    backend=target_attention_config.backend,
+                    prefill_backend=target_attention_config.prefill_backend,
                 ),
             )
         if (

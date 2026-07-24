@@ -1301,7 +1301,7 @@ class SpecDecodeBaseProposer:
             base,
             attention_config=replace(
                 base.attention_config,
-                backend=spec_cfg.resolved_attention_backend,
+                prefill_backend=spec_cfg.resolved_attention_backend,
                 decode_backend=spec_cfg.resolved_attention_decode_backend,
             ),
         )

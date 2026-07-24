@@ -167,7 +167,7 @@ def get_attn_backend(
     # the global backend; kinds not present in the map fall back to it.
     attention_config = vllm_config.attention_config
     backend = (
-        (backend_override or attention_config.backend)
+        (backend_override or attention_config.prefill_backend)
         if use_global_backend
         else backend_override
     )

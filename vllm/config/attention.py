@@ -4,7 +4,8 @@
 from dataclasses import field
 from typing import Any, Literal
 
-from pydantic import field_validator
+from pydantic import field_validator, model_validator
+from pydantic_core import ArgsKwargs
 
 from vllm.config.utils import config
 from vllm.v1.attention.backends.mla.prefill.registry import MLAPrefillBackendEnum
@@ -17,19 +18,20 @@ IndexerKVDType = Literal["bf16", "fp8", "mxfp4", "nvfp4"]
 class AttentionConfig:
     """Configuration for attention mechanisms in vLLM."""
 
-    backend: AttentionBackendEnum | None = None
-    """General attention backend. Batches are routed whole: any batch
-    containing prefill runs entirely on this backend. For MLA models, selects
-    the MLA decode backend (`mla_prefill_backend` handles the prefill portion
-    of each split batch). Use "auto" or None for automatic selection."""
+    prefill_backend: AttentionBackendEnum | None = None
+    """Attention backend for batches containing prefill. Batches are routed
+    whole: any batch containing prefill runs entirely on this backend. For MLA
+    models, selects the MLA decode backend (`mla_prefill_backend` handles the
+    prefill portion of each split batch). Use "auto" or None for automatic
+    selection."""
 
     decode_backend: AttentionBackendEnum | None = None
     """Attention backend for pure-decode batches, which run entirely on this
-    backend; prefill-containing and mixed batches use `backend`. Must share
-    `backend`'s KV cache layout. For MLA models — which split each batch into
-    prefill and decode portions instead of routing it whole — this is folded
-    into `backend`, which selects the MLA decode backend. Use "auto" or None
-    for independent automatic selection."""
+    backend; prefill-containing and mixed batches use `prefill_backend`. Must
+    share `prefill_backend`'s KV cache layout. For MLA models — which split
+    each batch into prefill and decode portions instead of routing it whole —
+    this is folded into `prefill_backend`, which selects the MLA decode
+    backend. Use "auto" or None for independent automatic selection."""
 
     backend_per_kind: dict[str, AttentionBackendEnum] = field(default_factory=dict)
     """Per-KV-cache-group attention backend overrides, keyed by
@@ -38,9 +40,9 @@ class AttentionConfig:
     layers across multiple KV-cache groups (e.g. interleaved full and
     sliding-window attention) use a different backend per group.
 
-    An entry overrides `backend` for layers of the matching kind; kinds not
-    listed fall back to `backend` (or automatic selection). A selected backend
-    that is invalid for that kind raises at startup."""
+    An entry overrides `prefill_backend` for layers of the matching kind; kinds
+    not listed fall back to `prefill_backend` (or automatic selection). A
+    selected backend that is invalid for that kind raises at startup."""
 
     flash_attn_version: Literal[2, 3, 4] | None = None
     """Force vllm to use a specific flash-attention version (2, 3, or 4).
@@ -108,6 +110,35 @@ class AttentionConfig:
     If None, uses the default (kv_cache_block_size on PyTorch >= 2.9,
     128 otherwise)."""
 
+    @property
+    def backend(self) -> AttentionBackendEnum | None:
+        """Attention backend to use for both prefill and decode."""
+        return self.prefill_backend
+
+    @backend.setter
+    def backend(self, value: AttentionBackendEnum | None) -> None:
+        self.prefill_backend = value
+        self.decode_backend = value
+
+    @model_validator(mode="before")
+    @classmethod
+    def handle_legacy_backend(cls, data: Any) -> Any:
+        """Map the legacy `backend` constructor argument to both roles."""
+        values = data.kwargs if isinstance(data, ArgsKwargs) else data
+        if not isinstance(values, dict) or "backend" not in values:
+            return data
+        if "prefill_backend" in values or "decode_backend" in values:
+            raise ValueError(
+                "backend is mutually exclusive with prefill_backend and decode_backend"
+            )
+        values = values.copy()
+        backend = values.pop("backend")
+        values["prefill_backend"] = backend
+        values["decode_backend"] = backend
+        if isinstance(data, ArgsKwargs):
+            return ArgsKwargs(data.args, values)
+        return values
+
     def compute_hash(self) -> str:
         """
         Provide a hash that uniquely identifies all the configs
@@ -122,7 +153,7 @@ class AttentionConfig:
         factors = get_hash_factors(self, ignored_factors)
         return hash_factors(factors)
 
-    @field_validator("backend", "decode_backend", mode="before")
+    @field_validator("prefill_backend", "decode_backend", mode="before")
     @classmethod
     def validate_backend_before(cls, value: Any) -> Any:
         """Enable parsing of attention backend enums from strings.
@@ -150,7 +181,7 @@ class AttentionConfig:
         """Parse the `backend_per_kind` map from strings.
 
         Keys must be valid `KVCacheSpecKind` values; values are parsed like
-        `backend` (enum name, case-insensitive).
+        `prefill_backend` (enum name, case-insensitive).
         """
         from vllm.v1.kv_cache_interface import KVCacheSpecKind
 

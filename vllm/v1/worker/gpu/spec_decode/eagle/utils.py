@@ -43,9 +43,9 @@ def load_eagle_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mod
         vllm_config,
         attention_config=replace(
             vllm_config.attention_config,
-            backend=(
+            prefill_backend=(
                 speculative_config.resolved_attention_backend
-                or vllm_config.attention_config.backend
+                or vllm_config.attention_config.prefill_backend
             ),
             decode_backend=speculative_config.resolved_attention_decode_backend,
         ),

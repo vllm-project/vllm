@@ -41,17 +41,31 @@ pytestmark = pytest.mark.skip_global_cleanup
 
 def test_decode_backend_affects_config_hash():
     """A routed backend change must invalidate compiled configuration state."""
-    default_hash = AttentionConfig(backend="FLASH_ATTN").compute_hash()
+    default_hash = AttentionConfig(prefill_backend="FLASH_ATTN").compute_hash()
     routed_hash = AttentionConfig(
-        backend="FLASH_ATTN", decode_backend="FLASHINFER"
+        prefill_backend="FLASH_ATTN", decode_backend="FLASHINFER"
     ).compute_hash()
     assert default_hash != routed_hash
+
+
+def test_legacy_backend_sets_both_roles():
+    config = AttentionConfig(backend="FLASH_ATTN")
+
+    assert config.prefill_backend == AttentionBackendEnum.FLASH_ATTN
+    assert config.decode_backend == AttentionBackendEnum.FLASH_ATTN
+
+    config.backend = AttentionBackendEnum.TRITON_ATTN
+
+    assert config.prefill_backend == AttentionBackendEnum.TRITON_ATTN
+    assert config.decode_backend == AttentionBackendEnum.TRITON_ATTN
 
 
 def test_decode_auto_selection_ignores_general_backend():
     """Decode auto-selection must not inherit a forced general backend."""
     config = VllmConfig(
-        attention_config=AttentionConfig(backend="FLASH_ATTN", decode_backend="auto"),
+        attention_config=AttentionConfig(
+            prefill_backend="FLASH_ATTN", decode_backend="auto"
+        ),
         device_config=DeviceConfig(device="cpu"),
     )
     selected_backend = object()
@@ -82,7 +96,7 @@ def test_draft_attention_backends_are_independent_from_target():
 
     target_config = TargetConfig(
         attention_config=AttentionConfig(
-            backend=AttentionBackendEnum.TRITON_ATTN,
+            prefill_backend=AttentionBackendEnum.TRITON_ATTN,
             decode_backend=AttentionBackendEnum.TRITON_ATTN,
         )
     )
@@ -98,7 +112,9 @@ def test_draft_attention_backends_are_independent_from_target():
 
     draft_config = SpecDecodeBaseProposer._create_draft_vllm_config(proposer)
 
-    assert draft_config.attention_config.backend == AttentionBackendEnum.FLASH_ATTN
+    assert (
+        draft_config.attention_config.prefill_backend == AttentionBackendEnum.FLASH_ATTN
+    )
     assert (
         draft_config.attention_config.decode_backend == AttentionBackendEnum.FLASHINFER
     )

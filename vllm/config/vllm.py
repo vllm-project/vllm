@@ -955,20 +955,20 @@ class VllmConfig:
                 and self.attention_config.decode_backend is not None
             ):
                 # MLA splits each batch into prefill and decode portions
-                # instead of routing whole batches; `backend` selects the MLA
-                # decode backend, so fold decode_backend into it.
+                # instead of routing whole batches; `prefill_backend` selects
+                # the MLA decode backend, so fold decode_backend into it.
                 decode_backend = self.attention_config.decode_backend
-                general_backend = self.attention_config.backend
-                if general_backend is not None and general_backend != decode_backend:
+                prefill_backend = self.attention_config.prefill_backend
+                if prefill_backend is not None and prefill_backend != decode_backend:
                     raise ValueError(
-                        f"attention_config.backend ({general_backend.name}) "
+                        f"attention_config.prefill_backend ({prefill_backend.name}) "
                         f"conflicts with attention_config.decode_backend "
                         f"({decode_backend.name}): for MLA models both select "
                         "the MLA decode backend, and "
                         "attention_config.mla_prefill_backend selects the "
                         "prefill backend."
                     )
-                self.attention_config.backend = decode_backend
+                self.attention_config.prefill_backend = decode_backend
                 self.attention_config.decode_backend = None
 
         if (
