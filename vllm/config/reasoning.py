@@ -7,7 +7,9 @@ from vllm.config.model import ModelConfig
 from vllm.config.utils import config
 from vllm.reasoning import ReasoningParserManager
 from vllm.tokenizers import cached_tokenizer_from_config
+from vllm.logger import init_logger
 
+logger = init_logger(__name__)
 
 @config
 class ReasoningConfig:
@@ -68,7 +70,16 @@ class ReasoningConfig:
             self._enabled = True
             return  # Already initialized
 
-        tokenizer = cached_tokenizer_from_config(model_config=model_config)
+        try:
+            tokenizer = cached_tokenizer_from_config(model_config=model_config)
+        except (FileNotFoundError, OSError) as e:
+            logger.warning(
+                "Skipping reasoning token-id init due to a missing file "
+                "(non-standard HF cache layout): %s",
+                e,
+            )
+            return
+        
         reasoning_start_str = self.reasoning_start_str
         reasoning_end_str = self.reasoning_end_str
         if self.reasoning_parser is not None and (
