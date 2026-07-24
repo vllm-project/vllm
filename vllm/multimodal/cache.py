@@ -3,7 +3,9 @@
 import operator
 import sys
 from abc import ABC, abstractmethod
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
+from contextvars import ContextVar, Token
 from multiprocessing.synchronize import Lock as LockType
 from typing import TYPE_CHECKING, Generic, TypeAlias, TypeVar, cast
 
@@ -37,6 +39,14 @@ if TYPE_CHECKING:
     from .processing.processor import ResolvedPromptUpdate
 
 logger = init_logger(__name__)
+
+
+_ACTIVE_PROCESSOR_CACHE_TXN = ContextVar["MultiModalProcessorCacheTransaction | None"](
+    "active_mm_processor_cache_txn", default=None
+)
+_PROCESSOR_CACHE_TXN_COLLECTOR = ContextVar[
+    "list[MultiModalProcessorCacheTransaction] | None"
+]("mm_processor_cache_txn_collector", default=None)
 
 
 class MultiModalProcessorCacheItem:
@@ -172,6 +182,65 @@ _I = TypeVar("_I", contravariant=True)
 _O = TypeVar("_O", covariant=True)
 
 
+class MultiModalProcessorCacheTransaction:
+    """Tracks MM processor cache entries inserted by one rendered request."""
+
+    def __init__(self, cache: "BaseMultiModalProcessorCache") -> None:
+        self.cache = cache
+        self._inserted_items: dict[str, object] = {}
+        self._token: Token[MultiModalProcessorCacheTransaction | None] | None = None
+        self._closed = False
+
+    def __enter__(self) -> "MultiModalProcessorCacheTransaction":
+        if self._closed:
+            raise RuntimeError(
+                "Cannot re-enter a closed MM processor cache transaction"
+            )
+        if self._token is not None:
+            raise RuntimeError("MM processor cache transaction is already active")
+        self._token = _ACTIVE_PROCESSOR_CACHE_TXN.set(self)
+        collector = _PROCESSOR_CACHE_TXN_COLLECTOR.get()
+        if collector is not None:
+            collector.append(self)
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback) -> None:
+        token = self._token
+        self._token = None
+        if token is not None:
+            _ACTIVE_PROCESSOR_CACHE_TXN.reset(token)
+        if exc_type is not None:
+            self.rollback()
+
+    def record_inserted(self, mm_hash: str, rollback_token: object) -> None:
+        if not self._closed:
+            self._inserted_items[mm_hash] = rollback_token
+
+    def commit(self) -> None:
+        self._closed = True
+        self._inserted_items.clear()
+
+    def rollback(self) -> None:
+        if self._closed:
+            return
+        self.cache.remove_items(self._inserted_items.items())
+        self._closed = True
+        self._inserted_items.clear()
+
+
+@contextmanager
+def collect_mm_processor_cache_transactions() -> Iterator[
+    list[MultiModalProcessorCacheTransaction]
+]:
+    """Collect MM processor cache transactions created in the current context."""
+    txns: list[MultiModalProcessorCacheTransaction] = []
+    token = _PROCESSOR_CACHE_TXN_COLLECTOR.set(txns)
+    try:
+        yield txns
+    finally:
+        _PROCESSOR_CACHE_TXN_COLLECTOR.reset(token)
+
+
 class BaseMultiModalCache(ABC, Generic[_I, _O]):
     """
     Abstract base class to read/write multi-modal items from cache.
@@ -264,6 +333,14 @@ class BaseMultiModalProcessorCache(
 ):
     """The required interface for caches on P0."""
 
+    def begin_transaction(self) -> MultiModalProcessorCacheTransaction:
+        return MultiModalProcessorCacheTransaction(self)
+
+    def record_inserted_item(self, mm_hash: str, rollback_token: object) -> None:
+        txn = _ACTIVE_PROCESSOR_CACHE_TXN.get()
+        if txn is not None and txn.cache is self:
+            txn.record_inserted(mm_hash, rollback_token)
+
     @abstractmethod
     def is_cached_item(self, mm_hash: str) -> bool:
         """
@@ -298,6 +375,16 @@ class BaseMultiModalProcessorCache(
     def close(self) -> None:
         """Close the underlying cache, if needed."""
         pass
+
+    @abstractmethod
+    def remove_item(self, mm_hash: str, rollback_token: object) -> None:
+        """Remove one inserted item, if it is still the same cache entry."""
+        raise NotImplementedError
+
+    def remove_items(self, items: Iterable[tuple[str, object]]) -> None:
+        """Remove multiple inserted items, if they are still current."""
+        for mm_hash, rollback_token in items:
+            self.remove_item(mm_hash, rollback_token)
 
     @abstractmethod
     def touch_sender_cache_item(self, mm_hash: str) -> None:
@@ -359,9 +446,16 @@ class MultiModalProcessorOnlyCache(BaseMultiModalProcessorCache):
 
         assert mm_item is not None, f"Expected a cached item for {mm_hash=}"
 
-        self._cache[mm_hash] = MultiModalProcessorCacheItem(*mm_item)
+        cache_item = MultiModalProcessorCacheItem(*mm_item)
+        self._cache[mm_hash] = cache_item
+        self.record_inserted_item(mm_hash, cache_item)
 
         return mm_item
+
+    @override
+    def remove_item(self, mm_hash: str, rollback_token: object) -> None:
+        if self._cache.get(mm_hash) is rollback_token:
+            self._cache.pop(mm_hash, None)
 
     @override
     def touch_sender_cache_item(self, mm_hash: str) -> None:
@@ -417,9 +511,16 @@ class MultiModalProcessorSenderCache(BaseMultiModalProcessorCache):
 
         assert mm_item is not None, f"Expected a cached item for {mm_hash=}"
 
-        self._cache[mm_hash] = MultiModalProcessorCacheItemMetadata(*mm_item)
+        cache_item = MultiModalProcessorCacheItemMetadata(*mm_item)
+        self._cache[mm_hash] = cache_item
+        self.record_inserted_item(mm_hash, cache_item)
 
         return mm_item
+
+    @override
+    def remove_item(self, mm_hash: str, rollback_token: object) -> None:
+        if self._cache.get(mm_hash) is rollback_token:
+            self._cache.pop(mm_hash, None)
 
     @override
     def touch_sender_cache_item(self, mm_hash: str) -> None:
@@ -510,6 +611,7 @@ class ShmObjectStoreSenderCache(BaseMultiModalProcessorCache):
                 self.remove_dangling_items()
 
             self._p0_cache[mm_hash] = prompt_updates
+            self.record_inserted_item(mm_hash, (address, monotonic_id))
             return self.address_as_item(address, monotonic_id), prompt_updates
         except ValueError as e:
             # `put` raises ValueError either for an oversize item or for a
@@ -533,6 +635,24 @@ class ShmObjectStoreSenderCache(BaseMultiModalProcessorCache):
                 str(e),
             )
             return mm_item
+
+    @override
+    def remove_item(self, mm_hash: str, rollback_token: object) -> None:
+        if self._shm_cache.key_index.get(mm_hash) != rollback_token:
+            return
+
+        _, monotonic_id = cast(tuple[int, int], rollback_token)
+        writer_count = self._shm_cache.writer_flag.get(monotonic_id, 0)
+        if writer_count > 1:
+            # Another request has already hit this entry. Keep the cache entry
+            # visible and release only this request's writer-side reference.
+            self._shm_cache.writer_flag[monotonic_id] = writer_count - 1
+            return
+
+        self._shm_cache.key_index.pop(mm_hash, None)
+        self._p0_cache.pop(mm_hash, None)
+        self._shm_cache.id_index.pop(monotonic_id, None)
+        self._shm_cache.writer_flag.pop(monotonic_id, None)
 
     @override
     def touch_sender_cache_item(self, mm_hash: str) -> None:
