@@ -15,10 +15,10 @@ class NvFp4LinearLayerConfig:
 
     All NVFP4 layers share the same structure: packed uint8 weights (2 FP4 values per
     byte), FP8-E4M3 per-block weight scales (group size 16), and scalar global
-    scales for both weights and activations.
+    scales for weights and, when static activation scaling is used, activations.
     """
 
-    pass
+    dynamic_input_global_scale: bool = False
 
 
 class NvFp4LinearKernel(ABC):

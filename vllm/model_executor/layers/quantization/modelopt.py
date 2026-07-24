@@ -1024,11 +1024,18 @@ class ModelOptNvFp4Config(ModelOptQuantConfigBase):
         kv_cache_quant_algo: str | None = None,
         exclude_modules: list[str] | None = None,
         group_size: int = 16,
+        activation_scheme: str = "static",
     ) -> None:
         if exclude_modules is None:
             exclude_modules = []
         super().__init__(exclude_modules)
         self.quant_method = quant_method
+        if activation_scheme not in ("static", "dynamic"):
+            raise ValueError(
+                "ModelOpt NVFP4 activation_scheme must be 'static' or "
+                f"'dynamic', got {activation_scheme!r}."
+            )
+        self.activation_scheme = activation_scheme
         self.is_checkpoint_nvfp4_serialized = is_checkpoint_nvfp4_serialized
         if is_checkpoint_nvfp4_serialized:
             logger.warning(
@@ -1058,7 +1065,10 @@ class ModelOptNvFp4Config(ModelOptQuantConfigBase):
         return "modelopt_fp4"
 
     def get_supported_act_dtypes(self) -> list[torch.dtype]:
-        return [torch.bfloat16, torch.half, torch.float8_e4m3fn]
+        dtypes = [torch.bfloat16, torch.half]
+        if self.activation_scheme == "static":
+            dtypes.append(torch.float8_e4m3fn)
+        return dtypes
 
     @classmethod
     def get_min_capability(cls) -> int:
@@ -1088,6 +1098,8 @@ class ModelOptNvFp4Config(ModelOptQuantConfigBase):
 
         if group_size is None:
             group_size = 16  # Default value
+        quant_config = original_config.get("quantization", original_config)
+        activation_scheme = str(quant_config.get("activation_scheme", "static")).lower()
 
         # For FP4, these fields are required
         if is_checkpoint_nvfp4_serialized and "quantization" in original_config:
@@ -1109,6 +1121,7 @@ class ModelOptNvFp4Config(ModelOptQuantConfigBase):
             kv_cache_quant_method,
             exclude_modules,
             group_size,
+            activation_scheme,
         )
 
 
@@ -1126,7 +1139,9 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
     def __init__(self, quant_config: ModelOptNvFp4Config) -> None:
         self.quant_config = quant_config
         self.marlin_input_dtype = None
-        self.kernel = init_nvfp4_linear_kernel()
+        self.kernel = init_nvfp4_linear_kernel(
+            dynamic_input_global_scale=quant_config.activation_scheme == "dynamic"
+        )
 
     def create_weights(
         self,
@@ -1174,7 +1189,8 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
         )
         layer.register_parameter("weight", weight)
 
-        # Input Global Scale
+        # Input Global Scale. Dynamic checkpoints may still contain this key,
+        # so register it for loading and discard it after loading.
         input_global_scale = PerTensorScaleParameter(
             data=torch.empty(len(output_partition_sizes), dtype=torch.float32),
             weight_loader=weight_loader,
@@ -1202,10 +1218,18 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
 
         layer.register_parameter("weight_scale", weight_scale)
 
-        expose_input_quant_key(layer, self.kernel)
+        if self.quant_config.activation_scheme == "static":
+            expose_input_quant_key(layer, self.kernel)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        if (
+        dynamic_global_scale = self.quant_config.activation_scheme == "dynamic"
+        if dynamic_global_scale:
+            if torch.unique(layer.weight_scale_2).numel() != 1:
+                raise ValueError(
+                    "Dynamic NVFP4 activation scaling requires one shared "
+                    "weight_scale_2 across fused output partitions."
+                )
+        elif (
             torch.unique(layer.input_scale).numel() != 1
             or torch.unique(layer.weight_scale_2).numel() != 1
         ):
@@ -1217,22 +1241,30 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
                 " scale for parallel layers."
             )
 
-        # Rename ModelOpt checkpoint names to standardized names
-        input_global_scale = layer.input_scale.max().to(torch.float32)
-        layer.input_global_scale = Parameter(input_global_scale, requires_grad=False)
-        del layer.input_scale
+        if dynamic_global_scale:
+            del layer.input_scale
+        else:
+            input_global_scale = layer.input_scale.max().to(torch.float32)
+            layer.input_global_scale = Parameter(
+                input_global_scale, requires_grad=False
+            )
+            del layer.input_scale
 
+        # Rename the ModelOpt weight-scale key to the kernel-standard name.
         weight_global_scale = layer.weight_scale_2.max().to(torch.float32)
         layer.weight_global_scale = Parameter(weight_global_scale, requires_grad=False)
         del layer.weight_scale_2
 
-        # Pre-compute alpha and inverse for runtime quantization
-        layer.alpha = Parameter(
-            layer.input_global_scale * layer.weight_global_scale, requires_grad=False
-        )
-        layer.input_global_scale_inv = Parameter(
-            (1.0 / layer.input_global_scale).to(torch.float32), requires_grad=False
-        )
+        if not dynamic_global_scale:
+            # Pre-compute alpha and inverse for runtime quantization.
+            layer.alpha = Parameter(
+                layer.input_global_scale * layer.weight_global_scale,
+                requires_grad=False,
+            )
+            layer.input_global_scale_inv = Parameter(
+                (1.0 / layer.input_global_scale).to(torch.float32),
+                requires_grad=False,
+            )
 
         # Convert layer to NVFP4 linear kernel format
         self.kernel.process_weights_after_loading(layer)
@@ -1404,6 +1436,11 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         quant_config: ModelOptNvFp4Config,
         moe_config: FusedMoEConfig,
     ) -> None:
+        if quant_config.activation_scheme == "dynamic":
+            raise ValueError(
+                "Dynamic ModelOpt NVFP4 global activation scaling is currently "
+                "supported only for dense linear layers, not FusedMoE."
+            )
         super().__init__(moe_config)
         self.quant_config = quant_config
         # W4A16 mode fires for W4A16_NVFP4 on-disk checkpoints. With

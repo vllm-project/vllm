@@ -880,17 +880,38 @@ def init_wfp8_a16_linear_kernel(
     )
 
 
-def init_nvfp4_linear_kernel(use_a16: bool = False) -> NvFp4LinearKernel:
+def init_nvfp4_linear_kernel(
+    use_a16: bool = False,
+    dynamic_input_global_scale: bool = False,
+) -> NvFp4LinearKernel:
     """Select and instantiate the best NVFP4 linear kernel for the
     current platform."""
-    config = NvFp4LinearLayerConfig()
+    config = NvFp4LinearLayerConfig(
+        dynamic_input_global_scale=dynamic_input_global_scale
+    )
 
     # VLLM_BATCH_INVARIANT forces deterministic execution. Prefer the
     # batch-invariant CUTLASS implementation when available, otherwise fall
     # back to emulation. It overrides --linear-backend.
     force_kernel: type[NvFp4LinearKernel] | None = None
     linear_backend = _get_linear_backend()
-    if envs.VLLM_BATCH_INVARIANT:
+    if dynamic_input_global_scale:
+        if use_a16:
+            raise ValueError(
+                "Dynamic NVFP4 activation scaling cannot be combined with A16."
+            )
+        if envs.VLLM_BATCH_INVARIANT:
+            raise ValueError(
+                "Dynamic NVFP4 activation scaling is not compatible with "
+                "VLLM_BATCH_INVARIANT."
+            )
+        if linear_backend not in ("auto", "flashinfer_cutlass"):
+            raise ValueError(
+                "Dynamic NVFP4 activation scaling requires "
+                "--linear-backend=flashinfer_cutlass."
+            )
+        force_kernel = FlashInferCutlassNvFp4LinearKernel
+    elif envs.VLLM_BATCH_INVARIANT:
         bi_supported, reason = CutlassNvFp4LinearKernel.is_supported()
         if bi_supported:
             if linear_backend not in ("auto", "cutlass"):
