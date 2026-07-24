@@ -3,11 +3,11 @@ depends_on:
   - image-build-xpu
 steps:
 - label: Weight Loading Multiple GPU
+  device: intel_gpu
   timeout_in_minutes: 50
-  working_dir: .
   num_devices: 2
   optional: true
-  device: intel_gpu
+  working_dir: .
   no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
