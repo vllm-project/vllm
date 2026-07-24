@@ -233,6 +233,19 @@ class Scheduler(SchedulerInterface):
             else EncoderCacheManager(cache_size=encoder_cache_size)
         )
 
+        # Check whether the model wants context reset between streaming
+        # segments (e.g. single-turn ASR models like Qwen3-ASR).
+        self._realtime_reset_context: bool = False
+        try:
+            from vllm.model_executor.model_loader.utils import get_model_cls
+
+            model_cls = get_model_cls(vllm_config.model_config)
+            self._realtime_reset_context = getattr(
+                model_cls, "realtime_reset_context", False
+            )
+        except Exception:
+            pass
+
         speculative_config = vllm_config.speculative_config
         self.use_eagle = False
         self.num_spec_tokens = vllm_config.num_speculative_tokens
@@ -1288,8 +1301,12 @@ class Scheduler(SchedulerInterface):
         del session._all_token_ids[num_computed_tokens:]
         session._output_token_ids.clear()
         assert session.prompt_token_ids is not None
-        # Extend prompt with kept output tokens.
-        session.prompt_token_ids.extend(kept_output_tokens)
+        # Extend prompt with kept output tokens, unless the model
+        # declares that it resets context between segments (e.g.
+        # single-turn ASR models that treat each audio segment
+        # independently).
+        if not self._realtime_reset_context:
+            session.prompt_token_ids.extend(kept_output_tokens)
 
         if update.mm_features:
             base = session.num_tokens

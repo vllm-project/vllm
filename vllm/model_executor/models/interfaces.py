@@ -1056,6 +1056,13 @@ class SupportsRealtime(Protocol):
     """Maximum tokens to generate per streaming audio segment.
     Override in subclasses based on the model's expected output length."""
 
+    realtime_reset_context: ClassVar[bool] = False
+    """If True, the scheduler will not prepend the output tokens from the
+    previous streaming segment to the prompt of the next segment. This is
+    useful for single-turn models (e.g. Qwen3-ASR) that treat each audio
+    segment independently and do not benefit from multi-turn conversation
+    history."""
+
     @classmethod
     async def buffer_realtime_audio(
         cls,
