@@ -60,6 +60,18 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
 
     def on_multi_step_decode_end(self, num_reqs: int) -> None: ...
 
+    # Lifecycle hooks for model-specific optimizations. Subclasses override
+    # the ones they need. These fire in both `capture` and `propose` so that
+    # any state they toggle (e.g. attention flags baked into a CUDA graph) is
+    # identical at capture time and replay time.
+    def on_prefill_begin(self, num_reqs: int, num_tokens: int) -> None: ...
+
+    def on_prefill_end(self, num_reqs: int, num_tokens: int) -> None: ...
+
+    def on_multi_step_decode_begin(self, num_reqs: int) -> None: ...
+
+    def on_multi_step_decode_end(self, num_reqs: int) -> None: ...
+
     @property
     def advance_draft_positions(self) -> bool:
         """
