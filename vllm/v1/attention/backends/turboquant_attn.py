@@ -29,7 +29,6 @@ from vllm.config.cache import CacheDType
 from vllm.model_executor.layers.quantization.turboquant.centroids import (
     get_centroids,
 )
-from vllm.triton_utils import triton
 from vllm.utils.math_utils import round_up
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -48,7 +47,7 @@ from vllm.v1.attention.backends.fa_utils import (
 )
 from vllm.v1.attention.backends.utils import split_decodes_and_prefills
 from vllm.v1.attention.ops.triton_turboquant_decode import (
-    _tq_full_dequant_kv,
+    _TQ_FULL_DEQUANT_KERNEL,
     _use_fp8_e4b15,
     triton_turboquant_decode_attention,
 )
@@ -734,6 +733,7 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
                         key_fp8=self.tq_config.key_fp8,
                         norm_correction=self.tq_config.norm_correction,
                         PiT=PiT,
+                        max_num_kv_splits=self.max_num_kv_splits,
                     )
                 else:
                     # Large continuation: dequant cached K/V and use
@@ -776,8 +776,6 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
         Hk = key_chunk.shape[1]
         device = query.device
         block_size = kv_cache.shape[1]
-        BLOCK_D = triton.next_power_of_2(D)
-
         mse_bytes = self._mse_bytes
         val_data_bytes = self._val_data_bytes
 
@@ -798,36 +796,23 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
         k_cached = k_buf[:, :, :alloc_len, :]
         v_cached = v_buf[:, :, :alloc_len, :]
 
-        grid = (alloc_len, 1 * Hk)
-        _tq_full_dequant_kv[grid](
+        _TQ_FULL_DEQUANT_KERNEL(
             kv_cache,
             block_table,
             centroids,
             k_cached,
             v_cached,
-            k_cached.stride(0),
-            k_cached.stride(1),
-            k_cached.stride(2),
-            v_cached.stride(0),
-            v_cached.stride(1),
-            v_cached.stride(2),
-            kv_cache.stride(0),
-            kv_cache.stride(1),
-            kv_cache.stride(2),
-            block_table.stride(0),
-            HEAD_DIM=D,
-            BLOCK_SIZE=block_size,
-            NUM_KV_HEADS=Hk,
-            MSE_BYTES=mse_bytes,
-            KPS=self.tq_config.key_packed_size,
-            VQB=self.tq_config.effective_value_quant_bits,
-            VAL_DATA_BYTES=val_data_bytes,
-            MSE_BITS=self.tq_config.key_mse_bits,
-            KEY_FP8=1 if self.tq_config.key_fp8 else 0,
-            BLOCK_D=BLOCK_D,
-            NORM_CORRECTION=1 if self.tq_config.norm_correction else 0,
-            FP8_E4B15=_use_fp8_e4b15(device.index or 0),
-            num_warps=4,
+            head_dim=D,
+            block_size=block_size,
+            num_kv_heads=Hk,
+            mse_bytes=mse_bytes,
+            key_packed_size=self.tq_config.key_packed_size,
+            value_quant_bits=self.tq_config.effective_value_quant_bits,
+            val_data_bytes=val_data_bytes,
+            mse_bits=self.tq_config.key_mse_bits,
+            key_fp8=self.tq_config.key_fp8,
+            norm_correction=self.tq_config.norm_correction,
+            fp8_e4b15=_use_fp8_e4b15(device.index or 0),
         )
 
         # Inverse-rotate MSE keys back to original space

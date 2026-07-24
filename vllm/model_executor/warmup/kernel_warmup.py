@@ -32,6 +32,9 @@ from vllm.model_executor.warmup.qwen_triton_warmup import qwen_triton_warmup
 from vllm.model_executor.warmup.sparse_mla_triton_warmup import (
     sparse_mla_triton_warmup,
 )
+from vllm.model_executor.warmup.turboquant_triton_warmup import (
+    turboquant_triton_warmup,
+)
 from vllm.model_executor.warmup.v1_block_table_warmup import (
     warm_v1_block_table_kernels,
 )
@@ -166,6 +169,7 @@ def kernel_warmup(worker: "Worker"):
     if worker.vllm_config.kernel_config.enable_jit_warmup:
         fa4_cutedsl_warmup(worker)
         sparse_mla_triton_warmup(worker)
+        turboquant_triton_warmup(worker)
 
 
 def _flashinfer_autotune_skip_ops(runner: "GPUModelRunner") -> set[str] | None:
