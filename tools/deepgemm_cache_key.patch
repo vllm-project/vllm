@@ -1,0 +1,40 @@
+diff --git a/csrc/jit/compiler.hpp b/csrc/jit/compiler.hpp
+index 42beaf5..39da71c 100644
+--- a/csrc/jit/compiler.hpp
++++ b/csrc/jit/compiler.hpp
+@@ -97,8 +97,34 @@ public:
+         fsync_path(path);
+     }
+
++    // DG_KEY: drop absolute -I include paths from a flag string so the JIT cache key
++    // is portable across install layouts, while keeping every behavioral compile flag.
++    static std::string strip_include_paths(const std::string& compile_flags) {
++        std::string out;
++        size_t i = 0;
++        while (i < compile_flags.size()) {
++            size_t j = compile_flags.find(' ', i);
++            if (j == std::string::npos)
++                j = compile_flags.size();
++            if (j > i and compile_flags.compare(i, 2, "-I") != 0) {
++                if (not out.empty())
++                    out += ' ';
++                out += compile_flags.substr(i, j - i);
++            }
++            i = j + 1;
++        }
++        return out;
++    }
++
+     std::shared_ptr<KernelRuntime> build(const std::string& name, const std::string& code) const {
+-        const auto kernel_signature = fmt::format("{}$${}$${}$${}", name, signature, flags, code);
++        // DG_KEY: content-only cache key so a prebuilt DeepGEMM cache relocates across
++        // install layouts. `signature` (local NVCC/NVRTC version) and the absolute
++        // `-I<...>/include` paths inside `flags` are toolchain/location identity, not
++        // kernel identity; `code` already embeds num_sms + shapes + include-content hash.
++        // The remaining compile flags (std, ptxas, arch) stay in the key.
++        const auto key_arch = device_runtime->get_arch(true);
++        const auto key_flags = strip_include_paths(flags);
++        const auto kernel_signature = fmt::format("{}$${}$${}$${}", name, key_arch, key_flags, code);
+         const auto dir_path = cache_dir_path / "cache" / fmt::format("kernel.{}.{}", name, get_hex_digest(kernel_signature));
+
+         // Hit the runtime cache

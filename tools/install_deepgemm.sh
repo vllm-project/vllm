@@ -4,6 +4,9 @@
 # Optional: build wheels to a directory for later installation (useful in multi-stage builds)
 set -e
 
+# Directory of this script, for locating the vendored patch after we pushd elsewhere.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 # Default values
 # Keep DEEPGEMM_GIT_REF in sync with cmake/external_projects/deepgemm.cmake
 DEEPGEMM_GIT_REPO="https://github.com/deepseek-ai/DeepGEMM.git"
@@ -91,6 +94,9 @@ pushd "$INSTALL_DIR/deepgemm"
 
 # Checkout the specific reference
 git checkout "$DEEPGEMM_GIT_REF"
+
+# DG_KEY: portable JIT cache key so a prebuilt cache relocates across install layouts.
+git apply "$SCRIPT_DIR/deepgemm_cache_key.patch"
 
 # Clean previous build artifacts
 # (Based on https://github.com/deepseek-ai/DeepGEMM/blob/main/install.sh)
