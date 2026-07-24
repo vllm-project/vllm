@@ -175,6 +175,7 @@ if TYPE_CHECKING:
     VLLM_RAY_EXTRA_ENV_VARS_TO_COPY: str = ""
     VLLM_MARLIN_USE_ATOMIC_ADD: bool = False
     VLLM_MARLIN_INPUT_DTYPE: Literal["int8", "fp8"] | None = None
+    VLLM_MARLIN_MOE_BLOCK_SIZE_M: int | None = None
     VLLM_HUMMING_ONLINE_QUANT_CONFIG: dict[str, Any] | None = None
     VLLM_HUMMING_INPUT_QUANT_CONFIG: dict[str, Any] | None = None
     VLLM_HUMMING_USE_F16_ACCUM: bool = False
@@ -1437,6 +1438,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Whether to use atomicAdd reduce in gptq/awq marlin kernel.
     "VLLM_MARLIN_USE_ATOMIC_ADD": lambda: (
         os.environ.get("VLLM_MARLIN_USE_ATOMIC_ADD", "0") == "1"
+    ),
+    # Override the auto-selected M-tile (block_size_m) for the Marlin MoE
+    # kernel. None = use the heuristic. See fused_marlin_moe and
+    # https://github.com/vllm-project/vllm/issues/48066.
+    "VLLM_MARLIN_MOE_BLOCK_SIZE_M": lambda: (
+        int(os.environ["VLLM_MARLIN_MOE_BLOCK_SIZE_M"])
+        if "VLLM_MARLIN_MOE_BLOCK_SIZE_M" in os.environ
+        else None
     ),
     # The activation dtype for marlin kernel
     "VLLM_MARLIN_INPUT_DTYPE": env_with_choices(

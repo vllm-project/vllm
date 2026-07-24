@@ -9,6 +9,7 @@ import torch
 
 import vllm._custom_ops as ops
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm import envs
 from vllm.model_executor.layers.fused_moe.activation import (
     MoEActivation,
     apply_moe_activation,
@@ -327,6 +328,14 @@ def fused_marlin_moe(
 
     if input_dtype is not None and input_dtype.itemsize == 1:
         block_size_m = max(block_size_m, 16)
+
+    # Opt-in override for the auto-selected M-tile. The heuristic above is a
+    # coarse function of tokens-per-expert; this lets a deployment pin a
+    # measured-optimal block_size_m per shape/GPU while a fully hardware-aware
+    # default is worked out. See
+    # https://github.com/vllm-project/vllm/issues/48066.
+    if envs.VLLM_MARLIN_MOE_BLOCK_SIZE_M is not None:
+        block_size_m = envs.VLLM_MARLIN_MOE_BLOCK_SIZE_M
 
     sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(
         topk_ids,
